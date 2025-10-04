@@ -1,0 +1,271 @@
+#!/bin/bash
+# hl-switch - Switch between different HumanLayer thoughts configurations
+# Usage:
+#   hl-switch                    # Interactive mode - shows menu
+#   hl-switch brkthru           # Switch to brkthru config
+#   hl-switch coalesce-labs     # Switch to coalesce-labs config
+
+set -e
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+CONFIG_DIR="$HOME/.config/humanlayer"
+ACTIVE_CONFIG="$CONFIG_DIR/config.json"
+
+# Function to list available configs
+list_configs() {
+    local configs=()
+
+    if [ ! -d "$CONFIG_DIR" ]; then
+        echo -e "${RED}Error: HumanLayer config directory not found${NC}"
+        echo "Expected: $CONFIG_DIR"
+        exit 1
+    fi
+
+    # Find all config-*.json files
+    for config in "$CONFIG_DIR"/config-*.json; do
+        if [ -f "$config" ]; then
+            # Extract the name between "config-" and ".json"
+            local basename=$(basename "$config")
+            local name="${basename#config-}"
+            name="${name%.json}"
+            configs+=("$name")
+        fi
+    done
+
+    echo "${configs[@]}"
+}
+
+# Function to get current active config
+get_current_config() {
+    if [ -L "$ACTIVE_CONFIG" ]; then
+        local target=$(readlink "$ACTIVE_CONFIG")
+        local basename=$(basename "$target")
+        local name="${basename#config-}"
+        name="${name%.json}"
+        echo "$name"
+    elif [ -f "$ACTIVE_CONFIG" ]; then
+        echo "(direct file, not symlink)"
+    else
+        echo "(none)"
+    fi
+}
+
+# Function to show current config details
+show_current_info() {
+    local current=$(get_current_config)
+
+    echo -e "${BLUE}Current configuration:${NC}"
+    if [ "$current" = "(none)" ]; then
+        echo "  No active config"
+    elif [ "$current" = "(direct file, not symlink)" ]; then
+        echo "  config.json (direct file - run 'hl-switch setup' to convert)"
+    else
+        echo -e "  ${GREEN}$current${NC}"
+
+        # Show thoughts repo location
+        if command -v jq >/dev/null 2>&1 && [ -f "$ACTIVE_CONFIG" ]; then
+            local repo=$(jq -r '.thoughts.thoughtsRepo' "$ACTIVE_CONFIG" 2>/dev/null)
+            if [ -n "$repo" ] && [ "$repo" != "null" ]; then
+                echo "  Repository: $repo"
+            fi
+        fi
+    fi
+    echo ""
+}
+
+# Function to switch to a specific config
+switch_to() {
+    local target_name="$1"
+    local target_file="$CONFIG_DIR/config-${target_name}.json"
+
+    if [ ! -f "$target_file" ]; then
+        echo -e "${RED}Error: Configuration '$target_name' not found${NC}"
+        echo "Expected file: $target_file"
+        echo ""
+        echo "Available configurations:"
+        local configs=($(list_configs))
+        for config in "${configs[@]}"; do
+            echo "  - $config"
+        done
+        exit 1
+    fi
+
+    # Remove existing config.json (whether file or symlink)
+    if [ -e "$ACTIVE_CONFIG" ] || [ -L "$ACTIVE_CONFIG" ]; then
+        rm "$ACTIVE_CONFIG"
+    fi
+
+    # Create symlink
+    ln -s "$target_file" "$ACTIVE_CONFIG"
+
+    echo -e "${GREEN}✓ Switched to: $target_name${NC}"
+
+    # Show details
+    if command -v jq >/dev/null 2>&1; then
+        local repo=$(jq -r '.thoughts.thoughtsRepo' "$ACTIVE_CONFIG" 2>/dev/null)
+        if [ -n "$repo" ] && [ "$repo" != "null" ]; then
+            echo "  Thoughts repo: $repo"
+        fi
+    fi
+    echo ""
+    echo "You can now use 'humanlayer thoughts' commands without --config-file"
+}
+
+# Function for interactive selection
+interactive_select() {
+    local configs=($(list_configs))
+
+    if [ ${#configs[@]} -eq 0 ]; then
+        echo -e "${RED}No configurations found${NC}"
+        echo ""
+        echo "Expected files like: $CONFIG_DIR/config-*.json"
+        echo ""
+        echo "Run 'hl-switch setup' to convert your current config"
+        exit 1
+    fi
+
+    echo -e "${BLUE}Available configurations:${NC}"
+    echo ""
+
+    local i=1
+    for config in "${configs[@]}"; do
+        echo "  [$i] $config"
+
+        # Show thoughts repo if jq is available
+        if command -v jq >/dev/null 2>&1; then
+            local config_file="$CONFIG_DIR/config-${config}.json"
+            local repo=$(jq -r '.thoughts.thoughtsRepo' "$config_file" 2>/dev/null)
+            if [ -n "$repo" ] && [ "$repo" != "null" ]; then
+                echo "      → $repo"
+            fi
+        fi
+
+        i=$((i + 1))
+    done
+
+    echo ""
+    read -p "Select configuration (1-${#configs[@]}): " selection
+
+    # Validate selection
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#configs[@]} ]; then
+        echo -e "${RED}Invalid selection${NC}"
+        exit 1
+    fi
+
+    # Switch to selected config
+    local selected_config="${configs[$((selection - 1))]}"
+    switch_to "$selected_config"
+}
+
+# Function to set up initial configs from existing config.json
+setup_configs() {
+    echo -e "${YELLOW}Setting up named configurations...${NC}"
+    echo ""
+
+    if [ ! -f "$ACTIVE_CONFIG" ]; then
+        echo -e "${RED}Error: No config.json found${NC}"
+        echo "Please run HumanLayer thoughts init first"
+        exit 1
+    fi
+
+    if [ -L "$ACTIVE_CONFIG" ]; then
+        echo "Configurations already set up (config.json is a symlink)"
+        show_current_info
+        exit 0
+    fi
+
+    # This is a direct file, let's convert it
+    echo "Found existing config.json"
+    echo ""
+    echo "What should we name this configuration?"
+    echo "Examples: brkthru, coalesce-labs, client-name, personal"
+    echo ""
+    read -p "Configuration name: " config_name
+
+    if [ -z "$config_name" ]; then
+        echo -e "${RED}Name cannot be empty${NC}"
+        exit 1
+    fi
+
+    # Sanitize name (lowercase, replace spaces with hyphens)
+    config_name=$(echo "$config_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+
+    local target_file="$CONFIG_DIR/config-${config_name}.json"
+
+    if [ -f "$target_file" ]; then
+        echo -e "${RED}Error: config-${config_name}.json already exists${NC}"
+        exit 1
+    fi
+
+    # Copy current config to named config
+    cp "$ACTIVE_CONFIG" "$target_file"
+    echo -e "${GREEN}✓ Created: config-${config_name}.json${NC}"
+
+    # Remove original and create symlink
+    rm "$ACTIVE_CONFIG"
+    ln -s "$target_file" "$ACTIVE_CONFIG"
+    echo -e "${GREEN}✓ Created symlink: config.json → config-${config_name}.json${NC}"
+    echo ""
+    echo "Setup complete! Your existing config is now named: $config_name"
+    echo ""
+    echo "To add more configurations, create files like:"
+    echo "  $CONFIG_DIR/config-another-name.json"
+    echo ""
+    echo "Then switch between them with:"
+    echo "  hl-switch"
+}
+
+# Main logic
+case "${1:-}" in
+    "")
+        # No arguments - show current and interactive select
+        show_current_info
+        interactive_select
+        ;;
+    setup)
+        setup_configs
+        ;;
+    status|current|show)
+        show_current_info
+        ;;
+    list|ls)
+        echo -e "${BLUE}Available configurations:${NC}"
+        local configs=($(list_configs))
+        for config in "${configs[@]}"; do
+            echo "  - $config"
+        done
+        echo ""
+        show_current_info
+        ;;
+    help|-h|--help)
+        echo "hl-switch - Switch between HumanLayer thoughts configurations"
+        echo ""
+        echo "Usage:"
+        echo "  hl-switch                 Interactive mode - shows menu"
+        echo "  hl-switch <name>          Switch to named configuration"
+        echo "  hl-switch setup           Convert existing config.json to named config"
+        echo "  hl-switch status          Show current configuration"
+        echo "  hl-switch list            List all available configurations"
+        echo ""
+        echo "Examples:"
+        echo "  hl-switch                 # Show menu and select"
+        echo "  hl-switch brkthru        # Switch to brkthru config"
+        echo "  hl-switch coalesce-labs  # Switch to coalesce-labs config"
+        echo ""
+        echo "Configuration files are stored in:"
+        echo "  $CONFIG_DIR/config-*.json"
+        echo ""
+        echo "The active config is a symlink at:"
+        echo "  $CONFIG_DIR/config.json"
+        ;;
+    *)
+        # Argument provided - switch to that config
+        switch_to "$1"
+        ;;
+esac
