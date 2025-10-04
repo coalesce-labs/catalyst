@@ -106,10 +106,16 @@ After getting initial clarifications:
    - Create multiple Task agents to research different aspects concurrently
    - Use the right agent for each type of research:
 
-   **For deeper investigation:**
+   **For local codebase:**
    - **codebase-locator** - To find more specific files (e.g., "find all files that handle [specific component]")
    - **codebase-analyzer** - To understand implementation details (e.g., "analyze how [system] works")
    - **codebase-pattern-finder** - To find similar features we can model after
+
+   **For external research:**
+   - **external-research** - To research framework patterns and best practices from popular repos
+   - Ask: "How does [framework] recommend implementing [feature]?"
+   - Ask: "What's the standard approach for [pattern] in [library]?"
+   - Examples: React patterns, Express middleware, Next.js routing, Prisma schemas
 
    **For historical context:**
    - **thoughts-locator** - To find any research, plans, or decisions about this area
