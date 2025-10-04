@@ -3,6 +3,13 @@ description: Create a git worktree for parallel work and optionally launch imple
 category: version-control-git
 ---
 
+## Configuration Note
+
+This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket prefix:
+- Read from `.claude/config.json` if available
+- Otherwise use a generic format like `TICKET-XXX`
+- Examples: `ENG-123`, `FEAT-456`, `BUG-789`
+
 You are tasked with creating a git worktree for parallel development work.
 
 ## Process
@@ -10,7 +17,7 @@ You are tasked with creating a git worktree for parallel development work.
 When this command is invoked:
 
 1. **Gather required information**:
-   - Worktree name (e.g., ENG-123, feature-name)
+   - Worktree name (e.g., PROJ-123, feature-name)
    - Base branch (default: current branch)
    - Optional: Path to implementation plan
 
@@ -52,4 +59,4 @@ When this command is invoked:
 ## Example Interaction
 
 ```
-User: /create_worktree ENG-123
+User: /create_worktree PROJ-123

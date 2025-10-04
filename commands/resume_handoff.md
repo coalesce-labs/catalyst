@@ -1,5 +1,12 @@
 # Resume work from a handoff document
 
+## Configuration Note
+
+This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket prefix:
+- Read from `.claude/config.json` if available
+- Otherwise use a generic format like `TICKET-XXX`
+- Examples: `ENG-123`, `FEAT-456`, `BUG-789`
+
 You are tasked with resuming work from a handoff document through an interactive process. These handoffs contain critical context, learnings, and next steps from previous work sessions that need to be understood and continued.
 
 ## Initial Response
@@ -13,9 +20,9 @@ When this command is invoked:
    - Begin the analysis process by ingesting relevant context from the handoff document, reading additional files it mentions
    - Then propose a course of action to the user and confirm, or ask for clarification on direction.
 
-2. **If a ticket number (like ENG-XXXX) was provided**:
+2. **If a ticket number (like PROJ-XXXX) was provided**:
    - run `humanlayer thoughts sync` to ensure your `thoughts/` directory is up to date.
-   - locate the most recent handoff document for the ticket. Tickets will be located in `thoughts/shared/handoffs/ENG-XXXX` where `ENG-XXXX` is the ticket number. e.g. for `ENG-2124` the handoffs would be in `thoughts/shared/handoffs/ENG-2124/`. **List this directory's contents.**
+   - locate the most recent handoff document for the ticket. Tickets will be located in `thoughts/shared/handoffs/PROJ-XXXX` where `PROJ-XXXX` is the ticket number. e.g. for `PROJ-123` the handoffs would be in `thoughts/shared/handoffs/PROJ-123/`. **List this directory's contents.**
    - There may be zero, one or multiple files in the directory.
    - **If there are zero files in the directory, or the directory does not exist**: tell the user: "I'm sorry, I can't seem to find that handoff document. Can you please provide me with a path to it?"
    - **If there is only one file in the directory**: proceed with that handoff
@@ -31,9 +38,9 @@ I'll help you resume work from a handoff document. Let me find the available han
 
 Which handoff would you like to resume from?
 
-Tip: You can invoke this command directly with a handoff path: `/resume_handoff `thoughts/shared/handoffs/ENG-XXXX/YYYY-MM-DD_HH-MM-SS_ENG-XXXX_description.md`
+Tip: You can invoke this command directly with a handoff path: `/resume_handoff `thoughts/shared/handoffs/PROJ-XXXX/YYYY-MM-DD_HH-MM-SS_PROJ-XXXX_description.md`
 
-or using a ticket number to resume from the most recent handoff for that ticket: `/resume_handoff ENG-XXXX`
+or using a ticket number to resume from the most recent handoff for that ticket: `/resume_handoff PROJ-XXXX`
 ```
 
 Then wait for the user's input.

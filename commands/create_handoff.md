@@ -1,15 +1,22 @@
 # Create Handoff
 
+## Configuration Note
+
+This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket prefix:
+- Read from `.claude/config.json` if available
+- Otherwise use a generic format like `TICKET-XXX`
+- Examples: `ENG-123`, `FEAT-456`, `BUG-789`
+
 You are tasked with writing a handoff document to hand off your work to another agent in a new session. You will create a handoff document that is thorough, but also **concise**. The goal is to compact and summarize your context without losing any of the key details of what you're working on.
 
 
 ## Process
 ### 1. Filepath & Metadata
 Use the following information to understand how to create your document:
-    - create your file under `thoughts/shared/handoffs/TICKET-XXX/YYYY-MM-DD_HH-MM-SS_description.md`, where:
+    - create your file under `thoughts/shared/handoffs/PROJ-XXX/YYYY-MM-DD_HH-MM-SS_description.md`, where:
         - YYYY-MM-DD is today's date
         - HH-MM-SS is the hours, minutes and seconds based on the current time, in 24-hour format (i.e. use `13:00` for `1:00 pm`)
-        - TICKET-XXX is the ticket number directory (replace with `general` if no ticket)
+        - PROJ-XXX is the ticket number directory (replace with `general` if no ticket)
         - description is a brief kebab-case description (optionally including ticket number)
     - Get current git information for metadata (branch, commit, repository name) using git commands
     - Examples:
@@ -79,7 +86,7 @@ for example (between <example_response></example_response> XML tags - do NOT inc
 Handoff created and synced! You can resume from this handoff in a new session with the following command:
 
 ```bash
-/resume_handoff thoughts/shared/handoffs/ENG-2166/2025-01-08_13-44-55_ENG-2166_create-context-compaction.md
+/resume_handoff thoughts/shared/handoffs/PROJ-123/2025-01-08_13-44-55_PROJ-123_create-context-compaction.md
 ```
 </example_response>
 

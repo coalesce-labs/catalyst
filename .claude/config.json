@@ -1,0 +1,14 @@
+{
+  "project": {
+    "ticketPrefix": "TICKET",
+    "defaultTicketPrefix": "TICKET"
+  },
+  "linear": {
+    "teamId": null,
+    "projectId": null,
+    "thoughtsRepoUrl": null
+  },
+  "thoughts": {
+    "user": null
+  }
+}
