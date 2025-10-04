@@ -258,6 +258,15 @@ gh pr create --fill        # Create PR
 
 **Target**: Keep context utilization between **40-60%**
 
+**How to Check**:
+```bash
+/context
+```
+This command shows:
+- Token usage breakdown by component
+- Total tokens used
+- **Percentage of context window used/remaining**
+
 **Why**:
 - Maintains AI performance quality
 - Prevents context exhaustion
@@ -274,11 +283,12 @@ gh pr create --fill        # Create PR
 - Validation → PR Creation
 
 **✅ Clear During Phase If:**
-- Context reaches >60% utilization
+- Context reaches >60% utilization (check with `/context`)
 - AI starts repeating same errors
 - Need to "reset" the approach
 - Creating a handoff
 - Work trajectory changes significantly
+- `/context` shows high token usage in messages component
 
 **✅ Clear For:**
 - Starting new ticket
@@ -795,8 +805,15 @@ Each Claude Code session is isolated with its own context.
 - [ ] After completing implementation
 - [ ] Before validation phase
 - [ ] After creating PR
-- [ ] When context reaches >60%
+- [ ] When `/context` shows >60% usage
 - [ ] When AI starts repeating errors
+
+### Context Monitoring Commands
+
+```bash
+/context              # Show detailed token usage breakdown
+/clear                # Clear context and start fresh session
+```
 
 ### Command Quick Reference
 
