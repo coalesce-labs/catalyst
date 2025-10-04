@@ -120,11 +120,15 @@ Collect metadata for the research document:
 - Get repository name from `.git/config` or working directory
 
 **Filename format:**
-- With ticket: `thoughts/shared/research/YYYY-MM-DD-PROJ-XXX-description.md`
+- With ticket: `thoughts/shared/research/YYYY-MM-DD-PROJ-XXXX-description.md`
 - Without ticket: `thoughts/shared/research/YYYY-MM-DD-description.md`
-- Alternative: `research/YYYY-MM-DD-description.md` (if not using thoughts system)
+- Alternative: `research/YYYY-MM-DD-PROJ-XXXX-description.md` (if not using thoughts system)
 
 Replace `PROJ` with your ticket prefix from `.claude/config.json`.
+
+**Examples:**
+- `2025-01-08-PROJ-1478-parent-child-tracking.md`
+- `2025-01-08-authentication-flow.md` (no ticket)
 
 ### Step 6: Generate Research Document
 
