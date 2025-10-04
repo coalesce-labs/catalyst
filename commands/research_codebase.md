@@ -290,6 +290,27 @@ https://github.com/{owner}/{repo}/blob/{commit-hash}/{file-path}#L{start}-L{end}
 
 ---
 
+## 📊 Context Status
+
+Current usage: {X}% ({Y}K/{Z}K tokens)
+
+{If >60%}:
+⚠️ **Recommendation**: Context is getting full. For best results in the planning
+phase, I recommend clearing context now.
+
+**Options**:
+1. ✅ Clear context now (recommended) - Close this session and start fresh for planning
+2. Create handoff to pause work
+3. Continue anyway (may impact performance)
+
+**Why clear?** Fresh context ensures optimal AI performance for the planning phase,
+which will load additional files and research.
+
+{If <60%}:
+✅ Context healthy. Ready to proceed to planning phase if needed.
+
+---
+
 Would you like me to:
 1. Dive deeper into any specific area?
 2. Create an implementation plan based on this research?
@@ -325,6 +346,40 @@ If the user has follow-up questions:
 5. **Re-sync** (if using thoughts system)
 
 ## Important Notes
+
+### Proactive Context Management
+
+**Monitor Your Context Throughout Research**:
+- Check token usage after spawning parallel agents
+- After synthesis phase, check context again
+- **If context >60%**: Warn user and recommend handoff
+
+**Example Warning**:
+```
+⚠️ Context Usage Alert: Currently at 65% (130K/200K tokens)
+
+Research is complete, but context is getting full. Before continuing to
+planning phase, I recommend creating a handoff to preserve this work
+and start fresh.
+
+Would you like me to:
+1. Create a handoff now (recommended)
+2. Continue and clear context manually
+3. Proceed anyway (not recommended - may impact planning quality)
+
+**Why this matters**: The planning phase will load additional context.
+Starting fresh ensures optimal AI performance.
+```
+
+**When to Warn**:
+- After Step 7 (document generated) if context >60%
+- After Step 9 (follow-up complete) if context >70%
+- Anytime during research if context >80%
+
+**Educate the User**:
+- Explain WHY clearing context matters (performance, token efficiency)
+- Explain WHEN to clear (between phases)
+- Offer to create handoff yourself if `/create-handoff` command exists
 
 ### Parallel Execution
 - ALWAYS use parallel Task agents for efficiency

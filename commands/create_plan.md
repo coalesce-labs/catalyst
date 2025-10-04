@@ -288,12 +288,44 @@ After structure approval:
    - Run `humanlayer thoughts sync` to sync the newly created plan
    - This ensures the plan is properly indexed and available
 
-2. **Present the draft plan location**:
-   ```
-   I've created the initial implementation plan at:
-   `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md`
+2. **Check context usage and present plan**:
 
-   Please review it and let me know:
+   **Monitor your context** and present:
+
+   ```
+   ✅ Implementation plan created!
+
+   **Plan location**: `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md`
+
+   ## 📊 Context Status
+
+   Current usage: {X}% ({Y}K/{Z}K tokens)
+
+   {If >60%}:
+   ⚠️ **Context Alert**: We're at {X}% context usage.
+
+   **Recommendation**: Clear context before implementation phase.
+
+   **Why?** The implementation phase will:
+   - Load the complete plan file
+   - Read multiple source files
+   - Track progress with TodoWrite
+   - Benefit from fresh context for optimal performance
+
+   **What to do**:
+   1. ✅ Review the plan (read the file above)
+   2. ✅ Close this session (clear context)
+   3. ✅ Start fresh session in worktree
+   4. ✅ Run `/implement-plan {plan-path}`
+
+   This is normal! Context is meant to be cleared between phases.
+
+   {If <60%}:
+   ✅ Context healthy ({X}%).
+
+   ---
+
+   Please review the plan and let me know:
    - Are the phases properly scoped?
    - Are the success criteria specific enough?
    - Any technical details that need adjustment?
@@ -306,8 +338,13 @@ After structure approval:
    - Clarify success criteria (both automated and manual)
    - Add/remove scope items
    - After making changes, run `humanlayer thoughts sync` again
+   - **Monitor context** - if >70% during iterations, warn user to review file offline
 
 4. **Continue refining** until the user is satisfied
+
+5. **Final context check** after approval:
+   - If context >50%, remind user to clear before implementation
+   - Provide clear instructions on next steps with fresh context
 
 ## Important Guidelines
 

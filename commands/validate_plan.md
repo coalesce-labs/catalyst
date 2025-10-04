@@ -77,7 +77,43 @@ For each phase in the plan:
 
 ### Step 3: Generate Validation Report
 
+**Before generating report, check context usage**:
+
 Create comprehensive validation summary:
+
+```
+# Validation Report: {Feature Name}
+
+**Plan**: `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-feature.md`
+**Validated**: {date}
+**Validation Status**: {PASS/FAIL/PARTIAL}
+
+## 📊 Context Status
+Current usage: {X}% ({Y}K/{Z}K tokens)
+
+{If >60%}:
+⚠️ **Context Alert**: Validation consumed {X}% of context.
+
+**Recommendation**: After reviewing this report, clear context before PR creation.
+
+**Why?** PR description generation benefits from fresh context to:
+- Synthesize changes clearly
+- Write concise summaries
+- Avoid accumulated error context
+
+**Next steps**:
+1. Review this validation report
+2. Address any failures
+3. Close this session (clear context)
+4. Start fresh for: `/commit` and `/describe-pr`
+
+{If <60%}:
+✅ Context healthy. Ready for PR creation.
+
+---
+
+{Continue with rest of validation report...}
+```
 
 ```markdown
 ## Validation Report: [Plan Name]

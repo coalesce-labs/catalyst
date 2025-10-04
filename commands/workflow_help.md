@@ -285,6 +285,17 @@ gh pr create --fill
 
 **Why?** Keeps AI performance optimal (40-60% context utilization)
 
+**How to check**: I monitor my context automatically and will warn you.
+You can also check anytime with `/context` command.
+
+**When I warn you**:
+- I'll show current usage: e.g., "65% (130K/200K tokens)"
+- I'll explain why clearing helps
+- I'll offer to create a handoff if needed
+- I'll tell you exactly what to do next
+
+**Context clearing is NORMAL and EXPECTED** - it's how we maintain quality!
+
 ---
 
 {Based on Task 3 - suggest next step}

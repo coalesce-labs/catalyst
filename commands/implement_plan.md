@@ -43,8 +43,55 @@ After implementing a phase:
 - Fix any issues before proceeding
 - Update your progress in both the plan and your todos
 - Check off completed items in the plan file itself using Edit
+- **Check context usage** - monitor token consumption
 
 Don't let verification interrupt your flow - batch it at natural stopping points.
+
+## Context Management During Implementation
+
+**Monitor context proactively throughout implementation**:
+
+**After Each Phase**:
+```
+✅ Phase {N} complete!
+
+## 📊 Context Status
+Current usage: {X}% ({Y}K/{Z}K tokens)
+
+{If >60%}:
+⚠️ **Context Alert**: We're at {X}% usage.
+
+**Recommendation**: Create a handoff before continuing to Phase {N+1}.
+
+**Why?** Implementation accumulates context:
+- File reads
+- Code changes
+- Test outputs
+- Error messages
+- Context clears ensure continued high performance
+
+**Options**:
+1. ✅ Create handoff and clear context (recommended)
+2. Continue to next phase (if close to completion)
+
+**To resume**: Start fresh session, run `/implement-plan {plan-path}`
+(The plan file tracks progress with checkboxes - you'll resume automatically)
+
+{If <60%}:
+✅ Context healthy. Ready for Phase {N+1}.
+```
+
+**When to Warn**:
+- After any phase if context >60%
+- If context >70%, strongly recommend handoff
+- If context >80%, STOP and require handoff
+- If user is spinning on errors (3+ attempts), suggest context clear
+
+**Educate About Phase-Based Context**:
+- Explain that implementation is designed to work in chunks
+- Each phase completion is a natural handoff point
+- Plan file preserves progress across sessions
+- Fresh context = fresh perspective on next phase
 
 ## If You Get Stuck
 
