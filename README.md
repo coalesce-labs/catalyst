@@ -157,6 +157,9 @@ Commands are workflows you invoke with `/command_name`:
 - **/implement_plan** - Execute approved plans
 - **/validate_plan** - Verify implementation
 - **/create_worktree** - Set up parallel work environment
+- **/commit** - Create well-structured git commits
+- **/describe_pr** - Generate comprehensive PR descriptions
+- **/debug** - Investigate logs, database, and git state
 
 ### Thoughts System
 
