@@ -1,0 +1,376 @@
+#!/bin/bash
+# setup-linear-workflow - Automatically create workflow statuses in Linear
+# Usage: ./setup-linear-workflow [team_key]
+
+set -e
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+echo -e "${BLUE}🔄 Linear Workflow Setup${NC}"
+echo ""
+
+# Check for Linear CLI or API key
+if ! command -v linear-cli &> /dev/null && [ -z "$LINEAR_API_KEY" ]; then
+    echo -e "${RED}❌ Error: Linear API access not configured${NC}"
+    echo ""
+    echo "You need either:"
+    echo "  1. Linear CLI: npm install -g @linear/cli"
+    echo "  2. Or set LINEAR_API_KEY environment variable"
+    echo ""
+    echo "To get an API key:"
+    echo "  1. Go to https://linear.app/settings/api"
+    echo "  2. Create a new Personal API Key"
+    echo "  3. Export it: export LINEAR_API_KEY='lin_api_...'"
+    exit 1
+fi
+
+# Check if Linear MCP is available (alternative)
+if command -v humanlayer &> /dev/null; then
+    echo -e "${BLUE}ℹ️  HumanLayer MCP detected - you can also use Claude to set this up!${NC}"
+    echo "Just run: /linear setup-workflow"
+    echo ""
+    read -p "Continue with script setup anyway? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 0
+    fi
+fi
+
+echo "This script will create the recommended workflow statuses in your Linear team."
+echo ""
+
+# Get team key
+TEAM_KEY="${1:-}"
+
+if [ -z "$TEAM_KEY" ]; then
+    echo "Enter your Linear team key (e.g., 'PROJ', 'ENG', 'TEAM'):"
+    echo "You can find this in your Linear URL: linear.app/{workspace}/{team-key}/..."
+    read -p "Team key: " TEAM_KEY
+fi
+
+if [ -z "$TEAM_KEY" ]; then
+    echo -e "${RED}Team key is required${NC}"
+    exit 1
+fi
+
+echo ""
+echo "Will set up workflow for team: ${TEAM_KEY}"
+echo ""
+
+# Show what will be created
+echo -e "${YELLOW}The following statuses will be created:${NC}"
+echo ""
+echo "  BACKLOG"
+echo "    1. Backlog (default)"
+echo ""
+echo "  UNSTARTED"
+echo "    2. Triage"
+echo "    3. Spec Needed"
+echo "    4. Research Needed"
+echo ""
+echo "  STARTED"
+echo "    5. Research in Progress"
+echo "    6. Ready for Plan"
+echo "    7. Plan in Progress"
+echo "    8. Plan in Review"
+echo "    9. Ready for Dev"
+echo "   10. In Dev"
+echo "   11. In Review"
+echo ""
+echo "  COMPLETED"
+echo "   12. Done"
+echo ""
+
+read -p "Proceed with setup? (Y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Nn]$ ]]; then
+    echo "Setup cancelled."
+    exit 0
+fi
+
+echo ""
+echo -e "${YELLOW}Note: This script creates a GraphQL mutation file.${NC}"
+echo "You'll need to execute it manually via Linear's API."
+echo ""
+
+# Create GraphQL mutation file
+MUTATION_FILE="/tmp/linear-workflow-setup.graphql"
+
+cat > "$MUTATION_FILE" <<'GRAPHQL'
+# Linear Workflow Setup Mutations
+# Execute these in order at: https://studio.apollographql.com/sandbox/explorer
+# Or use the Linear API directly
+
+# First, get your team ID:
+query GetTeamId {
+  teams {
+    nodes {
+      id
+      key
+      name
+    }
+  }
+}
+
+# Then, create each status (replace TEAM_ID with your actual team ID):
+
+# 1. Backlog
+mutation CreateBacklog {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Backlog"
+    type: "backlog"
+    description: "New ideas and feature requests"
+    color: "#bec2c8"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 2. Triage
+mutation CreateTriage {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Triage"
+    type: "unstarted"
+    description: "Initial review and prioritization"
+    color: "#e2e2e2"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 3. Spec Needed
+mutation CreateSpecNeeded {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Spec Needed"
+    type: "unstarted"
+    description: "Needs problem statement and solution outline"
+    color: "#e2e2e2"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 4. Research Needed
+mutation CreateResearchNeeded {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Research Needed"
+    type: "unstarted"
+    description: "Requires investigation before planning"
+    color: "#e2e2e2"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 5. Research in Progress
+mutation CreateResearchInProgress {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Research in Progress"
+    type: "started"
+    description: "Active research underway"
+    color: "#f2c94c"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 6. Ready for Plan
+mutation CreateReadyForPlan {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Ready for Plan"
+    type: "started"
+    description: "Research complete, ready for implementation plan"
+    color: "#f2c94c"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 7. Plan in Progress
+mutation CreatePlanInProgress {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Plan in Progress"
+    type: "started"
+    description: "Writing implementation plan (auto-set by /create_plan)"
+    color: "#f2c94c"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 8. Plan in Review
+mutation CreatePlanInReview {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Plan in Review"
+    type: "started"
+    description: "Plan under team discussion and review"
+    color: "#f2c94c"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 9. Ready for Dev
+mutation CreateReadyForDev {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Ready for Dev"
+    type: "started"
+    description: "Plan approved, ready to implement"
+    color: "#5e6ad2"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 10. In Dev
+mutation CreateInDev {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "In Dev"
+    type: "started"
+    description: "Active development (auto-set by /implement_plan)"
+    color: "#5e6ad2"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 11. In Review
+mutation CreateInReview {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "In Review"
+    type: "started"
+    description: "PR submitted for review (auto-set by /describe_pr)"
+    color: "#5e6ad2"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+
+# 12. Done
+mutation CreateDone {
+  workflowStateCreate(input: {
+    teamId: "TEAM_ID"
+    name: "Done"
+    type: "completed"
+    description: "Completed and deployed"
+    color: "#5e6ad2"
+  }) {
+    success
+    workflowState {
+      id
+      name
+    }
+  }
+}
+GRAPHQL
+
+echo -e "${GREEN}✓ Created GraphQL mutations file${NC}"
+echo ""
+echo "File location: $MUTATION_FILE"
+echo ""
+echo -e "${YELLOW}════════════════════════════════════════════════════════${NC}"
+echo -e "${YELLOW}Manual Setup Required${NC}"
+echo -e "${YELLOW}════════════════════════════════════════════════════════${NC}"
+echo ""
+echo "Linear's API requires manual execution. Here's how:"
+echo ""
+echo -e "${BLUE}Option 1: Use Claude with Linear MCP (EASIEST!)${NC}"
+echo ""
+echo "  1. In Claude Code, run:"
+echo "     /linear setup-workflow ${TEAM_KEY}"
+echo ""
+echo "  2. Claude will use Linear MCP tools to create all statuses"
+echo ""
+echo -e "${BLUE}Option 2: Use Linear's GraphQL API${NC}"
+echo ""
+echo "  1. Get your API key: https://linear.app/settings/api"
+echo "  2. Get your team ID:"
+echo "     curl -X POST https://api.linear.app/graphql \\"
+echo "       -H 'Authorization: YOUR_API_KEY' \\"
+echo "       -H 'Content-Type: application/json' \\"
+echo "       -d '{\"query\": \"{ teams { nodes { id key name } } }\"}'"
+echo ""
+echo "  3. Edit $MUTATION_FILE"
+echo "     Replace TEAM_ID with your actual team ID"
+echo ""
+echo "  4. Run each mutation via curl or Apollo Studio"
+echo ""
+echo -e "${BLUE}Option 3: Manual Setup in Linear UI${NC}"
+echo ""
+echo "  See the guide in: docs/LINEAR_WORKFLOW_AUTOMATION.md"
+echo ""
+echo -e "${YELLOW}════════════════════════════════════════════════════════${NC}"
+echo ""
+
+# Offer to show the GraphQL file
+read -p "View the GraphQL mutations file? (y/N) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    cat "$MUTATION_FILE"
+fi
+
+echo ""
+echo -e "${GREEN}✅ Workflow setup guide complete!${NC}"
+echo ""
+echo "Recommended: Use Option 1 (Claude with Linear MCP) for easiest setup"
+echo ""
