@@ -259,6 +259,8 @@ gh pr create --fill        # Create PR
 **Target**: Keep context utilization between **40-60%**
 
 **How to Check**:
+
+**For Users**:
 ```bash
 /context
 ```
@@ -266,6 +268,13 @@ This command shows:
 - Token usage breakdown by component
 - Total tokens used
 - **Percentage of context window used/remaining**
+
+**For Agents** (Automatic):
+- Agents receive real-time token updates after every tool call
+- See: `<system_warning>Token usage: X/200000; Y remaining</system_warning>`
+- Can proactively warn when approaching limits
+- Trained to adjust behavior based on remaining context
+- **Agents can self-monitor and suggest clearing context**
 
 **Why**:
 - Maintains AI performance quality

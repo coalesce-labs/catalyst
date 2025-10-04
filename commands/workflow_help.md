@@ -125,6 +125,8 @@ Based on detection results, determine user's current state:
 - Current phase: {detected-phase}
 - Clear context after: {when to clear}
 
+**Note**: I can monitor my own context usage and will proactively warn you if it gets high. You can also check anytime with `/context`.
+
 Would you like me to:
 1. Continue with next step
 2. Explain the complete workflow
