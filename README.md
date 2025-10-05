@@ -334,6 +334,25 @@ When you improve the workspace, easily update your projects:
 4. Local configs preserved, improvements applied
 5. Team shares updates via git
 
+## Using the Workspace on Itself
+
+This workspace "eats its own dog food" - the commands and agents are installed into `.claude/` so you can use them while working on the workspace itself!
+
+**What this means**:
+- You can use `/workflow-help` to learn about workflows
+- You can use `/create-plan` to plan new features
+- You can use `/research-codebase` to understand the workspace structure
+- All agents and commands work on this codebase
+
+**Source vs Installation**:
+- `agents/*.md` - Source files (edit these)
+- `commands/*.md` - Source files (edit these)
+- `.claude/agents/*.md` - Installed copies (used by Claude Code)
+- `.claude/commands/*.md` - Installed copies (used by Claude Code)
+
+**After editing source files**:
+The `.claude/` copies are automatically synced since they're in the same repo. Just restart Claude Code to pick up changes.
+
 ## Customization
 
 ### Adding Your Own Agents

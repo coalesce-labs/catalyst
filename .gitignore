@@ -12,3 +12,9 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# Workspace update metadata (tracks installation state, not source)
+.claude/.workspace-metadata.json
+
+# Backup directories created by update-project.sh
+.claude-backup-*/
