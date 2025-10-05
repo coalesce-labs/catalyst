@@ -44,17 +44,49 @@ for command in "$WORKSPACE_DIR/commands"/*.md; do
     fi
 done
 
+# Install config.json if it exists
+echo ""
+if [ -f "$WORKSPACE_DIR/.claude/config.json" ]; then
+    echo "📋 Installing config.json..."
+    cp "$WORKSPACE_DIR/.claude/config.json" "$PROJECT_DIR/.claude/"
+    echo "  ✓ config.json (customize for your project)"
+fi
+
+# Create initial metadata file
+echo ""
+echo "📋 Creating workspace metadata..."
+WORKSPACE_VERSION=$(cd "$WORKSPACE_DIR" && git rev-parse HEAD 2>/dev/null || echo "unknown")
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+cat > "$PROJECT_DIR/.claude/.workspace-metadata.json" <<EOF
+{
+  "workspaceVersion": "$WORKSPACE_VERSION",
+  "lastUpdated": "$TIMESTAMP",
+  "installedFiles": {}
+}
+EOF
+echo "  ✓ .workspace-metadata.json"
+
 echo ""
 echo "✅ Installation complete!"
 echo ""
 echo "Installed to: $PROJECT_DIR/.claude/"
 echo "  - $AGENT_COUNT agents"
 echo "  - $COMMAND_COUNT commands"
+echo "  - config.json (template)"
+echo "  - .workspace-metadata.json (tracking)"
 echo ""
 echo "These will ONLY be available in this project."
 echo ""
-echo "Note: Project .claude/ takes precedence over user ~/.claude/"
-echo "You can customize these for project-specific needs."
+echo "📝 Next steps:"
+echo "1. Customize .claude/config.json with your project settings"
+echo "2. Run /linear in Claude Code to configure Linear integration (if needed)"
+echo "3. Restart Claude Code if working in this project"
 echo ""
-echo "Next step: Restart Claude Code if working in this project"
+echo "📦 To update from workspace later:"
+echo "   From workspace: ./scripts/update-project.sh $PROJECT_DIR"
+echo "   Or in Claude: /update-project $PROJECT_DIR"
+echo ""
+echo "Note: Project .claude/ takes precedence over user ~/.claude/"
+echo "Workspace version: $(echo $WORKSPACE_VERSION | cut -c1-8)"
 echo ""

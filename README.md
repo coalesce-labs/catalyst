@@ -41,6 +41,10 @@ Based on Anthropic's context engineering principles:
 
 # Or install to specific project
 ./scripts/install-project.sh /path/to/project
+
+# Later, update project from workspace (preserves customizations!)
+./scripts/update-project.sh /path/to/project
+# Or use slash command: /update-project /path/to/project
 ```
 
 ### 3. Initialize a Project
@@ -302,6 +306,33 @@ ryan-init-project new-project
 ```
 
 The thoughts system automatically syncs context across all your worktrees.
+
+## Updating Projects from Workspace
+
+When you improve the workspace, easily update your projects:
+
+```bash
+# From workspace directory
+./scripts/update-project.sh /path/to/project
+
+# Or use slash command
+/update-project /path/to/project
+```
+
+**Smart updating**:
+- ✅ Preserves local customizations (config values, configured commands)
+- ✅ Intelligently merges config.json (workspace structure + local values)
+- ✅ Auto-updates agents (pure logic, no customization)
+- ✅ Prompts for conflicts (you decide what to keep)
+- ✅ Creates backups automatically
+- ✅ Tracks versions and detects drift
+
+**Example workflow**:
+1. Improve agents/commands in workspace
+2. Commit workspace changes
+3. Run `update-project.sh` on each project
+4. Local configs preserved, improvements applied
+5. Team shares updates via git
 
 ## Customization
 
