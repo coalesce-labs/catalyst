@@ -18,3 +18,6 @@ Thumbs.db
 
 # Backup directories created by update-project.sh
 .claude-backup-*/
+
+# HumanLayer thoughts directory (symlink to external system)
+thoughts/

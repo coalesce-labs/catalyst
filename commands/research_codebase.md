@@ -453,21 +453,131 @@ Starting fresh ensures optimal AI performance.
 - Keep tags consistent across research documents
 - Update `last_updated` fields when appending follow-ups
 
+## Linear Integration
+
+If a Linear ticket is associated with the research, the command can automatically update the ticket status.
+
+### How It Works
+
+**Ticket detection** (same as other commands):
+1. User provides ticket ID explicitly: `/research_codebase PROJ-123`
+2. Ticket mentioned in research query
+3. Auto-detected from current context
+
+**Status updates:**
+- When research starts → Move ticket to **"Research"**
+- When research document is saved → Add comment with link to research doc
+
+### Implementation Pattern
+
+**At research start** (Step 2 - after reading mentioned files):
+
+```javascript
+// If ticket is detected or provided
+if (ticketId) {
+  // Check if Linear MCP is available
+  if (mcp__linear__update_issue is available) {
+    // Update ticket status to "Research"
+    mcp__linear__update_issue({
+      id: ticketId,
+      state: "Research"  // or stateId if you have it
+    });
+
+    // Add comment
+    mcp__linear__create_comment({
+      issueId: ticketId,
+      body: "Starting research: [user's research question]"
+    });
+  }
+}
+```
+
+**After research document is saved** (Step 6 - after generating document):
+
+```javascript
+// Attach research document to ticket
+if (ticketId && githubPermalink) {
+  mcp__linear__update_issue({
+    id: ticketId,
+    links: [{
+      url: githubPermalink,
+      title: "Research: [topic]"
+    }]
+  });
+
+  // Add completion comment
+  mcp__linear__create_comment({
+    issueId: ticketId,
+    body: "Research complete! See findings: [link to research doc]"
+  });
+}
+```
+
+### User Experience
+
+**With ticket:**
+```bash
+/research_codebase PROJ-123
+> "How does authentication work?"
+```
+
+**What happens:**
+1. Command detects ticket PROJ-123
+2. Moves ticket from Backlog → Research
+3. Adds comment: "Starting research: How does authentication work?"
+4. Conducts research with parallel agents
+5. Saves document to thoughts/shared/research/
+6. Attaches document to Linear ticket
+7. Adds comment: "Research complete! See findings: [link]"
+
+**Without ticket:**
+```bash
+/research_codebase
+> "How does authentication work?"
+```
+
+**What happens:**
+- Same research process, but no Linear updates
+- User can manually attach research to ticket later
+
+### Configuration
+
+Uses the same Linear configuration as other commands from `.claude/config.json`:
+- `linear.teamId`
+- `linear.thoughtsRepoUrl` (for GitHub permalinks)
+
+### Error Handling
+
+**If Linear MCP not available:**
+- Skip Linear integration silently
+- Continue with research as normal
+- Note in output: "Research complete (Linear not configured)"
+
+**If ticket not found:**
+- Show warning: "Ticket PROJ-123 not found in Linear"
+- Ask user: "Continue research without Linear integration? (Y/n)"
+
+**If status update fails:**
+- Log error but continue research
+- Include note in final output: "⚠️ Could not update Linear ticket status"
+
 ## Integration with Other Commands
 
 This command integrates with the complete development workflow:
 
 ```
-/research-codebase → research document
+/research-codebase → research document (+ Linear: Research)
                   ↓
-           /create-plan → implementation plan
+           /create-plan → implementation plan (+ Linear: Planning)
                   ↓
-          /implement-plan → code changes
+          /implement-plan → code changes (+ Linear: In Progress)
                   ↓
-              /validate → tests & verification
+              /describe-pr → PR created (+ Linear: In Review)
 ```
 
 **How it connects:**
+
+- **research_codebase → Linear**: Moves ticket to "Research" status and attaches research document
 
 - **research_codebase → create_plan**: Research findings provide foundation for planning. The create_plan command can reference research documents in its "References" section.
 

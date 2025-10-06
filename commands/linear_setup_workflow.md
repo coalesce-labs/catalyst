@@ -10,7 +10,8 @@ You are tasked with automatically creating the recommended workflow statuses in 
 ## Prerequisites
 
 First, verify that Linear MCP tools are available by checking if any `mcp__linear__` tools exist. If not, respond:
-```
+
+```text
 I need access to Linear tools to set up workflow statuses. Please run the `/mcp` command to enable the Linear MCP server, then try again.
 ```
 
@@ -20,7 +21,7 @@ I need access to Linear tools to set up workflow statuses. Please run the `/mcp`
 
 Ask the user which team to set up:
 
-```
+```text
 I'll help you set up the recommended workflow statuses in Linear.
 
 Let me get your teams...
@@ -29,7 +30,8 @@ Let me get your teams...
 Use `mcp__linear__list_teams` to get all teams.
 
 Show teams to user:
-```
+
+```text
 Available teams:
 1. [Team Name] (key: TEAM)
 2. [Team Name] (key: PROJ)
@@ -41,32 +43,27 @@ Which team should I set up? (enter number or team key)
 
 Once team is selected, show what will be created:
 
-```
+```text
 I'll create these workflow statuses for team: [TEAM NAME]
 
 BACKLOG
   1. Backlog - New ideas and feature requests
 
 UNSTARTED
-  2. Triage - Initial review and prioritization
-  3. Spec Needed - Needs problem statement and solution outline
-  4. Research Needed - Requires investigation before planning
+  2. Research - Investigation, triage, and spec definition
 
 STARTED
-  5. Research in Progress - Active research underway
-  6. Ready for Plan - Research complete, ready for implementation plan
-  7. Plan in Progress - Writing implementation plan (auto-set by /create_plan)
-  8. Plan in Review - Plan under team discussion and review
-  9. Ready for Dev - Plan approved, ready to implement
-  10. In Dev - Active development (auto-set by /implement_plan)
-  11. In Review - PR submitted for review (auto-set by /describe_pr)
+  3. Planning - Writing and reviewing implementation plans
+  4. In Progress - Active development and implementation
+  5. In Review - PR submitted for code review
 
 COMPLETED
-  12. Done - Completed and deployed
+  6. Done - Completed and deployed
 
 This will integrate with your workflow commands:
-- /create_plan → Plan in Progress → Plan in Review
-- /implement_plan → In Dev
+- /research_codebase → Research
+- /create_plan → Planning
+- /implement_plan → In Progress
 - /describe_pr → In Review
 
 Proceed with creation? (Y/n)
@@ -86,73 +83,35 @@ const statuses = [
     name: "Backlog",
     type: "backlog",
     description: "New ideas and feature requests",
-    color: "#bec2c8"
+    color: "#bec2c8"  // Gray
   },
 
   // UNSTARTED
   {
-    name: "Triage",
+    name: "Research",
     type: "unstarted",
-    description: "Initial review and prioritization",
-    color: "#e2e2e2"
-  },
-  {
-    name: "Spec Needed",
-    type: "unstarted",
-    description: "Needs problem statement and solution outline",
-    color: "#e2e2e2"
-  },
-  {
-    name: "Research Needed",
-    type: "unstarted",
-    description: "Requires investigation before planning",
-    color: "#e2e2e2"
+    description: "Investigation, triage, and spec definition (auto-set by /research_codebase)",
+    color: "#f2c94c"  // Yellow
   },
 
-  // STARTED - Research & Planning
+  // STARTED - Planning & Development
   {
-    name: "Research in Progress",
+    name: "Planning",
     type: "started",
-    description: "Active research underway",
+    description: "Writing and reviewing implementation plans (auto-set by /create_plan)",
     color: "#f2c94c"  // Yellow
   },
   {
-    name: "Ready for Plan",
+    name: "In Progress",
     type: "started",
-    description: "Research complete, ready for implementation plan",
-    color: "#f2c94c"
-  },
-  {
-    name: "Plan in Progress",
-    type: "started",
-    description: "Writing implementation plan (auto-set by /create_plan)",
-    color: "#f2c94c"
-  },
-  {
-    name: "Plan in Review",
-    type: "started",
-    description: "Plan under team discussion and review",
-    color: "#f2c94c"
-  },
-
-  // STARTED - Development
-  {
-    name: "Ready for Dev",
-    type: "started",
-    description: "Plan approved, ready to implement",
+    description: "Active development and implementation (auto-set by /implement_plan)",
     color: "#5e6ad2"  // Blue
-  },
-  {
-    name: "In Dev",
-    type: "started",
-    description: "Active development (auto-set by /implement_plan)",
-    color: "#5e6ad2"
   },
   {
     name: "In Review",
     type: "started",
-    description: "PR submitted for review (auto-set by /describe_pr)",
-    color: "#5e6ad2"
+    description: "PR submitted for code review (auto-set by /describe_pr)",
+    color: "#5e6ad2"  // Blue
   },
 
   // COMPLETED
@@ -160,27 +119,28 @@ const statuses = [
     name: "Done",
     type: "completed",
     description: "Completed and deployed",
-    color: "#5e6ad2"
+    color: "#5e6ad2"  // Blue
   }
 ];
 ```
 
 Create each status using the MCP tool. If a status already exists (error), skip it and note it:
 
-```
+```text
 Creating statuses...
   ✓ Backlog
-  ✓ Triage
-  ⚠️  Spec Needed (already exists - skipped)
-  ✓ Research Needed
-  ...
+  ✓ Research
+  ✓ Planning
+  ✓ In Progress
+  ✓ In Review
+  ✓ Done
 ```
 
 ### 4. Verify Creation
 
 After creating all statuses, verify with `mcp__linear__list_workflow_states`:
 
-```
+```text
 Verifying workflow setup...
 ```
 
@@ -194,19 +154,18 @@ If possible, set "Backlog" as the default state for new issues in the team.
 
 Show completion summary:
 
-```
+```text
 ✅ Workflow setup complete!
 
-Created 12 workflow statuses for team: [TEAM NAME]
+Created 6 workflow statuses for team: [TEAM NAME]
 
 Workflow progression:
-  Backlog → Triage → Spec Needed → Research Needed →
-  Research in Progress → Ready for Plan → Plan in Progress →
-  Plan in Review → Ready for Dev → In Dev → In Review → Done
+  Backlog → Research → Planning → In Progress → In Review → Done
 
 Automatic status updates:
-  • /create_plan → Plan in Progress → Plan in Review
-  • /implement_plan → In Dev
+  • /research_codebase → Research
+  • /create_plan → Planning
+  • /implement_plan → In Progress
   • /describe_pr → In Review
 
 Next steps:
@@ -218,9 +177,10 @@ Next steps:
      /linear create thoughts/shared/research/example.md
 
   3. Test the workflow:
-     - Create a plan: /create_plan
-     - Implement it: /implement_plan path/to/plan.md
-     - Create PR: /describe_pr
+     - Research: /research_codebase "How does X work?"
+     - Plan: /create_plan
+     - Implement: /implement_plan path/to/plan.md
+     - Review: /describe_pr
 
 View the full workflow guide:
   docs/LINEAR_WORKFLOW_AUTOMATION.md
@@ -228,16 +188,20 @@ View the full workflow guide:
 
 ## Error Handling
 
-### If status already exists:
+### If status already exists
+
 Skip it and note in output: `⚠️  [Status] (already exists - skipped)`
 
-### If MCP tools not available:
+### If MCP tools not available
+
 Show clear error with setup instructions
 
-### If team not found:
+### If team not found
+
 Show available teams and ask user to select again
 
-### If creation fails:
+### If creation fails
+
 Show error and continue with remaining statuses
 
 ## Important Notes
