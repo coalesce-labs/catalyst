@@ -4,6 +4,7 @@ category: workflow-discovery
 tools: Read, Write, Edit, Grep, Glob
 model: inherit
 version: 1.0.0
+workspace_only: true
 ---
 
 # Create Workflow

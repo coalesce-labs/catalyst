@@ -25,7 +25,7 @@ Based on Anthropic's context engineering principles:
 
 ```bash
 # Initialize your central thoughts repository
-./scripts/setup-thoughts.sh
+./hack/setup-thoughts.sh
 
 # This creates:
 # ~/thoughts/
@@ -37,13 +37,13 @@ Based on Anthropic's context engineering principles:
 
 ```bash
 # Install to user directory (available in all projects)
-./scripts/install-user.sh
+./hack/install-user.sh
 
 # Or install to specific project
-./scripts/install-project.sh /path/to/project
+./hack/install-project.sh /path/to/project
 
 # Later, update project from workspace (preserves customizations!)
-./scripts/update-project.sh /path/to/project
+./hack/update-project.sh /path/to/project
 # Or use slash command: /update-project /path/to/project
 ```
 
@@ -68,7 +68,7 @@ ryan-init-project my-project
 
 ```bash
 # In your main repository
-./scripts/create-worktree.sh ENG-123 feature-name
+./hack/create-worktree.sh ENG-123 feature-name
 
 # This creates an isolated workspace with:
 # - Git worktree at ~/wt/my-project/feature-name
@@ -160,7 +160,7 @@ ryan-init-project my-project
 → thoughts/shared/plans/2025-01-08-PROJ-456-oauth-support.md
 
 # 3. Create worktree and implement
-./scripts/create-worktree.sh PROJ-456 oauth-support
+./hack/create-worktree.sh PROJ-456 oauth-support
 cd ~/wt/my-project/oauth-support
 /implement-plan thoughts/shared/plans/2025-01-08-PROJ-456-oauth-support.md
 → Code changes + tests
@@ -189,7 +189,7 @@ ryan-claude-workspace/
 │   ├── implement_plan.md
 │   ├── validate_plan.md
 │   └── create_worktree.md
-├── scripts/                 # Setup and installation scripts
+├── hack/                 # Setup and installation scripts
 │   ├── setup-thoughts.sh
 │   ├── install-user.sh
 │   ├── install-project.sh
@@ -273,7 +273,7 @@ Benefits:
 Installs to `~/.claude/` - available in all projects:
 
 ```bash
-./scripts/install-user.sh
+./hack/install-user.sh
 ```
 
 ### Project Installation
@@ -281,7 +281,7 @@ Installs to `~/.claude/` - available in all projects:
 Installs to `.claude/` in a specific project:
 
 ```bash
-./scripts/install-project.sh /path/to/project
+./hack/install-project.sh /path/to/project
 ```
 
 ### Hybrid Approach
@@ -313,7 +313,7 @@ When you improve the workspace, easily update your projects:
 
 ```bash
 # From workspace directory
-./scripts/update-project.sh /path/to/project
+./hack/update-project.sh /path/to/project
 
 # Or use slash command
 /update-project /path/to/project
@@ -358,13 +358,13 @@ The `.claude/` copies are automatically synced since they're in the same repo. J
 ### Adding Your Own Agents
 
 1. Create `agents/my-agent.md` following the format
-2. Run `./scripts/install-user.sh` to install
+2. Run `./hack/install-user.sh` to install
 3. Test with: `@agent-my-agent help with this task`
 
 ### Adding Your Own Commands
 
 1. Create `commands/my_command.md` following the format
-2. Run `./scripts/install-user.sh` to install
+2. Run `./hack/install-user.sh` to install
 3. Test with: `/my_command`
 
 See [PATTERNS.md](docs/PATTERNS.md) for detailed guidelines.

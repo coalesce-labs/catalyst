@@ -4,6 +4,7 @@ category: workflow-discovery
 tools: mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, Read, Write
 model: inherit
 version: 1.0.0
+workspace_only: true
 ---
 
 # Discover Workflows

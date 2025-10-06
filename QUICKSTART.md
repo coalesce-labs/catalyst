@@ -28,7 +28,7 @@ cd ryan-claude-workspace
 ### Step 2: Set Up Thoughts Repository
 
 ```bash
-./scripts/setup-thoughts.sh
+./hack/setup-thoughts.sh
 ```
 
 This will:
@@ -40,7 +40,7 @@ This will:
 ### Step 3: Install Agents & Commands
 
 ```bash
-./scripts/install-user.sh
+./hack/install-user.sh
 ```
 
 This installs agents and commands to `~/.claude/` making them available in **all** Claude Code projects.
@@ -55,7 +55,7 @@ Restart Claude Code to load the new agents and commands.
 
 ```bash
 cd /path/to/your-project
-~/code-repos/ryan-claude-workspace/scripts/init-project.sh . my-project
+~/code-repos/ryan-claude-workspace/hack/init-project.sh . my-project
 ```
 
 This creates:
@@ -133,7 +133,7 @@ Create isolated workspace for a feature:
 
 ```bash
 cd /path/to/your-project
-./scripts/create-worktree.sh ENG-123 main
+./hack/create-worktree.sh ENG-123 main
 ```
 
 This creates:
@@ -175,7 +175,7 @@ Now thoughts sync automatically to GitHub.
 For project-specific customization:
 
 ```bash
-./scripts/install-project.sh /path/to/project
+./hack/install-project.sh /path/to/project
 ```
 
 This installs to `.claude/` in the project (takes precedence over `~/.claude/`).

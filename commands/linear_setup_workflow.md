@@ -1,6 +1,7 @@
 ---
 description: Set up recommended workflow statuses in Linear
 category: project-task-management
+install_once: true
 ---
 
 # Linear Setup Workflow

@@ -4,6 +4,7 @@ category: workflow
 tools: Bash, Read, Write, Edit, Glob, Grep
 model: inherit
 version: 1.0.0
+workspace_only: true
 ---
 
 # Update Project
@@ -53,7 +54,7 @@ Then wait for the user's input.
 **Execute the update script**:
 
 ```bash
-./scripts/update-project.sh /path/to/project
+./hack/update-project.sh /path/to/project
 ```
 
 **The script will**:
@@ -248,7 +249,7 @@ Smooth team synchronization
 Error: Project not initialized
 
 Run this first:
-./scripts/install-project.sh /path/to/project
+./hack/install-project.sh /path/to/project
 ```
 
 **Workspace not found**:
@@ -289,7 +290,7 @@ Review carefully before proceeding.
 ```bash
 # From workspace
 for project in ~/code-repos/*/; do
-    ./scripts/update-project.sh "$project"
+    ./hack/update-project.sh "$project"
 done
 ```
 
@@ -374,12 +375,12 @@ Update complete. Review changes and commit.
 
 ## Files Modified
 
-**Script**: `scripts/update-project.sh`
+**Script**: `hack/update-project.sh`
 **Metadata**: `.claude/.workspace-metadata.json` (in project)
 **Backup**: `.claude-backup-{timestamp}/` (temporary)
 
 ## See Also
 
 - `/workflow-help` - Learn about complete workflows
-- `scripts/install-project.sh` - Initial project installation
+- `hack/install-project.sh` - Initial project installation
 - `docs/AGENTIC_WORKFLOW_GUIDE.md` - Workflow best practices

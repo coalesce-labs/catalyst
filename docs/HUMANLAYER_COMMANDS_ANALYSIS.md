@@ -285,7 +285,7 @@ cp ~/code-repos/humanlayer/.claude/commands/resume_handoff.md commands/
 
 # Minor edit: Remove HumanLayer-specific script reference
 # In create_handoff.md, remove or adapt:
-#   - Run the `scripts/spec_metadata.sh` script
+#   - Run the `hack/spec_metadata.sh` script
 # Replace with:
 #   - Get current git info for metadata
 ```

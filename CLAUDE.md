@@ -64,19 +64,19 @@ This workspace has no build process - it's markdown files and bash scripts.
 
 **User installation** (all projects):
 ```bash
-./scripts/install-user.sh
+./hack/install-user.sh
 ```
 Copies to `~/.claude/`
 
 **Project installation** (specific project):
 ```bash
-./scripts/install-project.sh /path/to/project
+./hack/install-project.sh /path/to/project
 ```
 Copies to `/path/to/project/.claude/`
 
 **Updating projects** (smart merge):
 ```bash
-./scripts/update-project.sh /path/to/project
+./hack/update-project.sh /path/to/project
 # Or use: /update-project /path/to/project
 ```
 Intelligently merges workspace updates while preserving local customizations.
@@ -137,7 +137,7 @@ ryan-claude-workspace/
 │   ├── create_handoff.md
 │   ├── resume_handoff.md
 │   └── workflow_help.md
-├── scripts/                 # Installation and setup scripts
+├── hack/                 # Installation and setup scripts
 │   ├── install-user.sh           # Install to ~/.claude/
 │   ├── install-project.sh        # Install to project .claude/
 │   ├── update-project.sh         # Smart update with merge
@@ -218,7 +218,7 @@ ryan-claude-workspace/
 
 Create isolated workspace for parallel work:
 ```bash
-./scripts/create-worktree.sh PROJ-123 feature-name
+./hack/create-worktree.sh PROJ-123 feature-name
 ```
 
 This creates:
@@ -297,7 +297,7 @@ Use `/validate-frontmatter` to check consistency.
 **Installation:**
 The thoughts system requires HumanLayer CLI. Setup with:
 ```bash
-./scripts/setup-thoughts.sh
+./hack/setup-thoughts.sh
 ```
 
 ## Update Strategy
@@ -309,7 +309,7 @@ The thoughts system requires HumanLayer CLI. Setup with:
 3. Commit to workspace
 4. Update other projects:
    ```bash
-   ./scripts/update-project.sh /path/to/project
+   ./hack/update-project.sh /path/to/project
    ```
 5. Smart merge preserves local customizations
 
@@ -414,7 +414,7 @@ TICKET_PREFIX=$(jq -r '.project.ticketPrefix // "PROJ"' "$CONFIG_FILE")
 
 **Testing installation:**
 ```bash
-./scripts/install-user.sh
+./hack/install-user.sh
 ls ~/.claude/agents/
 ls ~/.claude/commands/
 ```
@@ -424,7 +424,7 @@ ls ~/.claude/commands/
 **Installing to a new project:**
 ```bash
 cd /path/to/new-project
-/path/to/ryan-claude-workspace/scripts/install-project.sh .
+/path/to/ryan-claude-workspace/hack/install-project.sh .
 ```
 
 **Setting up thoughts:**
@@ -444,7 +444,7 @@ Commit `.claude/` and `thoughts/` to project repo. Team gets:
 
 For consultants working across clients:
 ```bash
-./scripts/setup-multi-config.sh client-name
+./hack/setup-multi-config.sh client-name
 hl-switch client-name
 ```
 

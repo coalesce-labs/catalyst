@@ -4,6 +4,7 @@ category: workflow-discovery
 tools: Read, Write, Edit, mcp__deepwiki__ask_question
 model: inherit
 version: 1.0.0
+workspace_only: true
 ---
 
 # Import Workflow

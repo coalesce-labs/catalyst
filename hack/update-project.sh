@@ -8,9 +8,18 @@ WORKSPACE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_DIR="${1:-.}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
+# Source frontmatter utilities
+SCRIPT_DIR="$(dirname "$0")"
+source "$SCRIPT_DIR/frontmatter-utils.sh"
+
 CLAUDE_DIR="$PROJECT_DIR/.claude"
 METADATA_FILE="$CLAUDE_DIR/.workspace-metadata.json"
 BACKUP_DIR="$PROJECT_DIR/.claude-backup-$(date +%Y%m%d-%H%M%S)"
+
+# Check if we're updating the workspace itself
+is_workspace_update() {
+    [[ "$PROJECT_DIR" -ef "$WORKSPACE_DIR" ]]
+}
 
 # Colors for output
 RED='\033[0;31m'
@@ -154,6 +163,23 @@ update_file() {
     local workspace_file="$WORKSPACE_DIR/.claude/$rel_path"
     local project_file="$CLAUDE_DIR/$rel_path"
 
+    # Skip workspace-only and install-once commands unless updating workspace itself
+    if [[ "$rel_path" == commands/* ]] && ! is_workspace_update; then
+        # Check frontmatter from source file, not .claude/ copy
+        local source_file="$WORKSPACE_DIR/$rel_path"
+        if should_skip_on_update "$source_file"; then
+            local reason=""
+            if [[ $(get_frontmatter_bool "$source_file" "workspace_only") == "true" ]]; then
+                reason="workspace-only"
+            elif [[ $(get_frontmatter_bool "$source_file" "install_once") == "true" ]]; then
+                reason="install-once"
+            fi
+            echo -e "   ○ Skipped: $rel_path ($reason)"
+            ((SKIPPED++))
+            return 0
+        fi
+    fi
+
     # Get checksums
     local workspace_checksum=$(calculate_checksum "$workspace_file")
     local project_checksum=$(calculate_checksum "$project_file")
@@ -280,7 +306,7 @@ main() {
 
     if [[ ! -d "$CLAUDE_DIR" ]]; then
         echo -e "${RED}Error: Project .claude/ directory not found${NC}"
-        echo "Run ./scripts/install-project.sh first to install workspace"
+        echo "Run ./hack/install-project.sh first to install workspace"
         exit 1
     fi
 

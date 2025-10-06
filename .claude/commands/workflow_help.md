@@ -217,7 +217,7 @@ WAIT for all tasks.
 **How**:
 
 \`\`\`bash
-./scripts/create-worktree.sh PROJ-123 feature-name
+./hack/create-worktree.sh PROJ-123 feature-name
 cd ~/wt/{project}/PROJ-123-feature
 \`\`\`
 

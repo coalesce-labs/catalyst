@@ -8,8 +8,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(dirname "$SCRIPT_DIR")"
 PROJECT_DIR="${1:-.}"
 
+# Source frontmatter utilities
+source "$SCRIPT_DIR/frontmatter-utils.sh"
+
 # Resolve to absolute path
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+
+# Check if we're installing into the workspace itself
+is_workspace_install() {
+    [[ "$PROJECT_DIR" -ef "$WORKSPACE_DIR" ]]
+}
 
 echo "🚀 Installing Ryan's Claude Workspace to project"
 echo ""
@@ -36,13 +44,27 @@ done
 echo ""
 echo "📋 Installing commands..."
 COMMAND_COUNT=0
+SKIPPED_COUNT=0
 for command in "$WORKSPACE_DIR/commands"/*.md; do
     if [ -f "$command" ]; then
+        filename=$(basename "$command")
+
+        # Skip workspace-only commands unless installing to workspace itself
+        if ! is_workspace_install && should_skip_on_install "$command"; then
+            echo "  ○ Skipped: $filename (workspace-only)"
+            SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+            continue
+        fi
+
         cp "$command" "$PROJECT_DIR/.claude/commands/"
         COMMAND_COUNT=$((COMMAND_COUNT + 1))
         echo "  ✓ $(basename "$command")"
     fi
 done
+
+if [[ $SKIPPED_COUNT -gt 0 ]]; then
+    echo "  (Skipped $SKIPPED_COUNT workspace-only commands)"
+fi
 
 # Install config.json if it exists
 echo ""
@@ -84,7 +106,7 @@ echo "2. Run /linear in Claude Code to configure Linear integration (if needed)"
 echo "3. Restart Claude Code if working in this project"
 echo ""
 echo "📦 To update from workspace later:"
-echo "   From workspace: ./scripts/update-project.sh $PROJECT_DIR"
+echo "   From workspace: ./hack/update-project.sh $PROJECT_DIR"
 echo "   Or in Claude: /update-project $PROJECT_DIR"
 echo ""
 echo "Note: Project .claude/ takes precedence over user ~/.claude/"

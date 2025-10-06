@@ -27,7 +27,7 @@ When this command is invoked:
 3. **Create the worktree**:
    Use the create-worktree.sh script:
    ```bash
-   ./scripts/create-worktree.sh <worktree_name> [base_branch]
+   ./hack/create-worktree.sh <worktree_name> [base_branch]
    ```
 
    Or if the script is not available in the current project:

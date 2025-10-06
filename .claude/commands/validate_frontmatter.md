@@ -4,6 +4,7 @@ category: workflow-discovery
 tools: Read, Edit, Glob, Grep
 model: inherit
 version: 1.0.0
+workspace_only: true
 ---
 
 # Validate Frontmatter

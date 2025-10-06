@@ -898,10 +898,10 @@ EOF
 **2. Install to Project**
 ```bash
 # Install to project for testing
-./scripts/install-project.sh /path/to/test-project
+./hack/install-project.sh /path/to/test-project
 
 # Or install to user directory
-./scripts/install-user.sh
+./hack/install-user.sh
 ```
 
 **3. Invoke and Test**
@@ -947,7 +947,7 @@ EOF
 
 **2. Install and Invoke**
 ```bash
-./scripts/install-user.sh
+./hack/install-user.sh
 
 # In Claude Code
 /test_command
