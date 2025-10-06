@@ -23,9 +23,14 @@ echo "📋 Installing agents..."
 AGENT_COUNT=0
 for agent in "$WORKSPACE_DIR/agents"/*.md; do
     if [ -f "$agent" ]; then
+        filename=$(basename "$agent")
+        # Skip README.md - it's documentation, not an agent
+        if [ "$filename" = "README.md" ]; then
+            continue
+        fi
         cp "$agent" "$USER_CLAUDE_DIR/agents/"
         AGENT_COUNT=$((AGENT_COUNT + 1))
-        echo "  ✓ $(basename "$agent")"
+        echo "  ✓ $filename"
     fi
 done
 
@@ -35,9 +40,14 @@ echo "📋 Installing commands..."
 COMMAND_COUNT=0
 for command in "$WORKSPACE_DIR/commands"/*.md; do
     if [ -f "$command" ]; then
+        filename=$(basename "$command")
+        # Skip README.md - it's documentation, not a command
+        if [ "$filename" = "README.md" ]; then
+            continue
+        fi
         cp "$command" "$USER_CLAUDE_DIR/commands/"
         COMMAND_COUNT=$((COMMAND_COUNT + 1))
-        echo "  ✓ $(basename "$command")"
+        echo "  ✓ $filename"
     fi
 done
 

@@ -353,6 +353,10 @@ main() {
     for agent_file in "$WORKSPACE_DIR/.claude/agents"/*.md; do
         if [[ -f "$agent_file" ]]; then
             local filename=$(basename "$agent_file")
+            # Skip README.md - it's documentation, not an agent
+            if [[ "$filename" = "README.md" ]]; then
+                continue
+            fi
             update_file "agents/$filename"
         fi
     done
@@ -363,6 +367,10 @@ main() {
     for command_file in "$WORKSPACE_DIR/.claude/commands"/*.md; do
         if [[ -f "$command_file" ]]; then
             local filename=$(basename "$command_file")
+            # Skip README.md - it's documentation, not a command
+            if [[ "$filename" = "README.md" ]]; then
+                continue
+            fi
             update_file "commands/$filename"
         fi
     done

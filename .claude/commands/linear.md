@@ -7,65 +7,13 @@ category: project-task-management
 
 You are tasked with managing Linear tickets, including creating tickets from thoughts documents, updating existing tickets, and following a structured workflow.
 
-## ⚠️ FIRST-TIME SETUP REQUIRED
-
-**Before using this command for the first time**, you need to configure it for your Linear workspace.
-
-Run this configuration check:
-1. Check if this file contains `[NEEDS_SETUP]` markers
-2. If yes, prompt the user for configuration and update this file
-3. If no, proceed with normal operation
-
-### Configuration Prompts
-
-If `[NEEDS_SETUP]` markers are found, ask the user:
-
-```
-This Linear command needs one-time configuration. I'll help you set it up.
-
-1. What's your Linear team ID?
-   (Find it with: mcp__linear__list_teams)
-   Team ID:
-
-2. What's your default project ID (or leave blank for none)?
-   (Find it with: mcp__linear__list_projects after selecting team)
-   Project ID:
-
-3. What's your thoughts repository URL pattern?
-   For coalesce-labs: https://github.com/coalesce-labs/thoughts/blob/main
-   Your pattern:
-
-Once you provide these, I'll update this command file and remove this setup prompt.
-You'll need to commit the changes so others on your team can use it too.
-```
-
-After getting responses, update this file:
-- Replace `[NEEDS_SETUP:TEAM_ID]` with the actual team ID
-- Replace `[NEEDS_SETUP:PROJECT_ID]` with the project ID (or remove if not used)
-- Replace `[NEEDS_SETUP:THOUGHTS_URL]` with the URL pattern
-- Remove this setup section entirely
-
-Then inform the user:
-```
-✅ Configuration complete! I've updated the linear.md file.
-
-Please commit this change:
-  git add .claude/commands/linear.md
-  git commit -m "Configure Linear command for this project"
-
-Now you can use /linear normally!
-```
-
----
-
-## Configuration (Edit these values)
+## Configuration
 
 ```javascript
-// [NEEDS_SETUP] - Remove this line after configuration
 const LINEAR_CONFIG = {
-  teamId: "[NEEDS_SETUP:TEAM_ID]",  // Your Linear team ID
-  defaultProjectId: "[NEEDS_SETUP:PROJECT_ID]",  // Default project ID (optional)
-  thoughtsRepoUrl: "[NEEDS_SETUP:THOUGHTS_URL]",  // e.g., "https://github.com/org/thoughts/blob/main"
+  teamId: "e7e703c4-13a8-42d4-97c1-25e342618f25",  // Ryans Claude Workspace
+  defaultProjectId: null,  // Default project ID (optional)
+  thoughtsRepoUrl: "https://github.com/coalesce-labs/thoughts/blob/main",
   reposPath: "repos",  // Path in thoughts repo to project-specific thoughts
   user: "your-name"  // Your username in thoughts (will be detected from thoughts config)
 };

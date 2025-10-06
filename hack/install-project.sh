@@ -34,9 +34,14 @@ echo "📋 Installing agents..."
 AGENT_COUNT=0
 for agent in "$WORKSPACE_DIR/agents"/*.md; do
     if [ -f "$agent" ]; then
+        filename=$(basename "$agent")
+        # Skip README.md - it's documentation, not an agent
+        if [ "$filename" = "README.md" ]; then
+            continue
+        fi
         cp "$agent" "$PROJECT_DIR/.claude/agents/"
         AGENT_COUNT=$((AGENT_COUNT + 1))
-        echo "  ✓ $(basename "$agent")"
+        echo "  ✓ $filename"
     fi
 done
 
@@ -49,6 +54,11 @@ for command in "$WORKSPACE_DIR/commands"/*.md; do
     if [ -f "$command" ]; then
         filename=$(basename "$command")
 
+        # Skip README.md - it's documentation, not a command
+        if [ "$filename" = "README.md" ]; then
+            continue
+        fi
+
         # Skip workspace-only commands unless installing to workspace itself
         if ! is_workspace_install && should_skip_on_install "$command"; then
             echo "  ○ Skipped: $filename (workspace-only)"
@@ -58,7 +68,7 @@ for command in "$WORKSPACE_DIR/commands"/*.md; do
 
         cp "$command" "$PROJECT_DIR/.claude/commands/"
         COMMAND_COUNT=$((COMMAND_COUNT + 1))
-        echo "  ✓ $(basename "$command")"
+        echo "  ✓ $filename"
     fi
 done
 
