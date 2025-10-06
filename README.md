@@ -25,7 +25,7 @@ Based on Anthropic's context engineering principles:
 
 ```bash
 # Initialize your central thoughts repository
-./scripts/setup-thoughts.sh
+./hack/setup-thoughts.sh
 
 # This creates:
 # ~/thoughts/
@@ -37,10 +37,14 @@ Based on Anthropic's context engineering principles:
 
 ```bash
 # Install to user directory (available in all projects)
-./scripts/install-user.sh
+./hack/install-user.sh
 
 # Or install to specific project
-./scripts/install-project.sh /path/to/project
+./hack/install-project.sh /path/to/project
+
+# Later, update project from workspace (preserves customizations!)
+./hack/update-project.sh /path/to/project
+# Or use slash command: /update-project /path/to/project
 ```
 
 ### 3. Initialize a Project
@@ -64,7 +68,7 @@ ryan-init-project my-project
 
 ```bash
 # In your main repository
-./scripts/create-worktree.sh ENG-123 feature-name
+./hack/create-worktree.sh ENG-123 feature-name
 
 # This creates an isolated workspace with:
 # - Git worktree at ~/wt/my-project/feature-name
@@ -73,42 +77,102 @@ ryan-init-project my-project
 # - All dependencies installed
 ```
 
-## Workflow
+## Complete Development Workflow
 
-### Research & Planning
+### 1. Research Phase
 
 ```bash
-# In Claude Code
-/create_plan
+# Start by researching the codebase
+/research-codebase
+
+# Prompt: "How does authentication work in the API?"
 
 # This:
-# 1. Spawns parallel research agents (codebase-locator, thoughts-locator)
-# 2. Interactively builds a comprehensive plan
-# 3. Saves to thoughts/shared/plans/YYYY-MM-DD-description.md
+# 1. Spawns parallel sub-agents (codebase-locator, codebase-analyzer, pattern-finder)
+# 2. Documents what EXISTS (not what should exist)
+# 3. Synthesizes findings with file:line references
+# 4. Saves to thoughts/shared/research/YYYY-MM-DD-description.md
 ```
 
-### Implementation
+**Output**: Comprehensive research document explaining current system state
+
+### 2. Planning Phase
 
 ```bash
-/implement_plan thoughts/shared/plans/2025-01-08-feature.md
+# Create implementation plan based on research
+/create-plan
+
+# Can reference research: "Create a plan based on thoughts/shared/research/2025-01-08-auth.md"
 
 # This:
-# 1. Reads the full plan
-# 2. Implements each phase
-# 3. Runs automated verification
+# 1. Reads research documents and ticket files fully
+# 2. Spawns parallel research agents to understand current state
+# 3. Interactively builds comprehensive plan with user
+# 4. Includes automated AND manual success criteria
+# 5. Saves to thoughts/shared/plans/YYYY-MM-DD-PROJ-XXX-description.md
+```
+
+**Output**: Detailed implementation plan with phases and verification steps
+
+### 3. Implementation Phase
+
+```bash
+# Execute the approved plan in a worktree
+/implement-plan thoughts/shared/plans/2025-01-08-PROJ-123-feature.md
+
+# This:
+# 1. Reads the full plan (no partial reads!)
+# 2. Implements each phase sequentially
+# 3. Runs automated verification after each phase
 # 4. Updates checkboxes as work completes
+# 5. Asks before moving to next phase
 ```
 
-### Validation
+**Output**: Code changes with passing tests
+
+### 4. Validation Phase
 
 ```bash
-/validate_plan
+/validate-plan
 
 # This:
 # 1. Verifies all phases completed
-# 2. Runs automated tests
-# 3. Documents any deviations
+# 2. Runs automated test suites
+# 3. Documents any deviations from plan
 # 4. Provides manual testing steps
+# 5. Confirms success criteria met
+```
+
+**Output**: Validation report confirming implementation
+
+### Complete Flow Example
+
+```bash
+# 1. Research existing authentication system
+/research-codebase
+> "How does authentication currently work?"
+→ thoughts/shared/research/2025-01-08-auth-system.md
+
+# 2. Create plan to add OAuth support
+/create-plan
+> Reference: thoughts/shared/research/2025-01-08-auth-system.md
+> Task: Add OAuth2 authentication
+→ thoughts/shared/plans/2025-01-08-PROJ-456-oauth-support.md
+
+# 3. Create worktree and implement
+./hack/create-worktree.sh PROJ-456 oauth-support
+cd ~/wt/my-project/oauth-support
+/implement-plan thoughts/shared/plans/2025-01-08-PROJ-456-oauth-support.md
+→ Code changes + tests
+
+# 4. Validate implementation
+/validate-plan
+→ All tests pass, manual verification steps listed
+
+# 5. Commit and create PR
+/commit
+gh pr create --fill
+/describe-pr
 ```
 
 ## Directory Structure
@@ -125,7 +189,7 @@ ryan-claude-workspace/
 │   ├── implement_plan.md
 │   ├── validate_plan.md
 │   └── create_worktree.md
-├── scripts/                 # Setup and installation scripts
+├── hack/                 # Setup and installation scripts
 │   ├── setup-thoughts.sh
 │   ├── install-user.sh
 │   ├── install-project.sh
@@ -153,13 +217,24 @@ Agents are specialized AI experts that Claude Code can delegate to:
 
 Commands are workflows you invoke with `/command_name`:
 
-- **/create_plan** - Interactive planning with research
-- **/implement_plan** - Execute approved plans
-- **/validate_plan** - Verify implementation
-- **/create_worktree** - Set up parallel work environment
+**Development Workflow:**
+- **/research-codebase** - Document existing system with parallel sub-agents
+- **/create-plan** - Interactive planning with research
+- **/implement-plan** - Execute approved plans
+- **/validate-plan** - Verify implementation
+
+**Workflow Discovery:**
+- **/discover-workflows** - Research external Claude Code repositories
+- **/import-workflow** - Import and adapt external workflows
+- **/create-workflow** - Create new agents/commands with templates
+- **/validate-frontmatter** - Ensure frontmatter consistency
+
+**Utilities:**
+- **/create-worktree** - Set up parallel work environment
 - **/commit** - Create well-structured git commits
-- **/describe_pr** - Generate comprehensive PR descriptions
+- **/describe-pr** - Generate comprehensive PR descriptions
 - **/debug** - Investigate logs, database, and git state
+- **/linear** - Linear ticket integration (if configured)
 
 ### Thoughts System
 
@@ -198,7 +273,7 @@ Benefits:
 Installs to `~/.claude/` - available in all projects:
 
 ```bash
-./scripts/install-user.sh
+./hack/install-user.sh
 ```
 
 ### Project Installation
@@ -206,7 +281,7 @@ Installs to `~/.claude/` - available in all projects:
 Installs to `.claude/` in a specific project:
 
 ```bash
-./scripts/install-project.sh /path/to/project
+./hack/install-project.sh /path/to/project
 ```
 
 ### Hybrid Approach
@@ -232,18 +307,64 @@ ryan-init-project new-project
 
 The thoughts system automatically syncs context across all your worktrees.
 
+## Updating Projects from Workspace
+
+When you improve the workspace, easily update your projects:
+
+```bash
+# From workspace directory
+./hack/update-project.sh /path/to/project
+
+# Or use slash command
+/update-project /path/to/project
+```
+
+**Smart updating**:
+- ✅ Preserves local customizations (config values, configured commands)
+- ✅ Intelligently merges config.json (workspace structure + local values)
+- ✅ Auto-updates agents (pure logic, no customization)
+- ✅ Prompts for conflicts (you decide what to keep)
+- ✅ Creates backups automatically
+- ✅ Tracks versions and detects drift
+
+**Example workflow**:
+1. Improve agents/commands in workspace
+2. Commit workspace changes
+3. Run `update-project.sh` on each project
+4. Local configs preserved, improvements applied
+5. Team shares updates via git
+
+## Using the Workspace on Itself
+
+This workspace "eats its own dog food" - the commands and agents are installed into `.claude/` so you can use them while working on the workspace itself!
+
+**What this means**:
+- You can use `/workflow-help` to learn about workflows
+- You can use `/create-plan` to plan new features
+- You can use `/research-codebase` to understand the workspace structure
+- All agents and commands work on this codebase
+
+**Source vs Installation**:
+- `agents/*.md` - Source files (edit these)
+- `commands/*.md` - Source files (edit these)
+- `.claude/agents/*.md` - Installed copies (used by Claude Code)
+- `.claude/commands/*.md` - Installed copies (used by Claude Code)
+
+**After editing source files**:
+The `.claude/` copies are automatically synced since they're in the same repo. Just restart Claude Code to pick up changes.
+
 ## Customization
 
 ### Adding Your Own Agents
 
 1. Create `agents/my-agent.md` following the format
-2. Run `./scripts/install-user.sh` to install
+2. Run `./hack/install-user.sh` to install
 3. Test with: `@agent-my-agent help with this task`
 
 ### Adding Your Own Commands
 
 1. Create `commands/my_command.md` following the format
-2. Run `./scripts/install-user.sh` to install
+2. Run `./hack/install-user.sh` to install
 3. Test with: `/my_command`
 
 See [PATTERNS.md](docs/PATTERNS.md) for detailed guidelines.

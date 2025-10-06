@@ -247,7 +247,7 @@ hl-switch brkthru
 
 # Create worktree (uses current config)
 cd ~/code-repos/github/brkthru/project
-./scripts/create-worktree.sh ENG-123
+./hack/create-worktree.sh ENG-123
 
 # The worktree automatically uses brkthru thoughts repo
 cd ~/wt/project/ENG-123

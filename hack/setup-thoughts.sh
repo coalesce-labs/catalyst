@@ -127,7 +127,7 @@ echo "   cd /path/to/your-project"
 echo "   humanlayer thoughts init"
 echo ""
 echo "2. Or use the helper script:"
-echo "   ./scripts/init-project.sh /path/to/project project-name"
+echo "   ./hack/init-project.sh /path/to/project project-name"
 echo ""
 echo "3. Optional: Set up remote backup for your thoughts:"
 if [ -f "$CONFIG_FILE" ] && command -v jq &> /dev/null; then

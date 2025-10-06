@@ -12,9 +12,9 @@ When you run workflow commands, the Linear command automatically updates ticket 
 
 | Command | Ticket Status Update |
 |---------|---------------------|
-| `/create_plan` (with ticket) | → **Plan in Progress** |
-| Plan saved & linked | → **Plan in Review** |
-| `/implement_plan` (with ticket) | → **In Dev** |
+| `/research_codebase` (with ticket) | → **Research** |
+| `/create_plan` (with ticket) | → **Planning** |
+| `/implement_plan` (with ticket) | → **In Progress** |
 | `/describe_pr` (with ticket) | → **In Review** |
 | PR merged | → **Done** (manual or via webhook) |
 
@@ -43,84 +43,153 @@ The commands look for tickets in:
 
 ### Recommended Workflow Statuses
 
-Based on HumanLayer's proven workflow:
+Simplified 6-status workflow (Option C):
 
 ```
 1. Backlog → New ideas and requests
-2. Triage → Initial review
-3. Spec Needed → Needs problem statement
-4. Research Needed → Needs investigation
-5. Research in Progress → Active research
-6. Ready for Plan → Research complete
-7. Plan in Progress → Writing plan ← /create_plan
-8. Plan in Review → Plan discussion
-9. Ready for Dev → Plan approved
-10. In Dev → Active coding ← /implement_plan
-11. In Review → PR submitted ← /describe_pr
-12. Done → Complete
+2. Research → Investigation, triage, spec definition ← /research_codebase
+3. Planning → Implementation plans ← /create_plan
+4. In Progress → Active development ← /implement_plan
+5. In Review → Code review ← /describe_pr
+6. Done → Complete
 ```
 
 ### Why This Workflow Works
 
-**Key insight**: Review happens at the **plan stage**, not the PR stage.
+**Key insight**: Review happens at the **planning stage**, not just the PR stage.
 
 **Benefits**:
-- Catch issues during planning, not after coding
-- Faster iteration on approach
-- Less wasted implementation effort
-- Team alignment before work starts
-
-**HumanLayer's experience**:
-> "We move faster and avoid rework by aligning on the plan before writing code."
+- Clear progression from idea to completion
+- Each command moves ticket forward automatically
+- Fewer statuses = less cognitive overhead
+- Maintains review gates (plan review + code review)
 
 ---
 
 ## Setting Up Linear Statuses
 
-### Option 1: Quick Setup (Recommended)
+### Quick Setup (Recommended)
 
-Use HumanLayer's proven statuses:
+Use the `/linear_setup_workflow` command:
 
 ```bash
-# In Linear:
-# 1. Go to Team Settings → Workflow States
-# 2. Create these statuses in order:
-
-Backlog (Backlog category)
-Triage (Unstarted category)
-Spec Needed (Unstarted category)
-Research Needed (Unstarted category)
-Research in Progress (Started category)
-Ready for Plan (Started category)
-Plan in Progress (Started category)
-Plan in Review (Started category)
-Ready for Dev (Started category)
-In Dev (Started category)
-In Review (Started category)
-Done (Completed category)
+/linear_setup_workflow
 ```
 
-### Option 2: Simplified Workflow
+This creates 6 statuses optimized for the workflow commands:
 
-Start simple, add statuses as needed:
+1. **Backlog** (Backlog category) - Gray
+2. **Research** (Unstarted category) - Yellow
+3. **Planning** (Started category) - Yellow
+4. **In Progress** (Started category) - Blue
+5. **In Review** (Started category) - Blue
+6. **Done** (Completed category) - Blue
+
+### Manual Setup
+
+If you prefer to create statuses manually in Linear:
+
+1. Go to Team Settings → Workflow States
+2. Create these 6 statuses in order
+3. Assign to the correct category (Backlog/Unstarted/Started/Completed)
+4. Use the color scheme above for visual clarity
+
+## Complete Workflow Example
+
+Here's how tickets flow through the simplified workflow:
+
+### 1. Create Ticket
+
+```bash
+/linear create "Add OAuth support"
+# Creates in Backlog
+```
+
+### 2. Research Phase
+
+```bash
+/research_codebase PROJ-123
+> "How does authentication currently work?"
+
+# Automatically:
+# - Moves ticket to "Research"
+# - Adds comment: "Starting research: How does authentication currently work?"
+# - Saves research document
+# - Attaches research to ticket
+# - Adds comment: "Research complete! See findings: [link]"
+```
+
+### 3. Planning Phase
+
+```bash
+/create_plan
+# Reference research document
+# User provides task details
+
+# Automatically:
+# - Moves ticket to "Planning"
+# - Creates plan document
+# - Attaches plan to ticket
+# - Stays in "Planning" for team review
+```
+
+### 4. Team Review
 
 ```
-Backlog → To Do → In Progress → In Review → Done
+# Team reviews plan in Linear
+# Discusses in comments
+# When approved, manually move to "In Progress"
+# Or /implement_plan does it automatically
 ```
 
-Then evolve to:
-```
-Backlog → To Do → Planning → In Progress → In Review → Done
+### 5. Implementation Phase
+
+```bash
+/implement_plan thoughts/shared/plans/2025-10-04-PROJ-123-oauth.md
+
+# Automatically:
+# - Moves ticket to "In Progress"
+# - Implements each phase
+# - Updates plan checkboxes
 ```
 
-Eventually:
-```
-Backlog → Triage → Research → Planning → In Progress → Review → Done
+### 6. Code Review Phase
+
+```bash
+/describe_pr
+
+# Automatically:
+# - Moves ticket to "In Review"
+# - Attaches PR to ticket
+# - Adds comment with PR link
 ```
 
-### Option 3: Custom Workflow
+### 7. Completion
 
-Adapt to your team's process! The command is flexible.
+```
+# After PR is merged
+# Manually move to "Done"
+# Or set up Linear webhook automation
+```
+
+## Workflow Progression Summary
+
+```
+Backlog
+  ↓ (create ticket)
+Research
+  ↓ (/research_codebase)
+Planning
+  ↓ (/create_plan)
+Planning (stays for team review)
+  ↓ (team approves or /implement_plan)
+In Progress
+  ↓ (/implement_plan)
+In Review
+  ↓ (/describe_pr)
+Done
+  ↓ (PR merged)
+```
 
 ---
 
@@ -188,14 +257,14 @@ cp ~/ryan-claude-workspace/commands/linear.md .claude/commands/
 2. Command asks: "Is this for a Linear ticket?"
 3. If yes:
    a. Get ticket ID (from user or auto-detect)
-   b. Update ticket status → "Plan in Progress"
-   c. Add comment: "Starting implementation plan"
+   b. Update ticket status → "Planning"
+   c. Add comment: "Creating implementation plan"
 4. Create plan document
 5. Save to thoughts/shared/plans/
 6. When complete:
    a. Attach plan to Linear ticket via links
    b. Add comment with plan summary
-   c. Update ticket status → "Plan in Review"
+   c. Ticket stays in "Planning" for team review
 ```
 
 ### During `/implement_plan`
@@ -205,7 +274,7 @@ cp ~/ryan-claude-workspace/commands/linear.md .claude/commands/
 2. Read plan document
 3. Check plan frontmatter for ticket ID
 4. If ticket found:
-   a. Update ticket status → "In Dev"
+   a. Update ticket status → "In Progress"
    b. Add comment: "Started implementation from plan: [link]"
 5. Implement the plan
 6. Update checkboxes in plan as phases complete
@@ -287,10 +356,10 @@ When you create a worktree for a ticket:
 cd ~/wt/project/PROJ-123
 
 /implement_plan  # Auto-detects PROJ-123 from directory name
-# → Updates Linear ticket to "In Dev"
+# → Updates Linear ticket to "In Progress"
 ```
 
-**Enhancement idea**: Worktree creation could auto-update Linear ticket to "In Dev"
+**Enhancement idea**: Worktree creation could auto-update Linear ticket to "In Progress"
 
 ---
 
@@ -330,7 +399,7 @@ Creates a **complete audit trail**.
 
 When auto-updating ticket status, add a comment explaining:
 ```markdown
-Moving to In Dev
+Moving to In Progress
 
 Starting implementation from plan: thoughts/shared/plans/2025-01-08-auth.md
 
@@ -362,7 +431,7 @@ Adjust as needed!
 
 **Fix**: Manually specify ticket:
 ```bash
-/linear move PROJ-123 "In Dev"
+/linear move PROJ-123 "In Progress"
 ```
 
 ### "Wrong status updated"

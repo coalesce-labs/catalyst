@@ -26,7 +26,7 @@ git clone <your-repo-url> ~/ryan-claude-workspace
 cd ~/ryan-claude-workspace
 
 # Run the thoughts setup script
-./scripts/setup-thoughts.sh
+./hack/setup-thoughts.sh
 ```
 
 This creates:
@@ -56,7 +56,7 @@ Installs to `~/.claude/` - available in all projects:
 
 ```bash
 cd ~/ryan-claude-workspace
-./scripts/install-user.sh
+./hack/install-user.sh
 ```
 
 This creates:
@@ -79,7 +79,7 @@ This creates:
 Installs to `.claude/` in a specific project:
 
 ```bash
-./scripts/install-project.sh /path/to/your-project
+./hack/install-project.sh /path/to/your-project
 ```
 
 **Hybrid Approach**
@@ -637,7 +637,7 @@ Worktrees allow parallel work on different features while sharing the thoughts d
 cd /path/to/main-repository
 
 # Create worktree with ticket number and feature name
-~/ryan-claude-workspace/scripts/create-worktree.sh ENG-1234 rate-limiting
+~/ryan-claude-workspace/hack/create-worktree.sh ENG-1234 rate-limiting
 ```
 
 This creates:
@@ -819,7 +819,7 @@ git commit -m "Fix button styling"
 **Worktree 1 - Major Feature A**
 ```bash
 # Create worktree for feature A
-~/ryan-claude-workspace/scripts/create-worktree.sh ENG-1234 new-dashboard
+~/ryan-claude-workspace/hack/create-worktree.sh ENG-1234 new-dashboard
 
 cd ~/wt/my-app/new-dashboard
 
@@ -832,7 +832,7 @@ cd ~/wt/my-app/new-dashboard
 ```bash
 # Create worktree for feature B (while A is in progress)
 cd ~/projects/my-app
-~/ryan-claude-workspace/scripts/create-worktree.sh ENG-1235 user-settings
+~/ryan-claude-workspace/hack/create-worktree.sh ENG-1235 user-settings
 
 cd ~/wt/my-app/user-settings
 
@@ -1046,7 +1046,7 @@ ls .claude/agents/
 
 # Reinstall if needed
 cd ~/ryan-claude-workspace
-./scripts/install-user.sh
+./hack/install-user.sh
 ```
 
 ### Worktree Thoughts Not Shared
