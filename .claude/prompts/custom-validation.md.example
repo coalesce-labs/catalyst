@@ -1,0 +1,122 @@
+# Custom Validation Rules
+
+Project-specific validation logic for PRs, commits, and workflows.
+
+## PR Validation
+
+### Required Checks
+
+- [ ] PR references a Linear ticket (PROJ-XXX format)
+- [ ] PR has descriptive title (>20 characters)
+- [ ] PR description includes "Test Plan" section
+- [ ] Breaking changes include migration guide
+- [ ] Database changes include rollback plan
+
+### Conditional Checks
+
+If PR changes API contracts:
+- [ ] API documentation updated
+- [ ] Client SDKs notified
+- [ ] Breaking change ADR created
+
+If PR changes database schema:
+- [ ] Migration is reversible
+- [ ] Migration tested on staging data
+- [ ] Backup strategy documented
+
+## Commit Validation
+
+### Format Requirements
+
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+```
+
+### Type Validation
+
+Allowed types:
+- `feat`: New feature
+- `fix`: Bug fix
+- `refactor`: Code refactoring (no behavior change)
+- `docs`: Documentation only
+- `test`: Test additions/fixes
+- `chore`: Build, CI, dependencies
+
+### Scope Validation
+
+Scopes must match project structure:
+- `api`: API changes
+- `frontend`: Frontend changes
+- `database`: Database changes
+- `infrastructure`: Infrastructure/DevOps
+- `docs`: Documentation
+
+Invalid scope → Fail commit or add warning
+
+### Subject Requirements
+
+- Must start with lowercase
+- No period at end
+- Max 72 characters
+- Imperative mood ("add" not "added")
+
+## Workflow Validation
+
+### Before Creating Plan
+
+- [ ] Research document exists for ticket
+- [ ] Research has been reviewed by team
+- [ ] Scope is clearly defined
+- [ ] Success criteria are measurable
+
+### Before Implementation
+
+- [ ] Plan has been approved
+- [ ] All open questions resolved
+- [ ] Dependencies identified
+- [ ] Test strategy defined
+
+### Before PR Creation
+
+- [ ] All phases in plan completed
+- [ ] Automated tests passing
+- [ ] Manual testing completed
+- [ ] Documentation updated
+
+## Custom Rules
+
+Add your project-specific rules here:
+
+### Example: Architecture Decision Records
+
+If PR affects architecture:
+- Create ADR in `docs/adrs/`
+- Reference ADR in PR description
+- Tag with "architecture" label
+
+### Example: Security Changes
+
+If PR touches authentication/authorization:
+- Security team review required
+- Penetration testing on staging
+- Security checklist completed
+
+## Error Messages
+
+Provide helpful messages when validation fails:
+
+```
+❌ Validation failed: No Linear ticket referenced
+
+This project requires all PRs to reference a Linear ticket.
+
+Add ticket reference to PR title or description:
+- PR title: "PROJ-123: Add OAuth support"
+- PR body: "Closes PROJ-123"
+
+Find ticket: /linear list --assignee me
+```

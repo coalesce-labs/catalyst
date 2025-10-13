@@ -1,0 +1,76 @@
+# Issue Classification Rules
+
+This file provides project-specific logic for automatically classifying Linear issues with appropriate labels.
+
+## Custom Keywords
+
+Map keywords in issue title/description to labels:
+
+- "hotfix" → type: bug, priority: urgent
+- "spike" → type: research
+- "tech-debt" → type: refactor
+- "documentation" → type: docs
+- "flaky test" → type: qa
+- "performance" → area: infrastructure
+
+## File Path Detection
+
+Detect area labels based on files changed:
+
+- Files in `src/api/` → area: api
+- Files in `src/web/` → area: frontend
+- Files in `src/database/` → area: database
+- Files in `infrastructure/` → area: infrastructure
+- Files in `docs/` → type: docs
+
+## Scope-Based Classification
+
+Use commit scopes to infer type:
+
+- Scope "feat" → type: feature
+- Scope "fix" → type: bug
+- Scope "refactor" → type: refactor
+- Scope "docs" → type: docs
+- Scope "test" → type: qa
+
+## Special Rules
+
+Apply special labels based on content:
+
+- Issue mentions "breaking change" → add "breaking-change" label
+- Issue mentions "ADR" or "RFC" → add "adr-required" label
+- Issue description <50 characters → add "needs-grooming" label
+- Issue assigned to new contributor → add "good-first-issue" label
+
+## Priority Detection
+
+Infer priority from keywords:
+
+- "urgent", "hotfix", "critical" → Priority: Urgent (1)
+- "important", "high priority" → Priority: High (2)
+- No priority keywords → Priority: Medium (3) - default
+- "nice to have", "low priority" → Priority: Low (4)
+
+## Confidence Scoring
+
+Classification confidence levels:
+
+- **High confidence** (>80%): Apply labels automatically
+- **Medium confidence** (50-80%): Apply labels, add "needs-grooming" for review
+- **Low confidence** (<50%): Don't apply labels, add "needs-grooming" for manual classification
+
+## Usage
+
+This prompt is referenced in `.claude/config.json`:
+
+```json
+{
+  "linear": {
+    "labels": {
+      "classificationPrompt": ".claude/prompts/classify-issue.md"
+    }
+  }
+}
+```
+
+Commands read this file and use the rules to classify issues intelligently.
