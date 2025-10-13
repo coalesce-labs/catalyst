@@ -164,6 +164,138 @@ Before considering complete, test:
 - [ ] Personal config: Create `.claude/config.local.json`, verify merge
 - [ ] Prompts: Copy example, reference in config, verify command reads it
 
+## Linear Issues to Create
+
+When using this workspace in an actual project (with Linear configured), create these tracking issues:
+
+### Issue 1: Phase 6 - Documentation Updates
+**Title**: Update documentation for centralized config system
+
+**Description**:
+Update documentation to reflect the new centralized configuration approach and remove references to embedded config patterns.
+
+**Tasks**:
+- [ ] Update `docs/LINEAR_WORKFLOW_AUTOMATION.md` - remove embedded config references
+- [ ] Update `docs/CONFIGURATION.md` - add three-tier system documentation
+- [ ] Update `CLAUDE.md` - configuration system section
+- [ ] Update `commands/README.md` - config reading examples
+- [ ] Update `commands/linear/README.md` - setup section
+- [ ] Update `QUICKSTART.md` - prerequisites and configuration
+- [ ] Create `docs/MIGRATION_EMBEDDED_TO_CENTRALIZED.md` - migration guide
+
+**Estimated effort**: 3-4 hours
+**Priority**: Medium (3)
+**Labels**: type: docs
+
+---
+
+### Issue 2: Phase 7-8 - Command Updates for Context Tracking
+**Title**: Add context tracking and prerequisite checks to workflow commands
+
+**Description**:
+Update 6 workflow and handoff commands to use the new workflow-context.sh and check-prerequisites.sh scripts.
+
+**Tasks**:
+
+Context tracking additions:
+- [ ] Update `commands/workflow/research_codebase.md` - track research docs
+- [ ] Update `commands/workflow/create_plan.md` - track plan docs
+- [ ] Update `commands/workflow/implement_plan.md` - auto-find plans from context
+- [ ] Update `commands/handoff/create_handoff.md` - track handoffs
+- [ ] Update `commands/handoff/resume_handoff.md` - auto-find handoffs
+- [ ] Update `commands/linear/create_pr.md` - track PRs
+
+Prerequisite checks:
+- [ ] Add prerequisite check to all 6 commands above
+
+**Code snippets**:
+```bash
+# Context tracking
+if [[ -f "./hack/workflow-context.sh" ]]; then
+  ./hack/workflow-context.sh add <type> "$DOC_PATH" "${TICKET_ID:-null}"
+fi
+
+# Prerequisites
+if [[ -f "./hack/check-prerequisites.sh" ]]; then
+  ./hack/check-prerequisites.sh || exit 1
+fi
+```
+
+**Estimated effort**: 2-3 hours
+**Priority**: Medium (3)
+**Labels**: type: feature, area: workflow
+
+---
+
+### Issue 3: Phase 9-10 - Comprehensive User Guides
+**Title**: Create comprehensive developer and project setup guides
+
+**Description**:
+Create two comprehensive documentation files for end users and project owners.
+
+**Tasks**:
+
+DEVELOPER_GUIDE.md (~800-1000 lines):
+- [ ] Complete command reference (all 20 commands)
+- [ ] Full workflow walkthrough
+- [ ] Linear integration behavior documentation
+- [ ] Context management guide
+- [ ] Personal configuration examples
+- [ ] Troubleshooting section
+
+PROJECT_SETUP_GUIDE.md (~500-700 lines):
+- [ ] Installation checklist
+- [ ] Linear setup guide
+- [ ] Team onboarding checklist
+- [ ] Configuration reference
+- [ ] Customization guide
+
+**Estimated effort**: 4-6 hours
+**Priority**: Medium (3)
+**Labels**: type: docs
+
+---
+
+### Issue 4: Phase 12 - Plugin Marketplace Packaging
+**Title**: Package workspace as Claude Code plugin for marketplace distribution
+
+**Description**:
+Research and implement packaging of ryan-claude-workspace as a Claude Code plugin for distribution via Anthropic's plugin marketplace.
+
+**Research Tasks**:
+- [ ] Review Claude Code plugin marketplace documentation
+- [ ] Understand plugin manifest format
+- [ ] Identify packaging requirements
+- [ ] Understand update/versioning mechanism
+- [ ] Determine user installation flow
+
+**Implementation Tasks**:
+- [ ] Create plugin manifest
+- [ ] Package agents, commands, configs
+- [ ] Implement version management
+- [ ] Add installation hooks (for config setup)
+- [ ] Test plugin installation flow
+- [ ] Submit to marketplace (if applicable)
+
+**Documentation Tasks**:
+- [ ] Document how users install via marketplace
+- [ ] Document how to keep plugin updated
+- [ ] Document how to customize post-install
+- [ ] Update README with marketplace install option
+
+**References**:
+- Anthropic Docs: https://docs.claude.com/en/docs/claude-code/plugin-marketplaces
+- Current install method: `./hack/install-project.sh` (manual)
+- Target: One-click install from marketplace
+
+**Estimated effort**: 20-30 hours
+**Priority**: Low (4) - Nice to have, not blocking
+**Labels**: type: feature, area: infrastructure
+
+**Note**: This is deferred until Claude Code plugin marketplace matures. Manual installation works well for current use.
+
+---
+
 ## Notes
 
 Context usage during implementation: ~60% (120K/200K tokens)
