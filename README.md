@@ -169,37 +169,87 @@ cd ~/wt/my-project/oauth-support
 /validate-plan
 → All tests pass, manual verification steps listed
 
-# 5. Commit and create PR
+# 5. Create PR with full automation
+/commit              # Conventional commits with auto-detection
+/create-pr           # Auto-rebase, create PR, generate description, link Linear
+/describe-pr         # Update description after code review changes
+/merge-pr            # Safe merge with verification, auto-cleanup
+```
+
+### PR Lifecycle (New!)
+
+Complete automation from commit to merge:
+
+```bash
+# Make changes
 /commit
-gh pr create --fill
+# → Conventional commits (feat/fix/docs/etc)
+# → Auto-detects type and scope
+# → Extracts ticket from branch
+
+/create-pr
+# → Auto-rebases if behind main
+# → Creates PR with ticket-based title
+# → Generates comprehensive description
+# → Linear: ticket → In Review (assigned to you)
+
+# Code review, push more commits...
+
 /describe-pr
+# → Incremental update (preserves manual edits)
+# → Appends new changes
+# → Reruns verification checks
+
+/merge-pr
+# → Runs tests automatically
+# → Squash merges (always)
+# → Deletes branches (always)
+# → Linear: ticket → Done
 ```
 
 ## Directory Structure
 
 ```
 ryan-claude-workspace/
-├── agents/                  # Specialized Claude agents
+├── agents/                  # Specialized research agents
+│   ├── README.md            # Agent documentation
 │   ├── codebase-locator.md
 │   ├── codebase-analyzer.md
+│   ├── codebase-pattern-finder.md
 │   ├── thoughts-locator.md
-│   └── ...
+│   ├── thoughts-analyzer.md
+│   └── external-research.md
 ├── commands/                # Slash commands for workflows
+│   ├── README.md            # Command documentation and types
+│   ├── research_codebase.md
 │   ├── create_plan.md
 │   ├── implement_plan.md
 │   ├── validate_plan.md
-│   └── create_worktree.md
-├── hack/                 # Setup and installation scripts
-│   ├── setup-thoughts.sh
-│   ├── install-user.sh
-│   ├── install-project.sh
-│   └── create-worktree.sh
-├── docs/                    # Documentation and guides
-│   ├── USAGE.md
-│   ├── BEST_PRACTICES.md
-│   ├── PATTERNS.md
-│   └── CONTEXT_ENGINEERING.md
-└── README.md
+│   ├── linear.md
+│   ├── create_worktree.md
+│   └── ... (18 total)
+├── hack/                    # Installation & setup scripts
+│   ├── README.md            # Script documentation and workflows
+│   ├── install-user.sh      # Install globally
+│   ├── install-project.sh   # Install to project
+│   ├── update-project.sh    # Smart update with merging
+│   ├── setup-thoughts.sh    # Initialize thoughts system
+│   ├── create-worktree.sh   # Create git worktree
+│   └── ... (12 total)
+├── docs/                    # Comprehensive guides
+│   ├── README.md            # Documentation index
+│   ├── USAGE.md             # Usage guide
+│   ├── CONFIGURATION.md     # Configuration system
+│   ├── LINEAR_WORKFLOW_AUTOMATION.md
+│   ├── AGENTIC_WORKFLOW_GUIDE.md
+│   └── ... (12 total)
+├── .claude/                 # Working installation (dogfooding)
+│   ├── agents/              # Installed agent copies
+│   ├── commands/            # Installed command copies
+│   └── config.json          # Configuration template
+├── README.md                # This file
+├── QUICKSTART.md            # 5-minute setup guide
+└── CLAUDE.md                # Instructions for Claude Code
 ```
 
 ## Key Concepts
@@ -261,10 +311,25 @@ Benefits:
 
 ## Documentation
 
-- [Usage Guide](docs/USAGE.md) - Detailed usage instructions
-- [Best Practices](docs/BEST_PRACTICES.md) - Patterns that work
-- [Agent Patterns](docs/PATTERNS.md) - Creating effective agents
-- [Context Engineering](docs/CONTEXT_ENGINEERING.md) - Managing context effectively
+### Quick Links
+
+- **[hack/README.md](hack/README.md)** - Installation scripts, setup workflows, troubleshooting
+- **[commands/README.md](commands/README.md)** - Command types, frontmatter, installation behavior
+- **[agents/README.md](agents/README.md)** - Agent philosophy, specializations, usage patterns
+- **[docs/README.md](docs/README.md)** - Complete documentation index and guide
+
+### Essential Guides
+
+- [docs/USAGE.md](docs/USAGE.md) - Comprehensive usage guide
+- [docs/BEST_PRACTICES.md](docs/BEST_PRACTICES.md) - Recommended workflows and patterns
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) - Configuration system details
+- [docs/AGENTIC_WORKFLOW_GUIDE.md](docs/AGENTIC_WORKFLOW_GUIDE.md) - Agent patterns and best practices
+- [docs/CONTEXT_ENGINEERING.md](docs/CONTEXT_ENGINEERING.md) - Context management strategies
+- [docs/LINEAR_WORKFLOW_AUTOMATION.md](docs/LINEAR_WORKFLOW_AUTOMATION.md) - Linear integration guide
+
+### All Documentation
+
+See [docs/README.md](docs/README.md) for the complete documentation index organized by category (Setup, Workflow, Integrations, Technical).
 
 ## Installation Modes
 
@@ -283,6 +348,22 @@ Installs to `.claude/` in a specific project:
 ```bash
 ./hack/install-project.sh /path/to/project
 ```
+
+**What gets installed:**
+- All 6 agents
+- 13 portable commands (excludes 5 workspace-only commands)
+- Configuration template
+- Metadata for version tracking
+- **Note**: README.md files are excluded (they're documentation, not agents/commands)
+
+**Workspace-only commands** (excluded from project installs):
+- `/validate-frontmatter` - Workspace validation
+- `/update-project` - Workspace management
+- `/discover-workflows` - Workflow catalog building
+- `/import-workflow` - Import to workspace
+- `/create-workflow` - Create in workspace
+
+See [commands/README.md](commands/README.md) for details on command types.
 
 ### Hybrid Approach
 
