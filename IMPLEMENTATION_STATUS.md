@@ -1,8 +1,7 @@
 # Implementation Status: RCW-13 Config Migration & Workflow Enhancements
 
-**Date**: 2025-10-13
-**Branch**: `ryan/rcw-13-implement-pr-lifecycle-commands-with-linear-integration`
-**Plans**:
+**Date**: 2025-10-13 **Branch**:
+`ryan/rcw-13-implement-pr-lifecycle-commands-with-linear-integration` **Plans**:
 
 - Base: `thoughts/shared/plans/2025-10-13-config-migration-embedded-to-centralized.md`
 - Supplement: `thoughts/shared/plans/2025-10-13-workflow-enhancements-supplement.md`
@@ -59,8 +58,7 @@
 
 ### ⏸️ Phase 6: Documentation Updates
 
-**Status**: DEFERRED - Large scope, not blocking
-**Needs**:
+**Status**: DEFERRED - Large scope, not blocking **Needs**:
 
 - Update `docs/LINEAR_WORKFLOW_AUTOMATION.md` - remove embedded config refs
 - Update `docs/CONFIGURATION.md` - add three-tier system
@@ -70,12 +68,12 @@
 - Update `QUICKSTART.md` - prerequisites and config
 - Create `docs/MIGRATION_EMBEDDED_TO_CENTRALIZED.md` - migration guide
 
-**Reason for deferral**: Extensive documentation updates, can be done separately without blocking functionality.
+**Reason for deferral**: Extensive documentation updates, can be done separately without blocking
+functionality.
 
 ### ⏸️ Phases 9-10: Comprehensive Documentation
 
-**Status**: DEFERRED - Very large scope
-**Needs**:
+**Status**: DEFERRED - Very large scope **Needs**:
 
 - Phase 9: Create `docs/DEVELOPER_GUIDE.md` (~800-1000 lines)
   - Complete command reference (all 20 commands)
@@ -88,12 +86,12 @@
   - Team onboarding checklist
   - Configuration reference
 
-**Reason for deferral**: 1300+ lines of comprehensive documentation. Better done in dedicated documentation session.
+**Reason for deferral**: 1300+ lines of comprehensive documentation. Better done in dedicated
+documentation session.
 
 ### ⏸️ Phase 12: Plugin Marketplace
 
-**Status**: DEFERRED - Research needed
-**Needs**:
+**Status**: DEFERRED - Research needed **Needs**:
 
 - Create Linear issue to track plugin marketplace packaging work
 - Research Claude Code plugin marketplace maturity
@@ -103,9 +101,8 @@
 
 ## ✅ Command Updates (Phases 7-8) - COMPLETE
 
-**Status**: ✅ COMPLETE - All 6 commands updated
-**Linear**: COA-15 marked as Done
-**Date**: 2025-10-13
+**Status**: ✅ COMPLETE - All 6 commands updated **Linear**: COA-15 marked as Done **Date**:
+2025-10-13
 
 ### Commands Updated:
 
@@ -161,10 +158,7 @@ All 6 commands now include:
 
 Before executing, verify required tools are installed:
 
-\```bash
-if [[-f "./hack/check-prerequisites.sh"]]; then
-./hack/check-prerequisites.sh || exit 1
-fi
+\```bash if [[-f "./hack/check-prerequisites.sh"]]; then ./hack/check-prerequisites.sh || exit 1 fi
 \```
 ````
 
@@ -173,11 +167,8 @@ fi
 ````markdown
 ### Track in Workflow Context
 
-\```bash
-if [[-f "./hack/workflow-context.sh"]]; then
-./hack/workflow-context.sh add <type> "$DOC_PATH" "${TICKET_ID:-null}"
-fi
-\```
+\```bash if [[-f "./hack/workflow-context.sh"]]; then ./hack/workflow-context.sh add <type>
+"$DOC_PATH" "${TICKET_ID:-null}" fi \```
 ````
 
 **3. Auto-find** (for `implement_plan` and `resume_handoff` only):
@@ -185,14 +176,9 @@ fi
 ````markdown
 ## Auto-Find Recent [Plan|Handoff]
 
-\```bash
-if [[-z "$FILE"]] && [[-f "./hack/workflow-context.sh"]]; then
+\```bash if [[-z "$FILE"]] && [[-f "./hack/workflow-context.sh"]]; then
 FILE=$(./hack/workflow-context.sh recent <type>)
-  if [[ -n "$FILE" ]]; then
-echo "📋 Found recent: $FILE"
-fi
-fi
-\```
+  if [[ -n "$FILE" ]]; then echo "📋 Found recent: $FILE" fi fi \```
 ````
 
 ## Summary
@@ -221,7 +207,8 @@ fi
 
 **Next steps** (for follow-up session or separate PRs):
 
-1. ~~Update 6 workflow/handoff commands with context tracking and prerequisite checks~~ ✅ **COMPLETE (COA-15)**
+1. ~~Update 6 workflow/handoff commands with context tracking and prerequisite checks~~ ✅
+   **COMPLETE (COA-15)**
 2. Update documentation files per Phase 6 plan (COA-14)
 3. Create comprehensive developer and setup guides (COA-16)
 4. Consider plugin marketplace when Claude Code marketplace matures (COA-17)
@@ -250,8 +237,7 @@ Issues created for deferred work:
 
 ### ✅ Issue COA-15: Command Updates (COMPLETE)
 
-**Title**: Add context tracking and prerequisite checks to workflow commands
-**Status**: ✅ Done
+**Title**: Add context tracking and prerequisite checks to workflow commands **Status**: ✅ Done
 **URL**: https://linear.app/rozich/issue/COA-15
 
 All 6 commands updated with prerequisite checking, context tracking, and auto-find capabilities.
@@ -262,8 +248,8 @@ All 6 commands updated with prerequisite checking, context tracking, and auto-fi
 
 **Title**: Update documentation for centralized config system
 
-**Description**:
-Update documentation to reflect the new centralized configuration approach and remove references to embedded config patterns.
+**Description**: Update documentation to reflect the new centralized configuration approach and
+remove references to embedded config patterns.
 
 **Tasks**:
 
@@ -275,9 +261,7 @@ Update documentation to reflect the new centralized configuration approach and r
 - [ ] Update `QUICKSTART.md` - prerequisites and configuration
 - [ ] Create `docs/MIGRATION_EMBEDDED_TO_CENTRALIZED.md` - migration guide
 
-**Estimated effort**: 3-4 hours
-**Priority**: Medium (3)
-**Labels**: type: docs
+**Estimated effort**: 3-4 hours **Priority**: Medium (3) **Labels**: type: docs
 
 ---
 
@@ -285,8 +269,7 @@ Update documentation to reflect the new centralized configuration approach and r
 
 **Title**: Create comprehensive developer and project setup guides
 
-**Description**:
-Create two comprehensive documentation files for end users and project owners.
+**Description**: Create two comprehensive documentation files for end users and project owners.
 
 **Tasks**:
 
@@ -307,9 +290,7 @@ PROJECT_SETUP_GUIDE.md (~500-700 lines):
 - [ ] Configuration reference
 - [ ] Customization guide
 
-**Estimated effort**: 4-6 hours
-**Priority**: Medium (3)
-**Labels**: type: docs
+**Estimated effort**: 4-6 hours **Priority**: Medium (3) **Labels**: type: docs
 
 ---
 
@@ -317,8 +298,8 @@ PROJECT_SETUP_GUIDE.md (~500-700 lines):
 
 **Title**: Package workspace as Claude Code plugin for marketplace distribution
 
-**Description**:
-Research and implement packaging of ryan-claude-workspace as a Claude Code plugin for distribution via Anthropic's plugin marketplace.
+**Description**: Research and implement packaging of ryan-claude-workspace as a Claude Code plugin
+for distribution via Anthropic's plugin marketplace.
 
 **Research Tasks**:
 
@@ -350,11 +331,11 @@ Research and implement packaging of ryan-claude-workspace as a Claude Code plugi
 - Current install method: `./hack/install-project.sh` (manual)
 - Target: One-click install from marketplace
 
-**Estimated effort**: 20-30 hours
-**Priority**: Low (4) - Nice to have, not blocking
-**Labels**: type: feature, area: infrastructure
+**Estimated effort**: 20-30 hours **Priority**: Low (4) - Nice to have, not blocking **Labels**:
+type: feature, area: infrastructure
 
-**Note**: This is deferred until Claude Code plugin marketplace matures. Manual installation works well for current use.
+**Note**: This is deferred until Claude Code plugin marketplace matures. Manual installation works
+well for current use.
 
 ---
 
@@ -368,4 +349,5 @@ This was a pragmatic implementation focusing on:
 2. Deferring extensive documentation that can be done separately
 3. Enabling incremental command updates over time
 
-The architecture is sound and ready for use. Documentation and command updates are polish that can happen iteratively.
+The architecture is sound and ready for use. Documentation and command updates are polish that can
+happen iteratively.

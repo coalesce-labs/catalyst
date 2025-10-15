@@ -2,13 +2,16 @@
 
 ## Configuration Note
 
-This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket prefix:
+This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
+prefix:
 
 - Read from `.claude/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
 - Examples: `ENG-123`, `FEAT-456`, `BUG-789`
 
-You are tasked with creating detailed implementation plans through an interactive, iterative process. You should be skeptical, thorough, and work collaboratively with the user to produce high-quality technical specifications.
+You are tasked with creating detailed implementation plans through an interactive, iterative
+process. You should be skeptical, thorough, and work collaboratively with the user to produce
+high-quality technical specifications.
 
 ## Initial Response
 
@@ -50,16 +53,18 @@ Then wait for the user's input.
    - **CRITICAL**: DO NOT spawn sub-tasks before reading these files yourself in the main context
    - **NEVER** read files partially - if a file is mentioned, read it completely
 
-2. **Spawn initial research tasks to gather context**:
-   Before asking the user any questions, use specialized agents to research in parallel:
+2. **Spawn initial research tasks to gather context**: Before asking the user any questions, use
+   specialized agents to research in parallel:
    - Use the **codebase-locator** agent to find all files related to the ticket/task
    - Use the **codebase-analyzer** agent to understand how the current implementation works
-   - If relevant, use the **thoughts-locator** agent to find any existing thoughts documents about this feature
+   - If relevant, use the **thoughts-locator** agent to find any existing thoughts documents about
+     this feature
    - If a Linear ticket is mentioned, use the **linear-ticket-reader** agent to get full details
 
    These agents will:
    - Find relevant source files, configs, and tests
-   - Identify the specific directories to focus on (e.g., if WUI is mentioned, they'll focus on humanlayer-wui/)
+   - Identify the specific directories to focus on (e.g., if WUI is mentioned, they'll focus on
+     humanlayer-wui/)
    - Trace data flow and key functions
    - Return detailed explanations with file:line references
 
@@ -109,8 +114,10 @@ After getting initial clarifications:
    - Use the right agent for each type of research:
 
    **For local codebase:**
-   - **codebase-locator** - To find more specific files (e.g., "find all files that handle [specific component]")
-   - **codebase-analyzer** - To understand implementation details (e.g., "analyze how [system] works")
+   - **codebase-locator** - To find more specific files (e.g., "find all files that handle [specific
+     component]")
+   - **codebase-analyzer** - To understand implementation details (e.g., "analyze how [system]
+     works")
    - **codebase-pattern-finder** - To find similar features we can model after
 
    **For external research:**
@@ -230,8 +237,7 @@ After structure approval:
 
 #### 1. [Component/File Group]
 
-**File**: `path/to/file.ext`
-**Changes**: [Summary of changes]
+**File**: `path/to/file.ext` **Changes**: [Summary of changes]
 
 ```[language]
 // Specific code to add/modify
@@ -377,7 +383,8 @@ After structure approval:
    - Research actual code patterns using parallel sub-tasks
    - Include specific file paths and line numbers
    - Write measurable success criteria with clear automated vs manual distinction
-   - automated steps should use `make` whenever possible - for example `make -C humanlayer-wui check` instead of `cd humanlayer-wui && bun run fmt`
+   - automated steps should use `make` whenever possible - for example
+     `make -C humanlayer-wui check` instead of `cd humanlayer-wui && bun run fmt`
 
 4. **Be Practical**:
    - Focus on incremental, testable changes

@@ -9,11 +9,13 @@ workspace_only: true
 
 # Validate Frontmatter
 
-You are tasked with validating frontmatter consistency across all agents and commands in the workspace, and fixing any issues found.
+You are tasked with validating frontmatter consistency across all agents and commands in the
+workspace, and fixing any issues found.
 
 ## Purpose
 
-This command ensures all workflows follow the workspace frontmatter standard, making them easier to maintain, discover, and integrate.
+This command ensures all workflows follow the workspace frontmatter standard, making them easier to
+maintain, discover, and integrate.
 
 ## Initial Response
 
@@ -126,9 +128,8 @@ Show comprehensive report:
 ```markdown
 # Frontmatter Validation Report
 
-**Validated**: {date}
-**Scope**: {agents-count} agents, {commands-count} commands
-**Status**: {PASS/FAIL}
+**Validated**: {date} **Scope**: {agents-count} agents, {commands-count} commands **Status**:
+{PASS/FAIL}
 
 ## Summary
 
@@ -161,9 +162,8 @@ Show comprehensive report:
 
 ## Tool Inventory
 
-**Total unique tools**: {tool-count}
-**Valid tools**: {valid-count}
-**Invalid references**: {invalid-count}
+**Total unique tools**: {tool-count} **Valid tools**: {valid-count} **Invalid references**:
+{invalid-count}
 
 ### Used Tools:
 
@@ -171,8 +171,7 @@ Show comprehensive report:
 - Write ({usage-count} workflows)
 - Edit ({usage-count} workflows)
 - Grep ({usage-count} workflows)
-- Glob ({usage-count} workflows)
-  [... more tools ...]
+- Glob ({usage-count} workflows) [... more tools ...]
 
 ### Invalid References:
 

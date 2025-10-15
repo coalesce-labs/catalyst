@@ -1,6 +1,8 @@
 # hack/ Directory: Installation & Setup Scripts
 
-This directory contains shell scripts for installing, updating, and configuring the workspace. These scripts manage the distribution of agents and commands to your projects and handle various setup tasks.
+This directory contains shell scripts for installing, updating, and configuring the workspace. These
+scripts manage the distribution of agents and commands to your projects and handle various setup
+tasks.
 
 ## Quick Reference
 

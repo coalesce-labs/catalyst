@@ -2,7 +2,8 @@
 
 ## Overview
 
-The Linear command provides intelligent ticket management with **automatic status progression** based on your workflow commands.
+The Linear command provides intelligent ticket management with **automatic status progression**
+based on your workflow commands.
 
 ## How Automation Works
 

@@ -8,7 +8,10 @@ version: 1.0.0
 
 # Debug
 
-You are tasked with helping debug issues during manual testing or implementation. This command allows you to investigate problems by examining logs, database state, and git history without editing files. Think of this as a way to bootstrap a debugging session without using the primary window's context.
+You are tasked with helping debug issues during manual testing or implementation. This command
+allows you to investigate problems by examining logs, database state, and git history without
+editing files. Think of this as a way to bootstrap a debugging session without using the primary
+window's context.
 
 ## Initial Response
 
@@ -220,4 +223,5 @@ git log --oneline -10
 git diff
 ```
 
-Remember: This command helps you investigate without burning the primary window's context. Perfect for when you hit an issue during manual testing and need to dig into logs, database, or git state.
+Remember: This command helps you investigate without burning the primary window's context. Perfect
+for when you hit an issue during manual testing and need to dig into logs, database, or git state.

@@ -5,7 +5,8 @@ category: version-control-git
 
 ## Configuration Note
 
-This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket prefix:
+This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
+prefix:
 
 - Read from `.claude/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
@@ -22,11 +23,9 @@ When this command is invoked:
    - Base branch (default: current branch)
    - Optional: Path to implementation plan
 
-2. **Confirm with user**:
-   Present the worktree details and get confirmation before creating.
+2. **Confirm with user**: Present the worktree details and get confirmation before creating.
 
-3. **Create the worktree**:
-   Use the create-worktree.sh script:
+3. **Create the worktree**: Use the create-worktree.sh script:
 
    ```bash
    ./hack/create-worktree.sh <worktree_name> [base_branch]
@@ -46,8 +45,8 @@ When this command is invoked:
    humanlayer thoughts sync
    ```
 
-5. **Optional: Launch implementation session**:
-   If a plan file path was provided, ask if the user wants to launch Claude in the worktree:
+5. **Optional: Launch implementation session**: If a plan file path was provided, ask if the user
+   wants to launch Claude in the worktree:
    ```bash
    humanlayer launch --model opus -w ~/wt/<repo>/<worktree_name> \
      "/implement_plan <plan_path> and when done: create commit, create PR, update Linear ticket"

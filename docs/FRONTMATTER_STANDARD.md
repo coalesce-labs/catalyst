@@ -2,8 +2,7 @@
 
 This document defines the frontmatter standard for all agents and commands in this workspace.
 
-**Last Updated**: 2025-01-08
-**Version**: 1.0.0
+**Last Updated**: 2025-01-08 **Version**: 1.0.0
 
 ## Agent Frontmatter
 

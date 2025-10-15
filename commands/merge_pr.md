@@ -190,8 +190,7 @@ Passed checks:
 Continue merge anyway? [y/N]:
 ```
 
-If user says no: exit.
-If user says yes: continue (user override).
+If user says no: exit. If user says yes: continue (user override).
 
 ### 7. Check approval status
 
@@ -216,8 +215,7 @@ Review status: $review_decision
 Continue merge anyway? [y/N]:
 ```
 
-If user says no: exit.
-If user says yes: continue (user override).
+If user says no: exit. If user says yes: continue (user override).
 
 **Skip these prompts if** `requireApproval: false` in config.
 

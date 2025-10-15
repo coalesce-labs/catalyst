@@ -93,7 +93,8 @@ Read telemetry configuration:
 
 \`\`\`bash
 PROMETHEUS_URL=$(jq -r '.telemetry.prometheusEndpoint // "http://localhost:9090"' .claude/config.local.json)
-COST_QUERY=$(jq -r '.telemetry.queries.sessionCost' .claude/config.local.json)
+COST_QUERY=$(jq
+-r '.telemetry.queries.sessionCost' .claude/config.local.json)
 
 # Query Prometheus
 
@@ -103,8 +104,7 @@ curl -s "${PROMETHEUS_URL}/api/v1/query" \
 
 # Display results
 
-echo "Session cost: $cost"
-\`\`\`
+echo "Session cost: $cost" \`\`\`
 ```
 
 **Usage**: `/analyze-costs`

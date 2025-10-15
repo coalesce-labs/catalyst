@@ -2,7 +2,8 @@
 
 ## Overview
 
-DeepWiki MCP provides AI-powered knowledge extraction from GitHub repositories, enabling your agents to understand external codebases, frameworks, and libraries during research and planning.
+DeepWiki MCP provides AI-powered knowledge extraction from GitHub repositories, enabling your agents
+to understand external codebases, frameworks, and libraries during research and planning.
 
 ## Available DeepWiki Tools
 
@@ -34,7 +35,8 @@ mcp__deepwiki__read_wiki_structure({
 
 **Use when**: You need comprehensive documentation about a repo.
 
-**⚠️ Warning**: Can return very large responses (80k+ tokens). Use sparingly or with specific questions instead.
+**⚠️ Warning**: Can return very large responses (80k+ tokens). Use sparingly or with specific
+questions instead.
 
 **Example**:
 
@@ -47,7 +49,8 @@ mcp__deepwiki__read_wiki_contents({
 
 ### 3. `mcp__deepwiki__ask_question` ⭐ **Most Useful**
 
-**What it does**: Ask specific questions about a repository and get AI-generated answers based on the codebase.
+**What it does**: Ask specific questions about a repository and get AI-generated answers based on
+the codebase.
 
 **Use when**: You need to understand:
 
@@ -222,10 +225,8 @@ When the user requests patterns from popular repos or frameworks:
 1. **Use DeepWiki to research external repos**:
 ```
 
-mcp**deepwiki**ask_question({
-repoName: "facebook/react",
-question: "How is [pattern] typically implemented?"
-})
+mcp**deepwiki**ask_question({ repoName: "facebook/react", question: "How is [pattern] typically
+implemented?" })
 
 ```
 
@@ -247,12 +248,17 @@ question: "How is [pattern] typically implemented?"
 ````markdown
 ---
 name: external-research
-description: Research external GitHub repositories, frameworks, and libraries using DeepWiki. Call when you need to understand how popular repos implement features, learn framework patterns, or research best practices from open-source projects.
-tools: mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, mcp__deepwiki__read_wiki_contents
+description:
+  Research external GitHub repositories, frameworks, and libraries using DeepWiki. Call when you
+  need to understand how popular repos implement features, learn framework patterns, or research
+  best practices from open-source projects.
+tools:
+  mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, mcp__deepwiki__read_wiki_contents
 model: inherit
 ---
 
-You are a specialist at researching external GitHub repositories to understand frameworks, libraries, and implementation patterns.
+You are a specialist at researching external GitHub repositories to understand frameworks,
+libraries, and implementation patterns.
 
 ## Your Only Job: Research External Codebases
 

@@ -6,7 +6,8 @@ Core research → plan → implement → validate workflow automation.
 
 ### `/workflow-research`
 
-Research codebase with parallel agents (codebase-locator, codebase-analyzer, codebase-pattern-finder, thoughts-locator, thoughts-analyzer).
+Research codebase with parallel agents (codebase-locator, codebase-analyzer,
+codebase-pattern-finder, thoughts-locator, thoughts-analyzer).
 
 **Usage:**
 

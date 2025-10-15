@@ -8,7 +8,8 @@ version: 2.0.0
 
 # Commit Changes
 
-You are tasked with creating git commits using conventional commit format for the changes made during this session.
+You are tasked with creating git commits using conventional commit format for the changes made
+during this session.
 
 ## Process:
 
@@ -27,7 +28,8 @@ You are tasked with creating git commits using conventional commit format for th
    - If `package.json`, `*.lock` files: suggest `build`
    - If `.github/workflows/`: suggest `ci`
    - If mix of changes: suggest `feat` or `fix` based on context
-   - Otherwise: ask user to choose from: `feat`, `fix`, `refactor`, `chore`, `docs`, `style`, `perf`, `test`, `build`, `ci`
+   - Otherwise: ask user to choose from: `feat`, `fix`, `refactor`, `chore`, `docs`, `style`,
+     `perf`, `test`, `build`, `ci`
 
    **Scope detection (suggest to user):**
    - Parse changed file paths

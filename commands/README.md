@@ -1,6 +1,8 @@
 # commands/ Directory: Claude Code Slash Commands
 
-This directory contains markdown files that become Claude Code slash commands. Each `.md` file with YAML frontmatter is automatically discovered and registered as a command you can invoke with `/command-name`.
+This directory contains markdown files that become Claude Code slash commands. Each `.md` file with
+YAML frontmatter is automatically discovered and registered as a command you can invoke with
+`/command-name`.
 
 ## How It Works
 
@@ -108,7 +110,8 @@ The markdown content here becomes the command's prompt...
 - `source` - Attribution for adapted commands
 - `adapted` - Original source information
 
-**Important:** Commands use filename as identifier. Do NOT add a `name` field (that's for agents only).
+**Important:** Commands use filename as identifier. Do NOT add a `name` field (that's for agents
+only).
 
 ## Installation Behavior
 
@@ -321,8 +324,7 @@ Portable commands read configuration from `.claude/config.json`:
 ### Pattern 1: Workspace References (Workspace-Only)
 
 ```markdown
-**Task 1**: Validate agents in workspace
-Path: /Users/ryan/code-repos/ryan-claude-workspace/agents/
+**Task 1**: Validate agents in workspace Path: /Users/ryan/code-repos/ryan-claude-workspace/agents/
 
 Run: ./hack/update-project.sh /path/to/project
 ```
@@ -330,8 +332,8 @@ Run: ./hack/update-project.sh /path/to/project
 ### Pattern 2: Configurable Paths (Portable)
 
 ```markdown
-Save plan to: thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md
-Replace PROJ with your ticket prefix from .claude/config.json
+Save plan to: thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md Replace PROJ with your
+ticket prefix from .claude/config.json
 ```
 
 ### Pattern 3: Self-Configuration (Portable)
@@ -339,9 +341,8 @@ Replace PROJ with your ticket prefix from .claude/config.json
 ```markdown
 ## ⚠️ FIRST-TIME SETUP REQUIRED
 
-Check if this file contains `[NEEDS_SETUP]` markers.
-If yes, prompt user for configuration and update this file.
-Replace `[NEEDS_SETUP:TEAM_ID]` with actual value.
+Check if this file contains `[NEEDS_SETUP]` markers. If yes, prompt user for configuration and
+update this file. Replace `[NEEDS_SETUP:TEAM_ID]` with actual value.
 ```
 
 ## Creating New Commands

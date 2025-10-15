@@ -1,6 +1,7 @@
 # Configuration Guide
 
-This workspace uses a simple configuration system to make commands portable across different projects and teams.
+This workspace uses a simple configuration system to make commands portable across different
+projects and teams.
 
 ## Configuration File
 
@@ -27,7 +28,8 @@ The configuration is stored in `.claude/config.json`:
 
 ### Ticket Prefix Configuration
 
-Commands like `/create_plan`, `/create_handoff`, etc. use ticket references in filenames and examples.
+Commands like `/create_plan`, `/create_handoff`, etc. use ticket references in filenames and
+examples.
 
 **Default behavior** (no config):
 
@@ -326,7 +328,8 @@ See [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) for details.
 
 **Issue**: Old HumanLayer examples in commands
 
-**Fix**: Commands now use `PROJ-XXX` as generic placeholder. If you see `ENG-`, it's just an example. The actual commands will use your configured prefix when you run them.
+**Fix**: Commands now use `PROJ-XXX` as generic placeholder. If you see `ENG-`, it's just an
+example. The actual commands will use your configured prefix when you run them.
 
 ### "Config not being read"
 

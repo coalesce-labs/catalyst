@@ -1,15 +1,18 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this
+repository.
 
 ## What This Repository Is
 
-This is a **portable collection of Claude Code agents, commands, and workflows** for AI-assisted development. It's both:
+This is a **portable collection of Claude Code agents, commands, and workflows** for AI-assisted
+development. It's both:
 
 1. A **source repository** for reusable agents/commands
 2. A **working installation** that uses its own tools (dogfooding)
 
-The workspace is installed into itself at `.claude/`, meaning you can use all the commands and agents while developing them.
+The workspace is installed into itself at `.claude/`, meaning you can use all the commands and
+agents while developing them.
 
 ## Key Architecture Concepts
 
@@ -112,8 +115,8 @@ Configuration lives in `.claude/config.json`:
 }
 ```
 
-**In this workspace:** Keep values generic/null (it's a template)
-**In actual projects:** Fill in real values (ENG-123, team IDs, etc.)
+**In this workspace:** Keep values generic/null (it's a template) **In actual projects:** Fill in
+real values (ENG-123, team IDs, etc.)
 
 Commands read config to customize behavior per-project.
 
@@ -319,8 +322,7 @@ Use `/validate-frontmatter` to check consistency.
 - Linear CLI (`linear`) - For Linear integration
 - GitHub CLI (`gh`) - For PR creation
 
-**Installation:**
-The thoughts system requires HumanLayer CLI. Setup with:
+**Installation:** The thoughts system requires HumanLayer CLI. Setup with:
 
 ```bash
 ./hack/setup-thoughts.sh
@@ -475,8 +477,7 @@ ryan-init-project project-name
 humanlayer thoughts sync
 ```
 
-**Sharing with team:**
-Commit `.claude/` and `thoughts/` to project repo. Team gets:
+**Sharing with team:** Commit `.claude/` and `thoughts/` to project repo. Team gets:
 
 - All agents and commands
 - Project configuration

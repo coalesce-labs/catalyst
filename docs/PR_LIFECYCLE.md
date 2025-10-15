@@ -1,6 +1,7 @@
 # PR Lifecycle Commands
 
-Complete automation of the pull request workflow from commit to merge, with Linear integration and intelligent defaults.
+Complete automation of the pull request workflow from commit to merge, with Linear integration and
+intelligent defaults.
 
 ## Overview
 
@@ -240,8 +241,7 @@ Generates or updates PR description with comprehensive analysis, preserving manu
 - How to Verify It (reruns checks)
 - Changelog Entry
 
-**Verification checks:**
-Automatically attempts to run:
+**Verification checks:** Automatically attempts to run:
 
 - `make test` / `npm test`
 - `make lint` / `npm run lint`

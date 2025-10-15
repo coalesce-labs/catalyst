@@ -2,9 +2,8 @@
 
 A comprehensive guide to using AI-assisted development workflows effectively with Claude Code.
 
-**Version**: 1.0.0
-**Last Updated**: 2025-01-08
-**Based on**: HumanLayer's Advanced Context Engineering & 12 Factor Agents
+**Version**: 1.0.0 **Last Updated**: 2025-01-08 **Based on**: HumanLayer's Advanced Context
+Engineering & 12 Factor Agents
 
 ## Table of Contents
 
@@ -23,7 +22,8 @@ A comprehensive guide to using AI-assisted development workflows effectively wit
 
 ### Philosophy
 
-**"Frequent Intentional Compaction"** - Design the entire workflow around context management, keeping utilization in the **40-60% range**.
+**"Frequent Intentional Compaction"** - Design the entire workflow around context management,
+keeping utilization in the **40-60% range**.
 
 ###
 
@@ -415,7 +415,8 @@ This command shows:
 
 ### What Are Handoffs?
 
-Context transfer documents that enable work to be paused, resumed, or transferred while preserving critical context.
+Context transfer documents that enable work to be paused, resumed, or transferred while preserving
+critical context.
 
 ### When to Create Handoffs
 
@@ -648,7 +649,8 @@ Make sure it works
 
 ### What Are Worktrees?
 
-Git worktrees allow multiple working directories for the same repository, enabling parallel development on different tasks.
+Git worktrees allow multiple working directories for the same repository, enabling parallel
+development on different tasks.
 
 ### Benefits
 

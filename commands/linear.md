@@ -5,11 +5,13 @@ category: project-task-management
 
 # Linear - Ticket Management
 
-You are tasked with managing Linear tickets, including creating tickets from thoughts documents, updating existing tickets, and following a structured workflow.
+You are tasked with managing Linear tickets, including creating tickets from thoughts documents,
+updating existing tickets, and following a structured workflow.
 
 ## ⚠️ FIRST-TIME SETUP REQUIRED
 
-**Before using this command for the first time**, you need to configure it for your Linear workspace.
+**Before using this command for the first time**, you need to configure it for your Linear
+workspace.
 
 Run this configuration check:
 
@@ -78,7 +80,8 @@ const LINEAR_CONFIG = {
 
 ## Initial Setup
 
-First, verify that Linear MCP tools are available by checking if any `mcp__linear__` tools exist. If not, respond:
+First, verify that Linear MCP tools are available by checking if any `mcp__linear__` tools exist. If
+not, respond:
 
 ```
 I need access to Linear tools to help with ticket management. Please run the `/mcp` command to enable the Linear MCP server, then try again.
@@ -186,8 +189,7 @@ When referencing thoughts documents, always provide GitHub links using the `link
    - Use configured `teamId` from config
    - Use configured `defaultProjectId` or list projects: `mcp__linear__list_projects`
 
-5. **Draft the ticket summary:**
-   Present a draft to the user:
+5. **Draft the ticket summary:** Present a draft to the user:
 
    ```
    ## Draft Linear Ticket
@@ -213,8 +215,7 @@ When referencing thoughts documents, always provide GitHub links using the `link
    Based on the document, this seems to be at the stage of: [ideation/planning/ready to implement]
    ```
 
-6. **Interactive refinement:**
-   Ask the user:
+6. **Interactive refinement:** Ask the user:
    - Does this summary capture the ticket accurately?
    - Which project should this go in? [show list or use default]
    - What priority? (Default: Medium/3)
@@ -276,8 +277,8 @@ When user wants to add a comment to a ticket:
    ```markdown
    Implemented retry logic in webhook handler to address rate limit issues.
 
-   Key insight: The 429 responses were clustered during batch operations,
-   so exponential backoff alone wasn't sufficient - added request queuing.
+   Key insight: The 429 responses were clustered during batch operations, so exponential backoff
+   alone wasn't sufficient - added request queuing.
 
    Files updated:
 
@@ -314,8 +315,7 @@ When moving tickets to a new status:
    In Review → Done (PR merged)
    ```
 
-3. **Automatic status updates:**
-   When certain commands are run, automatically update ticket status:
+3. **Automatic status updates:** When certain commands are run, automatically update ticket status:
    - `/create_plan` with ticket → Move to "Plan in Progress"
    - Plan synced and linked → Move to "Plan in Review"
    - `/implement_plan` with ticket → Move to "In Dev"
@@ -442,4 +442,5 @@ When these commands are run, check if there's a related Linear ticket and update
 - **Status mapping**: Customize workflow statuses for your team's process
 - **Automation**: Workflow commands auto-update tickets when ticket IDs are referenced
 
-This command integrates seamlessly with the create_plan → implement_plan → validate_plan workflow while keeping Linear tickets in sync!
+This command integrates seamlessly with the create_plan → implement_plan → validate_plan workflow
+while keeping Linear tickets in sync!

@@ -1,6 +1,7 @@
 # Context Engineering Guide
 
-A deep dive into context engineering principles and how they're implemented in the Ryan Claude Workspace.
+A deep dive into context engineering principles and how they're implemented in the Ryan Claude
+Workspace.
 
 ## Table of Contents
 
@@ -227,43 +228,27 @@ Commands orchestrate multiple agents:
 ```markdown
 ## /create_plan Command Flow
 
-Step 1: Read ticket file
-Context loaded: Ticket content (1-2K tokens)
+Step 1: Read ticket file Context loaded: Ticket content (1-2K tokens)
 
-Step 2: Spawn parallel research agents
-Agent A (codebase-locator):
-Context: Ticket keywords + file paths
-Returns: List of relevant files
-Context used: ~5K tokens
-Context persisted: File paths only
+Step 2: Spawn parallel research agents Agent A (codebase-locator): Context: Ticket keywords + file
+paths Returns: List of relevant files Context used: ~5K tokens Context persisted: File paths only
 
-Agent B (thoughts-locator):
-Context: Ticket keywords + thoughts structure
-Returns: Relevant documents
-Context used: ~3K tokens
-Context persisted: Document paths only
+Agent B (thoughts-locator): Context: Ticket keywords + thoughts structure Returns: Relevant
+documents Context used: ~3K tokens Context persisted: Document paths only
 
-Agent C (codebase-analyzer):
-Context: Specific files from exploration
-Returns: Implementation analysis
-Context used: ~10K tokens
-Context persisted: Analysis summary
+Agent C (codebase-analyzer): Context: Specific files from exploration Returns: Implementation
+analysis Context used: ~10K tokens Context persisted: Analysis summary
 
 All run in parallel → same time as slowest
 
-Step 3: Main context receives results
-File paths from A: 1K tokens
-Document paths from B: 500 tokens
-Analysis from C: 2K tokens
-Total added: 3.5K tokens (not 18K!)
+Step 3: Main context receives results File paths from A: 1K tokens Document paths from B: 500 tokens
+Analysis from C: 2K tokens Total added: 3.5K tokens (not 18K!)
 
-Step 4: Synthesize and plan
-Main context:
+Step 4: Synthesize and plan Main context:
 
 - Ticket: 2K
 - Research summaries: 3.5K
-- Planning logic: 5K
-  Total: ~10.5K tokens
+- Planning logic: 5K Total: ~10.5K tokens
 
 vs. doing all research in main context: ~50K+ tokens
 ```

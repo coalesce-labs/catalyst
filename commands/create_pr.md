@@ -8,7 +8,8 @@ version: 1.0.0
 
 # Create Pull Request
 
-Orchestrates the complete PR creation flow: commit → rebase → push → create → describe → link Linear ticket.
+Orchestrates the complete PR creation flow: commit → rebase → push → create → describe → link Linear
+ticket.
 
 ## Process:
 
@@ -77,7 +78,8 @@ gh pr view --json number,url,title,state 2>/dev/null
 If PR exists:
 
 - Show: "PR #{number} already exists: {title}\n{url}"
-- Ask: "What would you like to do?\n [D] Describe/update this PR\n [S] Skip (do nothing)\n [A] Abort"
+- Ask: "What would you like to do?\n [D] Describe/update this PR\n [S] Skip (do nothing)\n [A]
+  Abort"
 - If D: call `/describe_pr` and exit
 - If S: exit with success message
 - If A: exit

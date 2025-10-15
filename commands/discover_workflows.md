@@ -9,11 +9,13 @@ workspace_only: true
 
 # Discover Workflows
 
-You are tasked with researching external Claude Code repositories to discover, analyze, and catalog their agents, commands, and workflow patterns.
+You are tasked with researching external Claude Code repositories to discover, analyze, and catalog
+their agents, commands, and workflow patterns.
 
 ## Purpose
 
-This command helps you learn from the Claude Code community by analyzing workflow repositories and extracting reusable patterns.
+This command helps you learn from the Claude Code community by analyzing workflow repositories and
+extracting reusable patterns.
 
 ## Supported Repositories
 
@@ -141,9 +143,7 @@ Save research to `thoughts/shared/workflows/{repo-name}/analysis.md`:
 ````markdown
 # Workflow Analysis: {Repo Name}
 
-**Repository**: {org/repo}
-**Analyzed**: {date}
-**Focus**: {agents/commands/both}
+**Repository**: {org/repo} **Analyzed**: {date} **Focus**: {agents/commands/both}
 
 ## Summary
 
@@ -161,8 +161,7 @@ Save research to `thoughts/shared/workflows/{repo-name}/analysis.md`:
      [actual frontmatter from repo]
      ```
 
-2. **{command-name}**
-   [...]
+2. **{command-name}** [...]
 
 ### Agents
 

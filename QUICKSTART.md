@@ -45,7 +45,8 @@ This will:
 ./hack/install-user.sh
 ```
 
-This installs agents and commands to `~/.claude/` making them available in **all** Claude Code projects.
+This installs agents and commands to `~/.claude/` making them available in **all** Claude Code
+projects.
 
 ### Step 4: Restart Claude Code
 

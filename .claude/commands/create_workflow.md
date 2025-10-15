@@ -9,11 +9,13 @@ workspace_only: true
 
 # Create Workflow
 
-You are tasked with helping users create new agents or commands by leveraging discovered patterns, templates, and examples from the workflow catalog.
+You are tasked with helping users create new agents or commands by leveraging discovered patterns,
+templates, and examples from the workflow catalog.
 
 ## Purpose
 
-This command guides users through creating well-structured, standardized workflows by showing relevant examples and enforcing frontmatter consistency.
+This command guides users through creating well-structured, standardized workflows by showing
+relevant examples and enforcing frontmatter consistency.
 
 ## Initial Response
 
@@ -119,8 +121,7 @@ Show analysis and options:
    - Tools: {tools}
    - File: {path}
 
-2. **{local-workflow-2}**
-   [....]
+2. **{local-workflow-2}** [....]
 
 ### From Catalog
 
@@ -250,9 +251,7 @@ You are tasked with {command purpose}.
 
 When invoked:
 
-\`\`\`
-{Default message to show user}
-\`\`\`
+\`\`\` {Default message to show user} \`\`\`
 
 ## Process
 

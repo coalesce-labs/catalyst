@@ -344,9 +344,8 @@ Add notes in the thoughts repo README:
 ```markdown
 # ACME Corp Thoughts
 
-**Client**: ACME Corporation
-**Contract**: Jan 2025 - Dec 2025
-**Projects**: acme-api, acme-web, acme-mobile
+**Client**: ACME Corporation **Contract**: Jan 2025 - Dec 2025 **Projects**: acme-api, acme-web,
+acme-mobile
 
 ## Switching to This Config
 
@@ -370,10 +369,9 @@ hl-switch acme
 
 The multi-config system gives you:
 
-✅ **Complete isolation** - Client work never mixes with personal
-✅ **Easy switching** - `hl-switch <name>` is all you need
-✅ **No complex commands** - Just works with normal `humanlayer thoughts` commands
-✅ **Scalable** - Add unlimited clients with `add-client-config`
-✅ **Simple** - One symlink, many configs
+✅ **Complete isolation** - Client work never mixes with personal ✅ **Easy switching** -
+`hl-switch <name>` is all you need ✅ **No complex commands** - Just works with normal
+`humanlayer thoughts` commands ✅ **Scalable** - Add unlimited clients with `add-client-config` ✅
+**Simple** - One symlink, many configs
 
 You're now set up to manage thoughts across all your projects professionally and efficiently! 🎉

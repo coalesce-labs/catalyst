@@ -1,6 +1,7 @@
 # agents/ Directory: Specialized Research Agents
 
-This directory contains markdown files that define specialized research agents for Claude Code. Agents are invoked by commands using the `Task` tool to perform focused research tasks in parallel.
+This directory contains markdown files that define specialized research agents for Claude Code.
+Agents are invoked by commands using the `Task` tool to perform focused research tasks in parallel.
 
 ## How Agents Work
 
@@ -9,15 +10,13 @@ This directory contains markdown files that define specialized research agents f
 - **Commands** (`/command-name`) - User-facing workflows you invoke directly
 - **Agents** (`@agent-name`) - Specialized research tools spawned by commands
 
-**Invocation:**
-Commands spawn agents using the Task tool:
+**Invocation:** Commands spawn agents using the Task tool:
 
 ```markdown
 Task(subagent_type="codebase-locator", prompt="Find authentication files")
 ```
 
-**Philosophy:**
-All agents follow a **documentarian, not critic** approach:
+**Philosophy:** All agents follow a **documentarian, not critic** approach:
 
 - Document what EXISTS, not what should exist
 - NO suggestions for improvements unless explicitly asked
@@ -43,10 +42,7 @@ All agents follow a **documentarian, not critic** approach:
 **Example invocation:**
 
 ```markdown
-Task(
-subagent_type="codebase-locator",
-prompt="Find all authentication-related files"
-)
+Task( subagent_type="codebase-locator", prompt="Find all authentication-related files" )
 ```
 
 **Returns**: Organized list of file locations categorized by purpose
@@ -69,10 +65,8 @@ prompt="Find all authentication-related files"
 **Example invocation:**
 
 ```markdown
-Task(
-subagent_type="codebase-analyzer",
-prompt="Analyze the authentication middleware implementation and document how it works"
-)
+Task( subagent_type="codebase-analyzer", prompt="Analyze the authentication middleware
+implementation and document how it works" )
 ```
 
 **Returns**: Detailed analysis of how code works, with file:line references
@@ -95,10 +89,8 @@ prompt="Analyze the authentication middleware implementation and document how it
 **Example invocation:**
 
 ```markdown
-Task(
-subagent_type="codebase-pattern-finder",
-prompt="Find examples of how other components handle error logging"
-)
+Task( subagent_type="codebase-pattern-finder", prompt="Find examples of how other components handle
+error logging" )
 ```
 
 **Returns**: Concrete code examples showing patterns in use
@@ -121,10 +113,7 @@ prompt="Find examples of how other components handle error logging"
 **Example invocation:**
 
 ```markdown
-Task(
-subagent_type="thoughts-locator",
-prompt="Find all thoughts documents about authentication"
-)
+Task( subagent_type="thoughts-locator", prompt="Find all thoughts documents about authentication" )
 ```
 
 **Returns**: List of relevant thought documents with paths
@@ -147,10 +136,8 @@ prompt="Find all thoughts documents about authentication"
 **Example invocation:**
 
 ```markdown
-Task(
-subagent_type="thoughts-analyzer",
-prompt="Analyze the authentication research document and extract key findings"
-)
+Task( subagent_type="thoughts-analyzer", prompt="Analyze the authentication research document and
+extract key findings" )
 ```
 
 **Returns**: Summary of insights and decisions from documents
@@ -173,10 +160,8 @@ prompt="Analyze the authentication research document and extract key findings"
 **Example invocation:**
 
 ```markdown
-Task(
-subagent_type="external-research",
-prompt="Research how Next.js implements middleware authentication patterns"
-)
+Task( subagent_type="external-research", prompt="Research how Next.js implements middleware
+authentication patterns" )
 ```
 
 **Returns**: Information from external repositories and documentation
@@ -226,8 +211,7 @@ Commands spawn multiple agents concurrently for efficiency:
 ```markdown
 # Spawn three agents in parallel
 
-Task(subagent_type="codebase-locator", ...)
-Task(subagent_type="thoughts-locator", ...)
+Task(subagent_type="codebase-locator", ...) Task(subagent_type="thoughts-locator", ...)
 Task(subagent_type="codebase-analyzer", ...)
 
 # Wait for all to complete
@@ -238,17 +222,14 @@ Task(subagent_type="codebase-analyzer", ...)
 ### Example from research_codebase.md
 
 ```markdown
-Task 1 - Find WHERE components live:
-subagent: codebase-locator
-prompt: "Find all files related to authentication"
+Task 1 - Find WHERE components live: subagent: codebase-locator prompt: "Find all files related to
+authentication"
 
-Task 2 - Understand HOW it works:
-subagent: codebase-analyzer
-prompt: "Analyze auth middleware and document how it works"
+Task 2 - Understand HOW it works: subagent: codebase-analyzer prompt: "Analyze auth middleware and
+document how it works"
 
-Task 3 - Find existing patterns:
-subagent: codebase-pattern-finder
-prompt: "Find similar authentication implementations"
+Task 3 - Find existing patterns: subagent: codebase-pattern-finder prompt: "Find similar
+authentication implementations"
 ```
 
 ## Documentarian Philosophy
@@ -296,8 +277,8 @@ Agents are always installed, never filtered:
 - ✅ No user prompts needed
 - ✅ README.md excluded
 
-**Why auto-update?**
-Agents contain only research logic, no project-specific configuration. Safe to always overwrite.
+**Why auto-update?** Agents contain only research logic, no project-specific configuration. Safe to
+always overwrite.
 
 ## Creating New Agents
 
@@ -379,8 +360,7 @@ Task(subagent_type="codebase-analyzer", ...)
 ```markdown
 # Search codebase and thoughts simultaneously
 
-Task(subagent_type="codebase-locator", ...)
-Task(subagent_type="thoughts-locator", ...)
+Task(subagent_type="codebase-locator", ...) Task(subagent_type="thoughts-locator", ...)
 ```
 
 ### Pattern 3: Pattern Discovery
@@ -388,8 +368,7 @@ Task(subagent_type="thoughts-locator", ...)
 ```markdown
 # Find patterns after understanding the code
 
-Task(subagent_type="codebase-analyzer", ...)
-Task(subagent_type="codebase-pattern-finder", ...)
+Task(subagent_type="codebase-analyzer", ...) Task(subagent_type="codebase-pattern-finder", ...)
 ```
 
 ## Tool Access

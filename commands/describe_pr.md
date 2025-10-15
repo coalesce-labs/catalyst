@@ -8,7 +8,8 @@ version: 2.0.0
 
 # Generate/Update PR Description
 
-Generates or updates PR description with incremental information, auto-updates title, and links Linear tickets.
+Generates or updates PR description with incremental information, auto-updates title, and links
+Linear tickets.
 
 ## Process:
 

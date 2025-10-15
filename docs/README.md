@@ -1,6 +1,7 @@
 # Documentation Index
 
-Welcome to the Ryan Claude Workspace documentation. This directory contains comprehensive guides for using, configuring, and extending the workspace.
+Welcome to the Ryan Claude Workspace documentation. This directory contains comprehensive guides for
+using, configuring, and extending the workspace.
 
 ## Quick Start
 
@@ -241,19 +242,24 @@ Learn about:
 
 **Setting Up:**
 
-- [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md) → [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md)
+- [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md) →
+  [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md)
 
 **Daily Development:**
 
-- [BEST_PRACTICES.md](BEST_PRACTICES.md) → [PATTERNS.md](PATTERNS.md) → [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md)
+- [BEST_PRACTICES.md](BEST_PRACTICES.md) → [PATTERNS.md](PATTERNS.md) →
+  [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md)
 
 **Creating Workflows:**
 
-- [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) → [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md) → [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
+- [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) →
+  [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md) →
+  [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
 
 **Troubleshooting:**
 
-- [USAGE.md](USAGE.md) (Troubleshooting section) → [CONFIGURATION.md](CONFIGURATION.md) → [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
+- [USAGE.md](USAGE.md) (Troubleshooting section) → [CONFIGURATION.md](CONFIGURATION.md) →
+  [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
 
 ## Additional Resources
 

@@ -8,7 +8,8 @@ version: 1.0.0
 
 # Research Codebase
 
-You are tasked with conducting comprehensive research across the codebase to answer user questions by spawning parallel sub-agents and synthesizing their findings.
+You are tasked with conducting comprehensive research across the codebase to answer user questions
+by spawning parallel sub-agents and synthesizing their findings.
 
 ## CRITICAL: YOUR ONLY JOB IS TO DOCUMENT AND EXPLAIN THE CODEBASE AS IT EXISTS TODAY
 
@@ -52,7 +53,8 @@ Then wait for the user's research query.
 ### Step 2: Analyze and Decompose the Research Question
 
 - Break down the user's query into composable research areas
-- Take time to think deeply about the underlying patterns, connections, and architectural implications the user might be seeking
+- Take time to think deeply about the underlying patterns, connections, and architectural
+  implications the user might be seeking
 - Identify specific components, patterns, or concepts to investigate
 - Create a research plan using TodoWrite to track all subtasks
 - Consider which directories, files, or architectural patterns are relevant
@@ -67,23 +69,28 @@ We have specialized agents that know how to do specific research tasks:
 
 - Use the **codebase-locator** agent to find WHERE files and components live
 - Use the **codebase-analyzer** agent to understand HOW specific code works (without critiquing it)
-- Use the **codebase-pattern-finder** agent to find examples of existing patterns (without evaluating them)
+- Use the **codebase-pattern-finder** agent to find examples of existing patterns (without
+  evaluating them)
 
-**IMPORTANT**: All agents are documentarians, not critics. They will describe what exists without suggesting improvements or identifying issues.
+**IMPORTANT**: All agents are documentarians, not critics. They will describe what exists without
+suggesting improvements or identifying issues.
 
 **For thoughts directory (if using thoughts system):**
 
 - Use the **thoughts-locator** agent to discover what documents exist about the topic
-- Use the **thoughts-analyzer** agent to extract key insights from specific documents (only the most relevant ones)
+- Use the **thoughts-analyzer** agent to extract key insights from specific documents (only the most
+  relevant ones)
 
 **For external research (only if user explicitly asks):**
 
 - Use the **external-research** agent for external documentation and resources
-- IF you use external research agents, instruct them to return LINKS with their findings, and INCLUDE those links in your final report
+- IF you use external research agents, instruct them to return LINKS with their findings, and
+  INCLUDE those links in your final report
 
 **For Linear tickets (if relevant):**
 
-- Use the **linear-ticket-reader** agent to get full details of a specific ticket (if Linear MCP available)
+- Use the **linear-ticket-reader** agent to get full details of a specific ticket (if Linear MCP
+  available)
 - Use the **linear-searcher** agent to find related tickets or historical context
 
 The key is to use these agents intelligently:
@@ -171,11 +178,8 @@ last_updated_by: { your-name }
 
 # Research: {User's Research Question}
 
-**Date**: {date/time with timezone}
-**Researcher**: {your-name}
-**Git Commit**: {commit-hash}
-**Branch**: {branch-name}
-**Repository**: {repo-name}
+**Date**: {date/time with timezone} **Researcher**: {your-name} **Git Commit**: {commit-hash}
+**Branch**: {branch-name} **Repository**: {repo-name}
 
 ## Research Question
 
@@ -183,7 +187,8 @@ last_updated_by: { your-name }
 
 ## Summary
 
-{High-level documentation of what you found. 2-3 paragraphs explaining the current state of the system in this area. Focus on WHAT EXISTS, not what should exist.}
+{High-level documentation of what you found. 2-3 paragraphs explaining the current state of the
+system in this area. Focus on WHAT EXISTS, not what should exist.}
 
 ## Detailed Findings
 
@@ -220,7 +225,8 @@ Quick reference of key files and their roles:
 
 ## Architecture Documentation
 
-{Document the current architectural patterns, conventions, and design decisions observed in the code. This is descriptive, not prescriptive.}
+{Document the current architectural patterns, conventions, and design decisions observed in the
+code. This is descriptive, not prescriptive.}
 
 ### Current Patterns
 
@@ -232,8 +238,7 @@ Quick reference of key files and their roles:
 {Document how data moves through the system in this area}
 ```
 
-Component A → Component B → Component C
-{Describe what happens at each step}
+Component A → Component B → Component C {Describe what happens at each step}
 
 ```
 
@@ -322,9 +327,8 @@ https://github.com/{owner}/{repo}/blob/{commit-hash}/{file-path}#L{start}-L{end}
 
 Current usage: {X}% ({Y}K/{Z}K tokens)
 
-{If >60%}:
-⚠️ **Recommendation**: Context is getting full. For best results in the planning
-phase, I recommend clearing context now.
+{If >60%}: ⚠️ **Recommendation**: Context is getting full. For best results in the planning phase, I
+recommend clearing context now.
 
 **Options**:
 
@@ -332,11 +336,10 @@ phase, I recommend clearing context now.
 2. Create handoff to pause work
 3. Continue anyway (may impact performance)
 
-**Why clear?** Fresh context ensures optimal AI performance for the planning phase,
-which will load additional files and research.
+**Why clear?** Fresh context ensures optimal AI performance for the planning phase, which will load
+additional files and research.
 
-{If <60%}:
-✅ Context healthy. Ready to proceed to planning phase if needed.
+{If <60%}: ✅ Context healthy. Ready to proceed to planning phase if needed.
 
 ---
 
@@ -364,8 +367,7 @@ If the user has follow-up questions:
 
 ## Follow-up Research: {Follow-up Question}
 
-**Date**: {date}
-**Updated by**: {your-name}
+**Date**: {date} **Updated by**: {your-name}
 
 ### Additional Findings
 
@@ -483,7 +485,8 @@ Starting fresh ensures optimal AI performance.
 
 **If using thoughts system:**
 
-- `thoughts/searchable/` is a special directory - paths found there should be documented as their actual location
+- `thoughts/searchable/` is a special directory - paths found there should be documented as their
+  actual location
 - Example: `thoughts/searchable/allison/notes.md` → document as `thoughts/allison/notes.md`
 - Don't change directory names (keep `allison/`, don't change to `shared/`)
 
@@ -502,7 +505,8 @@ Starting fresh ensures optimal AI performance.
 
 ## Linear Integration
 
-If a Linear ticket is associated with the research, the command can automatically update the ticket status.
+If a Linear ticket is associated with the research, the command can automatically update the ticket
+status.
 
 ### How It Works
 
@@ -638,11 +642,14 @@ This command integrates with the complete development workflow:
 
 - **research_codebase → Linear**: Moves ticket to "Research" status and attaches research document
 
-- **research_codebase → create_plan**: Research findings provide foundation for planning. The create_plan command can reference research documents in its "References" section.
+- **research_codebase → create_plan**: Research findings provide foundation for planning. The
+  create_plan command can reference research documents in its "References" section.
 
-- **Research before planning**: Always research the codebase first to understand what exists before planning changes.
+- **Research before planning**: Always research the codebase first to understand what exists before
+  planning changes.
 
-- **Shared agents**: Both research_codebase and create_plan use the same specialized agents (codebase-locator, codebase-analyzer, codebase-pattern-finder).
+- **Shared agents**: Both research_codebase and create_plan use the same specialized agents
+  (codebase-locator, codebase-analyzer, codebase-pattern-finder).
 
 - **Documentation persistence**: Research documents serve as permanent reference for future work.
 
@@ -684,7 +691,8 @@ fi
 
 ## Adaptation Notes
 
-This command is adapted from HumanLayer's research_codebase command. Key differences for portability:
+This command is adapted from HumanLayer's research_codebase command. Key differences for
+portability:
 
 - **Thoughts system**: Made optional - can use simple `research/` directory
 - **Metadata script**: Made optional - can generate metadata inline
@@ -692,4 +700,5 @@ This command is adapted from HumanLayer's research_codebase command. Key differe
 - **Linear integration**: Made optional - only used if Linear MCP available
 - **Web research**: Uses `external-research` agent instead of `web-search-researcher`
 
-The core workflow and philosophy remain the same: parallel sub-agents, documentarian mindset, and structured output.
+The core workflow and philosophy remain the same: parallel sub-agents, documentarian mindset, and
+structured output.

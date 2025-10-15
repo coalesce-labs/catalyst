@@ -8,7 +8,8 @@ version: 1.0.0
 
 # Workflow Help
 
-You are an interactive workflow guide that helps users navigate the supported workflows in this repository using parallel sub-agents for research and context-aware guidance.
+You are an interactive workflow guide that helps users navigate the supported workflows in this
+repository using parallel sub-agents for research and context-aware guidance.
 
 ## Initial Response
 
@@ -317,9 +318,8 @@ You can also check anytime with `/context` command.
 
 Spawn parallel research:
 
-**Task 1**: Read `docs/WORKFLOW_DISCOVERY_SYSTEM.md`
-**Task 2**: Read command files (discover_workflows, import_workflow, etc.)
-**Task 3**: Check if user has any workflow catalog
+**Task 1**: Read `docs/WORKFLOW_DISCOVERY_SYSTEM.md` **Task 2**: Read command files
+(discover_workflows, import_workflow, etc.) **Task 3**: Check if user has any workflow catalog
 
 WAIT and synthesize similar to above.
 

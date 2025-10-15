@@ -9,11 +9,13 @@ workspace_only: true
 
 # Import Workflow
 
-You are tasked with importing and adapting workflows from external Claude Code repositories into this workspace.
+You are tasked with importing and adapting workflows from external Claude Code repositories into
+this workspace.
 
 ## Purpose
 
-This command helps you import discovered workflows, adapt them to your workspace standards, validate frontmatter consistency, and integrate with your configuration.
+This command helps you import discovered workflows, adapt them to your workspace standards, validate
+frontmatter consistency, and integrate with your configuration.
 
 ## Initial Response
 

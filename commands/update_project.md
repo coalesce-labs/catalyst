@@ -9,7 +9,8 @@ workspace_only: true
 
 # Update Project
 
-You are tasked with updating a target project's `.claude/` directory from this workspace, intelligently merging changes while preserving local customizations.
+You are tasked with updating a target project's `.claude/` directory from this workspace,
+intelligently merging changes while preserving local customizations.
 
 ## Purpose
 
@@ -145,8 +146,7 @@ After script completes, show summary:
 
 Current usage: {X}% ({Y}K/{Z}K tokens)
 
-{If >60%}:
-Update complete! Clear context if you're done.
+{If >60%}: Update complete! Clear context if you're done.
 
 ```
 
@@ -402,8 +402,7 @@ Update complete. Review changes and commit.
 
 ## Files Modified
 
-**Script**: `hack/update-project.sh`
-**Metadata**: `.claude/.workspace-metadata.json` (in project)
+**Script**: `hack/update-project.sh` **Metadata**: `.claude/.workspace-metadata.json` (in project)
 **Backup**: `.claude-backup-{timestamp}/` (temporary)
 
 ## See Also

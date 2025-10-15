@@ -400,11 +400,9 @@ Here's how handoffs work in practice:
 
 ### Benefits
 
-✅ **No context loss** - All learnings preserved
-✅ **Validates state** - Checks nothing broke since handoff
-✅ **Actionable** - Clear next steps
-✅ **Searchable** - All handoffs in thoughts/shared/handoffs/
-✅ **Version controlled** - Part of thoughts repo
+✅ **No context loss** - All learnings preserved ✅ **Validates state** - Checks nothing broke since
+handoff ✅ **Actionable** - Clear next steps ✅ **Searchable** - All handoffs in
+thoughts/shared/handoffs/ ✅ **Version controlled** - Part of thoughts repo
 
 ---
 
@@ -440,18 +438,12 @@ Backlog → Research → Plan → Implement → Review → Done
 # With commands:
 
 1. Ticket created (Backlog)
-2. /research_codebase "auth patterns"
-   → Save to thoughts/shared/research/
-   → Attach to ticket
-   → Move to "Plan"
-3. /create_plan (reads research)
-   → Save to thoughts/shared/plans/
-   → Attach to ticket
-   → Move to "Ready"
-4. /implement_plan thoughts/shared/plans/auth-plan.md
-   → Move to "In Progress"
-5. /commit + /describe_pr
-   → Move to "Review"
+2. /research_codebase "auth patterns" → Save to thoughts/shared/research/ → Attach to ticket → Move
+   to "Plan"
+3. /create_plan (reads research) → Save to thoughts/shared/plans/ → Attach to ticket → Move to
+   "Ready"
+4. /implement_plan thoughts/shared/plans/auth-plan.md → Move to "In Progress"
+5. /commit + /describe_pr → Move to "Review"
 ```
 
 ---
@@ -475,8 +467,9 @@ Backlog → Research → Plan → Implement → Review → Done
 
 ### 💡 Key Takeaways
 
-**From Handoffs**: Context handoff is crucial for long tasks
-**From Ralph**: Good workflow progression (research → plan → implement)
-**From Linear**: Attach artifacts (research, plans) to tickets
+**From Handoffs**: Context handoff is crucial for long tasks **From Ralph**: Good workflow
+progression (research → plan → implement) **From Linear**: Attach artifacts (research, plans) to
+tickets
 
-Your setup with agents + commands + thoughts is already excellent. Adding handoffs makes it complete!
+Your setup with agents + commands + thoughts is already excellent. Adding handoffs makes it
+complete!

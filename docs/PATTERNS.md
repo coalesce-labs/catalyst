@@ -183,8 +183,8 @@ name: codebase-locator
 description: Locates files and directories relevant to a feature
 tools: Grep, Glob, Bash(ls only)
 ---
-You are a specialist at finding WHERE code lives.
-Your job is to locate relevant files, NOT analyze their contents.
+You are a specialist at finding WHERE code lives. Your job is to locate relevant files, NOT analyze
+their contents.
 ```
 
 **Bad - Unfocused Agent:**
@@ -195,8 +195,8 @@ name: code-helper
 description: Helps with code stuff
 tools: all
 ---
-You help with anything related to code including finding files,
-analyzing them, fixing bugs, writing tests, and anything else.
+You help with anything related to code including finding files, analyzing them, fixing bugs, writing
+tests, and anything else.
 ```
 
 **Why Single Responsibility Matters:**
@@ -486,8 +486,7 @@ You are a specialist at finding patterns and examples.
 
 ### Pattern 1: {Name}
 
-**Found in**: `file.js:45-67`
-**Used for**: {Purpose}
+**Found in**: `file.js:45-67` **Used for**: {Purpose}
 
 ```{language}
 // Code example
@@ -555,15 +554,11 @@ You are a specialist at validating {things}.
 
 ### Passed Checks
 
-✓ Check 1 - Details
-✓ Check 2 - Details
+✓ Check 1 - Details ✓ Check 2 - Details
 
 ### Failed Checks
 
-✗ Check 3 - Details
-Location: file.js:45
-Expected: X
-Found: Y
+✗ Check 3 - Details Location: file.js:45 Expected: X Found: Y
 
 ### Warnings
 

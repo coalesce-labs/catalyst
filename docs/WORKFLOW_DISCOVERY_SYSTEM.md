@@ -1,9 +1,9 @@
 # Workflow Discovery System
 
-A comprehensive meta-workflow system for discovering, importing, creating, and validating Claude Code workflows from external repositories.
+A comprehensive meta-workflow system for discovering, importing, creating, and validating Claude
+Code workflows from external repositories.
 
-**Version**: 1.0.0
-**Last Updated**: 2025-01-08
+**Version**: 1.0.0 **Last Updated**: 2025-01-08
 
 ## Overview
 
@@ -445,10 +445,7 @@ version: 1.0.0
 ```yaml
 ---
 description: { one-line-summary } # No 'name' field!
-category:
-  {
-    workflow|planning|implementation|validation|linear|git|workflow-discovery|general,
-  }
+category: { workflow|planning|implementation|validation|linear|git|workflow-discovery|general }
 argument-hint: { optional }
 tools: [tool-list]
 model: inherit

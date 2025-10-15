@@ -1,6 +1,7 @@
 # Best Practices Guide
 
-A guide to effective patterns based on Anthropic's context engineering principles and battle-tested workflows.
+A guide to effective patterns based on Anthropic's context engineering principles and battle-tested
+workflows.
 
 ## Table of Contents
 
@@ -17,7 +18,8 @@ A guide to effective patterns based on Anthropic's context engineering principle
 
 ## Core Principles
 
-These principles are derived from Anthropic's context engineering article and proven through real-world usage.
+These principles are derived from Anthropic's context engineering article and proven through
+real-world usage.
 
 ### 1. Context is Precious
 
@@ -396,7 +398,8 @@ Do database stuff and API stuff
 - [ ] Unit tests pass: `make test-unit`
 - [ ] Integration tests pass: `make test-integration`
 - [ ] Type checking passes: `npm run typecheck`
-- [ ] API returns 429 on exceeded limit: `curl -X POST http://localhost:8080/api/test -H "X-Test: rate-limit-exceeded"`
+- [ ] API returns 429 on exceeded limit:
+      `curl -X POST http://localhost:8080/api/test -H "X-Test: rate-limit-exceeded"`
 
 #### Manual Verification
 
@@ -467,8 +470,7 @@ Do database stuff and API stuff
   - Standard practice, helps clients implement backoff
 ```
 
-**Process:**
-If you have open questions during planning:
+**Process:** If you have open questions during planning:
 
 1. STOP writing the plan
 2. Research the question (spawn agents, ask user)
@@ -915,8 +917,7 @@ Examples:
 
 ### Sharing Context Across Worktrees
 
-**Thoughts Directory:**
-All worktrees share the same thoughts directory via symlink.
+**Thoughts Directory:** All worktrees share the same thoughts directory via symlink.
 
 **Automatic Sharing:**
 

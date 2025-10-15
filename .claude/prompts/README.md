@@ -1,11 +1,12 @@
 # Prompts Directory
 
-This directory contains **unstructured, project-specific customization logic** that doesn't fit in `config.json`.
+This directory contains **unstructured, project-specific customization logic** that doesn't fit in
+`config.json`.
 
 ## Purpose
 
-**config.json** = Structured data (IDs, URLs, booleans, arrays)
-**prompts/** = Unstructured logic (classification rules, custom prompts, decision trees)
+**config.json** = Structured data (IDs, URLs, booleans, arrays) **prompts/** = Unstructured logic
+(classification rules, custom prompts, decision trees)
 
 ## Use Cases
 
