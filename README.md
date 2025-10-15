@@ -14,6 +14,7 @@ This repository contains battle-tested patterns for working with Claude Code on 
 ## Philosophy
 
 Based on Anthropic's context engineering principles:
+
 - **Context is precious** - Use specialized, focused agents rather than monolithic ones
 - **Just-in-time loading** - Load context dynamically, not all at once
 - **Sub-agent architecture** - Parallel, focused research > sequential analysis
@@ -268,18 +269,21 @@ Agents are specialized AI experts that Claude Code can delegate to:
 Commands are workflows you invoke with `/command_name`:
 
 **Development Workflow:**
+
 - **/research-codebase** - Document existing system with parallel sub-agents
 - **/create-plan** - Interactive planning with research
 - **/implement-plan** - Execute approved plans
 - **/validate-plan** - Verify implementation
 
 **Workflow Discovery:**
+
 - **/discover-workflows** - Research external Claude Code repositories
 - **/import-workflow** - Import and adapt external workflows
 - **/create-workflow** - Create new agents/commands with templates
 - **/validate-frontmatter** - Ensure frontmatter consistency
 
 **Utilities:**
+
 - **/create-worktree** - Set up parallel work environment
 - **/commit** - Create well-structured git commits
 - **/describe-pr** - Generate comprehensive PR descriptions
@@ -304,6 +308,7 @@ A git-backed context management system:
 ```
 
 Benefits:
+
 - **Persistent** - Context survives across worktrees
 - **Searchable** - Fast grep via searchable/ directory
 - **Version controlled** - All context is tracked in git
@@ -350,6 +355,7 @@ Installs to `.claude/` in a specific project:
 ```
 
 **What gets installed:**
+
 - All 6 agents
 - 13 portable commands (excludes 5 workspace-only commands)
 - Configuration template
@@ -357,6 +363,7 @@ Installs to `.claude/` in a specific project:
 - **Note**: README.md files are excluded (they're documentation, not agents/commands)
 
 **Workspace-only commands** (excluded from project installs):
+
 - `/validate-frontmatter` - Workspace validation
 - `/update-project` - Workspace management
 - `/discover-workflows` - Workflow catalog building
@@ -401,6 +408,7 @@ When you improve the workspace, easily update your projects:
 ```
 
 **Smart updating**:
+
 - ✅ Preserves local customizations (config values, configured commands)
 - ✅ Intelligently merges config.json (workspace structure + local values)
 - ✅ Auto-updates agents (pure logic, no customization)
@@ -409,6 +417,7 @@ When you improve the workspace, easily update your projects:
 - ✅ Tracks versions and detects drift
 
 **Example workflow**:
+
 1. Improve agents/commands in workspace
 2. Commit workspace changes
 3. Run `update-project.sh` on each project
@@ -420,12 +429,14 @@ When you improve the workspace, easily update your projects:
 This workspace "eats its own dog food" - the commands and agents are installed into `.claude/` so you can use them while working on the workspace itself!
 
 **What this means**:
+
 - You can use `/workflow-help` to learn about workflows
 - You can use `/create-plan` to plan new features
 - You can use `/research-codebase` to understand the workspace structure
 - All agents and commands work on this codebase
 
 **Source vs Installation**:
+
 - `agents/*.md` - Source files (edit these)
 - `commands/*.md` - Source files (edit these)
 - `.claude/agents/*.md` - Installed copies (used by Claude Code)
@@ -434,25 +445,57 @@ This workspace "eats its own dog food" - the commands and agents are installed i
 **After editing source files**:
 The `.claude/` copies are automatically synced since they're in the same repo. Just restart Claude Code to pick up changes.
 
+## Contributing
+
+### Code Quality
+
+All code must pass quality checks before merging:
+
+```bash
+# Run all quality checks
+make check
+
+# Fix formatting issues
+make format
+
+# Validate frontmatter
+make check-frontmatter
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+
+### What Gets Checked
+
+- ✅ **Shellcheck** - Shell script linting
+- ✅ **Markdownlint** - Markdown formatting
+- ✅ **Frontmatter validation** - Command/agent frontmatter
+- ✅ **Prettier** - Code formatting
+- ✅ **YAML linting** - Configuration files
+
 ## Customization
 
 ### Adding Your Own Agents
 
 1. Create `agents/my-agent.md` following the format
-2. Run `./hack/install-user.sh` to install
-3. Test with: `@agent-my-agent help with this task`
+2. Add required frontmatter (name, description, tools)
+3. Run `make check` to validate
+4. Run `./hack/install-user.sh` to install
+5. Test with: `@agent-my-agent help with this task`
 
 ### Adding Your Own Commands
 
-1. Create `commands/my_command.md` following the format
-2. Run `./hack/install-user.sh` to install
-3. Test with: `/my_command`
+1. Create `commands/{namespace}/my_command.md` following the format
+2. Add required frontmatter (description, category)
+3. Run `make check` to validate
+4. Run `./hack/install-user.sh` to install
+5. Test with: `/my_command`
 
-See [PATTERNS.md](docs/PATTERNS.md) for detailed guidelines.
+See [PATTERNS.md](docs/PATTERNS.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
 ## Credits
 
 Patterns adapted from:
+
 - [HumanLayer's researcher codebase](https://github.com/humanlayer/humanlayer)
 - [Anthropic's Context Engineering Guide](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
 - [Claude Code Subagents Collection](https://github.com/davepoon/claude-code-subagents-collection)

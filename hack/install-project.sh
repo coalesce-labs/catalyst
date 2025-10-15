@@ -33,15 +33,15 @@ mkdir -p "${PROJECT_DIR}/.claude/commands"
 echo "📋 Installing agents..."
 AGENT_COUNT=0
 for agent in "${WORKSPACE_DIR}/agents"/*.md; do
-	if [[ -f "${agent}" ]]; then
+	if [[ -f ${agent} ]]; then
 		filename=$(basename "${agent}")
 		# Skip README.md - it's documentation, not an agent
-		if [[ "${filename}" = "README.md" ]]; then
+		if [[ ${filename} == "README.md" ]]; then
 			continue
 		fi
 		cp "${agent}" "${PROJECT_DIR}/.claude/agents/"
 		AGENT_COUNT=$((AGENT_COUNT + 1))
-		echo "  �${ $filena}me"
+		echo "  ✓ ${filename}"
 	fi
 done
 
@@ -58,30 +58,31 @@ fi
 
 # Create namespace directories
 for namespace_dir in "${WORKSPACE_DIR}/commands"/*/; do
-	if [[ -d "${namespace_dir}" ]]; then
+	if [[ -d ${namespace_dir} ]]; then
 		namespace=$(basename "${namespace_dir}")
 		mkdir -p "${PROJECT_DIR}/.claude/commands/${namespace}"
 
 		# Copy commands from this namespace
 		for command in "${namespace_dir}"*.md; do
-			if [[ -f "${command}" ]]; then
+			if [[ -f ${command} ]]; then
 				filename=$(basename "${command}")
 
 				# Skip README.md - it's documentation
-				if [[ "${filename}" = "README.md" ]]; then
+				if [[ ${filename} == "README.md" ]]; then
 					continue
 				fi
 
 				# Skip workspace-only commands unless installing to workspace itself
+				# shellcheck disable=SC2310 # Intentionally using functions in conditions
 				if ! is_workspace_install && should_skip_on_install "${command}"; then
-					echo "  ○ Skipped${ $namespa}c${/$filena}me (workspace-only)"
+					echo "  ○ Skipped ${namespace}/${filename} (workspace-only)"
 					SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
 					continue
 				fi
 
 				cp "${command}" "${PROJECT_DIR}/.claude/commands/${namespace}/"
 				COMMAND_COUNT=$((COMMAND_COUNT + 1))
-				echo "  �${ $namespa}c${/$filena}me"
+				echo "  ✓ ${namespace}/${filename}"
 			fi
 		done
 	fi
@@ -121,15 +122,15 @@ append_claude_artifact() {
 	local target_file="${project_dir}/CLAUDE.md"
 
 	# Check if artifact exists
-	if [[ ! -f "$artifact_file" ]]; then
+	if [[ ! -f $artifact_file ]]; then
 		echo "⚠️  Artifact not found: $artifact_file"
 		return 1
 	fi
 
 	# If CLAUDE.md doesn't exist, create it
-	if [[ ! -f "$target_file" ]]; then
+	if [[ ! -f $target_file ]]; then
 		echo "📋 Creating CLAUDE.md..."
-		cat > "$target_file" <<'EOF'
+		cat >"$target_file" <<'EOF'
 # CLAUDE.md
 
 This file provides guidance to Claude Code when working with code in this repository.
@@ -147,7 +148,7 @@ EOF
 
 	# Append artifact
 	echo ""
-	cat "$artifact_file" >> "$target_file"
+	cat "$artifact_file" >>"$target_file"
 	echo "  ✓ Appended workspace artifact to CLAUDE.md"
 }
 
