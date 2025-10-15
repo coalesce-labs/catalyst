@@ -30,10 +30,12 @@ The configuration is stored in `.claude/config.json`:
 Commands like `/create_plan`, `/create_handoff`, etc. use ticket references in filenames and examples.
 
 **Default behavior** (no config):
+
 - Uses generic format: `PROJ-123`, `PROJ-456`
 - Examples show `PROJ` as placeholder
 
 **With config** (`.claude/config.json`):
+
 ```json
 {
   "project": {
@@ -41,6 +43,7 @@ Commands like `/create_plan`, `/create_handoff`, etc. use ticket references in f
   }
 }
 ```
+
 - Commands will use: `ENG-123`, `ENG-456`
 - Filenames: `thoughts/shared/plans/2025-01-08-ENG-123-feature.md`
 - Handoffs: `thoughts/shared/handoffs/ENG-123/...`
@@ -60,6 +63,7 @@ The `/linear` command uses self-configuration on first use:
 ```
 
 These values are:
+
 - Prompted on first `/linear` use
 - Saved automatically
 - Used for all Linear operations
@@ -78,6 +82,7 @@ Detected automatically from HumanLayer config:
 ```
 
 This is read from `~/.config/humanlayer/config.json` and used in:
+
 - File paths: `thoughts/ryan/notes.md`
 - Handoff metadata
 - Plan authorship
@@ -103,6 +108,7 @@ Create or edit `.claude/config.json` in your project:
 Some commands prompt for configuration on first use:
 
 **`/linear` command**:
+
 ```
 This Linear command needs one-time configuration...
 
@@ -132,10 +138,10 @@ After configuration, the command updates `.claude/config.json` automatically.
 ```json
 {
   "project": {
-    "ticketPrefix": "PROJ"  // Keep generic
+    "ticketPrefix": "PROJ" // Keep generic
   },
   "linear": {
-    "teamId": null,  // Keep null
+    "teamId": null, // Keep null
     "projectId": null,
     "thoughtsRepoUrl": null
   }
@@ -151,10 +157,10 @@ After configuration, the command updates `.claude/config.json` automatically.
 ```json
 {
   "project": {
-    "ticketPrefix": "ENG"  // Your actual prefix
+    "ticketPrefix": "ENG" // Your actual prefix
   },
   "linear": {
-    "teamId": "abc123",  // Your actual team ID
+    "teamId": "abc123", // Your actual team ID
     "projectId": "proj456",
     "thoughtsRepoUrl": "https://github.com/coalesce-labs/thoughts/blob/main"
   }
@@ -179,14 +185,14 @@ Commands read configuration in this order:
 
 Different teams use different formats:
 
-| Team | Prefix | Example |
-|------|--------|---------|
-| Engineering | `ENG` | `ENG-123` |
-| Features | `FEAT` | `FEAT-456` |
-| Bugs | `BUG` | `BUG-789` |
-| Design | `DES` | `DES-101` |
-| Product | `PROD` | `PROD-202` |
-| Generic | `PROJ` | `PROJ-303` |
+| Team        | Prefix | Example    |
+| ----------- | ------ | ---------- |
+| Engineering | `ENG`  | `ENG-123`  |
+| Features    | `FEAT` | `FEAT-456` |
+| Bugs        | `BUG`  | `BUG-789`  |
+| Design      | `DES`  | `DES-101`  |
+| Product     | `PROD` | `PROD-202` |
+| Generic     | `PROJ` | `PROJ-303` |
 
 Choose what works for your team!
 
@@ -250,12 +256,13 @@ Edit `.claude/config.json`:
 ```json
 {
   "project": {
-    "ticketPrefix": "FEAT"  // Changed from ENG
+    "ticketPrefix": "FEAT" // Changed from ENG
   }
 }
 ```
 
 Commit the change:
+
 ```bash
 git add .claude/config.json
 git commit -m "Update ticket prefix to FEAT"
@@ -264,6 +271,7 @@ git commit -m "Update ticket prefix to FEAT"
 ### Update Linear Settings
 
 Re-run the Linear setup:
+
 ```bash
 /linear
 # It will detect existing config and ask if you want to reconfigure
@@ -278,6 +286,7 @@ Or edit `.claude/config.json` directly.
 If you work across multiple clients, use the `hl-switch` system:
 
 **Client A** (`config-client-a.json`):
+
 ```json
 {
   "project": { "ticketPrefix": "ACME" },
@@ -289,6 +298,7 @@ If you work across multiple clients, use the `hl-switch` system:
 ```
 
 **Client B** (`config-client-b.json`):
+
 ```json
 {
   "project": { "ticketPrefix": "BETA" },
@@ -300,6 +310,7 @@ If you work across multiple clients, use the `hl-switch` system:
 ```
 
 Switch between them:
+
 ```bash
 hl-switch client-a  # Uses ACME tickets
 hl-switch client-b  # Uses BETA tickets
@@ -320,6 +331,7 @@ See [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) for details.
 ### "Config not being read"
 
 **Check**:
+
 1. File exists: `ls .claude/config.json`
 2. Valid JSON: `cat .claude/config.json | jq`
 3. Correct location: Must be in `.claude/` directory
@@ -327,6 +339,7 @@ See [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) for details.
 ### "Which config to edit?"
 
 **Rule of thumb**:
+
 - **In `ryan-claude-workspace/`**: Keep generic (PROJ, null values)
 - **In your project**: Use actual values (ENG, team IDs)
 
@@ -337,6 +350,7 @@ See [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) for details.
 ### 1. Commit Project Config
 
 Always commit `.claude/config.json` in your project repos:
+
 ```bash
 git add .claude/config.json
 git commit -m "Configure Claude workspace for this project"
@@ -345,6 +359,7 @@ git commit -m "Configure Claude workspace for this project"
 ### 2. Don't Commit Workspace Config
 
 In `ryan-claude-workspace`, keep it generic:
+
 ```bash
 # .gitignore could include:
 # .claude/config.json
@@ -355,10 +370,12 @@ In `ryan-claude-workspace`, keep it generic:
 ### 3. Document Your Choices
 
 Add a comment in your project's README:
+
 ```markdown
 ## Claude Code Setup
 
 This project uses:
+
 - Ticket prefix: `ENG-XXX`
 - Linear team: Engineering
 - See `.claude/config.json` for configuration
@@ -367,6 +384,7 @@ This project uses:
 ### 4. Share With Team
 
 After configuration:
+
 ```bash
 git add .claude/config.json .claude/commands/
 git commit -m "Set up Claude Code workspace"
@@ -380,12 +398,14 @@ Now your whole team has the same configuration!
 ## Summary
 
 **Configuration makes commands portable**:
+
 - ✅ No hardcoded values
 - ✅ Easy to customize per-project
 - ✅ Safe to share with team
 - ✅ Self-configuring where possible
 
 **Two-step setup**:
+
 1. **Install workspace**: Copy agents/commands
 2. **Configure project**: Set ticket prefix and Linear settings
 

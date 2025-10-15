@@ -38,6 +38,7 @@ What would you like to do?
 ### Step 1: Determine Scope
 
 Get user selection:
+
 - **All workflows**: Check everything
 - **Auto-fix**: Fix issues automatically
 - **Specific workflow**: Validate one file
@@ -52,6 +53,7 @@ Use TodoWrite to track parallel validation tasks.
 **For "Validate All" mode**:
 
 **Task 1 - Validate Agents**:
+
 ```
 Use codebase-analyzer agent:
 "Validate frontmatter in all files matching agents/*.md. For each file, check:
@@ -69,6 +71,7 @@ Return: Validation report for all agents
 ```
 
 **Task 2 - Validate Commands**:
+
 ```
 Use codebase-analyzer agent:
 "Validate frontmatter in all files matching commands/*.md. For each file, check:
@@ -87,6 +90,7 @@ Return: Validation report for all commands
 ```
 
 **Task 3 - Extract Tool References**:
+
 ```
 Use codebase-pattern-finder agent:
 "Extract all unique tool names referenced in frontmatter across agents/*.md and commands/*.md. Return a sorted list of all tools used."
@@ -101,6 +105,7 @@ Return: Complete list of tools referenced
 ### Step 3: Aggregate Validation Results
 
 Combine results from parallel tasks:
+
 - Agent issues (Task 1)
 - Command issues (Task 2)
 - Tool inventory (Task 3)
@@ -108,6 +113,7 @@ Combine results from parallel tasks:
 Mark all tasks complete in TodoWrite.
 
 Analyze:
+
 1. **Critical issues**: Missing required fields, invalid formats
 2. **Warnings**: Unusual patterns, potential improvements
 3. **Tool usage**: Are all tools valid?
@@ -127,27 +133,31 @@ Show comprehensive report:
 ## Summary
 
 - ✅ **Passed**: {pass-count} workflows
-- ⚠️  **Warnings**: {warning-count} workflows
+- ⚠️ **Warnings**: {warning-count} workflows
 - ❌ **Failed**: {fail-count} workflows
 
 ## Critical Issues
 
 ### {workflow-name}.md
+
 - ❌ Missing required field: `version`
 - ❌ Invalid category: "misc" (should be one of: general, research, analysis...)
 
 ### {workflow-name}.md
+
 - ❌ Name field "{name}" doesn't match filename "{filename}"
 - ❌ Invalid tool reference: "SearchFiles" (not a valid Claude Code tool)
 
 ## Warnings
 
 ### {workflow-name}.md
-- ⚠️  Description is very short (< 20 chars)
-- ⚠️  No category specified (defaulting to "general")
+
+- ⚠️ Description is very short (< 20 chars)
+- ⚠️ No category specified (defaulting to "general")
 
 ### {workflow-name}.md
-- ⚠️  Using old version format: "v1.0" (should be "1.0.0")
+
+- ⚠️ Using old version format: "v1.0" (should be "1.0.0")
 
 ## Tool Inventory
 
@@ -156,20 +166,23 @@ Show comprehensive report:
 **Invalid references**: {invalid-count}
 
 ### Used Tools:
+
 - Read ({usage-count} workflows)
 - Write ({usage-count} workflows)
 - Edit ({usage-count} workflows)
 - Grep ({usage-count} workflows)
 - Glob ({usage-count} workflows)
-[... more tools ...]
+  [... more tools ...]
 
 ### Invalid References:
+
 - SearchFiles (used in {workflow-name}.md) → Should be: Grep or Glob
 - FindFile (used in {workflow-name}.md) → Should be: Glob
 
 ## Category Distribution
 
 ### Agents:
+
 - research: {count}
 - analysis: {count}
 - search: {count}
@@ -178,6 +191,7 @@ Show comprehensive report:
 - general: {count}
 
 ### Commands:
+
 - workflow: {count}
 - planning: {count}
 - implementation: {count}
@@ -197,6 +211,7 @@ Show comprehensive report:
 ---
 
 Next steps:
+
 - Run with `--fix` to auto-correct issues
 - Review and approve fixes before applying
 - Re-validate after fixes
@@ -212,21 +227,25 @@ If user chose auto-fix:
    - Ask for confirmation
 
 2. **Present fix plan**:
+
    ```markdown
    # Auto-Fix Plan
 
    I can automatically fix {fixable-count} issues:
 
    ## {workflow-name}.md
+
    - Add missing `version: 1.0.0`
    - Fix category: "misc" → "general"
    - Standardize tool name: "SearchFiles" → "Grep"
 
    ## {workflow-name}.md
+
    - Fix version format: "v1.0" → "1.0.0"
    - Add missing `model: inherit`
 
    **Cannot auto-fix** ({manual-count} issues):
+
    - {workflow-name}.md: Description too short (needs human review)
    - {workflow-name}.md: Unclear category (analysis vs research?)
 
@@ -239,6 +258,7 @@ If user chose auto-fix:
    - Preserve original formatting and comments
 
 4. **Report results**:
+
    ```markdown
    ✅ Auto-fix complete!
 
@@ -247,16 +267,19 @@ If user chose auto-fix:
    ### Changes Made:
 
    #### agents/codebase-locator.md
+
    - Added `version: 1.0.0`
    - Standardized category: "search"
 
    #### commands/create_plan.md
+
    - Fixed version: "v1.0" → "1.0.0"
    - Updated tool reference: "SearchFiles" → "Grep"
 
    [... more changes ...]
 
    **Still needs manual review**:
+
    - {workflow-name}.md: {issue description}
 
    Re-run validation to verify: `/validate-frontmatter`
@@ -268,7 +291,7 @@ If user chose to generate standard:
 
 Create `docs/FRONTMATTER_STANDARD.md`:
 
-```markdown
+````markdown
 # Frontmatter Standard
 
 This document defines the frontmatter standard for all agents and commands in this workspace.
@@ -279,26 +302,27 @@ This document defines the frontmatter standard for all agents and commands in th
 
 ```yaml
 ---
-name: {agent-name}           # Agent identifier (kebab-case, must match filename)
-description: |               # Multi-line description
+name: { agent-name } # Agent identifier (kebab-case, must match filename)
+description: | # Multi-line description
   {What this agent does}
 
   Use this agent when:
   - {Use case 1}
   - {Use case 2}
-tools: {tool-list}          # Array of Claude Code tools
-model: inherit              # Always "inherit"
-category: {category}        # One of: research, analysis, search, execution, validation, general
-version: 1.0.0              # Semantic version
+tools: { tool-list } # Array of Claude Code tools
+model: inherit # Always "inherit"
+category: { category } # One of: research, analysis, search, execution, validation, general
+version: 1.0.0 # Semantic version
 ---
 ```
+````
 
 ### Optional Fields
 
 ```yaml
-source: {repo-url}          # If imported/adapted
-adapted: {date}             # Date of adaptation
-original-author: {name}     # Original creator
+source: { repo-url } # If imported/adapted
+adapted: { date } # Date of adaptation
+original-author: { name } # Original creator
 ```
 
 ### Valid Categories
@@ -335,21 +359,21 @@ version: 1.0.0
 
 ```yaml
 ---
-description: {one-line-summary}  # Brief description (no name field!)
-category: {category}             # Command category
-tools: {tool-list}              # Array of Claude Code tools
-model: inherit                  # Always "inherit"
-version: 1.0.0                  # Semantic version
+description: { one-line-summary } # Brief description (no name field!)
+category: { category } # Command category
+tools: { tool-list } # Array of Claude Code tools
+model: inherit # Always "inherit"
+version: 1.0.0 # Semantic version
 ---
 ```
 
 ### Optional Fields
 
 ```yaml
-argument-hint: {hint}       # Hint for command arguments
-source: {repo-url}          # If imported/adapted
-adapted: {date}             # Date of adaptation
-original-author: {name}     # Original creator
+argument-hint: { hint } # Hint for command arguments
+source: { repo-url } # If imported/adapted
+adapted: { date } # Date of adaptation
+original-author: { name } # Original creator
 ```
 
 ### Valid Categories
@@ -381,22 +405,27 @@ version: 1.0.0
 Claude Code provides these tools:
 
 ### File Operations
+
 - `Read` - Read file contents
 - `Write` - Write files
 - `Edit` - Edit existing files
 
 ### Search
+
 - `Grep` - Search file contents (regex)
 - `Glob` - Find files by pattern
 
 ### Execution
+
 - `Bash` - Run shell commands
 - `Task` - Spawn sub-agents
 
 ### Management
+
 - `TodoWrite` - Manage todo lists
 
 ### External
+
 - `WebFetch` - Fetch web content
 - `WebSearch` - Search the web
 - `mcp__deepwiki__ask_question` - Query external repos
@@ -404,6 +433,7 @@ Claude Code provides these tools:
 - `mcp__deepwiki__read_wiki_contents` - Read repo docs
 
 ### Linear Integration
+
 - `linear_get_ticket` - Get Linear ticket details
 - `linear_create_ticket` - Create Linear tickets
 - `linear_update_ticket` - Update Linear tickets
@@ -435,14 +465,16 @@ Claude Code provides these tools:
 ## Common Mistakes
 
 ### ❌ Wrong: Command with name field
+
 ```yaml
 ---
-name: create-plan              # Commands don't have name field
+name: create-plan # Commands don't have name field
 description: Create plans
 ---
 ```
 
 ### ✅ Correct: Command without name
+
 ```yaml
 ---
 description: Create detailed implementation plans
@@ -451,23 +483,27 @@ category: planning
 ```
 
 ### ❌ Wrong: Invalid tool reference
+
 ```yaml
-tools: SearchFiles, FindFile   # These aren't real tools
+tools: SearchFiles, FindFile # These aren't real tools
 ```
 
 ### ✅ Correct: Valid tools
+
 ```yaml
-tools: Grep, Glob              # Correct tool names
+tools: Grep, Glob # Correct tool names
 ```
 
 ### ❌ Wrong: Version format
+
 ```yaml
-version: v1.0                  # Should be semver
+version: v1.0 # Should be semver
 ```
 
 ### ✅ Correct: Semver version
+
 ```yaml
-version: 1.0.0                 # Proper semver
+version: 1.0.0 # Proper semver
 ```
 
 ## Updating the Standard
@@ -484,10 +520,12 @@ When adding new categories or patterns:
 - `/validate-frontmatter` - Validate workflows against this standard
 - `/create-workflow` - Create new workflows with correct frontmatter
 - `/import-workflow` - Import external workflows and adapt frontmatter
+
 ```
 
 Save and report:
 ```
+
 ✅ Frontmatter standard documented!
 
 **Saved to**: docs/FRONTMATTER_STANDARD.md
@@ -495,10 +533,12 @@ Save and report:
 This document now serves as the canonical reference for all frontmatter in this workspace.
 
 Next steps:
+
 1. Review the standard
 2. Share with team
 3. Use `/validate-frontmatter` to check compliance
 4. Reference when creating new workflows
+
 ```
 
 ## Advanced Usage
@@ -506,7 +546,9 @@ Next steps:
 ### Validate Specific Workflow
 
 ```
+
 /validate-frontmatter agents/codebase-analyzer.md
+
 ```
 
 Validates just one file.
@@ -514,7 +556,9 @@ Validates just one file.
 ### Auto-Fix Everything
 
 ```
+
 /validate-frontmatter --fix
+
 ```
 
 Automatically fixes all issues without prompting.
@@ -522,7 +566,9 @@ Automatically fixes all issues without prompting.
 ### Generate Report Only
 
 ```
+
 /validate-frontmatter --report-only > frontmatter-report.md
+
 ```
 
 Saves report to file for review.
@@ -530,7 +576,9 @@ Saves report to file for review.
 ### Validate by Category
 
 ```
+
 /validate-frontmatter --category research
+
 ```
 
 Only validates workflows in "research" category.
@@ -616,3 +664,4 @@ Only validates workflows in "research" category.
 - Provide error details
 
 This command ensures workspace consistency and quality!
+```

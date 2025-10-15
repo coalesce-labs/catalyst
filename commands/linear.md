@@ -12,6 +12,7 @@ You are tasked with managing Linear tickets, including creating tickets from tho
 **Before using this command for the first time**, you need to configure it for your Linear workspace.
 
 Run this configuration check:
+
 1. Check if this file contains `[NEEDS_SETUP]` markers
 2. If yes, prompt the user for configuration and update this file
 3. If no, proceed with normal operation
@@ -40,12 +41,14 @@ You'll need to commit the changes so others on your team can use it too.
 ```
 
 After getting responses, update this file:
+
 - Replace `[NEEDS_SETUP:TEAM_ID]` with the actual team ID
 - Replace `[NEEDS_SETUP:PROJECT_ID]` with the project ID (or remove if not used)
 - Replace `[NEEDS_SETUP:THOUGHTS_URL]` with the URL pattern
 - Remove this setup section entirely
 
 Then inform the user:
+
 ```
 ✅ Configuration complete! I've updated the linear.md file.
 
@@ -63,11 +66,11 @@ Now you can use /linear normally!
 ```javascript
 // [NEEDS_SETUP] - Remove this line after configuration
 const LINEAR_CONFIG = {
-  teamId: "[NEEDS_SETUP:TEAM_ID]",  // Your Linear team ID
-  defaultProjectId: "[NEEDS_SETUP:PROJECT_ID]",  // Default project ID (optional)
-  thoughtsRepoUrl: "[NEEDS_SETUP:THOUGHTS_URL]",  // e.g., "https://github.com/org/thoughts/blob/main"
-  reposPath: "repos",  // Path in thoughts repo to project-specific thoughts
-  user: "your-name"  // Your username in thoughts (will be detected from thoughts config)
+  teamId: "[NEEDS_SETUP:TEAM_ID]", // Your Linear team ID
+  defaultProjectId: "[NEEDS_SETUP:PROJECT_ID]", // Default project ID (optional)
+  thoughtsRepoUrl: "[NEEDS_SETUP:THOUGHTS_URL]", // e.g., "https://github.com/org/thoughts/blob/main"
+  reposPath: "repos", // Path in thoughts repo to project-specific thoughts
+  user: "your-name", // Your username in thoughts (will be detected from thoughts config)
 };
 ```
 
@@ -76,6 +79,7 @@ const LINEAR_CONFIG = {
 ## Initial Setup
 
 First, verify that Linear MCP tools are available by checking if any `mcp__linear__` tools exist. If not, respond:
+
 ```
 I need access to Linear tools to help with ticket management. Please run the `/mcp` command to enable the Linear MCP server, then try again.
 ```
@@ -83,6 +87,7 @@ I need access to Linear tools to help with ticket management. Please run the `/m
 If tools are available, respond based on the user's request:
 
 ### For general requests:
+
 ```
 I can help you with Linear tickets. What would you like to do?
 1. Create a new ticket from a thoughts document
@@ -135,6 +140,7 @@ These commands automatically update ticket status:
 ### URL Mapping for Thoughts Documents
 
 When referencing thoughts documents, always provide GitHub links using the `links` parameter:
+
 - `thoughts/shared/...` → `{thoughtsRepoUrl}/repos/{project}/shared/...`
 - `thoughts/{user}/...` → `{thoughtsRepoUrl}/repos/{project}/{user}/...`
 - `thoughts/global/...` → `{thoughtsRepoUrl}/global/...`
@@ -182,6 +188,7 @@ When referencing thoughts documents, always provide GitHub links using the `link
 
 5. **Draft the ticket summary:**
    Present a draft to the user:
+
    ```
    ## Draft Linear Ticket
 
@@ -218,6 +225,7 @@ When referencing thoughts documents, always provide GitHub links using the `link
    Note: Ticket will be created in "Backlog" status by default.
 
 7. **Create the Linear ticket:**
+
    ```
    mcp__linear__create_issue with:
    - title: [refined title]
@@ -264,6 +272,7 @@ When user wants to add a comment to a ticket:
    - Do this for both thoughts/ and code files
 
 4. **Comment structure example:**
+
    ```markdown
    Implemented retry logic in webhook handler to address rate limit issues.
 
@@ -271,6 +280,7 @@ When user wants to add a comment to a ticket:
    so exponential backoff alone wasn't sufficient - added request queuing.
 
    Files updated:
+
    - `src/webhooks/handler.ts` ([GitHub](link))
    - `thoughts/shared/rate_limit_analysis.md` ([GitHub](link))
    ```
@@ -289,6 +299,7 @@ When moving tickets to a new status:
    - Show current status in workflow
 
 2. **Suggest next status based on workflow:**
+
    ```
    Backlog → Triage (for initial review)
    Triage → Spec Needed (needs more detail) OR Research Needed (needs investigation)
@@ -305,13 +316,13 @@ When moving tickets to a new status:
 
 3. **Automatic status updates:**
    When certain commands are run, automatically update ticket status:
-
    - `/create_plan` with ticket → Move to "Plan in Progress"
    - Plan synced and linked → Move to "Plan in Review"
    - `/implement_plan` with ticket → Move to "In Dev"
    - `/describe_pr` with ticket → Move to "In Review"
 
 4. **Manual status updates:**
+
    ```
    mcp__linear__update_issue with:
    - id: [ticket ID]
@@ -336,6 +347,7 @@ When user wants to find tickets:
    - Date ranges
 
 2. **Execute search:**
+
    ```
    mcp__linear__list_issues with:
    - query: [search text]
@@ -359,20 +371,24 @@ When user wants to find tickets:
 When these commands are run, check if there's a related Linear ticket and update it:
 
 **During `/create_plan`:**
+
 1. If ticket mentioned, move to "Plan in Progress"
 2. When plan complete, attach to ticket via links
 3. Add comment with plan summary
 4. Move to "Plan in Review"
 
 **During `/implement_plan`:**
+
 1. If ticket in plan metadata, move to "In Dev"
 2. Add comment: "Started implementation from plan: [link]"
 
 **During `/describe_pr`:**
+
 1. If ticket mentioned in PR or plan, move to "In Review"
 2. Add comment with PR link
 
 **During `/commit`:**
+
 1. If ticket mentioned in commits, consider adding progress comment
 
 ---

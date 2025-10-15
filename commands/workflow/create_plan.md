@@ -1,3 +1,8 @@
+---
+description: Create detailed implementation plans through an interactive process
+category: workflow
+---
+
 # Implementation Plan
 
 ## Configuration Note
@@ -320,7 +325,7 @@ After structure approval:
    fi
    ```
 
-2. **Check context usage and present plan**:
+3. **Check context usage and present plan**:
 
    **Monitor your context** and present:
 
@@ -364,7 +369,7 @@ After structure approval:
    - Missing edge cases or considerations?
    ```
 
-3. **Iterate based on feedback** - be ready to:
+4. **Iterate based on feedback** - be ready to:
    - Add missing phases
    - Adjust technical approach
    - Clarify success criteria (both automated and manual)
@@ -372,9 +377,9 @@ After structure approval:
    - After making changes, run `humanlayer thoughts sync` again
    - **Monitor context** - if >70% during iterations, warn user to review file offline
 
-4. **Continue refining** until the user is satisfied
+5. **Continue refining** until the user is satisfied
 
-5. **Final context check** after approval:
+6. **Final context check** after approval:
    - If context >50%, remind user to clear before implementation
    - Provide clear instructions on next steps with fresh context
 

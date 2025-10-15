@@ -4,18 +4,18 @@ This directory contains shell scripts for installing, updating, and configuring 
 
 ## Quick Reference
 
-| Script | Purpose | When to Use |
-|--------|---------|-------------|
-| `install-user.sh` | Install globally to `~/.claude/` | Make tools available across all projects |
-| `install-project.sh` | Install to specific project | Add tools to one project only |
-| `update-project.sh` | Update project from workspace | Pull in workspace improvements |
-| `setup-thoughts.sh` | Initialize thoughts system | First-time global setup |
-| `init-project.sh` | Add thoughts to project | After installing to project |
-| `create-worktree.sh` | Create isolated workspace | Work on multiple features in parallel |
-| `setup-multi-config.sh` | Setup multi-client configs | For consultants with multiple clients |
-| `hl-switch` | Switch between configs | After multi-config setup |
-| `add-client-config` | Add new client config | Add another client to multi-config |
-| `setup-linear-workflow` | Setup Linear statuses | Configure Linear workflow automation |
+| Script                  | Purpose                          | When to Use                              |
+| ----------------------- | -------------------------------- | ---------------------------------------- |
+| `install-user.sh`       | Install globally to `~/.claude/` | Make tools available across all projects |
+| `install-project.sh`    | Install to specific project      | Add tools to one project only            |
+| `update-project.sh`     | Update project from workspace    | Pull in workspace improvements           |
+| `setup-thoughts.sh`     | Initialize thoughts system       | First-time global setup                  |
+| `init-project.sh`       | Add thoughts to project          | After installing to project              |
+| `create-worktree.sh`    | Create isolated workspace        | Work on multiple features in parallel    |
+| `setup-multi-config.sh` | Setup multi-client configs       | For consultants with multiple clients    |
+| `hl-switch`             | Switch between configs           | After multi-config setup                 |
+| `add-client-config`     | Add new client config            | Add another client to multi-config       |
+| `setup-linear-workflow` | Setup Linear statuses            | Configure Linear workflow automation     |
 
 ## Installation Scripts
 
@@ -28,16 +28,19 @@ This directory contains shell scripts for installing, updating, and configuring 
 ```
 
 **What it does:**
+
 - Copies all agents and commands to `~/.claude/`
 - Makes tools available in ALL your Claude Code projects
 - No filtering - includes workspace-only commands too
 
 **When to use:**
+
 - You want these tools available everywhere
 - You're a workspace developer
 - You use Claude Code across many projects
 
 **After installation:**
+
 - Restart Claude Code
 - Commands like `/research-codebase` now work in any project
 
@@ -52,22 +55,26 @@ This directory contains shell scripts for installing, updating, and configuring 
 ```
 
 **What it does:**
+
 - Copies agents and commands to `<project>/.claude/`
 - Filters out workspace-only commands (unless installing to workspace itself)
 - Creates `config.json` template
 - Creates `.workspace-metadata.json` for tracking
 
 **When to use:**
+
 - You want tools in just one project
 - You're setting up a new project
 - You want project-specific configuration
 
 **After installation:**
+
 1. Edit `<project>/.claude/config.json` for your team
 2. Run `/linear` to configure Linear integration
 3. Restart Claude Code
 
 **What gets installed:**
+
 - All 6 agents
 - 13 commands (excludes workspace-only tools like `/validate-frontmatter`)
 - Configuration template
@@ -84,6 +91,7 @@ This directory contains shell scripts for installing, updating, and configuring 
 ```
 
 **What it does:**
+
 - Smart merges `config.json` (keeps your values, adds new fields)
 - Auto-updates agents (they're pure logic, safe to overwrite)
 - Prompts for changes to customized commands
@@ -91,17 +99,20 @@ This directory contains shell scripts for installing, updating, and configuring 
 - Skips workspace-only commands
 
 **When to use:**
+
 - Workspace has been improved and you want the updates
 - After pulling workspace changes from git
 - Periodic maintenance to stay in sync
 
 **Smart features:**
+
 - **Backup**: Creates `.claude-backup-YYYYMMDD-HHMMSS/` before changes
 - **Config merge**: Your values preserved, new fields added
 - **Conflict resolution**: Interactive prompts for customized files
 - **linear.md handling**: Skips if you've configured it (preserves your Linear IDs)
 
 **Example output:**
+
 ```
 📊 Update Summary:
    Added:     2 files
@@ -124,17 +135,20 @@ Backup location:   .claude-backup-20251006-112810/
 ```
 
 **What it does:**
+
 - Creates `~/.config/humanlayer/config.json`
 - Initializes `~/thoughts/` repository
 - Sets up git for version control
 - Configures directory structure
 
 **When to use:**
+
 - First-time setup on a new machine
 - Before using any thought-based commands
 - Before `init-project.sh`
 
 **This is a prerequisite** for:
+
 - `/research-codebase`
 - `/create-plan`
 - `/implement-plan`
@@ -151,17 +165,20 @@ Backup location:   .claude-backup-20251006-112810/
 ```
 
 **What it does:**
+
 - Creates `<project>/thoughts/` symlink to central repo
 - Creates project-specific directory in `~/thoughts/repos/project-name/`
 - Initializes git repo if needed
 - Creates searchable index
 
 **When to use:**
+
 - After installing workspace to a project
 - Before using workflow commands in that project
 - When setting up a new project
 
 **Requires:**
+
 - `setup-thoughts.sh` already run globally
 - Git repository in the project
 
@@ -176,17 +193,20 @@ Backup location:   .claude-backup-20251006-112810/
 ```
 
 **What it does:**
+
 - Renames existing config to `config-brkthru.json` (client)
 - Creates `config-coalesce-labs.json` (personal)
 - Installs `hl-switch` tool to `~/bin/`
 - Adds `~/bin` to your shell PATH
 
 **When to use:**
+
 - You're a consultant working with multiple clients
 - You need separate thoughts repos for different contexts
 - You want easy switching between configurations
 
 **After setup:**
+
 ```bash
 hl-switch                    # Interactive selection
 hl-switch coalesce-labs      # Switch to personal
@@ -207,11 +227,13 @@ hl-switch client-name        # Switch to specific config
 ```
 
 **What it does:**
+
 - Manages symlink from `config.json` to `config-{name}.json`
 - Shows current configuration and thoughts repository
 - Lists available configurations
 
 **When to use:**
+
 - Switching between client and personal work
 - Checking which config is active
 - After `setup-multi-config.sh`
@@ -227,12 +249,14 @@ hl-switch client-name        # Switch to specific config
 ```
 
 **What it does:**
+
 - Creates `config-acme-corp.json`
 - Optionally creates thoughts repository at specified path
 - Optionally creates private GitHub repository
 - Initializes git with standard structure
 
 **When to use:**
+
 - Adding a new client to existing multi-config
 - After running `setup-multi-config.sh`
 - When starting work with a new client
@@ -248,6 +272,7 @@ hl-switch client-name        # Switch to specific config
 ```
 
 **What it does:**
+
 - Creates git worktree at `~/wt/{repo-name}/feature-name/`
 - Creates or uses existing branch
 - Copies `.claude/` directory
@@ -255,18 +280,21 @@ hl-switch client-name        # Switch to specific config
 - Initializes thoughts for the worktree
 
 **When to use:**
+
 - Working on multiple features simultaneously
 - Creating isolated environment for a ticket
 - Avoiding constant branch switching
 - Parallel development without conflicts
 
 **Customize location:**
+
 ```bash
 export RYAN_WORKTREE_BASE="/custom/path"
 ./hack/create-worktree.sh feature-name
 ```
 
 **Cleanup:**
+
 ```bash
 git worktree remove ~/wt/repo-name/feature-name
 git branch -D feature-name  # If you want to delete the branch
@@ -283,17 +311,20 @@ git branch -D feature-name  # If you want to delete the branch
 ```
 
 **What it does:**
+
 - Creates GraphQL mutation file at `/tmp/linear-workflow-setup.graphql`
 - Defines 12 workflow statuses:
   - Backlog → Triage → Research → Planning → In Progress → In Review → Done
 - Provides setup instructions for three methods
 
 **When to use:**
+
 - Initial Linear integration setup
 - Creating standardized workflow statuses
 - Before using `/create-plan`, `/implement-plan` commands
 
 **Three setup options:**
+
 1. **Claude with Linear MCP** (easiest): `/linear-setup-workflow TEAM-KEY`
 2. **GraphQL API**: Edit generated file and execute mutations
 3. **Manual**: Create statuses in Linear UI
@@ -305,10 +336,12 @@ git branch -D feature-name  # If you want to delete the branch
 **Library for parsing YAML frontmatter from markdown files.**
 
 **Not run directly** - sourced by other scripts:
+
 - `install-project.sh` - Check `workspace_only` flag
 - `update-project.sh` - Check `workspace_only` and `install_once` flags
 
 **Functions:**
+
 - `get_frontmatter_bool()` - Extract boolean field from frontmatter
 - `should_skip_on_install()` - Check if command should be excluded from project install
 - `should_skip_on_update()` - Check if command should be excluded from updates
@@ -397,18 +430,21 @@ git worktree remove ~/wt/myapp/PROJ-123-auth-feature
 **Understanding what gets installed where:**
 
 ### User Installation (`install-user.sh`)
+
 - ✅ All 6 agents
 - ✅ All 18 commands (including workspace-only)
 - ❌ No config.json
 - ❌ No metadata
 
 ### Project Installation (`install-project.sh`)
+
 - ✅ All 6 agents
 - ✅ 13 commands (excludes workspace-only unless installing to workspace itself)
 - ✅ config.json template
 - ✅ .workspace-metadata.json
 
 **Workspace-only commands (excluded from projects):**
+
 - `/validate-frontmatter` - Workspace validation tool
 - `/update-project` - Workspace management
 - `/discover-workflows` - Workflow catalog building
@@ -416,6 +452,7 @@ git worktree remove ~/wt/myapp/PROJ-123-auth-feature
 - `/create-workflow` - Create in workspace
 
 ### Project Update (`update-project.sh`)
+
 - ✅ Auto-updates: Agents (always)
 - ✅ Smart merge: config.json
 - ⏭️ Skips: workspace-only commands, install-once commands
@@ -428,6 +465,7 @@ git worktree remove ~/wt/myapp/PROJ-123-auth-feature
 ### "Command not found" after installation
 
 **Solution:**
+
 ```bash
 # Restart Claude Code to reload commands
 # OR
@@ -439,11 +477,13 @@ ls ~/myapp/.claude/commands/     # For project install
 ### Update script shows conflicts
 
 **What to do:**
+
 - Option 1: Keep local (default, safe)
 - Option 2: Take workspace version (lose local changes)
 - Option 3: View diff and decide
 
 **Rollback if needed:**
+
 ```bash
 rm -rf .claude/
 mv .claude-backup-YYYYMMDD-HHMMSS/ .claude/
@@ -452,6 +492,7 @@ mv .claude-backup-YYYYMMDD-HHMMSS/ .claude/
 ### HumanLayer thoughts not working
 
 **Check:**
+
 ```bash
 # Is humanlayer installed?
 which humanlayer
@@ -466,6 +507,7 @@ cat ~/.config/humanlayer/config.json
 ### Multi-config not switching
 
 **Check:**
+
 ```bash
 # Is hl-switch in PATH?
 which hl-switch

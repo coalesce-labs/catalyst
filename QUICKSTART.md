@@ -6,6 +6,7 @@ Get up and running with Ryan's Claude Workspace in 5 minutes.
 
 1. **Claude Code** installed and working
 2. **HumanLayer CLI** installed (for thoughts system)
+
    ```bash
    # If you have the humanlayer repo:
    cd /path/to/humanlayer/hlyr
@@ -32,6 +33,7 @@ cd ryan-claude-workspace
 ```
 
 This will:
+
 - Check for HumanLayer CLI
 - Guide you through creating `~/thoughts/` repository
 - Configure your username
@@ -59,6 +61,7 @@ cd /path/to/your-project
 ```
 
 This creates:
+
 ```
 your-project/
 └── thoughts/
@@ -80,11 +83,13 @@ This creates `thoughts/searchable/` with hard links for fast grepping.
 ### 1. Research & Planning
 
 In Claude Code:
+
 ```
 /create_plan
 ```
 
 This:
+
 1. Spawns parallel research agents (codebase-locator, thoughts-locator)
 2. Interactively builds a plan with you
 3. Saves to `thoughts/shared/plans/YYYY-MM-DD-description.md`
@@ -96,6 +101,7 @@ This:
 ```
 
 This:
+
 1. Reads the plan
 2. Implements each phase
 3. Runs automated tests
@@ -108,6 +114,7 @@ This:
 ```
 
 This:
+
 1. Verifies all success criteria
 2. Runs automated tests
 3. Documents deviations
@@ -123,6 +130,7 @@ Use these for finding code and context:
 - `@agent-codebase-pattern-finder` - Find similar implementations
 
 Example:
+
 ```
 @agent-codebase-locator find all files related to authentication
 ```
@@ -137,11 +145,13 @@ cd /path/to/your-project
 ```
 
 This creates:
+
 ```
 ~/wt/your-project/ENG-123/
 ```
 
 With:
+
 - Isolated git worktree
 - Separate branch
 - Thoughts automatically synced
@@ -182,28 +192,29 @@ This installs to `.claude/` in the project (takes precedence over `~/.claude/`).
 
 ## Common Commands
 
-| Command | Purpose |
-|---------|---------|
-| `/create_plan` | Interactive planning with research |
-| `/implement_plan <path>` | Execute a plan |
-| `/validate_plan` | Verify implementation |
-| `/create_worktree` | Set up parallel workspace |
+| Command                  | Purpose                            |
+| ------------------------ | ---------------------------------- |
+| `/create_plan`           | Interactive planning with research |
+| `/implement_plan <path>` | Execute a plan                     |
+| `/validate_plan`         | Verify implementation              |
+| `/create_worktree`       | Set up parallel workspace          |
 
 ## Common Agents
 
-| Agent | Purpose |
-|-------|---------|
-| `codebase-locator` | Find files by topic |
-| `codebase-analyzer` | Understand implementation |
-| `thoughts-locator` | Find historical docs |
-| `codebase-pattern-finder` | Find code examples |
-| `thoughts-analyzer` | Extract key insights |
+| Agent                     | Purpose                   |
+| ------------------------- | ------------------------- |
+| `codebase-locator`        | Find files by topic       |
+| `codebase-analyzer`       | Understand implementation |
+| `thoughts-locator`        | Find historical docs      |
+| `codebase-pattern-finder` | Find code examples        |
+| `thoughts-analyzer`       | Extract key insights      |
 
 ## Troubleshooting
 
 ### "humanlayer command not found"
 
 Install the HumanLayer CLI:
+
 ```bash
 cd /path/to/humanlayer/hlyr
 npm install -g .

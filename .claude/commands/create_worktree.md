@@ -6,6 +6,7 @@ category: version-control-git
 ## Configuration Note
 
 This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket prefix:
+
 - Read from `.claude/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
 - Examples: `ENG-123`, `FEAT-456`, `BUG-789`
@@ -26,16 +27,19 @@ When this command is invoked:
 
 3. **Create the worktree**:
    Use the create-worktree.sh script:
+
    ```bash
    ./hack/create-worktree.sh <worktree_name> [base_branch]
    ```
 
    Or if the script is not available in the current project:
+
    ```bash
    git worktree add ~/wt/<repo>/<worktree_name> -b <worktree_name> [base_branch]
    ```
 
 4. **Initialize thoughts** (if applicable):
+
    ```bash
    cd ~/wt/<repo>/<worktree_name>
    humanlayer thoughts init --directory <repo_name>
@@ -60,3 +64,4 @@ When this command is invoked:
 
 ```
 User: /create_worktree PROJ-123
+```

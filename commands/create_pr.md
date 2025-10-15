@@ -19,6 +19,7 @@ git status --porcelain
 ```
 
 If there are uncommitted changes:
+
 - Offer to commit: "You have uncommitted changes. Create commits now? [Y/n]"
 - If yes: internally call `/commit` workflow
 - If no: proceed (user may want to commit manually later)
@@ -30,6 +31,7 @@ branch=$(git branch --show-current)
 ```
 
 If on `main` or `master`:
+
 - Error: "Cannot create PR from main branch. Create a feature branch first."
 - Exit
 
@@ -59,6 +61,7 @@ fi
 ```
 
 If behind:
+
 - Auto-rebase: `git rebase origin/$base`
 - If conflicts:
   - Show conflicting files
@@ -72,8 +75,9 @@ gh pr view --json number,url,title,state 2>/dev/null
 ```
 
 If PR exists:
+
 - Show: "PR #{number} already exists: {title}\n{url}"
-- Ask: "What would you like to do?\n  [D] Describe/update this PR\n  [S] Skip (do nothing)\n  [A] Abort"
+- Ask: "What would you like to do?\n [D] Describe/update this PR\n [S] Skip (do nothing)\n [A] Abort"
 - If D: call `/describe_pr` and exit
 - If S: exit with success message
 - If A: exit
@@ -150,6 +154,7 @@ Capture PR number and URL from output.
 ### 10. Auto-call /describe_pr
 
 Immediately call `/describe_pr` with the PR number to:
+
 - Generate comprehensive description
 - Run verification checks
 - Update PR title (refined from code analysis)
@@ -168,22 +173,24 @@ const viewer = await mcp__linear__get_user({ query: "me" });
 mcp__linear__update_issue({
   id: ticket,
   state: "In Review",
-  assignee: "me"  // Auto-assign to current user
+  assignee: "me", // Auto-assign to current user
 });
 
 // Add PR link
 mcp__linear__update_issue({
   id: ticket,
-  links: [{
-    url: prUrl,
-    title: `PR #${prNumber}: ${prTitle}`
-  }]
+  links: [
+    {
+      url: prUrl,
+      title: `PR #${prNumber}: ${prTitle}`,
+    },
+  ],
 });
 
 // Add comment
 mcp__linear__create_comment({
   issueId: ticket,
-  body: `PR created and ready for review!\n\n**PR**: ${prUrl}\n\nDescription has been auto-generated with verification checks.`
+  body: `PR created and ready for review!\n\n**PR**: ${prUrl}\n\nDescription has been auto-generated with verification checks.`,
 });
 ```
 
@@ -204,6 +211,7 @@ Review the PR on GitHub!
 ## Error Handling
 
 **On main/master branch:**
+
 ```
 ❌ Cannot create PR from main branch.
 
@@ -212,6 +220,7 @@ Create a feature branch first:
 ```
 
 **Rebase conflicts:**
+
 ```
 ❌ Rebase conflicts detected
 
@@ -226,6 +235,7 @@ Resolve conflicts and run:
 ```
 
 **GitHub CLI not configured:**
+
 ```
 ❌ GitHub CLI not configured
 
@@ -234,6 +244,7 @@ Then: gh repo set-default
 ```
 
 **Linear ticket not found:**
+
 ```
 ⚠️  Could not find Linear ticket for {ticket}
 
@@ -260,6 +271,7 @@ Uses `.claude/config.json`:
 ## Examples
 
 **Branch: `RCW-13-implement-pr-lifecycle`**
+
 ```
 Extracting ticket: RCW-13
 Generated title: "RCW-13: Implement pr lifecycle"
@@ -271,6 +283,7 @@ Updating Linear ticket RCW-13 → In Review
 ```
 
 **Branch: `feature-add-validation` (no ticket)**
+
 ```
 No ticket found in branch name
 Generated title: "Feature add validation"

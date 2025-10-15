@@ -14,6 +14,7 @@ You are tasked with updating a target project's `.claude/` directory from this w
 ## Purpose
 
 This command helps you:
+
 - Push workspace improvements to projects
 - Preserve local customizations (config values, configured commands)
 - Intelligently merge config files
@@ -58,6 +59,7 @@ Then wait for the user's input.
 ```
 
 **The script will**:
+
 1. Check git status (warn if dirty)
 2. Create backup: `.claude-backup-TIMESTAMP/`
 3. Scan all files for changes
@@ -69,6 +71,7 @@ Then wait for the user's input.
 ### Step 3: Monitor and Assist
 
 **While script runs**:
+
 - Show progress to user
 - If script prompts for decisions, relay to user
 - Capture any errors or warnings
@@ -77,18 +80,22 @@ Then wait for the user's input.
 **Key decision points the script handles**:
 
 **For config.json**:
+
 - Smart merge: workspace structure + local values
 - New fields added automatically
 - Local values always preserved
 
 **For linear.md**:
+
 - If configured (no `[NEEDS_SETUP]`): Skip update, warn about workspace changes
 - If unconfigured: Update normally
 
 **For agents**:
+
 - Always update (pure logic, no customization expected)
 
 **For other commands**:
+
 - Check for local modifications
 - Prompt user: Update or keep local?
 - Show diff if requested
@@ -97,7 +104,7 @@ Then wait for the user's input.
 
 After script completes, show summary:
 
-```
+````
 ✅ Project updated successfully!
 
 ## Update Summary
@@ -130,7 +137,8 @@ After script completes, show summary:
    ```bash
    git add .claude/
    git commit -m "Update workspace to version {short-hash}"
-   ```
+````
+
 4. **Remove backup**: `rm -rf .claude-backup-{timestamp}/`
 
 ## 📊 Context Status
@@ -139,17 +147,21 @@ Current usage: {X}% ({Y}K/{Z}K tokens)
 
 {If >60%}:
 Update complete! Clear context if you're done.
+
 ```
 
 ### Step 5: Offer Additional Help
 
 ```
+
 Would you like me to:
+
 1. Show what changed in a specific file
 2. Help review the diff
 3. Test the updated commands
 4. Update another project
-```
+
+````
 
 ## Important Notes
 
@@ -190,9 +202,10 @@ The script creates/updates `.claude/.workspace-metadata.json`:
     }
   }
 }
-```
+````
 
 This tracks:
+
 - What workspace version was installed
 - Which files have been customized
 - File checksums to detect changes
@@ -200,16 +213,19 @@ This tracks:
 ### Safety Features
 
 **Automatic Backup**:
+
 - Created before any changes: `.claude-backup-{timestamp}/`
 - Can be deleted after verifying update
 - Or kept for rollback if needed
 
 **Git Check**:
+
 - Warns if project has uncommitted changes
 - Recommends committing first
 - Can continue anyway if user approves
 
 **Interactive Decisions**:
+
 - User approves conflicting changes
 - Can view diffs before deciding
 - Can skip updates for specific files
@@ -217,18 +233,21 @@ This tracks:
 ### Common Scenarios
 
 **Scenario 1: You improved agents**
+
 ```
 ✓ All agents auto-update (pure logic)
 No conflicts, fast update
 ```
 
 **Scenario 2: You added new config field**
+
 ```
 config.json: Smart merged
 New field added, local values preserved
 ```
 
 **Scenario 3: You improved command user customized**
+
 ```
 ⚠️  Conflict detected
 Options: Keep local / Take workspace / View diff
@@ -236,6 +255,7 @@ User decides
 ```
 
 **Scenario 4: Team member runs update**
+
 ```
 Same workflow, their local values preserved
 Config.json merges their values + new fields
@@ -245,6 +265,7 @@ Smooth team synchronization
 ### Error Handling
 
 **No .claude/ in project**:
+
 ```
 Error: Project not initialized
 
@@ -253,6 +274,7 @@ Run this first:
 ```
 
 **Workspace not found**:
+
 ```
 Error: This command must be run from ryan-claude-workspace
 
@@ -261,6 +283,7 @@ Then try again
 ```
 
 **Conflicts require attention**:
+
 ```
 ⚠️  {N} files need your decision
 
@@ -271,12 +294,14 @@ Review carefully before proceeding.
 ## Integration with Workflow
 
 **When to update projects**:
+
 - After improving workspace commands/agents
 - When adding new features to workspace
 - Periodically to stay current
 - Before starting new work (get latest improvements)
 
 **Team workflow**:
+
 1. One person improves workspace
 2. Commits workspace changes
 3. Others pull workspace repo
@@ -297,6 +322,7 @@ done
 ### Check What Would Update (Dry Run)
 
 Currently not supported - but you can:
+
 1. Check metadata file first
 2. Compare workspace version
 3. Review git diff after update
@@ -310,6 +336,7 @@ mv .claude-backup-{timestamp}/ .claude/
 ```
 
 Or use git:
+
 ```bash
 git restore .claude/
 ```

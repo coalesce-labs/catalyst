@@ -30,6 +30,7 @@ cd ~/ryan-claude-workspace
 ```
 
 This creates:
+
 ```
 ~/thoughts/
 ├── repos/              # Per-repository context
@@ -41,6 +42,7 @@ This creates:
 ```
 
 The thoughts repository is a git repository itself, allowing you to:
+
 - Version control all your context
 - Sync across machines
 - Share with teammates
@@ -60,6 +62,7 @@ cd ~/ryan-claude-workspace
 ```
 
 This creates:
+
 ```
 ~/.claude/
 ├── agents/
@@ -85,6 +88,7 @@ Installs to `.claude/` in a specific project:
 **Hybrid Approach**
 
 Claude Code prioritizes project-level `.claude/` over user-level `~/.claude/`. You can:
+
 1. Install common agents/commands to user directory
 2. Override with project-specific versions as needed
 3. Keep project-specific agents in the project's `.claude/`
@@ -124,6 +128,7 @@ your-project/
 ```
 
 **Key Benefits:**
+
 - **Persistent**: Survives across worktrees
 - **Searchable**: Fast grep via searchable/ directory
 - **Organized**: Clear separation of personal vs shared
@@ -132,11 +137,13 @@ your-project/
 ### Understanding the Thoughts Structure
 
 **Personal Directory (`thoughts/{your_name}/`)**
+
 - Your private notes and research
 - Not shared with team
 - Use for exploration, TODOs, rough ideas
 
 **Shared Directory (`thoughts/shared/`)**
+
 - Team knowledge base
 - Implementation plans
 - Ticket analysis
@@ -144,12 +151,14 @@ your-project/
 - Research findings
 
 **Global Directory (`thoughts/global/`)**
+
 - Cross-repository knowledge
 - General patterns
 - Architecture decisions
 - Shared learnings
 
 **Searchable Directory (`thoughts/searchable/`)**
+
 - Read-only hard links to all above
 - Enables fast searching without traversing multiple directories
 - Automatically maintained by thoughts sync
@@ -163,24 +172,28 @@ your-project/
 Documents in thoughts/ should follow naming conventions:
 
 **Plans**: `YYYY-MM-DD-ENG-XXXX-description.md`
+
 ```bash
 # Example
 thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 ```
 
 **Research**: `YYYY-MM-DD_topic.md` or `topic.md`
+
 ```bash
 thoughts/shared/research/2025-01-08_authentication_approaches.md
 thoughts/shared/research/database_patterns.md
 ```
 
 **Tickets**: `eng_XXXX.md` or `ticket_description.md`
+
 ```bash
 thoughts/shared/tickets/eng_1234.md
 thoughts/ryan/tickets/eng_1235_my_notes.md
 ```
 
 **PR Descriptions**: `pr_XXXX_description.md`
+
 ```bash
 thoughts/shared/prs/pr_456_add_rate_limiting.md
 ```
@@ -201,6 +214,7 @@ git push
 ```
 
 **Best Practice**: Sync after:
+
 - Creating or updating plans
 - Completing research
 - Finishing implementation
@@ -235,23 +249,27 @@ Agents are specialized AI experts that Claude Code can delegate to. They follow 
 Finds files and directories relevant to a feature or task.
 
 **When to use:**
+
 - Finding all files related to a feature
 - Locating test files
 - Discovering configuration files
 - Mapping directory structure
 
 **Example:**
+
 ```
 @agent-codebase-locator find all files related to authentication
 ```
 
 **What it does:**
+
 - Uses Grep, Glob, and Bash(ls) to search
 - Returns categorized file paths
 - Groups by purpose (implementation, tests, config, etc.)
 - Does NOT read file contents
 
 **Output:**
+
 ```
 ## File Locations for Authentication
 
@@ -273,23 +291,27 @@ Finds files and directories relevant to a feature or task.
 Analyzes HOW code works with detailed implementation analysis.
 
 **When to use:**
+
 - Understanding complex logic
 - Tracing data flow
 - Identifying integration points
 - Learning how a feature works
 
 **Example:**
+
 ```
 @agent-codebase-analyzer explain how the authentication flow works from login to session creation
 ```
 
 **What it does:**
+
 - Reads files to understand logic
 - Traces function calls and data flow
 - Returns detailed analysis with file:line references
 - Documents patterns and conventions
 
 **Output includes:**
+
 - Entry points with line numbers
 - Step-by-step data flow
 - Key functions and their purposes
@@ -300,23 +322,27 @@ Analyzes HOW code works with detailed implementation analysis.
 Discovers relevant documents in the thoughts/ directory.
 
 **When to use:**
+
 - Finding previous research
 - Locating related tickets
 - Discovering existing plans
 - Searching historical context
 
 **Example:**
+
 ```
 @agent-thoughts-locator find any documents about rate limiting
 ```
 
 **What it does:**
+
 - Searches all thoughts directories
 - Categorizes by document type
 - Corrects searchable/ paths to actual paths
 - Returns organized results
 
 **Output:**
+
 ```
 ## Thought Documents about Rate Limiting
 
@@ -335,23 +361,27 @@ Discovers relevant documents in the thoughts/ directory.
 Finds similar implementations and code patterns to model after.
 
 **When to use:**
+
 - Finding examples of similar features
 - Discovering coding conventions
 - Locating test patterns
 - Understanding best practices in the codebase
 
 **Example:**
+
 ```
 @agent-codebase-pattern-finder show me examples of pagination implementations
 ```
 
 **What it does:**
+
 - Searches for similar code
 - Extracts actual code snippets
 - Shows multiple variations
 - Includes test examples
 
 **Output includes:**
+
 - Concrete code examples
 - Multiple pattern variations
 - Test patterns
@@ -362,23 +392,27 @@ Finds similar implementations and code patterns to model after.
 Deeply analyzes thoughts documents to extract actionable insights.
 
 **When to use:**
+
 - Extracting key decisions from research
 - Understanding past architectural choices
 - Finding specific technical details
 - Validating current relevance
 
 **Example:**
+
 ```
 @agent-thoughts-analyzer analyze thoughts/shared/research/2025-01-05_rate_limiting.md and extract key decisions
 ```
 
 **What it does:**
+
 - Reads documents completely
 - Extracts decisions and trade-offs
 - Filters noise and outdated info
 - Returns actionable insights
 
 **Output includes:**
+
 - Key decisions made
 - Technical specifications
 - Constraints and trade-offs
@@ -401,11 +435,13 @@ I need to understand the payment system.
 **Be Specific in Your Requests**
 
 Good:
+
 ```
 @agent-codebase-analyzer trace how a webhook is validated and processed in the webhook handler
 ```
 
 Bad:
+
 ```
 @agent-codebase-analyzer look at webhooks
 ```
@@ -429,6 +465,7 @@ Commands are slash commands that execute multi-step workflows.
 Creates comprehensive implementation plans through interactive research and collaboration.
 
 **Basic Usage:**
+
 ```
 /create_plan
 ```
@@ -436,11 +473,13 @@ Creates comprehensive implementation plans through interactive research and coll
 Claude will ask for task details and guide you through the planning process.
 
 **With Ticket File:**
+
 ```
 /create_plan thoughts/shared/tickets/eng_1234.md
 ```
 
 **With Deep Analysis:**
+
 ```
 /create_plan think deeply about thoughts/shared/tickets/eng_1234.md
 ```
@@ -483,31 +522,44 @@ Claude will ask for task details and guide you through the planning process.
    - Iterates based on feedback
 
 **Plan Structure:**
+
 ```markdown
 # Feature Implementation Plan
 
 ## Overview
+
 [Brief description]
 
 ## Current State Analysis
+
 [What exists, what's missing, key constraints]
 
 ## Desired End State
+
 [Specification and verification criteria]
 
 ## What We're NOT Doing
+
 [Explicit out-of-scope items]
 
 ## Phase 1: [Name]
+
 ### Overview
+
 ### Changes Required
+
 ### Success Criteria
-  #### Automated Verification
-  - [ ] Tests pass: `make test`
-  #### Manual Verification
-  - [ ] Feature works in UI
+
+#### Automated Verification
+
+- [ ] Tests pass: `make test`
+
+#### Manual Verification
+
+- [ ] Feature works in UI
 
 ## Testing Strategy
+
 ## References
 ```
 
@@ -516,6 +568,7 @@ Claude will ask for task details and guide you through the planning process.
 Executes an approved implementation plan phase by phase.
 
 **Usage:**
+
 ```
 /implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 ```
@@ -542,16 +595,19 @@ Executes an approved implementation plan phase by phase.
 **Resuming Work:**
 
 If plan has checkmarks, implementation picks up from first unchecked item:
+
 ```markdown
 ## Phase 1: Database Schema
+
 - [x] Add migration file
 - [x] Run migration
-- [ ] Add indexes  ← Resumes here
+- [ ] Add indexes ← Resumes here
 ```
 
 **Handling Mismatches:**
 
 If reality doesn't match the plan:
+
 ```
 Issue in Phase 2:
 Expected: Configuration in config/auth.json
@@ -566,6 +622,7 @@ How should I proceed?
 Verifies implementation correctness and identifies deviations.
 
 **Usage:**
+
 ```
 /validate_plan
 ```
@@ -590,30 +647,38 @@ Verifies implementation correctness and identifies deviations.
    - Investigates failures
 
 4. **Validation Report**
+
 ```markdown
 ## Validation Report: Rate Limiting
 
 ### Implementation Status
+
 ✓ Phase 1: Database Schema - Fully implemented
 ✓ Phase 2: API Endpoints - Fully implemented
 ⚠️ Phase 3: UI Components - Partially implemented
 
 ### Automated Verification Results
+
 ✓ Tests pass: `make test`
 ✗ Linting issues: `make lint` (3 warnings)
 
 ### Code Review Findings
+
 #### Matches Plan:
+
 - Migration adds rate_limits table
 - API returns 429 on exceeded limits
 
 #### Deviations:
+
 - Used Redis instead of in-memory (improvement)
 
 #### Potential Issues:
+
 - Missing index on user_id column
 
 ### Manual Testing Required:
+
 - [ ] Verify UI shows rate limit errors
 - [ ] Test with 1000+ requests
 ```
@@ -641,6 +706,7 @@ cd /path/to/main-repository
 ```
 
 This creates:
+
 ```
 ~/wt/main-repository/rate-limiting/
 ├── .git                # Separate working directory
@@ -650,6 +716,7 @@ This creates:
 ```
 
 **What happens:**
+
 1. Git worktree created at `~/wt/{repo-name}/{feature-name}/`
 2. New branch `ENG-1234-rate-limiting` created
 3. `.claude/` directory copied over
@@ -684,6 +751,7 @@ cat thoughts/shared/research/topic.md  # Same file!
 ### Parallel Work Example
 
 **Main Repository:**
+
 ```bash
 cd ~/projects/my-app
 git branch
@@ -694,6 +762,7 @@ vim src/bugfix.js
 ```
 
 **Worktree 1:**
+
 ```bash
 cd ~/wt/my-app/rate-limiting
 git branch
@@ -708,6 +777,7 @@ vim src/rate-limiter.js
 ```
 
 **Worktree 2:**
+
 ```bash
 cd ~/wt/my-app/authentication
 git branch
@@ -738,6 +808,7 @@ git worktree prune
 **Scenario**: Add rate limiting to an API
 
 **Step 1: Create Research Ticket**
+
 ```bash
 cd ~/projects/my-api
 
@@ -761,12 +832,14 @@ EOF
 ```
 
 **Step 2: Create Implementation Plan**
+
 ```
 # In Claude Code
 /create_plan thoughts/shared/tickets/eng_1234.md
 ```
 
 Claude will:
+
 1. Read the ticket
 2. Research current authentication system
 3. Find similar rate limiting examples
@@ -774,6 +847,7 @@ Claude will:
 5. Create detailed plan with phases
 
 **Step 3: Review and Refine Plan**
+
 ```
 thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 
@@ -782,6 +856,7 @@ thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 ```
 
 **Step 4: Implement the Plan**
+
 ```
 /implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 ```
@@ -789,6 +864,7 @@ thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 Claude implements phase by phase, checking boxes as it progresses.
 
 **Step 5: Validate Implementation**
+
 ```
 /validate_plan
 ```
@@ -796,6 +872,7 @@ Claude implements phase by phase, checking boxes as it progresses.
 Claude runs all success criteria and generates validation report.
 
 **Step 6: Commit and Push**
+
 ```bash
 git add .
 git commit -m "Implement rate limiting (ENG-1234)"
@@ -807,6 +884,7 @@ git push
 **Scenario**: Two features being developed simultaneously
 
 **Main Repo - Bugfixes**
+
 ```bash
 cd ~/projects/my-app
 
@@ -817,6 +895,7 @@ git commit -m "Fix button styling"
 ```
 
 **Worktree 1 - Major Feature A**
+
 ```bash
 # Create worktree for feature A
 ~/ryan-claude-workspace/hack/create-worktree.sh ENG-1234 new-dashboard
@@ -829,6 +908,7 @@ cd ~/wt/my-app/new-dashboard
 ```
 
 **Worktree 2 - Major Feature B**
+
 ```bash
 # Create worktree for feature B (while A is in progress)
 cd ~/projects/my-app
@@ -844,11 +924,13 @@ cd ~/wt/my-app/user-settings
 ```
 
 **Both worktrees share thoughts:**
+
 - Plans visible across all worktrees
 - Research accessible everywhere
 - No context duplication
 
 **Cleanup:**
+
 ```bash
 # After feature A is merged
 cd ~/projects/my-app
@@ -876,6 +958,7 @@ I need to understand why webhooks are failing intermittently.
 Claude spawns three agents simultaneously:
 
 **Agent 1 Result (codebase-locator):**
+
 ```
 ## Webhook Files
 ### Implementation
@@ -888,6 +971,7 @@ Claude spawns three agents simultaneously:
 ```
 
 **Agent 2 Result (thoughts-locator):**
+
 ```
 ## Webhook Documents
 ### Tickets
@@ -898,6 +982,7 @@ Claude spawns three agents simultaneously:
 ```
 
 **Agent 3 Result (codebase-analyzer):**
+
 ```
 ## Webhook Flow Analysis
 1. Request arrives: handler.js:23
@@ -909,6 +994,7 @@ Key finding: No timeout handling in processor.js:45
 ```
 
 **Then investigate further:**
+
 ```
 @agent-thoughts-analyzer analyze thoughts/shared/tickets/eng_0987.md
 
@@ -919,6 +1005,7 @@ Key finding: No timeout handling in processor.js:45
 ### Example 4: Team Collaboration with Shared Thoughts
 
 **Developer A:**
+
 ```bash
 cd ~/projects/shared-app
 
@@ -944,6 +1031,7 @@ humanlayer thoughts sync
 ```
 
 **Developer B (different machine):**
+
 ```bash
 cd ~/projects/shared-app
 
@@ -1062,6 +1150,7 @@ cd ~/wt/my-app/feature && ls -la thoughts/
 ### Plan Checkboxes Not Updating
 
 Claude updates plans using the Edit tool. If checkboxes aren't updating:
+
 - Verify plan file exists and is readable
 - Check file permissions
 - Ensure plan follows correct markdown checkbox format: `- [ ]` or `- [x]`

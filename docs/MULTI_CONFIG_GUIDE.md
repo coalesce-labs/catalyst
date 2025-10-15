@@ -5,6 +5,7 @@ This guide explains how to manage separate thoughts repositories for different c
 ## Overview
 
 You can maintain completely separate thoughts repositories for:
+
 - **Personal/Coalesce Labs work** - Your own projects
 - **Client A work** - One client's projects
 - **Client B work** - Another client's projects
@@ -88,6 +89,7 @@ add-client-config acme
 ```
 
 This will:
+
 1. Ask for the thoughts repository path
 2. Create the config file
 3. Optionally create and initialize the thoughts repo
@@ -175,6 +177,7 @@ thoughts/
 ## GitHub Strategy
 
 ### Personal Thoughts
+
 - **Organization**: `coalesce-labs`
 - **Repository**: `coalesce-labs/thoughts` (private)
 - **Purpose**: Your IP, personal notes, patterns
@@ -182,17 +185,20 @@ thoughts/
 ### Client Thoughts
 
 **Option 1: Keep Local Only**
+
 - Don't push to GitHub at all
 - Client-specific knowledge stays on your machine
 - Good for sensitive work
 
 **Option 2: Push to Your Private Repo**
+
 ```bash
 cd ~/clients/acme/thoughts
 gh repo create ryan/acme-thoughts --private --source=. --push
 ```
 
 **Option 3: Push to Client's Organization** (if allowed)
+
 ```bash
 cd ~/clients/acme/thoughts
 gh repo create acme-org/thoughts --private --source=. --push
@@ -304,11 +310,13 @@ hl-switch status  # Verify you're on the right config
 ### 2. Use Descriptive Client Names
 
 Good:
+
 - `brkthru` - Clear client name
 - `acme-corp` - Full client name
 - `google-consulting` - Specific engagement
 
 Bad:
+
 - `client1` - Not memorable
 - `work` - Too vague
 - `temp` - Will get confusing
@@ -316,12 +324,14 @@ Bad:
 ### 3. Keep Configs in Sync with Projects
 
 If you organize projects like:
+
 ```
 ~/code-repos/github/brkthru/...
 ~/clients/acme/...
 ```
 
 Keep thoughts organized similarly:
+
 ```
 ~/code-repos/github/brkthru/thoughts/
 ~/clients/acme/thoughts/
@@ -346,10 +356,12 @@ hl-switch acme
 ### 5. Backup Strategy
 
 **Personal thoughts**:
+
 - Push to GitHub: `coalesce-labs/thoughts` (private)
 - Your IP, back it up!
 
 **Client thoughts**:
+
 - Check your contract/NDA
 - Keep local, or push to client's org
 - Consider Time Machine/cloud backup

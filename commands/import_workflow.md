@@ -44,6 +44,7 @@ Get the repository and workflow name from user or parameters.
 Use TodoWrite to track parallel research.
 
 **Task 1 - External Research**:
+
 ```
 Use external-research agent:
 "Research {repo}/{workflow}. Explain what this workflow does, how it works, what tools it uses, and provide the complete implementation including frontmatter."
@@ -53,6 +54,7 @@ Return: Full workflow understanding and implementation
 ```
 
 **Task 2 - Local Pattern Check**:
+
 ```
 Use codebase-pattern-finder agent:
 "Find similar workflows in our workspace (agents/ and commands/ directories). Look for workflows that serve similar purposes or use similar patterns."
@@ -63,6 +65,7 @@ Return: Similar local workflows for comparison
 ```
 
 **Task 3 - Historical Context**:
+
 ```
 Use thoughts-locator agent:
 "Search for any previous research, notes, or attempts related to this type of workflow. Search for keywords: {workflow-name}, {workflow-purpose}."
@@ -77,6 +80,7 @@ Return: Any historical context or previous attempts
 ### Step 3: Aggregate and Analyze
 
 Combine results from parallel tasks:
+
 - External workflow details (Task 1)
 - Similar local patterns (Task 2)
 - Historical context (Task 3)
@@ -84,6 +88,7 @@ Combine results from parallel tasks:
 Mark all tasks complete in TodoWrite.
 
 Analyze:
+
 1. **Purpose alignment**: Does this fit our needs?
 2. **Duplication check**: Do we already have something similar?
 3. **Adaptation needs**: What needs to change?
@@ -92,29 +97,35 @@ Analyze:
 
 Show comprehensive analysis:
 
-```markdown
+````markdown
 # Import Analysis: {workflow-name}
 
 ## What It Does
+
 [Summary from external research]
 
 ## External Implementation
+
 - **Repository**: {repo}
 - **Tools used**: [list]
 - **Frontmatter**:
   ```yaml
   [original frontmatter]
   ```
+````
 
 ## Comparison with Our Workspace
 
 ### Similar Local Workflows
+
 [From Task 2 - what we already have]
 
 ### Differences
+
 - [Key differences from our patterns]
 
 ### Historical Context
+
 [From Task 3 - any previous attempts or notes]
 
 ## Required Adaptations
@@ -129,7 +140,8 @@ Show comprehensive analysis:
 [Import as-is / Import with modifications / Skip (we have similar)]
 
 Proceed with import? (Y/n)
-```
+
+````
 
 ### Step 5: Adapt to Workspace Standards
 
@@ -152,24 +164,26 @@ category: {appropriate category}
 version: 1.0.0
 source: {repo-url}  # Track origin
 ---
-```
+````
 
 **For Commands**:
+
 ```yaml
 ---
-description: {One-line summary}
-category: {appropriate category}
-argument-hint: {if applicable}
-tools: {tool list}
+description: { One-line summary }
+category: { appropriate category }
+argument-hint: { if applicable }
+tools: { tool list }
 model: inherit
 version: 1.0.0
-source: {repo-url}  # Track origin
+source: { repo-url } # Track origin
 ---
 ```
 
 #### 5b. Replace Repository-Specific Values
 
 Check for and replace:
+
 - Ticket prefixes (ENG-XXX → read from `.claude/config.json`)
 - Repository paths (their paths → local paths)
 - Team/project IDs (their IDs → prompt or use config)
@@ -183,8 +197,8 @@ Add source attribution in frontmatter and as comment:
 ```markdown
 ---
 source: https://github.com/{repo}
-adapted: {date}
-original-author: {if known}
+adapted: { date }
+original-author: { if known }
 ---
 
 <!--
@@ -213,9 +227,11 @@ If validation fails, show issues and fix.
 Determine type and save location:
 
 **If Agent**:
+
 - Save to: `agents/{workflow-name}.md`
 
 **If Command**:
+
 - Save to: `commands/{workflow-name}.md`
 
 ### Step 8: Create Import Record
@@ -247,12 +263,14 @@ Present success summary:
 **Saved to**: {file-path}
 
 **Adaptations made**:
+
 - Standardized frontmatter
 - Updated ticket prefix: ENG → PROJ
 - Added source attribution
 - Validated tools list
 
 **Next steps**:
+
 1. Review: `{file-path}`
 2. Test: Try using the workflow
 3. Customize: Adjust for your specific needs
@@ -303,19 +321,23 @@ Shows what would be imported without actually saving files.
 ## Error Handling
 
 ### Workflow Not Found
+
 - Suggest running `/discover-workflows {repo}` first
 - Check catalog for available workflows
 
 ### Incompatible Tools
+
 - List tools that don't exist in your environment
 - Suggest alternatives
 - Ask if should proceed with modifications
 
 ### Duplicate Workflow
+
 - Show existing similar workflow
 - Ask: Replace / Rename / Skip?
 
 ### Validation Failures
+
 - Show specific issues
 - Offer to auto-fix
 - Request manual review if complex

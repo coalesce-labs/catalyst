@@ -36,12 +36,14 @@ Four commands work together to handle the entire PR lifecycle:
 Creates git commits using conventional commit format with auto-detection.
 
 **What it does:**
+
 - Analyzes changed files to suggest type and scope
 - Extracts ticket reference from branch name
 - Generates properly formatted conventional commit
 - Asks for confirmation before committing
 
 **Example:**
+
 ```bash
 # Working on branch: RCW-13-implement-pr-lifecycle
 # Changed files: commands/commit.md, commands/create_pr.md
@@ -63,6 +65,7 @@ Creates git commits using conventional commit format with auto-detection.
 ```
 
 **Conventional Commit Format:**
+
 ```
 <type>(<scope>): <short summary>
 
@@ -72,6 +75,7 @@ Creates git commits using conventional commit format with auto-detection.
 ```
 
 **Types:**
+
 - `feat` - New feature
 - `fix` - Bug fix
 - `docs` - Documentation
@@ -81,6 +85,7 @@ Creates git commits using conventional commit format with auto-detection.
 - `style`, `perf`, `ci`, `build`
 
 **Auto-detection heuristics:**
+
 - Only docs changed → `docs`
 - Only tests → `test`
 - Package files → `build`
@@ -88,6 +93,7 @@ Creates git commits using conventional commit format with auto-detection.
 - Otherwise → prompts for `feat`, `fix`, `refactor`, `chore`
 
 **Configuration:**
+
 ```json
 {
   "commit": {
@@ -106,6 +112,7 @@ Creates git commits using conventional commit format with auto-detection.
 Orchestrates complete PR creation: commit → rebase → push → create → describe → Linear update.
 
 **What it does:**
+
 1. Checks for uncommitted changes (offers to commit)
 2. Verifies not on main/master
 3. Checks if branch is up-to-date with main
@@ -120,6 +127,7 @@ Orchestrates complete PR creation: commit → rebase → push → create → des
 12. Links PR to Linear ticket
 
 **Example:**
+
 ```bash
 # Branch: RCW-13-implement-pr-lifecycle
 
@@ -149,10 +157,12 @@ URL: https://github.com/org/repo/pull/2
 ```
 
 **Only prompts when:**
+
 - PR already exists for branch
 - Rebase conflicts (can't auto-resolve)
 
 **Linear integration:**
+
 - Extracts ticket: `RCW-13` from branch `RCW-13-feature-name`
 - Moves to "In Review" status
 - Assigns to current user
@@ -166,6 +176,7 @@ URL: https://github.com/org/repo/pull/2
 Generates or updates PR description with comprehensive analysis, preserving manual edits.
 
 **What it does:**
+
 1. Reads PR description template
 2. Identifies target PR (current branch or asks)
 3. Extracts ticket reference
@@ -181,6 +192,7 @@ Generates or updates PR description with comprehensive analysis, preserving manu
 13. Updates Linear ticket
 
 **Incremental updates:**
+
 ```markdown
 <!-- Auto-generated: 2025-10-06T10:00:00Z -->
 <!-- Last updated: 2025-10-06T15:30:00Z -->
@@ -188,20 +200,26 @@ Generates or updates PR description with comprehensive analysis, preserving manu
 <!-- Previous commits: abc123,def456,ghi789 -->
 
 ---
+
 **Update History:**
+
 - 2025-10-06 15:30: Added error handling (2 commits)
 - 2025-10-06 10:00: Initial implementation (3 commits)
+
 ---
 
 ## Summary
+
 [Regenerated to reflect ALL changes]
 
 ## Changes Made
 
 ### Backend Changes
+
 [Existing changes preserved]
 
 **New changes** (since last update):
+
 - Added validation logic
 - Improved error messages
 
@@ -209,12 +227,14 @@ Generates or updates PR description with comprehensive analysis, preserving manu
 ```
 
 **Preserves:**
+
 - Reviewer Notes
 - Screenshots/Videos
 - Manually checked boxes
 - Post-Merge Tasks
 
 **Updates:**
+
 - Summary
 - Changes Made (appends new)
 - How to Verify It (reruns checks)
@@ -222,12 +242,14 @@ Generates or updates PR description with comprehensive analysis, preserving manu
 
 **Verification checks:**
 Automatically attempts to run:
+
 - `make test` / `npm test`
 - `make lint` / `npm run lint`
 - `make build` / `npm run build`
 - `npm run typecheck`
 
 Marks checkboxes:
+
 - `[x]` if passed
 - `[ ]` if failed (with error)
 - `[ ]` if manual verification required
@@ -241,6 +263,7 @@ Marks checkboxes:
 Safely merges PR after comprehensive checks, with Linear integration and cleanup.
 
 **What it does:**
+
 1. Identifies PR to merge
 2. Verifies PR is open and mergeable
 3. Checks if branch up-to-date with main
@@ -258,6 +281,7 @@ Safely merges PR after comprehensive checks, with Linear integration and cleanup
 15. Reports comprehensive summary
 
 **Example:**
+
 ```bash
 /merge_pr
 
@@ -298,16 +322,19 @@ Merging...
 ```
 
 **Intelligent defaults:**
+
 - Always squash merge
 - Always delete branches
 - Always run tests (unless `--skip-tests`)
 - Always update Linear (unless `--no-update`)
 
 **Prompts only for:**
+
 - Missing required approvals (override option)
 - Failing CI checks (override option)
 
 **Flags:**
+
 ```bash
 /merge_pr --skip-tests      # Skip local test execution
 /merge_pr --no-update       # Don't update Linear ticket
@@ -385,7 +412,7 @@ All commands that update Linear tickets automatically assign them to you:
 mcp__linear__update_issue({
   id: ticket,
   state: "In Review",
-  assignee: "me"  // Current user
+  assignee: "me", // Current user
 });
 ```
 
@@ -396,14 +423,17 @@ PRs are automatically linked to Linear tickets:
 ```javascript
 mcp__linear__update_issue({
   id: ticket,
-  links: [{
-    url: "https://github.com/org/repo/pull/123",
-    title: "PR #123: Ticket title"
-  }]
+  links: [
+    {
+      url: "https://github.com/org/repo/pull/123",
+      title: "PR #123: Ticket title",
+    },
+  ],
 });
 ```
 
 View linked PRs in Linear:
+
 - Open ticket in Linear
 - Check right sidebar "Links" or "Attachments"
 - Click to open PR
@@ -453,6 +483,7 @@ View linked PRs in Linear:
 ### Branch Naming
 
 Always include ticket ID in branch name:
+
 ```bash
 git checkout -b RCW-123-feature-name
 git checkout -b ENG-456-bug-fix
@@ -463,6 +494,7 @@ This enables automatic ticket extraction and Linear integration.
 ### Commit Frequently
 
 Use `/commit` often for atomic changes:
+
 - Easier to review
 - Clearer history
 - Better rollback capability
@@ -470,6 +502,7 @@ Use `/commit` often for atomic changes:
 ### Update Descriptions After Review
 
 After pushing review changes, run `/describe_pr`:
+
 - Shows reviewers what changed
 - Updates verification status
 - Maintains description accuracy
@@ -477,6 +510,7 @@ After pushing review changes, run `/describe_pr`:
 ### Test Before Merge
 
 `/merge_pr` runs tests by default. Don't skip unless absolutely necessary:
+
 ```bash
 # ✅ Good: tests run automatically
 /merge_pr
@@ -488,6 +522,7 @@ After pushing review changes, run `/describe_pr`:
 ### Monitor CI
 
 Check CI status before merging:
+
 - `/merge_pr` shows CI status
 - Can override if needed
 - Better to fix issues than override

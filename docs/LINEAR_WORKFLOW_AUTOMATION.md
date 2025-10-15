@@ -10,18 +10,20 @@ The Linear command provides intelligent ticket management with **automatic statu
 
 When you run workflow commands, the Linear command automatically updates ticket status:
 
-| Command | Ticket Status Update |
-|---------|---------------------|
-| `/research_codebase` (with ticket) | → **Research** |
-| `/create_plan` (with ticket) | → **Planning** |
-| `/implement_plan` (with ticket) | → **In Progress** |
-| `/describe_pr` (with ticket) | → **In Review** |
-| PR merged | → **Done** (manual or via webhook) |
+| Command                            | Ticket Status Update               |
+| ---------------------------------- | ---------------------------------- |
+| `/research_codebase` (with ticket) | → **Research**                     |
+| `/create_plan` (with ticket)       | → **Planning**                     |
+| `/implement_plan` (with ticket)    | → **In Progress**                  |
+| `/describe_pr` (with ticket)       | → **In Review**                    |
+| PR merged                          | → **Done** (manual or via webhook) |
 
 ### How It Detects Tickets
 
 The commands look for tickets in:
+
 1. **Ticket mentioned in plan frontmatter**:
+
    ```yaml
    ---
    ticket: PROJ-123
@@ -29,6 +31,7 @@ The commands look for tickets in:
    ```
 
 2. **Ticket in filename**:
+
    ```
    thoughts/shared/plans/2025-01-08-PROJ-123-feature.md
    ```
@@ -59,6 +62,7 @@ Simplified 6-status workflow (Option C):
 **Key insight**: Review happens at the **planning stage**, not just the PR stage.
 
 **Benefits**:
+
 - Clear progression from idea to completion
 - Each command moves ticket forward automatically
 - Fewer statuses = less cognitive overhead
@@ -302,6 +306,7 @@ cp ~/ryan-claude-workspace/commands/linear.md .claude/commands/
 ### Scenario: Multiple Projects, Same Workflow
 
 You have:
+
 - `coalesce-labs/project-a` (uses Linear)
 - `coalesce-labs/project-b` (uses Linear)
 - `client/project-c` (uses Linear, different team)
@@ -309,16 +314,19 @@ You have:
 ### Strategy 1: Base Command + Project Override
 
 **In your workspace** (`ryan-claude-workspace/commands/linear.md`):
+
 - Keep the template with `[NEEDS_SETUP]` markers
 - Don't commit configured values
 
 **In each project** (`.claude/commands/linear.md`):
+
 - Copy from workspace
 - Run first-time setup
 - Commit configured version
 - Project-specific settings
 
 **Benefits**:
+
 - Easy to start new projects
 - Each project has its own settings
 - Updates to base workflow logic can be pulled
@@ -329,7 +337,7 @@ You have:
 
 ```javascript
 // In linear.md, check for project-specific config file
-const config = loadConfig('.claude/linear-config.json');
+const config = loadConfig(".claude/linear-config.json");
 ```
 
 **Not recommended**: Too complex for this use case.
@@ -380,6 +388,7 @@ This enables automatic status updates.
 ### 2. Use Consistent Ticket Format
 
 **Good**:
+
 - `PROJ-123`
 - `ENG-456`
 - Consistent prefix + number
@@ -389,6 +398,7 @@ This enables automatic status updates.
 ### 3. Attach Artifacts to Tickets
 
 Always link:
+
 - Research docs → Tickets
 - Plans → Tickets
 - PRs → Tickets
@@ -398,12 +408,14 @@ Creates a **complete audit trail**.
 ### 4. Add Context in Comments
 
 When auto-updating ticket status, add a comment explaining:
+
 ```markdown
 Moving to In Progress
 
 Starting implementation from plan: thoughts/shared/plans/2025-01-08-auth.md
 
 Phases:
+
 - [ ] Phase 1: Database schema
 - [ ] Phase 2: API endpoints
 - [ ] Phase 3: Frontend integration
@@ -412,6 +424,7 @@ Phases:
 ### 5. Review Workflow Regularly
 
 After a month, evaluate:
+
 - Are statuses useful?
 - Too many/few statuses?
 - Is automation helpful?
@@ -425,11 +438,13 @@ Adjust as needed!
 ### "Ticket not auto-detected"
 
 **Check**:
+
 1. Ticket mentioned in plan frontmatter?
 2. Ticket in filename?
 3. Correct format (PROJ-123)?
 
 **Fix**: Manually specify ticket:
+
 ```bash
 /linear move PROJ-123 "In Progress"
 ```
@@ -439,6 +454,7 @@ Adjust as needed!
 **Cause**: Multiple tickets referenced
 
 **Fix**: Be explicit about which ticket
+
 ```bash
 /implement_plan thoughts/shared/plans/plan.md --ticket PROJ-123
 ```
@@ -448,6 +464,7 @@ Adjust as needed!
 **Cause**: Status name mismatch
 
 **Fix**: Check exact status names in Linear:
+
 ```bash
 mcp__linear__list_workflow_states
 ```

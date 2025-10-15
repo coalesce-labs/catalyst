@@ -5,17 +5,20 @@ This directory contains markdown files that define specialized research agents f
 ## How Agents Work
 
 **Agents vs Commands:**
+
 - **Commands** (`/command-name`) - User-facing workflows you invoke directly
 - **Agents** (`@agent-name`) - Specialized research tools spawned by commands
 
 **Invocation:**
 Commands spawn agents using the Task tool:
+
 ```markdown
 Task(subagent_type="codebase-locator", prompt="Find authentication files")
 ```
 
 **Philosophy:**
 All agents follow a **documentarian, not critic** approach:
+
 - Document what EXISTS, not what should exist
 - NO suggestions for improvements unless explicitly asked
 - NO root cause analysis unless explicitly asked
@@ -26,20 +29,23 @@ All agents follow a **documentarian, not critic** approach:
 ### Codebase Research Agents
 
 #### codebase-locator
+
 **Purpose**: Find WHERE code lives in a codebase
 
 **Use when**: You need to locate files, directories, or components
+
 - Finding all files related to a feature
 - Discovering directory structure
 - Locating test files, configs, or documentation
 
-**Tools**: Grep, Glob, Bash(ls *)
+**Tools**: Grep, Glob, Bash(ls \*)
 
 **Example invocation:**
+
 ```markdown
 Task(
-  subagent_type="codebase-locator",
-  prompt="Find all authentication-related files"
+subagent_type="codebase-locator",
+prompt="Find all authentication-related files"
 )
 ```
 
@@ -48,21 +54,24 @@ Task(
 ---
 
 #### codebase-analyzer
+
 **Purpose**: Understand HOW specific code works
 
 **Use when**: You need to analyze implementation details
+
 - Understanding how a component functions
 - Documenting data flow
 - Identifying integration points
 - Tracing function calls
 
-**Tools**: Read, Grep, Glob, Bash(ls *)
+**Tools**: Read, Grep, Glob, Bash(ls \*)
 
 **Example invocation:**
+
 ```markdown
 Task(
-  subagent_type="codebase-analyzer",
-  prompt="Analyze the authentication middleware implementation and document how it works"
+subagent_type="codebase-analyzer",
+prompt="Analyze the authentication middleware implementation and document how it works"
 )
 ```
 
@@ -71,21 +80,24 @@ Task(
 ---
 
 #### codebase-pattern-finder
+
 **Purpose**: Find existing patterns and usage examples
 
 **Use when**: You need concrete examples
+
 - Finding similar implementations
 - Discovering usage patterns
 - Locating test examples
 - Understanding conventions
 
-**Tools**: Grep, Glob, Read, Bash(ls *)
+**Tools**: Grep, Glob, Read, Bash(ls \*)
 
 **Example invocation:**
+
 ```markdown
 Task(
-  subagent_type="codebase-pattern-finder",
-  prompt="Find examples of how other components handle error logging"
+subagent_type="codebase-pattern-finder",
+prompt="Find examples of how other components handle error logging"
 )
 ```
 
@@ -94,9 +106,11 @@ Task(
 ### Thoughts System Agents
 
 #### thoughts-locator
+
 **Purpose**: Discover existing thought documents about a topic
 
 **Use when**: You need to find related research or plans
+
 - Finding previous research on a topic
 - Discovering related plans
 - Locating historical decisions
@@ -105,10 +119,11 @@ Task(
 **Tools**: Grep, Glob, LS
 
 **Example invocation:**
+
 ```markdown
 Task(
-  subagent_type="thoughts-locator",
-  prompt="Find all thoughts documents about authentication"
+subagent_type="thoughts-locator",
+prompt="Find all thoughts documents about authentication"
 )
 ```
 
@@ -117,9 +132,11 @@ Task(
 ---
 
 #### thoughts-analyzer
+
 **Purpose**: Extract key insights from thought documents
 
 **Use when**: You need to understand documented decisions
+
 - Analyzing research documents
 - Understanding plan rationale
 - Extracting historical context
@@ -128,10 +145,11 @@ Task(
 **Tools**: Read, Grep, Glob, LS
 
 **Example invocation:**
+
 ```markdown
 Task(
-  subagent_type="thoughts-analyzer",
-  prompt="Analyze the authentication research document and extract key findings"
+subagent_type="thoughts-analyzer",
+prompt="Analyze the authentication research document and extract key findings"
 )
 ```
 
@@ -140,21 +158,24 @@ Task(
 ### External Research Agents
 
 #### external-research
+
 **Purpose**: Research external frameworks and repositories
 
 **Use when**: You need information from outside sources
+
 - Understanding how popular repos implement features
 - Learning framework patterns
 - Researching best practices from open-source
 - Discovering external documentation
 
-**Tools**: mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure
+**Tools**: mcp**deepwiki**ask_question, mcp**deepwiki**read_wiki_structure
 
 **Example invocation:**
+
 ```markdown
 Task(
-  subagent_type="external-research",
-  prompt="Research how Next.js implements middleware authentication patterns"
+subagent_type="external-research",
+prompt="Research how Next.js implements middleware authentication patterns"
 )
 ```
 
@@ -177,6 +198,7 @@ model: inherit
 Instructions for the agent...
 
 ## CRITICAL: YOUR ONLY JOB IS TO DOCUMENT AND EXPLAIN THE CODEBASE AS IT EXISTS TODAY
+
 - DO NOT suggest improvements...
 - DO NOT perform root cause analysis...
 - ONLY describe what exists...
@@ -203,11 +225,13 @@ Commands spawn multiple agents concurrently for efficiency:
 
 ```markdown
 # Spawn three agents in parallel
+
 Task(subagent_type="codebase-locator", ...)
 Task(subagent_type="thoughts-locator", ...)
 Task(subagent_type="codebase-analyzer", ...)
 
 # Wait for all to complete
+
 # Synthesize findings
 ```
 
@@ -230,6 +254,7 @@ prompt: "Find similar authentication implementations"
 ## Documentarian Philosophy
 
 **What agents do:**
+
 - ✅ Locate files and components
 - ✅ Document how code works
 - ✅ Provide concrete examples
@@ -237,6 +262,7 @@ prompt: "Find similar authentication implementations"
 - ✅ Show integration points
 
 **What agents do NOT do:**
+
 - ❌ Suggest improvements
 - ❌ Critique implementation
 - ❌ Identify bugs (unless asked)
@@ -244,6 +270,7 @@ prompt: "Find similar authentication implementations"
 - ❌ Comment on code quality
 
 **Why this matters:**
+
 - Research should be objective
 - Understanding comes before judgment
 - Prevents bias in documentation
@@ -254,14 +281,17 @@ prompt: "Find similar authentication implementations"
 Agents are always installed, never filtered:
 
 ### User Installation (`install-user.sh`)
+
 - ✅ All 6 agents installed to `~/.claude/agents/`
 - ✅ README.md excluded (documentation)
 
 ### Project Installation (`install-project.sh`)
+
 - ✅ All 6 agents installed to `<project>/.claude/agents/`
 - ✅ README.md excluded
 
 ### Project Update (`update-project.sh`)
+
 - ✅ All agents auto-updated (they're pure logic)
 - ✅ No user prompts needed
 - ✅ README.md excluded
@@ -295,6 +325,7 @@ model: inherit
 You are a specialist at [specific research task].
 
 ## CRITICAL: YOUR ONLY JOB IS TO DOCUMENT AND EXPLAIN THE CODEBASE AS IT EXISTS TODAY
+
 [Standard documentarian guidelines]
 
 ## Core Responsibilities
@@ -335,9 +366,11 @@ You are a specialist at [specific research task].
 
 ```markdown
 # First, find files
+
 Task(subagent_type="codebase-locator", ...)
 
 # Then analyze the most relevant ones
+
 Task(subagent_type="codebase-analyzer", ...)
 ```
 
@@ -345,6 +378,7 @@ Task(subagent_type="codebase-analyzer", ...)
 
 ```markdown
 # Search codebase and thoughts simultaneously
+
 Task(subagent_type="codebase-locator", ...)
 Task(subagent_type="thoughts-locator", ...)
 ```
@@ -353,6 +387,7 @@ Task(subagent_type="thoughts-locator", ...)
 
 ```markdown
 # Find patterns after understanding the code
+
 Task(subagent_type="codebase-analyzer", ...)
 Task(subagent_type="codebase-pattern-finder", ...)
 ```
@@ -362,17 +397,21 @@ Task(subagent_type="codebase-pattern-finder", ...)
 Agents specify required tools in frontmatter:
 
 **File Operations:**
+
 - `Read` - Read file contents
 - `Write` - Create files (rare for agents)
 
 **Search:**
+
 - `Grep` - Content search
 - `Glob` - File pattern matching
 
 **Execution:**
+
 - `Bash(ls *)` - List directory contents
 
 **External:**
+
 - `mcp__deepwiki__ask_question` - Query external repos
 - `mcp__deepwiki__read_wiki_structure` - Read external docs
 
@@ -381,11 +420,13 @@ Agents specify required tools in frontmatter:
 ### Agent not found when spawned
 
 **Check:**
+
 1. Agent file exists in `.claude/agents/`?
 2. Frontmatter `name` field matches filename?
 3. Restarted Claude Code after adding agent?
 
 **Solution:**
+
 ```bash
 # Re-install to .claude/
 ./hack/install-project.sh .
@@ -397,6 +438,7 @@ Agents specify required tools in frontmatter:
 **This is by design** - agents are pure logic.
 
 **If you need customization:**
+
 - Don't modify agents - they'll be overwritten
 - Create a new agent with a different name
 - Or mark as workspace-only (though agents typically aren't)
@@ -406,6 +448,7 @@ Agents specify required tools in frontmatter:
 **Fixed in recent update** - install scripts now exclude README.md.
 
 **To verify:**
+
 ```bash
 ls .claude/agents/
 # Should NOT show README.md

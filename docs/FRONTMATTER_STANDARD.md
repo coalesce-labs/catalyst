@@ -11,26 +11,26 @@ This document defines the frontmatter standard for all agents and commands in th
 
 ```yaml
 ---
-name: {agent-name}           # Agent identifier (kebab-case, must match filename)
-description: |               # Multi-line description
+name: { agent-name } # Agent identifier (kebab-case, must match filename)
+description: | # Multi-line description
   {What this agent does}
 
   Use this agent when:
   - {Use case 1}
   - {Use case 2}
-tools: {tool-list}          # Array of Claude Code tools
-model: inherit              # Always "inherit"
-category: {category}        # One of: research, analysis, search, execution, validation, general
-version: 1.0.0              # Semantic version
+tools: { tool-list } # Array of Claude Code tools
+model: inherit # Always "inherit"
+category: { category } # One of: research, analysis, search, execution, validation, general
+version: 1.0.0 # Semantic version
 ---
 ```
 
 ### Optional Fields
 
 ```yaml
-source: {repo-url}          # If imported/adapted from external source
-adapted: {YYYY-MM-DD}       # Date of adaptation
-original-author: {name}     # Original creator credit
+source: { repo-url } # If imported/adapted from external source
+adapted: { YYYY-MM-DD } # Date of adaptation
+original-author: { name } # Original creator credit
 ```
 
 ### Valid Categories
@@ -68,21 +68,21 @@ version: 1.0.0
 
 ```yaml
 ---
-description: {one-line-summary}  # Brief description (NOTE: commands don't have 'name' field!)
-category: {category}             # Command category
-tools: {tool-list}              # Array of Claude Code tools
-model: inherit                  # Always "inherit"
-version: 1.0.0                  # Semantic version
+description: { one-line-summary } # Brief description (NOTE: commands don't have 'name' field!)
+category: { category } # Command category
+tools: { tool-list } # Array of Claude Code tools
+model: inherit # Always "inherit"
+version: 1.0.0 # Semantic version
 ---
 ```
 
 ### Optional Fields
 
 ```yaml
-argument-hint: {hint}       # Hint for command arguments (e.g., "[ticket-file]")
-source: {repo-url}          # If imported/adapted from external source
-adapted: {YYYY-MM-DD}       # Date of adaptation
-original-author: {name}     # Original creator credit
+argument-hint: { hint } # Hint for command arguments (e.g., "[ticket-file]")
+source: { repo-url } # If imported/adapted from external source
+adapted: { YYYY-MM-DD } # Date of adaptation
+original-author: { name } # Original creator credit
 ```
 
 ### Valid Categories
@@ -114,20 +114,24 @@ version: 1.0.0
 Claude Code provides these tools (non-exhaustive list - check official docs for complete reference):
 
 ### File Operations
+
 - `Read` - Read file contents
 - `Write` - Write new files (or overwrite existing)
 - `Edit` - Edit existing files with string replacement
 
 ### Search & Discovery
+
 - `Grep` - Search file contents using regex patterns
 - `Glob` - Find files by glob patterns
 
 ### Execution & Task Management
+
 - `Bash` - Run shell commands
 - `Task` - Spawn specialized sub-agents
 - `TodoWrite` - Manage todo lists
 
 ### Web & External
+
 - `WebFetch` - Fetch web content
 - `WebSearch` - Search the web
 - `mcp__deepwiki__ask_question` - Query external GitHub repos
@@ -135,6 +139,7 @@ Claude Code provides these tools (non-exhaustive list - check official docs for 
 - `mcp__deepwiki__read_wiki_contents` - Read repository documentation
 
 ### Specialized (if available in your environment)
+
 - Linear integration tools (if Linear MCP is configured)
 - Other MCP server tools (prefix: `mcp__`)
 
@@ -166,15 +171,17 @@ Claude Code provides these tools (non-exhaustive list - check official docs for 
 ## Common Mistakes
 
 ### ❌ Wrong: Command with name field
+
 ```yaml
 ---
-name: create-plan              # ← Commands don't have name field!
+name: create-plan # ← Commands don't have name field!
 description: Create plans
 category: planning
 ---
 ```
 
 ### ✅ Correct: Command without name
+
 ```yaml
 ---
 description: Create detailed implementation plans
@@ -188,18 +195,22 @@ version: 1.0.0
 ---
 
 ### ❌ Wrong: Agent name doesn't match filename
+
 **File**: `agents/code_analyzer.md`
+
 ```yaml
 ---
-name: codebase-analyzer        # ← Doesn't match filename!
+name: codebase-analyzer # ← Doesn't match filename!
 ---
 ```
 
 ### ✅ Correct: Agent name matches filename
+
 **File**: `agents/codebase-analyzer.md`
+
 ```yaml
 ---
-name: codebase-analyzer        # ← Matches filename ✓
+name: codebase-analyzer # ← Matches filename ✓
 description: |
   Analyzes codebases...
 ---
@@ -208,37 +219,43 @@ description: |
 ---
 
 ### ❌ Wrong: Invalid tool references
+
 ```yaml
-tools: SearchFiles, FindFile, GrepFiles   # ← These aren't real tools!
+tools: SearchFiles, FindFile, GrepFiles # ← These aren't real tools!
 ```
 
 ### ✅ Correct: Valid tools
+
 ```yaml
-tools: Grep, Glob, Read        # ← Correct tool names ✓
+tools: Grep, Glob, Read # ← Correct tool names ✓
 ```
 
 ---
 
 ### ❌ Wrong: Version format
+
 ```yaml
-version: v1.0                  # ← Should be semver (X.Y.Z)
+version: v1.0 # ← Should be semver (X.Y.Z)
 ```
 
 ### ✅ Correct: Semver version
+
 ```yaml
-version: 1.0.0                 # ← Proper semver ✓
+version: 1.0.0 # ← Proper semver ✓
 ```
 
 ---
 
 ### ❌ Wrong: Invalid category
+
 ```yaml
-category: misc                 # ← Not a valid category
+category: misc # ← Not a valid category
 ```
 
 ### ✅ Correct: Valid category
+
 ```yaml
-category: general              # ← Valid category ✓
+category: general # ← Valid category ✓
 ```
 
 ## Templates

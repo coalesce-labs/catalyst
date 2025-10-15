@@ -84,35 +84,38 @@ const statuses = [
     name: "Backlog",
     type: "backlog",
     description: "New ideas and feature requests",
-    color: "#bec2c8"  // Gray
+    color: "#bec2c8", // Gray
   },
 
   // UNSTARTED
   {
     name: "Research",
     type: "unstarted",
-    description: "Investigation, triage, and spec definition (auto-set by /research_codebase)",
-    color: "#f2c94c"  // Yellow
+    description:
+      "Investigation, triage, and spec definition (auto-set by /research_codebase)",
+    color: "#f2c94c", // Yellow
   },
 
   // STARTED - Planning & Development
   {
     name: "Planning",
     type: "started",
-    description: "Writing and reviewing implementation plans (auto-set by /create_plan)",
-    color: "#f2c94c"  // Yellow
+    description:
+      "Writing and reviewing implementation plans (auto-set by /create_plan)",
+    color: "#f2c94c", // Yellow
   },
   {
     name: "In Progress",
     type: "started",
-    description: "Active development and implementation (auto-set by /implement_plan)",
-    color: "#5e6ad2"  // Blue
+    description:
+      "Active development and implementation (auto-set by /implement_plan)",
+    color: "#5e6ad2", // Blue
   },
   {
     name: "In Review",
     type: "started",
     description: "PR submitted for code review (auto-set by /describe_pr)",
-    color: "#5e6ad2"  // Blue
+    color: "#5e6ad2", // Blue
   },
 
   // COMPLETED
@@ -120,8 +123,8 @@ const statuses = [
     name: "Done",
     type: "completed",
     description: "Completed and deployed",
-    color: "#5e6ad2"  // Blue
-  }
+    color: "#5e6ad2", // Blue
+  },
 ];
 ```
 

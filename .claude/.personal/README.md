@@ -50,11 +50,13 @@ Personal configuration overrides team config.
 ### Merge Behavior
 
 Config precedence (highest to lowest):
+
 1. `.claude/config.local.json` (personal)
 2. `.claude/config.json` (team)
 3. Command defaults
 
 Example:
+
 ```json
 // Team config (.claude/config.json)
 {
@@ -94,11 +96,13 @@ PROMETHEUS_URL=$(jq -r '.telemetry.prometheusEndpoint // "http://localhost:9090"
 COST_QUERY=$(jq -r '.telemetry.queries.sessionCost' .claude/config.local.json)
 
 # Query Prometheus
+
 curl -s "${PROMETHEUS_URL}/api/v1/query" \
   --data-urlencode "query=${COST_QUERY}" \
-  | jq '.data.result'
+ | jq '.data.result'
 
 # Display results
+
 echo "Session cost: $cost"
 \`\`\`
 ```
@@ -117,7 +121,7 @@ Create prompts in `.claude/.personal/prompts/` for your workflow.
 When analyzing costs:
 
 1. Query Prometheus for token usage
-2. Calculate cost (tokens * $0.000003)
+2. Calculate cost (tokens \* $0.000003)
 3. Break down by:
    - Issue ID
    - Session duration
@@ -126,6 +130,7 @@ When analyzing costs:
 5. Highlight expensive operations
 
 Provide actionable insights:
+
 - "Research phase costs X% more than implementation"
 - "Consider batching Y operations"
 ```
@@ -217,6 +222,7 @@ TEAM_ID=$(echo "$CONFIG_DATA" | jq -r '.linear.teamId')
 ### What's Safe to Put Here
 
 ✅ **Safe**:
+
 - Prometheus/Grafana URLs
 - Tool preferences
 - Custom scopes
@@ -224,6 +230,7 @@ TEAM_ID=$(echo "$CONFIG_DATA" | jq -r '.linear.teamId')
 - Non-sensitive API endpoints
 
 ❌ **NOT Safe** (use environment variables instead):
+
 - API keys (use `ANTHROPIC_API_KEY` env var)
 - Passwords
 - Access tokens
@@ -233,6 +240,7 @@ TEAM_ID=$(echo "$CONFIG_DATA" | jq -r '.linear.teamId')
 ### Best Practices
 
 1. **Never commit config.local.json**:
+
    ```bash
    # Verify gitignored
    git check-ignore .claude/config.local.json
@@ -240,6 +248,7 @@ TEAM_ID=$(echo "$CONFIG_DATA" | jq -r '.linear.teamId')
    ```
 
 2. **Use environment variables for secrets**:
+
    ```json
    {
      "integrations": {
@@ -268,6 +277,7 @@ If you create a useful personal command/prompt:
 ## Summary
 
 **Personal config enables**:
+
 - ✅ Individual customization without team impact
 - ✅ Telemetry and monitoring for your usage
 - ✅ Personal tooling integration

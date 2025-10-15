@@ -52,6 +52,7 @@ Ask the user:
 Use TodoWrite to track parallel research.
 
 **Task 1 - Local Examples**:
+
 ```
 Use codebase-pattern-finder agent:
 "Find all {agents/commands} in our workspace that are similar to {user-description}. Focus on {category} workflows. Return file paths and brief descriptions."
@@ -62,6 +63,7 @@ Return: List of similar local workflows with their frontmatter and key patterns
 ```
 
 **Task 2 - Catalog Examples**:
+
 ```
 Use thoughts-analyzer agent:
 "Search the workflow catalog at thoughts/shared/workflows/ for workflows similar to {user-description}. Find examples from external repositories that match the {category} category."
@@ -72,6 +74,7 @@ Return: External workflow examples with their implementations
 ```
 
 **Task 3 - Frontmatter Standards**:
+
 ```
 Use codebase-analyzer agent:
 "Analyze all existing {agents/commands} in the workspace to extract the frontmatter standard. What fields are required? What patterns are used? What categories exist?"
@@ -86,6 +89,7 @@ Return: Frontmatter standard with field definitions and examples
 ### Step 3: Aggregate Examples
 
 Combine results from parallel tasks:
+
 - Local examples (Task 1)
 - Catalog examples (Task 2)
 - Frontmatter standards (Task 3)
@@ -93,6 +97,7 @@ Combine results from parallel tasks:
 Mark all tasks complete in TodoWrite.
 
 Analyze:
+
 1. **Common patterns**: What do similar workflows do?
 2. **Tool usage**: Which tools are typically used?
 3. **Structure**: How are they organized?
@@ -102,12 +107,13 @@ Analyze:
 
 Show analysis and options:
 
-```markdown
+````markdown
 # Create {workflow-type}: {name}
 
 ## Similar Workflows Found
 
 ### From Our Workspace
+
 1. **{local-workflow-1}**
    - Purpose: {description}
    - Tools: {tools}
@@ -117,6 +123,7 @@ Show analysis and options:
    [....]
 
 ### From Catalog
+
 1. **{external-workflow-1}** (from {repo})
    - Purpose: {description}
    - Tools: {tools}
@@ -127,22 +134,26 @@ Based on existing workflows, here's the standard format:
 
 ```yaml
 ---
-{required-fields}
+{ required-fields }
 ---
 ```
+````
 
 ## Recommended Approach
 
 Based on similar workflows, I recommend:
+
 - **Model after**: {most-similar-workflow}
 - **Tools to use**: {suggested-tools}
 - **Key patterns**: {patterns-to-follow}
 
 Would you like me to:
+
 1. Generate a workflow based on {specific-example}
 2. Create a custom workflow from scratch
 3. Show me more examples first
-```
+
+````
 
 ### Step 5: Generate Workflow Template
 
@@ -193,8 +204,10 @@ You are a specialized agent for {purpose}.
 
 Return your findings in this format:
 
-```
+````
+
 {Expected output structure}
+
 ```
 
 ## Important Notes
@@ -215,12 +228,12 @@ Return your findings in this format:
 
 #### 5b. For Commands
 
-```markdown
+````markdown
 ---
-description: {One-line summary}
-category: {category}
-argument-hint: {if applicable}
-tools: {tool-list}
+description: { One-line summary }
+category: { category }
+argument-hint: { if applicable }
+tools: { tool-list }
 model: inherit
 version: 1.0.0
 ---
@@ -264,6 +277,7 @@ This command uses configuration from `.claude/config.json`:
   }
 }
 ```
+````
 
 ## Advanced Usage
 
@@ -292,11 +306,14 @@ This command uses configuration from `.claude/config.json`:
 ## Error Handling
 
 ### {Common Error 1}
+
 - {How to handle it}
 
 ### {Common Error 2}
+
 - {How to handle it}
-```
+
+````
 
 ### Step 6: Validate Template
 
@@ -337,22 +354,26 @@ I've created a draft based on {source-pattern}.
 ## Frontmatter
 ```yaml
 {frontmatter}
-```
+````
 
 ## Key Features
+
 - {Feature 1}
 - {Feature 2}
 - {Feature 3}
 
 ## Modeled After
+
 - Local: {local-example if any}
 - External: {catalog-example if any}
 
 Would you like me to:
+
 1. Save this workflow as-is
 2. Make adjustments (specify what to change)
 3. Show me alternative approaches
-```
+
+````
 
 ### Step 8: Iterate on Feedback
 
@@ -394,7 +415,7 @@ Save creation details to `thoughts/shared/workflows/created.md`:
 - **Category**: {category}
 
 **Creation Notes**: {any special notes about decisions made}
-```
+````
 
 ### Step 11: Confirmation
 
@@ -406,12 +427,14 @@ Present success summary:
 **Saved to**: {file-path}
 
 **What's included**:
+
 - Standardized frontmatter
 - Clear step-by-step process
 - {Type-specific features}
 - Error handling guidelines
 
 **Next steps**:
+
 1. Review: `{file-path}`
 2. Test: Try using the workflow
 3. Customize: Adjust for your specific needs
@@ -437,6 +460,7 @@ Creates a new workflow based on a specific catalog entry.
 ```
 
 Uses predefined templates:
+
 - `minimal`: Basic structure only
 - `standard`: Full featured (default)
 - `advanced`: Includes sub-agent patterns
@@ -501,6 +525,7 @@ You are tasked with {purpose}.
 Standard categories found in workspace:
 
 **For Agents**:
+
 - `research` - Finding and analyzing information
 - `analysis` - Deep code/data analysis
 - `search` - Locating files/patterns
@@ -509,6 +534,7 @@ Standard categories found in workspace:
 - `general` - Multi-purpose agents
 
 **For Commands**:
+
 - `workflow` - Development workflows
 - `planning` - Planning and design
 - `implementation` - Code changes
@@ -564,21 +590,25 @@ Standard categories found in workspace:
 ## Error Handling
 
 ### No Similar Workflows Found
+
 - Show general templates
 - Ask for more details about desired functionality
 - Suggest browsing catalog manually
 
 ### Invalid Tool References
+
 - List available tools
 - Suggest alternatives
 - Ask if should proceed without unavailable tools
 
 ### Category Mismatch
+
 - Show list of existing categories
 - Suggest closest match
 - Allow creating new category if justified
 
 ### Name Collision
+
 - Detect existing workflow with same name
 - Suggest alternative names
 - Ask: Rename / Replace / Cancel?

@@ -5,10 +5,12 @@ This directory contains markdown files that become Claude Code slash commands. E
 ## How It Works
 
 **Filename → Command Mapping:**
+
 - Filename: `research_codebase.md` (underscores)
 - Slash command: `/research-codebase` (hyphens)
 
 **Discovery Process:**
+
 1. Claude Code scans `.claude/commands/*.md` on startup
 2. Reads YAML frontmatter from each file
 3. Registers command based on filename
@@ -23,26 +25,31 @@ This directory contains markdown files that become Claude Code slash commands. E
 **These travel with installations and work in any project.**
 
 #### Core Workflow Commands
+
 - `/research-codebase` - Research codebase with parallel sub-agents
 - `/create-plan` - Create implementation plans
 - `/implement-plan` - Execute implementation plans
 - `/validate-plan` - Verify plan completion
 
 #### Linear Integration
+
 - `/linear` - Manage Linear tickets and workflow
 - `/linear-setup-workflow` - Configure Linear statuses (install-once)
 
 #### PR Lifecycle (Complete Git/GitHub Workflow)
+
 - `/commit` - Create conventional commits with auto-detection
 - `/create-pr` - Create PR with auto-rebase and Linear integration
 - `/describe-pr` - Generate/update PR descriptions incrementally
 - `/merge-pr` - Safely merge PR with verification and cleanup
 
 #### Handoff System
+
 - `/create-handoff` - Pause work and create handoff document
 - `/resume-handoff` - Resume from handoff document
 
 #### Utilities
+
 - `/create-worktree` - Create git worktree for parallel work
 - `/debug` - Debugging assistance
 - `/workflow-help` - Interactive workflow guidance
@@ -52,6 +59,7 @@ This directory contains markdown files that become Claude Code slash commands. E
 **These are excluded from project installations (unless installing to workspace itself).**
 
 #### Meta-Development Tools
+
 - `/validate-frontmatter` - Validate command/agent frontmatter consistency
 - `/update-project` - Update project's `.claude/` from workspace
 - `/discover-workflows` - Research external repos for workflow patterns
@@ -59,6 +67,7 @@ This directory contains markdown files that become Claude Code slash commands. E
 - `/create-workflow` - Create new agents/commands from templates
 
 **Why workspace-only?**
+
 - They modify the workspace itself (agents/, commands/ directories)
 - They're for workspace development, not project work
 - They reference workspace-specific paths
@@ -74,8 +83,8 @@ category: workflow
 tools: Read, Write, Bash, Task
 model: inherit
 version: 1.0.0
-workspace_only: true    # Optional: exclude from project installs
-install_once: true      # Optional: install once, skip updates
+workspace_only: true # Optional: exclude from project installs
+install_once: true # Optional: install once, skip updates
 ---
 
 # Command Implementation
@@ -106,6 +115,7 @@ The markdown content here becomes the command's prompt...
 ### User Installation (`./hack/install-user.sh`)
 
 **What gets installed:**
+
 - All 20 commands (including workspace-only)
 
 **Available in:** ALL your Claude Code projects
@@ -117,12 +127,14 @@ The markdown content here becomes the command's prompt...
 ### Project Installation (`./hack/install-project.sh /path/to/project`)
 
 **What gets installed:**
+
 - 15 portable commands
 - Excludes 5 workspace-only commands
 
 **Available in:** ONLY that specific project
 
 **Filtered out:**
+
 - `/validate-frontmatter`
 - `/update-project`
 - `/discover-workflows`
@@ -137,17 +149,18 @@ The markdown content here becomes the command's prompt...
 
 **How commands are updated:**
 
-| Command Type | Update Behavior |
-|-------------|-----------------|
-| New command | Added automatically |
-| Unchanged | Skipped |
-| Workspace-only | Skipped (not in projects) |
-| Install-once (e.g., `/linear-setup-workflow`) | Skipped |
-| `/linear` if configured | Skipped (preserves your Linear IDs) |
-| Modified, not customized | Prompted (Y/n) |
-| Marked as customized | Conflict resolution (3 options) |
+| Command Type                                  | Update Behavior                     |
+| --------------------------------------------- | ----------------------------------- |
+| New command                                   | Added automatically                 |
+| Unchanged                                     | Skipped                             |
+| Workspace-only                                | Skipped (not in projects)           |
+| Install-once (e.g., `/linear-setup-workflow`) | Skipped                             |
+| `/linear` if configured                       | Skipped (preserves your Linear IDs) |
+| Modified, not customized                      | Prompted (Y/n)                      |
+| Marked as customized                          | Conflict resolution (3 options)     |
 
 **Smart handling:**
+
 - Preserves your customizations
 - Updates workspace improvements
 - Interactive prompts when conflicts exist
@@ -155,27 +168,35 @@ The markdown content here becomes the command's prompt...
 ## Command Categories
 
 ### workflow
+
 Core development workflow commands like research, planning, implementation.
 
 ### planning
+
 Planning and design commands.
 
 ### implementation
+
 Code change execution commands.
 
 ### validation
+
 Testing and verification commands.
 
 ### project-task-management
+
 Linear integration and ticket management.
 
 ### git
+
 Version control operations.
 
 ### workflow-discovery
+
 Meta-workflow tools for discovering and creating workflows.
 
 ### general
+
 Miscellaneous utilities.
 
 ## Examples
@@ -193,6 +214,7 @@ version: 1.0.0
 ```
 
 **Characteristics:**
+
 - No `workspace_only` field → Gets installed to projects
 - Uses config from `.claude/config.json` for ticket prefixes
 - Saves to `thoughts/shared/research/` (configurable per project)
@@ -214,6 +236,7 @@ workspace_only: true
 ```
 
 **Characteristics:**
+
 - `workspace_only: true` → Excluded from project installs
 - Validates files in `agents/` and `commands/` directories
 - Creates `docs/FRONTMATTER_STANDARD.md`
@@ -231,6 +254,7 @@ category: project-task-management
 ```
 
 **Characteristics:**
+
 - Contains `[NEEDS_SETUP]` markers for first-time config
 - Prompts for teamId, projectId, thoughtsRepoUrl on first use
 - Updates itself after configuration
@@ -249,6 +273,7 @@ install_once: true
 ```
 
 **Characteristics:**
+
 - `install_once: true` → Installed initially, skipped on updates
 - Typically run once during project setup
 - May contain project-specific configuration after first run
@@ -277,6 +302,7 @@ Portable commands read configuration from `.claude/config.json`:
 **In workspace:** Keep values generic/null (it's a template)
 
 **In projects:** Fill in real values:
+
 ```json
 {
   "project": {
@@ -336,7 +362,7 @@ category: workflow
 tools: Read, Write, Bash
 model: inherit
 version: 1.0.0
-workspace_only: false  # Or true for workspace-only
+workspace_only: false # Or true for workspace-only
 ---
 ```
 
@@ -431,17 +457,20 @@ Code Review (push more commits)
 The workspace includes `/validate-frontmatter` (workspace-only) to ensure consistency.
 
 **Validates:**
+
 - Required fields present
 - Valid category values
 - Valid tool references
 - Proper structure
 
 **Auto-fixes:**
+
 - Adds missing optional fields
 - Standardizes formatting
 - Creates `docs/FRONTMATTER_STANDARD.md`
 
 **Run validation:**
+
 ```
 # In Claude Code (workspace only)
 /validate-frontmatter
@@ -452,11 +481,13 @@ The workspace includes `/validate-frontmatter` (workspace-only) to ensure consis
 ### Command not appearing after creation
 
 **Check:**
+
 1. File in `.claude/commands/` directory? (not just `commands/`)
 2. Valid YAML frontmatter?
 3. Restarted Claude Code?
 
 **Solution:**
+
 ```bash
 # Copy to .claude/ if needed
 cp commands/my_command.md .claude/commands/
@@ -467,20 +498,24 @@ cp commands/my_command.md .claude/commands/
 ### Workspace-only command showing in project
 
 **Check:**
+
 - Did you use `install-user.sh`? (includes all commands)
 - Or `install-project.sh`? (filters workspace-only)
 
 **Expected behavior:**
+
 - User install: All commands (for workspace developers)
 - Project install: Portable commands only
 
 ### Command customization lost after update
 
 **This is by design** if:
+
 - You marked the command as customized (chose "keep local")
 - OR it's `linear.md` and you configured it
 
 **To keep customizations:**
+
 - Update script will prompt you
 - Choose option 1: "Keep local version"
 - OR option 3: "View diff and decide"
@@ -490,6 +525,7 @@ cp commands/my_command.md .claude/commands/
 **Remember:** `/validate-frontmatter` is workspace-only.
 
 **Only available if:**
+
 - Installed with `install-user.sh`
 - OR installed to workspace itself
 - NOT available in regular project installations

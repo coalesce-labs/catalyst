@@ -24,6 +24,7 @@ These principles are derived from Anthropic's context engineering article and pr
 **Principle**: Treat context window as a scarce resource. Load only what's needed, when it's needed.
 
 **Why it matters:**
+
 - LLMs have limited context windows
 - Irrelevant information degrades performance
 - Focused context produces better results
@@ -31,24 +32,28 @@ These principles are derived from Anthropic's context engineering article and pr
 **How to apply:**
 
 **Good - Focused Loading:**
+
 ```
 # Load only the specific file needed
 Read the authentication handler at src/auth/handler.js
 ```
 
 **Bad - Over-Loading:**
+
 ```
 # Reads entire directory tree unnecessarily
 Read all files in src/
 ```
 
 **Good - Just-in-Time:**
+
 ```
 @agent-codebase-locator find authentication files
 # Then read only the relevant ones
 ```
 
 **Bad - Preemptive Loading:**
+
 ```
 Read all these files in case we need them later:
 [long list of files]
@@ -59,11 +64,13 @@ Read all these files in case we need them later:
 **Principle**: Load context dynamically as needed, not upfront.
 
 **Why it matters:**
+
 - You don't know what you need until you explore
 - Upfront loading often misses the right files
 - Dynamic loading follows actual code paths
 
 **Pattern:**
+
 1. Start with broad search (codebase-locator)
 2. Identify relevant files
 3. Read specific files
@@ -71,6 +78,7 @@ Read all these files in case we need them later:
 5. Load additional context as needed
 
 **Example:**
+
 ```
 # Step 1: Locate
 @agent-codebase-locator find rate limiting code
@@ -90,12 +98,14 @@ Read src/cache/redis-client.js
 **Principle**: Use parallel, focused agents instead of monolithic analysis.
 
 **Why it matters:**
+
 - Focused agents are more accurate
 - Parallel execution is faster
 - Specialized tools restrict scope (preventing over-exploration)
 - Each agent has clear, limited responsibility
 
 **Good - Parallel Specialists:**
+
 ```
 # Spawn multiple focused agents
 @agent-codebase-locator find payment files
@@ -104,12 +114,14 @@ Read src/cache/redis-client.js
 ```
 
 **Bad - Monolithic:**
+
 ```
 # Single agent with too much responsibility
 @agent research everything about payments including files, history, patterns, and implementation
 ```
 
 **Benefits of Sub-Agents:**
+
 - **Tool Restrictions**: Each agent has specific tools (read-only, no edits)
 - **Clear Scope**: Bounded responsibility prevents scope creep
 - **Parallel Execution**: Faster than sequential
@@ -120,17 +132,20 @@ Read src/cache/redis-client.js
 **Principle**: Save context outside the conversation window for reuse.
 
 **Why it matters:**
+
 - Conversations are ephemeral
 - Context is expensive to rebuild
 - Persistent context enables compaction
 
 **Implementation:**
+
 - **Thoughts Directory**: Persistent, searchable, version-controlled
 - **Plans**: Detailed specifications that survive conversation resets
 - **Research Documents**: Reusable findings
 - **Ticket Analysis**: Deep context that persists
 
 **Pattern:**
+
 ```
 # Research phase (expensive)
 @agent-codebase-analyzer deeply analyze authentication system
@@ -149,11 +164,13 @@ Read thoughts/shared/research/auth_system.md
 **Principle**: Start broad, narrow down progressively.
 
 **Why it matters:**
+
 - You don't know what you don't know
 - Premature specificity misses important context
 - Progressive refinement follows natural investigation
 
 **Pattern:**
+
 ```
 # Level 1: Broad search
 @agent-codebase-locator find all webhook code
@@ -177,30 +194,35 @@ Read src/utils/crypto.js  # Discovered during analysis
 ### When to Use Which Agent
 
 **codebase-locator** - "Where is X?"
+
 - Finding files by topic
 - Discovering test locations
 - Mapping directory structure
 - Initial exploration
 
 **codebase-analyzer** - "How does X work?"
+
 - Understanding implementation
 - Tracing data flow
 - Identifying integration points
 - Learning code patterns
 
 **codebase-pattern-finder** - "Show me examples of X"
+
 - Finding similar implementations
 - Discovering coding conventions
 - Locating test patterns
 - Understanding common approaches
 
 **thoughts-locator** - "What do we know about X?"
+
 - Finding past research
 - Locating related tickets
 - Discovering existing plans
 - Searching historical context
 
 **thoughts-analyzer** - "What were the key decisions about X?"
+
 - Extracting decisions from research
 - Understanding trade-offs
 - Finding technical specifications
@@ -209,12 +231,14 @@ Read src/utils/crypto.js  # Discovered during analysis
 ### Parallel vs Sequential Agent Usage
 
 **Use Parallel When:**
+
 - Researching independent aspects
 - Gathering comprehensive context
 - Exploring multiple options
 - Initial discovery phase
 
 **Example:**
+
 ```
 # All independent, spawn together
 @agent-codebase-locator find database migration files
@@ -223,12 +247,14 @@ Read src/utils/crypto.js  # Discovered during analysis
 ```
 
 **Use Sequential When:**
+
 - Second agent depends on first's results
 - Following a specific code path
 - Drilling into findings
 - Refining from broad to specific
 
 **Example:**
+
 ```
 # Step 1
 @agent-codebase-locator find rate limiting code
@@ -245,11 +271,13 @@ Read the Redis client used by the middleware
 **Be Specific:**
 
 Good:
+
 ```
 @agent-codebase-analyzer trace how a webhook request flows from receipt to database storage
 ```
 
 Bad:
+
 ```
 @agent-codebase-analyzer look at webhooks
 ```
@@ -257,11 +285,13 @@ Bad:
 **Include Context:**
 
 Good:
+
 ```
 @agent-codebase-locator find all files related to user authentication in the API service, focusing on JWT token handling
 ```
 
 Bad:
+
 ```
 @agent-codebase-locator find auth stuff
 ```
@@ -269,11 +299,13 @@ Bad:
 **Specify What You Need:**
 
 Good:
+
 ```
 @agent-codebase-pattern-finder show me examples of pagination with cursor-based approaches, including test patterns
 ```
 
 Bad:
+
 ```
 @agent-codebase-pattern-finder pagination
 ```
@@ -297,13 +329,16 @@ Bad:
 **Phase Guidelines:**
 
 **Good Phase:**
+
 ```markdown
 ## Phase 1: Database Schema
 
 ### Overview
+
 Add rate_limits table to track user quotas
 
 ### Changes Required
+
 - Migration adds table with user_id, limit, window_seconds
 - Add index on (user_id, created_at)
 - Add foreign key to users table
@@ -311,51 +346,60 @@ Add rate_limits table to track user quotas
 ### Success Criteria
 
 #### Automated Verification
+
 - [ ] Migration runs: `make migrate`
 - [ ] Schema matches spec: `make db-verify-schema`
 - [ ] Tests pass: `make test-db`
 
 #### Manual Verification
+
 - [ ] Can insert rate limit records
 - [ ] Foreign key constraint works
 - [ ] Index improves query performance
 ```
 
 **Bad Phase:**
+
 ```markdown
 ## Phase 1: Setup
 
 Do database stuff and API stuff
 
 ### Success Criteria
+
 - [ ] It works
 ```
 
 ### Separating Automated vs Manual Verification
 
 **Automated Verification:**
+
 - Can be run by execution agents
 - Deterministic pass/fail
 - No human judgment required
 - Examples: tests, linting, compilation, specific curl commands
 
 **Manual Verification:**
+
 - Requires human testing
 - Subjective assessment (UX, performance)
 - Visual or behavioral checks
 - Edge cases hard to automate
 
 **Good Separation:**
+
 ```markdown
 ### Success Criteria
 
 #### Automated Verification
+
 - [ ] Unit tests pass: `make test-unit`
 - [ ] Integration tests pass: `make test-integration`
 - [ ] Type checking passes: `npm run typecheck`
 - [ ] API returns 429 on exceeded limit: `curl -X POST http://localhost:8080/api/test -H "X-Test: rate-limit-exceeded"`
 
 #### Manual Verification
+
 - [ ] Error message is user-friendly when rate limit hit
 - [ ] UI shows helpful retry-after timer
 - [ ] Performance is acceptable with 10,000 requests
@@ -363,8 +407,10 @@ Do database stuff and API stuff
 ```
 
 **Bad Mixing:**
+
 ```markdown
 ### Success Criteria
+
 - [ ] Tests pass
 - [ ] Looks good
 - [ ] No bugs
@@ -386,6 +432,7 @@ Do database stuff and API stuff
 ```
 
 **Why this matters:**
+
 - Prevents scope creep
 - Clarifies boundaries
 - Enables faster delivery
@@ -394,10 +441,12 @@ Do database stuff and API stuff
 ### No Open Questions in Final Plans
 
 **Bad Plan (with open questions):**
+
 ```markdown
 ## Phase 2: API Implementation
 
 ### Changes Required
+
 - Add rate limiting middleware
 - Use Redis or maybe in-memory? Need to decide.
 - Return 429 status code
@@ -405,10 +454,12 @@ Do database stuff and API stuff
 ```
 
 **Good Plan (all decisions made):**
+
 ```markdown
 ## Phase 2: API Implementation
 
 ### Changes Required
+
 - Add rate limiting middleware using Redis
   - Rationale: Need to work across multiple instances
   - Alternative in-memory rejected due to multi-instance deployment
@@ -418,6 +469,7 @@ Do database stuff and API stuff
 
 **Process:**
 If you have open questions during planning:
+
 1. STOP writing the plan
 2. Research the question (spawn agents, ask user)
 3. Make the decision
@@ -433,18 +485,21 @@ If you have open questions during planning:
 Plans are guides, not rigid scripts. Reality may differ:
 
 **When to Adapt:**
+
 - File has been moved since plan was written
 - Better pattern discovered in codebase
 - Configuration has changed
 - Dependencies updated
 
 **When to Stop and Ask:**
+
 - Core approach no longer makes sense
 - Significant architectural mismatch
 - Security or correctness concern
 - Scope impact
 
 **How to Handle:**
+
 ```
 Issue in Phase 2:
 Expected: Configuration in config/auth.json
@@ -460,6 +515,7 @@ Updating plan approach while maintaining same outcome.
 **Don't wait until the end to verify:**
 
 **Good - Incremental:**
+
 ```
 Phase 1: Database schema
 [implement]
@@ -475,6 +531,7 @@ Phase 2: API endpoints
 ```
 
 **Bad - Deferred:**
+
 ```
 Phase 1: Database schema
 [implement]
@@ -493,21 +550,25 @@ Phase 3: Tests
 ### Update Progress as You Go
 
 **Use Checkboxes:**
+
 ```markdown
 ## Phase 1: Database Schema
 
 ### Changes Required
+
 - [x] Add migration file
 - [x] Add table definition
 - [ ] Add indexes
 - [ ] Add foreign keys
 
 ### Success Criteria
+
 - [x] Migration runs: `make migrate`
 - [ ] Schema verified: `make db-verify-schema`
 ```
 
 **Benefits:**
+
 - Clear progress tracking
 - Easy to resume if interrupted
 - Documents what's complete
@@ -520,6 +581,7 @@ Phase 3: Tests
 ### Naming Conventions
 
 **Plans:**
+
 ```
 Format: YYYY-MM-DD-ENG-XXXX-description.md
 Examples:
@@ -528,6 +590,7 @@ Examples:
 ```
 
 **Research Documents:**
+
 ```
 Format: YYYY-MM-DD_topic.md or topic.md
 Examples:
@@ -537,6 +600,7 @@ Examples:
 ```
 
 **Tickets:**
+
 ```
 Format: eng_XXXX.md or ticket_description.md
 Examples:
@@ -545,6 +609,7 @@ Examples:
 ```
 
 **PR Descriptions:**
+
 ```
 Format: pr_XXXX_description.md
 Examples:
@@ -555,6 +620,7 @@ Examples:
 ### Personal vs Shared Guidelines
 
 **Use Personal (`thoughts/{your_name}/`) For:**
+
 - Rough exploration and learning
 - Private TODOs
 - Incomplete research
@@ -563,6 +629,7 @@ Examples:
 - Learning notes
 
 **Use Shared (`thoughts/shared/`) For:**
+
 - Finalized implementation plans
 - Completed research
 - Architectural decisions
@@ -571,6 +638,7 @@ Examples:
 - Patterns and conventions
 
 **Example Workflow:**
+
 ```bash
 # Start in personal
 echo "Exploring auth options..." > thoughts/ryan/notes/auth_exploration.md
@@ -593,18 +661,21 @@ EOF
 ### When to Create New Documents
 
 **Create a New Plan When:**
+
 - Starting a new feature
 - Major refactoring effort
 - Complex bug fix requiring multiple phases
 - Migration or upgrade task
 
 **Create a New Research Doc When:**
+
 - Evaluating multiple options
 - Investigating architectural patterns
 - Analyzing performance issues
 - Documenting critical decisions
 
 **Add to Existing Doc When:**
+
 - Updating based on new findings
 - Adding implementation notes to existing plan
 - Documenting progress on ongoing research
@@ -613,12 +684,14 @@ EOF
 ### Thoughts Syncing Cadence
 
 **Sync After:**
+
 - Creating or updating plans
 - Completing research
 - Finishing implementation (before PR)
 - Making architectural decisions
 
 **Command:**
+
 ```bash
 humanlayer thoughts sync
 
@@ -630,6 +703,7 @@ git push
 ```
 
 **Automate with Git Hooks:**
+
 ```bash
 # .git/hooks/post-commit
 #!/bin/bash
@@ -643,6 +717,7 @@ cd ~/thoughts && git add . && git commit -m "Auto-sync $(date)" || true
 ### Shared Thoughts Repository
 
 **Setup:**
+
 ```bash
 # Initialize central thoughts repo
 cd ~/thoughts
@@ -654,6 +729,7 @@ git clone <team-thoughts-repo-url> ~/thoughts
 ```
 
 **Benefits:**
+
 - Shared context across team
 - No duplicated research
 - Consistent patterns
@@ -662,6 +738,7 @@ git clone <team-thoughts-repo-url> ~/thoughts
 ### Pull Before Planning
 
 **Pattern:**
+
 ```bash
 # Before starting new work
 cd ~/thoughts
@@ -674,6 +751,7 @@ git pull
 ### Collaborative Research
 
 **Developer A:**
+
 ```bash
 # Research authentication options
 cat > thoughts/shared/research/2025-01-08_auth_options.md << 'EOF'
@@ -695,6 +773,7 @@ humanlayer thoughts sync
 ```
 
 **Developer B:**
+
 ```bash
 # Pull latest
 humanlayer thoughts sync
@@ -718,6 +797,7 @@ humanlayer thoughts sync
 ### Ticket Ownership Patterns
 
 **Personal Tickets:**
+
 ```
 thoughts/ryan/tickets/eng_1234.md
 - Personal research and notes
@@ -726,6 +806,7 @@ thoughts/ryan/tickets/eng_1234.md
 ```
 
 **Shared Tickets:**
+
 ```
 thoughts/shared/tickets/eng_1234.md
 - Team-visible analysis
@@ -734,6 +815,7 @@ thoughts/shared/tickets/eng_1234.md
 ```
 
 **Pattern:**
+
 ```bash
 # Start in personal
 echo "Initial research..." > thoughts/ryan/tickets/eng_1234.md
@@ -759,6 +841,7 @@ EOF
 ### PR Description Sharing
 
 **Pattern:**
+
 ```bash
 # After implementation
 cat > thoughts/shared/prs/pr_456_rate_limiting.md << 'EOF'
@@ -796,6 +879,7 @@ Team members can reference this in future work.
 ### When to Use Worktrees
 
 **Use Worktrees When:**
+
 - Working on large, long-running features
 - Need to switch context frequently
 - Want to keep main branch clean
@@ -803,6 +887,7 @@ Team members can reference this in future work.
 - Want isolated testing environments
 
 **Don't Use Worktrees When:**
+
 - Small, quick fixes
 - Single feature at a time
 - Short-lived branches
@@ -811,6 +896,7 @@ Team members can reference this in future work.
 ### Worktree Organization
 
 **Recommended Structure:**
+
 ```
 ~/wt/{repo-name}/{feature-name}/
 
@@ -821,6 +907,7 @@ Examples:
 ```
 
 **Benefits:**
+
 - Clear organization
 - Easy to find worktrees
 - Matches feature naming
@@ -832,6 +919,7 @@ Examples:
 All worktrees share the same thoughts directory via symlink.
 
 **Automatic Sharing:**
+
 ```
 Main Repo: ~/projects/my-api/thoughts/
 Worktree 1: ~/wt/my-api/rate-limiting/thoughts/
@@ -842,6 +930,7 @@ Worktree 2: ~/wt/my-api/auth/thoughts/
 ```
 
 **Result:**
+
 - Plans created in one worktree visible in all others
 - Research shared automatically
 - No duplicate context
@@ -852,12 +941,14 @@ Worktree 2: ~/wt/my-api/auth/thoughts/
 **.claude/ Directory:**
 
 Option 1: Copy (default behavior of create-worktree.sh)
+
 ```
 Main Repo: ~/projects/my-api/.claude/
 Worktree:   ~/wt/my-api/feature/.claude/ (copied)
 ```
 
 Option 2: Symlink (for shared agent updates)
+
 ```bash
 # In worktree
 rm -rf .claude
@@ -865,12 +956,14 @@ ln -s ~/projects/my-api/.claude .claude
 ```
 
 **Trade-offs:**
+
 - Copy: Worktree independence, no accidental changes
 - Symlink: Agent updates apply everywhere, shared customization
 
 ### Worktree Cleanup
 
 **After Feature Merges:**
+
 ```bash
 cd ~/projects/my-api
 
@@ -885,6 +978,7 @@ git branch -d ENG-1234-rate-limiting
 ```
 
 **Automated Cleanup Script:**
+
 ```bash
 #!/bin/bash
 # cleanup-merged-worktrees.sh
@@ -915,6 +1009,7 @@ done
 ### 1. Context Over-Loading
 
 **Anti-Pattern:**
+
 ```
 # Reading entire codebase upfront
 Read all files in src/
@@ -923,11 +1018,13 @@ Read all files in config/
 ```
 
 **Why it's bad:**
+
 - Wastes context window
 - Includes irrelevant information
 - Degrades AI performance
 
 **Better Approach:**
+
 ```
 # Progressive, targeted loading
 @agent-codebase-locator find authentication files
@@ -939,17 +1036,20 @@ Read src/auth/handler.js
 ### 2. Monolithic Research
 
 **Anti-Pattern:**
+
 ```
 @agent research everything about payments including all files, all history, all patterns, and create a complete analysis
 ```
 
 **Why it's bad:**
+
 - Unclear scope
 - Mixed responsibilities
 - No parallelization
 - Hard to verify completeness
 
 **Better Approach:**
+
 ```
 # Parallel, focused research
 @agent-codebase-locator find payment files
@@ -960,29 +1060,35 @@ Read src/auth/handler.js
 ### 3. Vague Plans
 
 **Anti-Pattern:**
+
 ```markdown
 ## Phase 1: Setup
 
 Do database stuff
 
 ### Success Criteria
+
 - [ ] It works
 ```
 
 **Why it's bad:**
+
 - No clear completion criteria
 - Can't verify success
 - Unclear scope
 - No actionable steps
 
 **Better Approach:**
+
 ```markdown
 ## Phase 1: Database Schema
 
 ### Overview
+
 Add rate_limits table with user quotas and time windows
 
 ### Changes Required
+
 - Add migration: 012_add_rate_limits_table.sql
   - Columns: id, user_id, endpoint, limit_per_minute, created_at
   - Index on (user_id, endpoint)
@@ -991,11 +1097,13 @@ Add rate_limits table with user quotas and time windows
 ### Success Criteria
 
 #### Automated Verification
+
 - [ ] Migration runs: `make migrate`
 - [ ] Schema validation passes: `make db-verify-schema`
 - [ ] Can insert test records: `make test-db-rate-limits`
 
 #### Manual Verification
+
 - [ ] Table visible in database client
 - [ ] Foreign key constraint prevents invalid user_ids
 ```
@@ -1003,6 +1111,7 @@ Add rate_limits table with user quotas and time windows
 ### 4. Implementation Without Planning
 
 **Anti-Pattern:**
+
 ```
 # Jumping straight to implementation
 Let's add rate limiting. I'll start coding...
@@ -1010,12 +1119,14 @@ Let's add rate limiting. I'll start coding...
 ```
 
 **Why it's bad:**
+
 - Misses existing patterns
 - Duplicates code
 - Ignores constraints
 - No thought-out approach
 
 **Better Approach:**
+
 ```
 # Research, plan, then implement
 /create_plan thoughts/shared/tickets/eng_1234.md
@@ -1026,6 +1137,7 @@ Let's add rate limiting. I'll start coding...
 ### 5. No Context Persistence
 
 **Anti-Pattern:**
+
 ```
 # All work in conversation window
 [extensive research]
@@ -1035,12 +1147,14 @@ Let's add rate limiting. I'll start coding...
 ```
 
 **Why it's bad:**
+
 - Research must be redone
 - No reusable knowledge
 - Team can't benefit
 - Wastes time
 
 **Better Approach:**
+
 ```
 # Persist everything important
 [research]
@@ -1058,29 +1172,35 @@ humanlayer thoughts sync
 ### 6. Mixed Automated and Manual Criteria
 
 **Anti-Pattern:**
+
 ```markdown
 ### Success Criteria
+
 - [ ] Tests pass and UI looks good
 - [ ] No errors and performance is acceptable
 - [ ] Everything works correctly
 ```
 
 **Why it's bad:**
+
 - Can't distinguish what's automatable
 - Unclear what needs human testing
 - Validation agents can't help
 - Ambiguous completion
 
 **Better Approach:**
+
 ```markdown
 ### Success Criteria
 
 #### Automated Verification
+
 - [ ] Unit tests pass: `make test-unit`
 - [ ] Integration tests pass: `make test-integration`
 - [ ] No TypeScript errors: `npm run typecheck`
 
 #### Manual Verification
+
 - [ ] UI displays rate limit errors clearly
 - [ ] Performance acceptable with 1000+ requests
 - [ ] Error messages are user-friendly
@@ -1089,6 +1209,7 @@ humanlayer thoughts sync
 ### 7. Ignoring Existing Patterns
 
 **Anti-Pattern:**
+
 ```
 # Implementing without checking existing code
 I'll create a new pagination approach...
@@ -1097,12 +1218,14 @@ I'll create a new pagination approach...
 ```
 
 **Why it's bad:**
+
 - Creates inconsistency
 - Duplicates code
 - Misses proven patterns
 - Harder maintenance
 
 **Better Approach:**
+
 ```
 # Check existing patterns first
 @agent-codebase-pattern-finder show pagination implementations
@@ -1113,34 +1236,44 @@ I'll create a new pagination approach...
 ### 8. Scope Creep
 
 **Anti-Pattern:**
+
 ```markdown
 # Plan for "Add rate limiting"
 
 ## Phase 1: Basic rate limiting
+
 ## Phase 2: Dashboard for viewing limits
+
 ## Phase 3: Admin UI for configuring limits
+
 ## Phase 4: Per-endpoint limits
+
 ## Phase 5: Geographic rate limiting
+
 ## Phase 6: Machine learning for dynamic limits
 ```
 
 **Why it's bad:**
+
 - Original goal lost
 - Never finishes
 - Delays value delivery
 - Increases complexity
 
 **Better Approach:**
+
 ```markdown
 # Plan for "Add rate limiting"
 
 ## What We're NOT Doing
+
 - Not building admin UI (configuration via code only)
 - Not implementing per-endpoint limits (global only)
 - Not adding geographic rules (user-based only)
 - Not implementing ML/dynamic limits
 
 ## Phase 1: Basic Global Rate Limiting
+
 [Focused on original goal]
 ```
 

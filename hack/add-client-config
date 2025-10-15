@@ -16,25 +16,25 @@ CONFIG_DIR="$HOME/.config/humanlayer"
 
 # Function to show usage
 show_usage() {
-    echo "Usage: add-client-config <client-name> [thoughts-repo-path]"
-    echo ""
-    echo "Examples:"
-    echo "  add-client-config acme                    # Interactive - will prompt for path"
-    echo "  add-client-config acme ~/clients/acme/thoughts"
-    echo "  add-client-config brkthru ~/code-repos/github/brkthru/bravo_code/thoughts"
-    echo ""
-    echo "This creates a new HumanLayer configuration for a client project."
-    echo "You can then switch to it with: hl-switch <client-name>"
+	echo "Usage: add-client-config <client-name> [thoughts-repo-path]"
+	echo ""
+	echo "Examples:"
+	echo "  add-client-config acme                    # Interactive - will prompt for path"
+	echo "  add-client-config acme ~/clients/acme/thoughts"
+	echo "  add-client-config brkthru ~/code-repos/github/brkthru/bravo_code/thoughts"
+	echo ""
+	echo "This creates a new HumanLayer configuration for a client project."
+	echo "You can then switch to it with: hl-switch <client-name>"
 }
 
 # Check arguments
 if [ $# -eq 0 ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
-    show_usage
-    exit 0
+	show_usage
+	exit 0
 fi
 
 CLIENT_NAME="$1"
-THOUGHTS_REPO="${2:-}"
+THOUGHTS_REPO="${2-}"
 
 # Sanitize client name
 CLIENT_NAME=$(echo "$CLIENT_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
@@ -43,12 +43,12 @@ CONFIG_FILE="$CONFIG_DIR/config-${CLIENT_NAME}.json"
 
 # Check if config already exists
 if [ -f "$CONFIG_FILE" ]; then
-    echo -e "${RED}Error: Configuration for '$CLIENT_NAME' already exists${NC}"
-    echo "File: $CONFIG_FILE"
-    echo ""
-    echo "To update it, edit the file directly or remove it first:"
-    echo "  rm $CONFIG_FILE"
-    exit 1
+	echo -e "${RED}Error: Configuration for '$CLIENT_NAME' already exists${NC}"
+	echo "File: $CONFIG_FILE"
+	echo ""
+	echo "To update it, edit the file directly or remove it first:"
+	echo "  rm $CONFIG_FILE"
+	exit 1
 fi
 
 echo -e "${BLUE}🆕 Adding new client configuration: $CLIENT_NAME${NC}"
@@ -56,27 +56,27 @@ echo ""
 
 # Get thoughts repo path if not provided
 if [ -z "$THOUGHTS_REPO" ]; then
-    echo "Where should this client's thoughts be stored?"
-    echo ""
-    echo "Suggestions:"
-    echo "  ~/thoughts-${CLIENT_NAME}"
-    echo "  ~/clients/${CLIENT_NAME}/thoughts"
-    echo "  ~/code-repos/github/${CLIENT_NAME}/thoughts"
-    echo ""
-    read -p "Thoughts repository path: " THOUGHTS_REPO
+	echo "Where should this client's thoughts be stored?"
+	echo ""
+	echo "Suggestions:"
+	echo "  ~/thoughts-${CLIENT_NAME}"
+	echo "  ~/clients/${CLIENT_NAME}/thoughts"
+	echo "  ~/code-repos/github/${CLIENT_NAME}/thoughts"
+	echo ""
+	read -p "Thoughts repository path: " THOUGHTS_REPO
 
-    if [ -z "$THOUGHTS_REPO" ]; then
-        echo -e "${RED}Error: Path cannot be empty${NC}"
-        exit 1
-    fi
+	if [ -z "$THOUGHTS_REPO" ]; then
+		echo -e "${RED}Error: Path cannot be empty${NC}"
+		exit 1
+	fi
 fi
 
 # Expand tilde
 THOUGHTS_REPO="${THOUGHTS_REPO/#\~/$HOME}"
 
 # Convert to absolute path if relative
-if [[ "$THOUGHTS_REPO" != /* ]]; then
-    THOUGHTS_REPO="$(cd "$(dirname "$THOUGHTS_REPO")" 2>/dev/null && pwd)/$(basename "$THOUGHTS_REPO")" || THOUGHTS_REPO="$HOME/$THOUGHTS_REPO"
+if [[ $THOUGHTS_REPO != /* ]]; then
+	THOUGHTS_REPO="$(cd "$(dirname "$THOUGHTS_REPO")" 2>/dev/null && pwd)/$(basename "$THOUGHTS_REPO")" || THOUGHTS_REPO="$HOME/$THOUGHTS_REPO"
 fi
 
 echo ""
@@ -90,14 +90,14 @@ read -p "Create this configuration? (Y/n) " -n 1 -r
 echo
 
 if [[ $REPLY =~ ^[Nn]$ ]]; then
-    echo "Cancelled."
-    exit 0
+	echo "Cancelled."
+	exit 0
 fi
 
 # Create the config file
 mkdir -p "$CONFIG_DIR"
 
-cat > "$CONFIG_FILE" <<EOF
+cat >"$CONFIG_FILE" <<EOF
 {
   "thoughts": {
     "thoughtsRepo": "$THOUGHTS_REPO",
@@ -114,23 +114,23 @@ echo ""
 
 # Ask if they want to initialize the thoughts repo
 if [ ! -d "$THOUGHTS_REPO" ]; then
-    echo "The thoughts repository doesn't exist yet."
-    echo ""
-    read -p "Create and initialize $THOUGHTS_REPO? (Y/n) " -n 1 -r
-    echo
+	echo "The thoughts repository doesn't exist yet."
+	echo ""
+	read -p "Create and initialize $THOUGHTS_REPO? (Y/n) " -n 1 -r
+	echo
 
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-        echo ""
-        echo "Creating thoughts repository..."
+	if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+		echo ""
+		echo "Creating thoughts repository..."
 
-        mkdir -p "$THOUGHTS_REPO"
-        cd "$THOUGHTS_REPO"
+		mkdir -p "$THOUGHTS_REPO"
+		cd "$THOUGHTS_REPO"
 
-        # Create structure
-        mkdir -p repos global/ryan global/shared
+		# Create structure
+		mkdir -p repos global/ryan global/shared
 
-        # Create .gitignore
-        cat > .gitignore <<'GITIGNORE'
+		# Create .gitignore
+		cat >.gitignore <<'GITIGNORE'
 # OS files
 .DS_Store
 Thumbs.db
@@ -150,8 +150,8 @@ Thumbs.db
 **/searchable/
 GITIGNORE
 
-        # Create README
-        cat > README.md <<README
+		# Create README
+		cat >README.md <<README
 # ${CLIENT_NAME^} Thoughts Repository
 
 Thoughts repository for managing context across ${CLIENT_NAME} projects.
@@ -181,49 +181,49 @@ humanlayer thoughts init
 \`\`\`
 README
 
-        # Initialize git
-        git init
-        git add .
-        git commit -m "Initial ${CLIENT_NAME} thoughts repository"
+		# Initialize git
+		git init
+		git add .
+		git commit -m "Initial ${CLIENT_NAME} thoughts repository"
 
-        echo -e "${GREEN}✓ Created and initialized: $THOUGHTS_REPO${NC}"
-        echo ""
+		echo -e "${GREEN}✓ Created and initialized: $THOUGHTS_REPO${NC}"
+		echo ""
 
-        # Ask about GitHub
-        read -p "Push to GitHub? (y/N) " -n 1 -r
-        echo
+		# Ask about GitHub
+		read -p "Push to GitHub? (y/N) " -n 1 -r
+		echo
 
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            echo ""
-            echo "Enter GitHub repository (e.g., org-name/thoughts or just repo-name):"
-            read -p "GitHub repo: " GITHUB_REPO
+		if [[ $REPLY =~ ^[Yy]$ ]]; then
+			echo ""
+			echo "Enter GitHub repository (e.g., org-name/thoughts or just repo-name):"
+			read -p "GitHub repo: " GITHUB_REPO
 
-            if [ -n "$GITHUB_REPO" ]; then
-                # Check if it includes org/repo or just repo
-                if [[ "$GITHUB_REPO" != *"/"* ]]; then
-                    # Just repo name, ask for org
-                    echo ""
-                    echo "GitHub organization/owner:"
-                    echo "  1. Your personal account"
-                    echo "  2. coalesce-labs"
-                    echo "  3. Client organization"
-                    echo ""
-                    read -p "Enter org name: " ORG_NAME
-                    GITHUB_REPO="${ORG_NAME}/${GITHUB_REPO}"
-                fi
+			if [ -n "$GITHUB_REPO" ]; then
+				# Check if it includes org/repo or just repo
+				if [[ $GITHUB_REPO != *"/"* ]]; then
+					# Just repo name, ask for org
+					echo ""
+					echo "GitHub organization/owner:"
+					echo "  1. Your personal account"
+					echo "  2. coalesce-labs"
+					echo "  3. Client organization"
+					echo ""
+					read -p "Enter org name: " ORG_NAME
+					GITHUB_REPO="${ORG_NAME}/${GITHUB_REPO}"
+				fi
 
-                echo ""
-                echo "Creating GitHub repository: $GITHUB_REPO"
-                gh repo create "$GITHUB_REPO" \
-                    --private \
-                    --source=. \
-                    --description="Thoughts repository for ${CLIENT_NAME} projects" \
-                    --push || echo -e "${YELLOW}Failed to create/push to GitHub${NC}"
-            fi
-        fi
-    fi
+				echo ""
+				echo "Creating GitHub repository: $GITHUB_REPO"
+				gh repo create "$GITHUB_REPO" \
+					--private \
+					--source=. \
+					--description="Thoughts repository for ${CLIENT_NAME} projects" \
+					--push || echo -e "${YELLOW}Failed to create/push to GitHub${NC}"
+			fi
+		fi
+	fi
 else
-    echo -e "${GREEN}✓ Thoughts repository already exists: $THOUGHTS_REPO${NC}"
+	echo -e "${GREEN}✓ Thoughts repository already exists: $THOUGHTS_REPO${NC}"
 fi
 
 echo ""
