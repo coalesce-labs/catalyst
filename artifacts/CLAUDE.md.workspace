@@ -1,0 +1,111 @@
+<!-- BEGIN: Ryan Claude Workspace -->
+<!-- VERSION: 1.0.0 -->
+<!-- DO NOT EDIT: This section is managed by ryan-claude-workspace -->
+<!-- Last updated: 2025-10-13 -->
+
+# Claude Code Workspace Configuration
+
+This project uses the ryan-claude-workspace for AI-assisted development workflows.
+
+## Available Commands
+
+### Workflow Commands (project:workflow)
+
+- `/workflow:research_codebase [TICKET]` - Research codebase patterns with parallel agents
+- `/workflow:create_plan [TICKET]` - Create implementation plan based on research
+- `/workflow:implement_plan [plan-file]` - Execute plan phases (auto-finds from context)
+- `/workflow:validate_plan [plan-file]` - Validate implementation against plan
+
+### Linear Integration (project:linear)
+
+- `/linear` - Linear ticket management (create, list, update, search)
+- `/linear:create_pr` - Create PR with auto-rebase and Linear integration
+- `/linear:merge_pr` - Safely merge PR with verification and cleanup
+- `/linear:setup_linear` - Configure Linear workflow statuses
+
+### Development Commands (project:dev)
+
+- `/dev:commit` - Create conventional commits with auto-detection
+- `/dev:describe_pr [PR]` - Update PR description incrementally
+
+### Handoff Commands (project:handoff)
+
+- `/handoff:create_handoff` - Save current state for next session
+- `/handoff:resume_handoff [file]` - Resume from handoff (auto-finds recent)
+
+### Project Management (project:project)
+
+- `/project:create_worktree TICKET branch-name` - Create git worktree for parallel work
+- `/project:update_project [path]` - Update project with workspace changes
+
+### Meta Commands (project:meta)
+
+- `/meta:discover_workflows` - Discover workflows from external repos
+- `/meta:import_workflow` - Import workflow from external repo
+- `/meta:create_workflow` - Create new workflow using templates
+- `/meta:validate_frontmatter` - Validate command/agent frontmatter
+- `/meta:workflow_help` - Interactive workflow guidance
+
+## Linear Integration Behavior
+
+This workspace **automatically manages Linear tickets** throughout your workflow:
+
+### Automatic Status Updates
+
+| Command | Ticket Status | Assignment |
+|---------|---------------|------------|
+| `/workflow:research_codebase TICKET-123` | → "Research" | Assigns to you |
+| `/workflow:create_plan TICKET-123` | → "Planning" | (already assigned) |
+| `/workflow:implement_plan` | → "In Progress" | (already assigned) |
+| `/linear:create_pr` | → "In Review" | (already assigned) |
+| `/linear:merge_pr` | → "Done" | (already assigned) |
+
+### Automatic Document Linking
+
+- Research documents → Linked to Linear ticket (in attachments)
+- Plan documents → Linked to Linear ticket
+- PRs → Linked to Linear ticket
+- Handoffs → Available for next session
+
+### Automatic Assignment
+
+When you run any workflow command with a ticket ID, the ticket is **automatically assigned to you**.
+
+## Context Management
+
+Claude Code has 200K token limit. This workspace **monitors context usage** and warns you:
+
+- **60% usage**: Warning - consider handoff before next phase
+- **70% usage**: Strong recommendation - create handoff now
+- **80% usage**: Critical - create handoff immediately
+
+**Context tracking**: `.claude/.workflow-context.json` (gitignored) tracks all workflow documents, enabling commands to auto-find recent files.
+
+**Use handoffs between phases**:
+```bash
+/handoff:create_handoff    # Save state
+# Clear context, start fresh
+/handoff:resume_handoff    # Auto-finds recent handoff
+```
+
+## Configuration
+
+See `.claude/config.json` for project configuration.
+See `.claude/.personal/README.md` for personal customization (gitignored).
+
+## Documentation
+
+- **Developer guide**: `docs/DEVELOPER_GUIDE.md` - Complete command reference and workflow walkthrough
+- **Setup guide**: `docs/PROJECT_SETUP_GUIDE.md` - For project owners installing workspace
+- **Full docs**: `docs/README.md` - Documentation index
+
+## Prerequisites
+
+Workflow commands require:
+- HumanLayer CLI: `brew install humanlayer/tap/humanlayer`
+- jq: `brew install jq`
+- GitHub CLI: `brew install gh` (for PR commands)
+
+Commands will verify prerequisites and provide installation instructions if missing.
+
+<!-- END: Ryan Claude Workspace -->

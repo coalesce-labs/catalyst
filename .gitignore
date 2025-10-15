@@ -21,3 +21,16 @@ Thumbs.db
 
 # HumanLayer thoughts directory (symlink to external system)
 thoughts/
+
+# Personal developer configuration (not shared with team)
+.claude/config.local.json
+.claude/.personal/*
+!.claude/.personal/README.md
+!.claude/.personal/.gitkeep
+
+# Workflow context (per-worktree, not shared)
+.claude/.workflow-context.json
+.claude/.workflow-context.json.tmp
+
+# Backup files from config migration
+.claude/config.json.backup
