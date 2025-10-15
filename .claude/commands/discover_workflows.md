@@ -9,15 +9,18 @@ workspace_only: true
 
 # Discover Workflows
 
-You are tasked with researching external Claude Code repositories to discover, analyze, and catalog their agents, commands, and workflow patterns.
+You are tasked with researching external Claude Code repositories to discover, analyze, and catalog
+their agents, commands, and workflow patterns.
 
 ## Purpose
 
-This command helps you learn from the Claude Code community by analyzing workflow repositories and extracting reusable patterns.
+This command helps you learn from the Claude Code community by analyzing workflow repositories and
+extracting reusable patterns.
 
 ## Supported Repositories
 
 Default repositories to research:
+
 - `catlog22/Claude-Code-Workflow` - Multi-agent automation
 - `automazeio/ccpm` - Project management system
 - `wshobson/commands` - Production slash commands
@@ -60,6 +63,7 @@ Get user selection or use provided parameter.
 Use TodoWrite to track the 3 parallel research tasks.
 
 **Task 1 - Workflow Discovery**:
+
 ```
 Use external-research agent:
 "Research {repo-name}. What commands and agents are available? List all workflows with brief descriptions of what each does."
@@ -69,6 +73,7 @@ Return: Complete list of all workflows found
 ```
 
 **Task 2 - Frontmatter Analysis**:
+
 ```
 Use external-research agent:
 "Research {repo-name}. What frontmatter format is used for agents and commands? Provide specific examples showing all frontmatter fields used."
@@ -78,6 +83,7 @@ Return: Frontmatter patterns with concrete examples
 ```
 
 **Task 3 - Implementation Patterns**:
+
 ```
 Use external-research agent:
 "Research {repo-name}. What are the common implementation patterns, structures, and conventions used across workflows? Include naming conventions, file organization, and any templates."
@@ -89,6 +95,7 @@ Return: Patterns, templates, conventions observed
 **WAIT for all 3 tasks to complete before proceeding.**
 
 **Why parallel**:
+
 - 3x faster than sequential
 - Each agent has isolated context
 - No context contamination between research areas
@@ -97,6 +104,7 @@ Return: Patterns, templates, conventions observed
 ### Step 3: Aggregate Parallel Results
 
 Combine findings from the 3 parallel research tasks:
+
 - Workflows list from Task 1
 - Frontmatter patterns from Task 2
 - Implementation patterns from Task 3
@@ -132,12 +140,10 @@ From the aggregated results, extract:
 
 Save research to `thoughts/shared/workflows/{repo-name}/analysis.md`:
 
-```markdown
+````markdown
 # Workflow Analysis: {Repo Name}
 
-**Repository**: {org/repo}
-**Analyzed**: {date}
-**Focus**: {agents/commands/both}
+**Repository**: {org/repo} **Analyzed**: {date} **Focus**: {agents/commands/both}
 
 ## Summary
 
@@ -155,8 +161,7 @@ Save research to `thoughts/shared/workflows/{repo-name}/analysis.md`:
      [actual frontmatter from repo]
      ```
 
-2. **{command-name}**
-   [...]
+2. **{command-name}** [...]
 
 ### Agents
 
@@ -171,21 +176,25 @@ Save research to `thoughts/shared/workflows/{repo-name}/analysis.md`:
 ## Frontmatter Patterns
 
 ### Standard Fields
+
 - name: [how they define it]
 - description: [format they use]
 - tools: [how specified]
 - [other fields observed]
 
 ### Naming Conventions
+
 - [pattern 1]
 - [pattern 2]
 
 ## Implementation Patterns
 
 ### Common Structures
+
 [Patterns you notice across workflows]
 
 ### Reusable Templates
+
 [Templates that could be adapted]
 
 ## Unique Features
@@ -199,10 +208,12 @@ Save research to `thoughts/shared/workflows/{repo-name}/analysis.md`:
 ## Recommendations
 
 ### High-Value Imports
+
 1. **{workflow-name}** - [why it's valuable]
 2. **{workflow-name}** - [why it's valuable]
 
 ### Patterns to Adopt
+
 - [Pattern 1]: [how to use it]
 - [Pattern 2]: [how to use it]
 
@@ -211,7 +222,7 @@ Save research to `thoughts/shared/workflows/{repo-name}/analysis.md`:
 - DeepWiki searches: [links]
 - Repository: {URL}
 - Analyzed on: {date}
-```
+````
 
 ### Step 6: Update Master Catalog
 
@@ -225,6 +236,7 @@ Discovered workflows from the Claude Code community.
 ## Repositories Analyzed
 
 ### wshobson/commands
+
 - **Analyzed**: 2025-01-08
 - **Workflows**: 15 commands
 - **Focus**: Production-ready automation
@@ -238,10 +250,12 @@ Discovered workflows from the Claude Code community.
 ## By Category
 
 ### Code Review
+
 - wshobson/commands: code-review
 - OneRedOak/claude-code-workflows: review-pr
 
 ### Documentation
+
 - qdhenry/Claude-Command-Suite: doc-generator
 - hesreallyhim/awesome-claude-code: readme-generator
 
@@ -250,11 +264,13 @@ Discovered workflows from the Claude Code community.
 ## By Use Case
 
 ### "I want to automate code reviews"
+
 1. wshobson/commands/code-review
 2. OneRedOak/claude-code-workflows/review-pr
 3. [Details in respective analyses]
 
 ### "I need project management workflows"
+
 1. automazeio/ccpm - Full PM system
 2. [...]
 ```
@@ -267,20 +283,24 @@ Show user what was found:
 # Discovery Results: {Repo Name}
 
 ## Summary
+
 Discovered {N} workflows ({X} commands, {Y} agents)
 
 ## Highlights
 
 ### Top Workflows
+
 1. **{name}** - {brief description}
 2. **{name}** - {brief description}
 3. **{name}** - {brief description}
 
 ### Interesting Patterns
+
 - {Pattern 1}
 - {Pattern 2}
 
 ### Recommended for Import
+
 - **{workflow-name}**: {why}
 
 ## Next Steps
@@ -301,6 +321,7 @@ Catalog updated at: `thoughts/shared/workflows/catalog.md`
 ```
 
 This will:
+
 1. Spawn parallel research for ALL supported repos simultaneously
 2. Each repo gets 3 sub-agents (structure, frontmatter, patterns)
 3. Total: 11 repos × 3 agents = 33 parallel tasks

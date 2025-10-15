@@ -8,7 +8,8 @@ version: 2.0.0
 
 # Generate/Update PR Description
 
-Generates or updates PR description with incremental information, auto-updates title, and links Linear tickets.
+Generates or updates PR description with incremental information, auto-updates title, and links
+Linear tickets.
 
 ## Process:
 
@@ -22,6 +23,7 @@ fi
 ```
 
 If missing:
+
 ```
 ❌ PR description template missing
 
@@ -36,15 +38,18 @@ Read template fully to understand all sections.
 ### 2. Identify target PR
 
 **If argument provided:**
+
 - Use that PR number: `/describe_pr 123`
 
 **If no argument:**
+
 ```bash
 # Try current branch
 gh pr view --json number,url,title,state,body,headRefName,baseRefName 2>/dev/null
 ```
 
 If no PR on current branch OR on main/master:
+
 ```bash
 # List recent PRs
 gh pr list --limit 10 --json number,title,headRefName,state
@@ -79,11 +84,13 @@ fi
 ### 4. Read existing descriptions
 
 **Read current PR body from GitHub:**
+
 ```bash
 current_body=$(gh pr view $pr_number --json body -q .body)
 ```
 
 **Read saved description (if exists):**
+
 ```bash
 saved_desc="thoughts/shared/prs/${pr_number}_description.md"
 if [ -f "$saved_desc" ]; then
@@ -93,6 +100,7 @@ fi
 ```
 
 **Check for metadata header:**
+
 ```markdown
 <!-- Auto-generated: 2025-10-06T10:30:00Z -->
 <!-- Last updated: 2025-10-06T14:45:00Z -->
@@ -135,6 +143,7 @@ new_commits=$(comm -13 <(echo "$prev_commits" | tr ',' '\n' | sort) <(echo "$cur
 ```
 
 **Analysis:**
+
 - Identify what's NEW since last description
 - Deep analysis of:
   - Code changes and architectural impact
@@ -146,33 +155,40 @@ new_commits=$(comm -13 <(echo "$prev_commits" | tr ',' '\n' | sort) <(echo "$cur
 ### 7. Merge descriptions intelligently
 
 **Auto-generated sections (always update):**
+
 - **Summary** - regenerate based on ALL changes
 - **Changes Made** - append new changes, preserve old
 - **How to Verify It** - update checklist, rerun checks
 - **Changelog Entry** - update to reflect all changes
 
 **Preserve manual edits in:**
+
 - **Reviewer Notes** - keep existing unless explicitly empty
 - **Screenshots/Videos** - never overwrite
 - **Manually checked boxes** - preserve [x] marks for manual steps
 - **Post-Merge Tasks** - append new, keep existing
 
 **Merging strategy:**
+
 ```markdown
 ## Changes Made
 
 ### Backend Changes
+
 [Existing changes from previous description]
 
 **New changes** (since last update):
+
 - [New change 1]
 - [New change 2]
 
 ### Frontend Changes
+
 [Existing + new merged together]
 ```
 
 **Add change summary at top:**
+
 ```markdown
 <!-- Auto-generated: 2025-10-06T15:00:00Z -->
 <!-- Last updated: 2025-10-06T15:00:00Z -->
@@ -180,9 +196,12 @@ new_commits=$(comm -13 <(echo "$prev_commits" | tr ',' '\n' | sort) <(echo "$cur
 <!-- Previous commits: abc123,def456,ghi789 -->
 
 ---
+
 **Update History:**
+
 - 2025-10-06 15:00: Added validation logic, updated tests (3 new commits)
 - 2025-10-06 10:30: Initial implementation (5 commits)
+
 ---
 ```
 
@@ -198,9 +217,10 @@ If ticket found:
 ```
 
 Get Linear ticket details:
+
 ```javascript
 mcp__linear__get_issue({
-  id: ticket
+  id: ticket,
 });
 ```
 
@@ -251,12 +271,14 @@ fi
 ```
 
 **Common checks to attempt:**
+
 - `make test` / `npm test` / `pytest`
 - `make lint` / `npm run lint`
 - `npm run typecheck` / `tsc --noEmit`
 - `make build` / `npm run build`
 
 **Document results:**
+
 - ✅ if passed
 - ❌ if failed (with error)
 - Manual required if can't automate
@@ -264,6 +286,7 @@ fi
 ### 11. Save and sync
 
 **Save description:**
+
 ```bash
 # Add metadata header
 cat > "thoughts/shared/prs/${pr_number}_description.md" <<EOF
@@ -277,6 +300,7 @@ EOF
 ```
 
 **Sync thoughts:**
+
 ```bash
 humanlayer thoughts sync
 ```
@@ -284,11 +308,13 @@ humanlayer thoughts sync
 ### 12. Update PR on GitHub
 
 **Update title:**
+
 ```bash
 gh pr edit $pr_number --title "$new_title"
 ```
 
 **Update body:**
+
 ```bash
 gh pr edit $pr_number --body-file "thoughts/shared/prs/${pr_number}_description.md"
 ```
@@ -302,28 +328,31 @@ If ticket found:
 mcp__linear__update_issue({
   id: ticket,
   state: "In Review",
-  assignee: "me"  // Auto-assign to current user
+  assignee: "me", // Auto-assign to current user
 });
 
 // If PR link not already attached, add it
 mcp__linear__update_issue({
   id: ticket,
-  links: [{
-    url: prUrl,
-    title: `PR #${prNumber}: ${newTitle}`
-  }]
+  links: [
+    {
+      url: prUrl,
+      title: `PR #${prNumber}: ${newTitle}`,
+    },
+  ],
 });
 
 // Add comment about update
 mcp__linear__create_comment({
   issueId: ticket,
-  body: `PR description updated!\n\n**Changes**: ${updateSummary}\n**Verification**: ${checksPassedCount}/${totalChecks} automated checks passed\n\nView PR: ${prUrl}`
+  body: `PR description updated!\n\n**Changes**: ${updateSummary}\n**Verification**: ${checksPassedCount}/${totalChecks} automated checks passed\n\nView PR: ${prUrl}`,
 });
 ```
 
 ### 14. Report results
 
 **If first-time generation:**
+
 ```
 ✅ PR description generated!
 
@@ -340,6 +369,7 @@ Review PR on GitHub!
 ```
 
 **If incremental update:**
+
 ```
 ✅ PR description updated!
 
@@ -363,6 +393,7 @@ Review updated PR: {url}
 ## Metadata Management
 
 **First generation:**
+
 ```markdown
 <!-- Auto-generated: 2025-10-06T10:00:00Z -->
 <!-- Last updated: 2025-10-06T10:00:00Z -->
@@ -371,6 +402,7 @@ Review updated PR: {url}
 ```
 
 **Subsequent updates:**
+
 ```markdown
 <!-- Auto-generated: 2025-10-06T10:00:00Z -->
 <!-- Last updated: 2025-10-06T15:30:00Z -->
@@ -378,15 +410,19 @@ Review updated PR: {url}
 <!-- Previous commits: abc123,def456,ghi789,jkl012 -->
 
 ---
+
 **Update History:**
+
 - 2025-10-06 15:30: Added error handling, fixed tests (2 commits)
 - 2025-10-06 10:00: Initial implementation (2 commits)
+
 ---
 ```
 
 ## Incremental Update Examples
 
 **Example 1: Code review changes**
+
 ```
 User pushes 2 commits after code review feedback
 
@@ -404,6 +440,7 @@ Updates:
 ```
 
 **Example 2: Multiple updates**
+
 ```
 Update 1 (initial): 5 commits
 Update 2 (review): 3 commits
@@ -419,6 +456,7 @@ Description shows:
 ## Error Handling
 
 **No PR found:**
+
 ```
 ❌ No PR found for current branch
 
@@ -430,6 +468,7 @@ Which PR? (enter number)
 ```
 
 **Template missing:**
+
 ```
 ❌ PR description template required
 
@@ -438,6 +477,7 @@ See earlier in conversation for template structure.
 ```
 
 **Verification command fails:**
+
 ```
 ⚠️  Some automated checks failed
 

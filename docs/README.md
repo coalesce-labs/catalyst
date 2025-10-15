@@ -1,10 +1,12 @@
 # Documentation Index
 
-Welcome to the Ryan Claude Workspace documentation. This directory contains comprehensive guides for using, configuring, and extending the workspace.
+Welcome to the Ryan Claude Workspace documentation. This directory contains comprehensive guides for
+using, configuring, and extending the workspace.
 
 ## Quick Start
 
 **New to the workspace?** Start here:
+
 1. [USAGE.md](#usage) - Comprehensive usage guide
 2. [CONFIGURATION.md](#configuration) - Configuration system
 3. [BEST_PRACTICES.md](#best-practices) - Recommended workflows
@@ -14,9 +16,11 @@ Welcome to the Ryan Claude Workspace documentation. This directory contains comp
 ### 🚀 Setup & Configuration
 
 #### [CONFIGURATION.md](CONFIGURATION.md)
+
 **Complete guide to the configuration system**
 
 Learn about:
+
 - Configuration file structure (`.claude/config.json`)
 - Ticket prefix configuration
 - Linear integration settings
@@ -28,9 +32,11 @@ Learn about:
 ---
 
 #### [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md)
+
 **Managing multiple client configurations**
 
 Learn about:
+
 - Multi-client setup for consultants
 - Configuration switching with `hl-switch`
 - Separate thoughts repositories per client
@@ -43,9 +49,11 @@ Learn about:
 ### 📖 Workflow & Usage
 
 #### [USAGE.md](USAGE.md)
+
 **Comprehensive workspace usage guide**
 
 Learn about:
+
 - Core workflow commands (`/research-codebase`, `/create-plan`, etc.)
 - Installation methods (user vs project)
 - Thoughts system usage
@@ -57,9 +65,11 @@ Learn about:
 ---
 
 #### [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md)
+
 **Agent patterns and best practices**
 
 Learn about:
+
 - How agents work vs commands
 - Documentarian philosophy (document, don't critique)
 - Spawning parallel agents
@@ -71,9 +81,11 @@ Learn about:
 ---
 
 #### [BEST_PRACTICES.md](BEST_PRACTICES.md)
+
 **Recommended workflows and patterns**
 
 Learn about:
+
 - Research → Plan → Implement → Validate workflow
 - Context management strategies
 - When to use handoffs
@@ -85,9 +97,11 @@ Learn about:
 ---
 
 #### [PATTERNS.md](PATTERNS.md)
+
 **Common usage patterns and examples**
 
 Learn about:
+
 - Parallel development workflows
 - Feature branch management
 - Worktree usage patterns
@@ -99,9 +113,11 @@ Learn about:
 ---
 
 #### [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
+
 **Discovering and importing workflows from external repositories**
 
 Learn about:
+
 - Using `/discover-workflows` command
 - Importing workflows with `/import-workflow`
 - Creating new workflows with `/create-workflow`
@@ -114,9 +130,11 @@ Learn about:
 ### 🔌 Integrations
 
 #### [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md)
+
 **Linear integration and workflow automation**
 
 Learn about:
+
 - Setting up Linear integration
 - Workflow status automation
 - Creating tickets from thoughts
@@ -128,9 +146,11 @@ Learn about:
 ---
 
 #### [DEEPWIKI_INTEGRATION.md](DEEPWIKI_INTEGRATION.md)
+
 **External research using DeepWiki**
 
 Learn about:
+
 - Researching external repositories
 - Using the `external-research` agent
 - Learning from open-source patterns
@@ -141,9 +161,11 @@ Learn about:
 ---
 
 #### [HUMANLAYER_COMMANDS_ANALYSIS.md](HUMANLAYER_COMMANDS_ANALYSIS.md)
+
 **Analysis of HumanLayer command patterns**
 
 Learn about:
+
 - Command analysis from HumanLayer repository
 - Adaptation patterns
 - Command structure comparison
@@ -156,9 +178,11 @@ Learn about:
 ### 🔧 Technical
 
 #### [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md)
+
 **Context management and optimization**
 
 Learn about:
+
 - Context budgets and token limits
 - Just-in-time context loading
 - Sub-agent architecture benefits
@@ -170,9 +194,11 @@ Learn about:
 ---
 
 #### [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
+
 **YAML frontmatter validation and standards**
 
 Learn about:
+
 - Required frontmatter fields
 - Valid categories and tools
 - Agent vs command frontmatter differences
@@ -188,22 +214,26 @@ Learn about:
 ### For Different User Types
 
 **First-Time Users:**
+
 1. [USAGE.md](USAGE.md) - Start here
 2. [CONFIGURATION.md](CONFIGURATION.md) - Set up your project
 3. [BEST_PRACTICES.md](BEST_PRACTICES.md) - Learn effective patterns
 
 **Workspace Developers:**
+
 1. [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) - Understand agents
 2. [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md) - Follow standards
 3. [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md) - Import/create workflows
 4. [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md) - Optimize performance
 
 **Consultants:**
+
 1. [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) - Multi-client setup
 2. [CONFIGURATION.md](CONFIGURATION.md) - Per-client configuration
 3. [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md) - Client workflow automation
 
 **Integration Specialists:**
+
 1. [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md) - Linear setup
 2. [DEEPWIKI_INTEGRATION.md](DEEPWIKI_INTEGRATION.md) - External research
 3. [CONFIGURATION.md](CONFIGURATION.md) - Integration configuration
@@ -211,31 +241,43 @@ Learn about:
 ### By Task
 
 **Setting Up:**
-- [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md) → [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md)
+
+- [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md) →
+  [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md)
 
 **Daily Development:**
-- [BEST_PRACTICES.md](BEST_PRACTICES.md) → [PATTERNS.md](PATTERNS.md) → [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md)
+
+- [BEST_PRACTICES.md](BEST_PRACTICES.md) → [PATTERNS.md](PATTERNS.md) →
+  [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md)
 
 **Creating Workflows:**
-- [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) → [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md) → [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
+
+- [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) →
+  [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md) →
+  [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
 
 **Troubleshooting:**
-- [USAGE.md](USAGE.md) (Troubleshooting section) → [CONFIGURATION.md](CONFIGURATION.md) → [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
+
+- [USAGE.md](USAGE.md) (Troubleshooting section) → [CONFIGURATION.md](CONFIGURATION.md) →
+  [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
 
 ## Additional Resources
 
 **In Parent Directory:**
+
 - `../README.md` - Workspace overview
 - `../QUICKSTART.md` - 5-minute setup guide
 - `../CLAUDE.md` - Instructions for Claude Code
 - `../COMMANDS_ANALYSIS.md` - Command catalog
 
 **In Other Directories:**
+
 - `../hack/README.md` - Installation scripts documentation
 - `../commands/README.md` - Slash commands documentation
 - `../agents/README.md` - Research agents documentation
 
 **External:**
+
 - [Claude Code Documentation](https://docs.claude.com/en/docs/claude-code)
 - [Linear API Documentation](https://developers.linear.app/)
 - [HumanLayer Documentation](https://github.com/humanlayer/humanlayer)
@@ -251,6 +293,7 @@ When creating or updating documentation:
 5. **Be specific** - Provide file:line references where applicable
 
 **Testing documentation:**
+
 ```bash
 # Validate frontmatter if modifying agents/commands
 /validate-frontmatter
@@ -268,6 +311,7 @@ All documents are current as of workspace version `51b9601`.
 ## Need Help?
 
 **Can't find what you're looking for?**
+
 - Check the main [README.md](../README.md)
 - Review [USAGE.md](USAGE.md) troubleshooting section
 - Search across all docs with grep:
@@ -276,6 +320,7 @@ All documents are current as of workspace version `51b9601`.
   ```
 
 **Found an issue?**
+
 - Update the relevant document
 - Run `/validate-frontmatter` if you modified agent/command docs
 - Create a Linear ticket with `/linear` for larger documentation tasks

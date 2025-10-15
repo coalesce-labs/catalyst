@@ -15,47 +15,47 @@ echo -e "${BLUE}🔄 Linear Workflow Setup${NC}"
 echo ""
 
 # Check for Linear CLI or API key
-if ! command -v linear-cli &> /dev/null && [ -z "$LINEAR_API_KEY" ]; then
-    echo -e "${RED}❌ Error: Linear API access not configured${NC}"
-    echo ""
-    echo "You need either:"
-    echo "  1. Linear CLI: npm install -g @linear/cli"
-    echo "  2. Or set LINEAR_API_KEY environment variable"
-    echo ""
-    echo "To get an API key:"
-    echo "  1. Go to https://linear.app/settings/api"
-    echo "  2. Create a new Personal API Key"
-    echo "  3. Export it: export LINEAR_API_KEY='lin_api_...'"
-    exit 1
+if ! command -v linear-cli &>/dev/null && [ -z "$LINEAR_API_KEY" ]; then
+	echo -e "${RED}❌ Error: Linear API access not configured${NC}"
+	echo ""
+	echo "You need either:"
+	echo "  1. Linear CLI: npm install -g @linear/cli"
+	echo "  2. Or set LINEAR_API_KEY environment variable"
+	echo ""
+	echo "To get an API key:"
+	echo "  1. Go to https://linear.app/settings/api"
+	echo "  2. Create a new Personal API Key"
+	echo "  3. Export it: export LINEAR_API_KEY='lin_api_...'"
+	exit 1
 fi
 
 # Check if Linear MCP is available (alternative)
-if command -v humanlayer &> /dev/null; then
-    echo -e "${BLUE}ℹ️  HumanLayer MCP detected - you can also use Claude to set this up!${NC}"
-    echo "Just run: /linear setup-workflow"
-    echo ""
-    read -p "Continue with script setup anyway? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 0
-    fi
+if command -v humanlayer &>/dev/null; then
+	echo -e "${BLUE}ℹ️  HumanLayer MCP detected - you can also use Claude to set this up!${NC}"
+	echo "Just run: /linear setup-workflow"
+	echo ""
+	read -p "Continue with script setup anyway? (y/N) " -n 1 -r
+	echo
+	if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+		exit 0
+	fi
 fi
 
 echo "This script will create the recommended workflow statuses in your Linear team."
 echo ""
 
 # Get team key
-TEAM_KEY="${1:-}"
+TEAM_KEY="${1-}"
 
 if [ -z "$TEAM_KEY" ]; then
-    echo "Enter your Linear team key (e.g., 'PROJ', 'ENG', 'TEAM'):"
-    echo "You can find this in your Linear URL: linear.app/{workspace}/{team-key}/..."
-    read -p "Team key: " TEAM_KEY
+	echo "Enter your Linear team key (e.g., 'PROJ', 'ENG', 'TEAM'):"
+	echo "You can find this in your Linear URL: linear.app/{workspace}/{team-key}/..."
+	read -p "Team key: " TEAM_KEY
 fi
 
 if [ -z "$TEAM_KEY" ]; then
-    echo -e "${RED}Team key is required${NC}"
-    exit 1
+	echo -e "${RED}Team key is required${NC}"
+	exit 1
 fi
 
 echo ""
@@ -89,8 +89,8 @@ echo ""
 read -p "Proceed with setup? (Y/n) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Nn]$ ]]; then
-    echo "Setup cancelled."
-    exit 0
+	echo "Setup cancelled."
+	exit 0
 fi
 
 echo ""
@@ -101,7 +101,7 @@ echo ""
 # Create GraphQL mutation file
 MUTATION_FILE="/tmp/linear-workflow-setup.graphql"
 
-cat > "$MUTATION_FILE" <<'GRAPHQL'
+cat >"$MUTATION_FILE" <<'GRAPHQL'
 # Linear Workflow Setup Mutations
 # Execute these in order at: https://studio.apollographql.com/sandbox/explorer
 # Or use the Linear API directly
@@ -345,7 +345,8 @@ echo -e "${BLUE}Option 2: Use Linear's GraphQL API${NC}"
 echo ""
 echo "  1. Get your API key: https://linear.app/settings/api"
 echo "  2. Get your team ID:"
-echo "     curl -X POST https://api.linear.app/graphql \\"
+# shellcheck disable=SC1003
+echo '     curl -X POST https://api.linear.app/graphql \'
 echo "       -H 'Authorization: YOUR_API_KEY' \\"
 echo "       -H 'Content-Type: application/json' \\"
 echo "       -d '{\"query\": \"{ teams { nodes { id key name } } }\"}'"
@@ -366,7 +367,7 @@ echo ""
 read -p "View the GraphQL mutations file? (y/N) " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    cat "$MUTATION_FILE"
+	cat "$MUTATION_FILE"
 fi
 
 echo ""

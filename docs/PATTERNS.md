@@ -20,6 +20,7 @@ A comprehensive guide to creating effective custom agents and commands.
 ### What is an Agent?
 
 An agent is a specialized AI expert that Claude Code can delegate tasks to. Agents:
+
 - Have a specific, focused responsibility
 - Are restricted to certain tools (usually read-only)
 - Return structured findings to the main conversation
@@ -73,23 +74,27 @@ You are a specialist at [specific task]. Your job is to [clear responsibility].
 ### Frontmatter Fields
 
 **name** (required)
+
 - Format: kebab-case
 - Used to invoke: `@agent-{name}`
 - Example: `codebase-locator`
 
 **description** (required)
+
 - Brief, clear explanation of agent's purpose
 - Shown in agent list
 - Should convey when to use this agent
 - Example: "Locates files and directories relevant to a feature or task"
 
 **tools** (required)
+
 - Comma-separated list of allowed tools
 - Common values: `Grep, Glob, Read, Bash(ls only)`
 - Restricts what agent can do (important for safety)
 - Read-only tools for research agents
 
 **model** (optional)
+
 - `inherit` - Use same model as main conversation (recommended)
 - `fast` - Use faster, cheaper model
 - `extended` - Use extended context model
@@ -102,6 +107,7 @@ You are a specialist at [specific task]. Your job is to [clear responsibility].
 ### What is a Command?
 
 A command is a workflow that can be invoked with `/command_name`. Commands:
+
 - Execute multi-step processes
 - Can spawn sub-agents
 - Have full tool access (Read, Write, Edit, Bash, etc.)
@@ -127,15 +133,18 @@ You are tasked with [command objective].
 ## Initial Response
 
 When this command is invoked:
+
 1. [First action]
 2. [Second action]
 
 ## Process Steps
 
 ### Step 1: [Step Name]
+
 [Detailed instructions]
 
 ### Step 2: [Step Name]
+
 [Detailed instructions]
 
 ## Important Guidelines
@@ -146,12 +155,14 @@ When this command is invoked:
 ### Command vs Agent
 
 **Use Agent When:**
+
 - Focused, read-only research task
 - Want to restrict tool access
 - Task is parallelizable
 - Returns information, doesn't modify code
 
 **Use Command When:**
+
 - Multi-step workflow
 - Needs to modify files
 - Interactive process with user
@@ -165,30 +176,31 @@ When this command is invoked:
 ### 1. Single Responsibility
 
 **Good - Focused Agent:**
+
 ```yaml
 ---
 name: codebase-locator
 description: Locates files and directories relevant to a feature
 tools: Grep, Glob, Bash(ls only)
 ---
-
-You are a specialist at finding WHERE code lives.
-Your job is to locate relevant files, NOT analyze their contents.
+You are a specialist at finding WHERE code lives. Your job is to locate relevant files, NOT analyze
+their contents.
 ```
 
 **Bad - Unfocused Agent:**
+
 ```yaml
 ---
 name: code-helper
 description: Helps with code stuff
 tools: all
 ---
-
-You help with anything related to code including finding files,
-analyzing them, fixing bugs, writing tests, and anything else.
+You help with anything related to code including finding files, analyzing them, fixing bugs, writing
+tests, and anything else.
 ```
 
 **Why Single Responsibility Matters:**
+
 - Clear invocation decision ("I need to find files" → codebase-locator)
 - Predictable results
 - Easy to test
@@ -199,24 +211,31 @@ analyzing them, fixing bugs, writing tests, and anything else.
 **Principle**: Grant only the tools needed for the task.
 
 **Research Agent - Minimal Tools:**
+
 ```yaml
 tools: Grep, Glob, Read
 ```
+
 Can find and read files, but can't modify.
 
 **Analysis Agent - Read-Only:**
+
 ```yaml
 tools: Read, Grep
 ```
+
 Can read specific files and search, but can't list directories.
 
 **Implementation Agent - Full Access:**
+
 ```yaml
 tools: all
 ```
+
 Can read, write, edit, run commands.
 
 **Why Minimal Tools Matter:**
+
 - Safety: Can't accidentally modify code
 - Clarity: Tools signal the agent's role
 - Speed: Less to consider, faster decisions
@@ -225,6 +244,7 @@ Can read, write, edit, run commands.
 ### 3. Clear Instructions
 
 **Good Instructions:**
+
 ```markdown
 ## Core Responsibilities
 
@@ -251,6 +271,7 @@ Can read, write, edit, run commands.
 ```
 
 **Bad Instructions:**
+
 ```markdown
 ## What to Do
 
@@ -258,6 +279,7 @@ Find files and return them. Be helpful.
 ```
 
 **Characteristics of Clear Instructions:**
+
 - Specific actions, not vague goals
 - Step-by-step process
 - Examples of expected output
@@ -278,6 +300,7 @@ Find files and return them. Be helpful.
 ```
 
 **Why Boundaries Matter:**
+
 - Prevents scope creep
 - Clarifies role vs other agents
 - Stops unwanted behavior
@@ -292,6 +315,7 @@ Find files and return them. Be helpful.
 **Purpose**: Find files, directories, or code locations
 
 **Template:**
+
 ```yaml
 ---
 name: {domain}-locator
@@ -322,14 +346,18 @@ You are a specialist at finding WHERE {things} exist.
 ## Output Format
 
 ```
+
 ## {Things} for [Query]
 
 ### Category 1
+
 - path/to/file1 - Description
 - path/to/file2 - Description
 
 ### Category 2
+
 - path/to/file3 - Description
+
 ```
 
 ## What NOT to Do
@@ -339,6 +367,7 @@ You are a specialist at finding WHERE {things} exist.
 ```
 
 **Examples:**
+
 - `codebase-locator` - Finds code files
 - `thoughts-locator` - Finds thought documents
 - `config-locator` - Finds configuration files
@@ -349,6 +378,7 @@ You are a specialist at finding WHERE {things} exist.
 **Purpose**: Understand how something works
 
 **Template:**
+
 ```yaml
 ---
 name: {domain}-analyzer
@@ -379,20 +409,26 @@ You are a specialist at understanding HOW {things} work.
 ## Output Format
 
 ```
+
 ## Analysis: {Topic}
 
 ### Overview
+
 [2-3 sentence summary]
 
 ### Entry Points
+
 - `file.js:45` - Description
 
 ### Core Implementation
+
 1. [Step with file:line]
 2. [Step with file:line]
 
 ### Key Patterns
+
 - Pattern identified
+
 ```
 
 ## What NOT to Do
@@ -403,6 +439,7 @@ You are a specialist at understanding HOW {things} work.
 ```
 
 **Examples:**
+
 - `codebase-analyzer` - Analyzes code implementation
 - `thoughts-analyzer` - Analyzes thought documents
 - `performance-analyzer` - Analyzes performance characteristics
@@ -413,6 +450,7 @@ You are a specialist at understanding HOW {things} work.
 **Purpose**: Find examples and reusable patterns
 
 **Template:**
+
 ```yaml
 ---
 name: {domain}-pattern-finder
@@ -443,19 +481,22 @@ You are a specialist at finding patterns and examples.
 ## Output Format
 
 ```
+
 ## Pattern Examples: {Pattern Type}
 
 ### Pattern 1: {Name}
-**Found in**: `file.js:45-67`
-**Used for**: {Purpose}
+
+**Found in**: `file.js:45-67` **Used for**: {Purpose}
 
 ```{language}
 // Code example
 ```
 
 **Key aspects**:
+
 - Aspect 1
 - Aspect 2
+
 ```
 
 ## What NOT to Do
@@ -466,6 +507,7 @@ You are a specialist at finding patterns and examples.
 ```
 
 **Examples:**
+
 - `codebase-pattern-finder` - Finds code patterns
 - `test-pattern-finder` - Finds test patterns
 - `api-pattern-finder` - Finds API design patterns
@@ -476,6 +518,7 @@ You are a specialist at finding patterns and examples.
 **Purpose**: Check correctness or completeness
 
 **Template:**
+
 ```yaml
 ---
 name: {domain}-validator
@@ -506,20 +549,21 @@ You are a specialist at validating {things}.
 ## Output Format
 
 ```
+
 ## Validation Report: {Topic}
 
 ### Passed Checks
-✓ Check 1 - Details
-✓ Check 2 - Details
+
+✓ Check 1 - Details ✓ Check 2 - Details
 
 ### Failed Checks
-✗ Check 3 - Details
-  Location: file.js:45
-  Expected: X
-  Found: Y
+
+✗ Check 3 - Details Location: file.js:45 Expected: X Found: Y
 
 ### Warnings
+
 ⚠ Warning 1 - Details
+
 ```
 
 ## What NOT to Do
@@ -530,6 +574,7 @@ You are a specialist at validating {things}.
 ```
 
 **Examples:**
+
 - `schema-validator` - Validates database schemas
 - `api-validator` - Validates API contracts
 - `config-validator` - Validates configuration files
@@ -540,6 +585,7 @@ You are a specialist at validating {things}.
 **Purpose**: Collect and summarize information from multiple sources
 
 **Template:**
+
 ```yaml
 ---
 name: {domain}-aggregator
@@ -570,21 +616,28 @@ You are a specialist at gathering and summarizing {information}.
 ## Output Format
 
 ```
+
 ## Aggregated {Topic}
 
 ### Summary
+
 [High-level overview]
 
 ### Sources Checked
+
 - Source 1: {findings}
 - Source 2: {findings}
 
 ### Consolidated Findings
+
 [Unified view]
+
 ```
+
 ```
 
 **Examples:**
+
 - `dependency-aggregator` - Aggregates dependency usage
 - `error-aggregator` - Aggregates error patterns
 - `metric-aggregator` - Aggregates performance metrics
@@ -599,6 +652,7 @@ You are a specialist at gathering and summarizing {information}.
 **Purpose**: Execute a multi-step process with user interaction
 
 **Template:**
+
 ```markdown
 ---
 name: workflow_command
@@ -614,6 +668,7 @@ You are tasked with {objective}.
 ## Initial Response
 
 When invoked:
+
 1. Check parameters
 2. Read any provided files FULLY
 3. Present understanding
@@ -622,6 +677,7 @@ When invoked:
 ## Process Steps
 
 ### Step 1: {Phase Name}
+
 1. **{Sub-step}**
    - Specific action
    - Expected outcome
@@ -631,11 +687,13 @@ When invoked:
    - Expected outcome
 
 ### Step 2: {Phase Name}
+
 [Similar structure]
 
 ## Progress Tracking
 
 Use TodoWrite to track:
+
 - [ ] Step 1 completion
 - [ ] Step 2 completion
 
@@ -647,6 +705,7 @@ Use TodoWrite to track:
 ```
 
 **Example:**
+
 ```markdown
 ---
 name: create_plan
@@ -660,20 +719,24 @@ model: inherit
 ## Initial Response
 
 When invoked:
+
 1. Check if ticket file provided
 2. Read ticket FULLY if provided
 3. Ask for context if not provided
 
 ## Step 1: Research
+
 - Spawn parallel agents for comprehensive research
 - Wait for all to complete
 
 ## Step 2: Planning
+
 - Create plan structure
 - Get user feedback
 - Iterate until approved
 
 ## Step 3: Documentation
+
 - Write plan to thoughts/shared/plans/
 - Sync thoughts directory
 ```
@@ -683,6 +746,7 @@ When invoked:
 **Purpose**: Verify correctness of implementation or configuration
 
 **Template:**
+
 ```markdown
 ---
 name: validate_{domain}
@@ -704,12 +768,16 @@ You are tasked with validating {what}.
 ## Validation Process
 
 ### Automated Checks
+
 Run commands to verify:
+
 - [ ] Check 1: `command`
 - [ ] Check 2: `command`
 
 ### Manual Checks
+
 Present checklist for user:
+
 - [ ] Manual verification 1
 - [ ] Manual verification 2
 
@@ -717,14 +785,19 @@ Present checklist for user:
 
 Create validation report:
 ```
+
 ## Validation Report
 
 ### Automated Results
+
 ✓/✗ for each check
 
 ### Manual Verification Needed
+
 Checklist of items
+
 ```
+
 ```
 
 ### Pattern 3: Research Command
@@ -732,6 +805,7 @@ Checklist of items
 **Purpose**: Conduct comprehensive research on a topic
 
 **Template:**
+
 ```markdown
 ---
 name: research_{domain}
@@ -747,17 +821,20 @@ You are tasked with researching {topic}.
 ## Process
 
 ### Phase 1: Discovery
+
 - Spawn parallel research agents:
   - codebase-locator for files
   - thoughts-locator for history
   - {domain}-pattern-finder for examples
 
 ### Phase 2: Deep Analysis
+
 - Read all discovered files
 - Extract key findings
 - Identify patterns
 
 ### Phase 3: Documentation
+
 - Write findings to thoughts/shared/research/
 - Structure for future reference
 - Include actionable insights
@@ -768,6 +845,7 @@ You are tasked with researching {topic}.
 **Purpose**: Transform or migrate code/data
 
 **Template:**
+
 ```markdown
 ---
 name: transform_{what}
@@ -790,6 +868,7 @@ You are tasked with transforming {what}.
 ## Execution
 
 For each item:
+
 1. Read current version
 2. Apply transformation
 3. Verify correctness
@@ -809,14 +888,17 @@ For each item:
 ### Why Restrict Tools?
 
 **Safety**: Prevent accidental modifications
+
 - Research agents shouldn't edit code
 - Locator agents shouldn't read file contents
 
 **Performance**: Reduce decision space
+
 - Fewer tools = faster decisions
 - Clear constraints guide behavior
 
 **Clarity**: Tools signal purpose
+
 - `Grep, Glob` → Locator agent
 - `Read` → Analyzer agent
 - `all` → Implementation command
@@ -824,50 +906,65 @@ For each item:
 ### Common Tool Combinations
 
 **Locator Pattern:**
+
 ```yaml
 tools: Grep, Glob, Bash(ls only)
 ```
+
 Find files, don't read contents.
 
 **Analyzer Pattern:**
+
 ```yaml
 tools: Read, Grep, Glob
 ```
+
 Read and analyze, don't modify.
 
 **Pattern Finder:**
+
 ```yaml
 tools: Grep, Glob, Read
 ```
+
 Search and read for examples.
 
 **Validator:**
+
 ```yaml
 tools: Read, Bash, Grep
 ```
+
 Read and run checks, don't modify.
 
 **Implementation:**
+
 ```yaml
 tools: all
 ```
+
 Full access for modifications.
 
 ### Restricting Bash Usage
 
 **ls only:**
+
 ```yaml
 tools: Bash(ls only)
 ```
+
 Agent can only use `ls` commands, no other bash operations.
 
 **Specific commands:**
+
 ```yaml
 tools: Bash(git log only), Read
 ```
+
 Restrict to specific bash commands.
 
 **Why restrict Bash:**
+
 - Prevents arbitrary code execution
 - Limits scope of operations
 - Makes behavior predictable
@@ -879,6 +976,7 @@ Restrict to specific bash commands.
 ### Testing Agents
 
 **1. Create Test Agent File**
+
 ```bash
 # In workspace
 cat > agents/test-agent.md << 'EOF'
@@ -896,6 +994,7 @@ EOF
 ```
 
 **2. Install to Project**
+
 ```bash
 # Install to project for testing
 ./hack/install-project.sh /path/to/test-project
@@ -905,18 +1004,21 @@ EOF
 ```
 
 **3. Invoke and Test**
+
 ```
 # In Claude Code
 @agent-test-agent find all test files
 ```
 
 **4. Validate Output**
+
 - Does it find the right files?
 - Is the output structured correctly?
 - Does it stay within scope?
 - Are tool restrictions working?
 
 **5. Iterate**
+
 - Adjust instructions based on results
 - Refine output format
 - Add missing guidelines
@@ -925,6 +1027,7 @@ EOF
 ### Testing Commands
 
 **1. Create Test Command**
+
 ```bash
 cat > commands/test_command.md << 'EOF'
 ---
@@ -946,6 +1049,7 @@ EOF
 ```
 
 **2. Install and Invoke**
+
 ```bash
 ./hack/install-user.sh
 
@@ -954,6 +1058,7 @@ EOF
 ```
 
 **3. Test Scenarios**
+
 - Does it execute all steps?
 - Does it handle missing data?
 - Does it interact correctly?
@@ -962,6 +1067,7 @@ EOF
 ### Test Checklist
 
 **Agent Testing:**
+
 - [ ] Agent finds correct information
 - [ ] Output follows specified format
 - [ ] Tool restrictions work
@@ -970,6 +1076,7 @@ EOF
 - [ ] Handles edge cases (no results, many results)
 
 **Command Testing:**
+
 - [ ] All steps execute correctly
 - [ ] User interaction is clear
 - [ ] Files are modified correctly
@@ -1019,17 +1126,22 @@ You are a specialist at finding database migration files.
 ## Output Format
 
 ```
+
 ## Database Migrations
 
 ### Applied (from schema_versions table reference)
+
 - 001_initial_schema.sql
 - 002_add_users_table.sql
 
 ### Pending
+
 - 003_add_rate_limits.sql
 
 ### Location
+
 migrations/ directory contains all migration files
+
 ```
 
 ## What NOT to Do
@@ -1041,7 +1153,7 @@ migrations/ directory contains all migration files
 
 ### Example 2: API Contract Validator Command
 
-```markdown
+````markdown
 ---
 name: validate_api_contract
 description: Validates API endpoints match OpenAPI specification
@@ -1064,6 +1176,7 @@ You are tasked with validating API implementation against OpenAPI spec.
 ### Step 1: Endpoint Coverage
 
 For each endpoint in OpenAPI spec:
+
 - [ ] Verify route exists in code
 - [ ] Check HTTP methods match
 - [ ] Validate path parameters
@@ -1071,6 +1184,7 @@ For each endpoint in OpenAPI spec:
 ### Step 2: Request Validation
 
 For each endpoint:
+
 - [ ] Request body schema matches
 - [ ] Query parameters match spec
 - [ ] Headers are validated
@@ -1078,6 +1192,7 @@ For each endpoint:
 ### Step 3: Response Validation
 
 For each endpoint:
+
 - [ ] Response schemas match spec
 - [ ] Status codes match spec
 - [ ] Error responses defined
@@ -1085,15 +1200,18 @@ For each endpoint:
 ## Automated Checks
 
 Run:
+
 ```bash
 # If tools exist
 npm run validate-api-spec
 # Or manual verification via grep/read
 ```
+````
 
 ## Report Generation
 
 Create report:
+
 ```markdown
 ## API Contract Validation Report
 
@@ -1102,12 +1220,15 @@ Create report:
 ### Issues Found:
 
 #### Missing Endpoints
+
 - POST /api/users - Defined in spec but not implemented
 
 #### Schema Mismatches
+
 - GET /api/users response - Missing 'email' field
 
 ### Recommendations
+
 [Actionable fixes]
 ```
 
@@ -1116,7 +1237,8 @@ Create report:
 - Be thorough, check every endpoint
 - Document specific file:line for issues
 - Provide actionable recommendations
-```
+
+````
 
 ### Example 3: Dependency Analyzer Agent
 
@@ -1156,31 +1278,38 @@ You are a specialist at understanding dependency usage patterns.
 
 ## Output Format
 
-```
+````
+
 ## Dependency Analysis: {package-name}
 
 ### Version
+
 - Specified: ^1.2.3
 - Used in: package.json
 
 ### Usage Locations
+
 - `src/auth/handler.js:3` - Imports jwt.verify
 - `src/middleware/auth.js:5` - Imports jwt.sign
 - `tests/auth.test.js:2` - Imports jwt for testing
 
 ### Usage Patterns
+
 - Primary use: Token verification
 - Secondary use: Token generation
 - Test use: Mock token creation
 
 ### Exported Functions Used
+
 - jwt.sign() - 5 locations
 - jwt.verify() - 8 locations
 - jwt.decode() - 2 locations
 
 ### Notes
+
 - All usage follows documented API
 - No deprecated functions used
+
 ```
 
 ## What NOT to Do
@@ -1192,7 +1321,7 @@ You are a specialist at understanding dependency usage patterns.
 
 ### Example 4: Test Coverage Reporter Command
 
-```markdown
+````markdown
 ---
 name: report_test_coverage
 description: Generates comprehensive test coverage report
@@ -1223,12 +1352,14 @@ You are tasked with analyzing and reporting test coverage.
    # or
    pytest --cov
    ```
+````
 
 ## Analysis Process
 
 ### Step 1: Coverage Metrics
 
 Extract from coverage report:
+
 - Overall coverage percentage
 - Per-file coverage
 - Uncovered lines
@@ -1236,6 +1367,7 @@ Extract from coverage report:
 ### Step 2: Critical Path Analysis
 
 Identify critical code without tests:
+
 - Authentication logic
 - Payment processing
 - Data validation
@@ -1244,6 +1376,7 @@ Identify critical code without tests:
 ### Step 3: Test Quality
 
 Beyond coverage:
+
 - Test meaningful scenarios
 - Edge cases covered
 - Error handling tested
@@ -1257,25 +1390,30 @@ Create report at `thoughts/shared/reports/test_coverage_YYYY-MM-DD.md`:
 # Test Coverage Report
 
 ## Overall Metrics
+
 - Coverage: 78%
 - Files: 45/60 (75%)
 - Lines: 2340/3000 (78%)
 
 ## Files Without Tests
+
 - src/payment/processor.js - CRITICAL
 - src/auth/oauth.js - HIGH
 - src/utils/helpers.js - LOW
 
 ## Low Coverage Files (< 50%)
+
 - src/middleware/rate-limit.js - 35%
 - src/services/email.js - 42%
 
 ## Recommendations
+
 1. Add tests for payment processor (critical path)
 2. Improve rate-limit middleware coverage
 3. Add integration tests for OAuth flow
 
 ## Test Quality Issues
+
 - Missing error case tests in auth module
 - No integration tests for payment flow
 - Edge cases not covered in validation
@@ -1287,7 +1425,8 @@ Create report at `thoughts/shared/reports/test_coverage_YYYY-MM-DD.md`:
 - Don't just report numbers, provide insights
 - Prioritize by risk
 - Include actionable recommendations
-```
+
+````
 
 ### Template: Creating Your Own Agent
 
@@ -1320,15 +1459,19 @@ You are a specialist at {specific task}.
 
 ## Output Format
 
-```
+````
+
 ## {Topic}: {Subject}
 
 ### {Category}
+
 - Item with details
 - Another item
 
 ### {Another Category}
+
 - Item with details
+
 ```
 
 ## Important Guidelines
@@ -1346,6 +1489,7 @@ You are a specialist at {specific task}.
 ```
 
 **Steps to Create:**
+
 1. Copy template
 2. Fill in {placeholders}
 3. Define clear responsibilities
@@ -1384,14 +1528,19 @@ Agents can inform subsequent agents:
 
 ```markdown
 ## Step 1: Locate
+
 @agent-codebase-locator find webhook files
 
 ## Step 2: Analyze
+
 # Using results from step 1
+
 @agent-codebase-analyzer explain how webhooks work in [files from step 1]
 
 ## Step 3: Find Patterns
+
 # Using insights from step 2
+
 @agent-codebase-pattern-finder show similar async processing patterns
 ```
 
@@ -1401,14 +1550,17 @@ Agents can inform subsequent agents:
 ## Research Strategy
 
 If working with authentication:
+
 - Spawn security-analyzer agent
 - Spawn oauth-pattern-finder agent
 
 If working with database:
+
 - Spawn migration-locator agent
 - Spawn schema-analyzer agent
 
 If working with API:
+
 - Spawn api-contract-validator agent
 - Spawn endpoint-analyzer agent
 ```
@@ -1449,22 +1601,27 @@ After spawning multiple agents:
 Organize agents by purpose:
 
 **Locators** (`*-locator.md`)
+
 - Find files and locations
 - Tools: Grep, Glob, Bash(ls)
 
 **Analyzers** (`*-analyzer.md`)
+
 - Understand implementation
 - Tools: Read, Grep, Glob
 
 **Pattern Finders** (`*-pattern-finder.md`)
+
 - Find examples and patterns
 - Tools: Read, Grep, Glob
 
 **Validators** (`*-validator.md`)
+
 - Check correctness
 - Tools: Read, Bash, Grep
 
 **Aggregators** (`*-aggregator.md`)
+
 - Collect and summarize
 - Tools: Read, Grep, Glob
 
@@ -1473,22 +1630,27 @@ Organize agents by purpose:
 Organize commands by workflow:
 
 **Creation** (`create_*.md`)
+
 - Create new artifacts
 - Interactive workflows
 
 **Implementation** (`implement_*.md`)
+
 - Execute plans
 - Modify code
 
 **Validation** (`validate_*.md`)
+
 - Verify correctness
 - Generate reports
 
 **Research** (`research_*.md`)
+
 - Investigate topics
 - Gather information
 
 **Transformation** (`transform_*.md`)
+
 - Migrate or refactor
 - Bulk changes
 

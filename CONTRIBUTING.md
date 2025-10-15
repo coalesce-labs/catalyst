@@ -1,6 +1,7 @@
 # Contributing to Ryan Claude Workspace
 
-Thank you for your interest in contributing! This document provides guidelines for contributing to the workspace.
+Thank you for your interest in contributing! This document provides guidelines for contributing to
+the workspace.
 
 ## Development Setup
 
@@ -25,7 +26,8 @@ trunk install
 
 ## Code Quality
 
-This project uses **Trunk** for automated code quality checks. All code must pass linting before being merged.
+This project uses **Trunk** for automated code quality checks. All code must pass linting before
+being merged.
 
 ### Running Quality Checks
 
@@ -275,4 +277,5 @@ Currently no automated tests. Future additions:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same license as this project.
+By contributing, you agree that your contributions will be licensed under the same license as this
+project.

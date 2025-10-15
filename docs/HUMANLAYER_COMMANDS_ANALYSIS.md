@@ -4,14 +4,14 @@ Analysis of HumanLayer-specific commands to determine what's reusable for your w
 
 ## Summary Recommendations
 
-| Command | Copy? | Reason |
-|---------|-------|--------|
-| `create_handoff.md` | ✅ **YES** | Universal context handoff pattern |
-| `resume_handoff.md` | ✅ **YES** | Resume from handoffs in new sessions |
-| `linear.md` | ⚠️ **ADAPT** | Useful workflow, needs customization |
-| `ralph_*.md` | ❌ NO | Automation workflow, not manual |
-| `research_codebase*.md` | ❌ NO | Duplicate of create_plan research |
-| `ci_*.md` | ❌ NO | CI-specific, use regular versions |
+| Command                 | Copy?        | Reason                               |
+| ----------------------- | ------------ | ------------------------------------ |
+| `create_handoff.md`     | ✅ **YES**   | Universal context handoff pattern    |
+| `resume_handoff.md`     | ✅ **YES**   | Resume from handoffs in new sessions |
+| `linear.md`             | ⚠️ **ADAPT** | Useful workflow, needs customization |
+| `ralph_*.md`            | ❌ NO        | Automation workflow, not manual      |
+| `research_codebase*.md` | ❌ NO        | Duplicate of create_plan research    |
+| `ci_*.md`               | ❌ NO        | CI-specific, use regular versions    |
 
 ---
 
@@ -22,33 +22,42 @@ Analysis of HumanLayer-specific commands to determine what's reusable for your w
 **What it does**: Creates a structured handoff document to pass context to a new agent/session.
 
 **Why it's perfect for you**:
+
 - Solves your exact use case: "write a handoff document" → "clear context" → "resume later"
 - Not HumanLayer-specific at all
 - Stores handoffs in `thoughts/shared/handoffs/`
 - Uses timestamped filenames: `YYYY-MM-DD_HH-MM-SS_description.md`
 
 **Key sections**:
+
 ```markdown
 ## Task(s)
+
 What you were working on + status
 
 ## Recent changes
+
 File:line references to what you changed
 
 ## Learnings
+
 Important discoveries, patterns, gotchas
 
 ## Artifacts
+
 Paths to plans, research docs you created
 
 ## Action Items & Next Steps
+
 What the next agent should do
 
 ## Other Notes
+
 Codebase locations, references, etc.
 ```
 
 **Workflow**:
+
 ```bash
 # After working for a while
 /create_handoff
@@ -62,6 +71,7 @@ Codebase locations, references, etc.
 **What it does**: Reads handoff, validates current state, creates action plan.
 
 **Smart features**:
+
 1. Spawns parallel research agents to verify:
    - Changes from handoff still exist
    - No regressions since handoff
@@ -70,6 +80,7 @@ Codebase locations, references, etc.
 3. Adapts to current state vs handoff state
 
 **Usage patterns**:
+
 ```bash
 # By path
 /resume_handoff thoughts/shared/handoffs/ENG-123/2025-01-08_15-30-22.md
@@ -82,6 +93,7 @@ Codebase locations, references, etc.
 ```
 
 **Why it's brilliant**:
+
 - Handles "stale handoffs" (codebase changed since handoff)
 - Validates assumptions before continuing
 - Picks up exactly where you left off
@@ -93,12 +105,14 @@ Codebase locations, references, etc.
 ### What `linear.md` Does
 
 **Core functionality**:
+
 1. Create tickets from thoughts documents
 2. Add comments/updates to tickets
 3. Search for tickets
 4. Update ticket status
 
 **The Workflow** (This is the gem!):
+
 ```
 1. Triage → New tickets
 2. Spec Needed → Need more detail
@@ -119,6 +133,7 @@ Codebase locations, references, etc.
 ### What's HumanLayer-Specific
 
 Remove these:
+
 - `projectId: "M U L T I C L A U D E"` - Their project ID
 - Label auto-assignment (hld, wui, meta) - Their codebase structure
 - URL mapping to `github.com/humanlayer/thoughts` - Use your org
@@ -148,6 +163,7 @@ Remove these:
 /linear create thoughts/shared/research/api-redesign.md
 
 This will:
+
 1. Read the thoughts document
 2. Draft a ticket summary
 3. Ask you to review
@@ -166,12 +182,14 @@ This will:
 **Ralph = Automated ticket → plan → implement pipeline**
 
 It's named after their process for:
+
 1. **ralph_plan**: Auto-fetch Linear ticket → create plan → move to "Plan in Review"
 2. **ralph_impl**: Auto-fetch ticket with plan → create worktree → launch implementation
 
 **Why it exists**: Full automation from ticket to PR without human intervention.
 
 **Example ralph_plan flow**:
+
 ```
 1. Fetch top 10 priority tickets in "Ready for Spec"
 2. Select highest priority SMALL/XS ticket
@@ -183,6 +201,7 @@ It's named after their process for:
 ```
 
 **Example ralph_impl flow**:
+
 ```
 1. Fetch ticket in "Ready for Dev"
 2. Find linked implementation plan
@@ -203,6 +222,7 @@ It's named after their process for:
    - You work interactively in one session
 
 3. **Better alternative**: Use the base commands manually
+
    ```bash
    # Instead of ralph_plan, you do:
    # 1. Pick a ticket manually
@@ -228,10 +248,12 @@ It's named after their process for:
 ### Why They're Duplicates
 
 You already have this functionality in:
+
 1. **Research agents** - `codebase-locator`, `codebase-analyzer`, `thoughts-locator`
 2. **`/create_plan`** - Spawns research agents as part of planning
 
 The `research_codebase` command is essentially:
+
 ```markdown
 1. User asks research question
 2. Spawn parallel research agents
@@ -253,11 +275,13 @@ The `research_codebase` command is essentially:
 ### Differences from Regular Versions
 
 **ci_commit.md**:
+
 - Runs in CI with no interactive prompts
 - Auto-commits without confirmation
 - Designed for automated workflows
 
 **ci_describe_pr.md**:
+
 - Assumes PR already exists (created by CI)
 - Skips interactive template selection
 - Automated verification only
@@ -265,6 +289,7 @@ The `research_codebase` command is essentially:
 ### Should You Copy These?
 
 **NO** - Use the regular versions you already have:
+
 - `/commit` - Interactive, better for manual work
 - `/describe_pr` - Works for manual PR creation
 
@@ -295,16 +320,19 @@ cp ~/code-repos/humanlayer/.claude/commands/resume_handoff.md commands/
 Create `commands/linear.md` based on HumanLayer's but:
 
 **Remove**:
+
 - HumanLayer project IDs
 - Specific label assignments (hld/wui/meta)
 - URL mappings to humanlayer/thoughts
 
 **Keep**:
+
 - Create ticket from thoughts pattern
 - Interactive ticket creation
 - Link attachment to GitHub
 
 **Customize**:
+
 - Your workflow statuses
 - Your project IDs
 - Your org/repo URLs
@@ -312,11 +340,13 @@ Create `commands/linear.md` based on HumanLayer's but:
 ### 3. Document Ralph Lessons
 
 The Ralph workflow teaches:
+
 - **Workflow progression**: Research → Plan → Implement
 - **Automation potential**: Tickets can flow through stages
 - **Context preservation**: Plans and research attached to tickets
 
 Apply these principles manually:
+
 1. Create plan for ticket
 2. Attach plan to ticket
 3. Implement from plan
@@ -324,9 +354,9 @@ Apply these principles manually:
 
 ### 4. Ignore the Rest
 
-- ❌ ralph_*.md - Not for manual use
-- ❌ research_codebase*.md - You have agents
-- ❌ ci_*.md - Use regular versions
+- ❌ ralph\_\*.md - Not for manual use
+- ❌ research_codebase\*.md - You have agents
+- ❌ ci\_\*.md - Use regular versions
 
 ---
 
@@ -337,6 +367,7 @@ Here's how handoffs work in practice:
 ### Scenario: Working on Auth Feature
 
 **Session 1** (2 hours of work):
+
 ```bash
 # You've researched auth patterns, updated 5 files
 # Getting tired, want to hand off
@@ -352,6 +383,7 @@ Here's how handoffs work in practice:
 ```
 
 **Session 2** (Fresh start):
+
 ```bash
 /resume_handoff thoughts/shared/handoffs/2025-01-08_15-30-22_auth-implementation.md
 
@@ -368,11 +400,9 @@ Here's how handoffs work in practice:
 
 ### Benefits
 
-✅ **No context loss** - All learnings preserved
-✅ **Validates state** - Checks nothing broke since handoff
-✅ **Actionable** - Clear next steps
-✅ **Searchable** - All handoffs in thoughts/shared/handoffs/
-✅ **Version controlled** - Part of thoughts repo
+✅ **No context loss** - All learnings preserved ✅ **Validates state** - Checks nothing broke since
+handoff ✅ **Actionable** - Clear next steps ✅ **Searchable** - All handoffs in
+thoughts/shared/handoffs/ ✅ **Version controlled** - Part of thoughts repo
 
 ---
 
@@ -402,22 +432,18 @@ If you adapt the Linear command:
 
 ```markdown
 # Natural flow:
+
 Backlog → Research → Plan → Implement → Review → Done
 
 # With commands:
+
 1. Ticket created (Backlog)
-2. /research_codebase "auth patterns"
-   → Save to thoughts/shared/research/
-   → Attach to ticket
-   → Move to "Plan"
-3. /create_plan (reads research)
-   → Save to thoughts/shared/plans/
-   → Attach to ticket
-   → Move to "Ready"
-4. /implement_plan thoughts/shared/plans/auth-plan.md
-   → Move to "In Progress"
-5. /commit + /describe_pr
-   → Move to "Review"
+2. /research_codebase "auth patterns" → Save to thoughts/shared/research/ → Attach to ticket → Move
+   to "Plan"
+3. /create_plan (reads research) → Save to thoughts/shared/plans/ → Attach to ticket → Move to
+   "Ready"
+4. /implement_plan thoughts/shared/plans/auth-plan.md → Move to "In Progress"
+5. /commit + /describe_pr → Move to "Review"
 ```
 
 ---
@@ -435,14 +461,15 @@ Backlog → Research → Plan → Implement → Review → Done
 
 ### ❌ Don't Copy
 
-4. **ralph_*.md** - Automation workflow, not manual commands
-5. **research_codebase*.md** - Redundant with your agents
-6. **ci_*.md** - Use regular versions
+4. **ralph\_\*.md** - Automation workflow, not manual commands
+5. **research_codebase\*.md** - Redundant with your agents
+6. **ci\_\*.md** - Use regular versions
 
 ### 💡 Key Takeaways
 
-**From Handoffs**: Context handoff is crucial for long tasks
-**From Ralph**: Good workflow progression (research → plan → implement)
-**From Linear**: Attach artifacts (research, plans) to tickets
+**From Handoffs**: Context handoff is crucial for long tasks **From Ralph**: Good workflow
+progression (research → plan → implement) **From Linear**: Attach artifacts (research, plans) to
+tickets
 
-Your setup with agents + commands + thoughts is already excellent. Adding handoffs makes it complete!
+Your setup with agents + commands + thoughts is already excellent. Adding handoffs makes it
+complete!

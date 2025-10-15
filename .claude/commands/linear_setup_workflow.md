@@ -10,7 +10,8 @@ You are tasked with automatically creating the recommended workflow statuses in 
 
 ## Prerequisites
 
-First, verify that Linear MCP tools are available by checking if any `mcp__linear__` tools exist. If not, respond:
+First, verify that Linear MCP tools are available by checking if any `mcp__linear__` tools exist. If
+not, respond:
 
 ```text
 I need access to Linear tools to set up workflow statuses. Please run the `/mcp` command to enable the Linear MCP server, then try again.
@@ -84,7 +85,7 @@ const statuses = [
     name: "Backlog",
     type: "backlog",
     description: "New ideas and feature requests",
-    color: "#bec2c8"  // Gray
+    color: "#bec2c8", // Gray
   },
 
   // UNSTARTED
@@ -92,7 +93,7 @@ const statuses = [
     name: "Research",
     type: "unstarted",
     description: "Investigation, triage, and spec definition (auto-set by /research_codebase)",
-    color: "#f2c94c"  // Yellow
+    color: "#f2c94c", // Yellow
   },
 
   // STARTED - Planning & Development
@@ -100,19 +101,19 @@ const statuses = [
     name: "Planning",
     type: "started",
     description: "Writing and reviewing implementation plans (auto-set by /create_plan)",
-    color: "#f2c94c"  // Yellow
+    color: "#f2c94c", // Yellow
   },
   {
     name: "In Progress",
     type: "started",
     description: "Active development and implementation (auto-set by /implement_plan)",
-    color: "#5e6ad2"  // Blue
+    color: "#5e6ad2", // Blue
   },
   {
     name: "In Review",
     type: "started",
     description: "PR submitted for code review (auto-set by /describe_pr)",
-    color: "#5e6ad2"  // Blue
+    color: "#5e6ad2", // Blue
   },
 
   // COMPLETED
@@ -120,8 +121,8 @@ const statuses = [
     name: "Done",
     type: "completed",
     description: "Completed and deployed",
-    color: "#5e6ad2"  // Blue
-  }
+    color: "#5e6ad2", // Blue
+  },
 ];
 ```
 

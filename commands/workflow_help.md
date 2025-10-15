@@ -8,7 +8,8 @@ version: 1.0.0
 
 # Workflow Help
 
-You are an interactive workflow guide that helps users navigate the supported workflows in this repository using parallel sub-agents for research and context-aware guidance.
+You are an interactive workflow guide that helps users navigate the supported workflows in this
+repository using parallel sub-agents for research and context-aware guidance.
 
 ## Initial Response
 
@@ -59,6 +60,7 @@ Then wait for user input.
 Check if the user is already in a workflow by spawning parallel detection tasks:
 
 **Task 1 - Check for Active Work**:
+
 ```
 Use codebase-locator agent:
 "Search for recent uncommitted changes, work-in-progress files, or partial implementations. Look for:
@@ -72,6 +74,7 @@ Tools: Bash (git status), Grep, Glob
 ```
 
 **Task 2 - Find Recent Documents**:
+
 ```
 Use thoughts-locator agent (or Glob if no thoughts):
 "Find the most recent research, plan, or handoff documents. Look in:
@@ -84,6 +87,7 @@ Tools: Bash (ls -t), Grep, Glob
 ```
 
 **Task 3 - Detect Worktree**:
+
 ```
 "Check if currently in a git worktree (not main repo).
 Run: pwd and git worktree list
@@ -147,6 +151,7 @@ Based on user's choice, spawn parallel research to provide comprehensive guidanc
 Spawn 3 parallel research tasks:
 
 **Task 1 - Read Workflow Guide**:
+
 ```
 "Read docs/AGENTIC_WORKFLOW_GUIDE.md and extract:
 - Complete workflow phases
@@ -158,6 +163,7 @@ Tools: Read
 ```
 
 **Task 2 - Find Command Examples**:
+
 ```
 "Search for examples in:
 - commands/research_codebase.md
@@ -170,6 +176,7 @@ Tools: Read, Grep
 ```
 
 **Task 3 - Check for User Files**:
+
 ```
 "Check if user has any existing research, plans, or handoffs.
 Look in thoughts/ or research/, plans/, handoffs/ directories.
@@ -311,9 +318,8 @@ You can also check anytime with `/context` command.
 
 Spawn parallel research:
 
-**Task 1**: Read `docs/WORKFLOW_DISCOVERY_SYSTEM.md`
-**Task 2**: Read command files (discover_workflows, import_workflow, etc.)
-**Task 3**: Check if user has any workflow catalog
+**Task 1**: Read `docs/WORKFLOW_DISCOVERY_SYSTEM.md` **Task 2**: Read command files
+(discover_workflows, import_workflow, etc.) **Task 3**: Check if user has any workflow catalog
 
 WAIT and synthesize similar to above.
 
@@ -392,6 +398,7 @@ Type a command or ask another question!
 If user asks about external concepts:
 
 **Use external-research agent**:
+
 ```
 "Research {topic} from HumanLayer or Anthropic documentation.
 Return: Summary with links to sources"
@@ -543,6 +550,7 @@ See full guide: `docs/AGENTIC_WORKFLOW_GUIDE.md` (Handoff System section)
 ### Workflow State Detection
 
 The parallel agents can detect:
+
 - Current git branch
 - Worktree vs main repo
 - Recent files modified
@@ -554,6 +562,7 @@ The parallel agents can detect:
 ### Personalized Guidance
 
 Based on detected state, provide:
+
 - Specific file paths to reference
 - Exact commands to run next
 - Progress indicators (Phase X of Y)

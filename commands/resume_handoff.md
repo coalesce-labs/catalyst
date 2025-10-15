@@ -2,12 +2,16 @@
 
 ## Configuration Note
 
-This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket prefix:
+This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
+prefix:
+
 - Read from `.claude/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
 - Examples: `ENG-123`, `FEAT-456`, `BUG-789`
 
-You are tasked with resuming work from a handoff document through an interactive process. These handoffs contain critical context, learnings, and next steps from previous work sessions that need to be understood and continued.
+You are tasked with resuming work from a handoff document through an interactive process. These
+handoffs contain critical context, learnings, and next steps from previous work sessions that need
+to be understood and continued.
 
 ## Initial Response
 
@@ -16,23 +20,35 @@ When this command is invoked:
 1. **If the path to a handoff document was provided**:
    - If a handoff document path was provided as a parameter, skip the default message
    - Immediately read the handoff document FULLY
-   - Immediately read any research or plan documents that it links to under `thoughts/shared/plans` or `thoughts/shared/research`. do NOT use a sub-agent to read these critical files.
-   - Begin the analysis process by ingesting relevant context from the handoff document, reading additional files it mentions
+   - Immediately read any research or plan documents that it links to under `thoughts/shared/plans`
+     or `thoughts/shared/research`. do NOT use a sub-agent to read these critical files.
+   - Begin the analysis process by ingesting relevant context from the handoff document, reading
+     additional files it mentions
    - Then propose a course of action to the user and confirm, or ask for clarification on direction.
 
 2. **If a ticket number (like PROJ-XXXX) was provided**:
    - run `humanlayer thoughts sync` to ensure your `thoughts/` directory is up to date.
-   - locate the most recent handoff document for the ticket. Tickets will be located in `thoughts/shared/handoffs/PROJ-XXXX` where `PROJ-XXXX` is the ticket number. e.g. for `PROJ-123` the handoffs would be in `thoughts/shared/handoffs/PROJ-123/`. **List this directory's contents.**
+   - locate the most recent handoff document for the ticket. Tickets will be located in
+     `thoughts/shared/handoffs/PROJ-XXXX` where `PROJ-XXXX` is the ticket number. e.g. for
+     `PROJ-123` the handoffs would be in `thoughts/shared/handoffs/PROJ-123/`. **List this
+     directory's contents.**
    - There may be zero, one or multiple files in the directory.
-   - **If there are zero files in the directory, or the directory does not exist**: tell the user: "I'm sorry, I can't seem to find that handoff document. Can you please provide me with a path to it?"
+   - **If there are zero files in the directory, or the directory does not exist**: tell the user:
+     "I'm sorry, I can't seem to find that handoff document. Can you please provide me with a path
+     to it?"
    - **If there is only one file in the directory**: proceed with that handoff
-   - **If there are multiple files in the directory**: using the date and time specified in the file name (it will be in the format `YYYY-MM-DD_HH-MM-SS` in 24-hour time format), proceed with the _most recent_ handoff document.
+   - **If there are multiple files in the directory**: using the date and time specified in the file
+     name (it will be in the format `YYYY-MM-DD_HH-MM-SS` in 24-hour time format), proceed with the
+     _most recent_ handoff document.
    - Immediately read the handoff document FULLY
-   - Immediately read any research or plan documents that it links to under `thoughts/shared/plans` or `thoughts/shared/research`; do NOT use a sub-agent to read these critical files.
-   - Begin the analysis process by ingesting relevant context from the handoff document, reading additional files it mentions
+   - Immediately read any research or plan documents that it links to under `thoughts/shared/plans`
+     or `thoughts/shared/research`; do NOT use a sub-agent to read these critical files.
+   - Begin the analysis process by ingesting relevant context from the handoff document, reading
+     additional files it mentions
    - Then propose a course of action to the user and confirm, or ask for clarification on direction.
 
 3. **If no parameters provided**, respond with:
+
 ```
 I'll help you resume work from a handoff document. Let me find the available handoffs.
 
@@ -59,8 +75,8 @@ Then wait for the user's input.
      - Action items and next steps
      - Other notes
 
-2. **Spawn focused research tasks**:
-   Based on the handoff content, spawn parallel research tasks to verify current state:
+2. **Spawn focused research tasks**: Based on the handoff content, spawn parallel research tasks to
+   verify current state:
 
    ```
    Task 1 - Verify recent changes:
@@ -105,6 +121,7 @@ Then wait for the user's input.
 ### Step 2: Synthesize and Present Analysis
 
 1. **Present comprehensive analysis**:
+
    ```
    I've analyzed the handoff from [date] by [researcher]. Here's the current situation:
 
@@ -147,6 +164,7 @@ Then wait for the user's input.
    - Prioritize based on dependencies and handoff guidance
 
 2. **Present the plan**:
+
    ```
    I've created a task list based on the handoff and current analysis:
 
@@ -197,24 +215,28 @@ Then wait for the user's input.
 ## Common Scenarios
 
 ### Scenario 1: Clean Continuation
+
 - All changes from handoff are present
 - No conflicts or regressions
 - Clear next steps in action items
 - Proceed with recommended actions
 
 ### Scenario 2: Diverged Codebase
+
 - Some changes missing or modified
 - New related code added since handoff
 - Need to reconcile differences
 - Adapt plan based on current state
 
 ### Scenario 3: Incomplete Handoff Work
+
 - Tasks marked as "in_progress" in handoff
 - Need to complete unfinished work first
 - May need to re-understand partial implementations
 - Focus on completing before new work
 
 ### Scenario 4: Stale Handoff
+
 - Significant time has passed
 - Major refactoring has occurred
 - Original approach may no longer apply

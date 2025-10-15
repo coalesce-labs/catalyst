@@ -15,15 +15,18 @@ Safely merges a PR after comprehensive verification, with Linear integration and
 ### 1. Identify PR to merge
 
 **If argument provided:**
+
 - Use that PR number: `/merge_pr 123`
 
 **If no argument:**
+
 ```bash
 # Try current branch
 gh pr view --json number,url,title,state,mergeable 2>/dev/null
 ```
 
 If no PR on current branch:
+
 ```bash
 gh pr list --limit 10 --json number,title,headRefName,state
 ```
@@ -39,6 +42,7 @@ gh pr view $pr_number --json \
 ```
 
 **Extract:**
+
 - PR number, URL, title
 - Mergeable status
 - Base branch (usually main)
@@ -53,6 +57,7 @@ mergeable=$(gh pr view $pr_number --json mergeable -q .mergeable)
 ```
 
 **If PR not OPEN:**
+
 ```
 ❌ PR #$pr_number is $state
 
@@ -60,6 +65,7 @@ Only open PRs can be merged.
 ```
 
 **If not mergeable (CONFLICTING):**
+
 ```
 ❌ PR has merge conflicts
 
@@ -90,6 +96,7 @@ fi
 ```
 
 **If behind:**
+
 ```bash
 # Auto-rebase
 git rebase origin/$base_branch
@@ -106,6 +113,7 @@ git push --force-with-lease
 ```
 
 **If conflicts during rebase:**
+
 ```
 ❌ Rebase conflicts detected
 
@@ -125,11 +133,13 @@ Exit with error.
 ### 5. Run local tests
 
 **Read test command from config:**
+
 ```bash
 test_cmd=$(jq -r '.pr.testCommand // "make test"' .claude/config.json)
 ```
 
 **Execute tests:**
+
 ```bash
 echo "Running tests: $test_cmd"
 if ! $test_cmd; then
@@ -139,6 +149,7 @@ fi
 ```
 
 **If tests fail:**
+
 ```
 ❌ Local tests failed
 
@@ -158,11 +169,13 @@ gh pr checks $pr_number
 ```
 
 **Parse output for failures:**
+
 - If all checks pass: continue
 - If required checks fail: prompt user
 - If optional checks fail: warn but allow
 
 **If required checks failing:**
+
 ```
 ⚠️  Some required CI checks are failing
 
@@ -177,8 +190,7 @@ Passed checks:
 Continue merge anyway? [y/N]:
 ```
 
-If user says no: exit.
-If user says yes: continue (user override).
+If user says no: exit. If user says yes: continue (user override).
 
 ### 7. Check approval status
 
@@ -187,12 +199,14 @@ review_decision=$(gh pr view $pr_number --json reviewDecision -q .reviewDecision
 ```
 
 **Review decisions:**
+
 - `APPROVED` - proceed
 - `CHANGES_REQUESTED` - prompt user
 - `REVIEW_REQUIRED` - prompt user
 - `null` / empty - no reviews, prompt user
 
 **If not approved:**
+
 ```
 ⚠️  PR has not been approved
 
@@ -201,8 +215,7 @@ Review status: $review_decision
 Continue merge anyway? [y/N]:
 ```
 
-If user says no: exit.
-If user says yes: continue (user override).
+If user says no: exit. If user says yes: continue (user override).
 
 **Skip these prompts if** `requireApproval: false` in config.
 
@@ -252,10 +265,12 @@ gh pr merge $pr_number --squash --delete-branch
 ```
 
 **Always:**
+
 - Squash merge (combines all commits into one)
 - Delete remote branch automatically
 
 **Capture merge commit SHA:**
+
 ```bash
 merge_sha=$(git rev-parse HEAD)
 ```
@@ -268,13 +283,13 @@ If ticket found and not using `--no-update`:
 // Move to "Done"
 mcp__linear__update_issue({
   id: ticket,
-  state: "Done"
+  state: "Done",
 });
 
 // Add merge comment
 mcp__linear__create_comment({
   issueId: ticket,
-  body: `✅ PR merged!\n\n**PR**: #${prNumber} - ${prTitle}\n**Merge commit**: ${mergeSha}\n**Merged into**: ${baseBranch}\n\nView PR: ${prUrl}`
+  body: `✅ PR merged!\n\n**PR**: #${prNumber} - ${prTitle}\n**Merge commit**: ${mergeSha}\n**Merged into**: ${baseBranch}\n\nView PR: ${prUrl}`,
 });
 ```
 
@@ -299,6 +314,7 @@ echo "✅ Deleted local branch: $head_branch"
 ### 13. Extract post-merge tasks
 
 **Read PR description:**
+
 ```bash
 desc_file="thoughts/shared/prs/${pr_number}_description.md"
 if [ -f "$desc_file" ]; then
@@ -308,6 +324,7 @@ fi
 ```
 
 **If tasks exist:**
+
 ```
 📋 Post-merge tasks from PR description:
 - [ ] Update documentation
@@ -318,6 +335,7 @@ Save these tasks? [Y/n]:
 ```
 
 If yes:
+
 ```bash
 # Save to thoughts
 cat > "thoughts/shared/post_merge_tasks/${ticket}_tasks.md" <<EOF
@@ -366,21 +384,25 @@ Next steps:
 ## Flags
 
 **`--skip-tests`** - Skip local test execution
+
 ```bash
 /merge_pr 123 --skip-tests
 ```
 
 **`--no-update`** - Don't update Linear ticket
+
 ```bash
 /merge_pr 123 --no-update
 ```
 
 **`--keep-branch`** - Don't delete local branch
+
 ```bash
 /merge_pr 123 --keep-branch
 ```
 
 **Combined:**
+
 ```bash
 /merge_pr 123 --skip-tests --no-update
 ```
@@ -388,6 +410,7 @@ Next steps:
 ## Error Handling
 
 **Rebase conflicts:**
+
 ```
 ❌ Rebase conflicts detected
 
@@ -407,6 +430,7 @@ Resolve manually:
 ```
 
 **Tests failing:**
+
 ```
 ❌ Tests failed (exit code 1)
 
@@ -419,6 +443,7 @@ Fix tests or skip (not recommended):
 ```
 
 **CI checks failing:**
+
 ```
 ⚠️  Required CI checks failing
 
@@ -434,6 +459,7 @@ Override? [y/N]:
 ```
 
 **Linear API error:**
+
 ```
 ⚠️  Could not update Linear ticket $ticket
 
@@ -444,6 +470,7 @@ Update manually in Linear.
 ```
 
 **Branch deletion error:**
+
 ```
 ⚠️  Could not delete local branch $head_branch
 
@@ -481,6 +508,7 @@ Uses `.claude/config.json`:
 ## Examples
 
 **Happy path (all checks pass):**
+
 ```bash
 /merge_pr 123
 
@@ -499,6 +527,7 @@ Proceed? Y
 ```
 
 **With failing CI (user override):**
+
 ```bash
 /merge_pr 124
 
@@ -509,6 +538,7 @@ Continue anyway? y
 ```
 
 **Skip tests:**
+
 ```bash
 /merge_pr 125 --skip-tests
 
@@ -519,17 +549,20 @@ Continue anyway? y
 ## Safety Features
 
 **Fail fast on:**
+
 - Merge conflicts (can't auto-resolve)
 - Test failures (unless --skip-tests)
 - Rebase conflicts
 - PR not in mergeable state
 
 **Prompt for confirmation on:**
+
 - Missing required approvals
 - Failing CI checks
 - Any exceptional circumstance
 
 **Always automated:**
+
 - Rebase if behind (no conflicts)
 - Squash merge
 - Delete remote branch

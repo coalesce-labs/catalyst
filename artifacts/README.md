@@ -7,18 +7,23 @@ This directory contains reusable artifacts that get injected into project files.
 Canonical workspace section for project CLAUDE.md files.
 
 **Usage**:
+
 - Automatically appended during `./hack/install-project.sh`
 - Automatically updated during `./hack/update-project.sh`
 - Preserves project-specific content above/below markers
 
 **Markers**:
+
 ```markdown
 <!-- BEGIN: Ryan Claude Workspace -->
+
 ... workspace content ...
+
 <!-- END: Ryan Claude Workspace -->
 ```
 
 **Editing**:
+
 1. Edit `artifacts/CLAUDE.md.workspace`
 2. Test locally: `./hack/update-project.sh .`
 3. Verify only workspace section changes

@@ -1,6 +1,7 @@
 # Context Engineering Guide
 
-A deep dive into context engineering principles and how they're implemented in the Ryan Claude Workspace.
+A deep dive into context engineering principles and how they're implemented in the Ryan Claude
+Workspace.
 
 ## Table of Contents
 
@@ -27,12 +28,14 @@ Based on Anthropic's article "Effective Context Engineering for AI Agents", the 
 **Principle**: Treat the context window as a limited, valuable resource.
 
 **Why it matters:**
+
 - LLMs have finite context windows (e.g., 200K tokens)
 - More context ≠ better performance
 - Irrelevant information degrades accuracy
 - Focus increases quality
 
 **Implementation:**
+
 ```
 Bad: Load entire codebase upfront
 Good: Load only relevant files just-in-time
@@ -43,12 +46,14 @@ Good: Load only relevant files just-in-time
 **Principle**: Load context dynamically as needed, not preemptively.
 
 **Why it matters:**
+
 - You don't know what you need until you explore
 - Upfront loading often loads wrong files
 - Dynamic loading follows actual code paths
 - Reduces wasted context
 
 **Implementation:**
+
 ```
 1. Start with broad search → find relevant files
 2. Read specific files → discover dependencies
@@ -61,12 +66,14 @@ Good: Load only relevant files just-in-time
 **Principle**: Use focused, parallel agents instead of monolithic ones.
 
 **Why it matters:**
+
 - Specialized agents are more accurate
 - Parallel execution is faster
 - Tool restrictions prevent over-exploration
 - Clear boundaries improve focus
 
 **Implementation:**
+
 ```
 Instead of: One agent that does everything
 Use: Multiple focused agents in parallel
@@ -80,12 +87,14 @@ Use: Multiple focused agents in parallel
 **Principle**: Save important context outside conversation windows.
 
 **Why it matters:**
+
 - Conversations are ephemeral
 - Context is expensive to rebuild
 - Persistent artifacts enable compaction
 - Enables context reuse across sessions
 
 **Implementation:**
+
 ```
 Ephemeral: All research in conversation
 Persistent: Save to thoughts/ directory
@@ -99,12 +108,14 @@ Persistent: Save to thoughts/ directory
 **Principle**: Start broad, narrow progressively through iterations.
 
 **Why it matters:**
+
 - Unknown unknowns require exploration
 - Premature specificity misses important context
 - Iterative refinement is natural investigation pattern
 - Allows course correction
 
 **Implementation:**
+
 ```
 Level 1: Broad search (what files exist?)
 Level 2: Categorical (which are relevant?)
@@ -123,6 +134,7 @@ Level 4: Related context (what else is affected?)
 Each agent has a single, clear responsibility:
 
 **codebase-locator**
+
 - Responsibility: Find file locations
 - Tools: Grep, Glob, Bash(ls)
 - Does NOT: Read file contents
@@ -130,6 +142,7 @@ Each agent has a single, clear responsibility:
 - Context saved: Minimal (paths only)
 
 **codebase-analyzer**
+
 - Responsibility: Understand implementation
 - Tools: Read, Grep, Glob
 - Does NOT: Modify code or suggest changes
@@ -143,23 +156,27 @@ Each agent has a single, clear responsibility:
 Tools constrain what agents can access:
 
 **Locator Pattern** (`tools: Grep, Glob, Bash(ls only)`)
+
 - Can search for patterns
 - Can list directories
 - CANNOT read file contents
 - Result: Finds locations without loading full files
 
 **Analyzer Pattern** (`tools: Read, Grep, Glob`)
+
 - Can read specific files
 - Can search for patterns
 - CANNOT edit files
 - Result: Understands without modifying
 
 **Implementation Pattern** (`tools: all`)
+
 - Full access for modifications
 - Used only for implementation commands
 - Not used for research
 
 **Why this matters:**
+
 ```
 Without restrictions:
   Locator agent might read all files it finds
@@ -199,6 +216,7 @@ Result aggregation: Bring together findings
 ```
 
 **Benefits:**
+
 - Faster (parallel execution)
 - More efficient context usage (isolated contexts)
 - Better results (specialized focus)
@@ -210,42 +228,27 @@ Commands orchestrate multiple agents:
 ```markdown
 ## /create_plan Command Flow
 
-Step 1: Read ticket file
-Context loaded: Ticket content (1-2K tokens)
+Step 1: Read ticket file Context loaded: Ticket content (1-2K tokens)
 
-Step 2: Spawn parallel research agents
-  Agent A (codebase-locator):
-    Context: Ticket keywords + file paths
-    Returns: List of relevant files
-    Context used: ~5K tokens
-    Context persisted: File paths only
+Step 2: Spawn parallel research agents Agent A (codebase-locator): Context: Ticket keywords + file
+paths Returns: List of relevant files Context used: ~5K tokens Context persisted: File paths only
 
-  Agent B (thoughts-locator):
-    Context: Ticket keywords + thoughts structure
-    Returns: Relevant documents
-    Context used: ~3K tokens
-    Context persisted: Document paths only
+Agent B (thoughts-locator): Context: Ticket keywords + thoughts structure Returns: Relevant
+documents Context used: ~3K tokens Context persisted: Document paths only
 
-  Agent C (codebase-analyzer):
-    Context: Specific files from exploration
-    Returns: Implementation analysis
-    Context used: ~10K tokens
-    Context persisted: Analysis summary
+Agent C (codebase-analyzer): Context: Specific files from exploration Returns: Implementation
+analysis Context used: ~10K tokens Context persisted: Analysis summary
 
 All run in parallel → same time as slowest
 
-Step 3: Main context receives results
-  File paths from A: 1K tokens
-  Document paths from B: 500 tokens
-  Analysis from C: 2K tokens
-  Total added: 3.5K tokens (not 18K!)
+Step 3: Main context receives results File paths from A: 1K tokens Document paths from B: 500 tokens
+Analysis from C: 2K tokens Total added: 3.5K tokens (not 18K!)
 
-Step 4: Synthesize and plan
-Main context:
-  - Ticket: 2K
-  - Research summaries: 3.5K
-  - Planning logic: 5K
-  Total: ~10.5K tokens
+Step 4: Synthesize and plan Main context:
+
+- Ticket: 2K
+- Research summaries: 3.5K
+- Planning logic: 5K Total: ~10.5K tokens
 
 vs. doing all research in main context: ~50K+ tokens
 ```
@@ -259,6 +262,7 @@ vs. doing all research in main context: ~50K+ tokens
 ### Problem: Long Tasks Exhaust Context
 
 Implementing a large feature might involve:
+
 - Reading 50+ files (100K+ tokens)
 - Multiple iterations and edits
 - Verification and debugging
@@ -270,11 +274,13 @@ Use plans as checkpoints:
 
 ```markdown
 ## Phase 1: Database Schema
+
 - [x] Add migration file
 - [x] Run migration
 - [x] Verify schema
 
 ## Phase 2: API Endpoints
+
 - [x] Add rate limit middleware
 - [ ] Add endpoint handlers
 - [ ] Add error handling
@@ -283,6 +289,7 @@ Use plans as checkpoints:
 **How this helps:**
 
 **Without checkpoints:**
+
 ```
 Context accumulates:
 - All research (20K tokens)
@@ -293,6 +300,7 @@ Total: 110K tokens → context exhaustion
 ```
 
 **With checkpoints:**
+
 ```
 Phase 1:
 - Research phase 1 (10K)
@@ -315,6 +323,7 @@ Plan provides continuity
 ### Compaction Through Persistence
 
 **Anti-Pattern: Everything in Conversation**
+
 ```
 [Extensive research on authentication approaches]
 [Detailed exploration of OAuth flows]
@@ -327,6 +336,7 @@ Plan provides continuity
 ```
 
 **Pattern: Persist Important Findings**
+
 ```
 [Research authentication approaches]
 ↓
@@ -342,6 +352,7 @@ Read thoughts/shared/research/auth_approaches.md
 ```
 
 **Compaction Ratio:**
+
 ```
 Original research:
   - 5 agents spawned
@@ -366,6 +377,7 @@ Reusability: Infinite
 ### Strategy 1: Research → Document
 
 **Before (in conversation):**
+
 ```
 @agent-codebase-analyzer how does rate limiting work?
 
@@ -377,6 +389,7 @@ Must re-run analysis or scroll through history
 ```
 
 **After (persisted):**
+
 ```
 @agent-codebase-analyzer how does rate limiting work?
 
@@ -398,6 +411,7 @@ Read thoughts/shared/research/rate_limiting_implementation.md
 ```
 
 **Compaction:**
+
 - Original: 10K tokens, ephemeral
 - Persisted: 2K tokens, reusable
 - Benefit: 5x reduction + persistence
@@ -405,6 +419,7 @@ Read thoughts/shared/research/rate_limiting_implementation.md
 ### Strategy 2: Plan as Context Checkpoint
 
 **Anti-Pattern: Implement Without Plan**
+
 ```
 [Conversation 1]
 "Add rate limiting"
@@ -420,6 +435,7 @@ Read thoughts/shared/research/rate_limiting_implementation.md
 ```
 
 **Pattern: Plan First**
+
 ```
 [Conversation 1]
 /create_plan for rate limiting
@@ -439,6 +455,7 @@ Read plan: 5K tokens
 ```
 
 **Benefits:**
+
 - Research compacted into plan (20K → 5K)
 - Plan persists across conversations
 - Implementation can start fresh
@@ -450,11 +467,13 @@ Plans use checkboxes to track progress:
 
 ```markdown
 ## Phase 1: Database
+
 - [x] Add migration ← Marked complete
 - [x] Run migration ← Don't need to verify again
 - [ ] Add indexes ← Next task
 
 ## Phase 2: API
+
 - [ ] Add middleware
 - [ ] Add handlers
 ```
@@ -462,6 +481,7 @@ Plans use checkboxes to track progress:
 **How this enables compaction:**
 
 **Without checkboxes:**
+
 ```
 [Resume conversation]
 What did we complete?
@@ -475,6 +495,7 @@ Let me check:
 ```
 
 **With checkboxes:**
+
 ```
 [Resume conversation]
 Read plan, see checkboxes
@@ -522,6 +543,7 @@ Read thoughts/shared/research/rate_limiting_decision.md
 ```
 
 **Compaction flow:**
+
 ```
 Exploration: 50K tokens (conversation)
     ↓
@@ -560,6 +582,7 @@ Result: Context full of noise
 ### The Pattern: Progressive Discovery
 
 **Level 1: Broad Orientation**
+
 ```
 @agent-codebase-locator find authentication files
 
@@ -574,6 +597,7 @@ Learning: Auth logic in src/auth/, entry via middleware
 ```
 
 **Level 2: Categorical Understanding**
+
 ```
 Based on Level 1, focus on entry point:
 
@@ -587,6 +611,7 @@ Learning:
 ```
 
 **Level 3: Deep Dive on Relevant Files**
+
 ```
 Based on Level 2, follow the path:
 
@@ -601,6 +626,7 @@ Learning:
 ```
 
 **Level 4: Related Context**
+
 ```
 Based on Level 3, check tests and usage:
 
@@ -949,6 +975,7 @@ Better: webhook-validator
 **Typical Context Window: 200K tokens**
 
 **Token Usage Examples:**
+
 - Average code file: 2-5K tokens
 - Implementation plan: 3-7K tokens
 - Research document: 2-4K tokens
@@ -1039,6 +1066,7 @@ Result: Efficient usage, room to explore
 **Solutions:**
 
 1. **Compact Context**
+
    ```
    Write current understanding to thoughts/shared/research/
    Start fresh conversation
@@ -1047,6 +1075,7 @@ Result: Efficient usage, room to explore
    ```
 
 2. **Phase Work**
+
    ```
    Complete Phase 1
    Update plan checkboxes
@@ -1335,26 +1364,31 @@ Benefit:
 Think of context window like CPU cache:
 
 **L1 Cache (Current Context)**
+
 - Fastest access
 - Limited size (200K tokens)
 - Currently loaded files and conversation
 
 **L2 Cache (Thoughts Directory)**
+
 - Fast access (Read tool)
 - Larger size (unlimited)
 - Persisted research and plans
 
 **L3 Cache (Codebase)**
+
 - Slower access (search → read)
 - Unlimited size
 - All code files
 
 **RAM (Sub-Agents)**
+
 - Parallel access
 - Isolated contexts
 - Aggregate to main
 
 **Optimization Strategy:**
+
 1. Keep hot path in L1 (current context)
 2. Store frequently accessed in L2 (thoughts)
 3. Load from L3 on-demand (codebase files)

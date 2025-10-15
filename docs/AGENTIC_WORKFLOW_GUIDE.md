@@ -2,9 +2,8 @@
 
 A comprehensive guide to using AI-assisted development workflows effectively with Claude Code.
 
-**Version**: 1.0.0
-**Last Updated**: 2025-01-08
-**Based on**: HumanLayer's Advanced Context Engineering & 12 Factor Agents
+**Version**: 1.0.0 **Last Updated**: 2025-01-08 **Based on**: HumanLayer's Advanced Context
+Engineering & 12 Factor Agents
 
 ## Table of Contents
 
@@ -23,11 +22,12 @@ A comprehensive guide to using AI-assisted development workflows effectively wit
 
 ### Philosophy
 
-**"Frequent Intentional Compaction"** - Design the entire workflow around context management, keeping utilization in the **40-60% range**.
+**"Frequent Intentional Compaction"** - Design the entire workflow around context management,
+keeping utilization in the **40-60% range**.
 
 ###
 
- Core Principles
+Core Principles
 
 1. **Document, Don't Evaluate** - AI describes what EXISTS, not what should exist
 2. **Human-in-the-Loop** - Clear checkpoints between phases
@@ -68,6 +68,7 @@ Context  Context                          Context   Context  Context
 **Command**: `/research-codebase`
 
 **Process**:
+
 1. Provide research question
 2. AI spawns parallel sub-agents
 3. Review findings
@@ -76,10 +77,12 @@ Context  Context                          Context   Context  Context
 **Output**: `thoughts/shared/research/YYYY-MM-DD-PROJ-XXXX-description.md`
 
 **Context Management**:
+
 - ✅ **CLEAR CONTEXT** after research document is created
 - **Why**: Research loads many files - compacting keeps next phase efficient
 
 **Human Checkpoint**:
+
 - Read research document completely
 - Verify findings match your understanding
 - Note any areas needing clarification
@@ -93,6 +96,7 @@ Context  Context                          Context   Context  Context
 **Command**: `/create-plan`
 
 **Process**:
+
 1. Provide ticket or task description
 2. Reference research doc if exists
 3. AI spawns parallel research agents
@@ -102,10 +106,12 @@ Context  Context                          Context   Context  Context
 **Output**: `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md`
 
 **Context Management**:
+
 - ✅ **CLEAR CONTEXT** after plan is approved
 - **Why**: Planning involves extensive research - start implementation fresh
 
 **Human Checkpoint**:
+
 - Read implementation plan completely
 - Verify phases are properly scoped
 - Check success criteria are measurable
@@ -118,6 +124,7 @@ Context  Context                          Context   Context  Context
 ### Phase 3: Handoff Creation (Optional)
 
 **When**: Before implementation if you need to:
+
 - Pause work for later
 - Transfer to another session
 - Switch machines
@@ -126,6 +133,7 @@ Context  Context                          Context   Context  Context
 **Commands**: `/create-handoff` or manually create
 
 **Process**:
+
 1. Document current state
 2. List action items
 3. Reference critical files
@@ -134,6 +142,7 @@ Context  Context                          Context   Context  Context
 **Output**: `thoughts/shared/handoffs/PROJ-XXXX/YYYY-MM-DD_HH-MM-SS_description.md`
 
 **Context Management**:
+
 - ✅ **CLEAR CONTEXT** after handoff created
 - **Why**: Handoff captures all needed context - fresh session resumes efficiently
 
@@ -144,6 +153,7 @@ Context  Context                          Context   Context  Context
 **When**: Ready to implement (after plan approval)
 
 **Why Worktrees**:
+
 - Isolate changes from main development
 - Work on multiple tasks in parallel
 - Clean slate for implementation
@@ -168,6 +178,7 @@ humanlayer thoughts sync
 **Location**: `~/wt/{project-name}/{ticket-feature}`
 
 **What Gets Copied**:
+
 - `.claude/` directory (agents & commands)
 - Dependencies installed (run project setup)
 - Thoughts synced (if using thoughts system)
@@ -181,6 +192,7 @@ humanlayer thoughts sync
 **Command**: `/implement-plan thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-feature.md`
 
 **Process**:
+
 1. AI reads complete plan
 2. Implements Phase 1
 3. Runs automated verification
@@ -189,11 +201,13 @@ humanlayer thoughts sync
 6. Repeat for each phase
 
 **Context Management**:
+
 - ⚠️ **MAY clear context between phases** if context fills >60%
 - ✅ **CLEAR CONTEXT** after implementation complete
 - **Why**: Implementation can accumulate errors/attempts - fresh session for validation
 
 **Human Checkpoints**:
+
 - After EACH phase completes
 - Review code changes
 - Verify automated checks passed
@@ -210,16 +224,19 @@ humanlayer thoughts sync
 **Command**: `/validate-plan` (if exists) or manual validation
 
 **Process**:
+
 1. Run all automated tests
 2. Verify all success criteria met
 3. Perform manual testing steps
 4. Document any deviations
 
 **Context Management**:
+
 - ✅ **CLEAR CONTEXT** after validation complete
 - **Why**: PR creation benefits from clean, focused context
 
 **Human Checkpoint**:
+
 - All tests passing
 - Manual verification complete
 - Ready for code review
@@ -231,6 +248,7 @@ humanlayer thoughts sync
 **When**: Implementation validated and ready for review
 
 **Commands**:
+
 ```bash
 /commit                    # Create commit
 gh pr create --fill        # Create PR
@@ -240,6 +258,7 @@ gh pr create --fill        # Create PR
 **PR Description File**: `thoughts/shared/prs/pr_{number}_{description}.md`
 
 **Process**:
+
 1. Create well-structured commit
 2. Push to remote
 3. Create PR
@@ -247,6 +266,7 @@ gh pr create --fill        # Create PR
 5. Link to Linear ticket (if applicable)
 
 **Context Management**:
+
 - ✅ **CLEAR CONTEXT** after PR created
 - **Why**: Work complete - fresh session for next task
 
@@ -261,15 +281,19 @@ gh pr create --fill        # Create PR
 **How to Check**:
 
 **For Users**:
+
 ```bash
 /context
 ```
+
 This command shows:
+
 - Token usage breakdown by component
 - Total tokens used
 - **Percentage of context window used/remaining**
 
 **For Agents** (Automatic):
+
 - Agents receive real-time token updates after every tool call
 - See: `<system_warning>Token usage: X/200000; Y remaining</system_warning>`
 - Can proactively warn when approaching limits
@@ -277,6 +301,7 @@ This command shows:
 - **Agents can self-monitor and suggest clearing context**
 
 **Why**:
+
 - Maintains AI performance quality
 - Prevents context exhaustion
 - Enables focused, efficient work
@@ -286,12 +311,14 @@ This command shows:
 ### When to Clear Context
 
 **✅ ALWAYS Clear Between Phases:**
+
 - Research → Planning
 - Planning → Implementation
 - Implementation → Validation
 - Validation → PR Creation
 
 **✅ Clear During Phase If:**
+
 - Context reaches >60% utilization (check with `/context`)
 - AI starts repeating same errors
 - Need to "reset" the approach
@@ -300,6 +327,7 @@ This command shows:
 - `/context` shows high token usage in messages component
 
 **✅ Clear For:**
+
 - Starting new ticket
 - Resuming from handoff
 - Switching tasks
@@ -308,12 +336,14 @@ This command shows:
 ### How to Clear Context
 
 **In Claude Code**:
+
 1. Save all outputs (research doc, plan, code changes)
 2. Close current conversation
 3. Start new conversation
 4. Load needed context (plan file, research doc) when ready
 
 **Benefits of Clearing**:
+
 - Fresh perspective
 - Reduced token usage
 - Better error handling
@@ -331,6 +361,7 @@ This command shows:
 **Format**: `YYYY-MM-DD-PROJ-XXXX-description.md`
 
 **Examples**:
+
 - `2025-01-08-PROJ-1478-parent-child-tracking.md`
 - `2025-01-08-authentication-flow.md` (no ticket)
 
@@ -341,6 +372,7 @@ This command shows:
 **Format**: `YYYY-MM-DD-PROJ-XXXX-description.md`
 
 **Examples**:
+
 - `2025-01-08-PROJ-456-oauth-support.md`
 - `2025-01-08-improve-error-handling.md` (no ticket)
 
@@ -351,6 +383,7 @@ This command shows:
 **Format**: `YYYY-MM-DD_HH-MM-SS_PROJ-XXXX_description.md`
 
 **Examples**:
+
 - `2025-01-08_14-30-45_PROJ-123_implement-oauth.md`
 - Directory: `handoffs/PROJ-123/` (all handoffs for this ticket)
 
@@ -361,6 +394,7 @@ This command shows:
 **Format**: `pr_{number}_{description}.md`
 
 **Examples**:
+
 - `pr_456_rate_limiting.md`
 - `pr_789_oauth_support.md`
 
@@ -371,6 +405,7 @@ This command shows:
 **Format**: `PROJ-XXXX.md`
 
 **Examples**:
+
 - `PROJ-123.md`
 - `PROJ-456.md`
 
@@ -380,7 +415,8 @@ This command shows:
 
 ### What Are Handoffs?
 
-Context transfer documents that enable work to be paused, resumed, or transferred while preserving critical context.
+Context transfer documents that enable work to be paused, resumed, or transferred while preserving
+critical context.
 
 ### When to Create Handoffs
 
@@ -474,6 +510,7 @@ Completed:
 **Command**: `/resume-handoff` (with path or ticket number)
 
 **Process**:
+
 1. Read handoff document
 2. Read linked research/plans
 3. Spawn parallel verification tasks to check current state
@@ -482,11 +519,13 @@ Completed:
 6. Get approval to proceed
 
 **Example**:
+
 ```bash
 /resume-handoff thoughts/shared/handoffs/PROJ-123/2025-01-08_14-30-45_oauth.md
 ```
 
 Or if command supports ticket numbers:
+
 ```bash
 /resume-handoff PROJ-123
 # Finds latest handoff for this ticket
@@ -505,6 +544,7 @@ The AI's role is to DOCUMENT what exists, not critique or suggest improvements.
 #### 1. Be Specific
 
 **Good**:
+
 ```
 Research how authentication works in src/auth/:
 1. Find all files related to login flow
@@ -513,6 +553,7 @@ Research how authentication works in src/auth/:
 ```
 
 **Bad**:
+
 ```
 Look at auth and tell me about it
 ```
@@ -520,11 +561,13 @@ Look at auth and tell me about it
 #### 2. Request File References
 
 **Always ask for**:
+
 - Specific file paths
 - Line numbers
 - Code examples with context
 
 **Example**:
+
 ```
 Include file:line references for all findings
 Format: `path/to/file.ext:123`
@@ -535,11 +578,13 @@ Format: `path/to/file.ext:123`
 **Critical**: ALWAYS read complete files before analysis
 
 **Good**:
+
 ```
 Read the entire implementation plan at thoughts/shared/plans/2025-01-08-PROJ-123-feature.md
 ```
 
 **Bad**:
+
 ```
 Read the plan (with limit/offset)
 ```
@@ -547,6 +592,7 @@ Read the plan (with limit/offset)
 #### 4. Use Parallel Sub-Agents
 
 **Efficient**:
+
 ```
 Spawn 3 parallel research tasks:
 1. codebase-locator: Find auth-related files
@@ -555,6 +601,7 @@ Spawn 3 parallel research tasks:
 ```
 
 **Inefficient**:
+
 ```
 First find the files, then analyze them, then find patterns
 (sequential - 3x slower)
@@ -563,6 +610,7 @@ First find the files, then analyze them, then find patterns
 #### 5. Clear Success Criteria
 
 **Good**:
+
 ```
 Success criteria for Phase 1:
 - [ ] Migration runs: `make migrate`
@@ -572,6 +620,7 @@ Success criteria for Phase 1:
 ```
 
 **Bad**:
+
 ```
 Make sure it works
 ```
@@ -579,6 +628,7 @@ Make sure it works
 ### Anti-Patterns to Avoid
 
 **❌ NEVER Ask AI To:**
+
 - "Improve this code"
 - "What's wrong with this implementation?"
 - "How should we refactor this?"
@@ -587,6 +637,7 @@ Make sure it works
 - "Recommend which pattern is better"
 
 **✅ INSTEAD Ask:**
+
 - "Document how this code works"
 - "Explain the current implementation"
 - "Map out the existing architecture"
@@ -598,7 +649,8 @@ Make sure it works
 
 ### What Are Worktrees?
 
-Git worktrees allow multiple working directories for the same repository, enabling parallel development on different tasks.
+Git worktrees allow multiple working directories for the same repository, enabling parallel
+development on different tasks.
 
 ### Benefits
 
@@ -611,6 +663,7 @@ Git worktrees allow multiple working directories for the same repository, enabli
 ### Creating Worktrees
 
 **Automated** (if you have script):
+
 ```bash
 ./hack/create-worktree.sh PROJ-123 oauth-support
 
@@ -621,6 +674,7 @@ Git worktrees allow multiple working directories for the same repository, enabli
 ```
 
 **Manual**:
+
 ```bash
 # Create worktree
 git worktree add ~/wt/my-project/PROJ-123-feature main
@@ -683,6 +737,7 @@ git worktree list
 ### Removing Worktrees
 
 **After PR Merged**:
+
 ```bash
 git worktree remove ~/wt/my-project/PROJ-123-feature
 
@@ -788,16 +843,19 @@ Each Claude Code session is isolated with its own context.
 ## Additional Resources
 
 ### Official Documentation
+
 - [HumanLayer Advanced Context Engineering](https://github.com/humanlayer/advanced-context-engineering-for-coding-agents)
 - [12 Factor Agents](https://github.com/humanlayer/12-factor-agents)
 - [Anthropic Claude Code Best Practices](https://www.anthropic.com/engineering/claude-code-best-practices)
 
 ### Repository Documentation
+
 - [Workflow Discovery System](WORKFLOW_DISCOVERY_SYSTEM.md)
 - [Frontmatter Standard](FRONTMATTER_STANDARD.md)
 - [Main README](../README.md)
 
 ### Configuration
+
 - `.claude/config.json` - Project-specific settings
 - `thoughts/` - Persistent context storage
 

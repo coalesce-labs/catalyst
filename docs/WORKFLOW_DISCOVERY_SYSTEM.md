@@ -1,9 +1,9 @@
 # Workflow Discovery System
 
-A comprehensive meta-workflow system for discovering, importing, creating, and validating Claude Code workflows from external repositories.
+A comprehensive meta-workflow system for discovering, importing, creating, and validating Claude
+Code workflows from external repositories.
 
-**Version**: 1.0.0
-**Last Updated**: 2025-01-08
+**Version**: 1.0.0 **Last Updated**: 2025-01-08
 
 ## Overview
 
@@ -25,6 +25,7 @@ Discovers and catalogs workflows from the Claude Code community.
 **Purpose**: Research external repositories to find reusable agents, commands, and patterns.
 
 **Key Features**:
+
 - Researches 11+ curated Claude Code repositories
 - Uses 3 parallel sub-agents per repository for efficiency:
   - **Workflow Discovery** - Lists all available workflows
@@ -34,6 +35,7 @@ Discovers and catalogs workflows from the Claude Code community.
 - Creates searchable catalog with categorization
 
 **Usage**:
+
 ```bash
 # Research specific repository
 /discover-workflows wshobson/commands
@@ -46,11 +48,13 @@ Discovers and catalogs workflows from the Claude Code community.
 ```
 
 **Output**:
+
 - Repository analysis at `thoughts/shared/workflows/{repo}/analysis.md`
 - Master catalog at `thoughts/shared/workflows/catalog.md`
 - Organized by category and use case
 
 **Supported Repositories**:
+
 - `wshobson/commands` - Production slash commands
 - `wshobson/agents` - Production subagents
 - `qdhenry/Claude-Command-Suite` - 148+ commands
@@ -70,6 +74,7 @@ Imports workflows from external repositories and adapts them to your workspace s
 **Purpose**: Bring external workflows into your workspace with proper adaptation and validation.
 
 **Key Features**:
+
 - Uses 3 parallel validation tasks:
   - **External Research** - Understands the workflow thoroughly
   - **Local Pattern Check** - Finds similar existing workflows
@@ -81,6 +86,7 @@ Imports workflows from external repositories and adapts them to your workspace s
 - Records imports in `thoughts/shared/workflows/imports.md`
 
 **Usage**:
+
 ```bash
 # Interactive import with analysis
 /import-workflow wshobson/commands code-review
@@ -96,6 +102,7 @@ Imports workflows from external repositories and adapts them to your workspace s
 ```
 
 **Process**:
+
 1. Spawns 3 parallel research tasks
 2. Aggregates and analyzes findings
 3. Presents comprehensive import analysis
@@ -106,6 +113,7 @@ Imports workflows from external repositories and adapts them to your workspace s
 8. Records import details
 
 **Output**:
+
 - Workflow saved to `agents/{name}.md` or `commands/{name}.md`
 - Import record in `thoughts/shared/workflows/imports.md`
 - Attribution and source tracking
@@ -117,6 +125,7 @@ Creates new agents or commands using discovered patterns and templates.
 **Purpose**: Build new workflows following workspace standards with guidance from existing examples.
 
 **Key Features**:
+
 - Uses 3 parallel research tasks:
   - **Local Examples** - Finds similar workflows in workspace
   - **Catalog Examples** - Finds external examples from catalog
@@ -128,6 +137,7 @@ Creates new agents or commands using discovered patterns and templates.
 - Records creation in `thoughts/shared/workflows/created.md`
 
 **Usage**:
+
 ```bash
 # Interactive creation
 /create-workflow
@@ -143,6 +153,7 @@ Creates new agents or commands using discovered patterns and templates.
 ```
 
 **Process**:
+
 1. Gathers requirements (type, name, purpose, tools)
 2. Spawns 3 parallel research tasks for examples
 3. Presents similar workflows and patterns
@@ -152,6 +163,7 @@ Creates new agents or commands using discovered patterns and templates.
 7. Saves and records creation
 
 **Templates**:
+
 - **Minimal**: Basic structure only
 - **Standard**: Full featured (default)
 - **Advanced**: Includes sub-agent patterns
@@ -163,6 +175,7 @@ Validates frontmatter across all workflows and auto-fixes issues.
 **Purpose**: Ensure all agents and commands follow the workspace frontmatter standard.
 
 **Key Features**:
+
 - Uses 3 parallel validation tasks:
   - **Validate Agents** - Checks all agent frontmatter
   - **Validate Commands** - Checks all command frontmatter
@@ -173,6 +186,7 @@ Validates frontmatter across all workflows and auto-fixes issues.
 - Non-destructive (shows plan before fixing)
 
 **Usage**:
+
 ```bash
 # Validate all workflows (report only)
 /validate-frontmatter
@@ -188,6 +202,7 @@ Validates frontmatter across all workflows and auto-fixes issues.
 ```
 
 **Validation Checks**:
+
 - Required fields present
 - Version follows semver (X.Y.Z)
 - Tools are valid Claude Code tools
@@ -197,6 +212,7 @@ Validates frontmatter across all workflows and auto-fixes issues.
 - YAML well-formed
 
 **Auto-Fix Capabilities**:
+
 - ✅ Add missing version/model fields
 - ✅ Convert version to semver format
 - ✅ Fix common tool name typos
@@ -324,6 +340,7 @@ Present to user
 ### Example: `/discover-workflows`
 
 For each repository:
+
 ```
 Task 1: Workflow Discovery
   → "List all commands and agents available"
@@ -363,6 +380,7 @@ All commands use `.claude/config.json` for project-specific values:
 ```
 
 When importing or creating workflows:
+
 - Replace hardcoded ticket prefixes with config values
 - Use config for Linear integration
 - Maintain portability across projects
@@ -387,6 +405,7 @@ thoughts/
 ```
 
 Benefits:
+
 - Persistent across worktrees
 - Shareable across team
 - Searchable history
@@ -410,13 +429,13 @@ All workflows must follow the workspace frontmatter standard (see `docs/FRONTMAT
 
 ```yaml
 ---
-name: {agent-name}              # Must match filename
+name: { agent-name } # Must match filename
 description: |
   {Multi-line description}
   Use this agent when: ...
 tools: [tool-list]
 model: inherit
-category: {research|analysis|search|execution|validation|general}
+category: { research|analysis|search|execution|validation|general }
 version: 1.0.0
 ---
 ```
@@ -425,9 +444,9 @@ version: 1.0.0
 
 ```yaml
 ---
-description: {one-line-summary}  # No 'name' field!
-category: {workflow|planning|implementation|validation|linear|git|workflow-discovery|general}
-argument-hint: {optional}
+description: { one-line-summary } # No 'name' field!
+category: { workflow|planning|implementation|validation|linear|git|workflow-discovery|general }
+argument-hint: { optional }
 tools: [tool-list]
 model: inherit
 version: 1.0.0
@@ -439,24 +458,28 @@ version: 1.0.0
 ### When to Use Each Command
 
 **Use `/discover-workflows` when**:
+
 - Starting a new project and want to learn from others
 - Looking for inspiration or examples
 - Researching how others solve similar problems
 - Building a catalog of reusable patterns
 
 **Use `/import-workflow` when**:
+
 - You found a workflow in the catalog you want to use
 - You need exactly what an external workflow provides
 - You want to adapt an existing workflow to your needs
 - You want to track provenance of external code
 
 **Use `/create-workflow` when**:
+
 - You need something custom not in the catalog
 - You want to combine patterns from multiple examples
 - You're building something specific to your project
 - You want guidance but need flexibility
 
 **Use `/validate-frontmatter` when**:
+
 - Before committing new workflows
 - After importing or creating workflows
 - Periodically to ensure consistency
@@ -530,11 +553,13 @@ diff thoughts/shared/workflows/catalog.md <previous-version>
 ### Discovery Issues
 
 **Problem**: DeepWiki can't find repository
+
 - Ensure repository is public
 - Check repository name format (org/repo)
 - Try alternative: provide direct GitHub URL
 
 **Problem**: Discovery is slow
+
 - Use parallel mode (automatic)
 - Discover one repo at a time if needed
 - Check network connection
@@ -542,11 +567,13 @@ diff thoughts/shared/workflows/catalog.md <previous-version>
 ### Import Issues
 
 **Problem**: Workflow has incompatible tools
+
 - System will list incompatible tools
 - Suggests alternatives
 - Ask if should proceed with modifications
 
 **Problem**: Duplicate workflow exists
+
 - System detects similar workflows
 - Shows comparison
 - Asks: Replace / Rename / Skip
@@ -554,11 +581,13 @@ diff thoughts/shared/workflows/catalog.md <previous-version>
 ### Validation Issues
 
 **Problem**: Many validation failures
+
 - Run `/validate-frontmatter --fix` for auto-fixes
 - Review remaining issues manually
 - Update frontmatter standard if needed
 
 **Problem**: Auto-fix changes too much
+
 - Use `--dry-run` mode first
 - Review fix plan before applying
 - Selectively fix with specific file validation

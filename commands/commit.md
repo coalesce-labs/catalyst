@@ -8,7 +8,8 @@ version: 2.0.0
 
 # Commit Changes
 
-You are tasked with creating git commits using conventional commit format for the changes made during this session.
+You are tasked with creating git commits using conventional commit format for the changes made
+during this session.
 
 ## Process:
 
@@ -27,7 +28,8 @@ You are tasked with creating git commits using conventional commit format for th
    - If `package.json`, `*.lock` files: suggest `build`
    - If `.github/workflows/`: suggest `ci`
    - If mix of changes: suggest `feat` or `fix` based on context
-   - Otherwise: ask user to choose from: `feat`, `fix`, `refactor`, `chore`, `docs`, `style`, `perf`, `test`, `build`, `ci`
+   - Otherwise: ask user to choose from: `feat`, `fix`, `refactor`, `chore`, `docs`, `style`,
+     `perf`, `test`, `build`, `ci`
 
    **Scope detection (suggest to user):**
    - Parse changed file paths
@@ -47,6 +49,7 @@ You are tasked with creating git commits using conventional commit format for th
 3. **Generate conventional commit message:**
 
    **Format:**
+
    ```
    <type>(<scope>): <short summary>
 
@@ -63,6 +66,7 @@ You are tasked with creating git commits using conventional commit format for th
    - Footer: `Refs: TICKET-123` if ticket in branch name
 
    **Example:**
+
    ```
    feat(commands): add conventional commit support to /commit
 
@@ -111,12 +115,14 @@ Reads from `.claude/config.json`:
 ## Type Reference
 
 **Types that appear in CHANGELOG:**
+
 - `feat` - New feature
 - `fix` - Bug fix
 - `perf` - Performance improvement
 - `revert` - Revert previous commit
 
 **Internal types:**
+
 - `docs` - Documentation only
 - `style` - Formatting, no code change
 - `refactor` - Code restructuring, no behavior change
@@ -128,6 +134,7 @@ Reads from `.claude/config.json`:
 ## Examples
 
 **Feature:**
+
 ```
 feat(agents): add codebase-pattern-finder agent
 
@@ -138,6 +145,7 @@ Refs: RCW-45
 ```
 
 **Fix:**
+
 ```
 fix(commands): handle missing PR template gracefully
 
@@ -148,6 +156,7 @@ Refs: RCW-78
 ```
 
 **Documentation:**
+
 ```
 docs(hack): add README for installation scripts
 
@@ -158,6 +167,7 @@ Refs: RCW-12
 ```
 
 **Chore (no ticket):**
+
 ```
 chore(config): update conventional commit scopes
 

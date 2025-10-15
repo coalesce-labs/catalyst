@@ -1,11 +1,12 @@
 # Prompts Directory
 
-This directory contains **unstructured, project-specific customization logic** that doesn't fit in `config.json`.
+This directory contains **unstructured, project-specific customization logic** that doesn't fit in
+`config.json`.
 
 ## Purpose
 
-**config.json** = Structured data (IDs, URLs, booleans, arrays)
-**prompts/** = Unstructured logic (classification rules, custom prompts, decision trees)
+**config.json** = Structured data (IDs, URLs, booleans, arrays) **prompts/** = Unstructured logic
+(classification rules, custom prompts, decision trees)
 
 ## Use Cases
 
@@ -35,6 +36,7 @@ Create `classify-issue.md` with project-specific classification logic:
 ```
 
 Reference in config.json:
+
 ```json
 {
   "linear": {
@@ -136,7 +138,9 @@ Add comments explaining why rules exist:
 ## Area Detection
 
 # We use area labels to route issues to the right team
+
 # Frontend team monitors "area: frontend"
+
 # Backend team monitors "area: api"
 ```
 
@@ -147,6 +151,7 @@ See `.personal/prompts/` for individual developer customization (not shared with
 ## Summary
 
 **Prompts enable**:
+
 - ✅ Project-specific without editing command files
 - ✅ Markdown for readability (not JSON)
 - ✅ Optional (commands work without prompts)
@@ -154,6 +159,7 @@ See `.personal/prompts/` for individual developer customization (not shared with
 - ✅ Shareable (team uses same rules)
 
 **When to use**:
+
 - Classification logic too complex for config
 - Team-specific workflows or templates
 - Custom validation rules

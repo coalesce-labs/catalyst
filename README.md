@@ -1,10 +1,12 @@
 # Ryan's Claude Workspace
 
-A portable collection of Claude Code agents, commands, and workflows for effective AI-assisted development across multiple repositories.
+A portable collection of Claude Code agents, commands, and workflows for effective AI-assisted
+development across multiple repositories.
 
 ## What This Is
 
-This repository contains battle-tested patterns for working with Claude Code on large codebases, including:
+This repository contains battle-tested patterns for working with Claude Code on large codebases,
+including:
 
 - **Specialized Agents** - Research, analysis, and implementation agents
 - **Workflow Commands** - Create → Plan → Implement → Validate workflows
@@ -328,13 +330,16 @@ Benefits:
 - [docs/USAGE.md](docs/USAGE.md) - Comprehensive usage guide
 - [docs/BEST_PRACTICES.md](docs/BEST_PRACTICES.md) - Recommended workflows and patterns
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) - Configuration system details
-- [docs/AGENTIC_WORKFLOW_GUIDE.md](docs/AGENTIC_WORKFLOW_GUIDE.md) - Agent patterns and best practices
+- [docs/AGENTIC_WORKFLOW_GUIDE.md](docs/AGENTIC_WORKFLOW_GUIDE.md) - Agent patterns and best
+  practices
 - [docs/CONTEXT_ENGINEERING.md](docs/CONTEXT_ENGINEERING.md) - Context management strategies
-- [docs/LINEAR_WORKFLOW_AUTOMATION.md](docs/LINEAR_WORKFLOW_AUTOMATION.md) - Linear integration guide
+- [docs/LINEAR_WORKFLOW_AUTOMATION.md](docs/LINEAR_WORKFLOW_AUTOMATION.md) - Linear integration
+  guide
 
 ### All Documentation
 
-See [docs/README.md](docs/README.md) for the complete documentation index organized by category (Setup, Workflow, Integrations, Technical).
+See [docs/README.md](docs/README.md) for the complete documentation index organized by category
+(Setup, Workflow, Integrations, Technical).
 
 ## Installation Modes
 
@@ -426,7 +431,8 @@ When you improve the workspace, easily update your projects:
 
 ## Using the Workspace on Itself
 
-This workspace "eats its own dog food" - the commands and agents are installed into `.claude/` so you can use them while working on the workspace itself!
+This workspace "eats its own dog food" - the commands and agents are installed into `.claude/` so
+you can use them while working on the workspace itself!
 
 **What this means**:
 
@@ -442,8 +448,8 @@ This workspace "eats its own dog food" - the commands and agents are installed i
 - `.claude/agents/*.md` - Installed copies (used by Claude Code)
 - `.claude/commands/*.md` - Installed copies (used by Claude Code)
 
-**After editing source files**:
-The `.claude/` copies are automatically synced since they're in the same repo. Just restart Claude Code to pick up changes.
+**After editing source files**: The `.claude/` copies are automatically synced since they're in the
+same repo. Just restart Claude Code to pick up changes.
 
 ## Contributing
 

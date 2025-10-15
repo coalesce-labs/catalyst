@@ -1,10 +1,12 @@
 # Validate Plan
 
-You are tasked with validating that an implementation plan was correctly executed, verifying all success criteria and identifying any deviations or issues.
+You are tasked with validating that an implementation plan was correctly executed, verifying all
+success criteria and identifying any deviations or issues.
 
 ## Initial Setup
 
 When invoked:
+
 1. **Determine context** - Are you in an existing conversation or starting fresh?
    - If existing: Review what was implemented in this session
    - If fresh: Need to discover what was done through git and codebase analysis
@@ -14,6 +16,7 @@ When invoked:
    - Otherwise, search recent commits for plan references or ask user
 
 3. **Gather implementation evidence**:
+
    ```bash
    # Check recent commits
    git log --oneline -n 20
@@ -36,6 +39,7 @@ If starting fresh or need more context:
    - Identify key functionality to verify
 
 3. **Spawn parallel research tasks** to discover implementation:
+
    ```
    Task 1 - Verify database changes:
    Research if migration [N] was added and schema changes match plan.
@@ -119,31 +123,34 @@ Current usage: {X}% ({Y}K/{Z}K tokens)
 ## Validation Report: [Plan Name]
 
 ### Implementation Status
-✓ Phase 1: [Name] - Fully implemented
-✓ Phase 2: [Name] - Fully implemented
-⚠️ Phase 3: [Name] - Partially implemented (see issues)
+
+✓ Phase 1: [Name] - Fully implemented ✓ Phase 2: [Name] - Fully implemented ⚠️ Phase 3: [Name] -
+Partially implemented (see issues)
 
 ### Automated Verification Results
-✓ Build passes: `make build`
-✓ Tests pass: `make test`
-✗ Linting issues: `make lint` (3 warnings)
+
+✓ Build passes: `make build` ✓ Tests pass: `make test` ✗ Linting issues: `make lint` (3 warnings)
 
 ### Code Review Findings
 
 #### Matches Plan:
+
 - Database migration correctly adds [table]
 - API endpoints implement specified methods
 - Error handling follows plan
 
 #### Deviations from Plan:
+
 - Used different variable names in [file:line]
 - Added extra validation in [file:line] (improvement)
 
 #### Potential Issues:
+
 - Missing index on foreign key could impact performance
 - No rollback handling in migration
 
 ### Manual Testing Required:
+
 1. UI functionality:
    - [ ] Verify [feature] appears correctly
    - [ ] Test error states with invalid input
@@ -153,6 +160,7 @@ Current usage: {X}% ({Y}K/{Z}K tokens)
    - [ ] Check performance with large datasets
 
 ### Recommendations:
+
 - Address linting warnings before merge
 - Consider adding integration test for [scenario]
 - Document new API endpoints
@@ -161,6 +169,7 @@ Current usage: {X}% ({Y}K/{Z}K tokens)
 ## Working with Existing Context
 
 If you were part of the implementation:
+
 - Review the conversation history
 - Check your todo list for what was completed
 - Focus validation on work done in this session
@@ -177,6 +186,7 @@ If you were part of the implementation:
 ## Validation Checklist
 
 Always verify:
+
 - [ ] All phases marked complete are actually done
 - [ ] Automated tests pass
 - [ ] Code follows existing patterns
@@ -188,11 +198,14 @@ Always verify:
 ## Relationship to Other Commands
 
 Recommended workflow:
+
 1. `/implement_plan` - Execute the implementation
 2. `/commit` - Create atomic commits for changes
 3. `/validate_plan` - Verify implementation correctness
 4. `/describe_pr` - Generate PR description
 
-The validation works best after commits are made, as it can analyze the git history to understand what was implemented.
+The validation works best after commits are made, as it can analyze the git history to understand
+what was implemented.
 
-Remember: Good validation catches issues before they reach production. Be constructive but thorough in identifying gaps or improvements.
+Remember: Good validation catches issues before they reach production. Be constructive but thorough
+in identifying gaps or improvements.

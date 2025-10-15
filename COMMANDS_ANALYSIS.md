@@ -55,11 +55,11 @@ These are tightly coupled to HumanLayer's infrastructure:
    - Uses HumanLayer daemon for session management
    - Specific to their multi-Claude workflow
 
-4. **ralph_*.md commands** - Internal workflows
+4. **ralph\_\*.md commands** - Internal workflows
    - Named after their process "Ralph"
    - HumanLayer-specific conventions
 
-5. **research_codebase*.md** - Variations of create_plan
+5. **research_codebase\*.md** - Variations of create_plan
    - Duplicates of create_plan with slight tweaks
    - We already have create_plan
 
@@ -77,6 +77,7 @@ These are tightly coupled to HumanLayer's infrastructure:
 ### What to Consider Adding
 
 If you use **Linear** for issue tracking:
+
 - Copy `linear.md` but customize:
   - Remove HumanLayer-specific project IDs
   - Adjust workflow statuses for your team
@@ -104,17 +105,20 @@ commands/
 ## Usage Notes
 
 ### commit.md
+
 - Run after completing work
 - Creates well-structured commits
 - No Claude attribution (respects user authorship)
 
 ### describe_pr.md
+
 - Requires: `gh` CLI installed
 - Requires: PR template at `thoughts/shared/pr_description.md`
 - Runs verification commands automatically
 - Updates PR via GitHub API
 
 ### debug.md
+
 - Use when hitting issues during implementation
 - Investigates without burning main context
 - Adapt log paths for your project structure
@@ -124,28 +128,35 @@ commands/
 For `describe_pr.md` to work, create:
 
 `thoughts/shared/pr_description.md`:
+
 ```markdown
 ## Summary
+
 What does this PR do?
 
 ## Problem
+
 What problem does this solve?
 
 ## Solution
+
 How does it solve it?
 
 ## How to verify it
+
 - [ ] Tests pass: `make test`
 - [ ] Linting passes: `make lint`
 - [ ] Manually tested: [describe how]
 
 ## Changelog
+
 Brief user-facing description for CHANGELOG.md
 ```
 
 ## Extending This
 
 You can create project-specific commands by:
+
 1. Copying a command to `.claude/commands/` in your project
 2. Customizing for your workflow
 3. Project commands take precedence over user commands
