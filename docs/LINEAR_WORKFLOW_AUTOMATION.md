@@ -222,7 +222,8 @@ The `/linear` command uses a **clever initialization pattern**:
 
 ```bash
 # Copy command to new project
-cp ~/ryan-claude-workspace/commands/linear.md .claude/commands/
+mkdir -p .claude/commands/linear
+cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
 
 # First use
 /linear
@@ -244,7 +245,7 @@ cp ~/ryan-claude-workspace/commands/linear.md .claude/commands/
 # ✅ Configuration complete! I've updated the linear.md file.
 #
 # Please commit this change:
-#   git add .claude/commands/linear.md
+#   git add .claude/commands/linear/linear.md
 #   git commit -m "Configure Linear command"
 
 # Now it works:
@@ -314,12 +315,12 @@ You have:
 
 ### Strategy 1: Base Command + Project Override
 
-**In your workspace** (`ryan-claude-workspace/commands/linear.md`):
+**In your workspace** (`ryan-claude-workspace/commands/linear/linear.md`):
 
 - Keep the template with `[NEEDS_SETUP]` markers
 - Don't commit configured values
 
-**In each project** (`.claude/commands/linear.md`):
+**In each project** (`.claude/commands/linear/linear.md`):
 
 - Copy from workspace
 - Run first-time setup

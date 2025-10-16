@@ -55,7 +55,7 @@ Then inform the user:
 ✅ Configuration complete! I've updated the linear.md file.
 
 Please commit this change:
-  git add .claude/commands/linear.md
+  git add .claude/commands/linear/linear.md
   git commit -m "Configure Linear command for this project"
 
 Now you can use /linear normally!

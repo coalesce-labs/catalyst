@@ -120,7 +120,7 @@ After script completes, show summary:
 - config.json (smart merged)
 
 **Skipped**: {N} files
-- commands/linear.md (configured, has local values)
+- commands/linear/linear.md (configured, has local values)
 - commands/custom-command.md (user chose to keep local)
 
 **Conflicts handled**: {N}
@@ -195,7 +195,7 @@ The script creates/updates `.claude/.workspace-metadata.json`:
       "modified": false,
       "customized": false
     },
-    "commands/linear.md": {
+    "commands/linear/linear.md": {
       "checksum": "def456...",
       "modified": false,
       "customized": true

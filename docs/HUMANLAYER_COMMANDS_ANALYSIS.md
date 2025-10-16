@@ -317,7 +317,7 @@ cp ~/code-repos/humanlayer/.claude/commands/resume_handoff.md commands/
 
 ### 2. Adapt Linear Command (If Using Linear)
 
-Create `commands/linear.md` based on HumanLayer's but:
+Create `commands/linear/linear.md` based on HumanLayer's but:
 
 **Remove**:
 
