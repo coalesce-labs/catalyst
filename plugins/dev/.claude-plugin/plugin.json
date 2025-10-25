@@ -1,0 +1,27 @@
+{
+  "name": "catalyst-dev",
+  "version": "1.0.0",
+  "description": "Complete development workflow: research → plan → implement → validate → ship. Includes research agents, planning tools, handoff system, Linear integration, and PM commands.",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coalesce-labs/catalyst.git"
+  },
+  "keywords": [
+    "workflow",
+    "research",
+    "planning",
+    "agents",
+    "linear",
+    "handoff",
+    "pm",
+    "development"
+  ],
+  "license": "MIT",
+  "categories": ["development", "productivity"]
+}

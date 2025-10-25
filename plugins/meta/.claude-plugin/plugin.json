@@ -1,0 +1,25 @@
+{
+  "name": "catalyst-meta",
+  "version": "1.0.0",
+  "description": "Workflow discovery and creation tools: learn from community patterns and extend Catalyst with new workflows.",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/coalesce-labs/catalyst.git"
+  },
+  "keywords": [
+    "meta",
+    "discovery",
+    "creation",
+    "best-practices",
+    "community",
+    "workflows"
+  ],
+  "license": "MIT",
+  "categories": ["development", "learning"]
+}
