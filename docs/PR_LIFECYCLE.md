@@ -47,7 +47,7 @@ Creates git commits using conventional commit format with auto-detection.
 
 ```bash
 # Working on branch: RCW-13-implement-pr-lifecycle
-# Changed files: commands/commit.md, commands/create_pr.md
+# Changed files: commands/dev/commit.md, commands/linear/create_pr.md
 
 /commit
 
@@ -637,7 +637,7 @@ Add project-specific scopes to config:
 - [commands/README.md](../commands/README.md) - All available commands
 - [docs/LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md) - Linear integration details
 - [docs/USAGE.md](USAGE.md) - General workspace usage
-- [commands/commit.md](../commands/commit.md) - Commit command details
-- [commands/create_pr.md](../commands/create_pr.md) - Create PR command details
-- [commands/describe_pr.md](../commands/describe_pr.md) - Describe PR command details
-- [commands/merge_pr.md](../commands/merge_pr.md) - Merge PR command details
+- [commands/dev/commit.md](../commands/dev/commit.md) - Commit command details
+- [commands/linear/create_pr.md](../commands/linear/create_pr.md) - Create PR command details
+- [commands/dev/describe_pr.md](../commands/dev/describe_pr.md) - Describe PR command details
+- [commands/linear/merge_pr.md](../commands/linear/merge_pr.md) - Merge PR command details

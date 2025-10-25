@@ -34,3 +34,9 @@ thoughts/
 
 # Backup files from config migration
 .claude/config.json.backup
+
+# Catalyst configuration (contains secrets)
+.claude/config.json
+.claude/*.local.json
+.claude/.workflow-context.json
+.claude/*.backup

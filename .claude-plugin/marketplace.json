@@ -1,0 +1,34 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "catalyst",
+  "version": "1.0.0",
+  "description": "Research-driven development workflow with Linear integration, PM tools, and infrastructure research agents",
+  "owner": {
+    "name": "Coalesce Labs",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/ryanisaacg/catalyst",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ryanisaacg/catalyst.git"
+  },
+  "plugins": [
+    {
+      "name": "catalyst-dev",
+      "source": "./plugins/dev",
+      "description": "Complete development workflow: research → plan → implement → validate → ship with Linear automation. Includes 10 research agents (codebase + infrastructure), 18 commands (workflow, dev, handoff, Linear/PM, project), and 4 scripts.",
+      "version": "1.0.0",
+      "category": "development",
+      "keywords": ["workflow", "research", "planning", "agents", "linear", "handoff", "pm"],
+      "featured": true
+    },
+    {
+      "name": "catalyst-meta",
+      "source": "./plugins/meta",
+      "description": "Discover, import, and create workflows: learn from community patterns and extend Catalyst. Includes 5 commands for workflow discovery and creation.",
+      "version": "1.0.0",
+      "category": "development",
+      "keywords": ["meta", "discovery", "creation", "best-practices"]
+    }
+  ]
+}

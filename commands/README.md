@@ -1,8 +1,6 @@
 # commands/ Directory: Claude Code Slash Commands
 
-This directory contains markdown files that become Claude Code slash commands. Each `.md` file with
-YAML frontmatter is automatically discovered and registered as a command you can invoke with
-`/command-name`.
+This directory contains markdown files that become Claude Code slash commands for the Catalyst plugin system. Each `.md` file with YAML frontmatter is automatically discovered and registered as a command you can invoke with `/command-name`.
 
 ## How It Works
 
@@ -13,18 +11,30 @@ YAML frontmatter is automatically discovered and registered as a command you can
 
 **Discovery Process:**
 
-1. Claude Code scans `.claude/commands/*.md` on startup
+1. Claude Code scans plugin `commands/` directory
 2. Reads YAML frontmatter from each file
 3. Registers command based on filename
 4. Makes tools available per frontmatter specification
 
 **No manifest file needed** - it's automatic based on filename!
 
-## Command Types
+## Installation
 
-### Portable Commands (15 commands)
+Commands are distributed via the Catalyst plugin system:
 
-**These travel with installations and work in any project.**
+```bash
+# Install catalyst-dev plugin (includes all workflow commands)
+/plugin install catalyst-dev@catalyst
+
+# Install catalyst-meta plugin (includes workflow discovery commands)
+/plugin install catalyst-meta@catalyst
+```
+
+## Plugin Distribution
+
+### catalyst-dev Plugin (15 commands)
+
+**Complete development workflow from research to shipping.**
 
 #### Core Workflow Commands
 
@@ -56,23 +66,24 @@ YAML frontmatter is automatically discovered and registered as a command you can
 - `/debug` - Debugging assistance
 - `/workflow-help` - Interactive workflow guidance
 
-### Workspace-Only Commands (5 commands)
+### catalyst-meta Plugin (5 commands)
 
-**These are excluded from project installations (unless installing to workspace itself).**
+**Workflow discovery and creation for extending Catalyst.**
 
 #### Meta-Development Tools
 
 - `/validate-frontmatter` - Validate command/agent frontmatter consistency
-- `/update-project` - Update project's `.claude/` from workspace
 - `/discover-workflows` - Research external repos for workflow patterns
 - `/import-workflow` - Import discovered workflows into workspace
 - `/create-workflow` - Create new agents/commands from templates
+- `/workflow-help` - Interactive workflow guidance (also in catalyst-dev)
 
-**Why workspace-only?**
+**Use catalyst-meta when:**
 
-- They modify the workspace itself (agents/, commands/ directories)
-- They're for workspace development, not project work
-- They reference workspace-specific paths
+- You want to extend Catalyst with new workflows
+- You're researching patterns from other repositories
+- You need to validate frontmatter consistency
+- You want workflow creation assistance
 
 ## Command File Structure
 
@@ -112,61 +123,6 @@ The markdown content here becomes the command's prompt...
 
 **Important:** Commands use filename as identifier. Do NOT add a `name` field (that's for agents
 only).
-
-## Installation Behavior
-
-### User Installation (`./hack/install-user.sh`)
-
-**What gets installed:**
-
-- All 20 commands (including workspace-only)
-
-**Available in:** ALL your Claude Code projects
-
-**No filtering** - this is for workspace developers who want everything everywhere.
-
----
-
-### Project Installation (`./hack/install-project.sh /path/to/project`)
-
-**What gets installed:**
-
-- 15 portable commands
-- Excludes 5 workspace-only commands
-
-**Available in:** ONLY that specific project
-
-**Filtered out:**
-
-- `/validate-frontmatter`
-- `/update-project`
-- `/discover-workflows`
-- `/import-workflow`
-- `/create-workflow`
-
-**Exception:** If installing to workspace itself, ALL commands are included (dogfooding).
-
----
-
-### Project Update (`./hack/update-project.sh /path/to/project`)
-
-**How commands are updated:**
-
-| Command Type                                  | Update Behavior                     |
-| --------------------------------------------- | ----------------------------------- |
-| New command                                   | Added automatically                 |
-| Unchanged                                     | Skipped                             |
-| Workspace-only                                | Skipped (not in projects)           |
-| Install-once (e.g., `/linear-setup-workflow`) | Skipped                             |
-| `/linear` if configured                       | Skipped (preserves your Linear IDs) |
-| Modified, not customized                      | Prompted (Y/n)                      |
-| Marked as customized                          | Conflict resolution (3 options)     |
-
-**Smart handling:**
-
-- Preserves your customizations
-- Updates workspace improvements
-- Interactive prompts when conflicts exist
 
 ## Command Categories
 
@@ -479,57 +435,36 @@ The workspace includes `/validate-frontmatter` (workspace-only) to ensure consis
 
 ## Troubleshooting
 
-### Command not appearing after creation
+### Command not appearing after installation
 
 **Check:**
 
-1. File in `.claude/commands/` directory? (not just `commands/`)
-2. Valid YAML frontmatter?
-3. Restarted Claude Code?
+1. Plugin installed? (`/plugin list`)
+2. Valid YAML frontmatter in the command file?
+3. Restarted Claude Code after plugin install?
 
 **Solution:**
 
 ```bash
-# Copy to .claude/ if needed
-cp commands/my_command.md .claude/commands/
+# Verify plugin is installed
+/plugin list
 
-# Restart Claude Code
+# Reinstall if needed
+/plugin uninstall catalyst-dev@catalyst
+/plugin install catalyst-dev@catalyst
 ```
 
-### Workspace-only command showing in project
+### Need workflow discovery commands?
 
-**Check:**
+**Remember:** Workflow discovery commands are in `catalyst-meta` plugin.
 
-- Did you use `install-user.sh`? (includes all commands)
-- Or `install-project.sh`? (filters workspace-only)
+**To access:**
 
-**Expected behavior:**
+```bash
+/plugin install catalyst-meta@catalyst
+```
 
-- User install: All commands (for workspace developers)
-- Project install: Portable commands only
-
-### Command customization lost after update
-
-**This is by design** if:
-
-- You marked the command as customized (chose "keep local")
-- OR it's `linear.md` and you configured it
-
-**To keep customizations:**
-
-- Update script will prompt you
-- Choose option 1: "Keep local version"
-- OR option 3: "View diff and decide"
-
-### Can't find frontmatter validation
-
-**Remember:** `/validate-frontmatter` is workspace-only.
-
-**Only available if:**
-
-- Installed with `install-user.sh`
-- OR installed to workspace itself
-- NOT available in regular project installations
+Then use `/discover-workflows`, `/import-workflow`, `/create-workflow`, and `/validate-frontmatter`.
 
 ## See Also
 

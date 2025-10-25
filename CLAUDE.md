@@ -45,14 +45,22 @@ All agents follow a **documentarian, not critic** approach:
 
 This is critical - agents are for understanding codebases, not evaluating them.
 
-### Workflow Commands
+### Command Organization
 
-Commands orchestrate multi-step processes:
+Commands are organized into namespaces for clarity and discoverability:
 
-- **Research → Plan → Implement → Validate** is the core flow
-- Commands spawn parallel sub-agents for efficiency
-- All use the thoughts system for persistent context
-- Configuration-driven (see `.claude/config.json`)
+- **workflow/** - Core research/plan/implement/validate flow
+- **dev/** - Development workflow (commit, debug, PR descriptions)
+- **linear/** - Linear ticket management and PR lifecycle
+- **project/** - Project-level operations (worktrees, updates)
+- **handoff/** - Context persistence across sessions
+- **meta/** - Workflow discovery, creation, validation
+
+All commands:
+- Orchestrate multi-step processes via sub-agents
+- Use the thoughts system for persistent context
+- Are configuration-driven (see `.claude/config.json`)
+- Spawn parallel sub-agents for efficiency
 
 ## Common Development Tasks
 
@@ -131,25 +139,33 @@ ryan-claude-workspace/
 │   ├── thoughts-locator.md
 │   ├── thoughts-analyzer.md
 │   └── external-research.md
-├── commands/                # Source: Workflow slash commands
-│   ├── research_codebase.md
-│   ├── create_plan.md
-│   ├── implement_plan.md
-│   ├── validate_plan.md
-│   ├── create_worktree.md
-│   ├── update_project.md
-│   ├── discover_workflows.md
-│   ├── import_workflow.md
-│   ├── create_workflow.md
-│   ├── validate_frontmatter.md
-│   ├── linear.md
-│   ├── linear_setup_workflow.md
-│   ├── commit.md
-│   ├── describe_pr.md
-│   ├── debug.md
-│   ├── create_handoff.md
-│   ├── resume_handoff.md
-│   └── workflow_help.md
+├── commands/                # Source: Namespaced slash commands
+│   ├── dev/                 # Development workflow commands
+│   │   ├── commit.md
+│   │   ├── debug.md
+│   │   └── describe_pr.md
+│   ├── handoff/             # Context handoff commands
+│   │   ├── create_handoff.md
+│   │   └── resume_handoff.md
+│   ├── linear/              # Linear integration commands
+│   │   ├── linear.md
+│   │   ├── create_pr.md
+│   │   ├── merge_pr.md
+│   │   └── linear_setup_workflow.md
+│   ├── meta/                # Meta/workflow management commands
+│   │   ├── create_workflow.md
+│   │   ├── discover_workflows.md
+│   │   ├── import_workflow.md
+│   │   ├── validate_frontmatter.md
+│   │   └── workflow_help.md
+│   ├── project/             # Project management commands
+│   │   ├── create_worktree.md
+│   │   └── update_project.md
+│   └── workflow/            # Core workflow commands
+│       ├── research_codebase.md
+│       ├── create_plan.md
+│       ├── implement_plan.md
+│       └── validate_plan.md
 ├── hack/                 # Installation and setup scripts
 │   ├── install-user.sh           # Install to ~/.claude/
 │   ├── install-project.sh        # Install to project .claude/
@@ -174,7 +190,8 @@ ryan-claude-workspace/
 │   ├── FRONTMATTER_STANDARD.md
 │   ├── DEEPWIKI_INTEGRATION.md
 │   ├── MULTI_CONFIG_GUIDE.md
-│   └── HUMANLAYER_COMMANDS_ANALYSIS.md
+│   ├── HUMANLAYER_COMMANDS_ANALYSIS.md
+│   └── PR_LIFECYCLE.md
 ├── .claude/                 # Working installation (dogfooding)
 │   ├── agents/              # Installed copies
 │   ├── commands/            # Installed copies
@@ -277,7 +294,7 @@ When understanding the system:
 3. **docs/CONFIGURATION.md** - How config system works
 4. **docs/AGENTIC_WORKFLOW_GUIDE.md** - Agent patterns and best practices
 5. **agents/codebase-locator.md** - Example of agent structure
-6. **commands/research_codebase.md** - Example of command structure
+6. **commands/workflow/research_codebase.md** - Example of command structure
 
 ## Frontmatter Standard
 
@@ -441,10 +458,12 @@ TICKET_PREFIX=$(jq -r '.project.ticketPrefix // "PROJ"' "$CONFIG_FILE")
 
 **Testing commands:**
 
-1. Make changes to `commands/*.md`
+1. Make changes to `commands/{namespace}/*.md`
 2. Restart Claude Code
 3. Invoke with `/command-name args`
 4. Verify workflow executes correctly
+
+Namespaces: `dev/`, `handoff/`, `linear/`, `meta/`, `project/`, `workflow/`
 
 **Validating frontmatter:**
 

@@ -26,8 +26,8 @@ by spawning parallel sub-agents and synthesizing their findings.
 Before executing, verify required tools are installed:
 
 ```bash
-if [[ -f "./hack/check-prerequisites.sh" ]]; then
-  ./hack/check-prerequisites.sh || exit 1
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" || exit 1
 fi
 ```
 
@@ -684,8 +684,8 @@ This command integrates with the complete development workflow:
 After saving the research document, add it to workflow context:
 
 ```bash
-if [[ -f "./hack/workflow-context.sh" ]]; then
-  ./hack/workflow-context.sh add research "$DOC_PATH" "${TICKET_ID:-null}"
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "$DOC_PATH" "${TICKET_ID:-null}"
 fi
 ```
 
