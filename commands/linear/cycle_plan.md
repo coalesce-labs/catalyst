@@ -88,7 +88,7 @@ When fully implemented, this command will:
 - **Team activity report** - Show contribution breakdown by team member
 - **Summary generation** - Create cycle plan document in thoughts/
 
-Track progress at: https://github.com/coalesce-labs/catalyst/issues/PLACEHOLDER
+Track progress at: https://github.com/ryanisaacg/catalyst/issues
 
 ## Configuration
 

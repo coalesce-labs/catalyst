@@ -83,7 +83,7 @@ When fully implemented, this command will:
 - **Summary generation** - Create roadmap document in thoughts/
 - **Trend analysis** - Compare progress month-over-month
 
-Track progress at: https://github.com/coalesce-labs/catalyst/issues/PLACEHOLDER
+Track progress at: https://github.com/ryanisaacg/catalyst/issues
 
 ## Configuration
 

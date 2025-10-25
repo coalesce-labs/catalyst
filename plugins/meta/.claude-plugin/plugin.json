@@ -7,10 +7,10 @@
     "email": "hello@coalesce.dev",
     "url": "https://github.com/coalesce-labs"
   },
-  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "homepage": "https://github.com/ryanisaacg/catalyst",
   "repository": {
     "type": "git",
-    "url": "https://github.com/coalesce-labs/catalyst.git"
+    "url": "https://github.com/ryanisaacg/catalyst.git"
   },
   "keywords": [
     "meta",
