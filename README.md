@@ -1,26 +1,18 @@
-# Catalyst - Ryan's Claude Code Workspace
+# Catalyst - Claude Code Workspace
 
-**My personal development workflow for Claude Code, now open-sourced for the community.**
+My personal development workflow for Claude Code, now open-sourced for the community.
 
-This is the workspace I use daily for AI-assisted development. It's battle-tested on real projects and optimized for how I work. I'm sharing it so others can use it, fork it, and contribute ideas back.
+This is the workspace I use daily for AI-assisted development. It's battle-tested on real projects and optimized for efficient, context-aware AI collaboration. I'm sharing it so others can use it, fork it, and contribute ideas back.
 
 ## What's Inside
 
-**Catalyst** is a 2-plugin system for Claude Code that provides:
+**Catalyst** is a 2-plugin system for Claude Code focused on **token efficiency**, **reusability**, and **persistent context** through parallel agent research, structured handoffs, and shared memory systems.
 
-- 🔬 **11 Research Agents** - Specialized agents for codebase and infrastructure research
-- ⚡ **23 Commands** - Complete development workflow from research to deployment
-- 🔧 **Token-Efficient CLIs** - Linearis (13x faster than MCP), Railway, Sentry, GitHub
-- 🔒 **Secure Config** - Template system prevents committing secrets
-- 📊 **PM Tools** - Cycle planning and review with GitHub PR tracking
-
-### Two Plugins
-
-**catalyst-dev** - Main development workflow
-- Research → Plan → Implement → Validate
-- Linear integration with Linearis CLI
+**catalyst-dev** - Complete development workflow
+- 11 research agents (codebase + infrastructure)
+- 18 commands covering full dev lifecycle
+- Linear integration via Linearis CLI
 - Handoff system for context persistence
-- Git worktree management
 
 **catalyst-meta** - Workflow discovery
 - Discover workflows from community repos
@@ -29,51 +21,25 @@ This is the workspace I use daily for AI-assisted development. It's battle-teste
 
 ## Installation
 
-Coming soon to Claude Code marketplace. For now, clone and explore:
+Install via Claude Code plugin system:
 
 ```bash
-git clone https://github.com/ryanisaacg/catalyst.git
-cd catalyst
+# Add the marketplace repository
+/plugin marketplace add ryanisaacg/catalyst
 
-# Check what's required
-./hack/check-prerequisites.sh
+# Install catalyst-dev (main workflow)
+/plugin install catalyst-dev
 
-# Explore the plugins
-ls plugins/dev/
-ls plugins/meta/
+# Optionally install catalyst-meta (workflow discovery)
+/plugin install catalyst-meta
 ```
 
-## Philosophy
+For plugin documentation, see [Claude Code Plugin Guide](https://docs.claude.com/plugins).
 
-Built on Anthropic's context engineering principles:
+## Complete Workflow
 
-- **Context is precious** - Use specialized agents, not monoliths
-- **Just-in-time loading** - Load context dynamically
-- **CLI over MCP** - When possible (13x token reduction for Linear)
-- **Sub-agent architecture** - Parallel research, focused tasks
-- **Structured persistence** - Save context outside conversations
-
-## Key Features
-
-### Token Efficiency
-- Linear MCP (13k tokens) → Linearis CLI (1k tokens)
-- CLI-based infrastructure research agents
-- Minimal context footprint
-
-### Security First
-- Config template system
-- `.gitignore` prevents committing secrets
-- No hardcoded credentials
-
-### Real-World PM
-- Track work via Linear tickets AND GitHub PRs
-- Find untracked work (PRs without tickets)
-- Team contribution breakdown
-- Velocity insights from actual merged PRs
-
-### Complete Workflow
 ```
-/research_codebase → /create_plan → /implement_plan → /create_pr → /merge_pr
+/research_codebase → /create_plan → /implement_plan → /validate_plan → /create_pr → /merge_pr
 ```
 
 With handoffs for context persistence:
@@ -81,71 +47,103 @@ With handoffs for context persistence:
 /create_handoff → /resume_handoff
 ```
 
+Agents proactively monitor context during implementation and will prompt you to create handoffs before running out of context, creating structured handoff documents that add to persistent memory.
+
+## Core Philosophy
+
+### Token Efficiency Through Structured Context
+
+1. **Parallel Agent Research** - Multiple specialized agents research concurrently
+2. **Context Compression** - Research compressed into structured summaries
+3. **Focused Planning** - Planning agents work with compressed context
+4. **Persistent Memory** - Handoffs and thoughts system preserve context across sessions
+
+### Reusability and Shared Memory
+
+Uses the [HumanLayer thoughts system](https://github.com/humanlayer/humanlayer) for shared persistent memory across teams and projects. The research → plan → implement → validate workflow is adapted from HumanLayer's approach.
+
+### CLI-First Integration
+
+When possible, uses CLIs instead of MCPs for token efficiency:
+- Linear: Linearis CLI (1k tokens) vs Linear MCP (13k tokens) = **13x reduction**
+- Infrastructure research via CLIs (Railway, Sentry, GitHub)
+
+## Key Features
+
+**Large Long-Term Memory and Context**
+- Thoughts system for persistent memory across projects
+- Structured handoff documents for context preservation
+- Research artifacts saved and referenceable
+- Plan documents that persist implementation context
+
+**Token Efficiency**
+- Parallel agents compress research before synthesis
+- CLI-based tools minimize token overhead
+- Focused agents for specific tasks
+- Context-aware handoff prompts
+
+**Secure Configuration**
+- Template system prevents committing secrets
+- `.gitignore` protection for sensitive files
+- No hardcoded credentials
+
+## Requirements
+
+**Core Tools**:
+- Claude Code
+- Git
+- jq
+
+**CLI Integrations** (optional but recommended):
+- `linearis` - Linear integration ([install](https://github.com/ryanrozich/linearis))
+- `gh` - GitHub CLI
+- `railway` - Railway deployments
+- `sentry-cli` - Error monitoring
+- `humanlayer` - Thoughts system ([install](https://github.com/humanlayer/humanlayer))
+
+**MCP Tools** (auto-configured by Claude Code):
+- Context7 - Library documentation
+- Exa - Web search
+- PostHog - Product analytics
+- Sentry - Error monitoring (can use CLI or MCP)
+
+Run the prerequisite check:
+```bash
+/check_prerequisites
+```
+
+## Credits
+
+Built on patterns from:
+- [HumanLayer](https://github.com/humanlayer/humanlayer) - Thoughts system for shared persistent memory and research/plan/implement/validate workflow
+
+Personal refinement over hundreds of hours on real projects.
+
 ## Contributing
 
 This is my personal workspace, but I'm open to:
 
-✅ **Ideas** - Open issues with workflow suggestions
-✅ **Forks** - Adapt it to your needs
-✅ **Bug reports** - If something's broken
-✅ **Patterns** - Share your own workflow patterns
+- **Ideas** - Open issues with workflow suggestions
+- **Forks** - Adapt it to your needs
+- **Bug reports** - If something's broken
+- **Patterns** - Share your own workflow patterns
 
 I may not accept all PRs (since this is my daily driver), but I love seeing how others adapt these patterns!
 
 ## Documentation
 
-- 📖 **[Full Documentation](docs/)** - Comprehensive guides
-- 🚀 **[Quick Start](QUICKSTART.md)** - 5-minute setup
-- 🎯 **[Usage Guide](docs/USAGE.md)** - How to use all features
-- 📋 **[Commands](COMMANDS_ANALYSIS.md)** - Complete command reference
-- 🏗️ **[Architecture](CLAUDE.md)** - How it's built
-
-## What Makes This Different
-
-**Personal workspace**, not enterprise software:
-- Optimized for how I work
-- No unnecessary abstraction
-- Battle-tested on real projects
-- Constantly evolving
-
-**Open source philosophy**:
-- Use it as-is
-- Fork and customize
-- Share your improvements
-- Contribute ideas
-
-**Token-efficient**:
-- CLI-first approach where possible
-- Specialized, focused agents
-- Minimal context overhead
-
-## Requirements
-
-**Required**:
-- Claude Code
-- Git
-- jq
-
-**For full features**:
-- `linearis` - Linear integration (install: `npm install -g --install-links ryanrozich/linearis#feat/cycles-cli`)
-- `gh` - GitHub CLI
-- `railway` - Railway deployments
-- `sentry-cli` - Error monitoring
-- `humanlayer` - Thoughts system (optional)
-
-Run `./hack/check-prerequisites.sh` to check what you have.
+- [Full Documentation](docs/) - Comprehensive guides
+- [Quick Start](QUICKSTART.md) - 5-minute setup
+- [Usage Guide](docs/USAGE.md) - How to use all features
+- [Commands](COMMANDS_ANALYSIS.md) - Complete command reference
+- [Architecture](CLAUDE.md) - How it's built
 
 ## License
 
 MIT - Use it however you want!
 
-## About
-
-Built by [@ryanisaacg](https://github.com/ryanisaacg) using Claude Code.
-
-This represents hundreds of hours of refinement on real projects. I'm sharing it because I believe in open source and want to see what the community builds with these patterns.
-
 ---
 
-**Want to chat about workflows, contribute ideas, or share your fork?**
-Open an issue or discussion - I'd love to hear from you!
+Built by [Ryan Rozich](https://github.com/ryanrozich)
+
+Want to chat about workflows, contribute ideas, or share your fork? Open an issue or discussion!
