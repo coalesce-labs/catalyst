@@ -98,21 +98,53 @@ Set `LINEAR_API_TOKEN` environment variable or store in `~/.linear_api_token`
 
 ### Thoughts Configuration
 
-Detected automatically from HumanLayer config:
+**Per-Project HumanLayer Config** (New in v1.1):
 
 ```json
 {
   "thoughts": {
-    "user": "ryan"
+    "user": null,
+    "configName": "brkthru"
   }
 }
 ```
 
-This is read from `~/.config/humanlayer/config.json` and used in:
+**Fields**:
+- `user` - Auto-detected from HumanLayer config (don't set manually)
+- `configName` - Which HumanLayer config to use (e.g., "brkthru", "coalesce-labs", "acme")
 
-- File paths: `thoughts/ryan/notes.md`
-- Handoff metadata
-- Plan authorship
+**How it works**:
+
+When `configName` is set, Catalyst commands automatically use:
+```
+~/.config/humanlayer/config-{configName}.json
+```
+
+**Example**: If `configName` is "brkthru", commands will use `~/.config/humanlayer/config-brkthru.json`
+
+**Benefits**:
+- ✅ Work on multiple projects simultaneously (personal + client)
+- ✅ No manual config switching needed
+- ✅ Each project declares its own HumanLayer config
+- ✅ Team members automatically use correct config
+
+**Setup**:
+
+```bash
+# 1. Create client config
+./scripts/humanlayer/add-client-config brkthru ~/path/to/brkthru-thoughts
+
+# 2. Initialize project with config
+cd ~/client-project
+./scripts/humanlayer/init-project.sh . project-name brkthru
+
+# 3. Automatic! .claude/config.json now contains:
+#    "configName": "brkthru"
+```
+
+**Legacy** (if configName is null):
+- Uses global `~/.config/humanlayer/config.json`
+- `user` field is read from global config for file paths, handoff metadata, and plan authorship
 
 ### Railway Configuration
 

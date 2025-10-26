@@ -27,6 +27,7 @@
     "projectId": "[NEEDS_SETUP]"
   },
   "thoughts": {
-    "user": null
+    "user": null,
+    "configName": null
   }
 }
