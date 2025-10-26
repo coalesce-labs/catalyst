@@ -798,7 +798,7 @@ Worktrees allow parallel work on different features while sharing the thoughts d
 cd /path/to/main-repository
 
 # Create worktree with ticket number and feature name
-~/ryan-claude-workspace/hack/create-worktree.sh ENG-1234 rate-limiting
+/create-worktree ENG-1234 rate-limiting
 ```
 
 This creates:
@@ -994,7 +994,7 @@ git commit -m "Fix button styling"
 
 ```bash
 # Create worktree for feature A
-~/ryan-claude-workspace/hack/create-worktree.sh ENG-1234 new-dashboard
+/create-worktree ENG-1234 new-dashboard
 
 cd ~/wt/my-app/new-dashboard
 
@@ -1008,7 +1008,7 @@ cd ~/wt/my-app/new-dashboard
 ```bash
 # Create worktree for feature B (while A is in progress)
 cd ~/projects/my-app
-~/ryan-claude-workspace/hack/create-worktree.sh ENG-1235 user-settings
+/create-worktree ENG-1235 user-settings
 
 cd ~/wt/my-app/user-settings
 
@@ -1229,8 +1229,7 @@ ls ~/.claude/plugins/
 ls .claude/plugins/
 
 # Reinstall if needed
-cd ~/ryan-claude-workspace
-./hack/install-user.sh
+/plugin update catalyst-dev
 ```
 
 ### Worktree Thoughts Not Shared
