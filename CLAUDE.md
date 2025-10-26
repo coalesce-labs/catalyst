@@ -33,6 +33,41 @@ The workspace uses a plugin-based architecture where agents and commands are org
    - Shared across all worktrees
    - Initialized per-project via `init-project.sh`
 
+### Workflow State Management
+
+Commands track workflow state via `.claude/.workflow-context.json`:
+
+**Purpose**: Enable workflow commands to auto-discover recent documents without manual paths.
+
+**How it works**:
+- `/research-codebase` saves research → `/create-plan` auto-references it
+- `/create-plan` saves plan → `/implement-plan` auto-finds it
+- `/create-handoff` saves handoff → `/resume-handoff` auto-finds it
+
+**Structure**:
+```json
+{
+  "lastUpdated": "2025-10-26T10:30:00Z",
+  "currentTicket": "PROJ-123",
+  "mostRecentDocument": {
+    "type": "plans",
+    "path": "thoughts/shared/plans/2025-10-26-PROJ-123-feature.md",
+    "created": "2025-10-26T10:30:00Z",
+    "ticket": "PROJ-123"
+  },
+  "workflow": {
+    "research": [...],  // Recent research documents
+    "plans": [...],     // Recent plans
+    "handoffs": [...],  // Recent handoffs
+    "prs": [...]        // Recent PR descriptions
+  }
+}
+```
+
+**Key benefit**: Users don't need to remember or specify file paths. Commands chain together automatically.
+
+**Management**: Automatically updated by workflow commands. Tracked per-worktree (not committed to git).
+
 ### Agent Philosophy
 
 All agents follow a **documentarian, not critic** approach:
