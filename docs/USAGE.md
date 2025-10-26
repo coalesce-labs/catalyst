@@ -1077,9 +1077,9 @@ Commit your custom agents to the project:
 
 ```bash
 cd ~/projects/my-app
-mkdir -p .claude/agents
-cp ~/.claude/agents/custom-agent.md .claude/agents/
-git add .claude/agents/custom-agent.md
+mkdir -p .claude/plugins/custom/agents
+cp ~/.claude/plugins/custom/agents/custom-agent.md .claude/plugins/custom/agents/
+git add .claude/plugins/custom/agents/custom-agent.md
 git commit -m "Add custom agent"
 ```
 
@@ -1097,15 +1097,15 @@ ls -la thoughts/
 # Should show: thoughts -> /Users/you/thoughts/repos/project-name
 
 # Recreate if broken
-ryan-init-project project-name
+./scripts/humanlayer/init-project.sh . project-name
 ```
 
 ### Agent Not Found
 
 ```bash
-# Check installation
-ls ~/.claude/agents/
-ls .claude/agents/
+# Check plugin installation
+ls ~/.claude/plugins/
+ls .claude/plugins/
 
 # Reinstall if needed
 cd ~/ryan-claude-workspace

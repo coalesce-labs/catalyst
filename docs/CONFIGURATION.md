@@ -511,8 +511,8 @@ This project uses:
 After configuration:
 
 ```bash
-git add .claude/config.json .claude/commands/
-git commit -m "Set up Claude Code workspace"
+git add .claude/config.json
+git commit -m "Set up Claude Code workspace configuration"
 git push
 ```
 
@@ -531,7 +531,7 @@ Now your whole team has the same configuration!
 
 **Two-step setup**:
 
-1. **Install workspace**: Copy agents/commands
-2. **Configure project**: Set ticket prefix and Linear settings
+1. **Install plugins**: `/plugin install catalyst-dev`
+2. **Configure project**: Set ticket prefix and Linear settings in `.claude/config.json`
 
 **Result**: Commands work perfectly for your team's workflow!

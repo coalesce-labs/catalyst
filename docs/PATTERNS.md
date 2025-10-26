@@ -978,8 +978,8 @@ Restrict to specific bash commands.
 **1. Create Test Agent File**
 
 ```bash
-# In workspace
-cat > agents/test-agent.md << 'EOF'
+# In workspace - add to plugin
+cat > plugins/dev/agents/test-agent.md << 'EOF'
 ---
 name: test-agent
 description: Test agent for validation
@@ -993,14 +993,11 @@ Return a list of test file paths grouped by type.
 EOF
 ```
 
-**2. Install to Project**
+**2. Test Locally (Dogfooding)**
 
 ```bash
-# Install to project for testing
-./hack/install-project.sh /path/to/test-project
-
-# Or install to user directory
-./hack/install-user.sh
+# In this workspace, changes are immediately available via symlinks
+# Just restart Claude Code to reload
 ```
 
 **3. Invoke and Test**
@@ -1029,12 +1026,14 @@ EOF
 **1. Create Test Command**
 
 ```bash
-cat > commands/test_command.md << 'EOF'
+# Add to appropriate plugin directory
+cat > plugins/dev/commands/test_command.md << 'EOF'
 ---
-name: test_command
 description: Test command for validation
-tools: all
+category: utility
+tools: Grep, Read
 model: inherit
+version: 1.0.0
 ---
 
 # Test Command
@@ -1048,13 +1047,14 @@ When invoked, search for all TODO comments and present them.
 EOF
 ```
 
-**2. Install and Invoke**
+**2. Test Locally**
 
 ```bash
-./hack/install-user.sh
+# Changes are immediately available via symlinks
+# Just restart Claude Code
 
 # In Claude Code
-/test_command
+/test-command
 ```
 
 **3. Test Scenarios**
@@ -1660,16 +1660,19 @@ Organize commands by workflow:
 
 ### Project-Specific Agents
 
-Keep in project's `.claude/` directory:
+Keep in project's `.claude/` directory as custom plugins:
 
 ```bash
 my-project/
 ├── .claude/
-│   ├── agents/
-│   │   ├── project-specific-agent.md
-│   │   └── internal-tool-analyzer.md
-│   └── commands/
-│       └── deploy_to_staging.md
+│   ├── plugins/
+│   │   └── custom/
+│   │       ├── agents/
+│   │       │   ├── project-specific-agent.md
+│   │       │   └── internal-tool-analyzer.md
+│   │       └── commands/
+│   │           └── deploy_to_staging.md
+│   └── config.json
 ```
 
 Commit to version control for team sharing.
@@ -1680,11 +1683,13 @@ Install to `~/.claude/` for personal use across projects:
 
 ```bash
 ~/.claude/
-├── agents/
-│   ├── personal-research-agent.md
-│   └── code-review-helper.md
-└── commands/
-    └── my_workflow.md
+├── plugins/
+│   └── personal/
+│       ├── agents/
+│       │   ├── personal-research-agent.md
+│       │   └── code-review-helper.md
+│       └── commands/
+│           └── my_workflow.md
 ```
 
 ### Sharing with Community

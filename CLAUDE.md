@@ -6,32 +6,32 @@ repository.
 ## What This Repository Is
 
 This is a **portable collection of Claude Code agents, commands, and workflows** for AI-assisted
-development. It's both:
+development distributed as plugins. It's both:
 
-1. A **source repository** for reusable agents/commands
+1. A **source repository** for plugin-based agents and commands
 2. A **working installation** that uses its own tools (dogfooding)
 
-The workspace is installed into itself at `.claude/`, meaning you can use all the commands and
-agents while developing them.
+The workspace uses a plugin-based architecture where agents and commands are organized in
+`plugins/dev/` and `plugins/meta/`, and installed locally via `.claude/` symlinks.
 
 ## Key Architecture Concepts
 
 ### Three-Layer System
 
-1. **Source Files** (`agents/`, `commands/`)
+1. **Plugin Source** (`plugins/dev/`, `plugins/meta/`)
    - Canonical definitions of agents and commands
    - Edit these when making changes
-   - Automatically synced to `.claude/` since they're in the same repo
+   - Organized by plugin type (dev for workflows, meta for creation)
 
 2. **Installation Layer** (`.claude/`)
-   - Working copies used by Claude Code
-   - Auto-updated from source files in this repo
-   - Used by the `/update-project` command to push to other projects
+   - Symlinks to local plugin directories
+   - Configuration file (`config.json`)
+   - Claude Code reads plugins from here
 
 3. **Thoughts System** (external, `~/thoughts/`)
    - Git-backed context management
    - Shared across all worktrees
-   - Symlinked into projects via `ryan-init-project`
+   - Initialized per-project via `init-project.sh`
 
 ### Agent Philosophy
 
@@ -92,7 +92,7 @@ This workspace has no build process - it's markdown files and bash scripts.
 
 **For development on Catalyst itself:**
 
-This repository is both the source and a working installation (dogfooding). Source files in `agents/` and `commands/` are mirrored in `.claude/` for immediate use. Changes are available after restarting Claude Code.
+This repository is both the source and a working installation (dogfooding). Plugin files in `plugins/dev/` and `plugins/meta/` are symlinked to `.claude/plugins/` for immediate use. Changes are available after restarting Claude Code.
 
 ### Configuration System
 
@@ -141,49 +141,49 @@ Commands read config to customize behavior per-project.
 
 ```
 ryan-claude-workspace/
-├── agents/                  # Source: Specialized research agents
-│   ├── codebase-locator.md
-│   ├── codebase-analyzer.md
-│   ├── codebase-pattern-finder.md
-│   ├── thoughts-locator.md
-│   ├── thoughts-analyzer.md
-│   └── external-research.md
-├── commands/                # Source: Namespaced slash commands
-│   ├── dev/                 # Development workflow commands
-│   │   ├── commit.md
-│   │   ├── debug.md
-│   │   └── describe_pr.md
-│   ├── handoff/             # Context handoff commands
-│   │   ├── create_handoff.md
-│   │   └── resume_handoff.md
-│   ├── linear/              # Linear integration commands
-│   │   ├── linear.md
-│   │   ├── create_pr.md
-│   │   ├── merge_pr.md
-│   │   └── linear_setup_workflow.md
-│   ├── meta/                # Meta/workflow management commands
-│   │   ├── create_workflow.md
-│   │   ├── discover_workflows.md
-│   │   ├── import_workflow.md
-│   │   ├── validate_frontmatter.md
-│   │   └── workflow_help.md
-│   ├── project/             # Project management commands
-│   │   ├── create_worktree.md
-│   │   └── update_project.md
-│   └── workflow/            # Core workflow commands
-│       ├── research_codebase.md
-│       ├── create_plan.md
-│       ├── implement_plan.md
-│       └── validate_plan.md
-├── scripts/             # Setup and development scripts
-│   ├── setup-thoughts.sh         # Initialize ~/thoughts/
-│   ├── init-project.sh           # Init thoughts in project
-│   ├── create-worktree.sh        # Create git worktree (bundled in plugin)
-│   ├── setup-personal-thoughts.sh
-│   ├── setup-multi-config.sh
-│   ├── setup-linear-workflow
-│   ├── hl-switch                 # Multi-config switching
-│   └── add-client-config
+├── plugins/                 # Plugin packages for distribution
+│   ├── dev/                 # Development workflow plugin (catalyst-dev)
+│   │   ├── agents/          # Specialized research agents
+│   │   │   ├── codebase-locator.md
+│   │   │   ├── codebase-analyzer.md
+│   │   │   ├── codebase-pattern-finder.md
+│   │   │   ├── thoughts-locator.md
+│   │   │   ├── thoughts-analyzer.md
+│   │   │   ├── external-research.md
+│   │   │   └── README.md
+│   │   ├── commands/        # Core workflow commands
+│   │   │   ├── commit.md
+│   │   │   ├── debug.md
+│   │   │   ├── describe_pr.md
+│   │   │   ├── create_plan.md
+│   │   │   ├── implement_plan.md
+│   │   │   ├── validate_plan.md
+│   │   │   ├── create_worktree.md
+│   │   │   └── README.md
+│   │   ├── scripts/         # Runtime scripts bundled with plugin
+│   │   │   ├── check-prerequisites.sh
+│   │   │   ├── create-worktree.sh
+│   │   │   └── workflow-context.sh
+│   │   └── plugin.json      # Plugin manifest
+│   └── meta/                # Meta/workflow management plugin (catalyst-meta)
+│       ├── commands/        # Workflow discovery & creation
+│       │   ├── create_workflow.md
+│       │   ├── discover_workflows.md
+│       │   ├── import_workflow.md
+│       │   ├── validate_frontmatter.md
+│       │   └── workflow_help.md
+│       ├── scripts/         # Runtime scripts for meta commands
+│       │   └── validate-frontmatter.sh
+│       └── plugin.json      # Plugin manifest
+├── scripts/                 # One-time setup scripts (not bundled in plugins)
+│   ├── humanlayer/          # HumanLayer/thoughts setup
+│   │   ├── setup-thoughts.sh
+│   │   ├── init-project.sh
+│   │   ├── add-client-config
+│   │   └── setup-personal-thoughts.sh
+│   ├── linear/              # Linear workflow setup
+│   │   └── setup-linear-workflow
+│   └── README.md            # Setup scripts documentation
 ├── docs/                    # Documentation
 │   ├── USAGE.md                  # Comprehensive usage guide
 │   ├── BEST_PRACTICES.md
@@ -198,10 +198,11 @@ ryan-claude-workspace/
 │   ├── MULTI_CONFIG_GUIDE.md
 │   ├── HUMANLAYER_COMMANDS_ANALYSIS.md
 │   └── PR_LIFECYCLE.md
-├── .claude/                 # Working installation (dogfooding)
-│   ├── agents/              # Installed copies
-│   ├── commands/            # Installed copies
-│   └── config.json          # Configuration (generic values)
+├── .claude/                 # Local Claude Code installation (plugins + config)
+│   ├── config.json          # Configuration (generic template values)
+│   └── plugins/             # Symlinks to installed plugins
+│       ├── dev -> ../../plugins/dev/
+│       └── meta -> ../../plugins/meta/
 ├── README.md                # Overview and quick start
 ├── QUICKSTART.md            # 5-minute setup guide
 ├── COMMANDS_ANALYSIS.md     # Command catalog
@@ -299,8 +300,8 @@ When understanding the system:
 2. **docs/USAGE.md** - Comprehensive usage guide with examples
 3. **docs/CONFIGURATION.md** - How config system works
 4. **docs/AGENTIC_WORKFLOW_GUIDE.md** - Agent patterns and best practices
-5. **agents/codebase-locator.md** - Example of agent structure
-6. **commands/workflow/research_codebase.md** - Example of command structure
+5. **plugins/dev/agents/codebase-locator.md** - Example of agent structure
+6. **plugins/dev/commands/create_plan.md** - Example of command structure
 
 ## Frontmatter Standard
 
@@ -355,15 +356,15 @@ Use `/validate-frontmatter` to check consistency.
 
 **When improving Catalyst:**
 
-1. Edit source files in `agents/` or `commands/`
-2. Test locally (changes auto-sync in this repo)
+1. Edit plugin files in `plugins/dev/` or `plugins/meta/`
+2. Test locally (symlinks make changes immediately available)
 3. Commit to workspace
 4. Publish plugin updates to marketplace
 5. Users update with `/plugin update catalyst-dev`
 
 **Plugin Distribution:**
 
-- Agents and commands are bundled in plugins
+- Agents and commands are bundled in `plugins/dev/` and `plugins/meta/`
 - Users get updates via Claude Code plugin system
 - Local config (`.claude/config.json`) is never overwritten
 - Project-specific customizations are preserved
@@ -449,19 +450,21 @@ TICKET_PREFIX=$(jq -r '.project.ticketPrefix // "PROJ"' "$CONFIG_FILE")
 
 **Testing agents:**
 
-1. Make changes to `agents/*.md`
-2. Restart Claude Code
+1. Make changes to `plugins/dev/agents/*.md`
+2. Restart Claude Code (symlinks ensure changes are visible)
 3. Invoke with `@agent-name task description`
 4. Verify output matches expected behavior
 
 **Testing commands:**
 
-1. Make changes to `commands/{namespace}/*.md`
-2. Restart Claude Code
+1. Make changes to `plugins/dev/commands/*.md` or `plugins/meta/commands/*.md`
+2. Restart Claude Code (symlinks ensure changes are visible)
 3. Invoke with `/command-name args`
 4. Verify workflow executes correctly
 
-Namespaces: `dev/`, `handoff/`, `linear/`, `meta/`, `project/`, `workflow/`
+**Plugin structure:**
+- `plugins/dev/` - Core development workflow commands and research agents
+- `plugins/meta/` - Workflow discovery and creation commands
 
 **Validating frontmatter:**
 
@@ -537,7 +540,7 @@ Manages separate configs per client. See `docs/MULTI_CONFIG_GUIDE.md`.
 - Review `README.md` for philosophy
 - Read `QUICKSTART.md` for setup
 - Use `/workflow-help` for interactive guidance
-- Examine source in `agents/` and `commands/`
+- Examine plugin source in `plugins/dev/` and `plugins/meta/`
 
 ## Version Control
 
