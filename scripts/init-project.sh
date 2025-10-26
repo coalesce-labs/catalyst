@@ -28,7 +28,7 @@ if ! command -v humanlayer &>/dev/null; then
 	echo "  cd /path/to/humanlayer/hlyr"
 	echo "  npm install -g ."
 	echo ""
-	echo "Or run: ./hack/setup-thoughts.sh"
+	echo "Or run: ./scripts/setup-thoughts.sh"
 	exit 1
 fi
 
@@ -38,7 +38,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
 	echo -e "${RED}❌ Error: Thoughts not configured${NC}"
 	echo ""
 	echo "Please run the setup script first:"
-	echo "  ./hack/setup-thoughts.sh"
+	echo "  ./scripts/setup-thoughts.sh"
 	exit 1
 fi
 
