@@ -14,9 +14,26 @@ The configuration is stored in `.claude/config.json`:
     "defaultTicketPrefix": "PROJ"
   },
   "linear": {
-    "teamId": null,
-    "projectId": null,
+    "teamKey": "[NEEDS_SETUP]",
+    "defaultTeam": "[NEEDS_SETUP]",
+    "apiToken": "[NEEDS_SETUP]",
     "thoughtsRepoUrl": null
+  },
+  "railway": {
+    "projectId": "[NEEDS_SETUP]",
+    "defaultService": "[NEEDS_SETUP]"
+  },
+  "sentry": {
+    "org": "[NEEDS_SETUP]",
+    "project": "[NEEDS_SETUP]",
+    "authToken": "[NEEDS_SETUP]"
+  },
+  "posthog": {
+    "apiKey": "[NEEDS_SETUP]",
+    "projectId": "[NEEDS_SETUP]"
+  },
+  "exa": {
+    "apiKey": "[NEEDS_SETUP]"
   },
   "thoughts": {
     "user": null
@@ -52,24 +69,32 @@ examples.
 
 ### Linear Configuration
 
-The `/linear` command uses self-configuration on first use:
+The `/linear` command uses Linearis CLI and requires configuration:
 
 ```json
 {
   "linear": {
-    "teamId": "abc123",
-    "projectId": "proj456",
+    "teamKey": "ENG",
+    "defaultTeam": "Backend",
+    "apiToken": "[NEEDS_SETUP]",
     "thoughtsRepoUrl": "https://github.com/coalesce-labs/thoughts/blob/main"
   }
 }
 ```
 
-These values are:
+**Fields**:
+- `teamKey` - Your Linear team key (e.g., "ENG", "PROD")
+- `defaultTeam` - Default team name for operations
+- `apiToken` - Linear API token (or set `LINEAR_API_TOKEN` env var)
+- `thoughtsRepoUrl` - GitHub URL for linking docs to Linear tickets
 
-- Prompted on first `/linear` use
-- Saved automatically
-- Used for all Linear operations
-- Safe to commit (no secrets, just IDs)
+**Installation**:
+```bash
+npm install -g --install-links ryanrozich/linearis#feat/cycles-cli
+```
+
+**Authentication**:
+Set `LINEAR_API_TOKEN` environment variable or store in `~/.linear_api_token`
 
 ### Thoughts Configuration
 
@@ -88,6 +113,71 @@ This is read from `~/.config/humanlayer/config.json` and used in:
 - File paths: `thoughts/ryan/notes.md`
 - Handoff metadata
 - Plan authorship
+
+### Railway Configuration
+
+For deployment and infrastructure management:
+
+```json
+{
+  "railway": {
+    "projectId": "your-project-id",
+    "defaultService": "web"
+  }
+}
+```
+
+**Installation**:
+```bash
+npm install -g @railway/cli
+railway login
+```
+
+### Sentry Configuration
+
+For error tracking and release management:
+
+```json
+{
+  "sentry": {
+    "org": "your-org",
+    "project": "your-project",
+    "authToken": "[NEEDS_SETUP]"
+  }
+}
+```
+
+**Installation**:
+```bash
+curl -sL https://sentry.io/get-cli/ | sh
+```
+
+**Authentication**: Set `SENTRY_AUTH_TOKEN` or configure `~/.sentryclirc`
+
+### PostHog Configuration
+
+For product analytics (optional MCP):
+
+```json
+{
+  "posthog": {
+    "apiKey": "[NEEDS_SETUP]",
+    "projectId": "[NEEDS_SETUP]"
+  }
+}
+```
+
+### Exa Configuration
+
+For web search via MCP (optional):
+
+```json
+{
+  "exa": {
+    "apiKey": "[NEEDS_SETUP]"
+  }
+}
+```
 
 ---
 

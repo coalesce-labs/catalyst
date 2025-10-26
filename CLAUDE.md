@@ -75,32 +75,24 @@ This workspace has no build process - it's markdown files and bash scripts.
 3. Restart Claude Code to reload
 4. Test by invoking the agent/command
 
-### Installing to Projects
+### Distribution and Installation
 
-**User installation** (all projects):
-
-```bash
-./hack/install-user.sh
-```
-
-Copies to `~/.claude/`
-
-**Project installation** (specific project):
+**Catalyst is distributed as a Claude Code plugin:**
 
 ```bash
-./hack/install-project.sh /path/to/project
+# Add to marketplace
+/plugin marketplace add coalesce-labs/catalyst
+
+# Install development workflow plugin
+/plugin install catalyst-dev
+
+# Optional: Install meta/workflow creation plugin
+/plugin install catalyst-meta
 ```
 
-Copies to `/path/to/project/.claude/`
+**For development on Catalyst itself:**
 
-**Updating projects** (smart merge):
-
-```bash
-./hack/update-project.sh /path/to/project
-# Or use: /update-project /path/to/project
-```
-
-Intelligently merges workspace updates while preserving local customizations.
+This repository is both the source and a working installation (dogfooding). Source files in `agents/` and `commands/` are mirrored in `.claude/` for immediate use. Changes are available after restarting Claude Code.
 
 ### Configuration System
 
@@ -109,13 +101,30 @@ Configuration lives in `.claude/config.json`:
 ```json
 {
   "project": {
-    "ticketPrefix": "TICKET",
-    "defaultTicketPrefix": "TICKET"
+    "ticketPrefix": "PROJ",
+    "defaultTicketPrefix": "PROJ"
   },
   "linear": {
-    "teamId": null,
-    "projectId": null,
+    "teamKey": "[NEEDS_SETUP]",
+    "defaultTeam": "[NEEDS_SETUP]",
+    "apiToken": "[NEEDS_SETUP]",
     "thoughtsRepoUrl": null
+  },
+  "railway": {
+    "projectId": "[NEEDS_SETUP]",
+    "defaultService": "[NEEDS_SETUP]"
+  },
+  "sentry": {
+    "org": "[NEEDS_SETUP]",
+    "project": "[NEEDS_SETUP]",
+    "authToken": "[NEEDS_SETUP]"
+  },
+  "posthog": {
+    "apiKey": "[NEEDS_SETUP]",
+    "projectId": "[NEEDS_SETUP]"
+  },
+  "exa": {
+    "apiKey": "[NEEDS_SETUP]"
   },
   "thoughts": {
     "user": null
@@ -166,13 +175,10 @@ ryan-claude-workspace/
 │       ├── create_plan.md
 │       ├── implement_plan.md
 │       └── validate_plan.md
-├── hack/                 # Installation and setup scripts
-│   ├── install-user.sh           # Install to ~/.claude/
-│   ├── install-project.sh        # Install to project .claude/
-│   ├── update-project.sh         # Smart update with merge
+├── scripts/             # Setup and development scripts
 │   ├── setup-thoughts.sh         # Initialize ~/thoughts/
 │   ├── init-project.sh           # Init thoughts in project
-│   ├── create-worktree.sh        # Create git worktree
+│   ├── create-worktree.sh        # Create git worktree (bundled in plugin)
 │   ├── setup-personal-thoughts.sh
 │   ├── setup-multi-config.sh
 │   ├── setup-linear-workflow
@@ -257,7 +263,7 @@ ryan-claude-workspace/
 Create isolated workspace for parallel work:
 
 ```bash
-./hack/create-worktree.sh PROJ-123 feature-name
+/create-worktree PROJ-123 feature-name
 ```
 
 This creates:
@@ -342,33 +348,25 @@ Use `/validate-frontmatter` to check consistency.
 **Installation:** The thoughts system requires HumanLayer CLI. Setup with:
 
 ```bash
-./hack/setup-thoughts.sh
+./scripts/setup-thoughts.sh
 ```
 
 ## Update Strategy
 
-**When improving the workspace:**
+**When improving Catalyst:**
 
 1. Edit source files in `agents/` or `commands/`
 2. Test locally (changes auto-sync in this repo)
 3. Commit to workspace
-4. Update other projects:
-   ```bash
-   ./hack/update-project.sh /path/to/project
-   ```
-5. Smart merge preserves local customizations
+4. Publish plugin updates to marketplace
+5. Users update with `/plugin update catalyst-dev`
 
-**What gets preserved:**
+**Plugin Distribution:**
 
-- Local config values in `.claude/config.json`
-- Project-specific customizations
-- Configured commands
-
-**What gets updated:**
-
-- Agent logic (pure, no customization)
-- Command workflows
-- Documentation
+- Agents and commands are bundled in plugins
+- Users get updates via Claude Code plugin system
+- Local config (`.claude/config.json`) is never overwritten
+- Project-specific customizations are preserved
 
 ## Integration Points
 
@@ -471,43 +469,52 @@ Namespaces: `dev/`, `handoff/`, `linear/`, `meta/`, `project/`, `workflow/`
 /validate-frontmatter
 ```
 
-**Testing installation:**
+**Testing plugin installation:**
 
 ```bash
-./hack/install-user.sh
-ls ~/.claude/agents/
-ls ~/.claude/commands/
+/plugin list
+# Should show catalyst-dev and optionally catalyst-meta
+
+# Test a command
+/research-codebase
 ```
 
 ## Deployment and Distribution
 
-**Installing to a new project:**
+**Users install Catalyst via Claude Code marketplace:**
 
 ```bash
-cd /path/to/new-project
-/path/to/ryan-claude-workspace/hack/install-project.sh .
+/plugin marketplace add coalesce-labs/catalyst
+/plugin install catalyst-dev
 ```
 
-**Setting up thoughts:**
+**Setting up thoughts in a new project:**
 
 ```bash
 cd /path/to/new-project
-ryan-init-project project-name
+
+# Download init script
+curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/init-project.sh
+chmod +x init-project.sh
+./init-project.sh . project-name
+
+# Sync thoughts
 humanlayer thoughts sync
 ```
 
-**Sharing with team:** Commit `.claude/` and `thoughts/` to project repo. Team gets:
-
-- All agents and commands
-- Project configuration
-- Shared context (thoughts/shared/)
+**Sharing with team:** Commit `thoughts/` to project repo. Team gets shared context via thoughts system. Each team member installs the Catalyst plugin independently.
 
 ## Multi-Config Support
 
 For consultants working across clients:
 
 ```bash
-./hack/setup-multi-config.sh client-name
+# Download multi-config setup
+curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/setup-multi-config.sh
+chmod +x setup-multi-config.sh
+./setup-multi-config.sh
+
+# Switch between configs
 hl-switch client-name
 ```
 

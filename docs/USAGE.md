@@ -16,18 +16,38 @@ A comprehensive guide to using the Ryan Claude Workspace for AI-assisted develop
 
 ## Initial Setup
 
-### Step 1: Install the Thoughts Repository
+### Step 1: Install Catalyst Plugin
+
+Install Catalyst via the Claude Code plugin marketplace:
+
+```bash
+# Add the marketplace repository
+/plugin marketplace add coalesce-labs/catalyst
+
+# Install catalyst-dev (main workflow)
+/plugin install catalyst-dev
+
+# Optionally install catalyst-meta (workflow discovery)
+/plugin install catalyst-meta
+```
+
+This makes all agents and commands available in Claude Code across all projects.
+
+### Step 2: Install the Thoughts System
 
 The thoughts repository is a centralized, version-controlled context management system that persists
 across all your worktrees.
 
 ```bash
-# Clone this workspace repository
-git clone <your-repo-url> ~/ryan-claude-workspace
-cd ~/ryan-claude-workspace
+# Install HumanLayer CLI
+pip install humanlayer
+# or
+pipx install humanlayer
 
-# Run the thoughts setup script
-./hack/setup-thoughts.sh
+# Download and run the thoughts setup script
+curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/setup-thoughts.sh
+chmod +x setup-thoughts.sh
+./setup-thoughts.sh
 ```
 
 This creates:
@@ -48,51 +68,6 @@ The thoughts repository is a git repository itself, allowing you to:
 - Sync across machines
 - Share with teammates
 - Restore historical context
-
-### Step 2: Install Agents and Commands
-
-You can install in two ways:
-
-**User Installation (Recommended)**
-
-Installs to `~/.claude/` - available in all projects:
-
-```bash
-cd ~/ryan-claude-workspace
-./hack/install-user.sh
-```
-
-This creates:
-
-```
-~/.claude/
-├── agents/
-│   ├── codebase-locator.md
-│   ├── codebase-analyzer.md
-│   ├── thoughts-locator.md
-│   ├── codebase-pattern-finder.md
-│   └── thoughts-analyzer.md
-└── commands/
-    ├── create_plan.md
-    ├── implement_plan.md
-    └── validate_plan.md
-```
-
-**Project-Specific Installation**
-
-Installs to `.claude/` in a specific project:
-
-```bash
-./hack/install-project.sh /path/to/your-project
-```
-
-**Hybrid Approach**
-
-Claude Code prioritizes project-level `.claude/` over user-level `~/.claude/`. You can:
-
-1. Install common agents/commands to user directory
-2. Override with project-specific versions as needed
-3. Keep project-specific agents in the project's `.claude/`
 
 ---
 

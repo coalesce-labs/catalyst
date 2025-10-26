@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-Get up and running with Ryan's Claude Workspace in 5 minutes.
+Get up and running with Catalyst in 5 minutes.
 
 ## Prerequisites
 
@@ -8,28 +8,39 @@ Get up and running with Ryan's Claude Workspace in 5 minutes.
 2. **HumanLayer CLI** installed (for thoughts system)
 
    ```bash
-   # If you have the humanlayer repo:
-   cd /path/to/humanlayer/hlyr
-   npm install -g .
+   # Install with pip or pipx
+   pip install humanlayer
+   # or
+   pipx install humanlayer
 
-   # Verify installation:
+   # Verify installation
    humanlayer --version
    ```
 
 ## Setup (One-Time)
 
-### Step 1: Clone This Repository
+### Step 1: Install Catalyst Plugin
 
 ```bash
-cd ~/code-repos  # or wherever you keep repos
-git clone <this-repo-url> ryan-claude-workspace
-cd ryan-claude-workspace
+# Add Catalyst to your plugin marketplace
+/plugin marketplace add coalesce-labs/catalyst
+
+# Install the development workflow plugin
+/plugin install catalyst-dev
+
+# Optional: Install the meta/workflow creation plugin
+/plugin install catalyst-meta
 ```
+
+This makes all agents and commands available in Claude Code.
 
 ### Step 2: Set Up Thoughts Repository
 
 ```bash
-./hack/setup-thoughts.sh
+# Download the setup script from the Catalyst repository
+curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/setup-thoughts.sh
+chmod +x setup-thoughts.sh
+./setup-thoughts.sh
 ```
 
 This will:
@@ -39,18 +50,9 @@ This will:
 - Configure your username
 - Save config to `~/.config/humanlayer/config.json`
 
-### Step 3: Install Agents & Commands
+### Step 3: Restart Claude Code
 
-```bash
-./hack/install-user.sh
-```
-
-This installs agents and commands to `~/.claude/` making them available in **all** Claude Code
-projects.
-
-### Step 4: Restart Claude Code
-
-Restart Claude Code to load the new agents and commands.
+Restart Claude Code to load the Catalyst plugin.
 
 ## Using in a Project
 
@@ -58,7 +60,11 @@ Restart Claude Code to load the new agents and commands.
 
 ```bash
 cd /path/to/your-project
-~/code-repos/ryan-claude-workspace/hack/init-project.sh . my-project
+
+# Download the init script
+curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/init-project.sh
+chmod +x init-project.sh
+./init-project.sh . my-project
 ```
 
 This creates:
@@ -81,37 +87,47 @@ This creates `thoughts/searchable/` with hard links for fast grepping.
 
 ## Core Workflow
 
-### 1. Research & Planning
+### 1. Research Phase
 
 In Claude Code:
 
 ```
-/create_plan
+/research-codebase
+```
+
+Follow the prompts to research your codebase. This saves findings to `thoughts/shared/research/`.
+
+### 2. Planning Phase
+
+```
+/create-plan
 ```
 
 This:
 
 1. Spawns parallel research agents (codebase-locator, thoughts-locator)
 2. Interactively builds a plan with you
-3. Saves to `thoughts/shared/plans/YYYY-MM-DD-description.md`
+3. Saves to `thoughts/shared/plans/YYYY-MM-DD-TICKET-description.md`
 
-### 2. Implementation
+### 3. Implementation Phase
 
 ```
-/implement_plan thoughts/shared/plans/2025-01-08-my-feature.md
+/implement-plan
 ```
+
+**Note**: If you just created a plan, you can omit the path - the command will automatically find your most recent plan!
 
 This:
 
-1. Reads the plan
+1. Reads the plan (auto-discovered from workflow context)
 2. Implements each phase
 3. Runs automated tests
 4. Updates checkboxes as it progresses
 
-### 3. Validation
+### 4. Validation Phase
 
 ```
-/validate_plan
+/validate-plan
 ```
 
 This:
@@ -120,6 +136,14 @@ This:
 2. Runs automated tests
 3. Documents deviations
 4. Provides manual testing checklist
+
+### 5. Create PR
+
+```
+/create-pr
+```
+
+Automatically creates a PR with comprehensive description pulled from your research and plan.
 
 ## Research Agents
 
@@ -140,25 +164,35 @@ Example:
 
 Create isolated workspace for a feature:
 
-```bash
-cd /path/to/your-project
-./hack/create-worktree.sh ENG-123 main
+```
+/create-worktree TICKET-123 main
 ```
 
 This creates:
 
 ```
-~/wt/your-project/ENG-123/
+~/wt/your-project/TICKET-123/
 ```
 
 With:
 
 - Isolated git worktree
 - Separate branch
+- Shared `.claude/` configuration (via symlink)
 - Thoughts automatically synced
 - Dependencies installed
 
 ## Tips
+
+### Workflow Context Auto-Discovery
+
+Catalyst tracks your workflow automatically via `.claude/.workflow-context.json`:
+
+- `/research-codebase` saves research → `/create-plan` can reference it
+- `/create-plan` saves plan → `/implement-plan` auto-finds it
+- `/create-handoff` saves handoff → `/resume-handoff` auto-finds it
+
+**You don't need to specify file paths** - commands remember your most recent work!
 
 ### Sync Thoughts Regularly
 
@@ -181,24 +215,19 @@ gh repo create my-thoughts --private --source=. --push
 
 Now thoughts sync automatically to GitHub.
 
-### Use Project-Specific Agents
-
-For project-specific customization:
-
-```bash
-./hack/install-project.sh /path/to/project
-```
-
-This installs to `.claude/` in the project (takes precedence over `~/.claude/`).
-
 ## Common Commands
 
-| Command                  | Purpose                            |
-| ------------------------ | ---------------------------------- |
-| `/create_plan`           | Interactive planning with research |
-| `/implement_plan <path>` | Execute a plan                     |
-| `/validate_plan`         | Verify implementation              |
-| `/create_worktree`       | Set up parallel workspace          |
+| Command                    | Purpose                            |
+| -------------------------- | ---------------------------------- |
+| `/research-codebase`       | Research codebase and save findings |
+| `/create-plan`             | Interactive planning with research |
+| `/implement-plan`          | Execute a plan (auto-finds recent) |
+| `/validate-plan`           | Verify implementation              |
+| `/create-pr`               | Create PR with rich description    |
+| `/merge-pr`                | Merge PR and update Linear         |
+| `/create-worktree`         | Set up parallel workspace          |
+| `/create-handoff`          | Save context for later             |
+| `/resume-handoff`          | Restore previous context           |
 
 ## Common Agents
 
@@ -217,17 +246,22 @@ This installs to `.claude/` in the project (takes precedence over `~/.claude/`).
 Install the HumanLayer CLI:
 
 ```bash
-cd /path/to/humanlayer/hlyr
-npm install -g .
+pip install humanlayer
+# or
+pipx install humanlayer
 ```
 
-### Agents not showing up
+### Commands not showing up
 
-1. Check installation:
+1. Check plugin installation:
    ```bash
-   ls ~/.claude/agents/
+   /plugin list
    ```
-2. Restart Claude Code
+2. Reinstall if needed:
+   ```bash
+   /plugin install catalyst-dev
+   ```
+3. Restart Claude Code
 
 ### Thoughts not syncing
 
@@ -251,8 +285,8 @@ npm install -g .
 
 - Check [docs/](docs/) for comprehensive guides
 - Review examples in the documentation
-- Look at agent source in [agents/](agents/)
+- Visit [GitHub repository](https://github.com/coalesce-labs/catalyst)
 
 ---
 
-**You're ready!** Start with `/create_plan` in your next Claude Code session.
+**You're ready!** Start with `/research-codebase` or `/create-plan` in your next Claude Code session.

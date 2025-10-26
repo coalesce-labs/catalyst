@@ -39,12 +39,12 @@ For plugin documentation, see [Claude Code Plugin Guide](https://docs.claude.com
 ## Complete Workflow
 
 ```
-/research_codebase → /create_plan → /implement_plan → /validate_plan → /create_pr → /merge_pr
+/research-codebase → /create-plan → /implement-plan → /validate-plan → /create-pr → /merge-pr
 ```
 
 With handoffs for context persistence:
 ```
-/create_handoff → /resume_handoff
+/create-handoff → /resume-handoff
 ```
 
 Agents proactively monitor context during implementation and will prompt you to create handoffs before running out of context, creating structured handoff documents that add to persistent memory.
