@@ -25,7 +25,7 @@ Install via Claude Code plugin system:
 
 ```bash
 # Add the marketplace repository
-/plugin marketplace add ryanisaacg/catalyst
+/plugin marketplace add coalesce-labs/catalyst
 
 # Install catalyst-dev (main workflow)
 /plugin install catalyst-dev
