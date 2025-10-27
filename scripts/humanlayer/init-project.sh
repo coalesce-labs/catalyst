@@ -5,7 +5,7 @@
 # Arguments:
 #   project_path   - Path to project (default: current directory)
 #   directory_name - Name for thoughts directory (optional, will prompt if not provided)
-#   config_name    - HumanLayer config name (e.g., "brkthru", "coalesce-labs")
+#   config_name    - HumanLayer config name (e.g., "acme", "coalesce-labs")
 #                    Will use ~/.config/humanlayer/config-{name}.json
 #                    Also stores in .claude/config.json for per-project config
 

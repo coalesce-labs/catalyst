@@ -68,6 +68,90 @@ Commands track workflow state via `.claude/.workflow-context.json`:
 
 **Management**: Automatically updated by workflow commands. Tracked per-worktree (not committed to git).
 
+### Three-Layer Memory System
+
+Catalyst uses a three-layer memory architecture to manage context across multiple projects:
+
+**1. Project Configuration** (`.claude/config.json`)
+   - Specifies which HumanLayer config to use (`configName`)
+   - Contains project-specific settings (ticket prefix, Linear team, etc.)
+   - Points to the long-term memory repository for this project
+
+**2. Long-term Memory** (HumanLayer thoughts repository)
+   - Git-backed persistent storage shared across worktrees
+   - Contains: `shared/research/`, `shared/plans/`, `shared/prs/`, `shared/handoffs/`
+   - Synced via `humanlayer thoughts sync`
+   - Survives across sessions and team members
+
+**3. Short-term Memory** (`.claude/.workflow-context.json`)
+   - Local to each worktree (not committed to git)
+   - Contains pointers to recent documents in long-term memory
+   - Enables command chaining (e.g., `/create-plan` auto-finds recent research)
+   - Refreshed each session
+
+**How They Work Together:**
+
+```
+┌─────────────────────────────────────┐
+│  .claude/config.json                │
+│  {                                  │
+│    "configName": "acme",            │ ← Which thoughts repo?
+│    "project": {                     │
+│      "ticketPrefix": "ACME"         │
+│    }                                │
+│  }                                  │
+└─────────────────────────────────────┘
+          │
+          ├──→ Points to HumanLayer config "acme"
+          │
+          ▼
+┌─────────────────────────────────────┐
+│  ~/thoughts/repos/acme/             │
+│  ├─ shared/research/                │ ← Long-term memory
+│  ├─ shared/plans/                   │   (git-backed)
+│  ├─ shared/prs/                     │
+│  └─ shared/handoffs/                │
+└─────────────────────────────────────┘
+          │
+          ├──→ Commands read/write here
+          │
+          ▼
+┌─────────────────────────────────────┐
+│  .claude/.workflow-context.json     │
+│  {                                  │ ← Short-term memory
+│    "mostRecentDocument": {          │   (session pointers)
+│      "type": "plans",               │
+│      "path": "thoughts/shared/..."  │ ← Points into long-term
+│    },                                │
+│    "workflow": {                    │
+│      "research": [...],             │ ← Recent docs
+│      "plans": [...]                 │
+│    }                                │
+│  }                                  │
+└─────────────────────────────────────┘
+```
+
+**Why This Matters:**
+
+This architecture enables you to:
+- Work on multiple separate projects (work/personal, unrelated clients)
+- Keep project contexts isolated via different HumanLayer configs
+- Share long-term knowledge across worktrees within a project
+- Chain commands together without remembering file paths
+- Avoid committing secrets or session state to git
+
+**Example Flow:**
+
+1. Project config says "use acme thoughts repo"
+2. `/research-codebase` saves to `~/thoughts/repos/acme/shared/research/`
+3. Workflow-context tracks this as `mostRecentDocument`
+4. `/create-plan` auto-references the research (no manual path needed)
+5. Plan saves to `~/thoughts/repos/acme/shared/plans/`
+6. Workflow-context updates to point to the new plan
+7. `/implement-plan` auto-finds the plan
+
+All while keeping different projects completely isolated.
+
 ### Agent Philosophy
 
 All agents follow a **documentarian, not critic** approach:
@@ -127,7 +211,21 @@ This workspace has no build process - it's markdown files and bash scripts.
 
 **For development on Catalyst itself:**
 
-This repository is both the source and a working installation (dogfooding). Plugin files in `plugins/dev/` and `plugins/meta/` are symlinked to `.claude/plugins/` for immediate use. Changes are available after restarting Claude Code.
+This repository is both the source and a working installation (dogfooding).
+
+**Plugin Installation (Dogfooding)**:
+```bash
+# The workspace has symlinks in .claude/plugins/ pointing to the plugin source
+ls -la .claude/plugins/
+# dev -> ../../plugins/dev
+# meta -> ../../plugins/meta
+```
+
+This means:
+- ✅ Changes to `plugins/dev/` or `plugins/meta/` are immediately available
+- ✅ No hardcoded commands/agents in `.claude/` - uses plugin system like users do
+- ✅ Restart Claude Code to reload after editing plugins
+- ✅ True dogfooding - we use Catalyst exactly as users do
 
 ### Configuration System
 
@@ -233,9 +331,10 @@ ryan-claude-workspace/
 │   ├── MULTI_CONFIG_GUIDE.md
 │   ├── HUMANLAYER_COMMANDS_ANALYSIS.md
 │   └── PR_LIFECYCLE.md
-├── .claude/                 # Local Claude Code installation (plugins + config)
+├── .claude/                 # Local Claude Code installation
 │   ├── config.json          # Configuration (generic template values)
-│   └── plugins/             # Symlinks to installed plugins
+│   ├── .workflow-context.json # Workflow state (not committed)
+│   └── plugins/             # Symlinks to plugin source (dogfooding)
 │       ├── dev -> ../../plugins/dev/
 │       └── meta -> ../../plugins/meta/
 ├── README.md                # Overview and quick start
@@ -425,6 +524,109 @@ Use `/validate-frontmatter` to check consistency.
 - Personal/shared/global directories
 - Git-backed persistence
 - Commands: `humanlayer thoughts sync`, `humanlayer thoughts status`
+
+## Architecture Decision Records
+
+Brief records of key architectural decisions made in this project.
+
+### ADR-001: Plugin-Based Distribution
+
+**Decision**: Distribute Catalyst as Claude Code plugins instead of git clone/install.
+
+**Rationale**:
+- Users get updates via `/plugin update catalyst-dev`
+- No manual git pulls or symlink setup
+- Plugin marketplace provides discoverability
+- Local customizations (`.claude/config.json`) are preserved
+
+**Consequences**:
+- Plugin structure must be maintained in `plugins/dev/` and `plugins/meta/`
+- Breaking changes require version management
+- Users can install only what they need (dev vs meta plugins)
+
+---
+
+### ADR-002: Per-Project HumanLayer Configuration
+
+**Decision**: Support multiple HumanLayer configs via `configName` in `.claude/config.json`.
+
+**Rationale**:
+- Users work on multiple separate projects (work/personal, different clients)
+- Each project needs its own thoughts repository
+- Switching configs should be seamless
+- Config files can be committed (no secrets, just config names)
+
+**Consequences**:
+- HumanLayer CLI must be configured with multiple named configs
+- Scripts must read `configName` from project config
+- Setup requires `scripts/humanlayer/add-client-config` for new projects
+- Projects remain isolated with separate long-term memory
+
+---
+
+### ADR-003: Three-Layer Memory Architecture
+
+**Decision**: Separate project configuration, long-term memory (thoughts), and short-term memory (workflow-context).
+
+**Rationale**:
+- Config: Project-specific settings, portable, committable
+- Long-term: Git-backed persistence, team collaboration, survives sessions
+- Short-term: Session state, command chaining, not committed
+
+**Consequences**:
+- Commands must update workflow-context.json when creating documents
+- Thoughts must be synced via `humanlayer thoughts sync`
+- Workflow-context must be in `.gitignore`
+- System supports multiple projects and worktrees seamlessly
+
+---
+
+### ADR-004: Workflow-Context for Session State
+
+**Decision**: Store recent document references in `.claude/.workflow-context.json` for command chaining.
+
+**Rationale**:
+- Users shouldn't remember file paths between commands
+- `/research-codebase` → `/create-plan` → `/implement-plan` should flow naturally
+- Context must be local to each worktree
+- Must not contain secrets or be committed to git
+
+**Consequences**:
+- All workflow commands must update workflow-context.json
+- Helper script `scripts/workflow-context.sh` provides consistent interface
+- Context is lost when worktree is deleted (by design)
+- Commands can auto-discover recent documents without user input
+
+---
+
+### ADR-005: Configurable Worktree Convention
+
+**Decision**: Use `GITHUB_SOURCE_ROOT` environment variable to organize repositories and worktrees by org/repo.
+
+**Rationale**:
+- Developers have different preferences for where code lives
+- Hardcoded paths (`~/Source`, `~/wt`) don't work for everyone
+- Main branches and worktrees should be organized together
+- Clear separation between main checkout and feature branches
+
+**Convention**:
+- Main repository: `${GITHUB_SOURCE_ROOT}/<org>/<repo>`
+- Worktrees: `${GITHUB_SOURCE_ROOT}/<org>/<repo>-worktrees/<feature>`
+
+**Consequences**:
+- `create-worktree.sh` detects GitHub org from git remote
+- Falls back to `~/wt/<repo>` if `GITHUB_SOURCE_ROOT` not set
+- No hardcoded paths in scripts or documentation
+- Clean organization by org and repo
+- Easy cleanup: delete `<repo>-worktrees` directory when done
+
+**Example**:
+```
+~/code-repos/github/
+├── coalesce-labs/catalyst/          # Main branch
+├── coalesce-labs/catalyst-worktrees/ # Feature branches
+└── acme/api/                         # Client project
+```
 
 ## Context Management Principles
 

@@ -1,326 +1,186 @@
 # Documentation Index
 
-Welcome to the Ryan Claude Workspace documentation. This directory contains comprehensive guides for
-using, configuring, and extending the workspace.
+Catalyst is a Claude Code workspace system built on a three-layer memory architecture. This index helps you find the documentation you need.
+
+## Core Concepts
+
+**Three-Layer Memory System**: Catalyst separates context into three layers:
+
+1. **Short-term Memory** (`.claude/.workflow-context.json`) - Session state, command chaining
+2. **Long-term Memory** (HumanLayer thoughts repo) - Git-backed persistence, shared knowledge
+3. **Project Configuration** (`.claude/config.json`) - Which thoughts repo to use, project settings
+
+**Structured Development Workflow**:
+
+```
+research → plan → branch/worktree → implement → validate → merge_pr
+```
+
+**Multiple Projects**: Work on separate projects (work/personal, different clients) with isolated contexts via different HumanLayer configs.
+
+See [CLAUDE.md](../CLAUDE.md) for complete architecture details.
+
+---
 
 ## Quick Start
 
-**New to the workspace?** Start here:
+**New to Catalyst?**
 
-1. [USAGE.md](#usage) - Comprehensive usage guide
-2. [CONFIGURATION.md](#configuration) - Configuration system
-3. [BEST_PRACTICES.md](#best-practices) - Recommended workflows
+1. [USAGE.md](USAGE.md) - Installation and workflow commands
+2. [CONFIGURATION.md](CONFIGURATION.md) - Configure your project
+3. [BEST_PRACTICES.md](BEST_PRACTICES.md) - Effective patterns
+
+---
 
 ## Documentation by Category
 
-### 🚀 Setup & Configuration
+### Setup & Configuration
 
 #### [CONFIGURATION.md](CONFIGURATION.md)
+Configuration file structure, ticket prefixes, Linear integration, thoughts system, per-project HumanLayer config.
 
-**Complete guide to the configuration system**
-
-Learn about:
-
-- Configuration file structure (`.claude/config.json`)
-- Ticket prefix configuration
-- Linear integration settings
-- Thoughts system configuration
-- Project vs workspace configurations
-
-**When to read:** Setting up a new project or configuring Linear integration
+**Read this when**: Setting up a new project or configuring integrations.
 
 ---
 
 #### [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md)
+Managing multiple client configurations, switching configs, separate thoughts repositories per client.
 
-**Managing multiple client configurations**
-
-Learn about:
-
-- Multi-client setup for consultants
-- Configuration switching with `hl-switch`
-- Separate thoughts repositories per client
-- Adding new client configurations
-
-**When to read:** You work with multiple clients and need separate contexts
+**Read this when**: Working across multiple clients/projects simultaneously.
 
 ---
 
-### 📖 Workflow & Usage
+### Workflow & Usage
 
 #### [USAGE.md](USAGE.md)
+Core workflow commands, installation, thoughts system, Linear integration, common workflows.
 
-**Comprehensive workspace usage guide**
-
-Learn about:
-
-- Core workflow commands (`/research-codebase`, `/create-plan`, etc.)
-- Installation methods (user vs project)
-- Thoughts system usage
-- Linear integration
-- Common workflows and examples
-
-**When to read:** First-time setup or learning the core workflows
+**Read this when**: Learning the system or looking up command usage.
 
 ---
 
 #### [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md)
+Agent patterns, documentarian philosophy, spawning parallel agents, creating custom agents.
 
-**Agent patterns and best practices**
-
-Learn about:
-
-- How agents work vs commands
-- Documentarian philosophy (document, don't critique)
-- Spawning parallel agents
-- Agent specializations (locator, analyzer, pattern-finder)
-- Creating custom agents
-
-**When to read:** Understanding how to use agents effectively or creating new agents
+**Read this when**: Using agents effectively or creating new ones.
 
 ---
 
 #### [BEST_PRACTICES.md](BEST_PRACTICES.md)
+Research → Plan → Implement → Validate workflow, context management, handoffs, ticket management.
 
-**Recommended workflows and patterns**
-
-Learn about:
-
-- Research → Plan → Implement → Validate workflow
-- Context management strategies
-- When to use handoffs
-- Effective ticket management
-- Code review practices
-
-**When to read:** Learning how to work most effectively with the workspace
+**Read this when**: Learning effective workflow patterns.
 
 ---
 
 #### [PATTERNS.md](PATTERNS.md)
+Parallel development, feature branches, worktrees, documentation patterns, testing workflows.
 
-**Common usage patterns and examples**
-
-Learn about:
-
-- Parallel development workflows
-- Feature branch management
-- Worktree usage patterns
-- Documentation patterns
-- Testing workflows
-
-**When to read:** Looking for concrete examples of common scenarios
+**Read this when**: Looking for concrete usage examples.
 
 ---
 
 #### [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
+Discovering and importing workflows from external repositories using `/discover-workflows`, `/import-workflow`, `/create-workflow`.
 
-**Discovering and importing workflows from external repositories**
-
-Learn about:
-
-- Using `/discover-workflows` command
-- Importing workflows with `/import-workflow`
-- Creating new workflows with `/create-workflow`
-- Workflow catalog management
-
-**When to read:** Extending the workspace with new workflows or learning from other repos
+**Read this when**: Extending Catalyst with new workflows.
 
 ---
 
-### 🔌 Integrations
+### Integrations
 
 #### [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md)
+Linear integration setup, workflow status automation, ticket creation, status progression.
 
-**Linear integration and workflow automation**
-
-Learn about:
-
-- Setting up Linear integration
-- Workflow status automation
-- Creating tickets from thoughts
-- Status progression (Backlog → Research → Planning → In Progress → In Review → Done)
-- Using `/linear` command
-
-**When to read:** Integrating with Linear or automating ticket management
+**Read this when**: Integrating with Linear or automating ticket workflows.
 
 ---
 
 #### [DEEPWIKI_INTEGRATION.md](DEEPWIKI_INTEGRATION.md)
+External research using DeepWiki, researching external repositories, learning from open-source patterns.
 
-**External research using DeepWiki**
-
-Learn about:
-
-- Researching external repositories
-- Using the `external-research` agent
-- Learning from open-source patterns
-- Framework documentation access
-
-**When to read:** Researching how external projects implement features
+**Read this when**: Researching how external projects implement features.
 
 ---
 
 #### [HUMANLAYER_COMMANDS_ANALYSIS.md](HUMANLAYER_COMMANDS_ANALYSIS.md)
+Analysis of HumanLayer command patterns, adaptation patterns, command structure comparison.
 
-**Analysis of HumanLayer command patterns**
-
-Learn about:
-
-- Command analysis from HumanLayer repository
-- Adaptation patterns
-- Command structure comparison
-- Integration approaches
-
-**When to read:** Understanding the origins of workspace commands or adapting patterns
+**Read this when**: Understanding origins of workspace commands.
 
 ---
 
-### 🔧 Technical
+### Technical
 
 #### [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md)
+Context budgets, just-in-time loading, sub-agent architecture, handoff strategies.
 
-**Context management and optimization**
-
-Learn about:
-
-- Context budgets and token limits
-- Just-in-time context loading
-- Sub-agent architecture benefits
-- When to clear context
-- Handoff strategies
-
-**When to read:** Optimizing context usage or understanding architectural decisions
+**Read this when**: Optimizing context usage or understanding architectural decisions.
 
 ---
 
 #### [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
+YAML frontmatter validation, required fields, valid categories/tools, validation rules.
 
-**YAML frontmatter validation and standards**
-
-Learn about:
-
-- Required frontmatter fields
-- Valid categories and tools
-- Agent vs command frontmatter differences
-- Validation rules
-- Auto-generated by `/validate-frontmatter`
-
-**When to read:** Creating new agents/commands in plugins or debugging frontmatter issues
+**Read this when**: Creating new agents/commands or debugging frontmatter issues.
 
 ---
 
-## Documentation Map
+## By User Type
 
-### For Different User Types
+**First-Time Users**: [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md) → [BEST_PRACTICES.md](BEST_PRACTICES.md)
 
-**First-Time Users:**
+**Plugin Developers**: [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) → [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md) → [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
 
-1. [USAGE.md](USAGE.md) - Start here
-2. [CONFIGURATION.md](CONFIGURATION.md) - Set up your project
-3. [BEST_PRACTICES.md](BEST_PRACTICES.md) - Learn effective patterns
+**Multiple Clients**: [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) → [CONFIGURATION.md](CONFIGURATION.md)
 
-**Workspace Developers:**
+**Integration Specialists**: [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md) → [DEEPWIKI_INTEGRATION.md](DEEPWIKI_INTEGRATION.md)
 
-1. [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) - Understand agents
-2. [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md) - Follow standards
-3. [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md) - Import/create workflows
-4. [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md) - Optimize performance
+---
 
-**Consultants:**
+## By Task
 
-1. [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) - Multi-client setup
-2. [CONFIGURATION.md](CONFIGURATION.md) - Per-client configuration
-3. [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md) - Client workflow automation
+**Setting Up**: [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md)
 
-**Integration Specialists:**
+**Daily Development**: [BEST_PRACTICES.md](BEST_PRACTICES.md) → [PATTERNS.md](PATTERNS.md)
 
-1. [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md) - Linear setup
-2. [DEEPWIKI_INTEGRATION.md](DEEPWIKI_INTEGRATION.md) - External research
-3. [CONFIGURATION.md](CONFIGURATION.md) - Integration configuration
+**Creating Workflows**: [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) → [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
 
-### By Task
+**Troubleshooting**: [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md)
 
-**Setting Up:**
-
-- [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md) →
-  [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md)
-
-**Daily Development:**
-
-- [BEST_PRACTICES.md](BEST_PRACTICES.md) → [PATTERNS.md](PATTERNS.md) →
-  [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md)
-
-**Creating Workflows:**
-
-- [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) →
-  [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md) →
-  [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
-
-**Troubleshooting:**
-
-- [USAGE.md](USAGE.md) (Troubleshooting section) → [CONFIGURATION.md](CONFIGURATION.md) →
-  [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
+---
 
 ## Additional Resources
 
-**In Parent Directory:**
+**Parent Directory**:
+- [../README.md](../README.md) - Overview
+- [../QUICKSTART.md](../QUICKSTART.md) - 5-minute setup
+- [../CLAUDE.md](../CLAUDE.md) - Full architecture (read this!)
+- [../COMMANDS_ANALYSIS.md](../COMMANDS_ANALYSIS.md) - Command catalog
 
-- `../README.md` - Workspace overview
-- `../QUICKSTART.md` - 5-minute setup guide
-- `../CLAUDE.md` - Instructions for Claude Code
-- `../COMMANDS_ANALYSIS.md` - Command catalog
+**Plugin Documentation**:
+- [../plugins/dev/README.md](../plugins/dev/README.md) - Development plugin
+- [../plugins/meta/README.md](../plugins/meta/README.md) - Meta plugin
 
-**In Other Directories:**
+**Setup Scripts**:
+- [../scripts/README.md](../scripts/README.md) - One-time setup utilities
 
-- `../scripts/README.md` - Setup scripts documentation
-- `../plugins/dev/README.md` - Development plugin documentation
-- `../plugins/meta/README.md` - Meta plugin documentation
-
-**External:**
-
+**External**:
 - [Claude Code Documentation](https://docs.claude.com/en/docs/claude-code)
-- [Linear API Documentation](https://developers.linear.app/)
-- [HumanLayer Documentation](https://github.com/humanlayer/humanlayer)
+- [Linear API](https://developers.linear.app/)
+- [HumanLayer](https://github.com/humanlayer/humanlayer)
 
-## Contributing to Documentation
-
-When creating or updating documentation:
-
-1. **Follow existing structure** - Use similar formatting and organization
-2. **Include examples** - Real-world code snippets and workflows
-3. **Cross-reference** - Link to related docs
-4. **Keep current** - Update when features change
-5. **Be specific** - Provide file:line references where applicable
-
-**Testing documentation:**
-
-```bash
-# Validate frontmatter if modifying plugin agents/commands
-/validate-frontmatter
-
-# Test examples in documentation
-# Actually run the commands/workflows described
-```
-
-## Document Status
-
-Last reviewed: 2025-10-06
-
-All documents are current as of workspace version `51b9601`.
+---
 
 ## Need Help?
 
-**Can't find what you're looking for?**
-
-- Check the main [README.md](../README.md)
+**Can't find what you need?**
+- Check [../README.md](../README.md) for overview
+- Check [../CLAUDE.md](../CLAUDE.md) for architecture
 - Review [USAGE.md](USAGE.md) troubleshooting section
-- Search across all docs with grep:
-  ```bash
-  grep -r "your search term" docs/
-  ```
+- Search: `grep -r "search term" docs/`
 
 **Found an issue?**
-
 - Update the relevant document
-- Run `/validate-frontmatter` if you modified agent/command docs
-- Create a Linear ticket with `/linear` for larger documentation tasks
+- Run `/validate-frontmatter` for agent/command changes
+- Create Linear ticket with `/linear` for larger tasks
