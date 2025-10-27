@@ -3,6 +3,8 @@ name: cycle-analyzer
 description: Analyzes cycle health by calculating health scores, identifying risk factors, assessing team capacity, and generating specific recommendations. Returns structured insights for health reports.
 tools: Read, Write
 model: sonnet
+color: emerald
+version: 1.0.0
 ---
 
 # Cycle Analyzer Agent

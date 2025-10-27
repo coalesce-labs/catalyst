@@ -1,11 +1,13 @@
 ---
-name: pr-correlator
-description: Correlates GitHub PRs with Linear issues by analyzing branch names, PR descriptions, and attachments. Identifies orphaned PRs, orphaned issues, stale PRs, and merge candidates.
+name: github-linear-analyzer
+description: Analyzes the relationship between GitHub pull requests and Linear issues. Identifies sync gaps, orphaned PRs, orphaned issues, and correlation opportunities.
 tools: Read, Write, Grep
 model: sonnet
+color: blue
+version: 1.0.0
 ---
 
-# PR Correlator Agent
+# GitHub-Linear Analyzer Agent
 
 ## Mission
 

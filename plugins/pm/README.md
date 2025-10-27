@@ -36,12 +36,26 @@ The Catalyst PM plugin provides AI-powered project management workflows that int
 
 ## Commands
 
-### `/pm:cycle-status`
+### Cycle Management
+- `/pm:analyze-cycle` - Analyze cycle health with actionable insights
+  - Health assessment (🟢/🟡/🔴)
+  - Risk identification (blockers, at-risk issues)
+  - Team capacity analysis
+  - Specific recommendations
+
+### Milestone Management
+- `/pm:analyze-milestone` - Analyze milestone health toward target date
+  - Target date feasibility assessment
+  - Progress tracking (actual vs expected)
+  - Risk identification (behind schedule, blockers)
+  - Specific recommendations (adjust timeline, reduce scope)
+
+### `/pm:analyze-cycle`
 Generate comprehensive cycle health report with recommendations.
 
 **What it does**:
-- Fetches active cycle data from Linear
-- Spawns cycle-analyzer agent for health assessment
+- Spawns linear-research agent to fetch active cycle data (Haiku)
+- Spawns cycle-analyzer agent for health assessment (Sonnet)
 - Generates progress metrics, risk factors, capacity analysis
 - Provides specific, prioritized recommendations
 
@@ -61,11 +75,18 @@ Priority Actions:
   3. Assign 2 backlog issues to Dave (no active work)
 ```
 
-### `/pm:team-daily`
+### Daily Operations
+- `/pm:report-daily` - Quick daily standup report
+  - Yesterday's deliveries
+  - Current work in progress
+  - Team members needing assignments
+  - Quick blockers/risks
+
+### `/pm:report-daily`
 Quick daily standup report (scannable in <30 seconds).
 
 **What it does**:
-- Fetches yesterday's completed issues and merged PRs
+- Spawns 4 parallel research agents for fast data gathering (Haiku)
 - Lists current work in progress by team member
 - Identifies team members needing work assignments
 - Flags quick blockers and stalled issues
@@ -82,12 +103,20 @@ Quick daily standup report (scannable in <30 seconds).
 ⚠️  Blockers: 1 issue (TEAM-461)
 ```
 
-### `/pm:backlog-groom`
+### Backlog Health
+- `/pm:groom-backlog` - Analyze backlog health
+  - Orphaned issues (no project)
+  - Misplaced issues (wrong project)
+  - Stale issues (>30 days inactive)
+  - Potential duplicates
+  - Missing estimates
+
+### `/pm:groom-backlog`
 Analyze backlog health and generate cleanup recommendations.
 
 **What it does**:
-- Fetches all backlog issues
-- Spawns backlog-groomer agent for analysis
+- Spawns linear-research agent to fetch backlog issues (Haiku)
+- Spawns backlog-analyzer agent for analysis (Sonnet)
 - Identifies orphaned, misplaced, stale, and duplicate issues
 - Generates batch update commands
 
@@ -99,13 +128,19 @@ Analyze backlog health and generate cleanup recommendations.
 3. Generate Linear update commands for manual execution
 4. Skip (report saved for later)
 
-### `/pm:pr-sync`
+### GitHub-Linear Sync
+- `/pm:sync-prs` - Correlate GitHub PRs with Linear issues
+  - Orphaned PRs (no Linear issue)
+  - Orphaned issues (no PR)
+  - Ready to close (PR merged, issue open)
+  - Stale PRs (>14 days)
+
+### `/pm:sync-prs`
 Correlate GitHub PRs with Linear issues and identify gaps.
 
 **What it does**:
-- Fetches open and recently merged PRs from GitHub
-- Extracts Linear ticket IDs from branch names
-- Spawns pr-correlator agent for analysis
+- Spawns parallel research for GitHub PRs and Linear issues (Haiku)
+- Spawns github-linear-analyzer agent for correlation analysis (Sonnet)
 - Identifies orphaned PRs, orphaned issues, merge candidates
 - Generates auto-close commands
 
@@ -124,6 +159,15 @@ Health Score: 75/100
 
 ## Agents
 
+### Research Agents
+- `linear-research` (Haiku) - Gathers Linear data via CLI
+  - Cycles, issues, milestones, projects
+  - Natural language interface
+  - Returns structured JSON
+  - Optimized for speed
+
+### Analyzer Agents (Sonnet)
+
 ### `cycle-analyzer`
 **Purpose**: Transform raw cycle data into actionable health insights
 
@@ -135,7 +179,18 @@ Health Score: 75/100
 
 **Returns**: Structured markdown with health assessment, risks, capacity, recommendations
 
-### `backlog-groomer`
+### `milestone-analyzer`
+**Purpose**: Analyze project milestone progress toward target dates
+
+**Responsibilities**:
+- Calculate health scores based on target date feasibility
+- Identify risk factors (behind schedule, blockers, scope creep)
+- Analyze velocity and projected completion
+- Generate timeline/scope recommendations
+
+**Returns**: Structured markdown with target date assessment, risks, velocity, recommendations
+
+### `backlog-analyzer`
 **Purpose**: Maintain healthy, well-organized Linear backlog
 
 **Responsibilities**:
@@ -146,7 +201,7 @@ Health Score: 75/100
 
 **Returns**: Structured markdown with categorized recommendations and confidence scores
 
-### `pr-correlator`
+### `github-linear-analyzer`
 **Purpose**: Ensure proper GitHub-Linear correlation
 
 **Responsibilities**:
@@ -181,21 +236,29 @@ Health Score: 75/100
 
 ### Configuration
 
-Add Linear team configuration to `.claude/config.json`:
+PM commands read from two config sources:
 
+**1. Project metadata** (`.claude/config.json` - safe to commit):
 ```json
 {
-  "linear": {
-    "teamKey": "TEAM",
-    "apiToken": "[your-token]"
+  "projectKey": "acme",
+  "project": {
+    "ticketPrefix": "ACME"
   }
 }
 ```
 
-Set Linear API token:
-```bash
-export LINEAR_API_TOKEN=your_token_here
+**2. Secrets** (`~/.config/catalyst/config-acme.json` - NEVER committed):
+```json
+{
+  "linear": {
+    "apiToken": "lin_api_...",
+    "teamKey": "ACME"
+  }
+}
 ```
+
+**Setup**: Run `./scripts/setup-catalyst-config.sh` to configure your project
 
 ## Installation
 

@@ -23,9 +23,22 @@ by spawning parallel sub-agents and synthesizing their findings.
 
 ## Prerequisites
 
-Before executing, verify required tools are installed:
+Before executing, verify all required tools and systems:
 
 ```bash
+# 1. Validate thoughts system (REQUIRED)
+if [[ -f "scripts/validate-thoughts-setup.sh" ]]; then
+  ./scripts/validate-thoughts-setup.sh || exit 1
+else
+  # Inline validation if script not found
+  if [[ ! -d "thoughts/shared" ]]; then
+    echo "❌ ERROR: Thoughts system not configured"
+    echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
+    exit 1
+  fi
+fi
+
+# 2. Validate plugin scripts
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" || exit 1
 fi
@@ -145,18 +158,27 @@ Collect metadata for the research document:
 - Get current branch: `git branch --show-current`
 - Get repository name from `.git/config` or working directory
 
-**Filename format:**
+**Document Storage:**
 
+All research documents are stored in the **thoughts system** for persistence:
+
+**Required location:** `thoughts/shared/research/YYYY-MM-DD-{ticket}-{description}.md`
+
+**Why thoughts/shared/**:
+- ✅ Persisted across sessions (git-backed via HumanLayer)
+- ✅ Shared across worktrees
+- ✅ Synced via `humanlayer thoughts sync`
+- ✅ Team collaboration ready
+
+**Filename format:**
 - With ticket: `thoughts/shared/research/YYYY-MM-DD-PROJ-XXXX-description.md`
 - Without ticket: `thoughts/shared/research/YYYY-MM-DD-description.md`
-- Alternative: `research/YYYY-MM-DD-PROJ-XXXX-description.md` (if not using thoughts system)
 
 Replace `PROJ` with your ticket prefix from `.claude/config.json`.
 
 **Examples:**
-
-- `2025-01-08-PROJ-1478-parent-child-tracking.md`
-- `2025-01-08-authentication-flow.md` (no ticket)
+- `thoughts/shared/research/2025-01-08-PROJ-1478-parent-child-tracking.md`
+- `thoughts/shared/research/2025-01-08-authentication-flow.md` (no ticket)
 
 ### Step 6: Generate Research Document
 

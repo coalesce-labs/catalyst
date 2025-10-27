@@ -240,35 +240,15 @@ This means:
 
 ### Configuration System
 
-Configuration lives in `.claude/config.json`:
+Catalyst uses a **two-layer config system** to keep secrets out of git:
 
+**Layer 1: Project Config** (`.claude/config.json` - safe to commit):
 ```json
 {
+  "projectKey": "acme",
   "project": {
-    "ticketPrefix": "PROJ",
-    "defaultTicketPrefix": "PROJ"
-  },
-  "linear": {
-    "teamKey": "[NEEDS_SETUP]",
-    "defaultTeam": "[NEEDS_SETUP]",
-    "apiToken": "[NEEDS_SETUP]",
-    "thoughtsRepoUrl": null
-  },
-  "railway": {
-    "projectId": "[NEEDS_SETUP]",
-    "defaultService": "[NEEDS_SETUP]"
-  },
-  "sentry": {
-    "org": "[NEEDS_SETUP]",
-    "project": "[NEEDS_SETUP]",
-    "authToken": "[NEEDS_SETUP]"
-  },
-  "posthog": {
-    "apiKey": "[NEEDS_SETUP]",
-    "projectId": "[NEEDS_SETUP]"
-  },
-  "exa": {
-    "apiKey": "[NEEDS_SETUP]"
+    "ticketPrefix": "ACME",
+    "name": "Acme Corp Project"
   },
   "thoughts": {
     "user": null
@@ -276,10 +256,102 @@ Configuration lives in `.claude/config.json`:
 }
 ```
 
-**In this workspace:** Keep values generic/null (it's a template) **In actual projects:** Fill in
-real values (ENG-123, team IDs, etc.)
+**Layer 2: Secrets Config** (`~/.config/catalyst/config-{projectKey}.json` - NEVER committed):
+```json
+{
+  "linear": {
+    "apiToken": "lin_api_...",
+    "teamKey": "ACME",
+    "defaultTeam": "ACME"
+  },
+  "sentry": {
+    "org": "acme-corp",
+    "project": "acme-web",
+    "authToken": "sntrys_..."
+  },
+  "railway": {
+    "token": "...",
+    "projectId": "..."
+  },
+  "posthog": {
+    "apiKey": "...",
+    "projectId": "..."
+  },
+  "exa": {
+    "apiKey": "..."
+  }
+}
+```
+
+**Setup**:
+```bash
+./scripts/setup-catalyst-config.sh
+```
+
+**Benefits**:
+- ✅ Secrets never in git
+- ✅ Consistent project key across HumanLayer and Catalyst
+- ✅ Multiple projects per machine (work/personal/clients)
+- ✅ `.claude/config.json` only has non-sensitive metadata
+
+**Switching projects**: Just update `projectKey` in `.claude/config.json`
 
 Commands read config to customize behavior per-project.
+
+### Thoughts System (REQUIRED)
+
+Catalyst **requires** the thoughts system for all workflow commands. This provides:
+
+- 📁 **Persistent context**: Research, plans, handoffs survive across sessions
+- 🔄 **Team collaboration**: Git-backed, synced via HumanLayer
+- 🌲 **Worktree sharing**: Same context across multiple feature branches
+
+**Required Structure:**
+
+```
+thoughts/shared/
+├── research/       # Research documents from /research-codebase
+├── plans/          # Implementation plans from /create-plan
+├── handoffs/       # Session handoffs from /create-handoff
+├── prs/            # PR descriptions from /describe-pr
+└── reports/        # PM reports (cycles, milestones, daily)
+    ├── cycles/
+    ├── milestones/
+    ├── daily/
+    ├── backlog/
+    └── pr-sync/
+```
+
+**Setup:**
+
+```bash
+# Initialize thoughts system for your project
+./scripts/humanlayer/init-project.sh . acme-corp
+
+# Sync thoughts
+humanlayer thoughts sync
+```
+
+**Validation:**
+
+Commands automatically validate thoughts system is configured. If not, you'll see:
+
+```
+❌ ERROR: Thoughts system not configured
+Run: ./scripts/humanlayer/init-project.sh . {project-name}
+```
+
+**Why Required?**
+
+Unlike optional fallbacks, Catalyst requires thoughts because:
+1. Workflow commands chain together (research → plan → implement)
+2. Commands auto-find recent documents via workflow context
+3. Team members need shared context
+4. Worktrees need shared memory
+
+Without thoughts, the workflow breaks.
+
+See `docs/THOUGHTS_SETUP.md` for comprehensive setup guide.
 
 ## Directory Structure
 
@@ -545,15 +617,22 @@ Use `/validate-frontmatter` to check consistency.
 
 For project management workflows with Linear:
 
-- `/pm:cycle-status` - Cycle health report with actionable recommendations
-- `/pm:team-daily` - Quick daily standup summary
-- `/pm:backlog-groom` - Backlog analysis and cleanup recommendations
-- `/pm:pr-sync` - GitHub-Linear correlation and sync gaps
+- `/pm:analyze-cycle` - Cycle health report
+- `/pm:analyze-milestone` - Milestone progress and target date assessment
+- `/pm:report-daily` - Quick daily standup summary
+- `/pm:groom-backlog` - Backlog analysis
+- `/pm:sync-prs` - GitHub-Linear correlation
+
+**Features**:
+- Cycle management with health scoring
+- Project milestone tracking toward target dates
+- Backlog grooming and cleanup
+- GitHub-Linear PR sync
 
 **Setup**: Install with `/plugin install catalyst-pm`
 **Docs**: See `plugins/pm/README.md`
+**Architecture**: Research-first (Haiku for data, Sonnet for analysis)
 **Philosophy**: All reports provide actionable insights, not just data dumps
-**Requirements**: Linearis CLI with cycle management features (PR #4)
 
 ### DeepWiki Integration
 

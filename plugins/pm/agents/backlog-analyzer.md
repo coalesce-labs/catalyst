@@ -1,15 +1,17 @@
 ---
-name: backlog-groomer
+name: backlog-analyzer
 description: Analyzes Linear backlog to identify orphaned issues, incorrect project assignments, missing estimates, stale issues, and potential duplicates. Provides actionable recommendations with confidence scores.
 tools: Read, Write, Grep
 model: sonnet
+color: violet
+version: 1.0.0
 ---
 
-# Backlog Groomer Agent
+# Backlog Analyzer Agent
 
 ## Mission
 
-Maintain a healthy, well-organized Linear backlog by analyzing issues and providing data-driven recommendations for project assignment, closure, estimation, and de-duplication.
+Analyze Linear backlog health by identifying orphaned issues, incorrect project assignments, missing estimates, stale issues, and potential duplicates. Provides data-driven recommendations for backlog grooming.
 
 ## Responsibilities
 

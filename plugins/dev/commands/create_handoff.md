@@ -10,9 +10,22 @@ version: 1.0.0
 
 ## Prerequisites
 
-Before executing, verify required tools are installed:
+Before executing, verify all required tools and systems:
 
 ```bash
+# 1. Validate thoughts system (REQUIRED)
+if [[ -f "scripts/validate-thoughts-setup.sh" ]]; then
+  ./scripts/validate-thoughts-setup.sh || exit 1
+else
+  # Inline validation if script not found
+  if [[ ! -d "thoughts/shared" ]]; then
+    echo "❌ ERROR: Thoughts system not configured"
+    echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
+    exit 1
+  fi
+fi
+
+# 2. Validate plugin scripts
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" || exit 1
 fi

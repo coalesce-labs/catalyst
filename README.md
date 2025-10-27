@@ -24,10 +24,11 @@ and shared memory systems.
 **catalyst-pm** (Optional - Enable for project management)
 
 - Linear-focused project management workflows
-- 4 commands: cycle status, team daily, backlog grooming, PR-Linear sync
-- 3 specialized agents for health analysis and correlation
+- 5 commands: analyze-cycle, analyze-milestone, report-daily, groom-backlog, sync-prs
+- Research-first architecture (Haiku for data, Sonnet for analysis)
+- 5 specialized agents: linear-research, cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer
+- Cycle management and milestone tracking with target date feasibility
 - Actionable insights and recommendations (not just data dumps)
-- Requires Linearis CLI with cycle management features
 
 **catalyst-analytics** (Optional - Enable when needed)
 

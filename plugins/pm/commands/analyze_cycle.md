@@ -1,12 +1,12 @@
 ---
-description: Generate cycle health report with actionable insights, risk analysis, capacity assessment, and specific recommendations
+description: Analyze cycle health and generate comprehensive report with actionable insights, risk analysis, capacity assessment, and specific recommendations
 category: pm
-tools: Bash(linearis *), Bash(jq *), Read, Write, TodoWrite, Task
+tools: Task, Read, Write, TodoWrite
 model: inherit
 version: 1.0.0
 ---
 
-# Cycle Status Command
+# Analyze Cycle Command
 
 Generates a comprehensive **health report** (not just data) for the current Linear cycle.
 
@@ -22,11 +22,34 @@ Generates a comprehensive **health report** (not just data) for the current Line
 
 ## Prerequisites Check
 
-First, verify all required tools:
+First, verify all required tools and systems:
 
 ```bash
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" || exit 1
+# 1. Validate thoughts system (REQUIRED)
+if [[ -f "scripts/validate-thoughts-setup.sh" ]]; then
+  ./scripts/validate-thoughts-setup.sh || exit 1
+else
+  # Inline validation if script not found
+  if [[ ! -d "thoughts/shared" ]]; then
+    echo "❌ ERROR: Thoughts system not configured"
+    echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
+    exit 1
+  fi
+fi
+
+# 2. Determine script directory with fallback
+if [[ -n "${CLAUDE_PLUGIN_ROOT}" ]]; then
+  SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT}/scripts"
+else
+  # Fallback: resolve relative to this command file
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts"
+fi
+
+# 3. Check PM plugin prerequisites
+if [[ -f "${SCRIPT_DIR}/check-prerequisites.sh" ]]; then
+  "${SCRIPT_DIR}/check-prerequisites.sh" || exit 1
+else
+  echo "⚠️ Prerequisites check skipped (script not found at: ${SCRIPT_DIR})"
 fi
 ```
 
@@ -35,64 +58,56 @@ fi
 ### Step 1: Gather Configuration
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT}/scripts/pm-utils.sh"
+# Determine script directory with fallback (if not already set)
+if [[ -z "${SCRIPT_DIR}" ]]; then
+  if [[ -n "${CLAUDE_PLUGIN_ROOT}" ]]; then
+    SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT}/scripts"
+  else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts"
+  fi
+fi
+
+source "${SCRIPT_DIR}/pm-utils.sh"
 
 TEAM_KEY=$(get_team_key)
 CONFIG_FILE=".claude/config.json"
 ```
 
-### Step 2: Fetch Active Cycle Data
+### Step 2: Spawn Research Tasks (Parallel)
 
-Use linearis CLI to get the current active cycle:
+Spawn multiple research agents in parallel to gather data:
 
-```bash
-# Get active cycle with issues
-cycle_data=$(linearis cycles read --active --team "$TEAM_KEY" --with-issues)
+**Task 1 - Get Active Cycle**:
 
-# Parse cycle metadata
-cycle_name=$(echo "$cycle_data" | jq -r '.name')
-cycle_number=$(echo "$cycle_data" | jq -r '.number')
-cycle_starts=$(echo "$cycle_data" | jq -r '.startsAt')
-cycle_ends=$(echo "$cycle_data" | jq -r '.endsAt')
-cycle_progress=$(echo "$cycle_data" | jq -r '.progress')
-is_active=$(echo "$cycle_data" | jq -r '.isActive')
+Use Task tool with `linear-research` agent:
 
-# Get issues array
-issues=$(echo "$cycle_data" | jq -c '.issues[]')
+```
+Prompt: "Get the active cycle for team ${TEAM_KEY} with all issues"
+Model: haiku (fast data gathering)
 ```
 
-### Step 3: Spawn Cycle Analysis Agent
+**Task 2 - Get Team Workload**:
 
-Use the cycle-analyzer agent for health analysis and recommendations:
+Use Task tool with `linear-research` agent:
 
-```bash
-# Save raw data for agent analysis
-echo "$cycle_data" > /tmp/cycle-data.json
 ```
+Prompt: "List all in-progress issues for team ${TEAM_KEY}"
+Model: haiku (fast data gathering)
+```
+
+**Wait for both tasks to complete**
+
+### Step 3: Spawn Analysis Agent
 
 Use Task tool with `cycle-analyzer` agent:
 
-**Agent receives**:
-- Cycle data JSON (metadata + full issues array)
-- Current date for time calculations
-- Team configuration
+**Input**:
+- Cycle data JSON from Task 1
+- In-progress issues from Task 2
+- Current date: $(date +%Y-%m-%d)
 
-**Agent analyzes and returns**:
-1. **Health Score** (🟢 On Track / 🟡 At Risk / 🔴 Critical)
-   - Based on: progress vs time remaining, blocker count, at-risk issues
-2. **Risk Factors**
-   - Blocked issues with reasons
-   - At-risk issues (>5 days in progress with no activity)
-   - Scope creep indicators
-3. **Capacity Analysis**
-   - Who is over/under capacity
-   - Who is available for new work
-   - Load distribution recommendations
-4. **Specific Recommendations**
-   - Actionable next steps (escalate X, assign Y to Z, review W)
-   - Priority-ordered by impact
-
-**Agent output format**: Structured markdown with clear sections that the command can format
+**Agent returns**:
+Structured markdown with health assessment, risks, capacity, recommendations
 
 ### Step 4: Generate Health Report
 
@@ -217,6 +232,11 @@ cat > "$REPORT_FILE" << EOF
 EOF
 
 echo "✅ Report saved: $REPORT_FILE"
+
+# Update workflow context
+if [[ -f "${SCRIPT_DIR}/workflow-context.sh" ]]; then
+  "${SCRIPT_DIR}/workflow-context.sh" add reports "$REPORT_FILE" "${TICKET_ID:-null}"
+fi
 ```
 
 ### Step 6: Display Summary

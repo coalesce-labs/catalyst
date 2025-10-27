@@ -1,12 +1,12 @@
 ---
-description: Correlate GitHub PRs with Linear issues and identify sync gaps
+description: Sync GitHub PRs with Linear issues and identify correlation gaps
 category: pm
-tools: Bash(gh *), Bash(linearis *), Bash(jq *), Bash(git *), Read, Write, Task
+tools: Task, Read, Write
 model: inherit
 version: 1.0.0
 ---
 
-# PR Sync Command
+# Sync PRs Command
 
 Analyzes the relationship between GitHub pull requests and Linear issues to identify:
 - PRs without linked Linear issues
@@ -14,69 +14,85 @@ Analyzes the relationship between GitHub pull requests and Linear issues to iden
 - Merged PRs with open Linear issues (candidates for closure)
 - Open PRs for completed Linear issues (stale PRs)
 
+## Prerequisites Check
+
+```bash
+# 1. Validate thoughts system (REQUIRED)
+if [[ -f "scripts/validate-thoughts-setup.sh" ]]; then
+  ./scripts/validate-thoughts-setup.sh || exit 1
+else
+  # Inline validation if script not found
+  if [[ ! -d "thoughts/shared" ]]; then
+    echo "❌ ERROR: Thoughts system not configured"
+    echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
+    exit 1
+  fi
+fi
+
+# 2. Determine script directory with fallback
+if [[ -n "${CLAUDE_PLUGIN_ROOT}" ]]; then
+  SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT}/scripts"
+else
+  # Fallback: resolve relative to this command file
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts"
+fi
+
+# 3. Check PM plugin prerequisites
+if [[ -f "${SCRIPT_DIR}/check-prerequisites.sh" ]]; then
+  "${SCRIPT_DIR}/check-prerequisites.sh" || exit 1
+else
+  echo "⚠️ Prerequisites check skipped (script not found at: ${SCRIPT_DIR})"
+fi
+```
+
 ## Process
 
-### Step 1: Gather PR Data from GitHub
+### Step 1: Spawn Research Tasks (Parallel)
 
 ```bash
-# Get open PRs
-open_prs=$(gh pr list --json number,title,headRefName,author,createdAt,url --limit 100)
+# Determine script directory with fallback
+if [[ -n "${CLAUDE_PLUGIN_ROOT}" ]]; then
+  SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT}/scripts"
+else
+  # Fallback: resolve relative to this command file
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts"
+fi
 
-# Get recently merged PRs (last 7 days)
-merged_prs=$(gh pr list \
-  --state merged \
-  --search "merged:>=@(date -v-7d +%Y-%m-%d)" \
-  --json number,title,headRefName,author,mergedAt,url \
-  --limit 100)
+source "${SCRIPT_DIR}/pm-utils.sh"
+TEAM_KEY=$(get_team_key)
 ```
 
-### Step 2: Extract Linear Ticket IDs from PRs
-
-Use two methods:
-
-**Method 1: Branch naming convention**
-```bash
-# Extract TEAM-123 from branch name
-for pr in $(echo "$open_prs" | jq -c '.[]'); do
-  branch=$(echo "$pr" | jq -r '.headRefName')
-
-  if [[ "$branch" =~ ([A-Z]+-[0-9]+) ]]; then
-    ticket_id="${BASH_REMATCH[1]}"
-    echo "$ticket_id,$pr_number" >> /tmp/pr-ticket-map.csv
-  fi
-done
+**Task 1 - Get GitHub PRs**:
+Use `github-research` agent (if exists) or inline `gh` commands:
+```
+Get open and recently merged PRs (last 7 days)
 ```
 
-**Method 2: Check Linear for PR attachments**
-```bash
-# Query Linear for issues with PR attachments
-issues_with_prs=$(linearis issues list \
-  --team "$TEAM_KEY" \
-  --with-attachments \
-  --json)
-
-# Parse attachments for GitHub PR URLs
-# (linearis returns attachment URLs in issue JSON)
+**Task 2 - Get Linear Issues**:
+Use Task tool with `linear-research` agent:
+```
+Prompt: "Get all in-review and in-progress issues for team ${TEAM_KEY}"
+Model: haiku
 ```
 
-### Step 3: Spawn PR Correlator Agent
+**Wait for both tasks to complete**
 
-Use Task tool with pr-correlator agent:
+### Step 2: Spawn Analysis Agent
 
-**Agent Input**:
-- Open PRs JSON
-- Merged PRs JSON
-- Linear issues with cycle assignment
-- PR-ticket mapping
+Use Task tool with `github-linear-analyzer` agent:
 
-**Agent Analysis**:
-1. Match PRs to Linear issues (by branch name, PR description, attachments)
-2. Identify orphaned PRs (no Linear issue)
-3. Identify orphaned issues (no PR, status = "In Review" or "In Progress")
-4. Flag stale PRs (open >14 days)
-5. Flag merge candidates (PR merged, Linear issue still open)
+**Input**:
+- GitHub PRs from Task 1
+- Linear issues from Task 2
 
-### Step 4: Generate Correlation Report
+**Output**:
+- Linked PRs (healthy)
+- Orphaned PRs (no Linear issue)
+- Orphaned issues (no PR)
+- Ready to close (PR merged, issue open)
+- Stale PRs (>14 days)
+
+### Step 3: Generate Sync Report
 
 ```markdown
 # PR-Linear Sync Report
@@ -146,11 +162,30 @@ linearis issues update TEAM-457 --status "Done" \
 | #120 | TEAM-450 | 18 days | Alice | Review and merge or close |
 ```
 
-### Step 5: Save Report
+### Step 4: Save Report
 
-Save to `thoughts/shared/reports/pr-sync/YYYY-MM-DD-pr-sync.md`
+```bash
+REPORT_DIR="thoughts/shared/reports/pr-sync"
+mkdir -p "$REPORT_DIR"
 
-### Step 6: Display Summary
+REPORT_FILE="$REPORT_DIR/$(date +%Y-%m-%d)-pr-sync.md"
+
+# Write formatted report to file
+cat > "$REPORT_FILE" << EOF
+# PR-Linear Sync Report - $(date +%Y-%m-%d)
+
+[... formatted report content ...]
+EOF
+
+echo "✅ Report saved: $REPORT_FILE"
+
+# Update workflow context
+if [[ -f "${SCRIPT_DIR}/workflow-context.sh" ]]; then
+  "${SCRIPT_DIR}/workflow-context.sh" add reports "$REPORT_FILE" null
+fi
+```
+
+### Step 5: Display Summary
 
 ```
 🔗 PR-Linear Sync Report

@@ -1,12 +1,12 @@
 ---
-description: Analyze Linear backlog to identify orphaned issues, incorrect project assignments, and health issues
+description: Groom Linear backlog to identify orphaned issues, incorrect project assignments, and health issues
 category: pm
-tools: Bash(linearis *), Bash(jq *), Read, Write, Task
+tools: Task, Read, Write
 model: inherit
 version: 1.0.0
 ---
 
-# Backlog Grooming Command
+# Groom Backlog Command
 
 Comprehensive backlog health analysis that identifies:
 - Issues without projects (orphaned)
@@ -15,53 +15,73 @@ Comprehensive backlog health analysis that identifies:
 - Stale issues (no activity >30 days)
 - Duplicate issues (similar titles)
 
-## Process
-
-### Step 1: Fetch All Backlog Issues
+## Prerequisites Check
 
 ```bash
-source "${CLAUDE_PLUGIN_ROOT}/scripts/pm-utils.sh"
+# 1. Validate thoughts system (REQUIRED)
+if [[ -f "scripts/validate-thoughts-setup.sh" ]]; then
+  ./scripts/validate-thoughts-setup.sh || exit 1
+else
+  # Inline validation if script not found
+  if [[ ! -d "thoughts/shared" ]]; then
+    echo "❌ ERROR: Thoughts system not configured"
+    echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
+    exit 1
+  fi
+fi
 
-TEAM_KEY=$(get_team_key)
+# 2. Determine script directory with fallback
+if [[ -n "${CLAUDE_PLUGIN_ROOT}" ]]; then
+  SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT}/scripts"
+else
+  # Fallback: resolve relative to this command file
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts"
+fi
 
-# Get all issues in Backlog status (or no cycle assignment)
-backlog_issues=$(linearis issues list \
-  --team "$TEAM_KEY" \
-  --status "Backlog" \
-  --limit 1000 \
-  --json)
-
-# Also get issues without cycles
-no_cycle_issues=$(linearis issues list \
-  --team "$TEAM_KEY" \
-  --no-cycle \
-  --limit 1000 \
-  --json)
+# 3. Check PM plugin prerequisites
+if [[ -f "${SCRIPT_DIR}/check-prerequisites.sh" ]]; then
+  "${SCRIPT_DIR}/check-prerequisites.sh" || exit 1
+else
+  echo "⚠️ Prerequisites check skipped (script not found at: ${SCRIPT_DIR})"
+fi
 ```
 
-### Step 2: Spawn Backlog Groomer Agent
+## Process
 
-Use Task tool with backlog-groomer agent:
+### Step 1: Spawn Research Agent
 
-**Agent Input**:
-- All backlog issues JSON
-- Project definitions (if available)
-- Team configuration
+```bash
+# Determine script directory with fallback
+if [[ -n "${CLAUDE_PLUGIN_ROOT}" ]]; then
+  SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT}/scripts"
+else
+  # Fallback: resolve relative to this command file
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts"
+fi
 
-**Agent Responsibilities**:
-1. Categorize issues by theme/project
-2. Identify orphaned issues (no project assignment)
-3. Detect misplaced issues (wrong project based on content)
-4. Flag issues needing estimates
-5. Identify stale issues (>30 days no activity)
-6. Detect potential duplicates (similar titles/descriptions)
+source "${SCRIPT_DIR}/pm-utils.sh"
+TEAM_KEY=$(get_team_key)
+```
 
-**Agent Output**: Structured recommendations with:
-- Issue ID
-- Current state (project, status, assignee)
-- Recommendation (move to X project, add estimate, close as duplicate)
-- Confidence score (high/medium/low)
-- Reasoning
+Use Task tool with `linear-research` agent:
+
+```
+Prompt: "Get all backlog issues for team ${TEAM_KEY} including issues with no cycle assignment"
+Model: haiku
+```
+
+### Step 2: Spawn Analysis Agent
+
+Use Task tool with `backlog-analyzer` agent:
+
+**Input**: Backlog issues JSON from research
+
+**Output**: Structured recommendations with:
+- Orphaned issues (no project)
+- Misplaced issues (wrong project)
+- Stale issues (>30 days)
+- Potential duplicates
+- Missing estimates
 
 ### Step 3: Generate Grooming Report
 
@@ -164,11 +184,36 @@ linearis issues update TEAM-789 --status "Canceled" \
 echo "✅ Backlog grooming updates applied"
 ```
 
-Save to `thoughts/shared/reports/backlog/YYYY-MM-DD-grooming-updates.sh`
+```bash
+# Save update script
+UPDATE_SCRIPT="thoughts/shared/reports/backlog/$(date +%Y-%m-%d)-grooming-updates.sh"
+mkdir -p "$(dirname "$UPDATE_SCRIPT")"
+# [script contents saved here]
+chmod +x "$UPDATE_SCRIPT"
+```
 
 ### Step 6: Save Report
 
-Save detailed report to `thoughts/shared/reports/backlog/YYYY-MM-DD-backlog-grooming.md`
+```bash
+REPORT_DIR="thoughts/shared/reports/backlog"
+mkdir -p "$REPORT_DIR"
+
+REPORT_FILE="$REPORT_DIR/$(date +%Y-%m-%d)-backlog-grooming.md"
+
+# Write formatted report to file
+cat > "$REPORT_FILE" << EOF
+# Backlog Grooming Report - $(date +%Y-%m-%d)
+
+[... formatted report content ...]
+EOF
+
+echo "✅ Report saved: $REPORT_FILE"
+
+# Update workflow context
+if [[ -f "${SCRIPT_DIR}/workflow-context.sh" ]]; then
+  "${SCRIPT_DIR}/workflow-context.sh" add reports "$REPORT_FILE" null
+fi
+```
 
 ## Success Criteria
 
