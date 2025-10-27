@@ -1,6 +1,6 @@
 {
   "name": "catalyst-dev",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Complete development workflow: research → plan → implement → validate → ship. Includes research agents, planning tools, handoff system, Linear integration, and PM commands.",
   "author": {
     "name": "Coalesce Labs",
