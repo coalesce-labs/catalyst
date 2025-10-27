@@ -57,12 +57,18 @@ Quick version bumping for one or all plugins:
 ./scripts/bump-version.sh all minor
 ```
 
+**What it updates:**
+- `plugins/<plugin>/.claude-plugin/plugin.json` - Plugin version
+- `.claude-plugin/marketplace.json` - Marketplace catalog version
+
+This ensures users see the correct version in the plugin install menu.
+
 **Output:**
 ```
 📦 Plugin: catalyst-dev
    Current version: 1.0.0
    New version: 2.0.0
-   ✅ Updated!
+   ✅ Updated plugin.json and marketplace.json
 
 ✨ Version bump complete!
 
