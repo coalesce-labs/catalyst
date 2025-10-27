@@ -309,6 +309,24 @@ ryan-claude-workspace/
 │   │   │   ├── create-worktree.sh
 │   │   │   └── workflow-context.sh
 │   │   └── plugin.json      # Plugin manifest
+│   ├── pm/                  # Project management plugin (catalyst-pm)
+│   │   ├── agents/          # PM analysis agents
+│   │   │   ├── cycle-analyzer.md
+│   │   │   ├── backlog-groomer.md
+│   │   │   └── pr-correlator.md
+│   │   ├── commands/        # PM workflow commands
+│   │   │   ├── cycle_status.md
+│   │   │   ├── team_daily.md
+│   │   │   ├── backlog_groom.md
+│   │   │   └── pr_sync.md
+│   │   ├── scripts/         # PM utility scripts
+│   │   │   ├── check-prerequisites.sh
+│   │   │   └── pm-utils.sh
+│   │   ├── README.md        # PM plugin documentation
+│   │   └── .claude-plugin/
+│   │       └── plugin.json  # Plugin manifest
+│   ├── analytics/           # Analytics plugin (catalyst-analytics)
+│   ├── debugging/           # Debugging plugin (catalyst-debugging)
 │   └── meta/                # Meta/workflow management plugin (catalyst-meta)
 │       ├── commands/        # Workflow discovery & creation
 │       │   ├── create_workflow.md
@@ -522,6 +540,20 @@ Use `/validate-frontmatter` to check consistency.
 - Auto-configures on first use
 - Saves config to `.claude/config.json`
 - See `docs/LINEAR_WORKFLOW_AUTOMATION.md`
+
+### PM Plugin (catalyst-pm)
+
+For project management workflows with Linear:
+
+- `/pm:cycle-status` - Cycle health report with actionable recommendations
+- `/pm:team-daily` - Quick daily standup summary
+- `/pm:backlog-groom` - Backlog analysis and cleanup recommendations
+- `/pm:pr-sync` - GitHub-Linear correlation and sync gaps
+
+**Setup**: Install with `/plugin install catalyst-pm`
+**Docs**: See `plugins/pm/README.md`
+**Philosophy**: All reports provide actionable insights, not just data dumps
+**Requirements**: Linearis CLI with cycle management features (PR #4)
 
 ### DeepWiki Integration
 

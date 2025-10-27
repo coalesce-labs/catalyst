@@ -1,0 +1,21 @@
+{
+  "name": "catalyst-pm",
+  "version": "1.0.0",
+  "description": "Linear-focused project management plugin with cycle management, backlog grooming, and team analytics",
+  "author": {
+    "name": "Catalyst Team",
+    "email": "team@catalyst.dev"
+  },
+  "category": "productivity",
+  "commands": [
+    "./commands/cycle_status.md",
+    "./commands/team_daily.md",
+    "./commands/backlog_groom.md",
+    "./commands/pr_sync.md"
+  ],
+  "agents": [
+    "./agents/backlog-groomer.md",
+    "./agents/pr-correlator.md",
+    "./agents/cycle-analyzer.md"
+  ]
+}

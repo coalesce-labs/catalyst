@@ -9,7 +9,7 @@ fork it, and contribute ideas back.
 
 ## What's Inside
 
-**Catalyst** is a 4-plugin system for Claude Code focused on **token efficiency**, **session-aware
+**Catalyst** is a 5-plugin system for Claude Code focused on **token efficiency**, **session-aware
 MCP management**, and **persistent context** through parallel agent research, structured handoffs,
 and shared memory systems.
 
@@ -20,6 +20,14 @@ and shared memory systems.
 - Linear integration via Linearis CLI
 - Handoff system for context persistence
 - ~3.5k context (lightweight MCPs: DeepWiki, Context7)
+
+**catalyst-pm** (Optional - Enable for project management)
+
+- Linear-focused project management workflows
+- 4 commands: cycle status, team daily, backlog grooming, PR-Linear sync
+- 3 specialized agents for health analysis and correlation
+- Actionable insights and recommendations (not just data dumps)
+- Requires Linearis CLI with cycle management features
 
 **catalyst-analytics** (Optional - Enable when needed)
 
@@ -52,6 +60,9 @@ Install via Claude Code plugin system:
 # Install core workflow (required)
 /plugin install catalyst-dev
 
+# Optional: Install PM plugin (Linear project management)
+/plugin install catalyst-pm
+
 # Optional: Install analytics plugin (if you use PostHog)
 /plugin install catalyst-analytics
 
@@ -67,6 +78,9 @@ Install via Claude Code plugin system:
 Plugins automatically load/unload MCPs when enabled/disabled:
 
 ```bash
+# Enable PM tools for sprint planning and cycle reviews
+/plugin enable catalyst-pm  # Lightweight CLI-based, minimal context
+
 # Enable analytics when analyzing user behavior
 /plugin enable catalyst-analytics  # Loads PostHog MCP (+40k context)
 
@@ -76,8 +90,8 @@ Plugins automatically load/unload MCPs when enabled/disabled:
 # Enable debugging for incident response
 /plugin enable catalyst-debugging  # Loads Sentry MCP (+20k context)
 
-# Can enable both simultaneously
-/plugin enable catalyst-analytics catalyst-debugging  # Both MCPs loaded
+# Can enable multiple plugins simultaneously
+/plugin enable catalyst-pm catalyst-analytics catalyst-debugging
 ```
 
 **Why this matters**: Most development sessions don't need analytics or debugging MCPs. Starting
