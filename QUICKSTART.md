@@ -26,6 +26,7 @@ export GITHUB_SOURCE_ROOT="$HOME/code-repos/github"
 ```
 
 This organizes your code as:
+
 - Main repos: `~/code-repos/github/<org>/<repo>`
 - Worktrees: `~/code-repos/github/<org>/<repo>-worktrees/<feature>`
 
@@ -129,7 +130,8 @@ This:
 /implement-plan
 ```
 
-**Note**: If you just created a plan, you can omit the path - the command will automatically find your most recent plan!
+**Note**: If you just created a plan, you can omit the path - the command will automatically find
+your most recent plan!
 
 This:
 
@@ -231,17 +233,17 @@ Now thoughts sync automatically to GitHub.
 
 ## Common Commands
 
-| Command                    | Purpose                            |
-| -------------------------- | ---------------------------------- |
-| `/research-codebase`       | Research codebase and save findings |
-| `/create-plan`             | Interactive planning with research |
-| `/implement-plan`          | Execute a plan (auto-finds recent) |
-| `/validate-plan`           | Verify implementation              |
-| `/create-pr`               | Create PR with rich description    |
-| `/merge-pr`                | Merge PR and update Linear         |
-| `/create-worktree`         | Set up parallel workspace          |
-| `/create-handoff`          | Save context for later             |
-| `/resume-handoff`          | Restore previous context           |
+| Command              | Purpose                             |
+| -------------------- | ----------------------------------- |
+| `/research-codebase` | Research codebase and save findings |
+| `/create-plan`       | Interactive planning with research  |
+| `/implement-plan`    | Execute a plan (auto-finds recent)  |
+| `/validate-plan`     | Verify implementation               |
+| `/create-pr`         | Create PR with rich description     |
+| `/merge-pr`          | Merge PR and update Linear          |
+| `/create-worktree`   | Set up parallel workspace           |
+| `/create-handoff`    | Save context for later              |
+| `/resume-handoff`    | Restore previous context            |
 
 ## Common Agents
 
@@ -303,4 +305,5 @@ pipx install humanlayer
 
 ---
 
-**You're ready!** Start with `/research-codebase` or `/create-plan` in your next Claude Code session.
+**You're ready!** Start with `/research-codebase` or `/create-plan` in your next Claude Code
+session.

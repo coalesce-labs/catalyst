@@ -1,0 +1,14 @@
+{
+  "name": "catalyst-analytics",
+  "version": "1.0.0",
+  "description": "Product analytics with PostHog MCP integration. Enable when analyzing user behavior, conversion metrics, and product usage. ~40k context tokens when enabled.",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": "https://github.com/coalesce-labs/catalyst.git",
+  "keywords": ["analytics", "posthog", "metrics", "product", "usage", "conversion", "funnel"],
+  "license": "MIT"
+}

@@ -1,11 +1,12 @@
 # Catalyst Tooling Integration Plan
 
-**Date**: 2025-10-25
-**Purpose**: Comprehensive plan for integrating external tooling into Catalyst v1.0.0
+**Date**: 2025-10-25 **Purpose**: Comprehensive plan for integrating external tooling into Catalyst
+v1.0.0
 
 ## Executive Summary
 
 This document outlines the integration of 7 external tools/services into the Catalyst plugin system:
+
 - **Exa** (web search MCP)
 - **Linearis** (Linear CLI with cycles support)
 - **Railway CLI** (deployment platform)
@@ -17,12 +18,14 @@ This document outlines the integration of 7 external tools/services into the Cat
 ## Tool Categories
 
 ### 1. MCP Servers (Claude Code plugins)
+
 - **Exa** - Web search and research
 - **PostHog** - Product analytics
 - **Context7** - Library documentation (already available)
 - **DeepWiki** - GitHub repo research (already available)
 
 ### 2. CLI Tools (system prerequisites)
+
 - **humanlayer** - Context management and thoughts system (CRITICAL)
 - **linearis** - Linear ticket management
 - **railway** - Deployment and infrastructure
@@ -37,6 +40,7 @@ This document outlines the integration of 7 external tools/services into the Cat
 **Purpose**: Real-time web search for research agents
 
 **Installation**:
+
 ```bash
 /plugin marketplace add exa-labs/exa-mcp-server
 # or
@@ -44,6 +48,7 @@ claude mcp add-json "exa" '{"command":"npx","args":["exa-mcp-server"],"env":{"EX
 ```
 
 **Tools Available**:
+
 - `mcp__exa__search` - Web search
 - `mcp__exa__search_code` - Code search
 - `mcp__exa__company_research` - Company research
@@ -51,6 +56,7 @@ claude mcp add-json "exa" '{"command":"npx","args":["exa-mcp-server"],"env":{"EX
 - `mcp__exa__linkedin_search` - LinkedIn search
 
 **Config Required**:
+
 ```json
 {
   "exa": {
@@ -64,11 +70,13 @@ claude mcp add-json "exa" '{"command":"npx","args":["exa-mcp-server"],"env":{"EX
 **Purpose**: Linear ticket management optimized for LLMs (~1k tokens vs 13k for MCP)
 
 **Installation**:
+
 ```bash
 npm install -g --install-links ryanrozich/linearis#feat/cycles-cli
 ```
 
 **Key Commands**:
+
 - `linearis issues list --team TEAM`
 - `linearis issues read TICKET-123`
 - `linearis issues create --team TEAM --title "..." --description "..."`
@@ -80,10 +88,12 @@ npm install -g --install-links ryanrozich/linearis#feat/cycles-cli
 - `linearis usage` - Full command reference
 
 **Authentication**:
+
 - Environment variable: `LINEAR_API_TOKEN`
 - Or file: `~/.linear_api_token`
 
 **Config Required**:
+
 ```json
 {
   "linear": {
@@ -99,6 +109,7 @@ npm install -g --install-links ryanrozich/linearis#feat/cycles-cli
 **Purpose**: Deployment management and runtime debugging
 
 **Installation**:
+
 ```bash
 # via npm
 npm install -g @railway/cli
@@ -107,6 +118,7 @@ brew install railway
 ```
 
 **Key Commands**:
+
 - `railway login`
 - `railway link` - Link to project
 - `railway up` - Deploy
@@ -116,10 +128,12 @@ brew install railway
 - `railway vars` - Manage environment variables
 
 **Authentication**:
+
 - `railway login` for interactive
 - `RAILWAY_TOKEN` environment variable for CI/CD
 
 **Config Required**:
+
 ```json
 {
   "railway": {
@@ -134,6 +148,7 @@ brew install railway
 **Purpose**: Error tracking, release management, source maps
 
 **Installation**:
+
 ```bash
 curl -sL https://sentry.io/get-cli/ | sh
 # or pinned version
@@ -141,6 +156,7 @@ SENTRY_CLI_VERSION="2.56.1" curl -sL https://sentry.io/get-cli/ | sh
 ```
 
 **Key Commands**:
+
 - `sentry-cli releases new VERSION`
 - `sentry-cli releases set-commits VERSION --auto`
 - `sentry-cli sourcemaps upload`
@@ -148,10 +164,12 @@ SENTRY_CLI_VERSION="2.56.1" curl -sL https://sentry.io/get-cli/ | sh
 - `sentry-cli repos list`
 
 **Authentication**:
+
 - `~/.sentryclirc` config file
 - Or `SENTRY_AUTH_TOKEN` environment variable
 
 **Config Required**:
+
 ```json
 {
   "sentry": {
@@ -167,12 +185,14 @@ SENTRY_CLI_VERSION="2.56.1" curl -sL https://sentry.io/get-cli/ | sh
 **Purpose**: PR management, issue tracking, repository operations
 
 **Installation**:
+
 ```bash
 brew install gh
 # or other package managers
 ```
 
 **Key Commands**:
+
 - `gh pr create --title "..." --body "..."`
 - `gh pr view NUMBER`
 - `gh pr merge NUMBER`
@@ -180,6 +200,7 @@ brew install gh
 - `gh repo view`
 
 **Authentication**:
+
 - `gh auth login`
 
 **Config Required**: None (already authenticated)
@@ -189,12 +210,14 @@ brew install gh
 **Purpose**: Product analytics, feature flags, A/B testing
 
 **Installation**:
+
 ```bash
 # Use PostHog Wizard or manual:
 claude mcp add-json "posthog" '{"command":"uv","args":["--directory","/path/to/posthog-mcp","run","posthog_mcp"]}'
 ```
 
 **Tools Available**:
+
 - `mcp__posthog__list_projects`
 - `mcp__posthog__create_annotation`
 - `mcp__posthog__get_feature_flags`
@@ -202,6 +225,7 @@ claude mcp add-json "posthog" '{"command":"uv","args":["--directory","/path/to/p
 - `mcp__posthog__get_experiments`
 
 **Config Required**:
+
 ```json
 {
   "posthog": {
@@ -216,6 +240,7 @@ claude mcp add-json "posthog" '{"command":"uv","args":["--directory","/path/to/p
 **Purpose**: Context management, thoughts system, workflow persistence (CRITICAL DEPENDENCY)
 
 **Installation**:
+
 ```bash
 # Install HumanLayer CLI
 pip install humanlayer
@@ -224,12 +249,14 @@ pipx install humanlayer
 ```
 
 **Key Commands**:
+
 - `humanlayer thoughts init --directory <repo_name>`
 - `humanlayer thoughts sync`
 - `humanlayer thoughts status`
 - `humanlayer thoughts add <file>`
 
 **Usage in Catalyst**:
+
 - **CRITICAL DEPENDENCY** - Core to entire workflow system
 - `/research-codebase` - Saves research to `thoughts/shared/research/`
 - `/create-plan` - Saves plans to `thoughts/shared/plans/`
@@ -239,6 +266,7 @@ pipx install humanlayer
 - Git-backed persistence outside conversation context
 
 **Authentication**:
+
 - Configured via `humanlayer login`
 
 **Config Required**: None (CLI handles auth)
@@ -292,6 +320,7 @@ echo "✅ All required tools installed"
 ### Research Agents - Tool References
 
 **Update all research agents to use**:
+
 - `mcp__deepwiki__ask_question` - For GitHub repos (KEEP)
 - `mcp__deepwiki__read_wiki_structure` - For GitHub repos (KEEP)
 - `mcp__context7__resolve_library_id` - For libraries (KEEP)
@@ -302,36 +331,40 @@ echo "✅ All required tools installed"
 ### New Infrastructure Research Agents
 
 #### 1. `linear-research` Agent
-**Purpose**: Research Linear tickets, cycles, projects
-**Tools**: Bash(linearis *), Read, Grep
+
+**Purpose**: Research Linear tickets, cycles, projects **Tools**: Bash(linearis \*), Read, Grep
 **Key Operations**:
+
 - List and search tickets
 - Get cycle information
 - Project and label lookups
 - Milestone tracking
 
 #### 2. `railway-research` Agent
-**Purpose**: Research deployments, logs, runtime issues
-**Tools**: Bash(railway *), Read
-**Key Operations**:
+
+**Purpose**: Research deployments, logs, runtime issues **Tools**: Bash(railway \*), Read **Key
+Operations**:
+
 - Deployment status checks
 - Log analysis
 - Environment variable review
 - Service health checks
 
 #### 3. `sentry-research` Agent
-**Purpose**: Research errors, releases, performance
-**Tools**: Bash(sentry-cli *), mcp__sentry__* (if MCP installed)
-**Key Operations**:
+
+**Purpose**: Research errors, releases, performance **Tools**: Bash(sentry-cli _), mcp**sentry**_
+(if MCP installed) **Key Operations**:
+
 - Error investigation
 - Release tracking
 - Source map validation
 - Performance monitoring
 
 #### 4. `github-research` Agent (OPTIONAL)
-**Purpose**: Research PRs, issues, repository structure
-**Tools**: Bash(gh *), Read
-**Key Operations**:
+
+**Purpose**: Research PRs, issues, repository structure **Tools**: Bash(gh \*), Read **Key
+Operations**:
+
 - PR and issue lookups
 - Repository information
 - Workflow run status
@@ -339,18 +372,18 @@ echo "✅ All required tools installed"
 ## New PM Commands
 
 ### 1. `/cycle-plan` Command
-**Plugin**: catalyst-pm
-**Purpose**: Plan work for current or next cycle
-**Process**:
+
+**Plugin**: catalyst-pm **Purpose**: Plan work for current or next cycle **Process**:
+
 1. Get current and next cycle info via `linearis cycles`
 2. List backlog tickets
 3. Interactive planning session
 4. Update ticket cycles and milestones
 
 ### 2. `/cycle-review` Command
-**Plugin**: catalyst-pm
-**Purpose**: Review cycle progress
-**Process**:
+
+**Plugin**: catalyst-pm **Purpose**: Review cycle progress **Process**:
+
 1. Get active cycle info
 2. List tickets by status
 3. Calculate completion percentage
@@ -358,9 +391,9 @@ echo "✅ All required tools installed"
 5. Generate cycle summary
 
 ### 3. `/roadmap-review` Command
-**Plugin**: catalyst-pm
-**Purpose**: Review project roadmap and milestones
-**Process**:
+
+**Plugin**: catalyst-pm **Purpose**: Review project roadmap and milestones **Process**:
+
 1. List projects and their status
 2. Show milestone progress
 3. Identify dependencies
@@ -369,17 +402,21 @@ echo "✅ All required tools installed"
 ## Plugin Structure (2 Plugins)
 
 ### catalyst-dev Plugin
+
 **Complete development workflow from research to production**
 
 - **Agents**:
-  - 6 core research agents (codebase-locator, codebase-analyzer, codebase-pattern-finder, thoughts-locator, thoughts-analyzer, external-research)
-  - 4 infrastructure research agents (linear-research, railway-research, sentry-research, github-research)
+  - 6 core research agents (codebase-locator, codebase-analyzer, codebase-pattern-finder,
+    thoughts-locator, thoughts-analyzer, external-research)
+  - 4 infrastructure research agents (linear-research, railway-research, sentry-research,
+    github-research)
 
 - **Commands**:
   - **Workflow**: research_codebase, create_plan, implement_plan, validate_plan
   - **Handoff**: create_handoff, resume_handoff
   - **Dev**: commit, describe_pr, debug
-  - **Linear/PM**: linear, linear_setup_workflow, create_pr, merge_pr, cycle-plan, cycle-review, roadmap-review
+  - **Linear/PM**: linear, linear_setup_workflow, create_pr, merge_pr, cycle-plan, cycle-review,
+    roadmap-review
   - **Project**: create_worktree
   - **Meta**: workflow_help
 
@@ -390,6 +427,7 @@ echo "✅ All required tools installed"
   - frontmatter-utils.sh
 
 ### catalyst-meta Plugin
+
 **Workflow discovery and creation tools**
 
 - **Commands**:

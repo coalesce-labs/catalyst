@@ -11,17 +11,24 @@ status: complete
 
 ## Research Question
 
-How should bash scripts in the `hack/` directory be packaged and referenced within the Catalyst plugin structure? Which scripts should be included with plugins vs kept as workspace-only utilities?
+How should bash scripts in the `hack/` directory be packaged and referenced within the Catalyst
+plugin structure? Which scripts should be included with plugins vs kept as workspace-only utilities?
 
 ## Summary
 
-Your `hack/` directory contains 14 scripts serving three primary functions: **installation/migration tools**, **runtime utilities** (called by commands), and **prerequisite validators**. The analysis reveals a clear split:
+Your `hack/` directory contains 14 scripts serving three primary functions: **installation/migration
+tools**, **runtime utilities** (called by commands), and **prerequisite validators**. The analysis
+reveals a clear split:
 
 1. **Runtime scripts** (called by commands/agents) → Package in plugin `scripts/` directories
 2. **Installation scripts** → Keep at workspace root for backward compatibility
-3. **Prerequisite validators** → Package in plugin `scripts/` with `${CLAUDE_PLUGIN_ROOT}` resolution
+3. **Prerequisite validators** → Package in plugin `scripts/` with `${CLAUDE_PLUGIN_ROOT}`
+   resolution
 
-The recommended approach uses **plugin-level `scripts/` directories** with the `${CLAUDE_PLUGIN_ROOT}` environment variable for path resolution. This ensures scripts work regardless of installation location while maintaining the current relative path patterns your commands use.
+The recommended approach uses **plugin-level `scripts/` directories** with the
+`${CLAUDE_PLUGIN_ROOT}` environment variable for path resolution. This ensures scripts work
+regardless of installation location while maintaining the current relative path patterns your
+commands use.
 
 ## Current Script Inventory
 
@@ -30,23 +37,28 @@ The recommended approach uses **plugin-level `scripts/` directories** with the `
 These scripts are **invoked during command execution** and should be packaged with plugins:
 
 #### **check-prerequisites.sh** ⭐ Most Important
-- **Called by**: 6 commands (research_codebase, create_plan, implement_plan, create_pr, create_handoff, resume_handoff)
+
+- **Called by**: 6 commands (research_codebase, create_plan, implement_plan, create_pr,
+  create_handoff, resume_handoff)
 - **Purpose**: Validates HumanLayer CLI, jq, and thoughts system setup
 - **Current pattern**: `./hack/check-prerequisites.sh || exit 1`
 - **Must be**: Included in multiple plugins (workflow, pm, handoff)
 
 #### **frontmatter-utils.sh**
+
 - **Sourced by**: install-project.sh, update-project.sh
 - **Purpose**: Parse YAML frontmatter, check workspace_only/install_once flags
 - **Functions**: `should_skip_on_install()`, `should_skip_on_update()`, `get_frontmatter_bool()`
 - **Must be**: Available to installation/update scripts
 
 #### **update-project.sh**
+
 - **Called by**: `/update-project` command
 - **Purpose**: Smart project updates with conflict resolution
 - **Must be**: Available in pm plugin
 
 #### **create-worktree.sh**
+
 - **Called by**: `/create-worktree` command
 - **Purpose**: Git worktree creation with automatic setup
 - **Must be**: Available in pm plugin
@@ -63,7 +75,8 @@ These scripts are **used during initial setup** and should remain at workspace r
 - **add-client-config** - Add new client config
 - **setup-linear-workflow** - Linear status configuration
 
-**Rationale**: These are migration/setup tools, not runtime utilities. Users run them manually during initial setup or when migrating from script-based to plugin-based installation.
+**Rationale**: These are migration/setup tools, not runtime utilities. Users run them manually
+during initial setup or when migrating from script-based to plugin-based installation.
 
 ### Category 3: Development Utilities (Workspace-Only)
 
@@ -76,6 +89,7 @@ These scripts are **used during initial setup** and should remain at workspace r
 ### Official Pattern: scripts/ Directory
 
 **Structure**:
+
 ```
 plugin-root/
 ├── .claude-plugin/plugin.json
@@ -91,6 +105,7 @@ plugin-root/
 ### Path Resolution: ${CLAUDE_PLUGIN_ROOT}
 
 **From commands/agents, reference scripts using**:
+
 ```bash
 # Instead of: ./hack/check-prerequisites.sh
 # Use: ${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh
@@ -101,6 +116,7 @@ fi
 ```
 
 **Key benefits**:
+
 - Works regardless of where plugin is installed
 - No assumptions about current working directory
 - Portable across different installation contexts
@@ -108,11 +124,13 @@ fi
 ### Executable Permissions
 
 **Critical**: All scripts must have executable permissions before distribution:
+
 ```bash
 chmod +x scripts/*.sh
 ```
 
 **In git**: Track permissions with:
+
 ```bash
 git add --chmod=+x scripts/*.sh
 git commit -m "Make scripts executable"
@@ -136,6 +154,7 @@ plugins/workflow/
 ```
 
 **Usage in commands/research_codebase.md**:
+
 ```bash
 # Check prerequisites before starting research
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
@@ -163,12 +182,14 @@ plugins/pm/
 ```
 
 **Usage in commands/create_worktree.md**:
+
 ```bash
 # Execute worktree creation script
 "${CLAUDE_PLUGIN_ROOT}/scripts/create-worktree.sh" "$WORKTREE_NAME" "$BASE_BRANCH"
 ```
 
 **Usage in commands/update_project.md**:
+
 ```bash
 # Execute project update script
 "${CLAUDE_PLUGIN_ROOT}/scripts/update-project.sh" "$PROJECT_PATH"
@@ -206,13 +227,15 @@ plugins/research/
     └── README.md
 ```
 
-**Note**: Research agents don't currently call scripts directly, but the research_codebase command does.
+**Note**: Research agents don't currently call scripts directly, but the research_codebase command
+does.
 
 ## Script Sharing Strategy
 
 ### Problem: Multiple Plugins Need Same Scripts
 
 **Scripts used by multiple plugins**:
+
 - `check-prerequisites.sh` - Used by workflow, pm, handoff, research plugins
 - `frontmatter-utils.sh` - Used by pm plugin (update-project.sh needs it)
 
@@ -228,16 +251,19 @@ plugins/research/scripts/check-prerequisites.sh
 ```
 
 **Pros**:
+
 - Each plugin is self-contained
 - No cross-plugin dependencies
 - Users can install any plugin independently
 - Simple to maintain
 
 **Cons**:
+
 - Slight duplication (but file is small ~100 lines)
 - Updates require changing multiple copies
 
-**Recommendation**: This is the standard plugin pattern. Duplication is acceptable for small utilities.
+**Recommendation**: This is the standard plugin pattern. Duplication is acceptable for small
+utilities.
 
 ### Solution 2: Shared Scripts Plugin (Alternative)
 
@@ -252,6 +278,7 @@ plugins/utils/
 ```
 
 **Other plugins declare dependency**:
+
 ```json
 {
   "name": "catalyst-workflow",
@@ -260,10 +287,12 @@ plugins/utils/
 ```
 
 **Pros**:
+
 - Single source of truth
 - Updates propagate automatically
 
 **Cons**:
+
 - Adds complexity
 - Forces users to install utils plugin
 - Cross-plugin dependencies can break independent installation
@@ -272,13 +301,15 @@ plugins/utils/
 
 ### Decision: Use Duplication
 
-For catalyst, **duplicate check-prerequisites.sh** across plugins. It's small (~100 lines), rarely changes, and ensures plugins work independently.
+For catalyst, **duplicate check-prerequisites.sh** across plugins. It's small (~100 lines), rarely
+changes, and ensures plugins work independently.
 
 ## Migration Path: hack/ → scripts/
 
 ### Step 1: Identify Which Scripts Go Where
 
 **Keep in workspace root (hack/)**:
+
 - install-user.sh
 - install-project.sh
 - setup-thoughts.sh
@@ -289,7 +320,8 @@ For catalyst, **duplicate check-prerequisites.sh** across plugins. It's small (~
 - hl-switch
 - validate-frontmatter.sh (Trunk integration)
 
-**Move to plugins/*/scripts/**:
+**Move to plugins/\*/scripts/**:
+
 - check-prerequisites.sh → workflow/, pm/, handoff/, research/
 - frontmatter-utils.sh → pm/
 - create-worktree.sh → pm/
@@ -298,6 +330,7 @@ For catalyst, **duplicate check-prerequisites.sh** across plugins. It's small (~
 ### Step 2: Update Command References
 
 **Before** (current):
+
 ```bash
 # In commands/workflow/research_codebase.md
 if [[ -f "./hack/check-prerequisites.sh" ]]; then
@@ -306,6 +339,7 @@ fi
 ```
 
 **After** (plugin):
+
 ```bash
 # In plugins/workflow/commands/research_codebase.md
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
@@ -316,12 +350,14 @@ fi
 ### Step 3: Update Scripts That Source Other Scripts
 
 **Before** (update-project.sh):
+
 ```bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/frontmatter-utils.sh"
 ```
 
 **After** (plugin pm/):
+
 ```bash
 # Both scripts now in same plugin's scripts/ directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -335,7 +371,8 @@ source "${CLAUDE_PLUGIN_ROOT}/scripts/frontmatter-utils.sh"
 
 ### Step 4: Preserve Backward Compatibility
 
-**For scripts that remain in hack/** (install-project.sh, update-project.sh), update them to check both locations:
+**For scripts that remain in hack/** (install-project.sh, update-project.sh), update them to check
+both locations:
 
 ```bash
 # Try plugin location first, fall back to hack/
@@ -357,7 +394,7 @@ This allows scripts to work in both plugin and workspace contexts.
 
 **Example: plugins/workflow/scripts/README.md**
 
-```markdown
+````markdown
 # Workflow Plugin Scripts
 
 Supporting scripts for catalyst-workflow plugin.
@@ -367,22 +404,27 @@ Supporting scripts for catalyst-workflow plugin.
 Validates required tools before executing workflow commands.
 
 **Checks**:
+
 - HumanLayer CLI (`humanlayer` command)
 - jq (JSON processor)
 - Thoughts system initialization
 
 **Called by**:
+
 - /research-codebase
 - /create-plan
 - /implement-plan
 - /validate-plan
 
 **Usage**:
+
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" || exit 1
 ```
+````
 
 **Exit codes**:
+
 - 0: All prerequisites met
 - 1: Missing prerequisites (prints installation instructions)
 
@@ -393,10 +435,12 @@ Scripts are automatically installed with the plugin. No manual setup required.
 ## Permissions
 
 All scripts have execute permissions. If you clone this repo directly:
+
 ```bash
 chmod +x scripts/*.sh
 ```
-```
+
+````
 
 ## Testing Strategy
 
@@ -416,23 +460,23 @@ cat > test-plugin/commands/test.md << 'EOF'
 #!/bin/bash
 echo "Testing script execution..."
 "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh"
-```
+````
+
 EOF
 
 # Create plugin.json
-cat > test-plugin/.claude-plugin/plugin.json << 'EOF'
-{
-  "name": "test-plugin",
-  "version": "0.0.1"
-}
+
+cat > test-plugin/.claude-plugin/plugin.json << 'EOF' { "name": "test-plugin", "version": "0.0.1" }
 EOF
 
 # Make executable
-chmod +x test-plugin/scripts/*.sh
+
+chmod +x test-plugin/scripts/\*.sh
 
 # Test locally
-/plugin marketplace add ./test-plugin
-/plugin install test-plugin@local
+
+/plugin marketplace add ./test-plugin /plugin install test-plugin@local
+
 ```
 
 **Verify**:
@@ -447,17 +491,18 @@ chmod +x test-plugin/scripts/*.sh
 **Both must be in same plugin** (pm):
 
 ```
-plugins/pm/scripts/
-├── update-project.sh          # Sources frontmatter-utils.sh
-└── frontmatter-utils.sh       # Provides utility functions
-```
+
+plugins/pm/scripts/ ├── update-project.sh # Sources frontmatter-utils.sh └── frontmatter-utils.sh #
+Provides utility functions
+
+````
 
 **Sourcing works normally**:
 ```bash
 # In update-project.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/frontmatter-utils.sh"
-```
+````
 
 **Reason**: Both scripts are in same directory, relative sourcing works.
 
@@ -480,6 +525,7 @@ fi
 **Reason**: They're used for **installation and migration**, not runtime execution.
 
 **Structure**:
+
 ```
 catalyst/
 ├── hack/                           # Workspace-only scripts
@@ -498,6 +544,7 @@ catalyst/
 ```
 
 **Usage**: Direct execution by users during setup:
+
 ```bash
 # User runs these manually
 ./hack/install-project.sh /path/to/project
@@ -539,7 +586,8 @@ else
 fi
 ```
 
-**Benefit**: install-project.sh continues working as migration path for users who want script-based installation.
+**Benefit**: install-project.sh continues working as migration path for users who want script-based
+installation.
 
 ## Recommendations
 
@@ -548,6 +596,7 @@ fi
 **Action**: Copy to workflow/, pm/, handoff/, research/ plugins
 
 **Rationale**:
+
 - Small script (~100 lines)
 - Independent plugin operation
 - Standard plugin pattern
@@ -555,28 +604,34 @@ fi
 ### 2. Move Runtime Scripts to Plugin scripts/ Directories
 
 **Workflow plugin**:
+
 - check-prerequisites.sh
 
 **PM plugin**:
+
 - check-prerequisites.sh
 - create-worktree.sh
 - update-project.sh
 - frontmatter-utils.sh (sourced by update-project.sh)
 
 **Handoff plugin**:
+
 - check-prerequisites.sh
 
 **Research plugin**:
+
 - check-prerequisites.sh
 
 ### 3. Update All Command References to Use ${CLAUDE_PLUGIN_ROOT}
 
 **Pattern**:
+
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/script-name.sh"
 ```
 
 **Apply to**:
+
 - commands/workflow/research_codebase.md
 - commands/workflow/create_plan.md
 - commands/workflow/implement_plan.md
@@ -589,6 +644,7 @@ fi
 ### 4. Keep Workspace Scripts at Root
 
 **No changes** to:
+
 - hack/install-user.sh
 - hack/install-project.sh
 - hack/setup-thoughts.sh
@@ -604,6 +660,7 @@ fi
 ### 5. Add scripts/README.md to Each Plugin
 
 **Document**:
+
 - What each script does
 - Which commands call it
 - How to test it
@@ -612,6 +669,7 @@ fi
 ### 6. Make All Scripts Executable
 
 **Before committing**:
+
 ```bash
 find plugins/*/scripts -name "*.sh" -exec chmod +x {} \;
 git add --chmod=+x plugins/*/scripts/*.sh
@@ -620,6 +678,7 @@ git add --chmod=+x plugins/*/scripts/*.sh
 ### 7. Test Each Plugin Independently
 
 **Verify**:
+
 - Scripts resolve correctly with ${CLAUDE_PLUGIN_ROOT}
 - Commands can execute scripts
 - Permissions are correct
@@ -631,7 +690,7 @@ git add --chmod=+x plugins/*/scripts/*.sh
 
 **File**: commands/project/create_worktree.md
 
-```markdown
+````markdown
 ---
 description: Create git worktree for parallel development
 ---
@@ -642,7 +701,9 @@ description: Create git worktree for parallel development
 # Execute worktree creation
 ./hack/create-worktree.sh "$WORKTREE_NAME" "$BASE_BRANCH"
 ```
-```
+````
+
+````
 
 **Script**: hack/create-worktree.sh (230 lines)
 
@@ -660,7 +721,8 @@ description: Create git worktree for parallel development
 
 # Execute worktree creation
 "${CLAUDE_PLUGIN_ROOT}/scripts/create-worktree.sh" "$WORKTREE_NAME" "$BASE_BRANCH"
-```
+````
+
 ```
 
 **Script**: plugins/pm/scripts/create-worktree.sh (same 230 lines, no changes)
@@ -705,3 +767,4 @@ description: Create git worktree for parallel development
 - Standard plugin pattern
 
 **Next steps**: Implement the checklist above to complete the script packaging for the Catalyst plugin structure.
+```

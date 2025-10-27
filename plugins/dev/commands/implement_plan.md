@@ -142,6 +142,7 @@ Current usage: {X}% ({Y}K/{Z}K tokens)
 **Creating a Handoff**:
 
 When recommending a handoff, guide the user:
+
 1. Offer to create the handoff using `/create-handoff`
 2. Or create a manual handoff following the timestamp convention
 3. Handoff filename format: `thoughts/shared/handoffs/{ticket}/YYYY-MM-DD_HH-MM-SS_description.md`

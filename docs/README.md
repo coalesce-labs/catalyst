@@ -1,6 +1,7 @@
 # Documentation Index
 
-Catalyst is a Claude Code workspace system built on a three-layer memory architecture. This index helps you find the documentation you need.
+Catalyst is a Claude Code workspace system built on a three-layer memory architecture. This index
+helps you find the documentation you need.
 
 ## Core Concepts
 
@@ -16,7 +17,8 @@ Catalyst is a Claude Code workspace system built on a three-layer memory archite
 research → plan → branch/worktree → implement → validate → merge_pr
 ```
 
-**Multiple Projects**: Work on separate projects (work/personal, different clients) with isolated contexts via different HumanLayer configs.
+**Multiple Projects**: Work on separate projects (work/personal, different clients) with isolated
+contexts via different HumanLayer configs.
 
 See [CLAUDE.md](../CLAUDE.md) for complete architecture details.
 
@@ -37,14 +39,18 @@ See [CLAUDE.md](../CLAUDE.md) for complete architecture details.
 ### Setup & Configuration
 
 #### [CONFIGURATION.md](CONFIGURATION.md)
-Configuration file structure, ticket prefixes, Linear integration, thoughts system, per-project HumanLayer config.
+
+Configuration file structure, ticket prefixes, Linear integration, thoughts system, per-project
+HumanLayer config.
 
 **Read this when**: Setting up a new project or configuring integrations.
 
 ---
 
 #### [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md)
-Managing multiple client configurations, switching configs, separate thoughts repositories per client.
+
+Managing multiple client configurations, switching configs, separate thoughts repositories per
+client.
 
 **Read this when**: Working across multiple clients/projects simultaneously.
 
@@ -53,6 +59,7 @@ Managing multiple client configurations, switching configs, separate thoughts re
 ### Workflow & Usage
 
 #### [USAGE.md](USAGE.md)
+
 Core workflow commands, installation, thoughts system, Linear integration, common workflows.
 
 **Read this when**: Learning the system or looking up command usage.
@@ -60,6 +67,7 @@ Core workflow commands, installation, thoughts system, Linear integration, commo
 ---
 
 #### [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md)
+
 Agent patterns, documentarian philosophy, spawning parallel agents, creating custom agents.
 
 **Read this when**: Using agents effectively or creating new ones.
@@ -67,6 +75,7 @@ Agent patterns, documentarian philosophy, spawning parallel agents, creating cus
 ---
 
 #### [BEST_PRACTICES.md](BEST_PRACTICES.md)
+
 Research → Plan → Implement → Validate workflow, context management, handoffs, ticket management.
 
 **Read this when**: Learning effective workflow patterns.
@@ -74,6 +83,7 @@ Research → Plan → Implement → Validate workflow, context management, hando
 ---
 
 #### [PATTERNS.md](PATTERNS.md)
+
 Parallel development, feature branches, worktrees, documentation patterns, testing workflows.
 
 **Read this when**: Looking for concrete usage examples.
@@ -81,7 +91,9 @@ Parallel development, feature branches, worktrees, documentation patterns, testi
 ---
 
 #### [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
-Discovering and importing workflows from external repositories using `/discover-workflows`, `/import-workflow`, `/create-workflow`.
+
+Discovering and importing workflows from external repositories using `/discover-workflows`,
+`/import-workflow`, `/create-workflow`.
 
 **Read this when**: Extending Catalyst with new workflows.
 
@@ -90,6 +102,7 @@ Discovering and importing workflows from external repositories using `/discover-
 ### Integrations
 
 #### [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md)
+
 Linear integration setup, workflow status automation, ticket creation, status progression.
 
 **Read this when**: Integrating with Linear or automating ticket workflows.
@@ -97,13 +110,16 @@ Linear integration setup, workflow status automation, ticket creation, status pr
 ---
 
 #### [DEEPWIKI_INTEGRATION.md](DEEPWIKI_INTEGRATION.md)
-External research using DeepWiki, researching external repositories, learning from open-source patterns.
+
+External research using DeepWiki, researching external repositories, learning from open-source
+patterns.
 
 **Read this when**: Researching how external projects implement features.
 
 ---
 
 #### [HUMANLAYER_COMMANDS_ANALYSIS.md](HUMANLAYER_COMMANDS_ANALYSIS.md)
+
 Analysis of HumanLayer command patterns, adaptation patterns, command structure comparison.
 
 **Read this when**: Understanding origins of workspace commands.
@@ -113,6 +129,7 @@ Analysis of HumanLayer command patterns, adaptation patterns, command structure 
 ### Technical
 
 #### [CONTEXT_ENGINEERING.md](CONTEXT_ENGINEERING.md)
+
 Context budgets, just-in-time loading, sub-agent architecture, handoff strategies.
 
 **Read this when**: Optimizing context usage or understanding architectural decisions.
@@ -120,6 +137,7 @@ Context budgets, just-in-time loading, sub-agent architecture, handoff strategie
 ---
 
 #### [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md)
+
 YAML frontmatter validation, required fields, valid categories/tools, validation rules.
 
 **Read this when**: Creating new agents/commands or debugging frontmatter issues.
@@ -128,13 +146,18 @@ YAML frontmatter validation, required fields, valid categories/tools, validation
 
 ## By User Type
 
-**First-Time Users**: [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md) → [BEST_PRACTICES.md](BEST_PRACTICES.md)
+**First-Time Users**: [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md) →
+[BEST_PRACTICES.md](BEST_PRACTICES.md)
 
-**Plugin Developers**: [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) → [FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md) → [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
+**Plugin Developers**: [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) →
+[FRONTMATTER_STANDARD.md](FRONTMATTER_STANDARD.md) →
+[WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
 
-**Multiple Clients**: [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) → [CONFIGURATION.md](CONFIGURATION.md)
+**Multiple Clients**: [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) →
+[CONFIGURATION.md](CONFIGURATION.md)
 
-**Integration Specialists**: [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md) → [DEEPWIKI_INTEGRATION.md](DEEPWIKI_INTEGRATION.md)
+**Integration Specialists**: [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md) →
+[DEEPWIKI_INTEGRATION.md](DEEPWIKI_INTEGRATION.md)
 
 ---
 
@@ -144,7 +167,8 @@ YAML frontmatter validation, required fields, valid categories/tools, validation
 
 **Daily Development**: [BEST_PRACTICES.md](BEST_PRACTICES.md) → [PATTERNS.md](PATTERNS.md)
 
-**Creating Workflows**: [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) → [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
+**Creating Workflows**: [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) →
+[WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
 
 **Troubleshooting**: [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md)
 
@@ -153,19 +177,23 @@ YAML frontmatter validation, required fields, valid categories/tools, validation
 ## Additional Resources
 
 **Parent Directory**:
+
 - [../README.md](../README.md) - Overview
 - [../QUICKSTART.md](../QUICKSTART.md) - 5-minute setup
 - [../CLAUDE.md](../CLAUDE.md) - Full architecture (read this!)
 - [../COMMANDS_ANALYSIS.md](../COMMANDS_ANALYSIS.md) - Command catalog
 
 **Plugin Documentation**:
+
 - [../plugins/dev/README.md](../plugins/dev/README.md) - Development plugin
 - [../plugins/meta/README.md](../plugins/meta/README.md) - Meta plugin
 
 **Setup Scripts**:
+
 - [../scripts/README.md](../scripts/README.md) - One-time setup utilities
 
 **External**:
+
 - [Claude Code Documentation](https://docs.claude.com/en/docs/claude-code)
 - [Linear API](https://developers.linear.app/)
 - [HumanLayer](https://github.com/humanlayer/humanlayer)
@@ -175,12 +203,14 @@ YAML frontmatter validation, required fields, valid categories/tools, validation
 ## Need Help?
 
 **Can't find what you need?**
+
 - Check [../README.md](../README.md) for overview
 - Check [../CLAUDE.md](../CLAUDE.md) for architecture
 - Review [USAGE.md](USAGE.md) troubleshooting section
 - Search: `grep -r "search term" docs/`
 
 **Found an issue?**
+
 - Update the relevant document
 - Run `/validate-frontmatter` for agent/command changes
 - Create Linear ticket with `/linear` for larger tasks

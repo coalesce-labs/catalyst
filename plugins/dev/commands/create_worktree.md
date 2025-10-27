@@ -41,7 +41,8 @@ When this command is invoked:
 
 4. **Initialize thoughts** (REQUIRED - handled automatically by script):
 
-   The create-worktree.sh script automatically initializes thoughts and syncs with the shared repository, giving the worktree access to:
+   The create-worktree.sh script automatically initializes thoughts and syncs with the shared
+   repository, giving the worktree access to:
    - Shared research documents
    - Implementation plans
    - Handoff documents
@@ -64,15 +65,18 @@ export GITHUB_SOURCE_ROOT="$HOME/code-repos/github"
 ```
 
 **Convention**:
+
 - **Main repository**: `${GITHUB_SOURCE_ROOT}/<org>/<repo>`
   - Example: `~/code-repos/github/coalesce-labs/catalyst`
 - **Worktrees**: `${GITHUB_SOURCE_ROOT}/<org>/<repo>-worktrees/<feature>`
   - Example: `~/code-repos/github/coalesce-labs/catalyst-worktrees/PROJ-123`
 
 **Fallback behavior** (if `GITHUB_SOURCE_ROOT` not set):
+
 - Defaults to `~/wt/<repo_name>/<worktree_name>`
 
 **Why this convention?**
+
 - ✅ Main branches and worktrees are organized together by org/repo
 - ✅ Easy to find: all worktrees for a project in one place
 - ✅ Clean separation: `<repo>` vs `<repo>-worktrees`
@@ -80,6 +84,7 @@ export GITHUB_SOURCE_ROOT="$HOME/code-repos/github"
 - ✅ No hardcoded paths in scripts or documentation
 
 **Example with GITHUB_SOURCE_ROOT**:
+
 ```
 ~/code-repos/github/
 ├── coalesce-labs/

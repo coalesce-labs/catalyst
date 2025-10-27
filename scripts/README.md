@@ -1,8 +1,11 @@
 # scripts/ Directory: One-Time Setup Utilities
 
-This directory contains **one-time setup scripts** for initializing HumanLayer thoughts and Linear workflows. These scripts are **not bundled in the Catalyst plugin** - they're used during initial setup only.
+This directory contains **one-time setup scripts** for initializing HumanLayer thoughts and Linear
+workflows. These scripts are **not bundled in the Catalyst plugin** - they're used during initial
+setup only.
 
-**Note**: Runtime scripts (workflow-context.sh, check-prerequisites.sh, create-worktree.sh, etc.) are bundled in the plugin at `plugins/dev/scripts/` and `plugins/meta/scripts/`.
+**Note**: Runtime scripts (workflow-context.sh, check-prerequisites.sh, create-worktree.sh, etc.)
+are bundled in the plugin at `plugins/dev/scripts/` and `plugins/meta/scripts/`.
 
 ## Directory Structure
 
@@ -35,6 +38,7 @@ pip install humanlayer  # or: pipx install humanlayer
 ```
 
 **What it does**:
+
 - Creates `~/.config/humanlayer/config.json`
 - Initializes `~/thoughts/` repository
 - Configures your username
@@ -53,6 +57,7 @@ pip install humanlayer  # or: pipx install humanlayer
 ```
 
 **Arguments**:
+
 - `project_path` - Path to project (default: current directory)
 - `directory_name` - Name for thoughts directory (optional, prompts if omitted)
 - `config_name` - HumanLayer config to use (e.g., "acme", "coalesce-labs")
@@ -68,6 +73,7 @@ pip install humanlayer  # or: pipx install humanlayer
 ```
 
 **What it does**:
+
 - Creates `<project>/thoughts/` symlink to central repo
 - Uses `--config-file` to specify which HumanLayer config
 - Stores `configName` in `.claude/config.json` for per-project config
@@ -76,6 +82,7 @@ pip install humanlayer  # or: pipx install humanlayer
 **Per-Project Configuration**:
 
 When you provide a `config_name`, the script:
+
 1. Uses `~/.config/humanlayer/config-{name}.json` for initialization
 2. Stores `configName` in `.claude/config.json`:
    ```json
@@ -88,6 +95,7 @@ When you provide a `config_name`, the script:
 3. All Catalyst commands will automatically use this config
 
 **Benefits**:
+
 - ✅ Each project declares its HumanLayer config
 - ✅ Work on multiple projects simultaneously (personal + client)
 - ✅ No manual config switching needed
@@ -116,6 +124,7 @@ When you provide a `config_name`, the script:
 ```
 
 **What it does**:
+
 - Creates `~/.config/humanlayer/config-{client-name}.json`
 - Optionally creates thoughts repository at specified path
 - Optionally creates private GitHub repository
@@ -134,6 +143,7 @@ When you provide a `config_name`, the script:
 ```
 
 **What it does**:
+
 - Creates separate personal thoughts config
 - Distinguishes personal vs client contexts
 - For consultants managing multiple contexts
@@ -153,6 +163,7 @@ When you provide a `config_name`, the script:
 ```
 
 **What it does**:
+
 - Creates GraphQL mutation file at `/tmp/linear-workflow-setup.graphql`
 - Defines workflow statuses:
   - Backlog → Triage → Research → Planning → In Progress → In Review → Done
@@ -250,6 +261,7 @@ These scripts used to be in `scripts/` but are now bundled in the Catalyst plugi
 - ❌ `validate-frontmatter.sh` → `plugins/meta/scripts/validate-frontmatter.sh`
 
 **Use commands instead**:
+
 - `/create-worktree` - Creates worktrees
 - `/validate-frontmatter` - Validates frontmatter
 

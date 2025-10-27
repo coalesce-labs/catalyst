@@ -19,7 +19,6 @@ runtimes:
 lint:
   enabled:
     - checkov@3.2.477
-    - frontmatter-validator@SYSTEM
     - git-diff-check
     - markdownlint@0.45.0
     - prettier@3.6.2
@@ -31,24 +30,9 @@ lint:
     - linters: [shellcheck, shfmt]
       paths:
         # Scripts with ANSI color codes that confuse shellcheck's parser
-        - hack/create-worktree.sh
-        - hack/install-user.sh
-        - hack/setup-personal-thoughts.sh
-        - hack/update-project.sh
-  definitions:
-    - name: frontmatter-validator
-      files: [markdown]
-      commands:
-        - name: lint
-          run: hack/validate-frontmatter.sh ${target}
-          output: pass_fail
-          success_codes: [0, 1]
-          read_output_from: stdout
-      suggest_if: files_present
-      affects_cache:
-        - hack/validate-frontmatter.sh
-      direct_configs:
-        - .claude/config.json
+        - scripts/humanlayer/setup-personal-thoughts.sh
+        - scripts/humanlayer/setup-thoughts.sh
+        - scripts/humanlayer/init-project.sh
 actions:
   enabled:
     - trunk-upgrade-available

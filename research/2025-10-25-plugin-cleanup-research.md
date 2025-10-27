@@ -1,7 +1,7 @@
 # Plugin Cleanup & Worktree Workflow Research
 
-**Date**: 2025-10-25
-**Purpose**: Research how to clean up source directories and optimize worktree workflow with plugins
+**Date**: 2025-10-25 **Purpose**: Research how to clean up source directories and optimize worktree
+workflow with plugins
 
 ## Current State Analysis
 
@@ -10,6 +10,7 @@
 **Location**: `.claude/.workflow-context.json` (gitignored)
 
 **Purpose**: Tracks workflow documents across sessions:
+
 ```json
 {
   "lastUpdated": "2025-10-13T23:21:52Z",
@@ -32,6 +33,7 @@
 **Management Script**: `hack/workflow-context.sh` (copied to `plugins/dev/scripts/`)
 
 **Commands Using It**:
+
 - `implement_plan` - Gets most recent plan if no arg provided
 - `create_plan` - Adds plan to context
 - `create_pr` - Adds PR to context
@@ -40,6 +42,7 @@
 - `create_handoff` - Adds handoff to context
 
 **Commands NOT Using It (but should)**:
+
 - `validate_plan` - Could get most recent plan from context
 - `create_pr` - Could read all context docs for better PR description
 - Various commands could default to context when no args provided
@@ -47,6 +50,7 @@
 ### Directory Structure
 
 **Source Directories** (in repo root):
+
 ```
 commands/          # 7 namespace directories
 agents/            # 11 agent files
@@ -54,6 +58,7 @@ hack/              # 16 utility scripts
 ```
 
 **Plugin Directories**:
+
 ```
 plugins/dev/commands/    # 18 commands
 plugins/dev/agents/      # 11 agents
@@ -62,6 +67,7 @@ plugins/meta/commands/   # 5 commands
 ```
 
 **Local .claude/ Installation**:
+
 ```
 .claude/
 ├── agents/              # OLD installation (should delete)
@@ -74,16 +80,19 @@ plugins/meta/commands/   # 5 commands
 ### Claude Code Plugin Architecture (from docs)
 
 **Per-Workspace**:
+
 - `.claude/commands/` - Project-specific, committed to repo
 - `.claude/agents/` - Project-specific, committed to repo
 - `.claude/config.json` - Project config
 - `.claude/.workflow-context.json` - Project state (gitignored)
 
 **Global**:
+
 - `~/.claude/commands/` - User-level commands
 - `~/.claude/agents/` - User-level agents
 
 **Plugins** (marketplace):
+
 - Installed per-workspace
 - Located in `.claude-plugins/` or similar
 - Can be shared across workspaces via marketplace
@@ -93,6 +102,7 @@ plugins/meta/commands/   # 5 commands
 ### Problem
 
 When creating a worktree for parallel work:
+
 1. Plugin installation state is unclear
 2. Config/context files don't transfer
 3. Thoughts system needs init in new directory
@@ -100,6 +110,7 @@ When creating a worktree for parallel work:
 ### Current create_worktree.md Approach
 
 Creates worktree but doesn't:
+
 - ❌ Copy `.claude/config.json`
 - ❌ Copy `.claude/.workflow-context.json`
 - ❌ Init thoughts in new worktree
@@ -109,6 +120,7 @@ Creates worktree but doesn't:
 ### Proposed Solution
 
 **Option 1: Copy Everything**
+
 ```bash
 # After creating worktree
 cp -r .claude/config.json ../worktree-dir/.claude/
@@ -119,20 +131,23 @@ humanlayer thoughts init
 ```
 
 **Option 2: Symlink State**
+
 ```bash
 # Symlink shared state but keep separate workspace config
 ln -s $(pwd)/.claude/.workflow-context.json ../worktree-dir/.claude/
 ln -s $(pwd)/.claude/config.json ../worktree-dir/.claude/
 ```
 
-**Option 3: Shared .claude/ (Recommended)**
-Since worktrees share `.git/`, they could share `.claude/`:
+**Option 3: Shared .claude/ (Recommended)** Since worktrees share `.git/`, they could share
+`.claude/`:
+
 ```bash
 # In worktree, symlink to main .claude
 ln -s ../main-repo/.claude ../worktree-dir/.claude
 ```
 
 This would give all worktrees:
+
 - ✅ Same plugin installation
 - ✅ Shared workflow context
 - ✅ Shared config
@@ -143,6 +158,7 @@ This would give all worktrees:
 **Current Issue**: thoughts/ is symlinked per-project
 
 **Solution**: Thoughts are already centralized at `~/thoughts/repos/{project}/`
+
 - Each worktree can `humanlayer thoughts init` pointing to same project
 - OR symlink thoughts/ from main worktree
 - Shared memory works across all worktrees automatically!
@@ -152,18 +168,21 @@ This would give all worktrees:
 ### Files to DELETE
 
 **Source directories** (duplicated in plugins/):
+
 ```bash
 rm -rf commands/      # 7 namespaces → plugins/dev/commands/
 rm -rf agents/        # 11 agents → plugins/dev/agents/
 ```
 
 **Keep hack/** because:
+
 - Development/setup scripts
 - install-user.sh, install-project.sh
 - setup-thoughts.sh
 - Not runtime, used for workspace maintenance
 
 **Local .claude/ cleanup**:
+
 ```bash
 rm -rf .claude/agents/
 rm -rf .claude/commands/
@@ -171,6 +190,7 @@ rm -rf .claude/commands/
 ```
 
 Then install our own plugin:
+
 ```bash
 /plugin marketplace add coalesce-labs/catalyst
 /plugin install catalyst-dev
@@ -179,6 +199,7 @@ Then install our own plugin:
 ### Documentation to UPDATE
 
 **QUICKSTART.md**: ❌ Currently shows clone & install scripts
+
 - Should show plugin installation
 - Should explain thoughts setup (still needed)
 - Should show first workflow use
@@ -190,12 +211,14 @@ Then install our own plugin:
 ### Commands that should use workflow-context.json
 
 **validate_plan**:
+
 ```bash
 # If no plan file argument
 PLAN_FILE=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
 ```
 
 **create_pr**:
+
 ```bash
 # Read all context for comprehensive PR description
 PLAN=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
@@ -204,12 +227,14 @@ HANDOFFS=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ticket "$TICKET")
 ```
 
 **implement_plan** (already has it):
+
 ```bash
 # Already uses context for default plan
 PLAN_FILE=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
 ```
 
 **resume_handoff** (already checks, but could be smarter):
+
 ```bash
 # Could use ticket from branch name to find right handoff
 TICKET=$(git branch --show-current | grep -oE '[A-Z]+-[0-9]+')
@@ -219,28 +244,33 @@ HANDOFF=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ticket "$TICKET")
 ## Implementation Priority
 
 ### Phase 1: Research Complete ✅
+
 - Understand current state
 - Document findings
 - Create plan
 
 ### Phase 2: Enhance Context Integration
+
 1. Update `validate_plan` to use context
 2. Update `create_pr` to read all context
 3. Update `resume_handoff` to use ticket-based lookup
 4. Test context integration
 
 ### Phase 3: Update Documentation
+
 1. Rewrite QUICKSTART.md for plugin installation
 2. Update all docs mentioning clone/install
 3. Add worktree workflow guide
 
 ### Phase 4: Update create_worktree
+
 1. Add .claude/ symlinking option
 2. Add thoughts init
 3. Add plugin install instructions
 4. Test worktree workflow
 
 ### Phase 5: Cleanup
+
 1. Delete commands/ and agents/ source directories
 2. Clean local .claude/
 3. Install our own plugin

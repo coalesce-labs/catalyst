@@ -13,7 +13,8 @@ status: ready-for-implementation
 
 **Research is part of the dev workflow, not separate.**
 
-Research is the first step in solving a problem - whether implementing a feature, fixing a bug, or just understanding something. It's not a standalone activity; it's how dev work begins.
+Research is the first step in solving a problem - whether implementing a feature, fixing a bug, or
+just understanding something. It's not a standalone activity; it's how dev work begins.
 
 ## Final Plugin Structure (3 Plugins)
 
@@ -24,6 +25,7 @@ Research is the first step in solving a problem - whether implementing a feature
 **What it contains**:
 
 **Agents (6)**:
+
 - `codebase-locator` - Find WHERE code lives
 - `codebase-analyzer` - Understand HOW code works
 - `codebase-pattern-finder` - Find existing patterns
@@ -32,6 +34,7 @@ Research is the first step in solving a problem - whether implementing a feature
 - `external-research` - Research external repos
 
 **Commands (13)**:
+
 - `/research-codebase` - Start with understanding (spawns agents)
 - `/create-plan` - Plan the solution
 - `/implement-plan` - Build it
@@ -47,11 +50,13 @@ Research is the first step in solving a problem - whether implementing a feature
 - `/workflow-help` - Interactive guidance
 
 **Scripts**:
+
 - `scripts/check-prerequisites.sh` - Verify HumanLayer CLI, jq, thoughts system
 - `scripts/create-worktree.sh` - Worktree creation
 - `scripts/frontmatter-utils.sh` - YAML utilities
 
 **Prerequisites**:
+
 - **Required**: HumanLayer CLI (`humanlayer` command)
 - **Required**: jq (JSON processor)
 - **Required**: Thoughts system initialized (`humanlayer thoughts init`)
@@ -59,7 +64,8 @@ Research is the first step in solving a problem - whether implementing a feature
 
 **Who uses it**: All developers - the complete workflow
 
-**Value proposition**: "Everything from understanding code to shipping features with Linear automation"
+**Value proposition**: "Everything from understanding code to shipping features with Linear
+automation"
 
 ---
 
@@ -68,10 +74,12 @@ Research is the first step in solving a problem - whether implementing a feature
 **Tagline**: "Context persistence across sessions"
 
 **What it contains**:
+
 - **2 commands**: `/create-handoff`, `/resume-handoff`
 - **1 script**: `scripts/check-prerequisites.sh`
 
 **Prerequisites**:
+
 - **Required**: HumanLayer CLI
 - **Required**: Thoughts system initialized
 
@@ -86,6 +94,7 @@ Research is the first step in solving a problem - whether implementing a feature
 **Tagline**: "Learn from the community and create workflows"
 
 **What it contains**:
+
 - **5 commands**:
   - `/discover-workflows` - Research external Claude Code repos
   - `/import-workflow` - Import and adapt workflows
@@ -106,7 +115,8 @@ Research is the first step in solving a problem - whether implementing a feature
 
 ### Problem
 
-Commands need to verify that required tools are installed before execution. Current approach uses `check-prerequisites.sh` script.
+Commands need to verify that required tools are installed before execution. Current approach uses
+`check-prerequisites.sh` script.
 
 ### Solution: Multi-Layer Checking
 
@@ -116,7 +126,7 @@ Commands need to verify that required tools are installed before execution. Curr
 
 **Implementation**: Add to plugin.json (if supported) or show in README:
 
-```markdown
+````markdown
 # catalyst-dev Plugin
 
 ## Prerequisites
@@ -129,8 +139,10 @@ Before using this plugin, ensure these tools are installed:
    # OR
    curl -fsSL https://humanlayer.dev/install.sh | sh
    ```
+````
 
 2. **jq** (required)
+
    ```bash
    brew install jq
    # OR
@@ -138,20 +150,22 @@ Before using this plugin, ensure these tools are installed:
    ```
 
 3. **Initialize thoughts system** (required)
+
    ```bash
    humanlayer thoughts init
    ```
 
-4. **Linear MCP** (optional - for Linear integration)
-   Configure in Claude Code settings
+4. **Linear MCP** (optional - for Linear integration) Configure in Claude Code settings
 
 ## Verification
 
 Run this to check your setup:
+
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh"
 ```
-```
+
+````
 
 #### Layer 2: Runtime Checking (Per Command)
 
@@ -166,7 +180,7 @@ if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
 fi
 
 # Rest of command logic...
-```
+````
 
 **Script behavior** (`check-prerequisites.sh`):
 
@@ -236,6 +250,7 @@ fi
 ### Commands That Need Prerequisite Checks
 
 **catalyst-dev**:
+
 - `/research-codebase` ✅ Requires HumanLayer, jq, thoughts
 - `/create-plan` ✅ Requires HumanLayer, jq, thoughts
 - `/implement-plan` ✅ Requires HumanLayer, jq, thoughts
@@ -251,23 +266,27 @@ fi
 - `/workflow-help` ❌ No special requirements
 
 **catalyst-handoff**:
+
 - `/create-handoff` ✅ Requires HumanLayer, jq, thoughts
 - `/resume-handoff` ✅ Requires HumanLayer, jq, thoughts
 
 **catalyst-meta**:
+
 - All commands ❌ No special requirements (use standard Claude tools)
 
 ### Implementation Strategy
 
-**Option A: Per-Command Checking (Current Pattern)**
-Each command calls `check-prerequisites.sh` independently.
+**Option A: Per-Command Checking (Current Pattern)** Each command calls `check-prerequisites.sh`
+independently.
 
 **Pros**:
+
 - Fine-grained control
 - Clear which commands need what
 - Existing pattern in codebase
 
 **Cons**:
+
 - Repeated checks if running multiple commands
 - User sees check output every time
 
@@ -275,14 +294,15 @@ Each command calls `check-prerequisites.sh` independently.
 
 ---
 
-**Option B: Plugin-Level Check on Install**
-Check once when plugin installed, cache result.
+**Option B: Plugin-Level Check on Install** Check once when plugin installed, cache result.
 
 **Pros**:
+
 - Check once, run many times
 - Better user experience
 
 **Cons**:
+
 - Claude Code plugin system may not support install hooks
 - Prerequisites could change after install
 
@@ -290,13 +310,15 @@ Check once when plugin installed, cache result.
 
 ---
 
-**Option C: Lazy Checking (Check Only When Needed)**
-Commands check only when actually calling HumanLayer/thoughts.
+**Option C: Lazy Checking (Check Only When Needed)** Commands check only when actually calling
+HumanLayer/thoughts.
 
 **Pros**:
+
 - No overhead if feature not used
 
 **Cons**:
+
 - Late failure (user starts work, then fails)
 - Confusing error messages mid-execution
 
@@ -481,13 +503,14 @@ catalyst/
 ### First-Time User
 
 **Step 1: Install Plugin**
+
 ```bash
 /plugin marketplace add coalesce-labs/catalyst
 /plugin install catalyst-dev@catalyst
 ```
 
-**Step 2: See Setup Instructions**
-Plugin README automatically shown after install (if Claude Code supports it), or user reads it:
+**Step 2: See Setup Instructions** Plugin README automatically shown after install (if Claude Code
+supports it), or user reads it:
 
 ```
 🎉 catalyst-dev installed!
@@ -509,17 +532,17 @@ Verify setup:
 Documentation: https://github.com/coalesce-labs/catalyst#setup
 ```
 
-**Step 3: Install Prerequisites**
-User follows instructions, installs tools.
+**Step 3: Install Prerequisites** User follows instructions, installs tools.
 
-**Step 4: Verify Setup**
-User can manually verify (optional):
+**Step 4: Verify Setup** User can manually verify (optional):
+
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh"
 ```
 
-**Step 5: Use Commands**
-Commands automatically check prerequisites and fail with helpful message if missing:
+**Step 5: Use Commands** Commands automatically check prerequisites and fail with helpful message if
+missing:
+
 ```bash
 /research-codebase
 
@@ -561,7 +584,8 @@ Install with: brew install humanlayer/tap/humanlayer
 }
 ```
 
-**Note**: No explicit prerequisite declaration in plugin.json (not supported by Claude Code plugin system yet). Prerequisites documented in README and checked at runtime.
+**Note**: No explicit prerequisite declaration in plugin.json (not supported by Claude Code plugin
+system yet). Prerequisites documented in README and checked at runtime.
 
 ### catalyst-handoff/plugin.json
 
@@ -577,11 +601,7 @@ Install with: brew install humanlayer/tap/humanlayer
   "homepage": "https://github.com/coalesce-labs/catalyst",
   "repository": "https://github.com/coalesce-labs/catalyst",
   "license": "MIT",
-  "keywords": [
-    "context",
-    "handoff",
-    "persistence"
-  ]
+  "keywords": ["context", "handoff", "persistence"]
 }
 ```
 
@@ -599,13 +619,7 @@ Install with: brew install humanlayer/tap/humanlayer
   "homepage": "https://github.com/coalesce-labs/catalyst",
   "repository": "https://github.com/coalesce-labs/catalyst",
   "license": "MIT",
-  "keywords": [
-    "meta",
-    "discovery",
-    "creation",
-    "validation",
-    "best-practices"
-  ]
+  "keywords": ["meta", "discovery", "creation", "validation", "best-practices"]
 }
 ```
 
@@ -614,6 +628,7 @@ Install with: brew install humanlayer/tap/humanlayer
 ## Installation Scenarios
 
 ### Scenario 1: "I want the full workflow"
+
 ```bash
 /plugin marketplace add coalesce-labs/catalyst
 /plugin install catalyst-dev@catalyst
@@ -628,6 +643,7 @@ humanlayer thoughts init
 ---
 
 ### Scenario 2: "I also hit context limits"
+
 ```bash
 /plugin install catalyst-dev@catalyst
 /plugin install catalyst-handoff@catalyst
@@ -638,6 +654,7 @@ humanlayer thoughts init
 ---
 
 ### Scenario 3: "I want to learn and create workflows"
+
 ```bash
 /plugin install catalyst-meta@catalyst
 ```
@@ -650,7 +667,7 @@ humanlayer thoughts init
 
 ### Main README.md
 
-```markdown
+````markdown
 # Catalyst
 
 Production-ready AI-assisted development workflows.
@@ -662,8 +679,10 @@ Production-ready AI-assisted development workflows.
    /plugin marketplace add coalesce-labs/catalyst
    /plugin install catalyst-dev@catalyst
    ```
+````
 
 2. Install prerequisites:
+
    ```bash
    # macOS
    brew install humanlayer/tap/humanlayer jq
@@ -674,6 +693,7 @@ Production-ready AI-assisted development workflows.
    ```
 
 3. Initialize thoughts system:
+
    ```bash
    humanlayer thoughts init
    ```
@@ -686,13 +706,15 @@ Production-ready AI-assisted development workflows.
 ## Prerequisites
 
 catalyst-dev requires:
+
 - ✅ HumanLayer CLI
 - ✅ jq
 - ✅ Thoughts system initialized
 - ⚠️ Linear MCP (optional)
 
 See [SETUP.md](docs/SETUP.md) for detailed instructions.
-```
+
+````
 
 ### plugins/dev/scripts/README.md
 
@@ -711,13 +733,15 @@ Verifies that required tools are installed before command execution.
 **Usage**:
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh"
-```
+````
 
 **Exit codes**:
+
 - 0: All prerequisites met
 - 1: Missing prerequisites (shows installation instructions)
 
 **Called by**:
+
 - /research-codebase
 - /create-plan
 - /implement-plan
@@ -729,6 +753,7 @@ Verifies that required tools are installed before command execution.
 
 If you see prerequisite errors, follow the instructions in the output or see:
 https://github.com/coalesce-labs/catalyst#setup
+
 ```
 
 ---
@@ -751,3 +776,4 @@ https://github.com/coalesce-labs/catalyst#setup
 **Ready for**: `/create-plan` to implement this structure
 
 **No more questions** - this is the final aligned structure! 🎉
+```

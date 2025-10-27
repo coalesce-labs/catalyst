@@ -1,0 +1,22 @@
+{
+  "name": "catalyst-debugging",
+  "version": "1.0.0",
+  "description": "Production error monitoring with Sentry MCP integration. Enable when debugging errors, analyzing stack traces, and investigating incidents. ~20k context tokens when enabled.",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": "https://github.com/coalesce-labs/catalyst.git",
+  "keywords": [
+    "debugging",
+    "sentry",
+    "errors",
+    "monitoring",
+    "incidents",
+    "stack-traces",
+    "production"
+  ],
+  "license": "MIT"
+}

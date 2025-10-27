@@ -669,15 +669,18 @@ Verifies implementation correctness and identifies deviations.
 
 ## Workflow State Management
 
-Catalyst automatically tracks your workflow state in `.claude/.workflow-context.json` to enable intelligent command chaining.
+Catalyst automatically tracks your workflow state in `.claude/.workflow-context.json` to enable
+intelligent command chaining.
 
 ### What is workflow-context.json?
 
-A local file that tracks recent workflow documents (research, plans, handoffs, PRs) so commands can auto-discover them without manual file paths.
+A local file that tracks recent workflow documents (research, plans, handoffs, PRs) so commands can
+auto-discover them without manual file paths.
 
 **Location**: `.claude/.workflow-context.json` (per-worktree, not committed to git)
 
 **Structure**:
+
 ```json
 {
   "lastUpdated": "2025-10-26T10:30:00Z",
@@ -745,36 +748,40 @@ A local file that tracks recent workflow documents (research, plans, handoffs, P
 ### Manual Management
 
 **View context**:
+
 ```bash
 cat .claude/.workflow-context.json | jq
 ```
 
 **Initialize context** (normally automatic):
+
 ```bash
 plugins/dev/scripts/workflow-context.sh init
 ```
 
 **Add document manually** (normally automatic):
+
 ```bash
 plugins/dev/scripts/workflow-context.sh add plans thoughts/shared/plans/my-plan.md PROJ-123
 ```
 
 **Get most recent plan**:
+
 ```bash
 plugins/dev/scripts/workflow-context.sh recent plans
 ```
 
 **Get all documents for ticket**:
+
 ```bash
 plugins/dev/scripts/workflow-context.sh ticket PROJ-123
 ```
 
 ### Benefits
 
-✅ **No manual paths**: Commands remember your work
-✅ **Seamless chaining**: Research → Plan → Implement flows naturally
-✅ **Per-worktree**: Each worktree has independent workflow state
-✅ **Automatic**: Updated by commands, no user intervention needed
+✅ **No manual paths**: Commands remember your work ✅ **Seamless chaining**: Research → Plan →
+Implement flows naturally ✅ **Per-worktree**: Each worktree has independent workflow state ✅
+**Automatic**: Updated by commands, no user intervention needed
 
 ### Worktree Behavior
 

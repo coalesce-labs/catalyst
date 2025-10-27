@@ -9,13 +9,13 @@ status: ready-for-implementation
 
 # Remaining Documentation Work - Implementation Plan
 
-**Date**: 2025-10-26
-**Purpose**: Prioritized plan for fixing remaining documentation issues
+**Date**: 2025-10-26 **Purpose**: Prioritized plan for fixing remaining documentation issues
 **Related**: research/2025-10-26-documentation-audit.md
 
 ## Status
 
 ✅ **CRITICAL ISSUES FIXED** (Committed: a3c5dab)
+
 - QUICKSTART.md - Plugin install, command names, hack/ refs
 - CLAUDE.md - Config schema, installation, hack/ refs
 - README.md - Command naming
@@ -31,6 +31,7 @@ status: ready-for-implementation
 **Where**: QUICKSTART.md, CLAUDE.md, docs/USAGE.md
 
 **What to add**:
+
 ```markdown
 ## Workflow Context Auto-Discovery
 
@@ -44,11 +45,12 @@ Catalyst tracks your workflow automatically via `.claude/.workflow-context.json`
 
 **You don't need to specify file paths** - commands remember your most recent work!
 
-**Location**: `.claude/.workflow-context.json` (gitignored, per-project)
-**Management**: Automatic - you never touch this file directly
+**Location**: `.claude/.workflow-context.json` (gitignored, per-project) **Management**: Automatic -
+you never touch this file directly
 ```
 
 **Files to update**:
+
 - QUICKSTART.md: Add "Tips" section about auto-discovery (DONE in commit a3c5dab)
 - CLAUDE.md: Add to "Key Architecture Concepts" section
 - docs/USAGE.md: Add dedicated section after "Working with Thoughts"
@@ -60,11 +62,13 @@ Catalyst tracks your workflow automatically via `.claude/.workflow-context.json`
 #### 2. Update docs/PATTERNS.md
 
 **Issues**:
+
 - Multiple `hack/` references (need →`scripts/`)
 - Examples use `./hack/install-project.sh`
 - Script-based patterns need plugin updates
 
 **Changes**:
+
 ```bash
 # Find all references
 grep -n "hack/" docs/PATTERNS.md
@@ -81,11 +85,13 @@ grep -n "hack/" docs/PATTERNS.md
 #### 3. Update agents/README.md and plugins/dev/agents/README.md
 
 **Issues**:
+
 - Both have "User Installation" and "Project Installation" sections
 - Reference old install scripts
 - Create confusion about which is source of truth
 
 **Proposed solution**:
+
 - **agents/README.md**: Keep as source documentation
   - Remove installation sections (handled by plugin)
   - Focus on agent purpose and tools
@@ -102,11 +108,13 @@ grep -n "hack/" docs/PATTERNS.md
 #### 4. Update commands/README.md
 
 **Issues**:
+
 - References `./hack/update-project.sh`
 - References `./hack/install-project.sh`
 - Namespace documentation is good but needs plugin context
 
 **Changes**:
+
 - Remove installation references
 - Add "Distribution: Bundled in catalyst-dev plugin"
 - Update examples to use `/command-name` format consistently
@@ -122,32 +130,37 @@ grep -n "hack/" docs/PATTERNS.md
 **Decision needed**: Keep both `commands/` and `plugins/dev/commands/` or consolidate?
 
 **Option A: Keep Both (Recommended)**
+
 - `commands/` = Source for development
 - `plugins/dev/commands/` = Bundled distribution
 - Document sync strategy in CLAUDE.md
 - Add note about editing source files, not plugin files
 
 **Option B: Consolidate**
+
 - Move everything to `plugins/` only
 - Update all references
 - Remove `commands/` and `agents/` directories
 
 **If Option A**:
+
 ```markdown
 ## Source vs Distribution
 
 **Source Files** (`commands/`, `agents/`):
+
 - Edit these when developing Catalyst
 - Changes are manually synced to plugin structure
 - This is where PRs should update
 
 **Plugin Files** (`plugins/dev/`, `plugins/meta/`):
+
 - Distribution copies for plugin system
 - Auto-generated from source (or manually synced for now)
 - Don't edit these directly
 
-**For Catalyst development**: Always edit source files in `commands/` and `agents/`
-**For Catalyst users**: Install via plugin, never see these directories
+**For Catalyst development**: Always edit source files in `commands/` and `agents/` **For Catalyst
+users**: Install via plugin, never see these directories
 ```
 
 **Estimated effort**: 1 hour (documentation + decision making)
@@ -157,6 +170,7 @@ grep -n "hack/" docs/PATTERNS.md
 #### 6. Update Remaining docs/ Files
 
 **Files needing hack/ → scripts/ updates**:
+
 - docs/BEST_PRACTICES.md
 - docs/AGENTIC_WORKFLOW_GUIDE.md
 - docs/MULTI_CONFIG_GUIDE.md
@@ -164,6 +178,7 @@ grep -n "hack/" docs/PATTERNS.md
 - docs/PATTERNS.md (see #2 above)
 
 **Process**:
+
 ```bash
 # For each file
 grep -n "hack/" docs/<file>.md
@@ -189,17 +204,20 @@ grep -n "hack/" docs/<file>.md
 #### 8. Consolidate Linear Documentation
 
 **Files with Linear inconsistencies**:
+
 - docs/LINEAR_WORKFLOW_AUTOMATION.md
 - scripts/setup-linear-workflow
 - commands/linear/linear.md
 - plugins/dev/commands/linear.md
 
 **Issues**:
+
 - Some reference MCP, some reference Linearis CLI
 - Different field names (teamId vs teamKey)
 - setup-linear-workflow uses GraphQL but commands use CLI
 
 **Solution**:
+
 - Update LINEAR_WORKFLOW_AUTOMATION.md to Linearis CLI only
 - Update setup-linear-workflow to use teamKey not TEAM_ID
 - Standardize on Linearis CLI throughout
@@ -222,9 +240,11 @@ grep -n "hack/" docs/<file>.md
 
 Major architectural changes are documented in research/:
 
-- [Plugin Packaging Strategy](research/2025-10-25-claude-code-plugin-packaging-strategy.md) - Why plugins over scripts
+- [Plugin Packaging Strategy](research/2025-10-25-claude-code-plugin-packaging-strategy.md) - Why
+  plugins over scripts
 - [2-Plugin Structure](research/2025-10-25-catalyst-2-plugin-structure.md) - dev vs meta split
-- [Tooling Integration](research/2025-10-25-catalyst-tooling-integration-plan.md) - External services
+- [Tooling Integration](research/2025-10-25-catalyst-tooling-integration-plan.md) - External
+  services
 - [Configuration Strategy](research/2025-10-25-config-file-strategy.md) - Template pattern
 ```
 
@@ -235,10 +255,12 @@ Major architectural changes are documented in research/:
 #### 10. Update CONTRIBUTING.md
 
 **Current issues**:
+
 - Line 20: References git clone
 - Likely has installation instructions
 
 **Changes**:
+
 - Update for plugin development workflow
 - Add section on editing source vs plugin files
 - Document local testing process
@@ -250,9 +272,11 @@ Major architectural changes are documented in research/:
 #### 11. Update commands/dev/commit.md and describe_pr.md
 
 **Issue**: Example commit messages reference old installation
+
 - "docs(hack): add README for installation scripts"
 
 **Solution**: Update examples to current reality
+
 - Plugin-based examples
 - scripts/ not hack/
 
@@ -267,17 +291,21 @@ Major architectural changes are documented in research/:
 **For**: Users upgrading from script-based to plugin-based
 
 **Content**:
-```markdown
+
+````markdown
 # Migrating to Plugin-Based Catalyst
 
 ## From Script Installation
 
 **Old way**:
+
 ```bash
 ./hack/install-user.sh
 ```
+````
 
 **New way**:
+
 ```bash
 /plugin marketplace add coalesce-labs/catalyst
 /plugin install catalyst-dev
@@ -286,12 +314,14 @@ Major architectural changes are documented in research/:
 ## Cleaning Up
 
 **Remove old installation**:
+
 ```bash
 rm -rf ~/.claude/agents/codebase-*
 rm -rf ~/.claude/commands/
 ```
 
 **Keep**:
+
 - `.claude/config.json` (your configuration)
 - `.claude/.workflow-context.json` (your workflow state)
 
@@ -300,7 +330,8 @@ rm -rf ~/.claude/commands/
 - Installation: Script-based → Plugin marketplace
 - Updates: `./hack/update-project.sh` → `/plugin update catalyst-dev`
 - Directory: `hack/` → `scripts/` (setup scripts only)
-```
+
+````
 
 **Estimated effort**: 45 minutes
 
@@ -397,9 +428,10 @@ After each session:
    grep -r "hack/" *.md docs/ commands/ agents/
    grep -r "install-user" *.md docs/
    grep -r "teamId" *.md docs/
-   ```
+````
 
 2. **Check command examples**:
+
    ```bash
    grep -r "/create_plan" *.md docs/  # Should be /create-plan
    ```
@@ -431,4 +463,5 @@ Documentation is "done" when:
 
 ## Next Action
 
-Start with Session 1 (HIGH Priority) when ready. All issues are documented, prioritized, and estimated.
+Start with Session 1 (HIGH Priority) when ready. All issues are documented, prioritized, and
+estimated.

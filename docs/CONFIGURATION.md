@@ -83,18 +83,19 @@ The `/linear` command uses Linearis CLI and requires configuration:
 ```
 
 **Fields**:
+
 - `teamKey` - Your Linear team key (e.g., "ENG", "PROD")
 - `defaultTeam` - Default team name for operations
 - `apiToken` - Linear API token (or set `LINEAR_API_TOKEN` env var)
 - `thoughtsRepoUrl` - GitHub URL for linking docs to Linear tickets
 
 **Installation**:
+
 ```bash
 npm install -g --install-links ryanrozich/linearis#feat/cycles-cli
 ```
 
-**Authentication**:
-Set `LINEAR_API_TOKEN` environment variable or store in `~/.linear_api_token`
+**Authentication**: Set `LINEAR_API_TOKEN` environment variable or store in `~/.linear_api_token`
 
 ### Thoughts Configuration
 
@@ -110,12 +111,14 @@ Set `LINEAR_API_TOKEN` environment variable or store in `~/.linear_api_token`
 ```
 
 **Fields**:
+
 - `user` - Auto-detected from HumanLayer config (don't set manually)
 - `configName` - Which HumanLayer config to use (e.g., "acme", "coalesce-labs", "acme")
 
 **How it works**:
 
 When `configName` is set, Catalyst commands automatically use:
+
 ```
 ~/.config/humanlayer/config-{configName}.json
 ```
@@ -123,6 +126,7 @@ When `configName` is set, Catalyst commands automatically use:
 **Example**: If `configName` is "acme", commands will use `~/.config/humanlayer/config-acme.json`
 
 **Benefits**:
+
 - ✅ Work on multiple projects simultaneously (personal + client)
 - ✅ No manual config switching needed
 - ✅ Each project declares its own HumanLayer config
@@ -143,6 +147,7 @@ cd ~/client-project
 ```
 
 **Legacy** (if configName is null):
+
 - Uses global `~/.config/humanlayer/config.json`
 - `user` field is read from global config for file paths, handoff metadata, and plan authorship
 
@@ -160,6 +165,7 @@ For deployment and infrastructure management:
 ```
 
 **Installation**:
+
 ```bash
 npm install -g @railway/cli
 railway login
@@ -180,6 +186,7 @@ For error tracking and release management:
 ```
 
 **Installation**:
+
 ```bash
 curl -sL https://sentry.io/get-cli/ | sh
 ```
@@ -221,12 +228,14 @@ export GITHUB_SOURCE_ROOT="$HOME/code-repos/github"
 ```
 
 **Convention**:
+
 - **Main repository**: `${GITHUB_SOURCE_ROOT}/<org>/<repo>`
   - Example: `~/code-repos/github/coalesce-labs/catalyst`
 - **Worktrees**: `${GITHUB_SOURCE_ROOT}/<org>/<repo>-worktrees/<feature>`
   - Example: `~/code-repos/github/coalesce-labs/catalyst-worktrees/PROJ-123`
 
 **Benefits**:
+
 - ✅ All project code organized by GitHub org
 - ✅ Worktrees grouped with their main repository
 - ✅ No hardcoded paths in scripts
@@ -234,6 +243,7 @@ export GITHUB_SOURCE_ROOT="$HOME/code-repos/github"
 - ✅ Easy cleanup: delete `<repo>-worktrees` when done
 
 **Fallback** (if not set):
+
 - Defaults to `~/wt/<repo>`
 
 ---

@@ -3,6 +3,7 @@
 ## Problem Statement
 
 `.claude/config.json` needs to:
+
 1. Store sensitive data (API keys, tokens)
 2. Store project-specific settings (team names, IDs)
 3. Be shared across Claude Code sessions
@@ -192,6 +193,7 @@ catalyst-dev/
 ### 1. Never Commit Secrets
 
 **Template (committed)**:
+
 ```json
 {
   "linear": {
@@ -201,6 +203,7 @@ catalyst-dev/
 ```
 
 **User config (gitignored)**:
+
 ```json
 {
   "linear": {
@@ -256,7 +259,7 @@ echo "   Restore your values from .claude/config.json.backup"
 
 ### README.md Section
 
-```markdown
+````markdown
 ## Configuration
 
 Catalyst uses `.claude/config.json` for project-specific settings.
@@ -267,6 +270,7 @@ Catalyst uses `.claude/config.json` for project-specific settings.
    ```bash
    cp .claude/config.template.json .claude/config.json
    ```
+````
 
 2. Edit `.claude/config.json` and replace `[NEEDS_SETUP]` values:
    - Linear API token (get from Linear → Settings → API)
@@ -275,13 +279,14 @@ Catalyst uses `.claude/config.json` for project-specific settings.
    - Exa API key (get from dashboard.exa.ai)
    - PostHog API key and project ID (get from PostHog → Project Settings)
 
-3. **IMPORTANT**: Never commit `.claude/config.json` to git!
-   The template ensures this file is gitignored.
+3. **IMPORTANT**: Never commit `.claude/config.json` to git! The template ensures this file is
+   gitignored.
 
 ### Configuration Reference
 
 See `.claude/config.template.json` for all available options.
-```
+
+````
 
 ## Command Behavior
 
@@ -303,12 +308,11 @@ if ! EXA_CONFIGURED; then
   echo "   Research will use DeepWiki and Context7 only"
   # Continue without Exa
 fi
-```
+````
 
 ## Summary
 
-**Template**: `config.template.json` - Committed, generic, safe to share
-**User Config**: `config.json` - Gitignored, secrets, never committed
-**Pattern**: Standard practice (like `.env` files)
-**Security**: chmod 600, gitignore, environment variable fallback
-**UX**: Copy template on first run, interactive setup optional
+**Template**: `config.template.json` - Committed, generic, safe to share **User Config**:
+`config.json` - Gitignored, secrets, never committed **Pattern**: Standard practice (like `.env`
+files) **Security**: chmod 600, gitignore, environment variable fallback **UX**: Copy template on
+first run, interactive setup optional

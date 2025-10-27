@@ -47,6 +47,7 @@ THOUGHTS_URL=$(jq -r '.linear.thoughtsRepoUrl // "https://github.com/org/thought
 ```
 
 **Configuration in `.claude/config.json`**:
+
 ```json
 {
   "linear": {
@@ -95,8 +96,8 @@ This workflow ensures alignment through planning before implementation:
 11. **In Review** → PR submitted
 12. **Done** → Completed
 
-**Note**: These statuses must be configured in your Linear workspace settings. The Linearis CLI
-will read and use whatever states exist in your workspace.
+**Note**: These statuses must be configured in your Linear workspace settings. The Linearis CLI will
+read and use whatever states exist in your workspace.
 
 ### Key Principle
 
@@ -274,6 +275,7 @@ When user wants to add a comment to a ticket:
 When moving tickets to a new status:
 
 1. **Get current status:**
+
    ```bash
    linearis issues read TEAM-123 | jq -r '.state.name'
    ```

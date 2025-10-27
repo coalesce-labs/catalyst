@@ -264,6 +264,7 @@ Agents are distributed as part of the Catalyst plugin system:
 ### Installation
 
 **Install Catalyst plugin**:
+
 ```bash
 /plugin install catalyst-dev
 ```
@@ -273,6 +274,7 @@ This installs all agents automatically.
 ### Updates
 
 **Update plugin**:
+
 ```bash
 /plugin update catalyst-dev
 ```
@@ -281,7 +283,8 @@ Agents are pure research logic with no project-specific configuration, so update
 
 ### Per-Project Availability
 
-Agents are available in any project where the catalyst-dev plugin is installed. No per-project setup needed.
+Agents are available in any project where the catalyst-dev plugin is installed. No per-project setup
+needed.
 
 ## Creating New Agents
 

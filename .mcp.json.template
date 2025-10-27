@@ -1,0 +1,36 @@
+{
+  "$schema": "https://github.com/anthropics/claude-code/blob/main/schemas/mcp.schema.json",
+  "mcpServers": {
+    "posthog": {
+      "comment": "Product analytics - enable for projects with active users. ~40,645 tokens",
+      "command": "npx",
+      "args": ["-y", "@posthog/mcp-server"],
+      "env": {
+        "POSTHOG_AUTH_HEADER": "${POSTHOG_AUTH_HEADER}"
+      }
+    },
+    "sentry": {
+      "comment": "Error monitoring - enable for production projects. ~20,670 tokens",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sentry"],
+      "env": {
+        "SENTRY_AUTH_TOKEN": "${SENTRY_AUTH_TOKEN}",
+        "SENTRY_ORG": "${SENTRY_ORG}",
+        "SENTRY_PROJECT": "${SENTRY_PROJECT}"
+      }
+    },
+    "deepwiki": {
+      "comment": "GitHub repository research - useful for meta workflows. ~1,885 tokens",
+      "command": "npx",
+      "args": ["-y", "@deekard/deepwiki-mcp"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "context7": {
+      "comment": "Library documentation - helpful for learning new libraries. ~1,709 tokens",
+      "command": "npx",
+      "args": ["-y", "@context7/mcp"]
+    }
+  }
+}

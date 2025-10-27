@@ -1,10 +1,12 @@
 ---
 name: external-research
 description:
-  Research external GitHub repositories, frameworks, and libraries using DeepWiki and Exa. Call when you
-  need to understand how popular repos implement features, learn framework patterns, or research
+  Research external GitHub repositories, frameworks, and libraries using DeepWiki and Exa. Call when
+  you need to understand how popular repos implement features, learn framework patterns, or research
   best practices from open-source projects. Use Exa for web search when docs are insufficient.
-tools: mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, mcp__context7__get_library_docs, mcp__context7__resolve_library_id, mcp__exa__search, mcp__exa__search_code
+tools:
+  mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, mcp__context7__get_library_docs,
+  mcp__context7__resolve_library_id, mcp__exa__search, mcp__exa__search_code
 model: inherit
 version: 1.0.0
 ---

@@ -18,6 +18,7 @@ status: READY-FOR-PLAN
 **What it contains**:
 
 **Agents (6)** - Research is first step of dev:
+
 - codebase-locator
 - codebase-analyzer
 - codebase-pattern-finder
@@ -26,6 +27,7 @@ status: READY-FOR-PLAN
 - external-research
 
 **Commands (15)** - Complete dev workflow:
+
 - `/research-codebase` - Understand code (uses agents)
 - `/create-plan` - Plan the solution
 - `/implement-plan` - Build it
@@ -43,11 +45,13 @@ status: READY-FOR-PLAN
 - `/workflow-help` - Interactive guidance
 
 **Scripts (3)**:
+
 - `check-prerequisites.sh` - Verify HumanLayer, jq, thoughts
 - `create-worktree.sh` - Worktree creation
 - `frontmatter-utils.sh` - YAML utilities
 
 **Prerequisites**:
+
 - Required: HumanLayer CLI, jq, thoughts system
 - Optional: Linear MCP
 
@@ -62,6 +66,7 @@ status: READY-FOR-PLAN
 **What it contains**:
 
 **Commands (5)**:
+
 - `/discover-workflows` - Research external repos
 - `/import-workflow` - Import and adapt
 - `/create-workflow` - Create new workflows
@@ -69,6 +74,7 @@ status: READY-FOR-PLAN
 - `/workflow-help` - Guidance (duplicate from dev)
 
 **Scripts (1)**:
+
 - `validate-frontmatter.sh` - Trunk linter integration
 
 **Prerequisites**: None
@@ -146,18 +152,21 @@ catalyst/
 ### catalyst-dev: The Complete Dev Workflow
 
 **Research starts dev work**:
+
 - You research to implement a feature
 - You research to fix a bug
 - You research to answer a question
 - Research is phase 1 of development, not a separate activity
 
 **Handoff manages context**:
+
 - Handoff is when you need to clear context mid-workflow
 - It's a dev tool for managing Claude's context limits
 - Resume brings you back to where you left off
 - It's part of the flow, not separate from it
 
 **Everything flows together**:
+
 ```
 Research → Plan → Implement → Validate → Commit → PR → Merge
          ↓ (context full)
@@ -171,6 +180,7 @@ Research → Plan → Implement → Validate → Commit → PR → Merge
 ### catalyst-meta: Learning and Creating
 
 **For inspiration and extension**:
+
 - Learn how other teams structure workflows
 - Discover best practices
 - Create your own commands/agents
@@ -183,6 +193,7 @@ Research → Plan → Implement → Validate → Commit → PR → Merge
 ## Installation
 
 ### Most users (developers):
+
 ```bash
 /plugin marketplace add coalesce-labs/catalyst
 /plugin install catalyst-dev@catalyst
@@ -197,6 +208,7 @@ humanlayer thoughts init
 ---
 
 ### Power users (learning/creating):
+
 ```bash
 /plugin install catalyst-dev@catalyst
 /plugin install catalyst-meta@catalyst
@@ -245,10 +257,12 @@ humanlayer thoughts init
 ## Summary
 
 **2 Plugins**:
+
 1. **catalyst-dev** (6 agents, 15 commands, 3 scripts) - Complete dev workflow
 2. **catalyst-meta** (5 commands, 1 script) - Workflow inspiration
 
 **Key insights**:
+
 - Research is the first step of dev, not separate
 - Handoff is for managing context during dev, not separate
 - Linear integration is part of dev workflow

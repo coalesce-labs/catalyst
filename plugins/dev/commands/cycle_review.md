@@ -111,7 +111,7 @@ When fully implemented, this command will:
 - **Summary generation** - Create review document in thoughts/
 - **Burndown visualization** - Show progress over time (text-based chart)
 
-Track progress at: https://github.com/ryanisaacg/catalyst/issues
+Track progress at: https://github.com/coalesce-labs/catalyst/issues
 
 ## Configuration
 

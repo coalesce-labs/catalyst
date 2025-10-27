@@ -5,7 +5,9 @@ description:
   examples, or existing patterns that can be modeled after. It will give you concrete code examples
   based on what you're looking for! It's sorta like codebase-locator, but it will not only tell you
   the location of files, it will also give you code details!
-tools: Grep, Glob, Read, Bash(ls *), mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, mcp__context7__get_library_docs, mcp__context7__resolve_library_id
+tools:
+  Grep, Glob, Read, Bash(ls *), mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure,
+  mcp__context7__get_library_docs, mcp__context7__resolve_library_id
 model: inherit
 version: 1.0.0
 ---
