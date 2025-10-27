@@ -17,6 +17,20 @@ Get up and running with Catalyst in 5 minutes.
    humanlayer --version
    ```
 
+## Recommended Environment Setup
+
+Add this to your `~/.zshrc` or `~/.bashrc` for clean worktree organization:
+
+```bash
+export GITHUB_SOURCE_ROOT="$HOME/code-repos/github"
+```
+
+This organizes your code as:
+- Main repos: `~/code-repos/github/<org>/<repo>`
+- Worktrees: `~/code-repos/github/<org>/<repo>-worktrees/<feature>`
+
+See [CONFIGURATION.md](docs/CONFIGURATION.md#worktree-configuration) for details.
+
 ## Setup (One-Time)
 
 ### Step 1: Install Catalyst Plugin
