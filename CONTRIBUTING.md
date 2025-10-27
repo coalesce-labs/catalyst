@@ -83,13 +83,15 @@ Before committing changes:
 
 ### Adding a New Command
 
-1. Create markdown file in `commands/{namespace}/{command-name}.md`
+1. Create markdown file in appropriate plugin directory:
+   - `plugins/dev/commands/{command-name}.md` for workflow commands
+   - `plugins/meta/commands/{command-name}.md` for meta/creation commands
 2. **Add frontmatter** (required):
 
    ```yaml
    ---
    description: Brief description of what command does
-   category: workflow|dev|linear|meta|project|handoff
+   category: workflow|utility|research
    tools: Read, Write, Bash, Task, etc.
    model: inherit
    version: 1.0.0
@@ -97,12 +99,12 @@ Before committing changes:
    ```
 
 3. Write command logic following existing patterns
-4. Test with `/your-command-name` in Claude Code
-5. Run `make check` to validate frontmatter and formatting
+4. Test with `/your-command-name` in Claude Code (restart to reload)
+5. Run `/validate-frontmatter` to check formatting
 
 ### Adding a New Agent
 
-1. Create markdown file in `agents/{agent-name}.md`
+1. Create markdown file in `plugins/dev/agents/{agent-name}.md`
 2. **Add frontmatter** (required):
 
    ```yaml
@@ -115,17 +117,18 @@ Before committing changes:
    ```
 
 3. Write agent logic as documentarian (not critic)
-4. Test by invoking agent in a command
-5. Run `make check` to validate
+4. Test by invoking agent in a command (restart Claude Code to reload)
+5. Run `/validate-frontmatter` to check formatting
 
 ### Frontmatter Validation
 
-The custom frontmatter validator checks:
+The frontmatter validator checks:
 
 **For commands:**
 
 - ✅ Has `description` field
 - ✅ Has `category` field
+- ✅ Has `version` field
 
 **For agents:**
 
@@ -136,6 +139,7 @@ The custom frontmatter validator checks:
 **Skipped files:**
 
 - README.md files (documentation, not commands/agents)
+- Plugin manifest files (plugin.json)
 
 ## Shell Script Development
 
@@ -205,7 +209,8 @@ When making changes:
 - `README.md` - Project overview and quick start
 - `CLAUDE.md` - Instructions for Claude Code
 - `docs/` - Comprehensive guides
-- `commands/{namespace}/README.md` - Namespace documentation
+- `plugins/dev/README.md` - Development plugin documentation
+- `plugins/meta/README.md` - Meta plugin documentation
 
 ## Git Workflow
 

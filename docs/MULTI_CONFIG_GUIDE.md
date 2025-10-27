@@ -19,7 +19,7 @@ Each configuration points to a different thoughts repository, keeping contexts c
 # Switch between configurations
 hl-switch                    # Interactive menu
 hl-switch coalesce-labs     # Personal work
-hl-switch brkthru           # Client work
+hl-switch acme           # Client work
 hl-switch status            # Show current config
 
 # Add new client configuration
@@ -36,9 +36,9 @@ Your initial setup created:
    - Repo: `~/thoughts`
    - GitHub: `coalesce-labs/thoughts` (private)
 
-2. **BRKTHRU config**:
-   - File: `~/.config/humanlayer/config-brkthru.json`
-   - Repo: `~/code-repos/github/brkthru/bravo_code/thoughts`
+2. **ACME config**:
+   - File: `~/.config/humanlayer/config-acme.json`
+   - Repo: `~/code-repos/github/acme/bravo_code/thoughts`
    - GitHub: Client's repository
 
 ## Daily Workflow
@@ -59,10 +59,10 @@ humanlayer thoughts init
 
 ```bash
 # Switch to client config
-hl-switch brkthru
+hl-switch acme
 
 # Work as normal
-cd ~/code-repos/github/brkthru/project
+cd ~/code-repos/github/acme/project
 humanlayer thoughts init
 /create_plan
 ```
@@ -140,7 +140,7 @@ All configs are stored in `~/.config/humanlayer/`:
 ~/.config/humanlayer/
 ├── config.json                    # Symlink to active config
 ├── config-coalesce-labs.json     # Personal work
-├── config-brkthru.json           # BRKTHRU client
+├── config-acme.json           # ACME client
 ├── config-acme.json              # ACME client (example)
 └── config-megacorp.json          # MegaCorp client (example)
 ```
@@ -153,7 +153,7 @@ Each client gets their own isolated repository:
 
 ```
 ~/thoughts/                        # Personal (coalesce-labs)
-~/code-repos/github/brkthru/bravo_code/thoughts/  # BRKTHRU
+~/code-repos/github/acme/bravo_code/thoughts/  # ACME
 ~/clients/acme/thoughts/          # ACME (example)
 ~/clients/megacorp/thoughts/      # MegaCorp (example)
 ```
@@ -213,7 +213,7 @@ hl-switch list
 
 # Output:
 # Available configurations:
-#   - brkthru
+#   - acme
 #   - coalesce-labs
 ```
 
@@ -227,8 +227,8 @@ hl-switch
 #   coalesce-labs
 #
 # Available configurations:
-#   [1] brkthru
-#       → /Users/ryan/code-repos/github/brkthru/bravo_code/thoughts
+#   [1] acme
+#       → /Users/ryan/code-repos/github/acme/bravo_code/thoughts
 #   [2] coalesce-labs
 #       → /Users/ryan/thoughts
 #
@@ -239,7 +239,7 @@ hl-switch
 
 ```bash
 # Fast switching
-hl-switch brkthru        # Switch to BRKTHRU
+hl-switch acme        # Switch to ACME
 hl-switch coalesce-labs  # Switch back to personal
 
 # No need to remember paths or --config-file arguments!
@@ -249,15 +249,15 @@ hl-switch coalesce-labs  # Switch back to personal
 
 ```bash
 # Switch to client config first
-hl-switch brkthru
+hl-switch acme
 
 # Create worktree (uses current config)
-cd ~/code-repos/github/brkthru/project
-./hack/create-worktree.sh ENG-123
+cd ~/code-repos/github/acme/project
+/create-worktree ENG-123
 
-# The worktree automatically uses brkthru thoughts repo
+# The worktree automatically uses acme thoughts repo
 cd ~/wt/project/ENG-123
-humanlayer thoughts init  # Uses BRKTHRU config
+humanlayer thoughts init  # Uses ACME config
 ```
 
 ## Troubleshooting
@@ -282,10 +282,10 @@ humanlayer thoughts init --force
 ### "I want to see what a config points to"
 
 ```bash
-cat ~/.config/humanlayer/config-brkthru.json
+cat ~/.config/humanlayer/config-acme.json
 
 # Or use jq for pretty output
-jq '.thoughts.thoughtsRepo' ~/.config/humanlayer/config-brkthru.json
+jq '.thoughts.thoughtsRepo' ~/.config/humanlayer/config-acme.json
 ```
 
 ### "Add hl-switch to PATH manually"
@@ -311,7 +311,7 @@ hl-switch status  # Verify you're on the right config
 
 Good:
 
-- `brkthru` - Clear client name
+- `acme` - Clear client name
 - `acme-corp` - Full client name
 - `google-consulting` - Specific engagement
 
@@ -326,14 +326,14 @@ Bad:
 If you organize projects like:
 
 ```
-~/code-repos/github/brkthru/...
+~/code-repos/github/acme/...
 ~/clients/acme/...
 ```
 
 Keep thoughts organized similarly:
 
 ```
-~/code-repos/github/brkthru/thoughts/
+~/code-repos/github/acme/thoughts/
 ~/clients/acme/thoughts/
 ```
 

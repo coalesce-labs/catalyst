@@ -195,7 +195,7 @@ version: 1.0.0
 
 ### ❌ Wrong: Agent name doesn't match filename
 
-**File**: `agents/code_analyzer.md`
+**File**: `plugins/dev/agents/code_analyzer.md`
 
 ```yaml
 ---
@@ -205,7 +205,7 @@ name: codebase-analyzer # ← Doesn't match filename!
 
 ### ✅ Correct: Agent name matches filename
 
-**File**: `agents/codebase-analyzer.md`
+**File**: `plugins/dev/agents/codebase-analyzer.md`
 
 ```yaml
 ---
@@ -510,7 +510,7 @@ Use the `/validate-frontmatter` command to check compliance:
 /validate-frontmatter --fix
 
 # Validate specific file
-/validate-frontmatter agents/codebase-analyzer.md
+/validate-frontmatter plugins/dev/agents/codebase-analyzer.md
 ```
 
 ## See Also

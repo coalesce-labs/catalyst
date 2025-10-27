@@ -163,7 +163,7 @@ Context  Context                          Context   Context  Context
 
 ```bash
 # If you have a create-worktree script
-./hack/create-worktree.sh PROJ-123 feature-name
+/create-worktree PROJ-123 feature-name
 
 # Manual creation
 git worktree add ~/wt/my-project/PROJ-123-feature main
@@ -665,7 +665,7 @@ development on different tasks.
 **Automated** (if you have script):
 
 ```bash
-./hack/create-worktree.sh PROJ-123 oauth-support
+/create-worktree PROJ-123 oauth-support
 
 # Creates: ~/wt/my-project/PROJ-123-oauth-support
 # Copies: .claude/ directory
@@ -699,7 +699,7 @@ humanlayer thoughts sync
 
 ```bash
 # 1. Create worktree for new task
-./hack/create-worktree.sh PROJ-123 feature-name
+/create-worktree PROJ-123 feature-name
 cd ~/wt/my-project/PROJ-123-feature
 
 # 2. Start Claude Code in worktree
@@ -765,7 +765,7 @@ git worktree remove --force ~/wt/my-project/PROJ-123-feature
 # CLEAR CONTEXT
 
 # 3. Worktree
-./hack/create-worktree.sh PROJ-123 rate-limiting
+/create-worktree PROJ-123 rate-limiting
 cd ~/wt/my-project/PROJ-123-rate-limiting
 # CLEAR CONTEXT
 
@@ -797,7 +797,7 @@ cd ~/wt/my-project/PROJ-123-rate-limiting
 
 # Day 3 - Implementation Phase 1
 /resume-handoff PROJ-123
-./hack/create-worktree.sh PROJ-123 oauth
+/create-worktree PROJ-123 oauth
 /implement-plan thoughts/shared/plans/2025-01-08-PROJ-123-oauth.md
 # Complete Phase 1 only
 /create-handoff

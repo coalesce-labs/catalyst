@@ -257,28 +257,31 @@ authentication implementations"
 - Prevents bias in documentation
 - Maintains focus on current state
 
-## Installation Behavior
+## Plugin Distribution
 
-Agents are always installed, never filtered:
+Agents are distributed as part of the Catalyst plugin system:
 
-### User Installation (`install-user.sh`)
+### Installation
 
-- ✅ All 6 agents installed to `~/.claude/agents/`
-- ✅ README.md excluded (documentation)
+**Install Catalyst plugin**:
+```bash
+/plugin install catalyst-dev
+```
 
-### Project Installation (`install-project.sh`)
+This installs all agents automatically.
 
-- ✅ All 6 agents installed to `<project>/.claude/agents/`
-- ✅ README.md excluded
+### Updates
 
-### Project Update (`update-project.sh`)
+**Update plugin**:
+```bash
+/plugin update catalyst-dev
+```
 
-- ✅ All agents auto-updated (they're pure logic)
-- ✅ No user prompts needed
-- ✅ README.md excluded
+Agents are pure research logic with no project-specific configuration, so updates are always safe.
 
-**Why auto-update?** Agents contain only research logic, no project-specific configuration. Safe to
-always overwrite.
+### Per-Project Availability
+
+Agents are available in any project where the catalyst-dev plugin is installed. No per-project setup needed.
 
 ## Creating New Agents
 
@@ -327,8 +330,8 @@ You are a specialist at [specific research task].
 ### Step 4: Test
 
 ```bash
-# Install to workspace for testing
-./hack/install-project.sh .
+# In this workspace, agents are immediately available via symlinks
+# Just restart Claude Code to reload
 
 # Create a command that uses the agent
 # Invoke the command to test the agent
@@ -400,43 +403,33 @@ Agents specify required tools in frontmatter:
 
 **Check:**
 
-1. Agent file exists in `.claude/agents/`?
+1. Plugin installed? Run `/plugin list` to verify
 2. Frontmatter `name` field matches filename?
-3. Restarted Claude Code after adding agent?
+3. Restarted Claude Code after adding/modifying agent?
 
 **Solution:**
 
 ```bash
-# Re-install to .claude/
-./hack/install-project.sh .
+# Update plugin
+/plugin update catalyst-dev
+
 # Restart Claude Code
 ```
 
-### Agent auto-updated unwanted logic
+### Agent auto-updated by plugin
 
-**This is by design** - agents are pure logic.
+**This is by design** - agents are pure logic with no project-specific config.
 
 **If you need customization:**
 
-- Don't modify agents - they'll be overwritten
-- Create a new agent with a different name
-- Or mark as workspace-only (though agents typically aren't)
-
-### README.md showing up in .claude/agents/
-
-**Fixed in recent update** - install scripts now exclude README.md.
-
-**To verify:**
-
-```bash
-ls .claude/agents/
-# Should NOT show README.md
-```
+- Don't modify plugin agents - they'll be overwritten on update
+- Create a custom agent in `.claude/plugins/custom/agents/`
+- Use a different name to avoid conflicts
 
 ## See Also
 
-- `../commands/README.md` - Documentation for commands directory
-- `../hack/README.md` - Installation and setup scripts
-- `../docs/AGENTIC_WORKFLOW_GUIDE.md` - Agent patterns and best practices
-- `../docs/FRONTMATTER_STANDARD.md` - Frontmatter validation rules
-- `../README.md` - Workspace overview
+- `../commands/README.md` - Documentation for commands in this plugin
+- `../../docs/AGENTIC_WORKFLOW_GUIDE.md` - Agent patterns and best practices
+- `../../docs/FRONTMATTER_STANDARD.md` - Frontmatter validation rules
+- `../../README.md` - Workspace overview
+- `../../scripts/README.md` - Setup scripts documentation

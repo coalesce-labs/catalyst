@@ -114,7 +114,7 @@ Imports workflows from external repositories and adapts them to your workspace s
 
 **Output**:
 
-- Workflow saved to `agents/{name}.md` or `commands/{name}.md`
+- Workflow saved to `plugins/dev/agents/{name}.md` or `plugins/dev/commands/{name}.md`
 - Import record in `thoughts/shared/workflows/imports.md`
 - Attribution and source tracking
 
@@ -195,7 +195,7 @@ Validates frontmatter across all workflows and auto-fixes issues.
 /validate-frontmatter --fix
 
 # Validate specific workflow
-/validate-frontmatter agents/codebase-analyzer.md
+/validate-frontmatter plugins/dev/agents/codebase-analyzer.md
 
 # Generate standard document
 /validate-frontmatter --generate-standard
@@ -262,7 +262,7 @@ Validates frontmatter across all workflows and auto-fixes issues.
               │   • Validate tools
               │
               └─→ Save and record import
-                  • agents/{name}.md or commands/{name}.md
+                  • plugins/dev/agents/{name}.md or plugins/dev/commands/{name}.md
                   • thoughts/shared/workflows/imports.md
 
 3. Create Phase
@@ -282,7 +282,7 @@ Validates frontmatter across all workflows and auto-fixes issues.
               ├─→ Validate frontmatter and structure
               │
               └─→ Save and record creation
-                  • agents/{name}.md or commands/{name}.md
+                  • plugins/dev/agents/{name}.md or plugins/dev/commands/{name}.md
                   • thoughts/shared/workflows/created.md
 
 4. Validate Phase
@@ -291,8 +291,8 @@ Validates frontmatter across all workflows and auto-fixes issues.
    └──────────┬───────────┘
               │
               ├─→ Spawn 3 parallel validation tasks:
-              │   • Validate Agents (all agents/*.md)
-              │   • Validate Commands (all commands/*.md)
+              │   • Validate Agents (all plugins/*/agents/*.md)
+              │   • Validate Commands (all plugins/*/commands/*.md)
               │   • Extract Tools (inventory usage)
               │
               ├─→ Generate comprehensive report

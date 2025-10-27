@@ -24,11 +24,36 @@ fi
 WORKTREE_NAME="$1"
 BASE_BRANCH="${2:-$(git branch --show-current)}"
 
-# Get base directory name
-REPO_BASE_NAME=$(basename "$(git rev-parse --show-toplevel)")
+# Get repository information
+REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_NAME=$(basename "$REPO_ROOT")
 
-# Use custom worktree location or default
-WORKTREES_BASE="${RYAN_WORKTREE_BASE:-$HOME/wt}/${REPO_BASE_NAME}"
+# Try to detect GitHub org from remote URL
+GIT_REMOTE=$(git config --get remote.origin.url 2>/dev/null || echo "")
+if [[ $GIT_REMOTE =~ github.com[:/]([^/]+)/([^/.]+) ]]; then
+    GITHUB_ORG="${BASH_REMATCH[1]}"
+    GITHUB_REPO="${BASH_REMATCH[2]}"
+else
+    GITHUB_ORG=""
+    GITHUB_REPO="$REPO_NAME"
+fi
+
+# Determine worktree base path using convention
+# Convention: <GITHUB_SOURCE_ROOT>/<org>/<repo>-worktrees/<worktree-name>
+# Main checkout: <GITHUB_SOURCE_ROOT>/<org>/<repo>
+# Worktrees: <GITHUB_SOURCE_ROOT>/<org>/<repo>-worktrees/<feature>
+if [ -n "$GITHUB_SOURCE_ROOT" ]; then
+    # Use GITHUB_SOURCE_ROOT convention
+    if [ -n "$GITHUB_ORG" ]; then
+        WORKTREES_BASE="${GITHUB_SOURCE_ROOT}/${GITHUB_ORG}/${GITHUB_REPO}-worktrees"
+    else
+        WORKTREES_BASE="${GITHUB_SOURCE_ROOT}/${GITHUB_REPO}-worktrees"
+    fi
+else
+    # Default fallback: ~/wt/<repo>
+    WORKTREES_BASE="$HOME/wt/${REPO_NAME}"
+fi
+
 WORKTREE_PATH="${WORKTREES_BASE}/${WORKTREE_NAME}"
 
 echo -e "${YELLOW}🌳 Creating worktree: ${WORKTREE_NAME}${NC}"

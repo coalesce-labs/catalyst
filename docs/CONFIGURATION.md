@@ -104,14 +104,14 @@ Set `LINEAR_API_TOKEN` environment variable or store in `~/.linear_api_token`
 {
   "thoughts": {
     "user": null,
-    "configName": "brkthru"
+    "configName": "acme"
   }
 }
 ```
 
 **Fields**:
 - `user` - Auto-detected from HumanLayer config (don't set manually)
-- `configName` - Which HumanLayer config to use (e.g., "brkthru", "coalesce-labs", "acme")
+- `configName` - Which HumanLayer config to use (e.g., "acme", "coalesce-labs", "acme")
 
 **How it works**:
 
@@ -120,7 +120,7 @@ When `configName` is set, Catalyst commands automatically use:
 ~/.config/humanlayer/config-{configName}.json
 ```
 
-**Example**: If `configName` is "brkthru", commands will use `~/.config/humanlayer/config-brkthru.json`
+**Example**: If `configName` is "acme", commands will use `~/.config/humanlayer/config-acme.json`
 
 **Benefits**:
 - ✅ Work on multiple projects simultaneously (personal + client)
@@ -132,14 +132,14 @@ When `configName` is set, Catalyst commands automatically use:
 
 ```bash
 # 1. Create client config
-./scripts/humanlayer/add-client-config brkthru ~/path/to/brkthru-thoughts
+./scripts/humanlayer/add-client-config acme ~/path/to/acme-thoughts
 
 # 2. Initialize project with config
 cd ~/client-project
-./scripts/humanlayer/init-project.sh . project-name brkthru
+./scripts/humanlayer/init-project.sh . project-name acme
 
 # 3. Automatic! .claude/config.json now contains:
-#    "configName": "brkthru"
+#    "configName": "acme"
 ```
 
 **Legacy** (if configName is null):
@@ -210,6 +210,31 @@ For web search via MCP (optional):
   }
 }
 ```
+
+### Worktree Configuration
+
+For organizing git worktrees consistently (environment variable):
+
+```bash
+# In ~/.zshrc or ~/.bashrc
+export GITHUB_SOURCE_ROOT="$HOME/code-repos/github"
+```
+
+**Convention**:
+- **Main repository**: `${GITHUB_SOURCE_ROOT}/<org>/<repo>`
+  - Example: `~/code-repos/github/coalesce-labs/catalyst`
+- **Worktrees**: `${GITHUB_SOURCE_ROOT}/<org>/<repo>-worktrees/<feature>`
+  - Example: `~/code-repos/github/coalesce-labs/catalyst-worktrees/PROJ-123`
+
+**Benefits**:
+- ✅ All project code organized by GitHub org
+- ✅ Worktrees grouped with their main repository
+- ✅ No hardcoded paths in scripts
+- ✅ Clean separation: `<repo>` vs `<repo>-worktrees`
+- ✅ Easy cleanup: delete `<repo>-worktrees` when done
+
+**Fallback** (if not set):
+- Defaults to `~/wt/<repo>`
 
 ---
 
@@ -511,8 +536,8 @@ This project uses:
 After configuration:
 
 ```bash
-git add .claude/config.json .claude/commands/
-git commit -m "Set up Claude Code workspace"
+git add .claude/config.json
+git commit -m "Set up Claude Code workspace configuration"
 git push
 ```
 
@@ -531,7 +556,7 @@ Now your whole team has the same configuration!
 
 **Two-step setup**:
 
-1. **Install workspace**: Copy agents/commands
-2. **Configure project**: Set ticket prefix and Linear settings
+1. **Install plugins**: `/plugin install catalyst-dev`
+2. **Configure project**: Set ticket prefix and Linear settings in `.claude/config.json`
 
 **Result**: Commands work perfectly for your team's workflow!

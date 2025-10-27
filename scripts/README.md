@@ -55,7 +55,7 @@ pip install humanlayer  # or: pipx install humanlayer
 **Arguments**:
 - `project_path` - Path to project (default: current directory)
 - `directory_name` - Name for thoughts directory (optional, prompts if omitted)
-- `config_name` - HumanLayer config to use (e.g., "brkthru", "coalesce-labs")
+- `config_name` - HumanLayer config to use (e.g., "acme", "coalesce-labs")
 
 **Examples**:
 
@@ -64,7 +64,7 @@ pip install humanlayer  # or: pipx install humanlayer
 ./scripts/humanlayer/init-project.sh ~/my-project my-project
 
 # Client project (uses specific config)
-./scripts/humanlayer/init-project.sh ~/client-project client-project brkthru
+./scripts/humanlayer/init-project.sh ~/client-project client-project acme
 ```
 
 **What it does**:
@@ -81,7 +81,7 @@ When you provide a `config_name`, the script:
    ```json
    {
      "thoughts": {
-       "configName": "brkthru"
+       "configName": "acme"
      }
    }
    ```
@@ -108,8 +108,8 @@ When you provide a `config_name`, the script:
 **Examples**:
 
 ```bash
-# Create config for BRKTHRU client
-./scripts/humanlayer/add-client-config brkthru ~/code-repos/github/brkthru/thoughts
+# Create config for ACME client
+./scripts/humanlayer/add-client-config acme ~/code-repos/github/acme/thoughts
 
 # Create config for Acme Corp
 ./scripts/humanlayer/add-client-config acme ~/clients/acme/thoughts
@@ -176,12 +176,12 @@ pip install humanlayer
 ./scripts/humanlayer/setup-thoughts.sh
 
 # 3. Add client configs
-./scripts/humanlayer/add-client-config brkthru ~/code-repos/github/brkthru/thoughts
+./scripts/humanlayer/add-client-config acme ~/code-repos/github/acme/thoughts
 ./scripts/humanlayer/add-client-config acme ~/clients/acme/thoughts
 
 # 4. Initialize projects with specific configs
-cd ~/code-repos/github/brkthru/project1
-./scripts/humanlayer/init-project.sh . project1 brkthru
+cd ~/code-repos/github/acme/project1
+./scripts/humanlayer/init-project.sh . project1 acme
 
 cd ~/clients/acme/project2
 ./scripts/humanlayer/init-project.sh . project2 acme
@@ -193,9 +193,9 @@ cd ~/my-personal-project
 **Daily work** (automatic):
 
 ```bash
-# Work on BRKTHRU project
-cd ~/code-repos/github/brkthru/project1
-/research-codebase  # Automatically uses brkthru config
+# Work on ACME project
+cd ~/code-repos/github/acme/project1
+/research-codebase  # Automatically uses acme config
 
 # Switch to Acme project
 cd ~/clients/acme/project2
@@ -217,7 +217,7 @@ cd ~/my-personal-project
 ```
 ~/.config/humanlayer/
 ├── config.json              # Default/personal config
-├── config-brkthru.json      # Client 1
+├── config-acme.json      # Client 1
 ├── config-acme.json         # Client 2
 └── config-coalesce-labs.json # Personal (if using add-client-config)
 ```
@@ -227,15 +227,15 @@ cd ~/my-personal-project
 ```json
 {
   "project": {
-    "ticketPrefix": "BRKTHRU"
+    "ticketPrefix": "ACME"
   },
   "thoughts": {
-    "configName": "brkthru"
+    "configName": "acme"
   }
 }
 ```
 
-This tells Catalyst commands to use `~/.config/humanlayer/config-brkthru.json` automatically.
+This tells Catalyst commands to use `~/.config/humanlayer/config-acme.json` automatically.
 
 ---
 

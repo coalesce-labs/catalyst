@@ -21,7 +21,7 @@ show_usage() {
 	echo "Examples:"
 	echo "  add-client-config acme                    # Interactive - will prompt for path"
 	echo "  add-client-config acme ~/clients/acme/thoughts"
-	echo "  add-client-config brkthru ~/code-repos/github/brkthru/bravo_code/thoughts"
+	echo "  add-client-config acme ~/code-repos/github/acme/bravo_code/thoughts"
 	echo ""
 	echo "This creates a new HumanLayer configuration for a client project."
 	echo "You can then switch to it with: hl-switch <client-name>"

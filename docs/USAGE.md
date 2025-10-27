@@ -667,6 +667,127 @@ Verifies implementation correctness and identifies deviations.
 
 ---
 
+## Workflow State Management
+
+Catalyst automatically tracks your workflow state in `.claude/.workflow-context.json` to enable intelligent command chaining.
+
+### What is workflow-context.json?
+
+A local file that tracks recent workflow documents (research, plans, handoffs, PRs) so commands can auto-discover them without manual file paths.
+
+**Location**: `.claude/.workflow-context.json` (per-worktree, not committed to git)
+
+**Structure**:
+```json
+{
+  "lastUpdated": "2025-10-26T10:30:00Z",
+  "currentTicket": "PROJ-123",
+  "mostRecentDocument": {
+    "type": "plans",
+    "path": "thoughts/shared/plans/2025-10-26-PROJ-123-feature.md",
+    "created": "2025-10-26T10:30:00Z",
+    "ticket": "PROJ-123"
+  },
+  "workflow": {
+    "research": [
+      {
+        "path": "thoughts/shared/research/2025-10-26-auth-flow.md",
+        "created": "2025-10-26T09:15:00Z",
+        "ticket": "PROJ-123"
+      }
+    ],
+    "plans": [
+      {
+        "path": "thoughts/shared/plans/2025-10-26-PROJ-123-feature.md",
+        "created": "2025-10-26T10:30:00Z",
+        "ticket": "PROJ-123"
+      }
+    ],
+    "handoffs": [],
+    "prs": []
+  }
+}
+```
+
+### How Commands Use It
+
+**Automatic path discovery**:
+
+1. `/research-codebase` → Saves research document to context
+2. `/create-plan` → Automatically finds and references recent research
+3. `/implement-plan` → Automatically finds most recent plan (no path needed!)
+4. `/create-handoff` → Saves handoff document to context
+5. `/resume-handoff` → Automatically finds most recent handoff
+
+**Example workflow**:
+
+```bash
+# Step 1: Research (saves to context)
+/research-codebase
+> How does authentication work?
+
+# Step 2: Create plan (auto-finds research)
+/create-plan
+# Plan automatically includes research from step 1
+
+# Step 3: Implement (auto-finds plan)
+/implement-plan
+# No need to specify plan path - uses most recent!
+
+# Step 4: Create handoff (saves to context)
+/create-handoff
+
+# Later: Resume work (auto-finds handoff)
+/resume-handoff
+# Automatically loads most recent handoff
+```
+
+### Manual Management
+
+**View context**:
+```bash
+cat .claude/.workflow-context.json | jq
+```
+
+**Initialize context** (normally automatic):
+```bash
+plugins/dev/scripts/workflow-context.sh init
+```
+
+**Add document manually** (normally automatic):
+```bash
+plugins/dev/scripts/workflow-context.sh add plans thoughts/shared/plans/my-plan.md PROJ-123
+```
+
+**Get most recent plan**:
+```bash
+plugins/dev/scripts/workflow-context.sh recent plans
+```
+
+**Get all documents for ticket**:
+```bash
+plugins/dev/scripts/workflow-context.sh ticket PROJ-123
+```
+
+### Benefits
+
+✅ **No manual paths**: Commands remember your work
+✅ **Seamless chaining**: Research → Plan → Implement flows naturally
+✅ **Per-worktree**: Each worktree has independent workflow state
+✅ **Automatic**: Updated by commands, no user intervention needed
+
+### Worktree Behavior
+
+Each worktree maintains its own `.workflow-context.json`:
+
+- **Main repo**: `.claude/.workflow-context.json` tracks main branch work
+- **Worktree 1**: `~/wt/myapp/feature-a/.claude/.workflow-context.json` tracks feature-a
+- **Worktree 2**: `~/wt/myapp/feature-b/.claude/.workflow-context.json` tracks feature-b
+
+This allows parallel work on different features with independent workflow states.
+
+---
+
 ## Worktree Workflow
 
 Worktrees allow parallel work on different features while sharing the thoughts directory.
@@ -677,7 +798,7 @@ Worktrees allow parallel work on different features while sharing the thoughts d
 cd /path/to/main-repository
 
 # Create worktree with ticket number and feature name
-~/ryan-claude-workspace/hack/create-worktree.sh ENG-1234 rate-limiting
+/create-worktree ENG-1234 rate-limiting
 ```
 
 This creates:
@@ -873,7 +994,7 @@ git commit -m "Fix button styling"
 
 ```bash
 # Create worktree for feature A
-~/ryan-claude-workspace/hack/create-worktree.sh ENG-1234 new-dashboard
+/create-worktree ENG-1234 new-dashboard
 
 cd ~/wt/my-app/new-dashboard
 
@@ -887,7 +1008,7 @@ cd ~/wt/my-app/new-dashboard
 ```bash
 # Create worktree for feature B (while A is in progress)
 cd ~/projects/my-app
-~/ryan-claude-workspace/hack/create-worktree.sh ENG-1235 user-settings
+/create-worktree ENG-1235 user-settings
 
 cd ~/wt/my-app/user-settings
 
@@ -1077,9 +1198,9 @@ Commit your custom agents to the project:
 
 ```bash
 cd ~/projects/my-app
-mkdir -p .claude/agents
-cp ~/.claude/agents/custom-agent.md .claude/agents/
-git add .claude/agents/custom-agent.md
+mkdir -p .claude/plugins/custom/agents
+cp ~/.claude/plugins/custom/agents/custom-agent.md .claude/plugins/custom/agents/
+git add .claude/plugins/custom/agents/custom-agent.md
 git commit -m "Add custom agent"
 ```
 
@@ -1097,19 +1218,18 @@ ls -la thoughts/
 # Should show: thoughts -> /Users/you/thoughts/repos/project-name
 
 # Recreate if broken
-ryan-init-project project-name
+./scripts/humanlayer/init-project.sh . project-name
 ```
 
 ### Agent Not Found
 
 ```bash
-# Check installation
-ls ~/.claude/agents/
-ls .claude/agents/
+# Check plugin installation
+ls ~/.claude/plugins/
+ls .claude/plugins/
 
 # Reinstall if needed
-cd ~/ryan-claude-workspace
-./hack/install-user.sh
+/plugin update catalyst-dev
 ```
 
 ### Worktree Thoughts Not Shared
