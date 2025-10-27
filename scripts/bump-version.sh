@@ -85,7 +85,18 @@ bump_plugin() {
   jq --arg version "$new_version" '.version = $version' "$manifest" > "$manifest.tmp"
   mv "$manifest.tmp" "$manifest"
 
-  echo "   ✅ Updated!"
+  # Update version in marketplace.json
+  local marketplace=".claude-plugin/marketplace.json"
+  if [[ -f "$marketplace" ]]; then
+    jq --arg name "catalyst-$plugin_name" --arg version "$new_version" \
+      '(.plugins[] | select(.name == $name) | .version) = $version' \
+      "$marketplace" > "$marketplace.tmp"
+    mv "$marketplace.tmp" "$marketplace"
+    echo "   ✅ Updated plugin.json and marketplace.json"
+  else
+    echo "   ✅ Updated plugin.json"
+    echo "   ⚠️  Marketplace not found - skipping"
+  fi
   echo ""
 }
 
