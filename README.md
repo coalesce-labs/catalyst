@@ -1,6 +1,6 @@
 # Catalyst - Claude Code Workspace
 
-My personal development workflow for Claude Code, now open-sourced for the community.
+[Ryan Rozich's](https://ryanrozich.bio/) personal development workflow for Claude Code, now open sourced and packaged as a Claude Code plugin marketplace.
 
 This is the workspace I use daily for AI-assisted development. It's battle-tested on real projects and optimized for efficient, context-aware AI collaboration. I'm sharing it so others can use it, fork it, and contribute ideas back.
 
@@ -34,7 +34,10 @@ Install via Claude Code plugin system:
 /plugin install catalyst-meta
 ```
 
-For plugin documentation, see [Claude Code Plugin Guide](https://docs.claude.com/plugins).
+**Need help?**
+- [Quick Start Guide](QUICKSTART.md) - 5-minute setup walkthrough
+- [Configuration Guide](docs/CONFIGURATION.md) - Complete setup and configuration details
+- [Claude Code Plugin Guide](https://docs.claude.com/plugins) - Official plugin documentation
 
 ## Complete Workflow
 
@@ -48,6 +51,11 @@ With handoffs for context persistence:
 ```
 
 Agents proactively monitor context during implementation and will prompt you to create handoffs before running out of context, creating structured handoff documents that add to persistent memory.
+
+**Learn More:**
+- [Agentic Workflow Guide](docs/AGENTIC_WORKFLOW_GUIDE.md) - Complete guide showing research, planning, handoff, worktree, implementation, verify, and PR workflows
+- [Context Engineering](docs/CONTEXT_ENGINEERING.md) - Token efficiency strategies and context management patterns
+- [Linear Workflow Automation](docs/LINEAR_WORKFLOW_AUTOMATION.md) - Linearis integration for ticket → branch → PR → merge lifecycle ([Linearis GitHub](https://github.com/ryanrozich/linearis))
 
 ## Core Philosophy
 
