@@ -102,13 +102,30 @@ check_prerequisites() {
     print_success "GitHub CLI installed"
   fi
 
-  # Optional: linear (for Linear integration)
-  if ! check_command_exists "linear"; then
-    print_warning "Linear CLI not found (optional, for Linear integration)"
-    echo "  Install: npm install -g @linear/cli"
+  # Optional: linearis (for Linear integration)
+  if ! check_command_exists "linearis"; then
+    print_warning "Linearis CLI not found (optional, for Linear integration)"
+    echo "  Install: npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
     missing_optional=true
   else
-    print_success "Linear CLI installed"
+    # Check version is at least 1.1.0
+    local linearis_version
+    linearis_version=$(linearis --version 2>/dev/null | tail -1 | tr -d '[:space:]')
+
+    if [[ "$linearis_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      local major minor patch
+      IFS='.' read -r major minor patch <<< "$linearis_version"
+
+      if [ "$major" -lt 1 ] || ([ "$major" -eq 1 ] && [ "$minor" -lt 1 ]); then
+        print_warning "Linearis CLI version $linearis_version is too old (need >= 1.1.0)"
+        echo "  Update: npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
+        missing_optional=true
+      else
+        print_success "Linearis CLI installed (v${linearis_version})"
+      fi
+    else
+      print_success "Linearis CLI installed"
+    fi
   fi
 
   if [ "$missing_critical" = true ]; then
