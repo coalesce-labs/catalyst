@@ -1,6 +1,6 @@
 {
   "name": "catalyst-meta",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "Workflow discovery and creation tools: learn from community patterns and extend Catalyst with new workflows.",
   "author": {
     "name": "Coalesce Labs",
