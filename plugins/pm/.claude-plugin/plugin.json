@@ -3,10 +3,22 @@
   "version": "2.0.0",
   "description": "Linear-focused project management plugin with cycle management, milestone tracking, backlog grooming, and team analytics",
   "author": {
-    "name": "Catalyst Team",
-    "email": "team@catalyst.dev"
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev",
+    "url": "https://github.com/coalesce-labs"
   },
-  "category": "productivity",
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": "https://github.com/coalesce-labs/catalyst.git",
+  "keywords": [
+    "project-management",
+    "linear",
+    "cycles",
+    "milestones",
+    "backlog",
+    "analytics",
+    "pm"
+  ],
+  "license": "MIT",
   "commands": [
     "./commands/analyze_cycle.md",
     "./commands/analyze_milestone.md",
