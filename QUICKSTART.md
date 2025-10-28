@@ -118,20 +118,23 @@ This file contains **non-sensitive** project metadata and is **safe to commit** 
 **Example**:
 ```json
 {
-  "projectKey": "acme",
-  "project": {
-    "ticketPrefix": "ACME",
-    "name": "Acme Corp Project"
-  },
-  "thoughts": {
-    "user": null
+  "catalyst": {
+    "projectKey": "acme",
+    "project": {
+      "ticketPrefix": "ACME",
+      "name": "Acme Corp Project"
+    },
+    "thoughts": {
+      "user": null
+    }
   }
 }
 ```
 
 **What goes here**:
-- `projectKey` - Links to your secrets config
-- `ticketPrefix` - Your Linear/project ticket prefix (e.g., "ENG", "PROJ")
+- All Catalyst configuration under the `catalyst` key
+- `catalyst.projectKey` - Links to your secrets config
+- `catalyst.project.ticketPrefix` - Your Linear/project ticket prefix (e.g., "ENG", "PROJ")
 - Project name and metadata
 
 ### Layer 2: Secrets Config (`~/.config/catalyst/`)
@@ -143,26 +146,28 @@ This file contains **API tokens and secrets** and is **never committed** to git.
 **Example** (`~/.config/catalyst/config-acme.json`):
 ```json
 {
-  "linear": {
-    "apiToken": "lin_api_...",
-    "teamKey": "ACME",
-    "defaultTeam": "ACME"
-  },
-  "sentry": {
-    "org": "acme-corp",
-    "project": "acme-web",
-    "authToken": "sntrys_..."
-  },
-  "railway": {
-    "token": "...",
-    "projectId": "..."
-  },
-  "posthog": {
-    "apiKey": "...",
-    "projectId": "..."
-  },
-  "exa": {
-    "apiKey": "..."
+  "catalyst": {
+    "linear": {
+      "apiToken": "lin_api_...",
+      "teamKey": "ACME",
+      "defaultTeam": "ACME"
+    },
+    "sentry": {
+      "org": "acme-corp",
+      "project": "acme-web",
+      "authToken": "sntrys_..."
+    },
+    "railway": {
+      "token": "...",
+      "projectId": "..."
+    },
+    "posthog": {
+      "apiKey": "...",
+      "projectId": "..."
+    },
+    "exa": {
+      "apiKey": "..."
+    }
   }
 }
 ```
@@ -193,7 +198,9 @@ Working on multiple projects? Just change the `projectKey`:
 ```json
 // .claude/config.json
 {
-  "projectKey": "work"  // Change to "personal", "client-a", etc.
+  "catalyst": {
+    "projectKey": "work"  // Change to "personal", "client-a", etc.
+  }
 }
 ```
 
@@ -281,8 +288,10 @@ npm install -g --install-links ryanrozich/linearis#feat/cycles-cli
 Project config (`.claude/config.json`):
 ```json
 {
-  "project": {
-    "ticketPrefix": "ENG"
+  "catalyst": {
+    "project": {
+      "ticketPrefix": "ENG"
+    }
   }
 }
 ```
@@ -290,10 +299,12 @@ Project config (`.claude/config.json`):
 Secrets config (`~/.config/catalyst/config-{projectKey}.json`):
 ```json
 {
-  "linear": {
-    "apiToken": "lin_api_...",
-    "teamKey": "ENG",
-    "defaultTeam": "Engineering"
+  "catalyst": {
+    "linear": {
+      "apiToken": "lin_api_...",
+      "teamKey": "ENG",
+      "defaultTeam": "Engineering"
+    }
   }
 }
 ```
@@ -313,9 +324,11 @@ railway login
 Secrets config:
 ```json
 {
-  "railway": {
-    "projectId": "your-project-id",
-    "defaultService": "web"
+  "catalyst": {
+    "railway": {
+      "projectId": "your-project-id",
+      "defaultService": "web"
+    }
   }
 }
 ```
@@ -332,10 +345,12 @@ curl -sL https://sentry.io/get-cli/ | sh
 Secrets config:
 ```json
 {
-  "sentry": {
-    "org": "your-org",
-    "project": "your-project",
-    "authToken": "sntrys_..."
+  "catalyst": {
+    "sentry": {
+      "org": "your-org",
+      "project": "your-project",
+      "authToken": "sntrys_..."
+    }
   }
 }
 ```
@@ -347,9 +362,11 @@ Secrets config:
 Secrets config:
 ```json
 {
-  "posthog": {
-    "apiKey": "phc_...",
-    "projectId": "12345"
+  "catalyst": {
+    "posthog": {
+      "apiKey": "phc_...",
+      "projectId": "12345"
+    }
   }
 }
 ```
@@ -359,8 +376,10 @@ Secrets config:
 Secrets config:
 ```json
 {
-  "exa": {
-    "apiKey": "exa_..."
+  "catalyst": {
+    "exa": {
+      "apiKey": "exa_..."
+    }
   }
 }
 ```
