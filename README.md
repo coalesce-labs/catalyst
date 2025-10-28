@@ -101,8 +101,7 @@ code and conversation.
 
 **Need help?**
 
-- [Quick Start Guide](QUICKSTART.md) - 5-minute setup walkthrough
-- [Configuration Guide](docs/CONFIGURATION.md) - Complete setup and configuration details
+- [Installation & Configuration Guide](QUICKSTART.md) - Complete setup, installation, and configuration
 - [Claude Code Plugin Guide](https://docs.claude.com/plugins) - Official plugin documentation
 
 ## Complete Workflow

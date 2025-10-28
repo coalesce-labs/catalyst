@@ -28,8 +28,8 @@ See [CLAUDE.md](../CLAUDE.md) for complete architecture details.
 
 **New to Catalyst?**
 
-1. [USAGE.md](USAGE.md) - Installation and workflow commands
-2. [CONFIGURATION.md](CONFIGURATION.md) - Configure your project
+1. [Installation & Configuration Guide](../QUICKSTART.md) - Complete setup and configuration
+2. [USAGE.md](USAGE.md) - Workflow commands and patterns
 3. [BEST_PRACTICES.md](BEST_PRACTICES.md) - Effective patterns
 
 ---
@@ -38,10 +38,9 @@ See [CLAUDE.md](../CLAUDE.md) for complete architecture details.
 
 ### Setup & Configuration
 
-#### [CONFIGURATION.md](CONFIGURATION.md)
+#### [Installation & Configuration Guide](../QUICKSTART.md)
 
-Configuration file structure, ticket prefixes, Linear integration, thoughts system, per-project
-HumanLayer config.
+Complete guide covering installation, configuration, thoughts system setup, service integration (Linear, Sentry, Railway, PostHog), and worktree configuration.
 
 **Read this when**: Setting up a new project or configuring integrations.
 
@@ -146,7 +145,7 @@ YAML frontmatter validation, required fields, valid categories/tools, validation
 
 ## By User Type
 
-**First-Time Users**: [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md) →
+**First-Time Users**: [Installation & Configuration Guide](../QUICKSTART.md) → [USAGE.md](USAGE.md) →
 [BEST_PRACTICES.md](BEST_PRACTICES.md)
 
 **Plugin Developers**: [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) →
@@ -154,7 +153,7 @@ YAML frontmatter validation, required fields, valid categories/tools, validation
 [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
 
 **Multiple Clients**: [MULTI_CONFIG_GUIDE.md](MULTI_CONFIG_GUIDE.md) →
-[CONFIGURATION.md](CONFIGURATION.md)
+[Installation & Configuration Guide](../QUICKSTART.md)
 
 **Integration Specialists**: [LINEAR_WORKFLOW_AUTOMATION.md](LINEAR_WORKFLOW_AUTOMATION.md) →
 [DEEPWIKI_INTEGRATION.md](DEEPWIKI_INTEGRATION.md)
@@ -163,14 +162,14 @@ YAML frontmatter validation, required fields, valid categories/tools, validation
 
 ## By Task
 
-**Setting Up**: [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md)
+**Setting Up**: [Installation & Configuration Guide](../QUICKSTART.md)
 
 **Daily Development**: [BEST_PRACTICES.md](BEST_PRACTICES.md) → [PATTERNS.md](PATTERNS.md)
 
 **Creating Workflows**: [AGENTIC_WORKFLOW_GUIDE.md](AGENTIC_WORKFLOW_GUIDE.md) →
 [WORKFLOW_DISCOVERY_SYSTEM.md](WORKFLOW_DISCOVERY_SYSTEM.md)
 
-**Troubleshooting**: [USAGE.md](USAGE.md) → [CONFIGURATION.md](CONFIGURATION.md)
+**Troubleshooting**: [Installation & Configuration Guide](../QUICKSTART.md#troubleshooting)
 
 ---
 
