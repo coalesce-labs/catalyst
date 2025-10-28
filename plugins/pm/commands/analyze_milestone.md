@@ -69,7 +69,7 @@ Which milestone would you like to analyze?
 
 ### Step 2: Spawn Research Agent
 
-Use Task tool with `linear-research` agent:
+Use Task tool with `catalyst-dev:linear-research` agent:
 
 ```
 Prompt: "Get milestone '${MILESTONE_NAME}' details for project '${PROJECT_NAME}' with all issues (limit 100)"

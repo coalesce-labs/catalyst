@@ -63,7 +63,7 @@ source "${SCRIPT_DIR}/pm-utils.sh"
 TEAM_KEY=$(get_team_key)
 ```
 
-Use Task tool with `linear-research` agent:
+Use Task tool with `catalyst-dev:linear-research` agent:
 
 ```
 Prompt: "Get all backlog issues for team ${TEAM_KEY} including issues with no cycle assignment"

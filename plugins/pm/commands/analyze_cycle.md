@@ -79,7 +79,7 @@ Spawn multiple research agents in parallel to gather data:
 
 **Task 1 - Get Active Cycle**:
 
-Use Task tool with `linear-research` agent:
+Use Task tool with `catalyst-dev:linear-research` agent:
 
 ```
 Prompt: "Get the active cycle for team ${TEAM_KEY} with all issues"
@@ -88,7 +88,7 @@ Model: haiku (fast data gathering)
 
 **Task 2 - Get Team Workload**:
 
-Use Task tool with `linear-research` agent:
+Use Task tool with `catalyst-dev:linear-research` agent:
 
 ```
 Prompt: "List all in-progress issues for team ${TEAM_KEY}"

@@ -75,28 +75,28 @@ Spawn 4 research agents in parallel:
 
 **Task 1 - Yesterday's Completions**:
 ```
-Use Task tool with linear-research agent:
+Use Task tool with catalyst-dev:linear-research agent:
 Prompt: "Get issues completed yesterday for team ${TEAM_KEY} (completed after ${YESTERDAY} and before ${TODAY})"
 Model: haiku
 ```
 
 **Task 2 - Current In Progress**:
 ```
-Use Task tool with linear-research agent:
+Use Task tool with catalyst-dev:linear-research agent:
 Prompt: "List all in-progress issues for team ${TEAM_KEY}"
 Model: haiku
 ```
 
 **Task 3 - Blocked Issues**:
 ```
-Use Task tool with linear-research agent:
+Use Task tool with catalyst-dev:linear-research agent:
 Prompt: "Get all blocked issues for team ${TEAM_KEY}"
 Model: haiku
 ```
 
 **Task 4 - Team Members**:
 ```
-Use Task tool with linear-research agent:
+Use Task tool with catalyst-dev:linear-research agent:
 Prompt: "List all issues by assignee for team ${TEAM_KEY}"
 Model: haiku
 ```
