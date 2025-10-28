@@ -1,32 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$comment": "Catalyst Configuration Template - Copy to config.json and fill in [NEEDS_SETUP] values",
-  "project": {
-    "ticketPrefix": "PROJ",
-    "defaultTicketPrefix": "PROJ"
-  },
-  "linear": {
-    "teamKey": "[NEEDS_SETUP]",
-    "defaultTeam": "[NEEDS_SETUP]",
-    "apiToken": "[NEEDS_SETUP]"
-  },
-  "railway": {
-    "projectId": "[NEEDS_SETUP]",
-    "defaultService": "[NEEDS_SETUP]"
-  },
-  "sentry": {
-    "org": "[NEEDS_SETUP]",
-    "project": "[NEEDS_SETUP]",
-    "authToken": "[NEEDS_SETUP]"
-  },
-  "exa": {
-    "apiKey": "[NEEDS_SETUP]"
-  },
-  "posthog": {
-    "apiKey": "[NEEDS_SETUP]",
-    "projectId": "[NEEDS_SETUP]"
-  },
-  "thoughts": {
-    "user": null
+  "catalyst": {
+    "projectKey": "my-project",
+    "project": {
+      "ticketPrefix": "PROJ",
+      "defaultTicketPrefix": "PROJ"
+    },
+    "linear": {
+      "teamKey": "[NEEDS_SETUP]",
+      "defaultTeam": "[NEEDS_SETUP]",
+      "apiToken": "[NEEDS_SETUP]"
+    },
+    "railway": {
+      "projectId": "[NEEDS_SETUP]",
+      "defaultService": "[NEEDS_SETUP]"
+    },
+    "sentry": {
+      "org": "[NEEDS_SETUP]",
+      "project": "[NEEDS_SETUP]",
+      "authToken": "[NEEDS_SETUP]"
+    },
+    "exa": {
+      "apiKey": "[NEEDS_SETUP]"
+    },
+    "posthog": {
+      "apiKey": "[NEEDS_SETUP]",
+      "projectId": "[NEEDS_SETUP]"
+    },
+    "thoughts": {
+      "user": null,
+      "configName": null
+    }
   }
 }

@@ -271,8 +271,10 @@ This command uses configuration from `.claude/config.json`:
 
 ```json
 {
-  "project": {
-    "ticketPrefix": "PROJ"
+  "catalyst": {
+    "project": {
+      "ticketPrefix": "PROJ"
+    }
   }
 }
 ```

@@ -99,15 +99,17 @@ Reads from `.claude/config.json`:
 
 ```json
 {
-  "commit": {
-    "useConventional": true,
-    "scopes": ["agents", "commands", "hack", "docs", "claude", "config"],
-    "autoDetectType": true,
-    "autoDetectScope": true,
-    "requireBody": false
-  },
-  "project": {
-    "ticketPrefix": "RCW"
+  "catalyst": {
+    "commit": {
+      "useConventional": true,
+      "scopes": ["agents", "commands", "hack", "docs", "claude", "config"],
+      "autoDetectType": true,
+      "autoDetectScope": true,
+      "requireBody": false
+    },
+    "project": {
+      "ticketPrefix": "RCW"
+    }
   }
 }
 ```

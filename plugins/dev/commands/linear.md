@@ -37,13 +37,13 @@ Read team configuration from `.claude/config.json`:
 CONFIG_FILE=".claude/config.json"
 
 # Read team key (e.g., "ENG", "PROJ")
-TEAM_KEY=$(jq -r '.linear.teamKey // "PROJ"' "$CONFIG_FILE")
+TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
 
 # Read default team name (optional)
-DEFAULT_TEAM=$(jq -r '.linear.defaultTeam // null' "$CONFIG_FILE")
+DEFAULT_TEAM=$(jq -r '.catalyst.linear.defaultTeam // null' "$CONFIG_FILE")
 
 # Read thoughts repo URL
-THOUGHTS_URL=$(jq -r '.linear.thoughtsRepoUrl // "https://github.com/org/thoughts/blob/main"' "$CONFIG_FILE")
+THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/org/thoughts/blob/main"' "$CONFIG_FILE")
 ```
 
 **Configuration in `.claude/config.json`**:

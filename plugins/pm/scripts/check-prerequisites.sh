@@ -45,7 +45,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 
 # Check Linear configuration
-TEAM_KEY=$(jq -r '.linear.teamKey // empty' "$CONFIG_FILE")
+TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CONFIG_FILE")
 if [[ -z "$TEAM_KEY" ]]; then
     echo "⚠️  Linear team key not configured in $CONFIG_FILE"
     echo "Add: \"linear\": { \"teamKey\": \"TEAM\" }"

@@ -27,7 +27,7 @@ Read team configuration from `.claude/config.json`:
 
 ```bash
 CONFIG_FILE=".claude/config.json"
-TEAM_KEY=$(jq -r '.linear.teamKey // "PROJ"' "$CONFIG_FILE")
+TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
 ```
 
 ## Process:
@@ -287,12 +287,14 @@ Uses `.claude/config.json`:
 
 ```json
 {
-  "project": {
-    "ticketPrefix": "RCW"
-  },
-  "linear": {
-    "teamKey": "RCW",
-    "inReviewStatusName": "In Review"
+  "catalyst": {
+    "project": {
+      "ticketPrefix": "RCW"
+    },
+    "linear": {
+      "teamKey": "RCW",
+      "inReviewStatusName": "In Review"
+    }
   }
 }
 ```

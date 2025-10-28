@@ -16,8 +16,8 @@ Read team configuration from `.claude/config.json`:
 
 ```bash
 CONFIG_FILE=".claude/config.json"
-TEAM_KEY=$(jq -r '.linear.teamKey // "PROJ"' "$CONFIG_FILE")
-TEST_CMD=$(jq -r '.pr.testCommand // "make test"' "$CONFIG_FILE")
+TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
+TEST_CMD=$(jq -r '.catalyst.pr.testCommand // "make test"' "$CONFIG_FILE")
 ```
 
 ## Process:
@@ -145,7 +145,7 @@ Exit with error.
 **Read test command from config:**
 
 ```bash
-test_cmd=$(jq -r '.pr.testCommand // "make test"' .claude/config.json)
+test_cmd=$(jq -r '.catalyst.pr.testCommand // "make test"' .claude/config.json)
 ```
 
 **Execute tests:**
@@ -514,21 +514,23 @@ Uses `.claude/config.json`:
 
 ```json
 {
-  "project": {
-    "ticketPrefix": "RCW"
-  },
-  "linear": {
-    "teamKey": "RCW",
-    "doneStatusName": "Done"
-  },
-  "pr": {
-    "defaultMergeStrategy": "squash",
-    "deleteRemoteBranch": true,
-    "deleteLocalBranch": true,
-    "updateLinearOnMerge": true,
-    "requireApproval": false,
-    "requireCI": false,
-    "testCommand": "make test"
+  "catalyst": {
+    "project": {
+      "ticketPrefix": "RCW"
+    },
+    "linear": {
+      "teamKey": "RCW",
+      "doneStatusName": "Done"
+    },
+    "pr": {
+      "defaultMergeStrategy": "squash",
+      "deleteRemoteBranch": true,
+      "deleteLocalBranch": true,
+      "updateLinearOnMerge": true,
+      "requireApproval": false,
+      "requireCI": false,
+      "testCommand": "make test"
+    }
   }
 }
 ```

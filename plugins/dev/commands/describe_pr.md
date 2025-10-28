@@ -512,17 +512,19 @@ Uses `.claude/config.json`:
 
 ```json
 {
-  "project": {
-    "ticketPrefix": "RCW"
-  },
-  "linear": {
-    "teamId": "team-id",
-    "inReviewStatusName": "In Review"
-  },
-  "pr": {
-    "testCommand": "make test",
-    "lintCommand": "make lint",
-    "buildCommand": "make build"
+  "catalyst": {
+    "project": {
+      "ticketPrefix": "RCW"
+    },
+    "linear": {
+      "teamId": "team-id",
+      "inReviewStatusName": "In Review"
+    },
+    "pr": {
+      "testCommand": "make test",
+      "lintCommand": "make lint",
+      "buildCommand": "make build"
+    }
   }
 }
 ```

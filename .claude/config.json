@@ -1,11 +1,13 @@
 {
-  "projectKey": "catalyst-workspace",
-  "project": {
-    "ticketPrefix": "PROJ",
-    "defaultTicketPrefix": "PROJ"
-  },
-  "thoughts": {
-    "user": null,
-    "configName": null
+  "catalyst": {
+    "projectKey": "catalyst-workspace",
+    "project": {
+      "ticketPrefix": "PROJ",
+      "defaultTicketPrefix": "PROJ"
+    },
+    "thoughts": {
+      "user": null,
+      "configName": null
+    }
   }
 }

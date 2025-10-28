@@ -5,7 +5,7 @@
 get_config() {
     local key="$1"
     local default="${2:-}"
-    jq -r ".$key // \"$default\"" .claude/config.json
+    jq -r ".catalyst.$key // \"$default\"" .claude/config.json
 }
 
 # Get Linear team key

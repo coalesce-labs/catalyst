@@ -241,9 +241,11 @@ PM commands read from two config sources:
 **1. Project metadata** (`.claude/config.json` - safe to commit):
 ```json
 {
-  "projectKey": "acme",
-  "project": {
-    "ticketPrefix": "ACME"
+  "catalyst": {
+    "projectKey": "acme",
+    "project": {
+      "ticketPrefix": "ACME"
+    }
   }
 }
 ```
