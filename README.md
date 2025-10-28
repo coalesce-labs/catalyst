@@ -7,6 +7,23 @@ This is the workspace I use daily for AI-assisted development. It's battle-teste
 and optimized for efficient, context-aware AI collaboration. I'm sharing it so others can use it,
 fork it, and contribute ideas back.
 
+## ⚠️ Educational & Personal Use
+
+**Important**: This is **my personal workflow** shared for educational purposes. You're welcome to:
+- ✅ Use it as-is
+- ✅ Copy or fork it
+- ✅ Suggest improvements
+- ✅ Learn from the patterns
+
+**But understand**:
+- ❗ This workflow is optimized for **my** development style
+- ❗ Your workflow may be different (and that's totally fine!)
+- ❗ Some decisions are opinionated based on my preferences
+- ❗ I may not accept PRs that don't align with my workflow
+
+Think of this as **inspiration** rather than a one-size-fits-all solution. Take what works, adapt
+what doesn't!
+
 ## What's Inside
 
 **Catalyst** is a 5-plugin system for Claude Code focused on **token efficiency**, **session-aware
@@ -50,9 +67,47 @@ and shared memory systems.
 - Import and adapt patterns
 - Create new workflows
 
+## Quick Setup (One Command)
+
+Get started in 5 minutes with the unified setup script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
+```
+
+This single command:
+- ✅ Checks/installs prerequisites (HumanLayer CLI, jq)
+- ✅ Sets up thoughts repository (one per org)
+- ✅ Creates project configuration
+- ✅ Configures worktree directories
+- ✅ Prompts for API tokens (Linear, Sentry, etc.)
+- ✅ Links project to shared thoughts
+
+**Then install the plugins:**
+
+```bash
+# In Claude Code:
+/plugin marketplace add coalesce-labs/catalyst
+/plugin install catalyst-dev
+
+# Restart Claude Code
+```
+
+You're ready! Try `/research-codebase` in your next session.
+
+**Want to review the script first?**
+
+```bash
+curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh
+chmod +x setup-catalyst.sh
+./setup-catalyst.sh
+```
+
+See [QUICKSTART.md](QUICKSTART.md) for detailed setup instructions.
+
 ## Installation
 
-Install via Claude Code plugin system:
+Alternatively, install plugins manually via Claude Code plugin system:
 
 ```bash
 # Add the marketplace repository
@@ -211,15 +266,20 @@ Personal refinement over hundreds of hours on real projects.
 
 ## Contributing
 
-This is my personal workspace, but I'm open to:
+**This is my personal workflow workspace**, primarily built for my own development style and
+preferences. That said, I'm happy to:
 
-- **Ideas** - Open issues with workflow suggestions
-- **Forks** - Adapt it to your needs
-- **Bug reports** - If something's broken
-- **Patterns** - Share your own workflow patterns
+- **Discuss ideas** - Open issues with workflow suggestions or improvements
+- **See your forks** - Adapt it to your needs and share what you built
+- **Fix bugs** - If something's broken, let me know
+- **Learn together** - Share your workflow patterns and approaches
 
-I may not accept all PRs (since this is my daily driver), but I love seeing how others adapt these
-patterns!
+**Important**: I may not accept PRs that change core workflows or add features I don't personally
+use, since this is the workspace I rely on daily. But I **love** seeing how others adapt these
+patterns to their own needs!
+
+**Best approach**: Fork it, make it yours, and share what you learned. That's how we all get
+better!
 
 ## Documentation
 

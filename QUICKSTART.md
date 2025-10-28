@@ -18,21 +18,33 @@ Complete guide to installing and configuring Catalyst for Claude Code.
 
 ## Quick Start (5 Minutes)
 
+**One-command setup:**
 ```bash
-# 1. Add Catalyst marketplace
-/plugin marketplace add coalesce-labs/catalyst
+curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
+```
 
-# 2. Install core plugin
+Or download and review first:
+```bash
+curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh
+chmod +x setup-catalyst.sh
+./setup-catalyst.sh
+```
+
+**What this does:**
+- ✅ Checks/installs prerequisites (HumanLayer, jq)
+- ✅ Sets up thoughts repository (one per org)
+- ✅ Creates project configuration
+- ✅ Configures worktree directories
+- ✅ Prompts for API tokens (Linear, Sentry, etc.)
+- ✅ Links project to shared thoughts
+
+**Then:**
+```bash
+# In Claude Code:
+/plugin marketplace add coalesce-labs/catalyst
 /plugin install catalyst-dev
 
-# 3. Configure your project
-./scripts/setup-catalyst-config.sh
-
-# 4. Set up thoughts
-curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/setup-thoughts.sh
-chmod +x setup-thoughts.sh && ./setup-thoughts.sh
-
-# 5. Restart Claude Code
+# Restart Claude Code
 ```
 
 You're ready! Try `/research-codebase` in your next session.
@@ -109,6 +121,31 @@ Catalyst is distributed as a 5-plugin system. Install what you need:
 
 Catalyst uses a **two-layer configuration system**:
 
+### Setup Configuration
+
+**Unified setup script (recommended):**
+
+```bash
+# Download and run
+curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
+```
+
+**What you'll be asked:**
+1. Project location (existing repo or clone fresh)
+2. Project key (defaults to GitHub org name)
+3. Ticket prefix (e.g., "ENG", "PROJ")
+4. Your name (for thoughts system)
+5. API tokens for integrations (can skip optional ones)
+
+**Result:**
+- ✅ `.claude/config.json` (committable, no secrets)
+- ✅ `~/.config/humanlayer/config-{projectKey}.json` (thoughts location)
+- ✅ `~/.config/catalyst/config-{projectKey}.json` (API tokens)
+- ✅ Thoughts repository at org level
+- ✅ Worktree directory created
+
+**Idempotent:** Safe to re-run to add/update integrations.
+
 ### Layer 1: Project Config (`.claude/config.json`)
 
 This file contains **non-sensitive** project metadata and is **safe to commit** to git.
@@ -120,6 +157,10 @@ This file contains **non-sensitive** project metadata and is **safe to commit** 
 {
   "catalyst": {
     "projectKey": "acme",
+    "repository": {
+      "org": "acme-corp",
+      "name": "api"
+    },
     "project": {
       "ticketPrefix": "ACME",
       "name": "Acme Corp Project"
@@ -177,20 +218,6 @@ This file contains **API tokens and secrets** and is **never committed** to git.
 - Auth tokens
 - Service credentials
 
-### Setup Configuration
-
-Run the setup script to create both config files:
-
-```bash
-./scripts/setup-catalyst-config.sh
-```
-
-This will:
-1. Prompt for a project key (e.g., "acme", "personal")
-2. Create `.claude/config.json` with project metadata
-3. Create `~/.config/catalyst/config-{projectKey}.json` for secrets
-4. Guide you through filling in service credentials
-
 ### Switching Between Projects
 
 Working on multiple projects? Just change the `projectKey`:
@@ -212,42 +239,42 @@ Each project key points to a different secrets file in `~/.config/catalyst/`.
 
 The thoughts system provides git-backed persistent context across sessions.
 
-### Initial Setup
+### Automatic Setup
+
+**Automatic setup** (included in unified setup script):
+
+The setup script automatically:
+- Creates org-level thoughts repo (`<org_root>/thoughts/`)
+- Configures HumanLayer CLI
+- Initializes thoughts in your project
+- Creates symlinks to shared thoughts
+
+### Manual Setup
+
+**Manual setup** (if needed):
+
+If you skipped thoughts setup or want to initialize additional projects:
 
 ```bash
-# Download and run setup script
-curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/setup-thoughts.sh
-chmod +x setup-thoughts.sh
-./setup-thoughts.sh
-```
-
-This creates:
-- `~/thoughts/` repository
-- HumanLayer config at `~/.config/humanlayer/config.json`
-- Your username configuration
-
-### Per-Project Initialization
-
-For each project, initialize thoughts:
-
-```bash
+# Initialize thoughts in current project
 cd /path/to/your-project
-
-# Download init script
-curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/init-project.sh
-chmod +x init-project.sh
-
-# Initialize (creates symlinks to thoughts repo)
-./init-project.sh . my-project
+humanlayer thoughts init --directory <repo-name>
 ```
 
-This creates:
+**Directory structure:**
 ```
-your-project/
-└── thoughts/
-    ├── {your_name}/  → ~/thoughts/repos/my-project/{your_name}/
-    ├── shared/       → ~/thoughts/repos/my-project/shared/
-    └── global/       → ~/thoughts/global/
+<org_root>/
+├── thoughts/                    # Shared by all org projects
+│   ├── repos/
+│   │   ├── project-a/
+│   │   │   ├── {your_name}/
+│   │   │   └── shared/
+│   │   └── project-b/
+│   └── global/
+├── project-a/
+│   └── thoughts/                # Symlinks to ../thoughts/repos/project-a/
+└── project-b/
+    └── thoughts/                # Symlinks to ../thoughts/repos/project-b/
 ```
 
 ### Syncing Thoughts
@@ -266,7 +293,7 @@ humanlayer thoughts sync -m "Updated research on feature X"
 ### Backing Up to GitHub
 
 ```bash
-cd ~/thoughts
+cd <org_root>/thoughts
 gh repo create my-thoughts --private --source=. --push
 ```
 
