@@ -747,7 +747,7 @@ cd ~/thoughts
 git pull
 
 # Now your planning includes latest team knowledge
-/create_plan thoughts/shared/tickets/eng_1234.md
+/catalyst-dev:create_plan thoughts/shared/tickets/eng_1234.md
 ```
 
 ### Collaborative Research
@@ -1130,9 +1130,9 @@ Let's add rate limiting. I'll start coding...
 
 ```
 # Research, plan, then implement
-/create_plan thoughts/shared/tickets/eng_1234.md
+/catalyst-dev:create_plan thoughts/shared/tickets/eng_1234.md
 [collaborative planning with research]
-/implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
+/catalyst-dev:implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 ```
 
 ### 5. No Context Persistence

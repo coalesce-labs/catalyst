@@ -60,10 +60,10 @@ Codebase locations, references, etc.
 
 ```bash
 # After working for a while
-/create_handoff
+/catalyst-dev:create_handoff
 
 # Clears context, starts new session
-/resume_handoff thoughts/shared/handoffs/2025-01-08_15-30-22_feature-auth.md
+/catalyst-dev:resume_handoff thoughts/shared/handoffs/2025-01-08_15-30-22_feature-auth.md
 ```
 
 ### `resume_handoff.md` - **Copy This!**
@@ -83,13 +83,13 @@ Codebase locations, references, etc.
 
 ```bash
 # By path
-/resume_handoff thoughts/shared/handoffs/ENG-123/2025-01-08_15-30-22.md
+/catalyst-dev:resume_handoff thoughts/shared/handoffs/ENG-123/2025-01-08_15-30-22.md
 
 # By ticket (finds latest)
-/resume_handoff ENG-123
+/catalyst-dev:resume_handoff ENG-123
 
 # Interactive
-/resume_handoff  # Shows menu
+/catalyst-dev:resume_handoff  # Shows menu
 ```
 
 **Why it's brilliant**:
@@ -160,7 +160,7 @@ Remove these:
 
 ## Creating Tickets from Thoughts
 
-/linear create thoughts/shared/research/api-redesign.md
+/catalyst-dev:linear create thoughts/shared/research/api-redesign.md
 
 This will:
 
@@ -194,7 +194,7 @@ It's named after their process for:
 1. Fetch top 10 priority tickets in "Ready for Spec"
 2. Select highest priority SMALL/XS ticket
 3. Read ticket + comments
-4. Run /create_plan
+4. Run /catalyst-dev:create_plan
 5. Sync to thoughts
 6. Attach to Linear
 7. Move to "Plan in Review"
@@ -226,11 +226,11 @@ It's named after their process for:
    ```bash
    # Instead of ralph_plan, you do:
    # 1. Pick a ticket manually
-   # 2. Run: /create_plan
+   # 2. Run: /catalyst-dev:create_plan
 
    # Instead of ralph_impl, you do:
    # 1. Pick a planned ticket
-   # 2. Run: /implement_plan thoughts/shared/plans/plan.md
+   # 2. Run: /catalyst-dev:implement_plan thoughts/shared/plans/plan.md
    ```
 
 **The lesson from Ralph**: Good workflow progression (research → plan → implement)
@@ -250,7 +250,7 @@ It's named after their process for:
 You already have this functionality in:
 
 1. **Research agents** - `codebase-locator`, `codebase-analyzer`, `thoughts-locator`
-2. **`/create_plan`** - Spawns research agents as part of planning
+2. **`/catalyst-dev:create_plan`** - Spawns research agents as part of planning
 
 The `research_codebase` command is essentially:
 
@@ -261,7 +261,7 @@ The `research_codebase` command is essentially:
 4. Save to thoughts/shared/research/
 ```
 
-**You already have this** - Just use your agents directly or within `/create_plan`.
+**You already have this** - Just use your agents directly or within `/catalyst-dev:create_plan`.
 
 ---
 
@@ -290,8 +290,8 @@ The `research_codebase` command is essentially:
 
 **NO** - Use the regular versions you already have:
 
-- `/commit` - Interactive, better for manual work
-- `/describe_pr` - Works for manual PR creation
+- `/catalyst-dev:commit` - Interactive, better for manual work
+- `/catalyst-dev:describe_pr` - Works for manual PR creation
 
 If you ever need CI automation, create project-specific versions then.
 
@@ -372,7 +372,7 @@ Here's how handoffs work in practice:
 # You've researched auth patterns, updated 5 files
 # Getting tired, want to hand off
 
-/create_handoff
+/catalyst-dev:create_handoff
 
 # Creates: thoughts/shared/handoffs/2025-01-08_15-30-22_auth-implementation.md
 # Contains:
@@ -385,7 +385,7 @@ Here's how handoffs work in practice:
 **Session 2** (Fresh start):
 
 ```bash
-/resume_handoff thoughts/shared/handoffs/2025-01-08_15-30-22_auth-implementation.md
+/catalyst-dev:resume_handoff thoughts/shared/handoffs/2025-01-08_15-30-22_auth-implementation.md
 
 # Claude:
 # 1. Reads handoff completely
@@ -414,7 +414,7 @@ If you adapt the Linear command:
 
 ```bash
 # You did research, saved to thoughts
-/linear create thoughts/shared/research/api-redesign.md
+/catalyst-dev:linear create thoughts/shared/research/api-redesign.md
 
 # Claude:
 # 1. Reads research doc
@@ -438,12 +438,12 @@ Backlog → Research → Plan → Implement → Review → Done
 # With commands:
 
 1. Ticket created (Backlog)
-2. /research_codebase "auth patterns" → Save to thoughts/shared/research/ → Attach to ticket → Move
+2. /catalyst-dev:research_codebase "auth patterns" → Save to thoughts/shared/research/ → Attach to ticket → Move
    to "Plan"
-3. /create_plan (reads research) → Save to thoughts/shared/plans/ → Attach to ticket → Move to
+3. /catalyst-dev:create_plan (reads research) → Save to thoughts/shared/plans/ → Attach to ticket → Move to
    "Ready"
-4. /implement_plan thoughts/shared/plans/auth-plan.md → Move to "In Progress"
-5. /commit + /describe_pr → Move to "Review"
+4. /catalyst-dev:implement_plan thoughts/shared/plans/auth-plan.md → Move to "In Progress"
+5. /catalyst-dev:commit + /catalyst-dev:describe_pr → Move to "Review"
 ```
 
 ---

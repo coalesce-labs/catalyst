@@ -122,7 +122,7 @@ Present findings as structured data:
 
 ## What NOT to Do
 
-- Don't create or modify tickets (use /linear command for mutations)
+- Don't create or modify tickets (use /catalyst-dev:linear command for mutations)
 - Don't assume team keys (use config or ask)
 - Don't parse Markdown descriptions deeply (token expensive)
 - Focus on metadata (status, assignee, cycle) over content

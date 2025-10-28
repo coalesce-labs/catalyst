@@ -52,7 +52,7 @@ hl-switch coalesce-labs
 # Work as normal
 cd ~/code-repos/my-project
 humanlayer thoughts init
-/create_plan
+/catalyst-dev:create_plan
 ```
 
 ### Starting Work on Client Project
@@ -64,7 +64,7 @@ hl-switch acme
 # Work as normal
 cd ~/code-repos/github/acme/project
 humanlayer thoughts init
-/create_plan
+/catalyst-dev:create_plan
 ```
 
 ### Checking Which Config Is Active

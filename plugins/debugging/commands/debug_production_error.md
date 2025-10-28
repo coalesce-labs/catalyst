@@ -21,13 +21,13 @@ Investigate production errors using Sentry's error tracking, stack traces, and c
 ## Usage
 
 ```bash
-/debug-production-error <error-description-or-id>
+/catalyst-dev:debug-production-error <error-description-or-id>
 
 Examples:
-  /debug-production-error "TypeError in checkout flow"
-  /debug-production-error "ISSUE-123"
-  /debug-production-error "errors from last deployment"
-  /debug-production-error "unhandled exceptions this week"
+  /catalyst-dev:debug-production-error "TypeError in checkout flow"
+  /catalyst-dev:debug-production-error "ISSUE-123"
+  /catalyst-dev:debug-production-error "errors from last deployment"
+  /catalyst-dev:debug-production-error "unhandled exceptions this week"
 ```
 
 ## What This Command Does
@@ -84,25 +84,25 @@ When this plugin is enabled, you have access to ~19 Sentry tools:
 ### Investigate Specific Error
 
 ```bash
-/debug-production-error "Show me details for MYAPP-456 including stack trace and user context"
+/catalyst-dev:debug-production-error "Show me details for MYAPP-456 including stack trace and user context"
 ```
 
 ### Search by Error Type
 
 ```bash
-/debug-production-error "Find all TypeError exceptions in the last 24 hours"
+/catalyst-dev:debug-production-error "Find all TypeError exceptions in the last 24 hours"
 ```
 
 ### Deployment Issues
 
 ```bash
-/debug-production-error "What new errors appeared after release v2.3.0?"
+/catalyst-dev:debug-production-error "What new errors appeared after release v2.3.0?"
 ```
 
 ### High-Impact Errors
 
 ```bash
-/debug-production-error "Show unresolved errors affecting more than 100 users"
+/catalyst-dev:debug-production-error "Show unresolved errors affecting more than 100 users"
 ```
 
 ## Output Format
@@ -141,19 +141,19 @@ Analysis typically includes:
 ### Filter by Environment
 
 ```bash
-/debug-production-error "production errors in payment service"
+/catalyst-dev:debug-production-error "production errors in payment service"
 ```
 
 ### Time-Based Analysis
 
 ```bash
-/debug-production-error "spike in errors between 2pm-3pm today"
+/catalyst-dev:debug-production-error "spike in errors between 2pm-3pm today"
 ```
 
 ### User-Specific
 
 ```bash
-/debug-production-error "errors for user@example.com"
+/catalyst-dev:debug-production-error "errors for user@example.com"
 ```
 
 ### Integration with Analytics

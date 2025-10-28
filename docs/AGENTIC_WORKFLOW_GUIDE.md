@@ -250,7 +250,7 @@ humanlayer thoughts sync
 **Commands**:
 
 ```bash
-/commit                    # Create commit
+/catalyst-dev:commit                    # Create commit
 gh pr create --fill        # Create PR
 /describe-pr              # Generate PR description
 ```
@@ -709,7 +709,7 @@ claude
 /implement-plan thoughts/shared/plans/2025-01-08-PROJ-123-feature.md
 
 # 4. Commit and push
-/commit
+/catalyst-dev:commit
 git push -u origin PROJ-123-feature
 
 # 5. Create PR
@@ -774,7 +774,7 @@ cd ~/wt/my-project/PROJ-123-rate-limiting
 # CLEAR CONTEXT
 
 # 5. PR
-/commit && gh pr create --fill && /describe-pr
+/catalyst-dev:commit && gh pr create --fill && /describe-pr
 ```
 
 ### Pattern 2: Complex Feature with Handoffs
@@ -811,7 +811,7 @@ cd ~/wt/my-project/PROJ-123-rate-limiting
 
 # Day 5 - Validation & PR
 /validate-plan
-/commit && gh pr create --fill && /describe-pr
+/catalyst-dev:commit && gh pr create --fill && /describe-pr
 ```
 
 ### Pattern 3: Parallel Multi-Task
@@ -891,7 +891,7 @@ Each Claude Code session is isolated with its own context.
 /resume-handoff <path>       # Resume from handoff
 /implement-plan <plan-path>  # Execute plan
 /validate-plan               # Verify implementation
-/commit                      # Create commit
+/catalyst-dev:commit                      # Create commit
 /describe-pr                 # Generate PR description
 ```
 

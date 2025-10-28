@@ -7,32 +7,32 @@ intelligent defaults.
 
 Four commands work together to handle the entire PR lifecycle:
 
-1. **`/commit`** - Create conventional commits
-2. **`/create_pr`** - Create PR with auto-rebase and description
-3. **`/describe_pr`** - Update PR description incrementally
-4. **`/merge_pr`** - Safely merge with verification
+1. **`/catalyst-dev:commit`** - Create conventional commits
+2. **`/catalyst-dev:create_pr`** - Create PR with auto-rebase and description
+3. **`/catalyst-dev:describe_pr`** - Update PR description incrementally
+4. **`/catalyst-dev:merge_pr`** - Safely merge with verification
 
 ## Quick Start
 
 ```bash
 # 1. Make changes and commit
-/commit
+/catalyst-dev:commit
 
 # 2. Create PR (auto-rebases, describes, links Linear)
-/create_pr
+/catalyst-dev:create_pr
 
 # 3. After code review, update description
-/describe_pr
+/catalyst-dev:describe_pr
 
 # 4. Merge when ready
-/merge_pr
+/catalyst-dev:merge_pr
 ```
 
 ---
 
 ## Command Details
 
-### `/commit` - Conventional Commits
+### `/catalyst-dev:commit` - Conventional Commits
 
 Creates git commits using conventional commit format with auto-detection.
 
@@ -49,7 +49,7 @@ Creates git commits using conventional commit format with auto-detection.
 # Working on branch: RCW-13-implement-pr-lifecycle
 # Changed files: commands/dev/commit.md, commands/linear/create_pr.md
 
-/commit
+/catalyst-dev:commit
 
 # Detects:
 # - Type: feat (new functionality)
@@ -108,7 +108,7 @@ Creates git commits using conventional commit format with auto-detection.
 
 ---
 
-### `/create_pr` - Full PR Creation
+### `/catalyst-dev:create_pr` - Full PR Creation
 
 Orchestrates complete PR creation: commit → rebase → push → create → describe → Linear update.
 
@@ -122,7 +122,7 @@ Orchestrates complete PR creation: commit → rebase → push → create → des
 6. Pushes branch with upstream tracking
 7. Extracts ticket from branch name
 8. Creates PR with ticket-based title
-9. Calls `/describe_pr` automatically
+9. Calls `/catalyst-dev:describe_pr` automatically
 10. Updates Linear ticket → "In Review"
 11. Assigns ticket to you
 12. Links PR to Linear ticket
@@ -132,7 +132,7 @@ Orchestrates complete PR creation: commit → rebase → push → create → des
 ```bash
 # Branch: RCW-13-implement-pr-lifecycle
 
-/create_pr
+/catalyst-dev:create_pr
 
 # Output:
 Checking for uncommitted changes... none
@@ -145,7 +145,7 @@ Title: "RCW-13: Implement pr lifecycle"
 ✅ PR #2 created
 
 Generating comprehensive description...
-(calls /describe_pr internally)
+(calls /catalyst-dev:describe_pr internally)
 
 Updating Linear RCW-13:
 - Status: In Progress → In Review
@@ -172,7 +172,7 @@ URL: https://github.com/org/repo/pull/2
 
 ---
 
-### `/describe_pr` - Incremental PR Descriptions
+### `/catalyst-dev:describe_pr` - Incremental PR Descriptions
 
 Generates or updates PR description with comprehensive analysis, preserving manual edits.
 
@@ -258,7 +258,7 @@ Marks checkboxes:
 
 ---
 
-### `/merge_pr` - Safe Merge with Verification
+### `/catalyst-dev:merge_pr` - Safe Merge with Verification
 
 Safely merges PR after comprehensive checks, with Linear integration and cleanup.
 
@@ -283,7 +283,7 @@ Safely merges PR after comprehensive checks, with Linear integration and cleanup
 **Example:**
 
 ```bash
-/merge_pr
+/catalyst-dev:merge_pr
 
 Running tests: make test
 ✅ All tests passed (15 passed, 0 failed)
@@ -336,9 +336,9 @@ Merging...
 **Flags:**
 
 ```bash
-/merge_pr --skip-tests      # Skip local test execution
-/merge_pr --no-update       # Don't update Linear ticket
-/merge_pr --keep-branch     # Don't delete local branch
+/catalyst-dev:merge_pr --skip-tests      # Skip local test execution
+/catalyst-dev:merge_pr --no-update       # Don't update Linear ticket
+/catalyst-dev:merge_pr --keep-branch     # Don't delete local branch
 ```
 
 ---
@@ -355,12 +355,12 @@ git checkout -b RCW-42-add-validation
 # ... make changes ...
 
 # 3. Commit with conventional format
-/commit
+/catalyst-dev:commit
 # Suggests: feat(commands): add validation command
 # You confirm
 
 # 4. Create PR
-/create_pr
+/catalyst-dev:create_pr
 # - Rebases onto main
 # - Creates PR
 # - Generates description
@@ -373,18 +373,18 @@ git checkout -b RCW-42-add-validation
 # ... fix issues ...
 
 # 7. Commit changes
-/commit
+/catalyst-dev:commit
 # Suggests: fix(commands): handle edge cases in validation
 
 # 8. Update PR description
-/describe_pr
+/catalyst-dev:describe_pr
 # - Appends new changes
 # - Preserves reviewer notes
 # - Reruns verification checks
 # - Shows what changed since last update
 
 # 9. Approval received, ready to merge
-/merge_pr
+/catalyst-dev:merge_pr
 # - Runs tests ✅
 # - Checks CI ✅
 # - Squash merges
@@ -401,7 +401,7 @@ git checkout -b RCW-42-add-validation
 ```
 Backlog → Research → Planning → In Progress → In Review → Done
           ↑          ↑          ↑             ↑            ↑
-     /research  /create-plan  /implement  /create_pr  /merge_pr
+     /research  /create-plan  /implement  /catalyst-dev:create_pr  /catalyst-dev:merge_pr
 ```
 
 ### Auto-Assignment
@@ -493,7 +493,7 @@ This enables automatic ticket extraction and Linear integration.
 
 ### Commit Frequently
 
-Use `/commit` often for atomic changes:
+Use `/catalyst-dev:commit` often for atomic changes:
 
 - Easier to review
 - Clearer history
@@ -501,7 +501,7 @@ Use `/commit` often for atomic changes:
 
 ### Update Descriptions After Review
 
-After pushing review changes, run `/describe_pr`:
+After pushing review changes, run `/catalyst-dev:describe_pr`:
 
 - Shows reviewers what changed
 - Updates verification status
@@ -509,21 +509,21 @@ After pushing review changes, run `/describe_pr`:
 
 ### Test Before Merge
 
-`/merge_pr` runs tests by default. Don't skip unless absolutely necessary:
+`/catalyst-dev:merge_pr` runs tests by default. Don't skip unless absolutely necessary:
 
 ```bash
 # ✅ Good: tests run automatically
-/merge_pr
+/catalyst-dev:merge_pr
 
 # ⚠️ Use sparingly: skips safety checks
-/merge_pr --skip-tests
+/catalyst-dev:merge_pr --skip-tests
 ```
 
 ### Monitor CI
 
 Check CI status before merging:
 
-- `/merge_pr` shows CI status
+- `/catalyst-dev:merge_pr` shows CI status
 - Can override if needed
 - Better to fix issues than override
 
@@ -544,7 +544,7 @@ Resolve manually:
   git add <files>
   git rebase --continue
   git push --force-with-lease
-  /create_pr  # or /merge_pr
+  /catalyst-dev:create_pr  # or /catalyst-dev:merge_pr
 ```
 
 ### Tests Failing
@@ -557,7 +557,7 @@ Fix tests or skip (not recommended):
   make test
 
   # Or skip (use caution)
-  /merge_pr --skip-tests
+  /catalyst-dev:merge_pr --skip-tests
 ```
 
 ### Linear Ticket Not Found
@@ -620,14 +620,14 @@ Add project-specific scopes to config:
 # (if no ticket in branch name, automatic)
 
 # Merge without Linear update
-/merge_pr --no-update
+/catalyst-dev:merge_pr --no-update
 ```
 
 ### Keep Local Branch
 
 ```bash
 # Merge but don't delete local branch
-/merge_pr --keep-branch
+/catalyst-dev:merge_pr --keep-branch
 ```
 
 ---

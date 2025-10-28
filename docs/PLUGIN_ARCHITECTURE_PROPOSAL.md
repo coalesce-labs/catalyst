@@ -32,7 +32,7 @@ Organize by **use case** rather than **feature type**:
 **Includes**:
 
 - Core workflow commands: `/research-codebase`, `/create-plan`, `/implement-plan`
-- Development commands: `/commit`, `/describe-pr`, `/create-worktree`
+- Development commands: `/catalyst-dev:commit`, `/describe-pr`, `/create-worktree`
 - Handoff system: `/create-handoff`, `/resume-handoff`
 - All research agents (codebase-locator, analyzer, pattern-finder, etc.)
 - Lightweight MCPs: DeepWiki (~1.9k), Context7 (~1.7k)
@@ -123,7 +123,7 @@ Organize by **use case** rather than **feature type**:
 /research-codebase "authentication flow"
 /create-plan "Add OAuth support"
 /implement-plan
-/commit
+/catalyst-dev:commit
 ```
 
 **No heavy MCPs loaded** ✅
@@ -155,7 +155,7 @@ Organize by **use case** rather than **feature type**:
 /plugin enable catalyst-debugging
 
 # Now Sentry MCP available
-/debug-production-error "TypeError in checkout"
+/catalyst-dev:debug-production-error "TypeError in checkout"
 /error-impact-analysis
 
 # Optional: Also enable analytics for user impact

@@ -437,14 +437,14 @@ Bad:
 
 Commands are slash commands that execute multi-step workflows.
 
-### /create_plan
+### /catalyst-dev:create_plan
 
 Creates comprehensive implementation plans through interactive research and collaboration.
 
 **Basic Usage:**
 
 ```
-/create_plan
+/catalyst-dev:create_plan
 ```
 
 Claude will ask for task details and guide you through the planning process.
@@ -452,13 +452,13 @@ Claude will ask for task details and guide you through the planning process.
 **With Ticket File:**
 
 ```
-/create_plan thoughts/shared/tickets/eng_1234.md
+/catalyst-dev:create_plan thoughts/shared/tickets/eng_1234.md
 ```
 
 **With Deep Analysis:**
 
 ```
-/create_plan think deeply about thoughts/shared/tickets/eng_1234.md
+/catalyst-dev:create_plan think deeply about thoughts/shared/tickets/eng_1234.md
 ```
 
 **The Process:**
@@ -540,14 +540,14 @@ Claude will ask for task details and guide you through the planning process.
 ## References
 ```
 
-### /implement_plan
+### /catalyst-dev:implement_plan
 
 Executes an approved implementation plan phase by phase.
 
 **Usage:**
 
 ```
-/implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
+/catalyst-dev:implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 ```
 
 **The Process:**
@@ -594,14 +594,14 @@ Why this matters: Plan assumes JSON editing
 How should I proceed?
 ```
 
-### /validate_plan
+### /catalyst-dev:validate_plan
 
 Verifies implementation correctness and identifies deviations.
 
 **Usage:**
 
 ```
-/validate_plan
+/catalyst-dev:validate_plan
 ```
 
 **The Process:**
@@ -875,7 +875,7 @@ git branch
 vim src/rate-limiter.js
 
 # Create plan
-/create_plan
+/catalyst-dev:create_plan
 # Plan saved to thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 ```
 
@@ -938,7 +938,7 @@ EOF
 
 ```
 # In Claude Code
-/create_plan thoughts/shared/tickets/eng_1234.md
+/catalyst-dev:create_plan thoughts/shared/tickets/eng_1234.md
 ```
 
 Claude will:
@@ -961,7 +961,7 @@ thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 **Step 4: Implement the Plan**
 
 ```
-/implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
+/catalyst-dev:implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
 ```
 
 Claude implements phase by phase, checking boxes as it progresses.
@@ -969,7 +969,7 @@ Claude implements phase by phase, checking boxes as it progresses.
 **Step 5: Validate Implementation**
 
 ```
-/validate_plan
+/catalyst-dev:validate_plan
 ```
 
 Claude runs all success criteria and generates validation report.
@@ -1006,8 +1006,8 @@ git commit -m "Fix button styling"
 cd ~/wt/my-app/new-dashboard
 
 # Create and implement plan
-/create_plan thoughts/shared/tickets/eng_1234.md
-/implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-new-dashboard.md
+/catalyst-dev:create_plan thoughts/shared/tickets/eng_1234.md
+/catalyst-dev:implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-new-dashboard.md
 ```
 
 **Worktree 2 - Major Feature B**
@@ -1023,7 +1023,7 @@ cd ~/wt/my-app/user-settings
 @agent-thoughts-locator find dashboard research
 
 # Create separate plan
-/create_plan thoughts/shared/tickets/eng_1235.md
+/catalyst-dev:create_plan thoughts/shared/tickets/eng_1235.md
 ```
 
 **Both worktrees share thoughts:**
@@ -1142,7 +1142,7 @@ cd ~/projects/shared-app
 humanlayer thoughts sync
 
 # Can now reference Developer A's research
-/create_plan
+/catalyst-dev:create_plan
 
 # Claude reads shared research automatically
 @agent-thoughts-locator find authentication research
@@ -1184,7 +1184,7 @@ ls -lt thoughts/shared/plans/ | head -10
 Plans track progress with checkboxes. If interrupted:
 
 ```
-/implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-feature.md
+/catalyst-dev:implement_plan thoughts/shared/plans/2025-01-08-ENG-1234-feature.md
 ```
 
 Claude automatically resumes from first unchecked item.

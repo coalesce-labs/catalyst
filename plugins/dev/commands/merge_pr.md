@@ -135,7 +135,7 @@ Resolve manually:
   2. git add <resolved-files>
   3. git rebase --continue
   4. git push --force-with-lease
-  5. Run /merge_pr again
+  5. Run /catalyst-dev:merge_pr again
 ```
 
 Exit with error.
@@ -167,7 +167,7 @@ Fix failing tests before merge:
   $test_cmd
 
 Or skip tests (not recommended):
-  /merge_pr $pr_number --skip-tests
+  /catalyst-dev:merge_pr $pr_number --skip-tests
 ```
 
 Exit with error (unless `--skip-tests` flag provided).
@@ -397,25 +397,25 @@ Next steps:
 **`--skip-tests`** - Skip local test execution
 
 ```bash
-/merge_pr 123 --skip-tests
+/catalyst-dev:merge_pr 123 --skip-tests
 ```
 
 **`--no-update`** - Don't update Linear ticket
 
 ```bash
-/merge_pr 123 --no-update
+/catalyst-dev:merge_pr 123 --no-update
 ```
 
 **`--keep-branch`** - Don't delete local branch
 
 ```bash
-/merge_pr 123 --keep-branch
+/catalyst-dev:merge_pr 123 --keep-branch
 ```
 
 **Combined:**
 
 ```bash
-/merge_pr 123 --skip-tests --no-update
+/catalyst-dev:merge_pr 123 --skip-tests --no-update
 ```
 
 ## Error Handling
@@ -437,7 +437,7 @@ Resolve manually:
   git add <files>
   git rebase --continue
   git push --force-with-lease
-  /merge_pr $pr_number
+  /catalyst-dev:merge_pr $pr_number
 ```
 
 **Tests failing:**
@@ -450,7 +450,7 @@ Failed tests:
   - auth.test.ts:12 - Timeout exceeded
 
 Fix tests or skip (not recommended):
-  /merge_pr $pr_number --skip-tests
+  /catalyst-dev:merge_pr $pr_number --skip-tests
 ```
 
 **CI checks failing:**
@@ -538,7 +538,7 @@ Uses `.claude/config.json`:
 **Happy path (all checks pass):**
 
 ```bash
-/merge_pr 123
+/catalyst-dev:merge_pr 123
 
 Running tests: make test
 ✅ All tests passed
@@ -557,7 +557,7 @@ Proceed? Y
 **With failing CI (user override):**
 
 ```bash
-/merge_pr 124
+/catalyst-dev:merge_pr 124
 
 ⚠️  Some CI checks failing
 Continue anyway? y
@@ -568,7 +568,7 @@ Continue anyway? y
 **Skip tests:**
 
 ```bash
-/merge_pr 125 --skip-tests
+/catalyst-dev:merge_pr 125 --skip-tests
 
 ⚠️  Skipping tests (not recommended)
 ✅ Merged!
@@ -577,7 +577,7 @@ Continue anyway? y
 **Linearis not installed:**
 
 ```bash
-/merge_pr 126
+/catalyst-dev:merge_pr 126
 
 ✅ PR merged successfully!
 ⚠️  Linearis CLI not found - Linear ticket not updated

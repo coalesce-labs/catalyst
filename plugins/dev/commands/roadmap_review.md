@@ -113,5 +113,5 @@ Uses `.claude/config.json`:
 
 - `/cycle-plan` - Plan work within cycles for a project
 - `/cycle-review` - Review cycle progress
-- `/linear` - Manage individual tickets
+- `/catalyst-dev:linear` - Manage individual tickets
 - `/create-plan` - Create implementation plans for tickets

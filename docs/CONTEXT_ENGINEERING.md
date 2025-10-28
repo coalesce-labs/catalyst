@@ -226,7 +226,7 @@ Result aggregation: Bring together findings
 Commands orchestrate multiple agents:
 
 ```markdown
-## /create_plan Command Flow
+## /catalyst-dev:create_plan Command Flow
 
 Step 1: Read ticket file Context loaded: Ticket content (1-2K tokens)
 
@@ -438,7 +438,7 @@ Read thoughts/shared/research/rate_limiting_implementation.md
 
 ```
 [Conversation 1]
-/create_plan for rate limiting
+/catalyst-dev:create_plan for rate limiting
 
 [Research: 20K tokens]
 [Create plan]
@@ -446,7 +446,7 @@ Plan saved to thoughts/shared/plans/2025-01-08-rate-limiting.md
 ← 5K tokens, comprehensive
 
 [Conversation 2]
-/implement_plan thoughts/shared/plans/2025-01-08-rate-limiting.md
+/catalyst-dev:implement_plan thoughts/shared/plans/2025-01-08-rate-limiting.md
 
 Read plan: 5K tokens
 ← Full context recovered
@@ -731,7 +731,7 @@ Instead of: Sum(agent1, agent2, agent3)
 **Comprehensive Research:**
 
 ```
-/create_plan for new feature
+/catalyst-dev:create_plan for new feature
 
 Need to understand:
 - Codebase state (codebase-analyzer)
@@ -895,7 +895,7 @@ Overly specific:
 **Good Specificity:**
 
 ```
-Command: /create_plan
+Command: /catalyst-dev:create_plan
 Description: Creates implementation plans through research and collaboration
 
 Good because:
@@ -905,9 +905,9 @@ Good because:
 - Consistent output
 
 Works for:
-  /create_plan for authentication
-  /create_plan for payment processing
-  /create_plan for any feature
+  /catalyst-dev:create_plan for authentication
+  /catalyst-dev:create_plan for payment processing
+  /catalyst-dev:create_plan for any feature
 ```
 
 **Domain-Specific Commands:**
@@ -1203,7 +1203,7 @@ Phase 4: Validation (Conversation 4)
 
   Steps:
   1. Read plan (5K)
-  2. Run /validate_plan (30K)
+  2. Run /catalyst-dev:validate_plan (30K)
   3. Fix issues (25K)
   4. Final verification (15K)
 

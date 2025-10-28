@@ -440,7 +440,7 @@ Review updated PR: {url}
 ```
 User pushes 2 commits after code review feedback
 
-/describe_pr detects:
+/catalyst-dev:describe_pr detects:
 - 2 new commits
 - Changes in validation logic
 - New tests added

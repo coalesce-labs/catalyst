@@ -584,7 +584,7 @@ fi
 **With ticket:**
 
 ```bash
-/research_codebase PROJ-123
+/catalyst-dev:research_codebase PROJ-123
 > "How does authentication work?"
 ```
 
@@ -601,7 +601,7 @@ fi
 **Without ticket:**
 
 ```bash
-/research_codebase
+/catalyst-dev:research_codebase
 > "How does authentication work?"
 ```
 

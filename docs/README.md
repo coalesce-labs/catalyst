@@ -212,4 +212,4 @@ YAML frontmatter validation, required fields, valid categories/tools, validation
 
 - Update the relevant document
 - Run `/validate-frontmatter` for agent/command changes
-- Create Linear ticket with `/linear` for larger tasks
+- Create Linear ticket with `/catalyst-dev:linear` for larger tasks

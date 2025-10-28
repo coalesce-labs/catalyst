@@ -107,11 +107,11 @@ read and use whatever states exist in your workspace.
 
 These commands automatically update ticket status:
 
-- `/create_plan` → Moves ticket to "Plan in Progress"
+- `/catalyst-dev:create_plan` → Moves ticket to "Plan in Progress"
 - Plan completed → Moves to "Plan in Review"
-- `/implement_plan` → Moves to "In Dev"
-- `/create_pr` → Moves to "In Review"
-- `/merge_pr` → Moves to "Done"
+- `/catalyst-dev:implement_plan` → Moves to "In Dev"
+- `/catalyst-dev:create_pr` → Moves to "In Review"
+- `/catalyst-dev:merge_pr` → Moves to "Done"
 
 ---
 
@@ -288,20 +288,20 @@ When moving tickets to a new status:
    Spec Needed → Research Needed (once problem outlined)
    Research Needed → Research in Progress (starting research)
    Research in Progress → Ready for Plan (research complete)
-   Ready for Plan → Plan in Progress (starting plan with /create_plan)
+   Ready for Plan → Plan in Progress (starting plan with /catalyst-dev:create_plan)
    Plan in Progress → Plan in Review (plan complete)
    Plan in Review → Ready for Dev (plan approved)
-   Ready for Dev → In Dev (starting work with /implement_plan)
+   Ready for Dev → In Dev (starting work with /catalyst-dev:implement_plan)
    In Dev → In Review (PR created)
    In Review → Done (PR merged)
    ```
 
 3. **Automatic status updates:** When certain commands are run, automatically update ticket status:
-   - `/create_plan` with ticket → Move to "Plan in Progress"
+   - `/catalyst-dev:create_plan` with ticket → Move to "Plan in Progress"
    - Plan synced and linked → Move to "Plan in Review"
-   - `/implement_plan` with ticket → Move to "In Dev"
-   - `/create_pr` with ticket → Move to "In Review"
-   - `/merge_pr` with ticket → Move to "Done"
+   - `/catalyst-dev:implement_plan` with ticket → Move to "In Dev"
+   - `/catalyst-dev:create_pr` with ticket → Move to "In Review"
+   - `/catalyst-dev:merge_pr` with ticket → Move to "Done"
 
 4. **Manual status updates:**
 
@@ -353,23 +353,23 @@ When user wants to find tickets:
 
 When these commands are run, check if there's a related Linear ticket and update it:
 
-**During `/create_plan`:**
+**During `/catalyst-dev:create_plan`:**
 
 1. If ticket mentioned, move to "Plan in Progress"
 2. When plan complete, add comment with plan link
 3. Move to "Plan in Review"
 
-**During `/implement_plan`:**
+**During `/catalyst-dev:implement_plan`:**
 
 1. If ticket in plan metadata, move to "In Dev"
 2. Add comment: "Started implementation from plan: [link]"
 
-**During `/create_pr`:**
+**During `/catalyst-dev:create_pr`:**
 
 1. If ticket mentioned in PR or plan, move to "In Review"
 2. Add comment with PR link
 
-**During `/merge_pr`:**
+**During `/catalyst-dev:merge_pr`:**
 
 1. Move ticket to "Done"
 2. Add comment with merge details
@@ -382,28 +382,28 @@ When these commands are run, check if there's a related Linear ticket and update
 
 ```bash
 # 1. Research and document
-/research_codebase "authentication patterns"
+/catalyst-dev:research_codebase "authentication patterns"
 # Saves to thoughts/shared/research/auth-patterns.md
 
 # 2. Create ticket from research
-/linear create thoughts/shared/research/auth-patterns.md
+/catalyst-dev:linear create thoughts/shared/research/auth-patterns.md
 # Creates ticket in Backlog
 
 # 3. Create plan
-/create_plan
+/catalyst-dev:create_plan
 # Reads research, creates plan
 # Ticket moves to "Plan in Progress" → "Plan in Review"
 
 # 4. Implement
-/implement_plan thoughts/shared/plans/2025-01-08-auth-feature.md
+/catalyst-dev:implement_plan thoughts/shared/plans/2025-01-08-auth-feature.md
 # Ticket moves to "In Dev"
 
 # 5. Create PR
-/create_pr
+/catalyst-dev:create_pr
 # Ticket moves to "In Review"
 
 # 6. Merge PR
-/merge_pr
+/catalyst-dev:merge_pr
 # Ticket moves to "Done"
 ```
 

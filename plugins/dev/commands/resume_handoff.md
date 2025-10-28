@@ -280,7 +280,7 @@ Then wait for the user's input.
 ## Example Interaction Flow
 
 ```
-User: /resume_handoff specification/feature/handoffs/handoff-0.md
+User: /catalyst-dev:resume_handoff specification/feature/handoffs/handoff-0.md
 Assistant: Let me read and analyze that handoff document...
 
 [Reads handoff completely]

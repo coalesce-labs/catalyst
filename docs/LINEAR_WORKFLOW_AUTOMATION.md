@@ -13,10 +13,10 @@ When you run workflow commands, the Linear command automatically updates ticket 
 
 | Command                            | Ticket Status Update               |
 | ---------------------------------- | ---------------------------------- |
-| `/research_codebase` (with ticket) | → **Research**                     |
-| `/create_plan` (with ticket)       | → **Planning**                     |
-| `/implement_plan` (with ticket)    | → **In Progress**                  |
-| `/describe_pr` (with ticket)       | → **In Review**                    |
+| `/catalyst-dev:research_codebase` (with ticket) | → **Research**                     |
+| `/catalyst-dev:create_plan` (with ticket)       | → **Planning**                     |
+| `/catalyst-dev:implement_plan` (with ticket)    | → **In Progress**                  |
+| `/catalyst-dev:describe_pr` (with ticket)       | → **In Review**                    |
 | PR merged                          | → **Done** (manual or via webhook) |
 
 ### How It Detects Tickets
@@ -51,10 +51,10 @@ Simplified 6-status workflow (Option C):
 
 ```
 1. Backlog → New ideas and requests
-2. Research → Investigation, triage, spec definition ← /research_codebase
-3. Planning → Implementation plans ← /create_plan
-4. In Progress → Active development ← /implement_plan
-5. In Review → Code review ← /describe_pr
+2. Research → Investigation, triage, spec definition ← /catalyst-dev:research_codebase
+3. Planning → Implementation plans ← /catalyst-dev:create_plan
+4. In Progress → Active development ← /catalyst-dev:implement_plan
+5. In Review → Code review ← /catalyst-dev:describe_pr
 6. Done → Complete
 ```
 
@@ -78,7 +78,7 @@ Simplified 6-status workflow (Option C):
 Use the `/linear_setup_workflow` command:
 
 ```bash
-/linear_setup_workflow
+/catalyst-dev:linear_setup_workflow
 ```
 
 This creates 6 statuses optimized for the workflow commands:
@@ -106,14 +106,14 @@ Here's how tickets flow through the simplified workflow:
 ### 1. Create Ticket
 
 ```bash
-/linear create "Add OAuth support"
+/catalyst-dev:linear create "Add OAuth support"
 # Creates in Backlog
 ```
 
 ### 2. Research Phase
 
 ```bash
-/research_codebase PROJ-123
+/catalyst-dev:research_codebase PROJ-123
 > "How does authentication currently work?"
 
 # Automatically:
@@ -127,7 +127,7 @@ Here's how tickets flow through the simplified workflow:
 ### 3. Planning Phase
 
 ```bash
-/create_plan
+/catalyst-dev:create_plan
 # Reference research document
 # User provides task details
 
@@ -144,13 +144,13 @@ Here's how tickets flow through the simplified workflow:
 # Team reviews plan in Linear
 # Discusses in comments
 # When approved, manually move to "In Progress"
-# Or /implement_plan does it automatically
+# Or /catalyst-dev:implement_plan does it automatically
 ```
 
 ### 5. Implementation Phase
 
 ```bash
-/implement_plan thoughts/shared/plans/2025-10-04-PROJ-123-oauth.md
+/catalyst-dev:implement_plan thoughts/shared/plans/2025-10-04-PROJ-123-oauth.md
 
 # Automatically:
 # - Moves ticket to "In Progress"
@@ -161,7 +161,7 @@ Here's how tickets flow through the simplified workflow:
 ### 6. Code Review Phase
 
 ```bash
-/describe_pr
+/catalyst-dev:describe_pr
 
 # Automatically:
 # - Moves ticket to "In Review"
@@ -187,7 +187,7 @@ Research
 Planning
   ↓ (/create_plan)
 Planning (stays for team review)
-  ↓ (team approves or /implement_plan)
+  ↓ (team approves or /catalyst-dev:implement_plan)
 In Progress
   ↓ (/implement_plan)
 In Review
@@ -202,7 +202,7 @@ Done
 
 ### Per-Project Configuration
 
-The `/linear` command uses a **clever initialization pattern**:
+The `/catalyst-dev:linear` command uses a **clever initialization pattern**:
 
 1. **First use**: Detects `[NEEDS_SETUP]` markers
 2. **Prompts for config**: Team ID, Project ID, GitHub URL
@@ -226,7 +226,7 @@ mkdir -p .claude/commands/linear
 cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
 
 # First use
-/linear
+/catalyst-dev:linear
 
 # Output:
 # This Linear command needs one-time configuration...
@@ -249,17 +249,17 @@ cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
 #   git commit -m "Configure Linear command"
 
 # Now it works:
-/linear create thoughts/shared/research/feature.md
+/catalyst-dev:linear create thoughts/shared/research/feature.md
 ```
 
 ---
 
 ## Automation Details
 
-### During `/create_plan`
+### During `/catalyst-dev:create_plan`
 
 ```javascript
-1. User runs: /create_plan
+1. User runs: /catalyst-dev:create_plan
 2. Command asks: "Is this for a Linear ticket?"
 3. If yes:
    a. Get ticket ID (from user or auto-detect)
@@ -273,10 +273,10 @@ cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
    c. Ticket stays in "Planning" for team review
 ```
 
-### During `/implement_plan`
+### During `/catalyst-dev:implement_plan`
 
 ```javascript
-1. User runs: /implement_plan thoughts/shared/plans/plan.md
+1. User runs: /catalyst-dev:implement_plan thoughts/shared/plans/plan.md
 2. Read plan document
 3. Check plan frontmatter for ticket ID
 4. If ticket found:
@@ -286,10 +286,10 @@ cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
 6. Update checkboxes in plan as phases complete
 ```
 
-### During `/describe_pr`
+### During `/catalyst-dev:describe_pr`
 
 ```javascript
-1. User runs: /describe_pr
+1. User runs: /catalyst-dev:describe_pr
 2. Get PR diff and metadata
 3. Check for ticket references in:
    - PR title
@@ -354,7 +354,7 @@ When you create a worktree for a ticket:
 
 ```bash
 # In main repo
-/create_worktree PROJ-123
+/catalyst-dev:create_worktree PROJ-123
 
 # This:
 # 1. Creates worktree with ticket in name
@@ -365,7 +365,7 @@ When you create a worktree for a ticket:
 # In worktree
 cd ~/wt/project/PROJ-123
 
-/implement_plan  # Auto-detects PROJ-123 from directory name
+/catalyst-dev:implement_plan  # Auto-detects PROJ-123 from directory name
 # → Updates Linear ticket to "In Progress"
 ```
 
@@ -448,7 +448,7 @@ Adjust as needed!
 **Fix**: Manually specify ticket:
 
 ```bash
-/linear move PROJ-123 "In Progress"
+/catalyst-dev:linear move PROJ-123 "In Progress"
 ```
 
 ### "Wrong status updated"
@@ -458,7 +458,7 @@ Adjust as needed!
 **Fix**: Be explicit about which ticket
 
 ```bash
-/implement_plan thoughts/shared/plans/plan.md --ticket PROJ-123
+/catalyst-dev:implement_plan thoughts/shared/plans/plan.md --ticket PROJ-123
 ```
 
 ### "Status not found in Linear"

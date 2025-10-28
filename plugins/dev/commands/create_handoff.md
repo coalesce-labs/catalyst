@@ -148,7 +148,7 @@ Once this is completed, you should respond to the user with the template between
 with the following command:
 
 ```bash
-/resume_handoff path/to/handoff.md
+/catalyst-dev:resume_handoff path/to/handoff.md
 ```
 
 </template_response>
@@ -160,7 +160,7 @@ your actual response to the user)
 with the following command:
 
 ```bash
-/resume_handoff thoughts/shared/handoffs/PROJ-123/2025-01-08_13-44-55_PROJ-123_create-context-compaction.md
+/catalyst-dev:resume_handoff thoughts/shared/handoffs/PROJ-123/2025-01-08_13-44-55_PROJ-123_create-context-compaction.md
 ```
 
 </example_response>

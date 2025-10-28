@@ -72,7 +72,7 @@ To get these values:
 /plugin enable catalyst-debugging
 
 # Investigate error
-/debug-production-error "MYAPP-456"
+/catalyst-dev:debug-production-error "MYAPP-456"
 
 # View stack trace and context
 > "Show me the full stack trace and user actions that led to this error"

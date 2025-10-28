@@ -38,7 +38,7 @@ claude
 /research-codebase "authentication system"
 /create-plan "Add OAuth support"
 /implement-plan
-/commit
+/catalyst-dev:commit
 /describe-pr
 
 # Context stays light (~3.5k MCP tokens)
@@ -77,7 +77,7 @@ user behavior
 /plugin enable catalyst-debugging
 
 # Now Sentry MCP is available
-/debug-production-error "TypeError in checkout"
+/catalyst-dev:debug-production-error "TypeError in checkout"
 /error-impact-analysis "errors from last deployment"
 /trace-analysis "slow API requests"
 

@@ -291,7 +291,7 @@ automated.
 
 - [ ] Document when to enable Sentry MCP
 - [ ] Create `/debug-setup` command (checks for Sentry/PostHog availability)
-- [ ] Integrate Sentry MCP into `/debug` workflow
+- [ ] Integrate Sentry MCP into `/catalyst-dev:debug` workflow
 - [ ] Add error analysis patterns to debugging docs
 - [ ] Create incident response runbook with MCP recommendations
 
