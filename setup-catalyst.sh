@@ -710,13 +710,22 @@ prompt_linear_config() {
 
   read -p "Linear API token: " linear_token
 
-  echo ""
-  echo "Team Key (Identifier):"
-  echo "  This is the short prefix used in your Linear issue IDs."
-  echo "  Find it in: Linear → Team Settings → 'Identifier' field"
-  echo "  Example: If your issues look like 'CTL-123', enter 'CTL'"
-  echo ""
-  read -p "Linear team key (identifier): " linear_team
+  # Auto-detect team key from project config (same as ticket prefix)
+  local linear_team
+  if [ -f "${PROJECT_DIR}/.claude/config.json" ]; then
+    linear_team=$(jq -r '.catalyst.project.ticketPrefix // "PROJ"' "${PROJECT_DIR}/.claude/config.json")
+    echo ""
+    echo "Team Key (Identifier): Using '${linear_team}' from project config"
+    echo "  (This matches your ticket prefix for consistency)"
+  else
+    echo ""
+    echo "Team Key (Identifier):"
+    echo "  This is the short prefix used in your Linear issue IDs."
+    echo "  Find it in: Linear → Team Settings → 'Identifier' field"
+    echo "  Example: If your issues look like 'CTL-123', enter 'CTL'"
+    echo ""
+    read -p "Linear team key (identifier): " linear_team
+  fi
 
   echo ""
   echo "Team Name: The full team name as it appears in Linear"
