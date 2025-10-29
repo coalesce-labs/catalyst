@@ -67,21 +67,26 @@ and shared memory systems.
 - Import and adapt patterns
 - Create new workflows
 
-## Quick Setup (One Command)
+## Quick Setup (5 Minutes)
 
 Get started in 5 minutes with the unified setup script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
+# Download the setup script
+curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh
+chmod +x setup-catalyst.sh
+
+# Run it (requires interactive input)
+./setup-catalyst.sh
 ```
 
-This single command:
-- ✅ Checks/installs prerequisites (HumanLayer CLI, jq)
-- ✅ Sets up thoughts repository (one per org)
-- ✅ Creates project configuration
-- ✅ Configures worktree directories
-- ✅ Prompts for API tokens (Linear, Sentry, etc.)
-- ✅ Links project to shared thoughts
+This script will guide you through:
+- ✅ Prerequisites check and installation (HumanLayer CLI, jq, etc.)
+- ✅ Thoughts repository setup (one per org, backed up to GitHub)
+- ✅ Project configuration (ticket prefix, project name)
+- ✅ Integration setup (Linear, Sentry, Railway, PostHog, Exa)
+- ✅ Worktree directory creation
+- ✅ HumanLayer thoughts initialization and syncing
 
 **Then install the plugins:**
 
@@ -94,14 +99,6 @@ This single command:
 ```
 
 You're ready! Try `/research-codebase` in your next session.
-
-**Want to review the script first?**
-
-```bash
-curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh
-chmod +x setup-catalyst.sh
-./setup-catalyst.sh
-```
 
 See [QUICKSTART.md](QUICKSTART.md) for detailed setup instructions.
 

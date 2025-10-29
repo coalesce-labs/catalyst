@@ -18,15 +18,13 @@ Complete guide to installing and configuring Catalyst for Claude Code.
 
 ## Quick Start (5 Minutes)
 
-**One-command setup:**
+**Download and run setup script:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
-```
-
-Or download and review first:
-```bash
+# Download the setup script
 curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh
 chmod +x setup-catalyst.sh
+
+# Run it (requires interactive input)
 ./setup-catalyst.sh
 ```
 
