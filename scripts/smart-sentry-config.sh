@@ -97,7 +97,7 @@ prompt_sentry_config_smart() {
             sentry_org=$(echo "$sentry_orgs" | jq -r ".[$org_num].slug")
           fi
 
-          # Let user select project
+          # Let user select project(s)
           if [[ -n "$sentry_projects" ]]; then
             local project_count=$(echo "$sentry_projects" | jq 'length')
 
@@ -107,14 +107,50 @@ prompt_sentry_config_smart() {
               echo "Using project: $sentry_project ($project_name)" >&2
             elif [[ $project_count -gt 1 ]]; then
               echo "" >&2
-              echo "Select a project:" >&2
+              echo "Found $project_count projects:" >&2
               echo "$sentry_projects" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.slug): \(.value.name)"' >&2
               echo "" >&2
+              echo "Options:" >&2
+              echo "  A. Monitor all projects (recommended for multi-project setups)" >&2
+              echo "  S. Select specific projects to monitor" >&2
+              echo "  1-$project_count. Choose one default project" >&2
+              echo "" >&2
 
-              read -p "Enter project number [1-$project_count]: " project_num
-              project_num=$((project_num - 1))
+              read -p "Enter choice [A/S/1-$project_count]: " project_choice
 
-              sentry_project=$(echo "$sentry_projects" | jq -r ".[$project_num].slug")
+              case "${project_choice^^}" in
+                A)
+                  echo "✓ Will monitor all projects in organization" >&2
+                  sentry_project=""  # Empty = all projects
+                  ;;
+                S)
+                  echo "" >&2
+                  echo "Enter project numbers to monitor (space-separated, e.g., '1 3 5'):" >&2
+                  read -p "Projects: " selected_nums
+
+                  local selected_projects="[]"
+                  for num in $selected_nums; do
+                    num=$((num - 1))
+                    local proj_slug=$(echo "$sentry_projects" | jq -r ".[$num].slug")
+                    if [[ "$proj_slug" != "null" ]]; then
+                      selected_projects=$(echo "$selected_projects" | jq --arg slug "$proj_slug" '. += [$slug]')
+                    fi
+                  done
+
+                  sentry_project="$selected_projects"
+                  echo "✓ Will monitor $(echo "$selected_projects" | jq 'length') project(s)" >&2
+                  ;;
+                [0-9]*)
+                  project_num=$((project_choice - 1))
+                  sentry_project=$(echo "$sentry_projects" | jq -r ".[$project_num].slug")
+                  local project_name=$(echo "$sentry_projects" | jq -r ".[$project_num].name")
+                  echo "✓ Using default project: $sentry_project ($project_name)" >&2
+                  ;;
+                *)
+                  echo "⚠ Invalid choice, will monitor all projects" >&2
+                  sentry_project=""
+                  ;;
+              esac
             fi
           fi
         fi
@@ -191,14 +227,38 @@ EOF
     read -p "Sentry project slug: " sentry_project
   fi
 
-  # Build config
-  echo "$config" | jq \
-    --arg org "$sentry_org" \
-    --arg project "$sentry_project" \
-    --arg token "$sentry_token" \
-    '.catalyst.sentry = {
-      "org": $org,
-      "project": $project,
-      "authToken": $token
-    }'
+  # Build config based on project selection
+  if [[ -z "$sentry_project" ]]; then
+    # All projects - just store org and token
+    echo "$config" | jq \
+      --arg org "$sentry_org" \
+      --arg token "$sentry_token" \
+      '.catalyst.sentry = {
+        "org": $org,
+        "authToken": $token
+      }'
+  elif [[ "$sentry_project" =~ ^\[.*\]$ ]]; then
+    # Multiple projects - store as array
+    echo "$config" | jq \
+      --arg org "$sentry_org" \
+      --argjson projects "$sentry_project" \
+      --arg token "$sentry_token" \
+      '.catalyst.sentry = {
+        "org": $org,
+        "projects": $projects,
+        "defaultProject": $projects[0],
+        "authToken": $token
+      }'
+  else
+    # Single project - store as string for backward compatibility
+    echo "$config" | jq \
+      --arg org "$sentry_org" \
+      --arg project "$sentry_project" \
+      --arg token "$sentry_token" \
+      '.catalyst.sentry = {
+        "org": $org,
+        "project": $project,
+        "authToken": $token
+      }'
+  fi
 }

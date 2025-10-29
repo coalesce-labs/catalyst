@@ -787,18 +787,39 @@ prompt_sentry_config() {
   echo "" >&2
 
   read -p "Sentry organization slug: " sentry_org
-  read -p "Sentry project slug: " sentry_project
+
+  echo "" >&2
+  echo "Project Configuration:" >&2
+  echo "  You can monitor:" >&2
+  echo "    - All projects (leave blank, recommended for multi-project orgs)" >&2
+  echo "    - One specific project (enter project slug)" >&2
+  echo "" >&2
+  read -p "Sentry project slug (or leave blank for all): " sentry_project
+
   read -p "Sentry auth token: " sentry_token
 
-  echo "$config" | jq \
-    --arg org "$sentry_org" \
-    --arg project "$sentry_project" \
-    --arg token "$sentry_token" \
-    '.catalyst.sentry = {
-      "org": $org,
-      "project": $project,
-      "authToken": $token
-    }'
+  # Build config based on input
+  if [[ -z "$sentry_project" ]]; then
+    # All projects
+    echo "$config" | jq \
+      --arg org "$sentry_org" \
+      --arg token "$sentry_token" \
+      '.catalyst.sentry = {
+        "org": $org,
+        "authToken": $token
+      }'
+  else
+    # Specific project
+    echo "$config" | jq \
+      --arg org "$sentry_org" \
+      --arg project "$sentry_project" \
+      --arg token "$sentry_token" \
+      '.catalyst.sentry = {
+        "org": $org,
+        "project": $project,
+        "authToken": $token
+      }'
+  fi
 }
 
 prompt_railway_config() {
