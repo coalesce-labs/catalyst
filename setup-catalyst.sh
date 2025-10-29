@@ -697,6 +697,7 @@ prompt_linear_config() {
   fi
 
   echo ""
+  echo ""
   echo "Linear API Token Setup:"
   echo "  📚 Documentation: https://linear.app/docs/api-and-webhooks#api-keys"
   echo ""
@@ -758,6 +759,7 @@ prompt_sentry_config() {
   fi
 
   echo ""
+  echo ""
   echo "Sentry Auth Token Setup:"
   echo "  📚 Documentation: https://docs.sentry.io/api/guides/create-auth-token/"
   echo ""
@@ -811,6 +813,7 @@ prompt_railway_config() {
   fi
 
   echo ""
+  echo ""
   echo "Railway API Token Setup:"
   echo "  📚 Documentation: https://docs.railway.com/guides/public-api"
   echo ""
@@ -860,6 +863,7 @@ prompt_posthog_config() {
     return 0
   fi
 
+  echo ""
   echo ""
   echo "PostHog Personal API Key Setup:"
   echo "  📚 Documentation: https://posthog.com/docs/api"
@@ -911,6 +915,7 @@ prompt_exa_config() {
     return 0
   fi
 
+  echo ""
   echo ""
   echo "Exa API Key Setup:"
   echo "  📚 Documentation: https://docs.exa.ai/websets/api/get-started"
