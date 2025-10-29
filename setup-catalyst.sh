@@ -588,7 +588,10 @@ setup_humanlayer_config() {
   echo "  Structure: thoughts/{your_name}/ (e.g., thoughts/ryan/)"
   echo "  Used to separate your work from shared team documents."
   echo ""
-  read -p "Enter your name for thoughts (e.g., 'ryan', 'alice') [${USER}]: " thoughts_user
+  echo "  Detected system user: ${USER}"
+  echo "  You can use your system username or choose something else (like your first name)."
+  echo ""
+  read -p "Enter your name for thoughts [${USER}]: " thoughts_user
   thoughts_user="${thoughts_user:-${USER}}"
   USER_NAME="$thoughts_user"
 
@@ -694,10 +697,14 @@ prompt_linear_config() {
   fi
 
   echo ""
-  echo "Get your Linear API token:"
+  echo "Linear API Token Setup:"
+  echo "  📚 Documentation: https://linear.app/docs/api-and-webhooks#api-keys"
+  echo ""
+  echo "  Steps:"
   echo "  1. Go to https://linear.app/settings/api"
-  echo "  2. Create a new Personal API Key"
-  echo "  3. Copy the token (starts with 'lin_api_')"
+  echo "  2. Click 'Create key' under Personal API Keys"
+  echo "  3. Give it a name (e.g., 'Catalyst')"
+  echo "  4. Copy the token (starts with 'lin_api_')"
   echo ""
 
   read -p "Linear API token: " linear_token
@@ -751,10 +758,14 @@ prompt_sentry_config() {
   fi
 
   echo ""
-  echo "Get your Sentry auth token:"
+  echo "Sentry Auth Token Setup:"
+  echo "  📚 Documentation: https://docs.sentry.io/api/guides/create-auth-token/"
+  echo ""
+  echo "  Steps:"
   echo "  1. Go to https://sentry.io/settings/account/api/auth-tokens/"
-  echo "  2. Create a new token with 'project:read' scope"
-  echo "  3. Copy the token"
+  echo "  2. Click 'Create New Token'"
+  echo "  3. Add scopes: project:read, event:read, org:read"
+  echo "  4. Copy the generated token"
   echo ""
 
   read -p "Sentry organization slug: " sentry_org
@@ -800,10 +811,14 @@ prompt_railway_config() {
   fi
 
   echo ""
-  echo "Get your Railway token:"
-  echo "  1. Go to https://railway.app/account/tokens"
-  echo "  2. Create a new token"
-  echo "  3. Copy the token"
+  echo "Railway API Token Setup:"
+  echo "  📚 Documentation: https://docs.railway.com/guides/public-api"
+  echo ""
+  echo "  Steps:"
+  echo "  1. Click your profile icon → Account Settings → Tokens"
+  echo "  2. Click 'Create Token'"
+  echo "  3. Give it a name (e.g., 'Catalyst')"
+  echo "  4. Copy the generated token"
   echo ""
 
   read -p "Railway token: " railway_token
@@ -846,10 +861,15 @@ prompt_posthog_config() {
   fi
 
   echo ""
-  echo "Get your PostHog API key:"
-  echo "  1. Go to your PostHog project settings"
-  echo "  2. Find your API key"
-  echo "  3. Copy the key"
+  echo "PostHog Personal API Key Setup:"
+  echo "  📚 Documentation: https://posthog.com/docs/api"
+  echo ""
+  echo "  Steps:"
+  echo "  1. Click your avatar (bottom left) → gear icon → Account settings"
+  echo "  2. Go to 'Personal API Keys' tab"
+  echo "  3. Click 'Create personal API key'"
+  echo "  4. Add a name and select required scopes"
+  echo "  5. Copy the key (shown only once!)"
   echo ""
 
   read -p "PostHog API key: " posthog_key
@@ -892,10 +912,15 @@ prompt_exa_config() {
   fi
 
   echo ""
-  echo "Get your Exa API key:"
-  echo "  1. Go to https://exa.ai/dashboard"
-  echo "  2. Find your API key"
-  echo "  3. Copy the key"
+  echo "Exa API Key Setup:"
+  echo "  📚 Documentation: https://docs.exa.ai/websets/api/get-started"
+  echo ""
+  echo "  Steps:"
+  echo "  1. Create account at https://exa.ai/ (free tier available)"
+  echo "  2. Go to https://dashboard.exa.ai/api-keys"
+  echo "  3. Click '+ CREATE NEW KEY'"
+  echo "  4. Name it (e.g., 'Catalyst') and copy the key"
+  echo "  5. Store it securely (shown only once!)"
   echo ""
 
   read -p "Exa API key: " exa_key
