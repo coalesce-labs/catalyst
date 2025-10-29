@@ -711,9 +711,12 @@ prompt_linear_config() {
   read -p "Linear API token: " linear_token
 
   echo ""
-  echo "Team Key: The short prefix used in your Linear tickets"
-  echo "  Example: If your tickets look like 'ENG-123', enter 'ENG'"
-  read -p "Linear team key: " linear_team
+  echo "Team Key (Identifier):"
+  echo "  This is the short prefix used in your Linear issue IDs."
+  echo "  Find it in: Linear → Team Settings → 'Identifier' field"
+  echo "  Example: If your issues look like 'CTL-123', enter 'CTL'"
+  echo ""
+  read -p "Linear team key (identifier): " linear_team
 
   echo ""
   echo "Team Name: The full team name as it appears in Linear"
