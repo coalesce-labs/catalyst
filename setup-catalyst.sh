@@ -728,9 +728,13 @@ prompt_linear_config() {
   fi
 
   echo ""
-  echo "Team Name: The full team name as it appears in Linear"
-  echo "  Example: 'Engineering', 'Product', 'Backend Team'"
-  read -p "Linear default team name: " linear_team_name
+  echo "Team Name:"
+  echo "  This is the full team name (not the identifier)."
+  echo "  Find it in: Linear → Team Settings → 'Icon & Name' section"
+  echo "  Example: If your team is called 'Catalyst', enter 'Catalyst'"
+  echo "  (Used for display in reports and documentation)"
+  echo ""
+  read -p "Linear team name: " linear_team_name
 
   echo "$config" | jq \
     --arg token "$linear_token" \
