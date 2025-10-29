@@ -504,10 +504,22 @@ setup_project_config() {
 
   # Prompt for ticket prefix
   echo ""
+  echo "Ticket Prefix Configuration:"
+  echo "  This is used for Linear tickets and appears in:"
+  echo "  - Branch names (e.g., ${PROJECT_KEY}-123-feature-name)"
+  echo "  - PR titles (e.g., [${PROJECT_KEY}-123] Add new feature)"
+  echo "  - Commit messages and documentation"
+  echo ""
   read -p "Enter ticket prefix (e.g., ENG, PROJ) [PROJ]: " ticket_prefix
   ticket_prefix="${ticket_prefix:-PROJ}"
 
   # Prompt for project name
+  echo ""
+  echo "Project Name Configuration:"
+  echo "  This is a human-friendly display name (not the repo name)."
+  echo "  Used in documentation, reports, and thought documents."
+  echo "  Example: 'Acme API' instead of 'acme-api-backend'"
+  echo ""
   read -p "Enter project name [${REPO_NAME}]: " project_name
   project_name="${project_name:-${REPO_NAME}}"
 
@@ -570,6 +582,11 @@ setup_humanlayer_config() {
   fi
 
   # Prompt for username
+  echo ""
+  echo "Thoughts Username Configuration:"
+  echo "  This creates a personal directory for your notes and research."
+  echo "  Structure: thoughts/{your_name}/ (e.g., thoughts/ryan/)"
+  echo "  Used to separate your work from shared team documents."
   echo ""
   read -p "Enter your name for thoughts (e.g., 'ryan', 'alice') [${USER}]: " thoughts_user
   thoughts_user="${thoughts_user:-${USER}}"
@@ -684,7 +701,15 @@ prompt_linear_config() {
   echo ""
 
   read -p "Linear API token: " linear_token
-  read -p "Linear team key (e.g., ENG, PROJ): " linear_team
+
+  echo ""
+  echo "Team Key: The short prefix used in your Linear tickets"
+  echo "  Example: If your tickets look like 'ENG-123', enter 'ENG'"
+  read -p "Linear team key: " linear_team
+
+  echo ""
+  echo "Team Name: The full team name as it appears in Linear"
+  echo "  Example: 'Engineering', 'Product', 'Backend Team'"
   read -p "Linear default team name: " linear_team_name
 
   echo "$config" | jq \
