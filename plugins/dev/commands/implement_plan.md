@@ -21,33 +21,52 @@ if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
 fi
 ```
 
-## Getting Started
+## Initial Response
 
-When given a plan path:
+**STEP 1: Auto-discover recent plan (REQUIRED)**
 
-- Read the plan completely and check for any existing checkmarks (- [x])
-- Read the original ticket and all files mentioned in the plan
-- **Read files fully** - never use limit/offset parameters, you need complete context
-- Think deeply about how the pieces fit together
-- Create a todo list to track your progress
-- Start implementing if you understand what needs to be done
-
-## Auto-Find Recent Plan
-
-If no plan file specified, check for recent plans:
+IMMEDIATELY run this bash script BEFORE any other response:
 
 ```bash
-if [[ -z "$PLAN_FILE" ]] && [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  PLAN_FILE=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
-  if [[ -n "$PLAN_FILE" ]]; then
-    echo "📋 Found recent plan: $PLAN_FILE"
-    echo "Proceed with this plan? [Y/n]"
-    # Wait for user confirmation
+# Auto-discover most recent plan from workflow context
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  RECENT_PLAN=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
+  if [[ -n "$RECENT_PLAN" ]]; then
+    echo "📋 Auto-discovered recent plan: $RECENT_PLAN"
+    echo ""
   fi
 fi
 ```
 
-If user doesn't provide a plan and none found, ask for plan path.
+**STEP 2: Determine which plan to implement**
+
+After running the auto-discovery script, follow this logic:
+
+1. **If user provided a plan path as parameter**:
+   - Use the provided path (user override)
+   - Skip to Step 3
+
+2. **If no parameter provided AND RECENT_PLAN was found**:
+   - Show user: "📋 Found recent plan: $RECENT_PLAN"
+   - Ask: "**Proceed with this plan?** [Y/n]"
+   - If yes: use RECENT_PLAN and skip to Step 3
+   - If no: proceed to option 3
+
+3. **If no parameter AND no RECENT_PLAN found**:
+   - List available plans from `thoughts/shared/plans/`
+   - Show most recent 5 plans with dates and ticket numbers
+   - Ask user which plan to implement
+   - Wait for user input with plan path
+
+**STEP 3: Read and prepare**
+
+Once you have a plan path:
+- Read the plan completely (no limit/offset)
+- Check for any existing checkmarks (- [x]) to see what's done
+- Read the original ticket and all files mentioned in the plan
+- Think deeply about how the pieces fit together
+- Create a todo list to track your progress
+- Start implementing if you understand what needs to be done
 
 ## Implementation Philosophy
 

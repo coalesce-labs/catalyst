@@ -1,0 +1,115 @@
+# Claude Code Hooks for Catalyst Dev Plugin
+# Automatically tracks thoughts documents in workflow context
+
+[[hooks]]
+name = "Track Research Documents"
+event = "PostToolUse"
+description = "Automatically add research documents to workflow context when written"
+
+[hooks.matcher]
+tool_name = "Write"
+file_paths = ["*thoughts/shared/research/*"]
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
+run_in_background = false
+
+[[hooks]]
+name = "Track Plan Documents"
+event = "PostToolUse"
+description = "Automatically add plan documents to workflow context when written"
+
+[hooks.matcher]
+tool_name = "Write"
+file_paths = ["*thoughts/shared/plans/*"]
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
+run_in_background = false
+
+[[hooks]]
+name = "Track Handoff Documents"
+event = "PostToolUse"
+description = "Automatically add handoff documents to workflow context when written"
+
+[hooks.matcher]
+tool_name = "Write"
+file_paths = ["*thoughts/shared/handoffs/*"]
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
+run_in_background = false
+
+[[hooks]]
+name = "Track PR Descriptions"
+event = "PostToolUse"
+description = "Automatically add PR descriptions to workflow context when written"
+
+[hooks.matcher]
+tool_name = "Write"
+file_paths = ["*thoughts/shared/prs/*"]
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
+run_in_background = false
+
+# Also track edits to thoughts files
+[[hooks]]
+name = "Track Research Edits"
+event = "PostToolUse"
+description = "Update workflow context when research documents are edited"
+
+[hooks.matcher]
+tool_name = "Edit"
+file_paths = ["*thoughts/shared/research/*"]
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
+run_in_background = false
+
+[[hooks]]
+name = "Track Plan Edits"
+event = "PostToolUse"
+description = "Update workflow context when plan documents are edited"
+
+[hooks.matcher]
+tool_name = "Edit"
+file_paths = ["*thoughts/shared/plans/*"]
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
+run_in_background = false
+
+[[hooks]]
+name = "Track Handoff Edits"
+event = "PostToolUse"
+description = "Update workflow context when handoff documents are edited"
+
+[hooks.matcher]
+tool_name = "Edit"
+file_paths = ["*thoughts/shared/handoffs/*"]
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
+run_in_background = false
+
+[[hooks]]
+name = "Track PR Description Edits"
+event = "PostToolUse"
+description = "Update workflow context when PR descriptions are edited"
+
+[hooks.matcher]
+tool_name = "Edit"
+file_paths = ["*thoughts/shared/prs/*"]
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
+run_in_background = false

@@ -33,68 +33,58 @@ to be understood and continued.
 
 ## Initial Response
 
-When this command is invoked:
+**STEP 1: Auto-discover recent handoff (REQUIRED)**
 
-1. **If the path to a handoff document was provided**:
-   - If a handoff document path was provided as a parameter, skip the default message
-   - Immediately read the handoff document FULLY
-   - Immediately read any research or plan documents that it links to under `thoughts/shared/plans`
-     or `thoughts/shared/research`. do NOT use a sub-agent to read these critical files.
-   - Begin the analysis process by ingesting relevant context from the handoff document, reading
-     additional files it mentions
-   - Then propose a course of action to the user and confirm, or ask for clarification on direction.
-
-2. **If a ticket number (like PROJ-XXXX) was provided**:
-   - run `humanlayer thoughts sync` to ensure your `thoughts/` directory is up to date.
-   - locate the most recent handoff document for the ticket. Tickets will be located in
-     `thoughts/shared/handoffs/PROJ-XXXX` where `PROJ-XXXX` is the ticket number. e.g. for
-     `PROJ-123` the handoffs would be in `thoughts/shared/handoffs/PROJ-123/`. **List this
-     directory's contents.**
-   - There may be zero, one or multiple files in the directory.
-   - **If there are zero files in the directory, or the directory does not exist**: tell the user:
-     "I'm sorry, I can't seem to find that handoff document. Can you please provide me with a path
-     to it?"
-   - **If there is only one file in the directory**: proceed with that handoff
-   - **If there are multiple files in the directory**: using the date and time specified in the file
-     name (it will be in the format `YYYY-MM-DD_HH-MM-SS` in 24-hour time format), proceed with the
-     _most recent_ handoff document.
-   - Immediately read the handoff document FULLY
-   - Immediately read any research or plan documents that it links to under `thoughts/shared/plans`
-     or `thoughts/shared/research`; do NOT use a sub-agent to read these critical files.
-   - Begin the analysis process by ingesting relevant context from the handoff document, reading
-     additional files it mentions
-   - Then propose a course of action to the user and confirm, or ask for clarification on direction.
-
-3. **If no parameters provided**, respond with:
-
-### Auto-Find Recent Handoff
-
-When ticket number provided but no path, or when no parameters at all:
+IMMEDIATELY run this bash script BEFORE any other response:
 
 ```bash
+# Auto-discover most recent handoff from workflow context
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
   RECENT_HANDOFF=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent handoffs)
   if [[ -n "$RECENT_HANDOFF" ]]; then
-    echo "📋 Found recent handoff: $RECENT_HANDOFF"
+    echo "📋 Auto-discovered recent handoff: $RECENT_HANDOFF"
+    echo ""
   fi
 fi
 ```
 
-Use this to locate the most recent handoff when path not explicitly provided.
+**STEP 2: Determine which handoff to use**
 
-Then respond with:
+After running the auto-discovery script, follow this logic:
 
-```
-I'll help you resume work from a handoff document. Let me find the available handoffs.
+1. **If user provided a file path as parameter**:
+   - Use the provided path (user override)
+   - Skip to Step 3
 
-Which handoff would you like to resume from?
+2. **If user provided a ticket number (like PROJ-123)**:
+   - Run `humanlayer thoughts sync` to ensure `thoughts/` is up to date
+   - Look in `thoughts/shared/handoffs/PROJ-123/` directory
+   - List all handoffs for that ticket
+   - If multiple exist, use the most recent (by timestamp in filename `YYYY-MM-DD_HH-MM-SS`)
+   - If none exist, tell user and wait for input
+   - Skip to Step 3
 
-Tip: You can invoke this command directly with a handoff path: `/resume_handoff `thoughts/shared/handoffs/PROJ-XXXX/YYYY-MM-DD_HH-MM-SS_PROJ-XXXX_description.md`
+3. **If no parameters provided AND RECENT_HANDOFF was found**:
+   - Show user: "📋 Found recent handoff: $RECENT_HANDOFF"
+   - Ask: "**Proceed with this handoff?** [Y/n]"
+   - If yes: use RECENT_HANDOFF and skip to Step 3
+   - If no: proceed to option 4
 
-or using a ticket number to resume from the most recent handoff for that ticket: `/resume_handoff PROJ-XXXX`
-```
+4. **If no parameters AND no RECENT_HANDOFF found**:
+   - List available handoffs from `thoughts/shared/handoffs/`
+   - Show most recent 5 handoffs with dates
+   - Ask user which one to use
+   - Wait for user input with path or ticket number
 
-Then wait for the user's input.
+**STEP 3: Analyze the handoff**
+
+Once you have a handoff path:
+- Read the handoff document FULLY (no limit/offset)
+- Immediately read any research or plan documents it references
+- Do NOT use sub-agents to read these critical files
+- Ingest all context from the handoff
+- Propose course of action to user
+- Get confirmation before proceeding
 
 ## Process Steps
 

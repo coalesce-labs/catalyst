@@ -46,14 +46,33 @@ fi
 
 ## Initial Response
 
-When this command is invoked:
+**STEP 1: Check for recent research (OPTIONAL)**
 
-1. **Check if parameters were provided**:
-   - If a file path or ticket reference was provided as a parameter, skip the default message
+IMMEDIATELY run this bash script to find recent research that might be relevant:
+
+```bash
+# Find recent research that might inform this plan
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  RECENT_RESEARCH=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research)
+  if [[ -n "$RECENT_RESEARCH" ]]; then
+    echo "💡 Found recent research: $RECENT_RESEARCH"
+    echo ""
+  fi
+fi
+```
+
+**STEP 2: Gather initial input**
+
+After checking for research, follow this logic:
+
+1. **If user provided parameters** (file path or ticket reference):
    - Immediately read any provided files FULLY
+   - If RECENT_RESEARCH was found, ask: "Should I reference the recent research document in this plan?"
    - Begin the research process
 
-2. **If no parameters provided**, respond with:
+2. **If no parameters provided**:
+   - Show any RECENT_RESEARCH that was found
+   - Respond with:
 
 ```
 I'll help you create a detailed implementation plan. Let me start by understanding what we're building.
@@ -62,7 +81,16 @@ Please provide:
 1. The task/ticket description (or reference to a ticket file)
 2. Any relevant context, constraints, or specific requirements
 3. Links to related research or previous implementations
+```
 
+If RECENT_RESEARCH exists, add:
+```
+💡 I found recent research: $RECENT_RESEARCH
+   Would you like me to use this as context for the plan?
+```
+
+Continue with:
+```
 I'll analyze this information and work with you to create a comprehensive plan.
 
 Tip: You can also invoke this command with a ticket file directly: `/create_plan thoughts/allison/tickets/proj_123.md`
