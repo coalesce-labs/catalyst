@@ -683,7 +683,7 @@ prompt_linear_config() {
   has_token=$(echo "$config" | jq -r '.catalyst.linear.apiToken // empty')
 
   if [ -n "$has_token" ] && [ "$has_token" != "[NEEDS_SETUP]" ]; then
-    echo "✓ Linear already configured"
+    echo "✓ Linear already configured" >&2
     if ! ask_yes_no "Update Linear config?"; then
       echo "$config"
       return 0
@@ -691,22 +691,22 @@ prompt_linear_config() {
   fi
 
   if ! ask_yes_no "Configure Linear integration?"; then
-    echo "Skipping Linear. You can add it later by re-running this script."
+    echo "Skipping Linear. You can add it later by re-running this script." >&2
     echo "$config"
     return 0
   fi
 
-  echo ""
-  echo ""
-  echo "Linear API Token Setup:"
-  echo "  📚 Documentation: https://linear.app/docs/api-and-webhooks#api-keys"
-  echo ""
-  echo "  Steps:"
-  echo "  1. Go to https://linear.app/settings/api"
-  echo "  2. Click 'Create key' under Personal API Keys"
-  echo "  3. Give it a name (e.g., 'Catalyst')"
-  echo "  4. Copy the token (starts with 'lin_api_')"
-  echo ""
+  echo "" >&2
+  echo "" >&2
+  echo "Linear API Token Setup:" >&2
+  echo "  📚 Documentation: https://linear.app/docs/api-and-webhooks#api-keys" >&2
+  echo "" >&2
+  echo "  Steps:" >&2
+  echo "  1. Go to https://linear.app/settings/api" >&2
+  echo "  2. Click 'Create key' under Personal API Keys" >&2
+  echo "  3. Give it a name (e.g., 'Catalyst')" >&2
+  echo "  4. Copy the token (starts with 'lin_api_')" >&2
+  echo "" >&2
 
   read -p "Linear API token: " linear_token
 
@@ -714,26 +714,26 @@ prompt_linear_config() {
   local linear_team
   if [ -f "${PROJECT_DIR}/.claude/config.json" ]; then
     linear_team=$(jq -r '.catalyst.project.ticketPrefix // "PROJ"' "${PROJECT_DIR}/.claude/config.json")
-    echo ""
-    echo "Team Key (Identifier): Using '${linear_team}' from project config"
-    echo "  (This matches your ticket prefix for consistency)"
+    echo "" >&2
+    echo "Team Key (Identifier): Using '${linear_team}' from project config" >&2
+    echo "  (This matches your ticket prefix for consistency)" >&2
   else
-    echo ""
-    echo "Team Key (Identifier):"
-    echo "  This is the short prefix used in your Linear issue IDs."
-    echo "  Find it in: Linear → Team Settings → 'Identifier' field"
-    echo "  Example: If your issues look like 'CTL-123', enter 'CTL'"
-    echo ""
+    echo "" >&2
+    echo "Team Key (Identifier):" >&2
+    echo "  This is the short prefix used in your Linear issue IDs." >&2
+    echo "  Find it in: Linear → Team Settings → 'Identifier' field" >&2
+    echo "  Example: If your issues look like 'CTL-123', enter 'CTL'" >&2
+    echo "" >&2
     read -p "Linear team key (identifier): " linear_team
   fi
 
-  echo ""
-  echo "Team Name:"
-  echo "  This is the full team name (not the identifier)."
-  echo "  Find it in: Linear → Team Settings → 'Icon & Name' section"
-  echo "  Example: If your team is called 'Catalyst', enter 'Catalyst'"
-  echo "  (Used for display in reports and documentation)"
-  echo ""
+  echo "" >&2
+  echo "Team Name:" >&2
+  echo "  This is the full team name (not the identifier)." >&2
+  echo "  Find it in: Linear → Team Settings → 'Icon & Name' section" >&2
+  echo "  Example: If your team is called 'Catalyst', enter 'Catalyst'" >&2
+  echo "  (Used for display in reports and documentation)" >&2
+  echo "" >&2
   read -p "Linear team name: " linear_team_name
 
   echo "$config" | jq \
@@ -761,7 +761,7 @@ prompt_sentry_config() {
   has_token=$(echo "$config" | jq -r '.catalyst.sentry.authToken // empty')
 
   if [ -n "$has_token" ] && [ "$has_token" != "[NEEDS_SETUP]" ]; then
-    echo "✓ Sentry already configured"
+    echo "✓ Sentry already configured" >&2
     if ! ask_yes_no "Update Sentry config?"; then
       echo "$config"
       return 0
@@ -769,22 +769,22 @@ prompt_sentry_config() {
   fi
 
   if ! ask_yes_no "Configure Sentry integration?"; then
-    echo "Skipping Sentry. You can add it later by re-running this script."
+    echo "Skipping Sentry. You can add it later by re-running this script." >&2
     echo "$config"
     return 0
   fi
 
-  echo ""
-  echo ""
-  echo "Sentry Auth Token Setup:"
-  echo "  📚 Documentation: https://docs.sentry.io/api/guides/create-auth-token/"
-  echo ""
-  echo "  Steps:"
-  echo "  1. Go to https://sentry.io/settings/account/api/auth-tokens/"
-  echo "  2. Click 'Create New Token'"
-  echo "  3. Add scopes: project:read, event:read, org:read"
-  echo "  4. Copy the generated token"
-  echo ""
+  echo "" >&2
+  echo "" >&2
+  echo "Sentry Auth Token Setup:" >&2
+  echo "  📚 Documentation: https://docs.sentry.io/api/guides/create-auth-token/" >&2
+  echo "" >&2
+  echo "  Steps:" >&2
+  echo "  1. Go to https://sentry.io/settings/account/api/auth-tokens/" >&2
+  echo "  2. Click 'Create New Token'" >&2
+  echo "  3. Add scopes: project:read, event:read, org:read" >&2
+  echo "  4. Copy the generated token" >&2
+  echo "" >&2
 
   read -p "Sentry organization slug: " sentry_org
   read -p "Sentry project slug: " sentry_project
@@ -815,7 +815,7 @@ prompt_railway_config() {
   has_token=$(echo "$config" | jq -r '.catalyst.railway.token // empty')
 
   if [ -n "$has_token" ] && [ "$has_token" != "[NEEDS_SETUP]" ]; then
-    echo "✓ Railway already configured"
+    echo "✓ Railway already configured" >&2
     if ! ask_yes_no "Update Railway config?"; then
       echo "$config"
       return 0
@@ -823,22 +823,22 @@ prompt_railway_config() {
   fi
 
   if ! ask_yes_no "Configure Railway integration?"; then
-    echo "Skipping Railway. You can add it later by re-running this script."
+    echo "Skipping Railway. You can add it later by re-running this script." >&2
     echo "$config"
     return 0
   fi
 
-  echo ""
-  echo ""
-  echo "Railway API Token Setup:"
-  echo "  📚 Documentation: https://docs.railway.com/guides/public-api"
-  echo ""
-  echo "  Steps:"
-  echo "  1. Click your profile icon → Account Settings → Tokens"
-  echo "  2. Click 'Create Token'"
-  echo "  3. Give it a name (e.g., 'Catalyst')"
-  echo "  4. Copy the generated token"
-  echo ""
+  echo "" >&2
+  echo "" >&2
+  echo "Railway API Token Setup:" >&2
+  echo "  📚 Documentation: https://docs.railway.com/guides/public-api" >&2
+  echo "" >&2
+  echo "  Steps:" >&2
+  echo "  1. Click your profile icon → Account Settings → Tokens" >&2
+  echo "  2. Click 'Create Token'" >&2
+  echo "  3. Give it a name (e.g., 'Catalyst')" >&2
+  echo "  4. Copy the generated token" >&2
+  echo "" >&2
 
   read -p "Railway token: " railway_token
   read -p "Railway project ID: " railway_project
@@ -866,7 +866,7 @@ prompt_posthog_config() {
   has_token=$(echo "$config" | jq -r '.catalyst.posthog.apiKey // empty')
 
   if [ -n "$has_token" ] && [ "$has_token" != "[NEEDS_SETUP]" ]; then
-    echo "✓ PostHog already configured"
+    echo "✓ PostHog already configured" >&2
     if ! ask_yes_no "Update PostHog config?"; then
       echo "$config"
       return 0
@@ -874,23 +874,23 @@ prompt_posthog_config() {
   fi
 
   if ! ask_yes_no "Configure PostHog integration?"; then
-    echo "Skipping PostHog. You can add it later by re-running this script."
+    echo "Skipping PostHog. You can add it later by re-running this script." >&2
     echo "$config"
     return 0
   fi
 
-  echo ""
-  echo ""
-  echo "PostHog Personal API Key Setup:"
-  echo "  📚 Documentation: https://posthog.com/docs/api"
-  echo ""
-  echo "  Steps:"
-  echo "  1. Click your avatar (bottom left) → gear icon → Account settings"
-  echo "  2. Go to 'Personal API Keys' tab"
-  echo "  3. Click 'Create personal API key'"
-  echo "  4. Add a name and select required scopes"
-  echo "  5. Copy the key (shown only once!)"
-  echo ""
+  echo "" >&2
+  echo "" >&2
+  echo "PostHog Personal API Key Setup:" >&2
+  echo "  📚 Documentation: https://posthog.com/docs/api" >&2
+  echo "" >&2
+  echo "  Steps:" >&2
+  echo "  1. Click your avatar (bottom left) → gear icon → Account settings" >&2
+  echo "  2. Go to 'Personal API Keys' tab" >&2
+  echo "  3. Click 'Create personal API key'" >&2
+  echo "  4. Add a name and select required scopes" >&2
+  echo "  5. Copy the key (shown only once!)" >&2
+  echo "" >&2
 
   read -p "PostHog API key: " posthog_key
   read -p "PostHog project ID: " posthog_project
@@ -918,7 +918,7 @@ prompt_exa_config() {
   has_token=$(echo "$config" | jq -r '.catalyst.exa.apiKey // empty')
 
   if [ -n "$has_token" ] && [ "$has_token" != "[NEEDS_SETUP]" ]; then
-    echo "✓ Exa already configured"
+    echo "✓ Exa already configured" >&2
     if ! ask_yes_no "Update Exa config?"; then
       echo "$config"
       return 0
@@ -926,23 +926,23 @@ prompt_exa_config() {
   fi
 
   if ! ask_yes_no "Configure Exa integration?"; then
-    echo "Skipping Exa. You can add it later by re-running this script."
+    echo "Skipping Exa. You can add it later by re-running this script." >&2
     echo "$config"
     return 0
   fi
 
-  echo ""
-  echo ""
-  echo "Exa API Key Setup:"
-  echo "  📚 Documentation: https://docs.exa.ai/websets/api/get-started"
-  echo ""
-  echo "  Steps:"
-  echo "  1. Create account at https://exa.ai/ (free tier available)"
-  echo "  2. Go to https://dashboard.exa.ai/api-keys"
-  echo "  3. Click '+ CREATE NEW KEY'"
-  echo "  4. Name it (e.g., 'Catalyst') and copy the key"
-  echo "  5. Store it securely (shown only once!)"
-  echo ""
+  echo "" >&2
+  echo "" >&2
+  echo "Exa API Key Setup:" >&2
+  echo "  📚 Documentation: https://docs.exa.ai/websets/api/get-started" >&2
+  echo "" >&2
+  echo "  Steps:" >&2
+  echo "  1. Create account at https://exa.ai/ (free tier available)" >&2
+  echo "  2. Go to https://dashboard.exa.ai/api-keys" >&2
+  echo "  3. Click '+ CREATE NEW KEY'" >&2
+  echo "  4. Name it (e.g., 'Catalyst') and copy the key" >&2
+  echo "  5. Store it securely (shown only once!)" >&2
+  echo "" >&2
 
   read -p "Exa API key: " exa_key
 
