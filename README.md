@@ -7,22 +7,54 @@ This is the workspace I use daily for AI-assisted development. It's battle-teste
 and optimized for efficient, context-aware AI collaboration. I'm sharing it so others can use it,
 fork it, and contribute ideas back.
 
-## ⚠️ Educational & Personal Use
+## Tech Stack & Integrations
 
-**Important**: This is **my personal workflow** shared for educational purposes. You're welcome to:
-- ✅ Use it as-is
-- ✅ Copy or fork it
-- ✅ Suggest improvements
-- ✅ Learn from the patterns
+Catalyst integrates with your development tools through both **CLI-based** (token-efficient) and **MCP-based** (richer features) approaches:
 
-**But understand**:
-- ❗ This workflow is optimized for **my** development style
-- ❗ Your workflow may be different (and that's totally fine!)
-- ❗ Some decisions are opinionated based on my preferences
-- ❗ I may not accept PRs that don't align with my workflow
+### Project Management & Issue Tracking
+- **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via [Linearis](https://github.com/ryanrozich/linearis))
+  - `catalyst-dev`: Core research agents and workflow commands
+  - `catalyst-pm`: Advanced PM workflows (cycle analysis, milestone tracking, backlog grooming)
 
-Think of this as **inspiration** rather than a one-size-fits-all solution. Take what works, adapt
-what doesn't!
+### Version Control & Code Hosting
+- **GitHub** - Pull requests, code review, repository management (CLI via `gh`)
+  - `catalyst-dev`: PR creation, branch management, worktree workflows
+
+### Error Monitoring & Debugging
+- **Sentry** - Production error monitoring, stack traces, root cause analysis (MCP + CLI)
+  - `catalyst-debugging`: Sentry MCP integration (~20k tokens when enabled)
+  - Supports single-project and multi-project configurations
+
+### Deployment & Infrastructure
+- **Railway** - Deployment logs, service health, environment variables (CLI via `railway`)
+  - `catalyst-dev`: Railway research agent for deployment investigation
+
+### Product Analytics
+- **PostHog** - User behavior, conversion funnels, feature analytics (MCP)
+  - `catalyst-analytics`: PostHog MCP integration (~40k tokens when enabled)
+
+### Documentation & Code Search
+- **Context7** - Library documentation lookup (MCP, ~2k tokens)
+  - `catalyst-dev`: Built-in, always available
+- **DeepWiki** - GitHub repository documentation (MCP, ~1.5k tokens)
+  - `catalyst-dev`: Built-in, always available
+- **Exa** - Web research and external documentation (API)
+  - `catalyst-dev`: External research agent
+
+### Thoughts & Memory System
+- **HumanLayer** - Persistent memory, shared context, team collaboration (CLI via `humanlayer`)
+  - All plugins: Foundation for research, plans, handoffs, and reports
+
+### Token Efficiency Strategy
+
+**Why CLI + lightweight MCP?** Most development sessions don't need heavy integrations:
+
+- Start with `catalyst-dev` (~3.5k tokens): Core workflow + Linear + GitHub + Railway
+- Enable `catalyst-analytics` when analyzing user behavior (~+40k tokens)
+- Enable `catalyst-debugging` when investigating production errors (~+20k tokens)
+- Disable when done to free context for code and conversation
+
+This keeps your typical session lean while having powerful tools available when needed.
 
 ## What's Inside
 
@@ -289,6 +321,10 @@ better!
 ## License
 
 MIT - Use it however you want!
+
+## Note on Personal Use
+
+This is my personal workflow shared for learning and inspiration. You're welcome to use it as-is, fork it, or adapt the patterns to your own needs. Just keep in mind that it's optimized for my development style, so your mileage may vary. Some decisions are opinionated based on my preferences, and I may not accept PRs that don't align with how I work. Think of it as a starting point rather than a one-size-fits-all solution—take what works, adapt what doesn't!
 
 ---
 

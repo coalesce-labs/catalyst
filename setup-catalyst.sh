@@ -65,6 +65,218 @@ ask_yes_no() {
 }
 
 #
+# Token discovery and validation functions
+#
+
+# Discover existing Linear API token from standard locations
+discover_linear_token() {
+  local token=""
+
+  # Check environment variable
+  if [[ -n "${LINEAR_API_TOKEN:-}" ]]; then
+    echo "env" >&2
+    echo "$LINEAR_API_TOKEN"
+    return 0
+  fi
+
+  # Check ~/.linear_api_token file
+  if [[ -f ~/.linear_api_token ]]; then
+    token=$(cat ~/.linear_api_token | tr -d '[:space:]')
+    if [[ -n "$token" ]]; then
+      echo "file" >&2
+      echo "$token"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# Validate Linear API token and extract org/teams info
+validate_linear_token() {
+  local token="$1"
+
+  # GraphQL query to get viewer and teams
+  local query='
+  {
+    viewer {
+      id
+      name
+      email
+      organization {
+        id
+        name
+        urlKey
+      }
+    }
+    teams {
+      nodes {
+        id
+        name
+        key
+      }
+    }
+  }'
+
+  local response
+  response=$(curl -s -X POST \
+    -H "Authorization: $token" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\":$(echo "$query" | jq -Rs .)}" \
+    https://api.linear.app/graphql 2>&1)
+
+  # Check for errors
+  if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
+    echo '{"valid": false, "error": "Invalid token or API error"}' >&2
+    return 1
+  fi
+
+  # Extract data
+  local viewer=$(echo "$response" | jq -r '.data.viewer')
+  local teams=$(echo "$response" | jq -r '.data.teams.nodes')
+
+  if [[ "$viewer" == "null" ]]; then
+    echo '{"valid": false, "error": "No user data returned"}' >&2
+    return 1
+  fi
+
+  # Return validation result
+  echo "$response" | jq '{
+    valid: true,
+    viewer: .data.viewer,
+    teams: .data.teams.nodes
+  }'
+}
+
+# Discover existing Sentry auth token
+discover_sentry_token() {
+  local token=""
+
+  # Check environment variable
+  if [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
+    echo "env" >&2
+    echo "$SENTRY_AUTH_TOKEN"
+    return 0
+  fi
+
+  # Check ~/.sentryclirc file
+  if [[ -f ~/.sentryclirc ]]; then
+    token=$(grep -E '^token\s*=' ~/.sentryclirc 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]' || echo "")
+    if [[ -n "$token" ]]; then
+      echo "file" >&2
+      echo "$token"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# Validate Sentry auth token and get org/projects
+validate_sentry_token() {
+  local token="$1"
+
+  # Get organizations
+  local orgs_response
+  orgs_response=$(curl -s -X GET \
+    -H "Authorization: Bearer $token" \
+    https://sentry.io/api/0/organizations/ 2>&1)
+
+  # Check if valid JSON and has data
+  if ! echo "$orgs_response" | jq -e '.' >/dev/null 2>&1; then
+    echo '{"valid": false, "error": "Invalid response from API"}' >&2
+    return 1
+  fi
+
+  if echo "$orgs_response" | jq -e '.detail' >/dev/null 2>&1; then
+    local error=$(echo "$orgs_response" | jq -r '.detail')
+    echo "{\"valid\": false, \"error\": \"$error\"}" >&2
+    return 1
+  fi
+
+  # Get first org slug
+  local org_slug=$(echo "$orgs_response" | jq -r '.[0].slug // empty')
+
+  if [[ -z "$org_slug" ]]; then
+    echo '{"valid": false, "error": "No organizations found"}' >&2
+    return 1
+  fi
+
+  # Get projects for first org
+  local projects_response
+  projects_response=$(curl -s -X GET \
+    -H "Authorization: Bearer $token" \
+    "https://sentry.io/api/0/organizations/$org_slug/projects/" 2>&1)
+
+  # Return validation result
+  jq -n \
+    --argjson orgs "$orgs_response" \
+    --argjson projects "$projects_response" \
+    '{
+      valid: true,
+      organizations: $orgs,
+      projects: $projects
+    }'
+}
+
+# Discover Railway token
+discover_railway_token() {
+  local token=""
+
+  # Check environment variable
+  if [[ -n "${RAILWAY_TOKEN:-}" ]]; then
+    echo "env" >&2
+    echo "$RAILWAY_TOKEN"
+    return 0
+  fi
+
+  # Check ~/.railway/config.json
+  if [[ -f ~/.railway/config.json ]]; then
+    token=$(jq -r '.railway_token // empty' ~/.railway/config.json 2>/dev/null || echo "")
+    if [[ -n "$token" ]]; then
+      echo "file" >&2
+      echo "$token"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# Validate Railway token
+validate_railway_token() {
+  local token="$1"
+
+  # Railway uses GraphQL
+  local query='{ me { id name email } projects { edges { node { id name } } } }'
+
+  local response
+  response=$(curl -s -X POST \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\":\"$query\"}" \
+    https://backboard.railway.app/graphql/v2 2>&1)
+
+  if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
+    echo '{"valid": false, "error": "Invalid token"}' >&2
+    return 1
+  fi
+
+  local user=$(echo "$response" | jq -r '.data.me')
+
+  if [[ "$user" == "null" ]]; then
+    echo '{"valid": false, "error": "No user data"}' >&2
+    return 1
+  fi
+
+  echo "$response" | jq '{
+    valid: true,
+    user: .data.me,
+    projects: .data.projects.edges
+  }'
+}
+
+#
 # Prerequisite functions
 #
 
@@ -697,45 +909,142 @@ prompt_linear_config() {
   fi
 
   echo "" >&2
-  echo "" >&2
-  echo "Linear API Token Setup:" >&2
-  echo "  📚 Documentation: https://linear.app/docs/api-and-webhooks#api-keys" >&2
-  echo "" >&2
-  echo "  Steps:" >&2
-  echo "  1. Go to https://linear.app/settings/api" >&2
-  echo "  2. Click 'Create key' under Personal API Keys" >&2
-  echo "  3. Give it a name (e.g., 'Catalyst')" >&2
-  echo "  4. Copy the token (starts with 'lin_api_')" >&2
-  echo "" >&2
 
-  read -p "Linear API token: " linear_token
+  local discovered_token=""
+  local discovery_source=""
+  local linear_token=""
+  local linear_org=""
+  local linear_teams=""
+  local linear_team=""
+  local linear_team_name=""
 
-  # Auto-detect team key from project config (same as ticket prefix)
-  local linear_team
-  if [ -f "${PROJECT_DIR}/.claude/config.json" ]; then
-    linear_team=$(jq -r '.catalyst.project.ticketPrefix // "PROJ"' "${PROJECT_DIR}/.claude/config.json")
+  # Try to discover existing token
+  echo "🔍 Checking for existing Linear API token..." >&2
+
+  if discovered_token=$(discover_linear_token 2>&1); then
+    discovery_source=$(echo "$discovered_token" | head -1)
+    discovered_token=$(echo "$discovered_token" | tail -1)
+
     echo "" >&2
-    echo "Team Key (Identifier): Using '${linear_team}' from project config" >&2
-    echo "  (This matches your ticket prefix for consistency)" >&2
-  else
-    echo "" >&2
-    echo "Team Key (Identifier):" >&2
-    echo "  This is the short prefix used in your Linear issue IDs." >&2
-    echo "  Find it in: Linear → Team Settings → 'Identifier' field" >&2
-    echo "  Example: If your issues look like 'CTL-123', enter 'CTL'" >&2
-    echo "" >&2
-    read -p "Linear team key (identifier): " linear_team
+    echo "✓ Found existing Linear API token in: $discovery_source" >&2
+
+    # Validate the token
+    echo "🔍 Validating token and fetching organization info..." >&2
+
+    if validation_result=$(validate_linear_token "$discovered_token" 2>&1); then
+      # Extract info
+      linear_org=$(echo "$validation_result" | jq -r '.viewer.organization.name')
+      local org_key=$(echo "$validation_result" | jq -r '.viewer.organization.urlKey')
+      linear_teams=$(echo "$validation_result" | jq -r '.teams')
+
+      echo "" >&2
+      echo "✓ Token is valid!" >&2
+      echo "  Organization: $linear_org ($org_key)" >&2
+      echo "  Found $(echo "$linear_teams" | jq 'length') team(s):" >&2
+      echo "$linear_teams" | jq -r '.[] | "    - \(.key): \(.name)"' >&2
+      echo "" >&2
+
+      if ask_yes_no "Use this token?"; then
+        linear_token="$discovered_token"
+
+        # Let user select team
+        local team_count=$(echo "$linear_teams" | jq 'length')
+
+        if [[ $team_count -eq 1 ]]; then
+          # Only one team, use it
+          linear_team=$(echo "$linear_teams" | jq -r '.[0].key')
+          linear_team_name=$(echo "$linear_teams" | jq -r '.[0].name')
+          echo "Using team: $linear_team ($linear_team_name)" >&2
+        else
+          # Multiple teams, let user choose
+          echo "Select a team:" >&2
+          echo "$linear_teams" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.key): \(.value.name)"' >&2
+          echo "" >&2
+
+          read -p "Enter team number [1-$team_count]: " team_num
+          team_num=$((team_num - 1))
+
+          linear_team=$(echo "$linear_teams" | jq -r ".[$team_num].key")
+          linear_team_name=$(echo "$linear_teams" | jq -r ".[$team_num].name")
+        fi
+      fi
+    else
+      echo "⚠ Token validation failed. You'll need to enter it manually." >&2
+    fi
   fi
 
-  echo "" >&2
-  echo "Team Name:" >&2
-  echo "  This is the full team name (not the identifier)." >&2
-  echo "  Find it in: Linear → Team Settings → 'Icon & Name' section" >&2
-  echo "  Example: If your team is called 'Catalyst', enter 'Catalyst'" >&2
-  echo "  (Used for display in reports and documentation)" >&2
-  echo "" >&2
-  read -p "Linear team name: " linear_team_name
+  # If no token discovered or user declined, ask for it
+  if [[ -z "$linear_token" ]]; then
+    echo "" >&2
+    echo "Linear API Token Setup:" >&2
+    echo "  📚 Documentation: https://linear.app/docs/api-and-webhooks#api-keys" >&2
+    echo "" >&2
+    echo "  Steps:" >&2
+    echo "  1. Go to https://linear.app/settings/api" >&2
+    echo "  2. Click 'Create key' under Personal API Keys" >&2
+    echo "  3. Give it a name (e.g., 'Catalyst')" >&2
+    echo "  4. Copy the token (starts with 'lin_api_')" >&2
+    echo "" >&2
+    echo "  TIP: Save to ~/.linear_api_token to auto-discover next time:" >&2
+    echo "       echo 'YOUR_TOKEN' > ~/.linear_api_token" >&2
+    echo "" >&2
 
+    read -p "Linear API token: " linear_token
+
+    # Validate the manually entered token
+    if [[ -n "$linear_token" ]]; then
+      echo "" >&2
+      echo "🔍 Validating token..." >&2
+
+      if validation_result=$(validate_linear_token "$linear_token" 2>&1); then
+        linear_org=$(echo "$validation_result" | jq -r '.viewer.organization.name')
+        linear_teams=$(echo "$validation_result" | jq -r '.teams')
+
+        echo "✓ Token is valid!" >&2
+        echo "  Organization: $linear_org" >&2
+        echo "" >&2
+
+        # Offer to save token
+        if ask_yes_no "Save token to ~/.linear_api_token for future use?"; then
+          echo "$linear_token" > ~/.linear_api_token
+          chmod 600 ~/.linear_api_token
+          echo "✓ Token saved to ~/.linear_api_token" >&2
+        fi
+      else
+        echo "⚠ Warning: Token validation failed. Saving anyway..." >&2
+      fi
+    fi
+  fi
+
+  # Get team key (auto-detect from project config or use validated data)
+  if [[ -z "$linear_team" ]]; then
+    if [ -f "${PROJECT_DIR}/.claude/config.json" ]; then
+      linear_team=$(jq -r '.catalyst.project.ticketPrefix // "PROJ"' "${PROJECT_DIR}/.claude/config.json")
+      echo "" >&2
+      echo "Team Key (Identifier): Using '${linear_team}' from project config" >&2
+      echo "  (This matches your ticket prefix for consistency)" >&2
+    else
+      echo "" >&2
+      echo "Team Key (Identifier):" >&2
+      echo "  This is the short prefix used in your Linear issue IDs." >&2
+      echo "  Example: If your issues are 'ENG-123', the key is 'ENG'" >&2
+      echo "  📚 Find it: Linear → Settings → Teams → [Your Team] → Identifier field" >&2
+      echo "" >&2
+      read -p "Linear team key (identifier): " linear_team
+    fi
+  fi
+
+  # Get team name if not already set
+  if [[ -z "$linear_team_name" ]]; then
+    echo "" >&2
+    echo "Team Name:" >&2
+    echo "  The full name of your Linear team (not the short identifier)" >&2
+    echo "  📚 Find it: Linear → Settings → Teams → [Your Team] → Name field" >&2
+    echo "" >&2
+    read -p "Linear team name: " linear_team_name
+  fi
+
+  # Build config
   echo "$config" | jq \
     --arg token "$linear_token" \
     --arg team "$linear_team" \
@@ -775,32 +1084,197 @@ prompt_sentry_config() {
   fi
 
   echo "" >&2
-  echo "" >&2
-  echo "Sentry Auth Token Setup:" >&2
-  echo "  📚 Documentation: https://docs.sentry.io/api/guides/create-auth-token/" >&2
-  echo "" >&2
-  echo "  Steps:" >&2
-  echo "  1. Go to https://sentry.io/settings/account/api/auth-tokens/" >&2
-  echo "  2. Click 'Create New Token'" >&2
-  echo "  3. Add scopes: project:read, event:read, org:read" >&2
-  echo "  4. Copy the generated token" >&2
-  echo "" >&2
 
-  read -p "Sentry organization slug: " sentry_org
+  local discovered_token=""
+  local discovery_source=""
+  local sentry_token=""
+  local sentry_orgs=""
+  local sentry_org=""
+  local sentry_projects=""
+  local sentry_project=""
 
-  echo "" >&2
-  echo "Project Configuration:" >&2
-  echo "  You can monitor:" >&2
-  echo "    - All projects (leave blank, recommended for multi-project orgs)" >&2
-  echo "    - One specific project (enter project slug)" >&2
-  echo "" >&2
-  read -p "Sentry project slug (or leave blank for all): " sentry_project
+  # Try to discover existing token
+  echo "🔍 Checking for existing Sentry auth token..." >&2
 
-  read -p "Sentry auth token: " sentry_token
+  if discovered_token=$(discover_sentry_token 2>&1); then
+    discovery_source=$(echo "$discovered_token" | head -1)
+    discovered_token=$(echo "$discovered_token" | tail -1)
 
-  # Build config based on input
+    echo "" >&2
+    echo "✓ Found existing Sentry auth token in: $discovery_source" >&2
+
+    # Validate the token
+    echo "🔍 Validating token and fetching organization info..." >&2
+
+    if validation_result=$(validate_sentry_token "$discovered_token" 2>&1); then
+      # Extract info
+      sentry_orgs=$(echo "$validation_result" | jq -r '.organizations')
+
+      echo "" >&2
+      echo "✓ Token is valid!" >&2
+      echo "  Found $(echo "$sentry_orgs" | jq 'length') organization(s):" >&2
+      echo "$sentry_orgs" | jq -r '.[] | "    - \(.slug): \(.name)"' >&2
+      echo "" >&2
+
+      if ask_yes_no "Use this token?"; then
+        sentry_token="$discovered_token"
+
+        # Let user select organization
+        local org_count=$(echo "$sentry_orgs" | jq 'length')
+
+        if [[ $org_count -eq 1 ]]; then
+          # Only one org, use it
+          sentry_org=$(echo "$sentry_orgs" | jq -r '.[0].slug')
+          local org_name=$(echo "$sentry_orgs" | jq -r '.[0].name')
+          echo "Using organization: $sentry_org ($org_name)" >&2
+
+          # Get projects for this org
+          sentry_projects=$(echo "$validation_result" | jq -r '.projects')
+          echo "  Found $(echo "$sentry_projects" | jq 'length') project(s)" >&2
+        else
+          # Multiple orgs, let user choose
+          echo "Select an organization:" >&2
+          echo "$sentry_orgs" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.slug): \(.value.name)"' >&2
+          echo "" >&2
+
+          read -p "Enter organization number [1-$org_count]: " org_num
+          org_num=$((org_num - 1))
+
+          sentry_org=$(echo "$sentry_orgs" | jq -r ".[$org_num].slug")
+        fi
+
+        # Let user select project(s)
+        if [[ -n "$sentry_projects" ]]; then
+          local project_count=$(echo "$sentry_projects" | jq 'length')
+
+          if [[ $project_count -eq 1 ]]; then
+            sentry_project=$(echo "$sentry_projects" | jq -r '.[0].slug')
+            local project_name=$(echo "$sentry_projects" | jq -r '.[0].name')
+            echo "Using project: $sentry_project ($project_name)" >&2
+          elif [[ $project_count -gt 1 ]]; then
+            echo "" >&2
+            echo "Found $project_count projects:" >&2
+            echo "$sentry_projects" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.slug): \(.value.name)"' >&2
+            echo "" >&2
+            echo "Options:" >&2
+            echo "  A. Monitor all projects (recommended for multi-project setups)" >&2
+            echo "  S. Select specific projects to monitor" >&2
+            echo "  1-$project_count. Choose one default project" >&2
+            echo "" >&2
+
+            read -p "Enter choice [A/S/1-$project_count]: " project_choice
+
+            case "${project_choice^^}" in
+              A)
+                echo "✓ Will monitor all projects in organization" >&2
+                sentry_project=""  # Empty = all projects
+                ;;
+              S)
+                echo "" >&2
+                echo "Enter project numbers to monitor (space-separated, e.g., '1 3 5'):" >&2
+                read -p "Projects: " selected_nums
+
+                local selected_projects="[]"
+                for num in $selected_nums; do
+                  num=$((num - 1))
+                  local proj_slug=$(echo "$sentry_projects" | jq -r ".[$num].slug")
+                  if [[ "$proj_slug" != "null" ]]; then
+                    selected_projects=$(echo "$selected_projects" | jq --arg slug "$proj_slug" '. += [$slug]')
+                  fi
+                done
+
+                sentry_project="$selected_projects"
+                echo "✓ Will monitor $(echo "$selected_projects" | jq 'length') project(s)" >&2
+                ;;
+              [0-9]*)
+                project_num=$((project_choice - 1))
+                sentry_project=$(echo "$sentry_projects" | jq -r ".[$project_num].slug")
+                local project_name=$(echo "$sentry_projects" | jq -r ".[$project_num].name")
+                echo "✓ Using default project: $sentry_project ($project_name)" >&2
+                ;;
+              *)
+                echo "⚠ Invalid choice, will monitor all projects" >&2
+                sentry_project=""
+                ;;
+            esac
+          fi
+        fi
+      fi
+    else
+      echo "⚠ Token validation failed. You'll need to enter it manually." >&2
+    fi
+  fi
+
+  # If no token discovered or user declined, ask for it
+  if [[ -z "$sentry_token" ]]; then
+    echo "" >&2
+    echo "Sentry Auth Token Setup:" >&2
+    echo "  📚 Documentation: https://docs.sentry.io/api/auth/" >&2
+    echo "" >&2
+    echo "  Steps:" >&2
+    echo "  1. Go to https://sentry.io/settings/account/api/auth-tokens/" >&2
+    echo "  2. Click 'Create New Token'" >&2
+    echo "  3. Give it a name (e.g., 'Catalyst')" >&2
+    echo "  4. Select scopes: project:read, org:read" >&2
+    echo "  5. Copy the token" >&2
+    echo "" >&2
+    echo "  TIP: Save to ~/.sentryclirc to auto-discover next time:" >&2
+    echo "       echo '[auth]' > ~/.sentryclirc" >&2
+    echo "       echo 'token=YOUR_TOKEN' >> ~/.sentryclirc" >&2
+    echo "" >&2
+
+    read -p "Sentry auth token: " sentry_token
+
+    # Validate the manually entered token
+    if [[ -n "$sentry_token" ]]; then
+      echo "" >&2
+      echo "🔍 Validating token..." >&2
+
+      if validation_result=$(validate_sentry_token "$sentry_token" 2>&1); then
+        sentry_orgs=$(echo "$validation_result" | jq -r '.organizations')
+
+        echo "✓ Token is valid!" >&2
+        echo "  Found $(echo "$sentry_orgs" | jq 'length') organization(s)" >&2
+        echo "" >&2
+
+        # Offer to save token
+        if ask_yes_no "Save token to ~/.sentryclirc for future use?"; then
+          cat > ~/.sentryclirc <<EOF
+[auth]
+token=$sentry_token
+EOF
+          chmod 600 ~/.sentryclirc
+          echo "✓ Token saved to ~/.sentryclirc" >&2
+        fi
+      else
+        echo "⚠ Warning: Token validation failed. Saving anyway..." >&2
+      fi
+    fi
+  fi
+
+  # Get org slug if not already set
+  if [[ -z "$sentry_org" ]]; then
+    echo "" >&2
+    echo "Organization Slug:" >&2
+    echo "  Your Sentry organization URL slug" >&2
+    echo "  Example: If your URL is https://my-org.sentry.io, enter 'my-org'" >&2
+    echo "" >&2
+    read -p "Sentry organization slug: " sentry_org
+  fi
+
+  # Get project slug if not already set
   if [[ -z "$sentry_project" ]]; then
-    # All projects
+    echo "" >&2
+    echo "Project Slug:" >&2
+    echo "  Your main Sentry project slug" >&2
+    echo "  📚 Find it: Sentry → Settings → Projects → [Your Project]" >&2
+    echo "" >&2
+    read -p "Sentry project slug: " sentry_project
+  fi
+
+  # Build config based on project selection
+  if [[ -z "$sentry_project" ]]; then
+    # All projects - just store org and token
     echo "$config" | jq \
       --arg org "$sentry_org" \
       --arg token "$sentry_token" \
@@ -808,8 +1282,20 @@ prompt_sentry_config() {
         "org": $org,
         "authToken": $token
       }'
+  elif [[ "$sentry_project" =~ ^\[.*\]$ ]]; then
+    # Multiple projects - store as array
+    echo "$config" | jq \
+      --arg org "$sentry_org" \
+      --argjson projects "$sentry_project" \
+      --arg token "$sentry_token" \
+      '.catalyst.sentry = {
+        "org": $org,
+        "projects": $projects,
+        "defaultProject": $projects[0],
+        "authToken": $token
+      }'
   else
-    # Specific project
+    # Single project - store as string for backward compatibility
     echo "$config" | jq \
       --arg org "$sentry_org" \
       --arg project "$sentry_project" \
