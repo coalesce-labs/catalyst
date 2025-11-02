@@ -50,7 +50,7 @@ Read all files in src/
 **Good - Just-in-Time:**
 
 ```
-@agent-codebase-locator find authentication files
+@catalyst-dev:codebase-locator find authentication files
 # Then read only the relevant ones
 ```
 
@@ -83,10 +83,10 @@ Read all these files in case we need them later:
 
 ```
 # Step 1: Locate
-@agent-codebase-locator find rate limiting code
+@catalyst-dev:codebase-locator find rate limiting code
 
 # Step 2: Analyze what was found
-@agent-codebase-analyzer explain how rate limiting works in src/middleware/rate-limit.js
+@catalyst-dev:codebase-analyzer explain how rate limiting works in src/middleware/rate-limit.js
 
 # Step 3: Load related code as discovered
 # Agent identifies dependency on Redis
@@ -110,16 +110,16 @@ Read src/cache/redis-client.js
 
 ```
 # Spawn multiple focused agents
-@agent-codebase-locator find payment files
-@agent-thoughts-locator search payment research
-@agent-codebase-pattern-finder show payment patterns
+@catalyst-dev:codebase-locator find payment files
+@catalyst-dev:thoughts-locator search payment research
+@catalyst-dev:codebase-pattern-finder show payment patterns
 ```
 
 **Bad - Monolithic:**
 
 ```
 # Single agent with too much responsibility
-@agent research everything about payments including files, history, patterns, and implementation
+@catalyst-dev:research everything about payments including files, history, patterns, and implementation
 ```
 
 **Benefits of Sub-Agents:**
@@ -150,8 +150,8 @@ Read src/cache/redis-client.js
 
 ```
 # Research phase (expensive)
-@agent-codebase-analyzer deeply analyze authentication system
-@agent-thoughts-locator find past auth decisions
+@catalyst-dev:codebase-analyzer deeply analyze authentication system
+@catalyst-dev:thoughts-locator find past auth decisions
 
 # Save findings (persistence)
 Write comprehensive analysis to thoughts/shared/research/auth_system.md
@@ -175,18 +175,18 @@ Read thoughts/shared/research/auth_system.md
 
 ```
 # Level 1: Broad search
-@agent-codebase-locator find all webhook code
+@catalyst-dev:codebase-locator find all webhook code
 
 # Level 2: Categorical understanding
 # Based on results, focus on specific areas
-@agent-codebase-analyzer explain webhook validation in src/webhooks/validator.js
+@catalyst-dev:codebase-analyzer explain webhook validation in src/webhooks/validator.js
 
 # Level 3: Deep dive
 # Follow specific code path discovered
 Read src/utils/crypto.js  # Discovered during analysis
 
 # Level 4: Related context
-@agent-thoughts-locator find any webhook issues
+@catalyst-dev:thoughts-locator find any webhook issues
 ```
 
 ---
@@ -243,9 +243,9 @@ Read src/utils/crypto.js  # Discovered during analysis
 
 ```
 # All independent, spawn together
-@agent-codebase-locator find database migration files
-@agent-thoughts-locator search for database decisions
-@agent-codebase-pattern-finder show migration patterns
+@catalyst-dev:codebase-locator find database migration files
+@catalyst-dev:thoughts-locator search for database decisions
+@catalyst-dev:codebase-pattern-finder show migration patterns
 ```
 
 **Use Sequential When:**
@@ -259,10 +259,10 @@ Read src/utils/crypto.js  # Discovered during analysis
 
 ```
 # Step 1
-@agent-codebase-locator find rate limiting code
+@catalyst-dev:codebase-locator find rate limiting code
 
 # Wait for results, then step 2
-@agent-codebase-analyzer analyze the rate limiting middleware at [path from step 1]
+@catalyst-dev:codebase-analyzer analyze the rate limiting middleware at [path from step 1]
 
 # Wait for results, then step 3
 Read the Redis client used by the middleware
@@ -275,13 +275,13 @@ Read the Redis client used by the middleware
 Good:
 
 ```
-@agent-codebase-analyzer trace how a webhook request flows from receipt to database storage
+@catalyst-dev:codebase-analyzer trace how a webhook request flows from receipt to database storage
 ```
 
 Bad:
 
 ```
-@agent-codebase-analyzer look at webhooks
+@catalyst-dev:codebase-analyzer look at webhooks
 ```
 
 **Include Context:**
@@ -289,13 +289,13 @@ Bad:
 Good:
 
 ```
-@agent-codebase-locator find all files related to user authentication in the API service, focusing on JWT token handling
+@catalyst-dev:codebase-locator find all files related to user authentication in the API service, focusing on JWT token handling
 ```
 
 Bad:
 
 ```
-@agent-codebase-locator find auth stuff
+@catalyst-dev:codebase-locator find auth stuff
 ```
 
 **Specify What You Need:**
@@ -303,13 +303,13 @@ Bad:
 Good:
 
 ```
-@agent-codebase-pattern-finder show me examples of pagination with cursor-based approaches, including test patterns
+@catalyst-dev:codebase-pattern-finder show me examples of pagination with cursor-based approaches, including test patterns
 ```
 
 Bad:
 
 ```
-@agent-codebase-pattern-finder pagination
+@catalyst-dev:codebase-pattern-finder pagination
 ```
 
 ---
@@ -1028,7 +1028,7 @@ Read all files in config/
 
 ```
 # Progressive, targeted loading
-@agent-codebase-locator find authentication files
+@catalyst-dev:codebase-locator find authentication files
 [analyze results]
 Read src/auth/handler.js
 [follow specific code paths]
@@ -1039,7 +1039,7 @@ Read src/auth/handler.js
 **Anti-Pattern:**
 
 ```
-@agent research everything about payments including all files, all history, all patterns, and create a complete analysis
+@catalyst-dev:research everything about payments including all files, all history, all patterns, and create a complete analysis
 ```
 
 **Why it's bad:**
@@ -1053,9 +1053,9 @@ Read src/auth/handler.js
 
 ```
 # Parallel, focused research
-@agent-codebase-locator find payment files
-@agent-thoughts-locator search payment research
-@agent-codebase-pattern-finder show payment patterns
+@catalyst-dev:codebase-locator find payment files
+@catalyst-dev:thoughts-locator search payment research
+@catalyst-dev:codebase-pattern-finder show payment patterns
 ```
 
 ### 3. Vague Plans
@@ -1229,7 +1229,7 @@ I'll create a new pagination approach...
 
 ```
 # Check existing patterns first
-@agent-codebase-pattern-finder show pagination implementations
+@catalyst-dev:codebase-pattern-finder show pagination implementations
 [review existing patterns]
 # Use the same pattern as similar endpoints
 ```

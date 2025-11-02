@@ -618,7 +618,7 @@ commands/
     └── research_codebase.md      # Explicit: /research-codebase
 
 agents/
-└── codebase-analyzer.md          # Explicit: @agent-codebase-analyzer
+└── codebase-analyzer.md          # Explicit: @catalyst-dev:codebase-analyzer
 
 skills/
 └── analyze-code/
@@ -629,7 +629,7 @@ User experience:
 
 - User types `/research-codebase` → Explicit workflow
 - User asks "how does auth work?" → Skill triggers autonomously
-- User invokes `@agent-codebase-analyzer` → Explicit agent
+- User invokes `@catalyst-dev:codebase-analyzer` → Explicit agent
 
 **Conversion example**:
 

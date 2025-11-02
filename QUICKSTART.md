@@ -571,15 +571,15 @@ Catalyst tracks your workflow via `.claude/.workflow-context.json`:
 
 | Agent | Purpose |
 |-------|---------|
-| `@agent-codebase-locator` | Find files by topic |
-| `@agent-codebase-analyzer` | Understand implementation |
-| `@agent-thoughts-locator` | Find historical docs |
-| `@agent-codebase-pattern-finder` | Find code examples |
-| `@agent-thoughts-analyzer` | Extract key insights |
+| `@catalyst-dev:codebase-locator` | Find files by topic |
+| `@catalyst-dev:codebase-analyzer` | Understand implementation |
+| `@catalyst-dev:thoughts-locator` | Find historical docs |
+| `@catalyst-dev:codebase-pattern-finder` | Find code examples |
+| `@catalyst-dev:thoughts-analyzer` | Extract key insights |
 
 **Example**:
 ```
-@agent-codebase-locator find all files related to authentication
+@catalyst-dev:codebase-locator find all files related to authentication
 ```
 
 ---

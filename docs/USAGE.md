@@ -235,7 +235,7 @@ Finds files and directories relevant to a feature or task.
 **Example:**
 
 ```
-@agent-codebase-locator find all files related to authentication
+@catalyst-dev:codebase-locator find all files related to authentication
 ```
 
 **What it does:**
@@ -277,7 +277,7 @@ Analyzes HOW code works with detailed implementation analysis.
 **Example:**
 
 ```
-@agent-codebase-analyzer explain how the authentication flow works from login to session creation
+@catalyst-dev:codebase-analyzer explain how the authentication flow works from login to session creation
 ```
 
 **What it does:**
@@ -308,7 +308,7 @@ Discovers relevant documents in the thoughts/ directory.
 **Example:**
 
 ```
-@agent-thoughts-locator find any documents about rate limiting
+@catalyst-dev:thoughts-locator find any documents about rate limiting
 ```
 
 **What it does:**
@@ -347,7 +347,7 @@ Finds similar implementations and code patterns to model after.
 **Example:**
 
 ```
-@agent-codebase-pattern-finder show me examples of pagination implementations
+@catalyst-dev:codebase-pattern-finder show me examples of pagination implementations
 ```
 
 **What it does:**
@@ -378,7 +378,7 @@ Deeply analyzes thoughts documents to extract actionable insights.
 **Example:**
 
 ```
-@agent-thoughts-analyzer analyze thoughts/shared/research/2025-01-05_rate_limiting.md and extract key decisions
+@catalyst-dev:thoughts-analyzer analyze thoughts/shared/research/2025-01-05_rate_limiting.md and extract key decisions
 ```
 
 **What it does:**
@@ -404,9 +404,9 @@ Research agents work independently, so spawn multiple for comprehensive research
 ```
 I need to understand the payment system.
 
-@agent-codebase-locator find all payment-related files
-@agent-thoughts-locator search for any payment research or tickets
-@agent-codebase-pattern-finder show me similar payment implementations
+@catalyst-dev:codebase-locator find all payment-related files
+@catalyst-dev:thoughts-locator search for any payment research or tickets
+@catalyst-dev:codebase-pattern-finder show me similar payment implementations
 ```
 
 **Be Specific in Your Requests**
@@ -414,13 +414,13 @@ I need to understand the payment system.
 Good:
 
 ```
-@agent-codebase-analyzer trace how a webhook is validated and processed in the webhook handler
+@catalyst-dev:codebase-analyzer trace how a webhook is validated and processed in the webhook handler
 ```
 
 Bad:
 
 ```
-@agent-codebase-analyzer look at webhooks
+@catalyst-dev:codebase-analyzer look at webhooks
 ```
 
 **Use the Right Agent for the Job**
@@ -1020,7 +1020,7 @@ cd ~/projects/my-app
 cd ~/wt/my-app/user-settings
 
 # Can reference research from feature A!
-@agent-thoughts-locator find dashboard research
+@catalyst-dev:thoughts-locator find dashboard research
 
 # Create separate plan
 /catalyst-dev:create_plan thoughts/shared/tickets/eng_1235.md
@@ -1053,9 +1053,9 @@ git branch -d ENG-1234-new-dashboard
 I need to understand why webhooks are failing intermittently.
 
 # Spawn parallel research
-@agent-codebase-locator find all webhook-related files
-@agent-thoughts-locator search for any webhook issues or research
-@agent-codebase-analyzer trace the webhook processing flow from receipt to completion
+@catalyst-dev:codebase-locator find all webhook-related files
+@catalyst-dev:thoughts-locator search for any webhook issues or research
+@catalyst-dev:codebase-analyzer trace the webhook processing flow from receipt to completion
 ```
 
 Claude spawns three agents simultaneously:
@@ -1099,7 +1099,7 @@ Key finding: No timeout handling in processor.js:45
 **Then investigate further:**
 
 ```
-@agent-thoughts-analyzer analyze thoughts/shared/tickets/eng_0987.md
+@catalyst-dev:thoughts-analyzer analyze thoughts/shared/tickets/eng_0987.md
 
 # Returns past solution that was implemented
 # Confirms timeout handling was added but in different location
@@ -1145,7 +1145,7 @@ humanlayer thoughts sync
 /catalyst-dev:create_plan
 
 # Claude reads shared research automatically
-@agent-thoughts-locator find authentication research
+@catalyst-dev:thoughts-locator find authentication research
 
 # Plan builds on shared context
 ```
@@ -1175,8 +1175,8 @@ ls -lt thoughts/shared/plans/ | head -10
 ### Finding Related Work
 
 ```
-@agent-thoughts-locator find anything about [feature area]
-@agent-codebase-pattern-finder show similar implementations
+@catalyst-dev:thoughts-locator find anything about [feature area]
+@catalyst-dev:codebase-pattern-finder show similar implementations
 ```
 
 ### Resuming Interrupted Work

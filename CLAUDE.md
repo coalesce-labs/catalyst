@@ -785,9 +785,9 @@ See `docs/CONTEXT_ENGINEERING.md` for details.
 When researching, spawn multiple agents at once:
 
 ```
-@agent-codebase-locator find authentication files
-@agent-thoughts-locator find authentication research
-@agent-codebase-analyzer analyze auth flow
+@catalyst-dev:codebase-locator find authentication files
+@catalyst-dev:thoughts-locator find authentication research
+@catalyst-dev:codebase-analyzer analyze auth flow
 ```
 
 ### Reading Files Fully
@@ -826,7 +826,7 @@ TICKET_PREFIX=$(jq -r '.project.ticketPrefix // "PROJ"' "$CONFIG_FILE")
 
 1. Make changes to `plugins/dev/agents/*.md`
 2. Restart Claude Code (symlinks ensure changes are visible)
-3. Invoke with `@agent-name task description`
+3. Invoke with `@catalyst-dev:name task description`
 4. Verify output matches expected behavior
 
 **Testing commands:**

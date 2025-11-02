@@ -379,7 +379,7 @@ Reusability: Infinite
 **Before (in conversation):**
 
 ```
-@agent-codebase-analyzer how does rate limiting work?
+@catalyst-dev:codebase-analyzer how does rate limiting work?
 
 [Agent reads 5 files, traces logic, explains implementation]
 ← 10K tokens in conversation
@@ -391,7 +391,7 @@ Must re-run analysis or scroll through history
 **After (persisted):**
 
 ```
-@agent-codebase-analyzer how does rate limiting work?
+@catalyst-dev:codebase-analyzer how does rate limiting work?
 
 [Agent analysis: 10K tokens]
 
@@ -584,7 +584,7 @@ Result: Context full of noise
 **Level 1: Broad Orientation**
 
 ```
-@agent-codebase-locator find authentication files
+@catalyst-dev:codebase-locator find authentication files
 
 Returns:
 - src/auth/ (12 files)
@@ -630,7 +630,7 @@ Learning:
 ```
 Based on Level 3, check tests and usage:
 
-@agent-codebase-pattern-finder show JWT usage examples
+@catalyst-dev:codebase-pattern-finder show JWT usage examples
 
 Context used: 4K tokens (patterns)
 Learning:
@@ -651,7 +651,7 @@ Learning:
 
 ```
 Level 1: Find the files
-@agent-codebase-locator find webhook files
+@catalyst-dev:codebase-locator find webhook files
 
 Result:
 - src/webhooks/handler.js
@@ -755,14 +755,14 @@ Benefit:
 Task: Debug authentication issue
 
 Question 1: Where is auth code?
-@agent-codebase-locator find auth files
+@catalyst-dev:codebase-locator find auth files
 
 Result: src/auth/handler.js is entry point
 
 ↓ (Depends on Answer 1)
 
 Question 2: How does auth handler work?
-@agent-codebase-analyzer explain src/auth/handler.js
+@catalyst-dev:codebase-analyzer explain src/auth/handler.js
 
 Result: Uses JWT, calls verify() at line 45
 
@@ -780,12 +780,12 @@ Must be sequential - each depends on previous
 Trace webhook processing:
 
 Step 1: Find entry point
-@agent-codebase-locator find webhook handler
+@catalyst-dev:codebase-locator find webhook handler
 
 Result: src/webhooks/handler.js
 
 Step 2: Analyze entry (depends on step 1)
-@agent-codebase-analyzer analyze src/webhooks/handler.js
+@catalyst-dev:codebase-analyzer analyze src/webhooks/handler.js
 
 Result: Calls validateSignature() from validator.js
 
@@ -801,9 +801,9 @@ Sequential because each step informs the next
 
 ```
 Phase 1: Parallel broad research
-  @agent-codebase-locator find payment files
-  @agent-thoughts-locator search payment docs
-  @agent-codebase-pattern-finder show payment patterns
+  @catalyst-dev:codebase-locator find payment files
+  @catalyst-dev:thoughts-locator search payment docs
+  @catalyst-dev:codebase-pattern-finder show payment patterns
 
 [All run in parallel]
 
@@ -816,8 +816,8 @@ Phase 2: Sequential deep dive
 [Sequential - following discovered path]
 
 Phase 3: Parallel validation
-  @agent-test-validator verify payment tests
-  @agent-integration-checker check payment integrations
+  @catalyst-dev:test-validator verify payment tests
+  @catalyst-dev:integration-checker check payment integrations
 
 [Parallel - independent validations]
 
@@ -852,9 +852,9 @@ Good because:
 - Flexible execution
 
 Usage:
-  @agent-codebase-locator find authentication files
-  @agent-codebase-locator find payment processing code
-  @agent-codebase-locator find test files for webhooks
+  @catalyst-dev:codebase-locator find authentication files
+  @catalyst-dev:codebase-locator find payment processing code
+  @catalyst-dev:codebase-locator find test files for webhooks
 ```
 
 **Too General:**
@@ -870,7 +870,7 @@ Bad because:
 - Overlaps with everything
 
 Unclear usage:
-  @agent-code-helper do something with auth?
+  @catalyst-dev:code-helper do something with auth?
 ```
 
 **Too Specific:**
@@ -1223,9 +1223,9 @@ All progress tracked
 
 ```
 Step 1: Parallel Investigation (15K tokens)
-  @agent-codebase-locator find webhook files
-  @agent-thoughts-locator search webhook issues
-  @agent-codebase-analyzer trace webhook flow
+  @catalyst-dev:codebase-locator find webhook files
+  @catalyst-dev:thoughts-locator search webhook issues
+  @catalyst-dev:codebase-analyzer trace webhook flow
 
   Results:
   - File locations (2K)

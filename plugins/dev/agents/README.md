@@ -8,7 +8,7 @@ Agents are invoked by commands using the `Task` tool to perform focused research
 **Agents vs Commands:**
 
 - **Commands** (`/command-name`) - User-facing workflows you invoke directly
-- **Agents** (`@agent-name`) - Specialized research tools spawned by commands
+- **Agents** (`@catalyst-dev:name`) - Specialized research tools spawned by commands
 
 **Invocation:** Commands spawn agents using the Task tool:
 
