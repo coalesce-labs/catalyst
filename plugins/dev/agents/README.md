@@ -13,7 +13,7 @@ Agents are invoked by commands using the `Task` tool to perform focused research
 **Invocation:** Commands spawn agents using the Task tool:
 
 ```markdown
-Task(subagent_type="codebase-locator", prompt="Find authentication files")
+Task(subagent_type="catalyst-dev:codebase-locator", prompt="Find authentication files")
 ```
 
 **Philosophy:** All agents follow a **documentarian, not critic** approach:
@@ -42,7 +42,7 @@ Task(subagent_type="codebase-locator", prompt="Find authentication files")
 **Example invocation:**
 
 ```markdown
-Task( subagent_type="codebase-locator", prompt="Find all authentication-related files" )
+Task( subagent_type="catalyst-dev:codebase-locator", prompt="Find all authentication-related files" )
 ```
 
 **Returns**: Organized list of file locations categorized by purpose
@@ -65,7 +65,7 @@ Task( subagent_type="codebase-locator", prompt="Find all authentication-related 
 **Example invocation:**
 
 ```markdown
-Task( subagent_type="codebase-analyzer", prompt="Analyze the authentication middleware
+Task( subagent_type="catalyst-dev:codebase-analyzer", prompt="Analyze the authentication middleware
 implementation and document how it works" )
 ```
 
@@ -89,7 +89,7 @@ implementation and document how it works" )
 **Example invocation:**
 
 ```markdown
-Task( subagent_type="codebase-pattern-finder", prompt="Find examples of how other components handle
+Task( subagent_type="catalyst-dev:codebase-pattern-finder", prompt="Find examples of how other components handle
 error logging" )
 ```
 
@@ -113,7 +113,7 @@ error logging" )
 **Example invocation:**
 
 ```markdown
-Task( subagent_type="thoughts-locator", prompt="Find all thoughts documents about authentication" )
+Task( subagent_type="catalyst-dev:thoughts-locator", prompt="Find all thoughts documents about authentication" )
 ```
 
 **Returns**: List of relevant thought documents with paths
@@ -136,7 +136,7 @@ Task( subagent_type="thoughts-locator", prompt="Find all thoughts documents abou
 **Example invocation:**
 
 ```markdown
-Task( subagent_type="thoughts-analyzer", prompt="Analyze the authentication research document and
+Task( subagent_type="catalyst-dev:thoughts-analyzer", prompt="Analyze the authentication research document and
 extract key findings" )
 ```
 
@@ -160,7 +160,7 @@ extract key findings" )
 **Example invocation:**
 
 ```markdown
-Task( subagent_type="external-research", prompt="Research how Next.js implements middleware
+Task( subagent_type="catalyst-dev:external-research", prompt="Research how Next.js implements middleware
 authentication patterns" )
 ```
 
@@ -211,8 +211,8 @@ Commands spawn multiple agents concurrently for efficiency:
 ```markdown
 # Spawn three agents in parallel
 
-Task(subagent_type="codebase-locator", ...) Task(subagent_type="thoughts-locator", ...)
-Task(subagent_type="codebase-analyzer", ...)
+Task(subagent_type="catalyst-dev:codebase-locator", ...) Task(subagent_type="catalyst-dev:thoughts-locator", ...)
+Task(subagent_type="catalyst-dev:codebase-analyzer", ...)
 
 # Wait for all to complete
 
@@ -354,11 +354,11 @@ You are a specialist at [specific research task].
 ```markdown
 # First, find files
 
-Task(subagent_type="codebase-locator", ...)
+Task(subagent_type="catalyst-dev:codebase-locator", ...)
 
 # Then analyze the most relevant ones
 
-Task(subagent_type="codebase-analyzer", ...)
+Task(subagent_type="catalyst-dev:codebase-analyzer", ...)
 ```
 
 ### Pattern 2: Parallel Search
@@ -366,7 +366,7 @@ Task(subagent_type="codebase-analyzer", ...)
 ```markdown
 # Search codebase and thoughts simultaneously
 
-Task(subagent_type="codebase-locator", ...) Task(subagent_type="thoughts-locator", ...)
+Task(subagent_type="catalyst-dev:codebase-locator", ...) Task(subagent_type="catalyst-dev:thoughts-locator", ...)
 ```
 
 ### Pattern 3: Pattern Discovery
@@ -374,7 +374,7 @@ Task(subagent_type="codebase-locator", ...) Task(subagent_type="thoughts-locator
 ```markdown
 # Find patterns after understanding the code
 
-Task(subagent_type="codebase-analyzer", ...) Task(subagent_type="codebase-pattern-finder", ...)
+Task(subagent_type="catalyst-dev:codebase-analyzer", ...) Task(subagent_type="catalyst-dev:codebase-pattern-finder", ...)
 ```
 
 ## Tool Access
