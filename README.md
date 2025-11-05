@@ -183,10 +183,35 @@ Plugins automatically load/unload MCPs when enabled/disabled:
 with just `catalyst-dev` keeps your context at ~3.5k tokens instead of ~65k, leaving more room for
 code and conversation.
 
+### Updating Plugins
+
+Keep your Catalyst plugins up to date with bug fixes and new features:
+
+```bash
+# Update the marketplace to fetch latest from GitHub
+claude plugin marketplace update catalyst
+
+# Restart Claude Code to load updated plugins
+# (Exit and reopen, or start a new session)
+```
+
+**When to update:**
+- 🐛 **Bug fixes**: Patch versions (e.g., 3.0.0 → 3.0.1) - Fix issues like incorrect CLI syntax
+- ✨ **New features**: Minor versions (e.g., 3.0.0 → 3.1.0) - New commands or capabilities
+- 🔄 **Breaking changes**: Major versions (e.g., 3.0.0 → 4.0.0) - May require configuration updates
+
+**Important:** A restart is required for plugin updates to take effect. Active sessions use the old version until you restart Claude Code.
+
+**Check your versions:**
+```bash
+# List installed plugins and their versions
+/plugin list
+```
+
 **Need help?**
 
 - [Installation & Configuration Guide](QUICKSTART.md) - Complete setup, installation, and configuration
-- [Claude Code Plugin Guide](https://docs.claude.com/plugins) - Official plugin documentation
+- [Claude Code Plugin Guide](https://docs.claude.com/en/docs/claude-code/plugins.md) - Official plugin documentation
 
 ## Complete Workflow
 
