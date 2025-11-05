@@ -35,19 +35,65 @@ Linearis CLI tool.
    - Get available labels
    - Discover workflow states
 
+## Linearis CLI Quick Reference
+
+**IMPORTANT**: Use these exact command patterns to avoid trial-and-error syntax issues.
+
+### Most Common Commands
+
+```bash
+# Read a ticket (works with TEAM-123 or UUID)
+linearis issues read BRAVO-284
+
+# Update ticket state (use --state NOT --status!)
+linearis issues update BRAVO-284 --state "Research"
+linearis issues update BRAVO-284 --state "In Progress"
+
+# Add comment (use 'comments create' NOT 'issues comment'!)
+linearis comments create BRAVO-284 --body "Starting research"
+
+# List tickets
+linearis issues list --limit 50
+
+# List active cycle
+linearis cycles list --team BRAVO --active
+
+# Read cycle details (includes all issues)
+linearis cycles read "Sprint 2025-11" --team BRAVO
+
+# List projects
+linearis projects list --team BRAVO
+```
+
+### Common Mistakes to Avoid
+
+❌ `linearis issues update TICKET-123 --status "Research"` (Wrong flag)
+✅ `linearis issues update TICKET-123 --state "Research"`
+
+❌ `linearis issues comment TICKET-123 "text"` (Wrong subcommand)
+✅ `linearis comments create TICKET-123 --body "text"`
+
+❌ `linearis issues view TICKET-123` (Wrong verb)
+✅ `linearis issues read TICKET-123"`
+
+See `.linearis-syntax-reference.md` for comprehensive examples.
+
 ## Key Commands
 
 ### Ticket Operations
 
 ```bash
-# List tickets for team
-linearis issues list --team TEAM [--status "In Progress"] [--assignee "@me"]
+# List tickets (note: issues list only supports --limit, not --team or --status)
+linearis issues list --limit 100
+
+# Filter by team and status using jq
+linearis issues list --limit 100 | jq '.[] | select(.team.key == "TEAM" and .state.name == "In Progress")'
 
 # Read specific ticket
 linearis issues read TICKET-123
 
-# Search tickets
-linearis issues list --team TEAM | jq '.[] | select(.title | contains("search term"))'
+# Search tickets by title
+linearis issues list --limit 100 | jq '.[] | select(.title | contains("search term"))'
 ```
 
 ### Cycle Operations

@@ -267,7 +267,7 @@ When user wants to add a comment to a ticket:
 5. **Add comment with Linearis:**
 
    ```bash
-   linearis issues comment TEAM-123 "Your comment text here"
+   linearis comments create TEAM-123 --body "Your comment text here"
    ```
 
 ### 3. Moving Tickets Through Workflow
@@ -306,12 +306,12 @@ When moving tickets to a new status:
 4. **Manual status updates:**
 
    ```bash
-   linearis issues update TEAM-123 --status "In Progress"
+   linearis issues update TEAM-123 --state "In Progress"
    ```
 
 5. **Add comment explaining the transition:**
    ```bash
-   linearis issues comment TEAM-123 "Moving to In Progress: Starting implementation"
+   linearis comments create TEAM-123 --body "Moving to In Progress: Starting implementation"
    ```
 
 ### 4. Searching for Tickets
@@ -326,17 +326,20 @@ When user wants to find tickets:
 2. **Execute search:**
 
    ```bash
-   # List all issues for team
-   linearis issues list --team "$TEAM_KEY"
+   # List all issues (linearis issues list only supports --limit, not --team)
+   linearis issues list --limit 100
 
-   # Filter by status
-   linearis issues list --team "$TEAM_KEY" --status "In Progress"
+   # Filter by team using jq
+   linearis issues list --limit 100 | jq '.[] | select(.team.key == "TEAM")'
 
-   # Filter by assignee
-   linearis issues list --team "$TEAM_KEY" --assignee "@me"
+   # Filter by status using jq
+   linearis issues list --limit 100 | jq '.[] | select(.state.name == "In Progress")'
+
+   # Filter by assignee using jq
+   linearis issues list --limit 100 | jq '.[] | select(.assignee.email == "user@example.com")'
 
    # Search by text (filter JSON output with jq)
-   linearis issues list --team "$TEAM_KEY" | \
+   linearis issues list --limit 100 | \
      jq '.[] | select(.title | contains("search term"))'
    ```
 
@@ -411,10 +414,10 @@ When these commands are run, check if there's a related Linear ticket and update
 
 ```bash
 # Add progress comment
-linearis issues comment PROJ-123 "Completed phase 1, moving to phase 2"
+linearis comments create PROJ-123 --body "Completed phase 1, moving to phase 2"
 
 # Move ticket forward
-linearis issues update PROJ-123 --status "In Dev"
+linearis issues update PROJ-123 --state "In Dev"
 
 # Search for related tickets
 linearis issues list --team PROJ | jq '.[] | select(.title | contains("authentication"))'
@@ -427,20 +430,26 @@ linearis issues list --team PROJ | jq '.[] | select(.title | contains("authentic
 ### Common Commands
 
 ```bash
-# List issues
-linearis issues list --team TEAM [--status "Status"] [--assignee "@me"]
+# List issues (only --limit supported, use jq for filtering)
+linearis issues list --limit 50
+
+# Filter by status using jq
+linearis issues list --limit 100 | jq '.[] | select(.state.name == "In Progress")'
 
 # Read specific issue
 linearis issues read TICKET-123
 
 # Create issue
-linearis issues create --team TEAM --title "Title" --description "Description"
+linearis issues create "Title" --description "Description" --state "Todo"
 
-# Update issue
-linearis issues update TICKET-123 --status "In Progress" [--assignee "@me"]
+# Update issue state
+linearis issues update TICKET-123 --state "In Progress"
+
+# Update assignee
+linearis issues update TICKET-123 --assignee <user-id>
 
 # Add comment
-linearis issues comment TICKET-123 "Comment text"
+linearis comments create TICKET-123 --body "Comment text"
 
 # List cycles
 linearis cycles list --team TEAM [--active]

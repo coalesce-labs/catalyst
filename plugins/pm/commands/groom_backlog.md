@@ -176,8 +176,8 @@ linearis issues update TEAM-456 --project "Auth & Security"
 linearis issues update TEAM-123 --project "Frontend"
 
 # Close stale issue TEAM-789
-linearis issues update TEAM-789 --status "Canceled" \
-  --comment "Closing stale issue (>30 days inactive)"
+linearis issues update TEAM-789 --state "Canceled"
+linearis comments create TEAM-789 --body "Closing stale issue (>30 days inactive)"
 
 # [... more commands ...]
 

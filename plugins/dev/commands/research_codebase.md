@@ -552,11 +552,11 @@ status.
 if [[ -n "$ticketId" ]]; then
   # Check if Linearis CLI is available
   if command -v linearis &> /dev/null; then
-    # Update ticket status to "Research"
-    linearis issues update "$ticketId" --status "Research"
+    # Update ticket state to "Research" (use --state NOT --status!)
+    linearis issues update "$ticketId" --state "Research"
 
-    # Add comment
-    linearis issues comment "$ticketId" "Starting research: [user's research question]"
+    # Add comment (use 'comments create' NOT 'issues comment'!)
+    linearis comments create "$ticketId" --body "Starting research: [user's research question]"
   else
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
   fi
@@ -571,8 +571,8 @@ if [[ -n "$ticketId" ]] && [[ -n "$githubPermalink" ]]; then
   # Check if Linearis CLI is available
   if command -v linearis &> /dev/null; then
     # Add completion comment with research doc link
-    linearis issues comment "$ticketId" \
-        "Research complete! See findings: $githubPermalink"
+    linearis comments create "$ticketId" \
+        --body "Research complete! See findings: $githubPermalink"
   else
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
   fi

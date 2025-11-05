@@ -296,11 +296,11 @@ if ! command -v linearis &> /dev/null; then
     echo "Install: npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
 else
     # Move to "Done"
-    linearis issues update "$ticket" --status "Done"
+    linearis issues update "$ticket" --state "Done"
 
     # Add merge comment
-    linearis issues comment "$ticket" \
-        "✅ PR merged!\n\n**PR**: #${prNumber} - ${prTitle}\n**Merge commit**: ${mergeSha}\n**Merged into**: ${baseBranch}\n\nView PR: ${prUrl}"
+    linearis comments create "$ticket" \
+        --body "✅ PR merged!\n\n**PR**: #${prNumber} - ${prTitle}\n**Merge commit**: ${mergeSha}\n**Merged into**: ${baseBranch}\n\nView PR: ${prUrl}"
 fi
 ```
 
@@ -483,7 +483,7 @@ Configure:
   export LINEAR_API_TOKEN=your_token
 
 Then update ticket manually:
-  linearis issues update $ticket --status "Done"
+  linearis issues update $ticket --state "Done"
 ```
 
 **Linear API error:**

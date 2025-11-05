@@ -355,11 +355,11 @@ if ! command -v linearis &> /dev/null; then
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
 else
     # If not already in "In Review", move it and assign to self
-    linearis issues update "$ticket" --status "In Review" --assignee "@me"
+    linearis issues update "$ticket" --state "In Review" --assignee "@me"
 
     # Add comment about update with PR link
-    linearis issues comment "$ticket" \
-        "PR description updated!\n\n**Changes**: ${updateSummary}\n**Verification**: ${checksPassedCount}/${totalChecks} automated checks passed\n\nView PR: ${prUrl}"
+    linearis comments create "$ticket" \
+        --body "PR description updated!\n\n**Changes**: ${updateSummary}\n**Verification**: ${checksPassedCount}/${totalChecks} automated checks passed\n\nView PR: ${prUrl}"
 fi
 ```
 

@@ -153,11 +153,15 @@ linearis issues create \
 
 **Auto-close commands**:
 ```bash
-linearis issues update TEAM-456 --status "Done" \
-  --comment "PR #123 merged: https://github.com/user/repo/pull/123"
+# Update state
+linearis issues update TEAM-456 --state "Done"
+# Add comment
+linearis comments create TEAM-456 --body "PR #123 merged: https://github.com/user/repo/pull/123"
 
-linearis issues update TEAM-457 --status "Done" \
-  --comment "PR #124 merged: https://github.com/user/repo/pull/124"
+# Update state
+linearis issues update TEAM-457 --state "Done"
+# Add comment
+linearis comments create TEAM-457 --body "PR #124 merged: https://github.com/user/repo/pull/124"
 ```
 
 ## 🕐 Stale PRs (Open >14 Days)

@@ -29,9 +29,11 @@ Use Linearis CLI directly:
 # Get active cycle with tickets
 linearis cycles read "Sprint 2025-10" --team TEAM
 
-# List tickets by status
-linearis issues list --team TEAM --cycle "Sprint 2025-10" --status "In Progress"
-linearis issues list --team TEAM --cycle "Sprint 2025-10" --status "Done"
+# List tickets by status (use cycles read to get all issues, then filter)
+linearis cycles read "Sprint 2025-10" --team TEAM | \
+  jq '.issues[] | select(.state.name == "In Progress")'
+linearis cycles read "Sprint 2025-10" --team TEAM | \
+  jq '.issues[] | select(.state.name == "Done")'
 
 # Calculate completion manually (count tickets)
 ```
@@ -47,26 +49,25 @@ echo "Active cycle: $CYCLE"
 linearis issues list --team ENG | \
   jq --arg cycle "$CYCLE" '.[] | select(.cycle.name == $cycle)'
 
-# 3. Count by status
+# 3. Count by status (use cycles read to get issues)
+CYCLE_DATA=$(linearis cycles read "$CYCLE" --team ENG)
+
 echo "Backlog:"
-linearis issues list --team ENG --status "Backlog" | \
-  jq --arg cycle "$CYCLE" '[.[] | select(.cycle.name == $cycle)] | length'
+echo "$CYCLE_DATA" | jq '[.issues[] | select(.state.name == "Backlog")] | length'
 
 echo "In Progress:"
-linearis issues list --team ENG --status "In Progress" | \
-  jq --arg cycle "$CYCLE" '[.[] | select(.cycle.name == $cycle)] | length'
+echo "$CYCLE_DATA" | jq '[.issues[] | select(.state.name == "In Progress")] | length'
 
 echo "Done:"
-linearis issues list --team ENG --status "Done" | \
-  jq --arg cycle "$CYCLE" '[.[] | select(.cycle.name == $cycle)] | length'
+echo "$CYCLE_DATA" | jq '[.issues[] | select(.state.name == "Done")] | length'
 
 # 4. Calculate completion percentage
 # total_tickets = backlog + in_progress + done
 # completion = (done / total_tickets) * 100
 
-# 5. Find blocked tickets
-linearis issues list --team ENG --status "Blocked" | \
-  jq --arg cycle "$CYCLE" '.[] | select(.cycle.name == $cycle) | {id, title, blockedReason}'
+# 5. Find blocked tickets (use cycles read)
+linearis cycles read "$CYCLE" --team ENG | \
+  jq '.issues[] | select(.state.name == "Blocked") | {id, title, blockedReason}'
 
 # 6. Review PRs merged during cycle
 # Get cycle start date (example: 2 weeks ago)

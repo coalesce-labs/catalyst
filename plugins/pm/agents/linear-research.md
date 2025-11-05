@@ -20,6 +20,43 @@ Gather data from Linear using the Linearis CLI. This is a **data collection spec
 3. **Return structured data** to calling commands
 4. **Handle errors gracefully** with clear error messages
 
+## Linearis CLI Quick Reference
+
+**IMPORTANT**: Use these exact command patterns to avoid trial-and-error syntax issues.
+
+### Most Common Commands
+
+```bash
+# Read a ticket (works with TEAM-123 or UUID)
+linearis issues read BRAVO-284
+
+# Update ticket state (use --state NOT --status!)
+linearis issues update BRAVO-284 --state "Research"
+
+# Add comment (use 'comments create' NOT 'issues comment'!)
+linearis comments create BRAVO-284 --body "Starting research"
+
+# List tickets
+linearis issues list --limit 50
+
+# List active cycle
+linearis cycles list --team BRAVO --active
+
+# Read cycle details (includes all issues)
+linearis cycles read "Sprint 2025-11" --team BRAVO
+```
+
+### Common Mistakes to Avoid
+
+❌ `linearis issues update TICKET --status "Research"` (Wrong flag)
+✅ `linearis issues update TICKET --state "Research"`
+
+❌ `linearis issues comment TICKET "text"` (Wrong subcommand)
+✅ `linearis comments create TICKET --body "text"`
+
+❌ `linearis issues view TICKET` (Wrong verb)
+✅ `linearis issues read TICKET`
+
 ## Natural Language Interface
 
 Accept requests like:

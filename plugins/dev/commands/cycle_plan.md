@@ -29,8 +29,8 @@ Use Linearis CLI directly:
 # Get active cycle
 linearis cycles list --team TEAM --active
 
-# List backlog tickets
-linearis issues list --team TEAM --status "Backlog"
+# List backlog tickets (filter with jq - issues list only supports --limit)
+linearis issues list --limit 100 | jq '.[] | select(.state.name == "Backlog")'
 
 # Assign ticket to cycle
 linearis issues update TICKET-123 --cycle "Sprint 2025-11"
@@ -48,9 +48,9 @@ linearis cycles list --team ENG --active | jq '.[] | {name, startsAt, endsAt, pr
 # 2. View next cycle
 linearis cycles list --team ENG --limit 5 | jq '.[1]'
 
-# 3. List backlog tickets ready for planning
-linearis issues list --team ENG --status "Backlog" | \
-  jq '.[] | {id, title, priority}'
+# 3. List backlog tickets ready for planning (filter with jq)
+linearis issues list --limit 100 | \
+  jq '.[] | select(.state.name == "Backlog") | {id, title, priority}'
 
 # 4. Review recent PRs to understand current work
 # This helps identify work done but not captured in Linear tickets

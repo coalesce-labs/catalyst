@@ -200,12 +200,12 @@ if ! command -v linearis &> /dev/null; then
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
     echo "Install: npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
 else
-    # Update ticket status to "In Review"
-    linearis issues update "$ticket" --status "In Review" --assignee "@me"
+    # Update ticket state to "In Review"
+    linearis issues update "$ticket" --state "In Review" --assignee "@me"
 
     # Add comment with PR link
-    linearis issues comment "$ticket" \
-        "PR created and ready for review!\n\n**PR**: $prUrl\n\nDescription has been auto-generated with verification checks."
+    linearis comments create "$ticket" \
+        --body "PR created and ready for review!\n\n**PR**: $prUrl\n\nDescription has been auto-generated with verification checks."
 fi
 ```
 
