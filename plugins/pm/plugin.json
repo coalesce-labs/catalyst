@@ -86,6 +86,30 @@
       "file": "commands/context_daily.md",
       "description": "Generate daily context engineering adoption dashboard",
       "category": "reporting"
+    },
+    {
+      "name": "analyze_cycle",
+      "file": "commands/analyze_cycle.md",
+      "description": "Analyze cycle health with actionable insights and recommendations",
+      "category": "reporting"
+    },
+    {
+      "name": "analyze_milestone",
+      "file": "commands/analyze_milestone.md",
+      "description": "Analyze milestone health toward target date",
+      "category": "reporting"
+    },
+    {
+      "name": "groom_backlog",
+      "file": "commands/groom_backlog.md",
+      "description": "Groom Linear backlog to identify orphaned issues and health issues",
+      "category": "maintenance"
+    },
+    {
+      "name": "sync_prs",
+      "file": "commands/sync_prs.md",
+      "description": "Sync GitHub PRs with Linear issues and identify correlation gaps",
+      "category": "maintenance"
     }
   ],
   "scripts": [
