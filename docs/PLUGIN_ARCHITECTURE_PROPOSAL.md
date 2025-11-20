@@ -212,11 +212,15 @@ catalyst-analytics/
 **Critical assumption**: When a plugin is disabled via `/plugin disable`, its bundled `.mcp.json`
 MCPs should also be unloaded.
 
-**Research needed**:
+**Research Status**: ✅ **CONFIRMED** (Validated 2025-11-09)
 
-- ✅ Confirmed: Plugins can include `.mcp.json` (per docs)
-- ⚠️ **Unconfirmed**: Does disabling plugin also disable its MCPs?
-- ⚠️ **Unconfirmed**: Can plugins be enabled/disabled without restart?
+- ✅ **Confirmed**: Plugins can include `.mcp.json` (released v2.0.12, October 2025)
+- ✅ **Confirmed**: Disabling plugin also disables its MCPs (restart required)
+- ✅ **Confirmed**: **Restart IS required** - enable/disable does not work dynamically
+- ✅ **Confirmed**: Environment variables must be set before launching Claude Code
+- ✅ **Confirmed**: Feature is stable and production-ready
+
+**See**: `docs/PLUGIN_MCP_VALIDATION.md` for complete validation results and test data.
 
 **Test plan**:
 

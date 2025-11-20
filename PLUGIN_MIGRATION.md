@@ -262,11 +262,13 @@ Before publishing:
 - [ ] Verify `/plugin enable catalyst-analytics` loads PostHog MCP
 - [ ] Verify `/context` shows PostHog tools after enable
 - [ ] Verify `/plugin disable catalyst-analytics` unloads PostHog MCP
-- [ ] Verify `/context` shows reduced MCP tokens after disable
-- [ ] Repeat for catalyst-debugging with Sentry
-- [ ] Verify both plugins can be enabled simultaneously
-- [ ] Test environment variable expansion in `.mcp.json`
-- [ ] Verify no restart required for enable/disable
+- [x] Verified: Plugins can bundle `.mcp.json` (v2.0.12+)
+- [x] Verified: Environment variable expansion works (`${VAR}` syntax)
+- [x] Verified: **Restart IS required** for enable/disable to take effect
+- [ ] Test: `/context` shows reduced MCP tokens after disable + restart
+- [ ] Test: catalyst-debugging with Sentry MCP
+- [ ] Test: Both plugins enabled simultaneously
+- [ ] Test: PostHog MCP with actual token
 
 ## Breaking Changes
 
