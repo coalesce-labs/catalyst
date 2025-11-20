@@ -34,6 +34,13 @@ The Catalyst PM plugin provides AI-powered project management workflows that int
 - **Availability**: Who needs work assigned
 - **Quick Blockers**: Immediate attention items
 
+### Context Engineering Adoption
+- **Cross-Repo Analysis**: Compare code activity vs thoughts activity
+- **Non-Adopter Detection**: Identify developers coding without documentation
+- **Adoption Scoring**: 6-level status (Excellent → Not using)
+- **Trend Tracking**: 28-day week-over-week growth metrics
+- **Automated Reporting**: Daily dashboards via GitHub Actions
+
 ## Commands
 
 ### Cycle Management
@@ -157,6 +164,48 @@ Health Score: 75/100
   ✅ 2 ready to close
 ```
 
+### Context Engineering
+- `/pm:context-daily` - Generate daily context engineering adoption dashboard
+  - Cross-repo analysis (code vs thoughts activity)
+  - Identify developers NOT using context engineering
+  - Individual adoption scores
+  - 28-day trend analysis
+
+### `/pm:context-daily`
+Track context engineering adoption by cross-referencing code and thoughts repository activity.
+
+**What it does**:
+- Spawns parallel research for GitHub and thoughts metrics (Haiku)
+- Spawns context-analyzer agent for cross-repo synthesis (Sonnet)
+- Identifies developers with code activity but NO thoughts activity
+- Calculates adoption scores (🟢 Excellent → 🔴 Not using)
+- Generates 28-day trend analysis with week-over-week growth
+- Provides prioritized action items (P1: Immediate, P2: Celebrate, P3: Growth)
+
+**Output**: Dashboard saved to `{thoughts_repo}/context-engineering-daily.md` (root)
+
+**Example**:
+```
+📊 Context Engineering Adoption - Daily Dashboard
+
+Quick Stats (7-Day):
+  Active contributors: 5/7 devs (71%)
+  Files created: 8.6/day (↑ +39% vs 28-day avg)
+  Adoption trend: ↑ +51% month-over-month
+
+🚨 Not Using Context Engineering:
+  • Frank: 3 PRs, 8 commits → 0 thoughts files (🔴 Not using)
+  • Grace: 2 PRs, 5 commits → 0 thoughts files (🔴 Not using)
+
+Priority Actions:
+  1. P1: Onboard Frank & Grace (no thoughts activity)
+  2. P2: Celebrate Alice (22 research docs in 7 days!)
+  3. P3: Support Emily (building habit, needs guidance)
+```
+
+**GitHub Actions**: Automate daily reporting in your thoughts repository.
+See: `plugins/pm/templates/github-actions/SETUP.md`
+
 ## Agents
 
 ### Research Agents
@@ -200,6 +249,21 @@ Health Score: 75/100
 - Estimation gap identification
 
 **Returns**: Structured markdown with categorized recommendations and confidence scores
+
+### `context-analyzer`
+**Purpose**: Track context engineering adoption across the team
+
+**Responsibilities**:
+- Cross-reference code repository activity vs thoughts repository activity
+- Identify developers with code commits but NO thoughts activity
+- Calculate individual adoption scores (Excellent → Not using)
+- Analyze file type breakdown (research, plans, handoffs, PRs)
+- Generate 28-day trend analysis with week-over-week growth
+- Provide prioritized action items (P1: Immediate, P2: Celebrate, P3: Growth)
+
+**Returns**: Structured markdown dashboard with adoption metrics, non-adopters, trends, recommendations
+
+**Key Feature**: Identifies team members NOT using context engineering (code-only developers)
 
 ### `github-linear-analyzer`
 **Purpose**: Ensure proper GitHub-Linear correlation

@@ -1,0 +1,120 @@
+# Catalyst PM Configuration
+# Place this file at: .catalyst/config.yml in your thoughts repository
+
+project:
+  name: "Your Project Name"        # e.g., "Acme Platform"
+  org: "your-github-org"            # e.g., "acme-corp"
+  ticketPrefix: "TEAM"              # e.g., "ACME" for ACME-123
+
+code_repos:
+  # List all code repositories to collect metrics from
+  - name: "main-repo"               # Repository name
+    primary: true                   # Mark one as primary
+  - name: "api-repo"
+    primary: false
+  # Add more repositories as needed
+
+linear:
+  team: "Your Team Name"            # e.g., "Platform Team"
+  teamKey: "TEAM"                   # e.g., "ACME" (must match ticketPrefix)
+
+github:
+  bot_name: "Catalyst Bot"          # Name for commit author
+  bot_email: "bot@example.com"      # Email for commit author
+
+# Report schedules (cron format)
+schedules:
+  # Daily standup - runs every weekday
+  daily:
+    enabled: true
+    cron: "0 9 * * 1-5"             # 9 AM UTC, Monday-Friday
+    timezone: "UTC"
+
+  # Context engineering dashboard - runs every day
+  context_daily:
+    enabled: true
+    cron: "15 14 * * *"             # 9:15 AM CST (14:15 UTC), every day
+    timezone: "America/Chicago"
+
+  # Weekly executive summary - runs every Monday
+  weekly:
+    enabled: true
+    cron: "0 9 * * MON"             # 9 AM UTC, Mondays
+    timezone: "UTC"
+    period_days: 7                  # Look back 7 days
+
+  # Cycle review - aligned with Linear cycles (bi-weekly common)
+  cycle:
+    enabled: true
+    cron: "0 9 * * FRI"             # 9 AM UTC, Fridays (end of sprint)
+    timezone: "UTC"
+    # Automatically detects current cycle from Linear
+
+  # Monthly roadmap review
+  monthly:
+    enabled: true
+    cron: "0 9 1 * *"               # 9 AM UTC, 1st of month
+    timezone: "UTC"
+
+# Context engineering adoption tracking
+contextEngineering:
+  enabled: true
+
+  # Code repositories to analyze for developer activity
+  codeRepos:
+    - "org/repo-1"       # Primary codebase
+    - "org/repo-2"       # Additional repos
+    # Add all repositories where your team commits code
+
+  # Analysis windows
+  windows:
+    daily: 1              # Look back 1 day for "yesterday" metrics
+    weekly: 7             # Look back 7 days for trends
+    monthly: 28           # Look back 28 days for long-term trends
+
+  # Adoption status thresholds (files/day average)
+  thresholds:
+    excellent: 3.0        # 🟢 Excellent: 3+ files/day
+    good: 1.0             # 🟢 Good: 1-3 files/day
+    growing: 0.5          # 🟡 Growing: 0.5-1 files/day
+    light: 0.2            # 🟡 Light: 0.2-0.5 files/day
+    minimal: 0.01         # 🔴 Minimal: <0.2 files/day
+    notUsing: 0.0         # 🔴 Not using: 0 files/day
+
+# Optional: Google Calendar integration for PTO tracking
+calendar:
+  enabled: false
+  calendarId: "team-calendar@example.com"
+  # Set to true and configure calendar ID to enable PTO tracking
+
+# Optional: Team member mapping
+team:
+  members:
+    - name: "Team Member 1"
+      email: "member1@example.com"
+      github: "member1"
+      linear: "Member 1"
+    - name: "Team Member 2"
+      email: "member2@example.com"
+      github: "member2"
+      linear: "Member 2"
+  # This helps correlate activity across systems
+
+# Report customization
+reports:
+  # Include test coverage metrics?
+  includeTestCoverage: true
+
+  # Include thoughts repository adoption metrics?
+  includeContextEngineering: true
+
+  # Health score thresholds
+  healthScore:
+    excellent: 80    # 🟢 80-100
+    good: 60         # 🟡 60-79
+    critical: 0      # 🔴 0-59
+
+  # Issue age thresholds (days)
+  issueAge:
+    atRisk: 5        # Issues in progress > 5 days
+    stale: 30        # Issues inactive > 30 days

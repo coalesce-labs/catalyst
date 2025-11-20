@@ -1,0 +1,117 @@
+{
+  "name": "catalyst-pm",
+  "version": "1.0.0",
+  "description": "Project management reporting and analytics for Linear, GitHub, and thoughts repositories",
+  "category": "project-management",
+  "author": "Coalesce Labs",
+  "repository": "https://github.com/coalesce-labs/catalyst",
+  "license": "MIT",
+  "agents": [
+    {
+      "name": "github-metrics",
+      "file": "agents/github-metrics.md",
+      "description": "Collect GitHub PR and commit metrics",
+      "model": "haiku"
+    },
+    {
+      "name": "linear-metrics",
+      "file": "agents/linear-metrics.md",
+      "description": "Collect Linear issue and cycle metrics",
+      "model": "haiku"
+    },
+    {
+      "name": "thoughts-metrics",
+      "file": "agents/thoughts-metrics.md",
+      "description": "Collect thoughts repository commit metrics",
+      "model": "haiku"
+    },
+    {
+      "name": "code-classifier",
+      "file": "agents/code-classifier.md",
+      "description": "Classify code changes by type and purpose",
+      "model": "haiku"
+    },
+    {
+      "name": "calendar-analyzer",
+      "file": "agents/calendar-analyzer.md",
+      "description": "Analyze Google Calendar for team availability",
+      "model": "haiku"
+    },
+    {
+      "name": "health-scorer",
+      "file": "agents/health-scorer.md",
+      "description": "Calculate health scores and generate insights",
+      "model": "sonnet"
+    },
+    {
+      "name": "velocity-analyzer",
+      "file": "agents/velocity-analyzer.md",
+      "description": "Analyze velocity trends and projections",
+      "model": "sonnet"
+    },
+    {
+      "name": "milestone-tracker",
+      "file": "agents/milestone-tracker.md",
+      "description": "Track milestone progress and target dates",
+      "model": "sonnet"
+    },
+    {
+      "name": "context-analyzer",
+      "file": "agents/context-analyzer.md",
+      "description": "Cross-repo synthesis for context engineering adoption analysis",
+      "model": "sonnet"
+    }
+  ],
+  "commands": [
+    {
+      "name": "report_daily",
+      "file": "commands/report_daily.md",
+      "description": "Generate daily standup status report",
+      "category": "reporting"
+    },
+    {
+      "name": "executive_summary",
+      "file": "commands/executive_summary.md",
+      "description": "Generate comprehensive executive summary report",
+      "category": "reporting"
+    },
+    {
+      "name": "roadmap_review",
+      "file": "commands/roadmap_review.md",
+      "description": "Generate quarterly roadmap and milestone health report",
+      "category": "reporting"
+    },
+    {
+      "name": "context_daily",
+      "file": "commands/context_daily.md",
+      "description": "Generate daily context engineering adoption dashboard",
+      "category": "reporting"
+    }
+  ],
+  "scripts": [
+    "scripts/check-prerequisites.sh",
+    "scripts/pm-utils.sh",
+    "scripts/update-dashboard.sh"
+  ],
+  "dependencies": {
+    "required": [
+      "jq",
+      "git"
+    ],
+    "optional": [
+      "gh (GitHub CLI)",
+      "linearis (Linear CLI)",
+      "gcalcli (Google Calendar CLI)",
+      "humanlayer (HumanLayer CLI)"
+    ]
+  },
+  "configuration": {
+    "project_config": ".claude/config.json",
+    "secrets_config": "~/.config/catalyst/config-{projectKey}.json",
+    "thoughts_repo": "Configured via HumanLayer"
+  },
+  "installation": {
+    "marketplace": "catalyst-pm",
+    "manual": "symlink plugins/pm to .claude/plugins/pm"
+  }
+}
