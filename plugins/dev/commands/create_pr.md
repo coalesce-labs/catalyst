@@ -155,8 +155,18 @@ fi
 
 ### 9. Create PR
 
+**CRITICAL: NO CLAUDE ATTRIBUTION**
+
+DO NOT add any of the following to the PR:
+- ❌ "Generated with Claude Code" or similar messages
+- ❌ "Co-Authored-By: Claude" lines
+- ❌ Any reference to AI assistance
+- ❌ Links to Claude Code or Anthropic
+
+The PR should be authored solely by the user (git author). Keep the description clean and professional.
+
 ```bash
-# Minimal initial body
+# Minimal initial body (NO CLAUDE ATTRIBUTION)
 body="Automated PR creation. Comprehensive description generating..."
 
 # If ticket exists, add reference
@@ -164,7 +174,7 @@ if [[ "$ticket" ]]; then
     body="$body\n\nRefs: $ticket"
 fi
 
-# Create PR
+# Create PR (author will be the git user)
 gh pr create --title "$title" --body "$body" --base "$base"
 ```
 

@@ -333,6 +333,21 @@ humanlayer thoughts sync
 
 ### 12. Update PR on GitHub
 
+**CRITICAL: NO CLAUDE ATTRIBUTION**
+
+Before updating the PR, ensure the description contains NO Claude attribution:
+
+❌ **Remove these if present**:
+- "Generated with Claude Code" or similar messages
+- "Co-Authored-By: Claude" lines
+- Any reference to AI assistance or Anthropic
+- Links to Claude Code documentation
+
+✅ **Keep descriptions professional and human-authored**:
+- Focus on code changes and their purpose
+- Attribute work to the git author (the human developer)
+- Write in first-person if needed ("I added...", "We implemented...")
+
 **Update title:**
 
 ```bash
@@ -342,6 +357,7 @@ gh pr edit $pr_number --title "$new_title"
 **Update body:**
 
 ```bash
+# Ensure no Claude attribution in the description file
 gh pr edit $pr_number --body-file "thoughts/shared/prs/${pr_number}_description.md"
 ```
 
