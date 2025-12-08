@@ -1,8 +1,22 @@
 # Multi-Config Guide: Managing Multiple Thoughts Repositories
 
-This guide explains how to manage separate thoughts repositories for different clients and projects.
+This guide explains how to manage separate thoughts repositories for different clients and projects using HumanLayer profiles.
 
 ## Overview
+
+HumanLayer now supports profiles for managing multiple thoughts repositories:
+
+```bash
+# List available profiles
+humanlayer thoughts profile list
+
+# Create a new profile
+humanlayer thoughts profile create acme --repo ~/clients/acme/thoughts
+
+# Initialize a project with a profile
+cd /path/to/acme-project
+humanlayer thoughts init --profile acme
+```
 
 You can maintain completely separate thoughts repositories for:
 
@@ -11,151 +25,106 @@ You can maintain completely separate thoughts repositories for:
 - **Client B work** - Another client's projects
 - **Open source contributions** - Community projects
 
-Each configuration points to a different thoughts repository, keeping contexts completely isolated.
+Each profile points to a different thoughts repository, keeping contexts completely isolated.
 
 ## Quick Reference
 
 ```bash
-# Switch between configurations
-hl-switch                    # Interactive menu
-hl-switch coalesce-labs     # Personal work
-hl-switch acme           # Client work
-hl-switch status            # Show current config
+# List profiles
+humanlayer thoughts profile list
 
-# Add new client configuration
-add-client-config acme      # Interactive setup
-add-client-config acme ~/clients/acme/thoughts
+# Create new profile
+humanlayer thoughts profile create acme --repo ~/clients/acme/thoughts
+
+# Initialize project with profile
+cd /path/to/acme-project
+humanlayer thoughts init --profile acme
+
+# Check current status
+humanlayer thoughts status
+
+# Or use helper scripts
+./scripts/humanlayer/add-client-config acme ~/clients/acme/thoughts
+./scripts/humanlayer/init-project.sh . project-name acme
 ```
-
-## Initial Setup (Already Done!)
-
-Your initial setup created:
-
-1. **Personal config** (default):
-   - File: `~/.config/humanlayer/config.json` → `config-coalesce-labs.json`
-   - Repo: `~/thoughts`
-   - GitHub: `coalesce-labs/thoughts` (private)
-
-2. **ACME config**:
-   - File: `~/.config/humanlayer/config-acme.json`
-   - Repo: `~/code-repos/github/acme/bravo_code/thoughts`
-   - GitHub: Client's repository
 
 ## Daily Workflow
 
 ### Starting Work on Personal Project
 
 ```bash
-# Make sure you're on the right config
-hl-switch coalesce-labs
+# Initialize project with default profile (or specific profile)
+cd ~/code-repos/my-project
+humanlayer thoughts init --profile coalesce-labs
 
 # Work as normal
-cd ~/code-repos/my-project
-humanlayer thoughts init
 /catalyst-dev:create_plan
 ```
 
 ### Starting Work on Client Project
 
 ```bash
-# Switch to client config
-hl-switch acme
+# Initialize project with client profile
+cd ~/code-repos/github/acme/project
+humanlayer thoughts init --profile acme
 
 # Work as normal
-cd ~/code-repos/github/acme/project
-humanlayer thoughts init
 /catalyst-dev:create_plan
 ```
 
-### Checking Which Config Is Active
+### Checking Current Configuration
 
 ```bash
-hl-switch status
+humanlayer thoughts status
 
-# Output:
-# Current configuration:
-#   coalesce-labs
-#   Repository: /Users/ryan/thoughts
+# Output shows:
+# - Current profile
+# - Repository path
+# - Mapped directories
 ```
 
 ## Adding a New Client
 
 When you start work with a new client:
 
-### Option 1: Interactive Setup (Recommended)
+### Option 1: HumanLayer CLI (Recommended)
 
 ```bash
-add-client-config acme
+# Create profile
+humanlayer thoughts profile create acme --repo ~/clients/acme/thoughts
+
+# Initialize a project with this profile
+cd /path/to/acme-project
+humanlayer thoughts init --profile acme
 ```
 
-This will:
-
-1. Ask for the thoughts repository path
-2. Create the config file
-3. Optionally create and initialize the thoughts repo
-4. Optionally push to GitHub
-
-### Option 2: Command Line
+### Option 2: Helper Script
 
 ```bash
-# Create config pointing to specific path
-add-client-config acme ~/clients/acme/thoughts
+# Interactive setup
+./scripts/humanlayer/add-client-config acme
 
-# Or use a standard location
-add-client-config megacorp ~/code-repos/github/megacorp/thoughts
+# Or with explicit path
+./scripts/humanlayer/add-client-config acme ~/clients/acme/thoughts
 ```
 
-### Option 3: Manual Creation
+## How Profile Auto-Detection Works
 
-Create `~/.config/humanlayer/config-<client>.json`:
+HumanLayer maintains `repoMappings` that automatically map working directories to profiles:
 
-```json
-{
-  "thoughts": {
-    "thoughtsRepo": "/Users/ryan/clients/acme/thoughts",
-    "reposDir": "repos",
-    "globalDir": "global",
-    "user": "ryan",
-    "repoMappings": {}
-  }
-}
-```
-
-Then initialize the thoughts repo:
-
-```bash
-mkdir -p ~/clients/acme/thoughts
-cd ~/clients/acme/thoughts
-git init
-mkdir -p repos global/ryan global/shared
-git add .
-git commit -m "Initial acme thoughts repository"
-```
-
-## Configuration File Locations
-
-All configs are stored in `~/.config/humanlayer/`:
-
-```
-~/.config/humanlayer/
-├── config.json                    # Symlink to active config
-├── config-coalesce-labs.json     # Personal work
-├── config-acme.json           # ACME client
-├── config-acme.json              # ACME client (example)
-└── config-megacorp.json          # MegaCorp client (example)
-```
-
-The **active** config is always `config.json`, which is a **symlink** to one of the named configs.
+1. When you run `humanlayer thoughts init --profile acme` in `/path/to/project`
+2. HumanLayer records: `/path/to/project` → `acme` profile
+3. Future `humanlayer thoughts` commands in that directory auto-detect the profile
+4. No need to specify `--profile` on every command
 
 ## Thoughts Repository Layout
 
-Each client gets their own isolated repository:
+Each profile gets its own isolated repository:
 
 ```
-~/thoughts/                        # Personal (coalesce-labs)
-~/code-repos/github/acme/bravo_code/thoughts/  # ACME
-~/clients/acme/thoughts/          # ACME (example)
-~/clients/megacorp/thoughts/      # MegaCorp (example)
+~/thoughts/                        # Personal (default)
+~/clients/acme/thoughts/           # ACME client
+~/clients/megacorp/thoughts/       # MegaCorp client
 ```
 
 Each repository has the same internal structure:
@@ -204,174 +173,75 @@ cd ~/clients/acme/thoughts
 gh repo create acme-org/thoughts --private --source=. --push
 ```
 
-## Advanced Usage
-
-### List All Configurations
-
-```bash
-hl-switch list
-
-# Output:
-# Available configurations:
-#   - acme
-#   - coalesce-labs
-```
-
-### Interactive Selection
-
-```bash
-hl-switch
-
-# Output:
-# Current configuration:
-#   coalesce-labs
-#
-# Available configurations:
-#   [1] acme
-#       → /Users/ryan/code-repos/github/acme/bravo_code/thoughts
-#   [2] coalesce-labs
-#       → /Users/ryan/thoughts
-#
-# Select configuration (1-2):
-```
-
-### Direct Switching
-
-```bash
-# Fast switching
-hl-switch acme        # Switch to ACME
-hl-switch coalesce-labs  # Switch back to personal
-
-# No need to remember paths or --config-file arguments!
-```
-
-### Using with Worktrees
-
-```bash
-# Switch to client config first
-hl-switch acme
-
-# Create worktree (uses current config)
-cd ~/code-repos/github/acme/project
-/create-worktree ENG-123
-
-# The worktree automatically uses acme thoughts repo
-cd ~/wt/project/ENG-123
-humanlayer thoughts init  # Uses ACME config
-```
-
 ## Troubleshooting
 
-### "Which config am I using?"
+### "Which profile am I using?"
 
 ```bash
-hl-switch status
+humanlayer thoughts status
 ```
 
-### "I initialized thoughts with wrong config"
+### "I initialized thoughts with wrong profile"
 
 ```bash
-# Switch to correct config
-hl-switch coalesce-labs
-
-# Re-initialize (will use correct repo)
+# Re-initialize with correct profile
 cd /path/to/project
-humanlayer thoughts init --force
+humanlayer thoughts init --profile correct-profile
 ```
 
-### "I want to see what a config points to"
+### "List all profiles"
 
 ```bash
-cat ~/.config/humanlayer/config-acme.json
-
-# Or use jq for pretty output
-jq '.thoughts.thoughtsRepo' ~/.config/humanlayer/config-acme.json
+humanlayer thoughts profile list
 ```
 
-### "Add hl-switch to PATH manually"
-
-If the setup script didn't add it:
+### "How do I see profile details?"
 
 ```bash
-# Add to ~/.zshrc
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
+# The HumanLayer config stores all profiles
+humanlayer thoughts status --verbose
 ```
 
 ## Best Practices
 
-### 1. Always Check Before Starting Work
-
-```bash
-# Start of workday
-hl-switch status  # Verify you're on the right config
-```
-
-### 2. Use Descriptive Client Names
+### 1. Use Descriptive Profile Names
 
 Good:
-
 - `acme` - Clear client name
-- `acme-corp` - Full client name
+- `coalesce-labs` - Full organization name
 - `google-consulting` - Specific engagement
 
 Bad:
-
 - `client1` - Not memorable
 - `work` - Too vague
 - `temp` - Will get confusing
 
-### 3. Keep Configs in Sync with Projects
+### 2. Initialize Projects Immediately
 
-If you organize projects like:
+When starting work in a new project directory:
 
-```
-~/code-repos/github/acme/...
-~/clients/acme/...
-```
-
-Keep thoughts organized similarly:
-
-```
-~/code-repos/github/acme/thoughts/
-~/clients/acme/thoughts/
+```bash
+cd /path/to/new-project
+humanlayer thoughts init --profile appropriate-profile
 ```
 
-### 4. Document Client Configs
-
-Add notes in the thoughts repo README:
-
-```markdown
-# ACME Corp Thoughts
-
-**Client**: ACME Corporation **Contract**: Jan 2025 - Dec 2025 **Projects**: acme-api, acme-web,
-acme-mobile
-
-## Switching to This Config
-
-hl-switch acme
-```
-
-### 5. Backup Strategy
+### 3. Backup Strategy
 
 **Personal thoughts**:
-
 - Push to GitHub: `coalesce-labs/thoughts` (private)
 - Your IP, back it up!
 
 **Client thoughts**:
-
 - Check your contract/NDA
 - Keep local, or push to client's org
 - Consider Time Machine/cloud backup
 
 ## Summary
 
-The multi-config system gives you:
+The HumanLayer profile system gives you:
 
-✅ **Complete isolation** - Client work never mixes with personal ✅ **Easy switching** -
-`hl-switch <name>` is all you need ✅ **No complex commands** - Just works with normal
-`humanlayer thoughts` commands ✅ **Scalable** - Add unlimited clients with `add-client-config` ✅
-**Simple** - One symlink, many configs
-
-You're now set up to manage thoughts across all your projects professionally and efficiently! 🎉
+✅ **Complete isolation** - Client work never mixes with personal
+✅ **Auto-detection** - HumanLayer knows which profile to use via repoMappings
+✅ **Simple commands** - Just `humanlayer thoughts init --profile <name>`
+✅ **Scalable** - Add unlimited profiles for different clients
+✅ **Native integration** - No custom scripts needed

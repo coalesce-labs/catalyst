@@ -78,9 +78,9 @@ Catalyst uses a three-layer memory architecture to manage context across multipl
 
 **1. Project Configuration** (`.claude/config.json`)
 
-- Specifies which HumanLayer config to use (`configName`)
 - Contains project-specific settings (ticket prefix, Linear team, etc.)
-- Points to the long-term memory repository for this project
+- HumanLayer automatically maps working directories to profiles via `repoMappings`
+- No manual `configName` needed - HumanLayer handles profile selection
 
 **2. Long-term Memory** (HumanLayer thoughts repository)
 
@@ -102,14 +102,14 @@ Catalyst uses a three-layer memory architecture to manage context across multipl
 ┌─────────────────────────────────────┐
 │  .claude/config.json                │
 │  {                                  │
-│    "configName": "acme",            │ ← Which thoughts repo?
+│    "projectKey": "acme",            │ ← For secrets config
 │    "project": {                     │
 │      "ticketPrefix": "ACME"         │
 │    }                                │
 │  }                                  │
 └─────────────────────────────────────┘
           │
-          ├──→ Points to HumanLayer config "acme"
+          ├──→ HumanLayer auto-detects repo via repoMappings
           │
           ▼
 ┌─────────────────────────────────────┐
@@ -150,7 +150,7 @@ This architecture enables you to:
 
 **Example Flow:**
 
-1. Project config says "use acme thoughts repo"
+1. HumanLayer auto-detects project's thoughts repo via repoMappings
 2. `/research-codebase` saves to `~/thoughts/repos/acme/shared/research/`
 3. Workflow-context tracks this as `mostRecentDocument`
 4. `/create-plan` auto-references the research (no manual path needed)
@@ -567,6 +567,24 @@ version: 1.0.0
 
 Use `/validate-frontmatter` to check consistency.
 
+### Model Selection Guidance
+
+Catalyst uses a simple two-tier model strategy:
+
+**Opus 4.5 (via `model: inherit`)** - Default for most tasks:
+- Complex analysis and synthesis
+- Planning and implementation
+- All orchestrating commands
+- Research interpretation
+
+**Haiku 4.5 (`model: haiku`)** - Data collection only:
+- Raw metrics collection (github-metrics, linear-metrics, thoughts-metrics)
+- Simple classification tasks (code-classifier)
+- Calendar/date parsing (calendar-analyzer)
+- Fast, high-frequency lookups (linear-research)
+
+**Why no Sonnet?** With Opus 4.5's 76% token efficiency improvement, the cost difference is minimal while quality is significantly better. Haiku handles the speed-critical data collection tasks.
+
 ## Dependencies
 
 **Required:**
@@ -631,7 +649,7 @@ For project management workflows with Linear:
 
 **Setup**: Install with `/plugin install catalyst-pm`
 **Docs**: See `plugins/pm/README.md`
-**Architecture**: Research-first (Haiku for data, Sonnet for analysis)
+**Architecture**: Research-first (Haiku for data collection, Opus for analysis)
 **Philosophy**: All reports provide actionable insights, not just data dumps
 
 ### DeepWiki Integration
@@ -670,22 +688,22 @@ Brief records of key architectural decisions made in this project.
 
 ---
 
-### ADR-002: Per-Project HumanLayer Configuration
+### ADR-002: HumanLayer Profile-Based Configuration
 
-**Decision**: Support multiple HumanLayer configs via `configName` in `.claude/config.json`.
+**Decision**: Use HumanLayer's native profile and repoMappings system for automatic thoughts repository selection.
 
 **Rationale**:
 
 - Users work on multiple separate projects (work/personal, different clients)
 - Each project needs its own thoughts repository
-- Switching configs should be seamless
-- Config files can be committed (no secrets, just config names)
+- HumanLayer now supports `repoMappings` that automatically map working directories to profiles
+- No manual `configName` tracking needed - HumanLayer handles profile selection
 
 **Consequences**:
 
-- HumanLayer CLI must be configured with multiple named configs
-- Scripts must read `configName` from project config
-- Setup requires `scripts/humanlayer/add-client-config` for new projects
+- Use `humanlayer thoughts init --profile <name>` to initialize projects
+- HumanLayer automatically detects correct profile based on working directory
+- Scripts use `humanlayer thoughts status` to discover current thoughts repo
 - Projects remain isolated with separate long-term memory
 
 ---

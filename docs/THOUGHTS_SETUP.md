@@ -5,13 +5,19 @@ The thoughts system is the backbone of Catalyst workflows, providing persistent,
 ## Quick Setup
 
 ```bash
-# 1. Initialize for your project
-./scripts/humanlayer/init-project.sh . acme-corp
+# Default profile
+humanlayer thoughts init
 
-# 2. Verify structure created
+# Specific profile
+humanlayer thoughts init --profile coalesce-labs
+
+# Or use the helper script
+./scripts/humanlayer/init-project.sh . project-name coalesce-labs
+
+# Verify structure created
 ls -la thoughts/shared/
 
-# 3. Sync with HumanLayer
+# Sync with HumanLayer
 humanlayer thoughts sync
 ```
 
@@ -74,8 +80,8 @@ humanlayer thoughts status
 # Sync with verbose output for debugging
 humanlayer thoughts sync --verbose
 
-# Verify config name is set
-cat .claude/config.json | jq '.thoughts.configName'
+# List available profiles
+humanlayer thoughts profile list
 ```
 
 ## Best Practices
@@ -107,22 +113,21 @@ thoughts/shared/
 
 ### Per-Project Thoughts
 
-If you work on multiple projects, each can have its own thoughts repository:
+If you work on multiple projects, each can have its own thoughts repository using HumanLayer profiles:
 
-```json
-// .claude/config.json
-{
-  "projectKey": "acme",
-  "thoughts": {
-    "configName": "acme"  // Points to HumanLayer config named "acme"
-  }
-}
-```
-
-Then configure HumanLayer:
 ```bash
-humanlayer config add --name acme --repo ~/thoughts/repos/acme
+# List available profiles
+humanlayer thoughts profile list
+
+# Create a new profile
+humanlayer thoughts profile create acme --repo ~/clients/acme/thoughts
+
+# Initialize a project with a profile
+cd /path/to/acme-project
+humanlayer thoughts init --profile acme
 ```
+
+HumanLayer automatically maps working directories to profiles via `repoMappings`.
 
 ### Sharing Across Worktrees
 
@@ -185,14 +190,19 @@ HumanLayer provides:
 - **Git-backed storage**: Thoughts are versioned
 - **Multi-machine sync**: Work from anywhere
 - **Team collaboration**: Share context with team
+- **Profile-based config**: Automatic thoughts repo detection via repoMappings
 
 Setup:
 ```bash
 # Install HumanLayer CLI
 npm install -g humanlayer
 
-# Configure for your project
-humanlayer config add --name my-project --repo ~/thoughts/repos/my-project
+# Initialize with default profile
+humanlayer thoughts init
+
+# Or create and use a specific profile
+humanlayer thoughts profile create my-project --repo ~/thoughts/repos/my-project
+humanlayer thoughts init --profile my-project
 
 # Sync thoughts
 humanlayer thoughts sync

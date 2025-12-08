@@ -31,8 +31,13 @@ Read project configuration from `.claude/config.json`:
 ```bash
 CONFIG_FILE=".claude/config.json"
 
-# Required configuration
-THOUGHTS_REPO=$(jq -r '.thoughts.repo // "~/thoughts"' "$CONFIG_FILE")
+# Required configuration - detect from HumanLayer or fallback to config
+if command -v humanlayer &> /dev/null; then
+  THOUGHTS_REPO=$(humanlayer thoughts status --format json 2>/dev/null | jq -r '.repository_path // empty')
+fi
+if [ -z "$THOUGHTS_REPO" ]; then
+  THOUGHTS_REPO=$(jq -r '.thoughts.repo // "~/thoughts"' "$CONFIG_FILE")
+fi
 PROJECT_KEY=$(jq -r '.projectKey // "unknown"' "$CONFIG_FILE")
 
 # Code repositories to analyze (comma-separated)
@@ -221,9 +226,14 @@ Task(subagent_type=catalyst-pm:context-analyzer, description="Synthesize adoptio
 ### Step 5: Save Report to Thoughts Repository Root
 
 ```bash
-# Get thoughts repo path
-THOUGHTS_REPO=$(jq -r '.thoughts.repo // "~/thoughts"' .claude/config.json)
-THOUGHTS_REPO="${THOUGHTS_REPO/#\~/$HOME}"  # Expand ~ to home directory
+# Get thoughts repo path - detect from HumanLayer or fallback to config
+if command -v humanlayer &> /dev/null; then
+  THOUGHTS_REPO=$(humanlayer thoughts status --format json 2>/dev/null | jq -r '.repository_path // empty')
+fi
+if [ -z "$THOUGHTS_REPO" ]; then
+  THOUGHTS_REPO=$(jq -r '.thoughts.repo // "~/thoughts"' .claude/config.json)
+  THOUGHTS_REPO="${THOUGHTS_REPO/#\~/$HOME}"  # Expand ~ to home directory
+fi
 
 # Create report filename with timestamp
 TIMESTAMP=$(TZ="America/Chicago" date "+%Y-%m-%d_%H-%M-%S")
