@@ -113,8 +113,19 @@ fi
 # Initialize thoughts (REQUIRED for Catalyst workflows)
 if command -v humanlayer >/dev/null 2>&1; then
 	echo "🧠 Initializing HumanLayer thoughts system..."
-	if humanlayer thoughts init --directory "$REPO_BASE_NAME" >/dev/null 2>&1; then
-		echo -e "${GREEN}✅ Thoughts initialized for ${REPO_BASE_NAME}${NC}"
+
+	# Detect current profile from parent directory
+	CURRENT_PROFILE=$(humanlayer thoughts status 2>/dev/null | grep -i "Profile:" | head -1 | awk '{print $2}')
+
+	# Build init command with profile if detected
+	INIT_CMD="humanlayer thoughts init --directory $REPO_NAME"
+	if [ -n "$CURRENT_PROFILE" ]; then
+		INIT_CMD="$INIT_CMD --profile $CURRENT_PROFILE"
+		echo "📋 Using profile from parent: $CURRENT_PROFILE"
+	fi
+
+	if eval "$INIT_CMD" >/dev/null 2>&1; then
+		echo -e "${GREEN}✅ Thoughts initialized for ${REPO_NAME}${NC}"
 		echo "🔄 Syncing with shared thoughts repository..."
 		if humanlayer thoughts sync >/dev/null 2>&1; then
 			echo -e "${GREEN}✅ Thoughts synced! Worktree has access to:${NC}"
@@ -125,12 +136,12 @@ if command -v humanlayer >/dev/null 2>&1; then
 			echo -e "${YELLOW}⚠️  Sync warning: Run 'humanlayer thoughts sync' manually in worktree${NC}"
 		fi
 	else
-		echo -e "${YELLOW}⚠️  Could not initialize thoughts. Run 'humanlayer thoughts init --directory ${REPO_BASE_NAME}' manually.${NC}"
+		echo -e "${YELLOW}⚠️  Could not initialize thoughts. Run 'humanlayer thoughts init --directory ${REPO_NAME}' manually.${NC}"
 	fi
 else
 	echo -e "${RED}❌ HumanLayer CLI not found! Catalyst workflows require HumanLayer.${NC}"
 	echo "   Install: pip install humanlayer"
-	echo "   Then run: humanlayer thoughts init --directory ${REPO_BASE_NAME}"
+	echo "   Then run: humanlayer thoughts init --directory ${REPO_NAME}"
 	echo "             humanlayer thoughts sync"
 fi
 

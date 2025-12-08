@@ -53,53 +53,31 @@ pip install humanlayer  # or: pipx install humanlayer
 **Initialize thoughts in a specific project**
 
 ```bash
-./scripts/humanlayer/init-project.sh [project_path] [directory_name] [config_name]
+./scripts/humanlayer/init-project.sh [project_path] [directory_name] [profile]
 ```
 
 **Arguments**:
 
 - `project_path` - Path to project (default: current directory)
 - `directory_name` - Name for thoughts directory (optional, prompts if omitted)
-- `config_name` - HumanLayer config to use (e.g., "acme", "coalesce-labs")
+- `profile` - HumanLayer profile name (e.g., "coalesce-labs", "acme")
+  - If not provided, auto-detects from current directory via `humanlayer thoughts status`
 
 **Examples**:
 
 ```bash
-# Personal project (uses default config)
+# Auto-detect profile from current environment
 ./scripts/humanlayer/init-project.sh ~/my-project my-project
 
-# Client project (uses specific config)
+# Use specific profile
 ./scripts/humanlayer/init-project.sh ~/client-project client-project acme
 ```
 
 **What it does**:
 
 - Creates `<project>/thoughts/` symlink to central repo
-- Uses `--config-file` to specify which HumanLayer config
-- Stores `configName` in `.claude/config.json` for per-project config
-- Initializes git repo if needed
-
-**Per-Project Configuration**:
-
-When you provide a `config_name`, the script:
-
-1. Uses `~/.config/humanlayer/config-{name}.json` for initialization
-2. Stores `configName` in `.claude/config.json`:
-   ```json
-   {
-     "thoughts": {
-       "configName": "acme"
-     }
-   }
-   ```
-3. All Catalyst commands will automatically use this config
-
-**Benefits**:
-
-- ✅ Each project declares its HumanLayer config
-- ✅ Work on multiple projects simultaneously (personal + client)
-- ✅ No manual config switching needed
-- ✅ Team members use same config (commit `.claude/config.json`)
+- Uses `--profile` flag to specify which HumanLayer profile
+- Auto-detects profile if not specified (from parent directory's configuration)
 
 **When to use**: After installing Catalyst plugin, before using workflow commands
 
@@ -107,7 +85,7 @@ When you provide a `config_name`, the script:
 
 ### add-client-config
 
-**Create a new HumanLayer config for a client**
+**Create a new HumanLayer profile for a client**
 
 ```bash
 ./scripts/humanlayer/add-client-config <client-name> [thoughts-path]
@@ -116,19 +94,14 @@ When you provide a `config_name`, the script:
 **Examples**:
 
 ```bash
-# Create config for ACME client
-./scripts/humanlayer/add-client-config acme ~/code-repos/github/acme/thoughts
-
-# Create config for Acme Corp
+# Create profile for ACME client
 ./scripts/humanlayer/add-client-config acme ~/clients/acme/thoughts
 ```
 
 **What it does**:
 
-- Creates `~/.config/humanlayer/config-{client-name}.json`
-- Optionally creates thoughts repository at specified path
-- Optionally creates private GitHub repository
-- Initializes git with standard structure
+- Creates a new HumanLayer profile via `humanlayer thoughts profile create`
+- Prompts for thoughts repository path if not provided
 
 **When to use**: Adding a new client to your setup
 
@@ -175,78 +148,115 @@ When you provide a `config_name`, the script:
 
 ## Multi-Client Workflow
 
-### Example: Working with Multiple Clients Simultaneously
+HumanLayer now supports profiles for managing multiple thoughts repositories.
 
-**Setup** (one time):
+### Setup (one time)
 
 ```bash
 # 1. Install HumanLayer CLI
 pip install humanlayer
 
-# 2. Set up thoughts (creates default config)
+# 2. Set up thoughts (creates default profile)
 ./scripts/humanlayer/setup-thoughts.sh
 
-# 3. Add client configs
-./scripts/humanlayer/add-client-config acme ~/code-repos/github/acme/thoughts
-./scripts/humanlayer/add-client-config acme ~/clients/acme/thoughts
+# 3. Create profiles for each client
+humanlayer thoughts profile create acme --repo ~/clients/acme/thoughts
+humanlayer thoughts profile create megacorp --repo ~/clients/megacorp/thoughts
 
-# 4. Initialize projects with specific configs
-cd ~/code-repos/github/acme/project1
-./scripts/humanlayer/init-project.sh . project1 acme
+# 4. Initialize projects with profiles
+cd ~/clients/acme/project1
+humanlayer thoughts init --profile acme
 
-cd ~/clients/acme/project2
-./scripts/humanlayer/init-project.sh . project2 acme
+cd ~/clients/megacorp/project2
+humanlayer thoughts init --profile megacorp
 
 cd ~/my-personal-project
-./scripts/humanlayer/init-project.sh . personal coalesce-labs
+humanlayer thoughts init --profile coalesce-labs
 ```
 
-**Daily work** (automatic):
+### Daily Work (automatic)
 
 ```bash
 # Work on ACME project
-cd ~/code-repos/github/acme/project1
-/research-codebase  # Automatically uses acme config
+cd ~/clients/acme/project1
+/research-codebase  # HumanLayer auto-detects profile via repoMappings
 
-# Switch to Acme project
-cd ~/clients/acme/project2
-/create-plan  # Automatically uses acme config
+# Switch to MegaCorp project
+cd ~/clients/megacorp/project2
+/create-plan  # HumanLayer auto-detects profile
 
 # Switch to personal project
 cd ~/my-personal-project
-/implement-plan  # Automatically uses coalesce-labs config
+/implement-plan  # HumanLayer auto-detects profile
 ```
 
-**No manual switching needed!** Each project's `.claude/config.json` specifies its config.
+**No manual switching needed!** HumanLayer's `repoMappings` automatically map directories to profiles.
+
+### How Profile Auto-Detection Works
+
+1. When you run `humanlayer thoughts init --profile X` in a directory
+2. HumanLayer records the mapping: `/path/to/project` → profile `X`
+3. Future commands in that directory auto-detect the profile
+4. Check current profile: `humanlayer thoughts status` shows `Profile: <name>`
+
+---
+
+## Worktree Profile Inheritance
+
+When creating worktrees, the profile is automatically inherited:
+
+```bash
+# In a project using profile "acme"
+cd ~/clients/acme/project
+humanlayer thoughts status  # Shows: Profile: acme
+
+# Create worktree - profile is auto-detected and passed
+/create-worktree feature-branch
+# The new worktree automatically uses the same "acme" profile
+```
+
+The `create-worktree.sh` script:
+1. Detects the current profile via `humanlayer thoughts status`
+2. Passes `--profile <detected>` when initializing thoughts in the worktree
+3. No manual configuration needed
 
 ---
 
 ## Configuration Files
 
-### ~/.config/humanlayer/ Structure
+### HumanLayer Profile Storage
 
-```
-~/.config/humanlayer/
-├── config.json              # Default/personal config
-├── config-acme.json      # Client 1
-├── config-acme.json         # Client 2
-└── config-coalesce-labs.json # Personal (if using add-client-config)
+HumanLayer stores profiles in its config file:
+
+```bash
+# List available profiles
+humanlayer thoughts profile list
+
+# Show profile details
+humanlayer thoughts profile show acme
+
+# Check current directory's profile
+humanlayer thoughts status
 ```
 
 ### .claude/config.json (Per-Project)
 
 ```json
 {
-  "project": {
-    "ticketPrefix": "ACME"
-  },
-  "thoughts": {
-    "configName": "acme"
+  "catalyst": {
+    "projectKey": "acme",
+    "project": {
+      "ticketPrefix": "ACME"
+    },
+    "thoughts": {
+      "user": null
+    }
   }
 }
 ```
 
-This tells Catalyst commands to use `~/.config/humanlayer/config-acme.json` automatically.
+Note: `projectKey` is used for secrets config (`~/.config/catalyst/config-{projectKey}.json`).
+HumanLayer profile is detected automatically via `repoMappings`, not stored in this file.
 
 ---
 
@@ -269,10 +279,10 @@ These scripts used to be in `scripts/` but are now bundled in the Catalyst plugi
 
 ## Obsolete Scripts (Deleted)
 
-These scripts are no longer needed with per-project config:
+These scripts are no longer needed with HumanLayer's profile system:
 
-- ❌ `hl-switch` - Manual config switching (replaced by automatic per-project config)
-- ❌ `setup-multi-config.sh` - Multi-config setup (replaced by add-client-config)
+- ❌ `hl-switch` - Manual config switching (replaced by automatic profile detection)
+- ❌ `setup-multi-config.sh` - Multi-config setup (replaced by `humanlayer thoughts profile create`)
 
 ---
 
@@ -286,14 +296,21 @@ pip install humanlayer
 pipx install humanlayer
 ```
 
-### "Config not found: config-xyz.json"
+### "Profile not found"
 
 ```bash
-# List available configs
-ls ~/.config/humanlayer/config-*.json
+# List available profiles
+humanlayer thoughts profile list
 
-# Create missing config
-./scripts/humanlayer/add-client-config xyz ~/path/to/thoughts
+# Create missing profile
+humanlayer thoughts profile create xyz --repo ~/path/to/thoughts
+```
+
+### "Which profile am I using?"
+
+```bash
+humanlayer thoughts status
+# Output shows: Profile: <name>
 ```
 
 ### "jq not found" warning
@@ -303,12 +320,10 @@ brew install jq  # macOS
 apt-get install jq  # Linux
 ```
 
-The script works without jq but you'll need to manually edit `.claude/config.json`.
-
 ---
 
 ## See Also
 
 - [QUICKSTART.md](../QUICKSTART.md) - Getting started guide
-- [docs/CONFIGURATION.md](../docs/CONFIGURATION.md) - Configuration reference
 - [docs/MULTI_CONFIG_GUIDE.md](../docs/MULTI_CONFIG_GUIDE.md) - Advanced multi-client setup
+- [docs/THOUGHTS_SETUP.md](../docs/THOUGHTS_SETUP.md) - Thoughts system setup

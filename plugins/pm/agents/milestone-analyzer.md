@@ -2,7 +2,7 @@
 name: milestone-analyzer
 description: Analyzes project milestone health by calculating progress toward target date, identifying blocked/at-risk issues, and generating specific recommendations. Similar to cycle-analyzer but for milestones.
 tools: Read, Write
-model: sonnet
+model: inherit
 color: amber
 version: 1.0.0
 ---

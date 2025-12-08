@@ -2,7 +2,7 @@
 name: backlog-analyzer
 description: Analyzes Linear backlog to identify orphaned issues, incorrect project assignments, missing estimates, stale issues, and potential duplicates. Provides actionable recommendations with confidence scores.
 tools: Read, Write, Grep
-model: sonnet
+model: inherit
 color: violet
 version: 1.0.0
 ---

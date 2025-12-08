@@ -254,9 +254,15 @@ The setup script automatically:
 If you skipped thoughts setup or want to initialize additional projects:
 
 ```bash
-# Initialize thoughts in current project
+# Initialize with default profile
 cd /path/to/your-project
-humanlayer thoughts init --directory <repo-name>
+humanlayer thoughts init
+
+# Or with a specific profile
+humanlayer thoughts init --profile coalesce-labs
+
+# Create a new profile first (if needed)
+humanlayer thoughts profile create my-profile --repo ~/thoughts/repos/my-profile
 ```
 
 **Directory structure:**
