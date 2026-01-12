@@ -247,7 +247,22 @@ Once aligned on approach:
 
 After structure approval:
 
-1. **Write the plan** to `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md`
+1. **Gather metadata for the plan document**:
+
+   Before writing the plan, collect git and temporal metadata:
+
+   ```bash
+   # Get current date/time in ISO 8601 format with timezone
+   CURRENT_ISO_DATETIME=$(date -Iseconds)  # e.g., 2025-01-11T14:30:00-06:00
+   CURRENT_DATE=$(date +%Y-%m-%d)          # e.g., 2025-01-11
+
+   # Get git information
+   GIT_COMMIT_SHORT=$(git rev-parse --short HEAD)
+   GIT_BRANCH=$(git branch --show-current)
+   REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
+   ```
+
+2. **Write the plan** to `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md`
    - Format: `YYYY-MM-DD-PROJ-XXXX-description.md` where:
      - YYYY-MM-DD is today's date
      - PROJ-XXXX is the ticket number (omit if no ticket)
@@ -255,9 +270,24 @@ After structure approval:
    - Examples:
      - With ticket: `2025-01-08-PROJ-123-parent-child-tracking.md`
      - Without ticket: `2025-01-08-improve-error-handling.md`
-2. **Use this template structure**:
+
+3. **Use this template structure** (note: frontmatter comes BEFORE the heading):
 
 ````markdown
+---
+date: {CURRENT_ISO_DATETIME}
+researcher: claude
+git_commit: {GIT_COMMIT_SHORT}
+branch: {GIT_BRANCH}
+repository: {REPO_NAME}
+topic: "{PLAN_TITLE}"
+tags: [plan, implementation, {RELEVANT_COMPONENT_TAGS}]
+status: ready_for_implementation
+last_updated: {CURRENT_DATE}
+last_updated_by: claude
+type: implementation_plan
+---
+
 # [Feature/Task Name] Implementation Plan
 
 ## Overview
