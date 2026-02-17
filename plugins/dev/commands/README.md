@@ -1,8 +1,78 @@
-# Thoughts Commands
+# Commands
 
-Context handoff and collaboration tools using the thoughts system.
+Development workflow commands provided by the catalyst-dev plugin.
 
-## Commands
+## Workflow Commands
+
+### `/iterate-plan`
+
+Iterate on an existing implementation plan based on feedback or changed requirements.
+
+**Usage:**
+
+```
+/iterate-plan
+/iterate-plan thoughts/shared/plans/YYYY-MM-DD-PROJ-XXX-feature.md
+```
+
+**Process:**
+
+- Auto-discovers recent plan from workflow context
+- Reads current plan fully
+- Gathers feedback on what needs to change
+- Updates plan in place with tracked changes
+
+### `/oneshot`
+
+All-in-one workflow that chains research, planning, and implementation with context isolation.
+
+**Usage:**
+
+```
+/oneshot PROJ-123
+```
+
+**Process:**
+
+- Auto-discovers ticket context
+- Runs research phase with specialized agents
+- Creates implementation plan
+- Implements plan phase by phase
+- Each phase runs with proper context isolation
+
+### `/ci-commit`
+
+CI-aware commit command that runs pre-flight checks before committing.
+
+**Usage:**
+
+```
+/ci-commit
+```
+
+**Process:**
+
+- Runs linting and type checks before commit
+- Creates conventional commit with Linear integration
+- Validates CI requirements are met
+
+### `/ci-describe-pr`
+
+CI-aware PR description generator that includes CI status information.
+
+**Usage:**
+
+```
+/ci-describe-pr
+```
+
+**Process:**
+
+- Generates PR description from commits and changes
+- Includes CI check status in description
+- Links to relevant tickets
+
+## Handoff Commands
 
 ### `/create-handoff`
 

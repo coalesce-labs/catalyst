@@ -2,7 +2,7 @@
 description: Import and adapt a workflow from external repositories
 category: workflow-discovery
 tools: Read, Write, Edit, mcp__deepwiki__ask_question
-model: inherit
+model: sonnet
 version: 1.0.0
 workspace_only: true
 ---

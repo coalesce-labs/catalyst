@@ -2,7 +2,7 @@
 description: Sync GitHub PRs with Linear issues and identify correlation gaps
 category: pm
 tools: Task, Read, Write
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
@@ -167,6 +167,10 @@ linearis comments create TEAM-457 --body "PR #124 merged: https://github.com/use
 ```
 
 ### Step 4: Save Report
+
+**IMPORTANT: Document Storage Rules**
+- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 ```bash
 REPORT_DIR="thoughts/shared/reports/pr-sync"

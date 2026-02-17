@@ -139,6 +139,8 @@ Claude reads the research and creates plan
 | `/resume-handoff` | Recent handoff | Finds last handoff, asks to proceed |
 | `/implement-plan` | Recent plan | Finds last plan, asks to proceed |
 | `/create-plan` | Recent research | **Suggests** research as context |
+| `/iterate-plan` | Recent plan | Auto-discovers recent plans to iterate on |
+| `/oneshot` | Tickets, research, plans | Auto-discovers tickets and chains research, plan, and implement |
 
 ### 🚧 Fallback if Not Found
 

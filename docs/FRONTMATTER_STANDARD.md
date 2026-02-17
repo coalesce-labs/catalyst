@@ -18,7 +18,7 @@ description: | # Multi-line description
   - {Use case 1}
   - {Use case 2}
 tools: { tool-list } # Array of Claude Code tools
-model: inherit # Always "inherit"
+model: { tier } # See three-tier model strategy below
 category: { category } # One of: research, analysis, search, execution, validation, general
 version: 1.0.0 # Semantic version
 ---
@@ -41,6 +41,21 @@ original-author: { name } # Original creator credit
 - **validation**: Checking, verifying, and validating code or data
 - **general**: Multi-purpose or uncategorized agents
 
+### Three-Tier Model Strategy
+
+Agents use one of three model tiers based on their role:
+
+```yaml
+model: opus    # Planning, complex analysis, orchestration
+model: sonnet  # Analysis, PR/commit workflows, structured research
+model: haiku   # Fast lookups, data collection, file finding
+```
+
+**Selection guidance:**
+- **opus** - Agents that synthesize, plan, or make complex decisions
+- **sonnet** - Agents that analyze code, review patterns, or produce structured output
+- **haiku** - Agents that locate files, collect raw data, or perform simple classification
+
 ### Example
 
 ```yaml
@@ -55,7 +70,7 @@ description: |
   - You need to find patterns and conventions to follow
   - You're investigating how components interact
 tools: Read, Grep, Glob
-model: inherit
+model: sonnet
 category: analysis
 version: 1.0.0
 ---
@@ -70,7 +85,7 @@ version: 1.0.0
 description: { one-line-summary } # Brief description (NOTE: commands don't have 'name' field!)
 category: { category } # Command category
 tools: { tool-list } # Array of Claude Code tools
-model: inherit # Always "inherit"
+model: { tier } # See three-tier model strategy above
 version: 1.0.0 # Semantic version
 ---
 ```
@@ -103,7 +118,7 @@ description: Create detailed implementation plans through interactive process
 category: planning
 argument-hint: [ticket-file | ticket-reference]
 tools: Read, Write, Edit, Grep, Glob, Task, TodoWrite
-model: inherit
+model: opus
 version: 1.0.0
 ---
 ```
@@ -150,7 +165,7 @@ Claude Code provides these tools (non-exhaustive list - check official docs for 
 
 1. ✅ **Required fields must be present**
 2. ✅ **Version must follow semver**: `X.Y.Z` (e.g., `1.0.0`, NOT `v1.0` or `1.0`)
-3. ✅ **Model must be "inherit"** unless there's a specific reason to override
+3. ✅ **Model must be one of "opus", "sonnet", or "haiku"** matching the three-tier strategy
 4. ✅ **Tools must be valid Claude Code tools** (check official documentation)
 5. ✅ **Category must be from valid list** (see categories above)
 6. ✅ **YAML must be well-formed** (proper indentation, no syntax errors)
@@ -186,7 +201,7 @@ category: planning
 description: Create detailed implementation plans
 category: planning
 tools: Read, Write, Task
-model: inherit
+model: opus
 version: 1.0.0
 ---
 ```
@@ -271,7 +286,7 @@ description: |
   - {scenario 1}
   - {scenario 2}
 tools: Read, Grep
-model: inherit
+model: sonnet
 category: general
 version: 1.0.0
 ---
@@ -296,7 +311,7 @@ Return: {what you return to the caller}
 description: {One-line summary of what this command does}
 category: general
 tools: Read, Write
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
@@ -327,7 +342,7 @@ description: |
   - {Action 2}
   - {Action 3}
 tools: Read, Grep, Glob, {other-tools}
-model: inherit
+model: sonnet
 category: {appropriate-category}
 version: 1.0.0
 ---
@@ -384,7 +399,7 @@ description: {One-line summary}
 category: {appropriate-category}
 argument-hint: {argument-format}
 tools: {comprehensive-tool-list}
-model: inherit
+model: opus
 version: 1.0.0
 ---
 

@@ -2,7 +2,7 @@
 description: Create pull request with automatic Linear integration
 category: version-control-git
 tools: Bash(linearis *), Bash(git *), Bash(gh *), Read, Task
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
@@ -111,7 +111,7 @@ branch=$(git branch --show-current)
 
 # Extract pattern: PREFIX-NUMBER using configured team key
 if [[ "$branch" =~ ($TEAM_KEY-[0-9]+) ]]; then
-    ticket="${BASH_REMATCH[1]}"  # e.g., RCW-13
+    ticket="${BASH_REMATCH[1]}"  # e.g., ENG-123
 fi
 ```
 
@@ -119,7 +119,7 @@ fi
 
 ```bash
 # Branch format examples:
-# - RCW-13-implement-pr-lifecycle → "RCW-13: implement pr lifecycle"
+# - ENG-123-implement-pr-lifecycle → "ENG-123: implement pr lifecycle"
 # - feature-add-validation → "add validation"
 
 # Extract description from branch name
@@ -208,7 +208,7 @@ If ticket was extracted from branch:
 # Verify linearis is available
 if ! command -v linearis &> /dev/null; then
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
-    echo "Install: npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
+    echo "Install: npm install -g linearis"
 else
     # Update ticket state to "In Review"
     linearis issues update "$ticket" --state "In Review" --assignee "@me"
@@ -276,7 +276,7 @@ Then: gh repo set-default
 PR created successfully, but Linear ticket not updated.
 
 Install Linearis:
-  npm install -g --install-links ryanrozich/linearis#feat/cycles-cli
+  npm install -g linearis
 
 Configure:
   export LINEAR_API_TOKEN=your_token
@@ -299,10 +299,10 @@ Uses `.claude/config.json`:
 {
   "catalyst": {
     "project": {
-      "ticketPrefix": "RCW"
+      "ticketPrefix": "PROJ"
     },
     "linear": {
-      "teamKey": "RCW",
+      "teamKey": "PROJ",
       "inReviewStatusName": "In Review"
     }
   }
@@ -311,15 +311,15 @@ Uses `.claude/config.json`:
 
 ## Examples
 
-**Branch: `RCW-13-implement-pr-lifecycle`**
+**Branch: `ENG-123-implement-pr-lifecycle`**
 
 ```
-Extracting ticket: RCW-13
-Generated title: "RCW-13: Implement pr lifecycle"
+Extracting ticket: ENG-123
+Generated title: "ENG-123: Implement pr lifecycle"
 Creating PR...
 ✅ PR #2 created
 Calling /catalyst-dev:describe_pr to generate description...
-Updating Linear ticket RCW-13 → In Review
+Updating Linear ticket ENG-123 → In Review
 ✅ Complete!
 ```
 

@@ -2,7 +2,7 @@
 description: Analyze user behavior patterns and cohorts using PostHog
 category: analytics
 tools: Task, TodoWrite
-model: inherit
+model: opus
 version: 1.0.0
 ---
 

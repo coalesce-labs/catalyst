@@ -2,7 +2,7 @@
 description: Analyze distributed traces and performance issues with Sentry
 category: debugging
 tools: Task, TodoWrite
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 

@@ -2,7 +2,7 @@
 description: Research and catalog workflows from external Claude Code repositories
 category: workflow-discovery
 tools: mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, Read, Write
-model: inherit
+model: sonnet
 version: 1.0.0
 workspace_only: true
 ---

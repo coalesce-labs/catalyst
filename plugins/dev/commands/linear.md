@@ -2,7 +2,7 @@
 description: Manage Linear tickets with workflow automation
 category: project-task-management
 tools: Bash(linearis *), Read, Write, Edit, Grep
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
@@ -20,7 +20,7 @@ if ! command -v linearis &> /dev/null; then
     echo "❌ Linearis CLI not found"
     echo ""
     echo "Install with:"
-    echo "  npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
+    echo "  npm install -g linearis"
     echo ""
     echo "Configure with:"
     echo "  export LINEAR_API_TOKEN=your_token"
@@ -53,7 +53,7 @@ THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/or
   "linear": {
     "teamKey": "ENG",
     "defaultTeam": "Backend",
-    "thoughtsRepoUrl": "https://github.com/coalesce-labs/thoughts/blob/main"
+    "thoughtsRepoUrl": "https://github.com/org/thoughts/blob/main"
   }
 }
 ```

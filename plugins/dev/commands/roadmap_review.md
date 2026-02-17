@@ -2,7 +2,7 @@
 description: Review project roadmap and milestone progress
 category: project-task-management
 tools: Bash(linearis *), Read, Write, TodoWrite
-model: inherit
+model: sonnet
 version: 1.0.0
 status: placeholder
 ---

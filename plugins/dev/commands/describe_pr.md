@@ -2,7 +2,7 @@
 description: Generate or update PR description with incremental changes
 category: version-control-git
 tools: Bash, Read, Write
-model: inherit
+model: sonnet
 version: 2.0.0
 ---
 
@@ -311,6 +311,10 @@ fi
 
 ### 11. Save and sync
 
+**IMPORTANT: Document Storage Rules**
+- ALWAYS write to `thoughts/shared/prs/` for PR descriptions
+- NEVER write to `thoughts/searchable/` — this is a read-only search index
+
 **Save description:**
 
 ```bash
@@ -530,7 +534,7 @@ Uses `.claude/config.json`:
 {
   "catalyst": {
     "project": {
-      "ticketPrefix": "RCW"
+      "ticketPrefix": "PROJ"
     },
     "linear": {
       "teamId": "team-id",

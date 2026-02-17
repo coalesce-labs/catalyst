@@ -239,7 +239,7 @@ cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
 #    Project ID: [you enter: proj456]
 #
 # 3. What's your thoughts repository URL?
-#    Your pattern: https://github.com/coalesce-labs/thoughts/blob/main
+#    Your pattern: https://github.com/your-org/thoughts/blob/main
 
 # Command updates itself:
 # ✅ Configuration complete! I've updated the linear.md file.

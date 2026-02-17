@@ -1,7 +1,6 @@
 # Catalyst - Claude Code Workspace
 
-[Ryan Rozich's](https://ryanrozich.bio/) personal development workflow for Claude Code, now open
-sourced and packaged as a Claude Code plugin marketplace.
+A portable development workflow for Claude Code, packaged as a Claude Code plugin marketplace.
 
 This is the workspace I use daily for AI-assisted development. It's battle-tested on real projects
 and optimized for efficient, context-aware AI collaboration. I'm sharing it so others can use it,
@@ -12,7 +11,7 @@ fork it, and contribute ideas back.
 Catalyst integrates with your development tools through both **CLI-based** (token-efficient) and **MCP-based** (richer features) approaches:
 
 ### Project Management & Issue Tracking
-- **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via [Linearis](https://github.com/ryanrozich/linearis))
+- **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via [Linearis](https://www.npmjs.com/package/linearis))
   - `catalyst-dev`: Core research agents and workflow commands
   - `catalyst-pm`: Advanced PM workflows (cycle analysis, milestone tracking, backlog grooming)
 
@@ -65,8 +64,10 @@ and shared memory systems.
 **catalyst-dev** (Core - Always enabled)
 
 - 11 research agents (codebase + infrastructure)
-- 18 commands covering full dev lifecycle
+- 21 commands covering full dev lifecycle
+- Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for data collection)
 - Linear integration via Linearis CLI
+- CI/automation commands for non-interactive workflows
 - Handoff system for context persistence
 - ~3.5k context (lightweight MCPs: DeepWiki, Context7)
 
@@ -74,7 +75,7 @@ and shared memory systems.
 
 - Linear-focused project management workflows
 - 5 commands: analyze-cycle, analyze-milestone, report-daily, groom-backlog, sync-prs
-- Research-first architecture (Haiku for data, Sonnet for analysis)
+- Research-first architecture (Haiku for data collection, Sonnet for analysis)
 - 5 specialized agents: linear-research, cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer
 - Cycle management and milestone tracking with target date feasibility
 - Actionable insights and recommendations (not just data dumps)
@@ -235,7 +236,7 @@ before running out of context, creating structured handoff documents that add to
 - [Context Engineering](docs/CONTEXT_ENGINEERING.md) - Token efficiency strategies and context
   management patterns
 - [Linear Workflow Automation](docs/LINEAR_WORKFLOW_AUTOMATION.md) - Linearis integration for ticket
-  → branch → PR → merge lifecycle ([Linearis GitHub](https://github.com/ryanrozich/linearis))
+  → branch → PR → merge lifecycle ([Linearis](https://www.npmjs.com/package/linearis))
 
 ## Core Philosophy
 
@@ -291,7 +292,7 @@ When possible, uses CLIs instead of MCPs for token efficiency:
 
 **CLI Integrations** (optional but recommended):
 
-- `linearis` - Linear integration ([install](https://github.com/ryanrozich/linearis))
+- `linearis` - Linear integration (`npm install -g linearis`)
 - `gh` - GitHub CLI
 - `railway` - Railway deployments
 - `sentry-cli` - Error monitoring
@@ -353,6 +354,6 @@ This is my personal workflow shared for learning and inspiration. You're welcome
 
 ---
 
-Built by [Ryan Rozich](https://github.com/ryanrozich)
+Built by [Coalesce Labs](https://github.com/coalesce-labs)
 
 Want to chat about workflows, contribute ideas, or share your fork? Open an issue or discussion!

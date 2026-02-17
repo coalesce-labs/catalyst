@@ -2,7 +2,7 @@
 name: github-linear-analyzer
 description: Analyzes the relationship between GitHub pull requests and Linear issues. Identifies sync gaps, orphaned PRs, orphaned issues, and correlation opportunities.
 tools: Read, Write, Grep
-model: inherit
+model: sonnet
 color: blue
 version: 1.0.0
 ---

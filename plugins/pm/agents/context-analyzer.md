@@ -2,7 +2,7 @@
 name: context-analyzer
 description: Cross-repo synthesis agent for context engineering adoption analysis
 tools: Read, Write, Bash
-model: inherit
+model: sonnet
 ---
 
 # Context Analyzer Agent

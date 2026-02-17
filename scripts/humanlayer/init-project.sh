@@ -5,7 +5,7 @@
 # Arguments:
 #   project_path   - Path to project (default: current directory)
 #   directory_name - Name for thoughts directory (optional, will prompt if not provided)
-#   profile        - HumanLayer profile name (e.g., "coalesce-labs", "ryanrozich")
+#   profile        - HumanLayer profile name (e.g., "my-org", "personal")
 #                    If not provided, will try to detect from current directory
 
 set -e

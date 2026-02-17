@@ -147,8 +147,8 @@ thoughts/
 
 ### Personal Thoughts
 
-- **Organization**: `coalesce-labs`
-- **Repository**: `coalesce-labs/thoughts` (private)
+- **Organization**: `your-org`
+- **Repository**: `your-org/thoughts` (private)
 - **Purpose**: Your IP, personal notes, patterns
 
 ### Client Thoughts
@@ -228,7 +228,7 @@ humanlayer thoughts init --profile appropriate-profile
 ### 3. Backup Strategy
 
 **Personal thoughts**:
-- Push to GitHub: `coalesce-labs/thoughts` (private)
+- Push to GitHub: `your-org/thoughts` (private)
 - Your IP, back it up!
 
 **Client thoughts**:

@@ -1,4 +1,4 @@
-# Implementation Status: RCW-13 Config Migration & Workflow Enhancements
+# Implementation Status: PROJ-13 Config Migration & Workflow Enhancements
 
 **Date**: 2025-10-13 **Branch**:
 `ryan/rcw-13-implement-pr-lifecycle-commands-with-linear-integration` **Plans**:
@@ -238,7 +238,7 @@ Issues created for deferred work:
 ### ✅ Issue COA-15: Command Updates (COMPLETE)
 
 **Title**: Add context tracking and prerequisite checks to workflow commands **Status**: ✅ Done
-**URL**: https://linear.app/rozich/issue/COA-15
+**URL**: https://linear.app/team/issue/COA-15
 
 All 6 commands updated with prerequisite checking, context tracking, and auto-find capabilities.
 

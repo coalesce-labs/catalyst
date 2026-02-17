@@ -4,7 +4,7 @@ description:
   Research Linear tickets, cycles, projects, and milestones using Linearis CLI. Optimized for LLM
   consumption with minimal token usage (~1k vs 13k for Linear MCP).
 tools: Bash(linearis *), Read, Grep
-model: inherit
+model: haiku
 version: 1.0.0
 ---
 
@@ -43,26 +43,26 @@ Linearis CLI tool.
 
 ```bash
 # Read a ticket (works with TEAM-123 or UUID)
-linearis issues read BRAVO-284
+linearis issues read TEAM-123
 
 # Update ticket state (use --state NOT --status!)
-linearis issues update BRAVO-284 --state "Research"
-linearis issues update BRAVO-284 --state "In Progress"
+linearis issues update TEAM-123 --state "Research"
+linearis issues update TEAM-123 --state "In Progress"
 
 # Add comment (use 'comments create' NOT 'issues comment'!)
-linearis comments create BRAVO-284 --body "Starting research"
+linearis comments create TEAM-123 --body "Starting research"
 
 # List tickets
 linearis issues list --limit 50
 
 # List active cycle
-linearis cycles list --team BRAVO --active
+linearis cycles list --team TEAM --active
 
 # Read cycle details (includes all issues)
-linearis cycles read "Sprint 2025-11" --team BRAVO
+linearis cycles read "Sprint 2025-11" --team TEAM
 
 # List projects
-linearis projects list --team BRAVO
+linearis projects list --team TEAM
 ```
 
 ### Common Mistakes to Avoid

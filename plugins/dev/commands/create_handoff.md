@@ -2,7 +2,7 @@
 description: Create handoff document for passing work to another session
 category: workflow
 tools: Write, Bash, Read
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
@@ -47,6 +47,10 @@ compact and summarize your context without losing any of the key details of what
 ## Process
 
 ### 1. Filepath & Metadata
+
+**IMPORTANT: Document Storage Rules**
+- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 Use the following information to understand how to create your document: - create your file under
 `thoughts/shared/handoffs/PROJ-XXX/YYYY-MM-DD_HH-MM-SS_description.md`, where: - YYYY-MM-DD is

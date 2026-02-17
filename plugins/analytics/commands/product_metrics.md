@@ -2,7 +2,7 @@
 description: View key product metrics, KPIs, and conversion rates from PostHog
 category: analytics
 tools: Task, TodoWrite
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 

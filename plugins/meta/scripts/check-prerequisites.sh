@@ -15,7 +15,7 @@ REQUIRED_TOOLS=(
 	"humanlayer:HumanLayer CLI:pip install humanlayer"
 	"jq:JSON processor:brew install jq"
 	"gh:GitHub CLI:brew install gh"
-	"linearis:Linear CLI:npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
+	"linearis:Linear CLI:npm install -g linearis"
 	"railway:Railway CLI:npm install -g @railway/cli"
 	"sentry-cli:Sentry CLI:curl -sL https://sentry.io/get-cli/ | sh"
 )

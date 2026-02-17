@@ -2,7 +2,7 @@
 description: Create a git worktree for parallel work and optionally launch implementation session
 category: version-control-git
 tools: Bash, Read
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
