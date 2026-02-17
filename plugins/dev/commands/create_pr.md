@@ -179,14 +179,12 @@ gh pr create --title "$title" --body "$body" --base "$base"
 
 Capture PR number and URL from output.
 
-### Track in Workflow Context
+### Track in Workflow Context (REQUIRED)
 
-After creating the PR, add it to workflow context:
+After creating the PR, track it — substitute the actual PR URL and ticket:
 
 ```bash
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add prs "$PR_URL" "${TICKET_ID:-null}"
-fi
+"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add prs "https://github.com/org/repo/pull/NUMBER" "TICKET-ID"
 ```
 
 ### 10. Auto-call /catalyst-dev:describe_pr

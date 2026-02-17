@@ -68,7 +68,10 @@ tags: [implementation, strategy, relevant-component-names]
 status: complete
 last_updated: [Current date in YYYY-MM-DD format]
 last_updated_by: [Researcher name]
-type: implementation_strategy
+type: handoff
+source_ticket: [TICKET-ID or null]
+source_plan: [path to implementation plan, or null]
+source_research: [path to research doc, or null]
 ---
 
 # Handoff: {TICKET or General} - {very concise description}
@@ -121,15 +124,21 @@ Ask the user to review and approve the document. if they request any changes, yo
 and ask for approval again. Once the user approves the documents, you should run
 `humanlayer thoughts sync` to save the document.
 
-### Track in Workflow Context
+### Track in Workflow Context (REQUIRED)
 
-After saving the handoff document, add it to workflow context:
+After saving the handoff document, you MUST track it. Substitute the actual file path and ticket:
 
 ```bash
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add handoffs "$HANDOFF_FILE" "${TICKET_ID:-null}"
-fi
+"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add handoffs "thoughts/shared/handoffs/PROJ-XXX/YYYY-MM-DD_HH-MM-SS_description.md" "TICKET-ID"
 ```
+
+Verify it was tracked:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent handoffs
+```
+
+This MUST print the handoff path. If not, re-run the add command.
 
 Once this is completed, you should respond to the user with the template between
 <template_response></template_response> XML tags. do NOT include the tags in your response.

@@ -119,6 +119,8 @@ tags: [research, codebase, { component-names }]
 status: complete
 last_updated: YYYY-MM-DD
 last_updated_by: { your-name }
+type: research
+source_ticket: { TICKET-ID or null }
 ---
 
 # Research: {User's Research Question}
@@ -180,20 +182,48 @@ system in this area. Focus on WHAT EXISTS, not what should exist.}
 
 ### Step 8: Sync, track, and present findings
 
-1. Run `humanlayer thoughts sync` to sync the thoughts directory
-2. Track in workflow context:
-   ```bash
-   if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-     "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "$DOC_PATH" "${TICKET_ID:-null}"
-   fi
-   ```
-3. If a Linear ticket was detected, add completion comment via Linearis CLI
-4. Present a concise summary to the user:
+**MANDATORY — do all three sub-steps before presenting results to the user.**
+
+**8a. Sync thoughts:**
+
+```bash
+humanlayer thoughts sync
+```
+
+**8b. Track in workflow context (REQUIRED):**
+
+You MUST run this command, substituting the actual file path you wrote and the ticket ID (or "null"):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "thoughts/shared/research/YYYY-MM-DD-description.md" "TICKET-ID"
+```
+
+For example, if you wrote `thoughts/shared/research/2026-02-16-ADV-33-api-layer-research.md` for ticket ADV-33:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "thoughts/shared/research/2026-02-16-ADV-33-api-layer-research.md" "ADV-33"
+```
+
+**8c. Verify tracking succeeded:**
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research
+```
+
+This MUST print the path you just saved. If it doesn't, re-run step 8b.
+
+**8d. Linear comment** (if ticket detected):
+
+```bash
+linearis comments create "TICKET-ID" --body "Research complete: thoughts/shared/research/YYYY-MM-DD-description.md"
+```
+
+**8e. Present summary to user:**
 
 ```
 Research complete!
 
-**Research document**: {file-path}
+**Research document**: {exact file path you wrote}
 
 **Summary**: {2-3 sentence summary}
 

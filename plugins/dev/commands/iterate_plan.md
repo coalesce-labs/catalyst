@@ -108,12 +108,11 @@ If the changes require new technical understanding:
 
 1. Save the updated plan (overwrite the existing file)
 2. Sync thoughts: `humanlayer thoughts sync`
-3. Update workflow context:
+3. Track in workflow context (REQUIRED) — substitute actual path and ticket:
    ```bash
-   if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-     "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add plans "$PLAN_FILE" "${TICKET_ID}"
-   fi
+   "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add plans "thoughts/shared/plans/YYYY-MM-DD-description.md" "TICKET-ID"
    ```
+4. Verify: `"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans` must print the path
 
 ### Step 6: Present Summary
 
