@@ -8,37 +8,21 @@ version: 1.0.0
 
 # Implementation Plan
 
-## Configuration Note
-
-This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
-prefix:
-
-- Read from `.claude/config.json` if available
-- Otherwise use a generic format like `TICKET-XXX`
-- Examples: `ENG-123`, `FEAT-456`, `BUG-789`
-
 You are tasked with creating detailed implementation plans through an interactive, iterative
 process. You should be skeptical, thorough, and work collaboratively with the user to produce
 high-quality technical specifications.
 
+Replace `PROJ` in ticket references with your Linear team's prefix from `.claude/config.json`.
+
 ## Prerequisites
 
-Before executing, verify all required tools and systems:
-
 ```bash
-# 1. Validate thoughts system (REQUIRED)
-if [[ -f "scripts/validate-thoughts-setup.sh" ]]; then
-  ./scripts/validate-thoughts-setup.sh || exit 1
-else
-  # Inline validation if script not found
-  if [[ ! -d "thoughts/shared" ]]; then
-    echo "❌ ERROR: Thoughts system not configured"
-    echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
-    exit 1
-  fi
+if [[ ! -d "thoughts/shared" ]]; then
+  echo "ERROR: Thoughts system not configured"
+  echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
+  exit 1
 fi
 
-# 2. Validate plugin scripts
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" || exit 1
 fi
@@ -46,235 +30,110 @@ fi
 
 ## Initial Response
 
-**STEP 1: Check for recent research (OPTIONAL)**
-
-IMMEDIATELY run this bash script to find recent research that might be relevant:
+**STEP 1: Check for recent research**
 
 ```bash
-# Find recent research that might inform this plan
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
   RECENT_RESEARCH=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research)
   if [[ -n "$RECENT_RESEARCH" ]]; then
-    echo "💡 Found recent research: $RECENT_RESEARCH"
-    echo ""
+    echo "Found recent research: $RECENT_RESEARCH"
   fi
 fi
 ```
 
 **STEP 2: Gather initial input**
 
-After checking for research, follow this logic:
-
 1. **If user provided parameters** (file path or ticket reference):
-   - Immediately read any provided files FULLY
-   - If RECENT_RESEARCH was found, ask: "Should I reference the recent research document in this plan?"
+   - Read any provided files FULLY
+   - If RECENT_RESEARCH was found, mention it and ask if it should inform the plan
    - Begin the research process
 
 2. **If no parameters provided**:
-   - Show any RECENT_RESEARCH that was found
-   - Respond with:
-
-```
-I'll help you create a detailed implementation plan. Let me start by understanding what we're building.
-
-Please provide:
-1. The task/ticket description (or reference to a ticket file)
-2. Any relevant context, constraints, or specific requirements
-3. Links to related research or previous implementations
-```
-
-If RECENT_RESEARCH exists, add:
-```
-💡 I found recent research: $RECENT_RESEARCH
-   Would you like me to use this as context for the plan?
-```
-
-Continue with:
-```
-I'll analyze this information and work with you to create a comprehensive plan.
-
-Tip: You can also invoke this command with a ticket file directly: `/create_plan thoughts/shared/tickets/PROJ-123.md`
-For deeper analysis, try: `/create_plan think deeply about thoughts/shared/tickets/PROJ-123.md`
-```
-
-Then wait for the user's input.
+   - Show any RECENT_RESEARCH found
+   - Ask for: task/ticket description, context/constraints, related research
+   - Wait for user's input
 
 ## Process Steps
 
 ### Step 1: Context Gathering & Initial Analysis
 
 1. **Read all mentioned files immediately and FULLY**:
-   - Ticket files (e.g., `thoughts/shared/tickets/PROJ-123.md`)
-   - Research documents
-   - Related implementation plans
-   - Any JSON/data files mentioned
-   - **IMPORTANT**: Use the Read tool WITHOUT limit/offset parameters to read entire files
-   - **CRITICAL**: DO NOT spawn sub-tasks before reading these files yourself in the main context
-   - **NEVER** read files partially - if a file is mentioned, read it completely
+   - Ticket files, research documents, related plans, JSON/data files
+   - **IMPORTANT**: Use the Read tool WITHOUT limit/offset parameters
+   - **CRITICAL**: Read these files yourself before spawning sub-tasks
 
-2. **Spawn initial research tasks to gather context**: Before asking the user any questions, use
-   specialized agents to research in parallel:
-   - Use the **codebase-locator** agent to find all files related to the ticket/task
-   - Use the **codebase-analyzer** agent to understand how the current implementation works
-   - If relevant, use the **thoughts-locator** agent to find any existing thoughts documents about
-     this feature
-   - If a Linear ticket is mentioned, use the **linear-ticket-reader** agent to get full details
+2. **Spawn initial research tasks in parallel**:
+   - **codebase-locator** — find all files related to the ticket/task
+   - **codebase-analyzer** — understand how the current implementation works
+   - **thoughts-locator** — find existing thoughts documents about this feature (if relevant)
 
-   These agents will:
-   - Find relevant source files, configs, and tests
-   - Identify the specific directories to focus on (e.g., they'll focus on the relevant project directory)
-   - Trace data flow and key functions
-   - Return detailed explanations with file:line references
-
-3. **Read all files identified by research tasks**:
-   - After research tasks complete, read ALL files they identified as relevant
-   - Read them FULLY into the main context
-   - This ensures you have complete understanding before proceeding
+3. **Read all files identified by research tasks** FULLY into the main context
 
 4. **Analyze and verify understanding**:
-   - Cross-reference the ticket requirements with actual code
-   - Identify any discrepancies or misunderstandings
-   - Note assumptions that need verification
-   - Determine true scope based on codebase reality
+   - Cross-reference ticket requirements with actual code
+   - Identify discrepancies, assumptions, and true scope
 
 5. **Present informed understanding and focused questions**:
-
-   ```
-   Based on the ticket and my research of the codebase, I understand we need to [accurate summary].
-
-   I've found that:
-   - [Current implementation detail with file:line reference]
-   - [Relevant pattern or constraint discovered]
-   - [Potential complexity or edge case identified]
-
-   Questions that my research couldn't answer:
-   - [Specific technical question that requires human judgment]
-   - [Business logic clarification]
-   - [Design preference that affects implementation]
-   ```
-
-   Only ask questions that you genuinely cannot answer through code investigation.
+   - Show what you found with file:line references
+   - Only ask questions you genuinely cannot answer through code investigation
 
 ### Step 2: Research & Discovery
 
 After getting initial clarifications:
 
 1. **If the user corrects any misunderstanding**:
-   - DO NOT just accept the correction
-   - Spawn new research tasks to verify the correct information
-   - Read the specific files/directories they mention
+   - Spawn new research tasks to verify — don't just accept corrections
    - Only proceed once you've verified the facts yourself
 
-2. **Create a research todo list** using TodoWrite to track exploration tasks
+2. **Create a research todo list** using TodoWrite
 
 3. **Spawn parallel sub-tasks for comprehensive research**:
-   - Create multiple Task agents to research different aspects concurrently
-   - Use the right agent for each type of research:
 
    **For local codebase:**
-   - **codebase-locator** - To find more specific files (e.g., "find all files that handle [specific
-     component]")
-   - **codebase-analyzer** - To understand implementation details (e.g., "analyze how [system]
-     works")
-   - **codebase-pattern-finder** - To find similar features we can model after
+   - **codebase-locator** — find specific files
+   - **codebase-analyzer** — understand implementation details
+   - **codebase-pattern-finder** — find similar features to model after
 
    **For external research:**
-   - **external-research** - To research framework patterns and best practices from popular repos
-   - Ask: "How does [framework] recommend implementing [feature]?"
-   - Ask: "What's the standard approach for [pattern] in [library]?"
-   - Examples: React patterns, Express middleware, Next.js routing, Prisma schemas
+   - **external-research** — framework patterns and best practices from popular repos
 
    **For historical context:**
-   - **thoughts-locator** - To find any research, plans, or decisions about this area
-   - **thoughts-analyzer** - To extract key insights from the most relevant documents
-
-   **For related tickets:**
-   - **linear-searcher** - To find similar issues or past implementations
-
-   Each agent knows how to:
-   - Find the right files and code patterns
-   - Identify conventions and patterns to follow
-   - Look for integration points and dependencies
-   - Return specific file:line references
-   - Find tests and examples
+   - **thoughts-locator** / **thoughts-analyzer** — find past research, plans, decisions
 
 4. **Wait for ALL sub-tasks to complete** before proceeding
 
-5. **Present findings and design options**:
-
-   ```
-   Based on my research, here's what I found:
-
-   **Current State:**
-   - [Key discovery about existing code]
-   - [Pattern or convention to follow]
-
-   **Design Options:**
-   1. [Option A] - [pros/cons]
-   2. [Option B] - [pros/cons]
-
-   **Open Questions:**
-   - [Technical uncertainty]
-   - [Design decision needed]
-
-   Which approach aligns best with your vision?
-   ```
+5. **Present findings and design options** with pros/cons for each approach
 
 ### Step 3: Plan Structure Development
 
 Once aligned on approach:
 
-1. **Create initial plan outline**:
-
-   ```
-   Here's my proposed plan structure:
-
-   ## Overview
-   [1-2 sentence summary]
-
-   ## Implementation Phases:
-   1. [Phase name] - [what it accomplishes]
-   2. [Phase name] - [what it accomplishes]
-   3. [Phase name] - [what it accomplishes]
-
-   Does this phasing make sense? Should I adjust the order or granularity?
-   ```
-
+1. **Create initial plan outline** showing phases and what each accomplishes
 2. **Get feedback on structure** before writing details
 
 ### Step 4: Detailed Plan Writing
 
 After structure approval:
 
-1. **Gather metadata for the plan document**:
-
-   Before writing the plan, collect git and temporal metadata:
+1. **Gather metadata**:
 
    ```bash
-   # Get current date/time in ISO 8601 format with timezone
-   CURRENT_ISO_DATETIME=$(date -Iseconds)  # e.g., 2025-01-11T14:30:00-06:00
-   CURRENT_DATE=$(date +%Y-%m-%d)          # e.g., 2025-01-11
-
-   # Get git information
+   CURRENT_ISO_DATETIME=$(date -Iseconds)
+   CURRENT_DATE=$(date +%Y-%m-%d)
    GIT_COMMIT_SHORT=$(git rev-parse --short HEAD)
    GIT_BRANCH=$(git branch --show-current)
    REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
    ```
 
    **IMPORTANT: Document Storage Rules**
-   - ALWAYS write to `thoughts/shared/plans/` for plan documents
-   - NEVER write to `thoughts/searchable/` — this is a read-only search index
+   - ALWAYS write to `thoughts/shared/plans/`
+   - NEVER write to `thoughts/searchable/` (read-only search index)
 
 2. **Write the plan** to `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md`
-   - Format: `YYYY-MM-DD-PROJ-XXXX-description.md` where:
-     - YYYY-MM-DD is today's date
-     - PROJ-XXXX is the ticket number (omit if no ticket)
-     - description is a brief kebab-case description
-   - Examples:
-     - With ticket: `2025-01-08-PROJ-123-parent-child-tracking.md`
-     - Without ticket: `2025-01-08-improve-error-handling.md`
+   - With ticket: `2025-01-08-PROJ-123-parent-child-tracking.md`
+   - Without ticket: `2025-01-08-improve-error-handling.md`
 
-3. **Use this template structure** (note: frontmatter comes BEFORE the heading):
+3. **Use this template structure** (frontmatter comes BEFORE the heading):
 
 ````markdown
 ---
@@ -303,7 +162,7 @@ type: implementation_plan
 
 ## Desired End State
 
-[A Specification of the desired end state after this plan is complete, and how to verify it]
+[Specification of the desired end state and how to verify it]
 
 ### Key Discoveries:
 
@@ -329,7 +188,8 @@ type: implementation_plan
 
 #### 1. [Component/File Group]
 
-**File**: `path/to/file.ext` **Changes**: [Summary of changes]
+**File**: `path/to/file.ext`
+**Changes**: [Summary of changes]
 
 ```[language]
 // Specific code to add/modify
@@ -339,51 +199,34 @@ type: implementation_plan
 
 #### Automated Verification:
 
-- [ ] Migration applies cleanly: `make migrate`
-- [ ] Unit tests pass: `make test-component`
-- [ ] Type checking passes: `npm run typecheck`
+- [ ] Unit tests pass: `make test`
+- [ ] Type checking passes: `make check`
 - [ ] Linting passes: `make lint`
-- [ ] Integration tests pass: `make test-integration`
 
 #### Manual Verification:
 
-- [ ] Feature works as expected when tested via UI
-- [ ] Performance is acceptable under load
-- [ ] Edge case handling verified manually
+- [ ] Feature works as expected when tested
 - [ ] No regressions in related features
 
 ---
 
 ## Phase 2: [Descriptive Name]
 
-[Similar structure with both automated and manual success criteria...]
+[Similar structure...]
 
 ---
 
 ## Testing Strategy
 
-### Unit Tests:
-
-- [What to test]
-- [Key edge cases]
-
-### Integration Tests:
-
-- [End-to-end scenarios]
-
-### Manual Testing Steps:
-
-1. [Specific step to verify feature]
-2. [Another verification step]
-3. [Edge case to test manually]
+[Unit tests, integration tests, manual testing steps]
 
 ## Performance Considerations
 
-[Any performance implications or optimizations needed]
+[Any performance implications]
 
 ## Migration Notes
 
-[If applicable, how to handle existing data/systems]
+[If applicable]
 
 ## References
 
@@ -394,267 +237,61 @@ type: implementation_plan
 
 ### Step 5: Sync and Review
 
-1. **Sync the thoughts directory**:
-   - Run `humanlayer thoughts sync` to sync the newly created plan
-   - This ensures the plan is properly indexed and available
+1. **Sync**: Run `humanlayer thoughts sync`
 
 2. **Track in Workflow Context**:
-
-   After saving the plan document, add it to workflow context:
-
    ```bash
    if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
      "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add plans "$PLAN_FILE" "${TICKET_ID}"
    fi
    ```
 
-3. **Check context usage and present plan**:
+3. **Present plan** and ask for review:
+   - Show plan location
+   - Ask: Are phases properly scoped? Success criteria specific enough? Missing edge cases?
+   - If context >60%, recommend clearing before implementation phase
 
-   **Monitor your context** and present:
+4. **Iterate based on feedback** until the user is satisfied
+   - Re-sync thoughts after changes
+
+5. **After plan approval**, provide implementation command:
+
+   **Use `--team` when:** 3+ parallel phases, distinct domains, non-overlapping files, 10+ files
+   **Use standard mode when:** sequential phases, same directory, <10 files, tightly coupled
 
    ```
-   ✅ Implementation plan created!
-
-   **Plan location**: `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md`
-
-   ## 📊 Context Status
-
-   Current usage: {X}% ({Y}K/{Z}K tokens)
-
-   {If >60%}:
-   ⚠️ **Context Alert**: We're at {X}% context usage.
-
-   **Recommendation**: Clear context before implementation phase.
-
-   **Why?** The implementation phase will:
-   - Load the complete plan file
-   - Read multiple source files
-   - Track progress with TodoWrite
-   - Benefit from fresh context for optimal performance
-
-   **What to do**:
-   1. ✅ Review the plan (read the file above)
-   2. ✅ Close this session (clear context)
-   3. ✅ Start fresh session in worktree
-   4. ✅ Run `/implement-plan {plan-path}`
-
-   This is normal! Context is meant to be cleared between phases.
-
-   {If <60%}:
-   ✅ Context healthy ({X}%).
-
-   ---
-
-   Please review the plan and let me know:
-   - Are the phases properly scoped?
-   - Are the success criteria specific enough?
-   - Any technical details that need adjustment?
-   - Missing edge cases or considerations?
-   ```
-
-4. **Iterate based on feedback** - be ready to:
-   - Add missing phases
-   - Adjust technical approach
-   - Clarify success criteria (both automated and manual)
-   - Add/remove scope items
-   - After making changes, run `humanlayer thoughts sync` again
-   - **Monitor context** - if >70% during iterations, warn user to review file offline
-
-5. **Continue refining** until the user is satisfied
-
-6. **Final context check and implementation recommendation** after approval:
-   - If context >50%, remind user to clear before implementation
-
-   **Analyze the plan to determine the best implementation approach and provide a copy-paste ready command.**
-
-   **Use `--team` when ALL of these are true:**
-   1. Plan has 3+ phases that can be executed in parallel (not sequential dependencies)
-   2. Changes span distinct domains (e.g., frontend + backend + tests + config)
-   3. Each domain's file changes don't overlap (no two teammates editing the same file)
-   4. The total scope is substantial (10+ files across 3+ directories)
-
-   **Use standard mode (no `--team`) when ANY of these are true:**
-   1. Changes are sequential (each phase depends on the previous)
-   2. Most changes are in the same directory or closely related files
-   3. Total scope is small (fewer than 10 files)
-   4. Changes are tightly coupled (e.g., API + client contract changes)
-
-   **Always output this block after plan approval:**
-
-   ````
    ## Ready to Implement
 
-   {IF team mode recommended:}
-   This plan spans {N} independent domains ({list domains}) with {M}+ files.
-   **Recommended: agent team mode** for parallel implementation.
-
    Start a new session and run:
-   ```
-   /catalyst-dev:implement_plan --team thoughts/shared/plans/{PLAN_FILENAME}
-   ```
+   /catalyst-dev:implement_plan [--team] thoughts/shared/plans/{PLAN_FILENAME}
 
-   {IF standard mode recommended:}
-   This plan has sequential phases with tightly coupled changes.
-   **Recommended: standard mode** for focused implementation.
-
-   Start a new session and run:
+   Tip: Start a fresh session — implementation needs context for source files and progress tracking.
    ```
-   /catalyst-dev:implement_plan thoughts/shared/plans/{PLAN_FILENAME}
-   ```
-
-   {ALWAYS include:}
-   Tip: Start a fresh session before implementing. The implementation phase
-   needs context for reading source files and tracking progress.
-   ````
 
 ## Important Guidelines
 
-1. **Be Skeptical**:
-   - Question vague requirements
-   - Identify potential issues early
-   - Ask "why" and "what about"
-   - Don't assume - verify with code
-
-2. **Be Interactive**:
-   - Don't write the full plan in one shot
-   - Get buy-in at each major step
-   - Allow course corrections
-   - Work collaboratively
-
-3. **Be Thorough**:
-   - Read all context files COMPLETELY before planning
-   - Research actual code patterns using parallel sub-tasks
-   - Include specific file paths and line numbers
-   - Write measurable success criteria with clear automated vs manual distinction
-   - automated steps should use `make` whenever possible - for example
-     `make check` instead of running individual lint/test commands
-
-4. **Be Practical**:
-   - Focus on incremental, testable changes
-   - Consider migration and rollback
-   - Think about edge cases
-   - Include "what we're NOT doing"
-
-5. **Track Progress**:
-   - Use TodoWrite to track planning tasks
-   - Update todos as you complete research
-   - Mark planning tasks complete when done
-
-6. **No Open Questions in Final Plan**:
-   - If you encounter open questions during planning, STOP
-   - Research or ask for clarification immediately
-   - Do NOT write the plan with unresolved questions
-   - The implementation plan must be complete and actionable
-   - Every decision must be made before finalizing the plan
+1. **Be Skeptical**: Question vague requirements. Don't assume — verify with code.
+2. **Be Interactive**: Don't write the full plan in one shot. Get buy-in at each step.
+3. **Be Thorough**: Read all context files COMPLETELY. Include file:line references.
+   Use `make check` over individual lint/test commands when available.
+4. **Be Practical**: Focus on incremental, testable changes. Include "what we're NOT doing".
+5. **No Open Questions in Final Plan**: Research or ask for clarification immediately.
+   The plan must be complete and actionable — every decision made before finalizing.
 
 ## Success Criteria Guidelines
 
-**Always separate success criteria into two categories:**
+**Always separate into two categories:**
 
-1. **Automated Verification** (can be run by execution agents):
-   - Commands that can be run: `make test`, `npm run lint`, etc.
-   - Specific files that should exist
-   - Code compilation/type checking
-   - Automated test suites
-
-2. **Manual Verification** (requires human testing):
-   - UI/UX functionality
-   - Performance under real conditions
-   - Edge cases that are hard to automate
-   - User acceptance criteria
-
-**Format example:**
-
-```markdown
-### Success Criteria:
-
-#### Automated Verification:
-
-- [ ] Database migration runs successfully: `make migrate`
-- [ ] All unit tests pass: `go test ./...`
-- [ ] No linting errors: `golangci-lint run`
-- [ ] API endpoint returns 200: `curl localhost:8080/api/new-endpoint`
-
-#### Manual Verification:
-
-- [ ] New feature appears correctly in the UI
-- [ ] Performance is acceptable with 1000+ items
-- [ ] Error messages are user-friendly
-- [ ] Feature works correctly on mobile devices
-```
+1. **Automated Verification** (run by agents): `make test`, `make lint`, type checking, etc.
+2. **Manual Verification** (requires human): UI/UX, performance, edge cases, acceptance criteria
 
 ## Common Patterns
 
 ### For Database Changes:
-
-- Start with schema/migration
-- Add store methods
-- Update business logic
-- Expose via API
-- Update clients
+Schema/migration → store methods → business logic → API → clients
 
 ### For New Features:
-
-- Research existing patterns first
-- Start with data model
-- Build backend logic
-- Add API endpoints
-- Implement UI last
+Research patterns → data model → backend logic → API endpoints → UI
 
 ### For Refactoring:
-
-- Document current behavior
-- Plan incremental changes
-- Maintain backwards compatibility
-- Include migration strategy
-
-## Sub-task Spawning Best Practices
-
-When spawning research sub-tasks:
-
-1. **Spawn multiple tasks in parallel** for efficiency
-2. **Each task should be focused** on a specific area
-3. **Provide detailed instructions** including:
-   - Exactly what to search for
-   - Which directories to focus on
-   - What information to extract
-   - Expected output format
-4. **Be EXTREMELY specific about directories**:
-   - Use exact directory names from the codebase, not generic terms
-   - If the project has specific directory conventions, follow them precisely
-   - Include the full path context in your prompts
-5. **Specify read-only tools** to use
-6. **Request specific file:line references** in responses
-7. **Wait for all tasks to complete** before synthesizing
-8. **Verify sub-task results**:
-   - If a sub-task returns unexpected results, spawn follow-up tasks
-   - Cross-check findings against the actual codebase
-   - Don't accept results that seem incorrect
-
-Example of spawning multiple tasks:
-
-```python
-# Spawn these tasks concurrently:
-tasks = [
-    Task("Research database schema", db_research_prompt),
-    Task("Find API patterns", api_research_prompt),
-    Task("Investigate UI components", ui_research_prompt),
-    Task("Check test patterns", test_research_prompt)
-]
-```
-
-## Example Interaction Flow
-
-```
-User: /implementation_plan
-Assistant: I'll help you create a detailed implementation plan...
-
-User: We need to add parent-child tracking for Claude sub-tasks. See thoughts/shared/tickets/PROJ-456.md
-Assistant: Let me read that ticket file completely first...
-
-[Reads file fully]
-
-Based on the ticket, I understand we need to [specific task from ticket]. Before I start planning, I have some questions...
-
-[Interactive process continues...]
-```
+Document behavior → incremental changes → backwards compatibility → migration strategy
