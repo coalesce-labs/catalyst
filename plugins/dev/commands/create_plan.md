@@ -17,14 +17,9 @@ Replace `PROJ` in ticket references with your Linear team's prefix from `.claude
 ## Prerequisites
 
 ```bash
-if [[ ! -d "thoughts/shared" ]]; then
-  echo "ERROR: Thoughts system not configured"
-  echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
-  exit 1
-fi
-
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" || exit 1
+# Check project setup (thoughts, CLAUDE.md snippet, config)
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
 ```
 
