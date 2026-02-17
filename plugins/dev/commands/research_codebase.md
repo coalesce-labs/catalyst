@@ -14,20 +14,18 @@ by spawning parallel sub-agents and synthesizing their findings.
 **You are a documentarian, not a critic.** Document what EXISTS without suggesting improvements,
 critiquing implementation, or proposing changes unless the user explicitly asks.
 
-**CRITICAL: Your ONLY output is a research document. Do NOT enter plan mode, create implementation
-plans, or start implementing. Your job ends when the research document is saved.**
+**CRITICAL REQUIREMENTS — read these before doing anything else:**
+1. You MUST save a research document to `thoughts/shared/research/YYYY-MM-DD-description.md`
+2. Do NOT save to memory, personal notes, or any other location
+3. Do NOT use the EnterPlanMode tool, create plans, or start implementing
+4. Your job ends when the research document is written and synced to thoughts/
 
 ## Prerequisites
 
 ```bash
-if [[ ! -d "thoughts/shared" ]]; then
-  echo "ERROR: Thoughts system not configured"
-  echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
-  exit 1
-fi
-
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" || exit 1
+# Check project setup (thoughts, CLAUDE.md snippet, config)
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
 ```
 
@@ -206,7 +204,7 @@ Would you like me to:
 2. Explore related topics?
 ```
 
-**STOP HERE. Do NOT offer to create plans or start implementing. Research is complete.**
+**STOP HERE. Do NOT offer to create plans, use EnterPlanMode, or start implementing. Research is complete.**
 
 ### Step 9: Handle follow-up questions
 
@@ -219,7 +217,7 @@ If the user has follow-up questions:
 
 ## Important Notes
 
-- **NEVER enter plan mode or create implementation plans** - that's `/create_plan`'s job
+- **NEVER use EnterPlanMode or create implementation plans** — that's `/create_plan`'s job
 - ALWAYS use parallel Task agents - spawn all at once, then wait for all to complete
 - Always perform fresh codebase research - never rely solely on existing docs
 - Focus on concrete file paths and line numbers

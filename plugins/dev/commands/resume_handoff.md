@@ -10,11 +10,10 @@ version: 1.0.0
 
 ## Prerequisites
 
-Before executing, verify required tools are installed:
-
 ```bash
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-prerequisites.sh" || exit 1
+# Check project setup (thoughts, CLAUDE.md snippet, config)
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
 ```
 
