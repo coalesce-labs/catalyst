@@ -62,12 +62,11 @@ This phase runs in the current session to allow user interaction during research
    - **external-research**: Research frameworks/libraries (if relevant)
 4. **Synthesize findings**: Create research document at `thoughts/shared/research/YYYY-MM-DD-{ticket}-{description}.md`
 5. **Sync**: `humanlayer thoughts sync`
-6. **Update workflow context**:
+6. **Track in workflow context (REQUIRED)** — substitute actual path and ticket:
    ```bash
-   if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-     "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "$DOC_PATH" "${TICKET_ID:-null}"
-   fi
+   "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "thoughts/shared/research/YYYY-MM-DD-description.md" "TICKET-ID"
    ```
+7. **Verify**: `"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research` must print the path
 
 ### Phase 2: Plan (New Session via `humanlayer launch`)
 

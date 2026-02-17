@@ -143,6 +143,8 @@ status: ready_for_implementation
 last_updated: {CURRENT_DATE}
 last_updated_by: claude
 type: implementation_plan
+source_ticket: { TICKET-ID or null }
+source_research: { path to research doc used, or null }
 ---
 
 # [Feature/Task Name] Implementation Plan
@@ -230,18 +232,31 @@ type: implementation_plan
 - Similar implementation: `[file:line]`
 ````
 
-### Step 5: Sync and Review
+### Step 5: Sync, Track, and Review
 
-1. **Sync**: Run `humanlayer thoughts sync`
+**5a. Sync thoughts:**
 
-2. **Track in Workflow Context**:
-   ```bash
-   if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-     "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add plans "$PLAN_FILE" "${TICKET_ID}"
-   fi
-   ```
+```bash
+humanlayer thoughts sync
+```
 
-3. **Present plan** and ask for review:
+**5b. Track in workflow context (REQUIRED):**
+
+Substitute the actual file path and ticket ID:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add plans "thoughts/shared/plans/YYYY-MM-DD-PROJ-XXX-description.md" "TICKET-ID"
+```
+
+**5c. Verify tracking:**
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans
+```
+
+This MUST print the plan path. If not, re-run 5b.
+
+**5d. Present plan** and ask for review:
    - Show plan location
    - Ask: Are phases properly scoped? Success criteria specific enough? Missing edge cases?
    - If context >60%, recommend clearing before implementation phase
