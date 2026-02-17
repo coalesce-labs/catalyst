@@ -7,16 +7,19 @@ Complete development workflow: research → plan → implement → validate → 
 ### Core Workflow Commands
 - `/research-codebase` - Parallel research with specialized agents
 - `/create-plan` - Interactive implementation planning
+- `/iterate-plan` - Iterate on existing plans with feedback
 - `/implement-plan` - Execute plans with validation
 - `/validate-plan` - Verify implementation completeness
+- `/oneshot` - All-in-one research, plan, and implement with context isolation
 - `/create-handoff` - Session handoffs with context
 - `/resume-handoff` - Resume from handoffs
 
 ### Development Commands
 - `/commit` - Conventional commits with Linear integration
-- `/debug` - Investigate issues with logs and state
+- `/ci-commit` - CI-aware commits with pre-flight checks
 - `/create-pr` - Pull requests with auto-description
 - `/describe-pr` - Generate/update PR descriptions
+- `/ci-describe-pr` - CI-aware PR descriptions with status checks
 - `/merge-pr` - Safe merge with verification
 
 ### Project Management
@@ -90,8 +93,10 @@ Automatically extracts ticket numbers from:
 
 - `/resume-handoff` - Auto-finds recent handoff
 - `/create-plan` - References recent research
+- `/iterate-plan` - Auto-discovers recent plans to iterate on
 - `/implement-plan` - Finds associated plan
 - `/validate-plan` - Verifies plan execution
+- `/oneshot` - Auto-discovers tickets and chains research, plan, and implement
 
 ### Manual Tracking (Fallback)
 

@@ -2,7 +2,7 @@
 description: Create new agents or commands using discovered patterns and templates
 category: workflow-discovery
 tools: Read, Write, Edit, Grep, Glob
-model: inherit
+model: sonnet
 version: 1.0.0
 workspace_only: true
 ---

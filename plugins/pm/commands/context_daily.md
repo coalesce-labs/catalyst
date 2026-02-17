@@ -2,7 +2,7 @@
 description: Generate daily context engineering adoption dashboard
 category: reporting
 tools: Read, Write, Task, TodoWrite, Bash
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 

@@ -2,7 +2,7 @@
 description: Implement approved technical plans from thoughts/shared/plans/
 category: workflow
 tools: Read, Write, Edit, Grep, Glob, Task, TodoWrite, Bash
-model: inherit
+model: opus
 version: 1.0.0
 ---
 
@@ -188,3 +188,42 @@ If the plan has existing checkmarks:
 
 Remember: You're implementing a solution, not just checking boxes. Keep the end goal in mind and
 maintain forward momentum.
+
+## Agent Team Mode (Optional)
+
+When invoked with `--team` flag or when the plan spans 3+ independent domains:
+
+### When to Use Team Mode
+
+- Plan has phases that can be implemented in parallel
+- Changes span distinct domains (frontend, backend, tests, infra)
+- Each domain's changes don't overlap in files
+
+### Team Structure
+
+```
+Lead (Opus) — Coordinates implementation
+├── Teammate 1 (Sonnet) — Frontend changes
+│   └── Can spawn subagents for research
+├── Teammate 2 (Sonnet) — Backend changes
+│   └── Can spawn subagents for research
+└── Teammate 3 (Sonnet) — Test changes
+    └── Can spawn subagents for research
+```
+
+### Process
+
+1. **Analyze plan phases** — Identify which phases can be parallelized
+2. **Assign file ownership** — Each teammate gets distinct files (no overlap)
+3. **Create task list** — Use TaskCreate with dependencies between phases
+4. **Launch team** — Spawn teammates with focused instructions
+5. **Review gates** — Lead reviews teammate work via approvePlan/rejectPlan
+6. **Integration** — Lead verifies all changes work together
+7. **Commit** — Single atomic commit or per-phase commits
+
+### Important Constraints
+
+- **File ownership is strict** — no two teammates edit the same file
+- **Sequential phases stay sequential** — only parallelize truly independent work
+- **Lead reviews all code** — use plan approval gates before proceeding
+- **Fallback gracefully** — if agent teams unavailable, execute sequentially

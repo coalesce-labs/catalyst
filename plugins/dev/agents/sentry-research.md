@@ -5,7 +5,7 @@ description:
   documentation. Combines CLI data with error pattern research.
 tools:
   Bash(sentry-cli *), Read, Grep, mcp__context7__get_library_docs, mcp__context7__resolve_library_id
-model: inherit
+model: haiku
 version: 1.0.0
 ---
 

@@ -317,7 +317,7 @@ check_prerequisites() {
   # Optional: linearis (for Linear integration)
   if ! check_command_exists "linearis"; then
     print_warning "Linearis CLI not found (optional, for Linear integration)"
-    echo "  Install: npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
+    echo "  Install: npm install -g linearis"
     missing_optional=true
   else
     # Check version is at least 1.1.0
@@ -330,7 +330,7 @@ check_prerequisites() {
 
       if [ "$major" -lt 1 ] || ([ "$major" -eq 1 ] && [ "$minor" -lt 1 ]); then
         print_warning "Linearis CLI version $linearis_version is too old (need >= 1.1.0)"
-        echo "  Update: npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
+        echo "  Update: npm install -g linearis"
         missing_optional=true
       else
         print_success "Linearis CLI installed (v${linearis_version})"

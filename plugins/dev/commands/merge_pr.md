@@ -2,7 +2,7 @@
 description: Safely merge PR with verification and Linear integration
 category: version-control-git
 tools: Bash(linearis *), Bash(git *), Bash(gh *), Read
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
@@ -293,7 +293,7 @@ If ticket found and not using `--no-update`:
 # Verify linearis is available
 if ! command -v linearis &> /dev/null; then
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
-    echo "Install: npm install -g --install-links ryanrozich/linearis#feat/cycles-cli"
+    echo "Install: npm install -g linearis"
 else
     # Move to "Done"
     linearis issues update "$ticket" --state "Done"
@@ -477,7 +477,7 @@ Override? [y/N]:
 PR merged successfully, but Linear ticket not updated.
 
 Install Linearis:
-  npm install -g --install-links ryanrozich/linearis#feat/cycles-cli
+  npm install -g linearis
 
 Configure:
   export LINEAR_API_TOKEN=your_token
@@ -516,10 +516,10 @@ Uses `.claude/config.json`:
 {
   "catalyst": {
     "project": {
-      "ticketPrefix": "RCW"
+      "ticketPrefix": "PROJ"
     },
     "linear": {
-      "teamKey": "RCW",
+      "teamKey": "PROJ",
       "doneStatusName": "Done"
     },
     "pr": {
@@ -552,7 +552,7 @@ About to merge PR #123...
 Proceed? Y
 
 ✅ Merged!
-✅ Linear ticket RCW-13 → Done
+✅ Linear ticket ENG-123 → Done
 ✅ Branches deleted
 ```
 

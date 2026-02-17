@@ -36,7 +36,7 @@ Agents are markdown files with YAML frontmatter:
 name: agent-name
 description: Brief description of what this agent does (shown in agent list)
 tools: Grep, Glob, Bash(ls only)
-model: inherit
+model: sonnet
 ---
 
 # Agent Instructions
@@ -93,12 +93,12 @@ You are a specialist at [specific task]. Your job is to [clear responsibility].
 - Restricts what agent can do (important for safety)
 - Read-only tools for research agents
 
-**model** (optional)
+**model** (required)
 
-- `inherit` - Use same model as main conversation (recommended)
-- `fast` - Use faster, cheaper model
-- `extended` - Use extended context model
-- Default: `inherit`
+Uses the three-tier model strategy:
+- `opus` - Planning, complex analysis, orchestration (commands)
+- `sonnet` - Analysis, PR/commit workflows, structured research (agents and utility commands)
+- `haiku` - Fast lookups, data collection, file finding (locator agents)
 
 ---
 
@@ -123,7 +123,7 @@ Commands use the same frontmatter structure but focus on orchestration:
 name: command_name
 description: What this command does
 tools: all
-model: inherit
+model: opus
 ---
 
 # Command Name
@@ -321,7 +321,7 @@ Find files and return them. Be helpful.
 name: {domain}-locator
 description: Locates {specific things} relevant to {context}
 tools: Grep, Glob, Bash(ls only)
-model: inherit
+model: haiku
 ---
 
 You are a specialist at finding WHERE {things} exist.
@@ -384,7 +384,7 @@ You are a specialist at finding WHERE {things} exist.
 name: {domain}-analyzer
 description: Analyzes {specific aspect} with detailed {output}
 tools: Read, Grep, Glob
-model: inherit
+model: sonnet
 ---
 
 You are a specialist at understanding HOW {things} work.
@@ -456,7 +456,7 @@ You are a specialist at understanding HOW {things} work.
 name: {domain}-pattern-finder
 description: Finds similar {things} and usage examples
 tools: Grep, Glob, Read
-model: inherit
+model: sonnet
 ---
 
 You are a specialist at finding patterns and examples.
@@ -524,7 +524,7 @@ You are a specialist at finding patterns and examples.
 name: {domain}-validator
 description: Validates {specific aspect} for {criteria}
 tools: Read, Grep, Bash
-model: inherit
+model: sonnet
 ---
 
 You are a specialist at validating {things}.
@@ -591,7 +591,7 @@ You are a specialist at validating {things}.
 name: {domain}-aggregator
 description: Aggregates {information} from {sources}
 tools: Read, Grep, Glob
-model: inherit
+model: sonnet
 ---
 
 You are a specialist at gathering and summarizing {information}.
@@ -658,7 +658,7 @@ You are a specialist at gathering and summarizing {information}.
 name: workflow_command
 description: Executes {workflow} through {phases}
 tools: all
-model: inherit
+model: opus
 ---
 
 # Workflow Command
@@ -711,7 +711,7 @@ Use TodoWrite to track:
 name: create_plan
 description: Creates implementation plans through research and collaboration
 tools: all
-model: inherit
+model: opus
 ---
 
 # Implementation Plan
@@ -752,7 +752,7 @@ When invoked:
 name: validate_{domain}
 description: Validates {aspect} for {criteria}
 tools: all
-model: inherit
+model: opus
 ---
 
 # Validate {Domain}
@@ -811,7 +811,7 @@ Checklist of items
 name: research_{domain}
 description: Researches {topic} across {sources}
 tools: all
-model: inherit
+model: opus
 ---
 
 # Research {Domain}
@@ -851,7 +851,7 @@ You are tasked with researching {topic}.
 name: transform_{what}
 description: Transforms {what} from {A} to {B}
 tools: all
-model: inherit
+model: opus
 ---
 
 # Transform {What}
@@ -984,7 +984,7 @@ cat > plugins/dev/agents/test-agent.md << 'EOF'
 name: test-agent
 description: Test agent for validation
 tools: Grep, Glob
-model: inherit
+model: haiku
 ---
 
 You find all test files in the repository.
@@ -1032,7 +1032,7 @@ cat > plugins/dev/commands/test_command.md << 'EOF'
 description: Test command for validation
 category: utility
 tools: Grep, Read
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
@@ -1095,7 +1095,7 @@ EOF
 name: migration-locator
 description: Finds database migration files and their application status
 tools: Grep, Glob, Bash(ls only)
-model: inherit
+model: haiku
 ---
 
 You are a specialist at finding database migration files.
@@ -1158,7 +1158,7 @@ migrations/ directory contains all migration files
 name: validate_api_contract
 description: Validates API endpoints match OpenAPI specification
 tools: all
-model: inherit
+model: opus
 ---
 
 # Validate API Contract
@@ -1247,7 +1247,7 @@ Create report:
 name: dependency-analyzer
 description: Analyzes how dependencies are used across the codebase
 tools: Read, Grep, Glob
-model: inherit
+model: sonnet
 ---
 
 You are a specialist at understanding dependency usage patterns.
@@ -1326,7 +1326,7 @@ You are a specialist at understanding dependency usage patterns.
 name: report_test_coverage
 description: Generates comprehensive test coverage report
 tools: all
-model: inherit
+model: opus
 ---
 
 # Report Test Coverage
@@ -1435,7 +1435,7 @@ Create report at `thoughts/shared/reports/test_coverage_YYYY-MM-DD.md`:
 name: your-agent-name
 description: Clear, concise description of what this agent does
 tools: Grep, Glob, Read  # Adjust based on needs
-model: inherit
+model: sonnet
 ---
 
 You are a specialist at {specific task}.

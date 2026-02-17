@@ -840,6 +840,51 @@ Each Claude Code session is isolated with its own context.
 
 ---
 
+## Agent Teams
+
+### When to Use Agent Teams vs Subagents
+
+| Scenario | Subagents | Agent Teams |
+|----------|-----------|-------------|
+| Parallel research gathering | Best fit | Overkill |
+| Code analysis / file search | Best fit | Overkill |
+| Complex multi-file implementation | Can't nest | Best fit |
+| Cross-layer features (frontend + backend + tests) | Limited | Best fit |
+| Cost-sensitive operations | Best fit | Too expensive |
+
+### Two-Level Parallelism
+
+Agent teams enable a pattern that subagents alone cannot:
+
+```
+Lead Agent (Opus)
+├── Teammate 1 (Sonnet) — Frontend
+│   ├── Subagent: codebase-locator (Haiku)
+│   └── Subagent: codebase-analyzer (Sonnet)
+├── Teammate 2 (Sonnet) — Backend
+│   ├── Subagent: codebase-locator (Haiku)
+│   └── Subagent: external-research (Sonnet)
+└── Teammate 3 (Sonnet) — Tests
+    └── Subagent: codebase-pattern-finder (Sonnet)
+```
+
+Each teammate is a full Claude Code session that can spawn its own subagents.
+
+### Best Practices
+
+1. **Lead on Opus, teammates on Sonnet** — Lead needs complex coordination skills
+2. **Size tasks at 5-6 per teammate** — enough to be meaningful, not overwhelming
+3. **Each teammate owns distinct files** — prevents merge conflicts
+4. **Use plan approval gates** — Lead reviews teammate work before proceeding
+5. **Fallback gracefully** — if teams unavailable, execute sequentially
+
+### Commands That Support Agent Teams
+
+- `/implement-plan --team` — Spawns teammates for parallel phase implementation
+- `/oneshot --team` — Uses agent teams in the implementation phase
+
+---
+
 ## Additional Resources
 
 ### Official Documentation

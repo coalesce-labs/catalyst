@@ -46,7 +46,7 @@ Creates git commits using conventional commit format with auto-detection.
 **Example:**
 
 ```bash
-# Working on branch: RCW-13-implement-pr-lifecycle
+# Working on branch: PROJ-13-implement-pr-lifecycle
 # Changed files: commands/dev/commit.md, commands/linear/create_pr.md
 
 /catalyst-dev:commit
@@ -54,7 +54,7 @@ Creates git commits using conventional commit format with auto-detection.
 # Detects:
 # - Type: feat (new functionality)
 # - Scope: commands (directory with changes)
-# - Ticket: RCW-13 (from branch name)
+# - Ticket: PROJ-13 (from branch name)
 
 # Suggests:
 # feat(commands): implement pr lifecycle commands
@@ -62,7 +62,7 @@ Creates git commits using conventional commit format with auto-detection.
 # Adds complete PR lifecycle automation with conventional commits,
 # auto-rebase, incremental descriptions, and Linear integration.
 #
-# Refs: RCW-13
+# Refs: PROJ-13
 ```
 
 **Conventional Commit Format:**
@@ -130,7 +130,7 @@ Orchestrates complete PR creation: commit → rebase → push → create → des
 **Example:**
 
 ```bash
-# Branch: RCW-13-implement-pr-lifecycle
+# Branch: PROJ-13-implement-pr-lifecycle
 
 /catalyst-dev:create_pr
 
@@ -141,19 +141,19 @@ Auto-rebasing onto origin/main... ✅
 Pushing branch...
 ✅
 Creating PR...
-Title: "RCW-13: Implement pr lifecycle"
+Title: "PROJ-13: Implement pr lifecycle"
 ✅ PR #2 created
 
 Generating comprehensive description...
 (calls /catalyst-dev:describe_pr internally)
 
-Updating Linear RCW-13:
+Updating Linear PROJ-13:
 - Status: In Progress → In Review
 - Assignee: ryan
 - Link added: PR #2
 
 ✅ Pull request created successfully!
-PR: #2 - RCW-13: Implement pr lifecycle
+PR: #2 - PROJ-13: Implement pr lifecycle
 URL: https://github.com/org/repo/pull/2
 ```
 
@@ -164,7 +164,7 @@ URL: https://github.com/org/repo/pull/2
 
 **Linear integration:**
 
-- Extracts ticket: `RCW-13` from branch `RCW-13-feature-name`
+- Extracts ticket: `PROJ-13` from branch `PROJ-13-feature-name`
 - Moves to "In Review" status
 - Assigns to current user
 - Adds PR as attachment
@@ -293,8 +293,8 @@ Checking CI status...
 
 About to merge:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- PR:      #2 - RCW-13: Implement pr lifecycle
- From:    RCW-13-implement-pr-lifecycle
+ PR:      #2 - PROJ-13: Implement pr lifecycle
+ From:    PROJ-13-implement-pr-lifecycle
  To:      main
  Commits: 5
  Files:   8 changed
@@ -302,7 +302,7 @@ About to merge:
  Reviews: APPROVED
  CI:      ✅ All checks passed
  Tests:   ✅ Passed locally
- Ticket:  RCW-13 (will move to Done)
+ Ticket:  PROJ-13 (will move to Done)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Merge strategy: Squash and merge
@@ -312,7 +312,7 @@ Proceed? [Y/n]: Y
 Merging...
 ✅ PR merged!
 ✅ Remote branch deleted
-✅ Linear ticket RCW-13 → Done
+✅ Linear ticket PROJ-13 → Done
 ✅ Local branch deleted
 ✅ Switched to main and pulled latest
 
@@ -349,7 +349,7 @@ Merging...
 
 ```bash
 # 1. Create feature branch
-git checkout -b RCW-42-add-validation
+git checkout -b PROJ-42-add-validation
 
 # 2. Implement feature
 # ... make changes ...
@@ -364,7 +364,7 @@ git checkout -b RCW-42-add-validation
 # - Rebases onto main
 # - Creates PR
 # - Generates description
-# - Linear: RCW-42 → In Review (assigned to you)
+# - Linear: PROJ-42 → In Review (assigned to you)
 
 # 5. Code review feedback
 # Reviewer asks for changes
@@ -389,7 +389,7 @@ git checkout -b RCW-42-add-validation
 # - Checks CI ✅
 # - Squash merges
 # - Deletes branches
-# - Linear: RCW-42 → Done
+# - Linear: PROJ-42 → Done
 ```
 
 ---
@@ -447,7 +447,7 @@ View linked PRs in Linear:
 ```json
 {
   "project": {
-    "ticketPrefix": "RCW"
+    "ticketPrefix": "PROJ"
   },
   "linear": {
     "teamId": "your-team-id",
@@ -485,7 +485,7 @@ View linked PRs in Linear:
 Always include ticket ID in branch name:
 
 ```bash
-git checkout -b RCW-123-feature-name
+git checkout -b PROJ-123-feature-name
 git checkout -b ENG-456-bug-fix
 ```
 
@@ -563,7 +563,7 @@ Fix tests or skip (not recommended):
 ### Linear Ticket Not Found
 
 ```
-⚠️  Could not find Linear ticket RCW-999
+⚠️  Could not find Linear ticket PROJ-999
 
 - Check ticket exists in Linear
 - Verify ticket ID in branch name

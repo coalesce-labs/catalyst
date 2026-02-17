@@ -2,7 +2,7 @@
 description: Plan work for current or next cycle using Linearis and GitHub
 category: project-task-management
 tools: Bash(linearis *), Bash(gh *), Read, Write, TodoWrite
-model: inherit
+model: opus
 version: 1.0.0
 status: placeholder
 ---

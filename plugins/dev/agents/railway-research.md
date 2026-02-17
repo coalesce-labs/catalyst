@@ -4,7 +4,7 @@ description:
   Research Railway deployments, logs, environment variables, and service health using Railway CLI.
   Useful for deployment investigation and runtime debugging.
 tools: Bash(railway *), Read, Grep
-model: inherit
+model: haiku
 version: 1.0.0
 ---
 

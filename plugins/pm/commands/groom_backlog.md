@@ -2,7 +2,7 @@
 description: Groom Linear backlog to identify orphaned issues, incorrect project assignments, and health issues
 category: pm
 tools: Task, Read, Write
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
@@ -193,6 +193,10 @@ chmod +x "$UPDATE_SCRIPT"
 ```
 
 ### Step 6: Save Report
+
+**IMPORTANT: Document Storage Rules**
+- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 ```bash
 REPORT_DIR="thoughts/shared/reports/backlog"

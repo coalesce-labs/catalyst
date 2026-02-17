@@ -7,7 +7,7 @@ description:
 tools:
   Read, Grep, Glob, Bash(ls *), mcp__deepwiki__ask_question, mcp__context7__get_library_docs,
   mcp__context7__resolve_library_id
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 

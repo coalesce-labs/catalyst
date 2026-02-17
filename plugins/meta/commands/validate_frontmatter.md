@@ -2,7 +2,7 @@
 description: Validate and fix frontmatter consistency across all workflows
 category: workflow-discovery
 tools: Read, Edit, Glob, Grep
-model: inherit
+model: haiku
 version: 1.0.0
 workspace_only: true
 ---

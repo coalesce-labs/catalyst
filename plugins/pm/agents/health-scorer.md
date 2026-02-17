@@ -11,7 +11,7 @@ description: |
 
   This agent provides analysis and recommendations.
 tools: Read
-model: inherit
+model: haiku
 ---
 
 # Health Score Analyzer

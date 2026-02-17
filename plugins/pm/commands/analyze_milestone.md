@@ -2,7 +2,7 @@
 description: Analyze project milestone health with actionable insights, target date assessment, risk analysis, and specific recommendations
 category: pm
 tools: Task, Read, Write, TodoWrite
-model: inherit
+model: opus
 version: 1.0.0
 ---
 
@@ -142,6 +142,10 @@ Format the analyzer output into final report:
 ```
 
 ### Step 5: Save Report
+
+**IMPORTANT: Document Storage Rules**
+- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 ```bash
 REPORT_DIR="thoughts/shared/reports/milestones"

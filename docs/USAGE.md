@@ -437,6 +437,26 @@ Bad:
 
 Commands are slash commands that execute multi-step workflows.
 
+### Core Workflow Flow
+
+The standard development workflow chains these commands together:
+
+```
+/research-codebase → /create-plan → /iterate-plan (optional) → /implement-plan → /validate-plan
+```
+
+Each command auto-discovers documents from the previous step via workflow context tracking.
+
+### Alternative: One-Shot Workflow
+
+For straightforward tasks, use the all-in-one command:
+
+```
+/oneshot PROJ-123  (does all phases with context isolation)
+```
+
+This runs research, planning, and implementation in a single invocation with proper context isolation between phases.
+
 ### /catalyst-dev:create_plan
 
 Creates comprehensive implementation plans through interactive research and collaboration.
@@ -539,6 +559,38 @@ Claude will ask for task details and guide you through the planning process.
 
 ## References
 ```
+
+### /catalyst-dev:iterate_plan
+
+Iterates on an existing plan based on feedback, new requirements, or implementation learnings.
+
+**Usage:**
+
+```
+/catalyst-dev:iterate_plan
+```
+
+Or with an explicit path:
+
+```
+/catalyst-dev:iterate_plan thoughts/shared/plans/2025-01-08-ENG-1234-rate-limiting.md
+```
+
+**The Process:**
+
+1. **Auto-Discovery** - Finds recent plan from workflow context (or uses provided path)
+2. **Read Current Plan** - Reads the full plan to understand current state
+3. **Gather Feedback** - Asks what needs to change (scope, phases, approach)
+4. **Research Updates** - Spawns agents if new research is needed
+5. **Update Plan** - Edits the plan in place with tracked changes
+6. **Save & Sync** - Updates workflow context and syncs thoughts
+
+**When to Use:**
+
+- After `/create-plan` when feedback requires changes before implementation
+- Mid-implementation when reality differs from the plan
+- When requirements change after initial planning
+- To add phases or refine success criteria
 
 ### /catalyst-dev:implement_plan
 
@@ -718,9 +770,11 @@ auto-discover them without manual file paths.
 
 1. `/research-codebase` → Saves research document to context
 2. `/create-plan` → Automatically finds and references recent research
-3. `/implement-plan` → Automatically finds most recent plan (no path needed!)
-4. `/create-handoff` → Saves handoff document to context
-5. `/resume-handoff` → Automatically finds most recent handoff
+3. `/iterate-plan` → Automatically finds most recent plan to iterate on
+4. `/implement-plan` → Automatically finds most recent plan (no path needed!)
+5. `/create-handoff` → Saves handoff document to context
+6. `/resume-handoff` → Automatically finds most recent handoff
+7. `/oneshot` → Auto-discovers tickets and chains research, plan, and implement
 
 **Example workflow**:
 

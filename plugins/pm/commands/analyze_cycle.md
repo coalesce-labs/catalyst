@@ -2,7 +2,7 @@
 description: Analyze cycle health and generate comprehensive report with actionable insights, risk analysis, capacity assessment, and specific recommendations
 category: pm
 tools: Task, Read, Write, TodoWrite
-model: inherit
+model: opus
 version: 1.0.0
 ---
 
@@ -212,6 +212,10 @@ Format the agent's analysis into a user-facing health report:
 ```
 
 ### Step 5: Save Report
+
+**IMPORTANT: Document Storage Rules**
+- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 Write report to `thoughts/shared/reports/cycles/YYYY-MM-DD-cycle-N-status.md`
 

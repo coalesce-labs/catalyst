@@ -17,11 +17,6 @@ These are universally useful and work with any project:
    - Runs verification commands
    - Updates PR via GitHub API
 
-3. **debug.md** - Debugging helper
-   - Investigates logs, database, git state
-   - Can be adapted for any project's logging structure
-   - Helps debug without burning main context
-
 ### 🔧 HumanLayer CLI Commands (Use Directly)
 
 These are CLI commands that should be called directly, not duplicated:
@@ -47,32 +42,31 @@ These are tightly coupled to HumanLayer's infrastructure:
    - HumanLayer project IDs
    - Can be adapted if you use Linear, but needs customization
 
-2. **ci_commit.md / ci_describe_pr.md** - CI-specific versions
-   - Hardcoded for HumanLayer's CI environment
-   - Different behavior than local versions
-
-3. **create_handoff.md / resume_handoff.md** - Session handoff
+2. **create_handoff.md / resume_handoff.md** - Session handoff
    - Uses HumanLayer daemon for session management
    - Specific to their multi-Claude workflow
 
-4. **ralph\_\*.md commands** - Internal workflows
+3. **ralph\_\*.md commands** - Internal workflows
    - Named after their process "Ralph"
    - HumanLayer-specific conventions
 
-5. **research_codebase\*.md** - Variations of create_plan
+4. **research_codebase\*.md** - Variations of create_plan
    - Duplicates of create_plan with slight tweaks
    - We already have create_plan
 
-6. **founder_mode.md** - Internal joke/tool
+5. **founder_mode.md** - Internal joke/tool
    - Not generally useful
 
 ## Recommendations
 
 ### What to Add Now
 
-1. ✅ **commit.md** - Already copied
-2. ✅ **describe_pr.md** - Already copied
-3. ✅ **debug.md** - Already copied
+1. ✅ **commit.md** - Already added
+2. ✅ **describe_pr.md** - Already added
+3. ✅ **iterate_plan.md** - Already added
+4. ✅ **ci_commit.md** - Already added
+5. ✅ **ci_describe_pr.md** - Already added
+6. ✅ **oneshot.md** - Already added
 
 ### What to Consider Adding
 
@@ -93,13 +87,16 @@ If you use **Linear** for issue tracking:
 
 ```
 commands/
-├── commit.md              # Git commit creation (copied from HL)
-├── create_plan.md         # Interactive planning (copied from HL)
-├── create_worktree.md     # Worktree management (adapted from HL)
-├── debug.md               # Debugging helper (copied from HL)
-├── describe_pr.md         # PR description (copied from HL)
-├── implement_plan.md      # Plan execution (copied from HL)
-└── validate_plan.md       # Plan validation (copied from HL)
+├── ci_commit.md           # CI/automation git commit (sonnet)
+├── ci_describe_pr.md      # CI/automation PR description (sonnet)
+├── commit.md              # Interactive git commit creation (opus)
+├── create_plan.md         # Interactive planning (opus)
+├── create_worktree.md     # Worktree management (opus)
+├── describe_pr.md         # Interactive PR description (opus)
+├── implement_plan.md      # Plan execution (opus)
+├── iterate_plan.md        # Update plans based on feedback (opus)
+├── oneshot.md             # End-to-end research → plan → implement (opus)
+└── validate_plan.md       # Plan validation (opus)
 ```
 
 ## Usage Notes
@@ -117,11 +114,43 @@ commands/
 - Runs verification commands automatically
 - Updates PR via GitHub API
 
-### debug.md
+### ci_commit.md
 
-- Use when hitting issues during implementation
-- Investigates without burning main context
-- Adapt log paths for your project structure
+- Non-interactive git commit for CI pipelines and automation
+- Uses Sonnet model tier for cost efficiency
+- Never commits sensitive files or thoughts/
+- Conventional commit format maintained
+
+### ci_describe_pr.md
+
+- Non-interactive PR description generation for CI/automation
+- Uses Sonnet model tier for cost efficiency
+- Auto-detects current PR, generates and updates immediately
+- Runs `humanlayer thoughts sync` automatically
+
+### iterate_plan.md
+
+- Update existing implementation plans based on feedback
+- Uses Opus model tier for planning quality
+- Research-backed modifications, not just text edits
+- Reads current plan, gathers new context, produces updated plan
+
+### oneshot.md
+
+- End-to-end autonomous workflow: research, plan, implement
+- Uses Opus model tier for quality across all phases
+- Each phase runs in a fresh Claude Code session via `humanlayer launch`
+- Context isolation between phases prevents token overflow
+
+## Model Tiers
+
+Catalyst uses a three-tier model strategy:
+
+| Tier | Model | Use Case | Commands |
+|------|-------|----------|----------|
+| **Opus** | claude-opus-4-5 | Planning, implementation, complex analysis | commit, create_plan, implement_plan, iterate_plan, validate_plan, describe_pr, oneshot |
+| **Sonnet** | claude-sonnet-4-5 | CI/automation, non-interactive tasks | ci_commit, ci_describe_pr |
+| **Haiku** | claude-haiku-3-5 | Data collection, fast lookups | Research agents (linear-research, metrics collectors) |
 
 ## Creating Your Own PR Template
 

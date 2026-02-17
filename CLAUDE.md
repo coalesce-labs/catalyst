@@ -172,12 +172,51 @@ All agents follow a **documentarian, not critic** approach:
 
 This is critical - agents are for understanding codebases, not evaluating them.
 
+### Agent Teams vs Subagents
+
+Claude Code provides two parallelization mechanisms. Use the right one for each task:
+
+**Subagents (Task tool)** — Current default for most commands:
+- Own context window; results return to caller
+- Cannot spawn other subagents (no nesting)
+- Lower token cost
+- Best for: parallel research gathering, code analysis, file search
+
+**Agent Teams (TeammateTool)** — For complex multi-domain work:
+- Each teammate is a full Claude Code session
+- Teammates CAN spawn their own subagents (two-level parallelism)
+- Direct peer-to-peer messaging
+- Higher token cost
+- Best for: cross-layer features, complex implementations, competing-hypothesis debugging
+- Requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`
+
+**Decision framework:**
+
+| Scenario | Use Subagents | Use Agent Teams |
+|----------|--------------|-----------------|
+| Parallel research gathering | YES | Overkill |
+| Code analysis / file search | YES | Overkill |
+| Complex multi-file implementation | NO (can't nest) | YES |
+| Cross-layer features (frontend + backend + tests) | NO | YES |
+| Cost-sensitive operations | YES | NO |
+
+**Commands that support agent teams:**
+- `/implement-plan --team` — Spawns teammates for parallel phase implementation
+- `/oneshot --team` — Uses agent teams in implementation phase
+
+**Best practices:**
+- Lead on Opus, teammates on Sonnet
+- Size tasks at 5-6 per teammate
+- Each teammate owns distinct files (prevent conflicts)
+- Use plan approval gates for risky work
+
 ### Command Organization
 
 Commands are organized into namespaces for clarity and discoverability:
 
 - **workflow/** - Core research/plan/implement/validate flow
-- **dev/** - Development workflow (commit, debug, PR descriptions)
+- **dev/** - Development workflow (commit, PR descriptions)
+- **ci/** - CI/automation commands (non-interactive)
 - **linear/** - Linear ticket management and PR lifecycle
 - **project/** - Project-level operations (worktrees, updates)
 - **handoff/** - Context persistence across sessions
@@ -368,11 +407,14 @@ ryan-claude-workspace/
 │   │   │   ├── external-research.md
 │   │   │   └── README.md
 │   │   ├── commands/        # Core workflow commands
+│   │   │   ├── ci_commit.md
+│   │   │   ├── ci_describe_pr.md
 │   │   │   ├── commit.md
-│   │   │   ├── debug.md
-│   │   │   ├── describe_pr.md
 │   │   │   ├── create_plan.md
+│   │   │   ├── describe_pr.md
 │   │   │   ├── implement_plan.md
+│   │   │   ├── iterate_plan.md
+│   │   │   ├── oneshot.md
 │   │   │   ├── validate_plan.md
 │   │   │   ├── create_worktree.md
 │   │   │   └── README.md
@@ -472,6 +514,17 @@ ryan-claude-workspace/
 - Includes automated AND manual success criteria
 - Saves to `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXX-description.md`
 
+**2b. Iteration Phase (if revisions needed):**
+
+```
+/iterate-plan
+> Feedback: Simplify the OAuth token refresh logic
+```
+
+- `/create-plan` → `/iterate-plan` (if revisions needed) → `/implement-plan`
+- Revises an existing plan based on feedback
+- Preserves plan structure and success criteria
+
 **3. Implementation Phase:**
 
 ```
@@ -511,6 +564,16 @@ This creates:
 - Dependencies installed
 
 **Key benefit:** Multiple features in progress, shared context via thoughts.
+
+### Oneshot (End-to-End)
+
+Run the full pipeline with context isolation between phases:
+
+```
+/oneshot PROJ-123
+```
+
+Chains: research → (new session) → plan → (new session) → implement
 
 ### Workflow Discovery
 
@@ -569,21 +632,18 @@ Use `/validate-frontmatter` to check consistency.
 
 ### Model Selection Guidance
 
-Catalyst uses a simple two-tier model strategy:
+Catalyst uses a three-tier model strategy:
 
-**Opus 4.5 (via `model: inherit`)** - Default for most tasks:
-- Complex analysis and synthesis
-- Planning and implementation
-- All orchestrating commands
-- Research interpretation
+**Tier 1: Opus** — Planning, complex analysis, implementation orchestration:
+- create_plan, implement_plan, research_codebase, validate_plan, oneshot, cycle_plan, cycle_review
 
-**Haiku 4.5 (`model: haiku`)** - Data collection only:
-- Raw metrics collection (github-metrics, linear-metrics, thoughts-metrics)
-- Simple classification tasks (code-classifier)
-- Calendar/date parsing (calendar-analyzer)
-- Fast, high-frequency lookups (linear-research)
+**Tier 2: Sonnet** — Analysis agents, PR/commit workflows, structured research:
+- codebase-analyzer, external-research, describe_pr, commit, create_pr, create_handoff, linear
 
-**Why no Sonnet?** With Opus 4.5's 76% token efficiency improvement, the cost difference is minimal while quality is significantly better. Haiku handles the speed-critical data collection tasks.
+**Tier 3: Haiku** — Fast lookups, data collection, file finding:
+- codebase-locator, thoughts-locator, linear-research, github-research
+
+All agents and commands specify their tier explicitly in frontmatter — no more `model: inherit`.
 
 ## Dependencies
 
@@ -900,6 +960,15 @@ humanlayer thoughts sync
 
 **Sharing with team:** Commit `thoughts/` to project repo. Team gets shared context via thoughts
 system. Each team member installs the Catalyst plugin independently.
+
+## CI/Automation Commands
+
+Catalyst includes non-interactive commands for CI pipelines and automated workflows:
+
+- `/catalyst-dev:ci_commit` — Create commits autonomously (no user prompts)
+- `/catalyst-dev:ci_describe_pr` — Generate/update PR descriptions autonomously
+
+These commands follow the same conventions (conventional commits, PR templates) but skip all interactive prompts. They never commit sensitive files or add Claude attribution.
 
 ## Multi-Config Support
 

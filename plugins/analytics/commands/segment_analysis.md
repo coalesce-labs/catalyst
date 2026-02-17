@@ -2,7 +2,7 @@
 description: Analyze user segments and cohorts for targeted insights
 category: analytics
 tools: Task, TodoWrite
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 

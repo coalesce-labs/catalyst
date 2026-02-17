@@ -2,7 +2,7 @@
 description: Create conventional commits for session changes
 category: version-control-git
 tools: Bash, Read
-model: inherit
+model: sonnet
 version: 2.0.0
 ---
 
@@ -36,14 +36,14 @@ during this session.
    - Map to scopes:
      - `agents/*.md` → `agents`
      - `commands/*.md` → `commands`
-     - `hack/*` → `hack`
+     - `scripts/*` → `scripts`
      - `docs/*.md` → `docs`
      - `.claude/` → `claude`
      - Multiple dirs or root files → empty scope (cross-cutting)
 
    **Extract ticket reference:**
    - Get current branch: `git branch --show-current`
-   - Extract ticket pattern: `{PREFIX}-{NUMBER}` (e.g., RCW-13, ENG-123)
+   - Extract ticket pattern: `{PREFIX}-{NUMBER}` (e.g., ENG-123, PROJ-456)
    - Will be added to commit footer
 
 3. **Generate conventional commit message:**
@@ -74,7 +74,7 @@ during this session.
    and scope from changed files, following conventional commits spec.
    Extracts ticket references from branch names for traceability.
 
-   Refs: RCW-13
+   Refs: ENG-123
    ```
 
 4. **Present plan to user:**
@@ -102,13 +102,13 @@ Reads from `.claude/config.json`:
   "catalyst": {
     "commit": {
       "useConventional": true,
-      "scopes": ["agents", "commands", "hack", "docs", "claude", "config"],
+      "scopes": ["agents", "commands", "scripts", "docs", "config"],
       "autoDetectType": true,
       "autoDetectScope": true,
       "requireBody": false
     },
     "project": {
-      "ticketPrefix": "RCW"
+      "ticketPrefix": "PROJ"
     }
   }
 }
@@ -143,7 +143,7 @@ feat(agents): add codebase-pattern-finder agent
 Implements new agent for finding similar code patterns across
 the codebase with concrete examples and file references.
 
-Refs: RCW-45
+Refs: ENG-456
 ```
 
 **Fix:**
@@ -154,18 +154,18 @@ fix(commands): handle missing PR template gracefully
 Previously crashed when thoughts/shared/pr_description.md was
 missing. Now provides clear error with setup instructions.
 
-Refs: RCW-78
+Refs: ENG-789
 ```
 
 **Documentation:**
 
 ```
-docs(hack): add README for installation scripts
+docs(scripts): add README for setup scripts
 
-Documents all scripts in hack/ directory with usage examples
-and explains when to use each installation method.
+Documents all scripts in scripts/ directory with usage examples
+and explains when to use each setup method.
 
-Refs: RCW-12
+Refs: ENG-012
 ```
 
 **Chore (no ticket):**

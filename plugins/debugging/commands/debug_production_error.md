@@ -2,7 +2,7 @@
 description: Debug production errors using Sentry error tracking and analysis
 category: debugging
 tools: Task, TodoWrite
-model: inherit
+model: opus
 version: 1.0.0
 ---
 

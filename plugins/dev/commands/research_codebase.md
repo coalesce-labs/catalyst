@@ -2,7 +2,7 @@
 description: Conduct comprehensive codebase research using parallel sub-agents
 category: workflow
 tools: Read, Write, Grep, Glob, Task, TodoWrite, Bash
-model: inherit
+model: opus
 version: 1.0.0
 ---
 
@@ -148,7 +148,7 @@ Collect metadata for the research document:
 
 **If using thoughts system with metadata script:**
 
-- Run `hack/spec_metadata.sh` or equivalent to generate metadata
+- Generate metadata using git commands (see simple approach below)
 - Metadata includes: date, researcher, git commit, branch, repository
 
 **If using simple approach:**
@@ -169,6 +169,11 @@ All research documents are stored in the **thoughts system** for persistence:
 - ✅ Shared across worktrees
 - ✅ Synced via `humanlayer thoughts sync`
 - ✅ Team collaboration ready
+
+**IMPORTANT: Document Storage Rules**
+- ALWAYS write to `thoughts/shared/` (e.g., `thoughts/shared/research/`, `thoughts/shared/plans/`)
+- NEVER write to `thoughts/searchable/` — this is a read-only search index
+- NEVER write to `thoughts/{username}/` unless explicitly for personal notes
 
 **Filename format:**
 - With ticket: `thoughts/shared/research/YYYY-MM-DD-PROJ-XXXX-description.md`
@@ -507,10 +512,9 @@ Starting fresh ensures optimal AI performance.
 
 **If using thoughts system:**
 
-- `thoughts/searchable/` is a special directory - paths found there should be documented as their
-  actual location
-- Example: `thoughts/searchable/allison/notes.md` → document as `thoughts/allison/notes.md`
-- Don't change directory names (keep `allison/`, don't change to `shared/`)
+- `thoughts/searchable/` is a read-only search index directory
+- Paths found there should be documented as their actual location in `thoughts/shared/`
+- Example: `thoughts/searchable/shared/research/topic.md` → document as `thoughts/shared/research/topic.md`
 
 **If NOT using thoughts system:**
 

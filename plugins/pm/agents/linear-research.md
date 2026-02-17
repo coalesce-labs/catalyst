@@ -28,13 +28,13 @@ Gather data from Linear using the Linearis CLI. This is a **data collection spec
 
 ```bash
 # Read a ticket (works with TEAM-123 or UUID)
-linearis issues read BRAVO-284
+linearis issues read TEAM-123
 
 # Update ticket state (use --state NOT --status!)
-linearis issues update BRAVO-284 --state "Research"
+linearis issues update TEAM-123 --state "Research"
 
 # Add comment (use 'comments create' NOT 'issues comment'!)
-linearis comments create BRAVO-284 --body "Starting research"
+linearis comments create TEAM-123 --body "Starting research"
 
 # List tickets
 linearis issues list --limit 50

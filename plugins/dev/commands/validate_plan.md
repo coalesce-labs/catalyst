@@ -1,6 +1,7 @@
 ---
 description: Validate that implementation plans were correctly executed
 category: workflow
+model: opus
 ---
 
 # Validate Plan

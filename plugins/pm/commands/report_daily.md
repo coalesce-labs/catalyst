@@ -2,7 +2,7 @@
 description: Generate daily status report showing yesterday's deliveries, current work, and team members needing assignments
 category: pm
 tools: Task, Read, Write
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 
@@ -169,6 +169,10 @@ Combine research results to identify:
 ```
 
 ### Step 5: Save Report
+
+**IMPORTANT: Document Storage Rules**
+- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 ```bash
 REPORT_DIR="thoughts/shared/reports/daily"

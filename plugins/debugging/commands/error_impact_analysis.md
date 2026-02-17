@@ -2,7 +2,7 @@
 description: Analyze the impact and scope of production errors
 category: debugging
 tools: Task, TodoWrite
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 

@@ -2,7 +2,7 @@
 description: Interactive guide to supported workflows with context-aware assistance
 category: workflow
 tools: Read, Grep, Glob, Task
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 

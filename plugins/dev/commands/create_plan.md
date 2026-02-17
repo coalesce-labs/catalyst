@@ -2,7 +2,7 @@
 description: Create detailed implementation plans through an interactive process
 category: workflow
 tools: Read, Write, Grep, Glob, Task, TodoWrite, Bash
-model: inherit
+model: opus
 version: 1.0.0
 ---
 
@@ -93,8 +93,8 @@ Continue with:
 ```
 I'll analyze this information and work with you to create a comprehensive plan.
 
-Tip: You can also invoke this command with a ticket file directly: `/create_plan thoughts/allison/tickets/proj_123.md`
-For deeper analysis, try: `/create_plan think deeply about thoughts/allison/tickets/proj_123.md`
+Tip: You can also invoke this command with a ticket file directly: `/create_plan thoughts/shared/tickets/PROJ-123.md`
+For deeper analysis, try: `/create_plan think deeply about thoughts/shared/tickets/PROJ-123.md`
 ```
 
 Then wait for the user's input.
@@ -104,7 +104,7 @@ Then wait for the user's input.
 ### Step 1: Context Gathering & Initial Analysis
 
 1. **Read all mentioned files immediately and FULLY**:
-   - Ticket files (e.g., `thoughts/allison/tickets/proj_123.md`)
+   - Ticket files (e.g., `thoughts/shared/tickets/PROJ-123.md`)
    - Research documents
    - Related implementation plans
    - Any JSON/data files mentioned
@@ -122,8 +122,7 @@ Then wait for the user's input.
 
    These agents will:
    - Find relevant source files, configs, and tests
-   - Identify the specific directories to focus on (e.g., if WUI is mentioned, they'll focus on
-     humanlayer-wui/)
+   - Identify the specific directories to focus on (e.g., they'll focus on the relevant project directory)
    - Trace data flow and key functions
    - Return detailed explanations with file:line references
 
@@ -262,6 +261,10 @@ After structure approval:
    REPO_NAME=$(basename "$(git rev-parse --show-toplevel)")
    ```
 
+   **IMPORTANT: Document Storage Rules**
+   - ALWAYS write to `thoughts/shared/plans/` for plan documents
+   - NEVER write to `thoughts/searchable/` — this is a read-only search index
+
 2. **Write the plan** to `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md`
    - Format: `YYYY-MM-DD-PROJ-XXXX-description.md` where:
      - YYYY-MM-DD is today's date
@@ -384,7 +387,7 @@ type: implementation_plan
 
 ## References
 
-- Original ticket: `thoughts/allison/tickets/proj_XXXX.md`
+- Original ticket: `thoughts/shared/tickets/PROJ-XXX.md`
 - Related research: `thoughts/shared/research/[relevant].md`
 - Similar implementation: `[file:line]`
 ````
@@ -459,9 +462,50 @@ type: implementation_plan
 
 5. **Continue refining** until the user is satisfied
 
-6. **Final context check** after approval:
+6. **Final context check and implementation recommendation** after approval:
    - If context >50%, remind user to clear before implementation
-   - Provide clear instructions on next steps with fresh context
+
+   **Analyze the plan to determine the best implementation approach and provide a copy-paste ready command.**
+
+   **Use `--team` when ALL of these are true:**
+   1. Plan has 3+ phases that can be executed in parallel (not sequential dependencies)
+   2. Changes span distinct domains (e.g., frontend + backend + tests + config)
+   3. Each domain's file changes don't overlap (no two teammates editing the same file)
+   4. The total scope is substantial (10+ files across 3+ directories)
+
+   **Use standard mode (no `--team`) when ANY of these are true:**
+   1. Changes are sequential (each phase depends on the previous)
+   2. Most changes are in the same directory or closely related files
+   3. Total scope is small (fewer than 10 files)
+   4. Changes are tightly coupled (e.g., API + client contract changes)
+
+   **Always output this block after plan approval:**
+
+   ````
+   ## Ready to Implement
+
+   {IF team mode recommended:}
+   This plan spans {N} independent domains ({list domains}) with {M}+ files.
+   **Recommended: agent team mode** for parallel implementation.
+
+   Start a new session and run:
+   ```
+   /catalyst-dev:implement_plan --team thoughts/shared/plans/{PLAN_FILENAME}
+   ```
+
+   {IF standard mode recommended:}
+   This plan has sequential phases with tightly coupled changes.
+   **Recommended: standard mode** for focused implementation.
+
+   Start a new session and run:
+   ```
+   /catalyst-dev:implement_plan thoughts/shared/plans/{PLAN_FILENAME}
+   ```
+
+   {ALWAYS include:}
+   Tip: Start a fresh session before implementing. The implementation phase
+   needs context for reading source files and tracking progress.
+   ````
 
 ## Important Guidelines
 
@@ -483,7 +527,7 @@ type: implementation_plan
    - Include specific file paths and line numbers
    - Write measurable success criteria with clear automated vs manual distinction
    - automated steps should use `make` whenever possible - for example
-     `make -C humanlayer-wui check` instead of `cd humanlayer-wui && bun run fmt`
+     `make check` instead of running individual lint/test commands
 
 4. **Be Practical**:
    - Focus on incremental, testable changes
@@ -576,9 +620,8 @@ When spawning research sub-tasks:
    - What information to extract
    - Expected output format
 4. **Be EXTREMELY specific about directories**:
-   - If the ticket mentions "WUI", specify `humanlayer-wui/` directory
-   - If it mentions "daemon", specify `hld/` directory
-   - Never use generic terms like "UI" when you mean "WUI"
+   - Use exact directory names from the codebase, not generic terms
+   - If the project has specific directory conventions, follow them precisely
    - Include the full path context in your prompts
 5. **Specify read-only tools** to use
 6. **Request specific file:line references** in responses
@@ -606,12 +649,12 @@ tasks = [
 User: /implementation_plan
 Assistant: I'll help you create a detailed implementation plan...
 
-User: We need to add parent-child tracking for Claude sub-tasks. See thoughts/allison/tickets/proj_456.md
+User: We need to add parent-child tracking for Claude sub-tasks. See thoughts/shared/tickets/PROJ-456.md
 Assistant: Let me read that ticket file completely first...
 
 [Reads file fully]
 
-Based on the ticket, I understand we need to track parent-child relationships for Claude sub-task events in the hld daemon. Before I start planning, I have some questions...
+Based on the ticket, I understand we need to [specific task from ticket]. Before I start planning, I have some questions...
 
 [Interactive process continues...]
 ```

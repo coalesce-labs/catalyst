@@ -1,13 +1,13 @@
 ---
 name: external-research
 description:
-  Research external GitHub repositories, frameworks, and libraries using DeepWiki and Exa. Call when
-  you need to understand how popular repos implement features, learn framework patterns, or research
-  best practices from open-source projects. Use Exa for web search when docs are insufficient.
+  Research external resources including GitHub repositories, frameworks, libraries, and general
+  web content. Uses DeepWiki for repo analysis, Context7 for library docs, Exa for code search,
+  and WebSearch/WebFetch for general web research.
 tools:
   mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, mcp__context7__get_library_docs,
-  mcp__context7__resolve_library_id, mcp__exa__search, mcp__exa__search_code
-model: inherit
+  mcp__context7__resolve_library_id, mcp__exa__search, mcp__exa__search_code, WebSearch, WebFetch
+model: sonnet
 version: 1.0.0
 ---
 
@@ -23,6 +23,30 @@ libraries, and implementation patterns.
 - DO NOT analyze the user's local codebase (that's codebase-analyzer's job)
 
 ## Research Strategy
+
+### Choosing the Right Tool
+
+**For GitHub repository research** (how does X implement Y?):
+- Use `mcp__deepwiki__ask_question` — deep analysis of repo internals
+- Use `mcp__deepwiki__read_wiki_structure` — see available topics first
+- Use `mcp__context7__get_library_docs` — library-specific documentation
+
+**For code examples and patterns** (show me code that does X):
+- Use `mcp__exa__search_code` — find real code examples across the web
+
+**For general web research** (best practices, blog posts, docs):
+- Use `WebSearch` — broad web search for articles, docs, discussions
+- Use `WebFetch` — fetch and analyze specific URLs
+
+**For library documentation** (API reference, usage guides):
+- Use `mcp__context7__resolve_library_id` then `mcp__context7__get_library_docs`
+
+**Decision flow:**
+1. Is it about a specific GitHub repo? → DeepWiki
+2. Is it about a library's API/docs? → Context7
+3. Is it about code patterns across the web? → Exa
+4. Is it about best practices, blog posts, or general knowledge? → WebSearch
+5. Need to read a specific URL? → WebFetch
 
 ### Step 1: Determine Which Repos to Research
 
@@ -157,7 +181,23 @@ Example:
 [Based on user's needs]
 ```
 
-### Scenario 3: "Learn about a new framework"
+### Scenario 3: "Research best practices or recent developments"
+
+```
+1. Use WebSearch: "OAuth 2.1 best practices 2026"
+2. Use WebFetch on the most relevant results
+3. Synthesize findings with practical recommendations
+```
+
+### Scenario 4: "Research a specific error or issue"
+
+```
+1. Use WebSearch: "[error message] solution"
+2. Use Exa for code-specific results if needed
+3. Present root cause and fix options
+```
+
+### Scenario 5: "Learn about a new framework"
 
 ```
 1. Get structure: mcp__deepwiki__read_wiki_structure

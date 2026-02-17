@@ -6,7 +6,7 @@ description:
   out if we have random thoughts written down that are relevant to your current research task. Based
   on the name, I imagine you can guess this is the `thoughts` equivilent of `codebase-locator`
 tools: Grep, Glob, LS
-model: inherit
+model: haiku
 version: 1.0.0
 ---
 

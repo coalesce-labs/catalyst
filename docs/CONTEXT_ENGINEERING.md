@@ -826,6 +826,42 @@ Result: Fast initial discovery, thorough investigation, comprehensive validation
 
 ---
 
+## Two-Level Parallelism with Agent Teams
+
+Subagents have one limitation: they can't spawn other subagents (no nesting). Agent teams solve this.
+
+### The Pattern
+
+```
+Team level: Teammates work on separate features/layers in parallel
+Agent level: Each teammate spawns focused subagents for research/analysis
+
+Lead Agent (Opus) — Orchestrates
+├── Teammate A (Sonnet) — "Frontend changes"
+│   ├── Subagent: codebase-locator (Haiku) — Find component files
+│   └── Subagent: codebase-analyzer (Sonnet) — Understand patterns
+├── Teammate B (Sonnet) — "Backend changes"
+│   ├── Subagent: codebase-locator (Haiku) — Find API files
+│   └── Subagent: external-research (Sonnet) — Research library patterns
+└── Teammate C (Sonnet) — "Test coverage"
+    └── Subagent: codebase-pattern-finder (Sonnet) — Find test patterns
+```
+
+### When This Matters
+
+- **Subagents alone**: Good for research/analysis (read-only, flat parallelism)
+- **Agent teams**: Required for complex implementations (read-write, nested parallelism)
+- **Combined**: Each teammate can research AND implement within its domain
+
+### Cost Consideration
+
+Agent teams use significantly more tokens. Use them only when:
+1. Plan has 3+ independent domains
+2. Total scope is 10+ files
+3. Phases can genuinely be parallelized
+
+---
+
 ## Balancing Specificity vs Generality
 
 ### The Spectrum

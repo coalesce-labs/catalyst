@@ -203,7 +203,7 @@ Return structured JSON with all collected data:
     {
       "number": 234,
       "title": "Add OAuth support",
-      "author": "ryanrozich",
+      "author": "username",
       "created_at": "2025-01-10T09:00:00Z",
       "merged_at": "2025-01-12T14:30:00Z",
       "cycle_time_days": 2.23,
@@ -217,7 +217,7 @@ Return structured JSON with all collected data:
   "commits": [
     {
       "sha": "abc123",
-      "author": "ryanrozich",
+      "author": "username",
       "date": "2025-01-10T10:15:00Z",
       "message": "feat: add OAuth provider",
       "additions": 200,
@@ -240,7 +240,7 @@ Return structured JSON with all collected data:
   },
   "contributors": [
     {
-      "name": "ryanrozich",
+      "name": "username",
       "prs_merged": 15,
       "commits": 45,
       "additions": 12500,

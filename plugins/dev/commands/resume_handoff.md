@@ -2,7 +2,7 @@
 description: Resume work from a handoff document
 category: workflow
 tools: Read, Bash, TodoWrite
-model: inherit
+model: sonnet
 version: 1.0.0
 ---
 

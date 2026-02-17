@@ -47,6 +47,17 @@ chmod +x setup-catalyst.sh
 
 You're ready! Try `/research-codebase` in your next session.
 
+## Recommended: Add Catalyst Context to Your Project
+
+Copy the contents of `plugins/dev/templates/CLAUDE_SNIPPET.md` into your project's
+`CLAUDE.md` file. This helps Claude Code understand the available workflows and make
+better decisions about which commands and flags to use.
+
+```bash
+# Append Catalyst context to your project's CLAUDE.md
+cat plugins/dev/templates/CLAUDE_SNIPPET.md >> .claude/CLAUDE.md
+```
+
 ---
 
 ## Installation
@@ -92,8 +103,10 @@ Catalyst is distributed as a 5-plugin system. Install what you need:
 
 **catalyst-dev** (Always enabled):
 - 11 research agents
-- 18 workflow commands
+- 21 workflow commands
+- Three-tier model strategy (Opus / Sonnet / Haiku)
 - Linear integration
+- CI/automation commands for non-interactive workflows
 - Handoff system
 - ~3.5k context (lightweight)
 
@@ -311,7 +324,7 @@ Now thoughts automatically sync to GitHub.
 
 **Installation**:
 ```bash
-npm install -g --install-links ryanrozich/linearis#feat/cycles-cli
+npm install -g linearis
 ```
 
 **Configuration**:
@@ -555,13 +568,17 @@ Catalyst tracks your workflow via `.claude/.workflow-context.json`:
 |---------|---------|
 | `/research-codebase` | Research codebase and save findings |
 | `/create-plan` | Interactive planning with research |
+| `/iterate-plan` | Update existing plans based on feedback or changed requirements |
 | `/implement-plan` | Execute a plan (auto-finds recent) |
 | `/validate-plan` | Verify implementation |
+| `/oneshot` | End-to-end workflow: research, plan, and implement in one command |
 | `/create-pr` | Create PR with rich description |
 | `/merge-pr` | Merge PR and update Linear |
 | `/create-worktree` | Set up parallel workspace |
 | `/create-handoff` | Save context for later |
 | `/resume-handoff` | Restore previous context |
+| `/ci-commit` | Create git commits autonomously for CI/automation |
+| `/ci-describe-pr` | Generate PR descriptions autonomously for CI/automation |
 
 ### PM Commands (catalyst-pm plugin)
 

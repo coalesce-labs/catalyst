@@ -322,7 +322,7 @@ Create `commands/linear/linear.md` based on HumanLayer's but:
 **Remove**:
 
 - HumanLayer project IDs
-- Specific label assignments (hld/wui/meta)
+- Specific label assignments (project-specific labels)
 - URL mappings to humanlayer/thoughts
 
 **Keep**:
