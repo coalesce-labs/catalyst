@@ -46,8 +46,9 @@ Linearis CLI tool.
 linearis issues read TEAM-123
 
 # Update ticket state (use --state NOT --status!)
-linearis issues update TEAM-123 --state "Research"
+# State names should come from stateMap in .claude/config.json
 linearis issues update TEAM-123 --state "In Progress"
+linearis issues update TEAM-123 --state "In Review"
 
 # Add comment (use 'comments create' NOT 'issues comment'!)
 linearis comments create TEAM-123 --body "Starting research"
@@ -67,8 +68,8 @@ linearis projects list --team TEAM
 
 ### Common Mistakes to Avoid
 
-❌ `linearis issues update TICKET-123 --status "Research"` (Wrong flag)
-✅ `linearis issues update TICKET-123 --state "Research"`
+❌ `linearis issues update TICKET-123 --status "In Progress"` (Wrong flag)
+✅ `linearis issues update TICKET-123 --state "In Progress"`
 
 ❌ `linearis issues comment TICKET-123 "text"` (Wrong subcommand)
 ✅ `linearis comments create TICKET-123 --body "text"`

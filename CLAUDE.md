@@ -289,6 +289,19 @@ Catalyst uses a **two-layer config system** to keep secrets out of git:
     "ticketPrefix": "ACME",
     "name": "Acme Corp Project"
   },
+  "linear": {
+    "teamKey": "ACME",
+    "stateMap": {
+      "backlog": "Backlog",
+      "todo": "Todo",
+      "research": "In Progress",
+      "planning": "In Progress",
+      "inProgress": "In Progress",
+      "inReview": "In Review",
+      "done": "Done",
+      "canceled": "Canceled"
+    }
+  },
   "thoughts": {
     "user": null
   }
@@ -687,8 +700,9 @@ All agents and commands specify their tier explicitly in frontmatter — no more
 ### Linear Integration
 
 - `/linear` command for ticket management
-- Auto-configures on first use
-- Saves config to `.claude/config.json`
+- State transitions are configurable via `linear.stateMap` in `.claude/config.json`
+- Defaults match standard Linear states (Backlog, Todo, In Progress, In Review, Done, Canceled)
+- Set any `stateMap` key to `null` to skip that transition
 - See `docs/LINEAR_WORKFLOW_AUTOMATION.md`
 
 ### PM Plugin (catalyst-pm)

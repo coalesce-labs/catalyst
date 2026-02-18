@@ -295,8 +295,11 @@ if ! command -v linearis &> /dev/null; then
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
     echo "Install: npm install -g linearis"
 else
-    # Move to "Done"
-    linearis issues update "$ticket" --state "Done"
+    # Move to configured "Done" state
+    DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
+    if [[ "$DONE_STATE" != "null" ]]; then
+        linearis issues update "$ticket" --state "$DONE_STATE"
+    fi
 
     # Add merge comment
     linearis comments create "$ticket" \
@@ -482,8 +485,8 @@ Install Linearis:
 Configure:
   export LINEAR_API_TOKEN=your_token
 
-Then update ticket manually:
-  linearis issues update $ticket --state "Done"
+Then update ticket manually (use state name from your stateMap config):
+  linearis issues update $ticket --state "Done"  # or your configured done state
 ```
 
 **Linear API error:**
@@ -520,7 +523,9 @@ Uses `.claude/config.json`:
     },
     "linear": {
       "teamKey": "PROJ",
-      "doneStatusName": "Done"
+      "stateMap": {
+        "done": "Done"
+      }
     },
     "pr": {
       "defaultMergeStrategy": "squash",
@@ -534,6 +539,8 @@ Uses `.claude/config.json`:
   }
 }
 ```
+
+State names are read from `stateMap` with sensible defaults. See `.claude/config.json` for all keys.
 
 ## Examples
 

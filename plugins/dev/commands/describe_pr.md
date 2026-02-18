@@ -360,8 +360,11 @@ If ticket found:
 if ! command -v linearis &> /dev/null; then
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
 else
-    # If not already in "In Review", move it and assign to self
-    linearis issues update "$ticket" --state "In Review" --assignee "@me"
+    # Move to configured "In Review" state and assign to self
+    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .claude/config.json 2>/dev/null || echo "In Review")
+    if [[ "$IN_REVIEW_STATE" != "null" ]]; then
+        linearis issues update "$ticket" --state "$IN_REVIEW_STATE" --assignee "@me"
+    fi
 
     # Add comment about update with PR link
     linearis comments create "$ticket" \
@@ -523,8 +526,10 @@ Uses `.claude/config.json`:
       "ticketPrefix": "PROJ"
     },
     "linear": {
-      "teamId": "team-id",
-      "inReviewStatusName": "In Review"
+      "teamKey": "PROJ",
+      "stateMap": {
+        "inReview": "In Review"
+      }
     },
     "pr": {
       "testCommand": "make test",
@@ -534,6 +539,8 @@ Uses `.claude/config.json`:
   }
 }
 ```
+
+State names are read from `stateMap` with sensible defaults. See `.claude/config.json` for all keys.
 
 ## Remember:
 

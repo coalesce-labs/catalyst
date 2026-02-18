@@ -11,13 +11,16 @@ based on your workflow commands.
 
 When you run workflow commands, the Linear command automatically updates ticket status:
 
-| Command                            | Ticket Status Update               |
-| ---------------------------------- | ---------------------------------- |
-| `/catalyst-dev:research_codebase` (with ticket) | → **Research**                     |
-| `/catalyst-dev:create_plan` (with ticket)       | → **Planning**                     |
-| `/catalyst-dev:implement_plan` (with ticket)    | → **In Progress**                  |
-| `/catalyst-dev:describe_pr` (with ticket)       | → **In Review**                    |
-| PR merged                          | → **Done** (manual or via webhook) |
+| Command                            | stateMap Key | Default State |
+| ---------------------------------- | ------------ | ------------- |
+| `/catalyst-dev:research_codebase` (with ticket) | `research` | **In Progress** |
+| `/catalyst-dev:create_plan` (with ticket)       | `planning` | **In Progress** |
+| `/catalyst-dev:implement_plan` (with ticket)    | `inProgress` | **In Progress** |
+| `/catalyst-dev:describe_pr` (with ticket)       | `inReview` | **In Review** |
+| `/catalyst-dev:merge_pr`                        | `done` | **Done** |
+
+State names are configurable via `linear.stateMap` in `.claude/config.json`. Defaults match
+standard Linear workspace states.
 
 ### How It Detects Tickets
 
@@ -45,18 +48,38 @@ The commands look for tickets in:
 
 ## The Workflow
 
-### Recommended Workflow Statuses
+### Default Workflow (Standard Linear States)
 
-Simplified 6-status workflow (Option C):
+Catalyst works out of the box with standard Linear states. No custom states required:
 
 ```
 1. Backlog → New ideas and requests
-2. Research → Investigation, triage, spec definition ← /catalyst-dev:research_codebase
-3. Planning → Implementation plans ← /catalyst-dev:create_plan
-4. In Progress → Active development ← /catalyst-dev:implement_plan
-5. In Review → Code review ← /catalyst-dev:describe_pr
-6. Done → Complete
+2. Todo → Acknowledged, unstarted
+3. In Progress → Research, planning, or development ← /research_codebase, /create_plan, /implement_plan
+4. In Review → Code review ← /create_pr, /describe_pr
+5. Done → Complete ← /merge_pr
+6. Canceled → Closed without completing
 ```
+
+### Custom Workflow (Optional)
+
+Teams that want finer-grained tracking can configure `stateMap` to use custom states:
+
+```json
+{
+  "linear": {
+    "stateMap": {
+      "research": "Research in Progress",
+      "planning": "Plan in Progress",
+      "inProgress": "In Dev",
+      "inReview": "In Review",
+      "done": "Done"
+    }
+  }
+}
+```
+
+Run `scripts/linear/setup-linear-workflow` to create the full 12-state custom workflow.
 
 ### Why This Workflow Works
 
@@ -73,31 +96,29 @@ Simplified 6-status workflow (Option C):
 
 ## Setting Up Linear Statuses
 
-### Quick Setup (Recommended)
+### Default Setup (No Configuration Needed)
 
-Use the `/linear_setup_workflow` command:
+Standard Linear workspaces already have the states Catalyst needs:
+
+- **Backlog** (Backlog category)
+- **Todo** (Unstarted category)
+- **In Progress** (Started category)
+- **In Review** (Started category) — commonly added
+- **Done** (Completed category)
+- **Canceled** (Canceled category)
+
+If your workspace has these states, Catalyst works immediately with no configuration.
+
+### Advanced Setup (Optional)
+
+For teams that want fine-grained status tracking, run the setup script:
 
 ```bash
-/catalyst-dev:linear_setup_workflow
+scripts/linear/setup-linear-workflow
 ```
 
-This creates 6 statuses optimized for the workflow commands:
-
-1. **Backlog** (Backlog category) - Gray
-2. **Research** (Unstarted category) - Yellow
-3. **Planning** (Started category) - Yellow
-4. **In Progress** (Started category) - Blue
-5. **In Review** (Started category) - Blue
-6. **Done** (Completed category) - Blue
-
-### Manual Setup
-
-If you prefer to create statuses manually in Linear:
-
-1. Go to Team Settings → Workflow States
-2. Create these 6 statuses in order
-3. Assign to the correct category (Backlog/Unstarted/Started/Completed)
-4. Use the color scheme above for visual clarity
+This creates a 12-state custom workflow. After running it, update your `stateMap` in
+`.claude/config.json` to use the custom state names (the script outputs the config to copy).
 
 ## Complete Workflow Example
 
@@ -117,7 +138,7 @@ Here's how tickets flow through the simplified workflow:
 > "How does authentication currently work?"
 
 # Automatically:
-# - Moves ticket to "Research"
+# - Moves ticket to stateMap.research (default: "In Progress")
 # - Adds comment: "Starting research: How does authentication currently work?"
 # - Saves research document
 # - Attaches research to ticket
@@ -132,10 +153,9 @@ Here's how tickets flow through the simplified workflow:
 # User provides task details
 
 # Automatically:
-# - Moves ticket to "Planning"
+# - Moves ticket to stateMap.planning (default: "In Progress")
 # - Creates plan document
 # - Attaches plan to ticket
-# - Stays in "Planning" for team review
 ```
 
 ### 4. Team Review
@@ -153,7 +173,7 @@ Here's how tickets flow through the simplified workflow:
 /catalyst-dev:implement_plan thoughts/shared/plans/2025-10-04-PROJ-123-oauth.md
 
 # Automatically:
-# - Moves ticket to "In Progress"
+# - Moves ticket to stateMap.inProgress (default: "In Progress")
 # - Implements each phase
 # - Updates plan checkboxes
 ```
@@ -164,7 +184,7 @@ Here's how tickets flow through the simplified workflow:
 /catalyst-dev:describe_pr
 
 # Automatically:
-# - Moves ticket to "In Review"
+# - Moves ticket to stateMap.inReview (default: "In Review")
 # - Attaches PR to ticket
 # - Adds comment with PR link
 ```
@@ -180,21 +200,20 @@ Here's how tickets flow through the simplified workflow:
 ## Workflow Progression Summary
 
 ```
-Backlog
+Backlog (stateMap.backlog)
   ↓ (create ticket)
-Research
-  ↓ (/research_codebase)
-Planning
-  ↓ (/create_plan)
-Planning (stays for team review)
-  ↓ (team approves or /catalyst-dev:implement_plan)
-In Progress
-  ↓ (/implement_plan)
-In Review
-  ↓ (/describe_pr)
-Done
-  ↓ (PR merged)
+Todo (stateMap.todo)
+  ↓ (acknowledged)
+In Progress (stateMap.research / stateMap.planning / stateMap.inProgress)
+  ↓ (/research_codebase → /create_plan → /implement_plan)
+In Review (stateMap.inReview)
+  ↓ (/create_pr or /describe_pr)
+Done (stateMap.done)
+  ↓ (/merge_pr)
 ```
+
+With standard Linear states, research/planning/implementation all map to "In Progress".
+Teams with custom states can differentiate these phases via `stateMap`.
 
 ---
 
@@ -263,14 +282,14 @@ cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
 2. Command asks: "Is this for a Linear ticket?"
 3. If yes:
    a. Get ticket ID (from user or auto-detect)
-   b. Update ticket status → "Planning"
+   b. Update ticket status → stateMap.planning (default: "In Progress")
    c. Add comment: "Creating implementation plan"
 4. Create plan document
 5. Save to thoughts/shared/plans/
 6. When complete:
    a. Attach plan to Linear ticket via links
    b. Add comment with plan summary
-   c. Ticket stays in "Planning" for team review
+   c. Ticket stays for team review
 ```
 
 ### During `/catalyst-dev:implement_plan`
@@ -280,7 +299,7 @@ cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
 2. Read plan document
 3. Check plan frontmatter for ticket ID
 4. If ticket found:
-   a. Update ticket status → "In Progress"
+   a. Update ticket status → stateMap.inProgress (default: "In Progress")
    b. Add comment: "Started implementation from plan: [link]"
 5. Implement the plan
 6. Update checkboxes in plan as phases complete
@@ -296,7 +315,7 @@ cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
    - Commit messages
    - Plan document linked in description
 4. If ticket found:
-   a. Update ticket status → "In Review"
+   a. Update ticket status → stateMap.inReview (default: "In Review")
    b. Add comment with PR link
    c. Attach PR to ticket via links
 ```
@@ -487,7 +506,7 @@ Update command to use exact names.
 
 ### 🎯 Recommended Approach
 
-1. **Start simple**: Use HumanLayer's proven statuses
+1. **Start simple**: Use standard Linear states (works out of the box)
 2. **Configure per-project**: Each project gets own settings
 3. **Let automation work**: Trust the workflow commands to update tickets
 4. **Review in 1 month**: Adjust statuses based on what you learn

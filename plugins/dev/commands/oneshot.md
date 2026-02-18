@@ -53,7 +53,7 @@ Uses the provided text as the research query directly.
 This phase runs in the current session to allow user interaction during research.
 
 1. **Parse input**: Determine if ticket ID or freeform query
-2. **If ticket**: Read ticket details via Linearis CLI, move to "Research in Progress"
+2. **If ticket**: Read ticket details via Linearis CLI, move to `stateMap.research` (default: "In Progress")
 3. **Conduct research**: Spawn parallel sub-agents (same as `/research-codebase`):
    - **codebase-locator**: Find relevant files
    - **codebase-analyzer**: Understand current implementation
@@ -158,14 +158,14 @@ Phase 3: Implement (NEW session via humanlayer launch)
 
 If a ticket ID is provided:
 
-| Phase | Linear Status | Action |
-|-------|--------------|--------|
-| Research starts | "Research in Progress" | Comment: "Starting research" |
-| Research complete | — | Comment with research doc link |
-| Plan starts | "Plan in Progress" | Comment: "Starting planning" |
-| Plan approved | "Ready for Dev" | Comment with plan doc link |
-| Implementation starts | "In Dev" | Comment: "Starting implementation" |
-| PR created | "In Review" | Comment with PR link |
+| Phase | State (from stateMap) | Config Key | Default |
+|-------|----------------------|------------|---------|
+| Research starts | stateMap.research | `research` | "In Progress" |
+| Research complete | — | — | Comment with research doc link |
+| Plan starts | stateMap.planning | `planning` | "In Progress" |
+| Plan approved | stateMap.inProgress | `inProgress` | "In Progress" |
+| Implementation starts | stateMap.inProgress | `inProgress` | "In Progress" |
+| PR created | stateMap.inReview | `inReview` | "In Review" |
 
 ## Error Handling
 

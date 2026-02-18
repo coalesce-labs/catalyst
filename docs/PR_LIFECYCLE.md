@@ -399,10 +399,14 @@ git checkout -b PROJ-42-add-validation
 ### Workflow State Progression
 
 ```
-Backlog → Research → Planning → In Progress → In Review → Done
-          ↑          ↑          ↑             ↑            ↑
-     /research  /create-plan  /implement  /catalyst-dev:create_pr  /catalyst-dev:merge_pr
+Backlog → Todo → In Progress → In Review → Done
+                  ↑              ↑           ↑
+         /research_codebase  /create_pr  /merge_pr
+         /create_plan
+         /implement_plan
 ```
+
+State names are configurable via `linear.stateMap` in `.claude/config.json`.
 
 ### Auto-Assignment
 
@@ -450,11 +454,18 @@ View linked PRs in Linear:
     "ticketPrefix": "PROJ"
   },
   "linear": {
-    "teamId": "your-team-id",
-    "projectId": "your-project-id",
+    "teamKey": "PROJ",
     "thoughtsRepoUrl": "https://github.com/org/thoughts/blob/main",
-    "inReviewStatusName": "In Review",
-    "doneStatusName": "Done"
+    "stateMap": {
+      "backlog": "Backlog",
+      "todo": "Todo",
+      "research": "In Progress",
+      "planning": "In Progress",
+      "inProgress": "In Progress",
+      "inReview": "In Review",
+      "done": "Done",
+      "canceled": "Canceled"
+    }
   },
   "commit": {
     "useConventional": true,

@@ -1,5 +1,14 @@
 #!/bin/bash
-# setup-linear-workflow - Automatically create workflow statuses in Linear
+# setup-linear-workflow - Create OPTIONAL custom workflow statuses in Linear
+#
+# NOTE: This script is OPTIONAL. Catalyst works out-of-the-box with standard
+# Linear states (Backlog, Todo, In Progress, In Review, Done, Canceled).
+# Only run this if you want the full 12-state custom workflow for fine-grained
+# status tracking.
+#
+# After running, update your .claude/config.json with the stateMap output
+# shown at the end of the script.
+#
 # Usage: ./setup-linear-workflow [team_key]
 
 set -e
@@ -11,7 +20,10 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${BLUE}🔄 Linear Workflow Setup${NC}"
+echo -e "${BLUE}🔄 Linear Custom Workflow Setup (OPTIONAL)${NC}"
+echo ""
+echo -e "${YELLOW}Note: Catalyst works out-of-the-box with standard Linear states.${NC}"
+echo "This script creates an advanced 12-state workflow for fine-grained tracking."
 echo ""
 
 # Check for Linear CLI or API key
@@ -374,4 +386,22 @@ echo ""
 echo -e "${GREEN}✅ Workflow setup guide complete!${NC}"
 echo ""
 echo "Recommended: Use Option 1 (Claude with Linear MCP) for easiest setup"
+echo ""
+echo -e "${YELLOW}════════════════════════════════════════════════════════${NC}"
+echo -e "${YELLOW}After creating the custom states, add this to your${NC}"
+echo -e "${YELLOW}.claude/config.json to use them with Catalyst:${NC}"
+echo -e "${YELLOW}════════════════════════════════════════════════════════${NC}"
+echo ""
+echo '  "linear": {'
+echo '    "stateMap": {'
+echo '      "backlog": "Backlog",'
+echo '      "todo": "Triage",'
+echo '      "research": "Research in Progress",'
+echo '      "planning": "Plan in Progress",'
+echo '      "inProgress": "In Dev",'
+echo '      "inReview": "In Review",'
+echo '      "done": "Done",'
+echo '      "canceled": "Canceled"'
+echo '    }'
+echo '  }'
 echo ""

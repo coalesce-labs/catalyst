@@ -83,21 +83,26 @@ This workflow ensures alignment through planning before implementation:
 
 ### Workflow Statuses
 
-1. **Backlog** → New ideas and feature requests
-2. **Triage** → Initial review and prioritization
-3. **Spec Needed** → Needs problem statement and solution outline
-4. **Research Needed** → Requires investigation
-5. **Research in Progress** → Active research underway
-6. **Ready for Plan** → Research complete, needs implementation plan
-7. **Plan in Progress** → Writing implementation plan
-8. **Plan in Review** → Plan under discussion
-9. **Ready for Dev** → Plan approved, ready to implement
-10. **In Dev** → Active development
-11. **In Review** → PR submitted
-12. **Done** → Completed
+Catalyst maps workflow phases to your Linear workspace states via `stateMap` in
+`.claude/config.json`. Default mapping (matches standard Linear states):
 
-**Note**: These statuses must be configured in your Linear workspace settings. The Linearis CLI will
-read and use whatever states exist in your workspace.
+| Workflow Phase | Default State | Config Key |
+|---------------|---------------|------------|
+| New tickets | Backlog | `stateMap.backlog` |
+| Acknowledged | Todo | `stateMap.todo` |
+| Research started | In Progress | `stateMap.research` |
+| Planning started | In Progress | `stateMap.planning` |
+| Implementation | In Progress | `stateMap.inProgress` |
+| PR created | In Review | `stateMap.inReview` |
+| Completed | Done | `stateMap.done` |
+| Canceled | Canceled | `stateMap.canceled` |
+
+**Customization**: Override any key to match your workspace. Set to `null` to skip
+that transition.
+
+**Note**: These states must exist in your Linear workspace. The defaults match what
+Linear provides out of the box (plus "In Review" which is commonly added to the
+Started category).
 
 ### Key Principle
 
@@ -105,13 +110,13 @@ read and use whatever states exist in your workspace.
 
 ### Workflow Commands Integration
 
-These commands automatically update ticket status:
+These commands automatically update ticket status using `stateMap` config:
 
-- `/catalyst-dev:create_plan` → Moves ticket to "Plan in Progress"
-- Plan completed → Moves to "Plan in Review"
-- `/catalyst-dev:implement_plan` → Moves to "In Dev"
-- `/catalyst-dev:create_pr` → Moves to "In Review"
-- `/catalyst-dev:merge_pr` → Moves to "Done"
+- `/catalyst-dev:research_codebase` → Moves ticket to `stateMap.research` (default: "In Progress")
+- `/catalyst-dev:create_plan` → Moves ticket to `stateMap.planning` (default: "In Progress")
+- `/catalyst-dev:implement_plan` → Moves to `stateMap.inProgress` (default: "In Progress")
+- `/catalyst-dev:create_pr` → Moves to `stateMap.inReview` (default: "In Review")
+- `/catalyst-dev:merge_pr` → Moves to `stateMap.done` (default: "Done")
 
 ---
 
@@ -204,7 +209,7 @@ When referencing thoughts documents, always provide GitHub links:
      --title "[refined title]" \
      --description "[final description in markdown]" \
      --priority [1-4] \
-     --status "Backlog"
+     --status "$(jq -r '.catalyst.linear.stateMap.backlog // "Backlog"' .claude/config.json 2>/dev/null || echo "Backlog")"
 
    # Capture the created issue ID from output
    ISSUE_ID=$(linearis issues create ... | jq -r '.id')
@@ -282,26 +287,24 @@ When moving tickets to a new status:
 
 2. **Suggest next status based on workflow:**
 
+   State names come from `stateMap` in `.claude/config.json`:
+
    ```
-   Backlog → Triage (for initial review)
-   Triage → Spec Needed (needs more detail) OR Research Needed (needs investigation)
-   Spec Needed → Research Needed (once problem outlined)
-   Research Needed → Research in Progress (starting research)
-   Research in Progress → Ready for Plan (research complete)
-   Ready for Plan → Plan in Progress (starting plan with /catalyst-dev:create_plan)
-   Plan in Progress → Plan in Review (plan complete)
-   Plan in Review → Ready for Dev (plan approved)
-   Ready for Dev → In Dev (starting work with /catalyst-dev:implement_plan)
-   In Dev → In Review (PR created)
+   Backlog → Todo (acknowledged)
+   Todo → In Progress (research/planning/implementation started)
+   In Progress → In Review (PR created)
    In Review → Done (PR merged)
    ```
 
-3. **Automatic status updates:** When certain commands are run, automatically update ticket status:
-   - `/catalyst-dev:create_plan` with ticket → Move to "Plan in Progress"
-   - Plan synced and linked → Move to "Plan in Review"
-   - `/catalyst-dev:implement_plan` with ticket → Move to "In Dev"
-   - `/catalyst-dev:create_pr` with ticket → Move to "In Review"
-   - `/catalyst-dev:merge_pr` with ticket → Move to "Done"
+   Teams with custom states can configure finer-grained transitions via `stateMap`.
+
+3. **Automatic status updates:** When certain commands are run, automatically update ticket status
+   (state names read from `stateMap` config):
+   - `/catalyst-dev:research_codebase` with ticket → Move to `stateMap.research`
+   - `/catalyst-dev:create_plan` with ticket → Move to `stateMap.planning`
+   - `/catalyst-dev:implement_plan` with ticket → Move to `stateMap.inProgress`
+   - `/catalyst-dev:create_pr` with ticket → Move to `stateMap.inReview`
+   - `/catalyst-dev:merge_pr` with ticket → Move to `stateMap.done`
 
 4. **Manual status updates:**
 
@@ -358,23 +361,22 @@ When these commands are run, check if there's a related Linear ticket and update
 
 **During `/catalyst-dev:create_plan`:**
 
-1. If ticket mentioned, move to "Plan in Progress"
+1. If ticket mentioned, move to `stateMap.planning` (default: "In Progress")
 2. When plan complete, add comment with plan link
-3. Move to "Plan in Review"
 
 **During `/catalyst-dev:implement_plan`:**
 
-1. If ticket in plan metadata, move to "In Dev"
+1. If ticket in plan metadata, move to `stateMap.inProgress` (default: "In Progress")
 2. Add comment: "Started implementation from plan: [link]"
 
 **During `/catalyst-dev:create_pr`:**
 
-1. If ticket mentioned in PR or plan, move to "In Review"
+1. If ticket mentioned in PR or plan, move to `stateMap.inReview` (default: "In Review")
 2. Add comment with PR link
 
 **During `/catalyst-dev:merge_pr`:**
 
-1. Move ticket to "Done"
+1. Move ticket to `stateMap.done` (default: "Done")
 2. Add comment with merge details
 
 ---
@@ -395,19 +397,19 @@ When these commands are run, check if there's a related Linear ticket and update
 # 3. Create plan
 /catalyst-dev:create_plan
 # Reads research, creates plan
-# Ticket moves to "Plan in Progress" → "Plan in Review"
+# Ticket moves to stateMap.planning (default: "In Progress")
 
 # 4. Implement
 /catalyst-dev:implement_plan thoughts/shared/plans/2025-01-08-auth-feature.md
-# Ticket moves to "In Dev"
+# Ticket moves to stateMap.inProgress (default: "In Progress")
 
 # 5. Create PR
 /catalyst-dev:create_pr
-# Ticket moves to "In Review"
+# Ticket moves to stateMap.inReview (default: "In Review")
 
 # 6. Merge PR
 /catalyst-dev:merge_pr
-# Ticket moves to "Done"
+# Ticket moves to stateMap.done (default: "Done")
 ```
 
 ### Workflow 2: Quick Ticket Updates
@@ -416,8 +418,8 @@ When these commands are run, check if there's a related Linear ticket and update
 # Add progress comment
 linearis comments create PROJ-123 --body "Completed phase 1, moving to phase 2"
 
-# Move ticket forward
-linearis issues update PROJ-123 --state "In Dev"
+# Move ticket forward (state name from stateMap config)
+linearis issues update PROJ-123 --state "In Progress"
 
 # Search for related tickets
 linearis issues list --team PROJ | jq '.[] | select(.title | contains("authentication"))'
@@ -440,7 +442,7 @@ linearis issues list --limit 100 | jq '.[] | select(.state.name == "In Progress"
 linearis issues read TICKET-123
 
 # Create issue
-linearis issues create "Title" --description "Description" --state "Todo"
+linearis issues create "Title" --description "Description" --state "Backlog"
 
 # Update issue state
 linearis issues update TICKET-123 --state "In Progress"
@@ -480,9 +482,9 @@ linearis issues list --team TEAM | jq '.[] | select(.title | contains("bug"))'
 
 ## Notes
 
-- **Configuration**: Use `.claude/config.json` for team settings
-- **Status mapping**: Use status names that exist in your Linear workspace
-- **Automation**: Workflow commands auto-update tickets when ticket IDs are referenced
+- **Configuration**: Use `.claude/config.json` for team settings and `stateMap` for state names
+- **Status mapping**: Configure `linear.stateMap` to match your Linear workspace states
+- **Automation**: Workflow commands auto-update tickets using state names from `stateMap`
 - **CLI required**: Linearis CLI must be installed and configured with LINEAR_API_TOKEN
 
 This command integrates seamlessly with the create_plan → implement_plan → validate_plan workflow
