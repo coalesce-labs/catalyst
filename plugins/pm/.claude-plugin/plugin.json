@@ -1,6 +1,6 @@
 {
   "name": "catalyst-pm",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "description": "Linear-focused project management plugin with cycle management, milestone tracking, backlog grooming, and team analytics",
   "author": {
     "name": "Coalesce Labs",
