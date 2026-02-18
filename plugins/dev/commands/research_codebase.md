@@ -53,7 +53,7 @@ Then wait for the user's research query.
 - Break down the user's query into composable research areas
 - Think deeply about underlying patterns, connections, and architectural implications
 - Create a research plan using TodoWrite to track all subtasks
-- If a Linear ticket is provided, update it to "Research" status via Linearis CLI
+- If a Linear ticket is provided, update it to the configured research state via Linearis CLI (from `stateMap.research`)
 
 ### Step 3: Spawn parallel sub-agent tasks for comprehensive research
 
@@ -260,6 +260,12 @@ If the user has follow-up questions:
 
 If a ticket is detected (provided as argument, mentioned in query, or from context):
 
-- **At research start**: `linearis issues update "$ticketId" --state "Research"`
+- **At research start**:
+  ```bash
+  RESEARCH_STATE=$(jq -r '.catalyst.linear.stateMap.research // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  if [[ "$RESEARCH_STATE" != "null" ]]; then
+      linearis issues update "$ticketId" --state "$RESEARCH_STATE"
+  fi
+  ```
 - **After document saved**: `linearis comments create "$ticketId" --body "Research complete: $link"`
 - If Linearis CLI not available, skip silently and continue research

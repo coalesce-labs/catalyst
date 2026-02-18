@@ -207,8 +207,11 @@ if ! command -v linearis &> /dev/null; then
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
     echo "Install: npm install -g linearis"
 else
-    # Update ticket state to "In Review"
-    linearis issues update "$ticket" --state "In Review" --assignee "@me"
+    # Update ticket state from stateMap config
+    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .claude/config.json 2>/dev/null || echo "In Review")
+    if [[ "$IN_REVIEW_STATE" != "null" ]]; then
+        linearis issues update "$ticket" --state "$IN_REVIEW_STATE" --assignee "@me"
+    fi
 
     # Add comment with PR link
     linearis comments create "$ticket" \
@@ -300,11 +303,15 @@ Uses `.claude/config.json`:
     },
     "linear": {
       "teamKey": "PROJ",
-      "inReviewStatusName": "In Review"
+      "stateMap": {
+        "inReview": "In Review"
+      }
     }
   }
 }
 ```
+
+State names are read from `stateMap` with sensible defaults. See `.claude/config.json` for all keys.
 
 ## Examples
 

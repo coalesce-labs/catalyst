@@ -55,8 +55,9 @@ linearis issues search "auth" --team ENG         # ✅ Correct
 ### Update a Ticket
 ```bash
 # Update state - use --state NOT --status!
+# State names should come from stateMap in .claude/config.json
 linearis issues update TEAM-123 --state "In Progress"
-linearis issues update TEAM-123 --state "Research"
+linearis issues update TEAM-123 --state "In Review"
 linearis issues update TEAM-123 --state "Done"
 
 # Other updates
@@ -189,7 +190,9 @@ linearis issues list --team BRAVO --limit 100 | jq '.[] | select(.project.name =
 
 ### Mark ticket as done with PR link
 ```bash
-linearis issues update TEAM-123 --state "Done"
+# State name from stateMap.done config (default: "Done")
+DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
+linearis issues update TEAM-123 --state "$DONE_STATE"
 linearis comments create TEAM-123 --body "Merged: PR #456 https://github.com/org/repo/pull/456"
 ```
 

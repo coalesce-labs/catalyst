@@ -31,7 +31,8 @@ Gather data from Linear using the Linearis CLI. This is a **data collection spec
 linearis issues read TEAM-123
 
 # Update ticket state (use --state NOT --status!)
-linearis issues update TEAM-123 --state "Research"
+# State names should come from stateMap in .claude/config.json
+linearis issues update TEAM-123 --state "In Progress"
 
 # Add comment (use 'comments create' NOT 'issues comment'!)
 linearis comments create TEAM-123 --body "Starting research"
@@ -48,8 +49,8 @@ linearis cycles read "Sprint 2025-11" --team BRAVO
 
 ### Common Mistakes to Avoid
 
-❌ `linearis issues update TICKET --status "Research"` (Wrong flag)
-✅ `linearis issues update TICKET --state "Research"`
+❌ `linearis issues update TICKET --status "In Progress"` (Wrong flag)
+✅ `linearis issues update TICKET --state "In Progress"`
 
 ❌ `linearis issues comment TICKET "text"` (Wrong subcommand)
 ✅ `linearis comments create TICKET --body "text"`

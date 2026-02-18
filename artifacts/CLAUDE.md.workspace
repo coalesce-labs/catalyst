@@ -52,13 +52,15 @@ This workspace **automatically manages Linear tickets** throughout your workflow
 
 ### Automatic Status Updates
 
-| Command | Ticket Status | Assignment |
-|---------|---------------|------------|
-| `/workflow:research_codebase TICKET-123` | → "Research" | Assigns to you |
-| `/workflow:create_plan TICKET-123` | → "Planning" | (already assigned) |
-| `/workflow:implement_plan` | → "In Progress" | (already assigned) |
-| `/linear:create_pr` | → "In Review" | (already assigned) |
-| `/linear:merge_pr` | → "Done" | (already assigned) |
+| Command | stateMap Key | Default State | Assignment |
+|---------|-------------|---------------|------------|
+| `/workflow:research_codebase TICKET-123` | `research` | "In Progress" | Assigns to you |
+| `/workflow:create_plan TICKET-123` | `planning` | "In Progress" | (already assigned) |
+| `/workflow:implement_plan` | `inProgress` | "In Progress" | (already assigned) |
+| `/linear:create_pr` | `inReview` | "In Review" | (already assigned) |
+| `/linear:merge_pr` | `done` | "Done" | (already assigned) |
+
+State names are configurable via `linear.stateMap` in `.claude/config.json`.
 
 ### Automatic Document Linking
 

@@ -151,15 +151,18 @@ linearis issues create \
 | TEAM-456 | #123 | 2025-01-25 | Close issue |
 | TEAM-457 | #124 | 2025-01-26 | Close issue |
 
-**Auto-close commands**:
+**Auto-close commands** (state name from `stateMap.done` config):
 ```bash
+# Read configured done state
+DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
+
 # Update state
-linearis issues update TEAM-456 --state "Done"
+linearis issues update TEAM-456 --state "$DONE_STATE"
 # Add comment
 linearis comments create TEAM-456 --body "PR #123 merged: https://github.com/user/repo/pull/123"
 
 # Update state
-linearis issues update TEAM-457 --state "Done"
+linearis issues update TEAM-457 --state "$DONE_STATE"
 # Add comment
 linearis comments create TEAM-457 --body "PR #124 merged: https://github.com/user/repo/pull/124"
 ```
