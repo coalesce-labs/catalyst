@@ -1,0 +1,23 @@
+name: Check Plugin Versions
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'plugins/**'
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check plugin version bumps
+        env:
+          STRICT_VERSION_CHECK: "true"
+          BASE_REF: "origin/${{ github.base_ref }}"
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          bash scripts/check-plugin-version.sh

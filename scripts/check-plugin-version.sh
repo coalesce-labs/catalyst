@@ -4,11 +4,15 @@
 
 set -e
 
-# Get list of changed files in this commit
-CHANGED_FILES=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || echo "")
-
-if [[ -z "$CHANGED_FILES" ]]; then
-  # No staged changes, check working directory instead
+# Get list of changed files
+if [[ -n "${BASE_REF:-}" ]]; then
+  # CI mode: compare against PR base branch
+  CHANGED_FILES=$(git diff --name-only "$BASE_REF"...HEAD 2>/dev/null || echo "")
+elif [[ -n "$(git diff --cached --name-only 2>/dev/null)" ]]; then
+  # Pre-commit mode: staged files
+  CHANGED_FILES=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || echo "")
+else
+  # Working directory mode
   CHANGED_FILES=$(git diff --name-only 2>/dev/null || echo "")
 fi
 
