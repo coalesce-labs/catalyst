@@ -9,29 +9,31 @@ description: Browser automation CLI for AI agents. ALWAYS use when the user asks
 
 ## Starting a Browser Session
 
-Open a page in headed mode (browser window visible to user):
+**ALWAYS use a named session.** This preserves browser state so sessions survive accidental closes and can be resumed.
 
 ```bash
-agent-browser open https://example.com
-agent-browser snapshot -i -c
+agent-browser --session my-task open https://example.com
+agent-browser --session my-task snapshot -i -c
 ```
+
+Pick a short descriptive session name for the task (e.g., `v0-chat`, `gh-review`, `test-login`). Use the same `--session` flag on every command.
 
 ### Authentication Flow
 
 If a site requires login, follow this flow:
 
-1. Open the page:
+1. Open the page with a named session:
    ```bash
-   agent-browser open https://example.com/login
+   agent-browser --session my-task open https://example.com/login
    ```
 2. Tell the user: **"A browser window opened. Please log in, then let me know when you're ready."**
 3. **Wait for the user to confirm** they've logged in. Do NOT proceed until they say so.
 4. Then continue:
    ```bash
-   agent-browser snapshot -i -c
+   agent-browser --session my-task snapshot -i -c
    ```
 
-Sessions persist across commands — once logged in, the session stays active for all subsequent commands.
+Sessions persist across commands — once logged in, the session stays active for all subsequent commands. If the browser is closed accidentally, re-open with the same `--session` name to resume.
 
 ## Quick Reference
 
@@ -186,9 +188,10 @@ agent-browser find testid <id> <action>       # Find by test ID
 
 ## Important Rules
 
-1. **Headed mode is configured globally** — browser is always visible
-2. **For authenticated sites**, open the login page and ask the user to log in manually
-3. **Use snapshot -i -c** for AI-efficient page state
-4. **Use @refs** from snapshots for interactions, not CSS selectors
-5. **agent-browser, NOT Playwright MCP** — always prefer the CLI
-6. **Close when done**: `agent-browser close` to clean up
+1. **Always use `--session <name>`** on every command — preserves state, enables recovery
+2. **Headed mode is configured globally** — browser is always visible
+3. **For authenticated sites**, open the login page and ask the user to log in manually
+4. **Use snapshot -i -c** for AI-efficient page state
+5. **Use @refs** from snapshots for interactions, not CSS selectors
+6. **agent-browser, NOT Playwright MCP** — always prefer the CLI
+7. **Close when done**: `agent-browser --session <name> close` to clean up
