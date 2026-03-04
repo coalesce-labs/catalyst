@@ -1,0 +1,16 @@
+name: Audit References
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'plugins/**'
+
+jobs:
+  audit-references:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit plugin references
+        run: bash plugins/meta/scripts/audit-references.sh --ci

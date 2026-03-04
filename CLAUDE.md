@@ -984,6 +984,45 @@ Catalyst includes non-interactive commands for CI pipelines and automated workfl
 
 These commands follow the same conventions (conventional commits, PR templates) but skip all interactive prompts. They never commit sensitive files or add Claude attribution.
 
+## Versioning and Releases
+
+Catalyst uses **Release Please** for automated per-plugin releases.
+
+### How It Works
+
+1. **Merge PRs to main** with conventional commit titles (`feat(dev):`, `fix(pm):`, etc.)
+2. **Release Please opens release PRs** — one per affected plugin, accumulating changes
+3. **Merge a release PR** to create: git tag, GitHub Release, updated CHANGELOG.md, bumped versions
+4. **marketplace.json syncs automatically** via post-release CI step
+
+### Version Locations
+
+| File | Purpose | Updated By |
+|---|---|---|
+| `plugins/<x>/version.txt` | Release Please primary version | Release Please |
+| `plugins/<x>/.claude-plugin/plugin.json` | Plugin manifest | Release Please (extra-files) |
+| `.claude-plugin/marketplace.json` | Marketplace registry | Post-release sync script |
+| `plugins/<x>/CHANGELOG.md` | Per-plugin changelog | Release Please |
+
+### Commit Conventions for Releases
+
+- `feat(dev): add new command` → minor bump for catalyst-dev
+- `fix(pm): correct cycle calculation` → patch bump for catalyst-pm
+- `feat(dev)!: breaking change` → major bump for catalyst-dev
+- `chore(meta): update docs` → no version bump (chore commits don't trigger releases)
+
+### Manual Version Override
+
+If you need to manually bump a version (rare):
+
+```bash
+./scripts/bump-version.sh dev minor  # Still works but deprecated
+```
+
+### Tag Format
+
+Tags follow `<component>-v<version>` format: `catalyst-dev-v4.3.0`, `catalyst-pm-v4.1.0`
+
 ## Multi-Config Support
 
 For consultants working across clients:
