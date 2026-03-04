@@ -1,0 +1,20 @@
+{
+  "name": "catalyst-docs",
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "^3.3.1",
+    "@astrojs/starlight": "^0.37.0",
+    "astro": "^5.7.10",
+    "sharp": "^0.33.5",
+    "starlight-changelogs": "^0.4.0",
+    "starlight-llms-txt": "^0.7.0"
+  }
+}

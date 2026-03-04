@@ -1,0 +1,41 @@
+---
+title: Catalyst
+description: AI-assisted development workflows for Claude Code — agents, commands, and orchestration plugins.
+template: splash
+hero:
+  tagline: Portable agents, commands, and workflows for AI-assisted development with Claude Code.
+  actions:
+    - text: Get Started
+      link: /getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/coalesce-labs/catalyst
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+## What is Catalyst?
+
+Catalyst is a **plugin-based toolkit** that extends Claude Code with structured workflows for real-world software development. It provides specialized agents for codebase research, commands for planning and implementation, and integrations with tools like Linear, GitHub, Sentry, and Railway.
+
+<CardGrid stagger>
+  <Card title="Research → Plan → Implement" icon="rocket">
+    A structured workflow that chains codebase research into implementation
+    plans, then executes them with automated verification.
+  </Card>
+  <Card title="Specialized Agents" icon="magnifier">
+    Purpose-built agents for codebase analysis, pattern finding, external
+    research, and project management — each optimized for its task.
+  </Card>
+  <Card title="Plugin Architecture" icon="puzzle">
+    Install only what you need. Core development workflows, project management,
+    analytics, and meta-tooling ship as independent plugins.
+  </Card>
+  <Card title="Context Engineering" icon="document">
+    Persistent memory via the thoughts system, workflow state tracking, and
+    session handoffs keep context across sessions and team members.
+  </Card>
+</CardGrid>
