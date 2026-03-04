@@ -1,6 +1,9 @@
 ---
 description: Deep research with citation verification pipeline
+category: pm
+tools: Task, Read, Write
 model: opus
+version: 1.0.0
 ---
 
 # Research Pipeline

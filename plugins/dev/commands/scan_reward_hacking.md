@@ -1,6 +1,9 @@
 ---
 description: Scan for reward hacking patterns in recent changes
+category: dev
+tools: Bash, Read, Grep
 model: sonnet
+version: 1.0.0
 ---
 
 # Scan for Reward Hacking Patterns

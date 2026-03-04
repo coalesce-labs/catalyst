@@ -1,6 +1,9 @@
 ---
 description: Fix TypeScript errors with strict anti-reward-hacking rules
+category: dev
+tools: Read, Edit, Bash, Grep
 model: sonnet
+version: 1.0.0
 ---
 
 # Fix TypeScript Errors

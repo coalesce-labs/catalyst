@@ -316,11 +316,10 @@ for i in "${!SORTED_OLD[@]}"; do
 	old="${SORTED_OLD[$i]}"
 	new="${SORTED_NEW[$i]}"
 
-	# Escape old path for use in grep/sed (escape regex special chars)
-	escaped_old=$(printf '%s' "$old" | sed 's/[.[\*^$()+?{}|\\]/\\&/g')
 	# Escape for sed replacement (only & and \ and delimiter)
 	escaped_new=$(printf '%s' "$new" | sed 's/[&\\/]/\\&/g')
-	escaped_old_sed=$(printf '%s' "$old" | sed 's/[&\\/.*^$[\]]/\\&/g')
+	# Escape old path for sed pattern (] must be first in POSIX bracket expression)
+	escaped_old_sed=$(printf '%s' "$old" | sed 's/[][\\.^$*|]/\\&/g')
 
 	# Find all files containing the old path
 	mapfile -t matching_files < <(

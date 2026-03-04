@@ -1,6 +1,9 @@
 ---
 description: Adversarial citation verification for research documents
+category: pm
+tools: Task, Read, Write, WebFetch, WebSearch
 model: opus
+version: 1.0.0
 ---
 
 # Research Citation Verification
