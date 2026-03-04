@@ -340,6 +340,15 @@ check_prerequisites() {
     fi
   fi
 
+  # Check agent-browser (optional - browser automation)
+  if command -v agent-browser &>/dev/null; then
+    print_success "agent-browser installed"
+  else
+    print_warning "agent-browser not found (optional - browser automation)"
+    echo "  Install: npm install -g agent-browser && agent-browser install"
+    missing_optional=true
+  fi
+
   if [ "$missing_critical" = true ]; then
     print_error "Critical prerequisites missing. Cannot continue."
     exit 1

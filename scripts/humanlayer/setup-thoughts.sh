@@ -19,14 +19,10 @@ if ! command -v humanlayer &>/dev/null; then
 	echo ""
 	echo "The thoughts system uses the HumanLayer CLI to manage the central repository."
 	echo ""
-	echo "Installation options:"
-	echo ""
-	echo "1. If you have the humanlayer repo cloned:"
-	echo "   cd /path/to/humanlayer/hlyr"
-	echo "   npm install -g ."
-	echo ""
-	echo "2. Or install from npm (when published):"
-	echo "   npm install -g @humanlayer/cli"
+	echo "Install humanlayer:"
+	echo "  pip install humanlayer"
+	echo "  # or"
+	echo "  pipx install humanlayer"
 	echo ""
 	exit 1
 fi

@@ -102,8 +102,9 @@ Catalyst is distributed as a 5-plugin system. Install what you need:
 ### What You Get
 
 **catalyst-dev** (Always enabled):
-- 11 research agents
-- 21 workflow commands
+- 10 research agents
+- 22 workflow commands
+- 3 skills (browser automation, code prototyping, Linear CLI reference)
 - Three-tier model strategy (Opus / Sonnet / Haiku)
 - Linear integration
 - CI/automation commands for non-interactive workflows
@@ -111,9 +112,11 @@ Catalyst is distributed as a 5-plugin system. Install what you need:
 - ~3.5k context (lightweight)
 
 **catalyst-pm** (Enable for project management):
-- Cycle tracking, milestone planning
-- Backlog grooming, daily standups
-- GitHub-Linear sync
+- 8 commands, 16 agents, 39 skills for product management
+- Cycle tracking, milestone planning, backlog grooming
+- PRD drafting, user research, metrics frameworks
+- Review panel with 7 sub-agents (engineering, design, executive perspectives)
+- GitHub-Linear sync and daily standups
 
 **catalyst-analytics** (Enable when analyzing metrics):
 - PostHog MCP integration

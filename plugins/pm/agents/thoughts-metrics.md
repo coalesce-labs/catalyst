@@ -52,7 +52,7 @@ Team members: [list of developers to track]
 ```bash
 # Get thoughts repository path from HumanLayer config
 CONFIG_FILE=".claude/config.json"
-PROJECT_KEY=$(jq -r '.projectKey' "$CONFIG_FILE")
+PROJECT_KEY=$(jq -r '.catalyst.projectKey' "$CONFIG_FILE")
 
 # Determine thoughts repo location
 if command -v humanlayer &> /dev/null; then
@@ -243,25 +243,25 @@ Return structured JSON with all collected data:
 ```json
 {
   "metadata": {
-    "repository": "/Users/ryan/thoughts/repos/brkthru",
+    "repository": "$HOME/thoughts/repos/{project-key}",
     "start_date": "2025-01-01",
     "end_date": "2025-01-15",
     "collected_at": "2025-01-15T10:30:00Z",
     "team_members_tracked": [
-      "Ryan Rozich",
-      "Richard Bolkey",
-      "Caroline Horn",
-      "Chris Reeves",
-      "Michael Kelly",
-      "Andrew Clarke",
-      "Christopher Garrison"
+      "Developer A",
+      "Developer B",
+      "Developer C",
+      "Developer D",
+      "Developer E",
+      "Developer F",
+      "Developer G"
     ]
   },
   "commits": [
     {
       "sha": "abc123def456",
-      "author": "Ryan Rozich",
-      "email": "ryan@example.com",
+      "author": "Developer A",
+      "email": "dev-a@example.com",
       "date": "2025-01-10T14:30:00Z",
       "message": "Research: OAuth provider integration patterns",
       "files_changed": 3,
@@ -284,7 +284,7 @@ Return structured JSON with all collected data:
     }
   ],
   "by_author": {
-    "Ryan Rozich": {
+    "Developer A": {
       "commits": 25,
       "files_changed": 45,
       "additions": 8500,
@@ -303,7 +303,7 @@ Return structured JSON with all collected data:
         "most_active_hour": "14:00"
       }
     },
-    "Richard Bolkey": {
+    "Developer B": {
       "commits": 18,
       "files_changed": 32,
       "additions": 5200,
@@ -322,7 +322,7 @@ Return structured JSON with all collected data:
         "most_active_hour": "10:00"
       }
     },
-    "Chris Reeves": {
+    "Developer D": {
       "commits": 0,
       "files_changed": 0,
       "additions": 0,
@@ -340,7 +340,7 @@ Return structured JSON with all collected data:
       "additions": 12500,
       "deletions": 2000,
       "avg_file_size_lines": 357,
-      "most_active_author": "Ryan Rozich"
+      "most_active_author": "Developer A"
     },
     "research": {
       "files": 52,
@@ -348,7 +348,7 @@ Return structured JSON with all collected data:
       "additions": 18000,
       "deletions": 1500,
       "avg_file_size_lines": 346,
-      "most_active_author": "Ryan Rozich"
+      "most_active_author": "Developer A"
     },
     "handoff": {
       "files": 28,
@@ -356,7 +356,7 @@ Return structured JSON with all collected data:
       "additions": 7500,
       "deletions": 800,
       "avg_file_size_lines": 268,
-      "most_active_author": "Caroline Horn"
+      "most_active_author": "Developer C"
     },
     "pr_description": {
       "files": 15,
@@ -364,7 +364,7 @@ Return structured JSON with all collected data:
       "additions": 3500,
       "deletions": 500,
       "avg_file_size_lines": 233,
-      "most_active_author": "Ryan Rozich"
+      "most_active_author": "Developer A"
     }
   },
   "activity_summary": {
@@ -382,13 +382,13 @@ Return structured JSON with all collected data:
   },
   "inactive_team_members": [
     {
-      "name": "Chris Reeves",
+      "name": "Developer D",
       "commits": 0,
       "last_activity": null,
       "reason": "No thoughts repository activity detected"
     },
     {
-      "name": "Michael Kelly",
+      "name": "Developer E",
       "commits": 0,
       "last_activity": null,
       "reason": "No thoughts repository activity detected"
@@ -415,15 +415,15 @@ Return structured JSON with all collected data:
 ```
 @catalyst-pm:thoughts-metrics
 Collect thoughts metrics from 2025-01-01 to 2025-01-15
-Repository: ~/thoughts/repos/brkthru
-Team: Ryan, Richard, Caroline, Chris, Michael, Andrew, Christopher
+Repository: ~/thoughts/repos/{project-key}
+Team: Developer A, Developer B, Developer C, Developer D, Developer E, Developer F, Developer G
 ```
 
 ### Single Developer Focus
 
 ```
 @catalyst-pm:thoughts-metrics
-Collect thoughts metrics for Ryan Rozich from 2025-01-01 to 2025-01-15
+Collect thoughts metrics for Developer A from 2025-01-01 to 2025-01-15
 ```
 
 ### File Type Breakdown
@@ -441,7 +441,7 @@ Focus on: plans, research, handoffs
 ```json
 {
   "error": "repository_not_found",
-  "message": "Thoughts repository not found at /Users/ryan/thoughts/repos/brkthru",
+  "message": "Thoughts repository not found at $HOME/thoughts/repos/{project-key}",
   "suggestion": "Run: humanlayer thoughts status"
 }
 ```

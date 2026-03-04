@@ -14,8 +14,7 @@ scripts/
 ├── humanlayer/          # HumanLayer thoughts setup
 │   ├── setup-thoughts.sh
 │   ├── init-project.sh
-│   ├── add-client-config
-│   └── setup-personal-thoughts.sh
+│   └── add-client-config
 ├── linear/              # Linear workflow setup
 │   └── setup-linear-workflow
 └── README.md            # This file
@@ -104,24 +103,6 @@ pip install humanlayer  # or: pipx install humanlayer
 - Prompts for thoughts repository path if not provided
 
 **When to use**: Adding a new client to your setup
-
----
-
-### setup-personal-thoughts.sh
-
-**Advanced setup for personal thoughts separate from client work**
-
-```bash
-./scripts/humanlayer/setup-personal-thoughts.sh
-```
-
-**What it does**:
-
-- Creates separate personal thoughts config
-- Distinguishes personal vs client contexts
-- For consultants managing multiple contexts
-
-**When to use**: Optional, for consultants with complex multi-client setups
 
 ---
 
@@ -286,6 +267,9 @@ These scripts are no longer needed with HumanLayer's profile system:
 
 - ❌ `hl-switch` - Manual config switching (replaced by automatic profile detection)
 - ❌ `setup-multi-config.sh` - Multi-config setup (replaced by `humanlayer thoughts profile create`)
+- ❌ `setup-catalyst-config.sh` - Wrote flat-schema configs incompatible with plugin commands (use `setup-catalyst.sh` instead)
+- ❌ `load-catalyst-config.sh` - Unused config loader that read flat schema (no replacement needed)
+- ❌ `humanlayer/setup-personal-thoughts.sh` - Non-portable personal setup (use `setup-catalyst.sh` or `init-project.sh` instead)
 
 ---
 

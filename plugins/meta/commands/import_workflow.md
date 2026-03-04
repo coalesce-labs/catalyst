@@ -62,7 +62,7 @@ Use codebase-pattern-finder agent:
 "Find similar workflows in our workspace (agents/ and commands/ directories). Look for workflows that serve similar purposes or use similar patterns."
 
 Tools: Grep, Glob, Read
-Path: /Users/ryan/code-repos/ryan-claude-workspace
+Path: $(git rev-parse --show-toplevel)/plugins/
 Return: Similar local workflows for comparison
 ```
 
@@ -230,11 +230,11 @@ Determine type and save location:
 
 **If Agent**:
 
-- Save to: `agents/{workflow-name}.md`
+- Save to: `plugins/dev/agents/{workflow-name}.md`
 
 **If Command**:
 
-- Save to: `commands/{workflow-name}.md`
+- Save to: `plugins/dev/commands/{workflow-name}.md`
 
 ### Step 8: Create Import Record
 

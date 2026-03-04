@@ -68,7 +68,7 @@ Use codebase-analyzer agent:
 Return: List of all validation issues found with file:line references"
 
 Tools: Glob, Grep, Read
-Path: /Users/ryan/code-repos/ryan-claude-workspace/agents/
+Path: $(git rev-parse --show-toplevel)/plugins/*/agents/
 Return: Validation report for all agents
 ```
 
@@ -87,7 +87,7 @@ Use codebase-analyzer agent:
 Return: List of all validation issues found with file:line references"
 
 Tools: Glob, Grep, Read
-Path: /Users/ryan/code-repos/ryan-claude-workspace/commands/
+Path: $(git rev-parse --show-toplevel)/plugins/*/commands/
 Return: Validation report for all commands
 ```
 
@@ -95,10 +95,10 @@ Return: Validation report for all commands
 
 ```
 Use codebase-pattern-finder agent:
-"Extract all unique tool names referenced in frontmatter across agents/*.md and commands/*.md. Return a sorted list of all tools used."
+"Extract all unique tool names referenced in frontmatter across plugins/*/agents/*.md and plugins/*/commands/*.md. Return a sorted list of all tools used."
 
 Tools: Glob, Grep
-Path: /Users/ryan/code-repos/ryan-claude-workspace/
+Path: $(git rev-parse --show-toplevel)/plugins/
 Return: Complete list of tools referenced
 ```
 

@@ -28,7 +28,7 @@ if [[ ! -d "$THOUGHTS_DIR" ]]; then
 fi
 
 # Check required subdirectories
-REQUIRED_DIRS=("research" "plans" "handoffs" "prs")
+REQUIRED_DIRS=("research" "plans" "handoffs" "prs" "reports")
 MISSING_DIRS=()
 
 for dir in "${REQUIRED_DIRS[@]}"; do

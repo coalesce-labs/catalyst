@@ -280,11 +280,10 @@ See: `plugins/pm/templates/github-actions/SETUP.md`
 
 ### Required Tools
 
-1. **Linearis CLI** (with PR #4 cycle features)
+1. **Linearis CLI**
    ```bash
-   npm install -g --install-links czottmann/linearis
+   npm install -g linearis
    ```
-   See: https://github.com/czottmann/linearis/pull/4
 
 2. **jq** (JSON parsing)
    ```bash
@@ -429,7 +428,7 @@ Default settings in `.claude/config.json`:
 
 Install linearis:
 ```bash
-npm install -g --install-links czottmann/linearis
+npm install -g linearis
 ```
 
 Verify installation:
