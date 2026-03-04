@@ -1040,6 +1040,7 @@ See `docs/MULTI_CONFIG_GUIDE.md` for details on setting up multiple project conf
 
 ## Getting Help
 
+- Visit the [documentation site](https://catalyst.coalescelabs.ai) for guides and reference
 - Check `docs/` for comprehensive guides
 - Review `README.md` for philosophy
 - Read `QUICKSTART.md` for setup

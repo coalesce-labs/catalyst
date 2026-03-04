@@ -40,3 +40,8 @@ thoughts/
 # Secrets are stored in ~/.config/catalyst/config-*.json (never in repo)
 .claude/*.local.json
 .claude/*.backup
+
+# Website build artifacts
+website/node_modules/
+website/dist/
+website/.astro/

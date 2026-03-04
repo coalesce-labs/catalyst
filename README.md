@@ -358,7 +358,7 @@ better!
 
 ## Documentation
 
-- [Full Documentation](docs/) - Comprehensive guides
+- [Documentation Site](https://catalyst.coalescelabs.ai) - Comprehensive guides, reference, and tutorials
 - [Installation & Configuration](QUICKSTART.md) - Setup, config, and command reference
 - [Usage Guide](docs/USAGE.md) - How to use all features
 - [Architecture](CLAUDE.md) - How it's built
