@@ -478,14 +478,12 @@ ryan-claude-workspace/
 │   ├── BEST_PRACTICES.md
 │   ├── PATTERNS.md
 │   ├── CONTEXT_ENGINEERING.md
-│   ├── CONFIGURATION.md
 │   ├── AGENTIC_WORKFLOW_GUIDE.md
 │   ├── WORKFLOW_DISCOVERY_SYSTEM.md
 │   ├── LINEAR_WORKFLOW_AUTOMATION.md
 │   ├── FRONTMATTER_STANDARD.md
 │   ├── DEEPWIKI_INTEGRATION.md
 │   ├── MULTI_CONFIG_GUIDE.md
-│   ├── HUMANLAYER_COMMANDS_ANALYSIS.md
 │   └── PR_LIFECYCLE.md
 ├── .claude/                 # Local Claude Code installation
 │   ├── config.json          # Configuration (generic template values)
@@ -495,7 +493,6 @@ ryan-claude-workspace/
 │       └── meta -> ../../plugins/meta/
 ├── README.md                # Overview and quick start
 ├── QUICKSTART.md            # 5-minute setup guide
-├── COMMANDS_ANALYSIS.md     # Command catalog
 └── CLAUDE.md                # This file
 ```
 
@@ -609,7 +606,7 @@ When understanding the system:
 
 1. **README.md** - High-level overview and philosophy
 2. **docs/USAGE.md** - Comprehensive usage guide with examples
-3. **docs/CONFIGURATION.md** - How config system works
+3. **QUICKSTART.md** - Installation, configuration, and command reference
 4. **docs/AGENTIC_WORKFLOW_GUIDE.md** - Agent patterns and best practices
 5. **plugins/dev/agents/codebase-locator.md** - Example of agent structure
 6. **plugins/dev/commands/create_plan.md** - Example of command structure
@@ -984,21 +981,51 @@ Catalyst includes non-interactive commands for CI pipelines and automated workfl
 
 These commands follow the same conventions (conventional commits, PR templates) but skip all interactive prompts. They never commit sensitive files or add Claude attribution.
 
-## Multi-Config Support
+## Versioning and Releases
 
-For consultants working across clients:
+Catalyst uses **Release Please** for automated per-plugin releases.
+
+### How It Works
+
+1. **Merge PRs to main** with conventional commit titles (`feat(dev):`, `fix(pm):`, etc.)
+2. **Release Please opens release PRs** — one per affected plugin, accumulating changes
+3. **Merge a release PR** to create: git tag, GitHub Release, updated CHANGELOG.md, bumped versions
+4. **marketplace.json syncs automatically** via post-release CI step
+
+### Version Locations
+
+| File | Purpose | Updated By |
+|---|---|---|
+| `plugins/<x>/version.txt` | Release Please primary version | Release Please |
+| `plugins/<x>/.claude-plugin/plugin.json` | Plugin manifest | Release Please (extra-files) |
+| `.claude-plugin/marketplace.json` | Marketplace registry | Post-release sync script |
+| `plugins/<x>/CHANGELOG.md` | Per-plugin changelog | Release Please |
+
+### Commit Conventions for Releases
+
+- `feat(dev): add new command` → minor bump for catalyst-dev
+- `fix(pm): correct cycle calculation` → patch bump for catalyst-pm
+- `feat(dev)!: breaking change` → major bump for catalyst-dev
+- `chore(meta): update docs` → no version bump (chore commits don't trigger releases)
+
+### Manual Version Override
+
+If you need to manually bump a version (rare):
 
 ```bash
-# Download multi-config setup
-curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/setup-multi-config.sh
-chmod +x setup-multi-config.sh
-./setup-multi-config.sh
-
-# Switch between configs
-hl-switch client-name
+./scripts/bump-version.sh dev minor  # Still works but deprecated
 ```
 
-Manages separate configs per client. See `docs/MULTI_CONFIG_GUIDE.md`.
+### Tag Format
+
+Tags follow `<component>-v<version>` format: `catalyst-dev-v4.3.0`, `catalyst-pm-v4.1.0`
+
+## Multi-Config Support
+
+Multi-project configuration is now handled natively by HumanLayer's profile and repoMappings system
+(see ADR-002). HumanLayer automatically detects the correct profile based on your working directory.
+
+See `docs/MULTI_CONFIG_GUIDE.md` for details on setting up multiple project configurations.
 
 ## Key Principles When Editing
 
@@ -1013,6 +1040,7 @@ Manages separate configs per client. See `docs/MULTI_CONFIG_GUIDE.md`.
 
 ## Getting Help
 
+- Visit the [documentation site](https://catalyst.coalescelabs.ai) for guides and reference
 - Check `docs/` for comprehensive guides
 - Review `README.md` for philosophy
 - Read `QUICKSTART.md` for setup

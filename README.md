@@ -63,8 +63,9 @@ and shared memory systems.
 
 **catalyst-dev** (Core - Always enabled)
 
-- 11 research agents (codebase + infrastructure)
-- 21 commands covering full dev lifecycle
+- 10 research agents (codebase + infrastructure)
+- 22 commands covering full dev lifecycle
+- 3 skills (browser automation, code prototyping, Linear CLI reference)
 - Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for data collection)
 - Linear integration via Linearis CLI
 - CI/automation commands for non-interactive workflows
@@ -73,10 +74,11 @@ and shared memory systems.
 
 **catalyst-pm** (Optional - Enable for project management)
 
-- Linear-focused project management workflows
-- 5 commands: analyze-cycle, analyze-milestone, report-daily, groom-backlog, sync-prs
-- Research-first architecture (Haiku for data collection, Sonnet for analysis)
-- 5 specialized agents: linear-research, cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer
+- 8 commands for PM workflows (cycle analysis, milestone tracking, backlog grooming, research pipelines)
+- 16 specialized agents for data collection and analysis
+- 39 skills for product management (PRDs, user research, metrics, interviews, strategy)
+- 7 sub-agents forming a review panel (engineering, design, executive, legal, UX, customer voice)
+- Research-first architecture (Haiku for data collection, Sonnet/Opus for analysis)
 - Cycle management and milestone tracking with target date feasibility
 - Actionable insights and recommendations (not just data dumps)
 
@@ -96,9 +98,11 @@ and shared memory systems.
 
 **catalyst-meta** (Optional - For advanced users)
 
+- 7 commands for workflow management
 - Discover workflows from community repos
 - Import and adapt patterns
 - Create new workflows
+- Plugin health auditing and directory reorganization
 
 ## Quick Setup (5 Minutes)
 
@@ -238,6 +242,22 @@ before running out of context, creating structured handoff documents that add to
 - [Linear Workflow Automation](docs/LINEAR_WORKFLOW_AUTOMATION.md) - Linearis integration for ticket
   → branch → PR → merge lifecycle ([Linearis](https://www.npmjs.com/package/linearis))
 
+### Agent Teams
+
+For complex implementations spanning multiple domains, Catalyst supports
+[Claude Code agent teams](https://www.anthropic.com/news/claude-opus-4-6) — multiple Claude
+instances working in parallel on a shared codebase:
+
+```
+/implement-plan --team thoughts/shared/plans/my-plan.md
+/oneshot --team PROJ-123
+```
+
+A lead agent (Opus) coordinates the work, spawning teammates (Sonnet) that each own distinct files.
+Each teammate can spawn its own research sub-agents, enabling two-level parallelism. See
+[How we built our multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system)
+for the patterns behind this approach.
+
 ## Core Philosophy
 
 ### Token Efficiency Through Structured Context
@@ -338,10 +358,9 @@ better!
 
 ## Documentation
 
-- [Full Documentation](docs/) - Comprehensive guides
-- [Quick Start](QUICKSTART.md) - 5-minute setup
+- [Documentation Site](https://catalyst.coalescelabs.ai) - Comprehensive guides, reference, and tutorials
+- [Installation & Configuration](QUICKSTART.md) - Setup, config, and command reference
 - [Usage Guide](docs/USAGE.md) - How to use all features
-- [Commands](COMMANDS_ANALYSIS.md) - Complete command reference
 - [Architecture](CLAUDE.md) - How it's built
 
 ## License

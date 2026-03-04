@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Catalyst Prerequisites Check
-# Validates all required CLI tools are installed
+# Catalyst Dev Plugin Prerequisites Check
+# Validates required and optional CLI tools
 
 set -euo pipefail
 
@@ -16,8 +16,13 @@ REQUIRED_TOOLS=(
 	"jq:JSON processor:brew install jq"
 	"gh:GitHub CLI:brew install gh"
 	"linearis:Linear CLI:npm install -g linearis"
-	"railway:Railway CLI:npm install -g @railway/cli"
-	"sentry-cli:Sentry CLI:curl -sL https://sentry.io/get-cli/ | sh"
+	"agent-browser:Browser automation:npm install -g agent-browser && agent-browser install"
+)
+
+# Optional tools - used by specific agents only (command:name:install-instruction)
+OPTIONAL_TOOLS=(
+	"railway:Railway CLI (for railway-research agent):npm install -g @railway/cli"
+	"sentry-cli:Sentry CLI (for sentry-research agent):curl -sL https://sentry.io/get-cli/ | sh"
 )
 
 # Optional MCP servers (name:purpose:install-command)
@@ -26,7 +31,7 @@ OPTIONAL_MCPS=(
 	"posthog:Analytics:/plugin marketplace add posthog-mcp"
 )
 
-echo "🔍 Checking Catalyst prerequisites..."
+echo "🔍 Checking Catalyst dev plugin prerequisites..."
 echo ""
 
 missing=()
@@ -51,6 +56,21 @@ fi
 
 echo -e "${GREEN}✅ All required CLI tools installed${NC}"
 echo ""
+
+# Check optional tools (warn but don't block)
+missing_optional=false
+for tool_spec in "${OPTIONAL_TOOLS[@]}"; do
+	IFS=: read -r cmd name install <<<"$tool_spec"
+	if ! command -v "$cmd" &>/dev/null; then
+		echo -e "   ${YELLOW}⚠️${NC}  $name not found (optional)"
+		echo -e "      Install: $install"
+		missing_optional=true
+	fi
+done
+
+if [ "$missing_optional" = true ]; then
+	echo ""
+fi
 
 # Optional: Check MCP servers
 echo "ℹ️  Optional MCP servers:"

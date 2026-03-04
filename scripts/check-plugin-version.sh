@@ -32,8 +32,8 @@ for plugin in "${PLUGINS[@]}"; do
     continue
   fi
 
-  # Check if any files in this plugin changed
-  PLUGIN_CHANGED=$(echo "$CHANGED_FILES" | grep "^$PLUGIN_DIR/" || true)
+  # Check if any files in this plugin changed (excluding Release Please managed files)
+  PLUGIN_CHANGED=$(echo "$CHANGED_FILES" | grep "^$PLUGIN_DIR/" | grep -v "CHANGELOG.md$" | grep -v "version.txt$" || true)
 
   if [[ -z "$PLUGIN_CHANGED" ]]; then
     continue

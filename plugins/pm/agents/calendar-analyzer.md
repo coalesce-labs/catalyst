@@ -51,13 +51,13 @@ Calendar: [calendar ID or "primary"]
 
 ```bash
 CONFIG_FILE=".claude/config.json"
-PROJECT_KEY=$(jq -r '.projectKey' "$CONFIG_FILE")
+PROJECT_KEY=$(jq -r '.catalyst.projectKey' "$CONFIG_FILE")
 
 SECRETS_FILE="$HOME/.config/catalyst/config-$PROJECT_KEY.json"
 
 # Get Google Calendar configuration
-CALENDAR_ID=$(jq -r '.google.calendarId // "primary"' "$SECRETS_FILE")
-TEAM_EMAILS=$(jq -r '.team.members[] | .email' "$CONFIG_FILE")
+CALENDAR_ID=$(jq -r '.catalyst.google.calendarId // "primary"' "$SECRETS_FILE")
+TEAM_EMAILS=$(jq -r '.catalyst.team.members[] | .email' "$CONFIG_FILE")
 ```
 
 ### Step 2: Authenticate with Google Calendar

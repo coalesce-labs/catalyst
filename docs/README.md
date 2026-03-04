@@ -180,7 +180,6 @@ YAML frontmatter validation, required fields, valid categories/tools, validation
 - [../README.md](../README.md) - Overview
 - [../QUICKSTART.md](../QUICKSTART.md) - 5-minute setup
 - [../CLAUDE.md](../CLAUDE.md) - Full architecture (read this!)
-- [../COMMANDS_ANALYSIS.md](../COMMANDS_ANALYSIS.md) - Command catalog
 
 **Plugin Documentation**:
 

@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
+# Catalyst PM Plugin Prerequisites Check
+# Validates required and optional CLI tools for PM workflows
+
 set -euo pipefail
 
 echo "Checking PM plugin prerequisites..."
+
+# Check for humanlayer CLI (used by multiple PM commands)
+if ! command -v humanlayer &> /dev/null; then
+    echo "❌ HumanLayer CLI not found (required for thoughts system)"
+    echo "Install with:"
+    echo "  pip install humanlayer"
+    echo "  # or: pipx install humanlayer"
+    exit 1
+fi
+
+echo "✅ HumanLayer CLI found"
 
 # Check for linearis CLI
 if ! command -v linearis &> /dev/null; then
     echo "❌ Linearis CLI not found"
     echo "Install with:"
-    echo "  npm install -g --install-links czottmann/linearis"
-    echo ""
-    echo "Note: Requires PR #4 features (cycle management)"
-    echo "  https://github.com/czottmann/linearis/pull/4"
+    echo "  npm install -g linearis"
     exit 1
 fi
 
@@ -37,6 +48,14 @@ else
     echo "✅ GitHub CLI found: $(gh --version | head -n1)"
 fi
 
+# Check for gcalcli (optional - only used by calendar-analyzer agent)
+if ! command -v gcalcli &> /dev/null; then
+    echo "⚠️  gcalcli not found (optional, for calendar-analyzer agent)"
+    echo "Install with: pip install gcalcli"
+else
+    echo "✅ gcalcli found"
+fi
+
 # Verify configuration
 CONFIG_FILE=".claude/config.json"
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -48,17 +67,9 @@ fi
 TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CONFIG_FILE")
 if [[ -z "$TEAM_KEY" ]]; then
     echo "⚠️  Linear team key not configured in $CONFIG_FILE"
-    echo "Add: \"linear\": { \"teamKey\": \"TEAM\" }"
+    echo "Add: \"catalyst\": { \"linear\": { \"teamKey\": \"TEAM\" } }"
 else
     echo "✅ Linear team key configured: $TEAM_KEY"
-fi
-
-# Check for LINEAR_API_TOKEN
-if [[ -z "${LINEAR_API_TOKEN:-}" ]]; then
-    echo "⚠️  LINEAR_API_TOKEN environment variable not set"
-    echo "Set with: export LINEAR_API_TOKEN=your_token"
-else
-    echo "✅ LINEAR_API_TOKEN set"
 fi
 
 echo ""

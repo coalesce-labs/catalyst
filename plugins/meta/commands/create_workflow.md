@@ -60,7 +60,7 @@ Use codebase-pattern-finder agent:
 "Find all {agents/commands} in our workspace that are similar to {user-description}. Focus on {category} workflows. Return file paths and brief descriptions."
 
 Tools: Glob, Grep, Read
-Path: /Users/ryan/code-repos/ryan-claude-workspace
+Path: $(git rev-parse --show-toplevel)/plugins/
 Return: List of similar local workflows with their frontmatter and key patterns
 ```
 
@@ -82,7 +82,7 @@ Use codebase-analyzer agent:
 "Analyze all existing {agents/commands} in the workspace to extract the frontmatter standard. What fields are required? What patterns are used? What categories exist?"
 
 Tools: Glob, Grep, Read
-Path: /Users/ryan/code-repos/ryan-claude-workspace/{agents,commands}/
+Path: $(git rev-parse --show-toplevel)/plugins/
 Return: Frontmatter standard with field definitions and examples
 ```
 
@@ -393,10 +393,10 @@ Continue iterating until user is satisfied.
 Determine save location:
 
 **If Agent**:
-- Save to: `agents/{workflow-name}.md`
+- Save to: `plugins/dev/agents/{workflow-name}.md`
 
 **If Command**:
-- Save to: `commands/{workflow-name}.md`
+- Save to: `plugins/dev/commands/{workflow-name}.md`
 
 ### Step 10: Create Creation Record
 

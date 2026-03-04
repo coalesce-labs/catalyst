@@ -195,7 +195,7 @@ HumanLayer provides:
 Setup:
 ```bash
 # Install HumanLayer CLI
-npm install -g humanlayer
+pip install humanlayer
 
 # Initialize with default profile
 humanlayer thoughts init

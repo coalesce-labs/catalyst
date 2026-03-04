@@ -44,10 +44,10 @@ pip install humanlayer
 # or
 pipx install humanlayer
 
-# Download and run the thoughts setup script
-curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/scripts/setup-thoughts.sh
-chmod +x setup-thoughts.sh
-./setup-thoughts.sh
+# Download and run the unified setup script
+curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh
+chmod +x setup-catalyst.sh
+./setup-catalyst.sh
 ```
 
 This creates:
@@ -80,8 +80,8 @@ When you start working on a new repository:
 ```bash
 cd /path/to/your-project
 
-# Run the init command (installed by setup-thoughts.sh)
-ryan-init-project my-project-name
+# Initialize thoughts for this project
+humanlayer thoughts init
 ```
 
 This creates a symlinked thoughts directory in your project:
@@ -209,7 +209,7 @@ git push -u origin main
 # Clone on another machine
 git clone <your-thoughts-repo-url> ~/thoughts
 
-# Then re-run ryan-init-project in each repository
+# Then re-run humanlayer thoughts init in each repository
 ```
 
 ---

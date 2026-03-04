@@ -19,8 +19,10 @@ This command identifies developers who have code activity but NO thoughts activi
 Before executing, verify required tools are installed:
 
 ```bash
-if [[ -f "/Users/ryan/.claude/plugins/marketplaces/catalyst/plugins/dev/scripts/check-prerequisites.sh" ]]; then
-  "/Users/ryan/.claude/plugins/marketplaces/catalyst/plugins/dev/scripts/check-prerequisites.sh" || exit 1
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo ".")"
+PREREQ_SCRIPT="$REPO_ROOT/plugins/pm/scripts/check-prerequisites.sh"
+if [[ -f "$PREREQ_SCRIPT" ]]; then
+  "$PREREQ_SCRIPT" || exit 1
 fi
 ```
 
@@ -36,12 +38,12 @@ if command -v humanlayer &> /dev/null; then
   THOUGHTS_REPO=$(humanlayer thoughts status --format json 2>/dev/null | jq -r '.repository_path // empty')
 fi
 if [ -z "$THOUGHTS_REPO" ]; then
-  THOUGHTS_REPO=$(jq -r '.thoughts.repo // "~/thoughts"' "$CONFIG_FILE")
+  THOUGHTS_REPO=$(jq -r '.catalyst.thoughts.repo // "~/thoughts"' "$CONFIG_FILE")
 fi
-PROJECT_KEY=$(jq -r '.projectKey // "unknown"' "$CONFIG_FILE")
+PROJECT_KEY=$(jq -r '.catalyst.projectKey // "unknown"' "$CONFIG_FILE")
 
 # Code repositories to analyze (comma-separated)
-CODE_REPOS=$(jq -r '.contextEngineering.codeRepos // [] | join(",")' "$CONFIG_FILE")
+CODE_REPOS=$(jq -r '.catalyst.contextEngineering.codeRepos // [] | join(",")' "$CONFIG_FILE")
 
 # If no code repos configured, try to detect from git remote
 if [[ -z "$CODE_REPOS" || "$CODE_REPOS" == "" ]]; then
@@ -231,7 +233,7 @@ if command -v humanlayer &> /dev/null; then
   THOUGHTS_REPO=$(humanlayer thoughts status --format json 2>/dev/null | jq -r '.repository_path // empty')
 fi
 if [ -z "$THOUGHTS_REPO" ]; then
-  THOUGHTS_REPO=$(jq -r '.thoughts.repo // "~/thoughts"' .claude/config.json)
+  THOUGHTS_REPO=$(jq -r '.catalyst.thoughts.repo // "~/thoughts"' .claude/config.json)
   THOUGHTS_REPO="${THOUGHTS_REPO/#\~/$HOME}"  # Expand ~ to home directory
 fi
 
@@ -331,15 +333,17 @@ The command requires configuration in `.claude/config.json`:
 
 ```json
 {
-  "projectKey": "myproject",
-  "thoughts": {
-    "repo": "~/thoughts/repos/myproject"
-  },
-  "contextEngineering": {
-    "codeRepos": [
-      "org/repo-1",
-      "org/repo-2"
-    ]
+  "catalyst": {
+    "projectKey": "myproject",
+    "thoughts": {
+      "repo": "~/thoughts/repos/myproject"
+    },
+    "contextEngineering": {
+      "codeRepos": [
+        "org/repo-1",
+        "org/repo-2"
+      ]
+    }
   }
 }
 ```

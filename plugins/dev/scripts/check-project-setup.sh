@@ -16,7 +16,7 @@ warnings=()
 # 1. Check thoughts system is initialized
 if [[ -d "thoughts/shared" ]]; then
   # Check subdirectories exist
-  for dir in research plans handoffs prs; do
+  for dir in research plans handoffs prs reports; do
     if [[ ! -d "thoughts/shared/$dir" ]]; then
       warnings+=("thoughts/shared/$dir/ directory missing — run: mkdir -p thoughts/shared/$dir")
     fi

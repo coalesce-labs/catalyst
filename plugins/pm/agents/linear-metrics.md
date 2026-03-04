@@ -50,11 +50,11 @@ Include: [completed issues | active cycles | milestones | all]
 
 ```bash
 CONFIG_FILE=".claude/config.json"
-PROJECT_KEY=$(jq -r '.projectKey' "$CONFIG_FILE")
-TEAM_KEY=$(jq -r '.project.ticketPrefix' "$CONFIG_FILE")
+PROJECT_KEY=$(jq -r '.catalyst.projectKey' "$CONFIG_FILE")
+TEAM_KEY=$(jq -r '.catalyst.project.ticketPrefix' "$CONFIG_FILE")
 
 SECRETS_FILE="$HOME/.config/catalyst/config-$PROJECT_KEY.json"
-LINEAR_TEAM=$(jq -r '.linear.teamKey' "$SECRETS_FILE")
+LINEAR_TEAM=$(jq -r '.catalyst.linear.teamKey' "$SECRETS_FILE")
 ```
 
 ### Step 2: Collect Completed Issues

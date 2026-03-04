@@ -67,13 +67,15 @@ Teams that want finer-grained tracking can configure `stateMap` to use custom st
 
 ```json
 {
-  "linear": {
-    "stateMap": {
-      "research": "Research in Progress",
-      "planning": "Plan in Progress",
-      "inProgress": "In Dev",
-      "inReview": "In Review",
-      "done": "Done"
+  "catalyst": {
+    "linear": {
+      "stateMap": {
+        "research": "Research in Progress",
+        "planning": "Plan in Progress",
+        "inProgress": "In Dev",
+        "inReview": "In Review",
+        "done": "Done"
+      }
     }
   }
 }
@@ -240,35 +242,35 @@ The `/catalyst-dev:linear` command uses a **clever initialization pattern**:
 ### Example First-Time Flow
 
 ```bash
-# Copy command to new project
-mkdir -p .claude/commands/linear
-cp ~/ryan-claude-workspace/commands/linear/linear.md .claude/commands/linear/
+# Install the Catalyst plugin
+/plugin marketplace add coalesce-labs/catalyst
+/plugin install catalyst-dev
 
-# First use
-/catalyst-dev:linear
-
-# Output:
-# This Linear command needs one-time configuration...
-#
-# 1. What's your Linear team ID?
-#    (Find it with: mcp__linear__list_teams)
-#    Team ID: [you enter: abc123]
-#
-# 2. What's your default project ID?
-#    Project ID: [you enter: proj456]
-#
-# 3. What's your thoughts repository URL?
-#    Your pattern: https://github.com/your-org/thoughts/blob/main
-
-# Command updates itself:
-# ✅ Configuration complete! I've updated the linear.md file.
-#
-# Please commit this change:
-#   git add .claude/commands/linear/linear.md
-#   git commit -m "Configure Linear command"
+# Configure your project
+# Edit .claude/config.json:
+{
+  "catalyst": {
+    "projectKey": "acme",
+    "project": {
+      "ticketPrefix": "ACME"
+    },
+    "linear": {
+      "stateMap": {
+        "backlog": "Backlog",
+        "todo": "Todo",
+        "research": "In Progress",
+        "planning": "In Progress",
+        "inProgress": "In Progress",
+        "inReview": "In Review",
+        "done": "Done",
+        "canceled": "Canceled"
+      }
+    }
+  }
+}
 
 # Now it works:
-/catalyst-dev:linear create thoughts/shared/research/feature.md
+/catalyst-dev:linear create "Add OAuth support"
 ```
 
 ---

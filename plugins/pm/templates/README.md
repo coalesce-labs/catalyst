@@ -292,7 +292,7 @@ Want to adapt these templates for your team? Here are common customizations:
 Add sections relevant to your workflow:
 - **Security vulnerabilities** (if using Snyk/Dependabot)
 - **Production incidents** (if tracking in PagerDuty)
-- **Customer feedback** (if integrated with Intercom)
+- **Customer feedback** (if integrated with support tools)
 - **Deploy frequency** (if tracking deployments)
 
 ### Adjust Thresholds

@@ -1,5 +1,15 @@
 #!/bin/bash
-# Bump plugin version numbers
+# DEPRECATED: Version bumps are now automated by Release Please.
+# Release Please reads conventional commits and creates release PRs automatically.
+# This script is kept for manual overrides only.
+#
+# Normal workflow:
+#   1. Use conventional commits: feat(dev): ..., fix(pm): ...
+#   2. Release Please opens a release PR automatically
+#   3. Merge the release PR to create a release
+#
+# Manual override (if needed):
+#   ./scripts/bump-version.sh <plugin-name> <version-type>
 
 set -e
 
