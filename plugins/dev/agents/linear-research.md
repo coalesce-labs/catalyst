@@ -35,49 +35,7 @@ Linearis CLI tool.
    - Get available labels
    - Discover workflow states
 
-## Linearis CLI Quick Reference
-
-**IMPORTANT**: Use these exact command patterns to avoid trial-and-error syntax issues.
-
-### Most Common Commands
-
-```bash
-# Read a ticket (works with TEAM-123 or UUID)
-linearis issues read TEAM-123
-
-# Update ticket state (use --state NOT --status!)
-# State names should come from stateMap in .claude/config.json
-linearis issues update TEAM-123 --state "In Progress"
-linearis issues update TEAM-123 --state "In Review"
-
-# Add comment (use 'comments create' NOT 'issues comment'!)
-linearis comments create TEAM-123 --body "Starting research"
-
-# List tickets
-linearis issues list --limit 50
-
-# List active cycle
-linearis cycles list --team TEAM --active
-
-# Read cycle details (includes all issues)
-linearis cycles read "Sprint 2025-11" --team TEAM
-
-# List projects
-linearis projects list --team TEAM
-```
-
-### Common Mistakes to Avoid
-
-❌ `linearis issues update TICKET-123 --status "In Progress"` (Wrong flag)
-✅ `linearis issues update TICKET-123 --state "In Progress"`
-
-❌ `linearis issues comment TICKET-123 "text"` (Wrong subcommand)
-✅ `linearis comments create TICKET-123 --body "text"`
-
-❌ `linearis issues view TICKET-123` (Wrong verb)
-✅ `linearis issues read TICKET-123"`
-
-See `.linearis-syntax-reference.md` for comprehensive examples.
+**CLI Syntax**: The `linearis` skill provides full CLI syntax reference. It is auto-loaded when needed.
 
 ## Key Commands
 
@@ -180,9 +138,10 @@ Team information comes from `.claude/config.json`:
 
 ```json
 {
-  "linear": {
-    "teamKey": "ENG",
-    "defaultTeam": "Backend"
+  "catalyst": {
+    "linear": {
+      "teamKey": "ENG"
+    }
   }
 }
 ```
