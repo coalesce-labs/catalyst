@@ -16,7 +16,7 @@ When you run workflow commands, the Linear command automatically updates ticket 
 | `/catalyst-dev:research_codebase` (with ticket) | `research` | **In Progress** |
 | `/catalyst-dev:create_plan` (with ticket)       | `planning` | **In Progress** |
 | `/catalyst-dev:implement_plan` (with ticket)    | `inProgress` | **In Progress** |
-| `/catalyst-dev:describe_pr` (with ticket)       | `inReview` | **In Review** |
+| `/catalyst-dev:create_pr` (with ticket)          | `inReview` | **In Review** |
 | `/catalyst-dev:merge_pr`                        | `done` | **Done** |
 
 State names are configurable via `linear.stateMap` in `.claude/config.json`. Defaults match
@@ -223,31 +223,24 @@ Teams with custom states can differentiate these phases via `stateMap`.
 
 ### Per-Project Configuration
 
-The `/catalyst-dev:linear` command uses a **clever initialization pattern**:
+Configuration is managed through `setup-catalyst.sh` and `.claude/config.json`:
 
-1. **First use**: Detects `[NEEDS_SETUP]` markers
-2. **Prompts for config**: Team ID, Project ID, GitHub URL
-3. **Updates itself**: Replaces markers with actual values
-4. **Removes setup code**: Self-modifying command
-5. **Commit it**: Now configured for your team
+1. **Run setup**: `./setup-catalyst.sh` configures your project
+2. **Config file**: `.claude/config.json` stores team key and state mappings
+3. **Secrets file**: `~/.config/catalyst/config-{projectKey}.json` stores API tokens
+4. **Commit config**: `.claude/config.json` is safe to commit (no secrets)
 
-### Why This Works
-
-**Portable**: Copy command to new repo → It prompts for config → It's customized
-
-**Shareable**: Once configured, whole team uses same settings
-
-**No secrets**: Just IDs and URLs, safe to commit
-
-### Example First-Time Flow
+### Example Setup
 
 ```bash
 # Install the Catalyst plugin
 /plugin marketplace add coalesce-labs/catalyst
 /plugin install catalyst-dev
 
-# Configure your project
-# Edit .claude/config.json:
+# Run setup
+./setup-catalyst.sh
+
+# Or manually edit .claude/config.json:
 {
   "catalyst": {
     "projectKey": "acme",
@@ -255,6 +248,7 @@ The `/catalyst-dev:linear` command uses a **clever initialization pattern**:
       "ticketPrefix": "ACME"
     },
     "linear": {
+      "teamKey": "ACME",
       "stateMap": {
         "backlog": "Backlog",
         "todo": "Todo",
@@ -486,13 +480,13 @@ Adjust as needed!
 
 **Cause**: Status name mismatch
 
-**Fix**: Check exact status names in Linear:
+**Fix**: Check exact status names in Linear using Linearis CLI:
 
 ```bash
-mcp__linear__list_workflow_states
+linearis issues list --limit 1 | jq '.[0].state'
 ```
 
-Update command to use exact names.
+Update `stateMap` in `.claude/config.json` to use exact state names from your workspace.
 
 ---
 

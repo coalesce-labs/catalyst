@@ -63,6 +63,14 @@ Once you have a plan path:
 - Read the plan completely (no limit/offset)
 - Check for any existing checkmarks (- [x]) to see what's done
 - Read the original ticket and all files mentioned in the plan
+- **Extract ticket from plan frontmatter** (`source_ticket` field) and update Linear state:
+  ```bash
+  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
+      linearis issues update "$ticketId" --state "$IN_PROGRESS_STATE"
+  fi
+  ```
+  If Linearis CLI is not available, skip silently and continue implementation.
 - Think deeply about how the pieces fit together
 - Create a todo list to track your progress
 - Start implementing if you understand what needs to be done
@@ -226,3 +234,16 @@ Lead (Opus) — Coordinates implementation
 - **Sequential phases stay sequential** — only parallelize truly independent work
 - **Lead reviews all code** — use plan approval gates before proceeding
 - **Fallback gracefully** — if agent teams unavailable, execute sequentially
+
+## Linear Integration
+
+If a ticket is detected (from plan document's `source_ticket` frontmatter or from context):
+
+- **At implementation start** (Step 3):
+  ```bash
+  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
+      linearis issues update "$ticketId" --state "$IN_PROGRESS_STATE"
+  fi
+  ```
+- If Linearis CLI not available, skip silently and continue implementation

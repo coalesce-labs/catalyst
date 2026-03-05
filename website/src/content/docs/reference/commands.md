@@ -38,7 +38,7 @@ description: Complete reference for all Catalyst commands across plugins.
 
 | Command | Description | Model |
 |---------|-------------|-------|
-| `/linear` | Ticket management and workflow automation | Sonnet |
+| `/linear` | Direct ticket operations (create, update, comment). Workflow commands handle state transitions automatically. | Sonnet |
 | `/create-worktree` | Create git worktree for parallel development | Sonnet |
 
 ## catalyst-pm Commands

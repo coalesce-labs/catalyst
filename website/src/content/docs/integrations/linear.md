@@ -14,7 +14,7 @@ When you run workflow commands, Catalyst automatically updates Linear ticket sta
 | `/research-codebase` (with ticket) | In Progress |
 | `/create-plan` (with ticket) | In Progress |
 | `/implement-plan` (with ticket) | In Progress |
-| `/describe-pr` (with ticket) | In Review |
+| `/create-pr` (with ticket) | In Review |
 | `/merge-pr` | Done |
 
 ## Ticket Detection
@@ -85,12 +85,16 @@ The `catalyst-pm` plugin extends Linear integration with:
 
 ```json
 {
-  "linear": {
-    "apiToken": "lin_api_...",
-    "teamKey": "ACME"
+  "catalyst": {
+    "linear": {
+      "apiToken": "lin_api_...",
+      "teamKey": "ACME"
+    }
   }
 }
 ```
+
+The `setup-catalyst.sh` script auto-detects available states from the Linear API and generates the correct `stateMap` for your workspace.
 
 ## Why CLI Instead of MCP?
 

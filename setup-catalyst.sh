@@ -148,6 +148,166 @@ validate_linear_token() {
   }'
 }
 
+# Fetch workflow states for a Linear team
+# Args: $1 = API token, $2 = team key
+# Returns JSON array of workflow states with name, type, position
+fetch_linear_workflow_states() {
+  local token="$1"
+  local team_key="$2"
+
+  local query='
+  {
+    teams(filter: { key: { eq: "'"$team_key"'" } }) {
+      nodes {
+        workflowStates {
+          nodes {
+            name
+            type
+            position
+          }
+        }
+      }
+    }
+  }'
+
+  local response
+  response=$(curl -s -X POST \
+    -H "Authorization: $token" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\":$(echo "$query" | jq -Rs .)}" \
+    https://api.linear.app/graphql 2>&1)
+
+  # Check for errors
+  if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
+    return 1
+  fi
+
+  # Extract workflow states
+  local states
+  states=$(echo "$response" | jq -r '.data.teams.nodes[0].workflowStates.nodes // empty')
+
+  if [[ -z "$states" || "$states" == "null" ]]; then
+    return 1
+  fi
+
+  echo "$states"
+}
+
+# Map Linear workflow states to Catalyst stateMap
+# Args: $1 = JSON array of workflow states from fetch_linear_workflow_states
+# Returns JSON object matching our stateMap schema
+build_state_map_from_linear() {
+  local states="$1"
+
+  # Extract state names by type, sorted by position
+  # Linear types: triage, backlog, unstarted, started, completed, canceled
+  local backlog_state unstarted_state started_states review_state completed_state canceled_state
+
+  backlog_state=$(echo "$states" | jq -r '[.[] | select(.type == "backlog")] | sort_by(.position) | .[0].name // empty')
+  unstarted_state=$(echo "$states" | jq -r '[.[] | select(.type == "unstarted")] | sort_by(.position) | .[0].name // empty')
+  completed_state=$(echo "$states" | jq -r '[.[] | select(.type == "completed")] | sort_by(.position) | .[0].name // empty')
+  canceled_state=$(echo "$states" | jq -r '[.[] | select(.type == "cancelled" or .type == "canceled")] | sort_by(.position) | .[0].name // empty')
+
+  # For "started" type, there may be multiple states (e.g., "In Progress", "In Review")
+  # Try to find one with "review" in the name for our inReview key
+  local default_started
+  default_started=$(echo "$states" | jq -r '[.[] | select(.type == "started")] | sort_by(.position) | .[0].name // empty')
+  review_state=$(echo "$states" | jq -r '[.[] | select(.type == "started") | select(.name | test("review"; "i"))] | .[0].name // empty')
+
+  # If no explicit review state found, use the last started state (highest position)
+  if [[ -z "$review_state" ]]; then
+    local last_started
+    last_started=$(echo "$states" | jq -r '[.[] | select(.type == "started")] | sort_by(.position) | last.name // empty')
+    # Only use last_started as review if there are multiple started states
+    local started_count
+    started_count=$(echo "$states" | jq '[.[] | select(.type == "started")] | length')
+    if [[ "$started_count" -gt 1 ]]; then
+      review_state="$last_started"
+    else
+      review_state="$default_started"
+    fi
+  fi
+
+  # If no triage state but we need a backlog fallback
+  if [[ -z "$backlog_state" ]]; then
+    # Check for triage state as fallback
+    backlog_state=$(echo "$states" | jq -r '[.[] | select(.type == "triage")] | sort_by(.position) | .[0].name // empty')
+  fi
+
+  # Build the stateMap JSON
+  jq -n \
+    --arg backlog "${backlog_state:-Backlog}" \
+    --arg todo "${unstarted_state:-Todo}" \
+    --arg research "${default_started:-In Progress}" \
+    --arg planning "${default_started:-In Progress}" \
+    --arg inProgress "${default_started:-In Progress}" \
+    --arg inReview "${review_state:-In Review}" \
+    --arg done "${completed_state:-Done}" \
+    --arg canceled "${canceled_state:-Canceled}" \
+    '{
+      backlog: $backlog,
+      todo: $todo,
+      research: $research,
+      planning: $planning,
+      inProgress: $inProgress,
+      inReview: $inReview,
+      done: $done,
+      canceled: $canceled
+    }'
+}
+
+# Update .claude/config.json with real Linear workflow states
+# Called after Linear integration is configured in secrets
+update_config_with_linear_states() {
+  local config_file="${PROJECT_DIR}/.claude/config.json"
+  local secrets_file="$HOME/.config/catalyst/config-${PROJECT_KEY}.json"
+
+  # Need both files to exist
+  if [[ ! -f "$config_file" ]] || [[ ! -f "$secrets_file" ]]; then
+    return 0
+  fi
+
+  # Get token and team key from secrets
+  local token team_key
+  token=$(jq -r '.catalyst.linear.apiToken // empty' "$secrets_file" 2>/dev/null)
+  team_key=$(jq -r '.catalyst.linear.teamKey // empty' "$secrets_file" 2>/dev/null)
+
+  # Fall back to project config for team key
+  if [[ -z "$team_key" ]]; then
+    team_key=$(jq -r '.catalyst.linear.teamKey // empty' "$config_file" 2>/dev/null)
+  fi
+
+  if [[ -z "$token" ]] || [[ -z "$team_key" ]]; then
+    return 0
+  fi
+
+  echo ""
+  echo "🔍 Fetching workflow states from Linear for team ${team_key}..."
+
+  local states
+  if states=$(fetch_linear_workflow_states "$token" "$team_key"); then
+    local state_map
+    state_map=$(build_state_map_from_linear "$states")
+
+    if [[ -n "$state_map" ]]; then
+      # Update the project config with real states
+      local updated_config
+      updated_config=$(jq --argjson stateMap "$state_map" '.catalyst.linear.stateMap = $stateMap' "$config_file")
+      echo "$updated_config" | jq . > "$config_file"
+
+      echo ""
+      echo "✓ Updated .claude/config.json with actual Linear workflow states:"
+      echo "$state_map" | jq -r 'to_entries[] | "  \(.key): \(.value)"'
+      echo ""
+    else
+      print_warning "Could not build state map from Linear API response. Using defaults."
+    fi
+  else
+    print_warning "Could not fetch workflow states from Linear API. Using defaults."
+    echo "  You can customize later in .claude/config.json → catalyst.linear.stateMap"
+  fi
+}
+
 # Discover existing Sentry auth token
 discover_sentry_token() {
   local token=""
@@ -757,6 +917,19 @@ setup_project_config() {
       "ticketPrefix": "${ticket_prefix}",
       "name": "${project_name}"
     },
+    "linear": {
+      "teamKey": "${ticket_prefix}",
+      "stateMap": {
+        "backlog": "Backlog",
+        "todo": "Todo",
+        "research": "In Progress",
+        "planning": "In Progress",
+        "inProgress": "In Progress",
+        "inReview": "In Review",
+        "done": "Done",
+        "canceled": "Canceled"
+      }
+    },
     "thoughts": {
       "user": null
     }
@@ -769,6 +942,8 @@ EOF
   echo "✓ projectKey: ${PROJECT_KEY}"
   echo "✓ org/repo: ${ORG_NAME}/${REPO_NAME}"
   echo "✓ ticketPrefix: ${ticket_prefix}"
+  echo "✓ linear.teamKey: ${ticket_prefix}"
+  echo "✓ linear.stateMap: defaults (will be updated with actual Linear states after API setup)"
   echo ""
 }
 
@@ -1802,6 +1977,7 @@ main() {
   setup_project_config
   setup_humanlayer_config
   setup_catalyst_secrets
+  update_config_with_linear_states
   init_humanlayer_thoughts
   sync_thoughts
 
