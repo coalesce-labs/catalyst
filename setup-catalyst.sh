@@ -450,6 +450,15 @@ check_prerequisites() {
   local missing_critical=false
   local missing_optional=false
 
+  # Critical: git (used throughout for repo detection, worktrees, thoughts)
+  if ! check_command_exists "git"; then
+    print_error "git not found (required)"
+    echo "  Install git: https://git-scm.com/downloads"
+    missing_critical=true
+  else
+    print_success "git installed"
+  fi
+
   # Critical: jq (for config manipulation)
   if ! check_command_exists "jq"; then
     print_warning "jq not found (required for config management)"
@@ -722,12 +731,60 @@ determine_project_location() {
 # Setup functions
 #
 
+discover_existing_thoughts_repo() {
+  # Priority 1: Check if thoughts/shared is already a symlink in PROJECT_DIR
+  # This handles the case where humanlayer thoughts init was already run
+  if [ -L "${PROJECT_DIR}/thoughts/shared" ]; then
+    local shared_target
+    shared_target=$(readlink "${PROJECT_DIR}/thoughts/shared" 2>/dev/null || echo "")
+    if [ -n "$shared_target" ]; then
+      # Derive the thoughts repo root from the symlink target
+      # e.g., /path/to/thoughts/repos/evergreen/shared → /path/to/thoughts
+      local thoughts_root
+      thoughts_root=$(echo "$shared_target" | sed 's|/repos/[^/]*/shared$||')
+      if [ -d "$thoughts_root" ] && [ -d "$thoughts_root/repos" ]; then
+        THOUGHTS_REPO="$thoughts_root"
+        return 0
+      fi
+    fi
+  fi
+
+  # Priority 2: Check HumanLayer profile config in humanlayer.json
+  local hl_config="$HOME/.config/humanlayer/humanlayer.json"
+  if [ -f "$hl_config" ] && command -v jq &>/dev/null; then
+    # Try by ORG_NAME (most common - profile name matches org)
+    local thoughts_path
+    thoughts_path=$(jq -r ".thoughts.profiles.\"${ORG_NAME}\".thoughtsRepo // empty" "$hl_config" 2>/dev/null)
+    if [ -n "$thoughts_path" ] && [ -d "$thoughts_path" ] && [ -d "$thoughts_path/repos" ]; then
+      THOUGHTS_REPO="$thoughts_path"
+      return 0
+    fi
+
+    # Try by PROJECT_KEY if different from ORG_NAME
+    if [ "$PROJECT_KEY" != "$ORG_NAME" ]; then
+      thoughts_path=$(jq -r ".thoughts.profiles.\"${PROJECT_KEY}\".thoughtsRepo // empty" "$hl_config" 2>/dev/null)
+      if [ -n "$thoughts_path" ] && [ -d "$thoughts_path" ] && [ -d "$thoughts_path/repos" ]; then
+        THOUGHTS_REPO="$thoughts_path"
+        return 0
+      fi
+    fi
+  fi
+
+  # Priority 3: Check standard location based on ORG_ROOT
+  if [ -d "${ORG_ROOT}/thoughts" ] && [ -d "${ORG_ROOT}/thoughts/repos" ]; then
+    THOUGHTS_REPO="${ORG_ROOT}/thoughts"
+    return 0
+  fi
+
+  # Not found
+  return 1
+}
+
 setup_thoughts_repo() {
   print_header "Setting Up Thoughts Repository"
 
-  THOUGHTS_REPO="${ORG_ROOT}/thoughts"
-
-  if [ -d "$THOUGHTS_REPO" ]; then
+  # Try to discover an existing thoughts repo before creating one
+  if discover_existing_thoughts_repo; then
     print_success "Found existing thoughts repository: $THOUGHTS_REPO"
 
     # Validate structure
@@ -753,22 +810,34 @@ setup_thoughts_repo() {
         cd "$PROJECT_DIR"
       fi
     fi
-  else
-    echo "Thoughts repository will be created at: $THOUGHTS_REPO"
+
+    # Offer GitHub backup
+    if [ -d "$THOUGHTS_REPO/.git" ]; then
+      offer_github_backup
+    fi
+
     echo ""
-    echo "This will be shared by all projects in org: $ORG_NAME"
-    echo ""
+    return 0
+  fi
 
-    if ask_yes_no "Create thoughts repository?"; then
-      mkdir -p "$THOUGHTS_REPO/repos"
-      mkdir -p "$THOUGHTS_REPO/global"
+  # No existing thoughts repo found - create one at the standard location
+  THOUGHTS_REPO="${ORG_ROOT}/thoughts"
 
-      # Initialize as git repo
-      cd "$THOUGHTS_REPO"
-      git init
+  echo "Thoughts repository will be created at: $THOUGHTS_REPO"
+  echo ""
+  echo "This will be shared by all projects in org: $ORG_NAME"
+  echo ""
 
-      # Create README
-      cat > README.md <<'EOF'
+  if ask_yes_no "Create thoughts repository?"; then
+    mkdir -p "$THOUGHTS_REPO/repos"
+    mkdir -p "$THOUGHTS_REPO/global"
+
+    # Initialize as git repo
+    cd "$THOUGHTS_REPO"
+    git init
+
+    # Create README
+    cat > README.md <<'EOF'
 # Thoughts Repository
 
 This is a shared thoughts repository for all projects in this organization.
@@ -796,15 +865,14 @@ Projects symlink into this repo via `humanlayer thoughts init`.
 See: https://github.com/humanlayer/humanlayer/blob/main/hlyr/THOUGHTS.md
 EOF
 
-      git add README.md
-      git commit -m "Initial thoughts repository"
+    git add README.md
+    git commit -m "Initial thoughts repository"
 
-      print_success "Created thoughts repository: $THOUGHTS_REPO"
-      cd "$PROJECT_DIR"
-    else
-      print_error "Thoughts repository required for Catalyst. Exiting."
-      exit 1
-    fi
+    print_success "Created thoughts repository: $THOUGHTS_REPO"
+    cd "$PROJECT_DIR"
+  else
+    print_error "Thoughts repository required for Catalyst. Exiting."
+    exit 1
   fi
 
   # Offer GitHub backup
@@ -818,6 +886,22 @@ EOF
 setup_worktree_directory() {
   print_header "Setting Up Worktree Directory"
 
+  # Check if we're already inside a worktree (e.g., Conductor-managed)
+  local git_dir
+  git_dir=$(git rev-parse --git-dir 2>/dev/null || echo "")
+
+  if [ -f "$git_dir" ] 2>/dev/null || [[ "$git_dir" == *"/worktrees/"* ]]; then
+    print_success "Already running inside a git worktree"
+    echo "Worktree management is handled by your tooling (e.g., Conductor, /create-worktree)."
+    echo ""
+    echo "To create additional worktrees, use:"
+    echo "  /create-worktree PROJ-123 feature-name"
+    echo ""
+    WORKTREE_BASE=""
+    return 0
+  fi
+
+  # Standard layout: worktrees as sibling of the repo under ORG_ROOT
   WORKTREE_BASE="${ORG_ROOT}/${REPO_NAME}-worktrees"
 
   echo "Worktrees will be created at: $WORKTREE_BASE"
@@ -845,7 +929,7 @@ setup_worktree_directory() {
 
   echo ""
   echo "To create worktrees, use:"
-  echo "  /create-worktree PROJ-123 main"
+  echo "  /create-worktree PROJ-123 feature-name"
   echo ""
 }
 
@@ -1657,11 +1741,11 @@ init_humanlayer_thoughts() {
   if [ -L "thoughts/shared" ] && [ -L "thoughts/global" ]; then
     print_success "Thoughts already initialized in this project"
 
-    # Verify symlinks are correct
+    # Verify symlinks point to the discovered thoughts repo
     local shared_target
     shared_target=$(readlink "thoughts/shared" 2>/dev/null || echo "")
 
-    if [[ "$shared_target" =~ ${THOUGHTS_REPO} ]]; then
+    if [[ "$shared_target" == *"${THOUGHTS_REPO}"* ]]; then
       print_success "Symlinks point to correct thoughts repo"
       return 0
     else
@@ -1680,15 +1764,53 @@ init_humanlayer_thoughts() {
   echo "Running: humanlayer thoughts init --directory \"${REPO_NAME}\""
   echo ""
 
-  # Run humanlayer thoughts init with the correct config
+  # Try per-project config first, then fall back to --profile flag
   local config_file="$HOME/.config/humanlayer/config-${PROJECT_KEY}.json"
+  local init_success=false
 
-  if ! HUMANLAYER_CONFIG="$config_file" humanlayer thoughts init --directory "$REPO_NAME"; then
+  if [ -f "$config_file" ]; then
+    if HUMANLAYER_CONFIG="$config_file" humanlayer thoughts init --directory "$REPO_NAME"; then
+      init_success=true
+    fi
+  fi
+
+  # Fall back to --profile if per-project config didn't work
+  if ! $init_success; then
+    # Check if a matching profile exists in humanlayer.json
+    local hl_config="$HOME/.config/humanlayer/humanlayer.json"
+    local profile_name=""
+
+    if [ -f "$hl_config" ] && command -v jq &>/dev/null; then
+      # Check for profile matching ORG_NAME
+      if jq -e ".thoughts.profiles.\"${ORG_NAME}\"" "$hl_config" &>/dev/null; then
+        profile_name="$ORG_NAME"
+      elif jq -e ".thoughts.profiles.\"${PROJECT_KEY}\"" "$hl_config" &>/dev/null; then
+        profile_name="$PROJECT_KEY"
+      fi
+    fi
+
+    if [ -n "$profile_name" ]; then
+      echo "Using HumanLayer profile: $profile_name"
+      if humanlayer thoughts init --profile "$profile_name" --directory "$REPO_NAME"; then
+        init_success=true
+      fi
+    fi
+  fi
+
+  # Final fallback: try with per-project config even if it doesn't exist yet
+  # (humanlayer might use defaults)
+  if ! $init_success; then
+    if humanlayer thoughts init --directory "$REPO_NAME"; then
+      init_success=true
+    fi
+  fi
+
+  if ! $init_success; then
     print_error "Failed to initialize thoughts"
     echo ""
     echo "You can try manually:"
     echo "  cd $PROJECT_DIR"
-    echo "  HUMANLAYER_CONFIG=$config_file humanlayer thoughts init --directory \"${REPO_NAME}\""
+    echo "  humanlayer thoughts init --profile ${ORG_NAME} --directory \"${REPO_NAME}\""
     return 1
   fi
 
@@ -1709,9 +1831,19 @@ sync_thoughts() {
 
   cd "$PROJECT_DIR"
 
+  # Try per-project config first, then fall back to default
   local config_file="$HOME/.config/humanlayer/config-${PROJECT_KEY}.json"
 
-  if HUMANLAYER_CONFIG="$config_file" humanlayer thoughts sync; then
+  if [ -f "$config_file" ]; then
+    if HUMANLAYER_CONFIG="$config_file" humanlayer thoughts sync; then
+      print_success "Thoughts synced and indexed"
+      echo ""
+      return 0
+    fi
+  fi
+
+  # Fall back to default config (uses profile auto-detection via repoMappings)
+  if humanlayer thoughts sync; then
     print_success "Thoughts synced and indexed"
   else
     print_warning "Failed to sync thoughts. You can run manually:"
@@ -1758,11 +1890,13 @@ validate_setup() {
     validation_failed=true
   fi
 
-  # Check HumanLayer config
+  # Check HumanLayer config (per-project file or profile in humanlayer.json)
   local hl_config="$HOME/.config/humanlayer/config-${PROJECT_KEY}.json"
+  local hl_global="$HOME/.config/humanlayer/humanlayer.json"
+
   if [ -f "$hl_config" ]; then
     if jq empty "$hl_config" 2>/dev/null; then
-      print_success "✓ HumanLayer config is valid JSON"
+      print_success "✓ HumanLayer per-project config is valid JSON"
 
       local repo_path
       repo_path=$(jq -r '.thoughts.thoughtsRepo // empty' "$hl_config")
@@ -1774,8 +1908,19 @@ validate_setup() {
         validation_failed=true
       fi
     else
-      print_error "✗ HumanLayer config is invalid JSON"
+      print_error "✗ HumanLayer per-project config is invalid JSON"
       validation_failed=true
+    fi
+  elif [ -f "$hl_global" ]; then
+    # Check for profile in global humanlayer.json
+    local profile_repo=""
+    profile_repo=$(jq -r ".thoughts.profiles.\"${ORG_NAME}\".thoughtsRepo // empty" "$hl_global" 2>/dev/null)
+
+    if [ -n "$profile_repo" ] && [ -d "$profile_repo" ]; then
+      print_success "✓ HumanLayer profile '${ORG_NAME}' configured (thoughts: $profile_repo)"
+    else
+      print_warning "⚠ No HumanLayer per-project config or matching profile found"
+      print_warning "  Run: humanlayer thoughts init --profile ${ORG_NAME} --directory ${REPO_NAME}"
     fi
   else
     print_error "✗ HumanLayer config not found"
@@ -1804,10 +1949,12 @@ validate_setup() {
   fi
 
   # Check worktree directory
-  if [ -d "$WORKTREE_BASE" ]; then
+  if [ -n "$WORKTREE_BASE" ] && [ -d "$WORKTREE_BASE" ]; then
     print_success "✓ Worktree directory exists: $WORKTREE_BASE"
-  else
+  elif [ -n "$WORKTREE_BASE" ]; then
     print_warning "⚠ Worktree directory not created (okay if skipped)"
+  else
+    print_success "✓ Running inside worktree (worktree management handled externally)"
   fi
 
   echo ""
@@ -1842,7 +1989,11 @@ print_summary() {
   echo ""
 
   echo "🌳 Worktrees:"
-  echo "   Location: ${WORKTREE_BASE}"
+  if [ -n "$WORKTREE_BASE" ]; then
+    echo "   Location: ${WORKTREE_BASE}"
+  else
+    echo "   Managed externally (running inside worktree)"
+  fi
   echo ""
 
   echo "⚙️  Configuration Files:"
@@ -1962,6 +2113,18 @@ offer_github_backup() {
 #
 
 main() {
+  # Handle curl | bash: redirect stdin from terminal for interactive prompts.
+  # When piped, bash reads the script from stdin. Once loaded (main is a function,
+  # so bash reads the full definition before executing), we redirect stdin to /dev/tty
+  # so that read commands can get user input from the terminal.
+  if [ ! -t 0 ]; then
+    if [ -e /dev/tty ]; then
+      exec < /dev/tty
+    else
+      print_warning "No terminal available. Interactive prompts will use defaults."
+    fi
+  fi
+
   # Print banner
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
