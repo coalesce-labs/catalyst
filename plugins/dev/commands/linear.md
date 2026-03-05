@@ -50,10 +50,10 @@ THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/or
 
 ```json
 {
-  "linear": {
-    "teamKey": "ENG",
-    "defaultTeam": "Backend",
-    "thoughtsRepoUrl": "https://github.com/org/thoughts/blob/main"
+  "catalyst": {
+    "linear": {
+      "teamKey": "ENG"
+    }
   }
 }
 ```
@@ -427,56 +427,7 @@ linearis issues list --team PROJ | jq '.[] | select(.title | contains("authentic
 
 ---
 
-## Linearis CLI Reference
-
-### Common Commands
-
-```bash
-# List issues (only --limit supported, use jq for filtering)
-linearis issues list --limit 50
-
-# Filter by status using jq
-linearis issues list --limit 100 | jq '.[] | select(.state.name == "In Progress")'
-
-# Read specific issue
-linearis issues read TICKET-123
-
-# Create issue
-linearis issues create "Title" --description "Description" --state "Backlog"
-
-# Update issue state
-linearis issues update TICKET-123 --state "In Progress"
-
-# Update assignee
-linearis issues update TICKET-123 --assignee <user-id>
-
-# Add comment
-linearis comments create TICKET-123 --body "Comment text"
-
-# List cycles
-linearis cycles list --team TEAM [--active]
-
-# Read cycle
-linearis cycles read "Sprint 2025-10" --team TEAM
-```
-
-### JSON Output Parsing
-
-Linearis returns JSON, parse with jq:
-
-```bash
-# Get ticket status
-linearis issues read TEAM-123 | jq -r '.state.name'
-
-# Get ticket title
-linearis issues read TEAM-123 | jq -r '.title'
-
-# Get assignee
-linearis issues read TEAM-123 | jq -r '.assignee.name'
-
-# Filter list by keyword
-linearis issues list --team TEAM | jq '.[] | select(.title | contains("bug"))'
-```
+For Linearis CLI syntax, see the `linearis` skill reference.
 
 ---
 

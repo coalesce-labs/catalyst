@@ -22,6 +22,9 @@ Thumbs.db
 # HumanLayer thoughts directory (symlink to external system)
 thoughts/
 
+# Research documents belong in thoughts/shared/research/ (not in repo)
+research/
+
 # Personal developer configuration (not shared with team)
 .claude/config.local.json
 .claude/.personal/*

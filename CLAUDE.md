@@ -284,26 +284,28 @@ Catalyst uses a **two-layer config system** to keep secrets out of git:
 **Layer 1: Project Config** (`.claude/config.json` - safe to commit):
 ```json
 {
-  "projectKey": "acme",
-  "project": {
-    "ticketPrefix": "ACME",
-    "name": "Acme Corp Project"
-  },
-  "linear": {
-    "teamKey": "ACME",
-    "stateMap": {
-      "backlog": "Backlog",
-      "todo": "Todo",
-      "research": "In Progress",
-      "planning": "In Progress",
-      "inProgress": "In Progress",
-      "inReview": "In Review",
-      "done": "Done",
-      "canceled": "Canceled"
+  "catalyst": {
+    "projectKey": "acme",
+    "project": {
+      "ticketPrefix": "ACME",
+      "name": "Acme Corp Project"
+    },
+    "linear": {
+      "teamKey": "ACME",
+      "stateMap": {
+        "backlog": "Backlog",
+        "todo": "Todo",
+        "research": "In Progress",
+        "planning": "In Progress",
+        "inProgress": "In Progress",
+        "inReview": "In Review",
+        "done": "Done",
+        "canceled": "Canceled"
+      }
+    },
+    "thoughts": {
+      "user": null
     }
-  },
-  "thoughts": {
-    "user": null
   }
 }
 ```
@@ -311,26 +313,28 @@ Catalyst uses a **two-layer config system** to keep secrets out of git:
 **Layer 2: Secrets Config** (`~/.config/catalyst/config-{projectKey}.json` - NEVER committed):
 ```json
 {
-  "linear": {
-    "apiToken": "lin_api_...",
-    "teamKey": "ACME",
-    "defaultTeam": "ACME"
-  },
-  "sentry": {
-    "org": "acme-corp",
-    "project": "acme-web",
-    "authToken": "sntrys_..."
-  },
-  "railway": {
-    "token": "...",
-    "projectId": "..."
-  },
-  "posthog": {
-    "apiKey": "...",
-    "projectId": "..."
-  },
-  "exa": {
-    "apiKey": "..."
+  "catalyst": {
+    "linear": {
+      "apiToken": "lin_api_...",
+      "teamKey": "ACME",
+      "defaultTeam": "ACME"
+    },
+    "sentry": {
+      "org": "acme-corp",
+      "project": "acme-web",
+      "authToken": "sntrys_..."
+    },
+    "railway": {
+      "token": "...",
+      "projectId": "..."
+    },
+    "posthog": {
+      "apiKey": "...",
+      "projectId": "..."
+    },
+    "exa": {
+      "apiKey": "..."
+    }
   }
 }
 ```
@@ -1037,6 +1041,10 @@ See `docs/MULTI_CONFIG_GUIDE.md` for details on setting up multiple project conf
 6. **Wait for completion** - Don't synthesize partial results
 7. **Preserve context** - Save to thoughts/, not just memory
 8. **Smart updates** - Merge workspace changes, keep local config
+9. **Single source of truth** - Don't duplicate information across files:
+   - CLI syntax lives in skills (e.g., `linearis` skill) — reference it, don't copy it into agents or commands
+   - Workflow logic lives in commands — each command owns its own state transitions
+   - Config schema lives in `website/reference/configuration.md` — config examples in other files must use the canonical `catalyst`-wrapped structure
 
 ## Getting Help
 

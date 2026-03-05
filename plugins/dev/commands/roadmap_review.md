@@ -91,9 +91,10 @@ Uses `.claude/config.json`:
 
 ```json
 {
-  "linear": {
-    "teamKey": "ENG",
-    "defaultTeam": "Backend"
+  "catalyst": {
+    "linear": {
+      "teamKey": "ENG"
+    }
   }
 }
 ```

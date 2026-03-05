@@ -242,15 +242,95 @@ cat .claude/.workflow-context.json | jq '.workflow.plans[0]'
 - Auto-find recent documents
 - Chain workflows seamlessly
 
-## Future Enhancements
+## Plan Mode Integration
 
-Potential improvements:
+Catalyst hooks into Claude Code's built-in plan mode (Shift+Tab) to bridge it with the thoughts system. Two hooks work together:
 
-1. **Metadata Extraction**: Read YAML frontmatter for richer context
-2. **Cross-References**: Track document relationships
-3. **Validation Hooks**: Verify document structure on write
-4. **Notifications**: Alert when context updates
-5. **Analytics**: Track document creation patterns
+### ExitPlanMode Hook: `sync-plan-to-thoughts.sh`
+
+When a user exits plan mode, this hook automatically:
+
+1. Reads plan content from `~/.claude/plans/plan.md`
+2. Extracts a title from the first `# ` heading
+3. Extracts a ticket ID via `[A-Z]+-[0-9]+` regex (from title, then content)
+4. Gathers git metadata (commit, branch, repo)
+5. Generates Catalyst frontmatter matching the `create_plan.md` schema
+6. Writes to `thoughts/shared/plans/YYYY-MM-DD-{ticket}-{slug}.md`
+7. Updates workflow-context so `/implement-plan` can auto-discover it
+8. Fires `humanlayer thoughts sync` in background
+
+**Key behaviors:**
+
+- **Re-iteration safe**: Same date + same heading = same filename, so a rejected-then-revised plan overwrites the previous version
+- **Silent failure**: All errors are swallowed — the hook never blocks the approval dialog
+- **No auto-approve**: Exits 0 with no stdout, so the normal approval flow continues
+- **Coexists with `/create-plan`**: Plans from either source end up in the same thoughts directory and workflow-context, so `/implement-plan` works identically
+
+### UserPromptSubmit Hook: `inject-plan-template.sh`
+
+On every user prompt, this hook checks if Claude is in plan mode:
+
+- If `permission_mode` is NOT `"plan"` → exits immediately (< 10ms overhead)
+- If in plan mode → returns `additionalContext` with Catalyst plan structure guidance
+
+The guidance includes:
+- Required sections (Overview, Phases, Success Criteria, etc.)
+- Phase structure with automated and manual verification checkboxes
+- Ticket ID formatting using the project's configured `ticketPrefix`
+- Tips for file references and phase independence
+
+This is advisory — Claude's plan mode remains free-form, but the guidance nudges toward the structure that `/implement-plan` expects.
+
+### Testing Plan Mode Hooks
+
+**Test the sync hook:**
+```bash
+# Create a mock plan file
+mkdir -p ~/.claude/plans
+cat > ~/.claude/plans/plan.md << 'EOF'
+# PROJ-123 Test Feature Plan
+
+## Overview
+Testing the plan mode integration.
+
+## Phase 1: Setup
+- [ ] Create files
+EOF
+
+# Run the hook with mock input
+echo '{"tool_name":"ExitPlanMode","tool_input":{},"cwd":"'$(pwd)'","permission_mode":"plan"}' \
+  | CLAUDE_PROJECT_DIR=$(pwd) bash plugins/dev/hooks/sync-plan-to-thoughts.sh
+
+# Verify output
+ls thoughts/shared/plans/*test-feature-plan* 2>/dev/null
+```
+
+**Test the injection hook:**
+```bash
+# In plan mode — should return guidance JSON
+echo '{"permission_mode":"plan","cwd":"'$(pwd)'"}' \
+  | CLAUDE_PROJECT_DIR=$(pwd) bash plugins/dev/hooks/inject-plan-template.sh | jq .
+
+# In normal mode — should produce no output
+echo '{"permission_mode":"default","cwd":"'$(pwd)'"}' \
+  | bash plugins/dev/hooks/inject-plan-template.sh
+# (no output, exit 0)
+```
+
+### How Plan Mode Fits the Workflow
+
+Plan mode and `/create-plan` are complementary:
+
+| | Plan Mode (Shift+Tab) | `/create-plan` |
+|---|---|---|
+| **Trigger** | Keyboard shortcut | Slash command |
+| **Style** | Free-form with guidance | Structured interactive |
+| **Research input** | Manual | Auto-discovers recent research |
+| **Output location** | `thoughts/shared/plans/` (via hook) | `thoughts/shared/plans/` (direct) |
+| **Workflow context** | Updated by hook | Updated by command |
+| **Next step** | `/implement-plan` | `/implement-plan` |
+
+Both paths produce plans that `/implement-plan` can discover and execute.
 
 ## See Also
 

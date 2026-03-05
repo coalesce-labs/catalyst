@@ -30,10 +30,12 @@ Catalyst integrates with Sentry via the `catalyst-debugging` plugin for producti
 
 ```json
 {
-  "sentry": {
-    "org": "your-org",
-    "project": "your-project",
-    "authToken": "sntrys_..."
+  "catalyst": {
+    "sentry": {
+      "org": "your-org",
+      "project": "your-project",
+      "authToken": "sntrys_..."
+    }
   }
 }
 ```

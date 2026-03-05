@@ -11,11 +11,11 @@ When you run workflow commands, Catalyst automatically updates Linear ticket sta
 
 | Command | Default State |
 |---------|--------------|
-| `/research-codebase` (with ticket) | In Progress |
-| `/create-plan` (with ticket) | In Progress |
-| `/implement-plan` (with ticket) | In Progress |
-| `/describe-pr` (with ticket) | In Review |
-| `/merge-pr` | Done |
+| `/catalyst-dev:research_codebase` (with ticket) | In Progress |
+| `/catalyst-dev:create_plan` (with ticket) | In Progress |
+| `/catalyst-dev:implement_plan` (with ticket) | In Progress |
+| `/catalyst-dev:create_pr` (with ticket) | In Review |
+| `/catalyst-dev:merge_pr` | Done |
 
 ## Ticket Detection
 
@@ -60,22 +60,22 @@ Set any key to `null` to skip that transition.
 
 ## Commands
 
-The `/linear` command provides direct ticket management:
+The `/catalyst-dev:linear` command provides direct ticket management:
 
 ```bash
-/linear create "Add OAuth support"
-/linear move PROJ-123 "In Progress"
-/linear comment PROJ-123 "Started implementation"
+/catalyst-dev:linear create "Add OAuth support"
+/catalyst-dev:linear move PROJ-123 "In Progress"
+/catalyst-dev:linear comment PROJ-123 "Started implementation"
 ```
 
 ## PM Plugin Integration
 
 The `catalyst-pm` plugin extends Linear integration with:
 
-- `/pm:analyze-cycle` — Cycle health analysis
-- `/pm:analyze-milestone` — Milestone progress tracking
-- `/pm:groom-backlog` — Backlog health and cleanup
-- `/pm:sync-prs` — GitHub-Linear PR correlation
+- `/catalyst-pm:analyze_cycle` — Cycle health analysis
+- `/catalyst-pm:analyze_milestone` — Milestone progress tracking
+- `/catalyst-pm:groom_backlog` — Backlog health and cleanup
+- `/catalyst-pm:sync_prs` — GitHub-Linear PR correlation
 
 ## Setup
 
@@ -85,12 +85,16 @@ The `catalyst-pm` plugin extends Linear integration with:
 
 ```json
 {
-  "linear": {
-    "apiToken": "lin_api_...",
-    "teamKey": "ACME"
+  "catalyst": {
+    "linear": {
+      "apiToken": "lin_api_...",
+      "teamKey": "ACME"
+    }
   }
 }
 ```
+
+The `setup-catalyst.sh` script auto-detects available states from the Linear API and generates the correct `stateMap` for your workspace.
 
 ## Why CLI Instead of MCP?
 

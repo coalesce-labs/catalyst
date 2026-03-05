@@ -17,7 +17,7 @@ Handoffs are structured documents that capture the full state of in-progress wor
 ## Creating a Handoff
 
 ```
-/create-handoff
+/catalyst-dev:create_handoff
 ```
 
 This generates a structured document at `thoughts/shared/handoffs/PROJ-XXXX/YYYY-MM-DD_HH-MM-SS_description.md`.
@@ -38,13 +38,13 @@ A handoff document includes:
 ## Resuming from a Handoff
 
 ```
-/resume-handoff
+/catalyst-dev:resume_handoff
 ```
 
 Or specify a ticket number to find the latest handoff:
 
 ```
-/resume-handoff PROJ-123
+/catalyst-dev:resume_handoff PROJ-123
 ```
 
 The resume process:

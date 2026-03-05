@@ -2,8 +2,7 @@
   "catalyst": {
     "projectKey": "catalyst-workspace",
     "project": {
-      "ticketPrefix": "PROJ",
-      "defaultTicketPrefix": "PROJ"
+      "ticketPrefix": "PROJ"
     },
     "linear": {
       "teamKey": "PROJ",

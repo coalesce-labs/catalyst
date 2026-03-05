@@ -450,24 +450,24 @@ View linked PRs in Linear:
 
 ```json
 {
-  "project": {
-    "ticketPrefix": "PROJ"
-  },
-  "linear": {
-    "teamKey": "PROJ",
-    "thoughtsRepoUrl": "https://github.com/org/thoughts/blob/main",
-    "stateMap": {
-      "backlog": "Backlog",
-      "todo": "Todo",
-      "research": "In Progress",
-      "planning": "In Progress",
-      "inProgress": "In Progress",
-      "inReview": "In Review",
-      "done": "Done",
-      "canceled": "Canceled"
-    }
-  },
-  "commit": {
+  "catalyst": {
+    "project": {
+      "ticketPrefix": "PROJ"
+    },
+    "linear": {
+      "teamKey": "PROJ",
+      "stateMap": {
+        "backlog": "Backlog",
+        "todo": "Todo",
+        "research": "In Progress",
+        "planning": "In Progress",
+        "inProgress": "In Progress",
+        "inReview": "In Review",
+        "done": "Done",
+        "canceled": "Canceled"
+      }
+    },
+    "commit": {
     "useConventional": true,
     "scopes": ["agents", "commands", "hack", "docs", "claude", "config"],
     "autoDetectType": true,
@@ -483,6 +483,7 @@ View linked PRs in Linear:
     "testCommand": "make test",
     "lintCommand": "make lint",
     "buildCommand": "make build"
+    }
   }
 }
 ```

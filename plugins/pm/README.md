@@ -316,9 +316,11 @@ PM commands read from two config sources:
 **2. Secrets** (`~/.config/catalyst/config-acme.json` - NEVER committed):
 ```json
 {
-  "linear": {
-    "apiToken": "lin_api_...",
-    "teamKey": "ACME"
+  "catalyst": {
+    "linear": {
+      "apiToken": "lin_api_...",
+      "teamKey": "ACME"
+    }
   }
 }
 ```
@@ -455,7 +457,7 @@ cat .claude/config.json
 Create if missing:
 ```bash
 mkdir -p .claude
-echo '{"linear": {"teamKey": "TEAM"}}' > .claude/config.json
+echo '{"catalyst": {"linear": {"teamKey": "TEAM"}}}' > .claude/config.json
 ```
 
 ### "No active cycle found"

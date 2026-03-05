@@ -57,18 +57,32 @@ fi
    - **IMPORTANT**: Use the Read tool WITHOUT limit/offset parameters
    - **CRITICAL**: Read these files yourself before spawning sub-tasks
 
-2. **Spawn initial research tasks in parallel**:
+2. **Extract ticket and update Linear state**:
+
+   If a ticket is detected (from the research document's `source_ticket` frontmatter, from the
+   command argument, or from context), move it to the planning state:
+
+   ```bash
+   PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+   if [[ "$PLANNING_STATE" != "null" ]]; then
+       linearis issues update "$ticketId" --state "$PLANNING_STATE"
+   fi
+   ```
+
+   If Linearis CLI is not available, skip silently and continue planning.
+
+3. **Spawn initial research tasks in parallel**:
    - **codebase-locator** — find all files related to the ticket/task
    - **codebase-analyzer** — understand how the current implementation works
    - **thoughts-locator** — find existing thoughts documents about this feature (if relevant)
 
-3. **Read all files identified by research tasks** FULLY into the main context
+4. **Read all files identified by research tasks** FULLY into the main context
 
-4. **Analyze and verify understanding**:
+5. **Analyze and verify understanding**:
    - Cross-reference ticket requirements with actual code
    - Identify discrepancies, assumptions, and true scope
 
-5. **Present informed understanding and focused questions**:
+6. **Present informed understanding and focused questions**:
    - Show what you found with file:line references
    - Only ask questions you genuinely cannot answer through code investigation
 
@@ -305,3 +319,17 @@ Research patterns → data model → backend logic → API endpoints → UI
 
 ### For Refactoring:
 Document behavior → incremental changes → backwards compatibility → migration strategy
+
+## Linear Integration
+
+If a ticket is detected (from research document's `source_ticket` frontmatter, command argument, or context):
+
+- **At planning start** (Step 1):
+  ```bash
+  PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  if [[ "$PLANNING_STATE" != "null" ]]; then
+      linearis issues update "$ticketId" --state "$PLANNING_STATE"
+  fi
+  ```
+- **After plan saved**: `linearis comments create "$ticketId" --body "Plan created: $planPath"`
+- If Linearis CLI not available, skip silently and continue planning

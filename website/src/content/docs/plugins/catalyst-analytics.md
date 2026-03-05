@@ -19,9 +19,9 @@ PostHog integration for user behavior analysis, conversion funnels, and cohort a
 
 | Command | Description |
 |---------|-------------|
-| `/analytics:analyze-user-behavior` | User behavior patterns and cohorts |
-| `/analytics:segment-analysis` | User segment analysis for targeted insights |
-| `/analytics:product-metrics` | Key product metrics and conversion rates |
+| `/catalyst-analytics:analyze_user_behavior` | User behavior patterns and cohorts |
+| `/catalyst-analytics:segment_analysis` | User segment analysis for targeted insights |
+| `/catalyst-analytics:product_metrics` | Key product metrics and conversion rates |
 
 ## Prerequisites
 

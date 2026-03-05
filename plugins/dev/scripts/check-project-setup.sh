@@ -43,9 +43,40 @@ else
   warnings+=("  Create one and add the Catalyst snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
 fi
 
-# 4. Check .claude/config.json exists
-if [[ ! -f ".claude/config.json" ]]; then
-  warnings+=(".claude/config.json not found — ticket prefix will default to PROJ")
+# 4. Check .claude/config.json exists and has required fields
+if [[ -f ".claude/config.json" ]]; then
+  # Check for projectKey (needed to locate secrets config file)
+  PROJECT_KEY=$(jq -r '.catalyst.projectKey // empty' .claude/config.json 2>/dev/null)
+  if [[ -z "$PROJECT_KEY" ]]; then
+    warnings+=("Missing catalyst.projectKey in .claude/config.json — secrets config file can't be located")
+    warnings+=("  Add: \"projectKey\": \"your-project-name\"")
+  fi
+
+  # Check for project.ticketPrefix (needed for document naming)
+  TICKET_PREFIX=$(jq -r '.catalyst.project.ticketPrefix // empty' .claude/config.json 2>/dev/null)
+  if [[ -z "$TICKET_PREFIX" ]]; then
+    warnings+=("Missing catalyst.project.ticketPrefix in .claude/config.json — document naming will default to PROJ")
+  fi
+
+  # Check for linear.teamKey (needed for ticket extraction from branch names)
+  TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' .claude/config.json 2>/dev/null)
+  if [[ -z "$TEAM_KEY" ]]; then
+    warnings+=("Missing catalyst.linear.teamKey in .claude/config.json — ticket extraction from branch names won't work")
+  fi
+
+  # Check for linear.stateMap (needed for lifecycle transitions)
+  STATE_MAP=$(jq -r '.catalyst.linear.stateMap // empty' .claude/config.json 2>/dev/null)
+  if [[ -z "$STATE_MAP" ]]; then
+    warnings+=("Missing catalyst.linear.stateMap in .claude/config.json — Linear ticket states won't update during workflows")
+    warnings+=("  See: https://catalyst.coalescelabs.ai/reference/configuration/#state-map-keys")
+  fi
+
+  # If linear fields are missing, show a single setup hint
+  if [[ -z "$TEAM_KEY" || -z "$STATE_MAP" ]]; then
+    warnings+=("  Run setup-catalyst.sh or add linear config manually — see docs/reference/configuration")
+  fi
+else
+  warnings+=(".claude/config.json not found — run setup-catalyst.sh to create it")
 fi
 
 # Report errors (fatal)

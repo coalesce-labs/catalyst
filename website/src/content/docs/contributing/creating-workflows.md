@@ -89,7 +89,7 @@ You are tasked with [purpose].
 Run frontmatter validation to check your workflow:
 
 ```bash
-/validate-frontmatter plugins/dev/agents/my-agent.md
+/catalyst-meta:validate_frontmatter plugins/dev/agents/my-agent.md
 ```
 
 See the [Frontmatter Standard](/reference/frontmatter/) for the complete specification.

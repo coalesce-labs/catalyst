@@ -139,14 +139,16 @@ mcp__context7__get_library_docs("/facebook/react", "error handling useEffect cle
 
 ## Configuration
 
-Sentry project info from `.claude/config.json`:
+Sentry project info from secrets config (`~/.config/catalyst/config-{projectKey}.json`):
 
 ```json
 {
-  "sentry": {
-    "org": "my-company",
-    "project": "backend-api",
-    "authToken": "[NEEDS_SETUP]"
+  "catalyst": {
+    "sentry": {
+      "org": "my-company",
+      "project": "backend-api",
+      "authToken": "sntrys_..."
+    }
   }
 }
 ```
