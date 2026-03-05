@@ -9,23 +9,23 @@ Catalyst's core workflow is built on one principle: **frequent intentional compa
 
 ```mermaid
 flowchart LR
-    R["/catalyst-dev:research_codebase"]
-    P["/catalyst-dev:create_plan"]
-    H["/catalyst-dev:create_handoff"]
-    W["/catalyst-dev:create_worktree"]
-    I["/catalyst-dev:implement_plan"]
-    V["/catalyst-dev:validate_plan"]
-    PR["/catalyst-dev:create_pr"]
+    R(Research)
+    P(Plan)
+    H(Handoff)
+    W(Worktree)
+    I(Implement)
+    V(Validate)
+    PR(PR)
     D((Done))
 
-    R -->|clear context| P
-    P -->|clear context| H
+    R -->|clear ctx| P
+    P -->|clear ctx| H
     H -.->|optional| W
-    P -->|clear context| W
+    P -->|clear ctx| W
     W --> I
-    I -->|clear context| V
+    I -->|clear ctx| V
     V --> PR
-    PR -->|clear context| D
+    PR -->|clear ctx| D
 
     style R fill:#4f46e5,color:#fff
     style P fill:#4f46e5,color:#fff
@@ -36,6 +36,16 @@ flowchart LR
     style H fill:#6366f1,color:#fff
     style W fill:#6366f1,color:#fff
 ```
+
+| Phase | Command |
+|-------|---------|
+| Research | `/catalyst-dev:research_codebase` |
+| Plan | `/catalyst-dev:create_plan` |
+| Handoff | `/catalyst-dev:create_handoff` |
+| Worktree | `/catalyst-dev:create_worktree` |
+| Implement | `/catalyst-dev:implement_plan` |
+| Validate | `/catalyst-dev:validate_plan` |
+| PR | `/catalyst-dev:create_pr` |
 
 Clear context between every phase for optimal performance.
 
