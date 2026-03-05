@@ -113,3 +113,29 @@ file_paths = ["*thoughts/shared/prs/*"]
 command = "bash"
 args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
 run_in_background = false
+
+# Plan Mode Integration
+# Sync plan mode output to thoughts system and inject structure guidance
+
+[[hooks]]
+name = "Sync Plan Mode to Thoughts"
+event = "PermissionRequest"
+description = "Capture plan mode content and write to thoughts/shared/plans/ with Catalyst frontmatter"
+
+[hooks.matcher]
+tool_name = "ExitPlanMode"
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/sync-plan-to-thoughts.sh"]
+run_in_background = false
+
+[[hooks]]
+name = "Inject Plan Structure Guidance"
+event = "UserPromptSubmit"
+description = "Provide Catalyst plan structure guidance when in plan mode"
+
+[hooks.command]
+command = "bash"
+args = ["${CLAUDE_PLUGIN_ROOT}/hooks/inject-plan-template.sh"]
+run_in_background = false
