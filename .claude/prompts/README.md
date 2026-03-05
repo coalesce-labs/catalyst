@@ -39,9 +39,11 @@ Reference in config.json:
 
 ```json
 {
-  "linear": {
-    "labels": {
-      "classificationPrompt": ".claude/prompts/classify-issue.md"
+  "catalyst": {
+    "linear": {
+      "labels": {
+        "classificationPrompt": ".claude/prompts/classify-issue.md"
+      }
     }
   }
 }

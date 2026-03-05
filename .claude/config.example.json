@@ -1,11 +1,29 @@
 {
-  "projectKey": "acme",
-  "project": {
-    "ticketPrefix": "ACME",
-    "name": "Acme Corp Project",
-    "defaultTicketPrefix": "ACME"
-  },
-  "thoughts": {
-    "user": null
+  "catalyst": {
+    "projectKey": "acme",
+    "repository": {
+      "org": "acme-corp",
+      "name": "api"
+    },
+    "project": {
+      "ticketPrefix": "ACME",
+      "name": "Acme Corp API"
+    },
+    "linear": {
+      "teamKey": "ACME",
+      "stateMap": {
+        "backlog": "Backlog",
+        "todo": "Todo",
+        "research": "In Progress",
+        "planning": "In Progress",
+        "inProgress": "In Progress",
+        "inReview": "In Review",
+        "done": "Done",
+        "canceled": "Canceled"
+      }
+    },
+    "thoughts": {
+      "user": null
+    }
   }
 }

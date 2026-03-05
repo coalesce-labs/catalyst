@@ -30,9 +30,11 @@ Catalyst integrates with PostHog via the `catalyst-analytics` plugin MCP for use
 
 ```json
 {
-  "posthog": {
-    "apiKey": "phc_...",
-    "projectId": "12345"
+  "catalyst": {
+    "posthog": {
+      "apiKey": "phc_...",
+      "projectId": "12345"
+    }
   }
 }
 ```

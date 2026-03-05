@@ -24,9 +24,11 @@ The `catalyst-dev` plugin includes a Railway research agent that can investigate
 
 ```json
 {
-  "railway": {
-    "token": "...",
-    "projectId": "..."
+  "catalyst": {
+    "railway": {
+      "token": "...",
+      "projectId": "..."
+    }
   }
 }
 ```

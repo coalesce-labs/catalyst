@@ -128,13 +128,15 @@ after 3 attempts
 
 ## Configuration
 
-Railway project info from `.claude/config.json`:
+Railway project info from secrets config (`~/.config/catalyst/config-{projectKey}.json`):
 
 ```json
 {
-  "railway": {
-    "projectId": "proj_abc123",
-    "defaultService": "api"
+  "catalyst": {
+    "railway": {
+      "token": "...",
+      "projectId": "proj_abc123"
+    }
   }
 }
 ```

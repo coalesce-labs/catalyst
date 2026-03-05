@@ -368,13 +368,13 @@ All commands use `.claude/config.json` for project-specific values:
 
 ```json
 {
-  "project": {
-    "ticketPrefix": "PROJ",
-    "defaultTicketPrefix": "PROJ"
-  },
-  "linear": {
-    "teamId": "your-team-id",
-    "projectId": "your-project-id"
+  "catalyst": {
+    "project": {
+      "ticketPrefix": "PROJ"
+    },
+    "linear": {
+      "teamKey": "PROJ"
+    }
   }
 }
 ```
