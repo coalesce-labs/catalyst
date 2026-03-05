@@ -9,19 +9,19 @@ AI-powered project management workflows that integrate Linear issue tracking wit
 
 | Command | Description |
 |---------|-------------|
-| `/pm:analyze-cycle` | Cycle health report with risk analysis and recommendations |
-| `/pm:analyze-milestone` | Milestone progress toward target dates |
-| `/pm:report-daily` | Quick daily standup summary |
-| `/pm:groom-backlog` | Backlog health analysis and cleanup |
-| `/pm:sync-prs` | GitHub-Linear PR correlation and gap identification |
-| `/pm:context-daily` | Context engineering adoption dashboard |
+| `/catalyst-pm:analyze_cycle` | Cycle health report with risk analysis and recommendations |
+| `/catalyst-pm:analyze_milestone` | Milestone progress toward target dates |
+| `/catalyst-pm:report_daily` | Quick daily standup summary |
+| `/catalyst-pm:groom_backlog` | Backlog health analysis and cleanup |
+| `/catalyst-pm:sync_prs` | GitHub-Linear PR correlation and gap identification |
+| `/catalyst-pm:context_daily` | Context engineering adoption dashboard |
 
 ## Cycle Analysis
 
 Spawns parallel research agents to gather cycle data, then produces a health assessment:
 
 ```
-/pm:analyze-cycle
+/catalyst-pm:analyze_cycle
 ```
 
 Example output:
@@ -43,7 +43,7 @@ Priority Actions:
 Quick report designed to be read in under 30 seconds:
 
 ```
-/pm:report-daily
+/catalyst-pm:report_daily
 ```
 
 Shows yesterday's deliveries, current work, team availability, and blockers.
@@ -53,7 +53,7 @@ Shows yesterday's deliveries, current work, team availability, and blockers.
 Identifies orphaned issues, misplaced assignments, stale items, and potential duplicates:
 
 ```
-/pm:groom-backlog
+/catalyst-pm:groom_backlog
 ```
 
 Generates batch update commands for cleanup actions.
@@ -63,7 +63,7 @@ Generates batch update commands for cleanup actions.
 Correlates PRs to issues and identifies gaps:
 
 ```
-/pm:sync-prs
+/catalyst-pm:sync_prs
 ```
 
 Finds orphaned PRs, orphaned issues, merge candidates, and stale PRs.
@@ -73,6 +73,12 @@ Finds orphaned PRs, orphaned issues, merge candidates, and stale PRs.
 - **Research-first**: Haiku agents collect data fast, Sonnet/Opus agents analyze
 - **Parallel research**: Multiple data sources queried simultaneously
 - **Actionable output**: Every report includes specific next steps
+
+## Skills
+
+The PM plugin includes 40 skills covering the full product management workflow — from strategy and research to meetings, planning, and prototyping. All skills are user-invocable via `/catalyst-pm:{skill_name}`.
+
+See the [Skills Reference](/reference/skills/#catalyst-pm-skills) for the complete inventory organized by category.
 
 ## Prerequisites
 

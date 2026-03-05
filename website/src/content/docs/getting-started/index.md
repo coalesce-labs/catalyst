@@ -1,20 +1,26 @@
 ---
-title: Quick Start
+title: Getting Started
 description: Get up and running with Catalyst in 5 minutes.
+sidebar:
+  order: 1
 ---
 
 Get Catalyst installed and working in your project in under 5 minutes.
 
-## Install Prerequisites
+## Prerequisites
 
-- **Claude Code** installed and working
-- **HumanLayer CLI** for the persistent thoughts system:
+- **Claude Code** — [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code) before running setup
+- **Git** — required for repository detection and thoughts system
 
-```bash
-pip install humanlayer
-# or
-pipx install humanlayer
-```
+The setup script checks for and installs additional dependencies automatically:
+
+| Dependency | Required? | Auto-installed? |
+|-----------|-----------|-----------------|
+| jq | Yes | Yes (via Homebrew or apt-get) |
+| HumanLayer CLI | Yes | Yes (via pip) |
+| GitHub CLI (gh) | Optional | Opens install page |
+| Linearis CLI | Optional | Shows npm install command |
+| agent-browser | Optional | Shows npm install command |
 
 ## Run the Setup Script
 
@@ -57,7 +63,7 @@ cat plugins/dev/templates/CLAUDE_SNIPPET.md >> .claude/CLAUDE.md
 Start a Claude Code session and run:
 
 ```
-/research-codebase
+/catalyst-dev:research_codebase
 ```
 
 Follow the prompts to research your codebase. Catalyst will spawn parallel agents, document what exists, and save findings to `thoughts/shared/research/`.

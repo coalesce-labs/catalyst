@@ -58,11 +58,11 @@ Safe to commit to version control.
 |-----|----------|---------|
 | `backlog` | Initial ticket state | Backlog |
 | `todo` | Acknowledged, unstarted | Todo |
-| `research` | `/research-codebase` | In Progress |
-| `planning` | `/create-plan` | In Progress |
-| `inProgress` | `/implement-plan` | In Progress |
-| `inReview` | `/describe-pr`, `/create-pr` | In Review |
-| `done` | `/merge-pr` | Done |
+| `research` | `/catalyst-dev:research_codebase` | In Progress |
+| `planning` | `/catalyst-dev:create_plan` | In Progress |
+| `inProgress` | `/catalyst-dev:implement_plan` | In Progress |
+| `inReview` | `/catalyst-dev:describe_pr`, `/catalyst-dev:create_pr` | In Review |
+| `done` | `/catalyst-dev:merge_pr` | Done |
 | `canceled` | Manual cancellation | Canceled |
 
 Set any key to `null` to skip that automatic transition.

@@ -9,70 +9,70 @@ description: Complete reference for all Catalyst commands across plugins.
 
 | Command | Description | Model |
 |---------|-------------|-------|
-| `/research-codebase` | Parallel codebase research with specialized agents | Opus |
-| `/create-plan` | Interactive implementation planning | Opus |
-| `/iterate-plan` | Revise existing plans with feedback | Opus |
-| `/implement-plan` | Execute plans with phase-by-phase validation | Opus |
-| `/validate-plan` | Verify implementation against success criteria | Opus |
-| `/oneshot` | End-to-end: research, plan, implement in one invocation | Opus |
+| `/catalyst-dev:research_codebase` | Parallel codebase research with specialized agents | Opus |
+| `/catalyst-dev:create_plan` | Interactive implementation planning | Opus |
+| `/catalyst-dev:iterate_plan` | Revise existing plans with feedback | Opus |
+| `/catalyst-dev:implement_plan` | Execute plans with phase-by-phase validation | Opus |
+| `/catalyst-dev:validate_plan` | Verify implementation against success criteria | Opus |
+| `/catalyst-dev:oneshot` | End-to-end: research, plan, implement in one invocation | Opus |
 
 ### Development
 
 | Command | Description | Model |
 |---------|-------------|-------|
-| `/commit` | Conventional commits with Linear integration | Sonnet |
-| `/ci-commit` | CI-aware commits (non-interactive) | Sonnet |
-| `/create-pr` | Pull request creation with auto-description | Sonnet |
-| `/describe-pr` | Generate/update PR descriptions | Sonnet |
-| `/ci-describe-pr` | CI-aware PR descriptions (non-interactive) | Sonnet |
-| `/merge-pr` | Safe merge with verification and Linear integration | Sonnet |
+| `/catalyst-dev:commit` | Conventional commits with Linear integration | Sonnet |
+| `/catalyst-dev:ci_commit` | CI-aware commits (non-interactive) | Sonnet |
+| `/catalyst-dev:create_pr` | Pull request creation with auto-description | Sonnet |
+| `/catalyst-dev:describe_pr` | Generate/update PR descriptions | Sonnet |
+| `/catalyst-dev:ci_describe_pr` | CI-aware PR descriptions (non-interactive) | Sonnet |
+| `/catalyst-dev:merge_pr` | Safe merge with verification and Linear integration | Sonnet |
 
 ### Context Persistence
 
 | Command | Description | Model |
 |---------|-------------|-------|
-| `/create-handoff` | Save session state for resumption | Sonnet |
-| `/resume-handoff` | Resume from a handoff document | Sonnet |
+| `/catalyst-dev:create_handoff` | Save session state for resumption | Sonnet |
+| `/catalyst-dev:resume_handoff` | Resume from a handoff document | Sonnet |
 
 ### Project Management
 
 | Command | Description | Model |
 |---------|-------------|-------|
-| `/linear` | Direct ticket operations (create, update, comment). Workflow commands handle state transitions automatically. | Sonnet |
-| `/create-worktree` | Create git worktree for parallel development | Sonnet |
+| `/catalyst-dev:linear` | Direct ticket operations (create, update, comment). Workflow commands handle state transitions automatically. | Sonnet |
+| `/catalyst-dev:create_worktree` | Create git worktree for parallel development | Sonnet |
 
 ## catalyst-pm Commands
 
 | Command | Description | Model |
 |---------|-------------|-------|
-| `/pm:analyze-cycle` | Cycle health report with recommendations | Opus |
-| `/pm:analyze-milestone` | Milestone progress toward target dates | Opus |
-| `/pm:report-daily` | Daily standup summary | Sonnet |
-| `/pm:groom-backlog` | Backlog health analysis and cleanup | Sonnet |
-| `/pm:sync-prs` | GitHub-Linear PR correlation | Sonnet |
-| `/pm:context-daily` | Context engineering adoption dashboard | Sonnet |
+| `/catalyst-pm:analyze_cycle` | Cycle health report with recommendations | Opus |
+| `/catalyst-pm:analyze_milestone` | Milestone progress toward target dates | Opus |
+| `/catalyst-pm:report_daily` | Daily standup summary | Sonnet |
+| `/catalyst-pm:groom_backlog` | Backlog health analysis and cleanup | Sonnet |
+| `/catalyst-pm:sync_prs` | GitHub-Linear PR correlation | Sonnet |
+| `/catalyst-pm:context_daily` | Context engineering adoption dashboard | Sonnet |
 
 ## catalyst-analytics Commands
 
 | Command | Description | Model |
 |---------|-------------|-------|
-| `/analytics:analyze-user-behavior` | User behavior patterns | Sonnet |
-| `/analytics:segment-analysis` | Segment and cohort analysis | Sonnet |
-| `/analytics:product-metrics` | Product KPIs and conversion rates | Sonnet |
+| `/catalyst-analytics:analyze_user_behavior` | User behavior patterns | Sonnet |
+| `/catalyst-analytics:segment_analysis` | Segment and cohort analysis | Sonnet |
+| `/catalyst-analytics:product_metrics` | Product KPIs and conversion rates | Sonnet |
 
 ## catalyst-meta Commands
 
 | Command | Description | Model |
 |---------|-------------|-------|
-| `/discover-workflows` | Research external repos for workflow patterns | Opus |
-| `/import-workflow` | Import and adapt external workflows | Opus |
-| `/create-workflow` | Create new agents or commands | Opus |
-| `/validate-frontmatter` | Check frontmatter consistency | Sonnet |
-| `/workflow-help` | Interactive workflow guidance | Sonnet |
+| `/catalyst-meta:discover_workflows` | Research external repos for workflow patterns | Opus |
+| `/catalyst-meta:import_workflow` | Import and adapt external workflows | Opus |
+| `/catalyst-meta:create_workflow` | Create new agents or commands | Opus |
+| `/catalyst-meta:validate_frontmatter` | Check frontmatter consistency | Sonnet |
+| `/catalyst-meta:workflow_help` | Interactive workflow guidance | Sonnet |
 
 ## CI/Automation Commands
 
-The `/ci-commit` and `/ci-describe-pr` commands are designed for CI pipelines:
+The `/catalyst-dev:ci_commit` and `/catalyst-dev:ci_describe_pr` commands are designed for CI pipelines:
 
 - Non-interactive (no user prompts)
 - Follow the same conventions (conventional commits, PR templates)

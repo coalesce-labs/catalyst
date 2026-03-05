@@ -1,6 +1,8 @@
 ---
 title: Multi-Project Setup
 description: Managing separate thoughts repositories for different clients and projects.
+sidebar:
+  order: 3
 ---
 
 Catalyst supports completely isolated contexts for different clients and projects using HumanLayer profiles.
@@ -84,7 +86,7 @@ thoughts/
 ```bash
 cd ~/code-repos/my-project
 humanlayer thoughts init --profile coalesce-labs
-/create-plan  # Works as normal
+/catalyst-dev:create_plan  # Works as normal
 ```
 
 ### Starting Work on a Client Project
@@ -92,7 +94,7 @@ humanlayer thoughts init --profile coalesce-labs
 ```bash
 cd ~/code-repos/github/acme/project
 humanlayer thoughts init --profile acme
-/create-plan  # Uses client-specific context
+/catalyst-dev:create_plan  # Uses client-specific context
 ```
 
 ## Backup Strategy

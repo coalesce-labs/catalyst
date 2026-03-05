@@ -1,6 +1,8 @@
 ---
 title: Configuration
 description: Two-layer configuration system for project settings and secrets management.
+sidebar:
+  order: 4
 ---
 
 Catalyst uses a **two-layer configuration system** that keeps secrets out of git while allowing project metadata to be shared with your team.
@@ -87,23 +89,9 @@ This file contains API tokens and secrets:
 
 ## Setup
 
-The unified setup script handles both layers:
+Both layers are configured by the [setup script](/getting-started/#run-the-setup-script). The script is idempotent — safe to re-run to add or update integrations.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
-```
-
-You'll be asked for:
-
-1. Project location (existing repo or clone fresh)
-2. Project key (defaults to GitHub org name)
-3. Ticket prefix (e.g., "ENG", "PROJ")
-4. Your name (for the thoughts system)
-5. API tokens for integrations (optional ones can be skipped)
-
-The script is idempotent — safe to re-run to add or update integrations.
-
-When Linear is configured, the script automatically fetches your team's actual workflow states from the API and populates `stateMap` with the correct state names — no manual customization needed for most teams.
+When Linear is configured, the script automatically fetches your team's actual workflow states from the API and populates `stateMap` with the correct state names.
 
 ## Thoughts System Setup
 

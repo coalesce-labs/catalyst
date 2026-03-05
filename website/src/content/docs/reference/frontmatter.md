@@ -3,7 +3,7 @@ title: Frontmatter Standard
 description: YAML frontmatter specification for agents and commands.
 ---
 
-All Catalyst agents and commands use YAML frontmatter for metadata. This standard ensures consistency and enables validation with `/validate-frontmatter`.
+All Catalyst agents and commands use YAML frontmatter for metadata. This standard ensures consistency and enables validation with `/catalyst-meta:validate_frontmatter`.
 
 ## Agent Frontmatter
 
@@ -106,6 +106,6 @@ argument-hint: [ticket-file]     # Hint for command arguments
 ## Validation
 
 ```bash
-/validate-frontmatter              # Check all workflows
-/validate-frontmatter --fix        # Auto-fix issues
+/catalyst-meta:validate_frontmatter              # Check all workflows
+/catalyst-meta:validate_frontmatter --fix        # Auto-fix issues
 ```

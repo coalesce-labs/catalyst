@@ -41,8 +41,8 @@ Each teammate is a full Claude Code session that can spawn its own subagents —
 ## Using Agent Teams
 
 ```
-/implement-plan --team thoughts/shared/plans/my-plan.md
-/oneshot --team PROJ-123
+/catalyst-dev:implement_plan --team thoughts/shared/plans/my-plan.md
+/catalyst-dev:oneshot --team PROJ-123
 ```
 
 The lead agent:

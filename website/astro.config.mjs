@@ -3,10 +3,12 @@ import starlight from "@astrojs/starlight";
 import sitemap from "@astrojs/sitemap";
 import starlightLlmsTxt from "starlight-llms-txt";
 import starlightChangelogs from "starlight-changelogs";
+import mermaid from "astro-mermaid";
 
 export default defineConfig({
   site: "https://catalyst.coalescelabs.ai",
   integrations: [
+    mermaid(),
     starlight({
       title: "Catalyst",
       description:

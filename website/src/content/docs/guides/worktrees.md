@@ -23,7 +23,7 @@ Git worktrees let you work on multiple features simultaneously, each in its own 
 ## Creating a Worktree
 
 ```
-/create-worktree PROJ-123 feature-name
+/catalyst-dev:create_worktree PROJ-123 feature-name
 ```
 
 This creates:
@@ -38,21 +38,21 @@ This creates:
 
 ```bash
 # 1. Create worktree
-/create-worktree PROJ-123 feature-name
+/catalyst-dev:create_worktree PROJ-123 feature-name
 cd ~/wt/my-project/PROJ-123-feature-name
 
 # 2. Start Claude Code in worktree
 claude
 
 # 3. Implement
-/implement-plan
+/catalyst-dev:implement_plan
 
 # 4. Commit and push
-/commit
+/catalyst-dev:commit
 git push -u origin PROJ-123-feature-name
 
 # 5. Create PR
-/create-pr
+/catalyst-dev:create_pr
 
 # 6. Return to main repo
 cd /path/to/main/repo
@@ -82,15 +82,15 @@ Run separate Claude Code sessions in different worktrees:
 ```bash
 # Terminal 1 — Feature A
 cd ~/wt/api/PROJ-123-feature-a && claude
-/implement-plan
+/catalyst-dev:implement_plan
 
 # Terminal 2 — Feature B
 cd ~/wt/api/PROJ-456-feature-b && claude
-/implement-plan
+/catalyst-dev:implement_plan
 
 # Terminal 3 — Research (main repo)
 cd ~/projects/api && claude
-/research-codebase
+/catalyst-dev:research_codebase
 ```
 
 Each session is isolated with its own context window.

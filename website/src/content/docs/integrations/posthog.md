@@ -19,9 +19,9 @@ Catalyst integrates with PostHog via the `catalyst-analytics` plugin MCP for use
 
 | Command | Description |
 |---------|-------------|
-| `/analytics:analyze-user-behavior` | Analyze user behavior patterns and cohorts |
-| `/analytics:segment-analysis` | Segment and cohort analysis for targeted insights |
-| `/analytics:product-metrics` | Key product metrics, KPIs, and conversion rates |
+| `/catalyst-analytics:analyze_user_behavior` | Analyze user behavior patterns and cohorts |
+| `/catalyst-analytics:segment_analysis` | Segment and cohort analysis for targeted insights |
+| `/catalyst-analytics:product_metrics` | Key product metrics, KPIs, and conversion rates |
 
 ## Setup
 

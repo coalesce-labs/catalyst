@@ -7,11 +7,34 @@ Catalyst's core workflow is built on one principle: **frequent intentional compa
 
 ## Phase Overview
 
-```
-Research → Plan → [Handoff] → Worktree → Implement → Validate → PR → Done
-   ↓         ↓                               ↓          ↓         ↓
-Clear    Clear                            Clear     Clear    Clear
-Context  Context                          Context   Context  Context
+```mermaid
+flowchart LR
+    R["/catalyst-dev:research_codebase"]
+    P["/catalyst-dev:create_plan"]
+    H["/catalyst-dev:create_handoff"]
+    W["/catalyst-dev:create_worktree"]
+    I["/catalyst-dev:implement_plan"]
+    V["/catalyst-dev:validate_plan"]
+    PR["/catalyst-dev:create_pr"]
+    D((Done))
+
+    R -->|clear context| P
+    P -->|clear context| H
+    H -.->|optional| W
+    P -->|clear context| W
+    W --> I
+    I -->|clear context| V
+    V --> PR
+    PR -->|clear context| D
+
+    style R fill:#4f46e5,color:#fff
+    style P fill:#4f46e5,color:#fff
+    style I fill:#4f46e5,color:#fff
+    style V fill:#4f46e5,color:#fff
+    style PR fill:#4f46e5,color:#fff
+    style D fill:#22c55e,color:#fff
+    style H fill:#6366f1,color:#fff
+    style W fill:#6366f1,color:#fff
 ```
 
 Clear context between every phase for optimal performance.
@@ -21,7 +44,7 @@ Clear context between every phase for optimal performance.
 **When**: Ticket requires codebase understanding before planning.
 
 ```
-/research-codebase
+/catalyst-dev:research_codebase
 ```
 
 Catalyst spawns parallel sub-agents (locator, analyzer, pattern-finder), documents what exists, and saves findings to `thoughts/shared/research/`.
@@ -35,10 +58,10 @@ Clear context after research is saved. Research loads many files; compacting kee
 **When**: After research, or directly from a ticket if the codebase is well-understood.
 
 ```
-/create-plan
+/catalyst-dev:create_plan
 ```
 
-References your research automatically and creates a detailed plan interactively with you. If revisions are needed: `/iterate-plan`.
+References your research automatically and creates a detailed plan interactively with you. If revisions are needed: `/catalyst-dev:iterate_plan`.
 
 **Output**: `thoughts/shared/plans/YYYY-MM-DD-PROJ-XXXX-description.md`
 
@@ -49,19 +72,19 @@ Clear context after the plan is approved.
 **When**: Pausing work, transferring to another session, switching machines, or context exceeding 60%.
 
 ```
-/create-handoff
+/catalyst-dev:create_handoff
 ```
 
 **Output**: `thoughts/shared/handoffs/PROJ-XXXX/YYYY-MM-DD_HH-MM-SS_description.md`
 
-Handoffs capture current state, action items, critical file references, and learnings. Resume with `/resume-handoff`.
+Handoffs capture current state, action items, critical file references, and learnings. Resume with `/catalyst-dev:resume_handoff`.
 
 ## Phase 4: Worktree Creation
 
 **When**: Ready to implement after plan approval.
 
 ```
-/create-worktree PROJ-123 feature-name
+/catalyst-dev:create_worktree PROJ-123 feature-name
 ```
 
 Creates a git worktree at `~/wt/{project}/{ticket-feature}` with `.claude/` copied, dependencies installed, and thoughts shared via symlink.
@@ -71,7 +94,7 @@ Creates a git worktree at `~/wt/{project}/{ticket-feature}` with `.claude/` copi
 **When**: In a worktree with an approved plan.
 
 ```
-/implement-plan
+/catalyst-dev:implement_plan
 ```
 
 Reads the complete plan, implements each phase sequentially, runs automated verification, and updates checkboxes.
@@ -81,7 +104,7 @@ May clear context between phases if context fills above 60%.
 ## Phase 6: Validation
 
 ```
-/validate-plan
+/catalyst-dev:validate_plan
 ```
 
 Runs all automated tests, verifies success criteria, performs manual testing steps, and documents deviations.
@@ -89,8 +112,8 @@ Runs all automated tests, verifies success criteria, performs manual testing ste
 ## Phase 7: PR Creation
 
 ```bash
-/commit         # Create commit
-/create-pr      # Create PR with description
+/catalyst-dev:commit         # Create commit
+/catalyst-dev:create_pr      # Create PR with description
 ```
 
 ## Common Patterns
@@ -98,35 +121,35 @@ Runs all automated tests, verifies success criteria, performs manual testing ste
 ### Quick Feature
 
 ```bash
-/research-codebase          # Research
+/catalyst-dev:research_codebase          # Research
 # Clear context
-/create-plan                # Plan
+/catalyst-dev:create_plan                # Plan
 # Clear context
-/create-worktree PROJ-123 feature
-/implement-plan             # Implement
+/catalyst-dev:create_worktree PROJ-123 feature
+/catalyst-dev:implement_plan             # Implement
 # Clear context
-/commit && /create-pr       # Ship
+/catalyst-dev:commit && /catalyst-dev:create_pr       # Ship
 ```
 
 ### Multi-Day Feature
 
 ```bash
 # Day 1
-/research-codebase
-/create-handoff
+/catalyst-dev:research_codebase
+/catalyst-dev:create_handoff
 # Day 2
-/resume-handoff PROJ-123
-/create-plan
-/create-handoff
+/catalyst-dev:resume_handoff PROJ-123
+/catalyst-dev:create_plan
+/catalyst-dev:create_handoff
 # Day 3
-/resume-handoff PROJ-123
-/implement-plan             # Phases 1-2
-/create-handoff
+/catalyst-dev:resume_handoff PROJ-123
+/catalyst-dev:implement_plan             # Phases 1-2
+/catalyst-dev:create_handoff
 # Day 4
-/resume-handoff PROJ-123
-/implement-plan             # Phases 3-4
-/validate-plan
-/commit && /create-pr
+/catalyst-dev:resume_handoff PROJ-123
+/catalyst-dev:implement_plan             # Phases 3-4
+/catalyst-dev:validate_plan
+/catalyst-dev:commit && /catalyst-dev:create_pr
 ```
 
 ### One-Shot
@@ -134,5 +157,5 @@ Runs all automated tests, verifies success criteria, performs manual testing ste
 For straightforward tasks, chain everything:
 
 ```
-/oneshot PROJ-123
+/catalyst-dev:oneshot PROJ-123
 ```

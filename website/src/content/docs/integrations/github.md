@@ -9,15 +9,15 @@ Catalyst integrates with GitHub via the `gh` CLI for pull request creation, code
 
 | Command | Description |
 |---------|-------------|
-| `/create-pr` | Create pull requests with auto-generated descriptions |
-| `/describe-pr` | Generate or update PR descriptions |
-| `/merge-pr` | Safe merge with verification |
-| `/commit` | Conventional commits with ticket references |
+| `/catalyst-dev:create_pr` | Create pull requests with auto-generated descriptions |
+| `/catalyst-dev:describe_pr` | Generate or update PR descriptions |
+| `/catalyst-dev:merge_pr` | Safe merge with verification |
+| `/catalyst-dev:commit` | Conventional commits with ticket references |
 
 ## PR Creation
 
 ```
-/create-pr
+/catalyst-dev:create_pr
 ```
 
 Automatically generates a PR description from:
@@ -27,7 +27,7 @@ Automatically generates a PR description from:
 
 ## PR-Linear Sync
 
-The `catalyst-pm` plugin provides `/pm:sync-prs` to correlate GitHub PRs with Linear issues:
+The `catalyst-pm` plugin provides `/catalyst-pm:sync_prs` to correlate GitHub PRs with Linear issues:
 
 - Match PRs to issues via branch names, descriptions, and attachments
 - Identify orphaned PRs (no Linear issue) and orphaned issues (no PR)
@@ -36,10 +36,10 @@ The `catalyst-pm` plugin provides `/pm:sync-prs` to correlate GitHub PRs with Li
 
 ## Worktree Integration
 
-Worktrees created with `/create-worktree` automatically set up branches with ticket references:
+Worktrees created with `/catalyst-dev:create_worktree` automatically set up branches with ticket references:
 
 ```bash
-/create-worktree PROJ-123 feature-name
+/catalyst-dev:create_worktree PROJ-123 feature-name
 # Creates branch: PROJ-123-feature-name
 ```
 

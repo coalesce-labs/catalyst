@@ -19,37 +19,37 @@ The core plugin that powers all Catalyst development workflows. Always install t
 
 | Command | Description |
 |---------|-------------|
-| `/research-codebase` | Parallel codebase research with specialized agents |
-| `/create-plan` | Interactive implementation planning |
-| `/iterate-plan` | Revise existing plans with feedback |
-| `/implement-plan` | Execute plans with validation |
-| `/validate-plan` | Verify implementation completeness |
-| `/oneshot` | All-in-one: research, plan, and implement with context isolation |
+| `/catalyst-dev:research_codebase` | Parallel codebase research with specialized agents |
+| `/catalyst-dev:create_plan` | Interactive implementation planning |
+| `/catalyst-dev:iterate_plan` | Revise existing plans with feedback |
+| `/catalyst-dev:implement_plan` | Execute plans with validation |
+| `/catalyst-dev:validate_plan` | Verify implementation completeness |
+| `/catalyst-dev:oneshot` | All-in-one: research, plan, and implement with context isolation |
 
 ### Development
 
 | Command | Description |
 |---------|-------------|
-| `/commit` | Conventional commits with Linear integration |
-| `/ci-commit` | CI-aware commits with pre-flight checks |
-| `/create-pr` | Pull requests with auto-description |
-| `/describe-pr` | Generate/update PR descriptions |
-| `/ci-describe-pr` | CI-aware PR descriptions |
-| `/merge-pr` | Safe merge with verification |
+| `/catalyst-dev:commit` | Conventional commits with Linear integration |
+| `/catalyst-dev:ci_commit` | CI-aware commits with pre-flight checks |
+| `/catalyst-dev:create_pr` | Pull requests with auto-description |
+| `/catalyst-dev:describe_pr` | Generate/update PR descriptions |
+| `/catalyst-dev:ci_describe_pr` | CI-aware PR descriptions |
+| `/catalyst-dev:merge_pr` | Safe merge with verification |
 
 ### Context Persistence
 
 | Command | Description |
 |---------|-------------|
-| `/create-handoff` | Save session context for later |
-| `/resume-handoff` | Resume from a handoff document |
+| `/catalyst-dev:create_handoff` | Save session context for later |
+| `/catalyst-dev:resume_handoff` | Resume from a handoff document |
 
 ### Project Management
 
 | Command | Description |
 |---------|-------------|
-| `/linear` | Ticket management and workflow |
-| `/create-worktree` | Isolated workspace creation |
+| `/catalyst-dev:linear` | Ticket management and workflow |
+| `/catalyst-dev:create_worktree` | Isolated workspace creation |
 
 ## Research Agents
 
@@ -61,6 +61,26 @@ The core plugin that powers all Catalyst development workflows. Always install t
 | `thoughts-locator` | Search thoughts repository | Haiku |
 | `thoughts-analyzer` | Analyze documentation | Sonnet |
 | `external-research` | External repos and docs | Sonnet |
+
+## Skills
+
+| Skill | Description |
+|-------|-------------|
+| `agent-browser` | Browser automation CLI reference — use instead of Playwright MCP tools |
+| `code-first-draft` | Initial feature implementation guidance |
+| `linearis` | Linearis CLI reference for Linear ticket management |
+
+See the [Skills Reference](/reference/skills/) for full details.
+
+## Hooks
+
+| Hook | Event | Purpose |
+|------|-------|---------|
+| `inject-plan-template` | `UserPromptSubmit` | Injects plan structure in plan mode |
+| `sync-plan-to-thoughts` | `ExitPlanMode` | Copies plans to thoughts with frontmatter |
+| `update-workflow-context` | Write/Edit | Tracks documents in workflow context |
+
+See the [Hooks Reference](/reference/hooks/) for full details.
 
 ## Workflow Context Tracking
 
