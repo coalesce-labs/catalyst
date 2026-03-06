@@ -11,7 +11,7 @@
       "name": "catalyst-dev",
       "source": "./plugins/dev",
       "description": "Core development workflow: research → plan → implement → validate → ship. Includes 10 research agents, workflow commands, Linear integration, handoff system. Always enabled. ~3.5k context (lightweight MCPs: DeepWiki, Context7).",
-      "version": "4.3.0",
+      "version": "4.4.0",
       "author": {
         "name": "Coalesce Labs",
         "email": "hello@coalesce.dev"
@@ -34,7 +34,7 @@
       "name": "catalyst-pm",
       "source": "./plugins/pm",
       "description": "Linear-focused project management: cycle tracking, milestone planning, backlog grooming, daily standups, GitHub-Linear sync. Enable when managing Linear projects. ~5k context when enabled.",
-      "version": "4.0.1",
+      "version": "4.0.2",
       "author": {
         "name": "Coalesce Labs",
         "email": "hello@coalesce.dev"
