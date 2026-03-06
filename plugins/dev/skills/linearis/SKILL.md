@@ -50,8 +50,11 @@ linearis issues --filter "keyword"           # ❌ WRONG - no --filter flag
 
 ### Search Tickets
 ```bash
-linearis issues search "keyword" --team BRAVO    # ✅ Correct
-linearis issues search "auth" --team ENG         # ✅ Correct
+# WARNING: --team only works with UUIDs for search too (keys return wrong team's results)
+linearis issues search "keyword" --team "<team-uuid>"
+
+# Without --team, search returns results across all teams
+linearis issues search "keyword"
 ```
 
 ### Update a Ticket
@@ -139,8 +142,9 @@ linearis cycles read "$CYCLE" --team BRAVO | jq '.issues[] | {identifier, title,
 
 ### List Projects
 ```bash
-linearis projects list --team BRAVO
-linearis projects list --team BRAVO | jq '.[] | select(.name == "Auth System")'
+# NOTE: projects list does NOT support --team. It returns all workspace projects.
+linearis projects list
+linearis projects list | jq '.[] | select(.name == "Auth System")'
 ```
 
 ## Milestone Operations
@@ -209,7 +213,7 @@ linearis comments create TEAM-123 --body "Merged: PR #456 https://github.com/org
 | Read ticket | `linearis issues read TEAM-123` |
 | Update state | `linearis issues update TEAM-123 --state "State"` |
 | Add comment | `linearis comments create TEAM-123 --body "text"` |
-| Search | `linearis issues search "keyword" --team TEAM` |
+| Search | `linearis issues search "keyword"` (--team needs UUID) |
 | List issues | `linearis issues list --limit N` (filter by team with jq) |
 | Active cycle | `linearis cycles list --team TEAM --active` |
 | Cycle details | `linearis cycles read "Name" --team TEAM` |
@@ -220,7 +224,7 @@ linearis comments create TEAM-123 --body "Merged: PR #456 https://github.com/org
 2. **comments create**: Use `linearis comments create`, not `issues comment`
 3. **issues read**: Use `read`, not `get` or `view`
 4. **Filtering via jq**: No `--filter` or `--status` flags - pipe to jq instead
-5. **Team parameter**: `cycles`, `projects`, `labels`, `search` support `--team TEAM-KEY`. `issues list` does NOT (use jq). `issues create --team` requires a UUID (not key/name — upstream bug: czottmann/linearis#56)
+5. **Team parameter**: `cycles list` and `labels list` support `--team TEAM-KEY`. `issues list` and `projects list` do NOT support `--team` (use jq). `issues create` and `issues search` accept `--team` but **require a UUID** — keys/names silently return wrong results (upstream bug: czottmann/linearis#56)
 6. **Quotes for spaces**: `--cycle "Sprint 2025-11"` not `--cycle Sprint 2025-11`
 7. **JSON output**: All commands return JSON - use jq for parsing
 

@@ -27,10 +27,10 @@ Use Linearis CLI directly:
 
 ```bash
 # List projects
-linearis projects list --team TEAM
+linearis projects list
 
 # Parse project status from JSON
-linearis projects list --team TEAM | jq '.[] | {name, status, progress}'
+linearis projects list | jq '.[] | {name, status, progress}'
 
 # List tickets for specific project
 linearis issues list --limit 100 | jq '.[] | select(.team.key == "TEAM" and .project.name == "Project Name")'
@@ -40,11 +40,11 @@ linearis issues list --limit 100 | jq '.[] | select(.team.key == "TEAM" and .pro
 
 ```bash
 # 1. List all active projects
-linearis projects list --team ENG | \
+linearis projects list | \
   jq '.[] | select(.state != "completed") | {name, lead, targetDate}'
 
 # 2. Get project details with ticket counts
-for project in $(linearis projects list --team ENG | jq -r '.[].name'); do
+for project in $(linearis projects list | jq -r '.[].name'); do
   echo "Project: $project"
 
   # Count tickets by status

@@ -206,8 +206,9 @@ When referencing thoughts documents, always provide GitHub links:
    # Create issue with linearis
    # WARNING: --team only accepts UUIDs, not team keys/names (upstream bug: czottmann/linearis#56)
    # Team keys/names silently fall back to the workspace default team.
-   # To target a specific team, look up the UUID first:
-   #   TEAM_UUID=$(linearis teams list | jq -r '.[] | select(.key == "TEAM") | .id')
+   # Get the team UUID from config or from any existing issue:
+   #   TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .claude/config.json)
+   #   # Or: TEAM_UUID=$(linearis issues list --limit 1 | jq -r '.[0].team.id')
    linearis issues create \
      --team "$TEAM_UUID" \
      --title "[refined title]" \

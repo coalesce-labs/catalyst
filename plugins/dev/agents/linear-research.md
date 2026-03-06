@@ -72,10 +72,10 @@ linearis cycles list --team TEAM --active
 
 ```bash
 # List projects
-linearis projects list --team TEAM
+linearis projects list
 
 # Get project details (parse JSON output)
-linearis projects list --team TEAM | jq '.[] | select(.name == "Project Name")'
+linearis projects list | jq '.[] | select(.name == "Project Name")'
 ```
 
 ### Configuration Discovery
