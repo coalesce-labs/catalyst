@@ -26,12 +26,14 @@ linearis issue TEAM-123           # ❌ WRONG - missing subcommand
 ```bash
 linearis issues list                      # Basic list (25 tickets)
 linearis issues list --limit 50           # With limit
-linearis issues list --team BRAVO         # Filter by team
-linearis issues list --team BRAVO --limit 100
 ```
 
-**NOTE:** `--limit` and `--team` are the ONLY supported filters. For other filtering, use jq:
+**NOTE:** `--limit` is the ONLY supported flag for `issues list`. There is NO `--team` flag
+(upstream feature request: czottmann/linearis#20). For filtering, use jq:
 ```bash
+# Filter by team
+linearis issues list --limit 100 | jq '.[] | select(.team.key == "BRAVO")'
+
 # Filter by status - use jq, NOT --status or --filter
 linearis issues list --limit 100 | jq '.[] | select(.state.name == "In Progress")'
 
@@ -82,7 +84,11 @@ linearis issues update TEAM-123 --status "Done"   # ❌ WRONG - use --state
 ```bash
 linearis issues create "Title of ticket"
 linearis issues create "Title" --description "Description" --state "Todo" --priority 2
-linearis issues create "Title" --team BRAVO --project "Project Name"
+linearis issues create "Title" --project "Project Name"
+
+# WARNING: --team only accepts UUIDs (upstream bug: czottmann/linearis#56)
+# Team keys and names silently fall back to the workspace default team!
+linearis issues create "Title" --team "<team-uuid>" --project "Project Name"
 ```
 
 ## Comment Operations
@@ -185,7 +191,7 @@ linearis cycles read "$CYCLE" --team BRAVO | jq '.issues[] | {identifier, title,
 
 ### Get tickets by project
 ```bash
-linearis issues list --team BRAVO --limit 100 | jq '.[] | select(.project.name == "Auth System")'
+linearis issues list --limit 100 | jq '.[] | select(.team.key == "BRAVO" and .project.name == "Auth System")'
 ```
 
 ### Mark ticket as done with PR link
@@ -204,7 +210,7 @@ linearis comments create TEAM-123 --body "Merged: PR #456 https://github.com/org
 | Update state | `linearis issues update TEAM-123 --state "State"` |
 | Add comment | `linearis comments create TEAM-123 --body "text"` |
 | Search | `linearis issues search "keyword" --team TEAM` |
-| List issues | `linearis issues list --team TEAM --limit N` |
+| List issues | `linearis issues list --limit N` (filter by team with jq) |
 | Active cycle | `linearis cycles list --team TEAM --active` |
 | Cycle details | `linearis cycles read "Name" --team TEAM` |
 
@@ -214,7 +220,7 @@ linearis comments create TEAM-123 --body "Merged: PR #456 https://github.com/org
 2. **comments create**: Use `linearis comments create`, not `issues comment`
 3. **issues read**: Use `read`, not `get` or `view`
 4. **Filtering via jq**: No `--filter` or `--status` flags - pipe to jq instead
-5. **Team parameter**: Most commands need `--team TEAM-KEY`
+5. **Team parameter**: `cycles`, `projects`, `labels`, `search` support `--team TEAM-KEY`. `issues list` does NOT (use jq). `issues create --team` requires a UUID (not key/name — upstream bug: czottmann/linearis#56)
 6. **Quotes for spaces**: `--cycle "Sprint 2025-11"` not `--cycle Sprint 2025-11`
 7. **JSON output**: All commands return JSON - use jq for parsing
 

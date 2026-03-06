@@ -33,7 +33,7 @@ linearis projects list --team TEAM
 linearis projects list --team TEAM | jq '.[] | {name, status, progress}'
 
 # List tickets for specific project
-linearis issues list --team TEAM | jq '.[] | select(.project.name == "Project Name")'
+linearis issues list --limit 100 | jq '.[] | select(.team.key == "TEAM" and .project.name == "Project Name")'
 ```
 
 ### Example Workflow
@@ -48,9 +48,9 @@ for project in $(linearis projects list --team ENG | jq -r '.[].name'); do
   echo "Project: $project"
 
   # Count tickets by status
-  linearis issues list --team ENG | \
-    jq --arg proj "$project" '
-      [.[] | select(.project.name == $proj)] |
+  linearis issues list --limit 100 | \
+    jq --arg proj "$project" --arg team "ENG" '
+      [.[] | select(.team.key == $team and .project.name == $proj)] |
       group_by(.state.name) |
       map({status: .[0].state.name, count: length})
     '

@@ -119,7 +119,7 @@ Present findings as structured data:
 
 ## Important Guidelines
 
-- **Always specify --team**: Required for most commands
+- **Team flag varies by command**: `cycles`, `projects`, `labels` support `--team TEAM-KEY`. `issues list` does NOT support `--team` (use `--limit` + jq filtering). `issues create --team` requires a UUID, not a key/name
 - **JSON output**: Linearis returns JSON, parse with jq for filtering
 - **Ticket format**: Use TEAM-NUMBER format (e.g., ENG-123)
 - **Error handling**: If ticket not found, suggest checking team key

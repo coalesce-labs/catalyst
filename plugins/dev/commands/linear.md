@@ -204,8 +204,12 @@ When referencing thoughts documents, always provide GitHub links:
 
    ```bash
    # Create issue with linearis
+   # WARNING: --team only accepts UUIDs, not team keys/names (upstream bug: czottmann/linearis#56)
+   # Team keys/names silently fall back to the workspace default team.
+   # To target a specific team, look up the UUID first:
+   #   TEAM_UUID=$(linearis teams list | jq -r '.[] | select(.key == "TEAM") | .id')
    linearis issues create \
-     --team "$TEAM_KEY" \
+     --team "$TEAM_UUID" \
      --title "[refined title]" \
      --description "[final description in markdown]" \
      --priority [1-4] \
@@ -422,7 +426,7 @@ linearis comments create PROJ-123 --body "Completed phase 1, moving to phase 2"
 linearis issues update PROJ-123 --state "In Progress"
 
 # Search for related tickets
-linearis issues list --team PROJ | jq '.[] | select(.title | contains("authentication"))'
+linearis issues list --limit 100 | jq '.[] | select(.team.key == "PROJ" and (.title | contains("authentication")))'
 ```
 
 ---
