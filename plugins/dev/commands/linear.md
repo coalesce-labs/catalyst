@@ -39,8 +39,16 @@ CONFIG_FILE=".claude/config.json"
 # Read team key (e.g., "ENG", "PROJ")
 TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
 
-# Read default team name (optional)
-DEFAULT_TEAM=$(jq -r '.catalyst.linear.defaultTeam // null' "$CONFIG_FILE")
+# Read team UUID — required for issues create and issues search (keys don't work)
+# Fallback chain: config → lookup from existing issue → error
+TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' "$CONFIG_FILE")
+if [ -z "$TEAM_UUID" ]; then
+  TEAM_UUID=$(linearis issues list --limit 1 | jq -r --arg key "$TEAM_KEY" '.[0].team | select(.key == $key) | .id // empty')
+fi
+if [ -z "$TEAM_UUID" ]; then
+  echo "WARNING: Could not resolve team UUID for $TEAM_KEY. issues create/search may target wrong team."
+  echo "Add teamUuid to .claude/config.json to fix: linearis issues list --limit 20 | jq '[.[].team | {key, id}] | unique_by(.key)'"
+fi
 
 # Read thoughts repo URL
 THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/org/thoughts/blob/main"' "$CONFIG_FILE")
@@ -52,10 +60,16 @@ THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/or
 {
   "catalyst": {
     "linear": {
-      "teamKey": "ENG"
+      "teamKey": "ENG",
+      "teamUuid": "<team-uuid>"
     }
   }
 }
+```
+
+To find your team UUID:
+```bash
+linearis issues list --limit 20 | jq '[.[].team | {key, id, name}] | unique_by(.key)'
 ```
 
 ## Initial Response

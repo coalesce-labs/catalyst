@@ -206,6 +206,24 @@ linearis issues update TEAM-123 --state "$DONE_STATE"
 linearis comments create TEAM-123 --body "Merged: PR #456 https://github.com/org/repo/pull/456"
 ```
 
+## Team UUID Resolution
+
+Many commands require a team UUID (not key/name) for the `--team` flag. Use this pattern:
+
+```bash
+# Preferred: read from config
+TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .claude/config.json)
+
+# Fallback: look up from any existing issue
+if [ -z "$TEAM_UUID" ]; then
+  TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' .claude/config.json)
+  TEAM_UUID=$(linearis issues list --limit 1 | jq -r --arg key "$TEAM_KEY" '.[0].team | select(.key == $key) | .id // empty')
+fi
+
+# Discover all team UUIDs in workspace
+linearis issues list --limit 20 | jq '[.[].team | {key, id, name}] | unique_by(.key)'
+```
+
 ## Quick Reference Card
 
 | Action | Command |
