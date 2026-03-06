@@ -74,7 +74,8 @@ fi
 **Processing**:
 ```bash
 TEAM_KEY="PROJ"
-issues_data=$(linearis issues list --team "$TEAM_KEY" --states "Backlog" 2>&1)
+# NOTE: issues list only supports --limit (no --team or --states flags)
+issues_data=$(linearis issues list --limit 100 2>&1 | jq --arg team "$TEAM_KEY" '[.[] | select(.team.key == $team and .state.name == "Backlog")]')
 
 # Filter for issues without cycles using jq
 backlog_no_cycle=$(echo "$issues_data" | jq '[.[] | select(.cycle == null)]')

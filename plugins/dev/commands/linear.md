@@ -39,8 +39,16 @@ CONFIG_FILE=".claude/config.json"
 # Read team key (e.g., "ENG", "PROJ")
 TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
 
-# Read default team name (optional)
-DEFAULT_TEAM=$(jq -r '.catalyst.linear.defaultTeam // null' "$CONFIG_FILE")
+# Read team UUID — required for issues create and issues search (keys don't work)
+# Fallback chain: config → lookup from existing issue → error
+TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' "$CONFIG_FILE")
+if [ -z "$TEAM_UUID" ]; then
+  TEAM_UUID=$(linearis issues list --limit 1 | jq -r --arg key "$TEAM_KEY" '.[0].team | select(.key == $key) | .id // empty')
+fi
+if [ -z "$TEAM_UUID" ]; then
+  echo "WARNING: Could not resolve team UUID for $TEAM_KEY. issues create/search may target wrong team."
+  echo "Add teamUuid to .claude/config.json to fix: linearis issues list --limit 20 | jq '[.[].team | {key, id}] | unique_by(.key)'"
+fi
 
 # Read thoughts repo URL
 THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/org/thoughts/blob/main"' "$CONFIG_FILE")
@@ -52,10 +60,16 @@ THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/or
 {
   "catalyst": {
     "linear": {
-      "teamKey": "ENG"
+      "teamKey": "ENG",
+      "teamUuid": "<team-uuid>"
     }
   }
 }
+```
+
+To find your team UUID:
+```bash
+linearis issues list --limit 20 | jq '[.[].team | {key, id, name}] | unique_by(.key)'
 ```
 
 ## Initial Response
@@ -204,8 +218,13 @@ When referencing thoughts documents, always provide GitHub links:
 
    ```bash
    # Create issue with linearis
+   # WARNING: --team only accepts UUIDs, not team keys/names (upstream bug: czottmann/linearis#56)
+   # Team keys/names silently fall back to the workspace default team.
+   # Get the team UUID from config or from any existing issue:
+   #   TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .claude/config.json)
+   #   # Or: TEAM_UUID=$(linearis issues list --limit 1 | jq -r '.[0].team.id')
    linearis issues create \
-     --team "$TEAM_KEY" \
+     --team "$TEAM_UUID" \
      --title "[refined title]" \
      --description "[final description in markdown]" \
      --priority [1-4] \
@@ -422,7 +441,7 @@ linearis comments create PROJ-123 --body "Completed phase 1, moving to phase 2"
 linearis issues update PROJ-123 --state "In Progress"
 
 # Search for related tickets
-linearis issues list --team PROJ | jq '.[] | select(.title | contains("authentication"))'
+linearis issues list --limit 100 | jq '.[] | select(.team.key == "PROJ" and (.title | contains("authentication")))'
 ```
 
 ---

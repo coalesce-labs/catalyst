@@ -46,8 +46,8 @@ CYCLE=$(linearis cycles list --team ENG --active | jq -r '.[0].name')
 echo "Active cycle: $CYCLE"
 
 # 2. Get all tickets in cycle
-linearis issues list --team ENG | \
-  jq --arg cycle "$CYCLE" '.[] | select(.cycle.name == $cycle)'
+linearis issues list --limit 100 | \
+  jq --arg cycle "$CYCLE" '.[] | select(.team.key == "ENG" and .cycle.name == $cycle)'
 
 # 3. Count by status (use cycles read to get issues)
 CYCLE_DATA=$(linearis cycles read "$CYCLE" --team ENG)
