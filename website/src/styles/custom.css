@@ -10,3 +10,7 @@
   --sl-color-accent: #4338ca;
   --sl-color-accent-high: #1e1b4b;
 }
+
+.site-title img {
+  border-radius: 4px;
+}
