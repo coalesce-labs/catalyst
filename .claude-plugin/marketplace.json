@@ -34,7 +34,7 @@
       "name": "catalyst-pm",
       "source": "./plugins/pm",
       "description": "Linear-focused project management: cycle tracking, milestone planning, backlog grooming, daily standups, GitHub-Linear sync. Enable when managing Linear projects. ~5k context when enabled.",
-      "version": "4.0.2",
+      "version": "4.1.0",
       "author": {
         "name": "Coalesce Labs",
         "email": "hello@coalesce.dev"

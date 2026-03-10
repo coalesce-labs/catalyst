@@ -1,7 +1,7 @@
 {
   "name": "catalyst-pm",
-  "version": "4.0.2",
-  "description": "Comprehensive product management toolkit: PM skills, research pipelines, PRD workflows, analytics, reporting, and Linear integration",
+  "version": "4.1.0",
+  "description": "Comprehensive product management toolkit: PM skills, PRD workflows, analytics, reporting, and Linear integration",
   "author": {
     "name": "Coalesce Labs",
     "email": "hello@coalesce.dev",
@@ -18,7 +18,6 @@
     "analytics",
     "pm",
     "prd",
-    "research",
     "skills",
     "posthog"
   ],
@@ -28,20 +27,14 @@
     "./commands/analyze_milestone.md",
     "./commands/report_daily.md",
     "./commands/groom_backlog.md",
-    "./commands/sync_prs.md",
-    "./commands/deep_research.md",
-    "./commands/verify_research.md"
+    "./commands/sync_prs.md"
   ],
   "agents": [
     "./agents/linear-research.md",
     "./agents/cycle-analyzer.md",
     "./agents/milestone-analyzer.md",
     "./agents/backlog-analyzer.md",
-    "./agents/github-linear-analyzer.md",
-    "./agents/citation-verifier.md",
-    "./agents/source-recoverer.md",
-    "./agents/external-researcher.md",
-    "./agents/source-analyzer.md"
+    "./agents/github-linear-analyzer.md"
   ],
   "skills": [
     "./skills/activation-analysis/SKILL.md",
