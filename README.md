@@ -74,8 +74,8 @@ and shared memory systems.
 
 **catalyst-pm** (Optional - Enable for project management)
 
-- 8 commands for PM workflows (cycle analysis, milestone tracking, backlog grooming, research pipelines)
-- 16 specialized agents for data collection and analysis
+- 6 commands for PM workflows (cycle analysis, milestone tracking, backlog grooming)
+- 12 specialized agents for data collection and analysis
 - 39 skills for product management (PRDs, user research, metrics, interviews, strategy)
 - 7 sub-agents forming a review panel (engineering, design, executive, legal, UX, customer voice)
 - Research-first architecture (Haiku for data collection, Sonnet/Opus for analysis)
