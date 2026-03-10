@@ -13,7 +13,7 @@ export default defineConfig({
       title: "Catalyst",
       favicon: "/favicon.svg",
       logo: {
-        src: "./public/favicon.svg",
+        src: "./public/logo.png",
         alt: "Catalyst",
       },
       description:
