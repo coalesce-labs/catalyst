@@ -1,6 +1,6 @@
 ---
 title: Agent Reference
-description: Complete reference for all research agents across Catalyst plugins.
+description: Complete reference for all research agents, patterns, and team configuration.
 ---
 
 ## catalyst-dev Agents
@@ -43,6 +43,37 @@ description: Complete reference for all research agents across Catalyst plugins.
 | `github-linear-analyzer` | Correlate GitHub PRs with Linear issues | Sonnet |
 | `context-analyzer` | Track context engineering adoption | Sonnet |
 
+## When to Use Which Agent
+
+| Agent | Question it Answers |
+|-------|-------------------|
+| `codebase-locator` | Where is X? |
+| `codebase-analyzer` | How does X work? |
+| `codebase-pattern-finder` | Show me examples of X |
+| `thoughts-locator` | What do we know about X? |
+| `thoughts-analyzer` | What were the decisions about X? |
+| `external-research` | What do libraries/docs say about X? |
+
+## Agent Patterns
+
+Agents follow five core patterns:
+
+| Pattern | Purpose | Tools | Model |
+|---------|---------|-------|-------|
+| **Locator** | Find files and directories without reading contents | Grep, Glob, Bash(ls) | Haiku |
+| **Analyzer** | Read specific files and trace data flow | Read, Grep, Glob | Sonnet |
+| **Pattern Finder** | Find reusable patterns and examples | Read, Grep, Glob | Sonnet |
+| **Validator** | Check correctness against specifications | Read, Bash, Grep | Sonnet |
+| **Aggregator** | Collect and summarize from multiple sources | Read, Grep, Glob | Sonnet |
+
+### Design Principles
+
+1. **Documentarians, not critics** — Report what exists without suggesting improvements
+2. **Single responsibility** — Each agent answers one type of question
+3. **Tool minimalism** — Only the tools needed for the task
+4. **Structured output** — Consistent format with file:line references
+5. **Explicit boundaries** — Include "What NOT to Do" sections
+
 ## Three-Tier Model Strategy
 
 | Tier | Model | Use Case |
@@ -63,9 +94,69 @@ Agents are invoked via the `@` prefix:
 
 Commands spawn agents automatically — you rarely need to invoke them directly.
 
-## Agent Design Principles
+### Parallel vs Sequential
 
-1. **Documentarians, not critics** — Report what exists without suggesting improvements
-2. **Tool minimalism** — Only the tools needed for the task
-3. **Structured output** — Consistent format with file:line references
-4. **Single responsibility** — Each agent answers one type of question
+**Use parallel** when researching independent aspects:
+
+```
+@catalyst-dev:codebase-locator find payment files
+@catalyst-dev:thoughts-locator search payment research
+@catalyst-dev:codebase-pattern-finder show payment patterns
+```
+
+**Use sequential** when each step depends on the previous:
+
+```
+@catalyst-dev:codebase-locator find auth files
+# Wait for results
+@catalyst-dev:codebase-analyzer analyze src/auth/handler.js
+```
+
+## Agent Teams
+
+For complex implementations spanning multiple domains, agent teams enable multiple Claude Code instances working in parallel.
+
+### When to Use Teams vs Subagents
+
+| Scenario | Subagents | Agent Teams |
+|----------|-----------|-------------|
+| Parallel research gathering | Best fit | Overkill |
+| Code analysis / file search | Best fit | Overkill |
+| Complex multi-file implementation | Can't nest | Best fit |
+| Cross-layer features (frontend + backend + tests) | Limited | Best fit |
+| Cost-sensitive operations | Best fit | Too expensive |
+
+### Team Structure
+
+```
+Lead (Opus) — Coordinates implementation
+├── Teammate 1 (Sonnet) — Frontend changes
+│   └── Subagents (Haiku/Sonnet)
+├── Teammate 2 (Sonnet) — Backend changes
+│   └── Subagents (Haiku/Sonnet)
+└── Teammate 3 (Sonnet) — Test changes
+    └── Subagents (Haiku/Sonnet)
+```
+
+Each teammate is a full Claude Code session that can spawn its own subagents — two-level parallelism that subagents alone cannot achieve.
+
+```
+/catalyst-dev:implement_plan --team
+/catalyst-dev:oneshot --team PROJ-123
+```
+
+### Requirements
+
+```bash
+export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+```
+
+## Creating Custom Agents
+
+1. Create a markdown file in `plugins/<plugin>/agents/`
+2. Add frontmatter with name, description, tools, and model
+3. Write instructions with responsibilities, output format, and boundaries
+4. Restart Claude Code to load the agent
+5. Test with `@catalyst-dev:{name} task description`
+
+See [Creating Workflows](/contributing/creating-workflows/) for the complete template.

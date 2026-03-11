@@ -3,7 +3,34 @@ title: Best Practices
 description: Proven patterns for effective AI-assisted development with Catalyst.
 ---
 
-These best practices are derived from Anthropic's context engineering principles and tested across real-world projects.
+## Context Management
+
+Context is the most important resource in AI-assisted development. Treat it like CPU cache — load only what's needed, when it's needed.
+
+**The 40-60% rule** — Keep context utilization between 40-60% of the window. Check with `/context`. Clear context between workflow phases (research → plan → implement), when context reaches 60%, or when the AI starts repeating errors.
+
+**Warning signs of context pressure:**
+- AI repeating information you already discussed
+- Forgetting earlier decisions
+- Responses becoming less specific
+- Missing file:line references
+
+**What to do:** Create a handoff, start a fresh session, or phase the work using plan checkboxes.
+
+### Why Subagents Matter
+
+Subagents aren't just for speed — they're a context management strategy. Each agent gets its own context window, works its specific task, and returns only a summary. Three agents running in parallel use far less main context than doing the same work in a single session.
+
+```
+Main context: 30K tokens
+Spawn 3 agents (each isolated):
+  Locator:  25K tokens → returns 1K summary
+  Analyzer: 20K tokens → returns 2K summary
+  Patterns: 15K tokens → returns 3K summary
+
+Main context after: 36K tokens
+vs doing everything inline: 90K tokens
+```
 
 ## Planning
 
@@ -36,9 +63,9 @@ These best practices are derived from Anthropic's context engineering principles
 - [ ] Mobile app handles 429 gracefully
 ```
 
-### No Open Questions in Final Plans
+### Resolve Decisions During Planning
 
-Resolve all decisions during planning, not during implementation:
+No open questions in final plans. Resolve everything before implementation:
 
 ```markdown
 <!-- Bad -->
@@ -46,16 +73,6 @@ Resolve all decisions during planning, not during implementation:
 
 <!-- Good -->
 - Use Redis (multi-instance deployment requires shared state)
-```
-
-### Explicit Scope Control
-
-```markdown
-## What We're NOT Doing
-
-- Not implementing per-endpoint rate limits (global only)
-- Not adding a configuration UI (code config only)
-- Not handling distributed rate limiting across regions
 ```
 
 ## Implementation
@@ -81,7 +98,7 @@ Phase 2: Implement → Run tests → Fix issues → Mark complete
 
 Use plan checkboxes to track completion. This enables resumption from any point and eliminates re-verification.
 
-## Agent Usage
+## Working with Agents
 
 ### Be Specific in Requests
 
@@ -97,7 +114,7 @@ Use plan checkboxes to track completion. This enables resumption from any point 
 ### Use Parallel Agents for Independent Research
 
 ```
-# Parallel (3x faster)
+# Parallel (3x faster, better context efficiency)
 @catalyst-dev:codebase-locator find payment files
 @catalyst-dev:thoughts-locator search payment research
 @catalyst-dev:codebase-pattern-finder show payment patterns
@@ -107,34 +124,13 @@ Use plan checkboxes to track completion. This enables resumption from any point 
 
 Always check the codebase for existing implementations before creating new ones. Use `codebase-pattern-finder` to discover established conventions.
 
-## Anti-Patterns to Avoid
+## Anti-Patterns
 
-| Anti-Pattern | Why It's Bad | Better Approach |
-|-------------|-------------|-----------------|
-| Loading entire codebase upfront | Wastes context, includes irrelevant files | Progressive discovery with agents |
-| Monolithic research requests | No parallelization, unclear scope | Parallel focused agents |
-| Vague success criteria | Can't verify completion | Separated automated/manual checks |
-| Implementing without planning | Misses existing patterns, duplicates code | Research → plan → implement |
-| Losing context between sessions | Must re-research everything | Persist to thoughts system |
-| Scope creep in plans | Never finishes, delays delivery | Explicit "what we're NOT doing" |
-
-## Thoughts System
-
-### When to Create Documents
-
-- **New plan**: Starting a feature, refactoring, or complex bug fix
-- **Research doc**: Evaluating options, investigating patterns, documenting decisions
-- **Append to existing**: Updating based on new findings or progress
-
-### Naming Conventions
-
-```
-Research:  YYYY-MM-DD-PROJ-XXXX-description.md
-Plans:     YYYY-MM-DD-PROJ-XXXX-description.md
-Handoffs:  YYYY-MM-DD_HH-MM-SS_description.md
-PRs:       pr_{number}_{description}.md
-```
-
-### Sync Regularly
-
-Run `humanlayer thoughts sync` after creating or updating plans, completing research, finishing implementation, and making architectural decisions.
+| Anti-Pattern | Better Approach |
+|-------------|-----------------|
+| Loading entire codebase upfront | Progressive discovery with agents |
+| Monolithic research requests | Parallel focused agents |
+| Vague success criteria | Separated automated/manual checks |
+| Implementing without planning | Research → plan → implement |
+| Losing context between sessions | Persist to thoughts, use handoffs |
+| Scope creep in plans | Explicit "what we're NOT doing" |

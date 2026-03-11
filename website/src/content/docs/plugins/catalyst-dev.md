@@ -74,13 +74,13 @@ See the [Skills Reference](/reference/skills/) for full details.
 
 ## Hooks
 
-| Hook | Event | Purpose |
-|------|-------|---------|
-| `inject-plan-template` | `UserPromptSubmit` | Injects plan structure in plan mode |
-| `sync-plan-to-thoughts` | `ExitPlanMode` | Copies plans to thoughts with frontmatter |
-| `update-workflow-context` | Write/Edit | Tracks documents in workflow context |
+Catalyst includes three Claude Code hooks that run automatically:
 
-See the [Hooks Reference](/reference/hooks/) for full details.
+**inject-plan-template** — When Claude Code is in plan mode, this hook injects Catalyst's plan structure guidance so plans come out in the phased format that `/implement_plan` expects. Outside plan mode, it exits immediately (under 10ms overhead).
+
+**sync-plan-to-thoughts** — When you exit plan mode, this hook copies the plan to `thoughts/shared/plans/` with frontmatter (date, branch, commit) and updates workflow context so `/implement_plan` can auto-discover it.
+
+**update-workflow-context** — After any file write to `thoughts/shared/`, this hook records it in `.claude/.workflow-context.json`. This is what enables command chaining — research saves, then `/create_plan` finds it automatically.
 
 ## Workflow Context Tracking
 
