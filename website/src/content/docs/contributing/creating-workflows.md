@@ -1,13 +1,13 @@
 ---
 title: Creating Workflows
-description: Guide to creating new agents and commands for Catalyst.
+description: Guide to creating new agents and commands for Catalyst, including the frontmatter standard.
 ---
 
 ## Creating an Agent
 
 Agents are markdown files in `plugins/<plugin>/agents/` with YAML frontmatter.
 
-### Minimal Template
+### Template
 
 ```yaml
 ---
@@ -37,20 +37,32 @@ You are a specialized agent for [purpose].
 
 Return findings in this format:
 - `path/to/file:line` — Description
+
+## What NOT to Do
+
+- Don't [boundary 1]
+- Don't [boundary 2]
 ```
 
-### Key Requirements
+### Agent Frontmatter Fields
 
-- **name** must be kebab-case and match the filename (without `.md`)
-- **tools** must be valid Claude Code tools
-- **model** must be `opus`, `sonnet`, or `haiku`
-- Include a "What NOT to Do" section for clear boundaries
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | kebab-case, must match filename (without `.md`) |
+| `description` | Yes | Multi-line with use cases |
+| `tools` | Yes | Comma-separated list of allowed Claude Code tools |
+| `model` | Yes | `opus`, `sonnet`, or `haiku` |
+| `category` | Yes | `research`, `analysis`, `search`, `execution`, `validation`, `general` |
+| `version` | Yes | Semantic version |
+| `source` | No | URL if imported from external source |
+| `adapted` | No | Date of adaptation |
+| `original-author` | No | Original creator credit |
 
 ## Creating a Command
 
 Commands are markdown files in `plugins/<plugin>/commands/`.
 
-### Minimal Template
+### Template
 
 ```yaml
 ---
@@ -71,11 +83,42 @@ You are tasked with [purpose].
 2. Step two
 ```
 
+### Command Frontmatter Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `description` | Yes | One-line summary |
+| `category` | Yes | `workflow`, `planning`, `implementation`, `validation`, `linear`, `git`, `general` |
+| `tools` | Yes | Comma-separated list of allowed Claude Code tools |
+| `model` | Yes | `opus`, `sonnet`, or `haiku` |
+| `version` | Yes | Semantic version |
+| `argument-hint` | No | Hint for command arguments |
+
 ### Key Differences from Agents
 
-- Commands do **not** have a `name` field (filename is the identifier)
-- Commands use a one-line `description` (not multi-line)
-- Commands can use `argument-hint` for parameter documentation
+| Field | Agents | Commands |
+|-------|--------|----------|
+| `name` | Required (must match filename) | Not allowed |
+| `description` | Multi-line with use cases | One-line summary |
+| `argument-hint` | Not applicable | Optional |
+
+## Model Selection
+
+| Model | Use For |
+|-------|---------|
+| **opus** | Planning, complex analysis, orchestration |
+| **sonnet** | Code analysis, PR workflows, structured research |
+| **haiku** | Fast lookups, data collection, file finding |
+
+## Available Tools
+
+**File Operations**: `Read`, `Write`, `Edit`
+
+**Search & Discovery**: `Grep`, `Glob`
+
+**Execution**: `Bash`, `Task`, `TodoWrite`
+
+**Web & External**: `WebFetch`, `WebSearch`, `mcp__deepwiki__ask_question`, `mcp__deepwiki__read_wiki_structure`
 
 ## Testing
 
@@ -86,10 +129,7 @@ You are tasked with [purpose].
 
 ## Validation
 
-Run frontmatter validation to check your workflow:
-
 ```bash
-/catalyst-meta:validate_frontmatter plugins/dev/agents/my-agent.md
+/catalyst-meta:validate_frontmatter              # Check all workflows
+/catalyst-meta:validate_frontmatter --fix        # Auto-fix issues
 ```
-
-See the [Frontmatter Standard](/reference/frontmatter/) for the complete specification.

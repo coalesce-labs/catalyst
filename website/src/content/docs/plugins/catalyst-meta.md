@@ -43,7 +43,7 @@ Build new agents or commands from templates:
 /catalyst-meta:create_workflow
 ```
 
-Uses the [frontmatter standard](/reference/frontmatter/) and provides templates for both agents and commands.
+Uses the [frontmatter standard](/contributing/creating-workflows/) and provides templates for both agents and commands.
 
 ## Frontmatter Validation
 

@@ -11,6 +11,11 @@ export default defineConfig({
     mermaid(),
     starlight({
       title: "Catalyst",
+      favicon: "/favicon.svg",
+      logo: {
+        src: "./public/favicon.svg",
+        alt: "Catalyst",
+      },
       description:
         "AI-assisted development workflows for Claude Code — agents, commands, and orchestration plugins.",
       social: [
@@ -30,6 +35,10 @@ export default defineConfig({
           autogenerate: { directory: "guides" },
         },
         {
+          label: "Reference",
+          autogenerate: { directory: "reference" },
+        },
+        {
           label: "Plugins",
           autogenerate: { directory: "plugins" },
         },
@@ -38,16 +47,27 @@ export default defineConfig({
           autogenerate: { directory: "integrations" },
         },
         {
-          label: "Reference",
-          autogenerate: { directory: "reference" },
-        },
-        {
-          label: "Releases",
-          autogenerate: { directory: "releases" },
-        },
-        {
           label: "Contributing",
           autogenerate: { directory: "contributing" },
+        },
+      ],
+      head: [
+        {
+          tag: "link",
+          attrs: {
+            rel: "apple-touch-icon",
+            sizes: "180x180",
+            href: "/apple-touch-icon.png",
+          },
+        },
+        {
+          tag: "link",
+          attrs: {
+            rel: "icon",
+            type: "image/png",
+            sizes: "192x192",
+            href: "/icon-192.png",
+          },
         },
       ],
       plugins: [starlightLlmsTxt(), starlightChangelogs()],
