@@ -8,7 +8,7 @@ version: 1.0.0
 
 # Validate Frontmatter
 
-You are tasked with validating frontmatter consistency across all agents and commands in the
+You are tasked with validating frontmatter consistency across all agents and skills in the
 workspace, and fixing any issues found.
 
 ## Purpose
@@ -25,7 +25,7 @@ I'll validate frontmatter across all workflows.
 
 Checking:
 - agents/ directory
-- commands/ directory
+- skills/ directory
 
 What would you like to do?
 1. Validate all workflows (report issues only)
@@ -71,30 +71,29 @@ Path: $(git rev-parse --show-toplevel)/plugins/*/agents/
 Return: Validation report for all agents
 ```
 
-**Task 2 - Validate Commands**:
+**Task 2 - Validate Skills**:
 
 ```
 Use codebase-analyzer agent:
-"Validate frontmatter in all files matching commands/*.md. For each file, check:
-1. Required fields present (description, category, tools, model, version)
-2. No 'name' field (commands use filename)
-3. Tools list contains valid Claude Code tools
-4. Category is one of: workflow, planning, implementation, validation, linear, git, workflow-discovery, general
-5. Version follows semver (e.g., 1.0.0)
+"Validate frontmatter in all files matching skills/*/SKILL.md. For each file, check:
+1. Required fields present (name, description)
+2. User-invoked skills have disable-model-invocation: true
+3. CI/background skills have user-invocable: false
+4. Uses allowed-tools (not tools) for tool restrictions
+5. Does NOT include model or category in frontmatter
 6. Description is clear and concise
-7. argument-hint present if command takes arguments
 Return: List of all validation issues found with file:line references"
 
 Tools: Glob, Grep, Read
-Path: $(git rev-parse --show-toplevel)/plugins/*/commands/
-Return: Validation report for all commands
+Path: $(git rev-parse --show-toplevel)/plugins/*/skills/
+Return: Validation report for all skills
 ```
 
 **Task 3 - Extract Tool References**:
 
 ```
 Use codebase-pattern-finder agent:
-"Extract all unique tool names referenced in frontmatter across plugins/*/agents/*.md and plugins/*/commands/*.md. Return a sorted list of all tools used."
+"Extract all unique tool names referenced in frontmatter across plugins/*/agents/*.md and plugins/*/skills/*/SKILL.md. Return a sorted list of all tools used."
 
 Tools: Glob, Grep
 Path: $(git rev-parse --show-toplevel)/plugins/
@@ -108,7 +107,7 @@ Return: Complete list of tools referenced
 Combine results from parallel tasks:
 
 - Agent issues (Task 1)
-- Command issues (Task 2)
+- Skill issues (Task 2)
 - Tool inventory (Task 3)
 
 Mark all tasks complete in TodoWrite.
@@ -127,7 +126,7 @@ Show comprehensive report:
 ```markdown
 # Frontmatter Validation Report
 
-**Validated**: {date} **Scope**: {agents-count} agents, {commands-count} commands **Status**:
+**Validated**: {date} **Scope**: {agents-count} agents, {skills-count} skills **Status**:
 {PASS/FAIL}
 
 ## Summary
@@ -269,7 +268,7 @@ If user chose auto-fix:
    - Added `version: 1.0.0`
    - Standardized category: "search"
 
-   #### commands/create_plan.md
+   #### skills/create_plan/SKILL.md
 
    - Fixed version: "v1.0" → "1.0.0"
    - Updated tool reference: "SearchFiles" → "Grep"

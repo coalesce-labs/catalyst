@@ -394,8 +394,8 @@ Determine save location:
 **If Agent**:
 - Save to: `plugins/dev/agents/{workflow-name}.md`
 
-**If Command**:
-- Save to: `plugins/dev/commands/{workflow-name}.md`
+**If Skill**:
+- Save to: `plugins/dev/skills/{workflow-name}/SKILL.md`
 
 ### Step 10: Create Creation Record
 

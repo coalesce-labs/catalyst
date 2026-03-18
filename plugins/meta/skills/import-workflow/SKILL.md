@@ -231,9 +231,9 @@ Determine type and save location:
 
 - Save to: `plugins/dev/agents/{workflow-name}.md`
 
-**If Command**:
+**If Skill**:
 
-- Save to: `plugins/dev/commands/{workflow-name}.md`
+- Save to: `plugins/dev/skills/{workflow-name}/SKILL.md`
 
 ### Step 8: Create Import Record
 

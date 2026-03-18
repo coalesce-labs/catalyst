@@ -1,6 +1,7 @@
 ---
 name: weekly-review
 description: Review week's progress, meetings, learnings
+disable-model-invocation: true
 ---
 
 ## Quick Start

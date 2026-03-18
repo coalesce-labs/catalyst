@@ -1,6 +1,7 @@
 ---
 name: meeting-feedback
 description: Post-meeting effectiveness feedback and continuous improvement
+disable-model-invocation: true
 ---
 
 ## Quick Start
