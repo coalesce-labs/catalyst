@@ -5,15 +5,16 @@ description: Workflow discovery, creation, and management plugin for advanced us
 
 Tools for discovering, importing, creating, and validating Catalyst workflows.
 
-## Commands
+## Skills
 
-| Command | Description |
-|---------|-------------|
+| Skill | Description |
+|-------|-------------|
 | `/catalyst-meta:discover_workflows` | Research external Claude Code repositories for workflow patterns |
 | `/catalyst-meta:import_workflow` | Import and adapt workflows from other repositories |
-| `/catalyst-meta:create_workflow` | Create new agents or commands from discovered patterns |
+| `/catalyst-meta:create_workflow` | Create new agents or skills from discovered patterns |
 | `/catalyst-meta:validate_frontmatter` | Check frontmatter consistency across all workflows |
-| `/catalyst-meta:workflow_help` | Interactive guide to available workflows |
+| `/catalyst-meta:audit_references` | Audit plugin health and find broken references |
+| `/catalyst-meta:reorganize` | Analyze and reorganize directory structures |
 
 ## Workflow Discovery
 
@@ -23,7 +24,7 @@ Research community repositories for reusable patterns:
 /catalyst-meta:discover_workflows
 ```
 
-Catalogs agents and commands from external Claude Code repositories, documenting their patterns and approaches.
+Catalogs agents and skills from external Claude Code repositories, documenting their patterns and approaches.
 
 ## Importing Workflows
 
@@ -37,13 +38,13 @@ Adapts naming conventions, tool access, and configuration to match your existing
 
 ## Creating Workflows
 
-Build new agents or commands from templates:
+Build new agents or skills from templates:
 
 ```
 /catalyst-meta:create_workflow
 ```
 
-Uses the [frontmatter standard](/contributing/creating-workflows/) and provides templates for both agents and commands.
+Uses the [frontmatter standard](/contributing/creating-workflows/) and provides templates for both agents and skills.
 
 ## Frontmatter Validation
 
@@ -51,7 +52,7 @@ Uses the [frontmatter standard](/contributing/creating-workflows/) and provides 
 /catalyst-meta:validate_frontmatter
 ```
 
-Checks all agents and commands against the standard, reporting missing fields, invalid categories, tool mismatches, and version format issues.
+Checks all agents and skills against the standard, reporting missing fields, invalid tool references, and version format issues.
 
 ## Installation
 

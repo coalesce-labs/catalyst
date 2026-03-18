@@ -311,6 +311,5 @@ apt-get install jq  # Linux
 
 ## See Also
 
-- [QUICKSTART.md](../QUICKSTART.md) - Getting started guide
-- [docs/MULTI_CONFIG_GUIDE.md](../docs/MULTI_CONFIG_GUIDE.md) - Advanced multi-client setup
-- [docs/THOUGHTS_SETUP.md](../docs/THOUGHTS_SETUP.md) - Thoughts system setup
+- [Documentation Site](https://catalyst.coalescelabs.ai) - Getting started guide
+- [docs/architecture.md](../docs/architecture.md) - Three-layer memory architecture

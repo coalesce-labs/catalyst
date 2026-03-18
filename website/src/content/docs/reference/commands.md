@@ -1,78 +1,94 @@
 ---
 title: Command Reference
-description: Complete reference for all Catalyst commands across plugins.
+description: Complete reference for all Catalyst skills across plugins.
 ---
 
-## catalyst-dev Commands
+All Catalyst functionality is delivered as skills, invoked via `/plugin:skill_name`. This page lists every available skill organized by plugin.
+
+## catalyst-dev Skills
 
 ### Core Workflow
 
-| Command | Description | Model |
-|---------|-------------|-------|
-| `/catalyst-dev:research_codebase` | Parallel codebase research with specialized agents | Opus |
-| `/catalyst-dev:create_plan` | Interactive implementation planning | Opus |
-| `/catalyst-dev:iterate_plan` | Revise existing plans with feedback | Opus |
-| `/catalyst-dev:implement_plan` | Execute plans with phase-by-phase validation | Opus |
-| `/catalyst-dev:validate_plan` | Verify implementation against success criteria | Opus |
-| `/catalyst-dev:oneshot` | End-to-end: research, plan, implement in one invocation | Opus |
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-dev:research_codebase` | Parallel codebase research with specialized agents |
+| `/catalyst-dev:create_plan` | Interactive implementation planning |
+| `/catalyst-dev:iterate_plan` | Revise existing plans with feedback |
+| `/catalyst-dev:implement_plan` | Execute plans with phase-by-phase validation |
+| `/catalyst-dev:validate_plan` | Verify implementation against success criteria |
+| `/catalyst-dev:oneshot` | End-to-end: research, plan, implement in one invocation |
 
 ### Development
 
-| Command | Description | Model |
-|---------|-------------|-------|
-| `/catalyst-dev:commit` | Conventional commits with Linear integration | Sonnet |
-| `/catalyst-dev:ci_commit` | CI-aware commits (non-interactive) | Sonnet |
-| `/catalyst-dev:create_pr` | Pull request creation with auto-description | Sonnet |
-| `/catalyst-dev:describe_pr` | Generate/update PR descriptions | Sonnet |
-| `/catalyst-dev:ci_describe_pr` | CI-aware PR descriptions (non-interactive) | Sonnet |
-| `/catalyst-dev:merge_pr` | Safe merge with verification and Linear integration | Sonnet |
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-dev:commit` | Conventional commits with Linear integration |
+| `/catalyst-dev:create_pr` | Pull request creation with auto-description |
+| `/catalyst-dev:describe_pr` | Generate/update PR descriptions |
+| `/catalyst-dev:merge_pr` | Safe merge with verification and Linear integration |
 
 ### Context Persistence
 
-| Command | Description | Model |
-|---------|-------------|-------|
-| `/catalyst-dev:create_handoff` | Save session state for resumption | Sonnet |
-| `/catalyst-dev:resume_handoff` | Resume from a handoff document | Sonnet |
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-dev:create_handoff` | Save session state for resumption |
+| `/catalyst-dev:resume_handoff` | Resume from a handoff document |
 
 ### Project Management
 
-| Command | Description | Model |
-|---------|-------------|-------|
-| `/catalyst-dev:linear` | Direct ticket operations (create, update, comment). Workflow commands handle state transitions automatically. | Sonnet |
-| `/catalyst-dev:create_worktree` | Create git worktree for parallel development | Sonnet |
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-dev:linear` | Direct ticket operations (create, update, comment). Workflow commands handle state transitions automatically. |
+| `/catalyst-dev:create_worktree` | Create git worktree for parallel development |
 
-## catalyst-pm Commands
+### Code Quality
 
-| Command | Description | Model |
-|---------|-------------|-------|
-| `/catalyst-pm:analyze_cycle` | Cycle health report with recommendations | Opus |
-| `/catalyst-pm:analyze_milestone` | Milestone progress toward target dates | Opus |
-| `/catalyst-pm:report_daily` | Daily standup summary | Sonnet |
-| `/catalyst-pm:groom_backlog` | Backlog health analysis and cleanup | Sonnet |
-| `/catalyst-pm:sync_prs` | GitHub-Linear PR correlation | Sonnet |
-| `/catalyst-pm:context_daily` | Context engineering adoption dashboard | Sonnet |
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-dev:fix_typescript` | Fix TypeScript errors with strict rules |
+| `/catalyst-dev:scan_reward_hacking` | Scan for reward hacking patterns |
 
-## catalyst-analytics Commands
+## catalyst-pm Skills
 
-| Command | Description | Model |
-|---------|-------------|-------|
-| `/catalyst-analytics:analyze_user_behavior` | User behavior patterns | Sonnet |
-| `/catalyst-analytics:segment_analysis` | Segment and cohort analysis | Sonnet |
-| `/catalyst-analytics:product_metrics` | Product KPIs and conversion rates | Sonnet |
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-pm:analyze_cycle` | Cycle health report with recommendations |
+| `/catalyst-pm:analyze_milestone` | Milestone progress toward target dates |
+| `/catalyst-pm:report_daily` | Daily standup summary |
+| `/catalyst-pm:groom_backlog` | Backlog health analysis and cleanup |
+| `/catalyst-pm:sync_prs` | GitHub-Linear PR correlation |
+| `/catalyst-pm:context_daily` | Context engineering adoption dashboard |
 
-## catalyst-meta Commands
+## catalyst-analytics Skills
 
-| Command | Description | Model |
-|---------|-------------|-------|
-| `/catalyst-meta:discover_workflows` | Research external repos for workflow patterns | Opus |
-| `/catalyst-meta:import_workflow` | Import and adapt external workflows | Opus |
-| `/catalyst-meta:create_workflow` | Create new agents or commands | Opus |
-| `/catalyst-meta:validate_frontmatter` | Check frontmatter consistency | Sonnet |
-| `/catalyst-meta:workflow_help` | Interactive workflow guidance | Sonnet |
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-analytics:analyze_user_behavior` | User behavior patterns |
+| `/catalyst-analytics:segment_analysis` | Segment and cohort analysis |
+| `/catalyst-analytics:product_metrics` | Product KPIs and conversion rates |
 
-## CI/Automation Commands
+## catalyst-debugging Skills
 
-The `/catalyst-dev:ci_commit` and `/catalyst-dev:ci_describe_pr` commands are designed for CI pipelines:
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-debugging:debug_production_error` | Investigate production errors with Sentry data |
+| `/catalyst-debugging:error_impact_analysis` | Analyze error impact across users and releases |
+| `/catalyst-debugging:trace_analysis` | Trace error paths through the stack |
+
+## catalyst-meta Skills
+
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-meta:discover_workflows` | Research external repos for workflow patterns |
+| `/catalyst-meta:import_workflow` | Import and adapt external workflows |
+| `/catalyst-meta:create_workflow` | Create new agents or skills |
+| `/catalyst-meta:validate_frontmatter` | Check frontmatter consistency |
+| `/catalyst-meta:audit_references` | Audit plugin health and find broken references |
+| `/catalyst-meta:reorganize` | Analyze and reorganize directory structures |
+
+## CI/Automation Skills
+
+The `/catalyst-dev:ci_commit` and `/catalyst-dev:ci_describe_pr` skills are designed for CI pipelines:
 
 - Non-interactive (no user prompts)
 - Follow the same conventions (conventional commits, PR templates)

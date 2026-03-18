@@ -60,7 +60,7 @@ claude plugin marketplace update catalyst
 Each plugin contains:
 
 - **agents/** — Specialized research agents
-- **commands/** — Workflow commands (invoked via `/catalyst-dev:command_name`)
+- **skills/** — Workflow skills (invoked via `/catalyst-dev:skill_name`)
 - **scripts/** — Runtime utilities
 - **hooks/** — Automatic triggers (e.g., workflow context tracking)
 - **plugin.json** — Manifest with metadata and dependencies

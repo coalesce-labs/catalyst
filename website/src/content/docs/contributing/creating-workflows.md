@@ -1,6 +1,6 @@
 ---
 title: Creating Workflows
-description: Guide to creating new agents and commands for Catalyst, including the frontmatter standard.
+description: Guide to creating new agents and skills for Catalyst, including the frontmatter standard.
 ---
 
 ## Creating an Agent
@@ -19,9 +19,6 @@ description: |
   - Scenario 1
   - Scenario 2
 tools: Read, Grep
-model: sonnet
-category: general
-version: 1.0.0
 ---
 
 # My Agent
@@ -51,29 +48,26 @@ Return findings in this format:
 | `name` | Yes | kebab-case, must match filename (without `.md`) |
 | `description` | Yes | Multi-line with use cases |
 | `tools` | Yes | Comma-separated list of allowed Claude Code tools |
-| `model` | Yes | `opus`, `sonnet`, or `haiku` |
-| `category` | Yes | `research`, `analysis`, `search`, `execution`, `validation`, `general` |
-| `version` | Yes | Semantic version |
 | `source` | No | URL if imported from external source |
 | `adapted` | No | Date of adaptation |
 | `original-author` | No | Original creator credit |
 
-## Creating a Command
+## Creating a Skill
 
-Commands are markdown files in `plugins/<plugin>/commands/`.
+Skills are markdown files at `plugins/<plugin>/skills/<skill-name>/SKILL.md`.
 
 ### Template
 
 ```yaml
 ---
-description: One-line summary of what this command does
-category: general
-tools: Read, Write
-model: sonnet
+name: my-skill
+description: One-line summary of what this skill does
+disable-model-invocation: true
+allowed-tools: Read, Write
 version: 1.0.0
 ---
 
-# Command Name
+# Skill Name
 
 You are tasked with [purpose].
 
@@ -83,32 +77,32 @@ You are tasked with [purpose].
 2. Step two
 ```
 
-### Command Frontmatter Fields
+### Skill Frontmatter Fields
 
 | Field | Required | Description |
 |-------|----------|-------------|
+| `name` | Yes | kebab-case, must match directory name |
 | `description` | Yes | One-line summary |
-| `category` | Yes | `workflow`, `planning`, `implementation`, `validation`, `linear`, `git`, `general` |
-| `tools` | Yes | Comma-separated list of allowed Claude Code tools |
-| `model` | Yes | `opus`, `sonnet`, or `haiku` |
-| `version` | Yes | Semantic version |
-| `argument-hint` | No | Hint for command arguments |
+| `disable-model-invocation` | Conditional | Set `true` for user-invoked skills |
+| `user-invocable` | Conditional | Set `false` for CI/background skills |
+| `allowed-tools` | No | Comma-separated list of allowed Claude Code tools |
+| `version` | No | Semantic version |
 
 ### Key Differences from Agents
 
-| Field | Agents | Commands |
-|-------|--------|----------|
-| `name` | Required (must match filename) | Not allowed |
+| Field | Agents | Skills |
+|-------|--------|--------|
+| Location | `agents/*.md` | `skills/*/SKILL.md` |
+| `name` | Must match filename | Must match directory name |
 | `description` | Multi-line with use cases | One-line summary |
-| `argument-hint` | Not applicable | Optional |
+| Tool field | `tools` | `allowed-tools` |
+| `model` / `category` | Not used | Not used |
 
-## Model Selection
+### Do NOT Include
 
-| Model | Use For |
-|-------|---------|
-| **opus** | Planning, complex analysis, orchestration |
-| **sonnet** | Code analysis, PR workflows, structured research |
-| **haiku** | Fast lookups, data collection, file finding |
+- `model` — Skills inherit the model from the session
+- `category` — Not used in skills format
+- `tools` — Use `allowed-tools` instead
 
 ## Available Tools
 
@@ -124,7 +118,7 @@ You are tasked with [purpose].
 
 1. Edit the file in the appropriate `plugins/<plugin>/` directory
 2. Restart Claude Code to reload
-3. Invoke with `@catalyst-dev:{agent-name}` or `/command-name`
+3. Invoke with `@catalyst-dev:{agent-name}` or `/catalyst-dev:{skill-name}`
 4. Verify output matches expectations
 
 ## Validation

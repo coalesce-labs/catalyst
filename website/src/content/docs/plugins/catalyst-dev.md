@@ -8,17 +8,16 @@ The core plugin that powers all Catalyst development workflows. Always install t
 ## What's Included
 
 - **10 research agents** for codebase and infrastructure analysis
-- **22 commands** covering the full development lifecycle
-- **3 skills** for browser automation, code prototyping, and Linear CLI reference
+- **21 skills** covering the full development lifecycle
 - **Automatic workflow context tracking** via hooks
 - **~3.5K context** footprint (lightweight MCPs: DeepWiki, Context7)
 
-## Commands
+## Skills
 
 ### Core Workflow
 
-| Command | Description |
-|---------|-------------|
+| Skill | Description |
+|-------|-------------|
 | `/catalyst-dev:research_codebase` | Parallel codebase research with specialized agents |
 | `/catalyst-dev:create_plan` | Interactive implementation planning |
 | `/catalyst-dev:iterate_plan` | Revise existing plans with feedback |
@@ -28,8 +27,8 @@ The core plugin that powers all Catalyst development workflows. Always install t
 
 ### Development
 
-| Command | Description |
-|---------|-------------|
+| Skill | Description |
+|-------|-------------|
 | `/catalyst-dev:commit` | Conventional commits with Linear integration |
 | `/catalyst-dev:ci_commit` | CI-aware commits with pre-flight checks |
 | `/catalyst-dev:create_pr` | Pull requests with auto-description |
@@ -39,17 +38,34 @@ The core plugin that powers all Catalyst development workflows. Always install t
 
 ### Context Persistence
 
-| Command | Description |
-|---------|-------------|
+| Skill | Description |
+|-------|-------------|
 | `/catalyst-dev:create_handoff` | Save session context for later |
 | `/catalyst-dev:resume_handoff` | Resume from a handoff document |
 
 ### Project Management
 
-| Command | Description |
-|---------|-------------|
+| Skill | Description |
+|-------|-------------|
 | `/catalyst-dev:linear` | Ticket management and workflow |
 | `/catalyst-dev:create_worktree` | Isolated workspace creation |
+
+### Code Quality
+
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-dev:fix_typescript` | Fix TypeScript errors with strict rules |
+| `/catalyst-dev:scan_reward_hacking` | Scan for reward hacking patterns |
+
+### Reference Skills
+
+| Skill | Description |
+|-------|-------------|
+| `agent-browser` | Browser automation CLI reference — use instead of Playwright MCP tools |
+| `code-first-draft` | Initial feature implementation guidance |
+| `linearis` | Linearis CLI reference for Linear ticket management |
+
+See the [Skills Reference](/reference/skills/) for full details.
 
 ## Research Agents
 
@@ -61,16 +77,6 @@ The core plugin that powers all Catalyst development workflows. Always install t
 | `thoughts-locator` | Search thoughts repository | Haiku |
 | `thoughts-analyzer` | Analyze documentation | Sonnet |
 | `external-research` | External repos and docs | Sonnet |
-
-## Skills
-
-| Skill | Description |
-|-------|-------------|
-| `agent-browser` | Browser automation CLI reference — use instead of Playwright MCP tools |
-| `code-first-draft` | Initial feature implementation guidance |
-| `linearis` | Linearis CLI reference for Linear ticket management |
-
-See the [Skills Reference](/reference/skills/) for full details.
 
 ## Hooks
 

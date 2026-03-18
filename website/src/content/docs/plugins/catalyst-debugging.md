@@ -15,13 +15,13 @@ Sentry MCP integration for production error monitoring, stack trace analysis, an
 /plugin disable catalyst-debugging   # -20K context
 ```
 
-## Capabilities
+## Skills
 
-- Production error monitoring and alerting
-- Stack trace analysis with source maps
-- Root cause detection
-- Error pattern identification
-- Release health tracking
+| Skill | Description |
+|-------|-------------|
+| `/catalyst-debugging:debug_production_error` | Investigate production errors with Sentry data |
+| `/catalyst-debugging:error_impact_analysis` | Analyze error impact across users and releases |
+| `/catalyst-debugging:trace_analysis` | Trace error paths through the stack |
 
 ## Prerequisites
 

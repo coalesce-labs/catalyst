@@ -9,6 +9,33 @@ Skills activate automatically based on trigger conditions described in their fro
 
 ## catalyst-dev Skills
 
+The dev plugin includes 21 skills — 18 workflow skills and 3 reference skills.
+
+### Workflow Skills
+
+| Skill | Description | Source |
+|-------|-------------|--------|
+| `research-codebase` | Parallel codebase research with specialized agents. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/research-codebase/SKILL.md) |
+| `create-plan` | Interactive implementation planning. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-plan/SKILL.md) |
+| `iterate-plan` | Revise existing plans with feedback. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/iterate-plan/SKILL.md) |
+| `implement-plan` | Execute plans with phase-by-phase validation. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/implement-plan/SKILL.md) |
+| `validate-plan` | Verify implementation against success criteria. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/validate-plan/SKILL.md) |
+| `oneshot` | End-to-end: research, plan, implement in one invocation. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/oneshot/SKILL.md) |
+| `commit` | Conventional commits with Linear integration. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/commit/SKILL.md) |
+| `ci-commit` | CI-aware commits (non-interactive). | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/ci-commit/SKILL.md) |
+| `create-pr` | Pull request creation with auto-description. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-pr/SKILL.md) |
+| `describe-pr` | Generate/update PR descriptions. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/describe-pr/SKILL.md) |
+| `ci-describe-pr` | CI-aware PR descriptions (non-interactive). | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/ci-describe-pr/SKILL.md) |
+| `merge-pr` | Safe merge with verification and Linear integration. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/merge-pr/SKILL.md) |
+| `create-handoff` | Save session context for later resumption. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-handoff/SKILL.md) |
+| `resume-handoff` | Resume from a handoff document. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/resume-handoff/SKILL.md) |
+| `linear` | Direct ticket operations (create, update, comment). | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/linear/SKILL.md) |
+| `create-worktree` | Create git worktree for parallel development. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-worktree/SKILL.md) |
+| `fix-typescript` | Fix TypeScript errors with strict rules. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/fix-typescript/SKILL.md) |
+| `scan-reward-hacking` | Scan for reward hacking patterns. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/scan-reward-hacking/SKILL.md) |
+
+### Reference Skills
+
 | Skill | Description | Source |
 |-------|-------------|--------|
 | `agent-browser` | Fast browser automation CLI for AI agents. Use instead of Playwright MCP tools for web testing, screenshots, form filling, and UI verification. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/agent-browser/SKILL.md) |

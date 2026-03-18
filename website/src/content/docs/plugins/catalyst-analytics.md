@@ -15,10 +15,10 @@ PostHog integration for user behavior analysis, conversion funnels, and cohort a
 /plugin disable catalyst-analytics   # -40K context
 ```
 
-## Commands
+## Skills
 
-| Command | Description |
-|---------|-------------|
+| Skill | Description |
+|-------|-------------|
 | `/catalyst-analytics:analyze_user_behavior` | User behavior patterns and cohorts |
 | `/catalyst-analytics:segment_analysis` | User segment analysis for targeted insights |
 | `/catalyst-analytics:product_metrics` | Key product metrics and conversion rates |

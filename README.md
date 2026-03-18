@@ -64,8 +64,7 @@ and shared memory systems.
 **catalyst-dev** (Core - Always enabled)
 
 - 10 research agents (codebase + infrastructure)
-- 22 commands covering full dev lifecycle
-- 3 skills (browser automation, code prototyping, Linear CLI reference)
+- 21 skills covering full dev lifecycle
 - Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for data collection)
 - Linear integration via Linearis CLI
 - CI/automation commands for non-interactive workflows
@@ -74,7 +73,7 @@ and shared memory systems.
 
 **catalyst-pm** (Optional - Enable for project management)
 
-- 6 commands for PM workflows (cycle analysis, milestone tracking, backlog grooming)
+- 6 skills for PM workflows (cycle analysis, milestone tracking, backlog grooming)
 - 12 specialized agents for data collection and analysis
 - 39 skills for product management (PRDs, user research, metrics, interviews, strategy)
 - 7 sub-agents forming a review panel (engineering, design, executive, legal, UX, customer voice)
@@ -87,18 +86,18 @@ and shared memory systems.
 - PostHog MCP integration (~40k context)
 - Product analytics and user behavior analysis
 - Conversion funnels and cohort analysis
-- 3 specialized analytics commands
+- 3 specialized analytics skills
 
 **catalyst-debugging** (Optional - Enable when needed)
 
 - Sentry MCP integration (~20k context)
 - Production error monitoring and debugging
 - Stack trace analysis and root cause detection
-- 3 specialized debugging commands
+- 3 specialized debugging skills
 
 **catalyst-meta** (Optional - For advanced users)
 
-- 7 commands for workflow management
+- 6 skills for workflow management
 - Discover workflows from community repos
 - Import and adapt patterns
 - Create new workflows
@@ -137,7 +136,7 @@ This script will guide you through:
 
 You're ready! Try `/research-codebase` in your next session.
 
-See [QUICKSTART.md](QUICKSTART.md) for detailed setup instructions.
+See the [documentation site](https://catalyst.coalescelabs.ai) for detailed setup instructions.
 
 ## Installation
 
@@ -215,7 +214,7 @@ claude plugin marketplace update catalyst
 
 **Need help?**
 
-- [Installation & Configuration Guide](QUICKSTART.md) - Complete setup, installation, and configuration
+- [Documentation Site](https://catalyst.coalescelabs.ai) - Complete setup, installation, and configuration
 - [Claude Code Plugin Guide](https://docs.claude.com/en/docs/claude-code/plugins.md) - Official plugin documentation
 
 ## Complete Workflow
@@ -235,12 +234,8 @@ before running out of context, creating structured handoff documents that add to
 
 **Learn More:**
 
-- [Agentic Workflow Guide](docs/AGENTIC_WORKFLOW_GUIDE.md) - Complete guide showing research,
-  planning, handoff, worktree, implementation, verify, and PR workflows
-- [Context Engineering](docs/CONTEXT_ENGINEERING.md) - Token efficiency strategies and context
-  management patterns
-- [Linear Workflow Automation](docs/LINEAR_WORKFLOW_AUTOMATION.md) - Linearis integration for ticket
-  → branch → PR → merge lifecycle ([Linearis](https://www.npmjs.com/package/linearis))
+- [Architecture](docs/architecture.md) - Three-layer system, memory model, agent teams
+- [Documentation Site](https://catalyst.coalescelabs.ai) - Complete guides and reference
 
 ### Agent Teams
 
@@ -359,9 +354,9 @@ better!
 ## Documentation
 
 - [Documentation Site](https://catalyst.coalescelabs.ai) - Comprehensive guides, reference, and tutorials
-- [Installation & Configuration](QUICKSTART.md) - Setup, config, and command reference
-- [Usage Guide](docs/USAGE.md) - How to use all features
-- [Architecture](CLAUDE.md) - How it's built
+- [Architecture](docs/architecture.md) - Three-layer system and memory model
+- [ADRs](docs/adrs.md) - Architecture decision records
+- [Releases](docs/releases.md) - Release Please workflow
 
 ## License
 
