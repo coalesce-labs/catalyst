@@ -88,6 +88,6 @@ Catalyst is a 5-plugin system. Install what you need:
 
 ## Next Steps
 
-- [Configuration](/getting-started/configuration/) — Two-layer config system and secrets management
-- [First Workflow](/getting-started/first-workflow/) — Walk through the research-plan-implement cycle
+- [Configuration](/reference/configuration/) — Two-layer config system, secrets management, and schema reference
+- [Development Workflow](/reference/workflows/) — Walk through the research-plan-implement cycle
 - [Multi-Project Setup](/getting-started/multi-project/) — Managing multiple clients or projects

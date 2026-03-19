@@ -8,9 +8,15 @@ paths: ["website/**"]
 - Website is the canonical user-facing documentation source
 - docs/ in repo root is developer-only reference
 - Use Starlight conventions for page organization
+- Three sidebar sections: Getting Started, Reference, Plugins
+
+## Terminology
+- Always use "skills" — never "commands" when referring to Catalyst functionality
+- User-invocable skills: triggered by user with `/plugin:skill_name`
+- Model-invocable skills: activated automatically by Claude when relevant context detected
+- CI skills: non-interactive variants for automation pipelines
 
 ## Writing Style
 - Clear, concise, actionable
-- Commands are described as "skills" in technical context, "commands" in user-facing context
 - Include code examples for all workflows
 - Link to GitHub source when referencing specific files

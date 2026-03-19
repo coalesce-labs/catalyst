@@ -17,7 +17,7 @@ export default defineConfig({
         alt: "Catalyst",
       },
       description:
-        "AI-assisted development workflows for Claude Code — agents, commands, and orchestration plugins.",
+        "AI-assisted development workflows for Claude Code — skills, agents, and orchestration plugins.",
       social: [
         {
           icon: "github",
@@ -31,24 +31,12 @@ export default defineConfig({
           autogenerate: { directory: "getting-started" },
         },
         {
-          label: "Guides",
-          autogenerate: { directory: "guides" },
-        },
-        {
           label: "Reference",
           autogenerate: { directory: "reference" },
         },
         {
           label: "Plugins",
           autogenerate: { directory: "plugins" },
-        },
-        {
-          label: "Integrations",
-          autogenerate: { directory: "integrations" },
-        },
-        {
-          label: "Contributing",
-          autogenerate: { directory: "contributing" },
         },
       ],
       head: [
