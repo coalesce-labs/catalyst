@@ -22,9 +22,9 @@ And the prompt loop breaks down fast:
 
 Catalyst solves this by giving Claude Code structure.
 
-## Three Building Blocks
+## Four Building Blocks
 
-Catalyst is a plugin system for Claude Code. It chains together three types of building blocks into repeatable development workflows — so the AI works reliably and predictably, and code actually ships.
+Catalyst is a plugin system for Claude Code. It chains together four types of building blocks into repeatable development workflows — so the AI works reliably and predictably, and code actually ships.
 
 <CardGrid>
   <Card title="Skills" icon="rocket">
@@ -33,12 +33,15 @@ Catalyst is a plugin system for Claude Code. It chains together three types of b
   <Card title="Agents" icon="magnifier">
     Specialized roles that skills delegate to. A locator agent finds files. An analyzer agent reads implementation details. A pattern-finder agent discovers reusable code. Skills spawn these in parallel to gather information fast — and each agent gets its own context window, so it can focus deeply on one thing.
   </Card>
+  <Card title="Memory" icon="document">
+    Persistent, git-backed storage that survives across sessions. Catalyst uses the [HumanLayer thoughts system](https://humanlayer.dev) as long-term memory — research findings, implementation plans, handoff checkpoints, and PR descriptions all persist in `thoughts/shared/`. Any agent, in any session, can come back and understand what happened before. This is what makes multi-day features and team handoffs possible.
+  </Card>
   <Card title="Hooks" icon="setting">
     Automation that runs at specific moments in a workflow. A hook injects plan structure guidance, syncs plans to persistent storage, or tracks workflow context for skill chaining. Guardrails you don't have to remember.
   </Card>
 </CardGrid>
 
-These three pieces compose. A skill spawns agents, agents use their focused context to research and analyze, hooks enforce quality and track state at each gate. The result is a workflow — not a conversation, but a structured process that produces predictable output.
+These four pieces compose. A skill spawns agents, agents use their focused context to research and analyze, memory preserves artifacts across sessions, and hooks enforce quality and track state at each gate. The result is a workflow — not a conversation, but a structured process that produces predictable output.
 
 ## The Core Workflow: Research, Plan, Implement, Ship
 
