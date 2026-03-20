@@ -1,6 +1,7 @@
 ---
 name: weekly-plan
 description: Set next week's priorities
+disable-model-invocation: true
 ---
 
 ## Purpose

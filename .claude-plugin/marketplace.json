@@ -11,7 +11,7 @@
       "name": "catalyst-dev",
       "source": "./plugins/dev",
       "description": "Core development workflow: research → plan → implement → validate → ship. Includes 10 research agents, workflow commands, Linear integration, handoff system. Always enabled. ~3.5k context (lightweight MCPs: DeepWiki, Context7).",
-      "version": "4.4.0",
+      "version": "4.2.0",
       "author": {
         "name": "Coalesce Labs",
         "email": "hello@coalesce.dev"

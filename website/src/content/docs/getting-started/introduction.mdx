@@ -1,6 +1,6 @@
 ---
 title: Introduction
-description: Catalyst chains commands, agents, skills, and hooks into repeatable development workflows for Claude Code.
+description: Catalyst chains skills, agents, and hooks into repeatable development workflows for Claude Code.
 sidebar:
   order: 0
 ---
@@ -27,21 +27,21 @@ Catalyst solves this by giving Claude Code structure.
 Catalyst is a plugin system for Claude Code. It chains together four types of building blocks into repeatable development workflows — so the AI works reliably and predictably, and code actually ships.
 
 <CardGrid>
-  <Card title="Commands" icon="rocket">
-    Structured workflows you invoke with a slash command. Each command orchestrates a multi-step process — spawning agents, reading context, interacting with you, and saving artifacts. Commands are how work gets done.
+  <Card title="Skills" icon="rocket">
+    The core unit of Catalyst functionality. Some skills are **user-invocable** — structured workflows you trigger with a slash command (`/catalyst-dev:commit`). Others are **model-invocable** — reference knowledge that Claude activates automatically when it detects relevant context, like seeing a ticket ID. Skills orchestrate multi-step processes, spawn agents, and save artifacts.
   </Card>
   <Card title="Agents" icon="magnifier">
-    Specialized roles that commands delegate to. A locator agent finds files. An analyzer agent reads implementation details. A pattern-finder agent discovers reusable code. Commands spawn these in parallel to gather information fast.
+    Specialized roles that skills delegate to. A locator agent finds files. An analyzer agent reads implementation details. A pattern-finder agent discovers reusable code. Skills spawn these in parallel to gather information fast — and each agent gets its own context window, so it can focus deeply on one thing.
   </Card>
-  <Card title="Skills" icon="open-book">
-    Reusable knowledge that teaches Claude how to approach specific tasks — debugging strategies, commit conventions, writing styles. Skills shape behavior without you having to re-explain preferences every session.
+  <Card title="Memory" icon="document">
+    Persistent, git-backed storage that survives across sessions. Catalyst uses the [HumanLayer thoughts system](https://humanlayer.dev) as long-term memory — research findings, implementation plans, handoff checkpoints, and PR descriptions all persist in `thoughts/shared/`. Any agent, in any session, can come back and understand what happened before. This is what makes multi-day features and team handoffs possible.
   </Card>
   <Card title="Hooks" icon="setting">
-    Automation that runs at specific moments in a workflow. A hook can enforce linting before a commit, run tests after implementation, or validate that a plan meets criteria before execution starts. Guardrails, not guardrails you have to remember.
+    Automation that runs at specific moments in a workflow. A hook injects plan structure guidance, syncs plans to persistent storage, or tracks workflow context for skill chaining. Guardrails you don't have to remember.
   </Card>
 </CardGrid>
 
-These four pieces compose. A command spawns agents, agents use skills, hooks enforce quality at each gate. The result is a workflow — not a conversation, but a structured process that produces predictable output.
+These four pieces compose. A skill spawns agents, agents use their focused context to research and analyze, memory preserves artifacts across sessions, and hooks enforce quality and track state at each gate. The result is a workflow — not a conversation, but a structured process that produces predictable output.
 
 ## The Core Workflow: Research, Plan, Implement, Ship
 
@@ -107,9 +107,9 @@ Research to shipped PR. Each step is structured, each handoff is clean, and huma
 
     [Get started →](/getting-started/)
   </Card>
-  <Card title="Your First Workflow" icon="right-arrow">
+  <Card title="Development Workflow" icon="right-arrow">
     Walk through the full research-plan-implement cycle.
 
-    [Try it →](/getting-started/first-workflow/)
+    [See workflows →](/reference/workflows/)
   </Card>
 </CardGrid>

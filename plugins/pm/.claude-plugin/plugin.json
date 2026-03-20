@@ -22,13 +22,6 @@
     "posthog"
   ],
   "license": "MIT",
-  "commands": [
-    "./commands/analyze_cycle.md",
-    "./commands/analyze_milestone.md",
-    "./commands/report_daily.md",
-    "./commands/groom_backlog.md",
-    "./commands/sync_prs.md"
-  ],
   "agents": [
     "./agents/linear-research.md",
     "./agents/cycle-analyzer.md",
@@ -37,6 +30,12 @@
     "./agents/github-linear-analyzer.md"
   ],
   "skills": [
+    "./skills/analyze-cycle/SKILL.md",
+    "./skills/analyze-milestone/SKILL.md",
+    "./skills/report-daily/SKILL.md",
+    "./skills/groom-backlog/SKILL.md",
+    "./skills/sync-prs/SKILL.md",
+    "./skills/context-daily/SKILL.md",
     "./skills/activation-analysis/SKILL.md",
     "./skills/competitor-analysis/SKILL.md",
     "./skills/connect-mcps/SKILL.md",

@@ -1,6 +1,7 @@
 ---
 name: generate-ai-prototype
 description: Generate v0.dev, Lovable, or Bolt.new prompts for AI-powered prototyping
+disable-model-invocation: true
 ---
 
 # Generate AI Prototype Skill

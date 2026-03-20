@@ -1,6 +1,7 @@
 ---
 name: interview-feedback
 description: Post-PM-interview debrief and continuous improvement for job search
+disable-model-invocation: true
 ---
 
 **Note:** This skill is for PM career interviews (job interviews). For debriefing after conducting user research interviews, use `/user-research-synthesis` instead.

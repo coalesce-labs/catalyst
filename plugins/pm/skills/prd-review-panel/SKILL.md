@@ -1,6 +1,7 @@
 ---
 name: prd-review-panel
 description: Multi-agent PRD review (7 perspectives)
+disable-model-invocation: true
 ---
 
 ## Purpose

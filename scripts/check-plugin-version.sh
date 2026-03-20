@@ -50,35 +50,52 @@ done
 
 # Report findings
 if [[ ${#NEEDS_VERSION_BUMP[@]} -gt 0 ]]; then
+  # Release Please manages versions via conventional commits.
+  # Check if the commits on this branch use conventional commit format,
+  # which means Release Please will handle the version bump automatically.
+  CONVENTIONAL_COMMITS=false
+  if [[ -n "${BASE_REF:-}" ]]; then
+    # Check commit messages for conventional commit prefixes
+    COMMIT_MSGS=$(git log --format='%s' "$BASE_REF"...HEAD 2>/dev/null || echo "")
+    if echo "$COMMIT_MSGS" | grep -qE '^(feat|fix|perf|refactor|chore|docs|style|test|build|ci)(\(.+\))?!?:'; then
+      CONVENTIONAL_COMMITS=true
+    fi
+  fi
+
+  if [[ "$CONVENTIONAL_COMMITS" == true ]]; then
+    echo ""
+    echo "ℹ️  Plugin files changed — version bump will be handled by Release Please"
+    echo ""
+    echo "The following plugins have modifications:"
+    for plugin in "${NEEDS_VERSION_BUMP[@]}"; do
+      echo "  📦 catalyst-$plugin"
+      echo "$CHANGED_FILES" | grep "^plugins/$plugin/" | sed 's/^/     - /'
+    done
+    echo ""
+    echo "✅ Conventional commits detected — Release Please will bump versions on merge"
+    exit 0
+  fi
+
   echo ""
   echo "⚠️  Plugin files changed but version not bumped!"
   echo ""
   echo "The following plugins have modified files:"
   for plugin in "${NEEDS_VERSION_BUMP[@]}"; do
     echo "  📦 catalyst-$plugin"
-    # Show which files changed
     echo "$CHANGED_FILES" | grep "^plugins/$plugin/" | sed 's/^/     - /'
   done
   echo ""
   echo "💡 Recommended action:"
   echo ""
-  echo "   Determine the type of change:"
-  echo "   - Breaking changes (required updates): major version bump"
-  echo "   - New features (backward compatible): minor version bump"
-  echo "   - Bug fixes: patch version bump"
-  echo ""
-  echo "   Then run:"
-  for plugin in "${NEEDS_VERSION_BUMP[@]}"; do
-    echo "   ./scripts/bump-version.sh $plugin <major|minor|patch>"
-  done
-  echo ""
-  echo "   Or bump all at once:"
-  echo "   ./scripts/bump-version.sh all <major|minor|patch>"
+  echo "   Use conventional commit messages so Release Please can auto-bump versions:"
+  echo "   - feat(scope)!: breaking change  → major bump"
+  echo "   - feat(scope): new feature       → minor bump"
+  echo "   - fix(scope): bug fix            → patch bump"
   echo ""
 
   # In CI or pre-commit mode, fail
   if [[ "${STRICT_VERSION_CHECK:-}" == "true" ]]; then
-    echo "❌ Version bump required before commit"
+    echo "❌ Conventional commit message required for plugin changes"
     exit 1
   else
     echo "⚠️  Warning only - commit will proceed"

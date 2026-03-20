@@ -1,6 +1,7 @@
 ---
 name: interview-prep
 description: Pre-interview preparation for PM job interviews (Product Sense, Execution, Behavioral)
+disable-model-invocation: true
 ---
 
 **Note:** This skill is for PM career interviews (job interviews). For preparing to conduct user research interviews, see `/interview-guide`.

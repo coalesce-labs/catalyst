@@ -1,5 +1,5 @@
 ---
-title: Plugin System
+title: Plugins
 description: Catalyst's modular plugin architecture — install what you need.
 sidebar:
   order: 0
@@ -9,13 +9,15 @@ Catalyst is distributed as independent Claude Code plugins. Install only the one
 
 ## Available Plugins
 
-| Plugin | Description | Context Cost |
-|--------|------------|--------------|
-| **catalyst-dev** | Core development workflow — research, plan, implement, validate, ship | ~3.5K tokens |
-| **catalyst-pm** | Project management — cycle analysis, backlog grooming, PR sync | Minimal (CLI-based) |
-| **catalyst-analytics** | Product analytics via PostHog MCP | ~40K tokens |
-| **catalyst-debugging** | Error monitoring via Sentry MCP | ~20K tokens |
-| **catalyst-meta** | Workflow discovery, creation, and management | Minimal |
+| Plugin | Description | Context Cost | Skills | Agents |
+|--------|------------|:------------:|:------:|:------:|
+| **catalyst-dev** | Core development workflow — research, plan, implement, validate, ship | ~3.5K | 23 | 10 |
+| **catalyst-pm** | Project management — cycle analysis, backlog grooming, PR sync | Minimal | 40+ | 6 |
+| **catalyst-meta** | Workflow discovery, creation, and management | Minimal | 6 | — |
+| **catalyst-analytics** | Product analytics via PostHog MCP | ~40K | 3 | — |
+| **catalyst-debugging** | Error monitoring via Sentry MCP | ~20K | 3 | 1 |
+
+See the [Skills Reference](/reference/skills/) for the complete list of skills per plugin, and [Agents](/reference/agents/) for agent details.
 
 ## Installation
 
@@ -31,36 +33,50 @@ Catalyst is distributed as independent Claude Code plugins. Install only the one
 /plugin install catalyst-meta         # Optional
 ```
 
-## Session-Based MCP Management
+## Context Management
 
-Plugins load and unload MCPs dynamically to manage context:
+Plugins with heavy MCP integrations (analytics, debugging) should be enabled only when needed:
 
 ```bash
-# Enable when needed
 /plugin enable catalyst-analytics    # +40K context
-/plugin enable catalyst-debugging    # +20K context
-
-# Disable to free context
+# Do your analysis work...
 /plugin disable catalyst-analytics   # -40K context
 ```
 
 Most sessions start with just `catalyst-dev` (~3.5K tokens) and enable heavier plugins only when needed.
-
-## Updating
-
-```bash
-# Fetch latest from marketplace
-claude plugin marketplace update catalyst
-
-# Restart Claude Code to load updates
-```
 
 ## Architecture
 
 Each plugin contains:
 
 - **agents/** — Specialized research agents
-- **commands/** — Workflow commands (invoked via `/catalyst-dev:command_name`)
+- **skills/** — Workflow skills (invoked via `/plugin:skill_name`)
 - **scripts/** — Runtime utilities
 - **hooks/** — Automatic triggers (e.g., workflow context tracking)
 - **plugin.json** — Manifest with metadata and dependencies
+
+### Hooks (catalyst-dev)
+
+The dev plugin includes three Claude Code hooks that run automatically:
+
+- **inject-plan-template** — Injects Catalyst's plan structure guidance when Claude Code is in plan mode.
+- **sync-plan-to-thoughts** — Copies plans to `thoughts/shared/plans/` with frontmatter when you exit plan mode.
+- **update-workflow-context** — Records document writes to `.claude/.workflow-context.json`, enabling skill chaining.
+
+## Updating
+
+```bash
+claude plugin marketplace update catalyst
+# Restart Claude Code to load updates
+```
+
+## Release Strategy
+
+Catalyst uses **Release Please** for automated per-plugin releases with conventional commit messages:
+
+| Prefix | Effect | Example |
+|--------|--------|---------|
+| `feat(dev):` | Minor bump for catalyst-dev | `feat(dev): add new skill` |
+| `fix(pm):` | Patch bump for catalyst-pm | `fix(pm): correct cycle calculation` |
+| `feat(dev)!:` | Major bump (breaking change) | `feat(dev)!: redesign plan format` |
+| `chore(meta):` | No version bump | `chore(meta): update docs` |

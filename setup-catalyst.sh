@@ -2026,8 +2026,8 @@ print_summary() {
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
   echo "📚 Documentation:"
-  echo "   Quick Start: https://github.com/coalesce-labs/catalyst/blob/main/QUICKSTART.md"
-  echo "   Full Guide: https://github.com/coalesce-labs/catalyst/blob/main/docs/USAGE.md"
+  echo "   Documentation: https://catalyst.coalescelabs.ai"
+  echo "   Architecture: https://github.com/coalesce-labs/catalyst/blob/main/docs/architecture.md"
   echo ""
 
   echo "💡 Tip: This script is idempotent. Run again anytime to:"

@@ -1,7 +1,11 @@
 ---
-title: Agent Reference
-description: Complete reference for all research agents, patterns, and team configuration.
+title: Agents
+description: Complete reference for research agents, patterns, team configuration, and creating custom agents.
+sidebar:
+  order: 1
 ---
+
+Agents are specialized roles that skills delegate to. Each agent has a focused job, a dedicated context window, and a specific set of tools. Skills spawn agents in parallel to gather information fast without overloading the main context.
 
 ## catalyst-dev Agents
 
@@ -92,7 +96,7 @@ Agents are invoked via the `@` prefix:
 @catalyst-dev:external-research query React Server Components patterns
 ```
 
-Commands spawn agents automatically — you rarely need to invoke them directly.
+Skills spawn agents automatically — you rarely need to invoke them directly.
 
 ### Parallel vs Sequential
 
@@ -151,12 +155,92 @@ Each teammate is a full Claude Code session that can spawn its own subagents —
 export CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
 ```
 
-## Creating Custom Agents
+## Creating Custom Agents and Skills
 
-1. Create a markdown file in `plugins/<plugin>/agents/`
-2. Add frontmatter with name, description, tools, and model
-3. Write instructions with responsibilities, output format, and boundaries
-4. Restart Claude Code to load the agent
-5. Test with `@catalyst-dev:{name} task description`
+### Agent Template
 
-See [Creating Workflows](/contributing/creating-workflows/) for the complete template.
+Agents are markdown files in `plugins/<plugin>/agents/` with YAML frontmatter:
+
+```yaml
+---
+name: my-agent
+description: |
+  What this agent does.
+
+  Use this agent when:
+  - Scenario 1
+  - Scenario 2
+tools: Read, Grep
+---
+
+# My Agent
+
+You are a specialized agent for [purpose].
+
+## Process
+
+1. Step one
+2. Step two
+
+## Output
+
+Return findings in this format:
+- `path/to/file:line` — Description
+
+## What NOT to Do
+
+- Don't [boundary 1]
+- Don't [boundary 2]
+```
+
+#### Agent Frontmatter Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | kebab-case, must match filename (without `.md`) |
+| `description` | Yes | Multi-line with use cases |
+| `tools` | Yes | Comma-separated list of allowed Claude Code tools |
+| `source` | No | URL if imported from external source |
+
+### Skill Template
+
+Skills are markdown files at `plugins/<plugin>/skills/<skill-name>/SKILL.md`:
+
+```yaml
+---
+name: my-skill
+description: One-line summary of what this skill does
+disable-model-invocation: true
+allowed-tools: Read, Write
+version: 1.0.0
+---
+
+# Skill Name
+
+You are tasked with [purpose].
+
+## Process
+
+1. Step one
+2. Step two
+```
+
+#### Skill Frontmatter Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | kebab-case, must match directory name |
+| `description` | Yes | One-line summary |
+| `disable-model-invocation` | Conditional | Set `true` for user-invoked-only skills |
+| `user-invocable` | Conditional | Set `false` for CI/background skills |
+| `allowed-tools` | No | Comma-separated list of allowed Claude Code tools |
+| `version` | No | Semantic version |
+
+Do **not** include `model`, `category`, or `tools` (use `allowed-tools` instead).
+
+### Testing
+
+1. Edit files in the appropriate `plugins/<plugin>/` directory
+2. Restart Claude Code to reload
+3. Invoke with `@catalyst-dev:{agent-name}` or `/catalyst-dev:{skill-name}`
+4. Validate with `/catalyst-meta:validate_frontmatter`

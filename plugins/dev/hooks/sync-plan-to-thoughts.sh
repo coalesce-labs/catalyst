@@ -93,8 +93,8 @@ fi
 THOUGHTS_PLANS=""
 if [[ -d "$PROJECT_DIR/thoughts/shared/plans" ]]; then
   THOUGHTS_PLANS="$PROJECT_DIR/thoughts/shared/plans"
-elif [[ -d "thoughts/shared/plans" ]]; then
-  THOUGHTS_PLANS="thoughts/shared/plans"
+elif [[ -d "$PROJECT_DIR/thoughts/plans" ]]; then
+  THOUGHTS_PLANS="$PROJECT_DIR/thoughts/plans"
 fi
 
 # Can't write without a destination

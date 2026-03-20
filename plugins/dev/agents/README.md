@@ -431,8 +431,7 @@ Agents specify required tools in frontmatter:
 
 ## See Also
 
-- `../commands/README.md` - Documentation for commands in this plugin
-- `../../docs/AGENTIC_WORKFLOW_GUIDE.md` - Agent patterns and best practices
-- `../../docs/FRONTMATTER_STANDARD.md` - Frontmatter validation rules
+- `../../docs/frontmatter-standard.md` - Frontmatter validation rules
+- `../../docs/architecture.md` - Architecture and agent patterns
 - `../../README.md` - Workspace overview
 - `../../scripts/README.md` - Setup scripts documentation

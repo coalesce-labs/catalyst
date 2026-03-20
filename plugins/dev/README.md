@@ -145,7 +145,7 @@ curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-c
 ### Agents
 Specialized research agents with focused capabilities (Glob, Grep, Read, Bash).
 
-### Commands
+### Skills
 Workflow orchestrators that spawn agents and manage processes.
 
 ### Hooks
@@ -167,10 +167,10 @@ Runtime utilities bundled with the plugin:
 
 ## Documentation
 
-- [Usage Guide](../../docs/USAGE.md)
-- [Configuration](../../docs/CONFIGURATION.md)
-- [Best Practices](../../docs/BEST_PRACTICES.md)
-- [Agentic Workflows](../../docs/AGENTIC_WORKFLOW_GUIDE.md)
+- [Architecture](../../docs/architecture.md)
+- [Frontmatter Standard](../../docs/frontmatter-standard.md)
+- [Releases](../../docs/releases.md)
+- [Documentation Site](https://catalyst.coalescelabs.ai)
 
 ## License
 
