@@ -1,6 +1,6 @@
 {
   "name": "catalyst-meta",
-  "version": "2.3.0",
+  "version": "3.0.0",
   "description": "Workflow discovery, creation, reorganization, and audit tools: learn from community patterns, extend Catalyst with new workflows, safely reorganize directory structures, and audit plugin health.",
   "author": {
     "name": "Coalesce Labs",

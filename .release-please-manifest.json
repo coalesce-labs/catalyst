@@ -3,5 +3,5 @@
   "plugins/pm": "4.1.0",
   "plugins/analytics": "1.1.0",
   "plugins/debugging": "1.1.0",
-  "plugins/meta": "2.3.0"
+  "plugins/meta": "3.0.0"
 }
