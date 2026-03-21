@@ -23,5 +23,6 @@ paths: ["plugins/**"]
 3. Invoke skill/agent to verify
 
 ## Versioning
-- Never manually edit version.txt, plugin.json versions, or manifest
+- Never manually edit version.txt, marketplace.json versions, or manifest
 - Release Please manages all versions via conventional commits
+- Version lives in marketplace.json only (not plugin.json) per Claude Code docs for relative-path plugins

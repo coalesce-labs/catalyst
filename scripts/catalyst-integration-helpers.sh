@@ -186,65 +186,6 @@ format_sentry_projects() {
 }
 
 #
-# Railway API helpers
-#
-
-discover_railway_token() {
-  local token=""
-
-  # Check environment variable
-  if [[ -n "${RAILWAY_TOKEN:-}" ]]; then
-    echo "env" >&2
-    echo "$RAILWAY_TOKEN"
-    return 0
-  fi
-
-  # Check ~/.railway/config.json
-  if [[ -f ~/.railway/config.json ]]; then
-    token=$(jq -r '.railway_token // empty' ~/.railway/config.json 2>/dev/null || echo "")
-    if [[ -n "$token" ]]; then
-      echo "file" >&2
-      echo "$token"
-      return 0
-    fi
-  fi
-
-  return 1
-}
-
-validate_railway_token() {
-  local token="$1"
-
-  # Railway uses GraphQL
-  local query='{ me { id name email } projects { edges { node { id name } } } }'
-
-  local response
-  response=$(curl -s -X POST \
-    -H "Authorization: Bearer $token" \
-    -H "Content-Type: application/json" \
-    -d "{\"query\":\"$query\"}" \
-    https://backboard.railway.app/graphql/v2 2>&1)
-
-  if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
-    echo '{"valid": false, "error": "Invalid token"}' >&2
-    return 1
-  fi
-
-  local user=$(echo "$response" | jq -r '.data.me')
-
-  if [[ "$user" == "null" ]]; then
-    echo '{"valid": false, "error": "No user data"}' >&2
-    return 1
-  fi
-
-  echo "$response" | jq '{
-    valid: true,
-    user: .data.me,
-    projects: .data.projects.edges
-  }'
-}
-
-#
 # PostHog API helpers
 #
 
@@ -306,14 +247,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     validate-sentry)
       validate_sentry_token "${2:-}"
       ;;
-    discover-railway)
-      discover_railway_token
-      ;;
-    validate-railway)
-      validate_railway_token "${2:-}"
-      ;;
     *)
-      echo "Usage: $0 {discover-linear|validate-linear|discover-sentry|validate-sentry|discover-railway|validate-railway}"
+      echo "Usage: $0 {discover-linear|validate-linear|discover-sentry|validate-sentry}"
       exit 1
       ;;
   esac

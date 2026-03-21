@@ -24,10 +24,6 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
   - `catalyst-debugging`: Sentry MCP integration (~20k tokens when enabled)
   - Supports single-project and multi-project configurations
 
-### Deployment & Infrastructure
-- **Railway** - Deployment logs, service health, environment variables (CLI via `railway`)
-  - `catalyst-dev`: Railway research agent for deployment investigation
-
 ### Product Analytics
 - **PostHog** - User behavior, conversion funnels, feature analytics (MCP)
   - `catalyst-analytics`: PostHog MCP integration (~40k tokens when enabled)
@@ -48,7 +44,7 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
 
 **Why CLI + lightweight MCP?** Most development sessions don't need heavy integrations:
 
-- Start with `catalyst-dev` (~3.5k tokens): Core workflow + Linear + GitHub + Railway
+- Start with `catalyst-dev` (~3.5k tokens): Core workflow + Linear + GitHub
 - Enable `catalyst-analytics` when analyzing user behavior (~+40k tokens)
 - Enable `catalyst-debugging` when investigating production errors (~+20k tokens)
 - Disable when done to free context for code and conversation
@@ -63,7 +59,7 @@ and shared memory systems.
 
 **catalyst-dev** (Core - Always enabled)
 
-- 10 research agents (codebase + infrastructure)
+- 9 research agents (codebase + infrastructure)
 - 21 skills covering full dev lifecycle
 - Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for data collection)
 - Linear integration via Linearis CLI
@@ -120,7 +116,7 @@ This script will guide you through:
 - ✅ Prerequisites check and installation (HumanLayer CLI, jq, etc.)
 - ✅ Thoughts repository setup (one per org, backed up to GitHub)
 - ✅ Project configuration (ticket prefix, project name)
-- ✅ Integration setup (Linear, Sentry, Railway, PostHog, Exa)
+- ✅ Integration setup (Linear, Sentry, PostHog, Exa)
 - ✅ Worktree directory creation
 - ✅ HumanLayer thoughts initialization and syncing
 
@@ -273,7 +269,7 @@ adapted from HumanLayer's approach.
 When possible, uses CLIs instead of MCPs for token efficiency:
 
 - Linear: Linearis CLI (1k tokens) vs Linear MCP (13k tokens) = **13x reduction**
-- Infrastructure research via CLIs (Railway, Sentry, GitHub)
+- Infrastructure research via CLIs (Sentry, GitHub)
 
 ## Key Features
 
@@ -309,7 +305,6 @@ When possible, uses CLIs instead of MCPs for token efficiency:
 
 - `linearis` - Linear integration (`npm install -g linearis`)
 - `gh` - GitHub CLI
-- `railway` - Railway deployments
 - `sentry-cli` - Error monitoring
 - `humanlayer` - Thoughts system ([install](https://github.com/humanlayer/humanlayer))
 
@@ -324,6 +319,55 @@ Run the prerequisite check:
 ```bash
 /check_prerequisites
 ```
+
+## Recurring Workflows with /loop
+
+The built-in `/loop` command runs a skill or prompt on a recurring interval. Use it for
+monitoring and periodic tasks during active development sessions.
+
+### CI Check Monitoring (after pushing a PR)
+
+```
+/loop 2m gh pr checks <PR_NUMBER>
+```
+
+Polls every 2 minutes until checks pass or fail.
+
+### Post-Merge Deployment Monitoring
+
+```
+/loop 3m gh run list --branch main --limit 3 --json workflowName,status,conclusion
+```
+
+Monitors GitHub Actions workflow runs triggered by your merge.
+
+### Daily Context Engineering Dashboard
+
+```
+/loop 1d /catalyst-pm:context_daily
+```
+
+Refreshes the context engineering adoption dashboard once per day. Alternative to the
+GitHub Actions cron — useful in long-running sessions.
+
+### Cycle Health Monitoring
+
+```
+/loop 4h /catalyst-pm:analyze_cycle
+```
+
+Generates a fresh cycle health report every 4 hours during a sprint.
+
+### PR/Linear Sync
+
+```
+/loop 2h /catalyst-pm:sync_prs
+```
+
+Checks for orphaned PRs and out-of-sync Linear issues every 2 hours.
+
+**Note**: `/loop` is session-scoped (max ~3 days). For persistent scheduling, use
+GitHub Actions cron. `/loop` is best for active monitoring during development sessions.
 
 ## Credits
 

@@ -219,7 +219,19 @@ else
 fi
 ```
 
-### 12. Report success
+### 12. Suggest CI Monitoring
+
+After PR creation is complete, suggest the user monitor CI checks:
+
+```
+echo ""
+echo "Tip: Monitor CI checks with:"
+echo "  /loop 2m gh pr checks $pr_number --watch"
+echo ""
+echo "This will check every 2 minutes and report when checks pass or fail."
+```
+
+### 13. Report success
 
 ```
 ✅ Pull request created successfully!
