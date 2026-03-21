@@ -92,10 +92,6 @@ Never committed. One file per project, linked by `projectKey`.
       "project": "acme-web",
       "authToken": "sntrys_..."
     },
-    "railway": {
-      "token": "...",
-      "projectId": "..."
-    },
     "posthog": {
       "apiKey": "phc_...",
       "projectId": "12345"
@@ -113,7 +109,6 @@ Never committed. One file per project, linked by `projectKey`.
 |------------|----------------|---------|
 | Linear | `apiToken`, `teamKey` | catalyst-dev, catalyst-pm |
 | Sentry | `org`, `project`, `authToken` | catalyst-debugging |
-| Railway | `token`, `projectId` | catalyst-dev |
 | PostHog | `apiKey`, `projectId` | catalyst-analytics |
 | Exa | `apiKey` | catalyst-dev (external research) |
 

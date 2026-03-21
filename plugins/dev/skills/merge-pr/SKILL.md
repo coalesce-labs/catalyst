@@ -364,7 +364,31 @@ EOF
 humanlayer thoughts sync
 ```
 
-### 14. Report success summary
+### 14. Detect Deployments and Report Success
+
+After branch cleanup, check if the merge triggered any deployment workflows:
+
+```bash
+# Check for workflow runs triggered by the merge commit on the base branch
+DEPLOY_RUNS=$(gh run list --branch "$base_branch" --limit 5 --json name,status,workflowName,url \
+  --jq '.[] | select(.status == "in_progress" or .status == "queued")' 2>/dev/null)
+
+if [[ -n "$DEPLOY_RUNS" ]]; then
+  echo ""
+  echo "Active workflow runs detected after merge:"
+  gh run list --branch "$base_branch" --limit 5 --json workflowName,status,url \
+    --jq '.[] | select(.status == "in_progress" or .status == "queued") | "  - \(.workflowName): \(.status) (\(.url))"'
+  echo ""
+  echo "Tip: Monitor deployment with:"
+  echo "  /loop 3m gh run list --branch $base_branch --limit 3 --json workflowName,status,conclusion --jq '.[]'"
+  echo ""
+else
+  echo ""
+  echo "No active deployment workflows detected."
+fi
+```
+
+Display the standard success summary after this check:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -386,11 +410,6 @@ Linear:
   Comment: Added with merge details
 
 Post-merge tasks: $task_count saved to thoughts/
-
-Next steps:
-  - Monitor deployment
-  - Check CI/CD pipeline
-  - Verify in production
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
@@ -636,7 +655,7 @@ Base branch updated locally
     ↓
 Post-merge tasks extracted
     ↓
-Monitor deployment
+Deployment detection + /loop suggestion
 ```
 
 ## Remember:

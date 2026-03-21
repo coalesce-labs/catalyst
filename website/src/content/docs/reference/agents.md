@@ -26,7 +26,6 @@ Agents are specialized roles that skills delegate to. Each agent has a focused j
 |-------|---------|-------|-------|
 | `linear-research` | Gather Linear data via CLI | Bash(linearis) | Haiku |
 | `github-research` | Research GitHub PRs and issues | Bash(gh) | Haiku |
-| `railway-research` | Investigate Railway deployments | Bash(railway) | Haiku |
 | `sentry-research` | Research Sentry errors | Bash(sentry-cli) | Haiku |
 
 ## catalyst-pm Agents

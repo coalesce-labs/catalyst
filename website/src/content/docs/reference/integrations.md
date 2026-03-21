@@ -85,10 +85,3 @@ Product analytics via the `catalyst-analytics` plugin.
 
 **Related skills**: `analyze-user-behavior`, `segment-analysis`, `product-metrics`
 
-## Railway
-
-Deployment investigation and service health via the `railway` CLI.
-
-**Setup**: `npm install -g @railway/cli && railway login` + add `token` and `projectId` to secrets config.
-
-**Research agent**: `railway-research` (Haiku) — investigates deployment issues, analyzes logs, checks service configuration.

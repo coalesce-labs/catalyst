@@ -21,7 +21,6 @@ REQUIRED_TOOLS=(
 
 # Optional tools - used by specific agents only (command:name:install-instruction)
 OPTIONAL_TOOLS=(
-	"railway:Railway CLI (for railway-research agent):npm install -g @railway/cli"
 	"sentry-cli:Sentry CLI (for sentry-research agent):curl -sL https://sentry.io/get-cli/ | sh"
 )
 

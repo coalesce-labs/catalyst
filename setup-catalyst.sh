@@ -379,62 +379,6 @@ validate_sentry_token() {
     }'
 }
 
-# Discover Railway token
-discover_railway_token() {
-  local token=""
-
-  # Check environment variable
-  if [[ -n "${RAILWAY_TOKEN:-}" ]]; then
-    echo "env" >&2
-    echo "$RAILWAY_TOKEN"
-    return 0
-  fi
-
-  # Check ~/.railway/config.json
-  if [[ -f ~/.railway/config.json ]]; then
-    token=$(jq -r '.railway_token // empty' ~/.railway/config.json 2>/dev/null || echo "")
-    if [[ -n "$token" ]]; then
-      echo "file" >&2
-      echo "$token"
-      return 0
-    fi
-  fi
-
-  return 1
-}
-
-# Validate Railway token
-validate_railway_token() {
-  local token="$1"
-
-  # Railway uses GraphQL
-  local query='{ me { id name email } projects { edges { node { id name } } } }'
-
-  local response
-  response=$(curl -s -X POST \
-    -H "Authorization: Bearer $token" \
-    -H "Content-Type: application/json" \
-    -d "{\"query\":\"$query\"}" \
-    https://backboard.railway.app/graphql/v2 2>&1)
-
-  if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
-    echo '{"valid": false, "error": "Invalid token"}' >&2
-    return 1
-  fi
-
-  local user=$(echo "$response" | jq -r '.data.me')
-
-  if [[ "$user" == "null" ]]; then
-    echo '{"valid": false, "error": "No user data"}' >&2
-    return 1
-  fi
-
-  echo "$response" | jq '{
-    valid: true,
-    user: .data.me,
-    projects: .data.projects.edges
-  }'
-}
 
 #
 # Prerequisite functions
@@ -1132,9 +1076,6 @@ setup_catalyst_secrets() {
   prompt_sentry_config "$existing_config" > /tmp/catalyst-config-temp.json
   existing_config=$(cat /tmp/catalyst-config-temp.json)
 
-  prompt_railway_config "$existing_config" > /tmp/catalyst-config-temp.json
-  existing_config=$(cat /tmp/catalyst-config-temp.json)
-
   prompt_posthog_config "$existing_config" > /tmp/catalyst-config-temp.json
   existing_config=$(cat /tmp/catalyst-config-temp.json)
 
@@ -1576,56 +1517,6 @@ EOF
   fi
 }
 
-prompt_railway_config() {
-  local config="$1"
-
-  echo "" >&2
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-  echo "Railway Configuration (Deployment)" >&2
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
-  echo "" >&2
-
-  # Check if already configured
-  local has_token
-  has_token=$(echo "$config" | jq -r '.catalyst.railway.token // empty')
-
-  if [ -n "$has_token" ] && [ "$has_token" != "[NEEDS_SETUP]" ]; then
-    echo "✓ Railway already configured" >&2
-    if ! ask_yes_no "Update Railway config?"; then
-      echo "$config"
-      return 0
-    fi
-  fi
-
-  if ! ask_yes_no "Configure Railway integration?"; then
-    echo "Skipping Railway. You can add it later by re-running this script." >&2
-    echo "$config"
-    return 0
-  fi
-
-  echo "" >&2
-  echo "" >&2
-  echo "Railway API Token Setup:" >&2
-  echo "  📚 Documentation: https://docs.railway.com/guides/public-api" >&2
-  echo "" >&2
-  echo "  Steps:" >&2
-  echo "  1. Click your profile icon → Account Settings → Tokens" >&2
-  echo "  2. Click 'Create Token'" >&2
-  echo "  3. Give it a name (e.g., 'Catalyst')" >&2
-  echo "  4. Copy the generated token" >&2
-  echo "" >&2
-
-  read -p "Railway token: " railway_token
-  read -p "Railway project ID: " railway_project
-
-  echo "$config" | jq \
-    --arg token "$railway_token" \
-    --arg projectId "$railway_project" \
-    '.catalyst.railway = {
-      "token": $token,
-      "projectId": $projectId
-    }'
-}
 
 prompt_posthog_config() {
   local config="$1"

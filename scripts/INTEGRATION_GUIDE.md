@@ -240,7 +240,6 @@ The integration is **fully backward compatible**:
 ### Phase 2: More Integrations
 - PostHog token discovery and validation
 - Exa API key validation
-- Railway project selection
 
 ### Phase 3: Git Integration
 - Auto-detect GitHub org from remote
@@ -295,8 +294,6 @@ The setup script automatically discovers and validates existing API tokens:
 
 - **Linear**: Checks `LINEAR_API_TOKEN` env or `~/.linear_api_token`
 - **Sentry**: Checks `SENTRY_AUTH_TOKEN` env or `~/.sentryclirc`
-- **Railway**: Checks `RAILWAY_TOKEN` env or `~/.railway/config.json`
-
 If found, it validates the token and auto-populates organization and team information.
 No more manual copying of org slugs and team keys!
 ```
