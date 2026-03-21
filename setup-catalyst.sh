@@ -379,12 +379,6 @@ validate_sentry_token() {
     }'
 }
 
-  echo "$response" | jq '{
-    valid: true,
-    user: .data.me,
-    projects: .data.projects.edges
-  }'
-}
 
 #
 # Prerequisite functions

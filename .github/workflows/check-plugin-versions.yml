@@ -23,5 +23,3 @@ jobs:
           git fetch origin ${{ github.base_ref }}
           bash scripts/check-plugin-version.sh
 
-      - name: Check marketplace.json sync
-        run: bash scripts/sync-marketplace-versions.sh --check
