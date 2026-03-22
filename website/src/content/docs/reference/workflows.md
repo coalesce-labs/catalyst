@@ -15,32 +15,32 @@ sequenceDiagram
     participant CC as Claude Code
     participant T as Thoughts System
 
-    Dev->>CC: /catalyst-dev:research_codebase
+    Dev->>CC: /research-codebase
     CC->>CC: Spawn agents (locator, analyzer, pattern-finder)
     CC->>T: Save research document
     Note over Dev,CC: Clear context
 
-    Dev->>CC: /catalyst-dev:create_plan
+    Dev->>CC: /create-plan
     CC->>T: Read recent research
     CC->>Dev: Interactive planning
     CC->>T: Save implementation plan
     Note over Dev,CC: Clear context
 
-    Dev->>CC: /catalyst-dev:implement_plan
+    Dev->>CC: /implement-plan
     CC->>T: Read plan
     CC->>CC: Implement phase by phase
     Note over Dev,CC: Clear context
 
-    Dev->>CC: /catalyst-dev:validate_plan
+    Dev->>CC: /validate-plan
     CC->>CC: Run tests, verify criteria
-    Dev->>CC: /catalyst-dev:create_pr
+    Dev->>CC: /create-pr
     CC->>T: Save PR description
 ```
 
 ### 1. Research
 
 ```
-/catalyst-dev:research_codebase
+/research-codebase
 ```
 
 Describe what you want to understand. Catalyst spawns parallel research agents (locator, analyzer, pattern-finder), documents what exists in the codebase, and saves findings to `thoughts/shared/research/`.
@@ -50,19 +50,19 @@ Clear context after research completes. The research document persists — the n
 ### 2. Plan
 
 ```
-/catalyst-dev:create_plan
+/create-plan
 ```
 
 Catalyst auto-discovers your most recent research, reads it, and interactively builds a plan with you — including automated AND manual success criteria. Saved to `thoughts/shared/plans/`.
 
-If revisions are needed: `/catalyst-dev:iterate_plan`.
+If revisions are needed: `/iterate-plan`.
 
 Clear context after the plan is approved.
 
 ### 3. Implement
 
 ```
-/catalyst-dev:implement_plan
+/implement-plan
 ```
 
 Catalyst auto-finds your most recent plan, reads it fully, and implements each phase sequentially with automated verification after each phase. Checkboxes update as work completes.
@@ -70,7 +70,7 @@ Catalyst auto-finds your most recent plan, reads it fully, and implements each p
 ### 4. Validate
 
 ```
-/catalyst-dev:validate_plan
+/validate-plan
 ```
 
 Verifies all success criteria, runs automated test suites, documents deviations, and provides a manual testing checklist.
@@ -78,7 +78,7 @@ Verifies all success criteria, runs automated test suites, documents deviations,
 ### 5. Ship
 
 ```
-/catalyst-dev:create_pr
+/create-pr
 ```
 
 Creates a pull request with a description generated from your research and plan, linked to the relevant ticket.
@@ -90,13 +90,13 @@ Creates a pull request with a description generated from your research and plan,
 The standard flow for a well-scoped ticket:
 
 ```bash
-/catalyst-dev:research_codebase          # Research
+/research-codebase          # Research
 # Clear context
-/catalyst-dev:create_plan                # Plan
+/create-plan                # Plan
 # Clear context
-/catalyst-dev:implement_plan             # Implement
+/implement-plan             # Implement
 # Clear context
-/catalyst-dev:commit && /catalyst-dev:create_pr  # Ship
+/commit && /create-pr  # Ship
 ```
 
 ### Multi-Day Feature
@@ -105,21 +105,21 @@ For larger work that spans sessions:
 
 ```bash
 # Day 1
-/catalyst-dev:research_codebase
-/catalyst-dev:create_handoff
+/research-codebase
+/create-handoff
 # Day 2
-/catalyst-dev:resume_handoff
-/catalyst-dev:create_plan
-/catalyst-dev:create_handoff
+/resume-handoff
+/create-plan
+/create-handoff
 # Day 3
-/catalyst-dev:resume_handoff
-/catalyst-dev:implement_plan             # Phases 1-2
-/catalyst-dev:create_handoff
+/resume-handoff
+/implement-plan             # Phases 1-2
+/create-handoff
 # Day 4
-/catalyst-dev:resume_handoff
-/catalyst-dev:implement_plan             # Phases 3-4
-/catalyst-dev:validate_plan
-/catalyst-dev:commit && /catalyst-dev:create_pr
+/resume-handoff
+/implement-plan             # Phases 3-4
+/validate-plan
+/commit && /create-pr
 ```
 
 ### One-Shot
@@ -127,7 +127,7 @@ For larger work that spans sessions:
 For straightforward tasks, chain the entire workflow:
 
 ```
-/catalyst-dev:oneshot PROJ-123
+/oneshot PROJ-123
 ```
 
 Runs research, planning, and implementation in a single invocation with context isolation between phases.
@@ -139,13 +139,13 @@ Each phase ends with "clear context" — that's intentional. Long sessions are w
 If you need to pause mid-workflow (end of day, context getting long, waiting on something), create a handoff:
 
 ```
-/catalyst-dev:create_handoff
+/create-handoff
 ```
 
 This compresses the current session into a persistent document: what was done, what's left, decisions made, and file references. Resume later with:
 
 ```
-/catalyst-dev:resume_handoff
+/resume-handoff
 ```
 
 Handoffs are cheap (under a minute) and you should use them liberally.
@@ -154,9 +154,9 @@ Handoffs are cheap (under a minute) and you should use them liberally.
 
 You don't need to specify file paths between skills. Catalyst tracks your workflow automatically:
 
-- `research_codebase` saves research → `create_plan` auto-references it
-- `create_plan` saves plan → `implement_plan` auto-finds it
-- `create_handoff` saves handoff → `resume_handoff` auto-finds it
+- `research-codebase` saves research → `create-plan` auto-references it
+- `create-plan` saves plan → `implement-plan` auto-finds it
+- `create-handoff` saves handoff → `resume-handoff` auto-finds it
 
 ## Parallel Development with Worktrees
 
@@ -171,7 +171,7 @@ Git worktrees let you work on multiple features simultaneously, each in its own 
 ### Creating a Worktree
 
 ```
-/catalyst-dev:create_worktree PROJ-123 feature-name
+/create-worktree PROJ-123 feature-name
 ```
 
 This creates a git worktree at `~/wt/{project}/{PROJ-123-feature-name}/` with a new branch, `.claude/` copied over, dependencies installed, and `thoughts/` shared via symlink.
@@ -183,15 +183,15 @@ Run separate Claude Code sessions in different worktrees:
 ```bash
 # Terminal 1 — Feature A
 cd ~/wt/api/PROJ-123-feature-a && claude
-/catalyst-dev:implement_plan
+/implement-plan
 
 # Terminal 2 — Feature B
 cd ~/wt/api/PROJ-456-feature-b && claude
-/catalyst-dev:implement_plan
+/implement-plan
 
 # Terminal 3 — Research (main repo)
 cd ~/projects/api && claude
-/catalyst-dev:research_codebase
+/research-codebase
 ```
 
 All worktrees share the same thoughts directory via symlink. Plans created in one worktree are visible in all others.

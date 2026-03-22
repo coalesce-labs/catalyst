@@ -28,7 +28,7 @@ Catalyst is a plugin system for Claude Code. It chains together four types of bu
 
 <CardGrid>
   <Card title="Skills" icon="rocket">
-    The core unit of Catalyst functionality. Some skills are **user-invocable** — structured workflows you trigger with a slash command (`/catalyst-dev:commit`). Others are **model-invocable** — reference knowledge that Claude activates automatically when it detects relevant context, like seeing a ticket ID. Skills orchestrate multi-step processes, spawn agents, and save artifacts.
+    The core unit of Catalyst functionality. Some skills are **user-invocable** — structured workflows you trigger with a slash command (`/commit`). Others are **model-invocable** — reference knowledge that Claude activates automatically when it detects relevant context, like seeing a ticket ID. Skills orchestrate multi-step processes, spawn agents, and save artifacts.
   </Card>
   <Card title="Agents" icon="magnifier">
     Specialized roles that skills delegate to. A locator agent finds files. An analyzer agent reads implementation details. A pattern-finder agent discovers reusable code. Skills spawn these in parallel to gather information fast — and each agent gets its own context window, so it can focus deeply on one thing.
@@ -49,10 +49,10 @@ The central pattern in Catalyst is the **RPI workflow** — research, plan, impl
 
 ```mermaid
 graph LR
-    R["/research_codebase"] --> P["/create_plan"]
-    P --> I["/implement_plan"]
-    I --> V["/validate_plan"]
-    V --> S["/create_pr"]
+    R["/research-codebase"] --> P["/create-plan"]
+    P --> I["/implement-plan"]
+    I --> V["/validate-plan"]
+    V --> S["/create-pr"]
 
     style R fill:#2563eb,color:#fff,stroke:none
     style P fill:#7c3aed,color:#fff,stroke:none
@@ -61,19 +61,19 @@ graph LR
     style S fill:#dc2626,color:#fff,stroke:none
 ```
 
-**Research** — `/research_codebase` spawns parallel agents (locator, analyzer, pattern-finder) that fan out across the codebase and report back. External tools like DeepWiki and Context7 pull in library docs and open-source patterns. The output is a research document saved to persistent storage.
+**Research** — `/research-codebase` spawns parallel agents (locator, analyzer, pattern-finder) that fan out across the codebase and report back. External tools like DeepWiki and Context7 pull in library docs and open-source patterns. The output is a research document saved to persistent storage.
 
-**Plan** — `/create_plan` reads the research, then works with you interactively to build an implementation plan. Phases, success criteria, file-level specifics. The plan is a contract — both you and the AI agree on what gets built before any code is written.
+**Plan** — `/create-plan` reads the research, then works with you interactively to build an implementation plan. Phases, success criteria, file-level specifics. The plan is a contract — both you and the AI agree on what gets built before any code is written.
 
-**Implement** — `/implement_plan` reads the full plan and executes it phase by phase. Each phase has automated verification. Checkboxes update as work completes. Subagents handle individual tasks — not just for parallelism, but so each agent gets a focused job and can use its full context window on that one thing.
+**Implement** — `/implement-plan` reads the full plan and executes it phase by phase. Each phase has automated verification. Checkboxes update as work completes. Subagents handle individual tasks — not just for parallelism, but so each agent gets a focused job and can use its full context window on that one thing.
 
-**Validate** — `/validate_plan` verifies the implementation against the plan's success criteria. Tests pass. Behavior matches. Deviations are documented.
+**Validate** — `/validate-plan` verifies the implementation against the plan's success criteria. Tests pass. Behavior matches. Deviations are documented.
 
-**Ship** — `/create_pr` generates a PR description from the work, links to the Linear ticket, and pushes. `/merge_pr` handles the merge with verification.
+**Ship** — `/create-pr` generates a PR description from the work, links to the Linear ticket, and pushes. `/merge-pr` handles the merge with verification.
 
 ### Clean Handoffs Between Phases
 
-Each phase clears context and starts fresh — that's by design. Long-running sessions are where AI loses the thread. Instead, Catalyst uses **handoff checkpoints** (`/create_handoff` and `/resume_handoff`) to compress what the AI knows into a persistent document before moving on. The next phase picks up exactly where the last one left off, with clean context and no drift.
+Each phase clears context and starts fresh — that's by design. Long-running sessions are where AI loses the thread. Instead, Catalyst uses **handoff checkpoints** (`/create-handoff` and `/resume-handoff`) to compress what the AI knows into a persistent document before moving on. The next phase picks up exactly where the last one left off, with clean context and no drift.
 
 This happens automatically between workflow phases, but you can also create handoffs manually — mid-implementation when context is getting long, at the end of a session, or when passing work to a teammate. Every handoff is a snapshot: what was done, what's left, and what decisions were made.
 
@@ -83,19 +83,19 @@ The workflow runs on a few key pieces of infrastructure:
 
 - **Thoughts system** — Think of it like a shared S3 bucket for everything the AI has done: research, plans, handoffs, PR descriptions. It's git-backed, shared across worktrees and sessions, and it's how any agent — in any session — can come back and understand what happened before.
 - **Worktrees** — Catalyst is designed around git worktrees so you can have multiple features in flight at once. Each worktree gets its own workspace, its own branch, and its own local state — but they all share the same thoughts repo.
-- **Workflow context** — Local state that tracks what you've done in this worktree. It's what lets `/create_plan` automatically find your latest research and `/implement_plan` find your latest plan — no file paths to remember.
+- **Workflow context** — Local state that tracks what you've done in this worktree. It's what lets `/create-plan` automatically find your latest research and `/implement-plan` find your latest plan — no file paths to remember.
 - **Subagents** — Commands spawn specialized agents, each with a focused job and a full context window dedicated to it. A locator agent searches the whole codebase for relevant files. An analyzer agent reads those files deeply. They work in parallel, but the real benefit is focus — each agent reasons about one thing well instead of juggling everything at once.
 - **Third-party integrations** — Linear for tickets, GitHub for PRs, DeepWiki and Context7 for external documentation, Sentry for error investigation.
 
 ## What This Looks Like in Practice
 
-You start a session. You run `/research_codebase` and describe what you need to understand. Three agents fan out across the codebase, find relevant files, analyze patterns, and report back. A research document lands in your thoughts repo. Context is clean.
+You start a session. You run `/research-codebase` and describe what you need to understand. Three agents fan out across the codebase, find relevant files, analyze patterns, and report back. A research document lands in your thoughts repo. Context is clean.
 
-You run `/create_plan`. Catalyst picks up the research automatically, and you work together to design the implementation. Phases, files, success criteria. When you're satisfied, the plan saves. If the session is getting long, `/create_handoff` compresses everything into a checkpoint — you can resume later or hand it to a fresh session.
+You run `/create-plan`. Catalyst picks up the research automatically, and you work together to design the implementation. Phases, files, success criteria. When you're satisfied, the plan saves. If the session is getting long, `/create-handoff` compresses everything into a checkpoint — you can resume later or hand it to a fresh session.
 
-You run `/implement_plan`. Catalyst reads the full plan and starts building — phase by phase, with verification at each step. When it's done, you run `/validate_plan` to confirm everything matches the spec.
+You run `/implement-plan`. Catalyst reads the full plan and starts building — phase by phase, with verification at each step. When it's done, you run `/validate-plan` to confirm everything matches the spec.
 
-You run `/create_pr`. A PR with a structured description, linked to your Linear ticket, ready for review.
+You run `/create-pr`. A PR with a structured description, linked to your Linear ticket, ready for review.
 
 Research to shipped PR. Each step is structured, each handoff is clean, and humans approve at every gate.
 
