@@ -128,6 +128,41 @@ else
   fail "marketplace.json not found at .claude-plugin/marketplace.json"
 fi
 
+# --- Check 7: marketplace.json must NOT have version fields (DRY — version lives in plugin.json) ---
+# plugin.json silently overrides marketplace.json. Having both causes confusion and drift.
+MARKETPLACE_VERSIONS=$(jq -r '.plugins[] | select(.version) | .name' "$MARKETPLACE" 2>/dev/null || true)
+
+if [[ -n "$MARKETPLACE_VERSIONS" ]]; then
+  fail "marketplace.json has version fields (version must only be in plugin.json)"
+  echo "$MARKETPLACE_VERSIONS" | sed 's/^/    /'
+  echo "  Fix: Remove version from marketplace.json entries. plugin.json is the source of truth."
+else
+  pass "marketplace.json has no version fields (correct — plugin.json is source of truth)"
+fi
+
+# --- Check 8: Every plugin.json has a version field ---
+MISSING_VERSIONS=()
+for pkg in $(jq -r '.packages | keys[]' "$CONFIG"); do
+  PLUGIN_JSON="$REPO_ROOT/$pkg/.claude-plugin/plugin.json"
+  if [[ -f "$PLUGIN_JSON" ]]; then
+    version=$(jq -r '.version // empty' "$PLUGIN_JSON")
+    if [[ -z "$version" ]]; then
+      MISSING_VERSIONS+=("$pkg/.claude-plugin/plugin.json")
+    fi
+  else
+    MISSING_VERSIONS+=("$pkg/.claude-plugin/plugin.json (file missing)")
+  fi
+done
+
+if [[ ${#MISSING_VERSIONS[@]} -gt 0 ]]; then
+  fail "plugin.json files missing version field"
+  for msg in "${MISSING_VERSIONS[@]}"; do
+    echo "    $msg"
+  done
+else
+  pass "All plugin.json files have version fields"
+fi
+
 # --- Summary ---
 echo ""
 if [[ $ERRORS -gt 0 ]]; then

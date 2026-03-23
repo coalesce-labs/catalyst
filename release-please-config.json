@@ -8,35 +8,70 @@
       "component": "catalyst-dev",
       "package-name": "catalyst-dev",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     },
     "plugins/pm": {
       "release-type": "simple",
       "component": "catalyst-pm",
       "package-name": "catalyst-pm",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     },
     "plugins/analytics": {
       "release-type": "simple",
       "component": "catalyst-analytics",
       "package-name": "catalyst-analytics",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     },
     "plugins/debugging": {
       "release-type": "simple",
       "component": "catalyst-debugging",
       "package-name": "catalyst-debugging",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     },
     "plugins/meta": {
       "release-type": "simple",
       "component": "catalyst-meta",
       "package-name": "catalyst-meta",
       "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": true
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     }
   }
 }

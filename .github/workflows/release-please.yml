@@ -12,45 +12,8 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    outputs:
-      releases_created: ${{ steps.release.outputs.releases_created }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-
-  sync-marketplace:
-    needs: release-please
-    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - name: Sync marketplace.json versions
-        run: bash scripts/sync-marketplace-versions.sh
-
-      - name: Create and auto-merge PR for marketplace.json update
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if git diff --quiet; then
-            echo "No marketplace.json changes needed"
-            exit 0
-          fi
-          BRANCH="chore/sync-marketplace-versions"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          git add .claude-plugin/marketplace.json
-          git commit -m "chore(meta): sync marketplace.json versions"
-          git push -f origin "$BRANCH"
-          EXISTING_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
-          if [[ -z "$EXISTING_PR" ]]; then
-            PR_URL=$(gh pr create --title "chore(meta): sync marketplace.json versions" \
-              --body "Auto-syncs plugin versions from release-please manifest to marketplace.json. This PR is auto-merged to ensure other workspaces receive updated plugins promptly." \
-              --base main --head "$BRANCH")
-            gh pr merge "$PR_URL" --auto --squash
-          fi

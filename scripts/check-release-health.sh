@@ -5,7 +5,7 @@
 # Checks:
 #   1. Last release-please workflow run succeeded
 #   2. No releasable commits are sitting on main without an open release PR
-#   3. marketplace.json versions match .release-please-manifest.json
+#   3. plugin.json versions match .release-please-manifest.json
 
 set -euo pipefail
 
@@ -103,52 +103,39 @@ else
   pass "No stranded releasable commits (all packages have release PRs or are up to date)"
 fi
 
-# --- Check 3: marketplace.json versions match manifest ---
-# marketplace.json is what Claude Code reads for plugin distribution.
+# --- Check 3: plugin.json versions match manifest ---
+# plugin.json is the source of truth for Claude Code plugin distribution.
 # If it drifts from the manifest, other workspaces get stale plugins.
 
 MANIFEST="$REPO_ROOT/.release-please-manifest.json"
-MARKETPLACE="$REPO_ROOT/.claude-plugin/marketplace.json"
 
-if [[ -f "$MANIFEST" ]] && [[ -f "$MARKETPLACE" ]]; then
-  # Map: package path -> marketplace plugin index
-  declare -A PLUGIN_INDEX=(
-    ["plugins/dev"]=0
-    ["plugins/pm"]=1
-    ["plugins/analytics"]=2
-    ["plugins/debugging"]=3
-    ["plugins/meta"]=4
-  )
-
+if [[ -f "$MANIFEST" ]]; then
   DRIFTED=()
-  for pkg in "${!PLUGIN_INDEX[@]}"; do
-    idx=${PLUGIN_INDEX[$pkg]}
+  for pkg in $(jq -r '.packages | keys[]' "$CONFIG"); do
+    PLUGIN_JSON="$REPO_ROOT/$pkg/.claude-plugin/plugin.json"
     manifest_ver=$(jq -r --arg pkg "$pkg" '.[$pkg] // empty' "$MANIFEST")
-    marketplace_ver=$(jq -r --argjson idx "$idx" '.plugins[$idx].version // empty' "$MARKETPLACE")
-    plugin_name=$(jq -r --argjson idx "$idx" '.plugins[$idx].name // empty' "$MARKETPLACE")
 
-    if [[ -n "$manifest_ver" ]] && [[ -n "$marketplace_ver" ]] && [[ "$manifest_ver" != "$marketplace_ver" ]]; then
-      DRIFTED+=("$plugin_name: marketplace=$marketplace_ver manifest=$manifest_ver")
+    if [[ -f "$PLUGIN_JSON" ]]; then
+      plugin_ver=$(jq -r '.version // empty' "$PLUGIN_JSON")
+      plugin_name=$(jq -r '.name // empty' "$PLUGIN_JSON")
+
+      if [[ -n "$manifest_ver" ]] && [[ -n "$plugin_ver" ]] && [[ "$manifest_ver" != "$plugin_ver" ]]; then
+        DRIFTED+=("$plugin_name: plugin.json=$plugin_ver manifest=$manifest_ver")
+      fi
     fi
   done
 
   if [[ ${#DRIFTED[@]} -gt 0 ]]; then
-    fail "marketplace.json versions don't match manifest (other workspaces are getting stale plugins!)"
+    fail "plugin.json versions don't match manifest (other workspaces are getting stale plugins!)"
     for msg in "${DRIFTED[@]}"; do
       echo "  - $msg"
     done
-    # Check if there's already an open sync PR
-    SYNC_PR=$(gh pr list --head "chore/sync-marketplace-versions" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
-    if [[ -n "$SYNC_PR" ]]; then
-      echo "  Open sync PR: #$SYNC_PR (merge it to fix)"
-    else
-      echo "  No sync PR open — the sync-marketplace workflow job may not have run."
-    fi
+    echo "  release-please extra-files should keep these in sync. Check if the release PR updated plugin.json."
   else
-    pass "marketplace.json versions match manifest"
+    pass "plugin.json versions match manifest"
   fi
 else
-  fail "Missing manifest or marketplace.json"
+  fail "Missing .release-please-manifest.json"
 fi
 
 # --- Summary ---

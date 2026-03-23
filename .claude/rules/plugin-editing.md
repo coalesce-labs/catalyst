@@ -23,6 +23,8 @@ paths: ["plugins/**"]
 3. Invoke skill/agent to verify
 
 ## Versioning
-- Never manually edit version.txt, marketplace.json versions, or manifest
+- Never manually edit version.txt, plugin.json version, or manifest
 - Release Please manages all versions via conventional commits
-- Version lives in marketplace.json only (not plugin.json) per Claude Code docs for relative-path plugins
+- Version lives in plugin.json only (each plugin's `.claude-plugin/plugin.json`)
+- marketplace.json is a discovery manifest only — it must NOT have version fields
+- release-please updates both version.txt and plugin.json via extra-files
