@@ -12,7 +12,7 @@ paths: ["website/**"]
 
 ## Terminology
 - Always use "skills" — never "commands" when referring to Catalyst functionality
-- User-invocable skills: triggered by user with `/plugin:skill_name`
+- User-invocable skills: triggered by user with `/skill-name` (plugin shown in description for disambiguation)
 - Model-invocable skills: activated automatically by Claude when relevant context detected
 - CI skills: non-interactive variants for automation pipelines
 

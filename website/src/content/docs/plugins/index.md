@@ -50,7 +50,7 @@ Most sessions start with just `catalyst-dev` (~3.5K tokens) and enable heavier p
 Each plugin contains:
 
 - **agents/** — Specialized research agents
-- **skills/** — Workflow skills (invoked via `/plugin:skill_name`)
+- **skills/** — Workflow skills (invoked via `/skill-name`)
 - **scripts/** — Runtime utilities
 - **hooks/** — Automatic triggers (e.g., workflow context tracking)
 - **plugin.json** — Manifest with metadata and dependencies

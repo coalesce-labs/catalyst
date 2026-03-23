@@ -86,7 +86,7 @@ thoughts/
 ```bash
 cd ~/code-repos/my-project
 humanlayer thoughts init --profile coalesce-labs
-/catalyst-dev:create_plan  # Works as normal
+/create-plan  # Works as normal
 ```
 
 ### Starting Work on a Client Project
@@ -94,7 +94,7 @@ humanlayer thoughts init --profile coalesce-labs
 ```bash
 cd ~/code-repos/github/acme/project
 humanlayer thoughts init --profile acme
-/catalyst-dev:create_plan  # Uses client-specific context
+/create-plan  # Uses client-specific context
 ```
 
 ## Backup Strategy

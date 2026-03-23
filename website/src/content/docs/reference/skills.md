@@ -1,5 +1,5 @@
 ---
-title: Skills Reference
+title: Skills
 description: Complete reference for all skills across Catalyst plugins — user-invocable and model-invocable.
 sidebar:
   order: 0
@@ -11,7 +11,7 @@ Skills are reusable capabilities delivered as markdown files that teach Claude C
 
 There are two types of skills, distinguished by **who activates them**:
 
-**User-invocable skills** are structured workflows you trigger with a slash command (`/catalyst-dev:commit`). They orchestrate multi-step processes — spawning agents, reading context, interacting with you, and saving artifacts.
+**User-invocable skills** are structured workflows you trigger with a slash command. They orchestrate multi-step processes — spawning agents, reading context, interacting with you, and saving artifacts.
 
 **Model-invocable skills** are reference knowledge that Claude activates automatically when it detects relevant context. For example, when Claude sees a ticket ID like `ACME-123`, the `linearis` skill activates and teaches Claude how to use the Linearis CLI — without you having to explain it. These skills shape Claude's behavior the way a README or style guide would, but they load on demand instead of consuming context all the time.
 
@@ -21,7 +21,19 @@ A third category, **CI skills**, are non-interactive variants designed for autom
 
 For more on how Claude Code skills work under the hood, see [Anthropic's skills documentation](https://docs.anthropic.com/en/docs/claude-code/skills).
 
-**Legend**: User column: checkmark = invoke with `/plugin:skill` | Model column: checkmark = Claude activates automatically | `CI` = non-interactive, for automation pipelines
+## Invoking Skills
+
+Type `/` followed by the skill name:
+
+```
+/research-codebase
+/commit
+/create-plan
+```
+
+Claude Code has excellent auto-complete — start typing `/res` and it will suggest `/research-codebase`. You don't need to include the plugin name; Claude Code resolves skills across all installed plugins automatically.
+
+**Legend**: User column: checkmark = invoke with `/skill-name` | Model column: checkmark = Claude activates automatically | `CI` = non-interactive, for automation pipelines
 
 ## catalyst-dev
 

@@ -63,7 +63,7 @@ cat plugins/dev/templates/CLAUDE_SNIPPET.md >> .claude/CLAUDE.md
 Start a Claude Code session and run:
 
 ```
-/catalyst-dev:research_codebase
+/research-codebase
 ```
 
 Follow the prompts to research your codebase. Catalyst will spawn parallel agents, document what exists, and save findings to `thoughts/shared/research/`.

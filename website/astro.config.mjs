@@ -1,9 +1,26 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import sitemap from "@astrojs/sitemap";
 import starlightLlmsTxt from "starlight-llms-txt";
-import starlightChangelogs from "starlight-changelogs";
+import starlightChangelogs, {
+  makeChangelogsSidebarLinks,
+} from "starlight-changelogs";
 import mermaid from "astro-mermaid";
+
+function getLatestVersion(changelogPath) {
+  const content = readFileSync(new URL(changelogPath, import.meta.url), "utf8");
+  const match = content.match(/^## \[(\d+\.\d+\.\d+)]/m);
+  return match ? match[1] : null;
+}
+
+const plugins = [
+  { name: "catalyst-dev", changelog: "../plugins/dev/CHANGELOG.md" },
+  { name: "catalyst-pm", changelog: "../plugins/pm/CHANGELOG.md" },
+  { name: "catalyst-meta", changelog: "../plugins/meta/CHANGELOG.md" },
+  { name: "catalyst-analytics", changelog: "../plugins/analytics/CHANGELOG.md" },
+  { name: "catalyst-debugging", changelog: "../plugins/debugging/CHANGELOG.md" },
+];
 
 export default defineConfig({
   site: "https://catalyst.coalescelabs.ai",
@@ -37,6 +54,19 @@ export default defineConfig({
         {
           label: "Plugins",
           autogenerate: { directory: "plugins" },
+        },
+        {
+          label: "Changelogs",
+          items: makeChangelogsSidebarLinks(
+            plugins.map(({ name, changelog }) => {
+              const version = getLatestVersion(changelog);
+              return {
+                type: "all",
+                base: `changelog/${name}`,
+                label: version ? `${name} v${version}` : name,
+              };
+            }),
+          ),
         },
       ],
       head: [
