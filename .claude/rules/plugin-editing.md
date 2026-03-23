@@ -28,3 +28,5 @@ paths: ["plugins/**"]
 - Version lives in plugin.json only (each plugin's `.claude-plugin/plugin.json`)
 - marketplace.json is a discovery manifest only — it must NOT have version fields
 - release-please updates both version.txt and plugin.json via extra-files
+- All plugins share a single combined release PR (avoids manifest conflicts)
+- Release PRs auto-merge via `--squash --auto` in the workflow
