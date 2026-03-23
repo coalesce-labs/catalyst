@@ -42,58 +42,33 @@ export default defineConfig({
         },
         {
           label: "Changelogs",
-          items: [
+          items: makeChangelogsSidebarLinks([
             {
+              type: "all",
+              base: "changelog/catalyst-dev",
               label: "catalyst-dev",
-              items: makeChangelogsSidebarLinks([
-                {
-                  type: "all",
-                  base: "changelog/catalyst-dev",
-                  label: "All Versions",
-                },
-              ]),
             },
             {
+              type: "all",
+              base: "changelog/catalyst-pm",
               label: "catalyst-pm",
-              items: makeChangelogsSidebarLinks([
-                {
-                  type: "all",
-                  base: "changelog/catalyst-pm",
-                  label: "All Versions",
-                },
-              ]),
             },
             {
+              type: "all",
+              base: "changelog/catalyst-meta",
               label: "catalyst-meta",
-              items: makeChangelogsSidebarLinks([
-                {
-                  type: "all",
-                  base: "changelog/catalyst-meta",
-                  label: "All Versions",
-                },
-              ]),
             },
             {
+              type: "all",
+              base: "changelog/catalyst-analytics",
               label: "catalyst-analytics",
-              items: makeChangelogsSidebarLinks([
-                {
-                  type: "all",
-                  base: "changelog/catalyst-analytics",
-                  label: "All Versions",
-                },
-              ]),
             },
             {
+              type: "all",
+              base: "changelog/catalyst-debugging",
               label: "catalyst-debugging",
-              items: makeChangelogsSidebarLinks([
-                {
-                  type: "all",
-                  base: "changelog/catalyst-debugging",
-                  label: "All Versions",
-                },
-              ]),
             },
-          ],
+          ]),
         },
       ],
       head: [
