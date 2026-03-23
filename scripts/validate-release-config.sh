@@ -102,6 +102,32 @@ else
   pass "All extra-files targets exist"
 fi
 
+# --- Check 6: Every config package has a corresponding marketplace.json entry ---
+MARKETPLACE="$REPO_ROOT/.claude-plugin/marketplace.json"
+
+if [[ -f "$MARKETPLACE" ]]; then
+  MARKETPLACE_NAMES=$(jq -r '.plugins[].name' "$MARKETPLACE" | sort)
+  MISSING_MARKETPLACE=()
+
+  for pkg in $(jq -r '.packages | keys[]' "$CONFIG"); do
+    component=$(jq -r --arg pkg "$pkg" '.packages[$pkg].component // empty' "$CONFIG")
+    if [[ -n "$component" ]] && ! echo "$MARKETPLACE_NAMES" | grep -qx "$component"; then
+      MISSING_MARKETPLACE+=("$component (from $pkg)")
+    fi
+  done
+
+  if [[ ${#MISSING_MARKETPLACE[@]} -gt 0 ]]; then
+    fail "Config packages missing from marketplace.json"
+    for msg in "${MISSING_MARKETPLACE[@]}"; do
+      echo "    $msg"
+    done
+  else
+    pass "All config packages have marketplace.json entries"
+  fi
+else
+  fail "marketplace.json not found at .claude-plugin/marketplace.json"
+fi
+
 # --- Summary ---
 echo ""
 if [[ $ERRORS -gt 0 ]]; then

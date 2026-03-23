@@ -32,7 +32,7 @@ jobs:
       - name: Sync marketplace.json versions
         run: bash scripts/sync-marketplace-versions.sh
 
-      - name: Create PR for marketplace.json update
+      - name: Create and auto-merge PR for marketplace.json update
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -49,7 +49,8 @@ jobs:
           git push -f origin "$BRANCH"
           EXISTING_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
           if [[ -z "$EXISTING_PR" ]]; then
-            gh pr create --title "chore(meta): sync marketplace.json versions" \
-              --body "Auto-syncs plugin versions from release-please manifest to marketplace.json." \
-              --base main --head "$BRANCH"
+            PR_URL=$(gh pr create --title "chore(meta): sync marketplace.json versions" \
+              --body "Auto-syncs plugin versions from release-please manifest to marketplace.json. This PR is auto-merged to ensure other workspaces receive updated plugins promptly." \
+              --base main --head "$BRANCH")
+            gh pr merge "$PR_URL" --auto --squash
           fi

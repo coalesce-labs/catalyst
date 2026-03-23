@@ -5,6 +5,7 @@
 # Checks:
 #   1. Last release-please workflow run succeeded
 #   2. No releasable commits are sitting on main without an open release PR
+#   3. marketplace.json versions match .release-please-manifest.json
 
 set -euo pipefail
 
@@ -100,6 +101,54 @@ if [[ ${#STRANDED[@]} -gt 0 ]]; then
   echo "  This usually means the release-please workflow is failing."
 else
   pass "No stranded releasable commits (all packages have release PRs or are up to date)"
+fi
+
+# --- Check 3: marketplace.json versions match manifest ---
+# marketplace.json is what Claude Code reads for plugin distribution.
+# If it drifts from the manifest, other workspaces get stale plugins.
+
+MANIFEST="$REPO_ROOT/.release-please-manifest.json"
+MARKETPLACE="$REPO_ROOT/.claude-plugin/marketplace.json"
+
+if [[ -f "$MANIFEST" ]] && [[ -f "$MARKETPLACE" ]]; then
+  # Map: package path -> marketplace plugin index
+  declare -A PLUGIN_INDEX=(
+    ["plugins/dev"]=0
+    ["plugins/pm"]=1
+    ["plugins/analytics"]=2
+    ["plugins/debugging"]=3
+    ["plugins/meta"]=4
+  )
+
+  DRIFTED=()
+  for pkg in "${!PLUGIN_INDEX[@]}"; do
+    idx=${PLUGIN_INDEX[$pkg]}
+    manifest_ver=$(jq -r --arg pkg "$pkg" '.[$pkg] // empty' "$MANIFEST")
+    marketplace_ver=$(jq -r --argjson idx "$idx" '.plugins[$idx].version // empty' "$MARKETPLACE")
+    plugin_name=$(jq -r --argjson idx "$idx" '.plugins[$idx].name // empty' "$MARKETPLACE")
+
+    if [[ -n "$manifest_ver" ]] && [[ -n "$marketplace_ver" ]] && [[ "$manifest_ver" != "$marketplace_ver" ]]; then
+      DRIFTED+=("$plugin_name: marketplace=$marketplace_ver manifest=$manifest_ver")
+    fi
+  done
+
+  if [[ ${#DRIFTED[@]} -gt 0 ]]; then
+    fail "marketplace.json versions don't match manifest (other workspaces are getting stale plugins!)"
+    for msg in "${DRIFTED[@]}"; do
+      echo "  - $msg"
+    done
+    # Check if there's already an open sync PR
+    SYNC_PR=$(gh pr list --head "chore/sync-marketplace-versions" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)
+    if [[ -n "$SYNC_PR" ]]; then
+      echo "  Open sync PR: #$SYNC_PR (merge it to fix)"
+    else
+      echo "  No sync PR open — the sync-marketplace workflow job may not have run."
+    fi
+  else
+    pass "marketplace.json versions match manifest"
+  fi
+else
+  fail "Missing manifest or marketplace.json"
 fi
 
 # --- Summary ---
