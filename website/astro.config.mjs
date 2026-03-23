@@ -2,7 +2,9 @@ import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import sitemap from "@astrojs/sitemap";
 import starlightLlmsTxt from "starlight-llms-txt";
-import starlightChangelogs from "starlight-changelogs";
+import starlightChangelogs, {
+  makeChangelogsSidebarLinks,
+} from "starlight-changelogs";
 import mermaid from "astro-mermaid";
 
 export default defineConfig({
@@ -37,6 +39,61 @@ export default defineConfig({
         {
           label: "Plugins",
           autogenerate: { directory: "plugins" },
+        },
+        {
+          label: "Changelogs",
+          items: [
+            {
+              label: "catalyst-dev",
+              items: makeChangelogsSidebarLinks([
+                {
+                  type: "all",
+                  base: "changelog/catalyst-dev",
+                  label: "All Versions",
+                },
+              ]),
+            },
+            {
+              label: "catalyst-pm",
+              items: makeChangelogsSidebarLinks([
+                {
+                  type: "all",
+                  base: "changelog/catalyst-pm",
+                  label: "All Versions",
+                },
+              ]),
+            },
+            {
+              label: "catalyst-meta",
+              items: makeChangelogsSidebarLinks([
+                {
+                  type: "all",
+                  base: "changelog/catalyst-meta",
+                  label: "All Versions",
+                },
+              ]),
+            },
+            {
+              label: "catalyst-analytics",
+              items: makeChangelogsSidebarLinks([
+                {
+                  type: "all",
+                  base: "changelog/catalyst-analytics",
+                  label: "All Versions",
+                },
+              ]),
+            },
+            {
+              label: "catalyst-debugging",
+              items: makeChangelogsSidebarLinks([
+                {
+                  type: "all",
+                  base: "changelog/catalyst-debugging",
+                  label: "All Versions",
+                },
+              ]),
+            },
+          ],
         },
       ],
       head: [
