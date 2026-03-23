@@ -1,0 +1,18 @@
+name: Validate Release Config
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'release-please-config.json'
+      - '.release-please-manifest.json'
+      - '.github/workflows/release-please.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release-please config
+        run: bash scripts/validate-release-config.sh
