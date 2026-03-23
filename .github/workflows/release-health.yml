@@ -1,0 +1,55 @@
+name: Release Health Check
+
+on:
+  schedule:
+    - cron: '0 14 * * 1-5'  # Weekdays at 10am ET
+  workflow_dispatch:         # Manual trigger
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check release health
+        id: health
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+        run: bash scripts/check-release-health.sh 2>&1 | tee /tmp/health-output.txt
+
+      - name: Create issue on failure
+        if: steps.health.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh issue list --label "release-health" --state open --json number --jq '.[0].number // empty')
+          if [[ -n "$EXISTING" ]]; then
+            echo "Open issue #$EXISTING already exists, skipping"
+            exit 0
+          fi
+          gh issue create \
+            --title "Release pipeline unhealthy" \
+            --label "release-health" \
+            --body "$(cat <<EOF
+          The scheduled release health check failed.
+
+          \`\`\`
+          $(cat /tmp/health-output.txt)
+          \`\`\`
+
+          **Next steps:**
+          1. Check the [latest release-please run](../../actions/workflows/release-please.yml)
+          2. Fix the root cause
+          3. Re-run the release-please workflow
+          4. Close this issue once healthy
+
+          _Created by release-health workflow_
+          EOF
+          )"
