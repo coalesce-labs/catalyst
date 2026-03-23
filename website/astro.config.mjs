@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import sitemap from "@astrojs/sitemap";
@@ -6,6 +7,20 @@ import starlightChangelogs, {
   makeChangelogsSidebarLinks,
 } from "starlight-changelogs";
 import mermaid from "astro-mermaid";
+
+function getLatestVersion(changelogPath) {
+  const content = readFileSync(new URL(changelogPath, import.meta.url), "utf8");
+  const match = content.match(/^## \[(\d+\.\d+\.\d+)]/m);
+  return match ? match[1] : null;
+}
+
+const plugins = [
+  { name: "catalyst-dev", changelog: "../plugins/dev/CHANGELOG.md" },
+  { name: "catalyst-pm", changelog: "../plugins/pm/CHANGELOG.md" },
+  { name: "catalyst-meta", changelog: "../plugins/meta/CHANGELOG.md" },
+  { name: "catalyst-analytics", changelog: "../plugins/analytics/CHANGELOG.md" },
+  { name: "catalyst-debugging", changelog: "../plugins/debugging/CHANGELOG.md" },
+];
 
 export default defineConfig({
   site: "https://catalyst.coalescelabs.ai",
@@ -42,33 +57,16 @@ export default defineConfig({
         },
         {
           label: "Changelogs",
-          items: makeChangelogsSidebarLinks([
-            {
-              type: "all",
-              base: "changelog/catalyst-dev",
-              label: "catalyst-dev",
-            },
-            {
-              type: "all",
-              base: "changelog/catalyst-pm",
-              label: "catalyst-pm",
-            },
-            {
-              type: "all",
-              base: "changelog/catalyst-meta",
-              label: "catalyst-meta",
-            },
-            {
-              type: "all",
-              base: "changelog/catalyst-analytics",
-              label: "catalyst-analytics",
-            },
-            {
-              type: "all",
-              base: "changelog/catalyst-debugging",
-              label: "catalyst-debugging",
-            },
-          ]),
+          items: makeChangelogsSidebarLinks(
+            plugins.map(({ name, changelog }) => {
+              const version = getLatestVersion(changelog);
+              return {
+                type: "all",
+                base: `changelog/${name}`,
+                label: version ? `${name} v${version}` : name,
+              };
+            }),
+          ),
         },
       ],
       head: [
