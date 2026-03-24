@@ -22,6 +22,12 @@ And the prompt loop breaks down fast:
 
 Catalyst solves this by giving Claude Code structure.
 
+## Background
+
+Catalyst is developed by [Ryan Rozich](https://ryanrozich.bio/). The methodology behind it — inverting time allocation to roughly 80% research and planning, 20% execution — is described in detail in [Beyond Prompt and Pray: A Field Guide to Structured AI Engineering](https://slides.rozich.net/ai/structured-ai-development-guide). That guide captures the daily workflow that the **catalyst-dev** plugin implements: defining tasks clearly before agents engage, fanning out sub-agents for parallel research, compacting findings into focused documents, planning interactively with human approval gates, and executing against an agreed spec with continuous validation.
+
+If you want to understand *why* Catalyst works the way it does — why each phase clears context, why research comes before planning, why sub-agents get their own context windows — that guide is the place to start.
+
 ## Four Building Blocks
 
 Catalyst is a plugin system for Claude Code. It chains together four types of building blocks into repeatable development workflows — so the AI works reliably and predictably, and code actually ships.
