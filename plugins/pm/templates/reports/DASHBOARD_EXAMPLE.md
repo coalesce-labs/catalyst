@@ -211,22 +211,22 @@ Target:     ██░░░░░░░░░░░░░░ 2.0 days
 
 ```bash
 # Generate today's daily report
-/pm:report-daily
+/report-daily
 
 # Generate weekly summary
-/pm:executive-summary
+/executive-summary
 
 # Check current cycle health
-/pm:analyze-cycle
+/analyze-cycle
 
 # Generate roadmap review
-/pm:roadmap-review
+/roadmap-review
 
 # Groom backlog
-/pm:groom-backlog
+/groom-backlog
 
 # Sync PRs with Linear
-/pm:sync-prs
+/sync-prs
 ```
 
 ---
@@ -248,7 +248,7 @@ This dashboard is **automatically updated** by GitHub Actions workflows:
 - **Cycle** (9 AM UTC, Fridays) - Cycle review and burndown
 - **Monthly** (9 AM UTC, 1st of month) - Roadmap health
 
-**Manual updates**: You can also run `/pm:*` commands manually in your thoughts repository.
+**Manual updates**: You can also run `/pm` commands manually in your thoughts repository.
 
 **Configuration**: See `.catalyst/config.yml` in this repository.
 

@@ -68,7 +68,7 @@ during this session.
    **Example:**
 
    ```
-   feat(commands): add conventional commit support to /catalyst-dev:commit
+   feat(commands): add conventional commit support to /commit
 
    Updates the commit command to automatically detect commit type
    and scope from changed files, following conventional commits spec.

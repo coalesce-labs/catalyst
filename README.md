@@ -344,7 +344,7 @@ Monitors GitHub Actions workflow runs triggered by your merge.
 ### Daily Context Engineering Dashboard
 
 ```
-/loop 1d /catalyst-pm:context_daily
+/loop 1d /context-daily
 ```
 
 Refreshes the context engineering adoption dashboard once per day. Alternative to the
@@ -353,7 +353,7 @@ GitHub Actions cron — useful in long-running sessions.
 ### Cycle Health Monitoring
 
 ```
-/loop 4h /catalyst-pm:analyze_cycle
+/loop 4h /analyze-cycle
 ```
 
 Generates a fresh cycle health report every 4 hours during a sprint.
@@ -361,7 +361,7 @@ Generates a fresh cycle health report every 4 hours during a sprint.
 ### PR/Linear Sync
 
 ```
-/loop 2h /catalyst-pm:sync_prs
+/loop 2h /sync-prs
 ```
 
 Checks for orphaned PRs and out-of-sync Linear issues every 2 hours.

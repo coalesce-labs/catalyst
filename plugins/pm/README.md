@@ -44,20 +44,20 @@ The Catalyst PM plugin provides AI-powered project management workflows that int
 ## Commands
 
 ### Cycle Management
-- `/pm:analyze-cycle` - Analyze cycle health with actionable insights
+- `/analyze-cycle` - Analyze cycle health with actionable insights
   - Health assessment (🟢/🟡/🔴)
   - Risk identification (blockers, at-risk issues)
   - Team capacity analysis
   - Specific recommendations
 
 ### Milestone Management
-- `/pm:analyze-milestone` - Analyze milestone health toward target date
+- `/analyze-milestone` - Analyze milestone health toward target date
   - Target date feasibility assessment
   - Progress tracking (actual vs expected)
   - Risk identification (behind schedule, blockers)
   - Specific recommendations (adjust timeline, reduce scope)
 
-### `/pm:analyze-cycle`
+### `/analyze-cycle`
 Generate comprehensive cycle health report with recommendations.
 
 **What it does**:
@@ -83,13 +83,13 @@ Priority Actions:
 ```
 
 ### Daily Operations
-- `/pm:report-daily` - Quick daily standup report
+- `/report-daily` - Quick daily standup report
   - Yesterday's deliveries
   - Current work in progress
   - Team members needing assignments
   - Quick blockers/risks
 
-### `/pm:report-daily`
+### `/report-daily`
 Quick daily standup report (scannable in <30 seconds).
 
 **What it does**:
@@ -111,14 +111,14 @@ Quick daily standup report (scannable in <30 seconds).
 ```
 
 ### Backlog Health
-- `/pm:groom-backlog` - Analyze backlog health
+- `/groom-backlog` - Analyze backlog health
   - Orphaned issues (no project)
   - Misplaced issues (wrong project)
   - Stale issues (>30 days inactive)
   - Potential duplicates
   - Missing estimates
 
-### `/pm:groom-backlog`
+### `/groom-backlog`
 Analyze backlog health and generate cleanup recommendations.
 
 **What it does**:
@@ -136,13 +136,13 @@ Analyze backlog health and generate cleanup recommendations.
 4. Skip (report saved for later)
 
 ### GitHub-Linear Sync
-- `/pm:sync-prs` - Correlate GitHub PRs with Linear issues
+- `/sync-prs` - Correlate GitHub PRs with Linear issues
   - Orphaned PRs (no Linear issue)
   - Orphaned issues (no PR)
   - Ready to close (PR merged, issue open)
   - Stale PRs (>14 days)
 
-### `/pm:sync-prs`
+### `/sync-prs`
 Correlate GitHub PRs with Linear issues and identify gaps.
 
 **What it does**:
@@ -165,13 +165,13 @@ Health Score: 75/100
 ```
 
 ### Context Engineering
-- `/pm:context-daily` - Generate daily context engineering adoption dashboard
+- `/context-daily` - Generate daily context engineering adoption dashboard
   - Cross-repo analysis (code vs thoughts activity)
   - Identify developers NOT using context engineering
   - Individual adoption scores
   - 28-day trend analysis
 
-### `/pm:context-daily`
+### `/context-daily`
 Track context engineering adoption by cross-referencing code and thoughts repository activity.
 
 **What it does**:
@@ -368,7 +368,7 @@ cd /path/to/your/project
 
 **Morning Standup**:
 ```bash
-/pm:team-daily
+/context-daily
 ```
 - See what shipped yesterday
 - Review current work
@@ -379,7 +379,7 @@ cd /path/to/your/project
 
 **Start of Week**:
 ```bash
-/pm:cycle-status
+/analyze-cycle
 ```
 - Assess cycle health
 - Review capacity
@@ -388,7 +388,7 @@ cd /path/to/your/project
 
 **Mid-Week**:
 ```bash
-/pm:pr-sync
+/sync-prs
 ```
 - Check GitHub-Linear correlation
 - Close merged issues
@@ -396,7 +396,7 @@ cd /path/to/your/project
 
 **End of Week**:
 ```bash
-/pm:backlog-groom
+/groom-backlog
 ```
 - Clean up orphaned issues
 - Categorize new issues

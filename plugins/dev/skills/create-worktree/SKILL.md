@@ -101,5 +101,5 @@ export GITHUB_SOURCE_ROOT="$HOME/code-repos/github"
 ## Example Interaction
 
 ```
-User: /catalyst-dev:create_worktree PROJ-123
+User: /create-worktree PROJ-123
 ```

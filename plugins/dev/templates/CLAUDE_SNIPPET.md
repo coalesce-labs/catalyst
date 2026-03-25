@@ -6,40 +6,40 @@ This project uses [Catalyst](https://github.com/coalesce-labs/catalyst) for AI-a
 
 **Research → Plan → Implement → Validate:**
 ```
-/catalyst-dev:research_codebase    # Research codebase with parallel agents
-/catalyst-dev:create_plan          # Create implementation plan (interactive)
-/catalyst-dev:iterate_plan         # Update plan based on feedback
-/catalyst-dev:implement_plan       # Execute plan (use --team for complex multi-domain work)
-/catalyst-dev:validate_plan        # Verify implementation matches plan
+/research-codebase    # Research codebase with parallel agents
+/create-plan          # Create implementation plan (interactive)
+/iterate-plan         # Update plan based on feedback
+/implement-plan       # Execute plan (use --team for complex multi-domain work)
+/validate-plan        # Verify implementation matches plan
 ```
 
 **Oneshot (end-to-end with context isolation):**
 ```
-/catalyst-dev:oneshot TICKET-123   # Full pipeline: research → plan → implement
-/catalyst-dev:oneshot "question"   # Freeform research → plan → implement
+/oneshot TICKET-123   # Full pipeline: research → plan → implement
+/oneshot "question"   # Freeform research → plan → implement
 ```
 
 **Git & PR Lifecycle:**
 ```
-/catalyst-dev:commit               # Conventional commit with auto-detected type/scope
-/catalyst-dev:create_pr            # Create PR with Linear integration
-/catalyst-dev:describe_pr          # Generate/update PR description
-/catalyst-dev:merge_pr             # Merge with verification
+/commit               # Conventional commit with auto-detected type/scope
+/create-pr            # Create PR with Linear integration
+/describe-pr          # Generate/update PR description
+/merge-pr             # Merge with verification
 ```
 
 **CI Commands (non-interactive, for automation):**
 ```
-/catalyst-dev:ci_commit            # Autonomous commit (no prompts)
-/catalyst-dev:ci_describe_pr       # Autonomous PR description
+/ci-commit            # Autonomous commit (no prompts)
+/ci-describe-pr       # Autonomous PR description
 ```
 
 ### Agent Teams
 
 For complex implementations spanning multiple domains (frontend + backend + tests),
-use the `--team` flag with implement_plan:
+use the `--team` flag with implement-plan:
 
 ```
-/catalyst-dev:implement_plan --team thoughts/shared/plans/my-plan.md
+/implement-plan --team thoughts/shared/plans/my-plan.md
 ```
 
 **When to use `--team`:**

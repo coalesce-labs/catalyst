@@ -40,7 +40,7 @@ git status --porcelain
 If there are uncommitted changes:
 
 - Offer to commit: "You have uncommitted changes. Create commits now? [Y/n]"
-- If yes: internally call `/catalyst-dev:commit` workflow
+- If yes: internally call `/commit` workflow
 - If no: proceed (user may want to commit manually later)
 
 ### 2. Verify not on main/master branch
@@ -84,7 +84,7 @@ If behind:
 - Auto-rebase: `git rebase origin/$base`
 - If conflicts:
   - Show conflicting files
-  - Error: "Rebase conflicts detected. Resolve conflicts and run /catalyst-dev:create_pr again."
+  - Error: "Rebase conflicts detected. Resolve conflicts and run /create-pr again."
   - Exit
 
 ### 5. Check for existing PR
@@ -98,7 +98,7 @@ If PR exists:
 - Show: "PR #{number} already exists: {title}\n{url}"
 - Ask: "What would you like to do?\n [D] Describe/update this PR\n [S] Skip (do nothing)\n [A]
   Abort"
-- If D: call `/catalyst-dev:describe_pr` and exit
+- If D: call `/describe-pr` and exit
 - If S: exit with success message
 - If A: exit
 - **This is the ONLY interactive prompt in the happy path**
@@ -187,9 +187,9 @@ After creating the PR, track it — substitute the actual PR URL and ticket:
 "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add prs "https://github.com/org/repo/pull/NUMBER" "TICKET-ID"
 ```
 
-### 10. Auto-call /catalyst-dev:describe_pr
+### 10. Auto-call /describe-pr
 
-Immediately call `/catalyst-dev:describe_pr` with the PR number to:
+Immediately call `/describe-pr` with the PR number to:
 
 - Generate comprehensive description
 - Run verification checks
@@ -268,7 +268,7 @@ Conflicting files:
 Resolve conflicts and run:
   git add <resolved-files>
   git rebase --continue
-  /catalyst-dev:create_pr
+  /create-pr
 ```
 
 **GitHub CLI not configured:**
@@ -334,7 +334,7 @@ Extracting ticket: ENG-123
 Generated title: "ENG-123: Implement pr lifecycle"
 Creating PR...
 ✅ PR #2 created
-Calling /catalyst-dev:describe_pr to generate description...
+Calling /describe-pr to generate description...
 Updating Linear ticket ENG-123 → In Review
 ✅ Complete!
 ```
@@ -346,16 +346,16 @@ No ticket found in branch name
 Generated title: "Feature add validation"
 Creating PR...
 ✅ PR #3 created
-Calling /catalyst-dev:describe_pr...
+Calling /describe-pr...
 ⚠️  No Linear ticket to update
 ✅ Complete!
 ```
 
 ## Integration with Other Commands
 
-- **Calls `/catalyst-dev:commit`** - if uncommitted changes (optional)
-- **Calls `/catalyst-dev:describe_pr`** - always, to generate comprehensive description
-- **Sets up for `/catalyst-dev:merge_pr`** - PR is now ready for review and eventual merge
+- **Calls `/commit`** - if uncommitted changes (optional)
+- **Calls `/describe-pr`** - always, to generate comprehensive description
+- **Sets up for `/merge-pr`** - PR is now ready for review and eventual merge
 
 ## Remember:
 

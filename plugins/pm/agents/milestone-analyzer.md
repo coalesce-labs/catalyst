@@ -34,7 +34,7 @@ Structured markdown with these sections:
 - Issue Distribution (by status, assignee, priority)
 - Specific Recommendations (priority-ordered with owners)
 
-**Returns to**: `/pm:analyze-milestone` command formats output into user-facing health report
+**Returns to**: `/analyze-milestone` command formats output into user-facing health report
 
 ## Health Scoring Algorithm
 

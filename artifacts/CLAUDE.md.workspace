@@ -9,42 +9,39 @@ This project uses the ryan-claude-workspace for AI-assisted development workflow
 
 ## Available Commands
 
-### Workflow Commands (project:workflow)
+### Workflow Commands
 
-- `/workflow:research_codebase [TICKET]` - Research codebase patterns with parallel agents
-- `/workflow:create_plan [TICKET]` - Create implementation plan based on research
-- `/workflow:implement_plan [plan-file]` - Execute plan phases (auto-finds from context)
-- `/workflow:validate_plan [plan-file]` - Validate implementation against plan
+- `/research-codebase [TICKET]` - Research codebase patterns with parallel agents
+- `/create-plan [TICKET]` - Create implementation plan based on research
+- `/implement-plan [plan-file]` - Execute plan phases (auto-finds from context)
+- `/validate-plan [plan-file]` - Validate implementation against plan
 
-### Linear Integration (project:linear)
+### Linear Integration
 
 - `/linear` - Linear ticket management (create, list, update, search)
-- `/linear:create_pr` - Create PR with auto-rebase and Linear integration
-- `/linear:merge_pr` - Safely merge PR with verification and cleanup
-- `/linear:setup_linear` - Configure Linear workflow statuses
+- `/create-pr` - Create PR with auto-rebase and Linear integration
+- `/merge-pr` - Safely merge PR with verification and cleanup
 
-### Development Commands (project:dev)
+### Development Commands
 
-- `/dev:commit` - Create conventional commits with auto-detection
-- `/dev:describe_pr [PR]` - Update PR description incrementally
+- `/commit` - Create conventional commits with auto-detection
+- `/describe-pr [PR]` - Update PR description incrementally
 
-### Handoff Commands (project:handoff)
+### Handoff Commands
 
-- `/handoff:create_handoff` - Save current state for next session
-- `/handoff:resume_handoff [file]` - Resume from handoff (auto-finds recent)
+- `/create-handoff` - Save current state for next session
+- `/resume-handoff [file]` - Resume from handoff (auto-finds recent)
 
-### Project Management (project:project)
+### Project Management
 
-- `/project:create_worktree TICKET branch-name` - Create git worktree for parallel work
-- `/project:update_project [path]` - Update project with workspace changes
+- `/create-worktree TICKET branch-name` - Create git worktree for parallel work
 
-### Meta Commands (project:meta)
+### Meta Commands
 
-- `/meta:discover_workflows` - Discover workflows from external repos
-- `/meta:import_workflow` - Import workflow from external repo
-- `/meta:create_workflow` - Create new workflow using templates
-- `/meta:validate_frontmatter` - Validate command/agent frontmatter
-- `/meta:workflow_help` - Interactive workflow guidance
+- `/discover-workflows` - Discover workflows from external repos
+- `/import-workflow` - Import workflow from external repo
+- `/create-workflow` - Create new workflow using templates
+- `/validate-frontmatter` - Validate command/agent frontmatter
 
 ## Linear Integration Behavior
 
@@ -54,11 +51,11 @@ This workspace **automatically manages Linear tickets** throughout your workflow
 
 | Command | stateMap Key | Default State | Assignment |
 |---------|-------------|---------------|------------|
-| `/workflow:research_codebase TICKET-123` | `research` | "In Progress" | Assigns to you |
-| `/workflow:create_plan TICKET-123` | `planning` | "In Progress" | (already assigned) |
-| `/workflow:implement_plan` | `inProgress` | "In Progress" | (already assigned) |
-| `/linear:create_pr` | `inReview` | "In Review" | (already assigned) |
-| `/linear:merge_pr` | `done` | "Done" | (already assigned) |
+| `/research-codebase TICKET-123` | `research` | "In Progress" | Assigns to you |
+| `/create-plan TICKET-123` | `planning` | "In Progress" | (already assigned) |
+| `/implement-plan` | `inProgress` | "In Progress" | (already assigned) |
+| `/create-pr` | `inReview` | "In Review" | (already assigned) |
+| `/merge-pr` | `done` | "Done" | (already assigned) |
 
 State names are configurable via `linear.stateMap` in `.claude/config.json`.
 
@@ -85,9 +82,9 @@ Claude Code has 200K token limit. This workspace **monitors context usage** and 
 
 **Use handoffs between phases**:
 ```bash
-/handoff:create_handoff    # Save state
+/create-handoff    # Save state
 # Clear context, start fresh
-/handoff:resume_handoff    # Auto-finds recent handoff
+/resume-handoff    # Auto-finds recent handoff
 ```
 
 ## Configuration

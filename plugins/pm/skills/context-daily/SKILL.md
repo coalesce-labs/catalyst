@@ -281,7 +281,7 @@ Show the user:
 ## Example Interaction Flow
 
 ```
-User: /catalyst-pm:context-daily
+User: /context-daily
 Assistant: [Runs prerequisites check]
 
 [Creates task list with TodoWrite]
