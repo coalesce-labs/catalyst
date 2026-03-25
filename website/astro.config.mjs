@@ -77,52 +77,56 @@ export default defineConfig({
         },
       ],
       head: [
-        {
-          tag: "script",
-          content: `
-            !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug getPageviewId".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
-            posthog.init('${PUBLIC_POSTHOG_KEY}', {
-              api_host: 'https://us.i.posthog.com',
-              person_profiles: 'identified_only',
-              persistence: 'memory',
-            });
-          `,
-        },
-        {
-          tag: "script",
-          content: `
-            document.addEventListener('DOMContentLoaded', function() {
-              // Code copy button tracking (Expressive Code)
-              document.addEventListener('click', function(e) {
-                var btn = e.target.closest('.expressive-code .copy button, .expressive-code button.copy');
-                if (btn && window.posthog) {
-                  window.posthog.capture('docs_code_copied', {
-                    page: window.location.pathname,
+        ...(PUBLIC_POSTHOG_KEY
+          ? [
+              {
+                tag: "script",
+                content: `
+                  !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug getPageviewId".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+                  posthog.init('${PUBLIC_POSTHOG_KEY}', {
+                    api_host: 'https://us.i.posthog.com',
+                    person_profiles: 'identified_only',
+                    persistence: 'memory',
                   });
-                }
-              });
-
-              // Search query tracking (Starlight Pagefind, debounced)
-              var searchTimeout;
-              document.addEventListener('input', function(e) {
-                if (!e.target.matches('[data-pagefind-ui] input, .pagefind-ui__search-input')) return;
-                clearTimeout(searchTimeout);
-                searchTimeout = setTimeout(function() {
-                  var query = e.target.value.trim();
-                  if (query.length >= 3 && window.posthog) {
-                    window.posthog.capture('docs_search', {
-                      query: query,
-                      page: window.location.pathname,
+                `,
+              },
+              {
+                tag: "script",
+                content: `
+                  document.addEventListener('DOMContentLoaded', function() {
+                    // Code copy button tracking (Expressive Code)
+                    document.addEventListener('click', function(e) {
+                      var btn = e.target.closest('.expressive-code .copy button, .expressive-code button.copy');
+                      if (btn && window.posthog) {
+                        window.posthog.capture('docs_code_copied', {
+                          page: window.location.pathname,
+                        });
+                      }
                     });
-                  }
-                }, 1000);
-              });
 
-              // "Was this helpful?" — configure as a PostHog survey in the dashboard
-              // (zero-code, auto-rendered by the PostHog snippet)
-            });
-          `,
-        },
+                    // Search query tracking (Starlight Pagefind, debounced)
+                    var searchTimeout;
+                    document.addEventListener('input', function(e) {
+                      if (!e.target.matches('[data-pagefind-ui] input, .pagefind-ui__search-input')) return;
+                      clearTimeout(searchTimeout);
+                      searchTimeout = setTimeout(function() {
+                        var query = e.target.value.trim();
+                        if (query.length >= 3 && window.posthog) {
+                          window.posthog.capture('docs_search', {
+                            query: query,
+                            page: window.location.pathname,
+                          });
+                        }
+                      }, 1000);
+                    });
+
+                    // "Was this helpful?" — configure as a PostHog survey in the dashboard
+                    // (zero-code, auto-rendered by the PostHog snippet)
+                  });
+                `,
+              },
+            ]
+          : []),
         {
           tag: "link",
           attrs: {
