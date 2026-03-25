@@ -28,4 +28,4 @@ Canonical workspace section for project CLAUDE.md files.
 2. Test locally: `./hack/update-project.sh .`
 3. Verify only workspace section changes
 4. Commit and push
-5. Projects get update on next `/project:update_project`
+5. Projects get update on next run

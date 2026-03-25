@@ -135,7 +135,7 @@ Resolve manually:
   2. git add <resolved-files>
   3. git rebase --continue
   4. git push --force-with-lease
-  5. Run /catalyst-dev:merge_pr again
+  5. Run /merge-pr again
 ```
 
 Exit with error.
@@ -167,7 +167,7 @@ Fix failing tests before merge:
   $test_cmd
 
 Or skip tests (not recommended):
-  /catalyst-dev:merge_pr $pr_number --skip-tests
+  /merge-pr $pr_number --skip-tests
 ```
 
 Exit with error (unless `--skip-tests` flag provided).
@@ -437,25 +437,25 @@ Post-merge tasks: $task_count saved to thoughts/
 **`--skip-tests`** - Skip local test execution
 
 ```bash
-/catalyst-dev:merge_pr 123 --skip-tests
+/merge-pr 123 --skip-tests
 ```
 
 **`--no-update`** - Don't update Linear ticket
 
 ```bash
-/catalyst-dev:merge_pr 123 --no-update
+/merge-pr 123 --no-update
 ```
 
 **`--keep-branch`** - Don't delete local branch
 
 ```bash
-/catalyst-dev:merge_pr 123 --keep-branch
+/merge-pr 123 --keep-branch
 ```
 
 **Combined:**
 
 ```bash
-/catalyst-dev:merge_pr 123 --skip-tests --no-update
+/merge-pr 123 --skip-tests --no-update
 ```
 
 ## Error Handling
@@ -477,7 +477,7 @@ Resolve manually:
   git add <files>
   git rebase --continue
   git push --force-with-lease
-  /catalyst-dev:merge_pr $pr_number
+  /merge-pr $pr_number
 ```
 
 **Tests failing:**
@@ -490,7 +490,7 @@ Failed tests:
   - auth.test.ts:12 - Timeout exceeded
 
 Fix tests or skip (not recommended):
-  /catalyst-dev:merge_pr $pr_number --skip-tests
+  /merge-pr $pr_number --skip-tests
 ```
 
 **CI checks failing:**
@@ -584,7 +584,7 @@ State names are read from `stateMap` with sensible defaults. See `.claude/config
 **Happy path (all checks pass):**
 
 ```bash
-/catalyst-dev:merge_pr 123
+/merge-pr 123
 
 Running tests: make test
 ✅ All tests passed
@@ -603,7 +603,7 @@ Proceed? Y
 **With failing CI (user override):**
 
 ```bash
-/catalyst-dev:merge_pr 124
+/merge-pr 124
 
 ⚠️  Some CI checks failing
 Continue anyway? y
@@ -614,7 +614,7 @@ Continue anyway? y
 **Skip tests:**
 
 ```bash
-/catalyst-dev:merge_pr 125 --skip-tests
+/merge-pr 125 --skip-tests
 
 ⚠️  Skipping tests (not recommended)
 ✅ Merged!
@@ -623,7 +623,7 @@ Continue anyway? y
 **Linearis not installed:**
 
 ```bash
-/catalyst-dev:merge_pr 126
+/merge-pr 126
 
 ✅ PR merged successfully!
 ⚠️  Linearis CLI not found - Linear ticket not updated

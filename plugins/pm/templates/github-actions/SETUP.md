@@ -254,11 +254,11 @@ Add a notification step to alert on failures:
     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
 ```
 
-## Integration with /catalyst-pm:context-daily
+## Integration with /context-daily
 
-The GitHub Actions workflow is a **simplified version** of the full `/catalyst-pm:context-daily` command:
+The GitHub Actions workflow is a **simplified version** of the full `/context-daily` command:
 
-| Feature | GitHub Actions | /catalyst-pm:context-daily |
+| Feature | GitHub Actions | /context-daily |
 |---------|---------------|----------------------------|
 | **Cross-repo analysis** | ✅ Yes | ✅ Yes |
 | **Identifies non-adopters** | ✅ Yes | ✅ Yes |
@@ -270,7 +270,7 @@ The GitHub Actions workflow is a **simplified version** of the full `/catalyst-p
 
 **Recommendation**: Use both!
 - **GitHub Actions**: Automated daily monitoring
-- **/catalyst-pm:context-daily**: Deep-dive analysis when needed
+- **/context-daily**: Deep-dive analysis when needed
 
 ## Example Output
 
@@ -325,7 +325,7 @@ After setting up the GitHub Actions workflow:
 
 - **Documentation**: See `plugins/pm/templates/README.md`
 - **Issues**: Report bugs at https://github.com/coalesce-labs/catalyst/issues
-- **Command help**: Run `/catalyst-pm:workflow-help` in Claude Code
+- **Command help**: Run `/workflow-help` in Claude Code
 
 ---
 

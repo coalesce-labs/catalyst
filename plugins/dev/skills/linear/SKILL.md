@@ -126,11 +126,11 @@ Started category).
 
 These commands automatically update ticket status using `stateMap` config:
 
-- `/catalyst-dev:research_codebase` → Moves ticket to `stateMap.research` (default: "In Progress")
-- `/catalyst-dev:create_plan` → Moves ticket to `stateMap.planning` (default: "In Progress")
-- `/catalyst-dev:implement_plan` → Moves to `stateMap.inProgress` (default: "In Progress")
-- `/catalyst-dev:create_pr` → Moves to `stateMap.inReview` (default: "In Review")
-- `/catalyst-dev:merge_pr` → Moves to `stateMap.done` (default: "Done")
+- `/research-codebase` → Moves ticket to `stateMap.research` (default: "In Progress")
+- `/create-plan` → Moves ticket to `stateMap.planning` (default: "In Progress")
+- `/implement-plan` → Moves to `stateMap.inProgress` (default: "In Progress")
+- `/create-pr` → Moves to `stateMap.inReview` (default: "In Review")
+- `/merge-pr` → Moves to `stateMap.done` (default: "Done")
 
 ---
 
@@ -319,11 +319,11 @@ When moving tickets to a new status:
 
 3. **Automatic status updates:** When certain commands are run, automatically update ticket status
    (state names read from `stateMap` config):
-   - `/catalyst-dev:research_codebase` with ticket → Move to `stateMap.research`
-   - `/catalyst-dev:create_plan` with ticket → Move to `stateMap.planning`
-   - `/catalyst-dev:implement_plan` with ticket → Move to `stateMap.inProgress`
-   - `/catalyst-dev:create_pr` with ticket → Move to `stateMap.inReview`
-   - `/catalyst-dev:merge_pr` with ticket → Move to `stateMap.done`
+   - `/research-codebase` with ticket → Move to `stateMap.research`
+   - `/create-plan` with ticket → Move to `stateMap.planning`
+   - `/implement-plan` with ticket → Move to `stateMap.inProgress`
+   - `/create-pr` with ticket → Move to `stateMap.inReview`
+   - `/merge-pr` with ticket → Move to `stateMap.done`
 
 4. **Manual status updates:**
 
@@ -381,22 +381,22 @@ When user wants to find tickets:
 
 When these commands are run, check if there's a related Linear ticket and update it:
 
-**During `/catalyst-dev:create_plan`:**
+**During `/create-plan`:**
 
 1. If ticket mentioned, move to `stateMap.planning` (default: "In Progress")
 2. When plan complete, add comment with plan link
 
-**During `/catalyst-dev:implement_plan`:**
+**During `/implement-plan`:**
 
 1. If ticket in plan metadata, move to `stateMap.inProgress` (default: "In Progress")
 2. Add comment: "Started implementation from plan: [link]"
 
-**During `/catalyst-dev:create_pr`:**
+**During `/create-pr`:**
 
 1. If ticket mentioned in PR or plan, move to `stateMap.inReview` (default: "In Review")
 2. Add comment with PR link
 
-**During `/catalyst-dev:merge_pr`:**
+**During `/merge-pr`:**
 
 1. Move ticket to `stateMap.done` (default: "Done")
 2. Add comment with merge details
@@ -409,28 +409,28 @@ When these commands are run, check if there's a related Linear ticket and update
 
 ```bash
 # 1. Research and document
-/catalyst-dev:research_codebase "authentication patterns"
+/research-codebase "authentication patterns"
 # Saves to thoughts/shared/research/auth-patterns.md
 
 # 2. Create ticket from research
-/catalyst-dev:linear create thoughts/shared/research/auth-patterns.md
+/linear create thoughts/shared/research/auth-patterns.md
 # Creates ticket in Backlog
 
 # 3. Create plan
-/catalyst-dev:create_plan
+/create-plan
 # Reads research, creates plan
 # Ticket moves to stateMap.planning (default: "In Progress")
 
 # 4. Implement
-/catalyst-dev:implement_plan thoughts/shared/plans/2025-01-08-auth-feature.md
+/implement-plan thoughts/shared/plans/2025-01-08-auth-feature.md
 # Ticket moves to stateMap.inProgress (default: "In Progress")
 
 # 5. Create PR
-/catalyst-dev:create_pr
+/create-pr
 # Ticket moves to stateMap.inReview (default: "In Review")
 
 # 6. Merge PR
-/catalyst-dev:merge_pr
+/merge-pr
 # Ticket moves to stateMap.done (default: "Done")
 ```
 
@@ -460,5 +460,5 @@ For Linearis CLI syntax, see the `linearis` skill reference.
 - **Automation**: Workflow commands auto-update tickets using state names from `stateMap`
 - **CLI required**: Linearis CLI must be installed and configured with LINEAR_API_TOKEN
 
-This command integrates seamlessly with the create_plan → implement_plan → validate_plan workflow
+This command integrates seamlessly with the create-plan → implement-plan → validate-plan workflow
 while keeping Linear tickets in sync!

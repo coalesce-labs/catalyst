@@ -33,7 +33,7 @@ Structured markdown with these sections:
 - Capacity Analysis (over/under/available)
 - Specific Recommendations (priority-ordered with owners)
 
-**Returns to**: `/pm:cycle-status` command formats output into user-facing health report
+**Returns to**: `/analyze-cycle` command formats output into user-facing health report
 
 ## Health Scoring Algorithm
 

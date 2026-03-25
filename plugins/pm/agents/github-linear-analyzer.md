@@ -37,7 +37,7 @@ Structured markdown with:
 - Stale PRs requiring attention
 - Actionable commands for sync operations
 
-**Returns to**: `/pm:pr-sync` command formats output into correlation report
+**Returns to**: `/sync-prs` command formats output into correlation report
 
 ## Correlation Methods
 
