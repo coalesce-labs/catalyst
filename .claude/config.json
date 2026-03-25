@@ -2,10 +2,10 @@
   "catalyst": {
     "projectKey": "catalyst-workspace",
     "project": {
-      "ticketPrefix": "PROJ"
+      "ticketPrefix": "CTL"
     },
     "linear": {
-      "teamKey": "PROJ",
+      "teamKey": "CTL",
       "stateMap": {
         "backlog": "Backlog",
         "todo": "Todo",
