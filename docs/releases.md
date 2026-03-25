@@ -52,6 +52,15 @@ Tags follow `<component>-v<version>` format:
 3. The release PR updates CHANGELOG.md and version files
 4. Merging the release PR creates a git tag and GitHub Release
 
+## How Commit Routing Works
+
+Release-please routes commits to plugins by **file paths changed**, not by commit message scope:
+
+- A commit touching `plugins/dev/` and `plugins/pm/` bumps **both** plugins, regardless of scope
+- The `(scope)` in `fix(dev):` controls **changelog section headers**, not routing
+- Squash merges work correctly — GitHub API provides the full file list
+- Use the scope matching the primary plugin; cross-plugin changes still bump all affected plugins
+
 ## Important
 
 - Never manually edit `version.txt`, `marketplace.json` versions, or the manifest
