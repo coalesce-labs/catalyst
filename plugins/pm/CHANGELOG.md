@@ -1,5 +1,18 @@
 # Changelog
 
+## [5.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.0.0...catalyst-pm-v5.1.0) (2026-03-25)
+
+
+### Features
+
+* **dev:** remove Railway integration, add /loop workflow monitoring ([#30](https://github.com/coalesce-labs/catalyst/issues/30)) ([d7df8f2](https://github.com/coalesce-labs/catalyst/commit/d7df8f261ae05abd528d54d695df340b83147d30))
+
+
+### Bug Fixes
+
+* **dev:** fix release-please pipeline + add health monitoring ([#32](https://github.com/coalesce-labs/catalyst/issues/32)) ([cd7054c](https://github.com/coalesce-labs/catalyst/commit/cd7054c591afad61d307a11456855ad397257de3))
+* **dev:** upgrade linearis CLI and fix skill command syntax ([#41](https://github.com/coalesce-labs/catalyst/issues/41)) ([ffbc14c](https://github.com/coalesce-labs/catalyst/commit/ffbc14c487537bf70805880b39905643e0c56df5))
+
 ## [5.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v4.1.0...catalyst-pm-v5.0.0) (2026-03-20)
 
 
