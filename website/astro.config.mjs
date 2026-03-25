@@ -86,7 +86,7 @@ export default defineConfig({
                   posthog.init('${PUBLIC_POSTHOG_KEY}', {
                     api_host: 'https://us.i.posthog.com',
                     person_profiles: 'identified_only',
-                    persistence: 'memory',
+                    persistence: 'localStorage',
                   });
                 `,
               },
