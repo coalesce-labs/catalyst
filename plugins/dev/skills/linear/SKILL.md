@@ -223,23 +223,23 @@ When referencing thoughts documents, always provide GitHub links:
    # Get the team UUID from config or from any existing issue:
    #   TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .claude/config.json)
    #   # Or: TEAM_UUID=$(linearis issues list --limit 1 | jq -r '.[0].team.id')
-   linearis issues create \
+   linearis issues create "[refined title]" \
      --team "$TEAM_UUID" \
-     --title "[refined title]" \
      --description "[final description in markdown]" \
      --priority [1-4] \
      --status "$(jq -r '.catalyst.linear.stateMap.backlog // "Backlog"' .claude/config.json 2>/dev/null || echo "Backlog")"
 
    # Capture the created issue ID from output
-   ISSUE_ID=$(linearis issues create ... | jq -r '.id')
+   ISSUE_ID=$(linearis issues create "[refined title]" --team "$TEAM_UUID" -d "Description" | jq -r '.id')
    ```
 
    **Note**: Linearis creates issues in the team's default backlog state. To set specific status or
    assignee, create first then update:
 
    ```bash
-   # Assign to self
-   linearis issues update "$ISSUE_ID" --assignee "@me"
+   # Assign to a user (requires user UUID, not email or @me)
+   # Look up your user ID: linearis issues list --limit 5 | jq '[.[].assignee | select(.) | {name, id}] | unique_by(.id)'
+   linearis issues update "$ISSUE_ID" --assignee "<user-uuid>"
    ```
 
 7. **Post-creation actions:**
@@ -328,7 +328,7 @@ When moving tickets to a new status:
 4. **Manual status updates:**
 
    ```bash
-   linearis issues update TEAM-123 --state "In Progress"
+   linearis issues update TEAM-123 --status "In Progress"
    ```
 
 5. **Add comment explaining the transition:**
@@ -348,7 +348,14 @@ When user wants to find tickets:
 2. **Execute search:**
 
    ```bash
-   # List all issues (linearis issues list only supports --limit, not --team)
+   # Text search — use `issues search` for server-side query matching
+   # WARNING: --team requires a UUID, not a team key (upstream bug: czottmann/linearis#56)
+   linearis issues search "search term" --team "$TEAM_UUID"
+   linearis issues search "search term" --status "In Progress,In Review"
+   linearis issues search "search term" --limit 20
+
+   # List + jq — use for filtering by fields that search doesn't support
+   # (linearis issues list only supports --limit, not --team)
    linearis issues list --limit 100
 
    # Filter by team using jq
@@ -359,10 +366,6 @@ When user wants to find tickets:
 
    # Filter by assignee using jq
    linearis issues list --limit 100 | jq '.[] | select(.assignee.email == "user@example.com")'
-
-   # Search by text (filter JSON output with jq)
-   linearis issues list --limit 100 | \
-     jq '.[] | select(.title | contains("search term"))'
    ```
 
 3. **Present results:**
@@ -438,7 +441,7 @@ When these commands are run, check if there's a related Linear ticket and update
 linearis comments create PROJ-123 --body "Completed phase 1, moving to phase 2"
 
 # Move ticket forward (state name from stateMap config)
-linearis issues update PROJ-123 --state "In Progress"
+linearis issues update PROJ-123 --status "In Progress"
 
 # Search for related tickets
 linearis issues list --limit 100 | jq '.[] | select(.team.key == "PROJ" and (.title | contains("authentication")))'

@@ -157,12 +157,12 @@ linearis issues create \
 DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
 
 # Update state
-linearis issues update TEAM-456 --state "$DONE_STATE"
+linearis issues update TEAM-456 --status "$DONE_STATE"
 # Add comment
 linearis comments create TEAM-456 --body "PR #123 merged: https://github.com/user/repo/pull/123"
 
 # Update state
-linearis issues update TEAM-457 --state "$DONE_STATE"
+linearis issues update TEAM-457 --status "$DONE_STATE"
 # Add comment
 linearis comments create TEAM-457 --body "PR #124 merged: https://github.com/user/repo/pull/124"
 ```

@@ -264,7 +264,7 @@ If a ticket is detected (provided as argument, mentioned in query, or from conte
   ```bash
   RESEARCH_STATE=$(jq -r '.catalyst.linear.stateMap.research // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
   if [[ "$RESEARCH_STATE" != "null" ]]; then
-      linearis issues update "$ticketId" --state "$RESEARCH_STATE"
+      linearis issues update "$ticketId" --status "$RESEARCH_STATE"
   fi
   ```
 - **After document saved**: `linearis comments create "$ticketId" --body "Research complete: $link"`

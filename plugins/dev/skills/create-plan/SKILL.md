@@ -65,7 +65,7 @@ fi
    ```bash
    PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
    if [[ "$PLANNING_STATE" != "null" ]]; then
-       linearis issues update "$ticketId" --state "$PLANNING_STATE"
+       linearis issues update "$ticketId" --status "$PLANNING_STATE"
    fi
    ```
 
@@ -328,7 +328,7 @@ If a ticket is detected (from research document's `source_ticket` frontmatter, c
   ```bash
   PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
   if [[ "$PLANNING_STATE" != "null" ]]; then
-      linearis issues update "$ticketId" --state "$PLANNING_STATE"
+      linearis issues update "$ticketId" --status "$PLANNING_STATE"
   fi
   ```
 - **After plan saved**: `linearis comments create "$ticketId" --body "Plan created: $planPath"`

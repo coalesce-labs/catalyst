@@ -56,6 +56,14 @@ This workspace has no build process - it's markdown files and bash scripts.
 - `chore(meta): update docs` — no version bump
 - Valid scopes: `dev`, `pm`, `meta`, `analytics`, `debugging`
 
+**How release-please routes version bumps (monorepo):**
+- Routing is by **file paths changed**, NOT by commit message scope. A commit touching files in
+  both `plugins/dev/` and `plugins/pm/` bumps both plugins regardless of scope.
+- The `(scope)` in `fix(dev):` controls **changelog grouping**, not which plugin gets bumped.
+- Squash merges work correctly — GitHub API provides the file list to release-please.
+- Use the scope that best describes the primary intent (e.g., `fix(dev):` for a dev-led change
+  that also touches pm files). Both plugins still get their version bumps.
+
 ## Version Control
 
 This workspace tracks: agent definitions, skills, documentation, scripts, configuration templates.

@@ -210,7 +210,7 @@ else
     # Update ticket state from stateMap config
     IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .claude/config.json 2>/dev/null || echo "In Review")
     if [[ "$IN_REVIEW_STATE" != "null" ]]; then
-        linearis issues update "$ticket" --state "$IN_REVIEW_STATE" --assignee "@me"
+        linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
     fi
 
     # Add comment with PR link
