@@ -298,7 +298,7 @@ else
     # Move to configured "Done" state
     DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
     if [[ "$DONE_STATE" != "null" ]]; then
-        linearis issues update "$ticket" --state "$DONE_STATE"
+        linearis issues update "$ticket" --status "$DONE_STATE"
     fi
 
     # Add merge comment
@@ -523,7 +523,7 @@ Configure:
   export LINEAR_API_TOKEN=your_token
 
 Then update ticket manually (use state name from your stateMap config):
-  linearis issues update $ticket --state "Done"  # or your configured done state
+  linearis issues update $ticket --status "Done"  # or your configured done state
 ```
 
 **Linear API error:**

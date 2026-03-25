@@ -67,7 +67,7 @@ Once you have a plan path:
   ```bash
   IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
   if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
-      linearis issues update "$ticketId" --state "$IN_PROGRESS_STATE"
+      linearis issues update "$ticketId" --status "$IN_PROGRESS_STATE"
   fi
   ```
   If Linearis CLI is not available, skip silently and continue implementation.
@@ -243,7 +243,7 @@ If a ticket is detected (from plan document's `source_ticket` frontmatter or fro
   ```bash
   IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
   if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
-      linearis issues update "$ticketId" --state "$IN_PROGRESS_STATE"
+      linearis issues update "$ticketId" --status "$IN_PROGRESS_STATE"
   fi
   ```
 - If Linearis CLI not available, skip silently and continue implementation

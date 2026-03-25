@@ -59,11 +59,11 @@ linearis issues search "keyword"
 
 ### Update a Ticket
 ```bash
-# Update state - use --state NOT --status!
-# State names should come from stateMap in .claude/config.json
-linearis issues update TEAM-123 --state "In Progress"
-linearis issues update TEAM-123 --state "In Review"
-linearis issues update TEAM-123 --state "Done"
+# Update status (renamed from --state in v2025.12.2)
+# Status names should come from stateMap in .claude/config.json
+linearis issues update TEAM-123 --status "In Progress"
+linearis issues update TEAM-123 --status "In Review"
+linearis issues update TEAM-123 --status "Done"
 
 # Other updates
 linearis issues update TEAM-123 --title "New title"
@@ -80,13 +80,13 @@ linearis issues update TEAM-123 --clear-project-milestone
 
 **Common mistakes:**
 ```bash
-linearis issues update TEAM-123 --status "Done"   # ❌ WRONG - use --state
+linearis issues update TEAM-123 --state "Done"    # ❌ WRONG - use --status (--state removed in v2025.12.2)
 ```
 
 ### Create a Ticket
 ```bash
 linearis issues create "Title of ticket"
-linearis issues create "Title" --description "Description" --state "Todo" --priority 2
+linearis issues create "Title" --description "Description" --status "Todo" --priority 2
 linearis issues create "Title" --project "Project Name"
 
 # WARNING: --team only accepts UUIDs (upstream bug: czottmann/linearis#56)
@@ -181,7 +181,7 @@ linearis labels list --team BRAVO
 linearis issues read TEAM-123
 
 # 2. Update state
-linearis issues update TEAM-123 --state "In Progress"
+linearis issues update TEAM-123 --status "In Progress"
 
 # 3. Add comment
 linearis comments create TEAM-123 --body "Starting work on this"
@@ -202,7 +202,7 @@ linearis issues list --limit 100 | jq '.[] | select(.team.key == "BRAVO" and .pr
 ```bash
 # State name from stateMap.done config (default: "Done")
 DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
-linearis issues update TEAM-123 --state "$DONE_STATE"
+linearis issues update TEAM-123 --status "$DONE_STATE"
 linearis comments create TEAM-123 --body "Merged: PR #456 https://github.com/org/repo/pull/456"
 ```
 
@@ -229,7 +229,7 @@ linearis issues list --limit 20 | jq '[.[].team | {key, id, name}] | unique_by(.
 | Action | Command |
 |--------|---------|
 | Read ticket | `linearis issues read TEAM-123` |
-| Update state | `linearis issues update TEAM-123 --state "State"` |
+| Update status | `linearis issues update TEAM-123 --status "Status"` |
 | Add comment | `linearis comments create TEAM-123 --body "text"` |
 | Search | `linearis issues search "keyword"` (--team needs UUID) |
 | List issues | `linearis issues list --limit N` (filter by team with jq) |
@@ -238,7 +238,7 @@ linearis issues list --limit 20 | jq '[.[].team | {key, id, name}] | unique_by(.
 
 ## Important Rules
 
-1. **--state NOT --status**: Always use `--state` for issue state updates
+1. **--status NOT --state**: Always use `--status` for issue status updates (renamed in v2025.12.2)
 2. **comments create**: Use `linearis comments create`, not `issues comment`
 3. **issues read**: Use `read`, not `get` or `view`
 4. **Filtering via jq**: No `--filter` or `--status` flags - pipe to jq instead
