@@ -158,7 +158,7 @@ last_updated: {CURRENT_DATE}
 last_updated_by: claude
 type: implementation_plan
 source_ticket: { TICKET-ID or null }
-source_research: { path to research doc used, or null }
+source_research: "[[research-doc-filename]]"  # or null
 ---
 
 # [Feature/Task Name] Implementation Plan
@@ -241,8 +241,8 @@ source_research: { path to research doc used, or null }
 
 ## References
 
-- Original ticket: `thoughts/shared/tickets/PROJ-XXX.md`
-- Related research: `thoughts/shared/research/[relevant].md`
+- Original ticket: [[PROJ-XXX]]
+- Related research: [[YYYY-MM-DD-relevant-research]]
 - Similar implementation: `[file:line]`
 ````
 
