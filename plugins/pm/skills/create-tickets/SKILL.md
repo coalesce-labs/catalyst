@@ -16,9 +16,9 @@ Generate engineering tickets from PRDs, feature specs, or task lists. Supports d
 4. If Linear MCP is connected, I create tickets directly; otherwise, I generate copy-paste text
 5. I provide a dependency summary and sprint assignment suggestion
 
-**Example:** "Create tickets from thoughts/shared/prds/checkout-redesign.md targeting a March 15 launch"
+**Example:** "Create tickets from thoughts/shared/pm/prds/checkout-redesign.md targeting a March 15 launch"
 
-**Output:** Tickets created in Linear, or saved to `thoughts/shared/analyses/[feature]-tickets.md`
+**Output:** Tickets created in Linear, or saved to `thoughts/shared/pm/analyses/[feature]-tickets.md`
 
 **Time:** 15-30 minutes depending on PRD complexity
 
@@ -406,7 +406,7 @@ When the PM uses `/create-tickets`, I automatically:
 
 ### 1. Extract Source Material Understanding
 
-**Source:** PRDs in `pm/context-library/prds/`, or uploaded documents
+**Source:** PRDs in `thoughts/shared/pm/prds/`, or uploaded documents
 
 - **What I look for:** Acceptance criteria, technical requirements, design context
 - **How I use it:** Generate detailed tickets with full context
@@ -422,7 +422,7 @@ When the PM uses `/create-tickets`, I automatically:
 
 ### 3. Check Dependencies Across Roadmap
 
-**Source:** `pm/context-library/prds/`, related PRDs
+**Source:** `thoughts/shared/pm/prds/`, related PRDs
 
 - **What I look for:** What else is being built that might block this
 - **How I use it:** Surface dependency tickets

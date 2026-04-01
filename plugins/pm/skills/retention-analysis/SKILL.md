@@ -22,7 +22,7 @@ Then provide:
 I'll analyze your retention curve shape, identify the biggest drop-off,
 compare retained vs churned user behavior, and recommend interventions.
 
-**Output:** Saved to `thoughts/shared/analyses/retention-analysis-[date].md`
+**Output:** Saved to `thoughts/shared/pm/analyses/retention-analysis-[date].md`
 **Time:** ~15 min with data, ~25 min with cohort deep-dive
 
 **When to use:** When diagnosing churn problems, measuring product-market fit, or optimizing for stickiness
@@ -36,11 +36,11 @@ When this skill is invoked, immediately check:
 
 | Source            | Files/Folders                                  | Search Terms                                                               | What to Extract                                              |
 | ----------------- | ---------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Metrics/Analytics | `pm/context-library/metrics/*.md`              | D7, D30, retention, churn, cohort, "monthly active", DAU, WAU              | Current retention curves, cohort performance, churn rates    |
-| User Research     | `pm/context-library/research/*.md`             | churn, "stopped using", "didn't come back", "why I left", "why I switched" | Churn interview quotes, reasons users stop using product     |
-| Meeting Notes     | `pm/context-library/meetings/*.md`             | churn, "cancelled", "downgrade", lost deal, customer feedback              | CS feedback on churn, customer complaints, drop-off patterns |
-| PRDs              | `pm/context-library/prds/*.md`                 | retention, sticky, habit, engagement, notification, reminder               | Features built to improve retention                          |
-| Business Info     | `pm/context-library/business-info-template.md` | target user, use case, frequency, engagement, core activity                | How often users should use product, what drives stickiness   |
+| Metrics/Analytics | `thoughts/shared/pm/metrics/*.md`              | D7, D30, retention, churn, cohort, "monthly active", DAU, WAU              | Current retention curves, cohort performance, churn rates    |
+| User Research     | `thoughts/shared/pm/*.md`                      | churn, "stopped using", "didn't come back", "why I left", "why I switched" | Churn interview quotes, reasons users stop using product     |
+| Meeting Notes     | `thoughts/shared/product/meeting-notes/*.md`   | churn, "cancelled", "downgrade", lost deal, customer feedback              | CS feedback on churn, customer complaints, drop-off patterns |
+| PRDs              | `thoughts/shared/pm/prds/*.md`                 | retention, sticky, habit, engagement, notification, reminder               | Features built to improve retention                          |
+| Business Info     | `thoughts/shared/pm/context/business-info-template.md` | target user, use case, frequency, engagement, core activity                | How often users should use product, what drives stickiness   |
 
 **Context Priority:**
 
@@ -62,11 +62,11 @@ Before diving into retention analysis, let me check what data already exists abo
 
 **Checking:**
 
-- `pm/context-library/business-info-template.md` for expected product usage patterns
-- `pm/context-library/metrics/` for existing retention metrics and cohort data
-- `pm/context-library/research/` for churn interviews and user feedback
-- `pm/context-library/meetings/` for CS/support feedback on why users churn
-- `pm/context-library/prds/` for features built to improve retention
+- `thoughts/shared/pm/context/business-info-template.md` for expected product usage patterns
+- `thoughts/shared/pm/metrics/` for existing retention metrics and cohort data
+- `thoughts/shared/pm/` for churn interviews and user feedback
+- `thoughts/shared/product/meeting-notes/` for CS/support feedback on why users churn
+- `thoughts/shared/pm/prds/` for features built to improve retention
 
 **[If analytics MCP connected]:** "Let me also query [PostHog/PostHog] for your current retention curves, churn rates by cohort, and behavioral differences between retained vs churned users."
 
@@ -307,7 +307,7 @@ Referrals: 70% D30 retention
 **Run retention analysis:**
 
 ```
-Use /retention-analysis and reference pm/context-library/business-info-template.md
+Use /retention-analysis and reference [[business-info-template]]
 
 Help me analyze our retention:
 - D1 retention: ___%
@@ -579,18 +579,17 @@ Use this with your data:
 
 **Research & Findings:**
 
-- Save to: `thoughts/shared/analyses/retention-analysis-[date].md`
-- When finalized, move to: `pm/context-library/research/retention-[product].md`
+- Save to: `thoughts/shared/pm/analyses/retention-analysis-[date].md`
 
 **Retention Metrics & Dashboards:**
 
-- Update `pm/context-library/metrics/` with your retention dashboard
+- Update `thoughts/shared/pm/metrics/` with your retention dashboard
 - Include retention curves, cohort analysis, and trend notes
 - Link retention findings to broader business metrics
 
 **Retention Features & Improvements:**
 
-- Create PRD in `pm/context-library/prds/` for each retention initiative
+- Create PRD in `thoughts/shared/pm/prds/` for each retention initiative
 - Link this retention analysis as context
 - Track impact in PRD success metrics
 

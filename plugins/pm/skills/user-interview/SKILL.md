@@ -24,7 +24,7 @@ Tell me:
 I'll cross-reference with your existing research, extract pain points,
 feature requests, JTBD insights, and generate a shareable report.
 
-Output: thoughts/shared/research-synthesis/[date]-interview-insights.md
+Output: thoughts/shared/pm/interviews/[date]-interview-insights.md
 ```
 
 ---
@@ -56,11 +56,11 @@ When this skill is invoked, immediately check:
 
 | Source                                       | What to Check                                   | Priority |
 | -------------------------------------------- | ----------------------------------------------- | -------- |
-| pm/context-library/research/                 | Previous interview syntheses, existing themes   | High     |
-| pm/context-library/prds/                     | Active PRDs that this interview relates to      | High     |
-| pm/context-library/stakeholder-template.md   | If interviewee is a known stakeholder/customer  | Medium   |
-| pm/context-library/business-info-template.md | Company context, product positioning            | Medium   |
-| pm/context-library/launches/                 | Recent launches the interviewee might reference | Low      |
+| thoughts/shared/pm/research/                          | Previous interview syntheses, existing themes   | High     |
+| thoughts/shared/pm/prds/                              | Active PRDs that this interview relates to      | High     |
+| thoughts/shared/pm/context/stakeholder-template.md    | If interviewee is a known stakeholder/customer  | Medium   |
+| thoughts/shared/pm/context/business-info-template.md  | Company context, product positioning            | Medium   |
+| thoughts/shared/pm/launches/                          | Recent launches the interviewee might reference | Low      |
 
 **Context Priority:**
 
@@ -91,10 +91,10 @@ When this skill is invoked, immediately check:
 
 **Before processing new interviews, check existing context:**
 
-1. Search `pm/context-library/research/` for previous interview syntheses and findings
+1. Search `thoughts/shared/pm/research/` for previous interview syntheses and findings
 2. Identify validated themes from prior research
 3. Note which PRDs or strategic initiatives these interviews relate to
-4. Check `pm/context-library/business-info-template.md` for product positioning context
+4. Check `thoughts/shared/pm/context/business-info-template.md` for product positioning context
 
 **For each theme that emerges in the new interviews:**
 
@@ -106,9 +106,9 @@ When this skill is invoked, immediately check:
 
 ```
 ## Existing Research Context
-- Found [N] previous interview syntheses in pm/context-library/research/
+- Found [N] previous interview syntheses in thoughts/shared/pm/research/
 - Validated themes from prior research: [list]
-- Active PRDs this research relates to: [list]
+- Active PRDs from thoughts/shared/pm/prds/ this research relates to: [list]
 - New themes to watch for: [will identify during analysis]
 ```
 
@@ -192,7 +192,7 @@ Ask Claude:
 - Top 3 feature requests
 - Recommended next steps
 Format as a report I can share with my team.
-Save to thoughts/shared/research-synthesis/[date]-interview-insights.md"
+Save to thoughts/shared/pm/interviews/[date]-interview-insights.md"
 ```
 
 ---
@@ -423,7 +423,7 @@ research repository is purpose-built for research synthesis:
 
 **Build a repository:**
 
-- All past interviews in `pm/context-library/research/`
+- All past interviews in `thoughts/shared/pm/research/`
 - Searchable by theme/topic
 - Updated quote bank
 - Trend tracking over time
@@ -487,7 +487,7 @@ research repository is purpose-built for research synthesis:
 
 **Using Claude Code:**
 
-- Keep all transcripts in `pm/context-library/research/interviews/`
+- Keep all transcripts in `thoughts/shared/pm/interviews/`
 - Query anytime: "Search all interviews for mentions of [topic]"
 - Get instant insights from entire history
 
@@ -537,16 +537,16 @@ Before delivering the final research synthesis, verify:
 
 | Check                            | Criteria                                                                          | Pass? |
 | -------------------------------- | --------------------------------------------------------------------------------- | ----- |
-| **Existing research referenced** | Cross-referenced with `pm/context-library/research/` findings                     | [ ]   |
+| **Existing research referenced** | Cross-referenced with `thoughts/shared/pm/research/` findings                     | [ ]   |
 | **Themes labeled correctly**     | Each theme marked as VALIDATED, CHALLENGED, or NEW vs. prior research             | [ ]   |
 | **Quotes are real**              | Every quote is directly from a transcript (not paraphrased or invented)           | [ ]   |
 | **Pain points quantified**       | Each pain point shows how many users mentioned it + severity                      | [ ]   |
 | **Actionable recommendations**   | At least 3 specific next steps with owners and timelines                          | [ ]   |
-| **PRD linkage**                  | Insights connected to relevant active PRDs in `pm/context-library/prds/`          | [ ]   |
+| **PRD linkage**                  | Insights connected to relevant active PRDs in `thoughts/shared/pm/prds/`          | [ ]   |
 | **Segments identified**          | At least 2 distinct user archetypes with unique needs called out                  | [ ]   |
 | **Surprises captured**           | At least 1 unexpected finding or challenged assumption noted                      | [ ]   |
 | **Scope boundary stated**        | User knows when to use this skill vs /user-research-synthesis                     | [ ]   |
-| **Output file saved**            | Report saved to `thoughts/shared/research-synthesis/[date]-interview-insights.md` | [ ]   |
+| **Output file saved**            | Report saved to `thoughts/shared/pm/interviews/[date]-interview-insights.md` | [ ]   |
 
 **If any check fails, address it before delivering the output.**
 

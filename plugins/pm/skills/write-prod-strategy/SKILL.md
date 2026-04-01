@@ -11,10 +11,10 @@ Create comprehensive product strategy using a 7-component framework. Connects vi
 ## Quick Start
 
 1. Tell me: "I need a product strategy for [product/initiative]"
-2. I will check `pm/context-library/strategy/`, `pm/context-library/business-info-template.md`, and `pm/context-library/research/` for existing context
+2. I will check `thoughts/shared/pm/frameworks/`, `thoughts/shared/pm/context/business-info-template.md`, and `thoughts/shared/pm/research/` for existing context
 3. I will ask about scope (company vs product), horizon (6mo/1yr/3yr), audience, and whether we are building on or replacing existing strategy
 4. We work through the 7 components: Objective, Users, Superpowers, Vision, Pillars, Impact, Roadmap
-5. Output goes to `thoughts/shared/analyses/strategy-[product]-[date].md`
+5. Output goes to `thoughts/shared/pm/analyses/strategy-[product]-[date].md`
 
 **Output length:** A complete 7-component strategy doc should be 2,000-3,000 words with an executive summary of 200-300 words. If you want a shorter version, ask for a "1-page strategy brief" and I will generate only: Objective, Target Users, Strategic Pillars, and Key Metrics.
 
@@ -25,12 +25,12 @@ When this skill is invoked, immediately check:
 
 | Source               | Files/Folders                                  | Search Terms                              | What to Extract                          |
 | -------------------- | ---------------------------------------------- | ----------------------------------------- | ---------------------------------------- |
-| Existing Strategy    | `pm/context-library/strategy/*.md`             | company strategy, vision, roadmap         | Current strategy to build on or update   |
-| Business Model       | `pm/context-library/business-info-template.md` | TAM, revenue model, metrics               | Objective anchor and North Star          |
-| User Research        | `pm/context-library/research/*.md`             | user segments, JTBD, pain points          | Users section and strategic fit          |
-| Competitive Analysis | `pm/context-library/research/competitive-*.md` | competitor positioning                    | Superpowers and differentiation          |
-| Historical PRDs      | `pm/context-library/prds/*.md`                 | strategic features, decisions             | Precedent for feature strategy alignment |
-| Meetings             | `pm/context-library/meetings/*.md`             | strategy discussion, OKRs, board feedback | Stakeholder input and constraints        |
+| Existing Strategy    | `thoughts/shared/pm/frameworks/*.md`                   | company strategy, vision, roadmap         | Current strategy to build on or update   |
+| Business Model       | `thoughts/shared/pm/context/business-info-template.md` | TAM, revenue model, metrics               | Objective anchor and North Star          |
+| User Research        | `thoughts/shared/pm/research/*.md`                     | user segments, JTBD, pain points          | Users section and strategic fit          |
+| Competitive Analysis | `thoughts/shared/pm/research/competitive-*.md`         | competitor positioning                    | Superpowers and differentiation          |
+| Historical PRDs      | `thoughts/shared/pm/prds/*.md`                         | strategic features, decisions             | Precedent for feature strategy alignment |
+| Meetings             | `thoughts/shared/product/meeting-notes/*.md`           | strategy discussion, OKRs, board feedback | Stakeholder input and constraints        |
 
 **Context Priority:**
 
@@ -54,10 +54,10 @@ Before writing strategy, let me understand where you are...
 
 **Checking:**
 
-- `pm/context-library/strategy/` for existing strategy docs
-- `pm/context-library/business-info-template.md` for business model
-- `pm/context-library/research/` for user and competitive insights
-- `pm/context-library/meetings/` for stakeholder input and OKRs
+- `thoughts/shared/pm/frameworks/` for existing strategy docs
+- `thoughts/shared/pm/context/business-info-template.md` for business model
+- `thoughts/shared/pm/research/` for user and competitive insights
+- `thoughts/shared/product/meeting-notes/` for stakeholder input and OKRs
 
 **Based on what I find, I'll show you:**
 
@@ -707,8 +707,7 @@ What we're NOT doing (and why):
 
 **Strategy documents:**
 
-- Active work: `thoughts/shared/analyses/strategy-[product]-[date].md` (living document)
-- When finalized: Move to `pm/context-library/strategy/[product]-strategy-[year].md` for reference
+- Active work: `thoughts/shared/pm/analyses/strategy-[product]-[date].md` (living document)
 - Executive version: Can be adapted for board/investor presentations
 
 ### Link to Other Work

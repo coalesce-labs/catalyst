@@ -16,11 +16,11 @@ When this skill is invoked, immediately check:
 
 | Source             | Files/Folders                                   | Search Terms                   | What to Extract                        |
 | ------------------ | ----------------------------------------------- | ------------------------------ | -------------------------------------- |
-| Existing Research  | `pm/context-library/research/*.md`              | topic from chat, user segments | Previous findings to avoid duplication |
-| Related PRDs       | `pm/context-library/prds/*.md`                  | problem related to interviews  | Problem framing and hypothesis         |
-| Strategy Context   | `pm/context-library/strategy/*.md`              | user segment, strategic fit    | How findings ladder to strategy        |
-| Previous Synthesis | `thoughts/shared/research-synthesis/`           | topic name                     | Past research to build on              |
-| Interview Guides   | `pm/context-library/research/interview-guides/` | topic                          | What questions were asked              |
+| Existing Research  | `thoughts/shared/pm/research/*.md`              | topic from chat, user segments | Previous findings to avoid duplication |
+| Related PRDs       | `thoughts/shared/pm/prds/*.md`                  | problem related to interviews  | Problem framing and hypothesis         |
+| Strategy Context   | `thoughts/shared/pm/frameworks/*.md`            | user segment, strategic fit    | How findings ladder to strategy        |
+| Previous Synthesis | `thoughts/shared/pm/interviews/`                | topic name                     | Past research to build on              |
+| Interview Guides   | `thoughts/shared/pm/interviews/`                | topic                          | What questions were asked              |
 
 **Context Priority:**
 
@@ -44,8 +44,8 @@ Before we synthesize, let me understand what you've learned...
 
 **Checking:**
 
-- `pm/context-library/research/` for previous findings on this topic
-- `pm/context-library/prds/` for the problem statement
+- `thoughts/shared/pm/research/` for previous findings on this topic
+- `thoughts/shared/pm/prds/` for the problem statement
 - Interview guides used: what were you trying to validate?
 - Previous synthesis on related topics
 
@@ -588,8 +588,7 @@ I'll remind you:
 
 **Research synthesis:**
 
-- Active work: `thoughts/shared/research-synthesis/[topic]-[date].md`
-- When finalized: Archive to `pm/context-library/research/[topic]-synthesis.md` for future reference
+- Active work: `thoughts/shared/pm/interviews/[topic]-[date].md`
 - Executive summary: Can be shared directly with stakeholders
 
 ### Link to Other Work
@@ -612,10 +611,10 @@ After synthesis:
 
 **Pulls from:**
 
-- `pm/context-library/research/` - What questions were asked?
-- `pm/context-library/prds/` - What was the original problem hypothesis?
+- `thoughts/shared/pm/research/` - What questions were asked?
+- `thoughts/shared/pm/prds/` - What was the original problem hypothesis?
 - `/interview-guide` - Questions asked in the interview
-- `pm/context-library/meetings/` - Past conversations about this problem
+- `thoughts/shared/product/meeting-notes/` - Past conversations about this problem
 
 ---
 
@@ -685,8 +684,7 @@ When synthesis is complete, I'll create:
 
 All files will be saved to:
 
-- `thoughts/shared/research-synthesis/[topic]-[date].md`
-- `pm/context-library/personal-context-pm-background.md` (updated)
+- `thoughts/shared/pm/interviews/[topic]-[date].md`
 
 ---
 
@@ -712,8 +710,8 @@ Remember: User research isn't about validation. It's about discovery. The goal i
 
 Before presenting output to the PM, verify:
 
-- [ ] **File saved to correct location:** Output saved to `thoughts/shared/research-synthesis/[topic]-[date].md`
-- [ ] **Context routing table was checked:** Reviewed `pm/context-library/research/` for past findings, `pm/context-library/prds/` for related problem statements, and `pm/context-library/strategy/` for strategic fit
+- [ ] **File saved to correct location:** Output saved to `thoughts/shared/pm/interviews/[topic]-[date].md`
+- [ ] **Context routing table was checked:** Reviewed `thoughts/shared/pm/research/` for past findings, `thoughts/shared/pm/prds/` for related problem statements, and `thoughts/shared/pm/frameworks/` for strategic fit
 - [ ] **Themes backed by 2+ sources:** Every theme in the synthesis is supported by observations from at least 2 different interview participants (not a single anecdote)
 - [ ] **Direct user quotes included:** Each key finding includes at least one verbatim user quote with attribution (participant name or identifier)
 - [ ] **Insight severity/frequency rated:** Every theme has a frequency count (e.g., "6 out of 8 users") and a severity rating (High/Medium/Low)

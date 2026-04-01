@@ -45,13 +45,13 @@ When this skill is invoked, immediately check:
 
 | Source               | Files/Folders                                               | Search Terms       | What to Extract                                         |
 | -------------------- | ----------------------------------------------------------- | ------------------ | ------------------------------------------------------- |
-| Active PRDs          | `thoughts/shared/prds/*.md`, `pm/context-library/prds/*.md` | feature name       | Requirements, user flows, success metrics, edge cases   |
-| Previous Prototypes  | `thoughts/shared/prototypes/*.md`                           | feature name       | Previous versions, iteration history, feedback received |
-| User Research        | `pm/context-library/research/*.md`                          | user pain, problem | User quotes, pain points, workflows to design for       |
-| Napkin Sketches      | `thoughts/shared/prototypes/*-napkin*.md`                   | feature name       | ASCII wireframes to convert to prototype                |
+| Active PRDs          | `thoughts/shared/pm/prds/*.md`                              | feature name       | Requirements, user flows, success metrics, edge cases   |
+| Previous Prototypes  | `thoughts/shared/product/prototypes/*.md`                   | feature name       | Previous versions, iteration history, feedback received |
+| User Research        | `thoughts/shared/pm/*.md`                                   | user pain, problem | User quotes, pain points, workflows to design for       |
+| Napkin Sketches      | `thoughts/shared/product/prototypes/*-napkin*.md`           | feature name       | ASCII wireframes to convert to prototype                |
 | Stakeholder Profiles | Stakeholder templates                                       | design reviewers   | Who will review this and what they care about           |
-| Business Info        | `pm/context-library/business-info-template.md`              | brand, product     | Brand guidelines, product context, existing UI patterns |
-| Competitor Analysis  | `pm/context-library/research/competitive-*.md`              | feature name       | Competitor implementations for reference                |
+| Business Info        | `thoughts/shared/pm/context/business-info-template.md`      | brand, product     | Brand guidelines, product context, existing UI patterns |
+| Competitor Analysis  | `thoughts/shared/pm/competitive-*.md`                       | feature name       | Competitor implementations for reference                |
 
 **Context Priority:**
 
@@ -98,8 +98,8 @@ Let's build a prototype. First, let me check what we're working with...
 
 **Silently check:**
 
-1. Read most recent PRDs in `thoughts/shared/prds/` and `pm/context-library/prds/`
-2. Check `thoughts/shared/prototypes/` for previous versions
+1. Read most recent PRDs in `thoughts/shared/pm/prds/`
+2. Check `thoughts/shared/product/prototypes/` for previous versions
 3. Read any napkin sketches from `/napkin-sketch`
 4. Check user research for UX-relevant insights
 
@@ -251,7 +251,7 @@ Create a [component/page type] for [product context].
 ---
 ```
 
-Save to: `thoughts/shared/prototypes/[feature-name]-v0-prompt.md`
+Save to: `thoughts/shared/product/prototypes/[feature-name]-v0-prompt.md`
 
 ---
 
@@ -329,7 +329,7 @@ Build a [app type] for [product context].
 ---
 ```
 
-Save to: `thoughts/shared/prototypes/[feature-name]-lovable-prompt.md`
+Save to: `thoughts/shared/product/prototypes/[feature-name]-lovable-prompt.md`
 
 ---
 
@@ -370,7 +370,7 @@ Build a [app type] using [React/Next.js/vanilla].
 ---
 ```
 
-Save to: `thoughts/shared/prototypes/[feature-name]-bolt-prompt.md`
+Save to: `thoughts/shared/product/prototypes/[feature-name]-bolt-prompt.md`
 
 ---
 
@@ -396,7 +396,7 @@ Build the prototype directly in the conversation.
 - Footer/secondary actions
 ```
 
-Save the code to: `thoughts/shared/prototypes/[feature-name]-artifacts-v[N].md`
+Save the code to: `thoughts/shared/product/prototypes/[feature-name]-artifacts-v[N].md`
 
 ---
 
@@ -428,7 +428,7 @@ This checklist goes at the end of the prototype output, before the "Next steps" 
 After generating the prototype, offer next steps:
 
 ```
-Prototype ready! Saved to thoughts/shared/prototypes/[filename].
+Prototype ready! Saved to thoughts/shared/product/prototypes/[filename].
 
 **Next steps:**
 1. **Test it:** [Instructions specific to type -- paste into v0, open in Lovable, etc.]
@@ -449,7 +449,7 @@ Prototype ready! Saved to thoughts/shared/prototypes/[filename].
 
 When the PM comes back with feedback:
 
-1. **Read previous prototype:** Check `thoughts/shared/prototypes/[feature]-*` for history
+1. **Read previous prototype:** Check `thoughts/shared/product/prototypes/[feature]-*` for history
 2. **Understand feedback:** What worked? What didn't? What changed?
 3. **Generate updated version:** Increment version number
 4. **Track changes:** Note what changed between versions

@@ -10,9 +10,9 @@ user-invocable: true
 **What to provide:** A PRD, strategy doc, decision doc, or any product document you want challenged.
 
 ```
-/ralph-wiggum                          → Review the most recent PRD in thoughts/shared/prds/
+/ralph-wiggum                          → Review the most recent PRD in thoughts/shared/pm/prds/
 /ralph-wiggum [paste document]         → Review pasted content
-/ralph-wiggum thoughts/shared/prds/my-prd.md   → Review a specific file
+/ralph-wiggum thoughts/shared/pm/prds/my-prd.md   → Review a specific file
 ```
 
 **What you get:** A skeptic's review that finds logical gaps, questionable assumptions, and missing data -- delivered with personality and humor. Think sharp product critique meets Ralph Wiggum one-liners.
@@ -36,13 +36,13 @@ When this skill is invoked, immediately check:
 
 | Source              | Files/Folders                                               | Search Terms                   | What to Extract                                                            |
 | ------------------- | ----------------------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------- |
-| Strategy Docs       | `pm/context-library/strategy/*.md`                          | claims in the document         | Does the document contradict stated strategy?                              |
-| Related PRDs        | `pm/context-library/prds/*.md`, `thoughts/shared/prds/*.md` | feature name, related features | Conflicting scope, duplicated work, missed dependencies                    |
-| User Research       | `pm/context-library/research/*.md`                          | problem claims, user quotes    | Are claims actually supported by research? Are quotes cherry-picked?       |
-| Business Info       | `pm/context-library/business-info-template.md`              | metrics, revenue, North Star   | Do success metrics ladder to the North Star? Are impact numbers realistic? |
-| Decisions           | `pm/context-library/decisions/*.md`                         | feature name, trade-offs       | Has this been tried before? Are we repeating past mistakes?                |
-| Competitor Analysis | `pm/context-library/research/competitive-*.md`              | feature name                   | Is competitor positioning accurate or outdated?                            |
-| Previous Meetings   | `pm/context-library/meetings/*.md`                          | feature name, stakeholders     | Were concerns raised that got swept under the rug?                         |
+| Strategy Docs       | `thoughts/shared/pm/frameworks/*.md`                                    | claims in the document         | Does the document contradict stated strategy?                              |
+| Related PRDs        | `thoughts/shared/pm/prds/*.md`                                          | feature name, related features | Conflicting scope, duplicated work, missed dependencies                    |
+| User Research       | `thoughts/shared/pm/research/*.md`                                      | problem claims, user quotes    | Are claims actually supported by research? Are quotes cherry-picked?       |
+| Business Info       | `thoughts/shared/pm/context/business-info-template.md`                  | metrics, revenue, North Star   | Do success metrics ladder to the North Star? Are impact numbers realistic? |
+| Decisions           | `thoughts/shared/product/decisions/*.md`                                | feature name, trade-offs       | Has this been tried before? Are we repeating past mistakes?                |
+| Competitor Analysis | `thoughts/shared/pm/research/competitive-*.md`                          | feature name                   | Is competitor positioning accurate or outdated?                            |
+| Previous Meetings   | `thoughts/shared/product/meeting-notes/*.md`                            | feature name, stakeholders     | Were concerns raised that got swept under the rug?                         |
 
 **Context Priority:**
 
@@ -102,10 +102,10 @@ When the PM types `/ralph-wiggum`, determine what to review:
 
 1. **If they pasted content:** Use that directly
 2. **If they specified a file path:** Read that file
-3. **If they said nothing:** Check `thoughts/shared/prds/` for the most recently modified file, then ask:
+3. **If they said nothing:** Check `thoughts/shared/pm/prds/` for the most recently modified file, then ask:
 
    ```
-   I found [filename] in thoughts/shared/prds/ (last modified [date]). Want me to roast -- er, review -- this one?
+   I found [filename] in thoughts/shared/pm/prds/ (last modified [date]). Want me to roast -- er, review -- this one?
 
    Or paste/point me to something else.
    ```
@@ -114,10 +114,10 @@ When the PM types `/ralph-wiggum`, determine what to review:
 
 Before reviewing, silently check:
 
-1. **Strategy alignment:** Read `pm/context-library/strategy/*.md`. Does the document's "why now" actually match current strategy?
-2. **Research backing:** Read `pm/context-library/research/*.md`. Are the user pain points real or assumed?
-3. **Past decisions:** Read `pm/context-library/decisions/*.md`. Have we been here before?
-4. **Related PRDs:** Read `pm/context-library/prds/*.md` and `thoughts/shared/prds/*.md`. Any conflicts or dependencies?
+1. **Strategy alignment:** Read `thoughts/shared/pm/frameworks/*.md`. Does the document's "why now" actually match current strategy?
+2. **Research backing:** Read `thoughts/shared/pm/research/*.md`. Are the user pain points real or assumed?
+3. **Past decisions:** Read `thoughts/shared/product/decisions/*.md`. Have we been here before?
+4. **Related PRDs:** Read `thoughts/shared/pm/prds/*.md`. Any conflicts or dependencies?
 5. **Stakeholder concerns:** Read stakeholder profiles. Who will object to this and why?
 
 Note any contradictions, unsupported claims, or gaps for the review.
@@ -186,7 +186,7 @@ Use the output template below. Be specific -- vague feedback is useless. Quote t
 
 ## Output Template
 
-Save to: `thoughts/shared/reviews/[document-name]-ralph-review.md`
+Save to: `thoughts/shared/pm/reviews/[document-name]-ralph-review.md`
 
 ```markdown
 # Ralph Wiggum Review: [Document Title]
@@ -339,7 +339,7 @@ Use these consistently:
 **Ralph is the Skeptic sub-agent from pm/CLAUDE.md:**
 
 - When `/prd-draft` Step 3 offers multi-agent review and the PM picks "Skeptic," invoke Ralph's approach.
-- Ralph complements `pm/sub-agents/engineer-reviewer.md`, `pm/sub-agents/designer-reviewer.md`, and `pm/sub-agents/executive-reviewer.md`.
+- Ralph complements `thoughts/shared/pm/sub-agents/engineer-reviewer.md`, `thoughts/shared/pm/sub-agents/designer-reviewer.md`, and `thoughts/shared/pm/sub-agents/executive-reviewer.md`.
 
 ---
 

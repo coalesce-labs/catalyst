@@ -19,11 +19,11 @@ Plan your week forward with clear priorities tied to quarterly goals. Sets the f
 
 **Check these files first:**
 
-1. `pm/context-library/strategy/` - Quarter OKRs, North Star, strategic pillars
-2. `thoughts/shared/weekly-reviews/` - Last week's review (if exists)
-3. `thoughts/shared/prds/` - Active PRDs and their stages
-4. `pm/context-library/launches/` - Upcoming launches
-5. `thoughts/shared/weekly-plans/` - Previous weekly plans (for pattern analysis)
+1. `thoughts/shared/pm/frameworks/` - Quarter OKRs, North Star, strategic pillars
+2. `thoughts/shared/pm/reports/` - Last week's review (if exists)
+3. `thoughts/shared/pm/prds/` - Active PRDs and their stages
+4. `thoughts/shared/pm/launches/` - Upcoming launches
+5. `thoughts/shared/pm/reports/` - Previous weekly plans (for pattern analysis)
 
 **MCP Queries (if available):**
 
@@ -45,14 +45,14 @@ Plan your week forward with clear priorities tied to quarterly goals. Sets the f
    - If user specified "next": Next week
 
 2. **Check if week already planned:**
-   - Look for `thoughts/shared/weekly-plans/YYYY-WXX-weekly-plan.md`
+   - Look for `thoughts/shared/pm/reports/YYYY-WXX-weekly-plan.md`
    - If exists: Ask "Week already planned. Update it or create new version?"
 
 ---
 
 ### Step 2: Review Last Week (If Available)
 
-Check for `thoughts/shared/weekly-reviews/[last-week]-weekly-review.md`:
+Check for `thoughts/shared/pm/reports/[last-week]-weekly-review.md`:
 
 If exists, extract:
 
@@ -72,7 +72,7 @@ If doesn't exist:
 
 **A. Quarter Goals & North Star:**
 
-Read `pm/context-library/strategy/`:
+Read `thoughts/shared/pm/frameworks/`:
 
 - Current quarter OKRs
 - North Star metric and target
@@ -88,7 +88,7 @@ Extract:
 
 **B. Active PRD Pipeline:**
 
-Scan `thoughts/shared/prds/` and `pm/context-library/prds/`:
+Scan `thoughts/shared/pm/prds/`:
 
 For each active PRD:
 
@@ -112,7 +112,7 @@ Identify: Which PRDs need to advance this week?
 
 **C. Upcoming Launches:**
 
-Check `pm/context-library/launches/`:
+Check `thoughts/shared/pm/launches/`:
 
 - Features launching this week
 - Pre-launch checklists due
@@ -204,7 +204,7 @@ This helps with:
 
 ### Step 6: Generate Weekly Plan
 
-Create file: `thoughts/shared/weekly-plans/YYYY-WXX-weekly-plan.md`
+Create file: `thoughts/shared/pm/reports/YYYY-WXX-weekly-plan.md`
 
 **Template:**
 
@@ -447,7 +447,7 @@ _Next: Run `/daily-plan` each morning to execute against this plan_
 **If strategy docs don't exist:**
 
 - Ask: "What are your top quarterly goals?"
-- Suggest: "Fill out `pm/context-library/strategy/OKRs.md` for better alignment"
+- Suggest: "Fill out `thoughts/shared/pm/frameworks/OKRs.md` for better alignment"
 
 ---
 
@@ -521,8 +521,8 @@ _Next: Run `/daily-plan` each morning to execute against this plan_
 
 Before presenting output to the PM, verify:
 
-- [ ] **Context was checked:** Reviewed `pm/context-library/strategy/` for quarter OKRs, `thoughts/shared/prds/` for active PRDs, and `pm/context-library/meetings/` for upcoming commitments
+- [ ] **Context was checked:** Reviewed `thoughts/shared/pm/frameworks/` for quarter OKRs, `thoughts/shared/pm/prds/` for active PRDs, and `thoughts/shared/product/meeting-notes/` for upcoming commitments
 - [ ] **Priorities aligned with strategic goals:** Each of the top 3 priorities explicitly references which quarter goal, OKR, or strategic pillar it advances
 - [ ] **LNO classification applied:** Key tasks are tagged as Leverage, Neutral, or Overhead to ensure the week is weighted toward high-leverage work
 - [ ] **Dependencies and blockers identified:** Each priority lists what it depends on (people, decisions, deliverables) and any known blockers with mitigation plans
-- [ ] **Carry-over items from last week addressed:** If `thoughts/shared/weekly-reviews/` or `thoughts/shared/weekly-plans/` contain incomplete items from last week, they are explicitly acknowledged as carried over, deferred, or dropped with reasoning
+- [ ] **Carry-over items from last week addressed:** If `thoughts/shared/pm/reports/` contains incomplete items from last week, they are explicitly acknowledged as carried over, deferred, or dropped with reasoning

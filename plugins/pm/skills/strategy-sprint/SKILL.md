@@ -14,10 +14,10 @@ user-invocable: true
 ## Quick Start
 
 1. Tell me: "I need a [1-day / 1-week / 1-month] strategy for [topic]"
-2. I will check `pm/context-library/strategy/` and `pm/context-library/business-info-template.md` for existing context
+2. I will check `thoughts/shared/pm/frameworks/` and `thoughts/shared/pm/context/business-info-template.md` for existing context
 3. I will ask 3-5 clarifying questions about scope, stakeholders, and constraints
 4. We build progressively -- even a 1-month sprint starts with the 1-day foundation first
-5. Output goes to `thoughts/shared/strategy-[topic]-[date].md`
+5. Output goes to `thoughts/shared/product/strategy/strategy-[topic]-[date].md`
 
 **Which tier should you pick?**
 
@@ -114,12 +114,12 @@ Strategy doesn't always need to be a month-long exercise. Depending on your time
 1. **Jobs-to-Be-Done Analysis**
    - What job is the customer hiring our product to do?
    - What progress are they trying to make?
-   - Reference: `@pm/context-library/strategy/jtbd-canvas.md`
+   - Reference: [[jtbd-canvas]]
 
 2. **Competitive Positioning**
    - How do we differentiate?
    - What's our unfair advantage?
-   - Reference: `@pm/context-library/strategy/7-powers-framework.md`
+   - Reference: [[7-powers-framework]]
 
 3. **User Research Validation**
    - 5-10 customer interviews
@@ -183,7 +183,7 @@ Strategy doesn't always need to be a month-long exercise. Depending on your time
 3. **7 Powers Analysis**
    - Which power(s) does this unlock?
    - Network effects, brand, scale, switching costs?
-   - Reference: `@pm/context-library/strategy/7-powers-framework.md`
+   - Reference: [[7-powers-framework]]
 
 4. **Financial Model**
    - Revenue projections
@@ -250,7 +250,7 @@ Ask yourself:
 ### Step 2: Use This Prompt Pattern
 
 ```
-Use /strategy-sprint and reference pm/context-library/business-info-template.md
+Use /strategy-sprint and reference thoughts/shared/pm/context/business-info-template.md
 
 I need to create a [1-day / 1-week / 1-month] strategy for: [describe the opportunity/problem]
 
@@ -291,7 +291,7 @@ Help me work through the appropriate framework step by step.
 - Schedule stakeholder reviews in weeks 2-3, not week 4
 - Build in time to incorporate feedback
 - Create a FAQ doc as you go (capture all questions you get)
-- Use sub-agents for multiple perspectives: `@pm/sub-agents/engineer-reviewer.md`, `@pm/sub-agents/executive-reviewer.md`
+- Use sub-agents for multiple perspectives: [[engineer-reviewer]], [[executive-reviewer]]
 
 **Universal tip:**
 
@@ -358,8 +358,8 @@ Help me work through the appropriate framework step by step.
 - `/prd-draft` - Turn strategy into PRDs
 - `/competitor-analysis` - Research competitors
 - `/user-research-synthesis` - Process customer insights
-- `pm/context-library/strategy/jtbd-canvas.md` - Understand customer jobs
-- `pm/context-library/strategy/7-powers-framework.md` - Identify unfair advantages
+- [[jtbd-canvas]] - Understand customer jobs
+- [[7-powers-framework]] - Identify unfair advantages
 
 ---
 

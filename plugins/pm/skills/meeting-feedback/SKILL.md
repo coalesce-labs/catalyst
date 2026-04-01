@@ -538,7 +538,7 @@ After any meeting, ask yourself:
 
 ## Trend Tracking
 
-After scoring, check `thoughts/shared/meeting-notes/` and previous feedback files for the same recurring meeting. If previous feedback exists, show a trend:
+After scoring, check `thoughts/shared/product/meeting-notes/` and previous feedback files for the same recurring meeting. If previous feedback exists, show a trend:
 
 ```
 ## Meeting Effectiveness Trend: [Meeting Name]
@@ -561,7 +561,7 @@ assigning a facilitator or using round-robin format.
 
 If no previous feedback exists, note: "This is the first feedback for this meeting. Future ratings will show trends."
 
-Save feedback files with consistent naming: `thoughts/shared/meeting-notes/feedback-[meeting-name]-[date].md` to enable trend tracking.
+Save feedback files with consistent naming: `thoughts/shared/product/meeting-notes/feedback-[meeting-name]-[date].md` to enable trend tracking.
 
 ---
 
@@ -644,7 +644,7 @@ When the PM uses `/meeting-feedback`, I automatically:
 
 ### 2. Reference Related Decisions
 
-**Source:** `pm/context-library/decisions/` if this meeting made a decision
+**Source:** `thoughts/shared/product/decisions/` if this meeting made a decision
 
 - **What I look for:** Decision that came out of the meeting
 - **How I use it:** Note whether decision was crisp and clear
@@ -660,7 +660,7 @@ When the PM uses `/meeting-feedback`, I automatically:
 
 ### 4. Pull Attendee Context
 
-**Source:** `pm/context-library/stakeholder-template.md`
+**Source:** `thoughts/shared/pm/context/stakeholder-template.md`
 
 - **What I look for:** Attendees' roles, personality styles
 - **How I use it:** Calibrate feedback (e.g., "Person X dominates, needs facilitation")

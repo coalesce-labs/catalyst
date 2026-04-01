@@ -400,7 +400,7 @@ Long-press to select on mobile?
 ## How to Use This Sub-Agent
 
 ```bash
-claude "Read pm/sub-agents/designer-reviewer.md
+claude "Read thoughts/shared/pm/sub-agents/designer-reviewer.md
 
 Review this PRD from a design perspective:
 [paste PRD]

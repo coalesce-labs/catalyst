@@ -538,7 +538,7 @@ Use Firebase Cloud Messaging + Firestore instead of building custom:
 
 ```bash
 cd ~/pm-operating-system
-claude "Read pm/sub-agents/engineer-reviewer.md
+claude "Read thoughts/shared/pm/sub-agents/engineer-reviewer.md
 
 Then review this PRD from an engineering perspective:
 [paste PRD or reference file]

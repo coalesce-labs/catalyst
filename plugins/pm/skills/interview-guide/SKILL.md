@@ -24,7 +24,7 @@ Tell me:
 I'll check your existing research first, then generate a guide that
 focuses on gaps -- not re-asking what you already know.
 
-Output: thoughts/shared/interview-guides-[topic]-[date].md
+Output: thoughts/shared/pm/interviews/interview-guide-[topic]-[date].md
 ```
 
 ---
@@ -36,11 +36,11 @@ When this skill is invoked, immediately check:
 
 | Source            | Files/Folders                                                      | Search Terms                                | What to Extract                          |
 | ----------------- | ------------------------------------------------------------------ | ------------------------------------------- | ---------------------------------------- |
-| Research Plan     | `pm/context-library/research/*.md`                                 | hypothesis, problem statement, target users | Current understanding of problem         |
-| User Personas     | `pm/context-library/research/personas*.md` or stakeholder template | target segment, role, company size          | Who to interview and their context       |
-| PRDs              | `pm/context-library/prds/*.md`                                     | problem statement, user pain                | Problem framing for interview hypothesis |
-| Strategy          | `pm/context-library/strategy/*.md`                                 | user segment, JTBD canvas                   | Jobs framework and strategic fit         |
-| Previous Research | `pm/context-library/research/interviews*.md`                       | similar problem area, past themes           | Avoid revalidating, build on insights    |
+| Research Plan     | `thoughts/shared/pm/research/*.md`                                 | hypothesis, problem statement, target users | Current understanding of problem         |
+| User Personas     | `thoughts/shared/pm/research/personas*.md` or stakeholder template | target segment, role, company size          | Who to interview and their context       |
+| PRDs              | `thoughts/shared/pm/prds/*.md`                                     | problem statement, user pain                | Problem framing for interview hypothesis |
+| Strategy          | `thoughts/shared/pm/frameworks/*.md`                               | user segment, JTBD canvas                   | Jobs framework and strategic fit         |
+| Previous Research | `thoughts/shared/pm/interviews/*.md`                               | similar problem area, past themes           | Avoid revalidating, build on insights    |
 
 **Context Priority:**
 
@@ -65,9 +65,9 @@ Before creating the guide, let me understand what you're trying to learn...
 
 **Checking:**
 
-- `pm/context-library/prds/` for the feature or problem you're researching
-- `pm/context-library/research/` for previous findings on this area
-- `pm/context-library/strategy/` for strategic context
+- `thoughts/shared/pm/prds/` for the feature or problem you're researching
+- `thoughts/shared/pm/research/` for previous findings on this area
+- `thoughts/shared/pm/frameworks/` for strategic context
 - Stakeholder profiles for interview target information
 
 **Based on what I find, I'll show you:**
@@ -104,7 +104,7 @@ Before creating the guide, let me understand what you're trying to learn...
 
 ## Step 0.5: Integrate Past Research
 
-**Before creating the guide, check `pm/context-library/research/` for existing interview syntheses and findings.**
+**Before creating the guide, check `thoughts/shared/pm/research/` for existing interview syntheses and findings.**
 
 Search for:
 
@@ -117,7 +117,7 @@ Search for:
 ```
 ## Research Foundation for This Interview Guide
 
-**Based on [N] previous interviews/syntheses found in pm/context-library/research/:**
+**Based on [N] previous interviews/syntheses found in thoughts/shared/pm/research/:**
 
 ### Well-Validated Themes (don't over-index here)
 These themes have strong evidence from prior research. Include 1-2 confirmation
@@ -142,7 +142,7 @@ Add open-ended discovery questions to surface new insights.
 
 > "Based on [N] previous interviews, we already know [validated themes summary]. This guide focuses on deepening [weak evidence areas] and exploring [new areas]. Avoid spending excessive time re-validating established findings."
 
-If no previous research is found, note: "No existing research found in pm/context-library/research/. This is a discovery interview -- all questions are exploratory."
+If no previous research is found, note: "No existing research found in thoughts/shared/pm/research/. This is a discovery interview -- all questions are exploratory."
 
 ---
 
@@ -342,8 +342,7 @@ Wrap up, ask for referrals
 
 **Interview guides:**
 
-- Active work: `thoughts/shared/interview-guides-[topic]-[date].md`
-- When finalized: Archive to `pm/context-library/research/interview-guides/` for team reference
+- Active work: `thoughts/shared/pm/interviews/interview-guide-[topic]-[date].md`
 - Use directly: Share with interviewing team before sessions
 
 ### Link to Other Work
@@ -365,8 +364,8 @@ After creating the guide:
 
 **Pulls from:**
 
-- `pm/context-library/research/` - Previous research on this topic
-- `pm/context-library/strategy/` - Strategic context about this user problem
+- `thoughts/shared/pm/research/` - Previous research on this topic
+- `thoughts/shared/pm/frameworks/` - Strategic context about this user problem
 - Stakeholder profiles - Information about target user segment
 
 ---
@@ -377,7 +376,7 @@ Before delivering the interview guide, verify:
 
 | Check                                 | Criteria                                                                                                  | Pass? |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------- | ----- |
-| **Past research checked**             | Searched `pm/context-library/research/` and categorized findings into validated/needs-evidence/unexplored | [ ]   |
+| **Past research checked**             | Searched `thoughts/shared/pm/research/` and categorized findings into validated/needs-evidence/unexplored | [ ]   |
 | **Guide reflects prior knowledge**    | Questions focus on gaps, not re-validating what's already known                                           | [ ]   |
 | **Research foundation note included** | Top of guide states what's known and where this guide focuses                                             | [ ]   |
 | **No leading questions**              | Every question is open-ended, not suggesting a desired answer                                             | [ ]   |
@@ -385,7 +384,7 @@ Before delivering the interview guide, verify:
 | **Time-boxed sections**               | Each section has a suggested time allocation that totals 45-60 min                                        | [ ]   |
 | **Follow-up prompts included**        | At least 2-3 follow-up probes per core question                                                           | [ ]   |
 | **Closing includes referrals**        | Guide asks "Who else should I talk to?"                                                                   | [ ]   |
-| **Output file saved**                 | Guide saved to `thoughts/shared/interview-guides-[topic]-[date].md`                                       | [ ]   |
+| **Output file saved**                 | Guide saved to `thoughts/shared/pm/interviews/interview-guide-[topic]-[date].md`                           | [ ]   |
 
 **If any check fails, address it before delivering the output.**
 

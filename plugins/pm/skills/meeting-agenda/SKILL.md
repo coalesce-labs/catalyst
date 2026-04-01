@@ -61,7 +61,7 @@ Week 3: Planning session (45 min)
 Week 4: Retro + learnings (30 min)
 ```
 
-For recurring meetings, check `pm/context-library/meetings/` and `thoughts/shared/meeting-notes/` for previous agendas and notes. Reference what was discussed last time, carry over open items, and avoid repeating the same format every week.
+For recurring meetings, check `thoughts/shared/product/meeting-notes/` for previous agendas and notes. Reference what was discussed last time, carry over open items, and avoid repeating the same format every week.
 
 **One-off meetings** need a clear single outcome and should default to 25 minutes. If you cannot define the single outcome, push back on scheduling it.
 
@@ -817,7 +817,7 @@ When the PM uses `/meeting-agenda`, I automatically:
 
 ### 1. Check Recent Meeting Context
 
-**Source:** `pm/context-library/meetings/`, recent decisions and action items
+**Source:** `thoughts/shared/product/meeting-notes/`, recent decisions and action items
 
 - **What I look for:** Related meetings, earlier discussions, open questions
 - **How I use it:** Reference previous context in pre-read section
@@ -825,7 +825,7 @@ When the PM uses `/meeting-agenda`, I automatically:
 
 ### 2. Pull Stakeholder Communication Preferences
 
-**Source:** `pm/context-library/stakeholder-template.md`
+**Source:** `thoughts/shared/pm/context/stakeholder-template.md`
 
 - **What I look for:** How each stakeholder prefers communication, decision style
 - **How I use it:** Format agenda and pre-read to match their preferences
@@ -833,7 +833,7 @@ When the PM uses `/meeting-agenda`, I automatically:
 
 ### 3. Reference Relevant PRDs & Strategy
 
-**Source:** `pm/context-library/prds/`, `pm/context-library/strategy/`
+**Source:** `thoughts/shared/pm/prds/`, `thoughts/shared/pm/frameworks/`
 
 - **What I look for:** Strategic context that informs meeting purpose
 - **How I use it:** Add strategic rationale to meeting purpose statement

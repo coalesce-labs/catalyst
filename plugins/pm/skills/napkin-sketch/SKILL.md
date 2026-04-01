@@ -18,7 +18,7 @@ Create quick wireframes as ASCII art OR capture existing UI from browser to matc
 
 **Example:** "Sketch a settings page with tabs for Profile, Security, and Billing"
 
-**Output:** Wireframe delivered inline, also saved to `thoughts/shared/prototypes/[feature]-napkin-sketch.md`
+**Output:** Wireframe delivered inline, also saved to `thoughts/shared/product/prototypes/[feature]-napkin-sketch.md`
 
 **Time:** 5-10 minutes per screen
 
@@ -592,12 +592,12 @@ Before creating any wireframe, check these sources:
 
 | Source               | Files                                                       | What to Extract                                                              |
 | -------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Active PRD           | `pm/context-library/prds/*.md`, `thoughts/shared/prds/*.md` | UI requirements, user flows, feature scope, non-goals (what NOT to design)   |
-| User Research        | `pm/context-library/research/*.md`                          | Pain points to solve, user quotes about current UX frustrations              |
-| Stakeholder Profiles | `pm/context-library/stakeholder-template.md`                | Designer preferences (e.g., Lisa wants accessibility-first), exec priorities |
+| Active PRD           | `thoughts/shared/pm/prds/*.md`                              | UI requirements, user flows, feature scope, non-goals (what NOT to design)   |
+| User Research        | `thoughts/shared/pm/*.md`                                   | Pain points to solve, user quotes about current UX frustrations              |
+| Stakeholder Profiles | `thoughts/shared/pm/context/stakeholder-template.md`        | Designer preferences (e.g., Lisa wants accessibility-first), exec priorities |
 | Design System        | Any design docs or style references in workspace            | Colors, component patterns, layout conventions to follow                     |
-| Past Prototypes      | `thoughts/shared/prototypes/*.md`                           | Existing wireframes for consistency, decisions already made                  |
-| Business Context     | `pm/context-library/business-info-template.md`              | Product type, user personas, platform (web/mobile/both)                      |
+| Past Prototypes      | `thoughts/shared/product/prototypes/*.md`                   | Existing wireframes for consistency, decisions already made                  |
+| Business Context     | `thoughts/shared/pm/context/business-info-template.md`      | Product type, user personas, platform (web/mobile/both)                      |
 
 **Priority:** PRD requirements first (the wireframe must match the spec), then user research (ground the design in real pain points), then past prototypes (maintain consistency).
 

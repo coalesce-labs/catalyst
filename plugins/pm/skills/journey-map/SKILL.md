@@ -524,7 +524,7 @@ When the PM uses `/journey-map`, I automatically:
 
 ### 1. Pull User Research for Personas & Pain Points
 
-**Source:** `pm/context-library/research/`, user research MCPs (research repository, UserTesting)
+**Source:** `thoughts/shared/pm/research/`, user research MCPs (research repository, UserTesting)
 
 - **What I look for:** User personas, quotes, pain points, behavior patterns
 - **How I use it:** Pre-populate persona sections with real research data
@@ -532,7 +532,7 @@ When the PM uses `/journey-map`, I automatically:
 
 ### 2. Extract Relevant Metrics & Analytics
 
-**Source:** PostHog, PostHog, Posthog (if connected), `pm/context-library/metrics/`
+**Source:** PostHog, PostHog, Posthog (if connected), `thoughts/shared/pm/metrics/`
 
 - **What I look for:** Conversion rates, drop-off points, time-in-flow metrics
 - **How I use it:** Quantify pain points with actual data
@@ -540,7 +540,7 @@ When the PM uses `/journey-map`, I automatically:
 
 ### 3. Align With Strategy & OKRs
 
-**Source:** `pm/context-library/strategy/`, PRDs
+**Source:** `thoughts/shared/pm/frameworks/`, PRDs
 
 - **What I look for:** Current strategic focus, activation goals, retention goals
 - **How I use it:** Suggest which journey phases matter most for strategy
@@ -548,7 +548,7 @@ When the PM uses `/journey-map`, I automatically:
 
 ### 4. Cross-Reference Customer Lifecycle
 
-**Source:** Sales/CS data, past customer journey maps in `pm/context-library/`
+**Source:** Sales/CS data, past customer journey maps in `thoughts/shared/pm/`
 
 - **What I look for:** Typical customer progression, expansion patterns
 - **How I use it:** Build customer journey map that aligns with business model
@@ -556,7 +556,7 @@ When the PM uses `/journey-map`, I automatically:
 
 ### 5. Identify Cross-Functional Stakeholders
 
-**Source:** `pm/context-library/stakeholder-template.md`
+**Source:** `thoughts/shared/pm/context/stakeholder-template.md`
 
 - **What I look for:** Who owns different journey phases (sales, product, CS, success)
 - **How I use it:** Suggest who to involve in journey mapping workshop
@@ -577,9 +577,9 @@ When the PM uses `/journey-map`, I automatically:
 
 Before presenting output to the PM, verify:
 
-- [ ] **File saved to correct location:** Output saved to `thoughts/shared/journey-maps/[journey-name]-[date].md`
-- [ ] **Context routing table was checked:** Reviewed `pm/context-library/research/` for user research, interview transcripts, and persona data before building the map
+- [ ] **File saved to correct location:** Output saved to `thoughts/shared/pm/journey-maps/[journey-name]-[date].md`
+- [ ] **Context routing table was checked:** Reviewed `thoughts/shared/pm/research/` for user research, interview transcripts, and persona data before building the map
 - [ ] **Every stage has all four elements:** Each journey phase includes actions, thoughts, emotions, and pain points (no empty or missing sections)
-- [ ] **User quotes from research included:** Where available, real user quotes from `pm/context-library/research/` are embedded in relevant journey stages (not fabricated quotes)
+- [ ] **User quotes from research included:** Where available, real user quotes from `thoughts/shared/pm/research/` are embedded in relevant journey stages (not fabricated quotes)
 - [ ] **Opportunities linked to specific product improvements:** Each opportunity names a concrete product change (e.g., "add progress bar to onboarding step 3"), not generic advice like "improve the experience"
 - [ ] **Emotional journey shows highs and lows:** The emotional arc across stages is not flat; it includes at least one high point and one low point with explanations for the shifts

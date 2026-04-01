@@ -18,7 +18,7 @@ user-invocable: true
 
 **Accepted inputs:** Zoom/Otter/Grain transcripts, bullet-point notes, voice memo dictation, Slack threads, email chains, or just "tell me what happened."
 
-**What you get:** Structured notes with decisions, action items (with owners and dates), key insights, open questions, and next steps. Saved to `thoughts/shared/meeting-notes/[date]-[topic].md`.
+**What you get:** Structured notes with decisions, action items (with owners and dates), key insights, open questions, and next steps. Saved to `thoughts/shared/product/meeting-notes/[date]-[topic].md`.
 
 **Time:** 2-5 minutes per meeting.
 
@@ -52,10 +52,10 @@ When this skill is invoked, immediately check:
 
 | Source               | Files/Folders                      | Search Terms                     | What to Extract                            |
 | -------------------- | ---------------------------------- | -------------------------------- | ------------------------------------------ |
-| Related PRDs         | `pm/context-library/prds/*.md`     | feature from meeting             | PRD context, decisions already made        |
-| Stakeholder Profiles | Stakeholder templates              | attendees from meeting           | Communication style, preferences, concerns |
-| Strategy             | `pm/context-library/strategy/*.md` | feature or decision from meeting | Strategic alignment context                |
-| Previous Meetings    | `pm/context-library/meetings/*.md` | topic from this meeting          | Historical context, related decisions      |
+| Related PRDs         | `thoughts/shared/pm/prds/*.md`              | feature from meeting             | PRD context, decisions already made        |
+| Stakeholder Profiles | Stakeholder templates                       | attendees from meeting           | Communication style, preferences, concerns |
+| Strategy             | `thoughts/shared/pm/frameworks/*.md`        | feature or decision from meeting | Strategic alignment context                |
+| Previous Meetings    | `thoughts/shared/product/meeting-notes/*.md` | topic from this meeting          | Historical context, related decisions      |
 | Action Items         | Previous meeting notes             | same owners, same topics         | Recurring blockers or items                |
 
 **Context Priority:**
@@ -80,10 +80,10 @@ Before processing, let me check if there's relevant context...
 
 **Checking:**
 
-- `pm/context-library/meetings/` for any previous meetings on this topic
+- `thoughts/shared/product/meeting-notes/` for any previous meetings on this topic
 - Stakeholder profiles for communication style of attendees
-- `pm/context-library/prds/` for related feature context
-- `pm/context-library/strategy/` for strategic alignment
+- `thoughts/shared/pm/prds/` for related feature context
+- `thoughts/shared/pm/frameworks/` for strategic alignment
 
 **Based on what I find, I'll show you:**
 
@@ -193,7 +193,7 @@ I'll create a structured summary with:
 - Next steps
 
 Output format: [Standard / Detailed / Minimal]
-(I'll use your preferred writing style from pm/context-library/writing-style-*.md)
+(I'll use your preferred writing style from thoughts/shared/pm/context/writing-style-*.md)
 
 Processing now...
 ```
@@ -369,7 +369,7 @@ I'll automatically adjust the format based on meeting type:
 
 ### By Writing Style
 
-I'll match your preferred style from `pm/context-library/writing-style-*.md`:
+I'll match your preferred style from `thoughts/shared/pm/context/writing-style-*.md`:
 
 **Internal Audience:**
 
@@ -423,7 +423,7 @@ I'll create:
 
 If you don't specify who owns an action item, I'll:
 
-- Look at stakeholder info in `pm/context-library/stakeholder-template.md` (or any profiles you add)
+- Look at stakeholder info in `thoughts/shared/pm/context/stakeholder-template.md` (or any profiles you add)
 - Check who has context on similar work
 - Suggest the right owner with reasoning
 - Flag items that need clarification
@@ -440,8 +440,8 @@ Example:
 
 I'll automatically:
 
-- Link to related PRDs in `pm/context-library/prds/`
-- Reference relevant strategy docs in `pm/context-library/`
+- Link to related PRDs in `thoughts/shared/pm/prds/`
+- Reference relevant strategy docs in `thoughts/shared/pm/frameworks/`
 - Connect to similar past meetings or decisions
 - Pull in stakeholder preferences
 
@@ -463,9 +463,9 @@ Also see: [Voice Task PRD] which used similar rollout approach successfully.
 
 Compare all time estimates and deadlines mentioned in the meeting against known dates from:
 
-- PRDs in `pm/context-library/prds/*.md` and `thoughts/shared/prds/*.md` (launch dates, milestone dates)
-- Previous meeting notes in `pm/context-library/meetings/*.md` (prior commitments, deadlines)
-- Strategy docs in `pm/context-library/strategy/*.md` (quarter end dates, OKR deadlines)
+- PRDs in `thoughts/shared/pm/prds/*.md` (launch dates, milestone dates)
+- Previous meeting notes in `thoughts/shared/product/meeting-notes/*.md` (prior commitments, deadlines)
+- Strategy docs in `thoughts/shared/pm/frameworks/*.md` (quarter end dates, OKR deadlines)
 - Calendar context if available (upcoming reviews, stakeholder meetings)
 
 If any estimates conflict with known deadlines, flag explicitly in the output:
@@ -724,7 +724,7 @@ After I create the notes, review and edit:
 
 Save processed meeting notes to:
 
-- `thoughts/shared/meeting-notes/[date]-[topic].md`
+- `thoughts/shared/product/meeting-notes/[date]-[topic].md`
 
 Over time, I'll spot patterns:
 
@@ -1028,8 +1028,7 @@ _→ Add to lessons-learned: VPs appreciate when PMs anticipate their questions_
 
 **Meeting notes:**
 
-- Quick capture: `thoughts/shared/meeting-notes/[date]-[topic].md` (raw processing)
-- When finalized: Archive to `pm/context-library/meetings/[date]-[topic].md` for historical reference
+- Save to: `thoughts/shared/product/meeting-notes/[date]-[topic].md`
 - Use as templates: Your meeting notes become template for team
 
 ### Link to Other Work
@@ -1053,10 +1052,10 @@ After processing meeting notes:
 
 **Pulls from:**
 
-- `pm/context-library/prds/` - Feature context for meeting
+- `thoughts/shared/pm/prds/` - Feature context for meeting
 - Stakeholder profiles - Communication preferences and concerns
-- `pm/context-library/strategy/` - Strategic alignment context
-- `pm/context-library/meetings/` - Previous decisions and context
+- `thoughts/shared/pm/frameworks/` - Strategic alignment context
+- `thoughts/shared/product/meeting-notes/` - Previous decisions and context
 
 ---
 
@@ -1074,7 +1073,7 @@ Before presenting the meeting notes, verify:
 - [ ] **Context cross-reference done:** At least one check against PRDs, strategy, or previous meetings was performed
 - [ ] **Key quotes are verbatim:** Customer quotes use exact wording from transcript, not paraphrased
 - [ ] **Sensitive content flagged:** If confidential topics detected, recommendation to mark as internal-only is included
-- [ ] **File saved correctly:** `thoughts/shared/meeting-notes/[YYYY-MM-DD]-[topic-kebab-case].md`
+- [ ] **File saved correctly:** `thoughts/shared/product/meeting-notes/[YYYY-MM-DD]-[topic-kebab-case].md`
 - [ ] **Next steps are actionable:** Someone reading "Next Steps" knows exactly what to do without re-reading the full notes
 
 ---

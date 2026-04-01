@@ -205,7 +205,7 @@ You will receive two data sets:
 [Paste thoughts-metrics agent output here]
 
 Generate a comprehensive context engineering dashboard following the template at:
-plugins/pm/templates/reports/CONTEXT_ENGINEERING_DAILY.md
+thoughts/shared/pm/templates/reports/CONTEXT_ENGINEERING_DAILY.md
 
 CRITICAL REQUIREMENTS:
 1. Identify developers with code activity but NO thoughts activity (not using context engineering)

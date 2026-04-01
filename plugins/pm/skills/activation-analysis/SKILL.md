@@ -22,7 +22,7 @@ Then provide:
 I'll diagnose your activation funnel using Setup -> Aha -> Habit,
 identify the biggest bottleneck, and recommend specific fixes.
 
-**Output:** Saved to `thoughts/shared/analyses/activation-analysis-[date].md`
+**Output:** Saved to `thoughts/shared/pm/analyses/activation-analysis-[date].md`
 **Time:** ~15 min with data, ~25 min if defining stages from scratch
 
 **When to use:** When diagnosing activation problems, improving onboarding, or measuring early product engagement
@@ -36,11 +36,11 @@ When this skill is invoked, immediately check:
 
 | Source            | Files/Folders                                  | Search Terms                                                           | What to Extract                                                         |
 | ----------------- | ---------------------------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Metrics/Analytics | `pm/context-library/metrics/*.md`              | "onboarding", "setup", "activation", D7, D30, "time to value", TTV     | Current activation rates by stage, onboarding metrics, D7/D30 retention |
-| User Research     | `pm/context-library/research/*.md`             | "onboarding", "setup", "first time", "confused", "stuck", "struggle"   | User feedback on onboarding, confusion points, success moments          |
-| Meeting Notes     | `pm/context-library/meetings/*.md`             | "activation", "onboarding", "new users", "drop-off", "support tickets" | CS/support feedback on where users get stuck, win/loss reasons          |
-| PRDs              | `pm/context-library/prds/*.md`                 | "onboarding", "activation", "tutorial", "first-time user"              | Past onboarding improvements, features to drive activation              |
-| Business Info     | `pm/context-library/business-info-template.md` | target user, customer segment, use case, primary value                 | Who you're activating, what value matters to them                       |
+| Metrics/Analytics | `thoughts/shared/pm/metrics/*.md`              | "onboarding", "setup", "activation", D7, D30, "time to value", TTV     | Current activation rates by stage, onboarding metrics, D7/D30 retention |
+| User Research     | `thoughts/shared/pm/*.md`                      | "onboarding", "setup", "first time", "confused", "stuck", "struggle"   | User feedback on onboarding, confusion points, success moments          |
+| Meeting Notes     | `thoughts/shared/product/meeting-notes/*.md`   | "activation", "onboarding", "new users", "drop-off", "support tickets" | CS/support feedback on where users get stuck, win/loss reasons          |
+| PRDs              | `thoughts/shared/pm/prds/*.md`                 | "onboarding", "activation", "tutorial", "first-time user"              | Past onboarding improvements, features to drive activation              |
+| Business Info     | `thoughts/shared/pm/context/business-info-template.md` | target user, customer segment, use case, primary value                 | Who you're activating, what value matters to them                       |
 
 **Context Priority:**
 
@@ -62,11 +62,11 @@ Before measuring the Setup → Aha → Habit stages, let me check what data alre
 
 **Checking:**
 
-- `pm/context-library/business-info-template.md` for your product and target users
-- `pm/context-library/metrics/` for existing activation metrics and onboarding data
-- `pm/context-library/research/` for user research on onboarding struggles
-- `pm/context-library/meetings/` for CS/support feedback on where users get stuck
-- `pm/context-library/prds/` for past onboarding improvements
+- `thoughts/shared/pm/context/business-info-template.md` for your product and target users
+- `thoughts/shared/pm/metrics/` for existing activation metrics and onboarding data
+- `thoughts/shared/pm/` for user research on onboarding struggles
+- `thoughts/shared/product/meeting-notes/` for CS/support feedback on where users get stuck
+- `thoughts/shared/pm/prds/` for past onboarding improvements
 
 **[If analytics MCP connected]:** "Let me also query [PostHog/PostHog] for your current activation funnel, setup completion rates, and D7/D30 retention by cohort."
 
@@ -259,7 +259,7 @@ The Setup → Aha → Habit framework breaks activation into three measurable st
 Use this prompt pattern:
 
 ```
-Use /activation-analysis and reference pm/context-library/business-info-template.md
+Use /activation-analysis and reference [[business-info-template]]
 
 Help me define the Setup → Aha → Habit stages for my product.
 
@@ -335,7 +335,7 @@ Overall Activation = Setup Rate × Aha Rate × Habit Rate
 2. **For Setup improvements:**
    - Reduce required fields
    - Add progress indicators
-   - Provide pm/templates/examples
+   - Provide templates/examples
    - Allow "skip" for non-essential items
    - Use social proof ("Join 10,000 teams...")
 
@@ -522,18 +522,17 @@ Use this with your team:
 
 **Research & Findings:**
 
-- Save to: `thoughts/shared/analyses/activation-analysis-[date].md`
-- When finalized, move to: `pm/context-library/research/activation-[product].md`
+- Save to: `thoughts/shared/pm/analyses/activation-analysis-[date].md`
 
 **Onboarding Improvements:**
 
-- Create PRD in `pm/context-library/prds/` for each onboarding change
+- Create PRD in `thoughts/shared/pm/prds/` for each onboarding change
 - Link this activation analysis as context
 - Track changes in the PRD's success metrics section
 
 **Activation Metrics:**
 
-- Update `pm/context-library/metrics/` with your Setup, Aha, Habit definitions and rates
+- Update `thoughts/shared/pm/metrics/` with your Setup, Aha, Habit definitions and rates
 - Track weekly changes as baseline for comparison
 
 ### Cross-Skill Integration

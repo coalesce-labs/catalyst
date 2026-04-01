@@ -14,7 +14,7 @@ disable-model-invocation: true
 
 **Example:** "Create a launch checklist for the checkout redesign, targeting March 15"
 
-**Output:** Saved to `thoughts/shared/launches/[feature-name]-launch-checklist.md`
+**Output:** Saved to `thoughts/shared/pm/launches/[feature-name]-launch-checklist.md`
 
 **Time:** 15-20 minutes to generate, then ongoing tracking
 
@@ -34,11 +34,11 @@ Generate comprehensive launch checklist ensuring nothing falls through the crack
 
 **Check these files first:**
 
-1. `thoughts/shared/prds/` or `pm/context-library/prds/` - PRD for feature details
-2. `pm/context-library/launches/` - Past launch checklists (learn from history)
-3. `pm/context-library/strategy/` - GTM approach, stakeholders
-4. `pm/context-library/stakeholder-*.md` - Who needs to be involved
-5. `pm/templates/launch-checklist-template.md` - Base template (if exists)
+1. `thoughts/shared/pm/prds/` - PRD for feature details
+2. `thoughts/shared/pm/launches/` - Past launch checklists (learn from history)
+3. `thoughts/shared/pm/frameworks/` - GTM approach, stakeholders
+4. `thoughts/shared/pm/context/stakeholder-template.md` - Who needs to be involved
+5. `thoughts/shared/pm/templates/launch-checklist-template.md` - Base template (if exists)
 
 ---
 
@@ -64,7 +64,7 @@ Generate comprehensive launch checklist ensuring nothing falls through the crack
 
 ### Step 2: Generate Checklist
 
-Create file: `thoughts/shared/launches/[feature-name]-launch-checklist.md`
+Create file: `thoughts/shared/pm/launches/[feature-name]-launch-checklist.md`
 
 **Template Structure:**
 

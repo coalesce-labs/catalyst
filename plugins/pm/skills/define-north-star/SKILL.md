@@ -14,10 +14,10 @@ user-invocable: true
 ## Quick Start
 
 1. Tell me: "Help me define our North Star metric" (or "Validate our current North Star")
-2. I will check `pm/context-library/business-info-template.md` and `pm/context-library/strategy/` for your business model, growth stage, and existing metrics
+2. I will check [[business-info-template]] and `thoughts/shared/pm/frameworks/` for your business model, growth stage, and existing metrics
 3. I will ask about your core value, retention drivers, and business model to narrow candidates
 4. We work through: Core Value identification, Metric formula (Frequency x Core Action x Breadth), Validation tests, Input metrics, and Guardrails
-5. Output goes to `thoughts/shared/analyses/north-star-[quarter].md`
+5. Output goes to `thoughts/shared/pm/metrics/north-star-[quarter].md`
 
 **Key decision:** Not every product needs a single North Star. Marketplaces, multi-product companies, and complex B2B may need a constellation of 2-4 metrics instead. I will help you decide which approach fits.
 
@@ -28,11 +28,11 @@ When this skill is invoked, immediately check:
 
 | Source          | Files/Folders                                  | Search Terms                             | What to Extract                       |
 | --------------- | ---------------------------------------------- | ---------------------------------------- | ------------------------------------- |
-| Strategy Docs   | `pm/context-library/strategy/*.md`             | objective, business goal, success metric | Current metric direction, if any      |
-| Business Model  | `pm/context-library/business-info-template.md` | revenue model, growth focus, metrics     | What drives the business              |
-| Metrics History | `pm/context-library/metrics/*.md`              | baseline, trends, retention data         | Current metric baselines and movement |
-| Meetings        | `pm/context-library/meetings/*.md`             | "North Star", "KPI", "success metric"    | Stakeholder expectations              |
-| PRDs            | `pm/context-library/prds/*.md`                 | success metric, target                   | Feature-level success indicators      |
+| Strategy Docs   | `thoughts/shared/pm/frameworks/*.md`           | objective, business goal, success metric | Current metric direction, if any      |
+| Business Model  | `thoughts/shared/pm/context/business-info-template.md` | revenue model, growth focus, metrics     | What drives the business              |
+| Metrics History | `thoughts/shared/pm/metrics/*.md`              | baseline, trends, retention data         | Current metric baselines and movement |
+| Meetings        | `thoughts/shared/product/meeting-notes/*.md`   | "North Star", "KPI", "success metric"    | Stakeholder expectations              |
+| PRDs            | `thoughts/shared/pm/prds/*.md`                 | success metric, target                   | Feature-level success indicators      |
 
 **Context Priority:**
 
@@ -56,10 +56,10 @@ Before defining your North Star, let me understand where you are...
 
 **Checking:**
 
-- `pm/context-library/business-info-template.md` for your business model
-- `pm/context-library/strategy/` for strategic direction
-- `pm/context-library/metrics/` for baseline metrics and trends
-- `pm/context-library/meetings/` for stakeholder priorities
+- `thoughts/shared/pm/context/business-info-template.md` for your business model
+- `thoughts/shared/pm/frameworks/` for strategic direction
+- `thoughts/shared/pm/metrics/` for baseline metrics and trends
+- `thoughts/shared/product/meeting-notes/` for stakeholder priorities
 
 **Based on what I find, I'll show you:**
 
@@ -229,7 +229,7 @@ Answer these questions:
 Use this prompt:
 
 ```
-Use /define-north-star and reference pm/context-library/business-info-template.md
+Use /define-north-star and reference [[business-info-template]]
 
 Help me identify our core value:
 - Product: [describe your product]
@@ -630,8 +630,7 @@ Without guardrails, teams will find ways to game the North Star that hurt the bu
 
 **North Star definition:**
 
-- Active work: `thoughts/shared/analyses/north-star-[quarter].md` (your working definition)
-- When finalized: Move to `pm/context-library/metrics/north-star-[year].md` for reference
+- Save to: `thoughts/shared/pm/metrics/north-star-[quarter].md` (your working definition)
 - Share widely: This becomes the basis for all team metrics
 
 ### Link to Other Work
@@ -654,8 +653,8 @@ After defining North Star:
 
 **Pulls from:**
 
-- `pm/context-library/business-info-template.md` - Business model informs what matters
-- `pm/context-library/metrics/` - Historical data validates metric choices
+- [[business-info-template]] - Business model informs what matters
+- `thoughts/shared/pm/metrics/` - Historical data validates metric choices
 - `/retention-analysis` - Understand what drives long-term success
 - `/activation-analysis` - Early indicators of North Star movement
 

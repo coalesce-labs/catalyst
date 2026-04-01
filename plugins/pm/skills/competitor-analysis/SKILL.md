@@ -19,7 +19,7 @@ Two modes: **Deep Analysis** (comprehensive one-time research) + **Ongoing Monit
 
 **Example:** "Analyze Competitor X -- we're losing enterprise deals to them"
 
-**Output:** `thoughts/shared/research-synthesis/competitor-analysis-[name]-[date].md`
+**Output:** `thoughts/shared/pm/analyses/competitor-analysis-[name]-[date].md`
 
 **Time:** Deep Analysis: 2-4 hours | Monitoring: 30 min/month
 
@@ -30,12 +30,12 @@ When this skill is invoked, immediately check:
 
 | Source            | Files/Folders                                  | Search Terms                                                             | What to Extract                                   |
 | ----------------- | ---------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------- |
-| User Research     | `pm/context-library/research/*.md`             | competitor name, "switched to", "chose", "vs [competitor]", "competitor" | Customer quotes, pain points, feature comparisons |
-| Existing Analysis | `pm/context-library/research/competitive-*.md` | competitor name                                                          | Past findings, dates, trends, avoid duplication   |
-| Meeting Notes     | `pm/context-library/meetings/*.md`             | competitor name, "lost deal", "churn", sales, CS                         | Sales losses, CS feedback, win/loss patterns      |
-| PRDs              | `pm/context-library/prds/*.md`                 | competitor name, "competitive", "positioning"                            | Feature decisions, positioning rationale          |
-| Strategy          | `pm/context-library/strategy/*.md`             | competitor name, "positioning", "differentiation"                        | Strategic context, counter-positioning            |
-| Metrics           | `pm/context-library/metrics/*.md`              | "churn", "retention", competitor name                                    | Churn to competitors, competitive benchmarks      |
+| User Research     | `thoughts/shared/pm/*.md`                      | competitor name, "switched to", "chose", "vs [competitor]", "competitor" | Customer quotes, pain points, feature comparisons |
+| Existing Analysis | `thoughts/shared/pm/analyses/competitive-*.md` | competitor name                                                          | Past findings, dates, trends, avoid duplication   |
+| Meeting Notes     | `thoughts/shared/product/meeting-notes/*.md`   | competitor name, "lost deal", "churn", sales, CS                         | Sales losses, CS feedback, win/loss patterns      |
+| PRDs              | `thoughts/shared/pm/prds/*.md`                 | competitor name, "competitive", "positioning"                            | Feature decisions, positioning rationale          |
+| Strategy          | `thoughts/shared/pm/frameworks/*.md`           | competitor name, "positioning", "differentiation"                        | Strategic context, counter-positioning            |
+| Metrics           | `thoughts/shared/pm/metrics/*.md`              | "churn", "retention", competitor name                                    | Churn to competitors, competitive benchmarks      |
 
 **Context Priority:**
 
@@ -57,12 +57,12 @@ Before diving into research, let me check what competitive intelligence already 
 
 **Checking:**
 
-- `pm/context-library/research/` for user interviews mentioning competitors
-- `pm/context-library/research/competitive-*.md` for past competitive analysis
-- `pm/context-library/meetings/` for sales/CS notes with competitive intel
-- `pm/context-library/prds/` for competitive positioning decisions
-- `pm/context-library/strategy/` for strategic context
-- `pm/context-library/metrics/` for churn data
+- `thoughts/shared/pm/` for user interviews mentioning competitors
+- `thoughts/shared/pm/analyses/competitive-*.md` for past competitive analysis
+- `thoughts/shared/product/meeting-notes/` for sales/CS notes with competitive intel
+- `thoughts/shared/pm/prds/` for competitive positioning decisions
+- `thoughts/shared/pm/frameworks/` for strategic context
+- `thoughts/shared/pm/metrics/` for churn data
 
 **[If analytics MCP connected]:** "Let me also query [PostHog/PostHog] for churn patterns and competitor-related data."
 
@@ -137,7 +137,7 @@ Based on your objective and existing context:
 
 **Time:** 2-4 hours (depending on number of competitors)
 
-**Output:** Comprehensive report saved to `thoughts/shared/research-synthesis/competitor-analysis-[date].md`
+**Output:** Comprehensive report saved to `thoughts/shared/pm/analyses/competitor-analysis-[date].md`
 
 ### Ongoing Monitoring Mode
 
@@ -157,7 +157,7 @@ Based on your objective and existing context:
 
 **Time:** 30 minutes/month
 
-**Output:** Updates saved to `thoughts/shared/research-synthesis/competitive-intel-[month].md`
+**Output:** Updates saved to `thoughts/shared/pm/analyses/competitive-intel-[month].md`
 
 ---
 
@@ -432,7 +432,7 @@ Instead of complex Make.com automation, I'll help you set up:
 - [ ] [Action 2 with owner]
 ```
 
-Save to: `thoughts/shared/research-synthesis/competitive-intel-[month].md`
+Save to: `thoughts/shared/pm/analyses/competitive-intel-[month].md`
 
 ### Optional: Google Alerts Setup
 
@@ -451,12 +451,11 @@ I can help you set up:
 
 **Deep Analysis:**
 
-- Active work: `thoughts/shared/research-synthesis/competitor-analysis-[name]-[date].md`
-- When finalized: Move to `pm/context-library/research/` for future reference
+- Save to: `thoughts/shared/pm/analyses/competitor-analysis-[name]-[date].md`
 
 **Ongoing Monitoring:**
 
-- Save directly to: `thoughts/shared/research-synthesis/competitive-intel-[month].md`
+- Save to: `thoughts/shared/pm/analyses/competitive-intel-[month].md`
 
 ### Link to Other Work
 

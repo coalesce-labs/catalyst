@@ -30,7 +30,7 @@ I'll help you:
 
 For user research interview debriefs, use /user-research-synthesis instead.
 
-Output: thoughts/shared/interview-feedback/[date]-[company]-debrief.md
+Output: thoughts/shared/pm/interviews/[date]-[company]-debrief.md
 ```
 
 ## When to Use This Skill
@@ -274,14 +274,14 @@ This comparison accelerates learning by making the gap between intention and exe
 
 ### Step 6: Pattern Recognition (Multi-Interview)
 
-**Before generating feedback, check `thoughts/shared/interview-feedback/` for previous debrief files.**
+**Before generating feedback, check `thoughts/shared/pm/interviews/` for previous debrief files.**
 
 If previous debriefs are found, show a trend analysis:
 
 ```
 ## Cross-Interview Pattern Analysis
 
-**Previous debriefs found:** [N] files in thoughts/shared/interview-feedback/
+**Previous debriefs found:** [N] files in thoughts/shared/pm/interviews/
 
 ### Trend Report (across last [N] interviews)
 
@@ -625,7 +625,7 @@ After every interview debrief:
 
 **During job search:**
 
-- Track all feedback in `thoughts/shared/interview-feedback/`
+- Track all feedback in `thoughts/shared/pm/interviews/`
 - Monthly review: Look for patterns
 - Adjust prep based on recurring weaknesses
 
@@ -649,10 +649,10 @@ Before delivering the debrief, verify:
 | **Scores are honest**            | Scores reflect actual performance, not what the PM wants to hear                                          | [ ]   |
 | **Specific examples**            | Each strength and weakness cites a specific moment from the interview, not generalities                   | [ ]   |
 | **Improvement drills provided**  | At least 1 targeted drill for the lowest-scoring dimension                                                | [ ]   |
-| **Pattern check done**           | Checked `thoughts/shared/interview-feedback/` for prior debriefs and showed trends if found               | [ ]   |
+| **Pattern check done**           | Checked `thoughts/shared/pm/interviews/` for prior debriefs and showed trends if found               | [ ]   |
 | **Action items concrete**        | Next steps are specific and time-bound, not vague ("practice more")                                       | [ ]   |
 | **Follow-up tasks included**     | Thank-you email reminder, LinkedIn connection, next round prep noted                                      | [ ]   |
-| **Output file saved**            | Debrief saved to `thoughts/shared/interview-feedback/[date]-[company]-debrief.md`                         | [ ]   |
+| **Output file saved**            | Debrief saved to `thoughts/shared/pm/interviews/[date]-[company]-debrief.md`                         | [ ]   |
 
 **If any check fails, address it before delivering the output.**
 

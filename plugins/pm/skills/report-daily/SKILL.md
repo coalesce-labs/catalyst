@@ -171,11 +171,11 @@ Combine research results to identify:
 ### Step 5: Save Report
 
 **IMPORTANT: Document Storage Rules**
-- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- ALWAYS write to `thoughts/shared/pm/reports/`
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 ```bash
-REPORT_DIR="thoughts/shared/reports/daily"
+REPORT_DIR="thoughts/shared/pm/reports"
 mkdir -p "$REPORT_DIR"
 
 REPORT_FILE="$REPORT_DIR/$(date +%Y-%m-%d)-team-daily.md"
@@ -210,7 +210,7 @@ Quick Actions:
   • Assign backlog work to Dave and Emily
   • Check TEAM-465 status with Charlie
 
-Full report: thoughts/shared/reports/daily/2025-01-27-team-daily.md
+Full report: thoughts/shared/pm/reports/2025-01-27-team-daily.md
 ```
 
 ## Success Criteria

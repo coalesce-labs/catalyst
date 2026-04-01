@@ -23,7 +23,7 @@ I'll walk you through the decision tree: reversibility, hypothesis
 strength, detectable impact, and risk level. You'll get a clear
 recommendation: A/B test, ship + monitor, or just ship.
 
-**Output:** Decision documented inline or saved to `thoughts/shared/decisions/`
+**Output:** Decision documented inline or saved to `thoughts/shared/product/decisions/`
 **Time:** ~5 min for clear-cut cases, ~15 min for nuanced decisions
 
 **When to use:** Before building any feature, when stakeholders demand "data-driven" decisions, or when unsure if testing is worth the effort
@@ -386,7 +386,7 @@ When the PM uses `/experiment-decision`, I automatically:
 
 ### 1. Check Historical Reversibility Precedent
 
-**Source:** `pm/context-library/decisions/`, past decisions
+**Source:** `thoughts/shared/product/decisions/`, past decisions
 
 - **What I look for:** Similar decisions, how reversibility was judged
 - **How I use it:** Ensure consistent reversibility assessment
@@ -394,7 +394,7 @@ When the PM uses `/experiment-decision`, I automatically:
 
 ### 2. Extract Success Metrics Framework
 
-**Source:** `pm/context-library/metrics/`, active PRDs
+**Source:** `thoughts/shared/pm/metrics/`, active PRDs
 
 - **What I look for:** What metrics you typically measure, variance patterns
 - **How I use it:** Calculate minimum detectable effect (MDE) more accurately
@@ -410,7 +410,7 @@ When the PM uses `/experiment-decision`, I automatically:
 
 ### 4. Check Stakeholder Consensus on Risk
 
-**Source:** `pm/context-library/stakeholder-template.md`, recent discussions
+**Source:** `thoughts/shared/pm/context/stakeholder-template.md`, recent discussions
 
 - **What I look for:** Stakeholder risk tolerance, veto power
 - **How I use it:** Surface if high-risk decision needs executive approval

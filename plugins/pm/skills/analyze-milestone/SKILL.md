@@ -144,11 +144,11 @@ Format the analyzer output into final report:
 ### Step 5: Save Report
 
 **IMPORTANT: Document Storage Rules**
-- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- ALWAYS write to `thoughts/shared/pm/reports/`
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 ```bash
-REPORT_DIR="thoughts/shared/reports/milestones"
+REPORT_DIR="thoughts/shared/pm/reports"
 mkdir -p "$REPORT_DIR"
 
 # Sanitize milestone name for filename
@@ -180,7 +180,7 @@ Priority Actions:
   2. [Action 2]
   3. [Action 3]
 
-Full report: thoughts/shared/reports/milestones/YYYY-MM-DD-milestone.md
+Full report: thoughts/shared/pm/reports/YYYY-MM-DD-milestone.md
 ```
 
 ## Success Criteria

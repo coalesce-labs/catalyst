@@ -187,7 +187,7 @@ echo "✅ Backlog grooming updates applied"
 
 ```bash
 # Save update script
-UPDATE_SCRIPT="thoughts/shared/reports/backlog/$(date +%Y-%m-%d)-grooming-updates.sh"
+UPDATE_SCRIPT="thoughts/shared/pm/reports/$(date +%Y-%m-%d)-grooming-updates.sh"
 mkdir -p "$(dirname "$UPDATE_SCRIPT")"
 # [script contents saved here]
 chmod +x "$UPDATE_SCRIPT"
@@ -196,11 +196,11 @@ chmod +x "$UPDATE_SCRIPT"
 ### Step 6: Save Report
 
 **IMPORTANT: Document Storage Rules**
-- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- ALWAYS write to `thoughts/shared/pm/reports/`
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 ```bash
-REPORT_DIR="thoughts/shared/reports/backlog"
+REPORT_DIR="thoughts/shared/pm/reports"
 mkdir -p "$REPORT_DIR"
 
 REPORT_FILE="$REPORT_DIR/$(date +%Y-%m-%d)-backlog-grooming.md"
