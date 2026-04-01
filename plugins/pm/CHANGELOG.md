@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.1.0...catalyst-pm-v5.2.0) (2026-04-01)
+
+
+### Features
+
+* **dev,pm:** wiki-links and PM thoughts path restructuring ([#47](https://github.com/coalesce-labs/catalyst/issues/47)) ([fb32e36](https://github.com/coalesce-labs/catalyst/commit/fb32e3622619bfd317c02150565b107158d57746))
+
 ## [5.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.0.0...catalyst-pm-v5.1.0) (2026-03-25)
 
 
