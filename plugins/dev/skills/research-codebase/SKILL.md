@@ -172,6 +172,12 @@ system in this area. Focus on WHAT EXISTS, not what should exist.}
 ## Open Questions
 
 {Areas that would benefit from further investigation}
+
+## Related Documents
+
+{List related thoughts documents using wiki-links, e.g.:}
+- [[YYYY-MM-DD-source-ticket|Source Ticket]]
+- [[YYYY-MM-DD-related-research|Related Research]]
 ```
 
 ### Step 7: Add GitHub permalinks (if applicable)

@@ -32,11 +32,11 @@ When this skill is invoked, immediately check:
 
 | Source               | Files/Folders                      | Search Terms                      | What to Extract                   |
 | -------------------- | ---------------------------------- | --------------------------------- | --------------------------------- |
-| Recent PRDs          | `pm/context-library/prds/*.md`     | feature being updated             | Feature status and changes        |
-| Meeting Notes        | `pm/context-library/meetings/*.md` | this week's meetings              | Decisions, action items, blockers |
-| Action Items         | `pm/context-library/meetings/`     | completed / in progress / blocked | Track completion of commitments   |
-| Strategy             | `pm/context-library/strategy/*.md` | strategic pillars                 | Tie accomplishments to strategy   |
-| Metrics              | `pm/context-library/metrics/*.md`  | baseline, trends                  | Metric movement and progress      |
+| Recent PRDs          | `thoughts/shared/pm/prds/*.md`              | feature being updated             | Feature status and changes        |
+| Meeting Notes        | `thoughts/shared/product/meeting-notes/*.md` | this week's meetings              | Decisions, action items, blockers |
+| Action Items         | `thoughts/shared/product/meeting-notes/`     | completed / in progress / blocked | Track completion of commitments   |
+| Strategy             | `thoughts/shared/pm/frameworks/*.md`         | strategic pillars                 | Tie accomplishments to strategy   |
+| Metrics              | `thoughts/shared/pm/metrics/*.md`            | baseline, trends                  | Metric movement and progress      |
 | Stakeholder Profiles | Stakeholder templates              | your audience                     | Communication style for audience  |
 
 **Context Priority:**
@@ -61,10 +61,10 @@ Before drafting, let me gather what happened...
 
 **Checking:**
 
-- `pm/context-library/meetings/` for recent meetings this week/period
-- `pm/context-library/prds/` for features you're working on
-- `pm/context-library/metrics/` for recent metric changes
-- `pm/context-library/strategy/` for strategic context
+- `thoughts/shared/product/meeting-notes/` for recent meetings this week/period
+- `thoughts/shared/pm/prds/` for features you're working on
+- `thoughts/shared/pm/metrics/` for recent metric changes
+- `thoughts/shared/pm/frameworks/` for strategic context
 - Stakeholder profiles for communication style of audience
 
 **Based on what I find, I'll show you:**
@@ -864,8 +864,7 @@ Given the extra time, we could:
 
 **Status updates:**
 
-- Weekly/recurring: Save to `thoughts/shared/status-updates/[date]-[audience].md`
-- Archive: Move finalized updates to `pm/context-library/meetings/status-updates/` for historical record
+- Weekly/recurring: Save to `thoughts/shared/pm/reports/[date]-[audience].md`
 - Share: Send directly or paste into Slack/email
 
 ### Link to Other Work
@@ -893,7 +892,7 @@ After creating status update:
 - `/prd-draft` - Feature status and progress on PRDs
 - `/feature-results` - Shipped feature performance
 - `/metrics-framework` - Current metric values and movement
-- `pm/context-library/strategy/` - Strategic context and goals
+- `thoughts/shared/pm/frameworks/` - Strategic context and goals
 
 ---
 

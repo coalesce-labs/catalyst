@@ -22,11 +22,10 @@ Catches gaps, challenges assumptions, and surfaces conflicts before stakeholder 
 
 **Check these files first:**
 
-1. `thoughts/shared/prds/` - Active PRDs to review
-2. `pm/context-library/prds/` - Reference PRDs and past reviews
-3. `pm/sub-agents/` - The 7 reviewer personas
-4. `pm/context-library/strategy/` - Strategic context for executive review
-5. `pm/context-library/research/` - User research for UXR validation
+1. `thoughts/shared/pm/prds/` - Active PRDs to review
+2. `thoughts/shared/pm/sub-agents/` - The 7 reviewer personas
+3. `thoughts/shared/pm/frameworks/` - Strategic context for executive review
+4. `thoughts/shared/pm/` - User research for UXR validation
 
 **Sub-agents available:**
 
@@ -45,12 +44,12 @@ Catches gaps, challenges assumptions, and surfaces conflicts before stakeholder 
 ### Step 1: PRD Selection
 
 1. **If user specified PRD name:**
-   - Look for it in `thoughts/shared/prds/` and `pm/context-library/prds/`
+   - Look for it in `thoughts/shared/pm/prds/`
    - If found: Proceed
    - If not found: List available PRDs, ask user to choose
 
 2. **If no PRD specified:**
-   - Scan `thoughts/shared/prds/` for recent PRDs (modified in last 30 days)
+   - Scan `thoughts/shared/pm/prds/` for recent PRDs (modified in last 30 days)
    - List them with:
      - File name
      - Title (from content)
@@ -194,7 +193,7 @@ PRD Content:
 [Full PRD text]
 
 Strategic Context:
-[Include content from pm/context-library/strategy/ if available]
+[Include content from thoughts/shared/pm/frameworks/ if available]
 
 Review framework:
 1. Strategic Alignment
@@ -285,7 +284,7 @@ PRD Content:
 [Full PRD text]
 
 User Research Context:
-[Include recent research from pm/context-library/research/ if relevant]
+[Include recent research from thoughts/shared/pm/ if relevant]
 
 Review framework:
 1. Research Validation
@@ -459,7 +458,7 @@ Once all 7 agents complete (wait for all Task outputs):
 
 ### Step 5: Generate Review Synthesis
 
-Create file: `thoughts/shared/prds/[prd-name]-review-synthesis.md`
+Create file: `thoughts/shared/pm/reviews/[prd-name]-review-synthesis.md`
 
 **Template:**
 

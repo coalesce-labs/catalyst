@@ -23,7 +23,7 @@ user-invocable: true
 
 ## Same-Day Plan Detection
 
-Before generating a new plan, check `thoughts/shared/` for an existing plan from today.
+Before generating a new plan, check `thoughts/shared/pm/reports/` for an existing plan from today.
 
 **If a same-day plan exists:**
 
@@ -60,12 +60,12 @@ Inspired by personal operating system patterns but tailored specifically for Pro
 
 **Check these files first:**
 
-1. `pm/context-library/strategy/` - Quarter priorities, OKRs, North Star
-2. `thoughts/shared/weekly-plans/` - This week's priorities (if `/weekly-plan` was run)
-3. `thoughts/shared/prds/` - Active PRDs and their stages
-4. `pm/context-library/stakeholder-*.md` - Stakeholder profiles and communication styles
-5. `thoughts/shared/meeting-notes/` - Recent meeting context
-6. `pm/context-library/launches/` - Recently launched features (past 2 weeks)
+1. `thoughts/shared/pm/frameworks/` - Quarter priorities, OKRs, North Star
+2. `thoughts/shared/pm/reports/` - This week's priorities (if `/weekly-plan` was run)
+3. `thoughts/shared/pm/prds/` - Active PRDs and their stages
+4. `thoughts/shared/pm/context/stakeholder-*.md` - Stakeholder profiles and communication styles
+5. `thoughts/shared/product/meeting-notes/` - Recent meeting context
+6. `thoughts/shared/pm/launches/` - Recently launched features (past 2 weeks)
 
 **Integration Options (Multiple Paths):**
 
@@ -127,7 +127,7 @@ If no integrations available, I'll:
    - Calculate day of week, week number
 
 2. **Check for yesterday's plan (carry-over):**
-   - Read `thoughts/shared/daily-plans/` for yesterday's plan file
+   - Read `thoughts/shared/pm/reports/` for yesterday's plan file
    - If found: Identify which items were likely completed vs. deferred based on:
      - Items with checkboxes still unchecked
      - P0 tasks that had no time blocked
@@ -136,7 +136,7 @@ If no integrations available, I'll:
    - If no previous plan exists, skip this step.
 
 3. **Check for weekly plan:**
-   - Read `thoughts/shared/weekly-plans/YYYY-WXX-weekly-plan.md` for current week
+   - Read `thoughts/shared/pm/reports/YYYY-WXX-weekly-plan.md` for current week
    - If exists: Extract this week's Top 3 priorities
    - If missing: Note that week isn't planned (suggest `/weekly-plan`)
 
@@ -164,8 +164,8 @@ Extract:
 
 For each meeting:
 
-- Look up attendees in `pm/context-library/stakeholder-*.md`
-- Scan `thoughts/shared/meeting-notes/` for recent interactions with each person
+- Look up attendees in `thoughts/shared/pm/context/stakeholder-*.md`
+- Scan `thoughts/shared/product/meeting-notes/` for recent interactions with each person
 - Note: What was discussed last time, open action items
 
 Flag issues:
@@ -207,7 +207,7 @@ If Gmail MCP not available:
 
 **C. Active PRDs & Initiatives:**
 
-Scan `thoughts/shared/prds/` and `pm/context-library/prds/`:
+Scan `thoughts/shared/pm/prds/`:
 
 - Check file modification dates (recently updated = active)
 - Read frontmatter or first section to determine stage:
@@ -224,7 +224,7 @@ For each active PRD:
 - What the next milestone is
 - Who's blocking progress (if stalled)
 
-Cross-reference with `pm/context-library/strategy/`:
+Cross-reference with `thoughts/shared/pm/frameworks/`:
 
 - How does each PRD map to quarter priorities?
 - Which strategic pillar does it support?
@@ -245,7 +245,7 @@ Filter by priority/labels:
 
 If MCP not available:
 
-- Scan `thoughts/shared/meeting-notes/` for unchecked action items
+- Scan `thoughts/shared/product/meeting-notes/` for unchecked action items
 - Look for task lists in recent notes
 
 Categorize:
@@ -258,7 +258,7 @@ Categorize:
 
 **E. Metrics to Monitor (Analytics MCP or files):**
 
-Check `pm/context-library/launches/` for features launched in past 2 weeks.
+Check `thoughts/shared/pm/launches/` for features launched in past 2 weeks.
 
 For each recent launch:
 If Analytics MCP available:
@@ -271,7 +271,7 @@ Metrics: Adoption, engagement, conversion (based on PRD success criteria)
 
 If MCP not available:
 
-- Check if metrics file exists in `pm/context-library/metrics/`
+- Check if metrics file exists in `thoughts/shared/pm/metrics/`
 - Or note: "Manual check needed for [feature] metrics"
 
 Flag:
@@ -287,11 +287,11 @@ Flag:
 For each person you're meeting today:
 
 1. **Profile lookup:**
-   - Read `pm/context-library/stakeholder-*.md` if exists
+   - Read `thoughts/shared/pm/context/stakeholder-*.md` if exists
    - Extract: Role, communication style, priorities, pet peeves
 
 2. **Recent interaction history:**
-   - Scan `thoughts/shared/meeting-notes/` for past meetings with this person
+   - Scan `thoughts/shared/product/meeting-notes/` for past meetings with this person
    - Extract: Last meeting date, topics discussed, commitments made
 
 3. **Open loops:**
@@ -352,7 +352,7 @@ If light meeting day (< 2 hours):
 
 ### Step 4: Generate Daily Plan
 
-Create file: `thoughts/shared/daily-plans/YYYY-MM-DD-daily-plan.md`
+Create file: `thoughts/shared/pm/reports/YYYY-MM-DD-daily-plan.md`
 
 **Template:**
 
@@ -525,7 +525,7 @@ _Why these three:_
 
 Include this section when ANY of these are true:
 
-- PM's role is VP, Director, or Head of [function] (check `pm/context-library/personal-context-pm-background.md` or `pm/context-library/business-info-template.md`)
+- PM's role is VP, Director, or Head of [function] (check `thoughts/shared/pm/context/personal-context-pm-background.md` or `thoughts/shared/pm/context/business-info-template.md`)
 - PM has direct reports or manages PM leads (check stakeholder profiles for reports)
 - PM explicitly asks for delegation suggestions
 
@@ -581,7 +581,7 @@ Before presenting the daily plan, verify:
 - [ ] **Stakeholder profiles used:** If profiles exist, attendee context references them (not generic)
 - [ ] **Strategic alignment present:** At least one task or meeting connects to weekly/quarterly goals
 - [ ] **Delegation section:** Included with stated reason (e.g., "you manage 3 reports") OR excluded because PM is IC / no reports found
-- [ ] **File saved:** Plan saved to `thoughts/shared/daily-plans/YYYY-MM-DD-daily-plan.md`
+- [ ] **File saved:** Plan saved to `thoughts/shared/pm/reports/YYYY-MM-DD-daily-plan.md`
 
 ---
 
@@ -610,7 +610,7 @@ When user runs `/daily-plan tomorrow`:
    - Check what got done (if daily plan exists for today)
    - Identify what's carrying over
 3. **Generate tomorrow's draft plan**
-4. **Save as:** `thoughts/shared/daily-plans/YYYY-MM-DD-draft.md`
+4. **Save as:** `thoughts/shared/pm/reports/YYYY-MM-DD-draft.md`
 5. **Prompt:** "Tomorrow's plan is ready. Want to adjust priorities before end of day?"
 
 ---
@@ -860,8 +860,8 @@ Total time: 2 minutes
 **I'll then:**
 
 - Look up Sarah, John, VP Eng in stakeholder profiles (if exists)
-- Check PRD X in `thoughts/shared/prds/`
-- Find Feature Z in `pm/context-library/launches/`
+- Check PRD X in `thoughts/shared/pm/prds/`
+- Find Feature Z in `thoughts/shared/pm/launches/`
 - Generate full daily plan with all context
 
 **Trade-off:**
@@ -921,7 +921,7 @@ Total time: 2 minutes
 
 **If Linear MCP not connected:**
 
-- Scan `thoughts/shared/meeting-notes/` for unchecked action items
+- Scan `thoughts/shared/product/meeting-notes/` for unchecked action items
 - Ask: "What tasks are on your plate today?"
 
 **If Analytics MCP not connected:**
@@ -932,7 +932,7 @@ Total time: 2 minutes
 **If Stakeholder profiles don't exist:**
 
 - Generate basic meeting list without context
-- Suggest: "Want richer meeting context? Fill out stakeholder profiles in `pm/context-library/`"
+- Suggest: "Want richer meeting context? Fill out stakeholder profiles in `thoughts/shared/pm/context/`"
 
 ---
 

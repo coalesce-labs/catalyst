@@ -385,7 +385,7 @@ Before you launch an experiment, verify:
 When the PM uses `/experiment-metrics`, I automatically:
 
 ### 1. Pull Metrics from PRDs & Strategy
-**Source:** `pm/context-library/prds/`, success metrics defined there
+**Source:** `thoughts/shared/pm/prds/`, success metrics defined there
 - **What I look for:** Feature's pre-defined success metrics, targets
 - **How I use it:** Pre-populate primary and secondary metrics for STEDII evaluation
 - **Example:** "Your PRD says success = conversion >60%, let's test if that's STEDII-compliant"
@@ -397,13 +397,13 @@ When the PM uses `/experiment-metrics`, I automatically:
 - **Example:** "Metric X has 12% variance historically, so needs N=5000 sample size"
 
 ### 3. Check for Metric Conflicts with Guardrails
-**Source:** `pm/context-library/metrics/`, company guardrails
+**Source:** `thoughts/shared/pm/metrics/`, company guardrails
 - **What I look for:** Metrics that must not decline, company KPIs
 - **How I use it:** Ensure secondary metrics include guardrails
 - **Example:** "NPS is a company guardrail, must include in secondary metrics"
 
 ### 4. Reference Past Experiments for Benchmarks
-**Source:** `pm/context-library/metrics/`, A/B test results
+**Source:** `thoughts/shared/pm/metrics/`, A/B test results
 - **What I look for:** What worked in past experiments, surprising metric learnings
 - **How I use it:** Suggest metrics that detected real impacts before
 - **Example:** "In past experiments, page load time was poorly Sensitive, don't use it"
@@ -420,7 +420,7 @@ When the PM uses `/experiment-metrics`, I automatically:
 
 Before presenting output to the PM, verify:
 
-- [ ] **Context was checked:** Reviewed `pm/context-library/metrics/` for existing experiments and baselines, and `pm/context-library/prds/` for pre-defined success metrics
+- [ ] **Context was checked:** Reviewed `thoughts/shared/pm/metrics/` for existing experiments and baselines, and `thoughts/shared/pm/prds/` for pre-defined success metrics
 - [ ] **Each metric evaluated against all 6 STEDII dimensions:** Every candidate metric has a score (0-3) for Sensitive, Timely, Efficient, Debuggable, Interpretable, and Isolated, with reasoning for each score
 - [ ] **Sample size requirements calculated:** The output includes a minimum sample size estimate for the primary metric based on expected effect size and variance
 - [ ] **Metric sensitivity analysis included:** The output states whether the expected change is detectable given current traffic, variance, and experiment duration

@@ -919,7 +919,7 @@ When the PM uses `/decision-doc`, I automatically:
 
 ### 1. Check Strategic Alignment
 
-**Source:** `pm/context-library/strategy/`, `pm/context-library/prds/`
+**Source:** `thoughts/shared/pm/frameworks/`, `thoughts/shared/pm/prds/`
 
 - **What I look for:** Current roadmap, strategic pillars, OKRs, company direction
 - **How I use it:** Ensure recommendation aligns with broader strategy
@@ -927,7 +927,7 @@ When the PM uses `/decision-doc`, I automatically:
 
 ### 2. Identify Affected Stakeholders
 
-**Source:** `pm/context-library/stakeholder-template.md` + profiles
+**Source:** `thoughts/shared/pm/context/stakeholder-template.md` + profiles
 
 - **What I look for:** Who has input on this decision, who needs to approve, who will be affected
 - **How I use it:** Build stakeholder consultation section automatically
@@ -935,7 +935,7 @@ When the PM uses `/decision-doc`, I automatically:
 
 ### 3. Research Past Related Decisions
 
-**Source:** `pm/context-library/decisions/`
+**Source:** `thoughts/shared/product/decisions/`
 
 - **What I look for:** Similar decisions made before, how they were analyzed, what succeeded/failed
 - **How I use it:** Reference precedent, avoid contradictory decisions, build on learnings
@@ -943,7 +943,7 @@ When the PM uses `/decision-doc`, I automatically:
 
 ### 4. Pull Success Metrics Framework
 
-**Source:** `pm/context-library/metrics/`, this chat thread
+**Source:** `thoughts/shared/pm/metrics/`, this chat thread
 
 - **What I look for:** How you typically measure success, what metrics you care about
 - **How I use it:** Suggest relevant metrics for this decision
@@ -951,7 +951,7 @@ When the PM uses `/decision-doc`, I automatically:
 
 ### 5. Extract Competitive Context
 
-**Source:** `pm/context-library/research/competitive-*.md`, web search if needed
+**Source:** `thoughts/shared/pm/competitive-*.md`, web search if needed
 
 - **What I look for:** Competitor moves, market trends, positioning implications
 - **How I use it:** Include competitive rationale in decision reasoning
@@ -972,11 +972,11 @@ When the PM uses `/decision-doc`, I automatically:
 
 Before presenting output to the PM, verify:
 
-- [ ] **File saved to correct location:** Output saved to `thoughts/shared/decisions/decision-[topic]-[date].md`
-- [ ] **Context routing table was checked:** Reviewed `pm/context-library/decisions/` for past decisions, `pm/context-library/strategy/` for alignment, and `pm/context-library/stakeholder-template.md` for stakeholder context
+- [ ] **File saved to correct location:** Output saved to `thoughts/shared/product/decisions/decision-[topic]-[date].md`
+- [ ] **Context routing table was checked:** Reviewed `thoughts/shared/product/decisions/` for past decisions, `thoughts/shared/pm/frameworks/` for alignment, and `thoughts/shared/pm/context/stakeholder-template.md` for stakeholder context
 - [ ] **Decision framed as clear question:** The decision is stated as a specific, answerable question with 2-4 distinct options (not open-ended or vague)
 - [ ] **Each alternative has pros, cons, and trade-offs:** Every option includes at least 2 pros, 2 cons, and explicit trade-offs with the other options
 - [ ] **Recommendation includes explicit rationale:** The recommendation states which option is chosen and provides numbered reasons why, with data or logic supporting each
 - [ ] **Stakeholders who need to sign off are named:** Specific people (not roles) are listed as approvers, contributors, and informed parties
 - [ ] **Reversibility assessment included:** The document explicitly states whether this is a one-way door or two-way door decision, with reasoning
-- [ ] **Conflicts with existing strategy or past decisions flagged:** Any tension with decisions in `pm/context-library/decisions/` or goals in `pm/context-library/strategy/` is called out with explanation of how the conflict is resolved
+- [ ] **Conflicts with existing strategy or past decisions flagged:** Any tension with decisions in `thoughts/shared/product/decisions/` or goals in `thoughts/shared/pm/frameworks/` is called out with explanation of how the conflict is resolved

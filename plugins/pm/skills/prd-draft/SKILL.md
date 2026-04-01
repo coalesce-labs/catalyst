@@ -16,7 +16,7 @@ user-invocable: true
 /prd-draft --ai                           → Include AI behavior specification sections
 ```
 
-**What you get:** A 1-2 page modern PRD with hypothesis, strategic fit, non-goals, success metrics, rollout plan, and optional behavior examples. Saved to `thoughts/shared/prds/[feature-name-kebab-case]-[stage].md`. Based on `pm/templates/prd-template.md`.
+**What you get:** A 1-2 page modern PRD with hypothesis, strategic fit, non-goals, success metrics, rollout plan, and optional behavior examples. Saved to `thoughts/shared/pm/prds/[feature-name-kebab-case]-[stage].md`. Based on `thoughts/shared/pm/templates/prd-template.md`.
 
 **Time:** 10-20 minutes for first draft. Then iterate.
 
@@ -35,12 +35,12 @@ When this skill is invoked, immediately check:
 
 | Source              | Files/Folders                                  | Search Terms                      | What to Extract                              |
 | ------------------- | ---------------------------------------------- | --------------------------------- | -------------------------------------------- |
-| Strategy Docs       | `pm/context-library/strategy/*.md`             | feature name from chat            | Strategic pillar alignment                   |
-| Related PRDs        | `pm/context-library/prds/*.md`                 | feature dependencies              | Related features and cross-functional impact |
-| User Research       | `pm/context-library/research/*.md`             | problem related to feature        | User pain points, quotes, validation         |
-| Business Model      | `pm/context-library/business-info-template.md` | pricing, revenue, metrics         | Revenue impact, North Star alignment         |
-| Competitor Analysis | `pm/context-library/research/competitive-*.md` | feature name                      | Competitive positioning if relevant          |
-| Stakeholder Context | Stakeholder profiles                           | key stakeholders for this feature | Who to involve, communication style          |
+| Strategy Docs       | `thoughts/shared/pm/frameworks/*.md`                  | feature name from chat            | Strategic pillar alignment                   |
+| Related PRDs        | `thoughts/shared/pm/prds/*.md`                        | feature dependencies              | Related features and cross-functional impact |
+| User Research       | `thoughts/shared/pm/*.md`                             | problem related to feature        | User pain points, quotes, validation         |
+| Business Model      | `thoughts/shared/pm/context/business-info-template.md` | pricing, revenue, metrics         | Revenue impact, North Star alignment         |
+| Competitor Analysis | `thoughts/shared/pm/competitive-*.md`                 | feature name                      | Competitive positioning if relevant          |
+| Stakeholder Context | Stakeholder profiles                                   | key stakeholders for this feature | Who to involve, communication style          |
 
 **Context Priority:**
 
@@ -64,10 +64,10 @@ Before we draft, let me check what context exists...
 
 **Checking:**
 
-- `pm/context-library/prds/` for any related feature PRDs
-- `pm/context-library/strategy/` for strategic alignment
-- `pm/context-library/research/` for user validation
-- `pm/context-library/business-info-template.md` for business context
+- `thoughts/shared/pm/prds/` for any related feature PRDs
+- `thoughts/shared/pm/frameworks/` for strategic alignment
+- `thoughts/shared/pm/` for user validation
+- `thoughts/shared/pm/context/business-info-template.md` for business context
 - Stakeholder profiles for who needs to be involved
 
 ### Context Health Check
@@ -161,7 +161,7 @@ Before I draft anything, I need to understand the initiative. Don't worry about 
 5. Is this an A/B test or full launch?
 6. What are the non-goals? (What are we explicitly NOT doing?)
 7. What are the success metrics? (How will we know this worked?)
-8. Who are the key stakeholders? (@ mention them if you have profiles in `pm/context-library/stakeholder-template.md` or similar)
+8. Who are the key stakeholders? (@ mention them if you have profiles in `thoughts/shared/pm/context/stakeholder-template.md` or similar)
 
 **AI-specific (if applicable):**
 9. What are example prompts or user inputs?
@@ -203,16 +203,16 @@ Great, I have enough to draft a first version. This will be:
 - Focused on the key sections for this stage
 - At the [STAGE] stage of evolution
 - Using your [AUDIENCE] writing style
-- Based on pm/templates/prd-template.md
+- Based on thoughts/shared/pm/templates/prd-template.md
 
-I'll create it now and save it to `thoughts/shared/prds/[feature-name-kebab-case]-[stage].md`.
+I'll create it now and save it to `thoughts/shared/pm/prds/[feature-name-kebab-case]-[stage].md`.
 
 After you review, we can iterate or get multi-perspective feedback.
 ```
 
 ### PRD Structure
 
-**Reference the full template at `pm/templates/prd-template.md`.** Include only sections relevant to the current stage. Use this structure:
+**Reference the full template at `thoughts/shared/pm/templates/prd-template.md`.** Include only sections relevant to the current stage. Use this structure:
 
 ```markdown
 # [Feature Name]
@@ -334,7 +334,7 @@ If [scenario], we will [specific action].
 
 ## AI Behavior Contract (AI features only)
 
-> Include for AI/ML features. Delete for non-AI features. See `pm/templates/prd-template.md` Section 3 for the full contract format.
+> Include for AI/ML features. Delete for non-AI features. See `thoughts/shared/pm/templates/prd-template.md` Section 3 for the full contract format.
 
 | Dimension            | Specification                                     |
 | -------------------- | ------------------------------------------------- |
@@ -401,7 +401,7 @@ If [scenario], we will [specific action].
 
 **Tone:**
 
-- Use the appropriate writing style from `pm/context-library/writing-style-*.md`
+- Use the appropriate writing style from `thoughts/shared/pm/context/writing-style-*.md`
 - Write like the PM would write (human, not AI-generated)
 - Be direct and crisp
 
@@ -509,7 +509,7 @@ Create a [component type] for [product context].
 After generating the draft, offer:
 
 ```
-First draft created! Saved to `thoughts/shared/prds/[feature-name]-[stage].md`.
+First draft created! Saved to `thoughts/shared/pm/prds/[feature-name]-[stage].md`.
 
 Want me to review this from multiple perspectives?
 - Engineer (technical feasibility, implementation concerns)
@@ -529,7 +529,7 @@ When the PM requests review:
 
    ```
    I'll review this from [Engineer / Designer / Executive] perspective.
-   Reading from `pm/sub-agents/[agent-name].md`...
+   Reading from `thoughts/shared/pm/sub-agents/[agent-name].md`...
    ```
 
 2. **For each agent, provide:**
@@ -692,8 +692,7 @@ Great work! Your PRD is ready for review.
 
 **PRD documents:**
 
-- Active work: `thoughts/shared/prds/[feature-name]-[stage].md`
-- When finalized: Move to `pm/context-library/prds/[feature-name].md` for historical reference
+- Active work: `thoughts/shared/pm/prds/[feature-name]-[stage].md`
 - Evolve through stages: Team Kickoff → Planning Review → XFN Kickoff → Solution Review → Launch → Impact
 
 ### Link to Other Work
@@ -719,7 +718,7 @@ After creating PRD:
 - `/user-research-synthesis` - User quotes and insights populate Hypothesis
 - `/impact-sizing` - Usage estimates and revenue impact go into Strategic Fit
 - `/interview-guide` - User research that validated the problem
-- `pm/context-library/strategy/` - Strategic pillar and alignment context
+- `thoughts/shared/pm/frameworks/` - Strategic pillar and alignment context
 - `/define-north-star` - Ensure feature's success metrics ladder to North Star
 
 ---
@@ -731,16 +730,16 @@ After creating PRD:
 Before presenting the PRD draft to the PM, verify:
 
 - [ ] **Filename follows convention:** `[feature-name-kebab-case]-[stage].md` (e.g., `voice-task-capture-team-kickoff.md`)
-- [ ] **Saved to correct location:** `thoughts/shared/prds/` (NOT `pm/context-library/prds/`)
+- [ ] **Saved to correct location:** `thoughts/shared/pm/prds/`
 - [ ] **Word count matches stage:** Check against the Stage-Specific Length Guidance table
 - [ ] **Hypothesis is testable:** Contains a clear "If we... then... because..." statement
-- [ ] **Strategic fit references actual strategy:** Cites specific goals from `pm/context-library/strategy/`, not generic strategy language
+- [ ] **Strategic fit references actual strategy:** Cites specific goals from `thoughts/shared/pm/frameworks/`, not generic strategy language
 - [ ] **Non-goals are specific:** Each non-goal explains WHY it's excluded, not just what it is
 - [ ] **Success metrics have baselines and targets:** Not just "increase X" but "X from [current] to [target] by [date]"
 - [ ] **Kill criteria are realistic:** Would the team actually pull the plug at this threshold?
 - [ ] **Behavior Examples vs Solution Overview:** AI features have the behavior table; non-AI features have the solution overview
 - [ ] **Sounds human:** Read it aloud -- does it sound like the PM wrote it, or like an AI generated it?
-- [ ] **User quotes included:** If user research exists in `pm/context-library/research/`, at least one real quote is referenced
+- [ ] **User quotes included:** If user research exists in `thoughts/shared/pm/`, at least one real quote is referenced
 - [ ] **Open questions have owners:** Every open question has a @stakeholder assigned
 
 ---

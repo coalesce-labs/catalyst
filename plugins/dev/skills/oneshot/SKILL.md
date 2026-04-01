@@ -395,6 +395,7 @@ State transitions throughout the lifecycle:
 - **thoughts/ is the handoff mechanism** — all documents persist between sessions
 - **`humanlayer launch` is required** — no fallback for context isolation
 - **NEVER add Claude attribution** to any generated artifacts
+- **Use wiki-links** for cross-references between thoughts documents (e.g., `[[filename]]`), not full paths
 - **Phase 3 does NOT commit** — all git operations are deferred to Phase 5
 - **Phase 6 is opt-in** — requires `--auto-merge` or explicit user choice
 

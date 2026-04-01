@@ -16,11 +16,11 @@ When this skill is invoked, immediately check:
 
 | Source          | Files/Folders                                  | Search Terms                          | What to Extract                            |
 | --------------- | ---------------------------------------------- | ------------------------------------- | ------------------------------------------ |
-| Current PRD     | `pm/context-library/prds/*.md`                 | feature name from chat                | Hypothesis, problem statement, user impact |
-| Business Info   | `pm/context-library/business-info-template.md` | business model, growth stage, metrics | Product strategy, current North Star       |
-| Metrics Context | `pm/context-library/metrics/*.md`              | baseline numbers, historical data     | Current metric baselines, ranges           |
-| Strategy        | `pm/context-library/strategy/*.md`             | feature related to strategic pillar   | Strategic fit and expected outcomes        |
-| Meetings        | `pm/context-library/meetings/*.md`             | feature name, "success metrics"       | Stakeholder expectations, past decisions   |
+| Current PRD     | `thoughts/shared/pm/prds/*.md`                 | feature name from chat                | Hypothesis, problem statement, user impact |
+| Business Info   | `thoughts/shared/pm/context/business-info-template.md` | business model, growth stage, metrics | Product strategy, current North Star       |
+| Metrics Context | `thoughts/shared/pm/metrics/*.md`              | baseline numbers, historical data     | Current metric baselines, ranges           |
+| Strategy        | `thoughts/shared/pm/frameworks/*.md`           | feature related to strategic pillar   | Strategic fit and expected outcomes        |
+| Meetings        | `thoughts/shared/product/meeting-notes/*.md`   | feature name, "success metrics"       | Stakeholder expectations, past decisions   |
 
 **Context Priority:**
 
@@ -54,11 +54,11 @@ Before we define metrics, let me check what context already exists...
 
 **Checking:**
 
-- `pm/context-library/prds/` for any existing PRD for this feature
-- `pm/context-library/business-info-template.md` for your product model
-- `pm/context-library/metrics/` for historical baseline data
-- `pm/context-library/strategy/` for strategic context
-- `pm/context-library/meetings/` for stakeholder expectations
+- `thoughts/shared/pm/prds/` for any existing PRD for this feature
+- `thoughts/shared/pm/context/business-info-template.md` for your product model
+- `thoughts/shared/pm/metrics/` for historical baseline data
+- `thoughts/shared/pm/frameworks/` for strategic context
+- `thoughts/shared/product/meeting-notes/` for stakeholder expectations
 
 **[If feature PRD exists]:** "I found your [Feature Name] PRD from [date]. It mentions [hypothesis/goal]. Let me use that as context."
 
@@ -255,7 +255,7 @@ If any of these occur, immediately rollback:
 
 - Active work: Add to PRD in `Strategic Fit` section
 - When finalized: Reference in `/experiment-decision` for A/B testing approach
-- Archive: Store final metrics in `pm/context-library/metrics/[feature-name]-baseline.md` for historical reference
+- Archive: Store final metrics in `thoughts/shared/pm/metrics/[feature-name]-baseline.md` for historical reference
 
 ### Link to Other Work
 
@@ -279,7 +279,7 @@ After defining metrics:
 
 - `/define-north-star` - Ensure primary metric ladders up to North Star
 - `/impact-sizing` - Usage estimates inform what metrics can detect changes
-- `pm/context-library/business-info-template.md` - Company metrics and baselines
+- [[business-info-template]] - Company metrics and baselines
 
 ---
 
@@ -298,11 +298,11 @@ After defining metrics:
 
 Before presenting output to the PM, verify:
 
-- [ ] **File saved to correct location:** Output saved to `thoughts/shared/analyses/feature-metrics-[feature-name]-[date].md`
-- [ ] **Context routing table was checked:** Reviewed `pm/context-library/prds/` for feature context, `pm/context-library/business-info-template.md` for North Star metric, and `pm/context-library/metrics/` for existing dashboards and baselines
+- [ ] **File saved to correct location:** Output saved to `thoughts/shared/pm/metrics/feature-metrics-[feature-name]-[date].md`
+- [ ] **Context routing table was checked:** Reviewed `thoughts/shared/pm/prds/` for feature context, `thoughts/shared/pm/context/business-info-template.md` for North Star metric, and `thoughts/shared/pm/metrics/` for existing dashboards and baselines
 - [ ] **Metrics pass STEDII framework:** Each proposed metric is evaluated against all 6 STEDII dimensions (Sensitive, Timely, Easy to understand, Directional, Implementable, Independent) with pass/fail reasoning
 - [ ] **Primary metric has baseline and target:** The primary metric includes a current baseline number and a specific target value with timeline (not "improve" or "increase")
 - [ ] **Guardrail metrics defined:** At least 1 guardrail metric is specified with an acceptable range and explanation of what it protects against
-- [ ] **Metrics ladder to North Star:** The output explicitly shows how the primary metric connects upward to the company's North Star metric from `pm/context-library/business-info-template.md`
+- [ ] **Metrics ladder to North Star:** The output explicitly shows how the primary metric connects upward to the company's North Star metric from [[business-info-template]]
 - [ ] **Data source identified for each metric:** Every metric names where the data comes from (e.g., "PostHog event: task_created" or "database query on users table")
 - [ ] **Metric sensitivity estimated:** The output addresses whether the expected feature impact is large enough for the metric to detect, given current variance and traffic

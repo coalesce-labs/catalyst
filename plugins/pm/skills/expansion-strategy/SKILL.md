@@ -22,7 +22,7 @@ Then provide:
 I'll decompose your NRR, identify the biggest expansion gap, assess
 pricing sensitivity, design in-product triggers, and build a playbook.
 
-**Output:** Saved to `thoughts/shared/analyses/expansion-strategy-[date].md`
+**Output:** Saved to `thoughts/shared/pm/analyses/expansion-strategy-[date].md`
 **Time:** ~15 min for focused lever, ~30 min for full strategy
 
 **When to use:** When optimizing monetization, planning pricing tiers, or building expansion features
@@ -36,11 +36,11 @@ When this skill is invoked, immediately check:
 
 | Source            | Files/Folders                                  | Search Terms                                                      | What to Extract                                                       |
 | ----------------- | ---------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Business Info     | `pm/context-library/business-info-template.md` | pricing, tiers, plans, ACV, revenue model, monetization           | Current pricing, tiers, customer segments, revenue targets            |
-| Metrics/Analytics | `pm/context-library/metrics/*.md`              | NRR, "net revenue retention", expansion rate, upsell, churn, MRR  | Existing expansion metrics, NRR benchmarks, churn by segment          |
-| PRDs              | `pm/context-library/prds/*.md`                 | pricing, tier, feature gate, monetization                         | Feature decisions tied to monetization, pricing rationale             |
-| Strategy          | `pm/context-library/strategy/*.md`             | "growth", "expansion", "pricing", "positioning"                   | Strategic approach, customer segmentation, market positioning         |
-| Meeting Notes     | `pm/context-library/meetings/*.md`             | pricing, customer expansion, upsell, enterprise, segment, revenue | Sales conversations, customer upgrade opportunities, pricing feedback |
+| Business Info     | `thoughts/shared/pm/context/business-info-template.md` | pricing, tiers, plans, ACV, revenue model, monetization           | Current pricing, tiers, customer segments, revenue targets            |
+| Metrics/Analytics | `thoughts/shared/pm/metrics/*.md`              | NRR, "net revenue retention", expansion rate, upsell, churn, MRR  | Existing expansion metrics, NRR benchmarks, churn by segment          |
+| PRDs              | `thoughts/shared/pm/prds/*.md`                 | pricing, tier, feature gate, monetization                         | Feature decisions tied to monetization, pricing rationale             |
+| Strategy          | `thoughts/shared/pm/frameworks/*.md`           | "growth", "expansion", "pricing", "positioning"                   | Strategic approach, customer segmentation, market positioning         |
+| Meeting Notes     | `thoughts/shared/product/meeting-notes/*.md`   | pricing, customer expansion, upsell, enterprise, segment, revenue | Sales conversations, customer upgrade opportunities, pricing feedback |
 
 **Context Priority:**
 
@@ -62,11 +62,11 @@ Before diving into expansion tactics, let me check what you already know about y
 
 **Checking:**
 
-- `pm/context-library/business-info-template.md` for current pricing and segments
-- `pm/context-library/metrics/` for existing expansion metrics and NRR
-- `pm/context-library/prds/` for monetization-related decisions
-- `pm/context-library/strategy/` for revenue growth strategy
-- `pm/context-library/meetings/` for sales conversations about expansion
+- `thoughts/shared/pm/context/business-info-template.md` for current pricing and segments
+- `thoughts/shared/pm/metrics/` for existing expansion metrics and NRR
+- `thoughts/shared/pm/prds/` for monetization-related decisions
+- `thoughts/shared/pm/frameworks/` for revenue growth strategy
+- `thoughts/shared/product/meeting-notes/` for sales conversations about expansion
 
 **[If analytics MCP connected]:** "Let me also query [PostHog/PostHog] for current expansion rates, NRR, and customer segment growth patterns."
 
@@ -245,7 +245,7 @@ Upgraded (10%) - completed expansion
 **Use this prompt:**
 
 ```
-Use /expansion-strategy and reference pm/context-library/business-info-template.md
+Use /expansion-strategy and reference [[business-info-template]]
 
 Help me identify expansion opportunities:
 - Product: [describe your product]
@@ -629,12 +629,11 @@ Median days from signup to first upgrade
 
 **Strategy Documents:**
 
-- Save to: `thoughts/shared/analyses/expansion-strategy-[quarter].md`
-- When finalized: Move to `pm/context-library/strategy/expansion-strategy-[quarter].md` for reference
+- Save to: `thoughts/shared/pm/analyses/expansion-strategy-[quarter].md`
 
 **Pricing Changes & Experiments:**
 
-- Create PRD in `pm/context-library/prds/` for any tier changes or feature gating
+- Create PRD in `thoughts/shared/pm/prds/` for any tier changes or feature gating
 - Link to this expansion strategy as context
 
 **Sales Playbooks:**
@@ -750,7 +749,7 @@ When analyzing expansion opportunities, map your pricing against competitors:
 2. What features do competitors gate at each tier? (If a key feature is free at Competitor A but gated at your Business tier, that's churn risk)
 3. Is there a tier gap? (Price point where no option exists -- e.g., between $25 and $65/user, there's a $40 gap where users might feel stuck)
 
-Pull competitor pricing from `pm/context-library/research/competitive-*.md` or `pm/context-library/business-info-template.md` competitor sections.
+Pull competitor pricing from [[competitive-analysis]] documents or [[business-info-template]] competitor sections.
 
 ---
 

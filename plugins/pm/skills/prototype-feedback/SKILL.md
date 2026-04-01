@@ -17,9 +17,9 @@ Rapidly iterate on prototypes using AI-powered building and automated feedback c
 4. I deliver prioritized recommendations: must-fix, should-fix, and nice-to-have
 5. You iterate on the prototype and we repeat until validated
 
-**Example:** "Review my checkout prototype: [link]. PRD is in thoughts/shared/prds/checkout-redesign.md"
+**Example:** "Review my checkout prototype: [link]. PRD is in thoughts/shared/pm/prds/checkout-redesign.md"
 
-**Output:** Saved to `thoughts/shared/prototypes/[feature]-feedback-round-[N].md`
+**Output:** Saved to `thoughts/shared/product/prototypes/[feature]-feedback-round-[N].md`
 
 **Time:** 30 minutes per feedback round
 
@@ -29,11 +29,11 @@ Rapidly iterate on prototypes using AI-powered building and automated feedback c
 
 | Source               | Files/Folders                                       | What to Extract                                    |
 | -------------------- | --------------------------------------------------- | -------------------------------------------------- |
-| PRD                  | `thoughts/shared/prds/`, `pm/context-library/prds/` | Requirements, acceptance criteria, success metrics |
-| Design System        | `pm/context-library/technical/`, design docs        | Colors, typography, component patterns to match    |
-| Stakeholder Profiles | `pm/context-library/stakeholder-*.md`               | Who reviews this, their priorities and concerns    |
-| User Research        | `pm/context-library/research/`                      | User pain points, quotes, behavior patterns        |
-| Past Prototypes      | `thoughts/shared/prototypes/`                       | Previous feedback rounds, resolved issues          |
+| PRD                  | `thoughts/shared/pm/prds/`                          | Requirements, acceptance criteria, success metrics |
+| Design System        | design docs                                         | Colors, typography, component patterns to match    |
+| Stakeholder Profiles | `thoughts/shared/pm/context/stakeholder-template.md` | Who reviews this, their priorities and concerns    |
+| User Research        | `thoughts/shared/pm/`                               | User pain points, quotes, behavior patterns        |
+| Past Prototypes      | `thoughts/shared/product/prototypes/`               | Previous feedback rounds, resolved issues          |
 
 ## Overview
 

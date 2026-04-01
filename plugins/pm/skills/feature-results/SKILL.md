@@ -25,7 +25,7 @@ I'll generate a results doc with: executive summary, results vs targets,
 root cause analysis (if missed), segment breakdown, estimate calibration,
 stakeholder communication guidance, and concrete next steps.
 
-**Output:** Saved to `thoughts/shared/analyses/feature-results-[name]-[date].md`
+**Output:** Saved to `thoughts/shared/pm/analyses/feature-results-[name]-[date].md`
 **Time:** ~10 min with data ready, ~20 min if we need to dig
 
 ---
@@ -36,7 +36,7 @@ Before generating a results analysis, verify the feature has actually shipped.
 
 **Check for launch signals:**
 
-- Does the PRD in `pm/context-library/prds/` or `thoughts/shared/prds/` show status "Shipped" or "Launched"?
+- Does the PRD in `thoughts/shared/pm/prds/` show status "Shipped" or "Launched"?
 - Does the PM mention actual results data (not projections)?
 
 **If the feature hasn't launched yet:**
@@ -386,7 +386,7 @@ When the PM uses `/feature-results`, I automatically:
 
 ### 1. Pull Original PRD & Hypothesis
 
-**Source:** `pm/context-library/prds/`, conversation history
+**Source:** `thoughts/shared/pm/prds/`, conversation history
 
 - **What I look for:** Original hypothesis, target metrics, success criteria
 - **How I use it:** Compare actual results against original targets
@@ -402,14 +402,14 @@ When the PM uses `/feature-results`, I automatically:
 
 ### 3. Check Related Experiments
 
-**Source:** `pm/context-library/metrics/`, past feature results
+**Source:** `thoughts/shared/pm/metrics/`, past feature results
 
 - **What I look for:** Similar features' results, patterns in what works
 - **How I use it:** Add context like "This compares to our pricing redesign which saw 12% improvement"
 
 ### 4. Extract Guardrail Metrics
 
-**Source:** `pm/context-library/metrics/`, PRD success metrics section
+**Source:** `thoughts/shared/pm/metrics/`, PRD success metrics section
 
 - **What I look for:** Metrics that must not decline (retention, NPS, etc.)
 - **How I use it:** Pre-populate guardrail metrics table with relevant metrics

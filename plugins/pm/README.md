@@ -66,7 +66,7 @@ Generate comprehensive cycle health report with recommendations.
 - Generates progress metrics, risk factors, capacity analysis
 - Provides specific, prioritized recommendations
 
-**Output**: Health report saved to `thoughts/shared/reports/cycles/`
+**Output**: Health report saved to `thoughts/shared/pm/reports/`
 
 **Example**:
 ```
@@ -98,7 +98,7 @@ Quick daily standup report (scannable in <30 seconds).
 - Identifies team members needing work assignments
 - Flags quick blockers and stalled issues
 
-**Output**: Daily report saved to `thoughts/shared/reports/daily/`
+**Output**: Daily report saved to `thoughts/shared/pm/reports/`
 
 **Example**:
 ```
@@ -127,7 +127,7 @@ Analyze backlog health and generate cleanup recommendations.
 - Identifies orphaned, misplaced, stale, and duplicate issues
 - Generates batch update commands
 
-**Output**: Grooming report saved to `thoughts/shared/reports/backlog/`
+**Output**: Grooming report saved to `thoughts/shared/pm/reports/`
 
 **Options**:
 1. Review detailed report
@@ -151,7 +151,7 @@ Correlate GitHub PRs with Linear issues and identify gaps.
 - Identifies orphaned PRs, orphaned issues, merge candidates
 - Generates auto-close commands
 
-**Output**: Correlation report saved to `thoughts/shared/reports/pr-sync/`
+**Output**: Correlation report saved to `thoughts/shared/pm/reports/`
 
 **Example**:
 ```

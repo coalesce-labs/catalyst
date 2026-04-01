@@ -6,19 +6,27 @@ Catalyst uses **Release Please** for automated per-plugin releases.
 
 1. **Merge PRs to main** with conventional commit titles (`feat(dev):`, `fix(pm):`, etc.)
 2. **Release Please opens release PRs** — one per affected plugin, accumulating changes
-3. **Merge a release PR** to create: git tag, GitHub Release, updated CHANGELOG.md, bumped versions in `version.txt` and `marketplace.json`
+3. **Merge a release PR** to create: git tag, GitHub Release, updated CHANGELOG.md, bumped versions
 
 ## Version Source of Truth
 
 | File | Purpose | Updated By |
 |---|---|---|
 | `plugins/<x>/version.txt` | Release Please primary version | Release Please |
-| `.claude-plugin/marketplace.json` | Marketplace registry (authoritative for Claude Code) | Release Please (extra-files) |
+| `plugins/<x>/.claude-plugin/plugin.json` | Plugin version (authoritative for Claude Code auto-updates) | Release Please (extra-files) |
+| `.claude-plugin/marketplace.json` | Marketplace plugin registry (lists plugins, no versions) | Manual |
 | `plugins/<x>/CHANGELOG.md` | Per-plugin changelog | Release Please |
 
-Per [Claude Code docs](https://code.claude.com/docs/en/plugin-marketplaces#version-resolution-and-release-channels),
-relative-path plugins should set version in `marketplace.json` only, not in `plugin.json`.
-The `plugin.json` files contain plugin metadata (name, description, author, etc.) but no version.
+### How Claude Code auto-updates work
+
+1. At session start, Claude Code `git fetch`es the marketplace repo
+2. Compares the stored commit SHA (in `installed_plugins.json`) against remote HEAD
+3. If SHAs differ, reads `plugin.json` at the new commit and compares the `version` string
+4. If the version changed → updates the plugin cache. Same version → skips (even if code changed)
+
+The `version` field in `plugin.json` is the gate. Release Please bumps it via the `extra-files`
+jsonpath config (`$.version`). The `marketplace.json` lists available plugins and their source
+paths but does not carry per-plugin version fields.
 
 ## Commit Conventions
 
@@ -63,5 +71,5 @@ Release-please routes commits to plugins by **file paths changed**, not by commi
 
 ## Important
 
-- Never manually edit `version.txt`, `marketplace.json` versions, or the manifest
+- Never manually edit `version.txt`, `plugin.json` versions, or the manifest
 - Release Please manages all versions via conventional commits

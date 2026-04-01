@@ -70,8 +70,8 @@ last_updated: [Current date in YYYY-MM-DD format]
 last_updated_by: [Researcher name]
 type: handoff
 source_ticket: [TICKET-ID or null]
-source_plan: [path to implementation plan, or null]
-source_research: [path to research doc, or null]
+source_plan: "[[plan-filename]]"  # or null
+source_research: "[[research-filename]]"  # or null
 ---
 
 # Handoff: {TICKET or General} - {very concise description}
@@ -80,13 +80,13 @@ source_research: [path to research doc, or null]
 
 {description of the task(s) that you were working on, along with the status of each (completed, work
 in progress, planned/discussed). If you are working on an implementation plan, make sure to call out
-which phase you are on. Make sure to reference the plan document and/or research document(s) you are
-working from that were provided to you at the beginning of the session, if applicable.}
+which phase you are on. Reference the plan and/or research documents using wiki-links
+(e.g., [[plan-filename]], [[research-filename]]), if applicable.}
 
 ## Critical References
 
 {List any critical specification documents, architectural decisions, or design docs that must be
-followed. Include only 2-3 most important file paths. Leave blank if none.}
+followed using wiki-links (e.g., [[doc-filename]]). Include only 2-3 most important references. Leave blank if none.}
 
 ## Recent changes
 

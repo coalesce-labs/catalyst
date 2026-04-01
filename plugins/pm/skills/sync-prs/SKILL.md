@@ -172,11 +172,11 @@ linearis comments create TEAM-457 --body "PR #124 merged: https://github.com/use
 ### Step 4: Save Report
 
 **IMPORTANT: Document Storage Rules**
-- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- ALWAYS write to `thoughts/shared/pm/reports/`
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
 ```bash
-REPORT_DIR="thoughts/shared/reports/pr-sync"
+REPORT_DIR="thoughts/shared/pm/reports"
 mkdir -p "$REPORT_DIR"
 
 REPORT_FILE="$REPORT_DIR/$(date +%Y-%m-%d)-pr-sync.md"
@@ -212,7 +212,7 @@ Actions available:
   2. Create Linear issues for orphaned PRs
   3. View full report
 
-Full report: thoughts/shared/reports/pr-sync/2025-01-27-pr-sync.md
+Full report: thoughts/shared/pm/reports/2025-01-27-pr-sync.md
 ```
 
 ## Success Criteria

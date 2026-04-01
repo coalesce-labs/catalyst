@@ -214,13 +214,13 @@ Format the agent's analysis into a user-facing health report:
 ### Step 5: Save Report
 
 **IMPORTANT: Document Storage Rules**
-- ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
+- ALWAYS write to `thoughts/shared/pm/reports/`
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
-Write report to `thoughts/shared/reports/cycles/YYYY-MM-DD-cycle-N-status.md`
+Write report to `thoughts/shared/pm/reports/YYYY-MM-DD-cycle-N-status.md`
 
 ```bash
-REPORT_DIR="thoughts/shared/reports/cycles"
+REPORT_DIR="thoughts/shared/pm/reports"
 mkdir -p "$REPORT_DIR"
 
 REPORT_FILE="$REPORT_DIR/$(date +%Y-%m-%d)-cycle-${cycle_number}-status.md"
@@ -266,7 +266,7 @@ Status:
   ✅ Done: 18  |  🔄 In Progress: 12  |  📋 Todo: 10
   🚨 Blocked: 2  |  ⚠️  At Risk: 3 (>5 days)
 
-Full health report: thoughts/shared/reports/cycles/2025-01-27-cycle-4-health.md
+Full health report: thoughts/shared/pm/reports/2025-01-27-cycle-4-health.md
 ```
 
 ## Success Criteria

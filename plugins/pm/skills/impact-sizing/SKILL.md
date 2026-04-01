@@ -16,11 +16,11 @@ When this skill is invoked, immediately check:
 
 | Source          | Files/Folders                                  | Search Terms                          | What to Extract                         |
 | --------------- | ---------------------------------------------- | ------------------------------------- | --------------------------------------- |
-| Current PRD     | `pm/context-library/prds/*.md`                 | feature name from chat                | User impact, problem severity           |
-| User Research   | `pm/context-library/research/*.md`             | feature problem, user quotes          | Addressable users, pain severity        |
-| Business Model  | `pm/context-library/business-info-template.md` | pricing, revenue model, TAM           | Revenue impact drivers                  |
-| Historical Data | `pm/context-library/metrics/*.md`              | similar features, baseline conversion | Reference adoption rates                |
-| Strategy        | `pm/context-library/strategy/*.md`             | feature strategic fit                 | Resource availability, priority context |
+| Current PRD     | `thoughts/shared/pm/prds/*.md`                 | feature name from chat                | User impact, problem severity           |
+| User Research   | `thoughts/shared/pm/*.md`                      | feature problem, user quotes          | Addressable users, pain severity        |
+| Business Model  | `thoughts/shared/pm/context/business-info-template.md` | pricing, revenue model, TAM           | Revenue impact drivers                  |
+| Historical Data | `thoughts/shared/pm/metrics/*.md`              | similar features, baseline conversion | Reference adoption rates                |
+| Strategy        | `thoughts/shared/pm/frameworks/*.md`           | feature strategic fit                 | Resource availability, priority context |
 
 **Context Priority:**
 
@@ -44,10 +44,10 @@ Before we estimate impact, let me check what context exists...
 
 **Checking:**
 
-- `pm/context-library/prds/` for the feature definition
-- `pm/context-library/research/` for user research on this problem
-- `pm/context-library/business-info-template.md` for business model context
-- `pm/context-library/metrics/` for comparable feature data
+- `thoughts/shared/pm/prds/` for the feature definition
+- `thoughts/shared/pm/` for user research on this problem
+- `thoughts/shared/pm/context/business-info-template.md` for business model context
+- `thoughts/shared/pm/metrics/` for comparable feature data
 
 **Based on what I find, I'll show you:**
 
@@ -249,9 +249,8 @@ Feature: [Name]
 
 **Impact sizing analysis:**
 
-- Active work: `thoughts/shared/analyses/impact-sizing-[feature-name]-[date].md`
+- Save to: `thoughts/shared/pm/analyses/impact-sizing-[feature-name]-[date].md`
 - When finalized: Reference in PRD in `Strategic Fit` section
-- Archive: Move to `pm/context-library/prds/` as historical reference when feature ships
 
 ### Link to Other Work
 
@@ -273,10 +272,10 @@ After sizing impact:
 
 **Pulls from:**
 
-- `pm/context-library/research/` - User pain and adoption patterns
+- `thoughts/shared/pm/` - User pain and adoption patterns
 - `/user-research-synthesis` - Qualitative insights about addressable users
-- `pm/context-library/business-info-template.md` - Business model and growth drivers
-- `pm/context-library/metrics/` - Historical data on similar features
+- [[business-info-template]] - Business model and growth drivers
+- `thoughts/shared/pm/metrics/` - Historical data on similar features
 
 ---
 
@@ -294,11 +293,11 @@ After sizing impact:
 
 Before presenting output to the PM, verify:
 
-- [ ] **File saved to correct location:** Output saved to `thoughts/shared/analyses/impact-sizing-[feature-name]-[date].md`
-- [ ] **Context routing table was checked:** Reviewed `pm/context-library/business-info-template.md`, `pm/context-library/strategy/`, and `pm/context-library/metrics/` for relevant context
+- [ ] **File saved to correct location:** Output saved to `thoughts/shared/pm/analyses/impact-sizing-[feature-name]-[date].md`
+- [ ] **Context routing table was checked:** Reviewed `thoughts/shared/pm/context/business-info-template.md`, `thoughts/shared/pm/frameworks/`, and `thoughts/shared/pm/metrics/` for relevant context
 - [ ] **Driver tree has specific numbers:** Every node in the driver tree contains actual estimates (not placeholders like "[X]" or "[number]")
 - [ ] **Confidence levels assigned:** Each assumption in the confidence assessment table has a High/Med/Low rating with justification
 - [ ] **Revenue/user impact calculated with clear methodology:** Impact estimates show the math (e.g., "10,000 eligible users x 30% adoption x $5 ARPU = $15,000/month"), not just final numbers
 - [ ] **De-risking actions identified:** Every Low-confidence assumption has a specific, actionable de-risking step (not generic "do more research")
-- [ ] **Impact tied to strategic goal:** The recommendation section explicitly references a strategic goal or OKR from `pm/context-library/strategy/`
+- [ ] **Impact tied to strategic goal:** The recommendation section explicitly references a strategic goal or OKR from `thoughts/shared/pm/frameworks/`
 - [ ] **Sensitivity analysis included:** Output shows best-case, worst-case, and expected-case scenarios with the key variable that drives the range

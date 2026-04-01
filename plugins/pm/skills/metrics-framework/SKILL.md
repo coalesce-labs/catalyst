@@ -14,11 +14,11 @@ user-invocable: true
 ## Quick Start
 
 1. Tell me: "Help me build a metrics framework for [product/feature]"
-2. I will check `pm/context-library/strategy/` for your North Star and `pm/context-library/metrics/` for baseline data
+2. I will check `thoughts/shared/pm/frameworks/` for your North Star and `thoughts/shared/pm/metrics/` for baseline data
 3. I will ask about your North Star (lagging metric), product stage, and decision speed needs
 4. We build a metric hierarchy: Lagging (quarterly) -> Leading (weekly) -> Input (daily)
 5. For each key metric, we define alert thresholds (green/yellow/red) and a dashboard layout
-6. Output goes to `thoughts/shared/metrics-framework-[date].md`
+6. Output goes to `thoughts/shared/pm/metrics/metrics-framework-[date].md`
 
 **Key principle:** Leading metrics should PREDICT lagging metrics. If they do not, you are tracking the wrong thing. We always validate the correlation before committing to a leading indicator.
 
@@ -29,11 +29,11 @@ When this skill is invoked, immediately check:
 
 | Source           | Files/Folders                                  | Search Terms                         | What to Extract                        |
 | ---------------- | ---------------------------------------------- | ------------------------------------ | -------------------------------------- |
-| Strategy Context | `pm/context-library/strategy/*.md`             | North Star, objective, business goal | Company-wide lagging metric target     |
-| Business Model   | `pm/context-library/business-info-template.md` | metrics, KPIs, growth model          | Current revenue/retention/growth focus |
-| Metrics History  | `pm/context-library/metrics/*.md`              | baseline, trends, benchmarks         | Historical leading/lagging metric data |
-| PRDs             | `pm/context-library/prds/*.md`                 | success metrics, measurement         | Feature-level metric definitions       |
-| Meetings         | `pm/context-library/meetings/*.md`             | "metrics", "dashboard", "KPI"        | Stakeholder metric priorities          |
+| Strategy Context | `thoughts/shared/pm/frameworks/*.md`             | North Star, objective, business goal | Company-wide lagging metric target     |
+| Business Model   | `thoughts/shared/pm/context/business-info-template.md` | metrics, KPIs, growth model          | Current revenue/retention/growth focus |
+| Metrics History  | `thoughts/shared/pm/metrics/*.md`              | baseline, trends, benchmarks         | Historical leading/lagging metric data |
+| PRDs             | `thoughts/shared/pm/prds/*.md`                 | success metrics, measurement         | Feature-level metric definitions       |
+| Meetings         | `thoughts/shared/product/meeting-notes/*.md`   | "metrics", "dashboard", "KPI"        | Stakeholder metric priorities          |
 
 **Context Priority:**
 
@@ -57,10 +57,10 @@ Before designing your metrics framework, let me understand what you're optimizin
 
 **Checking:**
 
-- `pm/context-library/business-info-template.md` for business model and goals
-- `pm/context-library/strategy/*.md` for strategic priorities
-- `pm/context-library/metrics/` for existing metric baselines
-- `pm/context-library/prds/` for current feature success metrics
+- `thoughts/shared/pm/context/business-info-template.md` for business model and goals
+- `thoughts/shared/pm/frameworks/*.md` for strategic priorities
+- `thoughts/shared/pm/metrics/` for existing metric baselines
+- `thoughts/shared/pm/prds/` for current feature success metrics
 
 **Based on what I find, I'll show you:**
 
@@ -219,7 +219,7 @@ Examples:
 Use this prompt pattern:
 
 ```
-Use /metrics-framework and reference pm/context-library/business-info-template.md
+Use /metrics-framework and reference thoughts/shared/pm/context/business-info-template.md
 
 Our North Star / main outcome metric is: [your lagging metric]
 
@@ -717,8 +717,7 @@ For products with multiple value streams (e.g., separate features for creation, 
 
 **Metric framework documentation:**
 
-- Active work: `thoughts/shared/metrics-framework-[date].md` (living document for your team)
-- When finalized: Move to `pm/context-library/metrics/metric-hierarchy-[quarter].md` for historical reference
+- Active work: `thoughts/shared/pm/metrics/metrics-framework-[date].md` (living document for your team)
 - Dashboard spec: Share with analytics team for instrumentation
 
 ### Link to Other Work
@@ -742,7 +741,7 @@ After building your framework:
 **Pulls from:**
 
 - `/write-prod-strategy` - Strategy determines what you're optimizing for
-- `pm/context-library/metrics/` - Historical data validates correlations
+- `thoughts/shared/pm/metrics/` - Historical data validates correlations
 - `/define-north-star` - What is your ultimate success metric?
 
 ---

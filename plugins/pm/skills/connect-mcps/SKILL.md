@@ -22,7 +22,7 @@ Tell me which tool to connect (e.g., "connect to PostHog") and I will guide you 
 
 **Example:** `/connect-mcps connect to linear`
 
-**Output:** MCP connected, skills updated, integration log saved to `thoughts/shared/mcp-integration-logs/`
+**Output:** MCP connected, skills updated, integration log saved to `thoughts/shared/pm/reports/`
 
 **Time:** 5-20 minutes per tool depending on setup method
 
@@ -226,7 +226,7 @@ posthog.query_insights({
 - Query on-demand without switching tools
 - Segment and filter programmatically
 
-**Fallback:** If PostHog not connected, you can upload exported CSV data to `pm/context-library/metrics/` and I'll analyze that instead.
+**Fallback:** If PostHog not connected, you can upload exported CSV data to `thoughts/shared/pm/metrics/` and I'll analyze that instead.
 
 ````
 
@@ -253,7 +253,7 @@ This enables me to automatically understand queries like:
 ### Step 9: Generate Integration Summary
 
 After successful integration, I:
-- Save a detailed log to `thoughts/shared/mcp-integration-logs/[timestamp]-[tool-name].md`
+- Save a detailed log to `thoughts/shared/pm/reports/[timestamp]-[tool-name].md`
 - Display a summary showing:
   - Tools discovered
   - Skills updated
@@ -375,7 +375,7 @@ search, browse, web, internet, competitor, market research
 - [Benefit 1 - e.g., Real-time data access]
 - [Benefit 2 - e.g., No manual exports needed]
 
-**Fallback:** [What happens when MCP not available - e.g., "Upload CSV data to pm/context-library/metrics/ for manual analysis"]
+**Fallback:** [What happens when MCP not available - e.g., "Upload CSV data to thoughts/shared/pm/metrics/ for manual analysis"]
 
 ````
 
@@ -404,13 +404,13 @@ This ensures MCP integration info appears early but doesn't interrupt the skill'
 **Analytics Queries** → Analytics MCPs (PostHog)
 
 - Pattern: "give me metrics on X", "show funnel for Y", "retention for Z"
-- Fallback: Check pm/context-library/metrics/
+- Fallback: Check thoughts/shared/pm/metrics/
 
 **Task Queries** → PM MCPs (Linear)
 
 - Pattern: "show my tasks", "create ticket for X", "status of epic Y"
 - Multi-MCP: Ask user which tool to use
-- Fallback: Check pm/context-library/meetings/ for action items
+- Fallback: Check thoughts/shared/product/meeting-notes/ for action items
 ```
 
 ## Example Integrations
@@ -481,7 +481,7 @@ Examples:
 
 I'll automatically query PostHog and return the data with insights.
 
-Full log: thoughts/shared/mcp-integration-logs/2026-01-30-posthog.md
+Full log: thoughts/shared/pm/reports/2026-01-30-posthog.md
 
 ```
 
@@ -547,7 +547,7 @@ Examples:
 
 I'll automatically query Linear and perform operations.
 
-Full log: thoughts/shared/mcp-integration-logs/2026-01-30-linear.md
+Full log: thoughts/shared/pm/reports/2026-01-30-linear.md
 
 ```
 
@@ -598,7 +598,7 @@ You can now:
 - Manage tasks → I'll use Linear
 - Access docs → I'll search Notion
 
-Full logs saved to: thoughts/shared/mcp-integration-logs/2026-01-30-batch/
+Full logs saved to: thoughts/shared/pm/reports/2026-01-30-batch/
 
 ```
 
@@ -792,7 +792,7 @@ I'll continue with other skills and log this issue.
 
 14 out of 15 skills updated successfully.
 
-Check: thoughts/shared/mcp-integration-logs/[timestamp]-errors.md
+Check: thoughts/shared/pm/reports/[timestamp]-errors.md
 
 ```
 
@@ -830,9 +830,9 @@ Me: [maps to both skill groups]
 
 5. **Keep credentials handy** - Have your API keys and workspace IDs ready before running `/connect-mcps connect to [tool]` to speed up setup.
 
-6. **Check the integration log** - Each connection creates a log in `thoughts/shared/mcp-integration-logs/` with full details about what was updated.
+6. **Check the integration log** - Each connection creates a log in `thoughts/shared/pm/reports/` with full details about what was updated.
 
-7. **MCPs are optional** - If an MCP isn't connected, skills will gracefully fall back to manual workflows (e.g., "Upload CSV to pm/context-library/metrics/").
+7. **MCPs are optional** - If an MCP isn't connected, skills will gracefully fall back to manual workflows (e.g., "Upload CSV to thoughts/shared/pm/metrics/").
 
 8. **Re-run `/connect-mcps connect` to update** - If credentials change or expire, just run the connect command again to reconfigure.
 
@@ -860,7 +860,7 @@ Me: [maps to both skill groups]
 
 ❌ **Don't forget to check prerequisites** - Some MCPs require specific permissions or scopes on the API key. Check the tool's documentation.
 
-❌ **Don't skip the fallback** - Even with MCPs connected, keep some exported data in `pm/context-library/` as backup for offline work.
+❌ **Don't skip the fallback** - Even with MCPs connected, keep some exported data in `thoughts/shared/pm/` as backup for offline work.
 
 ## Troubleshooting
 
@@ -871,7 +871,7 @@ Me: [maps to both skill groups]
 - GitHub for community MCP implementations
 - The Anthropic MCP directory
 
-If no MCP exists, you can still use the tool manually and store outputs in `pm/context-library/`.
+If no MCP exists, you can still use the tool manually and store outputs in `thoughts/shared/pm/`.
 
 ### "Connection test failed"
 
@@ -885,7 +885,7 @@ If no MCP exists, you can still use the tool manually and store outputs in `pm/c
 ### "Skills weren't updated"
 
 **Solution:**
-1. Check the integration log in `thoughts/shared/mcp-integration-logs/`
+1. Check the integration log in `thoughts/shared/pm/reports/`
 2. Look for error messages indicating which skills failed
 3. Verify skill files aren't read-only or locked
 4. Re-run `/connect-mcps connect to [tool]` to retry updates
@@ -1209,7 +1209,7 @@ The `catalyst-analytics` plugin provides analytics-focused workflows that levera
 - **Community Discord:** MCP Community server
 
 **For PM-specific help:**
-- Check `thoughts/shared/mcp-integration-logs/` for detailed error messages
+- Check `thoughts/shared/pm/reports/` for detailed error messages
 - Ask in chat: "Why did my PostHog connection fail?"
 - Reference pm/CLAUDE.md → MCP Integrations section for routing logic
 
@@ -1258,7 +1258,7 @@ Before confirming an MCP connection is complete, verify:
 - [ ] **Relevant skills updated** -- All skills that benefit from this MCP have integration sections added
 - [ ] **pm/CLAUDE.md registry updated** -- MCP appears in the registry table with purpose, category, used-in skills, and key tools
 - [ ] **Routing logic updated** -- Natural language query patterns are mapped to this MCP in pm/CLAUDE.md
-- [ ] **Integration log saved** -- Detailed log written to `thoughts/shared/mcp-integration-logs/[timestamp]-[tool].md`
+- [ ] **Integration log saved** -- Detailed log written to `thoughts/shared/pm/reports/[timestamp]-[tool].md`
 - [ ] **Fallback documented** -- Skills note what to do when this MCP is unavailable
 - [ ] **No duplicate entries** -- MCP is not listed twice in registry or skill files
 - [ ] **PM knows how to use it** -- Example natural language queries provided so the PM can start using the MCP immediately

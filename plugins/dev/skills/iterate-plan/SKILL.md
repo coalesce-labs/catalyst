@@ -101,7 +101,7 @@ If the changes require new technical understanding:
 **Changes**:
 - [Phase X]: [What changed and why]
 - [Phase Y]: [Added/removed/modified]
-**Research conducted**: [Brief summary of any new research]
+**Research conducted**: [[research-doc-filename]] — [Brief summary, if any]
 ```
 
 ### Step 5: Save and Sync

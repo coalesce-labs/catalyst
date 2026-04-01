@@ -9,7 +9,7 @@ disable-model-invocation: true
 1. Run `/weekly-review` on Friday afternoon (best time) or Monday morning
 2. I will scan your workspace: weekly plans, daily plans, PRDs, meeting notes, decisions, and launches from the past 7 days
 3. I will generate a focused review comparing plan vs. actual, surfacing key wins, blockers, and learnings
-4. Output goes to `thoughts/shared/weekly-reviews/YYYY-WXX-weekly-review.md`
+4. Output goes to `thoughts/shared/pm/reports/YYYY-WXX-weekly-review.md`
 5. After the review, I will suggest running `/weekly-plan` to plan next week
 
 **Default output is focused (~150 lines max).** Say "full review" if you want the expanded version with stakeholder pulse, task-level execution metrics, and pattern analysis.
@@ -29,14 +29,14 @@ End-of-week synthesis reviewing what you accomplished, what you learned, and wha
 
 **Check these files first:**
 
-1. `thoughts/shared/weekly-plans/` - This week's plan (what you intended)
-2. `thoughts/shared/daily-plans/` - Daily plans from this week (what actually happened)
-3. `thoughts/shared/prds/` - PRDs modified this week
-4. `thoughts/shared/meeting-notes/` - Meeting notes from past 7 days
-5. `pm/context-library/launches/` - Launches that happened this week
-6. `pm/context-library/decisions/` - Decisions made this week
-7. `thoughts/shared/research-synthesis/` - Research conducted
-8. `pm/context-library/strategy/` - Quarter goals (to track progress)
+1. `thoughts/shared/pm/reports/` - This week's plan (what you intended)
+2. `thoughts/shared/pm/reports/` - Daily plans from this week (what actually happened)
+3. `thoughts/shared/pm/prds/` - PRDs modified this week
+4. `thoughts/shared/product/meeting-notes/` - Meeting notes from past 7 days
+5. `thoughts/shared/pm/launches/` - Launches that happened this week
+6. `thoughts/shared/product/decisions/` - Decisions made this week
+7. `thoughts/shared/pm/analyses/` - Research conducted
+8. `thoughts/shared/pm/frameworks/` - Quarter goals (to track progress)
 
 **MCP Queries (if available):**
 
@@ -59,7 +59,7 @@ End-of-week synthesis reviewing what you accomplished, what you learned, and wha
    - If user specified: Use that week
 
 2. **Check if review already exists:**
-   - Look for `thoughts/shared/weekly-reviews/YYYY-WXX-weekly-review.md`
+   - Look for `thoughts/shared/pm/reports/YYYY-WXX-weekly-review.md`
    - If exists: Ask "Update existing review or create new version?"
 
 ---
@@ -68,7 +68,7 @@ End-of-week synthesis reviewing what you accomplished, what you learned, and wha
 
 **A. Weekly Plan (What Was Intended):**
 
-Read `thoughts/shared/weekly-plans/YYYY-WXX-weekly-plan.md`:
+Read `thoughts/shared/pm/reports/YYYY-WXX-weekly-plan.md`:
 
 Extract:
 
@@ -86,13 +86,13 @@ If no weekly plan exists:
 
 **B. PRD Progress:**
 
-Scan `thoughts/shared/prds/` and `pm/context-library/prds/`:
+Scan `thoughts/shared/pm/prds/`:
 
 Method 1 - File modification dates:
 
 ```bash
 # Files modified in the past 7 days
-find thoughts/shared/prds/ pm/context-library/prds/ -name "*.md" -mtime -7
+find thoughts/shared/pm/prds/ -name "*.md" -mtime -7
 ```
 
 For each PRD touched this week:
@@ -119,7 +119,7 @@ git log --since="7 days ago" --name-only --pretty=format: | grep -E "prds/.*\.md
 
 **C. Feature Launches:**
 
-Check `pm/context-library/launches/`:
+Check `thoughts/shared/pm/launches/`:
 
 - Launches completed this week
 - Launch checklists finished
@@ -144,14 +144,14 @@ Categorize:
 
 **D. Meetings & Decisions:**
 
-Scan `thoughts/shared/meeting-notes/` from past 7 days:
+Scan `thoughts/shared/product/meeting-notes/` from past 7 days:
 
 For each meeting:
 
 - Extract date, attendees, topic
 - Look for: Decisions made, action items created, blockers identified
 
-Check `pm/context-library/decisions/`:
+Check `thoughts/shared/product/decisions/`:
 
 - Decision docs created this week
 - Link to related meetings
@@ -198,12 +198,12 @@ Initiative: [PRD Name]
 
 **F. User Research & Insights:**
 
-Check `pm/context-library/research/`:
+Check `thoughts/shared/pm/`:
 
 - New interview notes this week
 - Competitive analysis updates
 
-Check `thoughts/shared/research-synthesis/`:
+Check `thoughts/shared/pm/analyses/`:
 
 - Synthesis reports created
 - Themes identified
@@ -258,7 +258,7 @@ For each PRD:
 
 **Strategic Alignment:**
 
-Read `pm/context-library/strategy/` for quarter goals.
+Read `thoughts/shared/pm/frameworks/` for quarter goals.
 
 For each goal:
 
@@ -291,7 +291,7 @@ Look for:
 
 ### Step 4: Generate Weekly Review
 
-Create file: `thoughts/shared/weekly-reviews/YYYY-WXX-weekly-review.md`
+Create file: `thoughts/shared/pm/reports/YYYY-WXX-weekly-review.md`
 
 **Output Length Guidance:**
 
@@ -684,7 +684,7 @@ After generating review, prompt user with contextual suggestions:
 > - [Learning 1]
 > - [Learning 2]
 >
-> I'll surface these in future planning. Want me to add to `pm/context-library/personal-context/lessons-learned.md`?"
+> I'll surface these in future planning. Want me to add to `thoughts/shared/pm/context/lessons-learned.md`?"
 
 **If metrics concerning:**
 
