@@ -79,6 +79,15 @@ else
   warnings+=(".claude/config.json not found — run setup-catalyst.sh to create it")
 fi
 
+# 5. Ensure workflow context file exists
+#    This is the auto-discovery backing store; skills and hooks depend on it.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SCRIPT_DIR}/workflow-context.sh" ]]; then
+  "${SCRIPT_DIR}/workflow-context.sh" init 2>/dev/null || true
+elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" init 2>/dev/null || true
+fi
+
 # Report errors (fatal)
 if [[ ${#errors[@]} -gt 0 ]]; then
   echo -e "${RED}ERROR: Project setup incomplete${NC}"

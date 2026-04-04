@@ -54,13 +54,12 @@ install-project:
 	@read -p "Enter project path: " path; \
 	./hack/install-project.sh "$$path"
 
-# Run tests (placeholder for future)
+# Run tests
 test:
-	@echo "⚠️  No tests configured yet"
-	@echo "TODO: Add tests for:"
-	@echo "  - Command frontmatter validation"
-	@echo "  - Installation script behavior"
-	@echo "  - Configuration file handling"
+	@echo "Running plugin tests..."
+	@bash plugins/dev/scripts/test-workflow-context.sh
+	@echo ""
+	@echo "✅ All test suites passed!"
 
 # Clean temporary files
 clean:
