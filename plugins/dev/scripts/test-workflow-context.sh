@@ -316,7 +316,9 @@ cat >"$TEST_DIR/.claude/config.json" <<'CONF'
 {"catalyst":{"projectKey":"test","project":{"ticketPrefix":"TEST"},"linear":{"teamKey":"TEST","stateMap":{"backlog":"Backlog"}}}}
 CONF
 
-(cd "$TEST_DIR" && bash plugins/dev/scripts/check-project-setup.sh 2>&1) || true
+# Suppress warnings — the temp project is intentionally minimal; we only
+# care whether the script creates the context file as a side effect.
+(cd "$TEST_DIR" && bash plugins/dev/scripts/check-project-setup.sh >/dev/null 2>&1) || true
 
 if [[ -f "$TEST_DIR/.claude/.workflow-context.json" ]]; then
 	pass "check-project-setup.sh created the context file"
