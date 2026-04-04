@@ -79,10 +79,22 @@ Once you have a plan path:
 
 Plans are carefully designed, but reality can be messy. Your job is to:
 
+- **Follow TDD: write tests before implementation code** in each phase
 - Follow the plan's intent while adapting to what you find
 - Implement each phase fully before moving to the next
 - Verify your work makes sense in the broader codebase context
 - Update checkboxes in the plan as you complete sections
+
+### TDD Rhythm Per Phase
+
+For each phase, follow **Red → Green → Refactor**:
+
+1. **Red** — Write the tests specified in the plan's "Tests First" section. Run them to confirm they fail.
+2. **Green** — Implement the minimum code from the plan's "Implementation" section to make tests pass.
+3. **Refactor** — Clean up while keeping tests green. Apply any refactoring notes from the plan.
+
+This order is non-negotiable. If a phase doesn't have a "Tests First" section, write tests for the
+phase's expected behavior before implementing. The tests serve as executable acceptance criteria.
 
 When things don't match the plan exactly, think about why and communicate clearly. The plan is your
 guide, but your judgment matters too.
@@ -103,15 +115,22 @@ If you encounter a mismatch:
 
 ## Verification Approach
 
-After implementing a phase:
+**Within each phase (TDD cycle):**
 
-- Run the success criteria checks (usually `make check test` covers everything)
+- Write tests first → run them → confirm they fail (Red)
+- Write implementation → run tests → confirm they pass (Green)
+- Refactor if needed → run tests → confirm they still pass (Refactor)
+
+**After completing a phase:**
+
+- Run the full success criteria checks (usually `make check test` covers everything)
 - Fix any issues before proceeding
 - Update your progress in both the plan and your todos
 - Check off completed items in the plan file itself using Edit
 - **Check context usage** - monitor token consumption
 
-Don't let verification interrupt your flow - batch it at natural stopping points.
+Don't let verification interrupt your flow - batch full suite runs at natural stopping points. But
+always run the specific tests you wrote during each Red → Green cycle.
 
 ## Context Management During Implementation
 

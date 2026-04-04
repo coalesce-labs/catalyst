@@ -8,7 +8,7 @@ description: Initial feature implementation
 1. Point me to a PRD or describe the feature to build
 2. I explore your codebase (framework, patterns, structure) or switch to Prototype Mode if no codebase exists
 3. I create an implementation plan and ask for your approval before writing code
-4. I implement the feature following existing code patterns, with tests
+4. I follow TDD: write failing tests first, then implement to make them pass, then refactor
 5. I deliver a summary with files created/modified, test coverage, and next steps
 
 **Example:** "Build the user preferences feature from thoughts/shared/prds/preferences.md"
@@ -122,9 +122,10 @@ Create `pm/context-library/technical/codebase-overview.md`:
 
 ## Files to Create
 
+- `tests/feature.test.ts` - Unit tests (written FIRST)
+- `tests/feature.integration.test.ts` - Integration tests (written FIRST)
 - `src/components/NewFeature.tsx` - Main component
 - `src/api/feature.ts` - API routes
-- `tests/feature.test.ts` - Unit tests
 
 ## Files to Modify
 
@@ -142,10 +143,16 @@ Create `pm/context-library/technical/codebase-overview.md`:
 
 - Add `features` table with columns: id, user_id, data, created_at
 
-## Testing Approach
+## Testing Approach (TDD)
 
-- Unit tests for components
-- Integration tests for API
+Tests are written BEFORE implementation using Red → Green → Refactor:
+1. **Red** — Write failing tests describing expected behavior
+2. **Green** — Implement minimum code to make tests pass
+3. **Refactor** — Clean up while keeping tests green
+
+- Unit tests for core business logic (written first)
+- Integration tests for API endpoints (written first)
+- Edge case tests for error states (written first)
 - E2E test for happy path
 ```
 
@@ -153,14 +160,29 @@ Create `pm/context-library/technical/codebase-overview.md`:
 
 ---
 
-### Step 4: Implementation
+### Step 4: Implementation (TDD — Red → Green → Refactor)
 
-**Write code following:**
+Follow Test-Driven Development for each unit of work:
 
-- Existing code patterns (match style)
-- Framework conventions
-- PRD requirements
-- Best practices
+**Step 4a: Write Failing Tests (Red)**
+
+- Write test files FIRST, before any implementation code
+- Tests should describe the expected behavior from the PRD
+- Run tests to confirm they fail (this validates the tests are meaningful)
+- Cover: core logic, API contracts, edge cases, error states
+
+**Step 4b: Implement to Pass (Green)**
+
+- Write the minimum code to make tests pass
+- Follow existing code patterns (match style)
+- Follow framework conventions
+- Don't over-engineer — just make the tests green
+
+**Step 4c: Refactor (Clean)**
+
+- Clean up implementation while keeping all tests green
+- Extract shared logic, improve naming, simplify
+- Run tests after each refactor step to ensure nothing breaks
 
 **Add inline comments for:**
 
@@ -168,11 +190,13 @@ Create `pm/context-library/technical/codebase-overview.md`:
 - Edge case handling
 - TODOs for future work
 
-**Create tests:**
-
-- Unit tests for core logic
-- Basic integration tests
-- Mark areas needing more coverage
+**TDD rhythm per feature unit:**
+```
+1. Write test → run → see it fail (Red)
+2. Write implementation → run → see it pass (Green)
+3. Clean up → run → still passing (Refactor)
+4. Repeat for next unit
+```
 
 ---
 
@@ -286,30 +310,33 @@ For UI features, include basic accessibility in all generated code:
 
 ---
 
-## Testing Depth
+## Testing Depth (TDD)
 
-Generate tests using the detected testing framework. If no testing framework is detected, default to the standard for the stack (Jest for React/Node, Pytest for Python, Vitest for Vite-based projects).
+**All tests are written BEFORE implementation code** using the detected testing framework. If no testing framework is detected, default to the standard for the stack (Jest for React/Node, Pytest for Python, Vitest for Vite-based projects).
 
-**Minimum test coverage:**
+**TDD workflow per test tier:**
 
-### 1. Unit Tests (Core Logic)
+### 1. Unit Tests (Core Logic) — Written First
 
-- Test every function with business logic
-- Test edge cases: null inputs, empty arrays, boundary values
-- Test error handling: what happens when things fail
+- Write tests for every function with business logic BEFORE implementing the function
+- Include edge cases: null inputs, empty arrays, boundary values
+- Include error handling: what happens when things fail
+- Run tests → confirm they fail → then implement
 
-### 2. Integration Tests (Main User Flow)
+### 2. Integration Tests (Main User Flow) — Written First
 
-- Test the primary happy path end-to-end
-- Test API endpoint responses (status codes, response shapes)
-- Test database operations if applicable (create, read, update, delete)
+- Write tests for the primary happy path BEFORE building the flow
+- Write tests for API endpoint responses (status codes, response shapes)
+- Write tests for database operations if applicable (create, read, update, delete)
+- Run tests → confirm they fail → then implement
 
-### 3. Edge Case Tests (Error States)
+### 3. Edge Case Tests (Error States) — Written First
 
-- Test with invalid inputs
-- Test with missing required fields
-- Test with unauthorized access (if auth exists)
-- Test with network failures / timeouts (mock these)
+- Write tests for invalid inputs BEFORE adding validation
+- Write tests for missing required fields
+- Write tests for unauthorized access (if auth exists)
+- Write tests for network failures / timeouts (mock these)
+- Run tests → confirm they fail → then implement
 
 **Target:** 80% coverage of new code. Always include test data fixtures.
 
@@ -359,6 +386,7 @@ Before delivering the first draft, verify:
 - [ ] **Implementation plan was approved** -- PM confirmed the plan before code was written
 - [ ] **Existing code patterns followed** -- New code matches the codebase's naming conventions, file structure, and architectural patterns
 - [ ] **PRD requirements covered** -- Every acceptance criterion from the PRD maps to implemented code
+- [ ] **TDD followed** -- Tests were written BEFORE implementation code (Red → Green → Refactor)
 - [ ] **Tests written and passing** -- Unit tests for core logic, integration test for main flow, edge case tests for error states
 - [ ] **Test coverage target met** -- At least 80% coverage of new code
 - [ ] **Accessibility included** -- ARIA labels, keyboard navigation, focus indicators, semantic HTML (for UI features)
