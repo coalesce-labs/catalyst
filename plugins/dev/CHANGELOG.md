@@ -1,5 +1,17 @@
 # Changelog
 
+## [5.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.2.0...catalyst-dev-v5.3.0) (2026-04-04)
+
+
+### Features
+
+* **dev:** integrate Test-Driven Development (TDD) methodology across planning and implementation skills ([#50](https://github.com/coalesce-labs/catalyst/issues/50)) ([1083117](https://github.com/coalesce-labs/catalyst/commit/108311720eb59fed87570233a94abe748fc970b1))
+
+
+### Bug Fixes
+
+* **dev:** ensure workflow context is created and used properly ([#52](https://github.com/coalesce-labs/catalyst/issues/52)) ([b9cf5f5](https://github.com/coalesce-labs/catalyst/commit/b9cf5f5e30233bbabb5ff838a38c6f68328c18af))
+
 ## [5.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.1.1...catalyst-dev-v5.2.0) (2026-04-01)
 
 
