@@ -57,10 +57,11 @@ If starting fresh or need more context:
    Compare actual changes to plan specifications.
    Return: File-by-file comparison of planned vs actual
 
-   Task 3 - Verify test coverage:
+   Task 3 - Verify test coverage and TDD adherence:
    Check if tests were added/modified as specified.
+   Check git history to verify tests were committed before or alongside implementation (TDD).
    Run test commands and capture results.
-   Return: Test status and any missing coverage
+   Return: Test status, TDD adherence, and any missing coverage
    ```
 
 ### Step 2: Systematic Validation
@@ -194,6 +195,7 @@ If you were part of the implementation:
 Always verify:
 
 - [ ] All phases marked complete are actually done
+- [ ] **TDD was followed** — tests exist for each phase and were written before/alongside implementation
 - [ ] Automated tests pass
 - [ ] Code follows existing patterns
 - [ ] No regressions introduced

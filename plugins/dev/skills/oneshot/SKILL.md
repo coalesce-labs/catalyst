@@ -121,7 +121,7 @@ humanlayer launch \
 **What happens in the launched session:**
 - Fresh context window (no planning tokens consumed)
 - Reads plan document from thoughts/
-- Runs `/implement-plan` with full capabilities
+- Runs `/implement-plan` with full capabilities — follows TDD (tests written before implementation per phase)
 - Can spawn agent teams for complex multi-file implementations (see --team mode)
 - **Does NOT commit or create PR** — deferred to Phase 5
 

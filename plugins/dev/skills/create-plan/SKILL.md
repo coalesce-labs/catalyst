@@ -195,7 +195,22 @@ source_research: "[[research-doc-filename]]"  # or null
 
 [What this phase accomplishes]
 
-### Changes Required:
+### Tests First (Red):
+
+Define the expected behavior before writing implementation code.
+
+#### 1. [Test File/Group]
+
+**File**: `tests/path/to/feature.test.ext`
+**Tests to write**:
+
+```[language]
+// Test describing expected behavior — should FAIL before implementation
+```
+
+### Implementation (Green):
+
+Write the minimum code to make the tests pass.
 
 #### 1. [Component/File Group]
 
@@ -205,6 +220,10 @@ source_research: "[[research-doc-filename]]"  # or null
 ```[language]
 // Specific code to add/modify
 ```
+
+### Refactor (if needed):
+
+[Any cleanup, extraction, or simplification to do while tests stay green]
 
 ### Success Criteria:
 
@@ -223,13 +242,30 @@ source_research: "[[research-doc-filename]]"  # or null
 
 ## Phase 2: [Descriptive Name]
 
-[Similar structure...]
+[Similar structure — always Tests First → Implementation → Refactor]
 
 ---
 
-## Testing Strategy
+## Testing Strategy (TDD)
 
-[Unit tests, integration tests, manual testing steps]
+**Approach: Test-Driven Development (Red → Green → Refactor)**
+
+Each phase writes tests BEFORE implementation code. This ensures:
+- Requirements are encoded as executable specifications
+- Implementation stays focused on passing defined behavior
+- Refactoring is safe because tests catch regressions
+
+**Test tiers:**
+- **Unit tests** — written first for each function with business logic
+- **Integration tests** — written first for API endpoints and data flows
+- **Edge case tests** — written first for error states, invalid inputs, auth failures
+
+**Per-phase rhythm:**
+1. Write failing tests that describe the phase's expected behavior
+2. Implement the minimum code to make tests pass
+3. Refactor while keeping tests green
+
+[Additional manual testing steps if needed]
 
 ## Performance Considerations
 
@@ -311,14 +347,16 @@ This MUST print the plan path. If not, re-run 5b.
 
 ## Common Patterns
 
+All patterns follow TDD: write tests for each step BEFORE implementing it.
+
 ### For Database Changes:
-Schema/migration → store methods → business logic → API → clients
+Schema/migration → **tests for** store methods → store methods → **tests for** business logic → business logic → **tests for** API → API → clients
 
 ### For New Features:
-Research patterns → data model → backend logic → API endpoints → UI
+Research patterns → data model → **tests for** backend logic → backend logic → **tests for** API endpoints → API endpoints → **tests for** UI components → UI
 
 ### For Refactoring:
-Document behavior → incremental changes → backwards compatibility → migration strategy
+**Capture existing behavior as tests first** → incremental changes (keep tests green) → backwards compatibility → migration strategy
 
 ## Linear Integration
 
