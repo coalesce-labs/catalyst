@@ -18,40 +18,32 @@ plans contain phases with specific changes and success criteria.
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
+
+# Auto-discover most recent plan (workflow context + filesystem fallback)
+RECENT_PLAN=""
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  RECENT_PLAN=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
+fi
+if [[ -n "$RECENT_PLAN" ]]; then
+  echo "📋 Auto-discovered recent plan: $RECENT_PLAN"
+else
+  echo "⚠️ No recent plan found in workflow context or filesystem"
+fi
 ```
 
 ## Initial Response
 
-**STEP 1: Auto-discover recent plan (REQUIRED)**
+Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
 
-IMMEDIATELY run this bash script BEFORE any other response:
+1. **If user provided a plan path as parameter**: Use the provided path (user override). Skip to Step 3.
 
-```bash
-# Auto-discover most recent plan from workflow context
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  RECENT_PLAN=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
-  if [[ -n "$RECENT_PLAN" ]]; then
-    echo "📋 Auto-discovered recent plan: $RECENT_PLAN"
-    echo ""
-  fi
-fi
-```
-
-**STEP 2: Determine which plan to implement**
-
-After running the auto-discovery script, follow this logic:
-
-1. **If user provided a plan path as parameter**:
-   - Use the provided path (user override)
-   - Skip to Step 3
-
-2. **If no parameter provided AND RECENT_PLAN was found**:
-   - Show user: "📋 Found recent plan: $RECENT_PLAN"
+2. **If no parameter provided AND Prerequisites output shows a discovered plan (📋)**:
+   - Show user the discovered plan path
    - Ask: "**Proceed with this plan?** [Y/n]"
-   - If yes: use RECENT_PLAN and skip to Step 3
+   - If yes: use it and skip to Step 3
    - If no: proceed to option 3
 
-3. **If no parameter AND no RECENT_PLAN found**:
+3. **If no parameter AND Prerequisites shows no plan found (⚠️)**:
    - List available plans from `thoughts/shared/plans/`
    - Show most recent 5 plans with dates and ticket numbers
    - Ask user which plan to implement

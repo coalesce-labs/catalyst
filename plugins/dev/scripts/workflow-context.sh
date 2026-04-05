@@ -55,12 +55,21 @@ add_document() {
 	mv "${CONTEXT_FILE}.tmp" "$CONTEXT_FILE"
 }
 
-# Get most recent document of type
+# Get most recent document of type (with filesystem fallback)
 # Usage: get_recent <type>
 get_recent() {
 	local doc_type="$1"
 	init_context
-	jq -r --arg type "$doc_type" '.workflow[$type][0].path // empty' "$CONTEXT_FILE"
+	local result
+	result=$(jq -r --arg type "$doc_type" '.workflow[$type][0].path // empty' "$CONTEXT_FILE")
+	# Filesystem fallback if workflow context has no entries for this type
+	if [[ -z "$result" && -d "${PROJECT_ROOT}/thoughts/shared/${doc_type}" ]]; then
+		result=$(find "${PROJECT_ROOT}/thoughts/shared/${doc_type}" -name '*.md' -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+		if [[ -n "$result" ]]; then
+			result="${result#"${PROJECT_ROOT}/"}"
+		fi
+	fi
+	echo "$result"
 }
 
 # Get most recent document (any type)
