@@ -19,26 +19,26 @@ research-backed modifications, not just text edits.
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
+
+# Auto-discover most recent plan (workflow context + filesystem fallback)
+RECENT_PLAN=""
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  RECENT_PLAN=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
+fi
+if [[ -n "$RECENT_PLAN" ]]; then
+  echo "📋 Auto-discovered recent plan: $RECENT_PLAN"
+else
+  echo "⚠️ No recent plan found in workflow context or filesystem"
+fi
 ```
 
 ## Initial Response
 
-**STEP 1: Check for recent plan (AUTO-DETECT)**
+Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
 
-```bash
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  RECENT_PLAN=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
-  if [[ -n "$RECENT_PLAN" ]]; then
-    echo "Found recent plan: $RECENT_PLAN"
-  fi
-fi
-```
-
-**STEP 2: Gather input**
-
-1. **If user provided a plan file path**: Read it FULLY immediately
-2. **If RECENT_PLAN found and no path provided**: Ask "Should I update the recent plan?"
-3. **If neither**: Ask user to provide the plan file path
+1. **If user provided a plan file path**: Use the provided path (user override). Read it FULLY immediately.
+2. **If no path provided AND Prerequisites discovered a plan (📋)**: Show the path and ask "**Update this plan?** [Y/n]"
+3. **If no path AND no plan found (⚠️)**: Ask user to provide the plan file path
 
 Then ask: "What changes need to be made to this plan?"
 

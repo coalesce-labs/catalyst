@@ -21,30 +21,35 @@ Replace `PROJ` in ticket references with your Linear team's prefix from `.claude
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
+
+# Auto-discover most recent research (workflow context + filesystem fallback)
+RECENT_RESEARCH=""
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  RECENT_RESEARCH=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research)
+fi
+if [[ -n "$RECENT_RESEARCH" ]]; then
+  echo "📋 Auto-discovered recent research: $RECENT_RESEARCH"
+else
+  echo "⚠️ No recent research found in workflow context or filesystem"
+fi
 ```
 
 ## Initial Response
 
-**STEP 1: Check for recent research**
-
-```bash
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  RECENT_RESEARCH=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research)
-  if [[ -n "$RECENT_RESEARCH" ]]; then
-    echo "Found recent research: $RECENT_RESEARCH"
-  fi
-fi
-```
-
-**STEP 2: Gather initial input**
+Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
 
 1. **If user provided parameters** (file path or ticket reference):
+   - Use the provided path (user override)
    - Read any provided files FULLY
-   - If RECENT_RESEARCH was found, mention it and ask if it should inform the plan
+   - If Prerequisites also discovered research (📋), mention it and ask if it should inform the plan
    - Begin the research process
 
-2. **If no parameters provided**:
-   - Show any RECENT_RESEARCH found
+2. **If no parameters provided AND Prerequisites discovered research (📋)**:
+   - Show the discovered research path
+   - Ask if it should be used as context for the plan
+   - Wait for user's confirmation
+
+3. **If no parameters AND no research found (⚠️)**:
    - Ask for: task/ticket description, context/constraints, related research
    - Wait for user's input
 

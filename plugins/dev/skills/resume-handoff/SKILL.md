@@ -15,6 +15,17 @@ version: 1.0.0
 if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
+
+# Auto-discover most recent handoff (workflow context + filesystem fallback)
+RECENT_HANDOFF=""
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  RECENT_HANDOFF=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent handoffs)
+fi
+if [[ -n "$RECENT_HANDOFF" ]]; then
+  echo "📋 Auto-discovered recent handoff: $RECENT_HANDOFF"
+else
+  echo "⚠️ No recent handoff found in workflow context or filesystem"
+fi
 ```
 
 ## Configuration Note
@@ -32,28 +43,9 @@ to be understood and continued.
 
 ## Initial Response
 
-**STEP 1: Auto-discover recent handoff (REQUIRED)**
+Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
 
-IMMEDIATELY run this bash script BEFORE any other response:
-
-```bash
-# Auto-discover most recent handoff from workflow context
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
-  RECENT_HANDOFF=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent handoffs)
-  if [[ -n "$RECENT_HANDOFF" ]]; then
-    echo "📋 Auto-discovered recent handoff: $RECENT_HANDOFF"
-    echo ""
-  fi
-fi
-```
-
-**STEP 2: Determine which handoff to use**
-
-After running the auto-discovery script, follow this logic:
-
-1. **If user provided a file path as parameter**:
-   - Use the provided path (user override)
-   - Skip to Step 3
+1. **If user provided a file path as parameter**: Use the provided path (user override). Skip to Step 3.
 
 2. **If user provided a ticket number (like PROJ-123)**:
    - Run `humanlayer thoughts sync` to ensure `thoughts/` is up to date
@@ -63,13 +55,13 @@ After running the auto-discovery script, follow this logic:
    - If none exist, tell user and wait for input
    - Skip to Step 3
 
-3. **If no parameters provided AND RECENT_HANDOFF was found**:
-   - Show user: "📋 Found recent handoff: $RECENT_HANDOFF"
+3. **If no parameters provided AND Prerequisites output shows a discovered handoff (📋)**:
+   - Show user the discovered path
    - Ask: "**Proceed with this handoff?** [Y/n]"
-   - If yes: use RECENT_HANDOFF and skip to Step 3
+   - If yes: use it and skip to Step 3
    - If no: proceed to option 4
 
-4. **If no parameters AND no RECENT_HANDOFF found**:
+4. **If no parameters AND Prerequisites shows no handoff found (⚠️)**:
    - List available handoffs from `thoughts/shared/handoffs/`
    - Show most recent 5 handoffs with dates
    - Ask user which one to use

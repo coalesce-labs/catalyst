@@ -9,19 +9,44 @@ disable-model-invocation: true
 You are tasked with validating that an implementation plan was correctly executed, verifying all
 success criteria and identifying any deviations or issues.
 
+## Prerequisites
+
+```bash
+# Check project setup (thoughts, CLAUDE.md snippet, config)
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
+fi
+
+# Auto-discover most recent plan (workflow context + filesystem fallback)
+RECENT_PLAN=""
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+  RECENT_PLAN=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans)
+fi
+if [[ -n "$RECENT_PLAN" ]]; then
+  echo "📋 Auto-discovered recent plan: $RECENT_PLAN"
+else
+  echo "⚠️ No recent plan found in workflow context or filesystem"
+fi
+```
+
 ## Initial Setup
 
-When invoked:
+Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
 
-1. **Determine context** - Are you in an existing conversation or starting fresh?
-   - If existing: Review what was implemented in this session
-   - If fresh: Need to discover what was done through git and codebase analysis
+1. **If user provided a plan path as parameter**: Use the provided path (user override).
 
-2. **Locate the plan**:
-   - If plan path provided, use it
-   - Otherwise, search recent commits for plan references or ask user
+2. **If no parameter AND Prerequisites discovered a plan (📋)**:
+   - Show user the discovered plan path
+   - Ask: "**Validate this plan?** [Y/n]"
+   - If yes: use it
+   - If no: proceed to option 3
 
-3. **Gather implementation evidence**:
+3. **If no parameter AND no plan found (⚠️)**:
+   - Search recent commits for plan references
+   - List available plans from `thoughts/shared/plans/`
+   - Ask user which plan to validate
+
+4. **Gather implementation evidence**:
 
    ```bash
    # Check recent commits
