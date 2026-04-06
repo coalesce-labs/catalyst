@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.2.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.2.1...catalyst-pm-v5.2.2) (2026-04-06)
+
+
+### Bug Fixes
+
+* **pm:** remove explicit agents array that also broke auto-discovery ([#56](https://github.com/coalesce-labs/catalyst/issues/56)) ([71a8238](https://github.com/coalesce-labs/catalyst/commit/71a82389a733e7a24930030ab0af9aa95f8371d6))
+
 ## [5.2.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.2.0...catalyst-pm-v5.2.1) (2026-04-06)
 
 
