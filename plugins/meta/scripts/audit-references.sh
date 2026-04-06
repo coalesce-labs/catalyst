@@ -109,6 +109,13 @@ audit_manifest() {
 		return
 	fi
 
+	# Check for explicit "skills" array — this breaks Claude Code auto-discovery
+	if jq -e '.skills' "$manifest" &>/dev/null; then
+		local line
+		line=$(grep -nF '"skills"' "$manifest" 2>/dev/null | head -1 | cut -d: -f1)
+		echo "${manifest}|${line:-0}|skills|Explicit skills array breaks autocomplete — remove it and let Claude Code auto-discover skills/**/SKILL.md" >> "$CRITICAL_FILE"
+	fi
+
 	# Helper: extract file paths from a JSON array that may contain strings or objects with .file
 	local extract_files='if type == "string" then . elif type == "object" then .file // empty else empty end'
 
