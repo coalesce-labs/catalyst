@@ -21,5 +21,12 @@
     "skills",
     "posthog"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "agents": [
+    "./agents/linear-research.md",
+    "./agents/cycle-analyzer.md",
+    "./agents/milestone-analyzer.md",
+    "./agents/backlog-analyzer.md",
+    "./agents/github-linear-analyzer.md"
+  ]
 }
