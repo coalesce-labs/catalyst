@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.2.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.2.0...catalyst-pm-v5.2.1) (2026-04-06)
+
+
+### Bug Fixes
+
+* **pm:** remove explicit skills array that broke autocomplete ([#54](https://github.com/coalesce-labs/catalyst/issues/54)) ([09a5503](https://github.com/coalesce-labs/catalyst/commit/09a5503810467565c00ed4ce87d6c52e01e97300))
+
 ## [5.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.1.0...catalyst-pm-v5.2.0) (2026-04-01)
 
 
