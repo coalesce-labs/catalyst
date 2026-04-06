@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v3.1.2...catalyst-meta-v3.1.3) (2026-04-06)
+
+
+### Bug Fixes
+
+* **pm:** restore agents array removed in error ([#58](https://github.com/coalesce-labs/catalyst/issues/58)) ([c58ada5](https://github.com/coalesce-labs/catalyst/commit/c58ada507059c2381f6dc3652fc35edb2946f581))
+
 ## [3.1.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v3.1.1...catalyst-meta-v3.1.2) (2026-04-06)
 
 
