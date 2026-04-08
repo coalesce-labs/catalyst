@@ -1,6 +1,6 @@
 ---
 name: create-pr
-description: Create pull request with automatic Linear integration
+description: "Create pull request with automatic Linear integration. **ALWAYS use when** the user says 'create a PR', 'open a pull request', 'ship this', 'ready for review', or wants to push changes and create a GitHub PR. Handles commit, rebase, push, PR creation, description generation, and Linear ticket update."
 disable-model-invocation: true
 allowed-tools: Bash(linearis *), Bash(git *), Bash(gh *), Read, Task
 version: 1.0.0
@@ -165,17 +165,24 @@ DO NOT add any of the following to the PR:
 The PR should be authored solely by the user (git author). Keep the description clean and professional.
 
 ```bash
-# Minimal initial body (NO CLAUDE ATTRIBUTION)
-body="Automated PR creation. Comprehensive description generating..."
+# Generate a meaningful initial body from commit messages (NO CLAUDE ATTRIBUTION)
+commits=$(git log origin/$base..HEAD --oneline --no-merges)
+body="## Changes
+
+$commits"
 
 # If ticket exists, add reference
 if [[ "$ticket" ]]; then
-    body="$body\n\nRefs: $ticket"
+    body="$body
+
+Refs: $ticket"
 fi
 
 # Create PR (author will be the git user)
 gh pr create --title "$title" --body "$body" --base "$base"
 ```
+
+The initial body uses commit messages so the PR is immediately readable even before `/describe-pr` generates the full description.
 
 Capture PR number and URL from output.
 
@@ -359,9 +366,10 @@ Calling /describe-pr...
 
 ## Remember:
 
-- **Minimize prompts** - only ask when PR already exists
-- **Auto-rebase** - keep branch up-to-date with base
-- **Auto-link Linear** - extract ticket from branch, update status with Linearis CLI
-- **Auto-describe** - comprehensive description generated immediately
-- **Fail fast** - stop on conflicts or errors with clear messages
-- **Graceful degradation** - If Linearis not installed, warn but continue
+- **Minimize prompts** — only ask when PR already exists
+- **Auto-rebase** — keep branch up-to-date with base
+- **Auto-link Linear** — extract ticket from branch, update status with Linearis CLI
+- **Auto-describe** — comprehensive description generated immediately
+- **Fail fast** — stop on conflicts or errors with clear messages
+- **Graceful degradation** — if Linearis not installed, warn but continue
+- For Linearis CLI syntax, see the `linearis` skill reference

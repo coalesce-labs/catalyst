@@ -1,6 +1,6 @@
 ---
 name: describe-pr
-description: Generate or update PR description with incremental changes
+description: "Generate or update PR description with incremental changes. **ALWAYS use when** the user says 'describe the PR', 'update PR description', 'generate PR description', or after pushing new commits to an existing PR. Supports incremental updates that preserve manual edits."
 disable-model-invocation: true
 allowed-tools: Bash, Read, Write
 version: 2.0.0
@@ -243,16 +243,16 @@ Use ticket title and description for context.
 **Title generation rules:**
 
 ```bash
-# If ticket exists
-if [[ "$ticket" ]]; then
-    # Get ticket title from Linear
-    ticket_title=$(linear API or fallback to branch)
-
+# If ticket exists and linearis available
+if [[ "$ticket" ]] && command -v linearis &>/dev/null; then
+    ticket_title=$(linearis issues read "$ticket" | jq -r '.title')
     # Format: TICKET: Descriptive title (max 72 chars)
     title="$ticket: ${ticket_title:0:60}"
+elif [[ "$ticket" ]]; then
+    # Fallback: generate title from branch name + commits
+    title="$ticket: $(echo "$branch" | sed "s/^.*$ticket-//" | tr '-' ' ')"
 else
-    # Generate from primary change
-    # Analyze commits and code changes
+    # No ticket: generate from primary change
     title="Brief summary of main change"
 fi
 ```
@@ -442,78 +442,17 @@ Review updated PR: {url}
 ---
 ```
 
-## Incremental Update Examples
+## Incremental Update Behavior
 
-**Example 1: Code review changes**
-
-```
-User pushes 2 commits after code review feedback
-
-/describe-pr detects:
-- 2 new commits
-- Changes in validation logic
-- New tests added
-
-Updates:
-- Appends to "Backend Changes"
-- Updates "How to Verify It" (reruns test check)
-- Updates Summary to mention review changes
-- Preserves reviewer notes and screenshots
-- Adds to update history
-```
-
-**Example 2: Multiple updates**
-
-```
-Update 1 (initial): 5 commits
-Update 2 (review): 3 commits
-Update 3 (fixes): 2 commits
-
-Description shows:
-- Complete history in update log
-- All changes accumulated
-- Latest verification status
-- All manual notes preserved
-```
+Each subsequent call detects new commits since the last description update, appends changes to the
+appropriate sections, reruns verification checks, preserves manual edits (reviewer notes,
+screenshots, checked boxes), and adds entries to the update history log.
 
 ## Error Handling
 
-**No PR found:**
-
-```
-❌ No PR found for current branch
-
-Open PRs:
-  #120 - Feature A (feature-a branch)
-  #121 - Fix B (fix-b branch)
-
-Which PR? (enter number)
-```
-
-**Template missing:**
-
-```
-❌ PR description template required
-
-Create: thoughts/shared/pr_description.md
-See earlier in conversation for template structure.
-```
-
-**Verification command fails:**
-
-```
-⚠️  Some automated checks failed
-
-Failed:
-- make test (exit code 1)
-  Error: 2 tests failed in validation.test.ts
-
-Passed:
-- make lint ✅
-- make build ✅
-
-Fix failing tests before merge or document as known issues.
-```
+- **No PR found** → List open PRs and ask user which to describe
+- **Template missing** → Warn and generate without template
+- **Verification fails** → Mark failed checks with error details, continue with description
 
 ## Configuration
 
@@ -544,11 +483,10 @@ State names are read from `stateMap` with sensible defaults. See `.claude/config
 
 ## Remember:
 
-- **No interactive prompts** - fully automated
-- **Incremental updates** - preserve manual edits, append new
-- **Auto-update title** - based on analysis
-- **Run verification** - attempt all automated checks
-- **Link Linear** - extract ticket, update status
-- **Show what changed** - clear summary of updates
-- **Full context** - read entire existing description
-- **Metadata tracking** - commit history, timestamps
+- **No interactive prompts** — fully automated
+- **Incremental updates** — preserve manual edits, append new
+- **Auto-update title** — based on analysis
+- **Run verification** — attempt all automated checks
+- **Link Linear** — extract ticket, update status
+- **Metadata tracking** — commit history, timestamps
+- For Linearis CLI syntax, see the `linearis` skill reference

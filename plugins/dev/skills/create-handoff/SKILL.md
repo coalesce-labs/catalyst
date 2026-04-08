@@ -1,6 +1,6 @@
 ---
 name: create-handoff
-description: Create handoff document for passing work to another session
+description: "Create handoff document for passing work to another session. **ALWAYS use when** the user says 'create a handoff', 'hand this off', 'save progress for later', 'I need to stop here', or when context usage is high (>60%) during implementation and work needs to continue in a fresh session."
 disable-model-invocation: true
 allowed-tools: Write, Bash, Read
 version: 1.0.0
@@ -38,15 +38,18 @@ compact and summarize your context without losing any of the key details of what
 - ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
-Use the following information to understand how to create your document: - create your file under
-`thoughts/shared/handoffs/PROJ-XXX/YYYY-MM-DD_HH-MM-SS_description.md`, where: - YYYY-MM-DD is
-today's date - HH-MM-SS is the hours, minutes and seconds based on the current time, in 24-hour
-format (i.e. use `13:00` for `1:00 pm`) - PROJ-XXX is the ticket number directory (replace with
-`general` if no ticket) - description is a brief kebab-case description (optionally including ticket
-number) - Get current git information for metadata (branch, commit, repository name) using git
-commands - Examples: - With ticket:
-`thoughts/shared/handoffs/PROJ-123/2025-01-08_13-55-22_PROJ-123_auth-feature.md` - Without ticket:
-`thoughts/shared/handoffs/general/2025-01-08_13-55-22_refactor-api.md`
+Create your file under `thoughts/shared/handoffs/PROJ-XXX/YYYY-MM-DD_HH-MM-SS_description.md`:
+
+- `YYYY-MM-DD` — today's date
+- `HH-MM-SS` — current time in 24-hour format (e.g., `13-55-22`)
+- `PROJ-XXX` — ticket number directory (use `general` if no ticket)
+- `description` — brief kebab-case description
+
+Get current git information for metadata (branch, commit, repository name) using git commands.
+
+**Examples:**
+- With ticket: `thoughts/shared/handoffs/PROJ-123/2025-01-08_13-55-22_PROJ-123_auth-feature.md`
+- Without ticket: `thoughts/shared/handoffs/general/2025-01-08_13-55-22_refactor-api.md`
 
 ### 2. Handoff writing.
 
@@ -112,7 +115,7 @@ their statuses}
 ## Other Notes
 
 { other notes, references, or useful information - e.g. where relevant sections of the codebase are,
-where relevant documents are, or other important things you leanrned that you want to pass on but
+where relevant documents are, or other important things you learned that you want to pass on but
 that don't fall into the above categories}
 ```
 
@@ -166,7 +169,7 @@ with the following command:
 
 ---
 
-##. Additional Notes & Instructions
+## Additional Notes & Instructions
 
 - **more information, not less**. This is a guideline that defines the minimum of what a handoff
   should be. Always feel free to include more information if necessary.

@@ -1,6 +1,6 @@
 ---
 name: oneshot
-description: End-to-end autonomous workflow - research, plan, implement, validate, ship, and merge in one command
+description: "End-to-end autonomous workflow — research, plan, implement, validate, ship, and merge in one command. **ALWAYS use when** the user says 'oneshot', 'do everything end to end', 'full workflow', or wants to go from ticket/idea to merged PR autonomously. Each phase runs in a fresh session for context isolation."
 disable-model-invocation: true
 allowed-tools: Read, Write, Bash, Task, Grep, Glob
 version: 2.0.0

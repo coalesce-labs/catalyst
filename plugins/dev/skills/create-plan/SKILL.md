@@ -1,6 +1,6 @@
 ---
 name: create-plan
-description: Create detailed implementation plans through an interactive process
+description: "Create detailed implementation plans through an interactive process. **ALWAYS use when** the user says 'plan this', 'create a plan', 'let's plan the implementation', 'design the approach', or wants a structured TDD implementation plan before writing code. Works best after /research-codebase."
 disable-model-invocation: true
 allowed-tools: Read, Write, Grep, Glob, Task, TodoWrite, Bash
 version: 1.0.0

@@ -1,6 +1,6 @@
 ---
 name: scan-reward-hacking
-description: Scan for reward hacking patterns in recent changes
+description: "Scan for reward hacking patterns in recent changes. **ALWAYS use when** verifying TypeScript fixes before marking work complete, after /fix-typescript, or when the user says 'scan for hacks', 'check for type cheats', 'verify no reward hacking'. Detects forbidden patterns like `as any`, `as unknown as`, `@ts-ignore`."
 disable-model-invocation: true
 allowed-tools: Bash, Read, Grep
 version: 1.0.0
@@ -12,39 +12,20 @@ You are scanning for "reward hacking" patterns - code that makes linters pass wi
 
 ## What to Scan
 
-Scan the project structure and look for `src/`, `apps/`, `packages/`, `lib/` directories. If `$ARGUMENTS` is provided, scan those paths instead.
-
-Store the detected scan targets in a variable (e.g., `SCAN_DIRS`) and use them in all grep commands below.
+Scan the project structure and look for `src/`, `apps/`, `packages/`, `lib/` directories. If arguments are provided, scan those paths instead.
 
 ## Forbidden Patterns to Detect
 
-Run these grep commands against the detected directories and report ALL matches:
+Use the **Grep tool** (not bash grep) to search for each pattern in `*.ts` and `*.tsx` files. Run all searches and report ALL matches:
 
-```bash
-# 1. Undocumented double-casts (HIGH SEVERITY)
-grep -rn "as unknown as" $SCAN_DIRS --include="*.ts" --include="*.tsx"
+1. **Undocumented double-casts** (HIGH SEVERITY): pattern `as unknown as`
+2. **Direct any casts** (HIGH SEVERITY): pattern `as any`
+3. **Void tricks** (CRITICAL): patterns `void (0` and `void _`
+4. **Underscore-prefixed local variables** (MEDIUM): patterns `const _[a-zA-Z]` and `let _[a-zA-Z]` (not function parameters)
+5. **TypeScript directive comments** (HIGH): patterns `@ts-ignore` and `@ts-expect-error`
+6. **Exported unused types** (LOW — informational): patterns `^export type [A-Z]` and `^export interface [A-Z]`
 
-# 2. Direct any casts (HIGH SEVERITY)
-grep -rn "as any" $SCAN_DIRS --include="*.ts" --include="*.tsx"
-
-# 3. Void tricks to suppress unused warnings (CRITICAL - IMMEDIATE FIX)
-grep -rn "void (0" $SCAN_DIRS --include="*.ts" --include="*.tsx"
-grep -rn "void _" $SCAN_DIRS --include="*.ts" --include="*.tsx"
-
-# 4. Underscore-prefixed local variables (MEDIUM SEVERITY)
-# Look for const _varName = or let _varName = that aren't function parameters
-grep -rn "const _[a-zA-Z]" $SCAN_DIRS --include="*.ts" --include="*.tsx"
-grep -rn "let _[a-zA-Z]" $SCAN_DIRS --include="*.ts" --include="*.tsx"
-
-# 5. TypeScript directive comments (HIGH SEVERITY)
-grep -rn "@ts-ignore" $SCAN_DIRS --include="*.ts" --include="*.tsx"
-grep -rn "@ts-expect-error" $SCAN_DIRS --include="*.ts" --include="*.tsx"
-
-# 6. Exported but potentially unused types (LOW SEVERITY - informational)
-# This requires more analysis - flag for manual review
-grep -rn "^export type [A-Z]" $SCAN_DIRS --include="*.ts" --include="*.tsx"
-grep -rn "^export interface [A-Z]" $SCAN_DIRS --include="*.ts" --include="*.tsx"
-```
+Use glob `*.{ts,tsx}` to filter to TypeScript files only.
 
 ## How to Evaluate Matches
 

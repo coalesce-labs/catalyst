@@ -1,6 +1,6 @@
 ---
 name: merge-pr
-description: Safely merge PR with verification and Linear integration
+description: "Safely merge PR with verification and Linear integration. **ALWAYS use when** the user says 'merge the PR', 'merge this', 'ship it', or wants to merge an approved pull request. Runs tests, checks CI, verifies approvals, squash merges, cleans up branches, and moves Linear ticket to Done."
 disable-model-invocation: true
 allowed-tools: Bash(linearis *), Bash(git *), Bash(gh *), Read
 version: 1.0.0
@@ -460,93 +460,21 @@ Post-merge tasks: $task_count saved to thoughts/
 
 ## Error Handling
 
-**Rebase conflicts:**
+For all errors, provide clear messages with the specific error, what went wrong, and how to fix it.
 
-```
-❌ Rebase conflicts detected
+**Fail fast (stop execution):**
+- Rebase conflicts → show conflicting files, instructions to resolve manually, then re-run `/merge-pr`
+- Test failures → show failed tests, suggest fix or `--skip-tests`
+- PR not open/mergeable → show current state
 
-Conflicting files:
-  - src/app.ts
-  - tests/app.test.ts
+**Prompt for override:**
+- CI checks failing → show failures, ask `Continue anyway? [y/N]`
+- Missing approvals → show review status, ask `Continue anyway? [y/N]`
 
-Resolve manually:
-  gh pr checkout $pr_number
-  git fetch origin $base_branch
-  git rebase origin/$base_branch
-  # Fix conflicts
-  git add <files>
-  git rebase --continue
-  git push --force-with-lease
-  /merge-pr $pr_number
-```
-
-**Tests failing:**
-
-```
-❌ Tests failed (exit code 1)
-
-Failed tests:
-  - validation.test.ts:45 - Expected true but got false
-  - auth.test.ts:12 - Timeout exceeded
-
-Fix tests or skip (not recommended):
-  /merge-pr $pr_number --skip-tests
-```
-
-**CI checks failing:**
-
-```
-⚠️  Required CI checks failing
-
-Failed:
-  - build: Compilation error in src/types.ts
-  - security: Dependency vulnerability found
-
-You can:
-  1. Fix issues and try again
-  2. Override and merge anyway (not recommended)
-
-Override? [y/N]:
-```
-
-**Linearis CLI not found:**
-
-```
-⚠️  Linearis CLI not found
-
-PR merged successfully, but Linear ticket not updated.
-
-Install Linearis:
-  npm install -g linearis
-
-Configure:
-  export LINEAR_API_TOKEN=your_token
-
-Then update ticket manually (use state name from your stateMap config):
-  linearis issues update $ticket --status "Done"  # or your configured done state
-```
-
-**Linear API error:**
-
-```
-⚠️  Could not update Linear ticket $ticket
-
-Error: Ticket not found or API unavailable
-
-PR merged successfully, but ticket status not updated.
-Update manually in Linear.
-```
-
-**Branch deletion error:**
-
-```
-⚠️  Could not delete local branch $head_branch
-
-Error: Branch has unpushed commits
-
-This won't affect the merge (already complete).
-Delete manually: git branch -D $head_branch
-```
+**Warn but continue (graceful degradation):**
+- Linearis CLI not found → warn, suggest install, merge proceeds
+- Linear API error → warn, merge proceeds
+- Branch deletion error → warn, merge already succeeded
 
 ## Configuration
 
@@ -581,54 +509,11 @@ State names are read from `stateMap` with sensible defaults. See `.claude/config
 
 ## Examples
 
-**Happy path (all checks pass):**
-
 ```bash
-/merge-pr 123
-
-Running tests: make test
-✅ All tests passed
-✅ CI checks passed
-✅ PR approved
-
-About to merge PR #123...
-[shows summary]
-Proceed? Y
-
-✅ Merged!
-✅ Linear ticket ENG-123 → Done
-✅ Branches deleted
-```
-
-**With failing CI (user override):**
-
-```bash
-/merge-pr 124
-
-⚠️  Some CI checks failing
-Continue anyway? y
-
-✅ Merged (with overrides)
-```
-
-**Skip tests:**
-
-```bash
-/merge-pr 125 --skip-tests
-
-⚠️  Skipping tests (not recommended)
-✅ Merged!
-```
-
-**Linearis not installed:**
-
-```bash
-/merge-pr 126
-
-✅ PR merged successfully!
-⚠️  Linearis CLI not found - Linear ticket not updated
-
-Install Linearis to enable automatic ticket updates.
+/merge-pr 123              # Merge PR for current branch
+/merge-pr 123 --skip-tests # Skip local test execution
+/merge-pr 123 --no-update  # Don't update Linear ticket
+/merge-pr 123 --keep-branch # Don't delete local branch
 ```
 
 ## Safety Features
@@ -660,33 +545,14 @@ Install Linearis to enable automatic ticket updates.
 - If Linearis not installed, warn but continue
 - Merge succeeds regardless of Linear integration
 
-## Post-Merge Workflow
-
-```
-PR merged
-    ↓
-Linear ticket → Done (if Linearis available)
-    ↓
-Branches deleted
-    ↓
-Base branch updated locally
-    ↓
-Primary worktree updated (if separate)
-    ↓
-Post-merge tasks extracted
-    ↓
-Deployment detection + /loop suggestion
-```
-
 ## Remember:
 
-- **Always squash merge** - clean history
-- **Always delete branches** - no orphan branches
-- **Always run tests** - unless explicitly skipped
-- **Auto-rebase** - keep up-to-date with base
-- **Fail fast** - stop on conflicts or test failures
-- **Update Linear** - move ticket to Done automatically (if Linearis available)
-- **Extract tasks** - save post-merge checklist
-- **Clear summary** - show what happened
-- **Only prompt for exceptions** - approvals missing, CI failing
-- **Graceful degradation** - Work without Linearis if needed
+- **Always squash merge** — clean history
+- **Always delete branches** — no orphan branches
+- **Always run tests** — unless explicitly skipped
+- **Auto-rebase** — keep up-to-date with base
+- **Fail fast** — stop on conflicts or test failures
+- **Update Linear** — move ticket to Done automatically (if Linearis available)
+- **Only prompt for exceptions** — approvals missing, CI failing
+- **Graceful degradation** — work without Linearis if needed
+- For Linearis CLI syntax, see the `linearis` skill reference
