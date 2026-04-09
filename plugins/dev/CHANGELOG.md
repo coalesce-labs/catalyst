@@ -1,5 +1,12 @@
 # Changelog
 
+## [5.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.3.0...catalyst-dev-v5.4.0) (2026-04-09)
+
+
+### Features
+
+* **dev:** dev skills v2 — quality gates, new skills, and shipping enhancements ([#60](https://github.com/coalesce-labs/catalyst/issues/60)) ([70a2d8d](https://github.com/coalesce-labs/catalyst/commit/70a2d8d0dab401841fcc9acf26e4da9932edae57))
+
 ## [5.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.2.0...catalyst-dev-v5.3.0) (2026-04-04)
 
 
