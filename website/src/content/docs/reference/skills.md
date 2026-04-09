@@ -67,6 +67,8 @@ Each skill's description includes specific phrases and contexts that tell Claude
 | `create-worktree` | "create a worktree", "work in parallel", parallel feature development |
 | `fix-typescript` | "fix type errors", "fix typescript", "type-check is failing", TypeScript compilation errors |
 | `scan-reward-hacking` | After `/fix-typescript`, "scan for hacks", "check for type cheats", verifying TS fixes |
+| `validate-type-safety` | "validate types", "check type safety", "run type validation", before PRs with TS changes |
+| `review-comments` | "address comments", "fix review feedback", "handle PR comments", "respond to reviewers" |
 | `agent-browser` | "open in browser", "check the site", "take a screenshot", "fill the form", visual browser interaction |
 | `linearis` | Activates when ticket IDs like `ACME-123` appear, or when working with Linear CLI |
 | `ci-commit` | Non-interactive — used by CI pipelines and automation only |
@@ -95,7 +97,8 @@ The core development plugin. Skills covering research, planning, implementation,
 | `oneshot` | &#10003; | — | End-to-end autonomous workflow — research, plan, implement, validate, ship, and merge with context isolation between phases. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/oneshot/SKILL.md) |
 | `code-first-draft` | &#10003; | — | Initial feature implementation from a PRD or feature description. Also generates standalone prototypes when no codebase exists. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/code-first-draft/SKILL.md) |
 | `fix-typescript` | &#10003; | — | Fix TypeScript errors with strict anti-reward-hacking rules. Ensures runtime type safety over silencing errors. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/fix-typescript/SKILL.md) |
-| `scan-reward-hacking` | &#10003; | — | Scan for forbidden patterns (`as any`, `@ts-ignore`, etc.) in recent changes. Companion to `/fix-typescript`. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/scan-reward-hacking/SKILL.md) |
+| `scan-reward-hacking` | &#10003; | — | Scan for forbidden patterns (`as any`, `@ts-ignore`, non-null assertions, async issues) in recent changes. Companion to `/fix-typescript`. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/scan-reward-hacking/SKILL.md) |
+| `validate-type-safety` | &#10003; | — | 5-step type safety gate: type check, reward hacking scan, test inclusion, tests, lint. Detects project tooling automatically. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/validate-type-safety/SKILL.md) |
 
 ### Shipping
 
@@ -105,6 +108,7 @@ The core development plugin. Skills covering research, planning, implementation,
 | `create-pr` | &#10003; | — | Full PR creation: commit, rebase, push, create PR, generate description, and update Linear ticket. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-pr/SKILL.md) |
 | `describe-pr` | &#10003; | — | Generate or incrementally update PR descriptions. Preserves manual edits across updates. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/describe-pr/SKILL.md) |
 | `merge-pr` | &#10003; | — | Safe squash merge with test execution, CI verification, approval checks, branch cleanup, and Linear update. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/merge-pr/SKILL.md) |
+| `review-comments` | &#10003; | — | Pull PR review comments, analyze context, implement fixes, and push updates. Used by `/oneshot` Phase 5. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/review-comments/SKILL.md) |
 
 ### Session Management
 
