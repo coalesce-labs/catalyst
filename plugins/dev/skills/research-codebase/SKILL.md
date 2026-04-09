@@ -1,6 +1,6 @@
 ---
 name: research-codebase
-description: Conduct comprehensive codebase research using parallel sub-agents
+description: "Conduct comprehensive codebase research using parallel sub-agents. **ALWAYS use when** the user asks to 'research', 'investigate', 'explore the codebase', 'how does X work', 'find out about', or needs deep analysis of how existing code is structured. Produces a research document in thoughts/shared/research/ with file:line references."
 disable-model-invocation: true
 allowed-tools: Read, Write, Grep, Glob, Task, TodoWrite, Bash
 version: 1.0.0

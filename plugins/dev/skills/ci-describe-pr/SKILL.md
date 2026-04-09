@@ -1,6 +1,6 @@
 ---
 name: ci-describe-pr
-description: Generate PR descriptions autonomously for CI/automation (no user interaction)
+description: "Generate PR descriptions autonomously for CI/automation (no user interaction). Non-interactive variant of /describe-pr for use in CI pipelines and automated workflows. Auto-detects current PR, generates description, and updates GitHub."
 user-invocable: false
 allowed-tools: Bash, Read, Write
 version: 1.0.0

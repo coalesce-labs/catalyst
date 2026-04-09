@@ -1,9 +1,9 @@
 ---
 name: oneshot
-description: End-to-end autonomous workflow - research, plan, implement, validate, ship, and merge in one command
+description: "End-to-end autonomous workflow — research, plan, implement, validate, ship, and merge in one command. **ALWAYS use when** the user says 'oneshot', 'do everything end to end', 'full workflow', or wants to go from ticket/idea to merged PR autonomously. Each phase runs in a fresh session for context isolation."
 disable-model-invocation: true
 allowed-tools: Read, Write, Bash, Task, Grep, Glob
-version: 2.0.0
+version: 3.0.0
 ---
 
 # Oneshot
@@ -144,9 +144,24 @@ humanlayer launch \
 - Runs `/validate-plan` against the plan document
 - Produces a validation report with phase completion status and deviations
 
-**Step 2: Run quality gates** (skip with `--skip-quality-gates`)
+**Step 2: Run skill-based quality gates** (skip with `--skip-quality-gates`)
 
-Reads quality gates from `.claude/config.json` under `catalyst.qualityGates` (see Configuration section below). Runs each gate in `order` sequence:
+Run these skill/agent gates in order:
+
+```
+Gate 1: /validate-type-safety  → tsc + reward hacking scan + tests + lint
+Gate 2: /security-review       → security vulnerability scan (built-in)
+Gate 3: code-reviewer agent    → style/guideline adherence
+Gate 4: pr-test-analyzer agent → test coverage verification
+```
+
+For each gate: run it, if it fails and is auto-fixable (gates 1 and 2), attempt to fix and re-run.
+Gates 3 and 4 produce advisory findings — address them if significant.
+
+**Step 3: Run config-based quality gates**
+
+Reads additional gates from `.claude/config.json` under `catalyst.qualityGates` (see Configuration
+section below). Runs each gate in `order` sequence:
 
 ```
 For each gate (sorted by order):
@@ -195,25 +210,91 @@ Launches a Sonnet session for the structured PR workflow:
 humanlayer launch \
   --model sonnet \
   --title "ship ${TICKET_ID:-oneshot}" \
-  "/create-pr"
+  "Ship changes: smart PR create/update, CI polling, comment monitoring. Ticket: ${TICKET_ID:-none}"
 ```
 
-**What happens in the launched session:**
-- Runs `/create-pr` which internally handles: commit, push, PR creation, description, Linear linking
-- After PR is created, polls CI checks:
-  ```bash
-  gh pr checks --watch --fail-fast
-  ```
-- Presents user with options:
-  ```
-  PR created: https://github.com/org/repo/pull/123
+**Step 1: Smart PR Creation/Update**
 
-  CI status: ⏳ running...
+Check if a PR already exists for the current branch:
 
-  Options:
-    [1] Wait for CI and auto-merge (runs Phase 6 automatically)
-    [2] Exit — merge later with /merge-pr
-  ```
+```bash
+EXISTING_PR=$(gh pr list --head "$(git branch --show-current)" --json number --jq '.[0].number' 2>/dev/null)
+```
+
+- **If PR exists** (`$EXISTING_PR` is not empty):
+  - Commit and push new changes
+  - Update PR description with `/describe-pr`
+  - Log: "Updated existing PR #$EXISTING_PR"
+
+- **If no PR exists**:
+  - Run `/create-pr` (handles commit, push, PR creation, description, Linear linking)
+
+**Step 2: CI Polling with Auto-Fix**
+
+After PR is created/updated, poll CI checks with auto-fix capability:
+
+```bash
+# Poll CI — max 3 fix attempts
+ATTEMPT=0
+MAX_ATTEMPTS=3
+
+while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+  gh pr checks $PR_NUMBER --watch --fail-fast
+
+  if [ $? -eq 0 ]; then
+    break  # CI passed
+  fi
+
+  ATTEMPT=$((ATTEMPT + 1))
+  if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+    # Analyze CI failures
+    # Attempt automated fix
+    # Commit and push fix
+    # Re-poll
+  fi
+done
+```
+
+If CI fails after all attempts, present the user with options:
+```
+CI failed after {ATTEMPT} fix attempts:
+  ❌ {check name}: {failure reason}
+
+Options:
+  [1] Fix manually and re-poll
+  [2] Continue to merge anyway (if branch protections allow)
+  [3] Create handoff and stop
+```
+
+**Step 3: PR Comment Monitoring**
+
+After CI passes (or user chooses to proceed), check for review comments:
+
+```bash
+# Fetch PR comments and reviews
+gh api repos/{owner}/{repo}/pulls/{number}/comments --jq '.[].body'
+gh api repos/{owner}/{repo}/pulls/{number}/reviews --jq '.[] | select(.state != "APPROVED") | .body'
+```
+
+If comments exist that need addressing:
+1. Invoke `/review-comments` to analyze and address each comment
+2. Push fixes
+3. Re-poll CI if fixes were pushed
+
+If no actionable comments, proceed to merge prompt.
+
+**Step 4: Present options**
+
+```
+PR ready: https://github.com/org/repo/pull/{number}
+
+CI: ✅ passed
+Reviews: {N} comments addressed / no comments
+
+Options:
+  [1] Wait for approval and auto-merge (runs Phase 6 automatically)
+  [2] Exit — merge later with /merge-pr
+```
 
 **If `--auto-merge` flag was set:** Skips the prompt, waits for CI, and proceeds to Phase 6 automatically.
 
@@ -384,9 +465,16 @@ State transitions throughout the lifecycle:
 - If user creates handoff, remaining phases are documented for next session
 
 **If CI checks fail in Phase 5:**
-- Present failures to user
-- Suggest fixes or manual intervention
+- Auto-fix up to 3 attempts (analyze errors, fix, push, re-poll)
+- After max attempts, present failures with options (fix manually, continue, handoff)
 - Do not auto-merge if CI is red
+
+**Automatic handoff on stop:**
+When the workflow stops at any phase (user choice, unrecoverable error, context exhaustion):
+- Invoke `/create-handoff` with: phases completed, current phase status, unresolved issues,
+  CI/review status, and remaining phases
+- Save handoff to `thoughts/shared/handoffs/`
+- User can resume with `/resume-handoff`
 
 ## Important
 

@@ -1,6 +1,6 @@
 ---
 name: iterate-plan
-description: Update existing implementation plans based on feedback or changed requirements
+description: "Update existing implementation plans based on feedback or changed requirements. **ALWAYS use when** the user says 'update the plan', 'change the plan', 'the requirements changed', 'revise the approach', or wants to modify an existing plan in thoughts/shared/plans/ after review feedback or discovered issues."
 disable-model-invocation: true
 allowed-tools: Read, Write, Task, Bash, Grep, Glob
 version: 1.0.0

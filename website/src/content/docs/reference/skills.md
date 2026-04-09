@@ -33,37 +33,105 @@ Type `/` followed by the skill name:
 
 Claude Code has excellent auto-complete — start typing `/res` and it will suggest `/research-codebase`. You don't need to include the plugin name; Claude Code resolves skills across all installed plugins automatically.
 
+## How Skills Are Indexed
+
+Claude Code discovers skills through a two-layer system:
+
+1. **Metadata layer** — Every skill's `name` and `description` from its YAML frontmatter are always loaded into Claude's context (~100 words each). This is how Claude decides whether to consult a skill.
+2. **Body layer** — The full SKILL.md instructions are loaded only when the skill is triggered. This keeps context costs low while making the full capability available on demand.
+
+For **model-invocable skills**, the description is the primary triggering mechanism. Claude reads all skill descriptions and activates the skill whose description best matches the current task. This is why descriptions include specific trigger phrases — they tell Claude "activate me when you see these patterns."
+
+For **user-invocable skills**, the `/` command is the trigger. The description helps Claude understand what the skill does when presenting auto-complete suggestions.
+
+### Trigger Contexts — catalyst-dev
+
+Each skill's description includes specific phrases and contexts that tell Claude when to activate it. Here's what triggers each dev skill:
+
+| Skill | Trigger Phrases / Contexts |
+|-------|---------------------------|
+| `research-codebase` | "research", "investigate", "explore the codebase", "how does X work", "find out about", deep analysis of existing code |
+| `create-plan` | "plan this", "create a plan", "design the approach", structured TDD implementation planning |
+| `iterate-plan` | "update the plan", "change the plan", "requirements changed", "revise the approach" |
+| `implement-plan` | "implement the plan", "start implementing", "build from the plan", executing a TDD plan |
+| `validate-plan` | "validate the plan", "check if the plan was implemented correctly", "verify the implementation" |
+| `oneshot` | "oneshot", "do everything end to end", "full workflow", ticket-to-merged-PR autonomously |
+| `code-first-draft` | "build this feature", "implement this PRD", "code this up", "create the initial implementation" |
+| `commit` | "commit this", "save my changes", "let's commit", saving session work |
+| `create-pr` | "create a PR", "open a pull request", "ship this", "ready for review" |
+| `describe-pr` | "describe the PR", "update PR description", after pushing new commits |
+| `merge-pr` | "merge the PR", "merge this", "ship it", merging an approved PR |
+| `create-handoff` | "create a handoff", "hand this off", "save progress for later", context usage >60% |
+| `resume-handoff` | "resume handoff", "pick up where we left off", "continue from handoff" |
+| `linear` | "create a ticket", "update the ticket", "move ticket to", "search Linear" |
+| `create-worktree` | "create a worktree", "work in parallel", parallel feature development |
+| `fix-typescript` | "fix type errors", "fix typescript", "type-check is failing", TypeScript compilation errors |
+| `scan-reward-hacking` | After `/fix-typescript`, "scan for hacks", "check for type cheats", verifying TS fixes |
+| `validate-type-safety` | "validate types", "check type safety", "run type validation", before PRs with TS changes |
+| `review-comments` | "address comments", "fix review feedback", "handle PR comments", "respond to reviewers" |
+| `agent-browser` | "open in browser", "check the site", "take a screenshot", "fill the form", visual browser interaction |
+| `linearis` | Activates when ticket IDs like `ACME-123` appear, or when working with Linear CLI |
+| `ci-commit` | Non-interactive — used by CI pipelines and automation only |
+| `ci-describe-pr` | Non-interactive — used by CI pipelines and automation only |
+
 **Legend**: User column: checkmark = invoke with `/skill-name` | Model column: checkmark = Claude activates automatically | `CI` = non-interactive, for automation pipelines
 
 ## catalyst-dev
 
-The core development plugin. 23 skills covering research, planning, implementation, and shipping.
+The core development plugin. Skills covering research, planning, implementation, and shipping.
+
+### Research & Planning
 
 | Skill | User | Model | Description | Source |
 |-------|:----:|:-----:|-------------|--------|
-| `research-codebase` | &#10003; | — | Parallel codebase research with specialized agents | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/research-codebase/SKILL.md) |
-| `create-plan` | &#10003; | — | Interactive implementation planning with phased structure | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-plan/SKILL.md) |
-| `iterate-plan` | &#10003; | — | Revise existing plans with feedback or changed requirements | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/iterate-plan/SKILL.md) |
-| `implement-plan` | &#10003; | — | Execute plans phase by phase with automated verification | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/implement-plan/SKILL.md) |
-| `validate-plan` | &#10003; | — | Verify implementation against plan success criteria | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/validate-plan/SKILL.md) |
-| `oneshot` | &#10003; | — | End-to-end: research, plan, implement in one invocation | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/oneshot/SKILL.md) |
-| `commit` | &#10003; | — | Conventional commits with Linear ticket integration | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/commit/SKILL.md) |
-| `create-pr` | &#10003; | — | Pull request creation with auto-generated description | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-pr/SKILL.md) |
-| `describe-pr` | &#10003; | — | Generate or update PR descriptions from recent work | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/describe-pr/SKILL.md) |
-| `merge-pr` | &#10003; | — | Safe merge with verification and Linear status update | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/merge-pr/SKILL.md) |
-| `create-handoff` | &#10003; | — | Save session context for later resumption | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-handoff/SKILL.md) |
-| `resume-handoff` | &#10003; | — | Resume work from a handoff document | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/resume-handoff/SKILL.md) |
-| `linear` | &#10003; | — | Direct ticket operations (create, update, comment) | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/linear/SKILL.md) |
-| `create-worktree` | &#10003; | — | Create git worktree for parallel development | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-worktree/SKILL.md) |
-| `fix-typescript` | &#10003; | — | Fix TypeScript errors with strict anti-reward-hacking rules | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/fix-typescript/SKILL.md) |
-| `scan-reward-hacking` | &#10003; | — | Scan for reward hacking patterns in recent changes | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/scan-reward-hacking/SKILL.md) |
-| `workflow-help` | &#10003; | — | Interactive guide to supported workflows | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/workflow-help/SKILL.md) |
-| `cycle-plan` | &#10003; | — | Plan work for current or next cycle | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/cycle-plan/SKILL.md) |
-| `agent-browser` | — | &#10003; | Browser automation CLI reference — activates when browser testing is needed | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/agent-browser/SKILL.md) |
-| `code-first-draft` | — | &#10003; | Initial feature implementation guidance for rapid prototyping | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/code-first-draft/SKILL.md) |
-| `linearis` | — | &#10003; | Linearis CLI reference — activates when working with ticket IDs like ACME-123 | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/linearis/SKILL.md) |
-| `ci-commit` | — | CI | Non-interactive commits for automation pipelines | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/ci-commit/SKILL.md) |
-| `ci-describe-pr` | — | CI | Non-interactive PR descriptions for automation pipelines | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/ci-describe-pr/SKILL.md) |
+| `research-codebase` | &#10003; | — | Parallel codebase research with specialized agents. Produces a research document with file:line references. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/research-codebase/SKILL.md) |
+| `create-plan` | &#10003; | — | Interactive TDD implementation planning. Works best after `/research-codebase`. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-plan/SKILL.md) |
+| `iterate-plan` | &#10003; | — | Revise existing plans with research-backed modifications after feedback or changed requirements. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/iterate-plan/SKILL.md) |
+
+### Implementation
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `implement-plan` | &#10003; | — | Execute plans phase by phase using TDD (Red-Green-Refactor). Supports team mode for parallel implementation. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/implement-plan/SKILL.md) |
+| `validate-plan` | &#10003; | — | Verify implementation against plan success criteria and TDD adherence. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/validate-plan/SKILL.md) |
+| `oneshot` | &#10003; | — | End-to-end autonomous workflow — research, plan, implement, validate, ship, and merge with context isolation between phases. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/oneshot/SKILL.md) |
+| `code-first-draft` | &#10003; | — | Initial feature implementation from a PRD or feature description. Also generates standalone prototypes when no codebase exists. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/code-first-draft/SKILL.md) |
+| `fix-typescript` | &#10003; | — | Fix TypeScript errors with strict anti-reward-hacking rules. Ensures runtime type safety over silencing errors. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/fix-typescript/SKILL.md) |
+| `scan-reward-hacking` | &#10003; | — | Scan for forbidden patterns (`as any`, `@ts-ignore`, non-null assertions, async issues) in recent changes. Companion to `/fix-typescript`. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/scan-reward-hacking/SKILL.md) |
+| `validate-type-safety` | &#10003; | — | 5-step type safety gate: type check, reward hacking scan, test inclusion, tests, lint. Detects project tooling automatically. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/validate-type-safety/SKILL.md) |
+
+### Shipping
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `commit` | &#10003; | — | Auto-detect commit type, scope, and ticket reference. Conventional commit format for changelog generation. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/commit/SKILL.md) |
+| `create-pr` | &#10003; | — | Full PR creation: commit, rebase, push, create PR, generate description, and update Linear ticket. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-pr/SKILL.md) |
+| `describe-pr` | &#10003; | — | Generate or incrementally update PR descriptions. Preserves manual edits across updates. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/describe-pr/SKILL.md) |
+| `merge-pr` | &#10003; | — | Safe squash merge with test execution, CI verification, approval checks, branch cleanup, and Linear update. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/merge-pr/SKILL.md) |
+| `review-comments` | &#10003; | — | Pull PR review comments, analyze context, implement fixes, and push updates. Used by `/oneshot` Phase 5. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/review-comments/SKILL.md) |
+
+### Session Management
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `create-handoff` | &#10003; | — | Save session context, learnings, and next steps for continuation in a fresh session. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-handoff/SKILL.md) |
+| `resume-handoff` | &#10003; | — | Resume work from a handoff document. Verifies codebase state and creates an action plan. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/resume-handoff/SKILL.md) |
+| `create-worktree` | &#10003; | — | Create git worktree for parallel development without switching branches. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-worktree/SKILL.md) |
+
+### Integrations & References
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `linear` | &#10003; | — | Linear ticket operations: create from thoughts documents, update status, manage workflow. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/linear/SKILL.md) |
+| `agent-browser` | — | &#10003; | Browser automation CLI reference — activates when visual browser interaction is needed (OAuth, dashboards, screenshots). | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/agent-browser/SKILL.md) |
+| `linearis` | — | &#10003; | Linearis CLI reference — activates when ticket IDs like `ACME-123` appear or when Linear CLI syntax is needed. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/linearis/SKILL.md) |
+
+### CI / Automation
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `ci-commit` | — | CI | Non-interactive variant of `/commit` for CI pipelines. Never prompts the user. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/ci-commit/SKILL.md) |
+| `ci-describe-pr` | — | CI | Non-interactive variant of `/describe-pr` for CI pipelines. Auto-detects current PR. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/ci-describe-pr/SKILL.md) |
 
 ## catalyst-pm
 

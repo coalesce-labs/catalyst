@@ -1,6 +1,6 @@
 ---
 name: ci-commit
-description: Create git commits autonomously for CI/automation (no user interaction)
+description: "Create git commits autonomously for CI/automation (no user interaction). Non-interactive variant of /commit for use in CI pipelines, automated workflows, and background tasks. Never prompts the user."
 user-invocable: false
 allowed-tools: Bash, Read
 version: 1.0.0

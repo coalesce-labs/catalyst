@@ -1,6 +1,6 @@
 ---
 name: implement-plan
-description: Implement approved technical plans from thoughts/shared/plans/
+description: "Implement approved technical plans from thoughts/shared/plans/. **ALWAYS use when** the user says 'implement the plan', 'start implementing', 'build from the plan', or wants to execute a previously created implementation plan using TDD (Red-Green-Refactor). Supports team mode for parallel implementation."
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Grep, Glob, Task, TodoWrite, Bash
 version: 1.0.0
@@ -185,6 +185,64 @@ When recommending a handoff, guide the user:
 3. Handoff filename format: `thoughts/shared/handoffs/{ticket}/YYYY-MM-DD_HH-MM-SS_description.md`
 4. Include: completed phases, next steps, key learnings, file references
 5. Update plan file with checkboxes for completed work
+
+## Quality Gates (After All Phases Complete)
+
+After all implementation phases pass, run quality gates before marking work as done. These gates
+catch issues that per-phase testing might miss.
+
+**Gate execution order:**
+
+```
+Quality Gates:
+├── 1. /validate-type-safety  → tsc + reward hacking scan + tsconfig check + tests + lint
+├── 2. /security-review       → scan for security vulnerabilities (built-in Claude Code skill)
+├── 3. code-reviewer agent    → style/guideline adherence check
+└── 4. pr-test-analyzer agent → test coverage verification
+```
+
+### Running the Gates
+
+**Gate 1: Type Safety Validation**
+
+Invoke `/validate-type-safety`. This runs the full 5-step gate (type check, reward hacking scan,
+test inclusion, tests, lint). If it fails, fix issues and re-run before proceeding.
+
+**Gate 2: Security Review**
+
+Invoke the built-in `/security-review` skill. Review findings and fix any vulnerabilities before
+proceeding.
+
+**Gate 3: Code Review**
+
+Spawn the `code-reviewer` agent:
+```
+Agent(subagent_type="pr-review-toolkit:code-reviewer",
+      prompt="Review the uncommitted changes for adherence to project guidelines and style.")
+```
+
+Address any findings that violate project conventions.
+
+**Gate 4: Test Coverage**
+
+Spawn the `pr-test-analyzer` agent:
+```
+Agent(subagent_type="pr-review-toolkit:pr-test-analyzer",
+      prompt="Analyze test coverage for the uncommitted changes. Identify critical gaps.")
+```
+
+If critical gaps exist, write the missing tests.
+
+### Autofix Behavior
+
+For gates 1 and 2, attempt to fix issues automatically and re-run the gate. For gates 3 and 4,
+address findings and verify. If a gate fails after 2 fix attempts, report the remaining issues to
+the user and ask how to proceed.
+
+### Skipping Quality Gates
+
+If the plan or user specifies `--skip-quality-gates`, skip this section entirely. Report that
+quality gates were skipped in the completion summary.
 
 ## If You Get Stuck
 

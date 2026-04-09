@@ -1,6 +1,9 @@
 ---
 name: code-first-draft
-description: Initial feature implementation
+description: "Initial feature implementation from a PRD or feature description. **ALWAYS use when** the user wants to build a new feature, implement a PRD, create a first draft of code, or says things like 'build this feature', 'implement this PRD', 'code this up', 'create the initial implementation'. Also use when there's no existing codebase and user needs a standalone reference prototype."
+disable-model-invocation: true
+allowed-tools: Read, Write, Edit, Grep, Glob, Bash, Task
+version: 1.0.0
 ---
 
 ## Quick Start
@@ -33,9 +36,8 @@ Connect to codebase and build initial implementation of a feature. Single-pass d
 
 **Check first:**
 
-1. `thoughts/shared/prds/` - PRD for requirements
-2. `pm/context-library/technical/codebase-overview.md` - Cached codebase context
-3. Codebase (`.git` directory, source files)
+1. `thoughts/shared/prds/` - PRD for requirements (if available)
+2. Codebase (`.git` directory, source files)
 
 ---
 
@@ -69,28 +71,6 @@ find . -type d -name "components" -o -name "src" -o -name "app" | head -10
 
 # Understand structure
 tree -L 2 -I 'node_modules|__pycache__|.git'
-```
-
-**Save context:**
-Create `pm/context-library/technical/codebase-overview.md`:
-
-```markdown
-# Codebase Overview
-
-**Framework:** [React/Django/Rails/etc]
-**Key directories:**
-
-- `/src/components/` - UI components
-- `/src/api/` - API routes
-- `/src/services/` - Business logic
-
-**Patterns:**
-
-- [Pattern observed]
-
-**Tech stack:**
-
-- [Languages, frameworks, libraries]
 ```
 
 ---
@@ -235,7 +215,7 @@ Save to `thoughts/shared/prototypes/[feature]-first-draft.md`:
 
 - Run tests
 - Manual QA
-- For complex features: Consider `/ralph-wiggum` for autonomous iteration
+- For complex features: Consider `/create-plan` + `/implement-plan` for structured iteration
 ```
 
 ---
@@ -246,38 +226,24 @@ If no codebase is detected (no `.git` directory, no `package.json`, no source fi
 
 ### Tech Stack Detection (Prototype Mode)
 
-Before choosing the prototype tech stack, check `pm/context-library/business-info-template.md` for the company's actual technology:
-
-**Check for:**
-
-- Frontend framework (React, Vue, Angular, Svelte)
-- Language (TypeScript, JavaScript, Python)
-- CSS approach (Tailwind, styled-components, CSS modules)
-- Backend framework (Next.js, Express, FastAPI, Django)
-- Infrastructure (AWS, GCP, Azure)
-
-**If tech stack is found:** Match the prototype to the company's stack so engineering can more easily adopt it.
-
-- Example: Business-info says "React + TypeScript + Tailwind on AWS" --> generate prototype using React + TypeScript + Tailwind, not Vue or plain CSS.
-
-**If no tech stack found:** Use sensible defaults (React + TypeScript + Tailwind for UI, FastAPI for backend, Next.js for full-stack) and note: "No company tech stack found in context. Using industry-standard defaults. Engineering should adapt to your actual stack."
+Infer the tech stack from the user's request or use sensible defaults:
 
 **What changes:**
 
-- Instead of modifying an existing codebase, generate a **standalone reference implementation** that the PM can share with engineering
-- Use the company's tech stack (from business-info) if available; otherwise fall back to the most common stack for the feature type:
+- Instead of modifying an existing codebase, generate a **standalone reference implementation**
+- Fall back to the most common stack for the feature type:
   - **UI features:** React + TypeScript + Tailwind CSS
   - **Backend/API features:** Python (FastAPI) or Node.js (Express + TypeScript)
   - **Full-stack features:** Next.js + TypeScript
   - **Data processing:** Python with standard libraries
 - Include a `README.md` with setup instructions (`npm install && npm run dev` or equivalent)
-- Add a header comment in every file: `// Reference prototype - not production code. Share with engineering as a starting point.`
+- Add a header comment in every file: `// Reference prototype - not production code.`
 
 **Output:** Save all files to `thoughts/shared/prototypes/[feature]-reference-impl/`
 
-**When presenting to PM:**
+**When presenting:**
 
-> "No codebase detected, so I built a standalone reference prototype using [stack]. This is not production code -- share it with engineering as a starting point for the real implementation. They should adapt it to your actual codebase patterns, auth system, and infrastructure."
+> "No codebase detected, so I built a standalone reference prototype using [stack]. This is not production code — adapt it to your actual codebase patterns, auth system, and infrastructure."
 
 ---
 
@@ -295,7 +261,7 @@ For UI features, include basic accessibility in all generated code:
 - **Alt text** on images and icons that convey meaning
 - **Error messages** associated with form fields via `aria-describedby`
 
-**Check stakeholder profiles** for additional accessibility requirements (e.g., WCAG AAA, specific assistive technology support).
+Check for additional accessibility requirements in project documentation (e.g., WCAG AAA, specific assistive technology support).
 
 **In code comments:**
 
@@ -364,18 +330,14 @@ For UI features, include basic accessibility in all generated code:
 
 **Before:**
 
-- `/prd-draft` - Define feature
-- `/prototype` - Validate UX first
+- `/create-plan` - Create a detailed implementation plan first (for complex features)
+- `/research-codebase` - Research existing patterns before building
 
 **After:**
 
-- `/ralph-wiggum` - If needs autonomous iteration
-- `/launch-checklist` - Prepare for launch
-- `/create-tickets` - Track remaining work
-
-**Related:**
-
-- `/prd-review-panel` - Get engineering review
+- `/commit` - Commit the implementation
+- `/create-pr` - Create a pull request for review
+- `/validate-plan` - Verify implementation matches requirements
 
 ---
 
