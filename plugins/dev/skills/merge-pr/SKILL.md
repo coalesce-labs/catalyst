@@ -12,10 +12,10 @@ Safely merges a PR after comprehensive verification, with Linear integration and
 
 ## Configuration
 
-Read team configuration from `.claude/config.json`:
+Read team configuration from `.catalyst/config.json`:
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
 TEST_CMD=$(jq -r '.catalyst.pr.testCommand // "make test"' "$CONFIG_FILE")
 ```
@@ -145,7 +145,7 @@ Exit with error.
 **Read test command from config:**
 
 ```bash
-test_cmd=$(jq -r '.catalyst.pr.testCommand // "make test"' .claude/config.json)
+test_cmd=$(jq -r '.catalyst.pr.testCommand // "make test"' .catalyst/config.json)
 ```
 
 **Execute tests:**
@@ -296,7 +296,7 @@ if ! command -v linearis &> /dev/null; then
     echo "Install: npm install -g linearis"
 else
     # Move to configured "Done" state
-    DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
+    DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .catalyst/config.json 2>/dev/null || echo "Done")
     if [[ "$DONE_STATE" != "null" ]]; then
         linearis issues update "$ticket" --status "$DONE_STATE"
     fi
@@ -550,7 +550,7 @@ Delete manually: git branch -D $head_branch
 
 ## Configuration
 
-Uses `.claude/config.json`:
+Uses `.catalyst/config.json`:
 
 ```json
 {
@@ -577,7 +577,7 @@ Uses `.claude/config.json`:
 }
 ```
 
-State names are read from `stateMap` with sensible defaults. See `.claude/config.json` for all keys.
+State names are read from `stateMap` with sensible defaults. See `.catalyst/config.json` for all keys.
 
 ## Examples
 

@@ -1,0 +1,15 @@
+# Workflow state (ephemeral)
+workflow-context.json
+
+# Actual config (may contain project-specific values)
+config.json
+
+# Keep templates
+!config.template.json
+!config.example.json
+
+# Any local overrides
+*.local.json
+
+# Backup files
+*.backup

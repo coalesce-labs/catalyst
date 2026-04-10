@@ -80,7 +80,7 @@ prompts. They never commit sensitive files or add Claude attribution.
 
 Two-layer config system:
 
-- **Layer 1**: `.claude/config.json` (safe to commit) — project key, ticket prefix, state map
+- **Layer 1**: `.catalyst/config.json` (safe to commit) — project key, ticket prefix, state map
 - **Layer 2**: `~/.config/catalyst/config-{projectKey}.json` (NEVER committed) — API tokens, secrets
 
 ## Dependencies

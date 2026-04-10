@@ -120,11 +120,11 @@ pip install humanlayer  # or: pipx install humanlayer
 
 - Creates GraphQL mutation file at `/tmp/linear-workflow-setup.graphql`
 - Creates an optional 12-state custom workflow (Backlog → Triage → Research → Planning → In Dev → In Review → Done, etc.)
-- Outputs the `stateMap` configuration to add to `.claude/config.json`
+- Outputs the `stateMap` configuration to add to `.catalyst/config.json`
 
 **Note**: This is **optional**. Catalyst works out-of-the-box with standard Linear states
 (Backlog, Todo, In Progress, In Review, Done, Canceled). Only run this if you want finer-grained
-status tracking. State names are configurable via `linear.stateMap` in `.claude/config.json`.
+status tracking. State names are configurable via `linear.stateMap` in `.catalyst/config.json`.
 
 **When to use**: Optional setup for teams wanting a detailed 12-state workflow
 
@@ -223,7 +223,7 @@ humanlayer thoughts profile show acme
 humanlayer thoughts status
 ```
 
-### .claude/config.json (Per-Project)
+### .catalyst/config.json (Per-Project)
 
 ```json
 {

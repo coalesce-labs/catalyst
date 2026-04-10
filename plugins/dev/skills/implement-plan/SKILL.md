@@ -57,7 +57,7 @@ Once you have a plan path:
 - Read the original ticket and all files mentioned in the plan
 - **Extract ticket from plan frontmatter** (`source_ticket` field) and update Linear state:
   ```bash
-  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
   if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
       linearis issues update "$ticketId" --status "$IN_PROGRESS_STATE"
   fi
@@ -252,7 +252,7 @@ If a ticket is detected (from plan document's `source_ticket` frontmatter or fro
 
 - **At implementation start** (Step 3):
   ```bash
-  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
   if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
       linearis issues update "$ticketId" --status "$IN_PROGRESS_STATE"
   fi

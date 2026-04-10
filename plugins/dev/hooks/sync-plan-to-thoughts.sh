@@ -105,7 +105,7 @@ fi
 OUT_PATH="${THOUGHTS_PLANS}/${OUT_FILENAME}"
 
 # --- Read config for source_research ---
-CONFIG_FILE="$PROJECT_DIR/.claude/config.json"
+CONFIG_FILE="$PROJECT_DIR/.catalyst/config.json"
 SOURCE_RESEARCH="null"
 
 # Try to find most recent research from workflow-context

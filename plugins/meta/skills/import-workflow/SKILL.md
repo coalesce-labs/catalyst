@@ -185,7 +185,7 @@ source: { repo-url } # Track origin
 
 Check for and replace:
 
-- Ticket prefixes (ENG-XXX → read from `.claude/config.json`)
+- Ticket prefixes (ENG-XXX → read from `.catalyst/config.json`)
 - Repository paths (their paths → local paths)
 - Team/project IDs (their IDs → prompt or use config)
 - User names (their names → generic or config)

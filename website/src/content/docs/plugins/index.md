@@ -61,7 +61,7 @@ The dev plugin includes three Claude Code hooks that run automatically:
 
 - **inject-plan-template** — Injects Catalyst's plan structure guidance when Claude Code is in plan mode.
 - **sync-plan-to-thoughts** — Copies plans to `thoughts/shared/plans/` with frontmatter when you exit plan mode.
-- **update-workflow-context** — Records document writes to `.claude/.workflow-context.json`, enabling skill chaining.
+- **update-workflow-context** — Records document writes to `.catalyst/workflow-context.json`, enabling skill chaining.
 
 ## Updating
 

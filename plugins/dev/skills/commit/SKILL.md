@@ -95,7 +95,7 @@ during this session.
 
 ## Configuration
 
-Reads from `.claude/config.json`:
+Reads from `.catalyst/config.json`:
 
 ```json
 {

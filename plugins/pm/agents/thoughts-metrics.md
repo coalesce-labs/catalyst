@@ -51,7 +51,7 @@ Team members: [list of developers to track]
 
 ```bash
 # Get thoughts repository path from HumanLayer config
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 PROJECT_KEY=$(jq -r '.catalyst.projectKey' "$CONFIG_FILE")
 
 # Determine thoughts repo location

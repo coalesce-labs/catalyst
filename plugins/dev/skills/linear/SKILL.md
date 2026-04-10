@@ -31,10 +31,10 @@ fi
 
 ## Configuration
 
-Read team configuration from `.claude/config.json`:
+Read team configuration from `.catalyst/config.json`:
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 
 # Read team key (e.g., "ENG", "PROJ")
 TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
@@ -47,14 +47,14 @@ if [ -z "$TEAM_UUID" ]; then
 fi
 if [ -z "$TEAM_UUID" ]; then
   echo "WARNING: Could not resolve team UUID for $TEAM_KEY. issues create/search may target wrong team."
-  echo "Add teamUuid to .claude/config.json to fix: linearis issues list --limit 20 | jq '[.[].team | {key, id}] | unique_by(.key)'"
+  echo "Add teamUuid to .catalyst/config.json to fix: linearis issues list --limit 20 | jq '[.[].team | {key, id}] | unique_by(.key)'"
 fi
 
 # Read thoughts repo URL
 THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/org/thoughts/blob/main"' "$CONFIG_FILE")
 ```
 
-**Configuration in `.claude/config.json`**:
+**Configuration in `.catalyst/config.json`**:
 
 ```json
 {
@@ -98,7 +98,7 @@ This workflow ensures alignment through planning before implementation:
 ### Workflow Statuses
 
 Catalyst maps workflow phases to your Linear workspace states via `stateMap` in
-`.claude/config.json`. Default mapping (matches standard Linear states):
+`.catalyst/config.json`. Default mapping (matches standard Linear states):
 
 | Workflow Phase | Default State | Config Key |
 |---------------|---------------|------------|
@@ -221,13 +221,13 @@ When referencing thoughts documents, always provide GitHub links:
    # WARNING: --team only accepts UUIDs, not team keys/names (upstream bug: czottmann/linearis#56)
    # Team keys/names silently fall back to the workspace default team.
    # Get the team UUID from config or from any existing issue:
-   #   TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .claude/config.json)
+   #   TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .catalyst/config.json)
    #   # Or: TEAM_UUID=$(linearis issues list --limit 1 | jq -r '.[0].team.id')
    linearis issues create "[refined title]" \
      --team "$TEAM_UUID" \
      --description "[final description in markdown]" \
      --priority [1-4] \
-     --status "$(jq -r '.catalyst.linear.stateMap.backlog // "Backlog"' .claude/config.json 2>/dev/null || echo "Backlog")"
+     --status "$(jq -r '.catalyst.linear.stateMap.backlog // "Backlog"' .catalyst/config.json 2>/dev/null || echo "Backlog")"
 
    # Capture the created issue ID from output
    ISSUE_ID=$(linearis issues create "[refined title]" --team "$TEAM_UUID" -d "Description" | jq -r '.id')
@@ -306,7 +306,7 @@ When moving tickets to a new status:
 
 2. **Suggest next status based on workflow:**
 
-   State names come from `stateMap` in `.claude/config.json`:
+   State names come from `stateMap` in `.catalyst/config.json`:
 
    ```
    Backlog → Todo (acknowledged)
@@ -455,7 +455,7 @@ For Linearis CLI syntax, see the `linearis` skill reference.
 
 ## Notes
 
-- **Configuration**: Use `.claude/config.json` for team settings and `stateMap` for state names
+- **Configuration**: Use `.catalyst/config.json` for team settings and `stateMap` for state names
 - **Status mapping**: Configure `linear.stateMap` to match your Linear workspace states
 - **Automation**: Workflow commands auto-update tickets using state names from `stateMap`
 - **CLI required**: Linearis CLI must be installed and configured with LINEAR_API_TOKEN

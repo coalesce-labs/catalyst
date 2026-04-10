@@ -41,7 +41,7 @@ Complete development workflow: research → plan → implement → validate → 
 ### What It Does
 
 When you write or edit files in `thoughts/shared/`:
-- ✅ Automatically updates `.claude/.workflow-context.json`
+- ✅ Automatically updates `.catalyst/workflow-context.json`
 - ✅ Tracks document type (research, plans, handoffs, prs)
 - ✅ Extracts ticket numbers from filenames
 - ✅ Records timestamps
@@ -115,7 +115,7 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh add plans "path/to/plan.md" "P
 
 ## Configuration
 
-The plugin reads configuration from `.claude/config.json`:
+The plugin reads configuration from `.catalyst/config.json`:
 
 ```json
 {

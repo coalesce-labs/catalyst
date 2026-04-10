@@ -82,10 +82,16 @@ else
 	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$BASE_BRANCH"
 fi
 
-# Copy .claude directory if it exists
+# Copy .claude directory if it exists (Claude Code native config)
 if [ -d ".claude" ]; then
 	echo "📋 Copying .claude directory..."
 	cp -r .claude "$WORKTREE_PATH/"
+fi
+
+# Copy .catalyst directory if it exists (Catalyst workflow config)
+if [ -d ".catalyst" ]; then
+	echo "📋 Copying .catalyst directory..."
+	cp -r .catalyst "$WORKTREE_PATH/"
 fi
 
 # Change to worktree directory

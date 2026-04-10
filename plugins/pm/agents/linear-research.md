@@ -158,7 +158,7 @@ WARNING: No active cycle found for team ENG
 
 1. **Use appropriate limits**: Default to 50 items, adjust if needed
 2. **Filter early**: Use linearis flags instead of piping to jq when possible
-3. **Cache team configuration**: Read from `.claude/config.json` once
+3. **Cache team configuration**: Read from `.catalyst/config.json` once
 4. **Fail fast**: Return errors immediately, don't retry
 
 ## Communication Principles

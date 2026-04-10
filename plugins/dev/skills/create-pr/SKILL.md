@@ -22,10 +22,10 @@ fi
 
 ## Configuration
 
-Read team configuration from `.claude/config.json`:
+Read team configuration from `.catalyst/config.json`:
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
 ```
 
@@ -208,7 +208,7 @@ if ! command -v linearis &> /dev/null; then
     echo "Install: npm install -g linearis"
 else
     # Update ticket state from stateMap config
-    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .claude/config.json 2>/dev/null || echo "In Review")
+    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .catalyst/config.json 2>/dev/null || echo "In Review")
     if [[ "$IN_REVIEW_STATE" != "null" ]]; then
         linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
     fi
@@ -305,7 +305,7 @@ Update manually or check ticket ID.
 
 ## Configuration
 
-Uses `.claude/config.json`:
+Uses `.catalyst/config.json`:
 
 ```json
 {
@@ -323,7 +323,7 @@ Uses `.claude/config.json`:
 }
 ```
 
-State names are read from `stateMap` with sensible defaults. See `.claude/config.json` for all keys.
+State names are read from `stateMap` with sensible defaults. See `.catalyst/config.json` for all keys.
 
 ## Examples
 

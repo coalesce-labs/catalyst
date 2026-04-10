@@ -88,7 +88,7 @@ gh pr edit $PR_NUMBER --body-file "thoughts/shared/prs/${PR_NUMBER}_description.
 
 ```bash
 if [[ -n "$ticket" ]] && command -v linearis &>/dev/null; then
-  IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .claude/config.json 2>/dev/null || echo "In Review")
+  IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .catalyst/config.json 2>/dev/null || echo "In Review")
   if [[ "$IN_REVIEW_STATE" != "null" ]]; then
     linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
   fi

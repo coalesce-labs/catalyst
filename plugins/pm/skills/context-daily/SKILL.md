@@ -28,10 +28,10 @@ fi
 
 ## Configuration
 
-Read project configuration from `.claude/config.json`:
+Read project configuration from `.catalyst/config.json`:
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 
 # Required configuration - detect from HumanLayer or fallback to config
 if command -v humanlayer &> /dev/null; then
@@ -51,11 +51,11 @@ if [[ -z "$CODE_REPOS" || "$CODE_REPOS" == "" ]]; then
   if [[ -n "$REMOTE_URL" ]]; then
     # Extract org/repo from GitHub URL
     CODE_REPOS=$(echo "$REMOTE_URL" | sed -E 's#.*github\.com[:/]([^/]+/[^/]+)(\.git)?#\1#')
-    echo "⚠️  No code repos configured in .claude/config.json"
+    echo "⚠️  No code repos configured in .catalyst/config.json"
     echo "📍 Auto-detected from git remote: $CODE_REPOS"
   else
     echo "❌ ERROR: No code repos configured and could not detect from git remote"
-    echo "Add to .claude/config.json:"
+    echo "Add to .catalyst/config.json:"
     echo '  "contextEngineering": {'
     echo '    "codeRepos": ["org/repo-1", "org/repo-2"]'
     echo '  }'
@@ -233,7 +233,7 @@ if command -v humanlayer &> /dev/null; then
   THOUGHTS_REPO=$(humanlayer thoughts status --format json 2>/dev/null | jq -r '.repository_path // empty')
 fi
 if [ -z "$THOUGHTS_REPO" ]; then
-  THOUGHTS_REPO=$(jq -r '.catalyst.thoughts.repo // "~/thoughts"' .claude/config.json)
+  THOUGHTS_REPO=$(jq -r '.catalyst.thoughts.repo // "~/thoughts"' .catalyst/config.json)
   THOUGHTS_REPO="${THOUGHTS_REPO/#\~/$HOME}"  # Expand ~ to home directory
 fi
 
@@ -329,7 +329,7 @@ Analyzing context engineering adoption...
 
 ### Configuration Required
 
-The command requires configuration in `.claude/config.json`:
+The command requires configuration in `.catalyst/config.json`:
 
 ```json
 {

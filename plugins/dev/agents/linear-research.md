@@ -134,7 +134,7 @@ Present findings as structured data:
 
 ## Configuration
 
-Team information comes from `.claude/config.json`:
+Team information comes from `.catalyst/config.json`:
 
 ```json
 {

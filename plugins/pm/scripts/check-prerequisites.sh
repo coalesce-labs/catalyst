@@ -57,7 +57,7 @@ else
 fi
 
 # Verify configuration
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "❌ Configuration file not found: $CONFIG_FILE"
     exit 1

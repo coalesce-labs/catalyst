@@ -23,6 +23,7 @@ HOOK_SCRIPT="$SCRIPT_DIR/../hooks/update-workflow-context.sh"
 SYNC_PLAN_SCRIPT="$SCRIPT_DIR/../hooks/sync-plan-to-thoughts.sh"
 INJECT_PLAN_SCRIPT="$SCRIPT_DIR/../hooks/inject-plan-template.sh"
 SETUP_SCRIPT="$SCRIPT_DIR/check-project-setup.sh"
+RESOLVE_TICKET_SCRIPT="$SCRIPT_DIR/resolve-ticket.sh"
 
 PASS=true
 TESTS=0
@@ -51,7 +52,7 @@ setup_project() {
 	(
 		cd "$dir"
 		git init -q .
-		mkdir -p .claude
+		mkdir -p .catalyst
 		mkdir -p thoughts/shared/research
 		mkdir -p thoughts/shared/plans
 		mkdir -p thoughts/shared/handoffs
@@ -81,14 +82,14 @@ setup_project "$TEST_DIR"
 
 (cd "$TEST_DIR" && bash plugins/dev/scripts/workflow-context.sh init)
 
-if [[ -f "$TEST_DIR/.claude/.workflow-context.json" ]]; then
+if [[ -f "$TEST_DIR/.catalyst/workflow-context.json" ]]; then
 	pass "Context file was created"
 else
 	fail "Context file was not created"
 fi
 
 # Validate JSON structure
-if jq -e '.workflow.research' "$TEST_DIR/.claude/.workflow-context.json" >/dev/null 2>&1; then
+if jq -e '.workflow.research' "$TEST_DIR/.catalyst/workflow-context.json" >/dev/null 2>&1; then
 	pass "JSON structure is valid with workflow.research array"
 else
 	fail "JSON structure is invalid or missing workflow.research"
@@ -103,14 +104,14 @@ setup_project "$TEST_DIR"
 
 (cd "$TEST_DIR" && bash plugins/dev/scripts/workflow-context.sh add research "thoughts/shared/research/2026-01-01-PROJ-123-auth.md" "PROJ-123")
 
-RESULT=$(jq -r '.mostRecentDocument.path' "$TEST_DIR/.claude/.workflow-context.json")
+RESULT=$(jq -r '.mostRecentDocument.path' "$TEST_DIR/.catalyst/workflow-context.json")
 if [[ "$RESULT" == "thoughts/shared/research/2026-01-01-PROJ-123-auth.md" ]]; then
 	pass "mostRecentDocument.path is correct"
 else
 	fail "mostRecentDocument.path is '$RESULT', expected 'thoughts/shared/research/2026-01-01-PROJ-123-auth.md'"
 fi
 
-TICKET=$(jq -r '.currentTicket' "$TEST_DIR/.claude/.workflow-context.json")
+TICKET=$(jq -r '.currentTicket' "$TEST_DIR/.catalyst/workflow-context.json")
 if [[ "$TICKET" == "PROJ-123" ]]; then
 	pass "currentTicket updated to PROJ-123"
 else
@@ -175,7 +176,7 @@ setup_project "$TEST_DIR"
 # Run init from a subdirectory
 (cd "$TEST_DIR/plugins/dev" && bash scripts/workflow-context.sh init)
 
-if [[ -f "$TEST_DIR/.claude/.workflow-context.json" ]]; then
+if [[ -f "$TEST_DIR/.catalyst/workflow-context.json" ]]; then
 	pass "Context file created at project root from subdirectory"
 else
 	fail "Context file not found at project root"
@@ -232,7 +233,7 @@ setup_project "$TEST_DIR"
 CLAUDE_FILE_PATHS="thoughts/shared/research/2026-04-04-CTL-24-workflow-context.md" \
 	bash -c "cd '$TEST_DIR' && bash plugins/dev/hooks/update-workflow-context.sh"
 
-TICKET=$(jq -r '.currentTicket' "$TEST_DIR/.claude/.workflow-context.json")
+TICKET=$(jq -r '.currentTicket' "$TEST_DIR/.catalyst/workflow-context.json")
 if [[ "$TICKET" == "CTL-24" ]]; then
 	pass "Ticket CTL-24 extracted from filename"
 else
@@ -249,10 +250,10 @@ setup_project "$TEST_DIR"
 CLAUDE_FILE_PATHS="src/index.ts" \
 	bash -c "cd '$TEST_DIR' && bash plugins/dev/hooks/update-workflow-context.sh"
 
-if [[ ! -f "$TEST_DIR/.claude/.workflow-context.json" ]]; then
+if [[ ! -f "$TEST_DIR/.catalyst/workflow-context.json" ]]; then
 	pass "No context file created for non-thoughts file"
 else
-	MOST_RECENT=$(jq -r '.mostRecentDocument' "$TEST_DIR/.claude/.workflow-context.json")
+	MOST_RECENT=$(jq -r '.mostRecentDocument' "$TEST_DIR/.catalyst/workflow-context.json")
 	if [[ "$MOST_RECENT" == "null" ]]; then
 		pass "Context file exists but no document tracked"
 	else
@@ -315,13 +316,13 @@ cp "$SETUP_SCRIPT" "$TEST_DIR/plugins/dev/scripts/check-project-setup.sh"
 chmod +x "$TEST_DIR/plugins/dev/scripts/check-project-setup.sh"
 
 # Ensure no context file exists
-rm -f "$TEST_DIR/.claude/.workflow-context.json"
+rm -f "$TEST_DIR/.catalyst/workflow-context.json"
 
 # Create minimal CLAUDE.md so the script doesn't error on missing it
 echo "# Test Project" >"$TEST_DIR/CLAUDE.md"
 
 # Create config.json so the script doesn't warn too much
-cat >"$TEST_DIR/.claude/config.json" <<'CONF'
+cat >"$TEST_DIR/.catalyst/config.json" <<'CONF'
 {"catalyst":{"projectKey":"test","project":{"ticketPrefix":"TEST"},"linear":{"teamKey":"TEST","stateMap":{"backlog":"Backlog"}}}}
 CONF
 
@@ -329,7 +330,7 @@ CONF
 # care whether the script creates the context file as a side effect.
 (cd "$TEST_DIR" && bash plugins/dev/scripts/check-project-setup.sh >/dev/null 2>&1) || true
 
-if [[ -f "$TEST_DIR/.claude/.workflow-context.json" ]]; then
+if [[ -f "$TEST_DIR/.catalyst/workflow-context.json" ]]; then
 	pass "check-project-setup.sh created the context file"
 else
 	fail "check-project-setup.sh did not create the context file"
@@ -369,7 +370,7 @@ setup_project "$TEST_DIR"
 	bash plugins/dev/scripts/workflow-context.sh add plans "thoughts/shared/plans/p1.md" "null"
 )
 
-TICKET=$(jq -r '.currentTicket' "$TEST_DIR/.claude/.workflow-context.json")
+TICKET=$(jq -r '.currentTicket' "$TEST_DIR/.catalyst/workflow-context.json")
 if [[ "$TICKET" == "PROJ-100" ]]; then
 	pass "currentTicket preserved as PROJ-100 after null-ticket add"
 else
@@ -420,9 +421,9 @@ setup_project "$TEST_DIR"
 	bash plugins/dev/scripts/workflow-context.sh add plans "thoughts/shared/plans/third.md" "null"
 )
 
-IDX0=$(jq -r '.workflow.plans[0].path' "$TEST_DIR/.claude/.workflow-context.json")
-IDX1=$(jq -r '.workflow.plans[1].path' "$TEST_DIR/.claude/.workflow-context.json")
-IDX2=$(jq -r '.workflow.plans[2].path' "$TEST_DIR/.claude/.workflow-context.json")
+IDX0=$(jq -r '.workflow.plans[0].path' "$TEST_DIR/.catalyst/workflow-context.json")
+IDX1=$(jq -r '.workflow.plans[1].path' "$TEST_DIR/.catalyst/workflow-context.json")
+IDX2=$(jq -r '.workflow.plans[2].path' "$TEST_DIR/.catalyst/workflow-context.json")
 
 if [[ "$IDX0" == *"third.md" && "$IDX1" == *"second.md" && "$IDX2" == *"first.md" ]]; then
 	pass "Array order is newest-first: third, second, first"
@@ -494,7 +495,7 @@ fi
 run_test "sync-plan-to-thoughts registers plan in workflow-context"
 
 # Reuse test17's directory
-if [[ -f "$TEST_DIR/.claude/.workflow-context.json" ]]; then
+if [[ -f "$TEST_DIR/.catalyst/workflow-context.json" ]]; then
 	RECENT_PLAN=$(cd "$TEST_DIR" && bash plugins/dev/scripts/workflow-context.sh recent plans)
 	if [[ "$RECENT_PLAN" == *"ctl-42"* ]]; then
 		pass "Plan registered in workflow-context"
@@ -625,7 +626,7 @@ run_test "inject-plan-template reads ticket prefix from project config"
 
 TEST_DIR="$TMPDIR/test23"
 setup_project "$TEST_DIR"
-cat >"$TEST_DIR/.claude/config.json" <<'CONF'
+cat >"$TEST_DIR/.catalyst/config.json" <<'CONF'
 {"catalyst":{"project":{"ticketPrefix":"ACME"}}}
 CONF
 
@@ -643,7 +644,7 @@ fi
 run_test "check-project-setup.sh exits fatal when thoughts/shared is missing"
 
 TEST_DIR="$TMPDIR/test24"
-mkdir -p "$TEST_DIR/.claude"
+mkdir -p "$TEST_DIR/.catalyst"
 (cd "$TEST_DIR" && git init -q . && git commit -q --allow-empty -m "init")
 cp "$SETUP_SCRIPT" "$TEST_DIR/check-project-setup.sh"
 chmod +x "$TEST_DIR/check-project-setup.sh"
@@ -669,7 +670,7 @@ setup_project "$TEST_DIR"
 cp "$SETUP_SCRIPT" "$TEST_DIR/plugins/dev/scripts/check-project-setup.sh"
 chmod +x "$TEST_DIR/plugins/dev/scripts/check-project-setup.sh"
 
-rm -f "$TEST_DIR/.claude/config.json"
+rm -f "$TEST_DIR/.catalyst/config.json"
 
 EXIT_CODE=0
 (cd "$TEST_DIR" && bash plugins/dev/scripts/check-project-setup.sh >/dev/null 2>&1) || EXIT_CODE=$?
@@ -678,6 +679,64 @@ if [[ "$EXIT_CODE" -eq 0 ]]; then
 	pass "Exit code 0 for warning-only conditions"
 else
 	fail "Exit code $EXIT_CODE — warnings should not be fatal"
+fi
+
+# ── Test 26: resolve-ticket.sh returns explicit ticket ──────────────────
+
+run_test "resolve-ticket.sh returns explicit ticket when provided"
+
+TEST_DIR="$TMPDIR/test26"
+setup_project "$TEST_DIR"
+
+RESULT=$(cd "$TEST_DIR" && bash "$RESOLVE_TICKET_SCRIPT" "CTL-42")
+if [[ "$RESULT" == "CTL-42" ]]; then
+	pass "Explicit ticket CTL-42 returned"
+else
+	fail "Expected 'CTL-42', got '$RESULT'"
+fi
+
+# ── Test 27: resolve-ticket.sh falls back to currentTicket ─────────────
+
+run_test "resolve-ticket.sh returns currentTicket when branch doesn't match"
+
+TEST_DIR="$TMPDIR/test27"
+setup_project "$TEST_DIR"
+
+# Set currentTicket in workflow-context
+(cd "$TEST_DIR" && bash plugins/dev/scripts/workflow-context.sh add research "thoughts/shared/research/r.md" "CTL-99")
+
+# Branch name won't match (it's "master" from git init)
+RESULT=$(cd "$TEST_DIR" && bash "$RESOLVE_TICKET_SCRIPT")
+if [[ "$RESULT" == "CTL-99" ]]; then
+	pass "currentTicket CTL-99 returned as fallback"
+else
+	fail "Expected 'CTL-99', got '$RESULT'"
+fi
+
+# ── Test 28: check-project-setup.sh backward compat reads .claude/ ─────
+
+run_test "check-project-setup.sh reads from .claude/config.json when .catalyst/ absent"
+
+TEST_DIR="$TMPDIR/test28"
+setup_project "$TEST_DIR"
+
+# Remove .catalyst/config.json but create .claude/config.json
+rm -f "$TEST_DIR/.catalyst/config.json"
+mkdir -p "$TEST_DIR/.claude"
+cat >"$TEST_DIR/.claude/config.json" <<'CONF'
+{"catalyst":{"projectKey":"legacy","project":{"ticketPrefix":"LEG"},"linear":{"teamKey":"LEG","stateMap":{"backlog":"Backlog"}}}}
+CONF
+
+cp "$SETUP_SCRIPT" "$TEST_DIR/plugins/dev/scripts/check-project-setup.sh"
+chmod +x "$TEST_DIR/plugins/dev/scripts/check-project-setup.sh"
+echo "# Test" > "$TEST_DIR/CLAUDE.md"
+
+OUTPUT=$(cd "$TEST_DIR" && bash plugins/dev/scripts/check-project-setup.sh 2>&1) || true
+
+if echo "$OUTPUT" | grep -q "migrate to .catalyst/config.json"; then
+	pass "Backward compat: reads .claude/config.json with migration warning"
+else
+	fail "No migration warning found. Output: $OUTPUT"
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────

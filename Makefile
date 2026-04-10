@@ -66,5 +66,5 @@ clean:
 	@echo "Cleaning temporary files..."
 	@find . -name "*.tmp" -delete
 	@find . -name ".DS_Store" -delete
-	@rm -f .claude/config.json.tmp
+	@rm -f .catalyst/config.json.tmp
 	@echo "✅ Cleaned!"

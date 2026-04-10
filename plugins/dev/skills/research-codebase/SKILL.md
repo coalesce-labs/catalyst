@@ -97,7 +97,7 @@ Collect metadata using git commands:
 
 - With ticket: `thoughts/shared/research/YYYY-MM-DD-PROJ-XXXX-description.md`
 - Without ticket: `thoughts/shared/research/YYYY-MM-DD-description.md`
-- Replace `PROJ` with your ticket prefix from `.claude/config.json`
+- Replace `PROJ` with your ticket prefix from `.catalyst/config.json`
 
 **IMPORTANT: Document Storage Rules**
 - ALWAYS write to `thoughts/shared/research/`
@@ -268,7 +268,7 @@ If a ticket is detected (provided as argument, mentioned in query, or from conte
 
 - **At research start**:
   ```bash
-  RESEARCH_STATE=$(jq -r '.catalyst.linear.stateMap.research // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  RESEARCH_STATE=$(jq -r '.catalyst.linear.stateMap.research // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
   if [[ "$RESEARCH_STATE" != "null" ]]; then
       linearis issues update "$ticketId" --status "$RESEARCH_STATE"
   fi

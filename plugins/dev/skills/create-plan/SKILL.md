@@ -12,7 +12,7 @@ You are tasked with creating detailed implementation plans through an interactiv
 process. You should be skeptical, thorough, and work collaboratively with the user to produce
 high-quality technical specifications.
 
-Replace `PROJ` in ticket references with your Linear team's prefix from `.claude/config.json`.
+Replace `PROJ` in ticket references with your Linear team's prefix from `.catalyst/config.json`.
 
 ## Prerequisites
 
@@ -68,7 +68,7 @@ Auto-discovery has already run in Prerequisites above. Check its output and foll
    command argument, or from context), move it to the planning state:
 
    ```bash
-   PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+   PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
    if [[ "$PLANNING_STATE" != "null" ]]; then
        linearis issues update "$ticketId" --status "$PLANNING_STATE"
    fi
@@ -369,7 +369,7 @@ If a ticket is detected (from research document's `source_ticket` frontmatter, c
 
 - **At planning start** (Step 1):
   ```bash
-  PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
   if [[ "$PLANNING_STATE" != "null" ]]; then
       linearis issues update "$ticketId" --status "$PLANNING_STATE"
   fi

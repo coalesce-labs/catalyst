@@ -6,7 +6,7 @@
 # Only run this if you want the full 12-state custom workflow for fine-grained
 # status tracking.
 #
-# After running, update your .claude/config.json with the stateMap output
+# After running, update your .catalyst/config.json with the stateMap output
 # shown at the end of the script.
 #
 # Usage: ./setup-linear-workflow [team_key]
@@ -389,7 +389,7 @@ echo "Recommended: Use Option 1 (Claude with Linear MCP) for easiest setup"
 echo ""
 echo -e "${YELLOW}════════════════════════════════════════════════════════${NC}"
 echo -e "${YELLOW}After creating the custom states, add this to your${NC}"
-echo -e "${YELLOW}.claude/config.json to use them with Catalyst:${NC}"
+echo -e "${YELLOW}.catalyst/config.json to use them with Catalyst:${NC}"
 echo -e "${YELLOW}════════════════════════════════════════════════════════${NC}"
 echo ""
 echo '  "linear": {'

@@ -50,7 +50,7 @@ Calendar: [calendar ID or "primary"]
 ### Step 1: Load Configuration
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 PROJECT_KEY=$(jq -r '.catalyst.projectKey' "$CONFIG_FILE")
 
 SECRETS_FILE="$HOME/.config/catalyst/config-$PROJECT_KEY.json"

@@ -101,7 +101,7 @@ current_body=$(gh pr view $pr_number --json body -q .body)
 **Read saved description (if exists):**
 
 ```bash
-saved_desc="thoughts/shared/prs/${pr_number}_description.md"
+saved_desc="thoughts/shared/prs/${TICKET}_pr-${pr_number}_description.md"
 if [ -f "$saved_desc" ]; then
     # Read fully
     # Note what sections exist vs what's new
@@ -305,7 +305,7 @@ fi
 
 ```bash
 # Add metadata header
-cat > "thoughts/shared/prs/${pr_number}_description.md" <<EOF
+cat > "thoughts/shared/prs/${TICKET}_pr-${pr_number}_description.md" <<EOF
 <!-- Auto-generated: $(date -u +%Y-%m-%dT%H:%M:%SZ) -->
 <!-- Last updated: $(date -u +%Y-%m-%dT%H:%M:%SZ) -->
 <!-- PR: #$pr_number -->
@@ -348,7 +348,7 @@ gh pr edit $pr_number --title "$new_title"
 
 ```bash
 # Ensure no Claude attribution in the description file
-gh pr edit $pr_number --body-file "thoughts/shared/prs/${pr_number}_description.md"
+gh pr edit $pr_number --body-file "thoughts/shared/prs/${TICKET}_pr-${pr_number}_description.md"
 ```
 
 ### 13. Update Linear ticket
@@ -361,7 +361,7 @@ if ! command -v linearis &> /dev/null; then
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
 else
     # Move to configured "In Review" state and assign to self
-    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .claude/config.json 2>/dev/null || echo "In Review")
+    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .catalyst/config.json 2>/dev/null || echo "In Review")
     if [[ "$IN_REVIEW_STATE" != "null" ]]; then
         linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
     fi
@@ -517,7 +517,7 @@ Fix failing tests before merge or document as known issues.
 
 ## Configuration
 
-Uses `.claude/config.json`:
+Uses `.catalyst/config.json`:
 
 ```json
 {
@@ -540,7 +540,7 @@ Uses `.claude/config.json`:
 }
 ```
 
-State names are read from `stateMap` with sensible defaults. See `.claude/config.json` for all keys.
+State names are read from `stateMap` with sensible defaults. See `.catalyst/config.json` for all keys.
 
 ## Remember:
 

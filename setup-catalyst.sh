@@ -256,10 +256,10 @@ build_state_map_from_linear() {
     }'
 }
 
-# Update .claude/config.json with real Linear workflow states
+# Update .catalyst/config.json with real Linear workflow states
 # Called after Linear integration is configured in secrets
 update_config_with_linear_states() {
-  local config_file="${PROJECT_DIR}/.claude/config.json"
+  local config_file="${PROJECT_DIR}/.catalyst/config.json"
   local secrets_file="$HOME/.config/catalyst/config-${PROJECT_KEY}.json"
 
   # Need both files to exist
@@ -296,7 +296,7 @@ update_config_with_linear_states() {
       echo "$updated_config" | jq . > "$config_file"
 
       echo ""
-      echo "✓ Updated .claude/config.json with actual Linear workflow states:"
+      echo "✓ Updated .catalyst/config.json with actual Linear workflow states:"
       echo "$state_map" | jq -r 'to_entries[] | "  \(.key): \(.value)"'
       echo ""
     else
@@ -304,7 +304,7 @@ update_config_with_linear_states() {
     fi
   else
     print_warning "Could not fetch workflow states from Linear API. Using defaults."
-    echo "  You can customize later in .claude/config.json → catalyst.linear.stateMap"
+    echo "  You can customize later in .catalyst/config.json → catalyst.linear.stateMap"
   fi
 }
 
@@ -880,14 +880,14 @@ setup_worktree_directory() {
 setup_project_config() {
   print_header "Setting Up Project Configuration"
 
-  local config_file="${PROJECT_DIR}/.claude/config.json"
+  local config_file="${PROJECT_DIR}/.catalyst/config.json"
 
   # Create .claude directory if needed
   mkdir -p "${PROJECT_DIR}/.claude"
 
   # Check if config already exists
   if [ -f "$config_file" ]; then
-    print_warning "Found existing .claude/config.json"
+    print_warning "Found existing .catalyst/config.json"
 
     # Check if projectKey matches
     local existing_key
@@ -965,7 +965,7 @@ setup_project_config() {
 }
 EOF
 
-  print_success "Created .claude/config.json"
+  print_success "Created .catalyst/config.json"
   echo ""
   echo "✓ projectKey: ${PROJECT_KEY}"
   echo "✓ org/repo: ${ORG_NAME}/${REPO_NAME}"
@@ -1227,8 +1227,8 @@ prompt_linear_config() {
 
   # Get team key (auto-detect from project config or use validated data)
   if [[ -z "$linear_team" ]]; then
-    if [ -f "${PROJECT_DIR}/.claude/config.json" ]; then
-      linear_team=$(jq -r '.catalyst.project.ticketPrefix // "PROJ"' "${PROJECT_DIR}/.claude/config.json")
+    if [ -f "${PROJECT_DIR}/.catalyst/config.json" ]; then
+      linear_team=$(jq -r '.catalyst.project.ticketPrefix // "PROJ"' "${PROJECT_DIR}/.catalyst/config.json")
       echo "" >&2
       echo "Team Key (Identifier): Using '${linear_team}' from project config" >&2
       echo "  (This matches your ticket prefix for consistency)" >&2
@@ -1757,14 +1757,14 @@ validate_setup() {
   echo "Checking configuration..."
   echo ""
 
-  # Check .claude/config.json
-  if [ -f "${PROJECT_DIR}/.claude/config.json" ]; then
-    if jq empty "${PROJECT_DIR}/.claude/config.json" 2>/dev/null; then
+  # Check .catalyst/config.json
+  if [ -f "${PROJECT_DIR}/.catalyst/config.json" ]; then
+    if jq empty "${PROJECT_DIR}/.catalyst/config.json" 2>/dev/null; then
       print_success "✓ Project config is valid JSON"
 
       # Verify structure
       local has_key
-      has_key=$(jq -r '.catalyst.projectKey // empty' "${PROJECT_DIR}/.claude/config.json")
+      has_key=$(jq -r '.catalyst.projectKey // empty' "${PROJECT_DIR}/.catalyst/config.json")
 
       if [ -n "$has_key" ]; then
         print_success "✓ projectKey configured: $has_key"
@@ -1888,7 +1888,7 @@ print_summary() {
   echo ""
 
   echo "⚙️  Configuration Files:"
-  echo "   Project: ${PROJECT_DIR}/.claude/config.json"
+  echo "   Project: ${PROJECT_DIR}/.catalyst/config.json"
   echo "   HumanLayer: ~/.config/humanlayer/config-${PROJECT_KEY}.json"
   echo "   Secrets: ~/.config/catalyst/config-${PROJECT_KEY}.json"
   echo ""

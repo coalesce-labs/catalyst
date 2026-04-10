@@ -301,7 +301,7 @@ See: `plugins/pm/templates/github-actions/SETUP.md`
 
 PM commands read from two config sources:
 
-**1. Project metadata** (`.claude/config.json` - safe to commit):
+**1. Project metadata** (`.catalyst/config.json` - safe to commit):
 ```json
 {
   "catalyst": {
@@ -405,7 +405,7 @@ cd /path/to/your/project
 
 ## Configuration Options
 
-Default settings in `.claude/config.json`:
+Default settings in `.catalyst/config.json`:
 
 ```json
 {
@@ -449,15 +449,15 @@ Get token from: https://linear.app/settings/api
 
 ### "Configuration file not found"
 
-Ensure `.claude/config.json` exists:
+Ensure `.catalyst/config.json` exists:
 ```bash
-cat .claude/config.json
+cat .catalyst/config.json
 ```
 
 Create if missing:
 ```bash
 mkdir -p .claude
-echo '{"catalyst": {"linear": {"teamKey": "TEAM"}}}' > .claude/config.json
+echo '{"catalyst": {"linear": {"teamKey": "TEAM"}}}' > .catalyst/config.json
 ```
 
 ### "No active cycle found"

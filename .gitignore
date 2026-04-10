@@ -36,10 +36,10 @@ research/
 .claude/.workflow-context.json.tmp
 
 # Backup files from config migration
-.claude/config.json.backup
+.catalyst/config.json.backup
 
 # Catalyst workflow state (per-session, not committed)
-# NOTE: .claude/config.json is SAFE to commit (only has projectKey, no secrets)
+# NOTE: .catalyst/config.json is SAFE to commit (only has projectKey, no secrets)
 # Secrets are stored in ~/.config/catalyst/config-*.json (never in repo)
 .claude/*.local.json
 .claude/*.backup

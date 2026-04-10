@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-CONTEXT_FILE=".claude/.workflow-context.json"
+CONTEXT_FILE=".catalyst/workflow-context.json"
 
 # Initialize context file if it doesn't exist
 init_context() {

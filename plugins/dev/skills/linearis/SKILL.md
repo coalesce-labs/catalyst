@@ -60,7 +60,7 @@ linearis issues search "keyword"
 ### Update a Ticket
 ```bash
 # Update status (renamed from --state in v2025.12.2)
-# Status names should come from stateMap in .claude/config.json
+# Status names should come from stateMap in .catalyst/config.json
 linearis issues update TEAM-123 --status "In Progress"
 linearis issues update TEAM-123 --status "In Review"
 linearis issues update TEAM-123 --status "Done"
@@ -201,7 +201,7 @@ linearis issues list --limit 100 | jq '.[] | select(.team.key == "BRAVO" and .pr
 ### Mark ticket as done with PR link
 ```bash
 # State name from stateMap.done config (default: "Done")
-DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
+DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .catalyst/config.json 2>/dev/null || echo "Done")
 linearis issues update TEAM-123 --status "$DONE_STATE"
 linearis comments create TEAM-123 --body "Merged: PR #456 https://github.com/org/repo/pull/456"
 ```
@@ -212,11 +212,11 @@ Many commands require a team UUID (not key/name) for the `--team` flag. Use this
 
 ```bash
 # Preferred: read from config
-TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .claude/config.json)
+TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .catalyst/config.json)
 
 # Fallback: look up from any existing issue
 if [ -z "$TEAM_UUID" ]; then
-  TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' .claude/config.json)
+  TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' .catalyst/config.json)
   TEAM_UUID=$(linearis issues list --limit 1 | jq -r --arg key "$TEAM_KEY" '.[0].team | select(.key == $key) | .id // empty')
 fi
 

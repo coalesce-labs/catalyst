@@ -66,7 +66,7 @@ hooks/update-workflow-context.sh runs
 
 1. **Hooks** (`hooks.toml`) - Watch for Write/Edit on thoughts files
 2. **Hook Script** (`hooks/update-workflow-context.sh`) - Extract metadata and update context
-3. **Workflow Context** (`.claude/.workflow-context.json`) - Stores recent documents
+3. **Workflow Context** (`.catalyst/workflow-context.json`) - Stores recent documents
 
 ### 2. Reading Documents (Auto-Discovery)
 
@@ -159,10 +159,10 @@ All commands gracefully fall back to asking for input:
 
 ## Configuration Files
 
-### 1. Workflow Context (`.claude/.workflow-context.json`)
+### 1. Workflow Context (`.catalyst/workflow-context.json`)
 
 **Purpose**: Track recent documents
-**Location**: `.claude/.workflow-context.json` (per-worktree)
+**Location**: `.catalyst/workflow-context.json` (per-worktree)
 **Managed by**: Hooks + commands
 
 **Structure**:
@@ -321,7 +321,7 @@ Check if hooks are working:
 echo "test" > thoughts/shared/research/test.md
 
 # Check workflow context
-cat .claude/.workflow-context.json | jq '.workflow.research[0]'
+cat .catalyst/workflow-context.json | jq '.workflow.research[0]'
 # Should show: {..., "path": "thoughts/shared/research/test.md", ...}
 ```
 

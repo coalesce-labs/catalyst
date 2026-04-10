@@ -52,7 +52,7 @@ Management: Automatically updated by workflow skills. Tracked per-worktree (not 
 
 Catalyst uses a three-layer memory architecture to manage context across multiple projects:
 
-**1. Project Configuration** (`.claude/config.json`)
+**1. Project Configuration** (`.catalyst/config.json`)
 
 - Contains project-specific settings (ticket prefix, Linear team, etc.)
 - HumanLayer automatically maps working directories to profiles via `repoMappings`
@@ -70,7 +70,7 @@ Catalyst uses a three-layer memory architecture to manage context across multipl
 - Enables skill chaining (e.g., `/create-plan` auto-finds recent research)
 
 ```
-.claude/config.json          <- Project config (committable)
+.catalyst/config.json          <- Project config (committable)
         |
         v
 ~/thoughts/repos/acme/       <- Long-term memory (git-backed)

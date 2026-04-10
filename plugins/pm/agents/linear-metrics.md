@@ -41,7 +41,7 @@ Include: [completed issues | active cycles | milestones | all]
 ## Data Sources
 
 - Linearis CLI for Linear API queries
-- Team configuration from `.claude/config.json`
+- Team configuration from `.catalyst/config.json`
 - Secrets from `~/.config/catalyst/config-{projectKey}.json`
 
 ## Process
@@ -49,7 +49,7 @@ Include: [completed issues | active cycles | milestones | all]
 ### Step 1: Load Configuration
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 PROJECT_KEY=$(jq -r '.catalyst.projectKey' "$CONFIG_FILE")
 TEAM_KEY=$(jq -r '.catalyst.project.ticketPrefix' "$CONFIG_FILE")
 

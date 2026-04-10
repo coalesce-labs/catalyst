@@ -18,8 +18,8 @@ print_info() { echo -e "${BLUE}ℹ $1${NC}"; }
 
 # Get project config
 get_project_key() {
-  if [[ -f ".claude/config.json" ]]; then
-    jq -r '.catalyst.projectKey // empty' .claude/config.json
+  if [[ -f ".catalyst/config.json" ]]; then
+    jq -r '.catalyst.projectKey // empty' .catalyst/config.json
   fi
 }
 
@@ -27,7 +27,7 @@ get_project_key() {
 get_sentry_config() {
   local project_key=$(get_project_key)
   if [[ -z "$project_key" ]]; then
-    print_error "No project key found in .claude/config.json"
+    print_error "No project key found in .catalyst/config.json"
     return 1
   fi
 

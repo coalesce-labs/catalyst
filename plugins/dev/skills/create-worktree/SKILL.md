@@ -11,7 +11,7 @@ version: 1.0.0
 This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
 prefix:
 
-- Read from `.claude/config.json` if available
+- Read from `.catalyst/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
 - Examples: `ENG-123`, `FEAT-456`, `BUG-789`
 

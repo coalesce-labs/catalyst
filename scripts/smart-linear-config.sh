@@ -149,8 +149,8 @@ prompt_linear_config_smart() {
 
   # Get team key (auto-detect from project config or use validated data)
   if [[ -z "$linear_team" ]]; then
-    if [ -f "${PROJECT_DIR}/.claude/config.json" ]; then
-      linear_team=$(jq -r '.catalyst.project.ticketPrefix // "PROJ"' "${PROJECT_DIR}/.claude/config.json")
+    if [ -f "${PROJECT_DIR}/.catalyst/config.json" ]; then
+      linear_team=$(jq -r '.catalyst.project.ticketPrefix // "PROJ"' "${PROJECT_DIR}/.catalyst/config.json")
       echo "" >&2
       echo "Team Key (Identifier): Using '${linear_team}' from project config" >&2
       echo "  (This matches your ticket prefix for consistency)" >&2

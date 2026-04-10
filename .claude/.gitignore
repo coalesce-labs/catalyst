@@ -1,9 +1,3 @@
-# User configuration (contains secrets)
-config.json
-
-# Workflow context (temporary state)
-.workflow-context.json
-
 # Any local overrides
 *.local.json
 

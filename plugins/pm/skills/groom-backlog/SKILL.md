@@ -176,7 +176,7 @@ linearis issues update TEAM-456 --project "Auth & Security"
 linearis issues update TEAM-123 --project "Frontend"
 
 # Close stale issue TEAM-789 (state from stateMap.canceled config)
-CANCELED_STATE=$(jq -r '.catalyst.linear.stateMap.canceled // "Canceled"' .claude/config.json 2>/dev/null || echo "Canceled")
+CANCELED_STATE=$(jq -r '.catalyst.linear.stateMap.canceled // "Canceled"' .catalyst/config.json 2>/dev/null || echo "Canceled")
 linearis issues update TEAM-789 --status "$CANCELED_STATE"
 linearis comments create TEAM-789 --body "Closing stale issue (>30 days inactive)"
 

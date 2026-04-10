@@ -71,7 +71,7 @@ Claude Code PostToolUse hook fires for:
 
 ### 4. Context Updated
 
-`.claude/.workflow-context.json` is updated with:
+`.catalyst/workflow-context.json` is updated with:
 ```json
 {
   "lastUpdated": "2025-10-28T22:30:00Z",
@@ -196,7 +196,7 @@ fi
 
 **Solution**: Delete and reinitialize:
 ```bash
-rm .claude/.workflow-context.json
+rm .catalyst/workflow-context.json
 # Will auto-initialize on next update
 ```
 
@@ -210,7 +210,7 @@ CLAUDE_FILE_PATHS="thoughts/shared/plans/test.md" \
   bash plugins/dev/hooks/update-workflow-context.sh
 
 # Check it worked
-cat .claude/.workflow-context.json | jq '.workflow.plans[0]'
+cat .catalyst/workflow-context.json | jq '.workflow.plans[0]'
 ```
 
 ### Integration Test

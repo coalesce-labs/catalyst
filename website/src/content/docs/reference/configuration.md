@@ -7,7 +7,7 @@ sidebar:
 
 Catalyst uses a **two-layer configuration system** that keeps secrets out of git while allowing project metadata to be shared with your team. The setup script (`setup-catalyst.sh`) generates both layers automatically.
 
-## Project Config (`.claude/config.json`)
+## Project Config (`.catalyst/config.json`)
 
 Safe to commit. Contains non-sensitive project metadata that Catalyst reads to understand your project structure, ticket conventions, and workflow state mapping.
 
@@ -114,7 +114,7 @@ Never committed. One file per project, linked by `projectKey`.
 
 Only configure the integrations you use. The setup script prompts for each one.
 
-## Workflow Context (`.claude/.workflow-context.json`)
+## Workflow Context (`.catalyst/workflow-context.json`)
 
 Auto-managed by Claude Code hooks. Not committed to git.
 
@@ -182,7 +182,7 @@ gh repo create my-thoughts --private --source=. --push
 
 ## Switching Projects
 
-Change `projectKey` in `.claude/config.json` to point to a different secrets file:
+Change `projectKey` in `.catalyst/config.json` to point to a different secrets file:
 
 ```json
 {
@@ -198,8 +198,8 @@ For fully isolated multi-client setups, see [Multi-Project Setup](/getting-start
 
 ### Config not being read
 
-1. File exists: `ls .claude/config.json`
-2. Valid JSON: `cat .claude/config.json | jq`
+1. File exists: `ls .catalyst/config.json`
+2. Valid JSON: `cat .catalyst/config.json | jq`
 3. Correct location: must be in the `.claude/` directory
 4. Secrets file exists: `ls ~/.config/catalyst/config-{projectKey}.json`
 

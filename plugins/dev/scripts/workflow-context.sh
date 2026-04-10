@@ -5,8 +5,8 @@ set -euo pipefail
 
 # Resolve project root from git, then fall back to CWD
 PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-CONTEXT_DIR="${PROJECT_ROOT}/.claude"
-CONTEXT_FILE="${CONTEXT_DIR}/.workflow-context.json"
+CONTEXT_DIR="${PROJECT_ROOT}/.catalyst"
+CONTEXT_FILE="${CONTEXT_DIR}/workflow-context.json"
 
 # Initialize context file if it doesn't exist
 init_context() {

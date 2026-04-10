@@ -149,7 +149,7 @@ linearis issues create \
 **Auto-close commands** (state name from `stateMap.done` config):
 ```bash
 # Read configured done state
-DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
+DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .catalyst/config.json 2>/dev/null || echo "Done")
 
 # Update state
 linearis issues update TEAM-456 --status "$DONE_STATE"

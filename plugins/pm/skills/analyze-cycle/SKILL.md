@@ -70,7 +70,7 @@ fi
 source "${SCRIPT_DIR}/pm-utils.sh"
 
 TEAM_KEY=$(get_team_key)
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 ```
 
 ### Step 2: Spawn Research Tasks (Parallel)

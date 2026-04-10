@@ -146,7 +146,7 @@ humanlayer launch \
 
 **Step 2: Run quality gates** (skip with `--skip-quality-gates`)
 
-Reads quality gates from `.claude/config.json` under `catalyst.qualityGates` (see Configuration section below). Runs each gate in `order` sequence:
+Reads quality gates from `.catalyst/config.json` under `catalyst.qualityGates` (see Configuration section below). Runs each gate in `order` sequence:
 
 ```
 For each gate (sorted by order):
@@ -298,7 +298,7 @@ Phase 6: Merge (same session as Phase 5 or manual — Sonnet)
 
 ### Quality Gates
 
-Configure quality gates in the consuming project's `.claude/config.json`:
+Configure quality gates in the consuming project's `.catalyst/config.json`:
 
 ```json
 {

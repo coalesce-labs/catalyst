@@ -43,31 +43,40 @@ else
   warnings+=("  Create one and add the Catalyst snippet from: plugins/dev/templates/CLAUDE_SNIPPET.md")
 fi
 
-# 4. Check .claude/config.json exists and has required fields
-if [[ -f ".claude/config.json" ]]; then
+# 4. Check .catalyst/config.json exists and has required fields
+#    Backward compat: fall back to .claude/config.json if .catalyst/ doesn't exist yet
+CONFIG_FILE=""
+if [[ -f ".catalyst/config.json" ]]; then
+  CONFIG_FILE=".catalyst/config.json"
+elif [[ -f ".claude/config.json" ]]; then
+  CONFIG_FILE=".claude/config.json"
+  warnings+=("Config found at .claude/config.json — migrate to .catalyst/config.json")
+fi
+
+if [[ -n "$CONFIG_FILE" ]]; then
   # Check for projectKey (needed to locate secrets config file)
-  PROJECT_KEY=$(jq -r '.catalyst.projectKey // empty' .claude/config.json 2>/dev/null)
+  PROJECT_KEY=$(jq -r '.catalyst.projectKey // empty' "$CONFIG_FILE" 2>/dev/null)
   if [[ -z "$PROJECT_KEY" ]]; then
-    warnings+=("Missing catalyst.projectKey in .claude/config.json — secrets config file can't be located")
+    warnings+=("Missing catalyst.projectKey in $CONFIG_FILE — secrets config file can't be located")
     warnings+=("  Add: \"projectKey\": \"your-project-name\"")
   fi
 
   # Check for project.ticketPrefix (needed for document naming)
-  TICKET_PREFIX=$(jq -r '.catalyst.project.ticketPrefix // empty' .claude/config.json 2>/dev/null)
+  TICKET_PREFIX=$(jq -r '.catalyst.project.ticketPrefix // empty' "$CONFIG_FILE" 2>/dev/null)
   if [[ -z "$TICKET_PREFIX" ]]; then
-    warnings+=("Missing catalyst.project.ticketPrefix in .claude/config.json — document naming will default to PROJ")
+    warnings+=("Missing catalyst.project.ticketPrefix in $CONFIG_FILE — document naming will default to PROJ")
   fi
 
   # Check for linear.teamKey (needed for ticket extraction from branch names)
-  TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' .claude/config.json 2>/dev/null)
+  TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CONFIG_FILE" 2>/dev/null)
   if [[ -z "$TEAM_KEY" ]]; then
-    warnings+=("Missing catalyst.linear.teamKey in .claude/config.json — ticket extraction from branch names won't work")
+    warnings+=("Missing catalyst.linear.teamKey in $CONFIG_FILE — ticket extraction from branch names won't work")
   fi
 
   # Check for linear.stateMap (needed for lifecycle transitions)
-  STATE_MAP=$(jq -r '.catalyst.linear.stateMap // empty' .claude/config.json 2>/dev/null)
+  STATE_MAP=$(jq -r '.catalyst.linear.stateMap // empty' "$CONFIG_FILE" 2>/dev/null)
   if [[ -z "$STATE_MAP" ]]; then
-    warnings+=("Missing catalyst.linear.stateMap in .claude/config.json — Linear ticket states won't update during workflows")
+    warnings+=("Missing catalyst.linear.stateMap in $CONFIG_FILE — Linear ticket states won't update during workflows")
     warnings+=("  See: https://catalyst.coalescelabs.ai/reference/configuration/#state-map-keys")
   fi
 
@@ -76,7 +85,7 @@ if [[ -f ".claude/config.json" ]]; then
     warnings+=("  Run setup-catalyst.sh or add linear config manually — see docs/reference/configuration")
   fi
 else
-  warnings+=(".claude/config.json not found — run setup-catalyst.sh to create it")
+  warnings+=(".catalyst/config.json not found — run setup-catalyst.sh to create it")
 fi
 
 # 5. Ensure workflow context file exists
