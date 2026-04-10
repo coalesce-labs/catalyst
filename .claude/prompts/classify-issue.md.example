@@ -61,7 +61,7 @@ Classification confidence levels:
 
 ## Usage
 
-This prompt is referenced in `.claude/config.json`:
+This prompt is referenced in `.catalyst/config.json`:
 
 ```json
 {

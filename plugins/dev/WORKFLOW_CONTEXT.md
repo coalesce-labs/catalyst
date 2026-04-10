@@ -5,6 +5,7 @@ Complete guide to automatic document tracking and discovery in Catalyst.
 ## The Problem We Solved
 
 **Before**: Users had to remember and paste file paths between commands
+
 ```bash
 # User writes a research document
 /research-codebase
@@ -15,6 +16,7 @@ Complete guide to automatic document tracking and discovery in Catalyst.
 ```
 
 **After**: System automatically tracks and suggests recent documents
+
 ```bash
 # User writes a research document
 /research-codebase
@@ -66,29 +68,28 @@ hooks/update-workflow-context.sh runs
 
 1. **Hooks** (`hooks.toml`) - Watch for Write/Edit on thoughts files
 2. **Hook Script** (`hooks/update-workflow-context.sh`) - Extract metadata and update context
-3. **Workflow Context** (`.claude/.workflow-context.json`) - Stores recent documents
+3. **Workflow Context** (`.catalyst/.workflow-context.json`) - Stores recent documents
 
 ### 2. Reading Documents (Auto-Discovery)
 
 When user invokes a workflow command:
 
-```
+````
 You → /create-plan
       ↓
 Command IMMEDIATELY runs:
 ```bash
 RECENT_RESEARCH=$(workflow-context.sh recent research)
 # Returns: thoughts/shared/research/2025-10-28-PROJ-123-auth.md
-```
+````
+
       ↓
-Claude shows:
-"💡 Found recent research: thoughts/shared/research/2025-10-28-PROJ-123-auth.md"
-"Would you like me to use this as context for the plan?"
-      ↓
-You → "yes"
-      ↓
-Claude reads the research and creates plan
-```
+
+Claude shows: "💡 Found recent research: thoughts/shared/research/2025-10-28-PROJ-123-auth.md"
+"Would you like me to use this as context for the plan?" ↓ You → "yes" ↓ Claude reads the research
+and creates plan
+
+````
 
 **Key Components:**
 
@@ -124,7 +125,7 @@ Claude reads the research and creates plan
 # → You confirm: "yes"
 # → Claude reads plan and implements
 # → No file path needed! ✅
-```
+````
 
 **Zero file paths needed after initial research!**
 
@@ -134,14 +135,14 @@ Claude reads the research and creates plan
 
 ### ✅ Implemented
 
-| Command | Auto-Discovers | Behavior |
-|---------|---------------|----------|
-| `/resume-handoff` | Recent handoff | Finds last handoff, asks to proceed |
-| `/implement-plan` | Recent plan | Finds last plan, asks to proceed |
-| `/create-plan` | Recent research | **Suggests** research as context |
-| `/iterate-plan` | Recent plan | Auto-discovers recent plans to iterate on |
-| `/validate-plan` | Recent plan | Finds last plan, asks to validate |
-| `/oneshot` | Tickets, research, plans | Auto-discovers tickets and chains research, plan, and implement |
+| Command           | Auto-Discovers           | Behavior                                                        |
+| ----------------- | ------------------------ | --------------------------------------------------------------- |
+| `/resume-handoff` | Recent handoff           | Finds last handoff, asks to proceed                             |
+| `/implement-plan` | Recent plan              | Finds last plan, asks to proceed                                |
+| `/create-plan`    | Recent research          | **Suggests** research as context                                |
+| `/iterate-plan`   | Recent plan              | Auto-discovers recent plans to iterate on                       |
+| `/validate-plan`  | Recent plan              | Finds last plan, asks to validate                               |
+| `/oneshot`        | Tickets, research, plans | Auto-discovers tickets and chains research, plan, and implement |
 
 ### 🚧 Fallback if Not Found
 
@@ -159,13 +160,13 @@ All commands gracefully fall back to asking for input:
 
 ## Configuration Files
 
-### 1. Workflow Context (`.claude/.workflow-context.json`)
+### 1. Workflow Context (`.catalyst/.workflow-context.json`)
 
-**Purpose**: Track recent documents
-**Location**: `.claude/.workflow-context.json` (per-worktree)
+**Purpose**: Track recent documents **Location**: `.catalyst/.workflow-context.json` (per-worktree)
 **Managed by**: Hooks + commands
 
 **Structure**:
+
 ```json
 {
   "lastUpdated": "ISO timestamp",
@@ -187,11 +188,11 @@ All commands gracefully fall back to asking for input:
 
 ### 2. Hooks Configuration (`hooks.toml`)
 
-**Purpose**: Define which file operations trigger tracking
-**Location**: `plugins/dev/hooks.toml`
+**Purpose**: Define which file operations trigger tracking **Location**: `plugins/dev/hooks.toml`
 **Loaded by**: Claude Code on plugin install
 
 **Pattern**:
+
 ```toml
 [[hooks]]
 name = "Track Research Documents"
@@ -212,11 +213,11 @@ args = ["${CLAUDE_PLUGIN_ROOT}/hooks/update-workflow-context.sh"]
 
 ### 1. `workflow-context.sh` (Query Script)
 
-**Purpose**: Read from workflow context
-**Location**: `plugins/dev/scripts/workflow-context.sh`
+**Purpose**: Read from workflow context **Location**: `plugins/dev/scripts/workflow-context.sh`
 **Used by**: Commands
 
 **API**:
+
 ```bash
 # Get most recent document of type
 workflow-context.sh recent <type>
@@ -232,11 +233,11 @@ workflow-context.sh init
 
 ### 2. `update-workflow-context.sh` (Hook Handler)
 
-**Purpose**: Update workflow context when files are written
-**Location**: `plugins/dev/hooks/update-workflow-context.sh`
-**Triggered by**: Claude Code hooks
+**Purpose**: Update workflow context when files are written **Location**:
+`plugins/dev/hooks/update-workflow-context.sh` **Triggered by**: Claude Code hooks
 
 **How it works**:
+
 1. Gets file path from `$CLAUDE_FILE_PATHS` (or JSON fallback)
 2. Determines document type from path
 3. Extracts ticket from filename (`PROJ-123`)
@@ -249,12 +250,14 @@ workflow-context.sh init
 The system automatically extracts ticket numbers from filenames:
 
 ### Patterns Recognized
+
 - `2025-10-28-PROJ-123-description.md` → `PROJ-123`
 - `ABC-456_feature.md` → `ABC-456`
 - `thoughts/shared/handoffs/PROJ-123/handoff.md` → `PROJ-123` (from directory)
 - Any `[A-Z]+-[0-9]+` pattern
 
 ### Regex
+
 ```bash
 if [[ "$FILENAME" =~ ([A-Z]+-[0-9]+) ]]; then
   TICKET="${BASH_REMATCH[1]}"
@@ -267,7 +270,7 @@ fi
 
 All workflow commands follow this explicit pattern:
 
-```markdown
+````markdown
 ## Initial Response
 
 **STEP 1: Auto-discover recent document (REQUIRED)**
@@ -282,13 +285,15 @@ if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
   fi
 fi
 ```
+````
 
 **STEP 2: Determine which document to use**
 
 1. If user provided path → use it (override)
 2. If RECENT_DOC found → ask to proceed
 3. If nothing found → ask for path
-```
+
+````
 
 **Why this works:**
 - **IMMEDIATELY** and **REQUIRED** are explicit
@@ -321,30 +326,36 @@ Check if hooks are working:
 echo "test" > thoughts/shared/research/test.md
 
 # Check workflow context
-cat .claude/.workflow-context.json | jq '.workflow.research[0]'
+cat .catalyst/.workflow-context.json | jq '.workflow.research[0]'
 # Should show: {..., "path": "thoughts/shared/research/test.md", ...}
-```
+````
 
 ---
 
 ## Benefits
 
 ### 1. Zero Memory Required
+
 Users don't need to remember file paths between commands
 
 ### 2. Natural Workflow
+
 Commands chain together seamlessly:
+
 ```bash
 /research-codebase → /create-plan → /implement-plan
 ```
 
 ### 3. Context Awareness
+
 System knows what you're working on (ticket, recent docs)
 
 ### 4. Graceful Degradation
+
 Falls back to asking if auto-discovery doesn't find anything
 
 ### 5. User Override
+
 Can always provide explicit path to override auto-discovery
 
 ---
@@ -356,9 +367,11 @@ Can always provide explicit path to override auto-discovery
 **Symptom**: Workflow context not updating when writing files
 
 **Solutions**:
+
 1. Restart Claude Code (hooks load on startup)
 2. Check plugin installed: `/plugin list`
-3. Manually test: `CLAUDE_FILE_PATHS="thoughts/shared/plans/test.md" bash plugins/dev/hooks/update-workflow-context.sh`
+3. Manually test:
+   `CLAUDE_FILE_PATHS="thoughts/shared/plans/test.md" bash plugins/dev/hooks/update-workflow-context.sh`
 
 ### Auto-Discovery Not Working
 
@@ -373,6 +386,7 @@ Can always provide explicit path to override auto-discovery
 **Symptom**: `.workflow-context.json` exists but has no documents
 
 **Solutions**:
+
 1. Write a thoughts file to trigger hooks
 2. Manually add: `workflow-context.sh add research "path/to/doc.md" "PROJ-123"`
 3. Check hooks are registered in Claude Code settings
@@ -384,6 +398,7 @@ Can always provide explicit path to override auto-discovery
 **Cause**: Most recent document isn't what you want
 
 **Solution**: Provide explicit path to override:
+
 ```bash
 /implement-plan thoughts/shared/plans/specific-plan.md
 ```

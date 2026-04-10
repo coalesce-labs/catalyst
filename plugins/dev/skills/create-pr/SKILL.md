@@ -1,6 +1,10 @@
 ---
 name: create-pr
-description: "Create pull request with automatic Linear integration. **ALWAYS use when** the user says 'create a PR', 'open a pull request', 'ship this', 'ready for review', or wants to push changes and create a GitHub PR. Handles commit, rebase, push, PR creation, description generation, and Linear ticket update."
+description:
+  "Create pull request with automatic Linear integration. **ALWAYS use when** the user says 'create
+  a PR', 'open a pull request', 'ship this', 'ready for review', or wants to push changes and create
+  a GitHub PR. Handles commit, rebase, push, PR creation, description generation, and Linear ticket
+  update."
 disable-model-invocation: true
 allowed-tools: Bash(linearis *), Bash(git *), Bash(gh *), Read, Task
 version: 1.0.0
@@ -22,10 +26,11 @@ fi
 
 ## Configuration
 
-Read team configuration from `.claude/config.json`:
+Read team configuration from `.catalyst/config.json`:
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
+[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE=".claude/config.json"
 TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
 ```
 
@@ -157,12 +162,14 @@ fi
 **CRITICAL: NO CLAUDE ATTRIBUTION**
 
 DO NOT add any of the following to the PR:
+
 - ❌ "Generated with Claude Code" or similar messages
 - ❌ "Co-Authored-By: Claude" lines
 - ❌ Any reference to AI assistance
 - ❌ Links to Claude Code or Anthropic
 
-The PR should be authored solely by the user (git author). Keep the description clean and professional.
+The PR should be authored solely by the user (git author). Keep the description clean and
+professional.
 
 ```bash
 # Generate a meaningful initial body from commit messages (NO CLAUDE ATTRIBUTION)
@@ -182,7 +189,8 @@ fi
 gh pr create --title "$title" --body "$body" --base "$base"
 ```
 
-The initial body uses commit messages so the PR is immediately readable even before `/describe-pr` generates the full description.
+The initial body uses commit messages so the PR is immediately readable even before `/describe-pr`
+generates the full description.
 
 Capture PR number and URL from output.
 
@@ -215,7 +223,7 @@ if ! command -v linearis &> /dev/null; then
     echo "Install: npm install -g linearis"
 else
     # Update ticket state from stateMap config
-    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .claude/config.json 2>/dev/null || echo "In Review")
+    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .catalyst/config.json 2>/dev/null || echo "In Review")
     if [[ "$IN_REVIEW_STATE" != "null" ]]; then
         linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
     fi
@@ -312,7 +320,7 @@ Update manually or check ticket ID.
 
 ## Configuration
 
-Uses `.claude/config.json`:
+Uses `.catalyst/config.json`:
 
 ```json
 {
@@ -330,7 +338,8 @@ Uses `.claude/config.json`:
 }
 ```
 
-State names are read from `stateMap` with sensible defaults. See `.claude/config.json` for all keys.
+State names are read from `stateMap` with sensible defaults. See `.catalyst/config.json` for all
+keys.
 
 ## Examples
 

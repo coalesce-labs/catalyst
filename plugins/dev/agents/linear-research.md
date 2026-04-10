@@ -35,7 +35,8 @@ Linearis CLI tool.
    - Get available labels
    - Discover workflow states
 
-**CLI Syntax**: The `linearis` skill provides full CLI syntax reference. It is auto-loaded when needed.
+**CLI Syntax**: The `linearis` skill provides full CLI syntax reference. It is auto-loaded when
+needed.
 
 ## Key Commands
 
@@ -119,7 +120,9 @@ Present findings as structured data:
 
 ## Important Guidelines
 
-- **Team flag varies by command**: `cycles`, `projects`, `labels` support `--team TEAM-KEY`. `issues list` does NOT support `--team` (use `--limit` + jq filtering). `issues create --team` requires a UUID, not a key/name
+- **Team flag varies by command**: `cycles`, `projects`, `labels` support `--team TEAM-KEY`.
+  `issues list` does NOT support `--team` (use `--limit` + jq filtering). `issues create --team`
+  requires a UUID, not a key/name
 - **JSON output**: Linearis returns JSON, parse with jq for filtering
 - **Ticket format**: Use TEAM-NUMBER format (e.g., ENG-123)
 - **Error handling**: If ticket not found, suggest checking team key
@@ -134,7 +137,7 @@ Present findings as structured data:
 
 ## Configuration
 
-Team information comes from `.claude/config.json`:
+Team information comes from `.catalyst/config.json`:
 
 ```json
 {

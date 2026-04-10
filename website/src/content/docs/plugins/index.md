@@ -5,19 +5,21 @@ sidebar:
   order: 0
 ---
 
-Catalyst is distributed as independent Claude Code plugins. Install only the ones you need to keep your context lean and focused.
+Catalyst is distributed as independent Claude Code plugins. Install only the ones you need to keep
+your context lean and focused.
 
 ## Available Plugins
 
-| Plugin | Description | Context Cost | Skills | Agents |
-|--------|------------|:------------:|:------:|:------:|
-| **catalyst-dev** | Core development workflow — research, plan, implement, validate, ship | ~3.5K | 23 | 10 |
-| **catalyst-pm** | Project management — cycle analysis, backlog grooming, PR sync | Minimal | 40+ | 6 |
-| **catalyst-meta** | Workflow discovery, creation, and management | Minimal | 6 | — |
-| **catalyst-analytics** | Product analytics via PostHog MCP | ~40K | 3 | — |
-| **catalyst-debugging** | Error monitoring via Sentry MCP | ~20K | 3 | 1 |
+| Plugin                 | Description                                                           | Context Cost | Skills | Agents |
+| ---------------------- | --------------------------------------------------------------------- | :----------: | :----: | :----: |
+| **catalyst-dev**       | Core development workflow — research, plan, implement, validate, ship |    ~3.5K     |   23   |   10   |
+| **catalyst-pm**        | Project management — cycle analysis, backlog grooming, PR sync        |   Minimal    |  40+   |   6    |
+| **catalyst-meta**      | Workflow discovery, creation, and management                          |   Minimal    |   6    |   —    |
+| **catalyst-analytics** | Product analytics via PostHog MCP                                     |     ~40K     |   3    |   —    |
+| **catalyst-debugging** | Error monitoring via Sentry MCP                                       |     ~20K     |   3    |   1    |
 
-See the [Skills Reference](/reference/skills/) for the complete list of skills per plugin, and [Agents](/reference/agents/) for agent details.
+See the [Skills Reference](/reference/skills/) for the complete list of skills per plugin, and
+[Agents](/reference/agents/) for agent details.
 
 ## Installation
 
@@ -43,7 +45,8 @@ Plugins with heavy MCP integrations (analytics, debugging) should be enabled onl
 /plugin disable catalyst-analytics   # -40K context
 ```
 
-Most sessions start with just `catalyst-dev` (~3.5K tokens) and enable heavier plugins only when needed.
+Most sessions start with just `catalyst-dev` (~3.5K tokens) and enable heavier plugins only when
+needed.
 
 ## Architecture
 
@@ -59,9 +62,12 @@ Each plugin contains:
 
 The dev plugin includes three Claude Code hooks that run automatically:
 
-- **inject-plan-template** — Injects Catalyst's plan structure guidance when Claude Code is in plan mode.
-- **sync-plan-to-thoughts** — Copies plans to `thoughts/shared/plans/` with frontmatter when you exit plan mode.
-- **update-workflow-context** — Records document writes to `.claude/.workflow-context.json`, enabling skill chaining.
+- **inject-plan-template** — Injects Catalyst's plan structure guidance when Claude Code is in plan
+  mode.
+- **sync-plan-to-thoughts** — Copies plans to `thoughts/shared/plans/` with frontmatter when you
+  exit plan mode.
+- **update-workflow-context** — Records document writes to `.catalyst/.workflow-context.json`,
+  enabling skill chaining.
 
 ## Updating
 
@@ -72,11 +78,12 @@ claude plugin marketplace update catalyst
 
 ## Release Strategy
 
-Catalyst uses **Release Please** for automated per-plugin releases with conventional commit messages:
+Catalyst uses **Release Please** for automated per-plugin releases with conventional commit
+messages:
 
-| Prefix | Effect | Example |
-|--------|--------|---------|
-| `feat(dev):` | Minor bump for catalyst-dev | `feat(dev): add new skill` |
-| `fix(pm):` | Patch bump for catalyst-pm | `fix(pm): correct cycle calculation` |
-| `feat(dev)!:` | Major bump (breaking change) | `feat(dev)!: redesign plan format` |
-| `chore(meta):` | No version bump | `chore(meta): update docs` |
+| Prefix         | Effect                       | Example                              |
+| -------------- | ---------------------------- | ------------------------------------ |
+| `feat(dev):`   | Minor bump for catalyst-dev  | `feat(dev): add new skill`           |
+| `fix(pm):`     | Patch bump for catalyst-pm   | `fix(pm): correct cycle calculation` |
+| `feat(dev)!:`  | Major bump (breaking change) | `feat(dev)!: redesign plan format`   |
+| `chore(meta):` | No version bump              | `chore(meta): update docs`           |

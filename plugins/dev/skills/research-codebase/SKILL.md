@@ -1,6 +1,10 @@
 ---
 name: research-codebase
-description: "Conduct comprehensive codebase research using parallel sub-agents. **ALWAYS use when** the user asks to 'research', 'investigate', 'explore the codebase', 'how does X work', 'find out about', or needs deep analysis of how existing code is structured. Produces a research document in thoughts/shared/research/ with file:line references."
+description:
+  "Conduct comprehensive codebase research using parallel sub-agents. **ALWAYS use when** the user
+  asks to 'research', 'investigate', 'explore the codebase', 'how does X work', 'find out about', or
+  needs deep analysis of how existing code is structured. Produces a research document in
+  thoughts/shared/research/ with file:line references."
 disable-model-invocation: true
 allowed-tools: Read, Write, Grep, Glob, Task, TodoWrite, Bash
 version: 1.0.0
@@ -15,6 +19,7 @@ by spawning parallel sub-agents and synthesizing their findings.
 critiquing implementation, or proposing changes unless the user explicitly asks.
 
 **CRITICAL REQUIREMENTS — read these before doing anything else:**
+
 1. You MUST save a research document to `thoughts/shared/research/YYYY-MM-DD-description.md`
 2. Do NOT save to memory, personal notes, or any other location
 3. Do NOT use the EnterPlanMode tool, create plans, or start implementing
@@ -53,7 +58,8 @@ Then wait for the user's research query.
 - Break down the user's query into composable research areas
 - Think deeply about underlying patterns, connections, and architectural implications
 - Create a research plan using TodoWrite to track all subtasks
-- If a Linear ticket is provided, update it to the configured research state via Linearis CLI (from `stateMap.research`)
+- If a Linear ticket is provided, update it to the configured research state via Linearis CLI (from
+  `stateMap.research`)
 
 ### Step 3: Spawn parallel sub-agent tasks for comprehensive research
 
@@ -69,6 +75,7 @@ Create multiple Task agents to research different aspects concurrently.
 - **external-research** — research external repos/frameworks (only if user asks)
 
 The key is to use these agents intelligently:
+
 - Start with locator agents to find what exists
 - Then use analyzer agents on the most promising findings
 - Run multiple agents in parallel when they're searching for different things
@@ -88,6 +95,7 @@ The key is to use these agents intelligently:
 ### Step 5: Gather metadata for the research document
 
 Collect metadata using git commands:
+
 - Current date/time
 - Git commit hash: `git rev-parse HEAD`
 - Current branch: `git branch --show-current`
@@ -97,9 +105,10 @@ Collect metadata using git commands:
 
 - With ticket: `thoughts/shared/research/YYYY-MM-DD-PROJ-XXXX-description.md`
 - Without ticket: `thoughts/shared/research/YYYY-MM-DD-description.md`
-- Replace `PROJ` with your ticket prefix from `.claude/config.json`
+- Replace `PROJ` with your ticket prefix from `.catalyst/config.json`
 
 **IMPORTANT: Document Storage Rules**
+
 - ALWAYS write to `thoughts/shared/research/`
 - NEVER write to `thoughts/searchable/` (read-only search index)
 
@@ -125,11 +134,8 @@ source_ticket: { TICKET-ID or null }
 
 # Research: {User's Research Question}
 
-**Date**: {date/time with timezone}
-**Researcher**: {your-name}
-**Git Commit**: {commit-hash}
-**Branch**: {branch-name}
-**Repository**: {repo-name}
+**Date**: {date/time with timezone} **Researcher**: {your-name} **Git Commit**: {commit-hash}
+**Branch**: {branch-name} **Repository**: {repo-name}
 
 ## Research Question
 
@@ -176,6 +182,7 @@ system in this area. Focus on WHAT EXISTS, not what should exist.}
 ## Related Documents
 
 {List related thoughts documents using wiki-links, e.g.:}
+
 - [[YYYY-MM-DD-source-ticket|Source Ticket]]
 - [[YYYY-MM-DD-related-research|Related Research]]
 ```
@@ -198,13 +205,15 @@ humanlayer thoughts sync
 
 **8b. Track in workflow context (REQUIRED):**
 
-You MUST run this command, substituting the actual file path you wrote and the ticket ID (or "null"):
+You MUST run this command, substituting the actual file path you wrote and the ticket ID (or
+"null"):
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "thoughts/shared/research/YYYY-MM-DD-description.md" "TICKET-ID"
 ```
 
-For example, if you wrote `thoughts/shared/research/2026-02-16-ADV-33-api-layer-research.md` for ticket ADV-33:
+For example, if you wrote `thoughts/shared/research/2026-02-16-ADV-33-api-layer-research.md` for
+ticket ADV-33:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "thoughts/shared/research/2026-02-16-ADV-33-api-layer-research.md" "ADV-33"
@@ -240,11 +249,13 @@ Would you like me to:
 2. Explore related topics?
 ```
 
-**STOP HERE. Do NOT offer to create plans, use EnterPlanMode, or start implementing. Research is complete.**
+**STOP HERE. Do NOT offer to create plans, use EnterPlanMode, or start implementing. Research is
+complete.**
 
 ### Step 9: Handle follow-up questions
 
 If the user has follow-up questions:
+
 - DO NOT create a new research document - append to the same one
 - Update frontmatter: `last_updated`, `last_updated_by`, add `last_updated_note`
 - Add new section: `## Follow-up Research: {Question}`
@@ -268,7 +279,7 @@ If a ticket is detected (provided as argument, mentioned in query, or from conte
 
 - **At research start**:
   ```bash
-  RESEARCH_STATE=$(jq -r '.catalyst.linear.stateMap.research // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  RESEARCH_STATE=$(jq -r '.catalyst.linear.stateMap.research // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
   if [[ "$RESEARCH_STATE" != "null" ]]; then
       linearis issues update "$ticketId" --status "$RESEARCH_STATE"
   fi

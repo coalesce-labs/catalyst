@@ -1,15 +1,19 @@
 ---
 title: Configuration
-description: Two-layer configuration system — what you need to set up and what the AI checks automatically.
+description:
+  Two-layer configuration system — what you need to set up and what the AI checks automatically.
 sidebar:
   order: 3
 ---
 
-Catalyst uses a **two-layer configuration system** that keeps secrets out of git while allowing project metadata to be shared with your team. The setup script (`setup-catalyst.sh`) generates both layers automatically.
+Catalyst uses a **two-layer configuration system** that keeps secrets out of git while allowing
+project metadata to be shared with your team. The setup script (`setup-catalyst.sh`) generates both
+layers automatically.
 
-## Project Config (`.claude/config.json`)
+## Project Config (`.catalyst/config.json`)
 
-Safe to commit. Contains non-sensitive project metadata that Catalyst reads to understand your project structure, ticket conventions, and workflow state mapping.
+Safe to commit. Contains non-sensitive project metadata that Catalyst reads to understand your
+project structure, ticket conventions, and workflow state mapping.
 
 ```json
 {
@@ -45,35 +49,38 @@ Safe to commit. Contains non-sensitive project metadata that Catalyst reads to u
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `catalyst.projectKey` | string | Links to the secrets config file (`config-{projectKey}.json`) |
-| `catalyst.repository.org` | string | GitHub organization |
-| `catalyst.repository.name` | string | Repository name |
-| `catalyst.project.ticketPrefix` | string | Linear ticket prefix (e.g., "ACME") |
-| `catalyst.project.name` | string | Human-readable project name |
-| `catalyst.linear.teamKey` | string | Linear team identifier used in ticket IDs (e.g., "ACME" for ACME-123). Must match `ticketPrefix`. |
-| `catalyst.linear.stateMap` | object | Maps workflow phases to your Linear workspace state names |
-| `catalyst.thoughts.user` | string\|null | HumanLayer thoughts user name |
+| Field                           | Type         | Description                                                                                       |
+| ------------------------------- | ------------ | ------------------------------------------------------------------------------------------------- |
+| `catalyst.projectKey`           | string       | Links to the secrets config file (`config-{projectKey}.json`)                                     |
+| `catalyst.repository.org`       | string       | GitHub organization                                                                               |
+| `catalyst.repository.name`      | string       | Repository name                                                                                   |
+| `catalyst.project.ticketPrefix` | string       | Linear ticket prefix (e.g., "ACME")                                                               |
+| `catalyst.project.name`         | string       | Human-readable project name                                                                       |
+| `catalyst.linear.teamKey`       | string       | Linear team identifier used in ticket IDs (e.g., "ACME" for ACME-123). Must match `ticketPrefix`. |
+| `catalyst.linear.stateMap`      | object       | Maps workflow phases to your Linear workspace state names                                         |
+| `catalyst.thoughts.user`        | string\|null | HumanLayer thoughts user name                                                                     |
 
 ### State Map
 
-The `stateMap` controls automatic Linear status updates as you move through the development workflow:
+The `stateMap` controls automatic Linear status updates as you move through the development
+workflow:
 
-| Key | Updated When | Default |
-|-----|-------------|---------|
-| `backlog` | Initial ticket state | Backlog |
-| `todo` | Acknowledged, unstarted | Todo |
-| `research` | Running `research-codebase` | In Progress |
-| `planning` | Running `create-plan` | In Progress |
-| `inProgress` | Running `implement-plan` | In Progress |
-| `inReview` | Running `create-pr` or `describe-pr` | In Review |
-| `done` | Running `merge-pr` | Done |
-| `canceled` | Manual cancellation | Canceled |
+| Key          | Updated When                         | Default     |
+| ------------ | ------------------------------------ | ----------- |
+| `backlog`    | Initial ticket state                 | Backlog     |
+| `todo`       | Acknowledged, unstarted              | Todo        |
+| `research`   | Running `research-codebase`          | In Progress |
+| `planning`   | Running `create-plan`                | In Progress |
+| `inProgress` | Running `implement-plan`             | In Progress |
+| `inReview`   | Running `create-pr` or `describe-pr` | In Review   |
+| `done`       | Running `merge-pr`                   | Done        |
+| `canceled`   | Manual cancellation                  | Canceled    |
 
 Set any key to `null` to skip that automatic transition.
 
-**`stateMap` values are auto-detected from Linear** — when you run `setup-catalyst.sh` with a Linear API token, the script fetches your team's actual workflow states and populates `stateMap` with the correct names. Manual customization is only needed for non-standard state names.
+**`stateMap` values are auto-detected from Linear** — when you run `setup-catalyst.sh` with a Linear
+API token, the script fetches your team's actual workflow states and populates `stateMap` with the
+correct names. Manual customization is only needed for non-standard state names.
 
 ## Secrets Config (`~/.config/catalyst/config-{projectKey}.json`)
 
@@ -105,16 +112,16 @@ Never committed. One file per project, linked by `projectKey`.
 
 ### Integration Fields
 
-| Integration | Required Fields | Used By |
-|------------|----------------|---------|
-| Linear | `apiToken`, `teamKey` | catalyst-dev, catalyst-pm |
-| Sentry | `org`, `project`, `authToken` | catalyst-debugging |
-| PostHog | `apiKey`, `projectId` | catalyst-analytics |
-| Exa | `apiKey` | catalyst-dev (external research) |
+| Integration | Required Fields               | Used By                          |
+| ----------- | ----------------------------- | -------------------------------- |
+| Linear      | `apiToken`, `teamKey`         | catalyst-dev, catalyst-pm        |
+| Sentry      | `org`, `project`, `authToken` | catalyst-debugging               |
+| PostHog     | `apiKey`, `projectId`         | catalyst-analytics               |
+| Exa         | `apiKey`                      | catalyst-dev (external research) |
 
 Only configure the integrations you use. The setup script prompts for each one.
 
-## Workflow Context (`.claude/.workflow-context.json`)
+## Workflow Context (`.catalyst/.workflow-context.json`)
 
 Auto-managed by Claude Code hooks. Not committed to git.
 
@@ -137,11 +144,14 @@ Auto-managed by Claude Code hooks. Not committed to git.
 }
 ```
 
-This file is what enables skill chaining — when you save research, `create-plan` finds it automatically. When you save a plan, `implement-plan` finds it. You never need to specify file paths between workflow phases.
+This file is what enables skill chaining — when you save research, `create-plan` finds it
+automatically. When you save a plan, `implement-plan` finds it. You never need to specify file paths
+between workflow phases.
 
 ## Thoughts System
 
-The thoughts system provides git-backed persistent context across sessions. The setup script handles initialization, but for manual setup:
+The thoughts system provides git-backed persistent context across sessions. The setup script handles
+initialization, but for manual setup:
 
 ```bash
 cd /path/to/your-project
@@ -182,7 +192,7 @@ gh repo create my-thoughts --private --source=. --push
 
 ## Switching Projects
 
-Change `projectKey` in `.claude/config.json` to point to a different secrets file:
+Change `projectKey` in `.catalyst/config.json` to point to a different secrets file:
 
 ```json
 {
@@ -198,9 +208,9 @@ For fully isolated multi-client setups, see [Multi-Project Setup](/getting-start
 
 ### Config not being read
 
-1. File exists: `ls .claude/config.json`
-2. Valid JSON: `cat .claude/config.json | jq`
-3. Correct location: must be in the `.claude/` directory
+1. File exists: `ls .catalyst/config.json`
+2. Valid JSON: `cat .catalyst/config.json | jq`
+3. Correct location: must be in the `.catalyst/` directory (or `.claude/` for backward compat)
 4. Secrets file exists: `ls ~/.config/catalyst/config-{projectKey}.json`
 
 ### Thoughts not syncing

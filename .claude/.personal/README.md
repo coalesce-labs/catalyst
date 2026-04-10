@@ -6,8 +6,8 @@ This directory contains **individual developer customization** that isn't shared
 
 **Three-tier configuration:**
 
-1. **Workspace template** (`ryan-claude-workspace/.claude/config.json`) - Generic, shareable
-2. **Project config** (`.claude/config.json`) - Team-shared, versioned
+1. **Workspace template** (`ryan-claude-workspace/.catalyst/config.json`) - Generic, shareable
+2. **Project config** (`.catalyst/config.json`) - Team-shared, versioned
 3. **Personal config** (`.claude/config.local.json`) - Yours only ← YOU ARE HERE
 
 ## config.local.json
@@ -52,13 +52,13 @@ Personal configuration overrides team config.
 Config precedence (highest to lowest):
 
 1. `.claude/config.local.json` (personal)
-2. `.claude/config.json` (team)
+2. `.catalyst/config.json` (team)
 3. Command defaults
 
 Example:
 
 ```json
-// Team config (.claude/config.json)
+// Team config (.catalyst/config.json)
 {
   "commit": {
     "scopes": ["api", "frontend", "database"]
@@ -203,7 +203,7 @@ Update commands to check for `config.local.json`:
 
 ```bash
 # Read from both configs
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
 LOCAL_CONFIG=".claude/config.local.json"
 
 # Use jq to merge (local overrides team)

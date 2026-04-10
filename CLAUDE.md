@@ -57,12 +57,13 @@ This workspace has no build process - it's markdown files and bash scripts.
 - Valid scopes: `dev`, `pm`, `meta`, `analytics`, `debugging`
 
 **How release-please routes version bumps (monorepo):**
-- Routing is by **file paths changed**, NOT by commit message scope. A commit touching files in
-  both `plugins/dev/` and `plugins/pm/` bumps both plugins regardless of scope.
+
+- Routing is by **file paths changed**, NOT by commit message scope. A commit touching files in both
+  `plugins/dev/` and `plugins/pm/` bumps both plugins regardless of scope.
 - The `(scope)` in `fix(dev):` controls **changelog grouping**, not which plugin gets bumped.
 - Squash merges work correctly — GitHub API provides the file list to release-please.
-- Use the scope that best describes the primary intent (e.g., `fix(dev):` for a dev-led change
-  that also touches pm files). Both plugins still get their version bumps.
+- Use the scope that best describes the primary intent (e.g., `fix(dev):` for a dev-led change that
+  also touches pm files). Both plugins still get their version bumps.
 
 ## Version Control
 
@@ -80,7 +81,7 @@ prompts. They never commit sensitive files or add Claude attribution.
 
 Two-layer config system:
 
-- **Layer 1**: `.claude/config.json` (safe to commit) — project key, ticket prefix, state map
+- **Layer 1**: `.catalyst/config.json` (safe to commit) — project key, ticket prefix, state map
 - **Layer 2**: `~/.config/catalyst/config-{projectKey}.json` (NEVER committed) — API tokens, secrets
 
 ## Dependencies

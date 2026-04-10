@@ -1,6 +1,9 @@
 ---
 name: describe-pr
-description: "Generate or update PR description with incremental changes. **ALWAYS use when** the user says 'describe the PR', 'update PR description', 'generate PR description', or after pushing new commits to an existing PR. Supports incremental updates that preserve manual edits."
+description:
+  "Generate or update PR description with incremental changes. **ALWAYS use when** the user says
+  'describe the PR', 'update PR description', 'generate PR description', or after pushing new
+  commits to an existing PR. Supports incremental updates that preserve manual edits."
 disable-model-invocation: true
 allowed-tools: Bash, Read, Write
 version: 2.0.0
@@ -298,6 +301,7 @@ fi
 ### 11. Save and sync
 
 **IMPORTANT: Document Storage Rules**
+
 - ALWAYS write to `thoughts/shared/prs/` for PR descriptions
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
@@ -328,12 +332,14 @@ humanlayer thoughts sync
 Before updating the PR, ensure the description contains NO Claude attribution:
 
 ❌ **Remove these if present**:
+
 - "Generated with Claude Code" or similar messages
 - "Co-Authored-By: Claude" lines
 - Any reference to AI assistance or Anthropic
 - Links to Claude Code documentation
 
 ✅ **Keep descriptions professional and human-authored**:
+
 - Focus on code changes and their purpose
 - Attribute work to the git author (the human developer)
 - Write in first-person if needed ("I added...", "We implemented...")
@@ -361,7 +367,7 @@ if ! command -v linearis &> /dev/null; then
     echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
 else
     # Move to configured "In Review" state and assign to self
-    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .claude/config.json 2>/dev/null || echo "In Review")
+    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .catalyst/config.json 2>/dev/null || echo "In Review")
     if [[ "$IN_REVIEW_STATE" != "null" ]]; then
         linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
     fi
@@ -456,7 +462,7 @@ screenshots, checked boxes), and adds entries to the update history log.
 
 ## Configuration
 
-Uses `.claude/config.json`:
+Uses `.catalyst/config.json`:
 
 ```json
 {
@@ -479,7 +485,8 @@ Uses `.claude/config.json`:
 }
 ```
 
-State names are read from `stateMap` with sensible defaults. See `.claude/config.json` for all keys.
+State names are read from `stateMap` with sensible defaults. See `.catalyst/config.json` for all
+keys.
 
 ## Remember:
 

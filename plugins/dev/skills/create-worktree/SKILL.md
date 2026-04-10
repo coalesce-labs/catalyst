@@ -1,6 +1,9 @@
 ---
 name: create-worktree
-description: "Create a git worktree for parallel work and optionally launch implementation session. **ALWAYS use when** the user says 'create a worktree', 'work in parallel', 'start a worktree for', or needs to work on multiple features simultaneously without switching branches."
+description:
+  "Create a git worktree for parallel work and optionally launch implementation session. **ALWAYS
+  use when** the user says 'create a worktree', 'work in parallel', 'start a worktree for', or needs
+  to work on multiple features simultaneously without switching branches."
 disable-model-invocation: true
 allowed-tools: Bash, Read
 version: 1.0.0
@@ -11,7 +14,7 @@ version: 1.0.0
 This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
 prefix:
 
-- Read from `.claude/config.json` if available
+- Read from `.catalyst/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
 - Examples: `ENG-123`, `FEAT-456`, `BUG-789`
 

@@ -1,6 +1,10 @@
 ---
 name: commit
-description: "Automatically analyzes code changes and creates git commits with conventional commit messages when the user indicates they want to save their work, commit changes, or says 'commit this', 'save my changes', 'let's commit'. Auto-detects commit type, scope, and ticket reference from branch name."
+description:
+  "Automatically analyzes code changes and creates git commits with conventional commit messages
+  when the user indicates they want to save their work, commit changes, or says 'commit this', 'save
+  my changes', 'let's commit'. Auto-detects commit type, scope, and ticket reference from branch
+  name."
 disable-model-invocation: true
 allowed-tools: Bash, Read
 version: 2.0.0
@@ -95,7 +99,7 @@ during this session.
 
 ## Configuration
 
-Reads from `.claude/config.json`:
+Reads from `.catalyst/config.json`:
 
 ```json
 {

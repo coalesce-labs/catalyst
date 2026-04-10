@@ -1,6 +1,9 @@
 ---
 name: create-handoff
-description: "Create handoff document for passing work to another session. **ALWAYS use when** the user says 'create a handoff', 'hand this off', 'save progress for later', 'I need to stop here', or when context usage is high (>60%) during implementation and work needs to continue in a fresh session."
+description:
+  "Create handoff document for passing work to another session. **ALWAYS use when** the user says
+  'create a handoff', 'hand this off', 'save progress for later', 'I need to stop here', or when
+  context usage is high (>60%) during implementation and work needs to continue in a fresh session."
 disable-model-invocation: true
 allowed-tools: Write, Bash, Read
 version: 1.0.0
@@ -22,7 +25,7 @@ fi
 This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
 prefix:
 
-- Read from `.claude/config.json` if available
+- Read from `.catalyst/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
 - Examples: `ENG-123`, `FEAT-456`, `BUG-789`
 
@@ -35,6 +38,7 @@ compact and summarize your context without losing any of the key details of what
 ### 1. Filepath & Metadata
 
 **IMPORTANT: Document Storage Rules**
+
 - ALWAYS write to `thoughts/shared/` (appropriate subdirectory)
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
@@ -48,6 +52,7 @@ Create your file under `thoughts/shared/handoffs/PROJ-XXX/YYYY-MM-DD_HH-MM-SS_de
 Get current git information for metadata (branch, commit, repository name) using git commands.
 
 **Examples:**
+
 - With ticket: `thoughts/shared/handoffs/PROJ-123/2025-01-08_13-55-22_PROJ-123_auth-feature.md`
 - Without ticket: `thoughts/shared/handoffs/general/2025-01-08_13-55-22_refactor-api.md`
 
@@ -73,8 +78,8 @@ last_updated: [Current date in YYYY-MM-DD format]
 last_updated_by: [Researcher name]
 type: handoff
 source_ticket: [TICKET-ID or null]
-source_plan: "[[plan-filename]]"  # or null
-source_research: "[[research-filename]]"  # or null
+source_plan: "[[plan-filename]]" # or null
+source_research: "[[research-filename]]" # or null
 ---
 
 # Handoff: {TICKET or General} - {very concise description}
@@ -83,13 +88,14 @@ source_research: "[[research-filename]]"  # or null
 
 {description of the task(s) that you were working on, along with the status of each (completed, work
 in progress, planned/discussed). If you are working on an implementation plan, make sure to call out
-which phase you are on. Reference the plan and/or research documents using wiki-links
-(e.g., [[plan-filename]], [[research-filename]]), if applicable.}
+which phase you are on. Reference the plan and/or research documents using wiki-links (e.g.,
+[[plan-filename]], [[research-filename]]), if applicable.}
 
 ## Critical References
 
 {List any critical specification documents, architectural decisions, or design docs that must be
-followed using wiki-links (e.g., [[doc-filename]]). Include only 2-3 most important references. Leave blank if none.}
+followed using wiki-links (e.g., [[doc-filename]]). Include only 2-3 most important references.
+Leave blank if none.}
 
 ## Recent changes
 

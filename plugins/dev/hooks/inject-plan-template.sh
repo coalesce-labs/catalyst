@@ -18,8 +18,8 @@ INPUT=$(cat)
 
 # Fast-path: check permission_mode, exit immediately if not plan mode
 PERMISSION_MODE=$(echo "$INPUT" | jq -r '.permission_mode // empty' 2>/dev/null || echo "")
-if [[ "$PERMISSION_MODE" != "plan" ]]; then
-  exit 0
+if [[ $PERMISSION_MODE != "plan" ]]; then
+	exit 0
 fi
 
 # --- In plan mode: build structure guidance ---
@@ -27,11 +27,19 @@ fi
 # Read ticket prefix from config (best-effort)
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")}"
 TICKET_PREFIX="PROJ"
-if [[ -n "$PROJECT_DIR" && -f "$PROJECT_DIR/.claude/config.json" ]]; then
-  CONFIGURED_PREFIX=$(jq -r '.catalyst.project.ticketPrefix // empty' "$PROJECT_DIR/.claude/config.json" 2>/dev/null || echo "")
-  if [[ -n "$CONFIGURED_PREFIX" ]]; then
-    TICKET_PREFIX="$CONFIGURED_PREFIX"
-  fi
+CONFIG_FILE=""
+if [[ -n $PROJECT_DIR ]]; then
+	if [[ -f "$PROJECT_DIR/.catalyst/config.json" ]]; then
+		CONFIG_FILE="$PROJECT_DIR/.catalyst/config.json"
+	elif [[ -f "$PROJECT_DIR/.claude/config.json" ]]; then
+		CONFIG_FILE="$PROJECT_DIR/.claude/config.json"
+	fi
+fi
+if [[ -n $CONFIG_FILE ]]; then
+	CONFIGURED_PREFIX=$(jq -r '.catalyst.project.ticketPrefix // empty' "$CONFIG_FILE" 2>/dev/null || echo "")
+	if [[ -n $CONFIGURED_PREFIX ]]; then
+		TICKET_PREFIX="$CONFIGURED_PREFIX"
+	fi
 fi
 
 # Output JSON with additionalContext

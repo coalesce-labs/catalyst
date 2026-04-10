@@ -1,6 +1,10 @@
 ---
 name: implement-plan
-description: "Implement approved technical plans from thoughts/shared/plans/. **ALWAYS use when** the user says 'implement the plan', 'start implementing', 'build from the plan', or wants to execute a previously created implementation plan using TDD (Red-Green-Refactor). Supports team mode for parallel implementation."
+description:
+  "Implement approved technical plans from thoughts/shared/plans/. **ALWAYS use when** the user says
+  'implement the plan', 'start implementing', 'build from the plan', or wants to execute a
+  previously created implementation plan using TDD (Red-Green-Refactor). Supports team mode for
+  parallel implementation."
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Grep, Glob, Task, TodoWrite, Bash
 version: 1.0.0
@@ -35,7 +39,8 @@ fi
 
 Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
 
-1. **If user provided a plan path as parameter**: Use the provided path (user override). Skip to Step 3.
+1. **If user provided a plan path as parameter**: Use the provided path (user override). Skip to
+   Step 3.
 
 2. **If no parameter provided AND Prerequisites output shows a discovered plan (📋)**:
    - Show user the discovered plan path
@@ -52,12 +57,13 @@ Auto-discovery has already run in Prerequisites above. Check its output and foll
 **STEP 3: Read and prepare**
 
 Once you have a plan path:
+
 - Read the plan completely (no limit/offset)
 - Check for any existing checkmarks (- [x]) to see what's done
 - Read the original ticket and all files mentioned in the plan
 - **Extract ticket from plan frontmatter** (`source_ticket` field) and update Linear state:
   ```bash
-  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
   if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
       linearis issues update "$ticketId" --status "$IN_PROGRESS_STATE"
   fi
@@ -81,8 +87,10 @@ Plans are carefully designed, but reality can be messy. Your job is to:
 
 For each phase, follow **Red → Green → Refactor**:
 
-1. **Red** — Write the tests specified in the plan's "Tests First" section. Run them to confirm they fail.
-2. **Green** — Implement the minimum code from the plan's "Implementation" section to make tests pass.
+1. **Red** — Write the tests specified in the plan's "Tests First" section. Run them to confirm they
+   fail.
+2. **Green** — Implement the minimum code from the plan's "Implementation" section to make tests
+   pass.
 3. **Refactor** — Clean up while keeping tests green. Apply any refactoring notes from the plan.
 
 This order is non-negotiable. If a phase doesn't have a "Tests First" section, write tests for the
@@ -216,6 +224,7 @@ proceeding.
 **Gate 3: Code Review**
 
 Spawn the `code-reviewer` agent:
+
 ```
 Agent(subagent_type="pr-review-toolkit:code-reviewer",
       prompt="Review the uncommitted changes for adherence to project guidelines and style.")
@@ -226,6 +235,7 @@ Address any findings that violate project conventions.
 **Gate 4: Test Coverage**
 
 Spawn the `pr-test-analyzer` agent:
+
 ```
 Agent(subagent_type="pr-review-toolkit:pr-test-analyzer",
       prompt="Analyze test coverage for the uncommitted changes. Identify critical gaps.")
@@ -310,7 +320,7 @@ If a ticket is detected (from plan document's `source_ticket` frontmatter or fro
 
 - **At implementation start** (Step 3):
   ```bash
-  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
   if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
       linearis issues update "$ticketId" --status "$IN_PROGRESS_STATE"
   fi
