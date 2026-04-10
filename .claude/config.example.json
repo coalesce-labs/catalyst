@@ -24,6 +24,42 @@
     },
     "thoughts": {
       "user": null
+    },
+    "worktree": {
+      "setup": [
+        "humanlayer thoughts init --directory ${DIRECTORY} --profile ${PROFILE}",
+        "humanlayer thoughts sync",
+        "bun install",
+        "~/.claude/scripts/trust-workspace.sh \"$(pwd)\""
+      ]
+    },
+    "orchestration": {
+      "worktreeDir": "~/catalyst/api",
+      "maxParallel": 4,
+      "hooks": {
+        "setup": [
+          "humanlayer thoughts init --directory ${DIRECTORY}",
+          "humanlayer thoughts sync",
+          "bun install"
+        ],
+        "teardown": [
+          "git worktree remove ${WORKTREE_PATH}",
+          "git branch -D ${BRANCH_NAME}"
+        ]
+      },
+      "workerCommand": "/oneshot",
+      "workerModel": "opus",
+      "thoughts": {
+        "profile": "my-profile",
+        "directory": "api"
+      },
+      "testRequirements": {
+        "backend": ["unit", "bruno"],
+        "frontend": ["unit", "functional"],
+        "fullstack": ["unit", "bruno", "functional"]
+      },
+      "verifyBeforeMerge": true,
+      "allowSelfReportedCompletion": false
     }
   }
 }

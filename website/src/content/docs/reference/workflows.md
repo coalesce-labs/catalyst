@@ -174,7 +174,7 @@ Git worktrees let you work on multiple features simultaneously, each in its own 
 /create-worktree PROJ-123 feature-name
 ```
 
-This creates a git worktree at `~/wt/{project}/{PROJ-123-feature-name}/` with a new branch, `.claude/` copied over, dependencies installed, and `thoughts/` shared via symlink.
+This creates a git worktree at `~/catalyst/wt/{projectKey}/{PROJ-123-feature-name}/` with a new branch, `.claude/` and `.catalyst/` copied over, dependencies installed, and `thoughts/` shared via symlink.
 
 ### Parallel Sessions
 
@@ -182,11 +182,11 @@ Run separate Claude Code sessions in different worktrees:
 
 ```bash
 # Terminal 1 — Feature A
-cd ~/wt/api/PROJ-123-feature-a && claude
+cd ~/catalyst/wt/acme/ACME-123-feature-a && claude
 /implement-plan
 
 # Terminal 2 — Feature B
-cd ~/wt/api/PROJ-456-feature-b && claude
+cd ~/catalyst/wt/acme/ACME-456-feature-b && claude
 /implement-plan
 
 # Terminal 3 — Research (main repo)
@@ -200,11 +200,15 @@ All worktrees share the same thoughts directory via symlink. Plans created in on
 
 ```bash
 git worktree list                                          # List all
-git worktree remove ~/wt/my-project/PROJ-123-feature       # Remove after merge
+git worktree remove ~/catalyst/wt/acme/ACME-123-feature    # Remove after merge
 git worktree prune                                         # Clean stale references
 ```
 
-The worktree location defaults to `~/wt/{repo}` but can be customized with `GITHUB_SOURCE_ROOT`.
+The worktree location defaults to `~/catalyst/wt/{projectKey}` (reads `catalyst.projectKey` from config). Override with `catalyst.orchestration.worktreeDir` in config.
+
+### AI-Coordinated Parallel Work
+
+For coordinating multiple tickets with automated dispatch and verification, see [Orchestration](/reference/orchestration/).
 
 ## Best Practices
 

@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$comment": "Worker signal file schema — written by /oneshot workers, read by /orchestrate coordinator",
+  "type": "object",
+  "required": ["ticket", "orchestrator", "workerName", "status", "phase", "startedAt", "updatedAt"],
+  "properties": {
+    "ticket": {
+      "type": "string",
+      "description": "Linear ticket ID (e.g., PROJ-101)"
+    },
+    "orchestrator": {
+      "type": "string",
+      "description": "Name of the orchestrator that dispatched this worker"
+    },
+    "workerName": {
+      "type": "string",
+      "description": "Full worker name (e.g., api-redesign-PROJ-101)"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "dispatched",
+        "researching",
+        "planning",
+        "implementing",
+        "validating",
+        "shipping",
+        "pr-created",
+        "merging",
+        "done",
+        "failed",
+        "stalled",
+        "remediation"
+      ],
+      "description": "Current worker status"
+    },
+    "phase": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 6,
+      "description": "Current /oneshot phase (0=dispatched, 1=research, 2=plan, 3=implement, 4=validate, 5=ship, 6=merge)"
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when worker was dispatched"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of last status update"
+    },
+    "worktreePath": {
+      "type": "string",
+      "description": "Absolute path to the worker's worktree directory"
+    },
+    "pr": {
+      "type": ["object", "null"],
+      "properties": {
+        "number": { "type": "integer" },
+        "url": { "type": "string", "format": "uri" },
+        "ciStatus": {
+          "type": "string",
+          "enum": ["pending", "passing", "failing", "unknown"]
+        }
+      },
+      "description": "Pull request details (null until PR is created)"
+    },
+    "linearState": {
+      "type": ["string", "null"],
+      "description": "Current Linear ticket state as reported by the worker"
+    },
+    "definitionOfDone": {
+      "type": "object",
+      "description": "Self-reported completion status for each quality gate. The orchestrator independently verifies these claims.",
+      "properties": {
+        "testsWrittenFirst": {
+          "type": "boolean",
+          "description": "Whether tests were written before implementation (TDD)"
+        },
+        "unitTests": {
+          "type": "object",
+          "properties": {
+            "exists": { "type": "boolean" },
+            "count": { "type": "integer", "minimum": 0 }
+          },
+          "description": "Unit test coverage"
+        },
+        "apiTests": {
+          "type": "object",
+          "properties": {
+            "exists": { "type": "boolean" },
+            "count": { "type": "integer", "minimum": 0 },
+            "reason": { "type": "string" }
+          },
+          "description": "API/integration test coverage (Bruno collections, supertest, etc.)"
+        },
+        "functionalTests": {
+          "type": "object",
+          "properties": {
+            "exists": { "type": "boolean" },
+            "count": { "type": "integer", "minimum": 0 },
+            "reason": { "type": "string" }
+          },
+          "description": "Functional/E2E test coverage"
+        },
+        "typeCheck": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" }
+          },
+          "description": "TypeScript compilation status"
+        },
+        "securityReview": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" }
+          },
+          "description": "Security review status"
+        },
+        "codeReview": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" },
+            "findings": { "type": "integer", "minimum": 0 }
+          },
+          "description": "Code review agent status"
+        },
+        "rewardHackingScan": {
+          "type": "object",
+          "properties": {
+            "passed": { "type": "boolean" },
+            "violations": { "type": "integer", "minimum": 0 }
+          },
+          "description": "Reward hacking scan results"
+        }
+      }
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "Error message if status is 'failed'"
+    }
+  }
+}
