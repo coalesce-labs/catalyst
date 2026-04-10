@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v3.1.3...catalyst-meta-v4.0.0) (2026-04-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **dev:** migrate workflow state from .claude/ to .catalyst/ ([#63](https://github.com/coalesce-labs/catalyst/issues/63))
+
+### Features
+
+* **dev:** migrate workflow state from .claude/ to .catalyst/ ([#63](https://github.com/coalesce-labs/catalyst/issues/63)) ([114c7c4](https://github.com/coalesce-labs/catalyst/commit/114c7c47734574d552f932fa41902e5adb819283))
+
 ## [3.1.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-meta-v3.1.2...catalyst-meta-v3.1.3) (2026-04-06)
 
 
