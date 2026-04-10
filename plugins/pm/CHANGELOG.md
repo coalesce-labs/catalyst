@@ -1,5 +1,16 @@
 # Changelog
 
+## [6.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.2.3...catalyst-pm-v6.0.0) (2026-04-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **dev:** migrate workflow state from .claude/ to .catalyst/ ([#63](https://github.com/coalesce-labs/catalyst/issues/63))
+
+### Features
+
+* **dev:** migrate workflow state from .claude/ to .catalyst/ ([#63](https://github.com/coalesce-labs/catalyst/issues/63)) ([114c7c4](https://github.com/coalesce-labs/catalyst/commit/114c7c47734574d552f932fa41902e5adb819283))
+
 ## [5.2.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.2.2...catalyst-pm-v5.2.3) (2026-04-06)
 
 
