@@ -119,12 +119,13 @@ pip install humanlayer  # or: pipx install humanlayer
 **What it does**:
 
 - Creates GraphQL mutation file at `/tmp/linear-workflow-setup.graphql`
-- Creates an optional 12-state custom workflow (Backlog → Triage → Research → Planning → In Dev → In Review → Done, etc.)
-- Outputs the `stateMap` configuration to add to `.claude/config.json`
+- Creates an optional 12-state custom workflow (Backlog → Triage → Research → Planning → In Dev → In
+  Review → Done, etc.)
+- Outputs the `stateMap` configuration to add to `.catalyst/config.json`
 
-**Note**: This is **optional**. Catalyst works out-of-the-box with standard Linear states
-(Backlog, Todo, In Progress, In Review, Done, Canceled). Only run this if you want finer-grained
-status tracking. State names are configurable via `linear.stateMap` in `.claude/config.json`.
+**Note**: This is **optional**. Catalyst works out-of-the-box with standard Linear states (Backlog,
+Todo, In Progress, In Review, Done, Canceled). Only run this if you want finer-grained status
+tracking. State names are configurable via `linear.stateMap` in `.catalyst/config.json`.
 
 **When to use**: Optional setup for teams wanting a detailed 12-state workflow
 
@@ -174,7 +175,8 @@ cd ~/my-personal-project
 /implement-plan  # HumanLayer auto-detects profile
 ```
 
-**No manual switching needed!** HumanLayer's `repoMappings` automatically map directories to profiles.
+**No manual switching needed!** HumanLayer's `repoMappings` automatically map directories to
+profiles.
 
 ### How Profile Auto-Detection Works
 
@@ -200,6 +202,7 @@ humanlayer thoughts status  # Shows: Profile: acme
 ```
 
 The `create-worktree.sh` script:
+
 1. Detects the current profile via `humanlayer thoughts status`
 2. Passes `--profile <detected>` when initializing thoughts in the worktree
 3. No manual configuration needed
@@ -223,7 +226,7 @@ humanlayer thoughts profile show acme
 humanlayer thoughts status
 ```
 
-### .claude/config.json (Per-Project)
+### .catalyst/config.json (Per-Project)
 
 ```json
 {
@@ -267,9 +270,11 @@ These scripts are no longer needed with HumanLayer's profile system:
 
 - ❌ `hl-switch` - Manual config switching (replaced by automatic profile detection)
 - ❌ `setup-multi-config.sh` - Multi-config setup (replaced by `humanlayer thoughts profile create`)
-- ❌ `setup-catalyst-config.sh` - Wrote flat-schema configs incompatible with plugin commands (use `setup-catalyst.sh` instead)
+- ❌ `setup-catalyst-config.sh` - Wrote flat-schema configs incompatible with plugin commands (use
+  `setup-catalyst.sh` instead)
 - ❌ `load-catalyst-config.sh` - Unused config loader that read flat schema (no replacement needed)
-- ❌ `humanlayer/setup-personal-thoughts.sh` - Non-portable personal setup (use `setup-catalyst.sh` or `init-project.sh` instead)
+- ❌ `humanlayer/setup-personal-thoughts.sh` - Non-portable personal setup (use `setup-catalyst.sh`
+  or `init-project.sh` instead)
 
 ---
 

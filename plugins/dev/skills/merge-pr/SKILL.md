@@ -1,6 +1,9 @@
 ---
 name: merge-pr
-description: "Safely merge PR with verification and Linear integration. **ALWAYS use when** the user says 'merge the PR', 'merge this', 'ship it', or wants to merge an approved pull request. Runs tests, checks CI, verifies approvals, squash merges, cleans up branches, and moves Linear ticket to Done."
+description:
+  "Safely merge PR with verification and Linear integration. **ALWAYS use when** the user says
+  'merge the PR', 'merge this', 'ship it', or wants to merge an approved pull request. Runs tests,
+  checks CI, verifies approvals, squash merges, cleans up branches, and moves Linear ticket to Done."
 disable-model-invocation: true
 allowed-tools: Bash(linearis *), Bash(git *), Bash(gh *), Read
 version: 1.0.0
@@ -12,10 +15,11 @@ Safely merges a PR after comprehensive verification, with Linear integration and
 
 ## Configuration
 
-Read team configuration from `.claude/config.json`:
+Read team configuration from `.catalyst/config.json`:
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
+[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE=".claude/config.json"
 TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
 TEST_CMD=$(jq -r '.catalyst.pr.testCommand // "make test"' "$CONFIG_FILE")
 ```
@@ -145,7 +149,7 @@ Exit with error.
 **Read test command from config:**
 
 ```bash
-test_cmd=$(jq -r '.catalyst.pr.testCommand // "make test"' .claude/config.json)
+test_cmd=$(jq -r '.catalyst.pr.testCommand // "make test"' .catalyst/config.json)
 ```
 
 **Execute tests:**
@@ -296,7 +300,7 @@ if ! command -v linearis &> /dev/null; then
     echo "Install: npm install -g linearis"
 else
     # Move to configured "Done" state
-    DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
+    DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .catalyst/config.json 2>/dev/null || echo "Done")
     if [[ "$DONE_STATE" != "null" ]]; then
         linearis issues update "$ticket" --status "$DONE_STATE"
     fi
@@ -463,22 +467,26 @@ Post-merge tasks: $task_count saved to thoughts/
 For all errors, provide clear messages with the specific error, what went wrong, and how to fix it.
 
 **Fail fast (stop execution):**
-- Rebase conflicts → show conflicting files, instructions to resolve manually, then re-run `/merge-pr`
+
+- Rebase conflicts → show conflicting files, instructions to resolve manually, then re-run
+  `/merge-pr`
 - Test failures → show failed tests, suggest fix or `--skip-tests`
 - PR not open/mergeable → show current state
 
 **Prompt for override:**
+
 - CI checks failing → show failures, ask `Continue anyway? [y/N]`
 - Missing approvals → show review status, ask `Continue anyway? [y/N]`
 
 **Warn but continue (graceful degradation):**
+
 - Linearis CLI not found → warn, suggest install, merge proceeds
 - Linear API error → warn, merge proceeds
 - Branch deletion error → warn, merge already succeeded
 
 ## Configuration
 
-Uses `.claude/config.json`:
+Uses `.catalyst/config.json`:
 
 ```json
 {
@@ -505,7 +513,8 @@ Uses `.claude/config.json`:
 }
 ```
 
-State names are read from `stateMap` with sensible defaults. See `.claude/config.json` for all keys.
+State names are read from `stateMap` with sensible defaults. See `.catalyst/config.json` for all
+keys.
 
 ## Examples
 

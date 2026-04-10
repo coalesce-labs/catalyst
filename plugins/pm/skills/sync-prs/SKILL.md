@@ -9,6 +9,7 @@ version: 1.0.0
 # Sync PRs Command
 
 Analyzes the relationship between GitHub pull requests and Linear issues to identify:
+
 - PRs without linked Linear issues
 - Linear issues without associated PRs
 - Merged PRs with open Linear issues (candidates for closure)
@@ -62,14 +63,15 @@ source "${SCRIPT_DIR}/pm-utils.sh"
 TEAM_KEY=$(get_team_key)
 ```
 
-**Task 1 - Get GitHub PRs**:
-Use `catalyst-dev:github-research` agent (if exists) or inline `gh` commands:
+**Task 1 - Get GitHub PRs**: Use `catalyst-dev:github-research` agent (if exists) or inline `gh`
+commands:
+
 ```
 Get open and recently merged PRs (last 7 days)
 ```
 
-**Task 2 - Get Linear Issues**:
-Use Task tool with `catalyst-dev:linear-research` agent:
+**Task 2 - Get Linear Issues**: Use Task tool with `catalyst-dev:linear-research` agent:
+
 ```
 Prompt: "Get all in-review and in-progress issues for team ${TEAM_KEY}"
 Model: haiku
@@ -82,10 +84,12 @@ Model: haiku
 Use Task tool with `github-linear-analyzer` agent:
 
 **Input**:
+
 - GitHub PRs from Task 1
 - Linear issues from Task 2
 
 **Output**:
+
 - Linked PRs (healthy)
 - Orphaned PRs (no Linear issue)
 - Orphaned issues (no PR)
@@ -94,12 +98,10 @@ Use Task tool with `github-linear-analyzer` agent:
 
 ### Step 3: Generate Sync Report
 
-```markdown
+````markdown
 # PR-Linear Sync Report
 
-**Generated**: 2025-01-27
-**Repository**: user/repo
-**Linear Team**: TEAM
+**Generated**: 2025-01-27 **Repository**: user/repo **Linear Team**: TEAM
 
 ## 📊 Summary
 
@@ -109,19 +111,20 @@ Use Task tool with `github-linear-analyzer` agent:
 
 ## 🔗 Linked PRs (Healthy)
 
-| PR | Linear Issue | Status | Author |
-|----|--------------|--------|--------|
-| #123 | TEAM-456 | Open | Alice |
-| #124 | TEAM-457 | Merged | Bob |
+| PR   | Linear Issue | Status | Author |
+| ---- | ------------ | ------ | ------ |
+| #123 | TEAM-456     | Open   | Alice  |
+| #124 | TEAM-457     | Merged | Bob    |
 
 ## ⚠️ Orphaned PRs (No Linear Issue)
 
-| PR | Title | Branch | Author | Action |
-|----|-------|--------|--------|--------|
-| #125 | "Fix bug" | fix-bug | Alice | Create Linear issue or link existing |
-| #126 | "Update docs" | docs-update | Bob | Create Linear issue or link existing |
+| PR   | Title         | Branch      | Author | Action                               |
+| ---- | ------------- | ----------- | ------ | ------------------------------------ |
+| #125 | "Fix bug"     | fix-bug     | Alice  | Create Linear issue or link existing |
+| #126 | "Update docs" | docs-update | Bob    | Create Linear issue or link existing |
 
 **Recommended Actions**:
+
 ```bash
 # Create Linear issue for PR #125
 linearis issues create \
@@ -131,25 +134,29 @@ linearis issues create \
 
 # Or manually link in Linear UI
 ```
+````
 
 ## 🏷️ Orphaned Issues (No PR)
 
-| Issue | Title | Status | Assignee | Action |
-|-------|-------|--------|----------|--------|
-| TEAM-789 | "Implement feature" | In Progress | Alice | Create PR or update status |
-| TEAM-790 | "Refactor code" | In Review | Bob | PR might exist with different branch name |
+| Issue    | Title               | Status      | Assignee | Action                                    |
+| -------- | ------------------- | ----------- | -------- | ----------------------------------------- |
+| TEAM-789 | "Implement feature" | In Progress | Alice    | Create PR or update status                |
+| TEAM-790 | "Refactor code"     | In Review   | Bob      | PR might exist with different branch name |
 
 ## ✅ Ready to Close (PR merged, issue open)
 
-| Issue | PR | Merged | Action |
-|-------|----|--------|--------|
+| Issue    | PR   | Merged     | Action      |
+| -------- | ---- | ---------- | ----------- |
 | TEAM-456 | #123 | 2025-01-25 | Close issue |
 | TEAM-457 | #124 | 2025-01-26 | Close issue |
 
 **Auto-close commands** (state name from `stateMap.done` config):
+
 ```bash
 # Read configured done state
-DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .claude/config.json 2>/dev/null || echo "Done")
+CONFIG_FILE=".catalyst/config.json"
+[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE=".claude/config.json"
+DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' "$CONFIG_FILE" 2>/dev/null || echo "Done")
 
 # Update state
 linearis issues update TEAM-456 --status "$DONE_STATE"
@@ -164,10 +171,11 @@ linearis comments create TEAM-457 --body "PR #124 merged: https://github.com/use
 
 ## 🕐 Stale PRs (Open >14 days)
 
-| PR | Issue | Days Open | Author | Action |
-|----|-------|-----------|--------|--------|
-| #120 | TEAM-450 | 18 days | Alice | Review and merge or close |
-```
+| PR   | Issue    | Days Open | Author | Action                    |
+| ---- | -------- | --------- | ------ | ------------------------- |
+| #120 | TEAM-450 | 18 days   | Alice  | Review and merge or close |
+
+````
 
 ### Step 4: Save Report
 
@@ -194,7 +202,7 @@ echo "✅ Report saved: $REPORT_FILE"
 if [[ -f "${SCRIPT_DIR}/workflow-context.sh" ]]; then
   "${SCRIPT_DIR}/workflow-context.sh" add reports "$REPORT_FILE" null
 fi
-```
+````
 
 ### Step 5: Display Summary
 
@@ -218,6 +226,7 @@ Full report: thoughts/shared/pm/reports/2025-01-27-pr-sync.md
 ## Success Criteria
 
 ### Automated Verification:
+
 - [ ] GitHub PR data fetched successfully
 - [ ] Linear issue data fetched successfully
 - [ ] PR-ticket correlation logic executes
@@ -225,6 +234,7 @@ Full report: thoughts/shared/pm/reports/2025-01-27-pr-sync.md
 - [ ] Auto-close commands are valid
 
 ### Manual Verification:
+
 - [ ] PR-issue matches are accurate
 - [ ] Orphaned detection has minimal false positives
 - [ ] Branch name extraction works correctly

@@ -20,7 +20,8 @@ You are a specialized data collection agent that gathers Linear workspace metric
 
 ## Your Role
 
-Collect comprehensive Linear data for a specified time period. You focus on **data collection only** - no analysis or recommendations.
+Collect comprehensive Linear data for a specified time period. You focus on **data collection
+only** - no analysis or recommendations.
 
 ## Responsibilities
 
@@ -41,7 +42,7 @@ Include: [completed issues | active cycles | milestones | all]
 ## Data Sources
 
 - Linearis CLI for Linear API queries
-- Team configuration from `.claude/config.json`
+- Team configuration from `.catalyst/config.json`
 - Secrets from `~/.config/catalyst/config-{projectKey}.json`
 
 ## Process
@@ -49,7 +50,8 @@ Include: [completed issues | active cycles | milestones | all]
 ### Step 1: Load Configuration
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
+[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE=".claude/config.json"
 PROJECT_KEY=$(jq -r '.catalyst.projectKey' "$CONFIG_FILE")
 TEAM_KEY=$(jq -r '.catalyst.project.ticketPrefix' "$CONFIG_FILE")
 
@@ -337,11 +339,11 @@ Return structured JSON with all collected data:
     "none": 12
   },
   "issues_by_assignee": {
-    "Ryan Rozich": {"assigned": 8, "completed": 15, "in_progress": 3},
-    "Richard Bolkey": {"assigned": 6, "completed": 12, "in_progress": 2},
-    "Caroline Horn": {"assigned": 7, "completed": 10, "in_progress": 3},
-    "Chris Reeves": {"assigned": 5, "completed": 8, "in_progress": 2},
-    "Unassigned": {"assigned": 0, "completed": 0, "in_progress": 0}
+    "Ryan Rozich": { "assigned": 8, "completed": 15, "in_progress": 3 },
+    "Richard Bolkey": { "assigned": 6, "completed": 12, "in_progress": 2 },
+    "Caroline Horn": { "assigned": 7, "completed": 10, "in_progress": 3 },
+    "Chris Reeves": { "assigned": 5, "completed": 8, "in_progress": 2 },
+    "Unassigned": { "assigned": 0, "completed": 0, "in_progress": 0 }
   },
   "summary": {
     "total_issues_completed": 47,

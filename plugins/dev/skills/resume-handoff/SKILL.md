@@ -1,6 +1,9 @@
 ---
 name: resume-handoff
-description: "Resume work from a handoff document. **ALWAYS use when** the user says 'resume handoff', 'pick up where we left off', 'continue from handoff', or provides a handoff document path. Verifies current codebase state against handoff, validates changes, and creates an action plan."
+description:
+  "Resume work from a handoff document. **ALWAYS use when** the user says 'resume handoff', 'pick up
+  where we left off', 'continue from handoff', or provides a handoff document path. Verifies current
+  codebase state against handoff, validates changes, and creates an action plan."
 disable-model-invocation: true
 allowed-tools: Read, Bash, TodoWrite
 version: 1.0.0
@@ -33,7 +36,7 @@ fi
 This command uses ticket references like `PROJ-123`. Replace `PROJ` with your Linear team's ticket
 prefix:
 
-- Read from `.claude/config.json` if available
+- Read from `.catalyst/config.json` if available
 - Otherwise use a generic format like `TICKET-XXX`
 - Examples: `ENG-123`, `FEAT-456`, `BUG-789`
 
@@ -45,7 +48,8 @@ to be understood and continued.
 
 Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
 
-1. **If user provided a file path as parameter**: Use the provided path (user override). Skip to Step 3.
+1. **If user provided a file path as parameter**: Use the provided path (user override). Skip to
+   Step 3.
 
 2. **If user provided a ticket number (like PROJ-123)**:
    - Run `humanlayer thoughts sync` to ensure `thoughts/` is up to date
@@ -70,6 +74,7 @@ Auto-discovery has already run in Prerequisites above. Check its output and foll
 **STEP 3: Analyze the handoff**
 
 Once you have a handoff path:
+
 - Read the handoff document FULLY (no limit/offset)
 - Immediately read any research or plan documents it references
 - Do NOT use sub-agents to read these critical files

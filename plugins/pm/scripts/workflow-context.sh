@@ -3,10 +3,23 @@
 
 set -euo pipefail
 
-CONTEXT_FILE=".claude/.workflow-context.json"
+# Primary: .catalyst/ — Fallback: .claude/ (deprecated)
+if [[ -f ".catalyst/.workflow-context.json" ]]; then
+	CONTEXT_FILE=".catalyst/.workflow-context.json"
+elif [[ -f ".claude/.workflow-context.json" && ! -d ".catalyst" ]]; then
+	CONTEXT_FILE=".claude/.workflow-context.json"
+	echo >&2 "catalyst: workflow-context.json found in .claude/ — migrate to .catalyst/"
+else
+	CONTEXT_FILE=".catalyst/.workflow-context.json"
+fi
 
 # Initialize context file if it doesn't exist
 init_context() {
+	local ctx_dir
+	ctx_dir="$(dirname "$CONTEXT_FILE")"
+	if [[ ! -d $ctx_dir ]]; then
+		mkdir -p "$ctx_dir"
+	fi
 	if [[ ! -f $CONTEXT_FILE ]]; then
 		cat >"$CONTEXT_FILE" <<'EOF'
 {

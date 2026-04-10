@@ -57,7 +57,7 @@ This workspace **automatically manages Linear tickets** throughout your workflow
 | `/create-pr` | `inReview` | "In Review" | (already assigned) |
 | `/merge-pr` | `done` | "Done" | (already assigned) |
 
-State names are configurable via `linear.stateMap` in `.claude/config.json`.
+State names are configurable via `linear.stateMap` in `.catalyst/config.json`.
 
 ### Automatic Document Linking
 
@@ -78,7 +78,7 @@ Claude Code has 200K token limit. This workspace **monitors context usage** and 
 - **70% usage**: Strong recommendation - create handoff now
 - **80% usage**: Critical - create handoff immediately
 
-**Context tracking**: `.claude/.workflow-context.json` (gitignored) tracks all workflow documents, enabling commands to auto-find recent files.
+**Context tracking**: `.catalyst/.workflow-context.json` (gitignored) tracks all workflow documents, enabling commands to auto-find recent files.
 
 **Use handoffs between phases**:
 ```bash
@@ -89,7 +89,7 @@ Claude Code has 200K token limit. This workspace **monitors context usage** and 
 
 ## Configuration
 
-See `.claude/config.json` for project configuration.
+See `.catalyst/config.json` for project configuration.
 See `.claude/.personal/README.md` for personal customization (gitignored).
 
 ## Documentation

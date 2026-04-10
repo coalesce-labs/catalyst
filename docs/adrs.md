@@ -11,7 +11,7 @@ Brief records of key architectural decisions made in this project.
 - Users get updates via `/plugin update catalyst-dev`
 - No manual git pulls or symlink setup
 - Plugin marketplace provides discoverability
-- Local customizations (`.claude/config.json`) are preserved
+- Local customizations (`.catalyst/config.json`) are preserved
 
 **Consequences**:
 
@@ -64,7 +64,7 @@ repository selection.
 
 ## ADR-004: Workflow-Context for Session State
 
-**Decision**: Store recent document references in `.claude/.workflow-context.json` for skill
+**Decision**: Store recent document references in `.catalyst/.workflow-context.json` for skill
 chaining.
 
 **Rationale**:

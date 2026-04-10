@@ -94,7 +94,7 @@ Commands read prompt files and inject content into their execution:
 
 ```bash
 # In a command that supports custom prompts
-CLASSIFICATION_PROMPT=$(jq -r '.linear.labels.classificationPrompt' .claude/config.json)
+CLASSIFICATION_PROMPT=$(jq -r '.linear.labels.classificationPrompt' .catalyst/config.json)
 
 if [[ -f "$CLASSIFICATION_PROMPT" ]]; then
   # Read custom classification logic

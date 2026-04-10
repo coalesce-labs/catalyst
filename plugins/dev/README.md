@@ -5,6 +5,7 @@ Complete development workflow: research → plan → implement → validate → 
 ## Features
 
 ### Core Workflow Commands
+
 - `/research-codebase` - Parallel research with specialized agents
 - `/create-plan` - Interactive implementation planning
 - `/iterate-plan` - Iterate on existing plans with feedback
@@ -15,6 +16,7 @@ Complete development workflow: research → plan → implement → validate → 
 - `/resume-handoff` - Resume from handoffs
 
 ### Development Commands
+
 - `/commit` - Conventional commits with Linear integration
 - `/ci-commit` - CI-aware commits with pre-flight checks
 - `/create-pr` - Pull requests with auto-description
@@ -23,10 +25,12 @@ Complete development workflow: research → plan → implement → validate → 
 - `/merge-pr` - Safe merge with verification
 
 ### Project Management
+
 - `/linear` - Ticket management and workflow
 - `/create-worktree` - Isolated workspace creation
 
 ### Research Agents
+
 - `codebase-locator` - Find files and patterns
 - `codebase-analyzer` - Deep code analysis
 - `codebase-pattern-finder` - Architectural patterns
@@ -41,7 +45,8 @@ Complete development workflow: research → plan → implement → validate → 
 ### What It Does
 
 When you write or edit files in `thoughts/shared/`:
-- ✅ Automatically updates `.claude/.workflow-context.json`
+
+- ✅ Automatically updates `.catalyst/.workflow-context.json`
 - ✅ Tracks document type (research, plans, handoffs, prs)
 - ✅ Extracts ticket numbers from filenames
 - ✅ Records timestamps
@@ -50,6 +55,7 @@ When you write or edit files in `thoughts/shared/`:
 ### How It Works
 
 The plugin includes Claude Code hooks (`hooks.toml`) that:
+
 1. Watch for Write/Edit tools on thoughts files
 2. Trigger `hooks/update-workflow-context.sh` script
 3. Update workflow context automatically
@@ -65,6 +71,7 @@ The plugin includes Claude Code hooks (`hooks.toml`) that:
 ### Ticket Extraction
 
 Automatically extracts ticket numbers from:
+
 - Filenames: `2025-10-28-PROJ-123-description.md` → `PROJ-123`
 - Directories: `thoughts/shared/handoffs/PROJ-123/` → `PROJ-123`
 
@@ -115,7 +122,7 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh add plans "path/to/plan.md" "P
 
 ## Configuration
 
-The plugin reads configuration from `.claude/config.json`:
+The plugin reads configuration from `.catalyst/config.json`:
 
 ```json
 {
@@ -143,16 +150,21 @@ curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-c
 ## Architecture
 
 ### Agents
+
 Specialized research agents with focused capabilities (Glob, Grep, Read, Bash).
 
 ### Skills
+
 Workflow orchestrators that spawn agents and manage processes.
 
 ### Hooks
+
 Automatic tracking of thoughts documents via Claude Code hooks system.
 
 ### Scripts
+
 Runtime utilities bundled with the plugin:
+
 - `check-prerequisites.sh` - Validate requirements
 - `create-worktree.sh` - Worktree management
 - `workflow-context.sh` - Context tracking

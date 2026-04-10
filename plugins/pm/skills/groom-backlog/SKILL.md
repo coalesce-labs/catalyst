@@ -1,6 +1,7 @@
 ---
 name: groom-backlog
-description: Groom Linear backlog to identify orphaned issues, incorrect project assignments, and health issues
+description:
+  Groom Linear backlog to identify orphaned issues, incorrect project assignments, and health issues
 disable-model-invocation: true
 allowed-tools: Task, Read, Write
 version: 1.0.0
@@ -9,6 +10,7 @@ version: 1.0.0
 # Groom Backlog Command
 
 Comprehensive backlog health analysis that identifies:
+
 - Issues without projects (orphaned)
 - Issues in wrong projects (misclassified)
 - Issues without estimates
@@ -77,6 +79,7 @@ Use Task tool with `backlog-analyzer` agent:
 **Input**: Backlog issues JSON from research
 
 **Output**: Structured recommendations with:
+
 - Orphaned issues (no project)
 - Misplaced issues (wrong project)
 - Stale issues (>30 days)
@@ -88,10 +91,12 @@ Use Task tool with `backlog-analyzer` agent:
 Create markdown report with sections:
 
 **Orphaned Issues** (no project):
+
 ```markdown
 ## 🏷️ Orphaned Issues (No Project Assignment)
 
 ### High Priority
+
 - **TEAM-456**: "Add OAuth support"
   - **Suggested Project**: Auth & Security
   - **Reasoning**: Mentions authentication, OAuth, security tokens
@@ -100,10 +105,12 @@ Create markdown report with sections:
 [... more issues ...]
 
 ### Medium Priority
+
 [... issues ...]
 ```
 
 **Misplaced Issues** (wrong project):
+
 ```markdown
 ## 🔄 Misplaced Issues (Wrong Project)
 
@@ -114,6 +121,7 @@ Create markdown report with sections:
 ```
 
 **Stale Issues** (>30 days inactive):
+
 ```markdown
 ## 🗓️ Stale Issues (No Activity >30 Days)
 
@@ -122,6 +130,7 @@ Create markdown report with sections:
 ```
 
 **Duplicates** (similar titles):
+
 ```markdown
 ## 🔁 Potential Duplicates
 
@@ -132,6 +141,7 @@ Create markdown report with sections:
 ```
 
 **Missing Estimates**:
+
 ```markdown
 ## 📊 Issues Without Estimates
 
@@ -176,7 +186,9 @@ linearis issues update TEAM-456 --project "Auth & Security"
 linearis issues update TEAM-123 --project "Frontend"
 
 # Close stale issue TEAM-789 (state from stateMap.canceled config)
-CANCELED_STATE=$(jq -r '.catalyst.linear.stateMap.canceled // "Canceled"' .claude/config.json 2>/dev/null || echo "Canceled")
+CONFIG_FILE=".catalyst/config.json"
+[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE=".claude/config.json"
+CANCELED_STATE=$(jq -r '.catalyst.linear.stateMap.canceled // "Canceled"' "$CONFIG_FILE" 2>/dev/null || echo "Canceled")
 linearis issues update TEAM-789 --status "$CANCELED_STATE"
 linearis comments create TEAM-789 --body "Closing stale issue (>30 days inactive)"
 
@@ -196,6 +208,7 @@ chmod +x "$UPDATE_SCRIPT"
 ### Step 6: Save Report
 
 **IMPORTANT: Document Storage Rules**
+
 - ALWAYS write to `thoughts/shared/pm/reports/`
 - NEVER write to `thoughts/searchable/` — this is a read-only search index
 
@@ -223,6 +236,7 @@ fi
 ## Success Criteria
 
 ### Automated Verification:
+
 - [ ] All backlog issues fetched successfully
 - [ ] Agent analysis completes without errors
 - [ ] Report generated with all sections
@@ -230,6 +244,7 @@ fi
 - [ ] Files saved to correct locations
 
 ### Manual Verification:
+
 - [ ] Orphaned issues correctly identified
 - [ ] Project recommendations make sense
 - [ ] Stale issues are actually inactive

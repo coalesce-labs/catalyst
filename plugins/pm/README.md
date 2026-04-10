@@ -1,40 +1,48 @@
 # Catalyst PM Plugin
 
-Linear-focused project management plugin with cycle management, backlog grooming, GitHub-Linear correlation, and team analytics.
+Linear-focused project management plugin with cycle management, backlog grooming, GitHub-Linear
+correlation, and team analytics.
 
 ## Overview
 
-The Catalyst PM plugin provides AI-powered project management workflows that integrate Linear issue tracking with GitHub pull requests. It focuses on actionable insights rather than raw data dumps.
+The Catalyst PM plugin provides AI-powered project management workflows that integrate Linear issue
+tracking with GitHub pull requests. It focuses on actionable insights rather than raw data dumps.
 
-**Philosophy**: Every report includes specific recommendations, not just metrics. PMs should know exactly what action to take after reading any report.
+**Philosophy**: Every report includes specific recommendations, not just metrics. PMs should know
+exactly what action to take after reading any report.
 
 ## Features
 
 ### Cycle Management
+
 - **Health Scoring**: Progress vs time, blocker impact, at-risk issue detection
 - **Capacity Analysis**: Team workload distribution and availability
 - **Risk Identification**: Blocked issues, stalled work, scope creep
 - **Actionable Recommendations**: Prioritized next steps
 
 ### Backlog Health
+
 - **Orphan Detection**: Issues without project assignments
 - **Project Classification**: AI-powered project recommendations
 - **Staleness Tracking**: Issues inactive >30 days
 - **Duplicate Detection**: Similar issue identification
 
 ### GitHub-Linear Sync
+
 - **PR Correlation**: Match PRs to Linear issues via branch names, descriptions, attachments
 - **Gap Identification**: Orphaned PRs, orphaned issues
 - **Merge Automation**: Auto-close candidates with generated commands
 - **Stale PR Detection**: PRs open >14 days
 
 ### Daily Standups
+
 - **Yesterday's Deliveries**: Completed issues and merged PRs
 - **Current Work**: Team member assignments and progress
 - **Availability**: Who needs work assigned
 - **Quick Blockers**: Immediate attention items
 
 ### Context Engineering Adoption
+
 - **Cross-Repo Analysis**: Compare code activity vs thoughts activity
 - **Non-Adopter Detection**: Identify developers coding without documentation
 - **Adoption Scoring**: 6-level status (Excellent → Not using)
@@ -44,6 +52,7 @@ The Catalyst PM plugin provides AI-powered project management workflows that int
 ## Commands
 
 ### Cycle Management
+
 - `/analyze-cycle` - Analyze cycle health with actionable insights
   - Health assessment (🟢/🟡/🔴)
   - Risk identification (blockers, at-risk issues)
@@ -51,6 +60,7 @@ The Catalyst PM plugin provides AI-powered project management workflows that int
   - Specific recommendations
 
 ### Milestone Management
+
 - `/analyze-milestone` - Analyze milestone health toward target date
   - Target date feasibility assessment
   - Progress tracking (actual vs expected)
@@ -58,9 +68,11 @@ The Catalyst PM plugin provides AI-powered project management workflows that int
   - Specific recommendations (adjust timeline, reduce scope)
 
 ### `/analyze-cycle`
+
 Generate comprehensive cycle health report with recommendations.
 
 **What it does**:
+
 - Spawns linear-research agent to fetch active cycle data (Haiku)
 - Spawns cycle-analyzer agent for health assessment (Sonnet)
 - Generates progress metrics, risk factors, capacity analysis
@@ -69,6 +81,7 @@ Generate comprehensive cycle health report with recommendations.
 **Output**: Health report saved to `thoughts/shared/pm/reports/`
 
 **Example**:
+
 ```
 🟡 Cycle Health: Sprint 2025-W04 - At Risk
 
@@ -83,6 +96,7 @@ Priority Actions:
 ```
 
 ### Daily Operations
+
 - `/report-daily` - Quick daily standup report
   - Yesterday's deliveries
   - Current work in progress
@@ -90,9 +104,11 @@ Priority Actions:
   - Quick blockers/risks
 
 ### `/report-daily`
+
 Quick daily standup report (scannable in <30 seconds).
 
 **What it does**:
+
 - Spawns 4 parallel research agents for fast data gathering (Haiku)
 - Lists current work in progress by team member
 - Identifies team members needing work assignments
@@ -101,6 +117,7 @@ Quick daily standup report (scannable in <30 seconds).
 **Output**: Daily report saved to `thoughts/shared/pm/reports/`
 
 **Example**:
+
 ```
 📅 Team Daily - 2025-01-27
 
@@ -111,6 +128,7 @@ Quick daily standup report (scannable in <30 seconds).
 ```
 
 ### Backlog Health
+
 - `/groom-backlog` - Analyze backlog health
   - Orphaned issues (no project)
   - Misplaced issues (wrong project)
@@ -119,9 +137,11 @@ Quick daily standup report (scannable in <30 seconds).
   - Missing estimates
 
 ### `/groom-backlog`
+
 Analyze backlog health and generate cleanup recommendations.
 
 **What it does**:
+
 - Spawns linear-research agent to fetch backlog issues (Haiku)
 - Spawns backlog-analyzer agent for analysis (Sonnet)
 - Identifies orphaned, misplaced, stale, and duplicate issues
@@ -130,12 +150,14 @@ Analyze backlog health and generate cleanup recommendations.
 **Output**: Grooming report saved to `thoughts/shared/pm/reports/`
 
 **Options**:
+
 1. Review detailed report
 2. Apply high-confidence recommendations automatically
 3. Generate Linear update commands for manual execution
 4. Skip (report saved for later)
 
 ### GitHub-Linear Sync
+
 - `/sync-prs` - Correlate GitHub PRs with Linear issues
   - Orphaned PRs (no Linear issue)
   - Orphaned issues (no PR)
@@ -143,9 +165,11 @@ Analyze backlog health and generate cleanup recommendations.
   - Stale PRs (>14 days)
 
 ### `/sync-prs`
+
 Correlate GitHub PRs with Linear issues and identify gaps.
 
 **What it does**:
+
 - Spawns parallel research for GitHub PRs and Linear issues (Haiku)
 - Spawns github-linear-analyzer agent for correlation analysis (Sonnet)
 - Identifies orphaned PRs, orphaned issues, merge candidates
@@ -154,6 +178,7 @@ Correlate GitHub PRs with Linear issues and identify gaps.
 **Output**: Correlation report saved to `thoughts/shared/pm/reports/`
 
 **Example**:
+
 ```
 🔗 PR-Linear Sync Report
 
@@ -165,6 +190,7 @@ Health Score: 75/100
 ```
 
 ### Context Engineering
+
 - `/context-daily` - Generate daily context engineering adoption dashboard
   - Cross-repo analysis (code vs thoughts activity)
   - Identify developers NOT using context engineering
@@ -172,9 +198,11 @@ Health Score: 75/100
   - 28-day trend analysis
 
 ### `/context-daily`
+
 Track context engineering adoption by cross-referencing code and thoughts repository activity.
 
 **What it does**:
+
 - Spawns parallel research for GitHub and thoughts metrics (Haiku)
 - Spawns context-analyzer agent for cross-repo synthesis (Sonnet)
 - Identifies developers with code activity but NO thoughts activity
@@ -185,6 +213,7 @@ Track context engineering adoption by cross-referencing code and thoughts reposi
 **Output**: Dashboard saved to `{thoughts_repo}/context-engineering-daily.md` (root)
 
 **Example**:
+
 ```
 📊 Context Engineering Adoption - Daily Dashboard
 
@@ -203,12 +232,13 @@ Priority Actions:
   3. P3: Support Emily (building habit, needs guidance)
 ```
 
-**GitHub Actions**: Automate daily reporting in your thoughts repository.
-See: `plugins/pm/templates/github-actions/SETUP.md`
+**GitHub Actions**: Automate daily reporting in your thoughts repository. See:
+`plugins/pm/templates/github-actions/SETUP.md`
 
 ## Agents
 
 ### Research Agents
+
 - `linear-research` (Haiku) - Gathers Linear data via CLI
   - Cycles, issues, milestones, projects
   - Natural language interface
@@ -218,9 +248,11 @@ See: `plugins/pm/templates/github-actions/SETUP.md`
 ### Analyzer Agents (Sonnet)
 
 ### `cycle-analyzer`
+
 **Purpose**: Transform raw cycle data into actionable health insights
 
 **Responsibilities**:
+
 - Calculate health scores (progress, blockers, at-risk issues)
 - Identify risk factors with specific details
 - Analyze team capacity and workload distribution
@@ -229,9 +261,11 @@ See: `plugins/pm/templates/github-actions/SETUP.md`
 **Returns**: Structured markdown with health assessment, risks, capacity, recommendations
 
 ### `milestone-analyzer`
+
 **Purpose**: Analyze project milestone progress toward target dates
 
 **Responsibilities**:
+
 - Calculate health scores based on target date feasibility
 - Identify risk factors (behind schedule, blockers, scope creep)
 - Analyze velocity and projected completion
@@ -240,9 +274,11 @@ See: `plugins/pm/templates/github-actions/SETUP.md`
 **Returns**: Structured markdown with target date assessment, risks, velocity, recommendations
 
 ### `backlog-analyzer`
+
 **Purpose**: Maintain healthy, well-organized Linear backlog
 
 **Responsibilities**:
+
 - Project assignment analysis (orphaned, misplaced issues)
 - Staleness detection (>30 days inactive)
 - Duplicate detection (similar titles/descriptions)
@@ -251,9 +287,11 @@ See: `plugins/pm/templates/github-actions/SETUP.md`
 **Returns**: Structured markdown with categorized recommendations and confidence scores
 
 ### `context-analyzer`
+
 **Purpose**: Track context engineering adoption across the team
 
 **Responsibilities**:
+
 - Cross-reference code repository activity vs thoughts repository activity
 - Identify developers with code commits but NO thoughts activity
 - Calculate individual adoption scores (Excellent → Not using)
@@ -261,14 +299,17 @@ See: `plugins/pm/templates/github-actions/SETUP.md`
 - Generate 28-day trend analysis with week-over-week growth
 - Provide prioritized action items (P1: Immediate, P2: Celebrate, P3: Growth)
 
-**Returns**: Structured markdown dashboard with adoption metrics, non-adopters, trends, recommendations
+**Returns**: Structured markdown dashboard with adoption metrics, non-adopters, trends,
+recommendations
 
 **Key Feature**: Identifies team members NOT using context engineering (code-only developers)
 
 ### `github-linear-analyzer`
+
 **Purpose**: Ensure proper GitHub-Linear correlation
 
 **Responsibilities**:
+
 - Match PRs to Linear issues via multiple methods
 - Identify orphaned PRs and issues
 - Flag stale PRs (>14 days open)
@@ -281,11 +322,13 @@ See: `plugins/pm/templates/github-actions/SETUP.md`
 ### Required Tools
 
 1. **Linearis CLI**
+
    ```bash
    npm install -g linearis
    ```
 
 2. **jq** (JSON parsing)
+
    ```bash
    brew install jq  # macOS
    apt install jq   # Ubuntu/Debian
@@ -301,7 +344,8 @@ See: `plugins/pm/templates/github-actions/SETUP.md`
 
 PM commands read from two config sources:
 
-**1. Project metadata** (`.claude/config.json` - safe to commit):
+**1. Project metadata** (`.catalyst/config.json` - safe to commit):
+
 ```json
 {
   "catalyst": {
@@ -314,6 +358,7 @@ PM commands read from two config sources:
 ```
 
 **2. Secrets** (`~/.config/catalyst/config-acme.json` - NEVER committed):
+
 ```json
 {
   "catalyst": {
@@ -367,9 +412,11 @@ cd /path/to/your/project
 ### Daily Workflow
 
 **Morning Standup**:
+
 ```bash
 /context-daily
 ```
+
 - See what shipped yesterday
 - Review current work
 - Identify blockers
@@ -378,26 +425,32 @@ cd /path/to/your/project
 ### Weekly Review
 
 **Start of Week**:
+
 ```bash
 /analyze-cycle
 ```
+
 - Assess cycle health
 - Review capacity
 - Address blockers
 - Plan capacity adjustments
 
 **Mid-Week**:
+
 ```bash
 /sync-prs
 ```
+
 - Check GitHub-Linear correlation
 - Close merged issues
 - Create missing Linear issues
 
 **End of Week**:
+
 ```bash
 /groom-backlog
 ```
+
 - Clean up orphaned issues
 - Categorize new issues
 - Remove stale issues
@@ -405,7 +458,7 @@ cd /path/to/your/project
 
 ## Configuration Options
 
-Default settings in `.claude/config.json`:
+Default settings in `.catalyst/config.json`:
 
 ```json
 {
@@ -429,11 +482,13 @@ Default settings in `.claude/config.json`:
 ### "Linearis CLI not found"
 
 Install linearis:
+
 ```bash
 npm install -g linearis
 ```
 
 Verify installation:
+
 ```bash
 linearis --version
 ```
@@ -441,6 +496,7 @@ linearis --version
 ### "LINEAR_API_TOKEN not set"
 
 Export your Linear API token:
+
 ```bash
 export LINEAR_API_TOKEN=your_token_here
 ```
@@ -449,20 +505,23 @@ Get token from: https://linear.app/settings/api
 
 ### "Configuration file not found"
 
-Ensure `.claude/config.json` exists:
+Ensure `.catalyst/config.json` exists:
+
 ```bash
-cat .claude/config.json
+cat .catalyst/config.json
 ```
 
 Create if missing:
+
 ```bash
-mkdir -p .claude
-echo '{"catalyst": {"linear": {"teamKey": "TEAM"}}}' > .claude/config.json
+mkdir -p .catalyst
+echo '{"catalyst": {"linear": {"teamKey": "TEAM"}}}' > .catalyst/config.json
 ```
 
 ### "No active cycle found"
 
 Verify you have an active cycle in Linear:
+
 ```bash
 linearis cycles list --team TEAM
 ```

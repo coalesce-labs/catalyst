@@ -1,6 +1,9 @@
 ---
 name: ci-describe-pr
-description: "Generate PR descriptions autonomously for CI/automation (no user interaction). Non-interactive variant of /describe-pr for use in CI pipelines and automated workflows. Auto-detects current PR, generates description, and updates GitHub."
+description:
+  "Generate PR descriptions autonomously for CI/automation (no user interaction). Non-interactive
+  variant of /describe-pr for use in CI pipelines and automated workflows. Auto-detects current PR,
+  generates description, and updates GitHub."
 user-invocable: false
 allowed-tools: Bash, Read, Write
 version: 1.0.0
@@ -8,8 +11,8 @@ version: 1.0.0
 
 # CI Describe PR
 
-Generate or update PR descriptions autonomously without user interaction. Designed for
-CI pipelines and automated workflows.
+Generate or update PR descriptions autonomously without user interaction. Designed for CI pipelines
+and automated workflows.
 
 ## Key Differences from `/describe_pr`
 
@@ -88,7 +91,7 @@ gh pr edit $PR_NUMBER --body-file "thoughts/shared/prs/${PR_NUMBER}_description.
 
 ```bash
 if [[ -n "$ticket" ]] && command -v linearis &>/dev/null; then
-  IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .claude/config.json 2>/dev/null || echo "In Review")
+  IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .catalyst/config.json 2>/dev/null || echo "In Review")
   if [[ "$IN_REVIEW_STATE" != "null" ]]; then
     linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
   fi
@@ -110,5 +113,6 @@ Ticket: $ticket (updated to In Review)
 - **ALWAYS save to thoughts/shared/prs/** before updating GitHub
 
 **IMPORTANT: Document Storage Rules**
+
 - ALWAYS write to `thoughts/shared/prs/` for PR descriptions
 - NEVER write to `thoughts/searchable/` — this is a read-only search index

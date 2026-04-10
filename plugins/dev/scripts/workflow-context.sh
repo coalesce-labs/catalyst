@@ -5,15 +5,24 @@ set -euo pipefail
 
 # Resolve project root from git, then fall back to CWD
 PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-CONTEXT_DIR="${PROJECT_ROOT}/.claude"
+
+# Primary: .catalyst/ — Fallback: .claude/ (deprecated)
+if [[ -f "${PROJECT_ROOT}/.catalyst/.workflow-context.json" ]]; then
+	CONTEXT_DIR="${PROJECT_ROOT}/.catalyst"
+elif [[ -f "${PROJECT_ROOT}/.claude/.workflow-context.json" && ! -d "${PROJECT_ROOT}/.catalyst" ]]; then
+	CONTEXT_DIR="${PROJECT_ROOT}/.claude"
+	echo >&2 "catalyst: workflow-context.json found in .claude/ — migrate to .catalyst/"
+else
+	CONTEXT_DIR="${PROJECT_ROOT}/.catalyst"
+fi
 CONTEXT_FILE="${CONTEXT_DIR}/.workflow-context.json"
 
 # Initialize context file if it doesn't exist
 init_context() {
-	if [[ ! -d "$CONTEXT_DIR" ]]; then
+	if [[ ! -d $CONTEXT_DIR ]]; then
 		mkdir -p "$CONTEXT_DIR"
 	fi
-	if [[ ! -f "$CONTEXT_FILE" ]]; then
+	if [[ ! -f $CONTEXT_FILE ]]; then
 		cat >"$CONTEXT_FILE" <<'EOF'
 {
   "lastUpdated": "",
@@ -63,9 +72,9 @@ get_recent() {
 	local result
 	result=$(jq -r --arg type "$doc_type" '.workflow[$type][0].path // empty' "$CONTEXT_FILE")
 	# Filesystem fallback if workflow context has no entries for this type
-	if [[ -z "$result" && -d "${PROJECT_ROOT}/thoughts/shared/${doc_type}" ]]; then
+	if [[ -z $result && -d "${PROJECT_ROOT}/thoughts/shared/${doc_type}" ]]; then
 		result=$(find "${PROJECT_ROOT}/thoughts/shared/${doc_type}" -name '*.md' -type f 2>/dev/null | xargs ls -t 2>/dev/null | head -1)
-		if [[ -n "$result" ]]; then
+		if [[ -n $result ]]; then
 			result="${result#"${PROJECT_ROOT}/"}"
 		fi
 	fi

@@ -1,6 +1,8 @@
 ---
 name: linear-research
-description: Research Linear tickets, cycles, projects, and milestones using Linearis CLI. Accepts natural language requests and returns structured JSON data. Optimized for fast data gathering.
+description:
+  Research Linear tickets, cycles, projects, and milestones using Linearis CLI. Accepts natural
+  language requests and returns structured JSON data. Optimized for fast data gathering.
 tools: Bash(linearis *), Bash(jq *), Read
 model: haiku
 color: cyan
@@ -11,7 +13,8 @@ version: 1.0.0
 
 ## Mission
 
-Gather data from Linear using the Linearis CLI. This is a **data collection specialist** - not an analyzer. Returns structured JSON for other agents to analyze.
+Gather data from Linear using the Linearis CLI. This is a **data collection specialist** - not an
+analyzer. Returns structured JSON for other agents to analyze.
 
 ## Core Responsibilities
 
@@ -20,11 +23,13 @@ Gather data from Linear using the Linearis CLI. This is a **data collection spec
 3. **Return structured data** to calling commands
 4. **Handle errors gracefully** with clear error messages
 
-**CLI Syntax**: The `linearis` skill provides full CLI syntax reference. It is auto-loaded when needed.
+**CLI Syntax**: The `linearis` skill provides full CLI syntax reference. It is auto-loaded when
+needed.
 
 ## Natural Language Interface
 
 Accept requests like:
+
 - "Get the active cycle for team ENG with all issues"
 - "List all issues in Backlog status for team PROJ"
 - "Get milestone 'Q1 Launch' details with issues"
@@ -52,6 +57,7 @@ Accept requests like:
 **Request**: "Get the active cycle for team ENG with all issues"
 
 **Processing**:
+
 ```bash
 TEAM_KEY="ENG"
 cycle_data=$(linearis cycles list --team "$TEAM_KEY" --active 2>&1)
@@ -72,6 +78,7 @@ fi
 **Request**: "List all issues in Backlog status for team PROJ with no cycle"
 
 **Processing**:
+
 ```bash
 TEAM_KEY="PROJ"
 # NOTE: issues list only supports --limit (no --team or --states flags)
@@ -90,6 +97,7 @@ echo "$backlog_no_cycle"
 **Request**: "Get milestone 'Q1 Launch' details for project 'Mobile App' with issues"
 
 **Processing**:
+
 ```bash
 PROJECT="Mobile App"
 MILESTONE="Q1 Launch"
@@ -136,6 +144,7 @@ fi
 **Always return valid JSON or error messages**:
 
 **Success**:
+
 ```json
 {
   "id": "abc-123",
@@ -145,11 +154,13 @@ fi
 ```
 
 **Error**:
+
 ```
 ERROR: Team 'INVALID' not found
 ```
 
 **Warning**:
+
 ```
 WARNING: No active cycle found for team ENG
 ```
@@ -158,7 +169,7 @@ WARNING: No active cycle found for team ENG
 
 1. **Use appropriate limits**: Default to 50 items, adjust if needed
 2. **Filter early**: Use linearis flags instead of piping to jq when possible
-3. **Cache team configuration**: Read from `.claude/config.json` once
+3. **Cache team configuration**: Read from `.catalyst/config.json` once
 4. **Fail fast**: Return errors immediately, don't retry
 
 ## Communication Principles

@@ -1,6 +1,10 @@
 ---
 name: create-plan
-description: "Create detailed implementation plans through an interactive process. **ALWAYS use when** the user says 'plan this', 'create a plan', 'let's plan the implementation', 'design the approach', or wants a structured TDD implementation plan before writing code. Works best after /research-codebase."
+description:
+  "Create detailed implementation plans through an interactive process. **ALWAYS use when** the user
+  says 'plan this', 'create a plan', 'let's plan the implementation', 'design the approach', or
+  wants a structured TDD implementation plan before writing code. Works best after
+  /research-codebase."
 disable-model-invocation: true
 allowed-tools: Read, Write, Grep, Glob, Task, TodoWrite, Bash
 version: 1.0.0
@@ -12,7 +16,7 @@ You are tasked with creating detailed implementation plans through an interactiv
 process. You should be skeptical, thorough, and work collaboratively with the user to produce
 high-quality technical specifications.
 
-Replace `PROJ` in ticket references with your Linear team's prefix from `.claude/config.json`.
+Replace `PROJ` in ticket references with your Linear team's prefix from `.catalyst/config.json`.
 
 ## Prerequisites
 
@@ -68,7 +72,7 @@ Auto-discovery has already run in Prerequisites above. Check its output and foll
    command argument, or from context), move it to the planning state:
 
    ```bash
-   PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+   PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
    if [[ "$PLANNING_STATE" != "null" ]]; then
        linearis issues update "$ticketId" --status "$PLANNING_STATE"
    fi
@@ -151,19 +155,19 @@ After structure approval:
 
 ````markdown
 ---
-date: {CURRENT_ISO_DATETIME}
+date: { CURRENT_ISO_DATETIME }
 researcher: claude
-git_commit: {GIT_COMMIT_SHORT}
-branch: {GIT_BRANCH}
-repository: {REPO_NAME}
+git_commit: { GIT_COMMIT_SHORT }
+branch: { GIT_BRANCH }
+repository: { REPO_NAME }
 topic: "{PLAN_TITLE}"
-tags: [plan, implementation, {RELEVANT_COMPONENT_TAGS}]
+tags: [plan, implementation, { RELEVANT_COMPONENT_TAGS }]
 status: ready_for_implementation
-last_updated: {CURRENT_DATE}
+last_updated: { CURRENT_DATE }
 last_updated_by: claude
 type: implementation_plan
 source_ticket: { TICKET-ID or null }
-source_research: "[[research-doc-filename]]"  # or null
+source_research: "[[research-doc-filename]]" # or null
 ---
 
 # [Feature/Task Name] Implementation Plan
@@ -206,8 +210,7 @@ Define the expected behavior before writing implementation code.
 
 #### 1. [Test File/Group]
 
-**File**: `tests/path/to/feature.test.ext`
-**Tests to write**:
+**File**: `tests/path/to/feature.test.ext` **Tests to write**:
 
 ```[language]
 // Test describing expected behavior — should FAIL before implementation
@@ -219,8 +222,7 @@ Write the minimum code to make the tests pass.
 
 #### 1. [Component/File Group]
 
-**File**: `path/to/file.ext`
-**Changes**: [Summary of changes]
+**File**: `path/to/file.ext` **Changes**: [Summary of changes]
 
 ```[language]
 // Specific code to add/modify
@@ -256,16 +258,19 @@ Write the minimum code to make the tests pass.
 **Approach: Test-Driven Development (Red → Green → Refactor)**
 
 Each phase writes tests BEFORE implementation code. This ensures:
+
 - Requirements are encoded as executable specifications
 - Implementation stays focused on passing defined behavior
 - Refactoring is safe because tests catch regressions
 
 **Test tiers:**
+
 - **Unit tests** — written first for each function with business logic
 - **Integration tests** — written first for API endpoints and data flows
 - **Edge case tests** — written first for error states, invalid inputs, auth failures
 
 **Per-phase rhythm:**
+
 1. Write failing tests that describe the phase's expected behavior
 2. Implement the minimum code to make tests pass
 3. Refactor while keeping tests green
@@ -312,9 +317,10 @@ Substitute the actual file path and ticket ID:
 This MUST print the plan path. If not, re-run 5b.
 
 **5d. Present plan** and ask for review:
-   - Show plan location
-   - Ask: Are phases properly scoped? Success criteria specific enough? Missing edge cases?
-   - If context >60%, recommend clearing before implementation phase
+
+- Show plan location
+- Ask: Are phases properly scoped? Success criteria specific enough? Missing edge cases?
+- If context >60%, recommend clearing before implementation phase
 
 4. **Iterate based on feedback** until the user is satisfied
    - Re-sync thoughts after changes
@@ -337,11 +343,11 @@ This MUST print the plan path. If not, re-run 5b.
 
 1. **Be Skeptical**: Question vague requirements. Don't assume — verify with code.
 2. **Be Interactive**: Don't write the full plan in one shot. Get buy-in at each step.
-3. **Be Thorough**: Read all context files COMPLETELY. Include file:line references.
-   Use `make check` over individual lint/test commands when available.
+3. **Be Thorough**: Read all context files COMPLETELY. Include file:line references. Use
+   `make check` over individual lint/test commands when available.
 4. **Be Practical**: Focus on incremental, testable changes. Include "what we're NOT doing".
-5. **No Open Questions in Final Plan**: Research or ask for clarification immediately.
-   The plan must be complete and actionable — every decision made before finalizing.
+5. **No Open Questions in Final Plan**: Research or ask for clarification immediately. The plan must
+   be complete and actionable — every decision made before finalizing.
 
 ## Success Criteria Guidelines
 
@@ -355,21 +361,28 @@ This MUST print the plan path. If not, re-run 5b.
 All patterns follow TDD: write tests for each step BEFORE implementing it.
 
 ### For Database Changes:
-Schema/migration → **tests for** store methods → store methods → **tests for** business logic → business logic → **tests for** API → API → clients
+
+Schema/migration → **tests for** store methods → store methods → **tests for** business logic →
+business logic → **tests for** API → API → clients
 
 ### For New Features:
-Research patterns → data model → **tests for** backend logic → backend logic → **tests for** API endpoints → API endpoints → **tests for** UI components → UI
+
+Research patterns → data model → **tests for** backend logic → backend logic → **tests for** API
+endpoints → API endpoints → **tests for** UI components → UI
 
 ### For Refactoring:
-**Capture existing behavior as tests first** → incremental changes (keep tests green) → backwards compatibility → migration strategy
+
+**Capture existing behavior as tests first** → incremental changes (keep tests green) → backwards
+compatibility → migration strategy
 
 ## Linear Integration
 
-If a ticket is detected (from research document's `source_ticket` frontmatter, command argument, or context):
+If a ticket is detected (from research document's `source_ticket` frontmatter, command argument, or
+context):
 
 - **At planning start** (Step 1):
   ```bash
-  PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .claude/config.json 2>/dev/null || echo "In Progress")
+  PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
   if [[ "$PLANNING_STATE" != "null" ]]; then
       linearis issues update "$ticketId" --status "$PLANNING_STATE"
   fi

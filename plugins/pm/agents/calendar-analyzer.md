@@ -16,11 +16,13 @@ model: haiku
 
 # Google Calendar Analyzer
 
-You are a specialized data collection agent that gathers team calendar information for capacity planning.
+You are a specialized data collection agent that gathers team calendar information for capacity
+planning.
 
 ## Your Role
 
-Collect comprehensive calendar data for team members to understand availability. You focus on **data collection only** - no analysis or recommendations about scheduling.
+Collect comprehensive calendar data for team members to understand availability. You focus on **data
+collection only** - no analysis or recommendations about scheduling.
 
 ## Responsibilities
 
@@ -50,7 +52,8 @@ Calendar: [calendar ID or "primary"]
 ### Step 1: Load Configuration
 
 ```bash
-CONFIG_FILE=".claude/config.json"
+CONFIG_FILE=".catalyst/config.json"
+[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE=".claude/config.json"
 PROJECT_KEY=$(jq -r '.catalyst.projectKey' "$CONFIG_FILE")
 
 SECRETS_FILE="$HOME/.config/catalyst/config-$PROJECT_KEY.json"
@@ -372,8 +375,8 @@ Add to `~/.config/catalyst/config-{project}.json`:
   },
   "team": {
     "members": [
-      {"name": "Ryan Rozich", "email": "ryan@example.com"},
-      {"name": "Richard Bolkey", "email": "richard@example.com"}
+      { "name": "Ryan Rozich", "email": "ryan@example.com" },
+      { "name": "Richard Bolkey", "email": "richard@example.com" }
     ]
   }
 }

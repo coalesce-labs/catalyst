@@ -266,7 +266,7 @@ When invoked:
 
 ## Configuration
 
-This command uses configuration from `.claude/config.json`:
+This command uses configuration from `.catalyst/config.json`:
 
 ```json
 {
@@ -578,7 +578,7 @@ Standard categories found in workspace:
 - **Clear descriptions**: Make purpose immediately obvious
 - **Include examples**: Show expected inputs/outputs for agents
 - **Error handling**: Always include error scenarios
-- **Configuration**: Use .claude/config.json for project values
+- **Configuration**: Use .catalyst/config.json for project values
 
 ## Integration with Other Commands
 

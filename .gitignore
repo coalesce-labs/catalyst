@@ -32,17 +32,23 @@ research/
 !.claude/.personal/.gitkeep
 
 # Workflow context (per-worktree, not shared)
+.catalyst/.workflow-context.json
+.catalyst/.workflow-context.json.tmp
+# Deprecated locations (backward compat)
 .claude/.workflow-context.json
 .claude/.workflow-context.json.tmp
 
 # Backup files from config migration
 .claude/config.json.backup
+.catalyst/config.json.backup
 
 # Catalyst workflow state (per-session, not committed)
-# NOTE: .claude/config.json is SAFE to commit (only has projectKey, no secrets)
+# NOTE: .catalyst/config.json is SAFE to commit (only has projectKey, no secrets)
 # Secrets are stored in ~/.config/catalyst/config-*.json (never in repo)
 .claude/*.local.json
 .claude/*.backup
+.catalyst/*.local.json
+.catalyst/*.backup
 
 # Website build artifacts
 website/node_modules/
