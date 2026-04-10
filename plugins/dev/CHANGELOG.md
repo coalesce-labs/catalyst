@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.0.0...catalyst-dev-v6.1.0) (2026-04-10)
+
+
+### Features
+
+* **dev:** add /orchestrate skill for parallel development ([#65](https://github.com/coalesce-labs/catalyst/issues/65)) ([d3f16d9](https://github.com/coalesce-labs/catalyst/commit/d3f16d93674c7322cba4a2aa076a622e08a9d854))
+
 ## [6.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.4.0...catalyst-dev-v6.0.0) (2026-04-10)
 
 
