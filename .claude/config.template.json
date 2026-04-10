@@ -26,6 +26,30 @@
     },
     "thoughts": {
       "user": null
+    },
+    "worktree": {
+      "setup": []
+    },
+    "orchestration": {
+      "worktreeDir": null,
+      "maxParallel": 3,
+      "hooks": {
+        "setup": [],
+        "teardown": []
+      },
+      "workerCommand": "/oneshot",
+      "workerModel": "opus",
+      "thoughts": {
+        "profile": null,
+        "directory": null
+      },
+      "testRequirements": {
+        "backend": ["unit"],
+        "frontend": ["unit"],
+        "fullstack": ["unit"]
+      },
+      "verifyBeforeMerge": true,
+      "allowSelfReportedCompletion": false
     }
   }
 }

@@ -64,6 +64,63 @@ Uses the provided text as the research query directly.
 | `--skip-validation`    | Skip Phase 4 entirely                                  |
 | `--skip-quality-gates` | Run `/validate-plan` but skip quality gate loop        |
 
+## Orchestrator Mode
+
+When running under an `/orchestrate` coordinator, oneshot writes status updates to a **worker
+signal file** so the orchestrator can track progress and run adversarial verification.
+
+**Detection (checked once at startup):**
+
+```bash
+# 1. CATALYST_ORCHESTRATOR_DIR env var (set by orchestrator in dispatch)
+ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
+
+# 2. Sibling directory with workers/ subdirectory (convention-based)
+if [ -z "$ORCH_DIR" ]; then
+  PARENT=$(dirname "$(pwd)")
+  for DIR in "$PARENT"/*/workers; do
+    if [ -d "$DIR" ]; then
+      ORCH_DIR=$(dirname "$DIR")
+      break
+    fi
+  done
+fi
+```
+
+If `ORCH_DIR` is detected, the worker:
+
+1. **Reads its signal file** from `${ORCH_DIR}/workers/${TICKET_ID}.json` (created by orchestrator)
+2. **Updates status at each phase transition** — writes `status`, `phase`, and `updatedAt`
+3. **Fills `definitionOfDone`** at Phase 4 (validation) and Phase 5 (ship) with actual results
+4. **Reads wave briefing** if referenced in `${ORCH_DIR}/wave-*-briefing.md` before starting
+
+**Signal file update helper** (run at each phase boundary):
+
+```bash
+SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
+if [ -f "$SIGNAL_FILE" ]; then
+  jq --arg status "$NEW_STATUS" \
+     --arg phase "$PHASE_NUM" \
+     --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+     '.status = $status | .phase = ($phase | tonumber) | .updatedAt = $updated' \
+     "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+fi
+```
+
+**Phase-to-status mapping for signal file:**
+
+| Phase | Signal Status |
+|-------|--------------|
+| 1 start | `researching` |
+| 2 start | `planning` |
+| 3 start | `implementing` |
+| 4 start | `validating` |
+| 5 start | `shipping` |
+| 5 PR created | `pr-created` |
+| 6 start | `merging` |
+| 6 complete | `done` |
+| Any failure | `failed` |
+
 ## Workflow Phases
 
 ### Phase 1: Research (Current Session — Opus)

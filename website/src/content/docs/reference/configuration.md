@@ -121,6 +121,78 @@ Never committed. One file per project, linked by `projectKey`.
 
 Only configure the integrations you use. The setup script prompts for each one.
 
+## Worktree Setup
+
+Define the commands that run when creating a new worktree via `/create-worktree` or `/orchestrate`. This replaces the default auto-detected setup (dependency install + thoughts init) with full project control — like `conductor.json`'s lifecycle hooks.
+
+```json
+{
+  "catalyst": {
+    "worktree": {
+      "setup": [
+        "humanlayer thoughts init --directory ${DIRECTORY} --profile ${PROFILE}",
+        "humanlayer thoughts sync",
+        "bun install",
+        "~/.claude/scripts/trust-workspace.sh \"$(pwd)\""
+      ]
+    }
+  }
+}
+```
+
+Commands run in order, inside the new worktree directory. Each command supports variable substitution:
+
+| Variable | Value |
+|----------|-------|
+| `${WORKTREE_PATH}` | Absolute path to the new worktree |
+| `${BRANCH_NAME}` | Git branch name |
+| `${TICKET_ID}` | Same as branch name |
+| `${REPO_NAME}` | Repository name |
+| `${DIRECTORY}` | Thoughts directory (from `catalyst.thoughts.directory` or repo name) |
+| `${PROFILE}` | Thoughts profile (from `catalyst.thoughts.profile` or auto-detected) |
+
+If `catalyst.worktree.setup` is **not configured**, the script falls back to auto-detected setup: `make setup` or `bun/npm install`, then `humanlayer thoughts init` + `sync`. Once you define `setup`, only your commands run — the auto-detection is skipped entirely.
+
+## Orchestration Config
+
+Optional. Add this block to enable `/orchestrate` — see [Orchestration](/reference/orchestration/) for full documentation.
+
+```json
+{
+  "catalyst": {
+    "orchestration": {
+      "worktreeDir": null,
+      "maxParallel": 3,
+      "hooks": {
+        "setup": ["bun install"],
+        "teardown": []
+      },
+      "workerCommand": "/oneshot",
+      "workerModel": "opus",
+      "testRequirements": {
+        "backend": ["unit"],
+        "frontend": ["unit"],
+        "fullstack": ["unit"]
+      },
+      "verifyBeforeMerge": true,
+      "allowSelfReportedCompletion": false
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `worktreeDir` | string\|null | `~/catalyst/wt/<projectKey>` | Base directory for worktrees |
+| `maxParallel` | number | 3 | Max concurrent workers |
+| `hooks.setup` | string[] | `[]` | Run after worktree creation (supports `${WORKTREE_PATH}`, `${BRANCH_NAME}`, `${TICKET_ID}`, `${REPO_NAME}`, `${DIRECTORY}` variables) |
+| `hooks.teardown` | string[] | `[]` | Run before worktree removal |
+| `workerCommand` | string | `/oneshot` | Skill to dispatch in each worker |
+| `workerModel` | string | `opus` | Model for worker sessions |
+| `testRequirements` | object | See above | Required test types by scope (backend/frontend/fullstack) |
+| `verifyBeforeMerge` | boolean | `true` | Run adversarial verification before allowing merge |
+| `allowSelfReportedCompletion` | boolean | `false` | Trust worker's self-reported completion without verification |
+
 ## Workflow Context (`.catalyst/.workflow-context.json`)
 
 Auto-managed by Claude Code hooks. Not committed to git.
