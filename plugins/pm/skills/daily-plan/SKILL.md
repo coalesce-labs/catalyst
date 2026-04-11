@@ -622,18 +622,18 @@ When user runs `/daily-plan tomorrow`:
 **Google Calendar MCP:**
 
 ```
-1. Run: /connect-mcps connect to google-calendar
+1. Run: /catalyst-pm:connect-mcps connect to google-calendar
 2. I'll first check for official remote MCP server
 3. If remote server available: Guide you to use `claude mcp add --transport http`
 4. If not: Walk you through OAuth setup (credentials from Google Cloud Console)
 5. Test: I'll fetch today's events to confirm it works
-6. Done! Future /daily-plan calls will auto-fetch meetings
+6. Done! Future /catalyst-pm:daily-plan calls will auto-fetch meetings
 ```
 
 **Gmail MCP:**
 
 ```
-1. Run: /connect-mcps connect to gmail
+1. Run: /catalyst-pm:connect-mcps connect to gmail
 2. Similar priority: Check remote server first, then OAuth flow
 3. Permissions needed: Read email (not send)
 4. I'll fetch unread/important emails for daily context
@@ -642,7 +642,7 @@ When user runs `/daily-plan tomorrow`:
 **Linear MCP:**
 
 ```
-1. Run: /connect-mcps connect to linear (or linear)
+1. Run: /catalyst-pm:connect-mcps connect to linear (or linear)
 2. I'll check for remote servers, then fall back to API keys
 3. You'll need: API key from Linear settings (if no remote server)
 4. I'll query your assigned tasks daily
@@ -651,7 +651,7 @@ When user runs `/daily-plan tomorrow`:
 **Analytics MCP (PostHog/PostHog):**
 
 ```
-1. Run: /connect-mcps connect to posthog (or posthog)
+1. Run: /catalyst-pm:connect-mcps connect to posthog (or posthog)
 2. I'll check remote servers first, then manual setup
 3. You'll need: API key + Project ID (if manual)
 4. I'll pull metrics for recently launched features

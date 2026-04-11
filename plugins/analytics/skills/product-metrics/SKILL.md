@@ -115,4 +115,4 @@ This plugin consumes ~40k tokens. Disable after viewing metrics:
 
 ---
 
-**See also**: `/analyze-user-behavior`, `/segment-analysis`
+**See also**: `/catalyst-analytics:analyze-user-behavior`, `/catalyst-analytics:segment-analysis`

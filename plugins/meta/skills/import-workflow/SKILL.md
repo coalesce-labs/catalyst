@@ -27,7 +27,7 @@ Please provide:
 1. Repository name (e.g., wshobson/commands)
 2. Workflow name (e.g., code-review)
 
-Or, if you've already run /discover-workflows:
+Or, if you've already run /catalyst-meta:discover-workflows:
 - Check the catalog: thoughts/shared/workflows/catalog.md
 - Pick from discovered workflows
 ```
@@ -285,13 +285,13 @@ Import recorded in: thoughts/shared/workflows/imports.md
 ### Import with Custom Adaptations
 
 ```
-/import-workflow wshobson/commands code-review --adapt "Use our custom linting rules"
+/catalyst-meta:import-workflow wshobson/commands code-review --adapt "Use our custom linting rules"
 ```
 
 ### Import Multiple Workflows
 
 ```
-/import-workflow wshobson/commands code-review refactor test-gen
+/catalyst-meta:import-workflow wshobson/commands code-review refactor test-gen
 ```
 
 Imports all 3 in sequence (with parallel validation for each).
@@ -299,7 +299,7 @@ Imports all 3 in sequence (with parallel validation for each).
 ### Dry Run Mode
 
 ```
-/import-workflow wshobson/commands code-review --dry-run
+/catalyst-meta:import-workflow wshobson/commands code-review --dry-run
 ```
 
 Shows what would be imported without actually saving files.
@@ -314,16 +314,16 @@ Shows what would be imported without actually saving files.
 
 ## Integration with Other Commands
 
-- **Discover first**: `/discover-workflows` → catalog workflows
-- **Then import**: `/import-workflow` (this command)
-- **Validate**: `/validate-frontmatter` ensures consistency
-- **Create custom**: `/create-workflow` for new workflows
+- **Discover first**: `/catalyst-meta:discover-workflows` → catalog workflows
+- **Then import**: `/catalyst-meta:import-workflow` (this command)
+- **Validate**: `/catalyst-meta:validate-frontmatter` ensures consistency
+- **Create custom**: `/catalyst-meta:create-workflow` for new workflows
 
 ## Error Handling
 
 ### Workflow Not Found
 
-- Suggest running `/discover-workflows {repo}` first
+- Suggest running `/catalyst-meta:discover-workflows {repo}` first
 - Check catalog for available workflows
 
 ### Incompatible Tools

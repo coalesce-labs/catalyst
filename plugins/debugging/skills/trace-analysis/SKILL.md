@@ -145,7 +145,7 @@ Transaction: POST /api/checkout (2.4s)
 After identifying bottleneck:
 
 ```bash
-/create-plan "Optimize the slow payment gateway call identified in trace analysis"
+/catalyst-dev:create-plan "Optimize the slow payment gateway call identified in trace analysis"
 ```
 
 ## Performance Optimization Workflow
@@ -171,7 +171,7 @@ After identifying bottleneck:
 ### 4. Implement Fix
 
 ```bash
-/create-plan "Add database index for user lookups based on trace analysis"
+/catalyst-dev:create-plan "Add database index for user lookups based on trace analysis"
 ```
 
 ### 5. Verify Improvement
@@ -198,4 +198,4 @@ Plugin uses ~20k tokens. Disable after analysis:
 
 ---
 
-**See also**: `/debug-production-error`, `/error-impact-analysis`
+**See also**: `/catalyst-debugging:debug-production-error`, `/catalyst-debugging:error-impact-analysis`

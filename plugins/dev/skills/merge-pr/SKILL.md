@@ -146,7 +146,7 @@ Resolve manually:
   2. git add <resolved-files>
   3. git rebase --continue
   4. git push --force-with-lease
-  5. Run /merge-pr again
+  5. Run /catalyst-dev:merge-pr again
 ```
 
 Exit with error.
@@ -178,7 +178,7 @@ Fix failing tests before merge:
   $test_cmd
 
 Or skip tests (not recommended):
-  /merge-pr $pr_number --skip-tests
+  /catalyst-dev:merge-pr $pr_number --skip-tests
 ```
 
 Exit with error (unless `--skip-tests` flag provided).
@@ -421,25 +421,25 @@ Post-merge tasks: $task_count saved to thoughts/
 **`--skip-tests`** - Skip local test execution
 
 ```bash
-/merge-pr 123 --skip-tests
+/catalyst-dev:merge-pr 123 --skip-tests
 ```
 
 **`--no-update`** - Don't update Linear ticket
 
 ```bash
-/merge-pr 123 --no-update
+/catalyst-dev:merge-pr 123 --no-update
 ```
 
 **`--keep-branch`** - Don't delete local branch
 
 ```bash
-/merge-pr 123 --keep-branch
+/catalyst-dev:merge-pr 123 --keep-branch
 ```
 
 **Combined:**
 
 ```bash
-/merge-pr 123 --skip-tests --no-update
+/catalyst-dev:merge-pr 123 --skip-tests --no-update
 ```
 
 ## Error Handling
@@ -451,7 +451,7 @@ next steps.
 **Fail fast (stop execution):**
 
 - Rebase conflicts → show conflicting files, instructions to resolve manually, then re-run
-  `/merge-pr`
+  `/catalyst-dev:merge-pr`
 - Test failures → show failed tests, suggest fix or `--skip-tests`
 - PR not open/mergeable → show current state
 
@@ -517,10 +517,10 @@ keys.
 ## Examples
 
 ```bash
-/merge-pr 123              # Merge PR for current branch
-/merge-pr 123 --skip-tests # Skip local test execution
-/merge-pr 123 --no-update  # Don't update Linear ticket
-/merge-pr 123 --keep-branch # Don't delete local branch
+/catalyst-dev:merge-pr 123              # Merge PR for current branch
+/catalyst-dev:merge-pr 123 --skip-tests # Skip local test execution
+/catalyst-dev:merge-pr 123 --no-update  # Don't update Linear ticket
+/catalyst-dev:merge-pr 123 --keep-branch # Don't delete local branch
 ```
 
 ## Safety Features

@@ -143,7 +143,7 @@ Current usage: {X}% ({Y}K/{Z}K tokens)
 1. Review this validation report
 2. Address any failures
 3. Close this session (clear context)
-4. Start fresh for: `/commit` and `/describe-pr`
+4. Start fresh for: `/catalyst-dev:commit` and `/catalyst-dev:describe-pr`
 
 {If <60%}:
 ✅ Context healthy. Ready for PR creation.

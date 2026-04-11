@@ -89,7 +89,7 @@ If behind:
 - Auto-rebase: `git rebase origin/$base`
 - If conflicts:
   - Show conflicting files
-  - Error: "Rebase conflicts detected. Resolve conflicts and run /create-pr again."
+  - Error: "Rebase conflicts detected. Resolve conflicts and run /catalyst-dev:create-pr again."
   - Exit
 
 ### 5. Check for existing PR
@@ -283,7 +283,7 @@ Conflicting files:
 Resolve conflicts and run:
   git add <resolved-files>
   git rebase --continue
-  /create-pr
+  /catalyst-dev:create-pr
 ```
 
 **GitHub CLI not configured:**
@@ -350,7 +350,7 @@ Extracting ticket: ENG-123
 Generated title: "ENG-123: Implement pr lifecycle"
 Creating PR...
 ✅ PR #2 created
-Calling /describe-pr to generate description...
+Calling /catalyst-dev:describe-pr to generate description...
 Updating Linear ticket ENG-123 → In Review
 ✅ Complete!
 ```
