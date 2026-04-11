@@ -341,84 +341,21 @@ fi
 **Step 3: Resolve All Merge Blockers**
 
 After the automated reviewer wait, proactively resolve any merge blockers before attempting merge.
-This mirrors the blocker diagnosis loop in `/merge-pr` but runs earlier — while the PR is still
-fresh and before the user is waiting on a merge.
+This runs the same workflow as `/merge-pr` Step 6 but earlier — while the PR is still fresh.
 
-Query the full merge state via GraphQL (same query as `/merge-pr` step 6a):
+Read and follow `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`. This queries
+`mergeStateStatus` via GraphQL, identifies every specific blocker, and attempts to fix each one in
+a loop (max 3 rounds). Key blocker resolutions:
 
-```bash
-# Query mergeStateStatus, reviewDecision, CI checks, review threads in one call
-MERGE_STATE=$(gh api graphql -f query='
-query($owner: String!, $name: String!, $pr: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) {
-      mergeStateStatus
-      mergeable
-      reviewDecision
-      isDraft
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              state
-              contexts(first: 100) {
-                nodes {
-                  ... on CheckRun { name conclusion status detailsUrl }
-                  ... on StatusContext { context state targetUrl }
-                }
-              }
-            }
-          }
-        }
-      }
-      reviewThreads(first: 100) {
-        nodes {
-          id
-          isResolved
-          comments(first: 1) {
-            nodes { body author { login } path line }
-          }
-        }
-      }
-    }
-  }
-}' -f owner="$OWNER" -f name="$NAME" -F pr="$PR_NUMBER")
-```
+- `ci-failing` → analyze failure logs, fix code, push, re-poll
+- `unresolved-threads` → run `/review-comments` (see `review-thread-resolution.md`)
+- `branch-behind` → rebase and push
+- `draft` → `gh pr ready`
+- `changes-requested` → check if addressed; suggest re-request review
+- `review-required` → cannot fix — report how many approvals needed
 
-Identify blockers and resolve each one in a loop (max 3 rounds):
-
-| Blocker | Auto-resolution |
-|---------|----------------|
-| `ci-failing` | Analyze failure logs, fix code, push, re-poll |
-| `unresolved-threads` | Run `/review-comments` (fixes, replies, and resolves threads) |
-| `branch-behind` | Rebase and push |
-| `draft` | `gh pr ready` |
-| `changes-requested` | Check if addressed; suggest re-request review |
-| `review-required` | Cannot fix — report how many approvals needed and who to request |
-
-**After each round:** re-query merge state, rebuild blocker list, continue if blockers remain.
-
-**If blockers remain after 3 rounds:**
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚠️  Cannot auto-resolve $N blocker(s)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Resolved:
-  ✅ CI — fixed lint errors (commit abc1234)
-  ✅ Threads — 3 comments addressed and resolved
-
-Still blocking:
-  ❌ Review required — needs 1 approval
-     → gh pr edit $PR_NUMBER --add-reviewer "username"
-
-Options:
-  [1] Wait for resolution and auto-merge
-  [2] Create handoff and stop
-```
-
-**Never** use `--admin`, force merge, or bypass branch protection. See `/merge-pr` safety rules.
+If blockers remain after 3 rounds, present what was resolved and what still blocks with options
+to wait or create a handoff.
 
 **Step 4: Present options**
 
@@ -456,10 +393,9 @@ Otherwise, user merges manually later with `/merge-pr`.
 
 **What happens:**
 
-- Runs `/merge-pr` which runs the full blocker diagnosis loop (step 6) — checks mergeStateStatus,
-  resolves any remaining blockers (CI, threads, branch behind, etc.), and only merges when all
-  branch protection requirements are satisfied
-- **Never** uses `--admin`, force merge, or bypasses branch protection
+- Runs `/merge-pr` which runs the blocker diagnosis loop (see `merge-blocker-diagnosis.md`) —
+  resolves any remaining blockers and only merges when all branch protection requirements are
+  satisfied
 - If blockers cannot be resolved, reports exactly what's needed and stops
 - Moves Linear ticket to `stateMap.done` (default: "Done")
 

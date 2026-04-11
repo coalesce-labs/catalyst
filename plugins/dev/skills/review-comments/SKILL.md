@@ -100,61 +100,19 @@ git push
 After pushing fixes (or posting replies for disagreements), resolve each addressed thread on GitHub
 so it no longer blocks merge under branch protection rules that require resolved conversations.
 
-**Get unresolved review threads:**
+Read and follow `"${CLAUDE_PLUGIN_ROOT}/references/review-thread-resolution.md"` for the full
+workflow. Summary:
 
-```bash
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-OWNER=$(echo "$REPO" | cut -d'/' -f1)
-NAME=$(echo "$REPO" | cut -d'/' -f2)
+1. Fetch unresolved review threads via GraphQL
+2. For each thread addressed in steps above, resolve it via `resolveReviewThread` mutation
+3. Verify remaining unresolved count
 
-gh api graphql -f query='
-query($owner: String!, $name: String!, $pr: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $pr) {
-      reviewThreads(first: 100) {
-        nodes {
-          id
-          isResolved
-          comments(first: 1) {
-            nodes { body author { login } }
-          }
-        }
-      }
-    }
-  }
-}' -f owner="$OWNER" -f name="$NAME" -F pr="$PR_NUMBER"
-```
-
-**Resolve each thread that was addressed:**
-
-For each unresolved thread that was either fixed or replied to in the steps above:
-
-```bash
-gh api graphql -f query='
-mutation($threadId: ID!) {
-  resolveReviewThread(input: {threadId: $threadId}) {
-    thread { isResolved }
-  }
-}' -f threadId="$THREAD_NODE_ID"
-```
-
-**Rules for resolving:**
+**Resolution rules:**
 
 - **Code change implemented** → resolve the thread
-- **Reply posted (disagreement or clarification)** → resolve the thread (the reply is visible in the
-  resolved thread; the reviewer can re-open if they disagree)
+- **Reply posted** (disagreement or clarification) → resolve the thread
 - **Approval / praise** → already not blocking, skip
 - **Could not address** → do NOT resolve; leave for human review
-
-**Verify all threads resolved:**
-
-```bash
-# Re-fetch to confirm
-UNRESOLVED=$(gh api graphql -f query='...' | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
-if [ "$UNRESOLVED" -gt 0 ]; then
-  echo "⚠️  $UNRESOLVED unresolved thread(s) remain — manual review needed"
-fi
-```
 
 ## Output Format
 
