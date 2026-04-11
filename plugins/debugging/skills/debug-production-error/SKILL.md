@@ -184,7 +184,7 @@ After identifying root cause:
 After finding the bug:
 
 ```bash
-/create-plan "Fix the TypeError in checkout.ts based on Sentry analysis"
+/catalyst-dev:create-plan "Fix the TypeError in checkout.ts based on Sentry analysis"
 ```
 
 ## Context Cost
@@ -197,4 +197,4 @@ After finding the bug:
 
 ---
 
-**See also**: `/error-impact-analysis`, `/trace-analysis`
+**See also**: `/catalyst-debugging:error-impact-analysis`, `/catalyst-debugging:trace-analysis`

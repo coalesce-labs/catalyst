@@ -135,4 +135,4 @@ Plugin uses ~40k tokens. Disable when analysis is complete:
 
 ---
 
-**See also**: `/analyze-user-behavior`, `/product-metrics`
+**See also**: `/catalyst-analytics:analyze-user-behavior`, `/catalyst-analytics:product-metrics`

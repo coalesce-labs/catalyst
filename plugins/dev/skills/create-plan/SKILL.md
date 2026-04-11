@@ -334,7 +334,7 @@ This MUST print the plan path. If not, re-run 5b.
    ## Ready to Implement
 
    Start a new session and run:
-   /implement-plan [--team] thoughts/shared/plans/{PLAN_FILENAME}
+   /catalyst-dev:implement-plan [--team] thoughts/shared/plans/{PLAN_FILENAME}
 
    Tip: Start a fresh session — implementation needs context for source files and progress tracking.
    ```

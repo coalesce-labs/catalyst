@@ -117,4 +117,4 @@ The command will:
 
 ---
 
-**See also**: `/product-metrics`, `/segment-analysis`
+**See also**: `/catalyst-analytics:product-metrics`, `/catalyst-analytics:segment-analysis`

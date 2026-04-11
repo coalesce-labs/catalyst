@@ -67,7 +67,7 @@ When this command is invoked:
    wants to launch Claude in the worktree:
    ```bash
    humanlayer launch --model opus -w <worktree_path> \
-     "/implement_plan <plan_path> and when done: create commit, create PR, update Linear ticket"
+     "/catalyst-dev:implement-plan <plan_path> and when done: create commit, create PR, update Linear ticket"
    ```
 
 ## Worktree Location Convention

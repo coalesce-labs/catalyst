@@ -215,7 +215,7 @@ Save to `thoughts/shared/prototypes/[feature]-first-draft.md`:
 
 - Run tests
 - Manual QA
-- For complex features: Consider `/create-plan` + `/implement-plan` for structured iteration
+- For complex features: Consider `/catalyst-dev:create-plan` + `/catalyst-dev:implement-plan` for structured iteration
 ```
 
 ---
@@ -330,14 +330,14 @@ Check for additional accessibility requirements in project documentation (e.g., 
 
 **Before:**
 
-- `/create-plan` - Create a detailed implementation plan first (for complex features)
-- `/research-codebase` - Research existing patterns before building
+- `/catalyst-dev:create-plan` - Create a detailed implementation plan first (for complex features)
+- `/catalyst-dev:research-codebase` - Research existing patterns before building
 
 **After:**
 
-- `/commit` - Commit the implementation
-- `/create-pr` - Create a pull request for review
-- `/validate-plan` - Verify implementation matches requirements
+- `/catalyst-dev:commit` - Commit the implementation
+- `/catalyst-dev:create-pr` - Create a pull request for review
+- `/catalyst-dev:validate-plan` - Verify implementation matches requirements
 
 ---
 

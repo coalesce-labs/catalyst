@@ -20,7 +20,7 @@ Tell me which tool to connect (e.g., "connect to PostHog") and I will guide you 
 4. I test the connection and discover available tools
 5. I update your PM OS skills and pm/CLAUDE.md routing automatically
 
-**Example:** `/connect-mcps connect to linear`
+**Example:** `/catalyst-pm:connect-mcps connect to linear`
 
 **Output:** MCP connected, skills updated, integration log saved to `thoughts/shared/pm/reports/`
 
@@ -37,15 +37,15 @@ Tell me which tool to connect (e.g., "connect to PostHog") and I will guide you 
 ### Individual Connection (Recommended)
 
 ```
-/connect-mcps connect to posthog
-/connect-mcps connect to linear
-/connect-mcps connect to notion
+/catalyst-pm:connect-mcps connect to posthog
+/catalyst-pm:connect-mcps connect to linear
+/catalyst-pm:connect-mcps connect to notion
 ```
 
 ### Batch Connection (Advanced)
 
 ```
-/connect-mcps batch
+/catalyst-pm:connect-mcps batch
 ```
 
 Then provide multiple tool names when prompted.
@@ -73,7 +73,7 @@ When you run `/connect-mcps connect to [tool name]`, I will:
 
 ### Step 1: Parse Tool Name
 
-When you run `/connect-mcps connect to posthog`:
+When you run `/catalyst-pm:connect-mcps connect to posthog`:
 
 - Extract tool name: "posthog"
 - Normalize and validate the name
@@ -419,7 +419,7 @@ This ensures MCP integration info appears early but doesn't interrupt the skill'
 
 ```
 
-User: /connect-mcps connect to posthog
+User: /catalyst-pm:connect-mcps connect to posthog
 
 Me:
 Let me help you connect PostHog to your PM OS workspace.
@@ -489,7 +489,7 @@ Full log: thoughts/shared/pm/reports/2026-01-30-posthog.md
 
 ```
 
-User: /connect-mcps connect to linear
+User: /catalyst-pm:connect-mcps connect to linear
 
 Me:
 Let me help you connect Linear to your PM OS workspace.
@@ -555,7 +555,7 @@ Full log: thoughts/shared/pm/reports/2026-01-30-linear.md
 
 ```
 
-User: /connect-mcps batch
+User: /catalyst-pm:connect-mcps batch
 
 Me:
 Let's connect multiple MCPs at once.
@@ -765,7 +765,7 @@ Want to try again? Enter your API key:
 **3. MCP Already Connected**
 ```
 
-User: /connect-mcps connect to posthog
+User: /catalyst-pm:connect-mcps connect to posthog
 
 Me: PostHog is already connected!
 
@@ -824,7 +824,7 @@ Me: [maps to both skill groups]
 
 2. **Use natural language after setup** - Don't think about which MCP to call. Just ask your question naturally and I'll figure out the routing.
 
-3. **Batch connect if you can** - If you're setting up multiple tools, use `/connect-mcps batch` to go through them all at once.
+3. **Batch connect if you can** - If you're setting up multiple tools, use `/catalyst-pm:connect-mcps batch` to go through them all at once.
 
 4. **Test with simple queries first** - After connecting, try a simple query like "show me X" to verify the connection works before complex queries.
 
@@ -844,7 +844,7 @@ Me: [maps to both skill groups]
 
 ❌ **Don't paste credentials in chat without the prompt** - Wait for me to explicitly ask for your API key. Don't volunteer it unprompted.
 
-❌ **Don't skip the tool name** - Use `/connect-mcps connect to posthog`, not just `/connect-mcps posthog` or `/connect-mcps connect posthog`.
+❌ **Don't skip the tool name** - Use `/catalyst-pm:connect-mcps connect to posthog`, not just `/connect-mcps posthog` or `/connect-mcps connect posthog`.
 
 ❌ **Don't connect before installing** - Install the MCP server locally first (via NPM, Docker, etc.), then run `/connect-mcps connect to [tool]`.
 
@@ -852,7 +852,7 @@ Me: [maps to both skill groups]
 
 ❌ **Don't manually edit pm/CLAUDE.md** - Let me update the registry automatically. Manual edits can break the routing logic.
 
-❌ **Don't connect duplicate MCPs** - If you already have PostHog connected, don't run `/connect-mcps connect to posthog` again unless you're reconfiguring.
+❌ **Don't connect duplicate MCPs** - If you already have PostHog connected, don't run `/catalyst-pm:connect-mcps connect to posthog` again unless you're reconfiguring.
 
 ❌ **Don't ignore errors** - If connection fails, read the error message. It usually tells you exactly what's wrong (expired key, wrong format, etc.).
 
@@ -927,7 +927,7 @@ Connect these first. They provide immediate ROI for product managers.
 - "Which features correlate with power user behavior?"
 - "Pull session recordings for users who churned last week"
 
-**Setup:** Run `/connect-mcps connect to posthog`
+**Setup:** Run `/catalyst-pm:connect-mcps connect to posthog`
 
 **PostHog MCP Tools:**
 - `mcp__posthog__insight-query` - Query insights (trends, funnels, retention, paths, lifecycle)
@@ -950,7 +950,7 @@ See also: `catalyst-analytics` plugin for analytics-focused workflows
 - "List all blocked tickets and their reasons"
 - "Update ticket LIN-123 to mark it as done"
 
-**Setup:** Run `/connect-mcps connect to linear` (or your PM tool)
+**Setup:** Run `/catalyst-pm:connect-mcps connect to linear` (or your PM tool)
 
 **Tools discovered:** create_issue, update_issue, search_issues, get_project_status
 
@@ -1217,7 +1217,7 @@ The `catalyst-analytics` plugin provides analytics-focused workflows that levera
 
 ## What Happens Behind the Scenes
 
-When you run `/connect-mcps connect to posthog`:
+When you run `/catalyst-pm:connect-mcps connect to posthog`:
 
 1. **I search the web** for PostHog MCP documentation
 2. **I parse** the results to extract setup requirements
@@ -1240,7 +1240,7 @@ All of this happens automatically in seconds. You just provide credentials and I
 
 ```
 
-/connect-mcps connect to [your analytics tool]
+/catalyst-pm:connect-mcps connect to [your analytics tool]
 
 ```
 

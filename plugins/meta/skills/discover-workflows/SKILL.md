@@ -305,8 +305,8 @@ Discovered {N} workflows ({X} commands, {Y} agents)
 ## Next Steps
 
 1. **Review the analysis**: `thoughts/shared/workflows/{repo}/analysis.md`
-2. **Import a workflow**: `/import-workflow {repo} {workflow-name}`
-3. **Discover another repo**: `/discover-workflows`
+2. **Import a workflow**: `/catalyst-meta:import-workflow {repo} {workflow-name}`
+3. **Discover another repo**: `/catalyst-meta:discover-workflows`
 
 Catalog updated at: `thoughts/shared/workflows/catalog.md`
 ```
@@ -316,7 +316,7 @@ Catalog updated at: `thoughts/shared/workflows/catalog.md`
 ### Discover All Repos (Maximum Parallelism)
 
 ```
-/discover-workflows all
+/catalyst-meta:discover-workflows all
 ```
 
 This will:
@@ -336,7 +336,7 @@ This will:
 ### Discover Custom Repo
 
 ```
-/discover-workflows org/repo
+/catalyst-meta:discover-workflows org/repo
 ```
 
 Works with any public GitHub repo with Claude Code workflows.
@@ -344,7 +344,7 @@ Works with any public GitHub repo with Claude Code workflows.
 ### Focus on Specific Type
 
 ```
-/discover-workflows wshobson/agents --focus agents
+/catalyst-meta:discover-workflows wshobson/agents --focus agents
 ```
 
 Only analyzes agents, skips commands.
@@ -354,13 +354,13 @@ Only analyzes agents, skips commands.
 - **Read-only**: This command only researches, doesn't import
 - **Catalog persistence**: Saved in thoughts/ for future reference
 - **Reusable**: Run anytime to update catalog
-- **Combinable**: Use with `/import-workflow` to actually import
+- **Combinable**: Use with `/catalyst-meta:import-workflow` to actually import
 
 ## Integration with Other Commands
 
-- **Discover** → `/discover-workflows` (this command)
-- **Import** → `/import-workflow` (imports discovered workflows)
-- **Create** → `/create-workflow` (creates new using discovered patterns)
-- **Validate** → `/validate-frontmatter` (ensures consistency)
+- **Discover** → `/catalyst-meta:discover-workflows` (this command)
+- **Import** → `/catalyst-meta:import-workflow` (imports discovered workflows)
+- **Create** → `/catalyst-meta:create-workflow` (creates new using discovered patterns)
+- **Validate** → `/catalyst-meta:validate-frontmatter` (ensures consistency)
 
 This command is the first step in workflow discovery and reuse!

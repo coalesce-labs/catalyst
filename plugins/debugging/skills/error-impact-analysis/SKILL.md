@@ -172,4 +172,4 @@ Plugin uses ~20k tokens. Disable after analysis:
 
 ---
 
-**See also**: `/debug-production-error`, `/trace-analysis`
+**See also**: `/catalyst-debugging:debug-production-error`, `/catalyst-debugging:trace-analysis`

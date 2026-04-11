@@ -41,7 +41,7 @@ Supports two input modes:
 **Ticket-based:**
 
 ```
-/oneshot PROJ-123
+/catalyst-dev:oneshot PROJ-123
 ```
 
 Reads ticket from Linear, uses title/description as research query.
@@ -49,7 +49,7 @@ Reads ticket from Linear, uses title/description as research query.
 **Freeform:**
 
 ```
-/oneshot "How does authentication work and can we add OAuth?"
+/catalyst-dev:oneshot "How does authentication work and can we add OAuth?"
 ```
 
 Uses the provided text as the research query directly.
@@ -162,7 +162,7 @@ Launches a fresh Claude Code session with full context isolation.
 humanlayer launch \
   --model opus \
   --title "plan ${TICKET_ID:-oneshot}" \
-  "/create-plan thoughts/shared/research/$RESEARCH_DOC"
+  "/catalyst-dev:create-plan thoughts/shared/research/$RESEARCH_DOC"
 ```
 
 **What happens in the launched session:**
@@ -186,7 +186,7 @@ After the plan is approved, launches another fresh session:
 humanlayer launch \
   --model opus \
   --title "implement ${TICKET_ID:-oneshot}" \
-  "/implement-plan thoughts/shared/plans/$PLAN_DOC"
+  "/catalyst-dev:implement-plan thoughts/shared/plans/$PLAN_DOC"
 ```
 
 **What happens in the launched session:**
@@ -210,7 +210,7 @@ Launches a fresh session for validation and quality enforcement:
 humanlayer launch \
   --model opus \
   --title "validate ${TICKET_ID:-oneshot}" \
-  "Run /validate-plan then run quality gates. Plan: thoughts/shared/plans/$PLAN_DOC"
+  "Run /catalyst-dev:validate-plan then run quality gates. Plan: thoughts/shared/plans/$PLAN_DOC"
 ```
 
 **Step 1: Validate plan implementation**
@@ -370,7 +370,7 @@ Merge state: $mergeStateStatus
 
 Options:
   [1] Wait for remaining blockers to clear, then auto-merge (runs Phase 6)
-  [2] Exit — merge later with /merge-pr
+  [2] Exit — merge later with /catalyst-dev:merge-pr
 ```
 
 **If `--auto-merge` flag was set:** Skips the prompt and proceeds to Phase 6 automatically. Phase 6
@@ -385,10 +385,10 @@ Only runs automatically if:
 - User selected option [1] in Phase 5, OR
 - `--auto-merge` flag was passed
 
-Otherwise, user merges manually later with `/merge-pr`.
+Otherwise, user merges manually later with `/catalyst-dev:merge-pr`.
 
 ```
-/merge-pr
+/catalyst-dev:merge-pr
 ```
 
 **What happens:**
@@ -404,7 +404,7 @@ Otherwise, user merges manually later with `/merge-pr`.
 For complex implementations spanning multiple files/layers:
 
 ```
-/oneshot --team PROJ-123
+/catalyst-dev:oneshot --team PROJ-123
 ```
 
 In team mode, Phase 3 uses agent teams for parallel implementation:
@@ -554,7 +554,7 @@ State transitions throughout the lifecycle:
 
 - Save partial findings to thoughts/
 - Present error to user
-- Suggest running `/research-codebase` manually
+- Suggest running `/catalyst-dev:research-codebase` manually
 
 **If humanlayer launch fails:**
 
@@ -564,14 +564,14 @@ State transitions throughout the lifecycle:
   Could not launch new session automatically.
 
   Please start a new session and run:
-    /create-plan thoughts/shared/research/$RESEARCH_DOC
+    /catalyst-dev:create-plan thoughts/shared/research/$RESEARCH_DOC
   ```
 
 **If implementation fails:**
 
 - Partial work is preserved (uncommitted)
 - Handoff document created automatically
-- User can resume with `/resume-handoff`
+- User can resume with `/catalyst-dev:resume-handoff`
 
 **If quality gates fail after max retries:**
 
@@ -591,7 +591,7 @@ error, context exhaustion):
 - Invoke `/create-handoff` with: phases completed, current phase status, unresolved issues,
   CI/review status, and remaining phases
 - Save handoff to `thoughts/shared/handoffs/`
-- User can resume with `/resume-handoff`
+- User can resume with `/catalyst-dev:resume-handoff`
 
 ## Important
 

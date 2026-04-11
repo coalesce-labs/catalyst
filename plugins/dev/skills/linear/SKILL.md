@@ -412,28 +412,28 @@ When these commands are run, check if there's a related Linear ticket and update
 
 ```bash
 # 1. Research and document
-/research-codebase "authentication patterns"
+/catalyst-dev:research-codebase "authentication patterns"
 # Saves to thoughts/shared/research/auth-patterns.md
 
 # 2. Create ticket from research
-/linear create thoughts/shared/research/auth-patterns.md
+/catalyst-dev:linear create thoughts/shared/research/auth-patterns.md
 # Creates ticket in Backlog
 
 # 3. Create plan
-/create-plan
+/catalyst-dev:create-plan
 # Reads research, creates plan
 # Ticket moves to stateMap.planning (default: "In Progress")
 
 # 4. Implement
-/implement-plan thoughts/shared/plans/2025-01-08-auth-feature.md
+/catalyst-dev:implement-plan thoughts/shared/plans/2025-01-08-auth-feature.md
 # Ticket moves to stateMap.inProgress (default: "In Progress")
 
 # 5. Create PR
-/create-pr
+/catalyst-dev:create-pr
 # Ticket moves to stateMap.inReview (default: "In Review")
 
 # 6. Merge PR
-/merge-pr
+/catalyst-dev:merge-pr
 # Ticket moves to stateMap.done (default: "Done")
 ```
 

@@ -266,7 +266,7 @@ Once you have a handoff path:
 ## Example Interaction Flow
 
 ```
-User: /resume-handoff specification/feature/handoffs/handoff-0.md
+User: /catalyst-dev:resume-handoff specification/feature/handoffs/handoff-0.md
 Assistant: Let me read and analyze that handoff document...
 
 [Reads handoff completely]

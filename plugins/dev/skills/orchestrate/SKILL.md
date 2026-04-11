@@ -44,10 +44,10 @@ fi
 ## Invocation
 
 ```
-/orchestrate PROJ-101 PROJ-102 PROJ-103             # explicit tickets
-/orchestrate --project "Q2 API Redesign"              # pull from Linear project
-/orchestrate --cycle current                           # pull from current cycle
-/orchestrate --file tickets.txt                        # read ticket IDs from file
+/catalyst-dev:orchestrate PROJ-101 PROJ-102 PROJ-103             # explicit tickets
+/catalyst-dev:orchestrate --project "Q2 API Redesign"              # pull from Linear project
+/catalyst-dev:orchestrate --cycle current                           # pull from current cycle
+/catalyst-dev:orchestrate --file tickets.txt                        # read ticket IDs from file
 ```
 
 ## Flags
@@ -80,7 +80,7 @@ doesn't exist). Falls back to sensible defaults if no orchestration block exists
         "setup": [],
         "teardown": []
       },
-      "workerCommand": "/oneshot",
+      "workerCommand": "/catalyst-dev:oneshot",
       "workerModel": "opus",
       "thoughts": {
         "profile": null,
@@ -186,7 +186,7 @@ WORKTREE_DIR=$(jq -r '.catalyst.orchestration.worktreeDir // empty' "$CONFIG_FIL
 MAX_PARALLEL=$(jq -r '.catalyst.orchestration.maxParallel // 3' "$CONFIG_FILE" 2>/dev/null)
 SETUP_HOOKS=$(jq -c '.catalyst.orchestration.hooks.setup // []' "$CONFIG_FILE" 2>/dev/null)
 TEARDOWN_HOOKS=$(jq -c '.catalyst.orchestration.hooks.teardown // []' "$CONFIG_FILE" 2>/dev/null)
-WORKER_COMMAND=$(jq -r '.catalyst.orchestration.workerCommand // "/oneshot"' "$CONFIG_FILE" 2>/dev/null)
+WORKER_COMMAND=$(jq -r '.catalyst.orchestration.workerCommand // "/catalyst-dev:oneshot"' "$CONFIG_FILE" 2>/dev/null)
 WORKER_MODEL=$(jq -r '.catalyst.orchestration.workerModel // "opus"' "$CONFIG_FILE" 2>/dev/null)
 ```
 
@@ -711,7 +711,7 @@ fi
 
 **Orchestrator crash recovery:**
 - All state is in `${ORCH_DIR}/state.json` + worker signal files
-- Resume with: `/orchestrate --resume ${ORCH_DIR}`
+- Resume with: `/catalyst-dev:orchestrate --resume ${ORCH_DIR}`
 - Reads state.json, determines current wave, checks each worker's actual status
 - Picks up where it left off
 
