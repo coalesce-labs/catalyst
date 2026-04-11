@@ -338,121 +338,106 @@ if [ "$COMMENT_COUNT" -eq 0 ] && [ "$REVIEW_COUNT" -eq 0 ]; then
 fi
 ```
 
-**Step 3: Address and Resolve Review Comments**
+**Step 3: Resolve All Merge Blockers**
 
-Check for unresolved review threads and address them. This step loops until all threads are resolved
-or no new comments arrive after a fix push.
+After the automated reviewer wait, proactively resolve any merge blockers before attempting merge.
+This mirrors the blocker diagnosis loop in `/merge-pr` but runs earlier — while the PR is still
+fresh and before the user is waiting on a merge.
+
+Query the full merge state via GraphQL (same query as `/merge-pr` step 6a):
 
 ```bash
-MAX_COMMENT_ROUNDS=3
-ROUND=0
-
-while [ $ROUND -lt $MAX_COMMENT_ROUNDS ]; do
-  # Check for unresolved threads
-  UNRESOLVED=$(gh api graphql -f query='
-  query($owner: String!, $name: String!, $pr: Int!) {
-    repository(owner: $owner, name: $name) {
-      pullRequest(number: $pr) {
-        reviewThreads(first: 100) {
-          nodes { id isResolved comments(first: 1) { nodes { body author { login } } } }
+# Query mergeStateStatus, reviewDecision, CI checks, review threads in one call
+MERGE_STATE=$(gh api graphql -f query='
+query($owner: String!, $name: String!, $pr: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      mergeStateStatus
+      mergeable
+      reviewDecision
+      isDraft
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+              contexts(first: 100) {
+                nodes {
+                  ... on CheckRun { name conclusion status detailsUrl }
+                  ... on StatusContext { context state targetUrl }
+                }
+              }
+            }
+          }
+        }
+      }
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          comments(first: 1) {
+            nodes { body author { login } path line }
+          }
         }
       }
     }
-  }' -f owner="$OWNER" -f name="$NAME" -F pr="$PR_NUMBER" \
-    --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
-
-  if [ "$UNRESOLVED" -eq 0 ]; then
-    echo "All review threads resolved"
-    break
-  fi
-
-  echo "$UNRESOLVED unresolved thread(s) — running /review-comments"
-
-  # /review-comments now handles: fetch, categorize, fix/reply, commit, push, AND resolve threads
-  /review-comments $PR_NUMBER
-
-  ROUND=$((ROUND + 1))
-
-  # Brief pause for any new automated comments triggered by the fix push
-  if [ $ROUND -lt $MAX_COMMENT_ROUNDS ]; then
-    sleep 60
-  fi
-done
-
-if [ "$UNRESOLVED" -gt 0 ]; then
-  echo "⚠️  $UNRESOLVED unresolved thread(s) remain after $MAX_COMMENT_ROUNDS rounds"
-  echo "Manual review may be needed before merge"
-fi
+  }
+}' -f owner="$OWNER" -f name="$NAME" -F pr="$PR_NUMBER")
 ```
 
-**Step 4: CI Polling with Auto-Fix**
+Identify blockers and resolve each one in a loop (max 3 rounds):
 
-After comments are addressed (fixes may have been pushed), poll CI checks:
+| Blocker | Auto-resolution |
+|---------|----------------|
+| `ci-failing` | Analyze failure logs, fix code, push, re-poll |
+| `unresolved-threads` | Run `/review-comments` (fixes, replies, and resolves threads) |
+| `branch-behind` | Rebase and push |
+| `draft` | `gh pr ready` |
+| `changes-requested` | Check if addressed; suggest re-request review |
+| `review-required` | Cannot fix — report how many approvals needed and who to request |
 
-```bash
-# Poll CI — max 3 fix attempts
-ATTEMPT=0
-MAX_ATTEMPTS=3
+**After each round:** re-query merge state, rebuild blocker list, continue if blockers remain.
 
-while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-  gh pr checks $PR_NUMBER --watch --fail-fast
-
-  if [ $? -eq 0 ]; then
-    break  # CI passed
-  fi
-
-  ATTEMPT=$((ATTEMPT + 1))
-  if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-    # Analyze CI failures
-    # Attempt automated fix
-    # Commit and push fix
-    # Re-poll
-  fi
-done
-```
-
-If CI fails after all attempts, present the user with options:
+**If blockers remain after 3 rounds:**
 
 ```
-CI failed after {ATTEMPT} fix attempts:
-  ❌ {check name}: {failure reason}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️  Cannot auto-resolve $N blocker(s)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Resolved:
+  ✅ CI — fixed lint errors (commit abc1234)
+  ✅ Threads — 3 comments addressed and resolved
+
+Still blocking:
+  ❌ Review required — needs 1 approval
+     → gh pr edit $PR_NUMBER --add-reviewer "username"
 
 Options:
-  [1] Fix manually and re-poll
-  [2] Continue to merge anyway (if branch protections allow)
-  [3] Create handoff and stop
+  [1] Wait for resolution and auto-merge
+  [2] Create handoff and stop
 ```
 
-**Step 5: Final Comment Check**
+**Never** use `--admin`, force merge, or bypass branch protection. See `/merge-pr` safety rules.
 
-After CI passes, do one final check for any new comments that arrived during CI fixes:
-
-```bash
-FINAL_UNRESOLVED=$(gh api graphql -f query='...' \
-  --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
-
-if [ "$FINAL_UNRESOLVED" -gt 0 ]; then
-  echo "$FINAL_UNRESOLVED new unresolved thread(s) — running /review-comments"
-  /review-comments $PR_NUMBER
-fi
-```
-
-**Step 6: Present options**
+**Step 4: Present options**
 
 ```
 PR ready: https://github.com/org/repo/pull/{number}
 
-CI:       ✅ passed
-Threads:  ✅ all resolved ({N} addressed)
-Reviews:  {N} comments addressed / no comments
+Merge state: $mergeStateStatus
+  ✅ CI passed
+  ✅ Threads resolved ({N} addressed)
+  ✅ Reviews addressed
+  ❌ Review required — 1 approval needed (if applicable)
 
 Options:
-  [1] Wait for approval and auto-merge (runs Phase 6 automatically)
+  [1] Wait for remaining blockers to clear, then auto-merge (runs Phase 6)
   [2] Exit — merge later with /merge-pr
 ```
 
-**If `--auto-merge` flag was set:** Skips the prompt, waits for CI, and proceeds to Phase 6
-automatically.
+**If `--auto-merge` flag was set:** Skips the prompt and proceeds to Phase 6 automatically. Phase 6
+(`/merge-pr`) will run its own blocker diagnosis loop and resolve anything remaining.
 
 **Linear**: `/create-pr` moves ticket to `stateMap.inReview` (default: "In Review").
 
@@ -471,8 +456,11 @@ Otherwise, user merges manually later with `/merge-pr`.
 
 **What happens:**
 
-- Runs `/merge-pr` which internally handles: CI verification, rebase if needed, squash merge, branch
-  cleanup
+- Runs `/merge-pr` which runs the full blocker diagnosis loop (step 6) — checks mergeStateStatus,
+  resolves any remaining blockers (CI, threads, branch behind, etc.), and only merges when all
+  branch protection requirements are satisfied
+- **Never** uses `--admin`, force merge, or bypasses branch protection
+- If blockers cannot be resolved, reports exactly what's needed and stops
 - Moves Linear ticket to `stateMap.done` (default: "Done")
 
 ## Team Mode (Optional)
