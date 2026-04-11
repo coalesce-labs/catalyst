@@ -206,7 +206,55 @@ Continue merge anyway? [y/N]:
 
 If user says no: exit. If user says yes: continue (user override).
 
-### 7. Check approval status
+### 7. Check for unresolved review threads
+
+Branch protection requires all review conversations to be resolved before merging. Check for
+unresolved threads:
+
+```bash
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+OWNER=$(echo "$REPO" | cut -d'/' -f1)
+NAME=$(echo "$REPO" | cut -d'/' -f2)
+
+UNRESOLVED=$(gh api graphql -f query='
+query($owner: String!, $name: String!, $pr: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          comments(first: 1) {
+            nodes { body author { login } }
+          }
+        }
+      }
+    }
+  }
+}' -f owner="$OWNER" -f name="$NAME" -F pr="$pr_number" \
+  --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+```
+
+**If unresolved threads exist:**
+
+```
+❌ $UNRESOLVED unresolved review thread(s) on PR #$pr_number
+
+Unresolved comments:
+  - @reviewer on file.ts:42: "This should use..."
+  - @reviewer on file.ts:89: "Missing error..."
+
+Address these first:
+  /review-comments $pr_number
+
+Or resolve them manually on GitHub before merging.
+```
+
+Exit with error. Do NOT prompt for override — branch protection will reject the merge anyway.
+
+**If no unresolved threads:** continue.
+
+### 8. Check approval status
 
 ```bash
 review_decision=$(gh pr view $pr_number --json reviewDecision -q .reviewDecision)
@@ -233,7 +281,7 @@ If user says no: exit. If user says yes: continue (user override).
 
 **Skip these prompts if** `requireApproval: false` in config.
 
-### 8. Extract ticket reference
+### 9. Extract ticket reference
 
 ```bash
 branch=$(gh pr view $pr_number --json headRefName -q .headRefName)
@@ -250,7 +298,7 @@ if [[ -z "$ticket" ]] && [[ "$title" =~ ($TEAM_KEY-[0-9]+) ]]; then
 fi
 ```
 
-### 9. Show merge summary
+### 10. Show merge summary
 
 ```
 About to merge:
@@ -261,10 +309,11 @@ About to merge:
  Commits: $commit_count
  Files:   $file_count changed
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- Reviews: $review_status
- CI:      $ci_status
- Tests:   ✅ Passed locally
- Ticket:  $ticket (will move to Done)
+ Reviews:  $review_status
+ Threads:  ✅ All resolved
+ CI:       $ci_status
+ Tests:    ✅ Passed locally
+ Ticket:   $ticket (will move to Done)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Merge strategy: Squash and merge
@@ -272,7 +321,7 @@ Merge strategy: Squash and merge
 Proceed? [Y/n]:
 ```
 
-### 10. Execute squash merge
+### 11. Execute squash merge
 
 ```bash
 gh pr merge $pr_number --squash --delete-branch
@@ -289,7 +338,7 @@ gh pr merge $pr_number --squash --delete-branch
 merge_sha=$(git rev-parse HEAD)
 ```
 
-### 11. Update Linear ticket
+### 12. Update Linear ticket
 
 If ticket found and not using `--no-update`:
 
@@ -311,7 +360,7 @@ else
 fi
 ```
 
-### 12. Delete local branch and update base
+### 13. Delete local branch and update base
 
 ```bash
 # Switch to base branch
@@ -329,7 +378,7 @@ echo "✅ Deleted local branch: $head_branch"
 
 **Always delete local branch** - no prompt (remote already deleted).
 
-### 12a. Update primary worktree
+### 13a. Update primary worktree
 
 If running in a git worktree, the primary checkout of main may be stale. Update it:
 
@@ -347,7 +396,7 @@ else
 fi
 ```
 
-### 13. Extract post-merge tasks
+### 14. Extract post-merge tasks
 
 **Read PR description:**
 
@@ -386,7 +435,7 @@ EOF
 humanlayer thoughts sync
 ```
 
-### 14. Detect Deployments and Report Success
+### 15. Detect Deployments and Report Success
 
 After branch cleanup, check if the merge triggered any deployment workflows:
 

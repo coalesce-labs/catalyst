@@ -303,9 +303,91 @@ EXISTING_PR=$(gh pr list --head "$(git branch --show-current)" --json number --j
 - **If no PR exists**:
   - Run `/create-pr` (handles commit, push, PR creation, description, Linear linking)
 
-**Step 2: CI Polling with Auto-Fix**
+**Step 2: Wait for Automated Reviewers**
 
-After PR is created/updated, poll CI checks with auto-fix capability:
+Automated review agents (Codex, Direnv, etc.) typically post comments within 3-5 minutes of PR
+creation. Wait for them before processing comments, so we can address everything in one pass.
+
+```bash
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+OWNER=$(echo "$REPO" | cut -d'/' -f1)
+NAME=$(echo "$REPO" | cut -d'/' -f2)
+
+# Wait 3 minutes, then start checking for comments
+sleep 180
+
+# Poll for up to 2 more minutes (5 min total) — check every 30s
+WAITED=180
+MAX_WAIT=300
+while [ $WAITED -lt $MAX_WAIT ]; do
+  COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --jq 'length')
+  REVIEW_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+    --jq '[.[] | select(.state != "APPROVED" and .state != "DISMISSED")] | length')
+
+  if [ "$COMMENT_COUNT" -gt 0 ] || [ "$REVIEW_COUNT" -gt 0 ]; then
+    echo "Found review comments — proceeding to address them"
+    break
+  fi
+
+  sleep 30
+  WAITED=$((WAITED + 30))
+done
+
+if [ "$COMMENT_COUNT" -eq 0 ] && [ "$REVIEW_COUNT" -eq 0 ]; then
+  echo "No automated review comments after ${MAX_WAIT}s — proceeding"
+fi
+```
+
+**Step 3: Address and Resolve Review Comments**
+
+Check for unresolved review threads and address them. This step loops until all threads are resolved
+or no new comments arrive after a fix push.
+
+```bash
+MAX_COMMENT_ROUNDS=3
+ROUND=0
+
+while [ $ROUND -lt $MAX_COMMENT_ROUNDS ]; do
+  # Check for unresolved threads
+  UNRESOLVED=$(gh api graphql -f query='
+  query($owner: String!, $name: String!, $pr: Int!) {
+    repository(owner: $owner, name: $name) {
+      pullRequest(number: $pr) {
+        reviewThreads(first: 100) {
+          nodes { id isResolved comments(first: 1) { nodes { body author { login } } } }
+        }
+      }
+    }
+  }' -f owner="$OWNER" -f name="$NAME" -F pr="$PR_NUMBER" \
+    --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+
+  if [ "$UNRESOLVED" -eq 0 ]; then
+    echo "All review threads resolved"
+    break
+  fi
+
+  echo "$UNRESOLVED unresolved thread(s) — running /review-comments"
+
+  # /review-comments now handles: fetch, categorize, fix/reply, commit, push, AND resolve threads
+  /review-comments $PR_NUMBER
+
+  ROUND=$((ROUND + 1))
+
+  # Brief pause for any new automated comments triggered by the fix push
+  if [ $ROUND -lt $MAX_COMMENT_ROUNDS ]; then
+    sleep 60
+  fi
+done
+
+if [ "$UNRESOLVED" -gt 0 ]; then
+  echo "⚠️  $UNRESOLVED unresolved thread(s) remain after $MAX_COMMENT_ROUNDS rounds"
+  echo "Manual review may be needed before merge"
+fi
+```
+
+**Step 4: CI Polling with Auto-Fix**
+
+After comments are addressed (fixes may have been pushed), poll CI checks:
 
 ```bash
 # Poll CI — max 3 fix attempts
@@ -341,31 +423,28 @@ Options:
   [3] Create handoff and stop
 ```
 
-**Step 3: PR Comment Monitoring**
+**Step 5: Final Comment Check**
 
-After CI passes (or user chooses to proceed), check for review comments:
+After CI passes, do one final check for any new comments that arrived during CI fixes:
 
 ```bash
-# Fetch PR comments and reviews
-gh api repos/{owner}/{repo}/pulls/{number}/comments --jq '.[].body'
-gh api repos/{owner}/{repo}/pulls/{number}/reviews --jq '.[] | select(.state != "APPROVED") | .body'
+FINAL_UNRESOLVED=$(gh api graphql -f query='...' \
+  --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
+
+if [ "$FINAL_UNRESOLVED" -gt 0 ]; then
+  echo "$FINAL_UNRESOLVED new unresolved thread(s) — running /review-comments"
+  /review-comments $PR_NUMBER
+fi
 ```
 
-If comments exist that need addressing:
-
-1. Invoke `/review-comments` to analyze and address each comment
-2. Push fixes
-3. Re-poll CI if fixes were pushed
-
-If no actionable comments, proceed to merge prompt.
-
-**Step 4: Present options**
+**Step 6: Present options**
 
 ```
 PR ready: https://github.com/org/repo/pull/{number}
 
-CI: ✅ passed
-Reviews: {N} comments addressed / no comments
+CI:       ✅ passed
+Threads:  ✅ all resolved ({N} addressed)
+Reviews:  {N} comments addressed / no comments
 
 Options:
   [1] Wait for approval and auto-merge (runs Phase 6 automatically)
