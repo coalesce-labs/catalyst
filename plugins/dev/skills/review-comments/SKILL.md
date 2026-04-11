@@ -95,6 +95,25 @@ git commit -m "address review comments from PR #${PR_NUMBER}"
 git push
 ```
 
+## Step 5: Resolve Comment Threads
+
+After pushing fixes (or posting replies for disagreements), resolve each addressed thread on GitHub
+so it no longer blocks merge under branch protection rules that require resolved conversations.
+
+Read and follow `"${CLAUDE_PLUGIN_ROOT}/references/review-thread-resolution.md"` for the full
+workflow. Summary:
+
+1. Fetch unresolved review threads via GraphQL
+2. For each thread addressed in steps above, resolve it via `resolveReviewThread` mutation
+3. Verify remaining unresolved count
+
+**Resolution rules:**
+
+- **Code change implemented** → resolve the thread
+- **Reply posted** (disagreement or clarification) → resolve the thread
+- **Approval / praise** → already not blocking, skip
+- **Could not address** → do NOT resolve; leave for human review
+
 ## Output Format
 
 ```markdown

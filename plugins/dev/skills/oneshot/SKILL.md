@@ -303,77 +303,78 @@ EXISTING_PR=$(gh pr list --head "$(git branch --show-current)" --json number --j
 - **If no PR exists**:
   - Run `/create-pr` (handles commit, push, PR creation, description, Linear linking)
 
-**Step 2: CI Polling with Auto-Fix**
+**Step 2: Wait for Automated Reviewers**
 
-After PR is created/updated, poll CI checks with auto-fix capability:
+Automated review agents (Codex, Direnv, etc.) typically post comments within 3-5 minutes of PR
+creation. Wait for them before processing comments, so we can address everything in one pass.
 
 ```bash
-# Poll CI — max 3 fix attempts
-ATTEMPT=0
-MAX_ATTEMPTS=3
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+OWNER=$(echo "$REPO" | cut -d'/' -f1)
+NAME=$(echo "$REPO" | cut -d'/' -f2)
 
-while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-  gh pr checks $PR_NUMBER --watch --fail-fast
+# Wait 3 minutes, then start checking for comments
+sleep 180
 
-  if [ $? -eq 0 ]; then
-    break  # CI passed
+# Poll for up to 2 more minutes (5 min total) — check every 30s
+WAITED=180
+MAX_WAIT=300
+while [ $WAITED -lt $MAX_WAIT ]; do
+  COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --jq 'length')
+  REVIEW_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
+    --jq '[.[] | select(.state != "APPROVED" and .state != "DISMISSED")] | length')
+
+  if [ "$COMMENT_COUNT" -gt 0 ] || [ "$REVIEW_COUNT" -gt 0 ]; then
+    echo "Found review comments — proceeding to address them"
+    break
   fi
 
-  ATTEMPT=$((ATTEMPT + 1))
-  if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-    # Analyze CI failures
-    # Attempt automated fix
-    # Commit and push fix
-    # Re-poll
-  fi
+  sleep 30
+  WAITED=$((WAITED + 30))
 done
+
+if [ "$COMMENT_COUNT" -eq 0 ] && [ "$REVIEW_COUNT" -eq 0 ]; then
+  echo "No automated review comments after ${MAX_WAIT}s — proceeding"
+fi
 ```
 
-If CI fails after all attempts, present the user with options:
+**Step 3: Resolve All Merge Blockers**
 
-```
-CI failed after {ATTEMPT} fix attempts:
-  ❌ {check name}: {failure reason}
+After the automated reviewer wait, proactively resolve any merge blockers before attempting merge.
+This runs the same workflow as `/merge-pr` Step 6 but earlier — while the PR is still fresh.
 
-Options:
-  [1] Fix manually and re-poll
-  [2] Continue to merge anyway (if branch protections allow)
-  [3] Create handoff and stop
-```
+Read and follow `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`. This queries
+`mergeStateStatus` via GraphQL, identifies every specific blocker, and attempts to fix each one in
+a loop (max 3 rounds). Key blocker resolutions:
 
-**Step 3: PR Comment Monitoring**
+- `ci-failing` → analyze failure logs, fix code, push, re-poll
+- `unresolved-threads` → run `/review-comments` (see `review-thread-resolution.md`)
+- `branch-behind` → rebase and push
+- `draft` → `gh pr ready`
+- `changes-requested` → check if addressed; suggest re-request review
+- `review-required` → cannot fix — report how many approvals needed
 
-After CI passes (or user chooses to proceed), check for review comments:
-
-```bash
-# Fetch PR comments and reviews
-gh api repos/{owner}/{repo}/pulls/{number}/comments --jq '.[].body'
-gh api repos/{owner}/{repo}/pulls/{number}/reviews --jq '.[] | select(.state != "APPROVED") | .body'
-```
-
-If comments exist that need addressing:
-
-1. Invoke `/review-comments` to analyze and address each comment
-2. Push fixes
-3. Re-poll CI if fixes were pushed
-
-If no actionable comments, proceed to merge prompt.
+If blockers remain after 3 rounds, present what was resolved and what still blocks with options
+to wait or create a handoff.
 
 **Step 4: Present options**
 
 ```
 PR ready: https://github.com/org/repo/pull/{number}
 
-CI: ✅ passed
-Reviews: {N} comments addressed / no comments
+Merge state: $mergeStateStatus
+  ✅ CI passed
+  ✅ Threads resolved ({N} addressed)
+  ✅ Reviews addressed
+  ❌ Review required — 1 approval needed (if applicable)
 
 Options:
-  [1] Wait for approval and auto-merge (runs Phase 6 automatically)
+  [1] Wait for remaining blockers to clear, then auto-merge (runs Phase 6)
   [2] Exit — merge later with /merge-pr
 ```
 
-**If `--auto-merge` flag was set:** Skips the prompt, waits for CI, and proceeds to Phase 6
-automatically.
+**If `--auto-merge` flag was set:** Skips the prompt and proceeds to Phase 6 automatically. Phase 6
+(`/merge-pr`) will run its own blocker diagnosis loop and resolve anything remaining.
 
 **Linear**: `/create-pr` moves ticket to `stateMap.inReview` (default: "In Review").
 
@@ -392,8 +393,10 @@ Otherwise, user merges manually later with `/merge-pr`.
 
 **What happens:**
 
-- Runs `/merge-pr` which internally handles: CI verification, rebase if needed, squash merge, branch
-  cleanup
+- Runs `/merge-pr` which runs the blocker diagnosis loop (see `merge-blocker-diagnosis.md`) —
+  resolves any remaining blockers and only merges when all branch protection requirements are
+  satisfied
+- If blockers cannot be resolved, reports exactly what's needed and stops
 - Moves Linear ticket to `stateMap.done` (default: "Done")
 
 ## Team Mode (Optional)

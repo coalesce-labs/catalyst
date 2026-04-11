@@ -13,6 +13,13 @@ version: 1.0.0
 
 Safely merges a PR after comprehensive verification, with Linear integration and automated cleanup.
 
+## Branch Protection — Safety Rules
+
+Read and follow the safety rules in
+`"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"` — specifically the "Safety Rules"
+section. Summary: **NEVER** use `--admin`, `--force`, or any flag that bypasses branch protection.
+Always resolve blockers legitimately or escalate with specifics.
+
 ## Configuration
 
 Read team configuration from `.catalyst/config.json`:
@@ -176,64 +183,36 @@ Or skip tests (not recommended):
 
 Exit with error (unless `--skip-tests` flag provided).
 
-### 6. Check CI/CD status
+### 6. Diagnose and resolve merge blockers
 
-```bash
-gh pr checks $pr_number
-```
+Read and follow the full workflow in
+`"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`.
 
-**Parse output for failures:**
+This step queries GitHub's `mergeStateStatus` via GraphQL, identifies every specific blocker, and
+attempts to fix each one in a loop (max 3 attempts). The reference doc contains:
 
-- If all checks pass: continue
-- If required checks fail: prompt user
-- If optional checks fail: warn but allow
+- The GraphQL query (merge state + CI checks + review threads + reviews in one call)
+- Blocker type table (`CLEAN`, `BEHIND`, `DIRTY`, `BLOCKED`, `DRAFT`, `UNSTABLE`, `HAS_HOOKS`,
+  `UNKNOWN`)
+- How to decompose `BLOCKED` into specific causes
+- Resolution strategy for each blocker type:
 
-**If required checks failing:**
+| Blocker | Auto-resolution |
+|---------|----------------|
+| `branch-behind` | Rebase and push |
+| `conflicts` | Attempt rebase; report specific files if can't resolve |
+| `draft` | `gh pr ready` |
+| `ci-failing` | Analyze failure logs, fix code, push, re-poll |
+| `unresolved-threads` | Run `/review-comments` (see `review-thread-resolution.md`) |
+| `changes-requested` | Check if addressed; suggest re-request review |
+| `review-required` | Cannot fix — report how many approvals needed and who to request |
+| `hooks-pending` | Wait and re-query |
+| `unknown-blocker` | Query branch protection rules, report every requirement with status |
 
-```
-⚠️  Some required CI checks are failing
+After the resolution loop, report what was resolved and what still blocks with specific actionable
+guidance. If all blockers resolved, continue to next step.
 
-Failed checks:
-  - build (required)
-  - lint (required)
-
-Passed checks:
-  - test ✅
-  - security ✅
-
-Continue merge anyway? [y/N]:
-```
-
-If user says no: exit. If user says yes: continue (user override).
-
-### 7. Check approval status
-
-```bash
-review_decision=$(gh pr view $pr_number --json reviewDecision -q .reviewDecision)
-```
-
-**Review decisions:**
-
-- `APPROVED` - proceed
-- `CHANGES_REQUESTED` - prompt user
-- `REVIEW_REQUIRED` - prompt user
-- `null` / empty - no reviews, prompt user
-
-**If not approved:**
-
-```
-⚠️  PR has not been approved
-
-Review status: $review_decision
-
-Continue merge anyway? [y/N]:
-```
-
-If user says no: exit. If user says yes: continue (user override).
-
-**Skip these prompts if** `requireApproval: false` in config.
-
-### 8. Extract ticket reference
+### 7. Extract ticket reference
 
 ```bash
 branch=$(gh pr view $pr_number --json headRefName -q .headRefName)
@@ -250,21 +229,22 @@ if [[ -z "$ticket" ]] && [[ "$title" =~ ($TEAM_KEY-[0-9]+) ]]; then
 fi
 ```
 
-### 9. Show merge summary
+### 8. Show merge summary
 
 ```
 About to merge:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- PR:      #$pr_number - $title
- From:    $head_branch
- To:      $base_branch
- Commits: $commit_count
- Files:   $file_count changed
+ PR:       #$pr_number - $title
+ From:     $head_branch
+ To:       $base_branch
+ Commits:  $commit_count
+ Files:    $file_count changed
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- Reviews: $review_status
- CI:      $ci_status
- Tests:   ✅ Passed locally
- Ticket:  $ticket (will move to Done)
+ Merge:    $mergeStateStatus (CLEAN)
+ Reviews:  $review_status
+ CI:       $ci_status
+ Tests:    ✅ Passed locally
+ Ticket:   $ticket (will move to Done)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Merge strategy: Squash and merge
@@ -272,7 +252,7 @@ Merge strategy: Squash and merge
 Proceed? [Y/n]:
 ```
 
-### 10. Execute squash merge
+### 9. Execute squash merge
 
 ```bash
 gh pr merge $pr_number --squash --delete-branch
@@ -289,7 +269,7 @@ gh pr merge $pr_number --squash --delete-branch
 merge_sha=$(git rev-parse HEAD)
 ```
 
-### 11. Update Linear ticket
+### 10. Update Linear ticket
 
 If ticket found and not using `--no-update`:
 
@@ -311,7 +291,7 @@ else
 fi
 ```
 
-### 12. Delete local branch and update base
+### 11. Delete local branch and update base
 
 ```bash
 # Switch to base branch
@@ -329,7 +309,7 @@ echo "✅ Deleted local branch: $head_branch"
 
 **Always delete local branch** - no prompt (remote already deleted).
 
-### 12a. Update primary worktree
+### 11a. Update primary worktree
 
 If running in a git worktree, the primary checkout of main may be stale. Update it:
 
@@ -347,7 +327,7 @@ else
 fi
 ```
 
-### 13. Extract post-merge tasks
+### 12. Extract post-merge tasks
 
 **Read PR description:**
 
@@ -386,7 +366,7 @@ EOF
 humanlayer thoughts sync
 ```
 
-### 14. Detect Deployments and Report Success
+### 13. Detect Deployments and Report Success
 
 After branch cleanup, check if the merge triggered any deployment workflows:
 
@@ -465,6 +445,8 @@ Post-merge tasks: $task_count saved to thoughts/
 ## Error Handling
 
 For all errors, provide clear messages with the specific error, what went wrong, and how to fix it.
+**Never give up with a generic message** — always diagnose the specific cause and provide actionable
+next steps.
 
 **Fail fast (stop execution):**
 
@@ -473,10 +455,26 @@ For all errors, provide clear messages with the specific error, what went wrong,
 - Test failures → show failed tests, suggest fix or `--skip-tests`
 - PR not open/mergeable → show current state
 
-**Prompt for override:**
+**Diagnose and attempt to fix (step 6 blocker loop):**
 
-- CI checks failing → show failures, ask `Continue anyway? [y/N]`
-- Missing approvals → show review status, ask `Continue anyway? [y/N]`
+- CI checks failing → analyze failure, attempt code fix, re-push, re-poll
+- Unresolved threads → run `/review-comments`, resolve threads
+- Branch behind → rebase and push
+- Draft PR → mark as ready
+- Changes requested → check if addressed, suggest re-request review
+- Infrastructure failures → suggest re-run, provide log URL
+
+**Escalate with specifics (never generic):**
+
+- Review required → tell user exactly how many approvals needed and who to request
+- Unresolvable conflicts → list specific files and what conflicts exist
+- Unknown blockers → query branch protection rules and list every requirement with its status
+
+**Never suggest:**
+
+- Force merge, admin override, or disabling branch protection
+- Skipping required checks or reviews
+- Any workaround that bypasses the protection rather than satisfying it
 
 **Warn but continue (graceful degradation):**
 
@@ -527,6 +525,13 @@ keys.
 
 ## Safety Features
 
+**Never bypass branch protection:**
+
+- No `--admin`, `--force`, or any flag that circumvents protection rules
+- No disabling or modifying branch protection rules
+- No suggesting the user disable protections
+- Always satisfy requirements legitimately or escalate with specifics
+
 **Fail fast on:**
 
 - Merge conflicts (can't auto-resolve)
@@ -534,11 +539,18 @@ keys.
 - Rebase conflicts
 - PR not in mergeable state
 
-**Prompt for confirmation on:**
+**Diagnose and fix automatically:**
 
-- Missing required approvals
-- Failing CI checks
-- Any exceptional circumstance
+- CI failures → analyze errors, fix code, push, re-poll
+- Unresolved review threads → run `/review-comments`, resolve via GraphQL
+- Branch behind → rebase and push
+- Draft PR → mark as ready with `gh pr ready`
+
+**Escalate with actionable specifics:**
+
+- Review required → who to request, how many needed
+- Changes requested → what was asked, whether commits address it
+- Unknown blockers → full branch protection rule breakdown
 
 **Always automated:**
 
@@ -556,12 +568,12 @@ keys.
 
 ## Remember:
 
+- **Never bypass branch protection** — diagnose and resolve blockers legitimately
 - **Always squash merge** — clean history
 - **Always delete branches** — no orphan branches
 - **Always run tests** — unless explicitly skipped
 - **Auto-rebase** — keep up-to-date with base
-- **Fail fast** — stop on conflicts or test failures
+- **Diagnose, don't give up** — identify specific blockers and fix or explain them
 - **Update Linear** — move ticket to Done automatically (if Linearis available)
-- **Only prompt for exceptions** — approvals missing, CI failing
 - **Graceful degradation** — work without Linearis if needed
 - For Linearis CLI syntax, see the `linearis` skill reference
