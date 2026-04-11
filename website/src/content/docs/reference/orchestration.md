@@ -449,10 +449,236 @@ Multiple orchestrators can run concurrently. Each gets a unique name that prefix
 └── dash-orch-ACME-201/
 ```
 
+## Global State & Event Log
+
+When multiple orchestrators run concurrently — or you want to check on things after the fact — a single global state file at `~/catalyst/state.json` provides a unified view of all active orchestrators, their workers, and anything that needs your attention.
+
+### File Layout
+
+```
+~/catalyst/
+├── state.json              # Active orchestrators (machine-readable)
+├── events/                 # Append-only event stream, rotated monthly
+│   ├── 2026-03.jsonl
+│   └── 2026-04.jsonl
+├── history/                # Completed/archived orchestrator snapshots
+│   └── q2-api-redesign--2026-04-11T14-00-00Z.json
+└── wt/                     # Worktrees (existing)
+    └── <projectKey>/...
+```
+
+**`state.json`** contains all active orchestrators with their progress, worker status, and attention items. Orchestrators register at startup and heartbeat every 2-3 minutes. Workers update their own entries at each phase transition.
+
+**`events/`** contains append-only JSONL files, rotated monthly. Every significant transition — worker dispatched, status change, PR created, verification passed/failed, attention raised — is logged here. Query across all months with `cat ~/catalyst/events/*.jsonl | jq`.
+
+**`history/`** contains full snapshots of orchestrators after they complete, fail, or are garbage-collected due to stale heartbeats.
+
+### Global State Schema
+
+Each orchestrator entry in `state.json` contains:
+
+```json
+{
+  "id": "q2-api-redesign",
+  "projectKey": "acme",
+  "repository": "acme-corp/api",
+  "status": "active",
+  "lastHeartbeat": "2026-04-11T18:30:00Z",
+  "progress": {
+    "totalTickets": 6,
+    "completedTickets": 3,
+    "currentWave": 2,
+    "totalWaves": 3
+  },
+  "workers": {
+    "ACME-101": {
+      "title": "Add OAuth2 provider",
+      "status": "done",
+      "phase": 6,
+      "pr": { "number": 234, "url": "...", "ciStatus": "passing" },
+      "needsAttention": false
+    },
+    "ACME-105": {
+      "title": "Audit log schema",
+      "status": "stalled",
+      "phase": 3,
+      "needsAttention": true,
+      "attentionReason": "No progress for 15+ minutes"
+    }
+  },
+  "attention": [
+    {
+      "type": "stalled",
+      "ticketId": "ACME-105",
+      "message": "No progress for 15+ minutes",
+      "since": "2026-04-11T17:10:00Z"
+    }
+  ]
+}
+```
+
+The full JSON Schema is at `plugins/dev/templates/global-state.json`. The global state is a denormalized summary — each orchestrator's detailed local state remains at `<worktree>/state.json` for crash recovery.
+
+### Querying with jq
+
+The global state is designed for fast `jq` queries. Here are common patterns:
+
+```bash
+# What needs my attention right now?
+jq '[.orchestrators[].attention[]] | sort_by(.since)' ~/catalyst/state.json
+
+# All active orchestrators at a glance
+jq '.orchestrators[] | {id, status, progress: "\(.progress.completedTickets)/\(.progress.totalTickets)", wave: "\(.progress.currentWave)/\(.progress.totalWaves)"}' ~/catalyst/state.json
+
+# Workers currently in-flight
+jq '[.orchestrators[].workers[] | select(.status != "done" and .status != "failed") | {ticket: .ticketId, title, status, phase}]' ~/catalyst/state.json
+
+# PRs ready for review
+jq '[.orchestrators[].workers[] | select(.status == "pr-created") | {ticket: .ticketId, pr: .pr.url}]' ~/catalyst/state.json
+
+# Filter by project
+jq '[.orchestrators[] | select(.projectKey == "acme")]' ~/catalyst/state.json
+```
+
+### Querying Events
+
+Events are JSONL files (one JSON object per line), so `grep`, `jq`, and standard Unix tools all work:
+
+```bash
+# Last 20 events
+tail -20 ~/catalyst/events/2026-04.jsonl | jq .
+
+# All events for a specific ticket
+grep '"ACME-105"' ~/catalyst/events/*.jsonl | jq .
+
+# All attention events
+cat ~/catalyst/events/*.jsonl | jq 'select(.event == "attention-raised")'
+
+# Timeline for an orchestrator
+grep '"q2-api-redesign"' ~/catalyst/events/*.jsonl | jq -r '"\(.ts) \(.worker // "-") \(.event)"'
+
+# Event types
+cat ~/catalyst/events/*.jsonl | jq -r '.event' | sort | uniq -c | sort -rn
+```
+
+### The catalyst-state.sh CLI
+
+All state reads and writes go through `catalyst-state.sh`, which handles file locking for concurrent access:
+
+```bash
+# View active orchestrators
+catalyst-state.sh status
+
+# Filter by project
+catalyst-state.sh status --project acme
+
+# Run any jq query
+catalyst-state.sh query '.orchestrators | keys'
+
+# Query events
+catalyst-state.sh events --last 10
+catalyst-state.sh events --ticket ACME-105
+catalyst-state.sh events --type verification-failed
+
+# Garbage collect stale orchestrators and old events
+catalyst-state.sh gc --stale-after 10 --events-older-than 6m
+```
+
+Orchestrators and workers call `catalyst-state.sh` internally — you don't need to run it manually unless you're querying or debugging.
+
+### Heartbeat & Stale Detection
+
+Orchestrators write a `lastHeartbeat` timestamp during each monitoring poll (every 2-3 minutes). If an orchestrator dies without clean shutdown (process killed, machine restarts), its heartbeat goes stale.
+
+`catalyst-state.sh gc` detects stale entries (default: heartbeat older than 10 minutes), marks them as `abandoned`, and archives them to `~/catalyst/history/`. Run it manually or let the next orchestrator startup clean up automatically.
+
+### Building Interfaces
+
+The global state JSON is a stable contract designed for building rich interfaces:
+
+**Terminal dashboard** — Simplest approach with `watch`:
+```bash
+watch -n5 'jq ".orchestrators[] | {id, status, progress: \"\(.progress.completedTickets)/\(.progress.totalTickets)\", attention: (.attention | length)}" ~/catalyst/state.json'
+```
+
+**Web dashboard** — Serve `state.json` via a lightweight HTTP server and build a React/Svelte frontend that polls or watches for changes. The schema is documented in `plugins/dev/templates/global-state.json`.
+
+**Agent integration** — Any Claude Code agent can read `~/catalyst/state.json` directly to answer questions like "what's the status of the auth migration?" or "are any workers waiting for me?" without asking the orchestrator.
+
+**Event replay** — The event log in `~/catalyst/events/` gives you a full audit trail. Build timeline views, calculate cycle times, or feed events into analytics. Every event has a timestamp, orchestrator ID, optional worker/ticket ID, and event type — so you can reconstruct the full sequence of what happened in any orchestration run:
+
+```bash
+# Replay an entire orchestration run chronologically
+grep '"q2-api-redesign"' ~/catalyst/events/*.jsonl | jq -r '"\(.ts) [\(.worker // "orch")] \(.event) \(.detail // "" | tostring)"'
+
+# Calculate time from dispatch to PR for each worker
+cat ~/catalyst/events/*.jsonl | jq -s '
+  group_by(.worker) | map(select(.[0].worker != null)) | map({
+    ticket: .[0].worker,
+    dispatched: (map(select(.event == "worker-dispatched")) | .[0].ts),
+    pr_created: (map(select(.event == "worker-pr-created")) | .[0].ts)
+  }) | map(select(.dispatched and .pr_created))'
+
+# Total duration per orchestrator (start to completion)
+cat ~/catalyst/events/*.jsonl | jq -s '
+  group_by(.orchestrator) | map({
+    orchestrator: .[0].orchestrator,
+    started: (map(select(.event == "orchestrator-started")) | .[0].ts),
+    completed: (map(select(.event == "orchestrator-completed")) | .[0].ts)
+  })'
+```
+
+### Token Usage & Cost Tracking
+
+Each orchestrator and worker entry in the global state includes a `usage` block that tracks token consumption and cost:
+
+```json
+{
+  "usage": {
+    "inputTokens": 15420,
+    "outputTokens": 8730,
+    "cacheReadTokens": 42000,
+    "cacheCreationTokens": 29670,
+    "costUSD": 1.47,
+    "numTurns": 23,
+    "durationMs": 847000,
+    "durationApiMs": 312000,
+    "model": "claude-opus-4-6[1m]"
+  }
+}
+```
+
+**How it works**: Workers launched via the `claude` CLI with `--output-format json` produce a JSON output that includes full token counts, cost, and timing. After a worker process exits, the orchestrator parses this output and writes the usage data to both the worker's entry and the orchestrator's aggregate.
+
+**Query patterns**:
+
+```bash
+# Total cost across all active orchestrators
+jq '[.orchestrators[].usage.costUSD] | add' ~/catalyst/state.json
+
+# Cost per worker in an orchestration
+jq '.orchestrators["q2-api-redesign"].workers | to_entries[] | {ticket: .key, cost: .value.usage.costUSD}' ~/catalyst/state.json
+
+# Most expensive workers (from history)
+cat ~/catalyst/history/*.json | jq -s '[.[].workers | to_entries[] | {ticket: .key, cost: .value.usage.costUSD}] | sort_by(.cost) | reverse | .[:10]'
+
+# Average cost per ticket across all historical orchestrations
+cat ~/catalyst/history/*.json | jq -s '[.[].usage.costUSD / .[].progress.totalTickets] | add / length'
+```
+
+**Current limitations**:
+- Workers launched via `humanlayer launch` do not currently expose session usage — their `usage` fields remain null
+- The orchestrator itself cannot capture its own usage from within the session
+- Usage is only captured after a worker process exits, not in real-time
+
+As these tools evolve to expose usage data, the schema is ready to accept it.
+
 ## Error Handling
 
-**Worker crashes or stalls**: The orchestrator detects no progress for 15+ minutes (no commits, no signal updates). It marks the worker as "stalled" on the dashboard and flags it for human decision — it does not auto-restart.
+**Worker crashes or stalls**: The orchestrator detects no progress for 15+ minutes (no commits, no signal updates). It marks the worker as "stalled" on the dashboard, flags it in the global state's `attention` array, and emits an `attention-raised` event. It does not auto-restart — it flags for human decision.
 
-**Orchestrator crash recovery**: All state lives in `state.json` and worker signal files. Resume with `/orchestrate --resume <orch-dir>` to pick up where it left off.
+**Orchestrator crash recovery**: Local state lives in `<worktree>/state.json` + worker signal files. Resume with `/orchestrate --resume <orch-dir>` to pick up where it left off. The orchestrator re-registers itself in the global state on resume.
 
-**Verification failure**: The worker gets specific remediation instructions. The orchestrator re-verifies after fixes. A ticket cannot advance to merge until verification passes.
+**Orchestrator unclean death**: If the orchestrator process dies, its `lastHeartbeat` goes stale. `catalyst-state.sh gc` archives the entry as `abandoned`. Workers that were in-flight may still be running — check their worktrees and signal files manually, or let the next orchestrator pick them up.
+
+**Verification failure**: The worker gets specific remediation instructions. The global state gets an `attention` item with type `verification-failed`. The orchestrator re-verifies after fixes. A ticket cannot advance to merge until verification passes.

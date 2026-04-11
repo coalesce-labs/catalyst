@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$comment": "Event log entry schema — appended to ~/catalyst/events/YYYY-MM.jsonl by catalyst-state.sh.",
+  "type": "object",
+  "required": ["ts", "orchestrator", "event"],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp of the event"
+    },
+    "orchestrator": {
+      "type": "string",
+      "description": "Orchestrator ID that produced this event"
+    },
+    "worker": {
+      "type": ["string", "null"],
+      "description": "Ticket ID of the worker involved (null for orchestrator-level events)"
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "orchestrator-started",
+        "orchestrator-completed",
+        "orchestrator-failed",
+        "orchestrator-paused",
+        "orchestrator-resumed",
+        "orchestrator-heartbeat",
+        "wave-started",
+        "wave-completed",
+        "worker-dispatched",
+        "worker-status-change",
+        "worker-pr-created",
+        "worker-done",
+        "worker-failed",
+        "worker-stalled",
+        "verification-started",
+        "verification-passed",
+        "verification-failed",
+        "remediation-started",
+        "attention-raised",
+        "attention-resolved",
+        "worker-usage-captured",
+        "archive"
+      ],
+      "description": "Event type"
+    },
+    "detail": {
+      "type": ["object", "null"],
+      "description": "Event-specific payload (varies by event type)",
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "Previous status (for status-change events)"
+        },
+        "to": {
+          "type": "string",
+          "description": "New status (for status-change events)"
+        },
+        "wave": {
+          "type": "integer",
+          "description": "Wave number (for wave events)"
+        },
+        "tickets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Tickets involved (for wave-started, orchestrator-started)"
+        },
+        "pr": {
+          "type": "integer",
+          "description": "PR number (for pr-created events)"
+        },
+        "url": {
+          "type": "string",
+          "description": "URL (for pr-created events)"
+        },
+        "reason": {
+          "type": "string",
+          "description": "Reason (for failed, stalled, attention events)"
+        },
+        "attentionType": {
+          "type": "string",
+          "description": "Attention category (for attention-raised events)"
+        }
+      }
+    }
+  }
+}
