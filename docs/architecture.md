@@ -47,6 +47,32 @@ Structure:
 
 Management: Automatically updated by workflow skills. Tracked per-worktree (not committed to git).
 
+## Global Orchestrator State
+
+Cross-orchestrator visibility lives at `~/catalyst/state.json` — a single JSON file that all
+orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
+
+```
+~/catalyst/
+├── state.json              # Active orchestrators (denormalized summary)
+├── events/                 # Append-only JSONL event stream, rotated monthly
+│   └── YYYY-MM.jsonl
+├── history/                # Archived orchestrator snapshots
+│   └── <id>--<timestamp>.json
+└── wt/                     # Worktrees (existing)
+```
+
+- **state.json**: Registry of active orchestrators with progress, worker status, and attention
+  items. Queryable with `jq`. Schema: `plugins/dev/templates/global-state.json`.
+- **events/**: Every phase transition, PR creation, verification result, and attention item is
+  logged as a JSONL entry. Schema: `plugins/dev/templates/global-event.json`.
+- **history/**: Full orchestrator snapshots archived on completion, failure, or stale detection.
+- **Heartbeat**: Orchestrators write `lastHeartbeat` every 2-3 min. Stale entries (>10 min) are
+  garbage-collected as `abandoned`.
+
+This is a denormalized summary layer — per-orchestrator local state in worktrees remains the
+source of truth for crash recovery. See ADR-006 for the full design decision.
+
 ## Three-Layer Memory Architecture
 
 Catalyst uses a three-layer memory architecture to manage context across multiple projects:

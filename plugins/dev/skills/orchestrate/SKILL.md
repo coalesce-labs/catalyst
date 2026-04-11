@@ -327,6 +327,46 @@ Initialize `state.json`:
 }
 ```
 
+**Register with global state** (immediately after local state initialization):
+
+```bash
+STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
+
+# Build the registration JSON with all workers from all waves
+WORKERS_JSON="{}"
+for TICKET_ID in "${ALL_TICKETS[@]}"; do
+  TITLE=$(linearis issues get "$TICKET_ID" --json title --quiet | jq -r '.title')
+  WORKERS_JSON=$(echo "$WORKERS_JSON" | jq \
+    --arg tid "$TICKET_ID" --arg title "$TITLE" \
+    '. + {($tid): {ticketId: $tid, title: $title, status: "dispatched", phase: 0, branch: null, pr: null, updatedAt: "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'", needsAttention: false, attentionReason: null}}')
+done
+
+# Detect repository from git remote
+REPO=$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')
+
+"$STATE_SCRIPT" register "${ORCH_NAME}" "$(jq -nc \
+  --arg id "${ORCH_NAME}" \
+  --arg pk "$(jq -r '.catalyst.projectKey // "unknown"' "$CONFIG_FILE")" \
+  --arg repo "$REPO" \
+  --arg bb "${BASE_BRANCH}" \
+  --arg wtd "${ORCH_DIR}" \
+  --arg sf "${ORCH_DIR}/state.json" \
+  --argjson total "${#ALL_TICKETS[@]}" \
+  --argjson waves "$TOTAL_WAVES" \
+  --argjson workers "$WORKERS_JSON" \
+  '{
+    id: $id, projectKey: $pk, repository: $repo, baseBranch: $bb,
+    status: "active", startedAt: (now | strftime("%Y-%m-%dT%H:%M:%SZ")),
+    worktreeDir: $wtd, stateFile: $sf,
+    progress: {totalTickets: $total, completedTickets: 0, failedTickets: 0, inProgressTickets: 0, currentWave: 1, totalWaves: $waves},
+    usage: {inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUSD: 0, numTurns: 0, durationMs: 0, durationApiMs: 0, model: null},
+    workers: $workers, attention: []
+  }')"
+```
+
+The `CATALYST_ORCHESTRATOR_ID` is set to `${ORCH_NAME}` for use by workers (passed via
+environment variable alongside `CATALYST_ORCHESTRATOR_DIR`).
+
 ### Phase 3: Dispatch Workers
 
 For each provisioned worker worktree, dispatch a `/oneshot` session.
@@ -338,6 +378,7 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
    WORKER_DIR="${WORKTREES_BASE}/${ORCH_NAME}-${TICKET_ID}"
 
    CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
+   CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
    humanlayer launch \
      --model "${WORKER_MODEL}" \
      --title "${ORCH_NAME}-${TICKET_ID}" \
@@ -345,14 +386,68 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
      "${WORKER_COMMAND} ${TICKET_ID} --auto-merge"
    ```
 
-2. **Direct `claude` CLI** (fallback):
+2. **Direct `claude` CLI** (fallback — includes usage capture):
    ```bash
+   WORKER_OUTPUT="${ORCH_DIR}/workers/${TICKET_ID}-output.json"
+
    CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
+   CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
    claude \
      -n "${ORCH_NAME}-${TICKET_ID}" \
      -w "${WORKER_DIR}" \
-     -p "${WORKER_COMMAND} ${TICKET_ID} --auto-merge" &
+     --output-format json \
+     -p "${WORKER_COMMAND} ${TICKET_ID} --auto-merge" \
+     > "$WORKER_OUTPUT" 2>/dev/null &
    ```
+
+   When the worker process exits, parse usage from its output:
+
+   ```bash
+   # After worker PID exits, extract usage and write to global state
+   if [ -f "$WORKER_OUTPUT" ]; then
+     USAGE=$(jq -c '{
+       inputTokens: .usage.input_tokens,
+       outputTokens: .usage.output_tokens,
+       cacheReadTokens: .usage.cache_read_input_tokens,
+       cacheCreationTokens: .usage.cache_creation_input_tokens,
+       costUSD: .total_cost_usd,
+       numTurns: .num_turns,
+       durationMs: .duration_ms,
+       durationApiMs: .duration_api_ms,
+       model: (.modelUsage | keys[0] // null)
+     }' "$WORKER_OUTPUT" 2>/dev/null || echo 'null')
+
+     if [ "$USAGE" != "null" ]; then
+       "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET_ID}" ".usage = ${USAGE}"
+
+       # Aggregate into orchestrator-level usage
+       "$STATE_SCRIPT" update "${ORCH_NAME}" "
+         .usage.inputTokens += $(echo "$USAGE" | jq '.inputTokens')
+         | .usage.outputTokens += $(echo "$USAGE" | jq '.outputTokens')
+         | .usage.cacheReadTokens += $(echo "$USAGE" | jq '.cacheReadTokens')
+         | .usage.cacheCreationTokens += $(echo "$USAGE" | jq '.cacheCreationTokens')
+         | .usage.costUSD += $(echo "$USAGE" | jq '.costUSD')
+         | .usage.numTurns += $(echo "$USAGE" | jq '.numTurns')
+         | .usage.durationMs += $(echo "$USAGE" | jq '.durationMs')
+         | .usage.durationApiMs += $(echo "$USAGE" | jq '.durationApiMs')"
+     fi
+   fi
+   ```
+
+   **Note**: Usage capture requires the `claude` CLI fallback path with `--output-format json`.
+   Workers launched via `humanlayer launch` do not currently expose session usage data — their
+   `usage` fields remain null until humanlayer adds this capability.
+
+**Emit dispatch event and update global state** after each worker dispatch:
+
+```bash
+"$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET_ID}" '.status = "dispatched" | .phase = 0'
+"$STATE_SCRIPT" update "${ORCH_NAME}" '.progress.inProgressTickets += 1'
+"$STATE_SCRIPT" event "$(jq -nc \
+  --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
+  '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-dispatched", detail: null}')"
+```
 
 **Worker dispatch prompt includes mandatory testing requirements:**
 
@@ -439,6 +534,42 @@ done
 
 **Update `state.json`** with machine-readable state for crash recovery.
 
+**Update global state and heartbeat** after each monitoring poll:
+
+```bash
+# Heartbeat — proves the orchestrator is alive
+"$STATE_SCRIPT" heartbeat "${ORCH_NAME}"
+
+# Sync each worker's status from signal file to global state
+for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
+  TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
+  W_STATUS=$(jq -r '.status' "$WORKER_SIGNAL")
+  W_PHASE=$(jq -r '.phase' "$WORKER_SIGNAL")
+  W_BRANCH=$(git -C "${WORKTREE_BASE}/${ORCH_NAME}-${TICKET}" branch --show-current 2>/dev/null || echo "")
+  W_PR=$(jq -c '.pr // null' "$WORKER_SIGNAL")
+
+  "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET}" \
+    ".status = \"${W_STATUS}\" | .phase = ${W_PHASE} | .branch = \"${W_BRANCH}\" | .pr = ${W_PR}"
+done
+
+# Detect stalled workers and raise attention
+for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
+  TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
+  W_STATUS=$(jq -r '.status' "$WORKER_SIGNAL")
+  UPDATED=$(jq -r '.updatedAt' "$WORKER_SIGNAL")
+
+  # If no update in 15+ minutes and not in a terminal state, flag as stalled
+  if [[ "$W_STATUS" != "done" && "$W_STATUS" != "failed" && "$W_STATUS" != "stalled" ]]; then
+    STALE_CUTOFF=$(date -u -v-15M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "15 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+    if [[ "$UPDATED" < "$STALE_CUTOFF" ]]; then
+      "$STATE_SCRIPT" attention "${ORCH_NAME}" "stalled" "${TICKET}" \
+        "No progress for 15+ minutes (last update: ${UPDATED})"
+    fi
+  fi
+done
+```
+
 ### Phase 5: Independent Verification (Anti-Reward-Hacking)
 
 When a worker signals "done" (PR created, CI green), the orchestrator does NOT trust it.
@@ -465,6 +596,26 @@ The verification script checks:
 5. **Security**: Check for OWASP top 10 patterns in new code.
 6. **Reward hacking scan**: Run `/scan-reward-hacking` on changed files — check for `as any`,
    `@ts-ignore`, void patterns, suppressed errors.
+
+**Emit verification events:**
+
+```bash
+# Before running verification
+"$STATE_SCRIPT" event "$(jq -nc --arg ts "$(now_iso)" --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
+  '{ts: $ts, orchestrator: $orch, worker: $w, event: "verification-started", detail: null}')"
+
+# After verification
+if [[ $VERIFY_EXIT -eq 0 ]]; then
+  "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(now_iso)" --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
+    '{ts: $ts, orchestrator: $orch, worker: $w, event: "verification-passed", detail: null}')"
+  "$STATE_SCRIPT" resolve-attention "${ORCH_NAME}" "${TICKET_ID}"
+else
+  "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(now_iso)" --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
+    '{ts: $ts, orchestrator: $orch, worker: $w, event: "verification-failed", detail: null}')"
+  "$STATE_SCRIPT" attention "${ORCH_NAME}" "verification-failed" "${TICKET_ID}" \
+    "Independent verification found gaps — remediation required"
+fi
+```
 
 **Verification outcomes:**
 
@@ -543,7 +694,19 @@ When ALL tickets in the current wave pass verification:
    discovered by the previous wave. Build ON TOP of these — do not reinvent.
    ```
 
-6. **Update dashboard and state**: Advance `currentWave`, update wave statuses.
+6. **Update dashboard, local state, and global state**: Advance `currentWave`, update wave statuses.
+
+```bash
+# Update global state for wave advancement
+"$STATE_SCRIPT" update "${ORCH_NAME}" \
+  ".progress.currentWave = ${NEXT_WAVE} | .progress.completedTickets += ${COMPLETED_COUNT}"
+"$STATE_SCRIPT" event "$(jq -nc \
+  --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg orch "${ORCH_NAME}" \
+  --argjson wave $NEXT_WAVE \
+  --argjson tickets "$(printf '%s\n' "${NEXT_WAVE_TICKETS[@]}" | jq -R . | jq -sc .)" \
+  '{ts: $ts, orchestrator: $orch, worker: null, event: "wave-started", detail: {wave: $wave, tickets: $tickets}}')"
+```
 
 ### Phase 7: Completion
 
@@ -566,7 +729,20 @@ When all waves are complete:
 
 4. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.
 
-5. **Report to user**:
+5. **Complete and archive global state**:
+
+```bash
+# Mark completed in global state
+"$STATE_SCRIPT" update "${ORCH_NAME}" \
+  '.status = "completed" | .completedAt = $now | .progress.completedTickets = .progress.totalTickets | .progress.inProgressTickets = 0'
+"$STATE_SCRIPT" event "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg orch "${ORCH_NAME}" \
+  '{ts: $ts, orchestrator: $orch, worker: null, event: "orchestrator-completed", detail: null}')"
+
+# Archive to history (removes from active state)
+"$STATE_SCRIPT" archive "${ORCH_NAME}"
+```
+
+6. **Report to user**:
    ```
    Orchestration Complete — "api-redesign"
 
@@ -580,6 +756,7 @@ When all waves are complete:
      - PROJ-105: as any cast (fixed on retry)
 
    Summary: ${ORCH_DIR}/SUMMARY.md
+   History: ~/catalyst/history/${ORCH_NAME}--<timestamp>.json
    ```
 
 ## Wave Briefing Documents

@@ -105,3 +105,54 @@ by org/repo.
 - Falls back to `~/wt/<repo>` if `GITHUB_SOURCE_ROOT` not set
 - No hardcoded paths in scripts or documentation
 - Clean organization by org and repo
+
+---
+
+## ADR-006: Global Orchestrator State
+
+**Decision**: Maintain a single `~/catalyst/state.json` file as a global registry of all active
+orchestrators, with an append-only event log at `~/catalyst/events/YYYY-MM.jsonl` and completed
+orchestrator snapshots archived to `~/catalyst/history/`.
+
+**Rationale**:
+
+- Multiple orchestrators can run concurrently across different projects
+- Per-orchestrator local state (`state.json` in each worktree) serves crash recovery but provides no
+  cross-orchestrator visibility
+- Users and agents need a single place to answer "what is Catalyst doing right now?"
+- The file must be queryable via `jq` and consumable by dashboards (terminal, web)
+- A heartbeat pattern detects orchestrators that died without clean shutdown
+
+**Design**:
+
+```
+~/catalyst/
+├── state.json              # Global registry (active orchestrators only)
+├── events/                 # Append-only event stream, rotated monthly
+│   ├── 2026-03.jsonl
+│   └── 2026-04.jsonl
+├── history/                # Archived orchestrator snapshots
+│   └── <id>--<timestamp>.json
+└── wt/                     # Worktrees (existing, unchanged)
+```
+
+- **Global state** is a denormalized summary optimized for queries — not a replacement for local
+  state. Per-orchestrator `state.json` in worktrees continues to serve crash recovery.
+- **Writes** go through `catalyst-state.sh` which uses `mkdir`-based locking (portable, no `flock`
+  dependency) for atomic read-modify-write.
+- **Events** are appended without locking (POSIX atomic append for small writes). Monthly rotation
+  keeps files small. All event files are JSONL, so `cat *.jsonl | jq` queries across them.
+- **History** holds full orchestrator snapshots at completion/failure/abandonment. Keyed by
+  `<id>--<startedAt>` for uniqueness across reruns.
+- **Heartbeat**: Orchestrators write `lastHeartbeat` during each monitoring poll (every 2-3 min).
+  `catalyst-state.sh gc` detects entries with heartbeats older than 10 minutes and archives them as
+  `abandoned`.
+
+**Consequences**:
+
+- Orchestrators must register at startup and heartbeat during monitoring
+- Workers update both their signal file (local) and the global state (via `catalyst-state.sh`)
+- Agents can answer status questions by reading `~/catalyst/state.json` directly
+- Dashboards (terminal, web) have a stable JSON contract to build against
+- The schemas at `plugins/dev/templates/global-state.json` and `global-event.json` define the
+  contract for forward compatibility

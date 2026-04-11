@@ -75,7 +75,10 @@ signal file** so the orchestrator can track progress and run adversarial verific
 # 1. CATALYST_ORCHESTRATOR_DIR env var (set by orchestrator in dispatch)
 ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
 
-# 2. Sibling directory with workers/ subdirectory (convention-based)
+# 2. CATALYST_ORCHESTRATOR_ID env var (set by orchestrator in dispatch)
+ORCH_ID="${CATALYST_ORCHESTRATOR_ID:-}"
+
+# 3. Sibling directory with workers/ subdirectory (convention-based)
 if [ -z "$ORCH_DIR" ]; then
   PARENT=$(dirname "$(pwd)")
   for DIR in "$PARENT"/*/workers; do
@@ -85,25 +88,80 @@ if [ -z "$ORCH_DIR" ]; then
     fi
   done
 fi
+
+# Resolve global state script path
+STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
 ```
 
 If `ORCH_DIR` is detected, the worker:
 
 1. **Reads its signal file** from `${ORCH_DIR}/workers/${TICKET_ID}.json` (created by orchestrator)
-2. **Updates status at each phase transition** — writes `status`, `phase`, and `updatedAt`
-3. **Fills `definitionOfDone`** at Phase 4 (validation) and Phase 5 (ship) with actual results
-4. **Reads wave briefing** if referenced in `${ORCH_DIR}/wave-*-briefing.md` before starting
+2. **Updates status at each phase transition** — writes `status`, `phase`, and `updatedAt` to both
+   the local signal file AND the global state at `~/catalyst/state.json`
+3. **Emits events** to the global event log at each phase transition
+4. **Fills `definitionOfDone`** at Phase 4 (validation) and Phase 5 (ship) with actual results
+5. **Reads wave briefing** if referenced in `${ORCH_DIR}/wave-*-briefing.md` before starting
 
-**Signal file update helper** (run at each phase boundary):
+**Signal file + global state update helper** (run at each phase boundary):
 
 ```bash
 SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
 if [ -f "$SIGNAL_FILE" ]; then
+  OLD_STATUS=$(jq -r '.status' "$SIGNAL_FILE")
+
+  # Update local signal file
   jq --arg status "$NEW_STATUS" \
      --arg phase "$PHASE_NUM" \
      --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
      '.status = $status | .phase = ($phase | tonumber) | .updatedAt = $updated' \
      "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+
+  # Update global state (if orchestrator ID is known)
+  if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
+    "$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET_ID" \
+      ".status = \"$NEW_STATUS\" | .phase = $PHASE_NUM"
+
+    # Emit status change event
+    "$STATE_SCRIPT" event "$(jq -nc \
+      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg orch "$ORCH_ID" \
+      --arg w "$TICKET_ID" \
+      --arg from "$OLD_STATUS" \
+      --arg to "$NEW_STATUS" \
+      '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-status-change", detail: {from: $from, to: $to}}')"
+  fi
+fi
+```
+
+**When worker creates a PR**, also update global state with PR details:
+
+```bash
+if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
+  "$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET_ID" \
+    ".pr = {number: ${PR_NUMBER}, url: \"${PR_URL}\", ciStatus: \"pending\"}"
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg orch "$ORCH_ID" --arg w "$TICKET_ID" \
+    --argjson pr "$PR_NUMBER" --arg url "$PR_URL" \
+    '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-pr-created", detail: {pr: $pr, url: $url}}')"
+fi
+```
+
+**When worker reaches terminal state** (done or failed):
+
+```bash
+if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
+  if [ "$NEW_STATUS" = "done" ]; then
+    "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg orch "$ORCH_ID" --arg w "$TICKET_ID" \
+      '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-done", detail: null}')"
+  elif [ "$NEW_STATUS" = "failed" ]; then
+    "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg orch "$ORCH_ID" --arg w "$TICKET_ID" --arg reason "$ERROR_MSG" \
+      '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-failed", detail: {reason: $reason}}')"
+    "$STATE_SCRIPT" attention "$ORCH_ID" "waiting-for-user" "$TICKET_ID" \
+      "Worker failed: ${ERROR_MSG}"
+  fi
 fi
 ```
 

@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$comment": "Global orchestrator state — ~/catalyst/state.json. Written by orchestrators and workers via catalyst-state.sh.",
+  "type": "object",
+  "required": ["version", "lastUpdated", "orchestrators"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "Schema version for forward compatibility"
+    },
+    "lastUpdated": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of last write to this file"
+    },
+    "orchestrators": {
+      "type": "object",
+      "description": "Active orchestrators keyed by orchestrator ID. Completed orchestrators are archived to ~/catalyst/history/.",
+      "additionalProperties": {
+        "$ref": "#/$defs/orchestrator"
+      }
+    }
+  },
+  "$defs": {
+    "orchestrator": {
+      "type": "object",
+      "required": ["id", "projectKey", "repository", "baseBranch", "status", "startedAt", "updatedAt", "lastHeartbeat", "worktreeDir", "stateFile", "progress", "workers", "attention"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique orchestrator name (e.g., 'q2-api-redesign')"
+        },
+        "projectKey": {
+          "type": "string",
+          "description": "Project key from .catalyst/config.json (e.g., 'bravo-1')"
+        },
+        "repository": {
+          "type": "string",
+          "description": "GitHub org/repo (e.g., 'coalesce-labs/bravo-1')"
+        },
+        "baseBranch": {
+          "type": "string",
+          "description": "Git base branch (e.g., 'main')"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "paused", "completed", "failed", "abandoned"],
+          "description": "Orchestrator lifecycle status. 'abandoned' is set by GC when heartbeat expires."
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when orchestrator was created"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of last state change"
+        },
+        "completedAt": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when orchestrator finished (null while active)"
+        },
+        "lastHeartbeat": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of last monitoring poll. Stale if >10 minutes old."
+        },
+        "worktreeDir": {
+          "type": "string",
+          "description": "Absolute path to the orchestrator's worktree directory"
+        },
+        "stateFile": {
+          "type": "string",
+          "description": "Absolute path to the orchestrator's detailed local state.json"
+        },
+        "progress": {
+          "$ref": "#/$defs/progress"
+        },
+        "workers": {
+          "type": "object",
+          "description": "Worker summaries keyed by ticket ID",
+          "additionalProperties": {
+            "$ref": "#/$defs/worker"
+          }
+        },
+        "usage": {
+          "$ref": "#/$defs/usage",
+          "description": "Aggregate token/cost usage across orchestrator + all workers. Updated when worker sessions complete."
+        },
+        "attention": {
+          "type": "array",
+          "description": "Items requiring human attention, ordered newest first",
+          "items": {
+            "$ref": "#/$defs/attentionItem"
+          }
+        }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "required": ["totalTickets", "completedTickets", "failedTickets", "inProgressTickets", "currentWave", "totalWaves"],
+      "properties": {
+        "totalTickets": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total tickets across all waves"
+        },
+        "completedTickets": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tickets that passed verification and merged"
+        },
+        "failedTickets": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tickets that failed and were not recovered"
+        },
+        "inProgressTickets": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tickets currently being worked on"
+        },
+        "currentWave": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Current wave number (1-indexed)"
+        },
+        "totalWaves": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total number of waves in the plan"
+        }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "required": ["ticketId", "title", "status", "phase", "updatedAt", "needsAttention"],
+      "properties": {
+        "ticketId": {
+          "type": "string",
+          "description": "Linear ticket ID (e.g., 'ACME-101')"
+        },
+        "title": {
+          "type": "string",
+          "description": "Ticket title for display"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["dispatched", "researching", "planning", "implementing", "validating", "shipping", "pr-created", "merging", "done", "failed", "stalled", "remediation"],
+          "description": "Current worker status (mirrors worker-signal.json status enum)"
+        },
+        "phase": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6,
+          "description": "Current /oneshot phase (0=dispatched through 6=merge)"
+        },
+        "branch": {
+          "type": ["string", "null"],
+          "description": "Git branch name"
+        },
+        "pr": {
+          "type": ["object", "null"],
+          "properties": {
+            "number": { "type": "integer" },
+            "url": { "type": "string", "format": "uri" },
+            "ciStatus": {
+              "type": "string",
+              "enum": ["pending", "passing", "failing", "unknown"]
+            }
+          },
+          "description": "Pull request details (null until PR is created)"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of last status update"
+        },
+        "needsAttention": {
+          "type": "boolean",
+          "description": "True if this worker requires human intervention"
+        },
+        "attentionReason": {
+          "type": ["string", "null"],
+          "description": "Why this worker needs attention (null if needsAttention is false)"
+        },
+        "usage": {
+          "oneOf": [
+            { "$ref": "#/$defs/usage" },
+            { "type": "null" }
+          ],
+          "description": "Token/cost usage for this worker session. Populated when session completes (requires --output-format json capture). Null while in-flight or if usage unavailable."
+        }
+      }
+    },
+    "attentionItem": {
+      "type": "object",
+      "required": ["type", "ticketId", "message", "since"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["needs-review", "verification-failed", "stalled", "merge-conflict", "ci-failing", "waiting-for-user", "remediation"],
+          "description": "Category of attention needed"
+        },
+        "ticketId": {
+          "type": "string",
+          "description": "Ticket that needs attention"
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable description of what needs to happen"
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When this attention item was raised"
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "description": "Token usage and cost tracking. Matches the structure returned by `claude --output-format json`.",
+      "properties": {
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total input tokens (excluding cache)"
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total output tokens"
+        },
+        "cacheReadTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tokens served from prompt cache"
+        },
+        "cacheCreationTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tokens written to prompt cache"
+        },
+        "costUSD": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Total cost in USD"
+        },
+        "numTurns": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of conversational turns"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total wall-clock time in milliseconds"
+        },
+        "durationApiMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Time spent in API calls in milliseconds"
+        },
+        "model": {
+          "type": ["string", "null"],
+          "description": "Primary model used (e.g., 'claude-opus-4-6')"
+        }
+      }
+    }
+  }
+}
