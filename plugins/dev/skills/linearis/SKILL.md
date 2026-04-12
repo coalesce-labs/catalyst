@@ -3,283 +3,256 @@ name: linearis-cli
 description:
   Reference for Linearis CLI commands to interact with Linear project management. Use when working
   with Linear tickets, cycles, projects, milestones, or when the user mentions ticket IDs like
-  TEAM-123, BRAVO-456, ENG-789.
+  TEAM-123, ENG-456, PROJ-789.
 ---
 
 # Linearis CLI Reference
 
+> Verified against Linearis v2026.4.4 on 2026-04-12.
+
 **CRITICAL: Always use these exact patterns. Do NOT guess or improvise syntax.**
 
-## Issue Operations
+## Looking Up Syntax
 
-### Read a Ticket
+For full flag details, run `linearis usage` (all domains) or `linearis <domain> usage` (one domain).
+The `usage` output is authoritative and always current — prefer it over memorizing flags.
 
 ```bash
-linearis issues read TEAM-123                    # ✅ By identifier
-linearis issues read 7690e05c-32fb-4cf2-b709-f9adb12e73e7  # ✅ By UUID
+linearis usage                # Full overview of every domain and flag
+linearis issues usage         # Just issue operations
+linearis milestones usage     # Just milestone operations
+linearis cycles usage         # Just cycle operations
 ```
 
-**Common mistakes:**
+## Core Operations
+
+### Read a ticket
 
 ```bash
-linearis issues get TEAM-123      # ❌ WRONG - no 'get' command
-linearis issue view TEAM-123      # ❌ WRONG - no 'view', use 'read'
-linearis issue TEAM-123           # ❌ WRONG - missing subcommand
+linearis issues read ENG-123
 ```
 
-### List Tickets
+### Search tickets
 
 ```bash
-linearis issues list                      # Basic list (25 tickets)
-linearis issues list --limit 50           # With limit
-```
-
-**NOTE:** `--limit` is the ONLY supported flag for `issues list`. There is NO `--team` flag
-(upstream feature request: czottmann/linearis#20). For filtering, use jq:
-
-```bash
-# Filter by team
-linearis issues list --limit 100 | jq '.[] | select(.team.key == "BRAVO")'
-
-# Filter by status - use jq, NOT --status or --filter
-linearis issues list --limit 100 | jq '.[] | select(.state.name == "In Progress")'
-
-# Search by title
-linearis issues list --limit 100 | jq '.[] | select(.title | contains("auth"))'
-```
-
-**Common mistakes:**
-
-```bash
-linearis issues list --status "In Progress"  # ❌ WRONG - no --status flag
-linearis issues list --filter "keyword"      # ❌ WRONG - no --filter flag
-linearis issues --filter "keyword"           # ❌ WRONG - no --filter flag
-```
-
-### Search Tickets
-
-```bash
-# WARNING: --team only works with UUIDs for search too (keys return wrong team's results)
-linearis issues search "keyword" --team "<team-uuid>"
-
-# Without --team, search returns results across all teams
 linearis issues search "keyword"
+linearis issues search "auth bug" --team ENG --status "Todo"
 ```
 
-### Update a Ticket
+### Create a ticket
 
 ```bash
-# Update status (renamed from --state in v2025.12.2)
-# Status names should come from stateMap in .catalyst/config.json
-linearis issues update TEAM-123 --status "In Progress"
-linearis issues update TEAM-123 --status "In Review"
-linearis issues update TEAM-123 --status "Done"
+linearis issues create "Title" --team ENG
+linearis issues create "Title" --team ENG --description "Details" --priority 2 --project "Project"
+```
 
-# Other updates
-linearis issues update TEAM-123 --title "New title"
-linearis issues update TEAM-123 --description "New description"
-linearis issues update TEAM-123 --priority 1              # 1=Urgent, 2=High, 3=Medium, 4=Low
-linearis issues update TEAM-123 --assignee <user-id>
-linearis issues update TEAM-123 --project "Project Name"
-linearis issues update TEAM-123 --cycle "Cycle Name"
-linearis issues update TEAM-123 --project-milestone "Milestone Name"
-linearis issues update TEAM-123 --labels "bug,urgent"
-linearis issues update TEAM-123 --clear-cycle
-linearis issues update TEAM-123 --clear-project-milestone
+### Update a ticket
+
+```bash
+linearis issues update ENG-123 --status "In Progress"
+linearis issues update ENG-123 --priority 1
+linearis issues update ENG-123 --labels "bug" --label-mode add
+linearis issues update ENG-123 --project "Project Name"
+linearis issues update ENG-123 --project-milestone "Milestone Name"
+```
+
+### Comment on a ticket
+
+```bash
+linearis comments create ENG-123 --body "Starting work on this"
 ```
 
 **Common mistakes:**
 
 ```bash
-linearis issues update TEAM-123 --state "Done"    # ❌ WRONG - use --status (--state removed in v2025.12.2)
+linearis issues get ENG-123             # ❌ no 'get' — use 'read'
+linearis issue view ENG-123             # ❌ no 'view' — use 'read'
+linearis issues comment ENG-123 "text"  # ❌ use 'comments create', not 'issues comment'
+linearis issues update ENG-123 --state  # ❌ use --status, not --state
+linearis project-milestones list        # ❌ renamed to 'milestones' in v2026.4
 ```
 
-### Create a Ticket
+## Workflow: Backlog Grooming
+
+### Get the lay of the land
 
 ```bash
-linearis issues create "Title of ticket"
-linearis issues create "Title" --description "Description" --status "Todo" --priority 2
-linearis issues create "Title" --project "Project Name"
-
-# WARNING: --team only accepts UUIDs (upstream bug: czottmann/linearis#56)
-# Team keys and names silently fall back to the workspace default team!
-linearis issues create "Title" --team "<team-uuid>" --project "Project Name"
+# Discover teams and projects
+linearis teams list | jq '.nodes[] | {key, name}'
+linearis projects list | jq '.nodes[] | {name, status: .status.name, id}'
 ```
 
-## Comment Operations
-
-### Add a Comment
+### Pull tickets by project
 
 ```bash
-linearis comments create TEAM-123 --body "Starting research"
+# All tickets in a specific project
+linearis issues list --project "Auth System" --limit 100
 
-# Multi-line comment
-linearis comments create TEAM-123 --body "Research complete!
-
-See findings: https://github.com/..."
+# Tickets in a project, grouped by status (requires --team for --status filter)
+linearis issues list --team ENG --project "Auth System" --status "Backlog,Todo" --limit 100
 ```
 
-**Common mistakes:**
+### Find orphaned tickets (no project assigned)
 
 ```bash
-linearis issues comment TEAM-123 "Comment"        # ❌ WRONG
-linearis issues add-comment TEAM-123 "Comment"    # ❌ WRONG
-linearis comment TEAM-123 --body "Comment"        # ❌ WRONG
+linearis issues list --team ENG --limit 200 | jq '[.nodes[] | select(.project == null)] | length'
+linearis issues list --team ENG --limit 200 | jq '.nodes[] | select(.project == null) | {identifier, title, state: .state.name}'
 ```
 
-**Correct pattern:** `linearis comments create` (plural "comments", then "create")
-
-## Cycle Operations
-
-### List Cycles
+### Triage by priority
 
 ```bash
-linearis cycles list --team BRAVO              # All cycles
-linearis cycles list --team BRAVO --active     # Only active cycle
-linearis cycles list --team BRAVO --limit 5    # Recent cycles
+# Urgent/high priority tickets
+linearis issues list --team ENG --priority 1 --limit 50
+linearis issues list --team ENG --priority 2 --limit 50
+
+# Unestimated tickets in a project
+linearis issues list --project "Auth System" --limit 100 | jq '.nodes[] | select(.estimate == null) | {identifier, title}'
 ```
 
-### Read Cycle Details
+### Find stale tickets
 
 ```bash
-linearis cycles read "Sprint 2025-11" --team BRAVO   # By name
-linearis cycles read <cycle-uuid>                     # By UUID
+# Not updated in 30+ days
+linearis issues list --team ENG --updated-before 2026-03-13 --status "In Progress" --limit 50
 ```
 
-Returns all issues in the cycle - useful for cycle analysis.
-
-### Get Active Cycle Pattern
+### Assign a ticket to a project
 
 ```bash
-CYCLE=$(linearis cycles list --team BRAVO --active | jq -r '.[0].name')
-linearis cycles read "$CYCLE" --team BRAVO | jq '.issues[] | {identifier, title, state: .state.name}'
+linearis issues update ENG-123 --project "Auth System"
 ```
 
-## Project Operations
+## Workflow: Milestone Management
 
-### List Projects
+### See milestones for a project
 
 ```bash
-# NOTE: projects list does NOT support --team. It returns all workspace projects.
-linearis projects list
-linearis projects list | jq '.[] | select(.name == "Auth System")'
+linearis milestones list --project "Auth System"
 ```
 
-## Milestone Operations
-
-### List Milestones
+### Read milestone details (including its issues)
 
 ```bash
-linearis project-milestones list --project "Project Name"
-linearis project-milestones list --project <project-uuid>
+linearis milestones read "Beta Launch" --project "Auth System"
+linearis milestones read "Beta Launch" --project "Auth System" --limit 100
 ```
 
-### Read Milestone
+### Create a milestone
 
 ```bash
-linearis project-milestones read "Beta Launch" --project "Auth System"
-linearis project-milestones read <milestone-uuid>
+linearis milestones create "Beta Launch" --project "Auth System" --target-date 2026-06-15
+linearis milestones create "GA Release" --project "Auth System" --description "General availability" --target-date 2026-09-01
 ```
 
-### Update Milestone
+### Rename or reschedule a milestone
 
 ```bash
-linearis project-milestones update "Milestone" --project "Project" --name "New Name"
-linearis project-milestones update "Milestone" --project "Project" --target-date "2025-12-31"
+linearis milestones update "Beta Launch" --project "Auth System" --name "Beta 2.0"
+linearis milestones update "Beta Launch" --project "Auth System" --target-date 2026-07-01
 ```
 
-## Label Operations
+### Assign tickets to a milestone
 
 ```bash
-linearis labels list --team BRAVO
+linearis issues update ENG-123 --project-milestone "Beta Launch"
+
+# Clear a milestone assignment
+linearis issues update ENG-123 --clear-project-milestone
 ```
 
-## Common Workflow Patterns
-
-### Read ticket, update state, add comment
+### Audit milestone coverage
 
 ```bash
-# 1. Read ticket
-linearis issues read TEAM-123
-
-# 2. Update state
-linearis issues update TEAM-123 --status "In Progress"
-
-# 3. Add comment
-linearis comments create TEAM-123 --body "Starting work on this"
+# Tickets in a project with no milestone
+linearis issues list --project "Auth System" --limit 100 | jq '.nodes[] | select(.projectMilestone == null) | {identifier, title}'
 ```
 
-### Find tickets in current cycle
+## Workflow: Label Management
+
+### Discover labels
 
 ```bash
-CYCLE=$(linearis cycles list --team BRAVO --active | jq -r '.[0].name')
-linearis cycles read "$CYCLE" --team BRAVO | jq '.issues[] | {identifier, title, state: .state.name}'
+linearis labels list --team ENG
+linearis labels list --team ENG | jq '.nodes[] | {name, color}'
 ```
 
-### Get tickets by project
+### See what a label contains
 
 ```bash
-linearis issues list --limit 100 | jq '.[] | select(.team.key == "BRAVO" and .project.name == "Auth System")'
+linearis issues list --team ENG --label "bug" --limit 100
+linearis issues list --team ENG --label "tech-debt" --limit 100
 ```
 
-### Mark ticket as done with PR link
+### Re-label tickets
 
 ```bash
-# State name from stateMap.done config (default: "Done")
-DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .catalyst/config.json 2>/dev/null || echo "Done")
-linearis issues update TEAM-123 --status "$DONE_STATE"
-linearis comments create TEAM-123 --body "Merged: PR #456 https://github.com/org/repo/pull/456"
+# Add a label (keeps existing labels)
+linearis issues update ENG-123 --labels "needs-triage" --label-mode add
+
+# Replace all labels
+linearis issues update ENG-123 --labels "bug,P1" --label-mode overwrite
+
+# Remove all labels
+linearis issues update ENG-123 --clear-labels
 ```
 
-## Team UUID Resolution
+## Workflow: Cycle Review
 
-Many commands require a team UUID (not key/name) for the `--team` flag. Use this pattern:
+### Get the active cycle
 
 ```bash
-# Preferred: read from config
-TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .catalyst/config.json)
-
-# Fallback: look up from any existing issue
-if [ -z "$TEAM_UUID" ]; then
-  TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' .catalyst/config.json)
-  TEAM_UUID=$(linearis issues list --limit 1 | jq -r --arg key "$TEAM_KEY" '.[0].team | select(.key == $key) | .id // empty')
-fi
-
-# Discover all team UUIDs in workspace
-linearis issues list --limit 20 | jq '[.[].team | {key, id, name}] | unique_by(.key)'
+linearis cycles list --team ENG --active
 ```
 
-## Quick Reference Card
+### Read cycle with all issues
 
-| Action        | Command                                                   |
-| ------------- | --------------------------------------------------------- |
-| Read ticket   | `linearis issues read TEAM-123`                           |
-| Update status | `linearis issues update TEAM-123 --status "Status"`       |
-| Add comment   | `linearis comments create TEAM-123 --body "text"`         |
-| Search        | `linearis issues search "keyword"` (--team needs UUID)    |
-| List issues   | `linearis issues list --limit N` (filter by team with jq) |
-| Active cycle  | `linearis cycles list --team TEAM --active`               |
-| Cycle details | `linearis cycles read "Name" --team TEAM`                 |
+```bash
+CYCLE=$(linearis cycles list --team ENG --active | jq -r '.nodes[0].name')
+linearis cycles read "$CYCLE" --team ENG --limit 100
+```
+
+### Summarize cycle progress
+
+```bash
+CYCLE=$(linearis cycles list --team ENG --active | jq -r '.nodes[0].name')
+linearis cycles read "$CYCLE" --team ENG --limit 100 | jq '
+  .issues
+  | group_by(.state.name)
+  | map({status: .[0].state.name, count: length, tickets: [.[].identifier]})
+'
+```
+
+### Nearby cycles (for planning)
+
+```bash
+# Active cycle plus 2 before and after
+linearis cycles list --team ENG --window 2
+```
+
+## Workflow: Status Transitions
+
+Status names come from the team's workflow configuration. Use the stateMap in `.catalyst/config.json`
+when available, otherwise read a ticket to discover valid status names.
+
+```bash
+# Common flow
+linearis issues update ENG-123 --status "In Progress"
+linearis issues update ENG-123 --status "In Review"
+linearis issues update ENG-123 --status "Done"
+
+# With comment
+linearis issues update ENG-123 --status "Done"
+linearis comments create ENG-123 --body "Merged: PR #456"
+```
 
 ## Important Rules
 
-1. **--status NOT --state**: Always use `--status` for issue status updates (renamed in v2025.12.2)
-2. **comments create**: Use `linearis comments create`, not `issues comment`
-3. **issues read**: Use `read`, not `get` or `view`
-4. **Filtering via jq**: No `--filter` or `--status` flags - pipe to jq instead
-5. **Team parameter**: `cycles list` and `labels list` support `--team TEAM-KEY`. `issues list` and
-   `projects list` do NOT support `--team` (use jq). `issues create` and `issues search` accept
-   `--team` but **require a UUID** — keys/names silently return wrong results (upstream bug:
-   czottmann/linearis#56)
-6. **Quotes for spaces**: `--cycle "Sprint 2025-11"` not `--cycle Sprint 2025-11`
-7. **JSON output**: All commands return JSON - use jq for parsing
-
-## Getting Help
-
-```bash
-linearis --help
-linearis issues --help
-linearis issues update --help
-linearis comments --help
-linearis cycles --help
-```
+1. **--status NOT --state**: Always `--status` for issue updates (`--state` was removed in v2025.12.2)
+2. **comments create**: The command is `linearis comments create`, not `issues comment`
+3. **milestones NOT project-milestones**: The command was renamed in v2026.4
+4. **--status requires --team**: On `issues list` and `issues search`, `--status` only works when `--team` is also provided
+5. **--team accepts keys, names, and UUIDs**: Any form works on all commands (e.g., `--team ENG`)
+6. **Quotes for spaces**: `--status "In Progress"` not `--status In Progress`
+7. **JSON output**: All commands return JSON — use jq for parsing
+8. **Use `linearis <domain> usage`**: When unsure about flags, check usage instead of guessing
