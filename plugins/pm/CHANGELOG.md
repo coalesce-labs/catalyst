@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.0.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.0.2...catalyst-pm-v6.0.3) (2026-04-13)
+
+
+### Bug Fixes
+
+* **dev:** DRY linearis CLI commands, fix setup false positive ([#84](https://github.com/coalesce-labs/catalyst/issues/84)) ([68115ac](https://github.com/coalesce-labs/catalyst/commit/68115acd8168e14683a4a079b0cc42b7f2a763b7))
+
 ## [6.0.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.0.1...catalyst-pm-v6.0.2) (2026-04-13)
 
 
