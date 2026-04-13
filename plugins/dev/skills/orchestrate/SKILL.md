@@ -23,9 +23,10 @@ if ! command -v git &>/dev/null; then
 fi
 
 # 2. Linearis CLI (REQUIRED for ticket reading)
+# See /catalyst-dev:linearis for CLI syntax reference
 if ! command -v linearis &>/dev/null; then
   echo "ERROR: Linearis CLI required for ticket intake"
-  echo "Install: npm install -g @anthropic/linearis"
+  echo "Install: npm install -g linearis"
   exit 1
 fi
 
@@ -122,11 +123,12 @@ It NEVER:
 
 ### Phase 1: Intake & Dependency Analysis
 
-1. **Resolve tickets**: Based on invocation mode:
-   - Explicit IDs: validate each via `linearis issues read <ID>`
-   - `--project`: `linearis issues list --project "<name>" --status "Todo,Backlog,In Progress"`
-   - `--cycle current`: `linearis cycles list --current` then `linearis issues list --cycle <id>`
-   - `--file`: read IDs from file, validate each
+1. **Resolve tickets**: Based on invocation mode, use the Linearis CLI to fetch ticket data.
+   **For exact CLI syntax, run `linearis issues usage` or `linearis cycles usage`** — do not guess.
+   - Explicit IDs: read each ticket's full details
+   - `--project`: list issues filtered by project name
+   - `--cycle current`: list the active cycle, then list its issues
+   - `--file`: read IDs from file, then read each ticket's details
 
 2. **Read ticket details**: For each ticket, extract:
    - Title, description, estimate
@@ -333,6 +335,7 @@ Initialize `state.json`:
 STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
 
 # Build the registration JSON with all workers from all waves
+# Use linearis CLI to read ticket titles (run `linearis issues usage` for syntax)
 WORKERS_JSON="{}"
 for TICKET_ID in "${ALL_TICKETS[@]}"; do
   TITLE=$(linearis issues read "$TICKET_ID" | jq -r '.title')
@@ -728,10 +731,7 @@ When all waves are complete:
    - Any verification failures that required remediation
 
 2. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck,
-   update them:
-   ```bash
-   linearis issues update "${TICKET_ID}" --status "${STATE_MAP_DONE}"
-   ```
+   update them using the Linearis CLI (run `linearis issues usage` for update syntax).
 
 3. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it).
 
@@ -834,11 +834,8 @@ The orchestrator manages Linear state transitions as a safety net:
 | PR merged | Verify ticket is `stateMap.done` — fix if not |
 | Worker fails/stalls | Add comment with status, keep `inProgress` |
 
-The orchestrator also adds comments to tickets for visibility:
-```bash
-linearis comments create "${TICKET_ID}" \
-  --body "Orchestrator [${ORCH_NAME}]: Worker dispatched. Phase: research."
-```
+The orchestrator also adds comments to tickets for visibility using the Linearis CLI
+(run `linearis comments usage` for syntax).
 
 ## Named Orchestrators & Remote Control
 

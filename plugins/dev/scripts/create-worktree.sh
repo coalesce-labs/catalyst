@@ -180,14 +180,14 @@ if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 fi
 
 # Generate .envrc for OTEL context (source_up inherits parent profiles)
+# Note: direnv allow runs AFTER setup hooks to avoid re-blocking if hooks modify .envrc
 OTEL_PROJECT="${PROJECT_KEY:-$REPO_NAME}"
 if command -v direnv >/dev/null 2>&1 && [ ! -f "${WORKTREE_PATH}/.envrc" ]; then
 	cat > "${WORKTREE_PATH}/.envrc" <<EOF
 source_up
 use_otel_context "${OTEL_PROJECT}"
 EOF
-	direnv allow "${WORKTREE_PATH}" 2>/dev/null || true
-	echo "📡 OTEL context configured (.envrc created + allowed)"
+	echo "📡 OTEL context configured (.envrc created)"
 fi
 
 # Change to worktree directory
@@ -315,6 +315,12 @@ fi
 if [ -n "$HOOKS_JSON" ] && [ "$HOOKS_JSON" != "[]" ]; then
 	echo -e "${YELLOW}🔧 Running orchestration hooks...${NC}"
 	run_hook_array "$HOOKS_JSON" "orchestration"
+fi
+
+# Allow direnv AFTER all setup hooks have run (hooks like setup-env.sh may modify .envrc)
+if command -v direnv >/dev/null 2>&1 && [ -f "${WORKTREE_PATH}/.envrc" ]; then
+	direnv allow "${WORKTREE_PATH}/.envrc" 2>/dev/null || true
+	echo "📡 direnv allowed"
 fi
 
 # Return to original directory
