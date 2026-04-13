@@ -1,5 +1,20 @@
 # Changelog
 
+## [6.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.2.0...catalyst-dev-v6.3.0) (2026-04-13)
+
+
+### Features
+
+* **dev:** add global orchestrator state, event log, and token tracking ([#70](https://github.com/coalesce-labs/catalyst/issues/70)) ([9f45afa](https://github.com/coalesce-labs/catalyst/commit/9f45afa0f85823f5fbeea6dd27d175ce00b1e1d2))
+* **dev:** enforce post-PR monitoring and merge completion ([#74](https://github.com/coalesce-labs/catalyst/issues/74)) ([83b0ee2](https://github.com/coalesce-labs/catalyst/commit/83b0ee2b3fcc75b4149fce5aba5e1715d314557b))
+* **dev:** update linearis skill for v2026.4.4 ([#72](https://github.com/coalesce-labs/catalyst/issues/72)) ([05237da](https://github.com/coalesce-labs/catalyst/commit/05237dabfb056f4dc9457af47d83dec12aa85c81))
+
+
+### Bug Fixes
+
+* **dev:** add fully-qualified plugin prefixes to skill references ([#69](https://github.com/coalesce-labs/catalyst/issues/69)) ([f9e69f2](https://github.com/coalesce-labs/catalyst/commit/f9e69f29ce7021997f4fba17b1c2bb88e1b62b69))
+* **dev:** initialize workflow context and OTEL ticket early ([#73](https://github.com/coalesce-labs/catalyst/issues/73)) ([3406c30](https://github.com/coalesce-labs/catalyst/commit/3406c3099d1e6fcbf9604e9d66649e6e3fbd423e))
+
 ## [6.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.1.0...catalyst-dev-v6.2.0) (2026-04-11)
 
 
