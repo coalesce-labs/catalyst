@@ -76,6 +76,18 @@ get_most_recent() {
 	jq -r '.mostRecentDocument.path // empty' "$CONTEXT_FILE"
 }
 
+# Set current ticket without adding a document
+# Usage: set_ticket <ticket>
+set_ticket() {
+	local ticket="$1"
+	init_context
+	local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+	jq --arg ticket "$ticket" --arg ts "$timestamp" \
+		'.currentTicket = $ticket | .lastUpdated = $ts' \
+		"$CONTEXT_FILE" >"${CONTEXT_FILE}.tmp"
+	mv "${CONTEXT_FILE}.tmp" "$CONTEXT_FILE"
+}
+
 # Get documents for ticket
 # Usage: get_by_ticket <ticket>
 get_by_ticket() {
@@ -96,6 +108,9 @@ init)
 add)
 	add_document "$2" "$3" "${4:-null}"
 	;;
+set-ticket)
+	set_ticket "$2"
+	;;
 recent)
 	get_recent "$2"
 	;;
@@ -106,7 +121,7 @@ ticket)
 	get_by_ticket "$2"
 	;;
 *)
-	echo "Usage: $0 {init|add|recent|most-recent|ticket}"
+	echo "Usage: $0 {init|add|recent|most-recent|set-ticket|ticket}"
 	exit 1
 	;;
 esac
