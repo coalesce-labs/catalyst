@@ -1,5 +1,13 @@
 # Changelog
 
+## [6.0.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.0.0...catalyst-pm-v6.0.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* **dev:** add fully-qualified plugin prefixes to skill references ([#69](https://github.com/coalesce-labs/catalyst/issues/69)) ([f9e69f2](https://github.com/coalesce-labs/catalyst/commit/f9e69f29ce7021997f4fba17b1c2bb88e1b62b69))
+* **dev:** initialize workflow context and OTEL ticket early ([#73](https://github.com/coalesce-labs/catalyst/issues/73)) ([3406c30](https://github.com/coalesce-labs/catalyst/commit/3406c3099d1e6fcbf9604e9d66649e6e3fbd423e))
+
 ## [6.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v5.2.3...catalyst-pm-v6.0.0) (2026-04-10)
 
 
