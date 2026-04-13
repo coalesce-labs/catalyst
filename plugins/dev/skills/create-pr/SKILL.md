@@ -236,25 +236,46 @@ all the follow-up work manually.
 **Step 12a: Wait for CI checks and automated reviewers (3-5 minutes)**
 
 Automated review agents (Codex, security scanners, linters) typically post comments within 3-5
-minutes of PR creation. Wait for them before processing comments so you address everything in one
-pass.
+minutes of PR creation. CI checks also need time to run. Wait at least 3 minutes before checking,
+then poll every 30 seconds monitoring CI status, review comments, and PR state.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 
-# Wait 3 minutes for initial CI + automated reviews
+# Wait 3 minutes — CI and automated reviewers need time to run
 sleep 180
 
 # Poll for up to 2 more minutes (5 min total) — check every 30s
 WAITED=180
 MAX_WAIT=300
 while [ $WAITED -lt $MAX_WAIT ]; do
+  # Check CI status
+  CI_STATUS=$(gh pr checks $pr_number --json state \
+    --jq '[.[].state] | unique | join(",")' 2>/dev/null || echo "PENDING")
+
+  # Check for review comments/threads
   COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/comments" --jq 'length')
   REVIEW_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/reviews" \
     --jq '[.[] | select(.state != "APPROVED" and .state != "DISMISSED")] | length')
 
+  # Check PR state (may have auto-merged already)
+  PR_STATE=$(gh pr view $pr_number --json state --jq '.state' 2>/dev/null || echo "OPEN")
+
+  echo "Poll @${WAITED}s: state=${PR_STATE} CI=${CI_STATUS} comments=${COMMENT_COUNT} reviews=${REVIEW_COUNT}"
+
+  if [ "$PR_STATE" = "MERGED" ]; then
+    echo "PR already merged"
+    break
+  fi
+
   if [ "$COMMENT_COUNT" -gt 0 ] || [ "$REVIEW_COUNT" -gt 0 ]; then
     echo "Found review comments — proceeding to address them"
+    break
+  fi
+
+  # If all CI passed and no comments, clean exit
+  if echo "$CI_STATUS" | grep -qv "PENDING\|QUEUED"; then
+    echo "CI complete (${CI_STATUS}), no review comments — proceeding"
     break
   fi
 
@@ -449,8 +470,9 @@ Calling /describe-pr...
 
 ## Remember:
 
-- **NEVER stop at "PR created"** — monitor CI, address review comments, resolve blockers
-- **"PR created with auto-merge" is NOT done** — you must verify it actually merges cleanly
+- **NEVER stop at "PR created"** — poll every 30s (after 3-min minimum wait) checking CI, reviews,
+  and PR state. Address any comments, fix CI failures, confirm clean merge state
+- **"PR created with auto-merge" is NOT done** — poll until state=MERGED or genuinely human-blocked
 - **Automated reviewer comments are YOUR job** — address Codex/scanner feedback, don't wait for human
 - **Minimize prompts** — only ask when PR already exists
 - **Auto-rebase** — keep branch up-to-date with base
