@@ -123,7 +123,7 @@ It NEVER:
 ### Phase 1: Intake & Dependency Analysis
 
 1. **Resolve tickets**: Based on invocation mode:
-   - Explicit IDs: validate each via `linearis issues get <ID>`
+   - Explicit IDs: validate each via `linearis issues read <ID>`
    - `--project`: `linearis issues list --project "<name>" --status "Todo,Backlog,In Progress"`
    - `--cycle current`: `linearis cycles list --current` then `linearis issues list --cycle <id>`
    - `--file`: read IDs from file, validate each
@@ -335,7 +335,7 @@ STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
 # Build the registration JSON with all workers from all waves
 WORKERS_JSON="{}"
 for TICKET_ID in "${ALL_TICKETS[@]}"; do
-  TITLE=$(linearis issues get "$TICKET_ID" --json title --quiet | jq -r '.title')
+  TITLE=$(linearis issues read "$TICKET_ID" | jq -r '.title')
   WORKERS_JSON=$(echo "$WORKERS_JSON" | jq \
     --arg tid "$TICKET_ID" --arg title "$TITLE" \
     '. + {($tid): {ticketId: $tid, title: $title, status: "dispatched", phase: 0, branch: null, pr: null, updatedAt: "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'", needsAttention: false, attentionReason: null}}')
