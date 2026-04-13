@@ -7,6 +7,43 @@ sidebar:
 
 Catalyst's development workflow chains together: **research, plan, implement, validate, and ship**. Each phase produces a persistent artifact that feeds the next, with clean context handoffs in between.
 
+## In Plain English
+
+The intended development cycle is:
+
+1. You point Catalyst at a ticket or goal.
+2. Catalyst researches the existing code and writes down what it found.
+3. Catalyst turns that into an implementation plan with clear success criteria.
+4. Catalyst makes the changes in small steps and verifies each step as it goes.
+5. Catalyst opens a PR, waits for CI and automated reviewers, fixes actionable feedback, and keeps checking until the PR is either clean or clearly blocked on a human decision.
+6. Once the PR is clean, Catalyst can merge it and update the linked Linear ticket.
+
+The important mindset is that "opened a PR" is not the finish line. The finish line is one of:
+
+- the PR is clean and ready to merge
+- the PR has merged successfully
+- Catalyst can point to a real human-only blocker, such as "needs approval from a reviewer"
+
+## What Catalyst Should Do
+
+- Read the existing codebase before making broad changes.
+- Save research, plans, PR descriptions, and handoffs so later steps do not depend on chat memory.
+- Keep the branch up to date with `main` before asking to merge.
+- Run local verification before shipping when the project defines a test command.
+- Wait for CI checks and automated review comments after opening a PR.
+- Fix actionable review comments and re-poll the merge state instead of stopping at "PR created."
+- Update Linear states as work moves from implementation to review to done.
+- Stop and report clearly when the remaining blocker is genuinely human-owned.
+
+## What Catalyst Should Not Do
+
+- It should not merge with known failing checks.
+- It should not bypass GitHub protections with `--admin`, force pushes to protected branches, or other shortcuts.
+- It should not treat unresolved review comments as "someone else will handle this."
+- It should not tell you a PR is done just because the PR exists.
+- It should not silently change scope after planning. If the plan is wrong, it should stop and say so.
+- It should not assume GitHub is enforcing review rules that have not actually been configured in the repository.
+
 ## Development Workflow
 
 ```mermaid
@@ -83,6 +120,51 @@ Verifies all success criteria, runs automated test suites, documents deviations,
 
 Creates a pull request with a description generated from your research and plan, linked to the relevant ticket.
 
+In Catalyst's intended flow, shipping has two distinct stages:
+
+1. `/create-pr` gets the branch into review and works the PR until it is clean or clearly blocked.
+2. `/merge-pr` performs the final verification and squash merge once the PR is ready.
+
+### Shipping Loop
+
+After a PR is opened, Catalyst should continue through this loop instead of stopping immediately:
+
+1. Wait for CI checks, preview deploys, and automated reviewers to report back.
+2. Read review comments and group them by actual issue, not by comment count.
+3. Fix actionable feedback in code.
+4. Resolve review threads when the feedback has been addressed.
+5. Re-run local verification as needed.
+6. Re-check GitHub merge state.
+7. Repeat until the PR is clean or the only remaining blocker is a human gate.
+
+Typical human gates are:
+
+- an approval that a repository rule requires
+- a design or product decision
+- a merge conflict that needs a human judgment call
+
+Typical non-human blockers that Catalyst should usually handle itself are:
+
+- branch is behind `main`
+- CI is failing because of code issues
+- review comments from automated tools
+- draft PR state
+- unresolved review threads
+
+### GitHub Gates vs Catalyst Behavior
+
+Catalyst can behave as though reviews and checks matter, but GitHub only blocks merges based on the
+rules configured in the repository.
+
+That means there are two separate layers:
+
+- **Catalyst behavior**: what the skills try to do before merging
+- **GitHub enforcement**: what the repository rules or rulesets actually require
+
+If you want merges to be blocked until checks, approvals, or resolved threads are complete, that
+must be configured in GitHub. Catalyst should honor those rules, but it does not create them by
+itself.
+
 ## Workflow Patterns
 
 ### Quick Feature
@@ -131,6 +213,10 @@ For straightforward tasks, chain the entire workflow:
 ```
 
 Runs research, planning, and implementation in a single invocation with context isolation between phases.
+
+When `/oneshot` is used for shipping work, the expected behavior is still the same: do the work,
+open the PR, wait for review signals, address fixable feedback, and only stop when the PR is truly
+ready or genuinely blocked.
 
 ## Handoffs
 
@@ -237,6 +323,18 @@ Resolve all decisions during planning — no open questions in final plans.
 Follow the plan's intent, not its letter. When reality differs — a file moved, a better pattern found — adapt and document the deviation. If the core approach is invalid, stop and ask before proceeding.
 
 Verify incrementally: implement → test → fix → mark complete for each phase.
+
+### Linear Updates
+
+Catalyst can also keep Linear in sync with the workflow:
+
+- `research-codebase` can move work into the configured research state
+- `create-plan` can move work into the configured planning state
+- `implement-plan` can move work into the configured in-progress state
+- `create-pr` and `describe-pr` can move work into the configured in-review state
+- `merge-pr` can move work into the configured done state
+
+The exact state names come from `catalyst.linear.stateMap` in the project config.
 
 ### Anti-Patterns
 

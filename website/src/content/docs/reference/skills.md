@@ -65,6 +65,7 @@ Each skill's description includes specific phrases and contexts that tell Claude
 | `resume-handoff` | "resume handoff", "pick up where we left off", "continue from handoff" |
 | `linear` | "create a ticket", "update the ticket", "move ticket to", "search Linear" |
 | `create-worktree` | "create a worktree", "work in parallel", parallel feature development |
+| `setup-orchestrate` | "start orchestration", "set up orchestrator", "bootstrap orchestrate", create orchestrator worktree and launch command |
 | `fix-typescript` | "fix type errors", "fix typescript", "type-check is failing", TypeScript compilation errors |
 | `scan-reward-hacking` | After `/fix-typescript`, "scan for hacks", "check for type cheats", verifying TS fixes |
 | `validate-type-safety` | "validate types", "check type safety", "run type validation", before PRs with TS changes |
@@ -117,6 +118,7 @@ The core development plugin. Skills covering research, planning, implementation,
 | `create-handoff` | &#10003; | — | Save session context, learnings, and next steps for continuation in a fresh session. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-handoff/SKILL.md) |
 | `resume-handoff` | &#10003; | — | Resume work from a handoff document. Verifies codebase state and creates an action plan. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/resume-handoff/SKILL.md) |
 | `create-worktree` | &#10003; | — | Create git worktree for parallel development without switching branches. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-worktree/SKILL.md) |
+| `setup-orchestrate` | &#10003; | — | Bootstrap an orchestrator worktree and print a ready-to-run launch command for `/orchestrate`. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/setup-orchestrate/SKILL.md) |
 
 ### Integrations & References
 

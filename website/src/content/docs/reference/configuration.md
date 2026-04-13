@@ -82,6 +82,131 @@ Set any key to `null` to skip that automatic transition.
 API token, the script fetches your team's actual workflow states and populates `stateMap` with the
 correct names. Manual customization is only needed for non-standard state names.
 
+### Plain-Language State Flow
+
+In most teams, the intended meaning is:
+
+- `research` — Catalyst is still understanding the problem and the current code
+- `planning` — the implementation approach is being written and reviewed
+- `inProgress` — code changes are actively being made
+- `inReview` — a PR exists and is being worked through review and CI
+- `done` — the PR has merged
+
+This is useful because the PR stage is not just "waiting on somebody else." In Catalyst's model,
+`inReview` still includes active follow-up work such as fixing CI, addressing automated review
+feedback, updating the PR description, and re-checking merge readiness.
+
+## GitHub Merge Rules Are Separate
+
+Catalyst can open PRs, watch checks, address review comments, and try to merge safely. But GitHub
+decides what is actually required before `main` can be merged into.
+
+Those merge requirements live in **GitHub branch protection or repository rulesets**, not in
+`.catalyst/config.json`.
+
+If you want GitHub to block merges until review is complete, configure that in GitHub:
+
+- require pull requests for `main`
+- require status checks before merge
+- require one or more approving reviews
+- require conversation resolution if review threads must be closed
+- optionally enable auto-merge once those requirements pass
+
+Catalyst should behave as if these gates matter, but only GitHub can enforce them.
+
+## Recommended GitHub Repo Settings
+
+For most teams using Catalyst, the best default is **autonomous mode**: let Catalyst work the PR to
+completion, but make GitHub enforce the quality gates around checks and unresolved review comments.
+
+### Repository Settings
+
+- Enable pull requests.
+- Enable squash merge.
+- Enable auto-merge.
+- Enable automatic deletion of head branches after merge.
+- Set the default branch to `main`.
+
+### `main` Ruleset
+
+Target `refs/heads/main` with an active branch ruleset that:
+
+- blocks direct deletion
+- blocks non-fast-forward pushes
+- requires pull requests for changes into `main`
+- requires review conversations to be resolved before merge
+- requires status checks to pass before merge
+
+For **autonomous mode**, set:
+
+- required approving reviews: `0`
+- required review thread resolution: `true`
+- required status checks: `true`
+
+This gives you a fully automated merge path where Catalyst can:
+
+- open the PR
+- wait for checks and bot comments
+- fix actionable feedback
+- resolve review threads
+- merge once the PR is genuinely clean
+
+without waiting for a human approval click.
+
+For this repo shape, the recommended required check currently enabled in GitHub is:
+
+- `Cloudflare Pages`
+
+Once your repository runs the following checks on **every** PR to `main`, you should add them as
+required checks too:
+
+- `audit-references`
+- `check-versions`
+- `validate`
+
+`Cloudflare Pages` covers preview deploy readiness. The other three checks are repository-owned
+guardrails:
+
+- `audit-references` catches broken plugin references
+- `check-versions` verifies plugin changes are releasable through Release Please
+- `validate` checks release configuration consistency
+
+If your repository has additional always-on checks, add them too. The important rule is: only mark a
+check as required if it runs on every PR to `main`.
+
+### Optional Human-In-The-Loop Mode
+
+If you want a human signoff before merge, keep everything above and additionally set:
+
+- required approving reviews: `1` or more
+
+That changes the operating model from autonomous shipping to human-approved shipping. Catalyst still
+does the same review-follow-up work, but GitHub will not allow the merge until a human reviewer
+approves it.
+
+### Review Expectations
+
+The recommended operating model is:
+
+- automated reviewers can leave comments and request fixes
+- Catalyst should address actionable review feedback and resolve threads
+- GitHub should block merge until required conversations and checks are complete
+- human approval should be optional and controlled by the repository owner, not assumed by Catalyst
+
+### Why This Split Matters
+
+Catalyst can do the work of:
+
+- opening the PR
+- waiting for checks
+- reading bot and human review comments
+- fixing code
+- updating the PR
+- attempting the merge once the PR is clean
+
+But the repository settings are what make those expectations enforceable for every contributor, not
+just when Catalyst happens to be driving.
+
 ## Secrets Config (`~/.config/catalyst/config-{projectKey}.json`)
 
 Never committed. One file per project, linked by `projectKey`.
@@ -132,8 +257,7 @@ Define the commands that run when creating a new worktree via `/create-worktree`
       "setup": [
         "humanlayer thoughts init --directory ${DIRECTORY} --profile ${PROFILE}",
         "humanlayer thoughts sync",
-        "bun install",
-        "~/.claude/scripts/trust-workspace.sh \"$(pwd)\""
+        "bun install"
       ]
     }
   }
@@ -152,6 +276,9 @@ Commands run in order, inside the new worktree directory. Each command supports 
 | `${PROFILE}` | Thoughts profile (from `catalyst.thoughts.profile` or auto-detected) |
 
 If `catalyst.worktree.setup` is **not configured**, the script falls back to auto-detected setup: `make setup` or `bun/npm install`, then `humanlayer thoughts init` + `sync`. Once you define `setup`, only your commands run — the auto-detection is skipped entirely.
+
+Catalyst now pre-trusts newly created worktrees in Claude Code automatically, so you do **not**
+need to add a separate `trust-workspace.sh` command to your setup array.
 
 ## Orchestration Config
 
