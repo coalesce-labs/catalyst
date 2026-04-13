@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.4.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.4.0...catalyst-dev-v6.4.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* **dev:** tighten setup-orchestrate to zero-interaction ([#78](https://github.com/coalesce-labs/catalyst/issues/78)) ([2299917](https://github.com/coalesce-labs/catalyst/commit/229991717bb022beee8bcb19679519137c84a003))
+
 ## [6.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.3.0...catalyst-dev-v6.4.0) (2026-04-13)
 
 
