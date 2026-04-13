@@ -42,7 +42,7 @@ Accept requests like:
 2. **Determine the appropriate linearis command**:
    - Cycle queries → `linearis cycles list/read`
    - Issue queries → `linearis issues list/search`
-   - Milestone queries → `linearis projectMilestones list/read`
+   - Milestone queries → `linearis milestones list/read`
    - Project queries → `linearis projects list`
 
 3. **Build the CLI command** with appropriate flags
@@ -50,71 +50,32 @@ Accept requests like:
 5. **Validate JSON structure**
 6. **Return data or error message**
 
+## CLI Syntax
+
+For exact command syntax, run `linearis <domain> usage` (e.g., `linearis issues usage`,
+`linearis cycles usage`, `linearis milestones usage`). The `/catalyst-dev:linearis` skill is the
+authoritative reference — **do not guess or improvise commands**.
+
 ## Examples
 
 ### Example 1: Get Active Cycle
 
 **Request**: "Get the active cycle for team ENG with all issues"
 
-**Processing**:
-
-```bash
-TEAM_KEY="ENG"
-cycle_data=$(linearis cycles list --team "$TEAM_KEY" --active 2>&1)
-
-# Validate JSON
-if echo "$cycle_data" | jq empty 2>/dev/null; then
-  echo "$cycle_data"
-else
-  echo "ERROR: Failed to fetch active cycle: $cycle_data"
-  exit 1
-fi
-```
-
-**Output**: Raw JSON from linearis
+**Steps**: Use `linearis cycles usage` for list/read syntax. Filter with jq. Validate JSON output.
 
 ### Example 2: Get Backlog Issues
 
 **Request**: "List all issues in Backlog status for team PROJ with no cycle"
 
-**Processing**:
-
-```bash
-TEAM_KEY="PROJ"
-# NOTE: issues list only supports --limit (no --team or --states flags)
-issues_data=$(linearis issues list --limit 100 2>&1 | jq --arg team "$TEAM_KEY" '[.[] | select(.team.key == $team and .state.name == "Backlog")]')
-
-# Filter for issues without cycles using jq
-backlog_no_cycle=$(echo "$issues_data" | jq '[.[] | select(.cycle == null)]')
-
-echo "$backlog_no_cycle"
-```
-
-**Output**: Filtered JSON array of backlog issues
+**Steps**: Use `linearis issues usage` for list syntax. Filter by team and status with jq. Further
+filter for `cycle == null`.
 
 ### Example 3: Get Milestone Details
 
 **Request**: "Get milestone 'Q1 Launch' details for project 'Mobile App' with issues"
 
-**Processing**:
-
-```bash
-PROJECT="Mobile App"
-MILESTONE="Q1 Launch"
-
-milestone_data=$(linearis projectMilestones read "$MILESTONE" \
-  --project "$PROJECT" \
-  --issues-first 100 2>&1)
-
-if echo "$milestone_data" | jq empty 2>/dev/null; then
-  echo "$milestone_data"
-else
-  echo "ERROR: Failed to fetch milestone: $milestone_data"
-  exit 1
-fi
-```
-
-**Output**: Milestone JSON with issues array
+**Steps**: Use `linearis milestones usage` for read syntax. Validate JSON output.
 
 ## Error Handling
 

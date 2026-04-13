@@ -61,155 +61,35 @@ LINEAR_TEAM=$(jq -r '.catalyst.linear.teamKey' "$SECRETS_FILE")
 
 ### Step 2: Collect Completed Issues
 
-Fetch all issues completed in the time period:
-
-```bash
-# Get completed issues with full metadata
-linearis issues search \
-  "completed:>=$START_DATE" \
-  --team "$LINEAR_TEAM" \
-  --format json | jq '[.[] | {
-    id,
-    identifier,
-    title,
-    state: .state.name,
-    assignee: .assignee.name,
-    priority,
-    estimate,
-    project: .project.name,
-    projectId: .project.id,
-    cycle: .cycle.name,
-    cycleId: .cycle.id,
-    createdAt,
-    startedAt,
-    completedAt,
-    labels: [.labels[].name],
-    parent: .parent.identifier,
-    subIssues: [.children[].identifier],
-    blockedBy: [.relations[] | select(.type == "blocks") | .relatedIssue.identifier]
-  }]'
-```
+Search for issues completed in the time period. Use `linearis issues usage` for search syntax. Extract with jq:
+`id`, `identifier`, `title`, `state.name`, `assignee.name`, `priority`, `estimate`, `project.name`,
+`cycle.name`, `createdAt`, `startedAt`, `completedAt`, `labels[].name`, `parent.identifier`,
+`children[].identifier`, blocker relations.
 
 ### Step 3: Collect Active Cycles
 
-Fetch current and recent cycles:
-
-```bash
-# Get active and completed cycles in period
-linearis cycles list \
-  --team "$LINEAR_TEAM" \
-  --format json | jq '[.[] | select(
-    .startsAt >= "'"$START_DATE"'" or .endsAt >= "'"$START_DATE"'"
-  ) | {
-    id,
-    name,
-    number,
-    startsAt,
-    endsAt,
-    completedAt,
-    progress,
-    scopedIssueCount,
-    completedIssueCount,
-    inProgressIssueCount,
-    backlogIssueCount,
-    unestimatedIssueCount
-  }]'
-```
+Fetch current and recent cycles. Use `linearis cycles usage` for list syntax. Filter by date range
+with jq. Extract: `id`, `name`, `number`, `startsAt`, `endsAt`, `progress`, issue counts by status.
 
 ### Step 4: Collect Milestone Data
 
-Fetch active milestones:
-
-```bash
-# Get milestones with progress
-linearis projects list \
-  --team "$LINEAR_TEAM" \
-  --format json | jq '[.[] | select(.targetDate != null) | {
-    id,
-    name,
-    description,
-    targetDate,
-    startDate,
-    state,
-    progress,
-    scope,
-    lead: .lead.name,
-    members: [.members[].name],
-    completedIssueCount,
-    totalIssueCount,
-    completedScopeCount,
-    totalScopeCount
-  }]'
-```
+Fetch active milestones. Use `linearis milestones usage` for list syntax. Filter for milestones with
+target dates. Extract: `id`, `name`, `targetDate`, `state`, `progress`, issue counts.
 
 ### Step 5: Collect Project Assignments
 
-Group issues by project:
-
-```bash
-# Get all projects with issue counts
-linearis projects list \
-  --team "$LINEAR_TEAM" \
-  --format json | jq '[.[] | {
-    id,
-    name,
-    description,
-    state,
-    lead: .lead.name,
-    issueCount,
-    completedIssueCount,
-    canceledIssueCount,
-    startedIssueCount,
-    backlogIssueCount,
-    startDate,
-    targetDate,
-    priority
-  }]'
-```
+List projects with issue counts. Use `linearis projects usage` for list syntax. Extract: `id`,
+`name`, `state`, `lead`, issue counts by status, `startDate`, `targetDate`, `priority`.
 
 ### Step 6: Collect Team Member Data
 
-Aggregate metrics by assignee:
-
-```bash
-# Get all team members with issue counts
-linearis team members \
-  --team "$LINEAR_TEAM" \
-  --format json | jq '[.[] | {
-    id,
-    name,
-    email,
-    active,
-    assignedIssueCount,
-    completedIssueCount
-  }]'
-```
+Aggregate metrics by assignee from collected issue data using jq. Group completed/assigned issues by
+`assignee.name`.
 
 ### Step 7: Collect Blocker Data
 
-Find all blocked issues:
-
-```bash
-# Get blocked issues with blocker details
-linearis issues search \
-  "state:in_progress OR state:todo" \
-  --team "$LINEAR_TEAM" \
-  --format json | jq '[.[] | select(
-    .relations[] | select(.type == "blocks")
-  ) | {
-    identifier,
-    title,
-    assignee: .assignee.name,
-    priority,
-    blockedBy: [.relations[] | select(.type == "blocks") | {
-      identifier: .relatedIssue.identifier,
-      title: .relatedIssue.title,
-      state: .relatedIssue.state.name,
-      assignee: .relatedIssue.assignee.name
-    }],
-    blockedSince: .updatedAt
-  }]'
-```
+Search for in-progress and todo issues, then filter for those with blocker relations using jq.
+Extract: `identifier`, `title`, `assignee`, `priority`, and the blocking issue details.
 
 ## Output Format
 

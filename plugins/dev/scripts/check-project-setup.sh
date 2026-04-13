@@ -47,8 +47,14 @@ fi
 
 # 2. Check thoughts is synced (has .git or is managed)
 if [[ -d "thoughts" ]] && [[ ! -d "thoughts/.git" ]] && [[ ! -L "thoughts" ]]; then
-	# thoughts exists but isn't git-backed or a symlink
-	warnings+=("thoughts/ exists but doesn't appear to be git-backed — run: humanlayer thoughts sync")
+	if command -v humanlayer &>/dev/null; then
+		hl_status=$(humanlayer thoughts status 2>&1 || true)
+		if ! echo "$hl_status" | grep -q "Repository:"; then
+			warnings+=("thoughts/ exists but humanlayer is not configured — run: humanlayer thoughts init")
+		fi
+	else
+		warnings+=("thoughts/ exists but is not git-backed and humanlayer is not installed")
+	fi
 fi
 
 # 3. Check CLAUDE.md has Catalyst snippet
