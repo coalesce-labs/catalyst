@@ -42,7 +42,7 @@ Accept requests like:
 2. **Determine the appropriate linearis command**:
    - Cycle queries → `linearis cycles list/read`
    - Issue queries → `linearis issues list/search`
-   - Milestone queries → `linearis projectMilestones list/read`
+   - Milestone queries → `linearis milestones list/read`
    - Project queries → `linearis projects list`
 
 3. **Build the CLI command** with appropriate flags
@@ -102,7 +102,7 @@ echo "$backlog_no_cycle"
 PROJECT="Mobile App"
 MILESTONE="Q1 Launch"
 
-milestone_data=$(linearis projectMilestones read "$MILESTONE" \
+milestone_data=$(linearis milestones read "$MILESTONE" \
   --project "$PROJECT" \
   --issues-first 100 2>&1)
 
