@@ -47,9 +47,13 @@ fi
 
 # 2. Check thoughts is synced (has .git or is managed)
 if [[ -d "thoughts" ]] && [[ ! -d "thoughts/.git" ]] && [[ ! -L "thoughts" ]]; then
-	# Only warn if humanlayer CLI isn't available to manage thoughts
-	if ! command -v humanlayer &>/dev/null; then
-		warnings+=("thoughts/ exists but doesn't appear to be managed — install humanlayer CLI or run: humanlayer thoughts sync")
+	if command -v humanlayer &>/dev/null; then
+		hl_status=$(humanlayer thoughts status 2>&1 || true)
+		if ! echo "$hl_status" | grep -q "Repository:"; then
+			warnings+=("thoughts/ exists but humanlayer is not configured — run: humanlayer thoughts init")
+		fi
+	else
+		warnings+=("thoughts/ exists but is not git-backed and humanlayer is not installed")
 	fi
 fi
 
