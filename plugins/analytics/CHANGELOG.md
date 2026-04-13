@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-analytics-v1.3.0...catalyst-analytics-v1.3.1) (2026-04-13)
+
+
+### Bug Fixes
+
+* **dev:** add fully-qualified plugin prefixes to skill references ([#69](https://github.com/coalesce-labs/catalyst/issues/69)) ([f9e69f2](https://github.com/coalesce-labs/catalyst/commit/f9e69f29ce7021997f4fba17b1c2bb88e1b62b69))
+
 ## [1.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-analytics-v1.2.0...catalyst-analytics-v1.3.0) (2026-03-25)
 
 
