@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.3.0...catalyst-dev-v6.4.0) (2026-04-13)
+
+
+### Features
+
+* **dev:** add setup-orchestrate skill and inline worktree trust ([#76](https://github.com/coalesce-labs/catalyst/issues/76)) ([86b138e](https://github.com/coalesce-labs/catalyst/commit/86b138ecd8af0d8b1b674e2ebcbecc5d705d70a8))
+
 ## [6.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.2.0...catalyst-dev-v6.3.0) (2026-04-13)
 
 
