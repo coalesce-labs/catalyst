@@ -16,6 +16,31 @@ The goal is to satisfy branch protection requirements, not circumvent them. If a
 resolved autonomously, tell the user **exactly** what is needed and what they need to do — not just
 "branch protection is blocking the merge."
 
+## Common Misdiagnosis — READ THIS FIRST
+
+The most common agent error is **confusing unresolved review threads with "needs approving
+reviewer"** and then stopping, telling the user they need to approve the PR.
+
+**Unresolved threads** (from Codex, security scanners, linters, or human reviewers) are comments
+that create review threads on specific lines of code. These block merge when branch protection
+requires conversation resolution. **The agent CAN and MUST resolve these** by:
+
+1. Reading the comment and understanding the feedback
+2. Implementing the requested code change (or drafting a reply if it's a question)
+3. Pushing the fix
+4. Resolving the thread via GraphQL `resolveReviewThread` mutation
+
+**Review required** means no approving reviews exist and branch protection requires at least one.
+This is a genuine human gate — the agent cannot approve its own PR.
+
+**How to tell the difference:**
+- Check `reviewThreads` — if any have `isResolved: false`, that's `unresolved-threads` (fixable)
+- Check `reviewDecision` — if it's `REVIEW_REQUIRED`, that's a human gate (not fixable)
+- These can coexist! Fix the threads first, then report the review requirement
+
+**NEVER stop and tell the user "an approving reviewer is required" when the actual blocker is an
+unresolved code comment.** Diagnose carefully using the steps below.
+
 ## Step 1: Query Full Merge State
 
 Get everything in a single GraphQL call to avoid multiple round-trips:
