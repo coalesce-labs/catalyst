@@ -54,3 +54,6 @@ research/
 website/node_modules/
 website/dist/
 website/.astro/
+
+# Plugin-local tooling (orch-monitor)
+plugins/dev/scripts/orch-monitor/node_modules/

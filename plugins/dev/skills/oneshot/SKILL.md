@@ -113,12 +113,22 @@ If `ORCH_DIR` is detected, the worker:
 SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
 if [ -f "$SIGNAL_FILE" ]; then
   OLD_STATUS=$(jq -r '.status' "$SIGNAL_FILE")
+  TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-  # Update local signal file
+  # Update local signal file. Atomically records phaseTimestamps[$status] = $ts
+  # so the monitor can build a Gantt timeline. Sets completedAt for terminal states.
+  IS_TERMINAL="false"
+  case "$NEW_STATUS" in done|failed|stalled) IS_TERMINAL="true" ;; esac
+
   jq --arg status "$NEW_STATUS" \
      --arg phase "$PHASE_NUM" \
-     --arg updated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-     '.status = $status | .phase = ($phase | tonumber) | .updatedAt = $updated' \
+     --arg ts "$TS" \
+     --argjson terminal "$IS_TERMINAL" \
+     '.status = $status
+      | .phase = ($phase | tonumber)
+      | .updatedAt = $ts
+      | .phaseTimestamps = ((.phaseTimestamps // {}) | .[$status] = $ts)
+      | (if $terminal then .completedAt = $ts else . end)' \
      "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
 
   # Update global state (if orchestrator ID is known)
@@ -152,6 +162,32 @@ if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
 fi
 ```
 
+**When CI passes** (during Phase 5 blocker resolution or Phase 6 pre-merge), update signal + global state:
+
+```bash
+if [ -f "$SIGNAL_FILE" ]; then
+  jq '.pr.ciStatus = "passing"' "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" \
+    && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+fi
+if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
+  "$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET_ID" '.pr.ciStatus = "passing"'
+fi
+```
+
+**When PR is merged** (Phase 6 completes), update signal + global state with merge timestamp:
+
+```bash
+MERGE_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if [ -f "$SIGNAL_FILE" ]; then
+  jq --arg ts "$MERGE_TS" '.pr.ciStatus = "merged" | .pr.mergedAt = $ts' \
+    "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+fi
+if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
+  "$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET_ID" \
+    ".pr.ciStatus = \"merged\" | .pr.mergedAt = \"${MERGE_TS}\""
+fi
+```
+
 **When worker reaches terminal state** (done or failed):
 
 ```bash
@@ -179,9 +215,11 @@ fi
 | 3 start | `implementing` |
 | 4 start | `validating` |
 | 5 start | `shipping` |
-| 5 PR created | `pr-created` |
+| 5 PR created | `pr-created` + `pr.ciStatus: "pending"` |
+| 5 CI passes | `pr.ciStatus: "passing"` |
 | 5 monitoring | `monitoring` |
 | 6 start | `merging` |
+| 6 PR merged | `pr.ciStatus: "merged"` + `pr.mergedAt` |
 | 6 complete | `done` |
 | Any failure | `failed` |
 

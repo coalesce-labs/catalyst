@@ -116,6 +116,10 @@ Print this block:
 
  Full run (dispatch workers):
    cd ~/catalyst/wt/<projectKey>/<orch-name> && claude "/catalyst-dev:orchestrate <ticket-args>"
+
+ Monitor (optional — real-time web + terminal dashboard):
+   bun run ${CLAUDE_PLUGIN_ROOT}/scripts/orch-monitor/server.ts
+   Open http://<tailscale-ip>:7400 on any device
 ════════════════════════════════════════════════════════════════
 ```
 

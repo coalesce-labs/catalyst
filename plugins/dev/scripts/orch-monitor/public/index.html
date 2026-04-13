@@ -1,0 +1,1994 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalyst Orchestration Monitor</title>
+    <link rel="icon" type="image/svg+xml" href="/public/catalyst-logo.svg" />
+    <style>
+      :root {
+        --bg: #0b0d10;
+        --panel: #14181d;
+        --panel-2: #1b2028;
+        --border: #262d36;
+        --fg: #e6e9ef;
+        --muted: #8a93a1;
+        --accent: #4ea1ff;
+        --green: #39d07a;
+        --red: #ef5d5d;
+        --yellow: #eabc3b;
+        --blue: #4ea1ff;
+        --gray: #6b7280;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        min-height: 100vh;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        padding: 10px 14px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+      header h1 {
+        font-size: 15px;
+        font-weight: 600;
+        margin: 0;
+        flex: 1 1 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+      header h1 img {
+        width: 22px;
+        height: 22px;
+        display: block;
+      }
+      header h1 .brand-sub {
+        color: var(--muted);
+        font-weight: 400;
+        font-size: 13px;
+      }
+      .conn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--gray);
+        box-shadow: 0 0 4px transparent;
+      }
+      .dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+      .dot.err { background: var(--red); }
+      main {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 14px;
+        max-width: 1400px;
+        margin: 0 auto;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .card-head {
+        padding: 10px 14px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+      .card-head h2 {
+        font-size: 14px;
+        margin: 0;
+        flex: 1 1 auto;
+      }
+      .card-head .meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .wave-bar {
+        flex: 1 1 200px;
+        height: 6px;
+        background: var(--panel-2);
+        border-radius: 3px;
+        overflow: hidden;
+        min-width: 120px;
+      }
+      .wave-bar > span {
+        display: block;
+        height: 100%;
+        background: linear-gradient(90deg, var(--accent), var(--green));
+      }
+      /* --- Waves strip --- */
+      .waves-strip {
+        border-top: 1px solid var(--border);
+        padding: 12px 14px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 10px;
+      }
+      .wcard {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 10px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        cursor: pointer;
+        transition: border-color 120ms ease;
+      }
+      .wcard:hover { border-color: var(--accent); }
+      .wcard.active { border-color: var(--accent); }
+      .wcard .wc-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+      }
+      .wcard .wc-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--fg);
+      }
+      .wcard .wstatus {
+        font-size: 10px;
+        padding: 2px 7px;
+        border-radius: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        white-space: nowrap;
+      }
+      .wstatus.complete { background: #1a4a3a; color: #8af4cc; }
+      .wstatus.in_progress,
+      .wstatus.active,
+      .wstatus.provisioning { background: #1f3a5a; color: #9ec7f4; }
+      .wstatus.pending,
+      .wstatus.blocked { background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+      .wstatus.failed { background: #5a2a2a; color: #f4a8a8; }
+      .wcard .wtickets { display: flex; flex-wrap: wrap; gap: 4px; }
+      .tpill {
+        font-family: ui-monospace, monospace;
+        font-size: 11px;
+        padding: 2px 6px;
+        border-radius: 3px;
+        background: var(--panel-2);
+        color: var(--fg);
+        border: 1px solid var(--border);
+      }
+      .tpill.merged,
+      .tpill.done { background: #1a4a3a; color: #8af4cc; border-color: transparent; }
+      .tpill.pr-open,
+      .tpill.shipping,
+      .tpill.in_progress,
+      .tpill.implementing { background: #1f3a5a; color: #9ec7f4; border-color: transparent; }
+      .tpill.failed,
+      .tpill.stalled { background: #5a2a2a; color: #f4a8a8; border-color: transparent; }
+      .wcard .wc-foot {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .wcard .wc-foot .cta { color: var(--accent); }
+
+      /* --- Briefing drawer (markdown-rendered) --- */
+      .briefing-drawer {
+        border-top: 1px solid var(--border);
+        background: #0f1216;
+        padding: 16px 22px;
+        display: none;
+      }
+      .briefing-drawer.open { display: block; }
+      .briefing-drawer .bd-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+      .briefing-drawer .bd-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--muted);
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+      }
+      .briefing-drawer .bd-close {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 14px;
+        padding: 2px 8px;
+      }
+      .briefing-drawer .bd-close:hover { color: var(--accent); }
+      .md {
+        color: var(--fg);
+        font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        max-width: 78ch;
+      }
+      .md h1, .md h2, .md h3, .md h4 {
+        color: var(--fg);
+        margin: 1.2em 0 0.4em;
+        line-height: 1.25;
+        letter-spacing: -0.01em;
+      }
+      .md h1 { font-size: 22px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+      .md h2 { font-size: 18px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+      .md h3 { font-size: 15px; color: var(--accent); }
+      .md h4 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+      .md p { margin: 0.6em 0; }
+      .md ul, .md ol { margin: 0.4em 0; padding-left: 1.4em; }
+      .md li { margin: 0.25em 0; }
+      .md li > p { margin: 0.25em 0; }
+      .md strong { color: var(--fg); font-weight: 600; }
+      .md em { color: var(--fg); }
+      .md a { color: var(--accent); border-bottom: 1px dotted var(--accent); }
+      .md a:hover { border-bottom-style: solid; text-decoration: none; }
+      .md code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.9em;
+        padding: 1px 5px;
+        background: var(--panel-2);
+        border-radius: 3px;
+        color: #f4c88a;
+      }
+      .md pre {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 12px;
+        overflow-x: auto;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      .md pre code { background: transparent; padding: 0; color: var(--fg); }
+      .md blockquote {
+        border-left: 3px solid var(--accent);
+        padding: 0.2em 0 0.2em 1em;
+        margin: 0.6em 0;
+        color: var(--muted);
+      }
+      .md table {
+        border-collapse: collapse;
+        margin: 0.6em 0;
+        width: 100%;
+        font-size: 13px;
+      }
+      .md th, .md td {
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        text-align: left;
+      }
+      .md th { background: var(--panel-2); }
+      .md hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+
+      /* --- Worker table --- */
+      .worker-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+      .worker-table thead th {
+        text-align: left;
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+        background: var(--panel);
+        position: sticky;
+        top: 0;
+        font-weight: 600;
+      }
+      .worker-table tbody td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: middle;
+      }
+      .worker-table tbody tr:last-child td { border-bottom: none; }
+      .worker-table tbody tr:hover { background: var(--panel-2); }
+      .worker-table .col-ticket { font-family: ui-monospace, monospace; font-weight: 600; min-width: 80px; }
+      .worker-table .col-ticket a { color: var(--accent); }
+      .worker-table .col-wave { font-family: ui-monospace, monospace; color: var(--muted); width: 50px; }
+      .worker-table .col-phase { color: var(--muted); width: 44px; }
+      .worker-table .col-pid { color: var(--muted); font-family: ui-monospace, monospace; width: 80px; }
+      .worker-table .col-pr a { font-family: ui-monospace, monospace; }
+      .worker-table .col-pr .pr-merged-note { color: var(--green); margin-left: 6px; font-size: 11px; font-weight: 600; }
+      .worker-table .col-pr .pr-closed-link { color: var(--muted); text-decoration: line-through; }
+      .worker-table .col-age { font-family: ui-monospace, monospace; color: var(--muted); white-space: nowrap; }
+      .worker-table .col-age.stale { color: var(--red); }
+      .worker-table .col-cost,
+      .worker-table .col-tokens {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        text-align: right;
+        color: var(--fg);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+        width: 70px;
+      }
+      .worker-table .col-cost.muted,
+      .worker-table .col-tokens.muted { color: var(--muted); }
+      .worker-table thead th.th-num { text-align: right; }
+      .worker-table .col-title {
+        max-width: 380px;
+        line-height: 1.3;
+      }
+      .worker-table .col-title .ct-title {
+        color: var(--fg);
+        display: inline-block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        vertical-align: middle;
+      }
+      .worker-table .col-title .ct-project {
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 2px;
+      }
+      .worker-table .col-title .ct-labels {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 3px;
+        margin-left: 6px;
+        vertical-align: middle;
+      }
+      .worker-table .lbl-chip {
+        display: inline-block;
+        font-size: 10px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        background: var(--panel-2);
+        color: var(--muted);
+        border: 1px solid var(--border);
+        font-family: ui-monospace, monospace;
+        line-height: 1.4;
+      }
+      .worker-table .lbl-chip.bug { background: rgba(239, 93, 93, 0.16); color: #f4a8a8; border-color: transparent; }
+      .worker-table .lbl-chip.feature { background: rgba(78, 161, 255, 0.16); color: #9ec7f4; border-color: transparent; }
+      .worker-table tbody tr.row-merged { opacity: 0.85; }
+      .worker-table tbody tr.row-closed { opacity: 0.75; }
+      .worker-table .alive-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+      .worker-table .alive-dot.alive { background: var(--green); }
+      .worker-table .alive-dot.dead { background: var(--gray); }
+      .badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .b-done { background: rgba(57, 208, 122, 0.18); color: var(--green); }
+      .b-in_progress, .b-running {
+        background: rgba(78, 161, 255, 0.18); color: var(--blue);
+      }
+      .b-dispatched { background: rgba(107, 114, 128, 0.3); color: #cfd4dc; }
+      .b-failed, .b-error {
+        background: rgba(239, 93, 93, 0.18); color: var(--red);
+      }
+      .b-stalled, .b-blocked {
+        background: rgba(234, 188, 59, 0.18); color: var(--yellow);
+      }
+      .b-unknown { background: var(--panel-2); color: var(--muted); }
+      .alive { color: var(--green); font-weight: 600; }
+      .dead { color: var(--red); font-weight: 600; }
+      .stale { color: var(--red); }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .gates { display: flex; gap: 4px; flex-wrap: wrap; }
+      .gate {
+        font-size: 10px;
+        padding: 1px 5px;
+        border-radius: 3px;
+        background: var(--panel-2);
+        color: var(--muted);
+        font-family: ui-monospace, monospace;
+      }
+      .gate.ok { background: rgba(57, 208, 122, 0.2); color: var(--green); }
+      .gate.fail { background: rgba(239, 93, 93, 0.2); color: var(--red); }
+      .events {
+        max-height: 420px;
+        overflow-y: auto;
+        padding: 6px 10px;
+      }
+      .ev {
+        padding: 5px 6px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+        color: var(--fg);
+        font-family: ui-monospace, monospace;
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+      }
+      .ev:last-child { border-bottom: none; }
+      .ev .t { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .ev .k {
+        font-size: 10px;
+        padding: 1px 6px;
+        border-radius: 3px;
+        background: var(--panel-2);
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        white-space: nowrap;
+      }
+      .ev.status .k  { background: #1f3a5a; color: #9ec7f4; }
+      .ev.phase .k   { background: #2a3c1f; color: #b5d67a; }
+      .ev.pr .k      { background: #3a2a5a; color: #c8a8f4; }
+      .ev.live .k    { background: #5a2a2a; color: #f4a8a8; }
+      .ev.attn .k    { background: #5a4a1a; color: #f4dc8a; }
+      .ev.new .k     { background: #1a4a3a; color: #8af4cc; }
+      .ev.wave .k    { background: #4a3a1f; color: #f4c88a; font-weight: 700; }
+      .ev.brief .k   { background: #3a4a1a; color: #c8f48a; }
+      .ev .msg { flex: 1; }
+      .ev .tkt { color: var(--accent); font-weight: 600; }
+      .ev .from { color: var(--muted); }
+      .ev .to { color: var(--fg); font-weight: 600; }
+      .ev .arr { color: var(--muted); }
+      .empty { color: var(--muted); padding: 14px; text-align: center; }
+
+      /* --- Attention panel --- */
+      .attention-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .attention-panel.has-items {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+      }
+      .attn-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .attn-count {
+        font-family: ui-monospace, monospace;
+        color: var(--fg);
+      }
+      .attn-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .attn-item {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 10px;
+        border-radius: 5px;
+        font-size: 13px;
+        cursor: pointer;
+        border-left: 3px solid transparent;
+        background: var(--panel-2);
+        transition: background 120ms ease;
+      }
+      .attn-item:hover { background: #232a35; }
+      .attn-item.error {
+        border-left-color: var(--red);
+        background: rgba(239, 93, 93, 0.08);
+      }
+      .attn-item.error:hover { background: rgba(239, 93, 93, 0.15); }
+      .attn-item.warning {
+        border-left-color: var(--yellow);
+        background: rgba(234, 188, 59, 0.08);
+      }
+      .attn-item.warning:hover { background: rgba(234, 188, 59, 0.15); }
+      .attn-item .attn-orch {
+        color: var(--muted);
+        font-family: ui-monospace, monospace;
+        font-size: 11px;
+      }
+      .attn-item .attn-ticket {
+        color: var(--accent);
+        font-family: ui-monospace, monospace;
+        font-weight: 600;
+      }
+      .attn-item .attn-reason { flex: 1; color: var(--fg); }
+      .attn-item.error .attn-reason { color: #f4a8a8; }
+      .attn-item.warning .attn-reason { color: #f4dc8a; }
+      .attn-clear {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        color: var(--muted);
+        padding: 4px 10px;
+        align-self: flex-start;
+      }
+      .attn-clear .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+      /* --- Cost summary card --- */
+      .cost-card {
+        border-top: 1px solid var(--border);
+        padding: 12px 14px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 14px;
+      }
+      .cost-total {
+        font-size: 22px;
+        font-weight: 700;
+        color: var(--fg);
+        font-variant-numeric: tabular-nums;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .cost-meta {
+        color: var(--muted);
+        font-size: 12px;
+        flex: 1 1 auto;
+      }
+      .cost-meta .cm-sep { margin: 0 6px; color: var(--border); }
+      .cost-empty {
+        color: var(--muted);
+        font-size: 13px;
+        font-style: italic;
+      }
+      .cost-breakdown {
+        display: block;
+        width: 100%;
+        font-size: 11px;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin-top: 2px;
+      }
+      .cost-parallel {
+        position: relative;
+        border-bottom: 1px dotted var(--muted);
+        cursor: help;
+      }
+      .cost-parallel:hover::after {
+        content: attr(data-tip);
+        position: absolute;
+        bottom: calc(100% + 6px);
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 12px;
+        font-style: normal;
+        font-weight: 400;
+        line-height: 1.45;
+        width: max-content;
+        max-width: 320px;
+        white-space: normal;
+        z-index: 20;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        pointer-events: none;
+      }
+      .cost-parallel:hover::before {
+        content: "";
+        position: absolute;
+        bottom: calc(100% + 1px);
+        left: 50%;
+        transform: translateX(-50%);
+        border: 5px solid transparent;
+        border-top-color: var(--border);
+        z-index: 21;
+      }
+      @media (max-width: 560px) {
+        .cost-card { padding: 10px; gap: 8px; }
+        .cost-total { font-size: 18px; }
+      }
+
+      /* --- Gantt section --- */
+      .gantt-section {
+        border-top: 1px solid var(--border);
+        padding: 12px 14px 14px;
+      }
+      .gantt-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 8px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .gantt-head h3 {
+        margin: 0;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .gantt-head .gt-toggle {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .gantt-section.collapsed .gantt-body { display: none; }
+      .gantt-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        font-size: 10px;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+      .gantt-legend .lg-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .gantt-legend .lg-swatch {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+        display: inline-block;
+      }
+      .gantt-legend .lg-swatch-nodata {
+        background: var(--muted);
+        background-image: repeating-linear-gradient(
+          45deg,
+          rgba(255, 255, 255, 0.3) 0,
+          rgba(255, 255, 255, 0.3) 2px,
+          transparent 2px,
+          transparent 4px
+        );
+        opacity: 0.7;
+      }
+      .gantt-grid {
+        position: relative;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .gantt-overlay {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 110px;
+        right: 60px;
+        pointer-events: none;
+      }
+      .gantt-axis {
+        position: relative;
+        height: 18px;
+        margin-left: 110px;
+        margin-right: 60px;
+        border-bottom: 1px solid var(--border);
+      }
+      .gantt-tick {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 1px;
+        background: var(--border);
+      }
+      .gantt-tick-label {
+        position: absolute;
+        top: 0;
+        font-size: 10px;
+        color: var(--muted);
+        transform: translateX(-50%);
+        white-space: nowrap;
+      }
+      .gantt-row {
+        position: relative;
+        height: 22px;
+        display: flex;
+        align-items: center;
+        margin-top: 4px;
+      }
+      .gantt-label {
+        width: 110px;
+        flex-shrink: 0;
+        font-size: 11px;
+        color: var(--fg);
+        padding-right: 8px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .gantt-label .gl-wave {
+        color: var(--muted);
+        margin-right: 4px;
+      }
+      .gantt-track {
+        position: relative;
+        flex: 1;
+        height: 14px;
+        background: var(--panel-2);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .gantt-bar {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        display: flex;
+      }
+      .gantt-seg {
+        height: 100%;
+        position: relative;
+      }
+      .gantt-seg.merged { opacity: 0.7; }
+      .gantt-seg.no-data {
+        background-image: repeating-linear-gradient(
+          45deg,
+          rgba(255, 255, 255, 0.12) 0,
+          rgba(255, 255, 255, 0.12) 4px,
+          transparent 4px,
+          transparent 8px
+        );
+        opacity: 0.55;
+      }
+      .gantt-seg.live::after {
+        content: "";
+        position: absolute;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        width: 4px;
+        background: rgba(255, 255, 255, 0.35);
+        animation: gantt-pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes gantt-pulse {
+        0%, 100% { opacity: 0.2; }
+        50% { opacity: 0.95; }
+      }
+      .gantt-cost {
+        width: 60px;
+        flex-shrink: 0;
+        text-align: right;
+        font-size: 11px;
+        color: var(--muted);
+        padding-left: 8px;
+        white-space: nowrap;
+      }
+      .gantt-wave-divider {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 0;
+        border-left: 1px dashed var(--border);
+        pointer-events: none;
+        z-index: 1;
+      }
+      .gantt-wave-divider .gwd-label {
+        position: absolute;
+        top: 2px;
+        left: 4px;
+        font-size: 10px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .gantt-empty {
+        color: var(--muted);
+        font-size: 12px;
+        padding: 8px 0;
+      }
+
+      @media (max-width: 600px) {
+        .gantt-axis { margin-left: 80px; margin-right: 40px; }
+        .gantt-label { width: 80px; font-size: 10px; }
+        .gantt-cost { width: 40px; font-size: 10px; padding-left: 4px; }
+        .gantt-legend { display: none; }
+        .gantt-section.show-legend .gantt-legend { display: flex; }
+      }
+
+      @media (max-width: 560px) {
+        main { padding: 8px; gap: 10px; }
+        .card-head { padding: 8px 10px; }
+        .worker-table thead th,
+        .worker-table tbody td { padding: 7px 8px; font-size: 12px; }
+        .worker-table .col-phase,
+        .worker-table .col-pid { display: none; }
+        .worker-table .col-title { max-width: 180px; font-size: 11px; }
+        .waves-strip { grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px 10px; }
+        .briefing-drawer { padding: 14px; }
+        .md { font-size: 13px; }
+      }
+    </style>
+    <script src="/public/vendor/marked.umd.js"></script>
+    <script src="/public/vendor/purify.min.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>
+        <img src="/public/catalyst-logo.svg" alt="Catalyst" />
+        Catalyst <span class="brand-sub">Orchestration Monitor</span>
+      </h1>
+      <span class="conn">
+        <span id="conn-dot" class="dot"></span>
+        <span id="conn-text">connecting...</span>
+      </span>
+      <span id="last-update" class="conn"></span>
+    </header>
+    <main>
+      <div id="attention" class="attention-panel"></div>
+      <div id="orchestrators"></div>
+      <div class="card">
+        <div class="card-head"><h2>Events</h2></div>
+        <div id="events" class="events">
+          <div class="empty">No events yet.</div>
+        </div>
+      </div>
+    </main>
+    <script>
+      (function () {
+        const $orch = document.getElementById("orchestrators");
+        const $attention = document.getElementById("attention");
+        const $events = document.getElementById("events");
+        const STALE_THRESHOLD_SECONDS = 900;
+        const $dot = document.getElementById("conn-dot");
+        const $connText = document.getElementById("conn-text");
+        const $lastUpdate = document.getElementById("last-update");
+
+        let snapshot = { timestamp: null, orchestrators: [] };
+        const eventLog = [];
+        const MAX_EVENTS = 200;
+        // orchId -> { ticket -> WorkerAnalytics | null }
+        const analyticsByOrch = new Map();
+        // ticket key -> LinearTicket
+        const linearByKey = new Map();
+        // orchId -> bool (collapsed)
+        const ganttCollapsed = new Map();
+
+        const PHASE_COLORS = {
+          dispatched: "#475569",
+          researching: "#3b82f6",
+          planning: "#a855f7",
+          implementing: "#10b981",
+          in_progress: "#10b981",
+          validating: "#f59e0b",
+          shipping: "#14b8a6",
+          "pr-open": "#14b8a6",
+          pr_open: "#14b8a6",
+          merging: "#6b7280",
+          merged: "#6b7280",
+          done: "#6b7280",
+          failed: "#ef4444",
+          stalled: "#eab308",
+        };
+        const FALLBACK_PHASE_COLOR = "#3b82f6";
+        function phaseColor(phase) {
+          if (!phase) return FALLBACK_PHASE_COLOR;
+          return PHASE_COLORS[phase] || FALLBACK_PHASE_COLOR;
+        }
+        const LABEL_CHIP_CLASS = {
+          bug: "bug",
+          Bug: "bug",
+          feature: "feature",
+          Feature: "feature",
+        };
+        const PHASE_ORDER = [
+          "dispatched",
+          "researching",
+          "planning",
+          "implementing",
+          "validating",
+          "shipping",
+          "done",
+        ];
+        // Per-worker previous state, keyed "orchId:ticket"
+        const prevWorker = new Map();
+        // Per-orchestrator attention items we've already announced
+        const seenAttention = new Set();
+        // Per-wave status "orchId:waveN" -> status
+        const prevWaveStatus = new Map();
+        let snapshotPrimed = false;
+
+        function esc(s) {
+          return String(s == null ? "" : s)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+
+        function fmtSince(seconds) {
+          const s = Math.max(0, Math.floor(seconds));
+          if (s < 60) return s + "s";
+          const m = Math.floor(s / 60);
+          if (m < 60) return m + "m " + (s % 60) + "s";
+          const h = Math.floor(m / 60);
+          return h + "h " + (m % 60) + "m";
+        }
+
+        function fmtTokens(n) {
+          if (!Number.isFinite(n) || n <= 0) return "—";
+          if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+          if (n >= 10_000) return Math.round(n / 1000) + "k";
+          if (n >= 1_000) return (n / 1000).toFixed(1) + "k";
+          return String(Math.round(n));
+        }
+
+        function linearFor(ticket) {
+          return linearByKey.get(ticket) || null;
+        }
+
+        function labelChipHtml(label) {
+          const cls = LABEL_CHIP_CLASS[label]
+            ? " " + LABEL_CHIP_CLASS[label]
+            : LABEL_CHIP_CLASS[String(label).toLowerCase()]
+              ? " " + LABEL_CHIP_CLASS[String(label).toLowerCase()]
+              : "";
+          return '<span class="lbl-chip' + cls + '">' + esc(label) + "</span>";
+        }
+
+        function renderGate(key, val) {
+          const ok =
+            val === true || val === "pass" || val === "passed" || val === "ok";
+          const fail =
+            val === false || val === "fail" || val === "failed" || val === "x";
+          const cls = ok ? "gate ok" : fail ? "gate fail" : "gate";
+          return (
+            '<span class="' + cls + '">' + esc(key) + "</span>"
+          );
+        }
+
+        // Maps ticket -> wave number for the current orchestrator render
+        function ticketToWave(o) {
+          const map = {};
+          if (Array.isArray(o.waves)) {
+            for (const w of o.waves) {
+              if (!Array.isArray(w.tickets)) continue;
+              for (const t of w.tickets) map[t] = w.wave;
+            }
+          }
+          return map;
+        }
+
+        function statusClass(s) {
+          return (s || "").replace(/[^a-z0-9_]/gi, "_");
+        }
+
+        function renderWorkerRow(orchId, ticket, w, waveNum) {
+          const stat = w.status || "unknown";
+          const badgeClass = "b-" + statusClass(stat);
+          const aliveCell = w.pid
+            ? '<span class="alive-dot ' + (w.alive ? "alive" : "dead") + '"></span>' +
+              (w.alive ? "alive" : "dead") +
+              ' <span class="col-pid">' + esc(w.pid) + "</span>"
+            : '<span style="color:var(--muted)">—</span>';
+
+          // PR cell with state-aware treatment
+          let prCell = '<span style="color:var(--muted)">—</span>';
+          let rowStateCls = "";
+          if (w.pr) {
+            const prUrl = esc(w.pr.url);
+            const prNum = esc(w.pr.number);
+            if (w.prState === "MERGED") {
+              prCell =
+                '<a href="' + prUrl + '" target="_blank" rel="noopener">#' +
+                prNum + "</a>" +
+                '<span class="pr-merged-note">merged</span>';
+              rowStateCls = " row-merged";
+            } else if (w.prState === "CLOSED") {
+              prCell =
+                '<a class="pr-closed-link" href="' + prUrl +
+                '" target="_blank" rel="noopener">#' + prNum + "</a>";
+              rowStateCls = " row-closed";
+            } else {
+              prCell =
+                '<a href="' + prUrl + '" target="_blank" rel="noopener">#' +
+                prNum + "</a>";
+            }
+          }
+
+          const tsu = Math.floor(w.timeSinceUpdate || 0);
+          const ageCls = tsu > 600 ? "col-age stale" : "col-age";
+
+          // Linear metadata: title, project, labels, link
+          const lt = linearFor(ticket);
+          const ticketUrl = (lt && lt.url) ||
+            "https://linear.app/issue/" + encodeURIComponent(ticket);
+          const ticketLink =
+            '<a href="' + esc(ticketUrl) + '" target="_blank" rel="noopener">' +
+            esc(ticket) + "</a>";
+
+          let titleHtml = '<span style="color:var(--muted)">—</span>';
+          if (lt) {
+            const labels = Array.isArray(lt.labels) ? lt.labels : [];
+            const visible = labels.slice(0, 3);
+            const hidden = labels.length - visible.length;
+            const labelsHtml = visible.length
+              ? '<span class="ct-labels">' +
+                visible.map(labelChipHtml).join("") +
+                (hidden > 0
+                  ? '<span class="lbl-chip">+' + hidden + "</span>"
+                  : "") +
+                "</span>"
+              : "";
+            const project = lt.project
+              ? '<span class="ct-project">' + esc(lt.project) + "</span>"
+              : "";
+            titleHtml =
+              '<span class="ct-title" title="' + esc(lt.title) + '">' +
+              esc(lt.title) + "</span>" +
+              labelsHtml +
+              project;
+          }
+
+          // Cost + tokens
+          const orchAn = analyticsByOrch.get(orchId) || {};
+          const wa = orchAn[ticket] || null;
+          const liveCost =
+            w.cost && Number.isFinite(Number(w.cost.costUSD))
+              ? Number(w.cost.costUSD)
+              : 0;
+          const aCost = wa && Number.isFinite(Number(wa.costUSD))
+            ? Number(wa.costUSD)
+            : 0;
+          const costVal = Math.max(liveCost, aCost);
+          const costCell = costVal > 0
+            ? '<td class="col-cost">$' + costVal.toFixed(2) + "</td>"
+            : '<td class="col-cost muted">—</td>';
+
+          let totalTokens = 0;
+          if (wa) {
+            totalTokens =
+              (wa.inputTokens || 0) +
+              (wa.outputTokens || 0) +
+              (wa.cacheReadTokens || 0);
+          }
+          if (!totalTokens && w.cost) {
+            totalTokens =
+              (w.cost.inputTokens || 0) +
+              (w.cost.outputTokens || 0) +
+              (w.cost.cacheReadTokens || 0);
+          }
+          const tokensCell = totalTokens > 0
+            ? '<td class="col-tokens">' + esc(fmtTokens(totalTokens)) + "</td>"
+            : '<td class="col-tokens muted">—</td>';
+
+          return (
+            '<tr class="worker-row' + rowStateCls + '" data-orch="' + esc(orchId) +
+            '" data-ticket="' + esc(ticket) +
+            '" data-updated-at="' + esc(w.updatedAt || "") + '">' +
+            '<td class="col-wave">' + (waveNum != null ? esc(waveNum) : "—") + "</td>" +
+            '<td class="col-ticket">' + ticketLink + "</td>" +
+            '<td class="col-title">' + titleHtml + "</td>" +
+            '<td><span class="badge ' + esc(badgeClass) + '">' + esc(stat) + "</span></td>" +
+            '<td class="col-phase">' + esc(w.phase ?? 0) + "</td>" +
+            "<td>" + aliveCell + "</td>" +
+            '<td class="col-pr">' + prCell + "</td>" +
+            costCell +
+            tokensCell +
+            '<td class="' + ageCls + '" data-since="1">' + fmtSince(tsu) + "</td>" +
+            "</tr>"
+          );
+        }
+
+        function renderWaveCard(o, w) {
+          const workers = o.workers || {};
+          const tickets = Array.isArray(w.tickets) ? w.tickets : [];
+          const doneCount = tickets.filter((t) => {
+            const s = (workers[t] || {}).status;
+            return s === "done" || s === "merged";
+          }).length;
+          const pills = tickets
+            .map((t) => {
+              const s = (workers[t] || {}).status || "";
+              const cls = "tpill " + statusClass(s);
+              return '<span class="' + cls + '">' + esc(t) + "</span>";
+            })
+            .join("");
+          const briefing = (o.briefings || {})[w.wave];
+          const hasBrief = typeof briefing === "string" && briefing.length > 0;
+          const completedAt = w.completedAt
+            ? new Date(w.completedAt).toLocaleString()
+            : "";
+          return (
+            '<div class="wcard" data-orch="' + esc(o.id) +
+            '" data-wave="' + esc(w.wave) + '">' +
+            '<div class="wc-head">' +
+            '<span class="wc-title">Wave ' + esc(w.wave) + "</span>" +
+            '<span class="wstatus ' + statusClass(w.status) + '">' +
+            esc(w.status || "?") + "</span>" +
+            "</div>" +
+            '<div class="wtickets">' + pills + "</div>" +
+            '<div class="wc-foot">' +
+            "<span>" + doneCount + "/" + tickets.length + " merged" +
+            (completedAt ? " · " + esc(completedAt) : "") + "</span>" +
+            (hasBrief ? '<span class="cta">briefing →</span>' : "") +
+            "</div>" +
+            "</div>"
+          );
+        }
+
+        function fmtDuration(ms) {
+          if (!ms || ms < 0) return "";
+          const s = Math.floor(ms / 1000);
+          if (s < 60) return s + "s";
+          const m = Math.floor(s / 60);
+          if (m < 60) return m + "m " + (s % 60) + "s";
+          const h = Math.floor(m / 60);
+          return h + "h " + (m % 60) + "m";
+        }
+
+        function fmtClock(d) {
+          const hh = String(d.getHours()).padStart(2, "0");
+          const mm = String(d.getMinutes()).padStart(2, "0");
+          return hh + ":" + mm;
+        }
+
+        function renderCostCard(o) {
+          const workers = o.workers || {};
+          const tickets = Object.keys(workers);
+          const workerCount = tickets.length;
+          const analytics = analyticsByOrch.get(o.id) || {};
+          let completedCount = 0;
+          let totalDurationMs = 0;
+          let totalCost = 0;
+          let workerMinStart = Infinity;
+          let workerMaxEnd = -Infinity;
+          for (const t of tickets) {
+            const w = workers[t] || {};
+            if (w.status === "done" || w.status === "merged") completedCount++;
+            const liveCost = (w.cost && Number(w.cost.costUSD)) || 0;
+            const a = analytics[w.ticket || t] || null;
+            const aCost = (a && Number(a.costUSD)) || 0;
+            totalCost += Math.max(liveCost, aCost);
+            if (a && Number.isFinite(a.durationMs)) totalDurationMs += a.durationMs;
+            const sMs = w.startedAt ? Date.parse(w.startedAt) : NaN;
+            const eMs = w.completedAt ? Date.parse(w.completedAt) : NaN;
+            if (Number.isFinite(sMs)) workerMinStart = Math.min(workerMinStart, sMs);
+            if (Number.isFinite(eMs)) workerMaxEnd = Math.max(workerMaxEnd, eMs);
+          }
+          const orchStart = o.startedAt ? Date.parse(o.startedAt) : NaN;
+          const orchEnd = o.completedAt ? Date.parse(o.completedAt) : NaN;
+          const startMs = Number.isFinite(orchStart)
+            ? orchStart
+            : (workerMinStart === Infinity ? NaN : workerMinStart);
+          const endMs = Number.isFinite(orchEnd)
+            ? orchEnd
+            : (workerMaxEnd === -Infinity ? Date.now() : Math.max(workerMaxEnd, Date.now()));
+          const wallClockMs = Number.isFinite(startMs) && endMs > startMs ? endMs - startMs : 0;
+          const wallClockStr = wallClockMs > 0 ? fmtDuration(wallClockMs) : "";
+          const parallelism = wallClockMs > 0 && totalDurationMs > 0
+            ? totalDurationMs / wallClockMs
+            : 0;
+
+          if (totalCost === 0) {
+            const metaParts = [];
+            metaParts.push(workerCount + " worker" + (workerCount === 1 ? "" : "s") +
+              " (" + completedCount + " done)");
+            if (wallClockStr) metaParts.push(wallClockStr + " wall clock");
+            const meta = metaParts.join('<span class="cm-sep">·</span>');
+            return (
+              '<div class="cost-card">' +
+              '<span class="cost-empty">No cost data yet</span>' +
+              '<span class="cost-meta">' + meta + "</span>" +
+              "</div>"
+            );
+          }
+          const parts = [];
+          parts.push(workerCount + " worker" + (workerCount === 1 ? "" : "s") +
+            " (" + completedCount + " done)");
+          if (wallClockStr) parts.push(wallClockStr + " wall clock");
+          if (parallelism > 0) {
+            const pTip =
+              "Sum of per-worker compute time \u00F7 wall clock. " +
+              ">1\u00D7 means parallelism saved time; " +
+              "1\u00D7 = sequential equivalent; " +
+              "<1\u00D7 = limited overlap.";
+            parts.push(
+              '<span class="cost-parallel" data-tip="' + esc(pTip) + '">' +
+              parallelism.toFixed(1) + "\u00D7 parallel efficiency</span>",
+            );
+          }
+          const meta = parts.join('<span class="cm-sep">·</span>');
+          const breakdown = parallelism > 0
+            ? '<span class="cost-breakdown">\u03A3 compute ' +
+              esc(fmtDuration(totalDurationMs)) + " \u00B7 wall " +
+              esc(fmtDuration(wallClockMs)) + "</span>"
+            : "";
+          return (
+            '<div class="cost-card">' +
+            '<span class="cost-total">$' + totalCost.toFixed(2) + "</span>" +
+            '<span class="cost-meta">' + meta + "</span>" +
+            breakdown +
+            "</div>"
+          );
+        }
+
+        function pickTickInterval(spanMs) {
+          const minutes = spanMs / 60000;
+          if (minutes <= 30) return 5 * 60000;
+          if (minutes <= 120) return 15 * 60000;
+          if (minutes <= 360) return 30 * 60000;
+          return 60 * 60000;
+        }
+
+        function buildPhaseSegments(w, startMs, endMs) {
+          const phaseTs = w.phaseTimestamps || {};
+          const stops = [];
+          for (const phase of PHASE_ORDER) {
+            const ts = phaseTs[phase];
+            if (!ts) continue;
+            const t = Date.parse(ts);
+            if (!Number.isFinite(t)) continue;
+            stops.push({ phase, t });
+          }
+          stops.sort((a, b) => a.t - b.t);
+          if (!stops.length) {
+            const phase = w.status || "dispatched";
+            return [{ phase, from: startMs, to: endMs, noData: true }];
+          }
+          const segs = [];
+          if (stops[0].t > startMs) {
+            segs.push({ phase: "dispatched", from: startMs, to: stops[0].t });
+          }
+          for (let i = 0; i < stops.length; i++) {
+            const from = Math.max(stops[i].t, startMs);
+            const to = i + 1 < stops.length ? stops[i + 1].t : endMs;
+            if (to > from) segs.push({ phase: stops[i].phase, from, to });
+          }
+          return segs;
+        }
+
+        function renderGantt(o) {
+          const workers = o.workers || {};
+          const tToW = ticketToWave(o);
+          const entries = Object.entries(workers).sort((a, b) => {
+            const wa = tToW[a[0]] ?? 999;
+            const wb = tToW[b[0]] ?? 999;
+            if (wa !== wb) return wa - wb;
+            return a[0].localeCompare(b[0]);
+          });
+          if (!entries.length) return "";
+
+          const now = Date.now();
+          let minStart = Infinity;
+          let maxEnd = -Infinity;
+          const rowData = entries.map(([ticket, w]) => {
+            const startMs = w.startedAt ? Date.parse(w.startedAt) : NaN;
+            const isLive =
+              !w.completedAt &&
+              w.status !== "done" &&
+              w.status !== "merged" &&
+              w.status !== "failed";
+            const endMs = w.completedAt
+              ? Date.parse(w.completedAt)
+              : isLive
+                ? now
+                : Date.parse(w.updatedAt || w.startedAt || "") || now;
+            return {
+              ticket,
+              w,
+              wave: tToW[ticket],
+              startMs: Number.isFinite(startMs) ? startMs : null,
+              endMs: Number.isFinite(endMs) ? endMs : null,
+              isLive,
+            };
+          });
+          for (const r of rowData) {
+            if (r.startMs != null && r.startMs < minStart) minStart = r.startMs;
+            if (r.endMs != null && r.endMs > maxEnd) maxEnd = r.endMs;
+          }
+          if (!Number.isFinite(minStart) || !Number.isFinite(maxEnd) || maxEnd <= minStart) {
+            return (
+              '<div class="gantt-section"><div class="gantt-head">' +
+              '<h3>Timeline</h3></div>' +
+              '<div class="gantt-empty">Not enough data to render timeline.</div>' +
+              "</div>"
+            );
+          }
+          const span = maxEnd - minStart;
+          const pct = (t) => ((t - minStart) / span) * 100;
+
+          // Wave dividers: earliest startMs per wave (excluding the very first wave)
+          const waveFirst = new Map();
+          for (const r of rowData) {
+            if (r.startMs == null || r.wave == null) continue;
+            const cur = waveFirst.get(r.wave);
+            if (cur == null || r.startMs < cur) waveFirst.set(r.wave, r.startMs);
+          }
+          const sortedWaves = Array.from(waveFirst.entries())
+            .sort((a, b) => a[1] - b[1]);
+          const dividersHtml = sortedWaves.slice(1).map(([wn, t]) =>
+            '<div class="gantt-wave-divider" style="left:' +
+            pct(t).toFixed(2) + '%">' +
+            '<span class="gwd-label">Wave ' + esc(wn) + "</span>" +
+            "</div>",
+          ).join("");
+          const dividers = dividersHtml
+            ? '<div class="gantt-overlay">' + dividersHtml + "</div>"
+            : "";
+
+          // Axis ticks
+          const interval = pickTickInterval(span);
+          const ticks = [];
+          const firstTick = Math.ceil(minStart / interval) * interval;
+          for (let t = firstTick; t <= maxEnd; t += interval) {
+            const left = pct(t);
+            ticks.push(
+              '<div class="gantt-tick" style="left:' + left.toFixed(2) + '%"></div>' +
+              '<div class="gantt-tick-label" style="left:' + left.toFixed(2) + '%">' +
+              esc(fmtClock(new Date(t))) + "</div>",
+            );
+          }
+
+          const orchAnalytics = analyticsByOrch.get(o.id) || {};
+          const rowsHtml = rowData.map((r) => {
+            const w = r.w;
+            const wa = orchAnalytics[r.ticket] || null;
+            const cost = (wa && wa.costUSD) || (w.cost && w.cost.costUSD) || 0;
+            const costLabel = cost > 0 ? "$" + cost.toFixed(2) : "";
+            const startMs = r.startMs;
+            const endMs = r.endMs;
+            if (startMs == null || endMs == null || endMs <= startMs) {
+              return (
+                '<div class="gantt-row">' +
+                '<div class="gantt-label"><span class="gl-wave">W' +
+                esc(r.wave ?? "?") + "</span>" + esc(r.ticket) + "</div>" +
+                '<div class="gantt-track"></div>' +
+                '<div class="gantt-cost">' + esc(costLabel) + "</div>" +
+                "</div>"
+              );
+            }
+            const segs = buildPhaseSegments(w, startMs, endMs);
+            const totalSegSpan = endMs - startMs;
+            const segHtml = segs.map((s, i) => {
+              const segPct = ((s.to - s.from) / totalSegSpan) * 100;
+              const color = phaseColor(s.phase);
+              const mergedCls = s.phase === "merged" ? " merged" : "";
+              const liveCls =
+                r.isLive && i === segs.length - 1 ? " live" : "";
+              const noDataCls = s.noData ? " no-data" : "";
+              const title = s.noData
+                ? s.phase + " (no phase data logged) " +
+                  fmtClock(new Date(s.from)) + "–" + fmtClock(new Date(s.to))
+                : s.phase + " " + fmtClock(new Date(s.from)) +
+                  "–" + fmtClock(new Date(s.to));
+              return (
+                '<div class="gantt-seg' + liveCls + mergedCls + noDataCls +
+                '" style="width:' + segPct.toFixed(2) + "%;background:" + color +
+                ';" title="' + esc(title) + '"></div>'
+              );
+            }).join("");
+            const left = pct(startMs);
+            const width = ((endMs - startMs) / span) * 100;
+            const dur = fmtDuration(endMs - startMs);
+            const toolCount = wa && wa.toolUsage
+              ? Object.values(wa.toolUsage).reduce((a, b) => a + b, 0)
+              : 0;
+            const tooltip =
+              r.ticket + " · " + (w.status || "?") +
+              " · " + dur +
+              (cost > 0 ? " · $" + cost.toFixed(2) : "") +
+              (toolCount ? " · " + toolCount + " tools" : "");
+            return (
+              '<div class="gantt-row">' +
+              '<div class="gantt-label"><span class="gl-wave">W' +
+              esc(r.wave ?? "?") + "</span>" + esc(r.ticket) + "</div>" +
+              '<div class="gantt-track" title="' + esc(tooltip) + '">' +
+              '<div class="gantt-bar" style="left:' + left.toFixed(2) +
+              "%;width:" + width.toFixed(2) + '%;">' + segHtml + "</div>" +
+              "</div>" +
+              '<div class="gantt-cost">' + esc(costLabel) + "</div>" +
+              "</div>"
+            );
+          }).join("");
+
+          const legendHtml = Object.entries({
+            researching: "research",
+            planning: "plan",
+            implementing: "implement",
+            validating: "validate",
+            shipping: "ship",
+            done: "merged",
+            failed: "failed",
+            stalled: "stalled",
+          }).map(([k, label]) =>
+            '<span class="lg-item"><span class="lg-swatch" style="background:' +
+            PHASE_COLORS[k] + '"></span>' + esc(label) + "</span>",
+          ).join("") +
+            '<span class="lg-item"><span class="lg-swatch lg-swatch-nodata"></span>no phase data</span>';
+
+          const collapsed = ganttCollapsed.get(o.id) === true;
+
+          return (
+            '<div class="gantt-section' + (collapsed ? " collapsed" : "") +
+            '" data-orch="' + esc(o.id) + '">' +
+            '<div class="gantt-head" data-gantt-toggle="' + esc(o.id) + '">' +
+            "<h3>Timeline</h3>" +
+            '<span class="gt-toggle">' + (collapsed ? "show" : "hide") + "</span>" +
+            "</div>" +
+            '<div class="gantt-body">' +
+            '<div class="gantt-legend">' + legendHtml + "</div>" +
+            '<div class="gantt-grid">' +
+            '<div class="gantt-axis">' + ticks.join("") + "</div>" +
+            rowsHtml +
+            dividers +
+            "</div>" +
+            "</div>" +
+            "</div>"
+          );
+        }
+
+        function renderOrch(o) {
+          const workers = o.workers || {};
+          const tToW = ticketToWave(o);
+          const entries = Object.entries(workers).sort((a, b) => {
+            const wa = tToW[a[0]] ?? 999;
+            const wb = tToW[b[0]] ?? 999;
+            if (wa !== wb) return wa - wb;
+            return a[0].localeCompare(b[0]);
+          });
+          const done = entries.filter(
+            ([, w]) => w.status === "done" || w.status === "merged",
+          ).length;
+          const total = entries.length || 1;
+          const pct = Math.round((done / total) * 100);
+          const wavesInfo =
+            (o.currentWave || 0) + " / " + (o.totalWaves || 0);
+          const waves = Array.isArray(o.waves) ? o.waves : [];
+          const tableRows = entries.length
+            ? entries
+                .map(([t, w]) => {
+                  const wn = tToW[t] != null ? tToW[t] : (w.wave != null ? w.wave : null);
+                  return renderWorkerRow(o.id, t, w, wn);
+                })
+                .join("")
+            : '<tr><td colspan="10" class="empty">No workers.</td></tr>';
+          return (
+            '<div class="card" data-orch="' + esc(o.id) + '">' +
+            '<div class="card-head">' +
+            "<h2>" + esc(o.id) + "</h2>" +
+            '<span class="meta">wave ' + esc(wavesInfo) + " · " +
+            done + "/" + entries.length + " merged</span>" +
+            '<span class="wave-bar"><span style="width:' + pct + '%"></span></span>' +
+            "</div>" +
+            renderCostCard(o) +
+            (waves.length
+              ? '<div class="waves-strip">' +
+                waves.map((w) => renderWaveCard(o, w)).join("") +
+                "</div>"
+              : "") +
+            '<div class="briefing-drawer" data-drawer-for="' + esc(o.id) + '">' +
+            '<div class="bd-head">' +
+            '<span class="bd-title"></span>' +
+            '<span class="bd-close" title="Close">✕</span>' +
+            "</div>" +
+            '<div class="md"></div>' +
+            "</div>" +
+            '<table class="worker-table"><thead><tr>' +
+            "<th>Wave</th><th>Ticket</th><th>Title</th><th>Status</th><th>Phase</th>" +
+            "<th>Process</th><th>PR</th>" +
+            '<th class="th-num">Cost</th><th class="th-num">Tokens</th>' +
+            "<th>Last update</th>" +
+            "</tr></thead><tbody>" + tableRows + "</tbody></table>" +
+            renderGantt(o) +
+            "</div>"
+          );
+        }
+
+        function collectAttention(snap) {
+          const items = [];
+          const DONE_STATUSES = new Set([
+            "done",
+            "merged",
+            "failed",
+            "stalled",
+          ]);
+          const orchestrators = (snap && snap.orchestrators) || [];
+          for (const orch of orchestrators) {
+            const workers = orch.workers || {};
+            for (const ticket of Object.keys(workers)) {
+              const w = workers[ticket] || {};
+              const status = w.status;
+              if (status === "failed" || status === "stalled") {
+                items.push({
+                  orchId: orch.id,
+                  ticket,
+                  reason: "Status: " + status,
+                  severity: "error",
+                });
+              } else if (
+                w.pid &&
+                w.alive === false &&
+                !DONE_STATUSES.has(status)
+              ) {
+                items.push({
+                  orchId: orch.id,
+                  ticket,
+                  reason: "Process died",
+                  severity: "error",
+                });
+              }
+            }
+          }
+          // errors first, then warnings
+          items.sort((a, b) => {
+            if (a.severity !== b.severity) return a.severity === "error" ? -1 : 1;
+            return a.ticket.localeCompare(b.ticket);
+          });
+          return items;
+        }
+
+        function renderAttention() {
+          const items = collectAttention(snapshot);
+          if (!items.length) {
+            $attention.className = "attention-panel";
+            $attention.innerHTML =
+              '<div class="attn-clear"><span class="dot"></span>All clear</div>';
+            return;
+          }
+          const errs = items.filter((i) => i.severity === "error").length;
+          const warns = items.length - errs;
+          const summary =
+            (errs ? errs + " error" + (errs === 1 ? "" : "s") : "") +
+            (errs && warns ? " · " : "") +
+            (warns ? warns + " warning" + (warns === 1 ? "" : "s") : "");
+          const list = items
+            .map(
+              (it) =>
+                '<div class="attn-item ' + esc(it.severity) +
+                '" data-orch="' + esc(it.orchId) +
+                '" data-ticket="' + esc(it.ticket) + '">' +
+                '<span class="attn-ticket">' + esc(it.ticket) + "</span>" +
+                '<span class="attn-orch">' + esc(it.orchId) + "</span>" +
+                '<span class="attn-reason">' + esc(it.reason) + "</span>" +
+                "</div>",
+            )
+            .join("");
+          $attention.className = "attention-panel has-items";
+          $attention.innerHTML =
+            '<div class="attn-head"><span>Needs attention</span>' +
+            '<span class="attn-count">' + esc(summary) + "</span></div>" +
+            '<div class="attn-list">' + list + "</div>";
+        }
+
+        function render() {
+          const list = snapshot.orchestrators || [];
+          if (!list.length) {
+            $orch.innerHTML =
+              '<div class="card"><div class="empty">No active orchestrators found.</div></div>';
+          } else {
+            $orch.innerHTML = list.map(renderOrch).join("");
+          }
+          renderAttention();
+          if (snapshot.timestamp) {
+            $lastUpdate.textContent =
+              "snapshot " + new Date(snapshot.timestamp).toLocaleTimeString();
+          }
+        }
+
+        function patchWorker(payload) {
+          if (!payload || !payload.worker) return;
+          const orchId = payload.orchId;
+          const w = payload.worker;
+          const orch = (snapshot.orchestrators || []).find(
+            (o) => o.id === orchId,
+          );
+          if (!orch) return;
+          orch.workers = orch.workers || {};
+          orch.workers[w.ticket] = w;
+          render();
+        }
+
+        $attention.addEventListener("click", (e) => {
+          const item = e.target.closest(".attn-item");
+          if (!item) return;
+          const orchId = item.getAttribute("data-orch");
+          const ticket = item.getAttribute("data-ticket");
+          if (!orchId || !ticket) return;
+          const row = document.querySelector(
+            'tr[data-orch="' + CSS.escape(orchId) +
+            '"][data-ticket="' + CSS.escape(ticket) + '"]',
+          );
+          if (row) {
+            row.scrollIntoView({ behavior: "smooth", block: "center" });
+            row.style.transition = "background 600ms ease";
+            const orig = row.style.background;
+            row.style.background = "rgba(78, 161, 255, 0.18)";
+            setTimeout(() => { row.style.background = orig; }, 1200);
+          }
+        });
+
+        function addEvent(kind, html) {
+          const when = new Date().toLocaleTimeString();
+          eventLog.unshift({ when, kind, html });
+          if (eventLog.length > MAX_EVENTS) eventLog.length = MAX_EVENTS;
+          renderEvents();
+        }
+
+        function renderEvents() {
+          if (eventLog.length === 0) {
+            $events.innerHTML = '<div class="empty">No events yet.</div>';
+            return;
+          }
+          $events.innerHTML = eventLog
+            .map(
+              (e) =>
+                '<div class="ev ' + esc(e.kind) + '">' +
+                '<span class="t">' + esc(e.when) + "</span>" +
+                '<span class="k">' + esc(e.kind) + "</span>" +
+                '<span class="msg">' + e.html + "</span>" +
+                "</div>",
+            )
+            .join("");
+        }
+
+        function tkt(s) { return '<span class="tkt">' + esc(s) + "</span>"; }
+        function trans(from, to) {
+          return '<span class="from">' + esc(from) + '</span>' +
+                 '<span class="arr"> → </span>' +
+                 '<span class="to">' + esc(to) + '</span>';
+        }
+
+        function diffWorker(orchId, prev, next) {
+          if (!next) return;
+          const tktStr = next.ticket || "?";
+          if (!prev) {
+            if (snapshotPrimed) {
+              addEvent("new",
+                tkt(tktStr) + " discovered · status <span class=\"to\">" +
+                esc(next.status || "?") + "</span> · phase " +
+                esc(next.phase ?? 0));
+            }
+            return;
+          }
+          if (prev.status !== next.status) {
+            addEvent("status",
+              tkt(tktStr) + " status " + trans(prev.status || "?", next.status || "?"));
+          }
+          if ((prev.phase ?? 0) !== (next.phase ?? 0)) {
+            addEvent("phase",
+              tkt(tktStr) + " phase " + trans(prev.phase ?? 0, next.phase ?? 0));
+          }
+          const prevPr = prev.pr && prev.pr.number;
+          const nextPr = next.pr && next.pr.number;
+          if (nextPr && prevPr !== nextPr) {
+            const url = (next.pr && next.pr.url) || "#";
+            addEvent("pr",
+              tkt(tktStr) + ' PR opened · <a href="' + esc(url) +
+              '" target="_blank" rel="noopener">#' + esc(nextPr) + "</a>");
+          }
+          if (prev.alive !== next.alive) {
+            addEvent("live",
+              tkt(tktStr) + " process " + trans(
+                prev.alive ? "alive" : "dead",
+                next.alive ? "alive" : "dead"));
+          }
+          if (!prev.pid && next.pid) {
+            addEvent("live", tkt(tktStr) + " PID acquired · " + esc(next.pid));
+          }
+          if (prev.pid && !next.pid) {
+            addEvent("live", tkt(tktStr) + " PID cleared (was " + esc(prev.pid) + ")");
+          }
+        }
+
+        function scanAttention(orchId, attention) {
+          if (!Array.isArray(attention)) return;
+          for (let i = 0; i < attention.length; i++) {
+            const item = attention[i] || {};
+            const key =
+              orchId + ":" + (item.id || item.ticket || JSON.stringify(item));
+            if (seenAttention.has(key)) continue;
+            seenAttention.add(key);
+            const ticket = item.ticket || item.workerName || "";
+            const reason = item.reason || item.message || item.type || "needs attention";
+            addEvent("attn",
+              (ticket ? tkt(ticket) + " · " : "") + esc(reason));
+          }
+        }
+
+        const briefingSeen = new Set();
+
+        function scanWaves(orch) {
+          if (!Array.isArray(orch.waves)) return;
+          for (const w of orch.waves) {
+            const key = orch.id + ":" + w.wave;
+            const prev = prevWaveStatus.get(key);
+            if (prev !== undefined && prev !== w.status && snapshotPrimed) {
+              const tickets = Array.isArray(w.tickets) ? w.tickets.join(", ") : "";
+              addEvent("wave",
+                "Wave " + esc(w.wave) + " " + trans(prev, w.status) +
+                (tickets ? " · " + esc(tickets) : ""));
+            }
+            prevWaveStatus.set(key, w.status);
+          }
+          // Notice when a new briefing shows up
+          if (orch.briefings && snapshotPrimed) {
+            for (const nStr of Object.keys(orch.briefings)) {
+              const bKey = orch.id + ":" + nStr;
+              if (briefingSeen.has(bKey)) continue;
+              briefingSeen.add(bKey);
+              addEvent("brief",
+                "Wave " + esc(nStr) + " briefing written");
+            }
+          } else if (orch.briefings) {
+            // Prime the seen set silently
+            for (const nStr of Object.keys(orch.briefings)) {
+              briefingSeen.add(orch.id + ":" + nStr);
+            }
+          }
+        }
+
+        function processSnapshotForEvents(snap) {
+          if (!snap || !Array.isArray(snap.orchestrators)) return;
+          const nowKeys = new Set();
+          for (const orch of snap.orchestrators) {
+            scanWaves(orch);
+            scanAttention(orch.id, orch.attention);
+            const workers = orch.workers || {};
+            for (const key of Object.keys(workers)) {
+              const w = workers[key];
+              const k = orch.id + ":" + (w.ticket || key);
+              nowKeys.add(k);
+              diffWorker(orch.id, prevWorker.get(k), w);
+              prevWorker.set(k, {
+                status: w.status,
+                phase: w.phase,
+                pid: w.pid,
+                alive: w.alive,
+                pr: w.pr,
+              });
+            }
+          }
+          // Detect disappeared workers
+          for (const k of Array.from(prevWorker.keys())) {
+            if (!nowKeys.has(k)) {
+              const [orchId, ticket] = k.split(":");
+              addEvent("live", tkt(ticket) + " removed from " + esc(orchId));
+              prevWorker.delete(k);
+            }
+          }
+          snapshotPrimed = true;
+        }
+
+        function processWorkerUpdate(payload) {
+          if (!payload || !payload.worker) return;
+          const w = payload.worker;
+          const k = payload.orchId + ":" + (w.ticket || "?");
+          diffWorker(payload.orchId, prevWorker.get(k), w);
+          prevWorker.set(k, {
+            status: w.status,
+            phase: w.phase,
+            pid: w.pid,
+            alive: w.alive,
+            pr: w.pr,
+          });
+        }
+
+        function updateTimers() {
+          const rows = document.querySelectorAll("[data-updated-at]");
+          rows.forEach((row) => {
+            const at = row.getAttribute("data-updated-at");
+            if (!at) return;
+            const ms = Date.parse(at);
+            if (isNaN(ms)) return;
+            const secs = Math.max(0, (Date.now() - ms) / 1000);
+            const cell = row.querySelector('[data-since="1"]');
+            if (cell) {
+              cell.textContent = fmtSince(secs);
+              cell.className = secs > 600 ? "mono stale" : "mono";
+            }
+          });
+        }
+
+        function setConnected(state) {
+          if (state === "ok") {
+            $dot.className = "dot ok";
+            $connText.textContent = "connected";
+          } else if (state === "err") {
+            $dot.className = "dot err";
+            $connText.textContent = "reconnecting...";
+          } else {
+            $dot.className = "dot";
+            $connText.textContent = "connecting...";
+          }
+        }
+
+        let backoff = 500;
+        const BACKOFF_MAX = 15000;
+        let es = null;
+
+        function connect() {
+          try {
+            es = new EventSource("/events");
+          } catch (e) {
+            scheduleReconnect();
+            return;
+          }
+          es.addEventListener("open", () => {
+            backoff = 500;
+            setConnected("ok");
+          });
+          es.addEventListener("snapshot", (e) => {
+            try {
+              const parsed = JSON.parse(e.data);
+              processSnapshotForEvents(parsed);
+              snapshot = parsed;
+              render();
+            } catch (err) { console.error("snapshot handler failed", err); }
+          });
+          es.addEventListener("worker-update", (e) => {
+            try {
+              const payload = JSON.parse(e.data);
+              processWorkerUpdate(payload);
+              patchWorker(payload);
+            } catch (err) { console.error("worker-update handler failed", err); }
+          });
+          es.addEventListener("liveness-change", (e) => {
+            try {
+              const payload = JSON.parse(e.data);
+              processWorkerUpdate(payload);
+              patchWorker(payload);
+            } catch (err) { console.error("liveness-change handler failed", err); }
+          });
+          es.onerror = () => {
+            setConnected("err");
+            try { es && es.close(); } catch {}
+            es = null;
+            scheduleReconnect();
+          };
+        }
+
+        function scheduleReconnect() {
+          const delay = backoff;
+          backoff = Math.min(BACKOFF_MAX, backoff * 2);
+          setTimeout(connect, delay);
+        }
+
+        function findOrch(orchId) {
+          return (snapshot.orchestrators || []).find((o) => o.id === orchId);
+        }
+
+        function renderBriefing(orchId, waveNum) {
+          const card = document.querySelector(
+            '.card[data-orch="' + CSS.escape(orchId) + '"]',
+          );
+          if (!card) return;
+          const drawer = card.querySelector(".briefing-drawer");
+          const titleEl = drawer.querySelector(".bd-title");
+          const mdEl = drawer.querySelector(".md");
+          const orch = findOrch(orchId);
+          const briefing = orch && orch.briefings && orch.briefings[waveNum];
+          if (!briefing) return;
+          titleEl.textContent = "Wave " + waveNum + " briefing";
+          let html = "";
+          try {
+            html = window.marked
+              ? window.marked.parse(briefing, { gfm: true, breaks: false })
+              : "<pre>" + esc(briefing) + "</pre>";
+          } catch (err) {
+            console.error("marked parse failed", err);
+            html = "<pre>" + esc(briefing) + "</pre>";
+          }
+          if (window.DOMPurify) {
+            html = window.DOMPurify.sanitize(html, {
+              ADD_ATTR: ["target", "rel"],
+            });
+          }
+          mdEl.innerHTML = html;
+          // Ensure external links open safely
+          mdEl.querySelectorAll("a").forEach((a) => {
+            a.setAttribute("target", "_blank");
+            a.setAttribute("rel", "noopener noreferrer");
+          });
+          drawer.classList.add("open");
+          card
+            .querySelectorAll(".wcard")
+            .forEach((c) => c.classList.remove("active"));
+          const activeCard = card.querySelector(
+            '.wcard[data-wave="' + CSS.escape(String(waveNum)) + '"]',
+          );
+          if (activeCard) activeCard.classList.add("active");
+          drawer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+
+        async function refreshAnalytics() {
+          try {
+            const resp = await fetch("/api/analytics");
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const orchs = (data && data.orchestrators) || [];
+            for (const oa of orchs) {
+              analyticsByOrch.set(oa.id, oa.workers || {});
+            }
+            render();
+          } catch (err) {
+            console.error("analytics refresh failed", err);
+          }
+        }
+
+        async function refreshLinear() {
+          try {
+            const resp = await fetch("/api/linear");
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const tickets = (data && data.tickets) || {};
+            for (const key of Object.keys(tickets)) {
+              const t = tickets[key];
+              if (t && t.key) linearByKey.set(t.key, t);
+            }
+            render();
+          } catch (err) {
+            console.error("linear refresh failed", err);
+          }
+        }
+
+        $orch.addEventListener("click", (e) => {
+          const toggle = e.target.closest("[data-gantt-toggle]");
+          if (toggle) {
+            const orchId = toggle.getAttribute("data-gantt-toggle");
+            const cur = ganttCollapsed.get(orchId) === true;
+            ganttCollapsed.set(orchId, !cur);
+            const section = toggle.closest(".gantt-section");
+            if (section) {
+              section.classList.toggle("collapsed", !cur);
+              const lbl = section.querySelector(".gt-toggle");
+              if (lbl) lbl.textContent = !cur ? "show" : "hide";
+            }
+            return;
+          }
+          const close = e.target.closest(".bd-close");
+          if (close) {
+            const drawer = close.closest(".briefing-drawer");
+            if (drawer) {
+              drawer.classList.remove("open");
+              const card = drawer.closest(".card");
+              if (card) {
+                card.querySelectorAll(".wcard").forEach((c) =>
+                  c.classList.remove("active"),
+                );
+              }
+            }
+            return;
+          }
+          const wcard = e.target.closest(".wcard");
+          if (!wcard) return;
+          const orchId = wcard.getAttribute("data-orch");
+          const waveNum = Number(wcard.getAttribute("data-wave"));
+          renderBriefing(orchId, waveNum);
+        });
+
+        setConnected("pending");
+        connect();
+        setInterval(updateTimers, 1000);
+        refreshAnalytics();
+        setInterval(refreshAnalytics, 10000);
+        refreshLinear();
+        setInterval(refreshLinear, 60000);
+      })();
+    </script>
+  </body>
+</html>
