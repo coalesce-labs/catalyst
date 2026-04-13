@@ -3,10 +3,6 @@ name: Validate Release Config
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'release-please-config.json'
-      - '.release-please-manifest.json'
-      - '.github/workflows/release-please.yml'
 
 jobs:
   validate:

@@ -3,8 +3,6 @@ name: Audit References
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'plugins/**'
 
 jobs:
   audit-references:
