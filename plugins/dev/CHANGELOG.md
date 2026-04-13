@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.4.2...catalyst-dev-v6.5.0) (2026-04-13)
+
+
+### Features
+
+* **dev:** add orch-monitor with live dashboard and analytics ([#82](https://github.com/coalesce-labs/catalyst/issues/82)) ([75f025a](https://github.com/coalesce-labs/catalyst/commit/75f025a88a411882a0f4be45b94033e681c8d27c))
+
 ## [6.4.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.4.1...catalyst-dev-v6.4.2) (2026-04-13)
 
 
