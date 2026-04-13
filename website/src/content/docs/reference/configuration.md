@@ -257,8 +257,7 @@ Define the commands that run when creating a new worktree via `/create-worktree`
       "setup": [
         "humanlayer thoughts init --directory ${DIRECTORY} --profile ${PROFILE}",
         "humanlayer thoughts sync",
-        "bun install",
-        "~/.claude/scripts/trust-workspace.sh \"$(pwd)\""
+        "bun install"
       ]
     }
   }
@@ -277,6 +276,9 @@ Commands run in order, inside the new worktree directory. Each command supports 
 | `${PROFILE}` | Thoughts profile (from `catalyst.thoughts.profile` or auto-detected) |
 
 If `catalyst.worktree.setup` is **not configured**, the script falls back to auto-detected setup: `make setup` or `bun/npm install`, then `humanlayer thoughts init` + `sync`. Once you define `setup`, only your commands run — the auto-detection is skipped entirely.
+
+Catalyst now pre-trusts newly created worktrees in Claude Code automatically, so you do **not**
+need to add a separate `trust-workspace.sh` command to your setup array.
 
 ## Orchestration Config
 

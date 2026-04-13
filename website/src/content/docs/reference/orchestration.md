@@ -49,6 +49,9 @@ Add `~/catalyst` to Claude Code's trusted directories so all worktrees across al
 
 This is a one-time setup. All orchestrator and worker worktrees for every project land under `~/catalyst/wt/<projectKey>/`.
 
+Catalyst also pre-trusts newly created worktrees automatically, so the `additionalDirectories`
+setting is best treated as a convenience and backup layer rather than a hard requirement.
+
 ### Project Configuration
 
 The orchestrator reads from your project's Catalyst config (`.catalyst/config.json` or `.claude/config.json`). Two config blocks are relevant:
@@ -64,8 +67,7 @@ The orchestrator reads from your project's Catalyst config (`.catalyst/config.js
       "setup": [
         "humanlayer thoughts init --directory ${DIRECTORY} --profile ${PROFILE}",
         "humanlayer thoughts sync",
-        "bun install",
-        "~/.claude/scripts/trust-workspace.sh \"$(pwd)\""
+        "bun install"
       ]
     }
   }
@@ -79,9 +81,11 @@ The orchestrator reads from your project's Catalyst config (`.catalyst/config.js
 | Thoughts init | `humanlayer thoughts init --directory ${DIRECTORY} --profile ${PROFILE}` | Workers need access to shared research, plans, and handoffs. Without this, workers can't read wave briefings or save their findings for other waves. |
 | Thoughts sync | `humanlayer thoughts sync` | Pulls down existing shared documents so the worker starts with full context. |
 | Dependency install | `bun install` or `npm install` or `make setup` | Workers need project dependencies to run tests, typecheck, and build. |
-| Permission grant | `~/.claude/scripts/trust-workspace.sh "$(pwd)"` | Adds the worktree to Claude Code's allowed directories. Not needed if `~/catalyst` is already in `additionalDirectories`. |
 | Environment setup | `cp .env.example .env.local` | Workers may need environment variables for local dev. |
 | Database setup | `./scripts/setup-test-db.sh` | If tests require a local database. |
+
+You do not need a separate "permission grant" step anymore. `create-worktree.sh` now marks the new
+worktree as trusted in Claude Code automatically.
 
 **If `catalyst.worktree.setup` is NOT configured:** The script falls back to auto-detected setup — it will auto-detect `make setup`/`bun install`/`npm install` for dependencies, and run `humanlayer thoughts init` + `sync` if HumanLayer is installed. This fallback is convenient for simple projects but gives you no control over the order, additional steps, or error handling.
 
@@ -155,8 +159,7 @@ Here's a complete config for a project using orchestration:
       "setup": [
         "humanlayer thoughts init --directory ${DIRECTORY} --profile ${PROFILE}",
         "humanlayer thoughts sync",
-        "bun install",
-        "~/.claude/scripts/trust-workspace.sh \"$(pwd)\""
+        "bun install"
       ]
     },
     "orchestration": {
@@ -180,14 +183,26 @@ Before running `/orchestrate` for the first time:
 - [ ] **Linearis CLI installed** and authenticated (`linearis auth login`)
 - [ ] **GitHub CLI installed** and authenticated (`gh auth login`)
 - [ ] **HumanLayer CLI installed** and thoughts initialized in the main repo (`humanlayer thoughts init`)
-- [ ] **`~/catalyst` added** to `~/.claude/settings.json` `additionalDirectories`
-- [ ] **`catalyst.worktree.setup` configured** with your project's setup commands (thoughts init, dependency install, permission grant, etc.)
+- [ ] **`catalyst.worktree.setup` configured** with your project's setup commands (thoughts init, dependency install, environment setup, etc.)
 - [ ] **`catalyst.linear.stateMap` configured** so ticket state transitions work
 - [ ] **`catalyst.thoughts` configured** with your profile and directory names
+
+Optional but still useful:
+
+- [ ] **`~/catalyst` added** to `~/.claude/settings.json` `additionalDirectories`
 
 ## Quick Start
 
 Once prerequisites are met:
+
+```
+/setup-orchestrate
+```
+
+This creates an orchestrator worktree, initializes the shared orchestration state, and prints a
+single copy-paste command to launch the orchestrator in a new terminal.
+
+If you prefer to start manually from an existing orchestrator worktree, use:
 
 ```
 /orchestrate ACME-101 ACME-102 ACME-103
