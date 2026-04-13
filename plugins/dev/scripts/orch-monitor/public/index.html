@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Orchestration Monitor</title>
+    <title>Catalyst Orchestration Monitor</title>
+    <link rel="icon" type="image/svg+xml" href="/public/catalyst-logo.svg" />
     <style>
       :root {
         --bg: #0b0d10;
@@ -48,6 +49,19 @@
         font-weight: 600;
         margin: 0;
         flex: 1 1 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+      }
+      header h1 img {
+        width: 22px;
+        height: 22px;
+        display: block;
+      }
+      header h1 .brand-sub {
+        color: var(--muted);
+        font-weight: 400;
+        font-size: 13px;
       }
       .conn {
         display: inline-flex;
@@ -560,8 +574,41 @@
         margin-top: 2px;
       }
       .cost-parallel {
+        position: relative;
         border-bottom: 1px dotted var(--muted);
         cursor: help;
+      }
+      .cost-parallel:hover::after {
+        content: attr(data-tip);
+        position: absolute;
+        bottom: calc(100% + 6px);
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 12px;
+        font-style: normal;
+        font-weight: 400;
+        line-height: 1.45;
+        width: max-content;
+        max-width: 320px;
+        white-space: normal;
+        z-index: 20;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        pointer-events: none;
+      }
+      .cost-parallel:hover::before {
+        content: "";
+        position: absolute;
+        bottom: calc(100% + 1px);
+        left: 50%;
+        transform: translateX(-50%);
+        border: 5px solid transparent;
+        border-top-color: var(--border);
+        z-index: 21;
       }
       @media (max-width: 560px) {
         .cost-card { padding: 10px; gap: 8px; }
@@ -613,6 +660,17 @@
         height: 10px;
         border-radius: 2px;
         display: inline-block;
+      }
+      .gantt-legend .lg-swatch-nodata {
+        background: var(--muted);
+        background-image: repeating-linear-gradient(
+          45deg,
+          rgba(255, 255, 255, 0.3) 0,
+          rgba(255, 255, 255, 0.3) 2px,
+          transparent 2px,
+          transparent 4px
+        );
+        opacity: 0.7;
       }
       .gantt-grid {
         position: relative;
@@ -688,6 +746,16 @@
         position: relative;
       }
       .gantt-seg.merged { opacity: 0.7; }
+      .gantt-seg.no-data {
+        background-image: repeating-linear-gradient(
+          45deg,
+          rgba(255, 255, 255, 0.12) 0,
+          rgba(255, 255, 255, 0.12) 4px,
+          transparent 4px,
+          transparent 8px
+        );
+        opacity: 0.55;
+      }
       .gantt-seg.live::after {
         content: "";
         position: absolute;
@@ -760,7 +828,10 @@
   </head>
   <body>
     <header>
-      <h1>Orchestration Monitor</h1>
+      <h1>
+        <img src="/public/catalyst-logo.svg" alt="Catalyst" />
+        Catalyst <span class="brand-sub">Orchestration Monitor</span>
+      </h1>
       <span class="conn">
         <span id="conn-dot" class="dot"></span>
         <span id="conn-text">connecting...</span>
@@ -1137,7 +1208,7 @@
               "1\u00D7 = sequential equivalent; " +
               "<1\u00D7 = limited overlap.";
             parts.push(
-              '<span class="cost-parallel" title="' + esc(pTip) + '">' +
+              '<span class="cost-parallel" data-tip="' + esc(pTip) + '">' +
               parallelism.toFixed(1) + "\u00D7 parallel efficiency</span>",
             );
           }
@@ -1177,7 +1248,7 @@
           stops.sort((a, b) => a.t - b.t);
           if (!stops.length) {
             const phase = w.status || "dispatched";
-            return [{ phase, from: startMs, to: endMs }];
+            return [{ phase, from: startMs, to: endMs, noData: true }];
           }
           const segs = [];
           if (stops[0].t > startMs) {
@@ -1299,13 +1370,16 @@
               const mergedCls = s.phase === "merged" ? " merged" : "";
               const liveCls =
                 r.isLive && i === segs.length - 1 ? " live" : "";
-              const title =
-                s.phase + " " + fmtClock(new Date(s.from)) +
-                "–" + fmtClock(new Date(s.to));
+              const noDataCls = s.noData ? " no-data" : "";
+              const title = s.noData
+                ? s.phase + " (no phase data logged) " +
+                  fmtClock(new Date(s.from)) + "–" + fmtClock(new Date(s.to))
+                : s.phase + " " + fmtClock(new Date(s.from)) +
+                  "–" + fmtClock(new Date(s.to));
               return (
-                '<div class="gantt-seg' + liveCls + mergedCls + '" style="width:' +
-                segPct.toFixed(2) + "%;background:" + color + ';" title="' +
-                esc(title) + '"></div>'
+                '<div class="gantt-seg' + liveCls + mergedCls + noDataCls +
+                '" style="width:' + segPct.toFixed(2) + "%;background:" + color +
+                ';" title="' + esc(title) + '"></div>'
               );
             }).join("");
             const left = pct(startMs);
@@ -1344,7 +1418,8 @@
           }).map(([k, label]) =>
             '<span class="lg-item"><span class="lg-swatch" style="background:' +
             PHASE_COLORS[k] + '"></span>' + esc(label) + "</span>",
-          ).join("");
+          ).join("") +
+            '<span class="lg-item"><span class="lg-swatch lg-swatch-nodata"></span>no phase data</span>';
 
           const collapsed = ganttCollapsed.get(o.id) === true;
 
