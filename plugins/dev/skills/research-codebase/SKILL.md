@@ -227,11 +227,8 @@ ticket ADV-33:
 
 This MUST print the path you just saved. If it doesn't, re-run step 8b.
 
-**8d. Linear comment** (if ticket detected):
-
-```bash
-linearis comments create "TICKET-ID" --body "Research complete: thoughts/shared/research/YYYY-MM-DD-description.md"
-```
+**8d. Linear comment** (if ticket detected): Add a comment noting research is complete and
+linking the document path. Use Linearis CLI (run `linearis comments usage` for syntax).
 
 **8e. Present summary to user:**
 
@@ -277,12 +274,8 @@ If the user has follow-up questions:
 
 If a ticket is detected (provided as argument, mentioned in query, or from context):
 
-- **At research start**:
-  ```bash
-  RESEARCH_STATE=$(jq -r '.catalyst.linear.stateMap.research // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
-  if [[ "$RESEARCH_STATE" != "null" ]]; then
-      linearis issues update "$ticketId" --status "$RESEARCH_STATE"
-  fi
-  ```
-- **After document saved**: `linearis comments create "$ticketId" --body "Research complete: $link"`
+- **At research start**: Update ticket status to `stateMap.research` from config
+  using Linearis CLI (run `linearis issues usage` for syntax).
+- **After document saved**: Add a comment with the document link
+  (run `linearis comments usage` for syntax).
 - If Linearis CLI not available, skip silently and continue research

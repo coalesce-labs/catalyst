@@ -275,20 +275,11 @@ If ticket found and not using `--no-update`:
 
 ```bash
 # Verify linearis is available
-if ! command -v linearis &> /dev/null; then
-    echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
-    echo "Install: npm install -g linearis"
-else
-    # Move to configured "Done" state
-    DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' .catalyst/config.json 2>/dev/null || echo "Done")
-    if [[ "$DONE_STATE" != "null" ]]; then
-        linearis issues update "$ticket" --status "$DONE_STATE"
-    fi
-
-    # Add merge comment
-    linearis comments create "$ticket" \
-        --body "✅ PR merged!\n\n**PR**: #${prNumber} - ${prTitle}\n**Merge commit**: ${mergeSha}\n**Merged into**: ${baseBranch}\n\nView PR: ${prUrl}"
-fi
+# If Linearis CLI is available:
+# 1. Update ticket status to stateMap.done from config
+# 2. Add a comment with PR number, merge commit, and base branch
+# Use `linearis issues usage` and `linearis comments usage` for exact syntax.
+# Skip silently if CLI not available.
 ```
 
 ### 11. Delete local branch and update base

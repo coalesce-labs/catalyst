@@ -228,28 +228,17 @@ If ticket found:
 - Related to [any other linked issues]
 ```
 
-Get Linear ticket details:
-
-```bash
-# Use Linearis CLI to get ticket details
-linearis issues read "$ticket"
-
-# Extract title and description with jq
-ticket_title=$(linearis issues read "$ticket" | jq -r '.title')
-ticket_description=$(linearis issues read "$ticket" | jq -r '.description')
-```
-
-Use ticket title and description for context.
+Get Linear ticket details using the Linearis CLI (run `linearis issues usage` for read syntax).
+Extract title and description with jq. Use ticket title and description for context.
 
 ### 9. Generate updated title
 
 **Title generation rules:**
 
 ```bash
-# If ticket exists and linearis available
+# If ticket exists and linearis available, read ticket title (see `linearis issues usage`)
 if [[ "$ticket" ]] && command -v linearis &>/dev/null; then
     ticket_title=$(linearis issues read "$ticket" | jq -r '.title')
-    # Format: TICKET: Descriptive title (max 72 chars)
     title="$ticket: ${ticket_title:0:60}"
 elif [[ "$ticket" ]]; then
     # Fallback: generate title from branch name + commits
@@ -362,20 +351,11 @@ gh pr edit $pr_number --body-file "thoughts/shared/prs/${pr_number}_description.
 If ticket found:
 
 ```bash
-# Verify linearis is available
-if ! command -v linearis &> /dev/null; then
-    echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
-else
-    # Move to configured "In Review" state and assign to self
-    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .catalyst/config.json 2>/dev/null || echo "In Review")
-    if [[ "$IN_REVIEW_STATE" != "null" ]]; then
-        linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
-    fi
-
-    # Add comment about update with PR link
-    linearis comments create "$ticket" \
-        --body "PR description updated!\n\n**Changes**: ${updateSummary}\n**Verification**: ${checksPassedCount}/${totalChecks} automated checks passed\n\nView PR: ${prUrl}"
-fi
+# If Linearis CLI is available:
+# 1. Update ticket status to stateMap.inReview from config
+# 2. Add a comment with the PR link and verification summary
+# Use `linearis issues usage` and `linearis comments usage` for exact syntax.
+# Skip silently if CLI not available.
 ```
 
 ### 14. Report results

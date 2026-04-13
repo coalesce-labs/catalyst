@@ -206,7 +206,7 @@ This phase runs in the current session to allow user interaction during research
    Research complete. Would you like to create a Linear ticket from these findings?
    [y/N]
    ```
-   If yes, create a ticket via `linearis issue create` using the research summary as description,
+   If yes, create a ticket via the Linearis CLI (run `linearis issues usage` for create syntax) using the research summary as description,
    then register the ticket ID: `workflow-context.sh set-ticket "NEW-TICKET-ID"`
 5. **Conduct research**: Spawn parallel sub-agents (same as `/research-codebase`):
    - **codebase-locator**: Find relevant files
