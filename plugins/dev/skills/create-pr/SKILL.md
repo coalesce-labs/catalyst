@@ -234,30 +234,114 @@ else
 fi
 ```
 
-### 12. Suggest CI Monitoring
+### 12. Post-PR Monitoring & Resolution Loop
 
-After PR creation is complete, suggest the user monitor CI checks:
+**CRITICAL: Creating the PR is NOT the end of this skill.** You MUST monitor CI checks, wait for
+automated reviewer comments, address them, and only report success when the PR is in a clean,
+mergeable state — or genuinely blocked on a human gate (like approval from a specific person).
+
+Do NOT just say "PR created" or "PR created with auto-merge" and stop. That leaves the user to do
+all the follow-up work manually.
+
+**Step 12a: Wait for CI checks and automated reviewers (3-5 minutes)**
+
+Automated review agents (Codex, security scanners, linters) typically post comments within 3-5
+minutes of PR creation. Wait for them before processing comments so you address everything in one
+pass.
+
+```bash
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+
+# Wait 3 minutes for initial CI + automated reviews
+sleep 180
+
+# Poll for up to 2 more minutes (5 min total) — check every 30s
+WAITED=180
+MAX_WAIT=300
+while [ $WAITED -lt $MAX_WAIT ]; do
+  COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/comments" --jq 'length')
+  REVIEW_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/reviews" \
+    --jq '[.[] | select(.state != "APPROVED" and .state != "DISMISSED")] | length')
+
+  if [ "$COMMENT_COUNT" -gt 0 ] || [ "$REVIEW_COUNT" -gt 0 ]; then
+    echo "Found review comments — proceeding to address them"
+    break
+  fi
+
+  sleep 30
+  WAITED=$((WAITED + 30))
+done
+```
+
+**Step 12b: Address all review comments**
+
+If any comments or reviews exist, run `/review-comments $pr_number` to:
+
+- Fetch and categorize all comments (inline, review threads, issue comments)
+- Implement requested code changes
+- Resolve review threads via GraphQL
+- Push a single addressing commit
+
+**Step 12c: Diagnose and resolve merge blockers**
+
+Read and follow `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`. Run the full
+blocker diagnosis and resolution loop (max 3 rounds):
+
+- `ci-failing` → analyze failure logs, fix code, push, re-poll
+- `unresolved-threads` → run `/review-comments` (addresses + resolves threads)
+- `branch-behind` → rebase and push
+- `draft` → `gh pr ready`
+- `changes-requested` → check if addressed; attempt to fix
+
+**CRITICAL MISDIAGNOSIS WARNING**: Do NOT confuse "unresolved review threads" with "needs approving
+reviewer." Code comments from automated reviewers (Codex, security scanners) create **threads** that
+YOU can resolve by addressing the feedback and resolving the thread via GraphQL. These are NOT a
+human approval gate. Only `review-required` (no approving reviews at all) is a genuine human gate.
+Read the merge-blocker-diagnosis reference carefully.
+
+**Step 12d: Re-poll until clean or genuinely human-blocked**
+
+After each fix cycle, re-query the merge state. Continue looping until:
+
+- `mergeStateStatus` is `CLEAN` → PR is ready to merge, report success
+- Only remaining blocker is `review-required` (needs human approval) → report what's needed
+- Max attempts (3) exhausted → report exactly what's still blocking with actionable guidance
+
+### 13. Report final state
+
+Report based on the **actual merge state** after monitoring — not just "PR created."
+
+**If CLEAN (ready to merge):**
 
 ```
-echo ""
-echo "Tip: Monitor CI checks with:"
-echo "  /loop 2m gh pr checks $pr_number --watch"
-echo ""
-echo "This will check every 2 minutes and report when checks pass or fail."
+✅ PR #{number} ready to merge
+
+PR: #{number} - {title}
+URL: {url}
+Base: {base_branch}
+Ticket: {ticket} (moved to "In Review")
+
+Status:
+  ✅ CI checks passed
+  ✅ Review comments addressed ({N} resolved)
+  ✅ No merge blockers
+
+Merge with: /catalyst-dev:merge-pr
 ```
 
-### 13. Report success
+**If blockers remain (report exactly what's needed):**
 
 ```
-✅ Pull request created successfully!
+PR #{number} created — {N} blocker(s) remain
 
-**PR**: #{number} - {title}
-**URL**: {url}
-**Base**: {base_branch}
-**Ticket**: {ticket} (moved to "In Review")
+PR: #{number} - {title}
+URL: {url}
 
-Description has been generated and verification checks have been run.
-Review the PR on GitHub!
+Resolved:
+  ✅ {what was fixed}
+
+Still blocking:
+  ❌ {specific blocker and exactly what's needed to resolve it}
 ```
 
 ## Error Handling
@@ -375,6 +459,9 @@ Calling /describe-pr...
 
 ## Remember:
 
+- **NEVER stop at "PR created"** — monitor CI, address review comments, resolve blockers
+- **"PR created with auto-merge" is NOT done** — you must verify it actually merges cleanly
+- **Automated reviewer comments are YOUR job** — address Codex/scanner feedback, don't wait for human
 - **Minimize prompts** — only ask when PR already exists
 - **Auto-rebase** — keep branch up-to-date with base
 - **Auto-link Linear** — extract ticket from branch, update status with Linearis CLI

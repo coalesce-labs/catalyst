@@ -64,7 +64,7 @@ Uses the provided text as the research query directly.
 | Flag                   | Description                                            |
 | ---------------------- | ------------------------------------------------------ |
 | `--team`               | Use agent teams for parallel implementation in Phase 3 |
-| `--auto-merge`         | Phase 5 waits for CI and auto-invokes Phase 6          |
+| `--no-merge`           | Stop after PR creation — do NOT auto-merge             |
 | `--no-ticket`          | Skip Linear ticket creation in freeform mode           |
 | `--skip-validation`    | Skip Phase 4 entirely                                  |
 | `--skip-quality-gates` | Run `/validate-plan` but skip quality gate loop        |
@@ -180,6 +180,7 @@ fi
 | 4 start | `validating` |
 | 5 start | `shipping` |
 | 5 PR created | `pr-created` |
+| 5 monitoring | `monitoring` |
 | 6 start | `merging` |
 | 6 complete | `done` |
 | Any failure | `failed` |
@@ -426,7 +427,12 @@ a loop (max 3 rounds). Key blocker resolutions:
 If blockers remain after 3 rounds, present what was resolved and what still blocks with options
 to wait or create a handoff.
 
-**Step 4: Present options**
+**Step 4: Proceed to merge (default) or report status**
+
+By default, oneshot completes the full lifecycle — it does NOT stop at PR creation. After resolving
+all blockers, it proceeds directly to Phase 6 (merge).
+
+If `--no-merge` was set, report the PR status and exit:
 
 ```
 PR ready: https://github.com/org/repo/pull/{number}
@@ -437,24 +443,20 @@ Merge state: $mergeStateStatus
   ✅ Reviews addressed
   ❌ Review required — 1 approval needed (if applicable)
 
-Options:
-  [1] Wait for remaining blockers to clear, then auto-merge (runs Phase 6)
-  [2] Exit — merge later with /catalyst-dev:merge-pr
+Merge later with: /catalyst-dev:merge-pr
 ```
 
-**If `--auto-merge` flag was set:** Skips the prompt and proceeds to Phase 6 automatically. Phase 6
-(`/merge-pr`) will run its own blocker diagnosis loop and resolve anything remaining.
+**Default behavior (no `--no-merge` flag):** Proceeds to Phase 6 automatically. Phase 6
+(`/merge-pr`) will run its own blocker diagnosis loop and resolve anything remaining. If all
+blockers are resolved, it merges. If a genuine human gate remains (e.g., required approval),
+it reports what's needed and stops.
 
 **Linear**: `/create-pr` moves ticket to `stateMap.inReview` (default: "In Review").
 
-### Phase 6: Merge (Same Session as Phase 5 or Manual — Sonnet)
+### Phase 6: Merge (Same Session as Phase 5 — Sonnet)
 
-Only runs automatically if:
-
-- User selected option [1] in Phase 5, OR
-- `--auto-merge` flag was passed
-
-Otherwise, user merges manually later with `/catalyst-dev:merge-pr`.
+Runs automatically by default. Only skipped if `--no-merge` flag was passed, in which case the user
+merges manually later with `/catalyst-dev:merge-pr`.
 
 ```
 /catalyst-dev:merge-pr
@@ -522,12 +524,13 @@ Phase 4: Validate + Quality Gates (NEW session — Opus)
 
 Phase 5: Ship (NEW session — Sonnet)
   - Starts with 0% context used
-  - Lightweight: commit, PR, CI polling
+  - Lightweight: commit, PR, CI polling, comment resolution
   - Sonnet is sufficient for structured workflow
 
-Phase 6: Merge (same session as Phase 5 or manual — Sonnet)
+Phase 6: Merge (same session as Phase 5 — Sonnet)
   - Reuses Phase 5 context (minimal usage)
   - Procedural: verify, merge, cleanup
+  - Runs by default (skip with --no-merge)
 ```
 
 ## Configuration
@@ -672,7 +675,12 @@ error, context exhaustion):
 - **Use wiki-links** for cross-references between thoughts documents (e.g., `[[filename]]`), not
   full paths
 - **Phase 3 does NOT commit** — all git operations are deferred to Phase 5
-- **Phase 6 is opt-in** — requires `--auto-merge` or explicit user choice
+- **Phase 6 (merge) runs by default** — use `--no-merge` to opt out
+- **NEVER stop at "PR created"** — monitor CI, address automated review comments, resolve blockers,
+  and merge. "PR created with auto-merge" is NOT a terminal state — verify it actually merges
+- **Automated reviewer comments are the agent's job** — Codex, security scanners, and linters post
+  code comments that create unresolved threads. These are NOT "needs approving reviewer" — they are
+  fixable blockers. Address the feedback, resolve the threads, and continue
 
 **IMPORTANT: Document Storage Rules**
 

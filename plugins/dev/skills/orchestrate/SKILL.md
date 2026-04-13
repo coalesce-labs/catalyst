@@ -449,7 +449,7 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
   '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-dispatched", detail: null}')"
 ```
 
-**Worker dispatch prompt includes mandatory testing requirements:**
+**Worker dispatch prompt includes mandatory testing AND lifecycle requirements:**
 
 ```
 MANDATORY: Before marking this ticket as complete:
@@ -459,9 +459,17 @@ MANDATORY: Before marking this ticket as complete:
 4. Security review — must pass /security-review or equivalent
 5. Code review — must pass code-reviewer agent
 6. All quality gates in config must pass
+7. PR MUST be monitored through merge — do NOT stop at "PR created"
+   - Wait for CI checks to pass
+   - Address ALL automated review comments (Codex, security scanners)
+   - Resolve all merge blocker threads via GraphQL
+   - Only report done when PR is actually MERGED or blocked on human approval
 
 Your work will be independently verified by the orchestrator. Do NOT mark as done
-until all test types exist. Write your status to the worker signal file at:
+until all test types exist AND the PR is merged. "PR created with auto-merge" is
+NOT done — you must verify it actually merges cleanly.
+
+Write your status to the worker signal file at:
   ${ORCH_DIR}/workers/${TICKET_ID}.json
 
 Update the signal file at each phase transition using the worker-signal.json schema.
