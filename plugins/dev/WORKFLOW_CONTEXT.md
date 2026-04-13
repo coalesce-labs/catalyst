@@ -227,6 +227,10 @@ workflow-context.sh recent <type>
 workflow-context.sh ticket PROJ-123
 # → Returns: all docs with ticket PROJ-123
 
+# Set current ticket without adding a document
+workflow-context.sh set-ticket PROJ-123
+# → Sets currentTicket and lastUpdated; creates file if needed
+
 # Initialize context file
 workflow-context.sh init
 ```

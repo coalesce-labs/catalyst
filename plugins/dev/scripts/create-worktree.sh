@@ -127,6 +127,41 @@ if [ -d ".catalyst" ]; then
 	cp -r .catalyst "$WORKTREE_PATH/"
 fi
 
+# Initialize workflow context with ticket from worktree name (before setup runs)
+# This ensures .catalyst/.workflow-context.json exists with currentTicket set
+# so that direnv's use_otel_context can read it when someone enters the directory.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
+	# Remove stale workflow-context.json if copied from main repo
+	rm -f "${WORKTREE_PATH}/.catalyst/.workflow-context.json"
+	mkdir -p "${WORKTREE_PATH}/.catalyst"
+
+	# Extract ticket from worktree name (e.g., ENG-123, orch-1-ADV-42)
+	WT_TICKET=""
+	if [[ "$WORKTREE_NAME" =~ ([A-Za-z]+-[0-9]+) ]]; then
+		WT_TICKET=$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
+	fi
+
+	(cd "$WORKTREE_PATH" && bash "${SCRIPT_DIR}/workflow-context.sh" init)
+	if [ -n "$WT_TICKET" ]; then
+		(cd "$WORKTREE_PATH" && bash "${SCRIPT_DIR}/workflow-context.sh" set-ticket "$WT_TICKET")
+		echo "📋 Workflow context initialized with ticket: ${WT_TICKET}"
+	else
+		echo "📋 Workflow context initialized (no ticket in worktree name)"
+	fi
+fi
+
+# Generate .envrc for OTEL context (source_up inherits parent profiles)
+OTEL_PROJECT="${PROJECT_KEY:-$REPO_NAME}"
+if command -v direnv >/dev/null 2>&1 && [ ! -f "${WORKTREE_PATH}/.envrc" ]; then
+	cat > "${WORKTREE_PATH}/.envrc" <<EOF
+source_up
+use_otel_context "${OTEL_PROJECT}"
+EOF
+	direnv allow "${WORKTREE_PATH}" 2>/dev/null || true
+	echo "📡 OTEL context configured (.envrc created + allowed)"
+fi
+
 # Change to worktree directory
 cd "$WORKTREE_PATH"
 

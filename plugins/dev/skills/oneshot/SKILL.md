@@ -19,6 +19,11 @@ Code session with full capabilities.
 ## Prerequisites
 
 ```bash
+# 0. Check project setup (thoughts, config, workflow context init)
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
+fi
+
 # 1. Validate thoughts system (REQUIRED)
 if [[ ! -d "thoughts/shared" ]]; then
   echo "❌ ERROR: Thoughts system not configured"
@@ -186,30 +191,36 @@ fi
 This phase runs in the current session to allow user interaction during research.
 
 1. **Parse input**: Determine if ticket ID or freeform query
-2. **If ticket**: Read ticket details via Linearis CLI, move to `stateMap.research` (default: "In
+2. **Register ticket in workflow context (REQUIRED if ticket-based)** — immediately after parsing:
+   ```bash
+   "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" set-ticket "TICKET-ID"
+   ```
+   This ensures `.catalyst/.workflow-context.json` exists and `currentTicket` is set before any
+   other work begins. Downstream skills and hooks depend on this file existing.
+3. **If ticket**: Read ticket details via Linearis CLI, move to `stateMap.research` (default: "In
    Progress")
-3. **If freeform (and NOT `--no-ticket`)**: After research completes, offer to create a Linear
+4. **If freeform (and NOT `--no-ticket`)**: After research completes, offer to create a Linear
    ticket from the findings:
    ```
    Research complete. Would you like to create a Linear ticket from these findings?
    [y/N]
    ```
    If yes, create a ticket via `linearis issue create` using the research summary as description,
-   then track the ticket ID for subsequent phases.
-4. **Conduct research**: Spawn parallel sub-agents (same as `/research-codebase`):
+   then register the ticket ID: `workflow-context.sh set-ticket "NEW-TICKET-ID"`
+5. **Conduct research**: Spawn parallel sub-agents (same as `/research-codebase`):
    - **codebase-locator**: Find relevant files
    - **codebase-analyzer**: Understand current implementation
    - **codebase-pattern-finder**: Find similar patterns
    - **thoughts-locator**: Find existing context (if relevant)
    - **external-research**: Research frameworks/libraries (if relevant)
-5. **Synthesize findings**: Create research document at
+6. **Synthesize findings**: Create research document at
    `thoughts/shared/research/YYYY-MM-DD-{ticket}-{description}.md`
-6. **Sync**: `humanlayer thoughts sync`
-7. **Track in workflow context (REQUIRED)** — substitute actual path and ticket:
+7. **Sync**: `humanlayer thoughts sync`
+8. **Track in workflow context (REQUIRED)** — substitute actual path and ticket:
    ```bash
    "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "thoughts/shared/research/YYYY-MM-DD-description.md" "TICKET-ID"
    ```
-8. **Verify**: `"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research` must print the
+9. **Verify**: `"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research` must print the
    path
 
 ### Phase 2: Plan (New Session via `humanlayer launch` — Opus)

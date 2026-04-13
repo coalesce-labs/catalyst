@@ -281,10 +281,15 @@ For every worktree (orchestrator and workers), the `create-worktree.sh` script r
 1. git worktree add -b <name> <path> <base-branch>
 2. Copy .claude/ directory (plugins, rules, prompts)
 3. Copy .catalyst/ directory (project config)
-4. Run catalyst.worktree.setup commands (your config)
+4. Initialize workflow context with ticket from worktree name
+   (e.g., worktree "ENG-123" → currentTicket: "ENG-123")
+5. Generate .envrc (source_up + use_otel_context) and run direnv allow
+6. Run catalyst.worktree.setup commands (your config)
    — OR auto-detect: dependency install + humanlayer thoughts init (fallback)
-5. Run catalyst.orchestration.hooks.setup (orchestration-only, if present)
+7. Run catalyst.orchestration.hooks.setup (orchestration-only, if present)
 ```
+
+Steps 4–5 ensure that `.catalyst/.workflow-context.json` exists with the ticket set and that OTEL resource attributes include the ticket — before any skills run.
 
 The orchestrator then creates its status directory (`workers/`, `DASHBOARD.md`, `state.json`) and initializes worker signal files.
 

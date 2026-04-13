@@ -9,6 +9,7 @@
 # - Project root resolution from subdirectories
 # - most-recent cross-type query
 # - Null ticket preservation
+# - set-ticket (ticket-only, no document)
 # - Dual-write (hook + skill) behavior
 # - Array ordering invariant (newest-first)
 # - sync-plan-to-thoughts.sh (title, slug, ticket, frontmatter, workflow-context update)
@@ -764,11 +765,40 @@ else
 	fail "resolve-ticket returned '$RESULT', expected 'XYZ-500'"
 fi
 
-# ── Test 30: backward compat — reads from .claude/ if .catalyst/ missing ─
+# ── Test 30: set-ticket sets currentTicket without adding a document ────
+
+run_test "workflow-context.sh set-ticket sets currentTicket without adding a document"
+
+TEST_DIR="$TMPDIR/test30"
+setup_project "$TEST_DIR"
+
+(cd "$TEST_DIR" && bash plugins/dev/scripts/workflow-context.sh set-ticket "PROJ-42")
+
+TICKET=$(cd "$TEST_DIR" && jq -r '.currentTicket' .catalyst/.workflow-context.json)
+UPDATED=$(cd "$TEST_DIR" && jq -r '.lastUpdated' .catalyst/.workflow-context.json)
+RESEARCH_COUNT=$(cd "$TEST_DIR" && jq '.workflow.research | length' .catalyst/.workflow-context.json)
+
+if [[ $TICKET == "PROJ-42" ]]; then
+	pass "currentTicket set to PROJ-42"
+else
+	fail "currentTicket is '$TICKET', expected 'PROJ-42'"
+fi
+if [[ -n $UPDATED && $UPDATED != "" ]]; then
+	pass "lastUpdated is set"
+else
+	fail "lastUpdated should be set after set-ticket"
+fi
+if [[ $RESEARCH_COUNT -eq 0 ]]; then
+	pass "No documents added (workflow arrays empty)"
+else
+	fail "research array has $RESEARCH_COUNT items, expected 0"
+fi
+
+# ── Test 31: backward compat — reads from .claude/ if .catalyst/ missing ─
 
 run_test "workflow-context.sh reads from .claude/ when .catalyst/ doesn't exist"
 
-TEST_DIR="$TMPDIR/test30"
+TEST_DIR="$TMPDIR/test31"
 mkdir -p "$TEST_DIR"
 (
 	cd "$TEST_DIR"

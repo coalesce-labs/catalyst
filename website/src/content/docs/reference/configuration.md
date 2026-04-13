@@ -195,7 +195,7 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
 
 ## Workflow Context (`.catalyst/.workflow-context.json`)
 
-Auto-managed by Claude Code hooks. Not committed to git.
+Auto-managed by Claude Code hooks and skills. Not committed to git.
 
 ```json
 {
@@ -219,6 +219,54 @@ Auto-managed by Claude Code hooks. Not committed to git.
 This file is what enables skill chaining — when you save research, `create-plan` finds it
 automatically. When you save a plan, `implement-plan` finds it. You never need to specify file paths
 between workflow phases.
+
+### Script API
+
+The `workflow-context.sh` script manages this file programmatically:
+
+```bash
+workflow-context.sh init                    # Create file if missing
+workflow-context.sh set-ticket PROJ-123     # Set currentTicket (no document needed)
+workflow-context.sh add research "path" "PROJ-123"  # Add document + set ticket
+workflow-context.sh recent research         # Get most recent document of type
+workflow-context.sh most-recent             # Get most recent document (any type)
+workflow-context.sh ticket PROJ-123         # Get all documents for a ticket
+```
+
+### Initialization
+
+The workflow context file is created automatically at several points:
+
+- **Skill prerequisites** — all workflow skills call `check-project-setup.sh` which runs `workflow-context.sh init`
+- **Worktree creation** — `create-worktree.sh` initializes the file and sets `currentTicket` from the worktree name (e.g., worktree `ENG-123` sets ticket to `ENG-123`)
+- **Ticket-based skills** — `/oneshot PROJ-123` calls `set-ticket` immediately after parsing the ticket, before any research begins
+
+### OpenTelemetry Integration
+
+The workflow context file is also read by [direnv](https://direnv.net/) to populate
+`OTEL_RESOURCE_ATTRIBUTES` with the current ticket. This enables per-ticket telemetry correlation
+in Claude Code's native OpenTelemetry support.
+
+**Setup**: Add a `.envrc` to your repo root:
+
+```bash
+source_up
+use_otel_context "your-project-name"
+```
+
+The `use_otel_context` function (from `~/.config/direnv/lib/otel.sh`) sets these OTEL resource
+attributes:
+
+| Attribute | Source |
+|-----------|--------|
+| `project` | Argument to `use_otel_context` |
+| `hostname` | Machine short name |
+| `git.branch` | Current git branch |
+| `linear.key` | Ticket from branch name, fallback to `currentTicket` in workflow context |
+
+`source_up` inherits environment from parent `.envrc` files (e.g., profile-based secrets at the
+workspace root). When using worktrees, `create-worktree.sh` generates a `.envrc` and runs
+`direnv allow` automatically.
 
 ## Thoughts System
 

@@ -174,7 +174,7 @@ Git worktrees let you work on multiple features simultaneously, each in its own 
 /create-worktree PROJ-123 feature-name
 ```
 
-This creates a git worktree at `~/catalyst/wt/{projectKey}/{PROJ-123-feature-name}/` with a new branch, `.claude/` and `.catalyst/` copied over, dependencies installed, and `thoughts/` shared via symlink.
+This creates a git worktree at `~/catalyst/wt/{projectKey}/{PROJ-123-feature-name}/` with a new branch, `.claude/` and `.catalyst/` copied over, workflow context initialized with the ticket, `.envrc` generated for OTEL telemetry, dependencies installed, and `thoughts/` shared via symlink.
 
 ### Parallel Sessions
 
