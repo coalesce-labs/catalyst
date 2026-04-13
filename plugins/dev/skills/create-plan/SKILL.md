@@ -69,15 +69,8 @@ Auto-discovery has already run in Prerequisites above. Check its output and foll
 2. **Extract ticket and update Linear state**:
 
    If a ticket is detected (from the research document's `source_ticket` frontmatter, from the
-   command argument, or from context), move it to the planning state:
-
-   ```bash
-   PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
-   if [[ "$PLANNING_STATE" != "null" ]]; then
-       linearis issues update "$ticketId" --status "$PLANNING_STATE"
-   fi
-   ```
-
+   command argument, or from context), update ticket status to `stateMap.planning` from config
+   using Linearis CLI (run `linearis issues usage` for syntax).
    If Linearis CLI is not available, skip silently and continue planning.
 
 3. **Spawn initial research tasks in parallel**:
@@ -380,12 +373,8 @@ compatibility → migration strategy
 If a ticket is detected (from research document's `source_ticket` frontmatter, command argument, or
 context):
 
-- **At planning start** (Step 1):
-  ```bash
-  PLANNING_STATE=$(jq -r '.catalyst.linear.stateMap.planning // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
-  if [[ "$PLANNING_STATE" != "null" ]]; then
-      linearis issues update "$ticketId" --status "$PLANNING_STATE"
-  fi
-  ```
-- **After plan saved**: `linearis comments create "$ticketId" --body "Plan created: $planPath"`
+- **At planning start** (Step 1): Update ticket status to `stateMap.planning` from config
+  using Linearis CLI (run `linearis issues usage` for syntax).
+- **After plan saved**: Add a comment with the plan path using Linearis CLI
+  (run `linearis comments usage` for syntax).
 - If Linearis CLI not available, skip silently and continue planning

@@ -177,22 +177,13 @@ If user chooses option 3, generate batch update script:
 
 ```bash
 #!/usr/bin/env bash
-# Backlog grooming updates - Generated 2025-01-27
+# Backlog grooming updates - Generated from audit
+# Use `linearis issues usage` and `linearis comments usage` for exact CLI syntax.
 
-# Move TEAM-456 to Auth project
-linearis issues update TEAM-456 --project "Auth & Security"
-
-# Move TEAM-123 to Frontend project
-linearis issues update TEAM-123 --project "Frontend"
-
-# Close stale issue TEAM-789 (state from stateMap.canceled config)
-CONFIG_FILE=".catalyst/config.json"
-[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE=".claude/config.json"
-CANCELED_STATE=$(jq -r '.catalyst.linear.stateMap.canceled // "Canceled"' "$CONFIG_FILE" 2>/dev/null || echo "Canceled")
-linearis issues update TEAM-789 --status "$CANCELED_STATE"
-linearis comments create TEAM-789 --body "Closing stale issue (>30 days inactive)"
-
-# [... more commands ...]
+# For each recommended action, use linearis to:
+# - Move tickets to projects: update with --project flag
+# - Close stale issues: update status to stateMap.canceled from config, add comment
+# - Re-prioritize: update with --priority flag
 
 echo "✅ Backlog grooming updates applied"
 ```

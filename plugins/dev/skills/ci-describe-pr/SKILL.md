@@ -89,14 +89,8 @@ gh pr edit $PR_NUMBER --body-file "thoughts/shared/prs/${PR_NUMBER}_description.
 
 ### 7. Update Linear (if ticket found)
 
-```bash
-if [[ -n "$ticket" ]] && command -v linearis &>/dev/null; then
-  IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .catalyst/config.json 2>/dev/null || echo "In Review")
-  if [[ "$IN_REVIEW_STATE" != "null" ]]; then
-    linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
-  fi
-fi
-```
+If Linearis CLI is available, update the ticket status to `stateMap.inReview` from config.
+Use `linearis issues usage` for exact update syntax. Skip silently if CLI not available.
 
 ### 8. Report
 

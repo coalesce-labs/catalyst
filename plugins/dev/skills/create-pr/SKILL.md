@@ -217,21 +217,11 @@ Immediately call `/describe-pr` with the PR number to:
 If ticket was extracted from branch:
 
 ```bash
-# Verify linearis is available
-if ! command -v linearis &> /dev/null; then
-    echo "⚠️  Linearis CLI not found - skipping Linear ticket update"
-    echo "Install: npm install -g linearis"
-else
-    # Update ticket state from stateMap config
-    IN_REVIEW_STATE=$(jq -r '.catalyst.linear.stateMap.inReview // "In Review"' .catalyst/config.json 2>/dev/null || echo "In Review")
-    if [[ "$IN_REVIEW_STATE" != "null" ]]; then
-        linearis issues update "$ticket" --status "$IN_REVIEW_STATE" --assignee "@me"
-    fi
-
-    # Add comment with PR link
-    linearis comments create "$ticket" \
-        --body "PR created and ready for review!\n\n**PR**: $prUrl\n\nDescription has been auto-generated with verification checks."
-fi
+# If Linearis CLI is available:
+# 1. Update ticket status to stateMap.inReview from config
+# 2. Add a comment with the PR link
+# Use `linearis issues usage` and `linearis comments usage` for exact syntax.
+# Skip silently if CLI not available.
 ```
 
 ### 12. Post-PR Monitoring & Resolution Loop

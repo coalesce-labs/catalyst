@@ -61,13 +61,8 @@ Once you have a plan path:
 - Read the plan completely (no limit/offset)
 - Check for any existing checkmarks (- [x]) to see what's done
 - Read the original ticket and all files mentioned in the plan
-- **Extract ticket from plan frontmatter** (`source_ticket` field) and update Linear state:
-  ```bash
-  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
-  if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
-      linearis issues update "$ticketId" --status "$IN_PROGRESS_STATE"
-  fi
-  ```
+- **Extract ticket from plan frontmatter** (`source_ticket` field) and update Linear state
+  to `stateMap.inProgress` from config using Linearis CLI (run `linearis issues usage` for syntax).
   If Linearis CLI is not available, skip silently and continue implementation.
 - Think deeply about how the pieces fit together
 - Create a todo list to track your progress
@@ -318,11 +313,6 @@ Lead (Opus) — Coordinates implementation
 
 If a ticket is detected (from plan document's `source_ticket` frontmatter or from context):
 
-- **At implementation start** (Step 3):
-  ```bash
-  IN_PROGRESS_STATE=$(jq -r '.catalyst.linear.stateMap.inProgress // "In Progress"' .catalyst/config.json 2>/dev/null || echo "In Progress")
-  if [[ "$IN_PROGRESS_STATE" != "null" ]]; then
-      linearis issues update "$ticketId" --status "$IN_PROGRESS_STATE"
-  fi
-  ```
+- **At implementation start** (Step 3): Update ticket status to `stateMap.inProgress` from config
+  using Linearis CLI (run `linearis issues usage` for syntax).
 - If Linearis CLI not available, skip silently and continue implementation

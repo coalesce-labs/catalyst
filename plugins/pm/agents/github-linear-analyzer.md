@@ -144,13 +144,8 @@ Return structured markdown:
 
 **Suggested Actions**:
 
-```bash
-# Create Linear issue for PR #125
-linearis issues create \
-  --team TEAM \
-  --title "Fix bug (from PR #125)" \
-  --description "Imported from PR: https://github.com/user/repo/pull/125"
-```
+Create a Linear issue for the orphaned PR using Linearis CLI (run `linearis issues usage` for
+create syntax). Include the PR URL in the description.
 ````
 
 ## 🏷️ Orphaned Issues (No PR)
@@ -167,24 +162,9 @@ linearis issues create \
 | TEAM-456 | #123 | 2025-01-25  | Close issue |
 | TEAM-457 | #124 | 2025-01-26  | Close issue |
 
-**Auto-close commands** (state name from `stateMap.done` config):
-
-```bash
-# Read configured done state
-CONFIG_FILE=".catalyst/config.json"
-[[ ! -f "$CONFIG_FILE" ]] && CONFIG_FILE=".claude/config.json"
-DONE_STATE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' "$CONFIG_FILE" 2>/dev/null || echo "Done")
-
-# Update state
-linearis issues update TEAM-456 --status "$DONE_STATE"
-# Add comment
-linearis comments create TEAM-456 --body "PR #123 merged: https://github.com/user/repo/pull/123"
-
-# Update state
-linearis issues update TEAM-457 --status "$DONE_STATE"
-# Add comment
-linearis comments create TEAM-457 --body "PR #124 merged: https://github.com/user/repo/pull/124"
-```
+**Auto-close**: For each issue with a merged PR, update ticket status to `stateMap.done`
+from config and add a comment with the PR link. Use `linearis issues usage` and
+`linearis comments usage` for exact syntax.
 
 ## 🕐 Stale PRs (Open >14 Days)
 
