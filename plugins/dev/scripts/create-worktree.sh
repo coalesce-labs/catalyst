@@ -127,6 +127,34 @@ if [ -d ".catalyst" ]; then
 	cp -r .catalyst "$WORKTREE_PATH/"
 fi
 
+# Pre-trust worktree in Claude Code so no trust dialog appears on first launch
+CLAUDE_JSON="$HOME/.claude.json"
+if [ -f "$CLAUDE_JSON" ]; then
+	if jq -e --arg path "$WORKTREE_PATH" '.projects[$path]' "$CLAUDE_JSON" > /dev/null 2>&1; then
+		TMPFILE="$(mktemp "$CLAUDE_JSON.XXXXXX")"
+		jq --arg path "$WORKTREE_PATH" \
+			'.projects[$path].hasTrustDialogAccepted = true' \
+			"$CLAUDE_JSON" > "$TMPFILE" && mv "$TMPFILE" "$CLAUDE_JSON"
+	else
+		TMPFILE="$(mktemp "$CLAUDE_JSON.XXXXXX")"
+		jq --arg path "$WORKTREE_PATH" \
+			'.projects[$path] = {
+				"allowedTools": [],
+				"mcpContextUris": [],
+				"mcpServers": {},
+				"enabledMcpjsonServers": [],
+				"disabledMcpjsonServers": [],
+				"hasTrustDialogAccepted": true,
+				"projectOnboardingSeenCount": 0,
+				"hasClaudeMdExternalIncludesApproved": false,
+				"hasClaudeMdExternalIncludesWarningShown": false,
+				"hasCompletedProjectOnboarding": false
+			}' \
+			"$CLAUDE_JSON" > "$TMPFILE" && mv "$TMPFILE" "$CLAUDE_JSON"
+	fi
+	echo "🔒 Worktree pre-trusted in Claude Code"
+fi
+
 # Initialize workflow context with ticket from worktree name (before setup runs)
 # This ensures .catalyst/.workflow-context.json exists with currentTicket set
 # so that direnv's use_otel_context can read it when someone enters the directory.
