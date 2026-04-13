@@ -523,7 +523,7 @@ echo '{"catalyst": {"linear": {"teamKey": "TEAM"}}}' > .catalyst/config.json
 Verify you have an active cycle in Linear:
 
 ```bash
-linearis cycles list --team TEAM
+# Run `linearis cycles usage` for exact syntax
 ```
 
 Create a cycle in Linear UI or via API.

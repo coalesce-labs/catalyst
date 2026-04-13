@@ -338,7 +338,7 @@ STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
 # Use linearis CLI to read ticket titles (run `linearis issues usage` for syntax)
 WORKERS_JSON="{}"
 for TICKET_ID in "${ALL_TICKETS[@]}"; do
-  TITLE=$(linearis issues read "$TICKET_ID" | jq -r '.title')
+  TITLE=$(linearis issues read "$TICKET_ID" | jq -r '.title')  # see `linearis issues usage`
   WORKERS_JSON=$(echo "$WORKERS_JSON" | jq \
     --arg tid "$TICKET_ID" --arg title "$TITLE" \
     '. + {($tid): {ticketId: $tid, title: $title, status: "dispatched", phase: 0, branch: null, pr: null, updatedAt: "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'", needsAttention: false, attentionReason: null}}')

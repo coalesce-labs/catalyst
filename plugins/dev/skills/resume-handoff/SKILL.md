@@ -204,17 +204,8 @@ Once you have a handoff path:
 ## CLI Tools
 
 When you need to fetch ticket context from Linear (e.g., reading a ticket referenced in the
-handoff), use the Linearis CLI. For exact syntax, run `linearis issues usage` — **do not guess
-commands**.
-
-Quick reference for the most common operation during handoff resume:
-
-```bash
-linearis issues read PROJ-123          # Read a ticket (NOT 'get' or 'view')
-linearis comments create PROJ-123 --body "Resuming work from handoff"
-```
-
-For full CLI syntax, see `/catalyst-dev:linearis`.
+handoff), use the Linearis CLI. For exact syntax, run `linearis issues usage` or see
+`/catalyst-dev:linearis` — **do not guess commands**.
 
 ## Guidelines
 

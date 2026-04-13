@@ -38,56 +38,13 @@ Linearis CLI tool.
 **CLI Syntax**: The `linearis` skill provides full CLI syntax reference. It is auto-loaded when
 needed.
 
-## Key Commands
+## CLI Syntax
 
-### Ticket Operations
+For exact command syntax, run `linearis <domain> usage` (e.g., `linearis issues usage`,
+`linearis cycles usage`). The `/catalyst-dev:linearis` skill is the authoritative reference — **do
+not guess or improvise commands**.
 
-```bash
-# List tickets (note: issues list only supports --limit, not --team or --status)
-linearis issues list --limit 100
-
-# Filter by team and status using jq
-linearis issues list --limit 100 | jq '.[] | select(.team.key == "TEAM" and .state.name == "In Progress")'
-
-# Read specific ticket
-linearis issues read TICKET-123
-
-# Search tickets by title
-linearis issues list --limit 100 | jq '.[] | select(.title | contains("search term"))'
-```
-
-### Cycle Operations
-
-```bash
-# List cycles for team
-linearis cycles list --team TEAM [--active] [--limit 5]
-
-# Read cycle details
-linearis cycles read "Sprint 2025-10" --team TEAM
-
-# Get active cycle
-linearis cycles list --team TEAM --active
-```
-
-### Project Operations
-
-```bash
-# List projects
-linearis projects list
-
-# Get project details (parse JSON output)
-linearis projects list | jq '.[] | select(.name == "Project Name")'
-```
-
-### Configuration Discovery
-
-```bash
-# Get full command list
-linearis usage
-
-# List labels
-linearis labels list --team TEAM
-```
+All linearis output is JSON — use jq for filtering and transformation.
 
 ## Output Format
 

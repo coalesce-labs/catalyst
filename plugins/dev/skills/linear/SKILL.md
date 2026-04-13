@@ -44,14 +44,11 @@ CONFIG_FILE=".catalyst/config.json"
 TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // "PROJ"' "$CONFIG_FILE")
 
 # Read team UUID — required for issues create and issues search (keys don't work)
-# Fallback chain: config → lookup from existing issue → error
+# Use `linearis teams usage` to discover UUIDs — see /catalyst-dev:linearis
 TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' "$CONFIG_FILE")
 if [ -z "$TEAM_UUID" ]; then
-  TEAM_UUID=$(linearis issues list --limit 1 | jq -r --arg key "$TEAM_KEY" '.[0].team | select(.key == $key) | .id // empty')
-fi
-if [ -z "$TEAM_UUID" ]; then
   echo "WARNING: Could not resolve team UUID for $TEAM_KEY. issues create/search may target wrong team."
-  echo "Add teamUuid to .catalyst/config.json to fix: linearis issues list --limit 20 | jq '[.[].team | {key, id}] | unique_by(.key)'"
+  echo "Add teamUuid to .catalyst/config.json — see /catalyst-dev:linearis for lookup commands"
 fi
 
 # Read thoughts repo URL
@@ -71,11 +68,7 @@ THOUGHTS_URL=$(jq -r '.catalyst.linear.thoughtsRepoUrl // "https://github.com/or
 }
 ```
 
-To find your team UUID:
-
-```bash
-linearis issues list --limit 20 | jq '[.[].team | {key, id, name}] | unique_by(.key)'
-```
+To find your team UUID, see `/catalyst-dev:linearis` for team discovery commands.
 
 ## Initial Response
 
@@ -219,31 +212,14 @@ When referencing thoughts documents, always provide GitHub links:
 
 6. **Create the Linear ticket using Linearis CLI:**
 
-   ```bash
-   # Create issue with linearis
-   # WARNING: --team only accepts UUIDs, not team keys/names (upstream bug: czottmann/linearis#56)
-   # Team keys/names silently fall back to the workspace default team.
-   # Get the team UUID from config or from any existing issue:
-   #   TEAM_UUID=$(jq -r '.catalyst.linear.teamUuid // empty' .catalyst/config.json)
-   #   # Or: TEAM_UUID=$(linearis issues list --limit 1 | jq -r '.[0].team.id')
-   linearis issues create "[refined title]" \
-     --team "$TEAM_UUID" \
-     --description "[final description in markdown]" \
-     --priority [1-4] \
-     --status "$(jq -r '.catalyst.linear.stateMap.backlog // "Backlog"' .catalyst/config.json 2>/dev/null || echo "Backlog")"
+   Use `linearis issues usage` for create syntax, or see `/catalyst-dev:linearis`.
 
-   # Capture the created issue ID from output
-   ISSUE_ID=$(linearis issues create "[refined title]" --team "$TEAM_UUID" -d "Description" | jq -r '.id')
-   ```
+   **Important**: `--team` only accepts UUIDs, not team keys/names (upstream bug:
+   czottmann/linearis#56). Team keys silently fall back to the workspace default. Use the
+   `$TEAM_UUID` from config above.
 
-   **Note**: Linearis creates issues in the team's default backlog state. To set specific status or
-   assignee, create first then update:
-
-   ```bash
-   # Assign to a user (requires user UUID, not email or @me)
-   # Look up your user ID: linearis issues list --limit 5 | jq '[.[].assignee | select(.) | {name, id}] | unique_by(.id)'
-   linearis issues update "$ISSUE_ID" --assignee "<user-uuid>"
-   ```
+   Linearis creates issues in the team's default backlog state. To set specific status or assignee,
+   create first then update. Capture the created issue ID from the JSON output with jq.
 
 7. **Post-creation actions:**
    - Show the created ticket URL
@@ -265,7 +241,7 @@ When user wants to add a comment to a ticket:
 
 1. **Determine which ticket:**
    - Use context from the current conversation to identify the relevant ticket
-   - If uncertain, use `linearis issues read TEAM-123` to show ticket details and confirm
+   - If uncertain, read the ticket to show details and confirm (see `linearis issues usage`)
 
 2. **Format comments for clarity:**
    - Keep concise (~10 lines) unless more detail needed
@@ -291,21 +267,13 @@ When user wants to add a comment to a ticket:
    - `thoughts/shared/rate_limit_analysis.md` ([GitHub](link))
    ```
 
-5. **Add comment with Linearis:**
-
-   ```bash
-   linearis comments create TEAM-123 --body "Your comment text here"
-   ```
+5. **Add comment with Linearis** (see `linearis comments usage` for syntax)
 
 ### 3. Moving Tickets Through Workflow
 
 When moving tickets to a new status:
 
-1. **Get current status:**
-
-   ```bash
-   linearis issues read TEAM-123 | jq -r '.state.name'
-   ```
+1. **Get current status** by reading the ticket (see `linearis issues usage`)
 
 2. **Suggest next status based on workflow:**
 
@@ -328,16 +296,9 @@ When moving tickets to a new status:
    - `/create-pr` with ticket → Move to `stateMap.inReview`
    - `/merge-pr` with ticket → Move to `stateMap.done`
 
-4. **Manual status updates:**
+4. **Manual status updates** — use `linearis issues usage` for update syntax
 
-   ```bash
-   linearis issues update TEAM-123 --status "In Progress"
-   ```
-
-5. **Add comment explaining the transition:**
-   ```bash
-   linearis comments create TEAM-123 --body "Moving to In Progress: Starting implementation"
-   ```
+5. **Add comment explaining the transition** — use `linearis comments usage` for syntax
 
 ### 4. Searching for Tickets
 
@@ -348,28 +309,10 @@ When user wants to find tickets:
    - Status filters
    - Assignee filters
 
-2. **Execute search:**
-
-   ```bash
-   # Text search — use `issues search` for server-side query matching
-   # WARNING: --team requires a UUID, not a team key (upstream bug: czottmann/linearis#56)
-   linearis issues search "search term" --team "$TEAM_UUID"
-   linearis issues search "search term" --status "In Progress,In Review"
-   linearis issues search "search term" --limit 20
-
-   # List + jq — use for filtering by fields that search doesn't support
-   # (linearis issues list only supports --limit, not --team)
-   linearis issues list --limit 100
-
-   # Filter by team using jq
-   linearis issues list --limit 100 | jq '.[] | select(.team.key == "TEAM")'
-
-   # Filter by status using jq
-   linearis issues list --limit 100 | jq '.[] | select(.state.name == "In Progress")'
-
-   # Filter by assignee using jq
-   linearis issues list --limit 100 | jq '.[] | select(.assignee.email == "user@example.com")'
-   ```
+2. **Execute search** using `linearis issues usage` for search/list syntax:
+   - Use `issues search` for server-side query matching
+   - Use `issues list` + jq for filtering by fields that search doesn't support
+   - **Note**: `--team` requires a UUID on search (upstream bug: czottmann/linearis#56)
 
 3. **Present results:**
    - Show ticket ID, title, status, assignee
@@ -439,16 +382,9 @@ When these commands are run, check if there's a related Linear ticket and update
 
 ### Workflow 2: Quick Ticket Updates
 
-```bash
-# Add progress comment
-linearis comments create PROJ-123 --body "Completed phase 1, moving to phase 2"
-
-# Move ticket forward (state name from stateMap config)
-linearis issues update PROJ-123 --status "In Progress"
-
-# Search for related tickets
-linearis issues list --limit 100 | jq '.[] | select(.team.key == "PROJ" and (.title | contains("authentication")))'
-```
+Add a progress comment, move the ticket forward using the state name from `stateMap` config, and
+search for related tickets. Use `linearis issues usage` and `linearis comments usage` for exact
+syntax.
 
 ---
 

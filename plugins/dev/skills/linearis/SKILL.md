@@ -252,7 +252,7 @@ linearis comments create ENG-123 --body "Merged: PR #456"
 2. **comments create**: The command is `linearis comments create`, not `issues comment`
 3. **milestones NOT project-milestones**: The command was renamed in v2026.4
 4. **--status requires --team**: On `issues list` and `issues search`, `--status` only works when `--team` is also provided
-5. **--team accepts keys, names, and UUIDs**: Any form works on all commands (e.g., `--team ENG`)
+5. **--team accepts keys, names, and UUIDs on most commands** (e.g., `--team ENG`), but `issues create` and `issues search` require a UUID — keys/names silently fall back to the workspace default team (upstream bug: czottmann/linearis#56)
 6. **Quotes for spaces**: `--status "In Progress"` not `--status In Progress`
 7. **JSON output**: All commands return JSON — use jq for parsing
 8. **Use `linearis <domain> usage`**: When unsure about flags, check usage instead of guessing
