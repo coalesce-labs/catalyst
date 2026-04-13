@@ -392,6 +392,7 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
 2. **Direct `claude` CLI** (fallback — includes usage capture):
    ```bash
    WORKER_OUTPUT="${ORCH_DIR}/workers/${TICKET_ID}-output.json"
+   SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
 
    CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
    CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
@@ -401,6 +402,16 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
      --output-format json \
      -p "${WORKER_COMMAND} ${TICKET_ID} --auto-merge" \
      > "$WORKER_OUTPUT" 2>/dev/null &
+
+   WORKER_PID=$!
+
+   # Record the worker's PID + initial heartbeat into its signal file so the
+   # monitor can perform kill-0 liveness checks. Safe if SIGNAL_FILE doesn't
+   # yet exist (the worker will create it and merge on first phase update).
+   if [ -f "$SIGNAL_FILE" ]; then
+     jq --argjson pid "$WORKER_PID" '.pid = $pid | .lastHeartbeat = .updatedAt' \
+       "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+   fi
    ```
 
    When the worker process exits, parse usage from its output:
@@ -671,6 +682,14 @@ When ALL tickets in the current wave pass verification:
    PRs for human review on the dashboard.
 
 2. **Write wave briefing** for the next wave (see Wave Briefing section below).
+   Then persist a copy to the thoughts repository so it survives worktree cleanup:
+   ```bash
+   HANDOFF_DIR="thoughts/shared/handoffs/${ORCH_NAME}"
+   mkdir -p "${HANDOFF_DIR}"
+   TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+   cp "${ORCH_DIR}/wave-${WAVE}-briefing.md" \
+      "${HANDOFF_DIR}/${TIMESTAMP}_wave-${WAVE}-briefing.md"
+   ```
 
 3. **Clean up completed worktrees**: Run teardown hooks from config, then remove.
    ```bash
@@ -730,6 +749,15 @@ When all waves are complete:
    - Timeline (start to finish, per-wave durations)
    - Any verification failures that required remediation
 
+   Then persist summary and any remaining briefings to thoughts:
+   ```bash
+   HANDOFF_DIR="thoughts/shared/handoffs/${ORCH_NAME}"
+   mkdir -p "${HANDOFF_DIR}"
+   TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+   cp "${ORCH_DIR}/SUMMARY.md" \
+      "${HANDOFF_DIR}/${TIMESTAMP}_${ORCH_NAME}-summary.md"
+   ```
+
 2. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck,
    update them using the Linearis CLI (run `linearis issues usage` for update syntax).
 
@@ -781,6 +809,11 @@ to `${ORCH_DIR}/wave-${N}-briefing.md` summarizing what prior waves learned.
    gotchas discovered
 
 Use the wave briefing template from `plugins/dev/templates/orchestrate-wave-briefing.md`.
+
+**Thoughts persistence:** Every briefing is copied to `thoughts/shared/handoffs/${ORCH_NAME}/`
+with timestamped filenames (`YYYY-MM-DD_HH-MM-SS_wave-N-briefing.md`). This ensures briefings
+survive worktree cleanup and are available via `humanlayer thoughts sync` across workspaces.
+The final `SUMMARY.md` is also persisted there at completion.
 
 **Why this matters:** This is a unique advantage over other frameworks. GSD executors are
 stateless. Gas Town Polecats don't share findings. Wave briefings mean:
@@ -908,6 +941,7 @@ fi
 - Wave advancement requires ALL tickets in the wave to pass verification
 - The `--auto-merge` flag applies to workers, not the orchestrator
 - Dashboard and state files are ephemeral — they don't survive worktree removal
+- Wave briefings and summaries are persisted to `thoughts/shared/handoffs/${ORCH_NAME}/` for archival
 - Wave briefings are the key differentiator — knowledge compounds across waves
 - The 3-layer testing enforcement prevents the observed failure mode of agents skipping tests
 - CTL-26 dependency: Uses `.catalyst/` paths. Falls back to `.claude/` if `.catalyst/` doesn't exist

@@ -1,0 +1,209 @@
+export interface PrStatus {
+  number: number;
+  state: "OPEN" | "CLOSED" | "MERGED" | "UNKNOWN";
+  mergedAt: string | null;
+  fetchedAt: string;
+}
+
+export interface PrRef {
+  repo: string;
+  number: number;
+}
+
+export interface RunnerResult {
+  stdout: string;
+  ok: boolean;
+}
+
+export type Runner = (args: string[]) => Promise<RunnerResult>;
+
+export interface PrStatusFetcher {
+  get(repo: string, number: number): PrStatus | null;
+  refreshAll(prs: PrRef[]): Promise<void>;
+  start(prs: PrRef[], intervalMs: number): void;
+  stop(): void;
+}
+
+export interface CreatePrStatusFetcherOptions {
+  runner?: Runner;
+  concurrency?: number;
+}
+
+const PR_URL_RE = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/;
+
+export function parseRepoFromPrUrl(url: string): string | null {
+  if (typeof url !== "string" || url.length === 0) return null;
+  const m = PR_URL_RE.exec(url);
+  if (!m) return null;
+  return `${m[1]}/${m[2]}`;
+}
+
+function cacheKey(repo: string, number: number): string {
+  return `${repo}#${number}`;
+}
+
+async function defaultRunner(args: string[]): Promise<RunnerResult> {
+  try {
+    const proc = Bun.spawn(args, {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const exit = await proc.exited;
+    return { stdout, ok: exit === 0 };
+  } catch {
+    return { stdout: "", ok: false };
+  }
+}
+
+interface ParsedPrPayload {
+  state?: unknown;
+  mergedAt?: unknown;
+}
+
+function normalizeState(raw: unknown): PrStatus["state"] {
+  if (raw === "OPEN" || raw === "CLOSED" || raw === "MERGED") return raw;
+  return "UNKNOWN";
+}
+
+export function createPrStatusFetcher(
+  opts: CreatePrStatusFetcherOptions = {},
+): PrStatusFetcher {
+  const runner = opts.runner ?? defaultRunner;
+  const concurrency = Math.max(1, opts.concurrency ?? 5);
+  const cache = new Map<string, PrStatus>();
+  let intervalHandle: ReturnType<typeof setInterval> | null = null;
+  let ghAvailable: boolean | null = null;
+  let ghProbeInFlight: Promise<boolean> | null = null;
+
+  async function probeGh(): Promise<boolean> {
+    if (ghAvailable !== null) return ghAvailable;
+    if (ghProbeInFlight) return ghProbeInFlight;
+    ghProbeInFlight = (async () => {
+      let ok: boolean;
+      try {
+        const res = await runner(["gh", "--version"]);
+        ok = res.ok;
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        console.warn(
+          "[pr-status] gh CLI not available — PR status refresh disabled",
+        );
+      }
+      ghAvailable = ok;
+      return ok;
+    })();
+    try {
+      return await ghProbeInFlight;
+    } finally {
+      ghProbeInFlight = null;
+    }
+  }
+
+  async function fetchOne(ref: PrRef): Promise<void> {
+    const res = await runner([
+      "gh",
+      "pr",
+      "view",
+      String(ref.number),
+      "--repo",
+      ref.repo,
+      "--json",
+      "state,mergedAt",
+    ]);
+    const fetchedAt = new Date().toISOString();
+    if (!res.ok) {
+      cache.set(cacheKey(ref.repo, ref.number), {
+        number: ref.number,
+        state: "UNKNOWN",
+        mergedAt: null,
+        fetchedAt,
+      });
+      return;
+    }
+    let parsed: ParsedPrPayload;
+    try {
+      parsed = JSON.parse(res.stdout) as ParsedPrPayload;
+    } catch (err) {
+      console.warn(
+        `[pr-status] parse failed for ${ref.repo}#${ref.number}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      cache.set(cacheKey(ref.repo, ref.number), {
+        number: ref.number,
+        state: "UNKNOWN",
+        mergedAt: null,
+        fetchedAt,
+      });
+      return;
+    }
+    const state = normalizeState(parsed.state);
+    const mergedAt =
+      typeof parsed.mergedAt === "string" && parsed.mergedAt.length > 0
+        ? parsed.mergedAt
+        : null;
+    cache.set(cacheKey(ref.repo, ref.number), {
+      number: ref.number,
+      state,
+      mergedAt,
+      fetchedAt,
+    });
+  }
+
+  async function refreshAll(prs: PrRef[]): Promise<void> {
+    if (prs.length === 0) return;
+    const ok = await probeGh();
+    if (!ok) return;
+    // Dedupe
+    const seen = new Set<string>();
+    const queue: PrRef[] = [];
+    for (const ref of prs) {
+      const k = cacheKey(ref.repo, ref.number);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      queue.push(ref);
+    }
+    let cursor = 0;
+    async function worker(): Promise<void> {
+      while (cursor < queue.length) {
+        const idx = cursor++;
+        const ref = queue[idx];
+        if (!ref) return;
+        try {
+          await fetchOne(ref);
+        } catch (err) {
+          console.warn(
+            `[pr-status] fetch failed for ${ref.repo}#${ref.number}:`,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
+    }
+    const workers: Promise<void>[] = [];
+    const n = Math.min(concurrency, queue.length);
+    for (let i = 0; i < n; i++) workers.push(worker());
+    await Promise.all(workers);
+  }
+
+  return {
+    get(repo: string, number: number): PrStatus | null {
+      return cache.get(cacheKey(repo, number)) ?? null;
+    },
+    refreshAll,
+    start(prs: PrRef[], intervalMs: number): void {
+      if (intervalHandle !== null) return;
+      void refreshAll(prs);
+      intervalHandle = setInterval(() => {
+        void refreshAll(prs);
+      }, intervalMs);
+    },
+    stop(): void {
+      if (intervalHandle !== null) {
+        clearInterval(intervalHandle);
+        intervalHandle = null;
+      }
+    },
+  };
+}

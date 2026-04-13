@@ -614,14 +614,14 @@ Orchestrators write a `lastHeartbeat` timestamp during each monitoring poll (eve
 
 ### Building Interfaces
 
-The global state JSON is a stable contract designed for building rich interfaces:
+The global state JSON is a stable contract designed for building interfaces. The [Orchestration Monitor](#orchestration-monitor) is the built-in implementation — a real-time web + terminal dashboard that reads signal files, polls GitHub, and pushes updates via SSE. See the dedicated section below for full details.
 
-**Terminal dashboard** — Simplest approach with `watch`:
+For custom integrations, you can also access the data directly:
+
+**`jq` one-liners** — Quick terminal queries without running a server:
 ```bash
 watch -n5 'jq ".orchestrators[] | {id, status, progress: \"\(.progress.completedTickets)/\(.progress.totalTickets)\", attention: (.attention | length)}" ~/catalyst/state.json'
 ```
-
-**Web dashboard** — Serve `state.json` via a lightweight HTTP server and build a React/Svelte frontend that polls or watches for changes. The schema is documented in `plugins/dev/templates/global-state.json`.
 
 **Agent integration** — Any Claude Code agent can read `~/catalyst/state.json` directly to answer questions like "what's the status of the auth migration?" or "are any workers waiting for me?" without asking the orchestrator.
 
@@ -692,6 +692,108 @@ cat ~/catalyst/history/*.json | jq -s '[.[].usage.costUSD / .[].progress.totalTi
 - Usage is only captured after a worker process exits, not in real-time
 
 As these tools evolve to expose usage data, the schema is ready to accept it.
+
+## Orchestration Monitor
+
+The orchestration monitor is a real-time dashboard for watching your orchestration runs. It reads worker signal files, polls GitHub for PR status, and pushes updates to connected clients via Server-Sent Events — no polling from the browser.
+
+The monitor runs entirely on your local machine and uses the same CLI tools as the rest of Catalyst — `gh` for GitHub PR status, filesystem watches for signal files, `kill -0` for process liveness. There's no cloud service, no account to create, no data leaving your machine. It's a lightweight Bun process that reads the files your orchestrator and workers are already writing. A hosted version with persistent history and team dashboards is a natural evolution, but the local-first approach means you get full monitoring today with zero infrastructure.
+
+### Starting the Monitor
+
+The monitor is a Bun server bundled with the dev plugin:
+
+```bash
+bun run plugins/dev/scripts/orch-monitor/server.ts
+```
+
+By default it listens on `0.0.0.0:7400`. Override with environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MONITOR_PORT` | `7400` | HTTP port |
+| `CATALYST_DIR` | `~/catalyst` | Base directory (reads `wt/` subdirectories) |
+
+The `/setup-orchestrate` skill prints the monitor launch command as part of its output, so you can copy-paste it alongside the orchestrator launch command.
+
+### Web Dashboard
+
+Open `http://localhost:7400` in any browser. The dashboard is a single self-contained HTML page with no external dependencies — all CSS and JS are inline.
+
+**What you see at a glance:**
+
+- **Header bar** — orchestrator name, total cost, wall-clock time, parallel efficiency ratio, wave progress, merge count
+- **Wave cards** — each wave shows its tickets as status badges with completion state
+- **Worker table** — per-worker rows with ticket, status, phase, process liveness, time since last update, and PR link
+- **Timeline** — Gantt-style bars showing worker parallelism and phase durations
+- **Event feed** — scrolling log of the last 50 events (dispatches, status changes, PR creation, merges)
+
+Status badges are color-coded: green for done/merged, blue for in-progress, red for failed, yellow for stalled, gray for dispatched/waiting.
+
+**Real-time updates:** The browser connects to `/events` (SSE endpoint) and receives push updates whenever a worker signal file changes, a PR status is refreshed from GitHub, or a liveness check detects a dead process. Updates appear within 1-2 seconds of the underlying file change — no manual refresh needed.
+
+<!-- TODO: Add screenshot of the orchestration monitor dashboard -->
+<!-- Drop a screenshot at: website/public/orchestration-monitor.png -->
+<!-- Then uncomment: ![Orchestration Monitor Dashboard](/orchestration-monitor.png) -->
+
+### Remote Access via Tailscale
+
+Because the monitor binds to `0.0.0.0`, it's accessible from any device on your Tailscale network. This means you can check on your orchestration runs from your phone or iPad while away from your desk.
+
+```bash
+# Find your Tailscale IP
+tailscale ip -4
+
+# Access from any device on your tailnet
+# http://<tailscale-ip>:7400
+```
+
+The dashboard is mobile-responsive — the layout adapts to narrow screens so worker status, PR links, and the event feed are all readable on a phone. No VPN configuration or port forwarding required — Tailscale handles the secure mesh networking.
+
+**Typical workflow:** Start an orchestration on your workstation, walk away, and periodically check `http://<tailscale-ip>:7400` from your phone to see if any workers need attention (failed, stalled, or waiting for human input).
+
+### Terminal Mode
+
+The monitor also includes an ANSI terminal renderer for headless environments or quick checks without opening a browser:
+
+```bash
+bun run plugins/dev/scripts/orch-monitor/server.ts --terminal
+```
+
+This clears the screen and renders a compact 80-column dashboard with color-coded status, updated in real-time as signal files change. The HTTP server runs simultaneously, so you get both terminal and web access from a single process.
+
+### What the Monitor Tracks
+
+The monitor watches `~/catalyst/wt/` for orchestrator directories (matching `orch-*`) and reads:
+
+| Source | Data | Refresh |
+|--------|------|---------|
+| Worker signal files (`workers/*.json`) | Status, phase, PR number, definition of done | Instant (filesystem watch) |
+| GitHub API (`gh pr view`) | PR state (open/merged/closed), merge timestamp | Every 30 seconds |
+| Process table (`kill -0 <pid>`) | Whether the worker's Claude process is still alive | Every 5 seconds |
+| Orchestrator `state.json` | Wave count, progress, attention items | Instant (filesystem watch) |
+
+**Dead process detection:** If a worker's PID is recorded in its signal file but `kill -0` fails, the monitor marks it with a `!` indicator. This catches silently crashed workers that stopped updating their signal file — the status might say "implementing" but the process is gone.
+
+**PR status enrichment:** The monitor polls GitHub independently of what workers report. Even if a worker exited before updating its signal file after merge, the monitor shows the correct PR state. This is the backstop that prevents the "shows pr_open when actually merged" problem.
+
+### API Endpoints
+
+The monitor exposes a JSON API for programmatic access:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/snapshot` | Full current state of all orchestrators, workers, and PR statuses |
+| `GET /api/analytics` | Extended analytics including phase timelines and cost data |
+| `GET /events` | SSE stream — events: `snapshot`, `worker-update`, `liveness-change` |
+
+```bash
+# Quick status check from the command line
+curl -s http://localhost:7400/api/snapshot | jq '.orchestrators[].workers | to_entries[] | {ticket: .key, status: .value.status, pr: .value.pr?.number}'
+
+# Stream events
+curl -N http://localhost:7400/events
+```
 
 ## Error Handling
 

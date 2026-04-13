@@ -54,6 +54,38 @@
       "type": "string",
       "description": "Absolute path to the worker's worktree directory"
     },
+    "pid": {
+      "type": ["integer", "null"],
+      "description": "OS process ID of the worker's claude process. Used by monitor for kill-0 liveness checks."
+    },
+    "lastHeartbeat": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 timestamp updated every time the worker writes to this file. Stale if >60s old for active workers."
+    },
+    "phaseTimestamps": {
+      "type": "object",
+      "description": "ISO 8601 timestamps recording when each phase started. Keys are phase names from the status enum.",
+      "additionalProperties": {
+        "type": "string",
+        "format": "date-time"
+      }
+    },
+    "completedAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "When the worker finished (done, failed, or stalled). Null while active."
+    },
+    "cost": {
+      "type": ["object", "null"],
+      "description": "Token usage and cost, updated at phase transitions and on completion.",
+      "properties": {
+        "costUSD": { "type": "number" },
+        "inputTokens": { "type": "integer" },
+        "outputTokens": { "type": "integer" },
+        "cacheReadTokens": { "type": "integer" }
+      }
+    },
     "pr": {
       "type": ["object", "null"],
       "properties": {
@@ -61,7 +93,12 @@
         "url": { "type": "string", "format": "uri" },
         "ciStatus": {
           "type": "string",
-          "enum": ["pending", "passing", "failing", "unknown"]
+          "enum": ["pending", "passing", "failing", "merged", "unknown"]
+        },
+        "mergedAt": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the PR was merged. Null until merge."
         }
       },
       "description": "Pull request details (null until PR is created)"
