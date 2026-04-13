@@ -378,9 +378,37 @@ fi
 echo ""
 
 # ============================================================
-# 8. WORKER SIGNAL CROSS-CHECK
+# 8. PR MERGE STATE VERIFICATION
 # ============================================================
-echo -e "${CYAN}--- 8. Worker Signal Cross-Check ---${NC}"
+echo -e "${CYAN}--- 8. PR Merge State ---${NC}"
+
+BRANCH=$(git branch --show-current 2>/dev/null || echo "")
+if [ -n "$BRANCH" ]; then
+  PR_NUMBER=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+  if [ -n "$PR_NUMBER" ]; then
+    PR_STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+    if [ "$PR_STATE" = "MERGED" ]; then
+      report_pass "PR #${PR_NUMBER} is MERGED"
+    elif [ "$PR_STATE" = "OPEN" ]; then
+      MERGE_STATUS=$(gh pr view "$PR_NUMBER" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "UNKNOWN")
+      report_fail "PR #${PR_NUMBER} is still OPEN (mergeStateStatus: ${MERGE_STATUS}) — worker exited before merge"
+    elif [ "$PR_STATE" = "CLOSED" ]; then
+      report_fail "PR #${PR_NUMBER} is CLOSED without merge"
+    else
+      report_warn "PR #${PR_NUMBER} state: ${PR_STATE}"
+    fi
+  else
+    report_fail "No PR found for branch ${BRANCH}"
+  fi
+else
+  report_warn "Could not determine current branch"
+fi
+echo ""
+
+# ============================================================
+# 9. WORKER SIGNAL CROSS-CHECK
+# ============================================================
+echo -e "${CYAN}--- 9. Worker Signal Cross-Check ---${NC}"
 
 if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
   # Compare worker's self-reported definitionOfDone with our findings

@@ -411,66 +411,90 @@ EXISTING_PR=$(gh pr list --head "$(git branch --show-current)" --json number --j
 - **If no PR exists**:
   - Run `/create-pr` (handles commit, push, PR creation, description, Linear linking)
 
-**Step 2: Wait for Automated Reviewers**
+**Step 2: Monitor Through Merge**
 
-Automated review agents (Codex, Direnv, etc.) typically post comments within 3-5 minutes of PR
-creation. Wait for them before processing comments, so we can address everything in one pass.
+After creating/updating the PR, enter a monitoring loop. Do NOT exit until the PR is **actually
+merged** or genuinely blocked on human approval. "PR created with auto-merge" is NOT done.
+
+**Minimum 3-minute wait:** CI checks and automated reviewers (Codex, security scanners) need time
+to run. Always wait at least 3 minutes from PR creation before even checking status. Then poll
+every 30 seconds.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-OWNER=$(echo "$REPO" | cut -d'/' -f1)
-NAME=$(echo "$REPO" | cut -d'/' -f2)
+MIN_WAIT=180  # 3 minutes — CI and reviewers need time
 
-# Wait 3 minutes, then start checking for comments
-sleep 180
+# Initial wait — do not skip this
+sleep $MIN_WAIT
 
-# Poll for up to 2 more minutes (5 min total) — check every 30s
-WAITED=180
-MAX_WAIT=300
+# Poll until merged or human-blocked (max 15 min total)
+MAX_WAIT=900
+WAITED=$MIN_WAIT
 while [ $WAITED -lt $MAX_WAIT ]; do
+  # 1. Check PR merge state — the primary exit condition
+  PR_STATE=$(gh pr view $PR_NUMBER --json state --jq '.state')
+  if [ "$PR_STATE" = "MERGED" ]; then
+    echo "✅ PR #${PR_NUMBER} merged"
+    break
+  fi
+  if [ "$PR_STATE" = "CLOSED" ]; then
+    echo "PR #${PR_NUMBER} was closed unexpectedly"
+    break
+  fi
+
+  # 2. Check CI status
+  CI_STATUS=$(gh pr checks $PR_NUMBER --json state \
+    --jq '[.[].state] | unique | join(",")' 2>/dev/null || echo "PENDING")
+
+  # 3. Check for review comments/threads
   COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --jq 'length')
   REVIEW_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" \
     --jq '[.[] | select(.state != "APPROVED" and .state != "DISMISSED")] | length')
 
+  echo "Poll @${WAITED}s: state=${PR_STATE} CI=${CI_STATUS} comments=${COMMENT_COUNT} reviews=${REVIEW_COUNT}"
+
+  # 4. Address review comments if any arrived
   if [ "$COMMENT_COUNT" -gt 0 ] || [ "$REVIEW_COUNT" -gt 0 ]; then
-    echo "Found review comments — proceeding to address them"
-    break
+    # Run /review-comments, resolve threads via GraphQL, push fixes
+    # Then continue polling — auto-merge will proceed once threads resolved
+  fi
+
+  # 5. If CI failed, investigate and fix
+  if echo "$CI_STATUS" | grep -q "FAILURE"; then
+    # Analyze failure logs, fix code, push — then continue polling
   fi
 
   sleep 30
   WAITED=$((WAITED + 30))
 done
-
-if [ "$COMMENT_COUNT" -eq 0 ] && [ "$REVIEW_COUNT" -eq 0 ]; then
-  echo "No automated review comments after ${MAX_WAIT}s — proceeding"
-fi
 ```
 
-**Step 3: Resolve All Merge Blockers**
+On each poll cycle, handle what you find:
 
-After the automated reviewer wait, proactively resolve any merge blockers before attempting merge.
-This runs the same workflow as `/merge-pr` Step 6 but earlier — while the PR is still fresh.
+- **PR state = MERGED** → exit loop, proceed to post-merge cleanup
+- **Review comments/threads exist** → address them: run `/review-comments ${PR_NUMBER}`, resolve
+  threads via GraphQL, push fixes. Then continue polling — auto-merge will retry once threads
+  are resolved and `required_conversation_resolution` is satisfied
+- **CI failing** → analyze failure logs, fix code, push, continue polling
+- **CI pending** → normal, continue polling
+- **Genuinely blocked on human approval** (`review-required` with no other fixable blockers) →
+  report what's needed and stop
 
-Read and follow `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`. This queries
-`mergeStateStatus` via GraphQL, identifies every specific blocker, and attempts to fix each one in
-a loop (max 3 rounds). Key blocker resolutions:
+The agent does NOT need to decide whether to merge. Auto-merge handles that. The agent's job is to
+**keep the path clear** (address reviews, fix CI) and **confirm it actually happened**.
 
-- `ci-failing` → analyze failure logs, fix code, push, re-poll
-- `unresolved-threads` → run `/review-comments` (see `review-thread-resolution.md`)
-- `branch-behind` → rebase and push
-- `draft` → `gh pr ready`
-- `changes-requested` → check if addressed; suggest re-request review
-- `review-required` → cannot fix — report how many approvals needed
+If the PR has not merged after 15 minutes of polling, run the full merge blocker diagnosis
+(`merge-blocker-diagnosis.md`) to identify exactly what's stuck and report to the user.
 
-If blockers remain after 3 rounds, present what was resolved and what still blocks with options
-to wait or create a handoff.
+**Step 3: Post-Merge Cleanup (only after PR state = MERGED)**
 
-**Step 4: Proceed to merge (default) or report status**
+Only execute this step after confirming `PR_STATE = "MERGED"` in the poll loop above.
 
-By default, oneshot completes the full lifecycle — it does NOT stop at PR creation. After resolving
-all blockers, it proceeds directly to Phase 6 (merge).
+- Move Linear ticket to `stateMap.done` (default: "Done") via Linearis CLI
+- Delete local branch: `git branch -D "$BRANCH" 2>/dev/null || true`
+- Update primary worktree: `git -C "$PRIMARY_WORKTREE" pull --rebase 2>/dev/null || true`
 
-If `--no-merge` was set, report the PR status and exit:
+**If `--no-merge` was set**, skip the poll loop and report PR status instead:
 
 ```
 PR ready: https://github.com/org/repo/pull/{number}
@@ -484,17 +508,14 @@ Merge state: $mergeStateStatus
 Merge later with: /catalyst-dev:merge-pr
 ```
 
-**Default behavior (no `--no-merge` flag):** Proceeds to Phase 6 automatically. Phase 6
-(`/merge-pr`) will run its own blocker diagnosis loop and resolve anything remaining. If all
-blockers are resolved, it merges. If a genuine human gate remains (e.g., required approval),
-it reports what's needed and stops.
-
 **Linear**: `/create-pr` moves ticket to `stateMap.inReview` (default: "In Review").
 
-### Phase 6: Merge (Same Session as Phase 5 — Sonnet)
+### Phase 6: Merge (Only When Auto-Merge is NOT Armed)
 
-Runs automatically by default. Only skipped if `--no-merge` flag was passed, in which case the user
-merges manually later with `/catalyst-dev:merge-pr`.
+If auto-merge is armed, Phase 5 Step 2's poll loop already confirms merge — skip Phase 6.
+
+If auto-merge is NOT armed (manual merge flow), run merge-pr after the poll loop confirms
+a clean merge state:
 
 ```
 /catalyst-dev:merge-pr
@@ -714,8 +735,8 @@ error, context exhaustion):
   full paths
 - **Phase 3 does NOT commit** — all git operations are deferred to Phase 5
 - **Phase 6 (merge) runs by default** — use `--no-merge` to opt out
-- **NEVER stop at "PR created"** — monitor CI, address automated review comments, resolve blockers,
-  and merge. "PR created with auto-merge" is NOT a terminal state — verify it actually merges
+- **NEVER stop at "PR created"** — poll every 30s (after 3-min minimum wait) checking CI, reviews,
+  and merge state. "PR created with auto-merge" is NOT done — poll until state=MERGED
 - **Automated reviewer comments are the agent's job** — Codex, security scanners, and linters post
   code comments that create unresolved threads. These are NOT "needs approving reviewer" — they are
   fixable blockers. Address the feedback, resolve the threads, and continue

@@ -473,15 +473,21 @@ MANDATORY: Before marking this ticket as complete:
 4. Security review — must pass /security-review or equivalent
 5. Code review — must pass code-reviewer agent
 6. All quality gates in config must pass
-7. PR MUST be monitored through merge — do NOT stop at "PR created"
-   - Wait for CI checks to pass
-   - Address ALL automated review comments (Codex, security scanners)
-   - Resolve all merge blocker threads via GraphQL
-   - Only report done when PR is actually MERGED or blocked on human approval
+7. PR MUST be monitored through ACTUAL MERGE — do NOT stop at "PR created"
+   After creating the PR with auto-merge, you MUST:
+   a. Wait at least 3 minutes — CI checks and automated reviewers need time
+   b. Poll every 30s: check PR state, CI status, and review comments
+   c. If review comments arrive — address them, resolve threads, push fixes
+   d. If CI fails — analyze, fix, push
+   e. Continue polling until gh pr view shows state=MERGED
+   f. Only stop if genuinely blocked on human approval (review-required)
+   "PR created with auto-merge" is NOT done. You are polling to CONFIRM
+   the merge happened, not to decide whether to merge. Auto-merge handles
+   that — your job is to keep the path clear and verify completion.
 
 Your work will be independently verified by the orchestrator. Do NOT mark as done
-until all test types exist AND the PR is merged. "PR created with auto-merge" is
-NOT done — you must verify it actually merges cleanly.
+until all test types exist AND the PR state is MERGED (confirmed via gh pr view).
+The orchestrator will independently check PR merge state during verification.
 
 Write your status to the worker signal file at:
   ${ORCH_DIR}/workers/${TICKET_ID}.json
