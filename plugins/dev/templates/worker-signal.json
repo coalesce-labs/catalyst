@@ -16,6 +16,10 @@
       "type": "string",
       "description": "Full worker name (e.g., api-redesign-PROJ-101)"
     },
+    "label": {
+      "type": ["string", "null"],
+      "description": "Display label for the session (e.g., 'oneshot CTL-33'). Auto-derived from skill + ticket, or user-provided via --label flag. Null if not set."
+    },
     "status": {
       "type": "string",
       "enum": [

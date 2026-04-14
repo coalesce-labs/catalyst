@@ -147,6 +147,10 @@
           "type": "string",
           "description": "Ticket title for display"
         },
+        "label": {
+          "type": ["string", "null"],
+          "description": "Display label for the session (e.g., 'oneshot CTL-33'). Null if not set."
+        },
         "status": {
           "type": "string",
           "enum": ["dispatched", "researching", "planning", "implementing", "validating", "shipping", "pr-created", "merging", "done", "failed", "stalled", "remediation"],

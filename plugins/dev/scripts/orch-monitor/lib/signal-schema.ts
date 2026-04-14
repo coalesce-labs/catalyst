@@ -48,6 +48,9 @@ export function validateSignalFile(obj: unknown): boolean {
   if (!isIsoDateTimeString(o.updatedAt)) return false;
 
   // Optional fields — validate types only if present.
+  if ("label" in o && o.label !== null && o.label !== undefined) {
+    if (typeof o.label !== "string" || o.label.length === 0) return false;
+  }
   if ("pid" in o && o.pid !== null && o.pid !== undefined) {
     if (typeof o.pid !== "number" || !Number.isInteger(o.pid)) return false;
   }
