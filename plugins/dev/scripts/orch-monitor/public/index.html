@@ -1117,9 +1117,152 @@
         overflow-y: auto;
       }
       .worker-table tbody tr { cursor: pointer; }
+
+      /* --- Tab nav --- */
+      .tab-nav {
+        display: flex;
+        gap: 0;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 14px;
+      }
+      .tab-nav button {
+        background: none;
+        border: none;
+        color: var(--muted);
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 8px 16px;
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        transition: color 120ms, border-color 120ms;
+      }
+      .tab-nav button:hover { color: var(--fg); }
+      .tab-nav button.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+      }
+      .tab-nav .otel-indicator {
+        width: 7px; height: 7px; border-radius: 50%;
+        display: inline-block; margin-left: 6px; vertical-align: middle;
+      }
+      .tab-nav .otel-indicator.ok { background: var(--green); }
+      .tab-nav .otel-indicator.off { background: var(--gray); }
+
+      /* --- Hero stats strip --- */
+      .hero-stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .hero-stat {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .hero-stat .hs-label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .hero-stat .hs-value {
+        font-size: 22px;
+        font-weight: 700;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-variant-numeric: tabular-nums;
+        color: var(--fg);
+      }
+      .hero-stat .hs-value.accent { color: var(--accent); }
+      .hero-stat .hs-value.green { color: var(--green); }
+      .hero-stat .hs-sub {
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      /* --- Metrics view --- */
+      .metrics-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 14px;
+      }
+      .metrics-controls select,
+      .metrics-controls button {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--fg);
+        font: inherit;
+        font-size: 12px;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+      .metrics-controls select:focus,
+      .metrics-controls button:focus { outline: 1px solid var(--accent); }
+      .metrics-controls button.active {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+      .metrics-controls .mc-label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+      }
+      .chart-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+        gap: 14px;
+      }
+      .chart-panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 14px;
+      }
+      .chart-panel h3 {
+        margin: 0 0 10px;
+        font-size: 13px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+      }
+      .chart-panel canvas {
+        width: 100% !important;
+        max-height: 280px;
+      }
+      .chart-panel .chart-empty {
+        color: var(--muted);
+        font-size: 13px;
+        text-align: center;
+        padding: 40px 0;
+      }
+      .otel-disabled-banner {
+        text-align: center;
+        padding: 40px 20px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.6;
+      }
+      .otel-disabled-banner code {
+        font-family: ui-monospace, monospace;
+        background: var(--panel-2);
+        padding: 1px 5px;
+        border-radius: 3px;
+        color: #f4c88a;
+      }
     </style>
     <script src="/public/vendor/marked.umd.js"></script>
     <script src="/public/vendor/purify.min.js"></script>
+    <script src="/public/vendor/chart.umd.min.js"></script>
   </head>
   <body>
     <header>
@@ -1134,6 +1277,10 @@
       <span id="last-update" class="conn"></span>
     </header>
     <main>
+      <div class="tab-nav" id="tab-nav">
+        <button class="active" data-tab="dashboard">Dashboard</button>
+        <button data-tab="metrics">Metrics<span id="otel-dot" class="otel-indicator off"></span></button>
+      </div>
       <div id="dashboard-view">
         <div id="attention" class="attention-panel"></div>
         <div id="ai-briefing" class="card" style="display:none">
@@ -1160,6 +1307,46 @@
         </div>
       </div>
       <div id="session-view" style="display:none"></div>
+      <div id="metrics-view" style="display:none">
+        <div id="metrics-hero" class="hero-stats"></div>
+        <div class="metrics-controls">
+          <span class="mc-label">Time range</span>
+          <select id="metrics-range">
+            <option value="15m">15 min</option>
+            <option value="1h" selected>1 hour</option>
+            <option value="6h">6 hours</option>
+            <option value="24h">24 hours</option>
+          </select>
+          <button id="metrics-refresh">Refresh</button>
+        </div>
+        <div id="metrics-charts" class="chart-grid">
+          <div class="chart-panel">
+            <h3>Cost by Ticket (Top 10)</h3>
+            <canvas id="chart-cost-ticket"></canvas>
+            <div id="chart-cost-ticket-empty" class="chart-empty" style="display:none">No cost data available</div>
+          </div>
+          <div class="chart-panel">
+            <h3>Cost Rate by Model</h3>
+            <canvas id="chart-cost-rate"></canvas>
+            <div id="chart-cost-rate-empty" class="chart-empty" style="display:none">No cost rate data available</div>
+          </div>
+          <div class="chart-panel">
+            <h3>Token Usage by Type</h3>
+            <canvas id="chart-tokens"></canvas>
+            <div id="chart-tokens-empty" class="chart-empty" style="display:none">No token data available</div>
+          </div>
+          <div class="chart-panel">
+            <h3>Top Tools</h3>
+            <canvas id="chart-tools"></canvas>
+            <div id="chart-tools-empty" class="chart-empty" style="display:none">No tool data available</div>
+          </div>
+        </div>
+        <div id="otel-disabled" class="otel-disabled-banner" style="display:none">
+          <p><strong>OTel metrics not configured</strong></p>
+          <p>Enable OpenTelemetry to see cost, token, and tool usage metrics.</p>
+          <p>Set <code>PROMETHEUS_URL</code> in your environment or configure in <code>.catalyst/config.json</code>.</p>
+        </div>
+      </div>
     </main>
     <script>
       (function () {
@@ -1168,6 +1355,8 @@
         const $events = document.getElementById("events");
         const $dashboardView = document.getElementById("dashboard-view");
         const $sessionView = document.getElementById("session-view");
+        const $metricsView = document.getElementById("metrics-view");
+        const $tabNav = document.getElementById("tab-nav");
         const STALE_THRESHOLD_SECONDS = 900;
         const $dot = document.getElementById("conn-dot");
         const $connText = document.getElementById("conn-text");
@@ -2292,6 +2481,9 @@
         // --- Hash router ---
         function parseRoute() {
           const hash = location.hash || "#/";
+          if (hash === "#/metrics") {
+            return { view: "metrics", orchId: null, ticket: null };
+          }
           const sessionMatch = hash.match(/^#\/session\/([^/]+)\/([^/]+)$/);
           if (sessionMatch) {
             try {
@@ -2579,16 +2771,37 @@
         function showDashboardView() {
           $dashboardView.style.display = "block";
           $sessionView.style.display = "none";
+          $metricsView.style.display = "none";
           $sessionView.innerHTML = "";
           sessionDetail = null;
+          updateTabNav("dashboard");
           render();
+        }
+
+        function showMetricsView() {
+          $dashboardView.style.display = "none";
+          $sessionView.style.display = "none";
+          $metricsView.style.display = "block";
+          sessionDetail = null;
+          updateTabNav("metrics");
+          refreshMetrics();
+        }
+
+        function updateTabNav(active) {
+          $tabNav.querySelectorAll("button").forEach(function (btn) {
+            btn.classList.toggle("active", btn.getAttribute("data-tab") === active);
+          });
+          $tabNav.style.display = active === "session" ? "none" : "flex";
         }
 
         function handleRoute() {
           var route = parseRoute();
           currentRoute = route;
           if (route.view === "session" && route.orchId && route.ticket) {
+            updateTabNav("session");
             showSessionView(route.orchId, route.ticket);
+          } else if (route.view === "metrics") {
+            showMetricsView();
           } else {
             showDashboardView();
           }
@@ -3016,6 +3229,279 @@
             briefingAutoTimer = setInterval(fetchBriefing, BRIEFING_AUTO_INTERVAL);
           }
         });
+
+        // --- Tab navigation ---
+        $tabNav.addEventListener("click", function (e) {
+          var btn = e.target.closest("button[data-tab]");
+          if (!btn) return;
+          var tab = btn.getAttribute("data-tab");
+          if (tab === "metrics") navigateTo("#/metrics");
+          else navigateTo("#/");
+        });
+
+        // --- Metrics ---
+        var otelStatus = { enabled: false, prometheus: false, loki: false };
+        var metricsCharts = {};
+        var metricsRefreshTimer = null;
+        var METRICS_REFRESH_MS = 30000;
+
+        var CHART_COLORS = [
+          "#4ea1ff", "#39d07a", "#ef5d5d", "#eabc3b", "#c084fc",
+          "#f97316", "#06b6d4", "#ec4899", "#84cc16", "#a78bfa"
+        ];
+
+        function chartDefaults() {
+          return {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 300 },
+            plugins: {
+              legend: { display: true, position: "bottom", labels: { color: "#8a93a1", font: { size: 11 }, boxWidth: 12, padding: 8 } }
+            },
+            scales: {
+              x: { ticks: { color: "#8a93a1", font: { size: 11 } }, grid: { color: "#262d36" } },
+              y: { ticks: { color: "#8a93a1", font: { size: 11 } }, grid: { color: "#262d36" }, beginAtZero: true }
+            }
+          };
+        }
+
+        async function fetchOtelStatus() {
+          try {
+            var resp = await fetch("/api/otel/status");
+            if (!resp.ok) return;
+            otelStatus = await resp.json();
+            var dot = document.getElementById("otel-dot");
+            if (dot) {
+              dot.className = "otel-indicator " + (otelStatus.prometheus || otelStatus.loki ? "ok" : "off");
+            }
+          } catch (err) {
+            console.error("otel status fetch failed", err);
+          }
+        }
+
+        function getMetricsRange() {
+          return document.getElementById("metrics-range").value;
+        }
+
+        async function fetchMetricsData(endpoint, params) {
+          try {
+            var url = "/api/otel/" + endpoint;
+            if (params) url += "?" + new URLSearchParams(params).toString();
+            var resp = await fetch(url);
+            if (!resp.ok) return null;
+            var body = await resp.json();
+            return body.data || null;
+          } catch (err) {
+            console.error("metrics fetch failed: " + endpoint, err);
+            return null;
+          }
+        }
+
+        function renderHeroStats(cost, tokens) {
+          var $hero = document.getElementById("metrics-hero");
+          var totalCost = 0;
+          if (cost) {
+            var keys = Object.keys(cost);
+            for (var i = 0; i < keys.length; i++) totalCost += cost[keys[i]];
+          }
+          var totalTokens = 0;
+          var tokenTypes = tokens && tokens.tokens ? tokens.tokens : {};
+          var tkeys = Object.keys(tokenTypes);
+          for (var j = 0; j < tkeys.length; j++) totalTokens += tokenTypes[tkeys[j]];
+          var cacheRate = tokens && tokens.cacheHitRate != null ? tokens.cacheHitRate : null;
+
+          $hero.innerHTML =
+            '<div class="hero-stat">' +
+              '<span class="hs-label">Total Cost</span>' +
+              '<span class="hs-value accent">$' + totalCost.toFixed(2) + '</span>' +
+              '<span class="hs-sub">' + getMetricsRange() + ' window</span>' +
+            '</div>' +
+            '<div class="hero-stat">' +
+              '<span class="hs-label">Total Tokens</span>' +
+              '<span class="hs-value">' + fmtNumber(totalTokens) + '</span>' +
+              '<span class="hs-sub">' + tkeys.length + ' types</span>' +
+            '</div>' +
+            '<div class="hero-stat">' +
+              '<span class="hs-label">Cache Hit Rate</span>' +
+              '<span class="hs-value green">' + (cacheRate != null ? (cacheRate * 100).toFixed(1) + '%' : 'N/A') + '</span>' +
+              '<span class="hs-sub">prompt cache efficiency</span>' +
+            '</div>' +
+            '<div class="hero-stat">' +
+              '<span class="hs-label">Active Tickets</span>' +
+              '<span class="hs-value">' + (cost ? Object.keys(cost).length : 0) + '</span>' +
+              '<span class="hs-sub">with cost data</span>' +
+            '</div>';
+        }
+
+        function fmtNumber(n) {
+          if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+          if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+          return String(n);
+        }
+
+        function destroyChart(id) {
+          if (metricsCharts[id]) {
+            metricsCharts[id].destroy();
+            delete metricsCharts[id];
+          }
+        }
+
+        function showChartOrEmpty(canvasId, hasData) {
+          var canvas = document.getElementById(canvasId);
+          var empty = document.getElementById(canvasId + "-empty");
+          if (canvas) canvas.style.display = hasData ? "block" : "none";
+          if (empty) empty.style.display = hasData ? "none" : "block";
+        }
+
+        function renderCostByTicketChart(data) {
+          var id = "chart-cost-ticket";
+          destroyChart(id);
+          if (!data || !Object.keys(data).length) { showChartOrEmpty(id, false); return; }
+          showChartOrEmpty(id, true);
+
+          var entries = Object.entries(data).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 10);
+          var labels = entries.map(function (e) { return e[0]; });
+          var values = entries.map(function (e) { return e[1]; });
+
+          var canvas = document.getElementById(id);
+          var opts = chartDefaults();
+          opts.indexAxis = "y";
+          opts.plugins.legend.display = false;
+          opts.scales.x.title = { display: true, text: "Cost (USD)", color: "#8a93a1" };
+          delete opts.scales.y.beginAtZero;
+
+          metricsCharts[id] = new Chart(canvas, {
+            type: "bar",
+            data: {
+              labels: labels,
+              datasets: [{ data: values, backgroundColor: CHART_COLORS.slice(0, values.length), borderWidth: 0, borderRadius: 3 }]
+            },
+            options: opts
+          });
+        }
+
+        function renderCostRateChart(data) {
+          var id = "chart-cost-rate";
+          destroyChart(id);
+          if (!data || !Object.keys(data).length) { showChartOrEmpty(id, false); return; }
+          showChartOrEmpty(id, true);
+
+          var labels = Object.keys(data);
+          var values = Object.values(data);
+
+          var canvas = document.getElementById(id);
+          var opts = chartDefaults();
+          opts.plugins.legend.display = false;
+          opts.scales.y.title = { display: true, text: "USD / interval", color: "#8a93a1" };
+
+          metricsCharts[id] = new Chart(canvas, {
+            type: "bar",
+            data: {
+              labels: labels,
+              datasets: [{ data: values, backgroundColor: CHART_COLORS.slice(0, values.length), borderWidth: 0, borderRadius: 3 }]
+            },
+            options: opts
+          });
+        }
+
+        function renderTokensChart(data) {
+          var id = "chart-tokens";
+          destroyChart(id);
+          var tokens = data && data.tokens ? data.tokens : null;
+          if (!tokens || !Object.keys(tokens).length) { showChartOrEmpty(id, false); return; }
+          showChartOrEmpty(id, true);
+
+          var labels = Object.keys(tokens);
+          var values = Object.values(tokens);
+
+          var canvas = document.getElementById(id);
+          metricsCharts[id] = new Chart(canvas, {
+            type: "doughnut",
+            data: {
+              labels: labels,
+              datasets: [{ data: values, backgroundColor: CHART_COLORS.slice(0, values.length), borderWidth: 0 }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              animation: { duration: 300 },
+              plugins: {
+                legend: { position: "bottom", labels: { color: "#8a93a1", font: { size: 11 }, boxWidth: 12, padding: 8 } }
+              }
+            }
+          });
+        }
+
+        function renderToolsChart(data) {
+          var id = "chart-tools";
+          destroyChart(id);
+          if (!data || !Object.keys(data).length) { showChartOrEmpty(id, false); return; }
+          showChartOrEmpty(id, true);
+
+          var entries = Object.entries(data).sort(function (a, b) { return b[1] - a[1]; }).slice(0, 15);
+          var labels = entries.map(function (e) { return e[0]; });
+          var values = entries.map(function (e) { return e[1]; });
+
+          var canvas = document.getElementById(id);
+          var opts = chartDefaults();
+          opts.indexAxis = "y";
+          opts.plugins.legend.display = false;
+          opts.scales.x.title = { display: true, text: "Invocations", color: "#8a93a1" };
+          delete opts.scales.y.beginAtZero;
+
+          metricsCharts[id] = new Chart(canvas, {
+            type: "bar",
+            data: {
+              labels: labels,
+              datasets: [{ data: values, backgroundColor: CHART_COLORS.slice(0, values.length), borderWidth: 0, borderRadius: 3 }]
+            },
+            options: opts
+          });
+        }
+
+        async function refreshMetrics() {
+          await fetchOtelStatus();
+          var $disabled = document.getElementById("otel-disabled");
+          var $charts = document.getElementById("metrics-charts");
+          var $hero = document.getElementById("metrics-hero");
+          var $controls = document.querySelector(".metrics-controls");
+
+          if (!otelStatus.enabled) {
+            if ($disabled) $disabled.style.display = "block";
+            if ($charts) $charts.style.display = "none";
+            if ($hero) $hero.style.display = "none";
+            if ($controls) $controls.style.display = "none";
+            return;
+          }
+          if ($disabled) $disabled.style.display = "none";
+          if ($charts) $charts.style.display = "";
+          if ($hero) $hero.style.display = "";
+          if ($controls) $controls.style.display = "";
+
+          var range = getMetricsRange();
+          var results = await Promise.all([
+            fetchMetricsData("cost", { range: range }),
+            fetchMetricsData("tokens", { range: range }),
+            fetchMetricsData("cost-rate", { interval: "5m" }),
+            otelStatus.loki ? fetchMetricsData("tools", { range: range }) : Promise.resolve(null)
+          ]);
+
+          renderHeroStats(results[0], results[1]);
+          renderCostByTicketChart(results[0]);
+          renderCostRateChart(results[2]);
+          renderTokensChart(results[1]);
+          renderToolsChart(results[3]);
+        }
+
+        document.getElementById("metrics-refresh").addEventListener("click", function () {
+          refreshMetrics();
+        });
+        document.getElementById("metrics-range").addEventListener("change", function () {
+          refreshMetrics();
+        });
+
+        fetchOtelStatus();
+        setInterval(fetchOtelStatus, 60000);
 
         setConnected("pending");
         connect();

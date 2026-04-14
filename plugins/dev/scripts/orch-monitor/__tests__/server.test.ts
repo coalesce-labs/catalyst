@@ -479,6 +479,78 @@ describe("OTel API with mock clients", () => {
     expect(entry).toBeDefined();
     expect(entry!.discrepancy).toBeCloseTo(0.05);
   });
+
+  it("returns token data from /api/otel/tokens", async () => {
+    const res = await fetch(`${otelUrl}/api/otel/tokens?range=1h`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: { tokens: Record<string, number> | null; cacheHitRate: number | null };
+    };
+    expect(body.data).toBeDefined();
+  });
+
+  it("returns cost-rate data from /api/otel/cost-rate", async () => {
+    const res = await fetch(`${otelUrl}/api/otel/cost-rate?interval=5m`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: Record<string, number> | null };
+    expect(body.data).not.toBeUndefined();
+  });
+});
+
+describe("Metrics UI elements in index.html", () => {
+  it("serves Chart.js vendor file", async () => {
+    const res = await fetch(`${baseUrl}/public/vendor/chart.umd.min.js`);
+    expect(res.status).toBe(200);
+    const ct = res.headers.get("content-type") || "";
+    expect(ct).toContain("javascript");
+    const body = await res.text();
+    expect(body.length).toBeGreaterThan(1000);
+  });
+
+  it("index.html contains metrics tab navigation", async () => {
+    const res = await fetch(`${baseUrl}/`);
+    const html = await res.text();
+    expect(html).toContain('data-tab="metrics"');
+    expect(html).toContain('id="tab-nav"');
+  });
+
+  it("index.html contains metrics view with chart canvases", async () => {
+    const res = await fetch(`${baseUrl}/`);
+    const html = await res.text();
+    expect(html).toContain('id="metrics-view"');
+    expect(html).toContain('id="chart-cost-ticket"');
+    expect(html).toContain('id="chart-cost-rate"');
+    expect(html).toContain('id="chart-tokens"');
+    expect(html).toContain('id="chart-tools"');
+  });
+
+  it("index.html contains hero stats strip", async () => {
+    const res = await fetch(`${baseUrl}/`);
+    const html = await res.text();
+    expect(html).toContain('id="metrics-hero"');
+    expect(html).toContain("hero-stats");
+  });
+
+  it("index.html contains OTel disabled fallback banner", async () => {
+    const res = await fetch(`${baseUrl}/`);
+    const html = await res.text();
+    expect(html).toContain('id="otel-disabled"');
+    expect(html).toContain("OTel metrics not configured");
+  });
+
+  it("index.html contains time range selector", async () => {
+    const res = await fetch(`${baseUrl}/`);
+    const html = await res.text();
+    expect(html).toContain('id="metrics-range"');
+    expect(html).toContain('value="1h"');
+    expect(html).toContain('value="6h"');
+  });
+
+  it("index.html loads Chart.js vendor script", async () => {
+    const res = await fetch(`${baseUrl}/`);
+    const html = await res.text();
+    expect(html).toContain("chart.umd.min.js");
+  });
 });
 
 describe("SSE integration (file change -> SSE push)", () => {
