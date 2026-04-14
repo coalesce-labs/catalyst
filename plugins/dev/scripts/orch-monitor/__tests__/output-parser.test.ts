@@ -107,9 +107,40 @@ describe("parseOutputJson", () => {
     warn.mockRestore();
   });
 
-  it("returns null when the top-level value is not an array", () => {
+  it("parses summary object format (claude --output-format json)", () => {
+    const path = writeOutput("summary", {
+      type: "result",
+      duration_ms: 5000,
+      duration_api_ms: 3000,
+      num_turns: 10,
+      total_cost_usd: 4.26,
+      usage: { input_tokens: 100, output_tokens: 200, cache_read_input_tokens: 300 },
+      modelUsage: {
+        "claude-opus-4-6": {
+          inputTokens: 80, outputTokens: 180,
+          cacheReadInputTokens: 300, costUSD: 4.0,
+        },
+        "claude-haiku-4-5-20251001": {
+          inputTokens: 20, outputTokens: 20,
+          cacheReadInputTokens: 0, costUSD: 0.26,
+        },
+      },
+    });
+    const result = parseOutputJson(path);
+    expect(result).not.toBeNull();
+    expect(result!.costUSD).toBe(4.26);
+    expect(result!.inputTokens).toBe(100);
+    expect(result!.outputTokens).toBe(200);
+    expect(result!.cacheReadTokens).toBe(300);
+    expect(result!.model).toBe("claude-opus-4-6");
+    expect(Object.keys(result!.modelBreakdown)).toHaveLength(2);
+    expect(result!.modelBreakdown["claude-opus-4-6"].costUSD).toBe(4.0);
+    expect(result!.modelBreakdown["claude-haiku-4-5-20251001"].costUSD).toBe(0.26);
+  });
+
+  it("returns null when the top-level value is a non-result object", () => {
     const warn = spyOn(console, "warn").mockImplementation(() => {});
-    const path = writeOutput("obj", { type: "result", duration_ms: 1 });
+    const path = writeOutput("obj", { type: "assistant", content: "hello" });
     const result = parseOutputJson(path);
     expect(result).toBeNull();
     expect(warn).toHaveBeenCalled();
