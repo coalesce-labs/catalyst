@@ -328,6 +328,7 @@ Auto-managed by Claude Code hooks and skills. Not committed to git.
 {
   "lastUpdated": "2025-10-26T10:30:00Z",
   "currentTicket": "PROJ-123",
+  "orchestration": null,
   "mostRecentDocument": {
     "type": "plans",
     "path": "thoughts/shared/plans/...",
@@ -343,6 +344,11 @@ Auto-managed by Claude Code hooks and skills. Not committed to git.
 }
 ```
 
+| Field | Type | Description |
+|-------|------|-------------|
+| `currentTicket` | string \| null | Active ticket ID for this worktree |
+| `orchestration` | string \| null | Orchestration run name (set by `create-worktree.sh --orchestration`). Groups orchestrator + workers for per-run telemetry via `catalyst.orchestration` OTel resource attribute. |
+
 This file is what enables skill chaining — when you save research, `create-plan` finds it
 automatically. When you save a plan, `implement-plan` finds it. You never need to specify file paths
 between workflow phases.
@@ -354,6 +360,7 @@ The `workflow-context.sh` script manages this file programmatically:
 ```bash
 workflow-context.sh init                    # Create file if missing
 workflow-context.sh set-ticket PROJ-123     # Set currentTicket (no document needed)
+workflow-context.sh set-orchestration NAME  # Set orchestration run name
 workflow-context.sh add research "path" "PROJ-123"  # Add document + set ticket
 workflow-context.sh recent research         # Get most recent document of type
 workflow-context.sh most-recent             # Get most recent document (any type)

@@ -27,6 +27,7 @@ init_context() {
 {
   "lastUpdated": "",
   "currentTicket": null,
+  "orchestration": null,
   "mostRecentDocument": null,
   "workflow": {
     "research": [],
@@ -99,6 +100,18 @@ set_ticket() {
 	mv "${CONTEXT_FILE}.tmp" "$CONTEXT_FILE"
 }
 
+# Set orchestration run name
+# Usage: set_orchestration <name>
+set_orchestration() {
+	local name="$1"
+	init_context
+	local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+	jq --arg name "$name" --arg ts "$timestamp" \
+		'.orchestration = $name | .lastUpdated = $ts' \
+		"$CONTEXT_FILE" >"${CONTEXT_FILE}.tmp"
+	mv "${CONTEXT_FILE}.tmp" "$CONTEXT_FILE"
+}
+
 # Get documents for ticket
 # Usage: get_by_ticket <ticket>
 get_by_ticket() {
@@ -128,11 +141,14 @@ most-recent)
 set-ticket)
 	set_ticket "$2"
 	;;
+set-orchestration)
+	set_orchestration "$2"
+	;;
 ticket)
 	get_by_ticket "$2"
 	;;
 *)
-	echo "Usage: $0 {init|add|recent|most-recent|set-ticket|ticket}"
+	echo "Usage: $0 {init|add|recent|most-recent|set-ticket|set-orchestration|ticket}"
 	exit 1
 	;;
 esac

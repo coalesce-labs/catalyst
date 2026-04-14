@@ -1,10 +1,11 @@
 #!/bin/bash
 # create-worktree.sh - Create a git worktree for isolated development
-# Usage: ./create-worktree.sh [worktree_name] [base_branch] [--worktree-dir <path>] [--hooks-json <json>]
+# Usage: ./create-worktree.sh [worktree_name] [base_branch] [--worktree-dir <path>] [--hooks-json <json>] [--orchestration <name>]
 #
 # Options:
-#   --worktree-dir <path>   Override worktree base directory (used by orchestrator)
-#   --hooks-json <json>     JSON array of setup hook commands to run after creation
+#   --worktree-dir <path>       Override worktree base directory (used by orchestrator)
+#   --hooks-json <json>         JSON array of setup hook commands to run after creation
+#   --orchestration <name>      Set orchestration run name in workflow context
 
 set -e
 
@@ -18,11 +19,13 @@ NC='\033[0m'
 POSITIONAL=()
 OVERRIDE_WORKTREE_DIR=""
 HOOKS_JSON=""
+ORCHESTRATION_NAME=""
 
 while [[ $# -gt 0 ]]; do
 	case $1 in
 		--worktree-dir) OVERRIDE_WORKTREE_DIR="$2"; shift 2 ;;
 		--hooks-json) HOOKS_JSON="$2"; shift 2 ;;
+		--orchestration) ORCHESTRATION_NAME="$2"; shift 2 ;;
 		*) POSITIONAL+=("$1"); shift ;;
 	esac
 done
@@ -164,9 +167,11 @@ if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 	rm -f "${WORKTREE_PATH}/.catalyst/.workflow-context.json"
 	mkdir -p "${WORKTREE_PATH}/.catalyst"
 
-	# Extract ticket from worktree name (e.g., ENG-123, orch-1-ADV-42)
+	# Extract ticket from worktree name, anchored to end to avoid false matches
+	# on date fragments in orchestrator prefixes (e.g., "import-2026" in
+	# "orch-data-import-2026-04-13-ADV-220" — we want ADV-220, not IMPORT-2026)
 	WT_TICKET=""
-	if [[ "$WORKTREE_NAME" =~ ([A-Za-z]+-[0-9]+) ]]; then
+	if [[ "$WORKTREE_NAME" =~ ([A-Za-z]+-[0-9]+)$ ]]; then
 		WT_TICKET=$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
 	fi
 
@@ -176,6 +181,11 @@ if [ -f "${SCRIPT_DIR}/workflow-context.sh" ]; then
 		echo "📋 Workflow context initialized with ticket: ${WT_TICKET}"
 	else
 		echo "📋 Workflow context initialized (no ticket in worktree name)"
+	fi
+
+	if [ -n "$ORCHESTRATION_NAME" ]; then
+		(cd "$WORKTREE_PATH" && bash "${SCRIPT_DIR}/workflow-context.sh" set-orchestration "$ORCHESTRATION_NAME")
+		echo "📋 Orchestration context set: ${ORCHESTRATION_NAME}"
 	fi
 fi
 

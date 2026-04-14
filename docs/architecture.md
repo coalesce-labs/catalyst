@@ -30,6 +30,7 @@ Structure:
 {
   "lastUpdated": "2025-10-26T10:30:00Z",
   "currentTicket": "PROJ-123",
+  "orchestration": null,
   "mostRecentDocument": {
     "type": "plans",
     "path": "thoughts/shared/plans/2025-10-26-PROJ-123-feature.md",
