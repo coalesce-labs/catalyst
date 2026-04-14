@@ -11,6 +11,14 @@ import {
 import { readSessionStore } from "./lib/session-store";
 import { startWatching, type WatcherHandle } from "./lib/watcher";
 import {
+  createEvent,
+  parseFilter,
+  matchesFilter,
+  EVENT_TYPES,
+  type MonitorEventEnvelope,
+  type SSEFilter,
+} from "./lib/events";
+import {
   createPrStatusFetcher,
   parseRepoFromPrUrl,
   type PrRef,
@@ -102,12 +110,7 @@ function applyPrStatus(
   }
   return snapshot;
 }
-const SSE_EVENTS = [
-  "snapshot",
-  "worker-update",
-  "liveness-change",
-  "session-update",
-] as const;
+const SSE_EVENTS = EVENT_TYPES;
 const ALLOWED_PUBLIC_EXTENSIONS = new Set([
   ".html",
   ".css",
@@ -212,16 +215,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
     return snap;
   }
 
-  const sseClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  const sseClients = new Map<
+    ReadableStreamDefaultController<Uint8Array>,
+    SSEFilter
+  >();
   const encoder = new TextEncoder();
 
   const unsubscribers: Array<() => void> = [];
   for (const eventType of SSE_EVENTS) {
     unsubscribers.push(
       subscribe(eventType, (data) => {
-        const msg = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+        const envelope = data as MonitorEventEnvelope;
+        const msg = `event: ${eventType}\ndata: ${JSON.stringify(envelope)}\n\n`;
         const bytes = encoder.encode(msg);
-        for (const client of sseClients) {
+        for (const [client, filter] of sseClients) {
+          if (!matchesFilter(envelope, filter)) continue;
           try {
             client.enqueue(bytes);
           } catch (err) {
@@ -244,14 +252,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
         const url = new URL(req.url);
 
         if (url.pathname === "/events") {
+          const filter = parseFilter(url);
           let captured: ReadableStreamDefaultController<Uint8Array> | null = null;
           const stream = new ReadableStream<Uint8Array>({
             start(controller) {
               captured = controller;
-              sseClients.add(controller);
+              sseClients.set(controller, filter);
               try {
+                // Initial snapshot always sent regardless of filter to bootstrap client state
                 const snapshot = snapshotWithPrStatus();
-                const msg = `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`;
+                const envelope = createEvent("snapshot", snapshot, "filesystem");
+                const msg = `event: snapshot\ndata: ${JSON.stringify(envelope)}\n\n`;
                 controller.enqueue(encoder.encode(msg));
               } catch (err) {
                 console.error(`[server] initial snapshot enqueue failed:`, err);

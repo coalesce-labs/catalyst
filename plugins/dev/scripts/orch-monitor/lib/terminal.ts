@@ -1,5 +1,6 @@
 import { subscribe } from "./event-bus";
 import type { MonitorSnapshot, WorkerState } from "./state-reader";
+import type { MonitorEventEnvelope } from "./events";
 
 // ANSI constants
 const RESET = "\x1b[0m";
@@ -135,8 +136,8 @@ export function renderSnapshot(snapshot: MonitorSnapshot): string {
  */
 export function startTerminalRenderer(): () => void {
   const unsubscribe = subscribe("snapshot", (data: unknown) => {
-    const snapshot = data as MonitorSnapshot;
-    process.stdout.write(CLEAR + renderSnapshot(snapshot));
+    const envelope = data as MonitorEventEnvelope<MonitorSnapshot>;
+    process.stdout.write(CLEAR + renderSnapshot(envelope.data));
   });
   return unsubscribe;
 }
