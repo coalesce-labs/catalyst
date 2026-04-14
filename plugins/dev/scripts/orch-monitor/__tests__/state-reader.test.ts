@@ -9,6 +9,7 @@ import {
   buildSnapshot,
   buildAnalyticsSnapshot,
   buildSessionDetail,
+  groupByWorkspace,
 } from "../lib/state-reader";
 
 let tmpRoot: string;
@@ -86,15 +87,31 @@ describe("scanOrchestrators", () => {
     const found = scanOrchestrators(tmpRoot);
     expect(found).toBeArray();
     expect(found.length).toBe(3);
-    expect(found.some((p) => p.endsWith("orch-alpha"))).toBe(true);
-    expect(found.some((p) => p.endsWith("orch-beta"))).toBe(true);
-    expect(found.some((p) => p.endsWith("agent-obs"))).toBe(true);
-    expect(found.every((p) => p.startsWith("/"))).toBe(true);
+    expect(found.some((e) => e.path.endsWith("orch-alpha"))).toBe(true);
+    expect(found.some((e) => e.path.endsWith("orch-beta"))).toBe(true);
+    expect(found.some((e) => e.path.endsWith("agent-obs"))).toBe(true);
+    expect(found.every((e) => e.path.startsWith("/"))).toBe(true);
   });
 
   it("returns empty array when baseDir is missing", () => {
     const found = scanOrchestrators(join(tmpRoot, "does-not-exist"));
     expect(found).toEqual([]);
+  });
+
+  it("returns 'default' workspace for flat layout orch-* dirs", () => {
+    setupOrch(tmpRoot, "orch-flat", { workers: { "T-1": { ticket: "T-1" } } });
+    const found = scanOrchestrators(tmpRoot);
+    expect(found.length).toBe(1);
+    expect(found[0].workspace).toBe("default");
+  });
+
+  it("returns project directory name as workspace for nested layout", () => {
+    const projDir = join(tmpRoot, "my-project");
+    mkdirSync(projDir, { recursive: true });
+    setupOrch(projDir, "orch-nested", { workers: { "T-1": { ticket: "T-1" } } });
+    const found = scanOrchestrators(tmpRoot);
+    expect(found.length).toBe(1);
+    expect(found[0].workspace).toBe("my-project");
   });
 });
 
@@ -818,5 +835,140 @@ describe("buildSessionDetail", () => {
     const detail = buildSessionDetail(tmpRoot, "orch-alpha", "T-1");
     expect(detail).not.toBeNull();
     expect(detail!.analytics).toBeNull();
+  });
+});
+
+describe("workspace extraction", () => {
+  it("extracts workspace from nested layout (baseDir/<projectKey>/orch-*)", () => {
+    const projectDir = join(tmpRoot, "my-project");
+    mkdirSync(projectDir, { recursive: true });
+    setupOrch(projectDir, "orch-alpha", {
+      workers: { "T-1": { ticket: "T-1", status: "done", phase: 6, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } },
+    });
+
+    const snap = buildSnapshot(tmpRoot);
+    expect(snap.orchestrators.length).toBe(1);
+    expect(snap.orchestrators[0].workspace).toBe("my-project");
+  });
+
+  it("uses 'default' workspace for flat layout (baseDir/orch-*)", () => {
+    setupOrch(tmpRoot, "orch-flat", {
+      workers: { "T-1": { ticket: "T-1", status: "done", phase: 6, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } },
+    });
+
+    const snap = buildSnapshot(tmpRoot);
+    const orch = snap.orchestrators.find((o) => o.id === "orch-flat");
+    expect(orch).toBeDefined();
+    expect(orch!.workspace).toBe("default");
+  });
+
+  it("groups multiple orchestrators under the same workspace", () => {
+    const projectDir = join(tmpRoot, "adva");
+    mkdirSync(projectDir, { recursive: true });
+    const now = new Date().toISOString();
+    setupOrch(projectDir, "orch-one", {
+      workers: { "A-1": { ticket: "A-1", status: "done", phase: 6, startedAt: now, updatedAt: now } },
+    });
+    setupOrch(projectDir, "orch-two", {
+      workers: { "A-2": { ticket: "A-2", status: "in_progress", phase: 3, startedAt: now, updatedAt: now } },
+    });
+
+    const snap = buildSnapshot(tmpRoot);
+    expect(snap.orchestrators.length).toBe(2);
+    expect(snap.orchestrators.every((o) => o.workspace === "adva")).toBe(true);
+  });
+
+  it("separates orchestrators from different workspaces", () => {
+    const now = new Date().toISOString();
+    const proj1 = join(tmpRoot, "project-a");
+    const proj2 = join(tmpRoot, "project-b");
+    mkdirSync(proj1, { recursive: true });
+    mkdirSync(proj2, { recursive: true });
+    setupOrch(proj1, "orch-a", {
+      workers: { "PA-1": { ticket: "PA-1", status: "done", phase: 6, startedAt: now, updatedAt: now } },
+    });
+    setupOrch(proj2, "orch-b", {
+      workers: { "PB-1": { ticket: "PB-1", status: "in_progress", phase: 2, startedAt: now, updatedAt: now } },
+    });
+
+    const snap = buildSnapshot(tmpRoot);
+    expect(snap.orchestrators.length).toBe(2);
+    const workspaces = new Set(snap.orchestrators.map((o) => o.workspace));
+    expect(workspaces.size).toBe(2);
+    expect(workspaces.has("project-a")).toBe(true);
+    expect(workspaces.has("project-b")).toBe(true);
+  });
+});
+
+describe("groupByWorkspace", () => {
+  it("groups orchestrators by workspace and returns WorkspaceGroup[]", () => {
+    const now = new Date().toISOString();
+    const proj1 = join(tmpRoot, "ws-alpha");
+    const proj2 = join(tmpRoot, "ws-beta");
+    mkdirSync(proj1, { recursive: true });
+    mkdirSync(proj2, { recursive: true });
+    setupOrch(proj1, "orch-a1", {
+      workers: { "T-1": { ticket: "T-1", status: "done", phase: 6, startedAt: now, updatedAt: now, cost: { costUSD: 1.5 } } },
+    });
+    setupOrch(proj1, "orch-a2", {
+      workers: { "T-2": { ticket: "T-2", status: "in_progress", phase: 3, startedAt: now, updatedAt: now, cost: { costUSD: 0.75 } } },
+    });
+    setupOrch(proj2, "orch-b1", {
+      workers: { "T-3": { ticket: "T-3", status: "done", phase: 6, startedAt: now, updatedAt: now, cost: { costUSD: 2.0 } } },
+    });
+
+    const snap = buildSnapshot(tmpRoot);
+    const groups = groupByWorkspace(snap);
+
+    expect(groups.length).toBe(2);
+    const alpha = groups.find((g) => g.workspace === "ws-alpha");
+    const beta = groups.find((g) => g.workspace === "ws-beta");
+    expect(alpha).toBeDefined();
+    expect(beta).toBeDefined();
+    expect(alpha!.orchestrators.length).toBe(2);
+    expect(beta!.orchestrators.length).toBe(1);
+  });
+
+  it("computes aggregate stats per workspace", () => {
+    const now = new Date().toISOString();
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const projDir = join(tmpRoot, "ws-stats");
+    mkdirSync(projDir, { recursive: true });
+    setupOrch(projDir, "orch-s1", {
+      workers: {
+        "S-1": { ticket: "S-1", status: "done", phase: 6, startedAt: past, updatedAt: now, cost: { costUSD: 1.0 } },
+        "S-2": { ticket: "S-2", status: "in_progress", phase: 3, startedAt: past, updatedAt: past, cost: { costUSD: 0.5 } },
+      },
+    });
+
+    const snap = buildSnapshot(tmpRoot);
+    const groups = groupByWorkspace(snap);
+    expect(groups.length).toBe(1);
+    const g = groups[0];
+    expect(g.stats.sessionCount).toBe(2);
+    expect(g.stats.activeCount).toBe(1);
+    expect(g.stats.totalCost).toBeCloseTo(1.5, 1);
+    expect(g.stats.lastActivity).toBe(now);
+  });
+
+  it("returns empty array for empty snapshot", () => {
+    const snap = buildSnapshot(join(tmpRoot, "nonexistent"));
+    const groups = groupByWorkspace(snap);
+    expect(groups).toEqual([]);
+  });
+
+  it("sorts workspaces alphabetically", () => {
+    const now = new Date().toISOString();
+    for (const name of ["zeta", "alpha", "mu"]) {
+      const dir = join(tmpRoot, name);
+      mkdirSync(dir, { recursive: true });
+      setupOrch(dir, "orch-" + name, {
+        workers: { [`${name}-1`]: { ticket: `${name}-1`, status: "done", phase: 6, startedAt: now, updatedAt: now } },
+      });
+    }
+
+    const snap = buildSnapshot(tmpRoot);
+    const groups = groupByWorkspace(snap);
+    expect(groups.map((g) => g.workspace)).toEqual(["alpha", "mu", "zeta"]);
   });
 });

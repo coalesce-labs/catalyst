@@ -31,6 +31,7 @@ function makeOrchestrator(
   return {
     id: "orch-abc123",
     path: "/tmp/orch-abc123",
+    workspace: "default",
     startedAt: new Date().toISOString(),
     currentWave: 2,
     totalWaves: 5,
