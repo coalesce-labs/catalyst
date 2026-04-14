@@ -32,6 +32,21 @@ import {
   type LinearTicket,
 } from "./lib/linear";
 import type { BriefingProvider } from "./lib/ai-briefing";
+import { loadOtelConfig } from "./lib/otel-config";
+import {
+  createPrometheusFetcher,
+  type PrometheusFetcher,
+} from "./lib/prometheus";
+import { createLokiFetcher, type LokiFetcher } from "./lib/loki";
+import {
+  costByTicket,
+  tokensByType,
+  cacheHitRate,
+  costRateByModel,
+  toolUsageByName,
+  apiErrors,
+  costValidation,
+} from "./lib/otel-queries";
 
 type BunServer = ReturnType<typeof Bun.serve>;
 
@@ -46,11 +61,13 @@ export interface CreateServerOptions {
   prStatusRefreshMs?: number;
   linearFetcher?: LinearFetcher | null;
   linearRefreshMs?: number;
-  /** Path to the SQLite session store. Pass `null` to disable. */
   dbPath?: string | null;
-  /** SQLite poll interval for the watcher (ms). */
   sqlitePollIntervalMs?: number;
   briefingProvider?: BriefingProvider | null;
+  prometheusUrl?: string | null;
+  lokiUrl?: string | null;
+  prometheusFetcher?: PrometheusFetcher | null;
+  lokiFetcher?: LokiFetcher | null;
 }
 
 export const DEFAULT_PORT = 7400;
@@ -185,6 +202,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
     dbPath = null,
     sqlitePollIntervalMs,
     briefingProvider: briefingProviderOpt,
+    prometheusUrl,
+    lokiUrl,
+    prometheusFetcher: promFetcherOpt,
+    lokiFetcher: lokiFetcherOpt,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath };
@@ -203,6 +224,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   const briefingProvider: BriefingProvider | null =
     briefingProviderOpt === null ? null : (briefingProviderOpt ?? null);
+
+  const prom: PrometheusFetcher | null =
+    promFetcherOpt === null
+      ? null
+      : (promFetcherOpt ?? (prometheusUrl ? createPrometheusFetcher({ baseUrl: prometheusUrl }) : null));
+
+  const loki: LokiFetcher | null =
+    lokiFetcherOpt === null
+      ? null
+      : (lokiFetcherOpt ?? (lokiUrl ? createLokiFetcher({ baseUrl: lokiUrl }) : null));
 
   function snapshotWithPrStatus(): MonitorSnapshot {
     const snap = buildSnapshot(wtDir, buildOpts);
@@ -419,7 +450,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/linear") {
           const tickets: Record<string, LinearTicket> = {};
           if (linear) {
-            for (const key of collectTicketKeys(buildSnapshot(wtDir))) {
+            for (const key of collectTicketKeys(buildSnapshot(wtDir, buildOpts))) {
               const t = linear.get(key);
               if (t) tickets[key] = t;
             }
@@ -449,6 +480,66 @@ export function createServer(opts: CreateServerOptions): BunServer {
             suggestedLabels: result.suggestedLabels,
             generatedAt: result.generatedAt,
           });
+        }
+
+        if (url.pathname === "/api/otel/status") {
+          return Response.json({
+            enabled: prom !== null || loki !== null,
+            prometheus: prom ? prom.isAvailable() : false,
+            loki: loki ? loki.isAvailable() : false,
+          });
+        }
+
+        if (url.pathname === "/api/otel/cost") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await costByTicket(prom, range);
+          return Response.json({ data: result });
+        }
+
+        if (url.pathname === "/api/otel/tokens") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const tokens = await tokensByType(prom, range);
+          const hitRate = await cacheHitRate(prom, range);
+          return Response.json({ data: { tokens, cacheHitRate: hitRate } });
+        }
+
+        if (url.pathname === "/api/otel/cost-rate") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const interval = url.searchParams.get("interval") ?? "5m";
+          const result = await costRateByModel(prom, interval);
+          return Response.json({ data: result });
+        }
+
+        if (url.pathname === "/api/otel/tools") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await toolUsageByName(loki, range);
+          return Response.json({ data: result });
+        }
+
+        if (url.pathname === "/api/otel/errors") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
+          const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 500) : 50;
+          const result = await apiErrors(loki, range, limit);
+          return Response.json({ data: result });
+        }
+
+        if (url.pathname === "/api/otel/cost-validation") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "6h";
+          const snap = buildSnapshot(wtDir, buildOpts);
+          const signalCosts: Record<string, number> = {};
+          for (const orch of snap.orchestrators) {
+            for (const [key, worker] of Object.entries(orch.workers)) {
+              if (worker.cost?.costUSD) signalCosts[key] = worker.cost.costUSD;
+            }
+          }
+          const result = await costValidation(prom, signalCosts, range);
+          return Response.json({ data: result });
         }
 
         if (
@@ -548,7 +639,16 @@ if (import.meta.main) {
     }
   }
 
-  const srv = createServer({ port: PORT, wtDir: WT_DIR, dbPath: DB_PATH, pidFile: pidFilePath });
+  const otelCfg = loadOtelConfig(`${process.env.HOME}/.catalyst`);
+
+  const srv = createServer({
+    port: PORT,
+    wtDir: WT_DIR,
+    dbPath: DB_PATH,
+    pidFile: pidFilePath,
+    prometheusUrl: otelCfg.enabled ? otelCfg.prometheusUrl : null,
+    lokiUrl: otelCfg.enabled ? otelCfg.lokiUrl : null,
+  });
   const displayHost =
     srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);
   console.info(`Monitor running at http://${displayHost}:${srv.port}`);
