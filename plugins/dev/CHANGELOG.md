@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.15.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.15.0...catalyst-dev-v6.15.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* **dev:** filter ghost worker rows + fix orch-monitor cost tracking ([#114](https://github.com/coalesce-labs/catalyst/issues/114)) ([9eb336c](https://github.com/coalesce-labs/catalyst/commit/9eb336c1ae73eff463b259d93a09907965508764))
+
 ## [6.15.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.14.0...catalyst-dev-v6.15.0) (2026-04-14)
 
 
