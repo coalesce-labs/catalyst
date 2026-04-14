@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.11.0...catalyst-dev-v6.12.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** SSE event architecture for multiple frontends ([#111](https://github.com/coalesce-labs/catalyst/issues/111)) ([6433182](https://github.com/coalesce-labs/catalyst/commit/64331824c5a8ee4029becfe1fafdd0a19181a201))
+
 ## [6.11.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.10.0...catalyst-dev-v6.11.0) (2026-04-14)
 
 
