@@ -45,7 +45,8 @@ beforeAll(() => {
     }),
   );
 
-  server = createServer({ port: 0, wtDir, startWatcher: false });
+  const annotationsDbPath = join(tmpDir, "annotations.db");
+  server = createServer({ port: 0, wtDir, startWatcher: false, annotationsDbPath });
   baseUrl = `http://localhost:${server.port}`;
 });
 
@@ -222,6 +223,90 @@ describe("SSE filtering", () => {
   });
 });
 
+describe("Annotation API", () => {
+  it("GET /api/annotations returns empty initially", async () => {
+    const res = await fetch(`${baseUrl}/api/annotations`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { annotations: Record<string, unknown> };
+    expect(data.annotations).toBeDefined();
+  });
+
+  it("PUT /api/annotations/:id sets display name", async () => {
+    const res = await fetch(`${baseUrl}/api/annotations/TEST-1`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName: "my worker" }),
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { annotation: { displayName: string } };
+    expect(data.annotation.displayName).toBe("my worker");
+  });
+
+  it("PUT /api/annotations/:id adds flags", async () => {
+    const res = await fetch(`${baseUrl}/api/annotations/TEST-1`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ addFlags: ["starred"] }),
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { annotation: { flags: string[] } };
+    expect(data.annotation.flags).toContain("starred");
+  });
+
+  it("PUT /api/annotations/:id adds tags", async () => {
+    const res = await fetch(`${baseUrl}/api/annotations/TEST-1`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ addTags: ["refactor"] }),
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { annotation: { tags: string[] } };
+    expect(data.annotation.tags).toContain("refactor");
+  });
+
+  it("PUT /api/annotations/:id adds notes", async () => {
+    const res = await fetch(`${baseUrl}/api/annotations/TEST-1`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ addNote: "flaky test" }),
+    });
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { annotation: { notes: Array<{ text: string }> } };
+    expect(data.annotation.notes.some((n) => n.text === "flaky test")).toBe(true);
+  });
+
+  it("DELETE /api/annotations/:id removes annotation", async () => {
+    await fetch(`${baseUrl}/api/annotations/TEST-DEL`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ displayName: "to delete" }),
+    });
+    const del = await fetch(`${baseUrl}/api/annotations/TEST-DEL`, {
+      method: "DELETE",
+    });
+    expect(del.status).toBe(200);
+    const res = await fetch(`${baseUrl}/api/annotations`);
+    const data = (await res.json()) as { annotations: Record<string, unknown> };
+    expect(data.annotations["TEST-DEL"]).toBeUndefined();
+  });
+
+  it("PUT /api/annotations/:id rejects invalid flag values", async () => {
+    const res = await fetch(`${baseUrl}/api/annotations/TEST-1`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ addFlags: ["invalid-flag"] }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("GET /api/annotations returns previously set annotations", async () => {
+    const res = await fetch(`${baseUrl}/api/annotations`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { annotations: Record<string, { displayName: string }> };
+    expect(data.annotations["TEST-1"]?.displayName).toBe("my worker");
+  });
+});
+
 describe("OTel API endpoints", () => {
   it("returns disabled status when OTel is not configured", async () => {
     const res = await fetch(`${baseUrl}/api/otel/status`);
@@ -338,6 +423,7 @@ describe("OTel API with mock clients", () => {
       linearFetcher: null,
       prometheusFetcher: mockProm,
       lokiFetcher: mockLoki,
+      annotationsDbPath: join(otelTmp, "annotations.db"),
     });
     otelUrl = `http://localhost:${otelServer.port}`;
   });
@@ -409,7 +495,7 @@ describe("SSE integration (file change -> SSE push)", () => {
       join(orchDir, "state.json"),
       JSON.stringify({ id: "orch-sse", waves: [] }),
     );
-    sseServer = createServer({ port: 0, wtDir, startWatcher: true });
+    sseServer = createServer({ port: 0, wtDir, startWatcher: true, annotationsDbPath: join(sseTmp, "annotations.db") });
   });
 
   afterAll(() => {
@@ -500,6 +586,7 @@ describe("SQLite session endpoints", () => {
       wtDir,
       startWatcher: false,
       dbPath,
+      annotationsDbPath: join(sessTmp, "annotations.db"),
     });
     sessBaseUrl = `http://localhost:${sessServer.port}`;
   });
@@ -604,6 +691,7 @@ describe("History API endpoints", () => {
       wtDir,
       startWatcher: false,
       dbPath: histDbPath,
+      annotationsDbPath: join(histTmp, "annotations.db"),
     });
     histBaseUrl = `http://localhost:${histServer.port}`;
   });
@@ -699,7 +787,7 @@ describe("SQLite session endpoints (no dbPath)", () => {
     sessTmp = mkdtempSync(join(tmpdir(), "orch-monitor-nodb-"));
     const wtDir = join(sessTmp, "wt");
     mkdirSync(wtDir, { recursive: true });
-    noDbServer = createServer({ port: 0, wtDir, startWatcher: false });
+    noDbServer = createServer({ port: 0, wtDir, startWatcher: false, annotationsDbPath: join(sessTmp, "annotations.db") });
     url = `http://localhost:${noDbServer.port}`;
   });
 
@@ -763,6 +851,7 @@ describe("AI briefing endpoint", () => {
         prStatusFetcher: null,
         linearFetcher: null,
         briefingProvider: mockProvider,
+        annotationsDbPath: join(bTmp!, "annotations.db"),
       });
 
       const bUrl = `http://localhost:${bServer.port}`;
