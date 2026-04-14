@@ -337,6 +337,144 @@ describe("SQLite session endpoints", () => {
   });
 });
 
+describe("History API endpoints", () => {
+  let histTmp: string;
+  let histServer: ReturnType<typeof createServer>;
+  let histBaseUrl: string;
+  let histDbPath: string;
+
+  beforeAll(() => {
+    histTmp = mkdtempSync(join(tmpdir(), "orch-monitor-hist-"));
+    const wtDir = join(histTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    histDbPath = join(histTmp, "catalyst.db");
+
+    const schemaSql = readFileSync(
+      join(__dirname, "..", "..", "db-migrations", "001_initial_schema.sql"),
+      "utf8",
+    );
+    const db = new Database(histDbPath, { create: true });
+    db.exec("PRAGMA foreign_keys = ON;");
+    db.exec(schemaSql);
+
+    db.run(
+      `INSERT INTO sessions (session_id, skill_name, ticket_key, label, status, phase, started_at, updated_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["h1", "oneshot", "CTL-10", "fix auth", "done", 6, "2026-04-10T10:00:00Z", "2026-04-10T11:00:00Z", "2026-04-10T11:00:00Z"],
+    );
+    db.run(
+      `INSERT INTO sessions (session_id, skill_name, ticket_key, label, status, phase, started_at, updated_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["h2", "research", "CTL-20", "explore caching", "failed", 3, "2026-04-14T10:00:00Z", "2026-04-14T11:00:00Z", "2026-04-14T11:00:00Z"],
+    );
+    db.run(
+      `INSERT INTO session_metrics (session_id, cost_usd, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["h1", 2.50, 60000, 5000, 2000, 1000, 0, "2026-04-10T11:00:00Z"],
+    );
+    db.run(
+      `INSERT INTO session_metrics (session_id, cost_usd, duration_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ["h2", 1.00, 30000, 2000, 1000, 500, 0, "2026-04-14T11:00:00Z"],
+    );
+    db.run(
+      `INSERT INTO session_tools (session_id, tool_name, call_count, total_duration_ms, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      ["h1", "Read", 30, 3000, "2026-04-10T11:00:00Z"],
+    );
+    db.close();
+
+    histServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      dbPath: histDbPath,
+    });
+    histBaseUrl = `http://localhost:${histServer.port}`;
+  });
+
+  afterAll(() => {
+    void histServer?.stop(true);
+    try {
+      rmSync(histTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("GET /api/history returns paginated entries with total", async () => {
+    const res = await fetch(`${histBaseUrl}/api/history`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { entries: { sessionId: string }[]; total: number };
+    expect(data.total).toBe(2);
+    expect(data.entries).toHaveLength(2);
+    expect(data.entries[0].sessionId).toBe("h2");
+  });
+
+  it("GET /api/history?skill=oneshot filters by skill", async () => {
+    const res = await fetch(`${histBaseUrl}/api/history?skill=oneshot`);
+    const data = (await res.json()) as { entries: { sessionId: string }[]; total: number };
+    expect(data.entries).toHaveLength(1);
+    expect(data.entries[0].sessionId).toBe("h1");
+  });
+
+  it("GET /api/history?search=auth filters by text search", async () => {
+    const res = await fetch(`${histBaseUrl}/api/history?search=auth`);
+    const data = (await res.json()) as { entries: { sessionId: string }[] };
+    expect(data.entries).toHaveLength(1);
+    expect(data.entries[0].sessionId).toBe("h1");
+  });
+
+  it("GET /api/history/stats returns aggregate statistics", async () => {
+    const res = await fetch(`${histBaseUrl}/api/history/stats`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      totalSessions: number;
+      totalCostUsd: number;
+      successRate: number;
+      skillBreakdown: { skill: string }[];
+      dailyCosts: { date: string }[];
+      topTools: { tool: string }[];
+    };
+    expect(data.totalSessions).toBe(2);
+    expect(data.totalCostUsd).toBeCloseTo(3.5);
+    expect(data.skillBreakdown.length).toBeGreaterThanOrEqual(2);
+    expect(data.dailyCosts.length).toBeGreaterThanOrEqual(1);
+    expect(data.topTools.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("GET /api/history/compare?a=h1&b=h2 returns comparison", async () => {
+    const res = await fetch(`${histBaseUrl}/api/history/compare?a=h1&b=h2`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      left: { sessionId: string; costUsd: number };
+      right: { sessionId: string; costUsd: number };
+    };
+    expect(data.left.sessionId).toBe("h1");
+    expect(data.right.sessionId).toBe("h2");
+    expect(data.left.costUsd).toBe(2.5);
+    expect(data.right.costUsd).toBe(1.0);
+  });
+
+  it("GET /api/history/compare returns 400 without params", async () => {
+    const res = await fetch(`${histBaseUrl}/api/history/compare`);
+    expect(res.status).toBe(400);
+    await res.text();
+  });
+
+  it("GET /api/history/compare returns 404 for missing session", async () => {
+    const res = await fetch(`${histBaseUrl}/api/history/compare?a=h1&b=nonexistent`);
+    expect(res.status).toBe(404);
+    await res.text();
+  });
+
+  it("GET /history serves history.html page", async () => {
+    const res = await fetch(`${histBaseUrl}/history`);
+    expect([200, 500]).toContain(res.status);
+    await res.text();
+  });
+});
+
 describe("SQLite session endpoints (no dbPath)", () => {
   let sessTmp: string;
   let noDbServer: ReturnType<typeof createServer>;

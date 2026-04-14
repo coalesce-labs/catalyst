@@ -9,6 +9,7 @@ import {
   type SessionState,
 } from "./lib/state-reader";
 import { readSessionStore } from "./lib/session-store";
+import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import { startWatching, type WatcherHandle } from "./lib/watcher";
 import {
   createEvent,
@@ -310,6 +311,66 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ available: result.available, sessions });
         }
 
+        if (url.pathname === "/api/history") {
+          if (!dbPath) {
+            return Response.json({ entries: [], total: 0 });
+          }
+          const params = url.searchParams;
+          const limitRaw = params.get("limit");
+          const offsetRaw = params.get("offset");
+          const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
+          const parsedOffset = offsetRaw ? Number.parseInt(offsetRaw, 10) : NaN;
+          return Response.json(
+            queryHistory(dbPath, {
+              skill: params.get("skill") ?? undefined,
+              ticket: params.get("ticket") ?? undefined,
+              since: params.get("since") ?? undefined,
+              search: params.get("search") ?? undefined,
+              limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
+              offset: Number.isFinite(parsedOffset) ? parsedOffset : undefined,
+            }),
+          );
+        }
+
+        if (url.pathname === "/api/history/stats") {
+          if (!dbPath) {
+            return Response.json({
+              totalSessions: 0,
+              totalCostUsd: 0,
+              avgCostUsd: 0,
+              avgDurationMs: 0,
+              successRate: 0,
+              skillBreakdown: [],
+              dailyCosts: [],
+              topTools: [],
+            });
+          }
+          const params = url.searchParams;
+          return Response.json(
+            queryStats(dbPath, {
+              skill: params.get("skill") ?? undefined,
+              since: params.get("since") ?? undefined,
+            }),
+          );
+        }
+
+        if (url.pathname === "/api/history/compare") {
+          if (!dbPath) {
+            return Response.json(null);
+          }
+          const params = url.searchParams;
+          const a = params.get("a");
+          const b = params.get("b");
+          if (!a || !b) {
+            return new Response("Missing ?a=<id>&b=<id>", { status: 400 });
+          }
+          const result = compareSessions(dbPath, a, b);
+          if (!result) {
+            return new Response("Session(s) not found", { status: 404 });
+          }
+          return Response.json(result);
+        }
+
         if (url.pathname === "/api/linear") {
           const tickets: Record<string, LinearTicket> = {};
           if (linear) {
@@ -321,15 +382,22 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ tickets });
         }
 
-        if (url.pathname === "/" || url.pathname === "/index.html") {
-          const file = Bun.file(join(publicDir, "index.html"));
+        if (
+          url.pathname === "/" ||
+          url.pathname === "/index.html" ||
+          url.pathname === "/history"
+        ) {
+          const htmlFile =
+            url.pathname === "/history" ? "history.html" : "index.html";
+          const file = Bun.file(join(publicDir, htmlFile));
           if (await file.exists()) {
             return new Response(file, {
               headers: { "Content-Type": "text/html; charset=utf-8" },
             });
           }
-          return new Response("index.html not found", { status: 500 });
+          return new Response(`${htmlFile} not found`, { status: 500 });
         }
+
 
         if (url.pathname.startsWith("/public/")) {
           const rel = decodeURIComponent(url.pathname.slice("/public/".length));
