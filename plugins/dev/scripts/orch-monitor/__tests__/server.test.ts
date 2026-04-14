@@ -137,6 +137,30 @@ describe("SSE server", () => {
     expect([403, 404]).toContain(res.status);
     await res.text();
   });
+
+  it("should return session detail at /api/session/:orchId/:ticket", async () => {
+    const res = await fetch(`${baseUrl}/api/session/orch-test/TEST-1`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      orchId: string;
+      worker: { ticket: string; status: string };
+    };
+    expect(data.orchId).toBe("orch-test");
+    expect(data.worker.ticket).toBe("TEST-1");
+    expect(data.worker.status).toBe("in_progress");
+  });
+
+  it("should 404 for nonexistent session", async () => {
+    const res = await fetch(`${baseUrl}/api/session/orch-test/NONEXISTENT`);
+    expect(res.status).toBe(404);
+    await res.text();
+  });
+
+  it("should 404 for nonexistent orchestrator", async () => {
+    const res = await fetch(`${baseUrl}/api/session/orch-fake/TEST-1`);
+    expect(res.status).toBe(404);
+    await res.text();
+  });
 });
 
 describe("SSE filtering", () => {

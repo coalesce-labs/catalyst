@@ -855,6 +855,203 @@
         .briefing-drawer { padding: 14px; }
         .md { font-size: 13px; }
       }
+
+      /* --- Session detail view --- */
+      .session-back {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--accent);
+        font-size: 13px;
+        cursor: pointer;
+        padding: 4px 0;
+        margin-bottom: 8px;
+      }
+      .session-back:hover { text-decoration: underline; }
+      .session-header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        padding: 14px;
+        border-bottom: 1px solid var(--border);
+      }
+      .session-header .sh-ticket {
+        font-size: 18px;
+        font-weight: 700;
+        font-family: ui-monospace, monospace;
+      }
+      .session-header .sh-ticket a { color: var(--accent); }
+      .session-header .sh-title {
+        flex: 1 1 auto;
+        font-size: 14px;
+        color: var(--fg);
+        min-width: 200px;
+      }
+      .session-header .sh-elapsed {
+        font-family: ui-monospace, monospace;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .session-sections {
+        display: flex;
+        flex-direction: column;
+      }
+      .session-section {
+        border-top: 1px solid var(--border);
+        padding: 14px;
+      }
+      .session-section h3 {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin: 0 0 10px;
+      }
+      .phase-timeline {
+        display: flex;
+        gap: 0;
+        height: 28px;
+        border-radius: 4px;
+        overflow: hidden;
+        margin-bottom: 8px;
+      }
+      .phase-timeline .pt-seg {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 24px;
+        font-size: 10px;
+        color: rgba(255,255,255,0.85);
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding: 0 6px;
+      }
+      .phase-timeline .pt-seg.current::after {
+        content: "";
+        position: absolute;
+        right: 0; top: 0; bottom: 0; width: 3px;
+        background: rgba(255,255,255,0.35);
+        animation: gantt-pulse 1.4s ease-in-out infinite;
+      }
+      .phase-details {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .phase-details .pd-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .phase-details .pd-swatch {
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+        display: inline-block;
+      }
+      .phase-details .pd-dur {
+        font-family: ui-monospace, monospace;
+        color: var(--fg);
+      }
+      .session-cost-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+      }
+      .sc-item {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .sc-item .sc-value {
+        font-size: 20px;
+        font-weight: 700;
+        font-family: ui-monospace, monospace;
+        font-variant-numeric: tabular-nums;
+        color: var(--fg);
+      }
+      .sc-item .sc-label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+      .tool-bars {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .tool-bar-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 12px;
+      }
+      .tool-bar-row .tb-name {
+        width: 120px;
+        flex-shrink: 0;
+        text-align: right;
+        font-family: ui-monospace, monospace;
+        color: var(--fg);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .tool-bar-row .tb-bar {
+        flex: 1;
+        height: 14px;
+        background: var(--panel-2);
+        border-radius: 2px;
+        overflow: hidden;
+      }
+      .tool-bar-row .tb-fill {
+        height: 100%;
+        background: var(--accent);
+        border-radius: 2px;
+      }
+      .tool-bar-row .tb-count {
+        width: 40px;
+        font-family: ui-monospace, monospace;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .session-pr-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px 24px;
+        align-items: baseline;
+      }
+      .session-pr-grid .sp-number {
+        font-size: 18px;
+        font-weight: 700;
+        font-family: ui-monospace, monospace;
+      }
+      .session-pr-grid .sp-number a { color: var(--accent); }
+      .session-health-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 8px;
+      }
+      .sh-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+      }
+      .sh-item .sh-label { color: var(--muted); }
+      .sh-item .sh-val { font-family: ui-monospace, monospace; color: var(--fg); }
+      .session-events {
+        max-height: 400px;
+        overflow-y: auto;
+      }
+      .worker-table tbody tr { cursor: pointer; }
     </style>
     <script src="/public/vendor/marked.umd.js"></script>
     <script src="/public/vendor/purify.min.js"></script>
@@ -872,24 +1069,32 @@
       <span id="last-update" class="conn"></span>
     </header>
     <main>
-      <div id="attention" class="attention-panel"></div>
-      <div id="orchestrators"></div>
-      <div class="card">
-        <div class="card-head"><h2>Events</h2></div>
-        <div id="events" class="events">
-          <div class="empty">No events yet.</div>
+      <div id="dashboard-view">
+        <div id="attention" class="attention-panel"></div>
+        <div id="orchestrators"></div>
+        <div class="card">
+          <div class="card-head"><h2>Events</h2></div>
+          <div id="events" class="events">
+            <div class="empty">No events yet.</div>
+          </div>
         </div>
       </div>
+      <div id="session-view" style="display:none"></div>
     </main>
     <script>
       (function () {
         const $orch = document.getElementById("orchestrators");
         const $attention = document.getElementById("attention");
         const $events = document.getElementById("events");
+        const $dashboardView = document.getElementById("dashboard-view");
+        const $sessionView = document.getElementById("session-view");
         const STALE_THRESHOLD_SECONDS = 900;
         const $dot = document.getElementById("conn-dot");
         const $connText = document.getElementById("conn-text");
         const $lastUpdate = document.getElementById("last-update");
+
+        let currentRoute = { view: "dashboard", orchId: null, ticket: null };
+        let sessionDetail = null;
 
         let snapshot = { timestamp: null, orchestrators: [] };
         const eventLog = [];
@@ -1659,6 +1864,14 @@
         }
 
         function render() {
+          if (snapshot.timestamp) {
+            $lastUpdate.textContent =
+              "snapshot " + new Date(snapshot.timestamp).toLocaleTimeString();
+          }
+          if (currentRoute.view === "session") {
+            refreshSessionFromSnapshot();
+            return;
+          }
           const list = snapshot.orchestrators || [];
           if (!list.length) {
             $orch.innerHTML =
@@ -1667,10 +1880,21 @@
             $orch.innerHTML = list.map(renderOrch).join("");
           }
           renderAttention();
-          if (snapshot.timestamp) {
-            $lastUpdate.textContent =
-              "snapshot " + new Date(snapshot.timestamp).toLocaleTimeString();
-          }
+        }
+
+        function refreshSessionFromSnapshot() {
+          if (!sessionDetail || currentRoute.view !== "session") return;
+          var orchId = currentRoute.orchId;
+          var ticket = currentRoute.ticket;
+          var orch = (snapshot.orchestrators || []).find(function (o) { return o.id === orchId; });
+          if (!orch) return;
+          var w = orch.workers && orch.workers[ticket];
+          if (!w) return;
+          sessionDetail.worker = w;
+          var orchAn = analyticsByOrch.get(orchId) || {};
+          var wa = orchAn[ticket] || null;
+          if (wa) sessionDetail.analytics = wa;
+          $sessionView.innerHTML = buildSessionView(sessionDetail);
         }
 
         function patchWorker(payload) {
@@ -1705,9 +1929,9 @@
           }
         });
 
-        function addEvent(kind, html) {
+        function addEvent(kind, html, ticket) {
           const when = new Date().toLocaleTimeString();
-          eventLog.unshift({ when, kind, html });
+          eventLog.unshift({ when, kind, html, ticket: ticket || null });
           if (eventLog.length > MAX_EVENTS) eventLog.length = MAX_EVENTS;
           renderEvents();
         }
@@ -1744,17 +1968,20 @@
               addEvent("new",
                 tkt(tktStr) + " discovered · status <span class=\"to\">" +
                 esc(next.status || "?") + "</span> · phase " +
-                esc(next.phase ?? 0));
+                esc(next.phase ?? 0),
+                tktStr);
             }
             return;
           }
           if (prev.status !== next.status) {
             addEvent("status",
-              tkt(tktStr) + " status " + trans(prev.status || "?", next.status || "?"));
+              tkt(tktStr) + " status " + trans(prev.status || "?", next.status || "?"),
+              tktStr);
           }
           if ((prev.phase ?? 0) !== (next.phase ?? 0)) {
             addEvent("phase",
-              tkt(tktStr) + " phase " + trans(prev.phase ?? 0, next.phase ?? 0));
+              tkt(tktStr) + " phase " + trans(prev.phase ?? 0, next.phase ?? 0),
+              tktStr);
           }
           const prevPr = prev.pr && prev.pr.number;
           const nextPr = next.pr && next.pr.number;
@@ -1762,19 +1989,23 @@
             const url = (next.pr && next.pr.url) || "#";
             addEvent("pr",
               tkt(tktStr) + ' PR opened · <a href="' + esc(url) +
-              '" target="_blank" rel="noopener">#' + esc(nextPr) + "</a>");
+              '" target="_blank" rel="noopener">#' + esc(nextPr) + "</a>",
+              tktStr);
           }
           if (prev.alive !== next.alive) {
             addEvent("live",
               tkt(tktStr) + " process " + trans(
                 prev.alive ? "alive" : "dead",
-                next.alive ? "alive" : "dead"));
+                next.alive ? "alive" : "dead"),
+              tktStr);
           }
           if (!prev.pid && next.pid) {
-            addEvent("live", tkt(tktStr) + " PID acquired · " + esc(next.pid));
+            addEvent("live", tkt(tktStr) + " PID acquired · " + esc(next.pid),
+              tktStr);
           }
           if (prev.pid && !next.pid) {
-            addEvent("live", tkt(tktStr) + " PID cleared (was " + esc(prev.pid) + ")");
+            addEvent("live", tkt(tktStr) + " PID cleared (was " + esc(prev.pid) + ")",
+              tktStr);
           }
         }
 
@@ -1899,6 +2130,319 @@
             $connText.textContent = "connecting...";
           }
         }
+
+        // --- Hash router ---
+        function parseRoute() {
+          const hash = location.hash || "#/";
+          const sessionMatch = hash.match(/^#\/session\/([^/]+)\/([^/]+)$/);
+          if (sessionMatch) {
+            try {
+              return { view: "session", orchId: decodeURIComponent(sessionMatch[1]), ticket: decodeURIComponent(sessionMatch[2]) };
+            } catch (err) {
+              console.error("malformed hash, falling back to dashboard:", err);
+              return { view: "dashboard", orchId: null, ticket: null };
+            }
+          }
+          return { view: "dashboard", orchId: null, ticket: null };
+        }
+
+        function navigateTo(hash) {
+          location.hash = hash;
+        }
+
+        async function fetchSessionDetail(orchId, ticket) {
+          try {
+            const resp = await fetch("/api/session/" + encodeURIComponent(orchId) + "/" + encodeURIComponent(ticket));
+            if (resp.status === 404) return { error: "not_found" };
+            if (!resp.ok) return { error: "server_error", status: resp.status };
+            return { data: await resp.json() };
+          } catch (err) {
+            console.error("session detail fetch failed", err);
+            return { error: "network" };
+          }
+        }
+
+        function renderPhaseTimeline(w) {
+          const phaseTs = w.phaseTimestamps || {};
+          const stops = [];
+          for (var p of PHASE_ORDER) {
+            var ts = phaseTs[p];
+            if (!ts) continue;
+            var t = Date.parse(ts);
+            if (!Number.isFinite(t)) continue;
+            stops.push({ phase: p, t: t });
+          }
+          stops.sort(function (a, b) { return a.t - b.t; });
+          if (!stops.length) {
+            return '<div class="empty">No phase data available.</div>';
+          }
+          var now = Date.now();
+          var startMs = stops[0].t;
+          var isLive = !w.completedAt && w.status !== "done" && w.status !== "merged" && w.status !== "failed";
+          var endMs = w.completedAt ? Date.parse(w.completedAt) : (isLive ? now : Date.parse(w.updatedAt || "") || now);
+          var totalSpan = Math.max(endMs - startMs, 1);
+
+          var segsHtml = "";
+          var detailsHtml = "";
+          for (var i = 0; i < stops.length; i++) {
+            var from = stops[i].t;
+            var to = i + 1 < stops.length ? stops[i + 1].t : endMs;
+            var pct = ((to - from) / totalSpan) * 100;
+            var color = phaseColor(stops[i].phase);
+            var isCurrent = isLive && i === stops.length - 1;
+            segsHtml +=
+              '<div class="pt-seg' + (isCurrent ? " current" : "") +
+              '" style="width:' + pct.toFixed(1) + "%;background:" + color +
+              ';" title="' + esc(stops[i].phase) + " " + fmtDuration(to - from) + '">' +
+              (pct > 8 ? esc(stops[i].phase) : "") + "</div>";
+            detailsHtml +=
+              '<span class="pd-item"><span class="pd-swatch" style="background:' + color +
+              '"></span>' + esc(stops[i].phase) +
+              ' <span class="pd-dur">' + esc(fmtDuration(to - from)) + "</span></span>";
+          }
+          return (
+            '<div class="phase-timeline">' + segsHtml + "</div>" +
+            '<div class="phase-details">' + detailsHtml + "</div>"
+          );
+        }
+
+        function renderSessionCost(w, analytics) {
+          var liveCost = w.cost && Number.isFinite(Number(w.cost.costUSD)) ? Number(w.cost.costUSD) : 0;
+          var aCost = analytics && Number.isFinite(Number(analytics.costUSD)) ? Number(analytics.costUSD) : 0;
+          var costVal = Math.max(liveCost, aCost);
+
+          var inputTokens = 0, outputTokens = 0, cacheTokens = 0;
+          if (analytics) {
+            inputTokens = analytics.inputTokens || 0;
+            outputTokens = analytics.outputTokens || 0;
+            cacheTokens = analytics.cacheReadTokens || 0;
+          } else if (w.cost) {
+            inputTokens = w.cost.inputTokens || 0;
+            outputTokens = w.cost.outputTokens || 0;
+            cacheTokens = w.cost.cacheReadTokens || 0;
+          }
+          var totalTokens = inputTokens + outputTokens + cacheTokens;
+          var cacheRate = totalTokens > 0 ? ((cacheTokens / totalTokens) * 100).toFixed(1) : "0.0";
+
+          return (
+            '<div class="session-cost-grid">' +
+            '<div class="sc-item"><span class="sc-value">' +
+            (costVal > 0 ? "$" + costVal.toFixed(2) : "\u2014") +
+            '</span><span class="sc-label">Cost</span></div>' +
+            '<div class="sc-item"><span class="sc-value">' +
+            esc(fmtTokens(inputTokens)) +
+            '</span><span class="sc-label">Input tokens</span></div>' +
+            '<div class="sc-item"><span class="sc-value">' +
+            esc(fmtTokens(outputTokens)) +
+            '</span><span class="sc-label">Output tokens</span></div>' +
+            '<div class="sc-item"><span class="sc-value">' +
+            esc(fmtTokens(cacheTokens)) +
+            '</span><span class="sc-label">Cache read</span></div>' +
+            '<div class="sc-item"><span class="sc-value">' +
+            esc(cacheRate) + "%" +
+            '</span><span class="sc-label">Cache hit rate</span></div>' +
+            (analytics && analytics.numTurns
+              ? '<div class="sc-item"><span class="sc-value">' + esc(analytics.numTurns) +
+                '</span><span class="sc-label">Turns</span></div>'
+              : "") +
+            "</div>"
+          );
+        }
+
+        function renderToolUsage(analytics) {
+          if (!analytics || !analytics.toolUsage) {
+            return '<div class="empty">No tool data available.</div>';
+          }
+          var entries = Object.entries(analytics.toolUsage).sort(function (a, b) { return b[1] - a[1]; });
+          if (!entries.length) return '<div class="empty">No tools used.</div>';
+          var maxCount = entries[0][1];
+          return '<div class="tool-bars">' + entries.slice(0, 20).map(function (e) {
+            var pct = (e[1] / maxCount) * 100;
+            return (
+              '<div class="tool-bar-row">' +
+              '<span class="tb-name" title="' + esc(e[0]) + '">' + esc(e[0]) + "</span>" +
+              '<div class="tb-bar"><div class="tb-fill" style="width:' + pct.toFixed(1) + '%"></div></div>' +
+              '<span class="tb-count">' + esc(e[1]) + "</span>" +
+              "</div>"
+            );
+          }).join("") + "</div>";
+        }
+
+        function renderSessionPr(w) {
+          if (!w.pr) return '<div class="empty">No PR created yet.</div>';
+          var url = esc(w.pr.url);
+          var num = esc(w.pr.number);
+          var stateStr = w.prState || w.pr.state || w.pr.ciStatus || "unknown";
+          var badgeClass = "b-" + statusClass(stateStr);
+          var mergedAt = w.prMergedAt || w.pr.mergedAt;
+          return (
+            '<div class="session-pr-grid">' +
+            '<span class="sp-number"><a href="' + url + '" target="_blank" rel="noopener">#' + num + "</a></span>" +
+            '<span class="badge ' + esc(badgeClass) + '">' + esc(stateStr) + "</span>" +
+            (mergedAt ? '<span style="color:var(--green);font-size:12px">merged ' + esc(new Date(mergedAt).toLocaleString()) + "</span>" : "") +
+            "</div>"
+          );
+        }
+
+        function renderSessionHealth(w) {
+          var aliveDot = w.pid
+            ? '<span class="alive-dot ' + (w.alive ? "alive" : "dead") + '"></span>' + (w.alive ? "alive" : "dead")
+            : "\u2014";
+          var hb = w.lastHeartbeat
+            ? new Date(w.lastHeartbeat).toLocaleTimeString()
+            : "\u2014";
+          var dod = w.definitionOfDone || {};
+          var gatesHtml = "";
+          var gateKeys = ["testsWrittenFirst", "typeCheck", "securityReview", "codeReview", "rewardHackingScan"];
+          for (var g of gateKeys) {
+            var val = dod[g];
+            if (val === undefined) continue;
+            var passed = val === true || (typeof val === "object" && val && val.passed === true);
+            gatesHtml += renderGate(g.replace(/([A-Z])/g, " $1").trim(), passed);
+          }
+          var unitTests = dod.unitTests;
+          if (unitTests) {
+            gatesHtml += renderGate("unit tests (" + (unitTests.count || 0) + ")", unitTests.exists);
+          }
+          var apiTests = dod.apiTests;
+          if (apiTests) {
+            gatesHtml += renderGate("api tests (" + (apiTests.count || 0) + ")", apiTests.exists);
+          }
+          return (
+            '<div class="session-health-grid">' +
+            '<div class="sh-item"><span class="sh-label">PID</span> <span class="sh-val">' + (w.pid ? esc(w.pid) : "\u2014") + "</span></div>" +
+            '<div class="sh-item"><span class="sh-label">Status</span> ' + aliveDot + "</div>" +
+            '<div class="sh-item"><span class="sh-label">Heartbeat</span> <span class="sh-val">' + esc(hb) + "</span></div>" +
+            '<div class="sh-item"><span class="sh-label">Phase</span> <span class="sh-val">' + esc(w.phase ?? 0) + "</span></div>" +
+            "</div>" +
+            (gatesHtml ? '<div class="gates" style="margin-top:10px">' + gatesHtml + "</div>" : "")
+          );
+        }
+
+        function renderSessionEvents(orchId, ticket) {
+          var filtered = eventLog.filter(function (e) {
+            return e.ticket === ticket;
+          });
+          if (!filtered.length) return '<div class="empty">No events for this session.</div>';
+          return '<div class="session-events">' + filtered.map(function (e) {
+            return (
+              '<div class="ev ' + esc(e.kind) + '">' +
+              '<span class="t">' + esc(e.when) + "</span>" +
+              '<span class="k">' + esc(e.kind) + "</span>" +
+              '<span class="msg">' + e.html + "</span>" +
+              "</div>"
+            );
+          }).join("") + "</div>";
+        }
+
+        function buildSessionView(detail) {
+          var w = detail.worker;
+          var analytics = detail.analytics;
+          var lt = linearFor(w.ticket);
+          var ticketUrl = (lt && lt.url) || "https://linear.app/issue/" + encodeURIComponent(w.ticket);
+          var stat = w.status || "unknown";
+          var badgeClass = "b-" + statusClass(stat);
+
+          var isLive = !w.completedAt && w.status !== "done" && w.status !== "merged" && w.status !== "failed";
+          var elapsed = "";
+          if (w.startedAt) {
+            var startMs = Date.parse(w.startedAt);
+            var endMs = w.completedAt ? Date.parse(w.completedAt) : (isLive ? Date.now() : Date.parse(w.updatedAt || "") || Date.now());
+            elapsed = fmtDuration(endMs - startMs);
+          }
+
+          var titleHtml = (lt && lt.title) ? esc(lt.title) : "";
+
+          return (
+            '<div class="session-back" id="session-back">\u2190 Back to dashboard</div>' +
+            '<div class="card">' +
+            '<div class="session-header">' +
+            '<span class="sh-ticket"><a href="' + esc(ticketUrl) + '" target="_blank" rel="noopener">' + esc(w.ticket) + "</a></span>" +
+            '<span class="badge ' + esc(badgeClass) + '">' + esc(stat) + "</span>" +
+            (elapsed ? '<span class="sh-elapsed">' + esc(elapsed) + (isLive ? " (live)" : "") + "</span>" : "") +
+            (w.wave != null ? '<span style="color:var(--muted);font-size:12px">Wave ' + esc(w.wave) + "</span>" : "") +
+            "</div>" +
+            (titleHtml ? '<div style="padding:10px 14px;border-bottom:1px solid var(--border);font-size:14px">' + titleHtml + "</div>" : "") +
+            '<div class="session-sections">' +
+
+            '<div class="session-section"><h3>Phase Timeline</h3>' +
+            renderPhaseTimeline(w) +
+            "</div>" +
+
+            '<div class="session-section"><h3>Cost &amp; Tokens</h3>' +
+            renderSessionCost(w, analytics) +
+            "</div>" +
+
+            '<div class="session-section"><h3>Tool Usage</h3>' +
+            renderToolUsage(analytics) +
+            "</div>" +
+
+            '<div class="session-section"><h3>Event Log</h3>' +
+            renderSessionEvents(detail.orchId, w.ticket) +
+            "</div>" +
+
+            '<div class="session-section"><h3>PR Status</h3>' +
+            renderSessionPr(w) +
+            "</div>" +
+
+            '<div class="session-section"><h3>Process Health</h3>' +
+            renderSessionHealth(w) +
+            "</div>" +
+
+            "</div>" +
+            "</div>"
+          );
+        }
+
+        async function showSessionView(orchId, ticket) {
+          $dashboardView.style.display = "none";
+          $sessionView.style.display = "block";
+          $sessionView.innerHTML = '<div class="empty">Loading session...</div>';
+
+          var result = await fetchSessionDetail(orchId, ticket);
+          if (result.error) {
+            var msg = result.error === "not_found"
+              ? "Session not found: " + esc(orchId) + "/" + esc(ticket)
+              : result.error === "network"
+                ? "Network error \u2014 check your connection and try again"
+                : "Server error (HTTP " + esc(result.status) + ") \u2014 try again later";
+            $sessionView.innerHTML =
+              '<div class="session-back" id="session-back">\u2190 Back to dashboard</div>' +
+              '<div class="card"><div class="empty">' + msg + "</div></div>";
+            return;
+          }
+          sessionDetail = result.data;
+          $sessionView.innerHTML = buildSessionView(result.data);
+        }
+
+        function showDashboardView() {
+          $dashboardView.style.display = "block";
+          $sessionView.style.display = "none";
+          $sessionView.innerHTML = "";
+          sessionDetail = null;
+          render();
+        }
+
+        function handleRoute() {
+          var route = parseRoute();
+          currentRoute = route;
+          if (route.view === "session" && route.orchId && route.ticket) {
+            showSessionView(route.orchId, route.ticket);
+          } else {
+            showDashboardView();
+          }
+        }
+
+        window.addEventListener("hashchange", handleRoute);
+
+        document.addEventListener("click", function (e) {
+          var back = e.target.closest("#session-back");
+          if (back) {
+            e.preventDefault();
+            navigateTo("#/");
+            return;
+          }
+        });
 
         let backoff = 500;
         const BACKOFF_MAX = 15000;
@@ -2033,6 +2577,7 @@
         }
 
         $orch.addEventListener("click", (e) => {
+          if (e.target.closest("a")) return;
           const toggle = e.target.closest("[data-gantt-toggle]");
           if (toggle) {
             const orchId = toggle.getAttribute("data-gantt-toggle");
@@ -2060,6 +2605,15 @@
             }
             return;
           }
+          const row = e.target.closest("tr.worker-row");
+          if (row) {
+            const orchId = row.getAttribute("data-orch");
+            const ticket = row.getAttribute("data-ticket");
+            if (orchId && ticket) {
+              navigateTo("#/session/" + encodeURIComponent(orchId) + "/" + encodeURIComponent(ticket));
+              return;
+            }
+          }
           const wcard = e.target.closest(".wcard");
           if (!wcard) return;
           const orchId = wcard.getAttribute("data-orch");
@@ -2074,6 +2628,7 @@
         setInterval(refreshAnalytics, 10000);
         refreshLinear();
         setInterval(refreshLinear, 60000);
+        handleRoute();
       })();
     </script>
   </body>

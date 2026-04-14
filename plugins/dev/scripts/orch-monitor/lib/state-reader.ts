@@ -73,6 +73,13 @@ export interface AnalyticsSnapshot {
   orchestrators: OrchestratorAnalytics[];
 }
 
+export interface SessionDetail {
+  orchId: string;
+  orchStartedAt: string;
+  worker: WorkerState;
+  analytics: WorkerAnalytics | null;
+}
+
 export interface Wave {
   wave: number;
   status: string;
@@ -467,6 +474,30 @@ export function buildSnapshot(
     orchestrators,
     sessions,
     sessionStoreAvailable: storeAvailable,
+  };
+}
+
+export function buildSessionDetail(
+  baseDir: string,
+  orchId: string,
+  ticket: string,
+): SessionDetail | null {
+  const dirs = scanOrchestrators(baseDir);
+  const orchDir = dirs.find((d) => basename(d) === orchId);
+  if (!orchDir) return null;
+
+  const orch = readOrchestratorState(orchDir);
+  const worker = orch.workers[ticket];
+  if (!worker) return null;
+
+  const analytics = parseOutputJson(analyticsPath(orchDir, ticket));
+  if (analytics) analytics.ticket = ticket;
+
+  return {
+    orchId: orch.id,
+    orchStartedAt: orch.startedAt,
+    worker,
+    analytics,
   };
 }
 

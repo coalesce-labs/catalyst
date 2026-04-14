@@ -8,6 +8,7 @@ import {
   readOrchestratorState,
   buildSnapshot,
   buildAnalyticsSnapshot,
+  buildSessionDetail,
 } from "../lib/state-reader";
 
 let tmpRoot: string;
@@ -713,5 +714,109 @@ describe("buildAnalyticsSnapshot", () => {
     expect(analytics?.ticket).toBe("A-1");
     expect(analytics?.costUSD).toBe(0.5);
     expect(analytics?.durationMs).toBe(1000);
+  });
+});
+
+describe("buildSessionDetail", () => {
+  function writeOutputJson(orchDir: string, ticket: string, data: unknown): void {
+    const logsDir = join(orchDir, "workers", "logs");
+    mkdirSync(logsDir, { recursive: true });
+    writeFileSync(join(logsDir, `${ticket}.output.json`), JSON.stringify(data));
+  }
+
+  it("returns session detail for a valid orchestrator + ticket", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      state: {
+        id: "orch-alpha",
+        startedAt: "2026-04-13T18:00:00Z",
+        currentWave: 1,
+        totalWaves: 2,
+        waves: [
+          { wave: 1, status: "in_progress", tickets: ["T-1"] },
+          { wave: 2, status: "pending", tickets: ["T-2"] },
+        ],
+      },
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-1",
+          status: "implementing",
+          phase: 3,
+          startedAt: now,
+          updatedAt: now,
+          pid: process.pid,
+          phaseTimestamps: {
+            researching: "2026-04-13T18:01:00Z",
+            implementing: "2026-04-13T18:05:00Z",
+          },
+          cost: { costUSD: 0.75, inputTokens: 500, outputTokens: 200, cacheReadTokens: 100 },
+        },
+      },
+    });
+    writeOutputJson(orchDir, "T-1", [
+      {
+        type: "result",
+        duration_ms: 60000,
+        duration_api_ms: 30000,
+        num_turns: 10,
+        total_cost_usd: 0.80,
+        modelUsage: { "claude-opus-4-6": {} },
+        usage: { input_tokens: 600, output_tokens: 250, cache_read_input_tokens: 150 },
+      },
+    ]);
+
+    const detail = buildSessionDetail(tmpRoot, "orch-alpha", "T-1");
+    expect(detail).not.toBeNull();
+    expect(detail!.orchId).toBe("orch-alpha");
+    expect(detail!.worker.ticket).toBe("T-1");
+    expect(detail!.worker.status).toBe("implementing");
+    expect(detail!.worker.phase).toBe(3);
+    expect(detail!.worker.wave).toBe(1);
+    expect(detail!.worker.alive).toBe(true);
+    expect(detail!.analytics).not.toBeNull();
+    expect(detail!.analytics!.costUSD).toBe(0.80);
+    expect(detail!.analytics!.toolUsage).toBeDefined();
+    expect(detail!.orchStartedAt).toBe("2026-04-13T18:00:00Z");
+  });
+
+  it("returns null for a nonexistent orchestrator", () => {
+    setupOrch(tmpRoot, "orch-alpha", {
+      workers: { "T-1": { ticket: "T-1", status: "done", phase: 6, startedAt: "", updatedAt: "" } },
+    });
+
+    const detail = buildSessionDetail(tmpRoot, "orch-nonexistent", "T-1");
+    expect(detail).toBeNull();
+  });
+
+  it("returns null for a nonexistent ticket within a valid orchestrator", () => {
+    setupOrch(tmpRoot, "orch-alpha", {
+      workers: { "T-1": { ticket: "T-1", status: "done", phase: 6, startedAt: "", updatedAt: "" } },
+    });
+
+    const detail = buildSessionDetail(tmpRoot, "orch-alpha", "NONEXISTENT");
+    expect(detail).toBeNull();
+  });
+
+  it("returns analytics as null when output.json is missing", () => {
+    const now = new Date().toISOString();
+    setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-1",
+          status: "in_progress",
+          phase: 1,
+          startedAt: now,
+          updatedAt: now,
+        },
+      },
+    });
+
+    const detail = buildSessionDetail(tmpRoot, "orch-alpha", "T-1");
+    expect(detail).not.toBeNull();
+    expect(detail!.analytics).toBeNull();
   });
 });
