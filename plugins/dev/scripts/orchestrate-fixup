@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# orchestrate-fixup - Generate a fix-up worker prompt + dispatch script for an already-open PR.
+#
+# Usage:
+#   orchestrate-fixup <TICKET_ID> --issues "<file:line issues>" [--pr <number>] [--orch <name>]
+#                     [--orch-dir <path>] [--worker-dir <path>] [--model opus|sonnet]
+#                     [--dispatch] [--dry-run]
+#
+# Options:
+#   --issues <text>      Blocker description (file:line: description — multi-line ok). REQUIRED.
+#   --pr <number>        PR number. Auto-detected from the worker's branch if omitted.
+#   --orch <name>        Orchestrator name. Defaults to $CATALYST_ORCHESTRATOR_ID.
+#   --orch-dir <path>    Orchestrator directory. Defaults to $CATALYST_ORCHESTRATOR_DIR.
+#   --worker-dir <path>  Fix-up worker's worktree (typically the original worker's worktree —
+#                        we push to the existing PR branch). Defaults to detection by convention
+#                        (<orch-dir>/../<orch>-<TICKET_ID>).
+#   --model <model>      Worker model (opus|sonnet). Default: opus.
+#   --dispatch           Actually run the generated dispatch script in the background. Default
+#                        behavior is to emit files only and print the command for the human to
+#                        run — matches the existing pattern from orch-data-import Round 2.
+#   --dry-run            Print what would happen, do not write files or dispatch.
+#
+# Output:
+#   <orch-dir>/workers/fixup-<TICKET_ID>-prompt.md
+#   <orch-dir>/workers/dispatch-fixup-<TICKET_ID>.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TEMPLATE_PROMPT="${PLUGIN_ROOT}/templates/fixup-prompt.md"
+TEMPLATE_DISPATCH="${PLUGIN_ROOT}/templates/dispatch-fixup.sh.template"
+
+TICKET_ID=""
+ISSUES=""
+PR_NUMBER=""
+ORCH_NAME="${CATALYST_ORCHESTRATOR_ID:-}"
+ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
+WORKER_DIR=""
+WORKER_MODEL="opus"
+DISPATCH=0
+DRY_RUN=0
+
+usage() {
+  sed -n '2,25p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --issues)     ISSUES="$2"; shift 2 ;;
+    --pr)         PR_NUMBER="$2"; shift 2 ;;
+    --orch)       ORCH_NAME="$2"; shift 2 ;;
+    --orch-dir)   ORCH_DIR="$2"; shift 2 ;;
+    --worker-dir) WORKER_DIR="$2"; shift 2 ;;
+    --model)      WORKER_MODEL="$2"; shift 2 ;;
+    --dispatch)   DISPATCH=1; shift ;;
+    --dry-run)    DRY_RUN=1; shift ;;
+    -h|--help)    usage 0 ;;
+    -*)           echo "unknown flag: $1" >&2; usage ;;
+    *)
+      if [ -z "$TICKET_ID" ]; then TICKET_ID="$1"; shift
+      else echo "unexpected arg: $1" >&2; usage; fi
+      ;;
+  esac
+done
+
+[ -z "$TICKET_ID" ] && { echo "ERROR: TICKET_ID required" >&2; usage; }
+[ -z "$ISSUES" ]    && { echo "ERROR: --issues required" >&2; usage; }
+[ -z "$ORCH_NAME" ] && { echo "ERROR: --orch (or \$CATALYST_ORCHESTRATOR_ID) required" >&2; exit 1; }
+[ -z "$ORCH_DIR" ]  && { echo "ERROR: --orch-dir (or \$CATALYST_ORCHESTRATOR_DIR) required" >&2; exit 1; }
+
+if [ -z "$WORKER_DIR" ]; then
+  WORKER_DIR="$(dirname "$ORCH_DIR")/${ORCH_NAME}-${TICKET_ID}"
+fi
+
+BRANCH_NAME="${ORCH_NAME}-${TICKET_ID}"
+SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
+PROMPT_FILE="${ORCH_DIR}/workers/fixup-${TICKET_ID}-prompt.md"
+DISPATCH_FILE="${ORCH_DIR}/workers/dispatch-fixup-${TICKET_ID}.sh"
+
+# Auto-detect PR number if not provided and gh is available.
+if [ -z "$PR_NUMBER" ] && command -v gh >/dev/null 2>&1 && [ -d "$WORKER_DIR" ]; then
+  PR_NUMBER=$(gh -R "$(git -C "$WORKER_DIR" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')" \
+    pr list --head "$BRANCH_NAME" --json number --jq '.[0].number' 2>/dev/null || echo "")
+fi
+
+PR_URL=""
+if [ -n "$PR_NUMBER" ] && command -v gh >/dev/null 2>&1 && [ -d "$WORKER_DIR" ]; then
+  PR_URL=$(gh -R "$(git -C "$WORKER_DIR" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')" \
+    pr view "$PR_NUMBER" --json url --jq '.url' 2>/dev/null || echo "")
+fi
+PR_NUMBER="${PR_NUMBER:-UNKNOWN}"
+PR_URL="${PR_URL:-UNKNOWN}"
+
+render() {
+  # Substitute ${VAR} placeholders from a template file. Only replaces variables we know about;
+  # leaves the rest literal so templates stay readable.
+  local template="$1"
+  awk -v tid="$TICKET_ID" \
+      -v orch="$ORCH_NAME" \
+      -v wd="$WORKER_DIR" \
+      -v bn="$BRANCH_NAME" \
+      -v prn="$PR_NUMBER" \
+      -v pru="$PR_URL" \
+      -v sf="$SIGNAL_FILE" \
+      -v issues="$ISSUES" \
+      -v od="$ORCH_DIR" \
+      -v pf="$PROMPT_FILE" \
+      -v wm="$WORKER_MODEL" \
+      -v scope="dev" \
+  '{
+    gsub(/\$\{TICKET_ID\}/, tid);
+    gsub(/\$\{ORCH_NAME\}/, orch);
+    gsub(/\$\{ORCH_DIR\}/, od);
+    gsub(/\$\{WORKTREE_PATH\}/, wd);
+    gsub(/\$\{WORKER_DIR\}/, wd);
+    gsub(/\$\{BRANCH_NAME\}/, bn);
+    gsub(/\$\{PR_NUMBER\}/, prn);
+    gsub(/\$\{PR_URL\}/, pru);
+    gsub(/\$\{SIGNAL_FILE\}/, sf);
+    gsub(/\$\{ISSUES\}/, issues);
+    gsub(/\$\{PROMPT_FILE\}/, pf);
+    gsub(/\$\{WORKER_MODEL\}/, wm);
+    gsub(/\$\{SCOPE\}/, scope);
+    print;
+  }' "$template"
+}
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "[dry-run] would write prompt:   $PROMPT_FILE"
+  echo "[dry-run] would write dispatch: $DISPATCH_FILE"
+  echo "[dry-run] PR: #$PR_NUMBER ($PR_URL)"
+  echo "[dry-run] worker dir: $WORKER_DIR"
+  echo "[dry-run] dispatch: $([ "$DISPATCH" -eq 1 ] && echo yes || echo no)"
+  exit 0
+fi
+
+mkdir -p "${ORCH_DIR}/workers"
+render "$TEMPLATE_PROMPT"   > "$PROMPT_FILE"
+render "$TEMPLATE_DISPATCH" > "$DISPATCH_FILE"
+chmod +x "$DISPATCH_FILE"
+
+echo "Wrote prompt:   $PROMPT_FILE"
+echo "Wrote dispatch: $DISPATCH_FILE"
+echo ""
+
+if [ "$DISPATCH" -eq 1 ]; then
+  echo "Dispatching fix-up worker in background..."
+  bash "$DISPATCH_FILE"
+else
+  echo "To dispatch: bash $DISPATCH_FILE"
+fi

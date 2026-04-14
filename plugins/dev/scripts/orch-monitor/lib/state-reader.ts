@@ -50,6 +50,8 @@ export interface WorkerState {
   parseError?: string;
   prState?: "OPEN" | "CLOSED" | "MERGED" | "UNKNOWN";
   prMergedAt?: string | null;
+  fixupCommit?: string;
+  followUpTo?: string;
 }
 
 export interface OrchestratorAnalytics {
@@ -247,6 +249,15 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
     };
   }
 
+  const fixupCommit =
+    typeof signal.fixupCommit === "string" && signal.fixupCommit.length > 0
+      ? signal.fixupCommit
+      : undefined;
+  const followUpTo =
+    typeof signal.followUpTo === "string" && signal.followUpTo.length > 0
+      ? signal.followUpTo
+      : undefined;
+
   return {
     ticket: asString(signal.ticket),
     status: asString(signal.status, "unknown"),
@@ -263,6 +274,8 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
     phaseTimestamps,
     completedAt,
     cost,
+    fixupCommit,
+    followUpTo,
   };
 }
 

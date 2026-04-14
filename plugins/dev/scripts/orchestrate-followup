@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# orchestrate-followup - File a follow-up ticket + provision a fresh worktree for findings that
+#                        surfaced after the parent PR was already merged.
+#
+# Usage:
+#   orchestrate-followup <PARENT_TICKET> --findings "<list>" [--title "<title>"]
+#                        [--orch <name>] [--orch-dir <path>] [--base-branch <branch>]
+#                        [--team-key <key>] [--ticket <id>] [--dry-run]
+#
+# Options:
+#   --findings <text>    Comma- or newline-separated findings (what was flagged post-merge). REQUIRED.
+#   --title <text>       Title for the new Linear ticket. Defaults to "Follow-up: <PARENT_TICKET>
+#                        post-merge findings".
+#   --orch <name>        Orchestrator name. Defaults to $CATALYST_ORCHESTRATOR_ID.
+#   --orch-dir <path>    Orchestrator directory. Defaults to $CATALYST_ORCHESTRATOR_DIR.
+#   --base-branch <br>   Base branch for the new worktree. Default: main.
+#   --team-key <key>     Linear team key (e.g., CTL). Read from .catalyst/config.json if omitted.
+#   --ticket <id>        Skip Linear ticket creation and use the given ticket ID. Useful if you
+#                        filed the ticket manually or Linear is offline.
+#   --dry-run            Print what would happen; don't create tickets, worktrees, or files.
+#
+# Produces:
+#   * A new Linear ticket (unless --ticket is passed) with followUpTo metadata in the description
+#   * A new worktree via create-worktree.sh, branch <orch>-<NEW_TICKET_ID> off base-branch
+#   * <orch-dir>/workers/<NEW_TICKET_ID>-prompt.md (from templates/followup-prompt.md)
+#   * <orch-dir>/workers/<NEW_TICKET_ID>.json seeded with followUpTo: <PARENT_TICKET>
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+TEMPLATE_PROMPT="${PLUGIN_ROOT}/templates/followup-prompt.md"
+CREATE_WORKTREE="${SCRIPT_DIR}/create-worktree.sh"
+
+PARENT_TICKET=""
+FINDINGS=""
+TITLE=""
+ORCH_NAME="${CATALYST_ORCHESTRATOR_ID:-}"
+ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
+BASE_BRANCH="main"
+TEAM_KEY=""
+FORCED_TICKET=""
+DRY_RUN=0
+
+usage() {
+  sed -n '2,27p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --findings)    FINDINGS="$2"; shift 2 ;;
+    --title)       TITLE="$2"; shift 2 ;;
+    --orch)        ORCH_NAME="$2"; shift 2 ;;
+    --orch-dir)    ORCH_DIR="$2"; shift 2 ;;
+    --base-branch) BASE_BRANCH="$2"; shift 2 ;;
+    --team-key)    TEAM_KEY="$2"; shift 2 ;;
+    --ticket)      FORCED_TICKET="$2"; shift 2 ;;
+    --dry-run)     DRY_RUN=1; shift ;;
+    -h|--help)     usage 0 ;;
+    -*)            echo "unknown flag: $1" >&2; usage ;;
+    *)
+      if [ -z "$PARENT_TICKET" ]; then PARENT_TICKET="$1"; shift
+      else echo "unexpected arg: $1" >&2; usage; fi
+      ;;
+  esac
+done
+
+[ -z "$PARENT_TICKET" ] && { echo "ERROR: PARENT_TICKET required" >&2; usage; }
+[ -z "$FINDINGS" ]      && { echo "ERROR: --findings required" >&2; usage; }
+[ -z "$ORCH_NAME" ]     && { echo "ERROR: --orch (or \$CATALYST_ORCHESTRATOR_ID) required" >&2; exit 1; }
+[ -z "$ORCH_DIR" ]      && { echo "ERROR: --orch-dir (or \$CATALYST_ORCHESTRATOR_DIR) required" >&2; exit 1; }
+
+if [ -z "$TITLE" ]; then
+  TITLE="Follow-up: ${PARENT_TICKET} post-merge findings"
+fi
+
+if [ -z "$TEAM_KEY" ]; then
+  for CFG in ".catalyst/config.json" ".claude/config.json"; do
+    if [ -f "$CFG" ]; then
+      TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CFG" 2>/dev/null || true)
+      [ -n "$TEAM_KEY" ] && break
+    fi
+  done
+fi
+
+DESCRIPTION="Follow-up to ${PARENT_TICKET}. Findings surfaced after merge:
+
+${FINDINGS}
+
+This ticket was created by \`orchestrate-followup\`. The parent PR is merged; this is a fresh
+change off \`${BASE_BRANCH}\`. See \`templates/followup-prompt.md\` for the worker contract."
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "[dry-run] parent: $PARENT_TICKET"
+  echo "[dry-run] title:  $TITLE"
+  echo "[dry-run] team:   ${TEAM_KEY:-UNKNOWN}"
+  echo "[dry-run] base:   $BASE_BRANCH"
+  echo "[dry-run] orch:   $ORCH_NAME"
+  echo "[dry-run] ticket: ${FORCED_TICKET:-<will create via linearis>}"
+  echo "[dry-run] description:"
+  echo "$DESCRIPTION" | sed 's/^/    /'
+  exit 0
+fi
+
+# Step 1: Create (or accept) the follow-up ticket.
+if [ -n "$FORCED_TICKET" ]; then
+  NEW_TICKET="$FORCED_TICKET"
+else
+  if ! command -v linearis >/dev/null 2>&1; then
+    echo "ERROR: linearis CLI required to create follow-up ticket (or pass --ticket <id>)" >&2
+    exit 1
+  fi
+  [ -z "$TEAM_KEY" ] && { echo "ERROR: --team-key required (or configure catalyst.linear.teamKey)" >&2; exit 1; }
+
+  CREATE_JSON=$(linearis issues create "$TITLE" \
+    --team "$TEAM_KEY" \
+    --description "$DESCRIPTION" \
+    --output json 2>/dev/null || true)
+  NEW_TICKET=$(echo "$CREATE_JSON" | jq -r '.identifier // empty' 2>/dev/null || true)
+  if [ -z "$NEW_TICKET" ]; then
+    echo "ERROR: failed to create Linear ticket — check linearis output" >&2
+    echo "$CREATE_JSON" >&2
+    exit 1
+  fi
+fi
+
+echo "Follow-up ticket: $NEW_TICKET (parent: $PARENT_TICKET)"
+
+# Step 2: Provision the worker worktree.
+WORKER_NAME="${ORCH_NAME}-${NEW_TICKET}"
+if [ ! -x "$CREATE_WORKTREE" ]; then
+  echo "ERROR: create-worktree.sh missing or not executable: $CREATE_WORKTREE" >&2
+  exit 1
+fi
+"$CREATE_WORKTREE" "$WORKER_NAME" "$BASE_BRANCH" --orchestration "$ORCH_NAME"
+
+# Detect the worktree path create-worktree.sh wrote to (same resolution logic: sibling of ORCH_DIR).
+WORKER_DIR="$(dirname "$ORCH_DIR")/${WORKER_NAME}"
+
+# Step 3: Seed the worker signal file with followUpTo.
+SIGNAL_FILE="${ORCH_DIR}/workers/${NEW_TICKET}.json"
+mkdir -p "${ORCH_DIR}/workers"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cat > "$SIGNAL_FILE" <<EOF
+{
+  "ticket": "${NEW_TICKET}",
+  "orchestrator": "${ORCH_NAME}",
+  "workerName": "${WORKER_NAME}",
+  "status": "dispatched",
+  "phase": 0,
+  "startedAt": "${NOW}",
+  "updatedAt": "${NOW}",
+  "worktreePath": "${WORKER_DIR}",
+  "followUpTo": "${PARENT_TICKET}",
+  "pr": null,
+  "definitionOfDone": {
+    "testsWrittenFirst": false,
+    "unitTests": { "exists": false, "count": 0 },
+    "apiTests": { "exists": false, "count": 0 },
+    "functionalTests": { "exists": false, "count": 0 },
+    "typeCheck": { "passed": false },
+    "securityReview": { "passed": false },
+    "codeReview": { "passed": false },
+    "rewardHackingScan": { "passed": false }
+  }
+}
+EOF
+echo "Seeded signal file: $SIGNAL_FILE (followUpTo: $PARENT_TICKET)"
+
+# Step 4: Render the worker prompt.
+PROMPT_FILE="${ORCH_DIR}/workers/${NEW_TICKET}-prompt.md"
+PARENT_PR_URL=""
+PARENT_PR_NUMBER=""
+if command -v gh >/dev/null 2>&1; then
+  REPO=$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')
+  PARENT_BRANCH="${ORCH_NAME}-${PARENT_TICKET}"
+  PARENT_PR_NUMBER=$(gh -R "$REPO" pr list --state merged --head "$PARENT_BRANCH" \
+    --json number --jq '.[0].number' 2>/dev/null || echo "")
+  if [ -n "$PARENT_PR_NUMBER" ]; then
+    PARENT_PR_URL=$(gh -R "$REPO" pr view "$PARENT_PR_NUMBER" --json url --jq '.url' 2>/dev/null || echo "")
+  fi
+fi
+PARENT_PR_NUMBER="${PARENT_PR_NUMBER:-UNKNOWN}"
+PARENT_PR_URL="${PARENT_PR_URL:-UNKNOWN}"
+
+awk -v tid="$NEW_TICKET" \
+    -v parent="$PARENT_TICKET" \
+    -v orch="$ORCH_NAME" \
+    -v wd="$WORKER_DIR" \
+    -v bn="$WORKER_NAME" \
+    -v bb="$BASE_BRANCH" \
+    -v sf="$SIGNAL_FILE" \
+    -v findings="$FINDINGS" \
+    -v ppurl="$PARENT_PR_URL" \
+    -v ppnum="$PARENT_PR_NUMBER" \
+'{
+  gsub(/\$\{TICKET_ID\}/, tid);
+  gsub(/\$\{PARENT_TICKET\}/, parent);
+  gsub(/\$\{ORCH_NAME\}/, orch);
+  gsub(/\$\{WORKTREE_PATH\}/, wd);
+  gsub(/\$\{BRANCH_NAME\}/, bn);
+  gsub(/\$\{BASE_BRANCH\}/, bb);
+  gsub(/\$\{SIGNAL_FILE\}/, sf);
+  gsub(/\$\{FINDINGS\}/, findings);
+  gsub(/\$\{PARENT_PR_URL\}/, ppurl);
+  gsub(/\$\{PARENT_PR_NUMBER\}/, ppnum);
+  print;
+}' "$TEMPLATE_PROMPT" > "$PROMPT_FILE"
+echo "Wrote prompt: $PROMPT_FILE"
+echo ""
+echo "Dispatch the follow-up worker with:"
+echo "  humanlayer launch --model opus --title \"${WORKER_NAME}\" -w \"${WORKER_DIR}\" \"\$(cat ${PROMPT_FILE})\""

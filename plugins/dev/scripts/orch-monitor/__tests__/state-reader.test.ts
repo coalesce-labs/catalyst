@@ -451,6 +451,50 @@ describe("WorkerState analytics fields", () => {
     // non-string entries dropped, string entries retained
     expect(w.phaseTimestamps).toEqual({ implementing: "2026-04-13T18:05:00Z" });
   });
+
+  it("propagates fixupCommit and followUpTo when present", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-1-fixup",
+          status: "pr-created",
+          phase: 5,
+          startedAt: now,
+          updatedAt: now,
+          fixupCommit: "3704e82f9f7f0d0a9e1c2b3a4f5e6d7c8b9a0f1e",
+          followUpTo: "T-0",
+        },
+      },
+    });
+
+    const w = readOrchestratorState(orchDir).workers["T-1"];
+    expect(w.fixupCommit).toBe("3704e82f9f7f0d0a9e1c2b3a4f5e6d7c8b9a0f1e");
+    expect(w.followUpTo).toBe("T-0");
+  });
+
+  it("leaves fixupCommit and followUpTo undefined when signal omits them", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-1",
+          status: "in_progress",
+          phase: 1,
+          startedAt: now,
+          updatedAt: now,
+        },
+      },
+    });
+
+    const w = readOrchestratorState(orchDir).workers["T-1"];
+    expect(w.fixupCommit).toBeUndefined();
+    expect(w.followUpTo).toBeUndefined();
+  });
 });
 
 describe("buildAnalyticsSnapshot", () => {

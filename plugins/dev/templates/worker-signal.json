@@ -186,6 +186,14 @@
     "error": {
       "type": ["string", "null"],
       "description": "Error message if status is 'failed'"
+    },
+    "fixupCommit": {
+      "type": ["string", "null"],
+      "description": "Commit SHA pushed by a fix-up worker to resolve blockers on an already-open PR (Pattern A recovery). Written by the fix-up worker after `git push`. Distinct from `pr.mergedAt` — this records the remediation commit; the orchestrator still owns merge confirmation. Null for normal workers and for follow-up workers (use `followUpTo` instead)."
+    },
+    "followUpTo": {
+      "type": ["string", "null"],
+      "description": "Parent ticket ID if this worker is a follow-up ticket filed after the parent's PR was already merged (Pattern B recovery). Written by the orchestrator when initializing the follow-up worker's signal. Null for normal workers and for fix-up workers (use `fixupCommit` instead)."
     }
   }
 }

@@ -1024,6 +1024,137 @@ if [ -z "$ORCH_DIR" ]; then
 fi
 ```
 
+## Recovery Paths: Fix-up Worker vs Follow-up Ticket
+
+Workers exit at `pr-created` (PR open + auto-merge armed + CI triggered + one settle-window pass).
+Anything the worker missed — late reviewer comments, subsequent CI failures, post-merge findings —
+falls to the orchestrator to triage. Two recovery patterns cover the cases that came up in
+`orch-data-import-2026-04-13` Round 2:
+
+### Decision Tree
+
+```
+Did the PR already merge?
+├── No — PR is still OPEN
+│   └── Blockers on the existing PR (Codex inline threads, CI failure, missed review point).
+│       → Pattern A: FIX-UP WORKER  (orchestrate-fixup)
+│
+└── Yes — PR is MERGED
+    └── Findings surfaced AFTER merge (late scan, post-merge review, prod observation).
+        → Pattern B: FOLLOW-UP TICKET  (orchestrate-followup)
+```
+
+Ask `gh pr view $PR_NUMBER --json state` before choosing. `OPEN` → fix-up. `MERGED`/`CLOSED` →
+follow-up. If the PR is `MERGED` you physically cannot push to that branch anymore; a fix-up
+attempt will fail silently or push to an orphan branch.
+
+### Pattern A: Fix-up Worker (PR still open)
+
+Used on ADV-219 / PR #130 and ADV-220 / PR #132 during `orch-data-import-2026-04-13`. The
+original worker exited at `pr-created`. Codex or a security scanner posted inline threads after.
+Auto-merge is blocked on unresolved threads.
+
+**When to use:**
+- `pr.state = OPEN`
+- Blockers are specific and file:line-scoped (inline review comments, CI test failures, lint
+  errors)
+- The remediation is a small targeted patch, not a re-design
+
+**How the orchestrator dispatches:**
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-fixup" "${TICKET}" \
+  --issues "src/auth/middleware.ts:42: handle null session token
+src/auth/middleware.ts:89: Codex flagged timing-attack comparison
+test/auth.test.ts: add regression test for the null-token path" \
+  --pr "${PR_NUMBER}" \
+  --dispatch
+```
+
+What this does:
+1. Renders `templates/fixup-prompt.md` → `${ORCH_DIR}/workers/fixup-${TICKET}-prompt.md`
+2. Renders `templates/dispatch-fixup.sh.template` → `${ORCH_DIR}/workers/dispatch-fixup-${TICKET}.sh`
+3. With `--dispatch`, runs the dispatch script in the background (via `humanlayer launch` when
+   available, falling back to `claude --print`)
+
+The fix-up worker:
+- Pulls latest on the existing PR branch (does NOT create a new branch)
+- Resolves ONLY the listed blockers
+- Pushes ONE commit with message `fix(...): resolve review feedback on #${PR}`
+- Resolves review threads via `gh api graphql resolveReviewThread`
+- Writes its commit SHA to the worker signal file as `fixupCommit`
+- Does one ~3-minute settle-window pass and exits
+
+The orchestrator's Phase 4 poll loop then observes the re-triggered CI and eventual `MERGED`
+state, exactly as with a fresh worker. No additional orchestrator logic is needed — `fixupCommit`
+is metadata for the dashboard, not a signal the orchestrator acts on.
+
+**Typical cost:** ~$2 (much cheaper than a fresh worker because scope is narrow).
+
+### Pattern B: Follow-up Ticket (PR already merged)
+
+Used on ADV-221 → ADV-222 / PR #133 during `orch-data-import-2026-04-13`. The parent PR merged
+cleanly; a post-merge security review or prod observation surfaced issues later. A fix-up is
+physically impossible — the merged branch is gone.
+
+**When to use:**
+- `pr.state = MERGED`
+- New findings that would have blocked merge if they had arrived 10 minutes earlier
+- Traceability to the parent is important (audit, incident response)
+
+**How the orchestrator dispatches:**
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-followup" "${PARENT_TICKET}" \
+  --findings "post-merge: validateSessionToken allows empty string (src/auth/middleware.ts:42)
+post-merge: missing rate-limit on POST /api/auth/token (src/api/auth.ts:18)"
+```
+
+What this does:
+1. Files a new Linear ticket via `linearis issues create`, with description that references the
+   parent and enumerates the findings. Title defaults to
+   `Follow-up: <PARENT_TICKET> post-merge findings`; override with `--title`.
+2. Provisions a fresh worktree off `main` via `create-worktree.sh`, named
+   `${ORCH_NAME}-${NEW_TICKET}`.
+3. Seeds the new worker's signal file with `followUpTo: "${PARENT_TICKET}"` — the orchestrator
+   and dashboard both use this field to render the ancestry.
+4. Renders `templates/followup-prompt.md` → `${ORCH_DIR}/workers/${NEW_TICKET}-prompt.md`, which
+   points the worker at the findings, the parent PR, and the TDD contract.
+5. Prints the `humanlayer launch` command to actually start the worker — it does NOT auto-dispatch
+   (follow-up tickets are heavier and warrant human confirmation).
+
+The follow-up worker runs the full `/oneshot` pipeline (research → plan → implement → validate →
+ship), same as any other worker. Its PR description must reference the parent PR number; the
+prompt enforces this.
+
+**Typical cost:** ~$4 (full pipeline, but scoped to the findings).
+
+**Skip Linear ticket creation** with `--ticket <id>` if you filed the ticket manually or Linear
+is unavailable. The rest of the flow proceeds with the given ticket ID.
+
+### Signal file metadata
+
+| Field          | Written by                     | Pattern |
+| -------------- | ------------------------------ | ------- |
+| `fixupCommit`  | fix-up worker (after push)     | A       |
+| `followUpTo`   | orchestrator (at provisioning) | B       |
+
+These fields are additive — they do not conflict with `pr.prOpenedAt`, `pr.autoMergeArmedAt`, or
+`pr.mergedAt` (which remain worker-owned / orchestrator-owned per the normal split).
+
+### Dashboard columns
+
+`DASHBOARD.md` has two additional columns: `Fix-up Commit` (short SHA, empty for normal workers)
+and `Follow-up To` (parent ticket ID, empty for normal workers and fix-up workers). See
+`templates/orchestrate-dashboard.md`.
+
+### Known limitation
+
+`orchestrate-verify.sh` currently only matches open PRs via `gh pr list --head`; already-merged
+PRs (the exact target of Pattern B) slip past its checks as false-negatives. This is tracked
+separately and does not block recovery — follow-up workers run full quality gates from their
+`/oneshot` pipeline, which is the real verification.
+
 ## Error Handling
 
 **Worker crashes or stalls:**
