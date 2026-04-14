@@ -95,13 +95,23 @@
           "type": "string",
           "enum": ["pending", "passing", "failing", "merged", "unknown"]
         },
+        "prOpenedAt": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when the PR was opened (written by worker on gh pr create). Distinct from mergedAt so timeline analysis can separate PR-open duration from CI/review/merge latency."
+        },
+        "autoMergeArmedAt": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when auto-merge was armed on the PR (written by worker on gh pr merge --auto). Null if --no-merge or arming failed."
+        },
         "mergedAt": {
           "type": ["string", "null"],
           "format": "date-time",
-          "description": "ISO 8601 timestamp when the PR was merged. Null until merge."
+          "description": "ISO 8601 timestamp when the PR was actually merged. Null until merge. Written by the ORCHESTRATOR (not the worker) during its Phase 4 poll loop, because workers reliably exit before their PR merges. Sourced from `gh pr view --json mergedAt`."
         }
       },
-      "description": "Pull request details (null until PR is created)"
+      "description": "Pull request details (null until PR is created). The worker owns prOpenedAt, autoMergeArmedAt, number, url, and ciStatus. The orchestrator owns mergedAt and flips ciStatus to \"merged\" on merge confirmation."
     },
     "linearState": {
       "type": ["string", "null"],
