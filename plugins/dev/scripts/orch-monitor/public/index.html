@@ -290,15 +290,15 @@
       .worker-table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 13px;
+        font-size: 12px;
       }
       .worker-table thead th {
         text-align: left;
-        font-size: 11px;
+        font-size: 10px;
         color: var(--muted);
         text-transform: uppercase;
         letter-spacing: 0.5px;
-        padding: 8px 12px;
+        padding: 6px 10px;
         border-bottom: 1px solid var(--border);
         background: var(--panel);
         position: sticky;
@@ -306,7 +306,7 @@
         font-weight: 600;
       }
       .worker-table tbody td {
-        padding: 10px 12px;
+        padding: 6px 10px;
         border-bottom: 1px solid var(--border);
         vertical-align: middle;
       }
@@ -1259,6 +1259,177 @@
         border-radius: 3px;
         color: #f4c88a;
       }
+      /* --- Layout: sidebar + main --- */
+      .layout {
+        display: flex;
+        min-height: calc(100vh - 42px);
+      }
+      .sidebar {
+        width: 240px;
+        flex-shrink: 0;
+        background: var(--panel);
+        border-right: 1px solid var(--border);
+        overflow-y: auto;
+        transition: width 200ms ease, opacity 200ms ease;
+        display: flex;
+        flex-direction: column;
+      }
+      .sidebar.collapsed { width: 0; opacity: 0; overflow: hidden; border-right: none; }
+      .sidebar-head {
+        padding: 10px 12px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: var(--muted);
+        border-bottom: 1px solid var(--border);
+      }
+      .sidebar-list { padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+      .sidebar-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 13px;
+        color: var(--fg);
+        transition: background 120ms ease;
+      }
+      .sidebar-item:hover { background: var(--panel-2); }
+      .sidebar-item.active { background: var(--panel-2); border-left: 2px solid var(--accent); }
+      .sidebar-item .si-id {
+        font-family: ui-monospace, monospace;
+        font-size: 12px;
+        font-weight: 600;
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sidebar-item .si-meta { font-size: 11px; color: var(--muted); white-space: nowrap; }
+      .sidebar-item .si-bar {
+        width: 40px; height: 4px;
+        background: var(--panel-2);
+        border-radius: 2px;
+        overflow: hidden;
+        flex-shrink: 0;
+      }
+      .sidebar-item .si-bar > span {
+        display: block; height: 100%;
+        background: linear-gradient(90deg, var(--accent), var(--green));
+      }
+      #sidebar-toggle {
+        background: none;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--muted);
+        cursor: pointer;
+        padding: 4px 8px;
+        font-size: 13px;
+        line-height: 1;
+        transition: color 120ms ease;
+      }
+      #sidebar-toggle:hover { color: var(--fg); }
+      @media (max-width: 768px) {
+        .sidebar { position: fixed; z-index: 20; height: calc(100vh - 42px); top: 42px; }
+        .sidebar.collapsed { width: 0; }
+      }
+
+      /* --- Keyboard navigation: focused row --- */
+      .worker-row.focused {
+        background: rgba(78, 161, 255, 0.10);
+        outline: none;
+        border-left: 2px solid var(--accent);
+      }
+      .worker-row:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+      }
+
+      /* --- Command palette --- */
+      .cmd-overlay {
+        position: fixed; inset: 0; z-index: 100;
+        background: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(4px);
+        display: none;
+        align-items: flex-start;
+        justify-content: center;
+        padding-top: 20vh;
+      }
+      .cmd-overlay.open { display: flex; }
+      #cmd-palette {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        width: 520px;
+        max-width: 90vw;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+        overflow: hidden;
+      }
+      .cmd-input-wrap {
+        display: flex; align-items: center;
+        padding: 12px 14px; gap: 10px;
+        border-bottom: 1px solid var(--border);
+      }
+      .cmd-icon { color: var(--muted); font-size: 16px; flex-shrink: 0; }
+      #cmd-input {
+        flex: 1; background: none; border: none;
+        color: var(--fg); font-size: 15px; font-family: inherit; outline: none;
+      }
+      #cmd-input::placeholder { color: var(--muted); }
+      #cmd-results { max-height: 320px; overflow-y: auto; padding: 6px; }
+      .cmd-item {
+        display: flex; align-items: center; gap: 10px;
+        padding: 8px 10px; border-radius: 6px;
+        cursor: pointer; font-size: 13px;
+        transition: background 100ms ease;
+      }
+      .cmd-item:hover, .cmd-item.selected { background: var(--panel-2); }
+      .cmd-item .ci-ticket {
+        font-family: ui-monospace, monospace;
+        font-weight: 600; color: var(--accent); min-width: 70px;
+      }
+      .cmd-item .ci-title {
+        flex: 1; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; color: var(--fg);
+      }
+      .cmd-item .ci-status {
+        font-size: 11px; padding: 2px 6px;
+        border-radius: 999px; white-space: nowrap;
+      }
+      .cmd-empty { color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
+      .cmd-footer {
+        padding: 6px 14px; border-top: 1px solid var(--border);
+        font-size: 11px; color: var(--muted); display: flex; gap: 12px;
+      }
+      .cmd-footer kbd {
+        background: var(--panel-2); border: 1px solid var(--border);
+        border-radius: 3px; padding: 1px 4px;
+        font-size: 10px; font-family: ui-monospace, monospace;
+      }
+
+      /* --- Context menu --- */
+      #ctx-menu {
+        position: fixed; z-index: 110;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 4px; min-width: 180px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+        display: none;
+      }
+      #ctx-menu.open { display: block; }
+      .ctx-item {
+        display: flex; align-items: center; gap: 8px;
+        padding: 7px 10px; border-radius: 4px;
+        cursor: pointer; font-size: 13px; color: var(--fg);
+        transition: background 100ms ease; white-space: nowrap;
+      }
+      .ctx-item:hover { background: var(--panel-2); }
+      .ctx-item.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+      .ctx-item .ctx-icon { color: var(--muted); font-size: 14px; width: 16px; text-align: center; }
+      .ctx-sep { height: 1px; background: var(--border); margin: 4px 6px; }
     </style>
     <script src="/public/vendor/marked.umd.js"></script>
     <script src="/public/vendor/purify.min.js"></script>
@@ -1266,6 +1437,7 @@
   </head>
   <body>
     <header>
+      <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
       <h1>
         <img src="/public/catalyst-logo.svg" alt="Catalyst" />
         Catalyst <span class="brand-sub">Orchestration Monitor</span>
@@ -1276,6 +1448,11 @@
       </span>
       <span id="last-update" class="conn"></span>
     </header>
+    <div class="layout">
+    <nav id="sidebar" class="sidebar">
+      <div class="sidebar-head">Orchestrators</div>
+      <div id="sidebar-list" class="sidebar-list"></div>
+    </nav>
     <main>
       <div class="tab-nav" id="tab-nav">
         <button class="active" data-tab="dashboard">Dashboard</button>
@@ -1348,6 +1525,31 @@
         </div>
       </div>
     </main>
+    </div>
+
+    <div class="cmd-overlay" id="cmd-overlay">
+      <div id="cmd-palette">
+        <div class="cmd-input-wrap">
+          <span class="cmd-icon">⌘</span>
+          <input id="cmd-input" type="text" placeholder="Search tickets, orchestrators, statuses..." autocomplete="off" />
+        </div>
+        <div id="cmd-results"></div>
+        <div class="cmd-footer">
+          <span><kbd>↑↓</kbd> navigate</span>
+          <span><kbd>↵</kbd> select</span>
+          <span><kbd>esc</kbd> close</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="ctx-menu">
+      <div class="ctx-item" data-action="open-linear"><span class="ctx-icon">↗</span>Open in Linear</div>
+      <div class="ctx-item" data-action="open-pr"><span class="ctx-icon">⎇</span>Open PR</div>
+      <div class="ctx-sep"></div>
+      <div class="ctx-item" data-action="copy-ticket"><span class="ctx-icon">⎘</span>Copy ticket ID</div>
+      <div class="ctx-item" data-action="scroll-gantt"><span class="ctx-icon">▦</span>View in timeline</div>
+    </div>
+
     <script>
       (function () {
         const $orch = document.getElementById("orchestrators");
@@ -2227,6 +2429,8 @@
             $orch.innerHTML = list.map(renderOrch).join("");
           }
           renderAttention();
+          if (typeof renderSidebar === "function") renderSidebar();
+          if (typeof restoreFocusAfterRender === "function") restoreFocusAfterRender();
         }
 
         function refreshSessionFromSnapshot() {
@@ -3502,6 +3706,321 @@
 
         fetchOtelStatus();
         setInterval(fetchOtelStatus, 60000);
+
+        // ---- Sidebar ----
+        const $sidebar = document.getElementById("sidebar");
+        const $sidebarList = document.getElementById("sidebar-list");
+        const $sidebarToggle = document.getElementById("sidebar-toggle");
+        let sidebarOpen = true;
+
+        $sidebarToggle.addEventListener("click", () => {
+          sidebarOpen = !sidebarOpen;
+          $sidebar.classList.toggle("collapsed", !sidebarOpen);
+        });
+
+        function renderSidebar() {
+          const list = snapshot.orchestrators || [];
+          if (!list.length) {
+            $sidebarList.innerHTML = '<div style="padding:10px;color:var(--muted);font-size:12px">No orchestrators</div>';
+            return;
+          }
+          $sidebarList.innerHTML = list.map((o) => {
+            const workers = o.workers || {};
+            const entries = Object.keys(workers);
+            const done = entries.filter((t) => {
+              const s = (workers[t] || {}).status;
+              return s === "done" || s === "merged";
+            }).length;
+            const total = entries.length || 1;
+            const pct = Math.round((done / total) * 100);
+            return '<div class="sidebar-item" data-orch="' + esc(o.id) + '">' +
+              '<span class="si-id">' + esc(o.id) + '</span>' +
+              '<span class="si-meta">' + done + '/' + entries.length + '</span>' +
+              '<span class="si-bar"><span style="width:' + pct + '%"></span></span>' +
+              '</div>';
+          }).join("");
+        }
+
+        $sidebarList.addEventListener("click", (e) => {
+          const item = e.target.closest(".sidebar-item");
+          if (!item) return;
+          const orchId = item.getAttribute("data-orch");
+          const card = document.querySelector('.card[data-orch="' + CSS.escape(orchId) + '"]');
+          if (card) {
+            card.scrollIntoView({ behavior: "smooth", block: "start" });
+            $sidebarList.querySelectorAll(".sidebar-item").forEach((el) => el.classList.remove("active"));
+            item.classList.add("active");
+          }
+        });
+
+        // ---- Command palette ----
+        const $cmdOverlay = document.getElementById("cmd-overlay");
+        const $cmdInput = document.getElementById("cmd-input");
+        const $cmdResults = document.getElementById("cmd-results");
+        let cmdSelectedIdx = -1;
+
+        function openPalette() {
+          $cmdOverlay.classList.add("open");
+          $cmdInput.value = "";
+          cmdSelectedIdx = -1;
+          $cmdInput.focus();
+          renderCmdResults("");
+        }
+
+        function closePalette() {
+          $cmdOverlay.classList.remove("open");
+          $cmdInput.blur();
+        }
+
+        function flattenWorkers() {
+          const items = [];
+          for (const o of (snapshot.orchestrators || [])) {
+            const workers = o.workers || {};
+            for (const [ticket, w] of Object.entries(workers)) {
+              const lt = linearFor(ticket);
+              items.push({
+                orchId: o.id,
+                ticket: ticket,
+                status: w.status || "unknown",
+                title: (lt && lt.title) || "",
+                pr: w.pr || null,
+              });
+            }
+          }
+          return items;
+        }
+
+        function renderCmdResults(query) {
+          const all = flattenWorkers();
+          const q = query.toLowerCase().trim();
+          const filtered = q
+            ? all.filter((w) =>
+                w.ticket.toLowerCase().includes(q) ||
+                w.status.toLowerCase().includes(q) ||
+                w.orchId.toLowerCase().includes(q) ||
+                w.title.toLowerCase().includes(q))
+            : all;
+          if (!filtered.length) {
+            $cmdResults.innerHTML = '<div class="cmd-empty">No results</div>';
+            return;
+          }
+          $cmdResults.innerHTML = filtered.map((w, i) => {
+            const sel = i === cmdSelectedIdx ? " selected" : "";
+            return '<div class="cmd-item' + sel + '" data-orch="' + esc(w.orchId) +
+              '" data-ticket="' + esc(w.ticket) + '">' +
+              '<span class="ci-ticket">' + esc(w.ticket) + '</span>' +
+              '<span class="ci-title">' + esc(w.title || w.orchId) + '</span>' +
+              '<span class="ci-status badge b-' + statusClass(w.status) + '">' + esc(w.status) + '</span>' +
+              '</div>';
+          }).join("");
+        }
+
+        $cmdInput.addEventListener("input", () => {
+          cmdSelectedIdx = -1;
+          renderCmdResults($cmdInput.value);
+        });
+
+        $cmdResults.addEventListener("click", (e) => {
+          const item = e.target.closest(".cmd-item");
+          if (!item) return;
+          jumpToWorkerRow(item.getAttribute("data-orch"), item.getAttribute("data-ticket"));
+          closePalette();
+        });
+
+        $cmdOverlay.addEventListener("click", (e) => {
+          if (e.target === $cmdOverlay) closePalette();
+        });
+
+        function jumpToWorkerRow(orchId, ticket) {
+          const row = document.querySelector(
+            'tr[data-orch="' + CSS.escape(orchId) + '"][data-ticket="' + CSS.escape(ticket) + '"]'
+          );
+          if (row) {
+            row.scrollIntoView({ behavior: "smooth", block: "center" });
+            row.style.transition = "background 600ms ease";
+            const orig = row.style.background;
+            row.style.background = "rgba(78, 161, 255, 0.18)";
+            setTimeout(() => { row.style.background = orig; }, 1200);
+          }
+        }
+
+        // ---- Context menu ----
+        const $ctxMenu = document.getElementById("ctx-menu");
+        let ctxTicket = null;
+        let ctxOrchId = null;
+        let ctxPrUrl = null;
+        let ctxLinearUrl = null;
+
+        document.addEventListener("contextmenu", (e) => {
+          const row = e.target.closest(".worker-row");
+          if (!row) { $ctxMenu.classList.remove("open"); return; }
+          e.preventDefault();
+          ctxOrchId = row.getAttribute("data-orch");
+          ctxTicket = row.getAttribute("data-ticket");
+          const ticketLink = row.querySelector(".col-ticket a");
+          ctxLinearUrl = ticketLink ? ticketLink.getAttribute("href") : null;
+          const prLink = row.querySelector(".col-pr a");
+          ctxPrUrl = prLink ? prLink.getAttribute("href") : null;
+          $ctxMenu.querySelector('[data-action="open-linear"]').classList.toggle("disabled", !ctxLinearUrl);
+          $ctxMenu.querySelector('[data-action="open-pr"]').classList.toggle("disabled", !ctxPrUrl);
+          $ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - 200) + "px";
+          $ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - 180) + "px";
+          $ctxMenu.classList.add("open");
+        });
+
+        $ctxMenu.addEventListener("click", (e) => {
+          const item = e.target.closest(".ctx-item");
+          if (!item) return;
+          const action = item.getAttribute("data-action");
+          if (action === "open-linear" && ctxLinearUrl) {
+            window.open(ctxLinearUrl, "_blank", "noopener");
+          } else if (action === "open-pr" && ctxPrUrl) {
+            window.open(ctxPrUrl, "_blank", "noopener");
+          } else if (action === "copy-ticket" && ctxTicket) {
+            navigator.clipboard.writeText(ctxTicket).then(() => {
+              item.textContent = "Copied!";
+              setTimeout(() => { item.innerHTML = '<span class="ctx-icon">\u2398</span>Copy ticket ID'; }, 1200);
+            }).catch((err) => {
+              console.warn("Clipboard write failed:", err);
+            });
+          } else if (action === "scroll-gantt" && ctxOrchId) {
+            const gantt = document.querySelector('.gantt-section[data-orch="' + CSS.escape(ctxOrchId) + '"]');
+            if (gantt) {
+              gantt.classList.remove("collapsed");
+              const toggle = gantt.querySelector(".gt-toggle");
+              if (toggle) toggle.textContent = "hide";
+              ganttCollapsed.set(ctxOrchId, false);
+              gantt.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+          }
+          $ctxMenu.classList.remove("open");
+        });
+
+        document.addEventListener("click", (e) => {
+          if (!$ctxMenu.contains(e.target)) $ctxMenu.classList.remove("open");
+        });
+
+        document.addEventListener("scroll", () => { $ctxMenu.classList.remove("open"); }, true);
+
+        // ---- Keyboard navigation ----
+        let focusedRowIndex = -1;
+        let focusedTicketKey = null;
+
+        function getWorkerRows() {
+          return Array.from(document.querySelectorAll(".worker-row"));
+        }
+
+        function restoreFocusAfterRender() {
+          if (!focusedTicketKey) return;
+          const rows = getWorkerRows();
+          const idx = rows.findIndex((r) =>
+            (r.getAttribute("data-orch") + ":" + r.getAttribute("data-ticket")) === focusedTicketKey);
+          if (idx >= 0) {
+            focusedRowIndex = idx;
+            rows[idx].classList.add("focused");
+          } else {
+            focusedRowIndex = -1;
+            focusedTicketKey = null;
+          }
+        }
+
+        function setFocusedRow(idx) {
+          const rows = getWorkerRows();
+          rows.forEach((r) => r.classList.remove("focused"));
+          if (idx < 0 || idx >= rows.length) {
+            focusedRowIndex = -1;
+            focusedTicketKey = null;
+            return;
+          }
+          focusedRowIndex = idx;
+          const row = rows[idx];
+          focusedTicketKey = row.getAttribute("data-orch") + ":" + row.getAttribute("data-ticket");
+          row.classList.add("focused");
+          row.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+
+        document.addEventListener("keydown", (e) => {
+          const tag = (e.target.tagName || "").toLowerCase();
+          const isInput = tag === "input" || tag === "textarea" || tag === "select";
+          const paletteOpen = $cmdOverlay.classList.contains("open");
+
+          if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+            e.preventDefault();
+            if (paletteOpen) closePalette(); else openPalette();
+            return;
+          }
+
+          if (e.key === "Escape") {
+            if (paletteOpen) { closePalette(); return; }
+            if ($ctxMenu.classList.contains("open")) { $ctxMenu.classList.remove("open"); return; }
+            const openDrawer = document.querySelector(".briefing-drawer.open");
+            if (openDrawer) {
+              openDrawer.classList.remove("open");
+              const card = openDrawer.closest(".card");
+              if (card) card.querySelectorAll(".wcard").forEach((c) => c.classList.remove("active"));
+              return;
+            }
+            setFocusedRow(-1);
+            return;
+          }
+
+          if (paletteOpen) {
+            const items = $cmdResults.querySelectorAll(".cmd-item");
+            if (e.key === "ArrowDown") {
+              if (!items.length) return;
+              e.preventDefault();
+              cmdSelectedIdx = Math.min(cmdSelectedIdx + 1, items.length - 1);
+              items.forEach((el, i) => el.classList.toggle("selected", i === cmdSelectedIdx));
+              if (items[cmdSelectedIdx]) items[cmdSelectedIdx].scrollIntoView({ block: "nearest" });
+              return;
+            }
+            if (e.key === "ArrowUp") {
+              if (!items.length) return;
+              e.preventDefault();
+              cmdSelectedIdx = Math.max(cmdSelectedIdx - 1, 0);
+              items.forEach((el, i) => el.classList.toggle("selected", i === cmdSelectedIdx));
+              if (items[cmdSelectedIdx]) items[cmdSelectedIdx].scrollIntoView({ block: "nearest" });
+              return;
+            }
+            if (e.key === "Enter" && cmdSelectedIdx >= 0 && items[cmdSelectedIdx]) {
+              e.preventDefault();
+              const sel = items[cmdSelectedIdx];
+              jumpToWorkerRow(sel.getAttribute("data-orch"), sel.getAttribute("data-ticket"));
+              closePalette();
+              return;
+            }
+            return;
+          }
+
+          if (isInput) return;
+
+          if (e.key === "j") {
+            e.preventDefault();
+            const rows = getWorkerRows();
+            if (rows.length) setFocusedRow(Math.min(focusedRowIndex + 1, rows.length - 1));
+            return;
+          }
+          if (e.key === "k") {
+            e.preventDefault();
+            if (focusedRowIndex > 0) setFocusedRow(focusedRowIndex - 1);
+            return;
+          }
+          if (e.key === "Enter" && focusedRowIndex >= 0) {
+            e.preventDefault();
+            const rows = getWorkerRows();
+            const row = rows[focusedRowIndex];
+            if (row) {
+              const link = row.querySelector(".col-ticket a");
+              if (link) window.open(link.href, "_blank", "noopener");
+            }
+            return;
+          }
+          if (e.key === "/") {
+            e.preventDefault();
+            openPalette();
+            return;
+          }
+        });
 
         setConnected("pending");
         connect();
