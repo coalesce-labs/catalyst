@@ -1071,6 +1071,21 @@
     <main>
       <div id="dashboard-view">
         <div id="attention" class="attention-panel"></div>
+        <div id="ai-briefing" class="card" style="display:none">
+          <div class="card-head">
+            <h2>AI Briefing</h2>
+            <div style="display:flex;gap:8px;align-items:center;margin-left:auto">
+              <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px;cursor:pointer">
+                <input type="checkbox" id="briefing-auto" style="accent-color:var(--accent)"> Auto
+              </label>
+              <button id="briefing-btn" style="background:var(--accent);color:#fff;border:none;border-radius:4px;padding:4px 12px;font-size:12px;cursor:pointer">Generate</button>
+            </div>
+          </div>
+          <div id="briefing-content" style="padding:12px 14px;font-size:13px;line-height:1.5;color:var(--muted)">
+            Click "Generate" to get an AI-powered status summary.
+          </div>
+          <div id="briefing-labels" style="padding:0 14px 12px;display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
         <div id="orchestrators"></div>
         <div class="card">
           <div class="card-head"><h2>Events</h2></div>
@@ -2624,6 +2639,107 @@
           renderBriefing(orchId, waveNum);
         });
 
+        // --- AI Briefing ---
+        const $briefingPanel = document.getElementById("ai-briefing");
+        const $briefingContent = document.getElementById("briefing-content");
+        const $briefingLabels = document.getElementById("briefing-labels");
+        const $briefingBtn = document.getElementById("briefing-btn");
+        const $briefingAuto = document.getElementById("briefing-auto");
+        let briefingAutoTimer = null;
+        const BRIEFING_AUTO_INTERVAL = 5 * 60 * 1000;
+
+        async function checkBriefingEnabled() {
+          try {
+            const resp = await fetch("/api/briefing");
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (data.enabled === false && !data.briefing) {
+              $briefingPanel.style.display = "none";
+            } else {
+              $briefingPanel.style.display = "";
+              if (data.briefing) renderBriefingAi(data);
+            }
+          } catch (err) {
+            console.error("briefing check failed", err);
+          }
+        }
+
+        async function fetchBriefing() {
+          $briefingBtn.disabled = true;
+          $briefingBtn.textContent = "Generating...";
+          $briefingContent.textContent = "Generating briefing...";
+          $briefingLabels.innerHTML = "";
+          try {
+            const resp = await fetch("/api/briefing");
+            if (!resp.ok) {
+              $briefingContent.textContent = "Failed to generate briefing.";
+              return;
+            }
+            const data = await resp.json();
+            if (data.enabled === false) {
+              $briefingPanel.style.display = "none";
+              return;
+            }
+            if (!data.briefing) {
+              $briefingContent.textContent = "AI returned no briefing. Check configuration.";
+              return;
+            }
+            renderBriefingAi(data);
+          } catch (err) {
+            console.error("briefing fetch failed", err);
+            $briefingContent.textContent = "Error generating briefing.";
+          } finally {
+            $briefingBtn.disabled = false;
+            $briefingBtn.textContent = "Generate";
+          }
+        }
+
+        function renderBriefingAi(data) {
+          var html;
+          if (window.marked && window.DOMPurify) {
+            html = window.DOMPurify.sanitize(window.marked.parse(data.briefing));
+          } else {
+            html = esc(data.briefing);
+          }
+          $briefingContent.innerHTML = html;
+          $briefingContent.querySelectorAll("a").forEach(function(a) {
+            a.setAttribute("target", "_blank");
+            a.setAttribute("rel", "noopener noreferrer");
+          });
+          $briefingContent.style.color = "var(--fg)";
+
+          $briefingLabels.innerHTML = "";
+          var labels = data.suggestedLabels || {};
+          var keys = Object.keys(labels);
+          if (keys.length > 0) {
+            for (var i = 0; i < keys.length; i++) {
+              var ticket = keys[i];
+              var tags = labels[ticket];
+              if (!tags || !tags.length) continue;
+              var chip = document.createElement("span");
+              chip.style.cssText = "display:inline-flex;align-items:center;gap:4px;background:var(--panel-2);border:1px solid var(--border);border-radius:12px;padding:2px 8px;font-size:11px;color:var(--muted)";
+              chip.innerHTML = '<strong style="color:var(--fg)">' + esc(ticket) + "</strong> " + tags.map(function(t) { return esc(t); }).join(", ");
+              $briefingLabels.appendChild(chip);
+            }
+          }
+
+          if (data.generatedAt) {
+            var ts = document.createElement("span");
+            ts.style.cssText = "font-size:10px;color:var(--gray);margin-left:auto";
+            ts.textContent = "Generated " + new Date(data.generatedAt).toLocaleTimeString();
+            $briefingLabels.appendChild(ts);
+          }
+        }
+
+        $briefingBtn.addEventListener("click", fetchBriefing);
+        $briefingAuto.addEventListener("change", function () {
+          if (briefingAutoTimer) { clearInterval(briefingAutoTimer); briefingAutoTimer = null; }
+          if ($briefingAuto.checked) {
+            fetchBriefing();
+            briefingAutoTimer = setInterval(fetchBriefing, BRIEFING_AUTO_INTERVAL);
+          }
+        });
+
         setConnected("pending");
         connect();
         setInterval(updateTimers, 1000);
@@ -2632,6 +2748,7 @@
         refreshLinear();
         setInterval(refreshLinear, 60000);
         handleRoute();
+        checkBriefingEnabled();
       })();
     </script>
   </body>
