@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.19.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.18.0...catalyst-dev-v6.19.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** add session & orchestrator annotations ([#112](https://github.com/coalesce-labs/catalyst/issues/112)) ([adf331c](https://github.com/coalesce-labs/catalyst/commit/adf331c6be3e2ee1046cf79ffae1b90b7de1d1a1))
+
 ## [6.18.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.17.0...catalyst-dev-v6.18.0) (2026-04-14)
 
 
