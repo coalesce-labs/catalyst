@@ -410,6 +410,63 @@
       .b-stalled, .b-blocked {
         background: rgba(234, 188, 59, 0.18); color: var(--yellow);
       }
+      /* --- Annotation UI --- */
+      .ann-star, .ann-flag { cursor: pointer; font-size: 14px; opacity: 0.3; transition: opacity 120ms; }
+      .ann-star:hover, .ann-flag:hover { opacity: 0.7; }
+      .ann-star.active { opacity: 1; color: #eabc3b; }
+      .ann-flag.active { opacity: 1; color: #ef5d5d; }
+      .ann-archived { opacity: 0.5; font-size: 10px; color: var(--muted); text-transform: uppercase; margin-left: 4px; }
+      .ann-tags { display: inline-flex; flex-wrap: wrap; gap: 3px; margin-left: 6px; vertical-align: middle; }
+      .ann-tag {
+        display: inline-block; font-size: 10px; padding: 1px 6px;
+        border-radius: 3px; background: rgba(78, 161, 255, 0.12); color: var(--accent);
+        font-family: ui-monospace, monospace; line-height: 1.4; cursor: default;
+      }
+      .ann-tag .ann-tag-x { cursor: pointer; margin-left: 4px; opacity: 0.5; }
+      .ann-tag .ann-tag-x:hover { opacity: 1; }
+      .ann-name-edit {
+        background: transparent; border: 1px solid var(--accent); border-radius: 3px;
+        color: var(--fg); font: inherit; padding: 1px 4px; width: 180px;
+      }
+      .card-head h2 .ann-display-name { cursor: pointer; }
+      .card-head h2 .ann-display-name:hover { text-decoration: underline; text-decoration-style: dashed; }
+      .ann-notes-btn { cursor: pointer; font-size: 12px; color: var(--muted); margin-left: 6px; }
+      .ann-notes-btn:hover { color: var(--accent); }
+      .ann-notes-drawer {
+        border-top: 1px solid var(--border); background: #0f1216;
+        padding: 10px 14px; display: none; font-size: 12px;
+      }
+      .ann-notes-drawer.open { display: block; }
+      .ann-notes-drawer .ann-note {
+        padding: 4px 0; border-bottom: 1px solid var(--border); color: var(--fg);
+      }
+      .ann-notes-drawer .ann-note:last-child { border-bottom: none; }
+      .ann-notes-drawer .ann-note-time { color: var(--muted); font-size: 10px; margin-left: 8px; }
+      .ann-notes-drawer .ann-note-add {
+        margin-top: 6px; display: flex; gap: 4px;
+      }
+      .ann-notes-drawer .ann-note-input {
+        flex: 1; background: var(--panel-2); border: 1px solid var(--border);
+        border-radius: 3px; color: var(--fg); font: inherit; padding: 3px 6px;
+      }
+      .ann-notes-drawer .ann-note-submit {
+        background: var(--accent); color: #fff; border: none; border-radius: 3px;
+        padding: 3px 10px; cursor: pointer; font-size: 12px;
+      }
+      .ann-add-tag-input {
+        background: transparent; border: 1px dashed var(--border); border-radius: 3px;
+        color: var(--accent); font: inherit; font-size: 10px; padding: 1px 4px; width: 60px;
+      }
+      .ann-add-tag-input::placeholder { color: var(--muted); }
+      .worker-table tbody tr.row-archived { opacity: 0.4; }
+      .ann-filter-tags { display: inline-flex; gap: 4px; margin-left: 12px; }
+      .ann-filter-tag {
+        font-size: 10px; padding: 2px 6px; border-radius: 3px;
+        background: rgba(78, 161, 255, 0.12); color: var(--accent);
+        cursor: pointer; font-family: ui-monospace, monospace;
+      }
+      .ann-filter-tag.active { background: var(--accent); color: #fff; }
+      .ann-filter-tag:hover { opacity: 0.8; }
       .b-unknown { background: var(--panel-2); color: var(--muted); }
       .alive { color: var(--green); font-weight: 600; }
       .dead { color: var(--red); font-weight: 600; }
@@ -1164,6 +1221,8 @@
         // Per-wave status "orchId:waveN" -> status
         const prevWaveStatus = new Map();
         let snapshotPrimed = false;
+        const annotationsMap = new Map();
+        let activeTagFilter = null;
 
         function esc(s) {
           return String(s == null ? "" : s)
@@ -1228,6 +1287,60 @@
 
         function statusClass(s) {
           return (s || "").replace(/[^a-z0-9_]/gi, "_");
+        }
+
+        function annFor(id) {
+          return annotationsMap.get(id) || null;
+        }
+
+        function renderOrchName(orchId) {
+          const ann = annFor(orchId);
+          const display = (ann && ann.displayName) || orchId;
+          const nameHtml =
+            '<span class="ann-display-name" data-ann-rename="' +
+            esc(orchId) + '" title="Click to rename">' +
+            esc(display) + "</span>";
+          const suffix = (ann && ann.displayName)
+            ? ' <span style="color:var(--muted);font-size:11px">(' + esc(orchId) + ")</span>"
+            : "";
+          return nameHtml + suffix;
+        }
+
+        function renderAnnotationControls(id) {
+          const ann = annFor(id);
+          const flags = (ann && ann.flags) || [];
+          const tags = (ann && ann.tags) || [];
+          const notes = (ann && ann.notes) || [];
+
+          const starCls = flags.includes("starred") ? " active" : "";
+          const flagCls = flags.includes("flagged") ? " active" : "";
+          const archived = flags.includes("archived");
+
+          let html =
+            '<span class="ann-star' + starCls + '" data-ann-flag="starred" data-ann-id="' +
+            esc(id) + '" title="Star">&#9733;</span>' +
+            '<span class="ann-flag' + flagCls + '" data-ann-flag="flagged" data-ann-id="' +
+            esc(id) + '" title="Flag">&#9873;</span>';
+          if (archived) {
+            html += '<span class="ann-archived">archived</span>';
+          }
+          if (notes.length > 0) {
+            html += '<span class="ann-notes-btn" data-ann-notes="' +
+              esc(id) + '" title="' + notes.length + ' note(s)">' +
+              notes.length + ' note' + (notes.length === 1 ? '' : 's') + '</span>';
+          }
+          if (tags.length > 0) {
+            html += '<span class="ann-tags">';
+            for (const t of tags) {
+              html +=
+                '<span class="ann-tag" data-ann-id="' + esc(id) +
+                '">' + esc(t) +
+                '<span class="ann-tag-x" data-ann-untag="' + esc(t) +
+                '" data-ann-id="' + esc(id) + '">x</span></span>';
+            }
+            html += '</span>';
+          }
+          return html;
         }
 
         function renderWorkerRow(orchId, ticket, w, waveNum) {
@@ -1329,12 +1442,22 @@
             ? '<td class="col-tokens">' + esc(fmtTokens(totalTokens)) + "</td>"
             : '<td class="col-tokens muted">—</td>';
 
+          const workerAnn = annFor(ticket);
+          const workerFlags = (workerAnn && workerAnn.flags) || [];
+          if (workerFlags.includes("archived")) rowStateCls += " row-archived";
+          if (activeTagFilter) {
+            const wTags = (workerAnn && workerAnn.tags) || [];
+            if (!wTags.includes(activeTagFilter)) return "";
+          }
+
+          const annCtrl = renderAnnotationControls(ticket);
+
           return (
             '<tr class="worker-row' + rowStateCls + '" data-orch="' + esc(orchId) +
             '" data-ticket="' + esc(ticket) +
             '" data-updated-at="' + esc(w.updatedAt || "") + '">' +
             '<td class="col-wave">' + (waveNum != null ? esc(waveNum) : "—") + "</td>" +
-            '<td class="col-ticket">' + ticketLink + "</td>" +
+            '<td class="col-ticket">' + ticketLink + " " + annCtrl + "</td>" +
             '<td class="col-label">' + (w.label ? '<span class="ct-label">' + esc(w.label) + '</span>' : '<span style="color:var(--muted)">—</span>') + "</td>" +
             '<td class="col-title">' + titleHtml + "</td>" +
             '<td><span class="badge ' + esc(badgeClass) + '">' + esc(stat) + "</span></td>" +
@@ -1773,7 +1896,7 @@
           return (
             '<div class="card" data-orch="' + esc(o.id) + '">' +
             '<div class="card-head">' +
-            "<h2>" + esc(o.id) + "</h2>" +
+            "<h2>" + renderOrchName(o.id) + "</h2>" +
             '<span class="meta">wave ' + esc(wavesInfo) + " · " +
             done + "/" + entries.length + " merged</span>" +
             '<span class="wave-bar"><span style="width:' + pct + '%"></span></span>' +
@@ -2578,6 +2701,42 @@
           }
         }
 
+        async function refreshAnnotations() {
+          try {
+            const resp = await fetch("/api/annotations");
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const anns = (data && data.annotations) || {};
+            annotationsMap.clear();
+            for (const key of Object.keys(anns)) {
+              annotationsMap.set(key, anns[key]);
+            }
+            render();
+          } catch (err) {
+            console.error("annotations refresh failed", err);
+          }
+        }
+
+        async function updateAnnotation(sessionId, body) {
+          try {
+            const resp = await fetch("/api/annotations/" + encodeURIComponent(sessionId), {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            if (!resp.ok) return null;
+            const data = await resp.json();
+            if (data && data.annotation) {
+              annotationsMap.set(sessionId, data.annotation);
+              render();
+            }
+            return data;
+          } catch (err) {
+            console.error("annotation update failed", err);
+            return null;
+          }
+        }
+
         async function refreshLinear() {
           try {
             const resp = await fetch("/api/linear");
@@ -2596,6 +2755,104 @@
 
         $orch.addEventListener("click", (e) => {
           if (e.target.closest("a")) return;
+
+          const flagEl = e.target.closest("[data-ann-flag]");
+          if (flagEl) {
+            const flag = flagEl.getAttribute("data-ann-flag");
+            const id = flagEl.getAttribute("data-ann-id");
+            if (!id || !flag) return;
+            const ann = annFor(id);
+            const flags = (ann && ann.flags) || [];
+            if (flags.includes(flag)) {
+              updateAnnotation(id, { removeFlags: [flag] });
+            } else {
+              updateAnnotation(id, { addFlags: [flag] });
+            }
+            return;
+          }
+
+          const untagEl = e.target.closest("[data-ann-untag]");
+          if (untagEl) {
+            const tag = untagEl.getAttribute("data-ann-untag");
+            const id = untagEl.getAttribute("data-ann-id");
+            if (id && tag) updateAnnotation(id, { removeTags: [tag] });
+            return;
+          }
+
+          const renameEl = e.target.closest("[data-ann-rename]");
+          if (renameEl) {
+            const id = renameEl.getAttribute("data-ann-rename");
+            if (!id) return;
+            const ann = annFor(id);
+            const current = (ann && ann.displayName) || "";
+            const input = document.createElement("input");
+            input.className = "ann-name-edit";
+            input.value = current;
+            input.placeholder = id;
+            renameEl.replaceWith(input);
+            input.focus();
+            input.select();
+            let saved = false;
+            const save = () => {
+              if (saved) return;
+              saved = true;
+              const val = input.value.trim();
+              updateAnnotation(id, { displayName: val || null });
+            };
+            input.addEventListener("blur", save);
+            input.addEventListener("keydown", (ev) => {
+              if (ev.key === "Enter") { ev.preventDefault(); input.blur(); }
+              if (ev.key === "Escape") { input.value = current; input.blur(); }
+            });
+            return;
+          }
+
+          const notesBtn = e.target.closest("[data-ann-notes]");
+          if (notesBtn) {
+            const id = notesBtn.getAttribute("data-ann-notes");
+            if (!id) return;
+            const row = notesBtn.closest("tr");
+            if (!row) return;
+            let drawer = row.nextElementSibling;
+            if (drawer && drawer.classList.contains("ann-notes-row")) {
+              drawer.remove();
+              return;
+            }
+            const ann = annFor(id);
+            const notes = (ann && ann.notes) || [];
+            const notesTr = document.createElement("tr");
+            notesTr.className = "ann-notes-row";
+            const td = document.createElement("td");
+            td.colSpan = 10;
+            td.className = "ann-notes-drawer open";
+            let notesHtml = notes.map((n, i) =>
+              '<div class="ann-note">' + esc(n.text) +
+              '<span class="ann-note-time">' +
+              new Date(n.createdAt).toLocaleString() + "</span></div>"
+            ).join("");
+            notesHtml += '<div class="ann-note-add">' +
+              '<input class="ann-note-input" placeholder="Add a note..." data-ann-id="' + esc(id) + '">' +
+              '<button class="ann-note-submit" data-ann-id="' + esc(id) + '">Add</button></div>';
+            td.innerHTML = notesHtml;
+            notesTr.appendChild(td);
+            row.after(notesTr);
+
+            const addBtn = td.querySelector(".ann-note-submit");
+            const noteInput = td.querySelector(".ann-note-input");
+            const submitNote = () => {
+              const text = noteInput.value.trim();
+              if (!text) return;
+              updateAnnotation(id, { addNote: text }).then((result) => {
+                if (result) notesTr.remove();
+              });
+            };
+            addBtn.addEventListener("click", submitNote);
+            noteInput.addEventListener("keydown", (ev) => {
+              if (ev.key === "Enter") submitNote();
+            });
+            return;
+          }
+
           const toggle = e.target.closest("[data-gantt-toggle]");
           if (toggle) {
             const orchId = toggle.getAttribute("data-gantt-toggle");
@@ -2743,6 +3000,8 @@
         setConnected("pending");
         connect();
         setInterval(updateTimers, 1000);
+        refreshAnnotations();
+        setInterval(refreshAnnotations, 15000);
         refreshAnalytics();
         setInterval(refreshAnalytics, 10000);
         refreshLinear();

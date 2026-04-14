@@ -47,6 +47,20 @@ import {
   apiErrors,
   costValidation,
 } from "./lib/otel-queries";
+import {
+  openDb,
+  closeDb,
+  getAllAnnotations,
+  getAnnotation,
+  setDisplayName,
+  addFlag,
+  removeFlag,
+  addNote,
+  removeNote,
+  addTag,
+  removeTag,
+  deleteAnnotation,
+} from "./lib/annotations";
 
 type BunServer = ReturnType<typeof Bun.serve>;
 
@@ -68,6 +82,7 @@ export interface CreateServerOptions {
   lokiUrl?: string | null;
   prometheusFetcher?: PrometheusFetcher | null;
   lokiFetcher?: LokiFetcher | null;
+  annotationsDbPath?: string;
 }
 
 export const DEFAULT_PORT = 7400;
@@ -206,9 +221,22 @@ export function createServer(opts: CreateServerOptions): BunServer {
     lokiUrl,
     prometheusFetcher: promFetcherOpt,
     lokiFetcher: lokiFetcherOpt,
+    annotationsDbPath,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath };
+
+  const CATALYST_DIR =
+    process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
+  const annDbPath = annotationsDbPath ?? `${CATALYST_DIR}/annotations.db`;
+  try {
+    openDb(annDbPath);
+  } catch (err) {
+    throw new Error(
+      `Failed to open annotations database at ${annDbPath}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    );
+  }
 
   const prFetcher: PrStatusFetcher | null =
     prStatusFetcher === null
@@ -542,6 +570,94 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ data: result });
         }
 
+        if (url.pathname === "/api/annotations") {
+          return Response.json({ annotations: getAllAnnotations() });
+        }
+
+        const annMatch = url.pathname.match(
+          /^\/api\/annotations\/([A-Za-z0-9._-]+)$/,
+        );
+        if (annMatch && annMatch[1]) {
+          const sessionId = decodeURIComponent(annMatch[1]);
+
+          if (req.method === "DELETE") {
+            deleteAnnotation(sessionId);
+            return Response.json({ ok: true });
+          }
+
+          if (req.method === "PUT") {
+            let body: Record<string, unknown>;
+            try {
+              body = (await req.json()) as Record<string, unknown>;
+            } catch {
+              return Response.json(
+                { error: "Invalid JSON body" },
+                { status: 400 },
+              );
+            }
+
+            const VALID_FLAGS = new Set([
+              "starred",
+              "flagged",
+              "archived",
+            ]);
+
+            if (Array.isArray(body.addFlags)) {
+              for (const f of body.addFlags) {
+                if (typeof f !== "string" || !VALID_FLAGS.has(f)) {
+                  return Response.json(
+                    {
+                      error: `Invalid flag: ${String(f)}. Valid: starred, flagged, archived`,
+                    },
+                    { status: 400 },
+                  );
+                }
+              }
+            }
+
+            if (typeof body.displayName === "string") {
+              setDisplayName(sessionId, body.displayName);
+            } else if (body.displayName === null) {
+              setDisplayName(sessionId, null);
+            }
+
+            if (Array.isArray(body.addFlags)) {
+              for (const f of body.addFlags) {
+                if (typeof f === "string") addFlag(sessionId, f);
+              }
+            }
+            if (Array.isArray(body.removeFlags)) {
+              for (const f of body.removeFlags) {
+                if (typeof f === "string") removeFlag(sessionId, f);
+              }
+            }
+            if (typeof body.addNote === "string") {
+              addNote(sessionId, body.addNote);
+            }
+            if (
+              typeof body.removeNoteIndex === "number" &&
+              Number.isInteger(body.removeNoteIndex)
+            ) {
+              removeNote(sessionId, body.removeNoteIndex);
+            }
+            if (Array.isArray(body.addTags)) {
+              for (const t of body.addTags) {
+                if (typeof t === "string") addTag(sessionId, t);
+              }
+            }
+            if (Array.isArray(body.removeTags)) {
+              for (const t of body.removeTags) {
+                if (typeof t === "string") removeTag(sessionId, t);
+              }
+            }
+
+            const annotation = getAnnotation(sessionId);
+            return Response.json({ annotation });
+          }
+
+          return new Response("Method Not Allowed", { status: 405 });
+        }
+
         if (
           url.pathname === "/" ||
           url.pathname === "/index.html" ||
@@ -600,6 +716,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     prFetcher?.stop();
     linear?.stop();
     briefingProvider?.stop();
+    closeDb();
     sseClients.clear();
     if (pidFile) {
       try {
