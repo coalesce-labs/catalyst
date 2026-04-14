@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.8.0...catalyst-dev-v6.9.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** catalyst-session lifecycle CLI (CTL-37) ([#100](https://github.com/coalesce-labs/catalyst/issues/100)) ([9b7fae2](https://github.com/coalesce-labs/catalyst/commit/9b7fae2b16535c66c97b8a76ba68fb57a9b9d32f))
+
 ## [6.8.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.7.0...catalyst-dev-v6.8.0) (2026-04-14)
 
 
