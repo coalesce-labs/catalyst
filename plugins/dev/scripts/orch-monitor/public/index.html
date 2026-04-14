@@ -2154,7 +2154,10 @@
           try {
             const resp = await fetch("/api/session/" + encodeURIComponent(orchId) + "/" + encodeURIComponent(ticket));
             if (resp.status === 404) return { error: "not_found" };
-            if (!resp.ok) return { error: "server_error", status: resp.status };
+            if (!resp.ok) {
+              await resp.text().catch(function () {});
+              return { error: "server_error", status: resp.status };
+            }
             return { data: await resp.json() };
           } catch (err) {
             console.error("session detail fetch failed", err);

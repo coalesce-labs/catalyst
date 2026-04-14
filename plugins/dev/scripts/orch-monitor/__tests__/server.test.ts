@@ -161,6 +161,22 @@ describe("SSE server", () => {
     expect(res.status).toBe(404);
     await res.text();
   });
+
+  it("should 400 for path traversal in ticket", async () => {
+    const res = await fetch(
+      `${baseUrl}/api/session/orch-test/${encodeURIComponent("../../etc/passwd")}`,
+    );
+    expect(res.status).toBe(400);
+    await res.text();
+  });
+
+  it("should 400 for path traversal in orchId", async () => {
+    const res = await fetch(
+      `${baseUrl}/api/session/${encodeURIComponent("../secret")}/TEST-1`,
+    );
+    expect(res.status).toBe(400);
+    await res.text();
+  });
 });
 
 describe("SSE filtering", () => {
