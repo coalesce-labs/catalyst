@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.17.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.16.0...catalyst-dev-v6.17.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** add AI-powered status briefing to orch-monitor ([#107](https://github.com/coalesce-labs/catalyst/issues/107)) ([67ed25c](https://github.com/coalesce-labs/catalyst/commit/67ed25c73220c08741a5a666e8c77e39185296b5))
+
 ## [6.16.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.15.1...catalyst-dev-v6.16.0) (2026-04-14)
 
 
