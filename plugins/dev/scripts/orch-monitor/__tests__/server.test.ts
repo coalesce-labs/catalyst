@@ -222,6 +222,178 @@ describe("SSE filtering", () => {
   });
 });
 
+describe("OTel API endpoints", () => {
+  it("returns disabled status when OTel is not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/status`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      enabled: boolean;
+      prometheus: boolean;
+      loki: boolean;
+    };
+    expect(data.enabled).toBe(false);
+    expect(data.prometheus).toBe(false);
+    expect(data.loki).toBe(false);
+  });
+
+  it("returns 503 for /api/otel/cost when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost`);
+    expect(res.status).toBe(503);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toBe("OTel not configured");
+  });
+
+  it("returns 503 for /api/otel/tokens when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/tokens`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/tools when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/tools`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/errors when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/errors`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/cost-validation when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-validation`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/cost-rate when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-rate`);
+    expect(res.status).toBe(503);
+  });
+});
+
+describe("OTel API with mock clients", () => {
+  let otelServer: ReturnType<typeof createServer>;
+  let otelUrl: string;
+  let otelTmp: string;
+
+  beforeAll(() => {
+    otelTmp = mkdtempSync(join(tmpdir(), "orch-monitor-otel-"));
+    const wtDir = join(otelTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    const orchDir = join(wtDir, "orch-otel");
+    mkdirSync(join(orchDir, "workers"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ id: "orch-otel", waves: [] }),
+    );
+    writeFileSync(
+      join(orchDir, "workers", "CTL-99.json"),
+      JSON.stringify({
+        ticket: "CTL-99",
+        orchestrator: "orch-otel",
+        workerName: "w",
+        status: "done",
+        phase: 6,
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        cost: { costUSD: 1.5, inputTokens: 10000 },
+      }),
+    );
+
+    const mockProm = {
+      query: () =>
+        Promise.resolve({
+          data: {
+            resultType: "vector",
+            result: [
+              {
+                metric: { linear_key: "CTL-99" },
+                value: [0, "1.55"] as [number, string],
+              },
+            ],
+          },
+        }),
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => true,
+    };
+    const mockLoki = {
+      queryRange: () =>
+        Promise.resolve({
+          data: {
+            resultType: "streams",
+            result: [
+              {
+                stream: { service_name: "claude-code.s1" },
+                values: [["1713100000000000000", "error line"]] as Array<[string, string]>,
+              },
+            ],
+          },
+        }),
+      isAvailable: () => true,
+    };
+
+    otelServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      prStatusFetcher: null,
+      linearFetcher: null,
+      prometheusFetcher: mockProm,
+      lokiFetcher: mockLoki,
+    });
+    otelUrl = `http://localhost:${otelServer.port}`;
+  });
+
+  afterAll(() => {
+    void otelServer?.stop(true);
+    try {
+      rmSync(otelTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("returns enabled status with mock clients", async () => {
+    const res = await fetch(`${otelUrl}/api/otel/status`);
+    const data = (await res.json()) as {
+      enabled: boolean;
+      prometheus: boolean;
+      loki: boolean;
+    };
+    expect(data.enabled).toBe(true);
+    expect(data.prometheus).toBe(true);
+    expect(data.loki).toBe(true);
+  });
+
+  it("returns cost data from /api/otel/cost", async () => {
+    const res = await fetch(`${otelUrl}/api/otel/cost?range=1h`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: Record<string, number> | null };
+    expect(body.data).not.toBeNull();
+    expect(body.data!["CTL-99"]).toBeCloseTo(1.55);
+  });
+
+  it("returns errors from /api/otel/errors", async () => {
+    const res = await fetch(`${otelUrl}/api/otel/errors?range=1h&limit=10`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: Array<{ line: string }> | null;
+    };
+    expect(body.data).not.toBeNull();
+    expect(body.data!.length).toBeGreaterThan(0);
+  });
+
+  it("returns cost validation from /api/otel/cost-validation", async () => {
+    const res = await fetch(`${otelUrl}/api/otel/cost-validation`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      data: Array<{ ticket: string; discrepancy: number }> | null;
+    };
+    expect(body.data).not.toBeNull();
+    const entry = body.data!.find((e) => e.ticket === "CTL-99");
+    expect(entry).toBeDefined();
+    expect(entry!.discrepancy).toBeCloseTo(0.05);
+  });
+});
+
 describe("SSE integration (file change -> SSE push)", () => {
   let wtDir: string;
   let sseServer: ReturnType<typeof createServer>;
