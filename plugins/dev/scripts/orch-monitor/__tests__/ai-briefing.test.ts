@@ -31,6 +31,7 @@ function makeSnapshot(
       {
         id: "orch-test",
         path: "/tmp/orch-test",
+        workspace: "default",
         startedAt: "2026-04-14T11:00:00Z",
         currentWave: 1,
         totalWaves: 2,
