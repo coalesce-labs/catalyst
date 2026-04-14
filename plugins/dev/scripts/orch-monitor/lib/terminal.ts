@@ -22,6 +22,12 @@ const STATUS_COLORS: Record<string, string> = {
   dispatched: DIM,
 };
 
+const PREVIEW_STATUS_COLORS: Record<string, string> = {
+  live: GREEN,
+  deploying: YELLOW,
+  failed: RED,
+};
+
 export interface RenderOptions {
   compact?: boolean;
 }
@@ -34,6 +40,7 @@ const COL_STANDARD = {
   pid: 7,
   age: 6,
   pr: 8,
+  preview: 10,
 } as const;
 
 const COL_COMPACT = {
@@ -84,6 +91,14 @@ function formatAge(seconds: number): string {
   return `${Math.floor(seconds / 86400)}d`;
 }
 
+function formatPreview(w: WorkerState): string {
+  const previews = (w as WorkerState & { previews?: Array<{ provider: string; status: string }> }).previews;
+  if (!previews || previews.length === 0) return pad("-", COL_STANDARD.preview);
+  const first = previews[0];
+  const color = PREVIEW_STATUS_COLORS[first.status];
+  return colorize(pad(first.provider, COL_STANDARD.preview), color);
+}
+
 function renderWorkerRow(w: WorkerState, opts?: RenderOptions): string {
   const col = getCols(opts);
   const statusColor = STATUS_COLORS[w.status];
@@ -104,7 +119,8 @@ function renderWorkerRow(w: WorkerState, opts?: RenderOptions): string {
   const label = pad(w.label || "-", stdCol.label);
   const pidStr = w.pid == null ? "-" : String(w.pid);
   const pid = padLeft(w.alive ? pidStr : `${pidStr}!`, stdCol.pid);
-  return `${ticket} ${label} ${status} ${phase} ${pid} ${age} ${pr}`;
+  const preview = formatPreview(w);
+  return `${ticket} ${label} ${status} ${phase} ${pid} ${age} ${pr} ${preview}`;
 }
 
 function renderOrchestrator(
@@ -130,6 +146,9 @@ function renderOrchestrator(
   }
   headParts.push(padLeft("AGE", col.age));
   headParts.push(pad("PR", col.pr));
+  if (!opts?.compact) {
+    headParts.push(pad("PREVIEW", (col as typeof COL_STANDARD).preview));
+  }
   lines.push(BOLD + headParts.join(" ") + RESET);
 
   const workers = Object.values(orch.workers);

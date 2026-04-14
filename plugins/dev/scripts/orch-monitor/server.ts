@@ -32,6 +32,10 @@ import {
   type LinearTicket,
 } from "./lib/linear";
 import type { BriefingProvider } from "./lib/ai-briefing";
+import {
+  createPreviewFetcher,
+  type PreviewFetcher,
+} from "./lib/preview-status";
 import { loadOtelConfig } from "./lib/otel-config";
 import {
   createPrometheusFetcher,
@@ -83,6 +87,8 @@ export interface CreateServerOptions {
   lokiUrl?: string | null;
   prometheusFetcher?: PrometheusFetcher | null;
   lokiFetcher?: LokiFetcher | null;
+  previewFetcher?: PreviewFetcher | null;
+  previewRefreshMs?: number;
   annotationsDbPath?: string;
   terminal?: boolean;
   renderOptions?: RenderOptions;
@@ -90,6 +96,7 @@ export interface CreateServerOptions {
 
 export const DEFAULT_PORT = 7400;
 export const PR_STATUS_REFRESH_MS = 30_000;
+export const PREVIEW_REFRESH_MS = 30_000;
 export const LINEAR_REFRESH_MS = 5 * 60_000;
 
 function collectTicketKeys(snapshot: MonitorSnapshot): string[] {
@@ -150,6 +157,22 @@ function applyPrStatus(
   }
   return snapshot;
 }
+
+function applyPreviewStatus(
+  snapshot: MonitorSnapshot,
+  fetcher: PreviewFetcher,
+): void {
+  for (const orch of snapshot.orchestrators) {
+    for (const worker of Object.values(orch.workers)) {
+      if (!worker.pr) continue;
+      const repo = parseRepoFromPrUrl(worker.pr.url);
+      if (!repo) continue;
+      const links = fetcher.get(repo, worker.pr.number);
+      if (links.length > 0) worker.previews = links;
+    }
+  }
+}
+
 const SSE_EVENTS = EVENT_TYPES;
 const ALLOWED_PUBLIC_EXTENSIONS = new Set([
   ".html",
@@ -224,6 +247,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
     lokiUrl,
     prometheusFetcher: promFetcherOpt,
     lokiFetcher: lokiFetcherOpt,
+    previewFetcher: previewFetcherOpt,
+    previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
   } = opts;
 
@@ -266,6 +291,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
       ? null
       : (lokiFetcherOpt ?? (lokiUrl ? createLokiFetcher({ baseUrl: lokiUrl }) : null));
 
+  const previewFetcher: PreviewFetcher | null =
+    previewFetcherOpt === null
+      ? null
+      : (previewFetcherOpt ?? createPreviewFetcher());
+  let lastPreviewRefresh = 0;
+
   function snapshotWithPrStatus(): MonitorSnapshot {
     const snap = buildSnapshot(wtDir, buildOpts);
     if (prFetcher) {
@@ -276,6 +307,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (refs.length > 0) void prFetcher.refreshAll(refs);
       }
       applyPrStatus(snap, prFetcher);
+    }
+    if (previewFetcher) {
+      const now = Date.now();
+      if (now - lastPreviewRefresh >= previewRefreshMs) {
+        lastPreviewRefresh = now;
+        const refs = collectPrRefs(snap);
+        if (refs.length > 0) void previewFetcher.refreshAll(refs);
+      }
+      applyPreviewStatus(snap, previewFetcher);
     }
     if (linear && !linearStarted) {
       linearStarted = true;
@@ -721,6 +761,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     for (const u of unsubscribers) u();
     watcher?.stop();
     prFetcher?.stop();
+    previewFetcher?.stop();
     linear?.stop();
     briefingProvider?.stop();
     closeDb();

@@ -61,6 +61,12 @@ export interface WorkerState {
   prMergedAt?: string | null;
   fixupCommit?: string;
   followUpTo?: string;
+  previews?: Array<{
+    url: string;
+    provider: string;
+    status: string;
+    source: string;
+  }>;
 }
 
 export interface OrchestratorAnalytics {
