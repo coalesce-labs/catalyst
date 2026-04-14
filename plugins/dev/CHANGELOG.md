@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.5.4](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.3...catalyst-dev-v6.5.4) (2026-04-14)
+
+
+### Bug Fixes
+
+* **dev:** orchestrator-owned poll-until-MERGED (CTL-31) ([#91](https://github.com/coalesce-labs/catalyst/issues/91)) ([2da8f69](https://github.com/coalesce-labs/catalyst/commit/2da8f697dafcf9c878bf3fd1760d90ca34ff44c1))
+
 ## [6.5.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.2...catalyst-dev-v6.5.3) (2026-04-14)
 
 
