@@ -1,5 +1,5 @@
 import { join, resolve as resolvePath, sep } from "path";
-import { realpathSync } from "fs";
+import { realpathSync, writeFileSync, unlinkSync } from "fs";
 import { subscribe } from "./lib/event-bus";
 import {
   buildSnapshot,
@@ -38,6 +38,7 @@ export interface CreateServerOptions {
   wtDir: string;
   startWatcher?: boolean;
   publicDir?: string;
+  pidFile?: string;
   prStatusFetcher?: PrStatusFetcher | null;
   prStatusRefreshMs?: number;
   linearFetcher?: LinearFetcher | null;
@@ -172,6 +173,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     wtDir,
     startWatcher = true,
     publicDir = join(import.meta.dir, "public"),
+    pidFile,
     prStatusFetcher,
     prStatusRefreshMs = PR_STATUS_REFRESH_MS,
     linearFetcher,
@@ -355,6 +357,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
     watcher = startWatching(wtDir, { dbPath, sqlitePollIntervalMs });
   }
 
+  if (pidFile) {
+    try {
+      writeFileSync(pidFile, `${process.pid}\n`);
+    } catch (err) {
+      console.error(`[server] failed to write PID file ${pidFile}:`, err);
+    }
+  }
+
   const originalStop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
     for (const u of unsubscribers) u();
@@ -362,6 +372,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
     prFetcher?.stop();
     linear?.stop();
     sseClients.clear();
+    if (pidFile) {
+      try {
+        unlinkSync(pidFile);
+      } catch (err: unknown) {
+        if (
+          !(err instanceof Error) ||
+          !("code" in err) ||
+          (err as NodeJS.ErrnoException).code !== "ENOENT"
+        ) {
+          console.warn(`[server] failed to remove PID file:`, err);
+        }
+      }
+    }
     return originalStop(closeActiveConnections);
   }) as typeof server.stop;
 
@@ -377,7 +400,17 @@ if (import.meta.main) {
   const DB_PATH =
     process.env.CATALYST_DB_FILE ?? `${CATALYST_DIR}/catalyst.db`;
 
-  const srv = createServer({ port: PORT, wtDir: WT_DIR, dbPath: DB_PATH });
+  const pidFileIdx = process.argv.indexOf("--pid-file");
+  let pidFilePath: string | undefined;
+  if (pidFileIdx >= 0) {
+    pidFilePath = process.argv[pidFileIdx + 1];
+    if (!pidFilePath || pidFilePath.startsWith("--")) {
+      console.error("[server] --pid-file requires a path argument");
+      process.exit(1);
+    }
+  }
+
+  const srv = createServer({ port: PORT, wtDir: WT_DIR, dbPath: DB_PATH, pidFile: pidFilePath });
   const displayHost =
     srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);
   console.info(`Monitor running at http://${displayHost}:${srv.port}`);
