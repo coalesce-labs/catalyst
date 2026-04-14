@@ -83,13 +83,32 @@ describe("SSE server", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("text/event-stream");
 
-    // Read one SSE chunk (the initial snapshot) then abort.
     const reader = res.body!.getReader();
     const { value, done } = await reader.read();
     expect(done).toBe(false);
     const chunk = new TextDecoder().decode(value);
     expect(chunk).toContain("event: snapshot");
     expect(chunk).toContain("data: ");
+
+    await reader.cancel().catch(() => {});
+    controller.abort();
+  });
+
+  it("should deliver initial snapshot in envelope format", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/events`, { signal: controller.signal });
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    const chunk = new TextDecoder().decode(value);
+
+    const dataMatch = chunk.match(/data: (.+)/);
+    expect(dataMatch).toBeTruthy();
+    const envelope = JSON.parse(dataMatch![1]);
+    expect(envelope.type).toBe("snapshot");
+    expect(typeof envelope.timestamp).toBe("string");
+    expect(envelope.source).toBe("filesystem");
+    expect(envelope.data).toBeDefined();
+    expect(envelope.data.orchestrators).toBeDefined();
 
     await reader.cancel().catch(() => {});
     controller.abort();
@@ -117,6 +136,46 @@ describe("SSE server", () => {
     const res = await fetch(`${baseUrl}/public/something.sh`);
     expect([403, 404]).toContain(res.status);
     await res.text();
+  });
+});
+
+describe("SSE filtering", () => {
+  it("delivers all events when no filter is set", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/events`, { signal: controller.signal });
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    const chunk = new TextDecoder().decode(value);
+    expect(chunk).toContain("event: snapshot");
+    await reader.cancel().catch(() => {});
+    controller.abort();
+  });
+
+  it("delivers initial snapshot even with a type filter", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/events?filter=worker-update`, {
+      signal: controller.signal,
+    });
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    const chunk = new TextDecoder().decode(value);
+    expect(chunk).toContain("event: snapshot");
+    await reader.cancel().catch(() => {});
+    controller.abort();
+  });
+
+  it("accepts valid filter params without error", async () => {
+    const controller = new AbortController();
+    const res = await fetch(
+      `${baseUrl}/events?filter=snapshot,worker-update&session=s1&workspace=ws1`,
+      { signal: controller.signal },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+    await res.body!.getReader().cancel().catch(() => {});
+    controller.abort();
   });
 });
 

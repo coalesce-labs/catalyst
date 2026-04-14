@@ -1834,7 +1834,8 @@
           });
           es.addEventListener("snapshot", (e) => {
             try {
-              const parsed = JSON.parse(e.data);
+              const envelope = JSON.parse(e.data);
+              const parsed = envelope.data;
               processSnapshotForEvents(parsed);
               snapshot = parsed;
               render();
@@ -1842,14 +1843,16 @@
           });
           es.addEventListener("worker-update", (e) => {
             try {
-              const payload = JSON.parse(e.data);
+              const envelope = JSON.parse(e.data);
+              const payload = envelope.data;
               processWorkerUpdate(payload);
               patchWorker(payload);
             } catch (err) { console.error("worker-update handler failed", err); }
           });
           es.addEventListener("liveness-change", (e) => {
             try {
-              const payload = JSON.parse(e.data);
+              const envelope = JSON.parse(e.data);
+              const payload = envelope.data;
               processWorkerUpdate(payload);
               patchWorker(payload);
             } catch (err) { console.error("liveness-change handler failed", err); }

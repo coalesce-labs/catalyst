@@ -7,6 +7,7 @@ import {
   type BuildSnapshotOptions,
 } from "./state-reader";
 import { emit } from "./event-bus";
+import { createEvent } from "./events";
 
 export interface WatcherHandle {
   stop: () => void;
@@ -125,7 +126,7 @@ export function startWatching(
 ): WatcherHandle {
   const buildOpts: BuildSnapshotOptions = { dbPath: options.dbPath ?? null };
   let lastSnapshot: MonitorSnapshot = buildSnapshot(baseDir, buildOpts);
-  emit("snapshot", lastSnapshot);
+  emit("snapshot", createEvent("snapshot", lastSnapshot, "filesystem"));
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -137,7 +138,7 @@ export function startWatching(
       debounceTimer = setTimeout(() => {
         const next = buildSnapshot(baseDir, buildOpts);
         for (const change of diffWorkers(lastSnapshot, next)) {
-          emit("worker-update", change);
+          emit("worker-update", createEvent("worker-update", change, "filesystem"));
         }
         lastSnapshot = next;
       }, DEBOUNCE_MS);
@@ -155,25 +156,23 @@ export function startWatching(
   const livenessInterval = setInterval(() => {
     const next = buildSnapshot(baseDir, buildOpts);
     for (const flip of diffLiveness(lastSnapshot, next)) {
-      emit("liveness-change", flip);
+      emit("liveness-change", createEvent("liveness-change", flip, "filesystem"));
     }
     lastSnapshot = next;
   }, LIVENESS_INTERVAL_MS);
 
   const snapshotInterval = setInterval(() => {
     lastSnapshot = buildSnapshot(baseDir, buildOpts);
-    emit("snapshot", lastSnapshot);
+    emit("snapshot", createEvent("snapshot", lastSnapshot, "filesystem"));
   }, SNAPSHOT_INTERVAL_MS);
 
-  // SQLite doesn't support fs.watch semantics reliably (WAL writes bypass the
-  // main file mtime), so poll at a configurable interval when a dbPath is set.
   let sqliteInterval: ReturnType<typeof setInterval> | null = null;
   if (options.dbPath) {
     const pollMs = options.sqlitePollIntervalMs ?? SQLITE_POLL_INTERVAL_MS;
     sqliteInterval = setInterval(() => {
       const next = buildSnapshot(baseDir, buildOpts);
       for (const change of diffSessions(lastSnapshot, next)) {
-        emit("session-update", change);
+        emit("session-update", createEvent("session-update", change, "sqlite"));
       }
       lastSnapshot = next;
     }, pollMs);
