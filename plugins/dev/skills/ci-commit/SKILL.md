@@ -18,6 +18,18 @@ automated workflows, and non-interactive contexts.
 - **Conventional commit format** — maintained for consistency
 - **Safety checks** — never commits sensitive files or thoughts/
 
+## Session Tracking
+
+```bash
+SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
+if [[ -x "$SESSION_SCRIPT" ]]; then
+  CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "ci-commit" \
+    --ticket "${TICKET_ID:-}" \
+    --workflow "${CATALYST_SESSION_ID:-}")
+  export CATALYST_SESSION_ID
+fi
+```
+
 ## Process
 
 ### 1. Analyze Changes
@@ -29,7 +41,12 @@ git diff --cached --name-only
 git diff --name-only
 ```
 
-If no changes exist, exit silently:
+If no changes exist, end the session and exit silently:
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done
+fi
+```
 ```
 No changes to commit.
 ```
@@ -88,6 +105,14 @@ EOF
 ```bash
 git log --oneline -n 1
 git show --stat HEAD
+```
+
+### 6. End Session
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done
+fi
 ```
 
 ## Important

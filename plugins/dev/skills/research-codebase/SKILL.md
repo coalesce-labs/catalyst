@@ -34,6 +34,18 @@ if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
 fi
 ```
 
+## Session Tracking
+
+```bash
+SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
+if [[ -x "$SESSION_SCRIPT" ]]; then
+  CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "research-codebase" \
+    --ticket "${TICKET_ID:-}" \
+    --workflow "${CATALYST_SESSION_ID:-}")
+  export CATALYST_SESSION_ID
+fi
+```
+
 ## Initial Setup
 
 When this command is invoked, respond with:
@@ -81,6 +93,14 @@ The key is to use these agents intelligently:
 - Run multiple agents in parallel when they're searching for different things
 - Each agent knows its job - just tell it what you're looking for
 - Remind agents they are documenting, not evaluating
+
+**After spawning agents, record the phase transition:**
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "researching" --phase 1
+fi
+```
 
 ### Step 4: Wait for all sub-agents to complete and synthesize findings
 
@@ -244,6 +264,14 @@ Research complete!
 Would you like me to:
 1. Dive deeper into any specific area?
 2. Explore related topics?
+```
+
+**End session tracking:**
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done
+fi
 ```
 
 **STOP HERE. Do NOT offer to create plans, use EnterPlanMode, or start implementing. Research is

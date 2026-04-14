@@ -35,6 +35,19 @@ else
 fi
 ```
 
+## Session Tracking
+
+```bash
+SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
+if [[ -x "$SESSION_SCRIPT" ]]; then
+  CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "implement-plan" \
+    --ticket "${TICKET_ID:-}" \
+    --workflow "${CATALYST_SESSION_ID:-}")
+  export CATALYST_SESSION_ID
+  "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "implementing" --phase 1
+fi
+```
+
 ## Initial Response
 
 Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
@@ -237,6 +250,16 @@ Agent(subagent_type="pr-review-toolkit:pr-test-analyzer",
 ```
 
 If critical gaps exist, write the missing tests.
+
+### End Session Tracking
+
+After all quality gates pass (or are skipped), end the session:
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done
+fi
+```
 
 ### Autofix Behavior
 
