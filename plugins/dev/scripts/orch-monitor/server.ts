@@ -31,6 +31,7 @@ import {
   type LinearFetcher,
   type LinearTicket,
 } from "./lib/linear";
+import type { BriefingProvider } from "./lib/ai-briefing";
 
 type BunServer = ReturnType<typeof Bun.serve>;
 
@@ -49,6 +50,7 @@ export interface CreateServerOptions {
   dbPath?: string | null;
   /** SQLite poll interval for the watcher (ms). */
   sqlitePollIntervalMs?: number;
+  briefingProvider?: BriefingProvider | null;
 }
 
 export const DEFAULT_PORT = 7400;
@@ -182,6 +184,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     linearRefreshMs = LINEAR_REFRESH_MS,
     dbPath = null,
     sqlitePollIntervalMs,
+    briefingProvider: briefingProviderOpt,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath };
@@ -197,6 +200,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
       ? null
       : (linearFetcher ?? createLinearFetcher());
   let linearStarted = false;
+
+  const briefingProvider: BriefingProvider | null =
+    briefingProviderOpt === null ? null : (briefingProviderOpt ?? null);
 
   function snapshotWithPrStatus(): MonitorSnapshot {
     const snap = buildSnapshot(wtDir, buildOpts);
@@ -421,6 +427,30 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ tickets });
         }
 
+        if (url.pathname === "/api/briefing") {
+          if (!briefingProvider) {
+            return Response.json({ enabled: false });
+          }
+          const snap = snapshotWithPrStatus();
+          const tickets: Record<string, LinearTicket> = {};
+          if (linear) {
+            for (const key of collectTicketKeys(snap)) {
+              const t = linear.get(key);
+              if (t) tickets[key] = t;
+            }
+          }
+          const result = await briefingProvider.generate(snap, tickets);
+          if (!result) {
+            return Response.json({ enabled: true, briefing: null });
+          }
+          return Response.json({
+            enabled: true,
+            briefing: result.briefing,
+            suggestedLabels: result.suggestedLabels,
+            generatedAt: result.generatedAt,
+          });
+        }
+
         if (
           url.pathname === "/" ||
           url.pathname === "/index.html" ||
@@ -478,6 +508,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     watcher?.stop();
     prFetcher?.stop();
     linear?.stop();
+    briefingProvider?.stop();
     sseClients.clear();
     if (pidFile) {
       try {

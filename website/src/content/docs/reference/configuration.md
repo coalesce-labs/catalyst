@@ -246,6 +246,47 @@ Never committed. One file per project, linked by `projectKey`.
 
 Only configure the integrations you use. The setup script prompts for each one.
 
+### AI Briefing
+
+The monitor dashboard supports AI-powered status summaries. Configuration spans both layers:
+
+**Project config** (`.catalyst/config.json`) — opt-in toggle:
+
+```json
+{
+  "catalyst": {
+    "ai": {
+      "enabled": true
+    }
+  }
+}
+```
+
+**Secrets config** (`~/.config/catalyst/config-{projectKey}.json`) — provider credentials:
+
+```json
+{
+  "ai": {
+    "gateway": "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}",
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5-20251001",
+    "apiKey": "sk-ant-..."
+  }
+}
+```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `ai.enabled` | Yes (project config) | `false` | Master toggle. No API calls when off. |
+| `ai.gateway` | Yes (secrets) | — | Cloudflare AI Gateway URL |
+| `ai.provider` | No | `anthropic` | AI provider: `anthropic` or `openai` |
+| `ai.model` | No | `claude-haiku-4-5-20251001` | Model ID |
+| `ai.apiKey` | Yes (secrets) | — | Provider API key |
+
+The AI briefing generates a natural-language status summary and suggests session labels based on
+Linear ticket context. It is on-demand (button click) or optionally auto-refreshing. Zero cost
+when disabled.
+
 ## Worktree Setup
 
 Define the commands that run when creating a new worktree via `/create-worktree` or `/orchestrate`. This replaces the default auto-detected setup (dependency install + thoughts init) with full project control — like `conductor.json`'s lifecycle hooks.

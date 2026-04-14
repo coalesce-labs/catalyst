@@ -4,6 +4,9 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "fs"
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer } from "../server";
+import type { BriefingProvider } from "../lib/ai-briefing";
+import type { MonitorSnapshot } from "../lib/state-reader";
+import type { LinearTicket } from "../lib/linear";
 
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
@@ -545,5 +548,67 @@ describe("SQLite session endpoints (no dbPath)", () => {
     };
     expect(data.available).toBe(false);
     expect(data.sessions).toEqual([]);
+  });
+});
+
+describe("AI briefing endpoint", () => {
+  it("returns enabled:false when no briefing provider is configured", async () => {
+    const res = await fetch(`${baseUrl}/api/briefing`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { enabled: boolean };
+    expect(data.enabled).toBe(false);
+  });
+
+  it("returns briefing data when provider is configured", async () => {
+    let bTmp: string | null = null;
+    let bServer: ReturnType<typeof createServer> | null = null;
+    try {
+      bTmp = mkdtempSync(join(tmpdir(), "orch-monitor-briefing-"));
+      const bWtDir = join(bTmp, "wt");
+      mkdirSync(bWtDir, { recursive: true });
+      const bOrchDir = join(bWtDir, "orch-briefing");
+      mkdirSync(join(bOrchDir, "workers"), { recursive: true });
+      writeFileSync(
+        join(bOrchDir, "state.json"),
+        JSON.stringify({ id: "orch-briefing", waves: [] }),
+      );
+
+      const mockProvider: BriefingProvider = {
+        generate(_snapshot: MonitorSnapshot, _linear: Record<string, LinearTicket>) {
+          return Promise.resolve({
+            briefing: "All 1 orchestrator is idle.",
+            suggestedLabels: {},
+            generatedAt: "2026-04-14T12:00:00Z",
+          });
+        },
+        stop() {},
+      };
+
+      bServer = createServer({
+        port: 0,
+        wtDir: bWtDir,
+        startWatcher: false,
+        prStatusFetcher: null,
+        linearFetcher: null,
+        briefingProvider: mockProvider,
+      });
+
+      const bUrl = `http://localhost:${bServer.port}`;
+      const res = await fetch(`${bUrl}/api/briefing`);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as {
+        enabled: boolean;
+        briefing: string;
+        suggestedLabels: Record<string, string[]>;
+      };
+      expect(data.enabled).toBe(true);
+      expect(data.briefing).toContain("idle");
+      expect(data.suggestedLabels).toBeDefined();
+    } finally {
+      if (bServer) void bServer.stop(true);
+      if (bTmp) {
+        try { rmSync(bTmp, { recursive: true, force: true }); } catch { /* ignore */ }
+      }
+    }
   });
 });
