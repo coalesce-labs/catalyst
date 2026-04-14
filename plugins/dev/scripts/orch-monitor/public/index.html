@@ -87,6 +87,56 @@
         max-width: 1400px;
         margin: 0 auto;
       }
+      .view-toggle {
+        display: inline-flex;
+        gap: 0;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .vt-btn {
+        background: transparent;
+        border: none;
+        color: var(--muted);
+        font-size: 12px;
+        padding: 4px 12px;
+        cursor: pointer;
+        transition: background 150ms, color 150ms;
+      }
+      .vt-btn:hover { background: var(--panel-2); color: var(--fg); }
+      .vt-btn.active { background: var(--accent); color: #fff; }
+      .workspace-group {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--bg);
+        overflow: hidden;
+      }
+      .workspace-group > .card { border-radius: 0; border-left: 0; border-right: 0; }
+      .workspace-group > .card:first-of-type { border-top: 0; }
+      .workspace-group > .card:last-of-type { border-bottom: 0; }
+      .ws-head {
+        padding: 10px 14px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+      .ws-head h2 {
+        font-size: 15px;
+        font-weight: 600;
+        margin: 0;
+        flex: 1 1 auto;
+      }
+      .ws-stats {
+        display: flex;
+        gap: 14px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .ws-stat { display: inline-flex; align-items: center; gap: 4px; }
+      .ws-stat .ws-val { color: var(--fg); font-weight: 500; }
       .card {
         background: var(--panel);
         border: 1px solid var(--border);
@@ -1447,6 +1497,10 @@
         <span id="conn-text">connecting...</span>
       </span>
       <span id="last-update" class="conn"></span>
+      <span class="view-toggle">
+        <button id="view-ws" class="vt-btn active">Workspaces</button>
+        <button id="view-all" class="vt-btn">All</button>
+      </span>
     </header>
     <div class="layout">
     <nav id="sidebar" class="sidebar">
@@ -1576,6 +1630,8 @@
         const linearByKey = new Map();
         // orchId -> bool (collapsed)
         const ganttCollapsed = new Map();
+        // View mode: "workspace" or "all"
+        let viewMode = "workspace";
 
         const PHASE_COLORS = {
           dispatched: "#475569",
@@ -2412,6 +2468,54 @@
             '<div class="attn-list">' + list + "</div>";
         }
 
+        function groupByWorkspace(orchList) {
+          const map = {};
+          const DONE = { done: 1, merged: 1, failed: 1, stalled: 1, signal_corrupt: 1 };
+          for (const o of orchList) {
+            const ws = o.workspace || "default";
+            if (!map[ws]) map[ws] = { workspace: ws, orchestrators: [], stats: { sessionCount: 0, activeCount: 0, totalCost: 0, lastActivity: "" } };
+            map[ws].orchestrators.push(o);
+            const workers = o.workers || {};
+            for (const t of Object.keys(workers)) {
+              const w = workers[t];
+              map[ws].stats.sessionCount++;
+              if (!DONE[w.status]) map[ws].stats.activeCount++;
+              const live = (w.cost && Number(w.cost.costUSD)) || 0;
+              map[ws].stats.totalCost += live;
+              if (w.updatedAt && w.updatedAt > map[ws].stats.lastActivity) {
+                map[ws].stats.lastActivity = w.updatedAt;
+              }
+            }
+          }
+          return Object.values(map).sort(function (a, b) {
+            return a.workspace.localeCompare(b.workspace);
+          });
+        }
+
+        function renderWorkspaceGroup(group) {
+          const s = group.stats;
+          const costHtml = s.totalCost > 0
+            ? '<span class="ws-stat"><span class="ws-val">$' + s.totalCost.toFixed(2) + '</span> cost</span>'
+            : "";
+          const lastHtml = s.lastActivity
+            ? '<span class="ws-stat">last ' + fmtSince((Date.now() - Date.parse(s.lastActivity)) / 1000) + ' ago</span>'
+            : "";
+          return (
+            '<div class="workspace-group" data-workspace="' + esc(group.workspace) + '">' +
+            '<div class="ws-head">' +
+            '<h2>' + esc(group.workspace) + '</h2>' +
+            '<div class="ws-stats">' +
+            '<span class="ws-stat"><span class="ws-val">' + s.sessionCount + '</span> session' + (s.sessionCount === 1 ? '' : 's') + '</span>' +
+            '<span class="ws-stat"><span class="ws-val">' + s.activeCount + '</span> active</span>' +
+            costHtml +
+            lastHtml +
+            '</div>' +
+            '</div>' +
+            group.orchestrators.map(renderOrch).join("") +
+            '</div>'
+          );
+        }
+
         function render() {
           if (snapshot.timestamp) {
             $lastUpdate.textContent =
@@ -2425,6 +2529,9 @@
           if (!list.length) {
             $orch.innerHTML =
               '<div class="card"><div class="empty">No active orchestrators found.</div></div>';
+          } else if (viewMode === "workspace") {
+            const groups = groupByWorkspace(list);
+            $orch.innerHTML = groups.map(renderWorkspaceGroup).join("");
           } else {
             $orch.innerHTML = list.map(renderOrch).join("");
           }
@@ -4020,6 +4127,21 @@
             openPalette();
             return;
           }
+
+        // ---- Workspace view toggle ----
+        const $viewWs = document.getElementById("view-ws");
+        const $viewAll = document.getElementById("view-all");
+        $viewWs.addEventListener("click", function () {
+          viewMode = "workspace";
+          $viewWs.classList.add("active");
+          $viewAll.classList.remove("active");
+          render();
+        });
+        $viewAll.addEventListener("click", function () {
+          viewMode = "all";
+          $viewAll.classList.add("active");
+          $viewWs.classList.remove("active");
+          render();
         });
 
         setConnected("pending");

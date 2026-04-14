@@ -97,6 +97,7 @@ export interface Wave {
 export interface OrchestratorState {
   id: string;
   path: string;
+  workspace: string;
   startedAt: string;
   currentWave: number;
   totalWaves: number;
@@ -105,6 +106,19 @@ export interface OrchestratorState {
   dashboard: string | null;
   briefings: Record<number, string>;
   attention: unknown[];
+}
+
+export interface WorkspaceStats {
+  sessionCount: number;
+  activeCount: number;
+  totalCost: number;
+  lastActivity: string;
+}
+
+export interface WorkspaceGroup {
+  workspace: string;
+  orchestrators: OrchestratorState[];
+  stats: WorkspaceStats;
 }
 
 export interface MonitorSnapshot {
@@ -145,14 +159,19 @@ function isOrchestratorDir(candidate: string): boolean {
   }
 }
 
+export interface ScannedOrchestrator {
+  path: string;
+  workspace: string;
+}
+
 /**
  * Scan for orch-* directories under baseDir.
  *
  * Supports both layouts used by the orchestrate skill:
- *   (1) baseDir/orch-*                  (flat)
- *   (2) baseDir/<projectKey>/orch-*    (nested by project — current default)
+ *   (1) baseDir/orch-*                  (flat)        → workspace = "default"
+ *   (2) baseDir/<projectKey>/orch-*    (nested)       → workspace = <projectKey>
  */
-export function scanOrchestrators(baseDir: string): string[] {
+export function scanOrchestrators(baseDir: string): ScannedOrchestrator[] {
   if (!existsSync(baseDir)) return [];
 
   let entries: string[];
@@ -163,11 +182,11 @@ export function scanOrchestrators(baseDir: string): string[] {
     return [];
   }
 
-  const matches: string[] = [];
+  const matches: ScannedOrchestrator[] = [];
   for (const name of entries) {
     const full = join(baseDir, name);
     if (isOrchestratorDir(full)) {
-      matches.push(full);
+      matches.push({ path: full, workspace: "default" });
       continue;
     }
     try {
@@ -183,7 +202,7 @@ export function scanOrchestrators(baseDir: string): string[] {
     }
     for (const child of children) {
       const childPath = join(full, child);
-      if (isOrchestratorDir(childPath)) matches.push(childPath);
+      if (isOrchestratorDir(childPath)) matches.push({ path: childPath, workspace: name });
     }
   }
   return matches;
@@ -330,7 +349,7 @@ function corruptWorkerPlaceholder(filename: string, error: string): WorkerState 
   };
 }
 
-export function readOrchestratorState(orchDir: string): OrchestratorState {
+export function readOrchestratorState(orchDir: string, workspace = "default"): OrchestratorState {
   const id = basename(orchDir);
   const statePath = join(orchDir, "state.json");
   const stateRead = readJson(statePath);
@@ -406,6 +425,7 @@ export function readOrchestratorState(orchDir: string): OrchestratorState {
   return {
     id: asString((state as { id?: unknown }).id, id),
     path: orchDir,
+    workspace,
     startedAt: asString((state as { startedAt?: unknown }).startedAt),
     currentWave: asNumber((state as { currentWave?: unknown }).currentWave),
     totalWaves: asNumber(
@@ -421,9 +441,9 @@ export function readOrchestratorState(orchDir: string): OrchestratorState {
 }
 
 export function buildAnalyticsSnapshot(baseDir: string): AnalyticsSnapshot {
-  const dirs = scanOrchestrators(baseDir);
+  const scanned = scanOrchestrators(baseDir);
   const orchestrators: OrchestratorAnalytics[] = [];
-  for (const orchDir of dirs) {
+  for (const { path: orchDir } of scanned) {
     const id = basename(orchDir);
     const workers: Record<string, WorkerAnalytics | null> = {};
     const workersDir = join(orchDir, "workers");
@@ -455,13 +475,13 @@ export function buildSnapshot(
   baseDir: string,
   options: BuildSnapshotOptions = {},
 ): MonitorSnapshot {
-  const dirs = scanOrchestrators(baseDir);
+  const scanned = scanOrchestrators(baseDir);
   const orchestrators: OrchestratorState[] = [];
-  for (const d of dirs) {
+  for (const { path, workspace } of scanned) {
     try {
-      orchestrators.push(readOrchestratorState(d));
+      orchestrators.push(readOrchestratorState(path, workspace));
     } catch (err) {
-      console.error(`[state-reader] readOrchestratorState failed for ${d}:`, err);
+      console.error(`[state-reader] readOrchestratorState failed for ${path}:`, err);
     }
   }
 
@@ -488,15 +508,15 @@ export function buildSessionDetail(
   orchId: string,
   ticket: string,
 ): SessionDetail | null {
-  const dirs = scanOrchestrators(baseDir);
-  const orchDir = dirs.find((d) => basename(d) === orchId);
-  if (!orchDir) return null;
+  const scanned = scanOrchestrators(baseDir);
+  const entry = scanned.find((d) => basename(d.path) === orchId);
+  if (!entry) return null;
 
-  const orch = readOrchestratorState(orchDir);
+  const orch = readOrchestratorState(entry.path, entry.workspace);
   const worker = orch.workers[ticket];
   if (!worker) return null;
 
-  const analytics = parseOutputJson(analyticsPath(orchDir, ticket));
+  const analytics = parseOutputJson(analyticsPath(entry.path, ticket));
   if (analytics) analytics.ticket = ticket;
 
   return {
@@ -505,6 +525,46 @@ export function buildSessionDetail(
     worker,
     analytics,
   };
+}
+
+const DONE_STATUSES = new Set(["done", "merged", "failed", "stalled", "signal_corrupt"]);
+
+export function groupByWorkspace(snapshot: MonitorSnapshot): WorkspaceGroup[] {
+  const map = new Map<string, OrchestratorState[]>();
+  for (const orch of snapshot.orchestrators) {
+    const ws = orch.workspace;
+    const list = map.get(ws);
+    if (list) list.push(orch);
+    else map.set(ws, [orch]);
+  }
+
+  const groups: WorkspaceGroup[] = [];
+  for (const [workspace, orchestrators] of map) {
+    let sessionCount = 0;
+    let activeCount = 0;
+    let totalCost = 0;
+    let lastActivity = "";
+
+    for (const orch of orchestrators) {
+      for (const worker of Object.values(orch.workers)) {
+        sessionCount++;
+        if (!DONE_STATUSES.has(worker.status)) activeCount++;
+        if (worker.cost?.costUSD) totalCost += worker.cost.costUSD;
+        if (worker.updatedAt && worker.updatedAt > lastActivity) {
+          lastActivity = worker.updatedAt;
+        }
+      }
+    }
+
+    groups.push({
+      workspace,
+      orchestrators,
+      stats: { sessionCount, activeCount, totalCost, lastActivity },
+    });
+  }
+
+  groups.sort((a, b) => a.workspace.localeCompare(b.workspace));
+  return groups;
 }
 
 function assertWorktreeInside(baseDir: string, worktreePath: string): void {
