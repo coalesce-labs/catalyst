@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer } from "../server";
@@ -186,4 +187,126 @@ describe("SSE integration (file change -> SSE push)", () => {
     expect(received).toContain("event: worker-update");
     expect(received).toContain("SSE-1");
   }, 10000);
+});
+
+describe("SQLite session endpoints", () => {
+  let sessTmp: string;
+  let sessServer: ReturnType<typeof createServer>;
+  let sessBaseUrl: string;
+  let dbPath: string;
+
+  beforeAll(() => {
+    sessTmp = mkdtempSync(join(tmpdir(), "orch-monitor-sess-"));
+    const wtDir = join(sessTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    dbPath = join(sessTmp, "catalyst.db");
+
+    const schemaSql = readFileSync(
+      join(__dirname, "..", "..", "db-migrations", "001_initial_schema.sql"),
+      "utf8",
+    );
+    const db = new Database(dbPath, { create: true });
+    db.exec("PRAGMA foreign_keys = ON;");
+    db.exec(schemaSql);
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO sessions (session_id, workflow_id, ticket_key, status, phase, started_at, updated_at)
+       VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+      ["solo-1", "CTL-40", "researching", 1, now, now],
+    );
+    db.run(
+      `INSERT INTO sessions (session_id, workflow_id, ticket_key, status, phase, started_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ["orch-1", "orch-abc", "CTL-50", "in_progress", 2, now, now],
+    );
+    db.close();
+
+    sessServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      dbPath,
+    });
+    sessBaseUrl = `http://localhost:${sessServer.port}`;
+  });
+
+  afterAll(() => {
+    void sessServer?.stop(true);
+    try {
+      rmSync(sessTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("returns all sessions by default", async () => {
+    const res = await fetch(`${sessBaseUrl}/api/sessions`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      available: boolean;
+      sessions: { sessionId: string }[];
+    };
+    expect(data.available).toBe(true);
+    expect(data.sessions).toHaveLength(2);
+  });
+
+  it("filters to solo sessions when ?solo=true", async () => {
+    const res = await fetch(`${sessBaseUrl}/api/sessions?solo=true`);
+    const data = (await res.json()) as {
+      sessions: { sessionId: string; workflowId: string | null }[];
+    };
+    expect(data.sessions).toHaveLength(1);
+    expect(data.sessions[0].sessionId).toBe("solo-1");
+    expect(data.sessions[0].workflowId).toBeNull();
+  });
+
+  it("filters by ticket", async () => {
+    const res = await fetch(`${sessBaseUrl}/api/sessions?ticket=CTL-50`);
+    const data = (await res.json()) as { sessions: { sessionId: string }[] };
+    expect(data.sessions).toHaveLength(1);
+    expect(data.sessions[0].sessionId).toBe("orch-1");
+  });
+
+  it("includes sessions in /api/snapshot", async () => {
+    const res = await fetch(`${sessBaseUrl}/api/snapshot`);
+    const data = (await res.json()) as {
+      sessionStoreAvailable: boolean;
+      sessions: { sessionId: string }[];
+    };
+    expect(data.sessionStoreAvailable).toBe(true);
+    expect(data.sessions.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("SQLite session endpoints (no dbPath)", () => {
+  let sessTmp: string;
+  let noDbServer: ReturnType<typeof createServer>;
+  let url: string;
+
+  beforeAll(() => {
+    sessTmp = mkdtempSync(join(tmpdir(), "orch-monitor-nodb-"));
+    const wtDir = join(sessTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    noDbServer = createServer({ port: 0, wtDir, startWatcher: false });
+    url = `http://localhost:${noDbServer.port}`;
+  });
+
+  afterAll(() => {
+    void noDbServer?.stop(true);
+    try {
+      rmSync(sessTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("returns available:false when dbPath not configured", async () => {
+    const res = await fetch(`${url}/api/sessions`);
+    const data = (await res.json()) as {
+      available: boolean;
+      sessions: unknown[];
+    };
+    expect(data.available).toBe(false);
+    expect(data.sessions).toEqual([]);
+  });
 });

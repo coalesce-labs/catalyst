@@ -3,6 +3,14 @@ import { join, basename, resolve as resolvePath } from "path";
 import { execSync } from "child_process";
 import { checkProcessAlive } from "./liveness";
 import { parseOutputJson, analyticsPath, type WorkerAnalytics } from "./output-parser";
+import {
+  readSessionStore,
+  sessionStoreAvailable,
+  type SessionState,
+  type SessionQuery,
+} from "./session-store";
+
+export type { SessionState, SessionQuery } from "./session-store";
 
 export interface DefinitionOfDone {
   testsWrittenFirst?: boolean;
@@ -88,6 +96,13 @@ export interface OrchestratorState {
 export interface MonitorSnapshot {
   timestamp: string;
   orchestrators: OrchestratorState[];
+  sessions: SessionState[];
+  sessionStoreAvailable: boolean;
+}
+
+export interface BuildSnapshotOptions {
+  dbPath?: string | null;
+  sessionQuery?: SessionQuery;
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {
@@ -416,7 +431,10 @@ export function buildAnalyticsSnapshot(baseDir: string): AnalyticsSnapshot {
   };
 }
 
-export function buildSnapshot(baseDir: string): MonitorSnapshot {
+export function buildSnapshot(
+  baseDir: string,
+  options: BuildSnapshotOptions = {},
+): MonitorSnapshot {
   const dirs = scanOrchestrators(baseDir);
   const orchestrators: OrchestratorState[] = [];
   for (const d of dirs) {
@@ -426,9 +444,22 @@ export function buildSnapshot(baseDir: string): MonitorSnapshot {
       console.error(`[state-reader] readOrchestratorState failed for ${d}:`, err);
     }
   }
+
+  let sessions: SessionState[] = [];
+  let storeAvailable = false;
+  const dbPath = options.dbPath ?? null;
+  if (dbPath) {
+    storeAvailable = sessionStoreAvailable(dbPath);
+    if (storeAvailable) {
+      sessions = readSessionStore(dbPath, options.sessionQuery ?? {}).sessions;
+    }
+  }
+
   return {
     timestamp: new Date().toISOString(),
     orchestrators,
+    sessions,
+    sessionStoreAvailable: storeAvailable,
   };
 }
 
