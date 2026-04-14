@@ -915,8 +915,47 @@ to `${ORCH_DIR}/wave-${N}-briefing.md` summarizing what prior waves learned.
 3. Read any research documents workers saved to `thoughts/shared/`
 4. Synthesize into: patterns established, new dependencies added, test helpers created,
    gotchas discovered
+5. **Pre-assign Supabase migration numbers** for the upcoming wave (see Migration Number
+   Assignments below)
 
 Use the wave briefing template from `plugins/dev/templates/orchestrate-wave-briefing.md`.
+
+### Migration Number Assignments (CTL-29)
+
+When two tickets in the same wave both add a Supabase migration, they can race on the same
+`NNN_` filename prefix — whichever PR merges first wins, the other must rebase post-PR. The
+orchestrator pre-assigns numbers in the briefing to prevent this.
+
+**Generation step** (run before rendering the template):
+
+```bash
+# Scan migrations dir and assign numbers to migration-likely tickets in the NEXT wave.
+# Prints a Markdown "## Migration Number Assignments" section, or nothing if the
+# project has no supabase/migrations/ directory or no ticket in the wave is migration-
+# likely. Safe to append unconditionally to the briefing.
+MIG_SECTION=$("${CLAUDE_PLUGIN_ROOT}/scripts/pre-assign-migrations.sh" \
+  --migrations-dir "${ORCH_DIR}/supabase/migrations" \
+  --tickets "${NEXT_WAVE_TICKETS[*]}") || MIG_SECTION=""
+```
+
+The script replaces the `${MIGRATION_ASSIGNMENTS}` placeholder in the briefing template.
+
+**Detection heuristic** (matches `pre-assign-migrations.sh`):
+
+- Label match (case-insensitive): `database`, `migration`, `schema`
+- Keyword match in title or description (case-insensitive): `supabase/migrations`,
+  `migration`, `schema`, `ALTER TABLE`, `CREATE TABLE`
+
+**Behavior:**
+
+- If `supabase/migrations/` does not exist in the orchestrator worktree, the script emits
+  nothing (repo-agnostic — projects without Supabase are unaffected).
+- If no ticket in the wave is migration-likely, it emits nothing.
+- Otherwise it scans for the highest existing `NNN_` prefix and assigns `NNN+1`, `NNN+2`, ...
+  to each migration-likely ticket in input order.
+
+**Tests:** `plugins/dev/scripts/__tests__/pre-assign-migrations.test.sh` covers the detection
+heuristic, the scanning logic, repo-agnostic fallback, and sequential assignment.
 
 **Thoughts persistence:** Every briefing is copied to `thoughts/shared/handoffs/${ORCH_NAME}/`
 with timestamped filenames (`YYYY-MM-DD_HH-MM-SS_wave-N-briefing.md`). This ensures briefings
