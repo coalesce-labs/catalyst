@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.21.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.20.0...catalyst-dev-v6.21.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** add preview deployment links to orch-monitor ([#125](https://github.com/coalesce-labs/catalyst/issues/125)) ([2400616](https://github.com/coalesce-labs/catalyst/commit/2400616a424baa6987c639a6397dd061152b5d86))
+
 ## [6.20.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.19.0...catalyst-dev-v6.20.0) (2026-04-14)
 
 
