@@ -54,6 +54,12 @@ export function validateSignalFile(obj: unknown): boolean {
   if ("lastHeartbeat" in o && o.lastHeartbeat !== null && o.lastHeartbeat !== undefined) {
     if (!isIsoDateTimeString(o.lastHeartbeat)) return false;
   }
+  if ("fixupCommit" in o && o.fixupCommit !== null && o.fixupCommit !== undefined) {
+    if (typeof o.fixupCommit !== "string" || o.fixupCommit.length === 0) return false;
+  }
+  if ("followUpTo" in o && o.followUpTo !== null && o.followUpTo !== undefined) {
+    if (typeof o.followUpTo !== "string" || o.followUpTo.length === 0) return false;
+  }
 
   return true;
 }
