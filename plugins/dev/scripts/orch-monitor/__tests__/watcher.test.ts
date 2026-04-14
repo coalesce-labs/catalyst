@@ -1,15 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
   diffWorkers,
+  diffSessions,
   diffLiveness,
   isRelevant,
   startWatching,
 } from "../lib/watcher";
 import { subscribe } from "../lib/event-bus";
-import type { MonitorSnapshot, WorkerState } from "../lib/state-reader";
+import type { MonitorSnapshot, SessionState, WorkerState } from "../lib/state-reader";
 
 function makeWorker(overrides: Partial<WorkerState> = {}): WorkerState {
   return {
@@ -29,7 +31,10 @@ function makeWorker(overrides: Partial<WorkerState> = {}): WorkerState {
   };
 }
 
-function makeSnapshot(workers: Record<string, WorkerState>): MonitorSnapshot {
+function makeSnapshot(
+  workers: Record<string, WorkerState>,
+  sessions: SessionState[] = [],
+): MonitorSnapshot {
   return {
     timestamp: "2026-04-13T18:00:00Z",
     orchestrators: [
@@ -46,6 +51,29 @@ function makeSnapshot(workers: Record<string, WorkerState>): MonitorSnapshot {
         attention: [],
       },
     ],
+    sessions,
+    sessionStoreAvailable: sessions.length > 0,
+  };
+}
+
+function makeSession(overrides: Partial<SessionState> = {}): SessionState {
+  return {
+    sessionId: "sess-1",
+    workflowId: null,
+    ticket: "CTL-40",
+    label: "oneshot",
+    skillName: "oneshot",
+    status: "researching",
+    phase: 1,
+    pid: null,
+    alive: false,
+    startedAt: "2026-04-14T19:00:00Z",
+    updatedAt: "2026-04-14T19:00:00Z",
+    completedAt: null,
+    timeSinceUpdate: 0,
+    cost: null,
+    pr: null,
+    ...overrides,
   };
 }
 
@@ -113,6 +141,51 @@ describe("diffWorkers", () => {
   it("returns empty array when nothing changed", () => {
     const snap = makeSnapshot({ "T-1": makeWorker() });
     expect(diffWorkers(snap, snap)).toEqual([]);
+  });
+});
+
+describe("diffSessions", () => {
+  it("emits when a new session appears", () => {
+    const prev = makeSnapshot({}, []);
+    const next = makeSnapshot({}, [makeSession({ sessionId: "new-1" })]);
+    expect(diffSessions(prev, next).map((c) => c.session.sessionId)).toEqual([
+      "new-1",
+    ]);
+  });
+
+  it("emits when status / phase / updatedAt / pid changes", () => {
+    const base = makeSession({ sessionId: "s-1" });
+    const prev = makeSnapshot({}, [base]);
+
+    expect(
+      diffSessions(
+        prev,
+        makeSnapshot({}, [{ ...base, status: "done" }]),
+      ),
+    ).toHaveLength(1);
+    expect(
+      diffSessions(
+        prev,
+        makeSnapshot({}, [{ ...base, phase: 5 }]),
+      ),
+    ).toHaveLength(1);
+    expect(
+      diffSessions(
+        prev,
+        makeSnapshot({}, [{ ...base, updatedAt: "2026-04-14T20:00:00Z" }]),
+      ),
+    ).toHaveLength(1);
+    expect(
+      diffSessions(
+        prev,
+        makeSnapshot({}, [{ ...base, pid: 9999 }]),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not emit when nothing changed", () => {
+    const snap = makeSnapshot({}, [makeSession()]);
+    expect(diffSessions(snap, snap)).toEqual([]);
   });
 });
 
@@ -198,5 +271,45 @@ describe("startWatching integration", () => {
     const handle = startWatching(tmp);
     handle.stop();
     expect(() => handle.stop()).not.toThrow();
+  });
+
+  it("polls SQLite and emits session-update events when dbPath is given", async () => {
+    const dbPath = join(tmp, "catalyst.db");
+    const schemaSql = readFileSync(
+      join(__dirname, "..", "..", "db-migrations", "001_initial_schema.sql"),
+      "utf8",
+    );
+    const db = new Database(dbPath, { create: true });
+    db.exec("PRAGMA foreign_keys = ON;");
+    db.exec(schemaSql);
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO sessions (session_id, status, phase, started_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      ["sess-1", "researching", 1, now, now],
+    );
+    db.close();
+
+    const updates: unknown[] = [];
+    const unsub = subscribe("session-update", (d) => updates.push(d));
+    const handle = startWatching(tmp, {
+      dbPath,
+      sqlitePollIntervalMs: 50,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Mutate the DB: status change should trigger a session-update
+    const db2 = new Database(dbPath);
+    db2.run(
+      `UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?`,
+      ["done", new Date().toISOString(), "sess-1"],
+    );
+    db2.close();
+
+    await new Promise((r) => setTimeout(r, 200));
+    unsub();
+    handle.stop();
+
+    expect(updates.length).toBeGreaterThanOrEqual(1);
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -361,6 +362,35 @@ describe("buildSnapshot", () => {
     const snap = buildSnapshot(join(tmpRoot, "nope"));
     expect(snap.orchestrators).toEqual([]);
     expect(typeof snap.timestamp).toBe("string");
+  });
+
+  it("includes empty sessions array and sessionStoreAvailable=false when no dbPath given", () => {
+    const snap = buildSnapshot(tmpRoot);
+    expect(snap.sessions).toEqual([]);
+    expect(snap.sessionStoreAvailable).toBe(false);
+  });
+
+  it("includes sessions from SQLite store when dbPath is provided", () => {
+    const dbPath = join(tmpRoot, "catalyst.db");
+    const schemaSql = readFileSync(
+      join(__dirname, "..", "..", "db-migrations", "001_initial_schema.sql"),
+      "utf8",
+    );
+    const db = new Database(dbPath, { create: true });
+    db.exec("PRAGMA foreign_keys = ON;");
+    db.exec(schemaSql);
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO sessions (session_id, workflow_id, ticket_key, status, phase, started_at, updated_at)
+       VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+      ["solo-1", "CTL-40", "researching", 1, now, now],
+    );
+    db.close();
+
+    const snap = buildSnapshot(tmpRoot, { dbPath });
+    expect(snap.sessionStoreAvailable).toBe(true);
+    expect(snap.sessions).toHaveLength(1);
+    expect(snap.sessions[0].sessionId).toBe("solo-1");
   });
 });
 

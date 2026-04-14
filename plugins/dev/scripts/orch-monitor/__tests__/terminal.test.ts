@@ -46,6 +46,8 @@ function makeSnapshot(orchestrators: OrchestratorState[]): MonitorSnapshot {
   return {
     timestamp: new Date().toISOString(),
     orchestrators,
+    sessions: [],
+    sessionStoreAvailable: false,
   };
 }
 

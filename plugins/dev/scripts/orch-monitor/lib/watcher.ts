@@ -3,6 +3,8 @@ import {
   buildSnapshot,
   type MonitorSnapshot,
   type WorkerState,
+  type SessionState,
+  type BuildSnapshotOptions,
 } from "./state-reader";
 import { emit } from "./event-bus";
 
@@ -15,6 +17,10 @@ export interface WorkerChange {
   worker: WorkerState;
 }
 
+export interface SessionChange {
+  session: SessionState;
+}
+
 function flattenWorkers(snap: MonitorSnapshot): Map<string, WorkerChange> {
   const out = new Map<string, WorkerChange>();
   for (const orch of snap.orchestrators) {
@@ -22,6 +28,12 @@ function flattenWorkers(snap: MonitorSnapshot): Map<string, WorkerChange> {
       out.set(`${orch.id}:${key}`, { orchId: orch.id, worker: w });
     }
   }
+  return out;
+}
+
+function flattenSessions(snap: MonitorSnapshot): Map<string, SessionState> {
+  const out = new Map<string, SessionState>();
+  for (const s of snap.sessions) out.set(s.sessionId, s);
   return out;
 }
 
@@ -42,6 +54,28 @@ export function diffWorkers(
       before.worker.pid !== v.worker.pid
     ) {
       changed.push(v);
+    }
+  }
+  return changed;
+}
+
+export function diffSessions(
+  prev: MonitorSnapshot,
+  next: MonitorSnapshot,
+): SessionChange[] {
+  const prevMap = flattenSessions(prev);
+  const nextMap = flattenSessions(next);
+  const changed: SessionChange[] = [];
+  for (const [id, s] of nextMap) {
+    const before = prevMap.get(id);
+    if (
+      !before ||
+      before.status !== s.status ||
+      before.phase !== s.phase ||
+      before.updatedAt !== s.updatedAt ||
+      before.pid !== s.pid
+    ) {
+      changed.push({ session: s });
     }
   }
   return changed;
@@ -78,9 +112,19 @@ export function isRelevant(filename: string): boolean {
 export const DEBOUNCE_MS = 200;
 export const LIVENESS_INTERVAL_MS = 5000;
 export const SNAPSHOT_INTERVAL_MS = 30000;
+export const SQLITE_POLL_INTERVAL_MS = 2000;
 
-export function startWatching(baseDir: string): WatcherHandle {
-  let lastSnapshot: MonitorSnapshot = buildSnapshot(baseDir);
+export interface StartWatchingOptions {
+  dbPath?: string | null;
+  sqlitePollIntervalMs?: number;
+}
+
+export function startWatching(
+  baseDir: string,
+  options: StartWatchingOptions = {},
+): WatcherHandle {
+  const buildOpts: BuildSnapshotOptions = { dbPath: options.dbPath ?? null };
+  let lastSnapshot: MonitorSnapshot = buildSnapshot(baseDir, buildOpts);
   emit("snapshot", lastSnapshot);
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -91,7 +135,7 @@ export function startWatching(baseDir: string): WatcherHandle {
       if (!filename || !isRelevant(String(filename))) return;
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
-        const next = buildSnapshot(baseDir);
+        const next = buildSnapshot(baseDir, buildOpts);
         for (const change of diffWorkers(lastSnapshot, next)) {
           emit("worker-update", change);
         }
@@ -109,7 +153,7 @@ export function startWatching(baseDir: string): WatcherHandle {
   }
 
   const livenessInterval = setInterval(() => {
-    const next = buildSnapshot(baseDir);
+    const next = buildSnapshot(baseDir, buildOpts);
     for (const flip of diffLiveness(lastSnapshot, next)) {
       emit("liveness-change", flip);
     }
@@ -117,9 +161,23 @@ export function startWatching(baseDir: string): WatcherHandle {
   }, LIVENESS_INTERVAL_MS);
 
   const snapshotInterval = setInterval(() => {
-    lastSnapshot = buildSnapshot(baseDir);
+    lastSnapshot = buildSnapshot(baseDir, buildOpts);
     emit("snapshot", lastSnapshot);
   }, SNAPSHOT_INTERVAL_MS);
+
+  // SQLite doesn't support fs.watch semantics reliably (WAL writes bypass the
+  // main file mtime), so poll at a configurable interval when a dbPath is set.
+  let sqliteInterval: ReturnType<typeof setInterval> | null = null;
+  if (options.dbPath) {
+    const pollMs = options.sqlitePollIntervalMs ?? SQLITE_POLL_INTERVAL_MS;
+    sqliteInterval = setInterval(() => {
+      const next = buildSnapshot(baseDir, buildOpts);
+      for (const change of diffSessions(lastSnapshot, next)) {
+        emit("session-update", change);
+      }
+      lastSnapshot = next;
+    }, pollMs);
+  }
 
   let stopped = false;
   return {
@@ -129,6 +187,7 @@ export function startWatching(baseDir: string): WatcherHandle {
       if (debounceTimer) clearTimeout(debounceTimer);
       clearInterval(livenessInterval);
       clearInterval(snapshotInterval);
+      if (sqliteInterval) clearInterval(sqliteInterval);
       try {
         watcher?.close();
       } catch (err) {

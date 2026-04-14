@@ -5,7 +5,10 @@ import {
   buildSnapshot,
   buildAnalyticsSnapshot,
   type MonitorSnapshot,
+  type BuildSnapshotOptions,
+  type SessionState,
 } from "./lib/state-reader";
+import { readSessionStore } from "./lib/session-store";
 import { startWatching, type WatcherHandle } from "./lib/watcher";
 import {
   createPrStatusFetcher,
@@ -31,6 +34,10 @@ export interface CreateServerOptions {
   prStatusRefreshMs?: number;
   linearFetcher?: LinearFetcher | null;
   linearRefreshMs?: number;
+  /** Path to the SQLite session store. Pass `null` to disable. */
+  dbPath?: string | null;
+  /** SQLite poll interval for the watcher (ms). */
+  sqlitePollIntervalMs?: number;
 }
 
 export const DEFAULT_PORT = 7400;
@@ -95,7 +102,12 @@ function applyPrStatus(
   }
   return snapshot;
 }
-const SSE_EVENTS = ["snapshot", "worker-update", "liveness-change"] as const;
+const SSE_EVENTS = [
+  "snapshot",
+  "worker-update",
+  "liveness-change",
+  "session-update",
+] as const;
 const ALLOWED_PUBLIC_EXTENSIONS = new Set([
   ".html",
   ".css",
@@ -161,7 +173,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
     prStatusRefreshMs = PR_STATUS_REFRESH_MS,
     linearFetcher,
     linearRefreshMs = LINEAR_REFRESH_MS,
+    dbPath = null,
+    sqlitePollIntervalMs,
   } = opts;
+
+  const buildOpts: BuildSnapshotOptions = { dbPath };
 
   const prFetcher: PrStatusFetcher | null =
     prStatusFetcher === null
@@ -176,7 +192,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   let linearStarted = false;
 
   function snapshotWithPrStatus(): MonitorSnapshot {
-    const snap = buildSnapshot(wtDir);
+    const snap = buildSnapshot(wtDir, buildOpts);
     if (prFetcher) {
       const now = Date.now();
       if (now - lastPrRefresh >= prStatusRefreshMs) {
@@ -188,7 +204,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
     }
     if (linear && !linearStarted) {
       linearStarted = true;
-      linear.start(() => collectTicketKeys(buildSnapshot(wtDir)), linearRefreshMs);
+      linear.start(
+        () => collectTicketKeys(buildSnapshot(wtDir, buildOpts)),
+        linearRefreshMs,
+      );
     }
     return snap;
   }
@@ -260,6 +279,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(buildAnalyticsSnapshot(wtDir));
         }
 
+        if (url.pathname === "/api/sessions") {
+          if (!dbPath) {
+            return Response.json({ available: false, sessions: [] });
+          }
+          const params = url.searchParams;
+          const limitRaw = params.get("limit");
+          const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
+          const result = readSessionStore(dbPath, {
+            soloOnly: params.get("solo") === "true",
+            workflowId: params.get("workflow") ?? undefined,
+            ticket: params.get("ticket") ?? undefined,
+            status: params.get("status") ?? undefined,
+            limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
+          });
+          const sessions: SessionState[] = result.sessions;
+          return Response.json({ available: result.available, sessions });
+        }
+
         if (url.pathname === "/api/linear") {
           const tickets: Record<string, LinearTicket> = {};
           if (linear) {
@@ -304,7 +341,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   });
 
   if (startWatcher) {
-    watcher = startWatching(wtDir);
+    watcher = startWatching(wtDir, { dbPath, sqlitePollIntervalMs });
   }
 
   const originalStop = server.stop.bind(server);
@@ -326,8 +363,10 @@ if (import.meta.main) {
   const WT_DIR = `${CATALYST_DIR}/wt`;
   const parsedPort = parseInt(process.env.MONITOR_PORT ?? "", 10);
   const PORT = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : DEFAULT_PORT;
+  const DB_PATH =
+    process.env.CATALYST_DB_FILE ?? `${CATALYST_DIR}/catalyst.db`;
 
-  const srv = createServer({ port: PORT, wtDir: WT_DIR });
+  const srv = createServer({ port: PORT, wtDir: WT_DIR, dbPath: DB_PATH });
   const displayHost =
     srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);
   console.info(`Monitor running at http://${displayHost}:${srv.port}`);
