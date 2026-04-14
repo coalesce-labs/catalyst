@@ -56,12 +56,20 @@ orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
 ```
 ~/catalyst/
 ├── state.json              # Active orchestrators (denormalized summary)
+├── catalyst.db             # Durable session store (SQLite, WAL mode)
 ├── events/                 # Append-only JSONL event stream, rotated monthly
 │   └── YYYY-MM.jsonl
 ├── history/                # Archived orchestrator snapshots
 │   └── <id>--<timestamp>.json
 └── wt/                     # Worktrees (existing)
 ```
+
+- **catalyst.db**: SQLite-backed session store — durable source of truth for agent activity
+  (solo and orchestrated). Managed by `catalyst-db.sh`. Tables: `sessions`, `session_events`,
+  `session_metrics`, `session_tools`, `session_prs`, `schema_migrations`. Writers run in WAL
+  mode so monitor-style readers can operate concurrently. `catalyst-state.sh` continues to
+  write JSON/JSONL during the migration period for backward compatibility. Schema lives at
+  `plugins/dev/scripts/db-migrations/`.
 
 - **state.json**: Registry of active orchestrators with progress, worker status, and attention
   items. Queryable with `jq`. Schema: `plugins/dev/templates/global-state.json`.
