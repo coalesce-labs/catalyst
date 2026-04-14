@@ -15,15 +15,15 @@ Pull request creation, code review, and repository management via the `gh` CLI.
 
 No Catalyst-specific configuration needed — `gh` uses its own authentication.
 
-**Related skills**: `create-pr`, `describe-pr`, `merge-pr`, `commit`, `sync-prs`
+**Related skills**: `/catalyst-dev:create-pr`, `/catalyst-dev:describe-pr`, `/catalyst-dev:merge-pr`, `/catalyst-dev:commit`, `/catalyst-pm:sync-prs`
 
 ### PR-Linear Sync
 
-The `sync-prs` skill correlates GitHub PRs with Linear issues — matching via branch names and descriptions, identifying orphaned PRs and issues, and flagging stale PRs.
+The `/catalyst-pm:sync-prs` skill correlates GitHub PRs with Linear issues — matching via branch names and descriptions, identifying orphaned PRs and issues, and flagging stale PRs.
 
 ### Worktree Integration
 
-Worktrees created with `create-worktree` automatically set up branches with ticket references (e.g., `PROJ-123-feature-name`).
+Worktrees created with `/catalyst-dev:create-worktree` automatically set up branches with ticket references (e.g., `PROJ-123-feature-name`).
 
 ## Linear
 
@@ -33,7 +33,7 @@ Ticket management and automatic status progression via the [Linearis CLI](https:
 
 **Why CLI instead of MCP?** Linearis uses ~1K tokens vs Linear MCP's ~13K — a 13x reduction in context cost.
 
-**Related skills**: `linear`, `analyze-cycle`, `analyze-milestone`, `groom-backlog`, `sync-prs`
+**Related skills**: `/catalyst-dev:linear`, `/catalyst-pm:analyze-cycle`, `/catalyst-pm:analyze-milestone`, `/catalyst-pm:groom-backlog`, `/catalyst-pm:sync-prs`
 
 ### Automatic Status Updates
 
@@ -41,11 +41,11 @@ Workflow skills automatically update Linear ticket status as you progress:
 
 | Skill | Linear State |
 |-------|-------------|
-| `research-codebase` | In Progress |
-| `create-plan` | In Progress |
-| `implement-plan` | In Progress |
-| `create-pr` | In Review |
-| `merge-pr` | Done |
+| `/catalyst-dev:research-codebase` | In Progress |
+| `/catalyst-dev:create-plan` | In Progress |
+| `/catalyst-dev:implement-plan` | In Progress |
+| `/catalyst-dev:create-pr` | In Review |
+| `/catalyst-dev:merge-pr` | Done |
 
 Customize state names via `stateMap` in your [project config](/reference/configuration/#state-map).
 
@@ -66,9 +66,9 @@ Production error monitoring via the `catalyst-debugging` plugin.
 /plugin disable catalyst-debugging   # -20K context
 ```
 
-**Related skills**: `debug-production-error`, `error-impact-analysis`, `trace-analysis`
+**Related skills**: `/catalyst-debugging:debug-production-error`, `/catalyst-debugging:error-impact-analysis`, `/catalyst-debugging:trace-analysis`
 
-**Research agent**: `sentry-research` (Haiku) — gathers error data via Sentry CLI.
+**Research agent**: `@catalyst-dev:sentry-research` (Haiku) — gathers error data via Sentry CLI.
 
 ## PostHog
 
@@ -83,5 +83,13 @@ Product analytics via the `catalyst-analytics` plugin.
 /plugin disable catalyst-analytics   # -40K context
 ```
 
-**Related skills**: `analyze-user-behavior`, `segment-analysis`, `product-metrics`
+**Related skills**: `/catalyst-analytics:analyze-user-behavior`, `/catalyst-analytics:segment-analysis`, `/catalyst-analytics:product-metrics`
+
+## Exa
+
+Optional web search and code-search augmentation for research agents via the Exa MCP server.
+
+**Setup**: Add `exaApiKey` to secrets config. Used automatically by `@catalyst-dev:external-research` when doing web/library research.
+
+**Context cost**: MCP server — small baseline, per-query token cost.
 

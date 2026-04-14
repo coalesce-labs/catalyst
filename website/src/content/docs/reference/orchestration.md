@@ -7,16 +7,23 @@ sidebar:
 
 Orchestration is Catalyst's system for coordinating **multiple tickets in parallel** across git worktrees. An AI coordinator dispatches workers, tracks progress via a dashboard, and enforces quality through adversarial verification.
 
+:::note[Focused subarticles]
+This page is the orchestration overview. For deeper dives see:
+- [Workers and signal files](./orchestration/workers/) — lifecycle, signal-file schema, state machine
+- [Verification and reward-hacking defense](./orchestration/verification/) — how the orchestrator adversarially checks worker output
+- [Observability overview](/observability/) — monitoring orchestrations in real time
+:::
+
 ## Orchestration Levels
 
 Catalyst workflows operate at two levels:
 
 | Level | What | How |
 |-------|------|-----|
-| **Level 2** | Single-ticket pipeline | `/oneshot` chains research, plan, implement, validate, ship, merge with context isolation |
-| **Level 3** | Multi-ticket coordination | `/orchestrate` dispatches Level 2 workers across worktrees with wave-based parallelism and independent verification |
+| **Level 2** | Single-ticket pipeline | `/catalyst-dev:oneshot` chains research, plan, implement, validate, ship, merge with context isolation |
+| **Level 3** | Multi-ticket coordination | `/catalyst-dev:orchestrate` dispatches Level 2 workers across worktrees with wave-based parallelism and independent verification |
 
-Level 3 builds on Level 2 — each worker runs the full `/oneshot` pipeline autonomously. The orchestrator adds coordination, knowledge sharing, and anti-reward-hacking verification on top.
+Level 3 builds on Level 2 — each worker runs the full `/catalyst-dev:oneshot` pipeline autonomously. The orchestrator adds coordination, knowledge sharing, and anti-reward-hacking verification on top.
 
 ## Prerequisites
 
@@ -25,7 +32,7 @@ Level 3 builds on Level 2 — each worker runs the full `/oneshot` pipeline auto
 | Tool | Purpose | Install |
 |------|---------|---------|
 | **Git** | Worktree creation, branch management | Pre-installed on macOS |
-| **Linearis CLI** | Read tickets from Linear, update states | `npm install -g @anthropic/linearis` |
+| **Linearis CLI** | Read tickets from Linear, update states | `npm install -g linearis` |
 | **GitHub CLI** | PR creation, CI monitoring | `brew install gh` |
 | **jq** | Config parsing, signal file updates | `brew install jq` |
 | **HumanLayer CLI** | Worker dispatch with context isolation, thoughts system | `pip install humanlayer` |

@@ -55,6 +55,14 @@ export default defineConfig({
           autogenerate: { directory: "getting-started" },
         },
         {
+          label: "Guided Workflows",
+          autogenerate: { directory: "guided-workflows" },
+        },
+        {
+          label: "Observability",
+          autogenerate: { directory: "observability" },
+        },
+        {
           label: "Reference",
           autogenerate: { directory: "reference" },
         },
