@@ -16,6 +16,7 @@ import type { MonitorSnapshot, SessionState, WorkerState } from "../lib/state-re
 function makeWorker(overrides: Partial<WorkerState> = {}): WorkerState {
   return {
     ticket: "T-1",
+    label: null,
     status: "in_progress",
     phase: 2,
     wave: null,

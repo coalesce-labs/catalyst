@@ -64,6 +64,7 @@ Uses the provided text as the research query directly.
 | Flag                   | Description                                            |
 | ---------------------- | ------------------------------------------------------ |
 | `--team`               | Use agent teams for parallel implementation in Phase 3 |
+| `--label <text>`       | Custom display label for the session (overrides auto-derived) |
 | `--no-merge`           | Stop after PR creation — do NOT auto-merge             |
 | `--no-ticket`          | Skip Linear ticket creation in freeform mode           |
 | `--skip-validation`    | Skip Phase 4 entirely                                  |
@@ -103,9 +104,36 @@ If `ORCH_DIR` is detected, the worker:
 1. **Reads its signal file** from `${ORCH_DIR}/workers/${TICKET_ID}.json` (created by orchestrator)
 2. **Updates status at each phase transition** — writes `status`, `phase`, and `updatedAt` to both
    the local signal file AND the global state at `~/catalyst/state.json`
-3. **Emits events** to the global event log at each phase transition
-4. **Fills `definitionOfDone`** at Phase 4 (validation) and Phase 5 (ship) with actual results
-5. **Reads wave briefing** if referenced in `${ORCH_DIR}/wave-*-briefing.md` before starting
+3. **Derives and writes `label`** to the signal file at startup (see Label Derivation below)
+4. **Emits events** to the global event log at each phase transition
+5. **Fills `definitionOfDone`** at Phase 4 (validation) and Phase 5 (ship) with actual results
+6. **Reads wave briefing** if referenced in `${ORCH_DIR}/wave-*-briefing.md` before starting
+
+**Label Derivation** (at startup, before first phase transition):
+
+The `label` field in the signal file gives the session a human-readable display name. It is
+derived automatically unless overridden with `--label`:
+
+```bash
+# If --label flag was provided, use it directly
+if [ -n "$USER_LABEL" ]; then
+  LABEL="$USER_LABEL"
+else
+  # Auto-derive: "<skill> <ticket>"
+  SKILL_NAME="oneshot"   # or the current skill name
+  LABEL="${SKILL_NAME} ${TICKET_ID}"
+fi
+
+# Write to signal file (once, at startup)
+if [ -f "$SIGNAL_FILE" ]; then
+  jq --arg label "$LABEL" '.label = $label' "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" \
+    && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+fi
+```
+
+Sub-sessions launched via `humanlayer launch` use the `--title` value as their label. The title
+follows the pattern `<phase-verb> <ticket>` (e.g., `implement CTL-33`), which serves as the
+sub-session's label with parent context implied by the orchestrator's worker label.
 
 **Signal file + global state update helper** (run at each phase boundary):
 

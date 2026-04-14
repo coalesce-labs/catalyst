@@ -527,6 +527,93 @@ describe("WorkerState analytics fields", () => {
   });
 });
 
+describe("worker label", () => {
+  it("reads label from signal file when present", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-1",
+          status: "implementing",
+          phase: 3,
+          startedAt: now,
+          updatedAt: now,
+          label: "oneshot T-1",
+        },
+      },
+    });
+
+    const w = readOrchestratorState(orchDir).workers["T-1"];
+    expect(w.label).toBe("oneshot T-1");
+  });
+
+  it("returns null when label is absent from signal", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-1",
+          status: "dispatched",
+          phase: 0,
+          startedAt: now,
+          updatedAt: now,
+        },
+      },
+    });
+
+    const w = readOrchestratorState(orchDir).workers["T-1"];
+    expect(w.label).toBeNull();
+  });
+
+  it("returns null when label is explicitly null in signal", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-1",
+          status: "dispatched",
+          phase: 0,
+          startedAt: now,
+          updatedAt: now,
+          label: null,
+        },
+      },
+    });
+
+    const w = readOrchestratorState(orchDir).workers["T-1"];
+    expect(w.label).toBeNull();
+  });
+
+  it("returns null for corrupt worker placeholder", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "T-good": {
+          ticket: "T-good",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-good",
+          status: "in_progress",
+          phase: 1,
+          startedAt: now,
+          updatedAt: now,
+          label: "oneshot T-good",
+        },
+      },
+      malformedWorker: "T-bad",
+    });
+
+    const state = readOrchestratorState(orchDir);
+    expect(state.workers["T-good"].label).toBe("oneshot T-good");
+    expect(state.workers["T-bad"].label).toBeNull();
+  });
+});
+
 describe("buildAnalyticsSnapshot", () => {
   function writeOutputJson(orchDir: string, ticket: string, data: unknown): void {
     const logsDir = join(orchDir, "workers", "logs");

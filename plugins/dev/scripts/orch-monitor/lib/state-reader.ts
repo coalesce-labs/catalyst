@@ -32,6 +32,7 @@ export interface WorkerCost {
 
 export interface WorkerState {
   ticket: string;
+  label: string | null;
   status: string;
   phase: number;
   wave: number | null;
@@ -264,6 +265,9 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
     };
   }
 
+  const labelRaw = signal.label;
+  const label = typeof labelRaw === "string" && labelRaw.length > 0 ? labelRaw : null;
+
   const fixupCommit =
     typeof signal.fixupCommit === "string" && signal.fixupCommit.length > 0
       ? signal.fixupCommit
@@ -275,6 +279,7 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
 
   return {
     ticket: asString(signal.ticket),
+    label,
     status: asString(signal.status, "unknown"),
     phase: asNumber(signal.phase),
     wave: null,
@@ -297,6 +302,7 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
 function corruptWorkerPlaceholder(filename: string, error: string): WorkerState {
   return {
     ticket: filename.replace(/\.json$/, ""),
+    label: null,
     status: "signal_corrupt",
     phase: 0,
     wave: null,

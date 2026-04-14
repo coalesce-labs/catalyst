@@ -530,6 +530,7 @@ Update the signal file at each phase transition using the worker-signal.json sch
   "ticket": "PROJ-101",
   "orchestrator": "<name>",
   "workerName": "<orch-name>-PROJ-101",
+  "label": "oneshot PROJ-101",
   "status": "dispatched",
   "phase": 0,
   "startedAt": "<ISO timestamp>",
