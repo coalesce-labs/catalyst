@@ -33,6 +33,8 @@
 
 - **${TICKET_ID}**: ${TITLE} (depends on ${DEPENDENCY})
 
+${MIGRATION_ASSIGNMENTS}
+
 ## Important
 
 - Build ON TOP of Wave ${PREV_WAVE}'s patterns — don't reinvent what already exists
