@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.10.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.9.0...catalyst-dev-v6.10.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** SQLite reader and unified data source for orch-monitor (CTL-40) ([#101](https://github.com/coalesce-labs/catalyst/issues/101)) ([6bd8238](https://github.com/coalesce-labs/catalyst/commit/6bd8238f5ba3a7333170a9b9412ce01abbda365e))
+
 ## [6.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.8.0...catalyst-dev-v6.9.0) (2026-04-14)
 
 
