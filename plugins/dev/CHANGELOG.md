@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.18.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.17.0...catalyst-dev-v6.18.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** add OTel query integration (Prometheus + Loki) ([#106](https://github.com/coalesce-labs/catalyst/issues/106)) ([111156d](https://github.com/coalesce-labs/catalyst/commit/111156dabf3f86197fa2e8f99ec69c2d9ea6ca57))
+
 ## [6.17.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.16.0...catalyst-dev-v6.17.0) (2026-04-14)
 
 
