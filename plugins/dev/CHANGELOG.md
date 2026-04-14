@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.15.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.14.0...catalyst-dev-v6.15.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** historical analytics & session querying (CTL-44) ([#113](https://github.com/coalesce-labs/catalyst/issues/113)) ([edaaf4b](https://github.com/coalesce-labs/catalyst/commit/edaaf4b761c78886672c917add3316116f3d30f4))
+
 ## [6.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.13.0...catalyst-dev-v6.14.0) (2026-04-14)
 
 
