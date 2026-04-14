@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.22.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.21.0...catalyst-dev-v6.22.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** add OTel-powered metrics panels to monitor UI ([#126](https://github.com/coalesce-labs/catalyst/issues/126)) ([014ede1](https://github.com/coalesce-labs/catalyst/commit/014ede1e5d697b37ed9d6f557739f6167c8d9e11))
+
 ## [6.21.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.20.0...catalyst-dev-v6.21.0) (2026-04-14)
 
 
