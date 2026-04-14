@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.16.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.15.1...catalyst-dev-v6.16.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** add single-session detail view to orch-monitor ([#110](https://github.com/coalesce-labs/catalyst/issues/110)) ([562898b](https://github.com/coalesce-labs/catalyst/commit/562898b8e7342ba0a3fe07af31b32165b54b9e9d))
+
 ## [6.15.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.15.0...catalyst-dev-v6.15.1) (2026-04-14)
 
 
