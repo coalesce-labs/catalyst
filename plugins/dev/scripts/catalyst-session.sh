@@ -27,6 +27,12 @@
 #       List sessions as JSON. --active filters to status not in (done,failed).
 #   read <session-id>
 #       Print full session state (session + metrics + tools + events + prs).
+#   history [--skill NAME] [--ticket KEY] [--since DATE] [--limit N]
+#       List past sessions with optional filters. Defaults to limit 20.
+#   stats [--skill NAME] [--since DATE]
+#       Aggregate statistics: avg cost, duration, success rate, skill breakdown.
+#   compare <session-id-1> <session-id-2>
+#       Side-by-side comparison of two sessions.
 #
 # Exit codes: 0 on success, 1 on argument or execution error. Reads print
 # `null` + exit 1 when the session does not exist.
@@ -429,6 +435,149 @@ cmd_read() {
     '{session:$session, metrics:$metrics, events:$events, tools:$tools, prs:$prs}'
 }
 
+cmd_history() {
+  local skill="" ticket="" since="" limit="20"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --skill)  skill="$2"; shift 2 ;;
+      --ticket) ticket="$2"; shift 2 ;;
+      --since)  since="$2"; shift 2 ;;
+      --limit)  limit="$2"; shift 2 ;;
+      *) echo "error: unknown flag for history: $1" >&2; return 1 ;;
+    esac
+  done
+  [[ "$limit" =~ ^[0-9]+$ ]] || { echo "error: --limit must be an integer" >&2; return 1; }
+
+  local -a conds=()
+  [[ -n "$skill" ]]  && conds+=("skill_name = $(sql_quote "$skill")")
+  [[ -n "$ticket" ]] && conds+=("ticket_key = $(sql_quote "$ticket")")
+  [[ -n "$since" ]]  && conds+=("started_at >= $(sql_quote "$since")")
+
+  local where=""
+  if [[ ${#conds[@]} -gt 0 ]]; then
+    where="WHERE ${conds[0]}"
+    local i
+    for ((i=1; i<${#conds[@]}; i++)); do where+=" AND ${conds[$i]}"; done
+  fi
+
+  local sql
+  sql="SELECT s.session_id, s.skill_name, s.ticket_key, s.label, s.status, s.started_at, s.completed_at,
+              COALESCE(m.cost_usd, 0) as cost_usd, COALESCE(m.duration_ms, 0) as duration_ms
+       FROM sessions s
+       LEFT JOIN session_metrics m ON m.session_id = s.session_id
+       $where
+       ORDER BY s.started_at DESC
+       LIMIT $limit;"
+
+  local out
+  out=$(db_exec_json "$sql")
+  [[ -z "$out" ]] && { echo '[]'; return 0; }
+  echo "$out"
+}
+
+cmd_stats() {
+  local skill="" since=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --skill) skill="$2"; shift 2 ;;
+      --since) since="$2"; shift 2 ;;
+      *) echo "error: unknown flag for stats: $1" >&2; return 1 ;;
+    esac
+  done
+
+  local -a conds=()
+  [[ -n "$skill" ]] && conds+=("s.skill_name = $(sql_quote "$skill")")
+  [[ -n "$since" ]] && conds+=("s.started_at >= $(sql_quote "$since")")
+
+  local where=""
+  if [[ ${#conds[@]} -gt 0 ]]; then
+    where="WHERE ${conds[0]}"
+    local i
+    for ((i=1; i<${#conds[@]}; i++)); do where+=" AND ${conds[$i]}"; done
+  fi
+
+  local agg skill_breakdown daily_costs top_tools
+  agg=$(db_exec_json "SELECT COUNT(*) as total_sessions,
+                        SUM(COALESCE(m.cost_usd,0)) as total_cost,
+                        AVG(COALESCE(m.cost_usd,0)) as avg_cost,
+                        AVG(COALESCE(m.duration_ms,0)) as avg_duration,
+                        SUM(CASE WHEN s.status='done' THEN 1 ELSE 0 END) as done_count,
+                        SUM(CASE WHEN s.status='failed' THEN 1 ELSE 0 END) as failed_count
+                      FROM sessions s LEFT JOIN session_metrics m ON m.session_id=s.session_id $where;")
+  [[ -z "$agg" ]] && agg='[{"total_sessions":0}]'
+
+  skill_breakdown=$(db_exec_json "SELECT COALESCE(s.skill_name,'unknown') as skill,
+                                    COUNT(*) as count,
+                                    SUM(CASE WHEN s.status='done' THEN 1 ELSE 0 END) as done_count,
+                                    SUM(CASE WHEN s.status='failed' THEN 1 ELSE 0 END) as failed_count,
+                                    SUM(COALESCE(m.cost_usd,0)) as total_cost,
+                                    AVG(COALESCE(m.cost_usd,0)) as avg_cost,
+                                    AVG(COALESCE(m.duration_ms,0)) as avg_duration
+                                  FROM sessions s LEFT JOIN session_metrics m ON m.session_id=s.session_id
+                                  $where GROUP BY COALESCE(s.skill_name,'unknown') ORDER BY total_cost DESC;")
+  [[ -z "$skill_breakdown" ]] && skill_breakdown='[]'
+
+  daily_costs=$(db_exec_json "SELECT DATE(s.started_at) as day,
+                                SUM(COALESCE(m.cost_usd,0)) as cost,
+                                COUNT(*) as session_count
+                              FROM sessions s LEFT JOIN session_metrics m ON m.session_id=s.session_id
+                              $where GROUP BY DATE(s.started_at) ORDER BY day ASC;")
+  [[ -z "$daily_costs" ]] && daily_costs='[]'
+
+  local tool_where=""
+  if [[ ${#conds[@]} -gt 0 ]]; then
+    tool_where="WHERE t.session_id IN (SELECT s.session_id FROM sessions s $where)"
+  fi
+  top_tools=$(db_exec_json "SELECT t.tool_name, SUM(t.call_count) as total_calls,
+                              SUM(t.total_duration_ms) as total_duration_ms
+                            FROM session_tools t
+                            $tool_where
+                            GROUP BY t.tool_name ORDER BY total_calls DESC LIMIT 20;")
+  [[ -z "$top_tools" ]] && top_tools='[]'
+
+  jq -n \
+    --argjson agg "$agg" \
+    --argjson skills "$skill_breakdown" \
+    --argjson daily "$daily_costs" \
+    --argjson tools "$top_tools" \
+    '{aggregate: $agg[0], skillBreakdown: $skills, dailyCosts: $daily, topTools: $tools}'
+}
+
+cmd_compare() {
+  local id1="${1:-}" id2="${2:-}"
+  [[ -n "$id1" && -n "$id2" ]] || { echo "error: compare requires <session-id-1> <session-id-2>" >&2; return 1; }
+
+  local s1 s2 t1 t2
+  s1=$(db_exec_json "SELECT s.session_id, s.skill_name, s.ticket_key, s.status, s.started_at, s.completed_at,
+                       COALESCE(m.cost_usd,0) as cost_usd, COALESCE(m.duration_ms,0) as duration_ms,
+                       COALESCE(m.input_tokens,0) as input_tokens, COALESCE(m.output_tokens,0) as output_tokens,
+                       COALESCE(m.cache_read_tokens,0) as cache_read_tokens
+                     FROM sessions s LEFT JOIN session_metrics m ON m.session_id=s.session_id
+                     WHERE s.session_id=$(sql_quote "$id1");")
+  [[ -z "$s1" || "$s1" == "[]" ]] && { echo "error: session $id1 not found" >&2; return 1; }
+
+  s2=$(db_exec_json "SELECT s.session_id, s.skill_name, s.ticket_key, s.status, s.started_at, s.completed_at,
+                       COALESCE(m.cost_usd,0) as cost_usd, COALESCE(m.duration_ms,0) as duration_ms,
+                       COALESCE(m.input_tokens,0) as input_tokens, COALESCE(m.output_tokens,0) as output_tokens,
+                       COALESCE(m.cache_read_tokens,0) as cache_read_tokens
+                     FROM sessions s LEFT JOIN session_metrics m ON m.session_id=s.session_id
+                     WHERE s.session_id=$(sql_quote "$id2");")
+  [[ -z "$s2" || "$s2" == "[]" ]] && { echo "error: session $id2 not found" >&2; return 1; }
+
+  t1=$(db_exec_json "SELECT tool_name, call_count as total_calls, total_duration_ms
+                     FROM session_tools WHERE session_id=$(sql_quote "$id1") ORDER BY call_count DESC;")
+  [[ -z "$t1" ]] && t1='[]'
+
+  t2=$(db_exec_json "SELECT tool_name, call_count as total_calls, total_duration_ms
+                     FROM session_tools WHERE session_id=$(sql_quote "$id2") ORDER BY call_count DESC;")
+  [[ -z "$t2" ]] && t2='[]'
+
+  jq -n \
+    --argjson s1 "$s1" --argjson s2 "$s2" \
+    --argjson t1 "$t1" --argjson t2 "$t2" \
+    '{left: ($s1[0] + {tools: $t1}), right: ($s2[0] + {tools: $t2})}'
+}
+
 usage() {
   sed -n '/^# Commands:/,/^# Exit codes:/p' "${BASH_SOURCE[0]}" | sed 's/^# //; s/^#$//'
 }
@@ -448,6 +597,9 @@ case "$cmd" in
   heartbeat) cmd_heartbeat "$@" ;;
   list)      cmd_list "$@" ;;
   read)      cmd_read "$@" ;;
+  history)   cmd_history "$@" ;;
+  stats)     cmd_stats "$@" ;;
+  compare)   cmd_compare "$@" ;;
   help|--help|-h) usage ;;
   *) echo "error: unknown command: $cmd" >&2; echo "run '$0 help' for usage" >&2; exit 1 ;;
 esac
