@@ -1,5 +1,6 @@
 import { subscribe } from "./event-bus";
 import type { MonitorSnapshot, WorkerState } from "./state-reader";
+import type { MonitorEventEnvelope } from "./events";
 
 // ANSI constants
 const RESET = "\x1b[0m";
@@ -22,17 +23,16 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 // Column widths — total <=80 cols with single-space separators
-// TICKET(10) STATUS(13) PHASE(5) PID(7) AGE(6) PR(6) -> 47 + 5 spaces = 52
-// Extra padding for readability. We budget exactly 80.
+// TICKET(10) LABEL(14) STATUS(13) PHASE(5) PID(7) AGE(6) PR(8) = 63 + 6 spaces = 69
 const COL = {
-  ticket: 12,
+  ticket: 10,
+  label: 14,
   status: 13,
   phase: 5,
   pid: 7,
   age: 6,
   pr: 8,
 } as const;
-// Widths sum: 12+13+5+7+6+8 = 51, plus 5 spaces = 56. Fits 80 easily.
 
 function pad(s: string, width: number): string {
   if (s.length >= width) return s.slice(0, width);
@@ -60,6 +60,7 @@ function formatAge(seconds: number): string {
 function renderWorkerRow(w: WorkerState): string {
   const statusColor = STATUS_COLORS[w.status];
   const ticket = pad(w.ticket || "-", COL.ticket);
+  const label = pad(w.label || "-", COL.label);
   const statusRaw = pad(w.status || "-", COL.status);
   const status = colorize(statusRaw, statusColor);
   const phase = padLeft(String(w.phase ?? 0), COL.phase);
@@ -67,7 +68,7 @@ function renderWorkerRow(w: WorkerState): string {
   const pid = padLeft(w.alive ? pidStr : `${pidStr}!`, COL.pid);
   const age = padLeft(formatAge(w.timeSinceUpdate), COL.age);
   const pr = pad(w.pr ? `#${w.pr.number}` : "-", COL.pr);
-  return `${ticket} ${status} ${phase} ${pid} ${age} ${pr}`;
+  return `${ticket} ${label} ${status} ${phase} ${pid} ${age} ${pr}`;
 }
 
 function renderOrchestrator(
@@ -81,6 +82,8 @@ function renderOrchestrator(
   // Table header (no color)
   const head =
     pad("TICKET", COL.ticket) +
+    " " +
+    pad("LABEL", COL.label) +
     " " +
     pad("STATUS", COL.status) +
     " " +
@@ -135,8 +138,8 @@ export function renderSnapshot(snapshot: MonitorSnapshot): string {
  */
 export function startTerminalRenderer(): () => void {
   const unsubscribe = subscribe("snapshot", (data: unknown) => {
-    const snapshot = data as MonitorSnapshot;
-    process.stdout.write(CLEAR + renderSnapshot(snapshot));
+    const envelope = data as MonitorEventEnvelope<MonitorSnapshot>;
+    process.stdout.write(CLEAR + renderSnapshot(envelope.data));
   });
   return unsubscribe;
 }

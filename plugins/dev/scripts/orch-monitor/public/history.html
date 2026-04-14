@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Session History — Catalyst Monitor</title>
+    <link rel="icon" type="image/svg+xml" href="/public/catalyst-logo.svg" />
+    <style>
+      :root {
+        --bg: #0b0d10;
+        --panel: #14181d;
+        --panel-2: #1b2028;
+        --border: #262d36;
+        --fg: #e6e9ef;
+        --muted: #8a93a1;
+        --accent: #4ea1ff;
+        --green: #39d07a;
+        --red: #ef5d5d;
+        --yellow: #eabc3b;
+        --blue: #4ea1ff;
+        --gray: #6b7280;
+        --purple: #a855f7;
+        --teal: #14b8a6;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+        min-height: 100vh;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      header {
+        position: sticky; top: 0; z-index: 10;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        padding: 10px 14px;
+        display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+      }
+      header h1 {
+        font-size: 15px; font-weight: 600; margin: 0;
+        flex: 1 1 auto;
+        display: inline-flex; align-items: center; gap: 10px;
+      }
+      header h1 img { width: 22px; height: 22px; display: block; }
+      header h1 .brand-sub { color: var(--muted); font-weight: 400; font-size: 13px; }
+      header nav { display: flex; gap: 12px; }
+      header nav a { font-size: 13px; color: var(--muted); padding: 4px 8px; border-radius: 4px; }
+      header nav a.active, header nav a:hover { color: var(--fg); background: var(--panel-2); }
+
+      main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+
+      .stats-grid {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px; margin-bottom: 20px;
+      }
+      .stat-card {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+        padding: 14px;
+      }
+      .stat-card .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+      .stat-card .value { font-size: 22px; font-weight: 600; }
+      .stat-card .value.green { color: var(--green); }
+      .stat-card .value.red { color: var(--red); }
+      .stat-card .value.blue { color: var(--blue); }
+
+      .section { margin-bottom: 24px; }
+      .section-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; color: var(--muted); }
+
+      .filters {
+        display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px;
+      }
+      .filters input, .filters select {
+        background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+        border-radius: 4px; padding: 6px 10px; font-size: 13px; outline: none;
+      }
+      .filters input:focus, .filters select:focus { border-color: var(--accent); }
+      .filters input::placeholder { color: var(--gray); }
+
+      table {
+        width: 100%; border-collapse: collapse; font-size: 13px;
+      }
+      th {
+        text-align: left; padding: 8px 10px; color: var(--muted); font-size: 11px;
+        text-transform: uppercase; letter-spacing: 0.5px;
+        border-bottom: 1px solid var(--border); background: var(--panel);
+        position: sticky; top: 52px; z-index: 2;
+      }
+      td {
+        padding: 8px 10px; border-bottom: 1px solid var(--border);
+        vertical-align: middle;
+      }
+      tr:hover td { background: var(--panel-2); }
+      .badge {
+        display: inline-block; padding: 2px 8px; border-radius: 10px;
+        font-size: 11px; font-weight: 500;
+      }
+      .badge.done { background: rgba(57,208,122,0.15); color: var(--green); }
+      .badge.failed { background: rgba(239,93,93,0.15); color: var(--red); }
+      .badge.running { background: rgba(78,161,255,0.15); color: var(--blue); }
+
+      .chart-container {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+        padding: 16px; height: 220px; position: relative;
+      }
+      .chart-container svg { width: 100%; height: 100%; }
+
+      .skill-bars { display: flex; flex-direction: column; gap: 8px; }
+      .skill-bar-row { display: flex; align-items: center; gap: 10px; }
+      .skill-bar-label { min-width: 100px; font-size: 12px; color: var(--muted); text-align: right; }
+      .skill-bar-track {
+        flex: 1; height: 24px; background: var(--panel-2); border-radius: 4px;
+        position: relative; overflow: hidden;
+      }
+      .skill-bar-fill {
+        height: 100%; border-radius: 4px; display: flex; align-items: center;
+        padding: 0 8px; font-size: 11px; font-weight: 500; color: #fff;
+        transition: width 0.3s ease;
+      }
+      .skill-bar-meta { min-width: 120px; font-size: 12px; color: var(--muted); }
+
+      .pagination {
+        display: flex; justify-content: center; align-items: center; gap: 8px;
+        margin-top: 12px;
+      }
+      .pagination button {
+        background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+        border-radius: 4px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+      }
+      .pagination button:disabled { opacity: 0.4; cursor: default; }
+      .pagination button:hover:not(:disabled) { border-color: var(--accent); }
+      .pagination .page-info { font-size: 12px; color: var(--muted); }
+
+      .empty-state { text-align: center; padding: 40px; color: var(--muted); }
+
+      .compare-grid {
+        display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+      }
+      .compare-card {
+        background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+        padding: 16px;
+      }
+      .compare-card h3 { font-size: 13px; margin: 0 0 8px; color: var(--accent); }
+      .compare-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+      .compare-row .lbl { color: var(--muted); }
+
+      #compare-section { display: none; }
+
+      @media (max-width: 640px) {
+        .compare-grid { grid-template-columns: 1fr; }
+        .stats-grid { grid-template-columns: 1fr 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>
+        <img src="/public/catalyst-logo.svg" alt="" />
+        Catalyst Monitor
+        <span class="brand-sub">Session History</span>
+      </h1>
+      <nav>
+        <a href="/">Live</a>
+        <a href="/history" class="active">History</a>
+      </nav>
+    </header>
+
+    <main>
+      <div id="stats-cards" class="stats-grid"></div>
+
+      <div class="section">
+        <div class="section-title">Cost Trend</div>
+        <div class="chart-container" id="cost-chart"></div>
+      </div>
+
+      <div class="section" style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div>
+          <div class="section-title">Skill Performance</div>
+          <div class="skill-bars" id="skill-bars"></div>
+        </div>
+        <div>
+          <div class="section-title">Top Tools</div>
+          <div class="skill-bars" id="tool-bars"></div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Session History</div>
+        <div class="filters">
+          <input type="text" id="filter-search" placeholder="Search sessions..." style="min-width:200px;" />
+          <input type="text" id="filter-skill" placeholder="Skill name" />
+          <input type="text" id="filter-ticket" placeholder="Ticket key" />
+          <input type="date" id="filter-since" />
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Session</th>
+              <th>Skill</th>
+              <th>Ticket</th>
+              <th>Label</th>
+              <th>Status</th>
+              <th>Cost</th>
+              <th>Duration</th>
+              <th>Started</th>
+            </tr>
+          </thead>
+          <tbody id="session-tbody"></tbody>
+        </table>
+        <div class="pagination">
+          <button id="prev-btn" disabled>Prev</button>
+          <span class="page-info" id="page-info">Page 1</span>
+          <button id="next-btn" disabled>Next</button>
+        </div>
+      </div>
+
+      <div class="section" id="compare-section">
+        <div class="section-title">Session Comparison</div>
+        <div class="compare-grid" id="compare-grid"></div>
+      </div>
+    </main>
+
+    <script>
+      const PAGE_SIZE = 20;
+      let currentPage = 0;
+      let totalEntries = 0;
+      let statsData = null;
+      let compareIds = [];
+
+      function fmt$(n) { return n == null ? '-' : '$' + n.toFixed(2); }
+      function fmtDur(ms) {
+        if (ms == null || ms === 0) return '-';
+        if (ms < 60000) return (ms / 1000).toFixed(0) + 's';
+        return (ms / 60000).toFixed(1) + 'm';
+      }
+      function fmtDate(iso) {
+        if (!iso) return '-';
+        const d = new Date(iso);
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
+          ' ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+      }
+      function fmtPct(n) { return (n * 100).toFixed(0) + '%'; }
+
+      function statusBadge(status) {
+        const cls = status === 'done' ? 'done' : status === 'failed' ? 'failed' : 'running';
+        return '<span class="badge ' + cls + '">' + esc(status) + '</span>';
+      }
+      function esc(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+      async function loadStats() {
+        try {
+          const params = new URLSearchParams();
+          const skill = document.getElementById('filter-skill').value;
+          const since = document.getElementById('filter-since').value;
+          if (skill) params.set('skill', skill);
+          if (since) params.set('since', since + 'T00:00:00Z');
+          const res = await fetch('/api/history/stats?' + params.toString());
+          if (!res.ok) throw new Error('Stats API returned ' + res.status);
+          statsData = await res.json();
+          renderStats();
+          renderCostChart();
+          renderSkillBars();
+          renderToolBars();
+        } catch (err) {
+          console.error('Failed to load stats:', err);
+          document.getElementById('stats-cards').innerHTML =
+            '<div class="stat-card" style="grid-column:1/-1"><div class="empty-state">Failed to load statistics</div></div>';
+        }
+      }
+
+      function renderStats() {
+        if (!statsData) return;
+        const s = statsData;
+        const el = document.getElementById('stats-cards');
+        el.innerHTML =
+          '<div class="stat-card"><div class="label">Total Sessions</div><div class="value">' + s.totalSessions + '</div></div>' +
+          '<div class="stat-card"><div class="label">Total Cost</div><div class="value blue">' + fmt$(s.totalCostUsd) + '</div></div>' +
+          '<div class="stat-card"><div class="label">Avg Cost</div><div class="value">' + fmt$(s.avgCostUsd) + '</div></div>' +
+          '<div class="stat-card"><div class="label">Avg Duration</div><div class="value">' + fmtDur(s.avgDurationMs) + '</div></div>' +
+          '<div class="stat-card"><div class="label">Success Rate</div><div class="value ' + (s.successRate >= 0.7 ? 'green' : 'red') + '">' + fmtPct(s.successRate) + '</div></div>';
+      }
+
+      function renderCostChart() {
+        const dc = statsData.dailyCosts;
+        if (!dc || dc.length === 0) {
+          document.getElementById('cost-chart').innerHTML = '<div class="empty-state">No cost data yet</div>';
+          return;
+        }
+        const maxCost = Math.max(...dc.map(function(d) { return d.costUsd; }), 0.01);
+        const w = 100;
+        const h = 100;
+        const pad = { top: 10, right: 10, bottom: 20, left: 10 };
+        const pw = w - pad.left - pad.right;
+        const ph = h - pad.top - pad.bottom;
+
+        var points = dc.map(function(d, i) {
+          var x = pad.left + (dc.length === 1 ? pw / 2 : (i / (dc.length - 1)) * pw);
+          var y = pad.top + ph - (d.costUsd / maxCost) * ph;
+          return { x: x, y: y, d: d };
+        });
+
+        var line = points.map(function(p) { return p.x.toFixed(2) + ',' + p.y.toFixed(2); }).join(' ');
+        var area = 'M' + points[0].x.toFixed(2) + ',' + (pad.top + ph) + ' L' + line.replace(/ /g, ' L') + ' L' + points[points.length-1].x.toFixed(2) + ',' + (pad.top + ph) + 'Z';
+
+        var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">';
+        svg += '<defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">';
+        svg += '<stop offset="0%" stop-color="#4ea1ff" stop-opacity="0.3"/>';
+        svg += '<stop offset="100%" stop-color="#4ea1ff" stop-opacity="0.02"/>';
+        svg += '</linearGradient></defs>';
+        svg += '<path d="' + area + '" fill="url(#cg)"/>';
+        svg += '<polyline points="' + line + '" fill="none" stroke="#4ea1ff" stroke-width="0.5" stroke-linecap="round" stroke-linejoin="round"/>';
+
+        points.forEach(function(p) {
+          svg += '<circle cx="' + p.x.toFixed(2) + '" cy="' + p.y.toFixed(2) + '" r="1" fill="#4ea1ff">';
+          svg += '<title>' + p.d.date + ': ' + fmt$(p.d.costUsd) + ' (' + p.d.sessionCount + ' sessions)</title></circle>';
+        });
+
+        if (dc.length <= 14) {
+          dc.forEach(function(d, i) {
+            var x = pad.left + (dc.length === 1 ? pw / 2 : (i / (dc.length - 1)) * pw);
+            svg += '<text x="' + x.toFixed(2) + '" y="' + (h - 2) + '" text-anchor="middle" font-size="3" fill="#8a93a1">' + d.date.slice(5) + '</text>';
+          });
+        }
+        svg += '<text x="' + pad.left + '" y="' + (pad.top - 2) + '" font-size="3" fill="#8a93a1">' + fmt$(maxCost) + '</text>';
+        svg += '</svg>';
+        document.getElementById('cost-chart').innerHTML = svg;
+      }
+
+      var SKILL_COLORS = ['#4ea1ff','#a855f7','#14b8a6','#f59e0b','#ef5d5d','#39d07a','#6b7280'];
+
+      function renderSkillBars() {
+        var sb = statsData.skillBreakdown;
+        if (!sb || sb.length === 0) {
+          document.getElementById('skill-bars').innerHTML = '<div class="empty-state">No data</div>';
+          return;
+        }
+        var maxCost = Math.max.apply(null, sb.map(function(s) { return s.totalCostUsd; }));
+        if (maxCost === 0) maxCost = 1;
+        var html = '';
+        sb.forEach(function(s, i) {
+          var pct = (s.totalCostUsd / maxCost * 100).toFixed(1);
+          var color = SKILL_COLORS[i % SKILL_COLORS.length];
+          html += '<div class="skill-bar-row">' +
+            '<div class="skill-bar-label">' + esc(s.skill) + '</div>' +
+            '<div class="skill-bar-track"><div class="skill-bar-fill" style="width:' + pct + '%;background:' + color + '">' + fmt$(s.totalCostUsd) + '</div></div>' +
+            '<div class="skill-bar-meta">' + s.count + ' runs, ' + fmtPct(s.successRate) + ' success</div>' +
+            '</div>';
+        });
+        document.getElementById('skill-bars').innerHTML = html;
+      }
+
+      function renderToolBars() {
+        var tools = statsData.topTools;
+        if (!tools || tools.length === 0) {
+          document.getElementById('tool-bars').innerHTML = '<div class="empty-state">No data</div>';
+          return;
+        }
+        var maxCalls = Math.max.apply(null, tools.map(function(t) { return t.totalCalls; }));
+        if (maxCalls === 0) maxCalls = 1;
+        var html = '';
+        tools.slice(0, 10).forEach(function(t, i) {
+          var pct = (t.totalCalls / maxCalls * 100).toFixed(1);
+          var color = SKILL_COLORS[i % SKILL_COLORS.length];
+          html += '<div class="skill-bar-row">' +
+            '<div class="skill-bar-label">' + esc(t.tool) + '</div>' +
+            '<div class="skill-bar-track"><div class="skill-bar-fill" style="width:' + pct + '%;background:' + color + '">' + t.totalCalls + ' calls</div></div>' +
+            '<div class="skill-bar-meta">' + fmtDur(t.totalDurationMs) + ' total</div>' +
+            '</div>';
+        });
+        document.getElementById('tool-bars').innerHTML = html;
+      }
+
+      async function loadHistory() {
+        try {
+          var params = new URLSearchParams();
+          var search = document.getElementById('filter-search').value;
+          var skill = document.getElementById('filter-skill').value;
+          var ticket = document.getElementById('filter-ticket').value;
+          var since = document.getElementById('filter-since').value;
+          if (search) params.set('search', search);
+          if (skill) params.set('skill', skill);
+          if (ticket) params.set('ticket', ticket);
+          if (since) params.set('since', since + 'T00:00:00Z');
+          params.set('limit', String(PAGE_SIZE));
+          params.set('offset', String(currentPage * PAGE_SIZE));
+          var res = await fetch('/api/history?' + params.toString());
+          if (!res.ok) throw new Error('History API returned ' + res.status);
+          var data = await res.json();
+          totalEntries = data.total;
+          renderTable(data.entries);
+          renderPagination();
+        } catch (err) {
+          console.error('Failed to load history:', err);
+          document.getElementById('session-tbody').innerHTML =
+            '<tr><td colspan="8" class="empty-state">Failed to load session history</td></tr>';
+        }
+      }
+
+      function renderTable(entries) {
+        var tbody = document.getElementById('session-tbody');
+        if (!entries || entries.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No sessions found</td></tr>';
+          return;
+        }
+        var html = '';
+        entries.forEach(function(e) {
+          html += '<tr>' +
+            '<td><code style="font-size:11px;color:var(--muted)">' + esc(e.sessionId).slice(0, 24) + '</code></td>' +
+            '<td>' + esc(e.skillName || '-') + '</td>' +
+            '<td>' + esc(e.ticket || '-') + '</td>' +
+            '<td>' + esc(e.label || '-') + '</td>' +
+            '<td>' + statusBadge(e.status) + '</td>' +
+            '<td>' + fmt$(e.costUsd) + '</td>' +
+            '<td>' + fmtDur(e.durationMs) + '</td>' +
+            '<td>' + fmtDate(e.startedAt) + '</td>' +
+            '</tr>';
+        });
+        tbody.innerHTML = html;
+      }
+
+      function renderPagination() {
+        var totalPages = Math.max(1, Math.ceil(totalEntries / PAGE_SIZE));
+        document.getElementById('page-info').textContent = 'Page ' + (currentPage + 1) + ' of ' + totalPages + ' (' + totalEntries + ' total)';
+        document.getElementById('prev-btn').disabled = currentPage === 0;
+        document.getElementById('next-btn').disabled = currentPage >= totalPages - 1;
+      }
+
+      document.getElementById('prev-btn').onclick = function() { if (currentPage > 0) { currentPage--; loadHistory(); } };
+      document.getElementById('next-btn').onclick = function() { currentPage++; loadHistory(); };
+
+      var debounceTimer;
+      function onFilterChange() {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(function() {
+          currentPage = 0;
+          loadHistory();
+          loadStats();
+        }, 300);
+      }
+
+      document.getElementById('filter-search').addEventListener('input', onFilterChange);
+      document.getElementById('filter-skill').addEventListener('input', onFilterChange);
+      document.getElementById('filter-ticket').addEventListener('input', onFilterChange);
+      document.getElementById('filter-since').addEventListener('change', onFilterChange);
+
+      loadStats();
+      loadHistory();
+    </script>
+  </body>
+</html>

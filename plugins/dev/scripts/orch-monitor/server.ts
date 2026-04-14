@@ -1,5 +1,5 @@
 import { join, resolve as resolvePath, sep } from "path";
-import { realpathSync } from "fs";
+import { realpathSync, writeFileSync, unlinkSync } from "fs";
 import { subscribe } from "./lib/event-bus";
 import {
   buildSnapshot,
@@ -9,7 +9,16 @@ import {
   type SessionState,
 } from "./lib/state-reader";
 import { readSessionStore } from "./lib/session-store";
+import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import { startWatching, type WatcherHandle } from "./lib/watcher";
+import {
+  createEvent,
+  parseFilter,
+  matchesFilter,
+  EVENT_TYPES,
+  type MonitorEventEnvelope,
+  type SSEFilter,
+} from "./lib/events";
 import {
   createPrStatusFetcher,
   parseRepoFromPrUrl,
@@ -30,6 +39,7 @@ export interface CreateServerOptions {
   wtDir: string;
   startWatcher?: boolean;
   publicDir?: string;
+  pidFile?: string;
   prStatusFetcher?: PrStatusFetcher | null;
   prStatusRefreshMs?: number;
   linearFetcher?: LinearFetcher | null;
@@ -102,12 +112,7 @@ function applyPrStatus(
   }
   return snapshot;
 }
-const SSE_EVENTS = [
-  "snapshot",
-  "worker-update",
-  "liveness-change",
-  "session-update",
-] as const;
+const SSE_EVENTS = EVENT_TYPES;
 const ALLOWED_PUBLIC_EXTENSIONS = new Set([
   ".html",
   ".css",
@@ -169,6 +174,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     wtDir,
     startWatcher = true,
     publicDir = join(import.meta.dir, "public"),
+    pidFile,
     prStatusFetcher,
     prStatusRefreshMs = PR_STATUS_REFRESH_MS,
     linearFetcher,
@@ -212,16 +218,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
     return snap;
   }
 
-  const sseClients = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  const sseClients = new Map<
+    ReadableStreamDefaultController<Uint8Array>,
+    SSEFilter
+  >();
   const encoder = new TextEncoder();
 
   const unsubscribers: Array<() => void> = [];
   for (const eventType of SSE_EVENTS) {
     unsubscribers.push(
       subscribe(eventType, (data) => {
-        const msg = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+        const envelope = data as MonitorEventEnvelope;
+        const msg = `event: ${eventType}\ndata: ${JSON.stringify(envelope)}\n\n`;
         const bytes = encoder.encode(msg);
-        for (const client of sseClients) {
+        for (const [client, filter] of sseClients) {
+          if (!matchesFilter(envelope, filter)) continue;
           try {
             client.enqueue(bytes);
           } catch (err) {
@@ -244,14 +255,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
         const url = new URL(req.url);
 
         if (url.pathname === "/events") {
+          const filter = parseFilter(url);
           let captured: ReadableStreamDefaultController<Uint8Array> | null = null;
           const stream = new ReadableStream<Uint8Array>({
             start(controller) {
               captured = controller;
-              sseClients.add(controller);
+              sseClients.set(controller, filter);
               try {
+                // Initial snapshot always sent regardless of filter to bootstrap client state
                 const snapshot = snapshotWithPrStatus();
-                const msg = `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`;
+                const envelope = createEvent("snapshot", snapshot, "filesystem");
+                const msg = `event: snapshot\ndata: ${JSON.stringify(envelope)}\n\n`;
                 controller.enqueue(encoder.encode(msg));
               } catch (err) {
                 console.error(`[server] initial snapshot enqueue failed:`, err);
@@ -297,6 +311,66 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ available: result.available, sessions });
         }
 
+        if (url.pathname === "/api/history") {
+          if (!dbPath) {
+            return Response.json({ entries: [], total: 0 });
+          }
+          const params = url.searchParams;
+          const limitRaw = params.get("limit");
+          const offsetRaw = params.get("offset");
+          const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
+          const parsedOffset = offsetRaw ? Number.parseInt(offsetRaw, 10) : NaN;
+          return Response.json(
+            queryHistory(dbPath, {
+              skill: params.get("skill") ?? undefined,
+              ticket: params.get("ticket") ?? undefined,
+              since: params.get("since") ?? undefined,
+              search: params.get("search") ?? undefined,
+              limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
+              offset: Number.isFinite(parsedOffset) ? parsedOffset : undefined,
+            }),
+          );
+        }
+
+        if (url.pathname === "/api/history/stats") {
+          if (!dbPath) {
+            return Response.json({
+              totalSessions: 0,
+              totalCostUsd: 0,
+              avgCostUsd: 0,
+              avgDurationMs: 0,
+              successRate: 0,
+              skillBreakdown: [],
+              dailyCosts: [],
+              topTools: [],
+            });
+          }
+          const params = url.searchParams;
+          return Response.json(
+            queryStats(dbPath, {
+              skill: params.get("skill") ?? undefined,
+              since: params.get("since") ?? undefined,
+            }),
+          );
+        }
+
+        if (url.pathname === "/api/history/compare") {
+          if (!dbPath) {
+            return Response.json(null);
+          }
+          const params = url.searchParams;
+          const a = params.get("a");
+          const b = params.get("b");
+          if (!a || !b) {
+            return new Response("Missing ?a=<id>&b=<id>", { status: 400 });
+          }
+          const result = compareSessions(dbPath, a, b);
+          if (!result) {
+            return new Response("Session(s) not found", { status: 404 });
+          }
+          return Response.json(result);
+        }
+
         if (url.pathname === "/api/linear") {
           const tickets: Record<string, LinearTicket> = {};
           if (linear) {
@@ -308,15 +382,22 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ tickets });
         }
 
-        if (url.pathname === "/" || url.pathname === "/index.html") {
-          const file = Bun.file(join(publicDir, "index.html"));
+        if (
+          url.pathname === "/" ||
+          url.pathname === "/index.html" ||
+          url.pathname === "/history"
+        ) {
+          const htmlFile =
+            url.pathname === "/history" ? "history.html" : "index.html";
+          const file = Bun.file(join(publicDir, htmlFile));
           if (await file.exists()) {
             return new Response(file, {
               headers: { "Content-Type": "text/html; charset=utf-8" },
             });
           }
-          return new Response("index.html not found", { status: 500 });
+          return new Response(`${htmlFile} not found`, { status: 500 });
         }
+
 
         if (url.pathname.startsWith("/public/")) {
           const rel = decodeURIComponent(url.pathname.slice("/public/".length));
@@ -344,6 +425,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
     watcher = startWatching(wtDir, { dbPath, sqlitePollIntervalMs });
   }
 
+  if (pidFile) {
+    try {
+      writeFileSync(pidFile, `${process.pid}\n`);
+    } catch (err) {
+      console.error(`[server] failed to write PID file ${pidFile}:`, err);
+    }
+  }
+
   const originalStop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
     for (const u of unsubscribers) u();
@@ -351,6 +440,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
     prFetcher?.stop();
     linear?.stop();
     sseClients.clear();
+    if (pidFile) {
+      try {
+        unlinkSync(pidFile);
+      } catch (err: unknown) {
+        if (
+          !(err instanceof Error) ||
+          !("code" in err) ||
+          (err as NodeJS.ErrnoException).code !== "ENOENT"
+        ) {
+          console.warn(`[server] failed to remove PID file:`, err);
+        }
+      }
+    }
     return originalStop(closeActiveConnections);
   }) as typeof server.stop;
 
@@ -366,7 +468,17 @@ if (import.meta.main) {
   const DB_PATH =
     process.env.CATALYST_DB_FILE ?? `${CATALYST_DIR}/catalyst.db`;
 
-  const srv = createServer({ port: PORT, wtDir: WT_DIR, dbPath: DB_PATH });
+  const pidFileIdx = process.argv.indexOf("--pid-file");
+  let pidFilePath: string | undefined;
+  if (pidFileIdx >= 0) {
+    pidFilePath = process.argv[pidFileIdx + 1];
+    if (!pidFilePath || pidFilePath.startsWith("--")) {
+      console.error("[server] --pid-file requires a path argument");
+      process.exit(1);
+    }
+  }
+
+  const srv = createServer({ port: PORT, wtDir: WT_DIR, dbPath: DB_PATH, pidFile: pidFilePath });
   const displayHost =
     srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);
   console.info(`Monitor running at http://${displayHost}:${srv.port}`);

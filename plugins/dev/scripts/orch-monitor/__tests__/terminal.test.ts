@@ -9,6 +9,7 @@ import type {
 function makeWorker(overrides: Partial<WorkerState> = {}): WorkerState {
   return {
     ticket: "TEST-1",
+    label: null,
     status: "in_progress",
     phase: 2,
     wave: null,
@@ -91,6 +92,40 @@ describe("renderSnapshot", () => {
     expect(out).toContain("PROJ-3");
   });
 
+  it("renders worker label when present", () => {
+    const snapshot = makeSnapshot([
+      makeOrchestrator({
+        workers: {
+          "T-1": makeWorker({ ticket: "T-1", label: "oneshot T-1" }),
+        },
+      }),
+    ]);
+    const out = renderSnapshot(snapshot);
+    expect(out).toContain("oneshot T-1");
+  });
+
+  it("shows dash for absent label", () => {
+    const snapshot = makeSnapshot([
+      makeOrchestrator({
+        workers: {
+          "T-1": makeWorker({ ticket: "T-1", label: null }),
+        },
+      }),
+    ]);
+    const out = renderSnapshot(snapshot);
+    expect(out).toContain("T-1");
+  });
+
+  it("renders LABEL header column", () => {
+    const snapshot = makeSnapshot([
+      makeOrchestrator({
+        workers: { "T-1": makeWorker({ ticket: "T-1" }) },
+      }),
+    ]);
+    const out = renderSnapshot(snapshot);
+    expect(out).toContain("LABEL");
+  });
+
   it("renders table header columns", () => {
     const snapshot = makeSnapshot([
       makeOrchestrator({
@@ -150,6 +185,7 @@ describe("renderSnapshot", () => {
         workers: {
           "PROJ-123": makeWorker({
             ticket: "PROJ-123",
+            label: "oneshot PROJ-123 long label extra",
             status: "in_progress",
             pr: { number: 9999, url: "https://github.com/x/y/pull/9999" },
           }),

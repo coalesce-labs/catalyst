@@ -16,6 +16,7 @@ import type { MonitorSnapshot, SessionState, WorkerState } from "../lib/state-re
 function makeWorker(overrides: Partial<WorkerState> = {}): WorkerState {
   return {
     ticket: "T-1",
+    label: null,
     status: "in_progress",
     phase: 2,
     wave: null,
@@ -226,6 +227,26 @@ describe("startWatching integration", () => {
     handle.stop();
   });
 
+  it("emits snapshot events wrapped in envelope format", async () => {
+    const received: unknown[] = [];
+    const unsub = subscribe("snapshot", (d) => received.push(d));
+    const handle = startWatching(tmp);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(received.length).toBeGreaterThanOrEqual(1);
+    const envelope = received[0] as {
+      type: string;
+      timestamp: string;
+      data: unknown;
+      source: string;
+    };
+    expect(envelope.type).toBe("snapshot");
+    expect(envelope.source).toBe("filesystem");
+    expect(typeof envelope.timestamp).toBe("string");
+    expect(envelope.data).toBeDefined();
+    unsub();
+    handle.stop();
+  });
+
   it("does not throw when baseDir is missing", () => {
     const missing = join(tmp, "does-not-exist");
     const handle = startWatching(missing);
@@ -265,6 +286,15 @@ describe("startWatching integration", () => {
     handle.stop();
 
     expect(updates.length).toBeGreaterThanOrEqual(1);
+    const envelope = updates[0] as {
+      type: string;
+      timestamp: string;
+      data: { orchId: string; worker: { ticket: string } };
+      source: string;
+    };
+    expect(envelope.type).toBe("worker-update");
+    expect(envelope.source).toBe("filesystem");
+    expect(envelope.data.orchId).toBe("orch-alpha");
   });
 
   it("stop() is idempotent and cleanly tears down", () => {

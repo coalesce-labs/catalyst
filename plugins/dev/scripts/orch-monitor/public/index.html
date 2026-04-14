@@ -335,6 +335,19 @@
       .worker-table .col-cost.muted,
       .worker-table .col-tokens.muted { color: var(--muted); }
       .worker-table thead th.th-num { text-align: right; }
+      .worker-table .col-label {
+        max-width: 180px;
+        white-space: nowrap;
+      }
+      .worker-table .col-label .ct-label {
+        font-weight: 600;
+        color: var(--fg);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: inline-block;
+        max-width: 100%;
+        vertical-align: middle;
+      }
       .worker-table .col-title {
         max-width: 380px;
         line-height: 1.3;
@@ -1102,6 +1115,7 @@
             '" data-updated-at="' + esc(w.updatedAt || "") + '">' +
             '<td class="col-wave">' + (waveNum != null ? esc(waveNum) : "—") + "</td>" +
             '<td class="col-ticket">' + ticketLink + "</td>" +
+            '<td class="col-label">' + (w.label ? '<span class="ct-label">' + esc(w.label) + '</span>' : '<span style="color:var(--muted)">—</span>') + "</td>" +
             '<td class="col-title">' + titleHtml + "</td>" +
             '<td><span class="badge ' + esc(badgeClass) + '">' + esc(stat) + "</span></td>" +
             '<td class="col-phase">' + esc(w.phase ?? 0) + "</td>" +
@@ -1535,7 +1549,7 @@
                   return renderWorkerRow(o.id, t, w, wn);
                 })
                 .join("")
-            : '<tr><td colspan="10" class="empty">No workers.</td></tr>';
+            : '<tr><td colspan="11" class="empty">No workers.</td></tr>';
           return (
             '<div class="card" data-orch="' + esc(o.id) + '">' +
             '<div class="card-head">' +
@@ -1558,7 +1572,7 @@
             '<div class="md"></div>' +
             "</div>" +
             '<table class="worker-table"><thead><tr>' +
-            "<th>Wave</th><th>Ticket</th><th>Title</th><th>Status</th><th>Phase</th>" +
+            "<th>Wave</th><th>Ticket</th><th>Label</th><th>Title</th><th>Status</th><th>Phase</th>" +
             "<th>Process</th><th>PR</th>" +
             '<th class="th-num">Cost</th><th class="th-num">Tokens</th>' +
             "<th>Last update</th>" +
@@ -1903,7 +1917,8 @@
           });
           es.addEventListener("snapshot", (e) => {
             try {
-              const parsed = JSON.parse(e.data);
+              const envelope = JSON.parse(e.data);
+              const parsed = envelope.data;
               processSnapshotForEvents(parsed);
               snapshot = parsed;
               render();
@@ -1911,14 +1926,16 @@
           });
           es.addEventListener("worker-update", (e) => {
             try {
-              const payload = JSON.parse(e.data);
+              const envelope = JSON.parse(e.data);
+              const payload = envelope.data;
               processWorkerUpdate(payload);
               patchWorker(payload);
             } catch (err) { console.error("worker-update handler failed", err); }
           });
           es.addEventListener("liveness-change", (e) => {
             try {
-              const payload = JSON.parse(e.data);
+              const envelope = JSON.parse(e.data);
+              const payload = envelope.data;
               processWorkerUpdate(payload);
               patchWorker(payload);
             } catch (err) { console.error("liveness-change handler failed", err); }
