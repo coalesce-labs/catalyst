@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.13.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.12.0...catalyst-dev-v6.13.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** add session labeling system to orch-monitor ([#105](https://github.com/coalesce-labs/catalyst/issues/105)) ([bf6c3f6](https://github.com/coalesce-labs/catalyst/commit/bf6c3f691b5971403fbe81ce62f3e82fbbcf3c22))
+
 ## [6.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.11.0...catalyst-dev-v6.12.0) (2026-04-14)
 
 
