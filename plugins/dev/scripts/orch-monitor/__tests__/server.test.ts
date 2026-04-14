@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { createServer } from "../server";
+import { createServer, startTerminalOnly } from "../server";
 import type { BriefingProvider } from "../lib/ai-briefing";
 import type { MonitorSnapshot } from "../lib/state-reader";
 import type { LinearTicket } from "../lib/linear";
@@ -851,7 +851,7 @@ describe("AI briefing endpoint", () => {
         prStatusFetcher: null,
         linearFetcher: null,
         briefingProvider: mockProvider,
-        annotationsDbPath: join(bTmp!, "annotations.db"),
+        annotationsDbPath: join(bTmp, "annotations.db"),
       });
 
       const bUrl = `http://localhost:${bServer.port}`;
@@ -871,5 +871,50 @@ describe("AI briefing endpoint", () => {
         try { rmSync(bTmp, { recursive: true, force: true }); } catch { /* ignore */ }
       }
     }
+  });
+});
+
+describe("terminal mode", () => {
+  it("createServer with terminal option does not throw", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "orch-monitor-term-"));
+    const wtDir = join(tmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    const orchDir = join(wtDir, "orch-term");
+    mkdirSync(join(orchDir, "workers"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ id: "orch-term", waves: [] }),
+    );
+
+    const srv = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      terminal: true,
+      prStatusFetcher: null,
+      linearFetcher: null,
+    });
+    expect(srv).toBeDefined();
+    expect(srv.port).toBeGreaterThan(0);
+    void srv.stop(true);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("startTerminalOnly starts watcher without HTTP server", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "orch-monitor-to-"));
+    const wtDir = join(tmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    const orchDir = join(wtDir, "orch-to");
+    mkdirSync(join(orchDir, "workers"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ id: "orch-to", waves: [] }),
+    );
+
+    const handle = startTerminalOnly(wtDir);
+    expect(handle).toBeDefined();
+    expect(typeof handle.stop).toBe("function");
+    handle.stop();
+    rmSync(tmp, { recursive: true, force: true });
   });
 });

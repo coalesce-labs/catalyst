@@ -61,6 +61,7 @@ import {
   removeTag,
   deleteAnnotation,
 } from "./lib/annotations";
+import { startTerminalRenderer, type RenderOptions } from "./lib/terminal";
 
 type BunServer = ReturnType<typeof Bun.serve>;
 
@@ -83,6 +84,8 @@ export interface CreateServerOptions {
   prometheusFetcher?: PrometheusFetcher | null;
   lokiFetcher?: LokiFetcher | null;
   annotationsDbPath?: string;
+  terminal?: boolean;
+  renderOptions?: RenderOptions;
 }
 
 export const DEFAULT_PORT = 7400;
@@ -709,6 +712,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
     }
   }
 
+  if (opts.terminal) {
+    unsubscribers.push(startTerminalRenderer(opts.renderOptions));
+  }
+
   const originalStop = server.stop.bind(server);
   server.stop = ((closeActiveConnections?: boolean) => {
     for (const u of unsubscribers) u();
@@ -737,6 +744,25 @@ export function createServer(opts: CreateServerOptions): BunServer {
   return server;
 }
 
+export function startTerminalOnly(wtDir: string, renderOpts?: RenderOptions): {
+  stop: () => void;
+} {
+  let watcher: WatcherHandle | null = null;
+  try {
+    watcher = startWatching(wtDir);
+  } catch (err) {
+    console.error(`[terminal] failed to start watcher for ${wtDir}:`, err);
+  }
+  const unsubTerminal = startTerminalRenderer(renderOpts);
+  console.info(`Terminal monitor running (no HTTP server), watching ${wtDir}`);
+  return {
+    stop: () => {
+      unsubTerminal();
+      watcher?.stop();
+    },
+  };
+}
+
 if (import.meta.main) {
   const CATALYST_DIR =
     process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
@@ -756,26 +782,47 @@ if (import.meta.main) {
     }
   }
 
+  const useTerminal = process.argv.includes("--terminal");
+  const terminalOnly = process.argv.includes("--terminal-only");
+  const compact = process.argv.includes("--compact");
+  const renderOpts: RenderOptions = { compact };
+
   const otelCfg = loadOtelConfig(`${process.env.HOME}/.catalyst`);
 
-  const srv = createServer({
-    port: PORT,
-    wtDir: WT_DIR,
-    dbPath: DB_PATH,
-    pidFile: pidFilePath,
-    prometheusUrl: otelCfg.enabled ? otelCfg.prometheusUrl : null,
-    lokiUrl: otelCfg.enabled ? otelCfg.lokiUrl : null,
-  });
-  const displayHost =
-    srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);
-  console.info(`Monitor running at http://${displayHost}:${srv.port}`);
-  console.info(`(bound on ${String(srv.hostname)}:${srv.port}; watching ${WT_DIR})`);
-
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => {
-      console.info(`[server] received ${sig}, shutting down`);
-      void srv.stop(true);
-      process.exit(0);
+  if (terminalOnly) {
+    const handle = startTerminalOnly(WT_DIR, renderOpts);
+    for (const sig of ["SIGINT", "SIGTERM"] as const) {
+      process.on(sig, () => {
+        console.info(`[terminal] received ${sig}, shutting down`);
+        handle.stop();
+        process.exit(0);
+      });
+    }
+  } else {
+    const srv = createServer({
+      port: PORT,
+      wtDir: WT_DIR,
+      dbPath: DB_PATH,
+      pidFile: pidFilePath,
+      prometheusUrl: otelCfg.enabled ? otelCfg.prometheusUrl : null,
+      lokiUrl: otelCfg.enabled ? otelCfg.lokiUrl : null,
+      terminal: useTerminal,
+      renderOptions: renderOpts,
     });
+    const displayHost =
+      srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);
+    console.info(`Monitor running at http://${displayHost}:${srv.port}`);
+    if (useTerminal) {
+      console.info("Terminal renderer active (--terminal)");
+    }
+    console.info(`(bound on ${String(srv.hostname)}:${srv.port}; watching ${WT_DIR})`);
+
+    for (const sig of ["SIGINT", "SIGTERM"] as const) {
+      process.on(sig, () => {
+        console.info(`[server] received ${sig}, shutting down`);
+        void srv.stop(true);
+        process.exit(0);
+      });
+    }
   }
 }
