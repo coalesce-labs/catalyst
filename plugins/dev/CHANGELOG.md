@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.13.0...catalyst-dev-v6.14.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** add catalyst-monitor CLI for zero-config monitoring ([#109](https://github.com/coalesce-labs/catalyst/issues/109)) ([9db0fa5](https://github.com/coalesce-labs/catalyst/commit/9db0fa58ac6f073fc4a065d090013fdf4ed4d7c4))
+
 ## [6.13.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.12.0...catalyst-dev-v6.13.0) (2026-04-14)
 
 
