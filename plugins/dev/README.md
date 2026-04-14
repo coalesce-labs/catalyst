@@ -1,117 +1,81 @@
 # Catalyst Dev Plugin
 
-Complete development workflow: research → plan → implement → validate → ship.
+Complete development workflow: research → plan → implement → validate → ship. 25 skills and 9 research agents covering the full Level 1 (single-skill) and Level 2 (guided-workflow) stack, plus Level 3 orchestration.
 
-## Features
+See the [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/) and [Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/) for detailed per-skill documentation. The list below is the current inventory only.
 
-### Core Workflow Commands
+## Skills (25)
 
-- `/research-codebase` - Parallel research with specialized agents
-- `/create-plan` - Interactive implementation planning
-- `/iterate-plan` - Iterate on existing plans with feedback
-- `/implement-plan` - Execute plans with validation
-- `/validate-plan` - Verify implementation completeness
-- `/oneshot` - All-in-one research, plan, and implement with context isolation
-- `/create-handoff` - Session handoffs with context
-- `/resume-handoff` - Resume from handoffs
+### Research & Planning
 
-### Development Commands
+- `/catalyst-dev:research-codebase` — Parallel codebase research with specialized agents
+- `/catalyst-dev:create-plan` — Interactive TDD implementation planning
+- `/catalyst-dev:iterate-plan` — Revise existing plans after feedback
 
-- `/commit` - Conventional commits with Linear integration
-- `/ci-commit` - CI-aware commits with pre-flight checks
-- `/create-pr` - Pull requests with auto-description
-- `/describe-pr` - Generate/update PR descriptions
-- `/ci-describe-pr` - CI-aware PR descriptions with status checks
-- `/merge-pr` - Safe merge with verification
+### Implementation
 
-### Project Management
+- `/catalyst-dev:implement-plan` — Execute plans phase by phase using TDD (supports `--team`)
+- `/catalyst-dev:validate-plan` — Verify implementation against plan success criteria
+- `/catalyst-dev:oneshot` — End-to-end autonomous Level 2 workflow (supports `--team`, `--auto-merge`)
+- `/catalyst-dev:orchestrate` — Level 3 multi-ticket coordinator (wave-based parallelism + adversarial verification)
+- `/catalyst-dev:setup-orchestrate` — Bootstrap an orchestrator worktree and print the launch command
+- `/catalyst-dev:code-first-draft` — Initial feature implementation from a PRD
+- `/catalyst-dev:fix-typescript` — Fix TypeScript errors with strict anti-reward-hacking rules
+- `/catalyst-dev:scan-reward-hacking` — Scan for forbidden patterns (`as any`, `@ts-ignore`, etc.)
+- `/catalyst-dev:validate-type-safety` — 5-step type safety gate (typecheck + scan + tests + lint)
 
-- `/linear` - Ticket management and workflow
-- `/create-worktree` - Isolated workspace creation
+### Shipping
 
-### Research Agents
+- `/catalyst-dev:commit` — Conventional commits with Linear integration
+- `/catalyst-dev:create-pr` — Full PR creation: commit, rebase, push, description, Linear update
+- `/catalyst-dev:describe-pr` — Generate or incrementally update PR descriptions
+- `/catalyst-dev:merge-pr` — Safe squash merge with CI verification and branch cleanup
+- `/catalyst-dev:review-comments` — Process PR review comments, fix, push, resolve threads
 
-- `codebase-locator` - Find files and patterns
-- `codebase-analyzer` - Deep code analysis
-- `codebase-pattern-finder` - Architectural patterns
-- `thoughts-locator` - Search thoughts repository
-- `thoughts-analyzer` - Analyze documentation
-- `external-research` - External repository research
+### Session & Workspace
+
+- `/catalyst-dev:create-handoff` — Save session context for continuation
+- `/catalyst-dev:resume-handoff` — Resume from a handoff document
+- `/catalyst-dev:create-worktree` — Create git worktree for parallel development
+
+### Integrations & References (model-invocable)
+
+- `/catalyst-dev:linear` — Linear ticket operations (user-invocable)
+- `/catalyst-dev:linearis` — Linearis CLI reference (activates on ticket IDs)
+- `/catalyst-dev:agent-browser` — Browser automation CLI reference
+
+### CI / Automation (non-interactive)
+
+- `/catalyst-dev:ci-commit` — Non-interactive commit variant
+- `/catalyst-dev:ci-describe-pr` — Non-interactive PR description variant
+
+## Agents (9)
+
+### Research
+
+- `@catalyst-dev:codebase-locator` — Find files and directories (Haiku)
+- `@catalyst-dev:codebase-analyzer` — Understand implementation details (Sonnet)
+- `@catalyst-dev:codebase-pattern-finder` — Find reusable patterns and examples (Sonnet)
+- `@catalyst-dev:thoughts-locator` — Search thoughts repository (Haiku)
+- `@catalyst-dev:thoughts-analyzer` — Analyze documentation and decisions (Sonnet)
+- `@catalyst-dev:external-research` — Research external repos and libraries (Sonnet)
+
+### Infrastructure
+
+- `@catalyst-dev:linear-research` — Gather Linear data via CLI (Haiku)
+- `@catalyst-dev:github-research` — Research GitHub PRs and issues (Haiku)
+- `@catalyst-dev:sentry-research` — Research Sentry errors (Haiku)
 
 ## Automatic Workflow Context Tracking
 
-**New in v3.0**: Automatic tracking of thoughts documents via Claude Code hooks.
+The plugin ships Claude Code hooks that keep `.catalyst/.workflow-context.json` up to date automatically. See [HOOKS.md](./HOOKS.md) and [WORKFLOW_CONTEXT.md](./WORKFLOW_CONTEXT.md) for the full mechanism.
 
-### What It Does
+Summary:
 
-When you write or edit files in `thoughts/shared/`:
-
-- ✅ Automatically updates `.catalyst/.workflow-context.json`
-- ✅ Tracks document type (research, plans, handoffs, prs)
-- ✅ Extracts ticket numbers from filenames
-- ✅ Records timestamps
-- ✅ Maintains most recent document reference
-
-### How It Works
-
-The plugin includes Claude Code hooks (`hooks.toml`) that:
-
-1. Watch for Write/Edit tools on thoughts files
-2. Trigger `hooks/update-workflow-context.sh` script
-3. Update workflow context automatically
-4. No manual tracking needed
-
-### Tracked Document Types
-
-- **Research**: `thoughts/shared/research/*`
-- **Plans**: `thoughts/shared/plans/*`
-- **Handoffs**: `thoughts/shared/handoffs/*`
-- **PRs**: `thoughts/shared/prs/*`
-
-### Ticket Extraction
-
-Automatically extracts ticket numbers from:
-
-- Filenames: `2025-10-28-PROJ-123-description.md` → `PROJ-123`
-- Directories: `thoughts/shared/handoffs/PROJ-123/` → `PROJ-123`
-
-### Workflow Context Structure
-
-```json
-{
-  "lastUpdated": "2025-10-28T22:30:00Z",
-  "currentTicket": "PROJ-123",
-  "mostRecentDocument": {
-    "type": "plans",
-    "path": "thoughts/shared/plans/2025-10-28-PROJ-123-feature.md",
-    "created": "2025-10-28T22:30:00Z",
-    "ticket": "PROJ-123"
-  },
-  "workflow": {
-    "research": [...],
-    "plans": [...],
-    "handoffs": [...],
-    "prs": [...]
-  }
-}
-```
-
-### Commands That Use Workflow Context
-
-- `/resume-handoff` - Auto-finds recent handoff
-- `/create-plan` - References recent research
-- `/iterate-plan` - Auto-discovers recent plans to iterate on
-- `/implement-plan` - Finds associated plan
-- `/validate-plan` - Verifies plan execution
-- `/oneshot` - Auto-discovers tickets and chains research, plan, and implement
-
-### Manual Tracking (Fallback)
-
-If hooks aren't working, you can manually update:
-
-```bash
-${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh add plans "path/to/plan.md" "PROJ-123"
-```
+- Writes to `thoughts/shared/{research,plans,handoffs,prs}/*.md` are tracked
+- Ticket IDs are extracted from filenames and directories
+- Plan Mode hooks inject Catalyst's plan-structure guidance and sync plans to thoughts
+- Skills read workflow context to discover prior artifacts without explicit paths
 
 ## Installation
 
@@ -122,20 +86,9 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh add plans "path/to/plan.md" "P
 
 ## Configuration
 
-The plugin reads configuration from `.catalyst/config.json`:
+Reads `.catalyst/config.json` (safe to commit) and `~/.config/catalyst/config-{projectKey}.json` (never committed — secrets). See the [Configuration Reference](https://catalyst.coalescelabs.ai/reference/configuration/) for the full schema.
 
-```json
-{
-  "catalyst": {
-    "projectKey": "project-name",
-    "project": {
-      "ticketPrefix": "PROJ"
-    }
-  }
-}
-```
-
-Setup using the unified setup script:
+Quick setup:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
@@ -143,44 +96,43 @@ curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-c
 
 ## Requirements
 
-- **Required**: HumanLayer CLI (thoughts system)
-- **Optional**: Linear CLI (`linearis >= 1.1.0`)
-- **Optional**: GitHub CLI (`gh`)
+- **Required**: Git, Bash
+- **Recommended**: HumanLayer CLI (`pip install humanlayer`) for the thoughts system and context-isolated worker launches
+- **Optional**: Linearis CLI (`npm install -g linearis`) for Linear integration
+- **Optional**: GitHub CLI (`brew install gh`) for PR workflows
 
-## Architecture
+## Scripts
 
-### Agents
+Runtime utilities under `scripts/`:
 
-Specialized research agents with focused capabilities (Glob, Grep, Read, Bash).
+- `catalyst-state.sh` — Writes to `~/catalyst/state.json` and `~/catalyst/events.jsonl`
+- `check-prerequisites.sh` — Validate tool availability
+- `check-project-setup.sh` — Validate workspace has thoughts system, config, etc.
+- `create-worktree.sh` — Worktree creation with setup hooks
+- `frontmatter-utils.sh` — Parse and update markdown frontmatter
+- `orch-monitor/` — Web + terminal dashboard (Bun server, see [Observability](https://catalyst.coalescelabs.ai/observability/))
+- `orchestrate-verify.sh` — Adversarial verification checks (test existence, reward-hacking patterns)
+- `resolve-ticket.sh` — Extract ticket IDs from various contexts
+- `workflow-context.sh` — Read/write `.catalyst/.workflow-context.json`
 
-### Skills
+Hooks under `hooks/`:
 
-Workflow orchestrators that spawn agents and manage processes.
-
-### Hooks
-
-Automatic tracking of thoughts documents via Claude Code hooks system.
-
-### Scripts
-
-Runtime utilities bundled with the plugin:
-
-- `check-prerequisites.sh` - Validate requirements
-- `create-worktree.sh` - Worktree management
-- `workflow-context.sh` - Context tracking
-- `update-workflow-context.sh` - Hook handler
+- `update-workflow-context.sh` — PostToolUse hook that tracks thoughts writes
+- `sync-plan-to-thoughts.sh` — Plan mode exit hook
+- `inject-plan-template.sh` — Plan mode enter hook
 
 ## Philosophy
 
-1. **Agents are documentarians** - Report what exists, don't critique
-2. **Commands orchestrate** - Spawn parallel agents, manage workflows
-3. **Context is precious** - Use thoughts system for persistence
-4. **Automation via hooks** - Track automatically, not manually
+1. **Agents are documentarians** — Report what exists, don't critique
+2. **Skills orchestrate** — Spawn parallel agents, manage processes
+3. **Context is precious** — Use thoughts system for persistence between sessions
+4. **Automation via hooks** — Track automatically, not manually
+5. **Worker-side work has a boundary** — Workers exit at PR creation; polling-until-merged is the orchestrator's job
 
 ## Documentation
 
 - [Architecture](../../docs/architecture.md)
-- [Frontmatter Standard](../../docs/frontmatter-standard.md)
+- [ADRs](../../docs/adrs.md)
 - [Releases](../../docs/releases.md)
 - [Documentation Site](https://catalyst.coalescelabs.ai)
 

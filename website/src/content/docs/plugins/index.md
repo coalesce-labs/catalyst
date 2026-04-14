@@ -12,11 +12,11 @@ your context lean and focused.
 
 | Plugin                 | Description                                                           | Context Cost | Skills | Agents |
 | ---------------------- | --------------------------------------------------------------------- | :----------: | :----: | :----: |
-| **catalyst-dev**       | Core development workflow — research, plan, implement, validate, ship |    ~3.5K     |   23   |   10   |
-| **catalyst-pm**        | Project management — cycle analysis, backlog grooming, PR sync        |   Minimal    |  40+   |   6    |
+| **catalyst-dev**       | Core development workflow — research, plan, implement, validate, ship |    ~3.5K     |   25   |   9    |
+| **catalyst-pm**        | Project management — cycle analysis, backlog grooming, PR sync        |   Minimal    |   46   |   12   |
 | **catalyst-meta**      | Workflow discovery, creation, and management                          |   Minimal    |   6    |   —    |
 | **catalyst-analytics** | Product analytics via PostHog MCP                                     |     ~40K     |   3    |   —    |
-| **catalyst-debugging** | Error monitoring via Sentry MCP                                       |     ~20K     |   3    |   1    |
+| **catalyst-debugging** | Error monitoring via Sentry MCP                                       |     ~20K     |   3    |   —    |
 
 See the [Skills Reference](/reference/skills/) for the complete list of skills per plugin, and
 [Agents](/reference/agents/) for agent details.

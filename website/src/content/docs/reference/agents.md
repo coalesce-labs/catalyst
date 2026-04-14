@@ -45,6 +45,12 @@ Agents are specialized roles that skills delegate to. Each agent has a focused j
 | `backlog-analyzer` | Analyze backlog health and organization | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/backlog-analyzer.md) |
 | `github-linear-analyzer` | Correlate GitHub PRs with Linear issues | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/github-linear-analyzer.md) |
 | `context-analyzer` | Track context engineering adoption | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/context-analyzer.md) |
+| `calendar-analyzer` | Summarize calendar data for planning sessions | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/calendar-analyzer.md) |
+| `code-classifier` | Classify code changes for release notes and reporting | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/code-classifier.md) |
+| `github-metrics` | Aggregate GitHub activity metrics | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/github-metrics.md) |
+| `health-scorer` | Score project health across multiple signals | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/health-scorer.md) |
+| `linear-metrics` | Aggregate Linear velocity and throughput metrics | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/linear-metrics.md) |
+| `thoughts-metrics` | Aggregate thoughts-repo activity metrics | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/thoughts-metrics.md) |
 
 ## When to Use Which Agent
 
@@ -162,8 +168,8 @@ Lead (Opus) — Coordinates implementation
 Each teammate is a full Claude Code session that can spawn its own subagents — two-level parallelism that subagents alone cannot achieve.
 
 ```
-/implement-plan --team
-/oneshot --team PROJ-123
+/catalyst-dev:implement-plan --team
+/catalyst-dev:oneshot --team PROJ-123
 ```
 
 ### Requirements

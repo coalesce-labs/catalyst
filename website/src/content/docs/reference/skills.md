@@ -56,6 +56,7 @@ Each skill's description includes specific phrases and contexts that tell Claude
 | `implement-plan` | "implement the plan", "start implementing", "build from the plan", executing a TDD plan |
 | `validate-plan` | "validate the plan", "check if the plan was implemented correctly", "verify the implementation" |
 | `oneshot` | "oneshot", "do everything end to end", "full workflow", ticket-to-merged-PR autonomously |
+| `orchestrate` | "orchestrate", "run multiple tickets in parallel", "coordinate workers", multi-ticket autonomous execution |
 | `code-first-draft` | "build this feature", "implement this PRD", "code this up", "create the initial implementation" |
 | `commit` | "commit this", "save my changes", "let's commit", saving session work |
 | `create-pr` | "create a PR", "open a pull request", "ship this", "ready for review" |
@@ -96,6 +97,7 @@ The core development plugin. Skills covering research, planning, implementation,
 | `implement-plan` | &#10003; | — | Execute plans phase by phase using TDD (Red-Green-Refactor). Supports team mode for parallel implementation. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/implement-plan/SKILL.md) |
 | `validate-plan` | &#10003; | — | Verify implementation against plan success criteria and TDD adherence. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/validate-plan/SKILL.md) |
 | `oneshot` | &#10003; | — | End-to-end autonomous workflow — research, plan, implement, validate, ship, and merge with context isolation between phases. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/oneshot/SKILL.md) |
+| `orchestrate` | &#10003; | — | Multi-ticket parallel coordinator — dispatches Level 2 workers across worktrees with wave-based execution and adversarial verification. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/orchestrate/SKILL.md) |
 | `code-first-draft` | &#10003; | — | Initial feature implementation from a PRD or feature description. Also generates standalone prototypes when no codebase exists. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/code-first-draft/SKILL.md) |
 | `fix-typescript` | &#10003; | — | Fix TypeScript errors with strict anti-reward-hacking rules. Ensures runtime type safety over silencing errors. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/fix-typescript/SKILL.md) |
 | `scan-reward-hacking` | &#10003; | — | Scan for forbidden patterns (`as any`, `@ts-ignore`, non-null assertions, async issues) in recent changes. Companion to `/fix-typescript`. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/scan-reward-hacking/SKILL.md) |
@@ -137,7 +139,7 @@ The core development plugin. Skills covering research, planning, implementation,
 
 ## catalyst-pm
 
-Project management workflows. 40+ skills covering strategy, research, planning, and reporting.
+Project management workflows. 46 skills covering strategy, research, planning, and reporting.
 
 ### Reporting & Analysis
 
@@ -233,6 +235,7 @@ Project management workflows. 40+ skills covering strategy, research, planning, 
 | `decision-doc` | &#10003; | — | Create structured decision documents | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/decision-doc/SKILL.md) |
 | `create-tickets` | &#10003; | — | Create Linear tickets from requirements | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/create-tickets/SKILL.md) |
 | `connect-mcps` | &#10003; | — | Connect and configure MCP servers | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/connect-mcps/SKILL.md) |
+| `ralph-wiggum` | &#10003; | — | Devil's advocate PRD/document review — surfaces risks and assumptions with adversarial questioning | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/ralph-wiggum/SKILL.md) |
 
 ## catalyst-analytics
 

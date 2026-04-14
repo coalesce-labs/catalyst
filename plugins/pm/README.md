@@ -1,7 +1,8 @@
 # Catalyst PM Plugin
 
-Linear-focused project management plugin with cycle management, backlog grooming, GitHub-Linear
-correlation, and team analytics.
+Linear-focused project management plugin — 46 skills and 12 analyzer/research agents covering cycle management, backlog grooming, GitHub-Linear correlation, strategy, PRDs, user research, meetings, prototyping, and analytics.
+
+> **Complete inventory:** the full list of skills and agents (with trigger contexts) lives in the website's [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/#catalyst-pm) and [Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/#catalyst-pm-agents). The sections below highlight the most commonly-used feature groups; they are not exhaustive.
 
 ## Overview
 
