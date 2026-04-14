@@ -4,6 +4,7 @@ import { subscribe } from "./lib/event-bus";
 import {
   buildSnapshot,
   buildAnalyticsSnapshot,
+  buildSessionDetail,
   type MonitorSnapshot,
   type BuildSnapshotOptions,
   type SessionState,
@@ -369,6 +370,44 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return new Response("Session(s) not found", { status: 404 });
           }
           return Response.json(result);
+        }
+
+        const sessionMatch = url.pathname.match(
+          /^\/api\/session\/([^/]+)\/([^/]+)$/,
+        );
+        if (sessionMatch) {
+          let orchId: string;
+          let ticket: string;
+          try {
+            orchId = decodeURIComponent(sessionMatch[1]);
+            ticket = decodeURIComponent(sessionMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            orchId.includes("..") ||
+            orchId.includes("\0") ||
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const detail = buildSessionDetail(wtDir, orchId, ticket);
+          if (!detail) {
+            return new Response("Not Found", { status: 404 });
+          }
+          if (prFetcher && detail.worker.pr) {
+            const repo = parseRepoFromPrUrl(detail.worker.pr.url);
+            if (repo) {
+              const status = prFetcher.get(repo, detail.worker.pr.number);
+              if (status) {
+                detail.worker.prState = status.state;
+                detail.worker.prMergedAt = status.mergedAt;
+              }
+            }
+          }
+          return Response.json(detail);
         }
 
         if (url.pathname === "/api/linear") {
