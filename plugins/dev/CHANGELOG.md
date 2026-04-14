@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.23.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.22.0...catalyst-dev-v6.23.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** Linear-inspired SaaS UI polish for orch-monitor ([#131](https://github.com/coalesce-labs/catalyst/issues/131)) ([0760882](https://github.com/coalesce-labs/catalyst/commit/07608823b79020d06ba97bae3fb6c578046a289e))
+
 ## [6.22.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.21.0...catalyst-dev-v6.22.0) (2026-04-14)
 
 
