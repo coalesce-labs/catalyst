@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.24.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.23.0...catalyst-dev-v6.24.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** add workspace/repo grouping to orch-monitor dashboard ([#132](https://github.com/coalesce-labs/catalyst/issues/132)) ([3c88247](https://github.com/coalesce-labs/catalyst/commit/3c882476cb3530537506ec4bf8f6fcf205287597))
+
 ## [6.23.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.22.0...catalyst-dev-v6.23.0) (2026-04-14)
 
 
