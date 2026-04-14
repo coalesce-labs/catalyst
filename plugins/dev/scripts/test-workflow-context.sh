@@ -833,6 +833,72 @@ else
 	fail "recent returned '$RESULT', expected 'thoughts/shared/research/old.md'"
 fi
 
+# ── Test 32: set-orchestration sets orchestration field ───────────────────
+
+run_test "workflow-context.sh set-orchestration sets orchestration field"
+
+TEST_DIR="$TMPDIR/test32"
+setup_project "$TEST_DIR"
+
+(cd "$TEST_DIR" && bash plugins/dev/scripts/workflow-context.sh set-orchestration "orch-data-import-2026-04-13")
+
+ORCH=$(cd "$TEST_DIR" && jq -r '.orchestration' .catalyst/.workflow-context.json)
+UPDATED=$(cd "$TEST_DIR" && jq -r '.lastUpdated' .catalyst/.workflow-context.json)
+
+if [[ $ORCH == "orch-data-import-2026-04-13" ]]; then
+	pass "orchestration set correctly"
+else
+	fail "orchestration is '$ORCH', expected 'orch-data-import-2026-04-13'"
+fi
+if [[ -n $UPDATED && $UPDATED != "" ]]; then
+	pass "lastUpdated is set"
+else
+	fail "lastUpdated should be set after set-orchestration"
+fi
+
+# ── Test 33: init includes orchestration field ───────────────────────────
+
+run_test "workflow-context.sh init creates context with orchestration field"
+
+TEST_DIR="$TMPDIR/test33"
+setup_project "$TEST_DIR"
+
+(cd "$TEST_DIR" && bash plugins/dev/scripts/workflow-context.sh init)
+
+ORCH=$(cd "$TEST_DIR" && jq -r '.orchestration' .catalyst/.workflow-context.json)
+if [[ $ORCH == "null" ]]; then
+	pass "orchestration defaults to null"
+else
+	fail "orchestration is '$ORCH', expected 'null'"
+fi
+
+# ── Test 34: set-orchestration preserves currentTicket ───────────────────
+
+run_test "set-orchestration does not overwrite currentTicket"
+
+TEST_DIR="$TMPDIR/test34"
+setup_project "$TEST_DIR"
+
+(
+	cd "$TEST_DIR"
+	bash plugins/dev/scripts/workflow-context.sh set-ticket "ADV-220"
+	bash plugins/dev/scripts/workflow-context.sh set-orchestration "orch-data-import-2026-04-13"
+)
+
+TICKET=$(cd "$TEST_DIR" && jq -r '.currentTicket' .catalyst/.workflow-context.json)
+ORCH=$(cd "$TEST_DIR" && jq -r '.orchestration' .catalyst/.workflow-context.json)
+
+if [[ $TICKET == "ADV-220" ]]; then
+	pass "currentTicket preserved as ADV-220"
+else
+	fail "currentTicket is '$TICKET', expected 'ADV-220'"
+fi
+if [[ $ORCH == "orch-data-import-2026-04-13" ]]; then
+	pass "orchestration set correctly alongside ticket"
+else
+	fail "orchestration is '$ORCH', expected 'orch-data-import-2026-04-13'"
+fi
+
 # ── Summary ────────────────────────────────────────────────────────────────
 
 echo ""

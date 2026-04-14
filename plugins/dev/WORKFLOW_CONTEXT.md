@@ -171,6 +171,7 @@ All commands gracefully fall back to asking for input:
 {
   "lastUpdated": "ISO timestamp",
   "currentTicket": "PROJ-123",
+  "orchestration": "orch-api-redesign-2026-04-13",
   "mostRecentDocument": {
     "type": "plans|research|handoffs|prs",
     "path": "thoughts/shared/.../file.md",
@@ -230,6 +231,10 @@ workflow-context.sh ticket PROJ-123
 # Set current ticket without adding a document
 workflow-context.sh set-ticket PROJ-123
 # → Sets currentTicket and lastUpdated; creates file if needed
+
+# Set orchestration run name
+workflow-context.sh set-orchestration orch-api-redesign-2026-04-13
+# → Sets orchestration and lastUpdated; creates file if needed
 
 # Initialize context file
 workflow-context.sh init

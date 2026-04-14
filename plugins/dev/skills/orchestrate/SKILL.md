@@ -212,13 +212,16 @@ if [ "$SETUP_HOOKS" != "[]" ] && [ -n "$SETUP_HOOKS" ]; then
   HOOKS_FLAG="--hooks-json '${SETUP_HOOKS}'"
 fi
 
+# Pass --orchestration so all worktrees record which run they belong to
+ORCH_FLAG="--orchestration ${ORCH_NAME}"
+
 # 1. Create orchestrator worktree (same script, same initialization)
-"$SCRIPT" "${ORCH_NAME}" "${BASE_BRANCH}" ${WT_DIR_FLAG} ${HOOKS_FLAG}
+"$SCRIPT" "${ORCH_NAME}" "${BASE_BRANCH}" ${WT_DIR_FLAG} ${HOOKS_FLAG} ${ORCH_FLAG}
 ORCH_DIR="${WORKTREES_BASE}/${ORCH_NAME}"
 
 # 2. Create worker worktrees for current wave
 for TICKET_ID in "${WAVE_TICKETS[@]}"; do
-  "$SCRIPT" "${ORCH_NAME}-${TICKET_ID}" "${BASE_BRANCH}" ${WT_DIR_FLAG} ${HOOKS_FLAG}
+  "$SCRIPT" "${ORCH_NAME}-${TICKET_ID}" "${BASE_BRANCH}" ${WT_DIR_FLAG} ${HOOKS_FLAG} ${ORCH_FLAG}
 done
 ```
 
