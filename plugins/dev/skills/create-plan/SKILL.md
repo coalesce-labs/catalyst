@@ -38,6 +38,19 @@ else
 fi
 ```
 
+## Session Tracking
+
+```bash
+SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
+if [[ -x "$SESSION_SCRIPT" ]]; then
+  CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "create-plan" \
+    --ticket "${TICKET_ID:-}" \
+    --workflow "${CATALYST_SESSION_ID:-}")
+  export CATALYST_SESSION_ID
+  "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "planning" --phase 1
+fi
+```
+
 ## Initial Response
 
 Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
@@ -318,7 +331,15 @@ This MUST print the plan path. If not, re-run 5b.
 4. **Iterate based on feedback** until the user is satisfied
    - Re-sync thoughts after changes
 
-5. **After plan approval**, provide implementation command:
+5. **End session tracking:**
+
+   ```bash
+   if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+     "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done
+   fi
+   ```
+
+6. **After plan approval**, provide implementation command:
 
    **Use `--team` when:** 3+ parallel phases, distinct domains, non-overlapping files, 10+ files
    **Use standard mode when:** sequential phases, same directory, <10 files, tightly coupled

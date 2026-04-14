@@ -243,6 +243,59 @@ fi
 | 6 complete | `done` |
 | Any failure | `failed` |
 
+## Session Tracking
+
+Start a catalyst-session at the very beginning of the workflow, before Phase 1. This session
+spans the entire oneshot lifecycle and records phase transitions, PR creation, and completion.
+
+```bash
+SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
+if [[ -x "$SESSION_SCRIPT" ]]; then
+  CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "oneshot" \
+    --ticket "${TICKET_ID:-}" \
+    --workflow "${CATALYST_SESSION_ID:-}")
+  export CATALYST_SESSION_ID
+fi
+```
+
+**At each phase transition**, call BOTH the signal file update helper (above) AND the session
+phase call. The session phase call is additive — it never replaces the signal file write:
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "$NEW_STATUS" --phase "$PHASE_NUM"
+fi
+```
+
+**When a PR is created** (Phase 5), record it in the session:
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" pr "$CATALYST_SESSION_ID" --number "$PR_NUMBER" --url "$PR_URL"
+fi
+```
+
+**At terminal states** (done or failed), end the session:
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done  # or --status failed
+fi
+```
+
+**When launching sub-sessions** via `humanlayer launch`, pass CATALYST_SESSION_ID so child
+sessions can link back to this parent workflow:
+
+```bash
+CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
+humanlayer launch --model opus --title "plan ${TICKET_ID:-oneshot}" \
+  "/catalyst-dev:create-plan thoughts/shared/research/$RESEARCH_DOC"
+```
+
+Each child skill (create-plan, implement-plan, etc.) will pick up `CATALYST_SESSION_ID` from
+the environment and pass it as `--workflow` to their own `catalyst-session start` call,
+creating a linked parent-child session tree.
+
 ## Workflow Phases
 
 ### Phase 1: Research (Current Session — Opus)
@@ -287,6 +340,7 @@ This phase runs in the current session to allow user interaction during research
 Launches a fresh Claude Code session with full context isolation.
 
 ```bash
+CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
 humanlayer launch \
   --model opus \
   --title "plan ${TICKET_ID:-oneshot}" \
@@ -300,6 +354,7 @@ humanlayer launch \
 - Runs `/create-plan` interactively with the user
 - Creates plan at `thoughts/shared/plans/YYYY-MM-DD-{ticket}-{description}.md`
 - Syncs thoughts automatically
+- Child session links back to parent via `--workflow` (from inherited `CATALYST_SESSION_ID`)
 
 **User interaction**: The user interacts with the planning session normally. The plan is refined
 iteratively until approved.
@@ -311,6 +366,7 @@ iteratively until approved.
 After the plan is approved, launches another fresh session:
 
 ```bash
+CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
 humanlayer launch \
   --model opus \
   --title "implement ${TICKET_ID:-oneshot}" \
@@ -335,6 +391,7 @@ humanlayer launch \
 Launches a fresh session for validation and quality enforcement:
 
 ```bash
+CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
 humanlayer launch \
   --model opus \
   --title "validate ${TICKET_ID:-oneshot}" \
@@ -409,6 +466,7 @@ If none of those keys exist either, skip quality gates entirely (validation-only
 Launches a Sonnet session for the structured PR workflow:
 
 ```bash
+CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
 humanlayer launch \
   --model sonnet \
   --title "ship ${TICKET_ID:-oneshot}" \
@@ -719,14 +777,25 @@ observes the PR merged — not the worker.
 
 ## Error Handling
 
+**All error paths must end the session.** Before presenting errors or creating handoffs, always
+run:
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed
+fi
+```
+
 **If research phase fails:**
 
+- End session with `--status failed`
 - Save partial findings to thoughts/
 - Present error to user
 - Suggest running `/catalyst-dev:research-codebase` manually
 
 **If humanlayer launch fails:**
 
+- End session with `--status failed`
 - Fall back to manual workflow:
 
   ```
@@ -738,6 +807,7 @@ observes the PR merged — not the worker.
 
 **If implementation fails:**
 
+- End session with `--status failed`
 - Partial work is preserved (uncommitted)
 - Handoff document created automatically
 - User can resume with `/catalyst-dev:resume-handoff`
@@ -746,7 +816,8 @@ observes the PR merged — not the worker.
 
 - Present failures with options (fix, continue, handoff)
 - If user continues, gates are marked as skipped in PR description
-- If user creates handoff, remaining phases are documented for next session
+- If user creates handoff, end session with `--status failed`, remaining phases are documented for
+  next session
 
 **If CI checks fail in Phase 5:**
 
@@ -757,6 +828,7 @@ observes the PR merged — not the worker.
 **Automatic handoff on stop:** When the workflow stops at any phase (user choice, unrecoverable
 error, context exhaustion):
 
+- End session with `--status failed`
 - Invoke `/create-handoff` with: phases completed, current phase status, unresolved issues,
   CI/review status, and remaining phases
 - Save handoff to `thoughts/shared/handoffs/`

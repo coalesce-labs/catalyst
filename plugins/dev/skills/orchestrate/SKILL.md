@@ -373,6 +373,19 @@ REPO=$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git
 The `CATALYST_ORCHESTRATOR_ID` is set to `${ORCH_NAME}` for use by workers (passed via
 environment variable alongside `CATALYST_ORCHESTRATOR_DIR`).
 
+**Start session tracking** (alongside the global state registration above):
+
+```bash
+SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
+if [[ -x "$SESSION_SCRIPT" ]]; then
+  CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "orchestrate" \
+    --label "${ORCH_NAME}" \
+    --workflow "${CATALYST_SESSION_ID:-}")
+  export CATALYST_SESSION_ID
+  "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "dispatching" --phase 3
+fi
+```
+
 ### Phase 3: Dispatch Workers
 
 For each provisioned worker worktree, dispatch a `/oneshot` session.
@@ -385,6 +398,7 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
 
    CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
    CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
+   CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
    humanlayer launch \
      --model "${WORKER_MODEL}" \
      --title "${ORCH_NAME}-${TICKET_ID}" \
@@ -399,6 +413,7 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
 
    CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
    CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
+   CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
    claude \
      -n "${ORCH_NAME}-${TICKET_ID}" \
      -w "${WORKER_DIR}" \
@@ -536,6 +551,12 @@ Update the signal file at each phase transition using the worker-signal.json sch
 ```
 
 ### Phase 4: Monitor & Track
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "monitoring" --phase 4
+fi
+```
 
 The orchestrator polls worker status on a regular interval. Use `/loop` if available, otherwise
 poll manually.
@@ -697,6 +718,12 @@ done
 ```
 
 ### Phase 5: Independent Verification (Anti-Reward-Hacking)
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "verifying" --phase 5
+fi
+```
 
 When a worker signals "done" (PR created, CI green), the orchestrator does NOT trust it.
 It spawns an **adversarial verification agent** in the worker's worktree:
@@ -884,6 +911,11 @@ When all waves are complete:
 
 # Archive to history (removes from active state)
 "$STATE_SCRIPT" archive "${ORCH_NAME}"
+
+# End session tracking
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done
+fi
 ```
 
 6. **Report to user**:
@@ -1196,6 +1228,14 @@ separately and does not block recovery — follow-up workers run full quality ga
 
 ## Error Handling
 
+**All error paths that stop the orchestrator must end the session:**
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed
+fi
+```
+
 **Worker crashes or stalls:**
 - Monitor detects no progress for 15+ minutes (no commits, no signal updates)
 - Dashboard marks worker as "stalled"
@@ -1207,6 +1247,7 @@ separately and does not block recovery — follow-up workers run full quality ga
 - Resume with: `/catalyst-dev:orchestrate --resume ${ORCH_DIR}`
 - Reads state.json, determines current wave, checks each worker's actual status
 - Picks up where it left off
+- On resume, start a new session (the old one leaked — this is acceptable)
 
 **Worktree conflicts:**
 - If a worktree path already exists, skip creation and check if it's from a previous run
