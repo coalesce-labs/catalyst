@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.5.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.2...catalyst-dev-v6.5.3) (2026-04-14)
+
+
+### Bug Fixes
+
+* **dev:** worker worktrees get correct currentTicket + orchestration field ([#89](https://github.com/coalesce-labs/catalyst/issues/89)) ([4768eac](https://github.com/coalesce-labs/catalyst/commit/4768eac0b4cb87bf074088ca232b29cf72486836))
+
 ## [6.5.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.1...catalyst-dev-v6.5.2) (2026-04-13)
 
 
