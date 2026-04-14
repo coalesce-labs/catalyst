@@ -35,6 +35,8 @@ export interface WorkerState {
     state?: string;
     title?: string;
     ciStatus?: string;
+    prOpenedAt?: string;
+    autoMergeArmedAt?: string;
     mergedAt?: string;
   } | null;
   startedAt: string;
@@ -215,6 +217,8 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
     if (typeof signal.pr.state === "string") pr.state = signal.pr.state;
     if (typeof signal.pr.title === "string") pr.title = signal.pr.title;
     if (typeof signal.pr.ciStatus === "string") pr.ciStatus = signal.pr.ciStatus;
+    if (typeof signal.pr.prOpenedAt === "string") pr.prOpenedAt = signal.pr.prOpenedAt;
+    if (typeof signal.pr.autoMergeArmedAt === "string") pr.autoMergeArmedAt = signal.pr.autoMergeArmedAt;
     if (typeof signal.pr.mergedAt === "string") pr.mergedAt = signal.pr.mergedAt;
   }
 

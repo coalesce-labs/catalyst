@@ -469,28 +469,38 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
 **Worker dispatch prompt includes mandatory testing AND lifecycle requirements:**
 
 ```
-MANDATORY: Before marking this ticket as complete:
+MANDATORY: Before completing your contract:
 1. TDD — write failing tests BEFORE implementation for every feature
 2. Unit tests — required for all new functions/methods
 3. Integration/API tests — required for every new/modified API endpoint
 4. Security review — must pass /security-review or equivalent
 5. Code review — must pass code-reviewer agent
 6. All quality gates in config must pass
-7. PR MUST be monitored through ACTUAL MERGE — do NOT stop at "PR created"
-   After creating the PR with auto-merge, you MUST:
-   a. Wait at least 3 minutes — CI checks and automated reviewers need time
-   b. Poll every 30s: check PR state, CI status, and review comments
-   c. If review comments arrive — address them, resolve threads, push fixes
-   d. If CI fails — analyze, fix, push
-   e. Continue polling until gh pr view shows state=MERGED
-   f. Only stop if genuinely blocked on human approval (review-required)
-   "PR created with auto-merge" is NOT done. You are polling to CONFIRM
-   the merge happened, not to decide whether to merge. Auto-merge handles
-   that — your job is to keep the path clear and verify completion.
 
-Your work will be independently verified by the orchestrator. Do NOT mark as done
-until all test types exist AND the PR state is MERGED (confirmed via gh pr view).
-The orchestrator will independently check PR merge state during verification.
+Your success contract ENDS at:
+  ✓ PR open (gh pr create succeeded)
+  ✓ Auto-merge armed (gh pr merge --auto succeeded)
+  ✓ CI triggered (checks have started running)
+  ✓ One settle-window pass (~3 min) to address any inline reviewer comments
+    already posted and fix any already-failed CI — ONE pass, not a loop
+
+Do NOT poll until state=MERGED. The orchestrator owns merge confirmation —
+it polls gh pr view independently and transitions the Linear ticket. Your
+subprocess reliably exits on your final tool-use regardless of any polling
+language here, so a worker-side long poll produces false "waiting for merge"
+signals while the process has already exited.
+
+Write these fields into your signal file before exiting:
+  pr.number
+  pr.url
+  pr.prOpenedAt       (ISO timestamp when gh pr create returned)
+  pr.autoMergeArmedAt (ISO timestamp when gh pr merge --auto returned)
+  pr.ciStatus         (pending | passing | failing | unknown — your last observation)
+  status              (pr-created — terminal success for you)
+
+Your work will be independently verified by the orchestrator. Do NOT falsely
+mark the worker signal as `done` or set `pr.ciStatus = "merged"` — those
+fields belong to the orchestrator after it confirms the merge via gh pr view.
 
 Write your status to the worker signal file at:
   ${ORCH_DIR}/workers/${TICKET_ID}.json
@@ -582,8 +592,93 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
   "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET}" \
     ".status = \"${W_STATUS}\" | .phase = ${W_PHASE} | .branch = \"${W_BRANCH}\" | .pr = ${W_PR}"
 done
+```
 
-# Detect stalled workers and raise attention
+**Orchestrator-owned poll-until-MERGED (CTL-31):**
+
+Workers exit at `pr-created` with auto-merge armed. The orchestrator — which survives subprocess
+exits and stays alive across the entire run — owns the long poll that confirms the merge actually
+happens. On each monitoring cycle, for every worker in `pr-created`/`merging` status whose PR is
+not yet known-merged, ping GitHub directly:
+
+```bash
+for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
+  TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
+  W_STATUS=$(jq -r '.status' "$WORKER_SIGNAL")
+  PR_NUMBER=$(jq -r '.pr.number // empty' "$WORKER_SIGNAL")
+  PR_URL=$(jq -r '.pr.url // empty' "$WORKER_SIGNAL")
+  MERGED_AT=$(jq -r '.pr.mergedAt // empty' "$WORKER_SIGNAL")
+
+  # Skip if no PR yet, already merged, or already in a terminal failure state
+  [ -z "$PR_NUMBER" ] && continue
+  [ -n "$MERGED_AT" ] && continue
+  [ "$W_STATUS" = "failed" ] && continue
+  [ "$W_STATUS" = "stalled" ] && continue
+
+  # Parse repo from PR URL (e.g. https://github.com/org/repo/pull/123)
+  REPO=$(echo "$PR_URL" | sed -E 's|https://github.com/([^/]+/[^/]+)/pull/.*|\1|')
+
+  # Ask GitHub the authoritative question
+  PR_JSON=$(gh -R "$REPO" pr view "$PR_NUMBER" \
+    --json state,mergeStateStatus,mergedAt,mergeable,mergedBy 2>/dev/null || echo '{}')
+  PR_STATE=$(echo "$PR_JSON" | jq -r '.state // "UNKNOWN"')
+  MERGE_STATE=$(echo "$PR_JSON" | jq -r '.mergeStateStatus // "UNKNOWN"')
+  PR_MERGED_AT=$(echo "$PR_JSON" | jq -r '.mergedAt // empty')
+
+  case "$PR_STATE" in
+    MERGED)
+      # Record merge in signal + global state, advance worker to done
+      jq --arg ts "$PR_MERGED_AT" \
+        '.pr.ciStatus = "merged" | .pr.mergedAt = $ts | .status = "done"
+         | .completedAt = $ts | .phaseTimestamps.done = $ts | .phase = 6' \
+        "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+
+      "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET}" \
+        ".status = \"done\" | .phase = 6 | .pr.ciStatus = \"merged\" | .pr.mergedAt = \"${PR_MERGED_AT}\""
+
+      "$STATE_SCRIPT" event "$(jq -nc \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg orch "${ORCH_NAME}" \
+        --arg w "${TICKET}" --argjson pr "$PR_NUMBER" --arg mt "$PR_MERGED_AT" \
+        '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-pr-merged", detail:{pr:$pr, mergedAt:$mt}}')"
+
+      # Transition Linear ticket (orchestrator owns this — worker no longer does)
+      LINEAR_DONE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' "$CONFIG_FILE")
+      linearis issues update "${TICKET}" --status "${LINEAR_DONE}" 2>/dev/null || true
+      ;;
+
+    CLOSED)
+      # PR was closed without merge — surface for attention
+      "$STATE_SCRIPT" attention "${ORCH_NAME}" "pr-closed" "${TICKET}" \
+        "PR #${PR_NUMBER} was closed without merging"
+      ;;
+
+    OPEN)
+      # Not merged yet — this is normal. Adjust poll cadence in the outer loop
+      # based on MERGE_STATE (CLEAN=pass, BLOCKED=review/CI gating, UNSTABLE=CI
+      # failed, BEHIND=needs rebase, DIRTY=conflicts). Only raise attention for
+      # genuinely stuck states that a worker cannot unblock.
+      case "$MERGE_STATE" in
+        DIRTY)
+          "$STATE_SCRIPT" attention "${ORCH_NAME}" "merge-conflicts" "${TICKET}" \
+            "PR #${PR_NUMBER} has merge conflicts — needs rebase"
+          ;;
+        BEHIND)
+          # Often auto-resolves when auto-merge rebases; log only
+          ;;
+      esac
+      ;;
+  esac
+done
+```
+
+**Poll cadence**: 60–120s while CI is running (MERGE_STATE in {UNKNOWN, PENDING, BLOCKED}); 30s
+while merge is imminent (MERGE_STATE=CLEAN but not yet MERGED). The orchestrator is the only
+component that survives long enough to observe state transitions reliably — workers have already
+exited by the time their PR actually merges, so they cannot record `mergedAt` honestly.
+
+**Detect stalled workers and raise attention:**
+
+```bash
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
   TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
   W_STATUS=$(jq -r '.status' "$WORKER_SIGNAL")
@@ -687,8 +782,12 @@ Update your worker signal file when fixed. The orchestrator will re-verify.
 
 When ALL tickets in the current wave pass verification:
 
-1. **Merge PRs**: If `--auto-merge`, run `/merge-pr` in each worker worktree. Otherwise, flag
-   PRs for human review on the dashboard.
+1. **Confirm merges**: If `--auto-merge`, the Phase 4 orchestrator-owned poll loop already
+   observed `state=MERGED` for each worker and recorded `pr.mergedAt`. Before advancing the
+   wave, double-check every worker in this wave has `status="done"` with a non-null
+   `pr.mergedAt` in its signal file. If any still show `pr-created` or `merging`, run one more
+   Phase 4 poll cycle before proceeding. If `--auto-merge` is off, flag these PRs for human
+   review on the dashboard instead of advancing.
 
 2. **Write wave briefing** for the next wave (see Wave Briefing section below).
    Then persist a copy to the thoughts repository so it survives worktree cleanup:

@@ -8,9 +8,13 @@
 
 ## Current Wave: ${CURRENT_WAVE} of ${TOTAL_WAVES}
 
-| Ticket | Title | Status | PR | Unit Tests | API Tests | Functional | Security | Code Review | Verified |
-|--------|-------|--------|-----|-----------|-----------|------------|----------|-------------|----------|
-| ${TICKET_ID} | ${TITLE} | ${STATUS} | ${PR_LINK} | ${UNIT} | ${API} | ${FUNC} | ${SEC} | ${REVIEW} | ${VERIFIED} |
+| Ticket | Title | Status | PR | PR Opened | Auto-Merge Armed | Merged | Unit Tests | API Tests | Functional | Security | Code Review | Verified |
+|--------|-------|--------|-----|-----------|------------------|--------|-----------|-----------|------------|----------|-------------|----------|
+| ${TICKET_ID} | ${TITLE} | ${STATUS} | ${PR_LINK} | ${PR_OPENED_AT} | ${AUTO_MERGE_ARMED_AT} | ${MERGED_AT} | ${UNIT} | ${API} | ${FUNC} | ${SEC} | ${REVIEW} | ${VERIFIED} |
+
+`PR Opened` and `Merged` are tracked separately because workers exit at "PR open + auto-merge
+armed" (their success contract) while actual merge detection happens later in the orchestrator's
+Phase 4 poll loop — the gap between them is CI + review + merge-queue latency, not worker time.
 
 ## Upcoming Waves
 
