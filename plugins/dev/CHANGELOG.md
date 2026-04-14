@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.20.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.19.0...catalyst-dev-v6.20.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** terminal UI monitor frontend ([#124](https://github.com/coalesce-labs/catalyst/issues/124)) ([cd7240a](https://github.com/coalesce-labs/catalyst/commit/cd7240a2ce6a69e10220527598d5a0fe4d4e90b3))
+
 ## [6.19.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.18.0...catalyst-dev-v6.19.0) (2026-04-14)
 
 
