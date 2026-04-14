@@ -320,6 +320,14 @@
       .worker-table .col-pr a { font-family: ui-monospace, monospace; }
       .worker-table .col-pr .pr-merged-note { color: var(--green); margin-left: 6px; font-size: 11px; font-weight: 600; }
       .worker-table .col-pr .pr-closed-link { color: var(--muted); text-decoration: line-through; }
+      .worker-table .col-preview { white-space: nowrap; }
+      .preview-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+      .pv-live { background: rgba(57, 208, 122, 0.18); color: var(--green); }
+      .pv-deploying { background: rgba(234, 188, 59, 0.18); color: var(--yellow); }
+      .pv-failed { background: rgba(239, 93, 93, 0.18); color: var(--red); }
+      .pv-inactive { background: rgba(107, 114, 128, 0.3); color: #cfd4dc; }
+      .pv-unknown { background: rgba(107, 114, 128, 0.3); color: var(--muted); }
+      .preview-more { color: var(--muted); font-size: 11px; margin-left: 4px; }
       .worker-table .col-age { font-family: ui-monospace, monospace; color: var(--muted); white-space: nowrap; }
       .worker-table .col-age.stale { color: var(--red); }
       .worker-table .col-cost,
@@ -1343,6 +1351,17 @@
           return html;
         }
 
+        function renderPreviewCell(w) {
+          var previews = w.previews;
+          if (!previews || !previews.length) return '<span style="color:var(--muted)">—</span>';
+          var first = previews[0];
+          var cls = "pv-" + statusClass(first.status || "unknown");
+          var html = '<a href="' + esc(first.url) + '" target="_blank" rel="noopener">' +
+            '<span class="preview-badge ' + cls + '">' + esc(first.provider) + '</span></a>';
+          if (previews.length > 1) html += '<span class="preview-more">+' + (previews.length - 1) + '</span>';
+          return html;
+        }
+
         function renderWorkerRow(orchId, ticket, w, waveNum) {
           const stat = w.status || "unknown";
           const badgeClass = "b-" + statusClass(stat);
@@ -1464,6 +1483,7 @@
             '<td class="col-phase">' + esc(w.phase ?? 0) + "</td>" +
             "<td>" + aliveCell + "</td>" +
             '<td class="col-pr">' + prCell + "</td>" +
+            '<td class="col-preview">' + renderPreviewCell(w) + "</td>" +
             costCell +
             tokensCell +
             '<td class="' + ageCls + '" data-since="1">' + fmtSince(tsu) + "</td>" +
@@ -1916,7 +1936,7 @@
             "</div>" +
             '<table class="worker-table"><thead><tr>' +
             "<th>Wave</th><th>Ticket</th><th>Label</th><th>Title</th><th>Status</th><th>Phase</th>" +
-            "<th>Process</th><th>PR</th>" +
+            "<th>Process</th><th>PR</th><th>Preview</th>" +
             '<th class="th-num">Cost</th><th class="th-num">Tokens</th>' +
             "<th>Last update</th>" +
             "</tr></thead><tbody>" + tableRows + "</tbody></table>" +

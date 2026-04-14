@@ -7,6 +7,7 @@ import { createServer, startTerminalOnly } from "../server";
 import type { BriefingProvider } from "../lib/ai-briefing";
 import type { MonitorSnapshot } from "../lib/state-reader";
 import type { LinearTicket } from "../lib/linear";
+import { createPreviewFetcher } from "../lib/preview-status";
 
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
@@ -916,5 +917,90 @@ describe("terminal mode", () => {
     expect(typeof handle.stop).toBe("function");
     handle.stop();
     rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+describe("Preview integration", () => {
+  let pvTmp: string;
+  let pvServer: ReturnType<typeof createServer>;
+  let pvUrl: string;
+
+  beforeAll(async () => {
+    pvTmp = mkdtempSync(join(tmpdir(), "orch-monitor-pv-"));
+    const wtDir = join(pvTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    const orchDir = join(wtDir, "orch-pv");
+    mkdirSync(join(orchDir, "workers"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ id: "orch-pv", waves: [] }),
+    );
+    writeFileSync(
+      join(orchDir, "workers", "PV-1.json"),
+      JSON.stringify({
+        ticket: "PV-1",
+        orchestrator: "orch-pv",
+        workerName: "w",
+        status: "pr-created",
+        phase: 5,
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        pr: { number: 42, url: "https://github.com/test-org/test-repo/pull/42" },
+      }),
+    );
+
+    const fetcher = createPreviewFetcher({
+      runner: (args) => {
+        if (args[1] === "--version")
+          return Promise.resolve({ stdout: "gh 2.0", ok: true });
+        const key = args.join(" ");
+        if (key.includes("comments"))
+          return Promise.resolve({
+            stdout: "Preview: https://my-app.pages.dev\n",
+            ok: true,
+          });
+        if (key.includes("deployments"))
+          return Promise.resolve({ stdout: "[]", ok: true });
+        return Promise.resolve({ stdout: "", ok: true });
+      },
+    });
+
+    await fetcher.refreshAll([{ repo: "test-org/test-repo", number: 42 }]);
+
+    pvServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      prStatusFetcher: null,
+      linearFetcher: null,
+      previewFetcher: fetcher,
+      annotationsDbPath: join(pvTmp, "annotations.db"),
+    });
+    pvUrl = `http://localhost:${pvServer.port}`;
+  });
+
+  afterAll(() => {
+    void pvServer?.stop(true);
+    try {
+      rmSync(pvTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("includes preview links in /api/snapshot after refresh", async () => {
+    const res = await fetch(`${pvUrl}/api/snapshot`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      orchestrators: Array<{
+        workers: Record<string, { previews?: Array<{ url: string; provider: string }> }>;
+      }>;
+    };
+    const worker = data.orchestrators[0]?.workers["PV-1"];
+    expect(worker).toBeDefined();
+    expect(worker?.previews).toBeDefined();
+    expect(worker?.previews?.length).toBeGreaterThan(0);
+    expect(worker?.previews?.[0]?.url).toBe("https://my-app.pages.dev");
+    expect(worker?.previews?.[0]?.provider).toBe("cloudflare");
   });
 });

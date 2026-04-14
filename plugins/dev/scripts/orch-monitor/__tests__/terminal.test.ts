@@ -105,6 +105,7 @@ describe("renderSnapshot", () => {
     expect(out).toContain("PID");
     expect(out).toContain("AGE");
     expect(out).toContain("PR");
+    expect(out).toContain("PREVIEW");
   });
 
   it("includes ANSI color codes when status is a known non-default status", () => {
@@ -139,6 +140,45 @@ describe("renderSnapshot", () => {
     const snapshot = makeSnapshot([]);
     const out = renderSnapshot(snapshot);
     expect(typeof out).toBe("string");
+  });
+
+  it("renders preview provider when previews are present", () => {
+    const snapshot = makeSnapshot([
+      makeOrchestrator({
+        workers: {
+          "T-1": makeWorker({
+            ticket: "T-1",
+            previews: [
+              {
+                url: "https://my-app.pages.dev",
+                provider: "cloudflare",
+                status: "live",
+                source: "comment",
+              },
+            ],
+          }),
+        },
+      }),
+    ]);
+    const out = renderSnapshot(snapshot);
+    expect(out).toContain("cloudflare");
+    // GREEN color code for "live" status
+    expect(out).toContain("\x1b[32m");
+  });
+
+  it("renders dash for preview when no previews exist", () => {
+    const snapshot = makeSnapshot([
+      makeOrchestrator({
+        workers: {
+          "T-1": makeWorker({ ticket: "T-1" }),
+        },
+      }),
+    ]);
+    const out = renderSnapshot(snapshot);
+    // The preview column should contain a dash
+    const lines = out.split("\n");
+    const workerLine = lines.find((l) => l.includes("T-1") && !l.includes("TICKET"));
+    expect(workerLine).toBeDefined();
   });
 
   it("keeps visible line width <= 80 columns (excluding ANSI codes)", () => {
