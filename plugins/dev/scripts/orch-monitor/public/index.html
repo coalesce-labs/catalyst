@@ -623,6 +623,26 @@
         border-top-color: var(--border);
         z-index: 21;
       }
+      .cost-tokens {
+        display: block;
+        width: 100%;
+        font-size: 12px;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin-top: 2px;
+      }
+      .cost-models {
+        display: block;
+        width: 100%;
+        font-size: 11px;
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        margin-top: 4px;
+      }
+      .cost-models .model-row {
+        display: inline-block;
+        margin-right: 14px;
+      }
       @media (max-width: 560px) {
         .cost-card { padding: 10px; gap: 8px; }
         .cost-total { font-size: 18px; }
@@ -1169,6 +1189,10 @@
           let completedCount = 0;
           let totalDurationMs = 0;
           let totalCost = 0;
+          let totalInput = 0;
+          let totalOutput = 0;
+          let totalCacheRead = 0;
+          const modelTokens = {};
           let workerMinStart = Infinity;
           let workerMaxEnd = -Infinity;
           for (const t of tickets) {
@@ -1179,6 +1203,30 @@
             const aCost = (a && Number(a.costUSD)) || 0;
             totalCost += Math.max(liveCost, aCost);
             if (a && Number.isFinite(a.durationMs)) totalDurationMs += a.durationMs;
+            const inp = (a && a.inputTokens) || (w.cost && w.cost.inputTokens) || 0;
+            const out = (a && a.outputTokens) || (w.cost && w.cost.outputTokens) || 0;
+            const crd = (a && a.cacheReadTokens) || (w.cost && w.cost.cacheReadTokens) || 0;
+            totalInput += inp;
+            totalOutput += out;
+            totalCacheRead += crd;
+            const mb = a && a.modelBreakdown;
+            if (mb && typeof mb === "object") {
+              for (const m of Object.keys(mb)) {
+                const md = mb[m];
+                if (!modelTokens[m]) modelTokens[m] = { input: 0, output: 0, cacheRead: 0, cost: 0 };
+                modelTokens[m].input += md.inputTokens || 0;
+                modelTokens[m].output += md.outputTokens || 0;
+                modelTokens[m].cacheRead += md.cacheReadTokens || 0;
+                modelTokens[m].cost += md.costUSD || 0;
+              }
+            } else if (a && a.model && a.model !== "unknown") {
+              const m = a.model;
+              if (!modelTokens[m]) modelTokens[m] = { input: 0, output: 0, cacheRead: 0, cost: 0 };
+              modelTokens[m].input += inp;
+              modelTokens[m].output += out;
+              modelTokens[m].cacheRead += crd;
+              modelTokens[m].cost += aCost;
+            }
             const sMs = w.startedAt ? Date.parse(w.startedAt) : NaN;
             const eMs = w.completedAt ? Date.parse(w.completedAt) : NaN;
             if (Number.isFinite(sMs)) workerMinStart = Math.min(workerMinStart, sMs);
@@ -1197,8 +1245,27 @@
           const parallelism = wallClockMs > 0 && totalDurationMs > 0
             ? totalDurationMs / wallClockMs
             : 0;
+          const grandTotal = totalInput + totalOutput + totalCacheRead;
 
-          if (totalCost === 0) {
+          const tokenSummary = grandTotal > 0
+            ? '<span class="cost-tokens">' + esc(fmtTokens(grandTotal)) + " tokens" +
+              " (" + esc(fmtTokens(totalInput)) + " in · " +
+              esc(fmtTokens(totalOutput)) + " out · " +
+              esc(fmtTokens(totalCacheRead)) + " cache)</span>"
+            : "";
+
+          const modelKeys = Object.keys(modelTokens).sort();
+          const modelBreakdown = modelKeys.length > 0
+            ? '<span class="cost-models">' + modelKeys.map(function (m) {
+                const mt = modelTokens[m];
+                const mTotal = mt.input + mt.output + mt.cacheRead;
+                const costPart = mt.cost > 0 ? " $" + mt.cost.toFixed(2) : "";
+                return '<span class="model-row">' + esc(m) + ": " +
+                  esc(fmtTokens(mTotal)) + costPart + "</span>";
+              }).join("") + "</span>"
+            : "";
+
+          if (totalCost === 0 && grandTotal === 0) {
             const metaParts = [];
             metaParts.push(workerCount + " worker" + (workerCount === 1 ? "" : "s") +
               " (" + completedCount + " done)");
@@ -1237,6 +1304,8 @@
             '<span class="cost-total">$' + totalCost.toFixed(2) + "</span>" +
             '<span class="cost-meta">' + meta + "</span>" +
             breakdown +
+            tokenSummary +
+            modelBreakdown +
             "</div>"
           );
         }

@@ -1,4 +1,4 @@
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 
 export interface SubAgentCall {
@@ -14,6 +14,13 @@ export interface TimelineEntry {
   description?: string;
 }
 
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  costUSD: number;
+}
+
 export interface WorkerAnalytics {
   ticket: string;
   durationMs: number;
@@ -24,6 +31,7 @@ export interface WorkerAnalytics {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  modelBreakdown: Record<string, ModelUsage>;
   toolUsage: Record<string, number>;
   subAgents: SubAgentCall[];
   timeline: TimelineEntry[];
@@ -54,10 +62,41 @@ function firstModelName(modelUsage: unknown): string {
   return keys.length > 0 ? keys[0] : "unknown";
 }
 
+function extractModelBreakdown(modelUsage: unknown): Record<string, ModelUsage> {
+  const breakdown: Record<string, ModelUsage> = {};
+  if (!isRecord(modelUsage)) return breakdown;
+  for (const [model, data] of Object.entries(modelUsage)) {
+    if (!isRecord(data)) continue;
+    breakdown[model] = {
+      inputTokens: asNumber(data.inputTokens),
+      outputTokens: asNumber(data.outputTokens),
+      cacheReadTokens: asNumber(data.cacheReadInputTokens),
+      costUSD: asNumber(data.costUSD),
+    };
+  }
+  return breakdown;
+}
+
+function parseResultObject(result: Record<string, unknown>): Omit<WorkerAnalytics, "toolUsage" | "subAgents" | "timeline"> {
+  const usage = isRecord(result.usage) ? result.usage : {};
+  return {
+    ticket: "unknown",
+    durationMs: asNumber(result.duration_ms),
+    durationApiMs: asNumber(result.duration_api_ms),
+    numTurns: asNumber(result.num_turns),
+    costUSD: asNumber(result.total_cost_usd),
+    model: firstModelName(result.modelUsage),
+    inputTokens: asNumber(usage.input_tokens),
+    outputTokens: asNumber(usage.output_tokens),
+    cacheReadTokens: asNumber(usage.cache_read_input_tokens),
+    modelBreakdown: extractModelBreakdown(result.modelUsage),
+  };
+}
+
 /**
- * Parse a worker's output.json (a Claude Code session transcript) into a
- * compact analytics object. Returns null if the file is missing, malformed,
- * or does not contain a final `result` message.
+ * Parse a worker's output.json into analytics. Supports two formats:
+ * - Array of messages (streaming transcript with a "result" entry)
+ * - Single object (claude --output-format json summary)
  */
 export function parseOutputJson(path: string): WorkerAnalytics | null {
   let raw: string;
@@ -78,8 +117,14 @@ export function parseOutputJson(path: string): WorkerAnalytics | null {
     return null;
   }
 
+  // Summary object format (claude --output-format json)
+  if (isRecord(parsed) && parsed.type === "result") {
+    const base = parseResultObject(parsed);
+    return { ...base, toolUsage: {}, subAgents: [], timeline: [] };
+  }
+
   if (!Array.isArray(parsed)) {
-    console.warn(`[output-parser] expected array at ${path}, got ${typeof parsed}`);
+    console.warn(`[output-parser] unexpected format at ${path}`);
     return null;
   }
 
@@ -123,27 +168,19 @@ export function parseOutputJson(path: string): WorkerAnalytics | null {
     }
   }
 
-  const usage = isRecord(result.usage) ? result.usage : {};
-  return {
-    ticket: "unknown",
-    durationMs: asNumber(result.duration_ms),
-    durationApiMs: asNumber(result.duration_api_ms),
-    numTurns: asNumber(result.num_turns),
-    costUSD: asNumber(result.total_cost_usd),
-    model: firstModelName(result.modelUsage),
-    inputTokens: asNumber(usage.input_tokens),
-    outputTokens: asNumber(usage.output_tokens),
-    cacheReadTokens: asNumber(usage.cache_read_input_tokens),
-    toolUsage,
-    subAgents,
-    timeline,
-  };
+  const base = parseResultObject(result);
+  return { ...base, toolUsage, subAgents, timeline };
 }
 
 /**
- * Convenience: returns the conventional path where a worker's output.json
- * lives within an orchestrator directory.
+ * Returns the path to a worker's output.json within an orchestrator directory.
+ * Checks two locations: the logs/ subdirectory (older convention) and the flat
+ * workers/ directory with hyphen separator (current convention).
  */
 export function analyticsPath(orchDir: string, ticket: string): string {
-  return join(orchDir, "workers", "logs", `${ticket}.output.json`);
+  const logsPath = join(orchDir, "workers", "logs", `${ticket}.output.json`);
+  if (existsSync(logsPath)) return logsPath;
+  const flatPath = join(orchDir, "workers", `${ticket}-output.json`);
+  if (existsSync(flatPath)) return flatPath;
+  return logsPath;
 }

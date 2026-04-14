@@ -74,20 +74,20 @@ function setupOrch(
 }
 
 describe("scanOrchestrators", () => {
-  it("discovers orch-* directories that have workers/ subdir", () => {
+  it("discovers directories that have workers/ subdir regardless of name prefix", () => {
     setupOrch(tmpRoot, "orch-alpha", { workers: { "T-1": { ticket: "T-1" } } });
     setupOrch(tmpRoot, "orch-beta", { workers: { "T-2": { ticket: "T-2" } } });
+    setupOrch(tmpRoot, "agent-obs", { workers: { "T-3": { ticket: "T-3" } } });
 
     // Non-matching: no workers/ dir
     mkdirSync(join(tmpRoot, "orch-empty"), { recursive: true });
-    // Non-matching: wrong prefix
-    mkdirSync(join(tmpRoot, "other-dir", "workers"), { recursive: true });
 
     const found = scanOrchestrators(tmpRoot);
     expect(found).toBeArray();
-    expect(found.length).toBe(2);
+    expect(found.length).toBe(3);
     expect(found.some((p) => p.endsWith("orch-alpha"))).toBe(true);
     expect(found.some((p) => p.endsWith("orch-beta"))).toBe(true);
+    expect(found.some((p) => p.endsWith("agent-obs"))).toBe(true);
     expect(found.every((p) => p.startsWith("/"))).toBe(true);
   });
 

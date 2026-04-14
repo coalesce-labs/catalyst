@@ -153,8 +153,8 @@ export function scanOrchestrators(baseDir: string): string[] {
   const matches: string[] = [];
   for (const name of entries) {
     const full = join(baseDir, name);
-    if (name.startsWith("orch-")) {
-      if (isOrchestratorDir(full)) matches.push(full);
+    if (isOrchestratorDir(full)) {
+      matches.push(full);
       continue;
     }
     try {
@@ -169,7 +169,6 @@ export function scanOrchestrators(baseDir: string): string[] {
       continue;
     }
     for (const child of children) {
-      if (!child.startsWith("orch-")) continue;
       const childPath = join(full, child);
       if (isOrchestratorDir(childPath)) matches.push(childPath);
     }
@@ -335,6 +334,7 @@ export function readOrchestratorState(orchDir: string): OrchestratorState {
     }
     for (const file of entries) {
       if (!file.endsWith(".json")) continue;
+      if (file.endsWith("-output.json")) continue;
       const fullPath = join(workersDir, file);
       const result = readJson(fullPath);
       if (result.error || !isRecord(result.value)) {
@@ -423,6 +423,7 @@ export function buildAnalyticsSnapshot(baseDir: string): AnalyticsSnapshot {
       }
       for (const file of entries) {
         if (!file.endsWith(".json")) continue;
+        if (file.endsWith("-output.json")) continue;
         const ticket = file.replace(/\.json$/, "");
         const analytics = parseOutputJson(analyticsPath(orchDir, ticket));
         if (analytics) analytics.ticket = ticket;
