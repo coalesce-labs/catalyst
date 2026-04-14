@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.7.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.6.0...catalyst-dev-v6.7.0) (2026-04-14)
+
+
+### Features
+
+* **dev:** pre-assign Supabase migration numbers per wave (CTL-29) ([#95](https://github.com/coalesce-labs/catalyst/issues/95)) ([84a6f84](https://github.com/coalesce-labs/catalyst/commit/84a6f8471abd49879b0ffb56f4eeda897e96864f))
+
 ## [6.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.4...catalyst-dev-v6.6.0) (2026-04-14)
 
 
