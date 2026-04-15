@@ -22,6 +22,23 @@ And the prompt loop breaks down fast:
 
 Catalyst solves this by giving Claude Code structure.
 
+## Who This Is For
+
+- **Tinkerers and experimenters.** You're comfortable spinning up Docker Compose stacks, installing unfamiliar CLIs, and trying new platforms. You might fork this repo.
+- **Solo developers or small teams** using Claude Code as their primary AI coding tool.
+- **Teams already on GitHub + Linear** (or willing to adopt them).
+- **macOS users** comfortable with CLI-driven workflows.
+- People who want **structured AI workflows**, not just chat-and-generate.
+
+## Who This Is Not For
+
+- Teams looking for IDE-integrated AI (Copilot, Cursor). Catalyst runs in the terminal.
+- Developers who want a polished, one-click installer. This is a working toolkit, not a packaged product.
+- Windows or Linux-primary developers. There's no cross-platform support planned.
+- Organizations that need Jira, Azure DevOps, or GitLab integration.
+
+See [The Stack](/getting-started/the-stack/) for the full list of tools and what "opinionated" means in practice.
+
 ## Background
 
 Catalyst is developed by [Ryan Rozich](https://ryanrozich.bio/). The methodology behind it — inverting time allocation to roughly 80% research and planning, 20% execution — is described in detail in [Beyond Prompt and Pray: A Field Guide to Structured AI Engineering](https://slides.rozich.net/ai/structured-ai-development-guide). That guide captures the daily workflow that the **catalyst-dev** plugin implements: defining tasks clearly before agents engage, fanning out sub-agents for parallel research, compacting findings into focused documents, planning interactively with human approval gates, and executing against an agreed spec with continuous validation.

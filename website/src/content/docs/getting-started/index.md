@@ -2,7 +2,7 @@
 title: Getting Started
 description: Get up and running with Catalyst in 5 minutes.
 sidebar:
-  order: 1
+  order: 2
 ---
 
 Get Catalyst installed and working in your project in under 5 minutes.
@@ -85,6 +85,43 @@ Catalyst is a 5-plugin system. Install what you need:
 # Workflow discovery (advanced users)
 /plugin install catalyst-meta
 ```
+
+## Keeping Plugins Up to Date
+
+Catalyst plugins are updated frequently. There are two ways to stay current.
+
+### Automatic Updates
+
+Claude Code checks for plugin updates at session start. If a new version has been released, it pulls the update automatically. You just need to restart Claude Code (exit and reopen, or start a new session) to load the new version.
+
+To confirm auto-updates are working, your plugins should show as installed from the marketplace:
+
+```bash
+/plugins
+```
+
+### Manual Updates
+
+If you want to pull the latest right now — for example, a release just dropped — you can force an update:
+
+```bash
+# Fetch latest from the marketplace
+/plugins update
+
+# Restart Claude Code to load the new version
+```
+
+### Checking Versions
+
+```bash
+# See installed plugins and current versions
+/plugins
+```
+
+Compare against the latest releases:
+
+- [Documentation — Changelogs](https://catalyst.coalescelabs.ai/changelog/catalyst-dev/) — per-plugin changelogs on the docs site
+- [GitHub Releases](https://github.com/coalesce-labs/catalyst/releases) — release notes with full commit history
 
 ## Next Steps
 
