@@ -32,6 +32,7 @@ function run(
       CATALYST_DIR: tmpDir,
       MONITOR_PID_FILE: pidFile,
       MONITOR_SERVER_SCRIPT: SERVER_SCRIPT,
+      MONITOR_SKIP_BOOTSTRAP: "1",
       ...env,
     },
     cwd: tmpDir,

@@ -78,21 +78,21 @@ You should see batches of telemetry arriving within ~10 seconds of the first too
 ### 4. Start the orchestration monitor (optional)
 
 The orch-monitor is a web dashboard for watching orchestrators and workers in real time. Start it
-with the launcher script:
+with:
 
 ```bash
-bash plugins/dev/scripts/start-monitor.sh
+bash plugins/dev/scripts/catalyst-monitor.sh start
 ```
 
 Or from a plugin marketplace install:
 
 ```bash
-bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/start-monitor.sh
+bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/catalyst-monitor.sh start
 ```
 
-The launcher checks prerequisites, installs dependencies, builds the frontend, and starts the
-server on port 7400 (configurable via `MONITOR_PORT`). Open `http://localhost:7400` in your
-browser.
+The `start` command checks prerequisites, installs dependencies, builds the frontend, and starts the
+server in the background on port 7400 (configurable via `MONITOR_PORT`). Open `http://localhost:7400`
+in your browser, or use `catalyst-monitor.sh open` to start and open the browser automatically.
 
 The monitor works without the OTel stack — it reads worker signal files and the SQLite session
 database directly. To add OTel metrics and logs to the dashboard, configure it to proxy OTel

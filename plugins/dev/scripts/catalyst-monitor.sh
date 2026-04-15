@@ -20,6 +20,7 @@ fi
 PID_FILE="${MONITOR_PID_FILE:-$CATALYST_DIR/monitor.pid}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVER_SCRIPT="${MONITOR_SERVER_SCRIPT:-$SCRIPT_DIR/orch-monitor/server.ts}"
+MONITOR_DIR="$(cd "$(dirname "$SERVER_SCRIPT")" && pwd)"
 
 is_alive() {
   local pid="$1"
@@ -39,6 +40,65 @@ read_pid() {
   return 1
 }
 
+bootstrap() {
+  if [[ "${MONITOR_SKIP_BOOTSTRAP:-}" == "1" ]]; then
+    return 0
+  fi
+
+  local errors=()
+
+  if ! command -v bun &>/dev/null; then
+    errors+=("bun is required but not found. Install: curl -fsSL https://bun.sh/install | bash")
+  fi
+
+  if [[ ! -f "$SERVER_SCRIPT" ]]; then
+    errors+=("server.ts not found at $SERVER_SCRIPT")
+  fi
+
+  if ! command -v sqlite3 &>/dev/null; then
+    errors+=("sqlite3 is required for session history")
+  fi
+
+  if [[ ! -d "$CATALYST_DIR" ]]; then
+    errors+=("Catalyst directory missing: $CATALYST_DIR — run /catalyst-dev:setup-catalyst first")
+  fi
+
+  if [[ ! -d "$CATALYST_DIR/wt" ]]; then
+    errors+=("Worktree directory missing: $CATALYST_DIR/wt/ — run /catalyst-dev:setup-catalyst first")
+  fi
+
+  if [[ ${#errors[@]} -gt 0 ]]; then
+    echo "Cannot start monitor:" >&2
+    for err in "${errors[@]}"; do
+      echo "  • $err" >&2
+    done
+    return 1
+  fi
+
+  local db_file="${CATALYST_DB_FILE:-$CATALYST_DIR/catalyst.db}"
+  if [[ ! -f "$db_file" ]]; then
+    echo "Warning: Session database not found ($db_file) — session history will be empty"
+    echo "  Run /catalyst-dev:setup-catalyst to initialize"
+  fi
+
+  if [[ -d "$MONITOR_DIR" ]]; then
+    if [[ ! -d "$MONITOR_DIR/node_modules" ]]; then
+      echo "Installing orch-monitor dependencies..."
+      (cd "$MONITOR_DIR" && bun install --frozen-lockfile 2>/dev/null || bun install)
+    fi
+
+    if [[ -d "$MONITOR_DIR/ui" && ! -d "$MONITOR_DIR/ui/node_modules" ]]; then
+      echo "Installing orch-monitor UI dependencies..."
+      (cd "$MONITOR_DIR/ui" && bun install --frozen-lockfile 2>/dev/null || bun install)
+    fi
+
+    if [[ -d "$MONITOR_DIR/ui" && ! -d "$MONITOR_DIR/ui/dist" ]]; then
+      echo "Building orch-monitor frontend..."
+      (cd "$MONITOR_DIR/ui" && bunx vite build)
+    fi
+  fi
+}
+
 cmd_start() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -52,6 +112,8 @@ cmd_start() {
     echo "Monitor already running (pid $existing_pid)"
     return 0
   fi
+
+  bootstrap || return 1
 
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
   mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
