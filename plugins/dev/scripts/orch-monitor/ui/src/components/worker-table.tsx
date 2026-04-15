@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import { fmtSince, fmtTokens, fmtCost } from "@/lib/formatters";
 import { ticketToWaveMap, effectiveCost, totalTokens } from "@/lib/computations";
+import { useSort } from "@/hooks/use-sort";
+import { SortHeader } from "./ui/sort-header";
 import { StatusBadge } from "./ui/badge";
 import { StatusDot } from "./ui/status-dot";
 import { ExternalLink } from "./ui/external-link";
@@ -190,17 +192,33 @@ function WorkerRow({
   );
 }
 
-const COL_HEADERS = [
-  { label: "Wave", align: "left" as const },
-  { label: "Ticket", align: "left" as const },
-  { label: "Title", align: "left" as const },
-  { label: "Status", align: "left" as const },
-  { label: "Phase", align: "left" as const },
-  { label: "Process", align: "left" as const },
-  { label: "PR", align: "left" as const },
-  { label: "Cost", align: "right" as const },
-  { label: "Tokens", align: "right" as const },
-  { label: "Last update", align: "left" as const },
+type WorkerSortKey =
+  | "wave"
+  | "ticket"
+  | "title"
+  | "status"
+  | "phase"
+  | "process"
+  | "pr"
+  | "cost"
+  | "tokens"
+  | "lastUpdate";
+
+const COL_HEADERS: {
+  label: string;
+  sortKey: WorkerSortKey;
+  align: "left" | "right";
+}[] = [
+  { label: "Wave", sortKey: "wave", align: "left" },
+  { label: "Ticket", sortKey: "ticket", align: "left" },
+  { label: "Title", sortKey: "title", align: "left" },
+  { label: "Status", sortKey: "status", align: "left" },
+  { label: "Phase", sortKey: "phase", align: "left" },
+  { label: "Process", sortKey: "process", align: "left" },
+  { label: "PR", sortKey: "pr", align: "left" },
+  { label: "Cost", sortKey: "cost", align: "right" },
+  { label: "Tokens", sortKey: "tokens", align: "right" },
+  { label: "Last update", sortKey: "lastUpdate", align: "left" },
 ];
 
 const STATUS_FILTERS = ["all", "active", "done", "failed"] as const;
@@ -226,32 +244,55 @@ export function WorkerTable({
 }: WorkerTableProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const { sort, toggleSort, sortFn } = useSort<WorkerSortKey>("wave");
   const tToW = ticketToWaveMap(orch);
-  const analytics = getAnalytics(orch.id);
+  const analyticsMap = getAnalytics(orch.id);
 
-  const entries = useMemo(() => {
+  const filtered = useMemo(() => {
     const q = search.toLowerCase();
-    return Object.entries(orch.workers)
-      .filter(([t, w]) => {
-        if (filterWave != null && tToW[t] !== filterWave) return false;
-        if (!matchesStatusFilter(w.status, statusFilter)) return false;
-        if (q) {
-          const lin = getLinear(t);
-          const haystack = [t, w.status, lin?.title, lin?.project]
-            .filter(Boolean)
-            .join(" ")
-            .toLowerCase();
-          if (!haystack.includes(q)) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => {
-        const wa = tToW[a[0]] ?? 999;
-        const wb = tToW[b[0]] ?? 999;
-        if (wa !== wb) return wa - wb;
-        return a[0].localeCompare(b[0]);
-      });
+    return Object.entries(orch.workers).filter(([t, w]) => {
+      if (filterWave != null && tToW[t] !== filterWave) return false;
+      if (!matchesStatusFilter(w.status, statusFilter)) return false;
+      if (q) {
+        const lin = getLinear(t);
+        const haystack = [t, w.status, lin?.title, lin?.project]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      return true;
+    });
   }, [orch.workers, filterWave, tToW, search, statusFilter, getLinear]);
+
+  const entries = useMemo(
+    () =>
+      sortFn(filtered, ([t, w], key) => {
+        switch (key) {
+          case "wave":
+            return tToW[t] ?? 999;
+          case "ticket":
+            return t;
+          case "title":
+            return getLinear(t)?.title ?? null;
+          case "status":
+            return w.status ?? null;
+          case "phase":
+            return w.phase ?? 0;
+          case "process":
+            return w.alive ? 0 : 1;
+          case "pr":
+            return w.pr?.number ?? null;
+          case "cost":
+            return effectiveCost(w as WorkerState, analyticsMap[t] || null);
+          case "tokens":
+            return totalTokens(w as WorkerState, analyticsMap[t] || null);
+          case "lastUpdate":
+            return w.updatedAt ? Date.parse(w.updatedAt) : null;
+        }
+      }),
+    [filtered, sortFn, tToW, getLinear, analyticsMap],
+  );
 
   const totalCount = Object.keys(orch.workers).length;
 
@@ -306,15 +347,14 @@ export function WorkerTable({
             <thead>
               <tr className="border-b border-border bg-surface-2">
                 {COL_HEADERS.map((h) => (
-                  <th
-                    key={h.label}
-                    className={cn(
-                      "px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted",
-                      h.align === "right" ? "text-right" : "text-left",
-                    )}
-                  >
-                    {h.label}
-                  </th>
+                  <SortHeader
+                    key={h.sortKey}
+                    label={h.label}
+                    sortKey={h.sortKey}
+                    sort={sort}
+                    onSort={toggleSort}
+                    align={h.align}
+                  />
                 ))}
               </tr>
             </thead>
@@ -325,7 +365,7 @@ export function WorkerTable({
                   ticket={t}
                   w={w as WorkerState}
                   waveNum={tToW[t] ?? (w as WorkerState).wave}
-                  analytics={analytics[t] || null}
+                  analytics={analyticsMap[t] || null}
                   linear={getLinear(t)}
                   staleThreshold={staleThreshold}
                 />

@@ -1,7 +1,9 @@
 import { useState, useCallback, lazy, Suspense } from "react";
 import { useMonitor } from "./hooks/use-monitor";
+import { useKeyboardNav } from "./hooks/use-keyboard-nav";
 import { Sidebar } from "./components/layout/sidebar";
 import { AttentionBar } from "./components/attention-bar";
+import { ConnectionBanner } from "./components/ui/connection-banner";
 import { SkeletonDashboard } from "./components/ui/skeleton";
 import { ChevronRight, Home, PanelLeftClose, PanelLeft } from "lucide-react";
 
@@ -27,6 +29,10 @@ export default function App() {
 
   const [selectedOrchId, setSelectedOrchId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  useKeyboardNav({
+    onEscape: () => setSelectedOrchId(null),
+  });
 
   const selectedOrch = selectedOrchId
     ? snapshot.orchestrators.find((o: { id: string }) => o.id === selectedOrchId)
@@ -98,6 +104,8 @@ export default function App() {
             )}
           </div>
         </header>
+
+        <ConnectionBanner status={connectionStatus} className="mx-5 mt-3" />
 
         <div className="flex-1 overflow-y-auto p-5">
           <Suspense fallback={<SkeletonDashboard />}>
