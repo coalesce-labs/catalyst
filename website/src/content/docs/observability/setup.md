@@ -75,9 +75,28 @@ docker compose logs -f otel-collector
 
 You should see batches of telemetry arriving within ~10 seconds of the first tool use. If not, see [Troubleshooting](#troubleshooting) below.
 
-### 4. Configure the orchestration monitor (optional)
+### 4. Start the orchestration monitor (optional)
 
-If you use the orch-monitor dashboard (`bun run plugins/dev/scripts/orch-monitor/server.ts`), configure it to proxy OTel queries by creating `~/.config/catalyst/config.json`:
+The orch-monitor is a web dashboard for watching orchestrators and workers in real time. Start it
+with the launcher script:
+
+```bash
+bash plugins/dev/scripts/start-monitor.sh
+```
+
+Or from a plugin marketplace install:
+
+```bash
+bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/start-monitor.sh
+```
+
+The launcher checks prerequisites, installs dependencies, builds the frontend, and starts the
+server on port 7400 (configurable via `MONITOR_PORT`). Open `http://localhost:7400` in your
+browser.
+
+The monitor works without the OTel stack — it reads worker signal files and the SQLite session
+database directly. To add OTel metrics and logs to the dashboard, configure it to proxy OTel
+queries by creating `~/.config/catalyst/config.json`:
 
 ```json
 {

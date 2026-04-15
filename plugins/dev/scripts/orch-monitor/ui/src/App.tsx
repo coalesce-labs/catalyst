@@ -1,4 +1,4 @@
-import { useState, useCallback, lazy, Suspense } from "react";
+import { useState, useCallback, useEffect, lazy, Suspense } from "react";
 import { useMonitor } from "./hooks/use-monitor";
 import { useKeyboardNav } from "./hooks/use-keyboard-nav";
 import { Sidebar } from "./components/layout/sidebar";
@@ -29,6 +29,14 @@ export default function App() {
 
   const [selectedOrchId, setSelectedOrchId] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/version")
+      .then((r) => r.json())
+      .then((d) => setVersion(d.version))
+      .catch(() => {});
+  }, []);
 
   useKeyboardNav({
     onEscape: () => setSelectedOrchId(null),
@@ -101,6 +109,9 @@ export default function App() {
               <span>
                 {new Date(snapshot.timestamp).toLocaleTimeString()}
               </span>
+            )}
+            {version && (
+              <span className="font-mono opacity-50">v{version}</span>
             )}
           </div>
         </header>

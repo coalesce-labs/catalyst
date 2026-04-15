@@ -1,5 +1,5 @@
-import { join, resolve as resolvePath, sep } from "path";
-import { realpathSync, writeFileSync, unlinkSync } from "fs";
+import { join, resolve as resolvePath, sep, dirname } from "path";
+import { realpathSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "fs";
 import { subscribe } from "./lib/event-bus";
 import {
   buildSnapshot,
@@ -95,6 +95,21 @@ export interface CreateServerOptions {
 }
 
 export const DEFAULT_PORT = 7400;
+
+function resolveVersion(): string {
+  const candidates = [
+    join(dirname(import.meta.dir), "version.txt"),
+    join(dirname(dirname(import.meta.dir)), "version.txt"),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      return readFileSync(p, "utf-8").trim();
+    }
+  }
+  return "unknown";
+}
+
+export const CATALYST_DEV_VERSION = resolveVersion();
 export const PR_STATUS_REFRESH_MS = 30_000;
 export const PREVIEW_REFRESH_MS = 30_000;
 export const LINEAR_REFRESH_MS = 5 * 60_000;
@@ -392,6 +407,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
               "Access-Control-Allow-Origin": "*",
             },
           });
+        }
+
+        if (url.pathname === "/api/version") {
+          return Response.json({ version: CATALYST_DEV_VERSION });
         }
 
         if (url.pathname === "/api/snapshot") {
@@ -858,7 +877,7 @@ if (import.meta.main) {
     });
     const displayHost =
       srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);
-    console.info(`Monitor running at http://${displayHost}:${srv.port}`);
+    console.info(`Monitor v${CATALYST_DEV_VERSION} running at http://${displayHost}:${srv.port}`);
     if (useTerminal) {
       console.info("Terminal renderer active (--terminal)");
     }
