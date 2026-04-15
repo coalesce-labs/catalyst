@@ -832,7 +832,9 @@ if (import.meta.main) {
   const compact = process.argv.includes("--compact");
   const renderOpts: RenderOptions = { compact };
 
-  const otelCfg = loadOtelConfig(`${process.env.HOME}/.catalyst`);
+  const otelCfg = loadOtelConfig(
+    process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
+  );
 
   if (terminalOnly) {
     const handle = startTerminalOnly(WT_DIR, renderOpts);

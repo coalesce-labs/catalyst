@@ -75,7 +75,25 @@ docker compose logs -f otel-collector
 
 You should see batches of telemetry arriving within ~10 seconds of the first tool use. If not, see [Troubleshooting](#troubleshooting) below.
 
-### 4. Import the Grafana dashboard
+### 4. Configure the orchestration monitor (optional)
+
+If you use the orch-monitor dashboard (`bun run plugins/dev/scripts/orch-monitor/server.ts`), configure it to proxy OTel queries by creating `~/.config/catalyst/config.json`:
+
+```json
+{
+  "otel": {
+    "enabled": true,
+    "prometheus": "http://localhost:9090",
+    "loki": "http://localhost:3100"
+  }
+}
+```
+
+This enables the `/api/otel/query` and `/api/otel/logs` endpoints on the monitor server, allowing the dashboard to display metrics and logs alongside signal file data.
+
+Alternatively, set environment variables: `OTEL_ENABLED=true`, `PROMETHEUS_URL`, `LOKI_URL`.
+
+### 5. Import the Grafana dashboard
 
 The claude-code-otel repo ships with a pre-built Grafana dashboard at `dashboards/claude-code.json`. Import it via Grafana → Dashboards → New → Import → Upload JSON file.
 

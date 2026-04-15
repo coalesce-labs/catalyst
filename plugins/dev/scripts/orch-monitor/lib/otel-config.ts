@@ -15,13 +15,13 @@ function stripTrailingSlashes(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
-export function loadOtelConfig(catalystDir: string): OtelConfig {
+export function loadOtelConfig(configDir: string): OtelConfig {
   let fileEnabled = false;
   let filePrometheus: string | null = null;
   let fileLoki: string | null = null;
 
   try {
-    const raw = readFileSync(join(catalystDir, "config.json"), "utf8");
+    const raw = readFileSync(join(configDir, "config.json"), "utf8");
     const parsed: unknown = JSON.parse(raw);
     if (isRecord(parsed) && isRecord(parsed.otel)) {
       const otel = parsed.otel;

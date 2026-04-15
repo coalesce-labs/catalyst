@@ -109,10 +109,13 @@ fi
 
 log "${YELLOW}Project: ${PROJECT_KEY} (prefix: ${TICKET_PREFIX:-none})${NC}"
 
-# ─── Step 3: Initialize global state ─────────────────────────────────────────
+# ─── Step 3: Initialize global state and session database ────────────────────
 
 log "Initializing global state..."
 "${SCRIPT_DIR}/catalyst-state.sh" init >/dev/null 2>&1
+
+log "Initializing session database..."
+"${SCRIPT_DIR}/catalyst-db.sh" init 2>&1 | while read -r line; do log "  $line"; done
 
 # ─── Step 4: Auto-generate worktree name ──────────────────────────────────────
 

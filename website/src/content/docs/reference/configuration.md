@@ -246,6 +246,36 @@ Never committed. One file per project, linked by `projectKey`.
 
 Only configure the integrations you use. The setup script prompts for each one.
 
+### Monitor OTel Config (`~/.config/catalyst/config.json`)
+
+The orchestration monitor reads OpenTelemetry backend endpoints from a global config file at
+`~/.config/catalyst/config.json`. This file is separate from the per-project secrets files.
+
+```json
+{
+  "otel": {
+    "enabled": true,
+    "prometheus": "http://localhost:9090",
+    "loki": "http://localhost:3100"
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `otel.enabled` | boolean | `false` | Enable OTel proxy endpoints on orch-monitor |
+| `otel.prometheus` | string | `null` | Prometheus query URL (for `/api/otel/query`) |
+| `otel.loki` | string | `null` | Loki query URL (for `/api/otel/logs`) |
+
+Environment variable overrides: `OTEL_ENABLED`, `PROMETHEUS_URL`, `LOKI_URL`. Env vars take
+precedence over the file when both are set.
+
+If you're running the [claude-code-otel](https://github.com/coalesce-labs/claude-code-otel) Docker
+Compose stack locally, the defaults above match the standard ports. For hosted backends (Grafana
+Cloud, Datadog, etc.), point these URLs at your hosted Prometheus/Loki-compatible endpoints.
+
+See [Setting up the OTel stack](/observability/setup/) for the full installation guide.
+
 ### AI Briefing
 
 The monitor dashboard supports AI-powered status summaries. Configuration spans both layers:
