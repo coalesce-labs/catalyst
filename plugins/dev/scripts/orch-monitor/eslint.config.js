@@ -5,7 +5,7 @@ import globals from "globals";
 
 export default [
   {
-    ignores: ["node_modules/**", "public/**", "eslint.config.js"],
+    ignores: ["node_modules/**", "public/**", "ui/**", "eslint.config.js"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
