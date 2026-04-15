@@ -280,21 +280,24 @@ export function useMonitor() {
       });
       es.addEventListener("snapshot", (e) => {
         try {
-          processSnapshot(JSON.parse(e.data));
+          const envelope = JSON.parse(e.data);
+          processSnapshot(envelope.data ?? envelope);
         } catch (err) {
           console.error("snapshot parse failed", err);
         }
       });
       es.addEventListener("worker-update", (e) => {
         try {
-          patchWorker(JSON.parse(e.data));
+          const envelope = JSON.parse(e.data);
+          patchWorker(envelope.data ?? envelope);
         } catch (err) {
           console.error("worker-update parse failed", err);
         }
       });
       es.addEventListener("liveness-change", (e) => {
         try {
-          patchWorker(JSON.parse(e.data));
+          const envelope = JSON.parse(e.data);
+          patchWorker(envelope.data ?? envelope);
         } catch (err) {
           console.error("liveness-change parse failed", err);
         }
