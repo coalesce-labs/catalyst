@@ -6,7 +6,9 @@ description:
   needs deep analysis of how existing code is structured. Produces a research document in
   thoughts/shared/research/ with file:line references."
 disable-model-invocation: true
-allowed-tools: Read, Write, Grep, Glob, Task, TodoWrite, Bash
+allowed-tools:
+  Read, Write, Grep, Glob, Task, TodoWrite, Bash, mcp__deepwiki__ask_question,
+  mcp__deepwiki__read_wiki_structure
 version: 1.0.0
 ---
 
@@ -58,6 +60,40 @@ and I'll analyze it thoroughly by exploring relevant components and connections.
 Then wait for the user's research query.
 
 ## Steps to Follow After Receiving the Research Query
+
+### Step 0: Orient with DeepWiki (ALWAYS attempt this first)
+
+Before reading files or spawning sub-agents, get a high-level understanding from DeepWiki. This
+provides a compressed overview of the codebase that guides all subsequent research and saves tokens.
+
+**Prerequisite check** — only run this step if both conditions are met:
+1. The `mcp__deepwiki__ask_question` tool is available (DeepWiki MCP is installed)
+2. The repo is indexed by DeepWiki (the call returns a meaningful response, not an error)
+
+If either condition fails, skip to Step 1 — do not retry or warn the user.
+
+**Steps:**
+
+1. **Determine the repo name** from the git remote:
+   ```bash
+   gh repo view --json nameWithOwner -q .nameWithOwner
+   ```
+2. **Ask DeepWiki** about the user's research topic on this repo:
+   ```
+   mcp__deepwiki__ask_question({
+     repoName: "<owner/repo>",
+     question: "<rephrase the user's research query for DeepWiki>"
+   })
+   ```
+3. **Use the response to plan your research**: DeepWiki's answer will identify relevant components,
+   files, and architectural patterns. Use this to make your sub-agent prompts specific and targeted
+   rather than exploratory.
+
+**Guidelines:**
+- Rephrase the user's query to be specific and technical (e.g., "How does the orchestration monitor
+  track worker session state?" not "tell me about the monitor")
+- If the topic is broad, ask 1-2 focused questions rather than one vague one
+- DeepWiki results are a starting point — always verify with live code via sub-agents
 
 ### Step 1: Read any directly mentioned files first
 
