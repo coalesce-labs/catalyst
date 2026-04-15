@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.29.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.28.0...catalyst-dev-v6.29.0) (2026-04-15)
+
+
+### Features
+
+* **dev:** add worker detail drawer, session tracking, and sidebar sessions ([#153](https://github.com/coalesce-labs/catalyst/issues/153)) ([f38e0dc](https://github.com/coalesce-labs/catalyst/commit/f38e0dc37a4ad6b95a943304302d8e51b2381700))
+
 ## [6.28.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.27.1...catalyst-dev-v6.28.0) (2026-04-15)
 
 
