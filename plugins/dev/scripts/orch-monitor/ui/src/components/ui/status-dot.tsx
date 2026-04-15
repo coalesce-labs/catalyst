@@ -14,7 +14,11 @@ interface StatusDotProps {
 
 export function StatusDot({ alive, className }: StatusDotProps) {
   return (
-    <span className={cn("relative inline-block h-2 w-2", className)}>
+    <span
+      className={cn("relative inline-block h-2 w-2", className)}
+      role="img"
+      aria-label={alive ? "Active" : "Inactive"}
+    >
       <span
         className={cn(
           "absolute inset-0 rounded-full",

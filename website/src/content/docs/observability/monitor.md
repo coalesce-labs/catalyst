@@ -115,7 +115,7 @@ You can share a filtered URL with someone else running the same monitor — the 
 
 **Dashboard shows workers as "dead" but they're still running**:
 
-The PID-liveness check uses `kill -0 <pid>`. If the worker is running in a different user's session (common with `humanlayer launch` + sudo), the check fails. The worker is actually alive — the monitor just can't see it.
+The PID-liveness check uses `kill -0 <pid>`. If the worker is running under a different user, the check fails. The worker is actually alive — the monitor just can't see it. Additionally, the monitor can tail the worker's stream-json output file (`workers/<ticket>-stream.jsonl`) to see real-time tool calls and progress.
 
 **PR status says "merged" but the signal file says "pr-created"**:
 

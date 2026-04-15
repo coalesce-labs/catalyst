@@ -16,6 +16,26 @@ export interface WorkerCost {
   cacheReadTokens?: number;
 }
 
+export interface WorkerActivity {
+  currentTool: string | null;
+  lastText: string | null;
+  eventCount: number;
+  toolCalls: number;
+  turns: number;
+  streamSizeBytes: number;
+  hasRetries: boolean;
+}
+
+export interface StreamEvent {
+  ts: number;
+  type: "tool_start" | "tool_end" | "text" | "turn" | "init" | "retry" | "result";
+  tool?: string;
+  toolInput?: string;
+  text?: string;
+  retryInfo?: { attempt: number; maxRetries: number; error: string };
+  usage?: Record<string, unknown>;
+}
+
 export interface WorkerState {
   ticket: string;
   status: string;
@@ -42,6 +62,7 @@ export interface WorkerState {
   parseError?: string;
   prState?: "OPEN" | "CLOSED" | "MERGED" | "UNKNOWN";
   prMergedAt?: string | null;
+  activity?: WorkerActivity | null;
 }
 
 export interface Wave {
@@ -103,6 +124,34 @@ export interface EventEntry {
   message: string;
   ticket?: string;
   orchId?: string;
+}
+
+export type SessionKind = "orchestrator" | "worker" | "standalone";
+
+export interface SessionState {
+  sessionId: string;
+  workflowId: string | null;
+  ticket: string | null;
+  label: string | null;
+  skillName: string | null;
+  status: string;
+  phase: number;
+  pid: number | null;
+  alive: boolean;
+  startedAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  timeSinceUpdate: number;
+  cost: WorkerCost | null;
+  pr: { number: number; url: string | null } | null;
+  cwd: string | null;
+  gitBranch: string | null;
+}
+
+export function sessionKind(s: SessionState): SessionKind {
+  if (s.skillName === "orchestrate") return "orchestrator";
+  if (s.workflowId) return "worker";
+  return "standalone";
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting";

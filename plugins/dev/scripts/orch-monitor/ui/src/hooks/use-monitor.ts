@@ -8,6 +8,7 @@ import type {
   CollectedAttention,
   WorkerState,
   OrchestratorState,
+  SessionState,
 } from "@/lib/types";
 
 const MAX_EVENTS = 200;
@@ -63,6 +64,7 @@ export function useMonitor() {
   >(new Map());
   const [linear, setLinear] = useState<Map<string, LinearTicket>>(new Map());
   const [attention, setAttention] = useState<CollectedAttention[]>([]);
+  const [sessions, setSessions] = useState<SessionState[]>([]);
 
   const prevWorkerRef = useRef<Map<string, WorkerPrev>>(new Map());
   const seenAttentionRef = useRef<Set<string>>(new Set());
@@ -367,6 +369,23 @@ export function useMonitor() {
     return () => clearInterval(id);
   }, []);
 
+  // Sessions polling
+  useEffect(() => {
+    async function refresh() {
+      try {
+        const resp = await fetch("/api/sessions?limit=50");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data?.available && Array.isArray(data.sessions)) {
+          setSessions(data.sessions);
+        }
+      } catch {}
+    }
+    refresh();
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
+  }, []);
+
   const getAnalytics = useCallback(
     (orchId: string) => analytics.get(orchId) || {},
     [analytics],
@@ -384,6 +403,7 @@ export function useMonitor() {
     attention,
     analytics: getAnalytics,
     linear: getLinear,
+    sessions,
     staleThreshold: STALE_THRESHOLD,
   };
 }

@@ -210,4 +210,4 @@ awk -v tid="$NEW_TICKET" \
 echo "Wrote prompt: $PROMPT_FILE"
 echo ""
 echo "Dispatch the follow-up worker with:"
-echo "  humanlayer launch --model opus --title \"${WORKER_NAME}\" -w \"${WORKER_DIR}\" \"\$(cat ${PROMPT_FILE})\""
+echo "  claude -n \"${WORKER_NAME}\" -w \"${WORKER_DIR}\" --output-format stream-json --verbose -p \"\$(cat ${PROMPT_FILE})\" > \"${ORCH_DIR}/workers/${NEW_TICKET}-stream.jsonl\" 2>/dev/null &"

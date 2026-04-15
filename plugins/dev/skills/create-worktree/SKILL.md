@@ -66,8 +66,10 @@ When this command is invoked:
 5. **Optional: Launch implementation session**: If a plan file path was provided, ask if the user
    wants to launch Claude in the worktree:
    ```bash
-   humanlayer launch --model opus -w <worktree_path> \
-     "/catalyst-dev:implement-plan <plan_path> and when done: create commit, create PR, update Linear ticket"
+   claude -w <worktree_path> \
+     -p "/catalyst-dev:implement-plan <plan_path> and when done: create commit, create PR, update Linear ticket" \
+     --output-format stream-json --verbose \
+     > "<worktree_path>/worker-stream.jsonl" 2>/dev/null &
    ```
 
 ## Worktree Location Convention

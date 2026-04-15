@@ -23,6 +23,8 @@ interface WorkerTableProps {
   getLinear: (ticket: string) => LinearTicket | null;
   staleThreshold: number;
   filterWave?: number | null;
+  onWorkerSelect?: (ticket: string) => void;
+  selectedTicket?: string | null;
 }
 
 function LabelChip({ label }: { label: string }) {
@@ -79,6 +81,20 @@ function LiveTimer({
   );
 }
 
+function ActivityCell({ w }: { w: WorkerState }) {
+  if (!w.activity?.currentTool) {
+    return <span className="text-muted">—</span>;
+  }
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="h-1.5 w-1.5 rounded-full bg-blue animate-live-pulse" />
+      <span className="font-mono text-[11px] text-blue truncate max-w-[120px]">
+        {w.activity.currentTool}
+      </span>
+    </span>
+  );
+}
+
 function WorkerRow({
   ticket,
   w,
@@ -86,6 +102,8 @@ function WorkerRow({
   analytics,
   linear,
   staleThreshold,
+  onClick,
+  isSelected,
 }: {
   ticket: string;
   w: WorkerState;
@@ -93,6 +111,8 @@ function WorkerRow({
   analytics: WorkerAnalytics | null;
   linear: LinearTicket | null;
   staleThreshold: number;
+  onClick?: () => void;
+  isSelected?: boolean;
 }) {
   const ticketUrl =
     linear?.url || `https://linear.app/issue/${encodeURIComponent(ticket)}`;
@@ -103,8 +123,11 @@ function WorkerRow({
 
   return (
     <tr
+      onClick={onClick}
       className={cn(
         "border-b border-border-subtle transition-colors hover:bg-surface-3",
+        onClick && "cursor-pointer",
+        isSelected && "bg-surface-3/80 ring-1 ring-inset ring-accent/20",
         isMerged && "opacity-80",
         isClosed && "opacity-70",
       )}
@@ -187,6 +210,9 @@ function WorkerRow({
           <span className="text-muted">—</span>
         )}
       </td>
+      <td className="px-3 py-2.5">
+        <ActivityCell w={w} />
+      </td>
       <LiveTimer updatedAt={w.updatedAt} staleThreshold={staleThreshold} />
     </tr>
   );
@@ -202,6 +228,7 @@ type WorkerSortKey =
   | "pr"
   | "cost"
   | "tokens"
+  | "activity"
   | "lastUpdate";
 
 const COL_HEADERS: {
@@ -218,6 +245,7 @@ const COL_HEADERS: {
   { label: "PR", sortKey: "pr", align: "left" },
   { label: "Cost", sortKey: "cost", align: "right" },
   { label: "Tokens", sortKey: "tokens", align: "right" },
+  { label: "Activity", sortKey: "activity", align: "left" },
   { label: "Last update", sortKey: "lastUpdate", align: "left" },
 ];
 
@@ -241,6 +269,8 @@ export function WorkerTable({
   getLinear,
   staleThreshold,
   filterWave,
+  onWorkerSelect,
+  selectedTicket,
 }: WorkerTableProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -287,6 +317,8 @@ export function WorkerTable({
             return effectiveCost(w as WorkerState, analyticsMap[t] || null);
           case "tokens":
             return totalTokens(w as WorkerState, analyticsMap[t] || null);
+          case "activity":
+            return (w as WorkerState).activity?.currentTool ?? null;
           case "lastUpdate":
             return w.updatedAt ? Date.parse(w.updatedAt) : null;
         }
@@ -368,6 +400,8 @@ export function WorkerTable({
                   analytics={analyticsMap[t] || null}
                   linear={getLinear(t)}
                   staleThreshold={staleThreshold}
+                  onClick={onWorkerSelect ? () => onWorkerSelect(t) : undefined}
+                  isSelected={selectedTicket === t}
                 />
               ))}
             </tbody>

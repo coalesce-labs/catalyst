@@ -22,6 +22,7 @@ export default function App() {
     connectionStatus,
     events,
     attention,
+    sessions,
     analytics,
     linear,
     staleThreshold,
@@ -64,6 +65,7 @@ export default function App() {
     <div className="flex h-screen bg-surface-0 text-fg">
       <Sidebar
         orchestrators={snapshot.orchestrators}
+        sessions={sessions}
         selectedOrchId={effectiveOrch ? selectedOrchId : null}
         onSelect={handleSelect}
         connectionStatus={connectionStatus}
@@ -143,6 +145,7 @@ export default function App() {
               <div className="animate-fade-in">
                 <Dashboard
                   orchestrators={snapshot.orchestrators}
+                  sessions={sessions}
                   attention={attention}
                   events={events}
                   getAnalytics={analytics}

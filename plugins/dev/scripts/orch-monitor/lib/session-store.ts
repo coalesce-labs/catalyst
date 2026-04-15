@@ -27,6 +27,8 @@ export interface SessionState {
   timeSinceUpdate: number;
   cost: WorkerCost | null;
   pr: SessionPr | null;
+  cwd: string | null;
+  gitBranch: string | null;
 }
 
 export interface SessionStoreSnapshot {
@@ -97,6 +99,8 @@ interface SessionRow {
   ci_status: string | null;
   opened_at: string | null;
   merged_at: string | null;
+  cwd: string | null;
+  git_branch: string | null;
 }
 
 function rowToState(row: SessionRow): SessionState {
@@ -143,6 +147,8 @@ function rowToState(row: SessionRow): SessionState {
     timeSinceUpdate,
     cost,
     pr,
+    cwd: row.cwd ?? null,
+    gitBranch: row.git_branch ?? null,
   };
 }
 
@@ -203,6 +209,8 @@ export function readSessionStore(
         s.started_at,
         s.updated_at,
         s.completed_at,
+        s.cwd,
+        s.git_branch,
         m.cost_usd,
         m.input_tokens,
         m.output_tokens,

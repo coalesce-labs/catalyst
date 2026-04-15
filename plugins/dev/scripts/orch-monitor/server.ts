@@ -1,4 +1,4 @@
-import { join, resolve as resolvePath, sep, dirname } from "path";
+import { join, resolve as resolvePath, sep, dirname, basename } from "path";
 import { realpathSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "fs";
 import { subscribe } from "./lib/event-bus";
 import {
@@ -12,6 +12,7 @@ import {
 import { readSessionStore } from "./lib/session-store";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import { startWatching, type WatcherHandle } from "./lib/watcher";
+import { readRecentStreamEvents } from "./lib/stream-reader";
 import {
   createEvent,
   parseFilter,
@@ -94,7 +95,7 @@ export interface CreateServerOptions {
   renderOptions?: RenderOptions;
 }
 
-export const DEFAULT_PORT = 7400;
+const DEFAULT_PORT = 7400;
 
 function resolveVersion(): string {
   const candidates = [
@@ -109,9 +110,9 @@ function resolveVersion(): string {
   return "unknown";
 }
 
-export const CATALYST_DEV_VERSION = resolveVersion();
-export const PR_STATUS_REFRESH_MS = 30_000;
-export const PREVIEW_REFRESH_MS = 30_000;
+const CATALYST_DEV_VERSION = resolveVersion();
+const PR_STATUS_REFRESH_MS = 30_000;
+const PREVIEW_REFRESH_MS = 30_000;
 export const LINEAR_REFRESH_MS = 5 * 60_000;
 
 function collectTicketKeys(snapshot: MonitorSnapshot): string[] {
@@ -535,6 +536,42 @@ export function createServer(opts: CreateServerOptions): BunServer {
             }
           }
           return Response.json(detail);
+        }
+
+        const streamMatch = url.pathname.match(
+          /^\/api\/worker-stream\/([^/]+)\/([^/]+)$/,
+        );
+        if (streamMatch) {
+          let orchId: string;
+          let ticket: string;
+          try {
+            orchId = decodeURIComponent(streamMatch[1]);
+            ticket = decodeURIComponent(streamMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            orchId.includes("..") ||
+            orchId.includes("\0") ||
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const maxEventsRaw = url.searchParams.get("limit");
+          const maxEvents = maxEventsRaw ? Number.parseInt(maxEventsRaw, 10) : 30;
+          const scanned = (await import("./lib/state-reader")).scanOrchestrators(wtDir);
+          const entry = scanned.find((d) => basename(d.path) === orchId);
+          if (!entry) {
+            return new Response("Not Found", { status: 404 });
+          }
+          const events = readRecentStreamEvents(
+            entry.path,
+            ticket,
+            Number.isFinite(maxEvents) ? maxEvents : 30,
+          );
+          return Response.json({ orchId, ticket, events });
         }
 
         if (url.pathname === "/api/linear") {

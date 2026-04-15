@@ -109,9 +109,9 @@ for SKILL_FILE in "$CI_COMMIT" "$RESEARCH" "$PLAN" "$IMPLEMENT" "$ONESHOT" "$ORC
   assert_contains "$SKILL_FILE" '-x "$SESSION_SCRIPT"' "$SKILL_NAME checks if script is executable"
 done
 
-# ─── Test 8: oneshot passes CATALYST_SESSION_ID to humanlayer launch ──────────
-run_test "oneshot passes session ID to sub-sessions via --workflow"
-assert_contains "$ONESHOT" '--workflow' "oneshot passes --workflow to child sessions"
+# ─── Test 8: oneshot passes CATALYST_SESSION_ID ──────────────────────────────
+run_test "oneshot passes session ID via --workflow"
+assert_contains "$ONESHOT" '--workflow' "oneshot passes --workflow for session correlation"
 
 # ─── Test 9: orchestrate passes CATALYST_SESSION_ID to workers ────────────────
 run_test "orchestrate passes session ID to dispatched workers"

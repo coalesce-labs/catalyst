@@ -40,37 +40,3 @@ export function handleKeypress(data: Buffer, callbacks: InputCallbacks): void {
     }
   }
 }
-
-export function startInputHandler(callbacks: InputCallbacks): () => void {
-  if (!process.stdin.isTTY) {
-    console.warn("[input] stdin is not a TTY — keyboard controls disabled");
-    return () => {};
-  }
-
-  const onData = (data: Buffer) => {
-    try {
-      handleKeypress(data, callbacks);
-    } catch (err) {
-      console.error("[input] keypress handler error:", err);
-    }
-  };
-
-  try {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on("data", onData);
-  } catch (err) {
-    console.error("[input] failed to enable raw mode:", err);
-    return () => {};
-  }
-
-  return () => {
-    process.stdin.off("data", onData);
-    try {
-      process.stdin.setRawMode(false);
-      process.stdin.pause();
-    } catch {
-      // stdin may already be closed
-    }
-  };
-}

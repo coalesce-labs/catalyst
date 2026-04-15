@@ -620,13 +620,12 @@ describe("SQLite session endpoints", () => {
     mkdirSync(wtDir, { recursive: true });
     dbPath = join(sessTmp, "catalyst.db");
 
-    const schemaSql = readFileSync(
-      join(__dirname, "..", "..", "db-migrations", "001_initial_schema.sql"),
-      "utf8",
-    );
+    const migDir = join(__dirname, "..", "..", "db-migrations");
     const db = new Database(dbPath, { create: true });
     db.exec("PRAGMA foreign_keys = ON;");
-    db.exec(schemaSql);
+    for (const f of ["001_initial_schema.sql", "002_session_context.sql"]) {
+      db.exec(readFileSync(join(migDir, f), "utf8"));
+    }
     const now = new Date().toISOString();
     db.run(
       `INSERT INTO sessions (session_id, workflow_id, ticket_key, status, phase, started_at, updated_at)
@@ -710,13 +709,12 @@ describe("History API endpoints", () => {
     mkdirSync(wtDir, { recursive: true });
     histDbPath = join(histTmp, "catalyst.db");
 
-    const schemaSql = readFileSync(
-      join(__dirname, "..", "..", "db-migrations", "001_initial_schema.sql"),
-      "utf8",
-    );
+    const migDir2 = join(__dirname, "..", "..", "db-migrations");
     const db = new Database(histDbPath, { create: true });
     db.exec("PRAGMA foreign_keys = ON;");
-    db.exec(schemaSql);
+    for (const f of ["001_initial_schema.sql", "002_session_context.sql"]) {
+      db.exec(readFileSync(join(migDir2, f), "utf8"));
+    }
 
     db.run(
       `INSERT INTO sessions (session_id, skill_name, ticket_key, label, status, phase, started_at, updated_at, completed_at)
