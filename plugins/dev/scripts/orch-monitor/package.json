@@ -8,7 +8,9 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "audit": "bun audit",
-    "check": "bun run typecheck && bun run lint && bun audit && bun test"
+    "check": "bun run typecheck && bun run lint && bun audit && bun test",
+    "build:ui": "cd ui && npx vite build",
+    "dev:ui": "cd ui && npx vite dev"
   },
   "dependencies": {
     "dompurify": "^3.3.3",

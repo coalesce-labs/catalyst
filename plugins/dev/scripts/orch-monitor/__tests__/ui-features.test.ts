@@ -69,89 +69,60 @@ afterAll(() => {
   }
 });
 
-describe("command palette", () => {
-  it("should include command palette markup in the HTML", () => {
-    expect(html).toContain("cmd-palette");
+describe("React app shell", () => {
+  it("should serve a valid HTML document", () => {
+    expect(html.toLowerCase()).toContain("<!doctype html");
+    expect(html).toContain("<html");
   });
 
-  it("should include command palette input element", () => {
-    expect(html).toContain("cmd-input");
+  it("should include React root mount point", () => {
+    expect(html).toContain('id="root"');
   });
 
-  it("should include command palette results container", () => {
-    expect(html).toContain("cmd-results");
+  it("should include module script tag for Vite bundle", () => {
+    expect(html).toContain('type="module"');
+    expect(html).toContain("/assets/");
   });
 
-  it("should have command palette overlay with backdrop styling", () => {
-    expect(html).toContain("cmd-overlay");
-  });
-});
-
-describe("sidebar navigation", () => {
-  it("should include sidebar element", () => {
-    expect(html).toContain("sidebar");
+  it("should include CSS stylesheet link", () => {
+    expect(html).toContain('rel="stylesheet"');
+    expect(html).toContain(".css");
   });
 
-  it("should include sidebar toggle button", () => {
-    expect(html).toContain("sidebar-toggle");
+  it("should include page title", () => {
+    expect(html).toContain("Catalyst Orchestration Monitor");
   });
 
-  it("should include layout wrapper", () => {
-    expect(html).toContain("layout");
+  it("should include favicon reference", () => {
+    expect(html).toContain("catalyst-logo.svg");
   });
 });
 
-describe("context menu", () => {
-  it("should include context menu element", () => {
-    expect(html).toContain("ctx-menu");
+describe("static asset serving", () => {
+  it("should serve built JS assets from /assets/", async () => {
+    const match = html.match(/src="(\/assets\/[^"]+\.js)"/);
+    expect(match).toBeTruthy();
+    if (match) {
+      const res = await fetch(`${baseUrl}${match[1]}`);
+      expect(res.status).toBe(200);
+      const ct = res.headers.get("content-type") || "";
+      expect(ct).toContain("javascript");
+    }
   });
 
-  it("should include context menu items for common actions", () => {
-    expect(html).toContain("Open in Linear");
-    expect(html).toContain("Open PR");
-    expect(html).toContain("Copy ticket ID");
-  });
-});
-
-describe("keyboard navigation", () => {
-  it("should include focused row CSS class", () => {
-    expect(html).toContain(".worker-row.focused");
-  });
-
-  it("should include keydown event listener", () => {
-    expect(html).toContain("keydown");
+  it("should serve built CSS assets from /assets/", async () => {
+    const match = html.match(/href="(\/assets\/[^"]+\.css)"/);
+    expect(match).toBeTruthy();
+    if (match) {
+      const res = await fetch(`${baseUrl}${match[1]}`);
+      expect(res.status).toBe(200);
+      const ct = res.headers.get("content-type") || "";
+      expect(ct).toContain("css");
+    }
   });
 
-  it("should handle j/k navigation keys", () => {
-    expect(html).toContain('"j"');
-    expect(html).toContain('"k"');
-  });
-
-  it("should handle Escape key", () => {
-    expect(html).toContain('"Escape"');
-  });
-});
-
-describe("design consistency", () => {
-  it("should include focus-visible outlines for keyboard nav", () => {
-    expect(html).toContain("focus-visible");
-  });
-
-  it("should include CSS transitions for smooth animations", () => {
-    expect(html).toContain("transition:");
-  });
-
-  it("should include briefing drawer transition instead of display toggle", () => {
-    expect(html).toContain("briefing-drawer");
-  });
-});
-
-describe("compact table design", () => {
-  it("should use compact padding in table cells", () => {
-    expect(html).toContain("worker-table");
-  });
-
-  it("should include monospace font for IDs", () => {
-    expect(html).toContain("ui-monospace");
+  it("should serve logo SVG from /public/", async () => {
+    const res = await fetch(`${baseUrl}/public/catalyst-logo.svg`);
+    expect(res.status).toBe(200);
   });
 });

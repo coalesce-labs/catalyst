@@ -497,59 +497,45 @@ describe("OTel API with mock clients", () => {
   });
 });
 
-describe("Metrics UI elements in index.html", () => {
-  it("serves Chart.js vendor file", async () => {
-    const res = await fetch(`${baseUrl}/public/vendor/chart.umd.min.js`);
-    expect(res.status).toBe(200);
-    const ct = res.headers.get("content-type") || "";
-    expect(ct).toContain("javascript");
-    const body = await res.text();
-    expect(body.length).toBeGreaterThan(1000);
-  });
-
-  it("index.html contains metrics tab navigation", async () => {
+describe("React UI index.html", () => {
+  it("serves React app entry point", async () => {
     const res = await fetch(`${baseUrl}/`);
     const html = await res.text();
-    expect(html).toContain('data-tab="metrics"');
-    expect(html).toContain('id="tab-nav"');
+    expect(html).toContain('id="root"');
+    expect(html).toContain('type="module"');
   });
 
-  it("index.html contains metrics view with chart canvases", async () => {
+  it("references Vite-built CSS asset", async () => {
     const res = await fetch(`${baseUrl}/`);
     const html = await res.text();
-    expect(html).toContain('id="metrics-view"');
-    expect(html).toContain('id="chart-cost-ticket"');
-    expect(html).toContain('id="chart-cost-rate"');
-    expect(html).toContain('id="chart-tokens"');
-    expect(html).toContain('id="chart-tools"');
+    expect(html).toContain('rel="stylesheet"');
+    expect(html).toContain("/assets/");
   });
 
-  it("index.html contains hero stats strip", async () => {
+  it("serves built JS asset", async () => {
     const res = await fetch(`${baseUrl}/`);
     const html = await res.text();
-    expect(html).toContain('id="metrics-hero"');
-    expect(html).toContain("hero-stats");
+    const match = html.match(/src="(\/assets\/index-[^"]+\.js)"/);
+    expect(match).toBeTruthy();
+    if (match) {
+      const jsRes = await fetch(`${baseUrl}${match[1]}`);
+      expect(jsRes.status).toBe(200);
+      const ct = jsRes.headers.get("content-type") || "";
+      expect(ct).toContain("javascript");
+    }
   });
 
-  it("index.html contains OTel disabled fallback banner", async () => {
+  it("serves built CSS asset", async () => {
     const res = await fetch(`${baseUrl}/`);
     const html = await res.text();
-    expect(html).toContain('id="otel-disabled"');
-    expect(html).toContain("OTel metrics not configured");
-  });
-
-  it("index.html contains time range selector", async () => {
-    const res = await fetch(`${baseUrl}/`);
-    const html = await res.text();
-    expect(html).toContain('id="metrics-range"');
-    expect(html).toContain('value="1h"');
-    expect(html).toContain('value="6h"');
-  });
-
-  it("index.html loads Chart.js vendor script", async () => {
-    const res = await fetch(`${baseUrl}/`);
-    const html = await res.text();
-    expect(html).toContain("chart.umd.min.js");
+    const match = html.match(/href="(\/assets\/index-[^"]+\.css)"/);
+    expect(match).toBeTruthy();
+    if (match) {
+      const cssRes = await fetch(`${baseUrl}${match[1]}`);
+      expect(cssRes.status).toBe(200);
+      const ct = cssRes.headers.get("content-type") || "";
+      expect(ct).toContain("css");
+    }
   });
 });
 

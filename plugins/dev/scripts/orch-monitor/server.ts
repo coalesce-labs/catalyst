@@ -718,8 +718,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }
 
 
-        if (url.pathname.startsWith("/public/")) {
-          const rel = decodeURIComponent(url.pathname.slice("/public/".length));
+        if (url.pathname.startsWith("/public/") || url.pathname.startsWith("/assets/")) {
+          const rel = decodeURIComponent(
+            url.pathname.startsWith("/public/")
+              ? url.pathname.slice("/public/".length)
+              : url.pathname.slice(1),
+          );
           const safe = resolveSafeStaticPath(publicDir, rel);
           if (!safe) return new Response("Forbidden", { status: 403 });
           const file = Bun.file(safe);
