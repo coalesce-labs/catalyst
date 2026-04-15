@@ -39,9 +39,21 @@ function tailLines(filePath: string, maxBytes: number): string[] {
   }
 }
 
+interface RawStreamObj {
+  type?: string;
+  subtype?: string;
+  data?: { attempt?: number; max_retries?: number; error?: string };
+  event?: {
+    type?: string;
+    content_block?: { type?: string; name?: string };
+    delta?: { type?: string; text?: string; partial_json?: string };
+  };
+  usage?: Record<string, unknown>;
+}
+
 function parseStreamLine(line: string): StreamEvent | null {
   try {
-    const obj = JSON.parse(line);
+    const obj = JSON.parse(line) as RawStreamObj | null;
     if (!obj || typeof obj.type !== "string") return null;
 
     if (obj.type === "system") {
@@ -114,7 +126,7 @@ export function readWorkerActivity(
   const streamFile = join(orchDir, "workers", `${ticket}-stream.jsonl`);
   if (!existsSync(streamFile)) return null;
 
-  let streamSizeBytes = 0;
+  let streamSizeBytes: number;
   try {
     streamSizeBytes = statSync(streamFile).size;
   } catch {
@@ -126,7 +138,7 @@ export function readWorkerActivity(
 
   let currentTool: string | null = null;
   let lastText: string | null = null;
-  let sessionId: string | null = null;
+  const sessionId: string | null = null;
   let hasRetries = false;
   let toolCalls = 0;
   let turns = 0;
