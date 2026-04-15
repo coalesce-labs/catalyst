@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "setup": "bash scripts/setup-workspace.sh",
+    "archive": "humanlayer thoughts sync || true"
+  },
+  "runScriptMode": "nonconcurrent"
+}

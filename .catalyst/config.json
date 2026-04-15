@@ -18,6 +18,8 @@
       }
     },
     "thoughts": {
+      "profile": "coalesce-labs",
+      "directory": "catalyst-workspace",
       "user": null
     }
   }
