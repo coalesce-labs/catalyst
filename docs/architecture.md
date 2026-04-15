@@ -65,11 +65,13 @@ orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
 ```
 
 - **catalyst.db**: SQLite-backed session store — durable source of truth for agent activity
-  (solo and orchestrated). Managed by `catalyst-db.sh`. Tables: `sessions`, `session_events`,
-  `session_metrics`, `session_tools`, `session_prs`, `schema_migrations`. Writers run in WAL
-  mode so monitor-style readers can operate concurrently. `catalyst-state.sh` continues to
-  write JSON/JSONL during the migration period for backward compatibility. Schema lives at
-  `plugins/dev/scripts/db-migrations/`.
+  (solo and orchestrated). Managed by `catalyst-db.sh` (low-level CRUD, migrations) and
+  `catalyst-session.sh` (high-level lifecycle CLI used by instrumented skills). Tables:
+  `sessions`, `session_events`, `session_metrics`, `session_tools`, `session_prs`,
+  `schema_migrations`. Writers run in WAL mode so monitor-style readers (including
+  `orch-monitor`) can operate concurrently. `catalyst-state.sh` continues to write JSON/JSONL
+  during the migration period for backward compatibility. Schema lives at
+  `plugins/dev/scripts/db-migrations/`. See ADR-008.
 
 - **state.json**: Registry of active orchestrators with progress, worker status, and attention
   items. Queryable with `jq`. Schema: `plugins/dev/templates/global-state.json`.

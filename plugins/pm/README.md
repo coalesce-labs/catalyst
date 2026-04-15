@@ -54,7 +54,7 @@ exactly what action to take after reading any report.
 
 ### Cycle Management
 
-- `/analyze-cycle` - Analyze cycle health with actionable insights
+- `/catalyst-pm:analyze-cycle` - Analyze cycle health with actionable insights
   - Health assessment (🟢/🟡/🔴)
   - Risk identification (blockers, at-risk issues)
   - Team capacity analysis
@@ -62,13 +62,13 @@ exactly what action to take after reading any report.
 
 ### Milestone Management
 
-- `/analyze-milestone` - Analyze milestone health toward target date
+- `/catalyst-pm:analyze-milestone` - Analyze milestone health toward target date
   - Target date feasibility assessment
   - Progress tracking (actual vs expected)
   - Risk identification (behind schedule, blockers)
   - Specific recommendations (adjust timeline, reduce scope)
 
-### `/analyze-cycle`
+### `/catalyst-pm:analyze-cycle`
 
 Generate comprehensive cycle health report with recommendations.
 
@@ -98,13 +98,13 @@ Priority Actions:
 
 ### Daily Operations
 
-- `/report-daily` - Quick daily standup report
+- `/catalyst-pm:report-daily` - Quick daily standup report
   - Yesterday's deliveries
   - Current work in progress
   - Team members needing assignments
   - Quick blockers/risks
 
-### `/report-daily`
+### `/catalyst-pm:report-daily`
 
 Quick daily standup report (scannable in <30 seconds).
 
@@ -130,14 +130,14 @@ Quick daily standup report (scannable in <30 seconds).
 
 ### Backlog Health
 
-- `/groom-backlog` - Analyze backlog health
+- `/catalyst-pm:groom-backlog` - Analyze backlog health
   - Orphaned issues (no project)
   - Misplaced issues (wrong project)
   - Stale issues (>30 days inactive)
   - Potential duplicates
   - Missing estimates
 
-### `/groom-backlog`
+### `/catalyst-pm:groom-backlog`
 
 Analyze backlog health and generate cleanup recommendations.
 
@@ -159,13 +159,13 @@ Analyze backlog health and generate cleanup recommendations.
 
 ### GitHub-Linear Sync
 
-- `/sync-prs` - Correlate GitHub PRs with Linear issues
+- `/catalyst-pm:sync-prs` - Correlate GitHub PRs with Linear issues
   - Orphaned PRs (no Linear issue)
   - Orphaned issues (no PR)
   - Ready to close (PR merged, issue open)
   - Stale PRs (>14 days)
 
-### `/sync-prs`
+### `/catalyst-pm:sync-prs`
 
 Correlate GitHub PRs with Linear issues and identify gaps.
 
@@ -192,13 +192,13 @@ Health Score: 75/100
 
 ### Context Engineering
 
-- `/context-daily` - Generate daily context engineering adoption dashboard
+- `/catalyst-pm:context-daily` - Generate daily context engineering adoption dashboard
   - Cross-repo analysis (code vs thoughts activity)
   - Identify developers NOT using context engineering
   - Individual adoption scores
   - 28-day trend analysis
 
-### `/context-daily`
+### `/catalyst-pm:context-daily`
 
 Track context engineering adoption by cross-referencing code and thoughts repository activity.
 
@@ -371,7 +371,10 @@ PM commands read from two config sources:
 }
 ```
 
-**Setup**: Run `./scripts/setup-catalyst-config.sh` to configure your project
+**Setup**: Create both files manually, or use the `setup-catalyst.sh` script from the project root:
+```bash
+curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
+```
 
 ## Installation
 
@@ -415,7 +418,7 @@ cd /path/to/your/project
 **Morning Standup**:
 
 ```bash
-/context-daily
+/catalyst-pm:context-daily
 ```
 
 - See what shipped yesterday
@@ -428,7 +431,7 @@ cd /path/to/your/project
 **Start of Week**:
 
 ```bash
-/analyze-cycle
+/catalyst-pm:analyze-cycle
 ```
 
 - Assess cycle health
@@ -439,7 +442,7 @@ cd /path/to/your/project
 **Mid-Week**:
 
 ```bash
-/sync-prs
+/catalyst-pm:sync-prs
 ```
 
 - Check GitHub-Linear correlation
@@ -449,7 +452,7 @@ cd /path/to/your/project
 **End of Week**:
 
 ```bash
-/groom-backlog
+/catalyst-pm:groom-backlog
 ```
 
 - Clean up orphaned issues
