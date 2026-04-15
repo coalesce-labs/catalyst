@@ -6,7 +6,7 @@ description:
   copy-paste command to launch the orchestrator in a new terminal."
 disable-model-invocation: true
 allowed-tools: Bash, Read
-version: 1.1.0
+version: 1.2.0
 ---
 
 # Setup Orchestrate
@@ -41,87 +41,35 @@ creating the worktree. Wave planning and dependency analysis is the orchestrate 
 
 Execute all steps without asking questions. No confirmations, no menus, no options.
 
-### Step 1: Validate — Must Be Main Repo
+### Step 1: Parse Input
 
-You MUST be in the main repo root, not a worktree. Check and **hard stop** if wrong:
+Determine which mode the user invoked:
+- If the input contains `--cycle`, extract the value (e.g., `current`)
+- If the input contains `--project`, extract the quoted value (e.g., `"Project Name"`)
+- Otherwise, treat all tokens as space-separated ticket IDs
 
-```bash
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
-GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+### Step 2: Call setup-orchestrator.sh
 
-if [ -z "$REPO_ROOT" ]; then
-  echo "ERROR: Not in a git repository"; exit 1
-fi
-
-if [ "$COMMON_DIR" != "$GIT_DIR" ]; then
-  MAIN_REPO=$(git -C "$(git rev-parse --git-common-dir)" rev-parse --show-toplevel 2>/dev/null)
-  echo "ERROR: You are inside a git worktree, not the main repo."
-  echo "Run this from: ${MAIN_REPO:-the main repo root}"
-  exit 1
-fi
-```
-
-If the check fails, print the error and **stop**. Do not offer to continue from the worktree.
-
-### Step 2: Read Config
+Build the flag string from the parsed input and call the standalone script:
 
 ```bash
-CONFIG_FILE=""
-for CFG in "${REPO_ROOT}/.catalyst/config.json" "${REPO_ROOT}/.claude/config.json"; do
-  if [ -f "$CFG" ]; then CONFIG_FILE="$CFG"; break; fi
-done
+# For ticket IDs:
+"${CLAUDE_PLUGIN_ROOT}/scripts/setup-orchestrator.sh" --tickets "<ticket-ids>"
 
-if [ -z "$CONFIG_FILE" ]; then
-  echo "ERROR: No .catalyst/config.json found. See /catalyst-dev:linearis for setup."
-  exit 1
-fi
+# For cycle mode:
+"${CLAUDE_PLUGIN_ROOT}/scripts/setup-orchestrator.sh" --cycle current
 
-PROJECT_KEY=$(jq -r '.catalyst.projectKey // empty' "$CONFIG_FILE")
-TICKET_PREFIX=$(jq -r '.catalyst.project.ticketPrefix // empty' "$CONFIG_FILE")
+# For project mode:
+"${CLAUDE_PLUGIN_ROOT}/scripts/setup-orchestrator.sh" --project "<project-name>"
 ```
 
-### Step 3: Initialize Global State
+The script handles everything: validation, config reading, state init, worktree creation.
 
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh" init
-```
+### Step 3: Format Output
 
-Idempotent — safe to run every time.
-
-### Step 4: Create Orchestrator Worktree
-
-Auto-generate the name from today's date: `orch-YYYY-MM-DD`. If that already exists, append
-`-2`, `-3`, etc.
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/create-worktree.sh" "<orch-name>" main
-```
-
-Do not ask for a custom name. The auto-generated name is always used.
-
-### Step 5: Build and Print Launch Command
-
-Construct the ticket arguments from the user's input exactly as provided (ticket IDs, --cycle, or
---project). Always append `--dry-run` to the first suggested command.
-
-Print this block:
-
-```
-════════════════════════════════════════════════════════════════
- Orchestrator ready: ~/catalyst/wt/<projectKey>/<orch-name>
-
- Dry run (preview wave plan):
-   cd ~/catalyst/wt/<projectKey>/<orch-name> && claude "/catalyst-dev:orchestrate <ticket-args> --dry-run"
-
- Full run (dispatch workers):
-   cd ~/catalyst/wt/<projectKey>/<orch-name> && claude "/catalyst-dev:orchestrate <ticket-args>"
-
- Monitor (optional — real-time web + terminal dashboard):
-   bun run ${CLAUDE_PLUGIN_ROOT}/scripts/orch-monitor/server.ts
-   Open http://<tailscale-ip>:7400 on any device
-════════════════════════════════════════════════════════════════
-```
+The script prints a formatted output block with the worktree path and launch commands.
+Display the script's output directly — it already includes the ═══ banner with dry-run
+and full-run commands, plus the machine-readable `WORKTREE_PATH=...` line.
 
 ## Rules
 
