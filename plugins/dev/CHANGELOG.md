@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.27.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.26.1...catalyst-dev-v6.27.0) (2026-04-15)
+
+
+### Features
+
+* **dev:** add setup-catalyst health check, monitor launcher, and version display ([#147](https://github.com/coalesce-labs/catalyst/issues/147)) ([31c8cba](https://github.com/coalesce-labs/catalyst/commit/31c8cba7d413228afffb0c1953aad44926c873df))
+
 ## [6.26.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.26.0...catalyst-dev-v6.26.1) (2026-04-15)
 
 
