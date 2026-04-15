@@ -6,7 +6,9 @@ description:
   wants a structured TDD implementation plan before writing code. Works best after
   /research-codebase."
 disable-model-invocation: true
-allowed-tools: Read, Write, Grep, Glob, Task, TodoWrite, Bash
+allowed-tools:
+  Read, Write, Grep, Glob, Task, TodoWrite, Bash, mcp__deepwiki__ask_question,
+  mcp__deepwiki__read_wiki_structure
 version: 1.0.0
 ---
 
@@ -86,7 +88,10 @@ Auto-discovery has already run in Prerequisites above. Check its output and foll
    using Linearis CLI (run `linearis issues usage` for syntax).
    If Linearis CLI is not available, skip silently and continue planning.
 
-3. **Spawn initial research tasks in parallel**:
+3. **Gather context using research sub-agents** — use the same agent palette and DeepWiki
+   orientation process as `/catalyst-dev:research-codebase` (that skill is the single source of
+   truth for how codebase research works). For planning, focus agents on the specific ticket/task
+   scope rather than broad exploration:
    - **codebase-locator** — find all files related to the ticket/task
    - **codebase-analyzer** — understand how the current implementation works
    - **thoughts-locator** — find existing thoughts documents about this feature (if relevant)

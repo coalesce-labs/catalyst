@@ -6,7 +6,9 @@ description:
   or wants to go from ticket/idea to merged PR autonomously. Each phase runs in a fresh session for
   context isolation."
 disable-model-invocation: true
-allowed-tools: Read, Write, Bash, Task, Grep, Glob
+allowed-tools:
+  Read, Write, Bash, Task, Grep, Glob, mcp__deepwiki__ask_question,
+  mcp__deepwiki__read_wiki_structure
 version: 3.0.0
 ---
 
@@ -347,21 +349,10 @@ This phase runs in the current session to allow user interaction during research
    ```
    If yes, create a ticket via the Linearis CLI (run `linearis issues usage` for create syntax) using the research summary as description,
    then register the ticket ID: `workflow-context.sh set-ticket "NEW-TICKET-ID"`
-5. **Conduct research**: Spawn parallel sub-agents (same as `/research-codebase`):
-   - **codebase-locator**: Find relevant files
-   - **codebase-analyzer**: Understand current implementation
-   - **codebase-pattern-finder**: Find similar patterns
-   - **thoughts-locator**: Find existing context (if relevant)
-   - **external-research**: Research frameworks/libraries (if relevant)
-6. **Synthesize findings**: Create research document at
-   `thoughts/shared/research/YYYY-MM-DD-{ticket}-{description}.md`
-7. **Sync**: `humanlayer thoughts sync`
-8. **Track in workflow context (REQUIRED)** — substitute actual path and ticket:
-   ```bash
-   "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "thoughts/shared/research/YYYY-MM-DD-description.md" "TICKET-ID"
-   ```
-9. **Verify**: `"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research` must print the
-   path
+5. **Conduct research** — follow the `/catalyst-dev:research-codebase` process exactly. This is the
+   single source of truth for how codebase research works (including DeepWiki orientation, sub-agent
+   spawning, synthesis, and document creation). The research document MUST be written to
+   `thoughts/shared/research/` and tracked in workflow context before proceeding to Phase 2.
 
 ### Phase 2: Plan (New Session via `humanlayer launch` — Opus)
 
