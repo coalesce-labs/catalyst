@@ -1,5 +1,17 @@
 # Changelog
 
+## [6.26.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.25.0...catalyst-dev-v6.26.0) (2026-04-15)
+
+
+### Features
+
+* **dev:** standalone setup-orchestrator.sh for external automation ([#141](https://github.com/coalesce-labs/catalyst/issues/141)) ([c1158b4](https://github.com/coalesce-labs/catalyst/commit/c1158b46bd4c62995346e224afa3ede928fad6c0))
+
+
+### Bug Fixes
+
+* **dev:** unwrap SSE event envelope in orch-monitor React UI ([#137](https://github.com/coalesce-labs/catalyst/issues/137)) ([8e2e433](https://github.com/coalesce-labs/catalyst/commit/8e2e43335a354b31c095edbb504cb84357d2efc7))
+
 ## [6.25.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.24.0...catalyst-dev-v6.25.0) (2026-04-15)
 
 
