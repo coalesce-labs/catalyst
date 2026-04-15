@@ -75,6 +75,8 @@ function makeSession(overrides: Partial<SessionState> = {}): SessionState {
     timeSinceUpdate: 0,
     cost: null,
     pr: null,
+    cwd: null,
+    gitBranch: null,
     ...overrides,
   };
 }
