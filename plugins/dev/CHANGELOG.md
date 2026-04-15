@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.28.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.27.1...catalyst-dev-v6.28.0) (2026-04-15)
+
+
+### Features
+
+* **dev:** add DeepWiki orientation to codebase research workflow ([#151](https://github.com/coalesce-labs/catalyst/issues/151)) ([7e705de](https://github.com/coalesce-labs/catalyst/commit/7e705def583eca5640a91e071a38abac1389a375))
+
 ## [6.27.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.27.0...catalyst-dev-v6.27.1) (2026-04-15)
 
 
