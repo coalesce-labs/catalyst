@@ -95,7 +95,7 @@ export interface CreateServerOptions {
   renderOptions?: RenderOptions;
 }
 
-export const DEFAULT_PORT = 7400;
+const DEFAULT_PORT = 7400;
 
 function resolveVersion(): string {
   const candidates = [
@@ -110,9 +110,9 @@ function resolveVersion(): string {
   return "unknown";
 }
 
-export const CATALYST_DEV_VERSION = resolveVersion();
-export const PR_STATUS_REFRESH_MS = 30_000;
-export const PREVIEW_REFRESH_MS = 30_000;
+const CATALYST_DEV_VERSION = resolveVersion();
+const PR_STATUS_REFRESH_MS = 30_000;
+const PREVIEW_REFRESH_MS = 30_000;
 export const LINEAR_REFRESH_MS = 5 * 60_000;
 
 function collectTicketKeys(snapshot: MonitorSnapshot): string[] {

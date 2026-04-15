@@ -41,7 +41,7 @@ export function handleKeypress(data: Buffer, callbacks: InputCallbacks): void {
   }
 }
 
-export function startInputHandler(callbacks: InputCallbacks): () => void {
+function startInputHandler(callbacks: InputCallbacks): () => void {
   if (!process.stdin.isTTY) {
     console.warn("[input] stdin is not a TTY — keyboard controls disabled");
     return () => {};

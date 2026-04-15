@@ -110,10 +110,10 @@ export function isRelevant(filename: string): boolean {
   return false;
 }
 
-export const DEBOUNCE_MS = 200;
-export const LIVENESS_INTERVAL_MS = 5000;
-export const SNAPSHOT_INTERVAL_MS = 30000;
-export const SQLITE_POLL_INTERVAL_MS = 2000;
+const DEBOUNCE_MS = 200;
+const LIVENESS_INTERVAL_MS = 5000;
+const SNAPSHOT_INTERVAL_MS = 30000;
+const SQLITE_POLL_INTERVAL_MS = 2000;
 
 export interface StartWatchingOptions {
   dbPath?: string | null;
