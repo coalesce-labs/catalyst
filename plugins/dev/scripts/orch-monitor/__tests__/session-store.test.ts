@@ -11,21 +11,17 @@ import {
 let tmpRoot: string;
 let dbPath: string;
 
-function loadSchemaSql(): string {
-  const schemaPath = join(
-    __dirname,
-    "..",
-    "..",
-    "db-migrations",
-    "001_initial_schema.sql",
+function loadMigrations(): string[] {
+  const migDir = join(__dirname, "..", "..", "db-migrations");
+  return ["001_initial_schema.sql", "002_session_context.sql"].map((f) =>
+    readFileSync(join(migDir, f), "utf8"),
   );
-  return readFileSync(schemaPath, "utf8");
 }
 
 function seedDb(path: string, fn: (db: Database) => void): void {
   const db = new Database(path, { create: true });
   db.exec("PRAGMA foreign_keys = ON;");
-  db.exec(loadSchemaSql());
+  for (const sql of loadMigrations()) db.exec(sql);
   fn(db);
   db.close();
 }
