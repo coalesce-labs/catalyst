@@ -2,7 +2,7 @@
 title: Multi-Project Setup
 description: Managing separate thoughts repositories for different clients and projects.
 sidebar:
-  order: 2
+  order: 3
 ---
 
 Catalyst supports completely isolated contexts for different clients and projects using HumanLayer profiles.

@@ -71,10 +71,27 @@ The dev plugin includes three Claude Code hooks that run automatically:
 
 ## Updating
 
+Claude Code auto-updates plugins at session start — if a new version is available, it pulls it automatically. Restart Claude Code to load the update.
+
+To force an immediate update (e.g., a release just dropped):
+
 ```bash
-claude plugin marketplace update catalyst
-# Restart Claude Code to load updates
+# Fetch latest from the marketplace
+/plugins update
+
+# Restart Claude Code to load the new version
 ```
+
+Check your current versions:
+
+```bash
+/plugins
+```
+
+Compare against the latest:
+
+- [Changelogs](/changelog/catalyst-dev/) — per-plugin changelogs on this site
+- [GitHub Releases](https://github.com/coalesce-labs/catalyst/releases) — release notes with full commit history
 
 ## Release Strategy
 
