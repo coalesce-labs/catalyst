@@ -473,6 +473,93 @@ attributes:
 workspace root). When using worktrees, `create-worktree.sh` generates a `.envrc` and runs
 `direnv allow` automatically.
 
+## direnv Setup (Recommended)
+
+[direnv](https://direnv.net/) is recommended when working across multiple repositories. It
+automatically loads per-directory environment variables, keeping API keys isolated between projects
+and populating OTel resource attributes for observability.
+
+### Installation
+
+```bash
+brew install direnv
+```
+
+Add the shell hook to your profile (`~/.zshrc` or `~/.bashrc`):
+
+```bash
+eval "$(direnv hook zsh)"   # or bash
+```
+
+### Library Functions
+
+Catalyst ships two direnv library functions. Install them to `~/.config/direnv/lib/` so they're
+available in all `.envrc` files:
+
+**`use_profile`** — loads environment variables from a named profile file:
+
+```bash
+# ~/.config/direnv/lib/profiles.sh
+# Loads vars from ~/.config/direnv/profiles/{name}.env
+# Later profiles override earlier ones.
+```
+
+**`use_otel_context`** — sets `OTEL_RESOURCE_ATTRIBUTES` for telemetry correlation:
+
+```bash
+# ~/.config/direnv/lib/otel.sh
+# Sets project, hostname, git.branch, linear.key, catalyst.orchestration
+```
+
+### Profile Files
+
+Create profile files at `~/.config/direnv/profiles/` to separate credentials by project:
+
+```
+~/.config/direnv/profiles/
+├── personal.env     # Global defaults (Cloudflare, AWS, PostHog)
+├── adva.env         # Client-specific keys (Supabase, Postmark, geocoding APIs)
+├── slides.env       # Project-specific keys (ElevenLabs, Gemini TTS)
+└── accounting.env   # Project-specific keys (Wave, Monarch)
+```
+
+Each file is a simple `KEY=value` format — no `export` prefix needed (direnv handles that).
+
+### Per-Project `.envrc` Files
+
+Each project root gets an `.envrc` file that layers profiles and sets OTel context:
+
+```bash
+# ~/code-repos/github/acme/project/.envrc
+use_profile personal          # Base credentials
+use_profile acme              # Client-specific overrides
+use_otel_context "acme"       # OTel resource attributes
+```
+
+Sub-directories (e.g., Conductor workspaces or worktrees) inherit from the parent:
+
+```bash
+# ~/conductor/workspaces/acme/workspace-1/.envrc
+source_up                     # Inherit from parent .envrc
+use_otel_context "acme"       # OTel context for this workspace
+```
+
+The `source_up` directive walks up the directory tree until it finds a parent `.envrc`, chaining
+configurations. This means worktrees and Conductor workspaces automatically get the parent project's
+API keys without duplicating them.
+
+### Why This Matters for Multi-Repo Work
+
+Without direnv, API keys end up in shell profiles (`.zshrc`) where they're global — every project
+sees every key. With direnv profiles:
+
+- **Credentials are scoped** — `cd` into a project and only its keys are loaded
+- **OTel attributes are automatic** — every Claude Code session gets the right `project` and
+  `linear.key` labels without manual configuration
+- **Worktrees inherit** — `source_up` means new worktrees get the right environment immediately
+- **No secret leakage** — `.envrc` files are committed (they reference profiles, not secrets);
+  profile `.env` files are local-only
+
 ## Thoughts System
 
 The thoughts system provides git-backed persistent context across sessions. The setup script handles

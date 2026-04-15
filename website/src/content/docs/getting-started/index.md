@@ -24,6 +24,7 @@ The setup script checks for and installs additional dependencies automatically:
 | Linearis CLI | Optional | Shows npm install command |
 | agent-browser | Optional | Shows npm install command |
 | Bun | Optional | For orch-monitor dashboard |
+| direnv | Recommended | Per-project env vars, API key isolation |
 
 ## Run the Setup Script
 

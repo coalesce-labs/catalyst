@@ -43,6 +43,7 @@ This is **not** a one-click installer. It's not a polished, end-to-end package t
 
 | Tool | Role |
 |------|------|
+| [direnv](https://direnv.net) | Per-project environment variables, API key isolation, OTel context |
 | [Conductor](https://conductor.build) | Parallel agent orchestration UI |
 | [Warp](https://www.warp.dev) | Terminal |
 | [Bun](https://bun.sh) | Runtime for scripts and tooling |
