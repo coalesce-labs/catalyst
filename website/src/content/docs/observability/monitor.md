@@ -9,7 +9,20 @@ sidebar:
 
 ## Running the server
 
-From any Catalyst worktree:
+The simplest way to start the monitor:
+
+```bash
+bash plugins/dev/scripts/start-monitor.sh
+```
+
+Or if you installed via the plugin marketplace:
+
+```bash
+bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/start-monitor.sh
+```
+
+The launcher checks prerequisites (bun, sqlite3, catalyst directory), installs dependencies and
+builds the frontend if needed, then starts the server. You can also run the server directly:
 
 ```bash
 bun run plugins/dev/scripts/orch-monitor/server.ts
@@ -17,7 +30,7 @@ bun run plugins/dev/scripts/orch-monitor/server.ts
 
 The server:
 
-- Starts HTTP on port `7400` (configurable via `PORT` env var)
+- Starts HTTP on port `7400` (configurable via `MONITOR_PORT` env var)
 - Watches `~/catalyst/wt/` for directories matching `orch-*`
 - Reads worker signal files via `fs.watch` — instant updates on change
 - Polls `gh pr view` every 30s for each open PR

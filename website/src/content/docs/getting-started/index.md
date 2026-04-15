@@ -130,6 +130,7 @@ Compare against the latest releases:
 
 ## Next Steps
 
+- [Setup Health Check](/reference/setup-health-check/) — Validate your install and auto-fix common issues
 - [Configuration](/reference/configuration/) — Two-layer config system, secrets management, and schema reference
 - [Development Workflow](/reference/workflows/) — Walk through the research-plan-implement cycle
 - [Multi-Project Setup](/getting-started/multi-project/) — Managing multiple clients or projects
