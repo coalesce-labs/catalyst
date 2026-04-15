@@ -150,7 +150,7 @@ log "Worktree name: ${ORCH_NAME}"
 
 log ""
 if [[ "$QUIET" == true ]]; then
-  "${SCRIPT_DIR}/create-worktree.sh" "$ORCH_NAME" main --orchestration "$ORCH_NAME" >/dev/null 2>&1
+  "${SCRIPT_DIR}/create-worktree.sh" "$ORCH_NAME" main --orchestration "$ORCH_NAME" >/dev/null
 else
   "${SCRIPT_DIR}/create-worktree.sh" "$ORCH_NAME" main --orchestration "$ORCH_NAME"
 fi
@@ -190,8 +190,10 @@ if [[ "$QUIET" != true && "$LAUNCH" != true ]]; then
   echo "════════════════════════════════════════════════════════════════"
 fi
 
-# Machine-readable output (always last line)
-echo "WORKTREE_PATH=${WORKTREE_PATH}"
+# Machine-readable output (skip in --launch mode — claude would see it flash by)
+if [[ "$LAUNCH" != true ]]; then
+  echo "WORKTREE_PATH=${WORKTREE_PATH}"
+fi
 
 # ─── Optional: launch claude in the new worktree ──────────────────────────────
 
