@@ -97,7 +97,7 @@ curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-c
 ## Requirements
 
 - **Required**: Git, Bash
-- **Recommended**: HumanLayer CLI (`pip install humanlayer`) for the thoughts system and context-isolated worker launches
+- **Optional**: HumanLayer CLI (`pip install humanlayer`) for the thoughts system and context-isolated worker launches (being removed — see CTL-58)
 - **Optional**: Linearis CLI (`npm install -g linearis`) for Linear integration
 - **Optional**: GitHub CLI (`brew install gh`) for PR workflows
 
@@ -105,13 +105,19 @@ curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-c
 
 Runtime utilities under `scripts/`:
 
-- `catalyst-state.sh` — Writes to `~/catalyst/state.json` and `~/catalyst/events.jsonl`
+- `catalyst-db.sh` — SQLite session store CRUD and schema migrations (see ADR-008)
+- `catalyst-monitor.sh` — On-demand orch-monitor server management (`start`, `stop`, `status`, `open`, `url`)
+- `catalyst-session.sh` — Lifecycle CLI for agent sessions (`start`, `phase`, `metric`, `tool`, `pr`, `end`, `heartbeat`, `list`, `read`, `history`). Writes to SQLite via `catalyst-db.sh` and dual-writes JSONL events for backward compatibility
+- `catalyst-state.sh` — Writes to `~/catalyst/state.json` and `~/catalyst/events/YYYY-MM.jsonl`
 - `check-prerequisites.sh` — Validate tool availability
 - `check-project-setup.sh` — Validate workspace has thoughts system, config, etc.
 - `create-worktree.sh` — Worktree creation with setup hooks
 - `frontmatter-utils.sh` — Parse and update markdown frontmatter
-- `orch-monitor/` — Web + terminal dashboard (Bun server, see [Observability](https://catalyst.coalescelabs.ai/observability/))
+- `orch-monitor/` — React SPA + Bun server dashboard (default port 7400, configurable via `MONITOR_PORT`). Reads `~/catalyst/catalyst.db` (SQLite, WAL mode) and watches `~/catalyst/wt/`. Start with `cd plugins/dev/scripts/orch-monitor && bun run server.ts`, or use `catalyst-monitor.sh open`
+- `orchestrate-fixup` — Fix issues found during orchestration verification
+- `orchestrate-followup` — Handle follow-up tasks after orchestration completes
 - `orchestrate-verify.sh` — Adversarial verification checks (test existence, reward-hacking patterns)
+- `pre-assign-migrations.sh` — Pre-assign database migration numbers to avoid conflicts
 - `resolve-ticket.sh` — Extract ticket IDs from various contexts
 - `workflow-context.sh` — Read/write `.catalyst/.workflow-context.json`
 

@@ -128,6 +128,7 @@ orchestrator snapshots archived to `~/catalyst/history/`.
 ```
 ~/catalyst/
 ├── state.json              # Global registry (active orchestrators only)
+├── catalyst.db             # SQLite session store (WAL mode)
 ├── events/                 # Append-only event stream, rotated monthly
 │   ├── 2026-03.jsonl
 │   └── 2026-04.jsonl
@@ -156,3 +157,37 @@ orchestrator snapshots archived to `~/catalyst/history/`.
 - Dashboards (terminal, web) have a stable JSON contract to build against
 - The schemas at `plugins/dev/templates/global-state.json` and `global-event.json` define the
   contract for forward compatibility
+
+---
+
+## ADR-008: SQLite Session Store
+
+**Decision**: Replace JSONL event streams with a SQLite database (`~/catalyst/catalyst.db`) as the
+durable source of truth for agent session data, managed by `catalyst-db.sh` and `catalyst-session.sh`.
+
+**Rationale**:
+
+- JSONL event files grow unbounded and require full scans for queries
+- Cross-session analytics (cost rollups, tool histograms, duration trends) are expensive over flat files
+- SQLite provides ACID transactions, indexed queries, and WAL-mode concurrent readers — all with zero
+  server dependencies
+- A CLI wrapper (`catalyst-session.sh`) gives skills a sub-50ms write interface without importing
+  library code
+
+**Schema** (`plugins/dev/scripts/db-migrations/001_initial_schema.sql`):
+
+- `sessions` — One row per agent run (skill, ticket, workflow, status, timestamps)
+- `session_events` — Phase transitions, PR opens, heartbeats (typed, append-only)
+- `session_metrics` — Cost and token counters (upserted per session)
+- `session_tools` — Tool usage histograms (tool name → call count, total duration)
+- `session_prs` — PRs created during a session (number, URL, CI status)
+- `schema_migrations` — Applied migration versions
+
+**Consequences**:
+
+- Skills call `catalyst-session.sh start|phase|metric|tool|pr|end` instead of writing JSON directly
+- `catalyst-db.sh` handles schema init, migration, and low-level CRUD
+- Dual-write to `~/catalyst/events/YYYY-MM.jsonl` continues during the migration period for backward
+  compatibility with tools that still consume the JSONL stream
+- `orch-monitor` reads the SQLite store directly (WAL mode allows concurrent readers)
+- `sqlite3` is now listed as an optional dependency

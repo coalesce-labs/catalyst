@@ -43,7 +43,7 @@ This workspace has no build process - it's markdown files and bash scripts.
 - **Single source of truth** — Don't duplicate information across files:
   - CLI syntax lives in skills (e.g., `linearis` skill) — reference it, don't copy
   - Workflow logic lives in skills — each skill owns its own state transitions
-  - Config schema lives in `website/reference/configuration.md`
+  - Config schema lives in `website/src/content/docs/reference/configuration.md`
 - **Spawn parallel agents** — Maximize efficiency
 - **Agents are documentarians** — Never suggest improvements unless asked
 - **Preserve context** — Save to thoughts/, not just memory
@@ -88,7 +88,7 @@ Two-layer config system:
 
 **Required**: Claude Code, Git, Bash
 
-**Optional**: HumanLayer CLI (`humanlayer`), Linearis CLI (`linearis`), GitHub CLI (`gh`)
+**Optional**: HumanLayer CLI (`humanlayer`, being removed — see CTL-58), Linearis CLI (`linearis`), GitHub CLI (`gh`), `catalyst-session` CLI (`plugins/dev/scripts/catalyst-session.sh`), `sqlite3`
 
 ## Plugin Development
 
