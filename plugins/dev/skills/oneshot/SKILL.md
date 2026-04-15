@@ -3,8 +3,8 @@ name: oneshot
 description:
   "End-to-end autonomous workflow — research, plan, implement, validate, ship, and merge in one
   command. **ALWAYS use when** the user says 'oneshot', 'do everything end to end', 'full workflow',
-  or wants to go from ticket/idea to merged PR autonomously. Each phase runs in a fresh session for
-  context isolation."
+  or wants to go from ticket/idea to merged PR autonomously. All phases run sequentially in the
+  current session, using agent teams for parallelism when needed."
 disable-model-invocation: true
 allowed-tools:
   Read, Write, Bash, Task, Grep, Glob, mcp__deepwiki__ask_question,
@@ -15,8 +15,9 @@ version: 3.0.0
 # Oneshot
 
 End-to-end autonomous workflow that chains research → plan → implement → validate → ship → merge
-with context isolation between phases via `humanlayer launch`. Each phase runs in a fresh Claude
-Code session with full capabilities.
+in a single session. All phases run sequentially in the current Claude Code session, invoking
+skills directly. Context is managed naturally via Claude's automatic compaction, and the
+thoughts/ system provides persistent handoff documents between phases.
 
 ## Prerequisites
 
@@ -30,13 +31,6 @@ fi
 if [[ ! -d "thoughts/shared" ]]; then
   echo "❌ ERROR: Thoughts system not configured"
   echo "Run: ./scripts/humanlayer/init-project.sh . {project-name}"
-  exit 1
-fi
-
-# 2. Validate humanlayer CLI (REQUIRED for session launching)
-if ! command -v humanlayer &>/dev/null; then
-  echo "❌ ERROR: HumanLayer CLI required for oneshot workflow"
-  echo "Install: pip install humanlayer"
   exit 1
 fi
 ```
@@ -132,10 +126,6 @@ if [ -f "$SIGNAL_FILE" ]; then
     && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
 fi
 ```
-
-Sub-sessions launched via `humanlayer launch` use the `--title` value as their label. The title
-follows the pattern `<phase-verb> <ticket>` (e.g., `implement CTL-33`), which serves as the
-sub-session's label with parent context implied by the orchestrator's worker label.
 
 **Signal file + global state update helper** (run at each phase boundary):
 
@@ -313,19 +303,6 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-**When launching sub-sessions** via `humanlayer launch`, pass CATALYST_SESSION_ID so child
-sessions can link back to this parent workflow:
-
-```bash
-CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
-humanlayer launch --model opus --title "plan ${TICKET_ID:-oneshot}" \
-  "/catalyst-dev:create-plan thoughts/shared/research/$RESEARCH_DOC"
-```
-
-Each child skill (create-plan, implement-plan, etc.) will pick up `CATALYST_SESSION_ID` from
-the environment and pass it as `--workflow` to their own `catalyst-session start` call,
-creating a linked parent-child session tree.
-
 ## Workflow Phases
 
 ### Phase 1: Research (Current Session — Opus)
@@ -354,47 +331,36 @@ This phase runs in the current session to allow user interaction during research
    spawning, synthesis, and document creation). The research document MUST be written to
    `thoughts/shared/research/` and tracked in workflow context before proceeding to Phase 2.
 
-### Phase 2: Plan (New Session via `humanlayer launch` — Opus)
+### Phase 2: Plan (Current Session)
 
-Launches a fresh Claude Code session with full context isolation.
+Runs `/catalyst-dev:create-plan` directly in the current session.
 
-```bash
-CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
-humanlayer launch \
-  --model opus \
-  --title "plan ${TICKET_ID:-oneshot}" \
-  "/catalyst-dev:create-plan thoughts/shared/research/$RESEARCH_DOC"
+```
+/catalyst-dev:create-plan thoughts/shared/research/$RESEARCH_DOC
 ```
 
-**What happens in the launched session:**
+**What happens:**
 
-- Fresh context window (no research tokens consumed)
 - Reads research document from thoughts/
 - Runs `/create-plan` interactively with the user
 - Creates plan at `thoughts/shared/plans/YYYY-MM-DD-{ticket}-{description}.md`
 - Syncs thoughts automatically
-- Child session links back to parent via `--workflow` (from inherited `CATALYST_SESSION_ID`)
 
 **User interaction**: The user interacts with the planning session normally. The plan is refined
 iteratively until approved.
 
 **Linear**: If ticket exists, move to `stateMap.planning` (default: "In Progress").
 
-### Phase 3: Implement (New Session via `humanlayer launch` — Opus)
+### Phase 3: Implement (Current Session)
 
-After the plan is approved, launches another fresh session:
+After the plan is approved, runs implementation directly:
 
-```bash
-CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
-humanlayer launch \
-  --model opus \
-  --title "implement ${TICKET_ID:-oneshot}" \
-  "/catalyst-dev:implement-plan thoughts/shared/plans/$PLAN_DOC"
+```
+/catalyst-dev:implement-plan thoughts/shared/plans/$PLAN_DOC
 ```
 
-**What happens in the launched session:**
+**What happens:**
 
-- Fresh context window (no planning tokens consumed)
 - Reads plan document from thoughts/
 - Runs `/implement-plan` with full capabilities — follows TDD (tests written before implementation
   per phase)
@@ -403,18 +369,14 @@ humanlayer launch \
 
 **Linear**: If ticket exists, move to `stateMap.inProgress` (default: "In Progress").
 
-### Phase 4: Validate + Quality Gates (New Session via `humanlayer launch` — Opus)
+### Phase 4: Validate + Quality Gates (Current Session)
 
 **Skip this phase entirely with `--skip-validation`.**
 
-Launches a fresh session for validation and quality enforcement:
+Runs validation and quality enforcement directly:
 
-```bash
-CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
-humanlayer launch \
-  --model opus \
-  --title "validate ${TICKET_ID:-oneshot}" \
-  "Run /catalyst-dev:validate-plan then run quality gates. Plan: thoughts/shared/plans/$PLAN_DOC"
+```
+/catalyst-dev:validate-plan thoughts/shared/plans/$PLAN_DOC
 ```
 
 **Step 1: Validate plan implementation**
@@ -480,17 +442,7 @@ construct default gates from legacy config keys:
 
 If none of those keys exist either, skip quality gates entirely (validation-only mode).
 
-### Phase 5: Ship (New Session via `humanlayer launch` — Sonnet)
-
-Launches a Sonnet session for the structured PR workflow:
-
-```bash
-CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
-humanlayer launch \
-  --model sonnet \
-  --title "ship ${TICKET_ID:-oneshot}" \
-  "Ship changes: smart PR create/update, CI polling, comment monitoring. Ticket: ${TICKET_ID:-none}"
-```
+### Phase 5: Ship (Current Session)
 
 **Step 1: Smart PR Creation/Update**
 
@@ -580,12 +532,11 @@ After this, **return control** — the worker has fulfilled its contract. The or
 standalone confirmation fallback below) owns everything from here: polling PR state until MERGED,
 transitioning Linear to Done, deleting branches, running teardown hooks.
 
-**Why this split**: subprocesses dispatched via `claude --print` (and even some `humanlayer launch`
-configurations) terminate when the model emits its final tool-use, regardless of how the prompt
+**Why this split**: when oneshot runs as an orchestrator worker (dispatched via `claude -p`), the
+subprocess terminates when the model emits its final tool-use, regardless of how the prompt
 instructs the model to "keep polling." Any worker-side poll-until-MERGED loop is therefore a
-fiction that wastes tokens, produces misleading logs ("waiting for merge" while the process has
-already exited), and lets bugs like Codex races go undetected. Moving the long poll to the
-orchestrator fixes all four of these.
+fiction that wastes tokens, produces misleading logs, and lets bugs like Codex races go
+undetected. Moving the long poll to the orchestrator fixes all of these.
 
 **Step 3: Standalone Merge Confirmation (non-orchestrated oneshot only)**
 
@@ -668,40 +619,26 @@ In team mode, Phase 3 uses agent teams for parallel implementation:
 - Changes to a single file or closely related files
 - Quick bug fixes
 
-## Context Isolation Strategy
+## Context Management Strategy
 
-The key benefit of oneshot is **context isolation between phases**:
+All phases run in a single session. Context is managed through:
+
+1. **Automatic compaction** — Claude Code compresses prior messages as the conversation approaches
+   context limits. This happens transparently and allows long-running workflows.
+2. **Thoughts as persistent handoff** — Each phase writes its output to `thoughts/shared/` (research
+   documents, plans). Subsequent phases read these files, so the essential information is always
+   available even after compaction.
+3. **Agent teams for parallelism** — When a phase needs to do parallel work (research sub-agents,
+   team-mode implementation), it spawns Agent subagents. Each subagent gets its own context window
+   and returns a summary, keeping the main session's context lean.
 
 ```
-Phase 1: Research (current session — Opus)
-  - Spawns parallel sub-agents for research
-  - Saves research document to thoughts/
-  - Context consumed: ~60-80% (research is token-heavy)
-
-Phase 2: Plan (NEW session — Opus)
-  - Starts with 0% context used
-  - Reads only research document (~5-10% context)
-  - Full context available for interactive planning
-
-Phase 3: Implement (NEW session — Opus)
-  - Starts with 0% context used
-  - Reads only plan document (~5-10% context)
-  - Full context available for implementation
-
-Phase 4: Validate + Quality Gates (NEW session — Opus)
-  - Starts with 0% context used
-  - Reads plan + runs validation + quality gate loop
-  - Can attempt fixes without context pressure
-
-Phase 5: Ship (NEW session — Sonnet)
-  - Starts with 0% context used
-  - Lightweight: commit, PR, arm auto-merge, short settle window, one pass of blocker resolution
-  - Worker exits at "PR open + auto-merge armed + CI triggered" — does NOT poll until MERGED
-  - Sonnet is sufficient for structured workflow
-
-Phase 6: Merge (standalone only — Sonnet)
-  - Under an orchestrator: skipped (orchestrator's Phase 4 owns merge confirmation)
-  - Standalone: runs /merge-pr synchronously (blocker-diagnosis loop polls until merged)
+Phase 1: Research — spawns parallel sub-agents, writes to thoughts/shared/research/
+Phase 2: Plan — reads research doc, runs /create-plan, writes to thoughts/shared/plans/
+Phase 3: Implement — reads plan doc, runs /implement-plan (can use --team for agent teams)
+Phase 4: Validate — reads plan doc, runs /validate-plan + quality gates
+Phase 5: Ship — runs /create-pr, arms auto-merge, one settle-window pass
+Phase 6: Merge (standalone only) — runs /merge-pr blocker-diagnosis loop
 ```
 
 ## Configuration
@@ -767,16 +704,11 @@ Configure quality gates in the consuming project's `.catalyst/config.json`:
 gates from `catalyst.pr.typecheckCommand`, `catalyst.pr.lintCommand`, `catalyst.pr.testCommand`, and
 `catalyst.pr.buildCommand`. If none of those exist, quality gates are skipped entirely.
 
-### Model Selection Per Phase
+### Model Selection
 
-| Phase         | Model  | Rationale                         |
-| ------------- | ------ | --------------------------------- |
-| 1 Research    | Opus   | Complex analysis, parallel agents |
-| 2 Plan        | Opus   | Interactive planning, reasoning   |
-| 3 Implement   | Opus   | Complex implementation            |
-| 4 Validate+QG | Opus   | Error analysis, fix generation    |
-| 5 Ship        | Sonnet | Structured PR workflow            |
-| 6 Merge       | Sonnet | Procedural verification           |
+All phases run in the current session using whatever model the session was started with. When
+running as an orchestrator worker, the model is set by the orchestrator's `workerModel` config
+(default: Opus).
 
 ## Linear Integration
 
@@ -812,18 +744,6 @@ fi
 - Present error to user
 - Suggest running `/catalyst-dev:research-codebase` manually
 
-**If humanlayer launch fails:**
-
-- End session with `--status failed`
-- Fall back to manual workflow:
-
-  ```
-  Could not launch new session automatically.
-
-  Please start a new session and run:
-    /catalyst-dev:create-plan thoughts/shared/research/$RESEARCH_DOC
-  ```
-
 **If implementation fails:**
 
 - End session with `--status failed`
@@ -855,10 +775,8 @@ error, context exhaustion):
 
 ## Important
 
-- **Phase 1 (research) is interactive** — user can guide the research
-- **Phases 2-6 launch separate sessions** — user interacts with each independently
-- **thoughts/ is the handoff mechanism** — all documents persist between sessions
-- **`humanlayer launch` is required** — no fallback for context isolation
+- **All phases run in the current session** — no separate processes are spawned
+- **thoughts/ is the handoff mechanism** — all documents persist between phases and survive compaction
 - **NEVER add Claude attribution** to any generated artifacts
 - **Use wiki-links** for cross-references between thoughts documents (e.g., `[[filename]]`), not
   full paths

@@ -120,7 +120,7 @@ emit_event() {
 # ─── Commands ───────────────────────────────────────────────────────────────
 
 cmd_start() {
-  local skill="" ticket="" label="" workflow="" status="running"
+  local skill="" ticket="" label="" workflow="" status="running" explicit_pid="" cwd="" git_branch=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --skill)    skill="$2"; shift 2 ;;
@@ -128,6 +128,9 @@ cmd_start() {
       --label)    label="$2"; shift 2 ;;
       --workflow) workflow="$2"; shift 2 ;;
       --status)   status="$2"; shift 2 ;;
+      --pid)      explicit_pid="$2"; shift 2 ;;
+      --cwd)      cwd="$2"; shift 2 ;;
+      --branch)   git_branch="$2"; shift 2 ;;
       *) echo "error: unknown flag for start: $1" >&2; return 1 ;;
     esac
   done
@@ -141,10 +144,10 @@ cmd_start() {
   sid="sess_${stamp}_${rand}"
 
   local ts; ts="$(now_iso)"
-  local pid="$$"
+  local pid="${explicit_pid:-$$}"
 
   db_exec "INSERT INTO sessions
-             (session_id, workflow_id, ticket_key, label, skill_name, status, phase, pid, started_at, updated_at)
+             (session_id, workflow_id, ticket_key, label, skill_name, status, phase, pid, started_at, updated_at, cwd, git_branch)
            VALUES
              ($(sql_quote "$sid"),
               $(sql_value_or_null "$workflow"),
@@ -155,7 +158,9 @@ cmd_start() {
               0,
               $pid,
               $(sql_quote "$ts"),
-              $(sql_quote "$ts"));"
+              $(sql_quote "$ts"),
+              $(sql_value_or_null "$cwd"),
+              $(sql_value_or_null "$git_branch"));"
 
   # start is not on the hot path (one-shot per session), so jq is fine here.
   local payload

@@ -3,6 +3,7 @@ import { join, basename, resolve as resolvePath } from "path";
 import { execSync } from "child_process";
 import { checkProcessAlive } from "./liveness";
 import { parseOutputJson, analyticsPath, type WorkerAnalytics } from "./output-parser";
+import { readWorkerActivity, type WorkerActivity } from "./stream-reader";
 import {
   readSessionStore,
   sessionStoreAvailable,
@@ -67,7 +68,10 @@ export interface WorkerState {
     status: string;
     source: string;
   }>;
+  activity?: WorkerActivity | null;
 }
+
+export type { WorkerActivity } from "./stream-reader";
 
 export interface OrchestratorAnalytics {
   id: string;
@@ -379,7 +383,9 @@ export function readOrchestratorState(orchDir: string, workspace = "default"): O
       const signal = result.value;
       const key = asString(signal.ticket) || file.replace(/\.json$/, "");
       try {
-        workers[key] = toWorkerState(signal);
+        const w = toWorkerState(signal);
+        w.activity = readWorkerActivity(orchDir, key);
+        workers[key] = w;
       } catch (err) {
         console.error(`[state-reader] toWorkerState failed for ${fullPath}:`, err);
         workers[key] = corruptWorkerPlaceholder(

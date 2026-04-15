@@ -1,7 +1,8 @@
-import { fmtDuration, fmtCost } from "@/lib/formatters";
+import { fmtDuration, fmtCost, fmtSince } from "@/lib/formatters";
 import { computeOrchestratorStats } from "@/lib/computations";
+import { cn } from "@/lib/utils";
 import { StatusBadge } from "./ui/badge";
-import { HealthIcon } from "./ui/status-dot";
+import { StatusDot, HealthIcon } from "./ui/status-dot";
 import { ProgressBar } from "./ui/progress-bar";
 import { Panel, PanelHeader, SectionLabel } from "./ui/panel";
 import { EmptyState } from "./ui/empty-state";
@@ -13,11 +14,15 @@ import type {
   WorkerAnalytics,
   CollectedAttention,
   EventEntry,
+  SessionState,
+  SessionKind,
 } from "@/lib/types";
-import { ChevronRight, Clock, Layers } from "lucide-react";
+import { sessionKind } from "@/lib/types";
+import { ChevronRight, Clock, Layers, Terminal, GitBranch, Workflow } from "lucide-react";
 
 interface DashboardProps {
   orchestrators: OrchestratorState[];
+  sessions: SessionState[];
   attention: CollectedAttention[];
   events: EventEntry[];
   getAnalytics: (orchId: string) => Record<string, WorkerAnalytics | null>;
@@ -95,8 +100,89 @@ function OrchestratorCard({
   );
 }
 
+const KIND_ICON: Record<SessionKind, React.ReactNode> = {
+  orchestrator: <Workflow className="h-3.5 w-3.5 text-accent" />,
+  worker: <Terminal className="h-3.5 w-3.5 text-green" />,
+  standalone: <Terminal className="h-3.5 w-3.5 text-muted" />,
+};
+
+const KIND_LABEL: Record<SessionKind, string> = {
+  orchestrator: "orchestrator",
+  worker: "worker",
+  standalone: "standalone",
+};
+
+function SessionCard({ session }: { session: SessionState }) {
+  const kind = sessionKind(session);
+  const elapsed = session.startedAt
+    ? (Date.now() - Date.parse(session.startedAt)) / 1000
+    : 0;
+  const isDone = session.status === "done" || session.status === "failed";
+  const dir = session.cwd ? session.cwd.split("/").slice(-2).join("/") : null;
+
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-2 rounded-lg border border-border bg-surface-2 p-4 transition-all",
+        isDone && "opacity-70",
+      )}
+    >
+      <div className="flex items-start justify-between">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <StatusDot alive={session.alive} />
+            <span className="truncate font-mono text-[14px] font-semibold text-fg">
+              {session.label || session.sessionId}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+            <span className="flex items-center gap-1">
+              {KIND_ICON[kind]}
+              {KIND_LABEL[kind]}
+            </span>
+            {session.skillName && session.skillName !== "interactive" && (
+              <span className="rounded bg-surface-3 px-1.5 py-px font-mono">
+                {session.skillName}
+              </span>
+            )}
+            {elapsed > 0 && (
+              <span className="flex items-center gap-1">
+                <Clock className="h-3 w-3" /> {fmtSince(elapsed)}
+              </span>
+            )}
+          </div>
+        </div>
+        <StatusBadge status={session.status} />
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted">
+        {session.ticket && (
+          <span className="font-mono font-semibold text-fg">{session.ticket}</span>
+        )}
+        {session.gitBranch && (
+          <span className="flex items-center gap-1">
+            <GitBranch className="h-3 w-3" />
+            <span className="truncate max-w-[180px]">{session.gitBranch}</span>
+          </span>
+        )}
+        {dir && (
+          <span className="truncate font-mono opacity-60" title={session.cwd || ""}>
+            {dir}
+          </span>
+        )}
+        {session.cost && session.cost.costUSD > 0 && (
+          <span className="ml-auto font-mono tabular-nums">
+            {fmtCost(session.cost.costUSD)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function Dashboard({
   orchestrators,
+  sessions,
   attention,
   events,
   getAnalytics,
@@ -129,6 +215,19 @@ export function Dashboard({
           <EmptyState icon={Layers} message="No active orchestrators found" />
         )}
       </div>
+
+      {sessions.length > 0 && (
+        <div>
+          <SectionLabel className="mb-2 block">
+            Sessions ({sessions.length})
+          </SectionLabel>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {sessions.map((s) => (
+              <SessionCard key={s.sessionId} session={s} />
+            ))}
+          </div>
+        </div>
+      )}
 
       <Panel>
         <PanelHeader>

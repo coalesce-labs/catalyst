@@ -1,12 +1,15 @@
 import { cn } from "@/lib/utils";
-import type { OrchestratorState, ConnectionStatus } from "@/lib/types";
+import type { OrchestratorState, ConnectionStatus, SessionState } from "@/lib/types";
+import { sessionKind } from "@/lib/types";
 import { computeOrchestratorStats } from "@/lib/computations";
+import { fmtSince } from "@/lib/formatters";
 import { NavItem } from "../ui/nav-item";
-import { HealthIcon, ConnectionDot } from "../ui/status-dot";
-import { LayoutDashboard, ChevronRight } from "lucide-react";
+import { HealthIcon, StatusDot, ConnectionDot } from "../ui/status-dot";
+import { LayoutDashboard, ChevronRight, Terminal, Workflow } from "lucide-react";
 
 interface SidebarProps {
   orchestrators: OrchestratorState[];
+  sessions: SessionState[];
   selectedOrchId: string | null;
   onSelect: (orchId: string | null) => void;
   connectionStatus: ConnectionStatus;
@@ -17,12 +20,19 @@ interface SidebarProps {
 
 export function Sidebar({
   orchestrators,
+  sessions,
   selectedOrchId,
   onSelect,
   connectionStatus,
   attentionCount,
   collapsed = false,
 }: SidebarProps) {
+  const activeSessions = sessions.filter(
+    (s) => s.alive || s.status === "running",
+  );
+  const recentDead = sessions.filter(
+    (s) => !s.alive && s.status !== "running" && s.timeSinceUpdate < 3600,
+  );
   return (
     <aside
       style={{ width: collapsed ? 0 : 240 }}
@@ -96,6 +106,84 @@ export function Sidebar({
                 </NavItem>
               );
             })}
+          </>
+        )}
+
+        {(activeSessions.length > 0 || recentDead.length > 0) && (
+          <>
+            <div className="mt-4 mb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+              Sessions
+              {activeSessions.length > 0 && (
+                <span className="ml-1.5 rounded-full bg-green/20 px-1.5 py-px text-[9px] font-bold text-green tabular-nums">
+                  {activeSessions.length}
+                </span>
+              )}
+            </div>
+            <ul role="list" className="space-y-0.5">
+              {activeSessions.map((s) => {
+                const kind = sessionKind(s);
+                const label = s.label || s.ticket || s.sessionId.slice(-12);
+                const elapsed = s.startedAt
+                  ? (Date.now() - Date.parse(s.startedAt)) / 1000
+                  : 0;
+                return (
+                  <li key={s.sessionId}>
+                    <div
+                      className="group flex w-full items-center gap-2 rounded-md border-l-[3px] border-transparent px-2.5 py-1.5 text-left transition-colors hover:bg-surface-3"
+                      role="status"
+                      aria-label={`${label} — ${kind}, ${s.alive ? "running" : s.status}`}
+                    >
+                      <StatusDot alive={s.alive} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          {kind === "orchestrator" ? (
+                            <Workflow className="h-3 w-3 flex-shrink-0 text-accent" />
+                          ) : (
+                            <Terminal className="h-3 w-3 flex-shrink-0 text-green" />
+                          )}
+                          <span className="truncate text-[11px] font-medium text-fg">
+                            {label}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted">
+                          <span>{kind}</span>
+                          {s.skillName && s.skillName !== "interactive" && (
+                            <span className="font-mono">{s.skillName}</span>
+                          )}
+                          {elapsed > 0 && <span>{fmtSince(elapsed)}</span>}
+                        </div>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+              {recentDead.map((s) => {
+                const kind = sessionKind(s);
+                const label = s.label || s.ticket || s.sessionId.slice(-12);
+                return (
+                  <li key={s.sessionId}>
+                    <div
+                      className="group flex w-full items-center gap-2 rounded-md border-l-[3px] border-transparent px-2.5 py-1.5 text-left opacity-50 transition-colors hover:bg-surface-3 hover:opacity-80"
+                      role="status"
+                      aria-label={`${label} — ${kind}, ${s.status}`}
+                    >
+                      <StatusDot alive={false} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <Terminal className="h-3 w-3 flex-shrink-0 text-muted" />
+                          <span className="truncate text-[11px] font-medium text-fg">
+                            {label}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 text-[10px] text-muted">
+                          {kind} &middot; {s.status}
+                        </div>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
           </>
         )}
       </nav>

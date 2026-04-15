@@ -88,7 +88,7 @@ Two-layer config system:
 
 **Required**: Claude Code, Git, Bash
 
-**Optional**: HumanLayer CLI (`humanlayer`, being removed — see CTL-58), Linearis CLI (`linearis`), GitHub CLI (`gh`), `catalyst-session` CLI (`plugins/dev/scripts/catalyst-session.sh`), `sqlite3`
+**Optional**: HumanLayer CLI (`humanlayer`) for the thoughts persistence system, Linearis CLI (`linearis`), GitHub CLI (`gh`), `catalyst-session` CLI (`plugins/dev/scripts/catalyst-session.sh`), `sqlite3`
 
 ## Plugin Development
 

@@ -5,6 +5,7 @@ import { ProgressBar } from "./ui/progress-bar";
 import { Panel, SectionLabel } from "./ui/panel";
 import type {
   OrchestratorState,
+  WorkerState,
   WorkerAnalytics,
   LinearTicket,
   EventEntry,
@@ -14,6 +15,7 @@ import { KpiStrip } from "./kpi-strip";
 import { WaveCards } from "./wave-cards";
 import { CostCard } from "./cost-card";
 import { WorkerTable } from "./worker-table";
+import { WorkerDetailDrawer } from "./worker-detail-drawer";
 import { GanttChart } from "./gantt-chart";
 import { EventLog } from "./event-log";
 import { LayoutGrid, Users, BarChart3, Activity } from "lucide-react";
@@ -58,6 +60,10 @@ export function OrchestratorView({
 }: OrchestratorViewProps) {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [selectedWave, setSelectedWave] = useState<number | null>(null);
+  const [selectedWorker, setSelectedWorker] = useState<string | null>(null);
+
+  const selectedW: WorkerState | null =
+    selectedWorker ? (orch.workers[selectedWorker] ?? null) : null;
 
   const s = computeOrchestratorStats(orch, getAnalytics(orch.id));
 
@@ -132,6 +138,8 @@ export function OrchestratorView({
                 getLinear={getLinear}
                 staleThreshold={staleThreshold}
                 filterWave={selectedWave}
+                onWorkerSelect={setSelectedWorker}
+                selectedTicket={selectedWorker}
               />
             </div>
           </div>
@@ -144,6 +152,8 @@ export function OrchestratorView({
               getAnalytics={getAnalytics}
               getLinear={getLinear}
               staleThreshold={staleThreshold}
+              onWorkerSelect={setSelectedWorker}
+              selectedTicket={selectedWorker}
             />
           </div>
         )}
@@ -160,6 +170,17 @@ export function OrchestratorView({
           </div>
         )}
       </Panel>
+
+      {selectedWorker && selectedW && (
+        <WorkerDetailDrawer
+          orchId={orch.id}
+          ticket={selectedWorker}
+          worker={selectedW}
+          analytics={getAnalytics(orch.id)[selectedWorker] || null}
+          linear={getLinear(selectedWorker)}
+          onClose={() => setSelectedWorker(null)}
+        />
+      )}
     </div>
   );
 }

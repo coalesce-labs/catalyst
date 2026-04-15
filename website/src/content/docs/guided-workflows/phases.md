@@ -111,6 +111,6 @@ Requires `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. See [Agent Teams](/reference/
 
 ## Phase isolation in oneshot
 
-`/catalyst-dev:oneshot` runs phases 1–6 in separate Claude sessions (via `humanlayer launch`) so each phase starts with a fresh context window. Research might consume 60% of context, but the plan phase starts at 0% and only reads the research document it needs. This is why oneshot can handle much longer pipelines than a single session could — it's not one long conversation, it's six short ones glued together by thoughts/.
+`/catalyst-dev:oneshot` runs all phases sequentially in a single session. Claude's automatic context compaction handles long-running workflows by compressing earlier messages as the conversation approaches context limits. Each phase writes its output to `thoughts/shared/` (research documents, plans), and subsequent phases read those files — so the essential information survives compaction naturally.
 
-Manual phase-by-phase mode gives up this isolation (you stay in one session), which is fine for small tickets but can run out of context on large ones. Watch the `/cost` counter if you're manually chaining.
+For complex phases, oneshot can spawn agent teams (subagents with their own context windows) to do parallel work, keeping the main session's context lean. This approach is simpler and more observable than forking separate processes.

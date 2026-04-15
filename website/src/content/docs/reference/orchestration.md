@@ -317,7 +317,7 @@ The orchestrator then creates its status directory (`workers/`, `DASHBOARD.md`, 
 
 ## Worker Dispatch
 
-Workers are launched via `humanlayer launch` (preferred for context isolation and named sessions) or `claude` CLI (fallback). Each runs `/oneshot <ticket> --auto-merge` autonomously.
+Workers are launched via `claude -p` with `--output-format stream-json --verbose`, producing real-time NDJSON that the monitor can tail to show live worker activity. Each runs `/oneshot <ticket> --auto-merge` autonomously.
 
 The dispatch prompt includes **mandatory testing requirements** — not suggestions. Workers are told their output will be independently verified. The `CATALYST_ORCHESTRATOR_DIR` environment variable is set so workers know where to write their signal files.
 
@@ -694,9 +694,8 @@ cat ~/catalyst/history/*.json | jq -s '[.[].usage.costUSD / .[].progress.totalTi
 ```
 
 **Current limitations**:
-- Workers launched via `humanlayer launch` do not currently expose session usage — their `usage` fields remain null
 - The orchestrator itself cannot capture its own usage from within the session
-- Usage is only captured after a worker process exits, not in real-time
+- Usage is extracted from the `result` event in the worker's stream-json output after the worker process exits
 
 As these tools evolve to expose usage data, the schema is ready to accept it.
 

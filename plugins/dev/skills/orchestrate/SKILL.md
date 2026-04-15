@@ -36,9 +36,10 @@ if ! command -v gh &>/dev/null; then
   exit 1
 fi
 
-# 4. HumanLayer CLI (REQUIRED for worker dispatch)
-if ! command -v humanlayer &>/dev/null; then
-  echo "WARNING: HumanLayer CLI not found — falling back to direct claude CLI"
+# 4. Claude CLI (REQUIRED for worker dispatch)
+if ! command -v claude &>/dev/null; then
+  echo "ERROR: Claude CLI required for worker dispatch"
+  exit 1
 fi
 ```
 
@@ -106,7 +107,7 @@ See config template for full schema documentation.
 The orchestrator operates ONLY from its own worktree. It:
 
 - Creates/removes worker worktrees
-- Dispatches worker sessions (via `humanlayer launch` or `claude` CLI)
+- Dispatches worker sessions (via `claude` CLI with streaming JSON output)
 - Reads status from worker signal files and git
 - Writes dashboard and briefing documents for the human
 - Runs adversarial verification agents in worker worktrees
@@ -390,85 +391,83 @@ fi
 
 For each provisioned worker worktree, dispatch a `/oneshot` session.
 
-**Dispatch mechanism (priority order):**
+**Dispatch mechanism — `claude` CLI with streaming JSON:**
 
-1. **`humanlayer launch`** (preferred — context isolation + named sessions):
-   ```bash
-   WORKER_DIR="${WORKTREES_BASE}/${ORCH_NAME}-${TICKET_ID}"
+```bash
+WORKER_DIR="${WORKTREES_BASE}/${ORCH_NAME}-${TICKET_ID}"
+WORKER_STREAM="${ORCH_DIR}/workers/${TICKET_ID}-stream.jsonl"
+SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
 
-   CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
-   CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
-   CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
-   humanlayer launch \
-     --model "${WORKER_MODEL}" \
-     --title "${ORCH_NAME}-${TICKET_ID}" \
-     -w "${WORKER_DIR}" \
-     "${WORKER_COMMAND} ${TICKET_ID} --auto-merge"
-   ```
+CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
+CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
+CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
+claude \
+  -n "${ORCH_NAME}-${TICKET_ID}" \
+  -w "${WORKER_DIR}" \
+  --output-format stream-json \
+  --verbose \
+  -p "${WORKER_COMMAND} ${TICKET_ID} --auto-merge" \
+  > "$WORKER_STREAM" 2>/dev/null &
 
-2. **Direct `claude` CLI** (fallback — includes usage capture):
-   ```bash
-   WORKER_OUTPUT="${ORCH_DIR}/workers/${TICKET_ID}-output.json"
-   SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
+WORKER_PID=$!
 
-   CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
-   CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
-   CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
-   claude \
-     -n "${ORCH_NAME}-${TICKET_ID}" \
-     -w "${WORKER_DIR}" \
-     --output-format json \
-     -p "${WORKER_COMMAND} ${TICKET_ID} --auto-merge" \
-     > "$WORKER_OUTPUT" 2>/dev/null &
+# Record the worker's PID + initial heartbeat into its signal file so the
+# monitor can perform kill-0 liveness checks.
+if [ -f "$SIGNAL_FILE" ]; then
+  jq --argjson pid "$WORKER_PID" '.pid = $pid | .lastHeartbeat = .updatedAt' \
+    "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+fi
+```
 
-   WORKER_PID=$!
+**Streaming JSON output** (`--output-format stream-json --verbose`) emits NDJSON to stdout,
+one event per line, in real-time as the worker runs. The monitor can tail the stream file to
+show live worker activity. Key event types:
 
-   # Record the worker's PID + initial heartbeat into its signal file so the
-   # monitor can perform kill-0 liveness checks. Safe if SIGNAL_FILE doesn't
-   # yet exist (the worker will create it and merge on first phase update).
-   if [ -f "$SIGNAL_FILE" ]; then
-     jq --argjson pid "$WORKER_PID" '.pid = $pid | .lastHeartbeat = .updatedAt' \
-       "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
-   fi
-   ```
+| Event | What it signals |
+|-------|----------------|
+| `{"type":"system","subtype":"init"}` | Worker session started; contains `session_id` |
+| `{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"..."}}}` | Worker is now invoking a specific tool (Bash, Read, Edit, etc.) |
+| `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta"}}}` | Worker is generating reasoning/response text |
+| `{"type":"assistant"}` | Complete assistant turn with all content blocks |
+| `{"type":"system","subtype":"api_retry"}` | Worker hit rate limit / error; shows attempt and delay |
+| `{"type":"result"}` | Worker finished; contains final answer and usage stats |
 
-   When the worker process exits, parse usage from its output:
+When the worker process exits, parse usage from the final `result` event:
 
-   ```bash
-   # After worker PID exits, extract usage and write to global state
-   if [ -f "$WORKER_OUTPUT" ]; then
-     USAGE=$(jq -c '{
-       inputTokens: .usage.input_tokens,
-       outputTokens: .usage.output_tokens,
-       cacheReadTokens: .usage.cache_read_input_tokens,
-       cacheCreationTokens: .usage.cache_creation_input_tokens,
-       costUSD: .total_cost_usd,
-       numTurns: .num_turns,
-       durationMs: .duration_ms,
-       durationApiMs: .duration_api_ms,
-       model: (.modelUsage | keys[0] // null)
-     }' "$WORKER_OUTPUT" 2>/dev/null || echo 'null')
+```bash
+# After worker PID exits, extract usage from the last result event in the stream
+if [ -f "$WORKER_STREAM" ]; then
+  RESULT_LINE=$(grep '"type":"result"' "$WORKER_STREAM" | tail -1)
+  if [ -n "$RESULT_LINE" ]; then
+    USAGE=$(echo "$RESULT_LINE" | jq -c '{
+      inputTokens: .usage.input_tokens,
+      outputTokens: .usage.output_tokens,
+      cacheReadTokens: .usage.cache_read_input_tokens,
+      cacheCreationTokens: .usage.cache_creation_input_tokens,
+      costUSD: .total_cost_usd,
+      numTurns: .num_turns,
+      durationMs: .duration_ms,
+      durationApiMs: .duration_api_ms,
+      model: (.modelUsage | keys[0] // null)
+    }' 2>/dev/null || echo 'null')
 
-     if [ "$USAGE" != "null" ]; then
-       "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET_ID}" ".usage = ${USAGE}"
+    if [ "$USAGE" != "null" ]; then
+      "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET_ID}" ".usage = ${USAGE}"
 
-       # Aggregate into orchestrator-level usage
-       "$STATE_SCRIPT" update "${ORCH_NAME}" "
-         .usage.inputTokens += $(echo "$USAGE" | jq '.inputTokens')
-         | .usage.outputTokens += $(echo "$USAGE" | jq '.outputTokens')
-         | .usage.cacheReadTokens += $(echo "$USAGE" | jq '.cacheReadTokens')
-         | .usage.cacheCreationTokens += $(echo "$USAGE" | jq '.cacheCreationTokens')
-         | .usage.costUSD += $(echo "$USAGE" | jq '.costUSD')
-         | .usage.numTurns += $(echo "$USAGE" | jq '.numTurns')
-         | .usage.durationMs += $(echo "$USAGE" | jq '.durationMs')
-         | .usage.durationApiMs += $(echo "$USAGE" | jq '.durationApiMs')"
-     fi
-   fi
-   ```
-
-   **Note**: Usage capture requires the `claude` CLI fallback path with `--output-format json`.
-   Workers launched via `humanlayer launch` do not currently expose session usage data — their
-   `usage` fields remain null until humanlayer adds this capability.
+      # Aggregate into orchestrator-level usage
+      "$STATE_SCRIPT" update "${ORCH_NAME}" "
+        .usage.inputTokens += $(echo "$USAGE" | jq '.inputTokens')
+        | .usage.outputTokens += $(echo "$USAGE" | jq '.outputTokens')
+        | .usage.cacheReadTokens += $(echo "$USAGE" | jq '.cacheReadTokens')
+        | .usage.cacheCreationTokens += $(echo "$USAGE" | jq '.cacheCreationTokens')
+        | .usage.costUSD += $(echo "$USAGE" | jq '.costUSD')
+        | .usage.numTurns += $(echo "$USAGE" | jq '.numTurns')
+        | .usage.durationMs += $(echo "$USAGE" | jq '.durationMs')
+        | .usage.durationApiMs += $(echo "$USAGE" | jq '.durationApiMs')"
+    fi
+  fi
+fi
+```
 
 **Emit dispatch event and update global state** after each worker dispatch:
 
@@ -992,7 +991,7 @@ heuristic, the scanning logic, repo-agnostic fallback, and sequential assignment
 
 **Thoughts persistence:** Every briefing is copied to `thoughts/shared/handoffs/${ORCH_NAME}/`
 with timestamped filenames (`YYYY-MM-DD_HH-MM-SS_wave-N-briefing.md`). This ensures briefings
-survive worktree cleanup and are available via `humanlayer thoughts sync` across workspaces.
+survive worktree cleanup and are available via thoughts sync across workspaces.
 The final `SUMMARY.md` is also persisted there at completion.
 
 **Why this matters:** This is a unique advantage over other frameworks. GSD executors are
@@ -1146,8 +1145,8 @@ test/auth.test.ts: add regression test for the null-token path" \
 What this does:
 1. Renders `templates/fixup-prompt.md` → `${ORCH_DIR}/workers/fixup-${TICKET}-prompt.md`
 2. Renders `templates/dispatch-fixup.sh.template` → `${ORCH_DIR}/workers/dispatch-fixup-${TICKET}.sh`
-3. With `--dispatch`, runs the dispatch script in the background (via `humanlayer launch` when
-   available, falling back to `claude --print`)
+3. With `--dispatch`, runs the dispatch script in the background (via `claude -p` with streaming
+   JSON output)
 
 The fix-up worker:
 - Pulls latest on the existing PR branch (does NOT create a new branch)
@@ -1192,7 +1191,7 @@ What this does:
    and dashboard both use this field to render the ancestry.
 4. Renders `templates/followup-prompt.md` → `${ORCH_DIR}/workers/${NEW_TICKET}-prompt.md`, which
    points the worker at the findings, the parent PR, and the TDD contract.
-5. Prints the `humanlayer launch` command to actually start the worker — it does NOT auto-dispatch
+5. Prints the `claude -p` command to actually start the worker — it does NOT auto-dispatch
    (follow-up tickets are heavier and warrant human confirmation).
 
 The follow-up worker runs the full `/oneshot` pipeline (research → plan → implement → validate →

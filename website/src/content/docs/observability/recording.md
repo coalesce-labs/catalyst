@@ -14,7 +14,7 @@ Both layers are redundant on purpose: if OTel fails, signal files still work. If
 
 ## The Shell Wrapper
 
-When the orchestrator dispatches a worker via `humanlayer launch`, it wraps the command in a shell script that exports Catalyst-specific resource attributes:
+When the orchestrator dispatches a worker via `claude -p`, it wraps the command in a shell script that exports Catalyst-specific resource attributes:
 
 ```bash
 # Simplified version — the real one is in plugins/dev/skills/orchestrate/
@@ -25,10 +25,10 @@ worker.ticket=${TICKET_ID},\
 project.key=${PROJECT_KEY},\
 user.id=${USER}"
 
-exec humanlayer launch \
-  --model opus \
-  --title "oneshot ${TICKET_ID}" \
-  "/catalyst-dev:oneshot ${TICKET_ID} --auto-merge"
+exec claude \
+  -n "oneshot-${TICKET_ID}" \
+  --output-format stream-json --verbose \
+  -p "/catalyst-dev:oneshot ${TICKET_ID} --auto-merge"
 ```
 
 The `OTEL_RESOURCE_ATTRIBUTES` env var is picked up by the Claude Code OTel exporter and added to every telemetry batch. Downstream (Prometheus, Loki, Tempo) it's queryable as a label.

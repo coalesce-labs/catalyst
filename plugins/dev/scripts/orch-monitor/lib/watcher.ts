@@ -102,7 +102,7 @@ export function isRelevant(filename: string): boolean {
   const norm = filename.replace(/\\/g, "/");
   const base = norm.split("/").pop() ?? "";
   if (base.startsWith(".")) return false;
-  if (filename.endsWith(".json")) {
+  if (filename.endsWith(".json") || filename.endsWith(".jsonl")) {
     return norm.includes("workers/") || base === "state.json";
   }
   if (/^wave-\d+-briefing\.md$/.test(base)) return true;

@@ -17,7 +17,7 @@ WORKER_DIR="${WORKER_DIR}"
 PROMPT_FILE="${PROMPT_FILE}"
 WORKER_MODEL="${WORKER_MODEL}"
 LOG_FILE="${ORCH_DIR}/workers/fixup-${TICKET_ID}-launch.log"
-OUTPUT_FILE="${ORCH_DIR}/workers/fixup-${TICKET_ID}-output.json"
+STREAM_FILE="${ORCH_DIR}/workers/fixup-${TICKET_ID}-stream.jsonl"
 
 if [ ! -f "${PROMPT_FILE}" ]; then
   echo "ERROR: prompt file missing: ${PROMPT_FILE}" >&2
@@ -30,24 +30,13 @@ fi
 
 PROMPT_BODY="$(cat "${PROMPT_FILE}")"
 
-if command -v humanlayer >/dev/null 2>&1; then
-  CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
-  CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
-  humanlayer launch \
-    --model "${WORKER_MODEL}" \
-    --title "fixup-${TICKET_ID}" \
-    -w "${WORKER_DIR}" \
-    "${PROMPT_BODY}" \
-    > "${LOG_FILE}" 2>&1 &
-  echo "Dispatched fix-up worker via humanlayer launch (pid $!)"
-else
-  CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
-  CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
-  claude \
-    -n "fixup-${TICKET_ID}" \
-    -w "${WORKER_DIR}" \
-    --output-format json \
-    -p "${PROMPT_BODY}" \
-    > "${OUTPUT_FILE}" 2> "${LOG_FILE}" &
-  echo "Dispatched fix-up worker via claude CLI (pid $!)"
-fi
+CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
+CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
+claude \
+  -n "fixup-${TICKET_ID}" \
+  -w "${WORKER_DIR}" \
+  --output-format stream-json \
+  --verbose \
+  -p "${PROMPT_BODY}" \
+  > "${STREAM_FILE}" 2> "${LOG_FILE}" &
+echo "Dispatched fix-up worker via claude CLI (pid $!)"

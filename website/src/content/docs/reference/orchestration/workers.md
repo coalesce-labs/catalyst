@@ -13,7 +13,7 @@ When `/catalyst-dev:orchestrate` runs a wave, it dispatches one **worker** per t
 Orchestrator                   Worker subprocess
      │                                │
      │─ creates signal file ──────────>│
-     │─ launches humanlayer ──────────>│ starts /catalyst-dev:oneshot
+     │─ launches claude -p ────────────>│ starts /catalyst-dev:oneshot
      │                                 │   Phase 1: researching
      │                                 │   Phase 2: planning
      │                                 │   Phase 3: implementing

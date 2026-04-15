@@ -139,6 +139,22 @@ body {
   animation: live-pulse 2s ease-in-out infinite;
 }
 
+/* Drawer slide-in */
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-drawer-in {
+  animation: drawer-in 0.2s ease-out both;
+}
+
 /* Markdown rendered content */
 .md-content {
   color: var(--color-fg);
