@@ -1,0 +1,227 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-surface-0: #0b0d10;
+  --color-surface-1: #111318;
+  --color-surface-2: #16191f;
+  --color-surface-3: #1c2028;
+  --color-surface-4: #232a33;
+  --color-border: #262d36;
+  --color-border-subtle: #1e242c;
+  --color-fg: #e6e9ef;
+  --color-muted: #8a93a1;
+  --color-accent: #4ea1ff;
+  --color-green: #39d07a;
+  --color-red: #ef5d5d;
+  --color-yellow: #eabc3b;
+  --color-blue: #4ea1ff;
+
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+/* Shimmer skeleton animation */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-3) 25%,
+    var(--color-surface-4) 50%,
+    var(--color-surface-3) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.8s ease-in-out infinite;
+}
+
+/* Page/view transitions */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in-fast {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.25s ease-out both;
+}
+
+.animate-fade-in-fast {
+  animation: fade-in-fast 0.15s ease-out both;
+}
+
+.animate-slide-in {
+  animation: slide-in-right 0.2s ease-out both;
+}
+
+/* Gantt pulse animation */
+@keyframes gantt-pulse {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+/* Live pulse dot */
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.6);
+  }
+}
+
+.animate-live-pulse {
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
+/* Markdown rendered content */
+.md-content {
+  color: var(--color-fg);
+  font-size: 14px;
+  line-height: 1.6;
+  max-width: 78ch;
+}
+.md-content h1,
+.md-content h2,
+.md-content h3,
+.md-content h4 {
+  color: var(--color-fg);
+  margin: 1.2em 0 0.4em;
+  line-height: 1.25;
+}
+.md-content h1 {
+  font-size: 22px;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 6px;
+}
+.md-content h2 {
+  font-size: 18px;
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 4px;
+}
+.md-content h3 {
+  font-size: 15px;
+  color: var(--color-accent);
+}
+.md-content p {
+  margin: 0.6em 0;
+}
+.md-content ul,
+.md-content ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+.md-content li {
+  margin: 0.25em 0;
+}
+.md-content code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 1px 5px;
+  background: var(--color-surface-3);
+  border-radius: 3px;
+  color: #f4c88a;
+}
+.md-content pre {
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-border);
+  border-radius: 5px;
+  padding: 12px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.md-content pre code {
+  background: transparent;
+  padding: 0;
+  color: var(--color-fg);
+}
+.md-content blockquote {
+  border-left: 3px solid var(--color-accent);
+  padding: 0.2em 0 0.2em 1em;
+  margin: 0.6em 0;
+  color: var(--color-muted);
+}
+.md-content a {
+  color: var(--color-accent);
+}
+.md-content table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  width: 100%;
+  font-size: 13px;
+}
+.md-content th,
+.md-content td {
+  border: 1px solid var(--color-border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.md-content th {
+  background: var(--color-surface-3);
+}
