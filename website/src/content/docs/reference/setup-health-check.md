@@ -68,7 +68,7 @@ Automatically detects remapped ports from Docker when configured.
 ### Orchestration Monitor (Optional)
 
 Whether the orch-monitor web dashboard is running. If not, shows the command to start it via
-`start-monitor.sh`. The monitor is optional — it provides a real-time web UI for watching
+`catalyst-monitor.sh start`. The monitor is optional — it provides a real-time web UI for watching
 orchestrators and workers but isn't required for Catalyst to function.
 
 ### direnv

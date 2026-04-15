@@ -12,20 +12,22 @@ sidebar:
 The simplest way to start the monitor:
 
 ```bash
-bash plugins/dev/scripts/start-monitor.sh
+bash plugins/dev/scripts/catalyst-monitor.sh start
 ```
 
 Or if you installed via the plugin marketplace:
 
 ```bash
-bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/start-monitor.sh
+bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/catalyst-monitor.sh start
 ```
 
-The launcher checks prerequisites (bun, sqlite3, catalyst directory), installs dependencies and
-builds the frontend if needed, then starts the server. You can also run the server directly:
+The `start` command checks prerequisites (bun, sqlite3, catalyst directory), installs dependencies
+and builds the frontend if needed, then starts the server in the background. Other commands:
 
 ```bash
-bun run plugins/dev/scripts/orch-monitor/server.ts
+bash plugins/dev/scripts/catalyst-monitor.sh status   # Check if running
+bash plugins/dev/scripts/catalyst-monitor.sh open      # Start + open browser
+bash plugins/dev/scripts/catalyst-monitor.sh stop      # Stop the server
 ```
 
 The server:

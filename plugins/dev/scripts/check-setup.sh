@@ -321,15 +321,15 @@ if (echo >/dev/tcp/localhost/"$MONITOR_PORT") 2>/dev/null; then
 else
     info "Monitor not running on :$MONITOR_PORT"
     LAUNCHER=""
-    if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/scripts/start-monitor.sh" ]]; then
-        LAUNCHER="${CLAUDE_PLUGIN_ROOT}/scripts/start-monitor.sh"
-    elif [[ -f "plugins/dev/scripts/start-monitor.sh" ]]; then
-        LAUNCHER="plugins/dev/scripts/start-monitor.sh"
+    if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-monitor.sh" ]]; then
+        LAUNCHER="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-monitor.sh"
+    elif [[ -f "plugins/dev/scripts/catalyst-monitor.sh" ]]; then
+        LAUNCHER="plugins/dev/scripts/catalyst-monitor.sh"
     fi
     if [[ -n "$LAUNCHER" ]]; then
-        info "Start with: bash $LAUNCHER"
+        info "Start with: bash $LAUNCHER start"
     else
-        info "Start with: bash plugins/dev/scripts/start-monitor.sh"
+        info "Start with: bash plugins/dev/scripts/catalyst-monitor.sh start"
     fi
 fi
 
