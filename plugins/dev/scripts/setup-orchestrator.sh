@@ -76,21 +76,11 @@ log() {
   fi
 }
 
-# ─── Step 1: Validate — must be main repo root, not a worktree ───────────────
+# ─── Step 1: Validate — must be in a git repo ────────────────────────────────
 
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
 if [[ -z "$REPO_ROOT" ]]; then
   echo "ERROR: Not in a git repository" >&2
-  exit 1
-fi
-
-COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
-GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
-
-if [[ "$COMMON_DIR" != "$GIT_DIR" ]]; then
-  MAIN_REPO=$(git -C "$(git rev-parse --git-common-dir)" rev-parse --show-toplevel 2>/dev/null || true)
-  echo "ERROR: You are inside a git worktree, not the main repo." >&2
-  echo "Run this from: ${MAIN_REPO:-the main repo root}" >&2
   exit 1
 fi
 
