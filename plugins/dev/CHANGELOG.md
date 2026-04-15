@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.26.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.26.0...catalyst-dev-v6.26.1) (2026-04-15)
+
+
+### Bug Fixes
+
+* **dev:** harden prerequisites, wire up SQLite init, fix OTel config ([#143](https://github.com/coalesce-labs/catalyst/issues/143)) ([14f7c84](https://github.com/coalesce-labs/catalyst/commit/14f7c849d619b7bfb5f62f411c1e050d226f2103))
+
 ## [6.26.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.25.0...catalyst-dev-v6.26.0) (2026-04-15)
 
 
