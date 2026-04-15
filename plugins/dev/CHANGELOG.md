@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.25.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.24.0...catalyst-dev-v6.25.0) (2026-04-15)
+
+
+### Features
+
+* **dev:** migrate orch-monitor to React SPA with modern SaaS UI ([#135](https://github.com/coalesce-labs/catalyst/issues/135)) ([0790005](https://github.com/coalesce-labs/catalyst/commit/0790005962f46e98263fe983d346107aec2b5a7f))
+
 ## [6.24.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.23.0...catalyst-dev-v6.24.0) (2026-04-14)
 
 
