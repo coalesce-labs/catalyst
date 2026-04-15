@@ -9,6 +9,7 @@ Get Catalyst installed and working in your project in under 5 minutes.
 
 ## Prerequisites
 
+- **macOS** — Catalyst is built and tested on macOS only. Other platforms are unsupported.
 - **Claude Code** — [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code) before running setup
 - **Git** — required for repository detection and thoughts system
 
@@ -17,10 +18,13 @@ The setup script checks for and installs additional dependencies automatically:
 | Dependency | Required? | Auto-installed? |
 |-----------|-----------|-----------------|
 | jq | Yes | Yes (via Homebrew or apt-get) |
+| sqlite3 | Yes | Included with macOS |
 | HumanLayer CLI | Yes | Yes (via pip) |
 | GitHub CLI (gh) | Optional | Opens install page |
 | Linearis CLI | Optional | Shows npm install command |
 | agent-browser | Optional | Shows npm install command |
+| Bun | Optional | For orch-monitor dashboard |
+| direnv | Recommended | Per-project env vars, API key isolation |
 
 ## Run the Setup Script
 
@@ -32,10 +36,11 @@ chmod +x setup-catalyst.sh
 
 The script will:
 
-- Check and install prerequisites (HumanLayer, jq)
+- Verify platform (macOS) and check/install prerequisites (HumanLayer, jq, sqlite3)
 - Set up a thoughts repository (one per org)
 - Create project configuration
 - Configure worktree directories
+- Initialize the SQLite session database (`~/catalyst/catalyst.db`)
 - Prompt for API tokens (Linear, Sentry, etc.)
 - Link your project to shared thoughts
 

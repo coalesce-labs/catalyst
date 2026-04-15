@@ -34,7 +34,7 @@ Using a status transition as the example:
 ```
 Worker writes ───> Signal file          (local snapshot, atomic via tmp+mv)
             │
-            └───> catalyst-state.sh worker   ───> Global state  (atomic via jq+flock)
+            └───> catalyst-state.sh worker   ───> Global state  (atomic via jq+mkdir lock)
                                              └──> Event         (appended to events.jsonl)
 
 orch-monitor ──> fs.watch on signal files   ───> Recomputes snapshot

@@ -397,6 +397,21 @@ check_prerequisites() {
 	local missing_critical=false
 	local missing_optional=false
 
+	# Platform check — Catalyst is developed and tested on macOS only
+	if [[ "$(uname -s)" != "Darwin" ]]; then
+		echo ""
+		print_warning "Catalyst is built for macOS. Detected platform: $(uname -s)"
+		echo "  Some features (Homebrew installs, open(1), direnv profiles) assume macOS."
+		echo "  You can continue, but some things may not work as expected."
+		echo ""
+		if ! ask_yes_no "Continue on unsupported platform?" "n"; then
+			echo "Setup cancelled."
+			exit 0
+		fi
+	else
+		print_success "Platform: macOS ($(sw_vers -productVersion 2>/dev/null || echo 'unknown version'))"
+	fi
+
 	# Critical: git (used throughout for repo detection, worktrees, thoughts)
 	if ! check_command_exists "git"; then
 		print_error "git not found (required)"
@@ -412,6 +427,15 @@ check_prerequisites() {
 		offer_install_jq || missing_critical=true
 	else
 		print_success "jq installed"
+	fi
+
+	# Critical: sqlite3 (for session store)
+	if ! check_command_exists "sqlite3"; then
+		print_error "sqlite3 not found (required for session store)"
+		echo "  sqlite3 ships with macOS. If missing, install via your package manager."
+		missing_critical=true
+	else
+		print_success "sqlite3 installed"
 	fi
 
 	# Critical: humanlayer (for thoughts system)
@@ -456,12 +480,21 @@ check_prerequisites() {
 		fi
 	fi
 
-	# Check agent-browser (optional - browser automation)
-	if command -v agent-browser &>/dev/null; then
+	# Optional: agent-browser (browser automation)
+	if check_command_exists "agent-browser"; then
 		print_success "agent-browser installed"
 	else
-		print_warning "agent-browser not found (optional - browser automation)"
+		print_warning "agent-browser not found (optional — browser automation)"
 		echo "  Install: npm install -g agent-browser && agent-browser install"
+		missing_optional=true
+	fi
+
+	# Optional: bun (for orch-monitor dashboard)
+	if check_command_exists "bun"; then
+		print_success "bun installed"
+	else
+		print_warning "bun not found (optional — required for orch-monitor dashboard)"
+		echo "  Install: curl -fsSL https://bun.sh/install | bash"
 		missing_optional=true
 	fi
 
@@ -2012,6 +2045,44 @@ offer_github_backup() {
 }
 
 #
+# Session database initialization
+#
+
+init_session_database() {
+	print_header "Initializing Session Database"
+
+	local catalyst_dir="${CATALYST_DIR:-$HOME/catalyst}"
+	local db_file="${catalyst_dir}/catalyst.db"
+
+	mkdir -p "$catalyst_dir"
+
+	if ! check_command_exists "sqlite3"; then
+		print_warning "sqlite3 not found — skipping session database initialization"
+		return 0
+	fi
+
+	# Use catalyst-db.sh if available (plugin is installed), otherwise apply schema directly
+	local db_script=""
+	if [ -f "${PROJECT_DIR}/plugins/dev/scripts/catalyst-db.sh" ]; then
+		db_script="${PROJECT_DIR}/plugins/dev/scripts/catalyst-db.sh"
+	elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-db.sh" ]; then
+		db_script="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-db.sh"
+	fi
+
+	if [ -n "$db_script" ]; then
+		CATALYST_DIR="$catalyst_dir" "$db_script" init
+		print_success "Session database initialized: $db_file"
+	else
+		# Minimal init: create the db with WAL mode if it doesn't exist
+		sqlite3 "$db_file" "PRAGMA journal_mode = WAL;" >/dev/null 2>&1
+		print_success "Session database created: $db_file"
+		print_warning "Install the catalyst-dev plugin to apply full schema migrations"
+	fi
+
+	echo ""
+}
+
+#
 # Main execution
 #
 
@@ -2044,6 +2115,7 @@ main() {
 	setup_humanlayer_config
 	setup_catalyst_secrets
 	update_config_with_linear_states
+	init_session_database
 	init_humanlayer_thoughts
 	sync_thoughts
 

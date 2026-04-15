@@ -89,7 +89,7 @@ The worker writes statuses up through `pr-created`. The orchestrator writes `mer
 
 ## The global state
 
-In parallel with the signal file, workers also write to `~/catalyst/state.json` via `catalyst-state.sh worker`. This is the fleet-wide aggregate that the dashboard reads — it unifies workers across multiple orchestrators. Writes are atomic (jq + flock).
+In parallel with the signal file, workers also write to `~/catalyst/state.json` via `catalyst-state.sh worker`. This is the fleet-wide aggregate that the dashboard reads — it unifies workers across multiple orchestrators. Writes are atomic (jq + mkdir-based locking).
 
 Schema:
 

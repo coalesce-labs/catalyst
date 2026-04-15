@@ -952,6 +952,7 @@ describe("terminal mode", () => {
       terminal: true,
       prStatusFetcher: null,
       linearFetcher: null,
+      annotationsDbPath: join(tmp, "annotations.db"),
     });
     expect(srv).toBeDefined();
     expect(srv.port).toBeGreaterThan(0);

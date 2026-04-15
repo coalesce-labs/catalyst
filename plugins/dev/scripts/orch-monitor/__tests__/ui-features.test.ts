@@ -51,7 +51,7 @@ beforeAll(async () => {
     );
   }
 
-  server = createServer({ port: 0, wtDir, startWatcher: false });
+  server = createServer({ port: 0, wtDir, startWatcher: false, annotationsDbPath: join(tmpDir, "annotations.db") });
   baseUrl = `http://localhost:${server.port}`;
 
   const res = await fetch(`${baseUrl}/`);

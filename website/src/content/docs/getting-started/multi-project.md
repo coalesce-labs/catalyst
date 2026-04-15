@@ -112,6 +112,24 @@ cd ~/clients/acme/thoughts
 gh repo create ryan/acme-thoughts --private --source=. --push
 ```
 
+## Environment Isolation with direnv
+
+HumanLayer profiles isolate _thoughts and context_. For API key and credential isolation, pair them
+with [direnv](https://direnv.net/) profiles:
+
+```bash
+# ~/.config/direnv/profiles/personal.env  — your global defaults
+# ~/.config/direnv/profiles/acme.env      — client-specific API keys
+
+# ~/code-repos/github/acme/project/.envrc
+use_profile personal
+use_profile acme
+use_otel_context "acme"
+```
+
+This gives you per-project API keys, OTel telemetry labels, and secrets scoping — automatically,
+just by `cd`-ing into a directory. See [direnv Setup](/reference/configuration/#direnv-setup-recommended) for the full setup guide.
+
 ## Best Practices
 
 Use descriptive profile names (`acme`, `coalesce-labs`, `google-consulting`) rather than vague ones (`client1`, `work`, `temp`).

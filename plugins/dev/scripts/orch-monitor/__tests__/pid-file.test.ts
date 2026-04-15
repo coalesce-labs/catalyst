@@ -53,6 +53,7 @@ describe("PID file support", () => {
       wtDir,
       startWatcher: false,
       pidFile: pidPath,
+      annotationsDbPath: join(tmpDir, "annotations.db"),
     });
 
     expect(existsSync(pidPath)).toBe(true);
@@ -62,7 +63,7 @@ describe("PID file support", () => {
 
   it("does not write PID file when pidFile option is omitted", () => {
     const pidPath = join(tmpDir, "should-not-exist.pid");
-    server = createServer({ port: 0, wtDir, startWatcher: false });
+    server = createServer({ port: 0, wtDir, startWatcher: false, annotationsDbPath: join(tmpDir, "annotations.db") });
 
     expect(existsSync(pidPath)).toBe(false);
   });
@@ -74,6 +75,7 @@ describe("PID file support", () => {
       wtDir,
       startWatcher: false,
       pidFile: pidPath,
+      annotationsDbPath: join(tmpDir, "annotations.db"),
     });
 
     expect(existsSync(pidPath)).toBe(true);
@@ -89,6 +91,7 @@ describe("PID file support", () => {
       wtDir,
       startWatcher: false,
       pidFile: pidPath,
+      annotationsDbPath: join(tmpDir, "annotations.db"),
     });
 
     const content = readFileSync(pidPath, "utf-8");
