@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.27.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.27.0...catalyst-dev-v6.27.1) (2026-04-15)
+
+
+### Bug Fixes
+
+* **dev:** consolidate start-monitor.sh into catalyst-monitor.sh ([#149](https://github.com/coalesce-labs/catalyst/issues/149)) ([bf50058](https://github.com/coalesce-labs/catalyst/commit/bf50058ac21b0bcc9ac505f04ec085b1833450be))
+
 ## [6.27.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.26.1...catalyst-dev-v6.27.0) (2026-04-15)
 
 
