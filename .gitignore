@@ -42,6 +42,9 @@ research/
 .claude/config.json.backup
 .catalyst/config.json.backup
 
+# Session state (per-session, not committed)
+.catalyst/.session-id
+
 # Catalyst workflow state (per-session, not committed)
 # NOTE: .catalyst/config.json is SAFE to commit (only has projectKey, no secrets)
 # Secrets are stored in ~/.config/catalyst/config-*.json (never in repo)
