@@ -1,9 +1,18 @@
 # Changelog
 
-## [6.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.36.0...catalyst-dev-v6.37.0) (2026-04-16)
+## [6.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.36.0...catalyst-dev-v6.37.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Changelog Backfill and CI API Key Fix
+
+Backfills AI-enhanced summaries for the four most recent releases (6.34.1 through 6.36.0) that shipped after the original backfill PR. Updates both release-note scripts to use `LOCAL_ANTHROPIC_API_KEY` instead of `ANTHROPIC_API_KEY` to avoid conflicts with Claude Code's own key when running locally, with automatic fallback for CI.
 
 
-### Features
+
+### PRs
 
 * **dev:** backfill AI-enhanced notes and use LOCAL_ANTHROPIC_API_KEY ([#175](https://github.com/coalesce-labs/catalyst/issues/175)) ([6d60cc7](https://github.com/coalesce-labs/catalyst/commit/6d60cc74999fa1f5d17a3b28686fa0df4ec63683))
 
