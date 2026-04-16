@@ -221,7 +221,14 @@ ORCH_FLAG="--orchestration ${ORCH_NAME}"
 
 # 1. Create orchestrator worktree (same script, same initialization)
 "$SCRIPT" "${ORCH_NAME}" "${BASE_BRANCH}" ${WT_DIR_FLAG} ${HOOKS_FLAG} ${ORCH_FLAG}
-ORCH_DIR="${WORKTREES_BASE}/${ORCH_NAME}"
+ORCH_WORKTREE="${WORKTREES_BASE}/${ORCH_NAME}"
+
+# Per-orchestrator state lives under ~/catalyst/runs/<id>/ (decoupled from the
+# git worktree — CTL-59). state.json, DASHBOARD.md, workers/, wave briefings,
+# and SUMMARY.md all live here. Claude CLI output (streams/stderr) lands in
+# workers/output/ so it sits alongside the signal files but does not pollute
+# watchers that scan workers/*.json.
+ORCH_DIR="$("${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh" ensure-run-dir "${ORCH_NAME}")"
 
 # 2. Create worker worktrees for current wave
 for TICKET_ID in "${WAVE_TICKETS[@]}"; do
@@ -286,7 +293,11 @@ With `worktreeDir: "~/catalyst/api"` explicitly configured:
 **After worktree creation, set up the orchestrator's status directory:**
 
 ```bash
-mkdir -p "${ORCH_DIR}/workers"
+# ORCH_DIR is the per-orchestrator state dir under ~/catalyst/runs/<id>/ (created
+# by `catalyst-state.sh ensure-run-dir` above, which already makes workers/output/).
+# This mkdir is a no-op for fresh runs but keeps the skill robust when ORCH_DIR
+# is reconstructed on resume.
+mkdir -p "${ORCH_DIR}/workers/output"
 ```
 
 Initialize `DASHBOARD.md` from the template:
@@ -298,23 +309,31 @@ cp "${CLAUDE_PLUGIN_ROOT}/templates/orchestrate-dashboard.md" "${ORCH_DIR}/DASHB
 Create the orchestrator's status directory:
 
 ```
-${ORCH_DIR}/
-├── DASHBOARD.md                    # human-readable status (from template)
-├── state.json                      # machine-readable orchestration state
-└── workers/                        # worker signal files written here
-    ├── ${TICKET_1}.json            # worker signal (schema: worker-signal.json)
-    ├── ${TICKET_1}-stream.jsonl    # streaming JSON events from claude CLI
-    ├── ${TICKET_1}-stderr.log      # worker stderr (silent exits diagnosable)
+${ORCH_DIR}/                                    # ~/catalyst/runs/${ORCH_NAME}/
+├── DASHBOARD.md                                # human-readable status (from template)
+├── state.json                                  # machine-readable orchestration state
+├── wave-1-briefing.md                          # per-wave briefings
+├── SUMMARY.md                                  # final run summary (post-Phase 5)
+└── workers/
+    ├── ${TICKET_1}.json                        # worker signal (schema: worker-signal.json)
     ├── ${TICKET_2}.json
-    ├── ${TICKET_2}-stream.jsonl
-    ├── ${TICKET_2}-stderr.log
-    └── ...
+    └── output/                                 # claude CLI output (streams, stderr)
+        ├── ${TICKET_1}-stream.jsonl            # streaming JSON events from claude
+        ├── ${TICKET_1}-stderr.log              # worker stderr (silent exits diagnosable)
+        ├── ${TICKET_2}-stream.jsonl
+        └── ${TICKET_2}-stderr.log
 ```
 
-**Debugging silent worker exits:** If `${TICKET_ID}-stream.jsonl` is 0 bytes AND
-`${TICKET_ID}-stderr.log` is 0 bytes, the worker exited before emitting its first event — check
-`git -C ${WORKER_DIR} log --oneline -5` and the worktree's `.claude/` directory for setup issues. A
-non-empty stderr log will identify permission, path, or environment errors.
+**Note on the runs/ split (CTL-59):** `ORCH_DIR` lives at `~/catalyst/runs/${ORCH_NAME}/` and
+is decoupled from the git worktree at `${ORCH_WORKTREE}` (e.g.
+`~/catalyst/wt/${PROJECT_KEY}/${ORCH_NAME}/`). This lets state survive worktree cleanup and keeps
+`git status` clean. Claude CLI output (stream + stderr) lands in `workers/output/` to keep
+file watchers that scan `workers/*.json` free of noise from large stream files.
+
+**Debugging silent worker exits:** If `workers/output/${TICKET_ID}-stream.jsonl` is 0 bytes AND
+`workers/output/${TICKET_ID}-stderr.log` is 0 bytes, the worker exited before emitting its first
+event — check `git -C ${WORKER_DIR} log --oneline -5` and the worktree's `.claude/` directory for
+setup issues. A non-empty stderr log will identify permission, path, or environment errors.
 
 Initialize `state.json`:
 
@@ -406,8 +425,8 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
 
 ```bash
 WORKER_DIR="${WORKTREES_BASE}/${ORCH_NAME}-${TICKET_ID}"
-WORKER_STREAM="${ORCH_DIR}/workers/${TICKET_ID}-stream.jsonl"
-WORKER_STDERR="${ORCH_DIR}/workers/${TICKET_ID}-stderr.log"
+WORKER_STREAM="${ORCH_DIR}/workers/output/${TICKET_ID}-stream.jsonl"
+WORKER_STDERR="${ORCH_DIR}/workers/output/${TICKET_ID}-stderr.log"
 SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
 
 # `claude -w` takes a *name* and creates a new worktree — it does NOT accept a
@@ -1039,7 +1058,7 @@ pre-assigns numbers in the briefing to prevent this.
 # project has no supabase/migrations/ directory or no ticket in the wave is migration-
 # likely. Safe to append unconditionally to the briefing.
 MIG_SECTION=$("${CLAUDE_PLUGIN_ROOT}/scripts/pre-assign-migrations.sh" \
-  --migrations-dir "${ORCH_DIR}/supabase/migrations" \
+  --migrations-dir "${ORCH_WORKTREE}/supabase/migrations" \
   --tickets "${NEXT_WAVE_TICKETS[*]}") || MIG_SECTION=""
 ```
 
@@ -1131,7 +1150,7 @@ was already created in Phase 2, so `cd` into it — do not pass `-w` (that would
 a _new_ worktree using the path as a name):
 
 ```bash
-( cd "${ORCH_DIR}" && claude --remote-control "${ORCH_NAME}" )
+( cd "${ORCH_WORKTREE}" && claude --remote-control "${ORCH_NAME}" )
 ```
 
 Workers should NOT use remote control — they're autonomous. The human monitors workers through the

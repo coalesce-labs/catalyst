@@ -27,6 +27,7 @@ STATE_FILE="${CATALYST_STATE_FILE:-$CATALYST_DIR/state.json}"
 LOCK_FILE="${STATE_FILE}.lock"
 EVENTS_DIR="${CATALYST_DIR}/events"
 HISTORY_DIR="${CATALYST_DIR}/history"
+RUNS_DIR="${CATALYST_DIR}/runs"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -35,7 +36,32 @@ now_iso() {
 }
 
 ensure_dirs() {
-  mkdir -p "$CATALYST_DIR" "$EVENTS_DIR" "$HISTORY_DIR"
+  mkdir -p "$CATALYST_DIR" "$EVENTS_DIR" "$HISTORY_DIR" "$RUNS_DIR"
+}
+
+# Print the resolved per-orchestrator runs directory for a given orch-id.
+# Does not create anything on disk — callers that need the directory should use
+# `cmd_ensure_run_dir`.
+cmd_run_dir() {
+  local orch_id="${1:-}"
+  if [[ -z "$orch_id" ]]; then
+    echo "error: run-dir requires an orch-id argument" >&2
+    return 1
+  fi
+  echo "${RUNS_DIR}/${orch_id}"
+}
+
+# Idempotently create the per-orchestrator runs layout:
+#   ~/catalyst/runs/<orch-id>/workers/output/
+cmd_ensure_run_dir() {
+  local orch_id="${1:-}"
+  if [[ -z "$orch_id" ]]; then
+    echo "error: ensure-run-dir requires an orch-id argument" >&2
+    return 1
+  fi
+  ensure_dirs
+  mkdir -p "${RUNS_DIR}/${orch_id}/workers/output"
+  echo "${RUNS_DIR}/${orch_id}"
 }
 
 ensure_state_file() {
@@ -404,6 +430,8 @@ case "$cmd" in
   status)             cmd_status "$@" ;;
   query)              cmd_query "$@" ;;
   events)             cmd_events "$@" ;;
+  run-dir)            cmd_run_dir "$@" ;;
+  ensure-run-dir)     cmd_ensure_run_dir "$@" ;;
   help|--help|-h)
     echo "Usage: catalyst-state.sh <command> [args]"
     echo ""
@@ -421,6 +449,8 @@ case "$cmd" in
     echo "  status [--project <key>]                Print active orchestrator summary"
     echo "  query <jq-filter>                       Run jq query against state.json"
     echo "  events [--last <n>] [--ticket <id>] [--type <event-type>]  Query events"
+    echo "  run-dir <orch-id>                       Print ~/catalyst/runs/<id>/ path"
+    echo "  ensure-run-dir <orch-id>                Create ~/catalyst/runs/<id>/workers/output/"
     ;;
   *)
     echo "Unknown command: $cmd" >&2

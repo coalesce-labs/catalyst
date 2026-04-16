@@ -1,4 +1,4 @@
-import { watch, type FSWatcher } from "fs";
+import { watch, existsSync, type FSWatcher } from "fs";
 import {
   buildSnapshot,
   type MonitorSnapshot,
@@ -118,39 +118,58 @@ const SQLITE_POLL_INTERVAL_MS = 2000;
 interface StartWatchingOptions {
   dbPath?: string | null;
   sqlitePollIntervalMs?: number;
+  /**
+   * When set, the watcher also monitors this runs directory
+   * (~/catalyst/runs/) in addition to baseDir (~/catalyst/wt/). Orchestrators
+   * discovered under runsDir take precedence for duplicate ids.
+   */
+  runsDir?: string | null;
 }
 
 export function startWatching(
   baseDir: string,
   options: StartWatchingOptions = {},
 ): WatcherHandle {
-  const buildOpts: BuildSnapshotOptions = { dbPath: options.dbPath ?? null };
+  const runsDir = options.runsDir ?? null;
+  const buildOpts: BuildSnapshotOptions = {
+    dbPath: options.dbPath ?? null,
+    runsDir,
+  };
   let lastSnapshot: MonitorSnapshot = buildSnapshot(baseDir, buildOpts);
   emit("snapshot", createEvent("snapshot", lastSnapshot, "filesystem"));
 
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-  let watcher: FSWatcher | null = null;
-  try {
-    watcher = watch(baseDir, { recursive: true }, (_event, filename) => {
-      if (!filename || !isRelevant(String(filename))) return;
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        const next = buildSnapshot(baseDir, buildOpts);
-        for (const change of diffWorkers(lastSnapshot, next)) {
-          emit("worker-update", createEvent("worker-update", change, "filesystem"));
-        }
-        lastSnapshot = next;
-      }, DEBOUNCE_MS);
-    });
-    watcher.on("error", (err) => {
-      console.error(`[watcher] fs.watch error on ${baseDir}:`, err);
-    });
-  } catch (err) {
-    console.error(
-      `[watcher] fs.watch failed to start on ${baseDir} (falling back to polling):`,
-      err,
-    );
+  const watchedDirs: string[] = [baseDir];
+  if (runsDir && existsSync(runsDir)) watchedDirs.push(runsDir);
+  const watchers: FSWatcher[] = [];
+  const onChange = (filename: string) => {
+    if (!filename || !isRelevant(String(filename))) return;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      const next = buildSnapshot(baseDir, buildOpts);
+      for (const change of diffWorkers(lastSnapshot, next)) {
+        emit("worker-update", createEvent("worker-update", change, "filesystem"));
+      }
+      lastSnapshot = next;
+    }, DEBOUNCE_MS);
+  };
+
+  for (const dir of watchedDirs) {
+    try {
+      const w = watch(dir, { recursive: true }, (_event, filename) => {
+        onChange(String(filename ?? ""));
+      });
+      w.on("error", (err) => {
+        console.error(`[watcher] fs.watch error on ${dir}:`, err);
+      });
+      watchers.push(w);
+    } catch (err) {
+      console.error(
+        `[watcher] fs.watch failed to start on ${dir} (falling back to polling):`,
+        err,
+      );
+    }
   }
 
   const livenessInterval = setInterval(() => {
@@ -187,10 +206,12 @@ export function startWatching(
       clearInterval(livenessInterval);
       clearInterval(snapshotInterval);
       if (sqliteInterval) clearInterval(sqliteInterval);
-      try {
-        watcher?.close();
-      } catch (err) {
-        console.error(`[watcher] close failed:`, err);
+      for (const w of watchers) {
+        try {
+          w.close();
+        } catch (err) {
+          console.error(`[watcher] close failed:`, err);
+        }
       }
     },
   };

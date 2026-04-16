@@ -247,15 +247,26 @@ describe("parseOutputJson", () => {
 });
 
 describe("analyticsPath", () => {
-  it("returns the conventional output.json path inside an orch dir", () => {
+  it("defaults to the workers/output/ path when no analytics file exists", () => {
+    // When nothing is on disk, analyticsPath returns the preferred (primary)
+    // location so callers can use the path to write a new file.
     const path = analyticsPath("/tmp/orch-foo", "ADV-216");
-    expect(path).toBe("/tmp/orch-foo/workers/logs/ADV-216.output.json");
+    expect(path).toBe("/tmp/orch-foo/workers/output/ADV-216-output.json");
   });
 
-  it("composes paths cleanly even when orchDir ends without trailing slash", () => {
+  it("prefers workers/output/<ticket>-output.json when that file exists", () => {
+    const orchDir = mkdtempSync(join(tmpRoot, "orch-"));
+    mkdirSync(join(orchDir, "workers", "output"), { recursive: true });
+    const expected = join(orchDir, "workers", "output", "T-1-output.json");
+    writeFileSync(expected, "{}");
+    expect(analyticsPath(orchDir, "T-1")).toBe(expected);
+  });
+
+  it("falls back to workers/logs/<ticket>.output.json when only the legacy file exists", () => {
     const orchDir = mkdtempSync(join(tmpRoot, "orch-"));
     mkdirSync(join(orchDir, "workers", "logs"), { recursive: true });
     const expected = join(orchDir, "workers", "logs", "T-1.output.json");
+    writeFileSync(expected, "{}");
     expect(analyticsPath(orchDir, "T-1")).toBe(expected);
   });
 });

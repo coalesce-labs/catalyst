@@ -259,4 +259,4 @@ awk -v tid="$NEW_TICKET" \
 echo "Wrote prompt: $PROMPT_FILE"
 echo ""
 echo "Dispatch the follow-up worker with:"
-echo "  ( cd \"${WORKER_DIR}\" && exec nohup claude -n \"${WORKER_NAME}\" --output-format stream-json --verbose --dangerously-skip-permissions -p \"\$(cat ${PROMPT_FILE})\" ) > \"${ORCH_DIR}/workers/${NEW_TICKET}-stream.jsonl\" 2> \"${ORCH_DIR}/workers/${NEW_TICKET}-stderr.log\" &"
+echo "  mkdir -p \"${ORCH_DIR}/workers/output\" && ( cd \"${WORKER_DIR}\" && exec nohup claude -n \"${WORKER_NAME}\" --output-format stream-json --verbose --dangerously-skip-permissions -p \"\$(cat ${PROMPT_FILE})\" ) > \"${ORCH_DIR}/workers/output/${NEW_TICKET}-stream.jsonl\" 2> \"${ORCH_DIR}/workers/output/${NEW_TICKET}-stderr.log\" &"
