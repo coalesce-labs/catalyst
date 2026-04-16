@@ -174,13 +174,17 @@ export function parseOutputJson(path: string): WorkerAnalytics | null {
 
 /**
  * Returns the path to a worker's output.json within an orchestrator directory.
- * Checks two locations: the logs/ subdirectory (older convention) and the flat
- * workers/ directory with hyphen separator (current convention).
+ * Checks, in priority order:
+ *   1. workers/output/<ticket>-output.json (CTL-59 layout — runs/<id>/workers/output/)
+ *   2. workers/logs/<ticket>.output.json   (older convention, pre-CTL-59)
+ *   3. workers/<ticket>-output.json        (flat legacy convention)
  */
 export function analyticsPath(orchDir: string, ticket: string): string {
+  const outputSubdirPath = join(orchDir, "workers", "output", `${ticket}-output.json`);
+  if (existsSync(outputSubdirPath)) return outputSubdirPath;
   const logsPath = join(orchDir, "workers", "logs", `${ticket}.output.json`);
   if (existsSync(logsPath)) return logsPath;
   const flatPath = join(orchDir, "workers", `${ticket}-output.json`);
   if (existsSync(flatPath)) return flatPath;
-  return logsPath;
+  return outputSubdirPath;
 }
