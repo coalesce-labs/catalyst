@@ -496,6 +496,14 @@ if [ -f "$WORKER_STREAM" ]; then
     if [ "$USAGE" != "null" ]; then
       "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET_ID}" ".usage = ${USAGE}"
 
+      # Mirror cost into the worker's signal file. The dashboard reads signal
+      # files (not global state) for per-worker cost columns; without this
+      # write, signal.cost is null and the UI shows "—" everywhere.
+      if [ -f "$SIGNAL_FILE" ]; then
+        jq --argjson cost "$USAGE" '.cost = $cost' "$SIGNAL_FILE" \
+          > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+      fi
+
       # Aggregate into orchestrator-level usage
       "$STATE_SCRIPT" update "${ORCH_NAME}" "
         .usage.inputTokens += $(echo "$USAGE" | jq '.inputTokens')
