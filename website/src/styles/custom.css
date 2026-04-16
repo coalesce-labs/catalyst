@@ -18,65 +18,75 @@
 /* ─── Changelog Styling (Conductor-inspired) ────────────────────────────────
  *
  * DOM structure per version entry (from starlight-changelogs):
- *   <h2 id="slug"><a>6.34.0 (Apr 16, 2026)</a></h2>
+ *   <h2 id="slug"><a>6.34.0</a></h2>
+ *   <p>Apr 16, 2026</p>
  *   <!-- ai-enhanced -->
- *   <h3>Worker Detail Drawer</h3>     ← AI title (prominent)
- *   <p>Summary paragraph...</p>       ← AI summary
- *   <h3>PRs</h3>                      ← PR list
+ *   <h3>Session Time Filter Controls</h3>  ← AI title
+ *   <p>Summary paragraph...</p>            ← AI summary
+ *   <h3>PRs</h3>                           ← PR list
  *   <ul>...</ul>
  *   <h2>next version...</h2>
- *
- * Selectors use h2:has(+ h3) to scope to changelog entries that have
- * an AI title immediately after the version heading.
  */
 
-/* ── Version heading: small, lightweight, with separator above ─────────── */
-.sl-markdown-content h2:has(+ h3) {
-  font-size: var(--sl-text-sm);
-  font-weight: 400;
-  color: var(--sl-color-gray-3);
+/* ── Hide the version finder — browsing is top-down, search adds clutter */
+starlight-changelogs-versions-list {
+  display: none;
+}
+
+/* ── Version heading: pill badge (inline so date sits beside it) ──────── */
+.sl-markdown-content h2:has(+ p) {
+  display: inline;
+  font-family: var(--sl-font-mono, ui-monospace, monospace);
+  font-size: var(--sl-text-xs);
+  font-weight: 600;
+  padding: 0.2em 0.6em;
+  border-radius: 9999px;
+  background: var(--sl-color-accent-low);
+  color: var(--sl-color-accent-high);
   letter-spacing: 0.02em;
-  margin-top: 3rem;
-  margin-bottom: 0.25rem;
-  padding-top: 2rem;
-  border-top: 1px solid var(--sl-color-gray-5);
+  border-top: none;
   border-bottom: none;
 }
 
-.sl-markdown-content h2:has(+ h3):first-of-type {
-  border-top: none;
-  margin-top: 0;
-  padding-top: 0;
-}
-
-.sl-markdown-content h2:has(+ h3) a {
+.sl-markdown-content h2:has(+ p) a {
   color: inherit;
   text-decoration: none;
 }
 
 /* Hide the "Latest" badge — top position is already obvious */
-.sl-markdown-content h2:has(+ h3) :where(.sl-badge) {
+.sl-markdown-content h2:has(+ p) :where(.sl-badge) {
   display: none;
 }
 
-/* ── AI release title: the headline users scan ─────────────────────────── */
-.sl-markdown-content h2 + h3 {
+/* ── Date: muted, inline beside the version pill ─────────────────────── */
+.sl-markdown-content h2 + p {
+  display: inline;
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-gray-3);
+  margin-left: 0.75rem;
+}
+
+/* ── Separator line between releases (bottom border on each PR list) ──── */
+
+/* ── AI release title: the headline users scan ────────────────────────── */
+.sl-markdown-content h2 + p + h3 {
+  display: block;
   font-size: var(--sl-text-h2);
   font-weight: 700;
-  margin-top: 0.25rem;
+  margin-top: 0.5rem;
   margin-bottom: 0.5rem;
   line-height: 1.3;
   border-bottom: none;
 }
 
-/* ── AI summary paragraph ──────────────────────────────────────────────── */
-.sl-markdown-content h2 + h3 + p {
+/* ── AI summary paragraph ─────────────────────────────────────────────── */
+.sl-markdown-content h2 + p + h3 + p {
   color: var(--sl-color-gray-2);
   line-height: 1.7;
   margin-bottom: 1rem;
 }
 
-/* ── PRs section: compact, grouped with its release ────────────────────── */
+/* ── PRs section: compact, grouped with its release ───────────────────── */
 .sl-markdown-content h3[id^="prs"] {
   font-size: var(--sl-text-xs);
   font-weight: 600;
@@ -91,6 +101,7 @@
 .sl-markdown-content h3[id^="prs"] + ul {
   font-size: var(--sl-text-sm);
   color: var(--sl-color-gray-3);
-  margin-bottom: 0;
-  padding-bottom: 0;
+  padding-bottom: 2rem;
+  border-bottom: 1px solid var(--sl-color-gray-5);
+  margin-bottom: 2.5rem;
 }

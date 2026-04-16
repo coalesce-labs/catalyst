@@ -74,29 +74,31 @@ export function Sidebar({
         />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold text-fg">Catalyst</div>
-          <div className="text-[11px] text-muted">Orchestration Monitor</div>
-        </div>
-        <div className="flex gap-0.5">
-          {GROUPING_MODES.map((m) => (
-            <button
-              key={m}
-              onClick={() => onGroupingModeChange(m)}
-              className={cn(
-                "rounded px-1.5 py-0.5 text-[9px] font-medium capitalize transition-colors",
-                groupingMode === m
-                  ? "bg-accent/15 text-accent"
-                  : "text-muted hover:bg-surface-3 hover:text-fg",
-              )}
-            >
-              {m}
-            </button>
-          ))}
+          <div className="text-[11px] text-muted">Monitor</div>
         </div>
       </div>
 
       <nav className="flex-1 overflow-y-auto px-2 py-2">
-        <div className="mb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-          Navigation
+        <div className="mb-1 flex items-center justify-between px-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+            Navigation
+          </div>
+          <div className="flex rounded-md border border-border">
+            {GROUPING_MODES.map((m) => (
+              <button
+                key={m}
+                onClick={() => onGroupingModeChange(m)}
+                className={cn(
+                  "px-2 py-0.5 text-[9px] font-medium capitalize transition-colors first:rounded-l-[5px] last:rounded-r-[5px]",
+                  groupingMode === m
+                    ? "bg-accent/15 text-accent"
+                    : "text-muted hover:bg-surface-3 hover:text-fg",
+                )}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
         </div>
 
         <NavItem active={selectedOrchId === null} onClick={() => onSelect(null)}>
@@ -109,6 +111,8 @@ export function Sidebar({
           )}
         </NavItem>
 
+        <SessionTimeFilterBar filter={timeFilter} onChange={handleTimeFilterChange} className="mt-3 mb-1 px-2" />
+
         {isFlat ? (
           <FlatSections
             orchestrators={orchestrators}
@@ -118,12 +122,9 @@ export function Sidebar({
             onSelect={onSelect}
             selectedSessionId={selectedSessionId}
             onSessionSelect={onSessionSelect}
-            timeFilter={timeFilter}
-            onTimeFilterChange={handleTimeFilterChange}
           />
         ) : (
           <>
-          <SessionTimeFilterBar filter={timeFilter} onChange={handleTimeFilterChange} className="mt-3 mb-1 px-2" />
           {groups.map((group) => {
             const itemCount =
               group.orchestrators.length +
@@ -168,8 +169,6 @@ function FlatSections({
   onSelect,
   selectedSessionId,
   onSessionSelect,
-  timeFilter,
-  onTimeFilterChange,
 }: {
   orchestrators: OrchestratorState[];
   activeSessions: SessionState[];
@@ -178,8 +177,6 @@ function FlatSections({
   onSelect: (orchId: string | null) => void;
   selectedSessionId?: string | null;
   onSessionSelect?: (sessionId: string) => void;
-  timeFilter: SessionTimeFilter;
-  onTimeFilterChange: (filter: SessionTimeFilter) => void;
 }) {
   return (
     <>
@@ -196,7 +193,7 @@ function FlatSections({
         </>
       )}
 
-      <div className="mt-4 mb-1 flex items-center justify-between px-2">
+      <div className="mt-4 mb-1 px-2">
         <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">
           Sessions
           {activeSessions.length > 0 && (
@@ -205,7 +202,6 @@ function FlatSections({
             </span>
           )}
         </div>
-        <SessionTimeFilterBar filter={timeFilter} onChange={onTimeFilterChange} />
       </div>
       {(activeSessions.length > 0 || recentDead.length > 0) ? (
         <SessionList activeSessions={activeSessions} recentDead={recentDead} selectedSessionId={selectedSessionId} onSessionSelect={onSessionSelect} />
