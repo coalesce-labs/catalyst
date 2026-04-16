@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   createPrStatusFetcher,
+  fetchPrForBranch,
   parseRepoFromPrUrl,
   type Runner,
   type RunnerResult,
@@ -164,6 +165,90 @@ describe("createPrStatusFetcher", () => {
     const fetcher = createPrStatusFetcher({ runner });
     await fetcher.refreshAll([]);
     expect(calls).toBe(0);
+  });
+
+  it("fetchPrForBranch returns null on empty list", async () => {
+    const runner: Runner = (_args) =>
+      Promise.resolve({ stdout: "[]", ok: true });
+    const got = await fetchPrForBranch("o/r", "feat/x", runner);
+    expect(got).toBeNull();
+  });
+
+  it("fetchPrForBranch returns normalized MERGED entry", async () => {
+    const runner: Runner = (args) => {
+      expect(args).toEqual([
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        "o/r",
+        "--head",
+        "feat/x",
+        "--state",
+        "all",
+        "--json",
+        "number,state,mergedAt,url",
+        "--limit",
+        "1",
+      ]);
+      return Promise.resolve({
+        stdout: JSON.stringify([
+          {
+            number: 42,
+            state: "MERGED",
+            mergedAt: "2026-04-13T12:00:00Z",
+            url: "https://github.com/o/r/pull/42",
+          },
+        ]),
+        ok: true,
+      });
+    };
+    const got = await fetchPrForBranch("o/r", "feat/x", runner);
+    expect(got).not.toBeNull();
+    expect(got!.number).toBe(42);
+    expect(got!.state).toBe("MERGED");
+    expect(got!.mergedAt).toBe("2026-04-13T12:00:00Z");
+    expect(got!.url).toBe("https://github.com/o/r/pull/42");
+  });
+
+  it("fetchPrForBranch normalizes DRAFT/unknown to UNKNOWN", async () => {
+    const runner: Runner = () =>
+      Promise.resolve({
+        stdout: JSON.stringify([
+          { number: 3, state: "DRAFT", mergedAt: null, url: "u" },
+        ]),
+        ok: true,
+      });
+    const got = await fetchPrForBranch("o/r", "b", runner);
+    expect(got!.state).toBe("UNKNOWN");
+    expect(got!.mergedAt).toBeNull();
+  });
+
+  it("fetchPrForBranch returns null on runner failure", async () => {
+    const runner: Runner = () =>
+      Promise.resolve({ stdout: "", ok: false });
+    const got = await fetchPrForBranch("o/r", "b", runner);
+    expect(got).toBeNull();
+  });
+
+  it("fetchPrForBranch returns null on malformed JSON", async () => {
+    const runner: Runner = () =>
+      Promise.resolve({ stdout: "not json{{", ok: true });
+    const got = await fetchPrForBranch("o/r", "b", runner);
+    expect(got).toBeNull();
+  });
+
+  it("fetchPrForBranch tolerates missing fields", async () => {
+    const runner: Runner = () =>
+      Promise.resolve({
+        stdout: JSON.stringify([{ number: 1 }]),
+        ok: true,
+      });
+    const got = await fetchPrForBranch("o/r", "b", runner);
+    expect(got!.number).toBe(1);
+    expect(got!.state).toBe("UNKNOWN");
+    expect(got!.mergedAt).toBeNull();
+    expect(got!.url).toBe("");
   });
 
   it("start triggers an immediate refresh and stop clears the interval", async () => {

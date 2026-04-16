@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$comment": "Worker signal file schema — written by /oneshot workers, read by /orchestrate coordinator",
+  "$comment": "Worker signal file schema — written by /oneshot workers, read by /orchestrate coordinator. The signal file is advisory: the orchestrator derives authoritative completion from git/PR state (a merged PR on the worker's branch supersedes any stale signal; a live OPEN PR means the worker is not stalled even if the signal is stale). See CTL-32.",
   "type": "object",
   "required": ["ticket", "orchestrator", "workerName", "status", "phase", "startedAt", "updatedAt"],
   "properties": {
