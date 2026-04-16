@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.37.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.0...catalyst-dev-v6.37.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* **dev:** fix CI release notes to match backfill format ([#177](https://github.com/coalesce-labs/catalyst/issues/177)) ([a64b71a](https://github.com/coalesce-labs/catalyst/commit/a64b71a359cecbea30dd76ad784e02f75236cb71))
+
 ## [6.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.36.0...catalyst-dev-v6.37.0)
 
 Apr 16, 2026
