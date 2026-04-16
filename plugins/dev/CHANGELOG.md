@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.33.0...catalyst-dev-v6.34.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** add session time filter controls in sidebar ([#164](https://github.com/coalesce-labs/catalyst/issues/164)) ([781ca18](https://github.com/coalesce-labs/catalyst/commit/781ca184f2f24f05c3b0fb1fdf7c4a7c6e011b72))
+
 ## [6.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.32.0...catalyst-dev-v6.33.0) (2026-04-16)
 
 
