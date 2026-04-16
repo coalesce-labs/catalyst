@@ -804,6 +804,25 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
 done
 ```
 
+**Auto-revive dead/wedged workers (CTL-63):**
+
+After the stalled-worker scan, attempt to resume any dead or heartbeat-stale
+worker from its original `session_id`. Resumed sessions preserve tool-call
+history, plan context, and PR state at ~10× lower cost than a fresh redispatch.
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-revive" \
+  --orch-dir "$ORCH_DIR" \
+  --orch-id "$ORCH_NAME"
+```
+
+The script checks every non-terminal worker signal, revives from
+`workers/output/<ticket>-stream.jsonl` (with legacy / transcript fallbacks),
+enforces a per-ticket budget (default 2), and transitions workers whose
+budget is exhausted or whose session_id cannot be found to
+`status=stalled` with an attention item so you can decide between manual
+intervention and a fresh redispatch.
+
 ### Phase 5: Independent Verification (Anti-Reward-Hacking)
 
 ```bash
