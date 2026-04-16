@@ -822,6 +822,11 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
         BEHIND)
           # Often auto-resolves when auto-merge rebases; log only
           ;;
+        BLOCKED)
+          # Out-of-band: orchestrate-auto-fixup runs after this loop and handles
+          # BLOCKED (unresolved review threads, failing checks, review-required)
+          # once the state has been stable for ≥10 minutes (CTL-64).
+          ;;
       esac
       ;;
   esac
@@ -924,6 +929,44 @@ found transition to `status=stalled` with an attention item so you can
 decide between manual intervention and a fresh redispatch. Session resume
 uses `workers/output/<ticket>-stream.jsonl` (with legacy / transcript
 fallbacks) to find the original `session_id`.
+
+**Auto-dispatch fix-up workers for BLOCKED PRs (CTL-64):**
+
+After revive, a second pass detects PRs stuck in `state=OPEN,
+mergeStateStatus=BLOCKED` and either auto-dispatches `orchestrate-fixup`
+or escalates to an attention item depending on the cause.
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-auto-fixup" \
+  --orch-dir "$ORCH_DIR" \
+  --orch-id "$ORCH_NAME"
+```
+
+The script records `blockedSince` on the worker signal the first time it
+observes BLOCKED, then — once the state has been stable for
+`--stable-minutes` (default 10) — classifies the cause via `gh pr view`
+and an `api graphql` query for unresolved review threads:
+
+| Classification       | Trigger                                               | Action                                                                   |
+| -------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| `ci-running`         | any check `status ∈ {IN_PROGRESS, QUEUED, PENDING}`   | defer — try again next tick                                              |
+| `checks-failing`     | any check `conclusion ∈ {FAILURE, TIMED_OUT, …}`      | raise `checks-failing` attention (worker's own loop / revive handles it) |
+| `threads-unresolved` | checks pass AND unresolved review threads exist       | dispatch `orchestrate-fixup` with `--issues` composed from thread bodies |
+| `review-required`    | checks pass AND `reviewDecision = REVIEW_REQUIRED`    | raise `review-required` attention (human must approve)                   |
+| `blocked-unknown`    | none of the above (rare — shape not yet classified)   | raise `blocked-unknown` attention                                        |
+
+Each auto-dispatch bumps `fixupAttempts` on the signal. When
+`fixupAttempts ≥ --max-fixups` (default 2), the script raises
+`fixup-budget-exhausted` attention instead of dispatching again, so a
+human can decide between manual intervention and abandonment.
+
+Signal-file fields the script reads/writes:
+
+| Field                    | Written by                | Purpose                                                    |
+| ------------------------ | ------------------------- | ---------------------------------------------------------- |
+| `blockedSince`           | orchestrate-auto-fixup    | First observation of BLOCKED; cleared when PR leaves BLOCKED |
+| `fixupAttempts`          | orchestrate-auto-fixup    | Auto-dispatch counter (max = `--max-fixups`)               |
+| `lastFixupDispatchedAt`  | orchestrate-auto-fixup    | Timestamp of the most recent dispatch (for the dashboard)  |
 
 ### Phase 5: Independent Verification (Anti-Reward-Hacking)
 

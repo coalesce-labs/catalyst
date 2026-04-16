@@ -207,6 +207,21 @@
     "lastApiErrorUuid": {
       "type": ["string", "null"],
       "description": "UUID of the last API-error stream event (Stream idle timeout / partial response received) that `orchestrate-revive` has already handled (CTL-62). Used to dedup against the same error re-appearing in the appended stream JSONL after a successful revive. Null if no API-error revive has occurred."
+    },
+    "blockedSince": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of the first observation that this worker's PR entered mergeStateStatus=BLOCKED. Written by orchestrate-auto-fixup (CTL-64); cleared when the PR leaves BLOCKED. Used to enforce a stability window before auto-dispatching a fix-up worker."
+    },
+    "fixupAttempts": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Count of auto-fixup dispatches triggered by orchestrate-auto-fixup (CTL-64). Bumped on each successful dispatch; escalates to a `fixup-budget-exhausted` attention when it reaches --max-fixups (default 2)."
+    },
+    "lastFixupDispatchedAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of the most recent auto-fixup dispatch by orchestrate-auto-fixup (CTL-64). For dashboard/telemetry only."
     }
   }
 }
