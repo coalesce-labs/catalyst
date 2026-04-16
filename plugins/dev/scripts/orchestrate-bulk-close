@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+# orchestrate-bulk-close - Retroactively transition Linear ticket state for
+# every worker in an orchestration run. Inspects each signal file and the PR
+# (if any) to pick the right state map entry:
+#
+#   merged PR with non-empty diff     → stateMap.done
+#   merged PR with zero diff          → stateMap.canceled  (subsumed)
+#   no PR, worker status=done         → stateMap.canceled  (zero-scope)
+#   merged PR, signal status=done     → stateMap.done      (fallback when gh fails)
+#   worker still in progress          → skip
+#
+# Useful when (a) a run predates this feature or (b) the orchestrator's poll
+# loop missed some workers. CTL-69.
+#
+# Usage:
+#   orchestrate-bulk-close --orch-dir <path> [--config <path>]
+#                          [--state-on-merge <name>] [--state-on-canceled <name>]
+#                          [--dry-run] [--json]
+#
+#   --orch-dir <path>          Orchestrator directory (contains workers/*.json).
+#                              Required.
+#   --config <path>            Path to .catalyst/config.json.
+#                              Default: auto-discover from CWD.
+#   --state-on-merge <name>    Literal Linear state name to use for merged-with-diff
+#                              PRs (overrides stateMap.done).
+#   --state-on-canceled <name> Literal Linear state name for subsumed/zero-scope
+#                              tickets (overrides stateMap.canceled).
+#   --dry-run                  Print what would happen without updating Linear.
+#   --json                     Emit a JSON summary to stdout.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRANSITION="${SCRIPT_DIR}/linear-transition.sh"
+
+ORCH_DIR=""
+CONFIG=""
+STATE_ON_MERGE=""
+STATE_ON_CANCELED=""
+DRY_RUN=0
+JSON_OUT=0
+
+usage() {
+  sed -n '2,29p' "$0" >&2
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir)           ORCH_DIR="$2"; shift 2 ;;
+    --config)             CONFIG="$2"; shift 2 ;;
+    --state-on-merge)     STATE_ON_MERGE="$2"; shift 2 ;;
+    --state-on-canceled)  STATE_ON_CANCELED="$2"; shift 2 ;;
+    --dry-run)            DRY_RUN=1; shift ;;
+    --json)               JSON_OUT=1; shift ;;
+    -h|--help)            usage 0 ;;
+    *)                    echo "unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 1; }
+[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir under $ORCH_DIR" >&2; exit 1; }
+
+[ -x "$TRANSITION" ] || { echo "ERROR: linear-transition.sh missing at $TRANSITION" >&2; exit 1; }
+
+# ─── Call the transition helper with consistent flags ─────────────────────
+# Prints one log line per ticket for human readability and updates the
+# per-action counters via a name-reference.
+transition_ticket() {
+  local ticket="$1" action="$2"   # action: merge|canceled
+  local args=(--ticket "$ticket")
+
+  case "$action" in
+    merge)
+      if [ -n "$STATE_ON_MERGE" ]; then
+        args+=(--state "$STATE_ON_MERGE")
+      else
+        args+=(--transition done)
+      fi
+      ;;
+    canceled)
+      if [ -n "$STATE_ON_CANCELED" ]; then
+        args+=(--state "$STATE_ON_CANCELED")
+      else
+        args+=(--transition canceled)
+      fi
+      ;;
+  esac
+  [ -n "$CONFIG" ] && args+=(--config "$CONFIG")
+  [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
+
+  if "$TRANSITION" "${args[@]}" >&2; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# ─── Fetch PR state+diff size from gh; tolerant of missing gh/net errors ──
+fetch_pr_info() {
+  local pr_number="$1"
+  if ! command -v gh >/dev/null 2>&1; then
+    echo '{"state":"UNKNOWN","additions":0,"deletions":0}'; return
+  fi
+  local out
+  out=$(gh pr view "$pr_number" --json state,mergedAt,additions,deletions 2>/dev/null || echo "")
+  if [ -z "$out" ]; then
+    echo '{"state":"UNKNOWN","additions":0,"deletions":0}'; return
+  fi
+  echo "$out"
+}
+
+# ─── Main ─────────────────────────────────────────────────────────────────
+TOTAL=0
+TRANSITIONED=0
+CANCELED=0
+SKIPPED=0
+FAILED=0
+
+shopt -s nullglob
+for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
+  TICKET=$(jq -r '.ticket // empty' "$SIGNAL" 2>/dev/null || echo "")
+  [ -z "$TICKET" ] && continue
+
+  TOTAL=$((TOTAL+1))
+  STATUS=$(jq -r '.status // empty' "$SIGNAL")
+  PR_NUMBER=$(jq -r '.pr.number // empty' "$SIGNAL")
+
+  # If the worker is still in flight (not in a terminal state AND no PR)
+  # just skip — bulk-close is for reconciling completed/abandoned runs.
+  case "$STATUS" in
+    done|failed|stalled|merged) ;;  # proceed below
+    *)
+      if [ -z "$PR_NUMBER" ]; then
+        SKIPPED=$((SKIPPED+1))
+        echo "SKIP: ${TICKET} status=${STATUS} (in-flight, no PR)" >&2
+        continue
+      fi
+      ;;
+  esac
+
+  # Decide action based on PR state + diff.
+  ACTION="skip"
+  if [ -n "$PR_NUMBER" ]; then
+    PR_INFO=$(fetch_pr_info "$PR_NUMBER")
+    PR_STATE=$(echo "$PR_INFO" | jq -r '.state // "UNKNOWN"')
+    ADDS=$(echo "$PR_INFO" | jq -r '.additions // 0')
+    DELS=$(echo "$PR_INFO" | jq -r '.deletions // 0')
+    DIFF_LINES=$((ADDS + DELS))
+
+    case "$PR_STATE" in
+      MERGED)
+        if [ "$DIFF_LINES" -eq 0 ]; then
+          ACTION="canceled"
+        else
+          ACTION="merge"
+        fi
+        ;;
+      UNKNOWN)
+        # Fall back to signal — if the signal says done, treat as merge.
+        if [ "$STATUS" = "done" ] || [ "$STATUS" = "merged" ]; then
+          ACTION="merge"
+        else
+          ACTION="skip"
+        fi
+        ;;
+      OPEN|CLOSED|*)
+        # Open/closed PRs stay as-is. Let the human decide.
+        ACTION="skip"
+        ;;
+    esac
+  else
+    # No PR. If the worker reached "done" without a PR, it's a subsumed or
+    # zero-scope ticket — cancel it.
+    if [ "$STATUS" = "done" ]; then
+      ACTION="canceled"
+    else
+      ACTION="skip"
+    fi
+  fi
+
+  case "$ACTION" in
+    merge)
+      if transition_ticket "$TICKET" "merge"; then
+        TRANSITIONED=$((TRANSITIONED+1))
+      else
+        FAILED=$((FAILED+1))
+      fi
+      ;;
+    canceled)
+      if transition_ticket "$TICKET" "canceled"; then
+        CANCELED=$((CANCELED+1))
+      else
+        FAILED=$((FAILED+1))
+      fi
+      ;;
+    skip)
+      SKIPPED=$((SKIPPED+1))
+      echo "SKIP: ${TICKET} status=${STATUS} pr=${PR_NUMBER:-<none>}" >&2
+      ;;
+  esac
+done
+
+if [ "$JSON_OUT" -eq 1 ]; then
+  jq -nc \
+    --argjson total "$TOTAL" \
+    --argjson transitioned "$TRANSITIONED" \
+    --argjson canceled "$CANCELED" \
+    --argjson skipped "$SKIPPED" \
+    --argjson failed "$FAILED" \
+    --arg dry_run "$([ "$DRY_RUN" -eq 1 ] && echo true || echo false)" \
+    '{total:$total, transitioned:$transitioned, canceled:$canceled,
+      skipped:$skipped, failed:$failed, dryRun:($dry_run == "true")}'
+else
+  echo ""
+  echo "bulk-close summary: total=${TOTAL} transitioned=${TRANSITIONED} canceled=${CANCELED} skipped=${SKIPPED} failed=${FAILED}$([ "$DRY_RUN" -eq 1 ] && echo ' (dry-run)')"
+fi
+
+[ "$FAILED" -eq 0 ]

@@ -551,6 +551,17 @@ cannot be satisfied).
 Linear ticket to `stateMap.done`, save post-merge tasks. The orchestrator's Phase 4 loop is now a
 safety net that can re-dispatch a fix-up worker if the primary worker gets stuck.
 
+The worker transitions its Linear ticket via the shared helper — idempotent and tolerant of a
+missing `linearis` CLI (CTL-69):
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+  --ticket "$TICKET_ID" --transition done --config .catalyst/config.json
+```
+
+The orchestrator's safety-net poll loop calls the same helper when it independently confirms a
+PR has merged, so both paths stay in sync.
+
 **If `--no-merge` was set**, skip Steps 2–3 entirely and report PR status instead:
 
 ```
