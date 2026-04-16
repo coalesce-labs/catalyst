@@ -3,9 +3,13 @@ import type { OrchestratorState, ConnectionStatus, SessionState } from "@/lib/ty
 import { sessionKind } from "@/lib/types";
 import { computeOrchestratorStats } from "@/lib/computations";
 import { fmtSince } from "@/lib/formatters";
+import { groupSidebarItems, type GroupingMode } from "@/lib/grouping";
 import { NavItem } from "../ui/nav-item";
+import { SidebarGroup } from "../ui/sidebar-group";
 import { HealthIcon, StatusDot, ConnectionDot } from "../ui/status-dot";
 import { LayoutDashboard, ChevronRight, Terminal, Workflow } from "lucide-react";
+
+const GROUPING_MODES = ["flat", "repo"] as const;
 
 interface SidebarProps {
   orchestrators: OrchestratorState[];
@@ -18,6 +22,8 @@ interface SidebarProps {
   attentionCount: number;
   collapsed?: boolean;
   onToggle?: () => void;
+  groupingMode: GroupingMode;
+  onGroupingModeChange: (mode: GroupingMode) => void;
 }
 
 export function Sidebar({
@@ -30,6 +36,8 @@ export function Sidebar({
   connectionStatus,
   attentionCount,
   collapsed = false,
+  groupingMode,
+  onGroupingModeChange,
 }: SidebarProps) {
   const activeSessions = sessions.filter(
     (s) => s.alive || s.status === "running",
@@ -37,6 +45,10 @@ export function Sidebar({
   const recentDead = sessions.filter(
     (s) => !s.alive && s.status !== "running" && s.timeSinceUpdate < 3600,
   );
+
+  const groups = groupSidebarItems(orchestrators, activeSessions, recentDead, groupingMode);
+  const isFlat = groupingMode === "flat";
+
   return (
     <aside
       style={{ width: collapsed ? 0 : 240 }}
@@ -51,9 +63,25 @@ export function Sidebar({
           alt="Catalyst"
           className="h-5 w-5 flex-shrink-0"
         />
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold text-fg">Catalyst</div>
           <div className="text-[11px] text-muted">Orchestration Monitor</div>
+        </div>
+        <div className="flex gap-0.5">
+          {GROUPING_MODES.map((m) => (
+            <button
+              key={m}
+              onClick={() => onGroupingModeChange(m)}
+              className={cn(
+                "rounded px-1.5 py-0.5 text-[9px] font-medium capitalize transition-colors",
+                groupingMode === m
+                  ? "bg-accent/15 text-accent"
+                  : "text-muted hover:bg-surface-3 hover:text-fg",
+              )}
+            >
+              {m}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -72,135 +100,39 @@ export function Sidebar({
           )}
         </NavItem>
 
-        {orchestrators.length > 0 && (
-          <>
-            <div className="mt-4 mb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-              Orchestrators
-            </div>
-            {orchestrators.map((o) => {
-              const s = computeOrchestratorStats(o, {});
-              const isActive = selectedOrchId === o.id;
-              return (
-                <NavItem
-                  key={o.id}
-                  active={isActive}
-                  onClick={() => onSelect(o.id)}
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <HealthIcon
-                        failed={s.failed}
-                        active={s.active}
-                        size="h-3.5 w-3.5"
-                      />
-                      <span className="truncate font-mono text-[12px] font-medium">
-                        {o.id}
-                      </span>
-                    </div>
-                    <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted">
-                      <span>
-                        {s.done}/{s.total} done
-                      </span>
-                      <span>
-                        W{o.currentWave}/{o.totalWaves}
-                      </span>
-                    </div>
-                  </div>
-                  <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-border transition-colors group-hover:text-muted" />
-                </NavItem>
-              );
-            })}
-          </>
-        )}
-
-        {(activeSessions.length > 0 || recentDead.length > 0) && (
-          <>
-            <div className="mt-4 mb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-              Sessions
-              {activeSessions.length > 0 && (
-                <span className="ml-1.5 rounded-full bg-green/20 px-1.5 py-px text-[9px] font-bold text-green tabular-nums">
-                  {activeSessions.length}
-                </span>
-              )}
-            </div>
-            <ul role="list" className="space-y-0.5">
-              {activeSessions.map((s) => {
-                const kind = sessionKind(s);
-                const label = s.label || s.ticket || s.sessionId.slice(-12);
-                const elapsed = s.startedAt
-                  ? (Date.now() - Date.parse(s.startedAt)) / 1000
-                  : 0;
-                const isSelected = selectedSessionId === s.sessionId;
-                return (
-                  <li key={s.sessionId}>
-                    <button
-                      onClick={() => onSessionSelect?.(s.sessionId)}
-                      className={cn(
-                        "group flex w-full items-center gap-2 rounded-md border-l-[3px] px-2.5 py-1.5 text-left transition-colors hover:bg-surface-3",
-                        isSelected
-                          ? "border-accent bg-surface-3/80"
-                          : "border-transparent",
-                      )}
-                      aria-label={`${label} — ${kind}, ${s.alive ? "running" : s.status}`}
-                    >
-                      <StatusDot alive={s.alive} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          {kind === "orchestrator" ? (
-                            <Workflow className="h-3 w-3 flex-shrink-0 text-accent" />
-                          ) : (
-                            <Terminal className="h-3 w-3 flex-shrink-0 text-green" />
-                          )}
-                          <span className="truncate text-[11px] font-medium text-fg">
-                            {label}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted">
-                          <span>{kind}</span>
-                          {s.skillName && s.skillName !== "interactive" && (
-                            <span className="font-mono">{s.skillName}</span>
-                          )}
-                          {elapsed > 0 && <span>{fmtSince(elapsed)}</span>}
-                        </div>
-                      </div>
-                    </button>
-                  </li>
-                );
-              })}
-              {recentDead.map((s) => {
-                const kind = sessionKind(s);
-                const label = s.label || s.ticket || s.sessionId.slice(-12);
-                const isSelected = selectedSessionId === s.sessionId;
-                return (
-                  <li key={s.sessionId}>
-                    <button
-                      onClick={() => onSessionSelect?.(s.sessionId)}
-                      className={cn(
-                        "group flex w-full items-center gap-2 rounded-md border-l-[3px] px-2.5 py-1.5 text-left transition-colors hover:bg-surface-3",
-                        isSelected
-                          ? "border-accent bg-surface-3/80 opacity-80"
-                          : "border-transparent opacity-50 hover:opacity-80",
-                      )}
-                      aria-label={`${label} — ${kind}, ${s.status}`}
-                    >
-                      <StatusDot alive={false} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <Terminal className="h-3 w-3 flex-shrink-0 text-muted" />
-                          <span className="truncate text-[11px] font-medium text-fg">
-                            {label}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 text-[10px] text-muted">
-                          {kind} &middot; {s.status}
-                        </div>
-                      </div>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          </>
+        {isFlat ? (
+          <FlatSections
+            orchestrators={orchestrators}
+            activeSessions={activeSessions}
+            recentDead={recentDead}
+            selectedOrchId={selectedOrchId}
+            onSelect={onSelect}
+            selectedSessionId={selectedSessionId}
+            onSessionSelect={onSessionSelect}
+          />
+        ) : (
+          groups.map((group) => {
+            const itemCount =
+              group.orchestrators.length +
+              group.activeSessions.length +
+              group.recentDead.length;
+            if (itemCount === 0) return null;
+            return (
+              <SidebarGroup key={group.key} label={group.label} count={itemCount}>
+                <OrchestratorList
+                  orchestrators={group.orchestrators}
+                  selectedOrchId={selectedOrchId}
+                  onSelect={onSelect}
+                />
+                <SessionList
+                  activeSessions={group.activeSessions}
+                  recentDead={group.recentDead}
+                  selectedSessionId={selectedSessionId}
+                  onSessionSelect={onSessionSelect}
+                />
+              </SidebarGroup>
+            );
+          })
         )}
       </nav>
 
@@ -211,5 +143,196 @@ export function Sidebar({
         </div>
       </div>
     </aside>
+  );
+}
+
+function FlatSections({
+  orchestrators,
+  activeSessions,
+  recentDead,
+  selectedOrchId,
+  onSelect,
+  selectedSessionId,
+  onSessionSelect,
+}: {
+  orchestrators: OrchestratorState[];
+  activeSessions: SessionState[];
+  recentDead: SessionState[];
+  selectedOrchId: string | null;
+  onSelect: (orchId: string | null) => void;
+  selectedSessionId?: string | null;
+  onSessionSelect?: (sessionId: string) => void;
+}) {
+  return (
+    <>
+      {orchestrators.length > 0 && (
+        <>
+          <div className="mt-4 mb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            Orchestrators
+          </div>
+          <OrchestratorList
+            orchestrators={orchestrators}
+            selectedOrchId={selectedOrchId}
+            onSelect={onSelect}
+          />
+        </>
+      )}
+
+      {(activeSessions.length > 0 || recentDead.length > 0) && (
+        <>
+          <div className="mt-4 mb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            Sessions
+            {activeSessions.length > 0 && (
+              <span className="ml-1.5 rounded-full bg-green/20 px-1.5 py-px text-[9px] font-bold text-green tabular-nums">
+                {activeSessions.length}
+              </span>
+            )}
+          </div>
+          <SessionList activeSessions={activeSessions} recentDead={recentDead} selectedSessionId={selectedSessionId} onSessionSelect={onSessionSelect} />
+        </>
+      )}
+    </>
+  );
+}
+
+function OrchestratorList({
+  orchestrators,
+  selectedOrchId,
+  onSelect,
+}: {
+  orchestrators: OrchestratorState[];
+  selectedOrchId: string | null;
+  onSelect: (orchId: string | null) => void;
+}) {
+  return (
+    <>
+      {orchestrators.map((o) => {
+        const s = computeOrchestratorStats(o, {});
+        const isActive = selectedOrchId === o.id;
+        return (
+          <NavItem
+            key={o.id}
+            active={isActive}
+            onClick={() => onSelect(o.id)}
+          >
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <HealthIcon
+                  failed={s.failed}
+                  active={s.active}
+                  size="h-3.5 w-3.5"
+                />
+                <span className="truncate font-mono text-[12px] font-medium">
+                  {o.id}
+                </span>
+              </div>
+              <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted">
+                <span>
+                  {s.done}/{s.total} done
+                </span>
+                <span>
+                  W{o.currentWave}/{o.totalWaves}
+                </span>
+              </div>
+            </div>
+            <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-border transition-colors group-hover:text-muted" />
+          </NavItem>
+        );
+      })}
+    </>
+  );
+}
+
+function SessionList({
+  activeSessions,
+  recentDead,
+  selectedSessionId,
+  onSessionSelect,
+}: {
+  activeSessions: SessionState[];
+  recentDead: SessionState[];
+  selectedSessionId?: string | null;
+  onSessionSelect?: (sessionId: string) => void;
+}) {
+  if (activeSessions.length === 0 && recentDead.length === 0) return null;
+
+  return (
+    <ul role="list" className="space-y-0.5">
+      {activeSessions.map((s) => {
+        const kind = sessionKind(s);
+        const label = s.label || s.ticket || s.sessionId.slice(-12);
+        const elapsed = s.startedAt
+          ? (Date.now() - Date.parse(s.startedAt)) / 1000
+          : 0;
+        const isSelected = selectedSessionId === s.sessionId;
+        return (
+          <li key={s.sessionId}>
+            <button
+              onClick={() => onSessionSelect?.(s.sessionId)}
+              className={cn(
+                "group flex w-full items-center gap-2 rounded-md border-l-[3px] px-2.5 py-1.5 text-left transition-colors hover:bg-surface-3",
+                isSelected
+                  ? "border-accent bg-surface-3/80"
+                  : "border-transparent",
+              )}
+              aria-label={`${label} — ${kind}, ${s.alive ? "running" : s.status}`}
+            >
+              <StatusDot alive={s.alive} />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  {kind === "orchestrator" ? (
+                    <Workflow className="h-3 w-3 flex-shrink-0 text-accent" />
+                  ) : (
+                    <Terminal className="h-3 w-3 flex-shrink-0 text-green" />
+                  )}
+                  <span className="truncate text-[11px] font-medium text-fg">
+                    {label}
+                  </span>
+                </div>
+                <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted">
+                  <span>{kind}</span>
+                  {s.skillName && s.skillName !== "interactive" && (
+                    <span className="font-mono">{s.skillName}</span>
+                  )}
+                  {elapsed > 0 && <span>{fmtSince(elapsed)}</span>}
+                </div>
+              </div>
+            </button>
+          </li>
+        );
+      })}
+      {recentDead.map((s) => {
+        const kind = sessionKind(s);
+        const label = s.label || s.ticket || s.sessionId.slice(-12);
+        const isSelected = selectedSessionId === s.sessionId;
+        return (
+          <li key={s.sessionId}>
+            <button
+              onClick={() => onSessionSelect?.(s.sessionId)}
+              className={cn(
+                "group flex w-full items-center gap-2 rounded-md border-l-[3px] px-2.5 py-1.5 text-left transition-colors hover:bg-surface-3",
+                isSelected
+                  ? "border-accent bg-surface-3/80 opacity-80"
+                  : "border-transparent opacity-50 hover:opacity-80",
+              )}
+              aria-label={`${label} — ${kind}, ${s.status}`}
+            >
+              <StatusDot alive={false} />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5">
+                  <Terminal className="h-3 w-3 flex-shrink-0 text-muted" />
+                  <span className="truncate text-[11px] font-medium text-fg">
+                    {label}
+                  </span>
+                </div>
+                <div className="mt-0.5 text-[10px] text-muted">
+                  {kind} &middot; {s.status}
+                </div>
+              </div>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
   );
 }

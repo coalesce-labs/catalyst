@@ -76,6 +76,7 @@ export interface Wave {
 export interface OrchestratorState {
   id: string;
   path: string;
+  workspace: string;
   startedAt: string;
   currentWave: number;
   totalWaves: number;
