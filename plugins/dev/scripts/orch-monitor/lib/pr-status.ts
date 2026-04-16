@@ -24,7 +24,7 @@ export interface PrStatusFetcher {
   stop(): void;
 }
 
-export interface CreatePrStatusFetcherOptions {
+interface CreatePrStatusFetcherOptions {
   runner?: Runner;
   concurrency?: number;
 }

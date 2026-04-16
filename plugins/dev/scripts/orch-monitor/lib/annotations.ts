@@ -1,11 +1,11 @@
 import { Database } from "bun:sqlite";
 
-export interface NoteEntry {
+interface NoteEntry {
   text: string;
   createdAt: string;
 }
 
-export interface SessionAnnotation {
+interface SessionAnnotation {
   sessionId: string;
   displayName: string | null;
   flags: string[];

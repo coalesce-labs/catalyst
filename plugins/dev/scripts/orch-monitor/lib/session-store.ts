@@ -31,7 +31,7 @@ export interface SessionState {
   gitBranch: string | null;
 }
 
-export interface SessionStoreSnapshot {
+interface SessionStoreSnapshot {
   available: boolean;
   sessions: SessionState[];
 }

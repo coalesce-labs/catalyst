@@ -1,7 +1,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 
-export interface OtelConfig {
+interface OtelConfig {
   enabled: boolean;
   prometheusUrl: string | null;
   lokiUrl: string | null;

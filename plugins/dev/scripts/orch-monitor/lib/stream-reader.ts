@@ -13,7 +13,7 @@ export interface WorkerActivity {
   hasRetries: boolean;
 }
 
-export interface StreamEvent {
+interface StreamEvent {
   ts: number;
   type: "tool_start" | "tool_end" | "text" | "turn" | "init" | "retry" | "result";
   tool?: string;

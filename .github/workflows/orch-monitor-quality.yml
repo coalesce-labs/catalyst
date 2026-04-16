@@ -28,5 +28,8 @@ jobs:
       - name: Lint
         run: bun run lint
 
+      - name: Dead code check
+        run: bun run knip:ci
+
       - name: Test
         run: bun test

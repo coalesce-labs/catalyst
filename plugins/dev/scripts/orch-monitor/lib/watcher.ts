@@ -13,12 +13,12 @@ export interface WatcherHandle {
   stop: () => void;
 }
 
-export interface WorkerChange {
+interface WorkerChange {
   orchId: string;
   worker: WorkerState;
 }
 
-export interface SessionChange {
+interface SessionChange {
   session: SessionState;
 }
 
@@ -115,7 +115,7 @@ const LIVENESS_INTERVAL_MS = 5000;
 const SNAPSHOT_INTERVAL_MS = 30000;
 const SQLITE_POLL_INTERVAL_MS = 2000;
 
-export interface StartWatchingOptions {
+interface StartWatchingOptions {
   dbPath?: string | null;
   sqlitePollIntervalMs?: number;
 }

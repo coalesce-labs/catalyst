@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { existsSync } from "fs";
 
-export interface HistoryQuery {
+interface HistoryQuery {
   skill?: string;
   ticket?: string;
   since?: string;
@@ -10,7 +10,7 @@ export interface HistoryQuery {
   offset?: number;
 }
 
-export interface HistoryEntry {
+interface HistoryEntry {
   sessionId: string;
   workflowId: string | null;
   ticket: string | null;
@@ -28,17 +28,17 @@ export interface HistoryEntry {
   cacheReadTokens: number | null;
 }
 
-export interface HistoryResult {
+interface HistoryResult {
   entries: HistoryEntry[];
   total: number;
 }
 
-export interface StatsQuery {
+interface StatsQuery {
   skill?: string;
   since?: string;
 }
 
-export interface SkillBreakdown {
+interface SkillBreakdown {
   skill: string;
   count: number;
   doneCount: number;
@@ -49,19 +49,19 @@ export interface SkillBreakdown {
   successRate: number;
 }
 
-export interface DailyCost {
+interface DailyCost {
   date: string;
   costUsd: number;
   sessionCount: number;
 }
 
-export interface ToolUsage {
+interface ToolUsage {
   tool: string;
   totalCalls: number;
   totalDurationMs: number;
 }
 
-export interface StatsResult {
+interface StatsResult {
   totalSessions: number;
   totalCostUsd: number;
   avgCostUsd: number;
@@ -72,7 +72,7 @@ export interface StatsResult {
   topTools: ToolUsage[];
 }
 
-export interface ComparisonSide {
+interface ComparisonSide {
   sessionId: string;
   skillName: string | null;
   ticket: string | null;
@@ -87,7 +87,7 @@ export interface ComparisonSide {
   tools: ToolUsage[];
 }
 
-export interface SessionComparison {
+interface SessionComparison {
   left: ComparisonSide;
   right: ComparisonSide;
 }
