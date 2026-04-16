@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.34.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.1...catalyst-dev-v6.34.2) (2026-04-16)
+
+
+### Bug Fixes
+
+* **dev:** disown watcher subshell before exec ([#171](https://github.com/coalesce-labs/catalyst/issues/171)) ([5a902b3](https://github.com/coalesce-labs/catalyst/commit/5a902b35d4aefe74d1d237cff00119e41683fc2b))
+
 ## [6.34.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.0...catalyst-dev-v6.34.1) (2026-04-16)
 
 
