@@ -24,23 +24,23 @@ export interface MonitorEventEnvelope<T = unknown> {
   source: EventSource;
 }
 
-export interface SessionPayload {
+interface SessionPayload {
   sessionId: string;
   status: string;
   workspace?: string;
 }
 
-export interface SessionLifecyclePayload {
+interface SessionLifecyclePayload {
   sessionId: string;
   workspace?: string;
 }
 
-export interface MetricsPayload {
+interface MetricsPayload {
   sessionId?: string;
   metrics: Record<string, number>;
 }
 
-export interface AnnotationPayload {
+interface AnnotationPayload {
   targetId: string;
   targetType: string;
   key: string;

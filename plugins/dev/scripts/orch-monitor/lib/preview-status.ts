@@ -24,7 +24,7 @@ export interface PreviewFetcher {
   stop(): void;
 }
 
-export interface CreatePreviewFetcherOptions {
+interface CreatePreviewFetcherOptions {
   runner?: Runner;
   concurrency?: number;
   patterns?: string[];

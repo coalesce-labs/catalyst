@@ -1,10 +1,10 @@
 import { cn } from "@/lib/utils";
 
-export function Skeleton({ className }: { className?: string }) {
+function Skeleton({ className }: { className?: string }) {
   return <div className={cn("animate-shimmer rounded bg-surface-3", className)} />;
 }
 
-export function SkeletonKpiStrip() {
+function SkeletonKpiStrip() {
   return (
     <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
       {Array.from({ length: 4 }).map((_, i) => (
@@ -24,7 +24,7 @@ export function SkeletonKpiStrip() {
   );
 }
 
-export function SkeletonOrchestratorCard() {
+function SkeletonOrchestratorCard() {
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-surface-2 p-4">
       <div className="flex items-start justify-between">

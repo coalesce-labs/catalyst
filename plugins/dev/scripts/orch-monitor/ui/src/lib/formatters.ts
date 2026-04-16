@@ -38,10 +38,6 @@ export function fmtCost(n: number): string {
   return "$" + n.toFixed(2);
 }
 
-export function statusClass(s: string): string {
-  return (s || "").replace(/[^a-z0-9_]/gi, "_");
-}
-
 export type StatusSemantic = "success" | "info" | "danger" | "warning" | "neutral";
 
 const STATUS_SEMANTIC: Record<string, StatusSemantic> = {

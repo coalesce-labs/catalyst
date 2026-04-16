@@ -7,21 +7,21 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
+    "knip": "knip",
+    "knip:ci": "knip --reporter compact",
     "audit": "bun audit",
-    "check": "bun run typecheck && bun run lint && bun audit && bun test",
-    "build:ui": "cd ui && npx vite build",
-    "dev:ui": "cd ui && npx vite dev"
+    "check": "bun run typecheck && bun run lint && bun run knip && bun audit && bun test",
+    "build:ui": "cd ui && bun run build",
+    "dev:ui": "cd ui && bun run dev"
   },
-  "dependencies": {
-    "dompurify": "^3.3.3",
-    "marked": "^18.0.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/bun": "^1.3.12",
     "eslint": "^9",
     "eslint-plugin-security": "^4.0.0",
     "globals": "^17.5.0",
+    "knip": "^6.4.1",
     "typescript": "^6.0.2",
     "typescript-eslint": "^8.58.2"
   }

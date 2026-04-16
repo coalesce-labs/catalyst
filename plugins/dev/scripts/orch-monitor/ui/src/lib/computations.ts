@@ -19,7 +19,7 @@ export interface OrchestratorStats {
   maxEndMs: number;
 }
 
-export function isDone(status: string): boolean {
+function isDone(status: string): boolean {
   return status === "done" || status === "merged";
 }
 

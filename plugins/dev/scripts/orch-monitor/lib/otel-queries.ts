@@ -94,7 +94,7 @@ export async function toolUsageByName(
   return map;
 }
 
-export interface LogEntry {
+interface LogEntry {
   timestamp: string;
   line: string;
   labels: Record<string, string>;
@@ -130,7 +130,7 @@ export async function apiErrors(
   return entries;
 }
 
-export interface CostValidationEntry {
+interface CostValidationEntry {
   ticket: string;
   signalCost: number;
   otelCost: number;
