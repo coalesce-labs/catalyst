@@ -384,7 +384,7 @@ export function readOrchestratorState(orchDir: string, workspace = "default"): O
       const key = asString(signal.ticket) || file.replace(/\.json$/, "");
       try {
         const w = toWorkerState(signal);
-        w.activity = readWorkerActivity(orchDir, key);
+        w.activity = readWorkerActivity(orchDir, key, w.pid);
         workers[key] = w;
       } catch (err) {
         console.error(`[state-reader] toWorkerState failed for ${fullPath}:`, err);

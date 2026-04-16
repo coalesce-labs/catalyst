@@ -16,6 +16,13 @@ export interface WorkerCost {
   cacheReadTokens?: number;
 }
 
+export interface TaskSummary {
+  total: number;
+  completed: number;
+  inProgress: number;
+  activeTask: string | null;
+}
+
 export interface WorkerActivity {
   currentTool: string | null;
   lastText: string | null;
@@ -24,16 +31,40 @@ export interface WorkerActivity {
   turns: number;
   streamSizeBytes: number;
   hasRetries: boolean;
+  taskSummary?: TaskSummary | null;
 }
 
 export interface StreamEvent {
   ts: number;
-  type: "tool_start" | "tool_end" | "text" | "turn" | "init" | "retry" | "result";
+  type:
+    | "tool_start"
+    | "tool_end"
+    | "text"
+    | "turn"
+    | "init"
+    | "retry"
+    | "result"
+    | "rate_limit";
   tool?: string;
   toolInput?: string;
   text?: string;
+  /** Tool names invoked in this assistant turn (extracted from message.content) */
+  turnTools?: string[];
   retryInfo?: { attempt: number; maxRetries: number; error: string };
+  rateLimitInfo?: { status: string; resetsAt?: number };
   usage?: Record<string, unknown>;
+  sessionId?: string;
+}
+
+export interface WorkerTask {
+  id: string;
+  subject: string;
+  description?: string;
+  activeForm?: string;
+  status: "pending" | "in_progress" | "completed";
+  blocks?: string[];
+  blockedBy?: string[];
+  owner?: string;
 }
 
 export interface WorkerState {

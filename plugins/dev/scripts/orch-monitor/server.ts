@@ -13,6 +13,7 @@ import { readSessionStore } from "./lib/session-store";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import { startWatching, type WatcherHandle } from "./lib/watcher";
 import { readRecentStreamEvents } from "./lib/stream-reader";
+import { sessionIdFromPid, readWorkerTasks } from "./lib/task-reader";
 import {
   createEvent,
   parseFilter,
@@ -572,6 +573,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
             Number.isFinite(maxEvents) ? maxEvents : 30,
           );
           return Response.json({ orchId, ticket, events });
+        }
+
+        const taskMatch = url.pathname.match(
+          /^\/api\/worker-tasks$/,
+        );
+        if (taskMatch) {
+          const pidRaw = url.searchParams.get("pid");
+          const sessionIdParam = url.searchParams.get("sessionId");
+          if (!pidRaw && !sessionIdParam) {
+            return new Response("pid or sessionId required", { status: 400 });
+          }
+          const sessionId = sessionIdParam
+            || (pidRaw ? sessionIdFromPid(Number(pidRaw)) : null);
+          if (!sessionId) {
+            return Response.json({ tasks: null });
+          }
+          const tasks = readWorkerTasks(sessionId);
+          return Response.json({ tasks });
         }
 
         if (url.pathname === "/api/linear") {
