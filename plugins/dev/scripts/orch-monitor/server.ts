@@ -38,6 +38,7 @@ import {
   createPreviewFetcher,
   type PreviewFetcher,
 } from "./lib/preview-status";
+import { writeMergedSignalFile } from "./lib/signal-writer";
 import { loadOtelConfig } from "./lib/otel-config";
 import {
   createPrometheusFetcher,
@@ -164,10 +165,20 @@ function applyPrStatus(
       if (!status) continue;
       worker.prState = status.state;
       worker.prMergedAt = status.mergedAt;
-      if (status.state === "MERGED" && worker.status !== "merged") {
-        worker.status = "merged";
-        if (!worker.completedAt && status.mergedAt) {
-          worker.completedAt = status.mergedAt;
+      if (status.state === "MERGED") {
+        // Write-through to the signal file so the dashboard and any downstream
+        // consumers of `workers/<ticket>.json` converge on `done` even when
+        // the orchestrator's own Phase 4 loop never observed the merge
+        // (e.g. the orchestrator agent already exited). Idempotent — skips
+        // when the file already reports done+merged with the same mergedAt.
+        const signalPath = join(orch.path, "workers", `${worker.ticket}.json`);
+        writeMergedSignalFile(signalPath, status.mergedAt);
+
+        if (worker.status !== "merged") {
+          worker.status = "merged";
+          if (!worker.completedAt && status.mergedAt) {
+            worker.completedAt = status.mergedAt;
+          }
         }
       }
     }
