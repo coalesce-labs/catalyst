@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.1.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.1.0...catalyst-dev-v7.1.1)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Worker Cost Display Fix
+
+Dashboard now shows real-time worker costs (USD, input/output tokens, cache reads) instead of placeholder dashes. The orchestrator writes parsed usage data to each worker's signal file, matching the existing global state format that powers the cost overview.
+
+
+
+### PRs
+
+* **dev:** write worker cost to signal file in orchestrator (CTL-88) ([#190](https://github.com/coalesce-labs/catalyst/issues/190)) ([dbdb050](https://github.com/coalesce-labs/catalyst/commit/dbdb050de29a62fc6e9604579d2345bc32e13912))
+
 ## [7.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.0.0...catalyst-dev-v7.1.0)
 
 Apr 16, 2026
