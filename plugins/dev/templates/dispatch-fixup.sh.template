@@ -16,8 +16,12 @@ ORCH_DIR="${ORCH_DIR}"
 WORKER_DIR="${WORKER_DIR}"
 PROMPT_FILE="${PROMPT_FILE}"
 WORKER_MODEL="${WORKER_MODEL}"
-LOG_FILE="${ORCH_DIR}/workers/fixup-${TICKET_ID}-launch.log"
-STREAM_FILE="${ORCH_DIR}/workers/fixup-${TICKET_ID}-stream.jsonl"
+LOG_FILE="${ORCH_DIR}/workers/output/fixup-${TICKET_ID}-launch.log"
+STREAM_FILE="${ORCH_DIR}/workers/output/fixup-${TICKET_ID}-stream.jsonl"
+
+# Ensure output/ exists (CTL-59 layout). Safe on older ORCH_DIRs where
+# workers/ exists but workers/output/ may not.
+mkdir -p "${ORCH_DIR}/workers/output"
 
 if [ ! -f "${PROMPT_FILE}" ]; then
   echo "ERROR: prompt file missing: ${PROMPT_FILE}" >&2

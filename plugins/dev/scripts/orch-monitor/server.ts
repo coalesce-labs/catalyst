@@ -38,6 +38,7 @@ import {
   createPreviewFetcher,
   type PreviewFetcher,
 } from "./lib/preview-status";
+import { writeMergedSignalFile } from "./lib/signal-writer";
 import { loadOtelConfig } from "./lib/otel-config";
 import {
   createPrometheusFetcher,
@@ -75,6 +76,7 @@ export interface CreateServerOptions {
   port?: number;
   hostname?: string;
   wtDir: string;
+  runsDir?: string | null;
   startWatcher?: boolean;
   publicDir?: string;
   pidFile?: string;
@@ -164,10 +166,20 @@ function applyPrStatus(
       if (!status) continue;
       worker.prState = status.state;
       worker.prMergedAt = status.mergedAt;
-      if (status.state === "MERGED" && worker.status !== "merged") {
-        worker.status = "merged";
-        if (!worker.completedAt && status.mergedAt) {
-          worker.completedAt = status.mergedAt;
+      if (status.state === "MERGED") {
+        // Write-through to the signal file so the dashboard and any downstream
+        // consumers of `workers/<ticket>.json` converge on `done` even when
+        // the orchestrator's own Phase 4 loop never observed the merge
+        // (e.g. the orchestrator agent already exited). Idempotent — skips
+        // when the file already reports done+merged with the same mergedAt.
+        const signalPath = join(orch.path, "workers", `${worker.ticket}.json`);
+        writeMergedSignalFile(signalPath, status.mergedAt);
+
+        if (worker.status !== "merged") {
+          worker.status = "merged";
+          if (!worker.completedAt && status.mergedAt) {
+            worker.completedAt = status.mergedAt;
+          }
         }
       }
     }
@@ -250,6 +262,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     port = DEFAULT_PORT,
     hostname = "0.0.0.0",
     wtDir,
+    runsDir = null,
     startWatcher = true,
     publicDir = join(import.meta.dir, "public"),
     pidFile,
@@ -269,7 +282,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     annotationsDbPath,
   } = opts;
 
-  const buildOpts: BuildSnapshotOptions = { dbPath };
+  const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
 
   const CATALYST_DIR =
     process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
@@ -420,7 +433,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }
 
         if (url.pathname === "/api/analytics") {
-          return Response.json(buildAnalyticsSnapshot(wtDir));
+          return Response.json(buildAnalyticsSnapshot(wtDir, buildOpts));
         }
 
         if (url.pathname === "/api/sessions") {
@@ -522,7 +535,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
           ) {
             return new Response("Bad Request", { status: 400 });
           }
-          const detail = buildSessionDetail(wtDir, orchId, ticket);
+          const detail = buildSessionDetail(wtDir, orchId, ticket, { runsDir });
           if (!detail) {
             return new Response("Not Found", { status: 404 });
           }
@@ -562,7 +575,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const maxEventsRaw = url.searchParams.get("limit");
           const maxEvents = maxEventsRaw ? Number.parseInt(maxEventsRaw, 10) : 30;
-          const scanned = (await import("./lib/state-reader")).scanOrchestrators(wtDir);
+          const stateReader = await import("./lib/state-reader");
+          const scanned = runsDir
+            ? stateReader.scanAllOrchestrators({ runsDir, wtDir })
+            : stateReader.scanOrchestrators(wtDir);
           const entry = scanned.find((d) => basename(d.path) === orchId);
           if (!entry) {
             return new Response("Not Found", { status: 404 });
@@ -820,7 +836,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   });
 
   if (startWatcher) {
-    watcher = startWatching(wtDir, { dbPath, sqlitePollIntervalMs });
+    watcher = startWatching(wtDir, { dbPath, sqlitePollIntervalMs, runsDir });
   }
 
   if (pidFile) {
@@ -864,12 +880,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
   return server;
 }
 
-export function startTerminalOnly(wtDir: string, renderOpts?: RenderOptions): {
+export function startTerminalOnly(
+  wtDir: string,
+  renderOpts?: RenderOptions,
+  runsDir?: string | null,
+): {
   stop: () => void;
 } {
   let watcher: WatcherHandle | null = null;
   try {
-    watcher = startWatching(wtDir);
+    watcher = startWatching(wtDir, { runsDir: runsDir ?? null });
   } catch (err) {
     console.error(`[terminal] failed to start watcher for ${wtDir}:`, err);
   }
@@ -887,6 +907,7 @@ if (import.meta.main) {
   const CATALYST_DIR =
     process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
   const WT_DIR = `${CATALYST_DIR}/wt`;
+  const RUNS_DIR = `${CATALYST_DIR}/runs`;
   const parsedPort = parseInt(process.env.MONITOR_PORT ?? "", 10);
   const PORT = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : DEFAULT_PORT;
   const DB_PATH =
@@ -912,7 +933,7 @@ if (import.meta.main) {
   );
 
   if (terminalOnly) {
-    const handle = startTerminalOnly(WT_DIR, renderOpts);
+    const handle = startTerminalOnly(WT_DIR, renderOpts, RUNS_DIR);
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
       process.on(sig, () => {
         console.info(`[terminal] received ${sig}, shutting down`);
@@ -924,6 +945,7 @@ if (import.meta.main) {
     const srv = createServer({
       port: PORT,
       wtDir: WT_DIR,
+      runsDir: RUNS_DIR,
       dbPath: DB_PATH,
       pidFile: pidFilePath,
       prometheusUrl: otelCfg.enabled ? otelCfg.prometheusUrl : null,
@@ -937,7 +959,7 @@ if (import.meta.main) {
     if (useTerminal) {
       console.info("Terminal renderer active (--terminal)");
     }
-    console.info(`(bound on ${String(srv.hostname)}:${srv.port}; watching ${WT_DIR})`);
+    console.info(`(bound on ${String(srv.hostname)}:${srv.port}; watching ${WT_DIR} and ${RUNS_DIR})`);
 
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
       process.on(sig, () => {

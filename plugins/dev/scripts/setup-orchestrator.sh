@@ -150,6 +150,13 @@ fi
 
 WORKTREE_PATH="${WORKTREES_BASE}/${ORCH_NAME}"
 
+# ─── Step 5b: Create per-orchestrator runs/ directory (CTL-59) ────────────────
+# State (state.json, DASHBOARD.md, workers/) lives under ~/catalyst/runs/<id>/
+# so it is decoupled from the git worktree.
+
+RUN_DIR=$("${SCRIPT_DIR}/catalyst-state.sh" ensure-run-dir "$ORCH_NAME")
+log "Run dir: ${RUN_DIR}"
+
 # ─── Step 6: Build ticket args string for commands ────────────────────────────
 
 TICKET_ARGS=""
@@ -186,6 +193,8 @@ fi
 # Machine-readable output (skip in --launch mode — claude would see it flash by)
 if [[ "$LAUNCH" != true ]]; then
   echo "WORKTREE_PATH=${WORKTREE_PATH}"
+  echo "RUN_DIR=${RUN_DIR}"
+  echo "ORCH_ID=${ORCH_NAME}"
 fi
 
 # ─── Optional: launch claude in the new worktree ──────────────────────────────
