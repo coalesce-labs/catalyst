@@ -24,6 +24,20 @@ export interface WorkerTaskList {
 
 const CLAUDE_TASKS_DIR = join(homedir(), ".claude", "tasks");
 
+function isRecord(x: unknown): x is Record<string, unknown> {
+  return typeof x === "object" && x !== null && !Array.isArray(x);
+}
+
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
+function asStringArray(v: unknown): string[] | undefined {
+  return Array.isArray(v) && v.every((x) => typeof x === "string")
+    ? (v as string[])
+    : undefined;
+}
+
 /**
  * Look up a session ID from a PID via ~/.claude/sessions/{pid}.json
  */
@@ -31,8 +45,9 @@ export function sessionIdFromPid(pid: number): string | null {
   const sessionFile = join(homedir(), ".claude", "sessions", `${pid}.json`);
   try {
     if (!existsSync(sessionFile)) return null;
-    const data = JSON.parse(readFileSync(sessionFile, "utf8"));
-    return data.sessionId ?? null;
+    const data: unknown = JSON.parse(readFileSync(sessionFile, "utf8"));
+    if (!isRecord(data)) return null;
+    return asString(data.sessionId) ?? null;
   } catch {
     return null;
   }
@@ -55,19 +70,27 @@ export function readWorkerTasks(sessionId: string): WorkerTaskList | null {
     for (const file of files) {
       try {
         const raw = readFileSync(join(taskDir, file), "utf8");
-        const task = JSON.parse(raw);
-        if (task && typeof task.id === "string" && typeof task.subject === "string") {
-          tasks.push({
-            id: task.id,
-            subject: task.subject,
-            description: task.description,
-            activeForm: task.activeForm,
-            status: task.status ?? "pending",
-            blocks: task.blocks,
-            blockedBy: task.blockedBy,
-            owner: task.owner,
-          });
-        }
+        const parsed: unknown = JSON.parse(raw);
+        if (!isRecord(parsed)) continue;
+
+        const id = asString(parsed.id);
+        const subject = asString(parsed.subject);
+        if (!id || !subject) continue;
+
+        const status = asString(parsed.status);
+        tasks.push({
+          id,
+          subject,
+          description: asString(parsed.description),
+          activeForm: asString(parsed.activeForm),
+          status:
+            status === "in_progress" || status === "completed"
+              ? status
+              : "pending",
+          blocks: asStringArray(parsed.blocks),
+          blockedBy: asStringArray(parsed.blockedBy),
+          owner: asString(parsed.owner),
+        });
       } catch {
         // skip malformed task files
       }
