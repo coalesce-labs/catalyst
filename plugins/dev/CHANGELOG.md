@@ -1,9 +1,18 @@
 # Changelog
 
-## [6.37.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.0...catalyst-dev-v6.37.1) (2026-04-16)
+## [6.37.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.0...catalyst-dev-v6.37.1)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### CI Release Notes Enhancement
+
+The release pipeline now generates AI-enhanced changelogs automatically, matching the backfill format with structured titles and developer-focused summaries. Fixed a broken pipe issue in the enhancement script that was preventing changelog updates from completing under strict error handling.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** fix CI release notes to match backfill format ([#177](https://github.com/coalesce-labs/catalyst/issues/177)) ([a64b71a](https://github.com/coalesce-labs/catalyst/commit/a64b71a359cecbea30dd76ad784e02f75236cb71))
 
