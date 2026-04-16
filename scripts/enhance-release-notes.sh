@@ -10,6 +10,7 @@ fi
 REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq '.nameWithOwner')}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROMPT_TEMPLATE="$SCRIPT_DIR/templates/release-notes-prompt.md"
+BACKFILL_PROMPT_TEMPLATE="$SCRIPT_DIR/templates/backfill-release-notes-prompt.md"
 
 # Prefer LOCAL_ANTHROPIC_API_KEY to avoid conflicts with Claude Code's own key.
 # Falls back to ANTHROPIC_API_KEY for CI environments.
@@ -117,7 +118,7 @@ request_body=$(jq -nc \
 
 echo "Calling Claude API..."
 response=$(curl -sS --max-time 30 \
-  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "x-api-key: $API_KEY" \
   -H "anthropic-version: 2023-06-01" \
   -H "content-type: application/json" \
   -d "$request_body" \
@@ -167,29 +168,68 @@ if [[ -n "$head_branch" ]]; then
     plugin_dir=$(dirname "$changelog_file")
     plugin_name=$(basename "$plugin_dir")
 
-    version_line=$(grep -m1 '^## \[' "$changelog_file" || true)
-    if [[ -z "$version_line" ]]; then
+    # Read all version heading line numbers into an array (avoids grep|head pipe)
+    local_line_nums=()
+    local_versions=()
+    while IFS=: read -r lnum line; do
+      local_line_nums+=("$lnum")
+      local_versions+=("$line")
+    done < <(grep -n '^## \[' "$changelog_file" || true)
+
+    if [[ ${#local_versions[@]} -eq 0 ]]; then
       continue
     fi
+
+    version_line="${local_versions[0]}"
+    first_line="${local_line_nums[0]}"
 
     version=$(echo "$version_line" | sed -E 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\].*/\1/')
     if [[ -z "$version" ]]; then
       continue
     fi
 
-    next_version_line=$(grep -m2 '^## \[' "$changelog_file" | tail -1)
-    if [[ "$next_version_line" == "$version_line" ]]; then
-      section_end=$(wc -l < "$changelog_file")
+    # Determine section end from array (no pipe needed)
+    if [[ ${#local_line_nums[@]} -gt 1 ]]; then
+      section_end=$(( ${local_line_nums[1]} - 1 ))
     else
-      section_end=$(grep -n '^## \[' "$changelog_file" | sed -n '2p' | cut -d: -f1)
-      section_end=$((section_end - 1))
+      section_end=$(wc -l < "$changelog_file")
     fi
-    first_line=$(grep -n '^## \[' "$changelog_file" | head -1 | cut -d: -f1)
 
     original_section=$(sed -n "${first_line},${section_end}p" "$changelog_file")
 
-    plugin_commits=$(echo "$commit_messages" | grep -i "$plugin_name" || echo "$commit_messages")
-    plugin_prompt="Write a concise release summary (2-3 sentences) for catalyst-$plugin_name version $version. Commits: $plugin_commits"
+    # Skip if already enhanced
+    if echo "$original_section" | grep -q '<!-- ai-enhanced -->'; then
+      echo "  [$version] already enhanced, skipping"
+      continue
+    fi
+
+    # Extract PR numbers from original entries
+    section_pr_nums=$(echo "$original_section" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true)
+
+    # Fetch PR descriptions for the backfill prompt
+    section_pr_descriptions=""
+    for pr_num in $section_pr_nums; do
+      desc=$(gh api "repos/$REPO/pulls/$pr_num" --jq '.body // ""' 2>/dev/null || true)
+      if [[ -n "$desc" ]]; then
+        section_pr_descriptions+="### PR #$pr_num"$'\n'"$desc"$'\n\n'
+      fi
+    done
+
+    # Use the backfill prompt template for consistent formatting
+    if [[ -f "$BACKFILL_PROMPT_TEMPLATE" ]]; then
+      plugin_prompt=$(jq -Rrs \
+        --arg changelog "$original_section" \
+        --arg commits "$commit_messages" \
+        --arg prs "$section_pr_descriptions" \
+        --arg migrations "$migration_signals" \
+        'gsub("\\{CHANGELOG\\}"; $changelog)
+         | gsub("\\{COMMITS\\}"; $commits)
+         | gsub("\\{PR_DESCRIPTIONS\\}"; $prs)
+         | gsub("\\{MIGRATION_SIGNALS\\}"; $migrations)' \
+        "$BACKFILL_PROMPT_TEMPLATE")
+    else
+      plugin_prompt="Write a concise release summary for catalyst-$plugin_name version $version. Output a short title (3-6 words) on the first line, then a blank line, then a 2-4 sentence summary. Commits: $commit_messages"
+    fi
 
     plugin_request=$(jq -nc \
       --arg content "$plugin_prompt" \
@@ -199,25 +239,54 @@ if [[ -n "$head_branch" ]]; then
         messages: [{role: "user", content: $content}]
       }')
 
-    plugin_response=$(curl -sS --max-time 30 \
+    echo "  [$version] calling Claude API for CHANGELOG enhancement..."
+    plugin_response=$(curl -sS --max-time 60 \
       -H "x-api-key: $API_KEY" \
       -H "anthropic-version: 2023-06-01" \
       -H "content-type: application/json" \
       -d "$plugin_request" \
       "https://api.anthropic.com/v1/messages" 2>/dev/null) || continue
 
-    plugin_summary=$(echo "$plugin_response" | jq -r '.content[0].text // empty' 2>/dev/null) || continue
+    plugin_ai_notes=$(echo "$plugin_response" | jq -r '.content[0].text // empty' 2>/dev/null) || continue
 
-    if [[ -z "$plugin_summary" ]]; then
+    if [[ -z "$plugin_ai_notes" ]]; then
       continue
     fi
 
-    enhanced_section="$version_line"$'\n\n'
-    enhanced_section+="$plugin_summary"$'\n\n'
-    enhanced_section+='<details><summary>Detailed changes</summary>'$'\n\n'
-    detail_lines=$(echo "$original_section" | tail -n +2)
-    enhanced_section+="$detail_lines"$'\n\n'
-    enhanced_section+='</details>'
+    # Parse title and summary from AI output (same as backfill script)
+    ai_title=$(echo "$plugin_ai_notes" | head -1 | sed 's/^#* *//')
+    ai_summary=$(echo "$plugin_ai_notes" | tail -n +2 | sed '/./,$!d')
+
+    # Extract date from version line or use today
+    release_date=$(echo "$version_line" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' || true)
+    if [[ -n "$release_date" ]]; then
+      formatted_date=$(date -d "$release_date" '+%b %d, %Y' 2>/dev/null || date -jf '%Y-%m-%d' "$release_date" '+%b %d, %Y' 2>/dev/null || echo "$release_date")
+    else
+      formatted_date=$(date '+%b %d, %Y')
+    fi
+
+    # Strip inline date from version heading for clean format
+    clean_version_line=$(echo "$version_line" | sed -E 's/ \([0-9]{4}-[0-9]{2}-[0-9]{2}\)//')
+
+    # Collect original PR entries (### Features, ### Bug Fixes, bullets)
+    original_entries=$(echo "$original_section" | tail -n +2 | sed '/^$/d')
+
+    # Build enhanced section matching backfill format
+    enhanced_section="$clean_version_line"$'\n\n'
+    enhanced_section+="$formatted_date"$'\n\n'
+    enhanced_section+='<!-- ai-enhanced -->'$'\n\n'
+    if [[ -n "$ai_title" ]]; then
+      enhanced_section+="### $ai_title"$'\n\n'
+    fi
+    if [[ -n "$ai_summary" ]]; then
+      enhanced_section+="$ai_summary"$'\n\n'
+    fi
+    enhanced_section+=$'\n\n### PRs\n\n'
+    # Keep original bullet entries (strip ### headings, keep * lines)
+    original_bullets=$(echo "$original_section" | grep '^\* ' || true)
+    if [[ -n "$original_bullets" ]]; then
+      enhanced_section+="$original_bullets"$'\n'
+    fi
 
     tmp_file=$(mktemp)
     {
@@ -233,7 +302,7 @@ if [[ -n "$head_branch" ]]; then
     mv "$tmp_file" "$changelog_file"
     git add "$changelog_file"
     changelogs_updated=true
-    echo "Updated $changelog_file with enhanced notes"
+    echo "  [$version] enhanced with AI-generated title and summary"
 
   done < <(echo "$changed_files" | grep 'CHANGELOG.md$' || true)
 
