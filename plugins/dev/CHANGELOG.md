@@ -1,6 +1,6 @@
 # Changelog
 
-## [6.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.33.0...catalyst-dev-v6.34.0) (2026-04-16)
+## [6.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.33.0...catalyst-dev-v6.34.0) (Apr 16, 2026)
 
 <!-- ai-enhanced -->
 
@@ -10,11 +10,11 @@ Filter your Claude sessions in the sidebar by time range with a 5-option toggle 
 
 
 
-### Features
+### PRs
 
 * **dev:** add session time filter controls in sidebar ([#164](https://github.com/coalesce-labs/catalyst/issues/164)) ([781ca18](https://github.com/coalesce-labs/catalyst/commit/781ca184f2f24f05c3b0fb1fdf7c4a7c6e011b72))
 
-## [6.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.32.0...catalyst-dev-v6.33.0) (2026-04-16)
+## [6.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.32.0...catalyst-dev-v6.33.0) (Apr 16, 2026)
 
 <!-- ai-enhanced -->
 
@@ -24,11 +24,11 @@ The orchestration monitor sidebar now groups sessions and orchestrators by Linea
 
 
 
-### Features
+### PRs
 
 * **dev:** add sidebar grouping by Linear ticket ([#162](https://github.com/coalesce-labs/catalyst/issues/162)) ([d69aa05](https://github.com/coalesce-labs/catalyst/commit/d69aa05398fdae0a85d99530fea0b88fd8a16fa9))
 
-## [6.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.31.0...catalyst-dev-v6.32.0) (2026-04-16)
+## [6.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.31.0...catalyst-dev-v6.32.0) (Apr 16, 2026)
 
 <!-- ai-enhanced -->
 
@@ -38,11 +38,11 @@ Knip now runs automatically on every PR to catch unused exports, dead code, and 
 
 
 
-### Features
+### PRs
 
 * **dev:** add knip dead code checking to CI quality gates ([#158](https://github.com/coalesce-labs/catalyst/issues/158)) ([f58d441](https://github.com/coalesce-labs/catalyst/commit/f58d4414e12b84f6096edf23becd6f8780c0a6e9))
 
-## [6.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.30.0...catalyst-dev-v6.31.0) (2026-04-16)
+## [6.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.30.0...catalyst-dev-v6.31.0) (Apr 16, 2026)
 
 <!-- ai-enhanced -->
 
@@ -52,11 +52,11 @@ Switch between flat list and grouped tree views with the new Flat/Repo toggle in
 
 
 
-### Features
+### PRs
 
 * **dev:** add sidebar grouping by repo/cwd ([#157](https://github.com/coalesce-labs/catalyst/issues/157)) ([0101310](https://github.com/coalesce-labs/catalyst/commit/010131057e2c2419dec3a1ae5c337ba7d809a637))
 
-## [6.30.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.29.0...catalyst-dev-v6.30.0) (2026-04-16)
+## [6.30.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.29.0...catalyst-dev-v6.30.0) (Apr 16, 2026)
 
 <!-- ai-enhanced -->
 
@@ -66,11 +66,11 @@ Click any session in the sidebar or dashboard to open a detailed inspector with 
 
 
 
-### Features
+### PRs
 
 * **dev:** add session detail drawer ([#156](https://github.com/coalesce-labs/catalyst/issues/156)) ([8671562](https://github.com/coalesce-labs/catalyst/commit/867156239ec32907bcf61799948dac1cb6e27cb3))
 
-## [6.29.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.28.0...catalyst-dev-v6.29.0) (2026-04-15)
+## [6.29.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.28.0...catalyst-dev-v6.29.0) (Apr 15, 2026)
 
 <!-- ai-enhanced -->
 
@@ -80,11 +80,11 @@ Click any worker row in the orchestration monitor to open a live detail panel wi
 
 
 
-### Features
+### PRs
 
 * **dev:** add worker detail drawer, session tracking, and sidebar sessions ([#153](https://github.com/coalesce-labs/catalyst/issues/153)) ([f38e0dc](https://github.com/coalesce-labs/catalyst/commit/f38e0dc37a4ad6b95a943304302d8e51b2381700))
 
-## [6.28.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.27.1...catalyst-dev-v6.28.0) (2026-04-15)
+## [6.28.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.27.1...catalyst-dev-v6.28.0) (Apr 15, 2026)
 
 <!-- ai-enhanced -->
 
@@ -94,11 +94,11 @@ The research-codebase workflow now starts by querying DeepWiki for a compressed 
 
 
 
-### Features
+### PRs
 
 * **dev:** add DeepWiki orientation to codebase research workflow ([#151](https://github.com/coalesce-labs/catalyst/issues/151)) ([7e705de](https://github.com/coalesce-labs/catalyst/commit/7e705def583eca5640a91e071a38abac1389a375))
 
-## [6.27.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.27.0...catalyst-dev-v6.27.1) (2026-04-15)
+## [6.27.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.27.0...catalyst-dev-v6.27.1) (Apr 15, 2026)
 
 <!-- ai-enhanced -->
 
@@ -108,11 +108,11 @@ The `start-monitor.sh` script has been merged into `catalyst-monitor.sh` as a si
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** consolidate start-monitor.sh into catalyst-monitor.sh ([#149](https://github.com/coalesce-labs/catalyst/issues/149)) ([bf50058](https://github.com/coalesce-labs/catalyst/commit/bf50058ac21b0bcc9ac505f04ec085b1833450be))
 
-## [6.27.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.26.1...catalyst-dev-v6.27.0) (2026-04-15)
+## [6.27.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.26.1...catalyst-dev-v6.27.0) (Apr 15, 2026)
 
 <!-- ai-enhanced -->
 
@@ -122,11 +122,11 @@ Run `/catalyst-dev:setup-catalyst` to diagnose your entire Catalyst installation
 
 
 
-### Features
+### PRs
 
 * **dev:** add setup-catalyst health check, monitor launcher, and version display ([#147](https://github.com/coalesce-labs/catalyst/issues/147)) ([31c8cba](https://github.com/coalesce-labs/catalyst/commit/31c8cba7d413228afffb0c1953aad44926c873df))
 
-## [6.26.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.26.0...catalyst-dev-v6.26.1) (2026-04-15)
+## [6.26.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.26.0...catalyst-dev-v6.26.1) (Apr 15, 2026)
 
 <!-- ai-enhanced -->
 
@@ -136,11 +136,11 @@ Catalyst setup now checks for macOS platform and SQLite prerequisites before ins
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** harden prerequisites, wire up SQLite init, fix OTel config ([#143](https://github.com/coalesce-labs/catalyst/issues/143)) ([14f7c84](https://github.com/coalesce-labs/catalyst/commit/14f7c849d619b7bfb5f62f411c1e050d226f2103))
 
-## [6.26.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.25.0...catalyst-dev-v6.26.0) (2026-04-15)
+## [6.26.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.25.0...catalyst-dev-v6.26.0) (Apr 15, 2026)
 
 <!-- ai-enhanced -->
 
@@ -150,16 +150,16 @@ The new `setup-orchestrator.sh` script lets you bootstrap orchestrator worktrees
 
 
 
-### Features
+### PRs
 
 * **dev:** standalone setup-orchestrator.sh for external automation ([#141](https://github.com/coalesce-labs/catalyst/issues/141)) ([c1158b4](https://github.com/coalesce-labs/catalyst/commit/c1158b46bd4c62995346e224afa3ede928fad6c0))
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** unwrap SSE event envelope in orch-monitor React UI ([#137](https://github.com/coalesce-labs/catalyst/issues/137)) ([8e2e433](https://github.com/coalesce-labs/catalyst/commit/8e2e43335a354b31c095edbb504cb84357d2efc7))
 
-## [6.25.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.24.0...catalyst-dev-v6.25.0) (2026-04-15)
+## [6.25.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.24.0...catalyst-dev-v6.25.0) (Apr 15, 2026)
 
 <!-- ai-enhanced -->
 
@@ -169,11 +169,11 @@ The orchestration monitor is now a React SPA with shimmer loading, worker search
 
 
 
-### Features
+### PRs
 
 * **dev:** migrate orch-monitor to React SPA with modern SaaS UI ([#135](https://github.com/coalesce-labs/catalyst/issues/135)) ([0790005](https://github.com/coalesce-labs/catalyst/commit/0790005962f46e98263fe983d346107aec2b5a7f))
 
-## [6.24.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.23.0...catalyst-dev-v6.24.0) (2026-04-14)
+## [6.24.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.23.0...catalyst-dev-v6.24.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -183,11 +183,11 @@ The orchestration monitor now organizes sessions by workspace and repository, au
 
 
 
-### Features
+### PRs
 
 * **dev:** add workspace/repo grouping to orch-monitor dashboard ([#132](https://github.com/coalesce-labs/catalyst/issues/132)) ([3c88247](https://github.com/coalesce-labs/catalyst/commit/3c882476cb3530537506ec4bf8f6fcf205287597))
 
-## [6.23.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.22.0...catalyst-dev-v6.23.0) (2026-04-14)
+## [6.23.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.22.0...catalyst-dev-v6.23.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -197,11 +197,11 @@ Added keyboard navigation (j/k, Enter, Esc), command palette (/ or Cmd+K), sideb
 
 
 
-### Features
+### PRs
 
 * **dev:** Linear-inspired SaaS UI polish for orch-monitor ([#131](https://github.com/coalesce-labs/catalyst/issues/131)) ([0760882](https://github.com/coalesce-labs/catalyst/commit/07608823b79020d06ba97bae3fb6c578046a289e))
 
-## [6.22.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.21.0...catalyst-dev-v6.22.0) (2026-04-14)
+## [6.22.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.21.0...catalyst-dev-v6.22.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -211,11 +211,11 @@ The orchestration monitor now includes a Metrics tab with real-time charts showi
 
 
 
-### Features
+### PRs
 
 * **dev:** add OTel-powered metrics panels to monitor UI ([#126](https://github.com/coalesce-labs/catalyst/issues/126)) ([014ede1](https://github.com/coalesce-labs/catalyst/commit/014ede1e5d697b37ed9d6f557739f6167c8d9e11))
 
-## [6.21.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.20.0...catalyst-dev-v6.21.0) (2026-04-14)
+## [6.21.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.20.0...catalyst-dev-v6.21.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -225,11 +225,11 @@ The orchestration monitor now detects and displays preview deployment URLs from 
 
 
 
-### Features
+### PRs
 
 * **dev:** add preview deployment links to orch-monitor ([#125](https://github.com/coalesce-labs/catalyst/issues/125)) ([2400616](https://github.com/coalesce-labs/catalyst/commit/2400616a424baa6987c639a6397dd061152b5d86))
 
-## [6.20.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.19.0...catalyst-dev-v6.20.0) (2026-04-14)
+## [6.20.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.19.0...catalyst-dev-v6.20.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -239,11 +239,11 @@ Run `catalyst monitor --terminal` to get a real-time terminal dashboard alongsid
 
 
 
-### Features
+### PRs
 
 * **dev:** terminal UI monitor frontend ([#124](https://github.com/coalesce-labs/catalyst/issues/124)) ([cd7240a](https://github.com/coalesce-labs/catalyst/commit/cd7240a2ce6a69e10220527598d5a0fe4d4e90b3))
 
-## [6.19.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.18.0...catalyst-dev-v6.19.0) (2026-04-14)
+## [6.19.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.18.0...catalyst-dev-v6.19.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -253,11 +253,11 @@ Add display names, flags, notes, and tags to any session or orchestrator through
 
 
 
-### Features
+### PRs
 
 * **dev:** add session & orchestrator annotations ([#112](https://github.com/coalesce-labs/catalyst/issues/112)) ([adf331c](https://github.com/coalesce-labs/catalyst/commit/adf331c6be3e2ee1046cf79ffae1b90b7de1d1a1))
 
-## [6.18.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.17.0...catalyst-dev-v6.18.0) (2026-04-14)
+## [6.18.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.17.0...catalyst-dev-v6.18.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -267,11 +267,11 @@ Query Prometheus metrics and Loki logs directly from the orchestration monitor w
 
 
 
-### Features
+### PRs
 
 * **dev:** add OTel query integration (Prometheus + Loki) ([#106](https://github.com/coalesce-labs/catalyst/issues/106)) ([111156d](https://github.com/coalesce-labs/catalyst/commit/111156dabf3f86197fa2e8f99ec69c2d9ea6ca57))
 
-## [6.17.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.16.0...catalyst-dev-v6.17.0) (2026-04-14)
+## [6.17.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.16.0...catalyst-dev-v6.17.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -281,11 +281,11 @@ The orchestration monitor now includes an optional AI briefing panel that genera
 
 
 
-### Features
+### PRs
 
 * **dev:** add AI-powered status briefing to orch-monitor ([#107](https://github.com/coalesce-labs/catalyst/issues/107)) ([67ed25c](https://github.com/coalesce-labs/catalyst/commit/67ed25c73220c08741a5a666e8c77e39185296b5))
 
-## [6.16.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.15.1...catalyst-dev-v6.16.0) (2026-04-14)
+## [6.16.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.15.1...catalyst-dev-v6.16.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -295,11 +295,11 @@ Click any worker row in the orch-monitor to open a dedicated session page with p
 
 
 
-### Features
+### PRs
 
 * **dev:** add single-session detail view to orch-monitor ([#110](https://github.com/coalesce-labs/catalyst/issues/110)) ([562898b](https://github.com/coalesce-labs/catalyst/commit/562898b8e7342ba0a3fe07af31b32165b54b9e9d))
 
-## [6.15.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.15.0...catalyst-dev-v6.15.1) (2026-04-14)
+## [6.15.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.15.0...catalyst-dev-v6.15.1) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -309,11 +309,11 @@ The orchestration monitor now filters out ghost worker rows caused by output fil
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** filter ghost worker rows + fix orch-monitor cost tracking ([#114](https://github.com/coalesce-labs/catalyst/issues/114)) ([9eb336c](https://github.com/coalesce-labs/catalyst/commit/9eb336c1ae73eff463b259d93a09907965508764))
 
-## [6.15.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.14.0...catalyst-dev-v6.15.0) (2026-04-14)
+## [6.15.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.14.0...catalyst-dev-v6.15.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -323,11 +323,11 @@ Navigate to `/history` in the monitor dashboard to explore session analytics wit
 
 
 
-### Features
+### PRs
 
 * **dev:** historical analytics & session querying (CTL-44) ([#113](https://github.com/coalesce-labs/catalyst/issues/113)) ([edaaf4b](https://github.com/coalesce-labs/catalyst/commit/edaaf4b761c78886672c917add3316116f3d30f4))
 
-## [6.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.13.0...catalyst-dev-v6.14.0) (2026-04-14)
+## [6.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.13.0...catalyst-dev-v6.14.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -337,11 +337,11 @@ Run `catalyst-monitor start` to launch the orchestration monitor in the backgrou
 
 
 
-### Features
+### PRs
 
 * **dev:** add catalyst-monitor CLI for zero-config monitoring ([#109](https://github.com/coalesce-labs/catalyst/issues/109)) ([9db0fa5](https://github.com/coalesce-labs/catalyst/commit/9db0fa58ac6f073fc4a065d090013fdf4ed4d7c4))
 
-## [6.13.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.12.0...catalyst-dev-v6.13.0) (2026-04-14)
+## [6.13.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.12.0...catalyst-dev-v6.13.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -351,11 +351,11 @@ Add meaningful display names to Claude sessions using the optional `label` field
 
 
 
-### Features
+### PRs
 
 * **dev:** add session labeling system to orch-monitor ([#105](https://github.com/coalesce-labs/catalyst/issues/105)) ([bf6c3f6](https://github.com/coalesce-labs/catalyst/commit/bf6c3f691b5971403fbe81ce62f3e82fbbcf3c22))
 
-## [6.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.11.0...catalyst-dev-v6.12.0) (2026-04-14)
+## [6.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.11.0...catalyst-dev-v6.12.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -365,11 +365,11 @@ Catalyst now sends all orchestration events through a standardized envelope form
 
 
 
-### Features
+### PRs
 
 * **dev:** SSE event architecture for multiple frontends ([#111](https://github.com/coalesce-labs/catalyst/issues/111)) ([6433182](https://github.com/coalesce-labs/catalyst/commit/64331824c5a8ee4029becfe1fafdd0a19181a201))
 
-## [6.11.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.10.0...catalyst-dev-v6.11.0) (2026-04-14)
+## [6.11.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.10.0...catalyst-dev-v6.11.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -379,11 +379,11 @@ All six Catalyst skills now automatically track their execution as observable se
 
 
 
-### Features
+### PRs
 
 * **dev:** instrument 6 skills with catalyst-session tracking ([#104](https://github.com/coalesce-labs/catalyst/issues/104)) ([5f537a6](https://github.com/coalesce-labs/catalyst/commit/5f537a6a0bb93abbee63a8fe19613d79e5303021))
 
-## [6.10.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.9.0...catalyst-dev-v6.10.0) (2026-04-14)
+## [6.10.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.9.0...catalyst-dev-v6.10.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -393,11 +393,11 @@ Solo Claude Code sessions now appear directly in the orchestration monitor along
 
 
 
-### Features
+### PRs
 
 * **dev:** SQLite reader and unified data source for orch-monitor (CTL-40) ([#101](https://github.com/coalesce-labs/catalyst/issues/101)) ([6bd8238](https://github.com/coalesce-labs/catalyst/commit/6bd8238f5ba3a7333170a9b9412ce01abbda365e))
 
-## [6.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.8.0...catalyst-dev-v6.9.0) (2026-04-14)
+## [6.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.8.0...catalyst-dev-v6.9.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -407,11 +407,11 @@ The new `catalyst-session` command gives any skill a universal interface to repo
 
 
 
-### Features
+### PRs
 
 * **dev:** catalyst-session lifecycle CLI (CTL-37) ([#100](https://github.com/coalesce-labs/catalyst/issues/100)) ([9b7fae2](https://github.com/coalesce-labs/catalyst/commit/9b7fae2b16535c66c97b8a76ba68fb57a9b9d32f))
 
-## [6.8.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.7.0...catalyst-dev-v6.8.0) (2026-04-14)
+## [6.8.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.7.0...catalyst-dev-v6.8.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -421,11 +421,11 @@ Catalyst now persists all agent activity—both solo and orchestrated sessions�
 
 
 
-### Features
+### PRs
 
 * **dev:** SQLite session store for agent activity (CTL-36) ([#97](https://github.com/coalesce-labs/catalyst/issues/97)) ([74bb43d](https://github.com/coalesce-labs/catalyst/commit/74bb43d5a5e4e0be27bab79b2cdfadd4e2e5299b))
 
-## [6.7.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.6.0...catalyst-dev-v6.7.0) (2026-04-14)
+## [6.7.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.6.0...catalyst-dev-v6.7.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -435,11 +435,11 @@ The orchestrator now reserves sequential Supabase migration numbers for database
 
 
 
-### Features
+### PRs
 
 * **dev:** pre-assign Supabase migration numbers per wave (CTL-29) ([#95](https://github.com/coalesce-labs/catalyst/issues/95)) ([84a6f84](https://github.com/coalesce-labs/catalyst/commit/84a6f8471abd49879b0ffb56f4eeda897e96864f))
 
-## [6.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.4...catalyst-dev-v6.6.0) (2026-04-14)
+## [6.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.4...catalyst-dev-v6.6.0) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -449,11 +449,11 @@ Two new orchestration patterns handle post-merge issues: fix-up workers push tar
 
 
 
-### Features
+### PRs
 
 * **dev:** orchestrate fix-up worker + follow-up ticket recovery patterns (CTL-30) ([#93](https://github.com/coalesce-labs/catalyst/issues/93)) ([bfa9861](https://github.com/coalesce-labs/catalyst/commit/bfa9861b126d2163cae2d643b659237506ba40f7))
 
-## [6.5.4](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.3...catalyst-dev-v6.5.4) (2026-04-14)
+## [6.5.4](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.3...catalyst-dev-v6.5.4) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -463,11 +463,11 @@ Workers now exit cleanly after opening PRs with auto-merge armed, while the orch
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** orchestrator-owned poll-until-MERGED (CTL-31) ([#91](https://github.com/coalesce-labs/catalyst/issues/91)) ([2da8f69](https://github.com/coalesce-labs/catalyst/commit/2da8f697dafcf9c878bf3fd1760d90ca34ff44c1))
 
-## [6.5.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.2...catalyst-dev-v6.5.3) (2026-04-14)
+## [6.5.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.2...catalyst-dev-v6.5.3) (Apr 14, 2026)
 
 <!-- ai-enhanced -->
 
@@ -477,11 +477,11 @@ Fixed ticket extraction in worker worktrees so branches like `orch-data-import-2
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** worker worktrees get correct currentTicket + orchestration field ([#89](https://github.com/coalesce-labs/catalyst/issues/89)) ([4768eac](https://github.com/coalesce-labs/catalyst/commit/4768eac0b4cb87bf074088ca232b29cf72486836))
 
-## [6.5.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.1...catalyst-dev-v6.5.2) (2026-04-13)
+## [6.5.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.1...catalyst-dev-v6.5.2) (Apr 13, 2026)
 
 <!-- ai-enhanced -->
 
@@ -491,11 +491,11 @@ Orchestrated workers now actively poll PR state, CI status, and review comments 
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** add poll-until-merged loop and PR state verification ([#86](https://github.com/coalesce-labs/catalyst/issues/86)) ([666b835](https://github.com/coalesce-labs/catalyst/commit/666b8356ede7c4e1322a0f27bdb9f39c2921caea))
 
-## [6.5.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.0...catalyst-dev-v6.5.1) (2026-04-13)
+## [6.5.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.5.0...catalyst-dev-v6.5.1) (Apr 13, 2026)
 
 <!-- ai-enhanced -->
 
@@ -505,11 +505,11 @@ Removed duplicated Linear CLI commands from 8 files, making the linearis skill t
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** DRY linearis CLI commands, fix setup false positive ([#84](https://github.com/coalesce-labs/catalyst/issues/84)) ([68115ac](https://github.com/coalesce-labs/catalyst/commit/68115acd8168e14683a4a079b0cc42b7f2a763b7))
 
-## [6.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.4.2...catalyst-dev-v6.5.0) (2026-04-13)
+## [6.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.4.2...catalyst-dev-v6.5.0) (Apr 13, 2026)
 
 <!-- ai-enhanced -->
 
@@ -519,11 +519,11 @@ Live dashboard tracks your orchestrator runs in real-time with worker status, ph
 
 
 
-### Features
+### PRs
 
 * **dev:** add orch-monitor with live dashboard and analytics ([#82](https://github.com/coalesce-labs/catalyst/issues/82)) ([75f025a](https://github.com/coalesce-labs/catalyst/commit/75f025a88a411882a0f4be45b94033e681c8d27c))
 
-## [6.4.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.4.1...catalyst-dev-v6.4.2) (2026-04-13)
+## [6.4.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.4.1...catalyst-dev-v6.4.2) (Apr 13, 2026)
 
 <!-- ai-enhanced -->
 
@@ -533,11 +533,11 @@ Remove hardcoded CLI commands across 12 skills in favor of referencing the linea
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** DRY linearis across all skills, fix direnv timing and [@me](https://github.com/me) bug ([#80](https://github.com/coalesce-labs/catalyst/issues/80)) ([58e0a7b](https://github.com/coalesce-labs/catalyst/commit/58e0a7b14a423429fbb6f2de244f1e2f930dc89d))
 
-## [6.4.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.4.0...catalyst-dev-v6.4.1) (2026-04-13)
+## [6.4.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.4.0...catalyst-dev-v6.4.1) (Apr 13, 2026)
 
 <!-- ai-enhanced -->
 
@@ -547,11 +547,11 @@ The `setup-orchestrate` command now runs without any prompts or menus — just p
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** tighten setup-orchestrate to zero-interaction ([#78](https://github.com/coalesce-labs/catalyst/issues/78)) ([2299917](https://github.com/coalesce-labs/catalyst/commit/229991717bb022beee8bcb19679519137c84a003))
 
-## [6.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.3.0...catalyst-dev-v6.4.0) (2026-04-13)
+## [6.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.3.0...catalyst-dev-v6.4.0) (Apr 13, 2026)
 
 <!-- ai-enhanced -->
 
@@ -561,11 +561,11 @@ The new `/catalyst-dev:setup-orchestrate` skill creates a bootstrapped orchestra
 
 
 
-### Features
+### PRs
 
 * **dev:** add setup-orchestrate skill and inline worktree trust ([#76](https://github.com/coalesce-labs/catalyst/issues/76)) ([86b138e](https://github.com/coalesce-labs/catalyst/commit/86b138ecd8af0d8b1b674e2ebcbecc5d705d70a8))
 
-## [6.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.2.0...catalyst-dev-v6.3.0) (2026-04-13)
+## [6.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.2.0...catalyst-dev-v6.3.0) (Apr 13, 2026)
 
 <!-- ai-enhanced -->
 
@@ -575,19 +575,19 @@ All active orchestrators are now tracked in a queryable global state registry wi
 
 
 
-### Features
+### PRs
 
 * **dev:** add global orchestrator state, event log, and token tracking ([#70](https://github.com/coalesce-labs/catalyst/issues/70)) ([9f45afa](https://github.com/coalesce-labs/catalyst/commit/9f45afa0f85823f5fbeea6dd27d175ce00b1e1d2))
 * **dev:** enforce post-PR monitoring and merge completion ([#74](https://github.com/coalesce-labs/catalyst/issues/74)) ([83b0ee2](https://github.com/coalesce-labs/catalyst/commit/83b0ee2b3fcc75b4149fce5aba5e1715d314557b))
 * **dev:** update linearis skill for v2026.4.4 ([#72](https://github.com/coalesce-labs/catalyst/issues/72)) ([05237da](https://github.com/coalesce-labs/catalyst/commit/05237dabfb056f4dc9457af47d83dec12aa85c81))
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** add fully-qualified plugin prefixes to skill references ([#69](https://github.com/coalesce-labs/catalyst/issues/69)) ([f9e69f2](https://github.com/coalesce-labs/catalyst/commit/f9e69f29ce7021997f4fba17b1c2bb88e1b62b69))
 * **dev:** initialize workflow context and OTEL ticket early ([#73](https://github.com/coalesce-labs/catalyst/issues/73)) ([3406c30](https://github.com/coalesce-labs/catalyst/commit/3406c3099d1e6fcbf9604e9d66649e6e3fbd423e))
 
-## [6.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.1.0...catalyst-dev-v6.2.0) (2026-04-11)
+## [6.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.1.0...catalyst-dev-v6.2.0) (Apr 11, 2026)
 
 <!-- ai-enhanced -->
 
@@ -597,11 +597,11 @@ The merge-pr skill now queries GitHub's full merge state to identify specific bl
 
 
 
-### Features
+### PRs
 
 * **dev:** smart merge blocker diagnosis and review thread resolution ([#67](https://github.com/coalesce-labs/catalyst/issues/67)) ([ae74a74](https://github.com/coalesce-labs/catalyst/commit/ae74a749c9f1cd846fb91ba5124fb0db3685c17c))
 
-## [6.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.0.0...catalyst-dev-v6.1.0) (2026-04-10)
+## [6.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.0.0...catalyst-dev-v6.1.0) (Apr 10, 2026)
 
 <!-- ai-enhanced -->
 
@@ -611,11 +611,11 @@ The new `/orchestrate` skill coordinates multiple development tasks simultaneous
 
 
 
-### Features
+### PRs
 
 * **dev:** add /orchestrate skill for parallel development ([#65](https://github.com/coalesce-labs/catalyst/issues/65)) ([d3f16d9](https://github.com/coalesce-labs/catalyst/commit/d3f16d93674c7322cba4a2aa076a622e08a9d854))
 
-## [6.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.4.0...catalyst-dev-v6.0.0) (2026-04-10)
+## [6.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.4.0...catalyst-dev-v6.0.0) (Apr 10, 2026)
 
 <!-- ai-enhanced -->
 
@@ -629,11 +629,11 @@ Catalyst workflow state now lives in `.catalyst/` instead of `.claude/`, keeping
 
 * **dev:** migrate workflow state from .claude/ to .catalyst/ ([#63](https://github.com/coalesce-labs/catalyst/issues/63))
 
-### Features
+### PRs
 
 * **dev:** migrate workflow state from .claude/ to .catalyst/ ([#63](https://github.com/coalesce-labs/catalyst/issues/63)) ([114c7c4](https://github.com/coalesce-labs/catalyst/commit/114c7c47734574d552f932fa41902e5adb819283))
 
-## [5.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.3.0...catalyst-dev-v5.4.0) (2026-04-09)
+## [5.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.3.0...catalyst-dev-v5.4.0) (Apr 9, 2026)
 
 <!-- ai-enhanced -->
 
@@ -643,11 +643,11 @@ New `/validate-type-safety` and `/review-comments` skills join enhanced versions
 
 
 
-### Features
+### PRs
 
 * **dev:** dev skills v2 — quality gates, new skills, and shipping enhancements ([#60](https://github.com/coalesce-labs/catalyst/issues/60)) ([70a2d8d](https://github.com/coalesce-labs/catalyst/commit/70a2d8d0dab401841fcc9acf26e4da9932edae57))
 
-## [5.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.2.0...catalyst-dev-v5.3.0) (2026-04-04)
+## [5.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.2.0...catalyst-dev-v5.3.0) (Apr 4, 2026)
 
 <!-- ai-enhanced -->
 
@@ -657,16 +657,16 @@ Claude plugins now enforce Test-Driven Development across all planning and imple
 
 
 
-### Features
+### PRs
 
 * **dev:** integrate Test-Driven Development (TDD) methodology across planning and implementation skills ([#50](https://github.com/coalesce-labs/catalyst/issues/50)) ([1083117](https://github.com/coalesce-labs/catalyst/commit/108311720eb59fed87570233a94abe748fc970b1))
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** ensure workflow context is created and used properly ([#52](https://github.com/coalesce-labs/catalyst/issues/52)) ([b9cf5f5](https://github.com/coalesce-labs/catalyst/commit/b9cf5f5e30233bbabb5ff838a38c6f68328c18af))
 
-## [5.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.1.1...catalyst-dev-v5.2.0) (2026-04-01)
+## [5.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.1.1...catalyst-dev-v5.2.0) (Apr 1, 2026)
 
 <!-- ai-enhanced -->
 
@@ -676,11 +676,11 @@ The dev plugin now generates Obsidian-style `[[filename]]` wiki-links in skill t
 
 
 
-### Features
+### PRs
 
 * **dev,pm:** wiki-links and PM thoughts path restructuring ([#47](https://github.com/coalesce-labs/catalyst/issues/47)) ([fb32e36](https://github.com/coalesce-labs/catalyst/commit/fb32e3622619bfd317c02150565b107158d57746))
 
-## [5.1.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.1.0...catalyst-dev-v5.1.1) (2026-03-25)
+## [5.1.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.1.0...catalyst-dev-v5.1.1) (Mar 25, 2026)
 
 <!-- ai-enhanced -->
 
@@ -690,11 +690,11 @@ Updates the linearis CLI dependency to v2025.12.3 and fixes command syntax acros
 
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** upgrade linearis CLI and fix skill command syntax ([#41](https://github.com/coalesce-labs/catalyst/issues/41)) ([ffbc14c](https://github.com/coalesce-labs/catalyst/commit/ffbc14c487537bf70805880b39905643e0c56df5))
 
-## [5.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.0.0...catalyst-dev-v5.1.0) (2026-03-23)
+## [5.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v5.0.0...catalyst-dev-v5.1.0) (Mar 23, 2026)
 
 <!-- ai-enhanced -->
 
@@ -704,16 +704,16 @@ The `/create-pr` and `/merge-pr` skills now suggest using `/loop` to monitor Git
 
 
 
-### Features
+### PRs
 
 * **dev:** remove Railway integration, add /loop workflow monitoring ([#30](https://github.com/coalesce-labs/catalyst/issues/30)) ([d7df8f2](https://github.com/coalesce-labs/catalyst/commit/d7df8f261ae05abd528d54d695df340b83147d30))
 
 
-### Bug Fixes
+### PRs
 
 * **dev:** fix release-please pipeline + add health monitoring ([#32](https://github.com/coalesce-labs/catalyst/issues/32)) ([cd7054c](https://github.com/coalesce-labs/catalyst/commit/cd7054c591afad61d307a11456855ad397257de3))
 
-## [5.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v4.2.0...catalyst-dev-v5.0.0) (2026-03-20)
+## [5.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v4.2.0...catalyst-dev-v5.0.0) (Mar 20, 2026)
 
 <!-- ai-enhanced -->
 
@@ -727,7 +727,7 @@ Catalyst now automatically tracks research-to-plan-to-implementation lineage via
 
 * Configuration must now be nested under 'catalyst' key
 
-### Features
+### PRs
 
 * automatic workflow context tracking + smart setup with token discovery ([53b3d38](https://github.com/coalesce-labs/catalyst/commit/53b3d389d7b633721d33d047ff70c31e8c006996))
 * **dev:** add agent-browser skill for browser automation ([#16](https://github.com/coalesce-labs/catalyst/issues/16)) ([651241b](https://github.com/coalesce-labs/catalyst/commit/651241bfe9f559fde0f6ae1566d8bed7e6616e94))
@@ -742,7 +742,7 @@ Catalyst now automatically tracks research-to-plan-to-implementation lineage via
 * restructure to 4-plugin architecture with session-aware MCP management ([08f1ec1](https://github.com/coalesce-labs/catalyst/commit/08f1ec1bdd552917c7d29ea8e917be1b8531342f))
 
 
-### Bug Fixes
+### PRs
 
 * add namespace prefixes to all slash command references ([099bec9](https://github.com/coalesce-labs/catalyst/commit/099bec9f024594545946dbf8cba78033eb5b0cf6))
 * correct linearis CLI syntax across all agents and commands ([63ff171](https://github.com/coalesce-labs/catalyst/commit/63ff171dfabdc45c32c94b7e12c8c2aea95bcf06))
@@ -759,7 +759,7 @@ Catalyst now automatically tracks research-to-plan-to-implementation lineage via
 
 * bump versions for breaking config namespace change ([9a3f63b](https://github.com/coalesce-labs/catalyst/commit/9a3f63b70c119f7a019116788e6ba0c65b32aa04))
 
-## [4.2.0](https://github.com/coalesce-labs/catalyst/compare/e494235...HEAD) (2026-03-17)
+## [4.2.0](https://github.com/coalesce-labs/catalyst/compare/e494235...HEAD) (Mar 17, 2026)
 
 <!-- ai-enhanced -->
 
@@ -768,12 +768,12 @@ Catalyst now automatically tracks research-to-plan-to-implementation lineage via
 Claude can now automate web browsers through the new agent-browser skill, handling authentication flows and UI testing automatically when you mention browser tasks. Linear workflows get smoother with automatic ticket state transitions during planning and implementation, plus better team UUID resolution to prevent silent team-switching bugs. All config files now use the canonical `catalyst`-wrapped structure for consistency.
 
 
-### Features
+### PRs
 
 * add agent-browser skill for browser automation ([#16](https://github.com/coalesce-labs/catalyst/pull/16)) ([651241b](https://github.com/coalesce-labs/catalyst/commit/651241b))
 * oneshot Linear states and config normalization ([#17](https://github.com/coalesce-labs/catalyst/pull/17)) ([c0881bb](https://github.com/coalesce-labs/catalyst/commit/c0881bb))
 
-### Bug Fixes
+### PRs
 
 * **linearis:** correct --team flag docs and add UUID resolution ([#18](https://github.com/coalesce-labs/catalyst/pull/18)) ([050205c](https://github.com/coalesce-labs/catalyst/commit/050205c))
 
