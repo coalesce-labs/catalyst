@@ -59,7 +59,7 @@
 
 /* AI release title: big, bold — the headline users scan */
 .sl-markdown-content h2 + h3 {
-  font-size: var(--sl-text-2xl);
+  font-size: var(--sl-text-h2);
   font-weight: 700;
   color: var(--sl-color-white);
   margin-top: 0.25rem;
