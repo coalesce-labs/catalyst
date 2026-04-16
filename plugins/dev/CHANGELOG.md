@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.37.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.1...catalyst-dev-v6.37.2) (2026-04-16)
+
+
+### Bug Fixes
+
+* **dev:** claude-only worker dispatch with cd subshell (CTL-58, CTL-35) ([#179](https://github.com/coalesce-labs/catalyst/issues/179)) ([1bf3f62](https://github.com/coalesce-labs/catalyst/commit/1bf3f62e0b2ff3fe8a641dd03fb17f34c0a2da4e))
+
 ## [6.37.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.0...catalyst-dev-v6.37.1)
 
 Apr 16, 2026
