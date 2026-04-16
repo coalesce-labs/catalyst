@@ -1,9 +1,18 @@
 # Changelog
 
-## [7.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.2.0...catalyst-dev-v7.3.0) (2026-04-16)
+## [7.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.2.0...catalyst-dev-v7.3.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### API Stream Idle Detection
+
+Workers now recover immediately when hitting Claude API stream idle timeouts, instead of waiting up to 15 minutes for heartbeat staleness detection. Linear ticket states automatically transition when PRs are merged, with retroactive reconciliation available via `orchestrate-bulk-close` for tickets that stayed in "In Review" after successful merges.
 
 
-### Features
+
+### PRs
 
 * **dev:** detect API stream idle timeout in orchestrate-revive (CTL-62) ([#196](https://github.com/coalesce-labs/catalyst/issues/196)) ([b89e342](https://github.com/coalesce-labs/catalyst/commit/b89e342c9103d2324cb47f1478a54005da4e14bb))
 * **dev:** drive Linear ticket state transitions on PR merge (CTL-69) ([#197](https://github.com/coalesce-labs/catalyst/issues/197)) ([dc58f32](https://github.com/coalesce-labs/catalyst/commit/dc58f3293c8c76d31951a55af92ffc738bbf6be1))
