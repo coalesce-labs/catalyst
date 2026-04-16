@@ -1,5 +1,22 @@
 # Changelog
 
+## [7.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.39.1...catalyst-dev-v7.0.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Orchestration State Isolation
+
+Orchestrator runtime state now lives in `~/catalyst/runs/<orch-id>/` instead of git worktrees, keeping your worktree clean during runs. Output files move to `workers/output/` to reduce noise, while worker signal files stay in their expected locations. The monitor automatically handles both new runs-based and legacy worktree-based orchestrators.
+
+
+
+### PRs
+
+* **dev:** decouple orch state from worktrees — runs/ dir (CTL-59) ([#188](https://github.com/coalesce-labs/catalyst/issues/188))
+* **dev:** decouple orch state from worktrees — runs/ dir (CTL-59) ([#188](https://github.com/coalesce-labs/catalyst/issues/188)) ([a357eaa](https://github.com/coalesce-labs/catalyst/commit/a357eaad59b3684b72515c69e43e37edbbc34778))
+
 ## [6.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.39.0...catalyst-dev-v6.39.1)
 
 Apr 16, 2026
