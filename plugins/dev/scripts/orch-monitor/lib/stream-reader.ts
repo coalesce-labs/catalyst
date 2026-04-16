@@ -22,7 +22,7 @@ export interface WorkerActivity {
   taskSummary?: TaskSummary | null;
 }
 
-export interface StreamEvent {
+interface StreamEvent {
   ts: number;
   type:
     | "tool_start"

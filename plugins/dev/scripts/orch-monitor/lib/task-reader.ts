@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
-export interface WorkerTask {
+interface WorkerTask {
   id: string;
   subject: string;
   description?: string;
@@ -13,7 +13,7 @@ export interface WorkerTask {
   owner?: string;
 }
 
-export interface WorkerTaskList {
+interface WorkerTaskList {
   sessionId: string;
   tasks: WorkerTask[];
   total: number;
