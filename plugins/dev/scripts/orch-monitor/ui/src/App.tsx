@@ -7,6 +7,7 @@ import { SessionDetailDrawer } from "./components/session-detail-drawer";
 import { ConnectionBanner } from "./components/ui/connection-banner";
 import { SkeletonDashboard } from "./components/ui/skeleton";
 import { ChevronRight, Home, PanelLeftClose, PanelLeft } from "lucide-react";
+import type { GroupingMode } from "./lib/grouping";
 
 const Dashboard = lazy(() =>
   import("./components/dashboard").then((m) => ({ default: m.Dashboard })),
@@ -32,7 +33,15 @@ export default function App() {
   const [selectedOrchId, setSelectedOrchId] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [groupingMode, setGroupingMode] = useState<GroupingMode>(
+    () => (localStorage.getItem("catalyst-sidebar-grouping") as GroupingMode) || "flat",
+  );
   const [version, setVersion] = useState<string | null>(null);
+
+  const handleGroupingChange = useCallback((mode: GroupingMode) => {
+    setGroupingMode(mode);
+    localStorage.setItem("catalyst-sidebar-grouping", mode);
+  }, []);
 
   useEffect(() => {
     fetch("/api/version")
@@ -86,6 +95,8 @@ export default function App() {
         attentionCount={attention.length}
         collapsed={!sidebarOpen}
         onToggle={() => setSidebarOpen((o) => !o)}
+        groupingMode={groupingMode}
+        onGroupingModeChange={handleGroupingChange}
       />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
