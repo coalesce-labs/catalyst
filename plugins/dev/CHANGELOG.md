@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.2.0...catalyst-dev-v7.3.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** detect API stream idle timeout in orchestrate-revive (CTL-62) ([#196](https://github.com/coalesce-labs/catalyst/issues/196)) ([b89e342](https://github.com/coalesce-labs/catalyst/commit/b89e342c9103d2324cb47f1478a54005da4e14bb))
+* **dev:** drive Linear ticket state transitions on PR merge (CTL-69) ([#197](https://github.com/coalesce-labs/catalyst/issues/197)) ([dc58f32](https://github.com/coalesce-labs/catalyst/commit/dc58f3293c8c76d31951a55af92ffc738bbf6be1))
+
 ## [7.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.1.1...catalyst-dev-v7.2.0)
 
 Apr 16, 2026
