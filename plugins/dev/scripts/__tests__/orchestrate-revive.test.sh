@@ -222,6 +222,151 @@ REVIVED=$(echo "$OUT" | jq -r '.revived')
 [ "$REVIVED" = "1" ] && pass "summary.revived = 1" || fail "summary.revived" "got: $REVIVED"
 scratch_teardown
 
+# ─── CTL-62: API stream idle timeout detection ───────────────────────────────
+
+# write_stream_api_error TICKET SESSION_ID ERROR_UUID [MESSAGE]
+# Appends an init event, one assistant turn, and a final `result` event with
+# is_error=true + an api_error_status that mentions a stream idle timeout.
+write_stream_api_error() {
+  local ticket="$1" sid="$2" err_uuid="$3"
+  local msg="${4:-API Error: Stream idle timeout - partial response received}"
+  local stream="${ORCH_DIR}/workers/output/${ticket}-stream.jsonl"
+  mkdir -p "$(dirname "$stream")"
+  {
+    printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$sid"
+    printf '{"type":"assistant","session_id":"%s","uuid":"turn-1"}\n' "$sid"
+    printf '{"type":"result","subtype":"error","is_error":true,"api_error_status":"%s","session_id":"%s","uuid":"%s"}\n' \
+      "$msg" "$sid" "$err_uuid"
+  } > "$stream"
+}
+
+echo "test: API stream idle timeout on live PID triggers revive"
+scratch_setup
+ALIVE_PID=$$
+make_signal "IDLE-1" "$ALIVE_PID" "implementing" 3
+write_stream_api_error "IDLE-1" "sess-idle-1" "err-uuid-1"
+run_revive > "${SCRATCH}/out" 2>&1
+REVIVE_COUNT=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/IDLE-1.json")
+REASON=$(jq -r '.lastReviveReason // ""' "${ORCH_DIR}/workers/IDLE-1.json")
+RECORDED_UUID=$(jq -r '.lastApiErrorUuid // ""' "${ORCH_DIR}/workers/IDLE-1.json")
+[ "$REVIVE_COUNT" = "1" ] && pass "api-idle: revived despite live PID + fresh heartbeat" \
+  || fail "api-idle: revived despite live PID + fresh heartbeat" "rc: $REVIVE_COUNT"
+[ "$REASON" = "api-stream-idle-timeout" ] && pass "api-idle: lastReviveReason recorded" \
+  || fail "api-idle: lastReviveReason recorded" "got: $REASON"
+[ "$RECORDED_UUID" = "err-uuid-1" ] && pass "api-idle: lastApiErrorUuid recorded" \
+  || fail "api-idle: lastApiErrorUuid recorded" "got: $RECORDED_UUID"
+grep -q "worker-revived" "$STATE_LOG" && pass "api-idle: revive event emitted" \
+  || fail "api-idle: revive event emitted" "log: $(cat "$STATE_LOG")"
+scratch_teardown
+
+echo "test: same API error uuid is NOT re-revived on a second pass"
+scratch_setup
+ALIVE_PID=$$
+make_signal "IDLE-2" "$ALIVE_PID" "implementing" 3
+write_stream_api_error "IDLE-2" "sess-idle-2" "err-uuid-2"
+# Simulate post-first-revive state directly: live PID + fresh heartbeat +
+# lastApiErrorUuid already recorded for this error event. Running revive now
+# must NOT trigger another revive, because the error has already been handled.
+jq --arg uuid "err-uuid-2" \
+   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+   '.lastApiErrorUuid = $uuid
+    | .reviveCount = 1
+    | .lastReviveReason = "api-stream-idle-timeout"
+    | .lastHeartbeat = $ts
+    | .updatedAt = $ts' \
+  "${ORCH_DIR}/workers/IDLE-2.json" > "${ORCH_DIR}/workers/IDLE-2.json.tmp" \
+  && mv "${ORCH_DIR}/workers/IDLE-2.json.tmp" "${ORCH_DIR}/workers/IDLE-2.json"
+run_revive > "${SCRATCH}/out" 2>&1
+SECOND_RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/IDLE-2.json")
+[ "$SECOND_RC" = "1" ] && pass "api-idle-dedup: same uuid not re-revived" \
+  || fail "api-idle-dedup: same uuid not re-revived" "rc: $SECOND_RC"
+[ ! -s "$CLAUDE_LOG" ] && pass "api-idle-dedup: claude not invoked" \
+  || fail "api-idle-dedup: claude not invoked" "log: $(cat "$CLAUDE_LOG")"
+scratch_teardown
+
+echo "test: new API error uuid after dedup state DOES trigger revive"
+scratch_setup
+ALIVE_PID=$$
+make_signal "IDLE-3" "$ALIVE_PID" "implementing" 3
+# Signal already saw err-uuid-old, but the stream now shows a NEW error event.
+write_stream_api_error "IDLE-3" "sess-idle-3" "err-uuid-new"
+jq --arg uuid "err-uuid-old" \
+   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+   '.lastApiErrorUuid = $uuid
+    | .reviveCount = 1
+    | .lastHeartbeat = $ts
+    | .updatedAt = $ts' \
+  "${ORCH_DIR}/workers/IDLE-3.json" > "${ORCH_DIR}/workers/IDLE-3.json.tmp" \
+  && mv "${ORCH_DIR}/workers/IDLE-3.json.tmp" "${ORCH_DIR}/workers/IDLE-3.json"
+run_revive > "${SCRATCH}/out" 2>&1
+RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/IDLE-3.json")
+RECORDED_UUID=$(jq -r '.lastApiErrorUuid // ""' "${ORCH_DIR}/workers/IDLE-3.json")
+[ "$RC" = "2" ] && pass "api-idle-new-uuid: fresh error re-triggers revive" \
+  || fail "api-idle-new-uuid: fresh error re-triggers revive" "rc: $RC"
+[ "$RECORDED_UUID" = "err-uuid-new" ] && pass "api-idle-new-uuid: lastApiErrorUuid updated" \
+  || fail "api-idle-new-uuid: lastApiErrorUuid updated" "got: $RECORDED_UUID"
+scratch_teardown
+
+echo "test: lastReviveReason = pid-dead for dead-PID revives"
+scratch_setup
+make_signal "REASON-DEAD" "$DEAD_PID" "implementing" 3
+write_stream_init "REASON-DEAD" "sess-reason-dead"
+run_revive > "${SCRATCH}/out" 2>&1
+REASON=$(jq -r '.lastReviveReason // ""' "${ORCH_DIR}/workers/REASON-DEAD.json")
+[ "$REASON" = "pid-dead" ] && pass "reason: pid-dead recorded" \
+  || fail "reason: pid-dead recorded" "got: $REASON"
+scratch_teardown
+
+echo "test: lastReviveReason = heartbeat-stale for stale-heartbeat revives"
+scratch_setup
+ALIVE_PID=$$
+make_signal "REASON-STALE" "$ALIVE_PID" "implementing" 3
+write_stream_init "REASON-STALE" "sess-reason-stale"
+OLD_TS=$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -u -d "30 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+jq --arg ts "$OLD_TS" '.updatedAt = $ts | .lastHeartbeat = $ts' \
+  "${ORCH_DIR}/workers/REASON-STALE.json" > "${ORCH_DIR}/workers/REASON-STALE.json.tmp" \
+  && mv "${ORCH_DIR}/workers/REASON-STALE.json.tmp" "${ORCH_DIR}/workers/REASON-STALE.json"
+run_revive --stale-heartbeat-seconds 900 > "${SCRATCH}/out" 2>&1
+REASON=$(jq -r '.lastReviveReason // ""' "${ORCH_DIR}/workers/REASON-STALE.json")
+[ "$REASON" = "heartbeat-stale" ] && pass "reason: heartbeat-stale recorded" \
+  || fail "reason: heartbeat-stale recorded" "got: $REASON"
+scratch_teardown
+
+echo "test: dry-run with API error detection does not mutate signal"
+scratch_setup
+ALIVE_PID=$$
+make_signal "IDLE-DRY" "$ALIVE_PID" "implementing" 3
+write_stream_api_error "IDLE-DRY" "sess-idle-dry" "err-uuid-dry"
+run_revive --dry-run > "${SCRATCH}/out" 2>&1
+RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/IDLE-DRY.json")
+UUID_RECORDED=$(jq -r '.lastApiErrorUuid // ""' "${ORCH_DIR}/workers/IDLE-DRY.json")
+[ "$RC" = "0" ] && pass "api-idle-dry: reviveCount unchanged" \
+  || fail "api-idle-dry: reviveCount unchanged" "rc: $RC"
+[ "$UUID_RECORDED" = "" ] && pass "api-idle-dry: lastApiErrorUuid not written" \
+  || fail "api-idle-dry: lastApiErrorUuid not written" "got: $UUID_RECORDED"
+[ ! -s "$CLAUDE_LOG" ] && pass "api-idle-dry: claude not invoked" \
+  || fail "api-idle-dry: claude not invoked"
+scratch_teardown
+
+echo "test: non-API is_error=true (e.g. tool error) does NOT trigger revive"
+scratch_setup
+ALIVE_PID=$$
+make_signal "TOOL-ERR" "$ALIVE_PID" "implementing" 3
+# Write a result event that is_error=true but has NO api_error_status and no
+# stream-idle-timeout marker — e.g. a test failure that ended the run cleanly.
+stream="${ORCH_DIR}/workers/output/TOOL-ERR-stream.jsonl"
+mkdir -p "$(dirname "$stream")"
+{
+  printf '{"type":"system","subtype":"init","session_id":"sess-tool-err"}\n'
+  printf '{"type":"result","subtype":"error","is_error":true,"api_error_status":null,"result":"Tests failed","session_id":"sess-tool-err","uuid":"tool-err-uuid"}\n'
+} > "$stream"
+run_revive > "${SCRATCH}/out" 2>&1
+RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/TOOL-ERR.json")
+[ "$RC" = "0" ] && pass "tool-error: non-API is_error does not revive" \
+  || fail "tool-error: non-API is_error does not revive" "rc: $RC"
+scratch_teardown
+
 # ─── Results ──────────────────────────────────────────────────────────────────
 
 echo ""
