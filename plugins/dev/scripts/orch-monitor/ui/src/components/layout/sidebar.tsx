@@ -11,7 +11,7 @@ import { SidebarGroup } from "../ui/sidebar-group";
 import { HealthIcon, StatusDot, ConnectionDot } from "../ui/status-dot";
 import { LayoutDashboard, ChevronRight, Terminal, Workflow } from "lucide-react";
 
-const GROUPING_MODES = ["flat", "repo"] as const;
+const GROUPING_MODES = ["flat", "repo", "ticket"] as const;
 
 interface SidebarProps {
   orchestrators: OrchestratorState[];

@@ -1,6 +1,6 @@
 import type { OrchestratorState, SessionState } from "./types";
 
-export type GroupingMode = "flat" | "repo";
+export type GroupingMode = "flat" | "repo" | "ticket";
 
 export interface SidebarGroup {
   key: string;
@@ -38,6 +38,58 @@ function sessionWorkspaceKey(
   return repoKey(cwd);
 }
 
+function groupByTicket(
+  orchestrators: OrchestratorState[],
+  activeSessions: SessionState[],
+  recentDead: SessionState[],
+): SidebarGroup[] {
+  const UNLINKED = "unlinked";
+  const map = new Map<string, SidebarGroup>();
+
+  const getOrCreate = (key: string): SidebarGroup => {
+    let group = map.get(key);
+    if (!group) {
+      group = {
+        key,
+        label: key === UNLINKED ? "Unlinked" : key,
+        orchestrators: [],
+        activeSessions: [],
+        recentDead: [],
+      };
+      map.set(key, group);
+    }
+    return group;
+  };
+
+  for (const orch of orchestrators) {
+    const workerTickets = Object.keys(orch.workers);
+    if (workerTickets.length === 0) {
+      getOrCreate(UNLINKED).orchestrators.push(orch);
+    } else {
+      for (const ticket of workerTickets) {
+        getOrCreate(ticket).orchestrators.push(orch);
+      }
+    }
+  }
+
+  for (const session of activeSessions) {
+    getOrCreate(session.ticket ?? UNLINKED).activeSessions.push(session);
+  }
+
+  for (const session of recentDead) {
+    getOrCreate(session.ticket ?? UNLINKED).recentDead.push(session);
+  }
+
+  const groups = Array.from(map.values());
+  groups.sort((a, b) => {
+    if (a.key === UNLINKED) return 1;
+    if (b.key === UNLINKED) return -1;
+    return a.key.localeCompare(b.key);
+  });
+
+  return groups;
+}
+
 export function groupSidebarItems(
   orchestrators: OrchestratorState[],
   activeSessions: SessionState[],
@@ -54,6 +106,10 @@ export function groupSidebarItems(
         recentDead,
       },
     ];
+  }
+
+  if (mode === "ticket") {
+    return groupByTicket(orchestrators, activeSessions, recentDead);
   }
 
   const orchParentToWorkspace = new Map<string, string>();

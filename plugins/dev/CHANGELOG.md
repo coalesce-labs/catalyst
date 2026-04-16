@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.33.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.32.0...catalyst-dev-v6.33.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** add sidebar grouping by Linear ticket ([#162](https://github.com/coalesce-labs/catalyst/issues/162)) ([d69aa05](https://github.com/coalesce-labs/catalyst/commit/d69aa05398fdae0a85d99530fea0b88fd8a16fa9))
+
 ## [6.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.31.0...catalyst-dev-v6.32.0) (2026-04-16)
 
 
