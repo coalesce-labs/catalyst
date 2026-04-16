@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.1.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.1.0...catalyst-dev-v7.1.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* **dev:** write worker cost to signal file in orchestrator (CTL-88) ([#190](https://github.com/coalesce-labs/catalyst/issues/190)) ([dbdb050](https://github.com/coalesce-labs/catalyst/commit/dbdb050de29a62fc6e9604579d2345bc32e13912))
+
 ## [7.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.0.0...catalyst-dev-v7.1.0)
 
 Apr 16, 2026
