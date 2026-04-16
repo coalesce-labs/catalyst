@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.3.0...catalyst-dev-v7.4.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Auto-Dispatch Fixup Workers
+
+Blocked PRs with unresolved review threads or failed checks now automatically trigger fixup workers after a 10-minute stabilization window, capping at 2 attempts before escalating to human attention. The orchestrator polls BLOCKED states alongside existing DIRTY/BEHIND handling, eliminating the need for manual intervention on stuck PRs. New signal tracking includes `blockedSince`, `fixupAttempts`, and `lastFixupDispatchedAt` for dashboard visibility.
+
+
+
+### PRs
+
+* **dev:** auto-dispatch fixup workers on BLOCKED PRs (CTL-64) ([#199](https://github.com/coalesce-labs/catalyst/issues/199)) ([77ef1b5](https://github.com/coalesce-labs/catalyst/commit/77ef1b5a80df8bcfb0dc5c07212a25b4554267c8))
+
 ## [7.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.2.0...catalyst-dev-v7.3.0)
 
 Apr 16, 2026
