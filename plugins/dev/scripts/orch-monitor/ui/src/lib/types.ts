@@ -155,6 +155,9 @@ export function sessionKind(s: SessionState): SessionKind {
   return "standalone";
 }
 
+export const SESSION_TIME_FILTERS = ["active", "1h", "24h", "48h", "all"] as const;
+export type SessionTimeFilter = (typeof SESSION_TIME_FILTERS)[number];
+
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting";
 export type TabId = "overview" | "workers" | "timeline" | "events";
 

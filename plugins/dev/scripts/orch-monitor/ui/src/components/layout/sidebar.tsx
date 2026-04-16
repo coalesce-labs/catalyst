@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { cn } from "@/lib/utils";
 import type { OrchestratorState, ConnectionStatus, SessionState } from "@/lib/types";
-import { sessionKind } from "@/lib/types";
+import { sessionKind, SESSION_TIME_FILTERS, type SessionTimeFilter } from "@/lib/types";
+import { filterSessions } from "@/lib/session-filters";
 import { computeOrchestratorStats } from "@/lib/computations";
 import { fmtSince } from "@/lib/formatters";
 import { groupSidebarItems, type GroupingMode } from "@/lib/grouping";
@@ -39,12 +41,19 @@ export function Sidebar({
   groupingMode,
   onGroupingModeChange,
 }: SidebarProps) {
-  const activeSessions = sessions.filter(
-    (s) => s.alive || s.status === "running",
-  );
-  const recentDead = sessions.filter(
-    (s) => !s.alive && s.status !== "running" && s.timeSinceUpdate < 3600,
-  );
+  const [timeFilter, setTimeFilter] = useState<SessionTimeFilter>(() => {
+    const stored = localStorage.getItem("catalyst-session-filter");
+    return SESSION_TIME_FILTERS.includes(stored as SessionTimeFilter)
+      ? (stored as SessionTimeFilter)
+      : "active";
+  });
+
+  const handleTimeFilterChange = (filter: SessionTimeFilter) => {
+    setTimeFilter(filter);
+    localStorage.setItem("catalyst-session-filter", filter);
+  };
+
+  const { active: activeSessions, dead: recentDead } = filterSessions(sessions, timeFilter);
 
   const groups = groupSidebarItems(orchestrators, activeSessions, recentDead, groupingMode);
   const isFlat = groupingMode === "flat";
@@ -109,9 +118,13 @@ export function Sidebar({
             onSelect={onSelect}
             selectedSessionId={selectedSessionId}
             onSessionSelect={onSessionSelect}
+            timeFilter={timeFilter}
+            onTimeFilterChange={handleTimeFilterChange}
           />
         ) : (
-          groups.map((group) => {
+          <>
+          <SessionTimeFilterBar filter={timeFilter} onChange={handleTimeFilterChange} className="mt-3 mb-1 px-2" />
+          {groups.map((group) => {
             const itemCount =
               group.orchestrators.length +
               group.activeSessions.length +
@@ -132,7 +145,8 @@ export function Sidebar({
                 />
               </SidebarGroup>
             );
-          })
+          })}
+          </>
         )}
       </nav>
 
@@ -154,6 +168,8 @@ function FlatSections({
   onSelect,
   selectedSessionId,
   onSessionSelect,
+  timeFilter,
+  onTimeFilterChange,
 }: {
   orchestrators: OrchestratorState[];
   activeSessions: SessionState[];
@@ -162,6 +178,8 @@ function FlatSections({
   onSelect: (orchId: string | null) => void;
   selectedSessionId?: string | null;
   onSessionSelect?: (sessionId: string) => void;
+  timeFilter: SessionTimeFilter;
+  onTimeFilterChange: (filter: SessionTimeFilter) => void;
 }) {
   return (
     <>
@@ -178,18 +196,23 @@ function FlatSections({
         </>
       )}
 
-      {(activeSessions.length > 0 || recentDead.length > 0) && (
-        <>
-          <div className="mt-4 mb-1 px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-            Sessions
-            {activeSessions.length > 0 && (
-              <span className="ml-1.5 rounded-full bg-green/20 px-1.5 py-px text-[9px] font-bold text-green tabular-nums">
-                {activeSessions.length}
-              </span>
-            )}
-          </div>
-          <SessionList activeSessions={activeSessions} recentDead={recentDead} selectedSessionId={selectedSessionId} onSessionSelect={onSessionSelect} />
-        </>
+      <div className="mt-4 mb-1 flex items-center justify-between px-2">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+          Sessions
+          {activeSessions.length > 0 && (
+            <span className="ml-1.5 rounded-full bg-green/20 px-1.5 py-px text-[9px] font-bold text-green tabular-nums">
+              {activeSessions.length}
+            </span>
+          )}
+        </div>
+        <SessionTimeFilterBar filter={timeFilter} onChange={onTimeFilterChange} />
+      </div>
+      {(activeSessions.length > 0 || recentDead.length > 0) ? (
+        <SessionList activeSessions={activeSessions} recentDead={recentDead} selectedSessionId={selectedSessionId} onSessionSelect={onSessionSelect} />
+      ) : (
+        <div className="px-2 py-3 text-center text-[11px] text-muted">
+          No sessions
+        </div>
       )}
     </>
   );
@@ -334,5 +357,42 @@ function SessionList({
         );
       })}
     </ul>
+  );
+}
+
+const FILTER_LABELS: Record<SessionTimeFilter, string> = {
+  active: "Active",
+  "1h": "1h",
+  "24h": "24h",
+  "48h": "48h",
+  all: "All",
+};
+
+function SessionTimeFilterBar({
+  filter,
+  onChange,
+  className,
+}: {
+  filter: SessionTimeFilter;
+  onChange: (f: SessionTimeFilter) => void;
+  className?: string;
+}) {
+  return (
+    <div className={cn("flex gap-0.5", className)}>
+      {SESSION_TIME_FILTERS.map((f) => (
+        <button
+          key={f}
+          onClick={() => onChange(f)}
+          className={cn(
+            "rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors",
+            filter === f
+              ? "bg-accent/15 text-accent"
+              : "text-muted hover:bg-surface-3 hover:text-fg",
+          )}
+        >
+          {FILTER_LABELS[f]}
+        </button>
+      ))}
+    </div>
   );
 }
