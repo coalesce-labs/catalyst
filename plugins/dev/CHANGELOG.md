@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.37.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.36.0...catalyst-dev-v6.37.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** backfill AI-enhanced notes and use LOCAL_ANTHROPIC_API_KEY ([#175](https://github.com/coalesce-labs/catalyst/issues/175)) ([6d60cc7](https://github.com/coalesce-labs/catalyst/commit/6d60cc74999fa1f5d17a3b28686fa0df4ec63683))
+
 ## [6.36.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.35.0...catalyst-dev-v6.36.0)
 
 Apr 16, 2026
