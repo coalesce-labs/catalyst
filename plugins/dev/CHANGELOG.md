@@ -1,9 +1,18 @@
 # Changelog
 
-## [6.37.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.1...catalyst-dev-v6.37.2) (2026-04-16)
+## [6.37.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.1...catalyst-dev-v6.37.2)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Claude Worker Dispatch Fixes
+
+Fixed broken worker dispatch where the `-w` flag was incorrectly used with paths instead of names, causing "Invalid worktree name" errors. Workers now launch in a backgrounded subshell with proper directory switching, include `--dangerously-skip-permissions` to prevent TTY blocking, and capture stderr to debuggable log files instead of `/dev/null`.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** claude-only worker dispatch with cd subshell (CTL-58, CTL-35) ([#179](https://github.com/coalesce-labs/catalyst/issues/179)) ([1bf3f62](https://github.com/coalesce-labs/catalyst/commit/1bf3f62e0b2ff3fe8a641dd03fb17f34c0a2da4e))
 
