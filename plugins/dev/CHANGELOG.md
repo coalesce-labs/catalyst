@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.39.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.38.0...catalyst-dev-v6.39.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** detect worker launch failures within 30s of dispatch (CTL-87) ([#184](https://github.com/coalesce-labs/catalyst/issues/184)) ([c74613b](https://github.com/coalesce-labs/catalyst/commit/c74613b11217def5fe06ac66b3808d7018ed1d96))
+
 ## [6.38.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.2...catalyst-dev-v6.38.0)
 
 Apr 16, 2026
