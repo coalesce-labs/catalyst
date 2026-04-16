@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-Catalyst uses [claude-code-otel](https://github.com/coalesce-labs/claude-code-otel) to export OpenTelemetry telemetry (events, metrics, logs) from every Claude Code session — including workers dispatched by `/catalyst-dev:orchestrate`.
+Catalyst uses [claude-code-otel](https://github.com/ryanrozich/claude-code-otel) to export OpenTelemetry telemetry (events, metrics, logs) from every Claude Code session — including workers dispatched by `/catalyst-dev:orchestrate`.
 
 This page covers setting up the stack itself. For making sure agents record data correctly once the stack is running, see [Recording agent data](../recording/).
 
@@ -39,7 +39,7 @@ For production use, point the OTel Collector at your hosted backend (Honeycomb, 
 ### 1. Clone and start the stack
 
 ```bash
-git clone https://github.com/coalesce-labs/claude-code-otel.git
+git clone https://github.com/ryanrozich/claude-code-otel.git
 cd claude-code-otel
 docker compose up -d
 ```
@@ -61,6 +61,19 @@ export CLAUDE_CODE_ENABLE_TELEMETRY=1
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 export OTEL_METRICS_EXPORTER=otlp
 export OTEL_LOGS_EXPORTER=otlp
+```
+
+Alternatively, if you're running Claude Code in an environment without access to your shell profile (e.g., inside an IDE extension or automated harness), you can set these in Claude Code's `settings.json` (`~/.claude/settings.json`):
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://localhost:4318",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp"
+  }
+}
 ```
 
 For session-scoped enablement (only when running orchestration), set them in the orchestrator's launch command instead — see the shell wrapper section in [Recording agent data](../recording/).

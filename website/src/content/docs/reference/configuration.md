@@ -270,7 +270,7 @@ The orchestration monitor reads OpenTelemetry backend endpoints from a global co
 Environment variable overrides: `OTEL_ENABLED`, `PROMETHEUS_URL`, `LOKI_URL`. Env vars take
 precedence over the file when both are set.
 
-If you're running the [claude-code-otel](https://github.com/coalesce-labs/claude-code-otel) Docker
+If you're running the [claude-code-otel](https://github.com/ryanrozich/claude-code-otel) Docker
 Compose stack locally, the defaults above match the standard ports. For hosted backends (Grafana
 Cloud, Datadog, etc.), point these URLs at your hosted Prometheus/Loki-compatible endpoints.
 
