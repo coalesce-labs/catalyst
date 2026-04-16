@@ -16,8 +16,10 @@
 #   1. Detects ticket from --ticket flag, .catalyst/workflow-context, or branch
 #   2. Starts a catalyst session (records PID, working dir, branch)
 #   3. Exports CATALYST_SESSION_ID so skills inside claude inherit it
-#   4. Runs a background heartbeat every 60s to keep updated_at fresh
-#   5. On exit, calls catalyst-session end with done/failed status
+#   4. Spawns a background watcher for heartbeat + cleanup
+#   5. exec's claude so the process image becomes "claude" (enables Warp
+#      terminal integration: rich sidebar, notifications, process detection)
+#   6. Background watcher detects PID exit and records session end
 
 set -uo pipefail
 
@@ -100,49 +102,40 @@ export CATALYST_SESSION_ID
 mkdir -p .catalyst 2>/dev/null || true
 echo "$CATALYST_SESSION_ID" > .catalyst/.session-id 2>/dev/null || true
 
-# ─── Background heartbeat ────────────────────────────────────────────────────
+# ─── Background watcher (heartbeat + cleanup) ───────────────────────────────
+# We need to exec claude so that the process image becomes "claude" — this lets
+# terminal emulators like Warp detect the process by name for rich integration
+# (sidebar, notifications). But exec replaces our process, so traps never fire.
+#
+# Solution: spawn a background watcher that polls our PID. It handles heartbeat
+# while claude runs and performs session cleanup once the PID exits.
 
-HEARTBEAT_PID=""
+WRAPPER_PID=$$
+SESSION_ID_FILE="${WORKTREE_PATH}/.catalyst/.session-id"
 
-start_heartbeat() {
-  (
-    while true; do
-      sleep 60
+(
+  # Detach from parent's signal handling
+  trap '' INT TERM
+
+  SECONDS_SINCE_HEARTBEAT=0
+
+  while kill -0 "$WRAPPER_PID" 2>/dev/null; do
+    sleep 5
+    SECONDS_SINCE_HEARTBEAT=$((SECONDS_SINCE_HEARTBEAT + 5))
+
+    if [[ $SECONDS_SINCE_HEARTBEAT -ge 60 ]]; then
       "$SESSION_SCRIPT" heartbeat "$CATALYST_SESSION_ID" 2>/dev/null || true
-    done
-  ) &
-  HEARTBEAT_PID=$!
-}
+      SECONDS_SINCE_HEARTBEAT=0
+    fi
+  done
 
-stop_heartbeat() {
-  if [[ -n "$HEARTBEAT_PID" ]]; then
-    kill "$HEARTBEAT_PID" 2>/dev/null || true
-    wait "$HEARTBEAT_PID" 2>/dev/null || true
-    HEARTBEAT_PID=""
-  fi
-}
+  # claude (exec'd into our PID) has exited — clean up
+  rm -f "$SESSION_ID_FILE" 2>/dev/null || true
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done 2>/dev/null || true
+) &
 
-# ─── Cleanup on exit ─────────────────────────────────────────────────────────
+# ─── Replace process with claude ─────────────────────────────────────────────
+# After exec, this PID becomes claude. Warp sees "claude" in the process table.
+# The background watcher monitors this PID and cleans up when it exits.
 
-cleanup() {
-  local exit_code="${1:-$?}"
-
-  stop_heartbeat
-  rm -f .catalyst/.session-id 2>/dev/null || true
-
-  if [[ $exit_code -eq 0 ]]; then
-    "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done 2>/dev/null || true
-  else
-    "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed 2>/dev/null || true
-  fi
-}
-
-trap 'cleanup $?' EXIT
-trap 'cleanup 130; exit 130' INT
-trap 'cleanup 143; exit 143' TERM
-
-# ─── Run claude ───────────────────────────────────────────────────────────────
-
-start_heartbeat
-
-claude "$@"
+exec claude "$@"
