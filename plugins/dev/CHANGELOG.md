@@ -1,5 +1,17 @@
 # Changelog
 
+## [6.38.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.2...catalyst-dev-v6.38.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** catalyst-comms — file-based agent communication channels (CTL-60) ([#182](https://github.com/coalesce-labs/catalyst/issues/182)) ([51a73de](https://github.com/coalesce-labs/catalyst/commit/51a73de70c2ce5952bd02ed40a1fe9cb344ecb51))
+
+
+### Bug Fixes
+
+* **dev:** worker polls until PR merges instead of exiting at pr-created ([#180](https://github.com/coalesce-labs/catalyst/issues/180)) ([351cc95](https://github.com/coalesce-labs/catalyst/commit/351cc958baec9ed9d63739b33c53236f5a3ba302))
+
 ## [6.37.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.1...catalyst-dev-v6.37.2)
 
 Apr 16, 2026
