@@ -11,6 +11,7 @@ import type {
   WorkerAnalytics,
   LinearTicket,
   StreamEvent,
+  WorkerTask,
 } from "@/lib/types";
 import {
   X,
@@ -22,6 +23,10 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronRight,
+  ListTodo,
+  CheckCircle2,
+  Circle,
+  Loader2,
 } from "lucide-react";
 
 interface WorkerDetailDrawerProps {
@@ -94,16 +99,31 @@ function StreamEventRow({ event }: { event: StreamEvent }) {
           </span>
         </div>
       );
-    case "turn":
+    case "turn": {
+      const hasTools = event.turnTools && event.turnTools.length > 0;
+      const hasText = event.text && event.text.length > 0;
       return (
-        <div className="flex items-center gap-2 py-1">
+        <div className="flex items-start gap-2 py-1">
           <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-          <span className="text-[11px] text-muted">new turn</span>
-          <span className="ml-auto shrink-0 font-mono text-[10px] text-muted tabular-nums">
+          <div className="min-w-0 flex-1">
+            {hasTools ? (
+              <span className="font-mono text-[11px] text-accent">
+                {event.turnTools!.join(", ")}
+              </span>
+            ) : hasText ? (
+              <span className="truncate text-[11px] text-fg">
+                {event.text!.slice(0, 100)}
+              </span>
+            ) : (
+              <span className="text-[11px] text-muted">new turn</span>
+            )}
+          </div>
+          <span className="shrink-0 font-mono text-[10px] text-muted tabular-nums">
             {fmtSince(age)}
           </span>
         </div>
       );
+    }
     case "retry":
       return (
         <div className="flex items-center gap-2 py-1">
@@ -126,6 +146,24 @@ function StreamEventRow({ event }: { event: StreamEvent }) {
           </span>
         </div>
       );
+    case "rate_limit": {
+      const resets = event.rateLimitInfo?.resetsAt;
+      const resetsIn = resets ? Math.max(0, Math.round((resets * 1000 - Date.now()) / 1000)) : null;
+      return (
+        <div className="flex items-center gap-2 py-1">
+          <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-red" />
+          <span className="text-[11px] text-red">
+            rate limited
+            {resetsIn !== null && resetsIn > 0 && (
+              <span className="text-muted"> resets {fmtSince(resetsIn)}</span>
+            )}
+          </span>
+          <span className="ml-auto shrink-0 font-mono text-[10px] text-muted tabular-nums">
+            {fmtSince(age)}
+          </span>
+        </div>
+      );
+    }
     default:
       return null;
   }
@@ -163,6 +201,122 @@ function PhaseTimeline({ worker }: { worker: WorkerState }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+interface TaskListData {
+  total: number;
+  completed: number;
+  inProgress: number;
+  pending: number;
+  tasks: WorkerTask[];
+}
+
+function TaskStatusIcon({ status }: { status: string }) {
+  switch (status) {
+    case "completed":
+      return <CheckCircle2 className="h-3 w-3 text-green" />;
+    case "in_progress":
+      return <Loader2 className="h-3 w-3 animate-spin text-blue" />;
+    default:
+      return <Circle className="h-3 w-3 text-muted" />;
+  }
+}
+
+function TaskListSection({ pid }: { pid: number | null }) {
+  const [taskData, setTaskData] = useState<TaskListData | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!pid) return;
+    let cancelled = false;
+
+    async function fetchTasks() {
+      try {
+        const resp = await fetch(`/api/worker-tasks?pid=${pid}`);
+        if (!resp.ok || cancelled) return;
+        const data = await resp.json();
+        if (!cancelled && data.tasks) setTaskData(data.tasks);
+      } catch {
+        // ignore
+      }
+    }
+
+    fetchTasks();
+    const interval = setInterval(fetchTasks, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [pid]);
+
+  if (!taskData || taskData.tasks.length === 0) return null;
+
+  const activeTask = taskData.tasks.find((t) => t.status === "in_progress");
+
+  return (
+    <div className="border-b border-border-subtle px-4 py-3">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="flex w-full items-center gap-1.5 text-left"
+      >
+        {expanded ? (
+          <ChevronDown className="h-3 w-3 text-muted" />
+        ) : (
+          <ChevronRight className="h-3 w-3 text-muted" />
+        )}
+        <ListTodo className="h-3.5 w-3.5 text-muted" />
+        <SectionLabel>Tasks</SectionLabel>
+        <span className="ml-auto font-mono text-[10px] text-muted tabular-nums">
+          {taskData.completed}/{taskData.total}
+        </span>
+      </button>
+
+      {/* Always show active task */}
+      {activeTask && !expanded && (
+        <div className="mt-1.5 flex items-center gap-2 pl-5">
+          <Loader2 className="h-3 w-3 animate-spin text-blue" />
+          <span className="truncate text-[11px] text-fg">
+            {activeTask.activeForm || activeTask.subject}
+          </span>
+        </div>
+      )}
+
+      {/* Expanded: show all tasks */}
+      {expanded && (
+        <div className="mt-2 space-y-1 pl-5">
+          {taskData.tasks.map((task) => (
+            <div key={task.id} className="flex items-start gap-2">
+              <span className="mt-0.5">
+                <TaskStatusIcon status={task.status} />
+              </span>
+              <span
+                className={cn(
+                  "text-[11px]",
+                  task.status === "completed"
+                    ? "text-muted line-through"
+                    : task.status === "in_progress"
+                      ? "text-fg"
+                      : "text-muted",
+                )}
+              >
+                {task.subject}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Progress bar */}
+      {taskData.total > 1 && (
+        <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface-3">
+          <div
+            className="h-full rounded-full bg-green transition-all"
+            style={{ width: `${(taskData.completed / taskData.total) * 100}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -299,6 +453,9 @@ export function WorkerDetailDrawer({
               </div>
             </div>
           )}
+
+          {/* Task list */}
+          <TaskListSection pid={worker.pid} />
 
           {/* Current activity */}
           {worker.activity?.currentTool && (
