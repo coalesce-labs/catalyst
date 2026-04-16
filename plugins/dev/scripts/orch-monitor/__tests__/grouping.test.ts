@@ -145,4 +145,87 @@ describe("groupSidebarItems", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].recentDead).toHaveLength(1);
   });
+
+  it("groups sessions by ticket in ticket mode", () => {
+    const s1 = makeSession({ sessionId: "s1", ticket: "CTL-10" });
+    const s2 = makeSession({ sessionId: "s2", ticket: "CTL-10" });
+    const s3 = makeSession({ sessionId: "s3", ticket: "CTL-20" });
+
+    const groups = groupSidebarItems([], [s1, s2, s3], [], "ticket");
+
+    expect(groups).toHaveLength(2);
+    const ctl10 = groups.find((g) => g.key === "CTL-10")!;
+    expect(ctl10.activeSessions).toHaveLength(2);
+    expect(ctl10.label).toBe("CTL-10");
+
+    const ctl20 = groups.find((g) => g.key === "CTL-20")!;
+    expect(ctl20.activeSessions).toHaveLength(1);
+  });
+
+  it("puts sessions with null ticket in 'unlinked' group in ticket mode", () => {
+    const s1 = makeSession({ sessionId: "s1", ticket: "CTL-10" });
+    const s2 = makeSession({ sessionId: "s2", ticket: null });
+
+    const groups = groupSidebarItems([], [s1, s2], [], "ticket");
+
+    expect(groups).toHaveLength(2);
+    const unlinked = groups.find((g) => g.key === "unlinked")!;
+    expect(unlinked.activeSessions).toHaveLength(1);
+    expect(unlinked.label).toBe("Unlinked");
+  });
+
+  it("places orchestrators in groups for each worker ticket in ticket mode", () => {
+    const orch = makeOrch({
+      id: "orch-multi",
+      workers: {
+        "CTL-10": { ticket: "CTL-10", status: "done", phase: 5, wave: 1, pid: 1, alive: false, pr: null, startedAt: "2026-04-15T00:00:00Z", updatedAt: "2026-04-15T00:01:00Z", timeSinceUpdate: 60, lastHeartbeat: null, definitionOfDone: {} },
+        "CTL-20": { ticket: "CTL-20", status: "implementing", phase: 3, wave: 1, pid: 2, alive: true, pr: null, startedAt: "2026-04-15T00:00:00Z", updatedAt: "2026-04-15T00:01:00Z", timeSinceUpdate: 60, lastHeartbeat: null, definitionOfDone: {} },
+      },
+    });
+
+    const groups = groupSidebarItems([orch], [], [], "ticket");
+
+    expect(groups).toHaveLength(2);
+    const ctl10 = groups.find((g) => g.key === "CTL-10")!;
+    expect(ctl10.orchestrators).toHaveLength(1);
+    expect(ctl10.orchestrators[0].id).toBe("orch-multi");
+
+    const ctl20 = groups.find((g) => g.key === "CTL-20")!;
+    expect(ctl20.orchestrators).toHaveLength(1);
+  });
+
+  it("puts orchestrators with no workers in 'unlinked' group in ticket mode", () => {
+    const orch = makeOrch({ id: "orch-empty", workers: {} });
+
+    const groups = groupSidebarItems([orch], [], [], "ticket");
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe("unlinked");
+    expect(groups[0].orchestrators).toHaveLength(1);
+  });
+
+  it("sorts ticket groups alphabetically with 'unlinked' last", () => {
+    const s1 = makeSession({ sessionId: "s1", ticket: "CTL-20" });
+    const s2 = makeSession({ sessionId: "s2", ticket: "CTL-10" });
+    const s3 = makeSession({ sessionId: "s3", ticket: null });
+
+    const groups = groupSidebarItems([], [s1, s2, s3], [], "ticket");
+
+    expect(groups.map((g) => g.key)).toEqual(["CTL-10", "CTL-20", "unlinked"]);
+  });
+
+  it("includes recentDead in ticket groups", () => {
+    const dead = makeSession({
+      sessionId: "dead1",
+      alive: false,
+      status: "done",
+      ticket: "CTL-10",
+    });
+
+    const groups = groupSidebarItems([], [], [dead], "ticket");
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].key).toBe("CTL-10");
+    expect(groups[0].recentDead).toHaveLength(1);
+  });
 });
