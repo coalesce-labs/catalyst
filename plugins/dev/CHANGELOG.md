@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.39.0...catalyst-dev-v6.39.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* **dev:** orch-monitor writes back merged PR status to signal files (CTL-86) ([#185](https://github.com/coalesce-labs/catalyst/issues/185)) ([b340de9](https://github.com/coalesce-labs/catalyst/commit/b340de9c725f4bfe400f2796e4932ebba58c8dce))
+
 ## [6.39.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.38.0...catalyst-dev-v6.39.0)
 
 Apr 16, 2026
