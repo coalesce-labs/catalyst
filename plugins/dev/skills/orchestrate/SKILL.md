@@ -503,6 +503,34 @@ fi
   '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-dispatched", detail: null}')"
 ```
 
+**Post-dispatch health check (CTL-87):**
+
+After the wave's per-worker dispatch loop has completed, run the batch health check
+**once per wave**. It sleeps briefly (default 15s — configurable via `--grace-seconds`),
+then verifies that every worker still sitting at `status="dispatched"`/`phase=0` has a
+live PID. Any worker whose PID has already died is transitioned to `status="failed"`
+with `failureReason="launch-failure"`, an attention item of type `launch-failure` is
+raised, and a `worker-launch-failed` event is emitted. This means dead-on-arrival
+workers surface in under 30 seconds instead of after the 15-minute stalled-worker
+timeout, and the orchestrator can re-dispatch them (via `orchestrate-fixup` or a
+manual redispatch) in the same wave.
+
+```bash
+# Run ONCE, after all workers in this wave have been dispatched.
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-healthcheck" \
+  --orch-dir "${ORCH_DIR}" \
+  --orch-id "${ORCH_NAME}"
+# Prints a JSON summary on stdout: {"checked":N,"dead":M,"deadTickets":[...]}.
+# Launch failures also appear in the attention list and as `worker-launch-failed`
+# events in the global state log.
+```
+
+Healthy workers are untouched. Workers that have already advanced past `dispatched`
+(e.g. into `researching`) are skipped because reaching a later status is itself
+proof of life. This check complements the 15-minute stalled-worker detection in
+Phase 4 — healthcheck catches launch failures, the stalled-worker scan catches
+workers that die mid-run.
+
 **Worker dispatch prompt includes mandatory testing AND lifecycle requirements:**
 
 ```
