@@ -1,0 +1,568 @@
+#!/usr/bin/env bash
+# catalyst-comms — file-based agent communication channels.
+#
+# Provides an append-only JSONL messaging system for Claude Code agents across
+# worktrees, sub-agents, agent teams, and orchestrators. Storage lives under
+# ${CATALYST_DIR:-$HOME/catalyst}/comms/.
+#
+# No HTTP. No server. No dependencies beyond bash + jq + uuidgen.
+#
+# Layout:
+#   $COMMS_DIR/channels.json      # registry (mkdir-locked R/M/W)
+#   $COMMS_DIR/channels/<n>.jsonl # one file per channel (atomic append)
+#
+# Commands:
+#   join <ch> --as <name> [--capabilities S] [--parent P] [--orch O] [--ttl N] [--topic T]
+#   send <ch> <body> [--as <name>] [--type TYPE] [--to N|all] [--re MSG_ID] [--parent P] [--orch O]
+#   poll <ch> [--since N] [--filter-to N] [--wait] [--limit N]
+#   done <ch> --as <name>
+#   leave <ch> --as <name>
+#   channels
+#   watch <ch> [--summary-interval S]
+#   status [<ch>]
+#   gc [--older-than DAYS]
+#   help
+
+set -uo pipefail
+
+CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
+COMMS_DIR="${CATALYST_COMMS_DIR:-$CATALYST_DIR/comms}"
+REGISTRY="$COMMS_DIR/channels.json"
+CHANNELS_DIR="$COMMS_DIR/channels"
+LOCK_FILE="$REGISTRY.lock"
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+msg_id() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    echo "msg-$(uuidgen | tr 'A-Z' 'a-z')"
+  else
+    # Fallback: timestamp + random bash RANDOM
+    echo "msg-$(date +%s)-${RANDOM}${RANDOM}"
+  fi
+}
+
+ensure_dirs() {
+  mkdir -p "$COMMS_DIR" "$CHANNELS_DIR"
+  if [[ ! -f "$REGISTRY" ]]; then
+    echo '{}' > "$REGISTRY"
+  fi
+}
+
+lock_acquire() {
+  local max_wait=10 waited=0
+  while ! mkdir "$LOCK_FILE" 2>/dev/null; do
+    if [[ $waited -ge $max_wait ]]; then
+      echo "error: failed to acquire comms lock after ${max_wait}s" >&2
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  trap 'rmdir "$LOCK_FILE" 2>/dev/null' EXIT
+}
+
+lock_release() {
+  rmdir "$LOCK_FILE" 2>/dev/null || true
+  trap - EXIT
+}
+
+# Lock-protected R/M/W on channels.json.
+# $1 = jq filter; additional args passed through to jq.
+registry_write() {
+  local filter="$1"; shift
+  ensure_dirs
+  lock_acquire
+  jq "$@" "$filter" "$REGISTRY" > "${REGISTRY}.tmp" && mv "${REGISTRY}.tmp" "$REGISTRY"
+  lock_release
+}
+
+registry_read() {
+  ensure_dirs
+  cat "$REGISTRY"
+}
+
+channel_file() {
+  echo "$CHANNELS_DIR/$1.jsonl"
+}
+
+require_channel() {
+  local name="$1"
+  ensure_dirs
+  if ! jq -e --arg n "$name" 'has($n)' "$REGISTRY" >/dev/null 2>&1; then
+    echo "error: channel '$name' not registered — run 'catalyst-comms join $name --as <name>' first" >&2
+    return 1
+  fi
+}
+
+# Missing required flag helper.
+require_flag() {
+  local flag_name="$1" flag_value="$2"
+  if [[ -z "$flag_value" ]]; then
+    echo "error: $flag_name is required" >&2
+    return 1
+  fi
+}
+
+# ─── Commands ───────────────────────────────────────────────────────────────
+
+cmd_join() {
+  local channel="" name="" capabilities="" parent="" orch="" ttl="600" topic=""
+
+  [[ $# -lt 1 ]] && { echo "error: channel name required" >&2; return 1; }
+  channel="$1"; shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --as)           name="$2"; shift 2 ;;
+      --capabilities) capabilities="$2"; shift 2 ;;
+      --parent)       parent="$2"; shift 2 ;;
+      --orch)         orch="$2"; shift 2 ;;
+      --ttl)          ttl="$2"; shift 2 ;;
+      --topic)        topic="$2"; shift 2 ;;
+      *) echo "error: unknown join flag: $1" >&2; return 1 ;;
+    esac
+  done
+
+  require_flag "--as" "$name" || return 1
+
+  ensure_dirs
+  # Ensure channel log file exists (don't truncate existing).
+  local ch_file
+  ch_file="$(channel_file "$channel")"
+  [[ -f "$ch_file" ]] || : > "$ch_file"
+
+  # Preserve existing "joined" timestamp if re-joining.
+  local prior_joined
+  prior_joined=$(jq -r --arg ch "$channel" --arg who "$name" \
+    '.[$ch].participants[]? | select(.name == $who) | .joined' "$REGISTRY" 2>/dev/null)
+  [[ -z "$prior_joined" || "$prior_joined" = "null" ]] && prior_joined="$(now_iso)"
+
+  registry_write '
+    .[$ch] = ((.[$ch] // {name: $ch, topic: $topic, created: $now, participants: []})
+      | .participants = (
+          (.participants | map(select(.name != $who)))
+          + [{
+              name: $who,
+              joined: $joined,
+              ttl: ($ttl | tonumber),
+              lastSeen: $now,
+              capabilities: $caps,
+              parent: (if $parent == "" then null else $parent end),
+              orch: (if $orch == "" then null else $orch end),
+              status: "active"
+            }]
+        ))
+  ' \
+    --arg ch "$channel" \
+    --arg who "$name" \
+    --arg now "$(now_iso)" \
+    --arg ttl "$ttl" \
+    --arg caps "$capabilities" \
+    --arg parent "$parent" \
+    --arg orch "$orch" \
+    --arg topic "$topic" \
+    --arg joined "$prior_joined"
+
+  echo "$ch_file"
+}
+
+cmd_send() {
+  local channel="" body="" name="" type="info" to="all" re="" parent="" orch=""
+
+  [[ $# -lt 2 ]] && { echo "error: send requires <channel> <body>" >&2; return 1; }
+  channel="$1"; shift
+  body="$1"; shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --as)     name="$2"; shift 2 ;;
+      --type)   type="$2"; shift 2 ;;
+      --to)     to="$2"; shift 2 ;;
+      --re)     re="$2"; shift 2 ;;
+      --parent) parent="$2"; shift 2 ;;
+      --orch)   orch="$2"; shift 2 ;;
+      *) echo "error: unknown send flag: $1" >&2; return 1 ;;
+    esac
+  done
+
+  require_flag "--as" "$name" || return 1
+  require_channel "$channel" || return 1
+
+  case "$type" in
+    proposal|question|answer|ack|info|attention|done) ;;
+    *) echo "error: invalid --type '$type' (must be one of: proposal|question|answer|ack|info|attention|done)" >&2; return 1 ;;
+  esac
+
+  local id
+  id="$(msg_id)"
+  local msg
+  msg=$(jq -nc \
+    --arg id "$id" \
+    --arg from "$name" \
+    --arg to "$to" \
+    --arg ch "$channel" \
+    --arg parent "$parent" \
+    --arg orch "$orch" \
+    --arg ts "$(now_iso)" \
+    --arg type "$type" \
+    --arg re "$re" \
+    --arg body "$body" \
+    '{
+      id: $id, from: $from, to: $to, ch: $ch,
+      parent: (if $parent=="" then null else $parent end),
+      orch: (if $orch=="" then null else $orch end),
+      ts: $ts, type: $type,
+      re: (if $re=="" then null else $re end),
+      body: $body
+    }')
+  echo "$msg" >> "$(channel_file "$channel")"
+
+  # Update lastSeen on the sender.
+  registry_write '
+    .[$ch].participants |= map(
+      if .name == $who then .lastSeen = $now else . end
+    )
+  ' \
+    --arg ch "$channel" \
+    --arg who "$name" \
+    --arg now "$(now_iso)"
+
+  echo "$id"
+}
+
+cmd_poll() {
+  local channel="" since="0" filter_to="" wait="0" limit=""
+
+  [[ $# -lt 1 ]] && { echo "error: poll requires <channel>" >&2; return 1; }
+  channel="$1"; shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --since)      since="$2"; shift 2 ;;
+      --filter-to)  filter_to="$2"; shift 2 ;;
+      --wait)       wait="1"; shift ;;
+      --limit)      limit="$2"; shift 2 ;;
+      *) echo "error: unknown poll flag: $1" >&2; return 1 ;;
+    esac
+  done
+
+  require_channel "$channel" || return 1
+  local file
+  file="$(channel_file "$channel")"
+
+  emit_lines() {
+    local start="$1"
+    if [[ ! -s "$file" ]]; then
+      return 0
+    fi
+    # tail -n +N gives lines starting at N (1-indexed). We expose since as "skip first N".
+    local start_at=$((start + 1))
+    local out
+    out=$(tail -n +"$start_at" "$file")
+    if [[ -z "$out" ]]; then return 0; fi
+    if [[ -n "$filter_to" ]]; then
+      out=$(echo "$out" | jq -c --arg me "$filter_to" 'select(.to == $me or .to == "all")')
+    fi
+    if [[ -n "$limit" ]]; then
+      out=$(echo "$out" | head -n "$limit")
+    fi
+    if [[ -n "$out" ]]; then
+      echo "$out"
+    fi
+  }
+
+  if [[ "$wait" = "1" ]]; then
+    # Emit current backlog first
+    emit_lines "$since"
+    # Then wait and emit new lines as they arrive.
+    local last_lines
+    last_lines=$(wc -l < "$file" | tr -d ' ')
+    if command -v fswatch >/dev/null 2>&1; then
+      fswatch -o "$file" | while read -r _; do
+        local cur
+        cur=$(wc -l < "$file" | tr -d ' ')
+        if [[ "$cur" -gt "$last_lines" ]]; then
+          emit_lines "$last_lines"
+          last_lines="$cur"
+        fi
+      done
+    else
+      while :; do
+        sleep 1
+        local cur
+        cur=$(wc -l < "$file" | tr -d ' ')
+        if [[ "$cur" -gt "$last_lines" ]]; then
+          emit_lines "$last_lines"
+          last_lines="$cur"
+        fi
+      done
+    fi
+  else
+    emit_lines "$since"
+  fi
+}
+
+cmd_done() {
+  local channel="" name=""
+
+  [[ $# -lt 1 ]] && { echo "error: done requires <channel>" >&2; return 1; }
+  channel="$1"; shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --as) name="$2"; shift 2 ;;
+      *) echo "error: unknown done flag: $1" >&2; return 1 ;;
+    esac
+  done
+
+  require_flag "--as" "$name" || return 1
+  require_channel "$channel" || return 1
+
+  # Post a done message.
+  cmd_send "$channel" "done" --as "$name" --type done >/dev/null
+
+  # Count active participants and who has posted done.
+  local active_names
+  active_names=$(jq -r --arg ch "$channel" \
+    '.[$ch].participants[] | select(.status == "active") | .name' "$REGISTRY")
+
+  local done_senders
+  done_senders=$(jq -rs --arg ch "$channel" \
+    'map(select(.ch == $ch and .type == "done") | .from) | unique | .[]' \
+    < "$(channel_file "$channel")" 2>/dev/null)
+
+  local waiting=""
+  while IFS= read -r who; do
+    [[ -z "$who" ]] && continue
+    if ! echo "$done_senders" | grep -qx "$who"; then
+      waiting="${waiting}${who} "
+    fi
+  done <<< "$active_names"
+
+  if [[ -z "${waiting// }" ]]; then
+    echo "quorum reached: all active participants have posted done"
+    return 0
+  else
+    echo "waiting on: ${waiting% }"
+    return 1
+  fi
+}
+
+cmd_leave() {
+  local channel="" name=""
+
+  [[ $# -lt 1 ]] && { echo "error: leave requires <channel>" >&2; return 1; }
+  channel="$1"; shift
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --as) name="$2"; shift 2 ;;
+      *) echo "error: unknown leave flag: $1" >&2; return 1 ;;
+    esac
+  done
+
+  require_flag "--as" "$name" || return 1
+  require_channel "$channel" || return 1
+
+  cmd_send "$channel" "left" --as "$name" --type info >/dev/null
+
+  registry_write '
+    .[$ch].participants |= map(
+      if .name == $who then .status = "left" | .lastSeen = $now else . end
+    )
+  ' \
+    --arg ch "$channel" \
+    --arg who "$name" \
+    --arg now "$(now_iso)"
+}
+
+cmd_channels() {
+  ensure_dirs
+  jq '.' "$REGISTRY"
+}
+
+cmd_watch() {
+  local channel=""
+  [[ $# -lt 1 ]] && { echo "error: watch requires <channel>" >&2; return 1; }
+  channel="$1"; shift
+
+  # Ignore additional flags (accepted for forward compat).
+  require_channel "$channel" || return 1
+  local file
+  file="$(channel_file "$channel")"
+
+  # Colorize by agent name using a simple hash → ANSI code mapping.
+  local RESET=$'\033[0m'
+  colorize() {
+    local line="$1"
+    local from type body ts
+    from=$(echo "$line" | jq -r '.from // "?"')
+    type=$(echo "$line" | jq -r '.type // "info"')
+    body=$(echo "$line" | jq -r '.body // ""')
+    ts=$(echo "$line" | jq -r '.ts // ""')
+    # Hash name to a color in range 31..36 (red..cyan).
+    local h=0
+    local i
+    for ((i=0; i<${#from}; i++)); do
+      h=$(( (h + $(printf '%d' "'${from:$i:1}")) % 6 ))
+    done
+    local code=$((31 + h))
+    printf "\033[%sm[%s] %s (%s):\033[0m %s\n" "$code" "$ts" "$from" "$type" "$body"
+  }
+
+  # Stream current + new lines.
+  tail -n 0 -F "$file" 2>/dev/null | while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    colorize "$line"
+  done
+}
+
+cmd_status() {
+  ensure_dirs
+  local channel=""
+  if [[ $# -ge 1 ]]; then channel="$1"; fi
+
+  if [[ -z "$channel" ]]; then
+    # Summary for every channel.
+    jq -r 'to_entries | map({
+      name: .key,
+      participants: (.value.participants | length),
+      active: (.value.participants | map(select(.status == "active")) | length),
+      topic: (.value.topic // "")
+    })' "$REGISTRY"
+    # Add msg counts + last activity from files.
+    local ch_file ch count last_ts
+    for ch_file in "$CHANNELS_DIR"/*.jsonl; do
+      [[ -f "$ch_file" ]] || continue
+      ch=$(basename "$ch_file" .jsonl)
+      count=$(wc -l < "$ch_file" | tr -d ' ')
+      last_ts=$(tail -n 1 "$ch_file" 2>/dev/null | jq -r '.ts // ""')
+      echo "channel=$ch messages=$count lastActivity=${last_ts:-never}"
+    done
+  else
+    require_channel "$channel" || return 1
+    jq --arg ch "$channel" '.[$ch]' "$REGISTRY"
+    echo "--- last 10 messages ---"
+    local file
+    file="$(channel_file "$channel")"
+    if [[ -f "$file" ]]; then
+      tail -n 10 "$file"
+    fi
+  fi
+}
+
+cmd_gc() {
+  local older_than_days=30
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --older-than) older_than_days="$2"; shift 2 ;;
+      *) echo "error: unknown gc flag: $1" >&2; return 1 ;;
+    esac
+  done
+
+  ensure_dirs
+
+  # Compute cutoff timestamp
+  local cutoff_ts
+  cutoff_ts=$(date -u -v-${older_than_days}d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "${older_than_days} days ago" +%Y-%m-%dT%H:%M:%SZ)
+
+  local removed=()
+  local ch_file ch last_ts
+  for ch_file in "$CHANNELS_DIR"/*.jsonl; do
+    [[ -f "$ch_file" ]] || continue
+    ch=$(basename "$ch_file" .jsonl)
+    last_ts=$(tail -n 1 "$ch_file" 2>/dev/null | jq -r '.ts // empty')
+    if [[ -z "$last_ts" ]]; then
+      # No messages ever — if older_than_days == 0, remove anyway; else skip
+      if [[ "$older_than_days" = "0" ]]; then
+        rm -f "$ch_file"
+        removed+=("$ch")
+      fi
+      continue
+    fi
+    if [[ "$last_ts" < "$cutoff_ts" || "$older_than_days" = "0" ]]; then
+      rm -f "$ch_file"
+      removed+=("$ch")
+    fi
+  done
+
+  # Prune registry entries for removed channels.
+  if [[ ${#removed[@]} -gt 0 ]]; then
+    local names_json
+    names_json=$(printf '%s\n' "${removed[@]}" | jq -R . | jq -s .)
+    registry_write 'reduce ($names[]) as $n (.; del(.[$n]))' --argjson names "$names_json"
+    echo "removed: ${removed[*]}"
+  else
+    echo "no channels removed"
+  fi
+}
+
+cmd_help() {
+  cat <<'EOF'
+Usage: catalyst-comms <command> [args]
+
+File-based agent communication channels. Data lives at
+${CATALYST_DIR:-$HOME/catalyst}/comms/.
+
+Commands:
+  join <ch> --as <name> [--capabilities S] [--parent P] [--orch O] [--ttl N] [--topic T]
+      Join a channel (auto-creates if missing). Idempotent re-joins update lastSeen.
+
+  send <ch> <body> --as <name> [--type TYPE] [--to N|all] [--re MSG_ID]
+      Append a message to the channel log. Prints the message id to stdout.
+      TYPE is one of: proposal, question, answer, ack, info, attention, done
+
+  poll <ch> [--since N] [--filter-to N] [--wait] [--limit N]
+      Stream matching messages to stdout as JSONL.
+
+  done <ch> --as <name>
+      Post a done message and check quorum.
+      Exits 0 iff every active participant has posted done.
+
+  leave <ch> --as <name>
+      Post a leave notice and mark participant status=left.
+
+  channels
+      Print the full channel registry as JSON.
+
+  watch <ch>
+      Human live tail: color-coded agent names, type, body.
+
+  status [<ch>]
+      Print summary or per-channel detail.
+
+  gc [--older-than DAYS]
+      Remove channels whose last message is older than DAYS (default 30).
+      --older-than 0 removes all channels.
+
+  help | --help | -h
+      Print this help text.
+EOF
+}
+
+# ─── Dispatch ───────────────────────────────────────────────────────────────
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  join)      cmd_join "$@" ;;
+  send)      cmd_send "$@" ;;
+  poll)      cmd_poll "$@" ;;
+  done)      cmd_done "$@" ;;
+  leave)     cmd_leave "$@" ;;
+  channels)  cmd_channels "$@" ;;
+  watch)     cmd_watch "$@" ;;
+  status)    cmd_status "$@" ;;
+  gc)        cmd_gc "$@" ;;
+  help|--help|-h) cmd_help ;;
+  *)
+    echo "error: unknown command '$cmd'" >&2
+    echo "Run 'catalyst-comms help' for usage." >&2
+    exit 1
+    ;;
+esac
