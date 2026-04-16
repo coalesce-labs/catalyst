@@ -1,6 +1,5 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "fs";
-import { join, basename, resolve as resolvePath } from "path";
-import { execSync } from "child_process";
+import { join, basename } from "path";
 import { checkProcessAlive } from "./liveness";
 import { parseOutputJson, analyticsPath, type WorkerAnalytics } from "./output-parser";
 import { readWorkerActivity, type WorkerActivity } from "./stream-reader";
@@ -73,17 +72,17 @@ export interface WorkerState {
 
 export type { WorkerActivity } from "./stream-reader";
 
-export interface OrchestratorAnalytics {
+interface OrchestratorAnalytics {
   id: string;
   workers: Record<string, WorkerAnalytics | null>;
 }
 
-export interface AnalyticsSnapshot {
+interface AnalyticsSnapshot {
   generatedAt: string;
   orchestrators: OrchestratorAnalytics[];
 }
 
-export interface SessionDetail {
+interface SessionDetail {
   orchId: string;
   orchStartedAt: string;
   worker: WorkerState;
@@ -112,14 +111,14 @@ export interface OrchestratorState {
   attention: unknown[];
 }
 
-export interface WorkspaceStats {
+interface WorkspaceStats {
   sessionCount: number;
   activeCount: number;
   totalCost: number;
   lastActivity: string;
 }
 
-export interface WorkspaceGroup {
+interface WorkspaceGroup {
   workspace: string;
   orchestrators: OrchestratorState[];
   stats: WorkspaceStats;
@@ -169,7 +168,7 @@ function isOrchestratorDir(candidate: string): boolean {
   }
 }
 
-export interface ScannedOrchestrator {
+interface ScannedOrchestrator {
   path: string;
   workspace: string;
   /**
@@ -630,47 +629,3 @@ export function groupByWorkspace(snapshot: MonitorSnapshot): WorkspaceGroup[] {
   return groups;
 }
 
-function assertWorktreeInside(baseDir: string, worktreePath: string): void {
-  const absBase = resolvePath(baseDir);
-  const absPath = resolvePath(worktreePath);
-  if (!absPath.startsWith(absBase + "/") && absPath !== absBase) {
-    throw new Error(
-      `worktreePath ${worktreePath} escapes baseDir ${baseDir}`,
-    );
-  }
-}
-
-export function getLastCommit(
-  worktreePath: string,
-  options: { baseDir?: string } = {},
-): string | null {
-  if (options.baseDir) assertWorktreeInside(options.baseDir, worktreePath);
-  try {
-    return execSync("git log --oneline -1", {
-      cwd: worktreePath,
-      timeout: 3000,
-    })
-      .toString()
-      .trim();
-  } catch (err) {
-    console.error(`[state-reader] git log failed for ${worktreePath}:`, err);
-    return null;
-  }
-}
-
-export function getUncommittedChanges(
-  worktreePath: string,
-  options: { baseDir?: string } = {},
-): number {
-  if (options.baseDir) assertWorktreeInside(options.baseDir, worktreePath);
-  try {
-    const out = execSync("git status --short", {
-      cwd: worktreePath,
-      timeout: 3000,
-    });
-    return out.toString().trim().split("\n").filter(Boolean).length;
-  } catch (err) {
-    console.error(`[state-reader] git status failed for ${worktreePath}:`, err);
-    return 0;
-  }
-}

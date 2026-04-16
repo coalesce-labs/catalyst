@@ -652,6 +652,14 @@ fi
 The orchestrator polls worker status on a regular interval. Use `/loop` if available, otherwise poll
 manually.
 
+**Ground truth is git + PR, not the signal file.** The signal file is *advisory* — it reports
+the worker's self-described phase. Authoritative decisions (done, stalled) come from
+`gh pr view` / `gh pr list --head <branch>` and `git rev-list --count <base>..<branch>`. A
+merged upstream PR on a worker's branch means the worker is done, regardless of what the signal
+file says. A worker with a live upstream PR is not stalled even if its signal file is stale.
+When the signal disagrees with git/PR, the orchestrator reconciles the signal from the
+authoritative source.
+
 **Monitoring loop (every 2-3 minutes):**
 
 ```bash
@@ -723,11 +731,34 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
   PR_URL=$(jq -r '.pr.url // empty' "$WORKER_SIGNAL")
   MERGED_AT=$(jq -r '.pr.mergedAt // empty' "$WORKER_SIGNAL")
 
-  # Skip if no PR yet, already merged, or already in a terminal failure state
-  [ -z "$PR_NUMBER" ] && continue
+  # Skip terminal failure states and already-reconciled merges early.
   [ -n "$MERGED_AT" ] && continue
   [ "$W_STATUS" = "failed" ] && continue
   [ "$W_STATUS" = "stalled" ] && continue
+
+  # If the signal does not have a PR number, try to discover one from the worker's
+  # branch. This catches workers that merged their PR but died before writing
+  # pr.number to their signal file (the ADV-224 class of failure — CTL-32).
+  if [ -z "$PR_NUMBER" ]; then
+    WORKER_DIR="${WORKTREE_BASE}/${ORCH_NAME}-${TICKET}"
+    BRANCH=$(git -C "$WORKER_DIR" branch --show-current 2>/dev/null || echo "")
+    [ -z "$BRANCH" ] && continue
+    REPO_SLUG=$(git -C "$WORKER_DIR" remote get-url origin 2>/dev/null \
+      | sed -E 's|.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$|\1|')
+    [ -z "$REPO_SLUG" ] && continue
+
+    DISCOVERED=$(gh -R "$REPO_SLUG" pr list \
+      --head "$BRANCH" --state all \
+      --json number,state,mergedAt,url --limit 1 2>/dev/null || echo "[]")
+    PR_NUMBER=$(echo "$DISCOVERED" | jq -r '.[0].number // empty')
+    PR_URL=$(echo "$DISCOVERED" | jq -r '.[0].url // empty')
+    [ -z "$PR_NUMBER" ] && continue
+
+    # Record the discovery in the signal so future polls take the fast path.
+    jq --argjson n "$PR_NUMBER" --arg u "$PR_URL" \
+      '.pr = ((.pr // {}) | .number = ($n | tonumber) | .url = $u)' \
+      "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+  fi
 
   # Parse repo from PR URL (e.g. https://github.com/org/repo/pull/123)
   REPO=$(echo "$PR_URL" | sed -E 's|https://github.com/([^/]+/[^/]+)/pull/.*|\1|')
@@ -794,19 +825,56 @@ prematurely on a transient error).
 
 **Detect stalled workers and raise attention:**
 
+Before raising `stalled`, consult git + PR state. A stale signal file is not stall evidence on
+its own — if the worker's upstream branch has an OPEN or MERGED PR, the worker is progressing
+(or finished) regardless of what the signal file says. Only escalate when no authoritative
+source shows activity.
+
 ```bash
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
   TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
   W_STATUS=$(jq -r '.status' "$WORKER_SIGNAL")
   UPDATED=$(jq -r '.updatedAt' "$WORKER_SIGNAL")
 
-  # If no update in 15+ minutes and not in a terminal state, flag as stalled
+  # If no update in 15+ minutes and not in a terminal state, consider escalating.
   if [[ "$W_STATUS" != "done" && "$W_STATUS" != "failed" && "$W_STATUS" != "stalled" ]]; then
     STALE_CUTOFF=$(date -u -v-15M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
       || date -u -d "15 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
     if [[ "$UPDATED" < "$STALE_CUTOFF" ]]; then
-      "$STATE_SCRIPT" attention "${ORCH_NAME}" "stalled" "${TICKET}" \
-        "No progress for 15+ minutes (last update: ${UPDATED})"
+      # Before raising stalled, consult git + PR state. CTL-32: a stale signal
+      # on its own is not stall evidence when the PR shows real progress.
+      WORKER_DIR="${WORKTREE_BASE}/${ORCH_NAME}-${TICKET}"
+      BRANCH=$(git -C "$WORKER_DIR" branch --show-current 2>/dev/null || echo "")
+      COMMITS_AHEAD=0
+      HAS_UPSTREAM=0
+      PR_STATE="NONE"
+
+      if [ -n "$BRANCH" ]; then
+        COMMITS_AHEAD=$(git -C "$WORKER_DIR" rev-list --count \
+          "${BASE_BRANCH}..HEAD" 2>/dev/null || echo 0)
+        if git -C "$WORKER_DIR" ls-remote --heads origin "$BRANCH" 2>/dev/null | grep -q .; then
+          HAS_UPSTREAM=1
+        fi
+        REPO_SLUG=$(git -C "$WORKER_DIR" remote get-url origin 2>/dev/null \
+          | sed -E 's|.*github\.com[:/]([^/]+/[^/.]+)(\.git)?$|\1|')
+        if [ -n "$REPO_SLUG" ]; then
+          PR_STATE=$(gh -R "$REPO_SLUG" pr list --head "$BRANCH" --state all \
+            --json state --jq '.[0].state // "NONE"' 2>/dev/null || echo "NONE")
+        fi
+      fi
+
+      case "$PR_STATE" in
+        MERGED|OPEN)
+          # Worker's PR is the authoritative progress signal. Clear any prior
+          # stalled attention that the previous poll may have raised on signal
+          # staleness alone (Subloop B will reconcile to done if MERGED).
+          "$STATE_SCRIPT" resolve-attention "${ORCH_NAME}" "${TICKET}" 2>/dev/null || true
+          ;;
+        *)
+          "$STATE_SCRIPT" attention "${ORCH_NAME}" "stalled" "${TICKET}" \
+            "No progress for 15+ minutes (last update: ${UPDATED}); branch=${BRANCH:-?} commits=${COMMITS_AHEAD} pushed=${HAS_UPSTREAM} pr=${PR_STATE}"
+          ;;
+      esac
     fi
   fi
 done

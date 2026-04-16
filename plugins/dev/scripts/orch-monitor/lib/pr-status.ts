@@ -66,6 +66,55 @@ function normalizeState(raw: unknown): PrStatus["state"] {
   return "UNKNOWN";
 }
 
+interface PrByBranchResult {
+  number: number;
+  state: PrStatus["state"];
+  mergedAt: string | null;
+  url: string;
+}
+
+export async function fetchPrForBranch(
+  repo: string,
+  branch: string,
+  runner: Runner,
+): Promise<PrByBranchResult | null> {
+  const res = await runner([
+    "gh",
+    "pr",
+    "list",
+    "--repo",
+    repo,
+    "--head",
+    branch,
+    "--state",
+    "all",
+    "--json",
+    "number,state,mergedAt,url",
+    "--limit",
+    "1",
+  ]);
+  if (!res.ok) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(res.stdout) as unknown;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const first: unknown = parsed[0];
+  if (typeof first !== "object" || first === null) return null;
+  const f = first as Record<string, unknown>;
+  if (typeof f.number !== "number") return null;
+  const mergedAt =
+    typeof f.mergedAt === "string" && f.mergedAt.length > 0 ? f.mergedAt : null;
+  return {
+    number: f.number,
+    state: normalizeState(f.state),
+    mergedAt,
+    url: typeof f.url === "string" ? f.url : "",
+  };
+}
+
 export function createPrStatusFetcher(
   opts: CreatePrStatusFetcherOptions = {},
 ): PrStatusFetcher {
