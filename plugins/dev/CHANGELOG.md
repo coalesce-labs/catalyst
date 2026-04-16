@@ -1,9 +1,18 @@
 # Changelog
 
-## [6.39.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.38.0...catalyst-dev-v6.39.0) (2026-04-16)
+## [6.39.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.38.0...catalyst-dev-v6.39.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Orchestrator Launch Failure Detection
+
+Workers that die immediately after dispatch (bad flags, environment errors) are now detected within 30 seconds instead of waiting 15 minutes for the stalled-worker detector. The orchestrator runs a batch health check after each dispatch wave, verifying worker PIDs and automatically flagging dead-on-arrival processes as failed with attention items.
 
 
-### Features
+
+### PRs
 
 * **dev:** detect worker launch failures within 30s of dispatch (CTL-87) ([#184](https://github.com/coalesce-labs/catalyst/issues/184)) ([c74613b](https://github.com/coalesce-labs/catalyst/commit/c74613b11217def5fe06ac66b3808d7018ed1d96))
 
