@@ -294,12 +294,14 @@ merge_sha=$(git rev-parse HEAD)
 If ticket found and not using `--no-update`:
 
 ```bash
-# Verify linearis is available
-# If Linearis CLI is available:
-# 1. Update ticket status to stateMap.done from config
-# 2. Add a comment with PR number, merge commit, and base branch
-# Use `linearis issues usage` and `linearis comments usage` for exact syntax.
-# Skip silently if CLI not available.
+# Use the shared transition helper (CTL-69). It reads stateMap from
+# `.catalyst/config.json`, is idempotent, and silently skips when the
+# linearis CLI is not installed.
+"${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+  --ticket "$ticket_id" --transition done --config .catalyst/config.json
+
+# Then add a comment with PR number, merge commit, and base branch.
+# Use `linearis comments usage` for exact syntax. Skip silently if CLI missing.
 ```
 
 ### 11. Delete local branch and update base

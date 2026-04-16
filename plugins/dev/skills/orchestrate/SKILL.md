@@ -68,6 +68,7 @@ fi
 | `--interactive`          | Include PM intake phase before orchestration                           |
 | `--prd <path>`           | Run PRD review panel + ticket creation before orchestration            |
 | `--dry-run`              | Show wave plan without executing                                       |
+| `--state-on-merge <name>` | Linear state to set on PR merge. Default: `stateMap.done` (typically "Done") |
 
 ## Configuration
 
@@ -786,10 +787,20 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
         --arg w "${TICKET}" --argjson pr "$PR_NUMBER" --arg mt "$PR_MERGED_AT" \
         '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-pr-merged", detail:{pr:$pr, mergedAt:$mt}}')"
 
-      # Transition Linear ticket (safety net — workers now do this themselves;
-      # this is idempotent in case the worker exited before transitioning)
-      LINEAR_DONE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' "$CONFIG_FILE")
-      linearis issues update "${TICKET}" --status "${LINEAR_DONE}" 2>/dev/null || true
+      # Transition Linear ticket via the shared helper (CTL-69). The helper
+      # reads stateMap from `.catalyst/config.json`, is idempotent, and
+      # respects --state-on-merge when the operator wants a non-default
+      # state (e.g., "Shipped"). Workers now drive this themselves on merge;
+      # this call is a safety net for cases where the worker exited early.
+      STATE_ON_MERGE_FLAG=""
+      if [ -n "${STATE_ON_MERGE:-}" ]; then
+        STATE_ON_MERGE_FLAG="--state ${STATE_ON_MERGE}"
+      fi
+      "${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+        --ticket "${TICKET}" \
+        --transition done \
+        --config "$CONFIG_FILE" \
+        ${STATE_ON_MERGE_FLAG} >/dev/null 2>&1 || true
       ;;
 
     CLOSED)
@@ -1237,6 +1248,50 @@ The orchestrator manages Linear state transitions as a safety net:
 
 The orchestrator also adds comments to tickets for visibility using the Linearis CLI (run
 `linearis comments usage` for syntax).
+
+### Single source of truth: `linear-transition.sh`
+
+All Linear state transitions (by the orchestrator's safety net AND by workers at end of
+`/oneshot`) go through `plugins/dev/scripts/linear-transition.sh`. It reads `stateMap` from
+`.catalyst/config.json`, is idempotent (no-op when the ticket is already in the target state),
+and exits 0 when the `linearis` CLI is not installed (graceful skip).
+
+```bash
+# Transition via transition-key (reads stateMap.done from config):
+"${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+  --ticket PROJ-123 --transition done --config .catalyst/config.json
+
+# Override with an explicit state name (e.g., --state-on-merge "Shipped"):
+"${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+  --ticket PROJ-123 --state "Shipped" --config .catalyst/config.json
+```
+
+The `--state-on-merge` flag on orchestrate is passed through to this helper whenever it is set.
+
+### Retroactive bulk-close: `orchestrate-bulk-close`
+
+For runs that predated the state-transition wiring (or where the orchestrator's poll loop exited
+before reconciling tickets), run the bulk-close helper. It walks `workers/*.json`, inspects each
+PR via `gh`, and transitions tickets via `linear-transition.sh`:
+
+- Merged PR with non-empty diff → `stateMap.done`
+- Merged PR with zero diff (subsumed) → `stateMap.canceled`
+- No PR, signal `status=done` (zero-scope) → `stateMap.canceled`
+- Worker still in progress → skip (bulk-close is for reconciliation only)
+
+```bash
+# Preview what the helper would do (no changes):
+plugins/dev/scripts/orchestrate-bulk-close --orch-dir ~/catalyst/runs/<orch-name> --dry-run
+
+# Actually transition tickets:
+plugins/dev/scripts/orchestrate-bulk-close --orch-dir ~/catalyst/runs/<orch-name>
+
+# JSON summary for scripting:
+plugins/dev/scripts/orchestrate-bulk-close --orch-dir ~/catalyst/runs/<orch-name> --json
+```
+
+Flags mirror orchestrate: `--state-on-merge <name>` and `--state-on-canceled <name>` override the
+respective defaults.
 
 ## Named Orchestrators & Remote Control
 
