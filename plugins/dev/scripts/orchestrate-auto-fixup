@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+# orchestrate-auto-fixup - Auto-dispatch fix-up workers for PRs stuck in BLOCKED (CTL-64).
+#
+# Runs as part of the orchestrator's Phase 4 monitoring cycle. For each non-terminal
+# worker signal whose PR has been sitting in state=OPEN, mergeStateStatus=BLOCKED for
+# at least --stable-minutes, classify the reason and take action:
+#
+#   - checks-failing     → raise `checks-failing` attention (the worker's own poll
+#                          loop or a revive handles CI failures; escalating here
+#                          surfaces long-running ones)
+#   - threads-unresolved → auto-dispatch `orchestrate-fixup` with an issues list
+#                          composed from the unresolved review thread comments
+#                          (up to --max-fixups iterations per worker)
+#   - review-required    → raise `review-required` attention (only a human can
+#                          approve)
+#   - blocked-unknown    → raise `blocked-unknown` attention (state does not
+#                          match any classifier — surface for human triage)
+#
+# Usage:
+#   orchestrate-auto-fixup --orch-dir <path> --orch-id <id>
+#                          [--stable-minutes <n>]    # default 10
+#                          [--max-fixups <n>]        # default 2
+#                          [--dry-run]
+#
+# Outputs a single-line JSON summary on stdout:
+#   {"checked":N,"dispatched":M,"escalated":K,"skipped":S}
+#
+# Environment overrides:
+#   CATALYST_STATE_SCRIPT              path to catalyst-state.sh (default: sibling)
+#   CATALYST_AUTO_FIXUP_GH_BIN         gh binary (default: `gh` on PATH)
+#   CATALYST_AUTO_FIXUP_DISPATCH_BIN   orchestrate-fixup path (default: sibling)
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+GH_BIN="${CATALYST_AUTO_FIXUP_GH_BIN:-gh}"
+DISPATCH_BIN="${CATALYST_AUTO_FIXUP_DISPATCH_BIN:-${SCRIPT_DIR}/orchestrate-fixup}"
+
+ORCH_DIR=""
+ORCH_ID=""
+STABLE_MINUTES=10
+MAX_FIXUPS=2
+DRY_RUN=0
+
+usage() {
+  sed -n '2,33p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir)       ORCH_DIR="$2"; shift 2 ;;
+    --orch-id)        ORCH_ID="$2"; shift 2 ;;
+    --stable-minutes) STABLE_MINUTES="$2"; shift 2 ;;
+    --max-fixups)     MAX_FIXUPS="$2"; shift 2 ;;
+    --dry-run)        DRY_RUN=1; shift ;;
+    -h|--help)        usage 0 ;;
+    *)                echo "unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
+[ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
+[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Seconds since the given ISO timestamp, or 999999 if missing/unparseable.
+seconds_since() {
+  local ts="$1"
+  [ -z "$ts" ] && { echo 999999; return; }
+  local then
+  then=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null \
+        || date -u -d "$ts" +%s 2>/dev/null \
+        || echo "")
+  [ -z "$then" ] && { echo 999999; return; }
+  local now; now=$(date -u +%s)
+  echo $(( now - then ))
+}
+
+# Emit a state-script call (attention, event, etc.). Silent on missing script
+# or dry-run.
+emit_state() {
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  [ -x "$STATE_SCRIPT" ] || return 0
+  "$STATE_SCRIPT" "$@" >/dev/null 2>&1 || true
+}
+
+# Parse owner/repo from a github PR URL.
+parse_repo() {
+  local url="$1"
+  echo "$url" | sed -nE 's|https?://github\.com/([^/]+)/([^/]+)/pull/.*|\1/\2|p'
+}
+
+# Write a jq-style expression into the given signal file atomically.
+# Usage: update_signal <signal_file> <jq_expr> [jq_args...]
+update_signal() {
+  local signal="$1"; shift
+  local expr="$1"; shift
+  jq "$@" "$expr" "$signal" > "${signal}.tmp" && mv "${signal}.tmp" "$signal"
+}
+
+# Classify the current PR-view JSON into one of:
+#   ci-running | checks-failing | threads-unresolved | review-required | blocked-unknown
+# stdout is the classifier. Reads $PR_VIEW (file path) and $UNRESOLVED_THREAD_COUNT.
+classify_blocked() {
+  local pr_view_json="$1" unresolved_count="$2"
+
+  # Check for any in-progress required checks first — we should wait.
+  local running_count
+  running_count=$(jq -r '[.statusCheckRollup[]? | select(.status=="IN_PROGRESS" or .status=="QUEUED" or .status=="PENDING" or .status=="WAITING")] | length' "$pr_view_json" 2>/dev/null || echo 0)
+  if [ "${running_count:-0}" -gt 0 ]; then
+    echo "ci-running"
+    return
+  fi
+
+  # Any failing required check?
+  local failing_count
+  failing_count=$(jq -r '[.statusCheckRollup[]? | select(.conclusion=="FAILURE" or .conclusion=="TIMED_OUT" or .conclusion=="CANCELLED" or .conclusion=="ACTION_REQUIRED" or .conclusion=="STARTUP_FAILURE")] | length' "$pr_view_json" 2>/dev/null || echo 0)
+  if [ "${failing_count:-0}" -gt 0 ]; then
+    echo "checks-failing"
+    return
+  fi
+
+  if [ "${unresolved_count:-0}" -gt 0 ]; then
+    echo "threads-unresolved"
+    return
+  fi
+
+  local review_dec
+  review_dec=$(jq -r '.reviewDecision // empty' "$pr_view_json" 2>/dev/null || echo "")
+  if [ "$review_dec" = "REVIEW_REQUIRED" ]; then
+    echo "review-required"
+    return
+  fi
+
+  echo "blocked-unknown"
+}
+
+# Compose the --issues string for orchestrate-fixup from unresolved thread JSON.
+# Reads thread file, emits one line per thread in `path:line: [author]: body`
+# format. Bodies truncated at 200 chars; newlines collapsed to spaces.
+compose_issues() {
+  local threads_file="$1"
+  jq -r '
+    .data.repository.pullRequest.reviewThreads.nodes[]
+    | select(.isResolved == false and .isOutdated == false)
+    | . as $t
+    | ($t.comments.nodes[0] // {author:{login:"reviewer"}, body:"(no body)"}) as $c
+    | ($c.body // "")
+    | gsub("\r?\n"; " ")
+    | .[0:200] as $body
+    | ($t.path // "?") + ":" + (($t.line // 0) | tostring)
+      + ": [" + ($c.author.login // "reviewer") + "]: " + $body
+  ' "$threads_file" 2>/dev/null
+}
+
+# Count unresolved, non-outdated review threads.
+count_unresolved_threads() {
+  local threads_file="$1"
+  jq -r '[.data.repository.pullRequest.reviewThreads.nodes[]? | select(.isResolved == false and .isOutdated == false)] | length' "$threads_file" 2>/dev/null || echo 0
+}
+
+fetch_pr_view() {
+  local repo="$1" pr_num="$2" out="$3"
+  "$GH_BIN" -R "$repo" pr view "$pr_num" \
+    --json state,mergeStateStatus,reviewDecision,statusCheckRollup \
+    > "$out" 2>/dev/null
+}
+
+fetch_threads() {
+  local repo="$1" pr_num="$2" out="$3"
+  local owner name
+  owner="${repo%%/*}"; name="${repo##*/}"
+  # The GraphQL query asks for enough thread metadata to compose issue lines.
+  local query='query($owner: String!, $repo: String!, $pr: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { reviewThreads(first: 100) { nodes { isResolved isOutdated path line comments(first: 3) { nodes { author { login } body } } } } } } }'
+  "$GH_BIN" api graphql \
+    -f query="$query" \
+    -F owner="$owner" \
+    -F repo="$name" \
+    -F pr="$pr_num" \
+    > "$out" 2>/dev/null
+}
+
+# ─── Main loop ────────────────────────────────────────────────────────────────
+
+CHECKED=0
+DISPATCHED=0
+ESCALATED=0
+SKIPPED=0
+
+TERMINAL=" done failed stalled "
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+shopt -s nullglob
+for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
+  TICKET=$(jq -r '.ticket // empty' "$SIGNAL" 2>/dev/null || echo "")
+  [ -z "$TICKET" ] && continue
+
+  STATUS=$(jq -r '.status // empty' "$SIGNAL" 2>/dev/null || echo "")
+  if [[ "$TERMINAL" == *" $STATUS "* ]]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  PR_NUMBER=$(jq -r '.pr.number // empty' "$SIGNAL" 2>/dev/null || echo "")
+  PR_URL=$(jq -r '.pr.url // empty' "$SIGNAL" 2>/dev/null || echo "")
+  if [ -z "$PR_NUMBER" ] || [ -z "$PR_URL" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  REPO=$(parse_repo "$PR_URL")
+  if [ -z "$REPO" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  CHECKED=$((CHECKED+1))
+
+  PR_VIEW="${TMP_DIR}/pr-${TICKET}.json"
+  fetch_pr_view "$REPO" "$PR_NUMBER" "$PR_VIEW" || { SKIPPED=$((SKIPPED+1)); continue; }
+
+  if [ ! -s "$PR_VIEW" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  STATE=$(jq -r '.state // "UNKNOWN"' "$PR_VIEW")
+  MERGE_STATE=$(jq -r '.mergeStateStatus // "UNKNOWN"' "$PR_VIEW")
+
+  # Not OPEN — the orchestrator's PR-view safety net handles MERGED/CLOSED,
+  # and we should clear any stale blockedSince so future BLOCKED episodes
+  # start their clock fresh.
+  if [ "$STATE" != "OPEN" ]; then
+    if [ "$DRY_RUN" -ne 1 ]; then
+      update_signal "$SIGNAL" '.blockedSince = null'
+    fi
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # Not BLOCKED — clear the clock, move on.
+  if [ "$MERGE_STATE" != "BLOCKED" ]; then
+    if [ "$DRY_RUN" -ne 1 ]; then
+      update_signal "$SIGNAL" '.blockedSince = null'
+    fi
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # BLOCKED: record first-observation timestamp if missing, then wait one cycle.
+  BLOCKED_SINCE=$(jq -r '.blockedSince // empty' "$SIGNAL")
+  if [ -z "$BLOCKED_SINCE" ]; then
+    if [ "$DRY_RUN" -ne 1 ]; then
+      TS=$(now_iso)
+      update_signal "$SIGNAL" '.blockedSince = $ts' --arg ts "$TS"
+    fi
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # Still within the stability window — defer.
+  AGE=$(seconds_since "$BLOCKED_SINCE")
+  STABLE_SECONDS=$(( STABLE_MINUTES * 60 ))
+  if [ "$AGE" -lt "$STABLE_SECONDS" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # Classify. Threads fetch only matters if checks are clean.
+  THREADS_FILE="${TMP_DIR}/threads-${TICKET}.json"
+  UNRESOLVED=0
+  if fetch_threads "$REPO" "$PR_NUMBER" "$THREADS_FILE"; then
+    UNRESOLVED=$(count_unresolved_threads "$THREADS_FILE")
+  fi
+
+  CLASSIFICATION=$(classify_blocked "$PR_VIEW" "$UNRESOLVED")
+
+  case "$CLASSIFICATION" in
+    ci-running)
+      # Transient — don't act; next tick will re-check.
+      SKIPPED=$((SKIPPED+1))
+      continue
+      ;;
+
+    checks-failing)
+      MSG="PR #${PR_NUMBER} is BLOCKED with failing required checks (${AGE}s stable)"
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[dry-run] ${TICKET}: would escalate (checks-failing)" >&2
+      else
+        emit_state attention "$ORCH_ID" "checks-failing" "$TICKET" "$MSG"
+      fi
+      ESCALATED=$((ESCALATED+1))
+      ;;
+
+    review-required)
+      MSG="PR #${PR_NUMBER} is BLOCKED awaiting human review (${AGE}s stable)"
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[dry-run] ${TICKET}: would escalate (review-required)" >&2
+      else
+        emit_state attention "$ORCH_ID" "review-required" "$TICKET" "$MSG"
+      fi
+      ESCALATED=$((ESCALATED+1))
+      ;;
+
+    threads-unresolved)
+      FIXUP_ATTEMPTS=$(jq -r '.fixupAttempts // 0' "$SIGNAL")
+      if [ "$FIXUP_ATTEMPTS" -ge "$MAX_FIXUPS" ]; then
+        MSG="Auto-fixup budget exhausted (${FIXUP_ATTEMPTS}/${MAX_FIXUPS}) on PR #${PR_NUMBER}"
+        if [ "$DRY_RUN" -eq 1 ]; then
+          echo "[dry-run] ${TICKET}: would escalate (budget exhausted)" >&2
+        else
+          emit_state attention "$ORCH_ID" "fixup-budget-exhausted" "$TICKET" "$MSG"
+        fi
+        ESCALATED=$((ESCALATED+1))
+        continue
+      fi
+
+      ISSUES=$(compose_issues "$THREADS_FILE")
+      if [ -z "$ISSUES" ]; then
+        ISSUES="Resolve all unresolved review threads on PR #${PR_NUMBER}"
+      fi
+
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[dry-run] ${TICKET}: would dispatch fixup with $UNRESOLVED threads" >&2
+        DISPATCHED=$((DISPATCHED+1))
+        continue
+      fi
+
+      if ! "$DISPATCH_BIN" "$TICKET" \
+            --issues "$ISSUES" \
+            --pr "$PR_NUMBER" \
+            --orch "$ORCH_ID" \
+            --orch-dir "$ORCH_DIR" \
+            --dispatch >/dev/null 2>&1; then
+        MSG="Failed to dispatch auto-fixup for PR #${PR_NUMBER}"
+        emit_state attention "$ORCH_ID" "fixup-dispatch-failed" "$TICKET" "$MSG"
+        ESCALATED=$((ESCALATED+1))
+        continue
+      fi
+
+      TS=$(now_iso)
+      NEW_ATTEMPTS=$((FIXUP_ATTEMPTS+1))
+      update_signal "$SIGNAL" \
+        '.fixupAttempts = $a | .lastFixupDispatchedAt = $ts | .updatedAt = $ts' \
+        --argjson a "$NEW_ATTEMPTS" --arg ts "$TS"
+
+      emit_state event "$(jq -nc \
+        --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+        --argjson pr "$PR_NUMBER" --argjson a "$NEW_ATTEMPTS" \
+        '{ts:$ts, orchestrator:$orch, worker:$w,
+          event:"worker-auto-fixup-dispatched",
+          detail:{pr:$pr, attempt:$a}}')"
+
+      DISPATCHED=$((DISPATCHED+1))
+      ;;
+
+    blocked-unknown)
+      MSG="PR #${PR_NUMBER} is BLOCKED with no identifiable cause (${AGE}s stable)"
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[dry-run] ${TICKET}: would escalate (blocked-unknown)" >&2
+      else
+        emit_state attention "$ORCH_ID" "blocked-unknown" "$TICKET" "$MSG"
+      fi
+      ESCALATED=$((ESCALATED+1))
+      ;;
+  esac
+done
+
+jq -nc \
+  --argjson c "$CHECKED" \
+  --argjson d "$DISPATCHED" \
+  --argjson e "$ESCALATED" \
+  --argjson s "$SKIPPED" \
+  '{checked:$c, dispatched:$d, escalated:$e, skipped:$s}'
