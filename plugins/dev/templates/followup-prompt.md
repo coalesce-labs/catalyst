@@ -54,8 +54,10 @@ known parent to reference.
    - <finding 2>
    ```
 
-9. **Worker contract ends at "PR open + auto-merge armed + CI triggered + one settle pass"** —
-   same as a normal worker. The orchestrator owns merge confirmation.
+9. **Worker contract ends at `state=MERGED`** (CTL-80) — same as a normal worker. After PR open
+   and auto-merge armed, poll `gh pr view --json state,mergeStateStatus,mergedAt` every 30–60s,
+   resolve BEHIND/CI/review blockers, and only exit when `state=MERGED` and you have written
+   `pr.mergedAt` + `status: "done"` to your signal file.
 
 ## What NOT to do
 
@@ -64,4 +66,5 @@ known parent to reference.
   tests missed something.
 - Do NOT omit the `followUpTo` link from your signal file or PR description — traceability is
   the whole point of this pattern.
-- Do NOT poll-until-MERGED — the orchestrator owns that, same as any other worker.
+- Do NOT exit at `pr-created` if the PR has not merged — under CTL-80 the worker owns the
+  poll-until-MERGED loop.

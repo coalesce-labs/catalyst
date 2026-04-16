@@ -26,8 +26,8 @@ Each phase reads the previous phase's artifact plus anything it needs from workf
 Phase 2 (plan)      reads research doc path from workflow context
 Phase 3 (implement) reads plan doc path from workflow context
 Phase 4 (validate)  reads plan doc + the implementation diff
-Phase 5 (ship)      reads everything above to write the PR description
-Phase 6 (merge)     reads the PR number and waits for CI
+Phase 5 (ship)      reads everything above to write the PR description, then
+                    polls gh pr view until state=MERGED before exiting
 ```
 
 This is why "the thoughts/ directory is the handoff mechanism" — artifacts live there so **any future session**, not just this one, can pick up where the current one left off.

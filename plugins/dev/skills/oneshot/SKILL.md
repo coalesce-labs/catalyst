@@ -185,7 +185,7 @@ if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
 fi
 ```
 
-**When worker arms auto-merge** (right before Phase 5 exit), record the arming timestamp:
+**When worker arms auto-merge** (right after PR open, before entering the poll loop), record the arming timestamp:
 
 ```bash
 AUTO_MERGE_ARMED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -199,7 +199,7 @@ if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
 fi
 ```
 
-**When CI is observed passing during the settle window**, update signal + global state:
+**When CI is observed passing during the merge poll loop**, update signal + global state:
 
 ```bash
 if [ -f "$SIGNAL_FILE" ]; then
@@ -211,20 +211,21 @@ if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
 fi
 ```
 
-**When PR is merged**, the signal is written by the ORCHESTRATOR's Phase 4 poll loop (or, in
-standalone mode, by `/merge-pr` in the current session) — **not** by the worker. This is
-because the worker subprocess reliably exits at its final tool-use, before the merge actually
-completes. A worker that writes `mergedAt` is writing a lie. The orchestrator writes both the
-signal file and the global state with the authoritative `mergedAt` sourced from
-`gh pr view --json mergedAt`:
+**When PR is merged**, the WORKER writes the signal — the worker is responsible for polling
+`gh pr view --json state,mergedAt` until `state=MERGED` and only then writing `pr.mergedAt`
+and `status=done`. The orchestrator's poll loop is a safety net for stalled workers, not the
+primary merge confirmation. The authoritative `mergedAt` is sourced from `gh pr view --json
+mergedAt`:
 
 ```bash
-# Executed by the orchestrator (NOT the worker) after confirming state=MERGED
+# Executed by the WORKER after its poll loop confirms state=MERGED
 PR_MERGED_AT=$(gh -R "$REPO" pr view "$PR_NUMBER" --json mergedAt --jq '.mergedAt')
 jq --arg ts "$PR_MERGED_AT" '.pr.ciStatus = "merged" | .pr.mergedAt = $ts | .status = "done"' \
   "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
-"$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET_ID" \
-  ".pr.ciStatus = \"merged\" | .pr.mergedAt = \"${PR_MERGED_AT}\" | .status = \"done\""
+if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
+  "$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET_ID" \
+    ".pr.ciStatus = \"merged\" | .pr.mergedAt = \"${PR_MERGED_AT}\" | .status = \"done\""
+fi
 ```
 
 **When worker reaches terminal state** (done or failed):
@@ -256,11 +257,9 @@ fi
 | 5 start | `shipping` |
 | 5 PR opened | `pr-created` + `pr.prOpenedAt` + `pr.ciStatus: "pending"` |
 | 5 auto-merge armed | `pr-created` + `pr.autoMergeArmedAt` |
-| 5 settle window observed CI pass | `pr.ciStatus: "passing"` |
-| 5 worker exit (contract fulfilled) | `pr-created` — terminal state for the worker |
-| 6 start (orchestrator or standalone /merge-pr) | `merging` |
-| 6 PR merged (written by orchestrator or /merge-pr, never the worker) | `pr.ciStatus: "merged"` + `pr.mergedAt` |
-| 6 complete | `done` |
+| 5 poll loop observed CI pass | `pr.ciStatus: "passing"` |
+| 5 poll loop entered (waiting on merge) | `merging` |
+| 5 PR merged (written by the worker after `gh pr view` returns state=MERGED) | `pr.ciStatus: "merged"` + `pr.mergedAt` + `status: "done"` |
 | Any failure | `failed` |
 
 ## Session Tracking
@@ -460,102 +459,99 @@ EXISTING_PR=$(gh pr list --head "$(git branch --show-current)" --json number --j
 - **If no PR exists**:
   - Run `/create-pr` (handles commit, push, PR creation, description, Linear linking)
 
-**Step 2: Arm Auto-Merge and Clear Blockers (Worker Contract Ends Here)**
+**Step 2: Arm Auto-Merge, Record PR Open, Begin Poll Loop**
 
-The **worker's success contract is**: PR open + auto-merge armed + CI triggered + no unresolved
-inline blockers. The worker does NOT poll until the PR is merged — the subprocess running this
-session reliably exits on the final tool-use emission regardless of any polling loop, so a
-worker-side poll-until-MERGED burns tokens and produces false signals. Poll-until-MERGED is the
-**orchestrator's responsibility** (see the orchestrate skill's Phase 4 monitoring loop); for a
-standalone (non-orchestrated) oneshot, see the "Standalone merge confirmation" subsection below.
-
-**Worker success criteria** (update signal file with these when satisfied):
-
-| Field                     | Value                                                  |
-| ------------------------- | ------------------------------------------------------ |
-| `pr.number`               | PR number                                              |
-| `pr.url`                  | PR URL                                                 |
-| `pr.prOpenedAt`           | ISO timestamp when PR was opened                       |
-| `pr.autoMergeArmedAt`     | ISO timestamp when auto-merge was armed (or `null`)    |
-| `pr.ciStatus`             | `pending` \| `passing` \| `failing` \| `unknown`       |
-| `status`                  | `pr-created` (terminal success for the worker)         |
-
-**Brief settle window** (address immediate inline blockers before exit):
-
-After creating the PR, wait ~3 minutes for CI and automated reviewers (Codex, security scanners)
-to post initial results, then do a short pass of blocker resolution. Do NOT loop waiting for
-MERGED.
+After `/create-pr` succeeds, immediately record the PR-open timestamp, optionally arm
+`gh pr merge --auto --squash --delete-branch`, then enter the **poll-until-merged loop** in
+Step 3. The worker does NOT exit until `gh pr view` returns `state=MERGED` with a real
+`mergedAt`.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 PR_NUMBER=<set by /create-pr>
 PR_OPENED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# Record PR opening in signal file immediately (do not wait for settle window)
+# Record PR opening in signal file immediately
 jq --arg ts "$PR_OPENED_AT" '.pr.prOpenedAt = $ts | .status = "pr-created"' \
   "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
 
-# Arm auto-merge (if not already) and record when
-gh pr merge $PR_NUMBER --squash --auto 2>/dev/null || true
-ARMED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-jq --arg ts "$ARMED_AT" '.pr.autoMergeArmedAt = $ts' \
-  "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
-
-# Short settle window (~3 min) — let CI start, let automated reviewers post first pass
-sleep 180
-
-# One pass of blocker resolution (NOT a loop):
-CI_STATUS=$(gh pr checks $PR_NUMBER --json state \
-  --jq '[.[].state] | unique | join(",")' 2>/dev/null || echo "PENDING")
-COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --jq 'length')
-
-# If automated reviewers left inline comments, address and push fixes ONCE.
-# Do not loop — the orchestrator will re-queue remediation if more issues appear.
-if [ "$COMMENT_COUNT" -gt 0 ]; then
-  # Run /review-comments $PR_NUMBER, resolve threads, push
-  :
+# Arm auto-merge (unless --no-merge was set)
+if [ -z "$NO_MERGE" ]; then
+  gh pr merge $PR_NUMBER --squash --auto --delete-branch 2>/dev/null || true
+  ARMED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq --arg ts "$ARMED_AT" '.pr.autoMergeArmedAt = $ts' \
+    "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
 fi
-
-# If CI already failed (not pending), investigate and push one fix attempt.
-if echo "$CI_STATUS" | grep -q "FAILURE"; then
-  # Analyze failure logs, fix, push
-  :
-fi
-
-# Record final ciStatus observation in signal file, then EXIT.
-jq --arg ci "${CI_STATUS:-pending}" \
-  '.pr.ciStatus = (if $ci == "" then "pending" else ($ci | ascii_downcase | sub("success";"passing") | sub("failure";"failing")) end)' \
-  "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
 ```
 
-After this, **return control** — the worker has fulfilled its contract. The orchestrator (or the
-standalone confirmation fallback below) owns everything from here: polling PR state until MERGED,
-transitioning Linear to Done, deleting branches, running teardown hooks.
+**Step 3: Poll Until Merged (Worker Contract — `state=MERGED` Required Before Exit)**
 
-**Why this split**: when oneshot runs as an orchestrator worker (dispatched via `claude -p`), the
-subprocess terminates when the model emits its final tool-use, regardless of how the prompt
-instructs the model to "keep polling." Any worker-side poll-until-MERGED loop is therefore a
-fiction that wastes tokens, produces misleading logs, and lets bugs like Codex races go
-undetected. Moving the long poll to the orchestrator fixes all of these.
+The **worker's success contract** is: `gh pr view --json state` returns `MERGED` and the worker
+has written `pr.mergedAt` + `status: "done"` to its signal file. Auto-merge alone is not the
+contract — auto-merge fails silently in many real scenarios (branch BEHIND main, CI failure
+after rebase, repos with `allow_update_branch: false`, blocking review threads, merge conflicts).
+The worker is responsible for diagnosing and resolving those blockers itself.
 
-**Step 3: Standalone Merge Confirmation (non-orchestrated oneshot only)**
-
-If this oneshot session is NOT running under an orchestrator (`CATALYST_ORCHESTRATOR_DIR` unset),
-the calling session itself is responsible for confirming merge. Use `/catalyst-dev:merge-pr` —
-its blocker-diagnosis loop is designed to run synchronously in the current session and will only
-exit when the PR is actually merged or a genuine human-gated blocker is hit.
+Transition signal status to `merging` and enter the poll loop:
 
 ```bash
-if [ -z "${CATALYST_ORCHESTRATOR_DIR:-}" ]; then
-  # Standalone mode — we own the long poll
-  /catalyst-dev:merge-pr
-fi
+# Transition signal to merging
+TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+jq --arg ts "$TS" '.status = "merging" | .phase = 5 | .updatedAt = $ts | .phaseTimestamps.merging = $ts' \
+  "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
 ```
 
-If the orchestrator IS in control (`CATALYST_ORCHESTRATOR_DIR` set), skip this — the orchestrator's
-Phase 4 monitoring loop handles polling, merge detection, Linear transition, and teardown.
+Poll cadence: every 30–60 seconds. On every iteration:
 
-**If `--no-merge` was set**, skip arming auto-merge and report PR status instead:
+1. **Check merge state**:
+   ```bash
+   PR_STATE=$(gh pr view $PR_NUMBER --json state,mergeStateStatus,mergedAt)
+   STATE=$(echo "$PR_STATE" | jq -r '.state')
+   MERGE_STATE=$(echo "$PR_STATE" | jq -r '.mergeStateStatus')
+   MERGED_AT=$(echo "$PR_STATE" | jq -r '.mergedAt')
+   ```
+
+2. **If `state == MERGED`**: write `pr.mergedAt`, `pr.ciStatus = "merged"`, `status = "done"` to
+   signal + global state, then exit successfully. This is the only successful exit path.
+
+3. **If `mergeStateStatus == BEHIND`**: the branch is behind base. Many repos disable GitHub's
+   auto-update (`allow_update_branch: false`), so the worker must update the branch itself:
+   ```bash
+   gh api -X PUT "repos/${REPO}/pulls/${PR_NUMBER}/update-branch" 2>&1 | head -5
+   ```
+   After update-branch returns, CI will re-run on the new commit. Continue polling.
+
+4. **If CI is failing** (mergeStateStatus `UNSTABLE`, `BLOCKED`, or any check `conclusion=failure`):
+   investigate the failure, push a fix, continue polling. Apply the same auto-fix budget as the
+   create-pr/CI handling above (max 3 distinct fix attempts per failure type).
+
+5. **If review comments / Codex threads have appeared**: address them via `/review-comments`
+   (resolve threads, push fixes), continue polling. The worker keeps doing this — there is no
+   "one settle pass" cap; if more comments arrive after the first pass, address them too.
+
+6. **If `mergeStateStatus == DIRTY`** (merge conflicts): attempt `gh pr checkout && git fetch &&
+   git rebase origin/<base>` and resolve mechanically when possible. If conflicts cannot be
+   resolved automatically, write `status: "stalled"` with a clear message and exit non-success —
+   this is a genuine human-gated blocker.
+
+7. **If `mergeStateStatus == BLOCKED` and the only remaining requirement is human review** (no
+   approvals available to the worker), write `status: "stalled"` with details of which approval
+   is missing and exit non-success.
+
+8. **Otherwise** (PENDING, HAS_HOOKS, UNKNOWN, hooks-pending, etc.): wait one cadence cycle and
+   re-poll.
+
+**Maximum wait**: there is no fixed timeout — the worker polls indefinitely while CI/checks are
+still progressing. Exit non-success only when a genuine human-gated blocker is identified
+(unresolvable conflict, required reviewer not the worker, branch protection requirement that
+cannot be satisfied).
+
+**On successful merge**, after writing the merged signal, run the post-merge cleanup that
+`/merge-pr` does (or invoke `/merge-pr` to do it): pull latest base, delete local branch, move
+Linear ticket to `stateMap.done`, save post-merge tasks. The orchestrator's Phase 4 loop is now a
+safety net that can re-dispatch a fix-up worker if the primary worker gets stuck.
+
+**If `--no-merge` was set**, skip Steps 2–3 entirely and report PR status instead:
 
 ```
 PR ready: https://github.com/org/repo/pull/{number}
@@ -569,28 +565,17 @@ Merge state: $mergeStateStatus
 Merge later with: /catalyst-dev:merge-pr
 ```
 
-**Linear**: `/create-pr` moves ticket to `stateMap.inReview` (default: "In Review"). The
-orchestrator (or standalone `/merge-pr`) moves it to `stateMap.done` on merge — the worker does
-NOT do this transition itself.
+**Linear**: `/create-pr` moves ticket to `stateMap.inReview` (default: "In Review"). The worker
+moves it to `stateMap.done` itself when its poll loop confirms `state=MERGED`.
 
-### Phase 6: Merge (Only When Auto-Merge is NOT Armed AND Non-Orchestrated)
+### Phase 6: (deprecated)
 
-When running under an orchestrator, skip Phase 6 entirely — the orchestrator's Phase 4 loop
-owns merge confirmation and teardown.
-
-When running standalone (no orchestrator) AND auto-merge is NOT armed, run merge-pr:
-
-```
-/catalyst-dev:merge-pr
-```
-
-**What happens:**
-
-- Runs `/merge-pr` which runs the blocker diagnosis loop (see `merge-blocker-diagnosis.md`) —
-  resolves any remaining blockers and only merges when all branch protection requirements are
-  satisfied
-- If blockers cannot be resolved, reports exactly what's needed and stops
-- Moves Linear ticket to `stateMap.done` (default: "Done")
+Phase 6 used to run `/merge-pr` separately. The poll-until-merged loop is now part of Phase 5
+Step 3 and runs in every oneshot invocation (orchestrated and standalone alike), unless
+`--no-merge` was set. The worker does not exit until the PR is merged or a genuine human-gated
+blocker is hit. `/merge-pr` is still useful as a standalone tool for merging an existing PR
+opened outside the oneshot flow, and oneshot may invoke it from Step 3 to handle post-merge
+cleanup; it is no longer a separate phase.
 
 ## Team Mode (Optional)
 
@@ -637,8 +622,8 @@ Phase 1: Research — spawns parallel sub-agents, writes to thoughts/shared/rese
 Phase 2: Plan — reads research doc, runs /create-plan, writes to thoughts/shared/plans/
 Phase 3: Implement — reads plan doc, runs /implement-plan (can use --team for agent teams)
 Phase 4: Validate — reads plan doc, runs /validate-plan + quality gates
-Phase 5: Ship — runs /create-pr, arms auto-merge, one settle-window pass
-Phase 6: Merge (standalone only) — runs /merge-pr blocker-diagnosis loop
+Phase 5: Ship — runs /create-pr, arms auto-merge, polls gh pr view until state=MERGED,
+         resolves BEHIND/CI/review blockers along the way, writes pr.mergedAt to signal
 ```
 
 ## Configuration
@@ -721,10 +706,12 @@ State transitions throughout the lifecycle:
 | 2 start                            | → planning   | `stateMap.planning`   | "In Progress" |
 | 3 start                            | → inProgress | `stateMap.inProgress` | "In Progress" |
 | 5 (PR created)                     | → inReview   | `stateMap.inReview`   | "In Review"   |
-| 6 (merged, standalone)             | → done       | `stateMap.done`       | "Done"        |
+| 5 (PR merged, written by worker)   | → done       | `stateMap.done`       | "Done"        |
 
-Under an orchestrator, the orchestrator transitions the ticket to `stateMap.done` when it
-observes the PR merged — not the worker.
+The worker transitions the ticket to `stateMap.done` itself when its poll loop confirms
+`state=MERGED`. The orchestrator's poll loop is a safety net: if the worker stalls before
+recording mergedAt, the orchestrator can detect a merged PR and reconcile state, but the worker
+is the primary recorder.
 
 ## Error Handling
 
@@ -781,16 +768,24 @@ error, context exhaustion):
 - **Use wiki-links** for cross-references between thoughts documents (e.g., `[[filename]]`), not
   full paths
 - **Phase 3 does NOT commit** — all git operations are deferred to Phase 5
-- **Phase 6 (merge) runs only in standalone mode** — under an orchestrator it is skipped;
-  use `--no-merge` (standalone) to opt out of the final merge
-- **Worker's success contract ends at "PR open + auto-merge armed + CI triggered"** — poll-until-
-  MERGED is the orchestrator's job (orchestrate Phase 4) or, in standalone mode, `/merge-pr`'s
-  blocker-diagnosis loop. The worker subprocess reliably exits on its final tool-use regardless
-  of polling language in the prompt, so a worker-side long poll produces false signals
-- **Automated reviewer comments are still the worker's job on its one settle-window pass** —
-  Codex, security scanners, and linters post inline comments that create unresolved threads.
-  On the short settle pass, address what's already posted. Further rounds of remediation are
-  handled by the orchestrator (it can re-dispatch the worker with remediation instructions)
+- **Worker's success contract is `state=MERGED`** — the worker polls
+  `gh pr view --json state,mergeStateStatus,mergedAt` every 30–60s and only exits successfully
+  when `state == "MERGED"` and it has written `pr.mergedAt` + `status: "done"` to its signal
+  file. Auto-merge alone is not the contract — auto-merge fails silently (BEHIND main, CI failure
+  after rebase, blocking review threads, repos with `allow_update_branch: false`); the worker
+  resolves those blockers itself in the poll loop
+- **Worker handles BEHIND by calling `gh api PUT /repos/{owner}/{repo}/pulls/{number}/update-branch`**
+  — many repos disable GitHub's auto-update, so auto-merge alone leaves PRs stuck. The worker
+  rebases via the API and continues polling
+- **Worker keeps resolving review comments and CI failures throughout the poll loop**, not just
+  in a one-shot settle window. Codex / security scanners / human reviewers may post comments
+  minutes after PR open or after a push; the worker addresses each new round and pushes fixes
+- **Worker exits non-success only on genuine human-gated blockers** — unresolvable merge
+  conflicts, required reviewer that the worker cannot satisfy, branch protection rule that
+  cannot be met. In those cases write `status: "stalled"` with details
+- **Orchestrator poll loop is now a safety net, not the primary merge confirmation** — if the
+  worker reliably writes `pr.mergedAt`, the orchestrator's poll loop is reconciliation only.
+  The orchestrator may still re-dispatch a fix-up worker if the primary worker exits stalled
 
 **IMPORTANT: Document Storage Rules**
 

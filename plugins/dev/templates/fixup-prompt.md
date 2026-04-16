@@ -51,18 +51,21 @@ ${ISSUES}
      "${SIGNAL_FILE}" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "${SIGNAL_FILE}"
    ```
 
-9. **One settle-window pass (~3 min)** — let CI re-run, check for new inline comments, address
-   anything already posted. Do NOT loop waiting for merge — the orchestrator owns merge
-   confirmation (see orchestrate Phase 4).
+9. **Poll until MERGED** (CTL-80 contract) — after pushing the fix-up commit, run a poll loop
+   on `gh pr view --json state,mergeStateStatus,mergedAt` every 30–60s. Resolve BEHIND with
+   `gh api -X PUT /repos/{owner}/{repo}/pulls/{n}/update-branch`. Resolve any further CI
+   failures or review comments by pushing fixes. Only exit when `state=MERGED`.
 
-10. **Exit** when the fix-up commit is pushed, threads are resolved, local gates pass, and the
-    settle window is done. Do NOT write `mergedAt` — the orchestrator owns that field.
+10. **On merge**, write `pr.mergedAt`, `pr.ciStatus = "merged"`, and `status = "done"` to your
+    signal file (sourced from `gh pr view --json mergedAt`), transition the Linear ticket to
+    Done, then exit successfully.
 
 ## What NOT to do
 
 - Do NOT file a new Linear ticket — this is recovery on the same ticket.
 - Do NOT create a new PR — push to the existing branch.
-- Do NOT transition the Linear ticket state — it should already be `In Review`.
 - Do NOT force-push unless the orchestrator explicitly instructed you to (history rewrites break
   review threads).
-- Do NOT poll-until-MERGED — you will exit before the merge actually lands.
+- Do NOT exit at `pr-created` if the PR has not yet merged — under CTL-80 the worker owns the
+  poll-until-MERGED loop. Exit only at `done` (merged) or `stalled` (genuine human-gated
+  blocker).
