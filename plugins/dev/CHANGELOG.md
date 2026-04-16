@@ -1,9 +1,18 @@
 # Changelog
 
-## [6.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.39.0...catalyst-dev-v6.39.1) (2026-04-16)
+## [6.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.39.0...catalyst-dev-v6.39.1)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Merged PR Status Writeback
+
+The orchestration monitor now writes merged PR status back to worker signal files when it detects PRs have been merged on GitHub. Previously, merged PRs were only tracked in memory, causing the dashboard to show incorrect completion percentages when the orchestrator agent had already exited. Signal files now automatically update with `status=done`, `phase=6`, and merge timestamps for accurate project tracking.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** orch-monitor writes back merged PR status to signal files (CTL-86) ([#185](https://github.com/coalesce-labs/catalyst/issues/185)) ([b340de9](https://github.com/coalesce-labs/catalyst/commit/b340de9c725f4bfe400f2796e4932ebba58c8dce))
 
