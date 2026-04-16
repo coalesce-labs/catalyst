@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# orchestrate-healthcheck - Batch liveness check for freshly-dispatched workers (CTL-87).
+#
+# Run this once per wave, shortly after all workers are dispatched in Phase 3.
+# For each worker signal still at status="dispatched"/phase=0, verify the recorded
+# PID is alive. If it isn't, transition the signal to status="failed" with
+# failureReason="launch-failure", raise an attention item, and emit an event so
+# the orchestrator can react immediately instead of waiting 15 minutes for the
+# stalled-worker detector to fire.
+#
+# Usage:
+#   orchestrate-healthcheck --orch-dir <path> --orch-id <name>
+#                           [--grace-seconds <n>]   # default 15
+#                           [--dry-run]
+#
+# Outputs a single JSON summary on stdout:
+#   {"checked":N,"dead":M,"deadTickets":["TID-1",...]}
+#
+# Environment:
+#   CATALYST_STATE_SCRIPT   path to catalyst-state.sh (default: ../catalyst-state.sh
+#                           next to this script). Tests override this to capture calls.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+
+ORCH_DIR=""
+ORCH_ID=""
+GRACE_SECONDS=15
+DRY_RUN=0
+
+usage() {
+  sed -n '2,22p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir)        ORCH_DIR="$2"; shift 2 ;;
+    --orch-id)         ORCH_ID="$2"; shift 2 ;;
+    --grace-seconds)   GRACE_SECONDS="$2"; shift 2 ;;
+    --dry-run)         DRY_RUN=1; shift ;;
+    -h|--help)         usage 0 ;;
+    *)                 echo "unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
+[ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
+[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+
+# Give freshly-dispatched processes a moment to fail before we judge them.
+if [ "$GRACE_SECONDS" -gt 0 ]; then
+  sleep "$GRACE_SECONDS"
+fi
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+CHECKED=0
+DEAD_TICKETS=()
+
+shopt -s nullglob
+for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
+  # Skip non-worker JSON files (fixup prompts, misc artifacts) — a real signal
+  # has at minimum a .ticket field.
+  TICKET=$(jq -r '.ticket // empty' "$SIGNAL" 2>/dev/null || echo "")
+  [ -z "$TICKET" ] && continue
+
+  STATUS=$(jq -r '.status // empty' "$SIGNAL")
+  PHASE=$(jq -r '.phase // 0' "$SIGNAL")
+  PID=$(jq -r '.pid // empty' "$SIGNAL")
+
+  # Only inspect workers that haven't announced themselves yet. Anything that
+  # moved off `dispatched`/phase 0 is clearly alive; anything terminal should
+  # not be relitigated.
+  [ "$STATUS" != "dispatched" ] && continue
+  [ "$PHASE" != "0" ] && continue
+  [ -z "$PID" ] && continue
+
+  CHECKED=$((CHECKED+1))
+
+  if kill -0 "$PID" 2>/dev/null; then
+    continue
+  fi
+
+  # PID is dead — this is a launch failure.
+  DEAD_TICKETS+=("$TICKET")
+  MSG="Worker PID ${PID} died within ${GRACE_SECONDS}s of dispatch"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] ${TICKET}: ${MSG}" >&2
+    continue
+  fi
+
+  TS=$(now_iso)
+  jq --arg status "failed" \
+     --arg reason "launch-failure" \
+     --arg ts "$TS" \
+     '.status = $status
+      | .failureReason = $reason
+      | .updatedAt = $ts
+      | .completedAt = $ts
+      | .phaseTimestamps = ((.phaseTimestamps // {}) | .failed = $ts)' \
+     "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+
+  if [ -x "$STATE_SCRIPT" ]; then
+    "$STATE_SCRIPT" attention "$ORCH_ID" "launch-failure" "$TICKET" "$MSG"
+    "$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET" \
+      '.status = "failed" | .attentionReason = "'"${MSG//\"/\\\"}"'"'
+    EVT=$(jq -nc \
+      --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+      --argjson pid "$PID" --argjson grace "$GRACE_SECONDS" \
+      '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-launch-failed",
+        detail:{pid:$pid, graceSeconds:$grace}}')
+    "$STATE_SCRIPT" event "$EVT"
+  fi
+
+  echo "LAUNCH-FAILURE: ${TICKET} (pid=${PID})" >&2
+done
+
+# Summary on stdout (machine-readable).
+DEAD_COUNT=${#DEAD_TICKETS[@]}
+if [ "$DEAD_COUNT" -eq 0 ]; then
+  DEAD_JSON="[]"
+else
+  DEAD_JSON=$(printf '%s\n' "${DEAD_TICKETS[@]}" | jq -R . | jq -s .)
+fi
+
+jq -nc \
+  --argjson c "$CHECKED" \
+  --argjson d "$DEAD_COUNT" \
+  --argjson t "$DEAD_JSON" \
+  '{checked:$c, dead:$d, deadTickets:$t}'
