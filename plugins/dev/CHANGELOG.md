@@ -1,9 +1,18 @@
 # Changelog
 
-## [7.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.1.1...catalyst-dev-v7.2.0) (2026-04-16)
+## [7.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.1.1...catalyst-dev-v7.2.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Authoritative Git and PR State
+
+Workers are no longer marked as "stalled" based solely on signal file age — the orchestrator now uses git commit history and GitHub PR status as ground truth for completion detection. If a worker merged its PR but died before writing the terminal signal, it's correctly recognized as complete rather than stalled. Run the orchestration monitor to see the improved accuracy in worker lifecycle tracking.
 
 
-### Features
+
+### PRs
 
 * **dev:** derive worker completion from git/PR, not signal file (CTL-32) ([#193](https://github.com/coalesce-labs/catalyst/issues/193)) ([5e4e3bd](https://github.com/coalesce-labs/catalyst/commit/5e4e3bdb5e787b9168a445893e57d71e828d4f2d))
 
