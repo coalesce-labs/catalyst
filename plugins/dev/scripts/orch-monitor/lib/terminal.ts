@@ -210,7 +210,7 @@ export function renderSnapshot(
 ): string {
   const lines: string[] = [];
   lines.push(
-    `${BOLD}Orchestration Monitor${RESET} ${DIM}${snapshot.timestamp}${RESET}`,
+    `${BOLD}Catalyst Monitor${RESET} ${DIM}${snapshot.timestamp}${RESET}`,
   );
 
   const stats = renderStatsHeader(snapshot);

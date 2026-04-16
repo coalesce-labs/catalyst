@@ -90,7 +90,7 @@ describe("React app shell", () => {
   });
 
   it("should include page title", () => {
-    expect(html).toContain("Catalyst Orchestration Monitor");
+    expect(html).toContain("Catalyst Monitor");
   });
 
   it("should include favicon reference", () => {

@@ -106,7 +106,7 @@ prompt_content=$(jq -Rrs \
 request_body=$(jq -nc \
   --arg content "$prompt_content" \
   '{
-    model: "claude-haiku-4-5-20251001",
+    model: "claude-sonnet-4-20250514",
     max_tokens: 4096,
     messages: [{role: "user", content: $content}]
   }')
@@ -190,7 +190,7 @@ if [[ -n "$head_branch" ]]; then
     plugin_request=$(jq -nc \
       --arg content "$plugin_prompt" \
       '{
-        model: "claude-haiku-4-5-20251001",
+        model: "claude-sonnet-4-20250514",
         max_tokens: 1024,
         messages: [{role: "user", content: $content}]
       }')

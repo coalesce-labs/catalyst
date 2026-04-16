@@ -134,6 +134,11 @@ export default function App() {
           <div className="flex items-center gap-3 text-[12px] text-muted">
             {snapshot.timestamp && (
               <span>
+                {new Date(snapshot.timestamp).toLocaleDateString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}{" "}
                 {new Date(snapshot.timestamp).toLocaleTimeString()}
               </span>
             )}
