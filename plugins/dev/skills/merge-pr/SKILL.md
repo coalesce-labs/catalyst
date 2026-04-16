@@ -183,13 +183,15 @@ Or skip tests (not recommended):
 
 Exit with error (unless `--skip-tests` flag provided).
 
-### 6. Diagnose and resolve merge blockers
+### 6. Diagnose and resolve merge blockers — poll until state=MERGED
 
 Read and follow the full workflow in
 `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`.
 
-This step queries GitHub's `mergeStateStatus` via GraphQL, identifies every specific blocker, and
-attempts to fix each one in a loop (max 3 attempts). The reference doc contains:
+This step is a **poll-until-merged loop**. Every 30–60 seconds, query
+`gh pr view --json state,mergeStateStatus,mergedAt` plus the GraphQL details. The loop only
+exits successfully when `state == "MERGED"` and `mergedAt` is non-null. The reference doc
+contains:
 
 - The GraphQL query (merge state + CI checks + review threads + reviews in one call)
 - Blocker type table (`CLEAN`, `BEHIND`, `DIRTY`, `BLOCKED`, `DRAFT`, `UNSTABLE`, `HAS_HOOKS`,
@@ -199,18 +201,36 @@ attempts to fix each one in a loop (max 3 attempts). The reference doc contains:
 
 | Blocker | Auto-resolution |
 |---------|----------------|
-| `branch-behind` | Rebase and push |
-| `conflicts` | Attempt rebase; report specific files if can't resolve |
+| `branch-behind` (BEHIND) | `gh api -X PUT /repos/{owner}/{repo}/pulls/{n}/update-branch` (most repos disable GitHub's auto-update via `allow_update_branch: false`, so manual update is required), then continue polling |
+| `conflicts` (DIRTY) | Attempt `gh pr checkout && git rebase origin/<base>`; if unresolvable, exit non-success with specific files |
 | `draft` | `gh pr ready` |
-| `ci-failing` | Analyze failure logs, fix code, push, re-poll |
-| `unresolved-threads` | Run `/review-comments` (see `review-thread-resolution.md`) |
+| `ci-failing` (UNSTABLE / failing checks) | Analyze failure logs, fix code, push, continue polling |
+| `unresolved-threads` | Run `/review-comments` (see `review-thread-resolution.md`); push fixes; continue polling for new comments |
 | `changes-requested` | Check if addressed; suggest re-request review |
-| `review-required` | Cannot fix — report how many approvals needed and who to request |
-| `hooks-pending` | Wait and re-query |
-| `unknown-blocker` | Query branch protection rules, report every requirement with status |
+| `review-required` | Cannot fix — exit non-success and report how many approvals needed and who to request |
+| `hooks-pending` (HAS_HOOKS) | Wait one cadence cycle and re-query |
+| `unknown-blocker` (UNKNOWN) | Query branch protection rules, report every requirement with status |
 
-After the resolution loop, report what was resolved and what still blocks with specific actionable
-guidance. If all blockers resolved, continue to next step.
+There is no fixed iteration cap on the loop — it polls indefinitely while CI/checks are still
+progressing. Apply per-failure-type fix budgets (e.g., max 3 distinct fix attempts for the same
+CI failure mode) to prevent runaway loops on a stuck failure. Exit non-success only when a
+genuine human-gated blocker is identified (unresolvable conflict, required reviewer, branch
+protection requirement that cannot be satisfied).
+
+When the loop confirms `state == "MERGED"`, capture `mergedAt` and proceed to step 7.
+
+**Signal file write (when invoked from a worker context):** if `$SIGNAL_FILE` is set (oneshot or
+orchestrator worker), write `pr.mergedAt`, `pr.ciStatus = "merged"`, and `status = "done"` to
+the signal file as soon as `state == MERGED` is observed:
+
+```bash
+if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
+  PR_MERGED_AT=$(gh pr view "$PR_NUMBER" --json mergedAt --jq '.mergedAt')
+  jq --arg ts "$PR_MERGED_AT" \
+    '.pr.ciStatus = "merged" | .pr.mergedAt = $ts | .status = "done" | .updatedAt = $ts | .completedAt = $ts' \
+    "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
+fi
+```
 
 ### 7. Extract ticket reference
 

@@ -112,10 +112,10 @@
         "mergedAt": {
           "type": ["string", "null"],
           "format": "date-time",
-          "description": "ISO 8601 timestamp when the PR was actually merged. Null until merge. Written by the ORCHESTRATOR (not the worker) during its Phase 4 poll loop, because workers reliably exit before their PR merges. Sourced from `gh pr view --json mergedAt`."
+          "description": "ISO 8601 timestamp when the PR was actually merged. Null until merge. Written by the WORKER after polling `gh pr view --json state,mergedAt` returns state=MERGED. Worker does not exit terminal-success until this field is set. Sourced from `gh pr view --json mergedAt`."
         }
       },
-      "description": "Pull request details (null until PR is created). The worker owns prOpenedAt, autoMergeArmedAt, number, url, and ciStatus. The orchestrator owns mergedAt and flips ciStatus to \"merged\" on merge confirmation."
+      "description": "Pull request details (null until PR is created). The worker owns all fields — number, url, ciStatus, prOpenedAt, autoMergeArmedAt, and mergedAt — by polling until the PR is actually merged before exiting. The orchestrator's poll loop is a safety net for stalled workers, not the primary merge recorder."
     },
     "linearState": {
       "type": ["string", "null"],
