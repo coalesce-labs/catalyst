@@ -1,71 +1,83 @@
 ---
 title: Orchestration
-description: Coordinate multiple tickets in parallel — wave-based execution, worker dispatch, adversarial verification, and cross-wave knowledge sharing.
+description:
+  Coordinate multiple tickets in parallel — wave-based execution, worker dispatch, adversarial
+  verification, and cross-wave knowledge sharing.
 sidebar:
   order: 5
 ---
 
-Orchestration is Catalyst's system for coordinating **multiple tickets in parallel** across git worktrees. An AI coordinator dispatches workers, tracks progress via a dashboard, and enforces quality through adversarial verification.
+Orchestration is Catalyst's system for coordinating **multiple tickets in parallel** across git
+worktrees. An AI coordinator dispatches workers, tracks progress via a dashboard, and enforces
+quality through adversarial verification.
 
-:::note[Focused subarticles]
-This page is the orchestration overview. For deeper dives see:
-- [Workers and signal files](./orchestration/workers/) — lifecycle, signal-file schema, state machine
-- [Verification and reward-hacking defense](./orchestration/verification/) — how the orchestrator adversarially checks worker output
-- [Observability overview](/observability/) — monitoring orchestrations in real time
-:::
+:::note[Focused subarticles] This page is the orchestration overview. For deeper dives see:
+
+- [Workers and signal files](./orchestration/workers/) — lifecycle, signal-file schema, state
+  machine
+- [Verification and reward-hacking defense](./orchestration/verification/) — how the orchestrator
+  adversarially checks worker output
+- [Observability overview](/observability/) — monitoring orchestrations in real time :::
 
 ## Orchestration Levels
 
 Catalyst workflows operate at two levels:
 
-| Level | What | How |
-|-------|------|-----|
-| **Level 2** | Single-ticket pipeline | `/catalyst-dev:oneshot` chains research, plan, implement, validate, ship, merge with context isolation |
+| Level       | What                      | How                                                                                                                              |
+| ----------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **Level 2** | Single-ticket pipeline    | `/catalyst-dev:oneshot` chains research, plan, implement, validate, ship, merge with context isolation                           |
 | **Level 3** | Multi-ticket coordination | `/catalyst-dev:orchestrate` dispatches Level 2 workers across worktrees with wave-based parallelism and independent verification |
 
-Level 3 builds on Level 2 — each worker runs the full `/catalyst-dev:oneshot` pipeline autonomously. The orchestrator adds coordination, knowledge sharing, and anti-reward-hacking verification on top.
+Level 3 builds on Level 2 — each worker runs the full `/catalyst-dev:oneshot` pipeline autonomously.
+The orchestrator adds coordination, knowledge sharing, and anti-reward-hacking verification on top.
 
 ## Prerequisites
 
 ### Required Tools
 
-| Tool | Purpose | Install |
-|------|---------|---------|
-| **Git** | Worktree creation, branch management | Pre-installed on macOS |
-| **Linearis CLI** | Read tickets from Linear, update states | `npm install -g linearis` |
-| **GitHub CLI** | PR creation, CI monitoring | `brew install gh` |
-| **jq** | Config parsing, signal file updates | `brew install jq` |
-| **HumanLayer CLI** | Worker dispatch with context isolation, thoughts system | `pip install humanlayer` |
+| Tool               | Purpose                                                                 | Install                    |
+| ------------------ | ----------------------------------------------------------------------- | -------------------------- |
+| **Git**            | Worktree creation, branch management                                    | Pre-installed on macOS     |
+| **Linearis CLI**   | Read tickets from Linear, update states                                 | `npm install -g linearis`  |
+| **GitHub CLI**     | PR creation, CI monitoring                                              | `brew install gh`          |
+| **jq**             | Config parsing, signal file updates                                     | `brew install jq`          |
+| **Claude CLI**     | Worker dispatch (the only dispatch path)                                | Installed with Claude Code |
+| **HumanLayer CLI** | Thoughts persistence: shared research, plans, handoffs across worktrees | `pip install humanlayer`   |
 
-If HumanLayer is not installed, the orchestrator falls back to launching workers with the `claude` CLI directly. The thoughts system (shared research, plans, handoffs across worktrees) requires HumanLayer.
+The orchestrator always dispatches workers via the `claude` CLI (streaming JSON output). HumanLayer
+is used only for the thoughts system — it is not a dispatch mechanism. Projects that don't use the
+thoughts system can skip it entirely; dispatch still works.
 
 ### Claude Code Settings
 
-Add `~/catalyst` to Claude Code's trusted directories so all worktrees across all projects are accessible without per-worktree approval:
+Add `~/catalyst` to Claude Code's trusted directories so all worktrees across all projects are
+accessible without per-worktree approval:
 
 ```json
 // ~/.claude/settings.json
 {
   "permissions": {
-    "additionalDirectories": [
-      "/Users/you/catalyst"
-    ]
+    "additionalDirectories": ["/Users/you/catalyst"]
   }
 }
 ```
 
-This is a one-time setup. All orchestrator and worker worktrees for every project land under `~/catalyst/wt/<projectKey>/`.
+This is a one-time setup. All orchestrator and worker worktrees for every project land under
+`~/catalyst/wt/<projectKey>/`.
 
 Catalyst also pre-trusts newly created worktrees automatically, so the `additionalDirectories`
 setting is best treated as a convenience and backup layer rather than a hard requirement.
 
 ### Project Configuration
 
-The orchestrator reads from your project's Catalyst config (`.catalyst/config.json` or `.claude/config.json`). Two config blocks are relevant:
+The orchestrator reads from your project's Catalyst config (`.catalyst/config.json` or
+`.claude/config.json`). Two config blocks are relevant:
 
 #### 1. Worktree Setup Commands (`catalyst.worktree.setup`)
 
-**This is the most important configuration to get right.** It defines the commands that run in every new worktree — both standalone worktrees from `/create-worktree` and orchestrator/worker worktrees from `/orchestrate`.
+**This is the most important configuration to get right.** It defines the commands that run in every
+new worktree — both standalone worktrees from `/create-worktree` and orchestrator/worker worktrees
+from `/orchestrate`.
 
 ```json
 {
@@ -83,20 +95,25 @@ The orchestrator reads from your project's Catalyst config (`.catalyst/config.js
 
 **What to include in your setup array:**
 
-| Step | Command | Why |
-|------|---------|-----|
-| Thoughts init | `humanlayer thoughts init --directory ${DIRECTORY} --profile ${PROFILE}` | Workers need access to shared research, plans, and handoffs. Without this, workers can't read wave briefings or save their findings for other waves. |
-| Thoughts sync | `humanlayer thoughts sync` | Pulls down existing shared documents so the worker starts with full context. |
-| Dependency install | `bun install` or `npm install` or `make setup` | Workers need project dependencies to run tests, typecheck, and build. |
-| Environment setup | `cp .env.example .env.local` | Workers may need environment variables for local dev. |
-| Database setup | `./scripts/setup-test-db.sh` | If tests require a local database. |
+| Step               | Command                                                                  | Why                                                                                                                                                  |
+| ------------------ | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Thoughts init      | `humanlayer thoughts init --directory ${DIRECTORY} --profile ${PROFILE}` | Workers need access to shared research, plans, and handoffs. Without this, workers can't read wave briefings or save their findings for other waves. |
+| Thoughts sync      | `humanlayer thoughts sync`                                               | Pulls down existing shared documents so the worker starts with full context.                                                                         |
+| Dependency install | `bun install` or `npm install` or `make setup`                           | Workers need project dependencies to run tests, typecheck, and build.                                                                                |
+| Environment setup  | `cp .env.example .env.local`                                             | Workers may need environment variables for local dev.                                                                                                |
+| Database setup     | `./scripts/setup-test-db.sh`                                             | If tests require a local database.                                                                                                                   |
 
 You do not need a separate "permission grant" step anymore. `create-worktree.sh` now marks the new
 worktree as trusted in Claude Code automatically.
 
-**If `catalyst.worktree.setup` is NOT configured:** The script falls back to auto-detected setup — it will auto-detect `make setup`/`bun install`/`npm install` for dependencies, and run `humanlayer thoughts init` + `sync` if HumanLayer is installed. This fallback is convenient for simple projects but gives you no control over the order, additional steps, or error handling.
+**If `catalyst.worktree.setup` is NOT configured:** The script falls back to auto-detected setup —
+it will auto-detect `make setup`/`bun install`/`npm install` for dependencies, and run
+`humanlayer thoughts init` + `sync` if HumanLayer is installed. This fallback is convenient for
+simple projects but gives you no control over the order, additional steps, or error handling.
 
-**Once you define `catalyst.worktree.setup`, only your commands run.** The auto-detection is skipped entirely. This means you must include dependency install and thoughts init in your array if you need them — they are not added automatically.
+**Once you define `catalyst.worktree.setup`, only your commands run.** The auto-detection is skipped
+entirely. This means you must include dependency install and thoughts init in your array if you need
+them — they are not added automatically.
 
 #### 2. Orchestration Config (`catalyst.orchestration`)
 
@@ -128,11 +145,16 @@ Optional. Controls orchestrator-specific behavior. All fields have sensible defa
 
 **The difference between `worktree.setup` and `orchestration.hooks.setup`:**
 
-- `catalyst.worktree.setup` — runs for **every** worktree (standalone, orchestrator, and workers). This is your base project setup.
-- `catalyst.orchestration.hooks.setup` — runs **only** for orchestrator-managed worktrees, **after** the base setup. Use this for orchestration-specific steps that don't apply to standalone worktrees.
-- `catalyst.orchestration.hooks.teardown` — runs when the orchestrator cleans up completed worktrees after wave advancement.
+- `catalyst.worktree.setup` — runs for **every** worktree (standalone, orchestrator, and workers).
+  This is your base project setup.
+- `catalyst.orchestration.hooks.setup` — runs **only** for orchestrator-managed worktrees, **after**
+  the base setup. Use this for orchestration-specific steps that don't apply to standalone
+  worktrees.
+- `catalyst.orchestration.hooks.teardown` — runs when the orchestrator cleans up completed worktrees
+  after wave advancement.
 
-Most projects only need `catalyst.worktree.setup`. The orchestration hooks are for edge cases like registering workers with an external monitoring system.
+Most projects only need `catalyst.worktree.setup`. The orchestration hooks are for edge cases like
+registering workers with an external monitoring system.
 
 ### Full Config Example
 
@@ -189,8 +211,10 @@ Before running `/orchestrate` for the first time:
 
 - [ ] **Linearis CLI installed** and authenticated (`linearis auth login`)
 - [ ] **GitHub CLI installed** and authenticated (`gh auth login`)
-- [ ] **HumanLayer CLI installed** and thoughts initialized in the main repo (`humanlayer thoughts init`)
-- [ ] **`catalyst.worktree.setup` configured** with your project's setup commands (thoughts init, dependency install, environment setup, etc.)
+- [ ] **HumanLayer CLI installed** and thoughts initialized in the main repo
+      (`humanlayer thoughts init`)
+- [ ] **`catalyst.worktree.setup` configured** with your project's setup commands (thoughts init,
+      dependency install, environment setup, etc.)
 - [ ] **`catalyst.linear.stateMap` configured** so ticket state transitions work
 - [ ] **`catalyst.thoughts` configured** with your profile and directory names
 
@@ -216,6 +240,7 @@ If you prefer to start manually from an existing orchestrator worktree, use:
 ```
 
 The orchestrator:
+
 1. Reads each ticket from Linear
 2. Builds a dependency graph and groups tickets into waves
 3. Presents the wave plan for approval
@@ -237,14 +262,14 @@ The orchestrator:
 
 ### Flags
 
-| Flag | Description |
-|------|-------------|
-| `--name <name>` | Name this orchestrator (default: auto-generated) |
-| `--auto-merge` | Workers auto-merge when CI + verification pass |
-| `--max-parallel <n>` | Override max concurrent workers (default: 3) |
-| `--base-branch <branch>` | Base branch for worktrees (default: main) |
-| `--dry-run` | Show wave plan without executing |
-| `--interactive` | Include PM intake phase before orchestration |
+| Flag                     | Description                                      |
+| ------------------------ | ------------------------------------------------ |
+| `--name <name>`          | Name this orchestrator (default: auto-generated) |
+| `--auto-merge`           | Workers auto-merge when CI + verification pass   |
+| `--max-parallel <n>`     | Override max concurrent workers (default: 3)     |
+| `--base-branch <branch>` | Base branch for worktrees (default: main)        |
+| `--dry-run`              | Show wave plan without executing                 |
+| `--interactive`          | Include PM intake phase before orchestration     |
 
 ## Wave-Based Parallelism
 
@@ -311,31 +336,42 @@ For every worktree (orchestrator and workers), the `create-worktree.sh` script r
 7. Run catalyst.orchestration.hooks.setup (orchestration-only, if present)
 ```
 
-Steps 4–5 ensure that `.catalyst/.workflow-context.json` exists with the ticket set and that OTEL resource attributes include the ticket — before any skills run.
+Steps 4–5 ensure that `.catalyst/.workflow-context.json` exists with the ticket set and that OTEL
+resource attributes include the ticket — before any skills run.
 
-The orchestrator then creates its status directory (`workers/`, `DASHBOARD.md`, `state.json`) and initializes worker signal files.
+The orchestrator then creates its status directory (`workers/`, `DASHBOARD.md`, `state.json`) and
+initializes worker signal files.
 
 ## Worker Dispatch
 
-Workers are launched via `claude -p` with `--output-format stream-json --verbose`, producing real-time NDJSON that the monitor can tail to show live worker activity. Each runs `/oneshot <ticket> --auto-merge` autonomously.
+Workers are launched via `claude -p` with `--output-format stream-json --verbose`, producing
+real-time NDJSON that the monitor can tail to show live worker activity. Each runs
+`/oneshot <ticket> --auto-merge` autonomously.
 
-The dispatch prompt includes **mandatory testing requirements** — not suggestions. Workers are told their output will be independently verified. The `CATALYST_ORCHESTRATOR_DIR` environment variable is set so workers know where to write their signal files.
+The dispatch prompt includes **mandatory testing requirements** — not suggestions. Workers are told
+their output will be independently verified. The `CATALYST_ORCHESTRATOR_DIR` environment variable is
+set so workers know where to write their signal files.
 
 ## Testing Enforcement (3 Layers)
 
-The orchestrator addresses a specific failure mode: **agents ship PRs with minimal tests and self-report "done."** Three layers prevent this:
+The orchestrator addresses a specific failure mode: **agents ship PRs with minimal tests and
+self-report "done."** Three layers prevent this:
 
 ### Layer 1 — Dispatch Prompt (Prevention)
 
-Every worker's dispatch prompt includes hard requirements for TDD, unit tests, API tests, security review, and code review. The prompt explicitly states that work will be independently verified.
+Every worker's dispatch prompt includes hard requirements for TDD, unit tests, API tests, security
+review, and code review. The prompt explicitly states that work will be independently verified.
 
 ### Layer 2 — Quality Gates (Automated)
 
-Inside each worker's `/oneshot` pipeline, the existing quality gate system runs: `/validate-type-safety`, `/security-review`, `code-reviewer` agent, `pr-test-analyzer` agent, plus any project-specific gates from config.
+Inside each worker's `/oneshot` pipeline, the existing quality gate system runs:
+`/validate-type-safety`, `/security-review`, `code-reviewer` agent, `pr-test-analyzer` agent, plus
+any project-specific gates from config.
 
 ### Layer 3 — Independent Verification (Adversarial)
 
-After a worker claims "done", the orchestrator runs `orchestrate-verify.sh` **independently** in the worker's worktree. This script:
+After a worker claims "done", the orchestrator runs `orchestrate-verify.sh` **independently** in the
+worker's worktree. This script:
 
 - Checks that every changed source file has a corresponding test file
 - Verifies API test coverage for new/modified routes
@@ -344,11 +380,13 @@ After a worker claims "done", the orchestrator runs `orchestrate-verify.sh` **in
 - Scans for reward-hacking patterns (`as any`, `@ts-ignore`, empty catch blocks)
 - Cross-checks the worker's self-reported `definitionOfDone` against actual findings
 
-If verification **fails**, the worker gets explicit remediation instructions and must fix the gaps before advancing. The orchestrator re-verifies after fixes.
+If verification **fails**, the worker gets explicit remediation instructions and must fix the gaps
+before advancing. The orchestrator re-verifies after fixes.
 
 ## Wave Briefing Documents
 
-Before dispatching each wave after Wave 1, the orchestrator writes a **briefing document** summarizing what prior waves learned:
+Before dispatching each wave after Wave 1, the orchestrator writes a **briefing document**
+summarizing what prior waves learned:
 
 - Patterns and conventions established (e.g., "Auth uses `withAuth()` decorator")
 - New dependencies added
@@ -363,27 +401,29 @@ Wave 2+ workers read the briefing before starting. This means:
 - Workers avoid known gotchas instead of hitting them again
 - **Knowledge compounds across waves** instead of being lost
 
-This requires the thoughts system to be initialized in each worktree (via `catalyst.worktree.setup`). Without it, workers can't access shared documents.
+This requires the thoughts system to be initialized in each worktree (via
+`catalyst.worktree.setup`). Without it, workers can't access shared documents.
 
 ## Dashboard
 
-The orchestrator maintains a live dashboard at `DASHBOARD.md` in its worktree directory, updated after each monitoring poll:
+The orchestrator maintains a live dashboard at `DASHBOARD.md` in its worktree directory, updated
+after each monitoring poll:
 
 ```markdown
 # Orchestration Dashboard
-**Orchestrator:** api-redesign
-**Started:** 2026-04-10 14:00 UTC
-**Total:** 6 tickets | 3 waves
+
+**Orchestrator:** api-redesign **Started:** 2026-04-10 14:00 UTC **Total:** 6 tickets | 3 waves
 
 ## Current Wave: 1 of 3
 
-| Ticket | Status | PR | Unit Tests | API Tests | Security | Verified |
-|--------|--------|-----|-----------|-----------|----------|----------|
-| ACME-101 | Implementing | — | — | — | — | — |
-| ACME-102 | PR Created | #87 | 18 tests | 6 requests | PASS | Pending |
-| ACME-103 | Validating | — | 12 tests | N/A | Pending | — |
+| Ticket   | Status       | PR  | Unit Tests | API Tests  | Security | Verified |
+| -------- | ------------ | --- | ---------- | ---------- | -------- | -------- |
+| ACME-101 | Implementing | —   | —          | —          | —        | —        |
+| ACME-102 | PR Created   | #87 | 18 tests   | 6 requests | PASS     | Pending  |
+| ACME-103 | Validating   | —   | 12 tests   | N/A        | Pending  | —        |
 
 ## Event Log
+
 - 14:32 — ACME-102 PR #87 created, CI running
 - 14:15 — ACME-101 research complete, starting plan
 - 14:00 — Wave 1 dispatched (3 workers)
@@ -391,7 +431,8 @@ The orchestrator maintains a live dashboard at `DASHBOARD.md` in its worktree di
 
 ## Worker Signal Files
 
-Workers report status via JSON signal files in `workers/`. The orchestrator writes the initial file; workers update it at each phase transition.
+Workers report status via JSON signal files in `workers/`. The orchestrator writes the initial file;
+workers update it at each phase transition.
 
 ```json
 {
@@ -410,47 +451,49 @@ Workers report status via JSON signal files in `workers/`. The orchestrator writ
 }
 ```
 
-The `definitionOfDone` is the accountability layer — workers declare yes/no for each gate, and the orchestrator's verification independently confirms. A worker claiming 22 unit tests when 0 exist gets caught.
+The `definitionOfDone` is the accountability layer — workers declare yes/no for each gate, and the
+orchestrator's verification independently confirms. A worker claiming 22 unit tests when 0 exist
+gets caught.
 
 ## Configuration Reference
 
 ### Orchestration Fields
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `worktreeDir` | string\|null | `~/catalyst/wt/<projectKey>` | Base directory for worktrees |
-| `maxParallel` | number | 3 | Max concurrent workers per wave |
-| `hooks.setup` | string[] | `[]` | Extra commands after base `worktree.setup` (orchestration-only) |
-| `hooks.teardown` | string[] | `[]` | Commands before worktree removal on wave advancement |
-| `workerCommand` | string | `/oneshot` | Skill to run in each worker |
-| `workerModel` | string | `opus` | Model for worker sessions |
-| `testRequirements` | object | `{"backend":["unit"]}` | Required test types by scope |
-| `verifyBeforeMerge` | boolean | `true` | Run adversarial verification before merging |
-| `allowSelfReportedCompletion` | boolean | `false` | Trust worker's `definitionOfDone` without verification |
+| Field                         | Type         | Default                      | Description                                                     |
+| ----------------------------- | ------------ | ---------------------------- | --------------------------------------------------------------- |
+| `worktreeDir`                 | string\|null | `~/catalyst/wt/<projectKey>` | Base directory for worktrees                                    |
+| `maxParallel`                 | number       | 3                            | Max concurrent workers per wave                                 |
+| `hooks.setup`                 | string[]     | `[]`                         | Extra commands after base `worktree.setup` (orchestration-only) |
+| `hooks.teardown`              | string[]     | `[]`                         | Commands before worktree removal on wave advancement            |
+| `workerCommand`               | string       | `/oneshot`                   | Skill to run in each worker                                     |
+| `workerModel`                 | string       | `opus`                       | Model for worker sessions                                       |
+| `testRequirements`            | object       | `{"backend":["unit"]}`       | Required test types by scope                                    |
+| `verifyBeforeMerge`           | boolean      | `true`                       | Run adversarial verification before merging                     |
+| `allowSelfReportedCompletion` | boolean      | `false`                      | Trust worker's `definitionOfDone` without verification          |
 
 ### Hook Variables
 
 All setup and teardown commands support these variables:
 
-| Variable | Source | Value |
-|----------|--------|-------|
-| `${WORKTREE_PATH}` | Computed | Absolute path to the worktree |
-| `${BRANCH_NAME}` | Computed | Git branch name |
-| `${TICKET_ID}` | Computed | Same as branch name (includes orchestrator prefix) |
-| `${REPO_NAME}` | Git | Repository name |
-| `${DIRECTORY}` | Config | `catalyst.thoughts.directory` or repo name |
-| `${PROFILE}` | Config | `catalyst.thoughts.profile` or auto-detected from HumanLayer |
+| Variable           | Source   | Value                                                        |
+| ------------------ | -------- | ------------------------------------------------------------ |
+| `${WORKTREE_PATH}` | Computed | Absolute path to the worktree                                |
+| `${BRANCH_NAME}`   | Computed | Git branch name                                              |
+| `${TICKET_ID}`     | Computed | Same as branch name (includes orchestrator prefix)           |
+| `${REPO_NAME}`     | Git      | Repository name                                              |
+| `${DIRECTORY}`     | Config   | `catalyst.thoughts.directory` or repo name                   |
+| `${PROFILE}`       | Config   | `catalyst.thoughts.profile` or auto-detected from HumanLayer |
 
 ## Linear Integration
 
 The orchestrator manages Linear state as a safety net:
 
-| Event | Linear Action |
-|-------|--------------|
-| Worker dispatched | Move ticket to In Progress |
-| Worker creates PR | Verify ticket is In Review — fix if not |
-| PR merged | Verify ticket is Done — fix if not |
-| Worker fails/stalls | Add comment with status |
+| Event               | Linear Action                           |
+| ------------------- | --------------------------------------- |
+| Worker dispatched   | Move ticket to In Progress              |
+| Worker creates PR   | Verify ticket is In Review — fix if not |
+| PR merged           | Verify ticket is Done — fix if not      |
+| Worker fails/stalls | Add comment with status                 |
 
 Comments are added to tickets for team visibility:
 
@@ -478,7 +521,9 @@ Multiple orchestrators can run concurrently. Each gets a unique name that prefix
 
 ## Global State & Event Log
 
-When multiple orchestrators run concurrently — or you want to check on things after the fact — a single global state file at `~/catalyst/state.json` provides a unified view of all active orchestrators, their workers, and anything that needs your attention.
+When multiple orchestrators run concurrently — or you want to check on things after the fact — a
+single global state file at `~/catalyst/state.json` provides a unified view of all active
+orchestrators, their workers, and anything that needs your attention.
 
 ### File Layout
 
@@ -494,11 +539,16 @@ When multiple orchestrators run concurrently — or you want to check on things 
     └── <projectKey>/...
 ```
 
-**`state.json`** contains all active orchestrators with their progress, worker status, and attention items. Orchestrators register at startup and heartbeat every 2-3 minutes. Workers update their own entries at each phase transition.
+**`state.json`** contains all active orchestrators with their progress, worker status, and attention
+items. Orchestrators register at startup and heartbeat every 2-3 minutes. Workers update their own
+entries at each phase transition.
 
-**`events/`** contains append-only JSONL files, rotated monthly. Every significant transition — worker dispatched, status change, PR created, verification passed/failed, attention raised — is logged here. Query across all months with `cat ~/catalyst/events/*.jsonl | jq`.
+**`events/`** contains append-only JSONL files, rotated monthly. Every significant transition —
+worker dispatched, status change, PR created, verification passed/failed, attention raised — is
+logged here. Query across all months with `cat ~/catalyst/events/*.jsonl | jq`.
 
-**`history/`** contains full snapshots of orchestrators after they complete, fail, or are garbage-collected due to stale heartbeats.
+**`history/`** contains full snapshots of orchestrators after they complete, fail, or are
+garbage-collected due to stale heartbeats.
 
 ### Global State Schema
 
@@ -544,7 +594,9 @@ Each orchestrator entry in `state.json` contains:
 }
 ```
 
-The full JSON Schema is at `plugins/dev/templates/global-state.json`. The global state is a denormalized summary — each orchestrator's detailed local state remains at `<worktree>/state.json` for crash recovery.
+The full JSON Schema is at `plugins/dev/templates/global-state.json`. The global state is a
+denormalized summary — each orchestrator's detailed local state remains at `<worktree>/state.json`
+for crash recovery.
 
 ### Querying with jq
 
@@ -569,7 +621,8 @@ jq '[.orchestrators[] | select(.projectKey == "acme")]' ~/catalyst/state.json
 
 ### Querying Events
 
-Events are JSONL files (one JSON object per line), so `grep`, `jq`, and standard Unix tools all work:
+Events are JSONL files (one JSON object per line), so `grep`, `jq`, and standard Unix tools all
+work:
 
 ```bash
 # Last 20 events
@@ -590,7 +643,8 @@ cat ~/catalyst/events/*.jsonl | jq -r '.event' | sort | uniq -c | sort -rn
 
 ### The catalyst-state.sh CLI
 
-All state reads and writes go through `catalyst-state.sh`, which handles file locking for concurrent access:
+All state reads and writes go through `catalyst-state.sh`, which handles file locking for concurrent
+access:
 
 ```bash
 # View active orchestrators
@@ -611,28 +665,42 @@ catalyst-state.sh events --type verification-failed
 catalyst-state.sh gc --stale-after 10 --events-older-than 6m
 ```
 
-Orchestrators and workers call `catalyst-state.sh` internally — you don't need to run it manually unless you're querying or debugging.
+Orchestrators and workers call `catalyst-state.sh` internally — you don't need to run it manually
+unless you're querying or debugging.
 
 ### Heartbeat & Stale Detection
 
-Orchestrators write a `lastHeartbeat` timestamp during each monitoring poll (every 2-3 minutes). If an orchestrator dies without clean shutdown (process killed, machine restarts), its heartbeat goes stale.
+Orchestrators write a `lastHeartbeat` timestamp during each monitoring poll (every 2-3 minutes). If
+an orchestrator dies without clean shutdown (process killed, machine restarts), its heartbeat goes
+stale.
 
-`catalyst-state.sh gc` detects stale entries (default: heartbeat older than 10 minutes), marks them as `abandoned`, and archives them to `~/catalyst/history/`. Run it manually or let the next orchestrator startup clean up automatically.
+`catalyst-state.sh gc` detects stale entries (default: heartbeat older than 10 minutes), marks them
+as `abandoned`, and archives them to `~/catalyst/history/`. Run it manually or let the next
+orchestrator startup clean up automatically.
 
 ### Building Interfaces
 
-The global state JSON is a stable contract designed for building interfaces. The [Orchestration Monitor](#orchestration-monitor) is the built-in implementation — a real-time web + terminal dashboard that reads signal files, polls GitHub, and pushes updates via SSE. See the dedicated section below for full details.
+The global state JSON is a stable contract designed for building interfaces. The
+[Orchestration Monitor](#orchestration-monitor) is the built-in implementation — a real-time web +
+terminal dashboard that reads signal files, polls GitHub, and pushes updates via SSE. See the
+dedicated section below for full details.
 
 For custom integrations, you can also access the data directly:
 
 **`jq` one-liners** — Quick terminal queries without running a server:
+
 ```bash
 watch -n5 'jq ".orchestrators[] | {id, status, progress: \"\(.progress.completedTickets)/\(.progress.totalTickets)\", attention: (.attention | length)}" ~/catalyst/state.json'
 ```
 
-**Agent integration** — Any Claude Code agent can read `~/catalyst/state.json` directly to answer questions like "what's the status of the auth migration?" or "are any workers waiting for me?" without asking the orchestrator.
+**Agent integration** — Any Claude Code agent can read `~/catalyst/state.json` directly to answer
+questions like "what's the status of the auth migration?" or "are any workers waiting for me?"
+without asking the orchestrator.
 
-**Event replay** — The event log in `~/catalyst/events/` gives you a full audit trail. Build timeline views, calculate cycle times, or feed events into analytics. Every event has a timestamp, orchestrator ID, optional worker/ticket ID, and event type — so you can reconstruct the full sequence of what happened in any orchestration run:
+**Event replay** — The event log in `~/catalyst/events/` gives you a full audit trail. Build
+timeline views, calculate cycle times, or feed events into analytics. Every event has a timestamp,
+orchestrator ID, optional worker/ticket ID, and event type — so you can reconstruct the full
+sequence of what happened in any orchestration run:
 
 ```bash
 # Replay an entire orchestration run chronologically
@@ -657,7 +725,8 @@ cat ~/catalyst/events/*.jsonl | jq -s '
 
 ### Token Usage & Cost Tracking
 
-Each orchestrator and worker entry in the global state includes a `usage` block that tracks token consumption and cost:
+Each orchestrator and worker entry in the global state includes a `usage` block that tracks token
+consumption and cost:
 
 ```json
 {
@@ -675,7 +744,10 @@ Each orchestrator and worker entry in the global state includes a `usage` block 
 }
 ```
 
-**How it works**: Workers launched via the `claude` CLI with `--output-format json` produce a JSON output that includes full token counts, cost, and timing. After a worker process exits, the orchestrator parses this output and writes the usage data to both the worker's entry and the orchestrator's aggregate.
+**How it works**: Workers launched via the `claude` CLI with `--output-format json` produce a JSON
+output that includes full token counts, cost, and timing. After a worker process exits, the
+orchestrator parses this output and writes the usage data to both the worker's entry and the
+orchestrator's aggregate.
 
 **Query patterns**:
 
@@ -694,16 +766,25 @@ cat ~/catalyst/history/*.json | jq -s '[.[].usage.costUSD / .[].progress.totalTi
 ```
 
 **Current limitations**:
+
 - The orchestrator itself cannot capture its own usage from within the session
-- Usage is extracted from the `result` event in the worker's stream-json output after the worker process exits
+- Usage is extracted from the `result` event in the worker's stream-json output after the worker
+  process exits
 
 As these tools evolve to expose usage data, the schema is ready to accept it.
 
 ## Orchestration Monitor
 
-The orchestration monitor is a real-time dashboard for watching your orchestration runs. It reads worker signal files, polls GitHub for PR status, and pushes updates to connected clients via Server-Sent Events — no polling from the browser.
+The orchestration monitor is a real-time dashboard for watching your orchestration runs. It reads
+worker signal files, polls GitHub for PR status, and pushes updates to connected clients via
+Server-Sent Events — no polling from the browser.
 
-The monitor runs entirely on your local machine and uses the same CLI tools as the rest of Catalyst — `gh` for GitHub PR status, filesystem watches for signal files, `kill -0` for process liveness. There's no cloud service, no account to create, no data leaving your machine. It's a lightweight Bun process that reads the files your orchestrator and workers are already writing. A hosted version with persistent history and team dashboards is a natural evolution, but the local-first approach means you get full monitoring today with zero infrastructure.
+The monitor runs entirely on your local machine and uses the same CLI tools as the rest of Catalyst
+— `gh` for GitHub PR status, filesystem watches for signal files, `kill -0` for process liveness.
+There's no cloud service, no account to create, no data leaving your machine. It's a lightweight Bun
+process that reads the files your orchestrator and workers are already writing. A hosted version
+with persistent history and team dashboards is a natural evolution, but the local-first approach
+means you get full monitoring today with zero infrastructure.
 
 ### Starting the Monitor
 
@@ -715,28 +796,37 @@ bun run plugins/dev/scripts/orch-monitor/server.ts
 
 By default it listens on `0.0.0.0:7400`. Override with environment variables:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MONITOR_PORT` | `7400` | HTTP port |
+| Variable       | Default      | Description                                 |
+| -------------- | ------------ | ------------------------------------------- |
+| `MONITOR_PORT` | `7400`       | HTTP port                                   |
 | `CATALYST_DIR` | `~/catalyst` | Base directory (reads `wt/` subdirectories) |
 
-The `/setup-orchestrate` skill prints the monitor launch command as part of its output, so you can copy-paste it alongside the orchestrator launch command.
+The `/setup-orchestrate` skill prints the monitor launch command as part of its output, so you can
+copy-paste it alongside the orchestrator launch command.
 
 ### Web Dashboard
 
-Open `http://localhost:7400` in any browser. The dashboard is a single self-contained HTML page with no external dependencies — all CSS and JS are inline.
+Open `http://localhost:7400` in any browser. The dashboard is a single self-contained HTML page with
+no external dependencies — all CSS and JS are inline.
 
 **What you see at a glance:**
 
-- **Header bar** — orchestrator name, total cost, wall-clock time, parallel efficiency ratio, wave progress, merge count
+- **Header bar** — orchestrator name, total cost, wall-clock time, parallel efficiency ratio, wave
+  progress, merge count
 - **Wave cards** — each wave shows its tickets as status badges with completion state
-- **Worker table** — per-worker rows with ticket, status, phase, process liveness, time since last update, and PR link
+- **Worker table** — per-worker rows with ticket, status, phase, process liveness, time since last
+  update, and PR link
 - **Timeline** — Gantt-style bars showing worker parallelism and phase durations
-- **Event feed** — scrolling log of the last 50 events (dispatches, status changes, PR creation, merges)
+- **Event feed** — scrolling log of the last 50 events (dispatches, status changes, PR creation,
+  merges)
 
-Status badges are color-coded: green for done/merged, blue for in-progress, red for failed, yellow for stalled, gray for dispatched/waiting.
+Status badges are color-coded: green for done/merged, blue for in-progress, red for failed, yellow
+for stalled, gray for dispatched/waiting.
 
-**Real-time updates:** The browser connects to `/events` (SSE endpoint) and receives push updates whenever a worker signal file changes, a PR status is refreshed from GitHub, or a liveness check detects a dead process. Updates appear within 1-2 seconds of the underlying file change — no manual refresh needed.
+**Real-time updates:** The browser connects to `/events` (SSE endpoint) and receives push updates
+whenever a worker signal file changes, a PR status is refreshed from GitHub, or a liveness check
+detects a dead process. Updates appear within 1-2 seconds of the underlying file change — no manual
+refresh needed.
 
 <!-- TODO: Add screenshot of the orchestration monitor dashboard -->
 <!-- Drop a screenshot at: website/public/orchestration-monitor.png -->
@@ -744,7 +834,9 @@ Status badges are color-coded: green for done/merged, blue for in-progress, red 
 
 ### Remote Access via Tailscale
 
-Because the monitor binds to `0.0.0.0`, it's accessible from any device on your Tailscale network. This means you can check on your orchestration runs from your phone or iPad while away from your desk.
+Because the monitor binds to `0.0.0.0`, it's accessible from any device on your Tailscale network.
+This means you can check on your orchestration runs from your phone or iPad while away from your
+desk.
 
 ```bash
 # Find your Tailscale IP
@@ -754,44 +846,55 @@ tailscale ip -4
 # http://<tailscale-ip>:7400
 ```
 
-The dashboard is mobile-responsive — the layout adapts to narrow screens so worker status, PR links, and the event feed are all readable on a phone. No VPN configuration or port forwarding required — Tailscale handles the secure mesh networking.
+The dashboard is mobile-responsive — the layout adapts to narrow screens so worker status, PR links,
+and the event feed are all readable on a phone. No VPN configuration or port forwarding required —
+Tailscale handles the secure mesh networking.
 
-**Typical workflow:** Start an orchestration on your workstation, walk away, and periodically check `http://<tailscale-ip>:7400` from your phone to see if any workers need attention (failed, stalled, or waiting for human input).
+**Typical workflow:** Start an orchestration on your workstation, walk away, and periodically check
+`http://<tailscale-ip>:7400` from your phone to see if any workers need attention (failed, stalled,
+or waiting for human input).
 
 ### Terminal Mode
 
-The monitor also includes an ANSI terminal renderer for headless environments or quick checks without opening a browser:
+The monitor also includes an ANSI terminal renderer for headless environments or quick checks
+without opening a browser:
 
 ```bash
 bun run plugins/dev/scripts/orch-monitor/server.ts --terminal
 ```
 
-This clears the screen and renders a compact 80-column dashboard with color-coded status, updated in real-time as signal files change. The HTTP server runs simultaneously, so you get both terminal and web access from a single process.
+This clears the screen and renders a compact 80-column dashboard with color-coded status, updated in
+real-time as signal files change. The HTTP server runs simultaneously, so you get both terminal and
+web access from a single process.
 
 ### What the Monitor Tracks
 
 The monitor watches `~/catalyst/wt/` for orchestrator directories (matching `orch-*`) and reads:
 
-| Source | Data | Refresh |
-|--------|------|---------|
-| Worker signal files (`workers/*.json`) | Status, phase, PR number, definition of done | Instant (filesystem watch) |
-| GitHub API (`gh pr view`) | PR state (open/merged/closed), merge timestamp | Every 30 seconds |
-| Process table (`kill -0 <pid>`) | Whether the worker's Claude process is still alive | Every 5 seconds |
-| Orchestrator `state.json` | Wave count, progress, attention items | Instant (filesystem watch) |
+| Source                                 | Data                                               | Refresh                    |
+| -------------------------------------- | -------------------------------------------------- | -------------------------- |
+| Worker signal files (`workers/*.json`) | Status, phase, PR number, definition of done       | Instant (filesystem watch) |
+| GitHub API (`gh pr view`)              | PR state (open/merged/closed), merge timestamp     | Every 30 seconds           |
+| Process table (`kill -0 <pid>`)        | Whether the worker's Claude process is still alive | Every 5 seconds            |
+| Orchestrator `state.json`              | Wave count, progress, attention items              | Instant (filesystem watch) |
 
-**Dead process detection:** If a worker's PID is recorded in its signal file but `kill -0` fails, the monitor marks it with a `!` indicator. This catches silently crashed workers that stopped updating their signal file — the status might say "implementing" but the process is gone.
+**Dead process detection:** If a worker's PID is recorded in its signal file but `kill -0` fails,
+the monitor marks it with a `!` indicator. This catches silently crashed workers that stopped
+updating their signal file — the status might say "implementing" but the process is gone.
 
-**PR status enrichment:** The monitor polls GitHub independently of what workers report. Even if a worker exited before updating its signal file after merge, the monitor shows the correct PR state. This is the backstop that prevents the "shows pr_open when actually merged" problem.
+**PR status enrichment:** The monitor polls GitHub independently of what workers report. Even if a
+worker exited before updating its signal file after merge, the monitor shows the correct PR state.
+This is the backstop that prevents the "shows pr_open when actually merged" problem.
 
 ### API Endpoints
 
 The monitor exposes a JSON API for programmatic access:
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /api/snapshot` | Full current state of all orchestrators, workers, and PR statuses |
-| `GET /api/analytics` | Extended analytics including phase timelines and cost data |
-| `GET /events` | SSE stream — events: `snapshot`, `worker-update`, `liveness-change` |
+| Endpoint             | Description                                                         |
+| -------------------- | ------------------------------------------------------------------- |
+| `GET /api/snapshot`  | Full current state of all orchestrators, workers, and PR statuses   |
+| `GET /api/analytics` | Extended analytics including phase timelines and cost data          |
+| `GET /events`        | SSE stream — events: `snapshot`, `worker-update`, `liveness-change` |
 
 ```bash
 # Quick status check from the command line
@@ -803,10 +906,20 @@ curl -N http://localhost:7400/events
 
 ## Error Handling
 
-**Worker crashes or stalls**: The orchestrator detects no progress for 15+ minutes (no commits, no signal updates). It marks the worker as "stalled" on the dashboard, flags it in the global state's `attention` array, and emits an `attention-raised` event. It does not auto-restart — it flags for human decision.
+**Worker crashes or stalls**: The orchestrator detects no progress for 15+ minutes (no commits, no
+signal updates). It marks the worker as "stalled" on the dashboard, flags it in the global state's
+`attention` array, and emits an `attention-raised` event. It does not auto-restart — it flags for
+human decision.
 
-**Orchestrator crash recovery**: Local state lives in `<worktree>/state.json` + worker signal files. Resume with `/orchestrate --resume <orch-dir>` to pick up where it left off. The orchestrator re-registers itself in the global state on resume.
+**Orchestrator crash recovery**: Local state lives in `<worktree>/state.json` + worker signal files.
+Resume with `/orchestrate --resume <orch-dir>` to pick up where it left off. The orchestrator
+re-registers itself in the global state on resume.
 
-**Orchestrator unclean death**: If the orchestrator process dies, its `lastHeartbeat` goes stale. `catalyst-state.sh gc` archives the entry as `abandoned`. Workers that were in-flight may still be running — check their worktrees and signal files manually, or let the next orchestrator pick them up.
+**Orchestrator unclean death**: If the orchestrator process dies, its `lastHeartbeat` goes stale.
+`catalyst-state.sh gc` archives the entry as `abandoned`. Workers that were in-flight may still be
+running — check their worktrees and signal files manually, or let the next orchestrator pick them
+up.
 
-**Verification failure**: The worker gets specific remediation instructions. The global state gets an `attention` item with type `verification-failed`. The orchestrator re-verifies after fixes. A ticket cannot advance to merge until verification passes.
+**Verification failure**: The worker gets specific remediation instructions. The global state gets
+an `attention` item with type `verification-failed`. The orchestrator re-verifies after fixes. A
+ticket cannot advance to merge until verification passes.

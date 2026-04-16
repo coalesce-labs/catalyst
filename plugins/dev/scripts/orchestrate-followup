@@ -35,53 +35,99 @@ CREATE_WORKTREE="${SCRIPT_DIR}/create-worktree.sh"
 PARENT_TICKET=""
 FINDINGS=""
 TITLE=""
-ORCH_NAME="${CATALYST_ORCHESTRATOR_ID:-}"
-ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
+ORCH_NAME="${CATALYST_ORCHESTRATOR_ID-}"
+ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR-}"
 BASE_BRANCH="main"
 TEAM_KEY=""
 FORCED_TICKET=""
 DRY_RUN=0
 
 usage() {
-  sed -n '2,27p' "$0"
-  exit "${1:-1}"
+	sed -n '2,27p' "$0"
+	exit "${1:-1}"
 }
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --findings)    FINDINGS="$2"; shift 2 ;;
-    --title)       TITLE="$2"; shift 2 ;;
-    --orch)        ORCH_NAME="$2"; shift 2 ;;
-    --orch-dir)    ORCH_DIR="$2"; shift 2 ;;
-    --base-branch) BASE_BRANCH="$2"; shift 2 ;;
-    --team-key)    TEAM_KEY="$2"; shift 2 ;;
-    --ticket)      FORCED_TICKET="$2"; shift 2 ;;
-    --dry-run)     DRY_RUN=1; shift ;;
-    -h|--help)     usage 0 ;;
-    -*)            echo "unknown flag: $1" >&2; usage ;;
-    *)
-      if [ -z "$PARENT_TICKET" ]; then PARENT_TICKET="$1"; shift
-      else echo "unexpected arg: $1" >&2; usage; fi
-      ;;
-  esac
+	case "$1" in
+	--findings)
+		FINDINGS="$2"
+		shift 2
+		;;
+	--title)
+		TITLE="$2"
+		shift 2
+		;;
+	--orch)
+		ORCH_NAME="$2"
+		shift 2
+		;;
+	--orch-dir)
+		ORCH_DIR="$2"
+		shift 2
+		;;
+	--base-branch)
+		BASE_BRANCH="$2"
+		shift 2
+		;;
+	--team-key)
+		TEAM_KEY="$2"
+		shift 2
+		;;
+	--ticket)
+		FORCED_TICKET="$2"
+		shift 2
+		;;
+	--dry-run)
+		DRY_RUN=1
+		shift
+		;;
+	-h | --help) usage 0 ;;
+	-*)
+		echo "unknown flag: $1" >&2
+		usage
+		;;
+	*)
+		if [ -z "$PARENT_TICKET" ]; then
+			PARENT_TICKET="$1"
+			shift
+		else
+			echo "unexpected arg: $1" >&2
+			usage
+		fi
+		;;
+	esac
 done
 
-[ -z "$PARENT_TICKET" ] && { echo "ERROR: PARENT_TICKET required" >&2; usage; }
-[ -z "$FINDINGS" ]      && { echo "ERROR: --findings required" >&2; usage; }
-[ -z "$ORCH_NAME" ]     && { echo "ERROR: --orch (or \$CATALYST_ORCHESTRATOR_ID) required" >&2; exit 1; }
-[ -z "$ORCH_DIR" ]      && { echo "ERROR: --orch-dir (or \$CATALYST_ORCHESTRATOR_DIR) required" >&2; exit 1; }
+[ -z "$PARENT_TICKET" ] && {
+	echo "ERROR: PARENT_TICKET required" >&2
+	usage
+}
+[ -z "$FINDINGS" ] && {
+	echo "ERROR: --findings required" >&2
+	usage
+}
+# shellcheck disable=SC2016 # printing literal env-var names to guide the user
+[ -z "$ORCH_NAME" ] && {
+	echo 'ERROR: --orch (or $CATALYST_ORCHESTRATOR_ID) required' >&2
+	exit 1
+}
+# shellcheck disable=SC2016 # printing literal env-var names to guide the user
+[ -z "$ORCH_DIR" ] && {
+	echo 'ERROR: --orch-dir (or $CATALYST_ORCHESTRATOR_DIR) required' >&2
+	exit 1
+}
 
 if [ -z "$TITLE" ]; then
-  TITLE="Follow-up: ${PARENT_TICKET} post-merge findings"
+	TITLE="Follow-up: ${PARENT_TICKET} post-merge findings"
 fi
 
 if [ -z "$TEAM_KEY" ]; then
-  for CFG in ".catalyst/config.json" ".claude/config.json"; do
-    if [ -f "$CFG" ]; then
-      TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CFG" 2>/dev/null || true)
-      [ -n "$TEAM_KEY" ] && break
-    fi
-  done
+	for CFG in ".catalyst/config.json" ".claude/config.json"; do
+		if [ -f "$CFG" ]; then
+			TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CFG" 2>/dev/null || true)
+			[ -n "$TEAM_KEY" ] && break
+		fi
+	done
 fi
 
 DESCRIPTION="Follow-up to ${PARENT_TICKET}. Findings surfaced after merge:
@@ -92,37 +138,40 @@ This ticket was created by \`orchestrate-followup\`. The parent PR is merged; th
 change off \`${BASE_BRANCH}\`. See \`templates/followup-prompt.md\` for the worker contract."
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "[dry-run] parent: $PARENT_TICKET"
-  echo "[dry-run] title:  $TITLE"
-  echo "[dry-run] team:   ${TEAM_KEY:-UNKNOWN}"
-  echo "[dry-run] base:   $BASE_BRANCH"
-  echo "[dry-run] orch:   $ORCH_NAME"
-  echo "[dry-run] ticket: ${FORCED_TICKET:-<will create via linearis>}"
-  echo "[dry-run] description:"
-  echo "$DESCRIPTION" | sed 's/^/    /'
-  exit 0
+	echo "[dry-run] parent: $PARENT_TICKET"
+	echo "[dry-run] title:  $TITLE"
+	echo "[dry-run] team:   ${TEAM_KEY:-UNKNOWN}"
+	echo "[dry-run] base:   $BASE_BRANCH"
+	echo "[dry-run] orch:   $ORCH_NAME"
+	echo "[dry-run] ticket: ${FORCED_TICKET:-<will create via linearis>}"
+	echo "[dry-run] description:"
+	echo "$DESCRIPTION" | sed 's/^/    /'
+	exit 0
 fi
 
 # Step 1: Create (or accept) the follow-up ticket.
 if [ -n "$FORCED_TICKET" ]; then
-  NEW_TICKET="$FORCED_TICKET"
+	NEW_TICKET="$FORCED_TICKET"
 else
-  if ! command -v linearis >/dev/null 2>&1; then
-    echo "ERROR: linearis CLI required to create follow-up ticket (or pass --ticket <id>)" >&2
-    exit 1
-  fi
-  [ -z "$TEAM_KEY" ] && { echo "ERROR: --team-key required (or configure catalyst.linear.teamKey)" >&2; exit 1; }
+	if ! command -v linearis >/dev/null 2>&1; then
+		echo "ERROR: linearis CLI required to create follow-up ticket (or pass --ticket <id>)" >&2
+		exit 1
+	fi
+	[ -z "$TEAM_KEY" ] && {
+		echo "ERROR: --team-key required (or configure catalyst.linear.teamKey)" >&2
+		exit 1
+	}
 
-  CREATE_JSON=$(linearis issues create "$TITLE" \
-    --team "$TEAM_KEY" \
-    --description "$DESCRIPTION" \
-    --output json 2>/dev/null || true)
-  NEW_TICKET=$(echo "$CREATE_JSON" | jq -r '.identifier // empty' 2>/dev/null || true)
-  if [ -z "$NEW_TICKET" ]; then
-    echo "ERROR: failed to create Linear ticket — check linearis output" >&2
-    echo "$CREATE_JSON" >&2
-    exit 1
-  fi
+	CREATE_JSON=$(linearis issues create "$TITLE" \
+		--team "$TEAM_KEY" \
+		--description "$DESCRIPTION" \
+		--output json 2>/dev/null || true)
+	NEW_TICKET=$(echo "$CREATE_JSON" | jq -r '.identifier // empty' 2>/dev/null || true)
+	if [ -z "$NEW_TICKET" ]; then
+		echo "ERROR: failed to create Linear ticket — check linearis output" >&2
+		echo "$CREATE_JSON" >&2
+		exit 1
+	fi
 fi
 
 echo "Follow-up ticket: $NEW_TICKET (parent: $PARENT_TICKET)"
@@ -130,8 +179,8 @@ echo "Follow-up ticket: $NEW_TICKET (parent: $PARENT_TICKET)"
 # Step 2: Provision the worker worktree.
 WORKER_NAME="${ORCH_NAME}-${NEW_TICKET}"
 if [ ! -x "$CREATE_WORKTREE" ]; then
-  echo "ERROR: create-worktree.sh missing or not executable: $CREATE_WORKTREE" >&2
-  exit 1
+	echo "ERROR: create-worktree.sh missing or not executable: $CREATE_WORKTREE" >&2
+	exit 1
 fi
 "$CREATE_WORKTREE" "$WORKER_NAME" "$BASE_BRANCH" --orchestration "$ORCH_NAME"
 
@@ -142,7 +191,7 @@ WORKER_DIR="$(dirname "$ORCH_DIR")/${WORKER_NAME}"
 SIGNAL_FILE="${ORCH_DIR}/workers/${NEW_TICKET}.json"
 mkdir -p "${ORCH_DIR}/workers"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-cat > "$SIGNAL_FILE" <<EOF
+cat >"$SIGNAL_FILE" <<EOF
 {
   "ticket": "${NEW_TICKET}",
   "orchestrator": "${ORCH_NAME}",
@@ -173,28 +222,28 @@ PROMPT_FILE="${ORCH_DIR}/workers/${NEW_TICKET}-prompt.md"
 PARENT_PR_URL=""
 PARENT_PR_NUMBER=""
 if command -v gh >/dev/null 2>&1; then
-  REPO=$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')
-  PARENT_BRANCH="${ORCH_NAME}-${PARENT_TICKET}"
-  PARENT_PR_NUMBER=$(gh -R "$REPO" pr list --state merged --head "$PARENT_BRANCH" \
-    --json number --jq '.[0].number' 2>/dev/null || echo "")
-  if [ -n "$PARENT_PR_NUMBER" ]; then
-    PARENT_PR_URL=$(gh -R "$REPO" pr view "$PARENT_PR_NUMBER" --json url --jq '.url' 2>/dev/null || echo "")
-  fi
+	REPO=$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||')
+	PARENT_BRANCH="${ORCH_NAME}-${PARENT_TICKET}"
+	PARENT_PR_NUMBER=$(gh -R "$REPO" pr list --state merged --head "$PARENT_BRANCH" \
+		--json number --jq '.[0].number' 2>/dev/null || echo "")
+	if [ -n "$PARENT_PR_NUMBER" ]; then
+		PARENT_PR_URL=$(gh -R "$REPO" pr view "$PARENT_PR_NUMBER" --json url --jq '.url' 2>/dev/null || echo "")
+	fi
 fi
 PARENT_PR_NUMBER="${PARENT_PR_NUMBER:-UNKNOWN}"
 PARENT_PR_URL="${PARENT_PR_URL:-UNKNOWN}"
 
 awk -v tid="$NEW_TICKET" \
-    -v parent="$PARENT_TICKET" \
-    -v orch="$ORCH_NAME" \
-    -v wd="$WORKER_DIR" \
-    -v bn="$WORKER_NAME" \
-    -v bb="$BASE_BRANCH" \
-    -v sf="$SIGNAL_FILE" \
-    -v findings="$FINDINGS" \
-    -v ppurl="$PARENT_PR_URL" \
-    -v ppnum="$PARENT_PR_NUMBER" \
-'{
+	-v parent="$PARENT_TICKET" \
+	-v orch="$ORCH_NAME" \
+	-v wd="$WORKER_DIR" \
+	-v bn="$WORKER_NAME" \
+	-v bb="$BASE_BRANCH" \
+	-v sf="$SIGNAL_FILE" \
+	-v findings="$FINDINGS" \
+	-v ppurl="$PARENT_PR_URL" \
+	-v ppnum="$PARENT_PR_NUMBER" \
+	'{
   gsub(/\$\{TICKET_ID\}/, tid);
   gsub(/\$\{PARENT_TICKET\}/, parent);
   gsub(/\$\{ORCH_NAME\}/, orch);
@@ -206,8 +255,8 @@ awk -v tid="$NEW_TICKET" \
   gsub(/\$\{PARENT_PR_URL\}/, ppurl);
   gsub(/\$\{PARENT_PR_NUMBER\}/, ppnum);
   print;
-}' "$TEMPLATE_PROMPT" > "$PROMPT_FILE"
+}' "$TEMPLATE_PROMPT" >"$PROMPT_FILE"
 echo "Wrote prompt: $PROMPT_FILE"
 echo ""
 echo "Dispatch the follow-up worker with:"
-echo "  claude -n \"${WORKER_NAME}\" -w \"${WORKER_DIR}\" --output-format stream-json --verbose -p \"\$(cat ${PROMPT_FILE})\" > \"${ORCH_DIR}/workers/${NEW_TICKET}-stream.jsonl\" 2>/dev/null &"
+echo "  ( cd \"${WORKER_DIR}\" && exec nohup claude -n \"${WORKER_NAME}\" --output-format stream-json --verbose --dangerously-skip-permissions -p \"\$(cat ${PROMPT_FILE})\" ) > \"${ORCH_DIR}/workers/${NEW_TICKET}-stream.jsonl\" 2> \"${ORCH_DIR}/workers/${NEW_TICKET}-stderr.log\" &"

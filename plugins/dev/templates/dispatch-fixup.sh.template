@@ -30,13 +30,21 @@ fi
 
 PROMPT_BODY="$(cat "${PROMPT_FILE}")"
 
-CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
-CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
-claude \
-  -n "fixup-${TICKET_ID}" \
-  -w "${WORKER_DIR}" \
-  --output-format stream-json \
-  --verbose \
-  -p "${PROMPT_BODY}" \
-  > "${STREAM_FILE}" 2> "${LOG_FILE}" &
+# `claude -w` takes a *name* and creates a new worktree — do NOT pass the path
+# to the already-provisioned worker worktree there. Run the dispatch inside a
+# backgrounded subshell that `cd`s then `exec`s claude, so `$!` in this shell
+# resolves to the worker's PID. `--dangerously-skip-permissions` is required
+# for headless workers (no TTY to accept permission prompts). `nohup` keeps
+# the worker alive after this dispatching shell exits.
+(
+  cd "${WORKER_DIR}" || exit 1
+  CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
+  CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
+  exec nohup claude \
+    -n "fixup-${TICKET_ID}" \
+    --output-format stream-json \
+    --verbose \
+    --dangerously-skip-permissions \
+    -p "${PROMPT_BODY}"
+) > "${STREAM_FILE}" 2> "${LOG_FILE}" &
 echo "Dispatched fix-up worker via claude CLI (pid $!)"

@@ -1,6 +1,8 @@
 ---
 name: orchestrate
-description: Coordinate multiple tickets in parallel across worktrees with wave-based execution, worker dispatch, and adversarial verification
+description:
+  Coordinate multiple tickets in parallel across worktrees with wave-based execution, worker
+  dispatch, and adversarial verification
 disable-model-invocation: true
 allowed-tools: Read, Write, Bash, Task, Grep, Glob, Agent
 version: 1.0.0
@@ -10,8 +12,8 @@ version: 1.0.0
 
 Coordinate multiple Linear tickets in parallel across git worktrees. The orchestrator creates
 worktrees, dispatches `/oneshot` workers, tracks progress via a dashboard, and enforces quality
-gates through adversarial verification. **The orchestrator NEVER writes application code** — it
-only coordinates, monitors, and verifies.
+gates through adversarial verification. **The orchestrator NEVER writes application code** — it only
+coordinates, monitors, and verifies.
 
 ## Prerequisites
 
@@ -54,18 +56,18 @@ fi
 
 ## Flags
 
-| Flag | Description |
-|------|-------------|
-| `--name <name>` | Name this orchestrator instance (default: auto-generated from tickets) |
-| `--project <name>` | Pull tickets from a Linear project |
-| `--cycle current` | Pull tickets from the current Linear cycle |
-| `--file <path>` | Read ticket IDs from a file (one per line) |
-| `--auto-merge` | Workers auto-merge PRs when CI + verification pass |
-| `--max-parallel <n>` | Override config `maxParallel` (default: 3) |
-| `--base-branch <branch>` | Base branch for worktrees (default: main) |
-| `--interactive` | Include PM intake phase before orchestration |
-| `--prd <path>` | Run PRD review panel + ticket creation before orchestration |
-| `--dry-run` | Show wave plan without executing |
+| Flag                     | Description                                                            |
+| ------------------------ | ---------------------------------------------------------------------- |
+| `--name <name>`          | Name this orchestrator instance (default: auto-generated from tickets) |
+| `--project <name>`       | Pull tickets from a Linear project                                     |
+| `--cycle current`        | Pull tickets from the current Linear cycle                             |
+| `--file <path>`          | Read ticket IDs from a file (one per line)                             |
+| `--auto-merge`           | Workers auto-merge PRs when CI + verification pass                     |
+| `--max-parallel <n>`     | Override config `maxParallel` (default: 3)                             |
+| `--base-branch <branch>` | Base branch for worktrees (default: main)                              |
+| `--interactive`          | Include PM intake phase before orchestration                           |
+| `--prd <path>`           | Run PRD review panel + ticket creation before orchestration            |
+| `--dry-run`              | Show wave plan without executing                                       |
 
 ## Configuration
 
@@ -124,8 +126,8 @@ It NEVER:
 
 ### Phase 1: Intake & Dependency Analysis
 
-1. **Resolve tickets**: Based on invocation mode, use the Linearis CLI to fetch ticket data.
-   **For exact CLI syntax, run `linearis issues usage` or `linearis cycles usage`** — do not guess.
+1. **Resolve tickets**: Based on invocation mode, use the Linearis CLI to fetch ticket data. **For
+   exact CLI syntax, run `linearis issues usage` or `linearis cycles usage`** — do not guess.
    - Explicit IDs: read each ticket's full details
    - `--project`: list issues filtered by project name
    - `--cycle current`: list the active cycle, then list its issues
@@ -171,6 +173,7 @@ Proceed? [Y/n]
 ### Phase 2: Provision Worktrees
 
 Determine worktree base directory (in priority order):
+
 1. `catalyst.orchestration.worktreeDir` from config
 2. `${GITHUB_SOURCE_ROOT}/<org>/<repo>-worktrees/` (from env var + git remote)
 3. `~/wt/<repo>/` (fallback)
@@ -193,9 +196,9 @@ WORKER_COMMAND=$(jq -r '.catalyst.orchestration.workerCommand // "/catalyst-dev:
 WORKER_MODEL=$(jq -r '.catalyst.orchestration.workerModel // "opus"' "$CONFIG_FILE" 2>/dev/null)
 ```
 
-**Create ALL worktrees using `create-worktree.sh`** — both orchestrator and workers go
-through the same script so they all get `.claude/`, `.catalyst/`, dependency install,
-thoughts init, and custom hooks:
+**Create ALL worktrees using `create-worktree.sh`** — both orchestrator and workers go through the
+same script so they all get `.claude/`, `.catalyst/`, dependency install, thoughts init, and custom
+hooks:
 
 ```bash
 # The create-worktree.sh script lives relative to this plugin
@@ -226,15 +229,14 @@ for TICKET_ID in "${WAVE_TICKETS[@]}"; do
 done
 ```
 
-**Where worktrees actually land** — the `create-worktree.sh` script resolves the base
-directory in this priority order:
+**Where worktrees actually land** — the `create-worktree.sh` script resolves the base directory in
+this priority order:
 
 1. `--worktree-dir <path>` flag (from `catalyst.orchestration.worktreeDir` config)
 2. `~/catalyst/wt/<projectKey>/` (default — reads `catalyst.projectKey` from config)
 3. `~/catalyst/wt/<repo>/` (fallback if no config)
 
-So for a project with `projectKey: "acme"` and no `worktreeDir` override, all worktrees
-land in:
+So for a project with `projectKey: "acme"` and no `worktreeDir` override, all worktrees land in:
 
 ```
 ~/catalyst/wt/acme/
@@ -260,9 +262,7 @@ With `worktreeDir: "~/catalyst/api"` explicitly configured:
 ```json
 {
   "permissions": {
-    "additionalDirectories": [
-      "/Users/you/catalyst"
-    ]
+    "additionalDirectories": ["/Users/you/catalyst"]
   }
 }
 ```
@@ -273,10 +273,12 @@ With `worktreeDir: "~/catalyst/api"` explicitly configured:
 2. Copies `.claude/` directory (Claude Code native config, plugins, rules)
 3. Copies `.catalyst/` directory (Catalyst workflow config, if it exists)
 4. **Runs `catalyst.worktree.setup` commands from config** — dependency install, thoughts init,
-   permission grants, or any project-specific setup (like Conductor's `conductor.json` lifecycle hooks)
-5. If no `catalyst.worktree.setup` configured, falls back to auto-detected setup: `make setup`
-   or `bun/npm install`, then `humanlayer thoughts init` + `sync`
-6. Runs additional orchestration hooks from `--hooks-json` (from `catalyst.orchestration.hooks.setup`)
+   permission grants, or any project-specific setup (like Conductor's `conductor.json` lifecycle
+   hooks)
+5. If no `catalyst.worktree.setup` configured, falls back to auto-detected setup: `make setup` or
+   `bun/npm install`, then `humanlayer thoughts init` + `sync`
+6. Runs additional orchestration hooks from `--hooks-json` (from
+   `catalyst.orchestration.hooks.setup`)
 
 **Available variables in setup commands:** `${WORKTREE_PATH}`, `${BRANCH_NAME}`, `${TICKET_ID}`,
 `${REPO_NAME}`, `${DIRECTORY}`, `${PROFILE}`
@@ -300,10 +302,19 @@ ${ORCH_DIR}/
 ├── DASHBOARD.md                    # human-readable status (from template)
 ├── state.json                      # machine-readable orchestration state
 └── workers/                        # worker signal files written here
-    ├── ${TICKET_1}.json
+    ├── ${TICKET_1}.json            # worker signal (schema: worker-signal.json)
+    ├── ${TICKET_1}-stream.jsonl    # streaming JSON events from claude CLI
+    ├── ${TICKET_1}-stderr.log      # worker stderr (silent exits diagnosable)
     ├── ${TICKET_2}.json
+    ├── ${TICKET_2}-stream.jsonl
+    ├── ${TICKET_2}-stderr.log
     └── ...
 ```
+
+**Debugging silent worker exits:** If `${TICKET_ID}-stream.jsonl` is 0 bytes AND
+`${TICKET_ID}-stderr.log` is 0 bytes, the worker exited before emitting its first event — check
+`git -C ${WORKER_DIR} log --oneline -5` and the worktree's `.claude/` directory for setup issues. A
+non-empty stderr log will identify permission, path, or environment errors.
 
 Initialize `state.json`:
 
@@ -371,8 +382,8 @@ REPO=$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git
   }')"
 ```
 
-The `CATALYST_ORCHESTRATOR_ID` is set to `${ORCH_NAME}` for use by workers (passed via
-environment variable alongside `CATALYST_ORCHESTRATOR_DIR`).
+The `CATALYST_ORCHESTRATOR_ID` is set to `${ORCH_NAME}` for use by workers (passed via environment
+variable alongside `CATALYST_ORCHESTRATOR_DIR`).
 
 **Start session tracking** (alongside the global state registration above):
 
@@ -396,18 +407,30 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
 ```bash
 WORKER_DIR="${WORKTREES_BASE}/${ORCH_NAME}-${TICKET_ID}"
 WORKER_STREAM="${ORCH_DIR}/workers/${TICKET_ID}-stream.jsonl"
+WORKER_STDERR="${ORCH_DIR}/workers/${TICKET_ID}-stderr.log"
 SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
 
-CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
-CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
-CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
-claude \
-  -n "${ORCH_NAME}-${TICKET_ID}" \
-  -w "${WORKER_DIR}" \
-  --output-format stream-json \
-  --verbose \
-  -p "${WORKER_COMMAND} ${TICKET_ID} --auto-merge" \
-  > "$WORKER_STREAM" 2>/dev/null &
+# `claude -w` takes a *name* and creates a new worktree — it does NOT accept a
+# path to an existing worktree. The worker worktree was already provisioned in
+# Phase 2, so `cd` into it inside a backgrounded subshell and `exec` claude so
+# its PID is reachable from the outer shell as `$!`.
+# `--dangerously-skip-permissions` is required because headless workers have no
+# TTY to answer permission prompts; the worktree is pre-trusted via Catalyst's
+# setup hooks. `nohup` keeps the worker alive after the orchestrator shell
+# exits. Stderr goes to a real file (not /dev/null) so a silent worker exit
+# stays debuggable.
+(
+  cd "${WORKER_DIR}" || exit 1
+  CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
+  CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
+  CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
+  exec nohup claude \
+    -n "${ORCH_NAME}-${TICKET_ID}" \
+    --output-format stream-json \
+    --verbose \
+    --dangerously-skip-permissions \
+    -p "${WORKER_COMMAND} ${TICKET_ID} --auto-merge"
+) > "$WORKER_STREAM" 2> "$WORKER_STDERR" &
 
 WORKER_PID=$!
 
@@ -419,18 +442,18 @@ if [ -f "$SIGNAL_FILE" ]; then
 fi
 ```
 
-**Streaming JSON output** (`--output-format stream-json --verbose`) emits NDJSON to stdout,
-one event per line, in real-time as the worker runs. The monitor can tail the stream file to
-show live worker activity. Key event types:
+**Streaming JSON output** (`--output-format stream-json --verbose`) emits NDJSON to stdout, one
+event per line, in real-time as the worker runs. The monitor can tail the stream file to show live
+worker activity. Key event types:
 
-| Event | What it signals |
-|-------|----------------|
-| `{"type":"system","subtype":"init"}` | Worker session started; contains `session_id` |
+| Event                                                                                                             | What it signals                                                 |
+| ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `{"type":"system","subtype":"init"}`                                                                              | Worker session started; contains `session_id`                   |
 | `{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"..."}}}` | Worker is now invoking a specific tool (Bash, Read, Edit, etc.) |
-| `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta"}}}` | Worker is generating reasoning/response text |
-| `{"type":"assistant"}` | Complete assistant turn with all content blocks |
-| `{"type":"system","subtype":"api_retry"}` | Worker hit rate limit / error; shows attempt and delay |
-| `{"type":"result"}` | Worker finished; contains final answer and usage stats |
+| `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta"}}}`                    | Worker is generating reasoning/response text                    |
+| `{"type":"assistant"}`                                                                                            | Complete assistant turn with all content blocks                 |
+| `{"type":"system","subtype":"api_retry"}`                                                                         | Worker hit rate limit / error; shows attempt and delay          |
+| `{"type":"result"}`                                                                                               | Worker finished; contains final answer and usage stats          |
 
 When the worker process exits, parse usage from the final `result` event:
 
@@ -558,8 +581,8 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-The orchestrator polls worker status on a regular interval. Use `/loop` if available, otherwise
-poll manually.
+The orchestrator polls worker status on a regular interval. Use `/loop` if available, otherwise poll
+manually.
 
 **Monitoring loop (every 2-3 minutes):**
 
@@ -590,6 +613,7 @@ done
 ```
 
 **Update `DASHBOARD.md`** after each poll using the dashboard template. Include:
+
 - Wave progress (current wave, tickets per wave)
 - Per-worker status table (ticket, status, PR, test coverage columns)
 - Event log (timestamped significant events)
@@ -619,8 +643,8 @@ done
 
 Workers exit at `pr-created` with auto-merge armed. The orchestrator — which survives subprocess
 exits and stays alive across the entire run — owns the long poll that confirms the merge actually
-happens. On each monitoring cycle, for every worker in `pr-created`/`merging` status whose PR is
-not yet known-merged, ping GitHub directly:
+happens. On each monitoring cycle, for every worker in `pr-created`/`merging` status whose PR is not
+yet known-merged, ping GitHub directly:
 
 ```bash
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
@@ -725,8 +749,8 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-When a worker signals "done" (PR created, CI green), the orchestrator does NOT trust it.
-It spawns an **adversarial verification agent** in the worker's worktree:
+When a worker signals "done" (PR created, CI green), the orchestrator does NOT trust it. It spawns
+an **adversarial verification agent** in the worker's worktree:
 
 ```bash
 # Run adversarial verification
@@ -740,10 +764,10 @@ It spawns an **adversarial verification agent** in the worker's worktree:
 
 The verification script checks:
 
-1. **Unit tests**: For each new/modified source file, verify a corresponding test file exists.
-   Run the test suite, verify tests pass.
-2. **API tests**: If API routes were added/modified, verify test coverage exists (Bruno
-   collections, integration tests, etc.).
+1. **Unit tests**: For each new/modified source file, verify a corresponding test file exists. Run
+   the test suite, verify tests pass.
+2. **API tests**: If API routes were added/modified, verify test coverage exists (Bruno collections,
+   integration tests, etc.).
 3. **Functional tests**: If UI was changed, verify functional/E2E test coverage exists.
 4. **Type safety**: Run typecheck command, verify no errors.
 5. **Security**: Check for OWASP top 10 patterns in new code.
@@ -809,15 +833,16 @@ Update your worker signal file when fixed. The orchestrator will re-verify.
 
 When ALL tickets in the current wave pass verification:
 
-1. **Confirm merges**: If `--auto-merge`, the Phase 4 orchestrator-owned poll loop already
-   observed `state=MERGED` for each worker and recorded `pr.mergedAt`. Before advancing the
-   wave, double-check every worker in this wave has `status="done"` with a non-null
-   `pr.mergedAt` in its signal file. If any still show `pr-created` or `merging`, run one more
-   Phase 4 poll cycle before proceeding. If `--auto-merge` is off, flag these PRs for human
-   review on the dashboard instead of advancing.
+1. **Confirm merges**: If `--auto-merge`, the Phase 4 orchestrator-owned poll loop already observed
+   `state=MERGED` for each worker and recorded `pr.mergedAt`. Before advancing the wave,
+   double-check every worker in this wave has `status="done"` with a non-null `pr.mergedAt` in its
+   signal file. If any still show `pr-created` or `merging`, run one more Phase 4 poll cycle before
+   proceeding. If `--auto-merge` is off, flag these PRs for human review on the dashboard instead of
+   advancing.
 
-2. **Write wave briefing** for the next wave (see Wave Briefing section below).
-   Then persist a copy to the thoughts repository so it survives worktree cleanup:
+2. **Write wave briefing** for the next wave (see Wave Briefing section below). Then persist a copy
+   to the thoughts repository so it survives worktree cleanup:
+
    ```bash
    HANDOFF_DIR="thoughts/shared/handoffs/${ORCH_NAME}"
    mkdir -p "${HANDOFF_DIR}"
@@ -827,6 +852,7 @@ When ALL tickets in the current wave pass verification:
    ```
 
 3. **Clean up completed worktrees**: Run teardown hooks from config, then remove.
+
    ```bash
    WORKER_DIR="${WORKTREES_BASE}/${ORCH_NAME}-${TICKET_ID}"
    BRANCH_NAME="${ORCH_NAME}-${TICKET_ID}"
@@ -851,6 +877,7 @@ When ALL tickets in the current wave pass verification:
    `create-worktree.sh` invocation from Phase 2.
 
 5. **Dispatch next wave workers**: Include wave briefing in dispatch prompt:
+
    ```
    IMPORTANT: Read the Wave ${PREV} briefing before starting:
      ${ORCH_DIR}/wave-${PREV}-briefing.md
@@ -885,6 +912,7 @@ When all waves are complete:
    - Any verification failures that required remediation
 
    Then persist summary and any remaining briefings to thoughts:
+
    ```bash
    HANDOFF_DIR="thoughts/shared/handoffs/${ORCH_NAME}"
    mkdir -p "${HANDOFF_DIR}"
@@ -893,8 +921,8 @@ When all waves are complete:
       "${HANDOFF_DIR}/${TIMESTAMP}_${ORCH_NAME}-summary.md"
    ```
 
-2. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck,
-   update them using the Linearis CLI (run `linearis issues usage` for update syntax).
+2. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck, update them
+   using the Linearis CLI (run `linearis issues usage` for update syntax).
 
 3. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it).
 
@@ -919,6 +947,7 @@ fi
 ```
 
 6. **Report to user**:
+
    ```
    Orchestration Complete — "api-redesign"
 
@@ -937,26 +966,26 @@ fi
 
 ## Wave Briefing Documents
 
-Before dispatching each wave after Wave 1, the orchestrator writes a **briefing document**
-to `${ORCH_DIR}/wave-${N}-briefing.md` summarizing what prior waves learned.
+Before dispatching each wave after Wave 1, the orchestrator writes a **briefing document** to
+`${ORCH_DIR}/wave-${N}-briefing.md` summarizing what prior waves learned.
 
 **How the briefing is created:**
 
 1. Read each completed worker's PR description
 2. Read git diff summaries from each merged PR (`git diff --stat`)
 3. Read any research documents workers saved to `thoughts/shared/`
-4. Synthesize into: patterns established, new dependencies added, test helpers created,
-   gotchas discovered
-5. **Pre-assign Supabase migration numbers** for the upcoming wave (see Migration Number
-   Assignments below)
+4. Synthesize into: patterns established, new dependencies added, test helpers created, gotchas
+   discovered
+5. **Pre-assign Supabase migration numbers** for the upcoming wave (see Migration Number Assignments
+   below)
 
 Use the wave briefing template from `plugins/dev/templates/orchestrate-wave-briefing.md`.
 
 ### Migration Number Assignments (CTL-29)
 
-When two tickets in the same wave both add a Supabase migration, they can race on the same
-`NNN_` filename prefix — whichever PR merges first wins, the other must rebase post-PR. The
-orchestrator pre-assigns numbers in the briefing to prevent this.
+When two tickets in the same wave both add a Supabase migration, they can race on the same `NNN_`
+filename prefix — whichever PR merges first wins, the other must rebase post-PR. The orchestrator
+pre-assigns numbers in the briefing to prevent this.
 
 **Generation step** (run before rendering the template):
 
@@ -975,27 +1004,28 @@ The script replaces the `${MIGRATION_ASSIGNMENTS}` placeholder in the briefing t
 **Detection heuristic** (matches `pre-assign-migrations.sh`):
 
 - Label match (case-insensitive): `database`, `migration`, `schema`
-- Keyword match in title or description (case-insensitive): `supabase/migrations`,
-  `migration`, `schema`, `ALTER TABLE`, `CREATE TABLE`
+- Keyword match in title or description (case-insensitive): `supabase/migrations`, `migration`,
+  `schema`, `ALTER TABLE`, `CREATE TABLE`
 
 **Behavior:**
 
-- If `supabase/migrations/` does not exist in the orchestrator worktree, the script emits
-  nothing (repo-agnostic — projects without Supabase are unaffected).
+- If `supabase/migrations/` does not exist in the orchestrator worktree, the script emits nothing
+  (repo-agnostic — projects without Supabase are unaffected).
 - If no ticket in the wave is migration-likely, it emits nothing.
-- Otherwise it scans for the highest existing `NNN_` prefix and assigns `NNN+1`, `NNN+2`, ...
-  to each migration-likely ticket in input order.
+- Otherwise it scans for the highest existing `NNN_` prefix and assigns `NNN+1`, `NNN+2`, ... to
+  each migration-likely ticket in input order.
 
 **Tests:** `plugins/dev/scripts/__tests__/pre-assign-migrations.test.sh` covers the detection
 heuristic, the scanning logic, repo-agnostic fallback, and sequential assignment.
 
-**Thoughts persistence:** Every briefing is copied to `thoughts/shared/handoffs/${ORCH_NAME}/`
-with timestamped filenames (`YYYY-MM-DD_HH-MM-SS_wave-N-briefing.md`). This ensures briefings
-survive worktree cleanup and are available via thoughts sync across workspaces.
-The final `SUMMARY.md` is also persisted there at completion.
+**Thoughts persistence:** Every briefing is copied to `thoughts/shared/handoffs/${ORCH_NAME}/` with
+timestamped filenames (`YYYY-MM-DD_HH-MM-SS_wave-N-briefing.md`). This ensures briefings survive
+worktree cleanup and are available via thoughts sync across workspaces. The final `SUMMARY.md` is
+also persisted there at completion.
 
-**Why this matters:** This is a unique advantage over other frameworks. GSD executors are
-stateless. Gas Town Polecats don't share findings. Wave briefings mean:
+**Why this matters:** This is a unique advantage over other frameworks. GSD executors are stateless.
+Gas Town Polecats don't share findings. Wave briefings mean:
+
 - Wave 2+ workers know which patterns to follow
 - Wave 2+ workers know which test helpers exist
 - Wave 2+ workers know about gotchas discovered by earlier waves
@@ -1005,29 +1035,30 @@ stateless. Gas Town Polecats don't share findings. Wave briefings mean:
 
 ### Layer 1 — Dispatch Prompt (Prevention)
 
-Every worker dispatch includes mandatory testing requirements in the prompt itself.
-Not a suggestion — a hard requirement. The prompt explicitly states that work will be
-independently verified and workers should not claim done without tests.
+Every worker dispatch includes mandatory testing requirements in the prompt itself. Not a suggestion
+— a hard requirement. The prompt explicitly states that work will be independently verified and
+workers should not claim done without tests.
 
 ### Layer 2 — Quality Gates (Automated)
 
-The existing quality gate system (`/validate-type-safety`, `/security-review`,
-`code-reviewer`, `pr-test-analyzer`) plus config-based gates run inside each worker's
-`/oneshot` pipeline. These are the worker's own self-checks.
+The existing quality gate system (`/validate-type-safety`, `/security-review`, `code-reviewer`,
+`pr-test-analyzer`) plus config-based gates run inside each worker's `/oneshot` pipeline. These are
+the worker's own self-checks.
 
 ### Layer 3 — Independent Verification (Adversarial)
 
-The orchestrator's own verification script audits the worker's output AFTER the worker
-claims done. This is the anti-reward-hacking layer — the worker can't game its own quality
-gates because the orchestrator runs a separate, adversarial check. The verification agent
-has no incentive to pass — it's scored on catching gaps, not shipping fast.
+The orchestrator's own verification script audits the worker's output AFTER the worker claims done.
+This is the anti-reward-hacking layer — the worker can't game its own quality gates because the
+orchestrator runs a separate, adversarial check. The verification agent has no incentive to pass —
+it's scored on catching gaps, not shipping fast.
 
 ## Dashboard
 
-The orchestrator maintains a live dashboard at `${ORCH_DIR}/DASHBOARD.md`. Updated after
-each monitoring poll. Uses the template from `plugins/dev/templates/orchestrate-dashboard.md`.
+The orchestrator maintains a live dashboard at `${ORCH_DIR}/DASHBOARD.md`. Updated after each
+monitoring poll. Uses the template from `plugins/dev/templates/orchestrate-dashboard.md`.
 
 The dashboard includes:
+
 - Orchestrator metadata (name, start time, project, base branch)
 - Current wave progress
 - Per-worker status table with test coverage columns
@@ -1038,29 +1069,33 @@ The dashboard includes:
 
 The orchestrator manages Linear state transitions as a safety net:
 
-| Event | Linear Action |
-|-------|--------------|
-| Worker dispatched | Move ticket to `stateMap.inProgress` |
-| Worker creates PR | Verify ticket is `stateMap.inReview` — fix if not |
-| Worker passes verification | No change (already in review) |
-| PR merged | Verify ticket is `stateMap.done` — fix if not |
-| Worker fails/stalls | Add comment with status, keep `inProgress` |
+| Event                      | Linear Action                                     |
+| -------------------------- | ------------------------------------------------- |
+| Worker dispatched          | Move ticket to `stateMap.inProgress`              |
+| Worker creates PR          | Verify ticket is `stateMap.inReview` — fix if not |
+| Worker passes verification | No change (already in review)                     |
+| PR merged                  | Verify ticket is `stateMap.done` — fix if not     |
+| Worker fails/stalls        | Add comment with status, keep `inProgress`        |
 
-The orchestrator also adds comments to tickets for visibility using the Linearis CLI
-(run `linearis comments usage` for syntax).
+The orchestrator also adds comments to tickets for visibility using the Linearis CLI (run
+`linearis comments usage` for syntax).
 
 ## Named Orchestrators & Remote Control
 
-Start the orchestrator with remote control for access from claude.ai/code:
+Start the orchestrator with remote control for access from claude.ai/code. The orchestrator worktree
+was already created in Phase 2, so `cd` into it — do not pass `-w` (that would ask claude to create
+a _new_ worktree using the path as a name):
+
 ```bash
-claude --remote-control "${ORCH_NAME}" -w "${ORCH_DIR}"
+( cd "${ORCH_DIR}" && claude --remote-control "${ORCH_NAME}" )
 ```
 
-Workers should NOT use remote control — they're autonomous. The human monitors workers
-through the orchestrator's dashboard.
+Workers should NOT use remote control — they're autonomous. The human monitors workers through the
+orchestrator's dashboard.
 
-**Multiple orchestrators** can run concurrently. Worktree names are prefixed with the
-orchestrator name to avoid collisions:
+**Multiple orchestrators** can run concurrently. Worktree names are prefixed with the orchestrator
+name to avoid collisions:
+
 ```
 ${WORKTREE_BASE}/
 ├── auth-orch/                    # orchestrator 1
@@ -1073,12 +1108,12 @@ ${WORKTREE_BASE}/
 
 ## Worker Communication
 
-Workers write status updates to `${ORCH_DIR}/workers/${TICKET_ID}.json`. The `/oneshot`
-skill detects orchestrator presence by checking for a sibling `orchestrator/` directory or
-the `CATALYST_ORCHESTRATOR_DIR` environment variable.
+Workers write status updates to `${ORCH_DIR}/workers/${TICKET_ID}.json`. The `/oneshot` skill
+detects orchestrator presence by checking for a sibling `orchestrator/` directory or the
+`CATALYST_ORCHESTRATOR_DIR` environment variable.
 
-**Worker signal file schema:** See `plugins/dev/templates/worker-signal.json` for the full
-JSON schema including the `definitionOfDone` block.
+**Worker signal file schema:** See `plugins/dev/templates/worker-signal.json` for the full JSON
+schema including the `definitionOfDone` block.
 
 **How workers detect orchestrator mode:**
 
@@ -1116,19 +1151,19 @@ Did the PR already merge?
 ```
 
 Ask `gh pr view $PR_NUMBER --json state` before choosing. `OPEN` → fix-up. `MERGED`/`CLOSED` →
-follow-up. If the PR is `MERGED` you physically cannot push to that branch anymore; a fix-up
-attempt will fail silently or push to an orphan branch.
+follow-up. If the PR is `MERGED` you physically cannot push to that branch anymore; a fix-up attempt
+will fail silently or push to an orphan branch.
 
 ### Pattern A: Fix-up Worker (PR still open)
 
-Used on ADV-219 / PR #130 and ADV-220 / PR #132 during `orch-data-import-2026-04-13`. The
-original worker exited at `pr-created`. Codex or a security scanner posted inline threads after.
-Auto-merge is blocked on unresolved threads.
+Used on ADV-219 / PR #130 and ADV-220 / PR #132 during `orch-data-import-2026-04-13`. The original
+worker exited at `pr-created`. Codex or a security scanner posted inline threads after. Auto-merge
+is blocked on unresolved threads.
 
 **When to use:**
+
 - `pr.state = OPEN`
-- Blockers are specific and file:line-scoped (inline review comments, CI test failures, lint
-  errors)
+- Blockers are specific and file:line-scoped (inline review comments, CI test failures, lint errors)
 - The remediation is a small targeted patch, not a re-design
 
 **How the orchestrator dispatches:**
@@ -1143,12 +1178,15 @@ test/auth.test.ts: add regression test for the null-token path" \
 ```
 
 What this does:
+
 1. Renders `templates/fixup-prompt.md` → `${ORCH_DIR}/workers/fixup-${TICKET}-prompt.md`
-2. Renders `templates/dispatch-fixup.sh.template` → `${ORCH_DIR}/workers/dispatch-fixup-${TICKET}.sh`
+2. Renders `templates/dispatch-fixup.sh.template` →
+   `${ORCH_DIR}/workers/dispatch-fixup-${TICKET}.sh`
 3. With `--dispatch`, runs the dispatch script in the background (via `claude -p` with streaming
    JSON output)
 
 The fix-up worker:
+
 - Pulls latest on the existing PR branch (does NOT create a new branch)
 - Resolves ONLY the listed blockers
 - Pushes ONE commit with message `fix(...): resolve review feedback on #${PR}`
@@ -1156,9 +1194,9 @@ The fix-up worker:
 - Writes its commit SHA to the worker signal file as `fixupCommit`
 - Does one ~3-minute settle-window pass and exits
 
-The orchestrator's Phase 4 poll loop then observes the re-triggered CI and eventual `MERGED`
-state, exactly as with a fresh worker. No additional orchestrator logic is needed — `fixupCommit`
-is metadata for the dashboard, not a signal the orchestrator acts on.
+The orchestrator's Phase 4 poll loop then observes the re-triggered CI and eventual `MERGED` state,
+exactly as with a fresh worker. No additional orchestrator logic is needed — `fixupCommit` is
+metadata for the dashboard, not a signal the orchestrator acts on.
 
 **Typical cost:** ~$2 (much cheaper than a fresh worker because scope is narrow).
 
@@ -1169,6 +1207,7 @@ cleanly; a post-merge security review or prod observation surfaced issues later.
 physically impossible — the merged branch is gone.
 
 **When to use:**
+
 - `pr.state = MERGED`
 - New findings that would have blocked merge if they had arrived 10 minutes earlier
 - Traceability to the parent is important (audit, incident response)
@@ -1182,49 +1221,50 @@ post-merge: missing rate-limit on POST /api/auth/token (src/api/auth.ts:18)"
 ```
 
 What this does:
+
 1. Files a new Linear ticket via `linearis issues create`, with description that references the
    parent and enumerates the findings. Title defaults to
    `Follow-up: <PARENT_TICKET> post-merge findings`; override with `--title`.
 2. Provisions a fresh worktree off `main` via `create-worktree.sh`, named
    `${ORCH_NAME}-${NEW_TICKET}`.
-3. Seeds the new worker's signal file with `followUpTo: "${PARENT_TICKET}"` — the orchestrator
-   and dashboard both use this field to render the ancestry.
+3. Seeds the new worker's signal file with `followUpTo: "${PARENT_TICKET}"` — the orchestrator and
+   dashboard both use this field to render the ancestry.
 4. Renders `templates/followup-prompt.md` → `${ORCH_DIR}/workers/${NEW_TICKET}-prompt.md`, which
    points the worker at the findings, the parent PR, and the TDD contract.
 5. Prints the `claude -p` command to actually start the worker — it does NOT auto-dispatch
    (follow-up tickets are heavier and warrant human confirmation).
 
 The follow-up worker runs the full `/oneshot` pipeline (research → plan → implement → validate →
-ship), same as any other worker. Its PR description must reference the parent PR number; the
-prompt enforces this.
+ship), same as any other worker. Its PR description must reference the parent PR number; the prompt
+enforces this.
 
 **Typical cost:** ~$4 (full pipeline, but scoped to the findings).
 
-**Skip Linear ticket creation** with `--ticket <id>` if you filed the ticket manually or Linear
-is unavailable. The rest of the flow proceeds with the given ticket ID.
+**Skip Linear ticket creation** with `--ticket <id>` if you filed the ticket manually or Linear is
+unavailable. The rest of the flow proceeds with the given ticket ID.
 
 ### Signal file metadata
 
-| Field          | Written by                     | Pattern |
-| -------------- | ------------------------------ | ------- |
-| `fixupCommit`  | fix-up worker (after push)     | A       |
-| `followUpTo`   | orchestrator (at provisioning) | B       |
+| Field         | Written by                     | Pattern |
+| ------------- | ------------------------------ | ------- |
+| `fixupCommit` | fix-up worker (after push)     | A       |
+| `followUpTo`  | orchestrator (at provisioning) | B       |
 
 These fields are additive — they do not conflict with `pr.prOpenedAt`, `pr.autoMergeArmedAt`, or
 `pr.mergedAt` (which remain worker-owned / orchestrator-owned per the normal split).
 
 ### Dashboard columns
 
-`DASHBOARD.md` has two additional columns: `Fix-up Commit` (short SHA, empty for normal workers)
-and `Follow-up To` (parent ticket ID, empty for normal workers and fix-up workers). See
+`DASHBOARD.md` has two additional columns: `Fix-up Commit` (short SHA, empty for normal workers) and
+`Follow-up To` (parent ticket ID, empty for normal workers and fix-up workers). See
 `templates/orchestrate-dashboard.md`.
 
 ### Known limitation
 
-`orchestrate-verify.sh` currently only matches open PRs via `gh pr list --head`; already-merged
-PRs (the exact target of Pattern B) slip past its checks as false-negatives. This is tracked
-separately and does not block recovery — follow-up workers run full quality gates from their
-`/oneshot` pipeline, which is the real verification.
+`orchestrate-verify.sh` currently only matches open PRs via `gh pr list --head`; already-merged PRs
+(the exact target of Pattern B) slip past its checks as false-negatives. This is tracked separately
+and does not block recovery — follow-up workers run full quality gates from their `/oneshot`
+pipeline, which is the real verification.
 
 ## Error Handling
 
@@ -1237,12 +1277,14 @@ fi
 ```
 
 **Worker crashes or stalls:**
+
 - Monitor detects no progress for 15+ minutes (no commits, no signal updates)
 - Dashboard marks worker as "stalled"
 - Orchestrator does NOT auto-restart — flags for human decision
 - Options presented: restart worker, skip ticket, investigate manually
 
 **Orchestrator crash recovery:**
+
 - All state is in `${ORCH_DIR}/state.json` + worker signal files
 - Resume with: `/catalyst-dev:orchestrate --resume ${ORCH_DIR}`
 - Reads state.json, determines current wave, checks each worker's actual status
@@ -1250,6 +1292,7 @@ fi
 - On resume, start a new session (the old one leaked — this is acceptable)
 
 **Worktree conflicts:**
+
 - If a worktree path already exists, skip creation and check if it's from a previous run
 - If it has a valid worker signal file, treat as a resumed worker
 
@@ -1260,7 +1303,8 @@ fi
 - Wave advancement requires ALL tickets in the wave to pass verification
 - The `--auto-merge` flag applies to workers, not the orchestrator
 - Dashboard and state files are ephemeral — they don't survive worktree removal
-- Wave briefings and summaries are persisted to `thoughts/shared/handoffs/${ORCH_NAME}/` for archival
+- Wave briefings and summaries are persisted to `thoughts/shared/handoffs/${ORCH_NAME}/` for
+  archival
 - Wave briefings are the key differentiator — knowledge compounds across waves
 - The 3-layer testing enforcement prevents the observed failure mode of agents skipping tests
 - CTL-26 dependency: Uses `.catalyst/` paths. Falls back to `.claude/` if `.catalyst/` doesn't exist
