@@ -2,7 +2,7 @@ import type { OrchestratorState, SessionState } from "./types";
 
 export type GroupingMode = "flat" | "repo" | "ticket";
 
-export interface SidebarGroup {
+interface SidebarGroup {
   key: string;
   label: string;
   orchestrators: OrchestratorState[];
