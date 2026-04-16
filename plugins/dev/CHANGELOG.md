@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.30.0...catalyst-dev-v6.31.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** add sidebar grouping by repo/cwd ([#157](https://github.com/coalesce-labs/catalyst/issues/157)) ([0101310](https://github.com/coalesce-labs/catalyst/commit/010131057e2c2419dec3a1ae5c337ba7d809a637))
+
 ## [6.30.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.29.0...catalyst-dev-v6.30.0) (2026-04-16)
 
 
