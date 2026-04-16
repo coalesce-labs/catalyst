@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+# orchestrate-revive - Revive dead/stalled workers via claude session-resume (CTL-63).
+#
+# Ports the agent-obs/revive-worker.sh pattern into the orchestrator. For each
+# worker signal under ORCH_DIR/workers/*.json, checks PID liveness and
+# heartbeat staleness; when a non-terminal worker is dead or wedged, resolves
+# its original session_id and relaunches `claude -p --resume <sid>` so the
+# revived process picks up the full prior context (tool calls, plan, PR state)
+# at a fraction of the cost of a fresh redispatch.
+#
+# Usage:
+#   orchestrate-revive --orch-dir <path> --orch-id <id>
+#                      [--max-revives <n>]               # default 2
+#                      [--stale-heartbeat-seconds <n>]   # default 900 (15 min)
+#                      [--worker-command <cmd>]          # default /catalyst-dev:oneshot
+#                      [--model <name>]                  # default opus
+#                      [--dry-run]
+#
+# Outputs a JSON summary on stdout:
+#   {"checked":N,"revived":M,"stalled":K,"skipped":S}
+#
+# Environment:
+#   CATALYST_STATE_SCRIPT       path to catalyst-state.sh (default: sibling of this script)
+#   CATALYST_REVIVE_CLAUDE_BIN  claude binary to invoke (default: `claude` on PATH) — tests override
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+CLAUDE_BIN="${CATALYST_REVIVE_CLAUDE_BIN:-claude}"
+
+ORCH_DIR=""
+ORCH_ID=""
+MAX_REVIVES=2
+STALE_HEARTBEAT_SECONDS=900
+WORKER_COMMAND="/catalyst-dev:oneshot"
+MODEL="opus"
+DRY_RUN=0
+
+usage() {
+  sed -n '2,32p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir)                 ORCH_DIR="$2"; shift 2 ;;
+    --orch-id)                  ORCH_ID="$2"; shift 2 ;;
+    --max-revives)              MAX_REVIVES="$2"; shift 2 ;;
+    --stale-heartbeat-seconds)  STALE_HEARTBEAT_SECONDS="$2"; shift 2 ;;
+    --worker-command)           WORKER_COMMAND="$2"; shift 2 ;;
+    --model)                    MODEL="$2"; shift 2 ;;
+    --dry-run)                  DRY_RUN=1; shift ;;
+    -h|--help)                  usage 0 ;;
+    *)                          echo "unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
+[ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
+[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Return number of seconds since the given ISO timestamp, or a very large value
+# if the timestamp is empty/unparseable (so callers treat it as stale).
+seconds_since() {
+  local ts="$1"
+  [ -z "$ts" ] && { echo 999999; return; }
+  local then
+  # macOS `date -j -f` vs GNU `date -d` — fall back if neither accepts.
+  then=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null \
+        || date -u -d "$ts" +%s 2>/dev/null \
+        || echo "")
+  [ -z "$then" ] && { echo 999999; return; }
+  local now
+  now=$(date -u +%s)
+  echo $(( now - then ))
+}
+
+# Resolve the session_id for a ticket from (in priority order):
+#   1. workers/output/<ticket>-stream.jsonl first system/init event
+#   2. workers/<ticket>-stream.jsonl first system/init event (legacy path)
+#   3. workers/<ticket>-output.json .session_id (agent-obs legacy format)
+#   4. Basename of newest ~/.claude/projects/*<worker-name>*/*.jsonl
+resolve_session_id() {
+  local ticket="$1" worker_name="$2"
+  local sid=""
+
+  for stream in \
+    "${ORCH_DIR}/workers/output/${ticket}-stream.jsonl" \
+    "${ORCH_DIR}/workers/${ticket}-stream.jsonl"; do
+    if [ -f "$stream" ]; then
+      sid=$(grep -m1 '"subtype":"init"' "$stream" 2>/dev/null \
+        | jq -r '.session_id // empty' 2>/dev/null || echo "")
+      [ -n "$sid" ] && { echo "$sid"; return 0; }
+    fi
+  done
+
+  local legacy="${ORCH_DIR}/workers/${ticket}-output.json"
+  if [ -f "$legacy" ]; then
+    sid=$(jq -r '.session_id // empty' "$legacy" 2>/dev/null || echo "")
+    [ -n "$sid" ] && { echo "$sid"; return 0; }
+  fi
+
+  # Last resort: scan the local Claude Code project dirs for a transcript whose
+  # directory name matches the worker-name. Basename of the newest jsonl is the
+  # session_id.
+  if [ -n "$worker_name" ] && [ -d "$HOME/.claude/projects" ]; then
+    local newest
+    newest=$(find "$HOME/.claude/projects" -type d -name "*${worker_name}*" -maxdepth 2 \
+      -exec find {} -maxdepth 1 -name "*.jsonl" -type f \; 2>/dev/null \
+      | xargs ls -t 2>/dev/null | head -1)
+    if [ -n "$newest" ]; then
+      sid=$(basename "$newest" .jsonl)
+      [ -n "$sid" ] && { echo "$sid"; return 0; }
+    fi
+  fi
+
+  return 1
+}
+
+# Emit a fresh-start event via the state script (no-op when state script is
+# missing or when this is a dry run).
+emit_state() {
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  [ -x "$STATE_SCRIPT" ] || return 0
+  "$STATE_SCRIPT" "$@" >/dev/null 2>&1 || true
+}
+
+# Compose the revive prompt based on the worker's self-reported phase so the
+# resumed session knows which loop to re-enter. Kept short — the session
+# already carries full prior context.
+build_prompt() {
+  local status="$1"
+  case "$status" in
+    pr-created|merging)
+      echo "Your session was revived by the orchestrator. Resume your merge-completion loop: poll \`gh pr view <PR> --json state,mergeStateStatus,mergedAt\` every 30-60s. Handle BEHIND (call \`gh api -X PUT repos/.../update-branch\`), UNSTABLE/BLOCKED (investigate CI + Codex threads, fix and push), DIRTY (rebase). Update your signal file lastHeartbeat every iteration. You are not done until state=MERGED with a real mergedAt — write pr.mergedAt + status=done to your signal before exiting."
+      ;;
+    shipping)
+      echo "Your session was revived by the orchestrator. Resume Phase 5: if no PR yet, create it; then arm auto-merge and enter the poll-until-MERGED loop. You are not done until gh pr view returns state=MERGED with a real mergedAt."
+      ;;
+    validating)
+      echo "Your session was revived by the orchestrator. Resume Phase 4 (validation + quality gates) where you left off, then proceed to Phase 5 (ship) and poll until MERGED."
+      ;;
+    implementing|planning|researching|dispatched)
+      echo "Your session was revived by the orchestrator. Resume your current phase where you left off and continue through validation, ship, and merge. You are not done until gh pr view returns state=MERGED with a real mergedAt."
+      ;;
+    *)
+      echo "Your session was revived by the orchestrator. Continue your oneshot workflow where you left off — research → plan → implement → validate → ship → merge. You are not done until gh pr view returns state=MERGED with a real mergedAt."
+      ;;
+  esac
+}
+
+# Spawn a revived claude session for a worker. Emits the new PID on stdout, or
+# empty string on failure.
+spawn_revive() {
+  local ticket="$1" worktree="$2" session_id="$3" prompt="$4"
+
+  if [ ! -d "$worktree" ]; then
+    echo "ERROR: worktree missing for ${ticket}: ${worktree}" >&2
+    return 1
+  fi
+
+  local stream_file="${ORCH_DIR}/workers/output/${ticket}-stream.jsonl"
+  local stderr_file="${ORCH_DIR}/workers/output/${ticket}-stderr.log"
+  mkdir -p "$(dirname "$stream_file")"
+
+  (
+    cd "$worktree" || exit 1
+    CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+    CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+    exec nohup "$CLAUDE_BIN" \
+      --model "$MODEL" \
+      --output-format stream-json \
+      --verbose \
+      --dangerously-skip-permissions \
+      --resume "$session_id" \
+      -p "$prompt"
+  ) >> "$stream_file" 2>> "$stderr_file" < /dev/null &
+
+  local pid=$!
+  disown "$pid" 2>/dev/null || true
+  echo "$pid"
+}
+
+# ─── Main loop ────────────────────────────────────────────────────────────────
+
+CHECKED=0
+REVIVED=0
+STALLED=0
+SKIPPED=0
+
+TERMINAL_STATUSES=" done merged failed stalled signal_corrupt "
+
+shopt -s nullglob
+for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
+  # Skip non-worker JSON files (orchestrator artifacts etc.) — real signals
+  # always have a .ticket field.
+  TICKET=$(jq -r '.ticket // empty' "$SIGNAL" 2>/dev/null || echo "")
+  [ -z "$TICKET" ] && continue
+
+  STATUS=$(jq -r '.status // empty' "$SIGNAL")
+  PID=$(jq -r '.pid // empty' "$SIGNAL")
+  WORKTREE=$(jq -r '.worktreePath // empty' "$SIGNAL")
+  WORKER_NAME=$(jq -r '.workerName // empty' "$SIGNAL")
+  LAST_HEARTBEAT=$(jq -r '.lastHeartbeat // .updatedAt // empty' "$SIGNAL")
+  REVIVE_COUNT=$(jq -r '.reviveCount // 0' "$SIGNAL")
+
+  # Skip workers that have already reached a terminal state.
+  if [[ "$TERMINAL_STATUSES" == *" $STATUS "* ]]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  CHECKED=$((CHECKED+1))
+
+  # Liveness decision: dead PID OR (alive PID with heartbeat older than
+  # stale-heartbeat-seconds — a zombie-sleep situation documented in the
+  # CTL-63 ticket).
+  local_dead=0
+  if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+    local_dead=1
+  fi
+  STALE_AGE=$(seconds_since "$LAST_HEARTBEAT")
+  local_stale=0
+  if [ "$STALE_AGE" -ge "$STALE_HEARTBEAT_SECONDS" ]; then
+    local_stale=1
+  fi
+
+  if [ "$local_dead" -eq 0 ] && [ "$local_stale" -eq 0 ]; then
+    continue
+  fi
+
+  TS=$(now_iso)
+
+  # Budget check: if we have already used MAX_REVIVES, escalate to stalled.
+  if [ "$REVIVE_COUNT" -ge "$MAX_REVIVES" ]; then
+    STALLED=$((STALLED+1))
+    MSG="Revive budget exhausted after ${REVIVE_COUNT} attempts"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "[dry-run] ${TICKET}: ${MSG}" >&2
+      continue
+    fi
+    jq --arg ts "$TS" --arg msg "$MSG" \
+       '.status = "stalled"
+        | .attentionReason = "revive-budget-exhausted"
+        | .attentionMessage = $msg
+        | .updatedAt = $ts
+        | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+       "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+    emit_state attention "$ORCH_ID" "revive-budget-exhausted" "$TICKET" "$MSG"
+    emit_state event "$(jq -nc --arg ts "$TS" --arg orch "$ORCH_ID" \
+      --arg w "$TICKET" --argjson rc "$REVIVE_COUNT" \
+      '{ts:$ts, orchestrator:$orch, worker:$w,
+        event:"worker-revive-budget-exhausted", detail:{reviveCount:$rc}}')"
+    echo "BUDGET-EXHAUSTED: ${TICKET} (reviveCount=${REVIVE_COUNT})" >&2
+    continue
+  fi
+
+  # Resolve session_id; without one we cannot resume.
+  SESSION_ID=$(resolve_session_id "$TICKET" "$WORKER_NAME" || echo "")
+  if [ -z "$SESSION_ID" ]; then
+    STALLED=$((STALLED+1))
+    MSG="No session_id available for revive"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "[dry-run] ${TICKET}: ${MSG}" >&2
+      continue
+    fi
+    jq --arg ts "$TS" --arg msg "$MSG" \
+       '.status = "stalled"
+        | .attentionReason = "no-session-id"
+        | .attentionMessage = $msg
+        | .updatedAt = $ts
+        | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+       "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+    emit_state attention "$ORCH_ID" "no-session-id" "$TICKET" "$MSG"
+    echo "NO-SESSION-ID: ${TICKET}" >&2
+    continue
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] ${TICKET}: would revive via session ${SESSION_ID}" >&2
+    REVIVED=$((REVIVED+1))
+    continue
+  fi
+
+  # Actually revive.
+  PROMPT=$(build_prompt "$STATUS")
+  NEW_PID=$(spawn_revive "$TICKET" "$WORKTREE" "$SESSION_ID" "$PROMPT" || echo "")
+  if [ -z "$NEW_PID" ]; then
+    STALLED=$((STALLED+1))
+    MSG="Failed to spawn claude for revive"
+    jq --arg ts "$TS" --arg msg "$MSG" \
+       '.status = "stalled"
+        | .attentionReason = "revive-spawn-failed"
+        | .attentionMessage = $msg
+        | .updatedAt = $ts
+        | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+       "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+    emit_state attention "$ORCH_ID" "revive-spawn-failed" "$TICKET" "$MSG"
+    continue
+  fi
+
+  REVIVED=$((REVIVED+1))
+  NEW_REVIVE_COUNT=$((REVIVE_COUNT+1))
+  jq --arg ts "$TS" --arg sid "$SESSION_ID" \
+     --argjson pid "$NEW_PID" --argjson rc "$NEW_REVIVE_COUNT" \
+     '.pid = $pid
+      | .reviveCount = $rc
+      | .lastReviveAt = $ts
+      | .revivedFromSessionId = $sid
+      | .lastHeartbeat = $ts
+      | .updatedAt = $ts' \
+     "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+
+  emit_state event "$(jq -nc --arg ts "$TS" --arg orch "$ORCH_ID" \
+    --arg w "$TICKET" --arg sid "$SESSION_ID" \
+    --argjson pid "$NEW_PID" --argjson rc "$NEW_REVIVE_COUNT" \
+    '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-revived",
+      detail:{pid:$pid, sessionId:$sid, reviveCount:$rc}}')"
+
+  echo "REVIVED: ${TICKET} (sid=${SESSION_ID}, pid=${NEW_PID}, count=${NEW_REVIVE_COUNT})" >&2
+done
+
+jq -nc \
+  --argjson c "$CHECKED" \
+  --argjson r "$REVIVED" \
+  --argjson s "$STALLED" \
+  --argjson k "$SKIPPED" \
+  '{checked:$c, revived:$r, stalled:$s, skipped:$k}'
