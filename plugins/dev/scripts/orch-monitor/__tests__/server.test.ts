@@ -497,6 +497,94 @@ describe("OTel API with mock clients", () => {
   });
 });
 
+describe("PR merge write-through to signal file", () => {
+  let mergeServer: ReturnType<typeof createServer>;
+  let mergeUrl: string;
+  let mergeTmp: string;
+  let signalPath: string;
+
+  beforeAll(() => {
+    mergeTmp = mkdtempSync(join(tmpdir(), "orch-monitor-merge-"));
+    const wtDir = join(mergeTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    const orchDir = join(wtDir, "orch-merge");
+    mkdirSync(join(orchDir, "workers"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ id: "orch-merge", waves: [] }),
+    );
+    signalPath = join(orchDir, "workers", "CTL-WT-1.json");
+    writeFileSync(
+      signalPath,
+      JSON.stringify({
+        ticket: "CTL-WT-1",
+        orchestrator: "orch-merge",
+        workerName: "orch-merge-CTL-WT-1",
+        status: "pr-created",
+        phase: 5,
+        startedAt: "2026-04-16T10:00:00Z",
+        updatedAt: "2026-04-16T10:05:00Z",
+        pr: {
+          number: 42,
+          url: "https://github.com/owner/repo/pull/42",
+          ciStatus: "pending",
+          prOpenedAt: "2026-04-16T10:05:00Z",
+        },
+      }),
+    );
+
+    // Mock fetcher: always returns MERGED for this PR
+    const mockPrFetcher = {
+      get: () => ({
+        number: 42,
+        state: "MERGED" as const,
+        mergedAt: "2026-04-16T10:30:00Z",
+        fetchedAt: new Date().toISOString(),
+      }),
+      refreshAll: () => Promise.resolve(),
+      start: () => {},
+      stop: () => {},
+    };
+
+    mergeServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      prStatusFetcher: mockPrFetcher,
+      prStatusRefreshMs: 0,
+      linearFetcher: null,
+      annotationsDbPath: join(mergeTmp, "annotations.db"),
+    });
+    mergeUrl = `http://localhost:${mergeServer.port}`;
+  });
+
+  afterAll(() => {
+    void mergeServer?.stop(true);
+    try {
+      rmSync(mergeTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("writes done/merged/mergedAt to signal file when gh reports MERGED", async () => {
+    const res = await fetch(`${mergeUrl}/api/snapshot`);
+    expect(res.status).toBe(200);
+    await res.json();
+
+    const onDisk = JSON.parse(readFileSync(signalPath, "utf8")) as {
+      status: string;
+      phase: number;
+      pr: { ciStatus: string; mergedAt: string; number: number };
+    };
+    expect(onDisk.status).toBe("done");
+    expect(onDisk.phase).toBe(6);
+    expect(onDisk.pr.ciStatus).toBe("merged");
+    expect(onDisk.pr.mergedAt).toBe("2026-04-16T10:30:00Z");
+    expect(onDisk.pr.number).toBe(42);
+  });
+});
+
 describe("React UI index.html", () => {
   it("serves React app entry point", async () => {
     const res = await fetch(`${baseUrl}/`);

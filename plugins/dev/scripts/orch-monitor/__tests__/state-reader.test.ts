@@ -5,12 +5,14 @@ import { tmpdir } from "os";
 import { join } from "path";
 import {
   scanOrchestrators,
+  scanAllOrchestrators,
   readOrchestratorState,
   buildSnapshot,
   buildAnalyticsSnapshot,
   buildSessionDetail,
   groupByWorkspace,
 } from "../lib/state-reader";
+import { analyticsPath } from "../lib/output-parser";
 
 let tmpRoot: string;
 
@@ -969,5 +971,155 @@ describe("groupByWorkspace", () => {
     const snap = buildSnapshot(tmpRoot);
     const groups = groupByWorkspace(snap);
     expect(groups.map((g) => g.workspace)).toEqual(["alpha", "mu", "zeta"]);
+  });
+});
+
+describe("scanAllOrchestrators (CTL-59 dual-source discovery)", () => {
+  it("discovers orchestrators under runsDir", () => {
+    const runsDir = join(tmpRoot, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    setupOrch(runsDir, "orch-from-runs", { workers: { "T-1": { ticket: "T-1" } } });
+
+    const found = scanAllOrchestrators({ runsDir, wtDir: join(tmpRoot, "wt") });
+    expect(found.length).toBe(1);
+    expect(found[0].path.endsWith("orch-from-runs")).toBe(true);
+    expect(found[0].source).toBe("runs");
+    expect(found[0].workspace).toBe("default");
+  });
+
+  it("falls back to wtDir for legacy worktree-based orchestrators", () => {
+    const wtDir = join(tmpRoot, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    setupOrch(wtDir, "orch-legacy", { workers: { "T-1": { ticket: "T-1" } } });
+
+    const found = scanAllOrchestrators({
+      runsDir: join(tmpRoot, "runs"),
+      wtDir,
+    });
+    expect(found.length).toBe(1);
+    expect(found[0].path.endsWith("orch-legacy")).toBe(true);
+    expect(found[0].source).toBe("wt");
+  });
+
+  it("merges runs and wt sources, with runs taking precedence for duplicate ids", () => {
+    const runsDir = join(tmpRoot, "runs");
+    const wtDir = join(tmpRoot, "wt");
+    mkdirSync(runsDir, { recursive: true });
+    mkdirSync(wtDir, { recursive: true });
+
+    // Same orch-id in both locations — runs wins
+    setupOrch(runsDir, "orch-shared", { workers: { "FROM-RUNS": { ticket: "FROM-RUNS" } } });
+    setupOrch(wtDir, "orch-shared", { workers: { "FROM-WT": { ticket: "FROM-WT" } } });
+    // An orch only in wt
+    setupOrch(wtDir, "orch-wt-only", { workers: { "WT-ONLY": { ticket: "WT-ONLY" } } });
+
+    const found = scanAllOrchestrators({ runsDir, wtDir });
+    expect(found.length).toBe(2);
+
+    const shared = found.find((e) => e.path.includes("orch-shared"));
+    expect(shared).toBeDefined();
+    expect(shared?.source).toBe("runs");
+    expect(shared?.path.startsWith(runsDir)).toBe(true);
+
+    const wtOnly = found.find((e) => e.path.includes("orch-wt-only"));
+    expect(wtOnly).toBeDefined();
+    expect(wtOnly?.source).toBe("wt");
+  });
+
+  it("tolerates missing runsDir gracefully", () => {
+    const wtDir = join(tmpRoot, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    setupOrch(wtDir, "orch-legacy", { workers: { "T-1": { ticket: "T-1" } } });
+
+    const found = scanAllOrchestrators({
+      runsDir: join(tmpRoot, "does-not-exist"),
+      wtDir,
+    });
+    expect(found.length).toBe(1);
+    expect(found[0].source).toBe("wt");
+  });
+
+  it("returns empty when both dirs are missing", () => {
+    const found = scanAllOrchestrators({
+      runsDir: join(tmpRoot, "nope-runs"),
+      wtDir: join(tmpRoot, "nope-wt"),
+    });
+    expect(found).toEqual([]);
+  });
+
+  it("preserves nested workspace layout from wtDir", () => {
+    const wtDir = join(tmpRoot, "wt");
+    const projDir = join(wtDir, "my-proj");
+    mkdirSync(projDir, { recursive: true });
+    setupOrch(projDir, "orch-nested", { workers: { "T-1": { ticket: "T-1" } } });
+
+    const found = scanAllOrchestrators({ runsDir: join(tmpRoot, "runs"), wtDir });
+    expect(found.length).toBe(1);
+    expect(found[0].workspace).toBe("my-proj");
+  });
+});
+
+describe("readOrchestratorState — workers/output/ subdirectory (CTL-59)", () => {
+  it("ignores workers/output/ subdirectory when scanning for signal files", () => {
+    const orchDir = setupOrch(tmpRoot, "orch-with-output", {
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-with-output",
+          workerName: "w",
+          status: "in_progress",
+          phase: 1,
+          startedAt: "2026-04-16T00:00:00Z",
+          updatedAt: "2026-04-16T00:00:00Z",
+        },
+      },
+    });
+    // Create workers/output/ subdirectory with unrelated files
+    mkdirSync(join(orchDir, "workers", "output"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "workers", "output", "T-1-stream.jsonl"),
+      '{"type":"system"}\n',
+    );
+    writeFileSync(join(orchDir, "workers", "output", "T-1-stderr.log"), "some log");
+
+    const state = readOrchestratorState(orchDir);
+    // Only the real signal file T-1 should appear — not entries derived from output files
+    expect(Object.keys(state.workers).sort()).toEqual(["T-1"]);
+    expect(state.workers["T-1"].status).toBe("in_progress");
+  });
+});
+
+describe("analyticsPath (CTL-59 — prefer workers/output/)", () => {
+  it("prefers workers/output/<ticket>-output.json over legacy locations", () => {
+    const orchDir = join(tmpRoot, "orch-priority");
+    mkdirSync(join(orchDir, "workers", "output"), { recursive: true });
+    mkdirSync(join(orchDir, "workers", "logs"), { recursive: true });
+
+    const newPath = join(orchDir, "workers", "output", "T-1-output.json");
+    const flatPath = join(orchDir, "workers", "T-1-output.json");
+    const logsPath = join(orchDir, "workers", "logs", "T-1.output.json");
+    writeFileSync(newPath, "{}");
+    writeFileSync(flatPath, "{}");
+    writeFileSync(logsPath, "{}");
+
+    expect(analyticsPath(orchDir, "T-1")).toBe(newPath);
+  });
+
+  it("falls back to logs/ when workers/output/ is absent", () => {
+    const orchDir = join(tmpRoot, "orch-legacy-logs");
+    mkdirSync(join(orchDir, "workers", "logs"), { recursive: true });
+    const logsPath = join(orchDir, "workers", "logs", "T-1.output.json");
+    writeFileSync(logsPath, "{}");
+
+    expect(analyticsPath(orchDir, "T-1")).toBe(logsPath);
+  });
+
+  it("falls back to flat workers/<ticket>-output.json when newer locations absent", () => {
+    const orchDir = join(tmpRoot, "orch-flat");
+    mkdirSync(join(orchDir, "workers"), { recursive: true });
+    const flatPath = join(orchDir, "workers", "T-1-output.json");
+    writeFileSync(flatPath, "{}");
+
+    expect(analyticsPath(orchDir, "T-1")).toBe(flatPath);
   });
 });

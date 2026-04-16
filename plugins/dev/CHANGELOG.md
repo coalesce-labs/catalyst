@@ -1,5 +1,103 @@
 # Changelog
 
+## [7.1.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.1.0...catalyst-dev-v7.1.1)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Worker Cost Display Fix
+
+Dashboard now shows real-time worker costs (USD, input/output tokens, cache reads) instead of placeholder dashes. The orchestrator writes parsed usage data to each worker's signal file, matching the existing global state format that powers the cost overview.
+
+
+
+### PRs
+
+* **dev:** write worker cost to signal file in orchestrator (CTL-88) ([#190](https://github.com/coalesce-labs/catalyst/issues/190)) ([dbdb050](https://github.com/coalesce-labs/catalyst/commit/dbdb050de29a62fc6e9604579d2345bc32e13912))
+
+## [7.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.0.0...catalyst-dev-v7.1.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Session Resume Orchestration
+
+When workers die mid-merge or stall with heartbeats, the orchestrator now revives them using `claude --resume <session_id>` instead of starting fresh — preserving full context while cutting costs ~10×. The system resolves session IDs from worker output streams and enforces per-ticket revive budgets, transitioning to stalled status when revival isn't possible.
+
+
+
+### PRs
+
+* **dev:** port revive-worker session-resume into orchestrator Phase 4 (CTL-63) ([#191](https://github.com/coalesce-labs/catalyst/issues/191)) ([6b5aaf4](https://github.com/coalesce-labs/catalyst/commit/6b5aaf42b0f18eaf685b9661b0dfe3c354e04367))
+
+## [7.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.39.1...catalyst-dev-v7.0.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Orchestration State Isolation
+
+Orchestrator runtime state now lives in `~/catalyst/runs/<orch-id>/` instead of git worktrees, keeping your worktree clean during runs. Output files move to `workers/output/` to reduce noise, while worker signal files stay in their expected locations. The monitor automatically handles both new runs-based and legacy worktree-based orchestrators.
+
+
+
+### PRs
+
+* **dev:** decouple orch state from worktrees — runs/ dir (CTL-59) ([#188](https://github.com/coalesce-labs/catalyst/issues/188))
+* **dev:** decouple orch state from worktrees — runs/ dir (CTL-59) ([#188](https://github.com/coalesce-labs/catalyst/issues/188)) ([a357eaa](https://github.com/coalesce-labs/catalyst/commit/a357eaad59b3684b72515c69e43e37edbbc34778))
+
+## [6.39.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.39.0...catalyst-dev-v6.39.1)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Merged PR Status Writeback
+
+The orchestration monitor now writes merged PR status back to worker signal files when it detects PRs have been merged on GitHub. Previously, merged PRs were only tracked in memory, causing the dashboard to show incorrect completion percentages when the orchestrator agent had already exited. Signal files now automatically update with `status=done`, `phase=6`, and merge timestamps for accurate project tracking.
+
+
+
+### PRs
+
+* **dev:** orch-monitor writes back merged PR status to signal files (CTL-86) ([#185](https://github.com/coalesce-labs/catalyst/issues/185)) ([b340de9](https://github.com/coalesce-labs/catalyst/commit/b340de9c725f4bfe400f2796e4932ebba58c8dce))
+
+## [6.39.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.38.0...catalyst-dev-v6.39.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Orchestrator Launch Failure Detection
+
+Workers that die immediately after dispatch (bad flags, environment errors) are now detected within 30 seconds instead of waiting 15 minutes for the stalled-worker detector. The orchestrator runs a batch health check after each dispatch wave, verifying worker PIDs and automatically flagging dead-on-arrival processes as failed with attention items.
+
+
+
+### PRs
+
+* **dev:** detect worker launch failures within 30s of dispatch (CTL-87) ([#184](https://github.com/coalesce-labs/catalyst/issues/184)) ([c74613b](https://github.com/coalesce-labs/catalyst/commit/c74613b11217def5fe06ac66b3808d7018ed1d96))
+
+## [6.38.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.2...catalyst-dev-v6.38.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Agent Communication Channels
+
+The new `catalyst-comms` CLI gives Claude Code agents file-based communication across worktrees, sub-agents, and orchestrators without requiring servers or HTTP dependencies. Agents can join channels, send messages, poll for updates, and coordinate completion through simple bash commands that work with any agent workflow. Channel activity is logged locally at `~/catalyst/comms/` with automatic cleanup and human audit capabilities via `catalyst-comms watch` and `status`.
+
+
+
+### PRs
+
+* **dev:** catalyst-comms — file-based agent communication channels (CTL-60) ([#182](https://github.com/coalesce-labs/catalyst/issues/182)) ([51a73de](https://github.com/coalesce-labs/catalyst/commit/51a73de70c2ce5952bd02ed40a1fe9cb344ecb51))
+* **dev:** worker polls until PR merges instead of exiting at pr-created ([#180](https://github.com/coalesce-labs/catalyst/issues/180)) ([351cc95](https://github.com/coalesce-labs/catalyst/commit/351cc958baec9ed9d63739b33c53236f5a3ba302))
+
 ## [6.37.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.37.1...catalyst-dev-v6.37.2)
 
 Apr 16, 2026

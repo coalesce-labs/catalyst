@@ -134,6 +134,12 @@ export interface MonitorSnapshot {
 export interface BuildSnapshotOptions {
   dbPath?: string | null;
   sessionQuery?: SessionQuery;
+  /**
+   * When set, discovery also scans this runs directory in addition to baseDir
+   * (the legacy worktree dir). Orchestrators found under runsDir take
+   * precedence for duplicate ids (see `scanAllOrchestrators`).
+   */
+  runsDir?: string | null;
 }
 
 function isRecord(x: unknown): x is Record<string, unknown> {
@@ -165,6 +171,12 @@ function isOrchestratorDir(candidate: string): boolean {
 interface ScannedOrchestrator {
   path: string;
   workspace: string;
+  /**
+   * Where the orchestrator was discovered:
+   *   - "runs": ~/catalyst/runs/<id>/  (CTL-59 layout — state survives worktree cleanup)
+   *   - "wt":   ~/catalyst/wt/.../     (legacy — state lives inside the git worktree)
+   */
+  source?: "runs" | "wt";
 }
 
 /**
@@ -209,6 +221,41 @@ export function scanOrchestrators(baseDir: string): ScannedOrchestrator[] {
     }
   }
   return matches;
+}
+
+export interface ScanAllOptions {
+  /** Per-orchestrator state root: ~/catalyst/runs/ */
+  runsDir: string;
+  /** Legacy worktree root: ~/catalyst/wt/ */
+  wtDir: string;
+}
+
+/**
+ * Discover orchestrators from both the CTL-59 runs directory and the legacy
+ * worktree layout. Runs-based entries take precedence when an orch-id appears
+ * in both locations (migration is not destructive — old worktree state stays
+ * readable until the orchestrator is archived).
+ */
+export function scanAllOrchestrators(
+  { runsDir, wtDir }: ScanAllOptions,
+): ScannedOrchestrator[] {
+  const runsScan = scanOrchestrators(runsDir).map((e) => ({
+    ...e,
+    source: "runs" as const,
+  }));
+  const wtScan = scanOrchestrators(wtDir).map((e) => ({
+    ...e,
+    source: "wt" as const,
+  }));
+
+  const seen = new Set(runsScan.map((e) => basename(e.path)));
+  const result: ScannedOrchestrator[] = [...runsScan];
+  for (const entry of wtScan) {
+    if (seen.has(basename(entry.path))) continue;
+    result.push(entry);
+    seen.add(basename(entry.path));
+  }
+  return result;
 }
 
 interface ReadResult<T> {
@@ -445,8 +492,13 @@ export function readOrchestratorState(orchDir: string, workspace = "default"): O
   };
 }
 
-export function buildAnalyticsSnapshot(baseDir: string): AnalyticsSnapshot {
-  const scanned = scanOrchestrators(baseDir);
+export function buildAnalyticsSnapshot(
+  baseDir: string,
+  options: { runsDir?: string | null } = {},
+): AnalyticsSnapshot {
+  const scanned = options.runsDir
+    ? scanAllOrchestrators({ runsDir: options.runsDir, wtDir: baseDir })
+    : scanOrchestrators(baseDir);
   const orchestrators: OrchestratorAnalytics[] = [];
   for (const { path: orchDir } of scanned) {
     const id = basename(orchDir);
@@ -480,7 +532,9 @@ export function buildSnapshot(
   baseDir: string,
   options: BuildSnapshotOptions = {},
 ): MonitorSnapshot {
-  const scanned = scanOrchestrators(baseDir);
+  const scanned = options.runsDir
+    ? scanAllOrchestrators({ runsDir: options.runsDir, wtDir: baseDir })
+    : scanOrchestrators(baseDir);
   const orchestrators: OrchestratorState[] = [];
   for (const { path, workspace } of scanned) {
     try {
@@ -512,8 +566,11 @@ export function buildSessionDetail(
   baseDir: string,
   orchId: string,
   ticket: string,
+  options: { runsDir?: string | null } = {},
 ): SessionDetail | null {
-  const scanned = scanOrchestrators(baseDir);
+  const scanned = options.runsDir
+    ? scanAllOrchestrators({ runsDir: options.runsDir, wtDir: baseDir })
+    : scanOrchestrators(baseDir);
   const entry = scanned.find((d) => basename(d.path) === orchId);
   if (!entry) return null;
 
