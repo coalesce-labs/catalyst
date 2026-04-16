@@ -517,27 +517,40 @@ MANDATORY: Before completing your contract:
 Your success contract ENDS at:
   ✓ PR open (gh pr create succeeded)
   ✓ Auto-merge armed (gh pr merge --auto succeeded)
-  ✓ CI triggered (checks have started running)
-  ✓ One settle-window pass (~3 min) to address any inline reviewer comments
-    already posted and fix any already-failed CI — ONE pass, not a loop
+  ✓ CI passed and PR merged — gh pr view --json state returns MERGED
+  ✓ pr.mergedAt + status="done" written to signal file
+  ✓ Linear ticket transitioned to Done
 
-Do NOT poll until state=MERGED. The orchestrator owns merge confirmation —
-it polls gh pr view independently and transitions the Linear ticket. Your
-subprocess reliably exits on your final tool-use regardless of any polling
-language here, so a worker-side long poll produces false "waiting for merge"
-signals while the process has already exited.
+POLL until state=MERGED. After arming auto-merge, run a poll loop:
+  every 30-60s call gh pr view --json state,mergeStateStatus,mergedAt
+  - if state=MERGED: write pr.mergedAt + status="done", transition Linear, exit success
+  - if mergeStateStatus=BEHIND: gh api -X PUT /repos/{owner}/{repo}/pulls/{n}/update-branch
+    (most repos disable allow_update_branch, so manual update is required)
+  - if CI failing: investigate, fix, push, continue polling
+  - if review comments arrive: address via /review-comments, push, continue polling
+  - if mergeStateStatus=DIRTY (conflicts): attempt rebase; if unresolvable, write
+    status="stalled" and exit non-success
+  - if blocked on a required reviewer you cannot satisfy: write status="stalled"
+    and exit non-success
+  - otherwise: wait one cycle and re-poll
 
-Write these fields into your signal file before exiting:
+There is no fixed timeout — keep polling while CI/checks are still progressing.
+Apply per-failure-type fix budgets (max ~3 distinct attempts per failure mode) so
+you never spin on a stuck failure.
+
+Write these fields into your signal file as they become available:
   pr.number
   pr.url
   pr.prOpenedAt       (ISO timestamp when gh pr create returned)
   pr.autoMergeArmedAt (ISO timestamp when gh pr merge --auto returned)
-  pr.ciStatus         (pending | passing | failing | unknown — your last observation)
-  status              (pr-created — terminal success for you)
+  pr.ciStatus         (pending | passing | failing | merged)
+  pr.mergedAt         (ISO timestamp from gh pr view when state=MERGED)
+  status              (pr-created → merging → done)
 
-Your work will be independently verified by the orchestrator. Do NOT falsely
-mark the worker signal as `done` or set `pr.ciStatus = "merged"` — those
-fields belong to the orchestrator after it confirms the merge via gh pr view.
+Your work will be independently verified by the orchestrator. The orchestrator's
+poll loop is a safety net for stalled workers — if you exit successfully with
+pr.mergedAt set, the orchestrator simply reconciles. If you exit at "stalled" or
+"failed", the orchestrator can dispatch a fix-up worker.
 
 Write your status to the worker signal file at:
   ${ORCH_DIR}/workers/${TICKET_ID}.json
@@ -639,12 +652,13 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
 done
 ```
 
-**Orchestrator-owned poll-until-MERGED (CTL-31):**
+**Orchestrator poll-until-MERGED safety net (CTL-31, refined by CTL-80):**
 
-Workers exit at `pr-created` with auto-merge armed. The orchestrator — which survives subprocess
-exits and stays alive across the entire run — owns the long poll that confirms the merge actually
-happens. On each monitoring cycle, for every worker in `pr-created`/`merging` status whose PR is not
-yet known-merged, ping GitHub directly:
+Workers now poll-until-MERGED themselves and write `pr.mergedAt` + `status: "done"` directly to
+their signal file. The orchestrator's poll loop is a **safety net**: it independently confirms
+merges so that if a worker stalls, exits early, or never gets to write `mergedAt`, the
+orchestrator can detect the merge from GitHub and reconcile state. On each monitoring cycle,
+for every worker whose signal does not yet show `pr.mergedAt`, ping GitHub directly:
 
 ```bash
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
@@ -686,7 +700,8 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
         --arg w "${TICKET}" --argjson pr "$PR_NUMBER" --arg mt "$PR_MERGED_AT" \
         '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-pr-merged", detail:{pr:$pr, mergedAt:$mt}}')"
 
-      # Transition Linear ticket (orchestrator owns this — worker no longer does)
+      # Transition Linear ticket (safety net — workers now do this themselves;
+      # this is idempotent in case the worker exited before transitioning)
       LINEAR_DONE=$(jq -r '.catalyst.linear.stateMap.done // "Done"' "$CONFIG_FILE")
       linearis issues update "${TICKET}" --status "${LINEAR_DONE}" 2>/dev/null || true
       ;;
@@ -717,9 +732,10 @@ done
 ```
 
 **Poll cadence**: 60–120s while CI is running (MERGE_STATE in {UNKNOWN, PENDING, BLOCKED}); 30s
-while merge is imminent (MERGE_STATE=CLEAN but not yet MERGED). The orchestrator is the only
-component that survives long enough to observe state transitions reliably — workers have already
-exited by the time their PR actually merges, so they cannot record `mergedAt` honestly.
+while merge is imminent (MERGE_STATE=CLEAN but not yet MERGED). Under the CTL-80 contract the
+worker is responsible for polling its own PR and writing `mergedAt` itself; this orchestrator
+loop is a safety net that catches merges the worker missed (e.g., if the worker exited
+prematurely on a transient error).
 
 **Detect stalled workers and raise attention:**
 
@@ -1132,9 +1148,9 @@ fi
 
 ## Recovery Paths: Fix-up Worker vs Follow-up Ticket
 
-Workers exit at `pr-created` (PR open + auto-merge armed + CI triggered + one settle-window pass).
-Anything the worker missed — late reviewer comments, subsequent CI failures, post-merge findings —
-falls to the orchestrator to triage. Two recovery patterns cover the cases that came up in
+Under the CTL-80 contract, workers poll until `state=MERGED` and exit at `done`. If a worker
+exits earlier (`stalled`, `failed`, or process crash), or if findings surface after merge, the
+orchestrator triages them. Two recovery patterns cover the cases that came up in
 `orch-data-import-2026-04-13` Round 2:
 
 ### Decision Tree
@@ -1156,9 +1172,10 @@ will fail silently or push to an orphan branch.
 
 ### Pattern A: Fix-up Worker (PR still open)
 
-Used on ADV-219 / PR #130 and ADV-220 / PR #132 during `orch-data-import-2026-04-13`. The original
-worker exited at `pr-created`. Codex or a security scanner posted inline threads after. Auto-merge
-is blocked on unresolved threads.
+Used on ADV-219 / PR #130 and ADV-220 / PR #132 during `orch-data-import-2026-04-13`. Either the
+original worker exited at `stalled` because Codex or a security scanner posted inline threads it
+could not resolve in its own poll loop, or the worker process died before reaching MERGED.
+Auto-merge is blocked on unresolved threads.
 
 **When to use:**
 
@@ -1192,11 +1209,12 @@ The fix-up worker:
 - Pushes ONE commit with message `fix(...): resolve review feedback on #${PR}`
 - Resolves review threads via `gh api graphql resolveReviewThread`
 - Writes its commit SHA to the worker signal file as `fixupCommit`
-- Does one ~3-minute settle-window pass and exits
+- Polls until `state=MERGED` (CTL-80 contract), writes `pr.mergedAt` + `status: "done"`,
+  transitions Linear, then exits
 
-The orchestrator's Phase 4 poll loop then observes the re-triggered CI and eventual `MERGED` state,
-exactly as with a fresh worker. No additional orchestrator logic is needed — `fixupCommit` is
-metadata for the dashboard, not a signal the orchestrator acts on.
+The orchestrator's Phase 4 poll loop is a safety net: if the fix-up worker exits stalled or
+crashes before merge, the orchestrator can still observe the eventual `MERGED` state and
+reconcile. `fixupCommit` is metadata for the dashboard.
 
 **Typical cost:** ~$2 (much cheaper than a fresh worker because scope is narrow).
 
