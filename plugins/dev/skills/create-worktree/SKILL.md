@@ -44,10 +44,11 @@ When this command is invoked:
 
 4. **Project setup** (handled by script based on config):
 
-   If `catalyst.worktree.setup` is defined in config, those commands run in order.
-   Otherwise, the script auto-detects: dependency install (`bun/npm`) + thoughts init.
+   If `catalyst.worktree.setup` is defined in config, those commands run in order. Otherwise, the
+   script auto-detects: dependency install (`bun/npm`) + thoughts init.
 
    Example config for full control:
+
    ```json
    {
      "catalyst": {
@@ -64,12 +65,17 @@ When this command is invoked:
    ```
 
 5. **Optional: Launch implementation session**: If a plan file path was provided, ask if the user
-   wants to launch Claude in the worktree:
+   wants to launch Claude in the worktree. Note: `claude -w` takes a _name_ and creates a new
+   worktree — so `cd` into the already-created worktree instead, capture stderr to a real file for
+   post-mortem debugging, and use `--dangerously-skip-permissions` since there's no TTY.
    ```bash
-   claude -w <worktree_path> \
-     -p "/catalyst-dev:implement-plan <plan_path> and when done: create commit, create PR, update Linear ticket" \
-     --output-format stream-json --verbose \
-     > "<worktree_path>/worker-stream.jsonl" 2>/dev/null &
+   (
+     cd "<worktree_path>" || exit 1
+     exec nohup claude \
+       --output-format stream-json --verbose \
+       --dangerously-skip-permissions \
+       -p "/catalyst-dev:implement-plan <plan_path> and when done: create commit, create PR, update Linear ticket"
+   ) > "<worktree_path>/worker-stream.jsonl" 2> "<worktree_path>/worker-stderr.log" &
    ```
 
 ## Worktree Location Convention
