@@ -82,16 +82,37 @@ function LiveTimer({
 }
 
 function ActivityCell({ w }: { w: WorkerState }) {
-  if (!w.activity?.currentTool) {
+  const tool = w.activity?.currentTool;
+  const tasks = w.activity?.taskSummary;
+  const hasContent = tool || tasks;
+
+  if (!hasContent) {
     return <span className="text-muted">—</span>;
   }
+
   return (
-    <span className="flex items-center gap-1.5">
-      <span className="h-1.5 w-1.5 rounded-full bg-blue animate-live-pulse" />
-      <span className="font-mono text-[11px] text-blue truncate max-w-[120px]">
-        {w.activity.currentTool}
-      </span>
-    </span>
+    <div className="flex flex-col gap-0.5">
+      {tool && (
+        <span className="flex items-center gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-blue animate-live-pulse" />
+          <span className="font-mono text-[11px] text-blue truncate max-w-[120px]">
+            {tool}
+          </span>
+        </span>
+      )}
+      {tasks && tasks.total > 0 && (
+        <span className="flex items-center gap-1.5">
+          <span className="inline-flex h-[14px] items-center gap-0.5 rounded bg-surface-3 px-1 font-mono text-[10px] text-muted tabular-nums">
+            {tasks.completed}/{tasks.total}
+          </span>
+          {tasks.activeTask && (
+            <span className="truncate text-[10px] text-muted max-w-[100px]" title={tasks.activeTask}>
+              {tasks.activeTask}
+            </span>
+          )}
+        </span>
+      )}
+    </div>
   );
 }
 

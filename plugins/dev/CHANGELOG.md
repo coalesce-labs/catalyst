@@ -1,5 +1,34 @@
 # Changelog
 
+## [6.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.2...catalyst-dev-v6.35.0) (2026-04-16)
+
+# Catalyst-Dev v6.35.0 Release
+
+This release includes maintenance updates and preparation for the next development cycle. The changes ensure the codebase remains stable and ready for future feature development.
+
+<details><summary>Detailed changes</summary>
+
+
+
+### Features
+
+* **dev:** fix activity feed labels and add task list integration ([#165](https://github.com/coalesce-labs/catalyst/issues/165)) ([96e098e](https://github.com/coalesce-labs/catalyst/commit/96e098e3138045868ebdb5e45da2e1ff509ddfba))
+
+</details>
+## [6.34.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.1...catalyst-dev-v6.34.2) (2026-04-16)
+
+
+### Bug Fixes
+
+* **dev:** disown watcher subshell before exec ([#171](https://github.com/coalesce-labs/catalyst/issues/171)) ([5a902b3](https://github.com/coalesce-labs/catalyst/commit/5a902b35d4aefe74d1d237cff00119e41683fc2b))
+
+## [6.34.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.0...catalyst-dev-v6.34.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* **dev:** exec claude in wrapper for Warp terminal integration ([#168](https://github.com/coalesce-labs/catalyst/issues/168)) ([59e7509](https://github.com/coalesce-labs/catalyst/commit/59e750958cd963aa42972f83a7aba1efcaf0de82))
+
 ## [6.34.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.33.0...catalyst-dev-v6.34.0)
 
 Apr 16, 2026
