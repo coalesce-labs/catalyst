@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.30.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.29.0...catalyst-dev-v6.30.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** add session detail drawer ([#156](https://github.com/coalesce-labs/catalyst/issues/156)) ([8671562](https://github.com/coalesce-labs/catalyst/commit/867156239ec32907bcf61799948dac1cb6e27cb3))
+
 ## [6.29.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.28.0...catalyst-dev-v6.29.0) (2026-04-15)
 
 
