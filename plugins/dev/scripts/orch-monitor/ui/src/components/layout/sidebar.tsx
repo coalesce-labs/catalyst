@@ -12,6 +12,8 @@ interface SidebarProps {
   sessions: SessionState[];
   selectedOrchId: string | null;
   onSelect: (orchId: string | null) => void;
+  selectedSessionId?: string | null;
+  onSessionSelect?: (sessionId: string) => void;
   connectionStatus: ConnectionStatus;
   attentionCount: number;
   collapsed?: boolean;
@@ -23,6 +25,8 @@ export function Sidebar({
   sessions,
   selectedOrchId,
   onSelect,
+  selectedSessionId,
+  onSessionSelect,
   connectionStatus,
   attentionCount,
   collapsed = false,
@@ -126,11 +130,17 @@ export function Sidebar({
                 const elapsed = s.startedAt
                   ? (Date.now() - Date.parse(s.startedAt)) / 1000
                   : 0;
+                const isSelected = selectedSessionId === s.sessionId;
                 return (
                   <li key={s.sessionId}>
-                    <div
-                      className="group flex w-full items-center gap-2 rounded-md border-l-[3px] border-transparent px-2.5 py-1.5 text-left transition-colors hover:bg-surface-3"
-                      role="status"
+                    <button
+                      onClick={() => onSessionSelect?.(s.sessionId)}
+                      className={cn(
+                        "group flex w-full items-center gap-2 rounded-md border-l-[3px] px-2.5 py-1.5 text-left transition-colors hover:bg-surface-3",
+                        isSelected
+                          ? "border-accent bg-surface-3/80"
+                          : "border-transparent",
+                      )}
                       aria-label={`${label} — ${kind}, ${s.alive ? "running" : s.status}`}
                     >
                       <StatusDot alive={s.alive} />
@@ -153,18 +163,24 @@ export function Sidebar({
                           {elapsed > 0 && <span>{fmtSince(elapsed)}</span>}
                         </div>
                       </div>
-                    </div>
+                    </button>
                   </li>
                 );
               })}
               {recentDead.map((s) => {
                 const kind = sessionKind(s);
                 const label = s.label || s.ticket || s.sessionId.slice(-12);
+                const isSelected = selectedSessionId === s.sessionId;
                 return (
                   <li key={s.sessionId}>
-                    <div
-                      className="group flex w-full items-center gap-2 rounded-md border-l-[3px] border-transparent px-2.5 py-1.5 text-left opacity-50 transition-colors hover:bg-surface-3 hover:opacity-80"
-                      role="status"
+                    <button
+                      onClick={() => onSessionSelect?.(s.sessionId)}
+                      className={cn(
+                        "group flex w-full items-center gap-2 rounded-md border-l-[3px] px-2.5 py-1.5 text-left transition-colors hover:bg-surface-3",
+                        isSelected
+                          ? "border-accent bg-surface-3/80 opacity-80"
+                          : "border-transparent opacity-50 hover:opacity-80",
+                      )}
                       aria-label={`${label} — ${kind}, ${s.status}`}
                     >
                       <StatusDot alive={false} />
@@ -179,7 +195,7 @@ export function Sidebar({
                           {kind} &middot; {s.status}
                         </div>
                       </div>
-                    </div>
+                    </button>
                   </li>
                 );
               })}

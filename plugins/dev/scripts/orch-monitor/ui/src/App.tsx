@@ -3,6 +3,7 @@ import { useMonitor } from "./hooks/use-monitor";
 import { useKeyboardNav } from "./hooks/use-keyboard-nav";
 import { Sidebar } from "./components/layout/sidebar";
 import { AttentionBar } from "./components/attention-bar";
+import { SessionDetailDrawer } from "./components/session-detail-drawer";
 import { ConnectionBanner } from "./components/ui/connection-banner";
 import { SkeletonDashboard } from "./components/ui/skeleton";
 import { ChevronRight, Home, PanelLeftClose, PanelLeft } from "lucide-react";
@@ -29,6 +30,7 @@ export default function App() {
   } = useMonitor();
 
   const [selectedOrchId, setSelectedOrchId] = useState<string | null>(null);
+  const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [version, setVersion] = useState<string | null>(null);
 
@@ -40,7 +42,10 @@ export default function App() {
   }, []);
 
   useKeyboardNav({
-    onEscape: () => setSelectedOrchId(null),
+    onEscape: () => {
+      setSelectedOrchId(null);
+      setSelectedSession(null);
+    },
   });
 
   const selectedOrch = selectedOrchId
@@ -52,11 +57,18 @@ export default function App() {
 
   const handleSelect = useCallback((orchId: string | null) => {
     setSelectedOrchId(orchId);
+    setSelectedSession(null);
+  }, []);
+
+  const handleSessionSelect = useCallback((sessionId: string) => {
+    setSelectedSession(sessionId);
+    setSelectedOrchId(null);
   }, []);
 
   const handleAttentionClick = useCallback(
     (orchId: string, _ticket: string) => {
       setSelectedOrchId(orchId);
+      setSelectedSession(null);
     },
     [],
   );
@@ -68,6 +80,8 @@ export default function App() {
         sessions={sessions}
         selectedOrchId={effectiveOrch ? selectedOrchId : null}
         onSelect={handleSelect}
+        selectedSessionId={selectedSession}
+        onSessionSelect={handleSessionSelect}
         connectionStatus={connectionStatus}
         attentionCount={attention.length}
         collapsed={!sidebarOpen}
@@ -150,12 +164,25 @@ export default function App() {
                   events={events}
                   getAnalytics={analytics}
                   onSelectOrch={(id) => setSelectedOrchId(id)}
+                  selectedSessionId={selectedSession}
+                  onSessionSelect={handleSessionSelect}
                 />
               </div>
             )}
           </Suspense>
         </div>
       </main>
+
+      {selectedSession &&
+        (() => {
+          const s = sessions.find((s) => s.sessionId === selectedSession);
+          return s ? (
+            <SessionDetailDrawer
+              session={s}
+              onClose={() => setSelectedSession(null)}
+            />
+          ) : null;
+        })()}
     </div>
   );
 }

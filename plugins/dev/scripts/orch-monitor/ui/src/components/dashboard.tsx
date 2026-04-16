@@ -27,6 +27,8 @@ interface DashboardProps {
   events: EventEntry[];
   getAnalytics: (orchId: string) => Record<string, WorkerAnalytics | null>;
   onSelectOrch: (orchId: string) => void;
+  selectedSessionId?: string | null;
+  onSessionSelect?: (sessionId: string) => void;
 }
 
 function OrchestratorCard({
@@ -112,7 +114,15 @@ const KIND_LABEL: Record<SessionKind, string> = {
   standalone: "standalone",
 };
 
-function SessionCard({ session }: { session: SessionState }) {
+function SessionCard({
+  session,
+  isSelected,
+  onClick,
+}: {
+  session: SessionState;
+  isSelected?: boolean;
+  onClick?: () => void;
+}) {
   const kind = sessionKind(session);
   const elapsed = session.startedAt
     ? (Date.now() - Date.parse(session.startedAt)) / 1000
@@ -121,10 +131,12 @@ function SessionCard({ session }: { session: SessionState }) {
   const dir = session.cwd ? session.cwd.split("/").slice(-2).join("/") : null;
 
   return (
-    <div
+    <button
+      onClick={onClick}
       className={cn(
-        "flex flex-col gap-2 rounded-lg border border-border bg-surface-2 p-4 transition-all",
-        isDone && "opacity-70",
+        "flex flex-col gap-2 rounded-lg border bg-surface-2 p-4 text-left transition-all hover:border-accent/40 hover:bg-surface-3",
+        isSelected ? "border-accent/60 bg-surface-3" : "border-border",
+        isDone && !isSelected && "opacity-70",
       )}
     >
       <div className="flex items-start justify-between">
@@ -176,7 +188,7 @@ function SessionCard({ session }: { session: SessionState }) {
           </span>
         )}
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -187,6 +199,8 @@ export function Dashboard({
   events,
   getAnalytics,
   onSelectOrch,
+  selectedSessionId,
+  onSessionSelect,
 }: DashboardProps) {
   return (
     <div className="flex flex-col gap-4">
@@ -223,7 +237,12 @@ export function Dashboard({
           </SectionLabel>
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {sessions.map((s) => (
-              <SessionCard key={s.sessionId} session={s} />
+              <SessionCard
+                key={s.sessionId}
+                session={s}
+                isSelected={selectedSessionId === s.sessionId}
+                onClick={() => onSessionSelect?.(s.sessionId)}
+              />
             ))}
           </div>
         </div>
