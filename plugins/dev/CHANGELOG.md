@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.36.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.35.0...catalyst-dev-v6.36.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** AI-enhanced changelogs with titles, homepage badge, and Conductor-style styling ([#170](https://github.com/coalesce-labs/catalyst/issues/170)) ([ebdaf99](https://github.com/coalesce-labs/catalyst/commit/ebdaf99061b9c4f4801abe77290e9c41712f096d))
+
 ## [6.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.2...catalyst-dev-v6.35.0) (2026-04-16)
 
 # Catalyst-Dev v6.35.0 Release
@@ -907,4 +914,3 @@ Claude can now automate web browsers through the new agent-browser skill, handli
 ### PRs
 
 * **linearis:** correct --team flag docs and add UUID resolution ([#18](https://github.com/coalesce-labs/catalyst/pull/18)) ([050205c](https://github.com/coalesce-labs/catalyst/commit/050205c))
-
