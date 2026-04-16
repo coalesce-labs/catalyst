@@ -33,8 +33,8 @@ function asString(v: unknown): string | undefined {
 }
 
 function asStringArray(v: unknown): string[] | undefined {
-  return Array.isArray(v) && v.every((x) => typeof x === "string")
-    ? (v as string[])
+  return Array.isArray(v) && v.every((x: unknown) => typeof x === "string")
+    ? v
     : undefined;
 }
 
