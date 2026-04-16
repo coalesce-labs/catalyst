@@ -1,38 +1,66 @@
 # Changelog
 
-## [6.36.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.35.0...catalyst-dev-v6.36.0) (2026-04-16)
+## [6.36.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.35.0...catalyst-dev-v6.36.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### AI-Enhanced Changelogs and Homepage Badge
+
+All 51 catalyst-dev changelog entries now have Sonnet-generated titles and 2-4 sentence summaries. The website homepage gains a version badge that reads the latest release from CHANGELOG.md at build time. Changelog page styling follows a Conductor-inspired layout with small muted version numbers, bold release titles, and comfortable reading line-height. CI release note generation upgraded from Haiku to Sonnet, and a new `add-changelog-media` skill supports R2/CDN hosting for screenshots and GIF screencasts.
 
 
-### Features
+
+### PRs
 
 * **dev:** AI-enhanced changelogs with titles, homepage badge, and Conductor-style styling ([#170](https://github.com/coalesce-labs/catalyst/issues/170)) ([ebdaf99](https://github.com/coalesce-labs/catalyst/commit/ebdaf99061b9c4f4801abe77290e9c41712f096d))
 
-## [6.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.2...catalyst-dev-v6.35.0) (2026-04-16)
+## [6.35.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.2...catalyst-dev-v6.35.0)
 
-# Catalyst-Dev v6.35.0 Release
+Apr 16, 2026
 
-This release includes maintenance updates and preparation for the next development cycle. The changes ensure the codebase remains stable and ready for future feature development.
+<!-- ai-enhanced -->
 
-<details><summary>Detailed changes</summary>
+### Activity Feed and Task List Integration
+
+The orchestration monitor activity feed now shows tool names, text previews, and rate limit info instead of generic "new turn" labels. A new task list integration reads from `~/.claude/tasks/{sessionId}/` to display per-worker task progress with badges in the worker table and a collapsible task section in the detail drawer.
 
 
 
-### Features
+### PRs
 
 * **dev:** fix activity feed labels and add task list integration ([#165](https://github.com/coalesce-labs/catalyst/issues/165)) ([96e098e](https://github.com/coalesce-labs/catalyst/commit/96e098e3138045868ebdb5e45da2e1ff509ddfba))
 
-</details>
-## [6.34.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.1...catalyst-dev-v6.34.2) (2026-04-16)
+## [6.34.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.1...catalyst-dev-v6.34.2)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Watcher Subshell Detach
+
+Adds `disown` after the background watcher subshell in `catalyst-claude.sh` to fully detach it from bash's job table before `exec` replaces the process. This is a defensive fix that prevents any edge case where bash might send SIGHUP to the watcher on exit.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** disown watcher subshell before exec ([#171](https://github.com/coalesce-labs/catalyst/issues/171)) ([5a902b3](https://github.com/coalesce-labs/catalyst/commit/5a902b35d4aefe74d1d237cff00119e41683fc2b))
 
-## [6.34.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.0...catalyst-dev-v6.34.1) (2026-04-16)
+## [6.34.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.34.0...catalyst-dev-v6.34.1)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Warp Terminal Integration
+
+Replaces child-process `claude "$@"` with `exec claude "$@"` in the session wrapper so the process image becomes `claude` directly, restoring Warp's rich sidebar metadata (repo, branch, change count) and notification integration. Heartbeat and cleanup logic moves to a background watcher that polls the wrapper PID.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** exec claude in wrapper for Warp terminal integration ([#168](https://github.com/coalesce-labs/catalyst/issues/168)) ([59e7509](https://github.com/coalesce-labs/catalyst/commit/59e750958cd963aa42972f83a7aba1efcaf0de82))
 

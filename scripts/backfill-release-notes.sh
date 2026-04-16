@@ -3,21 +3,25 @@
 # entries with AI-generated summaries.
 #
 # Usage:
-#   ANTHROPIC_API_KEY=sk-... bash scripts/backfill-release-notes.sh [plugin]
+#   LOCAL_ANTHROPIC_API_KEY=sk-... bash scripts/backfill-release-notes.sh [plugin]
 #
 # If plugin is omitted, processes all plugins. Otherwise just the named one.
 # Writes enhanced CHANGELOGs in-place with AI summaries inserted after each
 # version heading, preserving the original conventional changelog entries
 # (with PR links) below the summary.
+#
+# Uses LOCAL_ANTHROPIC_API_KEY to avoid conflicts with Claude Code's own
+# ANTHROPIC_API_KEY. Falls back to ANTHROPIC_API_KEY for CI environments.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="${GITHUB_REPOSITORY:-coalesce-labs/catalyst}"
 PROMPT_TEMPLATE="$SCRIPT_DIR/templates/backfill-release-notes-prompt.md"
+API_KEY="${LOCAL_ANTHROPIC_API_KEY:-${ANTHROPIC_API_KEY:-}}"
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  echo "Error: ANTHROPIC_API_KEY not set"
+if [[ -z "$API_KEY" ]]; then
+  echo "Error: LOCAL_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY) not set"
   exit 1
 fi
 
@@ -47,7 +51,7 @@ call_claude() {
 
   local response
   response=$(curl -sS --max-time 60 \
-    -H "x-api-key: $ANTHROPIC_API_KEY" \
+    -H "x-api-key: $API_KEY" \
     -H "anthropic-version: 2023-06-01" \
     -H "content-type: application/json" \
     -d "$request_body" \

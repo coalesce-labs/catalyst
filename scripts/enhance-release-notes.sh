@@ -11,8 +11,12 @@ REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner --jq '.nameWithOw
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROMPT_TEMPLATE="$SCRIPT_DIR/templates/release-notes-prompt.md"
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-  echo "::warning::ANTHROPIC_API_KEY not set — skipping release notes enhancement"
+# Prefer LOCAL_ANTHROPIC_API_KEY to avoid conflicts with Claude Code's own key.
+# Falls back to ANTHROPIC_API_KEY for CI environments.
+API_KEY="${LOCAL_ANTHROPIC_API_KEY:-${ANTHROPIC_API_KEY:-}}"
+
+if [[ -z "$API_KEY" ]]; then
+  echo "::warning::LOCAL_ANTHROPIC_API_KEY (or ANTHROPIC_API_KEY) not set — skipping release notes enhancement"
   exit 0
 fi
 
@@ -196,7 +200,7 @@ if [[ -n "$head_branch" ]]; then
       }')
 
     plugin_response=$(curl -sS --max-time 30 \
-      -H "x-api-key: $ANTHROPIC_API_KEY" \
+      -H "x-api-key: $API_KEY" \
       -H "anthropic-version: 2023-06-01" \
       -H "content-type: application/json" \
       -d "$plugin_request" \
