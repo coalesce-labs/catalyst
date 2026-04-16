@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.32.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.31.0...catalyst-dev-v6.32.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** add knip dead code checking to CI quality gates ([#158](https://github.com/coalesce-labs/catalyst/issues/158)) ([f58d441](https://github.com/coalesce-labs/catalyst/commit/f58d4414e12b84f6096edf23becd6f8780c0a6e9))
+
 ## [6.31.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v6.30.0...catalyst-dev-v6.31.0) (2026-04-16)
 
 
