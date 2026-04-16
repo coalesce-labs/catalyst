@@ -1,9 +1,18 @@
 # Changelog
 
-## [7.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.0.0...catalyst-dev-v7.1.0) (2026-04-16)
+## [7.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.0.0...catalyst-dev-v7.1.0)
+
+Apr 16, 2026
+
+<!-- ai-enhanced -->
+
+### Session Resume Orchestration
+
+When workers die mid-merge or stall with heartbeats, the orchestrator now revives them using `claude --resume <session_id>` instead of starting fresh — preserving full context while cutting costs ~10×. The system resolves session IDs from worker output streams and enforces per-ticket revive budgets, transitioning to stalled status when revival isn't possible.
 
 
-### Features
+
+### PRs
 
 * **dev:** port revive-worker session-resume into orchestrator Phase 4 (CTL-63) ([#191](https://github.com/coalesce-labs/catalyst/issues/191)) ([6b5aaf4](https://github.com/coalesce-labs/catalyst/commit/6b5aaf42b0f18eaf685b9661b0dfe3c354e04367))
 
