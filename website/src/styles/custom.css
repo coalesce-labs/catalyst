@@ -18,3 +18,64 @@
 .site-title span {
   color: white;
 }
+
+/* ─── Changelog Styling (Conductor-inspired) ────────────────────────────────
+ * Makes the AI-generated release title prominent, with version/date as
+ * supporting info above it. The title is an h3 inserted right after the
+ * <time> element by the backfill script.
+ *
+ * DOM structure per version entry (from starlight-changelogs):
+ *   <h2 id="slug">6.29.0</h2>
+ *   <time>April 15, 2026</time>
+ *   <!-- ai-enhanced -->
+ *   <h3>Worker Detail Drawer</h3>     ← AI title (prominent)
+ *   <p>Summary paragraph...</p>       ← AI summary
+ *   <h3>Features</h3>                 ← conventional changelog
+ *   <ul>...</ul>
+ *
+ * Scoping: <time> elements only appear on changelog pages (from
+ * starlight-changelogs Title.astro), so these selectors are safe to use
+ * without a page-level scope attribute.
+ */
+
+/* Version number: smaller, muted — supporting info, not the headline */
+.sl-markdown-content h2:has(+ time) {
+  font-size: var(--sl-text-sm);
+  font-weight: 600;
+  color: var(--sl-color-gray-3);
+  margin-bottom: 0.125rem;
+  letter-spacing: 0.02em;
+  border-bottom: none;
+}
+
+/* Date: small and muted, sits below the version */
+.sl-markdown-content time {
+  font-size: var(--sl-text-sm) !important;
+  color: var(--sl-color-gray-3) !important;
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+/* AI release title: big, bold — the headline users scan */
+.sl-markdown-content time + h3 {
+  font-size: var(--sl-text-2xl);
+  font-weight: 700;
+  color: var(--sl-color-white);
+  margin-top: 0.25rem;
+  margin-bottom: 0.5rem;
+  line-height: 1.3;
+  border-bottom: none;
+}
+
+/* AI summary paragraph: readable, slightly muted */
+.sl-markdown-content time + h3 + p {
+  font-size: var(--sl-text-base);
+  color: var(--sl-color-gray-2);
+  line-height: 1.7;
+  margin-bottom: 1.5rem;
+}
+
+/* Light theme: adjust title color */
+:root[data-theme="light"] .sl-markdown-content time + h3 {
+  color: var(--sl-color-black);
+}

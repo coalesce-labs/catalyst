@@ -1,0 +1,77 @@
+---
+import { readFileSync } from "node:fs";
+
+const changelog = readFileSync(
+  new URL("../../../plugins/dev/CHANGELOG.md", import.meta.url),
+  "utf8",
+);
+
+const versionMatch = changelog.match(/^## \[(\d+\.\d+\.\d+)]/m);
+const dateMatch = changelog.match(
+  /^## \[\d+\.\d+\.\d+\].*\((\d{4}-\d{2}-\d{2})\)/m,
+);
+
+const version = versionMatch ? versionMatch[1] : null;
+const rawDate = dateMatch ? dateMatch[1] : null;
+const formattedDate = rawDate
+  ? new Date(rawDate + "T00:00:00").toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    })
+  : null;
+---
+
+{
+  version && (
+    <a href="/changelog/catalyst-dev/" class="latest-release">
+      <span class="latest-release-version">v{version}</span>
+      {formattedDate && (
+        <span class="latest-release-date">{formattedDate}</span>
+      )}
+      <span class="latest-release-link">View changelog &rarr;</span>
+    </a>
+  )
+}
+
+<style>
+  .latest-release {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 1rem;
+    border-radius: 9999px;
+    border: 1px solid var(--sl-color-gray-5);
+    background: var(--sl-color-gray-6);
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-sm);
+    text-decoration: none;
+    transition: border-color 0.15s, background 0.15s;
+    margin-bottom: 1.5rem;
+  }
+
+  .latest-release:hover {
+    border-color: var(--sl-color-accent);
+    background: var(--sl-color-gray-5);
+    text-decoration: none;
+  }
+
+  .latest-release-version {
+    font-weight: 700;
+    font-family: var(--sl-font-mono, ui-monospace, monospace);
+    color: var(--sl-color-accent-high);
+    font-size: var(--sl-text-xs);
+    background: var(--sl-color-accent-low);
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+  }
+
+  .latest-release-date {
+    color: var(--sl-color-gray-3);
+  }
+
+  .latest-release-link {
+    color: var(--sl-color-accent-high);
+    font-weight: 500;
+  }
+</style>
