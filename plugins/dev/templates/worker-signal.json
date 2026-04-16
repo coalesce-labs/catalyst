@@ -198,6 +198,15 @@
     "followUpTo": {
       "type": ["string", "null"],
       "description": "Parent ticket ID if this worker is a follow-up ticket filed after the parent's PR was already merged (Pattern B recovery). Written by the orchestrator when initializing the follow-up worker's signal. Null for normal workers and for fix-up workers (use `fixupCommit` instead)."
+    },
+    "lastReviveReason": {
+      "type": ["string", "null"],
+      "enum": [null, "pid-dead", "heartbeat-stale", "api-stream-idle-timeout"],
+      "description": "Reason the orchestrator last revived this worker (CTL-62, CTL-63). Written by `orchestrate-revive` on a successful revive. Null if never revived."
+    },
+    "lastApiErrorUuid": {
+      "type": ["string", "null"],
+      "description": "UUID of the last API-error stream event (Stream idle timeout / partial response received) that `orchestrate-revive` has already handled (CTL-62). Used to dedup against the same error re-appearing in the appended stream JSONL after a successful revive. Null if no API-error revive has occurred."
     }
   }
 }

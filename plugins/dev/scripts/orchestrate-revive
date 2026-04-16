@@ -120,6 +120,51 @@ resolve_session_id() {
   return 1
 }
 
+# Detect an API stream-idle-timeout failure in the tail of the worker's stream
+# JSONL (CTL-62). Returns the uuid of the most recent matching `result` event,
+# or empty string if none is found.
+#
+# Match criteria (both required):
+#   1. .type == "result" AND .is_error == true
+#   2. Either .api_error_status is a non-null/non-empty value that mentions a
+#      stream idle timeout / partial response, OR the result text contains one
+#      of those markers.
+#
+# This is intentionally conservative — legitimate tool errors / test failures
+# (is_error=true with no api_error_status and no idle-timeout marker) do NOT
+# trigger a revive.
+detect_api_error_in_stream() {
+  local ticket="$1"
+
+  local stream=""
+  for candidate in \
+    "${ORCH_DIR}/workers/output/${ticket}-stream.jsonl" \
+    "${ORCH_DIR}/workers/${ticket}-stream.jsonl"; do
+    if [ -f "$candidate" ]; then
+      stream="$candidate"
+      break
+    fi
+  done
+  [ -z "$stream" ] && return 1
+
+  # Scan the last 50 lines for a matching API-error result event.
+  # The jq filter returns the uuid of the most recent matching event, or nothing.
+  local uuid
+  uuid=$(tail -n 50 "$stream" 2>/dev/null \
+    | jq -r 'select(.type == "result" and .is_error == true)
+             | select(
+                 (.api_error_status // "" | tostring
+                   | test("Stream idle timeout|partial response received"; "i"))
+                 or
+                 ((.result // "" | tostring)
+                   | test("Stream idle timeout|partial response received"; "i"))
+               )
+             | .uuid // empty' 2>/dev/null \
+    | tail -n 1)
+  [ -n "$uuid" ] && { echo "$uuid"; return 0; }
+  return 1
+}
+
 # Emit a fresh-start event via the state script (no-op when state script is
 # missing or when this is a dry run).
 emit_state() {
@@ -206,6 +251,7 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   WORKER_NAME=$(jq -r '.workerName // empty' "$SIGNAL")
   LAST_HEARTBEAT=$(jq -r '.lastHeartbeat // .updatedAt // empty' "$SIGNAL")
   REVIVE_COUNT=$(jq -r '.reviveCount // 0' "$SIGNAL")
+  LAST_API_ERROR_UUID=$(jq -r '.lastApiErrorUuid // ""' "$SIGNAL")
 
   # Skip workers that have already reached a terminal state.
   if [[ "$TERMINAL_STATUSES" == *" $STATUS "* ]]; then
@@ -215,9 +261,10 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
 
   CHECKED=$((CHECKED+1))
 
-  # Liveness decision: dead PID OR (alive PID with heartbeat older than
-  # stale-heartbeat-seconds — a zombie-sleep situation documented in the
-  # CTL-63 ticket).
+  # Liveness decision (CTL-63 + CTL-62):
+  #   - dead PID (kill -0 fails)
+  #   - alive PID with heartbeat older than stale-heartbeat-seconds (zombie-sleep)
+  #   - stream JSONL shows a fresh API stream idle timeout we haven't handled yet
   local_dead=0
   if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
     local_dead=1
@@ -228,9 +275,21 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
     local_stale=1
   fi
 
-  if [ "$local_dead" -eq 0 ] && [ "$local_stale" -eq 0 ]; then
+  API_ERROR_UUID=$(detect_api_error_in_stream "$TICKET" || echo "")
+  local_api_error=0
+  if [ -n "$API_ERROR_UUID" ] && [ "$API_ERROR_UUID" != "$LAST_API_ERROR_UUID" ]; then
+    local_api_error=1
+  fi
+
+  if [ "$local_dead" -eq 0 ] && [ "$local_stale" -eq 0 ] && [ "$local_api_error" -eq 0 ]; then
     continue
   fi
+
+  # Priority for lastReviveReason (most informative wins):
+  #   api-stream-idle-timeout > pid-dead > heartbeat-stale
+  REVIVE_REASON="heartbeat-stale"
+  [ "$local_dead" -eq 1 ] && REVIVE_REASON="pid-dead"
+  [ "$local_api_error" -eq 1 ] && REVIVE_REASON="api-stream-idle-timeout"
 
   TS=$(now_iso)
 
@@ -304,23 +363,26 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
 
   REVIVED=$((REVIVED+1))
   NEW_REVIVE_COUNT=$((REVIVE_COUNT+1))
-  jq --arg ts "$TS" --arg sid "$SESSION_ID" \
+  jq --arg ts "$TS" --arg sid "$SESSION_ID" --arg reason "$REVIVE_REASON" \
+     --arg err_uuid "$API_ERROR_UUID" \
      --argjson pid "$NEW_PID" --argjson rc "$NEW_REVIVE_COUNT" \
      '.pid = $pid
       | .reviveCount = $rc
       | .lastReviveAt = $ts
+      | .lastReviveReason = $reason
       | .revivedFromSessionId = $sid
       | .lastHeartbeat = $ts
-      | .updatedAt = $ts' \
+      | .updatedAt = $ts
+      | (if $err_uuid == "" then . else .lastApiErrorUuid = $err_uuid end)' \
      "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
 
   emit_state event "$(jq -nc --arg ts "$TS" --arg orch "$ORCH_ID" \
-    --arg w "$TICKET" --arg sid "$SESSION_ID" \
+    --arg w "$TICKET" --arg sid "$SESSION_ID" --arg reason "$REVIVE_REASON" \
     --argjson pid "$NEW_PID" --argjson rc "$NEW_REVIVE_COUNT" \
     '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-revived",
-      detail:{pid:$pid, sessionId:$sid, reviveCount:$rc}}')"
+      detail:{pid:$pid, sessionId:$sid, reviveCount:$rc, reason:$reason}}')"
 
-  echo "REVIVED: ${TICKET} (sid=${SESSION_ID}, pid=${NEW_PID}, count=${NEW_REVIVE_COUNT})" >&2
+  echo "REVIVED: ${TICKET} (sid=${SESSION_ID}, pid=${NEW_PID}, count=${NEW_REVIVE_COUNT}, reason=${REVIVE_REASON})" >&2
 done
 
 jq -nc \

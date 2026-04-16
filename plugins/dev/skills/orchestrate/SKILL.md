@@ -891,11 +891,12 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
 done
 ```
 
-**Auto-revive dead/wedged workers (CTL-63):**
+**Auto-revive dead/wedged workers (CTL-63, CTL-62):**
 
-After the stalled-worker scan, attempt to resume any dead or heartbeat-stale
-worker from its original `session_id`. Resumed sessions preserve tool-call
-history, plan context, and PR state at ~10× lower cost than a fresh redispatch.
+After the stalled-worker scan, attempt to resume any dead, heartbeat-stale,
+or API-stream-idle-timeout'd worker from its original `session_id`. Resumed
+sessions preserve tool-call history, plan context, and PR state at ~10×
+lower cost than a fresh redispatch.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-revive" \
@@ -903,12 +904,26 @@ history, plan context, and PR state at ~10× lower cost than a fresh redispatch.
   --orch-id "$ORCH_NAME"
 ```
 
-The script checks every non-terminal worker signal, revives from
-`workers/output/<ticket>-stream.jsonl` (with legacy / transcript fallbacks),
-enforces a per-ticket budget (default 2), and transitions workers whose
-budget is exhausted or whose session_id cannot be found to
-`status=stalled` with an attention item so you can decide between manual
-intervention and a fresh redispatch.
+The script checks every non-terminal worker signal and revives when any of:
+
+1. **PID dead** — `kill -0 <pid>` fails (CTL-63)
+2. **Heartbeat stale** — `lastHeartbeat` older than 15 minutes (catches
+   zombie-sleep PIDs whose process is alive but idle) (CTL-63)
+3. **API stream idle timeout** — the tail of
+   `workers/output/<ticket>-stream.jsonl` contains a `type=result`,
+   `is_error=true` event whose `api_error_status` or `result` mentions
+   `Stream idle timeout` or `partial response received`, and whose `uuid`
+   differs from the signal's `lastApiErrorUuid` (CTL-62)
+
+Each successful revive records `lastReviveReason`
+(`pid-dead` / `heartbeat-stale` / `api-stream-idle-timeout`) in the signal
+file and emits a `worker-revived` event with the same reason in its detail.
+The per-ticket revive budget (default 2) applies across all reasons
+combined. Workers whose budget is exhausted or whose session_id cannot be
+found transition to `status=stalled` with an attention item so you can
+decide between manual intervention and a fresh redispatch. Session resume
+uses `workers/output/<ticket>-stream.jsonl` (with legacy / transcript
+fallbacks) to find the original `session_id`.
 
 ### Phase 5: Independent Verification (Anti-Reward-Hacking)
 
