@@ -133,6 +133,7 @@ SESSION_ID_FILE="${WORKTREE_PATH}/.catalyst/.session-id"
   rm -f "$SESSION_ID_FILE" 2>/dev/null || true
   "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done 2>/dev/null || true
 ) &
+disown
 
 # ─── Replace process with claude ─────────────────────────────────────────────
 # After exec, this PID becomes claude. Warp sees "claude" in the process table.
