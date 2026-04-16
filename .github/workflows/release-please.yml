@@ -13,15 +13,41 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      pr: ${{ steps.release.outputs.pr }}
+      releases_created: ${{ steps.release.outputs.releases_created }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
 
+  enhance-release-notes:
+    runs-on: ubuntu-latest
+    needs: release-please
+    if: ${{ needs.release-please.outputs.pr }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Enhance release notes with AI
+        env:
+          PR_NUMBER: ${{ fromJSON(needs.release-please.outputs.pr).number }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: bash scripts/enhance-release-notes.sh "$PR_NUMBER"
+
+  auto-merge:
+    runs-on: ubuntu-latest
+    needs: [release-please, enhance-release-notes]
+    if: ${{ always() && needs.release-please.outputs.pr && needs.release-please.result == 'success' }}
+    steps:
       - name: Auto-merge release PR
-        if: ${{ steps.release.outputs.pr }}
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          gh pr merge ${{ fromJSON(steps.release.outputs.pr).number }} --squash --auto --repo ${{ github.repository }}
+          gh pr merge ${{ fromJSON(needs.release-please.outputs.pr).number }} --squash --auto --repo ${{ github.repository }}
