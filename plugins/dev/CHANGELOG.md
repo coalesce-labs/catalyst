@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.3.0...catalyst-dev-v7.4.0) (2026-04-16)
+
+
+### Features
+
+* **dev:** auto-dispatch fixup workers on BLOCKED PRs (CTL-64) ([#199](https://github.com/coalesce-labs/catalyst/issues/199)) ([77ef1b5](https://github.com/coalesce-labs/catalyst/commit/77ef1b5a80df8bcfb0dc5c07212a25b4554267c8))
+
 ## [7.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.2.0...catalyst-dev-v7.3.0)
 
 Apr 16, 2026
