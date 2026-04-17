@@ -35,6 +35,7 @@ export default defineConfig({
     mermaid(),
     starlight({
       title: "Catalyst",
+      routeMiddleware: "./src/routeData.ts",
       favicon: "/favicon.svg",
       logo: {
         src: "./public/favicon.svg",
