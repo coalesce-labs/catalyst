@@ -56,11 +56,17 @@ const { src, poster, caption } = Astro.props;
 
   @media (max-width: 640px) {
     .monitor-showcase {
-      margin: 1.5rem auto 1rem;
+      margin: 1.25rem -0.75rem 1rem;
+      padding: 0;
     }
 
     .monitor-frame {
       border-radius: 10px;
+    }
+
+    figcaption {
+      margin-top: 1rem;
+      padding: 0 1rem;
     }
   }
 </style>
