@@ -15,6 +15,29 @@
   border-radius: 4px;
 }
 
+/* ─── Mobile homepage polish ──────────────────────────────────────────────
+ * Tighten hero vertical rhythm and shrink the oversized logo on small
+ * screens so the monitor video appears closer to the first fold.
+ */
+@media (max-width: 640px) {
+  .hero img {
+    width: 112px !important;
+    height: 112px !important;
+  }
+
+  .hero .hero-html {
+    justify-content: center;
+  }
+
+  .hero .stack {
+    gap: 1rem;
+  }
+
+  .hero .actions {
+    gap: 0.5rem;
+  }
+}
+
 /* ─── Changelog Styling (Conductor-inspired) ────────────────────────────────
  *
  * DOM structure per version entry (from starlight-changelogs):

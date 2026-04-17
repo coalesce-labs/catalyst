@@ -7,6 +7,10 @@ sidebar:
 
 `orch-monitor` is a Bun-based HTTP server that aggregates worker signal files, polls GitHub for PR state, and serves a live dashboard with server-sent event streams. One process powers both the web UI and the terminal UI.
 
+![Orchestrator overview showing active waves, completion percentage, total cost, wall clock, and the worker list](https://assets.coalescelabs.ai/images/screenshots/orchestrator-2026-04-17%20at%2008.05.20%402x.png)
+
+*Orchestrator overview — waves, workers, cost, and wall-clock time at a glance.*
+
 ## Running the server
 
 The simplest way to start the monitor:
@@ -68,9 +72,25 @@ One row per worker showing:
 - **Duration** since startedAt
 - **Last heartbeat** (red if > 15 min)
 
+![Workers tab showing a tabular list of workers per orchestrator with ticket, status, phase, PR number, cost, tokens, and last-update columns](https://assets.coalescelabs.ai/images/screenshots/workers-09.09.12.png)
+
+*Workers tab — one row per worker with ticket, phase, PR, cost, and activity.*
+
 ### Row 3 — Event stream
 
 Real-time event log from `~/catalyst/events.jsonl` and filesystem watches, rendered as a timeline. Filters: event type, worker ticket, orchestrator, date range.
+
+![Timeline tab showing a Gantt-style view with colored phase bars per worker across research, plan, implement, validate, ship, and merged states](https://assets.coalescelabs.ai/images/screenshots/timeline-2026-04-17%20at%2009.08.04.png)
+
+*Timeline tab — phase Gantt bars per worker (research → plan → implement → validate → ship → merged).*
+
+### Worker detail
+
+Click any worker row to open a detail drawer with the phase timeline, PR metadata, and the live activity feed for that ticket.
+
+![Worker detail drawer open on the right showing phase timeline, PR info, and a streaming activity feed for a single worker](https://assets.coalescelabs.ai/images/screenshots/worker-detail-9.06.34%402x.png)
+
+*Worker detail — drill into a single ticket for its phase timeline, PR state, and activity feed.*
 
 ## API endpoints
 
