@@ -1,0 +1,66 @@
+---
+interface Props {
+  src: string;
+  poster?: string;
+  caption?: string;
+}
+
+const { src, poster, caption } = Astro.props;
+---
+
+<figure class="monitor-showcase">
+  <div class="monitor-frame">
+    <video
+      class="monitor-video"
+      src={src}
+      poster={poster}
+      autoplay
+      loop
+      muted
+      playsinline
+      preload="metadata"
+    ></video>
+  </div>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+  .monitor-showcase {
+    margin: 2rem auto 2rem;
+    max-width: 1400px;
+    padding: 0 1rem;
+  }
+
+  .monitor-frame {
+    border-radius: 16px;
+    overflow: hidden;
+    border: 1px solid var(--sl-color-gray-5);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.2),
+      0 12px 32px rgba(0, 0, 0, 0.3),
+      0 32px 80px rgba(0, 0, 0, 0.35);
+  }
+
+  .monitor-video {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  figcaption {
+    margin-top: 1.5rem;
+    text-align: center;
+    color: var(--sl-color-gray-3);
+    font-size: var(--sl-text-sm);
+  }
+
+  @media (max-width: 640px) {
+    .monitor-showcase {
+      margin: 1.5rem auto 1rem;
+    }
+
+    .monitor-frame {
+      border-radius: 10px;
+    }
+  }
+</style>
