@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.5.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.1...catalyst-dev-v7.5.2) (2026-04-18)
+
+
+### Bug Fixes
+
+* **dev:** restrict setup-warp colors to Warp's 8 valid variants ([#207](https://github.com/coalesce-labs/catalyst/issues/207)) ([05800f3](https://github.com/coalesce-labs/catalyst/commit/05800f3a2fe1854568355d6a77fa526c374858b4))
+
 ## [7.5.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.0...catalyst-dev-v7.5.1)
 
 Apr 18, 2026
