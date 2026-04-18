@@ -194,7 +194,7 @@ type = "terminal"
 directory = "{PROJECT_PATH}"
 commands = [
   "export CATALYST_WARP_NAME={SLUG} CATALYST_WARP_REMOTE={SLUG}",
-  "~/.claude/scripts/open-project-tab.sh{SETUP_CMD_SUFFIX}",
+  "{CATALYST_ROOT}/plugins/dev/scripts/open-project-tab.sh{SETUP_CMD_SUFFIX}",
 ]
 ```
 
@@ -256,7 +256,7 @@ commands = [
   "export CATALYST_WARP_NAME={SLUG}_{{worktree}} CATALYST_WARP_REMOTE={SLUG}_{{worktree}}",
   "direnv allow . && eval \"$(direnv export zsh)\"",
   "yes | humanlayer thoughts init --profile $HUMANLAYER_PROFILE --directory $HUMANLAYER_DIRECTORY 2>/dev/null; humanlayer thoughts sync",
-  "~/.claude/scripts/trust-workspace.sh \"$(pwd)\"",
+  "{CATALYST_ROOT}/plugins/dev/scripts/trust-workspace.sh \"$(pwd)\"",
   "git status",
 ]
 
