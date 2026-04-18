@@ -129,9 +129,10 @@ possible, or sequential questions):
 - **Short identifier (slug)** — alnum/dash only, lowercase (e.g., `catalyst`, `bob-rozich`). Default:
   lowercase display name with spaces → dashes, non-alnum stripped.
 - **Emoji** — for main tab (default: `📦`)
-- **Color** — pick from: `magenta`, `blue`, `green`, `cyan`, `yellow`, `red`, `teal`, `purple`,
-  `orange`, `pink`, `white`. Each project gets a distinct color so vertical-sidebar tabs are visually
-  separable.
+- **Color** — Warp only accepts these 8 values: `black`, `red`, `green`, `yellow`, `blue`,
+  `magenta`, `cyan`, `white`. **Do not offer any others** — Warp rejects unknown variants with a
+  TOML parse error at load. Recommend against `black` (invisible on dark themes). Each project
+  gets a distinct color so vertical-sidebar tabs are visually separable.
 - **Variants** — multi-select from:
   - Main (always recommended)
   - PM worktree (only for Catalyst-managed projects)

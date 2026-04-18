@@ -52,7 +52,9 @@ color.
 | Personal tools | blue |
 | Client work | cyan |
 
-(These are just conventions — pick whatever you like.)
+Warp accepts 8 color variants total: `black`, `red`, `green`, `yellow`, `blue`, `magenta`,
+`cyan`, `white`. Any other value (e.g. `purple`, `orange`, `teal`, `pink`) fails to load with a
+TOML parse error. `black` is valid but invisible on dark themes.
 
 ### Session Name Convention
 
