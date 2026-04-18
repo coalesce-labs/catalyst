@@ -1,11 +1,14 @@
 #!/bin/bash
 # create-worktree.sh - Create a git worktree for isolated development
-# Usage: ./create-worktree.sh [worktree_name] [base_branch] [--worktree-dir <path>] [--hooks-json <json>] [--orchestration <name>]
+# Usage: ./create-worktree.sh [worktree_name] [base_branch] [--worktree-dir <path>] [--hooks-json <json>] [--orchestration <name>] [--reuse-existing]
 #
 # Options:
 #   --worktree-dir <path>       Override worktree base directory (used by orchestrator)
 #   --hooks-json <json>         JSON array of setup hook commands to run after creation
 #   --orchestration <name>      Set orchestration run name in workflow context
+#   --reuse-existing            If the worktree already exists, skip creation/setup
+#                               and succeed. Makes the script idempotent for tab-config
+#                               launchers that re-open a long-lived worktree (e.g. "pm").
 
 set -e
 
@@ -20,12 +23,14 @@ POSITIONAL=()
 OVERRIDE_WORKTREE_DIR=""
 HOOKS_JSON=""
 ORCHESTRATION_NAME=""
+REUSE_EXISTING=false
 
 while [[ $# -gt 0 ]]; do
 	case $1 in
 		--worktree-dir) OVERRIDE_WORKTREE_DIR="$2"; shift 2 ;;
 		--hooks-json) HOOKS_JSON="$2"; shift 2 ;;
 		--orchestration) ORCHESTRATION_NAME="$2"; shift 2 ;;
+		--reuse-existing) REUSE_EXISTING=true; shift ;;
 		*) POSITIONAL+=("$1"); shift ;;
 	esac
 done
@@ -105,6 +110,11 @@ fi
 
 # Check if worktree already exists
 if [ -d "$WORKTREE_PATH" ]; then
+	if [ "$REUSE_EXISTING" = true ]; then
+		echo -e "${GREEN}♻️  Reusing existing worktree: $WORKTREE_PATH${NC}"
+		echo "WORKTREE_PATH=${WORKTREE_PATH}"
+		exit 0
+	fi
 	echo -e "${RED}❌ Error: Worktree directory already exists: $WORKTREE_PATH${NC}"
 	exit 1
 fi
@@ -348,3 +358,6 @@ echo "To remove this worktree later:"
 echo "  git worktree remove ${WORKTREE_PATH}"
 echo "  git branch -D ${WORKTREE_NAME}"
 echo ""
+
+# Machine-readable output for automation (tab configs, launchers)
+echo "WORKTREE_PATH=${WORKTREE_PATH}"

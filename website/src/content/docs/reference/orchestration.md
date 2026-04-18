@@ -258,6 +258,7 @@ The orchestrator:
 /orchestrate --project "Q2 API Redesign"         # from a Linear project
 /orchestrate --cycle current                      # from the current Linear cycle
 /orchestrate --file tickets.txt                   # from a file (one ID per line)
+/orchestrate --auto 5                             # auto-pick top 5 Todo tickets
 ```
 
 ### Flags
@@ -265,6 +266,7 @@ The orchestrator:
 | Flag                     | Description                                      |
 | ------------------------ | ------------------------------------------------ |
 | `--name <name>`          | Name this orchestrator (default: auto-generated) |
+| `--auto <N>`             | Auto-pick top N Todo tickets (urgent/high priority first, newer first). Default N=3. |
 | `--auto-merge`           | Workers auto-merge when CI + verification pass   |
 | `--max-parallel <n>`     | Override max concurrent workers (default: 3)     |
 | `--base-branch <branch>` | Base branch for worktrees (default: main)        |

@@ -52,6 +52,7 @@ fi
 /catalyst-dev:orchestrate --project "Q2 API Redesign"              # pull from Linear project
 /catalyst-dev:orchestrate --cycle current                           # pull from current cycle
 /catalyst-dev:orchestrate --file tickets.txt                        # read ticket IDs from file
+/catalyst-dev:orchestrate --auto 5                                  # auto-pick top 5 Todo tickets
 ```
 
 ## Flags
@@ -62,6 +63,7 @@ fi
 | `--project <name>`       | Pull tickets from a Linear project                                     |
 | `--cycle current`        | Pull tickets from the current Linear cycle                             |
 | `--file <path>`          | Read ticket IDs from a file (one per line)                             |
+| `--auto <N>`             | Auto-pick top N Todo tickets: urgent/high priority first, newer first. Default N=3. |
 | `--auto-merge`           | Workers auto-merge PRs when CI + verification pass                     |
 | `--max-parallel <n>`     | Override config `maxParallel` (default: 3)                             |
 | `--base-branch <branch>` | Base branch for worktrees (default: main)                              |
@@ -133,6 +135,11 @@ It NEVER:
    - `--project`: list issues filtered by project name
    - `--cycle current`: list the active cycle, then list its issues
    - `--file`: read IDs from file, then read each ticket's details
+   - `--auto <N>`: list `status=Todo` issues, then select the top N. Ranking: urgent/high
+     priority first (Linear priority 1 = Urgent → 4 = Low, with 0 = "No priority" sorted
+     LAST), then newest `createdAt` first. Example jq after `linearis issues list --status Todo`:
+     `sort_by((if .priority == 0 then 5 else .priority end), (-(.createdAt | fromdateiso8601))) | .[:N]`
+     Present the auto-picked tickets to the user as part of the wave plan before proceeding.
 
 2. **Read ticket details**: For each ticket, extract:
    - Title, description, estimate

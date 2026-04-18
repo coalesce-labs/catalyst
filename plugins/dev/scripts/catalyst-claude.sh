@@ -28,8 +28,29 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSION_SCRIPT="${SCRIPT_DIR}/catalyst-session.sh"
 
+# ─── Env-driven claude flag injection ─────────────────────────────────────────
+# Warp tab configs (and the launchers that back them) export CATALYST_WARP_NAME
+# and CATALYST_WARP_REMOTE so Claude's in-UI session name and remote-control
+# session name match the Warp tab. We forward these only if the caller hasn't
+# already supplied an explicit --name / --remote-control-session-name-prefix.
+CLAUDE_PREFIX=()
+if [[ -n "${CATALYST_WARP_NAME:-}" ]] && ! printf '%s\n' "$@" | grep -qE '^(-n|--name)(=|$)'; then
+  CLAUDE_PREFIX+=(--name "$CATALYST_WARP_NAME")
+fi
+if [[ -n "${CATALYST_WARP_REMOTE:-}" ]] && ! printf '%s\n' "$@" | grep -qE '^--remote-control-session-name-prefix(=|$)'; then
+  CLAUDE_PREFIX+=(--remote-control-session-name-prefix "$CATALYST_WARP_REMOTE")
+fi
+
+claude_exec() {
+  if [[ ${#CLAUDE_PREFIX[@]} -gt 0 ]]; then
+    exec claude "${CLAUDE_PREFIX[@]}" "$@"
+  else
+    exec claude "$@"
+  fi
+}
+
 if [[ ! -x "$SESSION_SCRIPT" ]]; then
-  exec claude "$@"
+  claude_exec "$@"
 fi
 
 # ─── Parse wrapper flags ─────────────────────────────────────────────────────
@@ -94,7 +115,7 @@ SESSION_ARGS=(--skill "$SKILL" --cwd "$WORKTREE_PATH")
 
 CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start "${SESSION_ARGS[@]}" 2>/dev/null)
 if [[ -z "$CATALYST_SESSION_ID" ]]; then
-  exec claude "$@"
+  claude_exec "$@"
 fi
 export CATALYST_SESSION_ID
 
@@ -139,4 +160,4 @@ disown
 # After exec, this PID becomes claude. Warp sees "claude" in the process table.
 # The background watcher monitors this PID and cleans up when it exits.
 
-exec claude "$@"
+claude_exec "$@"
