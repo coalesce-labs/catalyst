@@ -1,9 +1,18 @@
 # Changelog
 
-## [7.5.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.0...catalyst-dev-v7.5.1) (2026-04-18)
+## [7.5.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.0...catalyst-dev-v7.5.1)
+
+Apr 18, 2026
+
+<!-- ai-enhanced -->
+
+### Warp Helper Script Bundling
+
+The `setup-warp` skill now bundles its helper scripts directly in the plugin instead of referencing dotfiles that don't exist for other users. Generated Warp tab configurations will point to the bundled `open-project-tab.sh` and `trust-workspace.sh` scripts, making the plugin work out of the box for everyone.
 
 
-### Bug Fixes
+
+### PRs
 
 * **dev:** bundle warp helper scripts in plugin ([#205](https://github.com/coalesce-labs/catalyst/issues/205)) ([687c98b](https://github.com/coalesce-labs/catalyst/commit/687c98bcdfa9d8d5313f18e618b0fb2cf94a60dc))
 
