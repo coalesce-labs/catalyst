@@ -122,17 +122,18 @@ type = "terminal"
 directory = "~/code-repos/github/coalesce-labs/catalyst"
 commands = [
   "export CATALYST_WARP_NAME=catalyst CATALYST_WARP_REMOTE=catalyst",
-  "~/.claude/scripts/open-project-tab.sh",
+  "~/code-repos/github/coalesce-labs/catalyst/plugins/dev/scripts/open-project-tab.sh",
 ]
 ```
 
-The helper `open-project-tab.sh` runs direnv, `humanlayer thoughts sync`, trust-workspace, and
-`git fetch && git status`. You can pass a project-specific init command as its first argument:
+The helper `open-project-tab.sh` (shipped in the catalyst plugin) runs direnv, `humanlayer
+thoughts sync`, trust-workspace, and `git fetch && git status`. You can pass a project-specific
+init command as its first argument:
 
 ```toml
 commands = [
   "export CATALYST_WARP_NAME=adva CATALYST_WARP_REMOTE=adva",
-  "~/.claude/scripts/open-project-tab.sh 'bun install && scripts/setup-env.sh'",
+  "~/code-repos/github/coalesce-labs/catalyst/plugins/dev/scripts/open-project-tab.sh 'bun install && scripts/setup-env.sh'",
 ]
 ```
 
@@ -197,7 +198,7 @@ commands = [
   "export CATALYST_WARP_NAME=catalyst_{{worktree}} CATALYST_WARP_REMOTE=catalyst_{{worktree}}",
   "direnv allow . && eval \"$(direnv export zsh)\"",
   "yes | humanlayer thoughts init --profile $HUMANLAYER_PROFILE --directory $HUMANLAYER_DIRECTORY 2>/dev/null; humanlayer thoughts sync",
-  "~/.claude/scripts/trust-workspace.sh \"$(pwd)\"",
+  "~/code-repos/github/coalesce-labs/catalyst/plugins/dev/scripts/trust-workspace.sh \"$(pwd)\"",
   "git status",
 ]
 
@@ -264,8 +265,14 @@ environment and forwards them to Claude as `--name` and
 ### `open-project-tab.sh`
 
 Shared init for Main tabs: direnv, humanlayer thoughts sync, optional project-specific setup
-command, trust-workspace, git fetch+status. Lives in `~/.claude/scripts/` (personal dotfiles
-territory, not part of the Catalyst plugin).
+command, trust-workspace, git fetch+status. Ships in `plugins/dev/scripts/` so the generated
+tab configs work on any checkout of the catalyst repo.
+
+### `trust-workspace.sh`
+
+Pre-trusts a directory in Claude Code's `~/.claude.json` so the first `claude` invocation in a
+fresh worktree skips the trust dialog. Called by `open-project-tab.sh` and by the existing-
+worktree tab template. Also ships in `plugins/dev/scripts/`.
 
 ## Known Limitations
 
