@@ -20,18 +20,21 @@ run. No questions — parse the input, create the worktree, print the command.
 /catalyst-dev:setup-orchestrate <ticket-ids...>
 /catalyst-dev:setup-orchestrate --cycle current
 /catalyst-dev:setup-orchestrate --project "Project Name"
+/catalyst-dev:setup-orchestrate --auto N
 ```
 
 The input MUST be one of:
 - **Ticket IDs**: space-separated (e.g., `ADV-214 ADV-215 ADV-208`)
 - **Cycle flag**: `--cycle current`
 - **Project flag**: `--project "Project Name"`
+- **Auto flag**: `--auto N` — orchestrate skill will pick top N Todo tickets
 
 If no input is provided, stop and tell the user:
 ```
 Usage: /catalyst-dev:setup-orchestrate <ticket-ids...>
        /catalyst-dev:setup-orchestrate --cycle current
        /catalyst-dev:setup-orchestrate --project "Project Name"
+       /catalyst-dev:setup-orchestrate --auto N
 ```
 
 **Do NOT** analyze tickets, suggest sequencing, research ticket details, or do any work beyond
@@ -46,6 +49,7 @@ Execute all steps without asking questions. No confirmations, no menus, no optio
 Determine which mode the user invoked:
 - If the input contains `--cycle`, extract the value (e.g., `current`)
 - If the input contains `--project`, extract the quoted value (e.g., `"Project Name"`)
+- If the input contains `--auto`, extract the integer N that follows (e.g., `5`)
 - Otherwise, treat all tokens as space-separated ticket IDs
 
 ### Step 2: Call setup-orchestrator.sh
@@ -61,6 +65,9 @@ Build the flag string from the parsed input and call the standalone script:
 
 # For project mode:
 "${CLAUDE_PLUGIN_ROOT}/scripts/setup-orchestrator.sh" --project "<project-name>"
+
+# For auto mode:
+"${CLAUDE_PLUGIN_ROOT}/scripts/setup-orchestrator.sh" --auto <N>
 ```
 
 The script handles everything: validation, config reading, state init, worktree creation.

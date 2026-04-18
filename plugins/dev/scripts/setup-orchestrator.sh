@@ -7,12 +7,13 @@
 #
 # Usage:
 #   setup-orchestrator.sh [--tickets "ID1 ID2"] [--cycle current] [--project "Name"]
-#                         [--quiet] [--launch]
+#                         [--auto N] [--quiet] [--launch]
 #
 # Flags:
 #   --tickets "ID1 ID2"   Ticket IDs to pass through to orchestrate command
 #   --cycle current       Use cycle mode (passed through to orchestrate)
 #   --project "Name"      Use project mode (passed through to orchestrate)
+#   --auto N              Auto-pick top N Todo tickets (passed through to orchestrate)
 #   --quiet               Suppress all output except WORKTREE_PATH=... line
 #   --launch              Exec claude with /catalyst-dev:orchestrate in the new worktree
 
@@ -31,6 +32,7 @@ NC='\033[0m'
 TICKETS=""
 CYCLE=""
 PROJECT=""
+AUTO=""
 QUIET=false
 LAUNCH=false
 
@@ -39,16 +41,18 @@ while [[ $# -gt 0 ]]; do
     --tickets)  TICKETS="$2"; shift 2 ;;
     --cycle)    CYCLE="$2"; shift 2 ;;
     --project)  PROJECT="$2"; shift 2 ;;
+    --auto)     AUTO="$2"; shift 2 ;;
     --quiet)    QUIET=true; shift ;;
     --launch)   LAUNCH=true; shift ;;
     -h|--help)
       echo "Usage: setup-orchestrator.sh [--tickets \"ID1 ID2\"] [--cycle current] [--project \"Name\"]"
-      echo "                             [--quiet] [--launch]"
+      echo "                             [--auto N] [--quiet] [--launch]"
       echo ""
       echo "Flags:"
       echo "  --tickets \"ID1 ID2\"   Ticket IDs for orchestration"
       echo "  --cycle current       Use cycle mode"
       echo "  --project \"Name\"      Use project mode"
+      echo "  --auto N              Auto-pick top N Todo tickets (priority asc, createdAt desc)"
       echo "  --quiet               Output only WORKTREE_PATH=... (for automation)"
       echo "  --launch              Create worktree and exec claude with orchestrate command"
       exit 0
@@ -62,11 +66,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 # At least one input mode required
-if [[ -z "$TICKETS" && -z "$CYCLE" && -z "$PROJECT" ]]; then
-  echo -e "${RED}Error: Must provide --tickets, --cycle, or --project${NC}" >&2
+if [[ -z "$TICKETS" && -z "$CYCLE" && -z "$PROJECT" && -z "$AUTO" ]]; then
+  echo -e "${RED}Error: Must provide --tickets, --cycle, --project, or --auto${NC}" >&2
   echo "Usage: setup-orchestrator.sh --tickets \"ID1 ID2\"" >&2
   echo "       setup-orchestrator.sh --cycle current" >&2
   echo "       setup-orchestrator.sh --project \"Project Name\"" >&2
+  echo "       setup-orchestrator.sh --auto 5" >&2
   exit 1
 fi
 
@@ -166,6 +171,8 @@ elif [[ -n "$CYCLE" ]]; then
   TICKET_ARGS="--cycle $CYCLE"
 elif [[ -n "$PROJECT" ]]; then
   TICKET_ARGS="--project \"$PROJECT\""
+elif [[ -n "$AUTO" ]]; then
+  TICKET_ARGS="--auto $AUTO"
 fi
 
 # ─── Step 7: Output ──────────────────────────────────────────────────────────
