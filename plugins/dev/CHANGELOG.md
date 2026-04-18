@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.5.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.0...catalyst-dev-v7.5.1) (2026-04-18)
+
+
+### Bug Fixes
+
+* **dev:** bundle warp helper scripts in plugin ([#205](https://github.com/coalesce-labs/catalyst/issues/205)) ([687c98b](https://github.com/coalesce-labs/catalyst/commit/687c98bcdfa9d8d5313f18e618b0fb2cf94a60dc))
+
 ## [7.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.4.0...catalyst-dev-v7.5.0)
 
 Apr 18, 2026
