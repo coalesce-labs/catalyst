@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.4.0...catalyst-dev-v7.5.0)
+
+Apr 18, 2026
+
+<!-- ai-enhanced -->
+
+### Auto Orchestration & Warp Integration
+
+Run `catalyst orchestrate --auto N` to automatically pick your top priority tickets from Linear, or use the new `/catalyst-dev:setup-warp` skill to generate terminal tab configs that launch orchestration sessions with proper naming and remote control. The `--reuse-existing` flag on worktree creation means your tab configs can safely reopen long-lived development environments without conflicts.
+
+
+
+### PRs
+
+* **dev:** add --auto orchestration, tab launchers, and setup-warp skill ([#203](https://github.com/coalesce-labs/catalyst/issues/203)) ([326ff20](https://github.com/coalesce-labs/catalyst/commit/326ff209f91e8ea8fbcb1b9c49176d4e50e55840))
+
 ## [7.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.3.0...catalyst-dev-v7.4.0)
 
 Apr 16, 2026
