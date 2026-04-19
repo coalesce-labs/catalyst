@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.5.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.2...catalyst-dev-v7.5.3)
+
+Apr 19, 2026
+
+<!-- ai-enhanced -->
+
+### Thoughts Symlink Protection
+
+`setup-catalyst` no longer silently clobbers thoughts symlinks when repairing directory structure. The new `catalyst-thoughts.sh` helper detects when a regular directory has replaced an expected symlink and refuses to auto-fix, instead showing a recovery command to preserve any files written to the wrong location. Health checks now treat clobbered symlinks as fatal errors when humanlayer is configured.
+
+
+
+### PRs
+
+* **dev:** setup-catalyst no longer clobbers thoughts symlinks (CTL-90) ([#209](https://github.com/coalesce-labs/catalyst/issues/209)) ([fb68453](https://github.com/coalesce-labs/catalyst/commit/fb6845367465c85d1421b09c4263d7abf22ee198))
+
 ## [7.5.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.1...catalyst-dev-v7.5.2)
 
 Apr 18, 2026
