@@ -34,15 +34,40 @@ if [[ -f ".claude/.workflow-context.json" && ! -f ".catalyst/.workflow-context.j
 fi
 
 # 1. Check thoughts system is initialized
+# Fatal: thoughts/shared or thoughts/global is a regular directory when humanlayer-is-configured
+# or .catalyst/config.json declares a thoughts directory. In that scenario humanlayer's symlink
+# was clobbered and writes will silently bypass the central thoughts repo. On truly-unconfigured
+# projects (no humanlayer, no thoughts config), plain directories are the intended fallback.
+thoughts_expected=0
+if [[ -n $CONFIG_PATH ]]; then
+	CAT_THOUGHTS_DIR=$(jq -r '.catalyst.thoughts.directory // empty' "$CONFIG_PATH" 2>/dev/null)
+	[[ -n $CAT_THOUGHTS_DIR ]] && thoughts_expected=1
+fi
+if command -v humanlayer &>/dev/null; then
+	if humanlayer thoughts config --json 2>/dev/null | jq -e --arg cwd "$(pwd)" '.repoMappings[$cwd] // empty' &>/dev/null; then
+		thoughts_expected=1
+	fi
+fi
+
+if [[ $thoughts_expected -eq 1 ]]; then
+	for top in shared global; do
+		if [[ -e "thoughts/$top" && ! -L "thoughts/$top" ]]; then
+			errors+=("thoughts/$top is a regular directory but should be a symlink — run: bash plugins/dev/scripts/catalyst-thoughts.sh check")
+		elif [[ -L "thoughts/$top" && ! -e "thoughts/$top" ]]; then
+			errors+=("thoughts/$top is a symlink with a missing target — run: bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair")
+		fi
+	done
+fi
+
 if [[ -d "thoughts/shared" ]]; then
 	# Check subdirectories exist
 	for dir in research plans handoffs prs reports; do
 		if [[ ! -d "thoughts/shared/$dir" ]]; then
-			warnings+=("thoughts/shared/$dir/ directory missing — run: mkdir -p thoughts/shared/$dir")
+			warnings+=("thoughts/shared/$dir/ directory missing — run: bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair")
 		fi
 	done
 else
-	errors+=("Thoughts system not configured — run: humanlayer thoughts init")
+	errors+=("Thoughts system not configured — run: bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair")
 fi
 
 # 2. Check thoughts is synced (has .git or is managed)
