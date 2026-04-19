@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.5.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.2...catalyst-dev-v7.5.3) (2026-04-19)
+
+
+### Bug Fixes
+
+* **dev:** setup-catalyst no longer clobbers thoughts symlinks (CTL-90) ([#209](https://github.com/coalesce-labs/catalyst/issues/209)) ([fb68453](https://github.com/coalesce-labs/catalyst/commit/fb6845367465c85d1421b09c4263d7abf22ee198))
+
 ## [7.5.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.1...catalyst-dev-v7.5.2)
 
 Apr 18, 2026
