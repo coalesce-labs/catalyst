@@ -450,7 +450,8 @@ if [[ -d "thoughts" ]]; then
                 hl_repo=$(echo "$hl_map" | jq -r '.repo // empty' 2>/dev/null)
                 if [[ -n "$cat_profile" && -n "$hl_profile" && "$cat_profile" != "$hl_profile" ]]; then
                     fail "Profile drift: .catalyst/config.json='$cat_profile', humanlayer='$hl_profile' for this repo"
-                    info "Fix: humanlayer thoughts init --force --profile $cat_profile --directory ${cat_dir:-<directory>}"
+                    info "Fix: bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair"
+                    info "  (or manually: humanlayer thoughts uninit --force && humanlayer thoughts init --profile $cat_profile --directory ${cat_dir:-<directory>})"
                 fi
                 if [[ -n "$cat_dir" && -n "$hl_repo" && "$cat_dir" != "$hl_repo" ]]; then
                     fail "Directory drift: .catalyst/config.json='$cat_dir', humanlayer='$hl_repo' for this repo"

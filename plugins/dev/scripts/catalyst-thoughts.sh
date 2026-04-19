@@ -48,8 +48,43 @@ _mkdir_subdirs() {
 }
 
 cmd_init_or_repair() {
-	# Case A: thoughts/shared is a valid symlink → ensure subdirs exist inside it, done.
+	# Case A: thoughts/shared is a valid symlink → check for profile/directory drift
+	# between .catalyst/config.json and humanlayer's mapping. If found, repair by
+	# `humanlayer thoughts uninit --force` followed by re-`init` with the config's
+	# profile/directory. Safe because thoughts content lives in the canonical
+	# thoughts repo, not in the symlink target. Otherwise, just ensure subdirs.
 	if [[ -L "thoughts/shared" && -d "thoughts/shared" ]]; then
+		if command -v humanlayer &>/dev/null && _read_thoughts_config && [[ -n "${CAT_DIR:-}" ]]; then
+			local mapping hl_profile hl_repo needs_fix=0
+			mapping="$(_humanlayer_mapping 2>/dev/null || true)"
+			if [[ -n "$mapping" ]]; then
+				hl_profile="$(printf '%s' "$mapping" | cut -f1)"
+				hl_repo="$(printf '%s' "$mapping" | cut -f2)"
+				if [[ -n "${CAT_PROFILE:-}" && -n "$hl_profile" && "$CAT_PROFILE" != "$hl_profile" ]]; then
+					needs_fix=1
+				fi
+				if [[ -n "$hl_repo" && "$CAT_DIR" != "$hl_repo" ]]; then
+					needs_fix=1
+				fi
+			fi
+			if [[ $needs_fix -eq 1 ]]; then
+				echo "  Drift detected between .catalyst/config.json and humanlayer mapping — repairing."
+				echo "  Running: humanlayer thoughts uninit --force"
+				if ! humanlayer thoughts uninit --force; then
+					echo "ERROR: humanlayer thoughts uninit failed" >&2
+					return 1
+				fi
+				local init_args=(thoughts init --directory "$CAT_DIR")
+				[[ -n "${CAT_PROFILE:-}" ]] && init_args+=(--profile "$CAT_PROFILE")
+				echo "  Running: humanlayer ${init_args[*]}"
+				if ! humanlayer "${init_args[@]}"; then
+					echo "ERROR: humanlayer thoughts init failed" >&2
+					return 1
+				fi
+				_mkdir_subdirs "thoughts/shared"
+				return 0
+			fi
+		fi
 		_mkdir_subdirs "thoughts/shared"
 		return 0
 	fi
