@@ -72,6 +72,11 @@ if [[ "\$1" == "thoughts" && "\$2" == "init" ]]; then
     ln -sfn "$fake_repo/repos/\$DIR/ryan"  thoughts/ryan
     exit 0
 fi
+if [[ "\$1" == "thoughts" && "\$2" == "uninit" ]]; then
+    # Simulate humanlayer removing the symlinks it owns.
+    rm -f thoughts/shared thoughts/global thoughts/ryan 2>/dev/null || true
+    exit 0
+fi
 if [[ "\$1" == "thoughts" && "\$2" == "status" ]]; then
     echo "✓ Initialized"
     exit 0
@@ -425,6 +430,91 @@ mkdir -p "$TEST_DIR"
 	else
 		fail "check exited non-zero on healthy project. stderr:"
 		cat /tmp/ctl-90-test5d-stderr | sed 's/^/    /'
+	fi
+)
+
+# ── Test 6: init-or-repair auto-fixes profile drift ──────────────────────
+
+run_test "init-or-repair auto-fixes profile drift (uninit + init)"
+
+TEST_DIR="$TMPDIR/test6"
+FAKE_REPO="$TMPDIR/test6-thoughts"
+mkdir -p "$TEST_DIR"
+(
+	cd "$TEST_DIR"
+	write_catalyst_config ".catalyst/config.json" "profile-A" "dir-A"
+	SHIM_LOG="$TEST_DIR/humanlayer.log"
+	# humanlayer claims the repo is mapped under profile-B (drift)
+	HL_JSON=$(humanlayer_config_json "$TEST_DIR" "dir-A" "profile-B")
+	make_humanlayer_shim "$TEST_DIR/bin" "$SHIM_LOG" "$FAKE_REPO" "$HL_JSON"
+	export PATH="$TEST_DIR/bin:$PATH"
+
+	# Pre-create a valid symlink so we're past the symlink-clobbered case.
+	mkdir -p "$FAKE_REPO/repos/dir-A/shared"
+	mkdir -p thoughts
+	ln -sfn "$FAKE_REPO/repos/dir-A/shared" thoughts/shared
+
+	if bash "$SUT" init-or-repair >/tmp/ctl-91-test6-stdout 2>&1; then
+		pass "init-or-repair exited 0"
+	else
+		fail "init-or-repair exit non-zero on drift. output:"
+		cat /tmp/ctl-91-test6-stdout | sed 's/^/    /'
+	fi
+
+	if grep -q "thoughts uninit --force" "$SHIM_LOG"; then
+		pass "humanlayer uninit --force was invoked"
+	else
+		fail "humanlayer uninit was not invoked. log:"
+		cat "$SHIM_LOG" | sed 's/^/    /'
+	fi
+
+	if grep -q "thoughts init --directory dir-A --profile profile-A" "$SHIM_LOG"; then
+		pass "humanlayer init invoked with config profile"
+	else
+		fail "humanlayer init was not invoked with expected args. log:"
+		cat "$SHIM_LOG" | sed 's/^/    /'
+	fi
+
+	if [[ -L "thoughts/shared" ]]; then
+		pass "thoughts/shared is a symlink after drift repair"
+	else
+		fail "thoughts/shared is not a symlink after drift repair"
+	fi
+)
+
+# ── Test 7: init-or-repair auto-fixes directory drift ────────────────────
+
+run_test "init-or-repair auto-fixes directory drift"
+
+TEST_DIR="$TMPDIR/test7"
+FAKE_REPO="$TMPDIR/test7-thoughts"
+mkdir -p "$TEST_DIR"
+(
+	cd "$TEST_DIR"
+	write_catalyst_config ".catalyst/config.json" "profile-A" "dir-A"
+	SHIM_LOG="$TEST_DIR/humanlayer.log"
+	# Same profile, wrong directory in humanlayer mapping
+	HL_JSON=$(humanlayer_config_json "$TEST_DIR" "dir-OTHER" "profile-A")
+	make_humanlayer_shim "$TEST_DIR/bin" "$SHIM_LOG" "$FAKE_REPO" "$HL_JSON"
+	export PATH="$TEST_DIR/bin:$PATH"
+
+	mkdir -p "$FAKE_REPO/repos/dir-A/shared"
+	mkdir -p thoughts
+	ln -sfn "$FAKE_REPO/repos/dir-A/shared" thoughts/shared
+
+	if bash "$SUT" init-or-repair >/tmp/ctl-91-test7-stdout 2>&1; then
+		pass "init-or-repair exited 0"
+	else
+		fail "init-or-repair exit non-zero on directory drift. output:"
+		cat /tmp/ctl-91-test7-stdout | sed 's/^/    /'
+	fi
+
+	if grep -q "thoughts uninit --force" "$SHIM_LOG" && \
+	   grep -q "thoughts init --directory dir-A --profile profile-A" "$SHIM_LOG"; then
+		pass "humanlayer uninit + init invoked for directory drift"
+	else
+		fail "humanlayer uninit + init not invoked for directory drift. log:"
+		cat "$SHIM_LOG" | sed 's/^/    /'
 	fi
 )
 

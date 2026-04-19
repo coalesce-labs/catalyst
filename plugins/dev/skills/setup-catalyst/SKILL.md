@@ -55,7 +55,7 @@ user rather than overwriting anything.
 | WAL mode not set | `sqlite3 ~/catalyst/catalyst.db 'PRAGMA journal_mode=WAL;'` |
 | `thoughts/shared/<dir>` missing | Run `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` (re-uses humanlayer when configured; warns loudly when no thoughts repo is set up) |
 | `thoughts/shared` is a regular directory (not a symlink) | **Fatal — do not auto-fix.** Tell the user the humanlayer symlink was clobbered and show recovery: `mv thoughts/shared thoughts/shared.orphaned-$(date +%Y%m%d)` then `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` |
-| Profile drift between `.catalyst/config.json` and humanlayer mapping | Show the user: `humanlayer thoughts init --force --profile <profile from .catalyst/config.json> --directory <directory from .catalyst/config.json>` |
+| Profile drift between `.catalyst/config.json` and humanlayer mapping | Run `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` — it now auto-repairs drift by running `humanlayer thoughts uninit --force && humanlayer thoughts init --profile <config profile> --directory <config directory>`. (Plain `humanlayer thoughts init --force` does NOT update an existing repo→profile mapping, so the `uninit` step is required.) |
 
 For issues needing user input, explain what's needed and how to provide it:
 
