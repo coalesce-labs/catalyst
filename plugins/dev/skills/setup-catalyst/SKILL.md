@@ -36,7 +36,14 @@ Parse the output. Categorize every warning and failure into:
 ## Phase 2: Fix
 
 For auto-fixable issues, fix them immediately — don't ask, just do it. These are safe, local,
-reversible operations:
+reversible operations.
+
+**Exception: thoughts/ repair is NOT a bare `mkdir`.** The humanlayer thoughts system expects
+`thoughts/shared` and `thoughts/global` to be **symlinks** into a central thoughts repo. A bare
+`mkdir` over a clobbered symlink silently routes all subsequent agent writes to a non-syncing
+local directory. Always route thoughts repair through `catalyst-thoughts.sh`, and treat a
+regular-directory-where-a-symlink-should-be as **fatal** — surface the recovery command to the
+user rather than overwriting anything.
 
 | Issue | Fix |
 |-------|-----|
@@ -46,7 +53,9 @@ reversible operations:
 | Database missing or schema incomplete | Run `catalyst-db.sh init` (locating it the same way as the check script) |
 | `schema_migrations` table missing | Run `catalyst-db.sh init` — it's idempotent |
 | WAL mode not set | `sqlite3 ~/catalyst/catalyst.db 'PRAGMA journal_mode=WAL;'` |
-| `thoughts/shared/<dir>` missing | `mkdir -p thoughts/shared/{research,plans,handoffs,prs,reports}` |
+| `thoughts/shared/<dir>` missing | Run `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` (re-uses humanlayer when configured; warns loudly when no thoughts repo is set up) |
+| `thoughts/shared` is a regular directory (not a symlink) | **Fatal — do not auto-fix.** Tell the user the humanlayer symlink was clobbered and show recovery: `mv thoughts/shared thoughts/shared.orphaned-$(date +%Y%m%d)` then `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` |
+| Profile drift between `.catalyst/config.json` and humanlayer mapping | Show the user: `humanlayer thoughts init --force --profile <profile from .catalyst/config.json> --directory <directory from .catalyst/config.json>` |
 
 For issues needing user input, explain what's needed and how to provide it:
 

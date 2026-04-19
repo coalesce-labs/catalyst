@@ -389,11 +389,39 @@ header "Thoughts System"
 if [[ -d "thoughts" ]]; then
     pass "thoughts/ directory exists"
 
+    # Fatal: regular directory (or dangling symlink) where humanlayer expects a symlink.
+    # This is the bug state where writes silently land in the local repo instead of
+    # syncing to the central thoughts store. Only fires when thoughts is expected
+    # to be symlinked (humanlayer is configured for this repo, or .catalyst/config.json
+    # declares catalyst.thoughts.directory).
+    thoughts_expected=0
+    if [[ -f ".catalyst/config.json" ]] && \
+       [[ -n "$(jq -r '.catalyst.thoughts.directory // empty' .catalyst/config.json 2>/dev/null)" ]]; then
+        thoughts_expected=1
+    fi
+    if command -v humanlayer &>/dev/null && \
+       humanlayer thoughts config --json 2>/dev/null | \
+         jq -e --arg cwd "$(pwd)" '.repoMappings[$cwd] // empty' &>/dev/null; then
+        thoughts_expected=1
+    fi
+
+    if [[ $thoughts_expected -eq 1 ]]; then
+        for top in shared global; do
+            if [[ -e "thoughts/$top" && ! -L "thoughts/$top" ]]; then
+                fail "thoughts/$top is a regular directory but should be a symlink — humanlayer init was bypassed"
+                info "Recovery: bash plugins/dev/scripts/catalyst-thoughts.sh check"
+            elif [[ -L "thoughts/$top" && ! -e "thoughts/$top" ]]; then
+                fail "thoughts/$top is a symlink with a missing target"
+                info "Recovery: bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair"
+            fi
+        done
+    fi
+
     for dir in research plans handoffs prs reports; do
         if [[ -d "thoughts/shared/$dir" ]]; then
             pass "thoughts/shared/$dir/"
         else
-            warn "Missing thoughts/shared/$dir/ — run: mkdir -p thoughts/shared/$dir"
+            warn "Missing thoughts/shared/$dir/ — run: bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair"
         fi
     done
 
@@ -410,9 +438,28 @@ if [[ -d "thoughts" ]]; then
             profile=$(echo "$hl_status" | grep "Profile:" | sed 's/.*Profile:[[:space:]]*//')
             pass "Thoughts profile: $profile"
         fi
+
+        # Profile / directory drift check: catches the scenario where humanlayer was
+        # init'd under a different profile than .catalyst/config.json declares.
+        if [[ -f ".catalyst/config.json" ]]; then
+            cat_profile=$(jq -r '.catalyst.thoughts.profile // empty' .catalyst/config.json 2>/dev/null)
+            cat_dir=$(jq -r '.catalyst.thoughts.directory // empty' .catalyst/config.json 2>/dev/null)
+            hl_map=$(humanlayer thoughts config --json 2>/dev/null | jq -r --arg cwd "$(pwd)" '.repoMappings[$cwd] // empty' 2>/dev/null)
+            if [[ -n "$hl_map" ]]; then
+                hl_profile=$(echo "$hl_map" | jq -r '.profile // empty' 2>/dev/null)
+                hl_repo=$(echo "$hl_map" | jq -r '.repo // empty' 2>/dev/null)
+                if [[ -n "$cat_profile" && -n "$hl_profile" && "$cat_profile" != "$hl_profile" ]]; then
+                    fail "Profile drift: .catalyst/config.json='$cat_profile', humanlayer='$hl_profile' for this repo"
+                    info "Fix: humanlayer thoughts init --force --profile $cat_profile --directory ${cat_dir:-<directory>}"
+                fi
+                if [[ -n "$cat_dir" && -n "$hl_repo" && "$cat_dir" != "$hl_repo" ]]; then
+                    fail "Directory drift: .catalyst/config.json='$cat_dir', humanlayer='$hl_repo' for this repo"
+                fi
+            fi
+        fi
     fi
 else
-    warn "thoughts/ not found — run: humanlayer thoughts init"
+    warn "thoughts/ not found — run: bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair"
 fi
 
 # ─── 10. CLAUDE.md ──────────────────────────────────────────────────────────
