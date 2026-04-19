@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.5.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.1...catalyst-dev-v7.5.2)
+
+Apr 18, 2026
+
+<!-- ai-enhanced -->
+
+### Warp Color Variant Fix
+
+The `setup-warp` skill now only offers Warp's 8 valid color variants (`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`) instead of invalid options like `purple` and `pink` that caused Warp to reject generated tab configs on load.
+
+
+
+### PRs
+
+* **dev:** restrict setup-warp colors to Warp's 8 valid variants ([#207](https://github.com/coalesce-labs/catalyst/issues/207)) ([05800f3](https://github.com/coalesce-labs/catalyst/commit/05800f3a2fe1854568355d6a77fa526c374858b4))
+
 ## [7.5.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.0...catalyst-dev-v7.5.1)
 
 Apr 18, 2026
