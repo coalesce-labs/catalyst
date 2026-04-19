@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.5.4](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.3...catalyst-dev-v7.5.4) (2026-04-19)
+
+
+### Bug Fixes
+
+* **dev:** init-or-repair auto-fixes thoughts profile drift (CTL-91) ([#211](https://github.com/coalesce-labs/catalyst/issues/211)) ([d79a14d](https://github.com/coalesce-labs/catalyst/commit/d79a14da98773e9eccf7596deb6e6cf88b7df20f))
+
 ## [7.5.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.2...catalyst-dev-v7.5.3)
 
 Apr 19, 2026
