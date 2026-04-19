@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.5.4](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.3...catalyst-dev-v7.5.4)
+
+Apr 19, 2026
+
+<!-- ai-enhanced -->
+
+### Thoughts Profile Drift Repair
+
+The `catalyst-thoughts.sh init-or-repair` command now automatically detects and fixes profile drift between your `.catalyst/config.json` and humanlayer's repo mapping. When drift is detected, it runs `humanlayer thoughts uninit --force` followed by re-init with the correct profile and directory from your config. Previously, drift would cause silent failures that required manual intervention.
+
+
+
+### PRs
+
+* **dev:** init-or-repair auto-fixes thoughts profile drift (CTL-91) ([#211](https://github.com/coalesce-labs/catalyst/issues/211)) ([d79a14d](https://github.com/coalesce-labs/catalyst/commit/d79a14da98773e9eccf7596deb6e6cf88b7df20f))
+
 ## [7.5.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.2...catalyst-dev-v7.5.3)
 
 Apr 19, 2026
