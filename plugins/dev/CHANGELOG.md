@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.6.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.6.0...catalyst-dev-v7.6.1)
+
+Apr 20, 2026
+
+<!-- ai-enhanced -->
+
+### PM Parallel Orient Delegates
+
+PM kickoff now dispatches three parallel sub-agents for orientation instead of running raw CLI fetches in the main context. This reduces a typical PM session start from ~15 tool calls with 30KB of JSON debris down to 3-4 clean tool calls, keeping the main context focused on PM reasoning rather than data collection.
+
+
+
+### PRs
+
+* **dev:** PM kickoff delegates orient to parallel sub-agents (CTL-95) ([#217](https://github.com/coalesce-labs/catalyst/issues/217)) ([5ed8496](https://github.com/coalesce-labs/catalyst/commit/5ed84964dcb2724392b402f15827dbd4c7c5b639))
+
 ## [7.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.4...catalyst-dev-v7.6.0)
 
 Apr 20, 2026

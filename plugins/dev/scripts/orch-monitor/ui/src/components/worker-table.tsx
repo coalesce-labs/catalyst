@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import { fmtSince, fmtTokens, fmtCost } from "@/lib/formatters";
-import { ticketToWaveMap, effectiveCost, totalTokens } from "@/lib/computations";
+import { ticketToWaveMap, effectiveCost, totalTokens, isAbandoned } from "@/lib/computations";
 import { useSort } from "@/hooks/use-sort";
 import { SortHeader } from "./ui/sort-header";
 import { StatusBadge } from "./ui/badge";
@@ -10,11 +10,12 @@ import { ExternalLink } from "./ui/external-link";
 import { EmptyState } from "./ui/empty-state";
 import { SearchInput } from "./ui/search-input";
 import { PrBadge } from "./ui/pr-badge";
-import type {
-  OrchestratorState,
-  WorkerState,
-  WorkerAnalytics,
-  LinearTicket,
+import {
+  isWorkerDone,
+  type OrchestratorState,
+  type WorkerState,
+  type WorkerAnalytics,
+  type LinearTicket,
 } from "@/lib/types";
 import { Users } from "lucide-react";
 
@@ -117,6 +118,35 @@ function ActivityCell({ w }: { w: WorkerState }) {
   );
 }
 
+function WorkerCell({ w }: { w: WorkerState }) {
+  if (isWorkerDone(w.status)) {
+    return <span className="text-muted">—</span>;
+  }
+  if (w.alive === true) {
+    return (
+      <span className="flex items-center gap-1.5">
+        <StatusDot alive={true} />
+        <span className="text-[12px] text-green">running</span>
+      </span>
+    );
+  }
+  if (w.pid && w.alive === false) {
+    return (
+      <span className="flex items-center gap-1.5" title="Worker died">
+        <span className="inline-block h-2 w-2 rounded-full bg-red shadow-[0_0_6px_theme(colors.red)]" />
+        <span className="text-[12px] font-medium text-red">died</span>
+      </span>
+    );
+  }
+  return <span className="text-muted">—</span>;
+}
+
+function workerCellSortRank(w: WorkerState): number {
+  if (isWorkerDone(w.status)) return 2;
+  if (w.alive === false) return 1;
+  return 0;
+}
+
 function WorkerRow({
   ticket,
   w,
@@ -142,6 +172,7 @@ function WorkerRow({
   const tokens = totalTokens(w, analytics);
   const isMerged = w.prState === "MERGED";
   const isClosed = w.prState === "CLOSED";
+  const isAbandonedRow = isAbandoned(w.status);
 
   return (
     <tr
@@ -152,6 +183,7 @@ function WorkerRow({
         isSelected && "bg-surface-3/80 ring-1 ring-inset ring-accent/20",
         isMerged && "opacity-80",
         isClosed && "opacity-70",
+        isAbandonedRow && "opacity-70",
       )}
     >
       <td className="px-3 py-2.5 font-mono text-[12px] text-muted">
@@ -188,17 +220,7 @@ function WorkerRow({
       </td>
       <td className="px-3 py-2.5 text-[12px] text-muted">{w.phase ?? 0}</td>
       <td className="px-3 py-2.5">
-        {w.pid ? (
-          <span className="flex items-center gap-1.5">
-            <StatusDot alive={w.alive} />
-            <span className={cn("text-[12px]", w.alive ? "text-green" : "text-muted")}>
-              {w.alive ? "alive" : "dead"}
-            </span>
-            <span className="font-mono text-[11px] text-muted">{w.pid}</span>
-          </span>
-        ) : (
-          <span className="text-muted">—</span>
-        )}
+        <WorkerCell w={w} />
       </td>
       <td className="px-3 py-2.5">
         {w.pr ? (
@@ -243,7 +265,7 @@ type WorkerSortKey =
   | "title"
   | "status"
   | "phase"
-  | "process"
+  | "worker"
   | "pr"
   | "cost"
   | "tokens"
@@ -260,7 +282,7 @@ const COL_HEADERS: {
   { label: "Title", sortKey: "title", align: "left" },
   { label: "Status", sortKey: "status", align: "left" },
   { label: "Phase", sortKey: "phase", align: "left" },
-  { label: "Process", sortKey: "process", align: "left" },
+  { label: "Worker", sortKey: "worker", align: "left" },
   { label: "PR", sortKey: "pr", align: "left" },
   { label: "Cost", sortKey: "cost", align: "right" },
   { label: "Tokens", sortKey: "tokens", align: "right" },
@@ -328,8 +350,8 @@ export function WorkerTable({
             return w.status ?? null;
           case "phase":
             return w.phase ?? 0;
-          case "process":
-            return w.alive ? 0 : 1;
+          case "worker":
+            return workerCellSortRank(w as WorkerState);
           case "pr":
             return w.pr?.number ?? null;
           case "cost":

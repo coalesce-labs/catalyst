@@ -8,6 +8,7 @@ import { ConnectionBanner } from "./components/ui/connection-banner";
 import { SkeletonDashboard } from "./components/ui/skeleton";
 import { ChevronRight, Home, PanelLeftClose, PanelLeft } from "lucide-react";
 import type { GroupingMode } from "./lib/grouping";
+import { SESSION_TIME_FILTERS, type SessionTimeFilter } from "./lib/types";
 
 const Dashboard = lazy(() =>
   import("./components/dashboard").then((m) => ({ default: m.Dashboard })),
@@ -17,8 +18,28 @@ const OrchestratorView = lazy(() =>
     default: m.OrchestratorView,
   })),
 );
+const Sandbox = lazy(() =>
+  import("./components/dev/sandbox").then((m) => ({ default: m.Sandbox })),
+);
+
+const isDevSandbox =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("dev") === "1";
 
 export default function App() {
+  if (isDevSandbox) {
+    return (
+      <div className="h-screen overflow-y-auto bg-surface-0 text-fg">
+        <Suspense fallback={null}>
+          <Sandbox />
+        </Suspense>
+      </div>
+    );
+  }
+  return <Monitor />;
+}
+
+function Monitor() {
   const {
     snapshot,
     connectionStatus,
@@ -36,11 +57,22 @@ export default function App() {
   const [groupingMode, setGroupingMode] = useState<GroupingMode>(
     () => (localStorage.getItem("catalyst-sidebar-grouping") as GroupingMode) || "flat",
   );
+  const [timeFilter, setTimeFilter] = useState<SessionTimeFilter>(() => {
+    const stored = localStorage.getItem("catalyst-session-filter");
+    return SESSION_TIME_FILTERS.includes(stored as SessionTimeFilter)
+      ? (stored as SessionTimeFilter)
+      : "active";
+  });
   const [version, setVersion] = useState<string | null>(null);
 
   const handleGroupingChange = useCallback((mode: GroupingMode) => {
     setGroupingMode(mode);
     localStorage.setItem("catalyst-sidebar-grouping", mode);
+  }, []);
+
+  const handleTimeFilterChange = useCallback((filter: SessionTimeFilter) => {
+    setTimeFilter(filter);
+    localStorage.setItem("catalyst-session-filter", filter);
   }, []);
 
   useEffect(() => {
@@ -97,6 +129,8 @@ export default function App() {
         onToggle={() => setSidebarOpen((o) => !o)}
         groupingMode={groupingMode}
         onGroupingModeChange={handleGroupingChange}
+        timeFilter={timeFilter}
+        onTimeFilterChange={handleTimeFilterChange}
       />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -182,6 +216,7 @@ export default function App() {
                   onSelectOrch={(id) => setSelectedOrchId(id)}
                   selectedSessionId={selectedSession}
                   onSessionSelect={handleSessionSelect}
+                  timeFilter={timeFilter}
                 />
               </div>
             )}
