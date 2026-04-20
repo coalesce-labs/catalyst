@@ -258,3 +258,34 @@ docs. Defer until someone explicitly needs it.
   broken.
 - Rollback is mechanical: revert the two workflow changes to restore the previous `auto-merge`
   job.
+
+---
+
+## ADR-010: Catalyst CLI Install via `~/.catalyst/bin/`
+
+**Decision**: Install the `catalyst-*` CLIs as symlinks in `~/.catalyst/bin/` with a single `$PATH`
+entry, rather than writing shell-rc alias blocks or relying on a plugin post-install hook.
+
+**Rationale**:
+
+- A single `export PATH="$HOME/.catalyst/bin:$PATH"` line works for `zsh`, `bash`, and `fish` —
+  alias blocks need shell-specific detection and rewriting.
+- `ls ~/.catalyst/bin/` is a discoverable inventory of every Catalyst CLI — new tools appear
+  there automatically when `setup-catalyst` re-runs.
+- Easy uninstall: `install-cli.sh --uninstall` (or `rm -rf ~/.catalyst/bin/`).
+- Symlinks strip the `.sh` suffix so users type `catalyst-session`, not `catalyst-session.sh`.
+- The Claude Code plugin system does not (yet) expose a post-install hook, so the explicit
+  `install-cli.sh` pathway avoids depending on a future plugin-system feature.
+
+**Consequences**:
+
+- `plugins/dev/scripts/install-cli.sh` is authoritative for the list of exposed CLIs — the
+  allowlist there must be updated when a new `catalyst-*` CLI is introduced.
+- When the plugin is updated, its scripts directory moves to a new version-stamped path
+  (`~/.claude/plugins/cache/catalyst/catalyst-dev/<version>/scripts/`). The existing symlinks
+  become stale. Re-running `setup-catalyst` (or `install-cli.sh`) re-points them — this is the
+  intentional repair path. The health check in `check-setup.sh` surfaces broken symlinks so
+  staleness is visible and fixable.
+- No plugin-uninstall hook exists, so users who `rm` the plugin will have broken symlinks until
+  they run `install-cli.sh --uninstall`. The reference docs page for `catalyst-comms` documents
+  the clean-removal command.

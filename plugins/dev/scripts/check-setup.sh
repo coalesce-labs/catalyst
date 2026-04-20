@@ -76,6 +76,36 @@ for spec in "${OPT_TOOLS[@]}"; do
     fi
 done
 
+# ─── 2b. Catalyst CLI Install ───────────────────────────────────────────────
+
+header "Catalyst CLI Install"
+
+CLI_BIN_DIR="${CATALYST_CLI_BIN_DIR:-$HOME/.catalyst/bin}"
+CLI_NAMES=(catalyst-comms catalyst-session catalyst-state catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude)
+
+if [[ -d "$CLI_BIN_DIR" ]]; then
+    pass "Bin dir exists: $CLI_BIN_DIR"
+
+    case ":${PATH:-}:" in
+        *":$CLI_BIN_DIR:"*) pass "$CLI_BIN_DIR is on PATH" ;;
+        *) warn "$CLI_BIN_DIR not on PATH — add: export PATH=\"\$HOME/.catalyst/bin:\$PATH\"" ;;
+    esac
+
+    for cli in "${CLI_NAMES[@]}"; do
+        link="$CLI_BIN_DIR/$cli"
+        if [[ -L "$link" && -e "$link" ]]; then
+            pass "$cli → $(readlink "$link")"
+        elif [[ -L "$link" ]]; then
+            fail "$cli symlink target missing — run install-cli.sh to repair"
+        else
+            warn "$cli not installed — run plugins/dev/scripts/install-cli.sh"
+        fi
+    done
+else
+    warn "$CLI_BIN_DIR missing — run plugins/dev/scripts/install-cli.sh"
+    info "After install, add to PATH: export PATH=\"\$HOME/.catalyst/bin:\$PATH\""
+fi
+
 # ─── 3. Catalyst Directory ──────────────────────────────────────────────────
 
 header "Catalyst Directory ($CATALYST_DIR)"
