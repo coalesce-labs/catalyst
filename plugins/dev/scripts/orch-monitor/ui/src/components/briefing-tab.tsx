@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { SectionLabel } from "./ui/panel";
 import { collectBriefings, renderBriefingHtml } from "@/lib/briefings";
+import { RollupSection } from "./rollup-section";
 import type { OrchestratorState } from "@/lib/types";
 
 interface BriefingTabProps {
@@ -9,8 +10,9 @@ interface BriefingTabProps {
 
 export function BriefingTab({ orch }: BriefingTabProps) {
   const entries = useMemo(() => collectBriefings(orch), [orch]);
+  const rollup = orch.rollupBriefing;
 
-  if (entries.length === 0) {
+  if (entries.length === 0 && !rollup) {
     return (
       <div className="px-4 py-6 text-[12px] text-muted">No briefings.</div>
     );
@@ -18,6 +20,7 @@ export function BriefingTab({ orch }: BriefingTabProps) {
 
   return (
     <div className="flex flex-col divide-y divide-border">
+      {rollup && <RollupSection rollup={rollup} />}
       {entries.map((entry) => (
         <BriefingSection
           key={entry.wave}

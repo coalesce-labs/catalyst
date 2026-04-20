@@ -108,6 +108,21 @@ export interface Wave {
   dependsOn?: number[];
 }
 
+export interface ShippedItem {
+  ticket: string;
+  pr?: number;
+  title: string;
+  oneliner?: string;
+}
+
+export interface RollupBriefing {
+  whatShipped: ShippedItem[];
+  whatToSee: string;
+  gotchas: string;
+  generatedAt: string;
+  generatedBy: "auto" | "manual" | "ai";
+}
+
 export interface OrchestratorState {
   id: string;
   path: string;
@@ -119,6 +134,7 @@ export interface OrchestratorState {
   workers: Record<string, WorkerState>;
   dashboard: string | null;
   briefings: Record<number, string>;
+  rollupBriefing?: RollupBriefing;
   attention: AttentionItem[];
 }
 

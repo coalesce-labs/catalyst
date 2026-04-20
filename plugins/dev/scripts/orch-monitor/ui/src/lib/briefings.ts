@@ -17,6 +17,10 @@ export function hasAnyBriefings(orch: OrchestratorState): boolean {
   return false;
 }
 
+export function hasRollup(orch: OrchestratorState): boolean {
+  return !!orch.rollupBriefing;
+}
+
 export function collectBriefings(orch: OrchestratorState): BriefingEntry[] {
   const briefings = orch.briefings || {};
   const entries: BriefingEntry[] = [];

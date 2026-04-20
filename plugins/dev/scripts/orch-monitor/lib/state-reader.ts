@@ -3,6 +3,7 @@ import { join, basename } from "path";
 import { checkProcessAlive } from "./liveness";
 import { parseOutputJson, analyticsPath, type WorkerAnalytics } from "./output-parser";
 import { readWorkerActivity, type WorkerActivity } from "./stream-reader";
+import { assembleRollup, type RollupBriefing } from "./rollup";
 import {
   readSessionStore,
   sessionStoreAvailable,
@@ -11,6 +12,7 @@ import {
 } from "./session-store";
 
 export type { SessionState, SessionQuery } from "./session-store";
+export type { RollupBriefing, ShippedItem } from "./rollup";
 
 export interface DefinitionOfDone {
   testsWrittenFirst?: boolean;
@@ -110,6 +112,7 @@ export interface OrchestratorState {
   workers: Record<string, WorkerState>;
   dashboard: string | null;
   briefings: Record<number, string>;
+  rollupBriefing?: RollupBriefing;
   attention: unknown[];
 }
 
@@ -475,14 +478,22 @@ export function readOrchestratorState(orchDir: string, workspace = "default"): O
     /* no briefings */
   }
 
+  const rollupFragments = readRollupFragments(orchDir);
+  const startedAtValue = asString((state as { startedAt?: unknown }).startedAt);
+  const rollupBriefing = assembleRollup(
+    { id, startedAt: startedAtValue, workers },
+    rollupFragments,
+    new Date().toISOString(),
+  );
+
   const rawAttention = (state as { attention?: unknown }).attention;
   const attention: unknown[] = Array.isArray(rawAttention) ? rawAttention : [];
 
-  return {
+  const result: OrchestratorState = {
     id: asString((state as { id?: unknown }).id, id),
     path: orchDir,
     workspace,
-    startedAt: asString((state as { startedAt?: unknown }).startedAt),
+    startedAt: startedAtValue,
     currentWave: asNumber((state as { currentWave?: unknown }).currentWave),
     totalWaves: asNumber(
       (state as { totalWaves?: unknown }).totalWaves,
@@ -494,6 +505,32 @@ export function readOrchestratorState(orchDir: string, workspace = "default"): O
     briefings,
     attention,
   };
+  if (rollupBriefing) result.rollupBriefing = rollupBriefing;
+  return result;
+}
+
+/**
+ * Read per-worker rollup fragment files from `${orchDir}/workers/`.
+ * Filenames must match `{ticket}-rollup.md`. Returns a map of ticket → body.
+ */
+function readRollupFragments(orchDir: string): Record<string, string> {
+  const workersDir = join(orchDir, "workers");
+  if (!existsSync(workersDir)) return {};
+  const out: Record<string, string> = {};
+  let entries: string[];
+  try {
+    entries = readdirSync(workersDir);
+  } catch {
+    return out;
+  }
+  for (const f of entries) {
+    const m = /^(.+)-rollup\.md$/.exec(f);
+    if (!m) continue;
+    const ticket = m[1];
+    const body = readText(join(workersDir, f));
+    if (body !== null) out[ticket] = body;
+  }
+  return out;
 }
 
 export function buildAnalyticsSnapshot(

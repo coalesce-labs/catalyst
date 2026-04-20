@@ -182,6 +182,28 @@ describe("SSE server", () => {
     expect(res.status).toBe(400);
     await res.text();
   });
+
+  it("should return null rollup at /api/rollup/:orchId when no PRs exist", async () => {
+    const res = await fetch(`${baseUrl}/api/rollup/orch-test`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { orchId: string; rollup: unknown };
+    expect(data.orchId).toBe("orch-test");
+    expect(data.rollup).toBeNull();
+  });
+
+  it("should 404 for nonexistent orchestrator at /api/rollup/:orchId", async () => {
+    const res = await fetch(`${baseUrl}/api/rollup/orch-does-not-exist`);
+    expect(res.status).toBe(404);
+    await res.text();
+  });
+
+  it("should 400 for path traversal at /api/rollup/:orchId", async () => {
+    const res = await fetch(
+      `${baseUrl}/api/rollup/${encodeURIComponent("../secret")}`,
+    );
+    expect(res.status).toBe(400);
+    await res.text();
+  });
 });
 
 describe("SSE filtering", () => {
@@ -1214,5 +1236,93 @@ describe("Preview integration", () => {
     expect(worker?.previews?.length).toBeGreaterThan(0);
     expect(worker?.previews?.[0]?.url).toBe("https://my-app.pages.dev");
     expect(worker?.previews?.[0]?.provider).toBe("cloudflare");
+  });
+});
+
+describe("/api/rollup with merged worker PR", () => {
+  let rollupServer: ReturnType<typeof createServer>;
+  let rollupUrl: string;
+  let rollupTmp: string;
+
+  beforeAll(() => {
+    rollupTmp = mkdtempSync(join(tmpdir(), "orch-rollup-test-"));
+    const wtDir = join(rollupTmp, "wt");
+    const orchDir = join(wtDir, "orch-rollup");
+    mkdirSync(join(orchDir, "workers"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({
+        id: "orch-rollup",
+        startedAt: new Date().toISOString(),
+        currentWave: 1,
+        totalWaves: 1,
+        waves: [{ wave: 1, status: "done", tickets: ["CTL-108"] }],
+      }),
+    );
+    writeFileSync(
+      join(orchDir, "workers", "CTL-108.json"),
+      JSON.stringify({
+        ticket: "CTL-108",
+        orchestrator: "orch-rollup",
+        workerName: "orch-rollup-CTL-108",
+        status: "done",
+        phase: 5,
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        pr: {
+          number: 999,
+          url: "https://github.com/a/b/pull/999",
+          title: "feat: rollup briefing",
+        },
+      }),
+    );
+    writeFileSync(
+      join(orchDir, "workers", "CTL-108-rollup.md"),
+      "Key note: gated behind existing AI briefing flag.",
+    );
+
+    rollupServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      annotationsDbPath: join(rollupTmp, "annotations.db"),
+    });
+    rollupUrl = `http://localhost:${rollupServer.port}`;
+  });
+
+  afterAll(() => {
+    void rollupServer?.stop(true);
+    if (rollupTmp) {
+      try {
+        rmSync(rollupTmp, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  it("returns whatShipped, whatToSee, gotchas", async () => {
+    const res = await fetch(`${rollupUrl}/api/rollup/orch-rollup`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      orchId: string;
+      rollup: {
+        whatShipped: Array<{ ticket: string; pr: number; title: string }>;
+        whatToSee: string;
+        gotchas: string;
+        generatedBy: string;
+      } | null;
+    };
+    expect(data.orchId).toBe("orch-rollup");
+    expect(data.rollup).not.toBeNull();
+    expect(data.rollup!.whatShipped).toHaveLength(1);
+    expect(data.rollup!.whatShipped[0].ticket).toBe("CTL-108");
+    expect(data.rollup!.whatShipped[0].pr).toBe(999);
+    expect(data.rollup!.whatToSee).toContain(
+      "https://github.com/a/b/pull/999",
+    );
+    expect(data.rollup!.gotchas).toContain("### CTL-108");
+    expect(data.rollup!.gotchas).toContain("Key note");
+    expect(data.rollup!.generatedBy).toBe("auto");
   });
 });

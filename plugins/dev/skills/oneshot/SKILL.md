@@ -595,6 +595,33 @@ cannot be satisfied).
 Linear ticket to `stateMap.done`, save post-merge tasks. The orchestrator's Phase 4 loop is now a
 safety net that can re-dispatch a fix-up worker if the primary worker gets stuck.
 
+**Step 4: Optional Rollup Fragment Contribution (CTL-108)**
+
+After a successful merge, under orchestrator mode only (`ORCH_DIR` set), the worker MAY write a
+short markdown fragment describing anything surprising, risky, or worth flagging to human
+reviewers of the whole orchestrator's output:
+
+```bash
+if [ -n "$ORCH_DIR" ] && [ -d "$ORCH_DIR/workers" ]; then
+  FRAGMENT_PATH="${ORCH_DIR}/workers/${TICKET_ID}-rollup.md"
+  # Write a short note — first line is the one-liner used in the rollup "what shipped" list.
+  cat > "$FRAGMENT_PATH" <<EOF
+One-sentence summary of what shipped and any reviewer heads-up.
+
+Additional context, migration notes, follow-up tickets, etc.
+EOF
+fi
+```
+
+- **File name**: MUST match `${TICKET_ID}-rollup.md` exactly — the orch-monitor scans for this
+  pattern to assemble the orchestrator-level rollup briefing.
+- **Content**: keep it short. The first non-blank line becomes the one-liner in the "What
+  shipped" list in the orch-monitor UI. The rest appears under a `### ${TICKET_ID}` heading in
+  the "Gotchas" section.
+- **Optional**: skip the fragment if there is nothing reviewers need to know beyond the PR
+  title — not having a fragment is the norm, not the exception.
+- **No orchestrator mode**: do nothing (standalone oneshot runs do not write fragments).
+
 The worker transitions its Linear ticket via the shared helper — idempotent and tolerant of a
 missing `linearis` CLI (CTL-69):
 
