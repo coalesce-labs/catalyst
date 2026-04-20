@@ -8,6 +8,7 @@ import { ConnectionBanner } from "./components/ui/connection-banner";
 import { SkeletonDashboard } from "./components/ui/skeleton";
 import { ChevronRight, Home, PanelLeftClose, PanelLeft } from "lucide-react";
 import type { GroupingMode } from "./lib/grouping";
+import { SESSION_TIME_FILTERS, type SessionTimeFilter } from "./lib/types";
 
 const Dashboard = lazy(() =>
   import("./components/dashboard").then((m) => ({ default: m.Dashboard })),
@@ -56,11 +57,22 @@ function Monitor() {
   const [groupingMode, setGroupingMode] = useState<GroupingMode>(
     () => (localStorage.getItem("catalyst-sidebar-grouping") as GroupingMode) || "flat",
   );
+  const [timeFilter, setTimeFilter] = useState<SessionTimeFilter>(() => {
+    const stored = localStorage.getItem("catalyst-session-filter");
+    return SESSION_TIME_FILTERS.includes(stored as SessionTimeFilter)
+      ? (stored as SessionTimeFilter)
+      : "active";
+  });
   const [version, setVersion] = useState<string | null>(null);
 
   const handleGroupingChange = useCallback((mode: GroupingMode) => {
     setGroupingMode(mode);
     localStorage.setItem("catalyst-sidebar-grouping", mode);
+  }, []);
+
+  const handleTimeFilterChange = useCallback((filter: SessionTimeFilter) => {
+    setTimeFilter(filter);
+    localStorage.setItem("catalyst-session-filter", filter);
   }, []);
 
   useEffect(() => {
@@ -117,6 +129,8 @@ function Monitor() {
         onToggle={() => setSidebarOpen((o) => !o)}
         groupingMode={groupingMode}
         onGroupingModeChange={handleGroupingChange}
+        timeFilter={timeFilter}
+        onTimeFilterChange={handleTimeFilterChange}
       />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -202,6 +216,7 @@ function Monitor() {
                   onSelectOrch={(id) => setSelectedOrchId(id)}
                   selectedSessionId={selectedSession}
                   onSessionSelect={handleSessionSelect}
+                  timeFilter={timeFilter}
                 />
               </div>
             )}

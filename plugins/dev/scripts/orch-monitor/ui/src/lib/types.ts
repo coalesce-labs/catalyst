@@ -189,6 +189,18 @@ export function sessionKind(s: SessionState): SessionKind {
 export const SESSION_TIME_FILTERS = ["active", "1h", "24h", "48h", "all"] as const;
 export type SessionTimeFilter = (typeof SESSION_TIME_FILTERS)[number];
 
+const WORKER_DONE_STATUSES: ReadonlySet<string> = new Set([
+  "done",
+  "merged",
+  "failed",
+  "stalled",
+  "signal_corrupt",
+]);
+
+export function isWorkerDone(status: string): boolean {
+  return WORKER_DONE_STATUSES.has(status);
+}
+
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting";
 export type TabId = "overview" | "workers" | "timeline" | "events";
 
