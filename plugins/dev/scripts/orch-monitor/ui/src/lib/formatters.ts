@@ -54,6 +54,8 @@ const STATUS_SEMANTIC: Record<string, StatusSemantic> = {
   dispatched: "neutral",
   pending: "neutral",
   unknown: "neutral",
+  superseded: "neutral",
+  canceled: "neutral",
   signal_corrupt: "danger",
   failed: "danger",
   error: "danger",
