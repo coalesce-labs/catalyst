@@ -1,6 +1,14 @@
 import { describe, it, expect } from "bun:test";
-import { filterSessions } from "../ui/src/lib/session-filters";
-import type { SessionState } from "../ui/src/lib/types";
+import {
+  filterSessions,
+  filterOrchestrators,
+  RECENT_WINDOW_SECONDS,
+} from "../ui/src/lib/session-filters";
+import type {
+  OrchestratorState,
+  SessionState,
+  WorkerState,
+} from "../ui/src/lib/types";
 
 function makeSession(overrides: Partial<SessionState> = {}): SessionState {
   return {
@@ -121,5 +129,227 @@ describe("filterSessions", () => {
     const { active, dead } = filterSessions([], "all");
     expect(active).toHaveLength(0);
     expect(dead).toHaveLength(0);
+  });
+});
+
+function makeWorker(overrides: Partial<WorkerState> = {}): WorkerState {
+  return {
+    ticket: "T-1",
+    status: "in_progress",
+    phase: 1,
+    wave: null,
+    pid: 1234,
+    alive: true,
+    pr: null,
+    startedAt: "2026-04-15T00:00:00Z",
+    updatedAt: "2026-04-15T00:01:00Z",
+    timeSinceUpdate: 60,
+    lastHeartbeat: null,
+    definitionOfDone: {},
+    ...overrides,
+  };
+}
+
+function makeOrch(
+  id: string,
+  workers: WorkerState[],
+  overrides: Partial<OrchestratorState> = {},
+): OrchestratorState {
+  const workersMap: Record<string, WorkerState> = {};
+  for (const w of workers) workersMap[w.ticket] = w;
+  return {
+    id,
+    path: `/runs/${id}`,
+    workspace: "default",
+    startedAt: "2026-04-15T00:00:00Z",
+    currentWave: 1,
+    totalWaves: 1,
+    waves: [],
+    workers: workersMap,
+    dashboard: null,
+    briefings: {},
+    attention: [],
+    ...overrides,
+  };
+}
+
+describe("filterOrchestrators", () => {
+  it("returns empty arrays for empty input", () => {
+    const { visible, recent } = filterOrchestrators([], "active");
+    expect(visible).toHaveLength(0);
+    expect(recent).toHaveLength(0);
+  });
+
+  it("orch with zero workers is always visible (bootstrap case)", () => {
+    const orch = makeOrch("boot", []);
+    const { visible, recent } = filterOrchestrators([orch], "active");
+    expect(visible).toHaveLength(1);
+    expect(recent).toHaveLength(0);
+  });
+
+  it("orch with one in_progress worker is visible under 'active'", () => {
+    const orch = makeOrch("o1", [makeWorker({ ticket: "T-1", status: "in_progress" })]);
+    const { visible, recent } = filterOrchestrators([orch], "active");
+    expect(visible).toHaveLength(1);
+    expect(recent).toHaveLength(0);
+  });
+
+  it("orch with all workers done+merged within 7d is in 'recent' under 'active'", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({ ticket: "T-1", status: "done", timeSinceUpdate: 1800, alive: false }),
+      makeWorker({ ticket: "T-2", status: "merged", timeSinceUpdate: 3600, alive: false }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "active");
+    expect(visible).toHaveLength(0);
+    expect(recent).toHaveLength(1);
+    expect(recent[0].id).toBe("o1");
+  });
+
+  it("orch with all workers done but older than 7d is hidden under 'active'", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({
+        ticket: "T-1",
+        status: "done",
+        timeSinceUpdate: RECENT_WINDOW_SECONDS + 100,
+        alive: false,
+      }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "active");
+    expect(visible).toHaveLength(0);
+    expect(recent).toHaveLength(0);
+  });
+
+  it("treats failed, stalled, and signal_corrupt as done", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({ ticket: "T-1", status: "failed", timeSinceUpdate: 60, alive: false }),
+      makeWorker({ ticket: "T-2", status: "stalled", timeSinceUpdate: 60, alive: false }),
+      makeWorker({ ticket: "T-3", status: "signal_corrupt", timeSinceUpdate: 60, alive: false }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "active");
+    expect(visible).toHaveLength(0);
+    expect(recent).toHaveLength(1);
+  });
+
+  it("mixed workers (one done, one in_progress) is visible under 'active'", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({ ticket: "T-1", status: "done", alive: false, timeSinceUpdate: 100 }),
+      makeWorker({ ticket: "T-2", status: "in_progress", alive: true, timeSinceUpdate: 30 }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "active");
+    expect(visible).toHaveLength(1);
+    expect(recent).toHaveLength(0);
+  });
+
+  it("done orch updated within 1h is visible under '1h' filter", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({ ticket: "T-1", status: "done", alive: false, timeSinceUpdate: 1800 }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "1h");
+    expect(visible).toHaveLength(1);
+    expect(recent).toHaveLength(0);
+  });
+
+  it("done orch within 24h but not 1h is in 'recent' under '1h' filter", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({ ticket: "T-1", status: "done", alive: false, timeSinceUpdate: 7200 }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "1h");
+    expect(visible).toHaveLength(0);
+    expect(recent).toHaveLength(1);
+  });
+
+  it("done orch older than 48h but within 7d is in 'recent' under '48h' filter", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({
+        ticket: "T-1",
+        status: "done",
+        alive: false,
+        timeSinceUpdate: 3 * 86400, // 3 days
+      }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "48h");
+    expect(visible).toHaveLength(0);
+    expect(recent).toHaveLength(1);
+  });
+
+  it("done orch older than 7d is hidden under '48h' filter", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({
+        ticket: "T-1",
+        status: "done",
+        alive: false,
+        timeSinceUpdate: RECENT_WINDOW_SECONDS + 100,
+      }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "48h");
+    expect(visible).toHaveLength(0);
+    expect(recent).toHaveLength(0);
+  });
+
+  it("'all' filter returns every orch in visible, recent empty", () => {
+    const active = makeOrch("active", [makeWorker({ ticket: "T-1", status: "in_progress" })]);
+    const recentDone = makeOrch("recent", [
+      makeWorker({ ticket: "T-2", status: "done", alive: false, timeSinceUpdate: 1800 }),
+    ]);
+    const oldDone = makeOrch("old", [
+      makeWorker({
+        ticket: "T-3",
+        status: "merged",
+        alive: false,
+        timeSinceUpdate: 30 * 86400,
+      }),
+    ]);
+    const { visible, recent } = filterOrchestrators([active, recentDone, oldDone], "all");
+    expect(visible).toHaveLength(3);
+    expect(recent).toHaveLength(0);
+  });
+
+  it("worker updated exactly at 7d boundary is NOT in recent (strict <)", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({
+        ticket: "T-1",
+        status: "done",
+        alive: false,
+        timeSinceUpdate: RECENT_WINDOW_SECONDS,
+      }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "active");
+    expect(visible).toHaveLength(0);
+    expect(recent).toHaveLength(0);
+  });
+
+  it("worker updated exactly at 1h cutoff is NOT in visible (strict <)", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({
+        ticket: "T-1",
+        status: "done",
+        alive: false,
+        timeSinceUpdate: 3600,
+      }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "1h");
+    expect(visible).toHaveLength(0);
+    // Still within 7d so should fall through to recent
+    expect(recent).toHaveLength(1);
+  });
+
+  it("when multiple workers present, uses the most recent update for bucketing", () => {
+    const orch = makeOrch("o1", [
+      makeWorker({
+        ticket: "T-1",
+        status: "done",
+        alive: false,
+        timeSinceUpdate: RECENT_WINDOW_SECONDS + 100, // very old
+      }),
+      makeWorker({
+        ticket: "T-2",
+        status: "done",
+        alive: false,
+        timeSinceUpdate: 3600, // recent
+      }),
+    ]);
+    const { visible, recent } = filterOrchestrators([orch], "active");
+    expect(visible).toHaveLength(0);
+    expect(recent).toHaveLength(1);
   });
 });

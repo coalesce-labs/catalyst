@@ -2,14 +2,20 @@ import { useState } from "react";
 import { cn } from "@/lib/utils";
 import type { OrchestratorState, ConnectionStatus, SessionState } from "@/lib/types";
 import { sessionKind, SESSION_TIME_FILTERS, type SessionTimeFilter } from "@/lib/types";
-import { filterSessions } from "@/lib/session-filters";
+import { filterOrchestrators, filterSessions } from "@/lib/session-filters";
 import { computeOrchestratorStats } from "@/lib/computations";
 import { fmtSince } from "@/lib/formatters";
 import { groupSidebarItems, type GroupingMode } from "@/lib/grouping";
 import { NavItem } from "../ui/nav-item";
 import { SidebarGroup } from "../ui/sidebar-group";
 import { HealthIcon, StatusDot, ConnectionDot } from "../ui/status-dot";
-import { LayoutDashboard, ChevronRight, Terminal, Workflow } from "lucide-react";
+import {
+  LayoutDashboard,
+  ChevronRight,
+  ChevronDown,
+  Terminal,
+  Workflow,
+} from "lucide-react";
 
 const GROUPING_MODES = ["flat", "repo", "ticket"] as const;
 
@@ -26,6 +32,8 @@ interface SidebarProps {
   onToggle?: () => void;
   groupingMode: GroupingMode;
   onGroupingModeChange: (mode: GroupingMode) => void;
+  timeFilter: SessionTimeFilter;
+  onTimeFilterChange: (filter: SessionTimeFilter) => void;
 }
 
 export function Sidebar({
@@ -40,22 +48,16 @@ export function Sidebar({
   collapsed = false,
   groupingMode,
   onGroupingModeChange,
+  timeFilter,
+  onTimeFilterChange,
 }: SidebarProps) {
-  const [timeFilter, setTimeFilter] = useState<SessionTimeFilter>(() => {
-    const stored = localStorage.getItem("catalyst-session-filter");
-    return SESSION_TIME_FILTERS.includes(stored as SessionTimeFilter)
-      ? (stored as SessionTimeFilter)
-      : "active";
-  });
-
-  const handleTimeFilterChange = (filter: SessionTimeFilter) => {
-    setTimeFilter(filter);
-    localStorage.setItem("catalyst-session-filter", filter);
-  };
-
   const { active: activeSessions, dead: recentDead } = filterSessions(sessions, timeFilter);
+  const { visible: visibleOrchs, recent: recentOrchs } = filterOrchestrators(
+    orchestrators,
+    timeFilter,
+  );
 
-  const groups = groupSidebarItems(orchestrators, activeSessions, recentDead, groupingMode);
+  const groups = groupSidebarItems(visibleOrchs, activeSessions, recentDead, groupingMode);
   const isFlat = groupingMode === "flat";
 
   return (
@@ -111,11 +113,11 @@ export function Sidebar({
           )}
         </NavItem>
 
-        <SessionTimeFilterBar filter={timeFilter} onChange={handleTimeFilterChange} className="mt-3 mb-1 px-2" />
+        <SessionTimeFilterBar filter={timeFilter} onChange={onTimeFilterChange} className="mt-3 mb-1 px-2" />
 
         {isFlat ? (
           <FlatSections
-            orchestrators={orchestrators}
+            orchestrators={visibleOrchs}
             activeSessions={activeSessions}
             recentDead={recentDead}
             selectedOrchId={selectedOrchId}
@@ -148,6 +150,14 @@ export function Sidebar({
             );
           })}
           </>
+        )}
+
+        {recentOrchs.length > 0 && (
+          <RecentOrchestratorsGroup
+            orchestrators={recentOrchs}
+            selectedOrchId={selectedOrchId}
+            onSelect={onSelect}
+          />
         )}
       </nav>
 
@@ -211,6 +221,48 @@ function FlatSections({
         </div>
       )}
     </>
+  );
+}
+
+function RecentOrchestratorsGroup({
+  orchestrators,
+  selectedOrchId,
+  onSelect,
+}: {
+  orchestrators: OrchestratorState[];
+  selectedOrchId: string | null;
+  onSelect: (orchId: string | null) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="mt-4">
+      <button
+        onClick={() => setExpanded((e) => !e)}
+        className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-[10px] font-semibold uppercase tracking-wider text-muted transition-colors hover:text-fg"
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Collapse" : "Expand"} Recent orchestrators (${orchestrators.length})`}
+      >
+        {expanded ? (
+          <ChevronDown className="h-3 w-3 flex-shrink-0" />
+        ) : (
+          <ChevronRight className="h-3 w-3 flex-shrink-0" />
+        )}
+        <span>Recent</span>
+        <span className="rounded-full bg-surface-3 px-1.5 py-px text-[9px] tabular-nums">
+          {orchestrators.length}
+        </span>
+      </button>
+      {expanded && (
+        <div className="opacity-70">
+          <OrchestratorList
+            orchestrators={orchestrators}
+            selectedOrchId={selectedOrchId}
+            onSelect={onSelect}
+          />
+        </div>
+      )}
+    </div>
   );
 }
 
