@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { computeOrchestratorStats } from "@/lib/computations";
+import { hasAnyBriefings } from "@/lib/briefings";
 import { ProgressBar } from "./ui/progress-bar";
 import { Panel, SectionLabel } from "./ui/panel";
 import type {
@@ -19,7 +20,14 @@ import { WorkerTable } from "./worker-table";
 import { WorkerDetailDrawer } from "./worker-detail-drawer";
 import { GanttChart } from "./gantt-chart";
 import { EventLog } from "./event-log";
-import { LayoutGrid, Users, BarChart3, Activity } from "lucide-react";
+import { BriefingTab } from "./briefing-tab";
+import {
+  LayoutGrid,
+  Users,
+  BarChart3,
+  Activity,
+  BookOpen,
+} from "lucide-react";
 
 interface OrchestratorViewProps {
   orch: OrchestratorState;
@@ -51,6 +59,11 @@ const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
     label: "Events",
     icon: <Activity className="h-3.5 w-3.5" />,
   },
+  {
+    id: "briefing",
+    label: "Briefing",
+    icon: <BookOpen className="h-3.5 w-3.5" />,
+  },
 ];
 
 export function OrchestratorView({
@@ -69,6 +82,18 @@ export function OrchestratorView({
     selectedWorker ? (orch.workers[selectedWorker] ?? null) : null;
 
   const s = computeOrchestratorStats(orch, getAnalytics(orch.id));
+  const showBriefing = hasAnyBriefings(orch);
+  const visibleTabs = TABS.filter(
+    (t) => t.id !== "briefing" || showBriefing,
+  );
+
+  // Guard: if the briefing tab was active and briefings disappear (e.g. an
+  // orchestrator's data rolls over), snap back to overview.
+  useEffect(() => {
+    if (activeTab === "briefing" && !showBriefing) {
+      setActiveTab("overview");
+    }
+  }, [activeTab, showBriefing]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -95,7 +120,7 @@ export function OrchestratorView({
       {/* Tabs */}
       <div className="border-b border-border">
         <div className="flex gap-0">
-          {TABS.map((tab) => (
+          {visibleTabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
@@ -172,6 +197,12 @@ export function OrchestratorView({
         {activeTab === "events" && (
           <div key="events" className="animate-fade-in-fast">
             <EventLog events={events} filterOrchId={orch.id} />
+          </div>
+        )}
+
+        {activeTab === "briefing" && showBriefing && (
+          <div key="briefing" className="animate-fade-in-fast">
+            <BriefingTab orch={orch} />
           </div>
         )}
       </Panel>
