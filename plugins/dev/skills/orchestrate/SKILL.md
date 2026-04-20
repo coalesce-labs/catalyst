@@ -1206,14 +1206,32 @@ When all waves are complete:
       "${HANDOFF_DIR}/${TIMESTAMP}_${ORCH_NAME}-summary.md"
    ```
 
-2. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck, update them
+2. **Archive orchestrator artifacts** (CTL-110).
+
+   Before any worktree cleanup, sweep artifacts from the runs dir and worktrees into
+   `~/catalyst/archives/${ORCH_NAME}/` and index them in `~/catalyst/catalyst.db`. The sweep
+   is **filesystem-first**: blobs are written to the archive root BEFORE the SQLite rows are
+   inserted. If SQLite write fails, the filesystem artifacts remain on disk (syncable later
+   via `catalyst-archive sync`).
+
+   ```bash
+   bun "${CLAUDE_PLUGIN_ROOT}/scripts/orch-monitor/catalyst-archive.ts" sweep "${ORCH_NAME}"
+   ```
+
+   The sweep is idempotent (`ON CONFLICT` upserts). Re-running is safe. If it fails, capture
+   the exit code and `stderr` but proceed with the remaining cleanup steps — artifacts can be
+   re-swept later before teardown.
+
+3. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck, update them
    using the Linearis CLI (run `linearis issues usage` for update syntax).
 
-3. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it).
+4. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it).
+   Use `/catalyst-dev:teardown ${ORCH_NAME}` for a safe, archive-gated deletion. Teardown
+   refuses to run unless step 2's sweep succeeded (use `--force` to override).
 
-4. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.
+5. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.
 
-5. **Complete and archive global state**:
+6. **Complete and archive global state**:
 
 ```bash
 # CTL-111: post orchestrator done to shared comms channel. Workers have already
@@ -1239,7 +1257,7 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-6. **Report to user**:
+7. **Report to user**:
 
    ```
    Orchestration Complete — "api-redesign"

@@ -218,6 +218,34 @@
         </div>
       </div>
 
+      <div class="section">
+        <div class="section-title">Archived Orchestrators</div>
+        <div class="filters">
+          <input type="text" id="arch-filter-ticket" placeholder="Ticket" />
+          <input type="date" id="arch-filter-since" />
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Orchestrator</th>
+              <th>Started</th>
+              <th>Status</th>
+              <th>Workers</th>
+              <th>PRs merged</th>
+              <th>Tickets</th>
+              <th>Archived</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="arch-tbody"></tbody>
+        </table>
+        <div class="pagination">
+          <button id="arch-prev-btn" disabled>Prev</button>
+          <span class="page-info" id="arch-page-info">Page 1</span>
+          <button id="arch-next-btn" disabled>Next</button>
+        </div>
+      </div>
+
       <div class="section" id="compare-section">
         <div class="section-title">Session Comparison</div>
         <div class="compare-grid" id="compare-grid"></div>
@@ -447,8 +475,156 @@
       document.getElementById('filter-ticket').addEventListener('input', onFilterChange);
       document.getElementById('filter-since').addEventListener('change', onFilterChange);
 
+      // ----- Archived orchestrators -----
+      var archCurrentPage = 0;
+      var archTotal = 0;
+      var archExpanded = {};
+
+      async function loadArchives() {
+        try {
+          var params = new URLSearchParams();
+          var ticket = document.getElementById('arch-filter-ticket').value;
+          var since = document.getElementById('arch-filter-since').value;
+          if (ticket) params.set('ticket', ticket);
+          if (since) params.set('since', since + 'T00:00:00Z');
+          params.set('limit', String(PAGE_SIZE));
+          params.set('offset', String(archCurrentPage * PAGE_SIZE));
+          var res = await fetch('/api/archive/orchestrators?' + params.toString());
+          if (!res.ok) throw new Error('Archive API returned ' + res.status);
+          var data = await res.json();
+          archTotal = data.total;
+          renderArchTable(data.entries);
+          renderArchPagination();
+        } catch (err) {
+          console.error('Failed to load archives:', err);
+          document.getElementById('arch-tbody').innerHTML =
+            '<tr><td colspan="8" class="empty-state">Failed to load archive</td></tr>';
+        }
+      }
+
+      function renderArchTable(entries) {
+        var tbody = document.getElementById('arch-tbody');
+        if (!entries || entries.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No archived orchestrators</td></tr>';
+          return;
+        }
+        var html = '';
+        entries.forEach(function(e) {
+          var tickets = (e.ticketsTouched || []).join(', ');
+          html += '<tr data-orch-id="' + esc(e.orchId) + '">' +
+            '<td><code style="font-size:11px;color:var(--muted)">' + esc(e.orchId) + '</code></td>' +
+            '<td>' + fmtDate(e.startedAt) + '</td>' +
+            '<td>' + statusBadge(e.status || 'unknown') + '</td>' +
+            '<td>' + (e.workersCount || 0) + '</td>' +
+            '<td>' + (e.prsMergedCount || 0) + '</td>' +
+            '<td>' + esc(tickets) + '</td>' +
+            '<td>' + fmtDate(e.archivedAt) + '</td>' +
+            '<td><button class="arch-view-btn" data-orch-id="' + esc(e.orchId) + '">View</button></td>' +
+            '</tr>' +
+            '<tr id="arch-detail-' + esc(e.orchId) + '" style="display:none;"><td colspan="8" style="padding:0;"><div class="arch-detail-panel" style="padding:12px 14px;background:var(--panel-2);"></div></td></tr>';
+        });
+        tbody.innerHTML = html;
+        var buttons = tbody.querySelectorAll('.arch-view-btn');
+        buttons.forEach(function(btn) {
+          btn.addEventListener('click', function() { toggleArchDetail(btn.getAttribute('data-orch-id')); });
+        });
+      }
+
+      async function toggleArchDetail(orchId) {
+        var row = document.getElementById('arch-detail-' + orchId);
+        if (!row) return;
+        if (row.style.display === 'table-row') {
+          row.style.display = 'none';
+          return;
+        }
+        row.style.display = 'table-row';
+        var panel = row.querySelector('.arch-detail-panel');
+        if (archExpanded[orchId]) return; // already loaded
+        panel.innerHTML = '<div class="empty-state" style="padding:12px;">Loading…</div>';
+        try {
+          var res = await fetch('/api/archive/orchestrators/' + encodeURIComponent(orchId));
+          if (!res.ok) throw new Error('Detail API returned ' + res.status);
+          var data = await res.json();
+          panel.innerHTML = renderArchDetail(data);
+          archExpanded[orchId] = true;
+        } catch (err) {
+          console.error('Failed to load archive detail:', err);
+          panel.innerHTML = '<div class="empty-state" style="padding:12px;">Failed to load detail</div>';
+        }
+      }
+
+      function renderArchDetail(data) {
+        var orchId = data.orch.orchId;
+        var workers = data.workers || [];
+        var artifacts = data.artifacts || [];
+        var html = '';
+
+        html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">';
+        html += '<div><div class="section-title">Workers (' + workers.length + ')</div>';
+        if (workers.length === 0) {
+          html += '<div class="empty-state" style="padding:8px;">No workers</div>';
+        } else {
+          html += '<table style="font-size:12px;"><thead><tr><th>Worker</th><th>Ticket</th><th>PR</th><th>Final</th><th>Cost</th></tr></thead><tbody>';
+          workers.forEach(function(w) {
+            var prCell = w.prNumber ? ('#' + w.prNumber + (w.prState ? ' ' + esc(w.prState) : '')) : '-';
+            html += '<tr>' +
+              '<td><code style="font-size:10px;color:var(--muted)">' + esc(w.workerId) + '</code></td>' +
+              '<td>' + esc(w.ticket || '-') + '</td>' +
+              '<td>' + prCell + '</td>' +
+              '<td>' + esc(w.finalStatus || '-') + '</td>' +
+              '<td>' + fmt$(w.costUsd) + '</td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+        html += '</div>';
+
+        html += '<div><div class="section-title">Artifacts (' + artifacts.length + ')</div>';
+        if (artifacts.length === 0) {
+          html += '<div class="empty-state" style="padding:8px;">No artifacts</div>';
+        } else {
+          html += '<table style="font-size:12px;"><thead><tr><th>Kind</th><th>Path</th><th>Bytes</th><th></th></tr></thead><tbody>';
+          artifacts.forEach(function(a) {
+            var url = '/api/archive/orchestrators/' + encodeURIComponent(orchId) + '/files/' + a.path.split('/').map(encodeURIComponent).join('/');
+            html += '<tr>' +
+              '<td>' + esc(a.kind) + '</td>' +
+              '<td><code style="font-size:10px;">' + esc(a.path) + '</code></td>' +
+              '<td>' + (a.bytes || 0) + '</td>' +
+              '<td><a href="' + url + '" target="_blank">open</a></td>' +
+              '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+        html += '</div>';
+        html += '</div>';
+        return html;
+      }
+
+      function renderArchPagination() {
+        var totalPages = Math.max(1, Math.ceil(archTotal / PAGE_SIZE));
+        document.getElementById('arch-page-info').textContent = 'Page ' + (archCurrentPage + 1) + ' of ' + totalPages + ' (' + archTotal + ' total)';
+        document.getElementById('arch-prev-btn').disabled = archCurrentPage === 0;
+        document.getElementById('arch-next-btn').disabled = archCurrentPage >= totalPages - 1;
+      }
+
+      document.getElementById('arch-prev-btn').onclick = function() { if (archCurrentPage > 0) { archCurrentPage--; loadArchives(); } };
+      document.getElementById('arch-next-btn').onclick = function() { archCurrentPage++; loadArchives(); };
+
+      var archDebounce;
+      function onArchFilterChange() {
+        clearTimeout(archDebounce);
+        archDebounce = setTimeout(function() {
+          archCurrentPage = 0;
+          archExpanded = {};
+          loadArchives();
+        }, 300);
+      }
+      document.getElementById('arch-filter-ticket').addEventListener('input', onArchFilterChange);
+      document.getElementById('arch-filter-since').addEventListener('change', onArchFilterChange);
+
       loadStats();
       loadHistory();
+      loadArchives();
     </script>
   </body>
 </html>
