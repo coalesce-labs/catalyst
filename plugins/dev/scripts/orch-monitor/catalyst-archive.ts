@@ -14,10 +14,9 @@ import {
   mkdirSync,
   renameSync,
   writeFileSync,
-  unlinkSync,
   rmSync,
 } from "node:fs";
-import { join, resolve, basename, relative, dirname } from "node:path";
+import { join, resolve, basename, dirname } from "node:path";
 import { createHash } from "node:crypto";
 
 // ---------------------------------------------------------------------------
@@ -186,11 +185,6 @@ function atomicWrite(destPath: string, content: Buffer | string): void {
   const tmp = `${destPath}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, content);
   renameSync(tmp, destPath);
-}
-
-function atomicCopy(sourcePath: string, destPath: string): void {
-  const content = readFileSync(sourcePath);
-  atomicWrite(destPath, content);
 }
 
 function sha256Hex(buf: Buffer | string): string {
@@ -1128,13 +1122,3 @@ if (import.meta.main) {
   }
 }
 
-// Exports for tests (prevent unused-lint on lower-level helpers)
-export const __test = {
-  sha256Hex,
-  atomicWrite,
-  atomicCopy,
-  fileContainsOrchId,
-  expandHome,
-  unlinkSync, // re-export so tests can simulate deletions
-  relative,
-};
