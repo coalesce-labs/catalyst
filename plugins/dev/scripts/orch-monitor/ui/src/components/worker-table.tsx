@@ -18,7 +18,7 @@ import {
   type LinearTicket,
   type OtelHealth,
 } from "@/lib/types";
-import { Users } from "lucide-react";
+import { Users, MessageSquare } from "lucide-react";
 
 interface WorkerTableProps {
   orch: OrchestratorState;
@@ -29,6 +29,8 @@ interface WorkerTableProps {
   onWorkerSelect?: (ticket: string) => void;
   selectedTicket?: string | null;
   otelHealth?: OtelHealth | null;
+  commsAuthors?: Set<string>;
+  onCommsLink?: (ticket: string) => void;
 }
 
 function missingSignalReason(otelHealth: OtelHealth | null | undefined): string | null {
@@ -170,6 +172,8 @@ function WorkerRow({
   onClick,
   isSelected,
   noSignalReason,
+  hasComms,
+  onCommsLink,
 }: {
   ticket: string;
   w: WorkerState;
@@ -180,6 +184,8 @@ function WorkerRow({
   onClick?: () => void;
   isSelected?: boolean;
   noSignalReason: string | null;
+  hasComms?: boolean;
+  onCommsLink?: (ticket: string) => void;
 }) {
   const ticketUrl =
     linear?.url || `https://linear.app/issue/${encodeURIComponent(ticket)}`;
@@ -252,6 +258,23 @@ function WorkerRow({
           <span className="text-muted">—</span>
         )}
       </td>
+      <td className="px-3 py-2.5">
+        {hasComms ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onCommsLink?.(ticket);
+            }}
+            title={`View comms messages from ${ticket}`}
+            className="flex items-center rounded p-1 text-muted hover:bg-surface-2 hover:text-accent"
+            aria-label={`View comms for ${ticket}`}
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+          </button>
+        ) : (
+          <span className="text-muted">—</span>
+        )}
+      </td>
       <td className="px-3 py-2.5 text-right font-mono text-[12px] tabular-nums">
         {cost > 0 ? (
           <span className="text-fg">{fmtCost(cost)}</span>
@@ -296,6 +319,7 @@ type WorkerSortKey =
   | "phase"
   | "worker"
   | "pr"
+  | "comms"
   | "cost"
   | "tokens"
   | "activity"
@@ -313,6 +337,7 @@ const COL_HEADERS: {
   { label: "Phase", sortKey: "phase", align: "left" },
   { label: "Worker", sortKey: "worker", align: "left" },
   { label: "PR", sortKey: "pr", align: "left" },
+  { label: "Comms", sortKey: "comms", align: "left" },
   { label: "Cost", sortKey: "cost", align: "right" },
   { label: "Tokens", sortKey: "tokens", align: "right" },
   { label: "Activity", sortKey: "activity", align: "left" },
@@ -342,6 +367,8 @@ export function WorkerTable({
   onWorkerSelect,
   selectedTicket,
   otelHealth,
+  commsAuthors,
+  onCommsLink,
 }: WorkerTableProps) {
   const noSignalReason = missingSignalReason(otelHealth);
   const [search, setSearch] = useState("");
@@ -385,6 +412,8 @@ export function WorkerTable({
             return workerCellSortRank(w as WorkerState);
           case "pr":
             return w.pr?.number ?? null;
+          case "comms":
+            return commsAuthors?.has(t) ? 1 : 0;
           case "cost":
             return effectiveCost(w as WorkerState, analyticsMap[t] || null);
           case "tokens":
@@ -475,6 +504,8 @@ export function WorkerTable({
                   onClick={onWorkerSelect ? () => onWorkerSelect(t) : undefined}
                   isSelected={selectedTicket === t}
                   noSignalReason={noSignalReason}
+                  hasComms={commsAuthors?.has(t)}
+                  onCommsLink={onCommsLink}
                 />
               ))}
             </tbody>

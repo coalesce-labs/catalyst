@@ -15,6 +15,7 @@ import {
   ChevronDown,
   Terminal,
   Workflow,
+  MessageSquare,
 } from "lucide-react";
 
 const GROUPING_MODES = ["flat", "repo", "ticket"] as const;
@@ -34,6 +35,8 @@ interface SidebarProps {
   onGroupingModeChange: (mode: GroupingMode) => void;
   timeFilter: SessionTimeFilter;
   onTimeFilterChange: (filter: SessionTimeFilter) => void;
+  topView: "dashboard" | "comms";
+  onCommsSelect: () => void;
 }
 
 export function Sidebar({
@@ -50,6 +53,8 @@ export function Sidebar({
   onGroupingModeChange,
   timeFilter,
   onTimeFilterChange,
+  topView,
+  onCommsSelect,
 }: SidebarProps) {
   const { active: activeSessions, dead: recentDead } = filterSessions(sessions, timeFilter);
   const { visible: visibleOrchs, recent: recentOrchs } = filterOrchestrators(
@@ -103,7 +108,10 @@ export function Sidebar({
           </div>
         </div>
 
-        <NavItem active={selectedOrchId === null} onClick={() => onSelect(null)}>
+        <NavItem
+          active={topView === "dashboard" && selectedOrchId === null}
+          onClick={() => onSelect(null)}
+        >
           <LayoutDashboard className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1 font-medium">Dashboard</span>
           {attentionCount > 0 && (
@@ -111,6 +119,11 @@ export function Sidebar({
               {attentionCount}
             </span>
           )}
+        </NavItem>
+
+        <NavItem active={topView === "comms"} onClick={onCommsSelect}>
+          <MessageSquare className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1 font-medium">Comms</span>
         </NavItem>
 
         <SessionTimeFilterBar filter={timeFilter} onChange={onTimeFilterChange} className="mt-3 mb-1 px-2" />

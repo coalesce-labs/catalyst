@@ -82,6 +82,11 @@ import {
   deleteAnnotation,
 } from "./lib/annotations";
 import { startTerminalRenderer, type RenderOptions } from "./lib/terminal";
+import {
+  createCommsReader,
+  isValidChannelName,
+  type CommsReader,
+} from "./lib/comms-reader";
 
 type BunServer = ReturnType<typeof Bun.serve>;
 
@@ -110,6 +115,7 @@ export interface CreateServerOptions {
   annotationsDbPath?: string;
   terminal?: boolean;
   renderOptions?: RenderOptions;
+  commsReader?: CommsReader | null;
 }
 
 const DEFAULT_PORT = 7400;
@@ -328,6 +334,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewFetcher: previewFetcherOpt,
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
+    commsReader: commsReaderOpt,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -381,6 +388,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
       ? null
       : (previewFetcherOpt ?? createPreviewFetcher());
   let lastPreviewRefresh = 0;
+
+  const comms: CommsReader | null =
+    commsReaderOpt === null ? null : (commsReaderOpt ?? createCommsReader());
 
   function snapshotWithPrStatus(): MonitorSnapshot {
     const snap = buildSnapshot(wtDir, buildOpts);
@@ -675,6 +685,116 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const tasks = readWorkerTasks(sessionId);
           return Response.json({ tasks });
+        }
+
+        if (url.pathname === "/api/comms/channels") {
+          if (!comms) return Response.json({ channels: [] });
+          return Response.json({ channels: await comms.listChannels() });
+        }
+
+        const commsStreamMatch = url.pathname.match(
+          /^\/api\/comms\/channels\/([^/]+)\/stream$/,
+        );
+        if (commsStreamMatch) {
+          let channelName: string;
+          try {
+            channelName = decodeURIComponent(commsStreamMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!isValidChannelName(channelName)) {
+            return new Response("Invalid channel name", { status: 400 });
+          }
+          if (!comms) return new Response("Comms not available", { status: 503 });
+
+          const commsReader = comms;
+          let offset = 0;
+          let timer: ReturnType<typeof setInterval> | null = null;
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              const initial = await commsReader.getChannel(channelName, { limit: 200 });
+              if (!initial) {
+                controller.close();
+                return;
+              }
+              offset = initial.tailOffset;
+              const snapshotFrame = `event: snapshot\ndata: ${JSON.stringify(initial)}\n\n`;
+              try {
+                controller.enqueue(encoder.encode(snapshotFrame));
+              } catch {
+                return;
+              }
+              timer = setInterval(() => {
+                void (async () => {
+                  try {
+                    const tail = await commsReader.tailChannel(channelName, offset);
+                    offset = tail.newOffset;
+                    for (const m of tail.messages) {
+                      const frame = `event: message\ndata: ${JSON.stringify(m)}\n\n`;
+                      controller.enqueue(encoder.encode(frame));
+                    }
+                  } catch {
+                    // Keep the stream alive on transient read errors.
+                  }
+                })();
+              }, 500);
+            },
+            cancel() {
+              if (timer) clearInterval(timer);
+              timer = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        const commsChannelMatch = url.pathname.match(
+          /^\/api\/comms\/channels\/([^/]+)$/,
+        );
+        if (commsChannelMatch) {
+          let channelName: string;
+          try {
+            channelName = decodeURIComponent(commsChannelMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!isValidChannelName(channelName)) {
+            return new Response("Invalid channel name", { status: 400 });
+          }
+          if (!comms) return new Response("Not Found", { status: 404 });
+          const limitRaw = url.searchParams.get("limit");
+          const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
+          const limit = Number.isFinite(parsedLimit)
+            ? Math.max(1, Math.min(parsedLimit, 1000))
+            : 200;
+          const detail = await comms.getChannel(channelName, { limit });
+          if (!detail) return new Response("Not Found", { status: 404 });
+          return Response.json(detail);
+        }
+
+        const commsParticipantMatch = url.pathname.match(
+          /^\/api\/comms\/participants\/([^/]+)$/,
+        );
+        if (commsParticipantMatch) {
+          let agentName: string;
+          try {
+            agentName = decodeURIComponent(commsParticipantMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (agentName.includes("/") || agentName.includes("\0")) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!comms) return new Response("Not Found", { status: 404 });
+          const detail = await comms.getParticipant(agentName);
+          if (!detail) return new Response("Not Found", { status: 404 });
+          return Response.json(detail);
         }
 
         if (url.pathname === "/api/linear") {

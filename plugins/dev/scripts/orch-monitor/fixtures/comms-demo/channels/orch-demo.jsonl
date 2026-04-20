@@ -1,0 +1,9 @@
+{"id":"msg-1","from":"orchestrator","to":"all","ch":"orch-demo","parent":null,"orch":"demo","ts":"2026-04-20T00:01:00Z","type":"info","re":null,"body":"Wave 2 kickoff. Dispatching CTL-111 and CTL-112."}
+{"id":"msg-2","from":"CTL-111","to":"all","ch":"orch-demo","parent":null,"orch":"demo","ts":"2026-04-20T00:03:00Z","type":"proposal","re":null,"body":"Proposing Bun.serve for the comms API since server.ts already uses it."}
+{"id":"msg-3","from":"CTL-112","to":"CTL-111","ch":"orch-demo","parent":null,"orch":"demo","ts":"2026-04-20T00:04:00Z","type":"question","re":"msg-2","body":"How are we handling SSE backpressure across reconnect?"}
+{"id":"msg-4","from":"CTL-111","to":"CTL-112","ch":"orch-demo","parent":null,"orch":"demo","ts":"2026-04-20T00:05:00Z","type":"answer","re":"msg-3","body":"byte-offset based tail with exponential reconnect (500ms -> 15s)."}
+{"id":"msg-5","from":"CTL-112","to":"all","ch":"orch-demo","parent":null,"orch":"demo","ts":"2026-04-20T00:06:00Z","type":"ack","re":"msg-4","body":"Thanks, going with that."}
+{"id":"msg-6","from":"CTL-111","to":"all","ch":"orch-demo","parent":null,"orch":"demo","ts":"2026-04-20T00:08:00Z","type":"done","re":null,"body":"Backend API + tests green, handoff to UI."}
+{"id":"msg-7","from":"CTL-112","to":"all","ch":"orch-demo","parent":null,"orch":"demo","ts":"2026-04-20T00:10:00Z","type":"attention","re":null,"body":"Blocked on Sheet prop typing, need review."}
+{"id":"msg-8","from":"orchestrator","to":"CTL-112","ch":"orch-demo","parent":null,"orch":"demo","ts":"2026-04-20T00:11:00Z","type":"info","re":"msg-7","body":"Acknowledged — investigating."}
+{"id":"msg-9","from":"CTL-112","to":"all","ch":"orch-demo","parent":null,"orch":"demo","ts":"2026-04-20T00:12:00Z","type":"info","re":null,"body":"Resolved — radix-ui Dialog props threaded through."}
