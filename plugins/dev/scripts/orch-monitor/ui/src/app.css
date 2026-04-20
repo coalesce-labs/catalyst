@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
 @theme inline {
   --color-surface-0: #0b0d10;
@@ -17,6 +18,51 @@
   --color-blue: #4ea1ff;
 
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* shadcn/ui semantic color utilities — aliased to existing tokens via :root */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* shadcn/ui semantic tokens mapped to orch-monitor surface system.
+   shadcn treats muted/accent as background-role tokens; our muted/accent
+   tokens remain unchanged and continue to resolve text color utilities
+   (text-muted, text-accent) through the @theme inline block above. */
+:root {
+  --background: var(--color-surface-0);
+  --foreground: var(--color-fg);
+  --card: var(--color-surface-1);
+  --card-foreground: var(--color-fg);
+  --popover: var(--color-surface-2);
+  --popover-foreground: var(--color-fg);
+  --primary: var(--color-accent);
+  --primary-foreground: var(--color-surface-0);
+  --secondary: var(--color-surface-3);
+  --secondary-foreground: var(--color-fg);
+  --muted-foreground: var(--color-muted);
+  --accent-foreground: var(--color-fg);
+  --destructive: var(--color-red);
+  --input: var(--color-border);
+  --ring: var(--color-accent);
+  --radius: 0.5rem;
 }
 
 * {
