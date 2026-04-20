@@ -8,7 +8,6 @@
       "teamKey": "CTL",
       "stateMap": {
         "backlog": "Backlog",
-        "todo": "Todo",
         "research": "In Progress",
         "planning": "In Progress",
         "inProgress": "In Progress",
