@@ -73,6 +73,7 @@ Each skill's description includes specific phrases and contexts that tell Claude
 | `review-comments` | "address comments", "fix review feedback", "handle PR comments", "respond to reviewers" |
 | `agent-browser` | "open in browser", "check the site", "take a screenshot", "fill the form", visual browser interaction |
 | `linearis` | Activates when ticket IDs like `ACME-123` appear, or when working with Linear CLI |
+| `catalyst-comms` | Activates when agents need to coordinate — "coordinate with", "tell the other agent", orchestrator-dispatched `CATALYST_COMMS_CHANNEL`, team-mode workers. See [Agent Communication](./catalyst-comms/). |
 | `ci-commit` | Non-interactive — used by CI pipelines and automation only |
 | `ci-describe-pr` | Non-interactive — used by CI pipelines and automation only |
 
@@ -129,6 +130,7 @@ The core development plugin. Skills covering research, planning, implementation,
 | `linear` | &#10003; | — | Linear ticket operations: create from thoughts documents, update status, manage workflow. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/linear/SKILL.md) |
 | `agent-browser` | — | &#10003; | Browser automation CLI reference — activates when visual browser interaction is needed (OAuth, dashboards, screenshots). | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/agent-browser/SKILL.md) |
 | `linearis` | — | &#10003; | Linearis CLI reference — activates when ticket IDs like `ACME-123` appear or when Linear CLI syntax is needed. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/linearis/SKILL.md) |
+| `catalyst-comms` | — | &#10003; | Protocol guide for the `catalyst-comms` file-based agent messaging CLI — activates when agents need to coordinate across worktrees, sub-agents, teams, or orchestrators. Full docs: [Agent Communication](./catalyst-comms/). | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/catalyst-comms/SKILL.md) |
 
 ### CI / Automation
 
