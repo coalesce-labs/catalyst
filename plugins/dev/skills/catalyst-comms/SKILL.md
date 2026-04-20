@@ -150,6 +150,33 @@ Orchestrators running `/orchestrate` that want workers to coordinate should:
 3. Workers check this env var at startup (or are instructed to by the dispatch prompt)
    and auto-join with `--as <ticket-id> --orch <orch-id>`.
 
+### Worker Traffic Contract (CTL-111)
+
+Workers dispatched by `/orchestrate` MUST produce traffic, not just join silently. The
+hard-gate baseline is **minimum 4 messages per worker** across its lifetime:
+
+| Hook                     | Type        | Example body                                       |
+|--------------------------|-------------|----------------------------------------------------|
+| Worker startup           | `info`      | `started oneshot for CTL-101`                      |
+| Each phase transition    | `info`      | `researching → planning`                           |
+| PR opened                | `info`      | `pr:#123 opened`                                   |
+| Blocked / stalled        | `attention` | `worker failed: <reason>`                          |
+| Worker settle            | `done`      | (posted via `catalyst-comms done` subcommand)      |
+
+In the normal path, the `/oneshot` flow transitions through 5 phases (researching → planning →
+implementing → validating → shipping), so a healthy worker emits **7+ messages** (1 start + 5
+transitions + 1 PR-opened + 1 done). Anything < 4 = worker is not properly integrated.
+
+**Where this is wired:**
+
+- `/oneshot` skill — startup join, phase-transition post, PR-opened post, done, attention
+- `/orchestrate` skill — orchestrator channel creation, `CATALYST_COMMS_CHANNEL` dispatch env,
+  attention-poll in the monitoring loop, orchestrator done on settle
+
+**Failure modes are silent by design:** every call is wrapped with `command -v catalyst-comms`
++ `|| true`, so a missing CLI or failed send never crashes the worker. Signal files remain the
+authoritative state; comms is observability and coordination only.
+
 ## Sub-agent Pattern
 
 When spawning a sub-agent via `Agent(...)`, pass the channel name in the prompt:
