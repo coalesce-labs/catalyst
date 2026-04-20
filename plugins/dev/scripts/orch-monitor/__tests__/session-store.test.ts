@@ -13,9 +13,11 @@ let dbPath: string;
 
 function loadMigrations(): string[] {
   const migDir = join(__dirname, "..", "..", "db-migrations");
-  return ["001_initial_schema.sql", "002_session_context.sql"].map((f) =>
-    readFileSync(join(migDir, f), "utf8"),
-  );
+  return [
+    "001_initial_schema.sql",
+    "002_session_context.sql",
+    "003_archives.sql",
+  ].map((f) => readFileSync(join(migDir, f), "utf8"));
 }
 
 function seedDb(path: string, fn: (db: Database) => void): void {

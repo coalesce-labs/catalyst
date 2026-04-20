@@ -454,7 +454,11 @@ describe("buildSnapshot", () => {
     const migDir = join(__dirname, "..", "..", "db-migrations");
     const db = new Database(dbPath, { create: true });
     db.exec("PRAGMA foreign_keys = ON;");
-    for (const f of ["001_initial_schema.sql", "002_session_context.sql"]) {
+    for (const f of [
+      "001_initial_schema.sql",
+      "002_session_context.sql",
+      "003_archives.sql",
+    ]) {
       db.exec(readFileSync(join(migDir, f), "utf8"));
     }
     const now = new Date().toISOString();

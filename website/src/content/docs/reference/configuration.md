@@ -391,6 +391,40 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
 | `verifyBeforeMerge` | boolean | `true` | Run adversarial verification before allowing merge |
 | `allowSelfReportedCompletion` | boolean | `false` | Trust worker's self-reported completion without verification |
 
+## Archive Config
+
+Optional. Controls where orchestrator artifacts are persisted and how long they are retained.
+The archive is a hybrid SQLite index plus filesystem blob store written by
+`catalyst-archive` (see [ADR-009](https://github.com/coalesce-labs/catalyst/blob/main/docs/adrs.md)).
+
+Goes in the global user config at `~/.config/catalyst/config.json`:
+
+```json
+{
+  "archive": {
+    "root": "~/catalyst/archives",
+    "syncToThoughts": false,
+    "retention": { "days": 90 }
+  }
+}
+```
+
+| Field             | Type         | Default               | Description                                                                                      |
+| ----------------- | ------------ | --------------------- | ------------------------------------------------------------------------------------------------ |
+| `root`            | string       | `~/catalyst/archives` | Root directory for archived blobs. One subdirectory per orchestrator id.                         |
+| `syncToThoughts`  | boolean      | `false`               | When `true`, `catalyst-archive sweep` also copies the top-level SUMMARY.md to `thoughts/shared/handoffs/`. |
+| `retention.days`  | number\|null | `null` (no prune)     | Default threshold for `catalyst-archive prune` when `--older-than` is not supplied.              |
+
+Environment variables override these paths when set:
+
+- `CATALYST_ARCHIVE_ROOT` — overrides `archive.root`
+- `CATALYST_RUNS_DIR` — orchestrator runtime source (default `~/catalyst/runs`)
+- `CATALYST_DB_FILE` — SQLite index path (default `~/catalyst/catalyst.db`)
+- `CATALYST_COMMS_DIR` — catalyst-comms source (default `~/catalyst/comms/channels`)
+
+The archive root is created on first sweep and tolerates missing optional artifacts (e.g., a
+worker without a rollup fragment). Re-running the sweep is idempotent (all upserts).
+
 ## Workflow Context (`.catalyst/.workflow-context.json`)
 
 Auto-managed by Claude Code hooks and skills. Not committed to git.
