@@ -6,16 +6,21 @@
 # permanent "pm" worktree and on-demand ticket worktrees.
 #
 # Usage:
-#   launch-worktree-tab.sh [--project NAME] <worktree-name> [base-branch] [description]
+#   launch-worktree-tab.sh [--project NAME] [--prompt-file PATH] <worktree-name> [base-branch] [description]
 #
 # Examples:
 #   launch-worktree-tab.sh --project catalyst pm main
+#   launch-worktree-tab.sh --project catalyst --prompt-file /path/to/pm-kickoff.md pm main
 #   launch-worktree-tab.sh --project catalyst CTL-64 main fix-auth
 #   launch-worktree-tab.sh ADV-230 main                  # --project omitted
 #
 # Session naming convention (for Claude's --name + remote-control prefix):
 #   <project>_<worktree>[_<description>]
 # e.g., catalyst_pm, catalyst_CTL-64, catalyst_CTL-64_fix-auth
+#
+# --prompt-file: Path to a file whose contents are passed to claude as the
+# initial positional prompt (interactive mode). Missing file is a non-fatal
+# warning; the tab still opens normally.
 #
 # Must be invoked from the repo root (Warp tab sets `directory`). Expects
 # create-worktree.sh and catalyst-claude.sh in a sibling directory.
@@ -27,9 +32,11 @@ CREATE="${SCRIPT_DIR}/create-worktree.sh"
 CLAUDE_LAUNCHER="${SCRIPT_DIR}/catalyst-claude.sh"
 
 PROJECT=""
+PROMPT_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT="$2"; shift 2 ;;
+    --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
     --) shift; break ;;
     --*) echo "Unknown flag: $1" >&2; exit 2 ;;
     *) break ;;
@@ -77,5 +84,14 @@ fi
 # Forward session name to claude via catalyst-claude.sh (reads CATALYST_WARP_*)
 export CATALYST_WARP_NAME="$SESSION_NAME"
 export CATALYST_WARP_REMOTE="$SESSION_NAME"
+
+if [[ -n "$PROMPT_FILE" ]]; then
+  if [[ -f "$PROMPT_FILE" ]]; then
+    INITIAL_PROMPT="$(<"$PROMPT_FILE")"
+    exec "$CLAUDE_LAUNCHER" "$INITIAL_PROMPT"
+  else
+    echo "⚠️  --prompt-file not found: $PROMPT_FILE — launching without initial prompt" >&2
+  fi
+fi
 
 exec "$CLAUDE_LAUNCHER"
