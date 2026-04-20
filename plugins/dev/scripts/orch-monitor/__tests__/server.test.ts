@@ -355,6 +355,63 @@ describe("OTel API endpoints", () => {
   });
 });
 
+describe("OTel health endpoint (/api/health/otel)", () => {
+  it("returns configured=false when no OTel URLs are set", async () => {
+    const res = await fetch(`${baseUrl}/api/health/otel`);
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as {
+      configured: boolean;
+      prometheus: { url: string | null; reachable: boolean };
+      loki: { url: string | null; reachable: boolean };
+    };
+    expect(data.configured).toBe(false);
+    expect(data.prometheus).toEqual({ url: null, reachable: false });
+    expect(data.loki).toEqual({ url: null, reachable: false });
+  });
+
+  it("uses the injected otelHealthChecker when provided", async () => {
+    let checkCount = 0;
+    const customChecker = {
+      check: () => {
+        checkCount++;
+        return Promise.resolve({
+          configured: true,
+          prometheus: { url: "http://prom.example", reachable: false },
+          loki: { url: "http://loki.example", reachable: true },
+        });
+      },
+    };
+    const tmp = mkdtempSync(join(tmpdir(), "orch-monitor-health-"));
+    const wtDir = join(tmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    const healthServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      prStatusFetcher: null,
+      linearFetcher: null,
+      otelHealthChecker: customChecker,
+      annotationsDbPath: join(tmp, "annotations.db"),
+    });
+    try {
+      const res = await fetch(`http://localhost:${healthServer.port}/api/health/otel`);
+      expect(res.status).toBe(200);
+      const data = (await res.json()) as {
+        configured: boolean;
+        prometheus: { url: string | null; reachable: boolean };
+        loki: { url: string | null; reachable: boolean };
+      };
+      expect(data.configured).toBe(true);
+      expect(data.prometheus).toEqual({ url: "http://prom.example", reachable: false });
+      expect(data.loki).toEqual({ url: "http://loki.example", reachable: true });
+      expect(checkCount).toBe(1);
+    } finally {
+      void healthServer.stop(true);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("OTel API with mock clients", () => {
   let otelServer: ReturnType<typeof createServer>;
   let otelUrl: string;

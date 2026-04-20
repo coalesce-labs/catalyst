@@ -10,6 +10,7 @@ import type {
   LinearTicket,
   EventEntry,
   TabId,
+  OtelHealth,
 } from "@/lib/types";
 import { KpiStrip } from "./kpi-strip";
 import { WaveCards } from "./wave-cards";
@@ -26,6 +27,7 @@ interface OrchestratorViewProps {
   getAnalytics: (orchId: string) => Record<string, WorkerAnalytics | null>;
   getLinear: (ticket: string) => LinearTicket | null;
   staleThreshold: number;
+  otelHealth?: OtelHealth | null;
 }
 
 const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
@@ -57,6 +59,7 @@ export function OrchestratorView({
   getAnalytics,
   getLinear,
   staleThreshold,
+  otelHealth,
 }: OrchestratorViewProps) {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [selectedWave, setSelectedWave] = useState<number | null>(null);
@@ -140,6 +143,7 @@ export function OrchestratorView({
                 filterWave={selectedWave}
                 onWorkerSelect={setSelectedWorker}
                 selectedTicket={selectedWorker}
+                otelHealth={otelHealth}
               />
             </div>
           </div>
@@ -154,6 +158,7 @@ export function OrchestratorView({
               staleThreshold={staleThreshold}
               onWorkerSelect={setSelectedWorker}
               selectedTicket={selectedWorker}
+              otelHealth={otelHealth}
             />
           </div>
         )}

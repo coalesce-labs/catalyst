@@ -222,3 +222,14 @@ export interface CollectedAttention {
   reason: string;
   severity: "error" | "warning";
 }
+
+export interface OtelEndpointHealth {
+  url: string | null;
+  reachable: boolean;
+}
+
+export interface OtelHealth {
+  configured: boolean;
+  prometheus: OtelEndpointHealth;
+  loki: OtelEndpointHealth;
+}
