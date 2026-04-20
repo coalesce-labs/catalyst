@@ -9,6 +9,7 @@ import { StatusDot } from "./ui/status-dot";
 import { ExternalLink } from "./ui/external-link";
 import { EmptyState } from "./ui/empty-state";
 import { SearchInput } from "./ui/search-input";
+import { PrBadge } from "./ui/pr-badge";
 import type {
   OrchestratorState,
   WorkerState,
@@ -201,18 +202,15 @@ function WorkerRow({
       </td>
       <td className="px-3 py-2.5">
         {w.pr ? (
-          <span className="flex items-center gap-1.5">
-            <ExternalLink
-              href={w.pr.url}
-              muted={isClosed}
-              strikethrough={isClosed}
-            >
-              #{w.pr.number}
-            </ExternalLink>
-            {isMerged && (
-              <span className="text-[11px] font-semibold text-green">merged</span>
-            )}
-          </span>
+          <PrBadge
+            number={w.pr.number}
+            url={w.pr.url}
+            state={w.pr.state ?? w.prState}
+            mergeStateStatus={w.pr.mergeStateStatus}
+            isDraft={w.pr.isDraft}
+            mergedAt={w.pr.mergedAt ?? w.prMergedAt ?? undefined}
+            title={w.pr.title}
+          />
         ) : (
           <span className="text-muted">—</span>
         )}

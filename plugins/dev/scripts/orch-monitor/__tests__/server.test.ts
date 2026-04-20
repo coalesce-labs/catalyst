@@ -539,6 +539,8 @@ describe("PR merge write-through to signal file", () => {
         number: 42,
         state: "MERGED" as const,
         mergedAt: "2026-04-16T10:30:00Z",
+        mergeStateStatus: "UNKNOWN" as const,
+        isDraft: false,
         fetchedAt: new Date().toISOString(),
       }),
       refreshAll: () => Promise.resolve(),

@@ -1,7 +1,18 @@
+export type PrMergeStateStatus =
+  | "CLEAN"
+  | "BLOCKED"
+  | "DIRTY"
+  | "BEHIND"
+  | "UNSTABLE"
+  | "HAS_HOOKS"
+  | "UNKNOWN";
+
 export interface PrStatus {
   number: number;
   state: "OPEN" | "CLOSED" | "MERGED" | "UNKNOWN";
   mergedAt: string | null;
+  mergeStateStatus: PrMergeStateStatus;
+  isDraft: boolean;
   fetchedAt: string;
 }
 
@@ -59,6 +70,8 @@ async function defaultRunner(args: string[]): Promise<RunnerResult> {
 interface ParsedPrPayload {
   state?: unknown;
   mergedAt?: unknown;
+  mergeStateStatus?: unknown;
+  isDraft?: unknown;
 }
 
 function normalizeState(raw: unknown): PrStatus["state"] {
@@ -66,10 +79,32 @@ function normalizeState(raw: unknown): PrStatus["state"] {
   return "UNKNOWN";
 }
 
+const MERGE_STATE_VALUES: ReadonlySet<PrMergeStateStatus> = new Set([
+  "CLEAN",
+  "BLOCKED",
+  "DIRTY",
+  "BEHIND",
+  "UNSTABLE",
+  "HAS_HOOKS",
+  "UNKNOWN",
+]);
+
+function normalizeMergeStateStatus(raw: unknown): PrMergeStateStatus {
+  if (typeof raw !== "string") return "UNKNOWN";
+  const upper = raw.toUpperCase() as PrMergeStateStatus;
+  return MERGE_STATE_VALUES.has(upper) ? upper : "UNKNOWN";
+}
+
+function normalizeIsDraft(raw: unknown): boolean {
+  return raw === true;
+}
+
 interface PrByBranchResult {
   number: number;
   state: PrStatus["state"];
   mergedAt: string | null;
+  mergeStateStatus: PrMergeStateStatus;
+  isDraft: boolean;
   url: string;
 }
 
@@ -89,7 +124,7 @@ export async function fetchPrForBranch(
     "--state",
     "all",
     "--json",
-    "number,state,mergedAt,url",
+    "number,state,mergedAt,mergeStateStatus,isDraft,url",
     "--limit",
     "1",
   ]);
@@ -111,6 +146,8 @@ export async function fetchPrForBranch(
     number: f.number,
     state: normalizeState(f.state),
     mergedAt,
+    mergeStateStatus: normalizeMergeStateStatus(f.mergeStateStatus),
+    isDraft: normalizeIsDraft(f.isDraft),
     url: typeof f.url === "string" ? f.url : "",
   };
 }
@@ -160,7 +197,7 @@ export function createPrStatusFetcher(
       "--repo",
       ref.repo,
       "--json",
-      "state,mergedAt",
+      "state,mergedAt,mergeStateStatus,isDraft",
     ]);
     const fetchedAt = new Date().toISOString();
     if (!res.ok) {
@@ -168,6 +205,8 @@ export function createPrStatusFetcher(
         number: ref.number,
         state: "UNKNOWN",
         mergedAt: null,
+        mergeStateStatus: "UNKNOWN",
+        isDraft: false,
         fetchedAt,
       });
       return;
@@ -184,6 +223,8 @@ export function createPrStatusFetcher(
         number: ref.number,
         state: "UNKNOWN",
         mergedAt: null,
+        mergeStateStatus: "UNKNOWN",
+        isDraft: false,
         fetchedAt,
       });
       return;
@@ -197,6 +238,8 @@ export function createPrStatusFetcher(
       number: ref.number,
       state,
       mergedAt,
+      mergeStateStatus: normalizeMergeStateStatus(parsed.mergeStateStatus),
+      isDraft: normalizeIsDraft(parsed.isDraft),
       fetchedAt,
     });
   }

@@ -6,6 +6,7 @@ import { StatusDot, HealthIcon } from "./ui/status-dot";
 import { ProgressBar } from "./ui/progress-bar";
 import { Panel, PanelHeader, SectionLabel } from "./ui/panel";
 import { EmptyState } from "./ui/empty-state";
+import { PrBadge } from "./ui/pr-badge";
 import { KpiStrip } from "./kpi-strip";
 import { AttentionBar } from "./attention-bar";
 import { EventLog } from "./event-log";
@@ -170,6 +171,17 @@ function SessionCard({
       <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted">
         {session.ticket && (
           <span className="font-mono font-semibold text-fg">{session.ticket}</span>
+        )}
+        {session.pr && (
+          <PrBadge
+            number={session.pr.number}
+            url={session.pr.url}
+            state={session.pr.state ?? (session.pr.mergedAt ? "MERGED" : "OPEN")}
+            mergeStateStatus={session.pr.mergeStateStatus}
+            isDraft={session.pr.isDraft}
+            mergedAt={session.pr.mergedAt}
+            compact
+          />
         )}
         {session.gitBranch && (
           <span className="flex items-center gap-1">

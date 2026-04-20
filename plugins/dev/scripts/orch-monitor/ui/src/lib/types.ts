@@ -80,7 +80,11 @@ export interface WorkerState {
     state?: string;
     title?: string;
     ciStatus?: string;
+    prOpenedAt?: string;
+    autoMergeArmedAt?: string;
     mergedAt?: string;
+    mergeStateStatus?: string;
+    isDraft?: boolean;
   } | null;
   startedAt: string;
   updatedAt: string;
@@ -175,7 +179,14 @@ export interface SessionState {
   completedAt: string | null;
   timeSinceUpdate: number;
   cost: WorkerCost | null;
-  pr: { number: number; url: string | null } | null;
+  pr: {
+    number: number;
+    url: string | null;
+    state?: string;
+    mergeStateStatus?: string;
+    isDraft?: boolean;
+    mergedAt?: string;
+  } | null;
   cwd: string | null;
   gitBranch: string | null;
 }
