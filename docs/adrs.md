@@ -289,3 +289,52 @@ entry, rather than writing shell-rc alias blocks or relying on a plugin post-ins
 - No plugin-uninstall hook exists, so users who `rm` the plugin will have broken symlinks until
   they run `install-cli.sh --uninstall`. The reference docs page for `catalyst-comms` documents
   the clean-removal command.
+---
+
+## ADR-011: Hybrid SQLite + Filesystem Archive for Orchestrator Artifacts
+
+**Decision**: Persist orchestrator artifacts (summaries, briefings, worker signals, phase logs, comms,
+metadata) out of the runs directory and worktrees into a durable, two-layer store:
+
+- **Blob layer** — Filesystem tree at `~/catalyst/archives/{orchId}/` (summaries, briefings,
+  signals, phase logs, comms channels, metadata.json).
+- **Index layer** — Three SQLite tables in `~/catalyst/catalyst.db` (`orchestrators`,
+  `archived_workers`, `archived_artifacts`) for fast querying, filtering, and pagination.
+
+The archive is written by `plugins/dev/scripts/orch-monitor/catalyst-archive.ts sweep` and served
+read-only via `/api/archive/*` endpoints in `orch-monitor`.
+
+**Rationale**:
+
+- Orchestrator artifacts currently live inside worktrees and `~/catalyst/runs/{orchId}/`. Both
+  are reaped during teardown, which loses the post-mortem artifacts users need.
+- A pure-SQLite design would balloon the DB with large text blobs (summaries, JSONL phase logs).
+- A pure-filesystem design loses query performance ("show me all archived orchs that touched
+  CTL-110" becomes an O(n) scan of metadata.json files).
+- Hybrid gives both: small, indexed, queryable metadata + unbounded blob storage on disk.
+
+**Schema** (`plugins/dev/scripts/db-migrations/003_archives.sql`):
+
+- `orchestrators` — one row per archived orchestrator (id, name, started/completed timestamps,
+  waves/workers/PRs counts, tickets_touched JSON, archive_path, has_rollup, archived_at)
+- `archived_workers` — composite PK `(orch_id, worker_id)` — per-worker summary (ticket, PR,
+  final status, duration, cost, flags for has_summary / has_rollup_fragment)
+- `archived_artifacts` — one row per blob, UNIQUE `(orch_id, path)` for idempotent upserts
+  (kind, relative path, bytes, optional sha256)
+
+**Write order (filesystem-first invariant)**: blobs are written via atomic `tmp + rename`
+BEFORE the SQLite rows are inserted. If SQLite insertion fails, the blobs remain on disk and
+are recoverable via `catalyst-archive sync`, which re-scans the filesystem and rebuilds the
+index.
+
+**Consequences**:
+
+- Teardown becomes safe: `/catalyst-dev:teardown <orchId>` refuses to delete runs/worktrees
+  unless the archive sweep succeeded (or `--force` is passed).
+- `orchestrate` Phase 7 runs `catalyst-archive sweep` before worktree cleanup.
+- The monitor gains a "History" view backed by `/api/archive/orchestrators`,
+  `/api/archive/orchestrators/:id`, and `/api/archive/orchestrators/:id/files/:rel+`.
+- File serving is path-traversal safe: `realpathSync()` must resolve within the recorded
+  `archive_path`, and relative paths are regex-validated to `[A-Za-z0-9._-]+` segments.
+- `catalyst-archive` exposes `sweep`, `sync`, `prune`, `list`, and `show` subcommands for
+  ops (prune respects `archive.retentionDays`).

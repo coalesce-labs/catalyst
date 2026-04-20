@@ -188,3 +188,66 @@ state — comms is observability and cross-worker coordination. See
 4. **Structured persistence** — Save outside conversation (thoughts/)
 5. **Read files fully** — No partial reads of key documents
 6. **Wait for agents** — Don't proceed until research completes
+
+## Artifact Persistence
+
+Orchestrator runs produce artifacts that must survive worktree and runtime-directory cleanup:
+SUMMARY.md, wave briefings, per-worker signal files and phase logs, rollup fragments, comms
+channels, and state.json. These are persisted into a **hybrid SQLite + filesystem archive**
+keyed by orchestrator id.
+
+### Layout
+
+- **Index (SQLite)** — `~/catalyst/catalyst.db`, three tables added by migration `003_archives.sql`:
+  - `orchestrators` — one row per archived orchestrator (status, counts, tickets, archive_path).
+  - `archived_workers` — one row per worker, composite PK (`orch_id`, `worker_id`).
+  - `archived_artifacts` — one row per blob, UNIQUE (`orch_id`, `path`) for idempotent upserts.
+- **Blobs (filesystem)** — `~/catalyst/archives/<orchId>/`:
+  - `metadata.json`, `SUMMARY.md`, `rollup-briefing.md` at the root
+  - `briefings/wave-*.md`
+  - `workers/<ticket>/{signal-final.json, phase-log.jsonl, SUMMARY.md, rollup-fragment.md}`
+  - `comms/<channel>.jsonl`
+
+### Write order (filesystem-first invariant)
+
+Every archive write follows the same rule: **blobs land on disk before SQLite rows exist**. Each
+file is written via `atomicWrite()` (tmp path + `rename`) and the SQLite INSERTs are wrapped in a
+transaction that runs *after* all filesystem writes succeed. The practical consequence:
+
+- If SQLite write fails, files remain on disk and can be picked up by `catalyst-archive sync`.
+- If the process crashes mid-sweep, partial `.tmp` files can be deleted; no row ever points at a
+  file that doesn't exist.
+- Re-running the sweep is safe: all inserts are `ON CONFLICT … DO UPDATE` upserts.
+
+### CLI (`plugins/dev/scripts/orch-monitor/catalyst-archive.ts`)
+
+```
+bun catalyst-archive.ts sweep <orchId>         # archive a single orchestrator
+bun catalyst-archive.ts sync                   # reconcile FS ↔ SQLite (orphans, missing rows)
+bun catalyst-archive.ts prune --older-than 30d # delete archives older than N days
+bun catalyst-archive.ts list [--json]          # list archived orchestrators
+bun catalyst-archive.ts show <orchId>          # show detail (workers + artifacts)
+```
+
+All subcommands accept `--dry-run`. Configuration comes from `.catalyst/config.json` (project
+layer) merged with `~/.config/catalyst/config.json` (user layer) via `archive.*` keys.
+
+### Monitor + UI
+
+The orch-monitor server exposes read-only endpoints:
+
+- `GET /api/archive/orchestrators` — paginated list with since/until/ticket/status filters.
+- `GET /api/archive/orchestrators/:id` — detail including workers + artifacts.
+- `GET /api/archive/orchestrators/:id/files/:relPath+` — streams an archived file. Paths are
+  validated with `isSafeArchivePart` / `isSafeArchiveFileRel` and a `realpathSync` check against
+  `archive_path` prevents symlink escapes (403 on violation, 400 on bad input, 404 on missing).
+
+The `/history` page includes an "Archived Orchestrators" section rendering these endpoints with
+expandable per-orch detail panels.
+
+### Lifecycle integration
+
+- **Orchestrate Phase 7** runs the sweep after the final SUMMARY.md is written and before any
+  worktree cleanup. Re-running is idempotent, so a retry is always safe.
+- **Teardown skill** (`/catalyst-dev:teardown <orchId>`) deletes runtime + worktree state but
+  refuses unless the archive exists and the SQLite row is present (bypass with `--force`).
