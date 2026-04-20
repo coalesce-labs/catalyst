@@ -137,6 +137,8 @@ possible, or sequential questions):
   - Main (always recommended)
   - PM worktree (only for Catalyst-managed projects)
   - New worktree (prompts for branch + optional description)
+  - New worktree one-shot (prompts for ticket, creates worktree, launches Claude
+    with `/catalyst-dev:oneshot {{ticket}}` already queued)
   - Existing worktree (branch picker)
   - Orchestrator (for projects using `/catalyst-dev:orchestrate`)
 - **Setup command** — optional init for the main tab (e.g., `bun install && scripts/setup-env.sh`).
@@ -168,14 +170,15 @@ rm -f ~/.warp/tab_configs/*.toml
 ### 4.2 — Write each TOML
 
 Compute prefix counter starting at 01. For each project in the Phase 3 order, emit each enabled
-variant in this order: Main, PM, New Worktree, Worktree, Orchestrator.
+variant in this order: Main, PM, New Worktree, New Worktree One-Shot, Worktree, Orchestrator.
 
 **Naming conventions**:
-- Emoji per variant: Main `📦`, PM `📋`, New Worktree `🆕`, Worktree `🔀`, Orchestrator `🚀`
-- Color per variant: Main/New/Worktree/Orchestrator → project color. PM → always `blue` (cross-project
-  convention for PM/backlog work).
+- Emoji per variant: Main `📦`, PM `📋`, New Worktree `🆕`, New Worktree One-Shot `🎯`,
+  Worktree `🔀`, Orchestrator `🚀`
+- Color per variant: Main/New/One-Shot/Worktree/Orchestrator → project color. PM → always `blue`
+  (cross-project convention for PM/backlog work).
 - Session name per variant: `<slug>` (main), `<slug>_pm`, `<slug>_<branch>[_<desc>]`,
-  `<slug>_<worktree>`, `<slug>_<tickets>`.
+  `<slug>_<ticket>` (one-shot), `<slug>_<worktree>`, `<slug>_<tickets>`.
 
 ### 4.3 — Templates
 
@@ -241,6 +244,34 @@ description = "Optional short description. Leave blank for none."
 
 `{TICKET_EXAMPLE}` — use a sensible example like `CTL-72` for catalyst, `ADV-230` for Adva, or
 `NEW-1` as fallback.
+
+#### New worktree one-shot tab (prompts for ticket, fires `/catalyst-dev:oneshot`)
+
+Creates the worktree AND launches Claude with the oneshot invocation pre-filled. Intended for
+the walk-away workflow: user types a ticket, hits enter, Claude runs the full research →
+plan → implement → ship pipeline autonomously.
+
+The `--prompt` flag passes a literal string that Warp has already substituted (`{{ticket}}`).
+The worktree name equals the ticket, so `create-worktree.sh` makes a branch matching the
+ticket ID.
+
+```toml
+name = "{DISPLAY} 🎯 New Worktree One-Shot"
+title = "{DISPLAY}: oneshot {{ticket}}"
+color = "{COLOR}"
+
+[[panes]]
+id = "main"
+type = "terminal"
+directory = "{PROJECT_PATH}"
+commands = [
+  "{CATALYST_ROOT}/plugins/dev/scripts/launch-worktree-tab.sh --project {SLUG} --prompt '/catalyst-dev:oneshot {{ticket}}' '{{ticket}}' main",
+]
+
+[params.ticket]
+type = "text"
+description = "Ticket ID (e.g. {TICKET_EXAMPLE}). Worktree/branch = this value; Claude auto-runs /catalyst-dev:oneshot with it."
+```
 
 #### Existing worktree picker tab
 
