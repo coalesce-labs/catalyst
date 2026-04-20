@@ -131,7 +131,7 @@ function WorkerCell({ w }: { w: WorkerState }) {
   }
   if (w.pid && w.alive === false) {
     return (
-      <span className="flex items-center gap-1.5" title="Worker process died">
+      <span className="flex items-center gap-1.5" title="Worker died">
         <span className="inline-block h-2 w-2 rounded-full bg-red shadow-[0_0_6px_theme(colors.red)]" />
         <span className="text-[12px] font-medium text-red">died</span>
       </span>
