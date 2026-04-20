@@ -47,6 +47,8 @@ export interface WorkerState {
     prOpenedAt?: string;
     autoMergeArmedAt?: string;
     mergedAt?: string;
+    mergeStateStatus?: string;
+    isDraft?: boolean;
   } | null;
   startedAt: string;
   updatedAt: string;
@@ -319,6 +321,8 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
     if (typeof signal.pr.prOpenedAt === "string") pr.prOpenedAt = signal.pr.prOpenedAt;
     if (typeof signal.pr.autoMergeArmedAt === "string") pr.autoMergeArmedAt = signal.pr.autoMergeArmedAt;
     if (typeof signal.pr.mergedAt === "string") pr.mergedAt = signal.pr.mergedAt;
+    if (typeof signal.pr.mergeStateStatus === "string") pr.mergeStateStatus = signal.pr.mergeStateStatus;
+    if (typeof signal.pr.isDraft === "boolean") pr.isDraft = signal.pr.isDraft;
   }
 
   const definitionOfDone = isRecord(signal.definitionOfDone)

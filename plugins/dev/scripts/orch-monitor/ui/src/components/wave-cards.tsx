@@ -2,10 +2,57 @@ import { useState, useMemo } from "react";
 import { StatusBadge, StatusPill } from "./ui/badge";
 import { SectionLabel } from "./ui/panel";
 import { waveDoneCount } from "@/lib/computations";
-import type { OrchestratorState } from "@/lib/types";
+import type { OrchestratorState, WorkerState, Wave } from "@/lib/types";
+import { derivePrVariant } from "../../../lib/pr-variant";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { FileText, X } from "lucide-react";
+
+type WaveAccent = "merged" | "blocked" | "conflict" | "neutral";
+
+function waveAccent(wave: Wave, workers: Record<string, WorkerState>): WaveAccent {
+  const tickets = Array.isArray(wave.tickets) ? wave.tickets : [];
+  if (tickets.length === 0) return "neutral";
+
+  let anyBlocked = false;
+  let anyConflict = false;
+  let allMerged = true;
+
+  for (const t of tickets) {
+    const pr = workers[t]?.pr;
+    if (!pr) {
+      allMerged = false;
+      continue;
+    }
+    const variant = derivePrVariant({
+      state: pr.state,
+      mergeStateStatus: pr.mergeStateStatus,
+      isDraft: pr.isDraft,
+    });
+    if (variant !== "merged") allMerged = false;
+    if (variant === "blocked") anyBlocked = true;
+    if (variant === "conflict") anyConflict = true;
+  }
+
+  if (allMerged) return "merged";
+  if (anyConflict) return "conflict";
+  if (anyBlocked) return "blocked";
+  return "neutral";
+}
+
+const ACCENT_CLASS: Record<WaveAccent, string> = {
+  merged: "border-[#8a63d2]/60 bg-[#3a2a52]/25 hover:border-[#8a63d2]",
+  blocked: "border-yellow/50 bg-yellow/10 hover:border-yellow",
+  conflict: "border-red/50 bg-red/10 hover:border-red",
+  neutral: "border-border bg-surface-3 hover:border-accent/50",
+};
+
+const ACCENT_SELECTED: Record<WaveAccent, string> = {
+  merged: "border-[#8a63d2] bg-[#3a2a52]/35",
+  blocked: "border-yellow bg-yellow/15",
+  conflict: "border-red bg-red/15",
+  neutral: "border-accent bg-surface-3",
+};
 
 interface WaveCardsProps {
   orch: OrchestratorState;
@@ -73,6 +120,7 @@ export function WaveCards({
             typeof orch.briefings?.[w.wave] === "string" &&
             orch.briefings[w.wave].length > 0;
           const isSelected = selectedWave === w.wave;
+          const accent = waveAccent(w, orch.workers);
 
           return (
             <button
@@ -84,9 +132,7 @@ export function WaveCards({
                 onWaveSelect?.(isSelected ? null : w.wave);
               }}
               className={`flex flex-col gap-2 rounded-md border p-3 text-left transition-colors ${
-                isSelected
-                  ? "border-accent bg-surface-3"
-                  : "border-border bg-surface-3 hover:border-accent/50"
+                isSelected ? ACCENT_SELECTED[accent] : ACCENT_CLASS[accent]
               }`}
             >
               <div className="flex items-center justify-between gap-2">

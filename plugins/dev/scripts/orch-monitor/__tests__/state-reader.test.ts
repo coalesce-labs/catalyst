@@ -244,6 +244,65 @@ describe("readOrchestratorState", () => {
     const state = readOrchestratorState(orchDir);
     expect(state.workers).toEqual({});
   });
+
+  it("passes through pr.mergeStateStatus and pr.isDraft when present", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-1",
+          status: "pr-created",
+          phase: 5,
+          startedAt: now,
+          updatedAt: now,
+          pr: {
+            number: 42,
+            url: "https://github.com/o/r/pull/42",
+            state: "OPEN",
+            ciStatus: "pending",
+            mergeStateStatus: "BLOCKED",
+            isDraft: false,
+          },
+        },
+      },
+    });
+
+    const state = readOrchestratorState(orchDir);
+    const w = state.workers["T-1"];
+    expect(w.pr).not.toBeNull();
+    expect(w.pr!.mergeStateStatus).toBe("BLOCKED");
+    expect(w.pr!.isDraft).toBe(false);
+  });
+
+  it("omits pr.mergeStateStatus and pr.isDraft when not on signal file", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "T-1": {
+          ticket: "T-1",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-T-1",
+          status: "pr-created",
+          phase: 5,
+          startedAt: now,
+          updatedAt: now,
+          pr: {
+            number: 42,
+            url: "https://github.com/o/r/pull/42",
+            state: "OPEN",
+          },
+        },
+      },
+    });
+
+    const state = readOrchestratorState(orchDir);
+    const w = state.workers["T-1"];
+    expect(w.pr).not.toBeNull();
+    expect(w.pr!.mergeStateStatus).toBeUndefined();
+    expect(w.pr!.isDraft).toBeUndefined();
+  });
 });
 
 describe("wave assignment", () => {

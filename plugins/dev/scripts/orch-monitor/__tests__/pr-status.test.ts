@@ -57,7 +57,7 @@ describe("createPrStatusFetcher", () => {
     const responses = new Map<string, RunnerResult>();
     responses.set("gh --version", { stdout: "gh 2.0", ok: true });
     responses.set(
-      "gh pr view 42 --repo owner/repo --json state,mergedAt",
+      "gh pr view 42 --repo owner/repo --json state,mergedAt,mergeStateStatus,isDraft",
       { stdout: '{"state":"MERGED","mergedAt":"2026-04-13T12:00:00Z"}', ok: true },
     );
     const fetcher = createPrStatusFetcher({ runner: makeRunner(responses) });
@@ -74,11 +74,11 @@ describe("createPrStatusFetcher", () => {
     const responses = new Map<string, RunnerResult>();
     responses.set("gh --version", { stdout: "gh 2.0", ok: true });
     responses.set(
-      "gh pr view 1 --repo o/r --json state,mergedAt",
+      "gh pr view 1 --repo o/r --json state,mergedAt,mergeStateStatus,isDraft",
       { stdout: '{"state":"OPEN","mergedAt":null}', ok: true },
     );
     responses.set(
-      "gh pr view 2 --repo o/r --json state,mergedAt",
+      "gh pr view 2 --repo o/r --json state,mergedAt,mergeStateStatus,isDraft",
       { stdout: '{"state":"DRAFT","mergedAt":null}', ok: true },
     );
     const fetcher = createPrStatusFetcher({ runner: makeRunner(responses) });
@@ -135,7 +135,7 @@ describe("createPrStatusFetcher", () => {
   it("caches state=UNKNOWN on JSON parse error", async () => {
     const responses = new Map<string, RunnerResult>();
     responses.set("gh --version", { stdout: "", ok: true });
-    responses.set("gh pr view 5 --repo o/r --json state,mergedAt", {
+    responses.set("gh pr view 5 --repo o/r --json state,mergedAt,mergeStateStatus,isDraft", {
       stdout: "not json{{",
       ok: true,
     });
@@ -147,7 +147,7 @@ describe("createPrStatusFetcher", () => {
   it("caches state=UNKNOWN when gh pr view exits non-zero", async () => {
     const responses = new Map<string, RunnerResult>();
     responses.set("gh --version", { stdout: "", ok: true });
-    responses.set("gh pr view 7 --repo o/r --json state,mergedAt", {
+    responses.set("gh pr view 7 --repo o/r --json state,mergedAt,mergeStateStatus,isDraft", {
       stdout: "",
       ok: false,
     });
@@ -187,7 +187,7 @@ describe("createPrStatusFetcher", () => {
         "--state",
         "all",
         "--json",
-        "number,state,mergedAt,url",
+        "number,state,mergedAt,mergeStateStatus,isDraft,url",
         "--limit",
         "1",
       ]);
@@ -251,10 +251,95 @@ describe("createPrStatusFetcher", () => {
     expect(got!.url).toBe("");
   });
 
+  it("parses mergeStateStatus and isDraft when present", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "gh 2.0", ok: true });
+    responses.set(
+      "gh pr view 10 --repo o/r --json state,mergedAt,mergeStateStatus,isDraft",
+      {
+        stdout:
+          '{"state":"OPEN","mergedAt":null,"mergeStateStatus":"BLOCKED","isDraft":false}',
+        ok: true,
+      },
+    );
+    const fetcher = createPrStatusFetcher({ runner: makeRunner(responses) });
+    await fetcher.refreshAll([{ repo: "o/r", number: 10 }]);
+    const got = fetcher.get("o/r", 10);
+    expect(got).not.toBeNull();
+    expect(got!.mergeStateStatus).toBe("BLOCKED");
+    expect(got!.isDraft).toBe(false);
+  });
+
+  it("normalizes mergeStateStatus casing and unknown values", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "gh 2.0", ok: true });
+    responses.set(
+      "gh pr view 11 --repo o/r --json state,mergedAt,mergeStateStatus,isDraft",
+      {
+        stdout:
+          '{"state":"OPEN","mergedAt":null,"mergeStateStatus":"dirty","isDraft":true}',
+        ok: true,
+      },
+    );
+    responses.set(
+      "gh pr view 12 --repo o/r --json state,mergedAt,mergeStateStatus,isDraft",
+      {
+        stdout:
+          '{"state":"OPEN","mergedAt":null,"mergeStateStatus":"WEIRD","isDraft":"yes"}',
+        ok: true,
+      },
+    );
+    const fetcher = createPrStatusFetcher({ runner: makeRunner(responses) });
+    await fetcher.refreshAll([
+      { repo: "o/r", number: 11 },
+      { repo: "o/r", number: 12 },
+    ]);
+    const a = fetcher.get("o/r", 11);
+    expect(a!.mergeStateStatus).toBe("DIRTY");
+    expect(a!.isDraft).toBe(true);
+    const b = fetcher.get("o/r", 12);
+    expect(b!.mergeStateStatus).toBe("UNKNOWN");
+    expect(b!.isDraft).toBe(false);
+  });
+
+  it("defaults mergeStateStatus/isDraft on gh failure", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "", ok: true });
+    responses.set(
+      "gh pr view 13 --repo o/r --json state,mergedAt,mergeStateStatus,isDraft",
+      { stdout: "", ok: false },
+    );
+    const fetcher = createPrStatusFetcher({ runner: makeRunner(responses) });
+    await fetcher.refreshAll([{ repo: "o/r", number: 13 }]);
+    const got = fetcher.get("o/r", 13);
+    expect(got!.mergeStateStatus).toBe("UNKNOWN");
+    expect(got!.isDraft).toBe(false);
+  });
+
+  it("fetchPrForBranch includes mergeStateStatus and isDraft", async () => {
+    const runner: Runner = () =>
+      Promise.resolve({
+        stdout: JSON.stringify([
+          {
+            number: 77,
+            state: "OPEN",
+            mergedAt: null,
+            mergeStateStatus: "BEHIND",
+            isDraft: false,
+            url: "https://github.com/o/r/pull/77",
+          },
+        ]),
+        ok: true,
+      });
+    const got = await fetchPrForBranch("o/r", "feat/y", runner);
+    expect(got!.mergeStateStatus).toBe("BEHIND");
+    expect(got!.isDraft).toBe(false);
+  });
+
   it("start triggers an immediate refresh and stop clears the interval", async () => {
     const responses = new Map<string, RunnerResult>();
     responses.set("gh --version", { stdout: "", ok: true });
-    responses.set("gh pr view 9 --repo o/r --json state,mergedAt", {
+    responses.set("gh pr view 9 --repo o/r --json state,mergedAt,mergeStateStatus,isDraft", {
       stdout: '{"state":"OPEN","mergedAt":null}',
       ok: true,
     });

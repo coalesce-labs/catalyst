@@ -4,8 +4,8 @@ import { fmtSince, fmtTokens, fmtCost, phaseColor, PHASE_ORDER } from "@/lib/for
 import { effectiveCost, totalTokens } from "@/lib/computations";
 import { StatusBadge } from "./ui/badge";
 import { StatusDot } from "./ui/status-dot";
-import { ExternalLink } from "./ui/external-link";
 import { SectionLabel } from "./ui/panel";
+import { PrBadge } from "./ui/pr-badge";
 import {
   isWorkerDone,
   type WorkerState,
@@ -539,18 +539,35 @@ export function WorkerDetailDrawer({
             <div className="border-b border-border-subtle px-4 py-3">
               <SectionLabel>Pull Request</SectionLabel>
               <div className="mt-1.5 flex items-center gap-2">
-                <ExternalLink href={worker.pr.url}>
-                  #{worker.pr.number}
-                </ExternalLink>
+                <PrBadge
+                  number={worker.pr.number}
+                  url={worker.pr.url}
+                  state={worker.pr.state ?? worker.prState}
+                  mergeStateStatus={worker.pr.mergeStateStatus}
+                  isDraft={worker.pr.isDraft}
+                  mergedAt={worker.pr.mergedAt ?? worker.prMergedAt ?? undefined}
+                  title={worker.pr.title}
+                />
                 {worker.pr.title && (
                   <span className="truncate text-[12px] text-muted">
                     {worker.pr.title}
                   </span>
                 )}
-                {worker.prState && (
-                  <StatusBadge status={worker.prState.toLowerCase()} />
-                )}
               </div>
+              {(worker.pr.mergeStateStatus || worker.pr.mergedAt) && (
+                <div className="mt-1.5 flex items-center gap-2 pl-0.5 text-[11px] text-muted">
+                  {worker.pr.mergeStateStatus && (
+                    <span className="font-mono uppercase tracking-wide">
+                      {worker.pr.mergeStateStatus}
+                    </span>
+                  )}
+                  {worker.pr.mergedAt && (
+                    <span>
+                      merged {new Date(worker.pr.mergedAt).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

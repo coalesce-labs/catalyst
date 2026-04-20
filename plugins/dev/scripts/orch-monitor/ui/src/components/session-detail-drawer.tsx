@@ -3,8 +3,8 @@ import { cn } from "@/lib/utils";
 import { fmtSince, fmtTokens, fmtCost } from "@/lib/formatters";
 import { StatusBadge } from "./ui/badge";
 import { StatusDot } from "./ui/status-dot";
-import { ExternalLink } from "./ui/external-link";
 import { SectionLabel } from "./ui/panel";
+import { PrBadge } from "./ui/pr-badge";
 import type { SessionState } from "@/lib/types";
 import { sessionKind } from "@/lib/types";
 import {
@@ -191,16 +191,20 @@ export function SessionDetailDrawer({
             <div className="border-b border-border-subtle px-4 py-3">
               <SectionLabel>Pull Request</SectionLabel>
               <div className="mt-1.5 flex items-center gap-2">
-                {session.pr.url ? (
-                  <ExternalLink href={session.pr.url}>
-                    #{session.pr.number}
-                  </ExternalLink>
-                ) : (
-                  <span className="font-mono text-[13px] text-fg">
-                    #{session.pr.number}
-                  </span>
-                )}
+                <PrBadge
+                  number={session.pr.number}
+                  url={session.pr.url}
+                  state={session.pr.state ?? (session.pr.mergedAt ? "MERGED" : "OPEN")}
+                  mergeStateStatus={session.pr.mergeStateStatus}
+                  isDraft={session.pr.isDraft}
+                  mergedAt={session.pr.mergedAt}
+                />
               </div>
+              {session.pr.mergedAt && (
+                <div className="mt-1.5 pl-0.5 text-[11px] text-muted">
+                  merged {new Date(session.pr.mergedAt).toLocaleString()}
+                </div>
+              )}
             </div>
           )}
 
