@@ -5,6 +5,7 @@ import { Sidebar } from "./components/layout/sidebar";
 import { AttentionBar } from "./components/attention-bar";
 import { SessionDetailDrawer } from "./components/session-detail-drawer";
 import { ConnectionBanner } from "./components/ui/connection-banner";
+import { OtelHealthBanner } from "./components/ui/otel-health-banner";
 import { SkeletonDashboard } from "./components/ui/skeleton";
 import { ChevronRight, Home, PanelLeftClose, PanelLeft } from "lucide-react";
 import type { GroupingMode } from "./lib/grouping";
@@ -48,6 +49,7 @@ function Monitor() {
     sessions,
     analytics,
     linear,
+    otelHealth,
     staleThreshold,
   } = useMonitor();
 
@@ -183,6 +185,7 @@ function Monitor() {
         </header>
 
         <ConnectionBanner status={connectionStatus} className="mx-5 mt-3" />
+        <OtelHealthBanner health={otelHealth} className="mx-5 mt-3" />
 
         <div className="flex-1 overflow-y-auto p-5">
           <Suspense fallback={<SkeletonDashboard />}>
@@ -203,6 +206,7 @@ function Monitor() {
                   getAnalytics={analytics}
                   getLinear={linear}
                   staleThreshold={staleThreshold}
+                  otelHealth={otelHealth}
                 />
               </div>
             ) : (

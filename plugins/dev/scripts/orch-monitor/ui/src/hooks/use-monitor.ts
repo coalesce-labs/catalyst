@@ -9,6 +9,7 @@ import type {
   WorkerState,
   OrchestratorState,
   SessionState,
+  OtelHealth,
 } from "@/lib/types";
 
 const MAX_EVENTS = 200;
@@ -65,6 +66,7 @@ export function useMonitor() {
   const [linear, setLinear] = useState<Map<string, LinearTicket>>(new Map());
   const [attention, setAttention] = useState<CollectedAttention[]>([]);
   const [sessions, setSessions] = useState<SessionState[]>([]);
+  const [otelHealth, setOtelHealth] = useState<OtelHealth | null>(null);
 
   const prevWorkerRef = useRef<Map<string, WorkerPrev>>(new Map());
   const seenAttentionRef = useRef<Set<string>>(new Set());
@@ -386,6 +388,21 @@ export function useMonitor() {
     return () => clearInterval(id);
   }, []);
 
+  // OTel health polling
+  useEffect(() => {
+    async function refresh() {
+      try {
+        const resp = await fetch("/api/health/otel");
+        if (!resp.ok) return;
+        const data = (await resp.json()) as OtelHealth;
+        setOtelHealth(data);
+      } catch {}
+    }
+    refresh();
+    const id = setInterval(refresh, 30000);
+    return () => clearInterval(id);
+  }, []);
+
   const getAnalytics = useCallback(
     (orchId: string) => analytics.get(orchId) || {},
     [analytics],
@@ -404,6 +421,7 @@ export function useMonitor() {
     analytics: getAnalytics,
     linear: getLinear,
     sessions,
+    otelHealth,
     staleThreshold: STALE_THRESHOLD,
   };
 }

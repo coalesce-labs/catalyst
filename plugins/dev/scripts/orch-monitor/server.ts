@@ -50,6 +50,10 @@ import {
 } from "./lib/prometheus";
 import { createLokiFetcher, type LokiFetcher } from "./lib/loki";
 import {
+  createOtelHealthChecker,
+  type OtelHealthChecker,
+} from "./lib/otel-health";
+import {
   costByTicket,
   tokensByType,
   cacheHitRate,
@@ -95,6 +99,7 @@ export interface CreateServerOptions {
   lokiUrl?: string | null;
   prometheusFetcher?: PrometheusFetcher | null;
   lokiFetcher?: LokiFetcher | null;
+  otelHealthChecker?: OtelHealthChecker | null;
   previewFetcher?: PreviewFetcher | null;
   previewRefreshMs?: number;
   annotationsDbPath?: string;
@@ -281,6 +286,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     lokiUrl,
     prometheusFetcher: promFetcherOpt,
     lokiFetcher: lokiFetcherOpt,
+    otelHealthChecker: otelHealthCheckerOpt,
     previewFetcher: previewFetcherOpt,
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
@@ -324,6 +330,13 @@ export function createServer(opts: CreateServerOptions): BunServer {
     lokiFetcherOpt === null
       ? null
       : (lokiFetcherOpt ?? (lokiUrl ? createLokiFetcher({ baseUrl: lokiUrl }) : null));
+
+  const otelHealth: OtelHealthChecker =
+    otelHealthCheckerOpt ??
+    createOtelHealthChecker({
+      prometheusUrl: prometheusUrl ?? null,
+      lokiUrl: lokiUrl ?? null,
+    });
 
   const previewFetcher: PreviewFetcher | null =
     previewFetcherOpt === null
@@ -667,6 +680,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
             prometheus: prom ? prom.isAvailable() : false,
             loki: loki ? loki.isAvailable() : false,
           });
+        }
+
+        if (url.pathname === "/api/health/otel") {
+          const health = await otelHealth.check();
+          return Response.json(health);
         }
 
         if (url.pathname === "/api/otel/cost") {

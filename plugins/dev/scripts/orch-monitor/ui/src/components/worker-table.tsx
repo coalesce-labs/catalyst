@@ -16,6 +16,7 @@ import {
   type WorkerState,
   type WorkerAnalytics,
   type LinearTicket,
+  type OtelHealth,
 } from "@/lib/types";
 import { Users } from "lucide-react";
 
@@ -27,6 +28,18 @@ interface WorkerTableProps {
   filterWave?: number | null;
   onWorkerSelect?: (ticket: string) => void;
   selectedTicket?: string | null;
+  otelHealth?: OtelHealth | null;
+}
+
+function missingSignalReason(otelHealth: OtelHealth | null | undefined): string | null {
+  if (!otelHealth) return null;
+  if (!otelHealth.configured) {
+    return "OTel not configured — run /catalyst-dev:setup-catalyst to enable cost/token tracking.";
+  }
+  if (otelHealth.prometheus.url && !otelHealth.prometheus.reachable) {
+    return `Prometheus unreachable (${otelHealth.prometheus.url}) — cost/token data temporarily unavailable.`;
+  }
+  return null;
 }
 
 function LabelChip({ label }: { label: string }) {
@@ -156,6 +169,7 @@ function WorkerRow({
   staleThreshold,
   onClick,
   isSelected,
+  noSignalReason,
 }: {
   ticket: string;
   w: WorkerState;
@@ -165,6 +179,7 @@ function WorkerRow({
   staleThreshold: number;
   onClick?: () => void;
   isSelected?: boolean;
+  noSignalReason: string | null;
 }) {
   const ticketUrl =
     linear?.url || `https://linear.app/issue/${encodeURIComponent(ticket)}`;
@@ -240,6 +255,13 @@ function WorkerRow({
       <td className="px-3 py-2.5 text-right font-mono text-[12px] tabular-nums">
         {cost > 0 ? (
           <span className="text-fg">{fmtCost(cost)}</span>
+        ) : noSignalReason ? (
+          <span
+            className="cursor-help border-b border-dotted border-muted text-muted"
+            title={noSignalReason}
+          >
+            —
+          </span>
         ) : (
           <span className="text-muted">—</span>
         )}
@@ -247,6 +269,13 @@ function WorkerRow({
       <td className="px-3 py-2.5 text-right font-mono text-[12px] tabular-nums">
         {tokens > 0 ? (
           <span className="text-fg">{fmtTokens(tokens)}</span>
+        ) : noSignalReason ? (
+          <span
+            className="cursor-help border-b border-dotted border-muted text-muted"
+            title={noSignalReason}
+          >
+            —
+          </span>
         ) : (
           <span className="text-muted">—</span>
         )}
@@ -312,7 +341,9 @@ export function WorkerTable({
   filterWave,
   onWorkerSelect,
   selectedTicket,
+  otelHealth,
 }: WorkerTableProps) {
+  const noSignalReason = missingSignalReason(otelHealth);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const { sort, toggleSort, sortFn } = useSort<WorkerSortKey>("wave");
@@ -443,6 +474,7 @@ export function WorkerTable({
                   staleThreshold={staleThreshold}
                   onClick={onWorkerSelect ? () => onWorkerSelect(t) : undefined}
                   isSelected={selectedTicket === t}
+                  noSignalReason={noSignalReason}
                 />
               ))}
             </tbody>
