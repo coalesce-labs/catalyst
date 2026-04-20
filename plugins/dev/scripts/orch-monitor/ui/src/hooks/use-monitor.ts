@@ -38,7 +38,7 @@ function collectAttention(snap: MonitorSnapshot): CollectedAttention[] {
         items.push({
           orchId: orch.id,
           ticket,
-          reason: "Process died",
+          reason: "Worker died",
           severity: "error",
         });
       }
