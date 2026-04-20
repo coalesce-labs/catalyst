@@ -154,6 +154,32 @@ Best practices:
 - Each teammate owns distinct files (prevent conflicts)
 - Use plan approval gates for risky work
 
+## Agent Communication (catalyst-comms)
+
+Agents coordinate across worktrees via `catalyst-comms`, a file-based JSONL messaging system at
+`~/catalyst/comms/channels/<name>.jsonl`. Orchestrators create a shared channel
+`orch-<orchId>` at startup and export `CATALYST_COMMS_CHANNEL` to every dispatched worker's
+environment. Workers auto-join on startup and post `info` messages at each lifecycle boundary
+(start, phase transitions, PR opened), `attention` when blocked, and `done` on settle.
+
+```bash
+# Orchestrator side (Phase 1 init)
+catalyst-comms join "orch-${ORCH_NAME}" --as orchestrator --capabilities "coordinates workers"
+
+# Worker dispatch env
+CATALYST_COMMS_CHANNEL="orch-${ORCH_NAME}" exec claude -p "/oneshot ${TICKET_ID}"
+
+# Worker side (oneshot startup)
+catalyst-comms join "$CATALYST_COMMS_CHANNEL" --as "$TICKET_ID" --parent orchestrator
+
+# Live tailing (human auditor)
+catalyst-comms watch "orch-${ORCH_NAME}"
+```
+
+The contract: every worker produces ≥4 messages per run. Signal files remain the authoritative
+state — comms is observability and cross-worker coordination. See
+`plugins/dev/skills/catalyst-comms/SKILL.md` for the full protocol.
+
 ## Context Management Principles
 
 1. **Context is precious** — Use specialized agents, not monoliths

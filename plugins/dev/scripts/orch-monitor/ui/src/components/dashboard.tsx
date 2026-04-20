@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { fmtDuration, fmtCost, fmtSince } from "@/lib/formatters";
 import { computeOrchestratorStats } from "@/lib/computations";
+import { filterOrchestrators } from "@/lib/session-filters";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "./ui/badge";
 import { StatusDot, HealthIcon } from "./ui/status-dot";
@@ -11,6 +13,7 @@ import { AttentionBar } from "./attention-bar";
 import { EventLog } from "./event-log";
 import type {
   OrchestratorState,
+  SessionTimeFilter,
   WorkerAnalytics,
   CollectedAttention,
   EventEntry,
@@ -18,7 +21,15 @@ import type {
   SessionKind,
 } from "@/lib/types";
 import { sessionKind } from "@/lib/types";
-import { ChevronRight, Clock, Layers, Terminal, GitBranch, Workflow } from "lucide-react";
+import {
+  ChevronRight,
+  ChevronDown,
+  Clock,
+  Layers,
+  Terminal,
+  GitBranch,
+  Workflow,
+} from "lucide-react";
 
 interface DashboardProps {
   orchestrators: OrchestratorState[];
@@ -29,6 +40,7 @@ interface DashboardProps {
   onSelectOrch: (orchId: string) => void;
   selectedSessionId?: string | null;
   onSessionSelect?: (sessionId: string) => void;
+  timeFilter: SessionTimeFilter;
 }
 
 function OrchestratorCard({
@@ -201,7 +213,14 @@ export function Dashboard({
   onSelectOrch,
   selectedSessionId,
   onSessionSelect,
+  timeFilter,
 }: DashboardProps) {
+  const { visible: visibleOrchs, recent: recentOrchs } = filterOrchestrators(
+    orchestrators,
+    timeFilter,
+  );
+  const [recentExpanded, setRecentExpanded] = useState(false);
+
   return (
     <div className="flex flex-col gap-4">
       <h1 className="text-lg font-bold text-fg">Dashboard</h1>
@@ -212,11 +231,11 @@ export function Dashboard({
 
       <div>
         <SectionLabel className="mb-2 block">
-          Orchestrators ({orchestrators.length})
+          Orchestrators ({visibleOrchs.length})
         </SectionLabel>
-        {orchestrators.length > 0 ? (
+        {visibleOrchs.length > 0 ? (
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {orchestrators.map((o) => (
+            {visibleOrchs.map((o) => (
               <OrchestratorCard
                 key={o.id}
                 orch={o}
@@ -227,6 +246,38 @@ export function Dashboard({
           </div>
         ) : (
           <EmptyState icon={Layers} message="No active orchestrators found" />
+        )}
+
+        {recentOrchs.length > 0 && (
+          <div className="mt-3">
+            <button
+              onClick={() => setRecentExpanded((e) => !e)}
+              className="flex items-center gap-1.5 px-1 py-1 text-[11px] font-medium text-muted transition-colors hover:text-fg"
+              aria-expanded={recentExpanded}
+              aria-label={`${recentExpanded ? "Hide" : "Show"} Recent orchestrators (${recentOrchs.length})`}
+            >
+              {recentExpanded ? (
+                <ChevronDown className="h-3.5 w-3.5" />
+              ) : (
+                <ChevronRight className="h-3.5 w-3.5" />
+              )}
+              <span>
+                {recentExpanded ? "Hide" : "Show"} Recent ({recentOrchs.length})
+              </span>
+            </button>
+            {recentExpanded && (
+              <div className="mt-2 grid gap-3 opacity-60 sm:grid-cols-2 xl:grid-cols-3">
+                {recentOrchs.map((o) => (
+                  <OrchestratorCard
+                    key={o.id}
+                    orch={o}
+                    getAnalytics={getAnalytics}
+                    onClick={() => onSelectOrch(o.id)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

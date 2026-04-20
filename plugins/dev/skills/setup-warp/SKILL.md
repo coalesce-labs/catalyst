@@ -131,8 +131,17 @@ possible, or sequential questions):
 - **Emoji** — for main tab (default: `📦`)
 - **Color** — Warp only accepts these 8 values: `black`, `red`, `green`, `yellow`, `blue`,
   `magenta`, `cyan`, `white`. **Do not offer any others** — Warp rejects unknown variants with a
-  TOML parse error at load. Recommend against `black` (invisible on dark themes). Each project
-  gets a distinct color so vertical-sidebar tabs are visually separable.
+  TOML parse error at load. Recommend against `black` (invisible on dark themes).
+
+  **Assign by GitHub org, not per-project.** Derive the org from the project path
+  (e.g., `/Users/ryan/code-repos/github/coalesce-labs/catalyst` → `coalesce-labs`). All repos from
+  the same org share one color so the vertical sidebar visually groups them. Ask the user once per
+  org, not once per project.
+
+  **`blue` is reserved for PM tabs.** Recommend it strongly but let the user pick something else if
+  they want — just warn that picking blue for an org will conflict with the PM convention (blue PM
+  tabs become indistinguishable from that org's rows in the sidebar). Do not offer `blue` in the
+  per-org color picker.
 - **Variants** — multi-select from:
   - Main (always recommended)
   - PM worktree (only for Catalyst-managed projects)

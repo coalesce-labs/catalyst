@@ -6,9 +6,14 @@ import type {
 } from "./types";
 
 export interface OrchestratorStats {
+  /** Effective denominator: workers counted toward completion (excludes abandoned). */
   total: number;
+  /** Merged workers (status in {done, merged}). */
   done: number;
+  /** Failed workers (status === "failed"). Not abandoned — still in denominator. */
   failed: number;
+  /** Abandoned / no-longer-required workers (status in {superseded, canceled}). Excluded from denominator. */
+  abandoned: number;
   active: number;
   pct: number;
   totalCost: number;
@@ -19,8 +24,19 @@ export interface OrchestratorStats {
   maxEndMs: number;
 }
 
-function isDone(status: string): boolean {
-  return status === "done" || status === "merged";
+const MERGED_STATUSES = new Set(["done", "merged"]);
+const ABANDONED_STATUSES = new Set(["superseded", "canceled"]);
+
+export function isMerged(status: string): boolean {
+  return MERGED_STATUSES.has(status);
+}
+
+export function isAbandoned(status: string): boolean {
+  return ABANDONED_STATUSES.has(status);
+}
+
+export function isSettled(status: string): boolean {
+  return isMerged(status) || isAbandoned(status) || status === "failed";
 }
 
 export function effectiveCost(
@@ -71,6 +87,7 @@ export function computeOrchestratorStats(
   const entries = Object.entries(orch.workers);
   let done = 0;
   let failed = 0;
+  let abandoned = 0;
   let active = 0;
   let totalCost = 0;
   let totalDurationMs = 0;
@@ -78,8 +95,9 @@ export function computeOrchestratorStats(
   let maxEndMs = -Infinity;
 
   for (const [ticket, w] of entries) {
-    if (isDone(w.status)) done++;
-    if (w.status === "failed") failed++;
+    if (isMerged(w.status)) done++;
+    else if (isAbandoned(w.status)) abandoned++;
+    else if (w.status === "failed") failed++;
     if (w.alive) active++;
     totalCost += effectiveCost(w, analyticsMap[ticket]);
     const a = analyticsMap[w.ticket || ticket];
@@ -92,7 +110,7 @@ export function computeOrchestratorStats(
     if (Number.isFinite(eMs)) maxEndMs = Math.max(maxEndMs, eMs);
   }
 
-  const total = entries.length;
+  const total = entries.length - abandoned;
   const orchStartMs = orch.startedAt ? Date.parse(orch.startedAt) : NaN;
   const startMs = Number.isFinite(orchStartMs)
     ? orchStartMs
@@ -112,6 +130,7 @@ export function computeOrchestratorStats(
     total,
     done,
     failed,
+    abandoned,
     active,
     pct: total > 0 ? Math.round((done / total) * 100) : 0,
     totalCost,
@@ -128,5 +147,5 @@ export function waveDoneCount(
   workers: Record<string, WorkerState>,
 ): number {
   const tickets = Array.isArray(wave.tickets) ? wave.tickets : [];
-  return tickets.filter((t) => isDone(workers[t]?.status || "")).length;
+  return tickets.filter((t) => isMerged(workers[t]?.status || "")).length;
 }

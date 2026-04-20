@@ -6,12 +6,13 @@ import { StatusBadge } from "./ui/badge";
 import { StatusDot } from "./ui/status-dot";
 import { ExternalLink } from "./ui/external-link";
 import { SectionLabel } from "./ui/panel";
-import type {
-  WorkerState,
-  WorkerAnalytics,
-  LinearTicket,
-  StreamEvent,
-  WorkerTask,
+import {
+  isWorkerDone,
+  type WorkerState,
+  type WorkerAnalytics,
+  type LinearTicket,
+  type StreamEvent,
+  type WorkerTask,
 } from "@/lib/types";
 import {
   X,
@@ -444,7 +445,7 @@ export function WorkerDetailDrawer({
             <div className="flex items-center gap-2">
               <span className="font-mono text-sm font-bold text-fg">{ticket}</span>
               <StatusBadge status={worker.status || "unknown"} />
-              {worker.pid && (
+              {worker.pid && !isWorkerDone(worker.status) && (
                 <span className="flex items-center gap-1">
                   <StatusDot alive={worker.alive} />
                 </span>
