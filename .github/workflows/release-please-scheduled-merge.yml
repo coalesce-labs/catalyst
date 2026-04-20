@@ -1,0 +1,92 @@
+name: Release Please Scheduled Merge
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # 05:00 UTC = 22:00 PT / 01:00 ET
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  scheduled-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Merge open release PR (if any)
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          PR_NUMBER=$(gh pr list --repo "$REPO" --label "autorelease: pending" --state open \
+            --json number --jq '.[0].number // empty')
+
+          if [[ -z "$PR_NUMBER" ]]; then
+            echo "No open release PR — empty day, nothing to cut."
+            exit 0
+          fi
+
+          echo "Found open release PR #$PR_NUMBER"
+
+          PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json state,mergeStateStatus,mergeable)
+          STATE=$(echo "$PR_STATE" | jq -r '.state')
+          MERGE_STATE=$(echo "$PR_STATE" | jq -r '.mergeStateStatus')
+          MERGEABLE=$(echo "$PR_STATE" | jq -r '.mergeable')
+
+          echo "PR #$PR_NUMBER state=$STATE mergeStateStatus=$MERGE_STATE mergeable=$MERGEABLE"
+
+          if [[ "$STATE" != "OPEN" ]]; then
+            echo "Release PR is not open ($STATE), nothing to merge."
+            exit 0
+          fi
+
+          case "$MERGE_STATE" in
+            CLEAN|UNSTABLE|HAS_HOOKS)
+              echo "Merging release PR #$PR_NUMBER"
+              gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch
+              echo "Release PR #$PR_NUMBER merged"
+              ;;
+            BEHIND)
+              echo "::warning::Release PR #$PR_NUMBER is behind main; attempting update-branch"
+              gh api -X PUT "repos/${REPO}/pulls/${PR_NUMBER}/update-branch" || true
+              echo "::error::Release PR #$PR_NUMBER was behind; updated branch. Rerun this workflow after CI settles."
+              exit 1
+              ;;
+            BLOCKED|DIRTY|CONFLICTING|UNKNOWN|*)
+              echo "::error::Release PR #$PR_NUMBER not mergeable (mergeStateStatus=$MERGE_STATE)"
+
+              EXISTING=$(gh issue list --repo "$REPO" --label "release-health" --state open \
+                --json number --jq '.[0].number // empty')
+              if [[ -z "$EXISTING" ]]; then
+                BODY=$(cat <<EOF
+          The scheduled release-please merge workflow could not merge PR #$PR_NUMBER.
+
+          - state: $STATE
+          - mergeStateStatus: $MERGE_STATE
+          - mergeable: $MERGEABLE
+
+          **Next steps:**
+          1. Resolve the blocker on the release PR (CI red, conflicts, review required, etc.).
+          2. Either wait for the next scheduled run or manually trigger the
+             \`release-please-scheduled-merge\` workflow via \`workflow_dispatch\`.
+          3. Close this issue once the release cuts successfully.
+
+          _Created by release-please-scheduled-merge workflow_
+          EOF
+          )
+                gh issue create --repo "$REPO" \
+                  --title "Scheduled release merge blocked on PR #$PR_NUMBER" \
+                  --label "release-health" \
+                  --body "$BODY"
+              else
+                echo "Existing release-health issue #$EXISTING is open, not creating duplicate"
+              fi
+              exit 1
+              ;;
+          esac
