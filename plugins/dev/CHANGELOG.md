@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.4...catalyst-dev-v7.6.0) (2026-04-20)
+
+
+### Features
+
+* **dev:** New Worktree One-Shot Warp variant ([#215](https://github.com/coalesce-labs/catalyst/issues/215)) ([0614a96](https://github.com/coalesce-labs/catalyst/commit/0614a9633ddf8f98ea21afe24ad260504c1d3f18))
+* **dev:** PM kickoff prompt + worktree symlink fix ([#213](https://github.com/coalesce-labs/catalyst/issues/213)) ([b03fc87](https://github.com/coalesce-labs/catalyst/commit/b03fc87fc9cd7d4da41331cef6bda9e512c026a8))
+
 ## [7.5.4](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.5.3...catalyst-dev-v7.5.4)
 
 Apr 19, 2026
