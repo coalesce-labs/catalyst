@@ -17,8 +17,28 @@ const OrchestratorView = lazy(() =>
     default: m.OrchestratorView,
   })),
 );
+const Sandbox = lazy(() =>
+  import("./components/dev/sandbox").then((m) => ({ default: m.Sandbox })),
+);
+
+const isDevSandbox =
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).get("dev") === "1";
 
 export default function App() {
+  if (isDevSandbox) {
+    return (
+      <div className="h-screen overflow-y-auto bg-surface-0 text-fg">
+        <Suspense fallback={null}>
+          <Sandbox />
+        </Suspense>
+      </div>
+    );
+  }
+  return <Monitor />;
+}
+
+function Monitor() {
   const {
     snapshot,
     connectionStatus,
