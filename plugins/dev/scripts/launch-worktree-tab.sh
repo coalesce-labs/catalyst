@@ -6,11 +6,12 @@
 # permanent "pm" worktree and on-demand ticket worktrees.
 #
 # Usage:
-#   launch-worktree-tab.sh [--project NAME] [--prompt-file PATH] <worktree-name> [base-branch] [description]
+#   launch-worktree-tab.sh [--project NAME] [--prompt-file PATH | --prompt STRING] <worktree-name> [base-branch] [description]
 #
 # Examples:
 #   launch-worktree-tab.sh --project catalyst pm main
 #   launch-worktree-tab.sh --project catalyst --prompt-file /path/to/pm-kickoff.md pm main
+#   launch-worktree-tab.sh --project catalyst --prompt '/catalyst-dev:oneshot CTL-123' CTL-123 main
 #   launch-worktree-tab.sh --project catalyst CTL-64 main fix-auth
 #   launch-worktree-tab.sh ADV-230 main                  # --project omitted
 #
@@ -21,6 +22,10 @@
 # --prompt-file: Path to a file whose contents are passed to claude as the
 # initial positional prompt (interactive mode). Missing file is a non-fatal
 # warning; the tab still opens normally.
+#
+# --prompt: Literal string passed to claude as the initial prompt. Use this
+# when the prompt is built from Warp params (e.g., /catalyst-dev:oneshot
+# {{ticket}}). If both --prompt and --prompt-file are given, --prompt wins.
 #
 # Must be invoked from the repo root (Warp tab sets `directory`). Expects
 # create-worktree.sh and catalyst-claude.sh in a sibling directory.
@@ -33,10 +38,12 @@ CLAUDE_LAUNCHER="${SCRIPT_DIR}/catalyst-claude.sh"
 
 PROJECT=""
 PROMPT_FILE=""
+PROMPT_STRING=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT="$2"; shift 2 ;;
     --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
+    --prompt) PROMPT_STRING="$2"; shift 2 ;;
     --) shift; break ;;
     --*) echo "Unknown flag: $1" >&2; exit 2 ;;
     *) break ;;
@@ -84,6 +91,10 @@ fi
 # Forward session name to claude via catalyst-claude.sh (reads CATALYST_WARP_*)
 export CATALYST_WARP_NAME="$SESSION_NAME"
 export CATALYST_WARP_REMOTE="$SESSION_NAME"
+
+if [[ -n "$PROMPT_STRING" ]]; then
+  exec "$CLAUDE_LAUNCHER" "$PROMPT_STRING"
+fi
 
 if [[ -n "$PROMPT_FILE" ]]; then
   if [[ -f "$PROMPT_FILE" ]]; then
