@@ -27,6 +27,7 @@ import {
   CheckCircle2,
   Circle,
   Loader2,
+  RotateCw,
 } from "lucide-react";
 
 interface WorkerDetailDrawerProps {
@@ -224,22 +225,41 @@ function TaskStatusIcon({ status }: { status: string }) {
   }
 }
 
+type TaskStatus = "loading" | "ok" | "empty" | "error";
+
 function TaskListSection({ pid }: { pid: number | null }) {
   const [taskData, setTaskData] = useState<TaskListData | null>(null);
+  const [status, setStatus] = useState<TaskStatus>("loading");
   const [expanded, setExpanded] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
-    if (!pid) return;
+    if (!pid) {
+      setStatus("empty");
+      setTaskData(null);
+      return;
+    }
     let cancelled = false;
 
     async function fetchTasks() {
       try {
         const resp = await fetch(`/api/worker-tasks?pid=${pid}`);
-        if (!resp.ok || cancelled) return;
+        if (cancelled) return;
+        if (!resp.ok) {
+          setStatus("error");
+          return;
+        }
         const data = await resp.json();
-        if (!cancelled && data.tasks) setTaskData(data.tasks);
+        if (cancelled) return;
+        if (data.tasks && data.tasks.tasks && data.tasks.tasks.length > 0) {
+          setTaskData(data.tasks);
+          setStatus("ok");
+        } else {
+          setTaskData(null);
+          setStatus("empty");
+        }
       } catch {
-        // ignore
+        if (!cancelled) setStatus("error");
       }
     }
 
@@ -249,73 +269,116 @@ function TaskListSection({ pid }: { pid: number | null }) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [pid]);
+  }, [pid, retryKey]);
 
-  if (!taskData || taskData.tasks.length === 0) return null;
+  const activeTask =
+    status === "ok" && taskData
+      ? taskData.tasks.find((t) => t.status === "in_progress")
+      : undefined;
 
-  const activeTask = taskData.tasks.find((t) => t.status === "in_progress");
+  const canExpand = status === "ok";
 
   return (
     <div className="border-b border-border-subtle px-4 py-3">
       <button
-        onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-1.5 text-left"
+        onClick={() => canExpand && setExpanded(!expanded)}
+        disabled={!canExpand}
+        className={cn(
+          "flex w-full items-center gap-1.5 text-left",
+          !canExpand && "cursor-default",
+        )}
       >
-        {expanded ? (
-          <ChevronDown className="h-3 w-3 text-muted" />
+        {canExpand ? (
+          expanded ? (
+            <ChevronDown className="h-3 w-3 text-muted" />
+          ) : (
+            <ChevronRight className="h-3 w-3 text-muted" />
+          )
         ) : (
-          <ChevronRight className="h-3 w-3 text-muted" />
+          <span className="h-3 w-3" />
         )}
         <ListTodo className="h-3.5 w-3.5 text-muted" />
         <SectionLabel>Tasks</SectionLabel>
-        <span className="ml-auto font-mono text-[10px] text-muted tabular-nums">
-          {taskData.completed}/{taskData.total}
-        </span>
+        {status === "ok" && taskData && (
+          <span className="ml-auto font-mono text-[10px] text-muted tabular-nums">
+            {taskData.completed}/{taskData.total}
+          </span>
+        )}
       </button>
 
-      {/* Always show active task */}
-      {activeTask && !expanded && (
-        <div className="mt-1.5 flex items-center gap-2 pl-5">
-          <Loader2 className="h-3 w-3 animate-spin text-blue" />
-          <span className="truncate text-[11px] text-fg">
-            {activeTask.activeForm || activeTask.subject}
-          </span>
+      {status === "empty" && (
+        <div className="mt-1.5 flex items-center gap-2 pl-5 text-[11px] text-muted">
+          <span>No task list for this worker</span>
         </div>
       )}
 
-      {/* Expanded: show all tasks */}
-      {expanded && (
-        <div className="mt-2 space-y-1 pl-5">
-          {taskData.tasks.map((task) => (
-            <div key={task.id} className="flex items-start gap-2">
-              <span className="mt-0.5">
-                <TaskStatusIcon status={task.status} />
-              </span>
-              <span
-                className={cn(
-                  "text-[11px]",
-                  task.status === "completed"
-                    ? "text-muted line-through"
-                    : task.status === "in_progress"
-                      ? "text-fg"
-                      : "text-muted",
-                )}
-              >
-                {task.subject}
+      {status === "error" && (
+        <div className="mt-1.5 flex items-center gap-2 pl-5 text-[11px] text-muted">
+          <span>Task list unavailable</span>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setStatus("loading");
+              setRetryKey((k) => k + 1);
+            }}
+            className="ml-auto flex items-center gap-1 rounded-md border border-border px-1.5 py-0.5 text-[10px] text-fg transition-colors hover:bg-surface-3"
+          >
+            <RotateCw className="h-3 w-3" />
+            Retry
+          </button>
+        </div>
+      )}
+
+      {status === "ok" && taskData && (
+        <>
+          {/* Always show active task */}
+          {activeTask && !expanded && (
+            <div className="mt-1.5 flex items-center gap-2 pl-5">
+              <Loader2 className="h-3 w-3 animate-spin text-blue" />
+              <span className="truncate text-[11px] text-fg">
+                {activeTask.activeForm || activeTask.subject}
               </span>
             </div>
-          ))}
-        </div>
-      )}
+          )}
 
-      {/* Progress bar */}
-      {taskData.total > 1 && (
-        <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface-3">
-          <div
-            className="h-full rounded-full bg-green transition-all"
-            style={{ width: `${(taskData.completed / taskData.total) * 100}%` }}
-          />
-        </div>
+          {/* Expanded: show all tasks */}
+          {expanded && (
+            <div className="mt-2 space-y-1 pl-5">
+              {taskData.tasks.map((task) => (
+                <div key={task.id} className="flex items-start gap-2">
+                  <span className="mt-0.5">
+                    <TaskStatusIcon status={task.status} />
+                  </span>
+                  <span
+                    className={cn(
+                      "text-[11px]",
+                      task.status === "completed"
+                        ? "text-muted line-through"
+                        : task.status === "in_progress"
+                          ? "text-fg"
+                          : "text-muted",
+                    )}
+                  >
+                    {task.subject}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Progress bar */}
+          {taskData.total > 1 && (
+            <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface-3">
+              <div
+                className="h-full rounded-full bg-green transition-all"
+                style={{
+                  width: `${(taskData.completed / taskData.total) * 100}%`,
+                }}
+              />
+            </div>
+          )}
+        </>
       )}
     </div>
   );

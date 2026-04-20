@@ -13,7 +13,11 @@ import { readSessionStore } from "./lib/session-store";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import { startWatching, type WatcherHandle } from "./lib/watcher";
 import { readRecentStreamEvents } from "./lib/stream-reader";
-import { sessionIdFromPid, readWorkerTasks } from "./lib/task-reader";
+import {
+  sessionIdFromPid,
+  readWorkerTasks,
+  getTaskDiagnostic,
+} from "./lib/task-reader";
 import {
   createEvent,
   parseFilter,
@@ -589,6 +593,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
             Number.isFinite(maxEvents) ? maxEvents : 30,
           );
           return Response.json({ orchId, ticket, events });
+        }
+
+        if (url.pathname === "/api/worker-tasks/debug") {
+          const pidRaw = url.searchParams.get("pid");
+          const sessionIdParam = url.searchParams.get("sessionId");
+          if (!pidRaw && !sessionIdParam) {
+            return new Response("pid or sessionId required", { status: 400 });
+          }
+          const diagnostic = getTaskDiagnostic({
+            pid: pidRaw ? Number(pidRaw) : undefined,
+            sessionId: sessionIdParam ?? undefined,
+          });
+          return Response.json(diagnostic);
         }
 
         const taskMatch = url.pathname.match(
