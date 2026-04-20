@@ -11,6 +11,11 @@ import {
 } from "./lib/state-reader";
 import { readSessionStore } from "./lib/session-store";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
+import {
+  listArchivedOrchestrators,
+  getArchivedOrchestrator,
+  getArchivePath,
+} from "./lib/archive-reader";
 import { startWatching, type WatcherHandle } from "./lib/watcher";
 import { readRecentStreamEvents } from "./lib/stream-reader";
 import {
@@ -251,6 +256,39 @@ function resolveSafeStaticPath(
   const ext = dot >= 0 ? realTarget.slice(dot).toLowerCase() : "";
   if (!ALLOWED_PUBLIC_EXTENSIONS.has(ext)) return null;
   return realTarget;
+}
+
+const SAFE_ARCHIVE_PART = /^[A-Za-z0-9._-]+$/;
+const ARCHIVE_FILE_REL_FORBIDDEN = /(^|\/)\.\.(\/|$)|\\|\0/;
+
+function isSafeArchivePart(s: string): boolean {
+  if (s.length === 0 || s.length > 120) return false;
+  return SAFE_ARCHIVE_PART.test(s);
+}
+
+function isSafeArchiveFileRel(s: string): boolean {
+  if (s.length === 0 || s.length > 250) return false;
+  if (s.startsWith("/")) return false;
+  if (ARCHIVE_FILE_REL_FORBIDDEN.test(s)) return false;
+  return s.split("/").every((seg) => seg === "" ? false : SAFE_ARCHIVE_PART.test(seg));
+}
+
+function contentTypeForArchive(path: string): string {
+  const dot = path.lastIndexOf(".");
+  const ext = dot >= 0 ? path.slice(dot).toLowerCase() : "";
+  switch (ext) {
+    case ".md":
+      return "text/markdown; charset=utf-8";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".jsonl":
+      return "application/x-ndjson; charset=utf-8";
+    case ".txt":
+    case ".log":
+      return "text/plain; charset=utf-8";
+    default:
+      return "application/octet-stream";
+  }
 }
 
 function contentTypeForExt(ext: string): string {
@@ -945,6 +983,105 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
 
           return new Response("Method Not Allowed", { status: 405 });
+        }
+
+        if (url.pathname === "/api/archive/orchestrators") {
+          if (!dbPath) {
+            return Response.json({ entries: [], total: 0 });
+          }
+          const params = url.searchParams;
+          const limitRaw = params.get("limit");
+          const offsetRaw = params.get("offset");
+          const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
+          const parsedOffset = offsetRaw ? Number.parseInt(offsetRaw, 10) : NaN;
+          const result = listArchivedOrchestrators(dbPath, {
+            since: params.get("since") ?? undefined,
+            until: params.get("until") ?? undefined,
+            ticket: params.get("ticket") ?? undefined,
+            status: params.get("status") ?? undefined,
+            limit: Number.isFinite(parsedLimit) ? parsedLimit : undefined,
+            offset: Number.isFinite(parsedOffset) ? parsedOffset : undefined,
+          });
+          return Response.json(result);
+        }
+
+        const archiveFileMatch = url.pathname.match(
+          /^\/api\/archive\/orchestrators\/([^/]+)\/files\/(.+)$/,
+        );
+        if (archiveFileMatch) {
+          if (!dbPath) {
+            return new Response("Not Found", { status: 404 });
+          }
+          let orchId: string;
+          let fileRel: string;
+          try {
+            orchId = decodeURIComponent(archiveFileMatch[1]);
+            fileRel = decodeURIComponent(archiveFileMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            !isSafeArchivePart(orchId) ||
+            !isSafeArchiveFileRel(fileRel)
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const archivePath = getArchivePath(dbPath, orchId);
+          if (!archivePath) {
+            return new Response("Not Found", { status: 404 });
+          }
+          const candidate = resolvePath(archivePath, fileRel);
+          let realRoot: string;
+          try {
+            realRoot = realpathSync(archivePath);
+          } catch {
+            return new Response("Not Found", { status: 404 });
+          }
+          let realTarget: string;
+          try {
+            realTarget = realpathSync(candidate);
+          } catch {
+            return new Response("Not Found", { status: 404 });
+          }
+          if (
+            realTarget !== realRoot &&
+            !realTarget.startsWith(realRoot + sep)
+          ) {
+            return new Response("Forbidden", { status: 403 });
+          }
+          const file = Bun.file(realTarget);
+          if (!(await file.exists())) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return new Response(file, {
+            headers: {
+              "Content-Type": contentTypeForArchive(realTarget),
+              "Cache-Control": "private, max-age=60",
+            },
+          });
+        }
+
+        const archiveDetailMatch = url.pathname.match(
+          /^\/api\/archive\/orchestrators\/([^/]+)$/,
+        );
+        if (archiveDetailMatch) {
+          if (!dbPath) {
+            return new Response("Not Found", { status: 404 });
+          }
+          let orchId: string;
+          try {
+            orchId = decodeURIComponent(archiveDetailMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!isSafeArchivePart(orchId)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const detail = getArchivedOrchestrator(dbPath, orchId);
+          if (!detail) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return Response.json(detail);
         }
 
         if (

@@ -214,7 +214,12 @@ export function isWorkerDone(status: string): boolean {
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "reconnecting";
-export type TabId = "overview" | "workers" | "timeline" | "events";
+export type TabId =
+  | "overview"
+  | "workers"
+  | "timeline"
+  | "events"
+  | "briefing";
 
 export interface CollectedAttention {
   orchId: string;

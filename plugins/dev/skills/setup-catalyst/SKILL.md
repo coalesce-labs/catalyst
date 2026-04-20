@@ -54,6 +54,7 @@ user rather than overwriting anything.
 | `schema_migrations` table missing | Run `catalyst-db.sh init` — it's idempotent |
 | WAL mode not set | `sqlite3 ~/catalyst/catalyst.db 'PRAGMA journal_mode=WAL;'` |
 | `thoughts/shared/<dir>` missing | Run `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` (re-uses humanlayer when configured; warns loudly when no thoughts repo is set up) |
+| `~/.catalyst/bin/` missing OR any catalyst-* symlink absent/broken | Run `bash plugins/dev/scripts/install-cli.sh` — idempotent, safe to re-run. If `$HOME/.catalyst/bin` is not on `$PATH`, the script prints the exact line to add to `~/.zshrc` or `~/.bashrc` — relay that to the user so they can finish the one-time PATH setup. |
 | `thoughts/shared` is a regular directory (not a symlink) | **Fatal — do not auto-fix.** Tell the user the humanlayer symlink was clobbered and show recovery: `mv thoughts/shared thoughts/shared.orphaned-$(date +%Y%m%d)` then `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` |
 | Profile drift between `.catalyst/config.json` and humanlayer mapping | Run `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` — it now auto-repairs drift by running `humanlayer thoughts uninit --force && humanlayer thoughts init --profile <config profile> --directory <config directory>`. (Plain `humanlayer thoughts init --force` does NOT update an existing repo→profile mapping, so the `uninit` step is required.) |
 

@@ -54,6 +54,7 @@ bun run plugins/dev/scripts/orch-monitor/server.ts --terminal
 - [Using the web monitor](./monitor/) — dashboard walkthrough, API endpoints, filters
 - [Using the terminal UI](./terminal/) — when to prefer ANSI over the browser
 - [Event architecture](./events/) — how SSE streams and the global event log fit together
+- [Agent communication (`catalyst-comms`)](../reference/catalyst-comms/) — how workers coordinate with each other across worktrees
 
 ## When Not to Enable Observability
 

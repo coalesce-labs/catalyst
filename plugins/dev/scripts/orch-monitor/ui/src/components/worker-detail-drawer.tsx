@@ -7,6 +7,13 @@ import { StatusDot } from "./ui/status-dot";
 import { SectionLabel } from "./ui/panel";
 import { PrBadge } from "./ui/pr-badge";
 import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "./ui/sheet";
+import {
   isWorkerDone,
   type WorkerState,
   type WorkerAnalytics,
@@ -15,7 +22,6 @@ import {
   type WorkerTask,
 } from "@/lib/types";
 import {
-  X,
   Terminal,
   Clock,
   DollarSign,
@@ -433,37 +439,36 @@ export function WorkerDetailDrawer({
     : 0;
 
   return (
-    <>
-      <div
-        className="fixed inset-0 z-40 bg-black/40"
-        onClick={onClose}
-      />
-      <div className="animate-drawer-in fixed inset-y-0 right-0 z-50 flex w-[420px] max-w-[90vw] flex-col border-l border-border bg-surface-1 shadow-2xl">
+    <Sheet open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <SheetContent
+        side="right"
+        className="flex w-full flex-col gap-0 border-l border-border bg-surface-1 p-0 sm:max-w-[540px]"
+      >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <SheetHeader className="flex flex-row items-center gap-2 space-y-0 border-b border-border px-4 py-3 pr-12">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-sm font-bold text-fg">{ticket}</span>
-              <StatusBadge status={worker.status || "unknown"} />
-              {worker.pid && !isWorkerDone(worker.status) && (
-                <span className="flex items-center gap-1">
-                  <StatusDot alive={worker.alive} />
-                </span>
-              )}
-            </div>
+            <SheetTitle asChild>
+              <div className="flex items-center gap-2 text-sm font-bold text-fg">
+                <span className="font-mono">{ticket}</span>
+                <StatusBadge status={worker.status || "unknown"} />
+                {worker.pid && !isWorkerDone(worker.status) && (
+                  <span className="flex items-center gap-1">
+                    <StatusDot alive={worker.alive} />
+                  </span>
+                )}
+              </div>
+            </SheetTitle>
             {linear && (
               <span className="mt-0.5 block truncate text-[12px] text-muted" title={linear.title}>
                 {linear.title}
               </span>
             )}
+            <SheetDescription className="sr-only">
+              Worker detail for {ticket}
+              {linear ? `: ${linear.title}` : ""}.
+            </SheetDescription>
           </div>
-          <button
-            onClick={onClose}
-            className="rounded-md p-1.5 text-muted transition-colors hover:bg-surface-3 hover:text-fg"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
+        </SheetHeader>
 
         {/* Scrollable content */}
         <div className="flex-1 overflow-y-auto">
@@ -612,7 +617,7 @@ export function WorkerDetailDrawer({
             )}
           </div>
         </div>
-      </div>
-    </>
+      </SheetContent>
+    </Sheet>
   );
 }
