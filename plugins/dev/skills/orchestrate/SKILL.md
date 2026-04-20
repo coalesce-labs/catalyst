@@ -412,6 +412,21 @@ REPO=$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git
 The `CATALYST_ORCHESTRATOR_ID` is set to `${ORCH_NAME}` for use by workers (passed via environment
 variable alongside `CATALYST_ORCHESTRATOR_DIR`).
 
+**Create the shared comms channel (CTL-111):** the orchestrator creates a file-based channel that
+every worker will auto-join via `CATALYST_COMMS_CHANNEL` in its dispatch env. Best-effort — the
+orchestrator does not crash if `catalyst-comms` is missing.
+
+```bash
+# Shared channel for this run. Workers will join at dispatch time.
+if command -v catalyst-comms >/dev/null 2>&1; then
+  catalyst-comms join "orch-${ORCH_NAME}" \
+    --as orchestrator \
+    --capabilities "coordinates workers" \
+    --orch "${ORCH_NAME}" \
+    --ttl 7200 >/dev/null 2>&1 || true
+fi
+```
+
 **Start session tracking** (alongside the global state registration above):
 
 ```bash
@@ -450,6 +465,7 @@ SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
   cd "${WORKER_DIR}" || exit 1
   CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
   CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
+  CATALYST_COMMS_CHANNEL="orch-${ORCH_NAME}" \
   CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
   exec nohup claude \
     -n "${ORCH_NAME}-${TICKET_ID}" \
@@ -846,6 +862,41 @@ worker is responsible for polling its own PR and writing `mergedAt` itself; this
 loop is a safety net that catches merges the worker missed (e.g., if the worker exited
 prematurely on a transient error).
 
+**Poll shared comms channel for attention (CTL-111):**
+
+Workers post `type:attention` messages to `orch-${ORCH_NAME}` when blocked. On each monitoring
+cycle, the orchestrator scans new messages and promotes any `attention` to a state-level
+attention item so the dashboard's NEEDS ATTENTION banner surfaces it (with author + reason).
+
+A small cursor file `${ORCH_DIR}/.comms-cursor` tracks the line count already processed so
+repeated polls don't re-surface the same message. Single-writer (this loop) so no race.
+
+```bash
+if command -v catalyst-comms >/dev/null 2>&1; then
+  CURSOR_FILE="${ORCH_DIR}/.comms-cursor"
+  SINCE=$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)
+  CH_FILE="${HOME}/catalyst/comms/channels/orch-${ORCH_NAME}.jsonl"
+  TOTAL=$(wc -l < "$CH_FILE" 2>/dev/null | tr -d ' ' || echo 0)
+
+  if [ "${TOTAL:-0}" -gt "${SINCE:-0}" ]; then
+    catalyst-comms poll "orch-${ORCH_NAME}" --since "$SINCE" 2>/dev/null | \
+    while IFS= read -r MSG; do
+      MSG_TYPE=$(echo "$MSG" | jq -r '.type // ""' 2>/dev/null)
+      MSG_FROM=$(echo "$MSG" | jq -r '.from // ""' 2>/dev/null)
+      MSG_BODY=$(echo "$MSG" | jq -r '.body // ""' 2>/dev/null)
+
+      if [ "$MSG_TYPE" = "attention" ]; then
+        # Extract the ticket id from the author name (workers use their TICKET_ID as --as)
+        MSG_TICKET=$(echo "$MSG_FROM" | grep -oE '^[A-Z]+-[0-9]+' || echo "$MSG_FROM")
+        "$STATE_SCRIPT" attention "${ORCH_NAME}" "comms-attention" "$MSG_TICKET" \
+          "[$MSG_FROM] $MSG_BODY" 2>/dev/null || true
+      fi
+    done
+    echo "$TOTAL" > "$CURSOR_FILE"
+  fi
+fi
+```
+
 **Detect stalled workers and raise attention:**
 
 Before raising `stalled`, consult git + PR state. A stale signal file is not stall evidence on
@@ -1165,6 +1216,14 @@ When all waves are complete:
 5. **Complete and archive global state**:
 
 ```bash
+# CTL-111: post orchestrator done to shared comms channel. Workers have already
+# posted their own done messages via their poll loops; this closes out the orch
+# participant and is advisory — rc is ignored. Channel cleanup is deferred to
+# CTL-110's archive sweep (do NOT call `catalyst-comms gc` here — gc is global).
+if command -v catalyst-comms >/dev/null 2>&1; then
+  catalyst-comms done "orch-${ORCH_NAME}" --as orchestrator >/dev/null 2>&1 || true
+fi
+
 # Mark completed in global state
 "$STATE_SCRIPT" update "${ORCH_NAME}" \
   '.status = "completed" | .completedAt = $now | .progress.completedTickets = .progress.totalTickets | .progress.inProgressTickets = 0'

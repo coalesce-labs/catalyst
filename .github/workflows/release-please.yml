@@ -40,14 +40,3 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: bash scripts/enhance-release-notes.sh "$PR_NUMBER"
-
-  auto-merge:
-    runs-on: ubuntu-latest
-    needs: [release-please, enhance-release-notes]
-    if: ${{ always() && needs.release-please.outputs.pr && needs.release-please.result == 'success' }}
-    steps:
-      - name: Auto-merge release PR
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          gh pr merge ${{ fromJSON(needs.release-please.outputs.pr).number }} --squash --auto --repo ${{ github.repository }}

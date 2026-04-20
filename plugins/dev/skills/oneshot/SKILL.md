@@ -95,6 +95,33 @@ fi
 STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
 ```
 
+**Shared comms channel (CTL-111):** if `CATALYST_COMMS_CHANNEL` is set by the orchestrator, the
+worker joins the shared channel and will post real traffic at each lifecycle boundary.
+Best-effort — every call is wrapped so a missing `catalyst-comms` CLI never crashes the worker.
+The worker posts at **minimum 4 messages** per run: start + phase transitions + done.
+
+```bash
+# Helper — called at every hook point below. Silent no-op when comms is unavailable.
+comms_post() {
+  local type="$1" body="$2"
+  [ -z "${CATALYST_COMMS_CHANNEL:-}" ] && return 0
+  command -v catalyst-comms >/dev/null 2>&1 || return 0
+  catalyst-comms send "$CATALYST_COMMS_CHANNEL" "$body" \
+    --as "$TICKET_ID" --type "$type" >/dev/null 2>&1 || true
+}
+
+# Once, at startup — right after orchestrator mode detection:
+if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && command -v catalyst-comms >/dev/null 2>&1; then
+  catalyst-comms join "$CATALYST_COMMS_CHANNEL" \
+    --as "$TICKET_ID" \
+    --capabilities "oneshot: ${TICKET_ID}" \
+    --orch "${CATALYST_ORCHESTRATOR_ID:-}" \
+    --parent orchestrator \
+    --ttl 3600 >/dev/null 2>&1 || true
+  comms_post info "started oneshot for $TICKET_ID"
+fi
+```
+
 If `ORCH_DIR` is detected, the worker:
 
 1. **Reads its signal file** from `${ORCH_DIR}/workers/${TICKET_ID}.json` (created by orchestrator)
@@ -165,6 +192,11 @@ if [ -f "$SIGNAL_FILE" ]; then
       --arg to "$NEW_STATUS" \
       '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-status-change", detail: {from: $from, to: $to}}')"
   fi
+
+  # CTL-111: announce phase transition to shared comms channel. Runs 5× in the
+  # normal path (researching → planning → implementing → validating → shipping),
+  # comfortably above the ≥2-transition floor.
+  comms_post info "${OLD_STATUS} → ${NEW_STATUS}"
 fi
 ```
 
@@ -183,6 +215,8 @@ if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
     --argjson pr "$PR_NUMBER" --arg url "$PR_URL" \
     '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-pr-created", detail: {pr: $pr, url: $url}}')"
 fi
+# CTL-111: announce PR opening on the shared comms channel
+comms_post info "pr:#${PR_NUMBER} opened"
 ```
 
 **When worker arms auto-merge** (right after PR open, before entering the poll loop), record the arming timestamp:
@@ -226,6 +260,13 @@ if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
   "$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET_ID" \
     ".pr.ciStatus = \"merged\" | .pr.mergedAt = \"${PR_MERGED_AT}\" | .status = \"done\""
 fi
+
+# CTL-111: post `done` on the shared comms channel. Uses the `done` subcommand
+# (not `send`) so quorum is auto-checked. Exit status ignored — quorum is
+# advisory from the worker's perspective; the orchestrator reconciles.
+if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && command -v catalyst-comms >/dev/null 2>&1; then
+  catalyst-comms done "$CATALYST_COMMS_CHANNEL" --as "$TICKET_ID" >/dev/null 2>&1 || true
+fi
 ```
 
 **When worker reaches terminal state** (done or failed):
@@ -242,6 +283,9 @@ if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
       '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-failed", detail: {reason: $reason}}')"
     "$STATE_SCRIPT" attention "$ORCH_ID" "waiting-for-user" "$TICKET_ID" \
       "Worker failed: ${ERROR_MSG}"
+    # CTL-111: post attention on shared comms channel so sibling workers / orchestrator
+    # monitoring loop can observe the blocker without reading the state file.
+    comms_post attention "worker failed: ${ERROR_MSG:-unknown}"
   fi
 fi
 ```

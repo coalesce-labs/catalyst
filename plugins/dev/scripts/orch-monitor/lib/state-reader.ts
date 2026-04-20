@@ -223,7 +223,7 @@ export function scanOrchestrators(baseDir: string): ScannedOrchestrator[] {
   return matches;
 }
 
-export interface ScanAllOptions {
+interface ScanAllOptions {
   /** Per-orchestrator state root: ~/catalyst/runs/ */
   runsDir: string;
   /** Legacy worktree root: ~/catalyst/wt/ */
