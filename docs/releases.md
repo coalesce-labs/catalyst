@@ -25,13 +25,21 @@ or via the GitHub Actions UI (`Run workflow` on `Release Please Scheduled Merge`
 ### Intraday consumption (pre-release / early access)
 
 `plugin.json.version` only changes when the Release PR merges (daily), so users installed via the
-marketplace auto-update at most once per day. For early-access users who need merged-but-not-yet-
-released commits:
+public Catalyst marketplace auto-update at most once per day. If you need merged-but-not-yet-
+released commits — for example to dogfood changes between cuts — point Claude Code at a local
+checkout of this repo:
 
-- **Current MVP**: check out or install from a specific commit SHA on `main`. All merged commits
-  are on `main` immediately — only the version bump waits for the evening cut.
-- **Future**: a `next` branch + companion marketplace entry is designed but not yet implemented.
-  See ADR-009 for the tradeoffs and planned follow-up.
+```
+git clone https://github.com/coalesce-labs/catalyst.git  # or use your existing checkout
+bash scripts/install-dev-marketplace.sh                  # registers the local path as a marketplace
+```
+
+Afterwards, `git pull` in the checkout and restart Claude Code sessions to pick up the latest
+`main`. See `scripts/install-dev-marketplace.sh` for details and for the `--plugin-dir` escape
+hatch if caching surprises you.
+
+A broader `next` branch + companion marketplace entry (auto-updating for anyone who opts in) is
+designed but not yet implemented — see ADR-009 for tradeoffs and the planned follow-up.
 
 ## Version Source of Truth
 
