@@ -1,12 +1,37 @@
 # Releases
 
-Catalyst uses **Release Please** for automated per-plugin releases.
+Catalyst uses **Release Please** for automated per-plugin releases on a **daily cadence**.
 
 ## How It Works
 
 1. **Merge PRs to main** with conventional commit titles (`feat(dev):`, `fix(pm):`, etc.)
-2. **Release Please opens release PRs** — one per affected plugin, accumulating changes
-3. **Merge a release PR** to create: git tag, GitHub Release, updated CHANGELOG.md, bumped versions
+2. **Release Please opens/updates a single aggregating Release PR** as commits land
+   (`separate-pull-requests: false`, so one PR covers all affected plugins).
+3. **A scheduled workflow merges the Release PR once a day** at 05:00 UTC (22:00 PT / 01:00 ET).
+   Merging creates git tags, GitHub Releases, updated CHANGELOG.md, and bumped versions.
+4. **Empty days skip**: if no PRs merged since the last release, no Release PR is open and the
+   scheduled workflow exits 0 without cutting anything.
+
+### Hotfix / urgent release
+
+To cut a release before the next scheduled run, trigger the workflow manually:
+
+```
+gh workflow run release-please-scheduled-merge.yml
+```
+
+or via the GitHub Actions UI (`Run workflow` on `Release Please Scheduled Merge`).
+
+### Intraday consumption (pre-release / early access)
+
+`plugin.json.version` only changes when the Release PR merges (daily), so users installed via the
+marketplace auto-update at most once per day. For early-access users who need merged-but-not-yet-
+released commits:
+
+- **Current MVP**: check out or install from a specific commit SHA on `main`. All merged commits
+  are on `main` immediately — only the version bump waits for the evening cut.
+- **Future**: a `next` branch + companion marketplace entry is designed but not yet implemented.
+  See ADR-009 for the tradeoffs and planned follow-up.
 
 ## Version Source of Truth
 
@@ -51,14 +76,21 @@ Tags follow `<component>-v<version>` format:
 
 - `release-please-config.json` — Plugin paths, release types, extra-files
 - `.release-please-manifest.json` — Current version for each plugin
-- `.github/workflows/release-please.yml` — CI workflow
+- `.github/workflows/release-please.yml` — opens/updates Release PRs and enhances notes on every
+  push to `main`
+- `.github/workflows/release-please-scheduled-merge.yml` — cuts the daily release by merging the
+  open Release PR at 05:00 UTC (also supports `workflow_dispatch` for manual cuts)
 
 ## Verifying Releases Work
 
 1. Merge a PR with a conventional commit title (e.g., `feat(dev): add feature`)
-2. Release Please should open a release PR within minutes
-3. The release PR updates CHANGELOG.md and version files
-4. Merging the release PR creates a git tag and GitHub Release
+2. Release Please should open/update the Release PR within minutes (label: `autorelease: pending`)
+3. The Release PR accumulates changes throughout the day; AI-enhanced CHANGELOGs refresh on each
+   push via `enhance-release-notes.sh`
+4. At 05:00 UTC, the scheduled-merge workflow merges the Release PR → release-please fires again
+   on the merge push and creates tags + GitHub Releases
+5. To verify without waiting for the cron, run
+   `gh workflow run release-please-scheduled-merge.yml`
 
 ## How Commit Routing Works
 
