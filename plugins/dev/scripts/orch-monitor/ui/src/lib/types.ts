@@ -192,6 +192,7 @@ export type SessionTimeFilter = (typeof SESSION_TIME_FILTERS)[number];
 const WORKER_DONE_STATUSES: ReadonlySet<string> = new Set([
   "done",
   "merged",
+  "superseded",
   "failed",
   "stalled",
   "signal_corrupt",
