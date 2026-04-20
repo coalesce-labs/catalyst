@@ -5,10 +5,16 @@ import { StatusBadge } from "./ui/badge";
 import { StatusDot } from "./ui/status-dot";
 import { SectionLabel } from "./ui/panel";
 import { PrBadge } from "./ui/pr-badge";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from "./ui/sheet";
 import type { SessionState } from "@/lib/types";
 import { sessionKind } from "@/lib/types";
 import {
-  X,
   Terminal,
   Workflow,
   Clock,
@@ -80,22 +86,21 @@ export function SessionDetailDrawer({
   const dir = session.cwd ? session.cwd.split("/").slice(-2).join("/") : null;
 
   return (
-    <>
-      <div
-        className="fixed inset-0 z-40 bg-black/40"
-        onClick={onClose}
-      />
-      <div className="animate-drawer-in fixed inset-y-0 right-0 z-50 flex w-[420px] max-w-[90vw] flex-col border-l border-border bg-surface-1 shadow-2xl">
+    <Sheet open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <SheetContent
+        side="right"
+        className="flex w-full flex-col gap-0 border-l border-border bg-surface-1 p-0 sm:max-w-[540px]"
+      >
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <SheetHeader className="flex flex-row items-center gap-2 space-y-0 border-b border-border px-4 py-3 pr-12">
           <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <StatusDot alive={session.alive} />
-              <span className="truncate font-mono text-sm font-bold text-fg">
-                {label}
-              </span>
-              <StatusBadge status={session.status} />
-            </div>
+            <SheetTitle asChild>
+              <div className="flex items-center gap-2 text-sm font-bold text-fg">
+                <StatusDot alive={session.alive} />
+                <span className="truncate font-mono">{label}</span>
+                <StatusBadge status={session.status} />
+              </div>
+            </SheetTitle>
             <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
               {KIND_ICON[kind]}
               <span>{kind}</span>
@@ -105,14 +110,14 @@ export function SessionDetailDrawer({
                 </span>
               )}
             </div>
+            <SheetDescription className="sr-only">
+              {kind} session {label}
+              {session.skillName && session.skillName !== "interactive"
+                ? ` (${session.skillName})`
+                : ""}.
+            </SheetDescription>
           </div>
-          <button
-            onClick={onClose}
-            className="rounded-md p-1.5 text-muted transition-colors hover:bg-surface-3 hover:text-fg"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
+        </SheetHeader>
 
         {/* Scrollable content */}
         <div className="flex-1 overflow-y-auto">
@@ -259,7 +264,7 @@ export function SessionDetailDrawer({
             )}
           </div>
         </div>
-      </div>
-    </>
+      </SheetContent>
+    </Sheet>
   );
 }
