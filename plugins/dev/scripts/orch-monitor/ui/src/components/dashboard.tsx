@@ -104,11 +104,16 @@ function OrchestratorCard({
         )}
       </div>
 
-      {orch.waves.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
+      {(orch.waves.length > 0 || orch.rollupBriefing) && (
+        <div className="flex flex-wrap items-center gap-1.5">
           {orch.waves.map((w) => (
             <StatusBadge key={w.wave} status={w.status} />
           ))}
+          {orch.rollupBriefing && (
+            <span className="rounded bg-surface-3 px-1.5 py-px font-mono text-[10px] text-muted">
+              rollup
+            </span>
+          )}
         </div>
       )}
     </button>

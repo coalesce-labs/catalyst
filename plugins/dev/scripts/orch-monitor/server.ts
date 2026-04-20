@@ -579,6 +579,28 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(result);
         }
 
+        const rollupMatch = url.pathname.match(/^\/api\/rollup\/([^/]+)$/);
+        if (rollupMatch) {
+          let orchId: string;
+          try {
+            orchId = decodeURIComponent(rollupMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (orchId.includes("..") || orchId.includes("/") || orchId.includes("\0")) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const snap = snapshotWithPrStatus();
+          const orch = snap.orchestrators.find((o) => o.id === orchId);
+          if (!orch) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return Response.json({
+            orchId: orch.id,
+            rollup: orch.rollupBriefing ?? null,
+          });
+        }
+
         const sessionMatch = url.pathname.match(
           /^\/api\/session\/([^/]+)\/([^/]+)$/,
         );

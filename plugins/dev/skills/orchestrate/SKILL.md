@@ -1342,6 +1342,27 @@ Gas Town Polecats don't share findings. Wave briefings mean:
 - Wave 2+ workers know about gotchas discovered by earlier waves
 - Knowledge compounds across waves
 
+## Orchestrator Rollup Briefing (CTL-108)
+
+In addition to per-wave briefings (which summarize upstream for downstream workers), the
+orchestrator also exposes an **aggregate rollup briefing** for humans reviewing the whole run.
+The rollup is **not written by the orchestrator** — it is derived on-read by the orch-monitor
+from:
+
+1. Worker signal files (`${ORCH_DIR}/workers/${ticket}.json`) — provides the "what shipped"
+   list (any worker with `pr.number` set).
+2. Per-worker rollup fragments (`${ORCH_DIR}/workers/${ticket}-rollup.md`) — optional markdown
+   files written by workers after a successful merge (see `oneshot/SKILL.md` Phase 5 Step 4).
+   Each fragment contributes a `### ${ticket}` section to the "Gotchas" area and its first
+   non-blank line becomes the one-liner next to the shipped PR.
+
+The orch-monitor assembles these on every snapshot — there is no persisted rollup file to
+maintain, no sync step for the orchestrator to run. Workers that do not write a fragment
+simply appear in "What shipped" with PR title only.
+
+The rollup surfaces in the orch-monitor UI under the existing Briefing tab (first section,
+above per-wave briefings) and as a small `rollup` pill on the orchestrator dashboard card.
+
 ## Testing Enforcement (3 Layers)
 
 ### Layer 1 — Dispatch Prompt (Prevention)

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { computeOrchestratorStats } from "@/lib/computations";
-import { hasAnyBriefings } from "@/lib/briefings";
+import { hasAnyBriefings, hasRollup } from "@/lib/briefings";
 import { ProgressBar } from "./ui/progress-bar";
 import { Panel, SectionLabel } from "./ui/panel";
 import type {
@@ -86,7 +86,7 @@ export function OrchestratorView({
     selectedWorker ? (orch.workers[selectedWorker] ?? null) : null;
 
   const s = computeOrchestratorStats(orch, getAnalytics(orch.id));
-  const showBriefing = hasAnyBriefings(orch);
+  const showBriefing = hasAnyBriefings(orch) || hasRollup(orch);
   const visibleTabs = TABS.filter(
     (t) => t.id !== "briefing" || showBriefing,
   );
