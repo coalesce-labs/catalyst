@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { cn } from "@/lib/utils";
 import { fmtSince, fmtTokens, fmtCost } from "@/lib/formatters";
-import { ticketToWaveMap, effectiveCost, totalTokens } from "@/lib/computations";
+import { ticketToWaveMap, effectiveCost, totalTokens, isAbandoned } from "@/lib/computations";
 import { useSort } from "@/hooks/use-sort";
 import { SortHeader } from "./ui/sort-header";
 import { StatusBadge } from "./ui/badge";
@@ -171,6 +171,7 @@ function WorkerRow({
   const tokens = totalTokens(w, analytics);
   const isMerged = w.prState === "MERGED";
   const isClosed = w.prState === "CLOSED";
+  const isAbandonedRow = isAbandoned(w.status);
 
   return (
     <tr
@@ -181,6 +182,7 @@ function WorkerRow({
         isSelected && "bg-surface-3/80 ring-1 ring-inset ring-accent/20",
         isMerged && "opacity-80",
         isClosed && "opacity-70",
+        isAbandonedRow && "opacity-70",
       )}
     >
       <td className="px-3 py-2.5 font-mono text-[12px] text-muted">

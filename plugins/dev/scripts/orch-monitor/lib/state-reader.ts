@@ -589,7 +589,15 @@ export function buildSessionDetail(
   };
 }
 
-const DONE_STATUSES = new Set(["done", "merged", "failed", "stalled", "signal_corrupt"]);
+const DONE_STATUSES = new Set([
+  "done",
+  "merged",
+  "failed",
+  "stalled",
+  "signal_corrupt",
+  "superseded",
+  "canceled",
+]);
 
 export function groupByWorkspace(snapshot: MonitorSnapshot): WorkspaceGroup[] {
   const map = new Map<string, OrchestratorState[]>();
