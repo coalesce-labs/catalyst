@@ -26,23 +26,36 @@ interface WorkerPrev {
 function collectAttention(snap: MonitorSnapshot): CollectedAttention[] {
   const items: CollectedAttention[] = [];
   const done = new Set(["done", "merged", "failed", "stalled"]);
+  const seen = new Set<string>();
+  const push = (item: CollectedAttention) => {
+    const k = `${item.orchId}::${item.ticket}::${item.reason}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    items.push(item);
+  };
   for (const orch of snap.orchestrators) {
     for (const [ticket, w] of Object.entries(orch.workers)) {
       if (w.status === "failed" || w.status === "stalled") {
-        items.push({
+        push({
           orchId: orch.id,
           ticket,
           reason: "Status: " + w.status,
           severity: "error",
         });
       } else if (w.pid && w.alive === false && !done.has(w.status)) {
-        items.push({
+        push({
           orchId: orch.id,
           ticket,
           reason: "Worker died",
           severity: "error",
         });
       }
+    }
+    for (const item of orch.attention ?? []) {
+      const ticket = item.ticket ?? item.workerName ?? "—";
+      const reason = item.reason ?? item.message ?? item.type ?? "attention";
+      const severity = item.type === "error" ? "error" : "warning";
+      push({ orchId: orch.id, ticket, reason, severity });
     }
   }
   items.sort((a, b) => {

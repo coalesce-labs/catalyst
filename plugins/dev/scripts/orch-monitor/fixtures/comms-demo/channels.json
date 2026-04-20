@@ -1,0 +1,56 @@
+{
+  "orch-demo": {
+    "name": "orch-demo",
+    "topic": "Wave 2 dogfood run",
+    "created": "2026-04-20T00:00:00Z",
+    "participants": [
+      {
+        "name": "orchestrator",
+        "joined": "2026-04-20T00:00:00Z",
+        "ttl": 600,
+        "lastSeen": "2026-04-20T00:12:00Z",
+        "capabilities": "coordinates dispatches",
+        "parent": null,
+        "orch": "demo",
+        "status": "active"
+      },
+      {
+        "name": "CTL-111",
+        "joined": "2026-04-20T00:01:00Z",
+        "ttl": 600,
+        "lastSeen": "2026-04-20T00:10:00Z",
+        "capabilities": "implements backend",
+        "parent": null,
+        "orch": "demo",
+        "status": "active"
+      },
+      {
+        "name": "CTL-112",
+        "joined": "2026-04-20T00:02:00Z",
+        "ttl": 600,
+        "lastSeen": "2026-04-20T00:12:00Z",
+        "capabilities": "implements ui tdd",
+        "parent": null,
+        "orch": "demo",
+        "status": "active"
+      }
+    ]
+  },
+  "agents-v3": {
+    "name": "agents-v3",
+    "topic": "Cross-orch agent pool",
+    "created": "2026-04-18T00:00:00Z",
+    "participants": [
+      {
+        "name": "orchestrator",
+        "joined": "2026-04-18T00:00:00Z",
+        "ttl": 3600,
+        "lastSeen": "2026-04-20T00:03:00Z",
+        "capabilities": "coordinates",
+        "parent": null,
+        "orch": null,
+        "status": "active"
+      }
+    ]
+  }
+}

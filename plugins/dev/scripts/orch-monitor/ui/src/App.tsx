@@ -1,6 +1,7 @@
-import { useState, useCallback, useEffect, lazy, Suspense } from "react";
+import { useMemo, useState, useCallback, useEffect, lazy, Suspense } from "react";
 import { useMonitor } from "./hooks/use-monitor";
 import { useKeyboardNav } from "./hooks/use-keyboard-nav";
+import { useCommsChannels } from "./hooks/use-comms";
 import { Sidebar } from "./components/layout/sidebar";
 import { AttentionBar } from "./components/attention-bar";
 import { SessionDetailDrawer } from "./components/session-detail-drawer";
@@ -9,7 +10,11 @@ import { OtelHealthBanner } from "./components/ui/otel-health-banner";
 import { SkeletonDashboard } from "./components/ui/skeleton";
 import { ChevronRight, Home, PanelLeftClose, PanelLeft } from "lucide-react";
 import type { GroupingMode } from "./lib/grouping";
-import { SESSION_TIME_FILTERS, type SessionTimeFilter } from "./lib/types";
+import {
+  SESSION_TIME_FILTERS,
+  type SessionTimeFilter,
+  type CommsFilter,
+} from "./lib/types";
 
 const Dashboard = lazy(() =>
   import("./components/dashboard").then((m) => ({ default: m.Dashboard })),
@@ -22,6 +27,11 @@ const OrchestratorView = lazy(() =>
 const Sandbox = lazy(() =>
   import("./components/dev/sandbox").then((m) => ({ default: m.Sandbox })),
 );
+const CommsView = lazy(() =>
+  import("./components/comms-view").then((m) => ({ default: m.CommsView })),
+);
+
+type TopView = "dashboard" | "comms";
 
 const isDevSandbox =
   typeof window !== "undefined" &&
@@ -56,6 +66,9 @@ function Monitor() {
   const [selectedOrchId, setSelectedOrchId] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [topView, setTopView] = useState<TopView>("dashboard");
+  const [commsInitialFilter, setCommsInitialFilter] =
+    useState<CommsFilter | null>(null);
   const [groupingMode, setGroupingMode] = useState<GroupingMode>(
     () => (localStorage.getItem("catalyst-sidebar-grouping") as GroupingMode) || "flat",
   );
@@ -101,12 +114,50 @@ function Monitor() {
   const handleSelect = useCallback((orchId: string | null) => {
     setSelectedOrchId(orchId);
     setSelectedSession(null);
+    setTopView("dashboard");
   }, []);
 
   const handleSessionSelect = useCallback((sessionId: string) => {
     setSelectedSession(sessionId);
     setSelectedOrchId(null);
+    setTopView("dashboard");
   }, []);
+
+  const handleCommsSelect = useCallback(() => {
+    setTopView("comms");
+    setSelectedOrchId(null);
+    setSelectedSession(null);
+    setCommsInitialFilter(null);
+  }, []);
+
+  const { channels: commsChannels } = useCommsChannels(true);
+  const authorsByOrchId = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const c of commsChannels) {
+      if (!c.orchId) continue;
+      const set = m.get(c.orchId) ?? new Set<string>();
+      for (const a of c.authors) set.add(a);
+      m.set(c.orchId, set);
+    }
+    return m;
+  }, [commsChannels]);
+
+  const commsAuthorsForSelected =
+    effectiveOrch && authorsByOrchId.get(effectiveOrch.id);
+
+  const handleWorkerCommsLink = useCallback(
+    (ticket: string) => {
+      if (!effectiveOrch) return;
+      const channelName = `orch-${effectiveOrch.id}`;
+      setCommsInitialFilter({
+        channel: channelName,
+        author: ticket,
+        types: null,
+      });
+      setTopView("comms");
+    },
+    [effectiveOrch],
+  );
 
   const handleAttentionClick = useCallback(
     (orchId: string, _ticket: string) => {
@@ -133,6 +184,8 @@ function Monitor() {
         onGroupingModeChange={handleGroupingChange}
         timeFilter={timeFilter}
         onTimeFilterChange={handleTimeFilterChange}
+        topView={topView}
+        onCommsSelect={handleCommsSelect}
       />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -151,13 +204,22 @@ function Monitor() {
             </button>
             <nav className="flex items-center gap-1.5 text-[13px]">
               <button
-                onClick={() => setSelectedOrchId(null)}
+                onClick={() => {
+                  setSelectedOrchId(null);
+                  setTopView("dashboard");
+                }}
                 className="flex items-center gap-1 text-muted transition-colors hover:text-fg"
               >
                 <Home className="h-3.5 w-3.5" />
                 Dashboard
               </button>
-              {effectiveOrch && (
+              {topView === "comms" && (
+                <>
+                  <ChevronRight className="h-3 w-3 text-border" />
+                  <span className="font-medium text-fg">Comms</span>
+                </>
+              )}
+              {topView === "dashboard" && effectiveOrch && (
                 <>
                   <ChevronRight className="h-3 w-3 text-border" />
                   <span className="font-mono font-medium text-fg">
@@ -189,7 +251,11 @@ function Monitor() {
 
         <div className="flex-1 overflow-y-auto p-5">
           <Suspense fallback={<SkeletonDashboard />}>
-            {effectiveOrch ? (
+            {topView === "comms" ? (
+              <div className="animate-fade-in">
+                <CommsView initialFilter={commsInitialFilter} />
+              </div>
+            ) : effectiveOrch ? (
               <div key={effectiveOrch.id} className="animate-fade-in flex flex-col gap-4">
                 {attention.filter((a) => a.orchId === effectiveOrch.id)
                   .length > 0 && (
@@ -207,6 +273,8 @@ function Monitor() {
                   getLinear={linear}
                   staleThreshold={staleThreshold}
                   otelHealth={otelHealth}
+                  commsAuthors={commsAuthorsForSelected || undefined}
+                  onCommsLink={handleWorkerCommsLink}
                 />
               </div>
             ) : (

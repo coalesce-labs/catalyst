@@ -28,6 +28,8 @@ interface OrchestratorViewProps {
   getLinear: (ticket: string) => LinearTicket | null;
   staleThreshold: number;
   otelHealth?: OtelHealth | null;
+  commsAuthors?: Set<string>;
+  onCommsLink?: (ticket: string) => void;
 }
 
 const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
@@ -60,6 +62,8 @@ export function OrchestratorView({
   getLinear,
   staleThreshold,
   otelHealth,
+  commsAuthors,
+  onCommsLink,
 }: OrchestratorViewProps) {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [selectedWave, setSelectedWave] = useState<number | null>(null);
@@ -144,6 +148,8 @@ export function OrchestratorView({
                 onWorkerSelect={setSelectedWorker}
                 selectedTicket={selectedWorker}
                 otelHealth={otelHealth}
+                commsAuthors={commsAuthors}
+                onCommsLink={onCommsLink}
               />
             </div>
           </div>
@@ -159,6 +165,8 @@ export function OrchestratorView({
               onWorkerSelect={setSelectedWorker}
               selectedTicket={selectedWorker}
               otelHealth={otelHealth}
+              commsAuthors={commsAuthors}
+              onCommsLink={onCommsLink}
             />
           </div>
         )}
