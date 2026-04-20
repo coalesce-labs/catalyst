@@ -24,19 +24,59 @@ for the syntax.
 
 ## How to start
 
-Skip generic "what would you like to work on?" prompts. Orient first, then recommend.
+Skip generic "what would you like to work on?" prompts. Orient fast, then recommend.
+Do the orient phase in parallel sub-agents so the main context stays clean for the PM
+conversation that follows. Target shape: 3–4 main-context tool calls (read config +
+spawn agents + synthesize), not 15.
 
-1. Pull the active Linear cycle state (via `linearis`) — what's in progress,
-   blocked, unestimated
-2. Check the last ~5 commits on main and any open PRs to get the current direction
-3. Glance at `thoughts/` for recent decision docs, plans, or research
+### Step 1 — Load configuration (1 call)
 
-Then give me a crisp read: the state of play, the decisions that feel due, and a
-recommendation for what to focus on right now. Offer to drive with a specific
-skill or dig into a specific area.
+Read `.catalyst/config.json` first. It holds `catalyst.linear.teamKey` (the team to query)
+and `catalyst.linear.stateMap` (the canonical status names for this workspace). Use these
+values directly — don't probe `linearis` CLI to rediscover team keys or status names.
 
-If the cycle is empty or quiet, pivot to discovery: propose features from gaps
-you see in the codebase, suggest `competitor-analysis`, or kick off a
+If you haven't already loaded `/catalyst-dev:linearis`, invoke it now. The skill auto-loads
+when Linear work is mentioned, but invoking it explicitly up front prevents you from
+guessing CLI flags.
+
+### Step 2 — Dispatch three sub-agents in parallel (1 batched message)
+
+Send all three Agent calls in a single message so they run concurrently. Ask each for a
+short summary, not raw JSON — the agents are data specialists; they should compress.
+
+1. **`catalyst-pm:linear-research`** — active cycle state, in-progress tickets, tickets
+   In Progress > 7 days (likely stalled), P0/P1 tickets without estimates, project status.
+   Use the `teamKey` from config.
+2. **`catalyst-dev:github-research`** — open PRs (with CI status), last ~10 merged PRs,
+   PRs stuck > 3 days in review. Highlight blockers.
+3. **`catalyst-dev:thoughts-analyzer`** — recent decision docs, plans, and research in
+   `thoughts/shared/` from the last ~14 days. One-line summary per doc plus recurring
+   topics.
+
+### Step 3 — Check memory open-loops (inline, main context)
+
+Scan project-type memories for unresolved actions. Read the user's per-project memory
+index (path varies by project; typically
+`~/.claude/projects/{project-slug}/memory/MEMORY.md`) and any `project_*.md` files in
+that directory. For each memory older than ~7 days whose body contains future-tense
+action language ("file tickets," "surface at end of run," "open loops"), flag it.
+
+Cross-check against the Linear results from Step 2: if a memo promised to file tickets
+and those tickets don't appear in the active team state, surface it as a genuine open
+loop worth naming. Keep this inline — the memory directory is small and plain-text, so a
+sub-agent isn't warranted.
+
+### Step 4 — Synthesize
+
+With the three agent summaries plus the memory scan in hand, give me:
+
+- **State of play** — 2–3 bullets from linear + github
+- **Decisions that feel due** — from thoughts-analyzer + memory open-loops
+- **Recommendation for right now** — one concrete next move (a specific
+  `/catalyst-pm:` skill to drive, or an area to dig into)
+
+If the cycle is empty and nothing is stalled, pivot to discovery: propose features from
+the thoughts/github signals, suggest `competitor-analysis`, or kick off a
 `strategy-sprint`.
 
 ## Principles
