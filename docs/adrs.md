@@ -191,3 +191,70 @@ durable source of truth for agent session data, managed by `catalyst-db.sh` and 
   compatibility with tools that still consume the JSONL stream
 - `orch-monitor` reads the SQLite store directly (WAL mode allows concurrent readers)
 - `sqlite3` is now listed as an optional dependency
+
+---
+
+## ADR-009: Daily Release Cadence with Deferred Intraday Channel
+
+**Decision**: Cut one release per day via a scheduled-merge workflow at 05:00 UTC instead of
+auto-merging the release-please Release PR on every push to `main`. Defer the intraday
+pre-release channel (for users who want merged-but-unreleased commits) to a follow-up ticket
+with a documented design.
+
+**Rationale**:
+
+- Every PR merge currently produces a point release, cluttering tag history and CHANGELOGs with
+  commits that don't represent meaningful user-facing checkpoints.
+- During multi-PR orchestration waves, every merge triggers a release-please chore commit to
+  `main`, forcing `update-branch` rebases on every other open PR. Observed during `ctl-lifecycle`
+  orchestration on 2026-04-16. Daily cadence collapses this to one cascade per day, in the
+  evening, when no other PRs should be in-flight.
+- Release Please already aggregates commits via a single `separate-pull-requests: false` Release
+  PR. We simply stop auto-merging it on every push.
+
+**Design**:
+
+- `.github/workflows/release-please.yml` opens/updates the Release PR on every push to `main`
+  and runs `enhance-release-notes.sh` to keep the AI-enhanced summary and CHANGELOGs fresh.
+- `.github/workflows/release-please-scheduled-merge.yml` runs at 05:00 UTC (22:00 PT / 01:00 ET).
+  It finds the open Release PR (label `autorelease: pending`), verifies mergeability, and merges
+  it. If no Release PR is open (empty day) it exits 0.
+- `workflow_dispatch` on the scheduled workflow provides a manual "cut now" escape hatch for
+  hotfixes.
+- A blocked or conflicted Release PR causes the scheduled workflow to open a `release-health`
+  labeled issue (dedup'd against any existing open one).
+
+**Intraday channel (deferred)**:
+
+Catalyst is distributed as a Claude Code plugin marketplace, not an npm package. Claude Code's
+plugin auto-update is gated on the `version` field in each plugin's `plugin.json`. Under daily
+cadence, `plugin.json.version` only changes once per day, so users on the marketplace see at most
+one update per day.
+
+For early-access / intraday users, the options are:
+
+| Option | Status |
+|---|---|
+| Pre-release npm dist-tag (`@next`) | Not applicable — no npm distribution |
+| Floating `next` branch + separate marketplace entry, with pre-release version bumps | Designed; deferred |
+| Nightly build artifact | Not applicable — no binaries |
+| Install from a specific commit SHA on `main` | Works today with zero plumbing — documented as the MVP |
+
+Recommended path forward for the deferred work: maintain a `next` branch that fast-forwards
+`main` on every push and appends a commit bumping each plugin's `plugin.json.version` to
+`<next-version>-rc.<commits-since-last-release>`. Publish a second marketplace entry that sources
+plugins from the `next` branch. Users who want intraday updates install the `-next` marketplace.
+Plumbing cost: version calculation, branch bookkeeping, marketplace duplication, user-facing
+docs. Defer until someone explicitly needs it.
+
+**Consequences**:
+
+- Changelog and tag history compress from per-merge to per-day granularity.
+- Orchestration waves no longer cascade through release-please chore commits mid-wave.
+- Users who relied on per-merge auto-updates see updates at most once per day via the
+  marketplace; they can install from a commit SHA for intraday access.
+- `scripts/check-release-health.sh` check #2 continues to work unchanged — it fires only when
+  releasable commits exist with no open Release PR, which still means release-please itself is
+  broken.
+- Rollback is mechanical: revert the two workflow changes to restore the previous `auto-merge`
+  job.
