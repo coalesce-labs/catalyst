@@ -90,6 +90,7 @@ export function useCommsStream(
     }
 
     let cancelled = false;
+    let terminal = false;
     let es: EventSource | null = null;
     let backoff = 500;
     const BACKOFF_MAX = 15000;
@@ -161,8 +162,21 @@ export function useCommsStream(
         try {
           const data = JSON.parse(
             (e as MessageEvent<string>).data,
-          ) as { message?: string };
+          ) as { message?: string; error?: string; channel?: string };
           if (cancelled) return;
+          if (data.error === "channel-not-found") {
+            terminal = true;
+            setStatus("error");
+            setError(`Channel "${data.channel ?? channelName}" not found`);
+            setLive(false);
+            try {
+              es?.close();
+            } catch {
+              /* ignore */
+            }
+            es = null;
+            return;
+          }
           setStatus("error");
           setError(data.message || "stream error");
         } catch {
@@ -183,7 +197,7 @@ export function useCommsStream(
     }
 
     function scheduleReconnect() {
-      if (cancelled) return;
+      if (cancelled || terminal) return;
       const delay = backoff;
       backoff = Math.min(BACKOFF_MAX, backoff * 2);
       reconnectTimer = setTimeout(connect, delay);

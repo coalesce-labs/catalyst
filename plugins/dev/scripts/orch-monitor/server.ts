@@ -710,10 +710,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const commsReader = comms;
           let offset = 0;
           let timer: ReturnType<typeof setInterval> | null = null;
+          let inFlight = false;
           const stream = new ReadableStream<Uint8Array>({
             async start(controller) {
               const initial = await commsReader.getChannel(channelName, { limit: 200 });
               if (!initial) {
+                const errFrame = `event: error-event\ndata: ${JSON.stringify({ error: "channel-not-found", channel: channelName })}\n\n`;
+                try {
+                  controller.enqueue(encoder.encode(errFrame));
+                } catch {
+                  // Client may have already disconnected.
+                }
                 controller.close();
                 return;
               }
@@ -725,6 +732,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
                 return;
               }
               timer = setInterval(() => {
+                if (inFlight) return;
+                inFlight = true;
                 void (async () => {
                   try {
                     const tail = await commsReader.tailChannel(channelName, offset);
@@ -735,6 +744,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
                     }
                   } catch {
                     // Keep the stream alive on transient read errors.
+                  } finally {
+                    inFlight = false;
                   }
                 })();
               }, 500);

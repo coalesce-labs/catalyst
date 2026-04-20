@@ -55,7 +55,12 @@ function collectAttention(snap: MonitorSnapshot): CollectedAttention[] {
       const ticket = item.ticket ?? item.workerName ?? "—";
       const reason = item.reason ?? item.message ?? item.type ?? "attention";
       const severity = item.type === "error" ? "error" : "warning";
-      push({ orchId: orch.id, ticket, reason, severity });
+      const dedupeKey = item.id
+        ? `${orch.id}::id::${item.id}`
+        : `${orch.id}::${ticket}::${reason}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      items.push({ orchId: orch.id, ticket, reason, severity });
     }
   }
   items.sort((a, b) => {
