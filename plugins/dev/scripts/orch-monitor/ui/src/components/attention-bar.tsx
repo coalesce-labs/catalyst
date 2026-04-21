@@ -37,6 +37,7 @@ export function AttentionBar({ items, onItemClick }: AttentionBarProps) {
         {items.map((item, i) => (
           <button
             key={i}
+            role="alert"
             onClick={() => onItemClick?.(item.orchId, item.ticket)}
             className={cn(
               "flex items-center gap-2 rounded px-3 py-1.5 text-left text-[13px] transition-colors",

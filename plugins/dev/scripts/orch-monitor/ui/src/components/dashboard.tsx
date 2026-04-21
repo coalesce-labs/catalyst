@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { fmtDuration, fmtCost, fmtSince } from "@/lib/formatters";
 import { computeOrchestratorStats } from "@/lib/computations";
-import { filterOrchestrators } from "@/lib/session-filters";
+import { partitionDashboard } from "@/lib/partition-dashboard";
 import { cn } from "@/lib/utils";
 import { StatusBadge } from "./ui/badge";
 import { StatusDot, HealthIcon } from "./ui/status-dot";
@@ -23,10 +23,12 @@ import type {
 } from "@/lib/types";
 import { sessionKind } from "@/lib/types";
 import {
+  AlertCircle,
   ChevronRight,
   ChevronDown,
   Clock,
   Layers,
+  Rocket,
   Terminal,
   GitBranch,
   Workflow,
@@ -232,27 +234,46 @@ export function Dashboard({
   onSessionSelect,
   timeFilter,
 }: DashboardProps) {
-  const { visible: visibleOrchs, recent: recentOrchs } = filterOrchestrators(
+  const { needsMe, shipping, recent } = partitionDashboard({
     orchestrators,
+    attention,
     timeFilter,
-  );
+  });
   const [recentExpanded, setRecentExpanded] = useState(false);
 
   return (
     <div className="flex flex-col gap-4">
       <h1 className="text-lg font-bold text-fg">Dashboard</h1>
 
-      <AttentionBar items={attention} />
-
       <KpiStrip orchestrators={orchestrators} getAnalytics={getAnalytics} />
 
-      <div>
-        <SectionLabel className="mb-2 block">
-          Orchestrators ({visibleOrchs.length})
-        </SectionLabel>
-        {visibleOrchs.length > 0 ? (
+      {needsMe.length > 0 && (
+        <section aria-labelledby="zone-needs-me-heading">
+          <h2
+            id="zone-needs-me-heading"
+            className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"
+          >
+            <AlertCircle
+              aria-hidden="true"
+              className="h-3.5 w-3.5 text-red"
+            />
+            Needs me ({needsMe.length})
+          </h2>
+          <AttentionBar items={needsMe} />
+        </section>
+      )}
+
+      <section aria-labelledby="zone-shipping-heading">
+        <h2
+          id="zone-shipping-heading"
+          className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted"
+        >
+          <Rocket aria-hidden="true" className="h-3.5 w-3.5 text-accent" />
+          Shipping ({shipping.length})
+        </h2>
+        {shipping.length > 0 ? (
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {visibleOrchs.map((o) => (
+            {shipping.map((o) => (
               <OrchestratorCard
                 key={o.id}
                 orch={o}
@@ -264,39 +285,45 @@ export function Dashboard({
         ) : (
           <EmptyState icon={Layers} message="No active orchestrators found" />
         )}
+      </section>
 
-        {recentOrchs.length > 0 && (
-          <div className="mt-3">
+      {recent.length > 0 && (
+        <section aria-labelledby="zone-recent-heading">
+          <h2 id="zone-recent-heading" className="text-[11px] font-semibold uppercase tracking-wider">
             <button
               onClick={() => setRecentExpanded((e) => !e)}
-              className="flex items-center gap-1.5 px-1 py-1 text-[11px] font-medium text-muted transition-colors hover:text-fg"
+              className="flex items-center gap-1.5 px-1 py-1 font-semibold uppercase tracking-wider text-muted transition-colors hover:text-fg"
               aria-expanded={recentExpanded}
-              aria-label={`${recentExpanded ? "Hide" : "Show"} Recent orchestrators (${recentOrchs.length})`}
+              aria-controls="zone-recent-panel"
+              aria-label={`${recentExpanded ? "Hide" : "Show"} Recent orchestrators (${recent.length})`}
             >
               {recentExpanded ? (
-                <ChevronDown className="h-3.5 w-3.5" />
+                <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
               ) : (
-                <ChevronRight className="h-3.5 w-3.5" />
+                <ChevronRight aria-hidden="true" className="h-3.5 w-3.5" />
               )}
               <span>
-                {recentExpanded ? "Hide" : "Show"} Recent ({recentOrchs.length})
+                {recentExpanded ? "Hide" : "Show"} Recent ({recent.length})
               </span>
             </button>
-            {recentExpanded && (
-              <div className="mt-2 grid gap-3 opacity-60 sm:grid-cols-2 xl:grid-cols-3">
-                {recentOrchs.map((o) => (
-                  <OrchestratorCard
-                    key={o.id}
-                    orch={o}
-                    getAnalytics={getAnalytics}
-                    onClick={() => onSelectOrch(o.id)}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+          </h2>
+          {recentExpanded && (
+            <div
+              id="zone-recent-panel"
+              className="mt-2 grid gap-3 opacity-60 sm:grid-cols-2 xl:grid-cols-3"
+            >
+              {recent.map((o) => (
+                <OrchestratorCard
+                  key={o.id}
+                  orch={o}
+                  getAnalytics={getAnalytics}
+                  onClick={() => onSelectOrch(o.id)}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {sessions.length > 0 && (
         <div>
