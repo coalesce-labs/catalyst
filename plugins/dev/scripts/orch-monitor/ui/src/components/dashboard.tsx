@@ -12,6 +12,8 @@ import { PrBadge } from "./ui/pr-badge";
 import { KpiStrip } from "./kpi-strip";
 import { AttentionBar } from "./attention-bar";
 import { EventLog } from "./event-log";
+import { ToolUsagePanel } from "./tool-usage-panel";
+import { ApiErrorsPanel } from "./api-errors-panel";
 import type {
   OrchestratorState,
   SessionTimeFilter,
@@ -20,6 +22,7 @@ import type {
   EventEntry,
   SessionState,
   SessionKind,
+  OtelLogEntry,
 } from "@/lib/types";
 import { sessionKind } from "@/lib/types";
 import {
@@ -44,6 +47,9 @@ interface DashboardProps {
   selectedSessionId?: string | null;
   onSessionSelect?: (sessionId: string) => void;
   timeFilter: SessionTimeFilter;
+  otelConfigured: boolean;
+  otelTools: Record<string, number> | null;
+  otelErrors: OtelLogEntry[] | null;
 }
 
 function OrchestratorCard({
@@ -233,6 +239,9 @@ export function Dashboard({
   selectedSessionId,
   onSessionSelect,
   timeFilter,
+  otelConfigured,
+  otelTools,
+  otelErrors,
 }: DashboardProps) {
   const { needsMe, shipping, recent } = partitionDashboard({
     orchestrators,
@@ -246,6 +255,13 @@ export function Dashboard({
       <h1 className="text-lg font-bold text-fg">Dashboard</h1>
 
       <KpiStrip orchestrators={orchestrators} getAnalytics={getAnalytics} />
+
+      {otelConfigured && (
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          <ToolUsagePanel tools={otelTools} configured={otelConfigured} />
+          <ApiErrorsPanel errors={otelErrors} configured={otelConfigured} />
+        </div>
+      )}
 
       {needsMe.length > 0 && (
         <section aria-labelledby="zone-needs-me-heading">

@@ -49,6 +49,7 @@ import {
 } from "./lib/preview-status";
 import { writeMergedSignalFile } from "./lib/signal-writer";
 import { loadOtelConfig } from "./lib/otel-config";
+import { detectProjectKey } from "./lib/project-key";
 import {
   createPrometheusFetcher,
   type PrometheusFetcher,
@@ -1253,8 +1254,10 @@ if (import.meta.main) {
   const compact = process.argv.includes("--compact");
   const renderOpts: RenderOptions = { compact };
 
+  const projectKey = detectProjectKey(process.cwd());
   const otelCfg = loadOtelConfig(
     process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
+    projectKey,
   );
 
   if (terminalOnly) {

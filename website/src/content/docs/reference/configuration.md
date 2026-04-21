@@ -246,17 +246,18 @@ Never committed. One file per project, linked by `projectKey`.
 
 Only configure the integrations you use. The setup script prompts for each one.
 
-### Monitor OTel Config (`~/.config/catalyst/config.json`)
+### Monitor OTel Config
 
-The orchestration monitor reads OpenTelemetry backend endpoints from a global config file at
-`~/.config/catalyst/config.json`. This file is separate from the per-project secrets files.
+The orchestration monitor reads OpenTelemetry backend endpoints from the per-project secrets
+file `~/.config/catalyst/config-<projectKey>.json` (layer 2). If that file is not present it
+falls back to the global `~/.config/catalyst/config.json`.
 
 ```json
 {
   "otel": {
     "enabled": true,
-    "prometheus": "http://localhost:9090",
-    "loki": "http://localhost:3100"
+    "prometheusUrl": "http://localhost:9090",
+    "lokiUrl": "http://localhost:3100"
   }
 }
 ```
@@ -264,11 +265,15 @@ The orchestration monitor reads OpenTelemetry backend endpoints from a global co
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `otel.enabled` | boolean | `false` | Enable OTel proxy endpoints on orch-monitor |
-| `otel.prometheus` | string | `null` | Prometheus query URL (for `/api/otel/query`) |
-| `otel.loki` | string | `null` | Loki query URL (for `/api/otel/logs`) |
+| `otel.prometheusUrl` | string | `null` | Prometheus query URL (for `/api/otel/query` and cost/token panels) |
+| `otel.lokiUrl` | string | `null` | Loki query URL (for `/api/otel/logs`, Tool Usage, and API Errors panels) |
 
 Environment variable overrides: `OTEL_ENABLED`, `PROMETHEUS_URL`, `LOKI_URL`. Env vars take
 precedence over the file when both are set.
+
+**Deprecated names**: the monitor still accepts `otel.prometheus` and `otel.loki` for one
+release cycle, but emits a deprecation warning on startup. Rename to `otel.prometheusUrl` and
+`otel.lokiUrl` to silence the warning.
 
 If you're running the [claude-code-otel](https://github.com/ryanrozich/claude-code-otel) Docker
 Compose stack locally, the defaults above match the standard ports. For hosted backends (Grafana

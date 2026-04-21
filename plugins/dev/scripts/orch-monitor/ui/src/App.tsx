@@ -60,6 +60,8 @@ function Monitor() {
     analytics,
     linear,
     otelHealth,
+    otelTools,
+    otelErrors,
     staleThreshold,
   } = useMonitor();
 
@@ -289,6 +291,9 @@ function Monitor() {
                   selectedSessionId={selectedSession}
                   onSessionSelect={handleSessionSelect}
                   timeFilter={timeFilter}
+                  otelConfigured={otelHealth?.configured === true}
+                  otelTools={otelTools}
+                  otelErrors={otelErrors}
                 />
               </div>
             )}
