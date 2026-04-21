@@ -10,6 +10,7 @@ import type {
   OrchestratorState,
   SessionState,
   OtelHealth,
+  OtelLogEntry,
 } from "@/lib/types";
 import { derivePrVariant } from "../../../lib/pr-variant";
 
@@ -101,6 +102,10 @@ export function useMonitor() {
   const [attention, setAttention] = useState<CollectedAttention[]>([]);
   const [sessions, setSessions] = useState<SessionState[]>([]);
   const [otelHealth, setOtelHealth] = useState<OtelHealth | null>(null);
+  const [otelTools, setOtelTools] = useState<Record<string, number> | null>(
+    null,
+  );
+  const [otelErrors, setOtelErrors] = useState<OtelLogEntry[] | null>(null);
 
   const prevWorkerRef = useRef<Map<string, WorkerPrev>>(new Map());
   const seenAttentionRef = useRef<Set<string>>(new Set());
@@ -437,6 +442,41 @@ export function useMonitor() {
     return () => clearInterval(id);
   }, []);
 
+  // OTel tools + errors polling (only when OTel is configured)
+  const otelConfigured = otelHealth?.configured === true;
+  useEffect(() => {
+    if (!otelConfigured) {
+      setOtelTools(null);
+      setOtelErrors(null);
+      return;
+    }
+    async function refreshTools() {
+      try {
+        const resp = await fetch("/api/otel/tools?range=1h");
+        if (!resp.ok) return;
+        const body = (await resp.json()) as {
+          data: Record<string, number> | null;
+        };
+        setOtelTools(body.data);
+      } catch {}
+    }
+    async function refreshErrors() {
+      try {
+        const resp = await fetch("/api/otel/errors?range=1h&limit=10");
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: OtelLogEntry[] | null };
+        setOtelErrors(body.data);
+      } catch {}
+    }
+    refreshTools();
+    refreshErrors();
+    const id = setInterval(() => {
+      refreshTools();
+      refreshErrors();
+    }, 30000);
+    return () => clearInterval(id);
+  }, [otelConfigured]);
+
   const getAnalytics = useCallback(
     (orchId: string) => analytics.get(orchId) || {},
     [analytics],
@@ -456,6 +496,8 @@ export function useMonitor() {
     linear: getLinear,
     sessions,
     otelHealth,
+    otelTools,
+    otelErrors,
     staleThreshold: STALE_THRESHOLD,
   };
 }

@@ -255,6 +255,12 @@ export interface OtelHealth {
   loki: OtelEndpointHealth;
 }
 
+export interface OtelLogEntry {
+  timestamp: string;
+  line: string;
+  labels: Record<string, string>;
+}
+
 export type CommsMessageType =
   | "proposal"
   | "question"
