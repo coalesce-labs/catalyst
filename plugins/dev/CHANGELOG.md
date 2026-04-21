@@ -1,5 +1,38 @@
 # Changelog
 
+## [7.7.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.6.1...catalyst-dev-v7.7.0)
+
+Apr 21, 2026
+
+<!-- ai-enhanced -->
+
+### Orchestrator Intelligence & Communications
+
+Three productivity-focused areas land in the monitor: a restructured dashboard puts "what needs me?" first without scrolling, a new Comms view surfaces real-time catalyst-comms channels with live message feeds and cross-links from worker activity, and orchestrator briefings now include an auto-generated rollup that aggregates what shipped across all waves. Worker cost tooltips explain when metrics are unavailable, and PR status badges show merge conflicts or blocks at a glance across tables and cards.
+
+
+
+### PRs
+
+* **dev:** briefing Sheet + orchestrator Briefing tab (CTL-105) ([#234](https://github.com/coalesce-labs/catalyst/issues/234)) ([8324f1c](https://github.com/coalesce-labs/catalyst/commit/8324f1c8b86f2d2a2c492859738d09fa1f929e35))
+* **dev:** catalyst-comms setup + website docs (CTL-113) ([#231](https://github.com/coalesce-labs/catalyst/issues/231)) ([7ce31a4](https://github.com/coalesce-labs/catalyst/commit/7ce31a43a9db0d35d37b2a7dbb69997d2c204c6d))
+* **dev:** Comms view in orch-monitor (CTL-112) ([#235](https://github.com/coalesce-labs/catalyst/issues/235)) ([ed8ba1a](https://github.com/coalesce-labs/catalyst/commit/ed8ba1a9a749dbf70a8b57cb2f28bba7cf41c1a3))
+* **dev:** Comms view in orch-monitor (CTL-112) ([#236](https://github.com/coalesce-labs/catalyst/issues/236)) ([81ef0e4](https://github.com/coalesce-labs/catalyst/commit/81ef0e4b2f3061f62fc42583c768b8886bda8bfe))
+* **dev:** dashboard IA three-zone layout (CTL-107) ([#238](https://github.com/coalesce-labs/catalyst/issues/238)) ([9ce601f](https://github.com/coalesce-labs/catalyst/commit/9ce601f8743e923f16458901bc606379ae636c95))
+* **dev:** orchestrator rollup briefing (CTL-108) ([#237](https://github.com/coalesce-labs/catalyst/issues/237)) ([007c8f3](https://github.com/coalesce-labs/catalyst/commit/007c8f3849ebdcef11d654f8f086db6ebcee1b16))
+* **dev:** OTel health banner + worker cost tooltips (CTL-104) ([#230](https://github.com/coalesce-labs/catalyst/issues/230)) ([0f63dbd](https://github.com/coalesce-labs/catalyst/commit/0f63dbd9bb91fba7d9ec75ff0121f9ce3935832c))
+* **dev:** persist orchestrator artifacts with hybrid archive (CTL-110) ([#232](https://github.com/coalesce-labs/catalyst/issues/232)) ([003bce3](https://github.com/coalesce-labs/catalyst/commit/003bce33f30d0b04a9ac5b92c2e1b781e76eb09d))
+* **dev:** PR status badges across orch-monitor (CTL-109) ([#229](https://github.com/coalesce-labs/catalyst/issues/229)) ([b3510f8](https://github.com/coalesce-labs/catalyst/commit/b3510f8f8c0c50b9be2fa3fc1b86642f1eddf1ce))
+* **dev:** rename Process column to Worker, suppress dead PID on done workers (CTL-101) ([#226](https://github.com/coalesce-labs/catalyst/issues/226)) ([6db8a76](https://github.com/coalesce-labs/catalyst/commit/6db8a762ae336efb0a81683046acdf6f4b7ca43a))
+* **dev:** scaffold shadcn/ui interaction primitives in orch-monitor (CTL-97) ([#223](https://github.com/coalesce-labs/catalyst/issues/223)) ([fbaba97](https://github.com/coalesce-labs/catalyst/commit/fbaba97fe4f5137c6f6043427e85574996ec5077))
+* **dev:** setup-warp color-by-org convention, reserve blue for PM ([#219](https://github.com/coalesce-labs/catalyst/issues/219)) ([4266d33](https://github.com/coalesce-labs/catalyst/commit/4266d33a7af80271e2086aaebf3f22b51d848fc0))
+* **dev:** wire catalyst-comms into orchestrate (CTL-111) ([#222](https://github.com/coalesce-labs/catalyst/issues/222)) ([f1e0ecf](https://github.com/coalesce-labs/catalyst/commit/f1e0ecfaa27341be3c016577b65e0246757afd97))
+* **dev:** worker + session drawers → shadcn Sheet (CTL-106) ([#233](https://github.com/coalesce-labs/catalyst/issues/233)) ([6355968](https://github.com/coalesce-labs/catalyst/commit/6355968c142a8a03c44bd6f4005f0ae164d876d5))
+* **dev:** Active filter now hides done orchestrators (CTL-99) ([#224](https://github.com/coalesce-labs/catalyst/issues/224)) ([39fbe22](https://github.com/coalesce-labs/catalyst/commit/39fbe2217a7c3e7503068d0e678ab6dadc22ff1e))
+* **dev:** exclude abandoned workers from orch-monitor progress denominator (CTL-100) ([#225](https://github.com/coalesce-labs/catalyst/issues/225)) ([0437300](https://github.com/coalesce-labs/catalyst/commit/04373001ad5f4ffe013f65b1a3895fe1cfd889d2))
+* **dev:** rename "Process died" → "Worker died" in attention feed (CTL-102) ([#227](https://github.com/coalesce-labs/catalyst/issues/227)) ([5ee6c77](https://github.com/coalesce-labs/catalyst/commit/5ee6c77824b128408ab431adde329ecdbcb60e38))
+* **dev:** TaskListSection empty/error states + worker-tasks debug endpoint (CTL-103) ([#228](https://github.com/coalesce-labs/catalyst/issues/228)) ([8524299](https://github.com/coalesce-labs/catalyst/commit/8524299074aa09fb079d6f6429c4d0499b91cc51))
+
 ## [7.6.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.6.0...catalyst-dev-v7.6.1)
 
 Apr 20, 2026
