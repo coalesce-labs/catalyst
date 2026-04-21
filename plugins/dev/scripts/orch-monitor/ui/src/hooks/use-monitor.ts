@@ -11,6 +11,7 @@ import type {
   SessionState,
   OtelHealth,
 } from "@/lib/types";
+import { derivePrVariant } from "../../../lib/pr-variant";
 
 const MAX_EVENTS = 200;
 const STALE_THRESHOLD = 900;
@@ -49,6 +50,21 @@ function collectAttention(snap: MonitorSnapshot): CollectedAttention[] {
           reason: "Worker died",
           severity: "error",
         });
+      }
+      if (w.pr) {
+        const variant = derivePrVariant({
+          state: w.pr.state,
+          mergeStateStatus: w.pr.mergeStateStatus,
+          isDraft: w.pr.isDraft,
+        });
+        if (variant === "blocked") {
+          push({
+            orchId: orch.id,
+            ticket,
+            reason: `PR #${w.pr.number} BLOCKED — review required`,
+            severity: "warning",
+          });
+        }
       }
     }
     for (const item of orch.attention ?? []) {
