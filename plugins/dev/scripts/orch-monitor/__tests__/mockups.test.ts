@@ -229,3 +229,119 @@ describe("mockups — briefing.html", () => {
     expect(body).toContain("__catalystMockupPrefs");
   });
 });
+
+describe("mockups — comms.html", () => {
+  it("serves /mockups/comms.html with text/html", async () => {
+    const res = await fetch(`${baseUrl}/mockups/comms.html`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const body = await res.text();
+    expect(body.toLowerCase()).toContain("<!doctype html");
+    expect(body).toContain('<main class="mockup-shell">');
+  });
+
+  it("gallery index links to comms.html", async () => {
+    const res = await fetch(`${baseUrl}/mockups/`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('href="./comms.html"');
+  });
+
+  it("renders three-pane layout with channels/thread/agents", async () => {
+    const res = await fetch(`${baseUrl}/mockups/comms.html`);
+    const body = await res.text();
+    expect(body).toContain("comms-layout");
+    expect(body).toContain("comms-channels");
+    expect(body).toContain("comms-thread");
+    expect(body).toContain("comms-agents");
+  });
+
+  it("renders at least one channel row with a name and participant count", async () => {
+    const res = await fetch(`${baseUrl}/mockups/comms.html`);
+    const body = await res.text();
+    const matches = body.match(/class="channel-row[^"]*"/g) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+    expect(body).toContain("channel-row__name");
+    expect(body).toContain("channel-row__count");
+  });
+
+  it("renders agent cards with capabilities, status, role, heartbeat, and TTL fields", async () => {
+    const res = await fetch(`${baseUrl}/mockups/comms.html`);
+    const body = await res.text();
+    for (const cls of [
+      "agent-card",
+      "agent-card__name",
+      "agent-card__role",
+      "agent-card__capabilities",
+      "agent-card__status",
+      "agent-card__heartbeat",
+      "agent-card__ttl",
+    ]) {
+      expect(body).toContain(cls);
+    }
+    // At least two agent cards in the demo data.
+    const cards = body.match(/class="agent-card[^"]*"/g) ?? [];
+    expect(cards.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("marks attention messages with a distinct class and dedicated styling", async () => {
+    const res = await fetch(`${baseUrl}/mockups/comms.html`);
+    const body = await res.text();
+    // Class must be applied to at least one message row, not just defined in CSS.
+    expect(body).toMatch(/class="message-row[^"]*message--attention/);
+    // Styling must actually differ — border-left using the warning token.
+    expect(body).toMatch(
+      /\.message--attention\s*\{[^}]*border-left:[^}]*var\(--color-warning\)/,
+    );
+  });
+
+  it("defines a reduced-motion-friendly heartbeat animation using the motion token", async () => {
+    const res = await fetch(`${baseUrl}/mockups/comms.html`);
+    const body = await res.text();
+    // Animation must be named and the keyframes defined.
+    expect(body).toMatch(/@keyframes\s+comms-heartbeat/);
+    // Animation must use the shared motion token, not a hardcoded duration.
+    expect(body).toContain("var(--motion-duration-heartbeat)");
+    // Reduced-motion guard present.
+    expect(body).toContain("prefers-reduced-motion");
+  });
+
+  it("renders an empty state for each of the three panes", async () => {
+    const res = await fetch(`${baseUrl}/mockups/comms.html`);
+    const body = await res.text();
+    expect(body).toContain("comms-empty--channels");
+    expect(body).toContain("comms-empty--thread");
+    expect(body).toContain("comms-empty--agents");
+  });
+
+  it("status dot pulses only on fresh heartbeats (data-fresh attribute)", async () => {
+    const res = await fetch(`${baseUrl}/mockups/comms.html`);
+    const body = await res.text();
+    // The CSS rule must be keyed on data-fresh="true" so stale/done cards don't pulse.
+    expect(body).toMatch(/data-fresh="true"/);
+    expect(body).toMatch(/\[data-fresh="true"\]/);
+  });
+
+  it("contains no emoji characters (operator voice, per ticket)", async () => {
+    const res = await fetch(`${baseUrl}/mockups/comms.html`);
+    const body = await res.text();
+    // Scan for codepoints inside emoji Unicode blocks (Misc Symbols &
+    // Pictographs, Emoticons, Transport, Supplemental Symbols, Extended-A).
+    // Iterating codepoints avoids regex backtracking / unsafe-regex warnings.
+    let hasEmoji = false;
+    for (const ch of body) {
+      const cp = ch.codePointAt(0) ?? 0;
+      if (
+        (cp >= 0x1f300 && cp <= 0x1f5ff) ||
+        (cp >= 0x1f600 && cp <= 0x1f64f) ||
+        (cp >= 0x1f680 && cp <= 0x1f6ff) ||
+        (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+        (cp >= 0x1fa70 && cp <= 0x1faff)
+      ) {
+        hasEmoji = true;
+        break;
+      }
+    }
+    expect(hasEmoji).toBe(false);
+  });
+});
