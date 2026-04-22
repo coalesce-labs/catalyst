@@ -322,6 +322,68 @@ The AI briefing generates a natural-language status summary and suggests session
 Linear ticket context. It is on-demand (button click) or optionally auto-refreshing. Zero cost
 when disabled.
 
+### AI Summarize Endpoint
+
+The monitor exposes `POST /api/summarize` for on-demand orchestrator summaries. Unlike the
+briefing endpoint (which routes through a Cloudflare AI gateway), summarize calls each provider
+directly using an API key sourced from an environment variable.
+
+**Project config** (`.catalyst/config.json`):
+
+```json
+{
+  "catalyst": {
+    "ai": {
+      "enabled": true,
+      "defaultProvider": "anthropic",
+      "defaultModel": "claude-sonnet-4-6",
+      "providers": {
+        "anthropic": { "apiKeyEnv": "ANTHROPIC_API_KEY" },
+        "openai":    { "apiKeyEnv": "OPENAI_API_KEY" },
+        "grok":      { "apiKeyEnv": "XAI_API_KEY" }
+      }
+    }
+  }
+}
+```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `ai.defaultProvider` | No | `anthropic` | Provider used when request omits `provider` |
+| `ai.defaultModel` | No | `claude-sonnet-4-6` | Model used when request omits `model` |
+| `ai.providers.{name}.apiKeyEnv` | Yes (per provider) | — | Name of the env var that holds that provider's API key |
+
+Only providers whose `apiKeyEnv` resolves to a non-empty value at monitor startup are considered
+enabled. If no providers have their env var set, the endpoint returns `503 {"error": "AI not
+configured"}`.
+
+**Request body** (`POST /api/summarize`):
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `orchId` | Yes | — | Orchestrator directory name (e.g. `orch-2026-04-22-3`) |
+| `template` | No | `run-summary` | `run-summary`, `attention-digest`, or `worker-status` |
+| `provider` | No | config default | `anthropic`, `openai`, or `grok` |
+| `model` | No | config default | Provider-specific model ID |
+
+**Response body** (`200 OK`):
+
+```json
+{
+  "summary": "string",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "cost": 0.0123,
+  "tokens": 1500,
+  "cached": false,
+  "generatedAt": "2026-04-22T20:00:00.000Z"
+}
+```
+
+Results are cached in-memory for 5 minutes keyed by `(orchId, template, snapshotHash, provider,
+model)`. When the cache hits, `cached` is `true` and no provider call is made. A simple
+per-provider rate limiter (concurrency + minimum interval) returns `429` on bursts.
+
 ## Worktree Setup
 
 Define the commands that run when creating a new worktree via `/create-worktree` or `/orchestrate`. This replaces the default auto-detected setup (dependency install + thoughts init) with full project control — like `conductor.json`'s lifecycle hooks.

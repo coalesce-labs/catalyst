@@ -43,6 +43,13 @@ import {
   type LinearTicket,
 } from "./lib/linear";
 import type { BriefingProvider } from "./lib/ai-briefing";
+import type { SummarizeHandler } from "./lib/summarize";
+import { createSummarizeHandler } from "./lib/summarize";
+import { loadSummarizeConfig, type ProviderName } from "./lib/summarize/config";
+import { buildSummarizeSnapshot } from "./lib/summarize/snapshot";
+import { getProvider, type SummarizeProvider } from "./lib/summarize/providers";
+import { createCache } from "./lib/summarize/cache";
+import { createRateLimiter } from "./lib/summarize/rate-limit";
 import {
   createPreviewFetcher,
   type PreviewFetcher,
@@ -106,6 +113,7 @@ export interface CreateServerOptions {
   dbPath?: string | null;
   sqlitePollIntervalMs?: number;
   briefingProvider?: BriefingProvider | null;
+  summarizeHandler?: SummarizeHandler | null;
   prometheusUrl?: string | null;
   lokiUrl?: string | null;
   prometheusFetcher?: PrometheusFetcher | null;
@@ -327,6 +335,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     dbPath = null,
     sqlitePollIntervalMs,
     briefingProvider: briefingProviderOpt,
+    summarizeHandler: summarizeHandlerOpt,
     prometheusUrl,
     lokiUrl,
     prometheusFetcher: promFetcherOpt,
@@ -366,6 +375,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   const briefingProvider: BriefingProvider | null =
     briefingProviderOpt === null ? null : (briefingProviderOpt ?? null);
+
+  const summarizeHandler: SummarizeHandler | null =
+    summarizeHandlerOpt === null ? null : (summarizeHandlerOpt ?? null);
 
   const prom: PrometheusFetcher | null =
     promFetcherOpt === null
@@ -866,6 +878,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
           });
         }
 
+        if (url.pathname === "/api/summarize" && req.method === "POST") {
+          if (!summarizeHandler) {
+            return Response.json(
+              { error: "AI not configured" },
+              { status: 503 },
+            );
+          }
+          return summarizeHandler.handle(req);
+        }
+
         if (url.pathname === "/api/otel/status") {
           return Response.json({
             enabled: prom !== null || loki !== null,
@@ -1285,6 +1307,28 @@ if (import.meta.main) {
     projectKey,
   );
 
+  const summarizeCfg = loadSummarizeConfig(
+    `${process.cwd()}/.catalyst/config.json`,
+  );
+  let summarizeHandler: SummarizeHandler | null = null;
+  if (summarizeCfg.enabled) {
+    const providers: Record<ProviderName, SummarizeProvider> = {
+      anthropic: getProvider("anthropic"),
+      openai: getProvider("openai"),
+      grok: getProvider("grok"),
+    };
+    summarizeHandler = createSummarizeHandler({
+      config: summarizeCfg,
+      buildSnapshot: (orchId) => buildSummarizeSnapshot(WT_DIR, orchId),
+      providers,
+      cache: createCache(5 * 60_000),
+      rateLimiter: createRateLimiter({
+        maxConcurrent: 2,
+        minIntervalMs: 500,
+      }),
+    });
+  }
+
   if (terminalOnly) {
     const handle = startTerminalOnly(WT_DIR, renderOpts, RUNS_DIR);
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
@@ -1305,6 +1349,7 @@ if (import.meta.main) {
       lokiUrl: otelCfg.enabled ? otelCfg.lokiUrl : null,
       terminal: useTerminal,
       renderOptions: renderOpts,
+      summarizeHandler,
     });
     const displayHost =
       srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);
