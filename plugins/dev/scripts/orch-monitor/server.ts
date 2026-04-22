@@ -1135,6 +1135,31 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }
 
 
+        if (url.pathname === "/mockups" || url.pathname === "/mockups/") {
+          const file = Bun.file(join(publicDir, "mockups", "index.html"));
+          if (await file.exists()) {
+            return new Response(file, {
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            });
+          }
+        }
+
+        if (url.pathname.startsWith("/mockups/")) {
+          const rel = decodeURIComponent(
+            "mockups/" + url.pathname.slice("/mockups/".length),
+          );
+          const safe = resolveSafeStaticPath(publicDir, rel);
+          if (!safe) return new Response("Forbidden", { status: 403 });
+          const file = Bun.file(safe);
+          if (await file.exists()) {
+            const dot = safe.lastIndexOf(".");
+            const ext = dot >= 0 ? safe.slice(dot).toLowerCase() : "";
+            return new Response(file, {
+              headers: { "Content-Type": contentTypeForExt(ext) },
+            });
+          }
+        }
+
         if (url.pathname.startsWith("/public/") || url.pathname.startsWith("/assets/")) {
           const rel = decodeURIComponent(
             url.pathname.startsWith("/public/")
