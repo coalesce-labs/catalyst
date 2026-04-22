@@ -14,6 +14,11 @@ package and are selected at runtime via `[data-system=...]` on `<html>`:
 No app consumers are wired yet — a follow-on ticket renders both systems side-by-side
 in the orch-monitor mockup harness.
 
+Brand V2 direction (CTL-146): **Ignition Chevron**. See
+[`docs/brand-v2-direction.md`](./docs/brand-v2-direction.md) for the decision summary +
+the hard requirements that inherited brand tickets (CTL-147, CTL-WORDMARK-LOCKUP,
+CTL-FAVICON-SET, CTL-OG-CARD) must obey.
+
 ## Outputs
 
 Running `bun run build` produces:
