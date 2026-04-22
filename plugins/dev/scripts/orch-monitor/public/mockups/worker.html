@@ -1,0 +1,990 @@
+<!doctype html>
+<html lang="en" data-system="operator-console" data-worker-mode="orch-worker">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalyst — Worker</title>
+    <link rel="stylesheet" href="./_shared/tokens.css" />
+    <link rel="stylesheet" href="./_shared/fonts.css" />
+    <link rel="stylesheet" href="./_shared/base.css" />
+    <link rel="stylesheet" href="./_shared/chrome.css" />
+    <script>
+      // Pre-paint bootstrap — sets html[data-system] before first paint to
+      // prevent flicker. Mirrors chrome.js's resolution priority (URL query
+      // > localStorage > default). chrome.js reads __catalystMockupPrefs to
+      // avoid re-parsing.
+      (function () {
+        const LS_KEY = "catalyst.mockup.prefs";
+        const DEFAULTS = { system: "operator-console" };
+        const SYSTEMS = ["operator-console", "precision-instrument"];
+        const url = new URLSearchParams(window.location.search);
+        let stored = {};
+        try {
+          stored = JSON.parse(window.localStorage.getItem(LS_KEY) || "{}");
+        } catch (_e) {
+          stored = {};
+        }
+        const candidate = url.get("system") || stored.system || DEFAULTS.system;
+        const system = SYSTEMS.includes(candidate) ? candidate : DEFAULTS.system;
+        document.documentElement.setAttribute("data-system", system);
+        window.__catalystMockupPrefs = { system };
+
+        // Worker-mode axis — separate from system axis. Query-only (no
+        // localStorage) so the page can be embedded by orch views without
+        // bleeding state back.
+        const MODES = ["orch-worker", "standalone"];
+        const modeCandidate = url.get("mode") || "orch-worker";
+        const mode = MODES.includes(modeCandidate) ? modeCandidate : "orch-worker";
+        document.documentElement.setAttribute("data-worker-mode", mode);
+      })();
+    </script>
+    <style>
+      /* ------- Worker page utilities (read tokens only) ------- */
+
+      .worker-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .worker-section__heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--spacing-4);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .worker-section__heading h2 {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+        color: var(--color-text-hi);
+      }
+
+      /* ------- Header ------- */
+
+      .worker-head {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .worker-head__breadcrumb {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-2);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      [data-worker-mode="standalone"] .worker-head__breadcrumb {
+        display: none;
+      }
+
+      .worker-head__breadcrumb a {
+        color: var(--color-text-md);
+      }
+
+      .worker-head__breadcrumb a:hover {
+        color: var(--color-accent);
+      }
+
+      .worker-head__sep {
+        color: var(--color-text-disabled);
+      }
+
+      .worker-head__title {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-4);
+        flex-wrap: wrap;
+      }
+
+      .worker-head__ticket {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-text-md);
+        padding: var(--spacing-1) var(--spacing-2);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-sm);
+      }
+
+      .worker-head__name {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-display);
+        line-height: var(--line-height-display);
+        letter-spacing: var(--letter-spacing-display);
+        color: var(--color-text-hi);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .worker-head__pr-link {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-info);
+      }
+
+      /* ------- Chips (local copy, mirrors brand.html tokens) ------- */
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      [data-system="operator-console"] .chip {
+        padding: 2px var(--spacing-2);
+        border-radius: var(--radius-full);
+        border: 1px solid transparent;
+      }
+      [data-system="operator-console"] .chip--running,
+      [data-system="operator-console"] .chip--merging {
+        color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--pr-open,
+      [data-system="operator-console"] .chip--pending {
+        color: var(--color-info);
+        background: color-mix(in srgb, var(--color-info) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--merged,
+      [data-system="operator-console"] .chip--done,
+      [data-system="operator-console"] .chip--passing {
+        color: var(--color-success);
+        background: color-mix(in srgb, var(--color-success) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--failed,
+      [data-system="operator-console"] .chip--failing {
+        color: var(--color-danger);
+        background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--queued,
+      [data-system="operator-console"] .chip--ticket {
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border-color: var(--color-border-subtle);
+      }
+
+      [data-system="precision-instrument"] .chip {
+        padding: 0;
+        background: transparent;
+        color: var(--color-text-md);
+        border: none;
+      }
+      [data-system="precision-instrument"] .chip::before {
+        content: "●";
+        font-size: 0.85em;
+        line-height: 1;
+      }
+      [data-system="precision-instrument"] .chip--running::before,
+      [data-system="precision-instrument"] .chip--merging::before {
+        color: var(--color-accent);
+      }
+      [data-system="precision-instrument"] .chip--pr-open::before,
+      [data-system="precision-instrument"] .chip--pending::before {
+        color: var(--color-info);
+      }
+      [data-system="precision-instrument"] .chip--merged::before,
+      [data-system="precision-instrument"] .chip--done::before,
+      [data-system="precision-instrument"] .chip--passing::before {
+        color: var(--color-success);
+      }
+      [data-system="precision-instrument"] .chip--failed::before,
+      [data-system="precision-instrument"] .chip--failing::before {
+        color: var(--color-danger);
+      }
+      [data-system="precision-instrument"] .chip--queued::before,
+      [data-system="precision-instrument"] .chip--ticket::before {
+        content: none;
+      }
+
+      /* ------- Phase timeline ------- */
+
+      .phase-strip {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: var(--spacing-2);
+        padding: var(--spacing-3) 0;
+      }
+
+      .phase-step {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+      }
+
+      .phase-step__name {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .phase-step__duration {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .phase-step--completed .phase-step__name {
+        color: var(--color-text-hi);
+      }
+
+      .phase-step--completed .phase-step__duration {
+        color: var(--color-success);
+      }
+
+      .phase-step--active {
+        border-color: var(--color-accent);
+      }
+
+      .phase-step--active .phase-step__name {
+        color: var(--color-accent);
+      }
+
+      .phase-step--active::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: -1px;
+        height: 2px;
+        background: var(--color-accent);
+        border-radius: 0 0 var(--radius-md) var(--radius-md);
+      }
+
+      [data-system="operator-console"] .phase-step--active::before {
+        animation: brand-heartbeat var(--motion-duration-heartbeat) ease-in-out infinite;
+      }
+
+      @keyframes brand-heartbeat {
+        0%, 100% { opacity: 0.7; }
+        50% { opacity: 1; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        [data-system="operator-console"] .phase-step--active::before {
+          animation: none;
+        }
+      }
+
+      .phase-step--pending .phase-step__name {
+        color: var(--color-text-disabled);
+      }
+
+      /* ------- Two-column split ------- */
+
+      .worker-split {
+        display: grid;
+        grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+        gap: var(--spacing-5);
+      }
+
+      @media (max-width: 900px) {
+        .worker-split {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ------- Signal panel ------- */
+
+      .signal-panel {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-lg);
+        padding: var(--spacing-5);
+      }
+
+      .signal-grid {
+        display: grid;
+        grid-template-columns: minmax(140px, auto) 1fr;
+        gap: var(--spacing-2) var(--spacing-4);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+      }
+
+      .signal-grid__key {
+        color: var(--color-text-lo);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      .signal-grid__val {
+        color: var(--color-text-hi);
+        word-break: break-all;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .signal-grid__val--muted {
+        color: var(--color-text-md);
+      }
+
+      .signal-grid__val--null {
+        color: var(--color-text-disabled);
+        font-style: italic;
+      }
+
+      /* ------- PR card ------- */
+
+      .pr-card {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-lg);
+        padding: var(--spacing-5);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .pr-card__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+      }
+
+      .pr-card__number {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        color: var(--color-text-hi);
+      }
+
+      .pr-card__grid {
+        display: grid;
+        grid-template-columns: minmax(120px, auto) 1fr;
+        gap: var(--spacing-1) var(--spacing-3);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+      }
+
+      .pr-card__grid dt {
+        color: var(--color-text-lo);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      .pr-card__grid dd {
+        margin: 0;
+        color: var(--color-text-hi);
+      }
+
+      .pr-card__empty {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        color: var(--color-text-lo);
+        padding: var(--spacing-4) 0;
+        text-align: center;
+      }
+
+      /* ------- Stream tail ------- */
+
+      .stream-list {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-lg);
+        max-height: 420px;
+        overflow-y: auto;
+        font-family: var(--font-family-mono);
+      }
+
+      .stream-row {
+        display: grid;
+        grid-template-columns: 24px 100px auto 1fr;
+        gap: var(--spacing-3);
+        align-items: baseline;
+        padding: var(--spacing-2) var(--spacing-4);
+        border-bottom: 1px solid var(--color-border-subtle);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+      }
+
+      .stream-row:last-child {
+        border-bottom: none;
+      }
+
+      .stream-row__icon {
+        color: var(--color-accent);
+        text-align: center;
+      }
+
+      .stream-row__tool {
+        color: var(--color-text-hi);
+      }
+
+      .stream-row__ts {
+        color: var(--color-text-lo);
+        font-size: var(--font-size-label);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .stream-row__preview {
+        color: var(--color-text-md);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* ------- Todos kanban ------- */
+
+      .todos-kanban {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: var(--spacing-4);
+      }
+
+      @media (max-width: 760px) {
+        .todos-kanban {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .todos-col {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-3);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .todos-col__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .todos-col__count {
+        font-variant-numeric: tabular-nums;
+        color: var(--color-text-lo);
+      }
+
+      .todos-col ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .todos-item {
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-sm);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+      }
+
+      .todos-col--in-progress .todos-item {
+        color: var(--color-text-hi);
+        border-color: var(--color-border-default);
+      }
+
+      .todos-col--in-progress .todos-item::before {
+        content: "▸ ";
+        color: var(--color-accent);
+      }
+
+      .todos-col--completed .todos-item {
+        color: var(--color-text-lo);
+      }
+
+      .todos-col--completed .todos-item::before {
+        content: "✓ ";
+        color: var(--color-success);
+      }
+
+      .todos-col--pending .todos-item::before {
+        content: "☐ ";
+        color: var(--color-text-disabled);
+      }
+
+      .todos-empty {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-label);
+        color: var(--color-text-disabled);
+        padding: var(--spacing-3);
+        text-align: center;
+      }
+
+      /* ------- Subagents section ------- */
+
+      .subagent-list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .subagent-row {
+        display: grid;
+        grid-template-columns: auto 1fr auto auto;
+        gap: var(--spacing-3);
+        align-items: center;
+        padding: var(--spacing-3) var(--spacing-4);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        cursor: pointer;
+        transition: border-color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .subagent-row:hover {
+        border-color: var(--color-border-strong);
+      }
+
+      .subagent-row__kind {
+        color: var(--color-text-lo);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      .subagent-row__name {
+        color: var(--color-text-hi);
+      }
+
+      .subagent-row__elapsed {
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ------- Cost grid ------- */
+
+      .cost-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: var(--spacing-3);
+      }
+
+      .cost-cell {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-3) var(--spacing-4);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+      }
+
+      .cost-cell__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .cost-cell__value {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        color: var(--color-text-hi);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* System B trim */
+      [data-system="precision-instrument"] .signal-panel,
+      [data-system="precision-instrument"] .pr-card,
+      [data-system="precision-instrument"] .stream-list,
+      [data-system="precision-instrument"] .todos-col,
+      [data-system="precision-instrument"] .subagent-row,
+      [data-system="precision-instrument"] .cost-cell,
+      [data-system="precision-instrument"] .phase-step {
+        border-color: var(--color-border-default);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mockup-shell">
+      <div class="mockup-container">
+        <header class="mockup-topbar">
+          <span class="mockup-topbar__mark">catalyst</span>
+          <span class="eyebrow">Worker</span>
+        </header>
+
+        <!-- ================ HEADER ================ -->
+        <section class="worker-head">
+          <nav class="worker-head__breadcrumb" aria-label="Orchestrator breadcrumb">
+            <a href="#">orch-2026-04-22-3</a>
+            <span class="worker-head__sep">/</span>
+            <span>wave 2</span>
+            <span class="worker-head__sep">/</span>
+            <span>CTL-138</span>
+          </nav>
+          <div class="worker-head__title">
+            <span class="worker-head__ticket chip chip--ticket">CTL-138</span>
+            <span class="chip chip--merging">Merging</span>
+            <h1 class="worker-head__name">worker.html mockup</h1>
+            <a class="worker-head__pr-link" href="#">PR #247 ↗</a>
+          </div>
+        </section>
+
+        <!-- ================ PHASE TIMELINE ================ -->
+        <section class="worker-section">
+          <header class="worker-section__heading">
+            <h2>Phase timeline</h2>
+            <span class="eyebrow">6 steps</span>
+          </header>
+          <div class="phase-strip" role="list" aria-label="Oneshot phases">
+            <div class="phase-step phase-step--completed" role="listitem">
+              <span class="phase-step__name">research</span>
+              <span class="phase-step__duration">2m 03s</span>
+            </div>
+            <div class="phase-step phase-step--completed" role="listitem">
+              <span class="phase-step__name">plan</span>
+              <span class="phase-step__duration">1m 12s</span>
+            </div>
+            <div class="phase-step phase-step--completed" role="listitem">
+              <span class="phase-step__name">implement</span>
+              <span class="phase-step__duration">4m 41s</span>
+            </div>
+            <div class="phase-step phase-step--completed" role="listitem">
+              <span class="phase-step__name">validate</span>
+              <span class="phase-step__duration">0m 38s</span>
+            </div>
+            <div class="phase-step phase-step--active" role="listitem" aria-current="step">
+              <span class="phase-step__name">ship</span>
+              <span class="phase-step__duration">1m 14s</span>
+            </div>
+            <div class="phase-step phase-step--pending" role="listitem">
+              <span class="phase-step__name">done</span>
+              <span class="phase-step__duration">—</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================ SPLIT: SIGNAL / PR ================ -->
+        <section class="worker-section">
+          <header class="worker-section__heading">
+            <h2>Signal + PR</h2>
+            <span class="eyebrow">signal file + gh state</span>
+          </header>
+
+          <div class="worker-split">
+            <!-- SIGNAL -->
+            <div class="signal-panel">
+              <dl class="signal-grid">
+                <div class="signal-grid__key">ticket</div>
+                <div class="signal-grid__val">CTL-138</div>
+
+                <div class="signal-grid__key">orchestrator</div>
+                <div class="signal-grid__val">orch-2026-04-22-3</div>
+
+                <div class="signal-grid__key">workerName</div>
+                <div class="signal-grid__val">orch-2026-04-22-3-CTL-138</div>
+
+                <div class="signal-grid__key">label</div>
+                <div class="signal-grid__val">oneshot CTL-138</div>
+
+                <div class="signal-grid__key">status</div>
+                <div class="signal-grid__val">merging</div>
+
+                <div class="signal-grid__key">phase</div>
+                <div class="signal-grid__val">5</div>
+
+                <div class="signal-grid__key">startedAt</div>
+                <div class="signal-grid__val">2026-04-22T20:48:35Z</div>
+
+                <div class="signal-grid__key">updatedAt</div>
+                <div class="signal-grid__val">2026-04-22T20:57:12Z</div>
+
+                <div class="signal-grid__key">lastHeartbeat</div>
+                <div class="signal-grid__val">2026-04-22T20:57:12Z</div>
+
+                <div class="signal-grid__key">completedAt</div>
+                <div class="signal-grid__val signal-grid__val--null">null</div>
+
+                <div class="signal-grid__key">pid</div>
+                <div class="signal-grid__val">56629</div>
+
+                <div class="signal-grid__key">worktreePath</div>
+                <div class="signal-grid__val signal-grid__val--muted">
+                  ~/catalyst/wt/orch-2026-04-22-3-CTL-138
+                </div>
+
+                <div class="signal-grid__key">session_id</div>
+                <div class="signal-grid__val signal-grid__val--muted">sess_20260422T204718_64aa0e66</div>
+
+                <div class="signal-grid__key">lastReviveReason</div>
+                <div class="signal-grid__val signal-grid__val--null">null</div>
+
+                <div class="signal-grid__key">fixupAttempts</div>
+                <div class="signal-grid__val">0</div>
+
+                <div class="signal-grid__key">linearState</div>
+                <div class="signal-grid__val">In Review</div>
+              </dl>
+            </div>
+
+            <!-- PR CARD -->
+            <aside class="pr-card" aria-label="Pull request">
+              <header class="pr-card__head">
+                <span class="pr-card__number">#247</span>
+                <span class="chip chip--passing">CI passing</span>
+              </header>
+              <dl class="pr-card__grid">
+                <dt>URL</dt>
+                <dd>
+                  <a href="#">github.com/../pull/247</a>
+                </dd>
+                <dt>merge state</dt>
+                <dd>CLEAN</dd>
+                <dt>opened</dt>
+                <dd>2026-04-22T20:55:48Z</dd>
+                <dt>auto-merge</dt>
+                <dd>armed</dd>
+                <dt>merged</dt>
+                <dd class="signal-grid__val--null">—</dd>
+              </dl>
+            </aside>
+          </div>
+        </section>
+
+        <!-- ================ STREAM TAIL ================ -->
+        <section class="worker-section">
+          <header class="worker-section__heading">
+            <h2>Stream tail</h2>
+            <span class="eyebrow">last 12 tool events</span>
+          </header>
+          <div class="stream-list" role="log" aria-live="polite">
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">▶</span>
+              <span class="stream-row__tool">Bash</span>
+              <span class="stream-row__ts">20:57:12</span>
+              <span class="stream-row__preview">gh pr view 247 --json state,mergeStateStatus</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">☐</span>
+              <span class="stream-row__tool">TodoWrite</span>
+              <span class="stream-row__ts">20:57:08</span>
+              <span class="stream-row__preview">mark "Ship" in-progress · polling auto-merge</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">▶</span>
+              <span class="stream-row__tool">Bash</span>
+              <span class="stream-row__ts">20:57:03</span>
+              <span class="stream-row__preview">gh pr merge 247 --squash --auto --delete-branch</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">✎</span>
+              <span class="stream-row__tool">Edit</span>
+              <span class="stream-row__ts">20:56:52</span>
+              <span class="stream-row__preview">public/mockups/index.html · add gallery card</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">✚</span>
+              <span class="stream-row__tool">Write</span>
+              <span class="stream-row__ts">20:56:41</span>
+              <span class="stream-row__preview">public/mockups/worker.html · 612 lines</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">◉</span>
+              <span class="stream-row__tool">Task</span>
+              <span class="stream-row__ts">20:54:02</span>
+              <span class="stream-row__preview">code-reviewer · review new worker.html + test</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">▶</span>
+              <span class="stream-row__tool">Bash</span>
+              <span class="stream-row__ts">20:53:58</span>
+              <span class="stream-row__preview">bun test __tests__/mockups.test.ts</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">✎</span>
+              <span class="stream-row__tool">Edit</span>
+              <span class="stream-row__ts">20:53:40</span>
+              <span class="stream-row__preview">__tests__/mockups.test.ts · add stream-tail assertion</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">⎙</span>
+              <span class="stream-row__tool">Read</span>
+              <span class="stream-row__ts">20:51:18</span>
+              <span class="stream-row__preview">templates/worker-signal.json · enumerate signal fields</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">⎙</span>
+              <span class="stream-row__tool">Read</span>
+              <span class="stream-row__ts">20:50:47</span>
+              <span class="stream-row__preview">public/mockups/brand.html · chips + kanban patterns</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">◉</span>
+              <span class="stream-row__tool">Task</span>
+              <span class="stream-row__ts">20:49:22</span>
+              <span class="stream-row__preview">Explore · locate mockup harness files</span>
+            </div>
+            <div class="stream-row">
+              <span class="stream-row__icon" aria-hidden="true">▶</span>
+              <span class="stream-row__tool">Bash</span>
+              <span class="stream-row__ts">20:49:04</span>
+              <span class="stream-row__preview">linearis issues read CTL-138</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================ TODOS ================ -->
+        <section class="worker-section">
+          <header class="worker-section__heading">
+            <h2>Todos</h2>
+            <span class="eyebrow">TodoWrite · mini kanban</span>
+          </header>
+          <div class="todos-kanban">
+            <div class="todos-col todos-col--pending">
+              <header class="todos-col__head">
+                <span>Pending</span>
+                <span class="todos-col__count">1</span>
+              </header>
+              <ul>
+                <li class="todos-item">
+                  Poll <code>gh pr view</code> every 60s until state=MERGED
+                </li>
+              </ul>
+            </div>
+            <div class="todos-col todos-col--in-progress">
+              <header class="todos-col__head">
+                <span>In progress</span>
+                <span class="todos-col__count">1</span>
+              </header>
+              <ul>
+                <li class="todos-item">
+                  Shipping · commit, push, create PR, arm auto-merge
+                </li>
+              </ul>
+            </div>
+            <div class="todos-col todos-col--completed">
+              <header class="todos-col__head">
+                <span>Completed</span>
+                <span class="todos-col__count">5</span>
+              </header>
+              <ul>
+                <li class="todos-item">Research mockup harness + brand patterns</li>
+                <li class="todos-item">Draft plan doc in thoughts/</li>
+                <li class="todos-item">Write failing integration test (TDD)</li>
+                <li class="todos-item">Implement worker.html sections</li>
+                <li class="todos-item">Add gallery card in index.html</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <!-- ================ SUBAGENTS ================ -->
+        <section class="worker-section">
+          <header class="worker-section__heading">
+            <h2>Subagents</h2>
+            <span class="eyebrow">Task · Agent calls</span>
+          </header>
+          <div class="subagent-list">
+            <a class="subagent-row" href="#" role="button">
+              <span class="subagent-row__kind">Task</span>
+              <span class="subagent-row__name">code-reviewer · review new worker.html + test</span>
+              <span class="chip chip--passing">passed</span>
+              <span class="subagent-row__elapsed">38s</span>
+            </a>
+            <a class="subagent-row" href="#" role="button">
+              <span class="subagent-row__kind">Task</span>
+              <span class="subagent-row__name">Explore · locate mockup harness files</span>
+              <span class="chip chip--done">done</span>
+              <span class="subagent-row__elapsed">12s</span>
+            </a>
+            <a class="subagent-row" href="#" role="button">
+              <span class="subagent-row__kind">Agent</span>
+              <span class="subagent-row__name">pr-test-analyzer · verify test coverage</span>
+              <span class="chip chip--running">running</span>
+              <span class="subagent-row__elapsed">04s</span>
+            </a>
+          </div>
+        </section>
+
+        <!-- ================ COST ================ -->
+        <section class="worker-section">
+          <header class="worker-section__heading">
+            <h2>Cost</h2>
+            <span class="eyebrow">tokens + duration</span>
+          </header>
+          <div class="cost-grid">
+            <div class="cost-cell">
+              <span class="cost-cell__label">Input</span>
+              <span class="cost-cell__value">24,187</span>
+            </div>
+            <div class="cost-cell">
+              <span class="cost-cell__label">Output</span>
+              <span class="cost-cell__value">3,412</span>
+            </div>
+            <div class="cost-cell">
+              <span class="cost-cell__label">Cache read</span>
+              <span class="cost-cell__value">58,120</span>
+            </div>
+            <div class="cost-cell">
+              <span class="cost-cell__label">Cache write</span>
+              <span class="cost-cell__value">12,440</span>
+            </div>
+            <div class="cost-cell">
+              <span class="cost-cell__label">Duration</span>
+              <span class="cost-cell__value">9m 48s</span>
+            </div>
+            <div class="cost-cell">
+              <span class="cost-cell__label">USD</span>
+              <span class="cost-cell__value">$0.47</span>
+            </div>
+          </div>
+        </section>
+
+        <div class="footer">
+          <p>
+            Try
+            <code>?mode=standalone</code>
+            to hide the breadcrumb, or
+            <code>?system=precision-instrument</code>
+            to flip systems. All values read from
+            <code>_shared/tokens.css</code>.
+          </p>
+        </div>
+      </div>
+    </main>
+
+    <script src="./_shared/chrome.js"></script>
+  </body>
+</html>
