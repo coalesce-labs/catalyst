@@ -1,0 +1,41 @@
+{
+  "spacing": {
+    "$type": "dimension",
+    "0-5": { "$value": "2px" },
+    "1": { "$value": "4px" },
+    "2": { "$value": "8px" },
+    "3": { "$value": "12px" },
+    "4": { "$value": "16px" },
+    "5": { "$value": "20px" },
+    "6": { "$value": "24px" },
+    "8": { "$value": "32px" },
+    "10": { "$value": "40px" },
+    "12": { "$value": "48px" },
+    "16": { "$value": "64px" },
+    "20": { "$value": "80px" },
+    "24": { "$value": "96px" }
+  },
+  "radius": {
+    "$type": "dimension",
+    "none": { "$value": "0" },
+    "sm": { "$value": "3px" },
+    "md": { "$value": "4px" },
+    "lg": { "$value": "6px" },
+    "full": { "$value": "9999px" }
+  },
+  "motion": {
+    "duration": {
+      "$type": "duration",
+      "fast": { "$value": "100ms" },
+      "base": { "$value": "150ms" },
+      "slow": { "$value": "250ms" }
+    }
+  },
+  "font-weight": {
+    "$type": "fontWeight",
+    "light": { "$value": 300 },
+    "regular": { "$value": 400 },
+    "medium": { "$value": 500 },
+    "semibold": { "$value": 600 }
+  }
+}
