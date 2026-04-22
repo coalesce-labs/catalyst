@@ -1,0 +1,65 @@
+{
+  "color": {
+    "$type": "color",
+    "bg": { "$value": "#FAFAF7" },
+    "surface-1": { "$value": "#FFFFFF" },
+    "surface-2": { "$value": "#F3F3EE" },
+    "surface-3": { "$value": "#ECECE5" },
+    "border-subtle": { "$value": "#E8E7E0" },
+    "border-default": { "$value": "#D6D4CA" },
+    "border-strong": { "$value": "#9A978C" },
+    "text-hi": { "$value": "#16181C" },
+    "text-md": { "$value": "#3B3E46" },
+    "text-lo": { "$value": "#6E7078" },
+    "text-disabled": { "$value": "#A8A8A1" },
+    "accent": { "$value": "#2C3E64" },
+    "accent-hover": { "$value": "#1F2E4E" },
+    "accent-active": { "$value": "#152341" },
+    "success": { "$value": "#4F6F4A" },
+    "warning": { "$value": "#A17B2E" },
+    "danger": { "$value": "#9A3B2C" },
+    "info": { "$value": "#4A6078" }
+  },
+  "font-family": {
+    "$type": "fontFamily",
+    "display": { "$value": "\"GT Super Display\", \"Source Serif Pro\", serif" },
+    "body": { "$value": "\"Söhne\", Inter, system-ui, sans-serif" },
+    "mono": { "$value": "\"Söhne Mono\", \"JetBrains Mono\", monospace" }
+  },
+  "font-size": {
+    "$type": "dimension",
+    "display": { "$value": "34px" },
+    "title": { "$value": "22px" },
+    "heading": { "$value": "15px" },
+    "body": { "$value": "14px" },
+    "label": { "$value": "11px" },
+    "data": { "$value": "12px" }
+  },
+  "line-height": {
+    "$type": "dimension",
+    "display": { "$value": "40px" },
+    "title": { "$value": "28px" },
+    "heading": { "$value": "22px" },
+    "body": { "$value": "22px" },
+    "label": { "$value": "16px" },
+    "data": { "$value": "18px" }
+  },
+  "letter-spacing": {
+    "$type": "dimension",
+    "display": { "$value": "-0.02em" },
+    "title": { "$value": "-0.01em" },
+    "label": { "$value": "0.06em" }
+  },
+  "motion": {
+    "duration": {
+      "$type": "duration",
+      "micro": { "$value": "120ms" },
+      "state": { "$value": "180ms" },
+      "reflow": { "$value": "240ms" }
+    },
+    "easing": {
+      "$type": "cubicBezier",
+      "standard": { "$value": [0.2, 0, 0, 1] }
+    }
+  }
+}

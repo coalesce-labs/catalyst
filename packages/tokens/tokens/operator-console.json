@@ -1,0 +1,66 @@
+{
+  "color": {
+    "$type": "color",
+    "bg": { "$value": "#07090B" },
+    "surface-1": { "$value": "#0D1117" },
+    "surface-2": { "$value": "#131A22" },
+    "surface-3": { "$value": "#1B242E" },
+    "border-subtle": { "$value": "#1F2A35" },
+    "border-default": { "$value": "#2A3845" },
+    "border-strong": { "$value": "#3C4E5D" },
+    "text-hi": { "$value": "#E6EDF3" },
+    "text-md": { "$value": "#9AA7B2" },
+    "text-lo": { "$value": "#5C6B78" },
+    "text-disabled": { "$value": "#364450" },
+    "accent": { "$value": "#FFB547" },
+    "accent-hover": { "$value": "#FFC466" },
+    "accent-active": { "$value": "#E09520" },
+    "success": { "$value": "#3FB950" },
+    "warning": { "$value": "#D29922" },
+    "danger": { "$value": "#F85149" },
+    "info": { "$value": "#58A6FF" }
+  },
+  "font-family": {
+    "$type": "fontFamily",
+    "display": { "$value": "\"Space Grotesk\", sans-serif" },
+    "body": { "$value": "\"IBM Plex Sans\", system-ui, sans-serif" },
+    "mono": { "$value": "\"JetBrains Mono\", monospace" }
+  },
+  "font-size": {
+    "$type": "dimension",
+    "display": { "$value": "28px" },
+    "title": { "$value": "20px" },
+    "heading": { "$value": "15px" },
+    "body": { "$value": "13px" },
+    "label": { "$value": "11px" },
+    "data": { "$value": "12px" }
+  },
+  "line-height": {
+    "$type": "dimension",
+    "display": { "$value": "32px" },
+    "title": { "$value": "26px" },
+    "heading": { "$value": "22px" },
+    "body": { "$value": "20px" },
+    "label": { "$value": "14px" },
+    "data": { "$value": "16px" }
+  },
+  "letter-spacing": {
+    "$type": "dimension",
+    "display": { "$value": "-0.01em" },
+    "title": { "$value": "-0.005em" },
+    "label": { "$value": "0.08em" }
+  },
+  "motion": {
+    "duration": {
+      "$type": "duration",
+      "hover": { "$value": "80ms" },
+      "state": { "$value": "150ms" },
+      "expand": { "$value": "250ms" },
+      "heartbeat": { "$value": "2400ms" }
+    },
+    "easing": {
+      "$type": "cubicBezier",
+      "standard": { "$value": [0.2, 0, 0, 1] }
+    }
+  }
+}
