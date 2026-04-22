@@ -493,6 +493,37 @@ else
     warn "thoughts/ not found — run: bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair"
 fi
 
+# ─── 9b. Catalyst Marketplace Drift ─────────────────────────────────────────
+
+header "Catalyst Marketplace"
+
+DRIFT_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DRIFT_SCRIPT="$DRIFT_SCRIPT_DIR/check-marketplace-drift.sh"
+if [[ -x "$DRIFT_SCRIPT" ]]; then
+    set +e
+    drift_out=$("$DRIFT_SCRIPT" 2>&1)
+    drift_rc=$?
+    set -e
+    if [[ $drift_rc -eq 2 ]]; then
+        fail "check-marketplace-drift.sh setup error: $drift_out"
+    elif [[ -z "$drift_out" ]]; then
+        info "No local dev marketplace registered (public marketplace only)"
+    else
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            case "$line" in
+                "✅ "*) pass "${line#✅ }" ;;
+                "⚠️ "*) warn "${line#⚠️ }" ;;
+                "❌ "*) fail "${line#❌ }" ;;
+                "ℹ "*)  info "${line#ℹ }" ;;
+                *)      info "$line" ;;
+            esac
+        done <<< "$drift_out"
+    fi
+else
+    warn "check-marketplace-drift.sh not found or not executable"
+fi
+
 # ─── 10. CLAUDE.md ──────────────────────────────────────────────────────────
 
 header "CLAUDE.md"
