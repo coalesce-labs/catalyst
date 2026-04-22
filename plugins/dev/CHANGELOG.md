@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.8.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.7.0...catalyst-dev-v7.8.0) (2026-04-22)
+
+
+### Features
+
+* **dev:** OTel config cleanup + Loki-backed UI panels (CTL-118) ([#239](https://github.com/coalesce-labs/catalyst/issues/239)) ([83647fc](https://github.com/coalesce-labs/catalyst/commit/83647fc1815ecdf61f406bc7684da43d9378370d))
+* **dev:** static mockup harness + gallery (CTL-125) ([#242](https://github.com/coalesce-labs/catalyst/issues/242)) ([09b4b3a](https://github.com/coalesce-labs/catalyst/commit/09b4b3a38a9f3c7b7ef485cfe56f829208f88a70))
+* **meta:** @catalyst/tokens package with operator-console + precision-instrument systems (CTL-123) ([#241](https://github.com/coalesce-labs/catalyst/issues/241)) ([20a0ec5](https://github.com/coalesce-labs/catalyst/commit/20a0ec53bfd9d2539320838ca21113334cd30299))
+
 ## [7.7.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.6.1...catalyst-dev-v7.7.0)
 
 Apr 21, 2026
