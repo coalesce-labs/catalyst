@@ -138,3 +138,140 @@
 .mockup-chrome__option--checked {
   color: var(--color-text-hi);
 }
+
+/*
+ * Cheat-sheet overlay — opened with `?`, closed with Escape or backdrop click.
+ * Built by chrome.js; token-driven styling only.
+ */
+
+.mockup-cheatsheet {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mockup-cheatsheet[hidden] {
+  display: none;
+}
+
+.mockup-cheatsheet__backdrop {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--color-bg) 70%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.mockup-cheatsheet__modal {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-5);
+  min-width: 420px;
+  max-width: 560px;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: var(--spacing-6);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  font-family: var(--font-family-body);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  color: var(--color-text-hi);
+}
+
+.mockup-cheatsheet__modal:focus-visible {
+  outline: none;
+  border-color: var(--color-border-strong);
+}
+
+.mockup-cheatsheet__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding-bottom: var(--spacing-3);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.mockup-cheatsheet__title {
+  font-family: var(--font-family-display);
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
+  letter-spacing: var(--letter-spacing-title);
+  color: var(--color-text-hi);
+}
+
+.mockup-cheatsheet__hint {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-label);
+  line-height: var(--line-height-label);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-text-lo);
+}
+
+.mockup-cheatsheet__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+}
+
+.mockup-cheatsheet__section-label {
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-label);
+  color: var(--color-text-md);
+  font-family: var(--font-family-mono);
+}
+
+.mockup-cheatsheet__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-1);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.mockup-cheatsheet__row {
+  display: grid;
+  grid-template-columns: minmax(120px, 180px) 1fr;
+  gap: var(--spacing-4);
+  align-items: center;
+  padding: var(--spacing-1-5, var(--spacing-2)) 0;
+}
+
+.mockup-cheatsheet__keys {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  flex-wrap: wrap;
+}
+
+.mockup-cheatsheet__kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  padding: 2px var(--spacing-2);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-label);
+  line-height: var(--line-height-label);
+  color: var(--color-text-hi);
+}
+
+.mockup-cheatsheet__sep {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-label);
+  color: var(--color-text-lo);
+}
+
+.mockup-cheatsheet__label {
+  color: var(--color-text-md);
+}
