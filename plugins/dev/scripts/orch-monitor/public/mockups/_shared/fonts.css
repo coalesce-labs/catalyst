@@ -1,0 +1,13 @@
+/*
+ * Shared font imports for both systems.
+ *
+ * System A (Operator Console) — Space Grotesk + IBM Plex Sans + JetBrains Mono.
+ *   All Google Fonts, open source.
+ *
+ * System B (Precision Instrument) — GT Super Display + Söhne + Söhne Mono are
+ *   the licensed targets. Licensed faces are deferred; we load the fallbacks
+ *   that tokens.css references in the font-family chain: Source Serif Pro,
+ *   Inter, and JetBrains Mono (shared with A).
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+Pro:wght@400;600&family=Inter:wght@400;500;600&display=swap");

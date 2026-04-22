@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en" data-system="operator-console">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalyst Mockups</title>
+    <link rel="stylesheet" href="./_shared/tokens.css" />
+    <link rel="stylesheet" href="./_shared/fonts.css" />
+    <link rel="stylesheet" href="./_shared/base.css" />
+    <link rel="stylesheet" href="./_shared/chrome.css" />
+    <script>
+      // Pre-paint bootstrap — sets html[data-system] before first paint to
+      // prevent flicker. Mirrors chrome.js's resolution priority (URL query
+      // > localStorage > default). chrome.js reads __catalystMockupPrefs to
+      // avoid re-parsing.
+      (function () {
+        const LS_KEY = "catalyst.mockup.prefs";
+        const DEFAULTS = { system: "operator-console" };
+        const SYSTEMS = ["operator-console", "precision-instrument"];
+        const url = new URLSearchParams(window.location.search);
+        let stored = {};
+        try {
+          stored = JSON.parse(window.localStorage.getItem(LS_KEY) || "{}");
+        } catch (_e) {
+          stored = {};
+        }
+        const candidate = url.get("system") || stored.system || DEFAULTS.system;
+        const system = SYSTEMS.includes(candidate) ? candidate : DEFAULTS.system;
+        document.documentElement.setAttribute("data-system", system);
+        window.__catalystMockupPrefs = { system };
+      })();
+    </script>
+    <style>
+      .gallery-header h1 {
+        margin-top: var(--spacing-2);
+      }
+
+      .mockup-card {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .mockup-card__thumb {
+        aspect-ratio: 16 / 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--color-surface-2);
+        border: 1px dashed var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        color: var(--color-text-lo);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+      }
+
+      .mockup-card--placeholder .mockup-card__thumb {
+        border-style: dashed;
+      }
+
+      .mockup-card__meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: var(--color-text-lo);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mockup-shell">
+      <div class="mockup-container">
+        <header class="mockup-topbar">
+          <span class="mockup-topbar__mark">catalyst</span>
+          <span class="eyebrow">Mockups</span>
+        </header>
+
+        <section class="gallery-header">
+          <span class="eyebrow">Visual direction preview</span>
+          <h1>Mockup harness</h1>
+          <p>
+            Side-by-side rendering of the Operator Console and Precision Instrument systems. Flip
+            the switcher (top right) to compare. Selection persists to localStorage and the URL.
+          </p>
+        </section>
+
+        <div class="card-grid" role="list">
+          <div class="card mockup-card mockup-card--placeholder" role="listitem">
+            <div class="mockup-card__thumb" aria-hidden="true">—</div>
+            <h3 class="mockup-card__title">No screens yet</h3>
+            <p class="mockup-card__desc">
+              Add a
+              <code>.html</code>
+              file in this directory, then add a card here that links to it. See
+              <code>_shared/README.md</code>
+              for load order and the pre-paint bootstrap script.
+            </p>
+            <div class="mockup-card__meta">
+              <span>Placeholder</span>
+              <span>empty</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="footer">
+          <p>
+            Reload to verify persistence. Try
+            <code>?system=precision-instrument</code>
+            in the URL to hard-set a system. Default stays clean.
+          </p>
+        </div>
+      </div>
+    </main>
+    <script src="./_shared/chrome.js"></script>
+  </body>
+</html>

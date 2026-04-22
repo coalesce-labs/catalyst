@@ -1,0 +1,158 @@
+/*
+ * Reset + baseline typography + harness utility classes.
+ * All values read from tokens.css CSS custom properties.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  background: var(--color-bg);
+  color: var(--color-text-hi);
+  font-family: var(--font-family-body);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  color-scheme: dark;
+}
+
+html[data-system="precision-instrument"] {
+  color-scheme: light;
+}
+
+body {
+  min-height: 100vh;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-family-display);
+  color: var(--color-text-hi);
+  margin: 0;
+  font-weight: var(--font-weight-medium);
+}
+
+h1 {
+  font-size: var(--font-size-display);
+  line-height: var(--line-height-display);
+  letter-spacing: var(--letter-spacing-display);
+}
+
+h2 {
+  font-size: var(--font-size-title);
+  line-height: var(--line-height-title);
+  letter-spacing: var(--letter-spacing-title);
+}
+
+h3 {
+  font-size: var(--font-size-heading);
+  line-height: var(--line-height-heading);
+}
+
+p {
+  margin: 0;
+  color: var(--color-text-md);
+}
+
+code {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-data);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--spacing-1);
+  color: var(--color-text-hi);
+}
+
+a {
+  color: var(--color-text-hi);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--color-accent);
+}
+
+/* ---------- Harness utility classes ---------- */
+
+.mockup-shell {
+  min-height: 100vh;
+  padding: var(--spacing-8) var(--spacing-6);
+}
+
+.mockup-container {
+  max-width: 1440px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-8);
+}
+
+.mockup-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: var(--spacing-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.mockup-topbar__mark {
+  font-family: var(--font-family-display);
+  font-size: var(--font-size-title);
+  letter-spacing: var(--letter-spacing-title);
+  color: var(--color-text-hi);
+}
+
+.eyebrow {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-label);
+  line-height: var(--line-height-label);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-text-md);
+}
+
+.gallery-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-2);
+  max-width: 680px;
+}
+
+.card {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-5);
+  transition: border-color var(--motion-duration-state) var(--motion-easing-standard);
+}
+
+.card:hover {
+  border-color: var(--color-border-strong);
+}
+
+.card-grid {
+  display: grid;
+  gap: var(--spacing-4);
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+.footer {
+  padding: var(--spacing-6) 0;
+  border-top: 1px solid var(--color-border-subtle);
+  color: var(--color-text-lo);
+  font-size: var(--font-size-label);
+  line-height: var(--line-height-label);
+}
