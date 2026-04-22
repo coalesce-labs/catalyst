@@ -9,14 +9,14 @@
     <link rel="stylesheet" href="./_shared/base.css" />
     <link rel="stylesheet" href="./_shared/chrome.css" />
     <script>
-      // Pre-paint bootstrap — sets html[data-system] before first paint to
-      // prevent flicker. Mirrors chrome.js's resolution priority (URL query
-      // > localStorage > default). chrome.js reads __catalystMockupPrefs to
-      // avoid re-parsing.
+      // Pre-paint bootstrap — resolves system + theme from URL/localStorage and
+      // sets html[data-system] + html[data-theme] before first paint to prevent
+      // flicker. chrome.js reads window.__catalystMockupPrefs to avoid re-parsing.
       (function () {
         const LS_KEY = "catalyst.mockup.prefs";
-        const DEFAULTS = { system: "operator-console" };
+        const DEFAULTS = { system: "operator-console", theme: "dark" };
         const SYSTEMS = ["operator-console", "precision-instrument"];
+        const THEMES = ["dark", "light"];
         const url = new URLSearchParams(window.location.search);
         let stored = {};
         try {
@@ -24,10 +24,13 @@
         } catch (_e) {
           stored = {};
         }
-        const candidate = url.get("system") || stored.system || DEFAULTS.system;
-        const system = SYSTEMS.includes(candidate) ? candidate : DEFAULTS.system;
+        const sysCandidate = url.get("system") || stored.system || DEFAULTS.system;
+        const themeCandidate = stored.theme || DEFAULTS.theme;
+        const system = SYSTEMS.includes(sysCandidate) ? sysCandidate : DEFAULTS.system;
+        const theme = THEMES.includes(themeCandidate) ? themeCandidate : DEFAULTS.theme;
         document.documentElement.setAttribute("data-system", system);
-        window.__catalystMockupPrefs = { system };
+        document.documentElement.setAttribute("data-theme", theme);
+        window.__catalystMockupPrefs = { system, theme };
       })();
     </script>
     <style>
@@ -88,6 +91,21 @@
         </section>
 
         <div class="card-grid" role="list">
+          <a class="card mockup-card" href="./home.html" role="listitem">
+            <div class="mockup-card__thumb" aria-hidden="true">Home</div>
+            <h3 class="mockup-card__title">Home</h3>
+            <p class="mockup-card__desc">
+              Landing view for the new IA. Active orchestrators and solo workers share one grid.
+              Attention bar, recently completed strip, and loading / empty / error states via
+              <code>?state=</code>
+              .
+            </p>
+            <div class="mockup-card__meta">
+              <span>home</span>
+              <span>v1</span>
+            </div>
+          </a>
+
           <a class="card mockup-card" href="./brand.html" role="listitem">
             <div class="mockup-card__thumb" aria-hidden="true">A · B</div>
             <h3 class="mockup-card__title">Brand showcase</h3>
@@ -97,6 +115,20 @@
             </p>
             <div class="mockup-card__meta">
               <span>brand</span>
+              <span>v1</span>
+            </div>
+          </a>
+
+          <a class="card mockup-card" href="./worker.html" role="listitem">
+            <div class="mockup-card__thumb" aria-hidden="true">⌘ · W</div>
+            <h3 class="mockup-card__title">Worker</h3>
+            <p class="mockup-card__desc">
+              Single-worker page — signal panel, phase timeline, stream tail, todos, subagents, PR
+              card, cost. Works both in-orch and standalone
+              (<code>?mode=orch-worker|standalone</code>).
+            </p>
+            <div class="mockup-card__meta">
+              <span>worker</span>
               <span>v1</span>
             </div>
           </a>
