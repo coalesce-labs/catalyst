@@ -53,14 +53,15 @@ Body:
 ## Pre-paint bootstrap (copy verbatim)
 
 The inline script sits after all `<link>` tags, before `</head>`. It runs synchronously during HTML
-parsing, so `data-system` is set before the browser paints anything.
+parsing, so `data-system` and `data-theme` are set before the browser paints anything.
 
 ```html
 <script>
   (function () {
     const LS_KEY = "catalyst.mockup.prefs";
-    const DEFAULTS = { system: "operator-console" };
+    const DEFAULTS = { system: "operator-console", theme: "dark" };
     const SYSTEMS = ["operator-console", "precision-instrument"];
+    const THEMES = ["dark", "light"];
     const url = new URLSearchParams(window.location.search);
     let stored = {};
     try {
@@ -68,10 +69,13 @@ parsing, so `data-system` is set before the browser paints anything.
     } catch (_e) {
       stored = {};
     }
-    const candidate = url.get("system") || stored.system || DEFAULTS.system;
-    const system = SYSTEMS.includes(candidate) ? candidate : DEFAULTS.system;
+    const sysCandidate = url.get("system") || stored.system || DEFAULTS.system;
+    const themeCandidate = stored.theme || DEFAULTS.theme;
+    const system = SYSTEMS.includes(sysCandidate) ? sysCandidate : DEFAULTS.system;
+    const theme = THEMES.includes(themeCandidate) ? themeCandidate : DEFAULTS.theme;
     document.documentElement.setAttribute("data-system", system);
-    window.__catalystMockupPrefs = { system };
+    document.documentElement.setAttribute("data-theme", theme);
+    window.__catalystMockupPrefs = { system, theme };
   })();
 </script>
 ```
@@ -113,6 +117,33 @@ cd packages/tokens && bun run build
 The build writes `dist/theme.css` and copies it to
 `plugins/dev/scripts/orch-monitor/public/mockups/_shared/tokens.css`. Do not hand-edit the output —
 edit `packages/tokens/tokens/*.json` and rebuild.
+
+## Global keybindings
+
+`chrome.js` installs a single `keydown` listener on `document` that handles navigation, theme, and
+a cheat-sheet overlay. Bindings never fire while focus is on `input`, `textarea`, `select`, or a
+`contenteditable` element (except `Escape`, which always closes overlays).
+
+| Key         | Action                                              |
+| ----------- | --------------------------------------------------- |
+| `g h`       | Navigate to `index.html` (gallery home)             |
+| `g d`       | Navigate to `orch.html` (orchestrator dashboard)    |
+| `g w`       | Navigate to `worker.html`                           |
+| `g c`       | Navigate to `comms.html`                            |
+| `g b`       | Navigate to `briefing.html`                         |
+| `g v`       | Navigate to `agent-graph.html`                      |
+| `g t`       | Navigate to `todos.html`                            |
+| `g r`       | Navigate to `brand.html`                            |
+| `⇧D`        | Toggle theme (`data-theme` = `dark` ↔ `light`)      |
+| `.`         | Cycle system (same as clicking the switcher pill)   |
+| `p`         | Cycle palette (reserved — no-op until palettes.css) |
+| `/`         | Focus first `input[data-search]` or `input[type=search]` |
+| `?`         | Open the cheat-sheet overlay                        |
+| `Esc`       | Close any open overlay / popover                    |
+
+Press `?` in-page to see the live cheat sheet. The `g` prefix resets after any key or a 1.5s timeout.
+Pages that don't exist yet (every `g`-nav target besides `h` and `r`) will 404 — add the page and
+the binding just works.
 
 ## Voice for mockup copy
 

@@ -19,6 +19,11 @@ import {
 import { startWatching, type WatcherHandle } from "./lib/watcher";
 import { readRecentStreamEvents } from "./lib/stream-reader";
 import {
+  parseStreamForSubagents,
+  flattenTodosForWorker,
+  streamFilePath,
+} from "./lib/subagent-tree";
+import {
   sessionIdFromPid,
   readWorkerTasks,
   getTaskDiagnostic,
@@ -689,6 +694,102 @@ export function createServer(opts: CreateServerOptions): BunServer {
             Number.isFinite(maxEvents) ? maxEvents : 30,
           );
           return Response.json({ orchId, ticket, events });
+        }
+
+        const subagentsMatch = url.pathname.match(
+          /^\/api\/worker\/([^/]+)\/([^/]+)\/subagents$/,
+        );
+        if (subagentsMatch) {
+          let orchId: string;
+          let ticket: string;
+          try {
+            orchId = decodeURIComponent(subagentsMatch[1]);
+            ticket = decodeURIComponent(subagentsMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            orchId.includes("..") ||
+            orchId.includes("/") ||
+            orchId.includes("\0") ||
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const stateReader = await import("./lib/state-reader");
+          const scanned = runsDir
+            ? stateReader.scanAllOrchestrators({ runsDir, wtDir })
+            : stateReader.scanOrchestrators(wtDir);
+          const entry = scanned.find((d) => basename(d.path) === orchId);
+          if (!entry) return new Response("Not Found", { status: 404 });
+          const tree = parseStreamForSubagents(streamFilePath(entry.path, ticket));
+          return Response.json({ orchId, ticket, tree });
+        }
+
+        const workerTodosMatch = url.pathname.match(
+          /^\/api\/worker\/([^/]+)\/([^/]+)\/todos$/,
+        );
+        if (workerTodosMatch) {
+          let orchId: string;
+          let ticket: string;
+          try {
+            orchId = decodeURIComponent(workerTodosMatch[1]);
+            ticket = decodeURIComponent(workerTodosMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            orchId.includes("..") ||
+            orchId.includes("/") ||
+            orchId.includes("\0") ||
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const stateReader = await import("./lib/state-reader");
+          const scanned = runsDir
+            ? stateReader.scanAllOrchestrators({ runsDir, wtDir })
+            : stateReader.scanOrchestrators(wtDir);
+          const entry = scanned.find((d) => basename(d.path) === orchId);
+          if (!entry) return new Response("Not Found", { status: 404 });
+          const tree = parseStreamForSubagents(streamFilePath(entry.path, ticket));
+          const todos = flattenTodosForWorker(tree, ticket);
+          return Response.json({ orchId, ticket, todos });
+        }
+
+        const orchTodosMatch = url.pathname.match(/^\/api\/orch\/([^/]+)\/todos$/);
+        if (orchTodosMatch) {
+          let orchId: string;
+          try {
+            orchId = decodeURIComponent(orchTodosMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (orchId.includes("..") || orchId.includes("/") || orchId.includes("\0")) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const stateReader = await import("./lib/state-reader");
+          const scanned = runsDir
+            ? stateReader.scanAllOrchestrators({ runsDir, wtDir })
+            : stateReader.scanOrchestrators(wtDir);
+          const entry = scanned.find((d) => basename(d.path) === orchId);
+          if (!entry) return new Response("Not Found", { status: 404 });
+          const orchState = stateReader.readOrchestratorState(
+            entry.path,
+            "workspace" in entry ? entry.workspace : "default",
+          );
+          const todos = [];
+          for (const [, worker] of Object.entries(orchState.workers)) {
+            const ticket = worker.ticket;
+            if (!ticket) continue;
+            const tree = parseStreamForSubagents(streamFilePath(entry.path, ticket));
+            todos.push(...flattenTodosForWorker(tree, ticket));
+          }
+          return Response.json({ orchId, todos });
         }
 
         if (url.pathname === "/api/worker-tasks/debug") {
