@@ -281,6 +281,21 @@ fi
 
 **When worker reaches terminal state** (done or failed):
 
+**Mandatory `attention` on block** (per [[catalyst-comms]] § Posting Discipline §3): in
+addition to the failure path below, the worker MUST also `comms_post attention "<reason>"`
+when it hits any of the following mid-flight, even if it is not yet writing
+`status: "failed"`:
+
+- scope conflict with a sibling worker
+- missing required access (CLI / credential / API)
+- ambiguous spec the worker cannot resolve unilaterally
+- same test/CI failure 3+ times after distinct fix attempts
+- writing `status: "stalled"` from the Phase 5 poll loop
+
+Use a single `attention` per blocker (do not retry). Continue with whatever work is still
+possible, or exit if the blocker is total. The orchestrator's poll loop will promote the
+message to a state-level NEEDS ATTENTION item.
+
 ```bash
 if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
   if [ "$NEW_STATUS" = "done" ]; then
@@ -878,6 +893,13 @@ error, context exhaustion):
 - **Orchestrator poll loop is now a safety net, not the primary merge confirmation** — if the
   worker reliably writes `pr.mergedAt`, the orchestrator's poll loop is reconciliation only.
   The orchestrator may still re-dispatch a fix-up worker if the primary worker exits stalled
+- **Worker comms discipline** — when posting to the shared comms channel, follow the rules
+  in [[catalyst-comms]] § Posting Discipline: `info` is the default heartbeat (phase
+  transitions only, ~5–7 per session), `attention` is reserved for orchestrator action
+  (0–2 per session, MANDATORY on the escalation triggers listed there — scope conflict,
+  missing access, ambiguous spec, 3+ repeated CI failures, `status="stalled"`), `done`
+  fires once at terminal success via the `done` subcommand. The existing `comms_post`
+  helper in this skill already routes correctly — these rules govern *when* you call it.
 
 **IMPORTANT: Document Storage Rules**
 

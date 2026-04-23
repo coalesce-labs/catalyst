@@ -83,6 +83,94 @@ MSG_ID=$(catalyst-comms send pr-114 "ack, holding" \
   --as frontend-worker --type ack --re msg-abc123)
 ```
 
+## Posting Discipline
+
+The message-type table above defines what each type *means*. This section defines *when*
+a worker should choose each type. Workers that emit `attention` as a heartbeat make the
+orchestrator's NEEDS ATTENTION banner useless and foreclose any real-time interrupt
+pattern (e.g., the Claude Code Monitor tool). Follow these rules.
+
+### 1. Message-Type Semantics (when to choose which)
+
+- **`info`** — the default. Cheap, append-only, never interrupts anyone. Use for phase
+  transitions, PR-opened, "still working", and any FYI a human auditor or the orchestrator
+  *might* read but is not required to act on.
+- **`attention`** — reserved for orchestrator action. The orchestrator promotes every
+  `attention` to a state-level NEEDS ATTENTION item. If you would not interrupt a human
+  for it, do not post it. Default to `info` and ask: "is the orchestrator blocked from
+  making forward progress unless it sees this *now*?" If no, it is `info`.
+- **`done`** — sent only via the `done` subcommand at terminal success. One per worker
+  per session. Never use `send --type done` manually; let the subcommand do it so quorum
+  is auto-checked.
+- **`proposal` / `question` / `answer` / `ack`** — peer-to-peer coordination only. Use
+  when you need a sibling worker to confirm before you proceed (e.g., overlapping file
+  scope). The recipient is expected to reply within minutes; if no reply, treat as `ack`
+  and proceed.
+
+### 2. Volume Budgets
+
+Per worker per session:
+
+| Type        | Budget                                                          |
+|-------------|-----------------------------------------------------------------|
+| `info`      | At phase boundaries + PR-opened only. ~5–7 in the normal path.  |
+| `attention` | **0–2 per worker.** More than 2 means you are using it as info. |
+| `done`      | Exactly 1, on terminal success.                                 |
+| `proposal` / `question` / `answer` / `ack` | As needed for active coordination. |
+
+`info` posts in the middle of a phase ("running tests…", "still here…") are noise. Phase
+transitions are the heartbeat — skip per-step status updates.
+
+`attention` above 2 is a signal that either (a) the worker is mis-categorising routine
+events, or (b) something is genuinely wrong and the worker should stop and write a
+clear final `attention` instead of spamming partial status.
+
+### 3. Mandatory Escalation (when you MUST post `attention`)
+
+These are not discretionary. The worker MUST post exactly one `attention` message —
+clear, single-shot, with a body the orchestrator can act on — when any of these occur:
+
+- **Scope conflict** — your dispatch brief tells you to touch files another worker also
+  owns, or your work has a hard dependency on a sibling worker's output that has not
+  arrived. Body: name the conflicting file/sibling.
+- **Missing access** — required CLI / credential / API not available, and you cannot
+  proceed without it. Body: name the missing thing.
+- **Ambiguous spec** — the ticket / dispatch brief contradicts itself or omits a fact
+  you must have to make a correct choice. Body: state the ambiguity and the two
+  candidate interpretations.
+- **Repeated test/CI failures** — same failure mode 3+ times after distinct fix
+  attempts. Body: failure signature + what you tried.
+- **Stalled merge** — you wrote `status="stalled"` for any reason (merge conflict you
+  cannot resolve, required reviewer you cannot satisfy, branch protection rule you
+  cannot meet). Body: which blocker, which PR.
+
+Do NOT wait for human input before escalating. Post the `attention`, then either
+continue working on what you *can* still do, or exit if the blocker is total.
+
+### 4. Severity Framing (blocking vs nonblocking)
+
+Catalyst uses a binary severity system mapped onto the existing types:
+
+- **blocking** → `attention` (orchestrator must act before forward progress is possible)
+- **nonblocking** → `info` (informational; orchestrator may act eventually)
+
+When in doubt, prefix the body to make severity unambiguous to a human reading the
+channel:
+
+```bash
+# blocking — pairs with --type attention
+catalyst-comms send "$CH" "[blocking] missing GH_TOKEN, cannot create PR" \
+  --as worker-3 --type attention
+
+# nonblocking — pairs with --type info
+catalyst-comms send "$CH" "[nonblocking] codex flagged 1 minor style issue, fixing inline" \
+  --as worker-3 --type info
+```
+
+Workers MAY adopt P1/P2/P3 in the body (`[P1]`, `[P2]`, `[P3]`) for finer grain — but
+only the binary distinction is enforced by the orchestrator. P1/P2/P3 is a body
+convention, not a schema change.
+
 ## Polling and Waiting
 
 ```bash
