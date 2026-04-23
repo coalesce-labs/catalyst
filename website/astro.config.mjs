@@ -153,6 +153,31 @@ export default defineConfig({
             href: "/icon-192.png",
           },
         },
+        {
+          tag: "link",
+          attrs: {
+            rel: "icon",
+            type: "image/png",
+            sizes: "512x512",
+            href: "/icon-512.png",
+          },
+        },
+        {
+          tag: "link",
+          attrs: {
+            rel: "alternate icon",
+            type: "image/x-icon",
+            href: "/favicon.ico",
+          },
+        },
+        {
+          tag: "link",
+          attrs: {
+            rel: "mask-icon",
+            href: "/safari-pinned-tab.svg",
+            color: "#FFB547",
+          },
+        },
       ],
       plugins: [starlightLlmsTxt(), starlightChangelogs()],
       customCss: ["./src/styles/custom.css"],

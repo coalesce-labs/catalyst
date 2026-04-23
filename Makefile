@@ -1,4 +1,4 @@
-.PHONY: help lint format check-frontmatter check install-user install-project test clean
+.PHONY: help lint format check-frontmatter check install-user install-project test clean favicons
 
 # Default target - show help
 help:
@@ -13,6 +13,9 @@ help:
 	@echo "Installation:"
 	@echo "  make install-user      - Install workspace to ~/.claude/"
 	@echo "  make install-project   - Install workspace to a project (interactive)"
+	@echo ""
+	@echo "Brand assets:"
+	@echo "  make favicons          - Build the V2 favicon set + distribute to consumers"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  make clean             - Clean temporary files and caches"
@@ -60,6 +63,13 @@ test:
 	@bash plugins/dev/scripts/test-workflow-context.sh
 	@echo ""
 	@echo "✅ All test suites passed!"
+
+# Build the V2 favicon set from CTL-147 mark assets and distribute to all consumer
+# locations (repo root, website/public, plugins/dev/scripts/orch-monitor/public).
+# Requires rsvg-convert + ImageMagick (brew install librsvg imagemagick).
+favicons:
+	@echo "Building V2 favicon set..."
+	@bash assets/brand-v2/favicons/build.sh
 
 # Clean temporary files
 clean:

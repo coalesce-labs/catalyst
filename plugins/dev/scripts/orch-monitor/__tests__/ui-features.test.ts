@@ -94,7 +94,7 @@ describe("React app shell", () => {
   });
 
   it("should include favicon reference", () => {
-    expect(html).toContain("catalyst-logo.svg");
+    expect(html).toContain("favicon.svg");
   });
 });
 
@@ -121,8 +121,13 @@ describe("static asset serving", () => {
     }
   });
 
-  it("should serve logo SVG from /public/", async () => {
-    const res = await fetch(`${baseUrl}/public/catalyst-logo.svg`);
+  it("should serve favicon SVG from /public/", async () => {
+    const res = await fetch(`${baseUrl}/public/favicon.svg`);
+    expect(res.status).toBe(200);
+  });
+
+  it("should serve favicon ICO fallback from /public/", async () => {
+    const res = await fetch(`${baseUrl}/public/favicon.ico`);
     expect(res.status).toBe(200);
   });
 });
