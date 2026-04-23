@@ -139,11 +139,32 @@ a cheat-sheet overlay. Bindings never fire while focus is on `input`, `textarea`
 | `p`         | Cycle palette (reserved — no-op until palettes.css) |
 | `/`         | Focus first `input[data-search]` or `input[type=search]` |
 | `?`         | Open the cheat-sheet overlay                        |
+| `⌘K` / `Ctrl K` | Open the command palette                        |
 | `Esc`       | Close any open overlay / popover                    |
 
 Press `?` in-page to see the live cheat sheet. The `g` prefix resets after any key or a 1.5s timeout.
 Pages that don't exist yet (every `g`-nav target besides `h` and `r`) will 404 — add the page and
 the binding just works.
+
+## Topbar nav shell (CTL-166)
+
+Every page ships a static `<header class="mockup-topbar">` with a `catalyst` mark and a
+single eyebrow. `chrome.js` upgrades the topbar on load:
+
+1. The mark becomes an `<a href="./index.html">` so a single click goes back to the gallery.
+2. A breadcrumb is injected in the middle, sourced from the page's
+   `<meta name="mockup-breadcrumb" content="Monitor / orch-2026-04-22 / briefing">`. Segments
+   are split on ` / `. The original eyebrow is removed once the breadcrumb renders to avoid
+   showing the same label twice. If the meta tag is absent or empty, the eyebrow stays put
+   as a fallback.
+3. A `⌘K` (or `Ctrl K` on non-mac) chip is appended on the right. Clicking the chip — or
+   pressing the binding — opens a filterable command palette modal with three sections:
+   **Navigate** (every entry from `GNAV`), **Appearance** (toggle theme, cycle system,
+   cycle palette), and **Help** (open cheat sheet). Type to filter by substring; `↑/↓`
+   to move; `Enter` to execute; `Esc` to close.
+
+The page-body breadcrumbs in `worker.html`, `briefing.html`, and `agent-graph.html` are part
+of the page heading, not the chrome — they stay in place.
 
 ## Voice for mockup copy
 
