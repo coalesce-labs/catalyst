@@ -13,27 +13,34 @@ fork it, and contribute ideas back.
 
 ## Tech Stack & Integrations
 
-Catalyst integrates with your development tools through both **CLI-based** (token-efficient) and **MCP-based** (richer features) approaches:
+Catalyst integrates with your development tools through both **CLI-based** (token-efficient) and
+**MCP-based** (richer features) approaches:
 
 ### Project Management & Issue Tracking
-- **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via [Linearis](https://www.npmjs.com/package/linearis))
+
+- **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via
+  [Linearis](https://www.npmjs.com/package/linearis))
   - `catalyst-dev`: Core research agents and workflow commands
   - `catalyst-pm`: Advanced PM workflows (cycle analysis, milestone tracking, backlog grooming)
 
 ### Version Control & Code Hosting
+
 - **GitHub** - Pull requests, code review, repository management (CLI via `gh`)
   - `catalyst-dev`: PR creation, branch management, worktree workflows
 
 ### Error Monitoring & Debugging
+
 - **Sentry** - Production error monitoring, stack traces, root cause analysis (MCP + CLI)
   - `catalyst-debugging`: Sentry MCP integration (~20k tokens when enabled)
   - Supports single-project and multi-project configurations
 
 ### Product Analytics
+
 - **PostHog** - User behavior, conversion funnels, feature analytics (MCP)
   - `catalyst-analytics`: PostHog MCP integration (~40k tokens when enabled)
 
 ### Documentation & Code Search
+
 - **Context7** - Library documentation lookup (MCP, ~2k tokens)
   - `catalyst-dev`: Built-in, always available
 - **DeepWiki** - GitHub repository documentation (MCP, ~1.5k tokens)
@@ -42,6 +49,7 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
   - `catalyst-dev`: External research agent
 
 ### Thoughts & Memory System
+
 - **HumanLayer** - Persistent memory, shared context, team collaboration (CLI via `humanlayer`)
   - All plugins: Foundation for research, plans, handoffs, and reports
 
@@ -66,7 +74,8 @@ and shared memory systems.
 
 - 9 research agents (codebase + infrastructure)
 - 21 skills covering full dev lifecycle
-- Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for data collection)
+- Three-tier model strategy (Opus for planning/implementation, Sonnet for CI/automation, Haiku for
+  data collection)
 - Linear integration via Linearis CLI
 - CI/automation commands for non-interactive workflows
 - Handoff system for context persistence
@@ -118,6 +127,7 @@ chmod +x setup-catalyst.sh
 ```
 
 This script will guide you through:
+
 - ✅ Prerequisites check and installation (HumanLayer CLI, jq, etc.)
 - ✅ Thoughts repository setup (one per org, backed up to GitHub)
 - ✅ Project configuration (ticket prefix, project name)
@@ -201,13 +211,16 @@ claude plugin marketplace update catalyst
 ```
 
 **When to update:**
+
 - 🐛 **Bug fixes**: Patch versions (e.g., 3.0.0 → 3.0.1) - Fix issues like incorrect CLI syntax
 - ✨ **New features**: Minor versions (e.g., 3.0.0 → 3.1.0) - New commands or capabilities
 - 🔄 **Breaking changes**: Major versions (e.g., 3.0.0 → 4.0.0) - May require configuration updates
 
-**Important:** A restart is required for plugin updates to take effect. Active sessions use the old version until you restart Claude Code.
+**Important:** A restart is required for plugin updates to take effect. Active sessions use the old
+version until you restart Claude Code.
 
 **Check your versions:**
+
 ```bash
 # List installed plugins and their versions
 /plugin list
@@ -215,8 +228,10 @@ claude plugin marketplace update catalyst
 
 **Need help?**
 
-- [Documentation Site](https://catalyst.coalescelabs.ai) - Complete setup, installation, and configuration
-- [Claude Code Plugin Guide](https://docs.claude.com/en/docs/claude-code/plugins.md) - Official plugin documentation
+- [Documentation Site](https://catalyst.coalescelabs.ai) - Complete setup, installation, and
+  configuration
+- [Claude Code Plugin Guide](https://docs.claude.com/en/docs/claude-code/plugins.md) - Official
+  plugin documentation
 
 ## Complete Workflow
 
@@ -327,8 +342,8 @@ Run the prerequisite check:
 
 ## Recurring Workflows with /loop
 
-The built-in `/loop` command runs a skill or prompt on a recurring interval. Use it for
-monitoring and periodic tasks during active development sessions.
+The built-in `/loop` command runs a skill or prompt on a recurring interval. Use it for monitoring
+and periodic tasks during active development sessions.
 
 ### CI Check Monitoring (after pushing a PR)
 
@@ -352,8 +367,8 @@ Monitors GitHub Actions workflow runs triggered by your merge.
 /loop 1d /context-daily
 ```
 
-Refreshes the context engineering adoption dashboard once per day. Alternative to the
-GitHub Actions cron — useful in long-running sessions.
+Refreshes the context engineering adoption dashboard once per day. Alternative to the GitHub Actions
+cron — useful in long-running sessions.
 
 ### Cycle Health Monitoring
 
@@ -371,8 +386,8 @@ Generates a fresh cycle health report every 4 hours during a sprint.
 
 Checks for orphaned PRs and out-of-sync Linear issues every 2 hours.
 
-**Note**: `/loop` is session-scoped (max ~3 days). For persistent scheduling, use
-GitHub Actions cron. `/loop` is best for active monitoring during development sessions.
+**Note**: `/loop` is session-scoped (max ~3 days). For persistent scheduling, use GitHub Actions
+cron. `/loop` is best for active monitoring during development sessions.
 
 ## Credits
 
@@ -397,15 +412,25 @@ preferences. That said, I'm happy to:
 use, since this is the workspace I rely on daily. But I **love** seeing how others adapt these
 patterns to their own needs!
 
-**Best approach**: Fork it, make it yours, and share what you learned. That's how we all get
-better!
+**Best approach**: Fork it, make it yours, and share what you learned. That's how we all get better!
 
 ## Documentation
 
-- [Documentation Site](https://catalyst.coalescelabs.ai) - Comprehensive guides, reference, and tutorials
+- [Documentation Site](https://catalyst.coalescelabs.ai) - Comprehensive guides, reference, and
+  tutorials
 - [Architecture](docs/architecture.md) - Three-layer system and memory model
 - [ADRs](docs/adrs.md) - Architecture decision records
 - [Releases](docs/releases.md) - Release Please workflow
+
+## Brand Assets
+
+Catalyst ships a V2 brand kit (Ignition Chevron) under [`assets/brand-v2/`](assets/brand-v2/): the
+mark, wordmark, lockups, favicon set, and the 1200×630 social preview card. All SVGs use
+`stroke="currentColor"` so they theme via CSS; the OG card raster (`assets/brand-v2/og-card.png`)
+bakes in the Operator Console palette.
+
+Repo admins: to set the GitHub repository social preview, go to **Settings → Social preview → Upload
+an image** and upload `assets/brand-v2/og-card.png`.
 
 ## License
 
@@ -413,7 +438,11 @@ MIT - Use it however you want!
 
 ## Note on Personal Use
 
-This is my personal workflow shared for learning and inspiration. You're welcome to use it as-is, fork it, or adapt the patterns to your own needs. Just keep in mind that it's optimized for my development style, so your mileage may vary. Some decisions are opinionated based on my preferences, and I may not accept PRs that don't align with how I work. Think of it as a starting point rather than a one-size-fits-all solution—take what works, adapt what doesn't!
+This is my personal workflow shared for learning and inspiration. You're welcome to use it as-is,
+fork it, or adapt the patterns to your own needs. Just keep in mind that it's optimized for my
+development style, so your mileage may vary. Some decisions are opinionated based on my preferences,
+and I may not accept PRs that don't align with how I work. Think of it as a starting point rather
+than a one-size-fits-all solution—take what works, adapt what doesn't!
 
 ---
 

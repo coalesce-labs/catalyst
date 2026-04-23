@@ -3,16 +3,14 @@ import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import sitemap from "@astrojs/sitemap";
 import starlightLlmsTxt from "starlight-llms-txt";
-import starlightChangelogs, {
-  makeChangelogsSidebarLinks,
-} from "starlight-changelogs";
+import starlightChangelogs, { makeChangelogsSidebarLinks } from "starlight-changelogs";
 import mermaid from "astro-mermaid";
 import { loadEnv } from "vite";
 
 const { PUBLIC_POSTHOG_KEY } = loadEnv(
   process.env.NODE_ENV || "production",
   new URL(".", import.meta.url).pathname,
-  "",
+  ""
 );
 
 function getLatestVersion(changelogPath) {
@@ -81,7 +79,7 @@ export default defineConfig({
                 base: `changelog/${name}`,
                 label: version ? `${name} v${version}` : name,
               };
-            }),
+            })
           ),
         },
       ],
@@ -177,6 +175,21 @@ export default defineConfig({
             href: "/safari-pinned-tab.svg",
             color: "#FFB547",
           },
+        },
+        // Static OG / Twitter card defaults. og:image and twitter:image are set
+        // per-route by src/routeData.ts — the home page gets the branded card
+        // (/og-card.png, CTL-152), leaf docs pages get astro-og-canvas generated
+        // per-page cards. Only invariant fields (og:type, twitter:card) live here
+        // so there's no duplicate-wins conflict with the per-route tags.
+        // Note: /og-card.png is the CTL-152 branded social preview, referenced
+        // via routeData.ts for the home page and documented here for grep.
+        {
+          tag: "meta",
+          attrs: { property: "og:type", content: "website" },
+        },
+        {
+          tag: "meta",
+          attrs: { name: "twitter:card", content: "summary_large_image" },
         },
       ],
       plugins: [starlightLlmsTxt(), starlightChangelogs()],
