@@ -531,50 +531,17 @@ worker activity. Key event types:
 | `{"type":"system","subtype":"api_retry"}`                                                                         | Worker hit rate limit / error; shows attempt and delay          |
 | `{"type":"result"}`                                                                                               | Worker finished; contains final answer and usage stats          |
 
-When the worker process exits, parse usage from the final `result` event:
+**Worker usage / cost is rolled in by the monitor pass (CTL-115).** The dispatch shell
+backgrounds workers with `&` and never `wait`s on them, so usage/cost extraction cannot
+happen here. Phase 4 invokes `plugins/dev/scripts/orchestrate-roll-usage.sh` once per
+worker per cycle to parse the final `result` event from the worker's stream file and:
 
-```bash
-# After worker PID exits, extract usage from the last result event in the stream
-if [ -f "$WORKER_STREAM" ]; then
-  RESULT_LINE=$(grep '"type":"result"' "$WORKER_STREAM" | tail -1)
-  if [ -n "$RESULT_LINE" ]; then
-    USAGE=$(echo "$RESULT_LINE" | jq -c '{
-      inputTokens: .usage.input_tokens,
-      outputTokens: .usage.output_tokens,
-      cacheReadTokens: .usage.cache_read_input_tokens,
-      cacheCreationTokens: .usage.cache_creation_input_tokens,
-      costUSD: .total_cost_usd,
-      numTurns: .num_turns,
-      durationMs: .duration_ms,
-      durationApiMs: .duration_api_ms,
-      model: (.modelUsage | keys[0] // null)
-    }' 2>/dev/null || echo 'null')
+1. Mirror cost into the worker's signal file (`.cost = USAGE`) — the dashboard reads
+   signal files (not global state) for per-worker cost columns.
+2. Write `state.workers[ticket].usage`.
+3. Roll the delta into `state.usage` for the orchestrator-level aggregate.
 
-    if [ "$USAGE" != "null" ]; then
-      "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET_ID}" ".usage = ${USAGE}"
-
-      # Mirror cost into the worker's signal file. The dashboard reads signal
-      # files (not global state) for per-worker cost columns; without this
-      # write, signal.cost is null and the UI shows "—" everywhere.
-      if [ -f "$SIGNAL_FILE" ]; then
-        jq --argjson cost "$USAGE" '.cost = $cost' "$SIGNAL_FILE" \
-          > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
-      fi
-
-      # Aggregate into orchestrator-level usage
-      "$STATE_SCRIPT" update "${ORCH_NAME}" "
-        .usage.inputTokens += $(echo "$USAGE" | jq '.inputTokens')
-        | .usage.outputTokens += $(echo "$USAGE" | jq '.outputTokens')
-        | .usage.cacheReadTokens += $(echo "$USAGE" | jq '.cacheReadTokens')
-        | .usage.cacheCreationTokens += $(echo "$USAGE" | jq '.cacheCreationTokens')
-        | .usage.costUSD += $(echo "$USAGE" | jq '.costUSD')
-        | .usage.numTurns += $(echo "$USAGE" | jq '.numTurns')
-        | .usage.durationMs += $(echo "$USAGE" | jq '.durationMs')
-        | .usage.durationApiMs += $(echo "$USAGE" | jq '.durationApiMs')"
-    fi
-  fi
-fi
-```
+The helper is idempotent (gated on `signal.cost == null`) and safe to call every cycle.
 
 **Emit dispatch event and update global state** after each worker dispatch:
 
@@ -778,6 +745,17 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
 
   "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET}" \
     ".status = \"${W_STATUS}\" | .phase = ${W_PHASE} | .branch = \"${W_BRANCH}\" | .pr = ${W_PR}"
+done
+
+# Roll worker usage/cost into orch.usage (CTL-115). Idempotent: the helper
+# no-ops when signal.cost is already populated, so calling it every cycle
+# costs only a `jq` read per worker until the worker's stream first contains
+# a `result` event.
+for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
+  TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
+  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-roll-usage.sh" \
+    --orch "${ORCH_NAME}" --ticket "${TICKET}" --orch-dir "${ORCH_DIR}" \
+    >/dev/null 2>&1 || true
 done
 ```
 
