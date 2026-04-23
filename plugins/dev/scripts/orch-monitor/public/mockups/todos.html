@@ -1,0 +1,995 @@
+<!doctype html>
+<html
+  lang="en"
+  data-system="operator-console"
+  data-theme="dark"
+  data-group="worker"
+  data-status="all"
+>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalyst — Todos</title>
+    <link rel="stylesheet" href="./_shared/tokens.css" />
+    <link rel="stylesheet" href="./_shared/fonts.css" />
+    <link rel="stylesheet" href="./_shared/base.css" />
+    <link rel="stylesheet" href="./_shared/chrome.css" />
+    <script>
+      // Pre-paint bootstrap — sets html[data-system], data-theme, data-group,
+      // data-status before first paint to avoid flicker. Mirrors the briefing
+      // bootstrap for system + theme; adds two attribute-driven axes that
+      // CSS uses to filter visible groups + rows.
+      (function () {
+        const LS_KEY = "catalyst.mockup.prefs";
+        const DEFAULTS = { system: "operator-console", theme: "dark" };
+        const SYSTEMS = ["operator-console", "precision-instrument"];
+        const THEMES = ["dark", "light"];
+        const GROUPS = ["worker", "orch", "flat"];
+        const STATUSES = ["all", "pending", "in-progress", "completed"];
+        const url = new URLSearchParams(window.location.search);
+        let stored = {};
+        try {
+          stored = JSON.parse(window.localStorage.getItem(LS_KEY) || "{}");
+        } catch (_e) {
+          stored = {};
+        }
+        const sysCandidate = url.get("system") || stored.system || DEFAULTS.system;
+        const themeCandidate = stored.theme || DEFAULTS.theme;
+        const groupCandidate = url.get("group") || "worker";
+        const statusCandidate = url.get("status") || "all";
+        const system = SYSTEMS.includes(sysCandidate) ? sysCandidate : DEFAULTS.system;
+        const theme = THEMES.includes(themeCandidate) ? themeCandidate : DEFAULTS.theme;
+        const group = GROUPS.includes(groupCandidate) ? groupCandidate : "worker";
+        const status = STATUSES.includes(statusCandidate) ? statusCandidate : "all";
+        document.documentElement.setAttribute("data-system", system);
+        document.documentElement.setAttribute("data-theme", theme);
+        document.documentElement.setAttribute("data-group", group);
+        document.documentElement.setAttribute("data-status", status);
+        window.__catalystMockupPrefs = { system, theme };
+      })();
+    </script>
+    <style>
+      /* ============================================================
+       * Page heading (mirrors home.html)
+       * ============================================================ */
+
+      .page-heading {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        max-width: 820px;
+      }
+
+      .page-heading h1 {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-display);
+        line-height: var(--line-height-display);
+        letter-spacing: var(--letter-spacing-display);
+        color: var(--color-text-hi);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .page-heading p {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+      }
+
+      /* ============================================================
+       * Todos section framing (mirrors worker.html .worker-section)
+       * ============================================================ */
+
+      .todos-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .todos-section__heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--spacing-4);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .todos-section__heading h2 {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+        color: var(--color-text-hi);
+      }
+
+      /* ============================================================
+       * Filter bar
+       * ============================================================ */
+
+      .todos-filter-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--spacing-3) var(--spacing-4);
+        padding: var(--spacing-3) var(--spacing-4);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+      }
+
+      [data-system="precision-instrument"] .todos-filter-bar {
+        border-color: var(--color-border-default);
+      }
+
+      .todos-filter__status,
+      .todos-filter__group {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-2);
+      }
+
+      .todos-filter__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .todos-filter__search {
+        flex: 1;
+        min-width: 180px;
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-hi);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+      }
+
+      .todos-filter__search::placeholder {
+        color: var(--color-text-lo);
+      }
+
+      .todos-filter__search:focus {
+        outline: none;
+        border-color: var(--color-accent);
+      }
+
+      /* Filter chip — anchor styled like a chip; the active variant is set
+         by the html[data-status=...] / html[data-group=...] attribute. */
+      .filter-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px var(--spacing-3);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-full);
+        text-decoration: none;
+      }
+
+      .filter-chip:hover {
+        color: var(--color-text-hi);
+        border-color: var(--color-border-default);
+      }
+
+      [data-system="precision-instrument"] .filter-chip {
+        border-radius: 0;
+        border-color: var(--color-border-default);
+      }
+
+      [data-status="all"] .filter-chip[href="?status=all"],
+      [data-status="pending"] .filter-chip[href="?status=pending"],
+      [data-status="in-progress"] .filter-chip[href="?status=in-progress"],
+      [data-status="completed"] .filter-chip[href="?status=completed"],
+      [data-group="worker"] .filter-chip[href="?group=worker"],
+      [data-group="orch"] .filter-chip[href="?group=orch"],
+      [data-group="flat"] .filter-chip[href="?group=flat"] {
+        color: var(--color-accent);
+        border-color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+      }
+
+      /* ============================================================
+       * Chip taxonomy (lifted from worker.html for shared visual language)
+       * ============================================================ */
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      [data-system="operator-console"] .chip {
+        padding: 2px var(--spacing-2);
+        border-radius: var(--radius-full);
+        border: 1px solid transparent;
+      }
+      [data-system="operator-console"] .chip--running,
+      [data-system="operator-console"] .chip--merging {
+        color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--pr-open,
+      [data-system="operator-console"] .chip--pending {
+        color: var(--color-info);
+        background: color-mix(in srgb, var(--color-info) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--merged,
+      [data-system="operator-console"] .chip--done,
+      [data-system="operator-console"] .chip--passing {
+        color: var(--color-success);
+        background: color-mix(in srgb, var(--color-success) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--failed,
+      [data-system="operator-console"] .chip--failing {
+        color: var(--color-danger);
+        background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--queued,
+      [data-system="operator-console"] .chip--ticket {
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border-color: var(--color-border-subtle);
+      }
+
+      [data-system="precision-instrument"] .chip {
+        padding: 0;
+        background: transparent;
+        color: var(--color-text-md);
+        border: none;
+      }
+      [data-system="precision-instrument"] .chip::before {
+        content: "●";
+        font-size: 0.85em;
+        line-height: 1;
+      }
+      [data-system="precision-instrument"] .chip--running::before,
+      [data-system="precision-instrument"] .chip--merging::before {
+        color: var(--color-accent);
+      }
+      [data-system="precision-instrument"] .chip--pr-open::before,
+      [data-system="precision-instrument"] .chip--pending::before {
+        color: var(--color-info);
+      }
+      [data-system="precision-instrument"] .chip--merged::before,
+      [data-system="precision-instrument"] .chip--done::before,
+      [data-system="precision-instrument"] .chip--passing::before {
+        color: var(--color-success);
+      }
+      [data-system="precision-instrument"] .chip--failed::before,
+      [data-system="precision-instrument"] .chip--failing::before {
+        color: var(--color-danger);
+      }
+      [data-system="precision-instrument"] .chip--queued::before,
+      [data-system="precision-instrument"] .chip--ticket::before {
+        content: none;
+      }
+
+      /* ============================================================
+       * Group / view toggling (CSS-only, attribute-driven)
+       * ============================================================ */
+
+      [data-group="worker"] .todos-view[data-group="orch"],
+      [data-group="worker"] .todos-view[data-group="flat"],
+      [data-group="orch"] .todos-view[data-group="worker"],
+      [data-group="orch"] .todos-view[data-group="flat"],
+      [data-group="flat"] .todos-view[data-group="worker"],
+      [data-group="flat"] .todos-view[data-group="orch"] {
+        display: none;
+      }
+
+      .todos-view {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      /* Status filter — when html[data-status="X"] is set, hide rows that
+         do not match. data-status="all" is the default and shows everything. */
+      [data-status="pending"] .todos-row:not([data-status="pending"]),
+      [data-status="in-progress"] .todos-row:not([data-status="in-progress"]),
+      [data-status="completed"] .todos-row:not([data-status="completed"]) {
+        display: none;
+      }
+
+      /* ============================================================
+       * Worker group card
+       * ============================================================ */
+
+      .todos-worker-group {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-lg);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        padding: var(--spacing-4) var(--spacing-5);
+      }
+
+      [data-system="precision-instrument"] .todos-worker-group {
+        border-color: var(--color-border-default);
+      }
+
+      .todos-worker-group__head {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-3);
+        flex-wrap: wrap;
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .todos-worker-group__name {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-heading);
+        line-height: var(--line-height-heading);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-hi);
+      }
+
+      .todos-worker-group__meta {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-3);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-text-lo);
+      }
+
+      .todos-worker-group__open {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-info);
+        text-decoration: none;
+      }
+
+      .todos-worker-group__open:hover {
+        color: var(--color-accent);
+      }
+
+      .todos-worker-group__list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      /* ============================================================
+       * Orch group (wraps worker groups)
+       * ============================================================ */
+
+      .todos-orch-group {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .todos-orch-group__head {
+        display: flex;
+        align-items: baseline;
+        gap: var(--spacing-3);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .todos-orch-group__name {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+        color: var(--color-text-hi);
+      }
+
+      .todos-orch-group__count {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .todos-orch-group__workers {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        padding-left: var(--spacing-4);
+        border-left: 2px solid var(--color-border-subtle);
+      }
+
+      [data-system="precision-instrument"] .todos-orch-group__workers {
+        border-left-color: var(--color-border-default);
+      }
+
+      /* ============================================================
+       * Todo row
+       * ============================================================ */
+
+      .todos-row {
+        display: grid;
+        grid-template-columns: auto 1fr auto auto auto;
+        gap: var(--spacing-3) var(--spacing-4);
+        align-items: baseline;
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-sm);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+      }
+
+      [data-system="precision-instrument"] .todos-row {
+        border-color: var(--color-border-default);
+      }
+
+      .todos-row__status {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+      }
+
+      .todos-row[data-status="pending"] .todos-row__status::before {
+        content: "☐";
+        color: var(--color-text-disabled);
+      }
+
+      .todos-row[data-status="in-progress"] .todos-row__status::before {
+        content: "▸";
+        color: var(--color-accent);
+      }
+
+      .todos-row[data-status="completed"] .todos-row__status::before {
+        content: "✓";
+        color: var(--color-success);
+      }
+
+      .todos-row[data-status="completed"] .todos-row__text {
+        color: var(--color-text-lo);
+      }
+
+      .todos-row[data-status="in-progress"] .todos-row__text {
+        color: var(--color-text-hi);
+      }
+
+      .todos-row__text {
+        color: var(--color-text-md);
+      }
+
+      .todos-row__owner {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .todos-row__time {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .todos-row__open {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-info);
+        text-decoration: none;
+      }
+
+      .todos-row__open:hover {
+        color: var(--color-accent);
+      }
+
+      /* ============================================================
+       * Empty states (hidden by default; demo data covers populated path)
+       * ============================================================ */
+
+      .todos-empty {
+        display: none;
+        padding: var(--spacing-5) var(--spacing-4);
+        background: var(--color-surface-1);
+        border: 1px dashed var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        text-align: center;
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        color: var(--color-text-md);
+      }
+
+      [data-system="precision-instrument"] .todos-empty {
+        border-style: solid;
+        border-color: var(--color-border-default);
+      }
+
+      [data-empty="filtered"] .todos-empty--filtered,
+      [data-empty="no-data"] .todos-empty--no-data {
+        display: block;
+      }
+      [data-empty="filtered"] .todos-view,
+      [data-empty="no-data"] .todos-view {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mockup-shell">
+      <div class="mockup-container">
+        <header class="mockup-topbar">
+          <span class="mockup-topbar__mark">catalyst</span>
+          <span class="eyebrow">Todos</span>
+        </header>
+
+        <section class="page-heading">
+          <span class="eyebrow">TodoWrite roll-up</span>
+          <h1>Todos across workers</h1>
+          <p>
+            Every active worker's TodoWrite payload in one view. Filter by status, group by worker
+            or by orchestrator, or flatten chronologically. Open a worker to see its full signal
+            and stream tail.
+          </p>
+        </section>
+
+        <section class="todos-section">
+          <header class="todos-section__heading">
+            <h2>Todos</h2>
+            <span class="eyebrow">14 items across 9 workers</span>
+          </header>
+
+          <div class="todos-filter-bar" role="toolbar" aria-label="Todo filters">
+            <div class="todos-filter__status" role="group" aria-label="Status">
+              <span class="todos-filter__label">Status</span>
+              <a class="filter-chip" href="?status=all">All</a>
+              <a class="filter-chip" href="?status=pending">Pending</a>
+              <a class="filter-chip" href="?status=in-progress">In progress</a>
+              <a class="filter-chip" href="?status=completed">Completed</a>
+            </div>
+            <div class="todos-filter__group" role="group" aria-label="Grouping">
+              <span class="todos-filter__label">Group</span>
+              <a class="filter-chip" href="?group=worker">By worker</a>
+              <a class="filter-chip" href="?group=orch">By orch</a>
+              <a class="filter-chip" href="?group=flat">Flat</a>
+            </div>
+            <input
+              class="todos-filter__search"
+              type="search"
+              placeholder="Search todos…"
+              data-search
+              aria-label="Search todos"
+            />
+          </div>
+
+          <div class="todos-view" data-group="worker" role="list">
+            <article class="todos-worker-group" role="listitem">
+              <header class="todos-worker-group__head">
+                <span class="chip chip--ticket">CTL-138</span>
+                <span class="chip chip--merging">Merging</span>
+                <h3 class="todos-worker-group__name">worker.html mockup</h3>
+                <div class="todos-worker-group__meta">
+                  <span>orch-2026-04-22-3</span>
+                  <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-138">
+                    open worker
+                  </a>
+                </div>
+              </header>
+              <ul class="todos-worker-group__list">
+                <li class="todos-row" data-status="in-progress">
+                  <span class="todos-row__status" aria-label="in progress"></span>
+                  <span class="todos-row__text">
+                    Shipping. Commit, push, create PR, arm auto-merge.
+                  </span>
+                  <span class="todos-row__owner">CTL-138</span>
+                  <span class="todos-row__time">02:18:14</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                </li>
+                <li class="todos-row" data-status="pending">
+                  <span class="todos-row__status" aria-label="pending"></span>
+                  <span class="todos-row__text">
+                    Poll <code>gh pr view</code> every 60s until state=MERGED.
+                  </span>
+                  <span class="todos-row__owner">CTL-138</span>
+                  <span class="todos-row__time">02:18:14</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                </li>
+                <li class="todos-row" data-status="completed">
+                  <span class="todos-row__status" aria-label="completed"></span>
+                  <span class="todos-row__text">Implement worker.html sections.</span>
+                  <span class="todos-row__owner">CTL-138</span>
+                  <span class="todos-row__time">02:14:02</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                </li>
+                <li class="todos-row" data-status="completed">
+                  <span class="todos-row__status" aria-label="completed"></span>
+                  <span class="todos-row__text">Add gallery card in index.html.</span>
+                  <span class="todos-row__owner">CTL-138</span>
+                  <span class="todos-row__time">02:13:41</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                </li>
+              </ul>
+            </article>
+
+            <article class="todos-worker-group" role="listitem">
+              <header class="todos-worker-group__head">
+                <span class="chip chip--ticket">CTL-141</span>
+                <span class="chip chip--pr-open">PR open</span>
+                <h3 class="todos-worker-group__name">briefing.html mockup</h3>
+                <div class="todos-worker-group__meta">
+                  <span>orch-2026-04-22-3</span>
+                  <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-141">
+                    open worker
+                  </a>
+                </div>
+              </header>
+              <ul class="todos-worker-group__list">
+                <li class="todos-row" data-status="in-progress">
+                  <span class="todos-row__status" aria-label="in progress"></span>
+                  <span class="todos-row__text">
+                    Resolve Codex feedback on summarize button accessibility.
+                  </span>
+                  <span class="todos-row__owner">CTL-141</span>
+                  <span class="todos-row__time">02:08:51</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-141">open</a>
+                </li>
+                <li class="todos-row" data-status="completed">
+                  <span class="todos-row__status" aria-label="completed"></span>
+                  <span class="todos-row__text">Render rollup section with all three blocks.</span>
+                  <span class="todos-row__owner">CTL-141</span>
+                  <span class="todos-row__time">02:02:18</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-141">open</a>
+                </li>
+              </ul>
+            </article>
+
+            <article class="todos-worker-group" role="listitem">
+              <header class="todos-worker-group__head">
+                <span class="chip chip--ticket">CTL-142</span>
+                <span class="chip chip--running">Running</span>
+                <h3 class="todos-worker-group__name">todos.html mockup</h3>
+                <div class="todos-worker-group__meta">
+                  <span>orch-2026-04-22-3</span>
+                  <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-142">
+                    open worker
+                  </a>
+                </div>
+              </header>
+              <ul class="todos-worker-group__list">
+                <li class="todos-row" data-status="in-progress">
+                  <span class="todos-row__status" aria-label="in progress"></span>
+                  <span class="todos-row__text">Implement todos.html with TDD tests first.</span>
+                  <span class="todos-row__owner">CTL-142</span>
+                  <span class="todos-row__time">02:32:07</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+                </li>
+                <li class="todos-row" data-status="pending">
+                  <span class="todos-row__status" aria-label="pending"></span>
+                  <span class="todos-row__text">Validate plan and run quality gates.</span>
+                  <span class="todos-row__owner">CTL-142</span>
+                  <span class="todos-row__time">02:32:07</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+                </li>
+                <li class="todos-row" data-status="pending">
+                  <span class="todos-row__status" aria-label="pending"></span>
+                  <span class="todos-row__text">Ship. Create PR, arm auto-merge, poll until merged.</span>
+                  <span class="todos-row__owner">CTL-142</span>
+                  <span class="todos-row__time">02:32:07</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+                </li>
+                <li class="todos-row" data-status="completed">
+                  <span class="todos-row__status" aria-label="completed"></span>
+                  <span class="todos-row__text">Research mockup harness and todo data shape.</span>
+                  <span class="todos-row__owner">CTL-142</span>
+                  <span class="todos-row__time">02:30:44</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+                </li>
+                <li class="todos-row" data-status="completed">
+                  <span class="todos-row__status" aria-label="completed"></span>
+                  <span class="todos-row__text">Draft implementation plan in thoughts.</span>
+                  <span class="todos-row__owner">CTL-142</span>
+                  <span class="todos-row__time">02:31:52</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+                </li>
+              </ul>
+            </article>
+
+            <article class="todos-worker-group" role="listitem">
+              <header class="todos-worker-group__head">
+                <span class="chip chip--ticket">CTL-218</span>
+                <span class="chip chip--failed">Stalled</span>
+                <h3 class="todos-worker-group__name">scope rename codemod</h3>
+                <div class="todos-worker-group__meta">
+                  <span>orch-2026-04-22-2</span>
+                  <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-218">
+                    open worker
+                  </a>
+                </div>
+              </header>
+              <ul class="todos-worker-group__list">
+                <li class="todos-row" data-status="pending">
+                  <span class="todos-row__status" aria-label="pending"></span>
+                  <span class="todos-row__text">
+                    Wait for human approval on scope rename. Awaiting reviewer.
+                  </span>
+                  <span class="todos-row__owner">CTL-218</span>
+                  <span class="todos-row__time">01:42:09</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-218">open</a>
+                </li>
+                <li class="todos-row" data-status="completed">
+                  <span class="todos-row__status" aria-label="completed"></span>
+                  <span class="todos-row__text">Run codemod across bounded contexts.</span>
+                  <span class="todos-row__owner">CTL-218</span>
+                  <span class="todos-row__time">01:38:27</span>
+                  <a class="todos-row__open" href="./worker.html?ticket=CTL-218">open</a>
+                </li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="todos-view" data-group="orch" role="list">
+            <section class="todos-orch-group" role="listitem">
+              <header class="todos-orch-group__head">
+                <h3 class="todos-orch-group__name">orch-2026-04-22-3</h3>
+                <span class="todos-orch-group__count">3 workers · 12 todos</span>
+                <span class="chip chip--running">Wave 2 active</span>
+              </header>
+              <div class="todos-orch-group__workers">
+                <article class="todos-worker-group" role="listitem">
+                  <header class="todos-worker-group__head">
+                    <span class="chip chip--ticket">CTL-138</span>
+                    <span class="chip chip--merging">Merging</span>
+                    <h4 class="todos-worker-group__name">worker.html mockup</h4>
+                    <div class="todos-worker-group__meta">
+                      <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-138">
+                        open worker
+                      </a>
+                    </div>
+                  </header>
+                  <ul class="todos-worker-group__list">
+                    <li class="todos-row" data-status="in-progress">
+                      <span class="todos-row__status" aria-label="in progress"></span>
+                      <span class="todos-row__text">Shipping. Arm auto-merge and poll.</span>
+                      <span class="todos-row__owner">CTL-138</span>
+                      <span class="todos-row__time">02:18:14</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                    </li>
+                    <li class="todos-row" data-status="pending">
+                      <span class="todos-row__status" aria-label="pending"></span>
+                      <span class="todos-row__text">Poll <code>gh pr view</code> until merged.</span>
+                      <span class="todos-row__owner">CTL-138</span>
+                      <span class="todos-row__time">02:18:14</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                    </li>
+                  </ul>
+                </article>
+                <article class="todos-worker-group" role="listitem">
+                  <header class="todos-worker-group__head">
+                    <span class="chip chip--ticket">CTL-141</span>
+                    <span class="chip chip--pr-open">PR open</span>
+                    <h4 class="todos-worker-group__name">briefing.html mockup</h4>
+                    <div class="todos-worker-group__meta">
+                      <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-141">
+                        open worker
+                      </a>
+                    </div>
+                  </header>
+                  <ul class="todos-worker-group__list">
+                    <li class="todos-row" data-status="in-progress">
+                      <span class="todos-row__status" aria-label="in progress"></span>
+                      <span class="todos-row__text">Resolve Codex feedback on accessibility.</span>
+                      <span class="todos-row__owner">CTL-141</span>
+                      <span class="todos-row__time">02:08:51</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-141">open</a>
+                    </li>
+                  </ul>
+                </article>
+                <article class="todos-worker-group" role="listitem">
+                  <header class="todos-worker-group__head">
+                    <span class="chip chip--ticket">CTL-142</span>
+                    <span class="chip chip--running">Running</span>
+                    <h4 class="todos-worker-group__name">todos.html mockup</h4>
+                    <div class="todos-worker-group__meta">
+                      <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-142">
+                        open worker
+                      </a>
+                    </div>
+                  </header>
+                  <ul class="todos-worker-group__list">
+                    <li class="todos-row" data-status="in-progress">
+                      <span class="todos-row__status" aria-label="in progress"></span>
+                      <span class="todos-row__text">Implement todos.html with TDD tests.</span>
+                      <span class="todos-row__owner">CTL-142</span>
+                      <span class="todos-row__time">02:32:07</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+                    </li>
+                    <li class="todos-row" data-status="pending">
+                      <span class="todos-row__status" aria-label="pending"></span>
+                      <span class="todos-row__text">Validate plan and run quality gates.</span>
+                      <span class="todos-row__owner">CTL-142</span>
+                      <span class="todos-row__time">02:32:07</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+                    </li>
+                  </ul>
+                </article>
+              </div>
+            </section>
+
+            <section class="todos-orch-group" role="listitem">
+              <header class="todos-orch-group__head">
+                <h3 class="todos-orch-group__name">orch-2026-04-22-2</h3>
+                <span class="todos-orch-group__count">1 worker · 2 todos</span>
+                <span class="chip chip--failed">Stalled</span>
+              </header>
+              <div class="todos-orch-group__workers">
+                <article class="todos-worker-group" role="listitem">
+                  <header class="todos-worker-group__head">
+                    <span class="chip chip--ticket">CTL-218</span>
+                    <span class="chip chip--failed">Stalled</span>
+                    <h4 class="todos-worker-group__name">scope rename codemod</h4>
+                    <div class="todos-worker-group__meta">
+                      <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-218">
+                        open worker
+                      </a>
+                    </div>
+                  </header>
+                  <ul class="todos-worker-group__list">
+                    <li class="todos-row" data-status="pending">
+                      <span class="todos-row__status" aria-label="pending"></span>
+                      <span class="todos-row__text">
+                        Wait for human approval on scope rename.
+                      </span>
+                      <span class="todos-row__owner">CTL-218</span>
+                      <span class="todos-row__time">01:42:09</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-218">open</a>
+                    </li>
+                    <li class="todos-row" data-status="completed">
+                      <span class="todos-row__status" aria-label="completed"></span>
+                      <span class="todos-row__text">Run codemod across bounded contexts.</span>
+                      <span class="todos-row__owner">CTL-218</span>
+                      <span class="todos-row__time">01:38:27</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-218">open</a>
+                    </li>
+                  </ul>
+                </article>
+              </div>
+            </section>
+          </div>
+
+          <div class="todos-view" data-group="flat" role="list">
+            <ul class="todos-worker-group__list" style="gap: var(--spacing-2);">
+              <li class="todos-row" data-status="in-progress">
+                <span class="todos-row__status" aria-label="in progress"></span>
+                <span class="todos-row__text">Implement todos.html with TDD tests first.</span>
+                <span class="todos-row__owner">CTL-142</span>
+                <span class="todos-row__time">02:32:07</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+              </li>
+              <li class="todos-row" data-status="pending">
+                <span class="todos-row__status" aria-label="pending"></span>
+                <span class="todos-row__text">Validate plan and run quality gates.</span>
+                <span class="todos-row__owner">CTL-142</span>
+                <span class="todos-row__time">02:32:07</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+              </li>
+              <li class="todos-row" data-status="pending">
+                <span class="todos-row__status" aria-label="pending"></span>
+                <span class="todos-row__text">Ship. Create PR, arm auto-merge, poll until merged.</span>
+                <span class="todos-row__owner">CTL-142</span>
+                <span class="todos-row__time">02:32:07</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+              </li>
+              <li class="todos-row" data-status="completed">
+                <span class="todos-row__status" aria-label="completed"></span>
+                <span class="todos-row__text">Draft implementation plan in thoughts.</span>
+                <span class="todos-row__owner">CTL-142</span>
+                <span class="todos-row__time">02:31:52</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+              </li>
+              <li class="todos-row" data-status="completed">
+                <span class="todos-row__status" aria-label="completed"></span>
+                <span class="todos-row__text">Research mockup harness and todo data shape.</span>
+                <span class="todos-row__owner">CTL-142</span>
+                <span class="todos-row__time">02:30:44</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-142">open</a>
+              </li>
+              <li class="todos-row" data-status="in-progress">
+                <span class="todos-row__status" aria-label="in progress"></span>
+                <span class="todos-row__text">Shipping. Commit, push, create PR, arm auto-merge.</span>
+                <span class="todos-row__owner">CTL-138</span>
+                <span class="todos-row__time">02:18:14</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+              </li>
+              <li class="todos-row" data-status="pending">
+                <span class="todos-row__status" aria-label="pending"></span>
+                <span class="todos-row__text">Poll <code>gh pr view</code> every 60s until merged.</span>
+                <span class="todos-row__owner">CTL-138</span>
+                <span class="todos-row__time">02:18:14</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+              </li>
+              <li class="todos-row" data-status="completed">
+                <span class="todos-row__status" aria-label="completed"></span>
+                <span class="todos-row__text">Implement worker.html sections.</span>
+                <span class="todos-row__owner">CTL-138</span>
+                <span class="todos-row__time">02:14:02</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+              </li>
+              <li class="todos-row" data-status="in-progress">
+                <span class="todos-row__status" aria-label="in progress"></span>
+                <span class="todos-row__text">Resolve Codex feedback on summarize accessibility.</span>
+                <span class="todos-row__owner">CTL-141</span>
+                <span class="todos-row__time">02:08:51</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-141">open</a>
+              </li>
+              <li class="todos-row" data-status="completed">
+                <span class="todos-row__status" aria-label="completed"></span>
+                <span class="todos-row__text">Render rollup section with all three blocks.</span>
+                <span class="todos-row__owner">CTL-141</span>
+                <span class="todos-row__time">02:02:18</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-141">open</a>
+              </li>
+              <li class="todos-row" data-status="pending">
+                <span class="todos-row__status" aria-label="pending"></span>
+                <span class="todos-row__text">Wait for human approval on scope rename.</span>
+                <span class="todos-row__owner">CTL-218</span>
+                <span class="todos-row__time">01:42:09</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-218">open</a>
+              </li>
+              <li class="todos-row" data-status="completed">
+                <span class="todos-row__status" aria-label="completed"></span>
+                <span class="todos-row__text">Run codemod across bounded contexts.</span>
+                <span class="todos-row__owner">CTL-218</span>
+                <span class="todos-row__time">01:38:27</span>
+                <a class="todos-row__open" href="./worker.html?ticket=CTL-218">open</a>
+              </li>
+            </ul>
+          </div>
+
+          <div class="todos-empty todos-empty--filtered">
+            No todos match the current filters. Try clearing the status or search filter.
+          </div>
+          <div class="todos-empty todos-empty--no-data">
+            No workers have active todos. New TodoWrite payloads will land here as workers run.
+          </div>
+        </section>
+
+        <div class="footer">
+          <p>
+            Try
+            <code>?group=orch</code>
+            to nest workers under orchestrators, or
+            <code>?status=in-progress</code>
+            to filter the rows. Press
+            <code>/</code>
+            to focus the search input.
+          </p>
+        </div>
+      </div>
+    </main>
+    <script src="./_shared/chrome.js"></script>
+  </body>
+</html>

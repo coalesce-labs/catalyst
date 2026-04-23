@@ -75,7 +75,7 @@ export function Sidebar({
     >
       <div className="flex items-center gap-2.5 border-b border-border px-4 py-3">
         <img
-          src="/public/catalyst-logo.svg"
+          src="/public/favicon.svg"
           alt="Catalyst"
           className="h-5 w-5 flex-shrink-0"
         />
