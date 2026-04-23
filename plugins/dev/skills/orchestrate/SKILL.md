@@ -641,6 +641,15 @@ poll loop is a safety net for stalled workers — if you exit successfully with
 pr.mergedAt set, the orchestrator simply reconciles. If you exit at "stalled" or
 "failed", the orchestrator can dispatch a fix-up worker.
 
+COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules in the
+catalyst-comms skill (plugins/dev/skills/catalyst-comms/SKILL.md § Posting Discipline):
+  - info = phase transitions + PR-opened only (default heartbeat, ~5-7 per session)
+  - attention = orchestrator action required (0-2 per session, MANDATORY on: scope
+    conflict, missing access, ambiguous spec, 3+ repeated CI failures, status=stalled)
+  - done = exactly 1, only via the `done` subcommand at terminal success
+  - never use attention as a heartbeat — it triggers the orchestrator's NEEDS ATTENTION
+    banner
+
 Write your status to the worker signal file at:
   ${ORCH_DIR}/workers/${TICKET_ID}.json
 
