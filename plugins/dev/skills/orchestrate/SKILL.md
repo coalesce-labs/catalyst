@@ -376,6 +376,16 @@ Initialize `state.json`:
 ```bash
 STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
 
+# Resolve the catalyst-comms binary. Prefer the plugin-shipped copy so installs
+# where `catalyst-comms` is only a shell alias (which doesn't propagate to
+# subshells) still work. Fall back to PATH for users who have symlinked it.
+COMMS_BIN="${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"
+[ -x "$COMMS_BIN" ] || COMMS_BIN="$(command -v catalyst-comms 2>/dev/null || true)"
+if [ -z "$COMMS_BIN" ] || [ ! -x "$COMMS_BIN" ]; then
+  echo "warn: catalyst-comms not found — comms disabled (install: plugins/dev/scripts/install-cli.sh)" >&2
+  COMMS_BIN=""
+fi
+
 # Build the registration JSON with all workers from all waves
 # Use linearis CLI to read ticket titles (run `linearis issues usage` for syntax)
 WORKERS_JSON="{}"
@@ -418,8 +428,8 @@ orchestrator does not crash if `catalyst-comms` is missing.
 
 ```bash
 # Shared channel for this run. Workers will join at dispatch time.
-if command -v catalyst-comms >/dev/null 2>&1; then
-  catalyst-comms join "orch-${ORCH_NAME}" \
+if [ -n "$COMMS_BIN" ]; then
+  "$COMMS_BIN" join "orch-${ORCH_NAME}" \
     --as orchestrator \
     --capabilities "coordinates workers" \
     --orch "${ORCH_NAME}" \
@@ -872,14 +882,14 @@ A small cursor file `${ORCH_DIR}/.comms-cursor` tracks the line count already pr
 repeated polls don't re-surface the same message. Single-writer (this loop) so no race.
 
 ```bash
-if command -v catalyst-comms >/dev/null 2>&1; then
+if [ -n "$COMMS_BIN" ]; then
   CURSOR_FILE="${ORCH_DIR}/.comms-cursor"
   SINCE=$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)
   CH_FILE="${HOME}/catalyst/comms/channels/orch-${ORCH_NAME}.jsonl"
   TOTAL=$(wc -l < "$CH_FILE" 2>/dev/null | tr -d ' ' || echo 0)
 
   if [ "${TOTAL:-0}" -gt "${SINCE:-0}" ]; then
-    catalyst-comms poll "orch-${ORCH_NAME}" --since "$SINCE" 2>/dev/null | \
+    "$COMMS_BIN" poll "orch-${ORCH_NAME}" --since "$SINCE" 2>/dev/null | \
     while IFS= read -r MSG; do
       MSG_TYPE=$(echo "$MSG" | jq -r '.type // ""' 2>/dev/null)
       MSG_FROM=$(echo "$MSG" | jq -r '.from // ""' 2>/dev/null)
@@ -1238,8 +1248,8 @@ When all waves are complete:
 # posted their own done messages via their poll loops; this closes out the orch
 # participant and is advisory — rc is ignored. Channel cleanup is deferred to
 # CTL-110's archive sweep (do NOT call `catalyst-comms gc` here — gc is global).
-if command -v catalyst-comms >/dev/null 2>&1; then
-  catalyst-comms done "orch-${ORCH_NAME}" --as orchestrator >/dev/null 2>&1 || true
+if [ -n "$COMMS_BIN" ]; then
+  "$COMMS_BIN" done "orch-${ORCH_NAME}" --as orchestrator >/dev/null 2>&1 || true
 fi
 
 # Mark completed in global state

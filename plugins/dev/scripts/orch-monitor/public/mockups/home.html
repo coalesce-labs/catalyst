@@ -1,0 +1,1253 @@
+<!doctype html>
+<html lang="en" data-system="operator-console">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalyst — Home</title>
+    <link rel="stylesheet" href="./_shared/tokens.css" />
+    <link rel="stylesheet" href="./_shared/fonts.css" />
+    <link rel="stylesheet" href="./_shared/base.css" />
+    <link rel="stylesheet" href="./_shared/chrome.css" />
+    <script>
+      // Pre-paint bootstrap — sets html[data-system] before first paint to
+      // prevent flicker. Mirrors chrome.js's resolution priority (URL query
+      // > localStorage > default). chrome.js reads __catalystMockupPrefs to
+      // avoid re-parsing. Also sets html[data-state] from ?state= so the
+      // loading / empty / error variants render without a flash.
+      (function () {
+        const LS_KEY = "catalyst.mockup.prefs";
+        const DEFAULTS = { system: "operator-console" };
+        const SYSTEMS = ["operator-console", "precision-instrument"];
+        const STATES = ["default", "loading", "empty", "error"];
+        const url = new URLSearchParams(window.location.search);
+        let stored = {};
+        try {
+          stored = JSON.parse(window.localStorage.getItem(LS_KEY) || "{}");
+        } catch (_e) {
+          stored = {};
+        }
+        const candidate = url.get("system") || stored.system || DEFAULTS.system;
+        const system = SYSTEMS.includes(candidate) ? candidate : DEFAULTS.system;
+        const stateCandidate = url.get("state") || "default";
+        const state = STATES.includes(stateCandidate) ? stateCandidate : "default";
+        document.documentElement.setAttribute("data-system", system);
+        document.documentElement.setAttribute("data-state", state);
+        window.__catalystMockupPrefs = { system };
+      })();
+    </script>
+    <style>
+      /* ============================================================
+       * Page header
+       * ============================================================ */
+
+      .page-heading {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        max-width: 820px;
+      }
+
+      .page-heading h1 {
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+      }
+
+      .page-heading p {
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+      }
+
+      /* ============================================================
+       * Attention bar
+       * ============================================================ */
+
+      .home-attention {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-4);
+        padding: var(--spacing-3) var(--spacing-4);
+        background: color-mix(in srgb, var(--color-accent) 10%, var(--color-surface-1));
+        border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+        border-radius: var(--radius-md);
+      }
+
+      [data-system="precision-instrument"] .home-attention {
+        background: var(--color-surface-2);
+        border-color: var(--color-border-default);
+        border-left: 2px solid var(--color-accent);
+        border-radius: 0;
+      }
+
+      .home-attention__icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: var(--spacing-6);
+        height: var(--spacing-6);
+        border-radius: var(--radius-full);
+        background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+        color: var(--color-accent);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        font-weight: var(--font-weight-semibold);
+      }
+
+      [data-system="precision-instrument"] .home-attention__icon {
+        width: auto;
+        height: auto;
+        background: transparent;
+        border-radius: 0;
+        font-family: var(--font-family-display);
+      }
+
+      .home-attention__text {
+        flex: 1;
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-hi);
+      }
+
+      .home-attention__count {
+        font-family: var(--font-family-mono);
+        font-variant-numeric: tabular-nums;
+        color: var(--color-accent);
+        margin-right: var(--spacing-1);
+      }
+
+      .home-attention__meta {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-md);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .home-attention__action {
+        padding: var(--spacing-1) var(--spacing-3);
+        background: transparent;
+        color: var(--color-text-hi);
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-md);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+
+      .home-attention__action:hover {
+        border-color: var(--color-accent);
+        color: var(--color-accent);
+      }
+
+      /* ============================================================
+       * Section framing
+       * ============================================================ */
+
+      .home-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .home-section__heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--spacing-4);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .home-section__title {
+        display: flex;
+        align-items: baseline;
+        gap: var(--spacing-3);
+      }
+
+      .home-section__title h2 {
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+      }
+
+      .home-section__count {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .home-card-grid {
+        display: grid;
+        gap: var(--spacing-4);
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      }
+
+      /* ============================================================
+       * Kanban card (orch + solo share the shape)
+       * ============================================================ */
+
+      .home-card {
+        position: relative;
+        padding: var(--spacing-5);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-lg);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        transition: border-color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .home-card:hover {
+        border-color: var(--color-border-strong);
+      }
+
+      [data-system="precision-instrument"] .home-card {
+        border-color: var(--color-border-default);
+      }
+
+      .home-card__header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+      }
+
+      .home-card__title {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-heading);
+        line-height: var(--line-height-heading);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-hi);
+      }
+
+      .home-card__kind {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .home-card__meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+      }
+
+      .home-card__stage {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+      }
+
+      .home-card__progress {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-md);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .home-card__bar {
+        height: 2px;
+        width: 100%;
+        background: var(--color-surface-3);
+        border-radius: var(--radius-full);
+        overflow: hidden;
+      }
+
+      [data-system="precision-instrument"] .home-card__bar {
+        height: 1px;
+        background: var(--color-border-subtle);
+        border-radius: 0;
+      }
+
+      .home-card__bar > span {
+        display: block;
+        height: 100%;
+        background: var(--color-accent);
+      }
+
+      .home-card__chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-2);
+        padding: var(--spacing-2) 0;
+      }
+
+      .home-card__chip-group {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+      }
+
+      .home-card__chip-count {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        font-variant-numeric: tabular-nums;
+        color: var(--color-text-md);
+      }
+
+      .home-card__footer {
+        display: flex;
+        gap: var(--spacing-4);
+        padding-top: var(--spacing-3);
+        border-top: 1px solid var(--color-border-subtle);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .home-card__footer-item {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+      }
+
+      .home-card__footer-label {
+        color: var(--color-text-lo);
+      }
+
+      .home-card__footer-value {
+        color: var(--color-text-md);
+      }
+
+      /* Needs-me accent rail */
+      .home-card--needs-me {
+        padding-left: calc(var(--spacing-5) + 2px);
+      }
+
+      .home-card--needs-me::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: var(--color-accent);
+        border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+        opacity: 0.9;
+      }
+
+      [data-system="operator-console"] .home-card--needs-me::before {
+        animation: brand-heartbeat var(--motion-duration-heartbeat) ease-in-out infinite;
+      }
+
+      @keyframes brand-heartbeat {
+        0%,
+        100% {
+          opacity: 0.6;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        [data-system="operator-console"] .home-card--needs-me::before {
+          animation: none;
+        }
+      }
+
+      /* ============================================================
+       * Chips (subset reused from brand.html)
+       * ============================================================ */
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      [data-system="operator-console"] .chip {
+        padding: 2px var(--spacing-2);
+        border-radius: var(--radius-full);
+        border: 1px solid transparent;
+      }
+
+      [data-system="operator-console"] .chip--running {
+        color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--pr-open {
+        color: var(--color-info);
+        background: color-mix(in srgb, var(--color-info) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--merged {
+        color: var(--color-success);
+        background: color-mix(in srgb, var(--color-success) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--failed {
+        color: var(--color-danger);
+        background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--needs-me {
+        color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+        border-color: var(--color-accent);
+      }
+      [data-system="operator-console"] .chip--queued {
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border-color: var(--color-border-subtle);
+      }
+      [data-system="operator-console"] .chip--ticket {
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border-color: var(--color-border-subtle);
+      }
+
+      [data-system="precision-instrument"] .chip {
+        padding: 0;
+        background: transparent;
+        color: var(--color-text-md);
+        border: none;
+      }
+      [data-system="precision-instrument"] .chip::before {
+        content: "●";
+        font-size: 0.85em;
+        line-height: 1;
+      }
+      [data-system="precision-instrument"] .chip--running::before {
+        color: var(--color-accent);
+      }
+      [data-system="precision-instrument"] .chip--pr-open::before {
+        color: var(--color-info);
+      }
+      [data-system="precision-instrument"] .chip--merged::before {
+        color: var(--color-success);
+      }
+      [data-system="precision-instrument"] .chip--failed::before {
+        color: var(--color-danger);
+      }
+      [data-system="precision-instrument"] .chip--needs-me::before {
+        color: var(--color-accent);
+      }
+      [data-system="precision-instrument"] .chip--queued::before {
+        color: var(--color-text-lo);
+      }
+      [data-system="precision-instrument"] .chip--ticket::before {
+        content: none;
+      }
+      [data-system="precision-instrument"] .chip--ticket {
+        color: var(--color-text-lo);
+      }
+
+      /* ============================================================
+       * Recently completed strip
+       * ============================================================ */
+
+      .home-strip {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: var(--spacing-3);
+      }
+
+      .home-strip__item {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+        padding: var(--spacing-3) var(--spacing-4);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+      }
+
+      [data-system="precision-instrument"] .home-strip__item {
+        border-color: var(--color-border-default);
+      }
+
+      .home-strip__top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-2);
+      }
+
+      .home-strip__name {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-hi);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .home-strip__meta {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+        display: flex;
+        gap: var(--spacing-3);
+      }
+
+      /* ============================================================
+       * Empty + error + loading states
+       * ============================================================ */
+
+      .home-empty,
+      .home-error {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--spacing-3);
+        padding: var(--spacing-6) var(--spacing-5);
+        background: var(--color-surface-1);
+        border: 1px dashed var(--color-border-subtle);
+        border-radius: var(--radius-lg);
+      }
+
+      [data-system="precision-instrument"] .home-empty,
+      [data-system="precision-instrument"] .home-error {
+        border-style: solid;
+        border-color: var(--color-border-default);
+      }
+
+      .home-empty__title,
+      .home-error__title {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-heading);
+        line-height: var(--line-height-heading);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-hi);
+      }
+
+      .home-empty__body,
+      .home-error__body {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+        max-width: 580px;
+      }
+
+      .home-empty__hint {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        padding: var(--spacing-2) var(--spacing-3);
+        border-radius: var(--radius-md);
+        border: 1px solid var(--color-border-subtle);
+      }
+
+      .home-error__line {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-danger);
+        background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+        padding: var(--spacing-2) var(--spacing-3);
+        border-radius: var(--radius-sm);
+        border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+        align-self: stretch;
+      }
+
+      .home-retry {
+        padding: var(--spacing-2) var(--spacing-4);
+        background: transparent;
+        color: var(--color-text-hi);
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-md);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        cursor: pointer;
+      }
+
+      .home-retry:hover {
+        border-color: var(--color-accent);
+        color: var(--color-accent);
+      }
+
+      /* Skeleton cards */
+      .home-card--skeleton .home-card__title,
+      .home-card--skeleton .home-card__kind,
+      .home-card--skeleton .home-card__stage,
+      .home-card--skeleton .home-card__progress,
+      .home-card--skeleton .home-card__footer,
+      .home-card--skeleton .home-card__chips {
+        color: transparent;
+        background: var(--color-surface-3);
+        border-radius: var(--radius-sm);
+        animation: home-shimmer var(--motion-duration-heartbeat, 2400ms) ease-in-out infinite;
+      }
+
+      .home-card--skeleton .home-card__bar > span {
+        width: 48%;
+        background: var(--color-surface-3);
+        animation: home-shimmer var(--motion-duration-heartbeat, 2400ms) ease-in-out infinite;
+      }
+
+      .home-card--skeleton .home-card__footer {
+        background: transparent;
+        animation: none;
+        border-top-color: var(--color-surface-3);
+      }
+
+      .home-card--skeleton .home-card__footer-item {
+        color: transparent;
+        background: var(--color-surface-3);
+        border-radius: var(--radius-sm);
+        min-height: var(--line-height-data);
+        min-width: var(--spacing-12);
+        animation: home-shimmer var(--motion-duration-heartbeat, 2400ms) ease-in-out infinite;
+      }
+
+      @keyframes home-shimmer {
+        0%,
+        100% {
+          opacity: 0.5;
+        }
+        50% {
+          opacity: 0.9;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .home-card--skeleton .home-card__title,
+        .home-card--skeleton .home-card__kind,
+        .home-card--skeleton .home-card__stage,
+        .home-card--skeleton .home-card__progress,
+        .home-card--skeleton .home-card__chips,
+        .home-card--skeleton .home-card__footer-item,
+        .home-card--skeleton .home-card__bar > span {
+          animation: none;
+        }
+      }
+
+      /* ============================================================
+       * Per-state visibility
+       * (html[data-state] is set by the pre-paint bootstrap)
+       * ============================================================ */
+
+      /* default — show real content, hide alternate states */
+      [data-state="default"] [data-variant="default"] {
+        display: flex;
+      }
+      [data-state="default"] [data-variant="loading"],
+      [data-state="default"] [data-variant="empty"],
+      [data-state="default"] [data-variant="error"] {
+        display: none;
+      }
+
+      /* loading — show skeletons in the sections, hide real + empty + error */
+      [data-state="loading"] [data-variant="default"],
+      [data-state="loading"] [data-variant="empty"],
+      [data-state="loading"] [data-variant="error"] {
+        display: none;
+      }
+      [data-state="loading"] [data-variant="loading"] {
+        display: flex;
+      }
+      /* In loading state the attention bar and precise counts are suppressed. */
+      [data-state="loading"] .home-attention,
+      [data-state="loading"] .home-section__count {
+        display: none;
+      }
+
+      /* empty — show empty panels per section, hide attention + completed strip */
+      [data-state="empty"] [data-variant="default"],
+      [data-state="empty"] [data-variant="loading"],
+      [data-state="empty"] [data-variant="error"] {
+        display: none;
+      }
+      [data-state="empty"] [data-variant="empty"] {
+        display: flex;
+      }
+      [data-state="empty"] .home-attention,
+      [data-state="empty"] .home-section--completed,
+      [data-state="empty"] .home-section__count {
+        display: none;
+      }
+
+      /* error — show error panels per section, hide the rest */
+      [data-state="error"] [data-variant="default"],
+      [data-state="error"] [data-variant="loading"],
+      [data-state="error"] [data-variant="empty"] {
+        display: none;
+      }
+      [data-state="error"] [data-variant="error"] {
+        display: flex;
+      }
+      [data-state="error"] .home-attention,
+      [data-state="error"] .home-section--completed,
+      [data-state="error"] .home-section__count {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mockup-shell">
+      <div class="mockup-container">
+        <!-- ============================================================
+             HEADER STRIP
+             ============================================================ -->
+        <header class="mockup-topbar">
+          <span class="mockup-topbar__mark">catalyst</span>
+          <span class="eyebrow">Home</span>
+        </header>
+
+        <section class="page-heading">
+          <span class="eyebrow">Active systems</span>
+          <h1>What is running right now</h1>
+          <p>
+            Orchestrators and standalone agents share the same grid. Solo workers are first-class
+            citizens. Attention items surface at the top when any run needs human review.
+          </p>
+        </section>
+
+        <!-- ============================================================
+             ATTENTION BAR
+             Renders only in default state (hidden in loading/empty/error).
+             ============================================================ -->
+        <div class="home-attention" role="status" aria-live="polite">
+          <span class="home-attention__icon" aria-hidden="true">!</span>
+          <span class="home-attention__text">
+            <span class="home-attention__count">2</span>
+            runs are waiting on you. Review before the next wave kicks off.
+          </span>
+          <span class="home-attention__meta">oldest · 14m</span>
+          <button type="button" class="home-attention__action">Review</button>
+        </div>
+
+        <!-- ============================================================
+             ACTIVE ORCHESTRATORS
+             ============================================================ -->
+        <section class="home-section">
+          <header class="home-section__heading">
+            <div class="home-section__title">
+              <h2>Active orchestrators</h2>
+              <span class="home-section__count">3 running</span>
+            </div>
+            <span class="eyebrow">Live</span>
+          </header>
+
+          <!-- default variant -->
+          <div class="home-card-grid" data-variant="default" role="list">
+            <article class="home-card" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">orch-2026-04-22-3</h3>
+                <span class="home-card__kind">Orchestrator</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">Wave 2 · implementation</span>
+                <span class="home-card__progress">9 / 14</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span style="width: 64%"></span>
+              </div>
+              <div class="home-card__chips" role="group" aria-label="Worker roll-up">
+                <span class="home-card__chip-group">
+                  <span class="chip chip--running">Running</span>
+                  <span class="home-card__chip-count">7</span>
+                </span>
+                <span class="home-card__chip-group">
+                  <span class="chip chip--pr-open">PR open</span>
+                  <span class="home-card__chip-count">2</span>
+                </span>
+                <span class="home-card__chip-group">
+                  <span class="chip chip--merged">Merged</span>
+                  <span class="home-card__chip-count">4</span>
+                </span>
+                <span class="home-card__chip-group">
+                  <span class="chip chip--failed">Failed</span>
+                  <span class="home-card__chip-count">1</span>
+                </span>
+              </div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">cost</span>
+                  <span class="home-card__footer-value">$3.41</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">heartbeat</span>
+                  <span class="home-card__footer-value">18s ago</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">PRs</span>
+                  <span class="home-card__footer-value">6</span>
+                </span>
+              </footer>
+            </article>
+
+            <article class="home-card home-card--needs-me" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">orch-2026-04-22-2</h3>
+                <span class="home-card__kind">Orchestrator</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">Wave 3 · review</span>
+                <span class="home-card__progress">11 / 12</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span style="width: 92%"></span>
+              </div>
+              <div class="home-card__chips" role="group" aria-label="Worker roll-up">
+                <span class="home-card__chip-group">
+                  <span class="chip chip--needs-me">Needs me</span>
+                  <span class="home-card__chip-count">2</span>
+                </span>
+                <span class="home-card__chip-group">
+                  <span class="chip chip--pr-open">PR open</span>
+                  <span class="home-card__chip-count">3</span>
+                </span>
+                <span class="home-card__chip-group">
+                  <span class="chip chip--merged">Merged</span>
+                  <span class="home-card__chip-count">6</span>
+                </span>
+              </div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">cost</span>
+                  <span class="home-card__footer-value">$5.82</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">heartbeat</span>
+                  <span class="home-card__footer-value">41s ago</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">PRs</span>
+                  <span class="home-card__footer-value">9</span>
+                </span>
+              </footer>
+            </article>
+
+            <article class="home-card" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">orch-2026-04-22-1</h3>
+                <span class="home-card__kind">Orchestrator</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">Wave 1 · research</span>
+                <span class="home-card__progress">3 / 8</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span style="width: 38%"></span>
+              </div>
+              <div class="home-card__chips" role="group" aria-label="Worker roll-up">
+                <span class="home-card__chip-group">
+                  <span class="chip chip--running">Running</span>
+                  <span class="home-card__chip-count">5</span>
+                </span>
+                <span class="home-card__chip-group">
+                  <span class="chip chip--queued">Queued</span>
+                  <span class="home-card__chip-count">3</span>
+                </span>
+              </div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">cost</span>
+                  <span class="home-card__footer-value">$0.82</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">heartbeat</span>
+                  <span class="home-card__footer-value">7s ago</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">PRs</span>
+                  <span class="home-card__footer-value">0</span>
+                </span>
+              </footer>
+            </article>
+          </div>
+
+          <!-- loading variant (skeletons) -->
+          <div class="home-card-grid" data-variant="loading" role="list" aria-hidden="true">
+            <article class="home-card home-card--skeleton" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">loading</h3>
+                <span class="home-card__kind">loading</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">loading</span>
+                <span class="home-card__progress">loading</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span></span>
+              </div>
+              <div class="home-card__chips">loading</div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+              </footer>
+            </article>
+            <article class="home-card home-card--skeleton" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">loading</h3>
+                <span class="home-card__kind">loading</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">loading</span>
+                <span class="home-card__progress">loading</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span></span>
+              </div>
+              <div class="home-card__chips">loading</div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+              </footer>
+            </article>
+            <article class="home-card home-card--skeleton" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">loading</h3>
+                <span class="home-card__kind">loading</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">loading</span>
+                <span class="home-card__progress">loading</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span></span>
+              </div>
+              <div class="home-card__chips">loading</div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+              </footer>
+            </article>
+          </div>
+
+          <!-- empty variant -->
+          <div class="home-empty" data-variant="empty">
+            <span class="home-empty__title">No orchestrators running</span>
+            <p class="home-empty__body">
+              Orchestrators coordinate waves of workers on a shared run. Start one by dispatching a
+              briefing.
+            </p>
+            <span class="home-empty__hint">/catalyst-dev:orchestrate</span>
+          </div>
+
+          <!-- error variant -->
+          <div class="home-error" data-variant="error">
+            <span class="home-error__title">Could not reach the monitor</span>
+            <p class="home-error__body">
+              The state stream did not respond. Active runs kept executing in the background.
+              Refresh to re-subscribe.
+            </p>
+            <code class="home-error__line">GET /api/runs → 503 service unavailable · 12:41:08</code>
+            <button type="button" class="home-retry">Retry</button>
+          </div>
+        </section>
+
+        <!-- ============================================================
+             SOLO WORKERS
+             ============================================================ -->
+        <section class="home-section">
+          <header class="home-section__heading">
+            <div class="home-section__title">
+              <h2>Solo workers</h2>
+              <span class="home-section__count">3 running</span>
+            </div>
+            <span class="eyebrow">Standalone</span>
+          </header>
+
+          <!-- default variant -->
+          <div class="home-card-grid" data-variant="default" role="list">
+            <article class="home-card" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">release-notes-gen</h3>
+                <span class="home-card__kind">Solo worker</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">Phase 3 · implement</span>
+                <span class="home-card__progress">14 / 18</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span style="width: 78%"></span>
+              </div>
+              <div class="home-card__chips">
+                <span class="chip chip--running">Running</span>
+                <span class="chip chip--ticket">CTL-219</span>
+              </div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">cost</span>
+                  <span class="home-card__footer-value">$0.24</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">heartbeat</span>
+                  <span class="home-card__footer-value">12s ago</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">PR</span>
+                  <span class="home-card__footer-value">—</span>
+                </span>
+              </footer>
+            </article>
+
+            <article class="home-card home-card--needs-me" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">rename-scope-refactor</h3>
+                <span class="home-card__kind">Solo worker</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">Phase 2 · plan</span>
+                <span class="home-card__progress">6 / 18</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span style="width: 33%"></span>
+              </div>
+              <div class="home-card__chips">
+                <span class="chip chip--needs-me">Needs me</span>
+                <span class="chip chip--ticket">CTL-214</span>
+              </div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">cost</span>
+                  <span class="home-card__footer-value">$0.18</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">heartbeat</span>
+                  <span class="home-card__footer-value">12m ago</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">PR</span>
+                  <span class="home-card__footer-value">—</span>
+                </span>
+              </footer>
+            </article>
+
+            <article class="home-card" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">otel-panel-cleanup</h3>
+                <span class="home-card__kind">Solo worker</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">Phase 5 · ship</span>
+                <span class="home-card__progress">17 / 18</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span style="width: 94%"></span>
+              </div>
+              <div class="home-card__chips">
+                <span class="chip chip--pr-open">PR open</span>
+                <span class="chip chip--ticket">CTL-118</span>
+              </div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">cost</span>
+                  <span class="home-card__footer-value">$0.47</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">heartbeat</span>
+                  <span class="home-card__footer-value">3s ago</span>
+                </span>
+                <span class="home-card__footer-item">
+                  <span class="home-card__footer-label">PR</span>
+                  <span class="home-card__footer-value">#239</span>
+                </span>
+              </footer>
+            </article>
+          </div>
+
+          <!-- loading variant -->
+          <div class="home-card-grid" data-variant="loading" role="list" aria-hidden="true">
+            <article class="home-card home-card--skeleton" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">loading</h3>
+                <span class="home-card__kind">loading</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">loading</span>
+                <span class="home-card__progress">loading</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span></span>
+              </div>
+              <div class="home-card__chips">loading</div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+              </footer>
+            </article>
+            <article class="home-card home-card--skeleton" role="listitem">
+              <header class="home-card__header">
+                <h3 class="home-card__title">loading</h3>
+                <span class="home-card__kind">loading</span>
+              </header>
+              <div class="home-card__meta">
+                <span class="home-card__stage">loading</span>
+                <span class="home-card__progress">loading</span>
+              </div>
+              <div class="home-card__bar" aria-hidden="true">
+                <span></span>
+              </div>
+              <div class="home-card__chips">loading</div>
+              <footer class="home-card__footer">
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+                <span class="home-card__footer-item">loading</span>
+              </footer>
+            </article>
+          </div>
+
+          <!-- empty variant -->
+          <div class="home-empty" data-variant="empty">
+            <span class="home-empty__title">No standalone agents</span>
+            <p class="home-empty__body">
+              Solo workers run one agent against one ticket. Dispatch one directly from a worktree
+              or let an orchestrator fan them out.
+            </p>
+            <span class="home-empty__hint">/catalyst-dev:oneshot CTL-123</span>
+          </div>
+
+          <!-- error variant -->
+          <div class="home-error" data-variant="error">
+            <span class="home-error__title">Could not reach the monitor</span>
+            <p class="home-error__body">
+              Solo-worker state is derived from the same stream. See the orchestrators section
+              above for the retry line.
+            </p>
+            <code class="home-error__line">GET /api/workers → 503 service unavailable · 12:41:08</code>
+          </div>
+        </section>
+
+        <!-- ============================================================
+             RECENTLY COMPLETED
+             Hidden in empty + error states.
+             ============================================================ -->
+        <section class="home-section home-section--completed">
+          <header class="home-section__heading">
+            <div class="home-section__title">
+              <h2>Recently completed</h2>
+              <span class="home-section__count">Last 5</span>
+            </div>
+            <span class="eyebrow">24h window</span>
+          </header>
+
+          <div class="home-strip" data-variant="default" role="list">
+            <div class="home-strip__item" role="listitem">
+              <div class="home-strip__top">
+                <span class="home-strip__name">brand-showcase</span>
+                <span class="chip chip--merged">Shipped</span>
+              </div>
+              <div class="home-strip__meta">
+                <span>CTL-126</span>
+                <span>#243</span>
+                <span>6m ago</span>
+              </div>
+            </div>
+            <div class="home-strip__item" role="listitem">
+              <div class="home-strip__top">
+                <span class="home-strip__name">mockup-gallery</span>
+                <span class="chip chip--merged">Shipped</span>
+              </div>
+              <div class="home-strip__meta">
+                <span>CTL-125</span>
+                <span>#242</span>
+                <span>24m ago</span>
+              </div>
+            </div>
+            <div class="home-strip__item" role="listitem">
+              <div class="home-strip__top">
+                <span class="home-strip__name">tokens-package</span>
+                <span class="chip chip--merged">Shipped</span>
+              </div>
+              <div class="home-strip__meta">
+                <span>CTL-123</span>
+                <span>#241</span>
+                <span>1h ago</span>
+              </div>
+            </div>
+            <div class="home-strip__item" role="listitem">
+              <div class="home-strip__top">
+                <span class="home-strip__name">otel-panels</span>
+                <span class="chip chip--merged">Shipped</span>
+              </div>
+              <div class="home-strip__meta">
+                <span>CTL-118</span>
+                <span>#239</span>
+                <span>3h ago</span>
+              </div>
+            </div>
+            <div class="home-strip__item" role="listitem">
+              <div class="home-strip__top">
+                <span class="home-strip__name">release-main</span>
+                <span class="chip chip--merged">Shipped</span>
+              </div>
+              <div class="home-strip__meta">
+                <span>—</span>
+                <span>#240</span>
+                <span>4h ago</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="home-strip" data-variant="loading" aria-hidden="true">
+            <div class="home-strip__item">
+              <div class="home-strip__top">
+                <span class="home-strip__name" style="background:var(--color-surface-3);color:transparent">loading</span>
+              </div>
+              <div class="home-strip__meta">
+                <span style="background:var(--color-surface-3);color:transparent">loading</span>
+              </div>
+            </div>
+            <div class="home-strip__item">
+              <div class="home-strip__top">
+                <span class="home-strip__name" style="background:var(--color-surface-3);color:transparent">loading</span>
+              </div>
+              <div class="home-strip__meta">
+                <span style="background:var(--color-surface-3);color:transparent">loading</span>
+              </div>
+            </div>
+            <div class="home-strip__item">
+              <div class="home-strip__top">
+                <span class="home-strip__name" style="background:var(--color-surface-3);color:transparent">loading</span>
+              </div>
+              <div class="home-strip__meta">
+                <span style="background:var(--color-surface-3);color:transparent">loading</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="footer">
+          <p>
+            Try
+            <code>?state=loading</code>
+            ,
+            <code>?state=empty</code>
+            , or
+            <code>?state=error</code>
+            to inspect the alternate views. Flip the switcher for Precision Instrument.
+          </p>
+        </div>
+      </div>
+    </main>
+    <script src="./_shared/chrome.js"></script>
+  </body>
+</html>
