@@ -34,6 +34,10 @@ git clone https://github.com/coalesce-labs/catalyst.git  # or use your existing 
 bash scripts/install-dev-marketplace.sh                  # registers the local path as a marketplace
 ```
 
+Run this from the main checkout, **not** a linked git worktree — the script refuses by default
+from a worktree because it would freeze the installed plugin at that branch's HEAD. Pass
+`--allow-worktree` to override.
+
 Afterwards, `git pull` in the checkout and restart Claude Code sessions to pick up the latest
 `main`. See `scripts/install-dev-marketplace.sh` for details and for the `--plugin-dir` escape
 hatch if caching surprises you.
