@@ -1,12 +1,15 @@
 # Catalyst Brand V2 — Mark, wordmark, lockups
 
 This folder holds the Catalyst V2 mark (CTL-147) plus the drawn wordmark and two lockups
-(CTL-148). Everything follows the **Ignition Chevron** direction picked in
+(CTL-148), the favicon set (CTL-150), the monochrome variants and README hero (CTL-154).
+Everything follows the **Ignition Chevron** direction picked in
 [CTL-146][ctl-146-direction] (PR #246).
 
 [ctl-146-direction]: ../../packages/tokens/docs/brand-v2-direction.md
 
 ## Files
+
+### Variable marks (theme via `currentColor`)
 
 | File                     | `viewBox`   | Paths            | Primary size range        |
 |--------------------------|-------------|------------------|---------------------------|
@@ -18,6 +21,35 @@ This folder holds the Catalyst V2 mark (CTL-147) plus the drawn wordmark and two
 
 Every path uses `stroke="currentColor"` — no hex literals anywhere. The consuming surface
 drives the tint through CSS `color`.
+
+### Fixed-color monochrome variants (CTL-154)
+
+For surfaces that lose CSS context — email clients, print, stickers, slide decks,
+terminal screenshots — the V2 mark also ships with the stroke baked into pure black or
+pure white. `opacity` is removed entirely so these variants are strictly single-tint.
+
+| File                                   | Ink     | Use on           |
+|----------------------------------------|---------|------------------|
+| `mark-mono-black.svg`                  | `#000`  | Light backgrounds |
+| `mark-mono-white.svg`                  | `#FFF`  | Dark backgrounds  |
+| `lockup-horizontal-mono-black.svg`     | `#000`  | Light backgrounds |
+| `lockup-horizontal-mono-white.svg`     | `#FFF`  | Dark backgrounds  |
+| `lockup-stacked-mono-black.svg`        | `#000`  | Light backgrounds |
+| `lockup-stacked-mono-white.svg`        | `#FFF`  | Dark backgrounds  |
+
+Geometry is identical to the source files — same `viewBox`, same path count, same
+letter data-attributes. Only the stroke color is hard-coded and the inner-chevron
+opacity is removed.
+
+### README hero image (CTL-154)
+
+1600×480 banner referenced at the top of the repo-root `README.md` via a `<picture>`
+element for GitHub light/dark mode routing. See [readme-hero/README.md](readme-hero/README.md)
+for the composition spec and regeneration command.
+
+### Favicons (CTL-150)
+
+See [favicons/README.md](favicons/README.md).
 
 ## The two-size system
 
