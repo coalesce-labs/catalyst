@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+# orchestrate-dispatch-next - Canonical wave-queue dispatcher (CTL-116).
+#
+# Drains `.queue.waveNPending` in numeric wave order from an orchestrator's
+# state.json, dispatching up to (maxParallel - currentlyRunning) fresh `/oneshot`
+# workers. Replaces the hand-rolled per-run `dispatch-next.sh` that previously
+# hardcoded wave1/wave2/wave3 keys.
+#
+# Usage:
+#   orchestrate-dispatch-next --orch-dir <path>
+#                             [--orch-id <id>]
+#                             [--worktree-base <path>]
+#                             [--max-parallel <n>]
+#                             [--session-id <id>]
+#                             [--worker-command <cmd>]    # default "/catalyst-dev:oneshot"
+#                             [--worker-args <str>]       # default "--auto-merge"
+#                             [--comms-channel <name>]    # default "orch-<orch-id>"
+#                             [--dry-run]
+#                             [--skip-healthcheck]
+#
+# Defaults read from state.json (`.orchestrator`, `.worktreeBase`, `.maxParallel`)
+# when the CLI flag is not provided. Session ID falls back to
+# $CATALYST_SESSION_ID or $ORCH_DIR/.session-id.
+#
+# Outputs a single JSON line on stdout:
+#   {"running":R,"slotsAfter":S,"dispatched":["T-1",...][,"queueEmpty":true]}
+#
+# Environment overrides (for tests):
+#   CATALYST_STATE_SCRIPT         path to catalyst-state.sh (default: sibling)
+#   CATALYST_DISPATCH_CLAUDE_BIN  claude binary (default: `claude` on PATH)
+#   CATALYST_DISPATCH_HEALTHCHECK path to orchestrate-healthcheck; empty string
+#                                 disables the post-dispatch check entirely.
+#
+# Concurrency: assumes a single-writer orchestrator. Two concurrent invocations
+# can observe the same pre-dispatch `RUNNING` count and over-subscribe past
+# `maxParallel`; callers that poll should serialize dispatcher calls.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+CLAUDE_BIN="${CATALYST_DISPATCH_CLAUDE_BIN:-claude}"
+# When the env var is defined (even if empty), honor it. Empty → no healthcheck.
+if [ -n "${CATALYST_DISPATCH_HEALTHCHECK+x}" ]; then
+  HEALTHCHECK_BIN="$CATALYST_DISPATCH_HEALTHCHECK"
+else
+  HEALTHCHECK_BIN="${SCRIPT_DIR}/orchestrate-healthcheck"
+fi
+
+ORCH_DIR=""
+ORCH_ID=""
+WORKTREE_BASE=""
+MAX_PARALLEL=""
+SESSION_ID=""
+WORKER_COMMAND="/catalyst-dev:oneshot"
+WORKER_ARGS="--auto-merge"
+COMMS_CHANNEL=""
+DRY_RUN=0
+SKIP_HEALTHCHECK=0
+
+usage() {
+  sed -n '2,36p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir)        ORCH_DIR="$2"; shift 2 ;;
+    --orch-id)         ORCH_ID="$2"; shift 2 ;;
+    --worktree-base)   WORKTREE_BASE="$2"; shift 2 ;;
+    --max-parallel)    MAX_PARALLEL="$2"; shift 2 ;;
+    --session-id)      SESSION_ID="$2"; shift 2 ;;
+    --worker-command)  WORKER_COMMAND="$2"; shift 2 ;;
+    --worker-args)     WORKER_ARGS="$2"; shift 2 ;;
+    --comms-channel)   COMMS_CHANNEL="$2"; shift 2 ;;
+    --dry-run)         DRY_RUN=1; shift ;;
+    --skip-healthcheck) SKIP_HEALTHCHECK=1; shift ;;
+    -h|--help)         usage 0 ;;
+    *)                 echo "unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
+[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+STATE_JSON="${ORCH_DIR}/state.json"
+[ ! -f "$STATE_JSON" ] && { echo "ERROR: state.json missing at $STATE_JSON" >&2; exit 2; }
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Resolve defaults from state.json when not supplied on the CLI.
+[ -z "$ORCH_ID" ]       && ORCH_ID=$(jq -r '.orchestrator // ""' "$STATE_JSON")
+[ -z "$WORKTREE_BASE" ] && WORKTREE_BASE=$(jq -r '.worktreeBase // ""' "$STATE_JSON")
+[ -z "$MAX_PARALLEL" ]  && MAX_PARALLEL=$(jq -r '.maxParallel // 1' "$STATE_JSON")
+[ -z "$ORCH_ID" ]       && { echo "ERROR: orchestrator id not set (in state.json or --orch-id)" >&2; exit 2; }
+[ -z "$WORKTREE_BASE" ] && { echo "ERROR: worktreeBase not set (in state.json or --worktree-base)" >&2; exit 2; }
+
+[ -z "$COMMS_CHANNEL" ] && COMMS_CHANNEL="orch-${ORCH_ID}"
+
+# Session id: CLI > env > .session-id stash > empty (which becomes "")
+if [ -z "$SESSION_ID" ]; then
+  SESSION_ID="${CATALYST_SESSION_ID:-}"
+  if [ -z "$SESSION_ID" ] && [ -f "$ORCH_DIR/.session-id" ]; then
+    SESSION_ID=$(cat "$ORCH_DIR/.session-id" 2>/dev/null || echo "")
+  fi
+fi
+
+# ─── Count non-terminal workers ───────────────────────────────────────────────
+RUNNING=0
+for SIGNAL in "$ORCH_DIR/workers/"*.json; do
+  [ -f "$SIGNAL" ] || continue
+  S=$(jq -r '.status // ""' "$SIGNAL" 2>/dev/null)
+  case "$S" in
+    done|failed|stalled|"") ;;
+    *) RUNNING=$((RUNNING+1));;
+  esac
+done
+
+SLOTS=$((MAX_PARALLEL - RUNNING))
+if [ "$SLOTS" -le 0 ]; then
+  printf '{"running":%d,"slotsAfter":0,"dispatched":[]}\n' "$RUNNING"
+  exit 0
+fi
+
+# ─── Enumerate pending queue across every waveN, in numeric order ─────────────
+PENDING=$(jq -r '
+  (.queue // {})
+  | to_entries
+  | map(select(.key | test("^wave[0-9]+Pending$")))
+  | map({n: (.key | capture("^wave(?<x>[0-9]+)Pending$") | .x | tonumber),
+         tickets: .value})
+  | sort_by(.n)
+  | map(.tickets[])
+  | .[]
+' "$STATE_JSON" 2>/dev/null)
+
+if [ -z "$PENDING" ]; then
+  printf '{"running":%d,"slotsAfter":%d,"dispatched":[],"queueEmpty":true}\n' \
+    "$RUNNING" "$SLOTS"
+  exit 0
+fi
+
+# ─── Dispatch loop ────────────────────────────────────────────────────────────
+DISPATCHED=()
+while IFS= read -r T; do
+  [ -z "$T" ] && continue
+  [ "$SLOTS" -le 0 ] && break
+
+  WORKER_DIR="${WORKTREE_BASE}/${ORCH_ID}-${T}"
+  SIGNAL_FILE="${ORCH_DIR}/workers/${T}.json"
+
+  if [ -f "$SIGNAL_FILE" ]; then
+    # Already has a signal (idempotent — previously dispatched)
+    continue
+  fi
+
+  if [ ! -d "$WORKER_DIR" ]; then
+    echo "skip $T: worktree missing ($WORKER_DIR)" >&2
+    continue
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    DISPATCHED+=("$T")
+    SLOTS=$((SLOTS-1))
+    continue
+  fi
+
+  # Write signal file with the shared dispatched/phase0 template.
+  NOW=$(now_iso)
+  jq -n \
+    --arg ticket "$T" \
+    --arg orch "$ORCH_ID" \
+    --arg name "${ORCH_ID}-${T}" \
+    --arg label "oneshot ${T}" \
+    --arg ts "$NOW" \
+    --arg wt "$WORKER_DIR" \
+    '{
+      ticket: $ticket,
+      orchestrator: $orch,
+      workerName: $name,
+      label: $label,
+      status: "dispatched",
+      phase: 0,
+      startedAt: $ts,
+      updatedAt: $ts,
+      lastHeartbeat: $ts,
+      worktreePath: $wt,
+      pr: null,
+      linearState: null,
+      definitionOfDone: {
+        testsWrittenFirst: false,
+        unitTests: {exists: false, count: 0},
+        apiTests: {exists: false, count: 0},
+        functionalTests: {exists: false, count: 0},
+        typeCheck: {passed: false},
+        securityReview: {passed: false},
+        codeReview: {passed: false},
+        rewardHackingScan: {passed: false}
+      }
+    }' > "$SIGNAL_FILE"
+
+  STREAM="${ORCH_DIR}/workers/output/${T}-stream.jsonl"
+  STDERR="${ORCH_DIR}/workers/output/${T}-stderr.log"
+  mkdir -p "${ORCH_DIR}/workers/output"
+
+  (
+    cd "$WORKER_DIR" || exit 1
+    CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+    CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+    CATALYST_COMMS_CHANNEL="$COMMS_CHANNEL" \
+    CATALYST_SESSION_ID="$SESSION_ID" \
+    exec nohup "$CLAUDE_BIN" \
+      -n "${ORCH_ID}-${T}" \
+      --output-format stream-json \
+      --verbose \
+      --dangerously-skip-permissions \
+      -p "${WORKER_COMMAND} ${T} ${WORKER_ARGS}"
+  ) > "$STREAM" 2> "$STDERR" &
+  PID=$!
+
+  NOW2=$(now_iso)
+  jq --argjson pid "$PID" --arg ts "$NOW2" \
+    '.pid = $pid | .lastHeartbeat = $ts' \
+    "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+
+  # Mirror into global state (best-effort — logged via fake script in tests).
+  "$STATE_SCRIPT" worker "$ORCH_ID" "$T" '.status = "dispatched" | .phase = 0' >/dev/null 2>&1 || true
+  "$STATE_SCRIPT" update "$ORCH_ID" '.progress.inProgressTickets += 1' >/dev/null 2>&1 || true
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$T" \
+    '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-dispatched", detail: null}')" \
+    >/dev/null 2>&1 || true
+
+  # Remove ticket from whichever waveNPending list it came from.
+  jq --arg t "$T" '
+    .queue |= (
+      (. // {}) | with_entries(
+        if (.key | test("^wave[0-9]+Pending$"))
+        then .value |= (. - [$t])
+        else . end
+      )
+    )' "$STATE_JSON" > "${STATE_JSON}.tmp" && mv "${STATE_JSON}.tmp" "$STATE_JSON"
+
+  DISPATCHED+=("$T")
+  SLOTS=$((SLOTS-1))
+done <<< "$PENDING"
+
+# ─── Dry-run also drains the queue conceptually, but in memory only ───────────
+if [ "$DRY_RUN" -eq 1 ] && [ "${#DISPATCHED[@]}" -gt 0 ]; then
+  : # queue was NOT mutated; intentional for dry-run
+fi
+
+# ─── Post-dispatch healthcheck (skip in dry-run or if disabled) ───────────────
+if [ "$DRY_RUN" -eq 0 ] && [ "$SKIP_HEALTHCHECK" -eq 0 ] \
+   && [ "${#DISPATCHED[@]}" -gt 0 ] \
+   && [ -n "$HEALTHCHECK_BIN" ] && [ -x "$HEALTHCHECK_BIN" ]; then
+  "$HEALTHCHECK_BIN" --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" >/dev/null 2>&1 || true
+fi
+
+# ─── Emit final JSON summary ──────────────────────────────────────────────────
+if [ "${#DISPATCHED[@]}" -eq 0 ]; then
+  DISPATCHED_JSON='[]'
+else
+  DISPATCHED_JSON=$(printf '%s\n' "${DISPATCHED[@]}" | jq -R . | jq -sc .)
+fi
+printf '{"running":%d,"slotsAfter":%d,"dispatched":%s}\n' \
+  "$RUNNING" "$SLOTS" "$DISPATCHED_JSON"
