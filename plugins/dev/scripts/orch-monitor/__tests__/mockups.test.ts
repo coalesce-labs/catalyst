@@ -345,3 +345,139 @@ describe("mockups — comms.html", () => {
     expect(hasEmoji).toBe(false);
   });
 });
+
+describe("mockups — agent-graph.html", () => {
+  it("serves /mockups/agent-graph.html with text/html", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const body = await res.text();
+    expect(body.toLowerCase()).toContain("<!doctype html");
+    expect(body).toContain('<main class="mockup-shell">');
+  });
+
+  it("gallery index links to agent-graph.html", async () => {
+    const res = await fetch(`${baseUrl}/mockups/`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('href="./agent-graph.html"');
+  });
+
+  it("uses pre-paint bootstrap with system + theme", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    expect(body).toContain('data-system="operator-console"');
+    expect(body).toContain("data-theme");
+    expect(body).toContain("__catalystMockupPrefs");
+  });
+
+  it("loads React, React Flow, and dagre from CDN via importmap", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    expect(body).toContain('type="importmap"');
+    // CDN sources are required by the ticket — no build step.
+    expect(body).toMatch(/react(@|\/)/);
+    expect(body).toMatch(/@?xyflow|reactflow/);
+    expect(body).toMatch(/dagre/);
+  });
+
+  it("defines all four node component names per CTL-140 scope", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    for (const name of [
+      "OrchestratorNode",
+      "WorkerNode",
+      "SubagentNode",
+      "TodoNode",
+    ]) {
+      expect(body).toContain(name);
+    }
+  });
+
+  it("wraps node components in React.memo per React Flow perf guidance", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    // At least one React.memo wrapper must appear — covers all four node types.
+    expect(body).toMatch(/React\.memo\s*\(/);
+  });
+
+  it("declares initial data with at least 1 orch / 3 workers / 5 subagents / 8 todos", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    const count = (re: RegExp) => (body.match(re) ?? []).length;
+    // Initial nodes declare type: "orchestrator" | "worker" | "subagent" | "todo".
+    // TodoNode is a collapsed checklist per the ticket, so todos are counted by
+    // individual items (state field) inside the todo node arrays rather than by
+    // top-level todo node count.
+    expect(count(/type:\s*"orchestrator"/g)).toBeGreaterThanOrEqual(1);
+    expect(count(/type:\s*"worker"/g)).toBeGreaterThanOrEqual(3);
+    expect(count(/type:\s*"subagent"/g)).toBeGreaterThanOrEqual(5);
+    expect(count(/type:\s*"todo"/g)).toBeGreaterThanOrEqual(1);
+    expect(count(/state:\s*"(?:completed|in_progress|pending)"/g)).toBeGreaterThanOrEqual(8);
+  });
+
+  it("runs a real-time mock mutator every 2 seconds", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    // Mock updater cadence is 2000ms per the ticket.
+    expect(body).toMatch(/setInterval\s*\([^,]+,\s*2000/);
+  });
+
+  it("renders minimap, controls, legend, and drawer placeholders", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    // Root mount point for the React Flow canvas.
+    expect(body).toContain("graph-root");
+    // MiniMap imported from xyflow — verified by name.
+    expect(body).toContain("MiniMap");
+    // Controls imported from xyflow — verified by name.
+    expect(body).toContain("Controls");
+    // Legend container rendered as static HTML outside the React tree.
+    expect(body).toContain("graph-legend");
+    // Drawer slides in when a node is clicked; placeholder lives in the DOM.
+    expect(body).toContain("graph-drawer");
+  });
+
+  it("legend maps every worker status to a color token", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    // Six status labels mirror the kanban chips from CTL-126.
+    for (const status of [
+      "dispatched",
+      "researching",
+      "implementing",
+      "validating",
+      "merging",
+      "done",
+    ]) {
+      expect(body).toContain(status);
+    }
+  });
+
+  it("loads the shared chrome.js for keybindings", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    expect(body).toContain('src="./_shared/chrome.js"');
+  });
+
+  it("contains no emoji characters (operator voice, per ticket)", async () => {
+    const res = await fetch(`${baseUrl}/mockups/agent-graph.html`);
+    const body = await res.text();
+    // Scan for codepoints inside emoji Unicode blocks (same blocks as comms.html).
+    let hasEmoji = false;
+    for (const ch of body) {
+      const cp = ch.codePointAt(0) ?? 0;
+      if (
+        (cp >= 0x1f300 && cp <= 0x1f5ff) ||
+        (cp >= 0x1f600 && cp <= 0x1f64f) ||
+        (cp >= 0x1f680 && cp <= 0x1f6ff) ||
+        (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+        (cp >= 0x1fa70 && cp <= 0x1faff)
+      ) {
+        hasEmoji = true;
+        break;
+      }
+    }
+    expect(hasEmoji).toBe(false);
+  });
+});
