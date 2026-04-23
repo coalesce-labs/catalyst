@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Catalyst — AI-assisted development workflows for Claude Code">
+  <title>Catalyst — AI-assisted development workflows for Claude Code</title>
+  <desc>Catalyst social preview card. Horizontal lockup in Signal Amber over an Operator Console dark background. catalyst.coalescelabs.ai.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#07090B"/>
+      <stop offset="100%" stop-color="#0D1117"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- Left accent rail — Signal Amber, terminal side-rail motif -->
+  <rect x="0" y="0" width="6" height="630" fill="#FFB547"/>
+
+  <!-- Horizontal lockup: mark + wordmark, scaled from viewBox 0 0 806 100 -->
+  <!-- Positioned at x=96, y=220, width 604, height 75 (75% scale of source viewBox) -->
+  <svg x="96" y="220" width="604" height="75" viewBox="0 0 806 100" fill="none" stroke="#FFB547" stroke-linecap="square" stroke-linejoin="miter" stroke-miterlimit="2" overflow="visible">
+    <g data-part="mark" stroke-width="6">
+      <path d="M 8 44 L 32 20 L 56 44"/>
+      <path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/>
+    </g>
+    <g data-part="wordmark" transform="translate(150, 0)" stroke-width="10">
+      <path data-letter="C"  d="M 65 15 L 15 15 L 15 85 L 65 85"/>
+      <path data-letter="A1" d="M 91 95 L 123 5 L 155 95 M 104 62 L 142 62"/>
+      <path data-letter="T1" d="M 181 10 L 233 10 M 207 10 L 207 95"/>
+      <path data-letter="A2" d="M 259 95 L 291 5 L 323 95 M 272 62 L 310 62"/>
+      <path data-letter="L"  d="M 349 5 L 349 90 L 397 90"/>
+      <path data-letter="Y"  d="M 423 5 L 455 50 L 487 5 M 455 50 L 455 95"/>
+      <path data-letter="S"  d="M 573 20 Q 513 10 513 35 T 573 65 Q 513 90 513 75"/>
+      <path data-letter="T2" d="M 599 10 L 651 10 M 625 10 L 625 95"/>
+    </g>
+  </svg>
+
+  <!-- Tagline -->
+  <text x="96" y="408" font-family="Space Grotesk, Inter, system-ui, sans-serif" font-weight="500" font-size="56" fill="#E6EDF3" letter-spacing="-1">AI-assisted development workflows for Claude Code</text>
+
+  <!-- Meta line — canonical URL -->
+  <text x="96" y="538" font-family="IBM Plex Sans, system-ui, sans-serif" font-weight="400" font-size="28" fill="#9AA7B2" letter-spacing="1.2">catalyst.coalescelabs.ai</text>
+</svg>
