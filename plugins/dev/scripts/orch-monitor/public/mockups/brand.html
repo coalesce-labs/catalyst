@@ -854,12 +854,90 @@
         color: var(--color-text-md);
       }
 
+      /* ------- Lockup specimens (CTL-148) ------- */
+
+      .lockup-grid {
+        display: grid;
+        gap: var(--spacing-4);
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      }
+
+      .lockup-block {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        padding: var(--spacing-5);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-lg);
+      }
+
+      .lockup-block__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .lockup-block__stage {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: var(--spacing-6);
+        background: var(--color-surface-2);
+        border-radius: var(--radius-md);
+        color: var(--color-accent);
+        min-height: 120px;
+      }
+
+      .lockup-block__stage svg {
+        display: block;
+        max-width: 100%;
+        height: auto;
+      }
+
+      .lockup-block__meta {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        color: var(--color-text-lo);
+      }
+
+      /* Size-matrix row inside the lockup specimens — shows same lockup at three sizes. */
+      .lockup-sizes {
+        display: flex;
+        align-items: flex-end;
+        gap: var(--spacing-4);
+        flex-wrap: wrap;
+      }
+
+      .lockup-sizes__item {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--spacing-1);
+        color: var(--color-accent);
+      }
+
+      .lockup-sizes__item svg {
+        display: block;
+      }
+
+      .lockup-sizes__caption {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        color: var(--color-text-lo);
+      }
+
       /* ------- Section overrides for System B surfaces ------- */
 
       [data-system="precision-instrument"] .specimen-block,
       [data-system="precision-instrument"] .motion-card,
       [data-system="precision-instrument"] .kanban-card,
-      [data-system="precision-instrument"] .swatch {
+      [data-system="precision-instrument"] .swatch,
+      [data-system="precision-instrument"] .lockup-block {
         border-color: var(--color-border-default);
       }
     </style>
@@ -1197,6 +1275,170 @@
                 <span>$0.18</span>
               </footer>
             </article>
+          </div>
+        </section>
+
+        <!-- ================ LOCKUPS (CTL-148) ================ -->
+        <section class="brand-section" data-section="lockups">
+          <header class="brand-section__heading">
+            <h2>Lockup specimens</h2>
+            <span class="eyebrow">Mark · wordmark · lockups</span>
+          </header>
+          <p class="brand-section__caption">
+            Mark (CTL-147), drawn wordmark, and horizontal + stacked lockups (CTL-148). Every
+            SVG uses <code>stroke="currentColor"</code>; the accent inherits from
+            <code>--color-accent</code> on each stage.
+          </p>
+
+          <div class="lockup-grid">
+            <div class="lockup-block">
+              <span class="lockup-block__label">Mark · detailed</span>
+              <div class="lockup-block__stage">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="120" height="120" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="square" stroke-linejoin="miter" role="img" aria-label="Catalyst">
+                  <title>Catalyst</title>
+                  <path d="M 8 44 L 32 20 L 56 44"/>
+                  <path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/>
+                </svg>
+              </div>
+              <span class="lockup-block__meta">mark.svg · viewBox 0 0 64 64 · 32 px and up</span>
+            </div>
+
+            <div class="lockup-block">
+              <span class="lockup-block__label">Mark · simplified</span>
+              <div class="lockup-block__stage">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="64" height="64" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" role="img" aria-label="Catalyst">
+                  <title>Catalyst</title>
+                  <path d="M 2 11 L 8 5 L 14 11"/>
+                </svg>
+              </div>
+              <span class="lockup-block__meta">mark-simplified.svg · 16 px and up</span>
+            </div>
+
+            <div class="lockup-block">
+              <span class="lockup-block__label">Wordmark</span>
+              <div class="lockup-block__stage">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 656 100" width="328" height="50" fill="none" stroke="currentColor" stroke-width="10" stroke-linecap="square" stroke-linejoin="miter" stroke-miterlimit="2" role="img" aria-label="Catalyst">
+                  <title>Catalyst</title>
+                  <path data-letter="C"  d="M 65 15 L 15 15 L 15 85 L 65 85"/>
+                  <path data-letter="A1" d="M 91 95 L 123 5 L 155 95 M 104 62 L 142 62"/>
+                  <path data-letter="T1" d="M 181 10 L 233 10 M 207 10 L 207 95"/>
+                  <path data-letter="A2" d="M 259 95 L 291 5 L 323 95 M 272 62 L 310 62"/>
+                  <path data-letter="L"  d="M 349 5 L 349 90 L 397 90"/>
+                  <path data-letter="Y"  d="M 423 5 L 455 50 L 487 5 M 455 50 L 455 95"/>
+                  <path data-letter="S"  d="M 573 20 Q 513 10 513 35 T 573 65 Q 513 90 513 75"/>
+                  <path data-letter="T2" d="M 599 10 L 651 10 M 625 10 L 625 95"/>
+                </svg>
+              </div>
+              <span class="lockup-block__meta">wordmark.svg · viewBox 0 0 656 100 · drawn (not a font)</span>
+            </div>
+
+            <div class="lockup-block">
+              <span class="lockup-block__label">Lockup · horizontal</span>
+              <div class="lockup-block__stage">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 806 100" width="403" height="50" fill="none" stroke="currentColor" stroke-linecap="square" stroke-linejoin="miter" stroke-miterlimit="2" role="img" aria-label="Catalyst">
+                  <title>Catalyst</title>
+                  <svg data-part="mark" x="0" y="0" width="100" height="100" viewBox="0 0 64 64" overflow="visible" stroke-width="6">
+                    <path d="M 8 44 L 32 20 L 56 44"/>
+                    <path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/>
+                  </svg>
+                  <g data-part="wordmark" transform="translate(150, 0)" stroke-width="10">
+                    <path data-letter="C"  d="M 65 15 L 15 15 L 15 85 L 65 85"/>
+                    <path data-letter="A1" d="M 91 95 L 123 5 L 155 95 M 104 62 L 142 62"/>
+                    <path data-letter="T1" d="M 181 10 L 233 10 M 207 10 L 207 95"/>
+                    <path data-letter="A2" d="M 259 95 L 291 5 L 323 95 M 272 62 L 310 62"/>
+                    <path data-letter="L"  d="M 349 5 L 349 90 L 397 90"/>
+                    <path data-letter="Y"  d="M 423 5 L 455 50 L 487 5 M 455 50 L 455 95"/>
+                    <path data-letter="S"  d="M 573 20 Q 513 10 513 35 T 573 65 Q 513 90 513 75"/>
+                    <path data-letter="T2" d="M 599 10 L 651 10 M 625 10 L 625 95"/>
+                  </g>
+                </svg>
+              </div>
+              <span class="lockup-block__meta">lockup-horizontal.svg · mark + wordmark · gap = 0.5 × mark</span>
+            </div>
+
+            <div class="lockup-block">
+              <span class="lockup-block__label">Lockup · stacked</span>
+              <div class="lockup-block__stage">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 656 240" width="220" height="80" fill="none" stroke="currentColor" stroke-linecap="square" stroke-linejoin="miter" stroke-miterlimit="2" role="img" aria-label="Catalyst">
+                  <title>Catalyst</title>
+                  <svg data-part="mark" x="278" y="0" width="100" height="100" viewBox="0 0 64 64" overflow="visible" stroke-width="6">
+                    <path d="M 8 44 L 32 20 L 56 44"/>
+                    <path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/>
+                  </svg>
+                  <g data-part="wordmark" transform="translate(0, 140)" stroke-width="10">
+                    <path data-letter="C"  d="M 65 15 L 15 15 L 15 85 L 65 85"/>
+                    <path data-letter="A1" d="M 91 95 L 123 5 L 155 95 M 104 62 L 142 62"/>
+                    <path data-letter="T1" d="M 181 10 L 233 10 M 207 10 L 207 95"/>
+                    <path data-letter="A2" d="M 259 95 L 291 5 L 323 95 M 272 62 L 310 62"/>
+                    <path data-letter="L"  d="M 349 5 L 349 90 L 397 90"/>
+                    <path data-letter="Y"  d="M 423 5 L 455 50 L 487 5 M 455 50 L 455 95"/>
+                    <path data-letter="S"  d="M 573 20 Q 513 10 513 35 T 573 65 Q 513 90 513 75"/>
+                    <path data-letter="T2" d="M 599 10 L 651 10 M 625 10 L 625 95"/>
+                  </g>
+                </svg>
+              </div>
+              <span class="lockup-block__meta">lockup-stacked.svg · mark above wordmark · gap = 0.4 × mark</span>
+            </div>
+
+            <div class="lockup-block">
+              <span class="lockup-block__label">Horizontal lockup · size matrix</span>
+              <div class="lockup-block__stage">
+                <div class="lockup-sizes">
+                  <div class="lockup-sizes__item">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 806 100" width="160" height="20" fill="none" stroke="currentColor" stroke-linecap="square" stroke-linejoin="miter" stroke-miterlimit="2" role="img" aria-label="Catalyst">
+                      <title>Catalyst</title>
+                      <svg x="0" y="0" width="100" height="100" viewBox="0 0 64 64" overflow="visible" stroke-width="6"><path d="M 8 44 L 32 20 L 56 44"/><path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/></svg>
+                      <g transform="translate(150, 0)" stroke-width="10">
+                        <path d="M 65 15 L 15 15 L 15 85 L 65 85"/>
+                        <path d="M 91 95 L 123 5 L 155 95 M 104 62 L 142 62"/>
+                        <path d="M 181 10 L 233 10 M 207 10 L 207 95"/>
+                        <path d="M 259 95 L 291 5 L 323 95 M 272 62 L 310 62"/>
+                        <path d="M 349 5 L 349 90 L 397 90"/>
+                        <path d="M 423 5 L 455 50 L 487 5 M 455 50 L 455 95"/>
+                        <path d="M 573 20 Q 513 10 513 35 T 573 65 Q 513 90 513 75"/>
+                        <path d="M 599 10 L 651 10 M 625 10 L 625 95"/>
+                      </g>
+                    </svg>
+                    <span class="lockup-sizes__caption">160 px (minimum)</span>
+                  </div>
+                  <div class="lockup-sizes__item">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 806 100" width="240" height="30" fill="none" stroke="currentColor" stroke-linecap="square" stroke-linejoin="miter" stroke-miterlimit="2" role="img" aria-label="Catalyst">
+                      <title>Catalyst</title>
+                      <svg x="0" y="0" width="100" height="100" viewBox="0 0 64 64" overflow="visible" stroke-width="6"><path d="M 8 44 L 32 20 L 56 44"/><path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/></svg>
+                      <g transform="translate(150, 0)" stroke-width="10">
+                        <path d="M 65 15 L 15 15 L 15 85 L 65 85"/>
+                        <path d="M 91 95 L 123 5 L 155 95 M 104 62 L 142 62"/>
+                        <path d="M 181 10 L 233 10 M 207 10 L 207 95"/>
+                        <path d="M 259 95 L 291 5 L 323 95 M 272 62 L 310 62"/>
+                        <path d="M 349 5 L 349 90 L 397 90"/>
+                        <path d="M 423 5 L 455 50 L 487 5 M 455 50 L 455 95"/>
+                        <path d="M 573 20 Q 513 10 513 35 T 573 65 Q 513 90 513 75"/>
+                        <path d="M 599 10 L 651 10 M 625 10 L 625 95"/>
+                      </g>
+                    </svg>
+                    <span class="lockup-sizes__caption">240 px</span>
+                  </div>
+                  <div class="lockup-sizes__item">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 806 100" width="400" height="50" fill="none" stroke="currentColor" stroke-linecap="square" stroke-linejoin="miter" stroke-miterlimit="2" role="img" aria-label="Catalyst">
+                      <title>Catalyst</title>
+                      <svg x="0" y="0" width="100" height="100" viewBox="0 0 64 64" overflow="visible" stroke-width="6"><path d="M 8 44 L 32 20 L 56 44"/><path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/></svg>
+                      <g transform="translate(150, 0)" stroke-width="10">
+                        <path d="M 65 15 L 15 15 L 15 85 L 65 85"/>
+                        <path d="M 91 95 L 123 5 L 155 95 M 104 62 L 142 62"/>
+                        <path d="M 181 10 L 233 10 M 207 10 L 207 95"/>
+                        <path d="M 259 95 L 291 5 L 323 95 M 272 62 L 310 62"/>
+                        <path d="M 349 5 L 349 90 L 397 90"/>
+                        <path d="M 423 5 L 455 50 L 487 5 M 455 50 L 455 95"/>
+                        <path d="M 573 20 Q 513 10 513 35 T 573 65 Q 513 90 513 75"/>
+                        <path d="M 599 10 L 651 10 M 625 10 L 625 95"/>
+                      </g>
+                    </svg>
+                    <span class="lockup-sizes__caption">400 px</span>
+                  </div>
+                </div>
+              </div>
+              <span class="lockup-block__meta">clear-space = 0.5 × mark-height on every side · same SVG, three render sizes</span>
+            </div>
           </div>
         </section>
 
