@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # Register this Catalyst checkout as a local-path plugin marketplace so Claude Code loads
 # plugins directly from your working tree. Useful for dogfooding changes on `main` between
-# daily releases — run `git pull` in this checkout and restart Claude Code sessions to pick up
-# new code.
+# daily releases.
 #
-# See docs/releases.md "Intraday consumption" for context.
+# Cache model (by design — see research 2026-04-22-CTL-122-plugin-cache-live-read):
+#   Claude Code copies plugin files into ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/
+#   at install time, keyed by plugin.json.version. A `git pull` in this checkout does NOT
+#   propagate to the cache until the version bumps or `claude plugin update` is run. There is
+#   no native live-read mode for `source: directory` marketplaces in Claude Code 2.1.118.
+#
+#   Two supported refresh flows (printed on success below and detailed in docs/releases.md):
+#     1. After a daily release bumps versions: `claude plugin update <plugin>@catalyst` + restart.
+#     2. For live-read during feature dev: `claude --plugin-dir <repo>/plugins/<plugin>` per-session.
 #
 # Usage:
 #   bash scripts/install-dev-marketplace.sh [--scope user|project|local] [--allow-worktree] [--help]
@@ -130,13 +137,22 @@ Dev marketplace registered.
 
 Next steps:
   1. Restart any running Claude Code sessions to pick up the local marketplace.
-  2. To update, run \`git pull\` in ${REPO_ROOT} and restart Claude Code sessions.
-  3. To revert to the published marketplace, remove this entry via
-     \`claude plugin marketplace remove\` and re-add the public one.
+  2. To revert to the published marketplace, remove this entry via
+     \`claude plugin marketplace remove catalyst\` and re-add the public one.
 
-Note: Claude Code caches plugins by the version field in each plugin.json. If a
-git pull brings code changes but no version bump (normal between daily cuts), a
-session restart is usually enough to pick them up; if not, toggle the plugin
-off/on via \`/plugin\` or run \`claude --plugin-dir ${REPO_ROOT}/plugins/dev\`
-(and similar for other plugins) for a fully uncached load.
+Refreshing after \`git pull\`:
+
+  Standard path (picks up daily-release version bumps):
+    git -C ${REPO_ROOT} pull
+    claude plugin update catalyst-dev@catalyst     # and -pm, -meta, -analytics, -debugging
+    # Restart Claude Code sessions to apply.
+
+  Live-read escape hatch (bypass cache, read files directly from source):
+    claude --plugin-dir ${REPO_ROOT}/plugins/dev   # one --plugin-dir per plugin to live-load
+
+Why these two flows (no symlink mode): Claude Code copies plugins into a
+version-keyed cache at install time. \`claude plugin update\` refreshes the cache
+when plugin.json.version has bumped (every daily release). \`--plugin-dir\` is
+the official dev mode for between-bump live reads. See docs/releases.md
+"Intraday consumption" and research 2026-04-22-CTL-122 for the full model.
 EOF
