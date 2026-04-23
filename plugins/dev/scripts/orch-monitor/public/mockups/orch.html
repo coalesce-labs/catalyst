@@ -1,0 +1,1518 @@
+<!doctype html>
+<html lang="en" data-system="operator-console" data-attention="urgent">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalyst — Orchestrator</title>
+    <link rel="stylesheet" href="./_shared/tokens.css" />
+    <link rel="stylesheet" href="./_shared/fonts.css" />
+    <link rel="stylesheet" href="./_shared/base.css" />
+    <link rel="stylesheet" href="./_shared/chrome.css" />
+    <script>
+      // Pre-paint bootstrap — sets html[data-system] before first paint to
+      // prevent flicker. Mirrors chrome.js's resolution priority (URL query
+      // > localStorage > default). chrome.js reads __catalystMockupPrefs to
+      // avoid re-parsing.
+      (function () {
+        const LS_KEY = "catalyst.mockup.prefs";
+        const DEFAULTS = { system: "operator-console" };
+        const SYSTEMS = ["operator-console", "precision-instrument"];
+        const url = new URLSearchParams(window.location.search);
+        let stored = {};
+        try {
+          stored = JSON.parse(window.localStorage.getItem(LS_KEY) || "{}");
+        } catch (_e) {
+          stored = {};
+        }
+        const candidate = url.get("system") || stored.system || DEFAULTS.system;
+        const system = SYSTEMS.includes(candidate) ? candidate : DEFAULTS.system;
+        document.documentElement.setAttribute("data-system", system);
+        window.__catalystMockupPrefs = { system };
+
+        // Attention severity axis — query-only (no localStorage) so the page
+        // can be embedded by other views without bleeding state back. Default
+        // = "urgent" so the demo lands in the most interesting state.
+        const ATTENTIONS = ["urgent", "warn", "ok"];
+        const attCandidate = url.get("attention") || "urgent";
+        const attention = ATTENTIONS.includes(attCandidate) ? attCandidate : "urgent";
+        document.documentElement.setAttribute("data-attention", attention);
+      })();
+    </script>
+    <style>
+      /* ------- Page utilities ------- */
+
+      .orch-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .orch-section__heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--spacing-4);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .orch-section__heading h2 {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+        color: var(--color-text-hi);
+      }
+
+      /* ------- Header strip ------- */
+
+      .orch-head {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .orch-head__row {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-4);
+        flex-wrap: wrap;
+      }
+
+      .orch-head__name {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-display);
+        line-height: var(--line-height-display);
+        letter-spacing: var(--letter-spacing-display);
+        color: var(--color-text-hi);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .orch-head__project {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+      }
+
+      .orch-head__meta {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-4);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .orch-head__meta strong {
+        color: var(--color-text-md);
+        font-weight: var(--font-weight-regular);
+      }
+
+      /* ------- Chips (page-local copy, mirrors brand.html) ------- */
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      [data-system="operator-console"] .chip {
+        padding: 2px var(--spacing-2);
+        border-radius: var(--radius-full);
+        border: 1px solid transparent;
+      }
+      [data-system="operator-console"] .chip--running,
+      [data-system="operator-console"] .chip--merging {
+        color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--pr-open,
+      [data-system="operator-console"] .chip--pending {
+        color: var(--color-info);
+        background: color-mix(in srgb, var(--color-info) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--merged,
+      [data-system="operator-console"] .chip--done,
+      [data-system="operator-console"] .chip--passing {
+        color: var(--color-success);
+        background: color-mix(in srgb, var(--color-success) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--failed,
+      [data-system="operator-console"] .chip--failing,
+      [data-system="operator-console"] .chip--ci-fail {
+        color: var(--color-danger);
+        background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--needs-me {
+        color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+        border-color: var(--color-accent);
+      }
+      [data-system="operator-console"] .chip--queued,
+      [data-system="operator-console"] .chip--ticket {
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border-color: var(--color-border-subtle);
+      }
+
+      [data-system="precision-instrument"] .chip {
+        padding: 0;
+        background: transparent;
+        color: var(--color-text-md);
+        border: none;
+      }
+      [data-system="precision-instrument"] .chip::before {
+        content: "●";
+        font-size: 0.85em;
+        line-height: 1;
+      }
+      [data-system="precision-instrument"] .chip--running::before,
+      [data-system="precision-instrument"] .chip--merging::before,
+      [data-system="precision-instrument"] .chip--needs-me::before {
+        color: var(--color-accent);
+      }
+      [data-system="precision-instrument"] .chip--pr-open::before,
+      [data-system="precision-instrument"] .chip--pending::before {
+        color: var(--color-info);
+      }
+      [data-system="precision-instrument"] .chip--merged::before,
+      [data-system="precision-instrument"] .chip--done::before,
+      [data-system="precision-instrument"] .chip--passing::before {
+        color: var(--color-success);
+      }
+      [data-system="precision-instrument"] .chip--failed::before,
+      [data-system="precision-instrument"] .chip--failing::before,
+      [data-system="precision-instrument"] .chip--ci-fail::before {
+        color: var(--color-danger);
+      }
+      [data-system="precision-instrument"] .chip--queued::before,
+      [data-system="precision-instrument"] .chip--ticket::before {
+        content: none;
+      }
+
+      /* ------- Zone 1 — Attention bar ------- */
+
+      .attention-bar {
+        position: relative;
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-default);
+        border-left-width: 2px;
+        border-radius: var(--radius-lg);
+        padding: var(--spacing-4) var(--spacing-5);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      [data-attention="urgent"] .attention-bar {
+        border-left-color: var(--color-danger);
+      }
+      [data-attention="warn"] .attention-bar {
+        border-left-color: var(--color-warning);
+      }
+      [data-attention="ok"] .attention-bar {
+        border-left-color: var(--color-success);
+      }
+
+      .attention-bar__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+      }
+
+      .attention-bar__head-left {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-3);
+      }
+
+      .attention-bar__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .attention-bar__count {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-text-hi);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .attention-bar__sev {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        padding: 2px var(--spacing-2);
+        border-radius: var(--radius-full);
+        border: 1px solid transparent;
+      }
+
+      [data-system="operator-console"][data-attention="urgent"] .attention-bar__sev {
+        color: var(--color-danger);
+        background: color-mix(in srgb, var(--color-danger) 14%, transparent);
+        border-color: color-mix(in srgb, var(--color-danger) 50%, transparent);
+      }
+      [data-system="operator-console"][data-attention="warn"] .attention-bar__sev {
+        color: var(--color-warning);
+        background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+        border-color: color-mix(in srgb, var(--color-warning) 50%, transparent);
+      }
+      [data-system="operator-console"][data-attention="ok"] .attention-bar__sev {
+        color: var(--color-success);
+        background: color-mix(in srgb, var(--color-success) 14%, transparent);
+        border-color: color-mix(in srgb, var(--color-success) 50%, transparent);
+      }
+      [data-system="precision-instrument"] .attention-bar__sev {
+        background: transparent;
+        border: none;
+        padding: 0;
+      }
+      [data-system="precision-instrument"][data-attention="urgent"] .attention-bar__sev {
+        color: var(--color-danger);
+      }
+      [data-system="precision-instrument"][data-attention="warn"] .attention-bar__sev {
+        color: var(--color-warning);
+      }
+      [data-system="precision-instrument"][data-attention="ok"] .attention-bar__sev {
+        color: var(--color-success);
+      }
+
+      .attention-bar__action {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+        background: transparent;
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-1) var(--spacing-3);
+        cursor: pointer;
+        transition: border-color var(--motion-duration-state) var(--motion-easing-standard),
+          color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .attention-bar__action:hover {
+        border-color: var(--color-border-strong);
+        color: var(--color-text-hi);
+      }
+
+      .attention-bar__list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .attention-bar__row {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        gap: var(--spacing-3);
+        align-items: center;
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+      }
+
+      .attention-bar__row-reason {
+        color: var(--color-text-md);
+      }
+
+      .attention-bar__row-reason strong {
+        color: var(--color-text-hi);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .attention-bar__row-link {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-info);
+      }
+
+      .attention-bar__empty {
+        color: var(--color-text-lo);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+      }
+
+      [data-attention="ok"] .attention-bar__list {
+        display: none;
+      }
+      [data-attention="ok"] .attention-bar__empty {
+        display: block;
+      }
+      .attention-bar__empty {
+        display: none;
+      }
+
+      /* ------- Zone 2 — KPIs + cost ------- */
+
+      .zone2 {
+        display: grid;
+        grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+        gap: var(--spacing-4);
+      }
+
+      @media (max-width: 960px) {
+        .zone2 {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .kpi-strip {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: var(--spacing-2);
+      }
+
+      @media (max-width: 720px) {
+        .kpi-strip {
+          grid-template-columns: repeat(3, 1fr);
+        }
+      }
+
+      .kpi-tile {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-3) var(--spacing-3);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+      }
+
+      .kpi-tile__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .kpi-tile__value {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        color: var(--color-text-hi);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .kpi-tile--success .kpi-tile__value {
+        color: var(--color-success);
+      }
+      .kpi-tile--accent .kpi-tile__value {
+        color: var(--color-accent);
+      }
+      .kpi-tile--danger .kpi-tile__value {
+        color: var(--color-danger);
+      }
+
+      .cost-card {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-lg);
+        padding: var(--spacing-4) var(--spacing-5);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .cost-card__head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .cost-card__head-label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .cost-card__total {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        color: var(--color-text-hi);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .cost-card__grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: var(--spacing-2) var(--spacing-4);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+      }
+
+      .cost-card__key {
+        color: var(--color-text-lo);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      .cost-card__val {
+        color: var(--color-text-hi);
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .cost-card__provider {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        color: var(--color-text-md);
+        text-transform: uppercase;
+        letter-spacing: var(--letter-spacing-label);
+        padding-top: var(--spacing-2);
+        border-top: 1px solid var(--color-border-subtle);
+      }
+
+      /* ------- Zone 3 — Waves ------- */
+
+      .wave-stack {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .wave-card {
+        position: relative;
+        padding: var(--spacing-4) var(--spacing-5);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-lg);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .wave-card--current {
+        border-color: var(--color-border-strong);
+        padding-left: calc(var(--spacing-5) + 2px);
+      }
+
+      .wave-card--current::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: var(--color-accent);
+        border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+        opacity: 0.9;
+      }
+
+      [data-system="operator-console"] .wave-card--current::before {
+        animation: orch-heartbeat var(--motion-duration-heartbeat) ease-in-out infinite;
+      }
+
+      @keyframes orch-heartbeat {
+        0%, 100% { opacity: 0.7; }
+        50% { opacity: 1; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        [data-system="operator-console"] .wave-card--current::before {
+          animation: none;
+        }
+      }
+
+      .wave-card__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+      }
+
+      .wave-card__title {
+        display: flex;
+        align-items: baseline;
+        gap: var(--spacing-3);
+      }
+
+      .wave-card__name {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-heading);
+        line-height: var(--line-height-heading);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-hi);
+      }
+
+      .wave-card__phase {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .wave-card__elapsed {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .wave-card__chip-rail {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-2);
+        align-items: center;
+      }
+
+      .wave-card__chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+      }
+
+      .wave-card__chip-ticket {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        color: var(--color-text-lo);
+        letter-spacing: var(--letter-spacing-label);
+      }
+
+      .wave-card__bar {
+        height: 2px;
+        width: 100%;
+        background: var(--color-surface-3);
+        border-radius: var(--radius-full);
+        overflow: hidden;
+      }
+
+      [data-system="precision-instrument"] .wave-card__bar {
+        height: 1px;
+        background: var(--color-border-subtle);
+        border-radius: 0;
+      }
+
+      .wave-card__bar > span {
+        display: block;
+        height: 100%;
+        background: var(--color-accent);
+      }
+
+      .wave-card__bar--done > span {
+        background: var(--color-success);
+      }
+
+      .wave-card__footer {
+        display: flex;
+        gap: var(--spacing-4);
+        padding-top: var(--spacing-2);
+        border-top: 1px solid var(--color-border-subtle);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+      }
+
+      .wave-card__footer strong {
+        color: var(--color-text-md);
+        font-weight: var(--font-weight-regular);
+      }
+
+      /* ------- Gantt (plain CSS bars) ------- */
+
+      .gantt {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-4) var(--spacing-5);
+        overflow-x: auto;
+      }
+
+      .gantt__row {
+        display: grid;
+        grid-template-columns: 80px 1fr 80px;
+        gap: var(--spacing-3);
+        align-items: center;
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .gantt__label {
+        color: var(--color-text-md);
+      }
+
+      .gantt__track {
+        position: relative;
+        height: 14px;
+        background: var(--color-surface-2);
+        border-radius: var(--radius-sm);
+        min-width: 200px;
+      }
+
+      .gantt__bar {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        background: var(--color-accent);
+        border-radius: var(--radius-sm);
+      }
+
+      .gantt__bar--done {
+        background: var(--color-success);
+      }
+
+      .gantt__bar--queued {
+        background: transparent;
+        border: 1px dashed var(--color-border-strong);
+      }
+
+      .gantt__duration {
+        color: var(--color-text-lo);
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .gantt__axis {
+        display: grid;
+        grid-template-columns: 80px 1fr 80px;
+        gap: var(--spacing-3);
+        padding-top: var(--spacing-2);
+        border-top: 1px solid var(--color-border-subtle);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        color: var(--color-text-disabled);
+        letter-spacing: var(--letter-spacing-label);
+      }
+
+      .gantt__axis-ticks {
+        display: flex;
+        justify-content: space-between;
+      }
+
+      /* ------- Worker table ------- */
+
+      .worker-table {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+      }
+
+      .worker-table__head,
+      .worker-table__row {
+        display: grid;
+        grid-template-columns:
+          minmax(90px, 1.1fr)
+          minmax(90px, 1fr)
+          minmax(100px, 1.1fr)
+          minmax(80px, 0.8fr)
+          minmax(60px, 0.7fr)
+          minmax(80px, 0.8fr)
+          minmax(100px, 1.1fr);
+        gap: var(--spacing-3);
+        padding: var(--spacing-2) var(--spacing-4);
+        align-items: center;
+      }
+
+      .worker-table__head {
+        background: var(--color-surface-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .worker-table__sort {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+        cursor: pointer;
+      }
+
+      .worker-table__sort--active {
+        color: var(--color-text-hi);
+      }
+
+      .worker-table__sort-caret {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-right: 1px solid currentColor;
+        border-bottom: 1px solid currentColor;
+        transform: rotate(45deg);
+        opacity: 0.6;
+      }
+
+      .worker-table__row {
+        border-bottom: 1px solid var(--color-border-subtle);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-md);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .worker-table__row:last-child {
+        border-bottom: none;
+      }
+
+      .worker-table__row:hover {
+        background: var(--color-surface-2);
+      }
+
+      .worker-table__cell--ticket {
+        color: var(--color-text-hi);
+      }
+
+      .worker-table__cell--pr a {
+        color: var(--color-info);
+      }
+
+      .worker-table__cell--null {
+        color: var(--color-text-disabled);
+        font-style: italic;
+      }
+
+      /* ------- Layout (main + sidebar) ------- */
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 280px;
+        gap: var(--spacing-5);
+        align-items: start;
+      }
+
+      .layout--sidebar-collapsed {
+        grid-template-columns: minmax(0, 1fr) 40px;
+      }
+
+      @media (max-width: 1100px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .layout__main {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-6);
+        min-width: 0;
+      }
+
+      /* ------- Events sidebar ------- */
+
+      .events-sidebar {
+        position: sticky;
+        top: var(--spacing-4);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-lg);
+        padding: var(--spacing-4);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        max-height: calc(100vh - var(--spacing-12));
+      }
+
+      .events-sidebar--collapsed {
+        padding: var(--spacing-3) var(--spacing-2);
+        align-items: center;
+      }
+
+      .events-sidebar__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-2);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+        width: 100%;
+      }
+
+      .events-sidebar--collapsed .events-sidebar__head {
+        border-bottom: none;
+        padding-bottom: 0;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .events-sidebar__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .events-sidebar--collapsed .events-sidebar__label {
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+      }
+
+      .events-sidebar__toggle {
+        background: transparent;
+        border: 1px solid var(--color-border-default);
+        color: var(--color-text-md);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: 1;
+        padding: var(--spacing-1) var(--spacing-2);
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        transition: border-color var(--motion-duration-state) var(--motion-easing-standard),
+          color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .events-sidebar__toggle:hover {
+        border-color: var(--color-border-strong);
+        color: var(--color-text-hi);
+      }
+
+      .events-sidebar__list {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        overflow-y: auto;
+        padding-right: var(--spacing-1);
+      }
+
+      .events-sidebar--collapsed .events-sidebar__list {
+        display: none;
+      }
+
+      .event-row {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: var(--spacing-2);
+        padding: var(--spacing-2);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-sm);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+      }
+
+      .event-row__time {
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .event-row__body {
+        color: var(--color-text-md);
+      }
+
+      .event-row__body strong {
+        color: var(--color-text-hi);
+        font-weight: var(--font-weight-regular);
+      }
+
+      .event-row__kind {
+        text-transform: uppercase;
+        letter-spacing: var(--letter-spacing-label);
+        color: var(--color-text-lo);
+      }
+
+      .event-row--success .event-row__kind {
+        color: var(--color-success);
+      }
+      .event-row--warn .event-row__kind {
+        color: var(--color-warning);
+      }
+      .event-row--danger .event-row__kind {
+        color: var(--color-danger);
+      }
+      .event-row--info .event-row__kind {
+        color: var(--color-info);
+      }
+
+      /* System B trim */
+      [data-system="precision-instrument"] .attention-bar,
+      [data-system="precision-instrument"] .kpi-tile,
+      [data-system="precision-instrument"] .cost-card,
+      [data-system="precision-instrument"] .wave-card,
+      [data-system="precision-instrument"] .gantt,
+      [data-system="precision-instrument"] .worker-table,
+      [data-system="precision-instrument"] .events-sidebar,
+      [data-system="precision-instrument"] .event-row {
+        border-color: var(--color-border-default);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mockup-shell">
+      <div class="mockup-container">
+        <header class="mockup-topbar">
+          <span class="mockup-topbar__mark">catalyst</span>
+          <span class="eyebrow">Orchestrator</span>
+        </header>
+
+        <!-- ================ HEADER STRIP ================ -->
+        <section class="orch-head">
+          <div class="orch-head__row">
+            <h1 class="orch-head__name">ctl-ux-apr20</h1>
+            <span class="chip chip--running">Running</span>
+            <span class="orch-head__project">Catalyst Monitor UX Refresh</span>
+          </div>
+          <div class="orch-head__meta">
+            <span><strong>wave</strong> 2 of 3</span>
+            <span><strong>tickets</strong> 17</span>
+            <span><strong>auto-merge</strong> armed</span>
+            <span><strong>started</strong> 17:15</span>
+          </div>
+        </section>
+
+        <!-- ================ LAYOUT (main + sidebar) ================ -->
+        <div class="layout" id="layout">
+          <div class="layout__main">
+            <!-- ================ ZONE 1 — ATTENTION BAR ================ -->
+            <section class="attention-bar" aria-label="Attention items">
+              <header class="attention-bar__head">
+                <div class="attention-bar__head-left">
+                  <span class="attention-bar__label">Attention</span>
+                  <span class="attention-bar__sev" id="attention-sev">Urgent</span>
+                  <span class="attention-bar__count" id="attention-count">3 items</span>
+                </div>
+                <button type="button" class="attention-bar__action">Resolve all</button>
+              </header>
+              <div class="attention-bar__list">
+                <div class="attention-bar__row">
+                  <span class="chip chip--ticket">CTL-145</span>
+                  <span class="attention-bar__row-reason">
+                    <strong>CI failure</strong> — keybindings test expected escape, got tab. Pushed
+                    fix; awaiting re-run.
+                  </span>
+                  <a class="attention-bar__row-link" href="#">Open ↗</a>
+                </div>
+                <div class="attention-bar__row">
+                  <span class="chip chip--ticket">CTL-141</span>
+                  <span class="attention-bar__row-reason">
+                    <strong>Rate-limit stall</strong> — auto-revived after 4m 12s. Worker resumed at
+                    phase implement.
+                  </span>
+                  <a class="attention-bar__row-link" href="#">Open ↗</a>
+                </div>
+                <div class="attention-bar__row">
+                  <span class="chip chip--ticket">CTL-139</span>
+                  <span class="attention-bar__row-reason">
+                    <strong>Review thread</strong> — Codex flagged inline JS XSS shape on query
+                    param. Reply needed.
+                  </span>
+                  <a class="attention-bar__row-link" href="#">Open ↗</a>
+                </div>
+              </div>
+              <p class="attention-bar__empty">All clear. No items waiting on operator action.</p>
+            </section>
+
+            <!-- ================ ZONE 2 — KPIs + COST ================ -->
+            <section class="orch-section" aria-label="Lifecycle metrics">
+              <header class="orch-section__heading">
+                <h2>Lifecycle</h2>
+                <span class="eyebrow">Aggregate</span>
+              </header>
+              <div class="zone2">
+                <div class="kpi-strip">
+                  <div class="kpi-tile kpi-tile--success">
+                    <span class="kpi-tile__label">Done</span>
+                    <span class="kpi-tile__value">5</span>
+                  </div>
+                  <div class="kpi-tile kpi-tile--accent">
+                    <span class="kpi-tile__label">In progress</span>
+                    <span class="kpi-tile__value">4</span>
+                  </div>
+                  <div class="kpi-tile kpi-tile--danger">
+                    <span class="kpi-tile__label">Failed</span>
+                    <span class="kpi-tile__value">1</span>
+                  </div>
+                  <div class="kpi-tile">
+                    <span class="kpi-tile__label">Wave</span>
+                    <span class="kpi-tile__value">2 / 3</span>
+                  </div>
+                  <div class="kpi-tile">
+                    <span class="kpi-tile__label">PRs merged</span>
+                    <span class="kpi-tile__value">4</span>
+                  </div>
+                  <div class="kpi-tile">
+                    <span class="kpi-tile__label">ETA</span>
+                    <span class="kpi-tile__value">38m</span>
+                  </div>
+                </div>
+                <aside class="cost-card" aria-label="Cost breakdown">
+                  <header class="cost-card__head">
+                    <span class="cost-card__head-label">Cost</span>
+                    <span class="cost-card__total">$12.40</span>
+                  </header>
+                  <dl class="cost-card__grid">
+                    <dt class="cost-card__key">Input</dt>
+                    <dd class="cost-card__val">487,201</dd>
+                    <dt class="cost-card__key">Output</dt>
+                    <dd class="cost-card__val">62,118</dd>
+                    <dt class="cost-card__key">Cache read</dt>
+                    <dd class="cost-card__val">1,204,308</dd>
+                    <dt class="cost-card__key">Cache write</dt>
+                    <dd class="cost-card__val">181,940</dd>
+                    <dt class="cost-card__key">Elapsed</dt>
+                    <dd class="cost-card__val">2h 14m</dd>
+                    <dt class="cost-card__key">Velocity</dt>
+                    <dd class="cost-card__val">$0.09 / min</dd>
+                  </dl>
+                  <div class="cost-card__provider">Provider · Anthropic · claude-opus-4-7</div>
+                </aside>
+              </div>
+            </section>
+
+            <!-- ================ ZONE 3 — WAVES ================ -->
+            <section class="orch-section" aria-label="Waves">
+              <header class="orch-section__heading">
+                <h2>Waves</h2>
+                <span class="eyebrow">3 total · current expanded</span>
+              </header>
+              <div class="wave-stack">
+                <article class="wave-card">
+                  <header class="wave-card__header">
+                    <div class="wave-card__title">
+                      <span class="wave-card__name">Wave 1</span>
+                      <span class="wave-card__phase">Settled</span>
+                    </div>
+                    <span class="wave-card__elapsed">42m 18s</span>
+                  </header>
+                  <div class="wave-card__bar wave-card__bar--done" aria-hidden="true">
+                    <span style="width: 100%"></span>
+                  </div>
+                  <footer class="wave-card__footer">
+                    <span><strong>tickets</strong> 5</span>
+                    <span><strong>merged</strong> 5</span>
+                    <span><strong>cost</strong> $3.18</span>
+                  </footer>
+                </article>
+
+                <article class="wave-card wave-card--current">
+                  <header class="wave-card__header">
+                    <div class="wave-card__title">
+                      <span class="wave-card__name">Wave 2</span>
+                      <span class="wave-card__phase">In flight</span>
+                    </div>
+                    <span class="wave-card__elapsed">28m 04s</span>
+                  </header>
+                  <div class="wave-card__chip-rail" role="list" aria-label="Worker chips">
+                    <span class="wave-card__chip" role="listitem">
+                      <span class="chip chip--merging">Merging</span>
+                      <span class="wave-card__chip-ticket">CTL-138</span>
+                    </span>
+                    <span class="wave-card__chip" role="listitem">
+                      <span class="chip chip--running">Running</span>
+                      <span class="wave-card__chip-ticket">CTL-137</span>
+                    </span>
+                    <span class="wave-card__chip" role="listitem">
+                      <span class="chip chip--running">Running</span>
+                      <span class="wave-card__chip-ticket">CTL-136</span>
+                    </span>
+                    <span class="wave-card__chip" role="listitem">
+                      <span class="chip chip--pr-open">PR open</span>
+                      <span class="wave-card__chip-ticket">CTL-143</span>
+                    </span>
+                    <span class="wave-card__chip" role="listitem">
+                      <span class="chip chip--ci-fail">CI fail</span>
+                      <span class="wave-card__chip-ticket">CTL-145</span>
+                    </span>
+                    <span class="wave-card__chip" role="listitem">
+                      <span class="chip chip--needs-me">Needs me</span>
+                      <span class="wave-card__chip-ticket">CTL-139</span>
+                    </span>
+                  </div>
+                  <div class="wave-card__bar" aria-hidden="true">
+                    <span style="width: 68%"></span>
+                  </div>
+                  <footer class="wave-card__footer">
+                    <span><strong>tickets</strong> 8</span>
+                    <span><strong>merged</strong> 0</span>
+                    <span><strong>cost</strong> $7.42</span>
+                    <span><strong>eta</strong> 14m</span>
+                  </footer>
+                </article>
+
+                <article class="wave-card">
+                  <header class="wave-card__header">
+                    <div class="wave-card__title">
+                      <span class="wave-card__name">Wave 3</span>
+                      <span class="wave-card__phase">Queued</span>
+                    </div>
+                    <span class="wave-card__elapsed">—</span>
+                  </header>
+                  <div class="wave-card__bar" aria-hidden="true">
+                    <span style="width: 0%"></span>
+                  </div>
+                  <footer class="wave-card__footer">
+                    <span><strong>tickets</strong> 4</span>
+                    <span><strong>dispatch after</strong> wave 2</span>
+                  </footer>
+                </article>
+              </div>
+            </section>
+
+            <!-- ================ GANTT ================ -->
+            <section class="orch-section" aria-label="Wave timeline">
+              <header class="orch-section__heading">
+                <h2>Wave timeline</h2>
+                <span class="eyebrow">Gantt</span>
+              </header>
+              <div class="gantt">
+                <div class="gantt__row">
+                  <span class="gantt__label">Wave 1</span>
+                  <div class="gantt__track">
+                    <div
+                      class="gantt__bar gantt__bar--done"
+                      style="left: 0%; width: 28%"
+                      aria-label="wave 1 — 42 minutes, completed"
+                    ></div>
+                  </div>
+                  <span class="gantt__duration">42m 18s</span>
+                </div>
+                <div class="gantt__row">
+                  <span class="gantt__label">Wave 2</span>
+                  <div class="gantt__track">
+                    <div
+                      class="gantt__bar"
+                      style="left: 28%; width: 38%"
+                      aria-label="wave 2 — 28 minutes elapsed of 42 estimated"
+                    ></div>
+                  </div>
+                  <span class="gantt__duration">28m 04s</span>
+                </div>
+                <div class="gantt__row">
+                  <span class="gantt__label">Wave 3</span>
+                  <div class="gantt__track">
+                    <div
+                      class="gantt__bar gantt__bar--queued"
+                      style="left: 66%; width: 24%"
+                      aria-label="wave 3 — queued, 36 minutes estimated"
+                    ></div>
+                  </div>
+                  <span class="gantt__duration">~36m</span>
+                </div>
+                <div class="gantt__axis" aria-hidden="true">
+                  <span></span>
+                  <div class="gantt__axis-ticks">
+                    <span>17:15</span>
+                    <span>17:45</span>
+                    <span>18:15</span>
+                    <span>18:45</span>
+                    <span>19:15 est</span>
+                  </div>
+                  <span></span>
+                </div>
+              </div>
+            </section>
+
+            <!-- ================ WORKER TABLE ================ -->
+            <section class="orch-section" aria-label="Workers">
+              <header class="orch-section__heading">
+                <h2>Workers</h2>
+                <span class="eyebrow">17 total · sortable</span>
+              </header>
+              <div class="worker-table" role="table">
+                <div class="worker-table__head" role="row">
+                  <span role="columnheader">
+                    <span class="worker-table__sort">Ticket</span>
+                  </span>
+                  <span role="columnheader">
+                    <span class="worker-table__sort">Status</span>
+                  </span>
+                  <span role="columnheader">
+                    <span class="worker-table__sort">Phase</span>
+                  </span>
+                  <span role="columnheader">
+                    <span class="worker-table__sort">PR</span>
+                  </span>
+                  <span role="columnheader">
+                    <span class="worker-table__sort">Turns</span>
+                  </span>
+                  <span role="columnheader">
+                    <span class="worker-table__sort">Cost</span>
+                  </span>
+                  <span role="columnheader">
+                    <span class="worker-table__sort worker-table__sort--active">
+                      Heartbeat
+                      <span class="worker-table__sort-caret" aria-hidden="true"></span>
+                    </span>
+                  </span>
+                </div>
+
+                <div class="worker-table__row" role="row">
+                  <span class="worker-table__cell--ticket" role="cell">CTL-138</span>
+                  <span role="cell"><span class="chip chip--merging">Merging</span></span>
+                  <span role="cell">ship</span>
+                  <span class="worker-table__cell--pr" role="cell"><a href="#">#244</a></span>
+                  <span role="cell">82</span>
+                  <span role="cell">$0.41</span>
+                  <span role="cell">12s ago</span>
+                </div>
+
+                <div class="worker-table__row" role="row">
+                  <span class="worker-table__cell--ticket" role="cell">CTL-137</span>
+                  <span role="cell"><span class="chip chip--running">Running</span></span>
+                  <span role="cell">implement</span>
+                  <span class="worker-table__cell--null" role="cell">—</span>
+                  <span role="cell">34</span>
+                  <span role="cell">$0.18</span>
+                  <span role="cell">18s ago</span>
+                </div>
+
+                <div class="worker-table__row" role="row">
+                  <span class="worker-table__cell--ticket" role="cell">CTL-136</span>
+                  <span role="cell"><span class="chip chip--running">Running</span></span>
+                  <span role="cell">implement</span>
+                  <span class="worker-table__cell--null" role="cell">—</span>
+                  <span role="cell">58</span>
+                  <span role="cell">$0.27</span>
+                  <span role="cell">1m ago</span>
+                </div>
+
+                <div class="worker-table__row" role="row">
+                  <span class="worker-table__cell--ticket" role="cell">CTL-145</span>
+                  <span role="cell"><span class="chip chip--ci-fail">CI fail</span></span>
+                  <span role="cell">ship</span>
+                  <span class="worker-table__cell--pr" role="cell"><a href="#">#245</a></span>
+                  <span role="cell">104</span>
+                  <span role="cell">$0.62</span>
+                  <span role="cell">4m ago</span>
+                </div>
+
+                <div class="worker-table__row" role="row">
+                  <span class="worker-table__cell--ticket" role="cell">CTL-143</span>
+                  <span role="cell"><span class="chip chip--pr-open">PR open</span></span>
+                  <span role="cell">ship</span>
+                  <span class="worker-table__cell--pr" role="cell"><a href="#">#246</a></span>
+                  <span role="cell">71</span>
+                  <span role="cell">$0.34</span>
+                  <span role="cell">2m ago</span>
+                </div>
+
+                <div class="worker-table__row" role="row">
+                  <span class="worker-table__cell--ticket" role="cell">CTL-141</span>
+                  <span role="cell"><span class="chip chip--running">Running</span></span>
+                  <span role="cell">research</span>
+                  <span class="worker-table__cell--null" role="cell">—</span>
+                  <span role="cell">12</span>
+                  <span role="cell">$0.07</span>
+                  <span role="cell">22s ago</span>
+                </div>
+
+                <div class="worker-table__row" role="row">
+                  <span class="worker-table__cell--ticket" role="cell">CTL-139</span>
+                  <span role="cell"><span class="chip chip--needs-me">Needs me</span></span>
+                  <span role="cell">validate</span>
+                  <span class="worker-table__cell--pr" role="cell"><a href="#">#243</a></span>
+                  <span role="cell">96</span>
+                  <span role="cell">$0.52</span>
+                  <span role="cell">11m ago</span>
+                </div>
+
+                <div class="worker-table__row" role="row">
+                  <span class="worker-table__cell--ticket" role="cell">CTL-144</span>
+                  <span role="cell"><span class="chip chip--queued">Queued</span></span>
+                  <span role="cell">—</span>
+                  <span class="worker-table__cell--null" role="cell">—</span>
+                  <span role="cell">0</span>
+                  <span role="cell">$0.00</span>
+                  <span role="cell">—</span>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <!-- ================ EVENTS SIDEBAR ================ -->
+          <aside class="events-sidebar" id="events-sidebar" aria-label="Event log">
+            <header class="events-sidebar__head">
+              <span class="events-sidebar__label">Events</span>
+              <button
+                type="button"
+                class="events-sidebar__toggle"
+                id="sidebar-toggle"
+                aria-expanded="true"
+                aria-controls="events-sidebar"
+              >
+                Collapse
+              </button>
+            </header>
+            <div class="events-sidebar__list">
+              <div class="event-row event-row--info">
+                <span class="event-row__time">17:43</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">PR-OPEN</span>
+                  <strong>CTL-143</strong> opened PR #246 (planning → shipping).
+                </span>
+              </div>
+              <div class="event-row event-row--success">
+                <span class="event-row__time">17:41</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">CI-PASS</span>
+                  <strong>CTL-138</strong> all checks green; auto-merge will fire on settle.
+                </span>
+              </div>
+              <div class="event-row event-row--danger">
+                <span class="event-row__time">17:38</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">CI-FAIL</span>
+                  <strong>CTL-145</strong> keybindings test expected escape, got tab.
+                </span>
+              </div>
+              <div class="event-row event-row--info">
+                <span class="event-row__time">17:36</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">STATUS</span>
+                  <strong>CTL-138</strong> shipping → merging.
+                </span>
+              </div>
+              <div class="event-row event-row--warn">
+                <span class="event-row__time">17:31</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">REVIVE</span>
+                  <strong>CTL-141</strong> recovered from rate-limit stall after 4m 12s.
+                </span>
+              </div>
+              <div class="event-row event-row--info">
+                <span class="event-row__time">17:28</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">DISPATCH</span>
+                  Wave 2 dispatched · 8 workers, est 42m.
+                </span>
+              </div>
+              <div class="event-row event-row--success">
+                <span class="event-row__time">17:21</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">SETTLE</span>
+                  Wave 1 settled · 5 of 5 merged · 42m 18s · $3.18.
+                </span>
+              </div>
+              <div class="event-row event-row--success">
+                <span class="event-row__time">17:18</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">MERGE</span>
+                  <strong>CTL-126</strong> merged in #243.
+                </span>
+              </div>
+              <div class="event-row event-row--success">
+                <span class="event-row__time">17:17</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">MERGE</span>
+                  <strong>CTL-125</strong> merged in #242.
+                </span>
+              </div>
+              <div class="event-row event-row--info">
+                <span class="event-row__time">17:15</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">START</span>
+                  Orchestrator dispatched · 17 tickets across 3 waves.
+                </span>
+              </div>
+              <div class="event-row event-row--info">
+                <span class="event-row__time">17:14</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">PLAN</span>
+                  Wave plan committed to runs/orch-2026-04-22-3.
+                </span>
+              </div>
+              <div class="event-row event-row--info">
+                <span class="event-row__time">17:13</span>
+                <span class="event-row__body">
+                  <span class="event-row__kind">INIT</span>
+                  Comms channel opened · orch-orch-2026-04-22-3.
+                </span>
+              </div>
+            </div>
+          </aside>
+        </div>
+
+        <div class="footer">
+          <p>
+            Try
+            <code>?attention=urgent</code>,
+            <code>?attention=warn</code>,
+            <code>?attention=ok</code>
+            to swap severity, or
+            <code>?system=precision-instrument</code>
+            to flip systems. All values read from
+            <code>_shared/tokens.css</code>.
+          </p>
+        </div>
+      </div>
+    </main>
+
+    <script>
+      // Sidebar collapse + attention severity label sync. No fetches, no
+      // framework. Reads back data-attention and updates the visible chip
+      // text to match the URL-resolved value.
+      (function () {
+        const SEV_LABELS = { urgent: "Urgent", warn: "Warn", ok: "Ok" };
+
+        const sevEl = document.getElementById("attention-sev");
+        const countEl = document.getElementById("attention-count");
+        const attention = document.documentElement.getAttribute("data-attention") || "urgent";
+        if (sevEl && SEV_LABELS[attention]) {
+          sevEl.textContent = SEV_LABELS[attention];
+        }
+        if (countEl && attention === "ok") {
+          countEl.textContent = "0 items";
+        }
+
+        const sidebar = document.getElementById("events-sidebar");
+        const toggle = document.getElementById("sidebar-toggle");
+        const layout = document.getElementById("layout");
+        if (sidebar && toggle && layout) {
+          toggle.addEventListener("click", () => {
+            const collapsed = sidebar.classList.toggle("events-sidebar--collapsed");
+            layout.classList.toggle("layout--sidebar-collapsed", collapsed);
+            toggle.textContent = collapsed ? "Expand" : "Collapse";
+            toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+          });
+        }
+      })();
+    </script>
+    <script src="./_shared/chrome.js"></script>
+  </body>
+</html>

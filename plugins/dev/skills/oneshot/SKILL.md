@@ -101,18 +101,28 @@ Best-effort — every call is wrapped so a missing `catalyst-comms` CLI never cr
 The worker posts at **minimum 4 messages** per run: start + phase transitions + done.
 
 ```bash
+# Resolve the catalyst-comms binary. Prefer the plugin-shipped copy so installs
+# where `catalyst-comms` is only a shell alias (which doesn't propagate to
+# subshells) still work. Fall back to PATH for users who have symlinked it.
+COMMS_BIN="${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"
+[ -x "$COMMS_BIN" ] || COMMS_BIN="$(command -v catalyst-comms 2>/dev/null || true)"
+if [ -z "$COMMS_BIN" ] || [ ! -x "$COMMS_BIN" ]; then
+  echo "warn: catalyst-comms not found — worker comms disabled" >&2
+  COMMS_BIN=""
+fi
+
 # Helper — called at every hook point below. Silent no-op when comms is unavailable.
 comms_post() {
   local type="$1" body="$2"
   [ -z "${CATALYST_COMMS_CHANNEL:-}" ] && return 0
-  command -v catalyst-comms >/dev/null 2>&1 || return 0
-  catalyst-comms send "$CATALYST_COMMS_CHANNEL" "$body" \
+  [ -n "$COMMS_BIN" ] || return 0
+  "$COMMS_BIN" send "$CATALYST_COMMS_CHANNEL" "$body" \
     --as "$TICKET_ID" --type "$type" >/dev/null 2>&1 || true
 }
 
 # Once, at startup — right after orchestrator mode detection:
-if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && command -v catalyst-comms >/dev/null 2>&1; then
-  catalyst-comms join "$CATALYST_COMMS_CHANNEL" \
+if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && [ -n "$COMMS_BIN" ]; then
+  "$COMMS_BIN" join "$CATALYST_COMMS_CHANNEL" \
     --as "$TICKET_ID" \
     --capabilities "oneshot: ${TICKET_ID}" \
     --orch "${CATALYST_ORCHESTRATOR_ID:-}" \
@@ -264,8 +274,8 @@ fi
 # CTL-111: post `done` on the shared comms channel. Uses the `done` subcommand
 # (not `send`) so quorum is auto-checked. Exit status ignored — quorum is
 # advisory from the worker's perspective; the orchestrator reconciles.
-if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && command -v catalyst-comms >/dev/null 2>&1; then
-  catalyst-comms done "$CATALYST_COMMS_CHANNEL" --as "$TICKET_ID" >/dev/null 2>&1 || true
+if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && [ -n "$COMMS_BIN" ]; then
+  "$COMMS_BIN" done "$CATALYST_COMMS_CHANNEL" --as "$TICKET_ID" >/dev/null 2>&1 || true
 fi
 ```
 
