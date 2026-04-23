@@ -1,9 +1,18 @@
 # Changelog
 
-## [7.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.8.0...catalyst-dev-v7.9.0) (2026-04-23)
+## [7.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.8.0...catalyst-dev-v7.9.0)
+
+Apr 23, 2026
+
+<!-- ai-enhanced -->
+
+### Dev UI Mockup Suite
+
+Complete static mockup harness for the orch-monitor redesign with 6 new views (home, worker, orchestrator, briefing, comms, todos, agent graph), global keybindings, AI summarization endpoint, and brand V2 assets. Each mockup supports both design systems and includes detailed state variants for visual review. The harness includes drift detection for local dev marketplace registration and improved worker communication discipline guidelines.
 
 
-### Features
+
+### PRs
 
 * **dev:** /api/summarize endpoint — configurable provider (CTL-144) ([#249](https://github.com/coalesce-labs/catalyst/issues/249)) ([5029f9e](https://github.com/coalesce-labs/catalyst/commit/5029f9e5a24fc0414589918d6308472e9b167498))
 * **dev:** agent-graph.html mockup — React Flow hierarchy (CTL-140) ([#259](https://github.com/coalesce-labs/catalyst/issues/259)) ([73e4947](https://github.com/coalesce-labs/catalyst/commit/73e4947963151f00e9170e05bb8df771e69c4ce6))
@@ -21,10 +30,6 @@
 * **meta:** drawn wordmark + horizontal/stacked lockups (CTL-148) ([#262](https://github.com/coalesce-labs/catalyst/issues/262)) ([81c6c98](https://github.com/coalesce-labs/catalyst/commit/81c6c98c4640cea3ca6bb21ae765561529711e0b))
 * **meta:** monochrome mark variants + README hero image (CTL-154) ([#263](https://github.com/coalesce-labs/catalyst/issues/263)) ([d776fd9](https://github.com/coalesce-labs/catalyst/commit/d776fd98cf43f8db37dcd4a3e459f2a0fbf4a048))
 * **meta:** V2 favicon set — multi-res ICO, SVG, apple-touch, PWA icons (CTL-150) ([#261](https://github.com/coalesce-labs/catalyst/issues/261)) ([5dfafaa](https://github.com/coalesce-labs/catalyst/commit/5dfafaa8131dbba45bfc2da7814a9b67957355a4))
-
-
-### Bug Fixes
-
 * **dev:** refuse worktree marketplace install unless --allow-worktree (CTL-120) ([#251](https://github.com/coalesce-labs/catalyst/issues/251)) ([f264d9b](https://github.com/coalesce-labs/catalyst/commit/f264d9bacf2f0c55955ffd66a69ca59b5df4b243))
 * **dev:** resolve catalyst-comms via plugin path (CTL-127) ([#252](https://github.com/coalesce-labs/catalyst/issues/252)) ([1563bec](https://github.com/coalesce-labs/catalyst/commit/1563bec14743d9d396d06149e51172266c606126))
 
