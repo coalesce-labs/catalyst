@@ -153,21 +153,25 @@ cmd_register() {
 cmd_update() {
   local orch_id="$1"
   local jq_filter="$2"
+  shift 2
 
   state_write \
     ".orchestrators[\$id] |= (${jq_filter} | .updatedAt = \$now)" \
-    --arg id "$orch_id"
+    --arg id "$orch_id" \
+    "$@"
 }
 
 cmd_worker() {
   local orch_id="$1"
   local ticket_id="$2"
   local jq_filter="$3"
+  shift 3
 
   state_write \
     ".orchestrators[\$oid].workers[\$tid] |= (${jq_filter} | .updatedAt = \$now) | .orchestrators[\$oid].updatedAt = \$now" \
     --arg oid "$orch_id" \
-    --arg tid "$ticket_id"
+    --arg tid "$ticket_id" \
+    "$@"
 }
 
 cmd_heartbeat() {

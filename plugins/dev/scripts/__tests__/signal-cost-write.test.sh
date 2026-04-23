@@ -16,7 +16,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-SKILL_FILE="${REPO_ROOT}/plugins/dev/skills/orchestrate/SKILL.md"
+# CTL-115: parse + signal-write logic moved out of SKILL.md and into the
+# orchestrate-roll-usage.sh helper. The drift guards below check the helper.
+HELPER_FILE="${REPO_ROOT}/plugins/dev/scripts/orchestrate-roll-usage.sh"
 
 FAILURES=0
 PASSES=0
@@ -156,14 +158,15 @@ run "missing signal file is a no-op (no error)" \
 run "missing signal file is not created" \
   bash -c "[ ! -f '$MISSING_SIGNAL' ]"
 
-# ─── Test 6: SKILL.md actually contains the documented pattern ───────────────
-# Guards against the doc and this test silently drifting apart.
-run "SKILL.md cost-parsing block references signal file write" \
-  bash -c "grep -q 'jq --argjson cost' '$SKILL_FILE'"
-run "SKILL.md uses .cost = \$cost assignment" \
-  bash -c "grep -q '.cost = \$cost' '$SKILL_FILE'"
-run "SKILL.md uses atomic tmp+rename for signal cost write" \
-  bash -c "grep -A2 'jq --argjson cost' '$SKILL_FILE' | grep -q 'mv .*SIGNAL_FILE'"
+# ─── Test 6: helper script contains the documented pattern ──────────────────
+# Guards against the helper and this test silently drifting apart. CTL-115
+# moved the parse + signal-write logic out of SKILL.md into the helper.
+run "helper references signal file write via --argjson cost" \
+  bash -c "grep -q 'jq --argjson cost' '$HELPER_FILE'"
+run "helper uses .cost = \$cost assignment" \
+  bash -c "grep -q '.cost = \$cost' '$HELPER_FILE'"
+run "helper uses atomic tmp+rename for signal cost write" \
+  bash -c "grep -A2 'jq --argjson cost' '$HELPER_FILE' | grep -q 'mv .*SIGNAL_FILE'"
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
