@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 480" role="img" aria-label="Catalyst — Portable workflows for Claude Code">
+  <title>Catalyst — Portable workflows for Claude Code</title>
+  <!-- Operator Console palette: #0B0D10 canvas + #FFB547 Signal Amber -->
+  <rect width="1600" height="480" fill="#0B0D10"/>
+  <svg data-part="lockup" x="320" y="140" width="960" height="120" viewBox="0 0 806 100"
+       fill="none" stroke="#FFB547" stroke-linecap="square" stroke-linejoin="miter" stroke-miterlimit="2">
+    <svg data-part="mark" x="0" y="0" width="100" height="100" viewBox="0 0 64 64" overflow="visible" stroke-width="6">
+      <path d="M 8 44 L 32 20 L 56 44"/>
+      <path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/>
+    </svg>
+    <g data-part="wordmark" transform="translate(150, 0)" stroke-width="10">
+      <path data-letter="C"  d="M 65 15 L 15 15 L 15 85 L 65 85"/>
+      <path data-letter="A1" d="M 91 95 L 123 5 L 155 95 M 104 62 L 142 62"/>
+      <path data-letter="T1" d="M 181 10 L 233 10 M 207 10 L 207 95"/>
+      <path data-letter="A2" d="M 259 95 L 291 5 L 323 95 M 272 62 L 310 62"/>
+      <path data-letter="L"  d="M 349 5 L 349 90 L 397 90"/>
+      <path data-letter="Y"  d="M 423 5 L 455 50 L 487 5 M 455 50 L 455 95"/>
+      <path data-letter="S"  d="M 573 20 Q 513 10 513 35 T 573 65 Q 513 90 513 75"/>
+      <path data-letter="T2" d="M 599 10 L 651 10 M 625 10 L 625 95"/>
+    </g>
+  </svg>
+  <text x="800" y="360" text-anchor="middle" fill="#FFB547"
+        font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="42" font-weight="400" letter-spacing="2">Portable workflows for Claude Code</text>
+</svg>

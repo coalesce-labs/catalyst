@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand-v2/readme-hero/readme-hero-dark.png">
+  <img alt="Catalyst — Portable workflows for Claude Code" src="assets/brand-v2/readme-hero/readme-hero-light.png">
+</picture>
+
 # Catalyst - Claude Code Workspace
 
 A portable development workflow for Claude Code, packaged as a Claude Code plugin marketplace.
