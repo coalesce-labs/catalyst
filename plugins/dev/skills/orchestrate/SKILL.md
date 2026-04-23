@@ -454,6 +454,29 @@ fi
 
 For each provisioned worker worktree, dispatch a `/oneshot` session.
 
+**Preferred entrypoint — `orchestrate-dispatch-next` (CTL-116):**
+
+The canonical dispatcher drains `state.json`'s `.queue.waveNPending` for every `N`
+(dynamically, so wave 1/2/3/…/N all work without code changes), respects
+`maxParallel - currentlyRunning`, writes dispatched/phase-0 signal files, launches
+workers via `nohup`, updates global state, removes dispatched tickets from whichever
+`waveNPending` list they lived in, and runs the post-dispatch healthcheck:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-dispatch-next" \
+  --orch-dir "${ORCH_DIR}" \
+  --orch-id "${ORCH_NAME}"
+# Emits a one-line JSON summary: {"running":R,"slotsAfter":S,"dispatched":[...][,"queueEmpty":true]}
+# Reads `orchestrator`, `worktreeBase`, `maxParallel` from state.json by default.
+# Pass --session-id / --worker-command / --worker-args / --comms-channel to override.
+# Pass --dry-run to preview without writing state or launching claude.
+```
+
+Call this once when the current wave is ready to dispatch, and again whenever a
+worker slot frees up. It supersedes the hand-rolled `dispatch-next.sh` pattern from
+pre-CTL-116 orchestration runs (which hardcoded `wave1Pending + wave2Pending + wave3Pending`).
+The inline block below is preserved as reference for the underlying machinery.
+
 **Dispatch mechanism — `claude` CLI with streaming JSON:**
 
 ```bash
