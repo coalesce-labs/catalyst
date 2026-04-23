@@ -1,0 +1,899 @@
+<!doctype html>
+<html lang="en" data-system="operator-console" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalyst — Comms</title>
+    <link rel="stylesheet" href="./_shared/tokens.css" />
+    <link rel="stylesheet" href="./_shared/fonts.css" />
+    <link rel="stylesheet" href="./_shared/base.css" />
+    <link rel="stylesheet" href="./_shared/chrome.css" />
+    <script>
+      // Pre-paint bootstrap — resolves system + theme from URL/localStorage and
+      // sets html[data-system] + html[data-theme] before first paint to prevent
+      // flicker. chrome.js reads window.__catalystMockupPrefs to avoid re-parsing.
+      (function () {
+        const LS_KEY = "catalyst.mockup.prefs";
+        const DEFAULTS = { system: "operator-console", theme: "dark" };
+        const SYSTEMS = ["operator-console", "precision-instrument"];
+        const THEMES = ["dark", "light"];
+        const url = new URLSearchParams(window.location.search);
+        let stored = {};
+        try {
+          stored = JSON.parse(window.localStorage.getItem(LS_KEY) || "{}");
+        } catch (_e) {
+          stored = {};
+        }
+        const sysCandidate = url.get("system") || stored.system || DEFAULTS.system;
+        const themeCandidate = stored.theme || DEFAULTS.theme;
+        const system = SYSTEMS.includes(sysCandidate) ? sysCandidate : DEFAULTS.system;
+        const theme = THEMES.includes(themeCandidate) ? themeCandidate : DEFAULTS.theme;
+        document.documentElement.setAttribute("data-system", system);
+        document.documentElement.setAttribute("data-theme", theme);
+        window.__catalystMockupPrefs = { system, theme };
+      })();
+    </script>
+    <style>
+      /* ------- Section shell (mirrors worker.html) ------- */
+
+      .comms-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .comms-section__heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--spacing-4);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .comms-section__heading h2 {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+        color: var(--color-text-hi);
+      }
+
+      /* ------- Three-pane grid ------- */
+
+      .comms-layout {
+        display: grid;
+        grid-template-columns: minmax(240px, 280px) minmax(0, 1fr) minmax(280px, 340px);
+        gap: var(--spacing-5);
+        align-items: stretch;
+      }
+
+      @media (max-width: 1024px) {
+        .comms-layout {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .comms-pane {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-lg);
+        padding: var(--spacing-4);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        min-height: 520px;
+      }
+
+      .comms-pane__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .comms-pane__title {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-heading);
+        line-height: var(--line-height-heading);
+        color: var(--color-text-hi);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .comms-count-badge {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+        padding: var(--spacing-0-5) var(--spacing-2);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-full);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ------- Chips (role + message type) ------- */
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      [data-system="operator-console"] .chip {
+        padding: 2px var(--spacing-2);
+        border-radius: var(--radius-full);
+        border: 1px solid transparent;
+      }
+      [data-system="operator-console"] .chip--role-orch {
+        color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--role-worker {
+        color: var(--color-info);
+        background: color-mix(in srgb, var(--color-info) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--role-subagent,
+      [data-system="operator-console"] .chip--role-other {
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border-color: var(--color-border-subtle);
+      }
+      [data-system="operator-console"] .chip--type-attention {
+        color: var(--color-warning);
+        background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+        border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--type-proposal {
+        color: var(--color-info);
+        background: color-mix(in srgb, var(--color-info) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--type-info {
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border-color: var(--color-border-subtle);
+      }
+      [data-system="operator-console"] .chip--type-done {
+        color: var(--color-success);
+        background: color-mix(in srgb, var(--color-success) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+      }
+
+      [data-system="precision-instrument"] .chip {
+        padding: 0;
+        background: transparent;
+        color: var(--color-text-md);
+        border: none;
+      }
+      [data-system="precision-instrument"] .chip::before {
+        content: "●";
+        font-size: 0.85em;
+        line-height: 1;
+        margin-right: var(--spacing-1);
+      }
+      [data-system="precision-instrument"] .chip--role-orch::before {
+        color: var(--color-accent);
+      }
+      [data-system="precision-instrument"] .chip--role-worker::before {
+        color: var(--color-info);
+      }
+      [data-system="precision-instrument"] .chip--role-subagent::before,
+      [data-system="precision-instrument"] .chip--role-other::before {
+        color: var(--color-text-lo);
+      }
+      [data-system="precision-instrument"] .chip--type-attention::before {
+        color: var(--color-warning);
+      }
+      [data-system="precision-instrument"] .chip--type-proposal::before {
+        color: var(--color-info);
+      }
+      [data-system="precision-instrument"] .chip--type-info::before {
+        content: none;
+      }
+      [data-system="precision-instrument"] .chip--type-done::before {
+        color: var(--color-success);
+      }
+
+      /* ------- Left pane — channels list ------- */
+
+      .channel-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+      }
+
+      .channel-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        row-gap: var(--spacing-1);
+        column-gap: var(--spacing-3);
+        padding: var(--spacing-3) var(--spacing-3);
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: var(--radius-md);
+        cursor: pointer;
+        transition:
+          border-color var(--motion-duration-state) var(--motion-easing-standard),
+          background var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .channel-row:hover {
+        border-color: var(--color-border-subtle);
+        background: var(--color-surface-2);
+      }
+
+      .channel-row[aria-current="true"] {
+        background: var(--color-surface-2);
+        border-color: var(--color-border-default);
+        border-left: 2px solid var(--color-accent);
+      }
+
+      .channel-row__name {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-hi);
+        word-break: break-all;
+      }
+
+      .channel-row__count {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .channel-row__meta {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-2);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        color: var(--color-text-lo);
+      }
+
+      .channel-row__unread {
+        color: var(--color-bg);
+        background: var(--color-accent);
+        padding: 0 var(--spacing-2);
+        border-radius: var(--radius-full);
+        font-weight: var(--font-weight-semibold);
+      }
+
+      /* ------- Center pane — message thread ------- */
+
+      .message-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        overflow-y: auto;
+        max-height: 560px;
+      }
+
+      .message-row {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+        padding: var(--spacing-3) var(--spacing-3);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+      }
+
+      .message-row__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+        flex-wrap: wrap;
+      }
+
+      .message-row__author-group {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-2);
+      }
+
+      .message-row__author {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-hi);
+      }
+
+      .message-row__ts {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .message-row__body {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+      }
+
+      .message-row__re {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        color: var(--color-text-lo);
+      }
+
+      .message--attention {
+        border-left: 2px solid var(--color-warning);
+        background: color-mix(in srgb, var(--color-warning) 6%, var(--color-surface-2));
+      }
+
+      .message--attention .message-row__body {
+        color: var(--color-text-hi);
+      }
+
+      .message--attention .message-row__icon {
+        color: var(--color-warning);
+        font-family: var(--font-family-mono);
+      }
+
+      /* ------- Right pane — agent cards ------- */
+
+      .agent-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .agent-card {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        padding: var(--spacing-3) var(--spacing-3);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+      }
+
+      .agent-card__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-2);
+      }
+
+      .agent-card__name {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-hi);
+        word-break: break-all;
+      }
+
+      .agent-card__role {
+        flex-shrink: 0;
+      }
+
+      .agent-card__capabilities {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        color: var(--color-text-md);
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        line-clamp: 2;
+        overflow: hidden;
+      }
+
+      .agent-card__status-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-2);
+      }
+
+      .agent-card__status {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-2);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .agent-card__status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: var(--radius-full);
+        background: var(--color-text-lo);
+        flex-shrink: 0;
+      }
+
+      .agent-card[data-status="alive"] .agent-card__status-dot {
+        background: var(--color-success);
+      }
+
+      .agent-card[data-status="alive"] .agent-card__status {
+        color: var(--color-success);
+      }
+
+      .agent-card[data-status="stale"] .agent-card__status-dot {
+        background: var(--color-warning);
+      }
+
+      .agent-card[data-status="stale"] .agent-card__status {
+        color: var(--color-warning);
+      }
+
+      .agent-card[data-status="done"] .agent-card__status-dot {
+        background: var(--color-text-lo);
+      }
+
+      .agent-card[data-status="done"] .agent-card__status {
+        color: var(--color-text-lo);
+      }
+
+      .agent-card[data-fresh="true"] .agent-card__status-dot {
+        animation: comms-heartbeat var(--motion-duration-heartbeat) ease-in-out infinite;
+      }
+
+      @keyframes comms-heartbeat {
+        0%,
+        100% {
+          opacity: 0.55;
+          transform: scale(0.9);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .agent-card[data-fresh="true"] .agent-card__status-dot {
+          animation: none;
+        }
+      }
+
+      .agent-card__ttl {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .agent-card__heartbeat {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ------- Empty states ------- */
+
+      .comms-empty {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: var(--spacing-6) var(--spacing-3);
+        border: 1px dashed var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        color: var(--color-text-lo);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+      }
+
+      .comms-empty__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-disabled);
+      }
+
+      .comms-empty__hint {
+        color: var(--color-text-md);
+      }
+
+      .comms-empty__hint code {
+        font-size: var(--font-size-label);
+      }
+
+      /* Empty-state demo grid (mirrors the layout so reviewers can see all three). */
+      .comms-empty-demo {
+        display: grid;
+        grid-template-columns: minmax(240px, 280px) minmax(0, 1fr) minmax(280px, 340px);
+        gap: var(--spacing-5);
+      }
+
+      @media (max-width: 1024px) {
+        .comms-empty-demo {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .comms-empty-demo .comms-pane {
+        min-height: 320px;
+      }
+
+      /* ------- Precision Instrument trim ------- */
+
+      [data-system="precision-instrument"] .comms-pane,
+      [data-system="precision-instrument"] .channel-row[aria-current="true"],
+      [data-system="precision-instrument"] .message-row,
+      [data-system="precision-instrument"] .agent-card {
+        border-color: var(--color-border-default);
+      }
+
+      [data-system="precision-instrument"] .channel-row__unread {
+        color: var(--color-surface-1);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mockup-shell">
+      <div class="mockup-container">
+        <header class="mockup-topbar">
+          <span class="mockup-topbar__mark">catalyst</span>
+          <span class="eyebrow">Comms</span>
+        </header>
+
+        <!-- =========== PAGE HEADING =========== -->
+        <section class="gallery-header">
+          <span class="eyebrow">catalyst-comms</span>
+          <h1>Channel view</h1>
+          <p>
+            Three panes — channels, message thread, and agent participants. Agent cards
+            surface the declared capabilities, role, liveness, and TTL countdown for every
+            participant that has joined the active channel.
+          </p>
+        </section>
+
+        <!-- =========== THREE-PANE VIEW =========== -->
+        <section class="comms-section">
+          <header class="comms-section__heading">
+            <h2>Active view</h2>
+            <span class="eyebrow">channels · thread · agents</span>
+          </header>
+
+          <div class="comms-layout">
+            <!-- ---------- Left: channels ---------- -->
+            <aside class="comms-pane comms-channels" aria-label="Channels">
+              <header class="comms-pane__head">
+                <span class="comms-pane__title">Channels</span>
+                <span class="comms-count-badge">3</span>
+              </header>
+              <ul class="channel-list" role="list">
+                <li
+                  class="channel-row"
+                  aria-current="true"
+                  role="listitem"
+                  tabindex="0"
+                >
+                  <span class="channel-row__name">orch-2026-04-22-3</span>
+                  <span class="channel-row__count">12 agents</span>
+                  <div class="channel-row__meta">
+                    <span>14m ago</span>
+                    <span class="channel-row__unread">3</span>
+                  </div>
+                </li>
+                <li class="channel-row" role="listitem" tabindex="0">
+                  <span class="channel-row__name">wave-1</span>
+                  <span class="channel-row__count">5 agents</span>
+                  <div class="channel-row__meta">
+                    <span>1h ago</span>
+                    <span></span>
+                  </div>
+                </li>
+                <li class="channel-row" role="listitem" tabindex="0">
+                  <span class="channel-row__name">pr-248</span>
+                  <span class="channel-row__count">2 agents</span>
+                  <div class="channel-row__meta">
+                    <span>4h ago</span>
+                    <span></span>
+                  </div>
+                </li>
+              </ul>
+            </aside>
+
+            <!-- ---------- Center: thread ---------- -->
+            <section class="comms-pane comms-thread" aria-label="Message thread">
+              <header class="comms-pane__head">
+                <span class="comms-pane__title">orch-2026-04-22-3</span>
+                <span class="comms-count-badge">7 msgs</span>
+              </header>
+              <ol class="message-list" role="list" aria-live="polite">
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">orchestrator</span>
+                      <span class="chip chip--role-orch">orch</span>
+                      <span class="chip chip--type-info">info</span>
+                    </div>
+                    <span class="message-row__ts">20:46:20Z</span>
+                  </div>
+                  <p class="message-row__body">
+                    dispatching wave 1 · 7 workers · max parallel 5
+                  </p>
+                </li>
+
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">CTL-138</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-info">info</span>
+                    </div>
+                    <span class="message-row__ts">20:48:35Z</span>
+                  </div>
+                  <p class="message-row__body">started oneshot for CTL-138</p>
+                </li>
+
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">CTL-143</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-proposal">proposal</span>
+                    </div>
+                    <span class="message-row__ts">20:52:01Z</span>
+                  </div>
+                  <p class="message-row__body">
+                    rebasing before push · sibling workers should pause migrations
+                  </p>
+                </li>
+
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">CTL-144</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-info">info</span>
+                    </div>
+                    <span class="message-row__ts">20:53:40Z</span>
+                  </div>
+                  <p class="message-row__body">researching → planning</p>
+                  <span class="message-row__re">re: msg-a1b2c3</span>
+                </li>
+
+                <li class="message-row message--attention" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__icon" aria-hidden="true">◆</span>
+                      <span class="message-row__author">CTL-145</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-attention">attention</span>
+                    </div>
+                    <span class="message-row__ts">20:55:11Z</span>
+                  </div>
+                  <p class="message-row__body">
+                    worker failed: type-check errors in chrome.js — 3 distinct fix attempts
+                    exhausted, human review required
+                  </p>
+                </li>
+
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">CTL-138</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-info">info</span>
+                    </div>
+                    <span class="message-row__ts">20:55:48Z</span>
+                  </div>
+                  <p class="message-row__body">pr:#247 opened</p>
+                </li>
+
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">CTL-138</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-done">done</span>
+                    </div>
+                    <span class="message-row__ts">21:02:29Z</span>
+                  </div>
+                  <p class="message-row__body">oneshot complete · pr merged</p>
+                </li>
+              </ol>
+            </section>
+
+            <!-- ---------- Right: agent cards ---------- -->
+            <aside class="comms-pane comms-agents" aria-label="Participants">
+              <header class="comms-pane__head">
+                <span class="comms-pane__title">Participants</span>
+                <span class="comms-count-badge">4</span>
+              </header>
+              <ul class="agent-list" role="list">
+                <li
+                  class="agent-card"
+                  data-status="alive"
+                  data-fresh="true"
+                  role="listitem"
+                >
+                  <header class="agent-card__head">
+                    <span class="agent-card__name">orchestrator</span>
+                    <span class="agent-card__role chip chip--role-orch">orch</span>
+                  </header>
+                  <p class="agent-card__capabilities">
+                    coordinates workers · dispatches waves · runs merge-poll safety net
+                  </p>
+                  <div class="agent-card__status-row">
+                    <span class="agent-card__status">
+                      <span class="agent-card__status-dot" aria-hidden="true"></span>
+                      <span>alive</span>
+                    </span>
+                    <span class="agent-card__ttl">TTL 58m</span>
+                  </div>
+                  <div class="agent-card__heartbeat">last 12s ago · 21:28:55Z</div>
+                </li>
+
+                <li
+                  class="agent-card"
+                  data-status="alive"
+                  data-fresh="true"
+                  role="listitem"
+                >
+                  <header class="agent-card__head">
+                    <span class="agent-card__name">CTL-139</span>
+                    <span class="agent-card__role chip chip--role-worker">worker</span>
+                  </header>
+                  <p class="agent-card__capabilities">
+                    oneshot: CTL-139 · implements comms.html mockup
+                  </p>
+                  <div class="agent-card__status-row">
+                    <span class="agent-card__status">
+                      <span class="agent-card__status-dot" aria-hidden="true"></span>
+                      <span>alive</span>
+                    </span>
+                    <span class="agent-card__ttl">TTL 47m</span>
+                  </div>
+                  <div class="agent-card__heartbeat">last 4s ago · 21:29:03Z</div>
+                </li>
+
+                <li class="agent-card" data-status="stale" role="listitem">
+                  <header class="agent-card__head">
+                    <span class="agent-card__name">CTL-145</span>
+                    <span class="agent-card__role chip chip--role-worker">worker</span>
+                  </header>
+                  <p class="agent-card__capabilities">
+                    oneshot: CTL-145 · mockup keybindings
+                  </p>
+                  <div class="agent-card__status-row">
+                    <span class="agent-card__status">
+                      <span class="agent-card__status-dot" aria-hidden="true"></span>
+                      <span>stale</span>
+                    </span>
+                    <span class="agent-card__ttl">TTL 02m</span>
+                  </div>
+                  <div class="agent-card__heartbeat">last 4m 12s ago · 21:24:55Z</div>
+                </li>
+
+                <li class="agent-card" data-status="done" role="listitem">
+                  <header class="agent-card__head">
+                    <span class="agent-card__name">sub-code-reviewer</span>
+                    <span class="agent-card__role chip chip--role-subagent">subagent</span>
+                  </header>
+                  <p class="agent-card__capabilities">
+                    reviews worker diff for style and guideline adherence
+                  </p>
+                  <div class="agent-card__status-row">
+                    <span class="agent-card__status">
+                      <span class="agent-card__status-dot" aria-hidden="true"></span>
+                      <span>done</span>
+                    </span>
+                    <span class="agent-card__ttl">TTL —</span>
+                  </div>
+                  <div class="agent-card__heartbeat">last 9m 48s ago · 21:19:19Z</div>
+                </li>
+              </ul>
+            </aside>
+          </div>
+        </section>
+
+        <!-- =========== EMPTY STATES =========== -->
+        <section class="comms-section">
+          <header class="comms-section__heading">
+            <h2>Empty states</h2>
+            <span class="eyebrow">three pane fallbacks</span>
+          </header>
+
+          <div class="comms-empty-demo">
+            <aside class="comms-pane" aria-label="Channels — empty">
+              <header class="comms-pane__head">
+                <span class="comms-pane__title">Channels</span>
+                <span class="comms-count-badge">0</span>
+              </header>
+              <div class="comms-empty comms-empty--channels">
+                <span class="comms-empty__label">no channels</span>
+                <p class="comms-empty__hint">
+                  No active channels. Workers create one via
+                  <code>catalyst-comms join</code>.
+                </p>
+              </div>
+            </aside>
+
+            <section class="comms-pane" aria-label="Thread — empty">
+              <header class="comms-pane__head">
+                <span class="comms-pane__title">orch-new-run</span>
+                <span class="comms-count-badge">0 msgs</span>
+              </header>
+              <div class="comms-empty comms-empty--thread">
+                <span class="comms-empty__label">no messages</span>
+                <p class="comms-empty__hint">
+                  Channel is empty. Messages will appear here as agents post via
+                  <code>catalyst-comms send</code>.
+                </p>
+              </div>
+            </section>
+
+            <aside class="comms-pane" aria-label="Participants — empty">
+              <header class="comms-pane__head">
+                <span class="comms-pane__title">Participants</span>
+                <span class="comms-count-badge">0</span>
+              </header>
+              <div class="comms-empty comms-empty--agents">
+                <span class="comms-empty__label">no participants</span>
+                <p class="comms-empty__hint">
+                  No agents have joined. Cards appear when agents call
+                  <code>catalyst-comms join</code>.
+                </p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <div class="footer">
+          <p>
+            Try
+            <code>?system=precision-instrument</code>
+            to flip systems, or press
+            <code>.</code>
+            to cycle. All colours, fonts, radii, and motion durations read from
+            <code>_shared/tokens.css</code>.
+          </p>
+        </div>
+      </div>
+    </main>
+
+    <script src="./_shared/chrome.js"></script>
+  </body>
+</html>
