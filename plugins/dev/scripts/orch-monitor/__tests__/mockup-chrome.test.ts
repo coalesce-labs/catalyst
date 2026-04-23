@@ -124,6 +124,15 @@ describe("chrome.js file structure — static markers", () => {
     expect(text).toContain("GNAV");
     expect(text).toContain("keydown");
   });
+
+  it("contains CTL-166 nav-shell symbols", async () => {
+    const text = await Bun.file(chromePath).text();
+    expect(text).toContain("mockup-palette");
+    expect(text).toContain("mockup-topbar__crumb");
+    expect(text).toContain("mockup-topbar__chip");
+    expect(text).toContain("mockup-breadcrumb");
+    expect(text).toContain("metaKey");
+  });
 });
 
 describe("chrome.css file — cheatsheet styles exist", () => {
@@ -138,6 +147,160 @@ describe("chrome.css file — cheatsheet styles exist", () => {
     );
     const text = await Bun.file(cssPath).text();
     expect(text).toContain(".mockup-cheatsheet");
+  });
+
+  it("defines CTL-166 nav-shell styles", async () => {
+    const cssPath = join(
+      import.meta.dir,
+      "..",
+      "public",
+      "mockups",
+      "_shared",
+      "chrome.css",
+    );
+    const text = await Bun.file(cssPath).text();
+    expect(text).toContain(".mockup-palette");
+    expect(text).toContain(".mockup-topbar__crumb");
+    expect(text).toContain(".mockup-topbar__chip");
+  });
+});
+
+describe("chrome.js pure helpers — parseBreadcrumb", () => {
+  it("returns empty array for missing/blank input", () => {
+    expect(chrome.parseBreadcrumb("")).toEqual([]);
+    expect(chrome.parseBreadcrumb("   ")).toEqual([]);
+    expect(chrome.parseBreadcrumb(null)).toEqual([]);
+    expect(chrome.parseBreadcrumb(undefined)).toEqual([]);
+  });
+
+  it("returns single segment", () => {
+    expect(chrome.parseBreadcrumb("Home")).toEqual(["Home"]);
+  });
+
+  it("splits on slash with surrounding spaces", () => {
+    expect(chrome.parseBreadcrumb("Monitor / ctl-ux-apr20")).toEqual([
+      "Monitor",
+      "ctl-ux-apr20",
+    ]);
+  });
+
+  it("handles many segments", () => {
+    expect(
+      chrome.parseBreadcrumb("Monitor / orch-2026-04-22-3 / wave 2 / CTL-138"),
+    ).toEqual(["Monitor", "orch-2026-04-22-3", "wave 2", "CTL-138"]);
+  });
+
+  it("trims extra whitespace and drops empty segments", () => {
+    expect(chrome.parseBreadcrumb("  A  /  B  / / C  ")).toEqual(["A", "B", "C"]);
+  });
+});
+
+describe("chrome.js pure helpers — isMacPlatform", () => {
+  it("detects platform=MacIntel", () => {
+    expect(chrome.isMacPlatform({ platform: "MacIntel" })).toBe(true);
+  });
+
+  it("detects platform containing Mac in any case", () => {
+    expect(chrome.isMacPlatform({ platform: "macOS" })).toBe(true);
+  });
+
+  it("returns false for Windows", () => {
+    expect(chrome.isMacPlatform({ platform: "Win32" })).toBe(false);
+  });
+
+  it("returns false for Linux", () => {
+    expect(chrome.isMacPlatform({ platform: "Linux x86_64" })).toBe(false);
+  });
+
+  it("falls back to userAgent when platform is missing", () => {
+    expect(
+      chrome.isMacPlatform({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5)" }),
+    ).toBe(true);
+    expect(
+      chrome.isMacPlatform({ userAgent: "Mozilla/5.0 (X11; Linux x86_64)" }),
+    ).toBe(false);
+  });
+
+  it("returns false for empty navigator object", () => {
+    expect(chrome.isMacPlatform({})).toBe(false);
+    expect(chrome.isMacPlatform(null)).toBe(false);
+    expect(chrome.isMacPlatform(undefined)).toBe(false);
+  });
+});
+
+describe("chrome.js pure helpers — paletteActions", () => {
+  it("returns 12 actions (8 nav + 3 appearance + 1 help)", () => {
+    const actions = chrome.paletteActions(chrome.GNAV);
+    expect(actions.length).toBe(12);
+  });
+
+  it("covers every GNAV key with a nav action", () => {
+    const actions = chrome.paletteActions(chrome.GNAV);
+    const navPaths = actions.filter((a) => a.type === "nav").map((a) => a.payload.path);
+    expect(navPaths.sort()).toEqual(Object.values(chrome.GNAV).sort());
+  });
+
+  it("includes all three groups", () => {
+    const actions = chrome.paletteActions(chrome.GNAV);
+    const groups = new Set(actions.map((a) => a.group));
+    expect(groups.has("Navigate")).toBe(true);
+    expect(groups.has("Appearance")).toBe(true);
+    expect(groups.has("Help")).toBe(true);
+  });
+
+  it("labels Orchestrator nav action", () => {
+    const actions = chrome.paletteActions(chrome.GNAV);
+    const orch = actions.find((a) => a.type === "nav" && a.payload.path === "orch.html");
+    expect(orch).toBeDefined();
+    expect(orch?.label).toBe("Orchestrator");
+  });
+
+  it("includes appearance actions for theme/system/palette", () => {
+    const actions = chrome.paletteActions(chrome.GNAV);
+    const appearanceLabels = actions
+      .filter((a) => a.type === "appearance")
+      .map((a) => a.label)
+      .sort();
+    expect(appearanceLabels).toEqual(
+      ["Cycle palette", "Cycle system", "Toggle theme"].sort(),
+    );
+  });
+
+  it("includes a help action for the cheatsheet", () => {
+    const actions = chrome.paletteActions(chrome.GNAV);
+    const help = actions.find((a) => a.type === "help");
+    expect(help).toBeDefined();
+    expect(help?.label.toLowerCase()).toContain("cheat");
+  });
+});
+
+describe("chrome.js pure helpers — filterPaletteActions", () => {
+  const actions: chrome.PaletteAction[] = [
+    { id: "n-h", group: "Navigate", label: "Home", type: "nav", payload: {} },
+    { id: "n-d", group: "Navigate", label: "Orchestrator", type: "nav", payload: {} },
+    { id: "n-w", group: "Navigate", label: "Worker", type: "nav", payload: {} },
+    { id: "a-t", group: "Appearance", label: "Toggle theme", type: "appearance", payload: {} },
+    { id: "h-c", group: "Help", label: "Open cheatsheet", type: "help", payload: {} },
+  ];
+
+  it("returns all actions for empty / whitespace query", () => {
+    expect(chrome.filterPaletteActions(actions, "").length).toBe(actions.length);
+    expect(chrome.filterPaletteActions(actions, "   ").length).toBe(actions.length);
+  });
+
+  it("does case-insensitive substring match on label", () => {
+    expect(chrome.filterPaletteActions(actions, "orch").map((a) => a.id)).toEqual(["n-d"]);
+    expect(chrome.filterPaletteActions(actions, "ORCH").map((a) => a.id)).toEqual(["n-d"]);
+  });
+
+  it("returns empty array when nothing matches", () => {
+    expect(chrome.filterPaletteActions(actions, "zzzz")).toEqual([]);
+  });
+
+  it("matches across groups", () => {
+    expect(chrome.filterPaletteActions(actions, "o").map((a) => a.id).sort()).toEqual(
+      ["a-t", "h-c", "n-d", "n-h", "n-w"].sort(),
+    );
   });
 });
 
