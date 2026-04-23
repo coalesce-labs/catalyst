@@ -1,0 +1,1164 @@
+<!doctype html>
+<html lang="en" data-system="operator-console" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalyst — Agent graph</title>
+    <link rel="stylesheet" href="./_shared/tokens.css" />
+    <link rel="stylesheet" href="./_shared/fonts.css" />
+    <link rel="stylesheet" href="./_shared/base.css" />
+    <link rel="stylesheet" href="./_shared/chrome.css" />
+    <link rel="stylesheet" href="https://esm.sh/@xyflow/react@12.3.2/dist/style.css" />
+    <script>
+      // Pre-paint bootstrap — resolves system + theme from URL/localStorage and
+      // sets html[data-system] + html[data-theme] before first paint to prevent
+      // flicker. chrome.js reads window.__catalystMockupPrefs to avoid re-parsing.
+      (function () {
+        const LS_KEY = "catalyst.mockup.prefs";
+        const DEFAULTS = { system: "operator-console", theme: "dark" };
+        const SYSTEMS = ["operator-console", "precision-instrument"];
+        const THEMES = ["dark", "light"];
+        const url = new URLSearchParams(window.location.search);
+        let stored = {};
+        try {
+          stored = JSON.parse(window.localStorage.getItem(LS_KEY) || "{}");
+        } catch (_e) {
+          stored = {};
+        }
+        const sysCandidate = url.get("system") || stored.system || DEFAULTS.system;
+        const themeCandidate = stored.theme || DEFAULTS.theme;
+        const system = SYSTEMS.includes(sysCandidate) ? sysCandidate : DEFAULTS.system;
+        const theme = THEMES.includes(themeCandidate) ? themeCandidate : DEFAULTS.theme;
+        document.documentElement.setAttribute("data-system", system);
+        document.documentElement.setAttribute("data-theme", theme);
+        window.__catalystMockupPrefs = { system, theme };
+      })();
+    </script>
+    <style>
+      /* ------- Page scaffolding ------- */
+
+      .graph-head {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .graph-head__breadcrumb {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-2);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        color: var(--color-text-lo);
+      }
+
+      .graph-head__title {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-display);
+        line-height: var(--line-height-display);
+        letter-spacing: var(--letter-spacing-display);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-hi);
+        margin: 0;
+      }
+
+      .graph-head__desc {
+        color: var(--color-text-md);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        max-width: 68ch;
+      }
+
+      /* ------- Canvas + chrome ------- */
+
+      .graph-canvas {
+        position: relative;
+        width: 100%;
+        height: 640px;
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-lg);
+        overflow: hidden;
+      }
+
+      .graph-root {
+        width: 100%;
+        height: 100%;
+      }
+
+      /* Re-skin React Flow chrome to match the tokens on both systems. */
+      .react-flow {
+        background: var(--color-surface-1);
+      }
+      .react-flow__minimap {
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-md);
+      }
+      .react-flow__minimap-mask {
+        fill: var(--color-bg);
+        fill-opacity: 0.6;
+      }
+      .react-flow__controls {
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+      }
+      .react-flow__controls-button {
+        background: var(--color-surface-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+        color: var(--color-text-md);
+      }
+      .react-flow__controls-button:hover {
+        background: var(--color-surface-3);
+        color: var(--color-text-hi);
+      }
+      .react-flow__controls-button svg {
+        fill: currentColor;
+      }
+      .react-flow__attribution {
+        background: transparent;
+        color: var(--color-text-lo);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+      }
+      .react-flow__edge-path {
+        stroke: var(--color-border-strong);
+        stroke-width: 1.25;
+      }
+      .react-flow__handle {
+        background: var(--color-border-default);
+        border: 1px solid var(--color-surface-1);
+        width: 8px;
+        height: 8px;
+      }
+
+      /* ------- Custom nodes ------- */
+
+      .agent-node {
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-3) var(--spacing-4);
+        min-width: 220px;
+        max-width: 260px;
+        color: var(--color-text-hi);
+        font-family: var(--font-family-body);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        transition:
+          border-color var(--motion-duration-state) var(--motion-easing-standard),
+          background var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .agent-node:hover {
+        border-color: var(--color-border-strong);
+      }
+
+      .agent-node--orchestrator {
+        background: var(--color-surface-3);
+        border-color: var(--color-accent);
+        min-width: 260px;
+      }
+
+      .agent-node--worker {
+        border-color: var(--color-border-default);
+      }
+
+      .agent-node--subagent {
+        min-width: 200px;
+        max-width: 240px;
+        background: var(--color-surface-1);
+      }
+
+      .agent-node--todo {
+        min-width: 200px;
+        background: var(--color-surface-1);
+        border-style: dashed;
+      }
+
+      .agent-node__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+      }
+
+      .agent-node__kind {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .agent-node__title {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-heading);
+        line-height: var(--line-height-heading);
+        color: var(--color-text-hi);
+        font-weight: var(--font-weight-medium);
+      }
+
+      .agent-node__meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-2) var(--spacing-3);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-md);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .agent-node__meta span em {
+        color: var(--color-text-lo);
+        font-style: normal;
+        margin-right: 4px;
+      }
+
+      .agent-node__todo-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-data);
+        color: var(--color-text-md);
+      }
+
+      .agent-node__todo-item {
+        display: flex;
+        gap: var(--spacing-2);
+        align-items: baseline;
+      }
+
+      .agent-node__todo-mark {
+        font-family: var(--font-family-mono);
+        color: var(--color-text-lo);
+        width: 10px;
+        display: inline-block;
+      }
+
+      .agent-node__todo-item--completed .agent-node__todo-mark {
+        color: var(--color-success);
+      }
+
+      .agent-node__todo-item--completed .agent-node__todo-text {
+        color: var(--color-text-lo);
+        text-decoration: line-through;
+      }
+
+      .agent-node__todo-item--in_progress .agent-node__todo-mark {
+        color: var(--color-accent);
+      }
+
+      /* ------- Status chips ------- */
+
+      .agent-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+        padding: 2px var(--spacing-2);
+        border-radius: var(--radius-full);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        border: 1px solid transparent;
+        background: var(--color-surface-1);
+        color: var(--color-text-md);
+      }
+
+      .agent-chip--dispatched {
+        color: var(--color-text-md);
+        border-color: var(--color-border-default);
+      }
+
+      .agent-chip--researching {
+        color: var(--color-info);
+        border-color: var(--color-info);
+      }
+
+      .agent-chip--implementing {
+        color: var(--color-accent);
+        border-color: var(--color-accent);
+      }
+
+      .agent-chip--validating {
+        color: var(--color-warning);
+        border-color: var(--color-warning);
+      }
+
+      .agent-chip--merging {
+        color: var(--color-accent-hover);
+        border-color: var(--color-accent-hover);
+      }
+
+      .agent-chip--done {
+        color: var(--color-success);
+        border-color: var(--color-success);
+      }
+
+      .agent-chip--failed {
+        color: var(--color-danger);
+        border-color: var(--color-danger);
+      }
+
+      /* ------- Legend ------- */
+
+      .graph-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--spacing-3);
+        padding: var(--spacing-3) var(--spacing-4);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .graph-legend__item {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-2);
+      }
+
+      .graph-legend__swatch {
+        width: 10px;
+        height: 10px;
+        border-radius: var(--radius-full);
+        background: var(--color-text-md);
+      }
+
+      .graph-legend__swatch--dispatched {
+        background: var(--color-text-md);
+      }
+      .graph-legend__swatch--researching {
+        background: var(--color-info);
+      }
+      .graph-legend__swatch--implementing {
+        background: var(--color-accent);
+      }
+      .graph-legend__swatch--validating {
+        background: var(--color-warning);
+      }
+      .graph-legend__swatch--merging {
+        background: var(--color-accent-hover);
+      }
+      .graph-legend__swatch--done {
+        background: var(--color-success);
+      }
+      .graph-legend__swatch--failed {
+        background: var(--color-danger);
+      }
+
+      /* ------- Drawer ------- */
+
+      .graph-drawer {
+        position: fixed;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: min(380px, 90vw);
+        background: var(--color-surface-2);
+        border-left: 1px solid var(--color-border-default);
+        padding: var(--spacing-5);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+        transform: translateX(100%);
+        transition: transform var(--motion-duration-expand) var(--motion-easing-standard);
+        z-index: 40;
+        overflow-y: auto;
+      }
+
+      .graph-drawer[aria-hidden="false"] {
+        transform: translateX(0);
+      }
+
+      .graph-drawer__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+      }
+
+      .graph-drawer__title {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+        color: var(--color-text-hi);
+        margin: 0;
+      }
+
+      .graph-drawer__close {
+        background: transparent;
+        border: 1px solid var(--color-border-default);
+        color: var(--color-text-md);
+        padding: var(--spacing-1) var(--spacing-3);
+        border-radius: var(--radius-md);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        cursor: pointer;
+      }
+
+      .graph-drawer__close:hover {
+        border-color: var(--color-border-strong);
+        color: var(--color-text-hi);
+      }
+
+      .graph-drawer__rows {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-text-md);
+      }
+
+      .graph-drawer__row {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: var(--spacing-3);
+        align-items: baseline;
+      }
+
+      .graph-drawer__key {
+        color: var(--color-text-lo);
+        text-transform: uppercase;
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+      }
+
+      .graph-drawer__value {
+        color: var(--color-text-hi);
+      }
+
+      .graph-drawer__note {
+        color: var(--color-text-lo);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+      }
+
+      /* ------- Page section rhythm ------- */
+
+      .graph-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "https://esm.sh/react@18.3.1",
+          "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+          "react-dom": "https://esm.sh/react-dom@18.3.1",
+          "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+          "@xyflow/react": "https://esm.sh/@xyflow/react@12.3.2?external=react,react-dom",
+          "dagre": "https://esm.sh/dagre@0.8.5"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <main class="mockup-shell">
+      <div class="mockup-container">
+        <header class="mockup-topbar">
+          <span class="mockup-topbar__mark">catalyst</span>
+          <span class="eyebrow">Agent graph</span>
+        </header>
+
+        <section class="graph-head">
+          <div class="graph-head__breadcrumb">
+            <span>monitor</span>
+            <span aria-hidden="true">/</span>
+            <span>orch-2026-04-22-3</span>
+            <span aria-hidden="true">/</span>
+            <span>agent graph</span>
+          </div>
+          <h1 class="graph-head__title">Agent graph</h1>
+          <p class="graph-head__desc">
+            Live hierarchy of an orchestrator, its workers, their subagents, and the todo
+            lists each agent is working. Pan and zoom with the mouse. Click any node for a
+            drawer of details. Data refreshes every two seconds without resetting the
+            viewport.
+          </p>
+        </section>
+
+        <section class="graph-section">
+          <div class="graph-canvas">
+            <div id="graph-root" class="graph-root"></div>
+          </div>
+
+          <div class="graph-legend" aria-label="Status color legend">
+            <span class="graph-legend__item">
+              <span class="graph-legend__swatch graph-legend__swatch--dispatched" aria-hidden="true"></span>
+              <span>dispatched</span>
+            </span>
+            <span class="graph-legend__item">
+              <span class="graph-legend__swatch graph-legend__swatch--researching" aria-hidden="true"></span>
+              <span>researching</span>
+            </span>
+            <span class="graph-legend__item">
+              <span class="graph-legend__swatch graph-legend__swatch--implementing" aria-hidden="true"></span>
+              <span>implementing</span>
+            </span>
+            <span class="graph-legend__item">
+              <span class="graph-legend__swatch graph-legend__swatch--validating" aria-hidden="true"></span>
+              <span>validating</span>
+            </span>
+            <span class="graph-legend__item">
+              <span class="graph-legend__swatch graph-legend__swatch--merging" aria-hidden="true"></span>
+              <span>merging</span>
+            </span>
+            <span class="graph-legend__item">
+              <span class="graph-legend__swatch graph-legend__swatch--done" aria-hidden="true"></span>
+              <span>done</span>
+            </span>
+            <span class="graph-legend__item">
+              <span class="graph-legend__swatch graph-legend__swatch--failed" aria-hidden="true"></span>
+              <span>failed</span>
+            </span>
+          </div>
+        </section>
+
+        <div class="footer">
+          <p>
+            Press
+            <code>.</code>
+            to cycle systems. Press
+            <code>?</code>
+            for the keybinding cheat sheet. Graph rendering uses React Flow and dagre via
+            an import map. Production will reuse the same node shapes wired to the
+            live SSE stream.
+          </p>
+        </div>
+      </div>
+    </main>
+
+    <aside
+      id="graph-drawer"
+      class="graph-drawer"
+      aria-hidden="true"
+      aria-labelledby="graph-drawer-title"
+      role="dialog"
+    >
+      <header class="graph-drawer__head">
+        <h2 id="graph-drawer-title" class="graph-drawer__title">Select a node</h2>
+        <button type="button" class="graph-drawer__close" data-graph-drawer-close>
+          Close
+        </button>
+      </header>
+      <div class="graph-drawer__rows" data-graph-drawer-rows></div>
+      <p class="graph-drawer__note" data-graph-drawer-note>
+        Click any node in the graph to see its full payload here. Production will stream
+        updates into this panel in real time.
+      </p>
+    </aside>
+
+    <script type="module">
+      import React from "react";
+      import { createRoot } from "react-dom/client";
+      import {
+        ReactFlow,
+        ReactFlowProvider,
+        Background,
+        MiniMap,
+        Controls,
+        Handle,
+        Position,
+        useNodesState,
+        useEdgesState,
+      } from "@xyflow/react";
+      import dagre from "dagre";
+
+      const { useCallback, useEffect, useMemo, useRef } = React;
+
+      /* ------- Mock data — the floor the tests enforce is
+         1 orch / 3 workers / 5 subagents / 8 todos. Scale beyond that
+         is fine; the tick loop only adds, never removes. ------- */
+
+      const INITIAL_NODES = [
+        {
+          id: "orch-1",
+          type: "orchestrator",
+          position: { x: 0, y: 0 },
+          data: {
+            name: "orch-2026-04-22-3",
+            wave: "2 / 3",
+            status: "implementing",
+            cost: "$1.24",
+          },
+        },
+        {
+          id: "worker-ctl-140",
+          type: "worker",
+          position: { x: 0, y: 0 },
+          data: {
+            ticket: "CTL-140",
+            status: "implementing",
+            phase: "implement",
+            pr: "—",
+            turns: 12,
+          },
+        },
+        {
+          id: "worker-ctl-142",
+          type: "worker",
+          position: { x: 0, y: 0 },
+          data: {
+            ticket: "CTL-142",
+            status: "researching",
+            phase: "research",
+            pr: "—",
+            turns: 4,
+          },
+        },
+        {
+          id: "worker-ctl-147",
+          type: "worker",
+          position: { x: 0, y: 0 },
+          data: {
+            ticket: "CTL-147",
+            status: "validating",
+            phase: "validate",
+            pr: "#257",
+            turns: 18,
+          },
+        },
+        {
+          id: "sub-140-explore",
+          type: "subagent",
+          position: { x: 0, y: 0 },
+          data: {
+            role: "Explore",
+            status: "done",
+            turns: 2,
+          },
+        },
+        {
+          id: "sub-140-code-reviewer",
+          type: "subagent",
+          position: { x: 0, y: 0 },
+          data: {
+            role: "code-reviewer",
+            status: "dispatched",
+            turns: 0,
+          },
+        },
+        {
+          id: "sub-142-general",
+          type: "subagent",
+          position: { x: 0, y: 0 },
+          data: {
+            role: "general-purpose",
+            status: "researching",
+            turns: 3,
+          },
+        },
+        {
+          id: "sub-142-deepwiki",
+          type: "subagent",
+          position: { x: 0, y: 0 },
+          data: {
+            role: "general-purpose",
+            status: "done",
+            turns: 1,
+          },
+        },
+        {
+          id: "sub-147-pr-test",
+          type: "subagent",
+          position: { x: 0, y: 0 },
+          data: {
+            role: "pr-test-analyzer",
+            status: "validating",
+            turns: 1,
+          },
+        },
+        {
+          id: "todo-140-a",
+          type: "todo",
+          position: { x: 0, y: 0 },
+          data: {
+            owner: "CTL-140",
+            items: [
+              { label: "Write mockup tests", state: "completed" },
+              { label: "Build agent-graph.html", state: "in_progress" },
+              { label: "Add gallery card", state: "pending" },
+            ],
+          },
+        },
+        {
+          id: "todo-142-a",
+          type: "todo",
+          position: { x: 0, y: 0 },
+          data: {
+            owner: "CTL-142",
+            items: [
+              { label: "Survey todo ingest", state: "completed" },
+              { label: "Draft todos.html", state: "in_progress" },
+              { label: "Define rollup rules", state: "pending" },
+            ],
+          },
+        },
+        {
+          id: "todo-147-a",
+          type: "todo",
+          position: { x: 0, y: 0 },
+          data: {
+            owner: "CTL-147",
+            items: [
+              { label: "Mark study v1", state: "completed" },
+              { label: "Simplified variant", state: "completed" },
+            ],
+          },
+        },
+      ];
+
+      const INITIAL_EDGES = [
+        { id: "e-orch-140", source: "orch-1", target: "worker-ctl-140" },
+        { id: "e-orch-142", source: "orch-1", target: "worker-ctl-142" },
+        { id: "e-orch-147", source: "orch-1", target: "worker-ctl-147" },
+        { id: "e-140-explore", source: "worker-ctl-140", target: "sub-140-explore" },
+        { id: "e-140-reviewer", source: "worker-ctl-140", target: "sub-140-code-reviewer" },
+        { id: "e-142-general", source: "worker-ctl-142", target: "sub-142-general" },
+        { id: "e-142-deepwiki", source: "sub-142-general", target: "sub-142-deepwiki" },
+        { id: "e-147-pr-test", source: "worker-ctl-147", target: "sub-147-pr-test" },
+        { id: "e-140-todo", source: "worker-ctl-140", target: "todo-140-a" },
+        { id: "e-142-todo", source: "worker-ctl-142", target: "todo-142-a" },
+        { id: "e-147-todo", source: "worker-ctl-147", target: "todo-147-a" },
+      ];
+
+      const NODE_SIZE = {
+        orchestrator: { width: 280, height: 120 },
+        worker: { width: 240, height: 140 },
+        subagent: { width: 220, height: 110 },
+        todo: { width: 220, height: 120 },
+      };
+
+      /* ------- Layout — dagre, top-down, stable on update ------- */
+
+      function layout(nodes, edges, direction = "TB") {
+        const g = new dagre.graphlib.Graph();
+        g.setDefaultEdgeLabel(() => ({}));
+        g.setGraph({ rankdir: direction, nodesep: 48, ranksep: 80 });
+
+        nodes.forEach((node) => {
+          const size = NODE_SIZE[node.type] ?? { width: 220, height: 100 };
+          g.setNode(node.id, size);
+        });
+        edges.forEach((edge) => g.setEdge(edge.source, edge.target));
+
+        dagre.layout(g);
+
+        return nodes.map((node) => {
+          const pos = g.node(node.id);
+          const size = NODE_SIZE[node.type] ?? { width: 220, height: 100 };
+          return {
+            ...node,
+            position: {
+              x: pos.x - size.width / 2,
+              y: pos.y - size.height / 2,
+            },
+          };
+        });
+      }
+
+      /* ------- Custom node components (React.memo per React Flow perf docs) ------- */
+
+      const OrchestratorNode = React.memo(function OrchestratorNode({ data }) {
+        return React.createElement(
+          "div",
+          { className: "agent-node agent-node--orchestrator" },
+          React.createElement(Handle, {
+            type: "source",
+            position: Position.Bottom,
+            isConnectable: false,
+          }),
+          React.createElement(
+            "div",
+            { className: "agent-node__head" },
+            React.createElement("span", { className: "agent-node__kind" }, "orchestrator"),
+            React.createElement(
+              "span",
+              { className: "agent-chip agent-chip--" + data.status },
+              data.status,
+            ),
+          ),
+          React.createElement("div", { className: "agent-node__title" }, data.name),
+          React.createElement(
+            "div",
+            { className: "agent-node__meta" },
+            React.createElement(
+              "span",
+              null,
+              React.createElement("em", null, "wave"),
+              data.wave,
+            ),
+            React.createElement(
+              "span",
+              null,
+              React.createElement("em", null, "cost"),
+              data.cost,
+            ),
+          ),
+        );
+      });
+
+      const WorkerNode = React.memo(function WorkerNode({ data }) {
+        return React.createElement(
+          "div",
+          { className: "agent-node agent-node--worker" },
+          React.createElement(Handle, {
+            type: "target",
+            position: Position.Top,
+            isConnectable: false,
+          }),
+          React.createElement(Handle, {
+            type: "source",
+            position: Position.Bottom,
+            isConnectable: false,
+          }),
+          React.createElement(
+            "div",
+            { className: "agent-node__head" },
+            React.createElement("span", { className: "agent-node__kind" }, "worker"),
+            React.createElement(
+              "span",
+              { className: "agent-chip agent-chip--" + data.status },
+              data.status,
+            ),
+          ),
+          React.createElement("div", { className: "agent-node__title" }, data.ticket),
+          React.createElement(
+            "div",
+            { className: "agent-node__meta" },
+            React.createElement(
+              "span",
+              null,
+              React.createElement("em", null, "phase"),
+              data.phase,
+            ),
+            React.createElement(
+              "span",
+              null,
+              React.createElement("em", null, "pr"),
+              data.pr,
+            ),
+            React.createElement(
+              "span",
+              null,
+              React.createElement("em", null, "turns"),
+              data.turns,
+            ),
+          ),
+        );
+      });
+
+      const SubagentNode = React.memo(function SubagentNode({ data }) {
+        return React.createElement(
+          "div",
+          { className: "agent-node agent-node--subagent" },
+          React.createElement(Handle, {
+            type: "target",
+            position: Position.Top,
+            isConnectable: false,
+          }),
+          React.createElement(Handle, {
+            type: "source",
+            position: Position.Bottom,
+            isConnectable: false,
+          }),
+          React.createElement(
+            "div",
+            { className: "agent-node__head" },
+            React.createElement("span", { className: "agent-node__kind" }, "subagent"),
+            React.createElement(
+              "span",
+              { className: "agent-chip agent-chip--" + data.status },
+              data.status,
+            ),
+          ),
+          React.createElement("div", { className: "agent-node__title" }, data.role),
+          React.createElement(
+            "div",
+            { className: "agent-node__meta" },
+            React.createElement(
+              "span",
+              null,
+              React.createElement("em", null, "turns"),
+              data.turns,
+            ),
+          ),
+        );
+      });
+
+      const TodoNode = React.memo(function TodoNode({ data }) {
+        return React.createElement(
+          "div",
+          { className: "agent-node agent-node--todo" },
+          React.createElement(Handle, {
+            type: "target",
+            position: Position.Top,
+            isConnectable: false,
+          }),
+          React.createElement(
+            "div",
+            { className: "agent-node__head" },
+            React.createElement("span", { className: "agent-node__kind" }, "todos"),
+            React.createElement(
+              "span",
+              { className: "agent-node__kind" },
+              data.owner,
+            ),
+          ),
+          React.createElement(
+            "ul",
+            { className: "agent-node__todo-list" },
+            data.items.map((item, idx) =>
+              React.createElement(
+                "li",
+                {
+                  key: idx,
+                  className:
+                    "agent-node__todo-item agent-node__todo-item--" + item.state,
+                },
+                React.createElement(
+                  "span",
+                  { className: "agent-node__todo-mark", "aria-hidden": "true" },
+                  item.state === "completed"
+                    ? "[x]"
+                    : item.state === "in_progress"
+                      ? "[.]"
+                      : "[ ]",
+                ),
+                React.createElement(
+                  "span",
+                  { className: "agent-node__todo-text" },
+                  item.label,
+                ),
+              ),
+            ),
+          ),
+        );
+      });
+
+      const NODE_TYPES = {
+        orchestrator: OrchestratorNode,
+        worker: WorkerNode,
+        subagent: SubagentNode,
+        todo: TodoNode,
+      };
+
+      /* ------- Drawer wiring — plain DOM, not React ------- */
+
+      function openDrawer(node) {
+        const drawer = document.getElementById("graph-drawer");
+        if (!drawer) return;
+        const title = drawer.querySelector("#graph-drawer-title");
+        const rows = drawer.querySelector("[data-graph-drawer-rows]");
+        if (title) title.textContent = node.id;
+        if (rows) {
+          rows.textContent = "";
+          const pairs = [];
+          pairs.push(["kind", node.type]);
+          Object.entries(node.data || {}).forEach(([k, v]) => {
+            if (Array.isArray(v)) {
+              pairs.push([
+                k,
+                v
+                  .map((it) =>
+                    typeof it === "object" && it ? it.label + " (" + it.state + ")" : String(it),
+                  )
+                  .join(", "),
+              ]);
+            } else {
+              pairs.push([k, String(v)]);
+            }
+          });
+          pairs.forEach(([k, v]) => {
+            const row = document.createElement("div");
+            row.className = "graph-drawer__row";
+            const key = document.createElement("span");
+            key.className = "graph-drawer__key";
+            key.textContent = k;
+            const val = document.createElement("span");
+            val.className = "graph-drawer__value";
+            val.textContent = v;
+            row.appendChild(key);
+            row.appendChild(val);
+            rows.appendChild(row);
+          });
+        }
+        drawer.setAttribute("aria-hidden", "false");
+      }
+
+      function closeDrawer() {
+        const drawer = document.getElementById("graph-drawer");
+        if (!drawer) return;
+        drawer.setAttribute("aria-hidden", "true");
+      }
+
+      document
+        .querySelector("[data-graph-drawer-close]")
+        ?.addEventListener("click", closeDrawer);
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeDrawer();
+      });
+
+      /* ------- Real-time tick — mutates data without touching positions ------- */
+
+      const STATUS_CYCLE = [
+        "dispatched",
+        "researching",
+        "implementing",
+        "validating",
+        "merging",
+        "done",
+      ];
+
+      function advanceStatus(current) {
+        const idx = STATUS_CYCLE.indexOf(current);
+        if (idx === -1) return STATUS_CYCLE[0];
+        return STATUS_CYCLE[Math.min(idx + 1, STATUS_CYCLE.length - 1)];
+      }
+
+      /* ------- App root ------- */
+
+      function Graph() {
+        const initialLayout = useMemo(
+          () => layout(INITIAL_NODES, INITIAL_EDGES, "TB"),
+          [],
+        );
+        const [nodes, setNodes, onNodesChange] = useNodesState(initialLayout);
+        const [edges, setEdges, onEdgesChange] = useEdgesState(INITIAL_EDGES);
+        const tickRef = useRef(0);
+
+        const onNodeClick = useCallback((_event, node) => {
+          openDrawer(node);
+        }, []);
+
+        // Real-time mock — advance a worker's status, append a todo, or
+        // spawn a subagent every two seconds. setNodes() preserves the
+        // React Flow viewport because we never re-run the layout on nodes
+        // that already have a position.
+        const runTick = useCallback(() => {
+          const tick = tickRef.current++;
+          const phase = tick % 3;
+
+          if (phase === 0) {
+            setNodes((current) => {
+              const workerIds = current
+                .filter((n) => n.type === "worker")
+                .map((n) => n.id);
+              if (workerIds.length === 0) return current;
+              const pick = workerIds[tick % workerIds.length];
+              return current.map((n) =>
+                n.id === pick
+                  ? { ...n, data: { ...n.data, status: advanceStatus(n.data.status) } }
+                  : n,
+              );
+            });
+            return;
+          }
+
+          if (phase === 1) {
+            setNodes((current) => {
+              const todoNodes = current.filter((n) => n.type === "todo");
+              if (todoNodes.length === 0) return current;
+              const pick = todoNodes[tick % todoNodes.length];
+              const nextItems = [
+                ...pick.data.items,
+                {
+                  label: "follow-up item " + (pick.data.items.length + 1),
+                  state: "pending",
+                },
+              ];
+              return current.map((n) =>
+                n.id === pick.id ? { ...n, data: { ...n.data, items: nextItems } } : n,
+              );
+            });
+            return;
+          }
+
+          // phase === 2 — spawn a subagent under a worker, dagre-place the new node.
+          setNodes((currentNodes) => {
+            const workers = currentNodes.filter((n) => n.type === "worker");
+            if (workers.length === 0) return currentNodes;
+            const parent = workers[tick % workers.length];
+            const newId = "sub-spawn-" + tick;
+            const newNode = {
+              id: newId,
+              type: "subagent",
+              position: { x: parent.position.x, y: parent.position.y + 180 },
+              data: { role: "general-purpose", status: "researching", turns: 0 },
+            };
+            setEdges((currentEdges) => [
+              ...currentEdges,
+              { id: "e-spawn-" + tick, source: parent.id, target: newId },
+            ]);
+            return [...currentNodes, newNode];
+          });
+        }, [setNodes, setEdges]);
+
+        useEffect(() => {
+          const id = window.setInterval(runTick, 2000);
+          return () => window.clearInterval(id);
+        }, [runTick]);
+
+        return React.createElement(
+          ReactFlow,
+          {
+            nodes,
+            edges,
+            onNodesChange,
+            onEdgesChange,
+            onNodeClick,
+            nodeTypes: NODE_TYPES,
+            fitView: true,
+            proOptions: { hideAttribution: false },
+            nodesDraggable: true,
+            nodesConnectable: false,
+            panOnScroll: true,
+            minZoom: 0.25,
+            maxZoom: 1.5,
+          },
+          React.createElement(Background, { gap: 24, size: 1 }),
+          React.createElement(MiniMap, {
+            pannable: true,
+            zoomable: true,
+            nodeStrokeWidth: 2,
+          }),
+          React.createElement(Controls, { showInteractive: false }),
+        );
+      }
+
+      const mount = document.getElementById("graph-root");
+      if (mount) {
+        const root = createRoot(mount);
+        root.render(
+          React.createElement(ReactFlowProvider, null, React.createElement(Graph)),
+        );
+      }
+    </script>
+
+    <script src="./_shared/chrome.js"></script>
+  </body>
+</html>
