@@ -159,7 +159,10 @@ echo "Skill markdown hook verification"
 echo "────────────────────────────────────────"
 
 # ── 10. orchestrate/SKILL.md contains all 4 required hooks ───────────────
-grep -q 'catalyst-comms join "orch-\${ORCH_NAME}"' "$ORCH_SKILL" \
+# Regexes accept either the new `"$COMMS_BIN" <subcmd>` form (CTL-127) or the
+# legacy bare `catalyst-comms <subcmd>` form so the test is resilient to the
+# binary resolution refactor.
+grep -qE '(catalyst-comms|\$COMMS_BIN") join "orch-\$\{ORCH_NAME\}"' "$ORCH_SKILL" \
   && pass "orchestrate: Phase 1 join hook present" \
   || fail "orchestrate: Phase 1 join hook missing"
 
@@ -167,11 +170,11 @@ grep -q 'CATALYST_COMMS_CHANNEL="orch-\${ORCH_NAME}"' "$ORCH_SKILL" \
   && pass "orchestrate: Phase 3 dispatch env hook present" \
   || fail "orchestrate: Phase 3 dispatch env hook missing"
 
-grep -q 'catalyst-comms poll "orch-\${ORCH_NAME}"' "$ORCH_SKILL" \
+grep -qE '(catalyst-comms|\$COMMS_BIN") poll "orch-\$\{ORCH_NAME\}"' "$ORCH_SKILL" \
   && pass "orchestrate: Phase 4 attention poll hook present" \
   || fail "orchestrate: Phase 4 attention poll hook missing"
 
-grep -q 'catalyst-comms done "orch-\${ORCH_NAME}" --as orchestrator' "$ORCH_SKILL" \
+grep -qE '(catalyst-comms|\$COMMS_BIN") done "orch-\$\{ORCH_NAME\}" --as orchestrator' "$ORCH_SKILL" \
   && pass "orchestrate: Phase 7 done hook present" \
   || fail "orchestrate: Phase 7 done hook missing"
 
@@ -184,11 +187,11 @@ grep -q 'CATALYST_COMMS_CHANNEL' "$ONESHOT_SKILL" \
   && pass "oneshot: CATALYST_COMMS_CHANNEL reference present" \
   || fail "oneshot: CATALYST_COMMS_CHANNEL reference missing"
 
-grep -q 'catalyst-comms join "\$CATALYST_COMMS_CHANNEL"' "$ONESHOT_SKILL" \
+grep -qE '(catalyst-comms|\$COMMS_BIN") join "\$CATALYST_COMMS_CHANNEL"' "$ONESHOT_SKILL" \
   && pass "oneshot: worker join hook present" \
   || fail "oneshot: worker join hook missing"
 
-grep -q 'catalyst-comms done "\$CATALYST_COMMS_CHANNEL"' "$ONESHOT_SKILL" \
+grep -qE '(catalyst-comms|\$COMMS_BIN") done "\$CATALYST_COMMS_CHANNEL"' "$ONESHOT_SKILL" \
   && pass "oneshot: worker done hook present" \
   || fail "oneshot: worker done hook missing"
 
@@ -196,6 +199,22 @@ grep -q 'catalyst-comms done "\$CATALYST_COMMS_CHANNEL"' "$ONESHOT_SKILL" \
 grep -qi "Worker Traffic Contract\|minimum 4 messages\|baseline traffic" "$COMMS_SKILL" \
   && pass "catalyst-comms: worker traffic contract documented" \
   || fail "catalyst-comms: worker traffic contract missing"
+
+# ── 13. CTL-127: plugin-root-first binary resolution ─────────────────────
+# Both skills must resolve catalyst-comms via ${CLAUDE_PLUGIN_ROOT}/scripts
+# before falling back to PATH, so shell-alias installs work in non-interactive
+# subshells.
+grep -q 'COMMS_BIN="\${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"' "$ORCH_SKILL" \
+  && pass "orchestrate: resolves COMMS_BIN via plugin root (CTL-127)" \
+  || fail "orchestrate: COMMS_BIN plugin-root resolver missing (CTL-127)"
+
+grep -q 'COMMS_BIN="\${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"' "$ONESHOT_SKILL" \
+  && pass "oneshot: resolves COMMS_BIN via plugin root (CTL-127)" \
+  || fail "oneshot: COMMS_BIN plugin-root resolver missing (CTL-127)"
+
+grep -q 'warn: catalyst-comms not found' "$ORCH_SKILL" \
+  && pass "orchestrate: warns when catalyst-comms missing (CTL-127)" \
+  || fail "orchestrate: missing-comms warning absent (CTL-127)"
 
 echo ""
 echo "────────────────────────────────────────"

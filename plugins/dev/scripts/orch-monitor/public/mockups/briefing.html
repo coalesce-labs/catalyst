@@ -1,0 +1,932 @@
+<!doctype html>
+<html lang="en" data-system="operator-console" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Catalyst — Briefing</title>
+    <link rel="stylesheet" href="./_shared/tokens.css" />
+    <link rel="stylesheet" href="./_shared/fonts.css" />
+    <link rel="stylesheet" href="./_shared/base.css" />
+    <link rel="stylesheet" href="./_shared/chrome.css" />
+    <script>
+      // Pre-paint bootstrap — resolves system + theme from URL/localStorage and
+      // sets html[data-system] + html[data-theme] before first paint to prevent
+      // flicker. chrome.js reads window.__catalystMockupPrefs to avoid re-parsing.
+      (function () {
+        const LS_KEY = "catalyst.mockup.prefs";
+        const DEFAULTS = { system: "operator-console", theme: "dark" };
+        const SYSTEMS = ["operator-console", "precision-instrument"];
+        const THEMES = ["dark", "light"];
+        const url = new URLSearchParams(window.location.search);
+        let stored = {};
+        try {
+          stored = JSON.parse(window.localStorage.getItem(LS_KEY) || "{}");
+        } catch (_e) {
+          stored = {};
+        }
+        const sysCandidate = url.get("system") || stored.system || DEFAULTS.system;
+        const themeCandidate = stored.theme || DEFAULTS.theme;
+        const system = SYSTEMS.includes(sysCandidate) ? sysCandidate : DEFAULTS.system;
+        const theme = THEMES.includes(themeCandidate) ? themeCandidate : DEFAULTS.theme;
+        document.documentElement.setAttribute("data-system", system);
+        document.documentElement.setAttribute("data-theme", theme);
+        window.__catalystMockupPrefs = { system, theme };
+      })();
+    </script>
+    <style>
+      /* ------- Brand-section scaffolding (lifted from brand.html) ------- */
+
+      .brand-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-5);
+      }
+
+      .brand-section__heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--spacing-4);
+        padding-bottom: var(--spacing-3);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .brand-section__heading h2 {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+        color: var(--color-text-hi);
+      }
+
+      .section-label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+        margin-bottom: var(--spacing-3);
+      }
+
+      /* ------- Briefing head ------- */
+
+      .briefing-head {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .briefing-head__breadcrumb {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-2);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        color: var(--color-text-lo);
+      }
+
+      .briefing-head__title {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-display);
+        line-height: var(--line-height-display);
+        letter-spacing: var(--letter-spacing-display);
+        font-weight: var(--font-weight-medium);
+        color: var(--color-text-hi);
+        margin: 0;
+      }
+
+      .briefing-head__meta {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--spacing-3);
+        padding-top: var(--spacing-2);
+      }
+
+      .briefing-head__counts {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-3);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-md);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .briefing-head__sep {
+        color: var(--color-text-lo);
+      }
+
+      .summarize-btn {
+        margin-left: auto;
+      }
+
+      /* ------- Buttons (lifted from brand.html) ------- */
+
+      .btn {
+        padding: var(--spacing-2) var(--spacing-4);
+        border-radius: var(--radius-md);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        font-weight: var(--font-weight-medium);
+        cursor: pointer;
+        transition:
+          background-color var(--motion-duration-state) var(--motion-easing-standard),
+          border-color var(--motion-duration-state) var(--motion-easing-standard),
+          color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .btn--primary {
+        background: var(--color-accent);
+        color: var(--color-bg);
+        border: 1px solid var(--color-accent);
+      }
+
+      .btn--primary:hover {
+        background: var(--color-accent-hover);
+        border-color: var(--color-accent-hover);
+      }
+
+      [data-system="precision-instrument"] .btn--primary {
+        color: var(--color-surface-1);
+      }
+
+      .btn--ghost {
+        background: transparent;
+        color: var(--color-text-md);
+        border: 1px solid transparent;
+      }
+
+      .btn--ghost:hover {
+        color: var(--color-text-hi);
+        background: var(--color-surface-2);
+      }
+
+      /* ------- Chips (lifted from brand.html) ------- */
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+      }
+
+      [data-system="operator-console"] .chip {
+        padding: 2px var(--spacing-2);
+        border-radius: var(--radius-full);
+        border: 1px solid transparent;
+      }
+
+      [data-system="operator-console"] .chip--merged {
+        color: var(--color-success);
+        background: color-mix(in srgb, var(--color-success) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+      }
+
+      [data-system="operator-console"] .chip--pr-open {
+        color: var(--color-info);
+        background: color-mix(in srgb, var(--color-info) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
+      }
+
+      [data-system="operator-console"] .chip--failed {
+        color: var(--color-danger);
+        background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+      }
+
+      [data-system="operator-console"] .chip--ticket {
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border-color: var(--color-border-subtle);
+      }
+
+      [data-system="precision-instrument"] .chip {
+        padding: 0;
+        background: transparent;
+        color: var(--color-text-md);
+        border: none;
+      }
+
+      [data-system="precision-instrument"] .chip::before {
+        content: "●";
+        font-size: 0.85em;
+        line-height: 1;
+      }
+
+      [data-system="precision-instrument"] .chip--merged::before {
+        color: var(--color-success);
+      }
+      [data-system="precision-instrument"] .chip--pr-open::before {
+        color: var(--color-info);
+      }
+      [data-system="precision-instrument"] .chip--failed::before {
+        color: var(--color-danger);
+      }
+      [data-system="precision-instrument"] .chip--ticket::before {
+        content: none;
+      }
+      [data-system="precision-instrument"] .chip--ticket {
+        color: var(--color-text-lo);
+      }
+
+      /* ------- Rollup section ------- */
+
+      .rollup-section__block + .rollup-section__block {
+        margin-top: var(--spacing-5);
+      }
+
+      .shipped-list {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .shipped-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: var(--spacing-2) var(--spacing-3);
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+      }
+
+      .shipped-row__title {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-hi);
+      }
+
+      .shipped-row__oneliner {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+        flex: 1;
+        min-width: 0;
+      }
+
+      /* ------- Wave tabs + panels ------- */
+
+      .wave-tabs {
+        display: flex;
+        gap: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+        margin-bottom: var(--spacing-4);
+      }
+
+      .wave-tab {
+        padding: var(--spacing-2) var(--spacing-3);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        color: var(--color-text-md);
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid transparent;
+        cursor: pointer;
+        transition:
+          color var(--motion-duration-state) var(--motion-easing-standard),
+          border-color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .wave-tab:hover {
+        color: var(--color-text-hi);
+      }
+
+      .wave-tab--active {
+        color: var(--color-text-hi);
+        border-bottom-color: var(--color-accent);
+      }
+
+      .wave-briefing[hidden] {
+        display: none;
+      }
+
+      /* ------- Markdown rendering scope (.md-content) ------- */
+
+      .md-content {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+      }
+
+      .md-content h1,
+      .md-content h2,
+      .md-content h3,
+      .md-content h4 {
+        color: var(--color-text-hi);
+        margin-top: var(--spacing-4);
+        margin-bottom: var(--spacing-2);
+      }
+
+      .md-content h1 {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+      }
+
+      .md-content h2 {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-heading);
+        line-height: var(--line-height-heading);
+      }
+
+      .md-content h3 {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-heading);
+        line-height: var(--line-height-heading);
+        font-weight: var(--font-weight-semibold);
+      }
+
+      .md-content h4 {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        font-weight: var(--font-weight-semibold);
+      }
+
+      .md-content p {
+        margin: var(--spacing-2) 0;
+      }
+
+      .md-content ul,
+      .md-content ol {
+        margin: var(--spacing-2) 0;
+        padding-left: var(--spacing-5);
+      }
+
+      .md-content li {
+        margin: var(--spacing-1) 0;
+      }
+
+      .md-content code {
+        font-family: var(--font-family-mono);
+        font-size: 0.92em;
+        color: var(--color-text-hi);
+        background: var(--color-surface-2);
+        padding: 0 var(--spacing-1);
+        border-radius: var(--radius-sm);
+      }
+
+      .md-content pre {
+        font-family: var(--font-family-mono);
+        background: var(--color-surface-2);
+        padding: var(--spacing-3) var(--spacing-4);
+        border-radius: var(--radius-md);
+        overflow-x: auto;
+        margin: var(--spacing-3) 0;
+      }
+
+      .md-content pre code {
+        background: transparent;
+        padding: 0;
+        font-size: var(--font-size-data);
+      }
+
+      .md-content a {
+        color: var(--color-accent);
+        text-decoration: none;
+      }
+
+      .md-content a:hover {
+        text-decoration: underline;
+      }
+
+      .md-content blockquote {
+        margin: var(--spacing-3) 0;
+        padding-left: var(--spacing-4);
+        border-left: 2px solid var(--color-border-default);
+        color: var(--color-text-md);
+      }
+
+      /* ------- AI summary panel (right slide-in) ------- */
+
+      .ai-panel {
+        position: fixed;
+        top: 0;
+        right: 0;
+        height: 100dvh;
+        width: min(100%, 520px);
+        background: var(--color-surface-1);
+        border-left: 1px solid var(--color-border-default);
+        padding: var(--spacing-6) var(--spacing-5);
+        overflow-y: auto;
+        transform: translateX(100%);
+        transition: transform var(--motion-duration-reflow) var(--motion-easing-standard);
+        z-index: 50;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .ai-panel[aria-hidden="false"] {
+        transform: translateX(0);
+      }
+
+      .ai-panel__head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--spacing-3);
+        padding-bottom: var(--spacing-3);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .ai-panel__head h2 {
+        font-family: var(--font-family-display);
+        font-size: var(--font-size-title);
+        line-height: var(--line-height-title);
+        letter-spacing: var(--letter-spacing-title);
+        color: var(--color-text-hi);
+        margin: 0;
+      }
+
+      .ai-panel__shimmer {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      .shimmer-block {
+        height: var(--spacing-4);
+        background: linear-gradient(
+          90deg,
+          var(--color-surface-2) 0%,
+          var(--color-surface-3) 50%,
+          var(--color-surface-2) 100%
+        );
+        background-size: 200% 100%;
+        border-radius: var(--radius-sm);
+        animation: briefing-shimmer 1.4s linear infinite;
+      }
+
+      .shimmer-block--title {
+        height: var(--spacing-6);
+        width: 70%;
+      }
+
+      .shimmer-block--short {
+        width: 40%;
+      }
+
+      @keyframes briefing-shimmer {
+        0% {
+          background-position: 0 0;
+        }
+        100% {
+          background-position: -200% 0;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .ai-panel {
+          transition: none;
+        }
+        .shimmer-block {
+          animation: none;
+          opacity: 0.5;
+        }
+      }
+
+      .ai-panel__summary[hidden] {
+        display: none;
+      }
+
+      .ai-panel__lede {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-hi);
+        margin: 0;
+      }
+
+      .ai-panel__section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .ai-panel__section ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .ai-panel__section li {
+        padding-left: var(--spacing-4);
+        position: relative;
+        color: var(--color-text-md);
+      }
+
+      .ai-panel__section li::before {
+        content: "·";
+        position: absolute;
+        left: var(--spacing-2);
+        color: var(--color-accent);
+        font-weight: var(--font-weight-semibold);
+      }
+
+      .ai-panel__footnote {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        color: var(--color-text-lo);
+        border-top: 1px solid var(--color-border-subtle);
+        padding-top: var(--spacing-3);
+      }
+    </style>
+  </head>
+  <body>
+    <main class="mockup-shell">
+      <div class="mockup-container">
+        <header class="mockup-topbar">
+          <span class="mockup-topbar__mark">catalyst</span>
+          <span class="eyebrow">Briefing</span>
+        </header>
+
+        <section class="briefing-head">
+          <nav class="briefing-head__breadcrumb" aria-label="Orchestrator breadcrumb">
+            <span>orch-2026-04-22</span>
+            <span class="briefing-head__sep">/</span>
+            <span>briefing</span>
+          </nav>
+          <h1 class="briefing-head__title">orch-2026-04-22</h1>
+          <div class="briefing-head__meta">
+            <div class="briefing-head__counts">
+              <span>3 waves</span>
+              <span class="briefing-head__sep">·</span>
+              <span>9 tickets</span>
+              <span class="briefing-head__sep">·</span>
+              <span class="chip chip--merged">8 merged</span>
+              <span class="chip chip--failed">1 stalled</span>
+            </div>
+            <button class="btn btn--primary summarize-btn" type="button">
+              Summarize with AI
+            </button>
+          </div>
+        </section>
+
+        <section class="rollup-section brand-section">
+          <header class="brand-section__heading">
+            <h2>Rollup</h2>
+            <span class="eyebrow">Orchestrator</span>
+          </header>
+
+          <div class="rollup-section__block what-shipped">
+            <div class="section-label">What shipped</div>
+            <ul class="shipped-list">
+              <li class="shipped-row">
+                <span class="chip chip--ticket">CTL-214</span>
+                <span class="chip chip--merged">#244</span>
+                <span class="shipped-row__title">rename-scope-refactor</span>
+                <span class="shipped-row__oneliner">
+                  — Renamed scope enums across bounded contexts with codemod-backed rollout.
+                </span>
+              </li>
+              <li class="shipped-row">
+                <span class="chip chip--ticket">CTL-215</span>
+                <span class="chip chip--merged">#245</span>
+                <span class="shipped-row__title">dispatch-guard</span>
+                <span class="shipped-row__oneliner">
+                  — Added orchestrator dispatch guard that refuses overlapping workers on the same ticket.
+                </span>
+              </li>
+              <li class="shipped-row">
+                <span class="chip chip--ticket">CTL-216</span>
+                <span class="chip chip--merged">#246</span>
+                <span class="shipped-row__title">signal-writer-resilience</span>
+                <span class="shipped-row__oneliner">
+                  — Made signal-file writer atomic and retry-safe under concurrent phase transitions.
+                </span>
+              </li>
+              <li class="shipped-row">
+                <span class="chip chip--ticket">CTL-217</span>
+                <span class="chip chip--merged">#247</span>
+                <span class="shipped-row__title">rollup-fragment-ingest</span>
+                <span class="shipped-row__oneliner">
+                  — Consumed per-worker rollup fragments into the orchestrator rollup briefing.
+                </span>
+              </li>
+              <li class="shipped-row">
+                <span class="chip chip--ticket">CTL-219</span>
+                <span class="chip chip--merged">#248</span>
+                <span class="shipped-row__title">release-notes-gen</span>
+                <span class="shipped-row__oneliner">
+                  — Emitted release-note fragments during Phase 5 ship so release-please can assemble them.
+                </span>
+              </li>
+            </ul>
+          </div>
+
+          <div class="rollup-section__block what-to-see">
+            <div class="section-label">What to see</div>
+            <div class="md-content" data-md="what-to-see"></div>
+          </div>
+
+          <div class="rollup-section__block gotchas">
+            <div class="section-label">Gotchas</div>
+            <div class="md-content" data-md="gotchas"></div>
+          </div>
+        </section>
+
+        <section class="wave-briefings brand-section">
+          <header class="brand-section__heading">
+            <h2>Per-wave briefings</h2>
+            <span class="eyebrow">3 waves</span>
+          </header>
+
+          <div class="wave-tabs" role="tablist" aria-label="Waves">
+            <button
+              class="wave-tab wave-tab--active"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              data-wave="1"
+            >
+              Wave 1
+            </button>
+            <button
+              class="wave-tab"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              data-wave="2"
+            >
+              Wave 2
+            </button>
+            <button
+              class="wave-tab"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              data-wave="3"
+            >
+              Wave 3
+            </button>
+          </div>
+
+          <article
+            class="wave-briefing wave-briefing--active"
+            role="tabpanel"
+            data-wave="1"
+          >
+            <div class="md-content" data-md="wave-1"></div>
+          </article>
+          <article class="wave-briefing" role="tabpanel" data-wave="2" hidden>
+            <div class="md-content" data-md="wave-2"></div>
+          </article>
+          <article class="wave-briefing" role="tabpanel" data-wave="3" hidden>
+            <div class="md-content" data-md="wave-3"></div>
+          </article>
+        </section>
+
+        <div class="footer">
+          <p>
+            Content rendered from markdown via vendored
+            <code>marked</code>
+            at
+            <code>../public/vendor/marked.min.js</code>
+            . Summary panel is a mockup — it shows the intended loading-then-generated
+            transition but makes no real API call.
+          </p>
+        </div>
+      </div>
+    </main>
+
+    <aside class="ai-panel" aria-hidden="true" aria-labelledby="ai-panel-title">
+      <header class="ai-panel__head">
+        <h2 id="ai-panel-title">AI summary</h2>
+        <button class="ai-panel__close btn btn--ghost" type="button">Close</button>
+      </header>
+
+      <div class="ai-panel__shimmer" aria-hidden="false">
+        <div class="shimmer-block shimmer-block--title"></div>
+        <div class="shimmer-block"></div>
+        <div class="shimmer-block"></div>
+        <div class="shimmer-block shimmer-block--short"></div>
+        <div class="shimmer-block"></div>
+        <div class="shimmer-block shimmer-block--short"></div>
+      </div>
+
+      <div class="ai-panel__summary" hidden>
+        <p class="ai-panel__lede">
+          This run shipped 5 pull requests across 3 waves. One worker stalled on a
+          rate-limit cool-down at 02:36Z and recovered on the next orchestrate-revive
+          cycle. Total cycle time landed at 1h 42m, about 18 percent under the moving
+          median for a 9-ticket orchestrator.
+        </p>
+
+        <div class="ai-panel__section">
+          <div class="section-label">Highlights</div>
+          <ul>
+            <li>
+              Rename refactor (CTL-214) landed with a codemod, so no follow-up sweep is
+              needed.
+            </li>
+            <li>
+              Dispatch guard (CTL-215) now blocks the class of bug that caused the
+              2026-04-18 double-dispatch incident.
+            </li>
+            <li>
+              Release-note fragments from CTL-219 are already assembled in the pending
+              release-please PR.
+            </li>
+            <li>
+              All five merges used auto-merge with no manual intervention required on
+              CI.
+            </li>
+          </ul>
+        </div>
+
+        <div class="ai-panel__section">
+          <div class="section-label">What needs attention now</div>
+          <ul>
+            <li>
+              CTL-218 remains stalled. The worker left a handoff note requesting an
+              approval on the scope rename.
+            </li>
+            <li>
+              A typography refinement to wave-briefing code fences is pending review in
+              CTL-220.
+            </li>
+          </ul>
+        </div>
+
+        <p class="ai-panel__footnote">
+          Mock summary. Real summaries will be generated by the CTL-144 summarize
+          endpoint once the briefing view is wired.
+        </p>
+      </div>
+    </aside>
+
+    <script src="../public/vendor/marked.min.js"></script>
+    <script>
+      (function () {
+        // ------- Markdown bodies (mock content) -------
+        // Static literals only — `parse(MD[key])` sets innerHTML, so replacing
+        // these with fetched/untrusted content without adding DOMPurify would
+        // open an XSS hole. The production React renderer at
+        // ui/src/lib/briefings.ts sanitizes precisely because it takes
+        // orchestrator-authored input.
+
+        const MD = {
+          "what-to-see": [
+            "Two pieces of the orchestrator briefing landed in this run: the rollup",
+            "assembly pipeline now ingests per-worker fragments on merge, and the",
+            "per-wave briefings render with a typography scale that matches the rest",
+            "of the console. Skim the rollup above for the merged tickets; drop into",
+            "per-wave briefings for a deeper look at any single wave.",
+            "",
+            "Sample inline code to verify rendering: `orch-2026-04-22`.",
+          ].join("\n"),
+
+          gotchas: [
+            "### CTL-215",
+            "",
+            "The dispatch guard introduces a new precondition on the `workers/` signal",
+            "directory. A pre-existing stale signal from a previous orchestrator will be",
+            "treated as an active worker. Clean the directory before starting a new run",
+            "or pass `--force` to override.",
+            "",
+            "### CTL-217",
+            "",
+            "Per-worker rollup fragments are read on merge. Fragments that are modified",
+            "after merge are not re-read. If a worker rewrites its fragment post-merge,",
+            "the orchestrator rollup will be stale until the next orchestrator cycle.",
+          ].join("\n"),
+
+          "wave-1": [
+            "## Wave 1 — research",
+            "",
+            "Three parallel research workers charted the scope surface for the",
+            "orchestrator rollup and the briefing view. Deliverables:",
+            "",
+            "- Signal schema stability matrix",
+            "- Per-worker fragment format draft",
+            "- Renderer approach comparison for the UI side",
+            "",
+            "Time to wave completion: 34 minutes. Check-in message on the comms",
+            "channel was `wave 1 done`.",
+          ].join("\n"),
+
+          "wave-2": [
+            "## Wave 2 — implementation",
+            "",
+            "Five implementation workers ran in parallel against the wave-1 plans. Four",
+            "merged on the first CI pass; one was rebased once and then merged.",
+            "",
+            "- CTL-214 rename refactor (codemod-driven)",
+            "- CTL-215 dispatch guard",
+            "- CTL-216 signal-writer hardening",
+            "- CTL-217 fragment ingest",
+            "- CTL-219 release-notes fragments",
+            "",
+            "Sample code fence:",
+            "",
+            "```ts",
+            "const guard = await createDispatchGuard(workersDir);",
+            "await guard.acquire(ticket);",
+            "```",
+          ].join("\n"),
+
+          "wave-3": [
+            "## Wave 3 — validation",
+            "",
+            "One validation worker consolidated coverage against the prior four merges",
+            "and exercised the orchestrate-revive path once, on purpose, to confirm the",
+            "new dispatch guard released its lock cleanly.",
+            "",
+            "- Coverage steady at prior baseline",
+            "- No new regressions in the integration harness",
+            "- Revive path exits clean within 3 seconds",
+          ].join("\n"),
+        };
+
+        // ------- Markdown rendering -------
+
+        const parse = (src) => {
+          if (window.marked && typeof window.marked.parse === "function") {
+            return window.marked.parse(src, { gfm: true, breaks: false });
+          }
+          return "<pre>" + src + "</pre>";
+        };
+
+        document.querySelectorAll("[data-md]").forEach((el) => {
+          const key = el.getAttribute("data-md");
+          if (key && MD[key] != null) el.innerHTML = parse(MD[key]);
+        });
+
+        // ------- Wave tab switching -------
+
+        const tabs = Array.from(document.querySelectorAll(".wave-tab"));
+        const panels = Array.from(document.querySelectorAll(".wave-briefing"));
+        tabs.forEach((tab) => {
+          tab.addEventListener("click", () => {
+            const w = tab.getAttribute("data-wave");
+            tabs.forEach((t) => {
+              const match = t === tab;
+              t.classList.toggle("wave-tab--active", match);
+              t.setAttribute("aria-selected", match ? "true" : "false");
+            });
+            panels.forEach((p) => {
+              const match = p.getAttribute("data-wave") === w;
+              p.hidden = !match;
+              p.classList.toggle("wave-briefing--active", match);
+            });
+          });
+        });
+
+        // ------- AI summary panel -------
+
+        const panel = document.querySelector(".ai-panel");
+        const shimmer = panel && panel.querySelector(".ai-panel__shimmer");
+        const summary = panel && panel.querySelector(".ai-panel__summary");
+        const openBtn = document.querySelector(".summarize-btn");
+        const closeBtn = panel && panel.querySelector(".ai-panel__close");
+        let loadTimer = null;
+
+        function openPanel() {
+          if (!panel) return;
+          panel.setAttribute("aria-hidden", "false");
+          if (shimmer) shimmer.removeAttribute("hidden");
+          if (summary) summary.setAttribute("hidden", "");
+          if (loadTimer) clearTimeout(loadTimer);
+          loadTimer = window.setTimeout(() => {
+            if (shimmer) shimmer.setAttribute("hidden", "");
+            if (summary) summary.removeAttribute("hidden");
+          }, 1200);
+        }
+
+        function closePanel() {
+          if (!panel) return;
+          panel.setAttribute("aria-hidden", "true");
+        }
+
+        if (openBtn) openBtn.addEventListener("click", openPanel);
+        if (closeBtn) closeBtn.addEventListener("click", closePanel);
+        document.addEventListener("keydown", (e) => {
+          if (e.key === "Escape") closePanel();
+        });
+      })();
+    </script>
+    <script src="./_shared/chrome.js"></script>
+  </body>
+</html>

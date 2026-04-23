@@ -116,3 +116,116 @@ describe("mockups — worker.html", () => {
     expect(matches.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe("mockups — briefing.html", () => {
+  it("serves /mockups/briefing.html with text/html", async () => {
+    const res = await fetch(`${baseUrl}/mockups/briefing.html`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const body = await res.text();
+    expect(body.toLowerCase()).toContain("<!doctype html");
+    expect(body).toContain('<main class="mockup-shell">');
+  });
+
+  it("gallery index links to briefing.html", async () => {
+    const res = await fetch(`${baseUrl}/mockups/`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('href="./briefing.html"');
+  });
+
+  it("briefing.html includes header markers + summarize button", async () => {
+    const res = await fetch(`${baseUrl}/mockups/briefing.html`);
+    const body = await res.text();
+    expect(body).toContain("briefing-head");
+    expect(body).toContain("briefing-head__meta");
+    expect(body).toContain("summarize-btn");
+  });
+
+  it("briefing.html renders rollup section with all three subsections", async () => {
+    const res = await fetch(`${baseUrl}/mockups/briefing.html`);
+    const body = await res.text();
+    expect(body).toContain("rollup-section");
+    expect(body).toContain("what-shipped");
+    expect(body).toContain("what-to-see");
+    expect(body).toContain("gotchas");
+  });
+
+  it("briefing.html renders at least two wave briefings", async () => {
+    const res = await fetch(`${baseUrl}/mockups/briefing.html`);
+    const body = await res.text();
+    const panels = body.match(/class="wave-briefing[^"]*"/g) ?? [];
+    expect(panels.length).toBeGreaterThanOrEqual(2);
+    const tabs = body.match(/class="wave-tab[^"]*"/g) ?? [];
+    expect(tabs.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("briefing.html includes AI summary panel with shimmer + summary slots", async () => {
+    const res = await fetch(`${baseUrl}/mockups/briefing.html`);
+    const body = await res.text();
+    expect(body).toContain("ai-panel");
+    expect(body).toContain("ai-panel__shimmer");
+    expect(body).toContain("ai-panel__summary");
+  });
+
+  it("briefing.html references vendored marked script via /public", async () => {
+    const res = await fetch(`${baseUrl}/mockups/briefing.html`);
+    const body = await res.text();
+    // Path must resolve to the server's /public/vendor/* route — relative paths
+    // like ../vendor/* resolve to /vendor/* which the server does not serve.
+    expect(body).toContain("../public/vendor/marked.min.js");
+  });
+
+  it("briefing.html vendored marked path actually serves from the server", async () => {
+    // Pull the script src out of the HTML, resolve it relative to /mockups/,
+    // and fetch it to confirm the path isn't a dead link.
+    const page = await fetch(`${baseUrl}/mockups/briefing.html`);
+    const body = await page.text();
+    const match = body.match(/<script src="([^"]+marked\.min\.js)"/);
+    expect(match).not.toBeNull();
+    const src = match![1];
+    const resolved = new URL(src, `${baseUrl}/mockups/`).pathname;
+    const assetRes = await fetch(`${baseUrl}${resolved}`);
+    expect(assetRes.status).toBe(200);
+    expect(assetRes.headers.get("content-type")).toContain("javascript");
+  });
+
+  it("briefing.html copy uses operator voice (no emoji, no exclamation in prose)", async () => {
+    const res = await fetch(`${baseUrl}/mockups/briefing.html`);
+    const body = await res.text();
+    // Scope the check to the visible mockup-container region — the <script>
+    // and <style> blocks above contain tokens like "!important" and
+    // "!function" that aren't UI copy.
+    const startMarker = '<div class="mockup-container">';
+    const endMarker = "</main>";
+    const start = body.indexOf(startMarker);
+    const end = body.indexOf(endMarker, start + startMarker.length);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const prose = body.slice(start + startMarker.length, end);
+    expect(prose).not.toContain("!");
+    // Spot-check a handful of pictographic emoji by code point; the full
+    // Unicode emoji range needs a flagged regex under the security linter,
+    // and the static mockup content is tightly controlled anyway.
+    for (const cp of [0x1f680, 0x1f525, 0x2728, 0x1f389, 0x2705]) {
+      expect(prose).not.toContain(String.fromCodePoint(cp));
+    }
+  });
+
+  it("briefing.html renders shipped rows with ticket chips and PR chips", async () => {
+    const res = await fetch(`${baseUrl}/mockups/briefing.html`);
+    const body = await res.text();
+    const ticketChips = body.match(/class="chip chip--ticket"/g) ?? [];
+    const mergedChips = body.match(/class="chip chip--merged"/g) ?? [];
+    expect(ticketChips.length).toBeGreaterThanOrEqual(3);
+    expect(mergedChips.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("briefing.html uses pre-paint bootstrap with system + theme", async () => {
+    const res = await fetch(`${baseUrl}/mockups/briefing.html`);
+    const body = await res.text();
+    expect(body).toContain('data-system="operator-console"');
+    expect(body).toContain("data-theme");
+    expect(body).toContain("__catalystMockupPrefs");
+  });
+});
