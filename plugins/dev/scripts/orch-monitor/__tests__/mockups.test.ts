@@ -481,3 +481,146 @@ describe("mockups — agent-graph.html", () => {
     expect(hasEmoji).toBe(false);
   });
 });
+
+describe("mockups — todos.html", () => {
+  it("serves /mockups/todos.html with text/html", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const body = await res.text();
+    expect(body.toLowerCase()).toContain("<!doctype html");
+    expect(body).toContain('<main class="mockup-shell">');
+  });
+
+  it("gallery index links to todos.html", async () => {
+    const res = await fetch(`${baseUrl}/mockups/`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('href="./todos.html"');
+  });
+
+  it("uses pre-paint bootstrap with system + theme + group + status axes", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    expect(body).toContain('data-system="operator-console"');
+    expect(body).toContain("data-theme");
+    expect(body).toContain("data-group");
+    expect(body).toContain("data-status");
+    expect(body).toContain("__catalystMockupPrefs");
+  });
+
+  it("renders the filter bar with status chips, group toggle, and search input", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    expect(body).toContain("todos-filter-bar");
+    expect(body).toContain("todos-filter__status");
+    expect(body).toContain("todos-filter__group");
+    // The global `/` keybinding focuses input[data-search] — wire the box that way.
+    expect(body).toMatch(/<input[^>]+data-search/);
+  });
+
+  it("supports grouping toggle via ?group=worker|orch|flat", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    for (const group of ["worker", "orch", "flat"]) {
+      expect(body).toContain(`data-group="${group}"`);
+      expect(body).toContain(`href="?group=${group}"`);
+    }
+  });
+
+  it("supports status filter via ?status=all|pending|in-progress|completed", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    for (const status of ["all", "pending", "in-progress", "completed"]) {
+      expect(body).toContain(`href="?status=${status}"`);
+    }
+    // Pre-paint bootstrap must register the same set so attribute-driven CSS works.
+    for (const status of ["pending", "in-progress", "completed"]) {
+      expect(body).toContain(`data-status="${status}"`);
+    }
+  });
+
+  it("worker grouping renders worker headers with ticket chip and status chip", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    const groups = body.match(/class="todos-worker-group[^"]*"/g) ?? [];
+    expect(groups.length).toBeGreaterThanOrEqual(2);
+    expect(body).toContain("chip chip--ticket");
+    // At least one of the worker status chip variants must appear.
+    expect(body).toMatch(
+      /chip chip--(running|pr-open|merged|failed|queued|merging|done)/,
+    );
+  });
+
+  it("orch grouping nests workers under orchestrator headers", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    const orchs = body.match(/class="todos-orch-group[^"]*"/g) ?? [];
+    expect(orchs.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("flat grouping renders chronological todo rows", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    // Find the flat view block.
+    const flatStart = body.indexOf('class="todos-view" data-group="flat"');
+    expect(flatStart).toBeGreaterThan(-1);
+    const flatEnd = body.indexOf("</div>", flatStart);
+    const flatBlock = body.slice(flatStart, flatEnd + 6);
+    const rows = flatBlock.match(/class="todos-row[^"]*"/g) ?? [];
+    expect(rows.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("todo rows expose status, text, owner, timestamp, and open-worker link", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    expect(body).toContain("todos-row__text");
+    expect(body).toContain("todos-row__owner");
+    expect(body).toContain("todos-row__time");
+    // Open-worker anchor must point to worker.html with a ticket query param.
+    expect(body).toMatch(/class="todos-row__open"[^>]+href="\.\/worker\.html\?ticket=CTL-/);
+  });
+
+  it("todo rows cover all three statuses via data-status attribute", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    expect(body).toMatch(/class="todos-row[^"]*"\s+data-status="pending"/);
+    expect(body).toMatch(/class="todos-row[^"]*"\s+data-status="in-progress"/);
+    expect(body).toMatch(/class="todos-row[^"]*"\s+data-status="completed"/);
+  });
+
+  it("renders empty-state blocks for filtered + no-data variants", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    expect(body).toContain("todos-empty--filtered");
+    expect(body).toContain("todos-empty--no-data");
+  });
+
+  it("contains no emoji and no exclamation marks in visible prose", async () => {
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    const startMarker = '<div class="mockup-container">';
+    const endMarker = "</main>";
+    const start = body.indexOf(startMarker);
+    const end = body.indexOf(endMarker, start + startMarker.length);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const prose = body.slice(start + startMarker.length, end);
+    expect(prose).not.toContain("!");
+    let hasEmoji = false;
+    for (const ch of prose) {
+      const cp = ch.codePointAt(0) ?? 0;
+      if (
+        (cp >= 0x1f300 && cp <= 0x1f5ff) ||
+        (cp >= 0x1f600 && cp <= 0x1f64f) ||
+        (cp >= 0x1f680 && cp <= 0x1f6ff) ||
+        (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+        (cp >= 0x1fa70 && cp <= 0x1faff)
+      ) {
+        hasEmoji = true;
+        break;
+      }
+    }
+    expect(hasEmoji).toBe(false);
+  });
+});
