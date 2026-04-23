@@ -109,6 +109,8 @@ run "main-worktree output invokes claude with main path" bash -c "
   grep -qE 'plugin marketplace add .*$MAIN1' '$SCRATCH/out1'
 "
 run "main-worktree output prints branch name" expect_contains "$SCRATCH/out1" "branch=main"
+run "main-worktree output mentions plugin update refresh" expect_contains "$SCRATCH/out1" "plugin update"
+run "main-worktree output mentions --plugin-dir escape hatch" expect_contains "$SCRATCH/out1" "--plugin-dir"
 
 # ── 5. refuses from linked worktree without --allow-worktree ─────────────
 MAIN2="$SCRATCH/repo2"

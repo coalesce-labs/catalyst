@@ -26,8 +26,8 @@ or via the GitHub Actions UI (`Run workflow` on `Release Please Scheduled Merge`
 
 `plugin.json.version` only changes when the Release PR merges (daily), so users installed via the
 public Catalyst marketplace auto-update at most once per day. If you need merged-but-not-yet-
-released commits — for example to dogfood changes between cuts — point Claude Code at a local
-checkout of this repo:
+released commits — for example to dogfood changes between cuts — register a local checkout as a
+dev marketplace:
 
 ```
 git clone https://github.com/coalesce-labs/catalyst.git  # or use your existing checkout
@@ -38,9 +38,37 @@ Run this from the main checkout, **not** a linked git worktree — the script re
 from a worktree because it would freeze the installed plugin at that branch's HEAD. Pass
 `--allow-worktree` to override.
 
-Afterwards, `git pull` in the checkout and restart Claude Code sessions to pick up the latest
-`main`. See `scripts/install-dev-marketplace.sh` for details and for the `--plugin-dir` escape
-hatch if caching surprises you.
+#### Refreshing after `git pull`
+
+Claude Code copies plugin files into a version-keyed cache at install time. A `git pull` does NOT
+propagate to the cache automatically. Use one of the two supported flows below. (There is no
+native live-read mode for `source: directory` marketplaces in Claude Code 2.1.118 —
+see `thoughts/shared/research/2026-04-22-CTL-122-plugin-cache-live-read.md` for the full
+investigation, including why symlinking the cache isn't the right default.)
+
+**Standard refresh** — works when the daily release has bumped `plugin.json.version` (once per
+day on average):
+
+```
+git -C /path/to/catalyst pull
+claude plugin update catalyst-dev@catalyst     # repeat per plugin: -pm, -meta, -analytics, -debugging
+# Restart Claude Code sessions to apply.
+```
+
+**Live-read escape hatch** — use during active feature development on a specific plugin, when
+you want every `git pull` or local edit to propagate without a version bump:
+
+```
+claude --plugin-dir /path/to/catalyst/plugins/dev
+# one --plugin-dir flag per plugin; bypasses all caching for the session
+```
+
+`--plugin-dir` is the official Claude Code dev mode. It's per-session (does not persist across
+restarts) and takes precedence over any installed marketplace plugin of the same name.
+
+To detect when a registered dev marketplace has drifted too far behind `origin/main`, run
+`plugins/dev/scripts/check-marketplace-drift.sh` (CTL-121). It warns when a `source: directory`
+entry is ≥5 commits or ≥24h behind.
 
 A broader `next` branch + companion marketplace entry (auto-updating for anyone who opts in) is
 designed but not yet implemented — see ADR-009 for tradeoffs and the planned follow-up.
