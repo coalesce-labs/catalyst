@@ -1,19 +1,23 @@
-# Catalyst Brand V2 — Mark assets
+# Catalyst Brand V2 — Mark, wordmark, lockups
 
-This folder holds the Catalyst V2 primary mark, delivered per **CTL-147** and following the
-**Ignition Chevron** direction picked in [CTL-146][ctl-146-direction] (PR #246).
+This folder holds the Catalyst V2 mark (CTL-147) plus the drawn wordmark and two lockups
+(CTL-148). Everything follows the **Ignition Chevron** direction picked in
+[CTL-146][ctl-146-direction] (PR #246).
 
 [ctl-146-direction]: ../../packages/tokens/docs/brand-v2-direction.md
 
 ## Files
 
-| File                  | `viewBox` | Path commands | Primary size range |
-|-----------------------|-----------|---------------|--------------------|
-| `mark.svg`            | `0 0 64 64` | 6 (≤ 20 cap)   | 32 px and above    |
-| `mark-simplified.svg` | `0 0 16 16` | 3 (≤ 8 cap)    | 16–32 px (favicons)|
+| File                     | `viewBox`   | Paths            | Primary size range        |
+|--------------------------|-------------|------------------|---------------------------|
+| `mark.svg`               | `0 0 64 64` | 2 (6 cmds ≤ 20)  | Mark at 32 px and above   |
+| `mark-simplified.svg`    | `0 0 16 16` | 1 (3 cmds ≤ 8)   | Mark at 16–32 px          |
+| `wordmark.svg`           | `0 0 656 100` | 8 (one per letter) | Wordmark stand-alone   |
+| `lockup-horizontal.svg`  | `0 0 806 100` | 2 mark + 8 wordmark | Primary lockup       |
+| `lockup-stacked.svg`     | `0 0 656 240` | 2 mark + 8 wordmark | Compact / square lockup |
 
-Both files ship without color: every path uses `stroke="currentColor"`, so the consuming
-surface controls tint.
+Every path uses `stroke="currentColor"` — no hex literals anywhere. The consuming surface
+drives the tint through CSS `color`.
 
 ## The two-size system
 
@@ -29,6 +33,79 @@ drawing optimised for its own grid.
 
 Below 32 px the inner chevron in the detailed mark collapses into visual noise, which is the
 reason the simplified mark exists as a separate file rather than a CSS scale.
+
+## Wordmark
+
+`wordmark.svg` is a drawn, stroke-based CATALYST — not a font export. Eight paths, one per
+letter (`data-letter="C"`, `"A1"`, `"T1"`, `"A2"`, `"L"`, `"Y"`, `"S"`, `"T2"`). The
+construction matches the chevron mark's straight-edge geometry: stroke-based, square caps,
+miter joins, no fills.
+
+- `viewBox="0 0 656 100"` — **cap-height 100** for easy sizing. Render at any height `h`
+  and the wordmark is `6.56 × h` wide.
+- Stroke-width is `10` units (10 % of cap height) so the wordmark's optical weight matches
+  the mark when they sit side-by-side.
+- Tracking is tight — roughly −0.01 em equivalent — so the word reads as one shape, not
+  eight.
+- Slightly condensed letter proportions keep the overall lockup compact.
+
+Typography pairing: the wordmark is designed to sit alongside **Space Grotesk** (System A)
+and **GT Super / Fraunces** (System B) without fighting either. It is uppercase, geometric,
+and has custom squared terminals so it does not read as a font render.
+
+## Lockups
+
+Two lockups ship as single SVG files with the mark embedded as a nested `<svg>` (so the
+mark's internal `viewBox="0 0 64 64"` coordinate system is preserved).
+
+### `lockup-horizontal.svg` — primary
+
+- Mark on the **left**, wordmark on the **right**.
+- **Gap** between mark and wordmark: `50` units = **0.5 × mark height** (per CTL-146's
+  direction spec: `Lockup gap: 0.5 × mark height`).
+- Mark is scaled to `100 × 100` so its height visually matches the wordmark's cap-height.
+- `viewBox="0 0 806 100"` — `100 (mark) + 50 (gap) + 656 (wordmark)`.
+- Vertically, the mark's visual center and the wordmark's cap center both sit at `y = 50`.
+
+### `lockup-stacked.svg` — compact / square
+
+- Mark **above**, wordmark **below**, both centered on a shared vertical axis.
+- **Vertical rhythm:** `40` units between the mark's baseline and the wordmark's cap line
+  (`0.4 × mark height`). Tighter than the horizontal gap so the two parts read as one
+  vertical stack, not two stacked blocks.
+- `viewBox="0 0 656 240"` — `100 (mark) + 40 (gap) + 100 (wordmark)`. Width matches the
+  wordmark since the mark is narrower.
+- Mark is centered horizontally at `x = 278` (= `(656 − 100) / 2`).
+
+### Clear space
+
+All lockups — including the mark used alone — require a minimum clear space of **0.5 × mark
+height** (`0.5 × cap-height` for wordmark-only use) on every side. No other graphic element
+may enter that zone.
+
+- Horizontal lockup at display size `h`: clear space `= 0.5 × h` on top/bottom/left/right.
+- Stacked lockup at display size `h`: clear space `= 0.125 × h` on every side (because `h`
+  is the 240-unit height, and 0.5 × mark-height = 0.5 × (100/240) × h ≈ 0.208 × h — round to
+  0.25 × h for safety).
+- Wordmark stand-alone at display height `h`: clear space `= 0.5 × h` on top/bottom,
+  `0.5 × h` on left/right.
+
+Rule of thumb: imagine a copy of the mark tucked against each edge of the bounding box. No
+copy, logo, icon, or photograph should cross that outer envelope.
+
+### Minimum size
+
+- `mark.svg` — min **32 px** (use `mark-simplified.svg` below 32 px).
+- `mark-simplified.svg` — min **16 px**.
+- `wordmark.svg` — min **80 px wide** (cap-height `80 / 6.56 ≈ 12 px`; below this the
+  strokes of S and A crossbars crush).
+- `lockup-horizontal.svg` — min **160 px wide**. Below this, switch to the stacked variant
+  or the mark-only.
+- `lockup-stacked.svg` — min **72 px wide**. Below this, switch to `mark-simplified.svg`
+  alone — the wordmark below the mark stops being legible.
+
+Rasterised usage (favicon, OG card, apple-touch-icon) is out of scope here — CTL-150 owns
+the raster set.
 
 ## Tinting via `currentColor`
 
@@ -115,9 +192,9 @@ not in this repo).
 
 - **Direction picked in:** CTL-146 (PR #246, merged 2026-04-22).
   `packages/tokens/docs/brand-v2-direction.md` carries the committable decision summary.
-- **Delivered in:** CTL-147.
+- **Mark delivered in:** CTL-147 (PR #258).
+- **Wordmark + lockups delivered in:** CTL-148 (this PR).
 - **V1 retirement:** out of scope here. V1 squircle-and-glyph files
   (`favicon.svg`, `website/public/favicon.svg`,
   `plugins/dev/scripts/orch-monitor/public/catalyst-logo.svg`) are replaced in the favicon-set
   ticket (CTL-150).
-- **Wordmark + lockups:** CTL-148. Not shipped here.
