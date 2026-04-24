@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://catalyst.coalescelabs.ai/schemas/pm/estimation-signal.schema.json",
+  "title": "AI-Native Ticket Estimation Signal (v1)",
+  "description": "Schema for the `estimation:` block emitted by any skill with ticket context and consumed by any skill that needs to estimate or forecast. Carried as YAML frontmatter in the ticket description, mirrored by Linear labels and the built-in Issue.estimate integer. See plugins/pm/docs/estimation-signal-schema.md for field-by-field rationale.",
+  "$comment": "Bump $id when adding new fields — `additionalProperties: false` is enforced at every level.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["estimation"],
+  "properties": {
+    "estimation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proposed_tshirt", "confidence", "source", "at"],
+      "properties": {
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "expected_loc": { "$ref": "#/$defs/bucketRange" },
+            "expected_files": { "$ref": "#/$defs/bucketRange" },
+            "domains_likely": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "uniqueItems": true
+            }
+          }
+        },
+        "structural": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "has_migration": { "type": "boolean" },
+            "has_frontend": { "type": "boolean" },
+            "has_backend": { "type": "boolean" },
+            "has_breaking_change": { "type": "boolean" },
+            "needs_spike": { "type": "boolean" }
+          }
+        },
+        "uncertainty": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "concreteness": { "$ref": "#/$defs/levelEnum" },
+            "acceptance_criteria_present": { "type": "boolean" },
+            "linked_design_doc": { "type": ["string", "null"] }
+          }
+        },
+        "risk": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "file_churn_90d": { "$ref": "#/$defs/levelEnum" },
+            "downstream_callers": { "$ref": "#/$defs/levelEnum" },
+            "shared_kernel_contact": { "type": "boolean" }
+          }
+        },
+        "reference_class": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "similar_closed_tickets": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9]*-[0-9]+$"
+              },
+              "uniqueItems": true
+            },
+            "rationale": { "type": "string" }
+          }
+        },
+        "proposed_tshirt": {
+          "type": "string",
+          "enum": ["XS", "S", "M", "L", "XL"]
+        },
+        "confidence": { "$ref": "#/$defs/levelEnum" },
+        "source": {
+          "type": "string",
+          "enum": ["inline-author", "estimate-ticket-skill", "retroactive-bulk", "human"]
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "bucketRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["low", "mid", "high"],
+      "properties": {
+        "low": { "type": "integer", "minimum": 0 },
+        "mid": { "type": "integer", "minimum": 0 },
+        "high": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "levelEnum": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    }
+  }
+}
