@@ -10,9 +10,17 @@ import {
   type SessionState,
   type SessionQuery,
 } from "./session-store";
+import {
+  loadProjectsConfig,
+  projectsConfigPath,
+  resolveProjectIdentity,
+  type ProjectsConfig,
+  type ProjectIdentity,
+} from "./projects-config";
 
 export type { SessionState, SessionQuery } from "./session-store";
 export type { RollupBriefing, ShippedItem } from "./rollup";
+export type { ProjectIdentity } from "./projects-config";
 
 export interface DefinitionOfDone {
   testsWrittenFirst?: boolean;
@@ -114,6 +122,7 @@ export interface OrchestratorState {
   briefings: Record<number, string>;
   rollupBriefing?: RollupBriefing;
   attention: unknown[];
+  project?: ProjectIdentity | null;
 }
 
 interface WorkspaceStats {
@@ -406,13 +415,21 @@ function corruptWorkerPlaceholder(filename: string, error: string): WorkerState 
   };
 }
 
-export function readOrchestratorState(orchDir: string, workspace = "default"): OrchestratorState {
+export function readOrchestratorState(
+  orchDir: string,
+  workspace = "default",
+  projectsConfig?: ProjectsConfig | null,
+): OrchestratorState {
   const id = basename(orchDir);
   const statePath = join(orchDir, "state.json");
   const stateRead = readJson(statePath);
   const state = isRecord(stateRead.value) ? stateRead.value : {};
 
   const workers: Record<string, WorkerState> = {};
+  // Track worktreePaths from raw worker signals so we can resolve project
+  // identity for orchestrators running under the flat (workspace="default")
+  // layout, where the slug must be sourced from a worker's .catalyst/config.json.
+  const workerWorktreePaths: string[] = [];
   const workersDir = join(orchDir, "workers");
   if (existsSync(workersDir)) {
     let entries: string[] = [];
@@ -435,6 +452,8 @@ export function readOrchestratorState(orchDir: string, workspace = "default"): O
       }
       const signal = result.value;
       const key = asString(signal.ticket) || file.replace(/\.json$/, "");
+      const wt = asString(signal.worktreePath);
+      if (wt) workerWorktreePaths.push(wt);
       try {
         const w = toWorkerState(signal);
         w.activity = readWorkerActivity(orchDir, key, w.pid);
@@ -506,6 +525,14 @@ export function readOrchestratorState(orchDir: string, workspace = "default"): O
     attention,
   };
   if (rollupBriefing) result.rollupBriefing = rollupBriefing;
+  if (projectsConfig) {
+    const candidatePath =
+      workerWorktreePaths.find((p) => existsSync(join(p, ".catalyst", "config.json"))) ??
+      workerWorktreePaths[0] ??
+      null;
+    const identity = resolveProjectIdentity(workspace, candidatePath, projectsConfig);
+    result.project = identity;
+  }
   return result;
 }
 
@@ -576,10 +603,12 @@ export function buildSnapshot(
   const scanned = options.runsDir
     ? scanAllOrchestrators({ runsDir: options.runsDir, wtDir: baseDir })
     : scanOrchestrators(baseDir);
+  // Load projects.json once per snapshot — file is small and missing is cheap.
+  const projectsConfig = loadProjectsConfig(projectsConfigPath());
   const orchestrators: OrchestratorState[] = [];
   for (const { path, workspace } of scanned) {
     try {
-      orchestrators.push(readOrchestratorState(path, workspace));
+      orchestrators.push(readOrchestratorState(path, workspace, projectsConfig));
     } catch (err) {
       console.error(`[state-reader] readOrchestratorState failed for ${path}:`, err);
     }

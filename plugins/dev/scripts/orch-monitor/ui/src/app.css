@@ -17,6 +17,18 @@
   --color-yellow: #eabc3b;
   --color-blue: #4ea1ff;
 
+  /* CTL-169 — project identity palette. Each color passes WCAG 3:1 contrast
+     against both dark surface-1 (#111318) and light surface-1 (#ffffff). Keep
+     in sync with PALETTE_HEX in lib/projects-config.ts. */
+  --palette-amber: #c07a1e;
+  --palette-rose: #d04050;
+  --palette-violet: #9470d4;
+  --palette-emerald: #359963;
+  --palette-teal: #369999;
+  --palette-sky: #3e85d0;
+  --palette-coral: #cc6a54;
+  --palette-indigo: #6b7ecb;
+
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   /* shadcn/ui semantic color utilities — aliased to existing tokens via :root */
@@ -47,6 +59,10 @@
    tokens remain unchanged and continue to resolve text color utilities
    (text-muted, text-accent) through the @theme inline block above. */
 :root {
+  /* CTL-169 — defaults to transparent so unscoped surfaces are invisible
+     until a descendant sets data-project-color. */
+  --project-color: transparent;
+
   --background: var(--color-surface-0);
   --foreground: var(--color-fg);
   --card: var(--color-surface-1);
@@ -287,3 +303,17 @@ body {
 .md-content th {
   background: var(--color-surface-3);
 }
+
+/* CTL-169 — data-project-color attribute cascades --project-color locally.
+   Scoping rule of thumb:
+     - A descendant with data-project-color wins over an ancestor.
+     - Absence → transparent (from :root default), so dots/slabs disappear.
+   Keep hex values in sync with PALETTE_HEX in lib/projects-config.ts. */
+[data-project-color="amber"]   { --project-color: var(--palette-amber); }
+[data-project-color="rose"]    { --project-color: var(--palette-rose); }
+[data-project-color="violet"]  { --project-color: var(--palette-violet); }
+[data-project-color="emerald"] { --project-color: var(--palette-emerald); }
+[data-project-color="teal"]    { --project-color: var(--palette-teal); }
+[data-project-color="sky"]     { --project-color: var(--palette-sky); }
+[data-project-color="coral"]   { --project-color: var(--palette-coral); }
+[data-project-color="indigo"]  { --project-color: var(--palette-indigo); }

@@ -17,6 +17,7 @@ function aggregateStats(
   let total = 0,
     done = 0,
     failed = 0,
+    abandoned = 0,
     active = 0,
     totalCost = 0,
     wallMs = 0,
@@ -29,6 +30,7 @@ function aggregateStats(
     total += s.total;
     done += s.done;
     failed += s.failed;
+    abandoned += s.abandoned;
     active += s.active;
     totalCost += s.totalCost;
     totalDurationMs += s.totalDurationMs;
@@ -49,6 +51,7 @@ function aggregateStats(
     total,
     done,
     failed,
+    abandoned,
     active,
     pct,
     totalCost,
@@ -67,7 +70,10 @@ export function KpiStrip({ orchestrators, getAnalytics }: KpiStripProps) {
   const animCost = useAnimatedNumber(s.totalCost);
 
   return (
-    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+    <div
+      className="grid grid-cols-2 gap-3 border-t-2 pt-3 lg:grid-cols-4"
+      style={{ borderTopColor: "var(--project-color)" }}
+    >
       <MetricCard
         label="Completion"
         value={`${Math.round(animPct)}%`}

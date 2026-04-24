@@ -123,6 +123,25 @@ export interface RollupBriefing {
   generatedBy: "auto" | "manual" | "ai";
 }
 
+export const PALETTE_COLORS = [
+  "amber",
+  "rose",
+  "violet",
+  "emerald",
+  "teal",
+  "sky",
+  "coral",
+  "indigo",
+] as const;
+export type PaletteColor = (typeof PALETTE_COLORS)[number];
+
+export interface ProjectIdentity {
+  key: string;
+  label: string;
+  color: PaletteColor;
+  iconPath?: string | null;
+}
+
 export interface OrchestratorState {
   id: string;
   path: string;
@@ -136,6 +155,7 @@ export interface OrchestratorState {
   briefings: Record<number, string>;
   rollupBriefing?: RollupBriefing;
   attention: AttentionItem[];
+  project?: ProjectIdentity | null;
 }
 
 export interface AttentionItem {
