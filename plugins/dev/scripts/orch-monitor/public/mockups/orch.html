@@ -982,6 +982,308 @@
       [data-system="precision-instrument"] .event-row {
         border-color: var(--color-border-default);
       }
+
+      /* ============================================================
+       * Todos panel (CTL-171) — orchestrator-scoped roll-up of
+       * TodoWrite payloads from every worker in this orch. Lifted
+       * from todos.html; scoped to the .todos-panel container so
+       * the filter attributes (data-todos-group/data-todos-status)
+       * cannot collide with future page-level axes.
+       * ============================================================ */
+
+      .orch-section--collapsible .orch-section__heading {
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .orch-section--collapsible .orch-section__heading:hover h2 {
+        color: var(--color-accent);
+      }
+
+      .orch-section__toggle {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+        background: transparent;
+        border: 1px solid var(--color-border-default);
+        border-radius: var(--radius-sm);
+        padding: var(--spacing-1) var(--spacing-3);
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-2);
+        transition: border-color var(--motion-duration-state) var(--motion-easing-standard),
+          color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .orch-section__toggle:hover {
+        border-color: var(--color-border-strong);
+        color: var(--color-text-hi);
+      }
+
+      .orch-section__chevron {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-right: 1px solid currentColor;
+        border-bottom: 1px solid currentColor;
+        transform: rotate(45deg);
+        transition: transform var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .orch-section[data-collapsed="true"] .orch-section__chevron {
+        transform: rotate(-45deg);
+      }
+
+      .orch-section[data-collapsed="true"] .orch-section__body {
+        display: none;
+      }
+
+      .orch-section__body {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .todos-filter-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--spacing-3) var(--spacing-4);
+        padding: var(--spacing-3) var(--spacing-4);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+      }
+
+      .todos-filter__status,
+      .todos-filter__group {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-2);
+      }
+
+      .todos-filter__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .todos-filter__search {
+        flex: 1;
+        min-width: 180px;
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-sm);
+        color: var(--color-text-hi);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+      }
+
+      .todos-filter__search::placeholder {
+        color: var(--color-text-lo);
+      }
+
+      .todos-filter__search:focus {
+        outline: none;
+        border-color: var(--color-accent);
+      }
+
+      /* Filter chip. Active state is keyed off the panel's own
+         data-todos-status / data-todos-group attributes so it does
+         not collide with todos.html's page-level data-status. */
+      .todos-panel .filter-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 2px var(--spacing-3);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-full);
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      .todos-panel .filter-chip:hover {
+        color: var(--color-text-hi);
+        border-color: var(--color-border-default);
+      }
+
+      .todos-panel[data-todos-status="all"] .filter-chip[data-status="all"],
+      .todos-panel[data-todos-status="pending"] .filter-chip[data-status="pending"],
+      .todos-panel[data-todos-status="in-progress"] .filter-chip[data-status="in-progress"],
+      .todos-panel[data-todos-status="completed"] .filter-chip[data-status="completed"],
+      .todos-panel[data-todos-group="worker"] .filter-chip[data-group="worker"],
+      .todos-panel[data-todos-group="flat"] .filter-chip[data-group="flat"] {
+        color: var(--color-accent);
+        border-color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+      }
+
+      .todos-panel .todos-view {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .todos-panel[data-todos-group="worker"] .todos-view[data-group="flat"],
+      .todos-panel[data-todos-group="flat"] .todos-view[data-group="worker"] {
+        display: none;
+      }
+
+      .todos-panel[data-todos-status="pending"] .todos-row:not([data-status="pending"]),
+      .todos-panel[data-todos-status="in-progress"] .todos-row:not([data-status="in-progress"]),
+      .todos-panel[data-todos-status="completed"] .todos-row:not([data-status="completed"]) {
+        display: none;
+      }
+
+      .todos-worker-group {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-lg);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        padding: var(--spacing-4) var(--spacing-5);
+      }
+
+      .todos-worker-group__head {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-3);
+        flex-wrap: wrap;
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .todos-worker-group__name {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-heading);
+        line-height: var(--line-height-heading);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-hi);
+      }
+
+      .todos-worker-group__meta {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-3);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-text-lo);
+      }
+
+      .todos-worker-group__open {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-info);
+        text-decoration: none;
+      }
+
+      .todos-worker-group__open:hover {
+        color: var(--color-accent);
+      }
+
+      .todos-worker-group__list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+      }
+
+      .todos-row {
+        display: grid;
+        grid-template-columns: auto 1fr auto auto auto;
+        gap: var(--spacing-3) var(--spacing-4);
+        align-items: baseline;
+        padding: var(--spacing-2) var(--spacing-3);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-sm);
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+      }
+
+      .todos-row__status {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+      }
+
+      .todos-row[data-status="pending"] .todos-row__status::before {
+        content: "☐";
+        color: var(--color-text-disabled);
+      }
+
+      .todos-row[data-status="in-progress"] .todos-row__status::before {
+        content: "▸";
+        color: var(--color-accent);
+      }
+
+      .todos-row[data-status="completed"] .todos-row__status::before {
+        content: "✓";
+        color: var(--color-success);
+      }
+
+      .todos-row[data-status="completed"] .todos-row__text {
+        color: var(--color-text-lo);
+      }
+
+      .todos-row[data-status="in-progress"] .todos-row__text {
+        color: var(--color-text-hi);
+      }
+
+      .todos-row__text {
+        color: var(--color-text-md);
+      }
+
+      .todos-row__owner {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .todos-row__time {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .todos-row__open {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-info);
+        text-decoration: none;
+      }
+
+      .todos-row__open:hover {
+        color: var(--color-accent);
+      }
     </style>
   </head>
   <body>
@@ -1364,6 +1666,263 @@
                 </div>
               </div>
             </section>
+
+            <!-- ================ TODOS PANEL (CTL-171) ================ -->
+            <section
+              class="orch-section orch-section--collapsible todos-panel"
+              id="todos-panel"
+              data-collapsed="true"
+              data-todos-group="worker"
+              data-todos-status="all"
+              aria-label="Todos"
+            >
+              <header
+                class="orch-section__heading"
+                id="todos-panel-heading"
+                role="button"
+                tabindex="0"
+                aria-controls="todos-panel-body"
+                aria-expanded="false"
+              >
+                <h2>Todos</h2>
+                <span class="eyebrow">
+                  9 items across 6 workers · <span class="orch-section__toggle-hint">click to expand</span>
+                </span>
+                <button
+                  type="button"
+                  class="orch-section__toggle"
+                  id="todos-panel-toggle"
+                  aria-controls="todos-panel-body"
+                  aria-expanded="false"
+                >
+                  <span class="orch-section__chevron" aria-hidden="true"></span>
+                  <span class="orch-section__toggle-label">Expand</span>
+                </button>
+              </header>
+
+              <div class="orch-section__body" id="todos-panel-body">
+                <div class="todos-filter-bar" role="toolbar" aria-label="Todo filters">
+                  <div class="todos-filter__status" role="group" aria-label="Status">
+                    <span class="todos-filter__label">Status</span>
+                    <button type="button" class="filter-chip" data-status="all">All</button>
+                    <button type="button" class="filter-chip" data-status="pending">Pending</button>
+                    <button type="button" class="filter-chip" data-status="in-progress">In progress</button>
+                    <button type="button" class="filter-chip" data-status="completed">Completed</button>
+                  </div>
+                  <div class="todos-filter__group" role="group" aria-label="Grouping">
+                    <span class="todos-filter__label">Group</span>
+                    <button type="button" class="filter-chip" data-group="worker">By worker</button>
+                    <button type="button" class="filter-chip" data-group="flat">Flat</button>
+                  </div>
+                  <input
+                    class="todos-filter__search"
+                    type="search"
+                    placeholder="Search todos in this orch…"
+                    data-search
+                    aria-label="Search todos"
+                  />
+                </div>
+
+                <div class="todos-view" data-group="worker" role="list">
+                  <article class="todos-worker-group" role="listitem">
+                    <header class="todos-worker-group__head">
+                      <span class="chip chip--ticket">CTL-138</span>
+                      <span class="chip chip--merging">Merging</span>
+                      <h3 class="todos-worker-group__name">worker.html mockup</h3>
+                      <div class="todos-worker-group__meta">
+                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-138">
+                          open worker
+                        </a>
+                      </div>
+                    </header>
+                    <ul class="todos-worker-group__list">
+                      <li class="todos-row" data-status="in-progress">
+                        <span class="todos-row__status" aria-label="in progress"></span>
+                        <span class="todos-row__text">
+                          Shipping. Commit, push, create PR, arm auto-merge.
+                        </span>
+                        <span class="todos-row__owner">CTL-138</span>
+                        <span class="todos-row__time">17:41:02</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                      </li>
+                      <li class="todos-row" data-status="pending">
+                        <span class="todos-row__status" aria-label="pending"></span>
+                        <span class="todos-row__text">
+                          Poll <code>gh pr view</code> every 60s until state=MERGED.
+                        </span>
+                        <span class="todos-row__owner">CTL-138</span>
+                        <span class="todos-row__time">17:41:02</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                      </li>
+                      <li class="todos-row" data-status="completed">
+                        <span class="todos-row__status" aria-label="completed"></span>
+                        <span class="todos-row__text">Implement worker.html sections.</span>
+                        <span class="todos-row__owner">CTL-138</span>
+                        <span class="todos-row__time">17:34:18</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                      </li>
+                    </ul>
+                  </article>
+
+                  <article class="todos-worker-group" role="listitem">
+                    <header class="todos-worker-group__head">
+                      <span class="chip chip--ticket">CTL-137</span>
+                      <span class="chip chip--running">Running</span>
+                      <h3 class="todos-worker-group__name">home.html polish</h3>
+                      <div class="todos-worker-group__meta">
+                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-137">
+                          open worker
+                        </a>
+                      </div>
+                    </header>
+                    <ul class="todos-worker-group__list">
+                      <li class="todos-row" data-status="in-progress">
+                        <span class="todos-row__status" aria-label="in progress"></span>
+                        <span class="todos-row__text">
+                          Implement session-centric Kanban columns.
+                        </span>
+                        <span class="todos-row__owner">CTL-137</span>
+                        <span class="todos-row__time">17:42:31</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
+                      </li>
+                      <li class="todos-row" data-status="completed">
+                        <span class="todos-row__status" aria-label="completed"></span>
+                        <span class="todos-row__text">Research project dot design tokens.</span>
+                        <span class="todos-row__owner">CTL-137</span>
+                        <span class="todos-row__time">17:30:07</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
+                      </li>
+                    </ul>
+                  </article>
+
+                  <article class="todos-worker-group" role="listitem">
+                    <header class="todos-worker-group__head">
+                      <span class="chip chip--ticket">CTL-145</span>
+                      <span class="chip chip--ci-fail">CI fail</span>
+                      <h3 class="todos-worker-group__name">keybindings fix</h3>
+                      <div class="todos-worker-group__meta">
+                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-145">
+                          open worker
+                        </a>
+                      </div>
+                    </header>
+                    <ul class="todos-worker-group__list">
+                      <li class="todos-row" data-status="in-progress">
+                        <span class="todos-row__status" aria-label="in progress"></span>
+                        <span class="todos-row__text">
+                          Update keybindings test — expected escape, got tab.
+                        </span>
+                        <span class="todos-row__owner">CTL-145</span>
+                        <span class="todos-row__time">17:38:02</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-145">open</a>
+                      </li>
+                    </ul>
+                  </article>
+
+                  <article class="todos-worker-group" role="listitem">
+                    <header class="todos-worker-group__head">
+                      <span class="chip chip--ticket">CTL-139</span>
+                      <span class="chip chip--needs-me">Needs me</span>
+                      <h3 class="todos-worker-group__name">review thread</h3>
+                      <div class="todos-worker-group__meta">
+                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-139">
+                          open worker
+                        </a>
+                      </div>
+                    </header>
+                    <ul class="todos-worker-group__list">
+                      <li class="todos-row" data-status="pending">
+                        <span class="todos-row__status" aria-label="pending"></span>
+                        <span class="todos-row__text">
+                          Wait for reviewer response on Codex XSS flag.
+                        </span>
+                        <span class="todos-row__owner">CTL-139</span>
+                        <span class="todos-row__time">17:32:44</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
+                      </li>
+                      <li class="todos-row" data-status="completed">
+                        <span class="todos-row__status" aria-label="completed"></span>
+                        <span class="todos-row__text">Draft sanitized query param helper.</span>
+                        <span class="todos-row__owner">CTL-139</span>
+                        <span class="todos-row__time">17:20:18</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
+                      </li>
+                    </ul>
+                  </article>
+                </div>
+
+                <div class="todos-view" data-group="flat" role="list">
+                  <ul class="todos-worker-group__list" style="gap: var(--spacing-2);">
+                    <li class="todos-row" data-status="in-progress">
+                      <span class="todos-row__status" aria-label="in progress"></span>
+                      <span class="todos-row__text">
+                        Implement session-centric Kanban columns.
+                      </span>
+                      <span class="todos-row__owner">CTL-137</span>
+                      <span class="todos-row__time">17:42:31</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
+                    </li>
+                    <li class="todos-row" data-status="in-progress">
+                      <span class="todos-row__status" aria-label="in progress"></span>
+                      <span class="todos-row__text">
+                        Shipping. Commit, push, create PR, arm auto-merge.
+                      </span>
+                      <span class="todos-row__owner">CTL-138</span>
+                      <span class="todos-row__time">17:41:02</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                    </li>
+                    <li class="todos-row" data-status="pending">
+                      <span class="todos-row__status" aria-label="pending"></span>
+                      <span class="todos-row__text">
+                        Poll <code>gh pr view</code> every 60s until state=MERGED.
+                      </span>
+                      <span class="todos-row__owner">CTL-138</span>
+                      <span class="todos-row__time">17:41:02</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                    </li>
+                    <li class="todos-row" data-status="in-progress">
+                      <span class="todos-row__status" aria-label="in progress"></span>
+                      <span class="todos-row__text">
+                        Update keybindings test — expected escape, got tab.
+                      </span>
+                      <span class="todos-row__owner">CTL-145</span>
+                      <span class="todos-row__time">17:38:02</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-145">open</a>
+                    </li>
+                    <li class="todos-row" data-status="completed">
+                      <span class="todos-row__status" aria-label="completed"></span>
+                      <span class="todos-row__text">Implement worker.html sections.</span>
+                      <span class="todos-row__owner">CTL-138</span>
+                      <span class="todos-row__time">17:34:18</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                    </li>
+                    <li class="todos-row" data-status="pending">
+                      <span class="todos-row__status" aria-label="pending"></span>
+                      <span class="todos-row__text">
+                        Wait for reviewer response on Codex XSS flag.
+                      </span>
+                      <span class="todos-row__owner">CTL-139</span>
+                      <span class="todos-row__time">17:32:44</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
+                    </li>
+                    <li class="todos-row" data-status="completed">
+                      <span class="todos-row__status" aria-label="completed"></span>
+                      <span class="todos-row__text">Research project dot design tokens.</span>
+                      <span class="todos-row__owner">CTL-137</span>
+                      <span class="todos-row__time">17:30:07</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
+                    </li>
+                    <li class="todos-row" data-status="completed">
+                      <span class="todos-row__status" aria-label="completed"></span>
+                      <span class="todos-row__text">Draft sanitized query param helper.</span>
+                      <span class="todos-row__owner">CTL-139</span>
+                      <span class="todos-row__time">17:20:18</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </section>
           </div>
 
           <!-- ================ EVENTS SIDEBAR ================ -->
@@ -1512,6 +2071,89 @@
             toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
           });
         }
+      })();
+
+      // CTL-171 — todos panel. Collapsible wrapper persists open/closed state
+      // to sessionStorage so the panel stays closed across page reloads in
+      // the same browser tab. Filter chips flip attributes on the panel
+      // itself (not the document), so the orch-scoped filters never collide
+      // with any future page-level filter axis.
+      (function () {
+        const SS_KEY = "catalyst.orch.todos.collapsed";
+        const panel = document.getElementById("todos-panel");
+        if (!panel) return;
+
+        const heading = document.getElementById("todos-panel-heading");
+        const toggle = document.getElementById("todos-panel-toggle");
+        const toggleLabel = toggle ? toggle.querySelector(".orch-section__toggle-label") : null;
+        const hint = panel.querySelector(".orch-section__toggle-hint");
+
+        function readCollapsed() {
+          try {
+            const stored = window.sessionStorage.getItem(SS_KEY);
+            if (stored === "false") return false;
+            if (stored === "true") return true;
+          } catch (_e) {
+            /* sessionStorage unavailable — fall through to default */
+          }
+          return panel.getAttribute("data-collapsed") !== "false";
+        }
+
+        function writeCollapsed(collapsed) {
+          try {
+            window.sessionStorage.setItem(SS_KEY, collapsed ? "true" : "false");
+          } catch (_e) {
+            /* sessionStorage unavailable — purely visual state is still applied */
+          }
+        }
+
+        function applyCollapsed(collapsed) {
+          panel.setAttribute("data-collapsed", collapsed ? "true" : "false");
+          const expanded = collapsed ? "false" : "true";
+          if (heading) heading.setAttribute("aria-expanded", expanded);
+          if (toggle) toggle.setAttribute("aria-expanded", expanded);
+          if (toggleLabel) toggleLabel.textContent = collapsed ? "Expand" : "Collapse";
+          if (hint) hint.textContent = collapsed ? "click to expand" : "click to collapse";
+        }
+
+        function setCollapsed(collapsed) {
+          applyCollapsed(collapsed);
+          writeCollapsed(collapsed);
+        }
+
+        applyCollapsed(readCollapsed());
+
+        if (heading) {
+          heading.addEventListener("click", (ev) => {
+            // Ignore clicks on the search input, chips, or links inside the panel.
+            const t = ev.target;
+            if (t && typeof t.closest === "function") {
+              if (t.closest(".orch-section__body")) return;
+            }
+            const nowCollapsed = panel.getAttribute("data-collapsed") !== "true";
+            setCollapsed(nowCollapsed);
+          });
+          heading.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter" || ev.key === " ") {
+              ev.preventDefault();
+              const nowCollapsed = panel.getAttribute("data-collapsed") !== "true";
+              setCollapsed(nowCollapsed);
+            }
+          });
+        }
+
+        panel.querySelectorAll(".filter-chip[data-status]").forEach((chip) => {
+          chip.addEventListener("click", () => {
+            const next = chip.getAttribute("data-status") || "all";
+            panel.setAttribute("data-todos-status", next);
+          });
+        });
+        panel.querySelectorAll(".filter-chip[data-group]").forEach((chip) => {
+          chip.addEventListener("click", () => {
+            const next = chip.getAttribute("data-group") || "worker";
+            panel.setAttribute("data-todos-group", next);
+          });
+        });
       })();
     </script>
     <script src="./_shared/chrome.js"></script>

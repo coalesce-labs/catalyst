@@ -30,6 +30,9 @@ describe("chrome.js pure helpers — SYSTEMS/THEMES/GNAV constants", () => {
   });
 
   it("exposes the full g-prefix nav table per CTL-145", () => {
+    // CTL-171 folded todos.html into orch.html's collapsible panel and freed
+    // the `t` slot. The standalone todos page still serves (with a deprecation
+    // banner) but is no longer reachable via the g-prefix keybinding.
     expect(chrome.GNAV).toEqual({
       h: "index.html",
       d: "orch.html",
@@ -37,7 +40,6 @@ describe("chrome.js pure helpers — SYSTEMS/THEMES/GNAV constants", () => {
       c: "comms.html",
       b: "briefing.html",
       v: "agent-graph.html",
-      t: "todos.html",
       r: "brand.html",
     });
   });
@@ -234,11 +236,12 @@ describe("chrome.js pure helpers — isMacPlatform", () => {
 });
 
 describe("chrome.js pure helpers — paletteActions", () => {
-  it("returns 11 actions (8 nav + 2 appearance + 1 help)", () => {
+  it("returns 10 actions (7 nav + 2 appearance + 1 help)", () => {
     // CTL-178 removed the cycle-system appearance action alongside the
     // precision-instrument system, leaving toggle-theme and cycle-palette.
+    // CTL-171 removed the todos.html nav entry, dropping the nav count to 7.
     const actions = chrome.paletteActions(chrome.GNAV);
-    expect(actions.length).toBe(11);
+    expect(actions.length).toBe(10);
   });
 
   it("covers every GNAV key with a nav action", () => {

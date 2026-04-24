@@ -538,6 +538,51 @@
       [data-empty="no-data"] .todos-view {
         display: none;
       }
+
+      /* ============================================================
+       * Deprecation banner (CTL-171)
+       * ============================================================ */
+
+      .deprecation-banner {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-default);
+        border-left: 2px solid var(--color-warning);
+        border-radius: var(--radius-lg);
+        padding: var(--spacing-3) var(--spacing-4);
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-3);
+        flex-wrap: wrap;
+      }
+
+      .deprecation-banner__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-warning);
+      }
+
+      .deprecation-banner__body {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        line-height: var(--line-height-body);
+        color: var(--color-text-md);
+      }
+
+      .deprecation-banner__link {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-info);
+        text-decoration: none;
+      }
+
+      .deprecation-banner__link:hover {
+        color: var(--color-accent);
+      }
     </style>
   </head>
   <body>
@@ -547,6 +592,17 @@
           <span class="mockup-topbar__mark">catalyst</span>
           <span class="eyebrow">Todos</span>
         </header>
+
+        <aside class="deprecation-banner" role="note" aria-label="Page deprecation notice">
+          <span class="deprecation-banner__label">Deprecated</span>
+          <span class="deprecation-banner__body">
+            Todos are now in the orchestrator detail view. This page will be removed in a
+            follow-up commit.
+          </span>
+          <a class="deprecation-banner__link" href="./orch.html#todos-panel">
+            Open in orch detail
+          </a>
+        </aside>
 
         <section class="page-heading">
           <span class="eyebrow">TodoWrite roll-up</span>
