@@ -658,6 +658,31 @@ missing `linearis` CLI (CTL-69):
 The orchestrator's safety-net poll loop calls the same helper when it independently confirms a
 PR has merged, so both paths stay in sync.
 
+**Step 5: File improvement findings (CTL-183 routing, optional)**
+
+If the worker captured any improvement findings during the run (per [[CTL-176]] — inert until
+that ticket lands), route each through the feedback helper. Runs as a no-op if no findings were
+collected. In orchestrator-dispatched workers, stdin is not a TTY and `CATALYST_AUTONOMOUS=1`
+is expected to be set — the helper silently skips filing when consent is not already granted,
+never prompts. Standalone oneshot runs prompt interactively once and persist "yes":
+
+```bash
+FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
+CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+
+if [ -x "$FEEDBACK" ] && [ -x "$CONSENT" ] && [ -n "${FINDINGS[*]:-}" ]; then
+  if [ "$("$CONSENT" check)" != "granted" ] && [ -z "${CATALYST_AUTONOMOUS:-}" ] && [ -t 0 ]; then
+    read -r -p "File ${#FINDINGS[@]} improvement tickets at end of run? [Y/n] " yn
+    case "$yn" in [Nn]*) : ;; *) "$CONSENT" grant >/dev/null ;; esac
+  fi
+  if [ "$("$CONSENT" check)" = "granted" ]; then
+    for F in "${FINDINGS[@]}"; do
+      "$FEEDBACK" --title "${F%%$'\n'*}" --body "$F" --skill oneshot --json || true
+    done
+  fi
+fi
+```
+
 **If `--no-merge` was set**, skip Steps 2–3 entirely and report PR status instead:
 
 ```

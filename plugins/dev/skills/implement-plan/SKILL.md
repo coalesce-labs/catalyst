@@ -253,6 +253,31 @@ Agent(subagent_type="pr-review-toolkit:pr-test-analyzer",
 
 If critical gaps exist, write the missing tests.
 
+### File Improvement Findings (Optional)
+
+If the implementation surfaced any improvement findings worth filing as follow-up tickets
+(per [[CTL-176]] — inert until that ticket lands), route each through the feedback helper.
+`implement-plan` usually runs under another orchestrator or under `/oneshot`, so prefer the
+calling skill's filing step when one exists; the block below is a safety net for direct
+invocations:
+
+```bash
+FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
+CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+
+if [ -x "$FEEDBACK" ] && [ -x "$CONSENT" ] && [ -n "${FINDINGS[*]:-}" ]; then
+  if [ "$("$CONSENT" check)" != "granted" ] && [ -z "${CATALYST_AUTONOMOUS:-}" ] && [ -t 0 ]; then
+    read -r -p "File ${#FINDINGS[@]} improvement tickets now? [Y/n] " yn
+    case "$yn" in [Nn]*) : ;; *) "$CONSENT" grant >/dev/null ;; esac
+  fi
+  if [ "$("$CONSENT" check)" = "granted" ]; then
+    for F in "${FINDINGS[@]}"; do
+      "$FEEDBACK" --title "${F%%$'\n'*}" --body "$F" --skill implement-plan --json || true
+    done
+  fi
+fi
+```
+
 ### End Session Tracking
 
 After all quality gates pass (or are skipped), end the session:
