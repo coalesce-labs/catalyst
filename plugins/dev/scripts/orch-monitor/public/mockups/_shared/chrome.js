@@ -1,18 +1,19 @@
 /*
- * Mockup harness chrome — floating system switcher + global keybindings.
+ * Mockup harness chrome — global keybindings + topbar enhancement.
  *
  * Two axes persist to localStorage under "catalyst.mockup.prefs":
- *   - system:  operator-console | precision-instrument  (html[data-system])
+ *   - system:  operator-console                         (html[data-system])
  *   - theme:   dark | light                             (html[data-theme])
  *
  * System resolution priority: window.__catalystMockupPrefs (set by pre-paint
  * bootstrap) > URL query string > localStorage > default. URL stays clean —
- * the default value is never written as a query param.
+ * the default value is never written as a query param. The SYSTEMS list is
+ * currently a single entry (operator-console) — the axis is kept for a future
+ * second system and for URL validation.
  *
  * Global keybindings (see README.md for the full table):
  *   g h/d/w/c/b/v/t/r  — navigate to the matching mockup page
  *   ⇧D                 — toggle theme (dark ↔ light)
- *   .                  — cycle system (same as pill click)
  *   p                  — cycle palette (no-op until palettes.css ships)
  *   /                  — focus search input if present
  *   ?                  — open keybinding cheat sheet overlay
@@ -32,12 +33,8 @@
 (function () {
   const LS_KEY = "catalyst.mockup.prefs";
   const DEFAULTS = { system: "operator-console", theme: "dark" };
-  const SYSTEMS = ["operator-console", "precision-instrument"];
+  const SYSTEMS = ["operator-console"];
   const THEMES = ["dark", "light"];
-  const SYSTEM_LABELS = {
-    "operator-console": "Operator Console",
-    "precision-instrument": "Precision Instrument",
-  };
 
   // Vim-style g-prefix navigation table. Values are file names under ./mockups/.
   // Pages that don't exist yet will 404 — that's intentional; new mockups just
@@ -69,7 +66,6 @@
     ]},
     { section: "Appearance", rows: [
       { keys: ["⇧", "D"], label: "Toggle theme (dark / light)" },
-      { keys: ["."],      label: "Cycle system (operator / precision)" },
       { keys: ["p"],      label: "Cycle palette" },
     ]},
     { section: "Utility", rows: [
@@ -176,14 +172,6 @@
       payload: { action: "toggleTheme" },
     });
     actions.push({
-      id: "appearance:cycle-system",
-      group: "Appearance",
-      label: "Cycle system",
-      hint: ["."],
-      type: "appearance",
-      payload: { action: "cycleSystem" },
-    });
-    actions.push({
       id: "appearance:cycle-palette",
       group: "Appearance",
       label: "Cycle palette",
@@ -278,73 +266,6 @@
       url.searchParams.delete("system");
     }
     window.history.replaceState({}, "", url.toString());
-  }
-
-  function buildPopover(prefs, onChange) {
-    const popover = document.createElement("div");
-    popover.className = "mockup-chrome__popover";
-    popover.hidden = true;
-    popover.setAttribute("role", "group");
-    popover.setAttribute("aria-label", "Visual system");
-
-    const label = document.createElement("span");
-    label.className = "eyebrow mockup-chrome__group-label";
-    label.textContent = "System";
-    popover.appendChild(label);
-
-    const options = document.createElement("div");
-    options.className = "mockup-chrome__options";
-    SYSTEMS.forEach((value) => {
-      const option = document.createElement("label");
-      option.className = "mockup-chrome__option";
-      if (value === prefs.system) {
-        option.classList.add("mockup-chrome__option--checked");
-      }
-
-      const radio = document.createElement("input");
-      radio.type = "radio";
-      radio.name = "system";
-      radio.value = value;
-      radio.checked = value === prefs.system;
-      radio.setAttribute("data-control", "system");
-      radio.addEventListener("change", () => onChange(value));
-
-      const text = document.createElement("span");
-      text.textContent = SYSTEM_LABELS[value];
-
-      option.appendChild(radio);
-      option.appendChild(text);
-      options.appendChild(option);
-    });
-    popover.appendChild(options);
-
-    return popover;
-  }
-
-  function buildPill(prefs) {
-    const pill = document.createElement("button");
-    pill.type = "button";
-    pill.className = "mockup-chrome__pill";
-    pill.setAttribute("aria-haspopup", "true");
-    pill.setAttribute("aria-expanded", "false");
-    pill.setAttribute("aria-label", "Open system switcher");
-
-    const label = document.createElement("span");
-    label.className = "mockup-chrome__pill-label";
-    label.textContent = "System";
-
-    const value = document.createElement("span");
-    value.className = "mockup-chrome__pill-value";
-    value.textContent = SYSTEM_LABELS[prefs.system];
-
-    const caret = document.createElement("span");
-    caret.className = "mockup-chrome__pill-caret";
-    caret.setAttribute("aria-hidden", "true");
-
-    pill.appendChild(label);
-    pill.appendChild(value);
-    pill.appendChild(caret);
-    return pill;
   }
 
   // ----- Cheat sheet overlay -----
@@ -706,55 +627,23 @@
     }
   }
 
-  // ----- Mount -----
+  // ----- Controller -----
+  //
+  // The user-facing system switcher was removed with `precision-instrument`
+  // (CTL-178). A headless controller is still returned so `installKeybindings`
+  // and the palette executor can read/write `state.system`/`state.theme`
+  // without special-casing. `handleSystemChange` and `setPopoverOpen` are
+  // no-ops today; when a second system lands, rewire this function.
 
   function mount(prefs) {
-    if (document.querySelector(".mockup-chrome")) return null;
-
     const state = { ...prefs };
-    const root = document.createElement("div");
-    root.className = "mockup-chrome";
-
-    const pill = buildPill(state);
-    const valueEl = pill.querySelector(".mockup-chrome__pill-value");
-
     const handleSystemChange = (system) => {
       if (!SYSTEMS.includes(system)) return;
       state.system = system;
       apply(state);
       persist(state);
-      valueEl.textContent = SYSTEM_LABELS[system];
-      root
-        .querySelectorAll(".mockup-chrome__option")
-        .forEach((el) => el.classList.remove("mockup-chrome__option--checked"));
-      const checkedInput = root.querySelector(`.mockup-chrome__option input[value="${system}"]`);
-      if (checkedInput) {
-        checkedInput.checked = true;
-        if (checkedInput.parentElement) {
-          checkedInput.parentElement.classList.add("mockup-chrome__option--checked");
-        }
-      }
     };
-
-    const popover = buildPopover(state, handleSystemChange);
-
-    const setPopoverOpen = (open) => {
-      popover.hidden = !open;
-      pill.setAttribute("aria-expanded", open ? "true" : "false");
-    };
-
-    pill.addEventListener("click", () => {
-      setPopoverOpen(popover.hidden);
-    });
-
-    document.addEventListener("click", (ev) => {
-      if (!root.contains(ev.target)) setPopoverOpen(false);
-    });
-
-    root.appendChild(pill);
-    root.appendChild(popover);
-    document.body.appendChild(root);
-
+    const setPopoverOpen = () => {};
     return { state, handleSystemChange, setPopoverOpen };
   }
 
@@ -770,12 +659,6 @@
         clearTimeout(gPrefixTimer);
         gPrefixTimer = null;
       }
-    };
-
-    const cycleSystem = () => {
-      if (!controller) return;
-      const nxt = nextSystem(controller.state.system);
-      controller.handleSystemChange(nxt);
     };
 
     const toggleTheme = () => {
@@ -863,11 +746,6 @@
 
       if (hasModifier) return;
 
-      if (ev.key === ".") {
-        ev.preventDefault();
-        cycleSystem();
-        return;
-      }
       if (ev.key === "p") {
         ev.preventDefault();
         cyclePalette();
@@ -898,10 +776,6 @@
     // Build the palette eagerly so the ⌘K keybinding can open it immediately
     // — but keep it hidden until the user triggers it. The first call to
     // `ensurePalette` wires the executor; subsequent calls are no-ops.
-    const cycleSystem = () => {
-      if (!controller) return;
-      controller.handleSystemChange(nextSystem(controller.state.system));
-    };
     const toggleTheme = () => {
       const current =
         document.documentElement.getAttribute("data-theme") || DEFAULTS.theme;
@@ -926,7 +800,6 @@
       }
       if (action.type === "appearance" && action.payload) {
         if (action.payload.action === "toggleTheme") toggleTheme();
-        else if (action.payload.action === "cycleSystem") cycleSystem();
         else if (action.payload.action === "cyclePalette") cyclePalette();
         return;
       }

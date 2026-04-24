@@ -107,7 +107,7 @@ describe("brand-v2 — lockup-stacked.svg", () => {
 });
 
 describe("brand-v2 — brand.html Lockup specimens section", () => {
-  const BRAND_HTML = join(
+  const MOCKUPS_DIR = join(
     REPO_ROOT,
     "plugins",
     "dev",
@@ -115,9 +115,12 @@ describe("brand-v2 — brand.html Lockup specimens section", () => {
     "orch-monitor",
     "public",
     "mockups",
-    "brand.html",
   );
-  const html = readFileSync(BRAND_HTML, "utf8");
+  const html = readFileSync(join(MOCKUPS_DIR, "brand.html"), "utf8");
+  // Brand CSS was extracted from the inline <style> block to a sibling file
+  // in CTL-178 part 2 to keep brand.html rewrite-able without blowing past
+  // Claude's output-token limit. Accent-token assertions now read from there.
+  const css = readFileSync(join(MOCKUPS_DIR, "brand.css"), "utf8");
 
   it("exposes a 'Lockup specimens' section by heading", () => {
     expect(html).toContain('data-section="lockups"');
@@ -137,8 +140,11 @@ describe("brand-v2 — brand.html Lockup specimens section", () => {
   });
 
   it("routes the accent color through currentColor, not a hex literal", () => {
-    // The stage element applies --color-accent; the SVGs must resolve via currentColor.
-    expect(html).toContain("var(--color-accent)");
+    // The stage element applies --color-accent; the SVGs must resolve via
+    // currentColor. The stage styles live in the extracted brand.css.
+    expect(css).toContain("var(--color-accent)");
+    expect(html).toContain("./brand.css");
+    expect(html).toContain('stroke="currentColor"');
   });
 });
 

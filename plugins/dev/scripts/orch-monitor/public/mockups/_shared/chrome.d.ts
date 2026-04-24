@@ -4,7 +4,7 @@
  * Bun unit tests import these helpers.
  */
 
-export const SYSTEMS: readonly ["operator-console", "precision-instrument"];
+export const SYSTEMS: readonly ["operator-console"];
 export const THEMES: readonly ["dark", "light"];
 export const GNAV: Readonly<Record<string, string>>;
 export const GNAV_LABELS: Readonly<Record<string, string>>;
