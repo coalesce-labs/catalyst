@@ -266,7 +266,7 @@
   color: var(--color-text-hi);
 }
 
-/* Signature move — System A: heartbeat */
+/* Signature move — heartbeat */
 .demo-heartbeat {
   position: relative;
   padding: var(--spacing-4) var(--spacing-5) var(--spacing-4) var(--spacing-5);
@@ -312,71 +312,13 @@
   }
 }
 
-[data-system="operator-console"] .demo-heartbeat::before {
+.demo-heartbeat::before {
   animation: brand-heartbeat var(--motion-duration-heartbeat) ease-in-out infinite;
 }
 
-/* Signature move — System B: underline sweep */
-.demo-sweep {
-  position: relative;
-  padding-bottom: var(--spacing-1);
-  font-family: var(--font-family-display);
-  font-size: var(--font-size-title);
-  color: var(--color-text-hi);
-  cursor: default;
-}
-
-.demo-sweep::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  bottom: 0;
-  height: 1px;
-  width: 0;
-  background: var(--color-accent);
-}
-
-[data-system="precision-instrument"] .demo-sweep::after {
-  transition: width var(--motion-duration-reflow) var(--motion-easing-standard);
-}
-
-[data-system="precision-instrument"] .demo-sweep:hover::after,
-[data-system="precision-instrument"] .demo-sweep:focus-visible::after {
-  width: 100%;
-}
-
-/* Signature move — cross-system fallback caption */
-.motion-card__scope {
-  font-family: var(--font-family-mono);
-  font-size: var(--font-size-label);
-  line-height: var(--line-height-label);
-  color: var(--color-text-lo);
-}
-
-.motion-card[data-scope="operator-console"] .motion-card__scope::before {
-  content: "Operator Console";
-}
-
-.motion-card[data-scope="precision-instrument"] .motion-card__scope::before {
-  content: "Precision Instrument";
-}
-
-/* Hide the heartbeat demo body in System B (keep label/caption) */
-[data-system="precision-instrument"] .motion-card[data-scope="operator-console"] .demo-heartbeat {
-  opacity: 0.25;
-  filter: grayscale(1);
-}
-
-[data-system="operator-console"] .motion-card[data-scope="precision-instrument"] .demo-sweep {
-  opacity: 0.35;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  [data-system="operator-console"] .demo-heartbeat::before {
+  .demo-heartbeat::before {
     animation: none;
-  }
-  [data-system="precision-instrument"] .demo-sweep::after {
-    transition: none;
   }
 }
 
@@ -438,10 +380,6 @@
 .btn--primary:hover {
   background: var(--color-accent-hover);
   border-color: var(--color-accent-hover);
-}
-
-[data-system="precision-instrument"] .btn--primary {
-  color: var(--color-surface-1);
 }
 
 .btn--secondary {
@@ -586,7 +524,7 @@
   border-color: var(--color-border-strong);
 }
 
-[data-system="operator-console"] .input--focused .input__control {
+.input--focused .input__control {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 25%, transparent);
 }
 
@@ -616,92 +554,53 @@
   text-transform: uppercase;
 }
 
-/* System A — filled pill */
-[data-system="operator-console"] .chip {
+/* Filled-pill chips — color by status */
+.chip {
   padding: 2px var(--spacing-2);
   border-radius: var(--radius-full);
   border: 1px solid transparent;
 }
 
-[data-system="operator-console"] .chip--queued {
+.chip--queued {
   color: var(--color-text-md);
   background: var(--color-surface-2);
   border-color: var(--color-border-subtle);
 }
 
-[data-system="operator-console"] .chip--running {
+.chip--running {
   color: var(--color-accent);
   background: color-mix(in srgb, var(--color-accent) 12%, transparent);
   border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
 }
 
-[data-system="operator-console"] .chip--pr-open {
+.chip--pr-open {
   color: var(--color-info);
   background: color-mix(in srgb, var(--color-info) 12%, transparent);
   border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
 }
 
-[data-system="operator-console"] .chip--merged {
+.chip--merged {
   color: var(--color-success);
   background: color-mix(in srgb, var(--color-success) 12%, transparent);
   border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
 }
 
-[data-system="operator-console"] .chip--failed {
+.chip--failed {
   color: var(--color-danger);
   background: color-mix(in srgb, var(--color-danger) 12%, transparent);
   border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
 }
 
-[data-system="operator-console"] .chip--needs-me {
+.chip--needs-me {
   color: var(--color-accent);
   background: color-mix(in srgb, var(--color-accent) 18%, transparent);
   border-color: var(--color-accent);
 }
 
-[data-system="operator-console"] .chip--ticket {
+.chip--ticket {
   color: var(--color-text-md);
   background: var(--color-surface-2);
   border-color: var(--color-border-subtle);
-}
-
-/* System B — glyph + uppercase label, no filled pill */
-[data-system="precision-instrument"] .chip {
-  padding: 0;
-  background: transparent;
-  color: var(--color-text-md);
-  border: none;
-}
-
-[data-system="precision-instrument"] .chip::before {
-  content: "●";
-  font-size: 0.85em;
-  line-height: 1;
-}
-
-[data-system="precision-instrument"] .chip--queued::before {
-  color: var(--color-text-lo);
-}
-[data-system="precision-instrument"] .chip--running::before {
-  color: var(--color-accent);
-}
-[data-system="precision-instrument"] .chip--pr-open::before {
-  color: var(--color-info);
-}
-[data-system="precision-instrument"] .chip--merged::before {
-  color: var(--color-success);
-}
-[data-system="precision-instrument"] .chip--failed::before {
-  color: var(--color-danger);
-}
-[data-system="precision-instrument"] .chip--needs-me::before {
-  color: var(--color-accent);
-}
-[data-system="precision-instrument"] .chip--ticket::before {
-  content: none;
-}
-[data-system="precision-instrument"] .chip--ticket {
-  color: var(--color-text-lo);
 }
 
 /* ------- Kanban-card specimen ------- */
@@ -755,12 +654,6 @@
   overflow: hidden;
 }
 
-[data-system="precision-instrument"] .kanban-card__bar {
-  height: 1px;
-  background: var(--color-border-subtle);
-  border-radius: 0;
-}
-
 .kanban-card__bar > span {
   display: block;
   height: 100%;
@@ -795,12 +688,12 @@
   opacity: 0.9;
 }
 
-[data-system="operator-console"] .kanban-card--needs-me::before {
+.kanban-card--needs-me::before {
   animation: brand-heartbeat var(--motion-duration-heartbeat) ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-system="operator-console"] .kanban-card--needs-me::before {
+  .kanban-card--needs-me::before {
     animation: none;
   }
 }
@@ -898,12 +791,3 @@
   color: var(--color-text-lo);
 }
 
-/* ------- Section overrides for System B surfaces ------- */
-
-[data-system="precision-instrument"] .specimen-block,
-[data-system="precision-instrument"] .motion-card,
-[data-system="precision-instrument"] .kanban-card,
-[data-system="precision-instrument"] .swatch,
-[data-system="precision-instrument"] .lockup-block {
-  border-color: var(--color-border-default);
-}
