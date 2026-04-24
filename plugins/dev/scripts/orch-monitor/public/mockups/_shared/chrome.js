@@ -12,7 +12,7 @@
  * second system and for URL validation.
  *
  * Global keybindings (see README.md for the full table):
- *   g h/d/w/c/b/v/t/r  — navigate to the matching mockup page
+ *   g h/d/w/c/b/v/r    — navigate to the matching mockup page
  *   ⇧D                 — toggle theme (dark ↔ light)
  *   p                  — cycle palette (no-op until palettes.css ships)
  *   /                  — focus search input if present
@@ -39,6 +39,10 @@
   // Vim-style g-prefix navigation table. Values are file names under ./mockups/.
   // Pages that don't exist yet will 404 — that's intentional; new mockups just
   // need to match these names to be reachable via the keyboard.
+  //
+  // CTL-171 — the `t` slot previously pointed to todos.html; todos are now
+  // folded into orch.html's collapsible panel, so the slot is intentionally
+  // left open for a future page.
   const GNAV = {
     h: "index.html",
     d: "orch.html",
@@ -46,7 +50,6 @@
     c: "comms.html",
     b: "briefing.html",
     v: "agent-graph.html",
-    t: "todos.html",
     r: "brand.html",
   };
 
@@ -61,7 +64,6 @@
       { keys: ["g", "c"], label: "Comms" },
       { keys: ["g", "b"], label: "Briefing" },
       { keys: ["g", "v"], label: "Agent graph" },
-      { keys: ["g", "t"], label: "Todos" },
       { keys: ["g", "r"], label: "Brand showcase" },
     ]},
     { section: "Appearance", rows: [
@@ -141,7 +143,6 @@
     "comms.html": "Comms",
     "briefing.html": "Briefing",
     "agent-graph.html": "Agent graph",
-    "todos.html": "Todos",
     "brand.html": "Brand showcase",
   };
 
