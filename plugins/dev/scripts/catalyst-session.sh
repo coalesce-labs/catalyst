@@ -19,8 +19,10 @@
 #       Increment the tool usage histogram (defaults to 0ms).
 #   pr <session-id> --number N --url URL [--ci STATUS]
 #       Record PR creation. Emits a `pr-opened` event.
-#   end <session-id> [--status done|failed]
-#       Mark the session complete. Emits a `session-ended` event.
+#   end <session-id> [--status done|failed] [--reason TEXT]
+#       Mark the session complete. Emits a `session-ended` event AND a
+#       `claude_code.session.outcome` OTLP log (CTL-157) carrying outcome,
+#       session_id, linear.key, and optional reason for Loki/PromQL queries.
 #   heartbeat <session-id>
 #       Bump updated_at (and emit a `heartbeat` event to the JSONL log).
 #   list [--active] [--skill NAME] [--ticket KEY] [--limit N]
@@ -335,10 +337,11 @@ cmd_end() {
   [[ -n "$sid" ]] || { echo "error: end requires <session-id>" >&2; return 1; }
   shift
 
-  local status="done"
+  local status="done" reason=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --status) status="$2"; shift 2 ;;
+      --reason) reason="$2"; shift 2 ;;
       *) echo "error: unknown flag for end: $1" >&2; return 1 ;;
     esac
   done
@@ -354,7 +357,32 @@ cmd_end() {
                updated_at = $(sql_quote "$ts")
            WHERE session_id = $(sql_quote "$sid");"
 
-  emit_event "$sid" "session-ended" "$(jq -nc --arg s "$status" '{status:$s}')"
+  local payload
+  if [[ -n "$reason" ]]; then
+    payload=$(jq -nc --arg s "$status" --arg r "$reason" '{status:$s,reason:$r}')
+  else
+    payload=$(jq -nc --arg s "$status" '{status:$s}')
+  fi
+  emit_event "$sid" "session-ended" "$payload"
+
+  # CTL-157: emit claude_code.session.outcome to OTLP. Best-effort; the
+  # emitter silently no-ops when OTEL_EXPORTER_OTLP_ENDPOINT is unset or the
+  # POST fails, so session end never blocks on telemetry.
+  local emit_bin="${CATALYST_EMIT_OTEL_BIN:-$SCRIPT_DIR/emit-otel-event.sh}"
+  if [[ -x "$emit_bin" ]]; then
+    local outcome
+    case "$status" in
+      done)   outcome="success" ;;
+      failed) outcome="fail" ;;
+    esac
+    local args=(
+      --event "claude_code.session.outcome"
+      --outcome "$outcome"
+      --session-id "$sid"
+    )
+    [[ -n "$reason" ]] && args+=(--reason "$reason")
+    "$emit_bin" "${args[@]}" >/dev/null 2>&1 || true
+  fi
 }
 
 cmd_heartbeat() {
