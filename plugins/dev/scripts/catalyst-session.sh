@@ -17,6 +17,9 @@
 #       Update cost/token counters (upserts session_metrics row).
 #   tool <session-id> <tool-name> [--duration MS]
 #       Increment the tool usage histogram (defaults to 0ms).
+#   iteration <session-id> --kind plan|fix [--by N]
+#       Increment the plan-replan or implement-fix iteration counter.
+#       Emits a `phase-iteration` event. Flushed to OTLP at session end.
 #   pr <session-id> --number N --url URL [--ci STATUS]
 #       Record PR creation. Emits a `pr-opened` event.
 #   end <session-id> [--status done|failed]
@@ -287,6 +290,46 @@ cmd_tool() {
              updated_at = $(sql_quote "$ts");"
 }
 
+cmd_iteration() {
+  local sid="${1:-}"
+  [[ -n "$sid" ]] || { echo "error: iteration requires <session-id>" >&2; return 1; }
+  shift
+
+  local kind="" by="1"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --kind) kind="$2"; shift 2 ;;
+      --by)   by="$2";   shift 2 ;;
+      *) echo "error: unknown flag for iteration: $1" >&2; return 1 ;;
+    esac
+  done
+  case "$kind" in
+    plan|fix) ;;
+    *) echo "error: iteration requires --kind plan|fix" >&2; return 1 ;;
+  esac
+  [[ "$by" =~ ^[0-9]+$ ]] || { echo "error: --by must be a non-negative integer" >&2; return 1; }
+
+  local col="${kind}_iterations"
+  local ts; ts="$(now_iso)"
+
+  # Lazy-create the metrics row, then increment the chosen counter.
+  db_exec "INSERT OR IGNORE INTO session_metrics (session_id, updated_at)
+             VALUES ($(sql_quote "$sid"), $(sql_quote "$ts"));
+           UPDATE session_metrics
+             SET $col = $col + $by, updated_at = $(sql_quote "$ts")
+             WHERE session_id = $(sql_quote "$sid");"
+
+  # Read the fresh value so downstream tailers (orch-monitor) get the new count.
+  local new_count
+  new_count=$(db_exec "SELECT $col FROM session_metrics WHERE session_id = $(sql_quote "$sid");")
+
+  local payload
+  payload=$(jq -nc --arg k "$kind" \
+    --argjson n "${new_count:-0}" --argjson by "$by" \
+    '{kind:$k, count:$n, by:$by}')
+  emit_event "$sid" "phase-iteration" "$payload"
+}
+
 cmd_pr() {
   local sid="${1:-}"
   [[ -n "$sid" ]] || { echo "error: pr requires <session-id>" >&2; return 1; }
@@ -355,6 +398,47 @@ cmd_end() {
            WHERE session_id = $(sql_quote "$sid");"
 
   emit_event "$sid" "session-ended" "$(jq -nc --arg s "$status" '{status:$s}')"
+
+  # Flush the per-session iteration counter to OTLP so Prometheus can surface
+  # `claude_code_iteration_count_total{linear_key,kind}`. Best-effort — the
+  # emitter is silent on any failure (see CTL-158).
+  emit_iteration_metric "$sid"
+}
+
+# Helper — resolves the emit-otel-metric.sh script and invokes it twice per
+# session end (once for plan-replans, once for implement-fix cycles). The
+# `CATALYST_EMIT_METRIC` env var lets tests inject a stub without rewriting
+# the script path.
+emit_iteration_metric() {
+  local sid="$1"
+  local emit="${CATALYST_EMIT_METRIC:-$SCRIPT_DIR/emit-otel-metric.sh}"
+  [[ -x "$emit" ]] || return 0
+
+  local plan_count fix_count ticket started_at
+  plan_count=$(db_exec "SELECT COALESCE(plan_iterations,0) FROM session_metrics WHERE session_id = $(sql_quote "$sid");")
+  fix_count=$( db_exec "SELECT COALESCE(fix_iterations,0)  FROM session_metrics WHERE session_id = $(sql_quote "$sid");")
+  ticket=$(    db_exec "SELECT COALESCE(ticket_key,'')     FROM sessions        WHERE session_id = $(sql_quote "$sid");")
+  started_at=$(db_exec "SELECT started_at                  FROM sessions        WHERE session_id = $(sql_quote "$sid");")
+
+  # Default to 0 when the metrics row was never created (no iteration calls).
+  plan_count="${plan_count:-0}"
+  fix_count="${fix_count:-0}"
+
+  # Convert ISO-8601 to Unix ns for OTLP startTimeUnixNano. macOS and GNU
+  # date take different flags; try both and fall back to empty (emitter
+  # substitutes "now" in that case).
+  local start_s=""
+  if [[ -n "$started_at" ]]; then
+    start_s=$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$started_at" '+%s' 2>/dev/null \
+           || date -u -d "$started_at" '+%s' 2>/dev/null \
+           || echo "")
+  fi
+  local start_ns=""
+  [[ -n "$start_s" ]] && start_ns="${start_s}000000000"
+
+  # Two calls — one per kind — so `sum by (kind)` is well-defined in PromQL.
+  "$emit" iteration_count --kind plan --count "$plan_count" --linear-key "$ticket" ${start_ns:+--start-ns "$start_ns"} 2>/dev/null || true
+  "$emit" iteration_count --kind fix  --count "$fix_count"  --linear-key "$ticket" ${start_ns:+--start-ns "$start_ns"} 2>/dev/null || true
 }
 
 cmd_heartbeat() {
@@ -597,6 +681,7 @@ case "$cmd" in
   phase)     cmd_phase "$@" ;;
   metric)    cmd_metric "$@" ;;
   tool)      cmd_tool "$@" ;;
+  iteration) cmd_iteration "$@" ;;
   pr)        cmd_pr "$@" ;;
   end)       cmd_end "$@" ;;
   heartbeat) cmd_heartbeat "$@" ;;

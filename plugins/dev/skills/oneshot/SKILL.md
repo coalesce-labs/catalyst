@@ -371,6 +371,18 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
+**Iteration counter** (see CTL-158): bump `--kind plan` whenever the plan is re-entered
+(validate-plan kicks back to create-plan) and `--kind fix` whenever an automated fix retry runs
+in Phase 4 (quality gates) or Phase 5 (CI auto-fix). The counts are flushed to OTLP as
+`claude_code_iteration_count_total{linear_key,kind}` at session end so downstream estimation can
+read rework signal per ticket:
+
+```bash
+if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
+  "$SESSION_SCRIPT" iteration "$CATALYST_SESSION_ID" --kind fix   # or --kind plan
+fi
+```
+
 ## Workflow Phases
 
 ### Phase 1: Research (Current Session — Opus)
@@ -479,6 +491,8 @@ For each gate (sorted by order):
      - Analyze errors
      - Attempt automated fix
      - Re-run gate.command
+     - After the fix attempt (pass OR fail), bump the iteration counter:
+       catalyst-session.sh iteration "$CATALYST_SESSION_ID" --kind fix
   4. If fails AND gate.autofix is false OR autofix attempt failed:
      - Log failure, continue to next gate
   5. After all gates, if any required gate failed:
@@ -592,7 +606,11 @@ Poll cadence: every 30–60 seconds. On every iteration:
 
 4. **If CI is failing** (mergeStateStatus `UNSTABLE`, `BLOCKED`, or any check `conclusion=failure`):
    investigate the failure, push a fix, continue polling. Apply the same auto-fix budget as the
-   create-pr/CI handling above (max 3 distinct fix attempts per failure type).
+   create-pr/CI handling above (max 3 distinct fix attempts per failure type). After each push of
+   a fix, bump the iteration counter:
+   ```bash
+   catalyst-session.sh iteration "$CATALYST_SESSION_ID" --kind fix
+   ```
 
 5. **If review comments / Codex threads have appeared**: address them via `/review-comments`
    (resolve threads, push fixes), continue polling. The worker keeps doing this — there is no
