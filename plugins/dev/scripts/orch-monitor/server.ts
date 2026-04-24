@@ -50,6 +50,8 @@ import {
 import type { BriefingProvider } from "./lib/ai-briefing";
 import type { SummarizeHandler } from "./lib/summarize";
 import { createSummarizeHandler } from "./lib/summarize";
+import type { OrchBriefingHandler } from "./lib/briefing-orch";
+import { createOrchBriefingHandler } from "./lib/briefing-orch";
 import { loadSummarizeConfig, type ProviderName } from "./lib/summarize/config";
 import { buildSummarizeSnapshot } from "./lib/summarize/snapshot";
 import { getProvider, type SummarizeProvider } from "./lib/summarize/providers";
@@ -119,6 +121,7 @@ export interface CreateServerOptions {
   sqlitePollIntervalMs?: number;
   briefingProvider?: BriefingProvider | null;
   summarizeHandler?: SummarizeHandler | null;
+  orchBriefingHandler?: OrchBriefingHandler | null;
   prometheusUrl?: string | null;
   lokiUrl?: string | null;
   prometheusFetcher?: PrometheusFetcher | null;
@@ -341,6 +344,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     sqlitePollIntervalMs,
     briefingProvider: briefingProviderOpt,
     summarizeHandler: summarizeHandlerOpt,
+    orchBriefingHandler: orchBriefingHandlerOpt,
     prometheusUrl,
     lokiUrl,
     prometheusFetcher: promFetcherOpt,
@@ -383,6 +387,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   const summarizeHandler: SummarizeHandler | null =
     summarizeHandlerOpt === null ? null : (summarizeHandlerOpt ?? null);
+
+  const orchBriefingHandler: OrchBriefingHandler | null =
+    orchBriefingHandlerOpt === null ? null : (orchBriefingHandlerOpt ?? null);
 
   const prom: PrometheusFetcher | null =
     promFetcherOpt === null
@@ -955,6 +962,35 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ tickets });
         }
 
+        const orchBriefingMatch = url.pathname.match(
+          /^\/api\/briefing\/([^/]+)$/,
+        );
+        if (orchBriefingMatch) {
+          let orchId: string;
+          try {
+            orchId = decodeURIComponent(orchBriefingMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!orchBriefingHandler) {
+            return Response.json({ enabled: false });
+          }
+          const result = await orchBriefingHandler.handle(orchId);
+          if ("error" in result) {
+            return Response.json(
+              { error: result.error },
+              { status: result.status },
+            );
+          }
+          if ("enabled" in result) {
+            return Response.json({ enabled: false });
+          }
+          return Response.json({
+            summary: result.summary,
+            generatedAt: result.generatedAt,
+          });
+        }
+
         if (url.pathname === "/api/briefing") {
           if (!briefingProvider) {
             return Response.json({ enabled: false });
@@ -1412,6 +1448,7 @@ if (import.meta.main) {
     `${process.cwd()}/.catalyst/config.json`,
   );
   let summarizeHandler: SummarizeHandler | null = null;
+  let orchBriefingHandler: OrchBriefingHandler | null = null;
   if (summarizeCfg.enabled) {
     const providers: Record<ProviderName, SummarizeProvider> = {
       anthropic: getProvider("anthropic"),
@@ -1419,6 +1456,16 @@ if (import.meta.main) {
       grok: getProvider("grok"),
     };
     summarizeHandler = createSummarizeHandler({
+      config: summarizeCfg,
+      buildSnapshot: (orchId) => buildSummarizeSnapshot(WT_DIR, orchId),
+      providers,
+      cache: createCache(5 * 60_000),
+      rateLimiter: createRateLimiter({
+        maxConcurrent: 2,
+        minIntervalMs: 500,
+      }),
+    });
+    orchBriefingHandler = createOrchBriefingHandler({
       config: summarizeCfg,
       buildSnapshot: (orchId) => buildSummarizeSnapshot(WT_DIR, orchId),
       providers,
@@ -1451,6 +1498,7 @@ if (import.meta.main) {
       terminal: useTerminal,
       renderOptions: renderOpts,
       summarizeHandler,
+      orchBriefingHandler,
     });
     const displayHost =
       srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);
