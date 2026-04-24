@@ -791,3 +791,105 @@
   color: var(--color-text-lo);
 }
 
+/* =========================================================================
+   Theme panels — render dark + light side-by-side regardless of the
+   document-level data-theme. Each panel redeclares its own token values
+   so its contents resolve those tokens without inheriting from :root.
+   ========================================================================= */
+
+.theme-panel-pair {
+  display: grid;
+  gap: var(--spacing-4);
+  grid-template-columns: 1fr 1fr;
+  align-items: stretch;
+}
+
+@media (max-width: 920px) {
+  .theme-panel-pair {
+    grid-template-columns: 1fr;
+  }
+}
+
+.theme-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-4);
+  padding: var(--spacing-5);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text-hi);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.theme-panel__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+  padding-bottom: var(--spacing-2);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.theme-panel__label {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-label);
+  line-height: var(--line-height-label);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-text-md);
+}
+
+.theme-panel__bg {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-label);
+  color: var(--color-text-lo);
+}
+
+/* Dark panel — mirrors :root token values. Redeclared so the panel is
+   self-contained and unaffected by html[data-theme] flips. */
+.theme-panel--dark {
+  --color-bg: #07090b;
+  --color-surface-1: #0d1117;
+  --color-surface-2: #131a22;
+  --color-surface-3: #1b242e;
+  --color-border-subtle: #1f2a35;
+  --color-border-default: #2a3845;
+  --color-border-strong: #3c4e5d;
+  --color-text-hi: #e6edf3;
+  --color-text-md: #9aa7b2;
+  --color-text-lo: #5c6b78;
+  --color-text-disabled: #364450;
+  --color-accent: #ffb547;
+  --color-accent-hover: #ffc466;
+  --color-accent-active: #e09520;
+  --color-success: #3fb950;
+  --color-warning: #d29922;
+  --color-danger: #f85149;
+  --color-info: #58a6ff;
+}
+
+/* Light panel — paper-white surfaces + navy/amber tuned for legibility
+   on a #fafaf7 canvas. The accent drops from bright amber (#ffb547, which
+   washes out against light) to a richer brown-amber (#b96b0c) that clears
+   WCAG 4.5:1 against both surface-1 and bg. */
+.theme-panel--light {
+  --color-bg: #fafaf7;
+  --color-surface-1: #ffffff;
+  --color-surface-2: #f3f3ee;
+  --color-surface-3: #ecece5;
+  --color-border-subtle: #e8e7e0;
+  --color-border-default: #d6d4ca;
+  --color-border-strong: #9a978c;
+  --color-text-hi: #16181c;
+  --color-text-md: #3b3e46;
+  --color-text-lo: #6e7078;
+  --color-text-disabled: #a8a8a1;
+  --color-accent: #b96b0c;
+  --color-accent-hover: #a35d08;
+  --color-accent-active: #8c4e05;
+  --color-success: #2d7a3b;
+  --color-warning: #9a6a1a;
+  --color-danger: #c0392b;
+  --color-info: #2e5f96;
+}
+
