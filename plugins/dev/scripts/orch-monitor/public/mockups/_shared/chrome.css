@@ -362,3 +362,44 @@ a.mockup-topbar__mark:focus-visible {
   font-size: var(--font-size-label);
   text-align: center;
 }
+
+/*
+ * CTL-170 — reason glyphs for attention chips.
+ *
+ * `.chip-glyph` attaches a monospace reason symbol after the chip label via
+ * ::after. Color is inherited from the host chip, so the chip's status
+ * modifier carries severity and `.chip-glyph--*` carries the reason.
+ *
+ * Usage:
+ *   <span class="chip chip--failing chip-glyph chip-glyph--ci-fail">CI</span>
+ *   <span class="chip chip--running chip-glyph chip-glyph--stale">Running</span>
+ *
+ * Reasons:
+ *   --review     "!"  — review reply needed / PR conflict
+ *   --ci-fail    "✗"  — CI failing
+ *   --stale      "~"  — heartbeat stale > 5m
+ *   --blocked    "⚑"  — merge blocked (branch protection, dependency)
+ */
+.chip-glyph::after {
+  content: "";
+  margin-left: var(--spacing-1);
+  font-family: var(--font-family-mono);
+  font-size: inherit;
+  line-height: 1;
+}
+
+.chip-glyph--review::after {
+  content: "!";
+}
+
+.chip-glyph--ci-fail::after {
+  content: "✗";
+}
+
+.chip-glyph--stale::after {
+  content: "~";
+}
+
+.chip-glyph--blocked::after {
+  content: "⚑";
+}
