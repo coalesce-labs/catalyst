@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.10.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.9.0...catalyst-dev-v7.10.0) (2026-04-24)
+
+
+### Features
+
+* **dev:** canonical orchestrate-dispatch-next reading all waveN queues (CTL-116) ([#268](https://github.com/coalesce-labs/catalyst/issues/268)) ([7490be9](https://github.com/coalesce-labs/catalyst/commit/7490be96d7dcd864a27d91af5ee18386fece573c))
+* **dev:** mockup chrome — clickable home, breadcrumb, ⌘K palette (CTL-166) ([#266](https://github.com/coalesce-labs/catalyst/issues/266)) ([f503027](https://github.com/coalesce-labs/catalyst/commit/f50302732ef0783e9ecf899218577648a2bdea7b))
+* drop precision-instrument + dual theme panels on brand mockup (CTL-178) ([#270](https://github.com/coalesce-labs/catalyst/issues/270)) ([4070e92](https://github.com/coalesce-labs/catalyst/commit/4070e925659b77c8c5ba058a0e761b903f556b80))
+
+
+### Bug Fixes
+
+* **dev:** aggregate worker usage/cost into orch state.json (CTL-115) ([#269](https://github.com/coalesce-labs/catalyst/issues/269)) ([bcc0189](https://github.com/coalesce-labs/catalyst/commit/bcc0189e4ba7c3b5fa5ef335fa087a88ad3e4f27))
+
 ## [7.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.8.0...catalyst-dev-v7.9.0)
 
 Apr 23, 2026
