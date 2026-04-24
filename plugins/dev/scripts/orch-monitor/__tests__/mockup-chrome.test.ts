@@ -18,8 +18,11 @@ const chromePath = join(
 );
 
 describe("chrome.js pure helpers — SYSTEMS/THEMES/GNAV constants", () => {
-  it("exposes SYSTEMS with both design systems", () => {
-    expect(chrome.SYSTEMS).toEqual(["operator-console", "precision-instrument"]);
+  it("exposes SYSTEMS with the single remaining design system", () => {
+    // CTL-178 dropped `precision-instrument`; the list collapsed to a single
+    // entry but is kept as an array so chrome.js and its consumers (and the
+    // mockup pre-paint bootstraps) do not need a shape change.
+    expect(chrome.SYSTEMS).toEqual(["operator-console"]);
   });
 
   it("exposes THEMES with dark and light", () => {
@@ -41,9 +44,11 @@ describe("chrome.js pure helpers — SYSTEMS/THEMES/GNAV constants", () => {
 });
 
 describe("chrome.js pure helpers — nextSystem / nextTheme", () => {
-  it("nextSystem cycles forward and wraps", () => {
-    expect(chrome.nextSystem("operator-console")).toBe("precision-instrument");
-    expect(chrome.nextSystem("precision-instrument")).toBe("operator-console");
+  it("nextSystem wraps to itself when only one system exists", () => {
+    // With a single-entry SYSTEMS list, advancing always returns the same
+    // value. The user-facing cycle-system keybinding was removed in part 1,
+    // but nextSystem remains in the export so external callers keep working.
+    expect(chrome.nextSystem("operator-console")).toBe("operator-console");
   });
 
   it("nextSystem falls back to first system for unknown input", () => {
@@ -229,9 +234,11 @@ describe("chrome.js pure helpers — isMacPlatform", () => {
 });
 
 describe("chrome.js pure helpers — paletteActions", () => {
-  it("returns 12 actions (8 nav + 3 appearance + 1 help)", () => {
+  it("returns 11 actions (8 nav + 2 appearance + 1 help)", () => {
+    // CTL-178 removed the cycle-system appearance action alongside the
+    // precision-instrument system, leaving toggle-theme and cycle-palette.
     const actions = chrome.paletteActions(chrome.GNAV);
-    expect(actions.length).toBe(12);
+    expect(actions.length).toBe(11);
   });
 
   it("covers every GNAV key with a nav action", () => {
@@ -255,15 +262,13 @@ describe("chrome.js pure helpers — paletteActions", () => {
     expect(orch?.label).toBe("Orchestrator");
   });
 
-  it("includes appearance actions for theme/system/palette", () => {
+  it("includes appearance actions for theme and palette (system cycling removed)", () => {
     const actions = chrome.paletteActions(chrome.GNAV);
     const appearanceLabels = actions
       .filter((a) => a.type === "appearance")
       .map((a) => a.label)
       .sort();
-    expect(appearanceLabels).toEqual(
-      ["Cycle palette", "Cycle system", "Toggle theme"].sort(),
-    );
+    expect(appearanceLabels).toEqual(["Cycle palette", "Toggle theme"].sort());
   });
 
   it("includes a help action for the cheatsheet", () => {
