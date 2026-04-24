@@ -658,27 +658,61 @@ missing `linearis` CLI (CTL-69):
 The orchestrator's safety-net poll loop calls the same helper when it independently confirms a
 PR has merged, so both paths stay in sync.
 
-**Step 5: File improvement findings (CTL-183 routing, optional)**
+**Step 5: File improvement findings (CTL-176 / CTL-183 routing)**
 
-If the worker captured any improvement findings during the run (per [[CTL-176]] — inert until
-that ticket lands), route each through the feedback helper. Runs as a no-op if no findings were
-collected. In orchestrator-dispatched workers, stdin is not a TTY and `CATALYST_AUTONOMOUS=1`
-is expected to be set — the helper silently skips filing when consent is not already granted,
-never prompts. Standalone oneshot runs prompt interactively once and persist "yes":
+Drain the findings queue and file one ticket per entry. Orchestrator-dispatched oneshot runs
+share the orchestrator's queue (`$CATALYST_FINDINGS_FILE=$ORCH_DIR/findings.jsonl`) and the
+orchestrator's Phase 7 files everything — this step is still safe to run and will find an
+empty queue in that case. Standalone oneshot runs (no orchestrator) use a session-scoped
+queue path derived from `$CATALYST_SESSION_ID`, falling back to `.catalyst/findings/current.jsonl`.
+
+**Recording findings during the run.** The moment you notice friction worth fixing (workflow
+gaps, bugs spotted in adjacent code, recurring manual steps), record it on the queue:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
+  --title "Short imperative title" \
+  --body "Reproduction + expected + observed + any links" \
+  --skill oneshot --severity low
+```
+
+Record inline, not as a post-run retrospective — context compaction loses observations that
+wait. Don't prompt the user; don't batch. Step 5 below files the whole queue in one pass.
+
+**What counts:** friction the maintainer would want fixed, bugs in adjacent catalyst code
+spotted incidentally, gaps in tooling, manual steps that should be automated.
+**What doesn't:** this ticket's own follow-up TODOs (PR body), user preferences that should
+be durable memory, routine debugging. In orchestrator-dispatched workers, stdin is not a TTY
+and `CATALYST_AUTONOMOUS=1` is expected to be set — the helper silently skips filing when
+consent is not already granted, never prompts. Standalone oneshot runs prompt interactively
+once and persist "yes":
 
 ```bash
 FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
 CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+FINDINGS_FILE="${CATALYST_FINDINGS_FILE:-.catalyst/findings/${CATALYST_SESSION_ID:-current}.jsonl}"
 
-if [ -x "$FEEDBACK" ] && [ -x "$CONSENT" ] && [ -n "${FINDINGS[*]:-}" ]; then
+if [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; then
+  COUNT=$(wc -l < "$FINDINGS_FILE" | tr -d ' ')
   if [ "$("$CONSENT" check)" != "granted" ] && [ -z "${CATALYST_AUTONOMOUS:-}" ] && [ -t 0 ]; then
-    read -r -p "File ${#FINDINGS[@]} improvement tickets at end of run? [Y/n] " yn
+    read -r -p "File $COUNT improvement tickets at end of run? [Y/n] " yn
     case "$yn" in [Nn]*) : ;; *) "$CONSENT" grant >/dev/null ;; esac
   fi
   if [ "$("$CONSENT" check)" = "granted" ]; then
-    for F in "${FINDINGS[@]}"; do
-      "$FEEDBACK" --title "${F%%$'\n'*}" --body "$F" --skill oneshot --json || true
-    done
+    FILED=0
+    while IFS= read -r line; do
+      TITLE=$(jq -r '.title' <<<"$line")
+      BODY=$(jq -r '.body' <<<"$line")
+      SKILL=$(jq -r '.skill // "oneshot"' <<<"$line")
+      RESULT=$("$FEEDBACK" --title "$TITLE" --body "$BODY" --skill "$SKILL" --json 2>/dev/null || true)
+      STATUS=$(jq -r '.status // "failed"' <<<"$RESULT")
+      if [ "$STATUS" = "filed" ]; then
+        ID=$(jq -r '.identifier // .url // ""' <<<"$RESULT")
+        echo "  filed: $ID  ($TITLE)"
+        FILED=$((FILED + 1))
+      fi
+    done < "$FINDINGS_FILE"
+    [ "$FILED" -eq "$COUNT" ] && rm -f "$FINDINGS_FILE"
   fi
 fi
 ```
