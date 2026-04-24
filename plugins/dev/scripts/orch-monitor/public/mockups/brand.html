@@ -65,31 +65,48 @@
             computed hex. Borders render as inset rings so the color stays visible.
           </p>
 
-          <div data-color-group="Canvas">
-            <div class="swatch-group__label">Canvas</div>
-            <div class="swatch-grid" data-swatches>
-              <!-- populated by script (falls back to empty grid if JS disabled) -->
-            </div>
-          </div>
+          <div class="theme-panel-pair">
+            <article class="theme-panel theme-panel--dark">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Dark · data-theme="dark"</span>
+              </header>
+              <div data-theme-panel-source>
+                <div data-color-group="Canvas">
+                  <div class="swatch-group__label">Canvas</div>
+                  <div class="swatch-grid" data-swatches>
+                    <!-- populated by brand.js (falls back to empty grid if JS disabled) -->
+                  </div>
+                </div>
 
-          <div data-color-group="Borders">
-            <div class="swatch-group__label">Borders</div>
-            <div class="swatch-grid" data-swatches></div>
-          </div>
+                <div data-color-group="Borders">
+                  <div class="swatch-group__label">Borders</div>
+                  <div class="swatch-grid" data-swatches></div>
+                </div>
 
-          <div data-color-group="Text">
-            <div class="swatch-group__label">Text</div>
-            <div class="swatch-grid" data-swatches></div>
-          </div>
+                <div data-color-group="Text">
+                  <div class="swatch-group__label">Text</div>
+                  <div class="swatch-grid" data-swatches></div>
+                </div>
 
-          <div data-color-group="Accent">
-            <div class="swatch-group__label">Accent</div>
-            <div class="swatch-grid" data-swatches></div>
-          </div>
+                <div data-color-group="Accent">
+                  <div class="swatch-group__label">Accent</div>
+                  <div class="swatch-grid" data-swatches></div>
+                </div>
 
-          <div data-color-group="State">
-            <div class="swatch-group__label">State</div>
-            <div class="swatch-grid" data-swatches></div>
+                <div data-color-group="State">
+                  <div class="swatch-group__label">State</div>
+                  <div class="swatch-grid" data-swatches></div>
+                </div>
+              </div>
+            </article>
+            <article class="theme-panel theme-panel--light">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Light · data-theme="light"</span>
+              </header>
+              <div data-theme-panel-light-target>
+                <!-- mirrored from the dark panel by brand.js at init -->
+              </div>
+            </article>
           </div>
         </section>
 
@@ -104,50 +121,67 @@
             UI body family; data is always mono with tabular numerics.
           </p>
 
-          <div class="type-row">
-            <div class="type-sample--display">Mission Elapsed Time</div>
-            <div class="type-meta">
-              <span><strong>display</strong></span>
-              <span data-type-meta="display">—</span>
-            </div>
-          </div>
-          <div class="type-row">
-            <div class="type-sample--title">Wave 2 · implementation</div>
-            <div class="type-meta">
-              <span><strong>title</strong></span>
-              <span data-type-meta="title">—</span>
-            </div>
-          </div>
-          <div class="type-row">
-            <div class="type-sample--heading">rename-scope-refactor</div>
-            <div class="type-meta">
-              <span><strong>heading</strong></span>
-              <span data-type-meta="heading">—</span>
-            </div>
-          </div>
-          <div class="type-row">
-            <div class="type-sample--body">
-              Wave 2 shipped three workers against CTL-214, CTL-215, and CTL-216. One worker stalled
-              and requires review before the next dispatch.
-            </div>
-            <div class="type-meta">
-              <span><strong>body</strong></span>
-              <span data-type-meta="body">—</span>
-            </div>
-          </div>
-          <div class="type-row">
-            <div class="type-sample--label">Needs me · attention</div>
-            <div class="type-meta">
-              <span><strong>label</strong></span>
-              <span data-type-meta="label">—</span>
-            </div>
-          </div>
-          <div class="type-row">
-            <div class="type-sample--data">14 / 18 · $2.14 · 38m</div>
-            <div class="type-meta">
-              <span><strong>data</strong></span>
-              <span data-type-meta="data">—</span>
-            </div>
+          <div class="theme-panel-pair">
+            <article class="theme-panel theme-panel--dark">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Dark · data-theme="dark"</span>
+              </header>
+              <div data-theme-panel-source>
+                <div class="type-row">
+                  <div class="type-sample--display">Mission Elapsed Time</div>
+                  <div class="type-meta">
+                    <span><strong>display</strong></span>
+                    <span data-type-meta="display">—</span>
+                  </div>
+                </div>
+                <div class="type-row">
+                  <div class="type-sample--title">Wave 2 · implementation</div>
+                  <div class="type-meta">
+                    <span><strong>title</strong></span>
+                    <span data-type-meta="title">—</span>
+                  </div>
+                </div>
+                <div class="type-row">
+                  <div class="type-sample--heading">rename-scope-refactor</div>
+                  <div class="type-meta">
+                    <span><strong>heading</strong></span>
+                    <span data-type-meta="heading">—</span>
+                  </div>
+                </div>
+                <div class="type-row">
+                  <div class="type-sample--body">
+                    Wave 2 shipped three workers against CTL-214, CTL-215, and CTL-216. One worker
+                    stalled and requires review before the next dispatch.
+                  </div>
+                  <div class="type-meta">
+                    <span><strong>body</strong></span>
+                    <span data-type-meta="body">—</span>
+                  </div>
+                </div>
+                <div class="type-row">
+                  <div class="type-sample--label">Needs me · attention</div>
+                  <div class="type-meta">
+                    <span><strong>label</strong></span>
+                    <span data-type-meta="label">—</span>
+                  </div>
+                </div>
+                <div class="type-row">
+                  <div class="type-sample--data">14 / 18 · $2.14 · 38m</div>
+                  <div class="type-meta">
+                    <span><strong>data</strong></span>
+                    <span data-type-meta="data">—</span>
+                  </div>
+                </div>
+              </div>
+            </article>
+            <article class="theme-panel theme-panel--light">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Light · data-theme="light"</span>
+              </header>
+              <div data-theme-panel-light-target>
+                <!-- mirrored from the dark panel by brand.js at init -->
+              </div>
+            </article>
           </div>
         </section>
 
@@ -164,42 +198,59 @@
             — a 2px leading edge that pulses while a record is actively running.
           </p>
 
-          <div class="motion-grid">
-            <div class="motion-card">
-              <span class="motion-card__label">Button press scale</span>
-              <div class="motion-card__body">
-                <button class="demo-press" type="button">Press me</button>
-              </div>
-              <span class="motion-card__annotation">
-                transform scale at
-                <span data-duration="--motion-duration-state">—</span>
-              </span>
-            </div>
+          <div class="theme-panel-pair">
+            <article class="theme-panel theme-panel--dark">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Dark · data-theme="dark"</span>
+              </header>
+              <div data-theme-panel-source>
+                <div class="motion-grid">
+                  <div class="motion-card">
+                    <span class="motion-card__label">Button press scale</span>
+                    <div class="motion-card__body">
+                      <button class="demo-press" type="button">Press me</button>
+                    </div>
+                    <span class="motion-card__annotation">
+                      transform scale at
+                      <span data-duration="--motion-duration-state">—</span>
+                    </span>
+                  </div>
 
-            <div class="motion-card">
-              <span class="motion-card__label">Card hover</span>
-              <div class="motion-card__body">
-                <div class="demo-hover">Hover to strengthen border</div>
-              </div>
-              <span class="motion-card__annotation">
-                border-color at
-                <span data-duration="--motion-duration-state">—</span>
-              </span>
-            </div>
+                  <div class="motion-card">
+                    <span class="motion-card__label">Card hover</span>
+                    <div class="motion-card__body">
+                      <div class="demo-hover">Hover to strengthen border</div>
+                    </div>
+                    <span class="motion-card__annotation">
+                      border-color at
+                      <span data-duration="--motion-duration-state">—</span>
+                    </span>
+                  </div>
 
-            <div class="motion-card">
-              <span class="motion-card__label">Heartbeat · signature</span>
-              <div class="motion-card__body">
-                <div class="demo-heartbeat">
-                  <div class="demo-heartbeat__title">ORCH-2026-04-22</div>
-                  <div class="demo-heartbeat__meta">running · 3 of 8 · needs me</div>
+                  <div class="motion-card">
+                    <span class="motion-card__label">Heartbeat · signature</span>
+                    <div class="motion-card__body">
+                      <div class="demo-heartbeat">
+                        <div class="demo-heartbeat__title">ORCH-2026-04-22</div>
+                        <div class="demo-heartbeat__meta">running · 3 of 8 · needs me</div>
+                      </div>
+                    </div>
+                    <span class="motion-card__annotation">
+                      2px leading edge ·
+                      <span data-duration="--motion-duration-heartbeat">—</span>
+                    </span>
+                  </div>
                 </div>
               </div>
-              <span class="motion-card__annotation">
-                2px leading edge ·
-                <span data-duration="--motion-duration-heartbeat">—</span>
-              </span>
-            </div>
+            </article>
+            <article class="theme-panel theme-panel--light">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Light · data-theme="light"</span>
+              </header>
+              <div data-theme-panel-light-target>
+                <!-- mirrored from the dark panel by brand.js at init -->
+              </div>
+            </article>
           </div>
         </section>
 
@@ -214,90 +265,107 @@
             inline so dark and light panels can be compared side-by-side on the same page.
           </p>
 
-          <div class="specimen-grid">
-            <div class="specimen-block">
-              <span class="specimen-block__label">Button</span>
-              <div class="specimen-row">
-                <button class="btn btn--primary" type="button">Primary</button>
-                <button class="btn btn--secondary" type="button">Secondary</button>
-                <button class="btn btn--ghost" type="button">Ghost</button>
-                <button class="btn btn--primary" type="button" disabled>Disabled</button>
-              </div>
-            </div>
+          <div class="theme-panel-pair">
+            <article class="theme-panel theme-panel--dark">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Dark · data-theme="dark"</span>
+              </header>
+              <div data-theme-panel-source>
+                <div class="specimen-grid">
+                  <div class="specimen-block">
+                    <span class="specimen-block__label">Button</span>
+                    <div class="specimen-row">
+                      <button class="btn btn--primary" type="button">Primary</button>
+                      <button class="btn btn--secondary" type="button">Secondary</button>
+                      <button class="btn btn--ghost" type="button">Ghost</button>
+                      <button class="btn btn--primary" type="button" disabled>Disabled</button>
+                    </div>
+                  </div>
 
-            <div class="specimen-block">
-              <span class="specimen-block__label">Card</span>
-              <div class="specimen-grid">
-                <div class="specimen-card specimen-card--elevated">
-                  <div class="specimen-card__title">Elevated</div>
-                  <div class="specimen-card__body">
-                    Surface-1 background, default border, radius-lg. The default card shape.
+                  <div class="specimen-block">
+                    <span class="specimen-block__label">Card</span>
+                    <div class="specimen-grid">
+                      <div class="specimen-card specimen-card--elevated">
+                        <div class="specimen-card__title">Elevated</div>
+                        <div class="specimen-card__body">
+                          Surface-1 background, default border, radius-lg. The default card shape.
+                        </div>
+                      </div>
+                      <div class="specimen-card specimen-card--flat">
+                        <div class="specimen-card__title">Flat</div>
+                        <div class="specimen-card__body">
+                          Transparent background, subtle dashed border. Used inside denser panels.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="specimen-block">
+                    <span class="specimen-block__label">Tabs</span>
+                    <nav class="tabs-outer" aria-label="Outer tabs">
+                      <span class="tabs-outer__tab tabs-outer__tab--active">Overview</span>
+                      <span class="tabs-outer__tab">Runs</span>
+                      <span class="tabs-outer__tab">Settings</span>
+                    </nav>
+                    <nav class="tabs-inner" aria-label="Inner tabs">
+                      <span class="tabs-inner__tab tabs-inner__tab--active">All</span>
+                      <span class="tabs-inner__tab">Mine</span>
+                      <span class="tabs-inner__tab">Blocked</span>
+                    </nav>
+                  </div>
+
+                  <div class="specimen-block">
+                    <span class="specimen-block__label">Input</span>
+                    <div class="input">
+                      <input
+                        class="input__control"
+                        type="text"
+                        placeholder="Default — type here"
+                      />
+                      <span class="input__help">Defaults use surface-2 fill and border-default.</span>
+                    </div>
+                    <div class="input input--focused">
+                      <input
+                        class="input__control"
+                        type="text"
+                        value="orch-2026-04-22"
+                        readonly
+                      />
+                      <span class="input__help">Focused state — border-strong, inner glow from accent token.</span>
+                    </div>
+                    <div class="input input--error">
+                      <input
+                        class="input__control"
+                        type="text"
+                        value="CTL-999"
+                        readonly
+                      />
+                      <span class="input__help">Unknown ticket. Check the prefix.</span>
+                    </div>
+                  </div>
+
+                  <div class="specimen-block">
+                    <span class="specimen-block__label">Badges · six states</span>
+                    <div class="specimen-row">
+                      <span class="chip chip--queued">Queued</span>
+                      <span class="chip chip--running">Running</span>
+                      <span class="chip chip--pr-open">PR open</span>
+                      <span class="chip chip--merged">Merged</span>
+                      <span class="chip chip--failed">Failed</span>
+                      <span class="chip chip--needs-me">Needs me</span>
+                    </div>
                   </div>
                 </div>
-                <div class="specimen-card specimen-card--flat">
-                  <div class="specimen-card__title">Flat</div>
-                  <div class="specimen-card__body">
-                    Transparent background, subtle dashed border. Used inside denser panels.
-                  </div>
-                </div>
               </div>
-            </div>
-
-            <div class="specimen-block">
-              <span class="specimen-block__label">Tabs</span>
-              <nav class="tabs-outer" aria-label="Outer tabs">
-                <span class="tabs-outer__tab tabs-outer__tab--active">Overview</span>
-                <span class="tabs-outer__tab">Runs</span>
-                <span class="tabs-outer__tab">Settings</span>
-              </nav>
-              <nav class="tabs-inner" aria-label="Inner tabs">
-                <span class="tabs-inner__tab tabs-inner__tab--active">All</span>
-                <span class="tabs-inner__tab">Mine</span>
-                <span class="tabs-inner__tab">Blocked</span>
-              </nav>
-            </div>
-
-            <div class="specimen-block">
-              <span class="specimen-block__label">Input</span>
-              <div class="input">
-                <input
-                  class="input__control"
-                  type="text"
-                  placeholder="Default — type here"
-                />
-                <span class="input__help">Defaults use surface-2 fill and border-default.</span>
+            </article>
+            <article class="theme-panel theme-panel--light">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Light · data-theme="light"</span>
+              </header>
+              <div data-theme-panel-light-target>
+                <!-- mirrored from the dark panel by brand.js at init -->
               </div>
-              <div class="input input--focused">
-                <input
-                  class="input__control"
-                  type="text"
-                  value="orch-2026-04-22"
-                  readonly
-                />
-                <span class="input__help">Focused state — border-strong, inner glow from accent token.</span>
-              </div>
-              <div class="input input--error">
-                <input
-                  class="input__control"
-                  type="text"
-                  value="CTL-999"
-                  readonly
-                />
-                <span class="input__help">Unknown ticket. Check the prefix.</span>
-              </div>
-            </div>
-
-            <div class="specimen-block">
-              <span class="specimen-block__label">Badges · six states</span>
-              <div class="specimen-row">
-                <span class="chip chip--queued">Queued</span>
-                <span class="chip chip--running">Running</span>
-                <span class="chip chip--pr-open">PR open</span>
-                <span class="chip chip--merged">Merged</span>
-                <span class="chip chip--failed">Failed</span>
-                <span class="chip chip--needs-me">Needs me</span>
-              </div>
-            </div>
+            </article>
           </div>
         </section>
 
@@ -308,54 +376,70 @@
             <span class="eyebrow">Run specimen</span>
           </header>
           <p class="brand-section__caption">
-            The dashboard Run-card shape. Default variant on the left, needs-me variant on the right
-            with a 2px accent leading edge — pulsing in Operator Console, static in Precision
-            Instrument.
+            The dashboard Run-card shape. Default variant on the left, needs-me variant on the
+            right with a 2px accent leading edge that pulses at the heartbeat duration.
           </p>
 
-          <div class="specimen-grid">
-            <article class="kanban-card">
-              <header class="kanban-card__header">
-                <h3 class="kanban-card__title">release-notes-gen</h3>
-                <span class="chip chip--ticket">CTL-219</span>
+          <div class="theme-panel-pair">
+            <article class="theme-panel theme-panel--dark">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Dark · data-theme="dark"</span>
               </header>
-              <div class="kanban-card__meta">
-                <span class="chip chip--running">Running</span>
-                <span class="kanban-card__progress">14 / 18</span>
-              </div>
-              <div class="kanban-card__bar" aria-hidden="true">
-                <span style="width: 78%"></span>
-              </div>
-              <footer class="kanban-card__footer">
-                <span>claude-4-7</span>
-                <span>04m 12s</span>
-                <span>$0.24</span>
-              </footer>
-            </article>
+              <div data-theme-panel-source>
+                <div class="specimen-grid">
+                  <article class="kanban-card">
+                    <header class="kanban-card__header">
+                      <h3 class="kanban-card__title">release-notes-gen</h3>
+                      <span class="chip chip--ticket">CTL-219</span>
+                    </header>
+                    <div class="kanban-card__meta">
+                      <span class="chip chip--running">Running</span>
+                      <span class="kanban-card__progress">14 / 18</span>
+                    </div>
+                    <div class="kanban-card__bar" aria-hidden="true">
+                      <span style="width: 78%"></span>
+                    </div>
+                    <footer class="kanban-card__footer">
+                      <span>claude-4-7</span>
+                      <span>04m 12s</span>
+                      <span>$0.24</span>
+                    </footer>
+                  </article>
 
-            <article class="kanban-card kanban-card--needs-me">
-              <header class="kanban-card__header">
-                <h3 class="kanban-card__title">rename-scope-refactor</h3>
-                <span class="chip chip--ticket">CTL-214</span>
+                  <article class="kanban-card kanban-card--needs-me">
+                    <header class="kanban-card__header">
+                      <h3 class="kanban-card__title">rename-scope-refactor</h3>
+                      <span class="chip chip--ticket">CTL-214</span>
+                    </header>
+                    <div class="kanban-card__meta">
+                      <span class="chip chip--needs-me">Needs me</span>
+                      <span class="kanban-card__progress">6 / 18</span>
+                    </div>
+                    <div class="kanban-card__bar" aria-hidden="true">
+                      <span style="width: 33%"></span>
+                    </div>
+                    <div class="kanban-card__callout">
+                      <span class="chip chip--needs-me">Review</span>
+                      <span class="kanban-card__callout-reason">
+                        Awaiting approval on scope rename before next stage.
+                      </span>
+                    </div>
+                    <footer class="kanban-card__footer">
+                      <span>claude-4-7</span>
+                      <span>12m 03s</span>
+                      <span>$0.18</span>
+                    </footer>
+                  </article>
+                </div>
+              </div>
+            </article>
+            <article class="theme-panel theme-panel--light">
+              <header class="theme-panel__header">
+                <span class="theme-panel__label">Light · data-theme="light"</span>
               </header>
-              <div class="kanban-card__meta">
-                <span class="chip chip--needs-me">Needs me</span>
-                <span class="kanban-card__progress">6 / 18</span>
+              <div data-theme-panel-light-target>
+                <!-- mirrored from the dark panel by brand.js at init -->
               </div>
-              <div class="kanban-card__bar" aria-hidden="true">
-                <span style="width: 33%"></span>
-              </div>
-              <div class="kanban-card__callout">
-                <span class="chip chip--needs-me">Review</span>
-                <span class="kanban-card__callout-reason">
-                  Awaiting approval on scope rename before next stage.
-                </span>
-              </div>
-              <footer class="kanban-card__footer">
-                <span>claude-4-7</span>
-                <span>12m 03s</span>
-                <span>$0.18</span>
-              </footer>
             </article>
           </div>
         </section>

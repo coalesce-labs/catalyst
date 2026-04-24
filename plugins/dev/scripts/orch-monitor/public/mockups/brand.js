@@ -1,7 +1,16 @@
-// Brand showcase live data — extracted from brand.html (CTL-178)
-// Populates color swatches, type-role metadata, and duration readouts
-// from computed styles on html:root, then refreshes when data-theme or
-// data-system attrs change.
+// Brand showcase live data — extracted from brand.html (CTL-178).
+//
+// Two jobs:
+//
+// 1. Mirror each [data-theme-panel-source] (the dark "source of truth"
+//    for a specimen section) into its sibling [data-theme-panel-light-target]
+//    so the light panel stays in sync with the dark one without requiring
+//    authors to duplicate the markup twice.
+//
+// 2. Populate color swatches, type-role metadata, and motion-duration
+//    readouts from the panel-scoped computed styles. Swatch hex readouts
+//    resolve per-panel so the dark panel shows dark tokens and the light
+//    panel shows light tokens on the same page.
 
 (function () {
   // Color tokens, grouped. Each entry: { name, var, group, kind? }.
@@ -36,6 +45,22 @@
     { role: "label", selector: ".type-sample--label" },
     { role: "data", selector: ".type-sample--data" },
   ];
+
+  // Copy each dark panel's authored content into the matching light panel
+  // slot. The dark panel is authored once; the light panel is a live
+  // mirror so authors never have to touch both.
+  function mirrorDarkIntoLight() {
+    document.querySelectorAll("[data-theme-panel-source]").forEach((src) => {
+      const pair = src.closest(".theme-panel-pair");
+      if (!pair) return;
+      const target = pair.querySelector("[data-theme-panel-light-target]");
+      if (!target) return;
+      target.innerHTML = "";
+      [...src.children].forEach((child) => {
+        target.appendChild(child.cloneNode(true));
+      });
+    });
+  }
 
   function buildSwatches() {
     const containers = document.querySelectorAll("[data-color-group]");
@@ -84,10 +109,13 @@
   }
 
   function refreshSwatches() {
-    const cs = getComputedStyle(document.documentElement);
+    // Read computed style from each swatch element so the hex value
+    // reflects the swatch's own panel scope (dark vs light), not the
+    // document root.
     document.querySelectorAll(".swatch").forEach((sw) => {
       const v = sw.getAttribute("data-var");
       if (!v) return;
+      const cs = getComputedStyle(sw);
       const value = cs.getPropertyValue(v).trim().toUpperCase();
       const hex = sw.querySelector("[data-hex]");
       if (hex) hex.textContent = value || "—";
@@ -96,16 +124,20 @@
 
   function refreshTypeMeta() {
     TYPE_ROLES.forEach(({ role, selector }) => {
+      // Type metadata is identical across panels (font/size/tracking
+      // tokens are not theme-scoped), so only the first match is read.
       const el = document.querySelector(selector);
-      const target = document.querySelector(`[data-type-meta="${role}"]`);
-      if (!el || !target) return;
+      if (!el) return;
       const cs = getComputedStyle(el);
       const family = cs.fontFamily.split(",")[0].trim().replace(/^["']|["']$/g, "");
       const size = cs.fontSize;
       const lh = cs.lineHeight;
       const weight = cs.fontWeight;
       const tracking = cs.letterSpacing === "normal" ? "0" : cs.letterSpacing;
-      target.textContent = `${family} · ${size} / ${lh} · ${weight} · ${tracking}`;
+      const text = `${family} · ${size} / ${lh} · ${weight} · ${tracking}`;
+      document.querySelectorAll(`[data-type-meta="${role}"]`).forEach((t) => {
+        t.textContent = text;
+      });
     });
   }
 
@@ -126,12 +158,9 @@
   }
 
   function init() {
+    mirrorDarkIntoLight();
     buildSwatches();
     refreshLive();
-    new MutationObserver(refreshLive).observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-system"],
-    });
   }
 
   if (document.readyState !== "loading") {
