@@ -458,6 +458,53 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
 | `verifyBeforeMerge` | boolean | `true` | Run adversarial verification before allowing merge |
 | `allowSelfReportedCompletion` | boolean | `false` | Trust worker's self-reported completion without verification |
 
+## Feedback Config
+
+Optional. Controls where catalyst skills auto-file improvement tickets at run end and on whose
+permission. Primarily relevant once [CTL-176](https://github.com/coalesce-labs/catalyst/issues)
+(skill-driven auto-filing) lands; CTL-183 ships the routing layer it will consume.
+
+```json
+{
+  "catalyst": {
+    "feedback": {
+      "autoFile": false,
+      "githubRepo": "coalesce-labs/catalyst",
+      "labels": ["auto-submitted"]
+    }
+  }
+}
+```
+
+| Field         | Type     | Default                      | Description                                                                                                                                           |
+| ------------- | -------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `autoFile`    | boolean  | `false`                      | When `true`, skills may auto-file findings at run end without prompting. When `false` or absent, skills prompt before filing each run.                |
+| `githubRepo`  | string   | `"coalesce-labs/catalyst"`   | `<owner>/<repo>` slug used when Linear filing fails or is unavailable. Defaults to upstream; override to redirect findings to your own fork.          |
+| `labels`      | string[] | `["auto-submitted"]`         | Base labels applied to every auto-filed ticket. The invoking skill name is appended automatically (e.g., `oneshot`, `orchestrate`, `implement-plan`). |
+
+### Routing
+
+Skills attempt `linearis issues create` first, using `catalyst.linear.teamKey`. On Linear
+failure (no API key, team mismatch, CLI unavailable), they fall back to
+`gh issue create --repo <feedback.githubRepo>`. Destinations are never split — GitHub is used
+only when Linear is unavailable.
+
+### Consent
+
+The first time a skill is ready to auto-file, it prompts:
+
+> Would you like us to automatically file tickets at the end of each run? [Y/n]
+
+- **Yes** → `autoFile` is set to `true` in `.catalyst/config.json`; no prompt on subsequent runs.
+- **No** → nothing is persisted; the prompt will return on the next run.
+
+Revoke by setting `autoFile` to `false` or deleting the `feedback` block. The
+`plugins/dev/scripts/feedback-consent.sh` helper exposes `check`, `grant`, and `status`
+subcommands for scripted use.
+
+See [Integrations › Linear ⇄ GitHub Sync](/reference/integrations/#linear--github-sync) for the
+maintainer-side setup that mirrors `auto-submitted`-labeled GitHub issues back into Linear.
+
 ## Archive Config
 
 Optional. Controls where orchestrator artifacts are persisted and how long they are retained.
