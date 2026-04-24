@@ -60,7 +60,7 @@ parsing, so `data-system` and `data-theme` are set before the browser paints any
   (function () {
     const LS_KEY = "catalyst.mockup.prefs";
     const DEFAULTS = { system: "operator-console", theme: "dark" };
-    const SYSTEMS = ["operator-console", "precision-instrument"];
+    const SYSTEMS = ["operator-console"];
     const THEMES = ["dark", "light"];
     const url = new URLSearchParams(window.location.search);
     let stored = {};
@@ -85,13 +85,13 @@ mount.
 
 ## The `data-system` axis
 
-| Value                  | Description                                       |
-| ---------------------- | ------------------------------------------------- |
-| `operator-console`     | Default. Dark canvas, amber accent, grotesk type. |
-| `precision-instrument` | Ivory canvas, ink-blue accent, serif display.     |
+| Value              | Description                                       |
+| ------------------ | ------------------------------------------------- |
+| `operator-console` | Default. Dark canvas, amber accent, grotesk type. |
 
 `operator-console` is the default because `tokens.css` scopes its block to `:root` in addition to
-`[data-system="operator-console"]`.
+`[data-system="operator-console"]`. The axis is kept as plumbing in case a second system lands;
+there is currently no system-switcher UI.
 
 ### Persistence + clean URL
 
@@ -135,7 +135,6 @@ a cheat-sheet overlay. Bindings never fire while focus is on `input`, `textarea`
 | `g t`       | Navigate to `todos.html`                            |
 | `g r`       | Navigate to `brand.html`                            |
 | `⇧D`        | Toggle theme (`data-theme` = `dark` ↔ `light`)      |
-| `.`         | Cycle system (same as clicking the switcher pill)   |
 | `p`         | Cycle palette (reserved — no-op until palettes.css) |
 | `/`         | Focus first `input[data-search]` or `input[type=search]` |
 | `?`         | Open the cheat-sheet overlay                        |

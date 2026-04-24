@@ -36,8 +36,10 @@ export default defineConfig({
       routeMiddleware: "./src/routeData.ts",
       favicon: "/favicon.svg",
       logo: {
-        src: "./public/favicon.svg",
+        light: "./src/assets/brand/lockup-horizontal-mono-black.svg",
+        dark: "./src/assets/brand/lockup-horizontal-mono-white.svg",
         alt: "Catalyst",
+        replacesTitle: true,
       },
       description:
         "AI-assisted development workflows for Claude Code — skills, agents, and orchestration plugins.",
