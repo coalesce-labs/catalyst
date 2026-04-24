@@ -59,16 +59,29 @@ known parent to reference.
    resolve BEHIND/CI/review blockers, and only exit when `state=MERGED` and you have written
    `pr.mergedAt` + `status: "done"` to your signal file.
 
-10. **File new improvement findings (optional, CTL-183 routing)** — if this follow-up surfaces
-    its own new findings worth tracking (per CTL-176, inert until that ticket lands), invoke the
-    feedback helper once per finding. Follow-up workers always run autonomously (no TTY), so
-    the helper silently skips when consent is not already granted:
+10. **File new improvement findings (CTL-176 / CTL-183 routing)** — if this follow-up
+    surfaces new friction worth tracking (beyond the parent findings that triggered it),
+    record it on the shared findings queue:
+    ```bash
+    "${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
+      --title "Short imperative title" --body "Details" --skill worker-followup
+    ```
+    Do NOT drain the queue yourself when running under an orchestrator — the orchestrator's
+    Phase 7 owns the single drain pass over the shared queue. Only file at end-of-run when
+    invoked standalone (no `CATALYST_ORCHESTRATOR_ID`). Follow-up workers always run
+    autonomously (no TTY), so the helper silently skips when consent is not already granted:
     ```bash
     FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
-    if [ -x "$FEEDBACK" ] && [ -n "${NEW_FINDINGS[*]:-}" ]; then
-      for F in "${NEW_FINDINGS[@]}"; do
-        "$FEEDBACK" --title "${F%%$'\n'*}" --body "$F" --skill worker-followup --json || true
-      done
+    FINDINGS_FILE="${CATALYST_FINDINGS_FILE:-.catalyst/findings/${CATALYST_SESSION_ID:-current}.jsonl}"
+    if [ -z "${CATALYST_ORCHESTRATOR_ID:-}${CATALYST_ORCHESTRATOR_DIR:-}" ] \
+        && [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; then
+      while IFS= read -r line; do
+        TITLE=$(jq -r '.title' <<<"$line")
+        BODY=$(jq -r '.body' <<<"$line")
+        SKILL=$(jq -r '.skill // "worker-followup"' <<<"$line")
+        "$FEEDBACK" --title "$TITLE" --body "$BODY" --skill "$SKILL" --json || true
+      done < "$FINDINGS_FILE"
+      rm -f "$FINDINGS_FILE"
     fi
     ```
 

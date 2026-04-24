@@ -1245,27 +1245,61 @@ When all waves are complete:
 3. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck, update them
    using the Linearis CLI (run `linearis issues usage` for update syntax).
 
-4. **File improvement findings (CTL-183 routing, optional):** If the orchestrator collected any
-   improvement findings during the run (per [[CTL-176]] — inert until that ticket lands), route
-   each finding through the feedback helper so it lands in Linear (or GitHub, if Linear is
-   unavailable). Runs as a no-op when there are no findings.
+4. **File improvement findings (CTL-176 / CTL-183 routing):** Drain the shared findings queue
+   and file one ticket per entry. The orchestrator and every dispatched worker share one queue
+   (dispatch sets `CATALYST_FINDINGS_FILE=$ORCH_DIR/findings.jsonl`), so this one pass covers
+   everything surfaced across the whole run. Runs as a no-op when the queue is empty.
+
+   **Recording findings during the run.** The moment you or a worker notices friction worth
+   fixing (workflow gaps, bugs spotted in adjacent code, recurring manual steps, gaps in
+   tooling), record it on the shared queue:
+
+   ```bash
+   "${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
+     --title "Short imperative title" \
+     --body "Reproduction + expected + observed + any links" \
+     --skill orchestrate --severity low
+   ```
+
+   Record inline, the moment it's observed — context compaction loses it otherwise. Don't
+   prompt the user mid-run; don't wait for the end; don't batch. Step 4 below files the whole
+   queue in one pass.
+
+   **What counts:** friction the maintainer would want fixed, bugs in adjacent catalyst code
+   spotted incidentally, gaps in tooling, manual steps that should be automated.
+   **What doesn't:** this run's own ticket TODOs (those go in the PR body), user preferences
+   that should be durable memory, routine debugging.
 
    ```bash
    FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
    CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+   FINDINGS_FILE="${CATALYST_FINDINGS_FILE:-${ORCH_DIR}/findings.jsonl}"
 
-   # Autonomous mode (orchestrator runs without a TTY): file only when consent
-   # is already granted — never prompt. Interactive maintainer invocations
-   # prompt once, then persist on yes.
-   if [ -x "$FEEDBACK" ] && [ -x "$CONSENT" ] && [ -n "${FINDINGS[*]:-}" ]; then
+   if [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; then
+     COUNT=$(wc -l < "$FINDINGS_FILE" | tr -d ' ')
+     # Autonomous mode (orchestrator runs without a TTY): file only when consent
+     # is already granted — never prompt. Interactive maintainer invocations
+     # prompt once, then persist on yes.
      if [ "$("$CONSENT" check)" != "granted" ] && [ -z "${CATALYST_AUTONOMOUS:-}" ] && [ -t 0 ]; then
-       read -r -p "File ${#FINDINGS[@]} improvement tickets at end of run? [Y/n] " yn
+       read -r -p "File $COUNT improvement tickets at end of run? [Y/n] " yn
        case "$yn" in [Nn]*) : ;; *) "$CONSENT" grant >/dev/null ;; esac
      fi
      if [ "$("$CONSENT" check)" = "granted" ]; then
-       for F in "${FINDINGS[@]}"; do
-         "$FEEDBACK" --title "${F%%$'\n'*}" --body "$F" --skill orchestrate --json || true
-       done
+       FILED=0
+       while IFS= read -r line; do
+         TITLE=$(jq -r '.title' <<<"$line")
+         BODY=$(jq -r '.body' <<<"$line")
+         SKILL=$(jq -r '.skill // "orchestrate"' <<<"$line")
+         RESULT=$("$FEEDBACK" --title "$TITLE" --body "$BODY" --skill "$SKILL" --json 2>/dev/null || true)
+         STATUS=$(jq -r '.status // "failed"' <<<"$RESULT")
+         if [ "$STATUS" = "filed" ]; then
+           ID=$(jq -r '.identifier // .url // ""' <<<"$RESULT")
+           echo "  filed: $ID  ($TITLE)"
+           FILED=$((FILED + 1))
+         fi
+       done < "$FINDINGS_FILE"
+       # Preserve queue on partial failure; delete on full success.
+       [ "$FILED" -eq "$COUNT" ] && rm -f "$FINDINGS_FILE"
      fi
    fi
    ```
