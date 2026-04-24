@@ -53,6 +53,29 @@ Customize state names via `stateMap` in your [project config](/reference/configu
 
 Skills detect tickets automatically from plan frontmatter (`ticket: PROJ-123`), filenames, handoff documents, and worktree directory names.
 
+### Linear ⇄ GitHub Sync
+
+Catalyst's feedback routing (see [Feedback Config](/reference/configuration/#feedback-config))
+prefers Linear but falls back to a GitHub issue on a configured repository when Linear is
+unavailable. Maintainers can mirror those GitHub issues back into Linear via Linear's native
+GitHub integration, so all auto-filed tickets land in the same triage queue regardless of who
+filed them.
+
+**Setup** (one-time, Linear workspace admin):
+
+1. In Linear, open **Settings → Integrations → GitHub**.
+2. Connect the Linear workspace to the repository that receives fallback filings (default:
+   `coalesce-labs/catalyst`, or whatever `catalyst.feedback.githubRepo` is set to in your
+   project config).
+3. In the connector's issue-sync rules, filter on the `auto-submitted` label so only
+   agent-filed issues are mirrored.
+4. Map the target Linear team (e.g., `CTL`) and the default status (e.g., `Backlog`).
+
+Once configured, any GitHub issue created by a Catalyst skill surfaces in the maintainer's
+Linear workspace automatically, preserving the `auto-submitted` label plus the skill-name
+label (e.g., `oneshot`, `orchestrate`). See Linear's [GitHub integration
+docs](https://linear.app/docs/github) for the current setup UI.
+
 ## Sentry
 
 Production error monitoring via the `catalyst-debugging` plugin.

@@ -1245,13 +1245,38 @@ When all waves are complete:
 3. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck, update them
    using the Linearis CLI (run `linearis issues usage` for update syntax).
 
-4. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it).
+4. **File improvement findings (CTL-183 routing, optional):** If the orchestrator collected any
+   improvement findings during the run (per [[CTL-176]] — inert until that ticket lands), route
+   each finding through the feedback helper so it lands in Linear (or GitHub, if Linear is
+   unavailable). Runs as a no-op when there are no findings.
+
+   ```bash
+   FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
+   CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+
+   # Autonomous mode (orchestrator runs without a TTY): file only when consent
+   # is already granted — never prompt. Interactive maintainer invocations
+   # prompt once, then persist on yes.
+   if [ -x "$FEEDBACK" ] && [ -x "$CONSENT" ] && [ -n "${FINDINGS[*]:-}" ]; then
+     if [ "$("$CONSENT" check)" != "granted" ] && [ -z "${CATALYST_AUTONOMOUS:-}" ] && [ -t 0 ]; then
+       read -r -p "File ${#FINDINGS[@]} improvement tickets at end of run? [Y/n] " yn
+       case "$yn" in [Nn]*) : ;; *) "$CONSENT" grant >/dev/null ;; esac
+     fi
+     if [ "$("$CONSENT" check)" = "granted" ]; then
+       for F in "${FINDINGS[@]}"; do
+         "$FEEDBACK" --title "${F%%$'\n'*}" --body "$F" --skill orchestrate --json || true
+       done
+     fi
+   fi
+   ```
+
+5. **Clean up all worktrees** (including orchestrator worktree, unless user wants to keep it).
    Use `/catalyst-dev:teardown ${ORCH_NAME}` for a safe, archive-gated deletion. Teardown
    refuses to run unless step 2's sweep succeeded (use `--force` to override).
 
-5. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.
+6. **Sync thoughts**: `humanlayer thoughts sync` to persist any shared documents.
 
-6. **Complete and archive global state**:
+7. **Complete and archive global state**:
 
 ```bash
 # CTL-111: post orchestrator done to shared comms channel. Workers have already
@@ -1277,7 +1302,7 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-7. **Report to user**:
+8. **Report to user**:
 
    ```
    Orchestration Complete — "api-redesign"

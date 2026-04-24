@@ -60,6 +60,19 @@ ${ISSUES}
     signal file (sourced from `gh pr view --json mergedAt`), transition the Linear ticket to
     Done, then exit successfully.
 
+11. **File improvement findings (optional, CTL-183 routing)** — if you captured improvement
+    findings during this fix-up (per CTL-176, inert until that ticket lands), invoke the feedback
+    helper once per finding. Fix-up workers always run autonomously (no TTY, no prompt), so the
+    helper silently skips when consent is not already granted:
+    ```bash
+    FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
+    if [ -x "$FEEDBACK" ] && [ -n "${FINDINGS[*]:-}" ]; then
+      for F in "${FINDINGS[@]}"; do
+        "$FEEDBACK" --title "${F%%$'\n'*}" --body "$F" --skill worker-fixup --json || true
+      done
+    fi
+    ```
+
 ## What NOT to do
 
 - Do NOT file a new Linear ticket — this is recovery on the same ticket.

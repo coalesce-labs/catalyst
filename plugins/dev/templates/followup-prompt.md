@@ -59,6 +59,19 @@ known parent to reference.
    resolve BEHIND/CI/review blockers, and only exit when `state=MERGED` and you have written
    `pr.mergedAt` + `status: "done"` to your signal file.
 
+10. **File new improvement findings (optional, CTL-183 routing)** — if this follow-up surfaces
+    its own new findings worth tracking (per CTL-176, inert until that ticket lands), invoke the
+    feedback helper once per finding. Follow-up workers always run autonomously (no TTY), so
+    the helper silently skips when consent is not already granted:
+    ```bash
+    FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
+    if [ -x "$FEEDBACK" ] && [ -n "${NEW_FINDINGS[*]:-}" ]; then
+      for F in "${NEW_FINDINGS[@]}"; do
+        "$FEEDBACK" --title "${F%%$'\n'*}" --body "$F" --skill worker-followup --json || true
+      done
+    fi
+    ```
+
 ## What NOT to do
 
 - Do NOT reopen or push to the parent's PR — it's merged, that branch is gone.

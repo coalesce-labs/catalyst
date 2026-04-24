@@ -26,6 +26,11 @@
     },
     "thoughts": {
       "user": null
+    },
+    "feedback": {
+      "autoFile": false,
+      "githubRepo": "coalesce-labs/catalyst",
+      "labels": ["auto-submitted"]
     }
   }
 }
