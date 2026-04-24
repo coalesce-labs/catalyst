@@ -208,6 +208,7 @@ while IFS= read -r T; do
     CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
     CATALYST_COMMS_CHANNEL="$COMMS_CHANNEL" \
     CATALYST_SESSION_ID="$SESSION_ID" \
+    CATALYST_FINDINGS_FILE="${ORCH_DIR}/findings.jsonl" \
     exec nohup "$CLAUDE_BIN" \
       -n "${ORCH_ID}-${T}" \
       --output-format stream-json \
