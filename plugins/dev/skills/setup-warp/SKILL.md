@@ -292,13 +292,9 @@ color = "{COLOR}"
 [[panes]]
 id = "main"
 type = "terminal"
-directory = "{WORKTREE_BASE}/{{worktree}}"
+directory = "{PROJECT_PATH}"
 commands = [
-  "export CATALYST_WARP_NAME={SLUG}_{{worktree}} CATALYST_WARP_REMOTE={SLUG}_{{worktree}}",
-  "direnv allow . && eval \"$(direnv export zsh)\"",
-  "yes | humanlayer thoughts init --profile $HUMANLAYER_PROFILE --directory $HUMANLAYER_DIRECTORY 2>/dev/null; humanlayer thoughts sync",
-  "{CATALYST_ROOT}/plugins/dev/scripts/trust-workspace.sh \"$(pwd)\"",
-  "git status",
+  "{CATALYST_ROOT}/plugins/dev/scripts/launch-worktree-tab.sh --project {SLUG} '{{worktree}}' main",
 ]
 
 [params.worktree]
