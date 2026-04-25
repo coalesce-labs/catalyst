@@ -222,6 +222,26 @@
       "type": ["string", "null"],
       "format": "date-time",
       "description": "ISO 8601 timestamp of the most recent auto-fixup dispatch by orchestrate-auto-fixup (CTL-64). For dashboard/telemetry only."
+    },
+    "postMergeVerification": {
+      "type": ["object", "null"],
+      "description": "Independent verification results recorded by the orchestrator after the worker's PR merges (CTL-130). Workers auto-merge independently, so verification is always post-merge. Null until verification runs.",
+      "properties": {
+        "result": {
+          "type": "string",
+          "enum": ["passed", "failed"],
+          "description": "Verification outcome from orchestrate-verify.sh"
+        },
+        "verifiedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp when verification completed"
+        },
+        "remediationTicket": {
+          "type": ["string", "null"],
+          "description": "Linear ticket ID for follow-up remediation if verification failed. Null on pass or before remediation is filed."
+        }
+      }
     }
   }
 }

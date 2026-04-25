@@ -35,6 +35,28 @@ thought documents and categorize them, NOT to analyze their contents in depth.
    - Note document dates if visible in filename
    - Correct searchable/ paths to actual paths
 
+## Preflight Check (MANDATORY — run before ANY search)
+
+Before doing anything else, run `ls thoughts/shared/` to verify the thoughts directory exists.
+
+- **If `thoughts/shared/` does not exist**: STOP immediately. Do NOT attempt any searches. Report:
+  ```
+  ⚠️ thoughts/shared/ not found
+  Working directory: <output of pwd or the cwd you observe>
+  Checked path: thoughts/shared/
+
+  The thoughts directory is not initialized in this working directory.
+  This may indicate a worktree setup issue — thoughts init or sync may not have run.
+  ```
+  Return this as your complete response. Do not guess, do not return empty results, do not say
+  "no relevant documents found" — the directory itself is missing, which is a setup problem.
+
+- **If `thoughts/shared/` exists but is completely empty** (no subdirectories, no files): Report a
+  warning that thoughts appears uninitialized, include the working directory, then proceed with
+  searching other locations (searchable/, global/, user dirs).
+
+- **If `thoughts/shared/` exists and has content**: Proceed normally to the search strategy below.
+
 ## Search Strategy
 
 First, think deeply about the search approach - consider which directories to prioritize based on

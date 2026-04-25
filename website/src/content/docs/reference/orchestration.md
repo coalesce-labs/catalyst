@@ -470,8 +470,8 @@ gets caught.
 | `workerCommand`               | string       | `/oneshot`                   | Skill to run in each worker                                     |
 | `workerModel`                 | string       | `opus`                       | Model for worker sessions                                       |
 | `testRequirements`            | object       | `{"backend":["unit"]}`       | Required test types by scope                                    |
-| `verifyBeforeMerge`           | boolean      | `true`                       | Run adversarial verification before merging                     |
-| `allowSelfReportedCompletion` | boolean      | `false`                      | Trust worker's `definitionOfDone` without verification          |
+| `verifyBeforeMerge`           | boolean      | `true`                       | Run adversarial verification on merged commits (post-merge)     |
+| `allowSelfReportedCompletion` | boolean      | `false`                      | When `true`, verification failures are advisory (wave advances). When `false` (default), failures block wave advancement until remediation is filed |
 
 ### Hook Variables
 
