@@ -124,8 +124,31 @@ log "Initializing session database..."
 
 # ─── Step 4: Auto-generate worktree name ──────────────────────────────────────
 
+slugify() {
+  printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c '[:alnum:]-' '-' \
+    | sed -E 's/-+/-/g; s/^-//; s/-$//' | cut -c1-30
+}
+
 TODAY=$(date +%Y-%m-%d)
-ORCH_NAME="orch-${TODAY}"
+
+SLUG=""
+if [[ -n "$PROJECT" ]]; then
+  SLUG=$(slugify "$PROJECT")
+elif [[ -n "$CYCLE" ]]; then
+  SLUG="cycle-$(slugify "$CYCLE")"
+elif [[ -n "$TICKETS" ]]; then
+  # Use first ticket as slug
+  FIRST_TICKET="${TICKETS%% *}"
+  SLUG=$(slugify "$FIRST_TICKET")
+elif [[ -n "$AUTO" ]]; then
+  SLUG="auto${AUTO}"
+fi
+
+if [[ -n "$SLUG" ]]; then
+  ORCH_NAME="orch-${SLUG}-${TODAY}"
+else
+  ORCH_NAME="orch-${TODAY}"
+fi
 
 WT_DIR_CONFIG=$(jq -r '.catalyst.orchestration.worktreeDir // empty' "$CONFIG_FILE" 2>/dev/null)
 if [[ -n "$WT_DIR_CONFIG" ]]; then

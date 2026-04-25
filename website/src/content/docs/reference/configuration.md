@@ -455,8 +455,8 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
 | `workerCommand` | string | `/oneshot` | Skill to dispatch in each worker |
 | `workerModel` | string | `opus` | Model for worker sessions |
 | `testRequirements` | object | See above | Required test types by scope (backend/frontend/fullstack) |
-| `verifyBeforeMerge` | boolean | `true` | Run adversarial verification before allowing merge |
-| `allowSelfReportedCompletion` | boolean | `false` | Trust worker's self-reported completion without verification |
+| `verifyBeforeMerge` | boolean | `true` | Run adversarial verification on merged commits (post-merge) |
+| `allowSelfReportedCompletion` | boolean | `false` | When `true`, verification failures are advisory (wave advances). When `false` (default), verification failures block wave advancement until remediation is filed |
 
 ## Feedback Config
 

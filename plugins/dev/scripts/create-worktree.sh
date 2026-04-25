@@ -322,6 +322,17 @@ else
 			echo -e "${GREEN}  ✅ Thoughts initialized${NC}"
 			echo "  Running: humanlayer thoughts sync"
 			humanlayer thoughts sync >/dev/null 2>&1 || echo -e "${YELLOW}  ⚠️  Sync warning: run 'humanlayer thoughts sync' manually${NC}"
+			# Verify thoughts/shared/ exists after init+sync
+			if [ ! -d "thoughts/shared" ]; then
+				echo -e "${RED}❌ Error: thoughts/shared/ does not exist after init+sync${NC}"
+				echo "  Working directory: $(pwd)"
+				echo "  Expected path: $(pwd)/thoughts/shared/"
+				echo "  This indicates a thoughts initialization failure."
+				exit 1
+			fi
+			if [ -z "$(ls -A thoughts/shared/ 2>/dev/null)" ]; then
+				echo -e "${YELLOW}  ⚠️  thoughts/shared/ exists but is empty — sync may not have pulled content yet${NC}"
+			fi
 		else
 			echo -e "${YELLOW}  ⚠️  Could not initialize thoughts${NC}"
 		fi

@@ -132,7 +132,6 @@ a cheat-sheet overlay. Bindings never fire while focus is on `input`, `textarea`
 | `g c`       | Navigate to `comms.html`                            |
 | `g b`       | Navigate to `briefing.html`                         |
 | `g v`       | Navigate to `agent-graph.html`                      |
-| `g t`       | Navigate to `todos.html`                            |
 | `g r`       | Navigate to `brand.html`                            |
 | `⇧D`        | Toggle theme (`data-theme` = `dark` ↔ `light`)      |
 | `p`         | Cycle palette (reserved — no-op until palettes.css) |

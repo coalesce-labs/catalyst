@@ -35,6 +35,10 @@
 #       Aggregate statistics: avg cost, duration, success rate, skill breakdown.
 #   compare <session-id-1> <session-id-2>
 #       Side-by-side comparison of two sessions.
+#   status [--json]
+#       Unified view of all active sessions with PID liveness checks.
+#   restart [--exec] [--all | <session-id>...]
+#       Find crashed sessions and offer resume commands. --exec runs them.
 #
 # Exit codes: 0 on success, 1 on argument or execution error. Reads print
 # `null` + exit 1 when the session does not exist.
@@ -611,6 +615,258 @@ cmd_compare() {
     '{left: ($s1[0] + {tools: $t1}), right: ($s2[0] + {tools: $t2})}'
 }
 
+time_ago() {
+  local started="$1" now_epoch elapsed h m
+  now_epoch=$(date -u +%s)
+  if [[ "$OSTYPE" == darwin* ]]; then
+    local started_epoch
+    started_epoch=$(date -u -jf "%Y-%m-%dT%H:%M:%SZ" "$started" +%s 2>/dev/null || date -u +%s)
+    elapsed=$(( now_epoch - started_epoch ))
+  else
+    local started_epoch
+    started_epoch=$(date -u -d "$started" +%s 2>/dev/null || date -u +%s)
+    elapsed=$(( now_epoch - started_epoch ))
+  fi
+  if (( elapsed < 60 )); then
+    printf '%ds ago' "$elapsed"
+  elif (( elapsed < 3600 )); then
+    printf '%dm ago' $(( elapsed / 60 ))
+  elif (( elapsed < 86400 )); then
+    h=$(( elapsed / 3600 ))
+    m=$(( (elapsed % 3600) / 60 ))
+    if (( m > 0 )); then printf '%dh%dm ago' "$h" "$m"; else printf '%dh ago' "$h"; fi
+  else
+    printf '%dd ago' $(( elapsed / 86400 ))
+  fi
+}
+
+truncate_str() {
+  local s="$1" max="$2"
+  if [[ ${#s} -gt $max ]]; then
+    printf '%s…' "${s:0:$(( max - 1 ))}"
+  else
+    printf '%s' "$s"
+  fi
+}
+
+cmd_status() {
+  local json_mode=0 since="" show_all=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json)  json_mode=1; shift ;;
+      --since) since="$2"; shift 2 ;;
+      --all)   show_all=1; shift ;;
+      *) echo "error: unknown flag for status: $1" >&2; return 1 ;;
+    esac
+  done
+
+  local since_clause=""
+  if [[ $show_all -eq 0 && -z "$since" ]]; then
+    since_clause="AND started_at >= datetime('now', '-24 hours')"
+  elif [[ -n "$since" ]]; then
+    since_clause="AND started_at >= $(sql_quote "$since")"
+  fi
+
+  local rows
+  rows=$(db_exec_json "SELECT session_id, skill_name, ticket_key, label, status, phase,
+                              pid, cwd, git_branch, started_at, updated_at
+                       FROM sessions
+                       WHERE status NOT IN ('done','failed') ${since_clause}
+                       ORDER BY started_at DESC;")
+  [[ -z "$rows" || "$rows" == "[]" ]] && rows='[]'
+
+  local total alive crashed
+  total=0; alive=0; crashed=0
+
+  local enriched='[]'
+  local count
+  count=$(echo "$rows" | jq 'length')
+
+  local i
+  for (( i=0; i<count; i++ )); do
+    local row pid is_alive
+    row=$(echo "$rows" | jq ".[$i]")
+    pid=$(echo "$row" | jq -r '.pid // ""')
+
+    is_alive="false"
+    if [[ -n "$pid" && "$pid" != "null" ]] && kill -0 "$pid" 2>/dev/null; then
+      is_alive="true"
+      alive=$(( alive + 1 ))
+    else
+      crashed=$(( crashed + 1 ))
+    fi
+    total=$(( total + 1 ))
+
+    enriched=$(echo "$enriched" | jq --argjson row "$row" --argjson alive "$is_alive" \
+      '. + [$row + {alive: $alive}]')
+  done
+
+  if [[ $json_mode -eq 1 ]]; then
+    jq -n --argjson sessions "$enriched" \
+           --argjson total "$total" --argjson alive "$alive" --argjson crashed "$crashed" \
+      '{sessions: $sessions, summary: {total: $total, alive: $alive, crashed: $crashed}}'
+    return 0
+  fi
+
+  if (( total == 0 )); then
+    if [[ $show_all -eq 0 ]]; then
+      echo "No active sessions in the last 24h. Use --all to see older sessions."
+    else
+      echo "No active sessions."
+    fi
+    return 0
+  fi
+
+  printf '%-12s %-24s %-14s %-5s %-42s %s\n' "TYPE" "LABEL" "STATUS" "PID" "CWD" "SINCE"
+  printf '%-12s %-24s %-14s %-5s %-42s %s\n' "────────────" "────────────────────────" "──────────────" "─────" "──────────────────────────────────────────" "─────────"
+
+  for (( i=0; i<count; i++ )); do
+    local skill label status alive_val cwd started display_cwd since_str alive_mark
+    skill=$(echo "$enriched" | jq -r ".[$i].skill_name // \"unknown\"")
+    # Strip plugin prefix for display
+    skill="${skill#catalyst-dev:}"
+    skill="${skill#catalyst-pm:}"
+    skill=$(truncate_str "$skill" 12)
+
+    label=$(echo "$enriched" | jq -r ".[$i].label // .[$i].ticket_key // .[$i].session_id" | head -1)
+    label=$(truncate_str "$label" 24)
+
+    status=$(echo "$enriched" | jq -r ".[$i].status")
+    status=$(truncate_str "$status" 14)
+
+    alive_val=$(echo "$enriched" | jq -r ".[$i].alive")
+    cwd=$(echo "$enriched" | jq -r ".[$i].cwd // \"\"")
+    started=$(echo "$enriched" | jq -r ".[$i].started_at // \"\"")
+
+    display_cwd="${cwd/#$HOME/\~}"
+    display_cwd=$(truncate_str "$display_cwd" 42)
+
+    since_str=""
+    [[ -n "$started" && "$started" != "null" ]] && since_str=$(time_ago "$started")
+
+    if [[ "$alive_val" == "true" ]]; then alive_mark="  ✓"; else alive_mark="  ✗"; fi
+
+    printf '%-12s %-24s %-14s %-5s %-42s %s\n' \
+      "$skill" "$label" "$status" "$alive_mark" "$display_cwd" "$since_str"
+  done
+
+  echo ""
+  echo "${total} session(s): ${alive} alive, ${crashed} crashed"
+  [[ $show_all -eq 0 ]] && echo "(last 24h — use --all for full history)"
+}
+
+cmd_restart() {
+  local exec_mode=0 all_mode=0 target_ids=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --exec) exec_mode=1; shift ;;
+      --all)  all_mode=1; shift ;;
+      *)      target_ids+=("$1"); shift ;;
+    esac
+  done
+
+  local rows
+  rows=$(db_exec_json "SELECT session_id, skill_name, ticket_key, label, status, pid, cwd, started_at
+                       FROM sessions
+                       WHERE status NOT IN ('done','failed')
+                       ORDER BY started_at DESC;")
+  [[ -z "$rows" || "$rows" == "[]" ]] && { echo "No active sessions found."; return 0; }
+
+  local crashed=()
+  local count
+  count=$(echo "$rows" | jq 'length')
+
+  local i
+  for (( i=0; i<count; i++ )); do
+    local pid sid
+    pid=$(echo "$rows" | jq -r ".[$i].pid // \"\"")
+    sid=$(echo "$rows" | jq -r ".[$i].session_id")
+
+    if [[ -n "$pid" && "$pid" != "null" ]] && kill -0 "$pid" 2>/dev/null; then
+      continue
+    fi
+
+    if [[ $all_mode -eq 0 && ${#target_ids[@]} -gt 0 ]]; then
+      local found=0
+      for tid in "${target_ids[@]}"; do
+        [[ "$sid" == "$tid" ]] && { found=1; break; }
+      done
+      [[ $found -eq 0 ]] && continue
+    fi
+
+    crashed+=("$i")
+  done
+
+  if [[ ${#crashed[@]} -eq 0 ]]; then
+    echo "No crashed sessions found."
+    return 0
+  fi
+
+  echo "Crashed sessions:"
+  echo ""
+
+  local resume_cmds=()
+  local n=1
+  for idx in "${crashed[@]}"; do
+    local sid skill label cwd started claude_sid
+    sid=$(echo "$rows" | jq -r ".[$idx].session_id")
+    skill=$(echo "$rows" | jq -r ".[$idx].skill_name // \"unknown\"")
+    label=$(echo "$rows" | jq -r ".[$idx].label // .[$idx].ticket_key // .[$idx].session_id" | head -1)
+    cwd=$(echo "$rows" | jq -r ".[$idx].cwd // \"\"")
+    started=$(echo "$rows" | jq -r ".[$idx].started_at // \"\"")
+
+    local since_str=""
+    [[ -n "$started" && "$started" != "null" ]] && since_str=" ($(time_ago "$started"))"
+
+    claude_sid=""
+    if [[ -n "$cwd" && "$cwd" != "null" && -f "${cwd}/.catalyst/.session-id" ]]; then
+      claude_sid=$(cat "${cwd}/.catalyst/.session-id" 2>/dev/null || true)
+    fi
+
+    local display_cwd="${cwd/#$HOME/\~}"
+
+    printf '  %d. %s %s%s\n' "$n" "$skill" "$label" "$since_str"
+    printf '     cwd: %s\n' "$display_cwd"
+
+    if [[ -n "$claude_sid" ]]; then
+      local cmd="cd ${display_cwd} && claude --resume ${claude_sid}"
+      printf '     resume: %s\n' "$cmd"
+      resume_cmds+=("cd ${cwd} && claude --resume ${claude_sid}")
+    else
+      printf '     resume: no Claude session ID found — mark as failed\n'
+      resume_cmds+=("")
+    fi
+    echo ""
+    n=$(( n + 1 ))
+  done
+
+  if [[ $exec_mode -eq 1 ]]; then
+    local executed=0
+    for ((j=0; j<${#crashed[@]}; j++)); do
+      local cmd="${resume_cmds[$j]}"
+      local idx="${crashed[$j]}"
+      local sid
+      sid=$(echo "$rows" | jq -r ".[$idx].session_id")
+
+      if [[ -z "$cmd" ]]; then
+        db_exec "UPDATE sessions SET status='failed', completed_at=$(sql_quote "$(now_iso)")
+                 WHERE session_id=$(sql_quote "$sid");"
+        echo "  Marked ${sid} as failed (no resumable session)"
+      else
+        echo "  Resuming: ${cmd}"
+        eval "$cmd" &
+        disown
+        executed=$(( executed + 1 ))
+      fi
+    done
+    echo ""
+    echo "Executed ${executed} resume(s). Use 'catalyst-session.sh status' to check."
+  else
+    echo "To restart, run:  catalyst-session.sh restart --exec --all"
+    echo "Or resume individually with the commands above."
+  fi
+}
+
 usage() {
   sed -n '/^# Commands:/,/^# Exit codes:/p' "${BASH_SOURCE[0]}" | sed 's/^# //; s/^#$//'
 }
@@ -633,6 +889,8 @@ case "$cmd" in
   history)   cmd_history "$@" ;;
   stats)     cmd_stats "$@" ;;
   compare)   cmd_compare "$@" ;;
+  status)    cmd_status "$@" ;;
+  restart)   cmd_restart "$@" ;;
   help|--help|-h) usage ;;
   *) echo "error: unknown command: $cmd" >&2; echo "run '$0 help' for usage" >&2; exit 1 ;;
 esac

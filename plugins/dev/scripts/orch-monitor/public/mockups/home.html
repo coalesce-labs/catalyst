@@ -17,9 +17,11 @@
       // loading / empty / error variants render without a flash.
       (function () {
         const LS_KEY = "catalyst.mockup.prefs";
-        const DEFAULTS = { system: "operator-console" };
+        const RECENCY_KEY = "catalyst.home.recencyDays";
+        const DEFAULTS = { system: "operator-console", recencyDays: 3 };
         const SYSTEMS = ["operator-console", "precision-instrument"];
         const STATES = ["default", "loading", "empty", "error"];
+        const RECENCY_DAYS = [1, 3, 7, 30];
         const url = new URLSearchParams(window.location.search);
         let stored = {};
         try {
@@ -27,6 +29,13 @@
         } catch (_e) {
           stored = {};
         }
+        let recency = parseInt(
+          url.get("recency") || window.localStorage.getItem(RECENCY_KEY) || "",
+          10,
+        );
+        if (!RECENCY_DAYS.includes(recency)) recency = DEFAULTS.recencyDays;
+        document.documentElement.setAttribute("data-recency", String(recency));
+        window.__catalystHomePrefs = { recencyDays: recency };
         const candidate = url.get("system") || stored.system || DEFAULTS.system;
         const system = SYSTEMS.includes(candidate) ? candidate : DEFAULTS.system;
         const stateCandidate = url.get("state") || "default";
@@ -64,20 +73,25 @@
        * Attention bar
        * ============================================================ */
 
+      /*
+       * CTL-170 — attention bar scoped to Tier 0 (blocked) severity. Uses
+       * --color-danger so operators distinguish blocked from merely
+       * degraded runs. `.home-attention__breakdown` carries reason counts.
+       */
       .home-attention {
         display: flex;
         align-items: center;
         gap: var(--spacing-4);
         padding: var(--spacing-3) var(--spacing-4);
-        background: color-mix(in srgb, var(--color-accent) 10%, var(--color-surface-1));
-        border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+        background: color-mix(in srgb, var(--color-danger) 10%, var(--color-surface-1));
+        border: 1px solid color-mix(in srgb, var(--color-danger) 40%, transparent);
         border-radius: var(--radius-md);
       }
 
       [data-system="precision-instrument"] .home-attention {
         background: var(--color-surface-2);
         border-color: var(--color-border-default);
-        border-left: 2px solid var(--color-accent);
+        border-left: 2px solid var(--color-danger);
         border-radius: 0;
       }
 
@@ -88,8 +102,8 @@
         width: var(--spacing-6);
         height: var(--spacing-6);
         border-radius: var(--radius-full);
-        background: color-mix(in srgb, var(--color-accent) 22%, transparent);
-        color: var(--color-accent);
+        background: color-mix(in srgb, var(--color-danger) 22%, transparent);
+        color: var(--color-danger);
         font-family: var(--font-family-mono);
         font-size: var(--font-size-data);
         font-weight: var(--font-weight-semibold);
@@ -114,8 +128,17 @@
       .home-attention__count {
         font-family: var(--font-family-mono);
         font-variant-numeric: tabular-nums;
-        color: var(--color-accent);
+        color: var(--color-danger);
         margin-right: var(--spacing-1);
+      }
+
+      .home-attention__breakdown {
+        margin-left: var(--spacing-2);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-md);
+        font-variant-numeric: tabular-nums;
       }
 
       .home-attention__meta {
@@ -140,8 +163,8 @@
       }
 
       .home-attention__action:hover {
-        border-color: var(--color-accent);
-        color: var(--color-accent);
+        border-color: var(--color-danger);
+        color: var(--color-danger);
       }
 
       /* ============================================================
@@ -190,19 +213,157 @@
       }
 
       /* ============================================================
+       * Kanban board (5 columns — Queued / Working / Review / Blocked / Done)
+       * ============================================================ */
+
+      .home-kanban {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .home-kanban__grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: var(--spacing-3);
+        align-items: start;
+      }
+
+      @media (max-width: 1200px) {
+        .home-kanban__grid {
+          grid-template-columns: repeat(5, minmax(200px, 1fr));
+          overflow-x: auto;
+          padding-bottom: var(--spacing-2);
+        }
+      }
+
+      .home-kanban__column {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+        min-width: 0;
+      }
+
+      .home-kanban__column-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--spacing-2);
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      [data-system="precision-instrument"] .home-kanban__column-header {
+        border-bottom-color: var(--color-border-default);
+      }
+
+      .home-kanban__column-title {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .home-kanban__column-count {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        line-height: var(--line-height-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Empty columns fade the title */
+      .home-kanban__column[data-count="0"] .home-kanban__column-title {
+        color: var(--color-text-lo);
+      }
+
+      /* Blocked column goes red when it has items */
+      .home-kanban__column[data-column="blocked"]:not([data-count="0"])
+        .home-kanban__column-title,
+      .home-kanban__column[data-column="blocked"]:not([data-count="0"])
+        .home-kanban__column-count {
+        color: var(--color-danger);
+      }
+
+      .home-kanban__column-body {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-3);
+      }
+
+      /* Per-column empty slot (rendered inline when data-count="0") */
+      .home-kanban__empty {
+        padding: var(--spacing-4);
+        background: var(--color-surface-1);
+        border: 1px dashed var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        color: var(--color-text-lo);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        text-align: center;
+      }
+
+      [data-system="precision-instrument"] .home-kanban__empty {
+        border-style: solid;
+        border-color: var(--color-border-subtle);
+      }
+
+      /* Per-column error panel (used in loading/empty/error variants) */
+      .home-kanban__error {
+        padding: var(--spacing-4);
+        background: color-mix(in srgb, var(--color-danger) 6%, var(--color-surface-1));
+        border: 1px solid color-mix(in srgb, var(--color-danger) 30%, transparent);
+        border-radius: var(--radius-md);
+        color: var(--color-danger);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+      }
+
+      /* ============================================================
        * Kanban card (orch + solo share the shape)
        * ============================================================ */
 
       .home-card {
         position: relative;
-        padding: var(--spacing-5);
+        padding: var(--spacing-4);
         background: var(--color-surface-1);
         border: 1px solid var(--color-border-default);
         border-radius: var(--radius-lg);
         display: flex;
         flex-direction: column;
-        gap: var(--spacing-3);
+        gap: var(--spacing-2);
         transition: border-color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      /* Project row — 8px project color dot + project name */
+      .home-card__project-row {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-2);
+      }
+
+      .home-card__project-dot {
+        width: 8px;
+        height: 8px;
+        flex-shrink: 0;
+        border-radius: var(--radius-full);
+        background: var(--project-color, var(--color-text-lo));
+      }
+
+      .home-card__project-name {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .home-card:hover {
@@ -279,6 +440,23 @@
         background: var(--color-accent);
       }
 
+      /* Progress bar color follows Kanban column */
+      .home-card[data-column="queued"] .home-card__bar > span {
+        background: var(--color-text-lo);
+      }
+      .home-card[data-column="working"] .home-card__bar > span {
+        background: var(--color-accent);
+      }
+      .home-card[data-column="review"] .home-card__bar > span {
+        background: var(--color-info);
+      }
+      .home-card[data-column="blocked"] .home-card__bar > span {
+        background: var(--color-danger);
+      }
+      .home-card[data-column="done"] .home-card__bar > span {
+        background: var(--color-success);
+      }
+
       .home-card__chips {
         display: flex;
         flex-wrap: wrap;
@@ -326,24 +504,47 @@
         color: var(--color-text-md);
       }
 
-      /* Needs-me accent rail */
-      .home-card--needs-me {
+      /*
+       * CTL-170 — tiered attention rails.
+       *
+       * Tier 0 (blocked) : danger rail, static. Triggers: PR conflict,
+       *                    merge hold, review reply needed.
+       * Tier 1 (degraded): warning rail, pulsing. Triggers: CI failing,
+       *                    heartbeat stale > 5m, rate-limit backoff.
+       * Tier 2 (info)    : success chip in .home-card__chips, no rail.
+       *                    Triggers: auto-recovered, PR auto-merged,
+       *                    wave settled.
+       *
+       * The heartbeat pulse moves to Tier 1 — "something is alive but
+       * slow" is the right metaphor. Tier 0 is static because blocked
+       * runs aren't making progress at all.
+       */
+      .home-card--tier-0,
+      .home-card--tier-1 {
         padding-left: calc(var(--spacing-5) + 2px);
       }
 
-      .home-card--needs-me::before {
+      .home-card--tier-0::before,
+      .home-card--tier-1::before {
         content: "";
         position: absolute;
         left: 0;
         top: 0;
         bottom: 0;
         width: 2px;
-        background: var(--color-accent);
         border-radius: var(--radius-sm) 0 0 var(--radius-sm);
         opacity: 0.9;
       }
 
-      [data-system="operator-console"] .home-card--needs-me::before {
+      .home-card--tier-0::before {
+        background: var(--color-danger);
+      }
+
+      .home-card--tier-1::before {
+        background: var(--color-warning);
+      }
+
+      [data-system="operator-console"] .home-card--tier-1::before {
         animation: brand-heartbeat var(--motion-duration-heartbeat) ease-in-out infinite;
       }
 
@@ -358,7 +559,7 @@
       }
 
       @media (prefers-reduced-motion: reduce) {
-        [data-system="operator-console"] .home-card--needs-me::before {
+        [data-system="operator-console"] .home-card--tier-1::before {
           animation: none;
         }
       }
@@ -404,15 +605,15 @@
         background: color-mix(in srgb, var(--color-danger) 12%, transparent);
         border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
       }
-      [data-system="operator-console"] .chip--needs-me {
-        color: var(--color-accent);
-        background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-        border-color: var(--color-accent);
-      }
       [data-system="operator-console"] .chip--queued {
         color: var(--color-text-md);
         background: var(--color-surface-2);
         border-color: var(--color-border-subtle);
+      }
+      [data-system="operator-console"] .chip--stalled {
+        color: var(--color-warning);
+        background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-warning) 40%, transparent);
       }
       [data-system="operator-console"] .chip--ticket {
         color: var(--color-text-md);
@@ -443,11 +644,11 @@
       [data-system="precision-instrument"] .chip--failed::before {
         color: var(--color-danger);
       }
-      [data-system="precision-instrument"] .chip--needs-me::before {
-        color: var(--color-accent);
-      }
       [data-system="precision-instrument"] .chip--queued::before {
         color: var(--color-text-lo);
+      }
+      [data-system="precision-instrument"] .chip--stalled::before {
+        color: var(--color-warning);
       }
       [data-system="precision-instrument"] .chip--ticket::before {
         content: none;
@@ -505,6 +706,65 @@
         font-variant-numeric: tabular-nums;
         display: flex;
         gap: var(--spacing-3);
+      }
+
+      /* Recency filter chips (on Recently completed section heading) */
+      .home-recency {
+        display: inline-flex;
+        gap: var(--spacing-1);
+      }
+
+      .home-recency__chip {
+        padding: var(--spacing-1) var(--spacing-2);
+        background: transparent;
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-full);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        line-height: var(--line-height-label);
+        letter-spacing: var(--letter-spacing-label);
+        color: var(--color-text-md);
+        cursor: pointer;
+        transition:
+          border-color var(--motion-duration-state) var(--motion-easing-standard),
+          color var(--motion-duration-state) var(--motion-easing-standard),
+          background-color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .home-recency__chip:hover,
+      .home-recency__chip:focus-visible {
+        border-color: var(--color-border-strong);
+        color: var(--color-text-hi);
+        outline: none;
+      }
+
+      .home-recency__chip--active {
+        background: var(--color-surface-2);
+        border-color: var(--color-border-default);
+        color: var(--color-text-hi);
+      }
+
+      [data-system="precision-instrument"] .home-recency__chip {
+        border-radius: 0;
+      }
+
+      /* Hide strip items whose age exceeds the current recency window */
+      [data-recency="1"] .home-strip__item[data-age-days]:not([data-age-days="0"]):not([data-age-days="1"]) {
+        display: none;
+      }
+      [data-recency="3"] .home-strip__item[data-age-days="4"],
+      [data-recency="3"] .home-strip__item[data-age-days="5"],
+      [data-recency="3"] .home-strip__item[data-age-days="6"],
+      [data-recency="3"] .home-strip__item[data-age-days="7"],
+      [data-recency="3"] .home-strip__item[data-age-days="14"],
+      [data-recency="3"] .home-strip__item[data-age-days="21"],
+      [data-recency="3"] .home-strip__item[data-age-days="30"] {
+        display: none;
+      }
+      [data-recency="7"] .home-strip__item[data-age-days="14"],
+      [data-recency="7"] .home-strip__item[data-age-days="21"],
+      [data-recency="7"] .home-strip__item[data-age-days="30"] {
+        display: none;
       }
 
       /* ============================================================
@@ -668,9 +928,11 @@
       [data-state="loading"] [data-variant="loading"] {
         display: flex;
       }
-      /* In loading state the attention bar and precise counts are suppressed. */
+      /* In loading state the attention bar, counts, and recency chip are suppressed. */
       [data-state="loading"] .home-attention,
-      [data-state="loading"] .home-section__count {
+      [data-state="loading"] .home-section__count,
+      [data-state="loading"] .home-recency,
+      [data-state="loading"] .home-kanban__column-count {
         display: none;
       }
 
@@ -733,232 +995,840 @@
           <span class="home-attention__icon" aria-hidden="true">!</span>
           <span class="home-attention__text">
             <span class="home-attention__count">2</span>
-            runs are waiting on you. Review before the next wave kicks off.
+            runs are blocked.
+            <span class="home-attention__breakdown">2 blocked · 1 CI fail</span>
           </span>
           <span class="home-attention__meta">oldest · 14m</span>
           <button type="button" class="home-attention__action">Review</button>
         </div>
 
         <!-- ============================================================
-             ACTIVE ORCHESTRATORS
+             SESSION KANBAN
+             5-column board (Queued / Working / Review / Blocked / Done).
+             Orch and solo sessions share one grid. Each card carries:
+               - data-column → placement and progress-bar color
+               - data-kind   → "orch" or "solo" for chip shape
+               - --project-color inline var → 8px project dot
+             Orchestrator cards land in the rightmost non-Done column any
+             of their workers occupies.
              ============================================================ -->
-        <section class="home-section">
-          <header class="home-section__heading">
-            <div class="home-section__title">
-              <h2>Active orchestrators</h2>
-              <span class="home-section__count">3 running</span>
-            </div>
-            <span class="eyebrow">Live</span>
-          </header>
-
+        <section class="home-kanban" aria-label="Active sessions by state">
           <!-- default variant -->
-          <div class="home-card-grid" data-variant="default" role="list">
-            <article class="home-card" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">orch-2026-04-22-3</h3>
-                <span class="home-card__kind">Orchestrator</span>
+          <div class="home-kanban__grid" data-variant="default" role="list">
+            <!-- ────────────────────────── Queued ────────────────────────── -->
+            <div class="home-kanban__column" data-column="queued" data-count="1">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Queued</span>
+                <span class="home-kanban__column-count">1</span>
               </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">Wave 2 · implementation</span>
-                <span class="home-card__progress">9 / 14</span>
+              <div class="home-kanban__column-body">
+                <article
+                  class="home-card"
+                  data-column="queued"
+                  data-kind="solo"
+                  role="listitem"
+                  style="--project-color: #8a97a4"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Infra</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">nightly-backfill</h3>
+                    <span class="home-card__kind">Solo</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Awaiting dispatch</span>
+                    <span class="home-card__progress">0 / 1</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 0%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Status">
+                    <span class="chip chip--dispatched">Dispatched</span>
+                    <span class="chip chip--ticket">CTL-221</span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">—</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">—</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PR</span>
+                      <span class="home-card__footer-value">—</span>
+                    </span>
+                  </footer>
+                </article>
               </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span style="width: 64%"></span>
-              </div>
-              <div class="home-card__chips" role="group" aria-label="Worker roll-up">
-                <span class="home-card__chip-group">
-                  <span class="chip chip--running">Running</span>
-                  <span class="home-card__chip-count">7</span>
-                </span>
-                <span class="home-card__chip-group">
-                  <span class="chip chip--pr-open">PR open</span>
-                  <span class="home-card__chip-count">2</span>
-                </span>
-                <span class="home-card__chip-group">
-                  <span class="chip chip--merged">Merged</span>
-                  <span class="home-card__chip-count">4</span>
-                </span>
-                <span class="home-card__chip-group">
-                  <span class="chip chip--failed">Failed</span>
-                  <span class="home-card__chip-count">1</span>
-                </span>
-              </div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">cost</span>
-                  <span class="home-card__footer-value">$3.41</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">heartbeat</span>
-                  <span class="home-card__footer-value">18s ago</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">PRs</span>
-                  <span class="home-card__footer-value">6</span>
-                </span>
-              </footer>
-            </article>
+            </div>
 
-            <article class="home-card home-card--needs-me" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">orch-2026-04-22-2</h3>
-                <span class="home-card__kind">Orchestrator</span>
+            <!-- ────────────────────────── Working ────────────────────────── -->
+            <div class="home-kanban__column" data-column="working" data-count="5">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Working</span>
+                <span class="home-kanban__column-count">5</span>
               </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">Wave 3 · review</span>
-                <span class="home-card__progress">11 / 12</span>
-              </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span style="width: 92%"></span>
-              </div>
-              <div class="home-card__chips" role="group" aria-label="Worker roll-up">
-                <span class="home-card__chip-group">
-                  <span class="chip chip--needs-me">Needs me</span>
-                  <span class="home-card__chip-count">2</span>
-                </span>
-                <span class="home-card__chip-group">
-                  <span class="chip chip--pr-open">PR open</span>
-                  <span class="home-card__chip-count">3</span>
-                </span>
-                <span class="home-card__chip-group">
-                  <span class="chip chip--merged">Merged</span>
-                  <span class="home-card__chip-count">6</span>
-                </span>
-              </div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">cost</span>
-                  <span class="home-card__footer-value">$5.82</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">heartbeat</span>
-                  <span class="home-card__footer-value">41s ago</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">PRs</span>
-                  <span class="home-card__footer-value">9</span>
-                </span>
-              </footer>
-            </article>
+              <div class="home-kanban__column-body">
+                <article
+                  class="home-card home-card--tier-0"
+                  data-column="working"
+                  data-kind="orch"
+                  role="listitem"
+                  style="--project-color: #9b7cff"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Catalyst</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">orch-2026-04-22-3</h3>
+                    <span class="home-card__kind">Orch</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Wave 2 · implementing</span>
+                    <span class="home-card__progress">9 / 14</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 64%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Worker roll-up">
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--running">Running</span>
+                      <span class="home-card__chip-count">7</span>
+                    </span>
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--pr-open">PR open</span>
+                      <span class="home-card__chip-count">2</span>
+                    </span>
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--merged">Auto-merged</span>
+                      <span class="home-card__chip-count">4</span>
+                    </span>
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--failed chip-glyph chip-glyph--ci-fail">Failed</span>
+                      <span class="home-card__chip-count">1</span>
+                    </span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$3.41</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">18s ago</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PRs</span>
+                      <span class="home-card__footer-value">6</span>
+                    </span>
+                  </footer>
+                </article>
 
-            <article class="home-card" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">orch-2026-04-22-1</h3>
-                <span class="home-card__kind">Orchestrator</span>
+                <article
+                  class="home-card"
+                  data-column="working"
+                  data-kind="orch"
+                  role="listitem"
+                  style="--project-color: #47c4d3"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Adva</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">orch-adva-imports</h3>
+                    <span class="home-card__kind">Orch</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Wave 1 · validating</span>
+                    <span class="home-card__progress">4 / 6</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 67%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Worker roll-up">
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--running">Running</span>
+                      <span class="home-card__chip-count">4</span>
+                    </span>
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--queued">Queued</span>
+                      <span class="home-card__chip-count">2</span>
+                    </span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$2.11</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">8s</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PRs</span>
+                      <span class="home-card__footer-value">0</span>
+                    </span>
+                  </footer>
+                </article>
+
+                <article
+                  class="home-card"
+                  data-column="working"
+                  data-kind="solo"
+                  role="listitem"
+                  style="--project-color: #ffb547"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Internal</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">release-notes-gen</h3>
+                    <span class="home-card__kind">Solo</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Phase 3 · implement</span>
+                    <span class="home-card__progress">3 / 6</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 50%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Status">
+                    <span class="chip chip--running">Running</span>
+                    <span class="chip chip--ticket">CTL-219</span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$0.54</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">4s</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PR</span>
+                      <span class="home-card__footer-value">—</span>
+                    </span>
+                  </footer>
+                </article>
+
+                <article
+                  class="home-card"
+                  data-column="working"
+                  data-kind="solo"
+                  role="listitem"
+                  style="--project-color: #ff6fa5"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Experiments</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">cost-mux-probe</h3>
+                    <span class="home-card__kind">Solo</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Phase 1 · research</span>
+                    <span class="home-card__progress">1 / 5</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 20%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Status">
+                    <span class="chip chip--running">Running</span>
+                    <span class="chip chip--ticket">ADV-436</span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$0.09</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">3s</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PR</span>
+                      <span class="home-card__footer-value">—</span>
+                    </span>
+                  </footer>
+                </article>
+
+                <article
+                  class="home-card"
+                  data-column="working"
+                  data-kind="solo"
+                  role="listitem"
+                  style="--project-color: #6aa6ff"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Bravo</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">bravo-perf-audit</h3>
+                    <span class="home-card__kind">Solo</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Phase 2 · plan</span>
+                    <span class="home-card__progress">2 / 5</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 40%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Status">
+                    <span class="chip chip--running">Running</span>
+                    <span class="chip chip--ticket">BRV-092</span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$0.28</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">6s</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PR</span>
+                      <span class="home-card__footer-value">—</span>
+                    </span>
+                  </footer>
+                </article>
+              </div>
+            </div>
+
+            <!-- ────────────────────────── Review ────────────────────────── -->
+            <div class="home-kanban__column" data-column="review" data-count="2">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Review</span>
+                <span class="home-kanban__column-count">2</span>
               </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">Wave 1 · research</span>
-                <span class="home-card__progress">3 / 8</span>
+              <div class="home-kanban__column-body">
+                <article
+                  class="home-card"
+                  data-column="review"
+                  data-kind="orch"
+                  role="listitem"
+                  style="--project-color: #9b7cff"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Catalyst</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">orch-2026-04-22-2</h3>
+                    <span class="home-card__kind">Orch</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Wave 3 · awaiting CI</span>
+                    <span class="home-card__progress">8 / 11</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 73%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Worker roll-up">
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--pr-open">PR open</span>
+                      <span class="home-card__chip-count">3</span>
+                    </span>
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--merged">Merged</span>
+                      <span class="home-card__chip-count">6</span>
+                    </span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$6.20</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">22s</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PRs</span>
+                      <span class="home-card__footer-value">9</span>
+                    </span>
+                  </footer>
+                </article>
+
+                <article
+                  class="home-card"
+                  data-column="review"
+                  data-kind="solo"
+                  role="listitem"
+                  style="--project-color: #47c4d3"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Adva</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">otel-panel-cleanup</h3>
+                    <span class="home-card__kind">Solo</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Phase 5 · ship</span>
+                    <span class="home-card__progress">5 / 5</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 100%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Status">
+                    <span class="chip chip--pr-open">PR open</span>
+                    <span class="chip chip--ticket">CTL-118</span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$0.72</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">1m</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PR</span>
+                      <span class="home-card__footer-value">#239</span>
+                    </span>
+                  </footer>
+                </article>
               </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span style="width: 38%"></span>
+            </div>
+
+            <!-- ────────────────────────── Blocked ────────────────────────── -->
+            <div class="home-kanban__column" data-column="blocked" data-count="1">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Blocked</span>
+                <span class="home-kanban__column-count">1</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <article
+                  class="home-card home-card--needs-me"
+                  data-column="blocked"
+                  data-kind="orch"
+                  role="listitem"
+                  style="--project-color: #ffb547"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Internal</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">rename-scope-refactor</h3>
+                    <span class="home-card__kind">Orch</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Wave 1 · needs review</span>
+                    <span class="home-card__progress">3 / 7</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 43%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Worker roll-up">
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--needs-me">Needs me</span>
+                      <span class="home-card__chip-count">2</span>
+                    </span>
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--failed">Failed</span>
+                      <span class="home-card__chip-count">1</span>
+                    </span>
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--stalled">Stalled</span>
+                      <span class="home-card__chip-count">1</span>
+                    </span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$1.40</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">14m</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PRs</span>
+                      <span class="home-card__footer-value">0</span>
+                    </span>
+                  </footer>
+                </article>
               </div>
-              <div class="home-card__chips" role="group" aria-label="Worker roll-up">
-                <span class="home-card__chip-group">
-                  <span class="chip chip--running">Running</span>
-                  <span class="home-card__chip-count">5</span>
-                </span>
-                <span class="home-card__chip-group">
-                  <span class="chip chip--queued">Queued</span>
-                  <span class="home-card__chip-count">3</span>
-                </span>
+            </div>
+
+            <!-- ────────────────────────── Done ────────────────────────── -->
+            <div class="home-kanban__column" data-column="done" data-count="3">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Done</span>
+                <span class="home-kanban__column-count">3</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <article
+                  class="home-card"
+                  data-column="done"
+                  data-kind="solo"
+                  role="listitem"
+                  style="--project-color: #9b7cff"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Catalyst</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">skill-references-audit</h3>
+                    <span class="home-card__kind">Solo</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Merged</span>
+                    <span class="home-card__progress">5 / 5</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 100%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Status">
+                    <span class="chip chip--merged">Merged</span>
+                    <span class="chip chip--ticket">CTL-214</span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$0.93</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">—</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PR</span>
+                      <span class="home-card__footer-value">#241</span>
+                    </span>
+                  </footer>
+                </article>
+
+                <article
+                  class="home-card"
+                  data-column="done"
+                  data-kind="orch"
+                  role="listitem"
+                  style="--project-color: #6aa6ff"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Bravo</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">orch-2026-04-22-1</h3>
+                    <span class="home-card__kind">Orch</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">All waves merged</span>
+                    <span class="home-card__progress">8 / 8</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 100%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Worker roll-up">
+                    <span class="home-card__chip-group">
+                      <span class="chip chip--merged">Merged</span>
+                      <span class="home-card__chip-count">8</span>
+                    </span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$3.18</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">—</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PRs</span>
+                      <span class="home-card__footer-value">8</span>
+                    </span>
+                  </footer>
+                </article>
+
+                <article
+                  class="home-card"
+                  data-column="done"
+                  data-kind="solo"
+                  role="listitem"
+                  style="--project-color: #47c4d3"
+                >
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" aria-hidden="true"></span>
+                    <span class="home-card__project-name">Adva</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">invoice-export-fix</h3>
+                    <span class="home-card__kind">Solo</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">Shipped</span>
+                    <span class="home-card__progress">4 / 4</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true">
+                    <span style="width: 100%"></span>
+                  </div>
+                  <div class="home-card__chips" role="group" aria-label="Status">
+                    <span class="chip chip--merged">Merged</span>
+                    <span class="chip chip--ticket">ADV-401</span>
+                  </div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">cost</span>
+                      <span class="home-card__footer-value">$0.41</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">heartbeat</span>
+                      <span class="home-card__footer-value">—</span>
+                    </span>
+                    <span class="home-card__footer-item">
+                      <span class="home-card__footer-label">PR</span>
+                      <span class="home-card__footer-value">#240</span>
+                    </span>
+                  </footer>
+                </article>
               </div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">cost</span>
-                  <span class="home-card__footer-value">$0.82</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">heartbeat</span>
-                  <span class="home-card__footer-value">7s ago</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">PRs</span>
-                  <span class="home-card__footer-value">0</span>
-                </span>
-              </footer>
-            </article>
+            </div>
           </div>
 
-          <!-- loading variant (skeletons) -->
-          <div class="home-card-grid" data-variant="loading" role="list" aria-hidden="true">
-            <article class="home-card home-card--skeleton" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">loading</h3>
-                <span class="home-card__kind">loading</span>
+          <!-- loading variant — skeleton cards across 5 columns -->
+          <div class="home-kanban__grid" data-variant="loading" aria-hidden="true">
+            <div class="home-kanban__column" data-column="queued">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Queued</span>
               </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">loading</span>
-                <span class="home-card__progress">loading</span>
+              <div class="home-kanban__column-body">
+                <article class="home-card home-card--skeleton">
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" style="background: var(--color-surface-3)"></span>
+                    <span class="home-card__project-name">loading</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">session-name-loading</h3>
+                    <span class="home-card__kind">loading</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">loading phase</span>
+                    <span class="home-card__progress">0 / 0</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true"><span></span></div>
+                  <div class="home-card__chips"><span class="home-card__chip-group"><span class="chip">loading</span></span></div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">loading</span>
+                    <span class="home-card__footer-item">loading</span>
+                    <span class="home-card__footer-item">loading</span>
+                  </footer>
+                </article>
               </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span></span>
-              </div>
-              <div class="home-card__chips">loading</div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-              </footer>
-            </article>
-            <article class="home-card home-card--skeleton" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">loading</h3>
-                <span class="home-card__kind">loading</span>
+            </div>
+            <div class="home-kanban__column" data-column="working">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Working</span>
               </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">loading</span>
-                <span class="home-card__progress">loading</span>
+              <div class="home-kanban__column-body">
+                <article class="home-card home-card--skeleton">
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" style="background: var(--color-surface-3)"></span>
+                    <span class="home-card__project-name">loading</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">session-name-loading</h3>
+                    <span class="home-card__kind">loading</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">loading phase</span>
+                    <span class="home-card__progress">0 / 0</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true"><span></span></div>
+                  <div class="home-card__chips"><span class="home-card__chip-group"><span class="chip">loading</span></span></div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">loading</span>
+                    <span class="home-card__footer-item">loading</span>
+                    <span class="home-card__footer-item">loading</span>
+                  </footer>
+                </article>
+                <article class="home-card home-card--skeleton">
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" style="background: var(--color-surface-3)"></span>
+                    <span class="home-card__project-name">loading</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">session-name-loading</h3>
+                    <span class="home-card__kind">loading</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">loading phase</span>
+                    <span class="home-card__progress">0 / 0</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true"><span></span></div>
+                  <div class="home-card__chips"><span class="home-card__chip-group"><span class="chip">loading</span></span></div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">loading</span>
+                    <span class="home-card__footer-item">loading</span>
+                    <span class="home-card__footer-item">loading</span>
+                  </footer>
+                </article>
               </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span></span>
-              </div>
-              <div class="home-card__chips">loading</div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-              </footer>
-            </article>
-            <article class="home-card home-card--skeleton" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">loading</h3>
-                <span class="home-card__kind">loading</span>
+            </div>
+            <div class="home-kanban__column" data-column="review">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Review</span>
               </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">loading</span>
-                <span class="home-card__progress">loading</span>
+              <div class="home-kanban__column-body">
+                <article class="home-card home-card--skeleton">
+                  <div class="home-card__project-row">
+                    <span class="home-card__project-dot" style="background: var(--color-surface-3)"></span>
+                    <span class="home-card__project-name">loading</span>
+                  </div>
+                  <header class="home-card__header">
+                    <h3 class="home-card__title">session-name-loading</h3>
+                    <span class="home-card__kind">loading</span>
+                  </header>
+                  <div class="home-card__meta">
+                    <span class="home-card__stage">loading phase</span>
+                    <span class="home-card__progress">0 / 0</span>
+                  </div>
+                  <div class="home-card__bar" aria-hidden="true"><span></span></div>
+                  <div class="home-card__chips"><span class="home-card__chip-group"><span class="chip">loading</span></span></div>
+                  <footer class="home-card__footer">
+                    <span class="home-card__footer-item">loading</span>
+                    <span class="home-card__footer-item">loading</span>
+                    <span class="home-card__footer-item">loading</span>
+                  </footer>
+                </article>
               </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span></span>
+            </div>
+            <div class="home-kanban__column" data-column="blocked">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Blocked</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__empty">—</div>
               </div>
-              <div class="home-card__chips">loading</div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-              </footer>
-            </article>
+            </div>
+            <div class="home-kanban__column" data-column="done">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Done</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__empty">—</div>
+              </div>
+            </div>
           </div>
 
-          <!-- empty variant -->
-          <div class="home-empty" data-variant="empty">
-            <span class="home-empty__title">No orchestrators running</span>
-            <p class="home-empty__body">
-              Orchestrators coordinate waves of workers on a shared run. Start one by dispatching a
-              briefing.
-            </p>
-            <span class="home-empty__hint">/catalyst-dev:orchestrate</span>
+          <!-- empty variant — per-column empty states -->
+          <div class="home-kanban__grid" data-variant="empty">
+            <div class="home-kanban__column" data-column="queued" data-count="0">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Queued</span>
+                <span class="home-kanban__column-count">0</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__empty">Nothing queued</div>
+              </div>
+            </div>
+            <div class="home-kanban__column" data-column="working" data-count="0">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Working</span>
+                <span class="home-kanban__column-count">0</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__empty">No active work</div>
+              </div>
+            </div>
+            <div class="home-kanban__column" data-column="review" data-count="0">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Review</span>
+                <span class="home-kanban__column-count">0</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__empty">No open PRs</div>
+              </div>
+            </div>
+            <div class="home-kanban__column" data-column="blocked" data-count="0">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Blocked</span>
+                <span class="home-kanban__column-count">0</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__empty">Nothing blocked</div>
+              </div>
+            </div>
+            <div class="home-kanban__column" data-column="done" data-count="0">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Done</span>
+                <span class="home-kanban__column-count">0</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__empty">No recent merges</div>
+              </div>
+            </div>
           </div>
 
-          <!-- error variant -->
+          <!-- error variant — per-column error panels -->
+          <div class="home-kanban__grid" data-variant="error">
+            <div class="home-kanban__column" data-column="queued">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Queued</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__error">GET /api/sessions → 503</div>
+              </div>
+            </div>
+            <div class="home-kanban__column" data-column="working">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Working</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__error">GET /api/sessions → 503</div>
+              </div>
+            </div>
+            <div class="home-kanban__column" data-column="review">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Review</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__error">GET /api/sessions → 503</div>
+              </div>
+            </div>
+            <div class="home-kanban__column" data-column="blocked">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Blocked</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__error">GET /api/sessions → 503</div>
+              </div>
+            </div>
+            <div class="home-kanban__column" data-column="done">
+              <header class="home-kanban__column-header">
+                <span class="home-kanban__column-title">Done</span>
+              </header>
+              <div class="home-kanban__column-body">
+                <div class="home-kanban__error">GET /api/sessions → 503</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- full-page error message stays for retry action -->
           <div class="home-error" data-variant="error">
-            <span class="home-error__title">Could not reach the monitor</span>
+            <h3 class="home-error__title">Couldn't load sessions</h3>
             <p class="home-error__body">
-              The state stream did not respond. Active runs kept executing in the background.
-              Refresh to re-subscribe.
+              We couldn't reach the orchestrator state API. Check that the monitor service is
+              running, then retry.
             </p>
-            <code class="home-error__line">GET /api/runs → 503 service unavailable · 12:41:08</code>
+            <code class="home-error__line">GET /api/sessions → 503 service unavailable · 12:41:08</code>
             <button type="button" class="home-retry">Retry</button>
           </div>
         </section>
@@ -1009,7 +1879,7 @@
               </footer>
             </article>
 
-            <article class="home-card home-card--needs-me" role="listitem">
+            <article class="home-card home-card--tier-1" role="listitem">
               <header class="home-card__header">
                 <h3 class="home-card__title">rename-scope-refactor</h3>
                 <span class="home-card__kind">Solo worker</span>
@@ -1022,7 +1892,7 @@
                 <span style="width: 33%"></span>
               </div>
               <div class="home-card__chips">
-                <span class="chip chip--needs-me">Needs me</span>
+                <span class="chip chip--running chip-glyph chip-glyph--stale">Stalled</span>
                 <span class="chip chip--ticket">CTL-214</span>
               </div>
               <footer class="home-card__footer">
@@ -1141,17 +2011,29 @@
              RECENTLY COMPLETED
              Hidden in empty + error states.
              ============================================================ -->
-        <section class="home-section home-section--completed">
+        <section class="home-section home-section--completed" data-recency="3">
           <header class="home-section__heading">
             <div class="home-section__title">
               <h2>Recently completed</h2>
-              <span class="home-section__count">Last 5</span>
+              <span class="home-section__count">Last window</span>
             </div>
-            <span class="eyebrow">24h window</span>
+            <div class="home-recency" role="group" aria-label="Recency window">
+              <button type="button" class="home-recency__chip" data-days="1">1d</button>
+              <button
+                type="button"
+                class="home-recency__chip home-recency__chip--active"
+                data-days="3"
+                aria-pressed="true"
+              >
+                3d
+              </button>
+              <button type="button" class="home-recency__chip" data-days="7">7d</button>
+              <button type="button" class="home-recency__chip" data-days="30">30d</button>
+            </div>
           </header>
 
           <div class="home-strip" data-variant="default" role="list">
-            <div class="home-strip__item" role="listitem">
+            <div class="home-strip__item" role="listitem" data-age-days="0">
               <div class="home-strip__top">
                 <span class="home-strip__name">brand-showcase</span>
                 <span class="chip chip--merged">Shipped</span>
@@ -1162,7 +2044,7 @@
                 <span>6m ago</span>
               </div>
             </div>
-            <div class="home-strip__item" role="listitem">
+            <div class="home-strip__item" role="listitem" data-age-days="0">
               <div class="home-strip__top">
                 <span class="home-strip__name">mockup-gallery</span>
                 <span class="chip chip--merged">Shipped</span>
@@ -1173,7 +2055,7 @@
                 <span>24m ago</span>
               </div>
             </div>
-            <div class="home-strip__item" role="listitem">
+            <div class="home-strip__item" role="listitem" data-age-days="0">
               <div class="home-strip__top">
                 <span class="home-strip__name">tokens-package</span>
                 <span class="chip chip--merged">Shipped</span>
@@ -1184,7 +2066,7 @@
                 <span>1h ago</span>
               </div>
             </div>
-            <div class="home-strip__item" role="listitem">
+            <div class="home-strip__item" role="listitem" data-age-days="2">
               <div class="home-strip__top">
                 <span class="home-strip__name">otel-panels</span>
                 <span class="chip chip--merged">Shipped</span>
@@ -1192,10 +2074,10 @@
               <div class="home-strip__meta">
                 <span>CTL-118</span>
                 <span>#239</span>
-                <span>3h ago</span>
+                <span>2d ago</span>
               </div>
             </div>
-            <div class="home-strip__item" role="listitem">
+            <div class="home-strip__item" role="listitem" data-age-days="3">
               <div class="home-strip__top">
                 <span class="home-strip__name">release-main</span>
                 <span class="chip chip--merged">Shipped</span>
@@ -1203,7 +2085,29 @@
               <div class="home-strip__meta">
                 <span>—</span>
                 <span>#240</span>
-                <span>4h ago</span>
+                <span>3d ago</span>
+              </div>
+            </div>
+            <div class="home-strip__item" role="listitem" data-age-days="5">
+              <div class="home-strip__top">
+                <span class="home-strip__name">doc-portal-refresh</span>
+                <span class="chip chip--merged">Shipped</span>
+              </div>
+              <div class="home-strip__meta">
+                <span>CTL-102</span>
+                <span>#231</span>
+                <span>5d ago</span>
+              </div>
+            </div>
+            <div class="home-strip__item" role="listitem" data-age-days="14">
+              <div class="home-strip__top">
+                <span class="home-strip__name">cost-mux-v1</span>
+                <span class="chip chip--merged">Shipped</span>
+              </div>
+              <div class="home-strip__meta">
+                <span>CTL-88</span>
+                <span>#202</span>
+                <span>2w ago</span>
               </div>
             </div>
           </div>
@@ -1244,9 +2148,68 @@
             <code>?state=empty</code>
             , or
             <code>?state=error</code>
-            to inspect the alternate views. Flip the switcher for Precision Instrument.
+            to inspect the alternate views. Flip the switcher for Precision Instrument. Recency
+            chip persists to
+            <code>localStorage["catalyst.home.recencyDays"]</code>
+            .
           </p>
         </div>
+
+        <script>
+          // Recency filter — wires the chips in .home-recency to persist the chosen window
+          // to localStorage, mirror the current selection onto .home-section--completed, and
+          // update the visible count. The pre-paint bootstrap already read the stored value
+          // onto html[data-recency], so this script syncs the existing DOM to that value on
+          // load and responds to user clicks thereafter.
+          (function () {
+            const RECENCY_KEY = "catalyst.home.recencyDays";
+            const VALID = new Set([1, 3, 7, 30]);
+            const section = document.querySelector(".home-section--completed");
+            const chips = document.querySelectorAll(".home-recency__chip");
+            const countEl = document.querySelector(
+              ".home-section--completed .home-section__count",
+            );
+            if (!section || chips.length === 0) return;
+
+            function applyRecency(days) {
+              if (!VALID.has(days)) days = 3;
+              section.setAttribute("data-recency", String(days));
+              chips.forEach((c) => {
+                const active = Number(c.dataset.days) === days;
+                c.classList.toggle("home-recency__chip--active", active);
+                c.setAttribute("aria-pressed", active ? "true" : "false");
+              });
+              if (countEl) {
+                const visible = section.querySelectorAll(
+                  ".home-strip__item:not([hidden])",
+                );
+                // Count items whose age is within the window (rely on CSS display rules
+                // by querying getComputedStyle after layout).
+                const stillVisible = Array.from(visible).filter(
+                  (el) => getComputedStyle(el).display !== "none",
+                );
+                countEl.textContent = `${stillVisible.length} in last ${days}d`;
+              }
+            }
+
+            // Sync DOM to whatever the bootstrap resolved (html[data-recency]).
+            const initial = Number(document.documentElement.dataset.recency) || 3;
+            applyRecency(initial);
+
+            chips.forEach((chip) => {
+              chip.addEventListener("click", () => {
+                const days = Number(chip.dataset.days);
+                if (!VALID.has(days)) return;
+                try {
+                  window.localStorage.setItem(RECENCY_KEY, String(days));
+                } catch (_e) {
+                  // localStorage unavailable — purely in-memory behavior still works.
+                }
+                applyRecency(days);
+              });
+            });
+          })();
+        </script>
       </div>
     </main>
     <script src="./_shared/chrome.js"></script>
