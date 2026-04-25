@@ -207,6 +207,8 @@ SETUP_HOOKS=$(jq -c '.catalyst.orchestration.hooks.setup // []' "$CONFIG_FILE" 2
 TEARDOWN_HOOKS=$(jq -c '.catalyst.orchestration.hooks.teardown // []' "$CONFIG_FILE" 2>/dev/null)
 WORKER_COMMAND=$(jq -r '.catalyst.orchestration.workerCommand // "/catalyst-dev:oneshot"' "$CONFIG_FILE" 2>/dev/null)
 WORKER_MODEL=$(jq -r '.catalyst.orchestration.workerModel // "opus"' "$CONFIG_FILE" 2>/dev/null)
+VERIFY_BEFORE_MERGE=$(jq -r '.catalyst.orchestration.verifyBeforeMerge // "true"' "$CONFIG_FILE" 2>/dev/null)
+ALLOW_SELF_REPORTED=$(jq -r '.catalyst.orchestration.allowSelfReportedCompletion // "false"' "$CONFIG_FILE" 2>/dev/null)
 ```
 
 **Create ALL worktrees using `create-worktree.sh`** — both orchestrator and workers go through the
@@ -849,6 +851,59 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
         --transition done \
         --config "$CONFIG_FILE" \
         ${STATE_ON_MERGE_FLAG} >/dev/null 2>&1 || true
+
+      # Post-merge verification (CTL-130). Run adversarial verification on
+      # the merged commit. The worker auto-merges independently so verification
+      # is always post-merge — it surfaces gaps for remediation rather than
+      # gating merge. Skipped when verifyBeforeMerge is false.
+      if [ "$VERIFY_BEFORE_MERGE" = "true" ]; then
+        WORKER_DIR="${WORKTREE_BASE}/${ORCH_NAME}-${TICKET}"
+        if [ -d "$WORKER_DIR" ]; then
+          TEST_REQ=$(jq -r --arg scope "$(jq -r '.labels // "" | ascii_downcase' "$WORKER_SIGNAL")" \
+            '.catalyst.orchestration.testRequirements[$scope] // "backend"' "$CONFIG_FILE" 2>/dev/null || echo "backend")
+
+          "$STATE_SCRIPT" event "$(jq -nc \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg orch "${ORCH_NAME}" --arg w "${TICKET}" \
+            '{ts:$ts, orchestrator:$orch, worker:$w, event:"verification-started", detail:null}')"
+
+          "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-verify.sh" \
+            --worktree "$WORKER_DIR" \
+            --ticket "$TICKET" \
+            --base-branch "${BASE_BRANCH:-main}" \
+            --signal-file "$WORKER_SIGNAL" \
+            --test-requirements "$TEST_REQ"
+          VERIFY_EXIT=$?
+
+          VERIFY_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          VERIFY_RESULT=$([ $VERIFY_EXIT -eq 0 ] && echo "passed" || echo "failed")
+          jq --arg result "$VERIFY_RESULT" --arg ts "$VERIFY_TS" \
+            '.postMergeVerification = {result: $result, verifiedAt: $ts, remediationTicket: null}' \
+            "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+
+          if [ $VERIFY_EXIT -eq 0 ]; then
+            "$STATE_SCRIPT" event "$(jq -nc \
+              --arg ts "$VERIFY_TS" --arg orch "${ORCH_NAME}" --arg w "${TICKET}" \
+              '{ts:$ts, orchestrator:$orch, worker:$w, event:"verification-passed", detail:null}')"
+            "$STATE_SCRIPT" resolve-attention "${ORCH_NAME}" "${TICKET}"
+          else
+            "$STATE_SCRIPT" event "$(jq -nc \
+              --arg ts "$VERIFY_TS" --arg orch "${ORCH_NAME}" --arg w "${TICKET}" \
+              '{ts:$ts, orchestrator:$orch, worker:$w, event:"verification-failed", detail:null}')"
+            "$STATE_SCRIPT" attention "${ORCH_NAME}" "post-merge-verification-failed" "${TICKET}" \
+              "Post-merge verification found gaps in ${TICKET} — remediation needed"
+
+            # Write remediation file for human visibility
+            cat > "${ORCH_DIR}/workers/${TICKET}-remediation.md" <<REMEDIATION_EOF
+# Post-Merge Verification Failed — ${TICKET}
+
+PR #${PR_NUMBER} merged but independent verification found gaps.
+Review the verification output above and file a follow-up ticket.
+
+The orchestrator will $([ "$ALLOW_SELF_REPORTED" = "true" ] && echo "advance the wave (advisory mode)" || echo "block wave advancement until remediation is filed").
+REMEDIATION_EOF
+          fi
+        fi
+      fi
       ;;
 
     CLOSED)
@@ -1050,7 +1105,7 @@ Signal-file fields the script reads/writes:
 | `fixupAttempts`          | orchestrate-auto-fixup    | Auto-dispatch counter (max = `--max-fixups`)               |
 | `lastFixupDispatchedAt`  | orchestrate-auto-fixup    | Timestamp of the most recent dispatch (for the dashboard)  |
 
-### Phase 5: Independent Verification (Anti-Reward-Hacking)
+### Phase 5: Post-Merge Verification (Anti-Reward-Hacking)
 
 ```bash
 if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
@@ -1058,18 +1113,45 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-When a worker signals "done" (PR created, CI green), the orchestrator does NOT trust it. It spawns
-an **adversarial verification agent** in the worker's worktree:
+**Context (CTL-130):** Workers auto-merge their PRs independently via `gh pr merge --auto
+--squash`. GitHub merges the PR the moment CI passes, before the orchestrator's poll loop can
+intervene. Verification therefore runs **post-merge** — it surfaces gaps for remediation rather
+than gating merge.
 
-```bash
-# Run adversarial verification
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-verify.sh" \
-  --worktree "${WORKER_DIR}" \
-  --ticket "${TICKET_ID}" \
-  --base-branch "${BASE_BRANCH}" \
-  --signal-file "${ORCH_DIR}/workers/${TICKET_ID}.json" \
-  --test-requirements "${TEST_REQUIREMENTS}"
-```
+The Phase 4 poll loop (Sub-loop A, MERGED case) already runs `orchestrate-verify.sh` on every
+merged PR when `verifyBeforeMerge` is `true` (default). Phase 5 aggregates those results and
+handles remediation for any failures.
+
+**Aggregation:** For each worker in the current wave, read `postMergeVerification.result` from
+its signal file. Three possible states:
+
+1. `"passed"` — verification ran and succeeded, no action needed
+2. `"failed"` — verification ran and found gaps, remediation needed
+3. `null` — verification hasn't run yet (worker merged between poll cycles, worktree already
+   cleaned up, or `verifyBeforeMerge` is `false`)
+
+**On failure — file a remediation ticket:**
+
+Since the code is already on main, the orchestrator cannot "send the worker back." Instead:
+
+1. Read the remediation file at `${ORCH_DIR}/workers/${TICKET_ID}-remediation.md` (written by
+   Phase 4 on verification failure)
+2. File a follow-up remediation ticket via Linearis CLI with the verification gaps as the
+   description
+3. Record the ticket ID in the signal file:
+   ```bash
+   jq --arg ticket "$REMEDIATION_TICKET_ID" \
+     '.postMergeVerification.remediationTicket = $ticket' \
+     "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+   ```
+
+**Wave advancement gating** (interacts with `allowSelfReportedCompletion`):
+
+- If `ALLOW_SELF_REPORTED` is `"false"` (default) AND any worker has `result: "failed"`:
+  block wave advancement until all remediation tickets are filed. The wave does not advance
+  until every worker either passes verification or has a filed remediation ticket.
+- If `ALLOW_SELF_REPORTED` is `"true"` AND any worker has `result: "failed"`: log a warning,
+  file remediation tickets, but allow wave advancement to proceed. Verification is advisory.
 
 The verification script checks:
 
@@ -1083,71 +1165,35 @@ The verification script checks:
 6. **Reward hacking scan**: Run `/scan-reward-hacking` on changed files — check for `as any`,
    `@ts-ignore`, void patterns, suppressed errors.
 
-**Emit verification events:**
-
-```bash
-# Before running verification
-"$STATE_SCRIPT" event "$(jq -nc --arg ts "$(now_iso)" --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
-  '{ts: $ts, orchestrator: $orch, worker: $w, event: "verification-started", detail: null}')"
-
-# After verification
-if [[ $VERIFY_EXIT -eq 0 ]]; then
-  "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(now_iso)" --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
-    '{ts: $ts, orchestrator: $orch, worker: $w, event: "verification-passed", detail: null}')"
-  "$STATE_SCRIPT" resolve-attention "${ORCH_NAME}" "${TICKET_ID}"
-else
-  "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(now_iso)" --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
-    '{ts: $ts, orchestrator: $orch, worker: $w, event: "verification-failed", detail: null}')"
-  "$STATE_SCRIPT" attention "${ORCH_NAME}" "verification-failed" "${TICKET_ID}" \
-    "Independent verification found gaps — remediation required"
-fi
-```
-
 **Verification outcomes:**
 
-- **PASS**: All required coverage types present and passing. Worker advances to merge.
+- **PASS**: All required coverage types present and passing. Worker is fully done.
 - **FAIL**: Specific gaps identified. Orchestrator:
   1. Updates dashboard with specific failures
-  2. Sends worker back with explicit remediation instructions
-  3. Does NOT allow the ticket to advance to merge
-  4. Re-verifies after worker reports fix
-
-**Send worker back (on failure):**
-
-Write remediation instructions to a file the worker can read:
-
-```
-${ORCH_DIR}/workers/${TICKET_ID}-remediation.md
-
-# Verification Failed — ${TICKET_ID}
-
-The following gaps were found by independent verification:
-
-## Missing Coverage
-- [ ] No unit tests for src/auth/middleware.ts (new file)
-- [ ] No Bruno API tests for POST /api/auth/token (new endpoint)
-
-## Quality Issues
-- [ ] `as any` cast at src/auth/types.ts:42
-
-## Required Actions
-1. Write unit tests for the middleware
-2. Add Bruno collection for the auth endpoint
-3. Remove the `as any` cast, use proper type guard
-
-Update your worker signal file when fixed. The orchestrator will re-verify.
-```
+  2. Files a remediation ticket with verification gaps (code is already on main)
+  3. Records remediation ticket ID in signal file
+  4. Blocks wave advancement if `allowSelfReportedCompletion` is `false` (until remediation
+     ticket is filed — not until it is resolved, which would be a future cycle's work)
 
 ### Phase 6: Wave Advancement
 
-When ALL tickets in the current wave pass verification:
+When ALL tickets in the current wave are merged and verified:
 
-1. **Confirm merges**: If `--auto-merge`, the Phase 4 orchestrator-owned poll loop already observed
-   `state=MERGED` for each worker and recorded `pr.mergedAt`. Before advancing the wave,
-   double-check every worker in this wave has `status="done"` with a non-null `pr.mergedAt` in its
-   signal file. If any still show `pr-created` or `merging`, run one more Phase 4 poll cycle before
-   proceeding. If `--auto-merge` is off, flag these PRs for human review on the dashboard instead of
-   advancing.
+1. **Confirm merges and verification (CTL-130)**: Before advancing the wave, check every worker
+   in this wave:
+
+   - `status="done"` with a non-null `pr.mergedAt` — confirms the PR merged
+   - If `VERIFY_BEFORE_MERGE` is `"true"`: `postMergeVerification.result` must not be `null`
+     (verification must have run)
+   - If `ALLOW_SELF_REPORTED` is `"false"` (default) AND any worker has
+     `postMergeVerification.result: "failed"`: block wave advancement until all failed workers
+     have a non-null `postMergeVerification.remediationTicket` (the remediation ticket has been
+     filed). The ticket does not need to be *resolved* — filing it is sufficient to unblock.
+   - If `ALLOW_SELF_REPORTED` is `"true"` AND any worker has `result: "failed"`: log a warning
+     but allow wave advancement (verification is advisory)
+   - If any worker still shows `pr-created` or `merging`, run one more Phase 4 poll cycle
+     before proceeding. If `--auto-merge` is off, flag these PRs for human review on the
+     dashboard instead of advancing.
 
 2. **Write wave briefing** for the next wave (see Wave Briefing section below). Then persist a copy
    to the thoughts repository so it survives worktree cleanup:
