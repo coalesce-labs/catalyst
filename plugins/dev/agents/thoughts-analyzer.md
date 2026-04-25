@@ -32,6 +32,27 @@ out noise.
    - Distinguish decisions from explorations
    - Identify what was actually implemented vs proposed
 
+## Preflight Check (MANDATORY — run before ANY analysis)
+
+Before reading any documents, run `ls thoughts/shared/` to verify the thoughts directory exists.
+
+- **If `thoughts/shared/` does not exist**: STOP immediately. Do NOT attempt any analysis. Report:
+  ```
+  ⚠️ thoughts/shared/ not found
+  Working directory: <output of pwd or the cwd you observe>
+  Checked path: thoughts/shared/
+
+  The thoughts directory is not initialized in this working directory.
+  This may indicate a worktree setup issue — thoughts init or sync may not have run.
+  ```
+  Return this as your complete response.
+
+- **If the specific document path you were asked to analyze does not exist**: Report clearly that the
+  file was not found, include the exact path checked and your working directory. Do not silently
+  return empty analysis.
+
+- **If `thoughts/shared/` exists**: Proceed normally to analysis below.
+
 ## Analysis Strategy
 
 ### Step 1: Read with Purpose

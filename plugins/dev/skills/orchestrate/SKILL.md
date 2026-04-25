@@ -43,6 +43,11 @@ if ! command -v claude &>/dev/null; then
   echo "ERROR: Claude CLI required for worker dispatch"
   exit 1
 fi
+
+# 5. Project setup (REQUIRED — thoughts, config, workflow context)
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
+fi
 ```
 
 ## Invocation
@@ -202,6 +207,8 @@ SETUP_HOOKS=$(jq -c '.catalyst.orchestration.hooks.setup // []' "$CONFIG_FILE" 2
 TEARDOWN_HOOKS=$(jq -c '.catalyst.orchestration.hooks.teardown // []' "$CONFIG_FILE" 2>/dev/null)
 WORKER_COMMAND=$(jq -r '.catalyst.orchestration.workerCommand // "/catalyst-dev:oneshot"' "$CONFIG_FILE" 2>/dev/null)
 WORKER_MODEL=$(jq -r '.catalyst.orchestration.workerModel // "opus"' "$CONFIG_FILE" 2>/dev/null)
+VERIFY_BEFORE_MERGE=$(jq -r '.catalyst.orchestration.verifyBeforeMerge // "true"' "$CONFIG_FILE" 2>/dev/null)
+ALLOW_SELF_REPORTED=$(jq -r '.catalyst.orchestration.allowSelfReportedCompletion // "false"' "$CONFIG_FILE" 2>/dev/null)
 ```
 
 **Create ALL worktrees using `create-worktree.sh`** — both orchestrator and workers go through the
@@ -626,10 +633,10 @@ Write these fields into your signal file as they become available:
   pr.mergedAt         (ISO timestamp from gh pr view when state=MERGED)
   status              (pr-created → merging → done)
 
-Your work will be independently verified by the orchestrator. The orchestrator's
-poll loop is a safety net for stalled workers — if you exit successfully with
-pr.mergedAt set, the orchestrator simply reconciles. If you exit at "stalled" or
-"failed", the orchestrator can dispatch a fix-up worker.
+Your work ends when you write status="merging" after arming auto-merge (CTL-133).
+The orchestrator's Phase 4 poll loop is the authoritative merge watcher — it confirms
+the PR merges, writes pr.mergedAt + status="done", and handles any BEHIND/DIRTY/BLOCKED
+states. If you hit an unrecoverable blocker, write status="stalled" with details.
 
 COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules in the
 catalyst-comms skill (plugins/dev/skills/catalyst-comms/SKILL.md § Posting Discipline):
@@ -759,13 +766,13 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
 done
 ```
 
-**Orchestrator poll-until-MERGED safety net (CTL-31, refined by CTL-80):**
+**Authoritative merge-poll loop (CTL-31, refined by CTL-80, CTL-133):**
 
-Workers now poll-until-MERGED themselves and write `pr.mergedAt` + `status: "done"` directly to
-their signal file. The orchestrator's poll loop is a **safety net**: it independently confirms
-merges so that if a worker stalls, exits early, or never gets to write `mergedAt`, the
-orchestrator can detect the merge from GitHub and reconcile state. On each monitoring cycle,
-for every worker whose signal does not yet show `pr.mergedAt`, ping GitHub directly:
+Workers exit at `status: "merging"` after arming auto-merge (CTL-133). The orchestrator's poll
+loop is the **authoritative merge watcher**: it confirms merges via `gh pr view`, writes
+`pr.mergedAt` + `status: "done"` to the worker's signal file, and transitions the Linear ticket.
+On each monitoring cycle, for every worker whose signal does not yet show `pr.mergedAt`, ping
+GitHub directly:
 
 ```bash
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
@@ -833,8 +840,8 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
       # Transition Linear ticket via the shared helper (CTL-69). The helper
       # reads stateMap from `.catalyst/config.json`, is idempotent, and
       # respects --state-on-merge when the operator wants a non-default
-      # state (e.g., "Shipped"). Workers now drive this themselves on merge;
-      # this call is a safety net for cases where the worker exited early.
+      # state (e.g., "Shipped"). Since CTL-133, this is the primary Linear
+      # done-transition — workers exit at "merging" before merge completes.
       STATE_ON_MERGE_FLAG=""
       if [ -n "${STATE_ON_MERGE:-}" ]; then
         STATE_ON_MERGE_FLAG="--state ${STATE_ON_MERGE}"
@@ -844,6 +851,59 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
         --transition done \
         --config "$CONFIG_FILE" \
         ${STATE_ON_MERGE_FLAG} >/dev/null 2>&1 || true
+
+      # Post-merge verification (CTL-130). Run adversarial verification on
+      # the merged commit. The worker auto-merges independently so verification
+      # is always post-merge — it surfaces gaps for remediation rather than
+      # gating merge. Skipped when verifyBeforeMerge is false.
+      if [ "$VERIFY_BEFORE_MERGE" = "true" ]; then
+        WORKER_DIR="${WORKTREE_BASE}/${ORCH_NAME}-${TICKET}"
+        if [ -d "$WORKER_DIR" ]; then
+          TEST_REQ=$(jq -r --arg scope "$(jq -r '.labels // "" | ascii_downcase' "$WORKER_SIGNAL")" \
+            '.catalyst.orchestration.testRequirements[$scope] // "backend"' "$CONFIG_FILE" 2>/dev/null || echo "backend")
+
+          "$STATE_SCRIPT" event "$(jq -nc \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg orch "${ORCH_NAME}" --arg w "${TICKET}" \
+            '{ts:$ts, orchestrator:$orch, worker:$w, event:"verification-started", detail:null}')"
+
+          "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-verify.sh" \
+            --worktree "$WORKER_DIR" \
+            --ticket "$TICKET" \
+            --base-branch "${BASE_BRANCH:-main}" \
+            --signal-file "$WORKER_SIGNAL" \
+            --test-requirements "$TEST_REQ"
+          VERIFY_EXIT=$?
+
+          VERIFY_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          VERIFY_RESULT=$([ $VERIFY_EXIT -eq 0 ] && echo "passed" || echo "failed")
+          jq --arg result "$VERIFY_RESULT" --arg ts "$VERIFY_TS" \
+            '.postMergeVerification = {result: $result, verifiedAt: $ts, remediationTicket: null}' \
+            "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+
+          if [ $VERIFY_EXIT -eq 0 ]; then
+            "$STATE_SCRIPT" event "$(jq -nc \
+              --arg ts "$VERIFY_TS" --arg orch "${ORCH_NAME}" --arg w "${TICKET}" \
+              '{ts:$ts, orchestrator:$orch, worker:$w, event:"verification-passed", detail:null}')"
+            "$STATE_SCRIPT" resolve-attention "${ORCH_NAME}" "${TICKET}"
+          else
+            "$STATE_SCRIPT" event "$(jq -nc \
+              --arg ts "$VERIFY_TS" --arg orch "${ORCH_NAME}" --arg w "${TICKET}" \
+              '{ts:$ts, orchestrator:$orch, worker:$w, event:"verification-failed", detail:null}')"
+            "$STATE_SCRIPT" attention "${ORCH_NAME}" "post-merge-verification-failed" "${TICKET}" \
+              "Post-merge verification found gaps in ${TICKET} — remediation needed"
+
+            # Write remediation file for human visibility
+            cat > "${ORCH_DIR}/workers/${TICKET}-remediation.md" <<REMEDIATION_EOF
+# Post-Merge Verification Failed — ${TICKET}
+
+PR #${PR_NUMBER} merged but independent verification found gaps.
+Review the verification output above and file a follow-up ticket.
+
+The orchestrator will $([ "$ALLOW_SELF_REPORTED" = "true" ] && echo "advance the wave (advisory mode)" || echo "block wave advancement until remediation is filed").
+REMEDIATION_EOF
+          fi
+        fi
+      fi
       ;;
 
     CLOSED)
@@ -877,10 +937,9 @@ done
 ```
 
 **Poll cadence**: 60–120s while CI is running (MERGE_STATE in {UNKNOWN, PENDING, BLOCKED}); 30s
-while merge is imminent (MERGE_STATE=CLEAN but not yet MERGED). Under the CTL-80 contract the
-worker is responsible for polling its own PR and writing `mergedAt` itself; this orchestrator
-loop is a safety net that catches merges the worker missed (e.g., if the worker exited
-prematurely on a transient error).
+while merge is imminent (MERGE_STATE=CLEAN but not yet MERGED). Since CTL-133, workers exit at
+`status: "merging"` after arming auto-merge — this orchestrator loop is the authoritative merge
+watcher that writes `pr.mergedAt` + `status: "done"` and handles BEHIND/DIRTY/BLOCKED states.
 
 **Poll shared comms channel for attention (CTL-111):**
 
@@ -1001,7 +1060,7 @@ The script checks every non-terminal worker signal and revives when any of:
 Each successful revive records `lastReviveReason`
 (`pid-dead` / `heartbeat-stale` / `api-stream-idle-timeout`) in the signal
 file and emits a `worker-revived` event with the same reason in its detail.
-The per-ticket revive budget (default 2) applies across all reasons
+The per-ticket revive budget (default 10) applies across all reasons
 combined. Workers whose budget is exhausted or whose session_id cannot be
 found transition to `status=stalled` with an attention item so you can
 decide between manual intervention and a fresh redispatch. Session resume
@@ -1046,7 +1105,7 @@ Signal-file fields the script reads/writes:
 | `fixupAttempts`          | orchestrate-auto-fixup    | Auto-dispatch counter (max = `--max-fixups`)               |
 | `lastFixupDispatchedAt`  | orchestrate-auto-fixup    | Timestamp of the most recent dispatch (for the dashboard)  |
 
-### Phase 5: Independent Verification (Anti-Reward-Hacking)
+### Phase 5: Post-Merge Verification (Anti-Reward-Hacking)
 
 ```bash
 if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
@@ -1054,18 +1113,45 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-When a worker signals "done" (PR created, CI green), the orchestrator does NOT trust it. It spawns
-an **adversarial verification agent** in the worker's worktree:
+**Context (CTL-130):** Workers auto-merge their PRs independently via `gh pr merge --auto
+--squash`. GitHub merges the PR the moment CI passes, before the orchestrator's poll loop can
+intervene. Verification therefore runs **post-merge** — it surfaces gaps for remediation rather
+than gating merge.
 
-```bash
-# Run adversarial verification
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-verify.sh" \
-  --worktree "${WORKER_DIR}" \
-  --ticket "${TICKET_ID}" \
-  --base-branch "${BASE_BRANCH}" \
-  --signal-file "${ORCH_DIR}/workers/${TICKET_ID}.json" \
-  --test-requirements "${TEST_REQUIREMENTS}"
-```
+The Phase 4 poll loop (Sub-loop A, MERGED case) already runs `orchestrate-verify.sh` on every
+merged PR when `verifyBeforeMerge` is `true` (default). Phase 5 aggregates those results and
+handles remediation for any failures.
+
+**Aggregation:** For each worker in the current wave, read `postMergeVerification.result` from
+its signal file. Three possible states:
+
+1. `"passed"` — verification ran and succeeded, no action needed
+2. `"failed"` — verification ran and found gaps, remediation needed
+3. `null` — verification hasn't run yet (worker merged between poll cycles, worktree already
+   cleaned up, or `verifyBeforeMerge` is `false`)
+
+**On failure — file a remediation ticket:**
+
+Since the code is already on main, the orchestrator cannot "send the worker back." Instead:
+
+1. Read the remediation file at `${ORCH_DIR}/workers/${TICKET_ID}-remediation.md` (written by
+   Phase 4 on verification failure)
+2. File a follow-up remediation ticket via Linearis CLI with the verification gaps as the
+   description
+3. Record the ticket ID in the signal file:
+   ```bash
+   jq --arg ticket "$REMEDIATION_TICKET_ID" \
+     '.postMergeVerification.remediationTicket = $ticket' \
+     "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+   ```
+
+**Wave advancement gating** (interacts with `allowSelfReportedCompletion`):
+
+- If `ALLOW_SELF_REPORTED` is `"false"` (default) AND any worker has `result: "failed"`:
+  block wave advancement until all remediation tickets are filed. The wave does not advance
+  until every worker either passes verification or has a filed remediation ticket.
+- If `ALLOW_SELF_REPORTED` is `"true"` AND any worker has `result: "failed"`: log a warning,
+  file remediation tickets, but allow wave advancement to proceed. Verification is advisory.
 
 The verification script checks:
 
@@ -1079,71 +1165,35 @@ The verification script checks:
 6. **Reward hacking scan**: Run `/scan-reward-hacking` on changed files — check for `as any`,
    `@ts-ignore`, void patterns, suppressed errors.
 
-**Emit verification events:**
-
-```bash
-# Before running verification
-"$STATE_SCRIPT" event "$(jq -nc --arg ts "$(now_iso)" --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
-  '{ts: $ts, orchestrator: $orch, worker: $w, event: "verification-started", detail: null}')"
-
-# After verification
-if [[ $VERIFY_EXIT -eq 0 ]]; then
-  "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(now_iso)" --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
-    '{ts: $ts, orchestrator: $orch, worker: $w, event: "verification-passed", detail: null}')"
-  "$STATE_SCRIPT" resolve-attention "${ORCH_NAME}" "${TICKET_ID}"
-else
-  "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(now_iso)" --arg orch "${ORCH_NAME}" --arg w "${TICKET_ID}" \
-    '{ts: $ts, orchestrator: $orch, worker: $w, event: "verification-failed", detail: null}')"
-  "$STATE_SCRIPT" attention "${ORCH_NAME}" "verification-failed" "${TICKET_ID}" \
-    "Independent verification found gaps — remediation required"
-fi
-```
-
 **Verification outcomes:**
 
-- **PASS**: All required coverage types present and passing. Worker advances to merge.
+- **PASS**: All required coverage types present and passing. Worker is fully done.
 - **FAIL**: Specific gaps identified. Orchestrator:
   1. Updates dashboard with specific failures
-  2. Sends worker back with explicit remediation instructions
-  3. Does NOT allow the ticket to advance to merge
-  4. Re-verifies after worker reports fix
-
-**Send worker back (on failure):**
-
-Write remediation instructions to a file the worker can read:
-
-```
-${ORCH_DIR}/workers/${TICKET_ID}-remediation.md
-
-# Verification Failed — ${TICKET_ID}
-
-The following gaps were found by independent verification:
-
-## Missing Coverage
-- [ ] No unit tests for src/auth/middleware.ts (new file)
-- [ ] No Bruno API tests for POST /api/auth/token (new endpoint)
-
-## Quality Issues
-- [ ] `as any` cast at src/auth/types.ts:42
-
-## Required Actions
-1. Write unit tests for the middleware
-2. Add Bruno collection for the auth endpoint
-3. Remove the `as any` cast, use proper type guard
-
-Update your worker signal file when fixed. The orchestrator will re-verify.
-```
+  2. Files a remediation ticket with verification gaps (code is already on main)
+  3. Records remediation ticket ID in signal file
+  4. Blocks wave advancement if `allowSelfReportedCompletion` is `false` (until remediation
+     ticket is filed — not until it is resolved, which would be a future cycle's work)
 
 ### Phase 6: Wave Advancement
 
-When ALL tickets in the current wave pass verification:
+When ALL tickets in the current wave are merged and verified:
 
-1. **Confirm merges**: If `--auto-merge`, the Phase 4 orchestrator-owned poll loop already observed
-   `state=MERGED` for each worker and recorded `pr.mergedAt`. Before advancing the wave,
-   double-check every worker in this wave has `status="done"` with a non-null `pr.mergedAt` in its
-   signal file. If any still show `pr-created` or `merging`, run one more Phase 4 poll cycle before
-   proceeding. If `--auto-merge` is off, flag these PRs for human review on the dashboard instead of
-   advancing.
+1. **Confirm merges and verification (CTL-130)**: Before advancing the wave, check every worker
+   in this wave:
+
+   - `status="done"` with a non-null `pr.mergedAt` — confirms the PR merged
+   - If `VERIFY_BEFORE_MERGE` is `"true"`: `postMergeVerification.result` must not be `null`
+     (verification must have run)
+   - If `ALLOW_SELF_REPORTED` is `"false"` (default) AND any worker has
+     `postMergeVerification.result: "failed"`: block wave advancement until all failed workers
+     have a non-null `postMergeVerification.remediationTicket` (the remediation ticket has been
+     filed). The ticket does not need to be *resolved* — filing it is sufficient to unblock.
+   - If `ALLOW_SELF_REPORTED` is `"true"` AND any worker has `result: "failed"`: log a warning
+     but allow wave advancement (verification is advisory)
+   - If any worker still shows `pr-created` or `merging`, run one more Phase 4 poll cycle
+     before proceeding. If `--auto-merge` is off, flag these PRs for human review on the
+     dashboard instead of advancing.
 
 2. **Write wave briefing** for the next wave (see Wave Briefing section below). Then persist a copy
    to the thoughts repository so it survives worktree cleanup:
@@ -1245,27 +1295,61 @@ When all waves are complete:
 3. **Verify Linear states**: Check all tickets are in `stateMap.done`. If any are stuck, update them
    using the Linearis CLI (run `linearis issues usage` for update syntax).
 
-4. **File improvement findings (CTL-183 routing, optional):** If the orchestrator collected any
-   improvement findings during the run (per [[CTL-176]] — inert until that ticket lands), route
-   each finding through the feedback helper so it lands in Linear (or GitHub, if Linear is
-   unavailable). Runs as a no-op when there are no findings.
+4. **File improvement findings (CTL-176 / CTL-183 routing):** Drain the shared findings queue
+   and file one ticket per entry. The orchestrator and every dispatched worker share one queue
+   (dispatch sets `CATALYST_FINDINGS_FILE=$ORCH_DIR/findings.jsonl`), so this one pass covers
+   everything surfaced across the whole run. Runs as a no-op when the queue is empty.
+
+   **Recording findings during the run.** The moment you or a worker notices friction worth
+   fixing (workflow gaps, bugs spotted in adjacent code, recurring manual steps, gaps in
+   tooling), record it on the shared queue:
+
+   ```bash
+   "${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
+     --title "Short imperative title" \
+     --body "Reproduction + expected + observed + any links" \
+     --skill orchestrate --severity low
+   ```
+
+   Record inline, the moment it's observed — context compaction loses it otherwise. Don't
+   prompt the user mid-run; don't wait for the end; don't batch. Step 4 below files the whole
+   queue in one pass.
+
+   **What counts:** friction the maintainer would want fixed, bugs in adjacent catalyst code
+   spotted incidentally, gaps in tooling, manual steps that should be automated.
+   **What doesn't:** this run's own ticket TODOs (those go in the PR body), user preferences
+   that should be durable memory, routine debugging.
 
    ```bash
    FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
    CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+   FINDINGS_FILE="${CATALYST_FINDINGS_FILE:-${ORCH_DIR}/findings.jsonl}"
 
-   # Autonomous mode (orchestrator runs without a TTY): file only when consent
-   # is already granted — never prompt. Interactive maintainer invocations
-   # prompt once, then persist on yes.
-   if [ -x "$FEEDBACK" ] && [ -x "$CONSENT" ] && [ -n "${FINDINGS[*]:-}" ]; then
+   if [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; then
+     COUNT=$(wc -l < "$FINDINGS_FILE" | tr -d ' ')
+     # Autonomous mode (orchestrator runs without a TTY): file only when consent
+     # is already granted — never prompt. Interactive maintainer invocations
+     # prompt once, then persist on yes.
      if [ "$("$CONSENT" check)" != "granted" ] && [ -z "${CATALYST_AUTONOMOUS:-}" ] && [ -t 0 ]; then
-       read -r -p "File ${#FINDINGS[@]} improvement tickets at end of run? [Y/n] " yn
+       read -r -p "File $COUNT improvement tickets at end of run? [Y/n] " yn
        case "$yn" in [Nn]*) : ;; *) "$CONSENT" grant >/dev/null ;; esac
      fi
      if [ "$("$CONSENT" check)" = "granted" ]; then
-       for F in "${FINDINGS[@]}"; do
-         "$FEEDBACK" --title "${F%%$'\n'*}" --body "$F" --skill orchestrate --json || true
-       done
+       FILED=0
+       while IFS= read -r line; do
+         TITLE=$(jq -r '.title' <<<"$line")
+         BODY=$(jq -r '.body' <<<"$line")
+         SKILL=$(jq -r '.skill // "orchestrate"' <<<"$line")
+         RESULT=$("$FEEDBACK" --title "$TITLE" --body "$BODY" --skill "$SKILL" --json 2>/dev/null || true)
+         STATUS=$(jq -r '.status // "failed"' <<<"$RESULT")
+         if [ "$STATUS" = "filed" ]; then
+           ID=$(jq -r '.identifier // .url // ""' <<<"$RESULT")
+           echo "  filed: $ID  ($TITLE)"
+           FILED=$((FILED + 1))
+         fi
+       done < "$FINDINGS_FILE"
+       # Preserve queue on partial failure; delete on full success.
+       [ "$FILED" -eq "$COUNT" ] && rm -f "$FINDINGS_FILE"
      fi
    fi
    ```
@@ -1292,6 +1376,9 @@ fi
   '.status = "completed" | .completedAt = $now | .progress.completedTickets = .progress.totalTickets | .progress.inProgressTickets = 0'
 "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg orch "${ORCH_NAME}" \
   '{ts: $ts, orchestrator: $orch, worker: null, event: "orchestrator-completed", detail: null}')"
+
+# Mark worktree as done (distinguishes done vs in-progress in ls)
+touch "${WORKTREE_PATH}/.done" 2>/dev/null || true
 
 # Archive to history (removes from active state)
 "$STATE_SCRIPT" archive "${ORCH_NAME}"
@@ -1444,7 +1531,7 @@ The dashboard includes:
 
 ## Linear Integration
 
-The orchestrator manages Linear state transitions as a safety net:
+The orchestrator manages Linear state transitions as the primary authority (CTL-133):
 
 | Event                      | Linear Action                                     |
 | -------------------------- | ------------------------------------------------- |
@@ -1459,10 +1546,11 @@ The orchestrator also adds comments to tickets for visibility using the Linearis
 
 ### Single source of truth: `linear-transition.sh`
 
-All Linear state transitions (by the orchestrator's safety net AND by workers at end of
-`/oneshot`) go through `plugins/dev/scripts/linear-transition.sh`. It reads `stateMap` from
-`.catalyst/config.json`, is idempotent (no-op when the ticket is already in the target state),
-and exits 0 when the `linearis` CLI is not installed (graceful skip).
+All Linear state transitions go through `plugins/dev/scripts/linear-transition.sh`. Since CTL-133,
+the orchestrator's Phase 4 poll loop is the primary source of `done` transitions (workers exit at
+`merging` before merge completes). The helper reads `stateMap` from `.catalyst/config.json`, is
+idempotent (no-op when the ticket is already in the target state), and exits 0 when the
+`linearis` CLI is not installed (graceful skip).
 
 ```bash
 # Transition via transition-key (reads stateMap.done from config):
@@ -1617,9 +1705,9 @@ The fix-up worker:
 - Polls until `state=MERGED` (CTL-80 contract), writes `pr.mergedAt` + `status: "done"`,
   transitions Linear, then exits
 
-The orchestrator's Phase 4 poll loop is a safety net: if the fix-up worker exits stalled or
-crashes before merge, the orchestrator can still observe the eventual `MERGED` state and
-reconcile. `fixupCommit` is metadata for the dashboard.
+The orchestrator's Phase 4 poll loop is the authoritative merge watcher: if the fix-up worker
+exits before merge, the orchestrator observes the eventual `MERGED` state and writes the merge
+signal. `fixupCommit` is metadata for the dashboard.
 
 **Typical cost:** ~$2 (much cheaper than a fresh worker because scope is narrow).
 
