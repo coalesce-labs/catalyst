@@ -10,7 +10,7 @@
 #
 # Usage:
 #   orchestrate-revive --orch-dir <path> --orch-id <id>
-#                      [--max-revives <n>]               # default 2
+#                      [--max-revives <n>]               # default 10
 #                      [--stale-heartbeat-seconds <n>]   # default 900 (15 min)
 #                      [--worker-command <cmd>]          # default /catalyst-dev:oneshot
 #                      [--model <name>]                  # default opus
@@ -31,7 +31,7 @@ CLAUDE_BIN="${CATALYST_REVIVE_CLAUDE_BIN:-claude}"
 
 ORCH_DIR=""
 ORCH_ID=""
-MAX_REVIVES=2
+MAX_REVIVES=10
 STALE_HEARTBEAT_SECONDS=900
 WORKER_COMMAND="/catalyst-dev:oneshot"
 MODEL="opus"

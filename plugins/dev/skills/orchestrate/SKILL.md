@@ -631,10 +631,10 @@ Write these fields into your signal file as they become available:
   pr.mergedAt         (ISO timestamp from gh pr view when state=MERGED)
   status              (pr-created → merging → done)
 
-Your work will be independently verified by the orchestrator. The orchestrator's
-poll loop is a safety net for stalled workers — if you exit successfully with
-pr.mergedAt set, the orchestrator simply reconciles. If you exit at "stalled" or
-"failed", the orchestrator can dispatch a fix-up worker.
+Your work ends when you write status="merging" after arming auto-merge (CTL-133).
+The orchestrator's Phase 4 poll loop is the authoritative merge watcher — it confirms
+the PR merges, writes pr.mergedAt + status="done", and handles any BEHIND/DIRTY/BLOCKED
+states. If you hit an unrecoverable blocker, write status="stalled" with details.
 
 COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules in the
 catalyst-comms skill (plugins/dev/skills/catalyst-comms/SKILL.md § Posting Discipline):
@@ -764,13 +764,13 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
 done
 ```
 
-**Orchestrator poll-until-MERGED safety net (CTL-31, refined by CTL-80):**
+**Authoritative merge-poll loop (CTL-31, refined by CTL-80, CTL-133):**
 
-Workers now poll-until-MERGED themselves and write `pr.mergedAt` + `status: "done"` directly to
-their signal file. The orchestrator's poll loop is a **safety net**: it independently confirms
-merges so that if a worker stalls, exits early, or never gets to write `mergedAt`, the
-orchestrator can detect the merge from GitHub and reconcile state. On each monitoring cycle,
-for every worker whose signal does not yet show `pr.mergedAt`, ping GitHub directly:
+Workers exit at `status: "merging"` after arming auto-merge (CTL-133). The orchestrator's poll
+loop is the **authoritative merge watcher**: it confirms merges via `gh pr view`, writes
+`pr.mergedAt` + `status: "done"` to the worker's signal file, and transitions the Linear ticket.
+On each monitoring cycle, for every worker whose signal does not yet show `pr.mergedAt`, ping
+GitHub directly:
 
 ```bash
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
@@ -838,8 +838,8 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
       # Transition Linear ticket via the shared helper (CTL-69). The helper
       # reads stateMap from `.catalyst/config.json`, is idempotent, and
       # respects --state-on-merge when the operator wants a non-default
-      # state (e.g., "Shipped"). Workers now drive this themselves on merge;
-      # this call is a safety net for cases where the worker exited early.
+      # state (e.g., "Shipped"). Since CTL-133, this is the primary Linear
+      # done-transition — workers exit at "merging" before merge completes.
       STATE_ON_MERGE_FLAG=""
       if [ -n "${STATE_ON_MERGE:-}" ]; then
         STATE_ON_MERGE_FLAG="--state ${STATE_ON_MERGE}"
@@ -882,10 +882,9 @@ done
 ```
 
 **Poll cadence**: 60–120s while CI is running (MERGE_STATE in {UNKNOWN, PENDING, BLOCKED}); 30s
-while merge is imminent (MERGE_STATE=CLEAN but not yet MERGED). Under the CTL-80 contract the
-worker is responsible for polling its own PR and writing `mergedAt` itself; this orchestrator
-loop is a safety net that catches merges the worker missed (e.g., if the worker exited
-prematurely on a transient error).
+while merge is imminent (MERGE_STATE=CLEAN but not yet MERGED). Since CTL-133, workers exit at
+`status: "merging"` after arming auto-merge — this orchestrator loop is the authoritative merge
+watcher that writes `pr.mergedAt` + `status: "done"` and handles BEHIND/DIRTY/BLOCKED states.
 
 **Poll shared comms channel for attention (CTL-111):**
 
@@ -1006,7 +1005,7 @@ The script checks every non-terminal worker signal and revives when any of:
 Each successful revive records `lastReviveReason`
 (`pid-dead` / `heartbeat-stale` / `api-stream-idle-timeout`) in the signal
 file and emits a `worker-revived` event with the same reason in its detail.
-The per-ticket revive budget (default 2) applies across all reasons
+The per-ticket revive budget (default 10) applies across all reasons
 combined. Workers whose budget is exhausted or whose session_id cannot be
 found transition to `status=stalled` with an attention item so you can
 decide between manual intervention and a fresh redispatch. Session resume
@@ -1483,7 +1482,7 @@ The dashboard includes:
 
 ## Linear Integration
 
-The orchestrator manages Linear state transitions as a safety net:
+The orchestrator manages Linear state transitions as the primary authority (CTL-133):
 
 | Event                      | Linear Action                                     |
 | -------------------------- | ------------------------------------------------- |
@@ -1498,10 +1497,11 @@ The orchestrator also adds comments to tickets for visibility using the Linearis
 
 ### Single source of truth: `linear-transition.sh`
 
-All Linear state transitions (by the orchestrator's safety net AND by workers at end of
-`/oneshot`) go through `plugins/dev/scripts/linear-transition.sh`. It reads `stateMap` from
-`.catalyst/config.json`, is idempotent (no-op when the ticket is already in the target state),
-and exits 0 when the `linearis` CLI is not installed (graceful skip).
+All Linear state transitions go through `plugins/dev/scripts/linear-transition.sh`. Since CTL-133,
+the orchestrator's Phase 4 poll loop is the primary source of `done` transitions (workers exit at
+`merging` before merge completes). The helper reads `stateMap` from `.catalyst/config.json`, is
+idempotent (no-op when the ticket is already in the target state), and exits 0 when the
+`linearis` CLI is not installed (graceful skip).
 
 ```bash
 # Transition via transition-key (reads stateMap.done from config):
@@ -1656,9 +1656,9 @@ The fix-up worker:
 - Polls until `state=MERGED` (CTL-80 contract), writes `pr.mergedAt` + `status: "done"`,
   transitions Linear, then exits
 
-The orchestrator's Phase 4 poll loop is a safety net: if the fix-up worker exits stalled or
-crashes before merge, the orchestrator can still observe the eventual `MERGED` state and
-reconcile. `fixupCommit` is metadata for the dashboard.
+The orchestrator's Phase 4 poll loop is the authoritative merge watcher: if the fix-up worker
+exits before merge, the orchestrator observes the eventual `MERGED` state and writes the merge
+signal. `fixupCommit` is metadata for the dashboard.
 
 **Typical cost:** ~$2 (much cheaper than a fresh worker because scope is narrow).
 
