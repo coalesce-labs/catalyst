@@ -1,5 +1,25 @@
 # Changelog
 
+## [7.11.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.10.0...catalyst-dev-v7.11.0) (2026-04-25)
+
+
+### Features
+
+* **dev:** /compound closing ritual writes compound-log entry at PR merge (CTL-159) ([#276](https://github.com/coalesce-labs/catalyst/issues/276)) ([7116395](https://github.com/coalesce-labs/catalyst/commit/71163957a45dd7a9c72f06df0193cda3905f4c23))
+* **dev:** auto-file improvement findings at skill run end (CTL-176) ([#274](https://github.com/coalesce-labs/catalyst/issues/274)) ([afc11ea](https://github.com/coalesce-labs/catalyst/commit/afc11ea32be7cf783f3c541e461b1b80112875e7))
+* **dev:** integrate todos panel into orch detail (CTL-171) ([#279](https://github.com/coalesce-labs/catalyst/issues/279)) ([62a5c14](https://github.com/coalesce-labs/catalyst/commit/62a5c1445d3686b580c8989ae062a0a77d63aba4))
+* **dev:** OSS-safe feedback routing — linear→github fallback + consent (CTL-183) ([#272](https://github.com/coalesce-labs/catalyst/issues/272)) ([77101f5](https://github.com/coalesce-labs/catalyst/commit/77101f572f23dd482fab607e995e588b09189a4b))
+* **dev:** post-merge verification for orchestrated workers (CTL-130) ([#293](https://github.com/coalesce-labs/catalyst/issues/293)) ([df04e39](https://github.com/coalesce-labs/catalyst/commit/df04e398cbdb346e1f87a2f1a89c88d228cbdc4c))
+* **dev:** session state tracking + crash-resilient restart (CTL-192) ([#294](https://github.com/coalesce-labs/catalyst/issues/294)) ([92c2dd0](https://github.com/coalesce-labs/catalyst/commit/92c2dd076350d29dfea0a8a618f2517457b00a3f))
+* **dev:** session-centric Kanban home mockup (CTL-168) ([#282](https://github.com/coalesce-labs/catalyst/issues/282)) ([0c5488f](https://github.com/coalesce-labs/catalyst/commit/0c5488f0981fe1715102c8a23d9315b4df54a783))
+* **dev:** tiered attention signals + reason glyphs (CTL-170) ([#277](https://github.com/coalesce-labs/catalyst/issues/277)) ([06d7c60](https://github.com/coalesce-labs/catalyst/commit/06d7c600789fe5546b836e09286dfba853afe3ec))
+
+
+### Bug Fixes
+
+* **dev:** add thoughts preflight assertions for orchestrated worktrees (CTL-195) ([#291](https://github.com/coalesce-labs/catalyst/issues/291)) ([4444b36](https://github.com/coalesce-labs/catalyst/commit/4444b36cde8db38aaa962741e96e8edd1e3f6e0b))
+* **dev:** workers exit at merging, orchestrator is authoritative merge-poller (CTL-133) ([#292](https://github.com/coalesce-labs/catalyst/issues/292)) ([3c99019](https://github.com/coalesce-labs/catalyst/commit/3c990192748e0f73c4cd4cdb95350a632fb7bc75))
+
 ## [7.10.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.9.0...catalyst-dev-v7.10.0)
 
 Apr 24, 2026

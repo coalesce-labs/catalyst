@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.0.3...catalyst-pm-v6.1.0) (2026-04-25)
+
+
+### Features
+
+* **pm:** define AI-native estimation signal schema (CTL-184) ([#275](https://github.com/coalesce-labs/catalyst/issues/275)) ([6aa462c](https://github.com/coalesce-labs/catalyst/commit/6aa462c15ab72ea781059bf95b716b21e9e84c89))
+
 ## [6.0.3](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.0.2...catalyst-pm-v6.0.3) (2026-04-13)
 
 
