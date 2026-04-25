@@ -157,11 +157,6 @@
         background: color-mix(in srgb, var(--color-danger) 12%, transparent);
         border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
       }
-      [data-system="operator-console"] .chip--needs-me {
-        color: var(--color-accent);
-        background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-        border-color: var(--color-accent);
-      }
       [data-system="operator-console"] .chip--queued,
       [data-system="operator-console"] .chip--ticket {
         color: var(--color-text-md);
@@ -181,8 +176,7 @@
         line-height: 1;
       }
       [data-system="precision-instrument"] .chip--running::before,
-      [data-system="precision-instrument"] .chip--merging::before,
-      [data-system="precision-instrument"] .chip--needs-me::before {
+      [data-system="precision-instrument"] .chip--merging::before {
         color: var(--color-accent);
       }
       [data-system="precision-instrument"] .chip--pr-open::before,
@@ -1463,7 +1457,7 @@
                       <span class="wave-card__chip-ticket">CTL-145</span>
                     </span>
                     <span class="wave-card__chip" role="listitem">
-                      <span class="chip chip--needs-me">Needs me</span>
+                      <span class="chip chip--failed chip-glyph chip-glyph--review">Review</span>
                       <span class="wave-card__chip-ticket">CTL-139</span>
                     </span>
                   </div>
@@ -1647,7 +1641,7 @@
 
                 <div class="worker-table__row" role="row">
                   <span class="worker-table__cell--ticket" role="cell">CTL-139</span>
-                  <span role="cell"><span class="chip chip--needs-me">Needs me</span></span>
+                  <span role="cell"><span class="chip chip--failing chip-glyph chip-glyph--ci-fail">CI fail</span></span>
                   <span role="cell">validate</span>
                   <span class="worker-table__cell--pr" role="cell"><a href="#">#243</a></span>
                   <span role="cell">96</span>

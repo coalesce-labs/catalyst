@@ -43,6 +43,11 @@ if ! command -v claude &>/dev/null; then
   echo "ERROR: Claude CLI required for worker dispatch"
   exit 1
 fi
+
+# 5. Project setup (REQUIRED — thoughts, config, workflow context)
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
+fi
 ```
 
 ## Invocation
