@@ -1,9 +1,18 @@
 # Changelog
 
-## [6.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.0.3...catalyst-pm-v6.1.0) (2026-04-25)
+## [6.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.0.3...catalyst-pm-v6.1.0)
+
+Apr 25, 2026
+
+<!-- ai-enhanced -->
+
+### AI-Native Estimation Signal Schema
+
+Foundation data contract for ticket estimation across all PM plugins. Every estimation skill now reads and writes the same `estimation:` YAML block with standardized fields for scope, confidence, methodology, and uncertainty modeling. Linear primitives (`Issue.estimate`, labels) mirror the schema for native filtering and burndown while YAML frontmatter remains the source of truth.
 
 
-### Features
+
+### PRs
 
 * **pm:** define AI-native estimation signal schema (CTL-184) ([#275](https://github.com/coalesce-labs/catalyst/issues/275)) ([6aa462c](https://github.com/coalesce-labs/catalyst/commit/6aa462c15ab72ea781059bf95b716b21e9e84c89))
 
