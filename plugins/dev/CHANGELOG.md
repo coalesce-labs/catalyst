@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.11.0...catalyst-dev-v7.12.0) (2026-04-25)
+
+
+### Features
+
+* **dev:** emit claude_code.session.outcome at session end (CTL-157) ([#278](https://github.com/coalesce-labs/catalyst/issues/278)) ([6505cb0](https://github.com/coalesce-labs/catalyst/commit/6505cb0a4640db162935f24b86e827b1087f84d9))
+* **dev:** iteration_count counter for plan-implement-validate loops (CTL-158) ([#280](https://github.com/coalesce-labs/catalyst/issues/280)) ([18a2b7d](https://github.com/coalesce-labs/catalyst/commit/18a2b7dac7f0e8d225eee6c7b640890be5deb034))
+
 ## [7.11.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.10.0...catalyst-dev-v7.11.0)
 
 Apr 25, 2026
