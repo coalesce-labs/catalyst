@@ -1377,6 +1377,9 @@ fi
 "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg orch "${ORCH_NAME}" \
   '{ts: $ts, orchestrator: $orch, worker: null, event: "orchestrator-completed", detail: null}')"
 
+# Mark worktree as done (distinguishes done vs in-progress in ls)
+touch "${WORKTREE_PATH}/.done" 2>/dev/null || true
+
 # Archive to history (removes from active state)
 "$STATE_SCRIPT" archive "${ORCH_NAME}"
 
