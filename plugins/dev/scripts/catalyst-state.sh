@@ -28,6 +28,7 @@ LOCK_FILE="${STATE_FILE}.lock"
 EVENTS_DIR="${CATALYST_DIR}/events"
 HISTORY_DIR="${CATALYST_DIR}/history"
 RUNS_DIR="${CATALYST_DIR}/runs"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -305,6 +306,19 @@ cmd_gc() {
       --arg ts "$(now_iso)" \
       --arg orch "$id" \
       '{ts: $ts, orchestrator: $orch, worker: null, event: "orchestrator-failed", detail: {reason: "heartbeat expired — presumed dead"}}')"
+
+    # CTL-157: emit claude_code.session.outcome for the abandoned orchestrator.
+    # Best-effort — the emitter silently no-ops if OTEL is unconfigured and
+    # we swallow any failure so gc always completes archival.
+    local emit_bin="${CATALYST_EMIT_OTEL_BIN:-$SCRIPT_DIR/emit-otel-event.sh}"
+    if [[ -x "$emit_bin" ]]; then
+      "$emit_bin" \
+        --event "claude_code.session.outcome" \
+        --outcome abandoned \
+        --session-id "$id" \
+        --reason "heartbeat expired — presumed dead" \
+        >/dev/null 2>&1 || true
+    fi
 
     cmd_archive "$id"
   done

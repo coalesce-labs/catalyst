@@ -22,8 +22,10 @@
 #       Emits a `phase-iteration` event. Flushed to OTLP at session end.
 #   pr <session-id> --number N --url URL [--ci STATUS]
 #       Record PR creation. Emits a `pr-opened` event.
-#   end <session-id> [--status done|failed]
-#       Mark the session complete. Emits a `session-ended` event.
+#   end <session-id> [--status done|failed] [--reason TEXT]
+#       Mark the session complete. Emits a `session-ended` event AND a
+#       `claude_code.session.outcome` OTLP log (CTL-157) carrying outcome,
+#       session_id, linear.key, and optional reason for Loki/PromQL queries.
 #   heartbeat <session-id>
 #       Bump updated_at (and emit a `heartbeat` event to the JSONL log).
 #   list [--active] [--skill NAME] [--ticket KEY] [--limit N]
@@ -382,10 +384,11 @@ cmd_end() {
   [[ -n "$sid" ]] || { echo "error: end requires <session-id>" >&2; return 1; }
   shift
 
-  local status="done"
+  local status="done" reason=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --status) status="$2"; shift 2 ;;
+      --reason) reason="$2"; shift 2 ;;
       *) echo "error: unknown flag for end: $1" >&2; return 1 ;;
     esac
   done
@@ -401,18 +404,35 @@ cmd_end() {
                updated_at = $(sql_quote "$ts")
            WHERE session_id = $(sql_quote "$sid");"
 
-  emit_event "$sid" "session-ended" "$(jq -nc --arg s "$status" '{status:$s}')"
+  local payload
+  if [[ -n "$reason" ]]; then
+    payload=$(jq -nc --arg s "$status" --arg r "$reason" '{status:$s,reason:$r}')
+  else
+    payload=$(jq -nc --arg s "$status" '{status:$s}')
+  fi
+  emit_event "$sid" "session-ended" "$payload"
 
-  # Flush the per-session iteration counter to OTLP so Prometheus can surface
-  # `claude_code_iteration_count_total{linear_key,kind}`. Best-effort — the
-  # emitter is silent on any failure (see CTL-158).
+  # CTL-157: emit claude_code.session.outcome to OTLP.
+  local emit_bin="${CATALYST_EMIT_OTEL_BIN:-$SCRIPT_DIR/emit-otel-event.sh}"
+  if [[ -x "$emit_bin" ]]; then
+    local outcome
+    case "$status" in
+      done)   outcome="success" ;;
+      failed) outcome="fail" ;;
+    esac
+    local args=(
+      --event "claude_code.session.outcome"
+      --outcome "$outcome"
+      --session-id "$sid"
+    )
+    [[ -n "$reason" ]] && args+=(--reason "$reason")
+    "$emit_bin" "${args[@]}" >/dev/null 2>&1 || true
+  fi
+
+  # CTL-158: flush iteration counters to OTLP.
   emit_iteration_metric "$sid"
 }
 
-# Helper — resolves the emit-otel-metric.sh script and invokes it twice per
-# session end (once for plan-replans, once for implement-fix cycles). The
-# `CATALYST_EMIT_METRIC` env var lets tests inject a stub without rewriting
-# the script path.
 emit_iteration_metric() {
   local sid="$1"
   local emit="${CATALYST_EMIT_METRIC:-$SCRIPT_DIR/emit-otel-metric.sh}"
@@ -424,13 +444,9 @@ emit_iteration_metric() {
   ticket=$(    db_exec "SELECT COALESCE(ticket_key,'')     FROM sessions        WHERE session_id = $(sql_quote "$sid");")
   started_at=$(db_exec "SELECT started_at                  FROM sessions        WHERE session_id = $(sql_quote "$sid");")
 
-  # Default to 0 when the metrics row was never created (no iteration calls).
   plan_count="${plan_count:-0}"
   fix_count="${fix_count:-0}"
 
-  # Convert ISO-8601 to Unix ns for OTLP startTimeUnixNano. macOS and GNU
-  # date take different flags; try both and fall back to empty (emitter
-  # substitutes "now" in that case).
   local start_s=""
   if [[ -n "$started_at" ]]; then
     start_s=$(date -ju -f '%Y-%m-%dT%H:%M:%SZ' "$started_at" '+%s' 2>/dev/null \
@@ -440,7 +456,6 @@ emit_iteration_metric() {
   local start_ns=""
   [[ -n "$start_s" ]] && start_ns="${start_s}000000000"
 
-  # Two calls — one per kind — so `sum by (kind)` is well-defined in PromQL.
   "$emit" iteration_count --kind plan --count "$plan_count" --linear-key "$ticket" ${start_ns:+--start-ns "$start_ns"} 2>/dev/null || true
   "$emit" iteration_count --kind fix  --count "$fix_count"  --linear-key "$ticket" ${start_ns:+--start-ns "$start_ns"} 2>/dev/null || true
 }

@@ -109,6 +109,94 @@ assert_dir_exists "$SCRATCH/cat6/runs" "runs/ created by init"
 assert_dir_exists "$SCRATCH/cat6/events" "events/ created by init"
 assert_dir_exists "$SCRATCH/cat6/history" "history/ created by init"
 
+# ─── Test 7: gc emits claude_code.session.outcome for abandoned orch (CTL-157) ──
+echo ""
+echo "--- Test 7: gc emits session.outcome with outcome=abandoned ---"
+export CATALYST_DIR="$SCRATCH/cat7"
+"$STATE_SCRIPT" init >/dev/null
+
+CAP="$SCRATCH/cat7/emit.args"
+STUB="$SCRATCH/cat7/emit-stub.sh"
+cat > "$STUB" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "$CAP"
+exit 0
+STUB
+chmod +x "$STUB"
+
+STALE_TS=$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -u -d "30 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+"$STATE_SCRIPT" register "orch-stale-test" "$(jq -nc \
+  --arg ts "$STALE_TS" \
+  '{id:"orch-stale-test",projectKey:"k",repository:"r",baseBranch:"main",
+    status:"active",startedAt:$ts,lastHeartbeat:$ts,
+    worktreeDir:"/tmp",stateFile:"/tmp/x.json",progress:{},usage:{},
+    workers:{},attention:[]}')" >/dev/null
+# cmd_register force-overwrites lastHeartbeat to now — rewrite it to the stale
+# value directly so gc's filter picks this orch up.
+TMP_STATE="$SCRATCH/cat7/state.json"
+jq --arg ts "$STALE_TS" '.orchestrators["orch-stale-test"].lastHeartbeat = $ts' \
+  "$TMP_STATE" > "$TMP_STATE.tmp" && mv "$TMP_STATE.tmp" "$TMP_STATE"
+
+CATALYST_EMIT_OTEL_BIN="$STUB" "$STATE_SCRIPT" gc --stale-after 10 >/dev/null 2>&1
+
+[[ -f "$CAP" ]] && pass "emitter invoked during gc" || fail "emitter not invoked for stale orch"
+ARGS=$(cat "$CAP" 2>/dev/null || echo "")
+if echo "$ARGS" | grep -qx "abandoned"; then
+  pass "outcome=abandoned forwarded"
+else
+  fail "outcome=abandoned not forwarded: $ARGS"
+fi
+if echo "$ARGS" | grep -qx "orch-stale-test"; then
+  pass "orch id forwarded as session-id"
+else
+  fail "orch id not forwarded: $ARGS"
+fi
+if echo "$ARGS" | grep -q "heartbeat expired"; then
+  pass "reason forwarded"
+else
+  fail "reason not forwarded: $ARGS"
+fi
+
+# ─── Test 8: gc still emits orchestrator-failed event (regression) ──────────
+echo ""
+echo "--- Test 8: existing orchestrator-failed event still emitted ---"
+EVENT_FILE=$(ls "$SCRATCH/cat7/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE" ]] && grep -q "orchestrator-failed" "$EVENT_FILE"; then
+  pass "orchestrator-failed event still written to JSONL"
+else
+  fail "orchestrator-failed event missing from JSONL"
+fi
+
+# ─── Test 9: gc silent no-op when emitter binary missing ────────────────────
+echo ""
+echo "--- Test 9: gc still succeeds when emitter binary missing ---"
+export CATALYST_DIR="$SCRATCH/cat9"
+"$STATE_SCRIPT" init >/dev/null
+STALE_TS=$(date -u -v-30M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -u -d "30 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+"$STATE_SCRIPT" register "orch-stale-2" "$(jq -nc \
+  --arg ts "$STALE_TS" \
+  '{id:"orch-stale-2",projectKey:"k",repository:"r",baseBranch:"main",
+    status:"active",startedAt:$ts,lastHeartbeat:$ts,
+    worktreeDir:"/tmp",stateFile:"/tmp/x.json",progress:{},usage:{},
+    workers:{},attention:[]}')" >/dev/null
+TMP_STATE9="$SCRATCH/cat9/state.json"
+jq --arg ts "$STALE_TS" '.orchestrators["orch-stale-2"].lastHeartbeat = $ts' \
+  "$TMP_STATE9" > "$TMP_STATE9.tmp" && mv "$TMP_STATE9.tmp" "$TMP_STATE9"
+
+set +e
+CATALYST_EMIT_OTEL_BIN="/nonexistent/path" "$STATE_SCRIPT" gc --stale-after 10 >/dev/null 2>&1
+GC_RC=$?
+set -e
+assert_eq "0" "$GC_RC" "gc exits 0 even when emitter missing"
+HIST_ENTRIES=$(ls "$SCRATCH/cat9/history/"*.json 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$HIST_ENTRIES" -ge 1 ]]; then
+  pass "orchestrator archived despite emitter missing"
+else
+  fail "orchestrator not archived: $HIST_ENTRIES entries in history"
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════"
