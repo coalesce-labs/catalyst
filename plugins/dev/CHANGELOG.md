@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.12.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.12.0...catalyst-dev-v7.12.1) (2026-04-26)
+
+
+### Bug Fixes
+
+* **dev:** Warp tab shows worktree CWD via --shell-eval mode ([#298](https://github.com/coalesce-labs/catalyst/issues/298)) ([ea30621](https://github.com/coalesce-labs/catalyst/commit/ea30621b65fb744f881ec45ac4affa51a855fe45))
+
 ## [7.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.11.0...catalyst-dev-v7.12.0)
 
 Apr 25, 2026
