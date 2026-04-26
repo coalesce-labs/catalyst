@@ -31,9 +31,11 @@ SETUP="${SCRIPT_DIR}/setup-orchestrator.sh"
 CLAUDE_LAUNCHER="${SCRIPT_DIR}/catalyst-claude.sh"
 
 PROJECT=""
+SHELL_EVAL=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT="$2"; shift 2 ;;
+    --shell-eval) SHELL_EVAL=true; shift ;;
     --) shift; break ;;
     *) break ;;
   esac
@@ -100,15 +102,23 @@ if [[ -z "${WORKTREE_PATH:-}" ]]; then
   exit 1
 fi
 
+if [[ "$SHELL_EVAL" == true ]]; then
+  printf 'cd %q\n' "$WORKTREE_PATH"
+  printf 'eval "$(direnv export zsh 2>/dev/null || true)"\n'
+  printf 'export CATALYST_WARP_NAME=%q\n' "$SESSION_NAME"
+  printf 'export CATALYST_WARP_REMOTE=%q\n' "$SESSION_NAME"
+  printf 'exec %q %q\n' "$CLAUDE_LAUNCHER" "$CLAUDE_INVOCATION"
+  exit 0
+fi
+
+# Direct mode: cd + exec (used when not invoked via eval)
 cd "$WORKTREE_PATH"
 
-# Re-activate direnv inside the worktree (per-worktree .envrc)
 if command -v direnv >/dev/null 2>&1; then
   direnv allow . >/dev/null 2>&1 || true
   eval "$(direnv export zsh 2>/dev/null || true)"
 fi
 
-# Forward session name to claude via catalyst-claude.sh (reads CATALYST_WARP_*)
 export CATALYST_WARP_NAME="$SESSION_NAME"
 export CATALYST_WARP_REMOTE="$SESSION_NAME"
 
