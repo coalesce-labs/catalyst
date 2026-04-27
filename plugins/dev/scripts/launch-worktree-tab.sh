@@ -102,10 +102,10 @@ if [[ "$SHELL_EVAL" == true ]]; then
   printf 'eval "$(direnv export zsh 2>/dev/null || true)"\n'
   printf 'export CATALYST_WARP_NAME=%q\n' "$SESSION_NAME"
   printf 'export CATALYST_WARP_REMOTE=%q\n' "$SESSION_NAME"
-  # Force Warp to update CWD tracking before launching Claude.
-  # warp_precmd emits the DCS payload Warp uses to track $PWD; without this,
-  # Claude launches before any prompt renders and Warp never learns about the cd.
-  printf '{ type warp_precmd &>/dev/null && warp_precmd; } 2>/dev/null || true\n'
+  # Update Warp's CWD display via OSC 7 (standard terminal CWD notification).
+  # Do NOT call warp_precmd here — it emits DCS block-delimiter sequences that
+  # cause Warp to split the eval into two blocks, dropping a new shell below Claude.
+  printf 'printf '"'"'\\e]7;file://%%s%%s\\a'"'"' "$(hostname)" "$PWD"\n'
   # No exec here — these commands run inside the caller's shell via eval, so
   # exec would replace the tab's login shell. When Claude exits, the shell
   # would be gone and Warp would respawn a bare shell with no context.
