@@ -107,6 +107,10 @@ if [[ "$SHELL_EVAL" == true ]]; then
   printf 'eval "$(direnv export zsh 2>/dev/null || true)"\n'
   printf 'export CATALYST_WARP_NAME=%q\n' "$SESSION_NAME"
   printf 'export CATALYST_WARP_REMOTE=%q\n' "$SESSION_NAME"
+  # Force Warp to update CWD tracking before exec replaces the shell.
+  # warp_precmd emits the DCS payload Warp uses to track $PWD; without this,
+  # exec fires before any prompt renders and Warp never learns about the cd.
+  printf '{ type warp_precmd &>/dev/null && warp_precmd; } 2>/dev/null || true\n'
   printf 'exec %q %q\n' "$CLAUDE_LAUNCHER" "$CLAUDE_INVOCATION"
   exit 0
 fi
