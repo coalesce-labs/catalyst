@@ -1,6 +1,6 @@
 ---
 name: prd-draft
-description: Create a modern, AI-era PRD for features and initiatives. Guides through clarifying questions, generates draft, and offers multi-agent review.
+description: "Create a PRD (product requirements document) for features and initiatives. Guides through clarifying questions, generates a structured draft with hypothesis, strategic fit, non-goals, success metrics, and rollout plan, then offers multi-agent review. Use when the user asks to create a PRD, product spec, feature spec, requirements doc, or product brief."
 disable-model-invocation: false
 user-invocable: true
 ---
@@ -748,112 +748,7 @@ Before presenting the PRD draft to the PM, verify:
 
 ---
 
-# Part 2: Full PRD Workflow
-
-For comprehensive end-to-end PRD creation, follow this 7-step process.
-
-## Step-by-Step Workflow
-
-### Workflow Step 1: Gather Context (10 min)
-
-Before touching AI, collect:
-
-**Research & Data:**
-
-- User research findings (interviews, surveys)
-- Analytics data (usage patterns, metrics)
-- Support tickets (common issues, requests)
-- Competitive analysis
-
-**Strategic Context:**
-
-- How this ladders to OKRs
-- Business case (revenue/user impact)
-- Strategic importance (why now?)
-
-**Technical Context:**
-
-- Existing architecture constraints
-- Integration requirements
-- Known dependencies
-
-### Workflow Step 2: Generate First Draft (5 min)
-
-Use the conversational workflow in Step 1-3 above to generate your first draft.
-
-### Workflow Step 3: Enhance Each Section (30-60 min)
-
-**Problem Statement:**
-
-- [ ] Add specific customer quotes
-- [ ] Include quantitative data
-- [ ] Connect to company strategy
-
-**Solution:**
-
-- [ ] Explain WHY this solution
-- [ ] Detail alternatives considered
-- [ ] Call out tradeoffs made
-
-**Success Metrics:**
-
-- [ ] Define leading AND lagging indicators
-- [ ] Set specific targets
-- [ ] Define success criteria
-
-### Workflow Step 4: Multi-Perspective Review (15 min)
-
-Use the multi-agent review in Step 3 above to get feedback from:
-
-- Engineering (feasibility)
-- Design (UX)
-- Executive (strategy)
-- Customer voice (user needs)
-
-### Workflow Step 5: Human Review
-
-**Must review with:**
-
-- Engineering lead
-- Design lead
-- Your manager
-
-**Should review with:**
-
-- Key stakeholders
-- PM peers
-
-### Workflow Step 6: Refine & Ship (30 min)
-
-**Final checklist:**
-
-- [ ] Can someone unfamiliar understand it?
-- [ ] All sections complete
-- [ ] Dependencies identified
-- [ ] Success criteria clear
-- [ ] Next steps defined
-
-### Workflow Step 7: Announce
-
-```
-Hi team,
-
-I've published the PRD for [Feature Name]: [link]
-
-TL;DR: [One sentence]
-Why now: [Strategic rationale]
-Timeline: [When we plan to start/ship]
-
-Action needed:
-- Engineering: Review technical approach by [date]
-- Design: Review UX approach by [date]
-
-Questions? Drop them in [Slack channel].
-```
-
----
-
-# Part 3: AI Feature PRDs
+# AI Feature PRDs
 
 **When to use:** When building any AI-powered feature, LLM integration, or ML product.
 
@@ -948,19 +843,6 @@ Create a table with three categories:
 - Correction rate (% of edited outputs)
 - Abandonment rate
 - Escalation rate
-
-## 10 Principles for AI Products
-
-1. **Focus on user value** - Users care about outcomes, not technology
-2. **Anticipate mistakes** - Show confidence, allow corrections
-3. **Start simple** - One use case, nail it, expand
-4. **Make AI transparent** - What it can/can't do, when uncertain
-5. **Build for iteration** - Feedback loops from Day 1
-6. **Design for diverse users** - Beginners and experts
-7. **Control context** - System instructions, user history, RAG
-8. **Optimize for latency** - Streaming, perceived performance
-9. **Safety is non-negotiable** - Input/output filtering, rate limiting
-10. **Measure what matters** - Satisfaction, completion, corrections
 
 ## AI PRD Template Addition
 

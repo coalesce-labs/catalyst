@@ -1,6 +1,6 @@
 ---
 name: debug-production-error
-description: Debug production errors using Sentry error tracking and analysis
+description: "Debug production errors using Sentry MCP tools. Searches issues, analyzes stack traces, identifies root causes, and suggests fixes. Use when the user mentions a Sentry error, production exception, stack trace, error monitoring, crash report, or unhandled exception."
 disable-model-invocation: true
 allowed-tools: Task, TodoWrite
 version: 1.0.0
@@ -34,50 +34,13 @@ Examples:
 
 Uses Sentry MCP tools to:
 
-1. Search for relevant errors
-2. Retrieve stack traces and context
-3. Analyze error patterns and frequency
-4. Identify affected users and environments
-5. Suggest root causes and fixes
+1. **Search** — Find matching issues via `sentry_search_issues` filtered by query, status, or date range
+2. **Retrieve** — Pull stack traces, breadcrumbs, and user context via `sentry_get_issue_details`
+3. **Analyze** — Examine error patterns, frequency, and affected releases
+4. **Diagnose** — Use Seer AI root cause analysis when available; fall back to manual stack trace analysis
+5. **Recommend** — Suggest specific code fixes with file paths and line numbers
 
-## Available Sentry Capabilities
-
-When this plugin is enabled, you have access to ~19 Sentry tools:
-
-**Error Search & Analysis**:
-
-- Search issues by query
-- Filter by status, assignment, date
-- View error trends and patterns
-- Identify new vs recurring errors
-
-**Stack Trace Analysis**:
-
-- Full stack traces with source context
-- Source map resolution
-- Frame-by-frame analysis
-- Variable inspection
-
-**Context & Metadata**:
-
-- User context (who was affected)
-- Environment details
-- Release/deployment information
-- Breadcrumb trail (user actions leading to error)
-
-**Issue Management**:
-
-- Update issue status
-- Assign to team members
-- Link to tickets/PRs
-- Add comments and notes
-
-**Root Cause Analysis** (Seer AI):
-
-- AI-powered root cause identification
-- Code-level explanations
-- Specific fix recommendations
-- Related error patterns
+**Checkpoints:** If no issues match the query, broaden search terms or check the project/environment filter. If Seer analysis is unavailable, proceed with manual analysis.
 
 ## Example Debugging Sessions
 
@@ -104,37 +67,6 @@ When this plugin is enabled, you have access to ~19 Sentry tools:
 ```bash
 /debug-production-error "Show unresolved errors affecting more than 100 users"
 ```
-
-## Output Format
-
-Analysis typically includes:
-
-**Error Overview**:
-
-- Error message and type
-- Frequency and trend
-- First seen / last seen
-- Number of users affected
-
-**Stack Trace**:
-
-- Full call stack
-- Source code context
-- File paths and line numbers
-- Variable values (if available)
-
-**User Context**:
-
-- User ID and properties
-- Browser/device information
-- URL and user actions (breadcrumbs)
-
-**Root Cause** (when Seer analysis available):
-
-- Likely cause explanation
-- Relevant code snippets
-- Specific fix recommendations
-- Related issues
 
 ## Advanced Queries
 

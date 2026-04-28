@@ -1,6 +1,6 @@
 ---
 name: validate-frontmatter
-description: Validate and fix frontmatter consistency across all workflows
+description: "Validate and fix YAML frontmatter consistency across all agent and skill definitions. Checks required fields, validates field types, ensures naming conventions, and auto-fixes common issues. Use when the user asks to check, validate, lint, or fix frontmatter, YAML metadata, or markdown headers in workflow files."
 disable-model-invocation: true
 allowed-tools: Read, Edit, Glob, Grep
 version: 1.0.0
@@ -537,48 +537,6 @@ Next steps:
 4. Reference when creating new workflows
 
 ```
-
-## Advanced Usage
-
-### Validate Specific Workflow
-
-```
-
-/catalyst-meta:validate-frontmatter agents/codebase-analyzer.md
-
-```
-
-Validates just one file.
-
-### Auto-Fix Everything
-
-```
-
-/catalyst-meta:validate-frontmatter --fix
-
-```
-
-Automatically fixes all issues without prompting.
-
-### Generate Report Only
-
-```
-
-/catalyst-meta:validate-frontmatter --report-only > frontmatter-report.md
-
-```
-
-Saves report to file for review.
-
-### Validate by Category
-
-```
-
-/catalyst-meta:validate-frontmatter --category research
-
-```
-
-Only validates workflows in "research" category.
 
 ## Validation Categories
 

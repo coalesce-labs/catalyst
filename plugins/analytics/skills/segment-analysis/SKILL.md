@@ -1,6 +1,6 @@
 ---
 name: segment-analysis
-description: Analyze user segments and cohorts for targeted insights
+description: "Analyze user segments, cohorts, and customer groups using PostHog data. Creates retention tables, compares segment behavior, and generates group breakdowns. Use when the user asks about customer segmentation, cohort retention, user group comparison, churn analysis, or funnel analysis by segment."
 disable-model-invocation: true
 allowed-tools: Task, TodoWrite
 version: 1.0.0
@@ -22,28 +22,13 @@ Examples:
   /segment-analysis "cohort: signed up in Q4 2024"
 ```
 
-## What This Analyzes
+## Workflow
 
-### User Segments
-
-- By plan type (free, pro, enterprise)
-- By geography (country, region)
-- By acquisition source (organic, paid, referral)
-- By behavior (power users, casual users, at-risk)
-
-### Cohort Analysis
-
-- By signup date (monthly, weekly cohorts)
-- By first feature used
-- By activation milestone reached
-- By engagement level
-
-### Comparison Analysis
-
-- Segment A vs Segment B
-- Before/after feature launch
-- Treatment vs control (A/B tests)
-- Time period comparisons
+1. **Define segments** — Identify segment criteria using PostHog properties (plan type, behavior, signup date, or any custom event property)
+2. **Query PostHog** — Retrieve segment data via PostHog MCP tools or HogQL queries
+3. **Compute metrics** — Calculate retention, conversion, engagement, and LTV per segment
+4. **Compare segments** — Generate side-by-side comparisons with statistical significance
+5. **Present findings** — Deliver segment profiles, key differences, and actionable recommendations
 
 ## Example Analyses
 
@@ -87,16 +72,6 @@ Analysis typically includes:
 - **Behavior patterns** unique to segment
 - **Recommendations** for targeting or improvement
 
-## Segmentation Criteria
-
-You can segment by:
-
-- **Demographics**: Country, language, device type
-- **Behavior**: Feature usage, session frequency, engagement score
-- **Business**: Plan type, payment history, LTV
-- **Temporal**: Signup date, last active, tenure
-- **Custom**: Any event or property in PostHog
-
 ## Advanced Analysis
 
 ### Multi-dimensional Segmentation
@@ -116,14 +91,6 @@ You can segment by:
 ```bash
 /segment-analysis "30-day retention by initial feature used"
 ```
-
-## Tips for Better Analysis
-
-1. **Be specific** - Define your segment clearly
-2. **Ask for comparisons** - "vs" between segments reveals insights
-3. **Look for patterns** - What makes segments different?
-4. **Consider time** - Trends over time matter
-5. **Combine criteria** - Multi-dimensional segments can be revealing
 
 ## Context Cost
 
