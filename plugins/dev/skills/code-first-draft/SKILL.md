@@ -1,6 +1,6 @@
 ---
 name: code-first-draft
-description: "Initial feature implementation from a PRD or feature description. **ALWAYS use when** the user wants to build a new feature, implement a PRD, create a first draft of code, or says things like 'build this feature', 'implement this PRD', 'code this up', 'create the initial implementation'. Also use when there's no existing codebase and user needs a standalone reference prototype."
+description: "Scaffolds initial feature implementation from a PRD or feature description using TDD (Red-Green-Refactor). Generates project structure, boilerplate code, tests, and wires up dependencies. **ALWAYS use when** the user wants to build a new feature, implement a PRD, create a first draft of code, or says things like 'build this feature', 'implement this PRD', 'code this up', 'create the initial implementation'. Not for incremental changes or bug fixes. Also use when there's no existing codebase and user needs a standalone reference prototype."
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Grep, Glob, Bash, Task
 version: 1.0.0
