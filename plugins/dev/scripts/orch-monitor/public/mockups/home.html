@@ -282,6 +282,27 @@
         color: var(--color-text-lo);
       }
 
+      /* Hide Queued column when empty; reflow grid to 4 cols */
+      .home-kanban__column[data-column="queued"][data-count="0"] {
+        display: none;
+      }
+      .home-kanban__grid:has(.home-kanban__column[data-column="queued"][data-count="0"]) {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+      @media (max-width: 1200px) {
+        .home-kanban__grid:has(.home-kanban__column[data-column="queued"][data-count="0"]) {
+          grid-template-columns: repeat(4, minmax(200px, 1fr));
+        }
+      }
+
+      /* Done column header: stack title row + pills on separate line */
+      .home-kanban__column[data-column="done"] .home-kanban__column-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--spacing-2);
+      }
+
+
       /* Blocked column goes red when it has items */
       .home-kanban__column[data-column="blocked"]:not([data-count="0"])
         .home-kanban__column-title,
@@ -870,7 +891,8 @@
        * ============================================================ */
 
       .home-done-age {
-        display: inline-flex;
+        display: flex;
+        flex-wrap: wrap;
         gap: var(--spacing-1);
       }
 
