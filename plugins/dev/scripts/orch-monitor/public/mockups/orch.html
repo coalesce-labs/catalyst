@@ -1202,6 +1202,58 @@
         border-color: var(--color-border-subtle);
       }
 
+      /* ------- Worker tabs ------- */
+
+      .worker-tabs {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-4);
+      }
+
+      .worker-tabs__nav {
+        display: flex;
+        gap: 0;
+        border-bottom: 1px solid var(--color-border-subtle);
+      }
+
+      .worker-tabs__btn {
+        padding: var(--spacing-2) var(--spacing-4);
+        background: transparent;
+        border: none;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px;
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        text-transform: uppercase;
+        letter-spacing: var(--letter-spacing-label);
+        color: var(--color-text-lo);
+        cursor: pointer;
+        transition: color 0.1s, border-color 0.1s;
+      }
+
+      .worker-tabs__btn:hover {
+        color: var(--color-text-md);
+      }
+
+      .worker-tabs__btn--active {
+        color: var(--color-text-hi);
+        border-bottom-color: var(--color-accent);
+      }
+
+      [data-system="operator-console"] .worker-tabs__btn--active {
+        color: var(--color-accent);
+      }
+
+      .worker-tab-panel {
+        display: none;
+      }
+
+      [data-tab="kanban"] #tab-panel-kanban,
+      [data-tab="waves"] #tab-panel-waves,
+      [data-tab="quality"] #tab-panel-quality {
+        display: block;
+      }
+
       /* ------- Gantt inside waves section ------- */
 
       .wave-gantt {
@@ -2030,12 +2082,16 @@
               </div>
             </section>
 
-            <!-- ================ WORKER KANBAN ================ -->
-            <section class="orch-section" aria-label="Workers by state">
-              <header class="orch-section__heading">
-                <h2>Workers</h2>
-                <span class="eyebrow">17 total · by state</span>
-              </header>
+            <!-- ================ WORKER TABS ================ -->
+            <div class="worker-tabs" id="worker-tabs" data-tab="kanban">
+              <nav class="worker-tabs__nav" role="tablist" aria-label="Worker views">
+                <button class="worker-tabs__btn worker-tabs__btn--active" data-tab-target="kanban" role="tab" aria-selected="true" aria-controls="tab-panel-kanban">Kanban</button>
+                <button class="worker-tabs__btn" data-tab-target="waves" role="tab" aria-selected="false" aria-controls="tab-panel-waves">Waves</button>
+                <button class="worker-tabs__btn" data-tab-target="quality" role="tab" aria-selected="false" aria-controls="tab-panel-quality">Quality Gates</button>
+              </nav>
+
+              <!-- ── Tab: Kanban ── -->
+              <div class="worker-tab-panel" id="tab-panel-kanban" data-panel="kanban" role="tabpanel" aria-label="Workers by state">
               <div class="worker-kanban">
                 <!-- Queued -->
                 <div class="worker-kanban__col" data-column="queued">
@@ -2162,14 +2218,10 @@
                   </a>
                 </div>
               </div>
-            </section>
 
-            <!-- ================ ZONE 3 — WAVES + GANTT ================ -->
-            <section class="orch-section" aria-label="Waves">
-              <header class="orch-section__heading">
-                <h2>Waves</h2>
-                <span class="eyebrow">3 total · current expanded</span>
-              </header>
+              <!-- ── Tab: Waves ── -->
+              </div>
+              <div class="worker-tab-panel" id="tab-panel-waves" data-panel="waves" role="tabpanel" aria-label="Waves and timeline">
               <div class="wave-stack">
                 <article class="wave-card">
                   <header class="wave-card__header">
@@ -2319,77 +2371,10 @@
                   <span></span>
                 </div>
               </div>
-            </section>
 
-            <!-- ================ COMMS PREVIEW ================ -->
-            <section class="orch-section" aria-label="Comms channel">
-              <header class="orch-section__heading">
-                <h2>Comms</h2>
-                <span class="eyebrow">orch-ctl-ux-apr20 · 14 agents</span>
-                <a class="orch-section__link" href="./comms.html">View all →</a>
-              </header>
-              <ol class="message-list orch-comms-preview" role="list" aria-live="polite">
-                <li class="message-row message--attention" role="listitem">
-                  <div class="message-row__head">
-                    <div class="message-row__author-group">
-                      <span class="message-row__icon" aria-hidden="true">◆</span>
-                      <span class="message-row__author">CTL-145</span>
-                      <span class="chip chip--role-worker">worker</span>
-                      <span class="chip chip--type-attention">attention</span>
-                    </div>
-                    <span class="message-row__ts">17:43:11Z</span>
-                  </div>
-                  <p class="message-row__body">worker failed: type-check errors in chrome.js — 3 fix attempts exhausted, human review required</p>
-                </li>
-                <li class="message-row" role="listitem">
-                  <div class="message-row__head">
-                    <div class="message-row__author-group">
-                      <span class="message-row__author">CTL-138</span>
-                      <span class="chip chip--role-worker">worker</span>
-                      <span class="chip chip--type-info">info</span>
-                    </div>
-                    <span class="message-row__ts">17:41:02Z</span>
-                  </div>
-                  <p class="message-row__body">pr:#244 opened · implementing → shipping</p>
-                </li>
-                <li class="message-row" role="listitem">
-                  <div class="message-row__head">
-                    <div class="message-row__author-group">
-                      <span class="message-row__author">CTL-143</span>
-                      <span class="chip chip--role-worker">worker</span>
-                      <span class="chip chip--type-proposal">proposal</span>
-                    </div>
-                    <span class="message-row__ts">17:39:44Z</span>
-                  </div>
-                  <p class="message-row__body">rebasing before push · sibling workers should pause migrations</p>
-                </li>
-                <li class="message-row" role="listitem">
-                  <div class="message-row__head">
-                    <div class="message-row__author-group">
-                      <span class="message-row__author">CTL-141</span>
-                      <span class="chip chip--role-worker">worker</span>
-                      <span class="chip chip--type-info">info</span>
-                    </div>
-                    <span class="message-row__ts">17:36:20Z</span>
-                  </div>
-                  <p class="message-row__body">researching → planning</p>
-                </li>
-                <li class="message-row" role="listitem">
-                  <div class="message-row__head">
-                    <div class="message-row__author-group">
-                      <span class="message-row__author">orchestrator</span>
-                      <span class="chip chip--role-orch">orch</span>
-                      <span class="chip chip--type-info">info</span>
-                    </div>
-                    <span class="message-row__ts">17:28:00Z</span>
-                  </div>
-                  <p class="message-row__body">dispatching wave 2 · 8 workers · max parallel 5</p>
-                </li>
-              </ol>
-            </section>
-
-            <!-- ================ QUALITY GATES ================ -->
-            <section class="orch-section" aria-label="Quality gates">
+              <!-- ── Tab: Quality Gates ── -->
+              </div>
+              <div class="worker-tab-panel" id="tab-panel-quality" data-panel="quality" role="tabpanel" aria-label="Quality gates">
               <header class="orch-section__heading">
                 <h2>Quality Gates</h2>
                 <span class="eyebrow">per-worker checks · red = skipped or failed</span>
@@ -2496,6 +2481,74 @@
                   <span class="qg-cell qg-cell--status" role="cell"><span class="chip chip--stalled">Stalled</span></span>
                 </a>
               </div>
+            </div><!-- /.worker-tab-panel[quality] -->
+            </div><!-- /.worker-tabs -->
+
+            <!-- ================ COMMS ================ -->
+            <section class="orch-section" aria-label="Comms channel">
+              <header class="orch-section__heading">
+                <h2>Comms</h2>
+                <span class="eyebrow">orch-ctl-ux-apr20 · 14 agents</span>
+                <a class="orch-section__link" href="./comms.html">View all →</a>
+              </header>
+              <ol class="message-list orch-comms-preview" role="list" aria-live="polite">
+                <li class="message-row message--attention" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__icon" aria-hidden="true">◆</span>
+                      <span class="message-row__author">CTL-145</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-attention">attention</span>
+                    </div>
+                    <span class="message-row__ts">17:43:11Z</span>
+                  </div>
+                  <p class="message-row__body">worker failed: type-check errors in chrome.js — 3 fix attempts exhausted, human review required</p>
+                </li>
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">CTL-138</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-info">info</span>
+                    </div>
+                    <span class="message-row__ts">17:41:02Z</span>
+                  </div>
+                  <p class="message-row__body">pr:#244 opened · implementing → shipping</p>
+                </li>
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">CTL-143</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-proposal">proposal</span>
+                    </div>
+                    <span class="message-row__ts">17:39:44Z</span>
+                  </div>
+                  <p class="message-row__body">rebasing before push · sibling workers should pause migrations</p>
+                </li>
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">CTL-141</span>
+                      <span class="chip chip--role-worker">worker</span>
+                      <span class="chip chip--type-info">info</span>
+                    </div>
+                    <span class="message-row__ts">17:36:20Z</span>
+                  </div>
+                  <p class="message-row__body">researching → planning</p>
+                </li>
+                <li class="message-row" role="listitem">
+                  <div class="message-row__head">
+                    <div class="message-row__author-group">
+                      <span class="message-row__author">orchestrator</span>
+                      <span class="chip chip--role-orch">orch</span>
+                      <span class="chip chip--type-info">info</span>
+                    </div>
+                    <span class="message-row__ts">17:28:00Z</span>
+                  </div>
+                  <p class="message-row__body">dispatching wave 2 · 8 workers · max parallel 5</p>
+                </li>
+              </ol>
             </section>
 
           </div>
@@ -2727,6 +2780,33 @@
           chip.addEventListener("click", () => {
             const next = chip.getAttribute("data-group") || "worker";
             panel.setAttribute("data-todos-group", next);
+          });
+        });
+      })();
+
+      // Worker tabs — Kanban / Waves / Quality Gates
+      (function () {
+        const STORAGE_KEY = "catalyst.orch.workerTab";
+        const tabs = document.getElementById("worker-tabs");
+        if (!tabs) return;
+
+        const saved = sessionStorage.getItem(STORAGE_KEY) || "kanban";
+        tabs.setAttribute("data-tab", saved);
+
+        tabs.querySelectorAll(".worker-tabs__btn").forEach((btn) => {
+          const target = btn.dataset.tabTarget;
+          const isActive = target === saved;
+          btn.classList.toggle("worker-tabs__btn--active", isActive);
+          btn.setAttribute("aria-selected", isActive ? "true" : "false");
+
+          btn.addEventListener("click", () => {
+            tabs.setAttribute("data-tab", target);
+            sessionStorage.setItem(STORAGE_KEY, target);
+            tabs.querySelectorAll(".worker-tabs__btn").forEach((b) => {
+              const active = b.dataset.tabTarget === target;
+              b.classList.toggle("worker-tabs__btn--active", active);
+              b.setAttribute("aria-selected", active ? "true" : "false");
+            });
           });
         });
       })();
