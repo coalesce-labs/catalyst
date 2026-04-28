@@ -137,7 +137,21 @@
         background: color-mix(in srgb, var(--color-accent) 12%, transparent);
         border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
       }
-      [data-system="operator-console"] .chip--pr-open,
+      [data-system="operator-console"] .chip--pr-open {
+        color: var(--color-success);
+        background: color-mix(in srgb, var(--color-success) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--pr-merged {
+        color: #b87cff;
+        background: color-mix(in srgb, #b87cff 12%, transparent);
+        border-color: color-mix(in srgb, #b87cff 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--pr-blocked {
+        color: var(--color-danger);
+        background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+      }
       [data-system="operator-console"] .chip--pending {
         color: var(--color-info);
         background: color-mix(in srgb, var(--color-info) 12%, transparent);
@@ -179,7 +193,15 @@
       [data-system="precision-instrument"] .chip--merging::before {
         color: var(--color-accent);
       }
-      [data-system="precision-instrument"] .chip--pr-open::before,
+      [data-system="precision-instrument"] .chip--pr-open::before {
+        color: var(--color-success);
+      }
+      [data-system="precision-instrument"] .chip--pr-merged::before {
+        color: #7c3aed;
+      }
+      [data-system="precision-instrument"] .chip--pr-blocked::before {
+        color: var(--color-danger);
+      }
       [data-system="precision-instrument"] .chip--pending::before {
         color: var(--color-info);
       }
@@ -722,6 +744,122 @@
       .gantt__axis-ticks {
         display: flex;
         justify-content: space-between;
+      }
+
+      /* ------- Worker Kanban ------- */
+
+      .worker-kanban {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: var(--spacing-3);
+        align-items: start;
+      }
+
+      @media (max-width: 1100px) {
+        .worker-kanban {
+          grid-template-columns: repeat(5, minmax(140px, 1fr));
+          overflow-x: auto;
+        }
+      }
+
+      .worker-kanban__col {
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-2);
+        min-width: 0;
+      }
+
+      .worker-kanban__col-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        padding-bottom: var(--spacing-2);
+        border-bottom: 1px solid var(--color-border-subtle);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+      }
+
+      .worker-kanban__col[data-column="blocked"] .worker-kanban__col-header {
+        color: var(--color-danger);
+      }
+
+      .worker-kanban__col-count {
+        font-size: var(--font-size-data);
+        color: var(--color-text-lo);
+      }
+
+      .worker-kanban__card {
+        padding: var(--spacing-3);
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+        cursor: pointer;
+        transition: border-color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .worker-kanban__card:hover {
+        border-color: var(--color-border-strong);
+      }
+
+      [data-system="precision-instrument"] .worker-kanban__card {
+        border-radius: 0;
+      }
+
+      .worker-kanban__card-head {
+        display: flex;
+        align-items: center;
+        gap: var(--spacing-2);
+        flex-wrap: wrap;
+      }
+
+      .worker-kanban__card-name {
+        font-family: var(--font-family-body);
+        font-size: var(--font-size-body);
+        font-weight: var(--font-weight-semibold);
+        color: var(--color-text-hi);
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .worker-kanban__card-todos {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-text-lo);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .worker-kanban__empty {
+        padding: var(--spacing-3);
+        border: 1px dashed var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        color: var(--color-text-lo);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        text-align: center;
+      }
+
+      /* Briefing link in orch head */
+      .orch-head__meta-link {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-accent);
+        text-decoration: none;
+        margin-left: auto;
+      }
+
+      .orch-head__meta-link:hover {
+        text-decoration: underline;
       }
 
       /* ------- Worker table ------- */
@@ -1300,12 +1438,270 @@
             <span><strong>tickets</strong> 17</span>
             <span><strong>auto-merge</strong> armed</span>
             <span><strong>started</strong> 17:15</span>
+            <a href="./briefing.html" class="orch-head__meta-link">Briefing →</a>
           </div>
         </section>
 
         <!-- ================ LAYOUT (main + sidebar) ================ -->
         <div class="layout" id="layout">
           <div class="layout__main">
+
+            <!-- ================ TODOS PANEL (CTL-171) ================ -->
+            <section
+              class="orch-section orch-section--collapsible todos-panel"
+              id="todos-panel"
+              data-collapsed="false"
+              data-todos-group="worker"
+              data-todos-status="all"
+              aria-label="Todos"
+            >
+              <header
+                class="orch-section__heading"
+                id="todos-panel-heading"
+                role="button"
+                tabindex="0"
+                aria-controls="todos-panel-body"
+                aria-expanded="true"
+              >
+                <h2>Todos</h2>
+                <span class="eyebrow">
+                  9 items across 6 workers · <span class="orch-section__toggle-hint">click to collapse</span>
+                </span>
+                <button
+                  type="button"
+                  class="orch-section__toggle"
+                  id="todos-panel-toggle"
+                  aria-controls="todos-panel-body"
+                  aria-expanded="true"
+                >
+                  <span class="orch-section__chevron" aria-hidden="true"></span>
+                  <span class="orch-section__toggle-label">Collapse</span>
+                </button>
+              </header>
+
+              <div class="orch-section__body" id="todos-panel-body">
+                <div class="todos-filter-bar" role="toolbar" aria-label="Todo filters">
+                  <div class="todos-filter__status" role="group" aria-label="Status">
+                    <span class="todos-filter__label">Status</span>
+                    <button type="button" class="filter-chip" data-status="all">All</button>
+                    <button type="button" class="filter-chip" data-status="pending">Pending</button>
+                    <button type="button" class="filter-chip" data-status="in-progress">In progress</button>
+                    <button type="button" class="filter-chip" data-status="completed">Completed</button>
+                  </div>
+                  <div class="todos-filter__group" role="group" aria-label="Grouping">
+                    <span class="todos-filter__label">Group</span>
+                    <button type="button" class="filter-chip" data-group="worker">By worker</button>
+                    <button type="button" class="filter-chip" data-group="flat">Flat</button>
+                  </div>
+                  <input
+                    class="todos-filter__search"
+                    type="search"
+                    placeholder="Search todos in this orch…"
+                    data-search
+                    aria-label="Search todos"
+                  />
+                </div>
+
+                <div class="todos-view" data-group="worker" role="list">
+                  <article class="todos-worker-group" role="listitem">
+                    <header class="todos-worker-group__head">
+                      <span class="chip chip--ticket">CTL-138</span>
+                      <span class="chip chip--merging">Merging</span>
+                      <h3 class="todos-worker-group__name">worker.html mockup</h3>
+                      <div class="todos-worker-group__meta">
+                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-138">
+                          open worker
+                        </a>
+                      </div>
+                    </header>
+                    <ul class="todos-worker-group__list">
+                      <li class="todos-row" data-status="in-progress">
+                        <span class="todos-row__status" aria-label="in progress"></span>
+                        <span class="todos-row__text">
+                          Shipping. Commit, push, create PR, arm auto-merge.
+                        </span>
+                        <span class="todos-row__owner">CTL-138</span>
+                        <span class="todos-row__time">17:41:02</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                      </li>
+                      <li class="todos-row" data-status="pending">
+                        <span class="todos-row__status" aria-label="pending"></span>
+                        <span class="todos-row__text">
+                          Poll <code>gh pr view</code> every 60s until state=MERGED.
+                        </span>
+                        <span class="todos-row__owner">CTL-138</span>
+                        <span class="todos-row__time">17:41:02</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                      </li>
+                      <li class="todos-row" data-status="completed">
+                        <span class="todos-row__status" aria-label="completed"></span>
+                        <span class="todos-row__text">Implement worker.html sections.</span>
+                        <span class="todos-row__owner">CTL-138</span>
+                        <span class="todos-row__time">17:34:18</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                      </li>
+                    </ul>
+                  </article>
+
+                  <article class="todos-worker-group" role="listitem">
+                    <header class="todos-worker-group__head">
+                      <span class="chip chip--ticket">CTL-137</span>
+                      <span class="chip chip--running">Running</span>
+                      <h3 class="todos-worker-group__name">home.html polish</h3>
+                      <div class="todos-worker-group__meta">
+                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-137">
+                          open worker
+                        </a>
+                      </div>
+                    </header>
+                    <ul class="todos-worker-group__list">
+                      <li class="todos-row" data-status="in-progress">
+                        <span class="todos-row__status" aria-label="in progress"></span>
+                        <span class="todos-row__text">
+                          Implement session-centric Kanban columns.
+                        </span>
+                        <span class="todos-row__owner">CTL-137</span>
+                        <span class="todos-row__time">17:42:31</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
+                      </li>
+                      <li class="todos-row" data-status="completed">
+                        <span class="todos-row__status" aria-label="completed"></span>
+                        <span class="todos-row__text">Research project dot design tokens.</span>
+                        <span class="todos-row__owner">CTL-137</span>
+                        <span class="todos-row__time">17:30:07</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
+                      </li>
+                    </ul>
+                  </article>
+
+                  <article class="todos-worker-group" role="listitem">
+                    <header class="todos-worker-group__head">
+                      <span class="chip chip--ticket">CTL-145</span>
+                      <span class="chip chip--ci-fail">CI fail</span>
+                      <h3 class="todos-worker-group__name">keybindings fix</h3>
+                      <div class="todos-worker-group__meta">
+                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-145">
+                          open worker
+                        </a>
+                      </div>
+                    </header>
+                    <ul class="todos-worker-group__list">
+                      <li class="todos-row" data-status="in-progress">
+                        <span class="todos-row__status" aria-label="in progress"></span>
+                        <span class="todos-row__text">
+                          Update keybindings test — expected escape, got tab.
+                        </span>
+                        <span class="todos-row__owner">CTL-145</span>
+                        <span class="todos-row__time">17:38:02</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-145">open</a>
+                      </li>
+                    </ul>
+                  </article>
+
+                  <article class="todos-worker-group" role="listitem">
+                    <header class="todos-worker-group__head">
+                      <span class="chip chip--ticket">CTL-139</span>
+                      <span class="chip chip--needs-me">Needs me</span>
+                      <h3 class="todos-worker-group__name">review thread</h3>
+                      <div class="todos-worker-group__meta">
+                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-139">
+                          open worker
+                        </a>
+                      </div>
+                    </header>
+                    <ul class="todos-worker-group__list">
+                      <li class="todos-row" data-status="pending">
+                        <span class="todos-row__status" aria-label="pending"></span>
+                        <span class="todos-row__text">
+                          Wait for reviewer response on Codex XSS flag.
+                        </span>
+                        <span class="todos-row__owner">CTL-139</span>
+                        <span class="todos-row__time">17:32:44</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
+                      </li>
+                      <li class="todos-row" data-status="completed">
+                        <span class="todos-row__status" aria-label="completed"></span>
+                        <span class="todos-row__text">Draft sanitized query param helper.</span>
+                        <span class="todos-row__owner">CTL-139</span>
+                        <span class="todos-row__time">17:20:18</span>
+                        <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
+                      </li>
+                    </ul>
+                  </article>
+                </div>
+
+                <div class="todos-view" data-group="flat" role="list">
+                  <ul class="todos-worker-group__list" style="gap: var(--spacing-2);">
+                    <li class="todos-row" data-status="in-progress">
+                      <span class="todos-row__status" aria-label="in progress"></span>
+                      <span class="todos-row__text">
+                        Implement session-centric Kanban columns.
+                      </span>
+                      <span class="todos-row__owner">CTL-137</span>
+                      <span class="todos-row__time">17:42:31</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
+                    </li>
+                    <li class="todos-row" data-status="in-progress">
+                      <span class="todos-row__status" aria-label="in progress"></span>
+                      <span class="todos-row__text">
+                        Shipping. Commit, push, create PR, arm auto-merge.
+                      </span>
+                      <span class="todos-row__owner">CTL-138</span>
+                      <span class="todos-row__time">17:41:02</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                    </li>
+                    <li class="todos-row" data-status="pending">
+                      <span class="todos-row__status" aria-label="pending"></span>
+                      <span class="todos-row__text">
+                        Poll <code>gh pr view</code> every 60s until state=MERGED.
+                      </span>
+                      <span class="todos-row__owner">CTL-138</span>
+                      <span class="todos-row__time">17:41:02</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                    </li>
+                    <li class="todos-row" data-status="in-progress">
+                      <span class="todos-row__status" aria-label="in progress"></span>
+                      <span class="todos-row__text">
+                        Update keybindings test — expected escape, got tab.
+                      </span>
+                      <span class="todos-row__owner">CTL-145</span>
+                      <span class="todos-row__time">17:38:02</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-145">open</a>
+                    </li>
+                    <li class="todos-row" data-status="completed">
+                      <span class="todos-row__status" aria-label="completed"></span>
+                      <span class="todos-row__text">Implement worker.html sections.</span>
+                      <span class="todos-row__owner">CTL-138</span>
+                      <span class="todos-row__time">17:34:18</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
+                    </li>
+                    <li class="todos-row" data-status="pending">
+                      <span class="todos-row__status" aria-label="pending"></span>
+                      <span class="todos-row__text">
+                        Wait for reviewer response on Codex XSS flag.
+                      </span>
+                      <span class="todos-row__owner">CTL-139</span>
+                      <span class="todos-row__time">17:32:44</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
+                    </li>
+                    <li class="todos-row" data-status="completed">
+                      <span class="todos-row__status" aria-label="completed"></span>
+                      <span class="todos-row__text">Research project dot design tokens.</span>
+                      <span class="todos-row__owner">CTL-137</span>
+                      <span class="todos-row__time">17:30:07</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
+                    </li>
+                    <li class="todos-row" data-status="completed">
+                      <span class="todos-row__status" aria-label="completed"></span>
+                      <span class="todos-row__text">Draft sanitized query param helper.</span>
+                      <span class="todos-row__owner">CTL-139</span>
+                      <span class="todos-row__time">17:20:18</span>
+                      <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </section>
             <!-- ================ ZONE 1 — ATTENTION BAR ================ -->
             <section class="attention-bar" aria-label="Attention items">
               <header class="attention-bar__head">
@@ -1399,6 +1795,140 @@
                   </dl>
                   <div class="cost-card__provider">Provider · Anthropic · claude-opus-4-7</div>
                 </aside>
+              </div>
+            </section>
+
+            <!-- ================ WORKER KANBAN ================ -->
+            <section class="orch-section" aria-label="Workers by state">
+              <header class="orch-section__heading">
+                <h2>Workers</h2>
+                <span class="eyebrow">17 total · by state</span>
+              </header>
+              <div class="worker-kanban">
+                <!-- Queued -->
+                <div class="worker-kanban__col" data-column="queued">
+                  <div class="worker-kanban__col-header">
+                    <span>Queued</span>
+                    <span class="worker-kanban__col-count">2</span>
+                  </div>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--queued">CTL-151</span>
+                    </div>
+                    <div class="worker-kanban__card-name">chart-zoom-control</div>
+                    <div class="worker-kanban__card-todos">Awaiting dispatch</div>
+                  </a>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--queued">CTL-152</span>
+                    </div>
+                    <div class="worker-kanban__card-name">export-csv-endpoint</div>
+                    <div class="worker-kanban__card-todos">Awaiting dispatch</div>
+                  </a>
+                </div>
+                <!-- Working -->
+                <div class="worker-kanban__col" data-column="working">
+                  <div class="worker-kanban__col-header">
+                    <span>Working</span>
+                    <span class="worker-kanban__col-count">7</span>
+                  </div>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--running">CTL-138</span>
+                    </div>
+                    <div class="worker-kanban__card-name">comms-panel-v2</div>
+                    <div class="worker-kanban__card-todos">▸ Write unit tests for collapse</div>
+                  </a>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--running">CTL-141</span>
+                    </div>
+                    <div class="worker-kanban__card-name">phase-strip-active</div>
+                    <div class="worker-kanban__card-todos">▸ Implement CSS animation</div>
+                  </a>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--running">CTL-142</span>
+                    </div>
+                    <div class="worker-kanban__card-name">kanban-card-heartbeat</div>
+                    <div class="worker-kanban__card-todos">▸ Research brand-heartbeat keyframe</div>
+                  </a>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--running">CTL-147</span>
+                    </div>
+                    <div class="worker-kanban__card-name">worker-detail-layout</div>
+                    <div class="worker-kanban__card-todos">▸ Add phase-strip component</div>
+                  </a>
+                </div>
+                <!-- Review -->
+                <div class="worker-kanban__col" data-column="review">
+                  <div class="worker-kanban__col-header">
+                    <span>Review</span>
+                    <span class="worker-kanban__col-count">3</span>
+                  </div>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--pr-open">● #312</span>
+                      <span class="chip chip--ticket">CTL-143</span>
+                    </div>
+                    <div class="worker-kanban__card-name">attention-bar-tiers</div>
+                    <div class="worker-kanban__card-todos">✓ All todos complete</div>
+                  </a>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--pr-open">● #313</span>
+                      <span class="chip chip--ticket">CTL-145</span>
+                    </div>
+                    <div class="worker-kanban__card-name">keybindings-cheatsheet</div>
+                    <div class="worker-kanban__card-todos">✓ CI awaiting re-run</div>
+                  </a>
+                </div>
+                <!-- Blocked -->
+                <div class="worker-kanban__col" data-column="blocked">
+                  <div class="worker-kanban__col-header">
+                    <span>Blocked</span>
+                    <span class="worker-kanban__col-count">2</span>
+                  </div>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--pr-blocked">● #311</span>
+                      <span class="chip chip--ticket">CTL-140</span>
+                    </div>
+                    <div class="worker-kanban__card-name">cost-panel-drill</div>
+                    <div class="worker-kanban__card-todos">☐ Needs review reply</div>
+                  </a>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--stalled">CTL-148</span>
+                    </div>
+                    <div class="worker-kanban__card-name">stream-tail-probe</div>
+                    <div class="worker-kanban__card-todos">☐ CI failure 3×</div>
+                  </a>
+                </div>
+                <!-- Done -->
+                <div class="worker-kanban__col" data-column="done">
+                  <div class="worker-kanban__col-header">
+                    <span>Done</span>
+                    <span class="worker-kanban__col-count">3</span>
+                  </div>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--pr-merged">● #308</span>
+                      <span class="chip chip--ticket">CTL-137</span>
+                    </div>
+                    <div class="worker-kanban__card-name">orch-heartbeat-css</div>
+                    <div class="worker-kanban__card-todos">✓ Merged</div>
+                  </a>
+                  <a class="worker-kanban__card" href="./worker.html">
+                    <div class="worker-kanban__card-head">
+                      <span class="chip chip--pr-merged">● #309</span>
+                      <span class="chip chip--ticket">CTL-139</span>
+                    </div>
+                    <div class="worker-kanban__card-name">breadcrumb-nav</div>
+                    <div class="worker-kanban__card-todos">✓ Merged</div>
+                  </a>
+                </div>
               </div>
             </section>
 
@@ -1661,262 +2191,6 @@
               </div>
             </section>
 
-            <!-- ================ TODOS PANEL (CTL-171) ================ -->
-            <section
-              class="orch-section orch-section--collapsible todos-panel"
-              id="todos-panel"
-              data-collapsed="true"
-              data-todos-group="worker"
-              data-todos-status="all"
-              aria-label="Todos"
-            >
-              <header
-                class="orch-section__heading"
-                id="todos-panel-heading"
-                role="button"
-                tabindex="0"
-                aria-controls="todos-panel-body"
-                aria-expanded="false"
-              >
-                <h2>Todos</h2>
-                <span class="eyebrow">
-                  9 items across 6 workers · <span class="orch-section__toggle-hint">click to expand</span>
-                </span>
-                <button
-                  type="button"
-                  class="orch-section__toggle"
-                  id="todos-panel-toggle"
-                  aria-controls="todos-panel-body"
-                  aria-expanded="false"
-                >
-                  <span class="orch-section__chevron" aria-hidden="true"></span>
-                  <span class="orch-section__toggle-label">Expand</span>
-                </button>
-              </header>
-
-              <div class="orch-section__body" id="todos-panel-body">
-                <div class="todos-filter-bar" role="toolbar" aria-label="Todo filters">
-                  <div class="todos-filter__status" role="group" aria-label="Status">
-                    <span class="todos-filter__label">Status</span>
-                    <button type="button" class="filter-chip" data-status="all">All</button>
-                    <button type="button" class="filter-chip" data-status="pending">Pending</button>
-                    <button type="button" class="filter-chip" data-status="in-progress">In progress</button>
-                    <button type="button" class="filter-chip" data-status="completed">Completed</button>
-                  </div>
-                  <div class="todos-filter__group" role="group" aria-label="Grouping">
-                    <span class="todos-filter__label">Group</span>
-                    <button type="button" class="filter-chip" data-group="worker">By worker</button>
-                    <button type="button" class="filter-chip" data-group="flat">Flat</button>
-                  </div>
-                  <input
-                    class="todos-filter__search"
-                    type="search"
-                    placeholder="Search todos in this orch…"
-                    data-search
-                    aria-label="Search todos"
-                  />
-                </div>
-
-                <div class="todos-view" data-group="worker" role="list">
-                  <article class="todos-worker-group" role="listitem">
-                    <header class="todos-worker-group__head">
-                      <span class="chip chip--ticket">CTL-138</span>
-                      <span class="chip chip--merging">Merging</span>
-                      <h3 class="todos-worker-group__name">worker.html mockup</h3>
-                      <div class="todos-worker-group__meta">
-                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-138">
-                          open worker
-                        </a>
-                      </div>
-                    </header>
-                    <ul class="todos-worker-group__list">
-                      <li class="todos-row" data-status="in-progress">
-                        <span class="todos-row__status" aria-label="in progress"></span>
-                        <span class="todos-row__text">
-                          Shipping. Commit, push, create PR, arm auto-merge.
-                        </span>
-                        <span class="todos-row__owner">CTL-138</span>
-                        <span class="todos-row__time">17:41:02</span>
-                        <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
-                      </li>
-                      <li class="todos-row" data-status="pending">
-                        <span class="todos-row__status" aria-label="pending"></span>
-                        <span class="todos-row__text">
-                          Poll <code>gh pr view</code> every 60s until state=MERGED.
-                        </span>
-                        <span class="todos-row__owner">CTL-138</span>
-                        <span class="todos-row__time">17:41:02</span>
-                        <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
-                      </li>
-                      <li class="todos-row" data-status="completed">
-                        <span class="todos-row__status" aria-label="completed"></span>
-                        <span class="todos-row__text">Implement worker.html sections.</span>
-                        <span class="todos-row__owner">CTL-138</span>
-                        <span class="todos-row__time">17:34:18</span>
-                        <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
-                      </li>
-                    </ul>
-                  </article>
-
-                  <article class="todos-worker-group" role="listitem">
-                    <header class="todos-worker-group__head">
-                      <span class="chip chip--ticket">CTL-137</span>
-                      <span class="chip chip--running">Running</span>
-                      <h3 class="todos-worker-group__name">home.html polish</h3>
-                      <div class="todos-worker-group__meta">
-                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-137">
-                          open worker
-                        </a>
-                      </div>
-                    </header>
-                    <ul class="todos-worker-group__list">
-                      <li class="todos-row" data-status="in-progress">
-                        <span class="todos-row__status" aria-label="in progress"></span>
-                        <span class="todos-row__text">
-                          Implement session-centric Kanban columns.
-                        </span>
-                        <span class="todos-row__owner">CTL-137</span>
-                        <span class="todos-row__time">17:42:31</span>
-                        <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
-                      </li>
-                      <li class="todos-row" data-status="completed">
-                        <span class="todos-row__status" aria-label="completed"></span>
-                        <span class="todos-row__text">Research project dot design tokens.</span>
-                        <span class="todos-row__owner">CTL-137</span>
-                        <span class="todos-row__time">17:30:07</span>
-                        <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
-                      </li>
-                    </ul>
-                  </article>
-
-                  <article class="todos-worker-group" role="listitem">
-                    <header class="todos-worker-group__head">
-                      <span class="chip chip--ticket">CTL-145</span>
-                      <span class="chip chip--ci-fail">CI fail</span>
-                      <h3 class="todos-worker-group__name">keybindings fix</h3>
-                      <div class="todos-worker-group__meta">
-                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-145">
-                          open worker
-                        </a>
-                      </div>
-                    </header>
-                    <ul class="todos-worker-group__list">
-                      <li class="todos-row" data-status="in-progress">
-                        <span class="todos-row__status" aria-label="in progress"></span>
-                        <span class="todos-row__text">
-                          Update keybindings test — expected escape, got tab.
-                        </span>
-                        <span class="todos-row__owner">CTL-145</span>
-                        <span class="todos-row__time">17:38:02</span>
-                        <a class="todos-row__open" href="./worker.html?ticket=CTL-145">open</a>
-                      </li>
-                    </ul>
-                  </article>
-
-                  <article class="todos-worker-group" role="listitem">
-                    <header class="todos-worker-group__head">
-                      <span class="chip chip--ticket">CTL-139</span>
-                      <span class="chip chip--needs-me">Needs me</span>
-                      <h3 class="todos-worker-group__name">review thread</h3>
-                      <div class="todos-worker-group__meta">
-                        <a class="todos-worker-group__open" href="./worker.html?ticket=CTL-139">
-                          open worker
-                        </a>
-                      </div>
-                    </header>
-                    <ul class="todos-worker-group__list">
-                      <li class="todos-row" data-status="pending">
-                        <span class="todos-row__status" aria-label="pending"></span>
-                        <span class="todos-row__text">
-                          Wait for reviewer response on Codex XSS flag.
-                        </span>
-                        <span class="todos-row__owner">CTL-139</span>
-                        <span class="todos-row__time">17:32:44</span>
-                        <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
-                      </li>
-                      <li class="todos-row" data-status="completed">
-                        <span class="todos-row__status" aria-label="completed"></span>
-                        <span class="todos-row__text">Draft sanitized query param helper.</span>
-                        <span class="todos-row__owner">CTL-139</span>
-                        <span class="todos-row__time">17:20:18</span>
-                        <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
-                      </li>
-                    </ul>
-                  </article>
-                </div>
-
-                <div class="todos-view" data-group="flat" role="list">
-                  <ul class="todos-worker-group__list" style="gap: var(--spacing-2);">
-                    <li class="todos-row" data-status="in-progress">
-                      <span class="todos-row__status" aria-label="in progress"></span>
-                      <span class="todos-row__text">
-                        Implement session-centric Kanban columns.
-                      </span>
-                      <span class="todos-row__owner">CTL-137</span>
-                      <span class="todos-row__time">17:42:31</span>
-                      <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
-                    </li>
-                    <li class="todos-row" data-status="in-progress">
-                      <span class="todos-row__status" aria-label="in progress"></span>
-                      <span class="todos-row__text">
-                        Shipping. Commit, push, create PR, arm auto-merge.
-                      </span>
-                      <span class="todos-row__owner">CTL-138</span>
-                      <span class="todos-row__time">17:41:02</span>
-                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
-                    </li>
-                    <li class="todos-row" data-status="pending">
-                      <span class="todos-row__status" aria-label="pending"></span>
-                      <span class="todos-row__text">
-                        Poll <code>gh pr view</code> every 60s until state=MERGED.
-                      </span>
-                      <span class="todos-row__owner">CTL-138</span>
-                      <span class="todos-row__time">17:41:02</span>
-                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
-                    </li>
-                    <li class="todos-row" data-status="in-progress">
-                      <span class="todos-row__status" aria-label="in progress"></span>
-                      <span class="todos-row__text">
-                        Update keybindings test — expected escape, got tab.
-                      </span>
-                      <span class="todos-row__owner">CTL-145</span>
-                      <span class="todos-row__time">17:38:02</span>
-                      <a class="todos-row__open" href="./worker.html?ticket=CTL-145">open</a>
-                    </li>
-                    <li class="todos-row" data-status="completed">
-                      <span class="todos-row__status" aria-label="completed"></span>
-                      <span class="todos-row__text">Implement worker.html sections.</span>
-                      <span class="todos-row__owner">CTL-138</span>
-                      <span class="todos-row__time">17:34:18</span>
-                      <a class="todos-row__open" href="./worker.html?ticket=CTL-138">open</a>
-                    </li>
-                    <li class="todos-row" data-status="pending">
-                      <span class="todos-row__status" aria-label="pending"></span>
-                      <span class="todos-row__text">
-                        Wait for reviewer response on Codex XSS flag.
-                      </span>
-                      <span class="todos-row__owner">CTL-139</span>
-                      <span class="todos-row__time">17:32:44</span>
-                      <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
-                    </li>
-                    <li class="todos-row" data-status="completed">
-                      <span class="todos-row__status" aria-label="completed"></span>
-                      <span class="todos-row__text">Research project dot design tokens.</span>
-                      <span class="todos-row__owner">CTL-137</span>
-                      <span class="todos-row__time">17:30:07</span>
-                      <a class="todos-row__open" href="./worker.html?ticket=CTL-137">open</a>
-                    </li>
-                    <li class="todos-row" data-status="completed">
-                      <span class="todos-row__status" aria-label="completed"></span>
-                      <span class="todos-row__text">Draft sanitized query param helper.</span>
-                      <span class="todos-row__owner">CTL-139</span>
-                      <span class="todos-row__time">17:20:18</span>
-                      <a class="todos-row__open" href="./worker.html?ticket=CTL-139">open</a>
-                    </li>
-                  </ul>
-                </div>
-              </div>
-            </section>
           </div>
 
           <!-- ================ EVENTS SIDEBAR ================ -->

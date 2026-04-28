@@ -18,10 +18,12 @@
       (function () {
         const LS_KEY = "catalyst.mockup.prefs";
         const RECENCY_KEY = "catalyst.home.recencyDays";
-        const DEFAULTS = { system: "operator-console", recencyDays: 3 };
+        const VIEW_KEY = "catalyst.home.view";
+        const PROJECT_KEY = "catalyst.home.project";
+        const DEFAULTS = { system: "operator-console", recency: "3d", view: "all", project: "all" };
         const SYSTEMS = ["operator-console", "precision-instrument"];
         const STATES = ["default", "loading", "empty", "error"];
-        const RECENCY_DAYS = [1, 3, 7, 30];
+        const RECENCY_VALS = ["1h", "24h", "2d", "3d", "7d", "14d", "30d"];
         const url = new URLSearchParams(window.location.search);
         let stored = {};
         try {
@@ -29,13 +31,14 @@
         } catch (_e) {
           stored = {};
         }
-        let recency = parseInt(
-          url.get("recency") || window.localStorage.getItem(RECENCY_KEY) || "",
-          10,
-        );
-        if (!RECENCY_DAYS.includes(recency)) recency = DEFAULTS.recencyDays;
-        document.documentElement.setAttribute("data-recency", String(recency));
-        window.__catalystHomePrefs = { recencyDays: recency };
+        let recency = url.get("recency") || window.localStorage.getItem(RECENCY_KEY) || "";
+        if (!RECENCY_VALS.includes(recency)) recency = DEFAULTS.recency;
+        const view = url.get("view") || window.localStorage.getItem(VIEW_KEY) || DEFAULTS.view;
+        const project = url.get("project") || window.localStorage.getItem(PROJECT_KEY) || DEFAULTS.project;
+        document.documentElement.setAttribute("data-recency", recency);
+        document.documentElement.setAttribute("data-view", view);
+        document.documentElement.setAttribute("data-project", project);
+        window.__catalystHomePrefs = { recency, view, project };
         const candidate = url.get("system") || stored.system || DEFAULTS.system;
         const system = SYSTEMS.includes(candidate) ? candidate : DEFAULTS.system;
         const stateCandidate = url.get("state") || "default";
@@ -591,9 +594,19 @@
         border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
       }
       [data-system="operator-console"] .chip--pr-open {
-        color: var(--color-info);
-        background: color-mix(in srgb, var(--color-info) 12%, transparent);
-        border-color: color-mix(in srgb, var(--color-info) 40%, transparent);
+        color: var(--color-success);
+        background: color-mix(in srgb, var(--color-success) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-success) 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--pr-merged {
+        color: #b87cff;
+        background: color-mix(in srgb, #b87cff 12%, transparent);
+        border-color: color-mix(in srgb, #b87cff 40%, transparent);
+      }
+      [data-system="operator-console"] .chip--pr-blocked {
+        color: var(--color-danger);
+        background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+        border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
       }
       [data-system="operator-console"] .chip--merged {
         color: var(--color-success);
@@ -636,7 +649,13 @@
         color: var(--color-accent);
       }
       [data-system="precision-instrument"] .chip--pr-open::before {
-        color: var(--color-info);
+        color: var(--color-success);
+      }
+      [data-system="precision-instrument"] .chip--pr-merged::before {
+        color: #7c3aed;
+      }
+      [data-system="precision-instrument"] .chip--pr-blocked::before {
+        color: var(--color-danger);
       }
       [data-system="precision-instrument"] .chip--merged::before {
         color: var(--color-success);
@@ -706,6 +725,189 @@
         font-variant-numeric: tabular-nums;
         display: flex;
         gap: var(--spacing-3);
+      }
+
+      /* ============================================================
+       * View toggle (Orchestrators / Solo / All)
+       * ============================================================ */
+
+      .home-board-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: var(--spacing-3);
+      }
+
+      .home-view-toggle {
+        display: inline-flex;
+        gap: var(--spacing-1);
+        background: var(--color-surface-2);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-full);
+        padding: 2px;
+      }
+
+      [data-system="precision-instrument"] .home-view-toggle {
+        border-radius: 0;
+      }
+
+      .home-view-toggle__btn {
+        padding: var(--spacing-1) var(--spacing-3);
+        background: transparent;
+        border: 1px solid transparent;
+        border-radius: var(--radius-full);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-md);
+        cursor: pointer;
+        transition:
+          background var(--motion-duration-state) var(--motion-easing-standard),
+          color var(--motion-duration-state) var(--motion-easing-standard),
+          border-color var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      [data-system="precision-instrument"] .home-view-toggle__btn {
+        border-radius: 0;
+      }
+
+      .home-view-toggle__btn--active,
+      .home-view-toggle__btn:hover {
+        background: var(--color-surface-3);
+        color: var(--color-text-hi);
+        border-color: var(--color-border-default);
+      }
+
+      [data-system="operator-console"] .home-view-toggle__btn--active {
+        background: var(--color-surface-3);
+        border-color: var(--color-border-strong);
+        color: var(--color-accent);
+      }
+
+      /* Hide cards by view */
+      [data-view="orch"] .home-card[data-kind="solo"] { display: none; }
+      [data-view="solo"] .home-card[data-kind="orch"] { display: none; }
+
+      /* Recount when filtered — handled in JS */
+
+      /* ============================================================
+       * Project filter
+       * ============================================================ */
+
+      .home-project-filter {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-2);
+      }
+
+      .home-project-filter__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .home-project-filter__chips {
+        display: inline-flex;
+        gap: var(--spacing-1);
+      }
+
+      .home-project-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--spacing-1);
+        padding: var(--spacing-1) var(--spacing-2);
+        background: transparent;
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-full);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        color: var(--color-text-md);
+        cursor: pointer;
+        transition:
+          border-color var(--motion-duration-state) var(--motion-easing-standard),
+          color var(--motion-duration-state) var(--motion-easing-standard),
+          background var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      [data-system="precision-instrument"] .home-project-chip {
+        border-radius: 0;
+      }
+
+      .home-project-chip:hover,
+      .home-project-chip--active {
+        border-color: var(--color-border-strong);
+        color: var(--color-text-hi);
+      }
+
+      [data-system="operator-console"] .home-project-chip--active {
+        background: var(--color-surface-2);
+        border-color: var(--color-accent);
+        color: var(--color-accent);
+      }
+
+      .home-project-chip__dot {
+        width: 6px;
+        height: 6px;
+        border-radius: var(--radius-full);
+        flex-shrink: 0;
+      }
+
+      /* Hide cards not matching the active project */
+      [data-project="catalyst"] .home-card:not([data-project="catalyst"]) { display: none; }
+      [data-project="adva"] .home-card:not([data-project="adva"]) { display: none; }
+      [data-project="bravo"] .home-card:not([data-project="bravo"]) { display: none; }
+      [data-project="infra"] .home-card:not([data-project="infra"]) { display: none; }
+      [data-project="internal"] .home-card:not([data-project="internal"]) { display: none; }
+      [data-project="experiments"] .home-card:not([data-project="experiments"]) { display: none; }
+
+      /* ============================================================
+       * Done-age selector (replaces recently-completed strip)
+       * ============================================================ */
+
+      .home-done-age {
+        display: inline-flex;
+        gap: var(--spacing-1);
+      }
+
+      .home-done-age__chip {
+        padding: 2px var(--spacing-2);
+        background: transparent;
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-full);
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        color: var(--color-text-lo);
+        cursor: pointer;
+        transition:
+          border-color var(--motion-duration-state) var(--motion-easing-standard),
+          color var(--motion-duration-state) var(--motion-easing-standard),
+          background var(--motion-duration-state) var(--motion-easing-standard);
+      }
+
+      .home-done-age__chip:hover {
+        color: var(--color-text-hi);
+        border-color: var(--color-border-default);
+      }
+
+      .home-done-age__chip--active {
+        background: var(--color-surface-2);
+        border-color: var(--color-border-default);
+        color: var(--color-text-hi);
+      }
+
+      [data-system="operator-console"] .home-done-age__chip--active {
+        border-color: var(--color-accent);
+        color: var(--color-accent);
+      }
+
+      [data-system="precision-instrument"] .home-done-age__chip {
+        border-radius: 0;
       }
 
       /* Recency filter chips (on Recently completed section heading) */
@@ -946,7 +1148,6 @@
         display: flex;
       }
       [data-state="empty"] .home-attention,
-      [data-state="empty"] .home-section--completed,
       [data-state="empty"] .home-section__count {
         display: none;
       }
@@ -961,7 +1162,6 @@
         display: flex;
       }
       [data-state="error"] .home-attention,
-      [data-state="error"] .home-section--completed,
       [data-state="error"] .home-section__count {
         display: none;
       }
@@ -1013,6 +1213,33 @@
              of their workers occupies.
              ============================================================ -->
         <section class="home-kanban" aria-label="Active sessions by state">
+          <!-- Board header: view toggle + project filter -->
+          <div class="home-board-header">
+            <div role="group" aria-label="Board view" class="home-view-toggle">
+              <button type="button" class="home-view-toggle__btn home-view-toggle__btn--active" data-view-target="all">All</button>
+              <button type="button" class="home-view-toggle__btn" data-view-target="orch">Orchestrators</button>
+              <button type="button" class="home-view-toggle__btn" data-view-target="solo">Solo workers</button>
+            </div>
+            <div class="home-project-filter" role="group" aria-label="Project filter">
+              <span class="home-project-filter__label">Project</span>
+              <div class="home-project-filter__chips">
+                <button type="button" class="home-project-chip home-project-chip--active" data-project-target="all">All</button>
+                <button type="button" class="home-project-chip" data-project-target="catalyst" style="--dot-color:#9b7cff">
+                  <span class="home-project-chip__dot" style="background:#9b7cff"></span>Catalyst
+                </button>
+                <button type="button" class="home-project-chip" data-project-target="adva" style="--dot-color:#47c4d3">
+                  <span class="home-project-chip__dot" style="background:#47c4d3"></span>Adva
+                </button>
+                <button type="button" class="home-project-chip" data-project-target="bravo" style="--dot-color:#6aa6ff">
+                  <span class="home-project-chip__dot" style="background:#6aa6ff"></span>Bravo
+                </button>
+                <button type="button" class="home-project-chip" data-project-target="internal" style="--dot-color:#ffb547">
+                  <span class="home-project-chip__dot" style="background:#ffb547"></span>Internal
+                </button>
+              </div>
+            </div>
+          </div>
+
           <!-- default variant -->
           <div class="home-kanban__grid" data-variant="default" role="list">
             <!-- ────────────────────────── Queued ────────────────────────── -->
@@ -1026,6 +1253,7 @@
                   class="home-card"
                   data-column="queued"
                   data-kind="solo"
+                  data-project="infra"
                   role="listitem"
                   style="--project-color: #8a97a4"
                 >
@@ -1077,6 +1305,7 @@
                   class="home-card home-card--tier-0"
                   data-column="working"
                   data-kind="orch"
+                  data-project="catalyst"
                   role="listitem"
                   style="--project-color: #9b7cff"
                 >
@@ -1133,6 +1362,7 @@
                   class="home-card"
                   data-column="working"
                   data-kind="orch"
+                  data-project="adva"
                   role="listitem"
                   style="--project-color: #47c4d3"
                 >
@@ -1181,6 +1411,7 @@
                   class="home-card"
                   data-column="working"
                   data-kind="solo"
+                  data-project="internal"
                   role="listitem"
                   style="--project-color: #ffb547"
                 >
@@ -1223,6 +1454,7 @@
                   class="home-card"
                   data-column="working"
                   data-kind="solo"
+                  data-project="experiments"
                   role="listitem"
                   style="--project-color: #ff6fa5"
                 >
@@ -1265,6 +1497,7 @@
                   class="home-card"
                   data-column="working"
                   data-kind="solo"
+                  data-project="bravo"
                   role="listitem"
                   style="--project-color: #6aa6ff"
                 >
@@ -1316,6 +1549,7 @@
                   class="home-card"
                   data-column="review"
                   data-kind="orch"
+                  data-project="catalyst"
                   role="listitem"
                   style="--project-color: #9b7cff"
                 >
@@ -1364,6 +1598,7 @@
                   class="home-card"
                   data-column="review"
                   data-kind="solo"
+                  data-project="adva"
                   role="listitem"
                   style="--project-color: #47c4d3"
                 >
@@ -1383,7 +1618,7 @@
                     <span style="width: 100%"></span>
                   </div>
                   <div class="home-card__chips" role="group" aria-label="Status">
-                    <span class="chip chip--pr-open">PR open</span>
+                    <span class="chip chip--pr-open">● #239</span>
                     <span class="chip chip--ticket">CTL-118</span>
                   </div>
                   <footer class="home-card__footer">
@@ -1415,6 +1650,7 @@
                   class="home-card home-card--needs-me"
                   data-column="blocked"
                   data-kind="orch"
+                  data-project="internal"
                   role="listitem"
                   style="--project-color: #ffb547"
                 >
@@ -1469,13 +1705,22 @@
             <div class="home-kanban__column" data-column="done" data-count="3">
               <header class="home-kanban__column-header">
                 <span class="home-kanban__column-title">Done</span>
-                <span class="home-kanban__column-count">3</span>
+                <div class="home-done-age" role="group" aria-label="Done age filter">
+                  <button type="button" class="home-done-age__chip" data-recency="1h">1h</button>
+                  <button type="button" class="home-done-age__chip" data-recency="24h">24h</button>
+                  <button type="button" class="home-done-age__chip" data-recency="2d">2d</button>
+                  <button type="button" class="home-done-age__chip home-done-age__chip--active" data-recency="3d">3d</button>
+                  <button type="button" class="home-done-age__chip" data-recency="7d">7d</button>
+                  <button type="button" class="home-done-age__chip" data-recency="14d">14d</button>
+                  <button type="button" class="home-done-age__chip" data-recency="30d">30d</button>
+                </div>
               </header>
               <div class="home-kanban__column-body">
                 <article
                   class="home-card"
                   data-column="done"
                   data-kind="solo"
+                  data-project="catalyst"
                   role="listitem"
                   style="--project-color: #9b7cff"
                 >
@@ -1495,7 +1740,7 @@
                     <span style="width: 100%"></span>
                   </div>
                   <div class="home-card__chips" role="group" aria-label="Status">
-                    <span class="chip chip--merged">Merged</span>
+                    <span class="chip chip--pr-merged">● #241</span>
                     <span class="chip chip--ticket">CTL-214</span>
                   </div>
                   <footer class="home-card__footer">
@@ -1518,6 +1763,7 @@
                   class="home-card"
                   data-column="done"
                   data-kind="orch"
+                  data-project="bravo"
                   role="listitem"
                   style="--project-color: #6aa6ff"
                 >
@@ -1562,6 +1808,7 @@
                   class="home-card"
                   data-column="done"
                   data-kind="solo"
+                  data-project="adva"
                   role="listitem"
                   style="--project-color: #47c4d3"
                 >
@@ -1581,7 +1828,7 @@
                     <span style="width: 100%"></span>
                   </div>
                   <div class="home-card__chips" role="group" aria-label="Status">
-                    <span class="chip chip--merged">Merged</span>
+                    <span class="chip chip--pr-merged">● #240</span>
                     <span class="chip chip--ticket">ADV-401</span>
                   </div>
                   <footer class="home-card__footer">
@@ -1833,380 +2080,77 @@
           </div>
         </section>
 
-        <!-- ============================================================
-             SOLO WORKERS
-             ============================================================ -->
-        <section class="home-section">
-          <header class="home-section__heading">
-            <div class="home-section__title">
-              <h2>Solo workers</h2>
-              <span class="home-section__count">3 running</span>
-            </div>
-            <span class="eyebrow">Standalone</span>
-          </header>
-
-          <!-- default variant -->
-          <div class="home-card-grid" data-variant="default" role="list">
-            <article class="home-card" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">release-notes-gen</h3>
-                <span class="home-card__kind">Solo worker</span>
-              </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">Phase 3 · implement</span>
-                <span class="home-card__progress">14 / 18</span>
-              </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span style="width: 78%"></span>
-              </div>
-              <div class="home-card__chips">
-                <span class="chip chip--running">Running</span>
-                <span class="chip chip--ticket">CTL-219</span>
-              </div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">cost</span>
-                  <span class="home-card__footer-value">$0.24</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">heartbeat</span>
-                  <span class="home-card__footer-value">12s ago</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">PR</span>
-                  <span class="home-card__footer-value">—</span>
-                </span>
-              </footer>
-            </article>
-
-            <article class="home-card home-card--tier-1" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">rename-scope-refactor</h3>
-                <span class="home-card__kind">Solo worker</span>
-              </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">Phase 2 · plan</span>
-                <span class="home-card__progress">6 / 18</span>
-              </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span style="width: 33%"></span>
-              </div>
-              <div class="home-card__chips">
-                <span class="chip chip--running chip-glyph chip-glyph--stale">Stalled</span>
-                <span class="chip chip--ticket">CTL-214</span>
-              </div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">cost</span>
-                  <span class="home-card__footer-value">$0.18</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">heartbeat</span>
-                  <span class="home-card__footer-value">12m ago</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">PR</span>
-                  <span class="home-card__footer-value">—</span>
-                </span>
-              </footer>
-            </article>
-
-            <article class="home-card" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">otel-panel-cleanup</h3>
-                <span class="home-card__kind">Solo worker</span>
-              </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">Phase 5 · ship</span>
-                <span class="home-card__progress">17 / 18</span>
-              </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span style="width: 94%"></span>
-              </div>
-              <div class="home-card__chips">
-                <span class="chip chip--pr-open">PR open</span>
-                <span class="chip chip--ticket">CTL-118</span>
-              </div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">cost</span>
-                  <span class="home-card__footer-value">$0.47</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">heartbeat</span>
-                  <span class="home-card__footer-value">3s ago</span>
-                </span>
-                <span class="home-card__footer-item">
-                  <span class="home-card__footer-label">PR</span>
-                  <span class="home-card__footer-value">#239</span>
-                </span>
-              </footer>
-            </article>
-          </div>
-
-          <!-- loading variant -->
-          <div class="home-card-grid" data-variant="loading" role="list" aria-hidden="true">
-            <article class="home-card home-card--skeleton" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">loading</h3>
-                <span class="home-card__kind">loading</span>
-              </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">loading</span>
-                <span class="home-card__progress">loading</span>
-              </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span></span>
-              </div>
-              <div class="home-card__chips">loading</div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-              </footer>
-            </article>
-            <article class="home-card home-card--skeleton" role="listitem">
-              <header class="home-card__header">
-                <h3 class="home-card__title">loading</h3>
-                <span class="home-card__kind">loading</span>
-              </header>
-              <div class="home-card__meta">
-                <span class="home-card__stage">loading</span>
-                <span class="home-card__progress">loading</span>
-              </div>
-              <div class="home-card__bar" aria-hidden="true">
-                <span></span>
-              </div>
-              <div class="home-card__chips">loading</div>
-              <footer class="home-card__footer">
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-                <span class="home-card__footer-item">loading</span>
-              </footer>
-            </article>
-          </div>
-
-          <!-- empty variant -->
-          <div class="home-empty" data-variant="empty">
-            <span class="home-empty__title">No standalone agents</span>
-            <p class="home-empty__body">
-              Solo workers run one agent against one ticket. Dispatch one directly from a worktree
-              or let an orchestrator fan them out.
-            </p>
-            <span class="home-empty__hint">/catalyst-dev:oneshot CTL-123</span>
-          </div>
-
-          <!-- error variant -->
-          <div class="home-error" data-variant="error">
-            <span class="home-error__title">Could not reach the monitor</span>
-            <p class="home-error__body">
-              Solo-worker state is derived from the same stream. See the orchestrators section
-              above for the retry line.
-            </p>
-            <code class="home-error__line">GET /api/workers → 503 service unavailable · 12:41:08</code>
-          </div>
-        </section>
-
-        <!-- ============================================================
-             RECENTLY COMPLETED
-             Hidden in empty + error states.
-             ============================================================ -->
-        <section class="home-section home-section--completed" data-recency="3">
-          <header class="home-section__heading">
-            <div class="home-section__title">
-              <h2>Recently completed</h2>
-              <span class="home-section__count">Last window</span>
-            </div>
-            <div class="home-recency" role="group" aria-label="Recency window">
-              <button type="button" class="home-recency__chip" data-days="1">1d</button>
-              <button
-                type="button"
-                class="home-recency__chip home-recency__chip--active"
-                data-days="3"
-                aria-pressed="true"
-              >
-                3d
-              </button>
-              <button type="button" class="home-recency__chip" data-days="7">7d</button>
-              <button type="button" class="home-recency__chip" data-days="30">30d</button>
-            </div>
-          </header>
-
-          <div class="home-strip" data-variant="default" role="list">
-            <div class="home-strip__item" role="listitem" data-age-days="0">
-              <div class="home-strip__top">
-                <span class="home-strip__name">brand-showcase</span>
-                <span class="chip chip--merged">Shipped</span>
-              </div>
-              <div class="home-strip__meta">
-                <span>CTL-126</span>
-                <span>#243</span>
-                <span>6m ago</span>
-              </div>
-            </div>
-            <div class="home-strip__item" role="listitem" data-age-days="0">
-              <div class="home-strip__top">
-                <span class="home-strip__name">mockup-gallery</span>
-                <span class="chip chip--merged">Shipped</span>
-              </div>
-              <div class="home-strip__meta">
-                <span>CTL-125</span>
-                <span>#242</span>
-                <span>24m ago</span>
-              </div>
-            </div>
-            <div class="home-strip__item" role="listitem" data-age-days="0">
-              <div class="home-strip__top">
-                <span class="home-strip__name">tokens-package</span>
-                <span class="chip chip--merged">Shipped</span>
-              </div>
-              <div class="home-strip__meta">
-                <span>CTL-123</span>
-                <span>#241</span>
-                <span>1h ago</span>
-              </div>
-            </div>
-            <div class="home-strip__item" role="listitem" data-age-days="2">
-              <div class="home-strip__top">
-                <span class="home-strip__name">otel-panels</span>
-                <span class="chip chip--merged">Shipped</span>
-              </div>
-              <div class="home-strip__meta">
-                <span>CTL-118</span>
-                <span>#239</span>
-                <span>2d ago</span>
-              </div>
-            </div>
-            <div class="home-strip__item" role="listitem" data-age-days="3">
-              <div class="home-strip__top">
-                <span class="home-strip__name">release-main</span>
-                <span class="chip chip--merged">Shipped</span>
-              </div>
-              <div class="home-strip__meta">
-                <span>—</span>
-                <span>#240</span>
-                <span>3d ago</span>
-              </div>
-            </div>
-            <div class="home-strip__item" role="listitem" data-age-days="5">
-              <div class="home-strip__top">
-                <span class="home-strip__name">doc-portal-refresh</span>
-                <span class="chip chip--merged">Shipped</span>
-              </div>
-              <div class="home-strip__meta">
-                <span>CTL-102</span>
-                <span>#231</span>
-                <span>5d ago</span>
-              </div>
-            </div>
-            <div class="home-strip__item" role="listitem" data-age-days="14">
-              <div class="home-strip__top">
-                <span class="home-strip__name">cost-mux-v1</span>
-                <span class="chip chip--merged">Shipped</span>
-              </div>
-              <div class="home-strip__meta">
-                <span>CTL-88</span>
-                <span>#202</span>
-                <span>2w ago</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="home-strip" data-variant="loading" aria-hidden="true">
-            <div class="home-strip__item">
-              <div class="home-strip__top">
-                <span class="home-strip__name" style="background:var(--color-surface-3);color:transparent">loading</span>
-              </div>
-              <div class="home-strip__meta">
-                <span style="background:var(--color-surface-3);color:transparent">loading</span>
-              </div>
-            </div>
-            <div class="home-strip__item">
-              <div class="home-strip__top">
-                <span class="home-strip__name" style="background:var(--color-surface-3);color:transparent">loading</span>
-              </div>
-              <div class="home-strip__meta">
-                <span style="background:var(--color-surface-3);color:transparent">loading</span>
-              </div>
-            </div>
-            <div class="home-strip__item">
-              <div class="home-strip__top">
-                <span class="home-strip__name" style="background:var(--color-surface-3);color:transparent">loading</span>
-              </div>
-              <div class="home-strip__meta">
-                <span style="background:var(--color-surface-3);color:transparent">loading</span>
-              </div>
-            </div>
-          </div>
-        </section>
 
         <div class="footer">
           <p>
-            Try
-            <code>?state=loading</code>
-            ,
-            <code>?state=empty</code>
-            , or
-            <code>?state=error</code>
-            to inspect the alternate views. Flip the switcher for Precision Instrument. Recency
-            chip persists to
-            <code>localStorage["catalyst.home.recencyDays"]</code>
-            .
+            Use the view toggle to filter by session type. Use the project filter to scope by project.
+            Done-age selector in the Done column header controls how far back completed sessions appear.
+            Try <code>?state=loading</code>, <code>?state=empty</code>, or <code>?state=error</code>.
           </p>
         </div>
 
         <script>
-          // Recency filter — wires the chips in .home-recency to persist the chosen window
-          // to localStorage, mirror the current selection onto .home-section--completed, and
-          // update the visible count. The pre-paint bootstrap already read the stored value
-          // onto html[data-recency], so this script syncs the existing DOM to that value on
-          // load and responds to user clicks thereafter.
           (function () {
+            const LS_KEY = "catalyst.mockup.prefs";
+            const VIEW_KEY = "catalyst.home.view";
+            const PROJECT_KEY = "catalyst.home.project";
             const RECENCY_KEY = "catalyst.home.recencyDays";
-            const VALID = new Set([1, 3, 7, 30]);
-            const section = document.querySelector(".home-section--completed");
-            const chips = document.querySelectorAll(".home-recency__chip");
-            const countEl = document.querySelector(
-              ".home-section--completed .home-section__count",
-            );
-            if (!section || chips.length === 0) return;
+            const VALID_RECENCY = ["1h", "24h", "2d", "3d", "7d", "14d", "30d"];
 
-            function applyRecency(days) {
-              if (!VALID.has(days)) days = 3;
-              section.setAttribute("data-recency", String(days));
-              chips.forEach((c) => {
-                const active = Number(c.dataset.days) === days;
-                c.classList.toggle("home-recency__chip--active", active);
-                c.setAttribute("aria-pressed", active ? "true" : "false");
+            // ---- View toggle ----
+            const viewBtns = document.querySelectorAll(".home-view-toggle__btn");
+            const html = document.documentElement;
+
+            function applyView(v) {
+              html.setAttribute("data-view", v);
+              viewBtns.forEach((b) => {
+                b.classList.toggle("home-view-toggle__btn--active", b.dataset.viewTarget === v);
               });
-              if (countEl) {
-                const visible = section.querySelectorAll(
-                  ".home-strip__item:not([hidden])",
-                );
-                // Count items whose age is within the window (rely on CSS display rules
-                // by querying getComputedStyle after layout).
-                const stillVisible = Array.from(visible).filter(
-                  (el) => getComputedStyle(el).display !== "none",
-                );
-                countEl.textContent = `${stillVisible.length} in last ${days}d`;
-              }
+              try { window.localStorage.setItem(VIEW_KEY, v); } catch (_) {}
             }
 
-            // Sync DOM to whatever the bootstrap resolved (html[data-recency]).
-            const initial = Number(document.documentElement.dataset.recency) || 3;
-            applyRecency(initial);
+            const initView = html.getAttribute("data-view") || "all";
+            applyView(initView);
 
-            chips.forEach((chip) => {
-              chip.addEventListener("click", () => {
-                const days = Number(chip.dataset.days);
-                if (!VALID.has(days)) return;
-                try {
-                  window.localStorage.setItem(RECENCY_KEY, String(days));
-                } catch (_e) {
-                  // localStorage unavailable — purely in-memory behavior still works.
-                }
-                applyRecency(days);
+            viewBtns.forEach((btn) => {
+              btn.addEventListener("click", () => applyView(btn.dataset.viewTarget || "all"));
+            });
+
+            // ---- Project filter ----
+            const projectBtns = document.querySelectorAll(".home-project-chip");
+
+            function applyProject(p) {
+              html.setAttribute("data-project", p);
+              projectBtns.forEach((b) => {
+                b.classList.toggle("home-project-chip--active", b.dataset.projectTarget === p);
               });
+              try { window.localStorage.setItem(PROJECT_KEY, p); } catch (_) {}
+            }
+
+            const initProject = html.getAttribute("data-project") || "all";
+            applyProject(initProject);
+
+            projectBtns.forEach((btn) => {
+              btn.addEventListener("click", () => applyProject(btn.dataset.projectTarget || "all"));
+            });
+
+            // ---- Done-age selector ----
+            const doneAgeBtns = document.querySelectorAll(".home-done-age__chip");
+
+            function applyRecency(r) {
+              if (!VALID_RECENCY.includes(r)) r = "3d";
+              html.setAttribute("data-recency", r);
+              doneAgeBtns.forEach((b) => {
+                b.classList.toggle("home-done-age__chip--active", b.dataset.recency === r);
+              });
+              try { window.localStorage.setItem(RECENCY_KEY, r); } catch (_) {}
+            }
+
+            const initRecency = html.getAttribute("data-recency") || "3d";
+            applyRecency(initRecency);
+
+            doneAgeBtns.forEach((btn) => {
+              btn.addEventListener("click", () => applyRecency(btn.dataset.recency || "3d"));
             });
           })();
         </script>

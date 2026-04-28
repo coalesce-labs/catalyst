@@ -591,6 +591,71 @@
         font-variant-numeric: tabular-nums;
       }
 
+      /* ------- Hero metrics ------- */
+
+      .hero-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: var(--spacing-3);
+      }
+
+      @media (max-width: 640px) {
+        .hero-metrics {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .hero-metric {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-4) var(--spacing-5);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+      }
+
+      [data-system="precision-instrument"] .hero-metric {
+        border-radius: 0;
+      }
+
+      .hero-metric__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .hero-metric__value {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-display);
+        line-height: 1.1;
+        font-variant-numeric: tabular-nums;
+        color: var(--color-text-hi);
+      }
+
+      .hero-metric__sub {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Briefing link in worker head */
+      .worker-head__briefing-link {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-accent);
+        text-decoration: none;
+        margin-left: auto;
+        align-self: center;
+      }
+
+      .worker-head__briefing-link:hover {
+        text-decoration: underline;
+      }
+
       /* ------- Cost grid ------- */
 
       .cost-grid {
@@ -661,8 +726,28 @@
             <span class="chip chip--failed chip-glyph chip-glyph--review">Review reply</span>
             <h1 class="worker-head__name">worker.html mockup</h1>
             <a class="worker-head__pr-link" href="#">PR #247 ↗</a>
+            <a class="worker-head__briefing-link" href="./briefing.html">Briefing →</a>
           </div>
         </section>
+
+        <!-- ================ HERO METRICS ================ -->
+        <div class="hero-metrics" aria-label="Key metrics">
+          <div class="hero-metric">
+            <span class="hero-metric__label">Elapsed</span>
+            <span class="hero-metric__value">9m 48s</span>
+            <span class="hero-metric__sub">started 17:33:21</span>
+          </div>
+          <div class="hero-metric">
+            <span class="hero-metric__label">Tokens</span>
+            <span class="hero-metric__value">124k</span>
+            <span class="hero-metric__sub">98k in · 26k out</span>
+          </div>
+          <div class="hero-metric">
+            <span class="hero-metric__label">Cost</span>
+            <span class="hero-metric__value">$3.47</span>
+            <span class="hero-metric__sub">$0.35 / min</span>
+          </div>
+        </div>
 
         <!-- ================ PHASE TIMELINE ================ -->
         <section class="worker-section">

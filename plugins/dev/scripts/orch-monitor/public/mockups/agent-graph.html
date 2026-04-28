@@ -759,7 +759,7 @@
       function layout(nodes, edges, direction = "TB") {
         const g = new dagre.graphlib.Graph();
         g.setDefaultEdgeLabel(() => ({}));
-        g.setGraph({ rankdir: direction, nodesep: 48, ranksep: 80 });
+        g.setGraph({ rankdir: direction, nodesep: 72, ranksep: 120 });
 
         nodes.forEach((node) => {
           const size = NODE_SIZE[node.type] ?? { width: 220, height: 100 };
