@@ -1,5 +1,23 @@
 # Changelog
 
+## [7.12.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.12.1...catalyst-dev-v7.12.2)
+
+Apr 27, 2026
+
+<!-- ai-enhanced -->
+
+### Shell Evaluation CWD Fixes
+
+Fixed Warp terminal integration where `--shell-eval` mode would show incorrect directory paths, create unwanted shell block splits, and kill the tab's shell on Claude exit. Warp's file explorer and path indicator now correctly track worktree directories, and Claude sessions return cleanly to your shell without spawning extra blocks.
+
+
+
+### PRs
+
+* **dev:** drop exec from --shell-eval to preserve tab shell (CTL-201) ([#307](https://github.com/coalesce-labs/catalyst/issues/307)) ([3ee4048](https://github.com/coalesce-labs/catalyst/commit/3ee40487ac2473edc90971f67af6288050d6f6cd))
+* **dev:** force Warp CWD update before exec in --shell-eval mode (CTL-199) ([#302](https://github.com/coalesce-labs/catalyst/issues/302)) ([d7c9ad8](https://github.com/coalesce-labs/catalyst/commit/d7c9ad8294716459502bd48b6725124aa889eb3b))
+* **dev:** replace warp_precmd with OSC 7 to prevent block split (CTL-201) ([#308](https://github.com/coalesce-labs/catalyst/issues/308)) ([1e512b3](https://github.com/coalesce-labs/catalyst/commit/1e512b376fe8dcf34a3356ea16b9626576b74f6f))
+
 ## [7.12.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.12.0...catalyst-dev-v7.12.1)
 
 Apr 26, 2026
