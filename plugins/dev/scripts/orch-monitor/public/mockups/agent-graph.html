@@ -76,7 +76,7 @@
       .graph-canvas {
         position: relative;
         width: 100%;
-        height: 640px;
+        height: 560px;
         background: var(--color-surface-1);
         border: 1px solid var(--color-border-subtle);
         border-radius: var(--radius-lg);
@@ -693,44 +693,6 @@
             turns: 1,
           },
         },
-        {
-          id: "todo-140-a",
-          type: "todo",
-          position: { x: 0, y: 0 },
-          data: {
-            owner: "CTL-140",
-            items: [
-              { label: "Write mockup tests", state: "completed" },
-              { label: "Build agent-graph.html", state: "in_progress" },
-              { label: "Add gallery card", state: "pending" },
-            ],
-          },
-        },
-        {
-          id: "todo-142-a",
-          type: "todo",
-          position: { x: 0, y: 0 },
-          data: {
-            owner: "CTL-142",
-            items: [
-              { label: "Survey todo ingest", state: "completed" },
-              { label: "Draft todos.html", state: "in_progress" },
-              { label: "Define rollup rules", state: "pending" },
-            ],
-          },
-        },
-        {
-          id: "todo-147-a",
-          type: "todo",
-          position: { x: 0, y: 0 },
-          data: {
-            owner: "CTL-147",
-            items: [
-              { label: "Mark study v1", state: "completed" },
-              { label: "Simplified variant", state: "completed" },
-            ],
-          },
-        },
       ];
 
       const INITIAL_EDGES = [
@@ -742,44 +704,98 @@
         { id: "e-142-general", source: "worker-ctl-142", target: "sub-142-general" },
         { id: "e-142-deepwiki", source: "sub-142-general", target: "sub-142-deepwiki" },
         { id: "e-147-pr-test", source: "worker-ctl-147", target: "sub-147-pr-test" },
-        { id: "e-140-todo", source: "worker-ctl-140", target: "todo-140-a" },
-        { id: "e-142-todo", source: "worker-ctl-142", target: "todo-142-a" },
-        { id: "e-147-todo", source: "worker-ctl-147", target: "todo-147-a" },
+
+
       ];
 
       const NODE_SIZE = {
-        orchestrator: { width: 280, height: 120 },
-        worker: { width: 240, height: 140 },
-        subagent: { width: 220, height: 110 },
-        todo: { width: 220, height: 120 },
+        orchestrator: { width: 200, height: 90 },
+        worker: { width: 200, height: 110 },
+        subagent: { width: 180, height: 90 },
+        todo: { width: 180, height: 100 },
       };
 
-      /* ------- Layout — dagre, top-down, stable on update ------- */
+      /* ------- Layout — manual top-down tree layout ------- */
+      // Dagre@0.8.5 places all same-rank nodes at identical x coordinates in
+      // this ESM environment. We use a simple BFS-based tree layout instead:
+      // assign each node to a rank, spread leaf subtrees to avoid overlap, then
+      // center parents over their children.
 
-      function layout(nodes, edges, direction = "TB") {
-        const g = new dagre.graphlib.Graph();
-        g.setDefaultEdgeLabel(() => ({}));
-        g.setGraph({ rankdir: direction, nodesep: 72, ranksep: 120 });
+      const RANK_GAP = 90;   // vertical space between ranks
+      const NODE_GAP = 24;   // horizontal gap between sibling subtrees
 
-        nodes.forEach((node) => {
-          const size = NODE_SIZE[node.type] ?? { width: 220, height: 100 };
-          g.setNode(node.id, size);
+      function layout(nodes, _edges, _direction) {
+        const childMap = {};  // parentId → [childId, ...]
+        const parentMap = {}; // childId → parentId
+        nodes.forEach((n) => { childMap[n.id] = []; });
+        _edges.forEach((e) => {
+          if (childMap[e.source]) childMap[e.source].push(e.target);
+          parentMap[e.target] = e.source;
         });
-        edges.forEach((edge) => g.setEdge(edge.source, edge.target));
 
-        dagre.layout(g);
+        // Find roots (nodes with no parent)
+        const roots = nodes.filter((n) => !parentMap[n.id]).map((n) => n.id);
 
-        return nodes.map((node) => {
-          const pos = g.node(node.id);
-          const size = NODE_SIZE[node.type] ?? { width: 220, height: 100 };
-          return {
-            ...node,
-            position: {
-              x: pos.x - size.width / 2,
-              y: pos.y - size.height / 2,
-            },
-          };
+        // BFS to assign ranks
+        const rank = {};
+        const queue = roots.map((r) => [r, 0]);
+        while (queue.length) {
+          const [id, r] = queue.shift();
+          rank[id] = r;
+          (childMap[id] || []).forEach((cid) => queue.push([cid, r + 1]));
+        }
+
+        // Post-order compute subtree width for each node
+        const subtreeWidth = {};
+        function computeWidth(id) {
+          const sz = NODE_SIZE[nodes.find((n) => n.id === id)?.type] ?? { width: 200, height: 90 };
+          const children = childMap[id] || [];
+          if (children.length === 0) {
+            subtreeWidth[id] = sz.width;
+            return sz.width;
+          }
+          const total = children.reduce((acc, cid, i) => {
+            return acc + computeWidth(cid) + (i > 0 ? NODE_GAP : 0);
+          }, 0);
+          subtreeWidth[id] = Math.max(sz.width, total);
+          return subtreeWidth[id];
+        }
+        roots.forEach(computeWidth);
+
+        // Assign x positions: center each node over its children subtree
+        const posX = {};
+        function assignX(id, left) {
+          const children = childMap[id] || [];
+          if (children.length === 0) {
+            const sz = NODE_SIZE[nodes.find((n) => n.id === id)?.type] ?? { width: 200, height: 90 };
+            posX[id] = left + sz.width / 2;
+            return left + sz.width;
+          }
+          let cursor = left;
+          children.forEach((cid, i) => {
+            if (i > 0) cursor += NODE_GAP;
+            cursor = assignX(cid, cursor);
+          });
+          // Center parent over all children
+          const firstChildX = posX[children[0]];
+          const lastChildX = posX[children[children.length - 1]];
+          posX[id] = (firstChildX + lastChildX) / 2;
+          return left + subtreeWidth[id];
+        }
+        roots.forEach((r) => assignX(r, 0));
+
+        const posY = {};
+        nodes.forEach((n) => {
+          const sz = NODE_SIZE[n.type] ?? { width: 200, height: 90 };
+          posY[n.id] = rank[n.id] * (Math.max(...Object.values(NODE_SIZE).map((s) => s.height)) + RANK_GAP);
+          posX[n.id] = (posX[n.id] ?? 0) - sz.width / 2;
+          posY[n.id] = (posY[n.id] ?? 0);
         });
+
+        return nodes.map((node) => ({
+          ...node,
+          position: { x: posX[node.id] ?? 0, y: posY[node.id] ?? 0 },
+        }));
       }
 
       /* ------- Custom node components (React.memo per React Flow perf docs) ------- */
@@ -1056,15 +1072,12 @@
           openDrawer(node);
         }, []);
 
-        // Real-time mock — advance a worker's status, append a todo, or
-        // spawn a subagent every two seconds. setNodes() preserves the
-        // React Flow viewport because we never re-run the layout on nodes
-        // that already have a position.
+        // Real-time mock — alternate between advancing a worker status and
+        // bumping subagent turn counts. Graph structure stays fixed so dagre
+        // layout is stable and fitView always shows all nodes.
         const runTick = useCallback(() => {
           const tick = tickRef.current++;
-          const phase = tick % 3;
-
-          if (phase === 0) {
+          if (tick % 2 === 0) {
             setNodes((current) => {
               const workerIds = current
                 .filter((n) => n.type === "worker")
@@ -1077,47 +1090,16 @@
                   : n,
               );
             });
-            return;
+          } else {
+            setNodes((current) =>
+              current.map((n) =>
+                n.type === "subagent"
+                  ? { ...n, data: { ...n.data, turns: (n.data.turns || 0) + 1 } }
+                  : n,
+              ),
+            );
           }
-
-          if (phase === 1) {
-            setNodes((current) => {
-              const todoNodes = current.filter((n) => n.type === "todo");
-              if (todoNodes.length === 0) return current;
-              const pick = todoNodes[tick % todoNodes.length];
-              const nextItems = [
-                ...pick.data.items,
-                {
-                  label: "follow-up item " + (pick.data.items.length + 1),
-                  state: "pending",
-                },
-              ];
-              return current.map((n) =>
-                n.id === pick.id ? { ...n, data: { ...n.data, items: nextItems } } : n,
-              );
-            });
-            return;
-          }
-
-          // phase === 2 — spawn a subagent under a worker, dagre-place the new node.
-          setNodes((currentNodes) => {
-            const workers = currentNodes.filter((n) => n.type === "worker");
-            if (workers.length === 0) return currentNodes;
-            const parent = workers[tick % workers.length];
-            const newId = "sub-spawn-" + tick;
-            const newNode = {
-              id: newId,
-              type: "subagent",
-              position: { x: parent.position.x, y: parent.position.y + 180 },
-              data: { role: "general-purpose", status: "researching", turns: 0 },
-            };
-            setEdges((currentEdges) => [
-              ...currentEdges,
-              { id: "e-spawn-" + tick, source: parent.id, target: newId },
-            ]);
-            return [...currentNodes, newNode];
-          });
-        }, [setNodes, setEdges]);
+        }, [setNodes]);
 
         useEffect(() => {
           const id = window.setInterval(runTick, 2000);
