@@ -62,6 +62,7 @@ import {
 import { writeMergedSignalFile } from "./lib/signal-writer";
 import { loadOtelConfig } from "./lib/otel-config";
 import { detectProjectKey } from "./lib/project-key";
+import { loadProjectsConfig, projectsConfigPath } from "./lib/projects-config";
 import {
   createPrometheusFetcher,
   type PrometheusFetcher,
@@ -509,6 +510,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
         if (url.pathname === "/api/version") {
           return Response.json({ version: CATALYST_DEV_VERSION });
+        }
+
+        if (url.pathname === "/api/projects") {
+          return Response.json(loadProjectsConfig(projectsConfigPath()));
         }
 
         if (url.pathname === "/api/snapshot") {

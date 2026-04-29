@@ -9,6 +9,7 @@ import { ProgressBar } from "./ui/progress-bar";
 import { Panel, PanelHeader, SectionLabel } from "./ui/panel";
 import { EmptyState } from "./ui/empty-state";
 import { PrBadge } from "./ui/pr-badge";
+import { ProjectDot } from "./ui/project-dot";
 import { KpiStrip } from "./kpi-strip";
 import { AttentionBar } from "./attention-bar";
 import { EventLog } from "./event-log";
@@ -68,12 +69,17 @@ function OrchestratorCard({
   return (
     <button
       onClick={onClick}
+      data-project-color={orch.project?.color}
+      title={orch.project?.label}
       className="group flex flex-col gap-3 rounded-lg border border-border bg-surface-2 p-4 text-left transition-all hover:border-accent/40 hover:bg-surface-3"
     >
       <div className="flex items-start justify-between">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <HealthIcon failed={s.failed} active={s.active} />
+            {orch.project && (
+              <ProjectDot size={8} label={orch.project.label} />
+            )}
             <span className="truncate font-mono text-[14px] font-semibold text-fg">
               {orch.id}
             </span>

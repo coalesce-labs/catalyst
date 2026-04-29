@@ -13,6 +13,7 @@ import {
 import { AgentCard } from "./agent-card";
 import { CommsMessageRow } from "./comms-message";
 import { MessageSquare, AlertCircle, Archive, RefreshCw } from "lucide-react";
+import { ProjectDot } from "./ui/project-dot";
 import {
   COMMS_MESSAGE_TYPES,
   type CommsFilter,
@@ -72,6 +73,7 @@ export function CommsChannelDetail({
         <MessageSquare className="h-4 w-4 text-muted" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
+            <ProjectDot />
             <h2 className="truncate font-mono text-[14px] font-semibold text-fg">
               {name}
             </h2>

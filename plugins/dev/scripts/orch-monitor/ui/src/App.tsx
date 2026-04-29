@@ -5,6 +5,7 @@ import { useCommsChannels } from "./hooks/use-comms";
 import { Sidebar } from "./components/layout/sidebar";
 import { AttentionBar } from "./components/attention-bar";
 import { SessionDetailDrawer } from "./components/session-detail-drawer";
+import { ProjectSlab } from "./components/ui/project-dot";
 import { ConnectionBanner } from "./components/ui/connection-banner";
 import { OtelHealthBanner } from "./components/ui/otel-health-banner";
 import { SkeletonDashboard } from "./components/ui/skeleton";
@@ -99,6 +100,28 @@ function Monitor() {
       .catch(() => {});
   }, []);
 
+  // CTL-169 — when an orchestrator with a mapped project identity is selected,
+  // expose its color globally via data-project-color on <html>. Components read
+  // it via the --project-color CSS custom property.
+  const selectedOrchFull = selectedOrchId
+    ? snapshot.orchestrators.find((o) => o.id === selectedOrchId)
+    : null;
+  const activeProject = selectedOrchFull?.project ?? null;
+  useEffect(() => {
+    const root = document.documentElement;
+    if (activeProject) {
+      root.setAttribute("data-project", activeProject.key);
+      root.setAttribute("data-project-color", activeProject.color);
+    } else {
+      root.removeAttribute("data-project");
+      root.removeAttribute("data-project-color");
+    }
+    return () => {
+      root.removeAttribute("data-project");
+      root.removeAttribute("data-project-color");
+    };
+  }, [activeProject]);
+
   useKeyboardNav({
     onEscape: () => {
       setSelectedOrchId(null);
@@ -106,9 +129,7 @@ function Monitor() {
     },
   });
 
-  const selectedOrch = selectedOrchId
-    ? snapshot.orchestrators.find((o: { id: string }) => o.id === selectedOrchId)
-    : null;
+  const selectedOrch = selectedOrchFull;
 
   const effectiveOrch =
     selectedOrchId && !selectedOrch ? null : selectedOrch;
@@ -224,7 +245,8 @@ function Monitor() {
               {topView === "dashboard" && effectiveOrch && (
                 <>
                   <ChevronRight className="h-3 w-3 text-border" />
-                  <span className="font-mono font-medium text-fg">
+                  <span className="flex items-center gap-2 font-mono font-medium text-fg">
+                    <ProjectSlab />
                     {effectiveOrch.id}
                   </span>
                 </>
