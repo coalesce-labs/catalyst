@@ -5,7 +5,7 @@ description:
   'implement the plan', 'start implementing', 'build from the plan', or wants to execute a
   previously created implementation plan using TDD (Red-Green-Refactor). Supports team mode for
   parallel implementation."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools:
   Read, Write, Edit, Grep, Glob, Task, TodoWrite, Bash, mcp__deepwiki__ask_question,
   mcp__deepwiki__read_wiki_structure

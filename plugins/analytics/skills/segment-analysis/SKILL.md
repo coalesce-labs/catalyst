@@ -1,7 +1,7 @@
 ---
 name: segment-analysis
 description: Analyze user segments and cohorts for targeted insights
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, TodoWrite
 version: 1.0.0
 ---

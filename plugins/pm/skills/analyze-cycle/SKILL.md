@@ -3,7 +3,7 @@ name: analyze-cycle
 description:
   Analyze cycle health and generate comprehensive report with actionable insights, risk analysis,
   capacity assessment, and specific recommendations
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, Read, Write, TodoWrite
 version: 1.0.0
 ---

@@ -2,7 +2,7 @@
 name: connect-mcps
 description: Connect MCPs for real-time tool integration
 version: 1.0
-disable-model-invocation: true
+disable-model-invocation: false
 modifies-workspace: true
 ---
 

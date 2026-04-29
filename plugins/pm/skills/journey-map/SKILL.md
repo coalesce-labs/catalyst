@@ -1,7 +1,7 @@
 ---
 name: journey-map
 description: Create user journey maps and customer journey maps (dual mode)
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Journey Map Skill

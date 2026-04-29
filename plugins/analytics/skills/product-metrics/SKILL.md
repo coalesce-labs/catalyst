@@ -1,7 +1,7 @@
 ---
 name: product-metrics
 description: View key product metrics, KPIs, and conversion rates from PostHog
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, TodoWrite
 version: 1.0.0
 ---

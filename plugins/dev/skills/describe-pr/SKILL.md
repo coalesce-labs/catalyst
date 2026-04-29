@@ -4,7 +4,7 @@ description:
   "Generate or update PR description with incremental changes. **ALWAYS use when** the user says
   'describe the PR', 'update PR description', 'generate PR description', or after pushing new
   commits to an existing PR. Supports incremental updates that preserve manual edits."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash, Read, Write
 version: 2.0.0
 ---

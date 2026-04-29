@@ -5,7 +5,7 @@ description:
   archiving artifacts to ~/catalyst/archives/{orchId}. **ALWAYS use when** the user says
   'teardown', 'delete orchestrator', 'cleanup orchestrator', or 'remove worktree' for a finished
   orchestrator. Refuses to delete unless the archive sweep succeeded; use --force to bypass."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Bash, Glob
 ---
 

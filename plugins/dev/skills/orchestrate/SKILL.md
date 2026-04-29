@@ -3,7 +3,7 @@ name: orchestrate
 description:
   Coordinate multiple tickets in parallel across worktrees with wave-based execution, worker
   dispatch, and adversarial verification
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Write, Bash, Task, Grep, Glob, Agent
 version: 1.0.0
 ---

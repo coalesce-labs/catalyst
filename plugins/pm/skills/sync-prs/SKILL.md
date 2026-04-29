@@ -1,7 +1,7 @@
 ---
 name: sync-prs
 description: Sync GitHub PRs with Linear issues and identify correlation gaps
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, Read, Write
 version: 1.0.0
 ---
