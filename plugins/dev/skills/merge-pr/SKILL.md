@@ -327,17 +327,7 @@ echo "✅ Deleted local branch: $head_branch"
 If running in a git worktree, the primary checkout of main may be stale. Update it:
 
 ```bash
-# Find the primary worktree checked out on the base branch
-PRIMARY_WORKTREE=$(git worktree list | grep "\[$base_branch\]" | awk '{print $1}')
-CURRENT_DIR=$(pwd)
-
-if [[ -n "$PRIMARY_WORKTREE" && "$PRIMARY_WORKTREE" != "$CURRENT_DIR" ]]; then
-    echo "Updating primary worktree at $PRIMARY_WORKTREE..."
-    git -C "$PRIMARY_WORKTREE" pull origin "$base_branch"
-    echo "✅ Primary worktree updated"
-else
-    echo "No separate primary worktree to update"
-fi
+"${CLAUDE_PLUGIN_ROOT}/scripts/pull-primary-worktree.sh" --branch "$base_branch"
 ```
 
 ### 12. Extract post-merge tasks
