@@ -1,7 +1,7 @@
 ---
 name: reorganize
 description: Analyze and reorganize a directory structure with safe reference updates
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Glob, Grep, Bash, Task, Write
 version: 1.0.0
 ---

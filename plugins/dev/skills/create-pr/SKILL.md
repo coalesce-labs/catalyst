@@ -5,7 +5,7 @@ description:
   a PR', 'open a pull request', 'ship this', 'ready for review', or wants to push changes and create
   a GitHub PR. Handles commit, rebase, push, PR creation, description generation, and Linear ticket
   update."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash(linearis *), Bash(git *), Bash(gh *), Read, Task
 version: 1.0.0
 ---

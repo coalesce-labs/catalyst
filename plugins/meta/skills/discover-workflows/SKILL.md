@@ -1,7 +1,7 @@
 ---
 name: discover-workflows
 description: Research and catalog workflows from external Claude Code repositories
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: mcp__deepwiki__ask_question, mcp__deepwiki__read_wiki_structure, Read, Write
 version: 1.0.0
 ---

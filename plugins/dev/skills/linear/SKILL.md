@@ -4,7 +4,7 @@ description:
   "Manage Linear tickets with workflow automation. **ALWAYS use when** the user says 'create a
   ticket', 'update the ticket', 'move ticket to', 'search Linear', or wants to create tickets from
   thoughts documents, update ticket status, or manage the Linear workflow. Uses Linearis CLI."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash(linearis *), Read, Write, Edit, Grep
 version: 1.0.0
 ---

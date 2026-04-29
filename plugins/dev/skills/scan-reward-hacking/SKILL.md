@@ -1,7 +1,7 @@
 ---
 name: scan-reward-hacking
 description: "Scan TypeScript code for reward hacking patterns — shortcuts that make linters pass without actually fixing type safety. This skill has a comprehensive checklist of 8 forbidden patterns with severity tuning (libraries vs apps) that you cannot reliably check on your own. **ALWAYS consult this skill when** the user says 'scan for hacks', 'check for type cheats', 'reward hacking', 'verify no shortcuts', wants to check for `as any`, `as unknown as`, `@ts-ignore`, non-null assertions (`value!`), `forEach(async`, or void tricks after fixing TypeScript errors. Also use after /fix-typescript completes, or when verifying TypeScript changes before marking work done. Accepts optional file/directory arguments to scope the scan."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash, Read, Grep, Glob
 argument-hint: "[files-or-directories]"
 version: 1.1.0

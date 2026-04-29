@@ -1,7 +1,7 @@
 ---
 name: write-prod-strategy
 description: Product strategy docs using 7-component framework
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Write Product Strategy Skill

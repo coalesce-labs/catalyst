@@ -1,7 +1,7 @@
 ---
 name: meeting-agenda
 description: Create structured meeting agendas for effective collaboration
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 ## Quick Start

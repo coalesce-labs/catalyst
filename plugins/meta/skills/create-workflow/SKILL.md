@@ -1,7 +1,7 @@
 ---
 name: create-workflow
 description: Create new agents or commands using discovered patterns and templates
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Write, Edit, Grep, Glob
 version: 1.0.0
 ---

@@ -2,7 +2,7 @@
 name: groom-backlog
 description:
   Groom Linear backlog to identify orphaned issues, incorrect project assignments, and health issues
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, Read, Write
 version: 1.0.0
 ---

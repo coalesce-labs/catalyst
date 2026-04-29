@@ -1,7 +1,7 @@
 ---
 name: fix-typescript
 description: "Fix TypeScript errors with strict anti-reward-hacking rules. **ALWAYS use when** the user says 'fix type errors', 'fix typescript', 'type-check is failing', or when TypeScript compilation errors need to be resolved. Ensures runtime type safety — fixes root causes instead of silencing errors with casts."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Edit, Bash, Grep
 version: 1.0.0
 ---

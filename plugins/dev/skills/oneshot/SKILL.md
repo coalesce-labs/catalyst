@@ -5,7 +5,7 @@ description:
   command. **ALWAYS use when** the user says 'oneshot', 'do everything end to end', 'full workflow',
   or wants to go from ticket/idea to merged PR autonomously. All phases run sequentially in the
   current session, using agent teams for parallelism when needed."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools:
   Read, Write, Bash, Task, Grep, Glob, mcp__deepwiki__ask_question,
   mcp__deepwiki__read_wiki_structure

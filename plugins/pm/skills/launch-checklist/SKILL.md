@@ -1,7 +1,7 @@
 ---
 name: launch-checklist
 description: Comprehensive product launch planning
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 ## Quick Start

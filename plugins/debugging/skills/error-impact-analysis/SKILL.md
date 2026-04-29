@@ -1,7 +1,7 @@
 ---
 name: error-impact-analysis
 description: Analyze the impact and scope of production errors
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, TodoWrite
 version: 1.0.0
 ---
