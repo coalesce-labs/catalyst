@@ -7,6 +7,7 @@ export const TEMPLATE_NAMES = [
   "run-summary",
   "attention-digest",
   "worker-status",
+  "orch-briefing",
 ] as const;
 
 export type TemplateName = (typeof TEMPLATE_NAMES)[number];
@@ -20,6 +21,7 @@ const TEMPLATES: Record<TemplateName, string> = {
   "run-summary": loadTemplate("run-summary"),
   "attention-digest": loadTemplate("attention-digest"),
   "worker-status": loadTemplate("worker-status"),
+  "orch-briefing": loadTemplate("orch-briefing"),
 };
 
 function isRecord(x: unknown): x is Record<string, unknown> {

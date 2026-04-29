@@ -21,12 +21,14 @@ import { WorkerDetailDrawer } from "./worker-detail-drawer";
 import { GanttChart } from "./gantt-chart";
 import { EventLog } from "./event-log";
 import { BriefingTab } from "./briefing-tab";
+import { AiBriefingPanel } from "./ai-briefing-panel";
 import {
   LayoutGrid,
   Users,
   BarChart3,
   Activity,
   BookOpen,
+  Sparkles,
 } from "lucide-react";
 
 interface OrchestratorViewProps {
@@ -81,6 +83,7 @@ export function OrchestratorView({
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [selectedWave, setSelectedWave] = useState<number | null>(null);
   const [selectedWorker, setSelectedWorker] = useState<string | null>(null);
+  const [aiBriefingOpen, setAiBriefingOpen] = useState<boolean>(false);
 
   const selectedW: WorkerState | null =
     selectedWorker ? (orch.workers[selectedWorker] ?? null) : null;
@@ -103,20 +106,50 @@ export function OrchestratorView({
     <div className="flex flex-col gap-4">
       {/* Header */}
       <div>
-        <h1 className="font-mono text-lg font-bold text-fg">{orch.id}</h1>
-        <div className="mt-1 flex items-center gap-4 text-[12px] text-muted">
-          <span>
-            Wave {orch.currentWave}/{orch.totalWaves}
-          </span>
-          <span>
-            {s.done}/{s.total} merged ({s.pct}%)
-          </span>
-          {orch.startedAt && (
-            <span>Started {new Date(orch.startedAt).toLocaleString()}</span>
-          )}
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="font-mono text-lg font-bold text-fg">{orch.id}</h1>
+            <div className="mt-1 flex items-center gap-4 text-[12px] text-muted">
+              <span>
+                Wave {orch.currentWave}/{orch.totalWaves}
+              </span>
+              <span>
+                {s.done}/{s.total} merged ({s.pct}%)
+              </span>
+              {orch.startedAt && (
+                <span>
+                  Started {new Date(orch.startedAt).toLocaleString()}
+                </span>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAiBriefingOpen((v) => !v)}
+            className={cn(
+              "flex shrink-0 items-center gap-1.5 rounded border border-border px-2.5 py-1 text-[12px] transition-colors",
+              aiBriefingOpen
+                ? "bg-surface-3 text-fg"
+                : "text-muted hover:bg-surface-3 hover:text-fg",
+            )}
+            aria-label="Toggle AI briefing"
+            aria-pressed={aiBriefingOpen}
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            Briefing
+          </button>
         </div>
         <ProgressBar pct={s.pct} className="mt-2 max-w-md" />
       </div>
+
+      {aiBriefingOpen && (
+        <AiBriefingPanel
+          orchId={orch.id}
+          onClose={() => {
+            setAiBriefingOpen(false);
+          }}
+        />
+      )}
 
       {/* KPI strip */}
       <KpiStrip orchestrators={[orch]} getAnalytics={getAnalytics} />
