@@ -3,6 +3,12 @@
 Shared workflow for diagnosing and resolving all merge blockers on a pull request. Referenced by
 `/merge-pr` (Step 6) and `/oneshot` (Phase 5, Step 3).
 
+## Rate Limit Warning
+
+GitHub's GraphQL API has a **5,000 requests/hr** rate limit. A tight polling loop without `sleep`
+can exhaust this in minutes, blocking ALL `gh` commands across every session for up to an hour.
+Every poll loop in this workflow MUST include an explicit `sleep 30` between iterations.
+
 ## Safety Rules
 
 **NEVER bypass branch protection.** These rules are non-negotiable:
@@ -174,6 +180,7 @@ attempt=0
 while blockers is not empty AND attempt < MAX_RESOLVE_ATTEMPTS:
   for each blocker:
     attempt_resolution(blocker)
+  sleep 30
   re-query merge state (step 1)
   rebuild blockers list (step 2)
   attempt += 1
@@ -230,10 +237,21 @@ gh pr ready $pr_number
 
 *Can fix:* Depends on the failure. Analyze each failing check.
 
-For **pending** checks: wait and re-poll (up to 10 minutes).
+For **pending** checks: wait and re-poll (up to 10 minutes). Always include `sleep 30` between
+iterations — never use a tight loop.
 
 ```bash
-gh pr checks $pr_number --watch --fail-fast
+MAX_POLLS=20
+POLLS=0
+while [ $POLLS -lt $MAX_POLLS ]; do
+  STATUS=$(gh pr checks $pr_number --json state --jq '[.[].state] | unique | join(",")' 2>/dev/null || echo "PENDING")
+  case "$STATUS" in
+    *PENDING*|*QUEUED*) ;;
+    *) break ;;
+  esac
+  sleep 30
+  POLLS=$((POLLS + 1))
+done
 ```
 
 For **failed** checks: read the failure details and attempt a fix.
