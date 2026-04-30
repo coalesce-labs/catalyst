@@ -51,14 +51,53 @@ ${ISSUES}
      "${SIGNAL_FILE}" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "${SIGNAL_FILE}"
    ```
 
-9. **Poll until MERGED** (CTL-80 contract) — after pushing the fix-up commit, run a poll loop
-   on `gh pr view --json state,mergeStateStatus,mergedAt` every 30–60s. Resolve BEHIND with
-   `gh api -X PUT /repos/{owner}/{repo}/pulls/{n}/update-branch`. Resolve any further CI
-   failures or review comments by pushing fixes. Only exit when `state=MERGED`.
+9. **Poll until MERGED** (CTL-80 contract) — after pushing the fix-up commit, run a poll loop.
+   CRITICAL: always include `sleep 30` — a tight loop exhausts GitHub's 5,000/hr GraphQL rate
+   limit in minutes. Resolve BEHIND with update-branch API. Resolve CI failures or review
+   comments by pushing fixes. Only exit when `state=MERGED`.
+
+   ```bash
+   while true; do
+     MERGE_STATE=$(gh pr view ${PR_NUMBER} --json state,mergeStateStatus,mergedAt)
+     STATE=$(echo "$MERGE_STATE" | jq -r '.state')
+     [ "$STATE" = "MERGED" ] && break
+     # Resolve BEHIND: gh api -X PUT /repos/{owner}/{repo}/pulls/${PR_NUMBER}/update-branch
+     # Resolve CI/review: investigate, fix, push
+     sleep 30
+   done
+   ```
 
 10. **On merge**, write `pr.mergedAt`, `pr.ciStatus = "merged"`, and `status = "done"` to your
     signal file (sourced from `gh pr view --json mergedAt`), transition the Linear ticket to
     Done, then exit successfully.
+
+11. **File improvement findings (CTL-176 / CTL-183 routing)** — when you notice friction
+    worth fixing during this fix-up (workflow gaps, bugs in adjacent code, tooling gaps),
+    record it on the shared findings queue:
+    ```bash
+    "${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
+      --title "Short imperative title" --body "Details" --skill worker-fixup
+    ```
+    Do NOT drain the queue yourself when running under an orchestrator — the orchestrator's
+    Phase 7 owns the single drain pass over the shared queue (`$ORCH_DIR/findings.jsonl`).
+    Only file at end-of-run when invoked standalone (no `CATALYST_ORCHESTRATOR_ID`). Fix-up
+    workers always run autonomously (no TTY, no prompt), so the helper silently skips when
+    consent is not already granted:
+    ```bash
+    FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
+    FINDINGS_FILE="${CATALYST_FINDINGS_FILE:-.catalyst/findings/${CATALYST_SESSION_ID:-current}.jsonl}"
+    # Under orchestrator → orchestrator drains. Standalone → drain here.
+    if [ -z "${CATALYST_ORCHESTRATOR_ID:-}${CATALYST_ORCHESTRATOR_DIR:-}" ] \
+        && [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; then
+      while IFS= read -r line; do
+        TITLE=$(jq -r '.title' <<<"$line")
+        BODY=$(jq -r '.body' <<<"$line")
+        SKILL=$(jq -r '.skill // "worker-fixup"' <<<"$line")
+        "$FEEDBACK" --title "$TITLE" --body "$BODY" --skill "$SKILL" --json || true
+      done < "$FINDINGS_FILE"
+      rm -f "$FINDINGS_FILE"
+    fi
+    ```
 
 ## What NOT to do
 

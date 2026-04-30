@@ -1,5 +1,100 @@
 # Changelog
 
+## [7.12.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.12.1...catalyst-dev-v7.12.2)
+
+Apr 27, 2026
+
+<!-- ai-enhanced -->
+
+### Shell Evaluation CWD Fixes
+
+Fixed Warp terminal integration where `--shell-eval` mode would show incorrect directory paths, create unwanted shell block splits, and kill the tab's shell on Claude exit. Warp's file explorer and path indicator now correctly track worktree directories, and Claude sessions return cleanly to your shell without spawning extra blocks.
+
+
+
+### PRs
+
+* **dev:** drop exec from --shell-eval to preserve tab shell (CTL-201) ([#307](https://github.com/coalesce-labs/catalyst/issues/307)) ([3ee4048](https://github.com/coalesce-labs/catalyst/commit/3ee40487ac2473edc90971f67af6288050d6f6cd))
+* **dev:** force Warp CWD update before exec in --shell-eval mode (CTL-199) ([#302](https://github.com/coalesce-labs/catalyst/issues/302)) ([d7c9ad8](https://github.com/coalesce-labs/catalyst/commit/d7c9ad8294716459502bd48b6725124aa889eb3b))
+* **dev:** replace warp_precmd with OSC 7 to prevent block split (CTL-201) ([#308](https://github.com/coalesce-labs/catalyst/issues/308)) ([1e512b3](https://github.com/coalesce-labs/catalyst/commit/1e512b376fe8dcf34a3356ea16b9626576b74f6f))
+
+## [7.12.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.12.0...catalyst-dev-v7.12.1)
+
+Apr 26, 2026
+
+<!-- ai-enhanced -->
+
+### Warp Tab Directory Tracking
+
+The `launch-worktree-tab.sh` script now supports `--shell-eval` mode to properly set the working directory in Warp tabs. When you open Catalyst worktree tabs, Warp's path indicator will now show the actual worktree path instead of defaulting to the main checkout directory.
+
+
+
+### PRs
+
+* **dev:** Warp tab shows worktree CWD via --shell-eval mode ([#298](https://github.com/coalesce-labs/catalyst/issues/298)) ([ea30621](https://github.com/coalesce-labs/catalyst/commit/ea30621b65fb744f881ec45ac4affa51a855fe45))
+
+## [7.12.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.11.0...catalyst-dev-v7.12.0)
+
+Apr 25, 2026
+
+<!-- ai-enhanced -->
+
+### Session Outcome & Iteration Tracking
+
+Catalyst now emits session outcome events (`success`, `fail`, `abandoned`) and iteration counters to your observability stack, enabling cost-per-successful-outcome analysis and complexity measurement. The `claude_code_iteration_count_total` metric tracks plan-replan and implement-fix cycles separately, giving you visibility into which tickets require more rework. Run your database migrations to add the new session tracking columns.
+
+
+
+### PRs
+
+* **dev:** emit claude_code.session.outcome at session end (CTL-157) ([#278](https://github.com/coalesce-labs/catalyst/issues/278)) ([6505cb0](https://github.com/coalesce-labs/catalyst/commit/6505cb0a4640db162935f24b86e827b1087f84d9))
+* **dev:** iteration_count counter for plan-implement-validate loops (CTL-158) ([#280](https://github.com/coalesce-labs/catalyst/issues/280)) ([18a2b7d](https://github.com/coalesce-labs/catalyst/commit/18a2b7dac7f0e8d225eee6c7b640890be5deb034))
+
+## [7.11.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.10.0...catalyst-dev-v7.11.0)
+
+Apr 25, 2026
+
+<!-- ai-enhanced -->
+
+### Session State Tracking & Restart
+
+Active sessions now show liveness status and crash detection via `catalyst-session.sh status`, with automated restart commands for crashed Claude sessions that preserves your conversation history. Orchestrator worktrees get readable names like `orch-deal-to-opportunity-2026-04-25` and write completion markers for clear done/in-progress distinction. Post-merge verification runs automatically on merged PRs when `allowSelfReportedCompletion` is disabled, filing remediation tickets instead of blocking merge.
+
+
+
+### PRs
+
+* **dev:** /compound closing ritual writes compound-log entry at PR merge (CTL-159) ([#276](https://github.com/coalesce-labs/catalyst/issues/276)) ([7116395](https://github.com/coalesce-labs/catalyst/commit/71163957a45dd7a9c72f06df0193cda3905f4c23))
+* **dev:** auto-file improvement findings at skill run end (CTL-176) ([#274](https://github.com/coalesce-labs/catalyst/issues/274)) ([afc11ea](https://github.com/coalesce-labs/catalyst/commit/afc11ea32be7cf783f3c541e461b1b80112875e7))
+* **dev:** integrate todos panel into orch detail (CTL-171) ([#279](https://github.com/coalesce-labs/catalyst/issues/279)) ([62a5c14](https://github.com/coalesce-labs/catalyst/commit/62a5c1445d3686b580c8989ae062a0a77d63aba4))
+* **dev:** OSS-safe feedback routing — linear→github fallback + consent (CTL-183) ([#272](https://github.com/coalesce-labs/catalyst/issues/272)) ([77101f5](https://github.com/coalesce-labs/catalyst/commit/77101f572f23dd482fab607e995e588b09189a4b))
+* **dev:** post-merge verification for orchestrated workers (CTL-130) ([#293](https://github.com/coalesce-labs/catalyst/issues/293)) ([df04e39](https://github.com/coalesce-labs/catalyst/commit/df04e398cbdb346e1f87a2f1a89c88d228cbdc4c))
+* **dev:** session state tracking + crash-resilient restart (CTL-192) ([#294](https://github.com/coalesce-labs/catalyst/issues/294)) ([92c2dd0](https://github.com/coalesce-labs/catalyst/commit/92c2dd076350d29dfea0a8a618f2517457b00a3f))
+* **dev:** session-centric Kanban home mockup (CTL-168) ([#282](https://github.com/coalesce-labs/catalyst/issues/282)) ([0c5488f](https://github.com/coalesce-labs/catalyst/commit/0c5488f0981fe1715102c8a23d9315b4df54a783))
+* **dev:** tiered attention signals + reason glyphs (CTL-170) ([#277](https://github.com/coalesce-labs/catalyst/issues/277)) ([06d7c60](https://github.com/coalesce-labs/catalyst/commit/06d7c600789fe5546b836e09286dfba853afe3ec))
+* **dev:** add thoughts preflight assertions for orchestrated worktrees (CTL-195) ([#291](https://github.com/coalesce-labs/catalyst/issues/291)) ([4444b36](https://github.com/coalesce-labs/catalyst/commit/4444b36cde8db38aaa962741e96e8edd1e3f6e0b))
+* **dev:** workers exit at merging, orchestrator is authoritative merge-poller (CTL-133) ([#292](https://github.com/coalesce-labs/catalyst/issues/292)) ([3c99019](https://github.com/coalesce-labs/catalyst/commit/3c990192748e0f73c4cd4cdb95350a632fb7bc75))
+
+## [7.10.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.9.0...catalyst-dev-v7.10.0)
+
+Apr 24, 2026
+
+<!-- ai-enhanced -->
+
+### Canonical Wave Dispatch & Chrome Navigation
+
+The orchestration dispatcher now reads all waveN queues dynamically instead of hardcoded wave limits, so you can dispatch wave5 or wave10 without manual script edits. Click the Catalyst logo to return to the mockup gallery, use the new breadcrumb navigation, or press ⌘K for a filterable command palette with nav shortcuts and appearance controls. Worker usage and costs now aggregate correctly into state.json during monitoring phases.
+
+
+
+### PRs
+
+* **dev:** canonical orchestrate-dispatch-next reading all waveN queues (CTL-116) ([#268](https://github.com/coalesce-labs/catalyst/issues/268)) ([7490be9](https://github.com/coalesce-labs/catalyst/commit/7490be96d7dcd864a27d91af5ee18386fece573c))
+* **dev:** mockup chrome — clickable home, breadcrumb, ⌘K palette (CTL-166) ([#266](https://github.com/coalesce-labs/catalyst/issues/266)) ([f503027](https://github.com/coalesce-labs/catalyst/commit/f50302732ef0783e9ecf899218577648a2bdea7b))
+* drop precision-instrument + dual theme panels on brand mockup (CTL-178) ([#270](https://github.com/coalesce-labs/catalyst/issues/270)) ([4070e92](https://github.com/coalesce-labs/catalyst/commit/4070e925659b77c8c5ba058a0e761b903f556b80))
+* **dev:** aggregate worker usage/cost into orch state.json (CTL-115) ([#269](https://github.com/coalesce-labs/catalyst/issues/269)) ([bcc0189](https://github.com/coalesce-labs/catalyst/commit/bcc0189e4ba7c3b5fa5ef335fa087a88ad3e4f27))
+
 ## [7.9.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.8.0...catalyst-dev-v7.9.0)
 
 Apr 23, 2026

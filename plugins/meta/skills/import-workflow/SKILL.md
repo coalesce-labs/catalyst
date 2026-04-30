@@ -1,7 +1,7 @@
 ---
 name: import-workflow
 description: Import and adapt a workflow from external repositories
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Write, Edit, mcp__deepwiki__ask_question
 version: 1.0.0
 ---

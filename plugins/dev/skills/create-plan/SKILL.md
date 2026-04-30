@@ -5,7 +5,7 @@ description:
   says 'plan this', 'create a plan', 'let's plan the implementation', 'design the approach', or
   wants a structured TDD implementation plan before writing code. Works best after
   /research-codebase."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools:
   Read, Write, Grep, Glob, Task, TodoWrite, Bash, mcp__deepwiki__ask_question,
   mcp__deepwiki__read_wiki_structure
@@ -311,23 +311,7 @@ Each phase writes tests BEFORE implementation code. This ensures:
 humanlayer thoughts sync
 ```
 
-**5b. Track in workflow context (REQUIRED):**
-
-Substitute the actual file path and ticket ID:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add plans "thoughts/shared/plans/YYYY-MM-DD-PROJ-XXX-description.md" "TICKET-ID"
-```
-
-**5c. Verify tracking:**
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans
-```
-
-This MUST print the plan path. If not, re-run 5b.
-
-**5d. Present plan** and ask for review:
+**5b. Present plan** and ask for review:
 
 - Show plan location
 - Ask: Are phases properly scoped? Success criteria specific enough? Missing edge cases?

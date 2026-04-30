@@ -455,8 +455,80 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
 | `workerCommand` | string | `/oneshot` | Skill to dispatch in each worker |
 | `workerModel` | string | `opus` | Model for worker sessions |
 | `testRequirements` | object | See above | Required test types by scope (backend/frontend/fullstack) |
-| `verifyBeforeMerge` | boolean | `true` | Run adversarial verification before allowing merge |
-| `allowSelfReportedCompletion` | boolean | `false` | Trust worker's self-reported completion without verification |
+| `verifyBeforeMerge` | boolean | `true` | Run adversarial verification on merged commits (post-merge) |
+| `allowSelfReportedCompletion` | boolean | `false` | When `true`, verification failures are advisory (wave advances). When `false` (default), verification failures block wave advancement until remediation is filed |
+
+## Feedback Config
+
+Optional. Controls where catalyst skills auto-file improvement tickets at run end and on whose
+permission. CTL-183 ships the routing layer, CTL-176 ships the findings-collection layer that
+populates it: skills call `plugins/dev/scripts/add-finding.sh` to record observations during a
+run, and the end-of-run hook drains the queue via `file-feedback.sh`.
+
+```json
+{
+  "catalyst": {
+    "feedback": {
+      "autoFile": false,
+      "githubRepo": "coalesce-labs/catalyst",
+      "labels": ["auto-submitted"]
+    }
+  }
+}
+```
+
+| Field         | Type     | Default                      | Description                                                                                                                                           |
+| ------------- | -------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `autoFile`    | boolean  | `false`                      | When `true`, skills may auto-file findings at run end without prompting. When `false` or absent, skills prompt before filing each run.                |
+| `githubRepo`  | string   | `"coalesce-labs/catalyst"`   | `<owner>/<repo>` slug used when Linear filing fails or is unavailable. Defaults to upstream; override to redirect findings to your own fork.          |
+| `labels`      | string[] | `["auto-submitted"]`         | Base labels applied to every auto-filed ticket. The invoking skill name is appended automatically (e.g., `oneshot`, `orchestrate`, `implement-plan`). |
+
+### Routing
+
+Skills attempt `linearis issues create` first, using `catalyst.linear.teamKey`. On Linear
+failure (no API key, team mismatch, CLI unavailable), they fall back to
+`gh issue create --repo <feedback.githubRepo>`. Destinations are never split — GitHub is used
+only when Linear is unavailable.
+
+### Consent
+
+The first time a skill is ready to auto-file, it prompts:
+
+> Would you like us to automatically file tickets at the end of each run? [Y/n]
+
+- **Yes** → `autoFile` is set to `true` in `.catalyst/config.json`; no prompt on subsequent runs.
+- **No** → nothing is persisted; the prompt will return on the next run.
+
+Revoke by setting `autoFile` to `false` or deleting the `feedback` block. The
+`plugins/dev/scripts/feedback-consent.sh` helper exposes `check`, `grant`, and `status`
+subcommands for scripted use.
+
+See [Integrations › Linear ⇄ GitHub Sync](/reference/integrations/#linear--github-sync) for the
+maintainer-side setup that mirrors `auto-submitted`-labeled GitHub issues back into Linear.
+
+### Findings queue
+
+Skills record improvement findings the moment they are observed by calling
+`plugins/dev/scripts/add-finding.sh` with `--title` and `--body`. Each call appends one JSON
+line to a per-run queue; the end-of-run hook reads the queue and files one ticket per line
+via `file-feedback.sh` (respecting consent and routing above).
+
+Queue path resolution (first match wins):
+
+1. `$CATALYST_FINDINGS_FILE` — orchestrator dispatch sets this to
+   `<orch-dir>/findings.jsonl` so the orchestrator and all workers share one queue per run.
+2. `.catalyst/findings/${CATALYST_SESSION_ID}.jsonl` — standalone oneshot / implement-plan
+   runs, scoped to the catalyst session id.
+3. `.catalyst/findings/current.jsonl` — final fallback when neither var is set.
+
+Each line has the shape:
+
+```json
+{"ts":"2026-04-24T20:30:00Z","skill":"oneshot","title":"…","body":"…","severity":"low","tags":[]}
+```
+
+The hook deletes the queue file after a successful full drain. On partial failure (some
+entries filed, some not), the queue is preserved so the next run can retry.
 
 ## Archive Config
 

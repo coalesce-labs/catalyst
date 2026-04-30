@@ -1,7 +1,7 @@
 ---
 name: iterate-plan
 description: "Update existing implementation plans based on feedback or changed requirements. **ALWAYS use when** the user says 'update the plan', 'change the plan', 'the requirements changed', 'revise the approach', or wants to modify an existing plan in thoughts/shared/plans/ after review feedback or discovered issues."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Write, Task, Bash, Grep, Glob
 version: 1.0.0
 ---
@@ -108,11 +108,6 @@ If the changes require new technical understanding:
 
 1. Save the updated plan (overwrite the existing file)
 2. Sync thoughts: `humanlayer thoughts sync`
-3. Track in workflow context (REQUIRED) — substitute actual path and ticket:
-   ```bash
-   "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add plans "thoughts/shared/plans/YYYY-MM-DD-description.md" "TICKET-ID"
-   ```
-4. Verify: `"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent plans` must print the path
 
 ### Step 6: Present Summary
 

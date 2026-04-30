@@ -623,4 +623,85 @@ describe("mockups — todos.html", () => {
     }
     expect(hasEmoji).toBe(false);
   });
+
+  it("renders a deprecation banner pointing to the orch detail view", async () => {
+    // CTL-171 — todos are now folded into orch.html's collapsible panel. The
+    // standalone page lingers with a banner so existing bookmarks still work
+    // during the transition period.
+    const res = await fetch(`${baseUrl}/mockups/todos.html`);
+    const body = await res.text();
+    expect(body).toContain("deprecation-banner");
+    expect(body.toLowerCase()).toContain("deprecated");
+    expect(body).toMatch(/href="\.\/orch\.html#todos-panel"/);
+  });
+});
+
+describe("mockups — orch.html todos panel (CTL-171)", () => {
+  it("renders a collapsible todos panel above the worker tabs (expanded by default)", async () => {
+    const res = await fetch(`${baseUrl}/mockups/orch.html`);
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('id="todos-panel"');
+    expect(body).toContain('data-collapsed="false"');
+    const workersIdx = body.indexOf('aria-label="Workers by state"');
+    const todosIdx = body.indexOf('id="todos-panel"');
+    expect(workersIdx).toBeGreaterThan(-1);
+    expect(todosIdx).toBeLessThan(workersIdx);
+  });
+
+  it("exposes status + group filter chips inline in the panel", async () => {
+    const res = await fetch(`${baseUrl}/mockups/orch.html`);
+    const body = await res.text();
+    expect(body).toContain("todos-filter-bar");
+    expect(body).toContain("todos-filter__status");
+    expect(body).toContain("todos-filter__group");
+    expect(body).toContain('data-status="all"');
+    expect(body).toContain('data-status="pending"');
+    expect(body).toContain('data-status="in-progress"');
+    expect(body).toContain('data-status="completed"');
+    expect(body).toContain('data-group="worker"');
+    expect(body).toContain('data-group="flat"');
+    expect(body).toMatch(/<input[^>]+data-search/);
+  });
+
+  it("declares a toggle button with aria-controls + aria-expanded", async () => {
+    const res = await fetch(`${baseUrl}/mockups/orch.html`);
+    const body = await res.text();
+    expect(body).toContain('id="todos-panel-toggle"');
+    expect(body).toMatch(/aria-controls="todos-panel-body"/);
+    expect(body).toMatch(/aria-expanded="true"/);
+  });
+
+  it("persists collapsed state to sessionStorage under catalyst.orch.todos.collapsed", async () => {
+    const res = await fetch(`${baseUrl}/mockups/orch.html`);
+    const body = await res.text();
+    expect(body).toContain("catalyst.orch.todos.collapsed");
+    expect(body).toContain("sessionStorage");
+  });
+
+  it("worker groups only include tickets from this orchestrator", async () => {
+    const res = await fetch(`${baseUrl}/mockups/orch.html`);
+    const body = await res.text();
+    const panelStart = body.indexOf('id="todos-panel"');
+    expect(panelStart).toBeGreaterThan(-1);
+    const panelEnd = body.indexOf("</section>", panelStart);
+    const panel = body.slice(panelStart, panelEnd);
+    const tickets = panel.match(/CTL-\d+/g) ?? [];
+    expect(tickets.length).toBeGreaterThanOrEqual(4);
+    // CTL-218 belongs to a different orch in todos.html; the orch-scoped
+    // panel must never bleed cross-session todos.
+    expect(panel).not.toContain("CTL-218");
+  });
+
+  it("includes todo rows with status variants + per-row open links", async () => {
+    const res = await fetch(`${baseUrl}/mockups/orch.html`);
+    const body = await res.text();
+    const panelStart = body.indexOf('id="todos-panel"');
+    const panelEnd = body.indexOf("</section>", panelStart);
+    const panel = body.slice(panelStart, panelEnd);
+    expect(panel).toMatch(/class="todos-row[^"]*"\s+data-status="pending"/);
+    expect(panel).toMatch(/class="todos-row[^"]*"\s+data-status="in-progress"/);
+    expect(panel).toMatch(/class="todos-row[^"]*"\s+data-status="completed"/);
+    expect(panel).toMatch(/class="todos-row__open"[^>]+href="\.\/worker\.html\?ticket=CTL-/);
+  });
 });

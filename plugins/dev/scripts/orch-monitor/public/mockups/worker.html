@@ -591,6 +591,71 @@
         font-variant-numeric: tabular-nums;
       }
 
+      /* ------- Hero metrics ------- */
+
+      .hero-metrics {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: var(--spacing-3);
+      }
+
+      @media (max-width: 640px) {
+        .hero-metrics {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .hero-metric {
+        background: var(--color-surface-1);
+        border: 1px solid var(--color-border-subtle);
+        border-radius: var(--radius-md);
+        padding: var(--spacing-4) var(--spacing-5);
+        display: flex;
+        flex-direction: column;
+        gap: var(--spacing-1);
+      }
+
+      [data-system="precision-instrument"] .hero-metric {
+        border-radius: 0;
+      }
+
+      .hero-metric__label {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-label);
+        letter-spacing: var(--letter-spacing-label);
+        text-transform: uppercase;
+        color: var(--color-text-lo);
+      }
+
+      .hero-metric__value {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-display);
+        line-height: 1.1;
+        font-variant-numeric: tabular-nums;
+        color: var(--color-text-hi);
+      }
+
+      .hero-metric__sub {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-text-lo);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Briefing link in worker head */
+      .worker-head__briefing-link {
+        font-family: var(--font-family-mono);
+        font-size: var(--font-size-data);
+        color: var(--color-accent);
+        text-decoration: none;
+        margin-left: auto;
+        align-self: center;
+      }
+
+      .worker-head__briefing-link:hover {
+        text-decoration: underline;
+      }
+
       /* ------- Cost grid ------- */
 
       .cost-grid {
@@ -658,9 +723,113 @@
           <div class="worker-head__title">
             <span class="worker-head__ticket chip chip--ticket">CTL-138</span>
             <span class="chip chip--merging">Merging</span>
+            <span class="chip chip--failed chip-glyph chip-glyph--review">Review reply</span>
             <h1 class="worker-head__name">worker.html mockup</h1>
             <a class="worker-head__pr-link" href="#">PR #247 ↗</a>
+            <a class="worker-head__briefing-link" href="./briefing.html">Briefing →</a>
           </div>
+        </section>
+
+        <!-- ================ DASHBOARD ================ -->
+        <div class="worker-dash">
+          <div class="worker-dash__status">
+            <span class="chip chip--merging">Merging</span>
+            <a class="worker-dash__pr" href="#">PR #247
+              <span class="chip chip--passing">CI passing</span>
+            </a>
+            <span class="worker-dash__kv">merge <strong>CLEAN</strong></span>
+            <span class="worker-dash__kv">auto-merge <strong>armed</strong></span>
+            <span class="chip chip--failed chip-glyph chip-glyph--review">Review reply</span>
+          </div>
+          <div class="worker-metrics">
+            <div class="worker-metric">
+              <span class="worker-metric__label">Cost</span>
+              <span class="worker-metric__value">$3.47</span>
+              <span class="worker-metric__sub">$0.35 / min</span>
+            </div>
+            <div class="worker-metric">
+              <span class="worker-metric__label">Elapsed</span>
+              <span class="worker-metric__value">9m 48s</span>
+              <span class="worker-metric__sub">started 17:33:21</span>
+            </div>
+            <div class="worker-metric">
+              <span class="worker-metric__label">Tokens</span>
+              <span class="worker-metric__value">124k</span>
+              <span class="worker-metric__sub">98k in · 26k out</span>
+            </div>
+          </div>
+          <div class="worker-cost-row">
+            <span class="worker-cost-item"><span class="worker-cost-item__k">input</span> 24,187</span>
+            <span class="worker-cost-sep">·</span>
+            <span class="worker-cost-item"><span class="worker-cost-item__k">output</span> 3,412</span>
+            <span class="worker-cost-sep">·</span>
+            <span class="worker-cost-item"><span class="worker-cost-item__k">cache read</span> 58,120</span>
+            <span class="worker-cost-sep">·</span>
+            <span class="worker-cost-item"><span class="worker-cost-item__k">cache write</span> 12,440</span>
+          </div>
+        </div>
+
+        <!-- ================ LINEAR TICKET ================ -->
+        <section class="worker-section worker-section--ticket">
+          <div class="ticket-panel">
+            <div class="ticket-panel__head">
+              <span class="chip chip--ticket">CTL-138</span>
+              <span class="chip chip--review">In Review</span>
+              <a class="ticket-panel__link" href="#">Open in Linear ↗</a>
+            </div>
+            <h2 class="ticket-panel__title">worker.html mockup — phase strip, hero metrics, briefing nav</h2>
+            <p class="ticket-panel__desc">
+              Implement the updated worker detail view per monitor UX review 2026-04-28.
+              Add hero metrics strip (elapsed, tokens, cost) above the phase timeline.
+              Include a visible "Briefing →" link in worker-head alongside ticket badge
+              and PR link. Promote cost data from the bottom grid to the top of the page.
+            </p>
+          </div>
+        </section>
+
+        <!-- ================ TODOS ================ -->
+        <section class="worker-section">
+          <header class="worker-section__heading">
+            <h2>Todos</h2>
+            <span class="eyebrow">7 items · 5 done</span>
+          </header>
+          <ol class="todo-list">
+            <li class="todo-item todo-item--done">
+              <span class="todo-item__seq">1</span>
+              <span class="todo-item__text">Research mockup harness + brand patterns</span>
+              <span class="todo-item__ts">20:49:22</span>
+            </li>
+            <li class="todo-item todo-item--done">
+              <span class="todo-item__seq">2</span>
+              <span class="todo-item__text">Draft plan doc in thoughts/</span>
+              <span class="todo-item__ts">20:51:18</span>
+            </li>
+            <li class="todo-item todo-item--done">
+              <span class="todo-item__seq">3</span>
+              <span class="todo-item__text">Write failing integration test (TDD)</span>
+              <span class="todo-item__ts">20:53:40</span>
+            </li>
+            <li class="todo-item todo-item--done">
+              <span class="todo-item__seq">4</span>
+              <span class="todo-item__text">Implement worker.html sections</span>
+              <span class="todo-item__ts">20:54:18</span>
+            </li>
+            <li class="todo-item todo-item--done">
+              <span class="todo-item__seq">5</span>
+              <span class="todo-item__text">Add gallery card in index.html</span>
+              <span class="todo-item__ts">20:56:52</span>
+            </li>
+            <li class="todo-item todo-item--active">
+              <span class="todo-item__seq">6</span>
+              <span class="todo-item__text">Shipping · commit, push, create PR, arm auto-merge</span>
+              <span class="todo-item__ts">20:57:08</span>
+            </li>
+            <li class="todo-item todo-item--pending">
+              <span class="todo-item__seq">7</span>
+              <span class="todo-item__text">Poll <code>gh pr view</code> every 60s until state=MERGED</span>
+              <span class="todo-item__ts">—</span>
+            </li>
+          </ol>
         </section>
 
         <!-- ================ PHASE TIMELINE ================ -->
@@ -694,93 +863,6 @@
               <span class="phase-step__name">done</span>
               <span class="phase-step__duration">—</span>
             </div>
-          </div>
-        </section>
-
-        <!-- ================ SPLIT: SIGNAL / PR ================ -->
-        <section class="worker-section">
-          <header class="worker-section__heading">
-            <h2>Signal + PR</h2>
-            <span class="eyebrow">signal file + gh state</span>
-          </header>
-
-          <div class="worker-split">
-            <!-- SIGNAL -->
-            <div class="signal-panel">
-              <dl class="signal-grid">
-                <div class="signal-grid__key">ticket</div>
-                <div class="signal-grid__val">CTL-138</div>
-
-                <div class="signal-grid__key">orchestrator</div>
-                <div class="signal-grid__val">orch-2026-04-22-3</div>
-
-                <div class="signal-grid__key">workerName</div>
-                <div class="signal-grid__val">orch-2026-04-22-3-CTL-138</div>
-
-                <div class="signal-grid__key">label</div>
-                <div class="signal-grid__val">oneshot CTL-138</div>
-
-                <div class="signal-grid__key">status</div>
-                <div class="signal-grid__val">merging</div>
-
-                <div class="signal-grid__key">phase</div>
-                <div class="signal-grid__val">5</div>
-
-                <div class="signal-grid__key">startedAt</div>
-                <div class="signal-grid__val">2026-04-22T20:48:35Z</div>
-
-                <div class="signal-grid__key">updatedAt</div>
-                <div class="signal-grid__val">2026-04-22T20:57:12Z</div>
-
-                <div class="signal-grid__key">lastHeartbeat</div>
-                <div class="signal-grid__val">2026-04-22T20:57:12Z</div>
-
-                <div class="signal-grid__key">completedAt</div>
-                <div class="signal-grid__val signal-grid__val--null">null</div>
-
-                <div class="signal-grid__key">pid</div>
-                <div class="signal-grid__val">56629</div>
-
-                <div class="signal-grid__key">worktreePath</div>
-                <div class="signal-grid__val signal-grid__val--muted">
-                  ~/catalyst/wt/orch-2026-04-22-3-CTL-138
-                </div>
-
-                <div class="signal-grid__key">session_id</div>
-                <div class="signal-grid__val signal-grid__val--muted">sess_20260422T204718_64aa0e66</div>
-
-                <div class="signal-grid__key">lastReviveReason</div>
-                <div class="signal-grid__val signal-grid__val--null">null</div>
-
-                <div class="signal-grid__key">fixupAttempts</div>
-                <div class="signal-grid__val">0</div>
-
-                <div class="signal-grid__key">linearState</div>
-                <div class="signal-grid__val">In Review</div>
-              </dl>
-            </div>
-
-            <!-- PR CARD -->
-            <aside class="pr-card" aria-label="Pull request">
-              <header class="pr-card__head">
-                <span class="pr-card__number">#247</span>
-                <span class="chip chip--passing">CI passing</span>
-              </header>
-              <dl class="pr-card__grid">
-                <dt>URL</dt>
-                <dd>
-                  <a href="#">github.com/../pull/247</a>
-                </dd>
-                <dt>merge state</dt>
-                <dd>CLEAN</dd>
-                <dt>opened</dt>
-                <dd>2026-04-22T20:55:48Z</dd>
-                <dt>auto-merge</dt>
-                <dd>armed</dd>
-                <dt>merged</dt>
-                <dd class="signal-grid__val--null">—</dd>
-              </dl>
-            </aside>
           </div>
         </section>
 
@@ -866,51 +948,6 @@
           </div>
         </section>
 
-        <!-- ================ TODOS ================ -->
-        <section class="worker-section">
-          <header class="worker-section__heading">
-            <h2>Todos</h2>
-            <span class="eyebrow">TodoWrite · mini kanban</span>
-          </header>
-          <div class="todos-kanban">
-            <div class="todos-col todos-col--pending">
-              <header class="todos-col__head">
-                <span>Pending</span>
-                <span class="todos-col__count">1</span>
-              </header>
-              <ul>
-                <li class="todos-item">
-                  Poll <code>gh pr view</code> every 60s until state=MERGED
-                </li>
-              </ul>
-            </div>
-            <div class="todos-col todos-col--in-progress">
-              <header class="todos-col__head">
-                <span>In progress</span>
-                <span class="todos-col__count">1</span>
-              </header>
-              <ul>
-                <li class="todos-item">
-                  Shipping · commit, push, create PR, arm auto-merge
-                </li>
-              </ul>
-            </div>
-            <div class="todos-col todos-col--completed">
-              <header class="todos-col__head">
-                <span>Completed</span>
-                <span class="todos-col__count">5</span>
-              </header>
-              <ul>
-                <li class="todos-item">Research mockup harness + brand patterns</li>
-                <li class="todos-item">Draft plan doc in thoughts/</li>
-                <li class="todos-item">Write failing integration test (TDD)</li>
-                <li class="todos-item">Implement worker.html sections</li>
-                <li class="todos-item">Add gallery card in index.html</li>
-              </ul>
-            </div>
-          </div>
-        </section>
-
         <!-- ================ SUBAGENTS ================ -->
         <section class="worker-section">
           <header class="worker-section__heading">
@@ -939,39 +976,69 @@
           </div>
         </section>
 
-        <!-- ================ COST ================ -->
-        <section class="worker-section">
-          <header class="worker-section__heading">
-            <h2>Cost</h2>
-            <span class="eyebrow">tokens + duration</span>
-          </header>
-          <div class="cost-grid">
-            <div class="cost-cell">
-              <span class="cost-cell__label">Input</span>
-              <span class="cost-cell__value">24,187</span>
+        <!-- ================ SIGNAL (DEBUG) ================ -->
+        <details class="worker-section worker-section--debug">
+          <summary>
+            <h2>Signal file</h2>
+            <span class="eyebrow">debug · click to expand</span>
+          </summary>
+          <div class="worker-split" style="margin-top: var(--spacing-4);">
+            <div class="signal-panel">
+              <dl class="signal-grid">
+                <div class="signal-grid__key">ticket</div>
+                <div class="signal-grid__val">CTL-138</div>
+                <div class="signal-grid__key">orchestrator</div>
+                <div class="signal-grid__val">orch-2026-04-22-3</div>
+                <div class="signal-grid__key">workerName</div>
+                <div class="signal-grid__val">orch-2026-04-22-3-CTL-138</div>
+                <div class="signal-grid__key">label</div>
+                <div class="signal-grid__val">oneshot CTL-138</div>
+                <div class="signal-grid__key">status</div>
+                <div class="signal-grid__val">merging</div>
+                <div class="signal-grid__key">phase</div>
+                <div class="signal-grid__val">5</div>
+                <div class="signal-grid__key">startedAt</div>
+                <div class="signal-grid__val">2026-04-22T20:48:35Z</div>
+                <div class="signal-grid__key">updatedAt</div>
+                <div class="signal-grid__val">2026-04-22T20:57:12Z</div>
+                <div class="signal-grid__key">lastHeartbeat</div>
+                <div class="signal-grid__val">2026-04-22T20:57:12Z</div>
+                <div class="signal-grid__key">completedAt</div>
+                <div class="signal-grid__val signal-grid__val--null">null</div>
+                <div class="signal-grid__key">pid</div>
+                <div class="signal-grid__val">56629</div>
+                <div class="signal-grid__key">worktreePath</div>
+                <div class="signal-grid__val signal-grid__val--muted">~/catalyst/wt/orch-2026-04-22-3-CTL-138</div>
+                <div class="signal-grid__key">session_id</div>
+                <div class="signal-grid__val signal-grid__val--muted">sess_20260422T204718_64aa0e66</div>
+                <div class="signal-grid__key">lastReviveReason</div>
+                <div class="signal-grid__val signal-grid__val--null">null</div>
+                <div class="signal-grid__key">fixupAttempts</div>
+                <div class="signal-grid__val">0</div>
+                <div class="signal-grid__key">linearState</div>
+                <div class="signal-grid__val">In Review</div>
+              </dl>
             </div>
-            <div class="cost-cell">
-              <span class="cost-cell__label">Output</span>
-              <span class="cost-cell__value">3,412</span>
-            </div>
-            <div class="cost-cell">
-              <span class="cost-cell__label">Cache read</span>
-              <span class="cost-cell__value">58,120</span>
-            </div>
-            <div class="cost-cell">
-              <span class="cost-cell__label">Cache write</span>
-              <span class="cost-cell__value">12,440</span>
-            </div>
-            <div class="cost-cell">
-              <span class="cost-cell__label">Duration</span>
-              <span class="cost-cell__value">9m 48s</span>
-            </div>
-            <div class="cost-cell">
-              <span class="cost-cell__label">USD</span>
-              <span class="cost-cell__value">$0.47</span>
-            </div>
+            <aside class="pr-card" aria-label="Pull request">
+              <header class="pr-card__head">
+                <span class="pr-card__number">#247</span>
+                <span class="chip chip--passing">CI passing</span>
+              </header>
+              <dl class="pr-card__grid">
+                <dt>URL</dt>
+                <dd><a href="#">github.com/../pull/247</a></dd>
+                <dt>merge state</dt>
+                <dd>CLEAN</dd>
+                <dt>opened</dt>
+                <dd>2026-04-22T20:55:48Z</dd>
+                <dt>auto-merge</dt>
+                <dd>armed</dd>
+                <dt>merged</dt>
+                <dd class="signal-grid__val--null">—</dd>
+              </dl>
+            </aside>
           </div>
-        </section>
+        </details>
 
         <div class="footer">
           <p>

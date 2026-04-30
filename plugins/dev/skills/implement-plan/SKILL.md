@@ -5,7 +5,7 @@ description:
   'implement the plan', 'start implementing', 'build from the plan', or wants to execute a
   previously created implementation plan using TDD (Red-Green-Refactor). Supports team mode for
   parallel implementation."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools:
   Read, Write, Edit, Grep, Glob, Task, TodoWrite, Bash, mcp__deepwiki__ask_question,
   mcp__deepwiki__read_wiki_structure
@@ -252,6 +252,54 @@ Agent(subagent_type="pr-review-toolkit:pr-test-analyzer",
 ```
 
 If critical gaps exist, write the missing tests.
+
+### File Improvement Findings
+
+**Recording findings during implementation.** When a phase surfaces friction worth fixing —
+a bug noticed in adjacent code, a step that shouldn't need manual intervention, a gap in
+tooling — record it the moment it's observed:
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
+  --title "Short imperative title" \
+  --body "Reproduction + expected + observed + any links" \
+  --skill implement-plan
+```
+
+Findings go to a shared queue (under orchestrate/oneshot, that skill's queue; direct
+invocations get a per-session queue). The block below files the queue at end-of-run. It's a
+safety net: when `implement-plan` runs under `/orchestrate` or `/oneshot`, the parent's
+filing step drains the same queue first and this block finds an empty file:
+
+```bash
+FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
+CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+FINDINGS_FILE="${CATALYST_FINDINGS_FILE:-.catalyst/findings/${CATALYST_SESSION_ID:-current}.jsonl}"
+
+if [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; then
+  COUNT=$(wc -l < "$FINDINGS_FILE" | tr -d ' ')
+  if [ "$("$CONSENT" check)" != "granted" ] && [ -z "${CATALYST_AUTONOMOUS:-}" ] && [ -t 0 ]; then
+    read -r -p "File $COUNT improvement tickets now? [Y/n] " yn
+    case "$yn" in [Nn]*) : ;; *) "$CONSENT" grant >/dev/null ;; esac
+  fi
+  if [ "$("$CONSENT" check)" = "granted" ]; then
+    FILED=0
+    while IFS= read -r line; do
+      TITLE=$(jq -r '.title' <<<"$line")
+      BODY=$(jq -r '.body' <<<"$line")
+      SKILL=$(jq -r '.skill // "implement-plan"' <<<"$line")
+      RESULT=$("$FEEDBACK" --title "$TITLE" --body "$BODY" --skill "$SKILL" --json 2>/dev/null || true)
+      STATUS=$(jq -r '.status // "failed"' <<<"$RESULT")
+      if [ "$STATUS" = "filed" ]; then
+        ID=$(jq -r '.identifier // .url // ""' <<<"$RESULT")
+        echo "  filed: $ID  ($TITLE)"
+        FILED=$((FILED + 1))
+      fi
+    done < "$FINDINGS_FILE"
+    [ "$FILED" -eq "$COUNT" ] && rm -f "$FINDINGS_FILE"
+  fi
+fi
+```
 
 ### End Session Tracking
 

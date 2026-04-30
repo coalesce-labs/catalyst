@@ -415,6 +415,103 @@ pass "every JSONL line is valid JSON after tricky input"
 
 rm -rf "$TMP"
 
+# ─── CTL-157: end emits claude_code.session.outcome via OTLP ────────────────
+# We inject a stub emit-otel-event.sh via $CATALYST_EMIT_OTEL_BIN and assert
+# the expected CLI args are forwarded. This isolates session-end behavior
+# from the actual OTLP transport.
+
+make_emit_stub() {
+  local capture_file="$1"
+  local stub_path="$2"
+  cat > "$stub_path" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$capture_file"
+exit 0
+STUB
+  chmod +x "$stub_path"
+}
+
+run_test "end --status done forwards outcome=success to OTel emitter"
+TMP=$(make_tmpdir)
+export CATALYST_DIR="$TMP"
+"$DB_SCRIPT" init >/dev/null
+SID=$(  "$SESS_SCRIPT" start --skill oneshot --ticket CTL-157)
+CAP="$TMP/emit.args"
+STUB="$TMP/emit-stub.sh"
+make_emit_stub "$CAP" "$STUB"
+CATALYST_EMIT_OTEL_BIN="$STUB" "$SESS_SCRIPT" end "$SID" --status done >/dev/null
+[[ -f "$CAP" ]] && pass "emitter invoked on end --status done" || fail "emitter not invoked"
+ARGS=$(cat "$CAP" 2>/dev/null || echo "")
+if echo "$ARGS" | grep -q "claude_code.session.outcome"; then
+  pass "emitter received --event claude_code.session.outcome"
+else
+  fail "event name not forwarded: $ARGS"
+fi
+if echo "$ARGS" | grep -qx "success"; then
+  pass "outcome=success forwarded"
+else
+  fail "outcome=success not forwarded: $ARGS"
+fi
+if echo "$ARGS" | grep -qx "$SID"; then
+  pass "session-id forwarded to emitter"
+else
+  fail "session-id not forwarded: $ARGS"
+fi
+rm -rf "$TMP"
+
+run_test "end --status failed forwards outcome=fail to OTel emitter"
+TMP=$(make_tmpdir)
+export CATALYST_DIR="$TMP"
+"$DB_SCRIPT" init >/dev/null
+SID=$(  "$SESS_SCRIPT" start --skill oneshot)
+CAP="$TMP/emit.args"
+STUB="$TMP/emit-stub.sh"
+make_emit_stub "$CAP" "$STUB"
+CATALYST_EMIT_OTEL_BIN="$STUB" "$SESS_SCRIPT" end "$SID" --status failed >/dev/null
+ARGS=$(cat "$CAP" 2>/dev/null || echo "")
+if echo "$ARGS" | grep -qx "fail"; then
+  pass "outcome=fail forwarded"
+else
+  fail "outcome=fail not forwarded: $ARGS"
+fi
+rm -rf "$TMP"
+
+run_test "end --reason forwards reason to OTel emitter"
+TMP=$(make_tmpdir)
+export CATALYST_DIR="$TMP"
+"$DB_SCRIPT" init >/dev/null
+SID=$(  "$SESS_SCRIPT" start --skill oneshot)
+CAP="$TMP/emit.args"
+STUB="$TMP/emit-stub.sh"
+make_emit_stub "$CAP" "$STUB"
+CATALYST_EMIT_OTEL_BIN="$STUB" "$SESS_SCRIPT" end "$SID" \
+  --status failed --reason "quality gates failed" >/dev/null
+ARGS=$(cat "$CAP" 2>/dev/null || echo "")
+if echo "$ARGS" | grep -qx "quality gates failed"; then
+  pass "reason forwarded to emitter"
+else
+  fail "reason not forwarded: $ARGS"
+fi
+# The --reason should also appear in the local session-ended payload.
+EV=$("$DB_SCRIPT" events list --session "$SID" --type session-ended)
+REASON_IN_EVENT=$(echo "$EV" | jq -r '.[0].payload' | jq -r '.reason')
+assert_eq "quality gates failed" "$REASON_IN_EVENT" "reason stored in session-ended payload"
+rm -rf "$TMP"
+
+run_test "end with no emitter binary still succeeds (silent failure)"
+TMP=$(make_tmpdir)
+export CATALYST_DIR="$TMP"
+"$DB_SCRIPT" init >/dev/null
+SID=$(  "$SESS_SCRIPT" start --skill oneshot)
+CATALYST_EMIT_OTEL_BIN="/nonexistent/path/does-not-exist" \
+  "$SESS_SCRIPT" end "$SID" --status done >/dev/null
+EXIT_CODE=$?
+assert_eq "0" "$EXIT_CODE" "end exits 0 even when emitter binary missing"
+# And the SQL write still happened:
+S=$(  "$DB_SCRIPT" session get "$SID" | jq -r '.status')
+assert_eq "done" "$S" "session still marked done despite emitter missing"
+rm -rf "$TMP"
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "────────────────────────────────────────"

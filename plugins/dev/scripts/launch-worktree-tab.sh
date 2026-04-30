@@ -2,7 +2,7 @@
 # launch-worktree-tab.sh — Tab-config launcher for long-lived catalyst worktrees
 #
 # Called as a one-liner from Warp tab configs. Creates the worktree if it doesn't
-# exist (reusing it if it does), then execs claude inside it. Used for both the
+# exist (reusing it if it does), then launches claude inside it. Used for both the
 # permanent "pm" worktree and on-demand ticket worktrees.
 #
 # Usage:
@@ -39,11 +39,13 @@ CLAUDE_LAUNCHER="${SCRIPT_DIR}/catalyst-claude.sh"
 PROJECT=""
 PROMPT_FILE=""
 PROMPT_STRING=""
+SHELL_EVAL=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project) PROJECT="$2"; shift 2 ;;
     --prompt-file) PROMPT_FILE="$2"; shift 2 ;;
     --prompt) PROMPT_STRING="$2"; shift 2 ;;
+    --shell-eval) SHELL_EVAL=true; shift ;;
     --) shift; break ;;
     --*) echo "Unknown flag: $1" >&2; exit 2 ;;
     *) break ;;
@@ -81,6 +83,42 @@ if [[ -z "${WORKTREE_PATH:-}" ]]; then
   exit 1
 fi
 
+# Resolve the initial prompt (used by both modes)
+INITIAL_PROMPT=""
+if [[ -n "$PROMPT_STRING" ]]; then
+  INITIAL_PROMPT="$PROMPT_STRING"
+elif [[ -n "$PROMPT_FILE" ]]; then
+  if [[ -f "$PROMPT_FILE" ]]; then
+    INITIAL_PROMPT="$(<"$PROMPT_FILE")"
+  else
+    echo "⚠️  --prompt-file not found: $PROMPT_FILE — launching without initial prompt" >&2
+  fi
+fi
+
+if [[ "$SHELL_EVAL" == true ]]; then
+  # Emit shell commands for the caller to eval. The cd happens in the calling
+  # shell so Warp's directory tracking picks it up.
+  printf 'cd %q\n' "$WORKTREE_PATH"
+  printf 'eval "$(direnv export zsh 2>/dev/null || true)"\n'
+  printf 'export CATALYST_WARP_NAME=%q\n' "$SESSION_NAME"
+  printf 'export CATALYST_WARP_REMOTE=%q\n' "$SESSION_NAME"
+  # Update Warp's CWD display via OSC 7 (standard terminal CWD notification).
+  # Do NOT call warp_precmd here — it emits DCS block-delimiter sequences that
+  # cause Warp to split the eval into two blocks, dropping a new shell below Claude.
+  printf 'printf '"'"'\\e]7;file://%%s%%s\\a'"'"' "$(hostname)" "$PWD"\n'
+  # No exec here — these commands run inside the caller's shell via eval, so
+  # exec would replace the tab's login shell. When Claude exits, the shell
+  # would be gone and Warp would respawn a bare shell with no context.
+  # Running without exec keeps the shell alive after Claude exits.
+  if [[ -n "$INITIAL_PROMPT" ]]; then
+    printf '%q %q\n' "$CLAUDE_LAUNCHER" "$INITIAL_PROMPT"
+  else
+    printf '%q\n' "$CLAUDE_LAUNCHER"
+  fi
+  exit 0
+fi
+
+# Direct mode: cd + exec (used when not invoked via eval)
 cd "$WORKTREE_PATH"
 
 if command -v direnv >/dev/null 2>&1; then
@@ -88,21 +126,11 @@ if command -v direnv >/dev/null 2>&1; then
   eval "$(direnv export zsh 2>/dev/null || true)"
 fi
 
-# Forward session name to claude via catalyst-claude.sh (reads CATALYST_WARP_*)
 export CATALYST_WARP_NAME="$SESSION_NAME"
 export CATALYST_WARP_REMOTE="$SESSION_NAME"
 
-if [[ -n "$PROMPT_STRING" ]]; then
-  exec "$CLAUDE_LAUNCHER" "$PROMPT_STRING"
-fi
-
-if [[ -n "$PROMPT_FILE" ]]; then
-  if [[ -f "$PROMPT_FILE" ]]; then
-    INITIAL_PROMPT="$(<"$PROMPT_FILE")"
-    exec "$CLAUDE_LAUNCHER" "$INITIAL_PROMPT"
-  else
-    echo "⚠️  --prompt-file not found: $PROMPT_FILE — launching without initial prompt" >&2
-  fi
+if [[ -n "$INITIAL_PROMPT" ]]; then
+  exec "$CLAUDE_LAUNCHER" "$INITIAL_PROMPT"
 fi
 
 exec "$CLAUDE_LAUNCHER"

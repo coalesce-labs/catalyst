@@ -1,7 +1,7 @@
 ---
 name: create-tickets
 description: Create tickets via Linear MCP or generate formatted ticket text
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Create Tickets Skill
