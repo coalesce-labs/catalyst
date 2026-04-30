@@ -15,9 +15,9 @@ direction picked in [CTL-146][ctl-146-direction] (PR #246).
 |-------------------------|-------------------|------------------------|-----------------------------------------|
 | `mark.svg`              | `0 0 64 64`       | 2 (6 cmds ≤ 20)        | Mark at 32 px and above                 |
 | `mark-simplified.svg`   | `0 0 16 16`       | 1 (3 cmds ≤ 8)         | Mark at 16–32 px                        |
-| `wordmark.svg`          | `0 0 656 100`     | 8 (one per letter)     | Wordmark stand-alone                    |
-| `lockup-horizontal.svg` | `0 0 806 100`     | 2 mark + 8 wordmark    | Primary lockup                          |
-| `lockup-stacked.svg`    | `0 0 656 240`     | 2 mark + 8 wordmark    | Compact / square lockup                 |
+| `wordmark.svg`          | `5.43 -102 564.71 132.57` | 1 compound path   | Wordmark stand-alone                    |
+| `lockup-horizontal.svg` | `0 -102 763.57 132.57`    | 2 mark + 1 wordmark | Primary lockup                          |
+| `lockup-stacked.svg`    | `0 0 564.71 271.77`       | 2 mark + 1 wordmark | Compact / square lockup                 |
 
 ### Rasterized export — OG card (CTL-152)
 
@@ -26,7 +26,8 @@ direction picked in [CTL-146][ctl-146-direction] (PR #246).
 | `og-card.svg`   | `0 0 1200 630`    | lockup + tagline + URL | Source for the social preview card      |
 | `og-card.png`   | 1200 × 630 raster | —                      | Shipped to `website/public/og-card.png` |
 
-Every mark/wordmark/lockup path uses `stroke="currentColor"` — no hex literals. The OG card
+Every mark path uses `stroke="currentColor"` and the wordmark uses `fill="currentColor"` — no hex
+literals in either. The OG card
 (`og-card.svg`) is an export source, not a themable asset, so it bakes Operator Console hex values
 directly.
 
@@ -75,20 +76,18 @@ the simplified mark exists as a separate file rather than a CSS scale.
 
 ## Wordmark
 
-`wordmark.svg` is a drawn, stroke-based CATALYST — not a font export. Eight paths, one per letter
-(`data-letter="C"`, `"A1"`, `"T1"`, `"A2"`, `"L"`, `"Y"`, `"S"`, `"T2"`). The construction matches
-the chevron mark's straight-edge geometry: stroke-based, square caps, miter joins, no fills.
+`wordmark.svg` is lowercase "catalyst" set in **Space Grotesk Medium (500)**, converted to outlined
+paths. The glyphs are exported as a single compound `<path>` with `fill="currentColor"` and
+`fill-rule="evenodd"` — no `<text>` elements, no font dependency at render time.
 
-- `viewBox="0 0 656 100"` — **cap-height 100** for easy sizing. Render at any height `h` and the
-  wordmark is `6.56 × h` wide.
-- Stroke-width is `10` units (10 % of cap height) so the wordmark's optical weight matches the mark
-  when they sit side-by-side.
-- Tracking is tight — roughly −0.01 em equivalent — so the word reads as one shape, not eight.
-- Slightly condensed letter proportions keep the overall lockup compact.
+- `viewBox="5.43 -102 564.71 132.57"` — **cap-height 100** for easy sizing. The coordinate system
+  uses the font baseline at `y = 0`, with glyphs extending upward (negative y). Render at any
+  height `h` and the wordmark is `4.26 × h` wide.
+- Letter-spacing is `−0.005 em` (matches `--letter-spacing-title` token).
+- Font weight 500 (Medium) produces optical weight that balances with the mark's stroke width.
 
-Typography pairing: the wordmark is designed to sit alongside **Space Grotesk** (System A) and **GT
-Super / Fraunces** (System B) without fighting either. It is uppercase, geometric, and has custom
-squared terminals so it does not read as a font render.
+This wordmark replaces the previous hand-drawn uppercase CATALYST (CTL-148). The lowercase
+treatment matches the mockup topbar usage (`--font-family-display` token).
 
 ## Lockups
 
@@ -98,21 +97,17 @@ internal `viewBox="0 0 64 64"` coordinate system is preserved).
 ### `lockup-horizontal.svg` — primary
 
 - Mark on the **left**, wordmark on the **right**.
-- **Gap** between mark and wordmark: `50` units = **0.5 × mark height** (per CTL-146's direction
-  spec: `Lockup gap: 0.5 × mark height`).
-- Mark is scaled to `100 × 100` so its height visually matches the wordmark's cap-height.
-- `viewBox="0 0 806 100"` — `100 (mark) + 50 (gap) + 656 (wordmark)`.
-- Vertically, the mark's visual center and the wordmark's cap center both sit at `y = 50`.
+- **Gap** between mark and wordmark: **0.5 × mark height** (per CTL-146's direction spec).
+- Mark is scaled to `132.57 × 132.57` to fill the full vertical extent (ascenders + descenders).
+- `viewBox="0 -102 763.57 132.57"`.
+- The mark uses `stroke="currentColor"`, the wordmark uses `fill="currentColor"`.
 
 ### `lockup-stacked.svg` — compact / square
 
 - Mark **above**, wordmark **below**, both centered on a shared vertical axis.
-- **Vertical rhythm:** `40` units between the mark's baseline and the wordmark's cap line
-  (`0.4 × mark height`). Tighter than the horizontal gap so the two parts read as one vertical
-  stack, not two stacked blocks.
-- `viewBox="0 0 656 240"` — `100 (mark) + 40 (gap) + 100 (wordmark)`. Width matches the wordmark
-  since the mark is narrower.
-- Mark is centered horizontally at `x = 278` (= `(656 − 100) / 2`).
+- **Vertical rhythm:** `0.4 × mark height` between the mark's baseline and the wordmark's cap line.
+- `viewBox="0 0 564.71 271.77"`. Width matches the wordmark since the mark is narrower.
+- Mark is centered horizontally at `x = 232.64` (= `(564.71 − 99.43) / 2`).
 
 ### Clear space
 
@@ -134,8 +129,8 @@ logo, icon, or photograph should cross that outer envelope.
 
 - `mark.svg` — min **32 px** (use `mark-simplified.svg` below 32 px).
 - `mark-simplified.svg` — min **16 px**.
-- `wordmark.svg` — min **80 px wide** (cap-height `80 / 6.56 ≈ 12 px`; below this the strokes of S
-  and A crossbars crush).
+- `wordmark.svg` — min **80 px wide** (height `80 / 4.26 ≈ 19 px`; below this the counter-shapes in
+  a and s lose clarity).
 - `lockup-horizontal.svg` — min **160 px wide**. Below this, switch to the stacked variant or the
   mark-only.
 - `lockup-stacked.svg` — min **72 px wide**. Below this, switch to `mark-simplified.svg` alone — the
@@ -274,7 +269,8 @@ so shares look identical regardless of the viewer's theme.
 - **Direction picked in:** CTL-146 (PR #246, merged 2026-04-22).
   `packages/tokens/docs/brand-v2-direction.md` carries the committable decision summary.
 - **Mark delivered in:** CTL-147 (PR #258).
-- **Wordmark + lockups delivered in:** CTL-148 (PR #262).
+- **Wordmark + lockups (uppercase, drawn) delivered in:** CTL-148 (PR #262).
+- **Wordmark + lockups (lowercase, Space Grotesk Medium) delivered in:** CTL-200.
 - **Favicon set delivered in:** CTL-150 (PR #261).
 - **OG / social preview card delivered in:** CTL-152 (this PR).
 - **V1 retirement:** V1 squircle-and-glyph files (`favicon.svg`, `website/public/favicon.svg`,
