@@ -5,7 +5,7 @@ description:
   when the user indicates they want to save their work, commit changes, or says 'commit this', 'save
   my changes', 'let's commit'. Auto-detects commit type, scope, and ticket reference from branch
   name."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash, Read
 version: 2.0.0
 ---

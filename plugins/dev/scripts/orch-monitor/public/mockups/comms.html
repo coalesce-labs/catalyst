@@ -282,6 +282,39 @@
         font-weight: var(--font-weight-semibold);
       }
 
+      .channel-row__activity {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+      }
+
+      .channel-row__activity-dot {
+        width: 5px;
+        height: 5px;
+        border-radius: var(--radius-full);
+        background: var(--color-text-lo);
+        opacity: 0.5;
+      }
+
+      .channel-row__activity-dot--recent {
+        opacity: 0.9;
+      }
+
+      [data-system="operator-console"] .channel-row__activity-dot--recent {
+        animation: comms-activity 3s ease-in-out infinite;
+      }
+
+      @keyframes comms-activity {
+        0%, 100% { opacity: 0.4; }
+        50% { opacity: 0.9; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        [data-system="operator-console"] .channel-row__activity-dot--recent {
+          animation: none;
+        }
+      }
+
       /* ------- Center pane — message thread ------- */
 
       .message-list {
@@ -621,7 +654,11 @@
                   <span class="channel-row__count">5 agents</span>
                   <div class="channel-row__meta">
                     <span>1h ago</span>
-                    <span></span>
+                    <span class="channel-row__activity" aria-label="3 recent messages">
+                      <span class="channel-row__activity-dot channel-row__activity-dot--recent"></span>
+                      <span class="channel-row__activity-dot channel-row__activity-dot--recent"></span>
+                      <span class="channel-row__activity-dot"></span>
+                    </span>
                   </div>
                 </li>
                 <li class="channel-row" role="listitem" tabindex="0">
@@ -629,7 +666,11 @@
                   <span class="channel-row__count">2 agents</span>
                   <div class="channel-row__meta">
                     <span>4h ago</span>
-                    <span></span>
+                    <span class="channel-row__activity" aria-label="1 recent message">
+                      <span class="channel-row__activity-dot channel-row__activity-dot--recent"></span>
+                      <span class="channel-row__activity-dot"></span>
+                      <span class="channel-row__activity-dot"></span>
+                    </span>
                   </div>
                 </li>
               </ul>

@@ -1,7 +1,7 @@
 ---
 name: context-daily
 description: Generate daily context engineering adoption dashboard
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Write, Task, TodoWrite, Bash
 version: 1.0.0
 ---

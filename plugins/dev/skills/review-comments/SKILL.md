@@ -1,7 +1,7 @@
 ---
 name: review-comments
 description: "Systematically pull, categorize, and address all PR review comments — code change requests, questions, and suggestions. This skill fetches comments via gh api, groups them by file, implements fixes, handles disagreements diplomatically, and pushes a single commit. You should not try to handle PR review feedback manually — this skill ensures nothing gets missed. **ALWAYS consult this skill when** the user says 'address comments', 'fix review feedback', 'handle PR comments', 'respond to reviewers', 'address review', 'review feedback', or mentions that a PR has unresolved comments or review threads. Also used by /oneshot Phase 5 to process reviewer feedback before merging."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
 version: 1.0.0
 argument-hint: "[PR-number]"

@@ -4,7 +4,7 @@ description:
   "Create a git worktree for parallel work and optionally launch implementation session. **ALWAYS
   use when** the user says 'create a worktree', 'work in parallel', 'start a worktree for', or needs
   to work on multiple features simultaneously without switching branches."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash, Read
 version: 1.0.0
 ---

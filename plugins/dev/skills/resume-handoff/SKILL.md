@@ -4,7 +4,7 @@ description:
   "Resume work from a handoff document. **ALWAYS use when** the user says 'resume handoff', 'pick up
   where we left off', 'continue from handoff', or provides a handoff document path. Verifies current
   codebase state against handoff, validates changes, and creates an action plan."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Bash, TodoWrite
 version: 1.0.0
 ---

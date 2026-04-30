@@ -1,7 +1,7 @@
 ---
 name: analyze-milestone
 description: Analyze project milestone health with actionable insights, target date assessment, risk analysis, and specific recommendations
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, Read, Write, TodoWrite
 version: 1.0.0
 ---

@@ -4,7 +4,7 @@ description:
   "Add screenshots, screencasts (GIFs), or other media to changelog entries. Supports both local
   files and externally-hosted assets on R2/CDN. Inserts markdown image references into CHANGELOG.md
   files so they render on the website."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash, Read, Edit, Glob, Grep
 ---
 

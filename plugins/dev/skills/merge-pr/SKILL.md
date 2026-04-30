@@ -4,7 +4,7 @@ description:
   "Safely merge PR with verification and Linear integration. **ALWAYS use when** the user says
   'merge the PR', 'merge this', 'ship it', or wants to merge an approved pull request. Runs tests,
   checks CI, verifies approvals, squash merges, cleans up branches, and moves Linear ticket to Done."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash(linearis *), Bash(git *), Bash(gh *), Read
 version: 1.0.0
 ---

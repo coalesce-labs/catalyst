@@ -1,7 +1,7 @@
 ---
 name: validate-plan
 description: "Validate that implementation plans were correctly executed. **ALWAYS use when** the user says 'validate the plan', 'check if the plan was implemented correctly', 'verify the implementation', or after completing /implement-plan to confirm all phases were properly executed and success criteria met."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Grep, Glob, Bash, Task
 version: 1.0.0
 ---

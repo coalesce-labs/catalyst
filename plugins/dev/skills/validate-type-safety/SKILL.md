@@ -1,7 +1,7 @@
 ---
 name: validate-type-safety
 description: "Run the full 5-step TypeScript validation gate: type check, reward hacking scan, test inclusion, tests, and lint. This skill provides a structured multi-step pipeline that you cannot replicate on your own — it detects the project's package manager and linter automatically, checks tsconfig strictness, and invokes /scan-reward-hacking internally. **ALWAYS consult this skill when** the user mentions 'validate types', 'check type safety', 'type validation', 'type safety gate', wants to verify TypeScript changes before a PR, after completing a plan phase, or says anything about running type checks + tests + lint together. Even if you think you can run tsc yourself, use this skill — it catches issues you'd miss (tsconfig strictness, test exclusions, reward hacking patterns)."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash, Read, Grep, Glob
 version: 1.0.0
 ---
