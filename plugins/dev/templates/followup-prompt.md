@@ -55,9 +55,21 @@ known parent to reference.
    ```
 
 9. **Worker contract ends at `state=MERGED`** (CTL-80) — same as a normal worker. After PR open
-   and auto-merge armed, poll `gh pr view --json state,mergeStateStatus,mergedAt` every 30–60s,
-   resolve BEHIND/CI/review blockers, and only exit when `state=MERGED` and you have written
-   `pr.mergedAt` + `status: "done"` to your signal file.
+   and auto-merge armed, poll until merged. CRITICAL: always include `sleep 30` — a tight loop
+   exhausts GitHub's 5,000/hr GraphQL rate limit in minutes.
+
+   ```bash
+   while true; do
+     MERGE_STATE=$(gh pr view ${PR_NUMBER} --json state,mergeStateStatus,mergedAt)
+     STATE=$(echo "$MERGE_STATE" | jq -r '.state')
+     [ "$STATE" = "MERGED" ] && break
+     # Resolve BEHIND/CI/review blockers
+     sleep 30
+   done
+   ```
+
+   Only exit when `state=MERGED` and you have written `pr.mergedAt` + `status: "done"` to
+   your signal file.
 
 10. **File new improvement findings (CTL-176 / CTL-183 routing)** — if this follow-up
     surfaces new friction worth tracking (beyond the parent findings that triggered it),

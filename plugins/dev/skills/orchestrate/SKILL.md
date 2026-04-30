@@ -607,18 +607,29 @@ Your success contract ENDS at:
   ✓ pr.mergedAt + status="done" written to signal file
   ✓ Linear ticket transitioned to Done
 
-POLL until state=MERGED. After arming auto-merge, run a poll loop:
-  every 30-60s call gh pr view --json state,mergeStateStatus,mergedAt
-  - if state=MERGED: write pr.mergedAt + status="done", transition Linear, exit success
-  - if mergeStateStatus=BEHIND: gh api -X PUT /repos/{owner}/{repo}/pulls/{n}/update-branch
-    (most repos disable allow_update_branch, so manual update is required)
-  - if CI failing: investigate, fix, push, continue polling
-  - if review comments arrive: address via /review-comments, push, continue polling
-  - if mergeStateStatus=DIRTY (conflicts): attempt rebase; if unresolvable, write
-    status="stalled" and exit non-success
-  - if blocked on a required reviewer you cannot satisfy: write status="stalled"
-    and exit non-success
-  - otherwise: wait one cycle and re-poll
+POLL until state=MERGED. After arming auto-merge, run a poll loop.
+CRITICAL: always include `sleep 30` — a tight loop exhausts GitHub's
+5,000/hr GraphQL rate limit in minutes.
+
+```bash
+while true; do
+  MERGE_STATE=$(gh pr view $PR_NUMBER --json state,mergeStateStatus,mergedAt)
+  STATE=$(echo "$MERGE_STATE" | jq -r '.state')
+  MSS=$(echo "$MERGE_STATE" | jq -r '.mergeStateStatus')
+  if [ "$STATE" = "MERGED" ]; then
+    # write pr.mergedAt + status="done", transition Linear, exit success
+    break
+  fi
+  case "$MSS" in
+    BEHIND) gh api -X PUT "/repos/{owner}/{repo}/pulls/${PR_NUMBER}/update-branch" ;;
+    DIRTY)  # attempt rebase; if unresolvable, write status="stalled" and exit
+            ;;
+  esac
+  # Also check: CI failing → investigate/fix/push; review comments → /review-comments
+  # Blocked on required reviewer → write status="stalled" and exit
+  sleep 30
+done
+```
 
 There is no fixed timeout — keep polling while CI/checks are still progressing.
 Apply per-failure-type fix budgets (max ~3 distinct attempts per failure mode) so
