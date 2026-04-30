@@ -1,15 +1,20 @@
 # Changelog
 
-## [7.13.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.12.2...catalyst-dev-v7.13.0) (2026-04-30)
+## [7.13.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.12.2...catalyst-dev-v7.13.0)
+
+Apr 30, 2026
+
+<!-- ai-enhanced -->
+
+### Orchestration Monitor Refresh
+
+Unified Kanban board with view toggles, project filters, and GitHub-style PR status indicators across home, orchestration, and worker views. Worker detail pages now show hero metrics (elapsed time, tokens, cost) above the phase timeline, while the orchestration view promotes todos to the top with an expanded 5-column worker board. Polling loops now include explicit sleep intervals to prevent GitHub API rate limit exhaustion.
 
 
-### Features
+
+### PRs
 
 * **dev:** refresh orch-monitor mockups — Kanban, PR icons, filters, worker board (CTL-202) ([#311](https://github.com/coalesce-labs/catalyst/issues/311)) ([934404f](https://github.com/coalesce-labs/catalyst/commit/934404f2e9afbe98d95959963f69967fdee2cfb1))
-
-
-### Bug Fixes
-
 * **dev:** add explicit sleep to polling loops (CTL-203) ([#313](https://github.com/coalesce-labs/catalyst/issues/313)) ([bf90290](https://github.com/coalesce-labs/catalyst/commit/bf90290cc9a6ee7920222dc614aa89deb6a8b3ba))
 * **dev:** revert chrome.js to single-system per CTL-178 (CTL-202 follow-up) ([#314](https://github.com/coalesce-labs/catalyst/issues/314)) ([2a4a344](https://github.com/coalesce-labs/catalyst/commit/2a4a344779711ef2bb50cd5da21a4bfb18550cdf))
 
