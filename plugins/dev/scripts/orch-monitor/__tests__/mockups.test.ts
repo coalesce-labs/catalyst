@@ -637,16 +637,16 @@ describe("mockups — todos.html", () => {
 });
 
 describe("mockups — orch.html todos panel (CTL-171)", () => {
-  it("renders a collapsible todos panel below the workers table", async () => {
+  it("renders a collapsible todos panel above the worker tabs (expanded by default)", async () => {
     const res = await fetch(`${baseUrl}/mockups/orch.html`);
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain('id="todos-panel"');
-    expect(body).toContain('data-collapsed="true"');
-    const workersIdx = body.indexOf('aria-label="Workers"');
+    expect(body).toContain('data-collapsed="false"');
+    const workersIdx = body.indexOf('aria-label="Workers by state"');
     const todosIdx = body.indexOf('id="todos-panel"');
     expect(workersIdx).toBeGreaterThan(-1);
-    expect(todosIdx).toBeGreaterThan(workersIdx);
+    expect(todosIdx).toBeLessThan(workersIdx);
   });
 
   it("exposes status + group filter chips inline in the panel", async () => {
@@ -669,7 +669,7 @@ describe("mockups — orch.html todos panel (CTL-171)", () => {
     const body = await res.text();
     expect(body).toContain('id="todos-panel-toggle"');
     expect(body).toMatch(/aria-controls="todos-panel-body"/);
-    expect(body).toMatch(/aria-expanded="false"/);
+    expect(body).toMatch(/aria-expanded="true"/);
   });
 
   it("persists collapsed state to sessionStorage under catalyst.orch.todos.collapsed", async () => {
