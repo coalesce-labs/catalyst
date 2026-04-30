@@ -2,14 +2,14 @@
  * Mockup harness chrome — global keybindings + topbar enhancement.
  *
  * Two axes persist to localStorage under "catalyst.mockup.prefs":
- *   - system:  operator-console | precision-instrument  (html[data-system])
+ *   - system:  operator-console                         (html[data-system])
  *   - theme:   dark | light                             (html[data-theme])
  *
  * System resolution priority: window.__catalystMockupPrefs (set by pre-paint
  * bootstrap) > URL query string > localStorage > default. URL stays clean —
- * the default value is never written as a query param. Shift+D and the topbar
- * ◐ button both cycle data-system between operator-console (dark) and
- * precision-instrument (light).
+ * the default value is never written as a query param. The SYSTEMS list is
+ * currently a single entry (operator-console) — the axis is kept for a future
+ * second system and for URL validation.
  *
  * Global keybindings (see README.md for the full table):
  *   g h/d/w/c/b/v/r    — navigate to the matching mockup page
@@ -33,7 +33,7 @@
 (function () {
   const LS_KEY = "catalyst.mockup.prefs";
   const DEFAULTS = { system: "operator-console", theme: "dark" };
-  const SYSTEMS = ["operator-console", "precision-instrument"];
+  const SYSTEMS = ["operator-console"];
   const THEMES = ["dark", "light"];
 
   // Vim-style g-prefix navigation table. Values are file names under ./mockups/.
@@ -67,7 +67,7 @@
       { keys: ["g", "r"], label: "Brand showcase" },
     ]},
     { section: "Appearance", rows: [
-      { keys: ["⇧", "D"], label: "Toggle system (dark / light)" },
+      { keys: ["⇧", "D"], label: "Toggle theme (dark / light)" },
       { keys: ["p"],      label: "Cycle palette" },
     ]},
     { section: "Utility", rows: [
@@ -165,12 +165,12 @@
       });
     });
     actions.push({
-      id: "appearance:toggle-system",
+      id: "appearance:toggle-theme",
       group: "Appearance",
-      label: "Toggle system (dark / light)",
+      label: "Toggle theme",
       hint: ["⇧", "D"],
       type: "appearance",
-      payload: { action: "toggleSystem" },
+      payload: { action: "toggleTheme" },
     });
     actions.push({
       id: "appearance:cycle-palette",
@@ -411,17 +411,6 @@
     return nav;
   }
 
-  function buildSystemToggleButton(toggleSystem) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "mockup-topbar__chip mockup-topbar__chip--system";
-    button.setAttribute("aria-label", "Toggle theme (⇧D)");
-    button.title = "Toggle dark / light (⇧D)";
-    button.textContent = "◐";
-    button.addEventListener("click", () => toggleSystem());
-    return button;
-  }
-
   function buildKeybindChip(palettePresenter) {
     const isMac = isMacPlatform(window.navigator || {});
     const button = document.createElement("button");
@@ -441,7 +430,7 @@
     return button;
   }
 
-  function enhanceTopbar(presenter) {
+  function enhanceTopbar(palettePresenter) {
     const topbar = document.querySelector("header.mockup-topbar");
     if (!topbar) return;
 
@@ -474,12 +463,8 @@
       }
     }
 
-    // System toggle (◐) + ⌘K chip → right.
-    if (presenter && typeof presenter.toggleSystem === "function") {
-      const systemBtn = buildSystemToggleButton(presenter.toggleSystem);
-      topbar.appendChild(systemBtn);
-    }
-    const chip = buildKeybindChip(presenter);
+    // ⌘K chip → right.
+    const chip = buildKeybindChip(palettePresenter);
     topbar.appendChild(chip);
   }
 
@@ -644,6 +629,12 @@
   }
 
   // ----- Controller -----
+  //
+  // The user-facing system switcher was removed with `precision-instrument`
+  // (CTL-178). A headless controller is still returned so `installKeybindings`
+  // and the palette executor can read/write `state.system`/`state.theme`
+  // without special-casing. `handleSystemChange` and `setPopoverOpen` are
+  // no-ops today; when a second system lands, rewire this function.
 
   function mount(prefs) {
     const state = { ...prefs };
@@ -671,10 +662,13 @@
       }
     };
 
-    const toggleSystem = () => {
-      const current = document.documentElement.getAttribute("data-system") || DEFAULTS.system;
-      const nxt = nextSystem(current);
-      if (controller) controller.handleSystemChange(nxt);
+    const toggleTheme = () => {
+      const current = document.documentElement.getAttribute("data-theme") || DEFAULTS.theme;
+      const nxt = nextTheme(current);
+      if (controller) controller.state.theme = nxt;
+      document.documentElement.setAttribute("data-theme", nxt);
+      const prefs = controller ? controller.state : { system: DEFAULTS.system, theme: nxt };
+      persist(prefs);
     };
 
     const cyclePalette = () => {
@@ -744,10 +738,10 @@
         return;
       }
 
-      // Shift+D — system toggle (dark / light).
+      // Shift+D — theme toggle.
       if (ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey && ev.key === "D") {
         ev.preventDefault();
-        toggleSystem();
+        toggleTheme();
         return;
       }
 
@@ -783,9 +777,14 @@
     // Build the palette eagerly so the ⌘K keybinding can open it immediately
     // — but keep it hidden until the user triggers it. The first call to
     // `ensurePalette` wires the executor; subsequent calls are no-ops.
-    const toggleSystem = () => {
-      const current = document.documentElement.getAttribute("data-system") || DEFAULTS.system;
-      controller.handleSystemChange(nextSystem(current));
+    const toggleTheme = () => {
+      const current =
+        document.documentElement.getAttribute("data-theme") || DEFAULTS.theme;
+      const nxt = nextTheme(current);
+      if (controller) controller.state.theme = nxt;
+      document.documentElement.setAttribute("data-theme", nxt);
+      const next = controller ? controller.state : { system: DEFAULTS.system, theme: nxt };
+      persist(next);
     };
     const cyclePalette = () => {
       // Reserved — palettes.css does not exist yet. Intentional no-op so the
@@ -801,7 +800,7 @@
         return;
       }
       if (action.type === "appearance" && action.payload) {
-        if (action.payload.action === "toggleSystem") toggleSystem();
+        if (action.payload.action === "toggleTheme") toggleTheme();
         else if (action.payload.action === "cyclePalette") cyclePalette();
         return;
       }
@@ -814,10 +813,7 @@
     paletteState.executeAction = executeAction;
     ensurePalette(executeAction);
 
-    enhanceTopbar({
-      toggle: () => setPaletteOpen(!isPaletteOpen()),
-      toggleSystem,
-    });
+    enhanceTopbar({ toggle: () => setPaletteOpen(!isPaletteOpen()) });
 
     installKeybindings(controller);
   };
