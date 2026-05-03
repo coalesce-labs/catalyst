@@ -6,7 +6,7 @@ description:
   actuals for a shipped Linear ticket. Writes a structured entry (linear.key, pr_number, merged_at,
   estimate_at_start, estimate_actual, cost_usd, wall_time_hours, what_worked, what_surprised_me)
   to `thoughts/shared/pm/metrics/YYYY-WW-compound-log.md` — one file per ISO week, appends."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash(gh *), Bash(linearis *), Bash(jq *), Bash(git *), Bash(./plugins/dev/scripts/compound-log.sh *), Bash(plugins/dev/scripts/compound-log.sh *), Read, Write
 version: 1.0.0
 ---

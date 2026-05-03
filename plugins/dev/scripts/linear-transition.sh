@@ -113,6 +113,14 @@ if [ -z "$TARGET_STATE" ]; then
   exit 1
 fi
 
+# ─── Look up cached UUID for the target state (CTL-207) ───────────────────
+TARGET_STATE_ID=""
+if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ] && command -v jq >/dev/null 2>&1; then
+  TARGET_STATE_ID=$(jq -r --arg s "$TARGET_STATE" \
+    '.catalyst.linear.stateIds[$s] // empty' "$CONFIG_PATH" 2>/dev/null)
+fi
+STATUS_ARG="${TARGET_STATE_ID:-$TARGET_STATE}"
+
 # ─── Emit a JSON or human-readable result ──────────────────────────────────
 emit() {
   local action="$1" current="$2" message="$3"
@@ -163,7 +171,7 @@ fi
 # Note: `linearis issues update --status "<name>"` expects the state name
 # exactly as it appears in Linear. Multi-word names like "In Review" are
 # passed as a single argument — the shell quotes handle spaces.
-if linearis issues update "$TICKET" --status "$TARGET_STATE" >/dev/null 2>&1; then
+if linearis issues update "$TICKET" --status "$STATUS_ARG" >/dev/null 2>&1; then
   emit "transitioned" "$CURRENT_STATE" ""
   exit 0
 else

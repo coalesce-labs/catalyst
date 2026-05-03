@@ -1,7 +1,7 @@
 ---
 name: debug-production-error
 description: Debug production errors using Sentry error tracking and analysis
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, TodoWrite
 version: 1.0.0
 ---

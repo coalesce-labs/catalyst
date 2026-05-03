@@ -1,7 +1,7 @@
 ---
 name: napkin-sketch
 description: ASCII wireframes + browser capture for design matching
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Napkin Sketch Skill

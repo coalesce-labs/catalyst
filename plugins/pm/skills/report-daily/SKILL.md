@@ -1,7 +1,7 @@
 ---
 name: report-daily
 description: Generate daily status report showing yesterday's deliveries, current work, and team members needing assignments
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, Read, Write
 version: 1.0.0
 ---

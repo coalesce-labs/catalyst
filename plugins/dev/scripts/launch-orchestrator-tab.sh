@@ -107,7 +107,12 @@ if [[ "$SHELL_EVAL" == true ]]; then
   printf 'eval "$(direnv export zsh 2>/dev/null || true)"\n'
   printf 'export CATALYST_WARP_NAME=%q\n' "$SESSION_NAME"
   printf 'export CATALYST_WARP_REMOTE=%q\n' "$SESSION_NAME"
-  printf 'exec %q %q\n' "$CLAUDE_LAUNCHER" "$CLAUDE_INVOCATION"
+  # Update Warp's CWD display via OSC 7 (standard terminal CWD notification).
+  # Do NOT call warp_precmd — it emits DCS block-delimiter sequences that cause
+  # Warp to split the eval into two blocks, dropping a new shell below Claude.
+  printf 'printf '"'"'\\e]7;file://%%s%%s\\a'"'"' "$(hostname)" "$PWD"\n'
+  # No exec — these run inside the caller's shell via eval. See worktree launcher.
+  printf '%q %q\n' "$CLAUDE_LAUNCHER" "$CLAUDE_INVOCATION"
   exit 0
 fi
 

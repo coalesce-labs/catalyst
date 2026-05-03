@@ -51,10 +51,21 @@ ${ISSUES}
      "${SIGNAL_FILE}" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "${SIGNAL_FILE}"
    ```
 
-9. **Poll until MERGED** (CTL-80 contract) — after pushing the fix-up commit, run a poll loop
-   on `gh pr view --json state,mergeStateStatus,mergedAt` every 30–60s. Resolve BEHIND with
-   `gh api -X PUT /repos/{owner}/{repo}/pulls/{n}/update-branch`. Resolve any further CI
-   failures or review comments by pushing fixes. Only exit when `state=MERGED`.
+9. **Poll until MERGED** (CTL-80 contract) — after pushing the fix-up commit, run a poll loop.
+   CRITICAL: always include `sleep 30` — a tight loop exhausts GitHub's 5,000/hr GraphQL rate
+   limit in minutes. Resolve BEHIND with update-branch API. Resolve CI failures or review
+   comments by pushing fixes. Only exit when `state=MERGED`.
+
+   ```bash
+   while true; do
+     MERGE_STATE=$(gh pr view ${PR_NUMBER} --json state,mergeStateStatus,mergedAt)
+     STATE=$(echo "$MERGE_STATE" | jq -r '.state')
+     [ "$STATE" = "MERGED" ] && break
+     # Resolve BEHIND: gh api -X PUT /repos/{owner}/{repo}/pulls/${PR_NUMBER}/update-branch
+     # Resolve CI/review: investigate, fix, push
+     sleep 30
+   done
+   ```
 
 10. **On merge**, write `pr.mergedAt`, `pr.ciStatus = "merged"`, and `status = "done"` to your
     signal file (sourced from `gh pr view --json mergedAt`), transition the Linear ticket to

@@ -1,7 +1,7 @@
 ---
 name: validate-frontmatter
 description: Validate and fix frontmatter consistency across all workflows
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Read, Edit, Glob, Grep
 version: 1.0.0
 ---
@@ -77,7 +77,7 @@ Return: Validation report for all agents
 Use codebase-analyzer agent:
 "Validate frontmatter in all files matching skills/*/SKILL.md. For each file, check:
 1. Required fields present (name, description)
-2. User-invoked skills have disable-model-invocation: true
+2. User-invoked skills have disable-model-invocation: false
 3. CI/background skills have user-invocable: false
 4. Uses allowed-tools (not tools) for tool restrictions
 5. Does NOT include model or category in frontmatter

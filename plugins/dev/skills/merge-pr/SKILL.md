@@ -4,7 +4,7 @@ description:
   "Safely merge PR with verification and Linear integration. **ALWAYS use when** the user says
   'merge the PR', 'merge this', 'ship it', or wants to merge an approved pull request. Runs tests,
   checks CI, verifies approvals, squash merges, cleans up branches, and moves Linear ticket to Done."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash(linearis *), Bash(git *), Bash(gh *), Read
 version: 1.0.0
 ---
@@ -188,10 +188,24 @@ Exit with error (unless `--skip-tests` flag provided).
 Read and follow the full workflow in
 `"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`.
 
-This step is a **poll-until-merged loop**. Every 30–60 seconds, query
-`gh pr view --json state,mergeStateStatus,mergedAt` plus the GraphQL details. The loop only
-exits successfully when `state == "MERGED"` and `mergedAt` is non-null. The reference doc
-contains:
+This step is a **poll-until-merged loop**. The loop only exits successfully when
+`state == "MERGED"` and `mergedAt` is non-null. **Always include `sleep 30` between
+iterations** — a tight loop without sleep exhausts GitHub's 5,000/hr GraphQL rate limit
+in minutes.
+
+```bash
+while true; do
+  MERGE_STATE=$(gh pr view $pr_number --json state,mergeStateStatus,mergedAt)
+  STATE=$(echo "$MERGE_STATE" | jq -r '.state')
+  if [ "$STATE" = "MERGED" ]; then
+    break
+  fi
+  # Diagnose and resolve blockers per the reference doc
+  sleep 30
+done
+```
+
+The reference doc contains:
 
 - The GraphQL query (merge state + CI checks + review threads + reviews in one call)
 - Blocker type table (`CLEAN`, `BEHIND`, `DIRTY`, `BLOCKED`, `DRAFT`, `UNSTABLE`, `HAS_HOOKS`,

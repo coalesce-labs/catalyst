@@ -2,7 +2,7 @@
 # launch-worktree-tab.sh — Tab-config launcher for long-lived catalyst worktrees
 #
 # Called as a one-liner from Warp tab configs. Creates the worktree if it doesn't
-# exist (reusing it if it does), then execs claude inside it. Used for both the
+# exist (reusing it if it does), then launches claude inside it. Used for both the
 # permanent "pm" worktree and on-demand ticket worktrees.
 #
 # Usage:
@@ -102,10 +102,18 @@ if [[ "$SHELL_EVAL" == true ]]; then
   printf 'eval "$(direnv export zsh 2>/dev/null || true)"\n'
   printf 'export CATALYST_WARP_NAME=%q\n' "$SESSION_NAME"
   printf 'export CATALYST_WARP_REMOTE=%q\n' "$SESSION_NAME"
+  # Update Warp's CWD display via OSC 7 (standard terminal CWD notification).
+  # Do NOT call warp_precmd here — it emits DCS block-delimiter sequences that
+  # cause Warp to split the eval into two blocks, dropping a new shell below Claude.
+  printf 'printf '"'"'\\e]7;file://%%s%%s\\a'"'"' "$(hostname)" "$PWD"\n'
+  # No exec here — these commands run inside the caller's shell via eval, so
+  # exec would replace the tab's login shell. When Claude exits, the shell
+  # would be gone and Warp would respawn a bare shell with no context.
+  # Running without exec keeps the shell alive after Claude exits.
   if [[ -n "$INITIAL_PROMPT" ]]; then
-    printf 'exec %q %q\n' "$CLAUDE_LAUNCHER" "$INITIAL_PROMPT"
+    printf '%q %q\n' "$CLAUDE_LAUNCHER" "$INITIAL_PROMPT"
   else
-    printf 'exec %q\n' "$CLAUDE_LAUNCHER"
+    printf '%q\n' "$CLAUDE_LAUNCHER"
   fi
   exit 0
 fi

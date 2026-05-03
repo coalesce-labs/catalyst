@@ -5,7 +5,7 @@ description:
   asks to 'research', 'investigate', 'explore the codebase', 'how does X work', 'find out about', or
   needs deep analysis of how existing code is structured. Produces a research document in
   thoughts/shared/research/ with file:line references."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools:
   Read, Write, Grep, Glob, Task, TodoWrite, Bash, mcp__deepwiki__ask_question,
   mcp__deepwiki__read_wiki_structure
@@ -259,31 +259,7 @@ system in this area. Focus on WHAT EXISTS, not what should exist.}
 humanlayer thoughts sync
 ```
 
-**8b. Track in workflow context (REQUIRED):**
-
-You MUST run this command, substituting the actual file path you wrote and the ticket ID (or
-"null"):
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "thoughts/shared/research/YYYY-MM-DD-description.md" "TICKET-ID"
-```
-
-For example, if you wrote `thoughts/shared/research/2026-02-16-ADV-33-api-layer-research.md` for
-ticket ADV-33:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add research "thoughts/shared/research/2026-02-16-ADV-33-api-layer-research.md" "ADV-33"
-```
-
-**8c. Verify tracking succeeded:**
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent research
-```
-
-This MUST print the path you just saved. If it doesn't, re-run step 8b.
-
-**8d. Linear comment** (if ticket detected): Add a comment noting research is complete and
+**8b. Linear comment** (if ticket detected): Add a comment noting research is complete and
 linking the document path. Use Linearis CLI (run `linearis comments usage` for syntax).
 
 **8e. Present summary to user:**

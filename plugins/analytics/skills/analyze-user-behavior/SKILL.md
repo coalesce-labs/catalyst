@@ -1,7 +1,7 @@
 ---
 name: analyze-user-behavior
 description: Analyze user behavior patterns and cohorts using PostHog
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Task, TodoWrite
 version: 1.0.0
 ---

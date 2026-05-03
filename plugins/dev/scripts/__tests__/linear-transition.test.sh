@@ -292,19 +292,97 @@ run "state names with spaces passed through correctly" \
 run "multi-word state name preserved" \
   expect_contains "$LOG13" "linearis issues update TST-13 --status In Review"
 
-# ─── Test 14: orchestrate SKILL.md references the helper (no drift) ───────
+# ─── Test 14: UUID pass-through when stateIds cached (CTL-207) ────────────
+WORK14="${SCRATCH}/t14"
+BIN14="${SCRATCH}/t14/bin"
+LOG14="${SCRATCH}/t14/log"
+mkdir -p "${WORK14}/.catalyst"
+cat > "${WORK14}/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "linear": {
+      "teamKey": "TST",
+      "stateMap": {
+        "done": "Done",
+        "inReview": "In Review"
+      },
+      "stateIds": {
+        "Done": "44444444-5555-6666-7777-888888888888",
+        "In Review": "33333333-4444-5555-6666-777777777777"
+      }
+    }
+  }
+}
+EOF
+install_fake_linearis "$BIN14"
+touch "$LOG14"
+
+run "UUID passed to --status when stateIds cached" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG14' PATH='$BIN14:$PATH' \
+    '$TRANSITION' --ticket TST-14 --transition done --config '$WORK14/.catalyst/config.json'"
+
+run "update call uses UUID instead of state name" \
+  expect_contains "$LOG14" "linearis issues update TST-14 --status 44444444-5555-6666-7777-888888888888"
+
+# ─── Test 15: falls back to name when stateIds not present ────────────────
+WORK15="${SCRATCH}/t15"
+BIN15="${SCRATCH}/t15/bin"
+LOG15="${SCRATCH}/t15/log"
+build_config "$WORK15"
+install_fake_linearis "$BIN15"
+touch "$LOG15"
+
+run "falls back to state name when no stateIds" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG15' PATH='$BIN15:$PATH' \
+    '$TRANSITION' --ticket TST-15 --transition done --config '$WORK15/.catalyst/config.json'"
+
+run "name-based update when stateIds absent" \
+  expect_contains "$LOG15" "linearis issues update TST-15 --status Done"
+
+# ─── Test 16: partial stateIds — uses UUID for cached, name for uncached ──
+WORK16="${SCRATCH}/t16"
+BIN16="${SCRATCH}/t16/bin"
+LOG16="${SCRATCH}/t16/log"
+mkdir -p "${WORK16}/.catalyst"
+cat > "${WORK16}/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "linear": {
+      "teamKey": "TST",
+      "stateMap": {
+        "done": "Done",
+        "inReview": "In Review"
+      },
+      "stateIds": {
+        "Done": "44444444-5555-6666-7777-888888888888"
+      }
+    }
+  }
+}
+EOF
+install_fake_linearis "$BIN16"
+touch "$LOG16"
+
+run "partial stateIds: name for uncached state" \
+  bash -c "FAKE_LINEARIS_STATE='Backlog' FAKE_LINEARIS_LOG='$LOG16' PATH='$BIN16:$PATH' \
+    '$TRANSITION' --ticket TST-16 --transition inReview --config '$WORK16/.catalyst/config.json'"
+
+run "In Review passed as name (not in stateIds)" \
+  expect_contains "$LOG16" "linearis issues update TST-16 --status In Review"
+
+# ─── Test 17: orchestrate SKILL.md references the helper (no drift) ───────
 ORCH_SKILL="${REPO_ROOT}/plugins/dev/skills/orchestrate/SKILL.md"
 run "orchestrate SKILL.md references linear-transition.sh" \
   bash -c "grep -q 'linear-transition.sh' '$ORCH_SKILL'"
 run "orchestrate SKILL.md documents --state-on-merge flag" \
   bash -c "grep -q 'state-on-merge' '$ORCH_SKILL'"
 
-# ─── Test 15: oneshot SKILL.md references the helper ──────────────────────
+# ─── Test 18: oneshot SKILL.md references the helper ──────────────────────
 ONESHOT_SKILL="${REPO_ROOT}/plugins/dev/skills/oneshot/SKILL.md"
 run "oneshot SKILL.md references linear-transition.sh" \
   bash -c "grep -q 'linear-transition.sh' '$ONESHOT_SKILL'"
 
-# ─── Test 16: merge-pr SKILL.md uses the helper ───────────────────────────
+# ─── Test 19: merge-pr SKILL.md uses the helper ───────────────────────────
 MERGE_SKILL="${REPO_ROOT}/plugins/dev/skills/merge-pr/SKILL.md"
 run "merge-pr SKILL.md uses linear-transition.sh" \
   bash -c "grep -q 'linear-transition.sh' '$MERGE_SKILL'"

@@ -4,7 +4,7 @@ description:
   "Create handoff document for passing work to another session. **ALWAYS use when** the user says
   'create a handoff', 'hand this off', 'save progress for later', 'I need to stop here', or when
   context usage is high (>60%) during implementation and work needs to continue in a fresh session."
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Write, Bash, Read
 version: 1.0.0
 ---
@@ -127,29 +127,9 @@ that don't fall into the above categories}
 
 ---
 
-### 3. Approve and Sync
+### 3. Sync and Complete
 
-Ask the user to review and approve the document. if they request any changes, you should make them
-and ask for approval again. Once the user approves the documents, you should run
-`humanlayer thoughts sync` to save the document.
-
-### Track in Workflow Context (REQUIRED)
-
-After saving the handoff document, you MUST track it. Substitute the actual file path and ticket:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" add handoffs "thoughts/shared/handoffs/PROJ-XXX/YYYY-MM-DD_HH-MM-SS_description.md" "TICKET-ID"
-```
-
-Verify it was tracked:
-
-```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent handoffs
-```
-
-This MUST print the handoff path. If not, re-run the add command.
-
-Once this is completed, you should respond to the user with the template between
+Run `humanlayer thoughts sync` to save the document. Then respond to the user with the template between
 <template_response></template_response> XML tags. do NOT include the tags in your response.
 
 <template_response> Handoff created and synced! You can resume from this handoff in a new session

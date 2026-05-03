@@ -1,7 +1,7 @@
 ---
 name: audit-references
 description: Audit plugin health and find broken references in manifests, commands, agents, and skills
-disable-model-invocation: true
+disable-model-invocation: false
 allowed-tools: Bash, Read, Task, Glob, Grep, Edit
 version: 1.0.0
 ---
