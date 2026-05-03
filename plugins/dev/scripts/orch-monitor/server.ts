@@ -1,6 +1,6 @@
 import { join, resolve as resolvePath, sep, dirname, basename } from "path";
 import { realpathSync, readFileSync, writeFileSync, unlinkSync, existsSync } from "fs";
-import { subscribe } from "./lib/event-bus";
+import { subscribe, emit } from "./lib/event-bus";
 import {
   buildSnapshot,
   buildAnalyticsSnapshot,
@@ -60,6 +60,15 @@ import {
   type PreviewFetcher,
 } from "./lib/preview-status";
 import { writeMergedSignalFile } from "./lib/signal-writer";
+import {
+  createWebhookHandler,
+  type WebhookHandler,
+} from "./lib/webhook-handler";
+import {
+  createWebhookTunnel,
+  type WebhookTunnel,
+  type SmeeClientFactory,
+} from "./lib/webhook-tunnel";
 import { loadOtelConfig } from "./lib/otel-config";
 import { detectProjectKey } from "./lib/project-key";
 import {
@@ -130,6 +139,14 @@ export interface CreateServerOptions {
   terminal?: boolean;
   renderOptions?: RenderOptions;
   commsReader?: CommsReader | null;
+  webhookConfig?: {
+    smeeChannel: string;
+    secret: string;
+    /** Local target URL — defaults to http://localhost:{port}/api/webhook. */
+    target?: string;
+    /** Override for tests so the real smee-client isn't invoked. */
+    tunnelFactory?: SmeeClientFactory;
+  } | null;
 }
 
 const DEFAULT_PORT = 7400;
@@ -151,6 +168,49 @@ const CATALYST_DEV_VERSION = resolveVersion();
 const PR_STATUS_REFRESH_MS = 30_000;
 const PREVIEW_REFRESH_MS = 30_000;
 export const LINEAR_REFRESH_MS = 5 * 60_000;
+
+interface WebhookCliConfig {
+  smeeChannel: string;
+  secret: string;
+}
+
+export function loadWebhookConfig(
+  configPath: string,
+): WebhookCliConfig | null {
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, "utf-8");
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const root = parsed as Record<string, unknown>;
+  const cat = root.catalyst;
+  if (typeof cat !== "object" || cat === null) return null;
+  const monitor = (cat as Record<string, unknown>).monitor;
+  if (typeof monitor !== "object" || monitor === null) return null;
+  const github = (monitor as Record<string, unknown>).github;
+  if (typeof github !== "object" || github === null) return null;
+  const ghCfg = github as Record<string, unknown>;
+  const smeeChannel =
+    typeof ghCfg.smeeChannel === "string" ? ghCfg.smeeChannel : "";
+  const secretEnv =
+    typeof ghCfg.webhookSecretEnv === "string"
+      ? ghCfg.webhookSecretEnv
+      : "CATALYST_WEBHOOK_SECRET";
+  const secret =
+    process.env[secretEnv] ?? process.env.CATALYST_SMEE_SECRET ?? "";
+  const channelOverride = process.env.CATALYST_SMEE_CHANNEL;
+  const finalChannel = channelOverride ?? smeeChannel;
+  if (finalChannel.length === 0 || secret.length === 0) return null;
+  return { smeeChannel: finalChannel, secret };
+}
 
 function collectTicketKeys(snapshot: MonitorSnapshot): string[] {
   const keys = new Set<string>();
@@ -350,6 +410,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
     commsReader: commsReaderOpt,
+    webhookConfig,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -409,6 +470,37 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   const comms: CommsReader | null =
     commsReaderOpt === null ? null : (commsReaderOpt ?? createCommsReader());
+
+  function findSignalPathsForRef(repo: string, prNumber: number): string[] {
+    const paths: string[] = [];
+    const snap = buildSnapshot(wtDir, buildOpts);
+    for (const orch of snap.orchestrators) {
+      for (const worker of Object.values(orch.workers)) {
+        if (!worker.pr) continue;
+        if (worker.pr.number !== prNumber) continue;
+        const wrepo = parseRepoFromPrUrl(worker.pr.url);
+        if (wrepo !== repo) continue;
+        paths.push(join(orch.path, "workers", `${worker.ticket}.json`));
+      }
+    }
+    return paths;
+  }
+
+  let webhookHandler: WebhookHandler | null = null;
+  let webhookTunnel: WebhookTunnel | null = null;
+  if (webhookConfig && prFetcher) {
+    webhookHandler = createWebhookHandler({
+      secret: webhookConfig.secret,
+      prFetcher,
+      findSignalPaths: findSignalPathsForRef,
+      emit: (type, data) => emit(type, data),
+      logger: {
+        info: (m) => console.info(m),
+        warn: (m) => console.warn(m),
+        error: (m) => console.error(m),
+      },
+    });
+  }
 
   function snapshotWithPrStatus(): MonitorSnapshot {
     const snap = buildSnapshot(wtDir, buildOpts);
@@ -979,6 +1071,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
           });
         }
 
+        if (url.pathname === "/api/webhook" && req.method === "POST") {
+          if (!webhookHandler) {
+            return new Response("webhook receiver not configured", {
+              status: 503,
+            });
+          }
+          return webhookHandler.handle(req);
+        }
+
         if (url.pathname === "/api/summarize" && req.method === "POST") {
           if (!summarizeHandler) {
             return Response.json(
@@ -1313,6 +1414,26 @@ export function createServer(opts: CreateServerOptions): BunServer {
     watcher = startWatching(wtDir, { dbPath, sqlitePollIntervalMs, runsDir });
   }
 
+  if (webhookConfig && webhookHandler) {
+    const tunnelTarget =
+      webhookConfig.target ?? `http://localhost:${server.port}/api/webhook`;
+    webhookTunnel = createWebhookTunnel({
+      source: webhookConfig.smeeChannel,
+      target: tunnelTarget,
+      logger: {
+        info: (m) => console.info(m),
+        error: (m) => console.error(m),
+      },
+      factory: webhookConfig.tunnelFactory,
+    });
+    void webhookTunnel.start().catch((err: unknown) => {
+      console.error(
+        `[server] webhook tunnel start failed:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  }
+
   if (pidFile) {
     try {
       writeFileSync(pidFile, `${process.pid}\n`);
@@ -1333,6 +1454,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewFetcher?.stop();
     linear?.stop();
     briefingProvider?.stop();
+    void webhookTunnel?.stop();
     closeDb();
     sseClients.clear();
     if (pidFile) {
@@ -1411,6 +1533,10 @@ if (import.meta.main) {
   const summarizeCfg = loadSummarizeConfig(
     `${process.cwd()}/.catalyst/config.json`,
   );
+
+  const webhookConfig = loadWebhookConfig(
+    `${process.cwd()}/.catalyst/config.json`,
+  );
   let summarizeHandler: SummarizeHandler | null = null;
   if (summarizeCfg.enabled) {
     const providers: Record<ProviderName, SummarizeProvider> = {
@@ -1451,6 +1577,7 @@ if (import.meta.main) {
       terminal: useTerminal,
       renderOptions: renderOpts,
       summarizeHandler,
+      webhookConfig,
     });
     const displayHost =
       srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);

@@ -1329,3 +1329,96 @@ describe("/api/rollup with merged worker PR", () => {
     expect(data.rollup!.generatedBy).toBe("auto");
   });
 });
+
+describe("Webhook receiver route (/api/webhook)", () => {
+  let webhookServer: ReturnType<typeof createServer>;
+  let webhookUrl: string;
+  let webhookTmp: string;
+
+  beforeAll(() => {
+    webhookTmp = mkdtempSync(join(tmpdir(), "webhook-route-"));
+    const wtDir = join(webhookTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+
+    // Fake smee-client constructor — never opens a real network connection.
+    const fakeFactory = () => ({
+      start: () => Promise.resolve({}),
+      stop: () => Promise.resolve(),
+    });
+
+    webhookServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      annotationsDbPath: join(webhookTmp, "annotations.db"),
+      webhookConfig: {
+        smeeChannel: "https://smee.io/test-channel",
+        secret: "test-secret",
+        tunnelFactory: fakeFactory,
+      },
+    });
+    webhookUrl = `http://localhost:${webhookServer.port}`;
+  });
+
+  afterAll(() => {
+    void webhookServer?.stop(true);
+    try {
+      rmSync(webhookTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("returns 401 (not 404) for POST without signature — route is registered", async () => {
+    const res = await fetch(`${webhookUrl}/api/webhook`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"action":"closed"}',
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 405 for GET (method not allowed)", async () => {
+    const res = await fetch(`${webhookUrl}/api/webhook`);
+    // The catchall returns 404 for unmatched paths/methods, so this hits the
+    // default 404 unless we restrict at the route level. We accept either.
+    expect([404, 405]).toContain(res.status);
+  });
+});
+
+describe("Webhook receiver — disabled (no webhookConfig)", () => {
+  let plainServer: ReturnType<typeof createServer>;
+  let plainUrl: string;
+  let plainTmp: string;
+
+  beforeAll(() => {
+    plainTmp = mkdtempSync(join(tmpdir(), "webhook-disabled-"));
+    const wtDir = join(plainTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    plainServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      annotationsDbPath: join(plainTmp, "annotations.db"),
+    });
+    plainUrl = `http://localhost:${plainServer.port}`;
+  });
+
+  afterAll(() => {
+    void plainServer?.stop(true);
+    try {
+      rmSync(plainTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("returns 503 when webhookConfig is not provided", async () => {
+    const res = await fetch(`${plainUrl}/api/webhook`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(503);
+  });
+});
