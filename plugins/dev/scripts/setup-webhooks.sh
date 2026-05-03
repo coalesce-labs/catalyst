@@ -24,9 +24,12 @@ HOME_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/catalyst"
 HOME_CONFIG_PATH="${HOME_CONFIG_DIR}/config.json"
 SECRET_PATH="${HOME_CONFIG_DIR}/webhook-secret"
 DEFAULT_SECRET_ENV="CATALYST_WEBHOOK_SECRET"
+DEFAULT_LINEAR_SECRET_ENV="CATALYST_LINEAR_WEBHOOK_SECRET"
 FORCE=0
 ADD_REPOS=()
+LINEAR_SECRET_ENV=""
 REPO_SHAPE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+ENV_VAR_SHAPE='^[A-Z_][A-Z0-9_]*$'
 
 usage() {
   cat <<EOF
@@ -44,6 +47,12 @@ Options:
   --add-repo <owner/repo>    Add a repo to catalyst.monitor.github.watchRepos in
                              ${PROJECT_CONFIG_PATH}. Repeatable. When this is the
                              only intent flag, channel/secret setup is skipped.
+  --linear-secret-env <NAME> Write catalyst.monitor.linear.webhookSecretEnv = NAME
+                             to ${PROJECT_CONFIG_PATH}. Default ${DEFAULT_LINEAR_SECRET_ENV}.
+                             When this is the only intent flag, channel/secret
+                             setup for GitHub is skipped. Linear webhooks are
+                             registered manually via Linear's GraphQL API; see
+                             website/src/content/docs/observability/webhooks.md.
   -h|--help                  Show this message
 
 Environment:
@@ -63,6 +72,15 @@ while [[ $# -gt 0 ]]; do
       ADD_REPOS+=("$2")
       shift 2
       ;;
+    --linear-secret-env)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "ERROR: --linear-secret-env requires an argument" >&2
+        usage
+        exit 1
+      fi
+      LINEAR_SECRET_ENV="$2"
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -77,6 +95,15 @@ for repo in "${ADD_REPOS[@]}"; do
   fi
 done
 
+# Validate --linear-secret-env name shape (env-var conventions: uppercase,
+# alphanumeric, underscores, must not start with a digit).
+if [[ -n "$LINEAR_SECRET_ENV" ]]; then
+  if [[ ! "$LINEAR_SECRET_ENV" =~ $ENV_VAR_SHAPE ]]; then
+    echo "ERROR: --linear-secret-env value '$LINEAR_SECRET_ENV' must be a valid env-var name (uppercase letters, digits, underscores; cannot start with a digit)" >&2
+    exit 1
+  fi
+fi
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "ERROR: '$1' is required but not installed" >&2
@@ -86,14 +113,18 @@ require_cmd() {
 
 require_cmd jq
 
-# Short-circuit when --add-repo is the only intent flag. The user is asking
-# to update the watch list, not (re)provision channel/secret — which means
-# we don't need curl/openssl and we never call out to the network. Channel
-# setup is a separate user action; the daemon tolerates a missing channel.
-ADD_REPO_ONLY=0
-if [[ ${#ADD_REPOS[@]} -gt 0 && $FORCE -eq 0 && -z "${CATALYST_SMEE_CHANNEL:-}" ]]; then
-  ADD_REPO_ONLY=1
+# Short-circuit when --add-repo and/or --linear-secret-env are the only intent
+# flags. The user is asking to update Layer 1 config, not (re)provision
+# channel/secret — which means we don't need curl/openssl and we never call
+# out to the network. Channel setup is a separate user action; the daemon
+# tolerates a missing channel.
+SKIP_GITHUB_SETUP=0
+if [[ $FORCE -eq 0 && -z "${CATALYST_SMEE_CHANNEL:-}" ]]; then
+  if [[ ${#ADD_REPOS[@]} -gt 0 || -n "$LINEAR_SECRET_ENV" ]]; then
+    SKIP_GITHUB_SETUP=1
+  fi
 fi
+ADD_REPO_ONLY=$SKIP_GITHUB_SETUP
 
 if [[ $ADD_REPO_ONLY -eq 0 ]]; then
   require_cmd curl
@@ -122,12 +153,40 @@ merge_watch_repos() {
   mv "$tmp" "$PROJECT_CONFIG_PATH"
 }
 
-if [[ $ADD_REPO_ONLY -eq 1 ]]; then
-  repos_json=$(printf '%s\n' "${ADD_REPOS[@]}" | jq -R . | jq -s .)
-  merge_watch_repos "$repos_json"
-  echo "Added ${#ADD_REPOS[@]} repo(s) to catalyst.monitor.github.watchRepos in $PROJECT_CONFIG_PATH"
-  jq -r '.catalyst.monitor.github.watchRepos[]' "$PROJECT_CONFIG_PATH" \
-    | sed 's/^/  • /'
+# Write catalyst.monitor.linear.webhookSecretEnv to the project config (Layer 1).
+# Mirrors the GitHub webhookSecretEnv pattern — env-var NAME only, never the
+# value. CTL-210.
+write_linear_secret_env() {
+  local env_name="$1"
+  mkdir -p "$(dirname "$PROJECT_CONFIG_PATH")"
+  if [[ ! -f "$PROJECT_CONFIG_PATH" ]]; then
+    echo "{}" > "$PROJECT_CONFIG_PATH"
+  fi
+  local tmp; tmp=$(mktemp)
+  jq --arg env_name "$env_name" '
+    .catalyst //= {} |
+    .catalyst.monitor //= {} |
+    .catalyst.monitor.linear //= {} |
+    .catalyst.monitor.linear.webhookSecretEnv = $env_name
+  ' "$PROJECT_CONFIG_PATH" > "$tmp"
+  mv "$tmp" "$PROJECT_CONFIG_PATH"
+}
+
+if [[ $SKIP_GITHUB_SETUP -eq 1 ]]; then
+  if [[ ${#ADD_REPOS[@]} -gt 0 ]]; then
+    repos_json=$(printf '%s\n' "${ADD_REPOS[@]}" | jq -R . | jq -s .)
+    merge_watch_repos "$repos_json"
+    echo "Added ${#ADD_REPOS[@]} repo(s) to catalyst.monitor.github.watchRepos in $PROJECT_CONFIG_PATH"
+    jq -r '.catalyst.monitor.github.watchRepos[]' "$PROJECT_CONFIG_PATH" \
+      | sed 's/^/  • /'
+  fi
+  if [[ -n "$LINEAR_SECRET_ENV" ]]; then
+    write_linear_secret_env "$LINEAR_SECRET_ENV"
+    echo "Wrote catalyst.monitor.linear.webhookSecretEnv = $LINEAR_SECRET_ENV to $PROJECT_CONFIG_PATH"
+    echo "  → Set the secret with: export $LINEAR_SECRET_ENV=<your-linear-webhook-signing-secret>"
+    echo "  → Then register the webhook URL with Linear's GraphQL API."
+    echo "  → See website/src/content/docs/observability/webhooks.md for the mutation."
+  fi
   exit 0
 fi
 
@@ -223,6 +282,12 @@ if [[ ${#ADD_REPOS[@]} -gt 0 ]]; then
   repos_json=$(printf '%s\n' "${ADD_REPOS[@]}" | jq -R . | jq -s .)
   merge_watch_repos "$repos_json"
   echo "Added ${#ADD_REPOS[@]} repo(s) to catalyst.monitor.github.watchRepos"
+fi
+
+# ─── 6b. Apply --linear-secret-env (if combined with normal setup) ──────────
+if [[ -n "$LINEAR_SECRET_ENV" ]]; then
+  write_linear_secret_env "$LINEAR_SECRET_ENV"
+  echo "Wrote catalyst.monitor.linear.webhookSecretEnv = $LINEAR_SECRET_ENV"
 fi
 
 # ─── 7. Print next steps ───────────────────────────────────────────────────

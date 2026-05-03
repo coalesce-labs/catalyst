@@ -180,6 +180,41 @@ run "messages posted from different cwd visible" bash -c "
   $COMMS poll shared-ch | grep -q 'from other cwd'
 "
 
+# ── 17. send fans out comms.message.posted to global event log (CTL-210) ───
+# A successful send must also append a `comms.message.posted` event to
+# ~/catalyst/events/YYYY-MM.jsonl via catalyst-state.sh. Both stores share
+# $CATALYST_DIR (set by the test harness), so we read events directly.
+reset_comms
+rm -rf "${CATALYST_DIR}/events"
+"$COMMS" join fanout-ch --as alice --ttl 300 > /dev/null
+MSG_ID=$("$COMMS" send fanout-ch "global fan-out test" --as alice --type info)
+EVENTS_FILE="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+run "send writes a comms.message.posted line to events.jsonl" bash -c "
+  test -f '$EVENTS_FILE' && grep -q '\"event\":\"comms.message.posted\"' '$EVENTS_FILE'
+"
+run "fan-out event carries the matching msgId in detail" bash -c "
+  jq -e --arg id '$MSG_ID' \
+    'select(.event == \"comms.message.posted\" and .detail.msgId == \$id)' \
+    '$EVENTS_FILE' >/dev/null
+"
+run "fan-out event records channel and type in detail" bash -c "
+  jq -e --arg id '$MSG_ID' \
+    'select(.event == \"comms.message.posted\" and .detail.msgId == \$id)
+       | (.detail.channel == \"fanout-ch\" and .detail.type == \"info\")' \
+    '$EVENTS_FILE' >/dev/null
+"
+
+# ── 18. send still succeeds when catalyst-state.sh is unavailable ──────────
+# Override the resolver to a non-existent path; the send must still work.
+reset_comms
+rm -rf "${CATALYST_DIR}/events"
+"$COMMS" join resilient-ch --as alice --ttl 300 > /dev/null
+CATALYST_STATE_SCRIPT="/dev/null/missing" \
+  "$COMMS" send resilient-ch "no events writer" --as alice --type info >/dev/null
+run "send succeeds when state script unavailable" bash -c "
+  grep -q 'no events writer' '${CATALYST_COMMS_DIR}/channels/resilient-ch.jsonl'
+"
+
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"
 [ "$FAILURES" = "0" ]

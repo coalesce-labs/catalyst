@@ -295,3 +295,94 @@ the channel URL as a low-grade secret — anyone with it can post events. Mitiga
 If you need higher assurance (regulated environments, etc.), replace smee with a private
 relay — the tunnel module (`plugins/dev/scripts/orch-monitor/lib/webhook-tunnel.ts`)
 accepts a custom factory you can wire to any EventSource-compatible service.
+
+## Linear webhooks
+
+CTL-210 added a parallel receiver for Linear events. When configured, the daemon exposes
+`POST /api/webhook/linear` and writes Linear-origin events to the same unified event log
+(`~/catalyst/events/YYYY-MM.jsonl`) as GitHub events. Topics use `linear.<noun>.<verb>` —
+e.g. `linear.issue.state_changed`, `linear.comment.created`.
+
+### Configuration
+
+| What | Where | Committed |
+|------|-------|-----------|
+| `webhookSecretEnv` (env-var name only) | `catalyst.monitor.linear.webhookSecretEnv` in `.catalyst/config.json` | YES |
+| HMAC secret value | env var named above (default fallback `CATALYST_LINEAR_WEBHOOK_SECRET`) | NO (per-developer env) |
+
+Run `setup-webhooks.sh --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET` to write the
+env-var name to `.catalyst/config.json`. Then `export CATALYST_LINEAR_WEBHOOK_SECRET=<your-secret>`
+in your shell rc file. Linear webhooks share the same Layer 1 / Layer 2 split as GitHub:
+team-wide config in `.catalyst/config.json`, per-developer values in environment.
+
+### Registering the webhook with Linear
+
+Linear webhooks are NOT auto-registered — there is no equivalent to the `gh api`
+auto-discovery used for GitHub. Register manually via Linear's GraphQL API:
+
+```graphql
+mutation {
+  webhookCreate(input: {
+    url: "https://your-public-host/api/webhook/linear"
+    label: "Catalyst orch-monitor"
+    teamId: "<your-team-uuid>"
+    resourceTypes: ["Issue", "Comment", "Cycle", "Reaction", "IssueLabel"]
+  }) {
+    success
+    webhook {
+      id
+      secret    # store this — needed for Linear-Signature verification
+      enabled
+    }
+  }
+}
+```
+
+Run via the [Linear API Explorer](https://studio.apollographql.com/public/Linear-API/home).
+The `secret` field is returned exactly once — store it immediately as the value of
+your `CATALYST_LINEAR_WEBHOOK_SECRET` env var.
+
+For local development, use a public tunnel (`cloudflared tunnel`, `ngrok`, etc.) to expose
+`http://localhost:7400/api/webhook/linear` to the internet. Linear cannot deliver to a
+smee.io URL the way GitHub can, because Linear webhooks require a stable HTTPS endpoint.
+
+### Signing scheme
+
+| | GitHub | Linear |
+|---|---|---|
+| Header | `X-Hub-Signature-256` | `Linear-Signature` |
+| Format | `sha256=<hex>` | `<hex>` (no prefix) |
+| Algorithm | HMAC-SHA256 over raw body | HMAC-SHA256 over raw body |
+| Delivery ID header | `X-GitHub-Delivery` | `Linear-Delivery` |
+
+### Event topics
+
+| Linear `type` + `action` (and changed fields) | Topic emitted |
+|---|---|
+| `Issue` create | `linear.issue.created` |
+| `Issue` update + `stateId` changed | `linear.issue.state_changed` |
+| `Issue` update + `priority` changed | `linear.issue.priority_changed` |
+| `Issue` update + `assigneeId` changed | `linear.issue.assignee_changed` |
+| `Issue` update (other fields only) | `linear.issue.updated` |
+| `Issue` remove | `linear.issue.removed` |
+| `Comment` create / update / remove | `linear.comment.{created,updated,removed}` |
+| `Cycle` create / update / remove | `linear.cycle.{created,updated,removed}` |
+| `Reaction` create / remove | `linear.reaction.{created,removed}` |
+| `IssueLabel` create / update / remove | `linear.issue_label.{created,updated,removed}` |
+
+For Issue updates with multiple changed fields, the topic is selected by priority order:
+state > priority > assignee > generic. This matches the GitHub PR pattern of one event
+per delivery.
+
+`IssueRelation` is not in Linear's webhook resourceTypes and is not received.
+
+### Testing the receiver
+
+```bash
+# After configuring the secret and starting the daemon:
+catalyst-events tail --filter '.event | startswith("linear.")'
+
+# In another shell, cause a Linear ticket state change.
+# The first shell should print the matching event line within seconds.
+```
+

@@ -65,6 +65,10 @@ import {
   type WebhookHandler,
 } from "./lib/webhook-handler";
 import {
+  createLinearWebhookHandler,
+  type LinearWebhookHandler,
+} from "./lib/linear-webhook-handler";
+import {
   createWebhookTunnel,
   type WebhookTunnel,
   type SmeeClientFactory,
@@ -172,6 +176,14 @@ export interface CreateServerOptions {
      * used. Tests pass a stub so no real `gh` is invoked.
      */
     subscriberRunner?: SubscriberRunner;
+  } | null;
+  /**
+   * Linear webhook config. Independent of `webhookConfig` (which carries the
+   * GitHub bits) so a daemon can run Linear-only or GitHub-only setups.
+   * `secret` empty disables `POST /api/webhook/linear`. CTL-210.
+   */
+  linearWebhookConfig?: {
+    secret: string;
   } | null;
 }
 
@@ -410,6 +422,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     annotationsDbPath,
     commsReader: commsReaderOpt,
     webhookConfig,
+    linearWebhookConfig,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -539,6 +552,30 @@ export function createServer(opts: CreateServerOptions): BunServer {
       runner: defaultGhRunner,
       handler: webhookHandler,
       secret: webhookConfig.secret,
+      logger: {
+        info: (m) => console.info(m),
+        warn: (m) => console.warn(m),
+        error: (m) => console.error(m),
+      },
+    });
+  }
+
+  // Linear webhook handler — independent of GitHub config so a daemon can run
+  // either or both. Shares the same EventLogWriter when both are present so
+  // GitHub and Linear events interleave in the same monthly file. CTL-210.
+  let linearWebhookHandler: LinearWebhookHandler | null = null;
+  if (linearWebhookConfig && linearWebhookConfig.secret.length > 0) {
+    const linearEventLog: EventLogWriter = createEventLogWriter({
+      catalystDir: CATALYST_DIR,
+      logger: {
+        warn: (m) => console.warn(m),
+        error: (m) => console.error(m),
+      },
+    });
+    linearWebhookHandler = createLinearWebhookHandler({
+      secret: linearWebhookConfig.secret,
+      eventLog: linearEventLog,
+      emit: (type, data) => emit(type, data),
       logger: {
         info: (m) => console.info(m),
         warn: (m) => console.warn(m),
@@ -1133,6 +1170,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return webhookHandler.handle(req);
         }
 
+        if (url.pathname === "/api/webhook/linear" && req.method === "POST") {
+          if (!linearWebhookHandler) {
+            return new Response("linear webhook receiver not configured", {
+              status: 503,
+            });
+          }
+          return linearWebhookHandler.handle(req);
+        }
+
         if (url.pathname === "/api/summarize" && req.method === "POST") {
           if (!summarizeHandler) {
             return Response.json(
@@ -1619,10 +1665,24 @@ if (import.meta.main) {
     `${process.cwd()}/.catalyst/config.json`,
   );
 
-  const webhookConfig = loadWebhookConfig(
+  const fullWebhookConfig = loadWebhookConfig(
     process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
     `${process.cwd()}/.catalyst/config.json`,
   );
+  const webhookConfig =
+    fullWebhookConfig &&
+    fullWebhookConfig.smeeChannel.length > 0 &&
+    fullWebhookConfig.secret.length > 0
+      ? {
+          smeeChannel: fullWebhookConfig.smeeChannel,
+          secret: fullWebhookConfig.secret,
+          watchRepos: fullWebhookConfig.watchRepos,
+        }
+      : null;
+  const linearWebhookConfig =
+    fullWebhookConfig && fullWebhookConfig.linearSecret.length > 0
+      ? { secret: fullWebhookConfig.linearSecret }
+      : null;
   let summarizeHandler: SummarizeHandler | null = null;
   if (summarizeCfg.enabled) {
     const providers: Record<ProviderName, SummarizeProvider> = {
@@ -1664,6 +1724,7 @@ if (import.meta.main) {
       renderOptions: renderOpts,
       summarizeHandler,
       webhookConfig,
+      linearWebhookConfig,
     });
     const displayHost =
       srv.hostname === "0.0.0.0" ? "localhost" : String(srv.hostname);

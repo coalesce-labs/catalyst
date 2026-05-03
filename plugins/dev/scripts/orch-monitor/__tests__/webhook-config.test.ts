@@ -23,6 +23,7 @@ beforeEach(() => {
   delete process.env.CATALYST_WEBHOOK_SECRET;
   delete process.env.CATALYST_SMEE_SECRET;
   delete process.env.CATALYST_SMEE_CHANNEL;
+  delete process.env.CATALYST_LINEAR_WEBHOOK_SECRET;
 });
 
 afterEach(() => {
@@ -30,6 +31,7 @@ afterEach(() => {
   delete process.env.CATALYST_WEBHOOK_SECRET;
   delete process.env.CATALYST_SMEE_SECRET;
   delete process.env.CATALYST_SMEE_CHANNEL;
+  delete process.env.CATALYST_LINEAR_WEBHOOK_SECRET;
 });
 
 function writeProject(json: object): void {
@@ -63,6 +65,7 @@ describe("loadWebhookConfig", () => {
       smeeChannel: "https://smee.io/home-channel",
       secret: "home-secret",
       watchRepos: [],
+      linearSecret: "",
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -88,6 +91,7 @@ describe("loadWebhookConfig", () => {
       smeeChannel: "https://smee.io/legacy-channel",
       secret: "legacy-secret",
       watchRepos: [],
+      linearSecret: "",
     });
     expect(warn).toHaveBeenCalledTimes(1);
     const msg = String(warn.mock.calls[0]?.[0] ?? "");
@@ -121,6 +125,7 @@ describe("loadWebhookConfig", () => {
       smeeChannel: "https://smee.io/home-wins",
       secret: "secret",
       watchRepos: [],
+      linearSecret: "",
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -148,6 +153,7 @@ describe("loadWebhookConfig", () => {
       smeeChannel: "https://smee.io/home",
       secret: "custom-value",
       watchRepos: [],
+      linearSecret: "",
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -169,6 +175,7 @@ describe("loadWebhookConfig", () => {
       smeeChannel: "https://smee.io/env-override",
       secret: "secret",
       watchRepos: [],
+      linearSecret: "",
     });
   });
 
@@ -191,6 +198,7 @@ describe("loadWebhookConfig", () => {
       smeeChannel: "https://smee.io/home",
       secret: "legacy-fallback",
       watchRepos: [],
+      linearSecret: "",
     });
   });
 
@@ -261,6 +269,7 @@ describe("loadWebhookConfig", () => {
       smeeChannel: "https://smee.io/legacy",
       secret: "secret",
       watchRepos: [],
+      linearSecret: "",
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -291,6 +300,7 @@ describe("loadWebhookConfig", () => {
       smeeChannel: "https://smee.io/home",
       secret: "default-secret",
       watchRepos: [],
+      linearSecret: "",
     });
   });
 });
@@ -383,6 +393,7 @@ describe("loadWebhookConfig watchRepos (CTL-216)", () => {
       smeeChannel: "https://smee.io/home",
       secret: "secret",
       watchRepos: ["a/b"],
+      linearSecret: "",
     });
   });
 
@@ -509,5 +520,87 @@ describe("loadWebhookConfig watchRepos (CTL-216)", () => {
     const cfg = loadWebhookConfig(homeDir, projectConfigPath);
 
     expect(cfg!.watchRepos).toEqual(["a/b", "c/d", "e/f"]);
+  });
+});
+
+describe("loadWebhookConfig — Linear webhook secret (CTL-210)", () => {
+  it("resolves linearSecret from the env-var named in Layer 1", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          github: { webhookSecretEnv: "CATALYST_WEBHOOK_SECRET" },
+          linear: { webhookSecretEnv: "MY_LINEAR_SECRET" },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "github-secret";
+    process.env.MY_LINEAR_SECRET = "linear-from-named-env";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.linearSecret).toBe("linear-from-named-env");
+
+    delete process.env.MY_LINEAR_SECRET;
+  });
+
+  it("falls back to CATALYST_LINEAR_WEBHOOK_SECRET when no env-var name is configured", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          github: { webhookSecretEnv: "CATALYST_WEBHOOK_SECRET" },
+          linear: {},
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "github-secret";
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "linear-fallback";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSecret).toBe("linear-fallback");
+  });
+
+  it("returns linearSecret as empty string when no Linear config and no env var", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "github-secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSecret).toBe("");
+  });
+
+  it("Linear-only config (no GitHub channel) still loads with smeeChannel/secret empty", () => {
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "MY_LINEAR_SECRET" },
+        },
+      },
+    });
+    process.env.MY_LINEAR_SECRET = "linear-only";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.smeeChannel).toBe("");
+    expect(cfg!.secret).toBe("");
+    expect(cfg!.linearSecret).toBe("linear-only");
+
+    delete process.env.MY_LINEAR_SECRET;
   });
 });

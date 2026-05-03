@@ -10,12 +10,22 @@ export interface WebhookCliConfig {
    * auto-discovery is the only subscription path. CTL-216.
    */
   watchRepos: string[];
+  /**
+   * Linear webhook signing secret (resolved from
+   * `catalyst.monitor.linear.webhookSecretEnv` env-var name in Layer 1, with
+   * fallback to `CATALYST_LINEAR_WEBHOOK_SECRET`). Empty string when no Linear
+   * config is present — the server then disables `POST /api/webhook/linear`.
+   * CTL-210.
+   */
+  linearSecret: string;
 }
 
 interface FileExtract {
   smeeChannel: string | null;
   webhookSecretEnv: string | null;
   watchRepos: string[];
+  /** Env-var name holding the Linear webhook signing secret (Layer 1). */
+  linearWebhookSecretEnv: string | null;
 }
 
 let warnedDeprecatedSmeeChannel = false;
@@ -73,21 +83,31 @@ function readGithubSection(filePath: string): FileExtract | null {
   if (!isRecord(parsed) || !isRecord(parsed.catalyst)) return null;
   const monitor = parsed.catalyst.monitor;
   if (!isRecord(monitor)) return null;
-  const github = monitor.github;
-  if (!isRecord(github)) return null;
+  const github = isRecord(monitor.github) ? monitor.github : null;
+  const linear = isRecord(monitor.linear) ? monitor.linear : null;
+  if (github === null && linear === null) return null;
 
   const smeeChannel =
-    typeof github.smeeChannel === "string" && github.smeeChannel.length > 0
+    github !== null &&
+    typeof github.smeeChannel === "string" &&
+    github.smeeChannel.length > 0
       ? github.smeeChannel
       : null;
   const webhookSecretEnv =
+    github !== null &&
     typeof github.webhookSecretEnv === "string" &&
     github.webhookSecretEnv.length > 0
       ? github.webhookSecretEnv
       : null;
-  const watchRepos = readWatchRepos(github);
+  const watchRepos = github !== null ? readWatchRepos(github) : [];
+  const linearWebhookSecretEnv =
+    linear !== null &&
+    typeof linear.webhookSecretEnv === "string" &&
+    linear.webhookSecretEnv.length > 0
+      ? linear.webhookSecretEnv
+      : null;
 
-  return { smeeChannel, webhookSecretEnv, watchRepos };
+  return { smeeChannel, webhookSecretEnv, watchRepos, linearWebhookSecretEnv };
 }
 
 /**
@@ -148,6 +168,35 @@ export function loadWebhookConfig(
   // opposite of what we want. CTL-216.
   const watchRepos = projectExtract?.watchRepos ?? [];
 
-  if (finalChannel.length === 0 || secret.length === 0) return null;
-  return { smeeChannel: finalChannel, secret, watchRepos };
+  // Linear webhook secret. Layer 1 carries the env-var name; the value lives
+  // in the env var itself. Optional — empty string disables the Linear route.
+  // CTL-210.
+  const linearWebhookSecretEnv =
+    projectExtract?.linearWebhookSecretEnv ?? null;
+  const linearSecret =
+    (linearWebhookSecretEnv !== null
+      ? process.env[linearWebhookSecretEnv]
+      : undefined) ??
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
+    "";
+
+  // Allow Linear-only configurations: if the GitHub channel/secret are missing
+  // but a Linear secret is present, return a config that disables the GitHub
+  // route but enables the Linear route. CTL-210.
+  if (finalChannel.length === 0 || secret.length === 0) {
+    if (linearSecret.length === 0) return null;
+    return {
+      smeeChannel: "",
+      secret: "",
+      watchRepos,
+      linearSecret,
+    };
+  }
+
+  return {
+    smeeChannel: finalChannel,
+    secret,
+    watchRepos,
+    linearSecret,
+  };
 }

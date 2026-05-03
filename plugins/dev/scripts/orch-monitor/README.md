@@ -102,4 +102,33 @@ The monitor subscribes to ten event types per repo:
 | `deployment`                  | (logged; preview state via fallback poll) |
 | `deployment_status`           | (logged; preview state via fallback poll) |
 
+### Linear webhooks (CTL-210)
+
+The monitor also accepts Linear events at `POST /api/webhook/linear` when `monitor.linear.webhookSecretEnv` is configured:
+
+```bash
+plugins/dev/scripts/setup-webhooks.sh --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET
+export CATALYST_LINEAR_WEBHOOK_SECRET=<your-linear-webhook-signing-secret>
+```
+
+Linear webhooks must be registered manually via Linear's GraphQL API (no `gh api` equivalent). See the [website docs](https://github.com/coalesce-labs/catalyst/blob/main/website/src/content/docs/observability/webhooks.md#linear-webhooks) for the `webhookCreate` mutation.
+
+Topics emitted to the unified event log:
+
+| Linear `type` + action | Topic |
+|---|---|
+| `Issue` create / update (state, priority, assignee, generic) / remove | `linear.issue.created` / `linear.issue.{state,priority,assignee}_changed` / `linear.issue.updated` / `linear.issue.removed` |
+| `Comment` create / update / remove | `linear.comment.{created,updated,removed}` |
+| `Cycle` create / update / remove | `linear.cycle.{created,updated,removed}` |
+| `Reaction` create / remove | `linear.reaction.{created,removed}` |
+| `IssueLabel` create / update / remove | `linear.issue_label.{created,updated,removed}` |
+
+The signing scheme differs from GitHub's: Linear sends a bare hex digest in the
+`Linear-Signature` header (no `sha256=` prefix), and uses `Linear-Delivery` as the
+idempotency header.
+
+### Event log consumption (CTL-210)
+
+Long-lived consumers (orchestrators, the dashboard, operator shells) tail the unified event log via `catalyst-events tail --filter <jq>`. Short-lived `claude -p` workers block on `catalyst-events wait-for --filter <jq> --timeout <sec>` until a matching event arrives. See the `monitor-events` skill (`plugins/dev/skills/monitor-events/SKILL.md`) for the canonical patterns and the safety-net rule (every wait MUST be paired with an authoritative one-shot check, since daemon-down means no webhook events).
+
 [shadcn]: https://ui.shadcn.com

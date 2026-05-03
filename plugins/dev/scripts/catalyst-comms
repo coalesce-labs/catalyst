@@ -230,6 +230,37 @@ cmd_send() {
     --arg who "$name" \
     --arg now "$(now_iso)"
 
+  # Fan-out to the global event log so cross-cutting consumers (catalyst-events
+  # tail, monitor-events skill) can observe comms traffic without subscribing
+  # to every channel file. Best-effort — failures here must NOT fail the send.
+  # Per-channel files remain authoritative for agent-to-agent pub/sub. CTL-210.
+  emit_global_event() {
+    local script="${CATALYST_STATE_SCRIPT:-}"
+    if [[ -z "$script" ]]; then
+      script="$(dirname "${BASH_SOURCE[0]}")/catalyst-state.sh"
+    fi
+    [[ -x "$script" ]] || return 0
+    local envelope
+    envelope=$(jq -nc \
+      --arg ts "$(now_iso)" \
+      --arg event "comms.message.posted" \
+      --arg orch "$orch" \
+      --arg from "$name" \
+      --arg ch "$channel" \
+      --arg type "$type" \
+      --arg id "$id" \
+      --arg to "$to" \
+      '{
+        ts: $ts,
+        event: $event,
+        orchestrator: (if $orch == "" then null else $orch end),
+        worker: $from,
+        detail: { channel: $ch, type: $type, msgId: $id, to: $to }
+      }') || return 0
+    "$script" event "$envelope" >/dev/null 2>&1 || true
+  }
+  emit_global_event || true
+
   echo "$id"
 }
 
