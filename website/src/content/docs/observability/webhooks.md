@@ -54,10 +54,78 @@ reason. The env-var **name** (`webhookSecretEnv`) is team-wide and lives in
 | smee channel URL | `~/.config/catalyst/config.json` (cross-project, per-machine) or `CATALYST_SMEE_CHANNEL` env | NO | Once at setup |
 | `webhookSecretEnv` (env-var name only) | `.catalyst/config.json` (per-repo, team-wide) | YES | Once at setup |
 | HMAC secret value | env var named by `webhookSecretEnv` (default `CATALYST_WEBHOOK_SECRET`) | NO (per-developer env) | Once at setup |
-| Repo webhook subscription | GitHub repo settings (auto-created via `gh api`) | n/a | Lazily, on first observation of the repo |
+| `watchRepos` (persistent watch list) | `.catalyst/config.json` (per-repo, team-wide) | YES | Optional; once per added repo |
+| Repo webhook subscription | GitHub repo settings (auto-created via `gh api`) | n/a | At startup for `watchRepos` entries; lazily for repos observed via worker signals |
 
 **You do not need to add the smee channel to each repo manually.** The daemon does this for
-you the first time a worker for that repo runs and is observed by the monitor.
+you the first time a worker for that repo runs and is observed by the monitor — or eagerly at
+startup if you list the repo in `watchRepos` (see [Persistent watch list](#persistent-watch-list)
+below).
+
+## Persistent watch list
+
+The default subscription model is **worker-driven**: the daemon registers a webhook on a
+`(owner, repo)` only after it observes a worker signal file referencing that repo. That works
+well for repos you actively orchestrate against, but it leaves a gap for the "always-on
+activity feed" use case — running orch-monitor as a background daemon (auto-start at login)
+and wanting a continuous event stream for your core repos even when no worker is currently
+active for them.
+
+For that, configure `catalyst.monitor.github.watchRepos` in `.catalyst/config.json` (Layer 1,
+team-wide). On daemon startup, after the smee tunnel is up and **before** the 1-hour replay
+window runs, the daemon iterates this list and ensures each repo is subscribed.
+
+`.catalyst/config.json`:
+
+```json
+{
+  "catalyst": {
+    "monitor": {
+      "github": {
+        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET",
+        "watchRepos": [
+          "coalesce-labs/catalyst",
+          "coalesce-labs/adva"
+        ]
+      }
+    }
+  }
+}
+```
+
+To add a repo without hand-editing the JSON, use the helper script:
+
+```bash
+plugins/dev/scripts/setup-webhooks.sh --add-repo coalesce-labs/catalyst
+```
+
+The flag is repeatable (`--add-repo a/b --add-repo c/d`) and idempotent (re-running with the
+same repo doesn't duplicate). When `--add-repo` is the only intent flag, the script skips
+channel/secret setup and just merges the repos into Layer 1 — safe to commit the resulting
+diff.
+
+### Auto-discovery still works alongside it
+
+`watchRepos` is **additive**, not a replacement. Any repo observed in a worker signal file
+still gets subscribed lazily, deduping against the in-memory cache so configured repos that
+later show up in worker signals don't double-subscribe. You can use either path, both, or
+neither — the daemon doesn't care which mechanism added a `(owner, repo)` to its subscription
+set.
+
+### When the gh CLI can't admin a configured repo
+
+If a repo in `watchRepos` is inaccessible to the `gh` CLI's stored token (no admin
+permission, repo doesn't exist, or the token is missing the `admin:repo_hook` scope), hook
+creation fails. The daemon logs a warning and continues — same tolerance as the
+auto-discovery path:
+
+```
+[webhook-subscriber] failed to list hooks for unknown-org/no-access; skipping
+[webhook-subscriber] failed to create hook for unknown-org/no-access; falling back to polling
+```
+
+The 10-minute polling fallback then handles that repo. Fix the token (or remove the repo from
+`watchRepos`) to silence the warning.
 
 ## One-time setup
 
@@ -117,12 +185,16 @@ per-machine reason.
   "catalyst": {
     "monitor": {
       "github": {
-        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET"
+        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET",
+        "watchRepos": []
       }
     }
   }
 }
 ```
+
+`watchRepos` is optional; see [Persistent watch list](#persistent-watch-list) for what it
+does and when to use it. Empty/missing → auto-discovery only.
 
 Override the channel without editing config (useful for ephemeral debugging):
 
@@ -167,14 +239,17 @@ preview-link updates.
    the receiver and continues with polling-only.
 2. The smee tunnel opens, forwarding `https://smee.io/<channel>` →
    `http://localhost:7400/api/webhook`.
-3. For each `(owner, repo)` observed in worker signal files, the daemon calls
+3. For each repo listed in `watchRepos`, the daemon calls
    `gh api repos/{repo}/hooks` and creates a webhook (or reuses an existing one whose
-   `config.url` matches the smee channel — case-insensitive match).
-4. **Replay**: for each subscribed repo, the last hour of webhook deliveries are pulled via
+   `config.url` matches the smee channel — case-insensitive match). This step runs
+   **before** the replay window so configured repos get the 1-hour replay too.
+4. For each `(owner, repo)` observed in worker signal files, the daemon does the same
+   thing — auto-discovery. The subscriber's in-memory cache dedupes against step 3.
+5. **Replay**: for each subscribed repo, the last hour of webhook deliveries are pulled via
    `gh api repos/{repo}/hooks/{id}/deliveries`, signed synthetically (we own the secret),
    and dispatched through the same handler used for live events. The handler dedupes by
    `X-GitHub-Delivery` so deliveries that raced replay don't double-process.
-5. Every accepted webhook event is also appended to
+6. Every accepted webhook event is also appended to
    `~/catalyst/events/YYYY-MM.jsonl` with a topic like `github.pr.merged` —
    see [Event architecture](../events/).
 

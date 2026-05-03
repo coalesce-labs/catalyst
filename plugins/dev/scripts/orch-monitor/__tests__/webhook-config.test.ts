@@ -62,6 +62,7 @@ describe("loadWebhookConfig", () => {
     expect(cfg).toEqual({
       smeeChannel: "https://smee.io/home-channel",
       secret: "home-secret",
+      watchRepos: [],
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -86,6 +87,7 @@ describe("loadWebhookConfig", () => {
     expect(cfg).toEqual({
       smeeChannel: "https://smee.io/legacy-channel",
       secret: "legacy-secret",
+      watchRepos: [],
     });
     expect(warn).toHaveBeenCalledTimes(1);
     const msg = String(warn.mock.calls[0]?.[0] ?? "");
@@ -118,6 +120,7 @@ describe("loadWebhookConfig", () => {
     expect(cfg).toEqual({
       smeeChannel: "https://smee.io/home-wins",
       secret: "secret",
+      watchRepos: [],
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -144,6 +147,7 @@ describe("loadWebhookConfig", () => {
     expect(cfg).toEqual({
       smeeChannel: "https://smee.io/home",
       secret: "custom-value",
+      watchRepos: [],
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -164,6 +168,7 @@ describe("loadWebhookConfig", () => {
     expect(cfg).toEqual({
       smeeChannel: "https://smee.io/env-override",
       secret: "secret",
+      watchRepos: [],
     });
   });
 
@@ -185,6 +190,7 @@ describe("loadWebhookConfig", () => {
     expect(cfg).toEqual({
       smeeChannel: "https://smee.io/home",
       secret: "legacy-fallback",
+      watchRepos: [],
     });
   });
 
@@ -254,6 +260,7 @@ describe("loadWebhookConfig", () => {
     expect(cfg).toEqual({
       smeeChannel: "https://smee.io/legacy",
       secret: "secret",
+      watchRepos: [],
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -283,6 +290,224 @@ describe("loadWebhookConfig", () => {
     expect(cfg).toEqual({
       smeeChannel: "https://smee.io/home",
       secret: "default-secret",
+      watchRepos: [],
     });
+  });
+});
+
+describe("loadWebhookConfig watchRepos (CTL-216)", () => {
+  it("returns an empty watchRepos array when the field is absent", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.watchRepos).toEqual([]);
+  });
+
+  it("reads watchRepos from Layer 1 (project config)", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          github: {
+            webhookSecretEnv: "CATALYST_WEBHOOK_SECRET",
+            watchRepos: ["coalesce-labs/catalyst", "coalesce-labs/adva"],
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.watchRepos).toEqual([
+      "coalesce-labs/catalyst",
+      "coalesce-labs/adva",
+    ]);
+  });
+
+  it("ignores watchRepos in Layer 2 (home-dir config) — Layer 1 only", () => {
+    // watchRepos is a team-default field; per CTL-217's split, only Layer 1
+    // contributes. A user putting watchRepos in their home-dir config should
+    // be a no-op rather than an override.
+    writeHome({
+      catalyst: {
+        monitor: {
+          github: {
+            smeeChannel: "https://smee.io/home",
+            watchRepos: ["should/be-ignored"],
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.watchRepos).toEqual([]);
+  });
+
+  it("merges Layer 1 watchRepos with Layer 2 smeeChannel", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          github: {
+            webhookSecretEnv: "CATALYST_WEBHOOK_SECRET",
+            watchRepos: ["a/b"],
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).toEqual({
+      smeeChannel: "https://smee.io/home",
+      secret: "secret",
+      watchRepos: ["a/b"],
+    });
+  });
+
+  it("filters out non-string entries", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          github: {
+            webhookSecretEnv: "CATALYST_WEBHOOK_SECRET",
+            // Mixed types — only valid owner/repo strings should survive.
+            watchRepos: ["good/repo", 42, null, { not: "string" }, ["nested"]],
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.watchRepos).toEqual(["good/repo"]);
+    warn.mockRestore();
+  });
+
+  it("filters out empty and whitespace-only strings", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          github: {
+            webhookSecretEnv: "CATALYST_WEBHOOK_SECRET",
+            watchRepos: ["a/b", "", "   ", "c/d"],
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.watchRepos).toEqual(["a/b", "c/d"]);
+    warn.mockRestore();
+  });
+
+  it("filters entries that don't match owner/repo shape", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          github: {
+            webhookSecretEnv: "CATALYST_WEBHOOK_SECRET",
+            watchRepos: ["a/b", "no-slash", "/leading", "trailing/", "a/b/c"],
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    // Only "a/b" matches the owner/repo shape (single slash, non-empty parts,
+    // no path components). Entries like "a/b/c" are not GitHub repos.
+    expect(cfg!.watchRepos).toEqual(["a/b"]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("returns empty array when watchRepos is not an array", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          github: {
+            webhookSecretEnv: "CATALYST_WEBHOOK_SECRET",
+            watchRepos: "not-an-array",
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.watchRepos).toEqual([]);
+  });
+
+  it("dedupes duplicate entries while preserving first-occurrence order", () => {
+    writeHome({
+      catalyst: {
+        monitor: { github: { smeeChannel: "https://smee.io/home" } },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          github: {
+            webhookSecretEnv: "CATALYST_WEBHOOK_SECRET",
+            watchRepos: ["a/b", "c/d", "a/b", "e/f", "c/d"],
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.watchRepos).toEqual(["a/b", "c/d", "e/f"]);
   });
 });

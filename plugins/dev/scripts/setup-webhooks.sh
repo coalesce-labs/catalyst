@@ -10,6 +10,9 @@
 #      (team-wide repo config — env-var NAME only, never the value)
 #   5. Persists the secret to ~/.config/catalyst/webhook-secret with mode 600
 #   6. Migrates a deprecated smeeChannel out of .catalyst/config.json if present
+#   7. Optionally adds repos to catalyst.monitor.github.watchRepos (Layer 1) via
+#      one or more --add-repo <owner/repo> flags. When ONLY --add-repo flags are
+#      passed, the script skips steps 1–6 entirely (no smee channel mutation).
 #
 # Re-running is safe: the script never overwrites an existing channel
 # unless --force is passed.
@@ -22,10 +25,12 @@ HOME_CONFIG_PATH="${HOME_CONFIG_DIR}/config.json"
 SECRET_PATH="${HOME_CONFIG_DIR}/webhook-secret"
 DEFAULT_SECRET_ENV="CATALYST_WEBHOOK_SECRET"
 FORCE=0
+ADD_REPOS=()
+REPO_SHAPE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [--force]
+Usage: $(basename "$0") [--force] [--add-repo owner/repo ...]
 
 Sets up webhook delivery for orch-monitor:
   • Creates a smee.io channel
@@ -35,8 +40,11 @@ Sets up webhook delivery for orch-monitor:
   • Persists the secret to ${SECRET_PATH} (mode 600)
 
 Options:
-  --force    Overwrite existing channel/secret if already configured
-  -h|--help  Show this message
+  --force                    Overwrite existing channel/secret if already configured
+  --add-repo <owner/repo>    Add a repo to catalyst.monitor.github.watchRepos in
+                             ${PROJECT_CONFIG_PATH}. Repeatable. When this is the
+                             only intent flag, channel/secret setup is skipped.
+  -h|--help                  Show this message
 
 Environment:
   CATALYST_SMEE_CHANNEL  Reuse this smee URL instead of generating one
@@ -46,9 +54,27 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --force) FORCE=1; shift ;;
+    --add-repo)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "ERROR: --add-repo requires an argument" >&2
+        usage
+        exit 1
+      fi
+      ADD_REPOS+=("$2")
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
+done
+
+# Validate --add-repo arguments before doing any work so a typo doesn't leave
+# the config in a half-modified state.
+for repo in "${ADD_REPOS[@]}"; do
+  if [[ ! "$repo" =~ $REPO_SHAPE ]]; then
+    echo "ERROR: --add-repo value '$repo' must match owner/repo (e.g. coalesce-labs/catalyst)" >&2
+    exit 1
+  fi
 done
 
 require_cmd() {
@@ -59,8 +85,51 @@ require_cmd() {
 }
 
 require_cmd jq
-require_cmd curl
-require_cmd openssl
+
+# Short-circuit when --add-repo is the only intent flag. The user is asking
+# to update the watch list, not (re)provision channel/secret — which means
+# we don't need curl/openssl and we never call out to the network. Channel
+# setup is a separate user action; the daemon tolerates a missing channel.
+ADD_REPO_ONLY=0
+if [[ ${#ADD_REPOS[@]} -gt 0 && $FORCE -eq 0 && -z "${CATALYST_SMEE_CHANNEL:-}" ]]; then
+  ADD_REPO_ONLY=1
+fi
+
+if [[ $ADD_REPO_ONLY -eq 0 ]]; then
+  require_cmd curl
+  require_cmd openssl
+fi
+
+# Merge an array of new repos into .catalyst.monitor.github.watchRepos in the
+# project config, deduping while preserving insertion order. Creates parent
+# objects as needed.
+merge_watch_repos() {
+  local repos_json="$1"
+  mkdir -p "$(dirname "$PROJECT_CONFIG_PATH")"
+  if [[ ! -f "$PROJECT_CONFIG_PATH" ]]; then
+    echo "{}" > "$PROJECT_CONFIG_PATH"
+  fi
+  local tmp; tmp=$(mktemp)
+  jq --argjson new "$repos_json" '
+    def dedup_preserve_order:
+      reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end);
+    .catalyst //= {} |
+    .catalyst.monitor //= {} |
+    .catalyst.monitor.github //= {} |
+    .catalyst.monitor.github.watchRepos =
+      (((.catalyst.monitor.github.watchRepos // []) + $new) | dedup_preserve_order)
+  ' "$PROJECT_CONFIG_PATH" > "$tmp"
+  mv "$tmp" "$PROJECT_CONFIG_PATH"
+}
+
+if [[ $ADD_REPO_ONLY -eq 1 ]]; then
+  repos_json=$(printf '%s\n' "${ADD_REPOS[@]}" | jq -R . | jq -s .)
+  merge_watch_repos "$repos_json"
+  echo "Added ${#ADD_REPOS[@]} repo(s) to catalyst.monitor.github.watchRepos in $PROJECT_CONFIG_PATH"
+  jq -r '.catalyst.monitor.github.watchRepos[]' "$PROJECT_CONFIG_PATH" \
+    | sed 's/^/  • /'
+  exit 0
+fi
 
 read_smee_channel_from() {
   local path="$1"
@@ -149,7 +218,14 @@ if [[ -n "$existing_project_channel" ]]; then
   echo "→ Removed deprecated smeeChannel from $PROJECT_CONFIG_PATH (commit this change)"
 fi
 
-# ─── 6. Print next steps ───────────────────────────────────────────────────
+# ─── 6. Apply --add-repo entries (if combined with normal setup) ────────────
+if [[ ${#ADD_REPOS[@]} -gt 0 ]]; then
+  repos_json=$(printf '%s\n' "${ADD_REPOS[@]}" | jq -R . | jq -s .)
+  merge_watch_repos "$repos_json"
+  echo "Added ${#ADD_REPOS[@]} repo(s) to catalyst.monitor.github.watchRepos"
+fi
+
+# ─── 7. Print next steps ───────────────────────────────────────────────────
 cat <<EOF
 
 Setup complete.

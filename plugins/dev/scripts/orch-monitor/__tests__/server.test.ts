@@ -1422,3 +1422,269 @@ describe("Webhook receiver — disabled (no webhookConfig)", () => {
     expect(res.status).toBe(503);
   });
 });
+
+describe("Webhook config-driven watch list (CTL-216)", () => {
+  // The subscriber issues a `gh api repos/{repo}/hooks` GET-list call before
+  // doing anything else (see webhook-subscriber.ts). We use the recorded calls
+  // as the signal that ensureSubscribed was invoked for a repo.
+  type Call = string[];
+
+  // Default responder returns a single existing hook that matches the test
+  // smee channel, so listExistingHook resolves to that hook id and the cache
+  // is populated WITHOUT a POST. This is the "happy path" used by tests A and
+  // B; bad-token / failure cases override the responder.
+  function defaultResponder(channel: string) {
+    return (args: string[]): { stdout: string; ok: boolean } => {
+      if (args.includes("-X")) {
+        // POST createHook — only reached when listExistingHook returns null,
+        // which our default responder avoids. Stub a created-hook response.
+        return { stdout: '{"id":777}', ok: true };
+      }
+      return {
+        stdout: JSON.stringify([{ id: 12345, config: { url: channel } }]),
+        ok: true,
+      };
+    };
+  }
+
+  function makeRunner(
+    responder?: (args: string[]) => { stdout: string; ok: boolean },
+    channel = "https://smee.io/test",
+  ): {
+    runner: (args: string[]) => Promise<{ stdout: string; ok: boolean }>;
+    calls: Call[];
+  } {
+    const calls: Call[] = [];
+    const respond = responder ?? defaultResponder(channel);
+    const runner = (args: string[]) => {
+      calls.push([...args]);
+      return Promise.resolve(respond(args));
+    };
+    return { runner, calls };
+  }
+
+  // Fake smee-client constructor — never opens a real network connection.
+  const fakeFactory = () => ({
+    start: () => Promise.resolve({}),
+    stop: () => Promise.resolve(),
+  });
+
+  // Subscriber subscriptions are kicked off in a `then(...)` chain after
+  // `webhookTunnel.start()`. Allow microtasks/macrotasks to drain so the
+  // recorded calls reflect the startup hook firing.
+  async function waitForSubscribeCalls(
+    calls: Call[],
+    expected: number,
+    deadlineMs = 1000,
+  ): Promise<void> {
+    const start = Date.now();
+    while (calls.length < expected && Date.now() - start < deadlineMs) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  function reposCalledFromGetHooks(calls: Call[]): string[] {
+    const out: string[] = [];
+    for (const args of calls) {
+      // GET-list step is `gh api repos/<owner>/<repo>/hooks` with no `-X POST`.
+      if (args[0] !== "gh" || args[1] !== "api") continue;
+      if (args.includes("-X")) continue;
+      const path = args[2] ?? "";
+      const m = path.match(/^repos\/([^/]+\/[^/]+)\/hooks$/);
+      if (m && m[1]) out.push(m[1]);
+    }
+    return out;
+  }
+
+  it("subscribes to configured watchRepos at startup with no workers present", async () => {
+    const channel = "https://smee.io/test-a";
+    const { runner, calls } = makeRunner(undefined, channel);
+    const tmp = mkdtempSync(join(tmpdir(), "webhook-watchrepos-a-"));
+    try {
+      const wtDir = join(tmp, "wt");
+      mkdirSync(wtDir, { recursive: true });
+      const srv = createServer({
+        port: 0,
+        wtDir,
+        startWatcher: false,
+        annotationsDbPath: join(tmp, "annotations.db"),
+        webhookConfig: {
+          smeeChannel: channel,
+          secret: "secret",
+          tunnelFactory: fakeFactory,
+          watchRepos: ["coalesce-labs/catalyst", "coalesce-labs/adva"],
+          subscriberRunner: runner,
+        },
+      });
+      try {
+        await waitForSubscribeCalls(calls, 2);
+        const repos = reposCalledFromGetHooks(calls);
+        expect(repos).toContain("coalesce-labs/catalyst");
+        expect(repos).toContain("coalesce-labs/adva");
+      } finally {
+        void srv.stop(true);
+      }
+    } finally {
+      try {
+        rmSync(tmp, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  it("dedupes when a configured repo is also auto-discovered via worker signal", async () => {
+    const channel = "https://smee.io/test-b";
+    const { runner, calls } = makeRunner(undefined, channel);
+    const tmp = mkdtempSync(join(tmpdir(), "webhook-watchrepos-b-"));
+    try {
+      const wtDir = join(tmp, "wt");
+      const orchDir = join(wtDir, "orch-dedup");
+      mkdirSync(join(orchDir, "workers"), { recursive: true });
+      writeFileSync(
+        join(orchDir, "state.json"),
+        JSON.stringify({
+          id: "orch-dedup",
+          startedAt: new Date().toISOString(),
+          currentWave: 1,
+          totalWaves: 1,
+          waves: [{ wave: 1, status: "in_progress", tickets: ["X-1"] }],
+        }),
+      );
+      writeFileSync(
+        join(orchDir, "workers", "X-1.json"),
+        JSON.stringify({
+          ticket: "X-1",
+          orchestrator: "orch-dedup",
+          workerName: "orch-dedup-X-1",
+          status: "in_progress",
+          phase: 1,
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          pid: process.pid,
+          pr: {
+            number: 99,
+            url: "https://github.com/coalesce-labs/catalyst/pull/99",
+            ciStatus: "pending",
+            prOpenedAt: new Date().toISOString(),
+            autoMergeArmedAt: null,
+            mergedAt: null,
+          },
+        }),
+      );
+
+      const srv = createServer({
+        port: 0,
+        wtDir,
+        startWatcher: false,
+        annotationsDbPath: join(tmp, "annotations.db"),
+        webhookConfig: {
+          smeeChannel: channel,
+          secret: "secret",
+          tunnelFactory: fakeFactory,
+          watchRepos: ["coalesce-labs/catalyst"],
+          subscriberRunner: runner,
+        },
+      });
+      try {
+        await waitForSubscribeCalls(calls, 1);
+        // Force snapshot to run the auto-discovery path too.
+        const res = await fetch(`http://localhost:${srv.port}/api/snapshot`);
+        expect(res.ok).toBe(true);
+        await res.json();
+        // Give the snapshot's `void ensureSubscribed` a tick to attempt running.
+        await new Promise((r) => setTimeout(r, 20));
+        const repos = reposCalledFromGetHooks(calls);
+        const catalystCalls = repos.filter(
+          (r) => r === "coalesce-labs/catalyst",
+        );
+        // Subscriber's in-memory cache dedupes — only one subscription attempt
+        // even though both startup hook and snapshot would have fired.
+        expect(catalystCalls.length).toBe(1);
+      } finally {
+        void srv.stop(true);
+      }
+    } finally {
+      try {
+        rmSync(tmp, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  it("does not subscribe to anything when watchRepos is empty/missing", async () => {
+    const { runner, calls } = makeRunner();
+    const tmp = mkdtempSync(join(tmpdir(), "webhook-watchrepos-c-"));
+    try {
+      const wtDir = join(tmp, "wt");
+      mkdirSync(wtDir, { recursive: true });
+      const srv = createServer({
+        port: 0,
+        wtDir,
+        startWatcher: false,
+        annotationsDbPath: join(tmp, "annotations.db"),
+        webhookConfig: {
+          smeeChannel: "https://smee.io/test-c",
+          secret: "secret",
+          tunnelFactory: fakeFactory,
+          // watchRepos omitted entirely.
+          subscriberRunner: runner,
+        },
+      });
+      try {
+        // Wait long enough that any rogue subscription attempt would have
+        // started. Don't loop on calls.length — we're asserting it stays 0.
+        await new Promise((r) => setTimeout(r, 50));
+        expect(reposCalledFromGetHooks(calls)).toEqual([]);
+      } finally {
+        void srv.stop(true);
+      }
+    } finally {
+      try {
+        rmSync(tmp, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  it("keeps the daemon running when a configured repo's hook list call fails", async () => {
+    // Simulate the gh CLI returning ok:false for the GET hooks call. The
+    // subscriber's tolerance contract is: log a warning and continue. The
+    // server must NOT throw / crash.
+    const { runner, calls } = makeRunner(() => ({ stdout: "", ok: false }));
+    const tmp = mkdtempSync(join(tmpdir(), "webhook-watchrepos-d-"));
+    try {
+      const wtDir = join(tmp, "wt");
+      mkdirSync(wtDir, { recursive: true });
+      const srv = createServer({
+        port: 0,
+        wtDir,
+        startWatcher: false,
+        annotationsDbPath: join(tmp, "annotations.db"),
+        webhookConfig: {
+          smeeChannel: "https://smee.io/test-d",
+          secret: "secret",
+          tunnelFactory: fakeFactory,
+          watchRepos: ["unknown-org/no-access"],
+          subscriberRunner: runner,
+        },
+      });
+      try {
+        await waitForSubscribeCalls(calls, 1);
+        // Server is still serving requests after the failed subscription.
+        const res = await fetch(`http://localhost:${srv.port}/api/snapshot`);
+        expect(res.ok).toBe(true);
+      } finally {
+        void srv.stop(true);
+      }
+    } finally {
+      try {
+        rmSync(tmp, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+});
