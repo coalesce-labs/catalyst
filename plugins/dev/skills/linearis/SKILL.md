@@ -246,6 +246,20 @@ linearis issues update ENG-123 --status "Done"
 linearis comments create ENG-123 --body "Merged: PR #456"
 ```
 
+### UUID-based calls (CTL-207)
+
+When `.catalyst/config.json` contains `catalyst.linear.stateIds`, prefer passing the UUID directly
+to `--status` instead of the display name. Every linearis resolver short-circuits on UUIDs — zero
+resolution API calls. The `linear-transition.sh` helper does this automatically.
+
+```bash
+# Resolve and cache UUIDs once (single GraphQL query)
+plugins/dev/scripts/resolve-linear-ids.sh
+
+# Then transitions use UUIDs from config — 1 fewer API call per update
+plugins/dev/scripts/linear-transition.sh --ticket ENG-123 --transition done
+```
+
 ## Important Rules
 
 1. **--status NOT --state**: Always `--status` for issue updates (`--state` was removed in v2025.12.2)

@@ -127,6 +127,14 @@ if [[ -n $CONFIG_PATH ]]; then
 		warnings+=("  Run setup-catalyst.sh or add linear config manually — see docs/reference/configuration")
 	fi
 
+	# Check for cached Linear UUIDs (CTL-207) — reduces API calls during orchestrator runs
+	if [[ -n $TEAM_KEY ]]; then
+		STATE_IDS=$(jq -r '.catalyst.linear.stateIds // empty' "$CONFIG_PATH" 2>/dev/null)
+		if [[ -z $STATE_IDS || $STATE_IDS == "null" ]]; then
+			warnings+=("Missing catalyst.linear.stateIds — run: plugins/dev/scripts/resolve-linear-ids.sh")
+		fi
+	fi
+
 	# Warn if config is still only in .claude/ (deprecated location)
 	if [[ $CONFIG_PATH == ".claude/config.json" && ! -f ".catalyst/config.json" ]]; then
 		warnings+=("config.json is in .claude/ (deprecated) — move to .catalyst/config.json")
