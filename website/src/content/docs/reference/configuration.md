@@ -29,6 +29,7 @@ project structure, ticket conventions, and workflow state mapping.
     },
     "linear": {
       "teamKey": "ACME",
+      "teamId": null,
       "stateMap": {
         "backlog": "Backlog",
         "todo": "Todo",
@@ -38,9 +39,12 @@ project structure, ticket conventions, and workflow state mapping.
         "inReview": "In Review",
         "done": "Done",
         "canceled": "Canceled"
-      }
+      },
+      "stateIds": null
     },
     "thoughts": {
+      "profile": "acme-corp",
+      "directory": "acme",
       "user": null
     }
   }
@@ -60,6 +64,8 @@ project structure, ticket conventions, and workflow state mapping.
 | `catalyst.linear.teamId`        | string\|null | Cached Linear team UUID. Resolved by `resolve-linear-ids.sh`.                                     |
 | `catalyst.linear.stateMap`      | object       | Maps workflow phases to your Linear workspace state names                                         |
 | `catalyst.linear.stateIds`      | object\|null | Map of Linear state display names to UUIDs. Eliminates per-call UUID resolution.                  |
+| `catalyst.thoughts.profile`     | string\|null | HumanLayer thoughts profile name (for multi-project isolation)                                    |
+| `catalyst.thoughts.directory`   | string\|null | HumanLayer thoughts directory name (usually matches `projectKey`)                                 |
 | `catalyst.thoughts.user`        | string\|null | HumanLayer thoughts user name                                                                     |
 
 ### State Map

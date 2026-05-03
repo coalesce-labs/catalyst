@@ -150,7 +150,9 @@ validate_linear_token() {
 
 # Fetch workflow states for a Linear team
 # Args: $1 = API token, $2 = team key
-# Returns JSON array of workflow states with name, type, position
+# Returns JSON array of workflow states with id, name, type, position
+# Also sets FETCHED_TEAM_ID as a side effect for UUID caching (CTL-207)
+FETCHED_TEAM_ID=""
 fetch_linear_workflow_states() {
 	local token="$1"
 	local team_key="$2"
@@ -159,8 +161,10 @@ fetch_linear_workflow_states() {
   {
     teams(filter: { key: { eq: "'"$team_key"'" } }) {
       nodes {
+        id
         workflowStates {
           nodes {
+            id
             name
             type
             position
@@ -181,6 +185,8 @@ fetch_linear_workflow_states() {
 	if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
 		return 1
 	fi
+
+	FETCHED_TEAM_ID=$(echo "$response" | jq -r '.data.teams.nodes[0].id // empty')
 
 	# Extract workflow states
 	local states
@@ -294,14 +300,26 @@ update_config_with_linear_states() {
 		state_map=$(build_state_map_from_linear "$states")
 
 		if [[ -n $state_map ]]; then
-			# Update the project config with real states
+			# Build stateIds map (name → UUID) from the same API response (CTL-207)
+			local state_ids
+			state_ids=$(echo "$states" | jq 'map({(.name): .id}) | add')
+
+			# Update the project config with stateMap, teamId, and stateIds
 			local updated_config
-			updated_config=$(jq --argjson stateMap "$state_map" '.catalyst.linear.stateMap = $stateMap' "$config_file")
+			updated_config=$(jq \
+				--argjson stateMap "$state_map" \
+				--arg teamId "${FETCHED_TEAM_ID}" \
+				--argjson stateIds "$state_ids" \
+				'.catalyst.linear.stateMap = $stateMap
+				 | .catalyst.linear.teamId = $teamId
+				 | .catalyst.linear.stateIds = $stateIds' "$config_file")
 			echo "$updated_config" | jq . >"$config_file"
 
 			echo ""
 			echo "✓ Updated config.json with actual Linear workflow states:"
 			echo "$state_map" | jq -r 'to_entries[] | "  \(.key): \(.value)"'
+			echo "✓ Cached teamId: ${FETCHED_TEAM_ID}"
+			echo "✓ Cached $(echo "$state_ids" | jq 'length') state UUIDs (reduces API rate limit usage)"
 			echo ""
 		else
 			print_warning "Could not build state map from Linear API response. Using defaults."

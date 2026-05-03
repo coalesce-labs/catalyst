@@ -28,18 +28,20 @@ fi
 
 # Required tools (command:name:install-instruction)
 REQUIRED_TOOLS=(
+	"git:Git:brew install git"
 	"humanlayer:HumanLayer CLI:pip install humanlayer"
 	"jq:JSON processor:brew install jq"
 	"sqlite3:SQLite CLI (session store):Included with macOS — install via your package manager if missing"
 	"gh:GitHub CLI:brew install gh"
 	"linearis:Linear CLI:npm install -g linearis"
-	"agent-browser:Browser automation:npm install -g agent-browser && agent-browser install"
 )
 
 # Optional tools - used by specific agents only (command:name:install-instruction)
 OPTIONAL_TOOLS=(
+	"agent-browser:Browser automation:npm install -g agent-browser && agent-browser install"
 	"sentry-cli:Sentry CLI (for sentry-research agent):curl -sL https://sentry.io/get-cli/ | sh"
 	"bun:Bun runtime (for orch-monitor dashboard):curl -fsSL https://bun.sh/install | bash"
+	"direnv:direnv (per-directory env vars):brew install direnv"
 )
 
 # Optional MCP servers (name:purpose:install-command)

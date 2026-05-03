@@ -1,8 +1,13 @@
 {
   "catalyst": {
     "projectKey": "catalyst-workspace",
+    "repository": {
+      "org": "coalesce-labs",
+      "name": "catalyst"
+    },
     "project": {
-      "ticketPrefix": "CTL"
+      "ticketPrefix": "CTL",
+      "name": "Catalyst"
     },
     "linear": {
       "teamKey": "CTL",

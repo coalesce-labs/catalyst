@@ -230,6 +230,14 @@ if [[ -n "$CONFIG_PATH" ]]; then
     else
         warn "Missing catalyst.linear.stateMap"
     fi
+
+    STATE_IDS=$(jq -r '.catalyst.linear.stateIds // empty' "$CONFIG_PATH" 2>/dev/null)
+    if [[ -n "$STATE_IDS" && "$STATE_IDS" != "null" ]]; then
+        STATE_ID_COUNT=$(jq '.catalyst.linear.stateIds | length' "$CONFIG_PATH" 2>/dev/null)
+        pass "Linear state UUIDs cached ($STATE_ID_COUNT states)"
+    elif [[ -n "$TEAM_KEY" ]]; then
+        warn "Missing catalyst.linear.stateIds — run: plugins/dev/scripts/resolve-linear-ids.sh"
+    fi
 fi
 
 # ─── 6. Secrets Config ──────────────────────────────────────────────────────
