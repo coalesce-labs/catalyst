@@ -39,7 +39,8 @@ The server:
 - Starts HTTP on port `7400` (configurable via `MONITOR_PORT` env var)
 - Watches `~/catalyst/wt/` for directories matching `orch-*`
 - Reads worker signal files via `fs.watch` — instant updates on change
-- Polls `gh pr view` every 30s for each open PR
+- Receives PR / review / check-suite / deployment events via [GitHub webhooks](../webhooks/)
+  when configured; falls back to a 10-minute poll otherwise
 - Runs `kill -0 <pid>` every 5s for each known worker PID
 
 Open `http://localhost:7400` in your browser. No login, no persistence — everything is derived on the fly from the filesystem and GitHub API.
