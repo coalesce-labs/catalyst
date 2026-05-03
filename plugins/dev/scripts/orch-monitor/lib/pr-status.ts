@@ -56,7 +56,17 @@ export interface PrStatusFetcher {
 interface CreatePrStatusFetcherOptions {
   runner?: Runner;
   concurrency?: number;
+  /**
+   * Returns the last-observed webhook timestamp for a PR ref, or null when
+   * none. When set, refreshAll skips refs whose last webhook arrived within
+   * `webhookFreshnessMs` (default 5 min) — webhooks are authoritative and a
+   * follow-up poll within that window is wasted.
+   */
+  lastWebhookAt?: (ref: PrRef) => number | null;
+  webhookFreshnessMs?: number;
 }
+
+const DEFAULT_WEBHOOK_FRESHNESS_MS = 5 * 60_000;
 
 const PR_URL_RE = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/;
 
@@ -175,6 +185,9 @@ export function createPrStatusFetcher(
 ): PrStatusFetcher {
   const runner = opts.runner ?? defaultRunner;
   const concurrency = Math.max(1, opts.concurrency ?? 5);
+  const webhookFreshnessMs =
+    opts.webhookFreshnessMs ?? DEFAULT_WEBHOOK_FRESHNESS_MS;
+  const lastWebhookAt = opts.lastWebhookAt;
   const cache = new Map<string, PrStatus>();
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
   let ghAvailable: boolean | null = null;
@@ -294,6 +307,10 @@ export function createPrStatusFetcher(
         ) {
           continue;
         }
+      }
+      if (lastWebhookAt) {
+        const ts = lastWebhookAt(ref);
+        if (ts !== null && now - ts < webhookFreshnessMs) continue;
       }
       queue.push(ref);
     }

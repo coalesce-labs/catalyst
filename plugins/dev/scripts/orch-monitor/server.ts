@@ -175,7 +175,9 @@ function resolveVersion(): string {
 }
 
 const CATALYST_DEV_VERSION = resolveVersion();
-const PR_STATUS_REFRESH_MS = 30_000;
+// Webhooks are the primary delivery path (CTL-209). Polling drops to a
+// 10-minute fallback so missed deliveries get reconciled within bounded latency.
+const PR_STATUS_REFRESH_MS = 10 * 60_000;
 const PREVIEW_REFRESH_MS = 30_000;
 export const LINEAR_REFRESH_MS = 5 * 60_000;
 
@@ -451,10 +453,18 @@ export function createServer(opts: CreateServerOptions): BunServer {
     );
   }
 
+  // Forward reference: the webhook handler is constructed below but
+  // the prFetcher's freshness filter needs to call into it. We hold a mutable
+  // ref and assign once the handler exists.
+  let webhookHandlerRef: WebhookHandler | null = null;
   const prFetcher: PrStatusFetcher | null =
     prStatusFetcher === null
       ? null
-      : (prStatusFetcher ?? createPrStatusFetcher());
+      : (prStatusFetcher ??
+        createPrStatusFetcher({
+          lastWebhookAt: (ref) =>
+            webhookHandlerRef?.getLastWebhookAt(ref.repo, ref.number) ?? null,
+        }));
   let lastPrRefresh = 0;
 
   const linear: LinearFetcher | null =
@@ -526,6 +536,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
         error: (m) => console.error(m),
       },
     });
+    webhookHandlerRef = webhookHandler;
     webhookSubscriber = createWebhookSubscriber({
       smeeChannel: webhookConfig.smeeChannel,
       secret: webhookConfig.secret,

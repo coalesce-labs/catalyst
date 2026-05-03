@@ -538,6 +538,55 @@ describe("createPrStatusFetcher (Phase 0 — terminal-skip + UNKNOWN backoff)", 
     expect(delay3).toBeLessThanOrEqual(2 * 60_000 + 100);
   });
 
+  it("refreshAll skips ref with recent webhook event (< 5min ago)", async () => {
+    let viewCalls = 0;
+    const runner: Runner = (args) => {
+      if (args[1] === "--version")
+        return Promise.resolve({ stdout: "", ok: true });
+      viewCalls++;
+      return Promise.resolve({ stdout: '{"state":"OPEN","mergedAt":null}', ok: true });
+    };
+    const fetcher = createPrStatusFetcher({
+      runner,
+      lastWebhookAt: () => Date.now() - 60_000, // 1 min ago
+    });
+    await fetcher.refreshAll([{ repo: "o/r", number: 200 }]);
+    expect(viewCalls).toBe(0);
+    expect(fetcher.get("o/r", 200)).toBeNull();
+  });
+
+  it("refreshAll fetches ref whose last webhook event is > 5min old", async () => {
+    let viewCalls = 0;
+    const runner: Runner = (args) => {
+      if (args[1] === "--version")
+        return Promise.resolve({ stdout: "", ok: true });
+      viewCalls++;
+      return Promise.resolve({ stdout: '{"state":"OPEN","mergedAt":null}', ok: true });
+    };
+    const fetcher = createPrStatusFetcher({
+      runner,
+      lastWebhookAt: () => Date.now() - 6 * 60_000, // 6 min ago
+    });
+    await fetcher.refreshAll([{ repo: "o/r", number: 201 }]);
+    expect(viewCalls).toBe(1);
+  });
+
+  it("refreshAll fetches ref with no webhook event recorded", async () => {
+    let viewCalls = 0;
+    const runner: Runner = (args) => {
+      if (args[1] === "--version")
+        return Promise.resolve({ stdout: "", ok: true });
+      viewCalls++;
+      return Promise.resolve({ stdout: '{"state":"OPEN","mergedAt":null}', ok: true });
+    };
+    const fetcher = createPrStatusFetcher({
+      runner,
+      lastWebhookAt: () => null,
+    });
+    await fetcher.refreshAll([{ repo: "o/r", number: 202 }]);
+    expect(viewCalls).toBe(1);
+  });
+
   it("force(ref) re-fetches a MERGED ref bypassing the filter", async () => {
     const responses = new Map<string, RunnerResult>();
     responses.set("gh --version", { stdout: "", ok: true });
