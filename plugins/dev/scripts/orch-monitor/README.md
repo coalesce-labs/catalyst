@@ -56,7 +56,8 @@ export CATALYST_WEBHOOK_SECRET="$(cat ~/.config/catalyst/webhook-secret)"
     "monitor": {
       "github": {
         "smeeChannel": "https://smee.io/<channel-id>",
-        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET"
+        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET",
+        "watchRepos": []
       }
     }
   }
@@ -65,13 +66,24 @@ export CATALYST_WEBHOOK_SECRET="$(cat ~/.config/catalyst/webhook-secret)"
 
 Override the channel without editing the config: `CATALYST_SMEE_CHANNEL=https://smee.io/...`.
 
+### Persistent watch list
+
+Add `watchRepos` to subscribe to repos at daemon startup regardless of whether a worker has been observed for them — useful when running orch-monitor as a continuous background activity feed for your core repos. Use the helper to add entries:
+
+```bash
+plugins/dev/scripts/setup-webhooks.sh --add-repo coalesce-labs/catalyst
+```
+
+Empty/missing → auto-discovery only. See the website docs for the full setup flow: [GitHub webhooks for orch-monitor — Persistent watch list](https://github.com/coalesce-labs/catalyst/blob/main/website/src/content/docs/observability/webhooks.md#persistent-watch-list).
+
 ### What the monitor does on startup
 
 1. Reads `monitor.github` config — if absent or the secret is missing, the receiver is disabled and the daemon falls back to 10-min polling
 2. Starts the smee tunnel toward `http://localhost:{port}/api/webhook`
-3. For each observed `(owner, repo)` (via worker signal files), creates or reuses a webhook subscription on that repo
-4. On startup, replays the last hour of deliveries from `gh api repos/{repo}/hooks/{id}/deliveries` so events missed during downtime are reconciled
-5. Every accepted webhook event is also fanned out to `~/catalyst/events/YYYY-MM.jsonl` for downstream consumers (UI activity feed, future `catalyst-events` CLI)
+3. Subscribes to each repo in `watchRepos` (Layer 1) before replay runs, so configured repos get the 1-hour replay too
+4. For each `(owner, repo)` observed in worker signal files, creates or reuses a webhook subscription — deduped against step 3
+5. On startup, replays the last hour of deliveries from `gh api repos/{repo}/hooks/{id}/deliveries` so events missed during downtime are reconciled
+6. Every accepted webhook event is also fanned out to `~/catalyst/events/YYYY-MM.jsonl` for downstream consumers (UI activity feed, future `catalyst-events` CLI)
 
 ### Subscribed events
 

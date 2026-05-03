@@ -329,7 +329,11 @@ team-wide.
   "catalyst": {
     "monitor": {
       "github": {
-        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET"
+        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET",
+        "watchRepos": [
+          "coalesce-labs/catalyst",
+          "coalesce-labs/adva"
+        ]
       }
     }
   }
@@ -340,6 +344,7 @@ team-wide.
 |-------|-------|------|---------|-------------|
 | `catalyst.monitor.github.smeeChannel` | `~/.config/catalyst/config.json` | string | _(none)_ | Per-machine smee.io channel URL the daemon tunnels deliveries through |
 | `catalyst.monitor.github.webhookSecretEnv` | `.catalyst/config.json` | string | `"CATALYST_WEBHOOK_SECRET"` | **Name** of the env var the HMAC secret value is read from at runtime |
+| `catalyst.monitor.github.watchRepos` | `.catalyst/config.json` | string[] | `[]` | Repos (owner/repo) subscribed at daemon startup — additive on top of worker-driven auto-discovery. See [Persistent watch list](/observability/webhooks/#persistent-watch-list). |
 
 Environment variable overrides:
 - `CATALYST_SMEE_CHANNEL` — overrides any file-derived channel.

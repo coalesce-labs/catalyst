@@ -161,6 +161,17 @@ export interface CreateServerOptions {
     target?: string;
     /** Override for tests so the real smee-client isn't invoked. */
     tunnelFactory?: SmeeClientFactory;
+    /**
+     * Repos to subscribe to at daemon startup, in addition to the workers
+     * observed in signal files. Empty/missing → auto-discovery only. CTL-216.
+     */
+    watchRepos?: string[];
+    /**
+     * Test override for the gh subprocess runner used by the subscriber. When
+     * omitted, the production `defaultGhRunner` (Bun.spawn → real `gh`) is
+     * used. Tests pass a stub so no real `gh` is invoked.
+     */
+    subscriberRunner?: SubscriberRunner;
   } | null;
 }
 
@@ -517,7 +528,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       smeeChannel: webhookConfig.smeeChannel,
       secret: webhookConfig.secret,
       events: [...DEFAULT_WEBHOOK_EVENTS],
-      runner: defaultGhRunner,
+      runner: webhookConfig.subscriberRunner ?? defaultGhRunner,
       logger: {
         info: (m) => console.info(m),
         warn: (m) => console.warn(m),
@@ -1477,10 +1488,20 @@ export function createServer(opts: CreateServerOptions): BunServer {
     if (webhookReplay && webhookSubscriber) {
       const replay = webhookReplay;
       const subscriber = webhookSubscriber;
+      // CTL-216: subscribe to configured watchRepos before replay so they're
+      // present in subscriber.listSubscribed() when replay runs. Errors per
+      // repo are tolerated by ensureSubscribed (logged + continue).
+      const watchRepos = webhookConfig.watchRepos ?? [];
+      const watchSubscriptions =
+        watchRepos.length > 0
+          ? Promise.allSettled(
+              watchRepos.map((repo) => subscriber.ensureSubscribed(repo)),
+            )
+          : Promise.resolve();
       // 1-hour replay window — wide enough to cover most outages, narrow enough
       // to keep startup latency under a few seconds.
       const since = new Date(Date.now() - 60 * 60_000);
-      void Promise.resolve()
+      void watchSubscriptions
         .then(() => replay.replaySince(subscriber.listSubscribed(), since))
         .then((count) => {
           if (count > 0) {
