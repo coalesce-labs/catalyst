@@ -57,7 +57,9 @@ project structure, ticket conventions, and workflow state mapping.
 | `catalyst.project.ticketPrefix` | string       | Linear ticket prefix (e.g., "ACME")                                                               |
 | `catalyst.project.name`         | string       | Human-readable project name                                                                       |
 | `catalyst.linear.teamKey`       | string       | Linear team identifier used in ticket IDs (e.g., "ACME" for ACME-123). Must match `ticketPrefix`. |
+| `catalyst.linear.teamId`        | string\|null | Cached Linear team UUID. Resolved by `resolve-linear-ids.sh`.                                     |
 | `catalyst.linear.stateMap`      | object       | Maps workflow phases to your Linear workspace state names                                         |
+| `catalyst.linear.stateIds`      | object\|null | Map of Linear state display names to UUIDs. Eliminates per-call UUID resolution.                  |
 | `catalyst.thoughts.user`        | string\|null | HumanLayer thoughts user name                                                                     |
 
 ### State Map
@@ -81,6 +83,23 @@ Set any key to `null` to skip that automatic transition.
 **`stateMap` values are auto-detected from Linear** — when you run `setup-catalyst.sh` with a Linear
 API token, the script fetches your team's actual workflow states and populates `stateMap` with the
 correct names. Manual customization is only needed for non-standard state names.
+
+### Cached UUIDs
+
+The `teamId` and `stateIds` fields cache Linear UUIDs so that `linear-transition.sh` can pass them
+directly to the linearis CLI, skipping per-call name-to-UUID resolution. This reduces Linear API
+requests by ~17% per state transition — significant during orchestrator runs with parallel workers.
+
+Populate the cache by running:
+
+```bash
+plugins/dev/scripts/resolve-linear-ids.sh
+```
+
+This makes a single Linear GraphQL query to fetch all workflow states for the configured team and
+writes the results to `.catalyst/config.json`. Re-run with `--force` after changing workflow states
+in Linear. The cache is optional — `linear-transition.sh` falls back to name-based calls when
+`stateIds` is absent.
 
 ### Plain-Language State Flow
 
@@ -432,7 +451,7 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
         "setup": ["bun install"],
         "teardown": []
       },
-      "workerCommand": "/oneshot",
+      "workerCommand": "/catalyst-dev:oneshot",
       "workerModel": "opus",
       "testRequirements": {
         "backend": ["unit"],
@@ -452,7 +471,7 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
 | `maxParallel` | number | 3 | Max concurrent workers |
 | `hooks.setup` | string[] | `[]` | Run after worktree creation (supports `${WORKTREE_PATH}`, `${BRANCH_NAME}`, `${TICKET_ID}`, `${REPO_NAME}`, `${DIRECTORY}` variables) |
 | `hooks.teardown` | string[] | `[]` | Run before worktree removal |
-| `workerCommand` | string | `/oneshot` | Skill to dispatch in each worker |
+| `workerCommand` | string | `/catalyst-dev:oneshot` | Plugin-namespaced skill to dispatch in each worker. Must be in `/<plugin>:<skill>` form — bare slashes (e.g. `/oneshot`) are rejected at dispatch. |
 | `workerModel` | string | `opus` | Model for worker sessions |
 | `testRequirements` | object | See above | Required test types by scope (backend/frontend/fullstack) |
 | `verifyBeforeMerge` | boolean | `true` | Run adversarial verification on merged commits (post-merge) |

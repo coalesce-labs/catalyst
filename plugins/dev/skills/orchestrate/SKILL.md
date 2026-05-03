@@ -206,6 +206,14 @@ MAX_PARALLEL=$(jq -r '.catalyst.orchestration.maxParallel // 3' "$CONFIG_FILE" 2
 SETUP_HOOKS=$(jq -c '.catalyst.orchestration.hooks.setup // []' "$CONFIG_FILE" 2>/dev/null)
 TEARDOWN_HOOKS=$(jq -c '.catalyst.orchestration.hooks.teardown // []' "$CONFIG_FILE" 2>/dev/null)
 WORKER_COMMAND=$(jq -r '.catalyst.orchestration.workerCommand // "/catalyst-dev:oneshot"' "$CONFIG_FILE" 2>/dev/null)
+
+# CTL-208: workerCommand must be plugin-namespaced (/<plugin>:<skill>). A bare /oneshot
+# becomes literal prompt text and the worker silently no-ops. Fail loudly here.
+if [[ ! "$WORKER_COMMAND" =~ ^/[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$ ]]; then
+  echo "ERROR: catalyst.orchestration.workerCommand=\"$WORKER_COMMAND\" must be plugin-namespaced (/<plugin>:<skill>), e.g. /catalyst-dev:oneshot. Update $CONFIG_FILE." >&2
+  exit 2
+fi
+
 WORKER_MODEL=$(jq -r '.catalyst.orchestration.workerModel // "opus"' "$CONFIG_FILE" 2>/dev/null)
 VERIFY_BEFORE_MERGE=$(jq -r '.catalyst.orchestration.verifyBeforeMerge // "true"' "$CONFIG_FILE" 2>/dev/null)
 ALLOW_SELF_REPORTED=$(jq -r '.catalyst.orchestration.allowSelfReportedCompletion // "false"' "$CONFIG_FILE" 2>/dev/null)
@@ -862,6 +870,10 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
         --transition done \
         --config "$CONFIG_FILE" \
         ${STATE_ON_MERGE_FLAG} >/dev/null 2>&1 || true
+
+      # Pull latest main in the primary worktree (CTL-198). Non-fatal.
+      "${CLAUDE_PLUGIN_ROOT}/scripts/pull-primary-worktree.sh" \
+        --branch "${BASE_BRANCH:-main}" 2>&1 || true
 
       # Post-merge verification (CTL-130). Run adversarial verification on
       # the merged commit. The worker auto-merges independently so verification
