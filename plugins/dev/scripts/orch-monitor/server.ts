@@ -69,6 +69,12 @@ import {
   type WebhookTunnel,
   type SmeeClientFactory,
 } from "./lib/webhook-tunnel";
+import {
+  createWebhookSubscriber,
+  DEFAULT_WEBHOOK_EVENTS,
+  type WebhookSubscriber,
+  type SubscriberRunner,
+} from "./lib/webhook-subscriber";
 import { loadOtelConfig } from "./lib/otel-config";
 import { detectProjectKey } from "./lib/project-key";
 import {
@@ -173,6 +179,20 @@ interface WebhookCliConfig {
   smeeChannel: string;
   secret: string;
 }
+
+const defaultGhRunner: SubscriberRunner = async (args) => {
+  try {
+    const proc = Bun.spawn(args, {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const exit = await proc.exited;
+    return { stdout, ok: exit === 0 };
+  } catch {
+    return { stdout: "", ok: false };
+  }
+};
 
 export function loadWebhookConfig(
   configPath: string,
@@ -488,6 +508,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   let webhookHandler: WebhookHandler | null = null;
   let webhookTunnel: WebhookTunnel | null = null;
+  let webhookSubscriber: WebhookSubscriber | null = null;
   if (webhookConfig && prFetcher) {
     webhookHandler = createWebhookHandler({
       secret: webhookConfig.secret,
@@ -500,10 +521,29 @@ export function createServer(opts: CreateServerOptions): BunServer {
         error: (m) => console.error(m),
       },
     });
+    webhookSubscriber = createWebhookSubscriber({
+      smeeChannel: webhookConfig.smeeChannel,
+      secret: webhookConfig.secret,
+      events: [...DEFAULT_WEBHOOK_EVENTS],
+      runner: defaultGhRunner,
+      logger: {
+        info: (m) => console.info(m),
+        warn: (m) => console.warn(m),
+        error: (m) => console.error(m),
+      },
+    });
   }
 
   function snapshotWithPrStatus(): MonitorSnapshot {
     const snap = buildSnapshot(wtDir, buildOpts);
+    if (webhookSubscriber) {
+      const seen = new Set<string>();
+      for (const ref of collectPrRefs(snap)) {
+        if (seen.has(ref.repo)) continue;
+        seen.add(ref.repo);
+        void webhookSubscriber.ensureSubscribed(ref.repo);
+      }
+    }
     if (prFetcher) {
       const now = Date.now();
       if (now - lastPrRefresh >= prStatusRefreshMs) {
