@@ -1,9 +1,18 @@
 # Changelog
 
-## [7.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.13.0...catalyst-dev-v7.14.0) (2026-05-03)
+## [7.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.13.0...catalyst-dev-v7.14.0)
+
+May 03, 2026
+
+<!-- ai-enhanced -->
+
+### Linear UUID Caching
+
+New `resolve-linear-ids.sh` script fetches and caches Linear team and workflow state UUIDs to reduce API rate limiting during issue transitions. The `linear-transition.sh` command now reads cached UUIDs from `.catalyst/config.json` instead of making repeated API calls, with full backward compatibility when cache is absent.
 
 
-### Features
+
+### PRs
 
 * **dev:** cache Linear UUIDs to reduce API rate limit pressure (CTL-207) ([#323](https://github.com/coalesce-labs/catalyst/issues/323)) ([ce82a8c](https://github.com/coalesce-labs/catalyst/commit/ce82a8ccc909be5b4605373b53135ebd682f8435))
 
