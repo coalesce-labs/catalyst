@@ -29,7 +29,11 @@
 
 - ${GOTCHA_DESCRIPTION}
 
-## Your Tickets (Wave ${WAVE_NUMBER})
+## Wave ${WAVE_NUMBER} roster
+
+This briefing is shared across every worker in Wave ${WAVE_NUMBER}. Your assigned ticket is
+the one passed as `$1` when you were dispatched — the others below are FYI only, so you
+understand what siblings are touching in parallel and can avoid scope conflicts.
 
 - **${TICKET_ID}**: ${TITLE} (depends on ${DEPENDENCY})
 
@@ -41,3 +45,4 @@ ${MIGRATION_ASSIGNMENTS}
 - Use the established test helpers listed above
 - Follow the naming conventions and file organization from completed PRs
 - Check `thoughts/shared/research/` for any relevant research from prior waves
+- **Do NOT** treat the roster above as your work scope — work only on the ticket from `$1`
