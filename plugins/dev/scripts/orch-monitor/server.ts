@@ -84,6 +84,7 @@ import {
   type EventLogWriter,
 } from "./lib/event-log";
 import { loadOtelConfig } from "./lib/otel-config";
+import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey } from "./lib/project-key";
 import {
   createPrometheusFetcher,
@@ -185,11 +186,6 @@ const PR_STATUS_REFRESH_MS = 10 * 60_000;
 const PREVIEW_REFRESH_MS = 10 * 60_000;
 export const LINEAR_REFRESH_MS = 5 * 60_000;
 
-interface WebhookCliConfig {
-  smeeChannel: string;
-  secret: string;
-}
-
 const defaultGhRunner: SubscriberRunner = async (args) => {
   try {
     const proc = Bun.spawn(args, {
@@ -203,44 +199,6 @@ const defaultGhRunner: SubscriberRunner = async (args) => {
     return { stdout: "", ok: false };
   }
 };
-
-export function loadWebhookConfig(
-  configPath: string,
-): WebhookCliConfig | null {
-  let raw: string;
-  try {
-    raw = readFileSync(configPath, "utf-8");
-  } catch {
-    return null;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== "object" || parsed === null) return null;
-  const root = parsed as Record<string, unknown>;
-  const cat = root.catalyst;
-  if (typeof cat !== "object" || cat === null) return null;
-  const monitor = (cat as Record<string, unknown>).monitor;
-  if (typeof monitor !== "object" || monitor === null) return null;
-  const github = (monitor as Record<string, unknown>).github;
-  if (typeof github !== "object" || github === null) return null;
-  const ghCfg = github as Record<string, unknown>;
-  const smeeChannel =
-    typeof ghCfg.smeeChannel === "string" ? ghCfg.smeeChannel : "";
-  const secretEnv =
-    typeof ghCfg.webhookSecretEnv === "string"
-      ? ghCfg.webhookSecretEnv
-      : "CATALYST_WEBHOOK_SECRET";
-  const secret =
-    process.env[secretEnv] ?? process.env.CATALYST_SMEE_SECRET ?? "";
-  const channelOverride = process.env.CATALYST_SMEE_CHANNEL;
-  const finalChannel = channelOverride ?? smeeChannel;
-  if (finalChannel.length === 0 || secret.length === 0) return null;
-  return { smeeChannel: finalChannel, secret };
-}
 
 function collectTicketKeys(snapshot: MonitorSnapshot): string[] {
   const keys = new Set<string>();
@@ -1641,6 +1599,7 @@ if (import.meta.main) {
   );
 
   const webhookConfig = loadWebhookConfig(
+    process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
     `${process.cwd()}/.catalyst/config.json`,
   );
   let summarizeHandler: SummarizeHandler | null = null;

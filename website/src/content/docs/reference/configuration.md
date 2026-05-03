@@ -300,6 +300,62 @@ Cloud, Datadog, etc.), point these URLs at your hosted Prometheus/Loki-compatibl
 
 See [Setting up the OTel stack](/observability/setup/) for the full installation guide.
 
+### Monitor Webhook Config
+
+The orch-monitor daemon receives GitHub events through a smee.io tunnel — see
+[GitHub webhooks for orch-monitor](/observability/webhooks/) for the why and the full setup
+flow. The webhook config is split across two files because the channel URL is per-machine
+(one daemon, one tunnel, every project on the laptop) while the env-var **name** is
+team-wide.
+
+`~/.config/catalyst/config.json` — cross-project, per-machine, **not committed**:
+
+```json
+{
+  "catalyst": {
+    "monitor": {
+      "github": {
+        "smeeChannel": "https://smee.io/<channel-id>"
+      }
+    }
+  }
+}
+```
+
+`.catalyst/config.json` — per-repo, **committed**, team-wide:
+
+```json
+{
+  "catalyst": {
+    "monitor": {
+      "github": {
+        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET"
+      }
+    }
+  }
+}
+```
+
+| Field | Where | Type | Default | Description |
+|-------|-------|------|---------|-------------|
+| `catalyst.monitor.github.smeeChannel` | `~/.config/catalyst/config.json` | string | _(none)_ | Per-machine smee.io channel URL the daemon tunnels deliveries through |
+| `catalyst.monitor.github.webhookSecretEnv` | `.catalyst/config.json` | string | `"CATALYST_WEBHOOK_SECRET"` | **Name** of the env var the HMAC secret value is read from at runtime |
+
+Environment variable overrides:
+- `CATALYST_SMEE_CHANNEL` — overrides any file-derived channel.
+- The env var named by `webhookSecretEnv` (default `CATALYST_WEBHOOK_SECRET`) holds the
+  shared HMAC secret value.
+
+If the channel is missing from both files (and unset in env), the receiver disables itself
+silently and the daemon falls back to 10-minute polling. Run `plugins/dev/scripts/setup-webhooks.sh`
+to provision both files and the secret.
+
+**Deprecated location**: `catalyst.monitor.github.smeeChannel` was originally written to
+`.catalyst/config.json` (Layer 1). The monitor still reads that location for one release
+cycle and emits a one-shot deprecation warning on startup if it finds a value there.
+Re-running `setup-webhooks.sh` migrates the value to the right home and clears it from the
+committed config.
+
 ### AI Briefing
 
 The monitor dashboard supports AI-powered status summaries. Configuration spans both layers:
