@@ -85,6 +85,25 @@ done
 STATE_JSON="${ORCH_DIR}/state.json"
 [ ! -f "$STATE_JSON" ] && { echo "ERROR: state.json missing at $STATE_JSON" >&2; exit 2; }
 
+# CTL-208: workerCommand must be plugin-namespaced (/<plugin>:<skill>). A bare slash like
+# /oneshot is passed to claude as literal prompt text — no skill expansion happens and the
+# worker silently no-ops. Fail loudly here instead of silently dispatching broken workers.
+if [[ ! "$WORKER_COMMAND" =~ ^/[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$ ]]; then
+  cat >&2 <<EOF
+ERROR: --worker-command "$WORKER_COMMAND" is not a plugin-namespaced slash command.
+
+Plugin skills must be invoked as /<plugin-name>:<skill-name>, e.g. /catalyst-dev:oneshot.
+A bare slash like /oneshot is passed to claude as literal prompt text; no skill expansion
+happens and the worker exits without doing any work.
+
+If this came from .catalyst/config.json, change:
+  catalyst.orchestration.workerCommand: "/oneshot"
+to:
+  catalyst.orchestration.workerCommand: "/catalyst-dev:oneshot"
+EOF
+  exit 2
+fi
+
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # Resolve defaults from state.json when not supplied on the CLI.
@@ -122,6 +141,9 @@ if [ "$SLOTS" -le 0 ]; then
 fi
 
 # ─── Enumerate pending queue across every waveN, in numeric order ─────────────
+# CTL-208: emit "<wave>\t<ticket>" pairs so each dispatched worker can record its wave
+# in its signal file. The wave field lets workers read their wave briefing by exact path
+# instead of globbing wave-*-briefing.md (which would tempt them to read sibling waves).
 PENDING=$(jq -r '
   (.queue // {})
   | to_entries
@@ -129,8 +151,10 @@ PENDING=$(jq -r '
   | map({n: (.key | capture("^wave(?<x>[0-9]+)Pending$") | .x | tonumber),
          tickets: .value})
   | sort_by(.n)
-  | map(.tickets[])
+  | map(.n as $w | .tickets | map([$w, .]))
+  | flatten(1)
   | .[]
+  | @tsv
 ' "$STATE_JSON" 2>/dev/null)
 
 if [ -z "$PENDING" ]; then
@@ -141,7 +165,7 @@ fi
 
 # ─── Dispatch loop ────────────────────────────────────────────────────────────
 DISPATCHED=()
-while IFS= read -r T; do
+while IFS=$'\t' read -r W T; do
   [ -z "$T" ] && continue
   [ "$SLOTS" -le 0 ] && break
 
@@ -165,10 +189,12 @@ while IFS= read -r T; do
   fi
 
   # Write signal file with the shared dispatched/phase0 template.
+  # CTL-208: include `wave` so the worker can read only its own wave briefing by exact path.
   NOW=$(now_iso)
   jq -n \
     --arg ticket "$T" \
     --arg orch "$ORCH_ID" \
+    --argjson wave "$W" \
     --arg name "${ORCH_ID}-${T}" \
     --arg label "oneshot ${T}" \
     --arg ts "$NOW" \
@@ -176,6 +202,7 @@ while IFS= read -r T; do
     '{
       ticket: $ticket,
       orchestrator: $orch,
+      wave: $wave,
       workerName: $name,
       label: $label,
       status: "dispatched",

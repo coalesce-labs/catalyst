@@ -47,7 +47,7 @@
           "git branch -D ${BRANCH_NAME}"
         ]
       },
-      "workerCommand": "/oneshot",
+      "workerCommand": "/catalyst-dev:oneshot",
       "workerModel": "opus",
       "thoughts": {
         "profile": "my-profile",

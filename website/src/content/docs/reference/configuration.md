@@ -432,7 +432,7 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
         "setup": ["bun install"],
         "teardown": []
       },
-      "workerCommand": "/oneshot",
+      "workerCommand": "/catalyst-dev:oneshot",
       "workerModel": "opus",
       "testRequirements": {
         "backend": ["unit"],
@@ -452,7 +452,7 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
 | `maxParallel` | number | 3 | Max concurrent workers |
 | `hooks.setup` | string[] | `[]` | Run after worktree creation (supports `${WORKTREE_PATH}`, `${BRANCH_NAME}`, `${TICKET_ID}`, `${REPO_NAME}`, `${DIRECTORY}` variables) |
 | `hooks.teardown` | string[] | `[]` | Run before worktree removal |
-| `workerCommand` | string | `/oneshot` | Skill to dispatch in each worker |
+| `workerCommand` | string | `/catalyst-dev:oneshot` | Plugin-namespaced skill to dispatch in each worker. Must be in `/<plugin>:<skill>` form — bare slashes (e.g. `/oneshot`) are rejected at dispatch. |
 | `workerModel` | string | `opus` | Model for worker sessions |
 | `testRequirements` | object | See above | Required test types by scope (backend/frontend/fullstack) |
 | `verifyBeforeMerge` | boolean | `true` | Run adversarial verification on merged commits (post-merge) |
