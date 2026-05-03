@@ -871,6 +871,10 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
         --config "$CONFIG_FILE" \
         ${STATE_ON_MERGE_FLAG} >/dev/null 2>&1 || true
 
+      # Pull latest main in the primary worktree (CTL-198). Non-fatal.
+      "${CLAUDE_PLUGIN_ROOT}/scripts/pull-primary-worktree.sh" \
+        --branch "${BASE_BRANCH:-main}" 2>&1 || true
+
       # Post-merge verification (CTL-130). Run adversarial verification on
       # the merged commit. The worker auto-merges independently so verification
       # is always post-merge — it surfaces gaps for remediation rather than
