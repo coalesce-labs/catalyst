@@ -31,23 +31,25 @@ describe("brand-v2 — wordmark.svg", () => {
     expect(svg).toMatch(/aria-label="Catalyst"/);
   });
 
-  it("uses a cap-height-100 viewBox (height = 100)", () => {
-    // viewBox="0 0 <width> 100" — cap-height 100 per ticket spec.
-    expect(svg).toMatch(/viewBox="0 0 \d+ 100"/);
-  });
-
-  it("draws CATALYST as 8 distinct letter paths", () => {
-    // One path per letter = 8 paths. The lockup files embed the wordmark
-    // and the mark, so that count is different — this assertion is for the
-    // stand-alone wordmark only.
-    const paths = svg.match(/<path /g) ?? [];
-    expect(paths.length).toBe(8);
-  });
-
-  it("ships a data-letter attribute for every letter (C A T A L Y S T)", () => {
-    for (const letter of ["C", "A1", "T1", "A2", "L", "Y", "S", "T2"]) {
-      expect(svg).toContain(`data-letter="${letter}"`);
+  it("declares a non-empty viewBox", () => {
+    // CTL-200 ships the wordmark as a Space Grotesk Medium font outline. The
+    // viewBox spans cap-height plus ascender/descender extents, so it isn't
+    // simply "0 0 W 100". Guard the structural intent: a real viewBox with
+    // positive width and height.
+    const m = svg.match(/viewBox="(-?[\d.]+) (-?[\d.]+) ([\d.]+) ([\d.]+)"/);
+    expect(m).toBeTruthy();
+    if (m) {
+      expect(parseFloat(m[3])).toBeGreaterThan(0);
+      expect(parseFloat(m[4])).toBeGreaterThan(0);
     }
+  });
+
+  it("draws the wordmark as a single merged outline path", () => {
+    // CTL-200 emits one merged <path> from the font outline rather than one
+    // path per letter. The brand.html specimens block (below) still verifies
+    // the per-letter inline shape used for design specimens.
+    const paths = svg.match(/<path /g) ?? [];
+    expect(paths.length).toBe(1);
   });
 });
 
@@ -71,10 +73,12 @@ describe("brand-v2 — lockup-horizontal.svg", () => {
     expect(svg).toContain('data-part="wordmark"');
   });
 
-  it("has all 8 wordmark letters plus at least 2 mark chevrons", () => {
+  it("ships the wordmark plus at least 2 mark chevrons", () => {
     const paths = svg.match(/<path /g) ?? [];
-    // 8 letters + 2 chevrons = 10 paths minimum.
-    expect(paths.length).toBeGreaterThanOrEqual(10);
+    // 1 merged wordmark path + 2 chevrons (apex + inner) = 3 minimum. The
+    // wordmark side is a single merged outline post-CTL-200 (Space Grotesk
+    // Medium); the structural guard is the data-part assertions above.
+    expect(paths.length).toBeGreaterThanOrEqual(3);
   });
 });
 
@@ -100,9 +104,12 @@ describe("brand-v2 — lockup-stacked.svg", () => {
     expect(markIdx).toBeLessThan(wordIdx);
   });
 
-  it("has all 8 wordmark letters plus at least 2 mark chevrons", () => {
+  it("ships the wordmark plus at least 2 mark chevrons", () => {
     const paths = svg.match(/<path /g) ?? [];
-    expect(paths.length).toBeGreaterThanOrEqual(10);
+    // 1 merged wordmark path + 2 chevrons (apex + inner) = 3 minimum. The
+    // wordmark side is a single merged outline post-CTL-200 (Space Grotesk
+    // Medium); the structural guard is the data-part assertions above.
+    expect(paths.length).toBeGreaterThanOrEqual(3);
   });
 });
 

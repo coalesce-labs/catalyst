@@ -693,6 +693,34 @@
             turns: 1,
           },
         },
+        {
+          id: "todo-140",
+          type: "todo",
+          position: { x: 0, y: 0 },
+          data: {
+            name: "CTL-140 todos",
+            items: [
+              { state: "completed", text: "Sketch node API" },
+              { state: "completed", text: "Wire React Flow into mockup" },
+              { state: "in_progress", text: "Real-time tick loop" },
+              { state: "pending", text: "Drawer integration" },
+            ],
+          },
+        },
+        {
+          id: "todo-147",
+          type: "todo",
+          position: { x: 0, y: 0 },
+          data: {
+            name: "CTL-147 todos",
+            items: [
+              { state: "completed", text: "Implement validation" },
+              { state: "in_progress", text: "Run quality gates" },
+              { state: "pending", text: "Create PR" },
+              { state: "pending", text: "Address review" },
+            ],
+          },
+        },
       ];
 
       const INITIAL_EDGES = [
@@ -704,8 +732,8 @@
         { id: "e-142-general", source: "worker-ctl-142", target: "sub-142-general" },
         { id: "e-142-deepwiki", source: "sub-142-general", target: "sub-142-deepwiki" },
         { id: "e-147-pr-test", source: "worker-ctl-147", target: "sub-147-pr-test" },
-
-
+        { id: "e-140-todos", source: "worker-ctl-140", target: "todo-140" },
+        { id: "e-147-todos", source: "worker-ctl-147", target: "todo-147" },
       ];
 
       const NODE_SIZE = {
