@@ -75,6 +75,10 @@ import {
   type WebhookSubscriber,
   type SubscriberRunner,
 } from "./lib/webhook-subscriber";
+import {
+  createWebhookReplay,
+  type WebhookReplay,
+} from "./lib/webhook-replay";
 import { loadOtelConfig } from "./lib/otel-config";
 import { detectProjectKey } from "./lib/project-key";
 import {
@@ -509,6 +513,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   let webhookHandler: WebhookHandler | null = null;
   let webhookTunnel: WebhookTunnel | null = null;
   let webhookSubscriber: WebhookSubscriber | null = null;
+  let webhookReplay: WebhookReplay | null = null;
   if (webhookConfig && prFetcher) {
     webhookHandler = createWebhookHandler({
       secret: webhookConfig.secret,
@@ -526,6 +531,16 @@ export function createServer(opts: CreateServerOptions): BunServer {
       secret: webhookConfig.secret,
       events: [...DEFAULT_WEBHOOK_EVENTS],
       runner: defaultGhRunner,
+      logger: {
+        info: (m) => console.info(m),
+        warn: (m) => console.warn(m),
+        error: (m) => console.error(m),
+      },
+    });
+    webhookReplay = createWebhookReplay({
+      runner: defaultGhRunner,
+      handler: webhookHandler,
+      secret: webhookConfig.secret,
       logger: {
         info: (m) => console.info(m),
         warn: (m) => console.warn(m),
@@ -1472,6 +1487,28 @@ export function createServer(opts: CreateServerOptions): BunServer {
         err instanceof Error ? err.message : String(err),
       );
     });
+    if (webhookReplay && webhookSubscriber) {
+      const replay = webhookReplay;
+      const subscriber = webhookSubscriber;
+      // 1-hour replay window — wide enough to cover most outages, narrow enough
+      // to keep startup latency under a few seconds.
+      const since = new Date(Date.now() - 60 * 60_000);
+      void Promise.resolve()
+        .then(() => replay.replaySince(subscriber.listSubscribed(), since))
+        .then((count) => {
+          if (count > 0) {
+            console.info(
+              `[server] replayed ${count} webhook deliveries from the last hour`,
+            );
+          }
+        })
+        .catch((err: unknown) => {
+          console.error(
+            `[server] webhook replay failed:`,
+            err instanceof Error ? err.message : String(err),
+          );
+        });
+    }
   }
 
   if (pidFile) {
