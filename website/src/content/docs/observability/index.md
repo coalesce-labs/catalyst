@@ -52,6 +52,7 @@ bun run plugins/dev/scripts/orch-monitor/server.ts --terminal
 - [Setting up the OTel stack](./setup/) — instrument Claude Code with `claude-code-otel` for full OpenTelemetry export
 - [Making agents record data properly](./recording/) — shell wrapper, resource attributes, environment variables
 - [Using the web monitor](./monitor/) — dashboard walkthrough, API endpoints, filters
+- [GitHub webhooks for orch-monitor](./webhooks/) — sub-5-second PR / review / deployment updates via smee.io tunnel
 - [Using the terminal UI](./terminal/) — when to prefer ANSI over the browser
 - [Event architecture](./events/) — how SSE streams and the global event log fit together
 - [Agent communication (`catalyst-comms`)](../reference/catalyst-comms/) — how workers coordinate with each other across worktrees

@@ -14,7 +14,9 @@
     "build:ui": "cd ui && bun run build",
     "dev:ui": "cd ui && bun run dev"
   },
-  "dependencies": {},
+  "dependencies": {
+    "smee-client": "^5.0.0"
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/bun": "^1.3.12",

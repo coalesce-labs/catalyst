@@ -338,3 +338,48 @@ index.
   `archive_path`, and relative paths are regex-validated to `[A-Za-z0-9._-]+` segments.
 - `catalyst-archive` exposes `sweep`, `sync`, `prune`, `list`, and `show` subcommands for
   ops (prune respects `archive.retentionDays`).
+
+---
+
+## ADR-012: Webhook-Driven orch-monitor with smee.io Tunnel
+
+**Decision**: Migrate orch-monitor from 30-second poll-everything to webhook-driven
+event ingestion via a smee.io tunnel, with polling kept as a 10-minute fallback.
+
+**Rationale**:
+
+- The 30s polling loop ran ~26,640 GraphQL `gh pr view` calls per hour for 222 tracked
+  PRs (only ~3 active at any time), draining the 5,000 calls/hr GitHub bucket in
+  ~11 minutes and keeping it drained 24/7. CTL-209 root-cause research confirmed the
+  recurrence pattern.
+- Webhooks deliver state changes within seconds (vs. 30s worst-case for polling) and
+  cost zero API budget at delivery time.
+- smee.io is the path of least resistance for local-only delivery: no public ingress,
+  no shared secret in DNS, no Cloudflare Worker. `gh webhook forward` was rejected
+  because it's CLI-session-oriented (one user per repo, no programmatic API).
+- Repo-level subscriptions (vs. org-level) mean we only manage hooks for repos we
+  actually observe. The lazy `ensureSubscribed(repo)` path runs once per repo per
+  process lifetime, then becomes a cache hit.
+- A hard cutover (no `MONITOR_WEBHOOKS` feature flag) keeps the migration tractable.
+  Worst case if all webhook plumbing fails: the daemon falls back to a 10-min poll
+  with terminal-PR-skip and UNKNOWN backoff (Phase 0), still under budget.
+
+**Consequences**:
+
+- New runtime dep: `smee-client@^5.0.0` (was zero deps).
+- New `lib/webhook-{verify,events,handler,tunnel,subscriber,replay,event-log}.ts`
+  modules; new `POST /api/webhook` route; new server lifecycle hooks.
+- Configuration: `.catalyst/config.json` adds `catalyst.monitor.github.smeeChannel`
+  + `webhookSecretEnv`; HMAC secret lives in an env var pointed at by the latter.
+  `plugins/dev/scripts/setup-webhooks.sh` is the idempotent setup helper.
+- Startup replay: 1-hour window of deliveries from
+  `gh api repos/{repo}/hooks/{id}/deliveries` is replayed through the same handler
+  used for live deliveries (with synthetic signing — we own the secret), so events
+  missed during downtime are reconciled without operator action.
+- Event-log fan-out: every accepted webhook event is appended to
+  `~/catalyst/events/YYYY-MM.jsonl` with topic namespace `<source>.<noun>.<verb>`
+  (e.g. `github.pr.merged`). This seeds the unified event-bus that CTL-210 (Linear
+  webhooks + consumer-side `catalyst-events` CLI) and CTL-211 (worker definition-of-
+  done = production deploy success) build on.
+- Steady-state GitHub API budget: 200+ tracked PRs × < 50 calls/hr (well under both
+  the GraphQL and REST 5,000 calls/hr ceilings).

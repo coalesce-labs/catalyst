@@ -20,14 +20,53 @@ export type Runner = (args: string[]) => Promise<RunnerResult>;
 export interface PreviewFetcher {
   get(repo: string, number: number): PreviewLink[];
   refreshAll(prs: PreviewRef[]): Promise<void>;
+  /**
+   * Bypass refreshAll's filters and force a fetch. Used by webhook handler
+   * when an issue_comment / pull_request_review_comment / deployment*
+   * event arrives for a known PR.
+   */
+  force(ref: PreviewRef): Promise<void>;
   start(prs: PreviewRef[], intervalMs: number): void;
   stop(): void;
 }
+
+export type PreviewPrState = "OPEN" | "CLOSED" | "MERGED" | "UNKNOWN";
 
 interface CreatePreviewFetcherOptions {
   runner?: Runner;
   concurrency?: number;
   patterns?: string[];
+  /**
+   * Returns the cached PR state for a ref, or null when unknown. When set,
+   * refreshAll skips refs whose PR is MERGED/CLOSED — preview state cannot
+   * change after the PR closes.
+   */
+  getPrState?: (ref: PreviewRef) => PreviewPrState | null;
+  /** Same shape as prFetcher's lastWebhookAt — skip recent-webhook refs. */
+  lastWebhookAt?: (ref: PreviewRef) => number | null;
+  webhookFreshnessMs?: number;
+}
+
+const DEFAULT_PREVIEW_WEBHOOK_FRESHNESS_MS = 5 * 60_000;
+const PREVIEW_BACKOFF_SCHEDULE_MS: readonly number[] = [
+  30_000,
+  60_000,
+  2 * 60_000,
+  5 * 60_000,
+  15 * 60_000,
+  30 * 60_000,
+];
+
+export function previewBackoffMs(unknownStreak: number): number {
+  if (unknownStreak <= 0) return 0;
+  const idx = Math.min(unknownStreak - 1, PREVIEW_BACKOFF_SCHEDULE_MS.length - 1);
+  return PREVIEW_BACKOFF_SCHEDULE_MS[idx];
+}
+
+interface PreviewCacheEntry {
+  links: PreviewLink[];
+  unknownStreak: number;
+  nextRetryAt: string | null;
 }
 
 export const DEFAULT_PREVIEW_PATTERNS = [
@@ -155,7 +194,11 @@ export function createPreviewFetcher(
   const runner = opts.runner ?? defaultRunner;
   const concurrency = Math.max(1, opts.concurrency ?? 3);
   const patterns = opts.patterns ?? DEFAULT_PREVIEW_PATTERNS;
-  const cache = new Map<string, PreviewLink[]>();
+  const webhookFreshnessMs =
+    opts.webhookFreshnessMs ?? DEFAULT_PREVIEW_WEBHOOK_FRESHNESS_MS;
+  const getPrState = opts.getPrState;
+  const lastWebhookAt = opts.lastWebhookAt;
+  const cache = new Map<string, PreviewCacheEntry>();
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
   let ghAvailable: boolean | null = null;
   let ghProbeInFlight: Promise<boolean> | null = null;
@@ -186,7 +229,9 @@ export function createPreviewFetcher(
     }
   }
 
-  async function fetchCommentUrls(ref: PreviewRef): Promise<PreviewLink[]> {
+  async function fetchCommentUrls(
+    ref: PreviewRef,
+  ): Promise<PreviewLink[] | null> {
     const res = await runner([
       "gh",
       "api",
@@ -199,7 +244,7 @@ export function createPreviewFetcher(
       console.warn(
         `[preview-status] comments fetch failed for ${ref.repo}#${ref.number}`,
       );
-      return [];
+      return null;
     }
     const urls = extractPreviewUrls(res.stdout, patterns);
     return urls.map((url) => ({
@@ -212,7 +257,7 @@ export function createPreviewFetcher(
 
   async function fetchDeploymentUrls(
     ref: PreviewRef,
-  ): Promise<PreviewLink[]> {
+  ): Promise<PreviewLink[] | null> {
     const res = await runner([
       "gh",
       "api",
@@ -224,7 +269,7 @@ export function createPreviewFetcher(
       console.warn(
         `[preview-status] deployments fetch failed for ${ref.repo}`,
       );
-      return [];
+      return null;
     }
 
     let entries: DeploymentEntry[];
@@ -235,7 +280,7 @@ export function createPreviewFetcher(
         `[preview-status] deployments parse failed for ${ref.repo}:`,
         err instanceof Error ? err.message : String(err),
       );
-      return [];
+      return null;
     }
     if (!Array.isArray(entries)) return [];
 
@@ -277,12 +322,30 @@ export function createPreviewFetcher(
   }
 
   async function fetchOne(ref: PreviewRef): Promise<void> {
+    const k = cacheKey(ref.repo, ref.number);
+    const prev = cache.get(k);
     const [commentLinks, deployLinks] = await Promise.all([
-      fetchCommentUrls(ref),
-      fetchDeploymentUrls(ref),
+      fetchCommentUrls(ref).catch(() => null),
+      fetchDeploymentUrls(ref).catch(() => null),
     ]);
-    const merged = mergeLinks(commentLinks, deployLinks);
-    cache.set(cacheKey(ref.repo, ref.number), merged);
+    if (commentLinks === null && deployLinks === null) {
+      const unknownStreak = (prev?.unknownStreak ?? 0) + 1;
+      const nextRetryAt = new Date(
+        Date.now() + previewBackoffMs(unknownStreak),
+      ).toISOString();
+      cache.set(k, {
+        links: prev?.links ?? [],
+        unknownStreak,
+        nextRetryAt,
+      });
+      return;
+    }
+    const merged = mergeLinks(commentLinks ?? [], deployLinks ?? []);
+    cache.set(k, {
+      links: merged,
+      unknownStreak: 0,
+      nextRetryAt: null,
+    });
   }
 
   async function refreshAll(prs: PreviewRef[]): Promise<void> {
@@ -290,12 +353,32 @@ export function createPreviewFetcher(
     const ok = await probeGh();
     if (!ok) return;
 
+    const now = Date.now();
     const seen = new Set<string>();
     const queue: PreviewRef[] = [];
     for (const ref of prs) {
       const k = cacheKey(ref.repo, ref.number);
       if (seen.has(k)) continue;
       seen.add(k);
+      // Skip terminal PRs — preview state cannot change after merge/close.
+      if (getPrState) {
+        const state = getPrState(ref);
+        if (state === "MERGED" || state === "CLOSED") continue;
+      }
+      // Respect UNKNOWN backoff.
+      const cached = cache.get(k);
+      if (
+        cached &&
+        cached.nextRetryAt !== null &&
+        new Date(cached.nextRetryAt).getTime() > now
+      ) {
+        continue;
+      }
+      // Skip if a webhook event arrived recently — webhooks are authoritative.
+      if (lastWebhookAt) {
+        const ts = lastWebhookAt(ref);
+        if (ts !== null && now - ts < webhookFreshnessMs) continue;
+      }
       queue.push(ref);
     }
 
@@ -322,11 +405,25 @@ export function createPreviewFetcher(
     await Promise.all(workers);
   }
 
+  async function force(ref: PreviewRef): Promise<void> {
+    const ok = await probeGh();
+    if (!ok) return;
+    try {
+      await fetchOne(ref);
+    } catch (err) {
+      console.warn(
+        `[preview-status] force fetch failed for ${ref.repo}#${ref.number}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
   return {
     get(repo: string, number: number): PreviewLink[] {
-      return cache.get(cacheKey(repo, number)) ?? [];
+      return cache.get(cacheKey(repo, number))?.links ?? [];
     },
     refreshAll,
+    force,
     start(prs: PreviewRef[], intervalMs: number): void {
       if (intervalHandle !== null) return;
       void refreshAll(prs);

@@ -14,6 +14,23 @@ export interface PrStatus {
   mergeStateStatus: PrMergeStateStatus;
   isDraft: boolean;
   fetchedAt: string;
+  unknownStreak: number;
+  nextRetryAt: string | null;
+}
+
+const UNKNOWN_BACKOFF_SCHEDULE_MS: readonly number[] = [
+  30_000,
+  60_000,
+  2 * 60_000,
+  5 * 60_000,
+  15 * 60_000,
+  30 * 60_000,
+];
+
+export function unknownBackoffMs(unknownStreak: number): number {
+  if (unknownStreak <= 0) return 0;
+  const idx = Math.min(unknownStreak - 1, UNKNOWN_BACKOFF_SCHEDULE_MS.length - 1);
+  return UNKNOWN_BACKOFF_SCHEDULE_MS[idx];
 }
 
 export interface PrRef {
@@ -31,6 +48,7 @@ export type Runner = (args: string[]) => Promise<RunnerResult>;
 export interface PrStatusFetcher {
   get(repo: string, number: number): PrStatus | null;
   refreshAll(prs: PrRef[]): Promise<void>;
+  force(ref: PrRef): Promise<void>;
   start(prs: PrRef[], intervalMs: number): void;
   stop(): void;
 }
@@ -38,7 +56,17 @@ export interface PrStatusFetcher {
 interface CreatePrStatusFetcherOptions {
   runner?: Runner;
   concurrency?: number;
+  /**
+   * Returns the last-observed webhook timestamp for a PR ref, or null when
+   * none. When set, refreshAll skips refs whose last webhook arrived within
+   * `webhookFreshnessMs` (default 5 min) — webhooks are authoritative and a
+   * follow-up poll within that window is wasted.
+   */
+  lastWebhookAt?: (ref: PrRef) => number | null;
+  webhookFreshnessMs?: number;
 }
+
+const DEFAULT_WEBHOOK_FRESHNESS_MS = 5 * 60_000;
 
 const PR_URL_RE = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/;
 
@@ -157,6 +185,9 @@ export function createPrStatusFetcher(
 ): PrStatusFetcher {
   const runner = opts.runner ?? defaultRunner;
   const concurrency = Math.max(1, opts.concurrency ?? 5);
+  const webhookFreshnessMs =
+    opts.webhookFreshnessMs ?? DEFAULT_WEBHOOK_FRESHNESS_MS;
+  const lastWebhookAt = opts.lastWebhookAt;
   const cache = new Map<string, PrStatus>();
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
   let ghAvailable: boolean | null = null;
@@ -188,6 +219,24 @@ export function createPrStatusFetcher(
     }
   }
 
+  function recordUnknown(ref: PrRef, fetchedAt: string): void {
+    const prev = cache.get(cacheKey(ref.repo, ref.number));
+    const unknownStreak = (prev?.unknownStreak ?? 0) + 1;
+    const nextRetryAt = new Date(
+      Date.now() + unknownBackoffMs(unknownStreak),
+    ).toISOString();
+    cache.set(cacheKey(ref.repo, ref.number), {
+      number: ref.number,
+      state: "UNKNOWN",
+      mergedAt: null,
+      mergeStateStatus: "UNKNOWN",
+      isDraft: false,
+      fetchedAt,
+      unknownStreak,
+      nextRetryAt,
+    });
+  }
+
   async function fetchOne(ref: PrRef): Promise<void> {
     const res = await runner([
       "gh",
@@ -201,14 +250,7 @@ export function createPrStatusFetcher(
     ]);
     const fetchedAt = new Date().toISOString();
     if (!res.ok) {
-      cache.set(cacheKey(ref.repo, ref.number), {
-        number: ref.number,
-        state: "UNKNOWN",
-        mergedAt: null,
-        mergeStateStatus: "UNKNOWN",
-        isDraft: false,
-        fetchedAt,
-      });
+      recordUnknown(ref, fetchedAt);
       return;
     }
     let parsed: ParsedPrPayload;
@@ -219,14 +261,7 @@ export function createPrStatusFetcher(
         `[pr-status] parse failed for ${ref.repo}#${ref.number}:`,
         err instanceof Error ? err.message : String(err),
       );
-      cache.set(cacheKey(ref.repo, ref.number), {
-        number: ref.number,
-        state: "UNKNOWN",
-        mergedAt: null,
-        mergeStateStatus: "UNKNOWN",
-        isDraft: false,
-        fetchedAt,
-      });
+      recordUnknown(ref, fetchedAt);
       return;
     }
     const state = normalizeState(parsed.state);
@@ -234,6 +269,10 @@ export function createPrStatusFetcher(
       typeof parsed.mergedAt === "string" && parsed.mergedAt.length > 0
         ? parsed.mergedAt
         : null;
+    if (state === "UNKNOWN") {
+      recordUnknown(ref, fetchedAt);
+      return;
+    }
     cache.set(cacheKey(ref.repo, ref.number), {
       number: ref.number,
       state,
@@ -241,6 +280,8 @@ export function createPrStatusFetcher(
       mergeStateStatus: normalizeMergeStateStatus(parsed.mergeStateStatus),
       isDraft: normalizeIsDraft(parsed.isDraft),
       fetchedAt,
+      unknownStreak: 0,
+      nextRetryAt: null,
     });
   }
 
@@ -248,13 +289,29 @@ export function createPrStatusFetcher(
     if (prs.length === 0) return;
     const ok = await probeGh();
     if (!ok) return;
-    // Dedupe
+    // Dedupe + filter terminal/backoff entries
+    const now = Date.now();
     const seen = new Set<string>();
     const queue: PrRef[] = [];
     for (const ref of prs) {
       const k = cacheKey(ref.repo, ref.number);
       if (seen.has(k)) continue;
       seen.add(k);
+      const cached = cache.get(k);
+      if (cached) {
+        if (cached.state === "MERGED" || cached.state === "CLOSED") continue;
+        if (
+          cached.state === "UNKNOWN" &&
+          cached.nextRetryAt !== null &&
+          new Date(cached.nextRetryAt).getTime() > now
+        ) {
+          continue;
+        }
+      }
+      if (lastWebhookAt) {
+        const ts = lastWebhookAt(ref);
+        if (ts !== null && now - ts < webhookFreshnessMs) continue;
+      }
       queue.push(ref);
     }
     let cursor = 0;
@@ -279,11 +336,25 @@ export function createPrStatusFetcher(
     await Promise.all(workers);
   }
 
+  async function force(ref: PrRef): Promise<void> {
+    const ok = await probeGh();
+    if (!ok) return;
+    try {
+      await fetchOne(ref);
+    } catch (err) {
+      console.warn(
+        `[pr-status] force fetch failed for ${ref.repo}#${ref.number}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
   return {
     get(repo: string, number: number): PrStatus | null {
       return cache.get(cacheKey(repo, number)) ?? null;
     },
     refreshAll,
+    force,
     start(prs: PrRef[], intervalMs: number): void {
       if (intervalHandle !== null) return;
       void refreshAll(prs);
