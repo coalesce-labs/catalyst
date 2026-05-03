@@ -6,6 +6,10 @@ export interface PrFetcherForceLike {
   force(ref: { repo: string; number: number }): Promise<void>;
 }
 
+export interface PreviewFetcherForceLike {
+  force(ref: { repo: string; number: number }): Promise<void>;
+}
+
 export interface WebhookLogger {
   info?: (msg: string) => void;
   warn?: (msg: string) => void;
@@ -17,6 +21,8 @@ export interface WebhookHandlerDeps {
   secret: string;
   /** Used to refresh PR cache on accepted PR-side events. */
   prFetcher: PrFetcherForceLike;
+  /** Used to refresh preview-link cache on preview-side events. */
+  previewFetcher?: PreviewFetcherForceLike;
   /**
    * Returns paths of worker signal files that reference (repo, prNumber).
    * The handler writes through `writeMergedSignalFile` on `pull_request.closed`
@@ -119,13 +125,26 @@ export function createWebhookHandler(
         break;
       }
       case "issue_comment":
-      case "pull_request_review_comment":
+      case "pull_request_review_comment": {
+        markLastWebhookAt(event.repo, event.number);
+        if (deps.previewFetcher) {
+          await deps.previewFetcher.force({
+            repo: event.repo,
+            number: event.number,
+          });
+        }
+        break;
+      }
       case "deployment":
-      case "deployment_status":
+      case "deployment_status": {
+        // Repo-level event with a sha; we don't currently resolve sha → PR
+        // here. The 10-min preview-fetcher fallback catches missed deployment
+        // events within bounded latency. Logging only.
         logger.info?.(
-          `[webhook] ${event.kind} received but not yet handled (Phase 5)`,
+          `[webhook] ${event.kind} received for ${event.repo} (env=${event.environment})`,
         );
         break;
+      }
       case "ignored":
         logger.info?.(`[webhook] ignored: ${event.reason}`);
         break;

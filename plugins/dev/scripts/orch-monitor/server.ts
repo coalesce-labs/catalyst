@@ -178,7 +178,7 @@ const CATALYST_DEV_VERSION = resolveVersion();
 // Webhooks are the primary delivery path (CTL-209). Polling drops to a
 // 10-minute fallback so missed deliveries get reconciled within bounded latency.
 const PR_STATUS_REFRESH_MS = 10 * 60_000;
-const PREVIEW_REFRESH_MS = 30_000;
+const PREVIEW_REFRESH_MS = 10 * 60_000;
 export const LINEAR_REFRESH_MS = 5 * 60_000;
 
 interface WebhookCliConfig {
@@ -499,7 +499,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const previewFetcher: PreviewFetcher | null =
     previewFetcherOpt === null
       ? null
-      : (previewFetcherOpt ?? createPreviewFetcher());
+      : (previewFetcherOpt ??
+        createPreviewFetcher({
+          getPrState: (ref) => prFetcher?.get(ref.repo, ref.number)?.state ?? null,
+          lastWebhookAt: (ref) =>
+            webhookHandlerRef?.getLastWebhookAt(ref.repo, ref.number) ?? null,
+        }));
   let lastPreviewRefresh = 0;
 
   const comms: CommsReader | null =
@@ -528,6 +533,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     webhookHandler = createWebhookHandler({
       secret: webhookConfig.secret,
       prFetcher,
+      previewFetcher: previewFetcher ?? undefined,
       findSignalPaths: findSignalPathsForRef,
       emit: (type, data) => emit(type, data),
       logger: {

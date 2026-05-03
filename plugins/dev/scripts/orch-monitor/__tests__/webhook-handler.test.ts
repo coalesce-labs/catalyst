@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import {
   createWebhookHandler,
   type PrFetcherForceLike,
+  type PreviewFetcherForceLike,
 } from "../lib/webhook-handler";
 
 const SECRET = "test-secret";
@@ -41,6 +42,14 @@ function makeReq(
 }
 
 class FakeFetcher implements PrFetcherForceLike {
+  forces: Array<{ repo: string; number: number }> = [];
+  force(ref: { repo: string; number: number }): Promise<void> {
+    this.forces.push(ref);
+    return Promise.resolve();
+  }
+}
+
+class FakePreviewFetcher implements PreviewFetcherForceLike {
   forces: Array<{ repo: string; number: number }> = [];
   force(ref: { repo: string; number: number }): Promise<void> {
     this.forces.push(ref);
@@ -233,7 +242,52 @@ describe("createWebhookHandler", () => {
     expect(fetcher.forces).toEqual([{ repo: "owner/repo", number: 50 }]);
   });
 
-  it("preview events are no-ops in Phase 1", async () => {
+  it("issue_comment.created → previewFetcher.force when configured", async () => {
+    const preview = new FakePreviewFetcher();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      previewFetcher: preview,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "created",
+          issue: { number: 80, pull_request: { url: "..." } },
+          comment: { id: 1, body: "Preview: https://x.pages.dev", html_url: "..." },
+        },
+        { "x-github-event": "issue_comment" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(preview.forces).toEqual([{ repo: "owner/repo", number: 80 }]);
+    expect(fetcher.forces.length).toBe(0);
+  });
+
+  it("pull_request_review_comment.created → previewFetcher.force", async () => {
+    const preview = new FakePreviewFetcher();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      previewFetcher: preview,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "created",
+          pull_request: { number: 90 },
+          comment: { id: 7, body: "nit", html_url: "..." },
+        },
+        { "x-github-event": "pull_request_review_comment" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(preview.forces).toEqual([{ repo: "owner/repo", number: 90 }]);
+  });
+
+  it("preview events are no-ops when previewFetcher is not configured", async () => {
     const handler = createWebhookHandler({ secret: SECRET, prFetcher: fetcher });
     const res = await handler.handle(
       makeReq(
@@ -247,6 +301,28 @@ describe("createWebhookHandler", () => {
       ),
     );
     expect(res.status).toBe(200);
+    expect(fetcher.forces.length).toBe(0);
+  });
+
+  it("deployment_status events are accepted but logged only", async () => {
+    const preview = new FakePreviewFetcher();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      previewFetcher: preview,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          deployment: { id: 1, environment: "preview" },
+          deployment_status: { state: "success", target_url: "..." },
+        },
+        { "x-github-event": "deployment_status" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(preview.forces.length).toBe(0);
     expect(fetcher.forces.length).toBe(0);
   });
 
