@@ -621,8 +621,11 @@ describe("PR merge write-through to signal file", () => {
         mergeStateStatus: "UNKNOWN" as const,
         isDraft: false,
         fetchedAt: new Date().toISOString(),
+        unknownStreak: 0,
+        nextRetryAt: null,
       }),
       refreshAll: () => Promise.resolve(),
+      force: () => Promise.resolve(),
       start: () => {},
       stop: () => {},
     };

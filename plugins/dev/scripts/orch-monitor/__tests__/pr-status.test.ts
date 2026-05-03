@@ -3,6 +3,7 @@ import {
   createPrStatusFetcher,
   fetchPrForBranch,
   parseRepoFromPrUrl,
+  unknownBackoffMs,
   type Runner,
   type RunnerResult,
 } from "../lib/pr-status";
@@ -349,5 +350,218 @@ describe("createPrStatusFetcher", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(fetcher.get("o/r", 9)?.state).toBe("OPEN");
     fetcher.stop();
+  });
+});
+
+describe("unknownBackoffMs", () => {
+  it("returns 0 for streak <= 0", () => {
+    expect(unknownBackoffMs(0)).toBe(0);
+    expect(unknownBackoffMs(-1)).toBe(0);
+  });
+
+  it("follows the schedule 30s, 60s, 2m, 5m, 15m, 30m", () => {
+    expect(unknownBackoffMs(1)).toBe(30_000);
+    expect(unknownBackoffMs(2)).toBe(60_000);
+    expect(unknownBackoffMs(3)).toBe(2 * 60_000);
+    expect(unknownBackoffMs(4)).toBe(5 * 60_000);
+    expect(unknownBackoffMs(5)).toBe(15 * 60_000);
+    expect(unknownBackoffMs(6)).toBe(30 * 60_000);
+  });
+
+  it("clamps at 30 minutes for streak > 6", () => {
+    expect(unknownBackoffMs(7)).toBe(30 * 60_000);
+    expect(unknownBackoffMs(100)).toBe(30 * 60_000);
+  });
+});
+
+describe("createPrStatusFetcher (Phase 0 — terminal-skip + UNKNOWN backoff)", () => {
+  const VIEW_ARGS = "--json state,mergedAt,mergeStateStatus,isDraft";
+
+  function viewKey(num: number, repo = "o/r"): string {
+    return `gh pr view ${num} --repo ${repo} ${VIEW_ARGS}`;
+  }
+
+  it("refreshAll skips refs whose cached state is MERGED", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "", ok: true });
+    let viewCalls = 0;
+    const runner: Runner = (args) => {
+      const key = args.join(" ");
+      const cached = responses.get(key);
+      if (cached) return Promise.resolve(cached);
+      if (args[1] === "pr" && args[2] === "view") viewCalls++;
+      return Promise.resolve({
+        stdout: '{"state":"MERGED","mergedAt":"2026-04-13T12:00:00Z"}',
+        ok: true,
+      });
+    };
+    const fetcher = createPrStatusFetcher({ runner });
+    // Prime the cache as MERGED
+    await fetcher.refreshAll([{ repo: "o/r", number: 42 }]);
+    expect(viewCalls).toBe(1);
+    expect(fetcher.get("o/r", 42)?.state).toBe("MERGED");
+    // Second refresh should skip the MERGED ref
+    await fetcher.refreshAll([{ repo: "o/r", number: 42 }]);
+    expect(viewCalls).toBe(1);
+  });
+
+  it("refreshAll skips refs whose cached state is CLOSED", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "", ok: true });
+    let viewCalls = 0;
+    const runner: Runner = (args) => {
+      const key = args.join(" ");
+      const cached = responses.get(key);
+      if (cached) return Promise.resolve(cached);
+      if (args[1] === "pr" && args[2] === "view") viewCalls++;
+      return Promise.resolve({
+        stdout: '{"state":"CLOSED","mergedAt":null}',
+        ok: true,
+      });
+    };
+    const fetcher = createPrStatusFetcher({ runner });
+    await fetcher.refreshAll([{ repo: "o/r", number: 50 }]);
+    expect(viewCalls).toBe(1);
+    expect(fetcher.get("o/r", 50)?.state).toBe("CLOSED");
+    await fetcher.refreshAll([{ repo: "o/r", number: 50 }]);
+    expect(viewCalls).toBe(1);
+  });
+
+  it("refreshAll respects UNKNOWN backoff (does not refetch before nextRetryAt)", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "", ok: true });
+    responses.set(viewKey(60), { stdout: "", ok: false });
+    let viewCalls = 0;
+    const runner: Runner = (args) => {
+      const key = args.join(" ");
+      const cached = responses.get(key);
+      if (args[1] === "pr" && args[2] === "view") viewCalls++;
+      return Promise.resolve(cached ?? { stdout: "", ok: false });
+    };
+    const fetcher = createPrStatusFetcher({ runner });
+    // First call → UNKNOWN, sets nextRetryAt 30s in the future
+    await fetcher.refreshAll([{ repo: "o/r", number: 60 }]);
+    expect(viewCalls).toBe(1);
+    const cached = fetcher.get("o/r", 60);
+    expect(cached?.state).toBe("UNKNOWN");
+    expect(cached?.unknownStreak).toBe(1);
+    expect(cached?.nextRetryAt).not.toBeNull();
+    expect(new Date(cached!.nextRetryAt!).getTime()).toBeGreaterThan(Date.now());
+    // Second call before nextRetryAt → skipped
+    await fetcher.refreshAll([{ repo: "o/r", number: 60 }]);
+    expect(viewCalls).toBe(1);
+  });
+
+  it("refreshAll refetches UNKNOWN ref once nextRetryAt is in the past", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "", ok: true });
+    let viewCalls = 0;
+    const runner: Runner = (args) => {
+      const key = args.join(" ");
+      if (args[1] === "pr" && args[2] === "view") viewCalls++;
+      return Promise.resolve(responses.get(key) ?? { stdout: "", ok: false });
+    };
+    const fetcher = createPrStatusFetcher({ runner });
+    // First call → UNKNOWN
+    responses.set(viewKey(70), { stdout: "", ok: false });
+    await fetcher.refreshAll([{ repo: "o/r", number: 70 }]);
+    expect(viewCalls).toBe(1);
+    // Manually rewind nextRetryAt into the past
+    const cached = fetcher.get("o/r", 70);
+    expect(cached?.nextRetryAt).not.toBeNull();
+    cached!.nextRetryAt = new Date(Date.now() - 1000).toISOString();
+    // Now success on retry
+    responses.set(viewKey(70), {
+      stdout: '{"state":"OPEN","mergedAt":null}',
+      ok: true,
+    });
+    await fetcher.refreshAll([{ repo: "o/r", number: 70 }]);
+    expect(viewCalls).toBe(2);
+    expect(fetcher.get("o/r", 70)?.state).toBe("OPEN");
+  });
+
+  it("successful fetch resets unknownStreak to 0 and clears nextRetryAt", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "", ok: true });
+    responses.set(viewKey(80), { stdout: "", ok: false });
+    const fetcher = createPrStatusFetcher({
+      runner: makeRunner(responses),
+    });
+    // First call fails → unknownStreak=1
+    await fetcher.refreshAll([{ repo: "o/r", number: 80 }]);
+    expect(fetcher.get("o/r", 80)?.unknownStreak).toBe(1);
+    expect(fetcher.get("o/r", 80)?.nextRetryAt).not.toBeNull();
+    // Force a retry with success
+    responses.set(viewKey(80), {
+      stdout: '{"state":"OPEN","mergedAt":null}',
+      ok: true,
+    });
+    await fetcher.force({ repo: "o/r", number: 80 });
+    const cached = fetcher.get("o/r", 80);
+    expect(cached?.state).toBe("OPEN");
+    expect(cached?.unknownStreak).toBe(0);
+    expect(cached?.nextRetryAt).toBeNull();
+  });
+
+  it("consecutive UNKNOWN responses extend nextRetryAt per backoff schedule", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "", ok: true });
+    responses.set(viewKey(90), { stdout: "", ok: false });
+    const fetcher = createPrStatusFetcher({
+      runner: makeRunner(responses),
+    });
+    const before1 = Date.now();
+    await fetcher.force({ repo: "o/r", number: 90 });
+    const c1 = fetcher.get("o/r", 90);
+    expect(c1?.unknownStreak).toBe(1);
+    const delay1 = new Date(c1!.nextRetryAt!).getTime() - before1;
+    // streak=1 → 30s ± 100ms
+    expect(delay1).toBeGreaterThanOrEqual(30_000 - 100);
+    expect(delay1).toBeLessThanOrEqual(30_000 + 100);
+
+    const before2 = Date.now();
+    await fetcher.force({ repo: "o/r", number: 90 });
+    const c2 = fetcher.get("o/r", 90);
+    expect(c2?.unknownStreak).toBe(2);
+    const delay2 = new Date(c2!.nextRetryAt!).getTime() - before2;
+    // streak=2 → 60s
+    expect(delay2).toBeGreaterThanOrEqual(60_000 - 100);
+    expect(delay2).toBeLessThanOrEqual(60_000 + 100);
+
+    const before3 = Date.now();
+    await fetcher.force({ repo: "o/r", number: 90 });
+    const c3 = fetcher.get("o/r", 90);
+    expect(c3?.unknownStreak).toBe(3);
+    const delay3 = new Date(c3!.nextRetryAt!).getTime() - before3;
+    // streak=3 → 2m
+    expect(delay3).toBeGreaterThanOrEqual(2 * 60_000 - 100);
+    expect(delay3).toBeLessThanOrEqual(2 * 60_000 + 100);
+  });
+
+  it("force(ref) re-fetches a MERGED ref bypassing the filter", async () => {
+    const responses = new Map<string, RunnerResult>();
+    responses.set("gh --version", { stdout: "", ok: true });
+    let viewCalls = 0;
+    const runner: Runner = (args) => {
+      const key = args.join(" ");
+      const cached = responses.get(key);
+      if (cached) return Promise.resolve(cached);
+      if (args[1] === "pr" && args[2] === "view") viewCalls++;
+      return Promise.resolve({
+        stdout: '{"state":"MERGED","mergedAt":"2026-04-13T12:00:00Z"}',
+        ok: true,
+      });
+    };
+    const fetcher = createPrStatusFetcher({ runner });
+    // Prime cache as MERGED
+    await fetcher.refreshAll([{ repo: "o/r", number: 100 }]);
+    expect(viewCalls).toBe(1);
+    expect(fetcher.get("o/r", 100)?.state).toBe("MERGED");
+    // refreshAll skips it
+    await fetcher.refreshAll([{ repo: "o/r", number: 100 }]);
+    expect(viewCalls).toBe(1);
+    // force() bypasses the filter
+    await fetcher.force({ repo: "o/r", number: 100 });
+    expect(viewCalls).toBe(2);
   });
 });
