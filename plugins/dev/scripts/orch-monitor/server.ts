@@ -79,6 +79,10 @@ import {
   createWebhookReplay,
   type WebhookReplay,
 } from "./lib/webhook-replay";
+import {
+  createEventLogWriter,
+  type EventLogWriter,
+} from "./lib/event-log";
 import { loadOtelConfig } from "./lib/otel-config";
 import { detectProjectKey } from "./lib/project-key";
 import {
@@ -530,11 +534,19 @@ export function createServer(opts: CreateServerOptions): BunServer {
   let webhookSubscriber: WebhookSubscriber | null = null;
   let webhookReplay: WebhookReplay | null = null;
   if (webhookConfig && prFetcher) {
+    const eventLog: EventLogWriter = createEventLogWriter({
+      catalystDir: CATALYST_DIR,
+      logger: {
+        warn: (m) => console.warn(m),
+        error: (m) => console.error(m),
+      },
+    });
     webhookHandler = createWebhookHandler({
       secret: webhookConfig.secret,
       prFetcher,
       previewFetcher: previewFetcher ?? undefined,
       findSignalPaths: findSignalPathsForRef,
+      eventLog,
       emit: (type, data) => emit(type, data),
       logger: {
         info: (m) => console.info(m),

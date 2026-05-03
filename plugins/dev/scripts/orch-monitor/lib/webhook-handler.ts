@@ -1,6 +1,11 @@
 import { writeMergedSignalFile } from "./signal-writer";
 import { verifyWebhookSignature } from "./webhook-verify";
 import { parseWebhookEvent, type WebhookEvent } from "./webhook-events";
+import {
+  type EventLogWriter,
+  type AppendableEvent,
+  WEBHOOK_SOURCE,
+} from "./event-log";
 
 export interface PrFetcherForceLike {
   force(ref: { repo: string; number: number }): Promise<void>;
@@ -31,6 +36,8 @@ export interface WebhookHandlerDeps {
   findSignalPaths?: (repo: string, prNumber: number) => string[];
   /** Optional pub/sub for SSE fan-out to UI clients. */
   emit?: (type: string, data: unknown) => void;
+  /** Optional event-log fan-out (Phase 6). */
+  eventLog?: EventLogWriter;
   /** Cap for the in-memory delivery-ID dedup set. Default 1000. */
   idempotencyMax?: number;
   logger?: WebhookLogger;
@@ -44,6 +51,153 @@ export interface WebhookHandler {
   markDelivery(deliveryId: string): void;
   /** Last-webhook-at lookup for fallback-poll freshness filter (Phase 4). */
   getLastWebhookAt(repo: string, prNumber: number): number | null;
+}
+
+/**
+ * Map a parsed WebhookEvent to a unified-event-log envelope.
+ *
+ * Topic namespace: `<source>.<noun>.<verb>` — e.g. `github.pr.merged`,
+ * `github.check_suite.completed`, `github.deployment_status.success`.
+ *
+ * Returns null for events that should not be logged (e.g. kind: "ignored").
+ */
+export function buildEventLogEnvelope(
+  event: WebhookEvent,
+  deliveryId: string,
+): AppendableEvent | null {
+  const id = `evt_${deliveryId}`;
+  switch (event.kind) {
+    case "pull_request": {
+      const verb = event.merged
+        ? "merged"
+        : event.action === "closed"
+          ? "closed"
+          : event.action;
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.pr.${verb}`,
+        scope: { repo: event.repo, pr: event.number },
+        detail: {
+          action: event.action,
+          merged: event.merged,
+          mergedAt: event.mergedAt,
+          draft: event.draft,
+          mergeable: event.mergeable,
+        },
+      };
+    }
+    case "pull_request_review":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.pr_review.${event.action}`,
+        scope: { repo: event.repo, pr: event.number },
+        detail: {
+          state: event.reviewState,
+          reviewer: event.reviewer,
+          body: event.body,
+        },
+      };
+    case "pull_request_review_thread":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.pr_review_thread.${event.action}`,
+        scope: { repo: event.repo, pr: event.number },
+        detail: { threadId: event.threadId },
+      };
+    case "check_suite":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.check_suite.${event.status}`,
+        scope: { repo: event.repo },
+        detail: {
+          conclusion: event.conclusion,
+          status: event.status,
+          prNumbers: event.prNumbers,
+        },
+      };
+    case "status":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.status.${event.state}`,
+        scope: { repo: event.repo, sha: event.sha },
+        detail: { state: event.state },
+      };
+    case "push":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: "github.push",
+        scope: { repo: event.repo, ref: event.ref, sha: event.headSha },
+        detail: {
+          baseSha: event.baseSha,
+          headSha: event.headSha,
+          commits: event.commits,
+        },
+      };
+    case "issue_comment":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.issue_comment.${event.action}`,
+        scope: { repo: event.repo, pr: event.number },
+        detail: {
+          commentId: event.commentId,
+          body: event.body,
+          htmlUrl: event.htmlUrl,
+        },
+      };
+    case "pull_request_review_comment":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.pr_review_comment.${event.action}`,
+        scope: { repo: event.repo, pr: event.number },
+        detail: {
+          commentId: event.commentId,
+          body: event.body,
+          htmlUrl: event.htmlUrl,
+        },
+      };
+    case "deployment":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: "github.deployment.created",
+        scope: {
+          repo: event.repo,
+          environment: event.environment,
+          sha: event.sha,
+          ref: event.refName,
+        },
+        detail: {
+          deploymentId: event.deploymentId,
+          payloadUrl: event.payloadUrl,
+        },
+      };
+    case "deployment_status":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.deployment_status.${event.state}`,
+        scope: {
+          repo: event.repo,
+          environment: event.environment,
+        },
+        detail: {
+          deploymentId: event.deploymentId,
+          state: event.state,
+          targetUrl: event.targetUrl,
+          environmentUrl: event.environmentUrl,
+        },
+      };
+    case "ignored":
+      return null;
+  }
 }
 
 export function createWebhookHandler(
@@ -192,6 +346,25 @@ export function createWebhookHandler(
     }
 
     const event = parseWebhookEvent(eventName, payload);
+
+    // Phase 6: log every accepted event to the unified event log BEFORE
+    // dispatching, so a crash mid-dispatch can be reconciled from the log on
+    // restart. Best-effort — log failures are warned and do not abort.
+    if (deps.eventLog && event.kind !== "ignored") {
+      const envelope = buildEventLogEnvelope(event, deliveryId);
+      if (envelope !== null) {
+        try {
+          await deps.eventLog.append(envelope);
+        } catch (err) {
+          logger.warn?.(
+            `[webhook] event-log append failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+    }
+
     try {
       await dispatch(event);
     } catch (err) {

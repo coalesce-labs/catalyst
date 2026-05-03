@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   createWebhookHandler,
+  buildEventLogEnvelope,
   type PrFetcherForceLike,
   type PreviewFetcherForceLike,
 } from "../lib/webhook-handler";
+import type { EventLogWriter, AppendableEvent } from "../lib/event-log";
 
 const SECRET = "test-secret";
 
@@ -53,6 +55,19 @@ class FakePreviewFetcher implements PreviewFetcherForceLike {
   forces: Array<{ repo: string; number: number }> = [];
   force(ref: { repo: string; number: number }): Promise<void> {
     this.forces.push(ref);
+    return Promise.resolve();
+  }
+}
+
+class FakeEventLog implements EventLogWriter {
+  appends: AppendableEvent[] = [];
+  failNext = false;
+  append(envelope: AppendableEvent): Promise<void> {
+    if (this.failNext) {
+      this.failNext = false;
+      return Promise.reject(new Error("disk full"));
+    }
+    this.appends.push(envelope);
     return Promise.resolve();
   }
 }
@@ -448,5 +463,177 @@ describe("createWebhookHandler", () => {
     expect(handler.hasSeenDelivery("a")).toBe(false);
     expect(handler.hasSeenDelivery("b")).toBe(true);
     expect(handler.hasSeenDelivery("c")).toBe(true);
+  });
+});
+
+describe("buildEventLogEnvelope", () => {
+  it("maps pull_request.closed (merged=true) → github.pr.merged", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request",
+        repo: "o/r",
+        number: 1,
+        action: "closed",
+        merged: true,
+        mergedAt: "2026-05-03T12:00:00Z",
+        draft: false,
+        mergeable: true,
+      },
+      "del-1",
+    );
+    expect(env).not.toBeNull();
+    expect(env!.event).toBe("github.pr.merged");
+    expect(env!.scope).toEqual({ repo: "o/r", pr: 1 });
+    expect(env!.id).toBe("evt_del-1");
+  });
+
+  it("maps pull_request.closed (merged=false) → github.pr.closed", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request",
+        repo: "o/r",
+        number: 1,
+        action: "closed",
+        merged: false,
+        mergedAt: null,
+        draft: false,
+        mergeable: null,
+      },
+      "del-2",
+    );
+    expect(env!.event).toBe("github.pr.closed");
+  });
+
+  it("maps check_suite.completed → github.check_suite.completed", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "check_suite",
+        repo: "o/r",
+        prNumbers: [1, 2],
+        status: "completed",
+        conclusion: "success",
+      },
+      "del-3",
+    );
+    expect(env!.event).toBe("github.check_suite.completed");
+    expect(env!.detail.conclusion).toBe("success");
+  });
+
+  it("maps deployment_status.success → github.deployment_status.success", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "deployment_status",
+        repo: "o/r",
+        deploymentId: 100,
+        environment: "preview",
+        state: "success",
+        targetUrl: "https://x.pages.dev",
+        environmentUrl: null,
+      },
+      "del-4",
+    );
+    expect(env!.event).toBe("github.deployment_status.success");
+    expect(env!.scope.environment).toBe("preview");
+  });
+
+  it("returns null for ignored events", () => {
+    const env = buildEventLogEnvelope(
+      { kind: "ignored", reason: "unknown event" },
+      "del-5",
+    );
+    expect(env).toBeNull();
+  });
+});
+
+describe("createWebhookHandler — event log fan-out", () => {
+  const fetcher = new FakeFetcher();
+
+  function makeHandler(eventLog: FakeEventLog) {
+    return createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      eventLog,
+    });
+  }
+
+  it("appends one log entry per accepted event", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = makeHandler(eventLog);
+    await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "synchronize",
+        pull_request: { number: 1 },
+      }),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.event).toBe("github.pr.synchronize");
+  });
+
+  it("does not log replayed (already-seen) deliveries", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = makeHandler(eventLog);
+    const body = JSON.stringify({
+      ...REPO,
+      action: "synchronize",
+      pull_request: { number: 1 },
+    });
+    const headers = {
+      "x-github-event": "pull_request",
+      "x-github-delivery": "dup-id",
+      "x-hub-signature-256": sign(body),
+      "content-type": "application/json",
+    };
+    await handler.handle(
+      new Request("http://localhost/", { method: "POST", headers, body }),
+    );
+    await handler.handle(
+      new Request("http://localhost/", { method: "POST", headers, body }),
+    );
+    expect(eventLog.appends.length).toBe(1);
+  });
+
+  it("does not log when signature fails", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = makeHandler(eventLog);
+    await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "synchronize",
+          pull_request: { number: 1 },
+        },
+        { "x-hub-signature-256": "sha256=bad" },
+      ),
+    );
+    expect(eventLog.appends.length).toBe(0);
+  });
+
+  it("handler still succeeds when log append throws", async () => {
+    const eventLog = new FakeEventLog();
+    eventLog.failNext = true;
+    const handler = makeHandler(eventLog);
+    const res = await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "synchronize",
+        pull_request: { number: 1 },
+      }),
+    );
+    expect(res.status).toBe(200);
+    // The first call's log append rejected; subsequent dispatch still ran.
+    expect(fetcher.forces.some((f) => f.number === 1)).toBe(true);
+  });
+
+  it("does not log ignored events", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = makeHandler(eventLog);
+    await handler.handle(
+      makeReq(
+        { ...REPO, action: "edited" },
+        { "x-github-event": "release" },
+      ),
+    );
+    expect(eventLog.appends.length).toBe(0);
   });
 });
