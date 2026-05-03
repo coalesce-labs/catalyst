@@ -32,6 +32,11 @@
       "profile": "coalesce-labs",
       "directory": "catalyst-workspace",
       "user": null
+    },
+    "monitor": {
+      "github": {
+        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET"
+      }
     }
   }
 }

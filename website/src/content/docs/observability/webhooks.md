@@ -35,18 +35,26 @@ The only third-party in the path is smee itself. It does not log payload bodies 
 forwards them in-flight), but you should not assume privacy on a free public relay — secrets
 inside webhook payloads (like environment URLs) traverse smee.
 
-## Setup is per-installation, not per-repo
+## Setup is per-machine, not per-project
 
-You configure smee **once per machine** that runs orch-monitor. Repository subscriptions
-are then created automatically on demand — the daemon registers a webhook on each
-`(owner, repo)` it observes via worker signal files, deduping with any existing webhook
-that already targets the same channel URL.
+You configure smee **once per machine** that runs orch-monitor. The daemon is
+one-process-per-laptop, watching `~/catalyst/wt/` across **every project** (catalyst, adva,
+slides, etc.) — so there is exactly one smee tunnel per machine, fanning events in for every
+repo it watches. Repository subscriptions are then created automatically on demand: the
+daemon registers a webhook on each `(owner, repo)` it observes via worker signal files,
+deduping with any existing webhook that already targets the same channel URL.
 
-| What | Where | When |
-|------|-------|------|
-| smee channel URL | `.catalyst/config.json` (project) or `CATALYST_SMEE_CHANNEL` env (machine) | Once at setup |
-| HMAC secret | env var named by `webhookSecretEnv` (default `CATALYST_WEBHOOK_SECRET`) | Once at setup |
-| Repo webhook subscription | GitHub repo settings (auto-created via `gh api`) | Lazily, on first observation of the repo |
+The channel URL therefore belongs in the **cross-project, per-machine** config file
+(`~/.config/catalyst/config.json`), the same place the OTel endpoints live for the same
+reason. The env-var **name** (`webhookSecretEnv`) is team-wide and lives in
+`.catalyst/config.json`.
+
+| What | Where | Committed | When |
+|------|-------|-----------|------|
+| smee channel URL | `~/.config/catalyst/config.json` (cross-project, per-machine) or `CATALYST_SMEE_CHANNEL` env | NO | Once at setup |
+| `webhookSecretEnv` (env-var name only) | `.catalyst/config.json` (per-repo, team-wide) | YES | Once at setup |
+| HMAC secret value | env var named by `webhookSecretEnv` (default `CATALYST_WEBHOOK_SECRET`) | NO (per-developer env) | Once at setup |
+| Repo webhook subscription | GitHub repo settings (auto-created via `gh api`) | n/a | Lazily, on first observation of the repo |
 
 **You do not need to add the smee channel to each repo manually.** The daemon does this for
 you the first time a worker for that repo runs and is observed by the monitor.
@@ -61,12 +69,16 @@ plugins/dev/scripts/setup-webhooks.sh
 
 It:
 
-1. Calls `curl -X POST https://smee.io/new` to create a fresh channel (or reuses
-   `CATALYST_SMEE_CHANNEL` if already set)
+1. Calls `curl -L https://smee.io/new` to create a fresh channel (or reuses an existing one
+   from `~/.config/catalyst/config.json`, or `CATALYST_SMEE_CHANNEL` if already set)
 2. Generates a 32-byte HMAC secret with `openssl rand -hex 32`
 3. Writes the secret to `~/.config/catalyst/webhook-secret` (mode 600)
-4. Merges `catalyst.monitor.github.{smeeChannel, webhookSecretEnv}` into
-   `.catalyst/config.json`
+4. Writes `catalyst.monitor.github.smeeChannel` to `~/.config/catalyst/config.json`
+   (cross-project, per-machine — never committed)
+5. Writes `catalyst.monitor.github.webhookSecretEnv` to `.catalyst/config.json` (committed,
+   team-wide — env-var **name** only)
+6. Migrates a deprecated `smeeChannel` out of `.catalyst/config.json` if it finds one there
+   (one-line console note; commit the resulting diff)
 
 Then export the secret in your shell:
 
@@ -79,14 +91,32 @@ the webhook tunnel comes up automatically.
 
 ## Configuration shape
 
-`.catalyst/config.json`:
+The webhook config is split across two files because the channel URL is per-machine while
+the env-var name is team-wide. This mirrors the [OTel config layout](/reference/configuration/#monitor-otel-config),
+where Prometheus and Loki URLs also live in `~/.config/catalyst/config.json` for the same
+per-machine reason.
+
+`~/.config/catalyst/config.json` (cross-project, per-machine — never committed):
 
 ```json
 {
   "catalyst": {
     "monitor": {
       "github": {
-        "smeeChannel": "https://smee.io/<channel-id>",
+        "smeeChannel": "https://smee.io/<channel-id>"
+      }
+    }
+  }
+}
+```
+
+`.catalyst/config.json` (per-repo, committed, team-wide):
+
+```json
+{
+  "catalyst": {
+    "monitor": {
+      "github": {
         "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET"
       }
     }
@@ -100,9 +130,18 @@ Override the channel without editing config (useful for ephemeral debugging):
 CATALYST_SMEE_CHANNEL=https://smee.io/another-channel bun run server.ts
 ```
 
-If the secret env var is unset or `smeeChannel` is missing, the receiver disables itself
-silently and the daemon falls back to 10-minute polling. Nothing breaks; you just lose the
-sub-5-second update latency.
+If the secret env var is unset or `smeeChannel` is missing from both files, the receiver
+disables itself silently and the daemon falls back to 10-minute polling. Nothing breaks; you
+just lose the sub-5-second update latency.
+
+### Migration from earlier versions
+
+Earlier `setup-webhooks.sh` runs wrote `smeeChannel` to `.catalyst/config.json` (Layer 1,
+committed). That was wrong — the value is per-machine, not per-team. The daemon still reads
+that location for one release cycle and emits a one-shot deprecation warning when it does.
+To migrate, re-run `setup-webhooks.sh`: it picks up the deprecated value, moves it to
+`~/.config/catalyst/config.json`, and removes it from the committed file. Commit the
+resulting Layer 1 diff.
 
 ## Subscribed events
 
