@@ -129,7 +129,7 @@ Optional. Controls orchestrator-specific behavior. All fields have sensible defa
         "setup": [],
         "teardown": []
       },
-      "workerCommand": "/oneshot",
+      "workerCommand": "/catalyst-dev:oneshot",
       "workerModel": "opus",
       "testRequirements": {
         "backend": ["unit", "bruno"],
@@ -245,7 +245,7 @@ The orchestrator:
 2. Builds a dependency graph and groups tickets into waves
 3. Presents the wave plan for approval
 4. Creates worktrees for each ticket (running your `worktree.setup` commands)
-5. Dispatches `/oneshot` workers into each worktree
+5. Dispatches `/catalyst-dev:oneshot` workers into each worktree
 6. Monitors progress and updates a dashboard
 7. Runs adversarial verification when workers claim "done"
 8. Advances to the next wave when all tickets pass
@@ -366,7 +366,7 @@ review, and code review. The prompt explicitly states that work will be independ
 
 ### Layer 2 — Quality Gates (Automated)
 
-Inside each worker's `/oneshot` pipeline, the existing quality gate system runs:
+Inside each worker's `/catalyst-dev:oneshot` pipeline, the existing quality gate system runs:
 `/validate-type-safety`, `/security-review`, `code-reviewer` agent, `pr-test-analyzer` agent, plus
 any project-specific gates from config.
 
@@ -467,7 +467,7 @@ gets caught.
 | `maxParallel`                 | number       | 3                            | Max concurrent workers per wave                                 |
 | `hooks.setup`                 | string[]     | `[]`                         | Extra commands after base `worktree.setup` (orchestration-only) |
 | `hooks.teardown`              | string[]     | `[]`                         | Commands before worktree removal on wave advancement            |
-| `workerCommand`               | string       | `/oneshot`                   | Skill to run in each worker                                     |
+| `workerCommand`               | string       | `/catalyst-dev:oneshot`      | Plugin-namespaced skill to run in each worker. Must be `/<plugin>:<skill>`; bare slashes rejected at dispatch. |
 | `workerModel`                 | string       | `opus`                       | Model for worker sessions                                       |
 | `testRequirements`            | object       | `{"backend":["unit"]}`       | Required test types by scope                                    |
 | `verifyBeforeMerge`           | boolean      | `true`                       | Run adversarial verification on merged commits (post-merge)     |

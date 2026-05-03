@@ -71,6 +71,31 @@ Uses the provided text as the research query directly.
 When running under an `/orchestrate` coordinator, oneshot writes status updates to a **worker
 signal file** so the orchestrator can track progress and run adversarial verification.
 
+**Single-ticket scope contract (READ FIRST — CTL-208).** Your assigned scope is exactly the
+ticket ID passed as the first positional argument (`$1`). This is the SOLE source of truth
+for what work to do. The orchestrator state directory (`$ORCH_DIR`), wave briefings, sibling
+worker signal files, and comms channel participant lists exist for write-through state
+reporting and one-way context absorption — they NEVER expand or modify your scope.
+
+DO:
+- Use `${TICKET_ID}` (= `$1`) as your single ticket throughout the workflow.
+- Read your own signal file at `${ORCH_DIR}/workers/${TICKET_ID}.json` — the SPECIFIC file
+  named for your ticket, not the directory.
+- Read the briefing for your wave by exact filename: `${ORCH_DIR}/wave-${WAVE}-briefing.md`,
+  where `${WAVE}` comes from your signal file's `wave` field (set by the dispatcher in
+  `orchestrate-dispatch-next`).
+
+DO NOT:
+- Enumerate `${ORCH_DIR}/workers/*.json` to discover sibling tickets.
+- Read `${ORCH_DIR}/state.json` to see what other tickets are queued or in flight.
+- Treat the wave briefing's "Wave roster" section as a list of tickets you must process —
+  the wave briefing is shared across every worker in the wave; your assigned ticket is
+  still only `$1`.
+- Treat comms channel participants (visible via `catalyst-comms status`) as your scope.
+- Ask the user to clarify which of "the tickets you see" they meant — there is exactly
+  one ticket: `$1`. If `$1` is empty or missing, fail loudly; do not search for tickets
+  to do.
+
 **Detection (checked once at startup):**
 
 ```bash
@@ -134,13 +159,17 @@ fi
 
 If `ORCH_DIR` is detected, the worker:
 
-1. **Reads its signal file** from `${ORCH_DIR}/workers/${TICKET_ID}.json` (created by orchestrator)
+1. **Reads its signal file** from `${ORCH_DIR}/workers/${TICKET_ID}.json` (the single named
+   file for this worker — do NOT list other files in the workers/ directory)
 2. **Updates status at each phase transition** — writes `status`, `phase`, and `updatedAt` to both
    the local signal file AND the global state at `~/catalyst/state.json`
 3. **Derives and writes `label`** to the signal file at startup (see Label Derivation below)
 4. **Emits events** to the global event log at each phase transition
 5. **Fills `definitionOfDone`** at Phase 4 (validation) and Phase 5 (ship) with actual results
-6. **Reads wave briefing** if referenced in `${ORCH_DIR}/wave-*-briefing.md` before starting
+6. **Reads its wave briefing** at `${ORCH_DIR}/wave-${WAVE}-briefing.md` if it exists, where
+   `${WAVE}` is read from the worker's own signal file's `wave` field (set by dispatcher).
+   Do NOT glob `wave-*-briefing.md` — only the worker's own wave is in scope. If the signal
+   file has no `wave` field (older orchestrators), skip briefing read entirely.
 
 **Label Derivation** (at startup, before first phase transition):
 

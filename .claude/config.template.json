@@ -37,7 +37,7 @@
         "setup": [],
         "teardown": []
       },
-      "workerCommand": "/oneshot",
+      "workerCommand": "/catalyst-dev:oneshot",
       "workerModel": "opus",
       "thoughts": {
         "profile": null,

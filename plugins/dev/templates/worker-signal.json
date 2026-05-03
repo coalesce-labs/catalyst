@@ -16,6 +16,11 @@
       "type": "string",
       "description": "Full worker name (e.g., api-redesign-PROJ-101)"
     },
+    "wave": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Wave number this worker belongs to (1-indexed). Set by orchestrate-dispatch-next at dispatch time so workers can read their own wave briefing by exact path (`${ORCH_DIR}/wave-${WAVE}-briefing.md`) instead of globbing. Null on signal files written before CTL-208."
+    },
     "label": {
       "type": ["string", "null"],
       "description": "Display label for the session (e.g., 'oneshot CTL-33'). Auto-derived from skill + ticket, or user-provided via --label flag. Null if not set."

@@ -339,6 +339,70 @@ echo "$OUT" | jq -e '.queueEmpty == true' >/dev/null \
   && pass "queueEmpty when .queue missing" || fail "queueEmpty when .queue missing" "got: $OUT"
 scratch_teardown
 
+echo "test 18 (CTL-208): rejects bare /oneshot worker-command with exit 2"
+scratch_setup
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$(run_dispatch --worker-command "/oneshot" 2>&1)
+RC=$?
+[ "$RC" = "2" ] && pass "exit code 2 on bare /oneshot" || fail "exit code 2 on bare /oneshot" "got rc=$RC"
+echo "$OUT" | grep -q "plugin-namespaced" \
+  && pass "stderr mentions plugin-namespaced" \
+  || fail "stderr mentions plugin-namespaced" "got: $OUT"
+echo "$OUT" | grep -q "/catalyst-dev:oneshot" \
+  && pass "stderr suggests /catalyst-dev:oneshot" \
+  || fail "stderr suggests /catalyst-dev:oneshot"
+[ ! -f "${ORCH_DIR}/workers/T-1.json" ] && pass "no signal created when rejected" || fail "no signal created"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude not invoked when rejected" || fail "claude not invoked"
+scratch_teardown
+
+echo "test 19 (CTL-208): rejects empty workerCommand with exit 2"
+scratch_setup
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$(run_dispatch --worker-command "" 2>&1)
+RC=$?
+[ "$RC" = "2" ] && pass "exit code 2 on empty worker-command" || fail "exit code 2 on empty" "got rc=$RC"
+scratch_teardown
+
+echo "test 20 (CTL-208): accepts properly namespaced worker-command"
+scratch_setup
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$(run_dispatch --worker-command "/catalyst-dev:oneshot" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 on /catalyst-dev:oneshot" || fail "exit 0 on /catalyst-dev:oneshot" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+[ -f "${ORCH_DIR}/workers/T-1.json" ] && pass "signal created" || fail "signal created"
+scratch_teardown
+
+echo "test 21 (CTL-208): signal file records wave number from source waveN key"
+scratch_setup
+write_state "demo" 4 '{"wave1Pending": ["A"], "wave2Pending": ["B"], "wave3Pending": ["C"]}'
+for T in A B C; do make_worktree "demo" "$T"; done
+run_dispatch 2>"${SCRATCH}/err" >/dev/null
+A_WAVE=$(jq -r '.wave' "${ORCH_DIR}/workers/A.json")
+B_WAVE=$(jq -r '.wave' "${ORCH_DIR}/workers/B.json")
+C_WAVE=$(jq -r '.wave' "${ORCH_DIR}/workers/C.json")
+[ "$A_WAVE" = "1" ] && pass "A.wave=1" || fail "A.wave=1" "got: $A_WAVE"
+[ "$B_WAVE" = "2" ] && pass "B.wave=2" || fail "B.wave=2" "got: $B_WAVE"
+[ "$C_WAVE" = "3" ] && pass "C.wave=3" || fail "C.wave=3" "got: $C_WAVE"
+# wave is an integer, not a string
+A_WAVE_TYPE=$(jq -r '.wave | type' "${ORCH_DIR}/workers/A.json")
+[ "$A_WAVE_TYPE" = "number" ] && pass "wave is number type" || fail "wave is number type" "got: $A_WAVE_TYPE"
+scratch_teardown
+
+echo "test 22 (CTL-208): signal file records wave for non-contiguous wave numbers"
+scratch_setup
+write_state "demo" 4 '{"wave5Pending": ["X"], "wave10Pending": ["Y"]}'
+make_worktree "demo" "X"
+make_worktree "demo" "Y"
+run_dispatch 2>"${SCRATCH}/err" >/dev/null
+X_WAVE=$(jq -r '.wave' "${ORCH_DIR}/workers/X.json")
+Y_WAVE=$(jq -r '.wave' "${ORCH_DIR}/workers/Y.json")
+[ "$X_WAVE" = "5" ] && pass "X.wave=5" || fail "X.wave=5" "got: $X_WAVE"
+[ "$Y_WAVE" = "10" ] && pass "Y.wave=10" || fail "Y.wave=10" "got: $Y_WAVE"
+scratch_teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"
