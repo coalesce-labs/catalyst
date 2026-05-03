@@ -71,8 +71,10 @@ elif [[ -n "$existing_channel" && $FORCE -eq 0 ]]; then
   echo "Reusing existing channel: $channel (use --force to regenerate)"
 else
   echo "Creating new smee.io channel..."
-  channel=$(curl -s -X POST -L -o /dev/null -w "%{url_effective}" https://smee.io/new)
-  if [[ -z "$channel" || "$channel" != https://smee.io/* ]]; then
+  # smee.io/new responds with HTTP 307 to GET (not POST). Follow the redirect
+  # with -L and capture the final URL via %{url_effective}.
+  channel=$(curl -s -L -o /dev/null -w "%{url_effective}" https://smee.io/new)
+  if [[ -z "$channel" || "$channel" != https://smee.io/* || "$channel" == "https://smee.io/new" ]]; then
     echo "ERROR: failed to create smee channel (got: $channel)" >&2
     exit 1
   fi
