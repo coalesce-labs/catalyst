@@ -51,7 +51,13 @@ set -uo pipefail
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 DB_FILE="${CATALYST_DB_FILE:-$CATALYST_DIR/catalyst.db}"
 EVENTS_DIR="${CATALYST_DIR}/events"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
