@@ -183,27 +183,44 @@ Or skip tests (not recommended):
 
 Exit with error (unless `--skip-tests` flag provided).
 
-### 6. Diagnose and resolve merge blockers — poll until state=MERGED
+### 6. Diagnose and resolve merge blockers — wait for merge event, then verify
 
 Read and follow the full workflow in
-`"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`.
+`"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`. See also the
+`monitor-events` skill for the canonical event-driven wait pattern.
 
-This step is a **poll-until-merged loop**. The loop only exits successfully when
-`state == "MERGED"` and `mergedAt` is non-null. **Always include `sleep 30` between
-iterations** — a tight loop without sleep exhausts GitHub's 5,000/hr GraphQL rate limit
-in minutes.
+This step **waits on the unified event log** for `github.pr.merged` and pairs every
+wake-up with a one-shot `gh pr view` for authoritative verification. The cheap wake-up
+is event-driven; the source of truth is GitHub. CTL-210 replaces the old `sleep 30`
+poll loop — see `plugins/dev/skills/monitor-events/SKILL.md` for the rationale.
 
 ```bash
 while true; do
+  # Wait for the merge event. wait-for is a no-op on event arrival; on
+  # timeout we fall through to the authoritative re-check below. The
+  # 600-second timeout is the fallback cadence when no events arrive (e.g.
+  # daemon down). Empty result on stderr means timed out — that's expected,
+  # don't treat it as a failure.
+  catalyst-events wait-for \
+    --filter ".event == \"github.pr.merged\" and .scope.pr == $pr_number" \
+    --timeout 600 >/dev/null 2>&1 || true
+
+  # MANDATORY authoritative re-check — never trust the event stream as proof
+  # of merge. The wait-for is a wake-up trigger; gh pr view is truth.
   MERGE_STATE=$(gh pr view $pr_number --json state,mergeStateStatus,mergedAt)
   STATE=$(echo "$MERGE_STATE" | jq -r '.state')
   if [ "$STATE" = "MERGED" ]; then
     break
   fi
-  # Diagnose and resolve blockers per the reference doc
-  sleep 30
+  # Diagnose and resolve blockers per the reference doc.
+  # No sleep needed — wait-for already provided the cadence.
 done
 ```
+
+**Why the pairing is mandatory:** if the orch-monitor daemon is down, no GitHub
+webhook events flow into the log, and `wait-for` will block until timeout (600 s).
+The `gh pr view` after timeout is the safety net that keeps the merge confirmation
+correct even when the event stream has dropped.
 
 The reference doc contains:
 

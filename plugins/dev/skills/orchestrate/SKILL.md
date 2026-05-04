@@ -719,7 +719,35 @@ file says. A worker with a live upstream PR is not stalled even if its signal fi
 When the signal disagrees with git/PR, the orchestrator reconciles the signal from the
 authoritative source.
 
-**Monitoring loop (every 2-3 minutes):**
+**Cadence — event-driven with safety-net fallback (CTL-210):**
+
+The orchestrator runs a `Monitor` watching the unified event log via `catalyst-events
+tail`. The Monitor wakes the orchestrator on every relevant GitHub/Linear/lifecycle
+event, so the per-cycle scan no longer needs to poll on a fixed schedule. The fallback
+cadence is **10 minutes maximum** (instead of 2–3) — this defends against daemon
+downtime and missed events. See `plugins/dev/skills/monitor-events/SKILL.md` for the
+full pattern.
+
+The orchestrator skill prose recommends launching the `Monitor` tool with this
+command before entering the per-cycle scan:
+
+```text
+catalyst-events tail --filter '
+  (.event | startswith("github.pr.")) or
+  (.event | startswith("github.check_")) or
+  (.event == "github.push") or
+  (.event | startswith("linear.issue.")) or
+  (.event == "worker-status-change") or
+  (.event == "attention-raised")
+'
+```
+
+When the Monitor surfaces a notification, the orchestrator runs ONE per-cycle scan
+immediately and then returns to event-driven idle. Every event is treated as a
+**wake-up trigger only** — the scan below uses `gh pr view` / `git rev-list` /
+signal-file reads as the source of truth.
+
+**Per-cycle scan:**
 
 ```bash
 # For each active worker:
@@ -959,10 +987,20 @@ REMEDIATION_EOF
 done
 ```
 
-**Poll cadence**: 60–120s while CI is running (MERGE_STATE in {UNKNOWN, PENDING, BLOCKED}); 30s
-while merge is imminent (MERGE_STATE=CLEAN but not yet MERGED). Since CTL-133, workers exit at
-`status: "merging"` after arming auto-merge — this orchestrator loop is the authoritative merge
-watcher that writes `pr.mergedAt` + `status: "done"` and handles BEHIND/DIRTY/BLOCKED states.
+**Cadence (CTL-210)**: The merge-watcher block runs on every Monitor wake-up plus a
+10-minute safety-net fallback. The Monitor watches `github.pr.merged`, `github.push`,
+`github.check_*`, and `worker-status-change` topics — when any fires, this scan runs
+immediately. Without an event, the fallback runs every ~10 minutes. The scan body is
+unchanged: each `gh pr view` is the canonical truth, the events are wake-up triggers
+only.
+
+For BEHIND/DIRTY recovery: a `github.push` event to the PR's branch signals that an
+auto-merge rebase or worker-driven fixup completed. The orchestrator can re-evaluate
+`mergeStateStatus` immediately on that event instead of waiting for the next cycle.
+
+Since CTL-133, workers exit at `status: "merging"` after arming auto-merge — this
+orchestrator loop is the authoritative merge watcher that writes `pr.mergedAt` +
+`status: "done"` and handles BEHIND/DIRTY/BLOCKED states.
 
 **Poll shared comms channel for attention (CTL-111):**
 

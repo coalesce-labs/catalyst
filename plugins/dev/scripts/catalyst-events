@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# catalyst-events — tail and wait-for primitives over the global event log.
+#
+# Reads the append-only JSONL event stream at
+# ${CATALYST_DIR:-$HOME/catalyst}/events/YYYY-MM.jsonl and exposes two consumer
+# patterns:
+#
+#   tail      — long-running follower; prints matching new lines to stdout.
+#   wait-for  — blocks until first matching line arrives, prints it, exits 0.
+#
+# Both seek to EOF on first run so historical heartbeat noise does not skew
+# filters. Both use fswatch when available and fall back to 1 s sleep polling
+# when not (matches the catalyst-comms poll --wait precedent).
+#
+# Topics in the log today include catalyst.* (orchestrator/worker/session),
+# github.* (CTL-209 webhook fan-out), linear.* (CTL-210), and comms.* (CTL-210).
+# v1 envelopes (no `source` field) and v2 envelopes (with `source`,
+# `schemaVersion`, `id`, `scope`) coexist in the same file.
+#
+# Commands:
+#   tail [--filter <jq>] [--since-line <N>]
+#   wait-for [--filter <jq>] [--timeout <sec>]
+#   help
+
+set -uo pipefail
+
+CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
+EVENTS_DIR="${CATALYST_EVENTS_DIR:-$CATALYST_DIR/events}"
+
+# Resolve the current month's events file. Re-resolved each loop iteration so
+# month rollover is handled transparently.
+events_file_path() {
+  if [[ -n "${CATALYST_EVENTS_FILE:-}" ]]; then
+    echo "$CATALYST_EVENTS_FILE"
+  else
+    echo "$EVENTS_DIR/$(date -u +%Y-%m).jsonl"
+  fi
+}
+
+# Apply a jq predicate filter to a stream. With no filter, pass through.
+# The filter is wrapped in `select(...)` so callers write predicates, not full
+# jq programs. Lines that don't parse as JSON are silently skipped.
+apply_filter() {
+  local filter="$1"
+  if [[ -z "$filter" ]]; then
+    cat
+  else
+    jq -c --unbuffered "select($filter)" 2>/dev/null
+  fi
+}
+
+# Count lines in a file safely (returns 0 if file is missing).
+line_count() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    wc -l < "$file" | tr -d ' '
+  else
+    echo 0
+  fi
+}
+
+# Emit lines from $file starting at 1-indexed line ($start + 1).
+emit_lines_since() {
+  local file="$1" start="$2" filter="$3"
+  if [[ ! -s "$file" ]]; then
+    return 0
+  fi
+  local start_at=$((start + 1))
+  tail -n +"$start_at" "$file" | apply_filter "$filter"
+}
+
+# Wait for the events file to exist. Returns once the file is present, or
+# exits 1 if a deadline is set and reached.
+wait_for_file() {
+  local file="$1" deadline="$2"
+  while [[ ! -f "$file" ]]; do
+    if [[ -n "$deadline" ]] && [[ "$(date +%s)" -ge "$deadline" ]]; then
+      return 1
+    fi
+    sleep 1
+    # Re-resolve in case month rolled over.
+    file="$(events_file_path)"
+  done
+  return 0
+}
+
+cmd_tail() {
+  local filter="" since_line=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --filter)     filter="$2"; shift 2 ;;
+      --since-line) since_line="$2"; shift 2 ;;
+      -h|--help)    cmd_help; return 0 ;;
+      *) echo "error: unknown tail flag: $1" >&2; return 2 ;;
+    esac
+  done
+
+  local file
+  file="$(events_file_path)"
+
+  # Wait up to 5s for the file to exist if missing — tests can race the writer.
+  if [[ ! -f "$file" ]]; then
+    local short_deadline=$(( $(date +%s) + 5 ))
+    wait_for_file "$file" "$short_deadline" || true
+    file="$(events_file_path)"
+  fi
+
+  # Default: seek to EOF so historical lines don't reprint.
+  local last_lines
+  last_lines="$(line_count "$file")"
+  if [[ -n "$since_line" ]]; then
+    last_lines="$since_line"
+    emit_lines_since "$file" "$last_lines" "$filter"
+    last_lines="$(line_count "$file")"
+  fi
+
+  if command -v fswatch >/dev/null 2>&1; then
+    # fswatch -o emits an event count; we re-check line count on each.
+    fswatch -o "$file" 2>/dev/null | while read -r _; do
+      local cur
+      cur="$(line_count "$file")"
+      if [[ "$cur" -gt "$last_lines" ]]; then
+        emit_lines_since "$file" "$last_lines" "$filter"
+        last_lines="$cur"
+      fi
+      # Re-resolve path for month rollover.
+      local new_file
+      new_file="$(events_file_path)"
+      if [[ "$new_file" != "$file" ]]; then
+        file="$new_file"
+        last_lines="$(line_count "$file")"
+      fi
+    done
+  else
+    while :; do
+      sleep 1
+      local cur
+      cur="$(line_count "$file")"
+      if [[ "$cur" -gt "$last_lines" ]]; then
+        emit_lines_since "$file" "$last_lines" "$filter"
+        last_lines="$cur"
+      fi
+      local new_file
+      new_file="$(events_file_path)"
+      if [[ "$new_file" != "$file" ]]; then
+        file="$new_file"
+        last_lines="$(line_count "$file")"
+      fi
+    done
+  fi
+}
+
+cmd_wait_for() {
+  local filter="" timeout="1800"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --filter)  filter="$2"; shift 2 ;;
+      --timeout) timeout="$2"; shift 2 ;;
+      -h|--help) cmd_help; return 0 ;;
+      *) echo "error: unknown wait-for flag: $1" >&2; return 2 ;;
+    esac
+  done
+
+  if ! [[ "$timeout" =~ ^[0-9]+$ ]]; then
+    echo "error: --timeout must be a non-negative integer" >&2
+    return 2
+  fi
+
+  local file
+  file="$(events_file_path)"
+  local deadline=$(( $(date +%s) + timeout ))
+
+  # If the file doesn't exist yet, wait for it AND treat all of its lines as
+  # "new" once it appears (the consumer started before the writer).
+  local file_existed_at_start=1
+  if [[ ! -f "$file" ]]; then
+    file_existed_at_start=0
+  fi
+  if ! wait_for_file "$file" "$deadline"; then
+    return 1
+  fi
+  file="$(events_file_path)"
+
+  # When the file already existed when we started: seek to EOF (skip history).
+  # When the file appeared after we started: start from line 0.
+  local last_lines=0
+  if [[ "$file_existed_at_start" = "1" ]]; then
+    last_lines="$(line_count "$file")"
+  fi
+
+  while :; do
+    if [[ "$(date +%s)" -ge "$deadline" ]]; then
+      return 1
+    fi
+
+    sleep 1
+
+    local cur
+    cur="$(line_count "$file")"
+    if [[ "$cur" -gt "$last_lines" ]]; then
+      local match
+      match="$(emit_lines_since "$file" "$last_lines" "$filter")"
+      if [[ -n "$match" ]]; then
+        # Only emit the FIRST matching line, then exit.
+        echo "$match" | head -n 1
+        return 0
+      fi
+      last_lines="$cur"
+    fi
+
+    local new_file
+    new_file="$(events_file_path)"
+    if [[ "$new_file" != "$file" ]]; then
+      file="$new_file"
+      last_lines="$(line_count "$file")"
+    fi
+  done
+}
+
+cmd_help() {
+  cat <<'EOF'
+catalyst-events — tail and wait-for primitives over the global event log.
+
+Usage:
+  catalyst-events tail [--filter <jq-predicate>] [--since-line <N>]
+  catalyst-events wait-for [--filter <jq-predicate>] [--timeout <sec>]
+  catalyst-events help
+
+Examples:
+  # Tail all GitHub events live
+  catalyst-events tail --filter '.event | startswith("github.")'
+
+  # Tail everything happening to one ticket
+  catalyst-events tail --filter '.scope.ticket == "CTL-210"'
+
+  # Block a worker until its PR is merged
+  catalyst-events wait-for \
+    --filter '.event == "github.pr.merged" and .scope.pr == 342' \
+    --timeout 7200
+
+  # Block until the first failure of any worker in this orchestrator
+  catalyst-events wait-for \
+    --filter '.event == "worker-failed" and .orchestrator == "orch-foo"' \
+    --timeout 600
+
+Environment:
+  CATALYST_DIR          base directory (default: $HOME/catalyst)
+  CATALYST_EVENTS_DIR   events directory (default: $CATALYST_DIR/events)
+  CATALYST_EVENTS_FILE  override file path entirely (used by tests)
+
+Exit codes:
+  0   wait-for: matched a line
+  1   wait-for: timed out
+  2   usage error
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+  case "$cmd" in
+    tail)     cmd_tail "$@" ;;
+    wait-for) cmd_wait_for "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *)
+      echo "error: unknown command: $cmd" >&2
+      cmd_help >&2
+      return 2
+      ;;
+  esac
+}
+
+main "$@"

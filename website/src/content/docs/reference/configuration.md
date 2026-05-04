@@ -334,6 +334,9 @@ team-wide.
           "coalesce-labs/catalyst",
           "coalesce-labs/adva"
         ]
+      },
+      "linear": {
+        "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET"
       }
     }
   }
@@ -345,11 +348,14 @@ team-wide.
 | `catalyst.monitor.github.smeeChannel` | `~/.config/catalyst/config.json` | string | _(none)_ | Per-machine smee.io channel URL the daemon tunnels deliveries through |
 | `catalyst.monitor.github.webhookSecretEnv` | `.catalyst/config.json` | string | `"CATALYST_WEBHOOK_SECRET"` | **Name** of the env var the HMAC secret value is read from at runtime |
 | `catalyst.monitor.github.watchRepos` | `.catalyst/config.json` | string[] | `[]` | Repos (owner/repo) subscribed at daemon startup — additive on top of worker-driven auto-discovery. See [Persistent watch list](/observability/webhooks/#persistent-watch-list). |
+| `catalyst.monitor.linear.webhookSecretEnv` | `.catalyst/config.json` | string | `"CATALYST_LINEAR_WEBHOOK_SECRET"` | **Name** of the env var the Linear HMAC secret is read from. Empty/missing → `POST /api/webhook/linear` returns 503. See [Linear webhooks](/observability/webhooks/#linear-webhooks). |
 
 Environment variable overrides:
 - `CATALYST_SMEE_CHANNEL` — overrides any file-derived channel.
 - The env var named by `webhookSecretEnv` (default `CATALYST_WEBHOOK_SECRET`) holds the
-  shared HMAC secret value.
+  shared GitHub HMAC secret value.
+- The env var named by `monitor.linear.webhookSecretEnv` (default fallback
+  `CATALYST_LINEAR_WEBHOOK_SECRET`) holds the Linear HMAC secret value.
 
 If the channel is missing from both files (and unset in env), the receiver disables itself
 silently and the daemon falls back to 10-minute polling. Run `plugins/dev/scripts/setup-webhooks.sh`

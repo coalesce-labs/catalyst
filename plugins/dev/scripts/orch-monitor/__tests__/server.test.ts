@@ -1688,3 +1688,83 @@ describe("Webhook config-driven watch list (CTL-216)", () => {
     }
   });
 });
+
+describe("Linear webhook receiver route (/api/webhook/linear) — CTL-210", () => {
+  let linearServer: ReturnType<typeof createServer>;
+  let linearUrl: string;
+  let linearTmp: string;
+
+  beforeAll(() => {
+    linearTmp = mkdtempSync(join(tmpdir(), "linear-webhook-route-"));
+    const wtDir = join(linearTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+
+    linearServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      annotationsDbPath: join(linearTmp, "annotations.db"),
+      linearWebhookConfig: { secret: "linear-test-secret" },
+    });
+    linearUrl = `http://localhost:${linearServer.port}`;
+  });
+
+  afterAll(() => {
+    void linearServer?.stop(true);
+    try {
+      rmSync(linearTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("returns 401 (not 404) for POST without signature — route is registered", async () => {
+    const res = await fetch(`${linearUrl}/api/webhook/linear`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "linear-event": "Issue",
+        "linear-delivery": "delivery-1",
+      },
+      body: '{"action":"create","type":"Issue","data":{}}',
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("Linear webhook receiver — disabled (no linearWebhookConfig)", () => {
+  let plainServer: ReturnType<typeof createServer>;
+  let plainUrl: string;
+  let plainTmp: string;
+
+  beforeAll(() => {
+    plainTmp = mkdtempSync(join(tmpdir(), "linear-webhook-disabled-"));
+    const wtDir = join(plainTmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+    plainServer = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      annotationsDbPath: join(plainTmp, "annotations.db"),
+    });
+    plainUrl = `http://localhost:${plainServer.port}`;
+  });
+
+  afterAll(() => {
+    void plainServer?.stop(true);
+    try {
+      rmSync(plainTmp, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it("returns 503 when linearWebhookConfig is not provided", async () => {
+    const res = await fetch(`${plainUrl}/api/webhook/linear`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(503);
+  });
+});
