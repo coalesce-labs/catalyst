@@ -1831,13 +1831,6 @@ These fields are additive — they do not conflict with `pr.prOpenedAt`, `pr.aut
 `Follow-up To` (parent ticket ID, empty for normal workers and fix-up workers). See
 `templates/orchestrate-dashboard.md`.
 
-### Known limitation
-
-`orchestrate-verify.sh` currently only matches open PRs via `gh pr list --head`; already-merged PRs
-(the exact target of Pattern B) slip past its checks as false-negatives. This is tracked separately
-and does not block recovery — follow-up workers run full quality gates from their `/oneshot`
-pipeline, which is the real verification.
-
 ## Error Handling
 
 **All error paths that stop the orchestrator must end the session:**
