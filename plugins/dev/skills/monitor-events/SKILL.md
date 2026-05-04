@@ -84,22 +84,36 @@ fi
 ## Pattern 2 — Long-lived orchestrator wakes on multiple event types
 
 The orchestrator's Phase 4 used to poll every 2–3 minutes for every active worker. With
-CTL-210, the orchestrator runs a `Monitor` watching all PR/CI/push events, and the
-per-cycle scan drops to 10 minutes maximum:
+CTL-210, the orchestrator runs a `Monitor` watching all PR/CI/push/lifecycle events, and
+the reactive scan drops to a 10-minute idle fallback as the safety net (CTL-243):
 
 ```text
 Use the `Monitor` tool with this command:
 
 catalyst-events tail --filter '
   (.event | startswith("github.pr.")) or
+  (.event | startswith("github.pr_review")) or
   (.event | startswith("github.check_")) or
-  (.event == "github.push")
+  (.event | startswith("github.deployment")) or
+  (.event == "github.push") or
+  (.event | startswith("linear.issue.")) or
+  (.event == "worker-status-change") or
+  (.event == "worker-pr-created") or
+  (.event == "worker-done") or
+  (.event == "worker-failed") or
+  (.event == "attention-raised") or
+  (.event == "attention-resolved")
 '
 
 When a notification arrives, re-evaluate the affected worker's state via the
 canonical `gh pr view` query. Do NOT trust the event's payload as the source
 of truth — use it only as a wake-up trigger.
 ```
+
+The orchestrator's filter is intentionally broad — it covers every event type that
+could require a dashboard re-render, a fix-up dispatch, or a merge-confirmation
+re-scan. See `orchestrate/SKILL.md` Phase 4 for the wake-up classification table that
+maps each event to its reaction.
 
 The orchestrator continues to maintain its 10-minute fallback scan (defense-in-depth).
 The fast path is event-driven; the slow path is the safety net.
@@ -128,6 +142,9 @@ events.
 | Linear ticket state change | `.event == "linear.issue.state_changed" and .scope.ticket == "CTL-210"` |
 | Comms message in one channel | `.event == "comms.message.posted" and .detail.channel == "orch-foo"` |
 | Worker phase transition | `.event == "worker-status-change" and .worker == "CTL-210"` |
+| Worker reached terminal state | `.event == "worker-done" or .event == "worker-failed"` |
+| PR review activity | `(.event \| startswith("github.pr_review")) or (.event == "github.issue_comment.created")` |
+| Deploy outcome | `.event \| startswith("github.deployment")` |
 | Attention raised in this orchestrator | `.event == "attention-raised" and .orchestrator == "orch-foo"` |
 
 ## `--timeout` semantics
