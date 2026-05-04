@@ -6,6 +6,21 @@
  * the receiver should be permissive.
  */
 
+/**
+ * Author identity carried on review and comment events.
+ *
+ * `type` is GitHub's `user.type` field — typically `"User"` or `"Bot"`,
+ * but `"Mannequin"` and `"Organization"` also appear. We pass it through
+ * verbatim so consumers can write `detail.author.type == "Bot"` filters
+ * without re-parsing. Empty strings indicate the upstream payload was
+ * missing the user block (defensive default; the field always exists on
+ * well-formed GitHub webhooks).
+ */
+export interface AuthorRef {
+  login: string;
+  type: string;
+}
+
 export type WebhookEvent =
   | {
       kind: "pull_request";
@@ -25,6 +40,7 @@ export type WebhookEvent =
       reviewState: string;
       reviewer: string;
       body: string;
+      author: AuthorRef;
     }
   | {
       kind: "pull_request_review_thread";
@@ -62,6 +78,7 @@ export type WebhookEvent =
       commentId: number;
       body: string;
       htmlUrl: string;
+      author: AuthorRef;
     }
   | {
       kind: "pull_request_review_comment";
@@ -71,6 +88,7 @@ export type WebhookEvent =
       commentId: number;
       body: string;
       htmlUrl: string;
+      author: AuthorRef;
     }
   | {
       kind: "deployment";
@@ -89,6 +107,32 @@ export type WebhookEvent =
       state: string;
       targetUrl: string | null;
       environmentUrl: string | null;
+    }
+  | {
+      kind: "release";
+      repo: string;
+      action: string;
+      releaseId: number;
+      tag: string;
+      name: string;
+      draft: boolean;
+      prerelease: boolean;
+      htmlUrl: string;
+    }
+  | {
+      kind: "workflow_run";
+      repo: string;
+      action: string;
+      workflowId: number;
+      runId: number;
+      name: string;
+      headSha: string;
+      headBranch: string;
+      status: string;
+      conclusion: string | null;
+      runNumber: number;
+      htmlUrl: string;
+      prNumbers: number[];
     }
   | { kind: "ignored"; reason: string };
 
@@ -137,6 +181,11 @@ function ignored(reason: string): WebhookEvent {
   return { kind: "ignored", reason };
 }
 
+function parseAuthor(value: unknown): AuthorRef {
+  if (!isObject(value)) return { login: "", type: "" };
+  return { login: getStr(value, "login"), type: getStr(value, "type") };
+}
+
 export function parseWebhookEvent(
   eventName: string,
   payload: unknown,
@@ -166,6 +215,10 @@ export function parseWebhookEvent(
       return parseDeployment(repo, payload);
     case "deployment_status":
       return parseDeploymentStatus(repo, payload);
+    case "release":
+      return parseRelease(repo, payload);
+    case "workflow_run":
+      return parseWorkflowRun(repo, payload);
     default:
       return ignored(`unhandled event: ${eventName}`);
   }
@@ -210,6 +263,7 @@ function parsePullRequestReview(
     reviewState: getStr(review, "state"),
     reviewer: getStr(user, "login"),
     body: getStr(review, "body"),
+    author: parseAuthor(review.user),
   };
 }
 
@@ -321,6 +375,7 @@ function parseIssueComment(
     commentId: getNum(comment, "id"),
     body: getStr(comment, "body"),
     htmlUrl: getStr(comment, "html_url"),
+    author: parseAuthor(comment.user),
   };
 }
 
@@ -345,6 +400,7 @@ function parsePullRequestReviewComment(
     commentId: getNum(comment, "id"),
     body: getStr(comment, "body"),
     htmlUrl: getStr(comment, "html_url"),
+    author: parseAuthor(comment.user),
   };
 }
 
@@ -383,5 +439,57 @@ function parseDeploymentStatus(
     state: getStr(status, "state"),
     targetUrl: getOptStr(status, "target_url"),
     environmentUrl: getOptStr(status, "environment_url"),
+  };
+}
+
+function parseRelease(
+  repo: string,
+  payload: Record<string, unknown>,
+): WebhookEvent {
+  const release = payload.release;
+  if (!isObject(release)) return ignored("release: missing release");
+  return {
+    kind: "release",
+    repo,
+    action: getStr(payload, "action"),
+    releaseId: getNum(release, "id"),
+    tag: getStr(release, "tag_name"),
+    name: getStr(release, "name"),
+    draft: getBool(release, "draft"),
+    prerelease: getBool(release, "prerelease"),
+    htmlUrl: getStr(release, "html_url"),
+  };
+}
+
+function parseWorkflowRun(
+  repo: string,
+  payload: Record<string, unknown>,
+): WebhookEvent {
+  const run = payload.workflow_run;
+  if (!isObject(run)) return ignored("workflow_run: missing workflow_run");
+  const prsRaw = run.pull_requests;
+  const prNumbers: number[] = [];
+  if (Array.isArray(prsRaw)) {
+    for (const entry of prsRaw) {
+      if (isObject(entry)) {
+        const n = getNum(entry, "number");
+        if (n > 0) prNumbers.push(n);
+      }
+    }
+  }
+  return {
+    kind: "workflow_run",
+    repo,
+    action: getStr(payload, "action"),
+    workflowId: getNum(run, "workflow_id"),
+    runId: getNum(run, "id"),
+    name: getStr(run, "name"),
+    headSha: getStr(run, "head_sha"),
+    headBranch: getStr(run, "head_branch"),
+    status: getStr(run, "status"),
+    conclusion: getOptStr(run, "conclusion"),
+    runNumber: getNum(run, "run_number"),
+    htmlUrl: getStr(run, "html_url"),
+    prNumbers,
   };
 }

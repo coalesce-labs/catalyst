@@ -27,7 +27,7 @@ STATE_SCRIPT="${SCRIPT_DIR}/catalyst-state.sh"
 
 usage() {
   cat >&2 <<'EOF'
-usage: orchestrate-roll-usage.sh --orch <id> --ticket <id> [--orch-dir <dir>]
+usage: orchestrate-roll-usage.sh --orch <id> --ticket <id> [--orch-dir <dir>] [-v]
 
 required:
   --orch <id>        orchestrator id (e.g. orch-ctl-115-116)
@@ -35,6 +35,9 @@ required:
 
 optional:
   --orch-dir <dir>   override default ~/catalyst/runs/<orch>/
+  -v, --verbose      log one-line action codes to stderr (CTL-233):
+                       wrote-cost, already-rolled, signal-missing,
+                       stream-missing, no-result-yet, extract-failed
 
 Reads ${ORCH_DIR}/workers/output/${TICKET}-stream.jsonl and
 ${ORCH_DIR}/workers/${TICKET}.json; writes signal.cost,
@@ -45,13 +48,14 @@ EOF
   exit 2
 }
 
-ORCH_ID="" TICKET_ID="" ORCH_DIR=""
+ORCH_ID="" TICKET_ID="" ORCH_DIR="" VERBOSE=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --orch)     ORCH_ID="$2"; shift 2 ;;
-    --ticket)   TICKET_ID="$2"; shift 2 ;;
-    --orch-dir) ORCH_DIR="$2"; shift 2 ;;
-    -h|--help)  usage ;;
+    --orch)        ORCH_ID="$2"; shift 2 ;;
+    --ticket)      TICKET_ID="$2"; shift 2 ;;
+    --orch-dir)    ORCH_DIR="$2"; shift 2 ;;
+    -v|--verbose)  VERBOSE=1; shift ;;
+    -h|--help)     usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
 done
@@ -60,21 +64,33 @@ done
 [ -n "$TICKET_ID" ] || usage
 [ -n "$ORCH_DIR" ]  || ORCH_DIR="${HOME}/catalyst/runs/${ORCH_ID}"
 
+# Silent by default — orchestrator scan calls per worker per cycle and we don't
+# want to spam stdout. With -v, emit one action code per invocation so the
+# orchestrator can capture stderr to a per-orch audit file (CTL-233).
+log_action() {
+  [ "$VERBOSE" = "1" ] || return 0
+  echo "roll-usage[ticket=${TICKET_ID}]: $1" >&2
+}
+
 SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
 STREAM_FILE="${ORCH_DIR}/workers/output/${TICKET_ID}-stream.jsonl"
 
-# No-op gates — silent so the monitor loop doesn't spew per-pass.
-[ -f "$SIGNAL_FILE" ] || exit 0
-[ -f "$STREAM_FILE" ] || exit 0
+# No-op gates — silent so the monitor loop doesn't spew per-pass (verbose mode
+# emits one line per gate so silent skips are auditable).
+[ -f "$SIGNAL_FILE" ] || { log_action "signal-missing"; exit 0; }
+[ -f "$STREAM_FILE" ] || { log_action "stream-missing"; exit 0; }
 
 # Idempotency: if signal already has .cost (non-null), nothing to do.
 EXISTING=$(jq -r '.cost // "null"' "$SIGNAL_FILE")
-[ "$EXISTING" = "null" ] || exit 0
+[ "$EXISTING" = "null" ] || { log_action "already-rolled"; exit 0; }
 
 # Extract final result event from the stream
 RESULT_LINE=$(grep '"type":"result"' "$STREAM_FILE" | tail -1 || true)
-[ -n "$RESULT_LINE" ] || exit 0
+[ -n "$RESULT_LINE" ] || { log_action "no-result-yet"; exit 0; }
 
+# Defensive on `.modelUsage`: older Claude CLI versions or error-during-execution
+# results may omit it. `null | keys[0]` errors with "null has no keys", so coalesce
+# to {} first.
 USAGE=$(echo "$RESULT_LINE" | jq -c '{
   inputTokens:         (.usage.input_tokens // 0),
   outputTokens:        (.usage.output_tokens // 0),
@@ -84,10 +100,10 @@ USAGE=$(echo "$RESULT_LINE" | jq -c '{
   numTurns:            (.num_turns // 0),
   durationMs:          (.duration_ms // 0),
   durationApiMs:       (.duration_api_ms // 0),
-  model:               (.modelUsage | keys[0] // null)
+  model:               ((.modelUsage // {}) | keys[0] // null)
 }' 2>/dev/null || echo 'null')
 
-[ "$USAGE" != "null" ] || exit 0
+[ "$USAGE" != "null" ] || { log_action "extract-failed"; exit 0; }
 
 # 1. Mirror to signal file (atomic tmp+rename). Dashboard reads signal files,
 #    not state.json, for per-worker cost columns.
@@ -109,3 +125,5 @@ jq --argjson cost "$USAGE" '.cost = $cost' "$SIGNAL_FILE" \
    | .usage.durationMs          += $u.durationMs
    | .usage.durationApiMs       += $u.durationApiMs' \
   --argjson u "$USAGE" >/dev/null
+
+log_action "wrote-cost"
