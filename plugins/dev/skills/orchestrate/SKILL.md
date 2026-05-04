@@ -810,15 +810,17 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
     ".status = \"${W_STATUS}\" | .phase = ${W_PHASE} | .branch = \"${W_BRANCH}\" | .pr = ${W_PR}"
 done
 
-# Roll worker usage/cost into orch.usage (CTL-115). Idempotent: the helper
-# no-ops when signal.cost is already populated, so calling it every cycle
-# costs only a `jq` read per worker until the worker's stream first contains
-# a `result` event.
+# Roll worker usage/cost into orch.usage (CTL-115, CTL-233). Idempotent: the
+# helper no-ops when signal.cost is already populated, so calling it every
+# cycle costs only a `jq` read per worker until the worker's stream first
+# contains a `result` event. The `-v` flag plus stderr-to-log redirect makes
+# silent skips auditable — tail `${ORCH_DIR}/.roll-usage.log` to see why a
+# worker's cost is still null.
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
   TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
   "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-roll-usage.sh" \
-    --orch "${ORCH_NAME}" --ticket "${TICKET}" --orch-dir "${ORCH_DIR}" \
-    >/dev/null 2>&1 || true
+    --orch "${ORCH_NAME}" --ticket "${TICKET}" --orch-dir "${ORCH_DIR}" -v \
+    >/dev/null 2>>"${ORCH_DIR}/.roll-usage.log" || true
 done
 ```
 
