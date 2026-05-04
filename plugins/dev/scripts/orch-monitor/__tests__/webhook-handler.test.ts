@@ -543,6 +543,63 @@ describe("buildEventLogEnvelope", () => {
     );
     expect(env).toBeNull();
   });
+
+  it("propagates author on pull_request_review envelopes", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request_review",
+        repo: "o/r",
+        number: 50,
+        action: "submitted",
+        reviewState: "changes_requested",
+        reviewer: "codex[bot]",
+        body: "fix",
+        author: { login: "codex[bot]", type: "Bot" },
+      },
+      "del-6",
+    );
+    expect(env!.event).toBe("github.pr_review.submitted");
+    expect(env!.detail.author).toEqual({ login: "codex[bot]", type: "Bot" });
+  });
+
+  it("propagates author on issue_comment envelopes", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "issue_comment",
+        repo: "o/r",
+        number: 80,
+        action: "created",
+        commentId: 999,
+        body: "lgtm",
+        htmlUrl: "https://example.com",
+        author: { login: "alice", type: "User" },
+      },
+      "del-7",
+    );
+    expect(env!.event).toBe("github.issue_comment.created");
+    expect(env!.detail.author).toEqual({ login: "alice", type: "User" });
+  });
+
+  it("propagates author on pull_request_review_comment envelopes", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request_review_comment",
+        repo: "o/r",
+        number: 90,
+        action: "created",
+        commentId: 7,
+        body: "nit",
+        htmlUrl: "https://example.com",
+        author: { login: "dependabot[bot]", type: "Bot" },
+      },
+      "del-8",
+    );
+    expect(env!.event).toBe("github.pr_review_comment.created");
+    expect(env!.detail.author).toEqual({
+      login: "dependabot[bot]",
+      type: "Bot",
+    });
+  });
 });
 
 describe("createWebhookHandler — event log fan-out", () => {

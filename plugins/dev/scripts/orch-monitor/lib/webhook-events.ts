@@ -6,6 +6,21 @@
  * the receiver should be permissive.
  */
 
+/**
+ * Author identity carried on review and comment events.
+ *
+ * `type` is GitHub's `user.type` field — typically `"User"` or `"Bot"`,
+ * but `"Mannequin"` and `"Organization"` also appear. We pass it through
+ * verbatim so consumers can write `detail.author.type == "Bot"` filters
+ * without re-parsing. Empty strings indicate the upstream payload was
+ * missing the user block (defensive default; the field always exists on
+ * well-formed GitHub webhooks).
+ */
+export interface AuthorRef {
+  login: string;
+  type: string;
+}
+
 export type WebhookEvent =
   | {
       kind: "pull_request";
@@ -25,6 +40,7 @@ export type WebhookEvent =
       reviewState: string;
       reviewer: string;
       body: string;
+      author: AuthorRef;
     }
   | {
       kind: "pull_request_review_thread";
@@ -62,6 +78,7 @@ export type WebhookEvent =
       commentId: number;
       body: string;
       htmlUrl: string;
+      author: AuthorRef;
     }
   | {
       kind: "pull_request_review_comment";
@@ -71,6 +88,7 @@ export type WebhookEvent =
       commentId: number;
       body: string;
       htmlUrl: string;
+      author: AuthorRef;
     }
   | {
       kind: "deployment";
@@ -135,6 +153,11 @@ function getRepoFullName(payload: Record<string, unknown>): string | null {
 
 function ignored(reason: string): WebhookEvent {
   return { kind: "ignored", reason };
+}
+
+function parseAuthor(value: unknown): AuthorRef {
+  if (!isObject(value)) return { login: "", type: "" };
+  return { login: getStr(value, "login"), type: getStr(value, "type") };
 }
 
 export function parseWebhookEvent(
@@ -210,6 +233,7 @@ function parsePullRequestReview(
     reviewState: getStr(review, "state"),
     reviewer: getStr(user, "login"),
     body: getStr(review, "body"),
+    author: parseAuthor(review.user),
   };
 }
 
@@ -321,6 +345,7 @@ function parseIssueComment(
     commentId: getNum(comment, "id"),
     body: getStr(comment, "body"),
     htmlUrl: getStr(comment, "html_url"),
+    author: parseAuthor(comment.user),
   };
 }
 
@@ -345,6 +370,7 @@ function parsePullRequestReviewComment(
     commentId: getNum(comment, "id"),
     body: getStr(comment, "body"),
     htmlUrl: getStr(comment, "html_url"),
+    author: parseAuthor(comment.user),
   };
 }
 
