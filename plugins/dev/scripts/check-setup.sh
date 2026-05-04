@@ -81,7 +81,7 @@ done
 header "Catalyst CLI Install"
 
 CLI_BIN_DIR="${CATALYST_CLI_BIN_DIR:-$HOME/.catalyst/bin}"
-CLI_NAMES=(catalyst-comms catalyst-session catalyst-state catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude)
+CLI_NAMES=(catalyst-comms catalyst-events catalyst-session catalyst-state catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude)
 
 if [[ -d "$CLI_BIN_DIR" ]]; then
     pass "Bin dir exists: $CLI_BIN_DIR"
