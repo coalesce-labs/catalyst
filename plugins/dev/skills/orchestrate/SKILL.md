@@ -712,13 +712,50 @@ context to no purpose. See `plugins/dev/skills/monitor-events/SKILL.md` for the
 full pattern.
 
 **Launch the Monitor before entering the reactive scan.** Wrap this command with the
-`Monitor` tool — each emitted line is a wake-up:
+`Monitor` tool — each emitted line is a wake-up.
+
+The recommended filter is **scope-aware**: build it from the orchestrator's worker
+signal directory using `catalyst-events build-orchestrator-filter`, then pass the
+result verbatim as `--filter`:
+
+```text
+FILTER=$(catalyst-events build-orchestrator-filter "$ORCH_DIR")
+catalyst-events tail --filter "$FILTER"
+```
+
+The helper reads `${ORCH_DIR}/workers/*.json` and emits a single jq predicate that
+matches catalyst-origin events for this orchestrator, worker lifecycle events for
+any in-orch ticket, github events scoped by branch-ref prefix
+(`refs/heads/<orch>-...`) or PR-number set, `check_suite`/`workflow_run` events
+whose `detail.prNumbers` intersect the PR set, and linear events for any in-orch
+ticket. Re-build it after `orchestrate-dispatch-next` adds new workers so the
+PR/ticket sets stay in sync.
+
+**Filter discipline (CTL-240).** All noise filtering belongs **inside** `--filter`.
+Do NOT pipe `catalyst-events tail` through `awk`/`sed`/`grep` for additional
+filtering: BSD awk (and most other line-oriented filters) buffer stdout in 4 KB
+blocks when stdout is not a TTY (the Monitor harness captures it). With the typical
+~1–3 events/min orchestrator cadence the buffer never fills and notifications stall
+silently for 15+ minutes despite live PR activity.
+
+**GitHub event schema (CTL-240).** `github.*` webhook events carry
+`orchestrator: null` and `worker: null` on every line — they are scoped only by
+`.scope.repo`, `.scope.ref`, `.scope.pr`, `.scope.sha`, and (for `check_suite` /
+`workflow_run`) `detail.prNumbers`. Predicates that try to scope github events by
+`.orchestrator == "<orch>"` will silently drop every github event.
+`build-orchestrator-filter` handles this correctly — prefer it over hand-rolled
+filters.
+
+If you need to write a filter by hand (e.g. for one-off `wait-for` calls), the
+broad event-type recommendation is:
 
 ```text
 catalyst-events tail --filter '
   (.event | startswith("github.pr.")) or
   (.event | startswith("github.pr_review")) or
+  (.event | startswith("github.issue_comment")) or
   (.event | startswith("github.check_")) or
+  (.event | startswith("github.workflow_run")) or
   (.event | startswith("github.deployment")) or
   (.event == "github.push") or
   (.event | startswith("linear.issue.")) or
@@ -731,6 +768,13 @@ catalyst-events tail --filter '
   (.event == "attention-resolved")
 '
 ```
+
+This list extends the pre-CTL-240 recommendation with `pr_review_comment` (Codex
+review threads land here — needed for CTL-64 BLOCKED auto-fixup detection),
+`issue_comment` (general PR comments), and `workflow_run` (the most reliable
+CI-done signal). The broad form has no scope filter, so events from sibling
+orchestrators sharing the repo will also fire wake-ups; prefer
+`build-orchestrator-filter` when you have an `$ORCH_DIR` to draw on.
 
 > **Orchestrator-scoped filtering (CTL-234):** `github.*` events now carry `.scope.orchestrator`
 > (stamped at receive time by the webhook handler). You may safely add
@@ -749,8 +793,8 @@ are wake-up triggers, never sources of truth.
 | `attention-raised`, `attention-resolved` | Re-render the `DASHBOARD.md` NEEDS ATTENTION banner |
 | `github.pr.merged`, `github.pr.closed` | Run the merge-confirmation scan for that PR |
 | `github.pr.synchronize`, `github.push` | Re-evaluate `mergeStateStatus` for the affected PR; if DIRTY ≥2 min, `orchestrate-auto-rebase` may dispatch a rebase worker (BEHIND auto-resolves via auto-merge) |
-| `github.check_*` | Re-check CI; if BLOCKED ≥10 min, `orchestrate-auto-fixup` may dispatch a fix-up |
-| `github.pr_review*`, `github.issue_comment.created` | Re-evaluate `mergeStateStatus`; surface review activity on the dashboard |
+| `github.check_*`, `github.workflow_run.completed` | Re-check CI; if BLOCKED ≥10 min, `orchestrate-auto-fixup` may dispatch a fix-up. `workflow_run.completed` is the most reliable CI-done signal |
+| `github.pr_review*`, `github.pr_review_comment*`, `github.issue_comment.created` | Re-evaluate `mergeStateStatus`; surface review activity on the dashboard. Codex review threads land as `pr_review_comment.created` — required for CTL-64 BLOCKED auto-fixup detection |
 | `github.deployment*` | Record deploy outcome on the worker's signal file |
 | `linear.issue.state_changed` | Reconcile Linear state with the worker signal |
 | 10-minute idle (no event) | Run the full reactive scan as a safety net |
