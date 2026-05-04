@@ -367,6 +367,59 @@ cycle and emits a one-shot deprecation warning on startup if it finds a value th
 Re-running `setup-webhooks.sh` migrates the value to the right home and clears it from the
 committed config.
 
+### Deploy Verification (CTL-211)
+
+Per-repo configuration for the orchestrator's production deploy state machine. When a repo
+emits GitHub Deployments, the orchestrator's Phase 4 loop watches `deployment_status` events
+on the merge SHA and only writes `status: "done"` after a `success` on the configured
+production environment. Repos that don't emit Deployments opt out via
+`skipDeployVerification: true` (the default for unknown repos), and the orchestrator
+short-circuits MERGED → done immediately.
+
+```json
+{
+  "catalyst": {
+    "deploy": {
+      "coalesce-labs/adva": {
+        "timeoutSec": 1800,
+        "productionEnvironment": "production",
+        "stagingEnvironment": "staging",
+        "skipDeployVerification": false
+      },
+      "coalesce-labs/catalyst": {
+        "skipDeployVerification": true
+      }
+    }
+  }
+}
+```
+
+| Field | Where | Type | Default | Description |
+|-------|-------|------|---------|-------------|
+| `catalyst.deploy.<repo>.timeoutSec` | `.catalyst/config.json` | integer | `1800` | Hard timeout for the deploy phase. After this elapses without a `deployment_status` resolution, the orchestrator escalates with `comms.attention` and writes `status: "stalled"`. |
+| `catalyst.deploy.<repo>.productionEnvironment` | `.catalyst/config.json` | string | `"production"` | GitHub deployment environment that gates `status: "done"`. |
+| `catalyst.deploy.<repo>.stagingEnvironment` | `.catalyst/config.json` | string | `"staging"` | Optional staging environment shown in the dashboard but not gating. |
+| `catalyst.deploy.<repo>.skipDeployVerification` | `.catalyst/config.json` | boolean | `true` | When `true`, MERGED → done immediately (today's CTL-133 behavior). When `false`, the new lifecycle states (`merged → deploying → done | deploy-failed`) are driven by GitHub Deployment events. |
+
+Lifecycle states the orchestrator writes to the worker's signal file (CTL-211):
+
+| Status | Trigger | Notes |
+|---|---|---|
+| `merged` | `gh pr view` returns `state=MERGED` AND `skipDeployVerification: false` | PR landed, waiting for deploy to start |
+| `deploying` | `github.deployment.created` (or `_status` `in_progress`/`pending`) for production env on merge SHA | Deploy in flight |
+| `done` | `github.deployment_status.success` for production env | Terminal success — Linear ticket transitions to Done |
+| `deploy-failed` | `github.deployment_status.failure | error` for production env | Non-terminal failure within retry budget; raises `attention` |
+| `stalled` | `timeoutSec` elapsed without resolution | Escalates with `comms.attention "deploy-timeout"` |
+
+The retry budget is currently fixed at 3 attempts per worker. After the budget is
+exhausted, attention is raised as `deploy-budget-exhausted` and the worker stays at
+`deploy-failed` until a human intervenes.
+
+**Repos without GitHub Deployments**: catalyst itself, repos using bare `git push`
+deploys, and most CI-only setups. Set `skipDeployVerification: true` (the default) for
+these — the worker's terminal state will be `done` immediately on PR merge, matching
+today's CTL-133 contract.
+
 ### AI Briefing
 
 The monitor dashboard supports AI-powered status summaries. Configuration spans both layers:

@@ -576,6 +576,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
       secret: linearWebhookConfig.secret,
       eventLog: linearEventLog,
       emit: (type, data) => emit(type, data),
+      // CTL-211 — invalidate the LinearFetcher cache on issue webhook events
+      // so the dashboard reflects the new state in seconds instead of waiting
+      // for the next 5-min polling tick. Other event kinds (comment, reaction,
+      // etc.) don't change the ticket fields the dashboard renders, so they
+      // skip invalidation. The fetcher's invalidate() degrades silently when
+      // linearis is unavailable.
+      onAccept: async (event) => {
+        if (
+          linear !== null &&
+          (event.kind === "issue" || event.kind === "comment") &&
+          event.ticket !== null
+        ) {
+          await linear.invalidate(event.ticket);
+        }
+      },
       logger: {
         info: (m) => console.info(m),
         warn: (m) => console.warn(m),

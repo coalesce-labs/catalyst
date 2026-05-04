@@ -208,6 +208,58 @@ describe("createLinearWebhookHandler", () => {
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(0);
   });
+
+  // CTL-211 — onAccept hook lets the server invalidate the LinearFetcher cache
+  // when a ticket changes state, so the dashboard reflects updates immediately.
+  it("invokes onAccept after appending to event log (issue event)", async () => {
+    const seen: Array<{ kind: string; ticket?: string | null }> = [];
+    const handler = createLinearWebhookHandler({
+      secret: SECRET,
+      eventLog,
+      onAccept: (event) => {
+        // Cast just to satisfy structural read in the test
+        const evt = event as { kind: string; ticket?: string | null };
+        seen.push({ kind: evt.kind, ticket: evt.ticket });
+      },
+    });
+    await handler.handle(makeReq(issueUpdatePayload()));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.kind).toBe("issue");
+    expect(seen[0]?.ticket).toBe("CTL-210");
+  });
+
+  it("does not invoke onAccept on ignored events", async () => {
+    const seen: number[] = [];
+    const handler = createLinearWebhookHandler({
+      secret: SECRET,
+      eventLog,
+      onAccept: () => {
+        seen.push(1);
+      },
+    });
+    await handler.handle(
+      makeReq(
+        { action: "create", type: "Project", data: { id: "p1" } },
+        { "linear-event": "Project" },
+      ),
+    );
+    expect(seen).toHaveLength(0);
+  });
+
+  it("onAccept failure does not fail the request", async () => {
+    const handler = createLinearWebhookHandler({
+      secret: SECRET,
+      eventLog,
+      onAccept: () => {
+        throw new Error("downstream consumer broke");
+      },
+      logger: { warn: () => {} },
+    });
+    const res = await handler.handle(makeReq(issueUpdatePayload()));
+    expect(res.status).toBe(200);
+    // Event-log append still happened despite consumer failure.
+    expect(eventLog.appends.length).toBe(1);
+  });
 });
 
 describe("buildLinearEventLogEnvelope", () => {
