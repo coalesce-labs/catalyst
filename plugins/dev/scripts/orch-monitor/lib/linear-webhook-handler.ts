@@ -23,6 +23,14 @@ export interface LinearWebhookHandlerDeps {
   emit?: (type: string, data: unknown) => void;
   /** Event-log fan-out — every accepted event is appended here. */
   eventLog?: EventLogWriter;
+  /**
+   * Hook fired AFTER an event is parsed, logged, and emitted. Lets the server
+   * react to ticket-scoped events without the handler needing to know about
+   * the consumers (e.g. invalidate the LinearFetcher cache on
+   * `linear.issue.state_changed`). CTL-211. Failures are logged and swallowed
+   * so a slow consumer never blocks the webhook response.
+   */
+  onAccept?: (event: LinearWebhookEvent) => void | Promise<void>;
   /** Cap for the in-memory delivery-ID dedup set. Default 1000. */
   idempotencyMax?: number;
   logger?: LinearWebhookLogger;
@@ -193,6 +201,18 @@ export function createLinearWebhookHandler(
     }
 
     deps.emit?.("linear-webhook-event", { event, deliveryId, eventName });
+
+    if (deps.onAccept && event.kind !== "ignored") {
+      try {
+        await deps.onAccept(event);
+      } catch (err) {
+        logger.warn?.(
+          `[linear-webhook] onAccept hook failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
 
     if (event.kind === "ignored") {
       logger.info?.(`[linear-webhook] ignored: ${event.reason}`);

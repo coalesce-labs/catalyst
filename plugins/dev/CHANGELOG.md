@@ -1,5 +1,47 @@
 # Changelog
 
+## [8.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.0.0...catalyst-dev-v8.1.0)
+
+May 04, 2026
+
+<!-- ai-enhanced -->
+
+### Webhook Auto-Registration & Verification Fixes
+
+The `setup-webhooks.sh` script now auto-registers Linear webhooks with `--linear-register --webhook-url <url>`, eliminating the manual GraphQL mutation step that previously blocked event-driven workflows. Fixed four critical bugs in `orchestrate-verify.sh` that caused verification failures on merged PRs and produced malformed output with integer comparison errors. Existing GitHub webhook subscriptions automatically upgrade to include `release` and `workflow_run` events on daemon restart.
+
+
+
+### PRs
+
+* **dev:** Linear webhook auto-registration in setup-webhooks.sh (CTL-224) ([#353](https://github.com/coalesce-labs/catalyst/issues/353)) ([8cf4807](https://github.com/coalesce-labs/catalyst/commit/8cf480738bfc301caed4ee9ddc824fec378ac111))
+* **dev:** repair orchestrate-verify.sh — broken on merged PRs + integer-cmp errors (CTL-222) ([#352](https://github.com/coalesce-labs/catalyst/issues/352)) ([e98ffea](https://github.com/coalesce-labs/catalyst/commit/e98ffeaea35f1e78ba4a67026a2c50d68d5a1237))
+* **dev:** webhook event mapper — missing release/workflow_run + bogus pr.merged on label changes (CTL-226) ([#351](https://github.com/coalesce-labs/catalyst/issues/351)) ([0668d38](https://github.com/coalesce-labs/catalyst/commit/0668d38bbb748fef6d16554e28d30bc34d0a681b))
+
+## [8.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.14.0...catalyst-dev-v8.0.0)
+
+May 04, 2026
+
+<!-- ai-enhanced -->
+
+### Orchestrator-Driven Deploy Lifecycle
+
+Worker definition-of-done now extends through production deploy success, with orchestrator managing the merging → merged → deploying → done state machine after workers exit at "merging". Event-driven GitHub deployment monitoring replaces polling across skills like merge-pr and orchestrate. New `catalyst-events` CLI provides tail and wait-for primitives over the unified GitHub/Linear/comms activity log, while Linear webhooks join GitHub webhooks for comprehensive event ingestion.
+
+
+
+### PRs
+
+* **dev:** orchestrator-driven deploy lifecycle for workers (CTL-211) ([#344](https://github.com/coalesce-labs/catalyst/issues/344))
+* **dev:** auto-pull main in primary worktree after PR merge (CTL-198) ([#304](https://github.com/coalesce-labs/catalyst/issues/304)) ([d6ae3ba](https://github.com/coalesce-labs/catalyst/commit/d6ae3baf006d28a0af427fdac8e0eb5512916078))
+* **dev:** catalyst-events CLI + Linear webhooks + event-driven skill migration (CTL-210) ([#343](https://github.com/coalesce-labs/catalyst/issues/343)) ([d70f7ee](https://github.com/coalesce-labs/catalyst/commit/d70f7ee87d98bbd7fb0908f8ba88d21c7ff69edf))
+* **dev:** config-driven webhook watch list (CTL-216) ([#342](https://github.com/coalesce-labs/catalyst/issues/342)) ([854a85e](https://github.com/coalesce-labs/catalyst/commit/854a85e579e6aafb1624a656ded2da7a41f66083))
+* **dev:** orchestrator-driven deploy lifecycle for workers (CTL-211) ([#344](https://github.com/coalesce-labs/catalyst/issues/344)) ([fff5513](https://github.com/coalesce-labs/catalyst/commit/fff5513492ec7b924ff9eb675838984b0445c19a))
+* **dev:** canonicalize workerCommand + close orchestrator scope leak (CTL-208) ([#325](https://github.com/coalesce-labs/catalyst/issues/325)) ([8139771](https://github.com/coalesce-labs/catalyst/commit/81397719ca4683ec895fd471b39329ac1f2d6bf6))
+* **dev:** move smee channel URL to per-machine Layer 2 config (CTL-217) ([#341](https://github.com/coalesce-labs/catalyst/issues/341)) ([2970e6c](https://github.com/coalesce-labs/catalyst/commit/2970e6c14f4bf02c256eb26f450c970d0528d295))
+* **dev:** replace orch-monitor poll-everything with webhook-driven event ingestion (CTL-209) ([#330](https://github.com/coalesce-labs/catalyst/issues/330)) ([39e9d13](https://github.com/coalesce-labs/catalyst/commit/39e9d13a7f5a90f65daf66091d6bb9d7eb16e23f))
+* **dev:** unstick Orch Monitor Quality Gates CI workflow (CTL-215) ([#335](https://github.com/coalesce-labs/catalyst/issues/335)) ([2801770](https://github.com/coalesce-labs/catalyst/commit/280177096836fad8dda397d5451b455d5baf79b2))
+
 ## [7.14.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.13.0...catalyst-dev-v7.14.0)
 
 May 03, 2026

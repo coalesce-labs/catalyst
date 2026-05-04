@@ -423,11 +423,107 @@ describe("createWebhookHandler", () => {
     const handler = createWebhookHandler({ secret: SECRET, prFetcher: fetcher });
     const res = await handler.handle(
       makeReq(
-        { ...REPO, action: "edited" },
+        // `unrecognized_event` exercises the unhandled-event-name branch since
+        // `release` is now a recognized event (CTL-226).
+        { ...REPO, action: "whatever" },
+        { "x-github-event": "unrecognized_event" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(fetcher.forces.length).toBe(0);
+  });
+
+  // CTL-226: regression-protect the topic mapper. Before the fix, ANY
+  // pull_request payload with merged=true (including label edits on an
+  // already-merged PR) was routed to github.pr.merged, which made workers
+  // waiting on merge re-fire on every subsequent label change.
+  it("pull_request.labeled on merged PR does NOT force-fire merge dispatch", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      eventLog,
+    });
+    const res = await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "labeled",
+        // Merged PR — but the action is labeled, not closed.
+        pull_request: {
+          number: 326,
+          merged: true,
+          merged_at: "2026-05-04T06:42:52Z",
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.event).toBe("github.pr.labeled");
+    expect(eventLog.appends[0]?.event).not.toBe("github.pr.merged");
+  });
+
+  it("release.published is accepted (200) and logged", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      eventLog,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "published",
+          release: {
+            id: 1234,
+            tag_name: "catalyst-dev-v8.0.0",
+            name: "catalyst-dev v8.0.0",
+            draft: false,
+            prerelease: false,
+            html_url: "https://github.com/owner/repo/releases/tag/catalyst-dev-v8.0.0",
+          },
+        },
         { "x-github-event": "release" },
       ),
     );
     expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.event).toBe("github.release.published");
+    // No PR fetcher force — release events are repo-level, not PR-keyed.
+    expect(fetcher.forces.length).toBe(0);
+  });
+
+  it("workflow_run.completed is accepted (200) and logged", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      eventLog,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "completed",
+          workflow_run: {
+            id: 555,
+            workflow_id: 99,
+            name: "CI",
+            head_sha: "abc123",
+            head_branch: "main",
+            status: "completed",
+            conclusion: "success",
+            run_number: 42,
+            html_url: "https://github.com/owner/repo/actions/runs/555",
+            pull_requests: [{ number: 326 }],
+          },
+        },
+        { "x-github-event": "workflow_run" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.event).toBe("github.workflow_run.completed");
     expect(fetcher.forces.length).toBe(0);
   });
 
@@ -502,6 +598,106 @@ describe("buildEventLogEnvelope", () => {
       "del-2",
     );
     expect(env!.event).toBe("github.pr.closed");
+  });
+
+  // CTL-226: pull_request payloads on already-merged PRs carry merged=true
+  // for non-merge actions too (labeled, unlabeled, edited, …). The mapper
+  // must not treat any merged=true payload as a merge event — only the one
+  // with action=closed AND merged=true.
+  it("maps pull_request.labeled (merged=true) → github.pr.labeled (NOT merged)", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request",
+        repo: "o/r",
+        number: 326,
+        action: "labeled",
+        merged: true,
+        mergedAt: "2026-05-04T06:42:52Z",
+        draft: false,
+        mergeable: null,
+      },
+      "del-pr-labeled",
+    );
+    expect(env!.event).toBe("github.pr.labeled");
+  });
+
+  it("maps pull_request.unlabeled (merged=true) → github.pr.unlabeled", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request",
+        repo: "o/r",
+        number: 326,
+        action: "unlabeled",
+        merged: true,
+        mergedAt: "2026-05-04T06:42:52Z",
+        draft: false,
+        mergeable: null,
+      },
+      "del-pr-unlabeled",
+    );
+    expect(env!.event).toBe("github.pr.unlabeled");
+  });
+
+  it("maps pull_request.synchronize → github.pr.synchronize", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request",
+        repo: "o/r",
+        number: 1,
+        action: "synchronize",
+        merged: false,
+        mergedAt: null,
+        draft: false,
+        mergeable: null,
+      },
+      "del-sync",
+    );
+    expect(env!.event).toBe("github.pr.synchronize");
+  });
+
+  it("maps release.published → github.release.published", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "release",
+        repo: "o/r",
+        action: "published",
+        releaseId: 1234,
+        tag: "catalyst-dev-v8.0.0",
+        name: "catalyst-dev v8.0.0",
+        draft: false,
+        prerelease: false,
+        htmlUrl: "https://github.com/o/r/releases/tag/catalyst-dev-v8.0.0",
+      },
+      "del-release",
+    );
+    expect(env!.event).toBe("github.release.published");
+    expect(env!.scope.repo).toBe("o/r");
+    expect(env!.scope.tag).toBe("catalyst-dev-v8.0.0");
+  });
+
+  it("maps workflow_run.completed → github.workflow_run.completed", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "workflow_run",
+        repo: "o/r",
+        action: "completed",
+        workflowId: 99,
+        runId: 555,
+        name: "CI",
+        headSha: "abc123",
+        headBranch: "main",
+        status: "completed",
+        conclusion: "success",
+        runNumber: 42,
+        htmlUrl: "https://github.com/o/r/actions/runs/555",
+        prNumbers: [326],
+      },
+      "del-wfr",
+    );
+    expect(env!.event).toBe("github.workflow_run.completed");
+    expect(env!.scope.sha).toBe("abc123");
+    expect(env!.detail.conclusion).toBe("success");
+    expect(env!.detail.prNumbers).toEqual([326]);
   });
 
   it("maps check_suite.completed → github.check_suite.completed", () => {
