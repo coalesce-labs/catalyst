@@ -349,6 +349,7 @@ team-wide.
 | `catalyst.monitor.github.webhookSecretEnv` | `.catalyst/config.json` | string | `"CATALYST_WEBHOOK_SECRET"` | **Name** of the env var the HMAC secret value is read from at runtime |
 | `catalyst.monitor.github.watchRepos` | `.catalyst/config.json` | string[] | `[]` | Repos (owner/repo) subscribed at daemon startup — additive on top of worker-driven auto-discovery. See [Persistent watch list](/observability/webhooks/#persistent-watch-list). |
 | `catalyst.monitor.linear.webhookSecretEnv` | `.catalyst/config.json` | string | `"CATALYST_LINEAR_WEBHOOK_SECRET"` | **Name** of the env var the Linear HMAC secret is read from. Empty/missing → `POST /api/webhook/linear` returns 503. See [Linear webhooks](/observability/webhooks/#linear-webhooks). |
+| `catalyst.monitor.suppressVersionWarning` | `.catalyst/config.json` | boolean | `false` | Suppress the version-drift warning printed by `catalyst-monitor start` / `restart` when running an older daemon version than the highest available in the plugin cache. See [Version drift detection](/observability/webhooks/#version-drift-detection). |
 
 Environment variable overrides:
 - `CATALYST_SMEE_CHANNEL` — overrides any file-derived channel.

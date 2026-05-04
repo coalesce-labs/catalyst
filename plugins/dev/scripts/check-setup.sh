@@ -346,16 +346,42 @@ fi
 header "Orchestration Monitor (optional)"
 
 MONITOR_PORT="${MONITOR_PORT:-7400}"
-if (echo >/dev/tcp/localhost/"$MONITOR_PORT") 2>/dev/null; then
+
+LAUNCHER=""
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-monitor.sh" ]]; then
+    LAUNCHER="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-monitor.sh"
+elif [[ -f "plugins/dev/scripts/catalyst-monitor.sh" ]]; then
+    LAUNCHER="plugins/dev/scripts/catalyst-monitor.sh"
+fi
+
+# Prefer querying the wrapper for structured status (running + version drift).
+# Fall back to a raw TCP probe when the wrapper or jq is unavailable.
+if [[ -n "$LAUNCHER" ]] && command -v jq &>/dev/null; then
+    STATUS_JSON=$(bash "$LAUNCHER" status --json 2>/dev/null || true)
+    if [[ -n "$STATUS_JSON" ]]; then
+        MONITOR_RUNNING=$(echo "$STATUS_JSON" | jq -r '.running // false')
+        MONITOR_RV=$(echo "$STATUS_JSON" | jq -r '.runningVersion // "?"')
+        MONITOR_LV=$(echo "$STATUS_JSON" | jq -r '.latestAvailableVersion // "?"')
+        MONITOR_STALE=$(echo "$STATUS_JSON" | jq -r '.isStale // false')
+        if [[ "$MONITOR_RUNNING" == "true" ]]; then
+            pass "Monitor running on :$MONITOR_PORT (v$MONITOR_RV)"
+        else
+            info "Monitor not running on :$MONITOR_PORT"
+            info "Start with: bash $LAUNCHER start"
+        fi
+        if [[ "$MONITOR_STALE" == "true" ]]; then
+            warn "Monitor version drift: running v$MONITOR_RV, v$MONITOR_LV available — bash $LAUNCHER restart"
+        fi
+    elif (echo >/dev/tcp/localhost/"$MONITOR_PORT") 2>/dev/null; then
+        pass "Monitor running on :$MONITOR_PORT"
+    else
+        info "Monitor not running on :$MONITOR_PORT"
+        info "Start with: bash $LAUNCHER start"
+    fi
+elif (echo >/dev/tcp/localhost/"$MONITOR_PORT") 2>/dev/null; then
     pass "Monitor running on :$MONITOR_PORT"
 else
     info "Monitor not running on :$MONITOR_PORT"
-    LAUNCHER=""
-    if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-monitor.sh" ]]; then
-        LAUNCHER="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-monitor.sh"
-    elif [[ -f "plugins/dev/scripts/catalyst-monitor.sh" ]]; then
-        LAUNCHER="plugins/dev/scripts/catalyst-monitor.sh"
-    fi
     if [[ -n "$LAUNCHER" ]]; then
         info "Start with: bash $LAUNCHER start"
     else
