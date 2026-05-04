@@ -108,6 +108,32 @@ export type WebhookEvent =
       targetUrl: string | null;
       environmentUrl: string | null;
     }
+  | {
+      kind: "release";
+      repo: string;
+      action: string;
+      releaseId: number;
+      tag: string;
+      name: string;
+      draft: boolean;
+      prerelease: boolean;
+      htmlUrl: string;
+    }
+  | {
+      kind: "workflow_run";
+      repo: string;
+      action: string;
+      workflowId: number;
+      runId: number;
+      name: string;
+      headSha: string;
+      headBranch: string;
+      status: string;
+      conclusion: string | null;
+      runNumber: number;
+      htmlUrl: string;
+      prNumbers: number[];
+    }
   | { kind: "ignored"; reason: string };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -189,6 +215,10 @@ export function parseWebhookEvent(
       return parseDeployment(repo, payload);
     case "deployment_status":
       return parseDeploymentStatus(repo, payload);
+    case "release":
+      return parseRelease(repo, payload);
+    case "workflow_run":
+      return parseWorkflowRun(repo, payload);
     default:
       return ignored(`unhandled event: ${eventName}`);
   }
@@ -409,5 +439,57 @@ function parseDeploymentStatus(
     state: getStr(status, "state"),
     targetUrl: getOptStr(status, "target_url"),
     environmentUrl: getOptStr(status, "environment_url"),
+  };
+}
+
+function parseRelease(
+  repo: string,
+  payload: Record<string, unknown>,
+): WebhookEvent {
+  const release = payload.release;
+  if (!isObject(release)) return ignored("release: missing release");
+  return {
+    kind: "release",
+    repo,
+    action: getStr(payload, "action"),
+    releaseId: getNum(release, "id"),
+    tag: getStr(release, "tag_name"),
+    name: getStr(release, "name"),
+    draft: getBool(release, "draft"),
+    prerelease: getBool(release, "prerelease"),
+    htmlUrl: getStr(release, "html_url"),
+  };
+}
+
+function parseWorkflowRun(
+  repo: string,
+  payload: Record<string, unknown>,
+): WebhookEvent {
+  const run = payload.workflow_run;
+  if (!isObject(run)) return ignored("workflow_run: missing workflow_run");
+  const prsRaw = run.pull_requests;
+  const prNumbers: number[] = [];
+  if (Array.isArray(prsRaw)) {
+    for (const entry of prsRaw) {
+      if (isObject(entry)) {
+        const n = getNum(entry, "number");
+        if (n > 0) prNumbers.push(n);
+      }
+    }
+  }
+  return {
+    kind: "workflow_run",
+    repo,
+    action: getStr(payload, "action"),
+    workflowId: getNum(run, "workflow_id"),
+    runId: getNum(run, "id"),
+    name: getStr(run, "name"),
+    headSha: getStr(run, "head_sha"),
+    headBranch: getStr(run, "head_branch"),
+    status: getStr(run, "status"),
+    conclusion: getOptStr(run, "conclusion"),
+    runNumber: getNum(run, "run_number"),
+    htmlUrl: getStr(run, "html_url"),
+    prNumbers,
   };
 }

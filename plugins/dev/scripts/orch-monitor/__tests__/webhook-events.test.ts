@@ -358,4 +358,112 @@ describe("parseWebhookEvent", () => {
       expect(typeof got.kind).toBe("string");
     }
   });
+
+  // CTL-226: GitHub release events. Used by release-please flows so consumers
+  // can wait-for `github.release.published` instead of polling.
+  describe("release", () => {
+    it("parses a release.published event", () => {
+      const got = parseWebhookEvent("release", {
+        ...REPO,
+        action: "published",
+        release: {
+          id: 4242,
+          tag_name: "catalyst-dev-v8.0.0",
+          name: "catalyst-dev v8.0.0",
+          draft: false,
+          prerelease: false,
+          html_url: "https://github.com/owner/repo/releases/tag/catalyst-dev-v8.0.0",
+        },
+      });
+      expect(got.kind).toBe("release");
+      if (got.kind !== "release") return;
+      expect(got.repo).toBe("owner/repo");
+      expect(got.action).toBe("published");
+      expect(got.releaseId).toBe(4242);
+      expect(got.tag).toBe("catalyst-dev-v8.0.0");
+      expect(got.name).toBe("catalyst-dev v8.0.0");
+      expect(got.draft).toBe(false);
+      expect(got.prerelease).toBe(false);
+      expect(got.htmlUrl).toBe(
+        "https://github.com/owner/repo/releases/tag/catalyst-dev-v8.0.0",
+      );
+    });
+
+    it("returns ignored when release field is missing", () => {
+      const got = parseWebhookEvent("release", {
+        ...REPO,
+        action: "published",
+      });
+      expect(got.kind).toBe("ignored");
+      if (got.kind !== "ignored") return;
+      expect(got.reason).toContain("missing release");
+    });
+  });
+
+  // CTL-226: workflow_run events let consumers observe CI completion at the
+  // workflow level (CTL-211 deploy lifecycle dependency).
+  describe("workflow_run", () => {
+    it("parses a workflow_run.completed event", () => {
+      const got = parseWebhookEvent("workflow_run", {
+        ...REPO,
+        action: "completed",
+        workflow_run: {
+          id: 555,
+          workflow_id: 99,
+          name: "CI",
+          head_sha: "abc123def",
+          head_branch: "main",
+          status: "completed",
+          conclusion: "success",
+          run_number: 42,
+          html_url: "https://github.com/owner/repo/actions/runs/555",
+          pull_requests: [{ number: 326 }, { number: 327 }],
+        },
+      });
+      expect(got.kind).toBe("workflow_run");
+      if (got.kind !== "workflow_run") return;
+      expect(got.repo).toBe("owner/repo");
+      expect(got.action).toBe("completed");
+      expect(got.runId).toBe(555);
+      expect(got.workflowId).toBe(99);
+      expect(got.headSha).toBe("abc123def");
+      expect(got.headBranch).toBe("main");
+      expect(got.status).toBe("completed");
+      expect(got.conclusion).toBe("success");
+      expect(got.runNumber).toBe(42);
+      expect(got.prNumbers).toEqual([326, 327]);
+    });
+
+    it("parses workflow_run with null conclusion (still in progress)", () => {
+      const got = parseWebhookEvent("workflow_run", {
+        ...REPO,
+        action: "in_progress",
+        workflow_run: {
+          id: 1,
+          workflow_id: 1,
+          name: "CI",
+          head_sha: "x",
+          head_branch: "main",
+          status: "in_progress",
+          conclusion: null,
+          run_number: 1,
+          html_url: "...",
+        },
+      });
+      expect(got.kind).toBe("workflow_run");
+      if (got.kind !== "workflow_run") return;
+      expect(got.conclusion).toBeNull();
+      expect(got.prNumbers).toEqual([]);
+    });
+
+    it("returns ignored when workflow_run field is missing", () => {
+      const got = parseWebhookEvent("workflow_run", {
+        ...REPO,
+        action: "completed",
+      });
+      expect(got.kind).toBe("ignored");
+      if (got.kind !== "ignored") return;
+      expect(got.reason).toContain("missing workflow_run");
+    });
+  });
 });

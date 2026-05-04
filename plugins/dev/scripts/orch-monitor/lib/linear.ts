@@ -17,6 +17,14 @@ export interface LinearFetcher {
   refreshAll(keys: string[]): Promise<void>;
   start(keysProvider: () => string[], intervalMs: number): void;
   stop(): void;
+  /**
+   * On-demand refresh of a single ticket. CTL-211 — wired up to
+   * `linear.issue.*` webhook events (CTL-210) so the dashboard reflects
+   * state changes within seconds instead of waiting up to 5 minutes for the
+   * polling fallback. Returns silently on blank keys, and degrades silently
+   * when linearis is unavailable (matches refreshAll behavior).
+   */
+  invalidate(key: string): Promise<void>;
 }
 
 const DEFAULT_CONCURRENCY = 5;
@@ -188,6 +196,12 @@ export function createLinearFetcher(
         clearInterval(timer);
         timer = null;
       }
+    },
+    async invalidate(key: string) {
+      const trimmed = (key ?? "").trim();
+      if (trimmed.length === 0) return;
+      if (!(await probe())) return;
+      await fetchOne(trimmed);
     },
   };
 }

@@ -55,6 +55,27 @@ In Claude Code:
 
 Restart Claude Code after installing.
 
+## Install the catalyst-* CLIs
+
+Several Catalyst skills invoke shell tools by bare name (`catalyst-events`, `catalyst-comms`, `catalyst-session`, ...). Install symlinks to them on your PATH:
+
+```bash
+bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/install-cli.sh
+```
+
+Default install location is `$HOME/.local/bin` (already on PATH for most users with Python/pyenv/pipx tooling), falling back to `$HOME/.catalyst/bin`. Override with `--bin-dir <path>`.
+
+If the chosen directory is not on your PATH, the installer prints the exact `export PATH=...` line to add to your shell rc and exits non-zero. Add the line, restart your shell, and re-run — or pass `--force` to install symlinks anyway (you'll still need to fix PATH before the CLIs resolve).
+
+Verify the install:
+
+```bash
+which catalyst-events
+catalyst-events help
+```
+
+If you previously ran the installer and have `alias catalyst-*=...` lines in `~/.zshrc` or `~/.bashrc` pointing at a local clone, remove them — they shadow the marketplace install.
+
 ## Add Catalyst Context to Your Project
 
 Copy the Catalyst snippet into your project's `CLAUDE.md` so Claude Code understands the available workflows:

@@ -19,6 +19,29 @@ to the event stream via filter.
 This skill documents the canonical patterns. Use it as a reference when writing or
 migrating skill prose; do not invoke it as a slash command.
 
+## Prerequisite — orch-monitor daemon must be running
+
+The two primitives below read from `~/catalyst/events/YYYY-MM.jsonl`, which is populated
+by the `orch-monitor` daemon (`plugins/dev/scripts/orch-monitor/server.ts`). When the
+daemon is **not** running:
+
+- `catalyst-events tail` returns an empty stream
+- `catalyst-events wait-for` blocks until its `--timeout` expires (default 600s) and
+  exits non-zero — callers fall back to `gh pr view` polling, which can't see deploys
+
+Liveness check (the same call wired into `check-project-setup.sh`):
+
+```bash
+plugins/dev/scripts/catalyst-monitor.sh status        # human-readable
+plugins/dev/scripts/catalyst-monitor.sh status --json # {"running":true,"pid":...}
+```
+
+Skills that invoke `check-project-setup.sh` (orchestrate, oneshot, merge-pr) handle the
+liveness check automatically — interactive runs prompt to start the daemon, autonomous
+runs warn-to-stderr and proceed. If you reuse the primitives outside those skills, run
+the status check yourself and either start the daemon (`catalyst-monitor.sh start`) or
+plan for the polling fallback.
+
 ## The two primitives
 
 | Primitive | When | What |
@@ -61,22 +84,36 @@ fi
 ## Pattern 2 — Long-lived orchestrator wakes on multiple event types
 
 The orchestrator's Phase 4 used to poll every 2–3 minutes for every active worker. With
-CTL-210, the orchestrator runs a `Monitor` watching all PR/CI/push events, and the
-per-cycle scan drops to 10 minutes maximum:
+CTL-210, the orchestrator runs a `Monitor` watching all PR/CI/push/lifecycle events, and
+the reactive scan drops to a 10-minute idle fallback as the safety net (CTL-243):
 
 ```text
 Use the `Monitor` tool with this command:
 
 catalyst-events tail --filter '
   (.event | startswith("github.pr.")) or
+  (.event | startswith("github.pr_review")) or
   (.event | startswith("github.check_")) or
-  (.event == "github.push")
+  (.event | startswith("github.deployment")) or
+  (.event == "github.push") or
+  (.event | startswith("linear.issue.")) or
+  (.event == "worker-status-change") or
+  (.event == "worker-pr-created") or
+  (.event == "worker-done") or
+  (.event == "worker-failed") or
+  (.event == "attention-raised") or
+  (.event == "attention-resolved")
 '
 
 When a notification arrives, re-evaluate the affected worker's state via the
 canonical `gh pr view` query. Do NOT trust the event's payload as the source
 of truth — use it only as a wake-up trigger.
 ```
+
+The orchestrator's filter is intentionally broad — it covers every event type that
+could require a dashboard re-render, a fix-up dispatch, or a merge-confirmation
+re-scan. See `orchestrate/SKILL.md` Phase 4 for the wake-up classification table that
+maps each event to its reaction.
 
 The orchestrator continues to maintain its 10-minute fallback scan (defense-in-depth).
 The fast path is event-driven; the slow path is the safety net.
@@ -218,6 +255,9 @@ events.
 | Linear ticket state change | `.event == "linear.issue.state_changed" and .scope.ticket == "CTL-210"` |
 | Comms message in one channel | `.event == "comms.message.posted" and .detail.channel == "orch-foo"` |
 | Worker phase transition | `.event == "worker-status-change" and .worker == "CTL-210"` |
+| Worker reached terminal state | `.event == "worker-done" or .event == "worker-failed"` |
+| PR review activity | `(.event \| startswith("github.pr_review")) or (.event == "github.issue_comment.created")` |
+| Deploy outcome | `.event \| startswith("github.deployment")` |
 | Attention raised in this orchestrator | `.event == "attention-raised" and .orchestrator == "orch-foo"` |
 
 ## `--timeout` semantics

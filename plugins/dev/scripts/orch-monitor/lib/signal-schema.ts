@@ -15,6 +15,11 @@ const VALID_STATUSES = new Set([
   "shipping",
   "pr-created",
   "merging",
+  // CTL-211: orchestrator-driven deploy lifecycle states (worker still exits at "merging";
+  // these are written by the orchestrator's Phase 4 deploy state machine).
+  "merged",
+  "deploying",
+  "deploy-failed",
   "done",
   "failed",
   "stalled",

@@ -13,6 +13,15 @@ version: 1.0.0
 
 Safely merges a PR after comprehensive verification, with Linear integration and automated cleanup.
 
+## Prerequisites
+
+```bash
+# Project setup + orch-monitor daemon liveness (REQUIRED — Phase 6 consumes webhook events)
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
+fi
+```
+
 ## Branch Protection — Safety Rules
 
 Read and follow the safety rules in
