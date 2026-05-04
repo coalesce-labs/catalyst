@@ -29,7 +29,8 @@
         "wave-started",
         "wave-completed",
         "worker-dispatched",
-        "worker-status-change",
+        "worker-phase-advanced",
+        "worker-status-terminal",
         "worker-pr-created",
         "worker-done",
         "worker-failed",
@@ -51,11 +52,29 @@
       "properties": {
         "from": {
           "type": "string",
-          "description": "Previous status (for status-change events)"
+          "description": "Previous status (for worker-status-terminal events)"
         },
         "to": {
           "type": "string",
-          "description": "New status (for status-change events)"
+          "description": "New status (for worker-status-terminal events)"
+        },
+        "windowSec": {
+          "type": "integer",
+          "description": "Coalesce window in seconds (for worker-phase-advanced events)"
+        },
+        "changes": {
+          "type": "array",
+          "description": "Coalesced batch of routine phase transitions (for worker-phase-advanced events)",
+          "items": {
+            "type": "object",
+            "required": ["ts", "worker", "from", "to"],
+            "properties": {
+              "ts": { "type": "string", "format": "date-time" },
+              "worker": { "type": "string" },
+              "from": { "type": "string" },
+              "to": { "type": "string" }
+            }
+          }
         },
         "wave": {
           "type": "integer",
@@ -67,8 +86,18 @@
           "description": "Tickets involved (for wave-started, orchestrator-started)"
         },
         "pr": {
-          "type": "integer",
-          "description": "PR number (for pr-created events)"
+          "oneOf": [
+            { "type": "integer", "description": "PR number (for worker-pr-created events)" },
+            {
+              "type": "object",
+              "description": "PR enrichment block (for PR-bearing worker-status-terminal events)",
+              "required": ["number", "url"],
+              "properties": {
+                "number": { "type": "integer" },
+                "url": { "type": "string" }
+              }
+            }
+          ]
         },
         "url": {
           "type": "string",
