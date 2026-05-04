@@ -97,6 +97,20 @@ export interface WorkerState {
   parseError?: string;
   prState?: "OPEN" | "CLOSED" | "MERGED" | "UNKNOWN";
   prMergedAt?: string | null;
+  /**
+   * Production deploy state — written by the orchestrator's Phase 4 deploy
+   * state machine (CTL-211). Present only for workers whose repo has
+   * `catalyst.deploy.<repo>.skipDeployVerification: false`.
+   */
+  deploy?: {
+    startedAt?: string;
+    completedAt?: string;
+    environment?: string;
+    deploymentId?: number;
+    result?: "success" | "failure" | "error";
+    failedAttempts?: number;
+    lastFailureState?: string;
+  };
   activity?: WorkerActivity | null;
 }
 
