@@ -269,6 +269,42 @@ update within a few seconds. You can also watch the event log:
 tail -F ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq 'select(.source == "github.webhook")'
 ```
 
+## Daemon liveness prerequisite
+
+The orch-monitor daemon is the only writer to `~/catalyst/events/`, so any skill that
+consumes events depends on it being alive. The Tier-1 event-driven skills are:
+
+- `orchestrate` — Phase 4 watcher and auto-fixup classifier consume events
+- `oneshot` — Phase 5 deploy-monitoring loop consumes events
+- `merge-pr` — Phase 6 wait-for-merged consumes events
+- `monitor-events` — the canonical pattern doc; reused everywhere the primitives are needed
+
+If the daemon is stopped, `catalyst-events wait-for` blocks until its 600 s timeout and
+exits non-zero. Callers fall back to `gh pr view` polling, which is functionally correct
+for merge detection but **cannot observe production deploy events** — those only arrive
+via the GitHub webhook stream that the daemon owns.
+
+`plugins/dev/scripts/check-project-setup.sh` runs a liveness check on every prereq pass.
+Behavior splits on whether the invocation is interactive:
+
+- **Interactive (TTY stdin, `CATALYST_AUTONOMOUS` unset)**: prompts to start the daemon
+  with `[Y/n]`, defaulting yes. On accept, runs `catalyst-monitor.sh start` and surfaces
+  its output. On decline, adds a non-fatal warning.
+- **Autonomous (`CATALYST_AUTONOMOUS=1` or non-TTY stdin)**: warns to stderr and
+  proceeds. CI variants (`ci-commit`, `ci-describe-pr`) and orchestrator-dispatched
+  workers take this path so a missing daemon never blocks an automation run.
+
+Manual liveness check:
+
+```bash
+plugins/dev/scripts/catalyst-monitor.sh status            # human-readable
+plugins/dev/scripts/catalyst-monitor.sh status --json     # {"running":true,"pid":N,...}
+plugins/dev/scripts/catalyst-monitor.sh start             # idempotent — no-op if alive
+```
+
+The `status --json` exit code is `0` when running and `1` when stopped, so scripts can
+gate cheaply via `if catalyst-monitor.sh status --json &>/dev/null; then ...`.
+
 ## Failure modes and recovery
 
 - **smee tunnel drops**: the daemon retries automatically. Up to 60 minutes of missed
