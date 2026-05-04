@@ -233,56 +233,69 @@ mergeable state — or genuinely blocked on a human gate (like approval from a s
 Do NOT just say "PR created" or "PR created with auto-merge" and stop. That leaves the user to do
 all the follow-up work manually.
 
-**Step 12a: Wait for CI checks and automated reviewers (3-5 minutes)**
+**Step 12a: Wait for CI checks and automated reviewers (event-driven)**
 
-Automated review agents (Codex, security scanners, linters) typically post comments within 3-5
-minutes of PR creation. CI checks also need time to run. Wait at least 3 minutes before checking,
-then poll every 30 seconds monitoring CI status, review comments, and PR state.
+Automated review agents (Codex, security scanners, linters) typically post
+comments within 3–5 minutes of PR creation. CI checks also need time to run.
+Use the canonical "Reactive PR lifecycle" pattern from [[monitor-events]] §
+Pattern 3 (CTL-228) — a single multi-event subscription that wakes on PR
+merged, PR closed, CI completed, review submitted, or push to the base
+branch — instead of `sleep 30` polling.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+BASE_BRANCH=$(gh pr view "$pr_number" --json baseRefName --jq '.baseRefName')
 
-# Wait 3 minutes — CI and automated reviewers need time to run
-sleep 180
+if command -v catalyst-events >/dev/null 2>&1; then
+  # Reactive event-driven path. Wakes on the first actionable signal
+  # (CI complete, comment, review, merge, base advance, or 5-min timeout).
+  EVENT_JSON=$(catalyst-events wait-for \
+    --filter '
+      (.event == "github.pr.merged" and .scope.pr == '"$pr_number"') or
+      (.event == "github.pr.closed" and .scope.pr == '"$pr_number"') or
+      (.event == "github.check_suite.completed"
+         and (.detail.prNumbers // [] | index('"$pr_number"') != null)) or
+      (.event == "github.pr_review.submitted"
+         and .scope.pr == '"$pr_number"') or
+      (.event == "github.issue_comment.created"
+         and .scope.pr == '"$pr_number"') or
+      (.event == "github.pr_review_comment.created"
+         and .scope.pr == '"$pr_number"') or
+      (.event == "github.push" and .scope.ref == "refs/heads/'"$BASE_BRANCH"'")
+    ' \
+    --timeout 300 || true)
 
-# Poll for up to 2 more minutes (5 min total) — check every 30s
-WAITED=180
-MAX_WAIT=300
-while [ $WAITED -lt $MAX_WAIT ]; do
-  # Check CI status
-  CI_STATUS=$(gh pr checks $pr_number --json state \
+  # MANDATORY authoritative re-check on every wake-up.
+  PR_STATE=$(gh pr view "$pr_number" --json state --jq '.state' 2>/dev/null || echo "OPEN")
+  CI_STATUS=$(gh pr checks "$pr_number" --json state \
     --jq '[.[].state] | unique | join(",")' 2>/dev/null || echo "PENDING")
-
-  # Check for review comments/threads
-  COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/comments" --jq 'length')
-  REVIEW_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/reviews" \
-    --jq '[.[] | select(.state != "APPROVED" and .state != "DISMISSED")] | length')
-
-  # Check PR state (may have auto-merged already)
-  PR_STATE=$(gh pr view $pr_number --json state --jq '.state' 2>/dev/null || echo "OPEN")
-
-  echo "Poll @${WAITED}s: state=${PR_STATE} CI=${CI_STATUS} comments=${COMMENT_COUNT} reviews=${REVIEW_COUNT}"
-
-  if [ "$PR_STATE" = "MERGED" ]; then
-    echo "PR already merged"
-    break
-  fi
-
-  if [ "$COMMENT_COUNT" -gt 0 ] || [ "$REVIEW_COUNT" -gt 0 ]; then
-    echo "Found review comments — proceeding to address them"
-    break
-  fi
-
-  # If all CI passed and no comments, clean exit
-  if echo "$CI_STATUS" | grep -qv "PENDING\|QUEUED"; then
-    echo "CI complete (${CI_STATUS}), no review comments — proceeding"
-    break
-  fi
-
-  sleep 30
-  WAITED=$((WAITED + 30))
-done
+  echo "wake: state=${PR_STATE} CI=${CI_STATUS} event=$(echo "$EVENT_JSON" | jq -r '.event // "(timeout)"')"
+else
+  # Fallback when catalyst-events CLI is not installed — sleep + poll.
+  sleep 180
+  WAITED=180
+  MAX_WAIT=300
+  while [ $WAITED -lt $MAX_WAIT ]; do
+    CI_STATUS=$(gh pr checks "$pr_number" --json state \
+      --jq '[.[].state] | unique | join(",")' 2>/dev/null || echo "PENDING")
+    COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/comments" --jq 'length')
+    REVIEW_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/reviews" \
+      --jq '[.[] | select(.state != "APPROVED" and .state != "DISMISSED")] | length')
+    PR_STATE=$(gh pr view "$pr_number" --json state --jq '.state' 2>/dev/null || echo "OPEN")
+    echo "Poll @${WAITED}s: state=${PR_STATE} CI=${CI_STATUS} comments=${COMMENT_COUNT} reviews=${REVIEW_COUNT}"
+    [ "$PR_STATE" = "MERGED" ] && break
+    [ "$COMMENT_COUNT" -gt 0 ] || [ "$REVIEW_COUNT" -gt 0 ] && break
+    echo "$CI_STATUS" | grep -qv "PENDING\|QUEUED" && break
+    sleep 30
+    WAITED=$((WAITED + 30))
+  done
+fi
 ```
+
+The reactive path replaces the `sleep 180 + sleep 30` poll cadence with
+event-driven wake-ups. The `--timeout 300` floor prevents indefinite blocks
+when the orch-monitor daemon is down. The fallback path is preserved verbatim
+for installs without the `catalyst-events` CLI.
 
 **Step 12b: Address all review comments**
 

@@ -30,8 +30,11 @@ const Sandbox = lazy(() =>
 const CommsView = lazy(() =>
   import("./components/comms-view").then((m) => ({ default: m.CommsView })),
 );
+const ActivityView = lazy(() =>
+  import("./components/activity-view").then((m) => ({ default: m.ActivityView })),
+);
 
-type TopView = "dashboard" | "comms";
+type TopView = "dashboard" | "comms" | "activity";
 
 const isDevSandbox =
   typeof window !== "undefined" &&
@@ -67,6 +70,9 @@ function Monitor() {
 
   const [selectedOrchId, setSelectedOrchId] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
+  // `selectedWorker` is lifted up from `OrchestratorView` so the Activity pane
+  // can pivot directly to a worker drawer via cross-link chips.
+  const [selectedWorker, setSelectedWorker] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [topView, setTopView] = useState<TopView>("dashboard");
   const [commsInitialFilter, setCommsInitialFilter] =
@@ -116,12 +122,14 @@ function Monitor() {
   const handleSelect = useCallback((orchId: string | null) => {
     setSelectedOrchId(orchId);
     setSelectedSession(null);
+    setSelectedWorker(null);
     setTopView("dashboard");
   }, []);
 
   const handleSessionSelect = useCallback((sessionId: string) => {
     setSelectedSession(sessionId);
     setSelectedOrchId(null);
+    setSelectedWorker(null);
     setTopView("dashboard");
   }, []);
 
@@ -129,8 +137,26 @@ function Monitor() {
     setTopView("comms");
     setSelectedOrchId(null);
     setSelectedSession(null);
+    setSelectedWorker(null);
     setCommsInitialFilter(null);
   }, []);
+
+  const handleActivitySelect = useCallback(() => {
+    setTopView("activity");
+    setSelectedOrchId(null);
+    setSelectedSession(null);
+    setSelectedWorker(null);
+  }, []);
+
+  const handleActivityPivot = useCallback(
+    (orchId: string, ticket: string) => {
+      setSelectedOrchId(orchId);
+      setSelectedWorker(ticket);
+      setSelectedSession(null);
+      setTopView("dashboard");
+    },
+    [],
+  );
 
   const { channels: commsChannels } = useCommsChannels(true);
   const authorsByOrchId = useMemo(() => {
@@ -188,6 +214,7 @@ function Monitor() {
         onTimeFilterChange={handleTimeFilterChange}
         topView={topView}
         onCommsSelect={handleCommsSelect}
+        onActivitySelect={handleActivitySelect}
       />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -219,6 +246,12 @@ function Monitor() {
                 <>
                   <ChevronRight className="h-3 w-3 text-border" />
                   <span className="font-medium text-fg">Comms</span>
+                </>
+              )}
+              {topView === "activity" && (
+                <>
+                  <ChevronRight className="h-3 w-3 text-border" />
+                  <span className="font-medium text-fg">Activity</span>
                 </>
               )}
               {topView === "dashboard" && effectiveOrch && (
@@ -257,6 +290,10 @@ function Monitor() {
               <div className="animate-fade-in">
                 <CommsView initialFilter={commsInitialFilter} />
               </div>
+            ) : topView === "activity" ? (
+              <div className="animate-fade-in">
+                <ActivityView onPivot={handleActivityPivot} />
+              </div>
             ) : effectiveOrch ? (
               <div key={effectiveOrch.id} className="animate-fade-in flex flex-col gap-4">
                 {attention.filter((a) => a.orchId === effectiveOrch.id)
@@ -277,6 +314,8 @@ function Monitor() {
                   otelHealth={otelHealth}
                   commsAuthors={commsAuthorsForSelected || undefined}
                   onCommsLink={handleWorkerCommsLink}
+                  selectedWorker={selectedWorker}
+                  onWorkerSelect={setSelectedWorker}
                 />
               </div>
             ) : (
