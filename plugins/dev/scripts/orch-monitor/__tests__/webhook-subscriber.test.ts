@@ -51,11 +51,11 @@ describe("createWebhookSubscriber", () => {
     ]);
   });
 
-  it("reuses an existing matching hook (no POST)", async () => {
+  it("reuses an existing matching hook (no POST) when events match", async () => {
     const { runner, calls } = recordRunner(() => ({
       stdout: JSON.stringify([
-        { id: 42, config: { url: SMEE } },
-        { id: 99, config: { url: "https://example.com/other" } },
+        { id: 42, config: { url: SMEE }, events: ["pull_request"] },
+        { id: 99, config: { url: "https://example.com/other" }, events: [] },
       ]),
       ok: true,
     }));
@@ -75,7 +75,7 @@ describe("createWebhookSubscriber", () => {
   it("matches existing hook URL case-insensitively", async () => {
     const { runner, calls } = recordRunner(() => ({
       stdout: JSON.stringify([
-        { id: 5, config: { url: SMEE.toUpperCase() } },
+        { id: 5, config: { url: SMEE.toUpperCase() }, events: ["pull_request"] },
       ]),
       ok: true,
     }));
@@ -207,7 +207,9 @@ describe("createWebhookSubscriber", () => {
     // Reuse path
     const reuseRunner: SubscriberRunner = () =>
       Promise.resolve({
-        stdout: JSON.stringify([{ id: 11, config: { url: SMEE } }]),
+        stdout: JSON.stringify([
+          { id: 11, config: { url: SMEE }, events: ["pull_request"] },
+        ]),
         ok: true,
       });
     const sub1 = createWebhookSubscriber({
@@ -239,5 +241,180 @@ describe("createWebhookSubscriber", () => {
     expect(
       logs.some((l) => l.startsWith("info:") && l.includes("subscribed")),
     ).toBe(true);
+  });
+
+  // CTL-226: existing webhooks must auto-upgrade when DEFAULT_WEBHOOK_EVENTS
+  // grows. Without this, hooks created against the old list (e.g. before
+  // `release` was added) silently never deliver the new event types.
+  it("PATCHes existing hook when its events list is missing required types", async () => {
+    const calls: string[][] = [];
+    const runner: SubscriberRunner = (args) => {
+      calls.push([...args]);
+      const isList =
+        args.includes("repos/o/r/hooks") &&
+        !args.includes("-X") &&
+        !args.some((a) => /\/hooks\/\d+/.test(a));
+      if (isList) {
+        return Promise.resolve({
+          stdout: JSON.stringify([
+            // existing hook missing the new "release" event
+            {
+              id: 7,
+              config: { url: SMEE },
+              events: ["pull_request", "check_suite"],
+            },
+          ]),
+          ok: true,
+        });
+      }
+      // PATCH response
+      return Promise.resolve({ stdout: '{"id":7}', ok: true });
+    };
+    const sub = createWebhookSubscriber({
+      smeeChannel: SMEE,
+      secret: SECRET,
+      events: ["pull_request", "check_suite", "release"],
+      runner,
+    });
+    await sub.ensureSubscribed("o/r");
+    expect(calls.length).toBe(2);
+    const patch = calls[1];
+    expect(patch).toContain("-X");
+    expect(patch).toContain("PATCH");
+    expect(patch).toContain("repos/o/r/hooks/7");
+    expect(patch).toContain("events[]=pull_request");
+    expect(patch).toContain("events[]=check_suite");
+    expect(patch).toContain("events[]=release");
+    expect(sub.listSubscribed()).toEqual([{ repo: "o/r", hookId: 7 }]);
+  });
+
+  it("does NOT PATCH when existing hook events match exactly", async () => {
+    const { runner, calls } = recordRunner(() => ({
+      stdout: JSON.stringify([
+        {
+          id: 7,
+          config: { url: SMEE },
+          events: ["pull_request", "release"],
+        },
+      ]),
+      ok: true,
+    }));
+    const sub = createWebhookSubscriber({
+      smeeChannel: SMEE,
+      secret: SECRET,
+      // Order differs from the existing hook — must still be a match.
+      events: ["release", "pull_request"],
+      runner,
+    });
+    await sub.ensureSubscribed("o/r");
+    expect(calls.length).toBe(1);
+  });
+
+  it("PATCHes when existing hook has an extra unwanted event", async () => {
+    const calls: string[][] = [];
+    const runner: SubscriberRunner = (args) => {
+      calls.push([...args]);
+      const isList =
+        args.includes("repos/o/r/hooks") &&
+        !args.includes("-X") &&
+        !args.some((a) => /\/hooks\/\d+/.test(a));
+      if (isList) {
+        return Promise.resolve({
+          stdout: JSON.stringify([
+            {
+              id: 9,
+              config: { url: SMEE },
+              events: ["pull_request", "deprecated_event"],
+            },
+          ]),
+          ok: true,
+        });
+      }
+      return Promise.resolve({ stdout: '{"id":9}', ok: true });
+    };
+    const sub = createWebhookSubscriber({
+      smeeChannel: SMEE,
+      secret: SECRET,
+      events: ["pull_request"],
+      runner,
+    });
+    await sub.ensureSubscribed("o/r");
+    expect(calls.length).toBe(2);
+    expect(calls[1]).toContain("PATCH");
+  });
+
+  it("PATCH failure is non-fatal and still caches the hook", async () => {
+    const logs: string[] = [];
+    const logger = {
+      info: (m: string) => logs.push(`info:${m}`),
+      warn: (m: string) => logs.push(`warn:${m}`),
+      error: (m: string) => logs.push(`error:${m}`),
+    };
+    let listCount = 0;
+    const runner: SubscriberRunner = (args) => {
+      const isList =
+        args.includes("repos/o/r/hooks") &&
+        !args.includes("-X") &&
+        !args.some((a) => /\/hooks\/\d+/.test(a));
+      if (isList) {
+        listCount++;
+        return Promise.resolve({
+          stdout: JSON.stringify([
+            { id: 5, config: { url: SMEE }, events: ["pull_request"] },
+          ]),
+          ok: true,
+        });
+      }
+      // PATCH fails
+      return Promise.resolve({ stdout: "", ok: false });
+    };
+    const sub = createWebhookSubscriber({
+      smeeChannel: SMEE,
+      secret: SECRET,
+      events: ["pull_request", "release"],
+      runner,
+      logger,
+    });
+    await sub.ensureSubscribed("o/r");
+    expect(listCount).toBe(1);
+    expect(sub.listSubscribed()).toEqual([{ repo: "o/r", hookId: 5 }]);
+    expect(
+      logs.some((l) => l.startsWith("warn:") && l.includes("upgrade events")),
+    ).toBe(true);
+  });
+
+  it("treats existing hook with no events array as stale (PATCHes)", async () => {
+    const calls: string[][] = [];
+    const runner: SubscriberRunner = (args) => {
+      calls.push([...args]);
+      const isList =
+        args.includes("repos/o/r/hooks") &&
+        !args.includes("-X") &&
+        !args.some((a) => /\/hooks\/\d+/.test(a));
+      if (isList) {
+        return Promise.resolve({
+          stdout: JSON.stringify([{ id: 12, config: { url: SMEE } }]),
+          ok: true,
+        });
+      }
+      return Promise.resolve({ stdout: '{"id":12}', ok: true });
+    };
+    const sub = createWebhookSubscriber({
+      smeeChannel: SMEE,
+      secret: SECRET,
+      events: ["pull_request"],
+      runner,
+    });
+    await sub.ensureSubscribed("o/r");
+    expect(calls.length).toBe(2);
+    expect(calls[1]).toContain("PATCH");
+  });
+
+  // CTL-226: pin the new event-type entries in DEFAULT_WEBHOOK_EVENTS so a
+  // future accidental removal fails the test rather than silently regresses.
+  it("DEFAULT_WEBHOOK_EVENTS includes release and workflow_run", () => {
+    expect(DEFAULT_WEBHOOK_EVENTS).toContain("release");
+    expect(DEFAULT_WEBHOOK_EVENTS).toContain("workflow_run");
+    expect(DEFAULT_WEBHOOK_EVENTS).toContain("deployment_status");
   });
 });
