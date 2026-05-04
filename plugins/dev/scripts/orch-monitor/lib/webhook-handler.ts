@@ -68,11 +68,14 @@ export function buildEventLogEnvelope(
   const id = `evt_${deliveryId}`;
   switch (event.kind) {
     case "pull_request": {
-      const verb = event.merged
-        ? "merged"
-        : event.action === "closed"
-          ? "closed"
-          : event.action;
+      // CTL-226: only `action="closed"` with `merged=true` is a real merge
+      // event. Other actions (labeled, unlabeled, edited, synchronize, …) on
+      // an already-merged PR still carry merged=true in the payload — that
+      // field describes PR state, not the webhook action — and must NOT route
+      // to github.pr.merged or workers waiting on merge will re-fire on every
+      // subsequent label edit.
+      const verb =
+        event.action === "closed" && event.merged ? "merged" : event.action;
       return {
         id,
         source: WEBHOOK_SOURCE,
@@ -195,6 +198,40 @@ export function buildEventLogEnvelope(
           environmentUrl: event.environmentUrl,
         },
       };
+    case "release":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.release.${event.action}`,
+        scope: { repo: event.repo, tag: event.tag },
+        detail: {
+          action: event.action,
+          releaseId: event.releaseId,
+          name: event.name,
+          draft: event.draft,
+          prerelease: event.prerelease,
+          htmlUrl: event.htmlUrl,
+        },
+      };
+    case "workflow_run":
+      return {
+        id,
+        source: WEBHOOK_SOURCE,
+        event: `github.workflow_run.${event.action}`,
+        scope: { repo: event.repo, sha: event.headSha },
+        detail: {
+          action: event.action,
+          runId: event.runId,
+          workflowId: event.workflowId,
+          name: event.name,
+          headBranch: event.headBranch,
+          status: event.status,
+          conclusion: event.conclusion,
+          runNumber: event.runNumber,
+          htmlUrl: event.htmlUrl,
+          prNumbers: event.prNumbers,
+        },
+      };
     case "ignored":
       return null;
   }
@@ -296,6 +333,15 @@ export function createWebhookHandler(
         // events within bounded latency. Logging only.
         logger.info?.(
           `[webhook] ${event.kind} received for ${event.repo} (env=${event.environment})`,
+        );
+        break;
+      }
+      case "release":
+      case "workflow_run": {
+        // Logged-only — consumers (CTL-210 wait-for, CTL-211 deploy lifecycle)
+        // read events.jsonl. No PR cache invalidation here.
+        logger.info?.(
+          `[webhook] ${event.kind} received for ${event.repo} (action=${event.action})`,
         );
         break;
       }
