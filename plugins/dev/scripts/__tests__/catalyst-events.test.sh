@@ -77,12 +77,12 @@ run "wait-for times out with exit 1" expect_exit 1 "$EVENTS" wait-for --timeout 
 reset_events
 (
   sleep 1
-  write_event '{"ts":"2026-05-03T00:00:00Z","event":"worker-status-change","worker":"X","detail":null}'
+  write_event '{"ts":"2026-05-03T00:00:00Z","event":"worker-status-terminal","worker":"X","detail":null}'
 ) &
 EMITTER_PID=$!
 
 START=$(date +%s)
-OUT=$("$EVENTS" wait-for --timeout 5 --filter '.event == "worker-status-change"')
+OUT=$("$EVENTS" wait-for --timeout 5 --filter '.event == "worker-status-terminal"')
 RC=$?
 END=$(date +%s)
 ELAPSED=$((END - START))
@@ -91,7 +91,7 @@ wait "$EMITTER_PID" 2>/dev/null || true
 
 run "wait-for exits 0 when match arrives" bash -c "[ '$RC' = '0' ]"
 run "wait-for prints the matching line" bash -c "
-  echo '$OUT' | grep -q 'worker-status-change'
+  echo '$OUT' | grep -q 'worker-status-terminal'
 "
 run "wait-for completes in <5s when event arrives early" bash -c "[ '$ELAPSED' -lt 5 ]"
 

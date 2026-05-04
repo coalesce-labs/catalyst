@@ -222,14 +222,20 @@ if [ -f "$SIGNAL_FILE" ]; then
     "$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET_ID" \
       ".status = \"$NEW_STATUS\" | .phase = $PHASE_NUM"
 
-    # Emit status change event
-    "$STATE_SCRIPT" event "$(jq -nc \
-      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      --arg orch "$ORCH_ID" \
-      --arg w "$TICKET_ID" \
-      --arg from "$OLD_STATUS" \
-      --arg to "$NEW_STATUS" \
-      '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-status-change", detail: {from: $from, to: $to}}')"
+    # Emit phase-advance / terminal event via the central producer (CTL-229).
+    # Routine info-tier transitions (researching → planning → …) coalesce
+    # within the configured window; terminal transitions (pr-created, merging,
+    # done, failed, stalled, deploy-failed) flush any pending queue and emit
+    # immediately, with PR enrichment when --to is PR-bearing.
+    EMITTER="${CLAUDE_PLUGIN_ROOT:-/Users/ryan/.claude/plugins/cache/catalyst/catalyst-dev/8.1.0}/scripts/emit-worker-status-change.sh"
+    if [ -x "$EMITTER" ]; then
+      "$EMITTER" emit \
+        --orch "$ORCH_ID" \
+        --ticket "$TICKET_ID" \
+        --from "$OLD_STATUS" \
+        --to "$NEW_STATUS" \
+        --signal-file "$SIGNAL_FILE" >/dev/null 2>&1 || true
+    fi
   fi
 
   # CTL-111: announce phase transition to shared comms channel. Runs 5× in the

@@ -722,7 +722,8 @@ catalyst-events tail --filter '
   (.event | startswith("github.deployment")) or
   (.event == "github.push") or
   (.event | startswith("linear.issue.")) or
-  (.event == "worker-status-change") or
+  (.event == "worker-phase-advanced") or
+  (.event == "worker-status-terminal") or
   (.event == "worker-pr-created") or
   (.event == "worker-done") or
   (.event == "worker-failed") or
@@ -738,7 +739,8 @@ are wake-up triggers, never sources of truth.
 
 | Event | Reaction |
 |---|---|
-| `worker-status-change`, `worker-done`, `worker-failed` | Re-render `DASHBOARD.md`; if terminal, run `orchestrate-dispatch-next` to fill freed slots |
+| `worker-phase-advanced` | Routine in-flight progress; re-render `DASHBOARD.md`. Coalesced — `.detail.changes` carries the batch (CTL-229) |
+| `worker-status-terminal`, `worker-done`, `worker-failed` | Terminal transition; re-render `DASHBOARD.md` and run `orchestrate-dispatch-next` to fill freed slots. PR-bearing transitions carry `.detail.pr.{number,url}` (CTL-229) |
 | `worker-pr-created` | Reconcile the PR number into signal/state; re-render `DASHBOARD.md` |
 | `attention-raised`, `attention-resolved` | Re-render the `DASHBOARD.md` NEEDS ATTENTION banner |
 | `github.pr.merged`, `github.pr.closed` | Run the merge-confirmation scan for that PR |
