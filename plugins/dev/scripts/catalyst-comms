@@ -25,6 +25,14 @@
 
 set -uo pipefail
 
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 COMMS_DIR="${CATALYST_COMMS_DIR:-$CATALYST_DIR/comms}"
 REGISTRY="$COMMS_DIR/channels.json"
@@ -237,7 +245,7 @@ cmd_send() {
   emit_global_event() {
     local script="${CATALYST_STATE_SCRIPT:-}"
     if [[ -z "$script" ]]; then
-      script="$(dirname "${BASH_SOURCE[0]}")/catalyst-state.sh"
+      script="$SCRIPT_DIR/catalyst-state.sh"
     fi
     [[ -x "$script" ]] || return 0
     local envelope
