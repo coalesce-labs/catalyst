@@ -121,6 +121,25 @@ if [ -z "$TITLE" ]; then
 	TITLE="Follow-up: ${PARENT_TICKET} post-merge findings"
 fi
 
+# CTL-231: resolve a worker worktree path the same way orchestrate-dispatch-next does —
+# from state.json:.worktreeBase. The old dirname(ORCH_DIR) fallback broke after CTL-59
+# split ~/catalyst/runs/ from ~/catalyst/wt/. We keep the old fallback (with a warning)
+# for pre-CTL-228 orchestrators that didn't write the key.
+resolve_worker_dir() {
+	local worker_name="$1"
+	local state_json="${ORCH_DIR}/state.json"
+	local worktree_base=""
+	if [ -f "$state_json" ]; then
+		worktree_base=$(jq -r '.worktreeBase // ""' "$state_json" 2>/dev/null || echo "")
+	fi
+	if [ -n "$worktree_base" ]; then
+		echo "${worktree_base}/${worker_name}"
+	else
+		echo "warn: orchestrate-followup falling back to dirname(ORCH_DIR) — state.json:.worktreeBase missing" >&2
+		echo "$(dirname "$ORCH_DIR")/${worker_name}"
+	fi
+}
+
 if [ -z "$TEAM_KEY" ]; then
 	for CFG in ".catalyst/config.json" ".claude/config.json"; do
 		if [ -f "$CFG" ]; then
@@ -144,6 +163,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
 	echo "[dry-run] base:   $BASE_BRANCH"
 	echo "[dry-run] orch:   $ORCH_NAME"
 	echo "[dry-run] ticket: ${FORCED_TICKET:-<will create via linearis>}"
+	# Preview the resolved worker dir so the path can be verified without invoking
+	# create-worktree.sh. Uses a placeholder ticket if linearis would create one.
+	DR_TICKET="${FORCED_TICKET:-NEW}"
+	echo "[dry-run] worker dir: $(resolve_worker_dir "${ORCH_NAME}-${DR_TICKET}")"
 	echo "[dry-run] description:"
 	echo "$DESCRIPTION" | sed 's/^/    /'
 	exit 0
@@ -184,8 +207,10 @@ if [ ! -x "$CREATE_WORKTREE" ]; then
 fi
 "$CREATE_WORKTREE" "$WORKER_NAME" "$BASE_BRANCH" --orchestration "$ORCH_NAME"
 
-# Detect the worktree path create-worktree.sh wrote to (same resolution logic: sibling of ORCH_DIR).
-WORKER_DIR="$(dirname "$ORCH_DIR")/${WORKER_NAME}"
+# Detect the worktree path create-worktree.sh wrote to. Mirrors orchestrate-dispatch-next
+# by reading state.json:.worktreeBase (CTL-231); falls back to the pre-CTL-59 sibling
+# layout if state.json is missing or doesn't carry the key.
+WORKER_DIR="$(resolve_worker_dir "$WORKER_NAME")"
 
 # Step 3: Seed the worker signal file with followUpTo.
 SIGNAL_FILE="${ORCH_DIR}/workers/${NEW_TICKET}.json"
