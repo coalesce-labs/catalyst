@@ -270,6 +270,92 @@ run "no signal .tmp file leaks" \
 run "no state .tmp file leaks" \
   bash -c "[ ! -f '${CATALYST_STATE_FILE}.tmp' ]"
 
+# ─── Test 13: --verbose emits action codes to stderr (CTL-233) ────────────────
+# Helper currently silent on every exit branch. Verbose mode lets the orchestrator
+# log roll-usage activity to a per-orch audit file so silent skips are auditable.
+# Action codes capture each exit branch:
+#   wrote-cost, already-rolled, signal-missing, stream-missing, no-result-yet
+
+# Helper that captures stderr to a file so `set -e` doesn't abort on a non-zero
+# exit and we can grep the captured output.
+verbose_run() {
+  local label="$1" tic="$2" odir="$3"
+  local logf="${SCRATCH}/${label}.stderr"
+  "$HELPER" --orch "$label" --ticket "$tic" --orch-dir "$odir" -v 2>"$logf" >/dev/null || true
+  echo "$logf"
+}
+
+ORCH_DIR=$(setup_orch "orch-t13a")
+build_stream_with_result "${ORCH_DIR}/workers/output/V-1-stream.jsonl" \
+  "0.5" "100" "10" "5" "1" "1" "1000" "500"
+build_signal "${ORCH_DIR}/workers/V-1.json" "V-1"
+
+LOG=$(verbose_run "orch-t13a" "V-1" "$ORCH_DIR")
+run "verbose: wrote-cost on successful roll" \
+  bash -c "grep -q 'roll-usage\\[ticket=V-1\\]: wrote-cost' '$LOG'"
+
+# Second invocation: should be no-op and emit "already-rolled"
+LOG=$(verbose_run "orch-t13a" "V-1" "$ORCH_DIR")
+run "verbose: already-rolled on second invocation" \
+  bash -c "grep -q 'roll-usage\\[ticket=V-1\\]: already-rolled' '$LOG'"
+
+# Stream missing
+ORCH_DIR=$(setup_orch "orch-t13b")
+build_signal "${ORCH_DIR}/workers/V-2.json" "V-2"
+LOG=$(verbose_run "orch-t13b" "V-2" "$ORCH_DIR")
+run "verbose: stream-missing when no stream file" \
+  bash -c "grep -q 'roll-usage\\[ticket=V-2\\]: stream-missing' '$LOG'"
+
+# Signal missing
+ORCH_DIR=$(setup_orch "orch-t13c")
+build_stream_with_result "${ORCH_DIR}/workers/output/V-3-stream.jsonl" \
+  "0.5" "100" "10" "5" "1" "1" "1000" "500"
+LOG=$(verbose_run "orch-t13c" "V-3" "$ORCH_DIR")
+run "verbose: signal-missing when no signal file" \
+  bash -c "grep -q 'roll-usage\\[ticket=V-3\\]: signal-missing' '$LOG'"
+
+# No result event yet (worker still running)
+ORCH_DIR=$(setup_orch "orch-t13d")
+build_stream_no_result "${ORCH_DIR}/workers/output/V-4-stream.jsonl"
+build_signal "${ORCH_DIR}/workers/V-4.json" "V-4"
+LOG=$(verbose_run "orch-t13d" "V-4" "$ORCH_DIR")
+run "verbose: no-result-yet when stream lacks result event" \
+  bash -c "grep -q 'roll-usage\\[ticket=V-4\\]: no-result-yet' '$LOG'"
+
+# ─── Test 14: silent by default (no -v) ───────────────────────────────────────
+ORCH_DIR=$(setup_orch "orch-t14")
+build_stream_with_result "${ORCH_DIR}/workers/output/S-1-stream.jsonl" \
+  "0.5" "100" "10" "5" "1" "1" "1000" "500"
+build_signal "${ORCH_DIR}/workers/S-1.json" "S-1"
+SILENT_LOG="${SCRATCH}/orch-t14.stderr"
+"$HELPER" --orch "orch-t14" --ticket "S-1" --orch-dir "$ORCH_DIR" 2>"$SILENT_LOG" >/dev/null || true
+run "silent by default: stderr empty on success" \
+  bash -c "[ ! -s '$SILENT_LOG' ]"
+
+# ─── Test 15: defensive — missing modelUsage in result event (CTL-233) ────────
+# Older Claude CLI versions / error_during_execution results may lack modelUsage.
+# Helper must not error on `keys[0]` against null.
+build_stream_no_modelusage() {
+  local out="$1" cost="$2" itok="$3" otok="$4"
+  cat > "$out" <<EOF
+{"type":"system","subtype":"init","session_id":"test"}
+{"type":"result","subtype":"success","usage":{"input_tokens":${itok},"output_tokens":${otok},"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"total_cost_usd":${cost},"num_turns":1,"duration_ms":1000,"duration_api_ms":500}
+EOF
+}
+
+ORCH_DIR=$(setup_orch "orch-t15")
+build_stream_no_modelusage "${ORCH_DIR}/workers/output/M-1-stream.jsonl" "0.25" "500" "100"
+build_signal "${ORCH_DIR}/workers/M-1.json" "M-1"
+
+run "missing-modelUsage: helper exits 0" \
+  "$HELPER" --orch "orch-t15" --ticket "M-1" --orch-dir "$ORCH_DIR"
+run "missing-modelUsage: signal.cost.costUSD populated" \
+  bash -c "[ \"\$(jq -r '.cost.costUSD' '${ORCH_DIR}/workers/M-1.json')\" = '0.25' ]"
+run "missing-modelUsage: signal.cost.model is null" \
+  bash -c "[ \"\$(jq -r '.cost.model' '${ORCH_DIR}/workers/M-1.json')\" = 'null' ]"
+run "missing-modelUsage: orch.usage.costUSD updated" \
+  bash -c "[ \"\$(jq -r '.orchestrators[\"orch-t15\"].usage.costUSD' '$CATALYST_STATE_FILE')\" = '0.25' ]"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]
