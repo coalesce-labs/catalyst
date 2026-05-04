@@ -187,6 +187,15 @@ elif [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-
 	"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" init 2>/dev/null || true
 fi
 
+# 6. Check catalyst-* CLIs are on PATH (CTL-227)
+#    Skills like monitor-events invoke `catalyst-events` by bare name; if it's
+#    not on PATH, the skill fails with `command not found`. Use catalyst-events
+#    as the canary — it's the newest CLI and most likely to be missing on a
+#    user who upgraded but never re-ran install-cli.sh.
+if ! command -v catalyst-events &>/dev/null; then
+	warnings+=("catalyst-events not found on PATH — run: bash plugins/dev/scripts/install-cli.sh")
+fi
+
 # Report errors (fatal)
 if [[ ${#errors[@]} -gt 0 ]]; then
 	echo -e "${RED}ERROR: Project setup incomplete${NC}"
