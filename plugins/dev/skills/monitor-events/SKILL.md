@@ -97,7 +97,8 @@ catalyst-events tail --filter '
   (.event | startswith("github.deployment")) or
   (.event == "github.push") or
   (.event | startswith("linear.issue.")) or
-  (.event == "worker-status-change") or
+  (.event == "worker-phase-advanced") or
+  (.event == "worker-status-terminal") or
   (.event == "worker-pr-created") or
   (.event == "worker-done") or
   (.event == "worker-failed") or
@@ -248,6 +249,56 @@ equivalent: `wait-for` instead of `Monitor`, `case` on the matched event
 instead of the canonical PR state. They share the same safety rule: treat
 events as wake-up triggers; treat `gh pr view` (or its equivalent) as truth.
 
+## Worker phase events — severity tiers and coalescing (CTL-229)
+
+The worker emitter splits phase transitions into two topics so subscribers can
+filter by severity instead of inspecting `.detail` fields:
+
+| Topic | Tier | When | Coalesces? | Carries `detail.pr`? |
+|---|---|---|---|---|
+| `worker-phase-advanced` | info | routine in-flight phases (researching, planning, implementing, validating, shipping) | yes — batched per orchestrator within `windowSec` (default 30 s) | no |
+| `worker-status-terminal` | act  | actionable transitions (pr-created, merging, merged, done, failed, stalled, deploy-failed, deploying) | no — emitted immediately and flushes any pending coalesce queue | yes when `to ∈ {pr-created, merging, merged, done, deploy-failed}` |
+
+Coalesced `worker-phase-advanced` events have `worker: null` at the envelope level;
+the per-change `worker` lives inside `.detail.changes[]`:
+
+```json
+{
+  "ts": "2026-05-04T22:00:00Z",
+  "orchestrator": "orch-foo",
+  "worker": null,
+  "event": "worker-phase-advanced",
+  "detail": {
+    "windowSec": 30,
+    "changes": [
+      { "ts": "2026-05-04T21:59:32Z", "worker": "CTL-229", "from": "researching", "to": "planning" },
+      { "ts": "2026-05-04T21:59:36Z", "worker": "CTL-232", "from": "planning",    "to": "implementing" }
+    ]
+  }
+}
+```
+
+Stragglers (the last event in a sequence) flush via the next `emit` OR via an
+explicit `emit-worker-status-change.sh flush --orch <id>` invocation. The
+orchestrator's 10-min idle scan is the documented contract for periodic
+flushing — a worker exiting between phases does not need to flush its own
+queue.
+
+Subscriber recipes:
+
+```bash
+# Subscribe to actionable transitions only (no routine progress noise)
+catalyst-events tail --filter '.event == "worker-status-terminal"'
+
+# Subscribe to routine progress (already coalesced into batches)
+catalyst-events tail --filter '.event == "worker-phase-advanced"'
+
+# A worker just opened a PR — wait until it tells you the PR number
+catalyst-events wait-for --timeout 600 \
+  --filter '.event == "worker-status-terminal" and .detail.to == "pr-created" and .worker == "CTL-229"' \
+  | jq -r '.detail.pr.number'
+```
+
 ## Pattern 4 — Tail everything happening to a ticket
 
 Useful for live debugging or operator dashboards:
@@ -325,7 +376,9 @@ unavailable, insufficient, or contradicts what you expect.
 | Comment from a human on a PR | `.event == "github.issue_comment.created" and (.detail.author.type // "User") != "Bot"` |
 | Linear ticket state change | `.event == "linear.issue.state_changed" and .scope.ticket == "CTL-210"` |
 | Comms message in one channel | `.event == "comms.message.posted" and .detail.channel == "orch-foo"` |
-| Worker phase transition | `.event == "worker-status-change" and .worker == "CTL-210"` |
+| Routine worker phase transitions (info-tier, coalesced batches; CTL-229) | `.event == "worker-phase-advanced"` |
+| Worker terminal transitions (PR-created, merging, done, fail; CTL-229) | `.event == "worker-status-terminal"` |
+| One worker's terminal events with PR number | `.event == "worker-status-terminal" and .worker == "CTL-210" and (.detail.pr.number // null)` |
 | Worker reached terminal state | `.event == "worker-done" or .event == "worker-failed"` |
 | PR review activity | `(.event \| startswith("github.pr_review")) or (.event == "github.issue_comment.created")` |
 | Deploy outcome | `.event \| startswith("github.deployment")` |

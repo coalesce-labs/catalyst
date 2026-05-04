@@ -323,17 +323,21 @@ With `worktreeDir: "~/catalyst/api"` explicitly configured:
 mkdir -p "${ORCH_DIR}/workers/output"
 ```
 
-Initialize `DASHBOARD.md` from the template:
+Render the initial `DASHBOARD.md` (CTL-230) — the renderer reads `state.json` +
+`workers/*.json` signals + the events log every cycle, so calling it now produces a real
+header + empty worker table + waves outline rather than a template skeleton:
 
 ```bash
-cp "${CLAUDE_PLUGIN_ROOT}/templates/orchestrate-dashboard.md" "${ORCH_DIR}/DASHBOARD.md"
+"${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
+  --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" \
+  >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 ```
 
 Create the orchestrator's status directory:
 
 ```
 ${ORCH_DIR}/                                    # ~/catalyst/runs/${ORCH_NAME}/
-├── DASHBOARD.md                                # human-readable status (from template)
+├── DASHBOARD.md                                # human-readable status (re-rendered each Phase 4 cycle)
 ├── state.json                                  # machine-readable orchestration state
 ├── wave-1-briefing.md                          # per-wave briefings
 ├── SUMMARY.md                                  # final run summary (post-Phase 5)
@@ -718,7 +722,8 @@ catalyst-events tail --filter '
   (.event | startswith("github.deployment")) or
   (.event == "github.push") or
   (.event | startswith("linear.issue.")) or
-  (.event == "worker-status-change") or
+  (.event == "worker-phase-advanced") or
+  (.event == "worker-status-terminal") or
   (.event == "worker-pr-created") or
   (.event == "worker-done") or
   (.event == "worker-failed") or
@@ -738,11 +743,12 @@ are wake-up triggers, never sources of truth.
 
 | Event | Reaction |
 |---|---|
-| `worker-status-change`, `worker-done`, `worker-failed` | Re-render `DASHBOARD.md`; if terminal, run `orchestrate-dispatch-next` to fill freed slots |
+| `worker-phase-advanced` | Routine in-flight progress; re-render `DASHBOARD.md`. Coalesced — `.detail.changes` carries the batch (CTL-229) |
+| `worker-status-terminal`, `worker-done`, `worker-failed` | Terminal transition; re-render `DASHBOARD.md` and run `orchestrate-dispatch-next` to fill freed slots. PR-bearing transitions carry `.detail.pr.{number,url}` (CTL-229) |
 | `worker-pr-created` | Reconcile the PR number into signal/state; re-render `DASHBOARD.md` |
 | `attention-raised`, `attention-resolved` | Re-render the `DASHBOARD.md` NEEDS ATTENTION banner |
 | `github.pr.merged`, `github.pr.closed` | Run the merge-confirmation scan for that PR |
-| `github.pr.synchronize`, `github.push` | Re-evaluate `mergeStateStatus` for the affected PR (BEHIND / DIRTY recovery) |
+| `github.pr.synchronize`, `github.push` | Re-evaluate `mergeStateStatus` for the affected PR; if DIRTY ≥2 min, `orchestrate-auto-rebase` may dispatch a rebase worker (BEHIND auto-resolves via auto-merge) |
 | `github.check_*` | Re-check CI; if BLOCKED ≥10 min, `orchestrate-auto-fixup` may dispatch a fix-up |
 | `github.pr_review*`, `github.issue_comment.created` | Re-evaluate `mergeStateStatus`; surface review activity on the dashboard |
 | `github.deployment*` | Record deploy outcome on the worker's signal file |
@@ -826,6 +832,13 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
     --orch "${ORCH_NAME}" --ticket "${TICKET}" --orch-dir "${ORCH_DIR}" -v \
     >/dev/null 2>>"${ORCH_DIR}/.roll-usage.log" || true
 done
+
+# Re-render DASHBOARD.md so the file artifact reflects current state (CTL-230).
+# Idempotent — same inputs produce a byte-identical file. The orch-monitor daemon
+# file-watches DASHBOARD.md and forwards changes to UI clients via SSE.
+"${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
+  --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" \
+  >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 ```
 
 **Authoritative merge confirmation (CTL-31, refined by CTL-80, CTL-133, CTL-243):**
@@ -1028,8 +1041,10 @@ REMEDIATION_EOF
       # failed, BEHIND=needs rebase, DIRTY=conflicts).
       case "$MERGE_STATE" in
         DIRTY)
-          "$STATE_SCRIPT" attention "${ORCH_NAME}" "merge-conflicts" "${TICKET}" \
-            "PR #${PR_NUMBER} has merge conflicts — needs rebase"
+          # Out-of-band: orchestrate-auto-rebase runs after this scan and handles
+          # DIRTY (merge conflicts) by dispatching a rebase worker once the state
+          # has been stable for ≥2 minutes (CTL-232). Falls back to attention only
+          # when the rebase budget is exhausted.
           ;;
         BEHIND)
           # Often auto-resolves when auto-merge rebases; log only. The next
@@ -1330,6 +1345,40 @@ Signal-file fields the script reads/writes:
 | `fixupAttempts`          | orchestrate-auto-fixup    | Auto-dispatch counter (max = `--max-fixups`)               |
 | `lastFixupDispatchedAt`  | orchestrate-auto-fixup    | Timestamp of the most recent dispatch (for the dashboard)  |
 
+**Auto-dispatch rebase workers for DIRTY PRs (CTL-232):**
+
+After auto-fixup, a third pass detects PRs stuck in `state=OPEN,
+mergeStateStatus=DIRTY` (merge conflicts that GitHub's auto-merge cannot
+resolve on its own — it can only handle BEHIND, never DIRTY) and dispatches
+`orchestrate-rebase` to spawn a worker that rebases the PR branch onto
+current base, resolves conflicts, and force-pushes (`--force-with-lease`).
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-auto-rebase" \
+  --orch-dir "$ORCH_DIR" \
+  --orch-id "$ORCH_NAME"
+```
+
+The script records `dirtySince` on the worker signal the first time it
+observes DIRTY, then — once the state has been stable for `--stable-minutes`
+(default 2; DIRTY is unambiguous so the window is much shorter than
+auto-fixup's 10) — reads `baseRefName` from `gh pr view` and dispatches
+`orchestrate-rebase --base-branch <ref>`.
+
+Each auto-dispatch bumps `rebaseAttempts` on the signal. When
+`rebaseAttempts ≥ --max-rebases` (default 2), the script raises
+`rebase-budget-exhausted` attention instead of dispatching again. A
+dispatch failure raises `rebase-dispatch-failed` attention.
+
+Signal-file fields the script reads/writes:
+
+| Field                    | Written by                 | Purpose                                                    |
+| ------------------------ | -------------------------- | ---------------------------------------------------------- |
+| `dirtySince`             | orchestrate-auto-rebase    | First observation of DIRTY; cleared when PR leaves DIRTY   |
+| `rebaseAttempts`         | orchestrate-auto-rebase    | Auto-dispatch counter (max = `--max-rebases`)              |
+| `lastRebaseDispatchedAt` | orchestrate-auto-rebase    | Timestamp of the most recent dispatch (for the dashboard)  |
+| `rebaseCommit`           | rebase worker              | SHA of the rebased HEAD (written by the dispatched worker) |
+
 ### Phase 5: Post-Merge Verification (Anti-Reward-Hacking)
 
 ```bash
@@ -1491,14 +1540,21 @@ When all waves are complete:
    - Timeline (start to finish, per-wave durations)
    - Any verification failures that required remediation
 
-   Then persist summary and any remaining briefings to thoughts:
+   Then render the dashboard one final time so the persisted handoff copy reflects the
+   run's terminal state (CTL-230), and persist both alongside any remaining briefings:
 
    ```bash
+   "${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
+     --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" \
+     >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
+
    HANDOFF_DIR="thoughts/shared/handoffs/${ORCH_NAME}"
    mkdir -p "${HANDOFF_DIR}"
    TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
    cp "${ORCH_DIR}/SUMMARY.md" \
       "${HANDOFF_DIR}/${TIMESTAMP}_${ORCH_NAME}-summary.md"
+   cp "${ORCH_DIR}/DASHBOARD.md" \
+      "${HANDOFF_DIR}/${TIMESTAMP}_${ORCH_NAME}-dashboard.md"
    ```
 
 2. **Archive orchestrator artifacts** (CTL-110).
@@ -2034,8 +2090,8 @@ fi
 - Wave advancement requires ALL tickets in the wave to pass verification
 - The `--auto-merge` flag applies to workers, not the orchestrator
 - Dashboard and state files are ephemeral — they don't survive worktree removal
-- Wave briefings and summaries are persisted to `thoughts/shared/handoffs/${ORCH_NAME}/` for
-  archival
+- Wave briefings, summaries, and the final dashboard are persisted to
+  `thoughts/shared/handoffs/${ORCH_NAME}/` for archival (CTL-230)
 - Wave briefings are the key differentiator — knowledge compounds across waves
 - The 3-layer testing enforcement prevents the observed failure mode of agents skipping tests
 - CTL-26 dependency: Uses `.catalyst/` paths. Falls back to `.claude/` if `.catalyst/` doesn't exist
