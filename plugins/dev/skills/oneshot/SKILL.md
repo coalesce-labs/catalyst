@@ -641,6 +641,17 @@ user can later run `/catalyst-dev:merge-pr` to confirm the merge and run post-me
 Standalone runs do not get deploy verification — that requires the orchestrator's Phase 4
 loop.
 
+**Reactive recovery is owned by the long-lived watcher (CTL-228).** Both
+the orchestrator's Phase 4 poll loop and `/catalyst-dev:merge-pr` consume the
+canonical "Reactive PR lifecycle" pattern documented in
+[[monitor-events]] § Pattern 3 — a single multi-event subscription that wakes
+on PR merged, CI failure, review changes-requested, or push to the base
+branch, and dispatches via a `case` on the matched event. The worker itself
+does **not** subscribe; that would require a long-lived loop, which `claude -p`
+workers can't run reliably. The merge-arming-to-merge-confirmation window is
+covered by whichever long-lived watcher is in scope (orchestrator or the
+follow-up `/merge-pr` invocation).
+
 **Step 4: Optional Rollup Fragment Contribution (CTL-108)**
 
 Before exiting, under orchestrator mode only (`ORCH_DIR` set), the worker MAY write a

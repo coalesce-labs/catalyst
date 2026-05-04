@@ -84,7 +84,11 @@ describe("parseWebhookEvent", () => {
         ...REPO,
         action: "submitted",
         pull_request: { number: 50 },
-        review: { state: "approved", body: "lgtm", user: { login: "alice" } },
+        review: {
+          state: "approved",
+          body: "lgtm",
+          user: { login: "alice", type: "User" },
+        },
       });
       expect(got.kind).toBe("pull_request_review");
       if (got.kind !== "pull_request_review") return;
@@ -92,6 +96,35 @@ describe("parseWebhookEvent", () => {
       expect(got.reviewState).toBe("approved");
       expect(got.reviewer).toBe("alice");
       expect(got.body).toBe("lgtm");
+      expect(got.author).toEqual({ login: "alice", type: "User" });
+    });
+
+    it("captures author.type for bot reviewers", () => {
+      const got = parseWebhookEvent("pull_request_review", {
+        ...REPO,
+        action: "submitted",
+        pull_request: { number: 51 },
+        review: {
+          state: "changes_requested",
+          body: "fix this",
+          user: { login: "codex[bot]", type: "Bot" },
+        },
+      });
+      expect(got.kind).toBe("pull_request_review");
+      if (got.kind !== "pull_request_review") return;
+      expect(got.author).toEqual({ login: "codex[bot]", type: "Bot" });
+    });
+
+    it("falls back to empty author when user is missing", () => {
+      const got = parseWebhookEvent("pull_request_review", {
+        ...REPO,
+        action: "submitted",
+        pull_request: { number: 52 },
+        review: { state: "commented", body: "" },
+      });
+      expect(got.kind).toBe("pull_request_review");
+      if (got.kind !== "pull_request_review") return;
+      expect(got.author).toEqual({ login: "", type: "" });
     });
   });
 
@@ -190,6 +223,7 @@ describe("parseWebhookEvent", () => {
           id: 999,
           body: "Preview: https://preview.example.com/x",
           html_url: "https://github.com/owner/repo/issues/80#issuecomment-999",
+          user: { login: "alice", type: "User" },
         },
       });
       expect(got.kind).toBe("issue_comment");
@@ -197,6 +231,30 @@ describe("parseWebhookEvent", () => {
       expect(got.number).toBe(80);
       expect(got.commentId).toBe(999);
       expect(got.body).toContain("Preview");
+      expect(got.author).toEqual({ login: "alice", type: "User" });
+    });
+
+    it("captures author.type for bot PR comments", () => {
+      const got = parseWebhookEvent("issue_comment", {
+        ...REPO,
+        action: "created",
+        issue: {
+          number: 81,
+          pull_request: { url: "https://api.github.com/.../pulls/81" },
+        },
+        comment: {
+          id: 1000,
+          body: "🤖 Codex review",
+          html_url: "https://github.com/owner/repo/issues/81#issuecomment-1000",
+          user: { login: "claude-code-review[bot]", type: "Bot" },
+        },
+      });
+      expect(got.kind).toBe("issue_comment");
+      if (got.kind !== "issue_comment") return;
+      expect(got.author).toEqual({
+        login: "claude-code-review[bot]",
+        type: "Bot",
+      });
     });
 
     it("returns ignored for non-PR issue comments", () => {
@@ -220,12 +278,31 @@ describe("parseWebhookEvent", () => {
           id: 7,
           body: "nit",
           html_url: "https://github.com/owner/repo/pull/90#discussion_r7",
+          user: { login: "bob", type: "User" },
         },
       });
       expect(got.kind).toBe("pull_request_review_comment");
       if (got.kind !== "pull_request_review_comment") return;
       expect(got.number).toBe(90);
       expect(got.commentId).toBe(7);
+      expect(got.author).toEqual({ login: "bob", type: "User" });
+    });
+
+    it("captures author.type for bot inline comments", () => {
+      const got = parseWebhookEvent("pull_request_review_comment", {
+        ...REPO,
+        action: "created",
+        pull_request: { number: 91 },
+        comment: {
+          id: 8,
+          body: "Suggested change",
+          html_url: "https://github.com/owner/repo/pull/91#discussion_r8",
+          user: { login: "dependabot[bot]", type: "Bot" },
+        },
+      });
+      expect(got.kind).toBe("pull_request_review_comment");
+      if (got.kind !== "pull_request_review_comment") return;
+      expect(got.author).toEqual({ login: "dependabot[bot]", type: "Bot" });
     });
   });
 

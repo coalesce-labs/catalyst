@@ -100,6 +100,7 @@ export function buildEventLogEnvelope(
           state: event.reviewState,
           reviewer: event.reviewer,
           body: event.body,
+          author: event.author,
         },
       };
     case "pull_request_review_thread":
@@ -152,6 +153,7 @@ export function buildEventLogEnvelope(
           commentId: event.commentId,
           body: event.body,
           htmlUrl: event.htmlUrl,
+          author: event.author,
         },
       };
     case "pull_request_review_comment":
@@ -164,6 +166,7 @@ export function buildEventLogEnvelope(
           commentId: event.commentId,
           body: event.body,
           htmlUrl: event.htmlUrl,
+          author: event.author,
         },
       };
     case "deployment":
