@@ -161,3 +161,70 @@ describe("createLinearFetcher", () => {
     expect(calls).toBe(2);
   });
 });
+
+// CTL-211 — event-driven cache invalidation. Today the fetcher polls every
+// 5 minutes (linear.start interval). With CTL-210 emitting linear.issue.*
+// webhook events to the unified log, we can refresh on-demand the moment a
+// ticket changes state, in addition to (not instead of) the polling fallback.
+describe("createLinearFetcher — event-driven invalidation (CTL-211)", () => {
+  it("exposes invalidate(key) that refreshes the cached entry on demand", async () => {
+    const reads: string[] = [];
+    const fetcher = createLinearFetcher({
+      runner: makeRunner({
+        read: (key) => {
+          reads.push(key);
+          return Promise.resolve({
+            stdout: JSON.stringify({
+              identifier: key,
+              title: `t-${key}-${reads.length}`,
+              state: { name: reads.length === 1 ? "Todo" : "In Review" },
+              labels: { nodes: [] },
+            }),
+            ok: true,
+          });
+        },
+      }),
+    });
+
+    // Prime the cache.
+    await fetcher.refreshAll(["ADV-100"]);
+    expect(fetcher.get("ADV-100")?.state).toBe("Todo");
+    expect(reads).toEqual(["ADV-100"]);
+
+    // Webhook arrived → invalidate the entry.
+    await fetcher.invalidate("ADV-100");
+    expect(reads).toEqual(["ADV-100", "ADV-100"]);
+    expect(fetcher.get("ADV-100")?.state).toBe("In Review");
+  });
+
+  it("invalidate is a no-op for blank keys", async () => {
+    const reads: string[] = [];
+    const fetcher = createLinearFetcher({
+      runner: makeRunner({
+        read: (key) => {
+          reads.push(key);
+          return Promise.resolve({ stdout: "", ok: false });
+        },
+      }),
+    });
+    await fetcher.invalidate("");
+    await fetcher.invalidate("   ");
+    expect(reads).toEqual([]);
+  });
+
+  it("invalidate degrades silently when linearis is unavailable", async () => {
+    const reads: string[] = [];
+    const fetcher = createLinearFetcher({
+      runner: makeRunner({
+        version: () => Promise.resolve({ stdout: "", ok: false }),
+        read: (key) => {
+          reads.push(key);
+          return Promise.resolve({ stdout: validPayload, ok: true });
+        },
+      }),
+    });
+    await fetcher.invalidate("ADV-999");
+    expect(reads).toEqual([]);
+    expect(fetcher.get("ADV-999")).toBeNull();
+  });
+});

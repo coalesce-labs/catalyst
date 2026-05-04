@@ -154,4 +154,34 @@ describe("signal file validation", () => {
     };
     expect(validateSignalFile(signal)).toBe(false);
   });
+
+  // CTL-211 — orchestrator-driven deploy lifecycle states. The worker exits at
+  // `merging`; `merged`, `deploying`, `deploy-failed` are written by the
+  // orchestrator's Phase 4 deploy state-machine.
+  describe("CTL-211 deploy lifecycle states", () => {
+    const baseSignal = {
+      ticket: "CTL-211",
+      orchestrator: "orch-test",
+      workerName: "orch-test-CTL-211",
+      phase: 5,
+      startedAt: "2026-05-04T00:00:00Z",
+      updatedAt: "2026-05-04T00:30:00Z",
+    };
+
+    it("accepts status: merged (PR merged, awaiting deploy start)", () => {
+      expect(validateSignalFile({ ...baseSignal, status: "merged" })).toBe(true);
+    });
+
+    it("accepts status: deploying (deployment_status pending/in_progress observed)", () => {
+      expect(validateSignalFile({ ...baseSignal, status: "deploying" })).toBe(true);
+    });
+
+    it("accepts status: deploy-failed (production deployment_status.failure)", () => {
+      expect(validateSignalFile({ ...baseSignal, status: "deploy-failed" })).toBe(true);
+    });
+
+    it("rejects unknown deploy-like statuses", () => {
+      expect(validateSignalFile({ ...baseSignal, status: "deployed-yay" })).toBe(false);
+    });
+  });
 });

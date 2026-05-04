@@ -608,54 +608,44 @@ MANDATORY: Before completing your contract:
 5. Code review — must pass code-reviewer agent
 6. All quality gates in config must pass
 
-Your success contract ENDS at:
+Your success contract ENDS at (CTL-133, refined by CTL-211):
   ✓ PR open (gh pr create succeeded)
   ✓ Auto-merge armed (gh pr merge --auto succeeded)
-  ✓ CI passed and PR merged — gh pr view --json state returns MERGED
-  ✓ pr.mergedAt + status="done" written to signal file
-  ✓ Linear ticket transitioned to Done
+  ✓ pr.prOpenedAt, pr.autoMergeArmedAt, status="merging" written to signal file
+  ✓ Worker process exits cleanly
 
-POLL until state=MERGED. After arming auto-merge, run a poll loop.
-CRITICAL: always include `sleep 30` — a tight loop exhausts GitHub's
-5,000/hr GraphQL rate limit in minutes.
+DO NOT POLL. The orchestrator's Phase 4 loop owns everything past `merging`:
+merge confirmation, BEHIND/DIRTY recovery, CI auto-fixup, and the production
+deploy state machine (`merged → deploying → done | deploy-failed`). A `claude
+-p` worker process is fire-and-forget — it cannot reliably stay alive for the
+hour+ that production deploy verification requires, and a polling worker
+duplicates the orchestrator's state machine while exhausting GitHub's 5,000/hr
+GraphQL rate limit.
 
-```bash
-while true; do
-  MERGE_STATE=$(gh pr view $PR_NUMBER --json state,mergeStateStatus,mergedAt)
-  STATE=$(echo "$MERGE_STATE" | jq -r '.state')
-  MSS=$(echo "$MERGE_STATE" | jq -r '.mergeStateStatus')
-  if [ "$STATE" = "MERGED" ]; then
-    # write pr.mergedAt + status="done", transition Linear, exit success
-    break
-  fi
-  case "$MSS" in
-    BEHIND) gh api -X PUT "/repos/{owner}/{repo}/pulls/${PR_NUMBER}/update-branch" ;;
-    DIRTY)  # attempt rebase; if unresolvable, write status="stalled" and exit
-            ;;
-  esac
-  # Also check: CI failing → investigate/fix/push; review comments → /review-comments
-  # Blocked on required reviewer → write status="stalled" and exit
-  sleep 30
-done
-```
-
-There is no fixed timeout — keep polling while CI/checks are still progressing.
-Apply per-failure-type fix budgets (max ~3 distinct attempts per failure mode) so
-you never spin on a stuck failure.
+If you must block on a single event mid-implementation (e.g. waiting for a
+specific webhook before the next step), use `catalyst-events wait-for` with a
+short timeout and an authoritative `gh` fallback. See the [[monitor-events]]
+skill for the canonical pattern. NEVER run a `while true; do … sleep 30; done`
+poll loop.
 
 Write these fields into your signal file as they become available:
   pr.number
   pr.url
   pr.prOpenedAt       (ISO timestamp when gh pr create returned)
   pr.autoMergeArmedAt (ISO timestamp when gh pr merge --auto returned)
-  pr.ciStatus         (pending | passing | failing | merged)
-  pr.mergedAt         (ISO timestamp from gh pr view when state=MERGED)
-  status              (pr-created → merging → done)
+  pr.ciStatus         (pending — orchestrator updates this past merge)
+  status              (pr-created → merging)
 
-Your work ends when you write status="merging" after arming auto-merge (CTL-133).
-The orchestrator's Phase 4 poll loop is the authoritative merge watcher — it confirms
-the PR merges, writes pr.mergedAt + status="done", and handles any BEHIND/DIRTY/BLOCKED
-states. If you hit an unrecoverable blocker, write status="stalled" with details.
+Status transitions YOU do NOT write (orchestrator-owned, CTL-211):
+  merged          (orchestrator confirms PR.state=MERGED)
+  deploying       (orchestrator observes github.deployment.created)
+  done            (orchestrator observes deployment_status.success on production
+                   env, OR catalyst.deploy.<repo>.skipDeployVerification=true)
+  deploy-failed   (orchestrator observes deployment_status.failure on production)
+
+Your work ends when you write status="merging" after arming auto-merge. If you
+hit an unrecoverable blocker before that point, write status="stalled" with
+details and post a `comms attention` message.
 
 COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules in the
 catalyst-comms skill (plugins/dev/skills/catalyst-comms/SKILL.md § Posting Discipline):
@@ -736,11 +726,15 @@ catalyst-events tail --filter '
   (.event | startswith("github.pr.")) or
   (.event | startswith("github.check_")) or
   (.event == "github.push") or
+  (.event | startswith("github.deployment")) or
   (.event | startswith("linear.issue.")) or
   (.event == "worker-status-change") or
   (.event == "attention-raised")
 '
 ```
+
+`github.deployment*` is included so the deploy state machine (CTL-211) wakes on
+`deployment.created` and `deployment_status` events.
 
 When the Monitor surfaces a notification, the orchestrator runs ONE per-cycle scan
 immediately and then returns to event-driven idle. Every event is treated as a
@@ -863,21 +857,51 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
 
   # Ask GitHub the authoritative question
   PR_JSON=$(gh -R "$REPO" pr view "$PR_NUMBER" \
-    --json state,mergeStateStatus,mergedAt,mergeable,mergedBy 2>/dev/null || echo '{}')
+    --json state,mergeStateStatus,mergedAt,mergeable,mergedBy,mergeCommit 2>/dev/null || echo '{}')
   PR_STATE=$(echo "$PR_JSON" | jq -r '.state // "UNKNOWN"')
   MERGE_STATE=$(echo "$PR_JSON" | jq -r '.mergeStateStatus // "UNKNOWN"')
   PR_MERGED_AT=$(echo "$PR_JSON" | jq -r '.mergedAt // empty')
+  MERGE_COMMIT_SHA=$(echo "$PR_JSON" | jq -r '.mergeCommit.oid // empty')
+
+  # CTL-211: load per-repo deploy verification config. When
+  # skipDeployVerification is true (default for repos without GitHub
+  # Deployments), keep today's behavior — MERGED → done. When false, MERGED →
+  # merged, then the deploy sub-loop below drives merged → deploying →
+  # done | deploy-failed via deployment_status events.
+  SKIP_DEPLOY=$(jq -r --arg repo "$REPO" \
+    '.catalyst.deploy[$repo].skipDeployVerification // true' "$CONFIG_FILE" 2>/dev/null)
+  PROD_ENV=$(jq -r --arg repo "$REPO" \
+    '.catalyst.deploy[$repo].productionEnvironment // "production"' "$CONFIG_FILE" 2>/dev/null)
+  DEPLOY_TIMEOUT_SEC=$(jq -r --arg repo "$REPO" \
+    '.catalyst.deploy[$repo].timeoutSec // 1800' "$CONFIG_FILE" 2>/dev/null)
 
   case "$PR_STATE" in
     MERGED)
-      # Record merge in signal + global state, advance worker to done
-      jq --arg ts "$PR_MERGED_AT" \
-        '.pr.ciStatus = "merged" | .pr.mergedAt = $ts | .status = "done"
-         | .completedAt = $ts | .phaseTimestamps.done = $ts | .phase = 6' \
+      if [ "$SKIP_DEPLOY" != "false" ]; then
+        # Today's behavior: MERGED → done immediately. The repo doesn't emit
+        # GitHub Deployments, or deploy verification is opted out per-repo.
+        TARGET_STATUS="done"
+        TARGET_PHASE=6
+      else
+        # CTL-211: MERGED → merged. The deploy state-machine sub-loop below
+        # advances it to deploying → done|deploy-failed on the SHA's
+        # deployment_status events.
+        TARGET_STATUS="merged"
+        TARGET_PHASE=5
+      fi
+
+      # Record merge in signal + global state, advance worker to TARGET_STATUS
+      jq --arg ts "$PR_MERGED_AT" --arg sha "$MERGE_COMMIT_SHA" \
+         --arg status "$TARGET_STATUS" --argjson phase "$TARGET_PHASE" \
+        '.pr.ciStatus = "merged" | .pr.mergedAt = $ts | .status = $status
+         | (if $status == "done" then .completedAt = $ts | .phaseTimestamps.done = $ts else . end)
+         | .phase = $phase
+         | (if $sha != "" then .pr.mergeCommitSha = $sha else . end)
+         | (if $status == "merged" then .deploy = ((.deploy // {}) | .startedAt = $ts | .environment = "'"$PROD_ENV"'") else . end)' \
         "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
 
       "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET}" \
-        ".status = \"done\" | .phase = 6 | .pr.ciStatus = \"merged\" | .pr.mergedAt = \"${PR_MERGED_AT}\""
+        ".status = \"${TARGET_STATUS}\" | .phase = ${TARGET_PHASE} | .pr.ciStatus = \"merged\" | .pr.mergedAt = \"${PR_MERGED_AT}\""
 
       "$STATE_SCRIPT" event "$(jq -nc \
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg orch "${ORCH_NAME}" \
@@ -889,15 +913,22 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
       # respects --state-on-merge when the operator wants a non-default
       # state (e.g., "Shipped"). Since CTL-133, this is the primary Linear
       # done-transition — workers exit at "merging" before merge completes.
-      STATE_ON_MERGE_FLAG=""
-      if [ -n "${STATE_ON_MERGE:-}" ]; then
-        STATE_ON_MERGE_FLAG="--state ${STATE_ON_MERGE}"
+      #
+      # CTL-211: only transition Linear to done when TARGET_STATUS is "done"
+      # (skipDeployVerification=true). When TARGET_STATUS is "merged", the
+      # deploy state-machine sub-loop below transitions Linear after the
+      # production deployment_status.success arrives.
+      if [ "$TARGET_STATUS" = "done" ]; then
+        STATE_ON_MERGE_FLAG=""
+        if [ -n "${STATE_ON_MERGE:-}" ]; then
+          STATE_ON_MERGE_FLAG="--state ${STATE_ON_MERGE}"
+        fi
+        "${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+          --ticket "${TICKET}" \
+          --transition done \
+          --config "$CONFIG_FILE" \
+          ${STATE_ON_MERGE_FLAG} >/dev/null 2>&1 || true
       fi
-      "${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
-        --ticket "${TICKET}" \
-        --transition done \
-        --config "$CONFIG_FILE" \
-        ${STATE_ON_MERGE_FLAG} >/dev/null 2>&1 || true
 
       # Pull latest main in the primary worktree (CTL-198). Non-fatal.
       "${CLAUDE_PLUGIN_ROOT}/scripts/pull-primary-worktree.sh" \
@@ -986,6 +1017,114 @@ REMEDIATION_EOF
   esac
 done
 ```
+
+**Deploy state-machine sub-loop (CTL-211)** — runs every cycle for any worker
+in `merged` or `deploying`. Wakes on `github.deployment*` events from the
+event log; otherwise the 10-minute fallback sweep catches missed events. The
+authoritative source is `gh api repos/<repo>/deployments` and
+`/deployments/<id>/statuses`. Events are wake-up triggers only.
+
+```bash
+for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
+  W_STATUS=$(jq -r '.status' "$WORKER_SIGNAL")
+  case "$W_STATUS" in
+    merged|deploying|deploy-failed) ;;
+    *) continue ;;
+  esac
+
+  TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
+  PR_URL=$(jq -r '.pr.url // empty' "$WORKER_SIGNAL")
+  MERGE_SHA=$(jq -r '.pr.mergeCommitSha // empty' "$WORKER_SIGNAL")
+  REPO=$(echo "$PR_URL" | sed -E 's|https://github.com/([^/]+/[^/]+)/pull/.*|\1|')
+  PROD_ENV=$(jq -r --arg repo "$REPO" \
+    '.catalyst.deploy[$repo].productionEnvironment // "production"' "$CONFIG_FILE")
+  TIMEOUT_SEC=$(jq -r --arg repo "$REPO" \
+    '.catalyst.deploy[$repo].timeoutSec // 1800' "$CONFIG_FILE")
+  STARTED_AT=$(jq -r '.deploy.startedAt // empty' "$WORKER_SIGNAL")
+  FAILED_ATTEMPTS=$(jq -r '.deploy.failedAttempts // 0' "$WORKER_SIGNAL")
+
+  # 1. Hard timeout — escalate via comms.attention, set status=stalled.
+  if [ -n "$STARTED_AT" ]; then
+    NOW_EPOCH=$(date -u +%s)
+    START_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$STARTED_AT" +%s 2>/dev/null \
+      || date -u -d "$STARTED_AT" +%s)
+    ELAPSED=$((NOW_EPOCH - START_EPOCH))
+    if [ "$ELAPSED" -gt "$TIMEOUT_SEC" ]; then
+      jq '.status = "stalled"' "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" \
+        && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+      "$STATE_SCRIPT" attention "${ORCH_NAME}" "deploy-timeout" "${TICKET}" \
+        "Deploy verification timed out after ${TIMEOUT_SEC}s for ${REPO}@${MERGE_SHA}"
+      continue
+    fi
+  fi
+
+  # 2. Authoritative deploy lookup. Fetch the most recent deployment_status
+  #    for the merge SHA on the production environment.
+  [ -z "$MERGE_SHA" ] && continue
+  DEPLOY_JSON=$(gh api -X GET "/repos/${REPO}/deployments" \
+    -f sha="$MERGE_SHA" -f environment="$PROD_ENV" --jq '.[0] // empty' 2>/dev/null || echo "")
+  [ -z "$DEPLOY_JSON" ] && continue
+  DEPLOY_ID=$(echo "$DEPLOY_JSON" | jq -r '.id // empty')
+  [ -z "$DEPLOY_ID" ] && continue
+
+  STATUS_JSON=$(gh api "/repos/${REPO}/deployments/${DEPLOY_ID}/statuses" \
+    --jq '.[0] // empty' 2>/dev/null || echo "")
+  DEPLOY_STATE=$(echo "$STATUS_JSON" | jq -r '.state // "pending"')
+
+  case "$DEPLOY_STATE" in
+    success)
+      jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson did "$DEPLOY_ID" \
+        '.status = "done" | .phase = 6 | .completedAt = $ts | .phaseTimestamps.done = $ts
+         | .deploy.completedAt = $ts | .deploy.deploymentId = $did | .deploy.result = "success"' \
+        "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+      "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET}" \
+        ".status = \"done\" | .phase = 6"
+      "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg orch "${ORCH_NAME}" --arg w "${TICKET}" --argjson did "$DEPLOY_ID" \
+        '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-deploy-success", detail:{deploymentId:$did}}')"
+      # Transition Linear → done now that deploy succeeded.
+      STATE_ON_MERGE_FLAG=""
+      [ -n "${STATE_ON_MERGE:-}" ] && STATE_ON_MERGE_FLAG="--state ${STATE_ON_MERGE}"
+      "${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+        --ticket "${TICKET}" --transition done --config "$CONFIG_FILE" \
+        ${STATE_ON_MERGE_FLAG} >/dev/null 2>&1 || true
+      ;;
+    failure|error)
+      NEW_ATTEMPTS=$((FAILED_ATTEMPTS + 1))
+      MAX_ATTEMPTS=3
+      jq --argjson n "$NEW_ATTEMPTS" --argjson did "$DEPLOY_ID" --arg state "$DEPLOY_STATE" \
+        '.status = "deploy-failed" | .deploy.failedAttempts = $n | .deploy.deploymentId = $did
+         | .deploy.lastFailureState = $state' \
+        "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+      if [ "$NEW_ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
+        "$STATE_SCRIPT" attention "${ORCH_NAME}" "deploy-budget-exhausted" "${TICKET}" \
+          "Production deploy ${DEPLOY_STATE} ${NEW_ATTEMPTS}× for ${REPO}@${MERGE_SHA} — manual intervention required"
+      else
+        "$STATE_SCRIPT" attention "${ORCH_NAME}" "deploy-failed" "${TICKET}" \
+          "Production deploy ${DEPLOY_STATE} (attempt ${NEW_ATTEMPTS}/${MAX_ATTEMPTS}) for ${REPO}@${MERGE_SHA}"
+      fi
+      "$STATE_SCRIPT" event "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg orch "${ORCH_NAME}" --arg w "${TICKET}" --arg state "$DEPLOY_STATE" \
+        --argjson did "$DEPLOY_ID" --argjson att "$NEW_ATTEMPTS" \
+        '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-deploy-failed", detail:{deploymentId:$did, state:$state, attempts:$att}}')"
+      ;;
+    in_progress|pending|queued)
+      # Advance status only if not already deploying.
+      if [ "$W_STATUS" = "merged" ]; then
+        jq --argjson did "$DEPLOY_ID" \
+          '.status = "deploying" | .deploy.deploymentId = $did' \
+          "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+        "$STATE_SCRIPT" worker "${ORCH_NAME}" "${TICKET}" '.status = "deploying"'
+      fi
+      ;;
+  esac
+done
+```
+
+The state-machine transition logic is mirrored in
+`plugins/dev/scripts/orch-monitor/lib/deploy-state-machine.ts` as a pure
+function (`nextDeployState`) so the transitions are mechanically verified by
+unit tests independently of this bash glue.
 
 **Cadence (CTL-210)**: The merge-watcher block runs on every Monitor wake-up plus a
 10-minute safety-net fallback. The Monitor watches `github.pr.merged`, `github.push`,
