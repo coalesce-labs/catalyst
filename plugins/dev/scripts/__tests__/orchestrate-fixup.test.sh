@@ -88,6 +88,46 @@ run "dispatch file references TICKET_ID" \
 run "dispatch file does not leave unresolved placeholders" \
   bash -c "! grep -E '\\\$\\{(TICKET_ID|ORCH_NAME|ORCH_DIR|WORKER_DIR|PROMPT_FILE|WORKER_MODEL)\\}' '${ORCH_DIR}/workers/dispatch-fixup-TEST-1.sh'"
 
+# Test 6 (CTL-231): default WORKER_DIR resolution reads state.json:.worktreeBase
+# Regression for the CTL-59 split that broke the dirname(ORCH_DIR) fallback.
+ORCH_DIR_2="${SCRATCH}/orch2"
+WORKTREE_BASE_2="${SCRATCH}/wt-base"
+mkdir -p "${ORCH_DIR_2}/workers" "${WORKTREE_BASE_2}/orch-test-TEST-2"
+cat > "${ORCH_DIR_2}/state.json" <<EOF
+{"orchestrator": "orch-test", "worktreeBase": "${WORKTREE_BASE_2}"}
+EOF
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_2" \
+  "$FIXUP" TEST-2 --issues "bar.ts:5: bug" --pr 7 > "${SCRATCH}/run2.out" 2>&1
+run "default WORKER_DIR uses state.json:.worktreeBase (not dirname(ORCH_DIR))" \
+  expect_contains "${ORCH_DIR_2}/workers/dispatch-fixup-TEST-2.sh" "WORKER_DIR=\"${WORKTREE_BASE_2}/orch-test-TEST-2\""
+run "default WORKER_DIR does NOT include dirname(ORCH_DIR)" \
+  bash -c "! grep -q '$(dirname "$ORCH_DIR_2")/orch-test-TEST-2' '${ORCH_DIR_2}/workers/dispatch-fixup-TEST-2.sh'"
+
+# Test 7 (CTL-231): backward-compat — when state.json is missing, fall back to old
+# dirname(ORCH_DIR) behavior and warn on stderr (pre-CTL-228 orchestrators)
+ORCH_DIR_3="${SCRATCH}/parent3/orch3"
+mkdir -p "${ORCH_DIR_3}/workers"
+# No state.json — simulates a pre-CTL-228 orchestrator directory
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_3" \
+  "$FIXUP" TEST-3 --issues "baz.ts:1: bug" --pr 8 > "${SCRATCH}/run3.out" 2>&1
+run "fallback warns when state.json is missing" \
+  expect_contains "${SCRATCH}/run3.out" "warn:"
+run "fallback uses dirname(ORCH_DIR) when state.json missing" \
+  expect_contains "${ORCH_DIR_3}/workers/dispatch-fixup-TEST-3.sh" "WORKER_DIR=\"$(dirname "$ORCH_DIR_3")/orch-test-TEST-3\""
+
+# Test 8 (CTL-231): explicit --worker-dir still wins over state.json
+ORCH_DIR_4="${SCRATCH}/orch4"
+WORKTREE_BASE_4="${SCRATCH}/wt-base4"
+EXPLICIT_DIR="${SCRATCH}/explicit/some-other-path"
+mkdir -p "${ORCH_DIR_4}/workers" "${WORKTREE_BASE_4}/orch-test-TEST-4" "$EXPLICIT_DIR"
+cat > "${ORCH_DIR_4}/state.json" <<EOF
+{"orchestrator": "orch-test", "worktreeBase": "${WORKTREE_BASE_4}"}
+EOF
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_4" \
+  "$FIXUP" TEST-4 --issues "x" --pr 9 --worker-dir "$EXPLICIT_DIR" > "${SCRATCH}/run4.out" 2>&1
+run "--worker-dir override wins over state.json" \
+  expect_contains "${ORCH_DIR_4}/workers/dispatch-fixup-TEST-4.sh" "WORKER_DIR=\"${EXPLICIT_DIR}\""
+
 echo ""
 echo "orchestrate-fixup: ${PASSES} passed, ${FAILURES} failed"
 exit "$FAILURES"
