@@ -38,6 +38,13 @@ interface OrchestratorViewProps {
   otelHealth?: OtelHealth | null;
   commsAuthors?: Set<string>;
   onCommsLink?: (ticket: string) => void;
+  /**
+   * Optional lifted state for the worker drawer. When provided, parent owns
+   * `selectedWorker` (e.g. so the Activity pane can pivot directly to a
+   * worker). When omitted, the component falls back to local state.
+   */
+  selectedWorker?: string | null;
+  onWorkerSelect?: (ticket: string | null) => void;
 }
 
 const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
@@ -77,10 +84,17 @@ export function OrchestratorView({
   otelHealth,
   commsAuthors,
   onCommsLink,
+  selectedWorker: selectedWorkerProp,
+  onWorkerSelect,
 }: OrchestratorViewProps) {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   const [selectedWave, setSelectedWave] = useState<number | null>(null);
-  const [selectedWorker, setSelectedWorker] = useState<string | null>(null);
+  // Either parent owns the selection (lifted state) or we own it locally.
+  const [internalSelectedWorker, setInternalSelectedWorker] = useState<
+    string | null
+  >(null);
+  const selectedWorker = selectedWorkerProp ?? internalSelectedWorker;
+  const setSelectedWorker = onWorkerSelect ?? setInternalSelectedWorker;
 
   const selectedW: WorkerState | null =
     selectedWorker ? (orch.workers[selectedWorker] ?? null) : null;
