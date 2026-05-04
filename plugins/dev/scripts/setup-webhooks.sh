@@ -28,8 +28,11 @@ DEFAULT_LINEAR_SECRET_ENV="CATALYST_LINEAR_WEBHOOK_SECRET"
 FORCE=0
 ADD_REPOS=()
 LINEAR_SECRET_ENV=""
+LINEAR_REGISTER=0
+LINEAR_WEBHOOK_URL=""
 REPO_SHAPE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 ENV_VAR_SHAPE='^[A-Z_][A-Z0-9_]*$'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<EOF
@@ -50,9 +53,15 @@ Options:
   --linear-secret-env <NAME> Write catalyst.monitor.linear.webhookSecretEnv = NAME
                              to ${PROJECT_CONFIG_PATH}. Default ${DEFAULT_LINEAR_SECRET_ENV}.
                              When this is the only intent flag, channel/secret
-                             setup for GitHub is skipped. Linear webhooks are
-                             registered manually via Linear's GraphQL API; see
-                             website/src/content/docs/observability/webhooks.md.
+                             setup for GitHub is skipped.
+  --linear-register          Auto-register a Linear webhook via Linear's
+                             GraphQL API (requires --webhook-url). Idempotent:
+                             re-running with the same URL no-ops. Combine with
+                             --force to delete and recreate. When this is the
+                             only intent flag, channel/secret setup for GitHub
+                             is skipped.
+  --webhook-url <https-url>  Public HTTPS URL where Linear should deliver
+                             events. Required when --linear-register is used.
   -h|--help                  Show this message
 
 Environment:
@@ -81,6 +90,16 @@ while [[ $# -gt 0 ]]; do
       LINEAR_SECRET_ENV="$2"
       shift 2
       ;;
+    --linear-register) LINEAR_REGISTER=1; shift ;;
+    --webhook-url)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "ERROR: --webhook-url requires an argument" >&2
+        usage
+        exit 1
+      fi
+      LINEAR_WEBHOOK_URL="$2"
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -104,6 +123,16 @@ if [[ -n "$LINEAR_SECRET_ENV" ]]; then
   fi
 fi
 
+# Validate --linear-register / --webhook-url pairing.
+if [[ $LINEAR_REGISTER -eq 1 && -z "$LINEAR_WEBHOOK_URL" ]]; then
+  echo "ERROR: --linear-register requires --webhook-url <https-url>" >&2
+  exit 1
+fi
+if [[ -n "$LINEAR_WEBHOOK_URL" && ! "$LINEAR_WEBHOOK_URL" =~ ^https:// ]]; then
+  echo "ERROR: --webhook-url must start with https:// (got: $LINEAR_WEBHOOK_URL)" >&2
+  exit 1
+fi
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "ERROR: '$1' is required but not installed" >&2
@@ -120,7 +149,7 @@ require_cmd jq
 # tolerates a missing channel.
 SKIP_GITHUB_SETUP=0
 if [[ $FORCE -eq 0 && -z "${CATALYST_SMEE_CHANNEL:-}" ]]; then
-  if [[ ${#ADD_REPOS[@]} -gt 0 || -n "$LINEAR_SECRET_ENV" ]]; then
+  if [[ ${#ADD_REPOS[@]} -gt 0 || -n "$LINEAR_SECRET_ENV" || $LINEAR_REGISTER -eq 1 ]]; then
     SKIP_GITHUB_SETUP=1
   fi
 fi
@@ -183,9 +212,19 @@ if [[ $SKIP_GITHUB_SETUP -eq 1 ]]; then
   if [[ -n "$LINEAR_SECRET_ENV" ]]; then
     write_linear_secret_env "$LINEAR_SECRET_ENV"
     echo "Wrote catalyst.monitor.linear.webhookSecretEnv = $LINEAR_SECRET_ENV to $PROJECT_CONFIG_PATH"
-    echo "  → Set the secret with: export $LINEAR_SECRET_ENV=<your-linear-webhook-signing-secret>"
-    echo "  → Then register the webhook URL with Linear's GraphQL API."
-    echo "  → See website/src/content/docs/observability/webhooks.md for the mutation."
+    if [[ $LINEAR_REGISTER -eq 0 ]]; then
+      echo "  → Set the secret with: export $LINEAR_SECRET_ENV=<your-linear-webhook-signing-secret>"
+      echo "  → Then run with --linear-register --webhook-url <url> to auto-register the webhook,"
+      echo "    or see website/src/content/docs/observability/webhooks.md for manual registration."
+    fi
+  fi
+  if [[ $LINEAR_REGISTER -eq 1 ]]; then
+    helper_secret_env="${LINEAR_SECRET_ENV:-$DEFAULT_LINEAR_SECRET_ENV}"
+    bash "${SCRIPT_DIR}/setup-linear-webhook.sh" \
+      --webhook-url "$LINEAR_WEBHOOK_URL" \
+      --secret-env "$helper_secret_env" \
+      --config "$PROJECT_CONFIG_PATH" \
+      $([[ $FORCE -eq 1 ]] && echo "--force")
   fi
   exit 0
 fi
@@ -288,6 +327,16 @@ fi
 if [[ -n "$LINEAR_SECRET_ENV" ]]; then
   write_linear_secret_env "$LINEAR_SECRET_ENV"
   echo "Wrote catalyst.monitor.linear.webhookSecretEnv = $LINEAR_SECRET_ENV"
+fi
+
+# ─── 6c. Auto-register Linear webhook (if --linear-register passed) ─────────
+if [[ $LINEAR_REGISTER -eq 1 ]]; then
+  helper_secret_env="${LINEAR_SECRET_ENV:-$DEFAULT_LINEAR_SECRET_ENV}"
+  bash "${SCRIPT_DIR}/setup-linear-webhook.sh" \
+    --webhook-url "$LINEAR_WEBHOOK_URL" \
+    --secret-env "$helper_secret_env" \
+    --config "$PROJECT_CONFIG_PATH" \
+    $([[ $FORCE -eq 1 ]] && echo "--force")
 fi
 
 # ─── 7. Print next steps ───────────────────────────────────────────────────
