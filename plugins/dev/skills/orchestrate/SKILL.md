@@ -738,7 +738,7 @@ are wake-up triggers, never sources of truth.
 | `worker-pr-created` | Reconcile the PR number into signal/state; re-render `DASHBOARD.md` |
 | `attention-raised`, `attention-resolved` | Re-render the `DASHBOARD.md` NEEDS ATTENTION banner |
 | `github.pr.merged`, `github.pr.closed` | Run the merge-confirmation scan for that PR |
-| `github.pr.synchronize`, `github.push` | Re-evaluate `mergeStateStatus` for the affected PR (BEHIND / DIRTY recovery) |
+| `github.pr.synchronize`, `github.push` | Re-evaluate `mergeStateStatus` for the affected PR; if DIRTY ≥2 min, `orchestrate-auto-rebase` may dispatch a rebase worker (BEHIND auto-resolves via auto-merge) |
 | `github.check_*` | Re-check CI; if BLOCKED ≥10 min, `orchestrate-auto-fixup` may dispatch a fix-up |
 | `github.pr_review*`, `github.issue_comment.created` | Re-evaluate `mergeStateStatus`; surface review activity on the dashboard |
 | `github.deployment*` | Record deploy outcome on the worker's signal file |
@@ -1024,8 +1024,10 @@ REMEDIATION_EOF
       # failed, BEHIND=needs rebase, DIRTY=conflicts).
       case "$MERGE_STATE" in
         DIRTY)
-          "$STATE_SCRIPT" attention "${ORCH_NAME}" "merge-conflicts" "${TICKET}" \
-            "PR #${PR_NUMBER} has merge conflicts — needs rebase"
+          # Out-of-band: orchestrate-auto-rebase runs after this scan and handles
+          # DIRTY (merge conflicts) by dispatching a rebase worker once the state
+          # has been stable for ≥2 minutes (CTL-232). Falls back to attention only
+          # when the rebase budget is exhausted.
           ;;
         BEHIND)
           # Often auto-resolves when auto-merge rebases; log only. The next
@@ -1325,6 +1327,40 @@ Signal-file fields the script reads/writes:
 | `blockedSince`           | orchestrate-auto-fixup    | First observation of BLOCKED; cleared when PR leaves BLOCKED |
 | `fixupAttempts`          | orchestrate-auto-fixup    | Auto-dispatch counter (max = `--max-fixups`)               |
 | `lastFixupDispatchedAt`  | orchestrate-auto-fixup    | Timestamp of the most recent dispatch (for the dashboard)  |
+
+**Auto-dispatch rebase workers for DIRTY PRs (CTL-232):**
+
+After auto-fixup, a third pass detects PRs stuck in `state=OPEN,
+mergeStateStatus=DIRTY` (merge conflicts that GitHub's auto-merge cannot
+resolve on its own — it can only handle BEHIND, never DIRTY) and dispatches
+`orchestrate-rebase` to spawn a worker that rebases the PR branch onto
+current base, resolves conflicts, and force-pushes (`--force-with-lease`).
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-auto-rebase" \
+  --orch-dir "$ORCH_DIR" \
+  --orch-id "$ORCH_NAME"
+```
+
+The script records `dirtySince` on the worker signal the first time it
+observes DIRTY, then — once the state has been stable for `--stable-minutes`
+(default 2; DIRTY is unambiguous so the window is much shorter than
+auto-fixup's 10) — reads `baseRefName` from `gh pr view` and dispatches
+`orchestrate-rebase --base-branch <ref>`.
+
+Each auto-dispatch bumps `rebaseAttempts` on the signal. When
+`rebaseAttempts ≥ --max-rebases` (default 2), the script raises
+`rebase-budget-exhausted` attention instead of dispatching again. A
+dispatch failure raises `rebase-dispatch-failed` attention.
+
+Signal-file fields the script reads/writes:
+
+| Field                    | Written by                 | Purpose                                                    |
+| ------------------------ | -------------------------- | ---------------------------------------------------------- |
+| `dirtySince`             | orchestrate-auto-rebase    | First observation of DIRTY; cleared when PR leaves DIRTY   |
+| `rebaseAttempts`         | orchestrate-auto-rebase    | Auto-dispatch counter (max = `--max-rebases`)              |
+| `lastRebaseDispatchedAt` | orchestrate-auto-rebase    | Timestamp of the most recent dispatch (for the dashboard)  |
+| `rebaseCommit`           | rebase worker              | SHA of the rebased HEAD (written by the dispatched worker) |
 
 ### Phase 5: Post-Merge Verification (Anti-Reward-Hacking)
 
