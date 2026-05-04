@@ -17,7 +17,10 @@
 #   1 — FAIL (gaps found, details in output)
 #   2 — ERROR (script misconfiguration)
 
-set -euo pipefail
+# Drop `-e`: many checks use `[ "$X" -gt N ]` style and we want the
+# script to always reach the explicit summary block (which sets the real
+# exit code). `-uo pipefail` still catches unset vars and pipeline errors.
+set -uo pipefail
 
 # Colors
 GREEN='\033[0;32m'
@@ -25,6 +28,31 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+# Count non-empty lines in a string. Always emits exactly one integer to
+# stdout — never the broken "0\n0" produced by `grep -c . || echo 0` on
+# empty input.
+count_lines() {
+  if [ -z "${1:-}" ]; then
+    echo 0
+  else
+    local n
+    n=$(printf '%s\n' "$1" | grep -c . 2>/dev/null)
+    echo "${n:-0}"
+  fi
+}
+
+# Count regex matches in a file. Always emits a single integer.
+count_matches() {
+  local pattern="$1" file="$2"
+  if [ ! -f "$file" ]; then
+    echo 0
+    return
+  fi
+  local n
+  n=$(grep -cE "$pattern" "$file" 2>/dev/null)
+  echo "${n:-0}"
+}
 
 # Parse arguments
 WORKTREE=""
@@ -86,28 +114,56 @@ echo ""
 
 cd "$WORKTREE"
 
+# Determine the diff range. Default: vs base-branch tip. If the worker's
+# PR is already merged (post-merge verification — the common case since
+# CTL-130), use the merge SHA so we can still see the changeset even
+# after the branch has been deleted by `gh pr merge --delete-branch`.
+BRANCH=$(git branch --show-current 2>/dev/null || echo "")
+DIFF_RANGE="${BASE_BRANCH}..."
+PR_NUMBER=""
+PR_STATE=""
+PR_MERGE_SHA=""
+if [ -n "$BRANCH" ]; then
+  PR_LIST_JSON=$(gh pr list --head "$BRANCH" --state all --json number,state,mergedAt --limit 5 2>/dev/null || echo "[]")
+  if [ -n "$PR_LIST_JSON" ] && [ "$PR_LIST_JSON" != "[]" ]; then
+    # Prefer MERGED, then OPEN, then CLOSED
+    PR_NUMBER=$(echo "$PR_LIST_JSON" | jq -r 'sort_by(if .state=="MERGED" then 0 elif .state=="OPEN" then 1 else 2 end) | .[0].number // empty' 2>/dev/null || echo "")
+    PR_STATE=$(echo "$PR_LIST_JSON" | jq -r 'sort_by(if .state=="MERGED" then 0 elif .state=="OPEN" then 1 else 2 end) | .[0].state // empty' 2>/dev/null || echo "")
+  fi
+  if [ "$PR_STATE" = "MERGED" ] && [ -n "$PR_NUMBER" ]; then
+    PR_VIEW_JSON=$(gh pr view "$PR_NUMBER" --json mergeCommit 2>/dev/null || echo "{}")
+    PR_MERGE_SHA=$(echo "$PR_VIEW_JSON" | jq -r '.mergeCommit.oid // empty' 2>/dev/null || echo "")
+    if [ -n "$PR_MERGE_SHA" ]; then
+      DIFF_RANGE="${PR_MERGE_SHA}~..${PR_MERGE_SHA}"
+    fi
+  fi
+fi
+
 # ============================================================
 # 1. CHANGED FILES ANALYSIS
 # ============================================================
 echo -e "${CYAN}--- 1. Changed Files Analysis ---${NC}"
+echo "  Diff range: $DIFF_RANGE"
 
-CHANGED_FILES=$(git diff --name-only "${BASE_BRANCH}..." 2>/dev/null || echo "")
+CHANGED_FILES=$(git diff --name-only "$DIFF_RANGE" 2>/dev/null || echo "")
 if [ -z "$CHANGED_FILES" ]; then
-  echo -e "${RED}ERROR: No changed files found vs ${BASE_BRANCH}${NC}"
+  echo -e "${RED}ERROR: No changed files found in range ${DIFF_RANGE}${NC}"
   exit 2
 fi
 
-# Categorize changed files
+# Categorize changed files. Route detection only matches actual API
+# source paths and explicit *.{route,handler,controller,endpoint}.X
+# extensions — NOT arbitrary filenames containing "api" or "handler".
 SOURCE_FILES=$(echo "$CHANGED_FILES" | grep -E '\.(ts|tsx|js|jsx|py|go|rs)$' | grep -vE '(\.test\.|\.spec\.|__test__|_test\.)' || true)
 TEST_FILES=$(echo "$CHANGED_FILES" | grep -E '(\.test\.|\.spec\.|__test__|_test\.)' || true)
 CONFIG_FILES=$(echo "$CHANGED_FILES" | grep -E '(\.json|\.yaml|\.yml|\.toml|\.env)$' || true)
-ROUTE_FILES=$(echo "$CHANGED_FILES" | grep -iE '(route|controller|handler|endpoint|api)' | grep -vE '(\.test\.|\.spec\.)' || true)
+ROUTE_FILES=$(echo "$CHANGED_FILES" | grep -E '(^|/)(src/api/|app/api/|pages/api/)|\.(route|handler|controller|endpoint)\.(ts|tsx|js|jsx|py|go|rs)$' | grep -vE '(\.test\.|\.spec\.)' || true)
 UI_FILES=$(echo "$CHANGED_FILES" | grep -iE '\.(tsx|jsx|vue|svelte)$' | grep -vE '(\.test\.|\.spec\.)' || true)
 
-SOURCE_COUNT=$(echo "$SOURCE_FILES" | grep -c . 2>/dev/null || echo 0)
-TEST_COUNT=$(echo "$TEST_FILES" | grep -c . 2>/dev/null || echo 0)
-ROUTE_COUNT=$(echo "$ROUTE_FILES" | grep -c . 2>/dev/null || echo 0)
-UI_COUNT=$(echo "$UI_FILES" | grep -c . 2>/dev/null || echo 0)
+SOURCE_COUNT=$(count_lines "$SOURCE_FILES")
+TEST_COUNT=$(count_lines "$TEST_FILES")
+ROUTE_COUNT=$(count_lines "$ROUTE_FILES")
+UI_COUNT=$(count_lines "$UI_FILES")
 
 echo "  Source files changed: $SOURCE_COUNT"
 echo "  Test files changed: $TEST_COUNT"
@@ -204,7 +260,7 @@ else
   if [ -n "$BRUNO_DIR" ]; then
     # Check for new .bru files in the diff
     NEW_BRU=$(echo "$CHANGED_FILES" | grep -E '\.bru$' || true)
-    BRU_COUNT=$(echo "$NEW_BRU" | grep -c . 2>/dev/null || echo 0)
+    BRU_COUNT=$(count_lines "$NEW_BRU")
 
     if [ "$BRU_COUNT" -gt 0 ]; then
       report_pass "Found $BRU_COUNT Bruno API test files for $ROUTE_COUNT route changes"
@@ -218,7 +274,7 @@ else
   else
     # Check for other API test patterns (supertest, axios tests, etc.)
     API_TEST_FILES=$(echo "$TEST_FILES" | grep -iE '(api|route|endpoint|integration)' || true)
-    API_TEST_COUNT=$(echo "$API_TEST_FILES" | grep -c . 2>/dev/null || echo 0)
+    API_TEST_COUNT=$(count_lines "$API_TEST_FILES")
 
     if [ "$API_TEST_COUNT" -gt 0 ]; then
       report_pass "Found $API_TEST_COUNT API test files for $ROUTE_COUNT route changes"
@@ -241,7 +297,7 @@ elif [ "$UI_COUNT" -eq 0 ]; then
 else
   # Check for E2E/functional test files
   E2E_FILES=$(echo "$CHANGED_FILES" | grep -iE '(e2e|playwright|cypress|functional|integration)' || true)
-  E2E_COUNT=$(echo "$E2E_FILES" | grep -c . 2>/dev/null || echo 0)
+  E2E_COUNT=$(count_lines "$E2E_FILES")
 
   if [ "$E2E_COUNT" -gt 0 ]; then
     report_pass "Found $E2E_COUNT functional/E2E test files for $UI_COUNT UI changes"
@@ -337,13 +393,13 @@ for SRC in $SOURCE_FILES; do
   if [ ! -f "$SRC" ]; then continue; fi
 
   # as any casts
-  AS_ANY_COUNT=$(grep -c 'as any' "$SRC" 2>/dev/null || echo 0)
+  AS_ANY_COUNT=$(count_matches 'as any' "$SRC")
   if [ "$AS_ANY_COUNT" -gt 0 ]; then
     RH_ISSUES+=("$AS_ANY_COUNT 'as any' cast(s) in $SRC")
   fi
 
   # @ts-ignore / @ts-expect-error without explanation
-  TS_IGNORE_COUNT=$(grep -cE '@ts-(ignore|expect-error)' "$SRC" 2>/dev/null || echo 0)
+  TS_IGNORE_COUNT=$(count_matches '@ts-(ignore|expect-error)' "$SRC")
   if [ "$TS_IGNORE_COUNT" -gt 0 ]; then
     RH_ISSUES+=("$TS_IGNORE_COUNT @ts-ignore/@ts-expect-error in $SRC")
   fi
@@ -355,14 +411,14 @@ for SRC in $SOURCE_FILES; do
 
   # console.log left in (non-test files)
   if ! echo "$SRC" | grep -qE '(test|spec)'; then
-    LOG_COUNT=$(grep -c 'console\.log' "$SRC" 2>/dev/null || echo 0)
+    LOG_COUNT=$(count_matches 'console\.log' "$SRC")
     if [ "$LOG_COUNT" -gt 2 ]; then
       RH_ISSUES+=("$LOG_COUNT console.log statements in $SRC (possible debug leftovers)")
     fi
   fi
 
   # Non-null assertions (!)
-  BANG_COUNT=$(grep -cE '\w+!' "$SRC" 2>/dev/null || echo 0)
+  BANG_COUNT=$(count_matches '\w+!' "$SRC")
   if [ "$BANG_COUNT" -gt 5 ]; then
     RH_ISSUES+=("$BANG_COUNT non-null assertions in $SRC (excessive)")
   fi
@@ -380,28 +436,38 @@ echo ""
 # ============================================================
 # 8. PR MERGE STATE VERIFICATION
 # ============================================================
+# PR_NUMBER, PR_STATE and PR_MERGE_SHA were already resolved at the top
+# of the script (see DIFF_RANGE setup). Reuse them instead of re-querying
+# `gh pr list --head` (which only matches OPEN PRs and false-negatives
+# every merged-with-deleted-branch worker — the common case since
+# CTL-130).
 echo -e "${CYAN}--- 8. PR Merge State ---${NC}"
 
-BRANCH=$(git branch --show-current 2>/dev/null || echo "")
-if [ -n "$BRANCH" ]; then
-  PR_NUMBER=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
-  if [ -n "$PR_NUMBER" ]; then
-    PR_STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
-    if [ "$PR_STATE" = "MERGED" ]; then
-      report_pass "PR #${PR_NUMBER} is MERGED"
-    elif [ "$PR_STATE" = "OPEN" ]; then
-      MERGE_STATUS=$(gh pr view "$PR_NUMBER" --json mergeStateStatus --jq '.mergeStateStatus' 2>/dev/null || echo "UNKNOWN")
-      report_fail "PR #${PR_NUMBER} is still OPEN (mergeStateStatus: ${MERGE_STATUS}) — worker exited before merge"
-    elif [ "$PR_STATE" = "CLOSED" ]; then
-      report_fail "PR #${PR_NUMBER} is CLOSED without merge"
-    else
-      report_warn "PR #${PR_NUMBER} state: ${PR_STATE}"
-    fi
-  else
-    report_fail "No PR found for branch ${BRANCH}"
-  fi
-else
+if [ -z "$BRANCH" ]; then
   report_warn "Could not determine current branch"
+elif [ -n "$PR_NUMBER" ]; then
+  case "$PR_STATE" in
+    MERGED)
+      if [ -n "$PR_MERGE_SHA" ]; then
+        report_pass "PR #${PR_NUMBER} is MERGED (merge SHA: ${PR_MERGE_SHA:0:8})"
+      else
+        report_pass "PR #${PR_NUMBER} is MERGED"
+      fi
+      ;;
+    OPEN)
+      PR_VIEW_OPEN_JSON=$(gh pr view "$PR_NUMBER" --json mergeStateStatus 2>/dev/null || echo "{}")
+      MERGE_STATUS=$(echo "$PR_VIEW_OPEN_JSON" | jq -r '.mergeStateStatus // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
+      report_fail "PR #${PR_NUMBER} is still OPEN (mergeStateStatus: ${MERGE_STATUS}) — worker exited before merge"
+      ;;
+    CLOSED)
+      report_fail "PR #${PR_NUMBER} is CLOSED without merge"
+      ;;
+    *)
+      report_warn "PR #${PR_NUMBER} state: ${PR_STATE}"
+      ;;
+  esac
+else
+  report_fail "No PR found for branch ${BRANCH}"
 fi
 echo ""
 
@@ -422,9 +488,11 @@ if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
   fi
 
   if [ "$CLAIMED_API" = "true" ] && [ "$ROUTE_COUNT" -gt 0 ]; then
-    NEW_BRU=$(echo "$CHANGED_FILES" | grep -E '\.bru$' | grep -c . 2>/dev/null || echo 0)
-    API_TESTS=$(echo "$TEST_FILES" | grep -iE '(api|route|endpoint|integration)' | grep -c . 2>/dev/null || echo 0)
-    if [ "$NEW_BRU" -eq 0 ] && [ "$API_TESTS" -eq 0 ]; then
+    NEW_BRU_FILES=$(echo "$CHANGED_FILES" | grep -E '\.bru$' || true)
+    NEW_BRU_COUNT=$(count_lines "$NEW_BRU_FILES")
+    API_TEST_MATCHES=$(echo "$TEST_FILES" | grep -iE '(api|route|endpoint|integration)' || true)
+    API_TESTS_COUNT=$(count_lines "$API_TEST_MATCHES")
+    if [ "$NEW_BRU_COUNT" -eq 0 ] && [ "$API_TESTS_COUNT" -eq 0 ]; then
       report_fail "Worker claims API tests exist but none found in diff"
     fi
   fi
