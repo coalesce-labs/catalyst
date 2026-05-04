@@ -1,5 +1,23 @@
 # Changelog
 
+## [8.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.0.0...catalyst-dev-v8.1.0)
+
+May 04, 2026
+
+<!-- ai-enhanced -->
+
+### Webhook Auto-Registration & Verification Fixes
+
+The `setup-webhooks.sh` script now auto-registers Linear webhooks with `--linear-register --webhook-url <url>`, eliminating the manual GraphQL mutation step that previously blocked event-driven workflows. Fixed four critical bugs in `orchestrate-verify.sh` that caused verification failures on merged PRs and produced malformed output with integer comparison errors. Existing GitHub webhook subscriptions automatically upgrade to include `release` and `workflow_run` events on daemon restart.
+
+
+
+### PRs
+
+* **dev:** Linear webhook auto-registration in setup-webhooks.sh (CTL-224) ([#353](https://github.com/coalesce-labs/catalyst/issues/353)) ([8cf4807](https://github.com/coalesce-labs/catalyst/commit/8cf480738bfc301caed4ee9ddc824fec378ac111))
+* **dev:** repair orchestrate-verify.sh — broken on merged PRs + integer-cmp errors (CTL-222) ([#352](https://github.com/coalesce-labs/catalyst/issues/352)) ([e98ffea](https://github.com/coalesce-labs/catalyst/commit/e98ffeaea35f1e78ba4a67026a2c50d68d5a1237))
+* **dev:** webhook event mapper — missing release/workflow_run + bogus pr.merged on label changes (CTL-226) ([#351](https://github.com/coalesce-labs/catalyst/issues/351)) ([0668d38](https://github.com/coalesce-labs/catalyst/commit/0668d38bbb748fef6d16554e28d30bc34d0a681b))
+
 ## [8.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v7.14.0...catalyst-dev-v8.0.0)
 
 May 04, 2026
