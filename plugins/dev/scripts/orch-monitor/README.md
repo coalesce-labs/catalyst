@@ -107,11 +107,13 @@ The monitor subscribes to ten event types per repo:
 The monitor also accepts Linear events at `POST /api/webhook/linear` when `monitor.linear.webhookSecretEnv` is configured:
 
 ```bash
-plugins/dev/scripts/setup-webhooks.sh --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET
-export CATALYST_LINEAR_WEBHOOK_SECRET=<your-linear-webhook-signing-secret>
+plugins/dev/scripts/setup-webhooks.sh \
+  --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET \
+  --linear-register \
+  --webhook-url https://your-tunnel/api/webhook/linear
 ```
 
-Linear webhooks must be registered manually via Linear's GraphQL API (no `gh api` equivalent). See the [website docs](https://github.com/coalesce-labs/catalyst/blob/main/website/src/content/docs/observability/webhooks.md#linear-webhooks) for the `webhookCreate` mutation.
+`--linear-register` auto-registers the Linear webhook via Linear's GraphQL API (CTL-224). It is idempotent: re-running with the same URL is a no-op. See the [website docs](https://github.com/coalesce-labs/catalyst/blob/main/website/src/content/docs/observability/webhooks.md#linear-webhooks) for the full setup flow including local tunnels.
 
 Topics emitted to the unified event log:
 
