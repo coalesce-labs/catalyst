@@ -32,7 +32,13 @@ set -euo pipefail
 
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 DB_FILE="${CATALYST_DB_FILE:-$CATALYST_DIR/catalyst.db}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 MIGRATIONS_DIR="${CATALYST_MIGRATIONS_DIR:-$SCRIPT_DIR/db-migrations}"
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
