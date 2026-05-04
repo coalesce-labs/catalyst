@@ -450,3 +450,49 @@ catalyst-events tail --filter '.event | startswith("linear.")'
 # The first shell should print the matching event line within seconds.
 ```
 
+## Version drift detection
+
+The `catalyst-monitor` wrapper checks at startup whether it is running a stale version of
+the daemon code. This catches the case where `/plugin update` lands new code in the plugin
+cache but the active symlink (or shell alias) still points at the previous version.
+
+On `start` and `restart`, the wrapper:
+
+1. Reads the version of the script being executed (from the adjacent `version.txt`).
+2. Reads the highest semver subdirectory under `~/.claude/plugins/cache/catalyst/catalyst-dev/`.
+3. Prints a warning to stderr when the running version is older.
+
+The same fields are exposed in `status --json`:
+
+```json
+{
+  "running": true,
+  "pid": 12345,
+  "port": 7400,
+  "url": "http://localhost:7400",
+  "runningVersion": "8.1.0",
+  "latestAvailableVersion": "8.1.0",
+  "isStale": false
+}
+```
+
+The startup pre-flight (`check-setup.sh`, run by setup skills) consumes these fields and
+surfaces drift as a warning with the remediation command.
+
+To suppress the warning (e.g. when deliberately pinned to an older version), add the
+following to `.catalyst/config.json`:
+
+```json
+{
+  "catalyst": {
+    "monitor": {
+      "suppressVersionWarning": true
+    }
+  }
+}
+```
+
+When running the wrapper from a source-tree clone (no plugin cache), `runningVersion`
+comes from `plugins/dev/version.txt` and `latestAvailableVersion` is `null` if the plugin
+cache directory does not exist on the machine.
+
