@@ -408,6 +408,37 @@ test_combined_add_repo_and_linear_register() {
   fi
 }
 
+# ─── Test 17 — --linear-register and --linear-deregister are mutex (CTL-238) ──
+test_linear_register_deregister_mutex() {
+  local env; env=$(make_test_env t17)
+  if run_setup "$env" --linear-register --linear-deregister --webhook-url https://x/ \
+       > "${SCRATCH}/t17.out" 2>&1; then
+    echo "expected non-zero exit for register + deregister combination" >&2
+    cat "${SCRATCH}/t17.out" >&2
+    return 1
+  fi
+  if ! grep -q "mutually exclusive" "${SCRATCH}/t17.out"; then
+    echo "expected mutex error message" >&2
+    cat "${SCRATCH}/t17.out" >&2
+    return 1
+  fi
+}
+
+# ─── Test 18 — --linear-deregister only-mode skips GitHub setup (CTL-238) ───
+test_linear_deregister_only_skips_github_setup() {
+  local env; env=$(make_test_env t18)
+  # Run will likely fail (no Layer 2 record present) but the point of this
+  # test is that setup-webhooks.sh did NOT run smee channel provisioning —
+  # i.e., the FAIL: curl/openssl marker from the smee channel call never
+  # appears in the output.
+  run_setup "$env" --linear-deregister > "${SCRATCH}/t18.out" 2>&1 || true
+  if grep -q "FAIL: curl invoked during --add-repo-only mode\|FAIL: openssl" "${SCRATCH}/t18.out"; then
+    echo "--linear-deregister only-mode unexpectedly hit smee channel setup" >&2
+    cat "${SCRATCH}/t18.out" >&2
+    return 1
+  fi
+}
+
 # ─── Run all ──────────────────────────────────────────────────────────────
 echo "Running setup-webhooks --add-repo tests…"
 run "single add bootstraps watchRepos" test_single_add
@@ -426,6 +457,8 @@ run "--linear-register requires --webhook-url" test_linear_register_requires_web
 run "--webhook-url must be https://" test_webhook_url_must_be_https
 run "--linear-register only mode skips GitHub setup" test_linear_register_only_skips_github
 run "combined --add-repo + --linear-register" test_combined_add_repo_and_linear_register
+run "--linear-register/-deregister mutex" test_linear_register_deregister_mutex
+run "--linear-deregister only-mode skips GitHub setup" test_linear_deregister_only_skips_github_setup
 
 echo
 echo "Passed: $PASSES, Failed: $FAILURES"

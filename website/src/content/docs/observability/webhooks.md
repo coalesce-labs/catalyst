@@ -345,11 +345,41 @@ e.g. `linear.issue.state_changed`, `linear.comment.created`.
 |------|-------|-----------|
 | `webhookSecretEnv` (env-var name only) | `catalyst.monitor.linear.webhookSecretEnv` in `.catalyst/config.json` | YES |
 | HMAC secret value | env var named above (default fallback `CATALYST_LINEAR_WEBHOOK_SECRET`) | NO (per-developer env) |
+| Registration record (`webhookId`, `webhookUrl`, `registeredAt`, `resourceTypes`) | `catalyst.monitor.linear` in `~/.config/catalyst/config.json` | NO (per-machine, written by `--linear-register`) |
+| HMAC secret file | `~/.config/catalyst/linear-webhook-secret` (mode 600, read by `--linear-register` post-create) | NO (per-developer) |
 
 Run `setup-webhooks.sh --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET` to write the
 env-var name to `.catalyst/config.json`. Then `export CATALYST_LINEAR_WEBHOOK_SECRET=<your-secret>`
 in your shell rc file. Linear webhooks share the same Layer 1 / Layer 2 split as GitHub:
-team-wide config in `.catalyst/config.json`, per-developer values in environment.
+team-wide config in `.catalyst/config.json`, per-developer values in environment, and
+per-machine registration state in `~/.config/catalyst/config.json` (CTL-238 — mirrors the
+GitHub `smeeChannel` write).
+
+#### Layer 2 registration record
+
+`~/.config/catalyst/config.json` (cross-project, per-machine — never committed; written by
+`setup-webhooks.sh --linear-register` after a successful `webhookCreate`):
+
+```json
+{
+  "catalyst": {
+    "monitor": {
+      "linear": {
+        "webhookId": "abc-123-uuid-from-linear",
+        "webhookUrl": "https://your-tunnel/api/webhook/linear",
+        "registeredAt": "2026-05-04T20:00:00Z",
+        "resourceTypes": ["Issue", "Comment", "IssueLabel", "Cycle", "Reaction", "Project"]
+      }
+    }
+  }
+}
+```
+
+This is the Linear analogue of `catalyst.monitor.github.smeeChannel` — same Layer 2 file,
+same per-machine semantics. The local record is the source of truth for idempotency on
+re-run: when the URL matches, `--linear-register` short-circuits without calling Linear's
+GraphQL API, and `--linear-deregister` reads `webhookId` from this record to call
+`webhookDelete` cleanly.
 
 ### Registering the webhook with Linear
 
@@ -379,8 +409,29 @@ The script:
    `IssueRelation` is intentionally excluded — Linear does not deliver it.
 5. Persists the returned `secret` to `~/.config/catalyst/linear-webhook-secret`
    (mode 600), mirroring the GitHub-side `~/.config/catalyst/webhook-secret`.
-6. Prints the `export CATALYST_LINEAR_WEBHOOK_SECRET="$(cat …)"` line for
+6. Writes the registration record (`webhookId`, `webhookUrl`, `registeredAt`,
+   `resourceTypes`) to `~/.config/catalyst/config.json` under
+   `catalyst.monitor.linear` (CTL-238). Subsequent re-runs short-circuit on
+   this record — no Linear API call needed for the dedup decision. See
+   [Layer 2 registration record](#layer-2-registration-record) above.
+7. Prints the `export CATALYST_LINEAR_WEBHOOK_SECRET="$(cat …)"` line for
    your shell rc.
+
+#### Idempotency on re-run (CTL-238)
+
+When you re-run `--linear-register --webhook-url <U>`, the script consults the Layer 2
+record before touching the Linear API:
+
+- **Record matches `<U>`, no `--force`** → prints `Webhook already registered (id=…); skipping`
+  and exits 0. Zero API calls.
+- **Record holds a different URL, no `--force`** → errors out, leaves the record untouched,
+  asks the user to pass `--force` to delete the old webhook and register the new URL.
+- **`--force`** → deletes the recorded webhook by ID, clears the record, calls `webhookCreate`
+  for `<U>`, rewrites the record. The list-then-match step from CTL-224 is skipped on this
+  path (we already know the world from the Layer 2 record).
+- **No record** → falls back to the CTL-224 path: list webhooks via API, dedup by URL,
+  reuse-or-create. On reuse, writes a partial Layer 2 record (no `resourceTypes` —
+  the list response doesn't expose them) so subsequent runs short-circuit locally.
 
 To rotate the secret (or change the URL), re-run with `--force`:
 
@@ -409,6 +460,21 @@ want webhook registration (no env-var-name write):
 plugins/dev/scripts/setup-linear-webhook.sh \
   --webhook-url https://your-tunnel/api/webhook/linear
 ```
+
+### Deregistering the webhook (CTL-238)
+
+To clean up a registered Linear webhook:
+
+```bash
+plugins/dev/scripts/setup-webhooks.sh --linear-deregister
+```
+
+The script reads `webhookId` from the Layer 2 registration record, calls Linear's
+`webhookDelete`, clears the record, and removes `~/.config/catalyst/linear-webhook-secret`.
+Errors cleanly with a non-zero exit when no Layer 2 record exists (nothing to delete).
+
+`--linear-deregister` and `--linear-register` are mutually exclusive — pass one or the
+other, not both.
 
 ### Signing scheme
 
