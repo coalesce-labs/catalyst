@@ -24,6 +24,8 @@ export interface EventScope {
   sha?: string;
   ref?: string;
   environment?: string;
+  /** GitHub release tag (e.g. "v8.0.0") — populated for github.release.* events. */
+  tag?: string;
 }
 
 export interface GlobalEventEnvelope {
