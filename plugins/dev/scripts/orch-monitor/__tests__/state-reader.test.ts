@@ -1186,3 +1186,56 @@ describe("analyticsPath (CTL-59 — prefer workers/output/)", () => {
     expect(analyticsPath(orchDir, "T-1")).toBe(flatPath);
   });
 });
+
+// CTL-211 — surface the worker's `deploy` block (written by the orchestrator's
+// Phase 4 deploy state machine) so the dashboard can render a Deploy column.
+describe("WorkerState deploy field passthrough (CTL-211)", () => {
+  it("populates worker.deploy when the signal file has a deploy block", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "CTL-211": {
+          ticket: "CTL-211",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-CTL-211",
+          status: "deploying",
+          phase: 5,
+          startedAt: now,
+          updatedAt: now,
+          deploy: {
+            startedAt: now,
+            environment: "production",
+            deploymentId: 12345,
+            failedAttempts: 0,
+          },
+        },
+      },
+    });
+
+    const state = readOrchestratorState(orchDir);
+    const w = state.workers["CTL-211"];
+    expect(w).toBeDefined();
+    expect(w.deploy).toBeDefined();
+    expect(w.deploy?.environment).toBe("production");
+    expect(w.deploy?.deploymentId).toBe(12345);
+  });
+
+  it("leaves worker.deploy undefined when the signal file has no deploy block", () => {
+    const now = new Date().toISOString();
+    const orchDir = setupOrch(tmpRoot, "orch-alpha", {
+      workers: {
+        "CTL-200": {
+          ticket: "CTL-200",
+          orchestrator: "orch-alpha",
+          workerName: "orch-alpha-CTL-200",
+          status: "merging",
+          phase: 5,
+          startedAt: now,
+          updatedAt: now,
+        },
+      },
+    });
+    const state = readOrchestratorState(orchDir);
+    expect(state.workers["CTL-200"].deploy).toBeUndefined();
+  });
+});

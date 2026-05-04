@@ -133,4 +133,22 @@ idempotency header.
 
 Long-lived consumers (orchestrators, the dashboard, operator shells) tail the unified event log via `catalyst-events tail --filter <jq>`. Short-lived `claude -p` workers block on `catalyst-events wait-for --filter <jq> --timeout <sec>` until a matching event arrives. See the `monitor-events` skill (`plugins/dev/skills/monitor-events/SKILL.md`) for the canonical patterns and the safety-net rule (every wait MUST be paired with an authoritative one-shot check, since daemon-down means no webhook events).
 
+### Deploy verification (CTL-211)
+
+The orchestrator's Phase 4 loop drives a production-deploy state machine for repos that opt in via `catalyst.deploy.<repo>.skipDeployVerification: false`. Lifecycle:
+
+```
+worker exits → merging → (orchestrator: gh pr view) → MERGED?
+   → skipDeployVerification=true → done (today's behavior)
+   → skipDeployVerification=false → merged
+        → github.deployment.created (production env, merge SHA) → deploying
+        → github.deployment_status.success → done
+        → github.deployment_status.failure | error → deploy-failed
+        → timeoutSec elapsed → stalled (with comms.attention)
+```
+
+The dashboard renders these states in a Deploy column. Per-repo configuration (timeoutSec, productionEnvironment, etc.) lives in `.catalyst/config.json` under `catalyst.deploy.<repo>` — see [Deploy Verification](https://github.com/coalesce-labs/catalyst/blob/main/website/src/content/docs/reference/configuration.md#deploy-verification-ctl-211) for the schema.
+
+The Linear ticket fetcher is also event-driven (CTL-211): `linear.issue.*` webhook events trigger an on-demand cache refresh for the affected ticket, in addition to the 5-minute polling fallback.
+
 [shadcn]: https://ui.shadcn.com

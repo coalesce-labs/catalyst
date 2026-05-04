@@ -59,6 +59,90 @@ function LabelChip({ label }: { label: string }) {
   );
 }
 
+// CTL-211 — sort rank for the Deploy column. Lower = earlier in the lifecycle.
+// Surface in-flight deploys above settled rows when sorted ascending.
+function deployCellSortRank(w: WorkerState): number {
+  switch (w.status) {
+    case "deploy-failed":
+      return 0; // surface failures first
+    case "deploying":
+      return 1;
+    case "merged":
+      return 2;
+    case "done":
+      return w.deploy?.result === "success" ? 3 : 4;
+    default:
+      return 5;
+  }
+}
+
+// CTL-211 — Deploy column. Shows the production deploy state for workers
+// whose repo opts into deploy verification. Sourced from signal-file `status`
+// + `deploy.*` fields written by the orchestrator's Phase 4 deploy state
+// machine.
+function DeployCell({ w }: { w: WorkerState }) {
+  const status = w.status;
+  // Statuses that aren't part of the deploy lifecycle render "—".
+  const isDeployRelevant =
+    status === "merged" ||
+    status === "deploying" ||
+    status === "done" ||
+    status === "deploy-failed";
+  if (!isDeployRelevant) return <span className="text-muted">—</span>;
+
+  // Repos with skipDeployVerification=true short-circuit MERGED → done with
+  // no deploy block. Show "n/a" so the operator knows there's no deploy
+  // signal expected.
+  if (!w.deploy) {
+    if (status === "done") {
+      return <span className="text-muted">n/a</span>;
+    }
+    return <span className="text-muted">—</span>;
+  }
+
+  const deploy = w.deploy;
+  if (status === "done" && deploy.result === "success") {
+    return (
+      <span
+        className="rounded bg-green/16 px-1.5 py-px font-mono text-[10px] text-[#9eea9e]"
+        title={`deployed to ${deploy.environment ?? "production"}${deploy.completedAt ? ` at ${deploy.completedAt}` : ""}`}
+      >
+        deployed
+      </span>
+    );
+  }
+  if (status === "deploy-failed") {
+    const attempts = deploy.failedAttempts ?? 0;
+    return (
+      <span
+        className="rounded bg-red/16 px-1.5 py-px font-mono text-[10px] text-[#f4a8a8]"
+        title={`${deploy.lastFailureState ?? "failure"} (attempt ${attempts})`}
+      >
+        deploy-failed{attempts > 1 ? ` ×${attempts}` : ""}
+      </span>
+    );
+  }
+  if (status === "deploying") {
+    return (
+      <span
+        className="rounded bg-blue/16 px-1.5 py-px font-mono text-[10px] text-[#9ec7f4]"
+        title={`deploying to ${deploy.environment ?? "production"}`}
+      >
+        deploying
+      </span>
+    );
+  }
+  // status === "merged" — PR landed, deploy not started yet.
+  return (
+    <span
+      className="rounded bg-surface-3 px-1.5 py-px font-mono text-[10px] text-muted border border-border"
+      title={`waiting for deploy to ${deploy.environment ?? "production"}`}
+    >
+      pending deploy
+    </span>
+  );
+}
+
 function LiveTimer({
   updatedAt,
   staleThreshold,
@@ -259,6 +343,9 @@ function WorkerRow({
         )}
       </td>
       <td className="px-3 py-2.5">
+        <DeployCell w={w} />
+      </td>
+      <td className="px-3 py-2.5">
         {hasComms ? (
           <button
             onClick={(e) => {
@@ -319,6 +406,7 @@ type WorkerSortKey =
   | "phase"
   | "worker"
   | "pr"
+  | "deploy"
   | "comms"
   | "cost"
   | "tokens"
@@ -337,6 +425,7 @@ const COL_HEADERS: {
   { label: "Phase", sortKey: "phase", align: "left" },
   { label: "Worker", sortKey: "worker", align: "left" },
   { label: "PR", sortKey: "pr", align: "left" },
+  { label: "Deploy", sortKey: "deploy", align: "left" },
   { label: "Comms", sortKey: "comms", align: "left" },
   { label: "Cost", sortKey: "cost", align: "right" },
   { label: "Tokens", sortKey: "tokens", align: "right" },
@@ -412,6 +501,8 @@ export function WorkerTable({
             return workerCellSortRank(w as WorkerState);
           case "pr":
             return w.pr?.number ?? null;
+          case "deploy":
+            return deployCellSortRank(w as WorkerState);
           case "comms":
             return commsAuthors?.has(t) ? 1 : 0;
           case "cost":
