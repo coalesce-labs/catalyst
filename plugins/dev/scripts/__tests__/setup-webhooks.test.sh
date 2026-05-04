@@ -259,6 +259,155 @@ test_combined_flags() {
   expect_eq "linear env preserved" "CATALYST_LINEAR_WEBHOOK_SECRET" "$linear_env"
 }
 
+# Replace the strict-failure curl stub with a GraphQL-aware one. Used by tests
+# that exercise --linear-register, which dispatches to setup-linear-webhook.sh
+# and legitimately needs curl to run. openssl remains strict-failure so an
+# unintended fall-through into GitHub-side setup still trips the test.
+install_graphql_curl_stub() {
+  local env_dir="$1"
+  mkdir -p "${env_dir}/curl-fixtures"
+  cat > "${env_dir}/curl-fixtures/list.json" <<'EOF'
+{"data":{"webhooks":{"nodes":[]}}}
+EOF
+  cat > "${env_dir}/curl-fixtures/create.json" <<'EOF'
+{"data":{"webhookCreate":{"success":true,"webhook":{"id":"wh-test","secret":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","enabled":true,"url":"https://example.com/api/webhook/linear"}}}}
+EOF
+  cat > "${env_dir}/stubbin/curl" <<EOF
+#!/usr/bin/env bash
+body=\$(cat 2>/dev/null || true)
+log="${env_dir}/curl-requests.log"
+fixture_dir="${env_dir}/curl-fixtures"
+{ echo "---REQUEST---"; echo "args: \$*"; echo "body: \$body"; } >> "\$log"
+if [[ "\$body" == *"webhookCreate"* ]]; then op="create"
+elif [[ "\$body" == *"webhookDelete"* ]]; then op="delete"
+elif [[ "\$body" == *"webhooks"* ]]; then op="list"
+else op="unknown"
+fi
+fixture="\${fixture_dir}/\${op}.json"
+[[ -f "\$fixture" ]] && cat "\$fixture" || echo '{"data":{}}'
+exit 0
+EOF
+  chmod +x "${env_dir}/stubbin/curl"
+}
+
+seed_layer1_layer2_for_linear() {
+  local env_dir="$1"
+  cat > "${env_dir}/project/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-project",
+    "linear": {
+      "teamKey": "TEST",
+      "teamId": "00000000-0000-0000-0000-000000000001"
+    }
+  }
+}
+EOF
+  cat > "${env_dir}/home/.config/catalyst/config-test-project.json" <<'EOF'
+{ "linear": { "apiToken": "lin_api_test" } }
+EOF
+}
+
+# ─── Test 13 — --linear-register requires --webhook-url ─────────────────────
+test_linear_register_requires_webhook_url() {
+  local env; env=$(make_test_env t13)
+  if run_setup "$env" --linear-register > "${SCRATCH}/t13.out" 2>&1; then
+    echo "expected non-zero exit when --linear-register has no --webhook-url" >&2
+    return 1
+  fi
+  if ! grep -qi "webhook-url" "${SCRATCH}/t13.out"; then
+    echo "error should mention --webhook-url" >&2
+    cat "${SCRATCH}/t13.out" >&2
+    return 1
+  fi
+  # No curl/openssl call should have happened.
+  if grep -q "FAIL: curl\|FAIL: openssl" "${SCRATCH}/t13.out"; then
+    echo "validation failure should reject before any network call" >&2
+    return 1
+  fi
+}
+
+# ─── Test 14 — --webhook-url with non-https rejected ────────────────────────
+test_webhook_url_must_be_https() {
+  local env; env=$(make_test_env t14)
+  if run_setup "$env" --linear-register --webhook-url "http://example.com" \
+      > "${SCRATCH}/t14.out" 2>&1; then
+    echo "expected non-zero exit for http:// URL" >&2
+    return 1
+  fi
+  if grep -q "FAIL: curl\|FAIL: openssl" "${SCRATCH}/t14.out"; then
+    echo "validation failure should reject before any network call" >&2
+    return 1
+  fi
+}
+
+# ─── Test 15 — --linear-register only mode skips GitHub setup ───────────────
+test_linear_register_only_skips_github() {
+  local env; env=$(make_test_env t15)
+  install_graphql_curl_stub "$env"
+  seed_layer1_layer2_for_linear "$env"
+
+  if ! run_setup "$env" --linear-register \
+        --webhook-url https://example.com/api/webhook/linear \
+      > "${SCRATCH}/t15.out" 2>&1; then
+    echo "expected --linear-register only mode to succeed" >&2
+    cat "${SCRATCH}/t15.out" >&2
+    return 1
+  fi
+
+  # openssl is still strict-failure: GitHub setup must NOT have run.
+  if grep -q "FAIL: openssl" "${SCRATCH}/t15.out"; then
+    echo "GitHub setup unexpectedly ran in --linear-register only mode" >&2
+    cat "${SCRATCH}/t15.out" >&2
+    return 1
+  fi
+
+  # Helper script should have been dispatched (curl request logged).
+  if [[ ! -s "${env}/curl-requests.log" ]]; then
+    echo "expected helper to issue at least one GraphQL request" >&2
+    return 1
+  fi
+  if ! grep -q "webhookCreate" "${env}/curl-requests.log"; then
+    echo "expected helper to call webhookCreate" >&2
+    return 1
+  fi
+}
+
+# ─── Test 16 — combining --add-repo + --linear-register ─────────────────────
+test_combined_add_repo_and_linear_register() {
+  local env; env=$(make_test_env t16)
+  install_graphql_curl_stub "$env"
+  seed_layer1_layer2_for_linear "$env"
+
+  if ! run_setup "$env" --add-repo coalesce-labs/catalyst \
+        --linear-register \
+        --webhook-url https://example.com/api/webhook/linear \
+      > "${SCRATCH}/t16.out" 2>&1; then
+    echo "expected combined invocation to succeed" >&2
+    cat "${SCRATCH}/t16.out" >&2
+    return 1
+  fi
+
+  # watchRepos should be written.
+  local got; got=$(read_watch_repos "${env}/project/.catalyst/config.json")
+  expect_eq "watchRepos written in combined mode" \
+    '["coalesce-labs/catalyst"]' "$got" || return 1
+
+  # Helper should have been dispatched.
+  if ! grep -q "webhookCreate" "${env}/curl-requests.log"; then
+    echo "expected helper to call webhookCreate in combined mode" >&2
+    return 1
+  fi
+
+  # GitHub setup must NOT have run (--add-repo + --linear-register are both
+  # "only intent" flags so SKIP_GITHUB_SETUP applies).
+  if grep -q "FAIL: openssl" "${SCRATCH}/t16.out"; then
+    echo "GitHub channel/secret setup unexpectedly ran" >&2
+    cat "${SCRATCH}/t16.out" >&2
+    return 1
+  fi
+}
+
 # ─── Run all ──────────────────────────────────────────────────────────────
 echo "Running setup-webhooks --add-repo tests…"
 run "single add bootstraps watchRepos" test_single_add
@@ -273,6 +422,10 @@ run "--linear-secret-env writes config" test_linear_secret_env
 run "--linear-secret-env only mode no network" test_linear_no_network
 run "--linear-secret-env invalid name rejected" test_linear_invalid_env_name
 run "combined --add-repo + --linear-secret-env" test_combined_flags
+run "--linear-register requires --webhook-url" test_linear_register_requires_webhook_url
+run "--webhook-url must be https://" test_webhook_url_must_be_https
+run "--linear-register only mode skips GitHub setup" test_linear_register_only_skips_github
+run "combined --add-repo + --linear-register" test_combined_add_repo_and_linear_register
 
 echo
 echo "Passed: $PASSES, Failed: $FAILURES"
