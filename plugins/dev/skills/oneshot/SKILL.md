@@ -582,13 +582,22 @@ authoritative watcher for everything past `merging` — it confirms the merge vi
 handles BEHIND/DIRTY/BLOCKED via `orchestrate-revive` and `orchestrate-auto-fixup`, and
 (per CTL-211) drives the production-deploy state machine.
 
-Transition signal status to `merging` and exit:
+Transition signal status to `merging`, post the terminal `done` event on the shared comms
+channel, and exit:
 
 ```bash
 # Transition signal to merging (terminal worker status)
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 jq --arg ts "$TS" '.status = "merging" | .phase = 5 | .updatedAt = $ts | .phaseTimestamps.merging = $ts' \
   "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
+
+# CTL-111 / CTL-236: post the terminal `done` event so the orchestrator's quorum
+# check (and any sibling watchers) observe worker completion. The `done` subcommand
+# is the contract for terminal success — distinct from `info` heartbeats. Posted
+# exactly once, after the merging signal is written, before exit.
+if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && [ -n "$COMMS_BIN" ]; then
+  "$COMMS_BIN" done "$CATALYST_COMMS_CHANNEL" --as "$TICKET_ID" >/dev/null 2>&1 || true
+fi
 ```
 
 **Definition of done (CTL-211).** The worker's job ends at `merging`; the worker's
