@@ -323,17 +323,21 @@ With `worktreeDir: "~/catalyst/api"` explicitly configured:
 mkdir -p "${ORCH_DIR}/workers/output"
 ```
 
-Initialize `DASHBOARD.md` from the template:
+Render the initial `DASHBOARD.md` (CTL-230) — the renderer reads `state.json` +
+`workers/*.json` signals + the events log every cycle, so calling it now produces a real
+header + empty worker table + waves outline rather than a template skeleton:
 
 ```bash
-cp "${CLAUDE_PLUGIN_ROOT}/templates/orchestrate-dashboard.md" "${ORCH_DIR}/DASHBOARD.md"
+"${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
+  --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" \
+  >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 ```
 
 Create the orchestrator's status directory:
 
 ```
 ${ORCH_DIR}/                                    # ~/catalyst/runs/${ORCH_NAME}/
-├── DASHBOARD.md                                # human-readable status (from template)
+├── DASHBOARD.md                                # human-readable status (re-rendered each Phase 4 cycle)
 ├── state.json                                  # machine-readable orchestration state
 ├── wave-1-briefing.md                          # per-wave briefings
 ├── SUMMARY.md                                  # final run summary (post-Phase 5)
@@ -822,6 +826,13 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
     --orch "${ORCH_NAME}" --ticket "${TICKET}" --orch-dir "${ORCH_DIR}" -v \
     >/dev/null 2>>"${ORCH_DIR}/.roll-usage.log" || true
 done
+
+# Re-render DASHBOARD.md so the file artifact reflects current state (CTL-230).
+# Idempotent — same inputs produce a byte-identical file. The orch-monitor daemon
+# file-watches DASHBOARD.md and forwards changes to UI clients via SSE.
+"${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
+  --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" \
+  >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 ```
 
 **Authoritative merge confirmation (CTL-31, refined by CTL-80, CTL-133, CTL-243):**
@@ -1487,14 +1498,21 @@ When all waves are complete:
    - Timeline (start to finish, per-wave durations)
    - Any verification failures that required remediation
 
-   Then persist summary and any remaining briefings to thoughts:
+   Then render the dashboard one final time so the persisted handoff copy reflects the
+   run's terminal state (CTL-230), and persist both alongside any remaining briefings:
 
    ```bash
+   "${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
+     --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" \
+     >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
+
    HANDOFF_DIR="thoughts/shared/handoffs/${ORCH_NAME}"
    mkdir -p "${HANDOFF_DIR}"
    TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
    cp "${ORCH_DIR}/SUMMARY.md" \
       "${HANDOFF_DIR}/${TIMESTAMP}_${ORCH_NAME}-summary.md"
+   cp "${ORCH_DIR}/DASHBOARD.md" \
+      "${HANDOFF_DIR}/${TIMESTAMP}_${ORCH_NAME}-dashboard.md"
    ```
 
 2. **Archive orchestrator artifacts** (CTL-110).
@@ -2030,8 +2048,8 @@ fi
 - Wave advancement requires ALL tickets in the wave to pass verification
 - The `--auto-merge` flag applies to workers, not the orchestrator
 - Dashboard and state files are ephemeral — they don't survive worktree removal
-- Wave briefings and summaries are persisted to `thoughts/shared/handoffs/${ORCH_NAME}/` for
-  archival
+- Wave briefings, summaries, and the final dashboard are persisted to
+  `thoughts/shared/handoffs/${ORCH_NAME}/` for archival (CTL-230)
 - Wave briefings are the key differentiator — knowledge compounds across waves
 - The 3-layer testing enforcement prevents the observed failure mode of agents skipping tests
 - CTL-26 dependency: Uses `.catalyst/` paths. Falls back to `.claude/` if `.catalyst/` doesn't exist
