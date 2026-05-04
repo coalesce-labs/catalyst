@@ -321,18 +321,23 @@ fi
 
 **Phase-to-status mapping for signal file:**
 
-| Phase | Signal Status |
-|-------|--------------|
-| 1 start | `researching` |
-| 2 start | `planning` |
-| 3 start | `implementing` |
-| 4 start | `validating` |
-| 5 start | `shipping` |
-| 5 PR opened | `pr-created` + `pr.prOpenedAt` + `pr.ciStatus: "pending"` |
-| 5 auto-merge armed | `pr-created` + `pr.autoMergeArmedAt` |
-| 5 worker exits after arming auto-merge | `merging` (terminal worker status) |
-| 5 PR merged (written by orchestrator poll loop) | `pr.ciStatus: "merged"` + `pr.mergedAt` + `status: "done"` |
-| Any failure | `failed` |
+| Phase | Signal Status | Writer |
+|-------|--------------|--------|
+| 1 start | `researching` | worker |
+| 2 start | `planning` | worker |
+| 3 start | `implementing` | worker |
+| 4 start | `validating` | worker |
+| 5 start | `shipping` | worker |
+| 5 PR opened | `pr-created` + `pr.prOpenedAt` + `pr.ciStatus: "pending"` | worker |
+| 5 auto-merge armed | `pr-created` + `pr.autoMergeArmedAt` | worker |
+| 5 worker exits after arming auto-merge | `merging` (terminal worker status) | worker |
+| 5 PR merged + skipDeployVerification=true | `pr.ciStatus: "merged"` + `pr.mergedAt` + `status: "done"` | orchestrator Phase 4 |
+| 5 PR merged + skipDeployVerification=false (CTL-211) | `pr.ciStatus: "merged"` + `pr.mergedAt` + `pr.mergeCommitSha` + `status: "merged"` + `deploy.startedAt` + `deploy.environment` | orchestrator Phase 4 |
+| 5 deployment created/in_progress for production env (CTL-211) | `status: "deploying"` + `deploy.deploymentId` | orchestrator Phase 4 deploy sub-loop |
+| 5 deployment_status.success on production env (CTL-211) | `status: "done"` + `deploy.completedAt` + `deploy.result: "success"` | orchestrator Phase 4 deploy sub-loop |
+| 5 deployment_status.failure on production env (CTL-211) | `status: "deploy-failed"` + `deploy.failedAttempts` + attention | orchestrator Phase 4 deploy sub-loop |
+| 5 deploy timeout exceeded (CTL-211) | `status: "stalled"` + attention | orchestrator Phase 4 deploy sub-loop |
+| Any failure | `failed` | worker |
 
 ## Session Tracking
 
@@ -569,13 +574,13 @@ if [ -z "$NO_MERGE" ]; then
 fi
 ```
 
-**Step 3: Worker Exit (Orchestrator Takes Over) — CTL-133**
+**Step 3: Worker Exit (Orchestrator Takes Over) — CTL-133, refined by CTL-211**
 
 The worker's contract ends at `status: "merging"`. After arming auto-merge and recording the
-signal, the worker exits successfully. The **orchestrator's Phase 4 poll loop** is the
-authoritative merge watcher — it polls `gh pr view --json state,mergeStateStatus,mergedAt`,
-writes `pr.mergedAt` + `status: "done"` to the signal file, and handles BEHIND/DIRTY/BLOCKED
-states via `orchestrate-revive` and `orchestrate-auto-fixup`.
+signal, the worker exits successfully. The **orchestrator's Phase 4 loop** is the
+authoritative watcher for everything past `merging` — it confirms the merge via `gh pr view`,
+handles BEHIND/DIRTY/BLOCKED via `orchestrate-revive` and `orchestrate-auto-fixup`, and
+(per CTL-211) drives the production-deploy state machine.
 
 Transition signal status to `merging` and exit:
 
@@ -586,14 +591,66 @@ jq --arg ts "$TS" '.status = "merging" | .phase = 5 | .updatedAt = $ts | .phaseT
   "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
 ```
 
-**Why workers don't poll (CTL-133):** Workers dispatched via `claude -p` run one conversation
-turn and exit. `ScheduleWakeup` only fires in `/loop` dynamic mode — in `-p` mode it silently
-no-ops, causing false-positive worker deaths. The orchestrator's poll loop + `orchestrate-revive`
-(default budget: 10) handles merge confirmation, BEHIND rebases, CI fix-ups, and review-thread
-resolution by reviving workers when remediation is needed.
+**Definition of done (CTL-211).** The worker's job ends at `merging`; the worker's
+*ticket* is "done" when production deploy succeeds (or `skipDeployVerification: true`
+shortcuts the chain). This split exists for two reasons:
+
+1. **`claude -p` workers can't reliably stay alive for hours.** Process death (machine
+   sleep, OOM, transient CLI bug) before deploy completes would leave the ticket stuck.
+   The orchestrator is already long-lived and event-driven (CTL-210); putting deploy
+   verification there avoids re-implementing reliability machinery.
+2. **Single-writer guarantee.** Only the orchestrator writes `merged`, `deploying`,
+   `done`, and `deploy-failed`. The worker writes through `merging` only. No race.
+
+Lifecycle states the worker DOES NOT write (orchestrator-owned, see
+[[monitor-events]] for the wake-up + `gh`-as-source-of-truth pattern):
+
+| Status | Trigger | Written by |
+|---|---|---|
+| `merged` | `gh pr view` returns `state=MERGED` AND `catalyst.deploy.<repo>.skipDeployVerification: false` | orchestrator Phase 4 merge-watcher |
+| `deploying` | `github.deployment.created` (or `_status` in_progress/pending) for production env on the merge SHA | orchestrator Phase 4 deploy sub-loop |
+| `done` | `github.deployment_status.success` for production env, OR MERGED with `skipDeployVerification: true` | orchestrator Phase 4 |
+| `deploy-failed` | `github.deployment_status.failure|error` for production env | orchestrator Phase 4 deploy sub-loop |
+
+**Recovery semantics (orchestrator-driven):**
+
+| Failure | Orchestrator action |
+|---|---|
+| `github.check_suite.completed` failure | `orchestrate-auto-fixup` (CTL-64) dispatches a fix-up worker if state is BLOCKED for ≥10 min |
+| `github.pr_review.submitted` changes_requested | `orchestrate-revive` (budget: 10) re-dispatches the original worker to address comments |
+| `mergeStateStatus = BEHIND` | Auto-merge typically rebases; on `github.push` to base, re-evaluates merge state |
+| `mergeStateStatus = DIRTY` | Raises `merge-conflicts` attention if not auto-resolvable |
+| `deployment_status.failure` (within retry budget) | Records `deploy-failed`, raises attention; future deployment_status events can retry |
+| `deployment_status.failure` (budget exhausted, default 3) | Raises `deploy-budget-exhausted` attention; status stays `deploy-failed` until human intervention |
+| Hard timeout (`catalyst.deploy.<repo>.timeoutSec`, default 1800s) | Sets `status: "stalled"` + `deploy-timeout` attention |
+| Worker process death (heartbeat staleness > 15 min) | `orchestrate-revive` reclaims and re-dispatches if PR is still in flight |
+
+**Why workers don't poll (CTL-133, CTL-211):** Workers dispatched via `claude -p` run one
+conversation turn and exit. `ScheduleWakeup` only fires in `/loop` dynamic mode — in `-p`
+mode it silently no-ops, causing false-positive worker deaths. A long-lived `Monitor` loop
+in the worker is technically possible, but per the
+[token-cost validation finding](../../../thoughts/shared/research/2026-05-04-CTL-211-token-cost-validation-finding.md)
+the orchestrator-driven hybrid is more reliable, doesn't duplicate recovery logic
+across two writers, and keeps the worker contract simple. The orchestrator's poll loop +
+`orchestrate-revive` (default budget: 10) handles merge confirmation, BEHIND rebases, CI
+fix-ups, review-thread resolution, AND the new deploy state machine — by reviving workers
+when remediation is needed.
 
 **Standalone mode** (no orchestrator): the worker arms auto-merge and reports PR status. The
 user can later run `/catalyst-dev:merge-pr` to confirm the merge and run post-merge cleanup.
+Standalone runs do not get deploy verification — that requires the orchestrator's Phase 4
+loop.
+
+**Reactive recovery is owned by the long-lived watcher (CTL-228).** Both
+the orchestrator's Phase 4 poll loop and `/catalyst-dev:merge-pr` consume the
+canonical "Reactive PR lifecycle" pattern documented in
+[[monitor-events]] § Pattern 3 — a single multi-event subscription that wakes
+on PR merged, CI failure, review changes-requested, or push to the base
+branch, and dispatches via a `case` on the matched event. The worker itself
+does **not** subscribe; that would require a long-lived loop, which `claude -p`
+workers can't run reliably. The merge-arming-to-merge-confirmation window is
+covered by whichever long-lived watcher is in scope (orchestrator or the
+follow-up `/merge-pr` invocation).
 
 **Step 4: Optional Rollup Fragment Contribution (CTL-108)**
 

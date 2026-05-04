@@ -31,6 +31,15 @@
       "autoFile": false,
       "githubRepo": "coalesce-labs/catalyst",
       "labels": ["auto-submitted"]
+    },
+    "deploy": {
+      "$comment": "Per-repo deploy verification config (CTL-211). Set skipDeployVerification: false for repos that emit GitHub Deployments to enable the orchestrator's merged → deploying → done state machine. Default for unknown repos is skipDeployVerification: true (today's CTL-133 behavior — done immediately on PR merge).",
+      "[YOUR_ORG]/[YOUR_REPO]": {
+        "timeoutSec": 1800,
+        "productionEnvironment": "production",
+        "stagingEnvironment": "staging",
+        "skipDeployVerification": true
+      }
     }
   }
 }

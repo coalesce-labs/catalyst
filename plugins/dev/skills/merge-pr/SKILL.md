@@ -13,6 +13,15 @@ version: 1.0.0
 
 Safely merges a PR after comprehensive verification, with Linear integration and automated cleanup.
 
+## Prerequisites
+
+```bash
+# Project setup + orch-monitor daemon liveness (REQUIRED — Phase 6 consumes webhook events)
+if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
+  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
+fi
+```
+
 ## Branch Protection — Safety Rules
 
 Read and follow the safety rules in
@@ -183,44 +192,91 @@ Or skip tests (not recommended):
 
 Exit with error (unless `--skip-tests` flag provided).
 
-### 6. Diagnose and resolve merge blockers — wait for merge event, then verify
+### 6. Diagnose and resolve merge blockers — reactive PR lifecycle
 
 Read and follow the full workflow in
-`"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`. See also the
-`monitor-events` skill for the canonical event-driven wait pattern.
+`"${CLAUDE_PLUGIN_ROOT}/references/merge-blocker-diagnosis.md"`. The wake-up
+mechanism here is the **canonical "Reactive PR lifecycle" pattern from
+`monitor-events` (Pattern 3, CTL-228)** — a single `wait-for` that fires on
+any of: PR merged, PR closed, CI failure, review changes-requested, or push
+to the base branch. Each wake-up is paired with an authoritative `gh pr view`
+re-check; the event tells the agent *what changed*, `gh pr view` tells it
+*the current truth*.
 
-This step **waits on the unified event log** for `github.pr.merged` and pairs every
-wake-up with a one-shot `gh pr view` for authoritative verification. The cheap wake-up
-is event-driven; the source of truth is GitHub. CTL-210 replaces the old `sleep 30`
-poll loop — see `plugins/dev/skills/monitor-events/SKILL.md` for the rationale.
+Why a multi-event filter and not just `github.pr.merged`: most of the time
+between PR-create and PR-merge is spent on CI, review, and base-branch
+churn — not waiting on a clean merge to land. Subscribing only to the merge
+event means the agent learns nothing from a check failure or a
+changes-requested review until the 600-second timeout fires, at which point
+it falls back to `gh pr view` polling. The disjunctive filter restores
+event-driven dispatch for those cases.
 
 ```bash
-while true; do
-  # Wait for the merge event. wait-for is a no-op on event arrival; on
-  # timeout we fall through to the authoritative re-check below. The
-  # 600-second timeout is the fallback cadence when no events arrive (e.g.
-  # daemon down). Empty result on stderr means timed out — that's expected,
-  # don't treat it as a failure.
-  catalyst-events wait-for \
-    --filter ".event == \"github.pr.merged\" and .scope.pr == $pr_number" \
-    --timeout 600 >/dev/null 2>&1 || true
+BASE_BRANCH=$(gh pr view "$pr_number" --json baseRefName --jq '.baseRefName')
+ITER=0
+MAX_ITER=20
 
-  # MANDATORY authoritative re-check — never trust the event stream as proof
-  # of merge. The wait-for is a wake-up trigger; gh pr view is truth.
-  MERGE_STATE=$(gh pr view $pr_number --json state,mergeStateStatus,mergedAt)
+while [ $ITER -lt $MAX_ITER ]; do
+  ITER=$((ITER + 1))
+
+  # Reactive multi-event subscription. wait-for is a no-op on event arrival;
+  # on timeout we fall through to the authoritative re-check below. The
+  # 600-second timeout is the fallback cadence when no events arrive (e.g.
+  # daemon down).
+  EVENT_JSON=$(catalyst-events wait-for \
+    --filter '
+      (.event == "github.pr.merged" and .scope.pr == '"$pr_number"') or
+      (.event == "github.pr.closed" and .scope.pr == '"$pr_number"') or
+      (.event == "github.check_suite.completed"
+         and (.detail.prNumbers // [] | index('"$pr_number"') != null)
+         and (.detail.conclusion == "failure" or .detail.conclusion == "timed_out")) or
+      (.event == "github.pr_review.submitted"
+         and .scope.pr == '"$pr_number"'
+         and .detail.state == "changes_requested") or
+      (.event == "github.push" and .scope.ref == "refs/heads/'"$BASE_BRANCH"'")
+    ' \
+    --timeout 600 || true)
+
+  # MANDATORY authoritative re-check on every wake-up.
+  MERGE_STATE=$(gh pr view "$pr_number" --json state,mergeStateStatus,mergedAt)
   STATE=$(echo "$MERGE_STATE" | jq -r '.state')
-  if [ "$STATE" = "MERGED" ]; then
-    break
+  if [ "$STATE" = "MERGED" ]; then break; fi
+  if [ "$STATE" = "CLOSED" ]; then
+    echo "❌ PR #$pr_number was closed without merging"
+    exit 1
   fi
-  # Diagnose and resolve blockers per the reference doc.
-  # No sleep needed — wait-for already provided the cadence.
+
+  EVENT=$(echo "$EVENT_JSON" | jq -r '.event // ""')
+  case "$EVENT" in
+    github.check_suite.completed)
+      # CI failed — diagnose via merge-blocker-diagnosis.md, push fix.
+      ;;
+    github.pr_review.submitted)
+      # Changes requested. Bot reviewers are addressable inline; humans
+      # require operator action. detail.author.type is "Bot" or "User".
+      AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.detail.author.type // "User"')
+      if [ "$AUTHOR_TYPE" = "Bot" ]; then
+        # Run /catalyst-dev:review-comments to address inline.
+        :
+      fi
+      ;;
+    github.push)
+      gh pr update-branch "$pr_number" || true
+      ;;
+    "")
+      # Timeout — gh pr view above already confirmed we're not merged.
+      # Diagnose blockers per the reference doc.
+      ;;
+  esac
 done
 ```
 
-**Why the pairing is mandatory:** if the orch-monitor daemon is down, no GitHub
-webhook events flow into the log, and `wait-for` will block until timeout (600 s).
-The `gh pr view` after timeout is the safety net that keeps the merge confirmation
-correct even when the event stream has dropped.
+**Why every wake-up runs `gh pr view`:** if the orch-monitor daemon is down,
+no GitHub webhook events flow into the log and `wait-for` blocks until
+timeout (600 s). The `gh pr view` after timeout is the safety net that keeps
+merge confirmation correct even when the event stream has dropped. Same rule
+applies on real event arrivals — events are wake-up triggers, never the
+source of truth.
 
 The reference doc contains:
 
@@ -242,11 +298,12 @@ The reference doc contains:
 | `hooks-pending` (HAS_HOOKS) | Wait one cadence cycle and re-query |
 | `unknown-blocker` (UNKNOWN) | Query branch protection rules, report every requirement with status |
 
-There is no fixed iteration cap on the loop — it polls indefinitely while CI/checks are still
-progressing. Apply per-failure-type fix budgets (e.g., max 3 distinct fix attempts for the same
-CI failure mode) to prevent runaway loops on a stuck failure. Exit non-success only when a
-genuine human-gated blocker is identified (unresolvable conflict, required reviewer, branch
-protection requirement that cannot be satisfied).
+The outer loop has a `MAX_ITER=20` cap to prevent runaway behaviour on a
+stuck failure mode. Apply per-failure-type fix budgets inside each handler
+(e.g., max 3 distinct fix attempts for the same CI failure mode). Exit
+non-success only when a genuine human-gated blocker is identified
+(unresolvable conflict, required reviewer, branch protection requirement that
+cannot be satisfied).
 
 When the loop confirms `state == "MERGED"`, capture `mergedAt` and proceed to step 7.
 

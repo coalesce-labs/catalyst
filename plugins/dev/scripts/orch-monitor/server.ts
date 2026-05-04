@@ -87,6 +87,8 @@ import {
   createEventLogWriter,
   type EventLogWriter,
 } from "./lib/event-log";
+import { validatePredicate } from "./lib/event-filter";
+import { readBacklog, tailEventLog } from "./lib/event-log-reader";
 import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey } from "./lib/project-key";
@@ -307,7 +309,24 @@ function applyPreviewStatus(
   }
 }
 
+function safeParseJson(line: string): Record<string, unknown> | null {
+  try {
+    const v: unknown = JSON.parse(line);
+    return typeof v === "object" && v !== null && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 const SSE_EVENTS = EVENT_TYPES;
+// `global-event` and `global-event-backlog` are produced per-client by the
+// activity tailer in the /events handler — not by the in-process bus — so they
+// are excluded from the bus broadcast loop.
+const BUS_BROADCAST_EVENTS = SSE_EVENTS.filter(
+  (t) => t !== "global-event" && t !== "global-event-backlog",
+);
 const ALLOWED_PUBLIC_EXTENSIONS = new Set([
   ".html",
   ".css",
@@ -576,6 +595,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
       secret: linearWebhookConfig.secret,
       eventLog: linearEventLog,
       emit: (type, data) => emit(type, data),
+      // CTL-211 — invalidate the LinearFetcher cache on issue webhook events
+      // so the dashboard reflects the new state in seconds instead of waiting
+      // for the next 5-min polling tick. Other event kinds (comment, reaction,
+      // etc.) don't change the ticket fields the dashboard renders, so they
+      // skip invalidation. The fetcher's invalidate() degrades silently when
+      // linearis is unavailable.
+      onAccept: async (event) => {
+        if (
+          linear !== null &&
+          (event.kind === "issue" || event.kind === "comment") &&
+          event.ticket !== null
+        ) {
+          await linear.invalidate(event.ticket);
+        }
+      },
       logger: {
         info: (m) => console.info(m),
         warn: (m) => console.warn(m),
@@ -629,7 +663,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const encoder = new TextEncoder();
 
   const unsubscribers: Array<() => void> = [];
-  for (const eventType of SSE_EVENTS) {
+  for (const eventType of BUS_BROADCAST_EVENTS) {
     unsubscribers.push(
       subscribe(eventType, (data) => {
         const envelope = data as MonitorEventEnvelope;
@@ -660,9 +694,27 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
         if (url.pathname === "/events") {
           const filter = parseFilter(url);
+
+          // Eagerly validate the activity predicate so we can return 400 before
+          // opening a stream. Empty-string predicate is allowed (means "no
+          // jq filter, all global events"); only validate non-empty.
+          if (
+            filter.activityPredicate !== undefined &&
+            filter.activityPredicate.trim() !== ""
+          ) {
+            const v = validatePredicate(filter.activityPredicate);
+            if (!v.ok) {
+              return new Response(
+                `activity filter error: ${v.error ?? "invalid"}`,
+                { status: 400 },
+              );
+            }
+          }
+
           let captured: ReadableStreamDefaultController<Uint8Array> | null = null;
+          let activityCtrl: AbortController | null = null;
           const stream = new ReadableStream<Uint8Array>({
-            start(controller) {
+            async start(controller) {
               captured = controller;
               sseClients.set(controller, filter);
               try {
@@ -674,9 +726,66 @@ export function createServer(opts: CreateServerOptions): BunServer {
               } catch (err) {
                 console.error(`[server] initial snapshot enqueue failed:`, err);
               }
+
+              // Activity stream multiplex: only when the client opted in via
+              // `?activity=` (predicate may be empty for "all events").
+              if (filter.activityPredicate !== undefined) {
+                const predicate = filter.activityPredicate;
+                try {
+                  const backlogLines = await readBacklog({
+                    catalystDir: CATALYST_DIR,
+                    predicate,
+                    limit: 100,
+                  });
+                  const parsed = backlogLines
+                    .map((l) => safeParseJson(l))
+                    .filter((v): v is Record<string, unknown> => v !== null);
+                  const backlogEnv = createEvent(
+                    "global-event-backlog",
+                    { events: parsed },
+                    "filesystem",
+                  );
+                  // Enqueue may race with client cancel; swallow the
+                  // ERR_INVALID_STATE that comes back if the controller has
+                  // already closed.
+                  try {
+                    controller.enqueue(
+                      encoder.encode(
+                        `event: global-event-backlog\ndata: ${JSON.stringify(backlogEnv)}\n\n`,
+                      ),
+                    );
+                  } catch {
+                    /* client cancelled */
+                  }
+                } catch (err) {
+                  console.error(`[server] activity backlog failed:`, err);
+                }
+
+                activityCtrl = new AbortController();
+                void tailEventLog({
+                  catalystDir: CATALYST_DIR,
+                  predicate,
+                  signal: activityCtrl.signal,
+                  onEvent: (line) => {
+                    const parsed = safeParseJson(line);
+                    if (parsed === null) return;
+                    const env = createEvent("global-event", parsed, "filesystem");
+                    try {
+                      controller.enqueue(
+                        encoder.encode(
+                          `event: global-event\ndata: ${JSON.stringify(env)}\n\n`,
+                        ),
+                      );
+                    } catch {
+                      activityCtrl?.abort();
+                    }
+                  },
+                });
+              }
             },
             cancel() {
               if (captured) sseClients.delete(captured);
+              activityCtrl?.abort();
             },
           });
           return new Response(stream, {

@@ -71,7 +71,20 @@ done
 [ -z "$ORCH_DIR" ]  && { echo "ERROR: --orch-dir (or \$CATALYST_ORCHESTRATOR_DIR) required" >&2; exit 1; }
 
 if [ -z "$WORKER_DIR" ]; then
-  WORKER_DIR="$(dirname "$ORCH_DIR")/${ORCH_NAME}-${TICKET_ID}"
+  # CTL-231: read worktreeBase from state.json (the canonical key written by the
+  # orchestrator at startup, also consumed by orchestrate-dispatch-next). The old
+  # dirname(ORCH_DIR) fallback broke after CTL-59 split runs/ from wt/.
+  STATE_JSON="${ORCH_DIR}/state.json"
+  WORKTREE_BASE=""
+  if [ -f "$STATE_JSON" ]; then
+    WORKTREE_BASE=$(jq -r '.worktreeBase // ""' "$STATE_JSON" 2>/dev/null || echo "")
+  fi
+  if [ -n "$WORKTREE_BASE" ]; then
+    WORKER_DIR="${WORKTREE_BASE}/${ORCH_NAME}-${TICKET_ID}"
+  else
+    echo "warn: orchestrate-fixup falling back to dirname(ORCH_DIR) — state.json:.worktreeBase missing" >&2
+    WORKER_DIR="$(dirname "$ORCH_DIR")/${ORCH_NAME}-${TICKET_ID}"
+  fi
 fi
 
 BRANCH_NAME="${ORCH_NAME}-${TICKET_ID}"

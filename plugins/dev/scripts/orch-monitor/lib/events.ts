@@ -11,6 +11,9 @@ export const EVENT_TYPES = [
   "session-end",
   "metrics-update",
   "annotation-change",
+  // Global event log multiplex (per-client tail; see server.ts /events handler):
+  "global-event-backlog",
+  "global-event",
 ] as const;
 
 export type MonitorEventType = (typeof EVENT_TYPES)[number];
@@ -51,6 +54,12 @@ export interface SSEFilter {
   types?: Set<MonitorEventType>;
   sessionId?: string;
   workspace?: string;
+  /**
+   * If set, the client opts into the global-event stream multiplexed onto the
+   * same SSE connection. Empty string = no jq predicate (receive all global
+   * events). Undefined = client does not want the global-event stream.
+   */
+  activityPredicate?: string;
 }
 
 export function createEvent<T>(
@@ -84,6 +93,11 @@ export function parseFilter(url: URL): SSEFilter {
 
   const workspace = url.searchParams.get("workspace");
   if (workspace && workspace.length <= 256) filter.workspace = workspace;
+
+  const activity = url.searchParams.get("activity");
+  if (activity !== null && activity.length <= 4096) {
+    filter.activityPredicate = activity;
+  }
 
   return filter;
 }
