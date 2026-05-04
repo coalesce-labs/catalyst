@@ -19,6 +19,29 @@ to the event stream via filter.
 This skill documents the canonical patterns. Use it as a reference when writing or
 migrating skill prose; do not invoke it as a slash command.
 
+## Prerequisite — orch-monitor daemon must be running
+
+The two primitives below read from `~/catalyst/events/YYYY-MM.jsonl`, which is populated
+by the `orch-monitor` daemon (`plugins/dev/scripts/orch-monitor/server.ts`). When the
+daemon is **not** running:
+
+- `catalyst-events tail` returns an empty stream
+- `catalyst-events wait-for` blocks until its `--timeout` expires (default 600s) and
+  exits non-zero — callers fall back to `gh pr view` polling, which can't see deploys
+
+Liveness check (the same call wired into `check-project-setup.sh`):
+
+```bash
+plugins/dev/scripts/catalyst-monitor.sh status        # human-readable
+plugins/dev/scripts/catalyst-monitor.sh status --json # {"running":true,"pid":...}
+```
+
+Skills that invoke `check-project-setup.sh` (orchestrate, oneshot, merge-pr) handle the
+liveness check automatically — interactive runs prompt to start the daemon, autonomous
+runs warn-to-stderr and proceed. If you reuse the primitives outside those skills, run
+the status check yourself and either start the daemon (`catalyst-monitor.sh start`) or
+plan for the polling fallback.
+
 ## The two primitives
 
 | Primitive | When | What |
