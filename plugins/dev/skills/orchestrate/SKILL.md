@@ -732,6 +732,10 @@ catalyst-events tail --filter '
 '
 ```
 
+> **Orchestrator-scoped filtering (CTL-234):** `github.*` events now carry `.scope.orchestrator`
+> (stamped at receive time by the webhook handler). You may safely add
+> `(.orchestrator == "${ORCH_NAME}") and (...)` to narrow the filter to this run's PRs only.
+
 **Wake-up classification.** When a line arrives on the Monitor, classify it before
 re-entering the scan so the response stays proportional. Every reaction reads
 authoritative state from `gh pr view`, `git rev-list`, or the signal file — events

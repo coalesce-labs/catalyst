@@ -70,6 +70,7 @@ describe.skipIf(JQ_PATH === null)(
           mergedAt: "2026-05-04T00:00:00Z",
           draft: false,
           mergeable: true,
+          headRef: "",
         },
         "del-1",
       )!;
@@ -88,6 +89,7 @@ describe.skipIf(JQ_PATH === null)(
           mergedAt: "2026-05-04T00:00:00Z",
           draft: false,
           mergeable: true,
+          headRef: "",
         },
         "del-2",
       )!;
@@ -102,6 +104,7 @@ describe.skipIf(JQ_PATH === null)(
           prNumbers: [PR, 43],
           conclusion: "failure",
           status: "completed",
+          headRef: "",
         },
         "del-3",
       )!;
@@ -116,6 +119,7 @@ describe.skipIf(JQ_PATH === null)(
           prNumbers: [PR],
           conclusion: "success",
           status: "completed",
+          headRef: "",
         },
         "del-4",
       )!;
@@ -130,6 +134,7 @@ describe.skipIf(JQ_PATH === null)(
           prNumbers: [99, 100],
           conclusion: "failure",
           status: "completed",
+          headRef: "",
         },
         "del-5",
       )!;
@@ -147,6 +152,7 @@ describe.skipIf(JQ_PATH === null)(
           reviewer: "alice",
           body: "fix",
           author: { login: "alice", type: "User" },
+          headRef: "",
         },
         "del-6",
       )!;
@@ -164,6 +170,7 @@ describe.skipIf(JQ_PATH === null)(
           reviewer: "alice",
           body: "lgtm",
           author: { login: "alice", type: "User" },
+          headRef: "",
         },
         "del-7",
       )!;
@@ -215,6 +222,7 @@ describe.skipIf(JQ_PATH === null)(
             reviewer: "codex[bot]",
             body: "fix",
             author: { login: "codex[bot]", type: "Bot" },
+            headRef: "",
           },
           "del-10",
         )!;
@@ -232,6 +240,7 @@ describe.skipIf(JQ_PATH === null)(
             reviewer: "alice",
             body: "fix",
             author: { login: "alice", type: "User" },
+            headRef: "",
           },
           "del-11",
         )!;

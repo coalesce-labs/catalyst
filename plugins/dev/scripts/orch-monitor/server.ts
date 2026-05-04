@@ -65,6 +65,10 @@ import {
   type WebhookHandler,
 } from "./lib/webhook-handler";
 import {
+  resolveOrchestrator as resolveOrchestratorFn,
+  type ActiveOrchestrator,
+} from "./lib/orchestrator-resolver";
+import {
   createLinearWebhookHandler,
   type LinearWebhookHandler,
 } from "./lib/linear-webhook-handler";
@@ -530,6 +534,36 @@ export function createServer(opts: CreateServerOptions): BunServer {
     return paths;
   }
 
+  // CTL-234 — orchestrator attribution for webhook events. Builds an
+  // `ActiveOrchestrator[]` snapshot for the resolver: orchestrator IDs come
+  // from `basename(orch.path)`, branch prefix is `${id}-` (the convention
+  // used by orchestrate-create-worktree), and the PR list comes from worker
+  // signal files. Cached briefly so a burst of webhooks doesn't re-scan disk
+  // for every event.
+  const ORCH_LIST_TTL_MS = 30_000;
+  let cachedOrchList: { at: number; list: ActiveOrchestrator[] } | null = null;
+
+  function getActiveOrchestrators(): ActiveOrchestrator[] {
+    const now = Date.now();
+    if (cachedOrchList && now - cachedOrchList.at < ORCH_LIST_TTL_MS) {
+      return cachedOrchList.list;
+    }
+    const snap = buildSnapshot(wtDir, buildOpts);
+    const list: ActiveOrchestrator[] = snap.orchestrators.map((orch) => {
+      const id = basename(orch.path);
+      const prs: Array<{ repo: string; number: number }> = [];
+      for (const worker of Object.values(orch.workers)) {
+        if (!worker.pr) continue;
+        const wrepo = parseRepoFromPrUrl(worker.pr.url);
+        if (wrepo === null) continue;
+        prs.push({ repo: wrepo, number: worker.pr.number });
+      }
+      return { id, branchPrefix: `${id}-`, prs };
+    });
+    cachedOrchList = { at: now, list };
+    return list;
+  }
+
   let webhookHandler: WebhookHandler | null = null;
   let webhookTunnel: WebhookTunnel | null = null;
   let webhookSubscriber: WebhookSubscriber | null = null;
@@ -548,6 +582,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
       previewFetcher: previewFetcher ?? undefined,
       findSignalPaths: findSignalPathsForRef,
       eventLog,
+      resolveOrchestrator: (input) =>
+        resolveOrchestratorFn(input, getActiveOrchestrators()),
       emit: (type, data) => emit(type, data),
       logger: {
         info: (m) => console.info(m),

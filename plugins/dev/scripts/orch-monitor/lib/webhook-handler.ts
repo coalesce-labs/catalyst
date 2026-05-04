@@ -7,6 +7,18 @@ import {
   WEBHOOK_SOURCE,
 } from "./event-log";
 
+/**
+ * Function that resolves a (repo, pr?, headRef?) tuple to an orchestrator ID.
+ * Used by the webhook handler to stamp `scope.orchestrator` on github.* events
+ * (CTL-234). Returns `null` when the event doesn't belong to any active
+ * orchestrator (e.g. human-merged PRs to main).
+ */
+export type OrchestratorResolverFn = (input: {
+  repo: string;
+  pr?: number;
+  headRef?: string;
+}) => string | null;
+
 export interface PrFetcherForceLike {
   force(ref: { repo: string; number: number }): Promise<void>;
 }
@@ -38,9 +50,64 @@ export interface WebhookHandlerDeps {
   emit?: (type: string, data: unknown) => void;
   /** Optional event-log fan-out (Phase 6). */
   eventLog?: EventLogWriter;
+  /**
+   * Optional orchestrator-attribution lookup (CTL-234). When provided, the
+   * handler resolves each github.* event to an active orchestrator (by PR
+   * number or head-ref prefix) and stamps `scope.orchestrator` on the
+   * envelope before appending. Without this, events arrive with
+   * `scope.orchestrator: undefined`, breaking filters of the form
+   * `(.orchestrator == "orch-foo") and (.event | startswith("github."))`.
+   */
+  resolveOrchestrator?: OrchestratorResolverFn;
   /** Cap for the in-memory delivery-ID dedup set. Default 1000. */
   idempotencyMax?: number;
   logger?: WebhookLogger;
+}
+
+/**
+ * Extract `(repo, pr?, headRef?)` from a parsed webhook event for orchestrator
+ * attribution. For `check_suite` we use the first PR number (most events are
+ * scoped to a single PR; check_suites that fan across multiple PRs are
+ * rare). Events with no useful attribution fields return null.
+ */
+export function attributionInputFor(
+  event: WebhookEvent,
+): { repo: string; pr?: number; headRef?: string } | null {
+  switch (event.kind) {
+    case "pull_request":
+    case "pull_request_review":
+    case "pull_request_review_thread":
+    case "pull_request_review_comment":
+      return { repo: event.repo, pr: event.number, headRef: event.headRef };
+    case "check_suite":
+      return {
+        repo: event.repo,
+        pr: event.prNumbers[0],
+        headRef: event.headRef,
+      };
+    case "issue_comment":
+      return { repo: event.repo, pr: event.number };
+    case "workflow_run":
+      return {
+        repo: event.repo,
+        pr: event.prNumbers[0],
+        headRef: event.headBranch,
+      };
+    case "push": {
+      // ref is like "refs/heads/orch-foo-CTL-99" — strip the prefix to get
+      // the bare branch name for orchestrator attribution.
+      const headRef = event.ref.startsWith("refs/heads/")
+        ? event.ref.slice("refs/heads/".length)
+        : event.ref;
+      return { repo: event.repo, headRef };
+    }
+    case "deployment":
+    case "deployment_status":
+    case "status":
+    case "release":
+    case "ignored":
+      return null;
+  }
 }
 
 export interface WebhookHandler {
@@ -402,6 +469,21 @@ export function createWebhookHandler(
     if (deps.eventLog && event.kind !== "ignored") {
       const envelope = buildEventLogEnvelope(event, deliveryId);
       if (envelope !== null) {
+        if (deps.resolveOrchestrator) {
+          const attribInput = attributionInputFor(event);
+          if (attribInput !== null) {
+            try {
+              const orchId = deps.resolveOrchestrator(attribInput);
+              if (orchId !== null) envelope.scope.orchestrator = orchId;
+            } catch (err) {
+              logger.warn?.(
+                `[webhook] orchestrator resolution failed: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            }
+          }
+        }
         try {
           await deps.eventLog.append(envelope);
         } catch (err) {

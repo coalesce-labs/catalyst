@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import {
   createWebhookHandler,
   buildEventLogEnvelope,
+  attributionInputFor,
   type PrFetcherForceLike,
   type PreviewFetcherForceLike,
+  type OrchestratorResolverFn,
 } from "../lib/webhook-handler";
 import type { EventLogWriter, AppendableEvent } from "../lib/event-log";
 
@@ -574,6 +576,7 @@ describe("buildEventLogEnvelope", () => {
         mergedAt: "2026-05-03T12:00:00Z",
         draft: false,
         mergeable: true,
+        headRef: "",
       },
       "del-1",
     );
@@ -594,6 +597,7 @@ describe("buildEventLogEnvelope", () => {
         mergedAt: null,
         draft: false,
         mergeable: null,
+        headRef: "",
       },
       "del-2",
     );
@@ -615,6 +619,7 @@ describe("buildEventLogEnvelope", () => {
         mergedAt: "2026-05-04T06:42:52Z",
         draft: false,
         mergeable: null,
+        headRef: "",
       },
       "del-pr-labeled",
     );
@@ -632,6 +637,7 @@ describe("buildEventLogEnvelope", () => {
         mergedAt: "2026-05-04T06:42:52Z",
         draft: false,
         mergeable: null,
+        headRef: "",
       },
       "del-pr-unlabeled",
     );
@@ -649,6 +655,7 @@ describe("buildEventLogEnvelope", () => {
         mergedAt: null,
         draft: false,
         mergeable: null,
+        headRef: "",
       },
       "del-sync",
     );
@@ -708,6 +715,7 @@ describe("buildEventLogEnvelope", () => {
         prNumbers: [1, 2],
         status: "completed",
         conclusion: "success",
+        headRef: "",
       },
       "del-3",
     );
@@ -751,6 +759,7 @@ describe("buildEventLogEnvelope", () => {
         reviewer: "codex[bot]",
         body: "fix",
         author: { login: "codex[bot]", type: "Bot" },
+        headRef: "",
       },
       "del-6",
     );
@@ -787,6 +796,7 @@ describe("buildEventLogEnvelope", () => {
         body: "nit",
         htmlUrl: "https://example.com",
         author: { login: "dependabot[bot]", type: "Bot" },
+        headRef: "",
       },
       "del-8",
     );
@@ -794,6 +804,280 @@ describe("buildEventLogEnvelope", () => {
     expect(env!.detail.author).toEqual({
       login: "dependabot[bot]",
       type: "Bot",
+    });
+  });
+});
+
+describe("attributionInputFor", () => {
+  it("extracts repo, pr, and headRef from pull_request events", () => {
+    const got = attributionInputFor({
+      kind: "pull_request",
+      repo: "o/r",
+      number: 42,
+      action: "opened",
+      merged: false,
+      mergedAt: null,
+      draft: false,
+      mergeable: null,
+      headRef: "orch-foo-CTL-1",
+    });
+    expect(got).toEqual({ repo: "o/r", pr: 42, headRef: "orch-foo-CTL-1" });
+  });
+
+  it("uses the first PR number on check_suite events", () => {
+    const got = attributionInputFor({
+      kind: "check_suite",
+      repo: "o/r",
+      prNumbers: [10, 11],
+      conclusion: "failure",
+      status: "completed",
+      headRef: "orch-foo-CTL-2",
+    });
+    expect(got).toEqual({ repo: "o/r", pr: 10, headRef: "orch-foo-CTL-2" });
+  });
+
+  it("strips refs/heads/ from push.ref to produce a bare branch name", () => {
+    const got = attributionInputFor({
+      kind: "push",
+      repo: "o/r",
+      ref: "refs/heads/orch-foo-CTL-3",
+      baseSha: "a",
+      headSha: "b",
+      commits: [],
+    });
+    expect(got).toEqual({ repo: "o/r", headRef: "orch-foo-CTL-3" });
+  });
+
+  it("returns null for events with no orchestrator-attributable fields", () => {
+    expect(
+      attributionInputFor({
+        kind: "deployment",
+        repo: "o/r",
+        deploymentId: 1,
+        environment: "prod",
+        sha: "abc",
+        refName: "main",
+        payloadUrl: null,
+      }),
+    ).toBeNull();
+    expect(
+      attributionInputFor({ kind: "ignored", reason: "skip" }),
+    ).toBeNull();
+  });
+
+  it("uses workflow_run.headBranch", () => {
+    const got = attributionInputFor({
+      kind: "workflow_run",
+      repo: "o/r",
+      action: "completed",
+      workflowId: 1,
+      runId: 2,
+      name: "CI",
+      headSha: "abc",
+      headBranch: "orch-foo-CTL-9",
+      status: "completed",
+      conclusion: "success",
+      runNumber: 1,
+      htmlUrl: "https://example.com",
+      prNumbers: [50],
+    });
+    expect(got).toEqual({
+      repo: "o/r",
+      pr: 50,
+      headRef: "orch-foo-CTL-9",
+    });
+  });
+});
+
+describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
+  const eventLog = new FakeEventLog();
+  const calls: Array<{ repo: string; pr?: number; headRef?: string }> = [];
+  const resolveOrchestrator: OrchestratorResolverFn = (input) => {
+    calls.push(input);
+    if (input.headRef?.startsWith("orch-foo-")) return "orch-foo";
+    if (input.pr === 42) return "orch-bar";
+    return null;
+  };
+
+  beforeEach(() => {
+    eventLog.appends.length = 0;
+    calls.length = 0;
+  });
+
+  it("stamps scope.orchestrator when resolver matches by head ref", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    const res = await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "synchronize",
+        pull_request: {
+          number: 1,
+          merged: false,
+          head: { ref: "orch-foo-CTL-99" },
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-foo");
+    expect(calls[0]).toEqual({
+      repo: "owner/repo",
+      pr: 1,
+      headRef: "orch-foo-CTL-99",
+    });
+  });
+
+  it("stamps scope.orchestrator when resolver matches by PR number", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "created",
+          issue: { number: 42, pull_request: { url: "..." } },
+          comment: { id: 1, body: "hi", html_url: "..." },
+        },
+        { "x-github-event": "issue_comment" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-bar");
+  });
+
+  it("does not stamp when resolver returns null (e.g. non-orchestrator PR)", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: {
+          number: 999,
+          merged: false,
+          head: { ref: "feature/random" },
+        },
+      }),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBeUndefined();
+  });
+
+  it("works without a resolver (envelope is unstamped, existing behavior)", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      // resolveOrchestrator omitted
+    });
+    await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: {
+          number: 1,
+          merged: false,
+          head: { ref: "orch-foo-CTL-1" },
+        },
+      }),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBeUndefined();
+  });
+
+  it("logs and continues when the resolver throws", async () => {
+    const warnings: string[] = [];
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator: () => {
+        throw new Error("disk read failed");
+      },
+      logger: { warn: (m) => warnings.push(m) },
+    });
+    const res = await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: {
+          number: 1,
+          merged: false,
+          head: { ref: "orch-foo-CTL-1" },
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBeUndefined();
+    expect(warnings.some((w) => w.includes("orchestrator resolution failed"))).toBe(
+      true,
+    );
+  });
+
+  it("attributes check_suite events via head_branch", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          check_suite: {
+            status: "completed",
+            conclusion: "success",
+            head_branch: "orch-foo-CTL-1",
+            pull_requests: [],
+          },
+        },
+        { "x-github-event": "check_suite" },
+      ),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-foo");
+  });
+
+  it("attributes push events via the bare branch name", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          ref: "refs/heads/orch-foo-CTL-2",
+          before: "a",
+          after: "b",
+          commits: [],
+        },
+        { "x-github-event": "push" },
+      ),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-foo");
+    expect(calls[0]).toEqual({
+      repo: "owner/repo",
+      headRef: "orch-foo-CTL-2",
     });
   });
 });

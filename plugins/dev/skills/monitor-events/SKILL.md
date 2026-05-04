@@ -119,6 +119,26 @@ maps each event to its reaction.
 The orchestrator continues to maintain its 10-minute fallback scan (defense-in-depth).
 The fast path is event-driven; the slow path is the safety net.
 
+**Cross-orchestrator scoping (CTL-234).** When multiple orchestrators run on the same
+machine, narrow the filter with `(.orchestrator == "orch-foo")` to ignore events from
+sibling runs. As of CTL-234, the webhook receiver stamps `.scope.orchestrator` (and
+the back-compat top-level `.orchestrator`) on `github.*` events for PRs whose head
+branch starts with `<orchId>-`, so the filter
+
+```jq
+(.orchestrator == "orch-foo") and (
+  (.event | startswith("github.pr.")) or
+  (.event | startswith("github.check_")) or
+  (.event == "github.push") or
+  (.event | startswith("worker-"))
+)
+```
+
+works for **both** worker-lifecycle events (already attributed) and webhook events
+(now attributed via PR-number lookup or head-ref prefix). Events that don't belong
+to any active orchestrator (human-merged PRs to main, dependabot PRs, etc.) keep
+`.orchestrator == null` and are filtered out, which is the desired behaviour.
+
 ## Pattern 3 — Reactive PR lifecycle (multi-event wait + classify + dispatch)
 
 Pattern 1's single-event wait is fine for the happy path: the PR merges, the
