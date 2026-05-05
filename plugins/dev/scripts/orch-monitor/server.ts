@@ -88,7 +88,7 @@ import {
   type EventLogWriter,
 } from "./lib/event-log";
 import { validatePredicate } from "./lib/event-filter";
-import { readBacklog, tailEventLog } from "./lib/event-log-reader";
+import { readBacklog, tailEventLog, readTunnelEventStats } from "./lib/event-log-reader";
 import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey } from "./lib/project-key";
@@ -137,6 +137,8 @@ export interface CreateServerOptions {
   port?: number;
   hostname?: string;
   wtDir: string;
+  /** Override for the Catalyst state directory used by event log stats (default: ~/catalyst). */
+  catalystDir?: string;
   runsDir?: string | null;
   startWatcher?: boolean;
   publicDir?: string;
@@ -163,6 +165,8 @@ export interface CreateServerOptions {
   webhookConfig?: {
     smeeChannel: string;
     secret: string;
+    /** Env-var name the secret is read from (e.g. "CATALYST_WEBHOOK_SECRET"). Exposed via /api/status/webhook-tunnel. */
+    secretEnvName?: string;
     /** Local target URL — defaults to http://localhost:{port}/api/webhook. */
     target?: string;
     /** Override for tests so the real smee-client isn't invoked. */
@@ -419,6 +423,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     port = DEFAULT_PORT,
     hostname = "0.0.0.0",
     wtDir,
+    catalystDir: catalystDirOpt,
     runsDir = null,
     startWatcher = true,
     publicDir = join(import.meta.dir, "public"),
@@ -447,7 +452,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
 
   const CATALYST_DIR =
-    process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
+    catalystDirOpt ?? process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
   const annDbPath = annotationsDbPath ?? `${CATALYST_DIR}/annotations.db`;
   try {
     openDb(annDbPath);
@@ -1610,6 +1615,30 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
         }
 
+        if (url.pathname === "/api/status/webhook-tunnel") {
+          const stats = readTunnelEventStats(CATALYST_DIR);
+          if (!webhookConfig) {
+            return Response.json({
+              connected: false,
+              smeeUrl: null,
+              secretEnvName: null,
+              secretPresent: false,
+              lastEventAt: stats.lastEventAt,
+              eventCount24h: stats.eventCount24h,
+              eventCount24hByRepo: stats.eventCount24hByRepo,
+            });
+          }
+          return Response.json({
+            connected: webhookTunnel?.isStarted() ?? false,
+            smeeUrl: webhookConfig.smeeChannel || null,
+            secretEnvName: webhookConfig.secretEnvName ?? "CATALYST_WEBHOOK_SECRET",
+            secretPresent: webhookConfig.secret.length > 0,
+            lastEventAt: stats.lastEventAt,
+            eventCount24h: stats.eventCount24h,
+            eventCount24hByRepo: stats.eventCount24hByRepo,
+          });
+        }
+
         return new Response("Not Found", { status: 404 });
       } catch (err) {
         console.error(`[server] fetch handler error:`, err);
@@ -1785,6 +1814,7 @@ if (import.meta.main) {
       ? {
           smeeChannel: fullWebhookConfig.smeeChannel,
           secret: fullWebhookConfig.secret,
+          secretEnvName: fullWebhookConfig.secretEnvName,
           watchRepos: fullWebhookConfig.watchRepos,
         }
       : null;

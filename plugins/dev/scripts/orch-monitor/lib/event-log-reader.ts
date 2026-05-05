@@ -133,3 +133,68 @@ export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
     stream.close();
   }
 }
+
+export interface TunnelEventStats {
+  lastEventAt: string | null;
+  eventCount24h: number;
+  eventCount24hByRepo: Record<string, number>;
+}
+
+/**
+ * Synchronously scans monthly event log files for github.* events.
+ *
+ * Reads the current month's JSONL and, when the 24h window spans a month
+ * boundary, the previous month's file too. Uses JSON.parse per line (no jq
+ * subprocess) since we only need counts, not filtered content.
+ */
+export function readTunnelEventStats(
+  catalystDir: string,
+  now: () => Date = () => new Date(),
+): TunnelEventStats {
+  const nowDate = now();
+  const cutoff24h = new Date(nowDate.getTime() - 24 * 60 * 60 * 1000);
+
+  const currentPath = monthlyPath(catalystDir, nowDate);
+  const prevPath = monthlyPath(catalystDir, cutoff24h);
+  const paths = currentPath === prevPath ? [currentPath] : [prevPath, currentPath];
+
+  let lastEventAt: string | null = null;
+  let eventCount24h = 0;
+  const eventCount24hByRepo: Record<string, number> = {};
+
+  for (const filePath of paths) {
+    if (!existsSync(filePath)) continue;
+    let text: string;
+    try {
+      text = readFileSync(filePath, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      let evt: Record<string, unknown>;
+      try {
+        evt = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const event = evt.event;
+      if (typeof event !== "string" || !event.startsWith("github.")) continue;
+
+      const ts = typeof evt.ts === "string" ? evt.ts : null;
+      if (ts !== null) {
+        if (lastEventAt === null || ts > lastEventAt) lastEventAt = ts;
+        if (ts >= cutoff24h.toISOString()) {
+          eventCount24h++;
+          const scope = evt.scope as Record<string, unknown> | undefined;
+          const repo = typeof scope?.repo === "string" ? scope.repo : "";
+          if (repo) {
+            eventCount24hByRepo[repo] = (eventCount24hByRepo[repo] ?? 0) + 1;
+          }
+        }
+      }
+    }
+  }
+
+  return { lastEventAt, eventCount24h, eventCount24hByRepo };
+}

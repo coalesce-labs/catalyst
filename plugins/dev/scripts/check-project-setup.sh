@@ -150,9 +150,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #    the daemon to surface webhook events. Without it, catalyst-events wait-for falls back
 #    to a 600s timeout + gh pr view polling — silently degraded.
 MONITOR_SCRIPT="${SCRIPT_DIR}/catalyst-monitor.sh"
+MONITOR_PORT_RESOLVED="${MONITOR_PORT:-7400}"
 if [[ -x $MONITOR_SCRIPT ]]; then
 	if "$MONITOR_SCRIPT" status --json &>/dev/null; then
-		: # daemon running — silent pass
+		# Daemon is running — also check webhook tunnel connectivity (CTL-244).
+		if command -v curl &>/dev/null && command -v jq &>/dev/null; then
+			local_tunnel=$(curl -s --max-time 2 "http://localhost:${MONITOR_PORT_RESOLVED}/api/status/webhook-tunnel" 2>/dev/null || true)
+			smee_url=$(echo "$local_tunnel" | jq -r '.smeeUrl // empty' 2>/dev/null || true)
+			tunnel_connected=$(echo "$local_tunnel" | jq -r '.connected // empty' 2>/dev/null || true)
+			if [[ -n "$smee_url" && "$tunnel_connected" != "true" ]]; then
+				warnings+=("Webhook tunnel not connected (smeeUrl=${smee_url}) — GitHub events won't reach the daemon")
+				warnings+=("  Restart the monitor: $MONITOR_SCRIPT restart")
+			fi
+		fi
 	else
 		# Daemon stopped. Behavior splits on autonomous vs interactive.
 		if [[ -n ${CATALYST_AUTONOMOUS:-} ]] || [[ ! -t 0 ]]; then

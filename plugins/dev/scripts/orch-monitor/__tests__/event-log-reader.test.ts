@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { readBacklog, tailEventLog } from "../lib/event-log-reader";
+import { readBacklog, tailEventLog, readTunnelEventStats } from "../lib/event-log-reader";
 
 let workdir: string;
 
@@ -223,5 +223,116 @@ describe("tailEventLog", () => {
       now: () => new Date("2026-05-04T00:00:00Z"),
     });
     // resolves immediately
+  });
+});
+
+function makeGithubLine(
+  repo: string,
+  ts: string,
+  event = "github.pr.merged",
+): string {
+  return JSON.stringify({ ts, event, scope: { repo }, schemaVersion: 2 });
+}
+
+describe("readTunnelEventStats", () => {
+  it("returns null lastEventAt and zero counts when file is absent", () => {
+    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    expect(r.lastEventAt).toBeNull();
+    expect(r.eventCount24h).toBe(0);
+    expect(r.eventCount24hByRepo).toEqual({});
+  });
+
+  it("returns null lastEventAt and zero counts for empty file", () => {
+    eventsDir();
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), "");
+    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    expect(r.lastEventAt).toBeNull();
+    expect(r.eventCount24h).toBe(0);
+  });
+
+  it("counts only github.* events and ignores others", () => {
+    eventsDir();
+    const lines = [
+      makeGithubLine("org/a", "2026-05-04T11:00:00Z"),
+      JSON.stringify({ ts: "2026-05-04T11:01:00Z", event: "linear.issue.created", scope: {} }),
+      JSON.stringify({ ts: "2026-05-04T11:02:00Z", event: "session-started", scope: {} }),
+      makeGithubLine("org/b", "2026-05-04T11:03:00Z"),
+    ];
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
+    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    expect(r.eventCount24h).toBe(2);
+    expect(r.lastEventAt).toBe("2026-05-04T11:03:00Z");
+    expect(r.eventCount24hByRepo).toEqual({ "org/a": 1, "org/b": 1 });
+  });
+
+  it("excludes events older than 24h from counts but lastEventAt is the most recent github event overall", () => {
+    eventsDir();
+    const lines = [
+      makeGithubLine("org/a", "2026-05-03T10:00:00Z"),  // >24h ago
+      makeGithubLine("org/b", "2026-05-04T11:00:00Z"),  // within 24h
+    ];
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
+    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    expect(r.eventCount24h).toBe(1);
+    expect(r.eventCount24hByRepo).toEqual({ "org/b": 1 });
+    expect(r.lastEventAt).toBe("2026-05-04T11:00:00Z");
+  });
+
+  it("crosses month boundary: reads previous month file for 24h window", () => {
+    eventsDir();
+    // now = May 1 00:30 UTC → 24h window starts April 30 00:30 UTC
+    const aprilLine = makeGithubLine("org/x", "2026-04-30T01:00:00Z");
+    const mayLine   = makeGithubLine("org/y", "2026-05-01T00:15:00Z");
+    writeFileSync(join(workdir, "events", "2026-04.jsonl"), aprilLine + "\n");
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), mayLine + "\n");
+    const r = readTunnelEventStats(workdir, () => new Date("2026-05-01T00:30:00Z"));
+    expect(r.eventCount24h).toBe(2);
+    expect(r.eventCount24hByRepo).toEqual({ "org/x": 1, "org/y": 1 });
+  });
+
+  it("accumulates per-repo counts across multiple events in same repo", () => {
+    eventsDir();
+    const lines = [
+      makeGithubLine("org/a", "2026-05-04T10:00:00Z"),
+      makeGithubLine("org/a", "2026-05-04T10:30:00Z"),
+      makeGithubLine("org/b", "2026-05-04T11:00:00Z"),
+    ];
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
+    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    expect(r.eventCount24h).toBe(3);
+    expect(r.eventCount24hByRepo).toEqual({ "org/a": 2, "org/b": 1 });
+  });
+
+  it("skips malformed lines without throwing", () => {
+    eventsDir();
+    const lines = [
+      "not json",
+      makeGithubLine("org/a", "2026-05-04T11:00:00Z"),
+      "{broken",
+    ];
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
+    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    expect(r.eventCount24h).toBe(1);
+  });
+
+  it("ignores github.* events with no ts field", () => {
+    eventsDir();
+    const noTs = JSON.stringify({ event: "github.pr.merged", scope: { repo: "org/a" }, schemaVersion: 2 });
+    const withTs = makeGithubLine("org/b", "2026-05-04T11:00:00Z");
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), [noTs, withTs].join("\n") + "\n");
+    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    expect(r.eventCount24h).toBe(1);
+    expect(r.lastEventAt).toBe("2026-05-04T11:00:00Z");
+    expect(r.eventCount24hByRepo).toEqual({ "org/b": 1 });
+  });
+
+  it("counts github.* events with no scope.repo in eventCount24h but not in eventCount24hByRepo", () => {
+    eventsDir();
+    const noRepo = JSON.stringify({ ts: "2026-05-04T11:00:00Z", event: "github.push", schemaVersion: 2 });
+    const withRepo = makeGithubLine("org/a", "2026-05-04T11:30:00Z");
+    writeFileSync(join(workdir, "events", "2026-05.jsonl"), [noRepo, withRepo].join("\n") + "\n");
+    const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
+    expect(r.eventCount24h).toBe(2);
+    expect(r.eventCount24hByRepo).toEqual({ "org/a": 1 });
   });
 });

@@ -274,16 +274,33 @@ cmd_status() {
   local pid
   if pid=$(read_pid); then
     if [[ $json -eq 1 ]]; then
-      printf '{"running":true,"pid":%d,"port":%d,"url":"http://localhost:%d","runningVersion":%s,"latestAvailableVersion":%s,"isStale":%s}\n' \
-        "$pid" "$PORT" "$PORT" "$rv" "$lv" "$IS_STALE"
+      # Fetch webhook tunnel state from the running daemon (2s timeout, silent on error).
+      local tunnel
+      tunnel=$(curl -s --max-time 2 "http://localhost:${PORT}/api/status/webhook-tunnel" 2>/dev/null || true)
+      # If tunnel response is empty or invalid JSON, omit the field (null).
+      if ! echo "$tunnel" | jq -e . >/dev/null 2>&1; then
+        tunnel='null'
+      fi
+      jq -n \
+        --argjson pid "$pid" \
+        --argjson port "$PORT" \
+        --argjson rv "$rv" \
+        --argjson lv "$lv" \
+        --argjson stale "$([ "$IS_STALE" = "true" ] && echo true || echo false)" \
+        --argjson tunnel "$tunnel" \
+        '{running:true,pid:$pid,port:$port,url:("http://localhost:"+($port|tostring)),runningVersion:$rv,latestAvailableVersion:$lv,isStale:$stale,webhookTunnel:$tunnel}'
     else
       echo "Monitor running (pid $pid) at http://localhost:$PORT"
     fi
     return 0
   else
     if [[ $json -eq 1 ]]; then
-      printf '{"running":false,"pid":null,"port":%d,"url":"http://localhost:%d","runningVersion":%s,"latestAvailableVersion":%s,"isStale":%s}\n' \
-        "$PORT" "$PORT" "$rv" "$lv" "$IS_STALE"
+      jq -n \
+        --argjson port "$PORT" \
+        --argjson rv "$rv" \
+        --argjson lv "$lv" \
+        --argjson stale "$([ "$IS_STALE" = "true" ] && echo true || echo false)" \
+        '{running:false,pid:null,port:$port,url:("http://localhost:"+($port|tostring)),runningVersion:$rv,latestAvailableVersion:$lv,isStale:$stale}'
     else
       echo "Monitor stopped"
     fi
