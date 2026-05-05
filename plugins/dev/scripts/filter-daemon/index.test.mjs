@@ -5,6 +5,7 @@ import { describe, test, expect, beforeEach } from 'bun:test';
 import {
   handleRegister,
   handleDeregister,
+  handleOrchestratorTerminated,
   shouldSkipEvent,
   buildGroqPrompt,
   getInterests,
@@ -90,6 +91,91 @@ describe('interest table', () => {
       handleDeregister({ event: 'filter.deregister', detail: { interest_id: 'nonexistent' } })
     ).not.toThrow();
   });
+
+  test('handleRegister stores persistent: false by default', () => {
+    handleRegister({
+      event: 'filter.register',
+      orchestrator: 'orch-p1',
+      detail: { interest_id: 'orch-p1', notify_event: 'filter.wake.orch-p1', prompt: 'x' },
+    });
+    expect(getInterests().get('orch-p1').persistent).toBe(false);
+  });
+
+  test('handleRegister stores persistent: true when passed', () => {
+    handleRegister({
+      event: 'filter.register',
+      orchestrator: 'orch-p2',
+      detail: { interest_id: 'orch-p2', notify_event: 'filter.wake.orch-p2', prompt: 'x', persistent: true },
+    });
+    expect(getInterests().get('orch-p2').persistent).toBe(true);
+  });
+
+  test('handleRegister treats persistent: false explicitly as false', () => {
+    handleRegister({
+      event: 'filter.register',
+      orchestrator: 'orch-p3',
+      detail: { interest_id: 'orch-p3', notify_event: 'filter.wake.orch-p3', prompt: 'x', persistent: false },
+    });
+    expect(getInterests().get('orch-p3').persistent).toBe(false);
+  });
+});
+
+describe('handleOrchestratorTerminated', () => {
+  beforeEach(() => clearInterests());
+
+  test('removes all interests belonging to the terminated orchestrator', () => {
+    handleRegister({
+      event: 'filter.register',
+      orchestrator: 'orch-A',
+      detail: { interest_id: 'orch-A', notify_event: 'filter.wake.orch-A', prompt: 'x' },
+    });
+    handleRegister({
+      event: 'filter.register',
+      orchestrator: 'orch-A',
+      detail: { interest_id: 'orch-A-2', notify_event: 'filter.wake.orch-A-2', prompt: 'y' },
+    });
+    handleOrchestratorTerminated({ event: 'orchestrator-completed', orchestrator: 'orch-A' });
+    expect(getInterests().has('orch-A')).toBe(false);
+    expect(getInterests().has('orch-A-2')).toBe(false);
+  });
+
+  test('does not remove interests belonging to other orchestrators', () => {
+    handleRegister({
+      event: 'filter.register',
+      orchestrator: 'orch-A',
+      detail: { interest_id: 'orch-A', notify_event: 'filter.wake.orch-A', prompt: 'x' },
+    });
+    handleRegister({
+      event: 'filter.register',
+      orchestrator: 'orch-B',
+      detail: { interest_id: 'orch-B', notify_event: 'filter.wake.orch-B', prompt: 'y' },
+    });
+    handleOrchestratorTerminated({ event: 'orchestrator-completed', orchestrator: 'orch-A' });
+    expect(getInterests().has('orch-A')).toBe(false);
+    expect(getInterests().has('orch-B')).toBe(true);
+  });
+
+  test('is a no-op when no interests match the orchestrator', () => {
+    handleRegister({
+      event: 'filter.register',
+      orchestrator: 'orch-X',
+      detail: { interest_id: 'orch-X', notify_event: 'filter.wake.orch-X', prompt: 'x' },
+    });
+    handleOrchestratorTerminated({ event: 'orchestrator-failed', orchestrator: 'orch-Y' });
+    expect(getInterests().has('orch-X')).toBe(true);
+  });
+
+  test('is a no-op when event has no orchestrator field', () => {
+    handleRegister({
+      event: 'filter.register',
+      orchestrator: 'orch-Z',
+      detail: { interest_id: 'orch-Z', notify_event: 'filter.wake.orch-Z', prompt: 'x' },
+    });
+    expect(() =>
+      handleOrchestratorTerminated({ event: 'orchestrator-completed' })
+    ).not.toThrow();
+    expect(getInterests().has('orch-Z')).toBe(true);
+  });
 });
 
 describe('shouldSkipEvent', () => {
@@ -98,12 +184,10 @@ describe('shouldSkipEvent', () => {
     expect(shouldSkipEvent({ event: 'filter.wake.anything' })).toBe(true);
   });
 
-  test('does not skip filter.register (handled by processEvent)', () => {
-    expect(shouldSkipEvent({ event: 'filter.register' })).toBe(false);
-  });
-
-  test('does not skip filter.deregister', () => {
-    expect(shouldSkipEvent({ event: 'filter.deregister' })).toBe(false);
+  test('skips all filter.* events to prevent Groq loop', () => {
+    expect(shouldSkipEvent({ event: 'filter.register' })).toBe(true);
+    expect(shouldSkipEvent({ event: 'filter.deregister' })).toBe(true);
+    expect(shouldSkipEvent({ event: 'filter.anything' })).toBe(true);
   });
 
   test('does not skip github events', () => {
