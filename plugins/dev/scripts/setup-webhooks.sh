@@ -66,7 +66,9 @@ Options:
                              is the only intent flag, channel/secret setup for
                              GitHub is skipped.
   --webhook-url <https-url>  Public HTTPS URL where Linear should deliver
-                             events. Required when --linear-register is used.
+                             events. When omitted with --linear-register, a
+                             new smee.io channel is auto-provisioned and the
+                             URL is written to ${HOME_CONFIG_PATH}. CTL-242.
   -h|--help                  Show this message
 
 Environment:
@@ -134,10 +136,6 @@ if [[ $LINEAR_REGISTER -eq 1 && $LINEAR_DEREGISTER -eq 1 ]]; then
   echo "ERROR: --linear-register and --linear-deregister are mutually exclusive" >&2
   exit 1
 fi
-if [[ $LINEAR_REGISTER -eq 1 && -z "$LINEAR_WEBHOOK_URL" ]]; then
-  echo "ERROR: --linear-register requires --webhook-url <https-url>" >&2
-  exit 1
-fi
 if [[ $LINEAR_DEREGISTER -eq 1 && -n "$LINEAR_WEBHOOK_URL" ]]; then
   echo "ERROR: --linear-deregister and --webhook-url are mutually exclusive" >&2
   exit 1
@@ -170,10 +168,57 @@ if [[ $FORCE -eq 0 && -z "${CATALYST_SMEE_CHANNEL:-}" ]]; then
 fi
 ADD_REPO_ONLY=$SKIP_GITHUB_SETUP
 
-if [[ $ADD_REPO_ONLY -eq 0 ]]; then
+# --linear-register without --webhook-url auto-provisions a smee channel (CTL-242)
+# and needs curl. --linear-deregister only does GraphQL + local file ops (no curl).
+LINEAR_NEEDS_SMEE=0
+if [[ $LINEAR_REGISTER -eq 1 && -z "$LINEAR_WEBHOOK_URL" ]]; then
+  LINEAR_NEEDS_SMEE=1
+fi
+
+if [[ $ADD_REPO_ONLY -eq 0 || $LINEAR_NEEDS_SMEE -eq 1 ]]; then
   require_cmd curl
+fi
+if [[ $ADD_REPO_ONLY -eq 0 ]]; then
   require_cmd openssl
 fi
+
+# Provision (or reuse) a Linear smee.io channel and write it to Layer 2.
+# Sets LINEAR_WEBHOOK_URL to the resulting URL. CTL-242.
+provision_linear_smee_channel() {
+  mkdir -p "$HOME_CONFIG_DIR"
+  if [[ ! -f "$HOME_CONFIG_PATH" ]]; then
+    echo "{}" > "$HOME_CONFIG_PATH"
+  fi
+
+  local existing_linear_channel
+  existing_linear_channel=$(jq -r '.catalyst.monitor.linear.smeeChannel // ""' "$HOME_CONFIG_PATH" 2>/dev/null || true)
+
+  if [[ -n "$existing_linear_channel" && $FORCE -eq 0 ]]; then
+    echo "Reusing existing Linear smee channel from $HOME_CONFIG_PATH: $existing_linear_channel (use --force to regenerate)"
+    LINEAR_WEBHOOK_URL="$existing_linear_channel"
+    return 0
+  fi
+
+  echo "Creating new Linear smee.io channel..."
+  local new_channel
+  new_channel=$(curl -s -L -o /dev/null -w "%{url_effective}" https://smee.io/new)
+  if [[ -z "$new_channel" || "$new_channel" != https://smee.io/* || "$new_channel" == "https://smee.io/new" ]]; then
+    echo "ERROR: failed to create Linear smee channel (got: $new_channel)" >&2
+    exit 1
+  fi
+  echo "Created Linear smee channel: $new_channel"
+
+  local tmp; tmp=$(mktemp)
+  jq --arg channel "$new_channel" '
+    .catalyst //= {}
+    | .catalyst.monitor //= {}
+    | .catalyst.monitor.linear //= {}
+    | .catalyst.monitor.linear.smeeChannel = $channel
+  ' "$HOME_CONFIG_PATH" > "$tmp"
+  mv "$tmp" "$HOME_CONFIG_PATH"
+  echo "Wrote catalyst.monitor.linear.smeeChannel to $HOME_CONFIG_PATH"
+  LINEAR_WEBHOOK_URL="$new_channel"
+}
 
 # Merge an array of new repos into .catalyst.monitor.github.watchRepos in the
 # project config, deduping while preserving insertion order. Creates parent
@@ -234,6 +279,9 @@ if [[ $SKIP_GITHUB_SETUP -eq 1 ]]; then
     fi
   fi
   if [[ $LINEAR_REGISTER -eq 1 ]]; then
+    if [[ -z "$LINEAR_WEBHOOK_URL" ]]; then
+      provision_linear_smee_channel
+    fi
     helper_secret_env="${LINEAR_SECRET_ENV:-$DEFAULT_LINEAR_SECRET_ENV}"
     helper_args=(
       --webhook-url "$LINEAR_WEBHOOK_URL"
@@ -351,6 +399,9 @@ fi
 
 # ─── 6c. --linear-register / --linear-deregister (if combined) ─────────────
 if [[ $LINEAR_REGISTER -eq 1 ]]; then
+  if [[ -z "$LINEAR_WEBHOOK_URL" ]]; then
+    provision_linear_smee_channel
+  fi
   helper_secret_env="${LINEAR_SECRET_ENV:-$DEFAULT_LINEAR_SECRET_ENV}"
   helper_args=(
     --webhook-url "$LINEAR_WEBHOOK_URL"

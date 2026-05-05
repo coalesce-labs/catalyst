@@ -187,9 +187,12 @@ export interface CreateServerOptions {
    * Linear webhook config. Independent of `webhookConfig` (which carries the
    * GitHub bits) so a daemon can run Linear-only or GitHub-only setups.
    * `secret` empty disables `POST /api/webhook/linear`. CTL-210.
+   * `smeeChannel` drives the second smee tunnel (CTL-242); empty means no tunnel.
    */
   linearWebhookConfig?: {
     secret: string;
+    /** smee.io channel URL for Linear delivery. Empty = no tunnel. CTL-242. */
+    smeeChannel?: string;
   } | null;
 }
 
@@ -566,6 +569,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   let webhookHandler: WebhookHandler | null = null;
   let webhookTunnel: WebhookTunnel | null = null;
+  let linearWebhookTunnel: WebhookTunnel | null = null;
   let webhookSubscriber: WebhookSubscriber | null = null;
   let webhookReplay: WebhookReplay | null = null;
   if (webhookConfig && prFetcher) {
@@ -1710,6 +1714,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
     }
   }
 
+  const linearSmeeChannel = opts.linearWebhookConfig?.smeeChannel ?? "";
+  if (linearSmeeChannel.length > 0) {
+    linearWebhookTunnel = createWebhookTunnel({
+      source: linearSmeeChannel,
+      target: `http://localhost:${server.port}/api/webhook/linear`,
+      logger: {
+        info: (m) => console.info(`[linear-tunnel] ${m}`),
+        error: (m) => console.error(`[linear-tunnel] ${m}`),
+      },
+    });
+    void linearWebhookTunnel.start().catch((err: unknown) => {
+      console.error(
+        `[server] linear webhook tunnel start failed:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  }
+
   if (pidFile) {
     try {
       writeFileSync(pidFile, `${process.pid}\n`);
@@ -1731,6 +1753,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     linear?.stop();
     briefingProvider?.stop();
     void webhookTunnel?.stop();
+    void linearWebhookTunnel?.stop();
     closeDb();
     sseClients.clear();
     if (pidFile) {
@@ -1825,8 +1848,13 @@ if (import.meta.main) {
         }
       : null;
   const linearWebhookConfig =
-    fullWebhookConfig && fullWebhookConfig.linearSecret.length > 0
-      ? { secret: fullWebhookConfig.linearSecret }
+    fullWebhookConfig &&
+    (fullWebhookConfig.linearSecret.length > 0 ||
+      fullWebhookConfig.linearSmeeChannel.length > 0)
+      ? {
+          secret: fullWebhookConfig.linearSecret,
+          smeeChannel: fullWebhookConfig.linearSmeeChannel,
+        }
       : null;
   let summarizeHandler: SummarizeHandler | null = null;
   if (summarizeCfg.enabled) {
