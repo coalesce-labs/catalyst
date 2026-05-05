@@ -345,6 +345,7 @@ e.g. `linear.issue.state_changed`, `linear.comment.created`.
 |------|-------|-----------|
 | `webhookSecretEnv` (env-var name only) | `catalyst.monitor.linear.webhookSecretEnv` in `.catalyst/config.json` | YES |
 | HMAC secret value | env var named above (default fallback `CATALYST_LINEAR_WEBHOOK_SECRET`) | NO (per-developer env) |
+| `smeeChannel` (Linear smee URL) | `catalyst.monitor.linear.smeeChannel` in `~/.config/catalyst/config.json` | NO (per-machine, written by `--linear-register`) |
 | Registration record (`webhookId`, `webhookUrl`, `registeredAt`, `resourceTypes`) | `catalyst.monitor.linear` in `~/.config/catalyst/config.json` | NO (per-machine, written by `--linear-register`) |
 | HMAC secret file | `~/.config/catalyst/linear-webhook-secret` (mode 600, read by `--linear-register` post-create) | NO (per-developer) |
 
@@ -383,8 +384,32 @@ GraphQL API, and `--linear-deregister` reads `webhookId` from this record to cal
 
 ### Registering the webhook with Linear
 
-The setup script auto-registers the webhook for you (CTL-224). Combine
-`--linear-register` with `--webhook-url`:
+The setup script auto-registers the webhook for you (CTL-224) and, when no
+`--webhook-url` is supplied, auto-provisions a smee.io channel for delivery
+(CTL-242). The simplest end-to-end setup is a single command:
+
+```bash
+plugins/dev/scripts/setup-webhooks.sh \
+  --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET \
+  --linear-register
+```
+
+This creates a fresh smee.io channel, writes `catalyst.monitor.linear.smeeChannel`
+to `~/.config/catalyst/config.json`, registers the webhook against that URL
+with Linear, and writes the resulting HMAC secret to
+`~/.config/catalyst/linear-webhook-secret`. The daemon picks up the smee
+channel automatically on next start and tunnels Linear deliveries to
+`http://localhost:7400/api/webhook/linear`.
+
+To reuse an existing smee channel instead of generating a new one, set
+`CATALYST_LINEAR_SMEE_CHANNEL` before running:
+
+```bash
+CATALYST_LINEAR_SMEE_CHANNEL=https://smee.io/existing-channel \
+  plugins/dev/scripts/setup-webhooks.sh --linear-register
+```
+
+To use an existing public URL instead:
 
 ```bash
 plugins/dev/scripts/setup-webhooks.sh \
@@ -446,12 +471,11 @@ plugins/dev/scripts/setup-webhooks.sh \
 secret can only be retrieved once, so persist it immediately (the script
 does this automatically) and re-export it in any active shell.
 
-For local development you still need a public tunnel — Linear webhooks
-require a stable HTTPS endpoint, so smee.io URLs do not work. Use
-[`cloudflared tunnel`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/),
-[`ngrok`](https://ngrok.com/), or any other reverse-proxy of your choice to
-expose `http://localhost:7400/api/webhook/linear` to the internet, then pass
-that public URL via `--webhook-url`.
+smee.io URLs work with Linear (empirically verified — Linear accepts any public HTTPS
+non-localhost URL). The limitation is offline buffering: smee.io is a pass-through relay
+and does not persist payloads, so events sent while the tunnel is offline are lost. The
+daemon's `linear.ts` polling fallback (every 5 minutes) compensates for this. For a
+durable relay see CTL-241 (Cloudflare-based store-and-forward, in progress).
 
 You can also run the helper directly without `setup-webhooks.sh` if you only
 want webhook registration (no env-var-name write):
