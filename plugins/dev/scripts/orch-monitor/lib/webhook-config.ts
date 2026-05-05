@@ -4,6 +4,8 @@ import { join } from "path";
 export interface WebhookCliConfig {
   smeeChannel: string;
   secret: string;
+  /** Env-var name the GitHub webhook secret is read from (e.g. "CATALYST_WEBHOOK_SECRET"). */
+  secretEnvName: string;
   /**
    * Repos to subscribe to at startup, regardless of whether a worker has been
    * observed for them. Layer 1 only (team-wide). Empty array means
@@ -212,6 +214,7 @@ export function loadWebhookConfig(
     return {
       smeeChannel: "",
       secret: "",
+      secretEnvName: webhookSecretEnv,
       watchRepos,
       linearSecret,
       linearSmeeChannel,
@@ -221,6 +224,7 @@ export function loadWebhookConfig(
   return {
     smeeChannel: finalChannel,
     secret,
+    secretEnvName: webhookSecretEnv,
     watchRepos,
     linearSecret,
     linearSmeeChannel,
