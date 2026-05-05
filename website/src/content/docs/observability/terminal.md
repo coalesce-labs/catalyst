@@ -37,9 +37,9 @@ Quit with `q` or `Ctrl-C`.
 │ CTL-48  researching !                      1m 15s │  ← dead PID
 └────────────────────────────────────────────────────┘
 Events (most recent first):
-  19:15:32  CTL-44  worker-pr-created     pr#120
-  19:14:01  CTL-46  worker-status-change  validating
-  19:13:44  CTL-48  worker-failed         crashed — PID gone
+  19:15:32  CTL-44  worker-pr-created       pr#120
+  19:14:01  CTL-46  worker-phase-advanced   validating
+  19:13:44  CTL-48  worker-failed           crashed — PID gone
 ```
 
 Color coding matches the web UI: blue for in-progress phases, green for done, red for failed/dead, amber for validating/shipping.

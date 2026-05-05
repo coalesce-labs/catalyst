@@ -31,6 +31,8 @@ export type WebhookEvent =
       mergedAt: string | null;
       draft: boolean;
       mergeable: boolean | null;
+      /** Head branch name (CTL-234 — used to attribute the event to an orchestrator). Empty when payload omits it. */
+      headRef: string;
     }
   | {
       kind: "pull_request_review";
@@ -41,6 +43,7 @@ export type WebhookEvent =
       reviewer: string;
       body: string;
       author: AuthorRef;
+      headRef: string;
     }
   | {
       kind: "pull_request_review_thread";
@@ -48,6 +51,7 @@ export type WebhookEvent =
       number: number;
       action: string;
       threadId: number;
+      headRef: string;
     }
   | {
       kind: "check_suite";
@@ -55,6 +59,7 @@ export type WebhookEvent =
       prNumbers: number[];
       conclusion: string | null;
       status: string;
+      headRef: string;
     }
   | {
       kind: "status";
@@ -89,6 +94,7 @@ export type WebhookEvent =
       body: string;
       htmlUrl: string;
       author: AuthorRef;
+      headRef: string;
     }
   | {
       kind: "deployment";
@@ -186,6 +192,17 @@ function parseAuthor(value: unknown): AuthorRef {
   return { login: getStr(value, "login"), type: getStr(value, "type") };
 }
 
+/**
+ * Read `pull_request.head.ref` from a webhook payload. Returns "" when the
+ * payload omits it (e.g. on already-deleted branches) — callers should treat
+ * empty string as "unknown head ref" and fall back to PR-number lookup for
+ * orchestrator attribution.
+ */
+function getPrHeadRef(pr: Record<string, unknown>): string {
+  const head = pr.head;
+  return isObject(head) ? getStr(head, "ref") : "";
+}
+
 export function parseWebhookEvent(
   eventName: string,
   payload: unknown,
@@ -241,6 +258,7 @@ function parsePullRequest(
     mergedAt: getOptStr(pr, "merged_at"),
     draft: getBool(pr, "draft"),
     mergeable: getOptBool(pr, "mergeable"),
+    headRef: getPrHeadRef(pr),
   };
 }
 
@@ -264,6 +282,7 @@ function parsePullRequestReview(
     reviewer: getStr(user, "login"),
     body: getStr(review, "body"),
     author: parseAuthor(review.user),
+    headRef: getPrHeadRef(pr),
   };
 }
 
@@ -286,6 +305,7 @@ function parsePullRequestReviewThread(
     number,
     action: getStr(payload, "action"),
     threadId: getNum(thread, "id"),
+    headRef: getPrHeadRef(pr),
   };
 }
 
@@ -311,6 +331,7 @@ function parseCheckSuite(
     prNumbers,
     conclusion: getOptStr(suite, "conclusion"),
     status: getStr(suite, "status"),
+    headRef: getStr(suite, "head_branch"),
   };
 }
 
@@ -401,6 +422,7 @@ function parsePullRequestReviewComment(
     body: getStr(comment, "body"),
     htmlUrl: getStr(comment, "html_url"),
     author: parseAuthor(comment.user),
+    headRef: getPrHeadRef(pr),
   };
 }
 

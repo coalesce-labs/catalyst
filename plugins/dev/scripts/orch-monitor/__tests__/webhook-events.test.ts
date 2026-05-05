@@ -33,6 +33,7 @@ describe("parseWebhookEvent", () => {
           merged_at: "2026-05-03T12:00:00Z",
           draft: false,
           mergeable: true,
+          head: { ref: "orch-foo-CTL-1" },
         },
       });
       expect(got.kind).toBe("pull_request");
@@ -44,6 +45,18 @@ describe("parseWebhookEvent", () => {
       expect(got.mergedAt).toBe("2026-05-03T12:00:00Z");
       expect(got.draft).toBe(false);
       expect(got.mergeable).toBe(true);
+      expect(got.headRef).toBe("orch-foo-CTL-1");
+    });
+
+    it("falls back to empty headRef when payload omits head", () => {
+      const got = parseWebhookEvent("pull_request", {
+        ...REPO,
+        action: "closed",
+        pull_request: { number: 1, merged: false },
+      });
+      expect(got.kind).toBe("pull_request");
+      if (got.kind !== "pull_request") return;
+      expect(got.headRef).toBe("");
     });
 
     it("parses a closed-not-merged event", () => {
@@ -145,12 +158,13 @@ describe("parseWebhookEvent", () => {
   });
 
   describe("check_suite", () => {
-    it("extracts pr numbers and conclusion", () => {
+    it("extracts pr numbers, conclusion, and head_branch", () => {
       const got = parseWebhookEvent("check_suite", {
         ...REPO,
         check_suite: {
           status: "completed",
           conclusion: "success",
+          head_branch: "orch-foo-CTL-99",
           pull_requests: [{ number: 70 }, { number: 71 }],
         },
       });
@@ -159,6 +173,7 @@ describe("parseWebhookEvent", () => {
       expect(got.prNumbers).toEqual([70, 71]);
       expect(got.conclusion).toBe("success");
       expect(got.status).toBe("completed");
+      expect(got.headRef).toBe("orch-foo-CTL-99");
     });
 
     it("handles empty pr list", () => {
@@ -170,6 +185,7 @@ describe("parseWebhookEvent", () => {
       if (got.kind !== "check_suite") return;
       expect(got.prNumbers).toEqual([]);
       expect(got.conclusion).toBeNull();
+      expect(got.headRef).toBe("");
     });
   });
 

@@ -65,6 +65,10 @@ import {
   type WebhookHandler,
 } from "./lib/webhook-handler";
 import {
+  resolveOrchestrator as resolveOrchestratorFn,
+  type ActiveOrchestrator,
+} from "./lib/orchestrator-resolver";
+import {
   createLinearWebhookHandler,
   type LinearWebhookHandler,
 } from "./lib/linear-webhook-handler";
@@ -187,9 +191,12 @@ export interface CreateServerOptions {
    * Linear webhook config. Independent of `webhookConfig` (which carries the
    * GitHub bits) so a daemon can run Linear-only or GitHub-only setups.
    * `secret` empty disables `POST /api/webhook/linear`. CTL-210.
+   * `smeeChannel` drives the second smee tunnel (CTL-242); empty means no tunnel.
    */
   linearWebhookConfig?: {
     secret: string;
+    /** smee.io channel URL for Linear delivery. Empty = no tunnel. CTL-242. */
+    smeeChannel?: string;
   } | null;
 }
 
@@ -535,8 +542,39 @@ export function createServer(opts: CreateServerOptions): BunServer {
     return paths;
   }
 
+  // CTL-234 — orchestrator attribution for webhook events. Builds an
+  // `ActiveOrchestrator[]` snapshot for the resolver: orchestrator IDs come
+  // from `basename(orch.path)`, branch prefix is `${id}-` (the convention
+  // used by orchestrate-create-worktree), and the PR list comes from worker
+  // signal files. Cached briefly so a burst of webhooks doesn't re-scan disk
+  // for every event.
+  const ORCH_LIST_TTL_MS = 30_000;
+  let cachedOrchList: { at: number; list: ActiveOrchestrator[] } | null = null;
+
+  function getActiveOrchestrators(): ActiveOrchestrator[] {
+    const now = Date.now();
+    if (cachedOrchList && now - cachedOrchList.at < ORCH_LIST_TTL_MS) {
+      return cachedOrchList.list;
+    }
+    const snap = buildSnapshot(wtDir, buildOpts);
+    const list: ActiveOrchestrator[] = snap.orchestrators.map((orch) => {
+      const id = basename(orch.path);
+      const prs: Array<{ repo: string; number: number }> = [];
+      for (const worker of Object.values(orch.workers)) {
+        if (!worker.pr) continue;
+        const wrepo = parseRepoFromPrUrl(worker.pr.url);
+        if (wrepo === null) continue;
+        prs.push({ repo: wrepo, number: worker.pr.number });
+      }
+      return { id, branchPrefix: `${id}-`, prs };
+    });
+    cachedOrchList = { at: now, list };
+    return list;
+  }
+
   let webhookHandler: WebhookHandler | null = null;
   let webhookTunnel: WebhookTunnel | null = null;
+  let linearWebhookTunnel: WebhookTunnel | null = null;
   let webhookSubscriber: WebhookSubscriber | null = null;
   let webhookReplay: WebhookReplay | null = null;
   if (webhookConfig && prFetcher) {
@@ -553,6 +591,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
       previewFetcher: previewFetcher ?? undefined,
       findSignalPaths: findSignalPathsForRef,
       eventLog,
+      resolveOrchestrator: (input) =>
+        resolveOrchestratorFn(input, getActiveOrchestrators()),
       emit: (type, data) => emit(type, data),
       logger: {
         info: (m) => console.info(m),
@@ -1703,6 +1743,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
     }
   }
 
+  const linearSmeeChannel = opts.linearWebhookConfig?.smeeChannel ?? "";
+  if (linearSmeeChannel.length > 0) {
+    linearWebhookTunnel = createWebhookTunnel({
+      source: linearSmeeChannel,
+      target: `http://localhost:${server.port}/api/webhook/linear`,
+      logger: {
+        info: (m) => console.info(`[linear-tunnel] ${m}`),
+        error: (m) => console.error(`[linear-tunnel] ${m}`),
+      },
+    });
+    void linearWebhookTunnel.start().catch((err: unknown) => {
+      console.error(
+        `[server] linear webhook tunnel start failed:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  }
+
   if (pidFile) {
     try {
       writeFileSync(pidFile, `${process.pid}\n`);
@@ -1724,6 +1782,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     linear?.stop();
     briefingProvider?.stop();
     void webhookTunnel?.stop();
+    void linearWebhookTunnel?.stop();
     closeDb();
     sseClients.clear();
     if (pidFile) {
@@ -1819,8 +1878,13 @@ if (import.meta.main) {
         }
       : null;
   const linearWebhookConfig =
-    fullWebhookConfig && fullWebhookConfig.linearSecret.length > 0
-      ? { secret: fullWebhookConfig.linearSecret }
+    fullWebhookConfig &&
+    (fullWebhookConfig.linearSecret.length > 0 ||
+      fullWebhookConfig.linearSmeeChannel.length > 0)
+      ? {
+          secret: fullWebhookConfig.linearSecret,
+          smeeChannel: fullWebhookConfig.linearSmeeChannel,
+        }
       : null;
   let summarizeHandler: SummarizeHandler | null = null;
   if (summarizeCfg.enabled) {

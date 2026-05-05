@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# orchestrate-auto-rebase - Auto-dispatch rebase workers for PRs stuck in DIRTY (CTL-232).
+#
+# Sibling of orchestrate-auto-fixup. Where auto-fixup handles BLOCKED (review threads, CI
+# failures), auto-rebase handles DIRTY — `mergeStateStatus=DIRTY` means GitHub cannot
+# fast-forward or auto-merge because the PR branch has diverged from base with conflicting
+# changes. The only path forward is to rebase the PR branch onto current base, resolve
+# conflicts, and force-push. That's what the dispatched worker does via the rebase prompt
+# template.
+#
+# Auto-merge resolves BEHIND (no conflicts) by triggering its own rebase. DIRTY is
+# distinct: GitHub will NOT attempt the rebase itself, so a worker has to.
+#
+# Usage:
+#   orchestrate-auto-rebase --orch-dir <path> --orch-id <id>
+#                           [--stable-minutes <n>]   # default 2
+#                           [--max-rebases <n>]      # default 2
+#                           [--base-branch <name>]   # fallback if PR doesn't expose baseRefName; default main
+#                           [--dry-run]
+#
+# Outputs a single-line JSON summary on stdout:
+#   {"checked":N,"dispatched":M,"escalated":K,"skipped":S}
+#
+# Environment overrides:
+#   CATALYST_STATE_SCRIPT               path to catalyst-state.sh (default: sibling)
+#   CATALYST_AUTO_REBASE_GH_BIN         gh binary (default: `gh` on PATH)
+#   CATALYST_AUTO_REBASE_DISPATCH_BIN   orchestrate-rebase path (default: sibling)
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+GH_BIN="${CATALYST_AUTO_REBASE_GH_BIN:-gh}"
+DISPATCH_BIN="${CATALYST_AUTO_REBASE_DISPATCH_BIN:-${SCRIPT_DIR}/orchestrate-rebase}"
+
+ORCH_DIR=""
+ORCH_ID=""
+STABLE_MINUTES=2
+MAX_REBASES=2
+DEFAULT_BASE_BRANCH="main"
+DRY_RUN=0
+
+usage() {
+  sed -n '2,28p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir)       ORCH_DIR="$2"; shift 2 ;;
+    --orch-id)        ORCH_ID="$2"; shift 2 ;;
+    --stable-minutes) STABLE_MINUTES="$2"; shift 2 ;;
+    --max-rebases)    MAX_REBASES="$2"; shift 2 ;;
+    --base-branch)    DEFAULT_BASE_BRANCH="$2"; shift 2 ;;
+    --dry-run)        DRY_RUN=1; shift ;;
+    -h|--help)        usage 0 ;;
+    *)                echo "unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
+[ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
+[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+seconds_since() {
+  local ts="$1"
+  [ -z "$ts" ] && { echo 999999; return; }
+  local then
+  then=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null \
+        || date -u -d "$ts" +%s 2>/dev/null \
+        || echo "")
+  [ -z "$then" ] && { echo 999999; return; }
+  local now; now=$(date -u +%s)
+  echo $(( now - then ))
+}
+
+emit_state() {
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  [ -x "$STATE_SCRIPT" ] || return 0
+  "$STATE_SCRIPT" "$@" >/dev/null 2>&1 || true
+}
+
+parse_repo() {
+  local url="$1"
+  echo "$url" | sed -nE 's|https?://github\.com/([^/]+)/([^/]+)/pull/.*|\1/\2|p'
+}
+
+update_signal() {
+  local signal="$1"; shift
+  local expr="$1"; shift
+  jq "$@" "$expr" "$signal" > "${signal}.tmp" && mv "${signal}.tmp" "$signal"
+}
+
+fetch_pr_view() {
+  local repo="$1" pr_num="$2" out="$3"
+  "$GH_BIN" -R "$repo" pr view "$pr_num" \
+    --json state,mergeStateStatus,baseRefName \
+    > "$out" 2>/dev/null
+}
+
+# ─── Main loop ────────────────────────────────────────────────────────────────
+
+CHECKED=0
+DISPATCHED=0
+ESCALATED=0
+SKIPPED=0
+
+TERMINAL=" done failed stalled "
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+shopt -s nullglob
+for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
+  TICKET=$(jq -r '.ticket // empty' "$SIGNAL" 2>/dev/null || echo "")
+  [ -z "$TICKET" ] && continue
+
+  STATUS=$(jq -r '.status // empty' "$SIGNAL" 2>/dev/null || echo "")
+  if [[ "$TERMINAL" == *" $STATUS "* ]]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  PR_NUMBER=$(jq -r '.pr.number // empty' "$SIGNAL" 2>/dev/null || echo "")
+  PR_URL=$(jq -r '.pr.url // empty' "$SIGNAL" 2>/dev/null || echo "")
+  if [ -z "$PR_NUMBER" ] || [ -z "$PR_URL" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  REPO=$(parse_repo "$PR_URL")
+  if [ -z "$REPO" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  CHECKED=$((CHECKED+1))
+
+  PR_VIEW="${TMP_DIR}/pr-${TICKET}.json"
+  fetch_pr_view "$REPO" "$PR_NUMBER" "$PR_VIEW" || { SKIPPED=$((SKIPPED+1)); continue; }
+
+  if [ ! -s "$PR_VIEW" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  STATE=$(jq -r '.state // "UNKNOWN"' "$PR_VIEW")
+  MERGE_STATE=$(jq -r '.mergeStateStatus // "UNKNOWN"' "$PR_VIEW")
+  BASE_REF=$(jq -r '.baseRefName // empty' "$PR_VIEW")
+  [ -z "$BASE_REF" ] && BASE_REF="$DEFAULT_BASE_BRANCH"
+
+  # Not OPEN — clear stale dirtySince and move on.
+  if [ "$STATE" != "OPEN" ]; then
+    if [ "$DRY_RUN" -ne 1 ]; then
+      update_signal "$SIGNAL" '.dirtySince = null'
+    fi
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # Not DIRTY — clear the clock.
+  if [ "$MERGE_STATE" != "DIRTY" ]; then
+    if [ "$DRY_RUN" -ne 1 ]; then
+      update_signal "$SIGNAL" '.dirtySince = null'
+    fi
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # DIRTY: record first-observation timestamp if missing, then wait one cycle.
+  DIRTY_SINCE=$(jq -r '.dirtySince // empty' "$SIGNAL")
+  if [ -z "$DIRTY_SINCE" ]; then
+    if [ "$DRY_RUN" -ne 1 ]; then
+      TS=$(now_iso)
+      update_signal "$SIGNAL" '.dirtySince = $ts' --arg ts "$TS"
+    fi
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  AGE=$(seconds_since "$DIRTY_SINCE")
+  STABLE_SECONDS=$(( STABLE_MINUTES * 60 ))
+  if [ "$AGE" -lt "$STABLE_SECONDS" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  REBASE_ATTEMPTS=$(jq -r '.rebaseAttempts // 0' "$SIGNAL")
+  if [ "$REBASE_ATTEMPTS" -ge "$MAX_REBASES" ]; then
+    MSG="Auto-rebase budget exhausted (${REBASE_ATTEMPTS}/${MAX_REBASES}) on PR #${PR_NUMBER}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "[dry-run] ${TICKET}: would escalate (rebase-budget-exhausted)" >&2
+    else
+      emit_state attention "$ORCH_ID" "rebase-budget-exhausted" "$TICKET" "$MSG"
+    fi
+    ESCALATED=$((ESCALATED+1))
+    continue
+  fi
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] ${TICKET}: would dispatch rebase onto ${BASE_REF}" >&2
+    DISPATCHED=$((DISPATCHED+1))
+    continue
+  fi
+
+  if ! "$DISPATCH_BIN" "$TICKET" \
+        --pr "$PR_NUMBER" \
+        --orch "$ORCH_ID" \
+        --orch-dir "$ORCH_DIR" \
+        --base-branch "$BASE_REF" \
+        --dispatch >/dev/null 2>&1; then
+    MSG="Failed to dispatch auto-rebase for PR #${PR_NUMBER}"
+    emit_state attention "$ORCH_ID" "rebase-dispatch-failed" "$TICKET" "$MSG"
+    ESCALATED=$((ESCALATED+1))
+    continue
+  fi
+
+  TS=$(now_iso)
+  NEW_ATTEMPTS=$((REBASE_ATTEMPTS+1))
+  update_signal "$SIGNAL" \
+    '.rebaseAttempts = $a | .lastRebaseDispatchedAt = $ts | .updatedAt = $ts' \
+    --argjson a "$NEW_ATTEMPTS" --arg ts "$TS"
+
+  emit_state event "$(jq -nc \
+    --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+    --argjson pr "$PR_NUMBER" --argjson a "$NEW_ATTEMPTS" --arg base "$BASE_REF" \
+    '{ts:$ts, orchestrator:$orch, worker:$w,
+      event:"worker-auto-rebase-dispatched",
+      detail:{pr:$pr, attempt:$a, baseBranch:$base}}')"
+
+  DISPATCHED=$((DISPATCHED+1))
+done
+
+jq -nc \
+  --argjson c "$CHECKED" \
+  --argjson d "$DISPATCHED" \
+  --argjson e "$ESCALATED" \
+  --argjson s "$SKIPPED" \
+  '{checked:$c, dispatched:$d, escalated:$e, skipped:$s}'

@@ -95,7 +95,7 @@ Event types:
 
 - `orchestrator-started`, `orchestrator-completed`, `orchestrator-stalled`
 - `wave-started`, `wave-completed`
-- `worker-status-change`, `worker-pr-created`, `worker-done`, `worker-failed`
+- `worker-phase-advanced`, `worker-status-terminal`, `worker-pr-created`, `worker-done`, `worker-failed`
 - `verification-started`, `verification-passed`, `verification-failed`
 - `attention-raised`, `attention-resolved`
 
