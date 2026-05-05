@@ -695,6 +695,48 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
+**Register with catalyst-filter daemon (CTL-257):** When `catalyst-filter status` returns 0,
+emit `filter.register` at Phase 4 start so the daemon pre-filters incoming events through Groq
+LLM and emits targeted `filter.wake.{ORCH_NAME}` events. This reduces the rate of wake-ups
+(and downstream `gh pr view` calls) compared to reacting to every raw GitHub webhook.
+
+```bash
+if catalyst-filter status >/dev/null 2>&1; then
+  ACTIVE_PRS=$(jq -rs '[.[].pr.number // empty] | unique' \
+    "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+  ACTIVE_TICKETS=$(jq -rs '[.[].ticket // empty]' \
+    "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+  ACTIVE_BRANCHES_ARR=()
+  for _WSIG in "${ORCH_DIR}/workers/"*.json; do
+    _WTKT=$(jq -r '.ticket' "$_WSIG")
+    _WDIR="${WORKTREE_BASE}/${ORCH_NAME}-${_WTKT}"
+    _WBRANCH=$(git -C "$_WDIR" branch --show-current 2>/dev/null || true)
+    [ -n "$_WBRANCH" ] && ACTIVE_BRANCHES_ARR+=("$_WBRANCH")
+  done
+  ACTIVE_BRANCHES_JSON=$(printf '%s\n' "${ACTIVE_BRANCHES_ARR[@]}" \
+    | jq -Rnc '[inputs]' 2>/dev/null || echo '[]')
+
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg orch "${ORCH_NAME}" \
+    --arg notify "filter.wake.${ORCH_NAME}" \
+    --argjson prs "${ACTIVE_PRS}" \
+    --argjson tickets "${ACTIVE_TICKETS}" \
+    --argjson branches "${ACTIVE_BRANCHES_JSON}" \
+    '{
+      ts: (now | todate),
+      event: "filter.register",
+      orchestrator: $orch,
+      worker: null,
+      detail: {
+        notify_event: $notify,
+        prompt: "Wake me when: CI passes or fails on any of my PRs, a PR gets changes-requested or is merged or closed, or the base branch receives a push that would put my PRs BEHIND",
+        persistent: true,
+        context: {pr_numbers: $prs, tickets: $tickets, branches: $branches}
+      }
+    }')"
+fi
+```
+
 **Phase 4 is event-driven, not poll-driven (CTL-210, CTL-243).** The orchestrator
 subscribes to the unified event log via `catalyst-events tail` (wrapped in the
 `Monitor` tool) and wakes on every relevant GitHub / Linear / orchestrator-lifecycle
@@ -715,6 +757,27 @@ result verbatim as `--filter`:
 FILTER=$(catalyst-events build-orchestrator-filter "$ORCH_DIR")
 catalyst-events tail --filter "$FILTER"
 ```
+
+**catalyst-filter alternative (CTL-257):** When the filter daemon is running, you can replace
+the broad `catalyst-events tail` with a targeted `catalyst-events wait-for` on
+`filter.wake.{ORCH_NAME}`. The daemon batches raw events through Groq, classifies which are
+relevant to this orchestrator's context, and emits a single wake event — so the reactive scan
+runs only on semantically meaningful events rather than on every raw webhook. The 10-minute
+timeout acts as the safety-net fallback for daemon-down scenarios.
+
+```bash
+WAKE_EVENT=$(catalyst-events wait-for \
+  --filter ".event == \"filter.wake.${ORCH_NAME}\"" \
+  --timeout 600 2>/dev/null || true)
+if [ -n "$WAKE_EVENT" ]; then
+  WAKE_REASON=$(echo "$WAKE_EVENT" | jq -r '.detail.reason // "unknown"' 2>/dev/null || echo "unknown")
+  echo "[Phase 4] Filter wake: ${WAKE_REASON}"
+fi
+# Always follow with an authoritative REST re-check — the reason string is informational only.
+```
+
+Use `WAKE_REASON` for logging only; the reactive scan below reads authoritative state from
+`gh pr view`, `git rev-list`, and the signal file regardless of how the wake was triggered.
 
 The helper reads `${ORCH_DIR}/workers/*.json` and emits a single jq predicate that
 matches catalyst-origin events for this orchestrator, worker lifecycle events for
@@ -790,6 +853,7 @@ are wake-up triggers, never sources of truth.
 | `github.pr_review*`, `github.pr_review_comment*`, `github.issue_comment.created` | Re-evaluate `mergeStateStatus`; surface review activity on the dashboard. Codex review threads land as `pr_review_comment.created` — required for CTL-64 BLOCKED auto-fixup detection |
 | `github.deployment*` | Record deploy outcome on the worker's signal file |
 | `linear.issue.state_changed` | Reconcile Linear state with the worker signal |
+| `filter.wake.{ORCH_NAME}` | Daemon-filtered semantic wake: read `.detail.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source |
 | 10-minute idle (no event) | Run the full reactive scan as a safety net |
 
 **Ground truth is git + PR, not the signal file.** The signal file is *advisory* — it reports
@@ -922,6 +986,32 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
     jq --argjson n "$PR_NUMBER" --arg u "$PR_URL" \
       '.pr = ((.pr // {}) | .number = ($n | tonumber) | .url = $u)' \
       "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
+
+    # Refresh filter context with the newly discovered PR number (CTL-257).
+    # Re-emitting filter.register with the same orchestrator key overwrites the prior registration.
+    if catalyst-filter status >/dev/null 2>&1; then
+      _UPD_PRS=$(jq -rs '[.[].pr.number // empty] | unique' \
+        "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+      _UPD_TICKETS=$(jq -rs '[.[].ticket // empty]' \
+        "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+      "$STATE_SCRIPT" event "$(jq -nc \
+        --arg orch "${ORCH_NAME}" \
+        --arg notify "filter.wake.${ORCH_NAME}" \
+        --argjson prs "${_UPD_PRS}" \
+        --argjson tickets "${_UPD_TICKETS}" \
+        '{
+          ts: (now | todate),
+          event: "filter.register",
+          orchestrator: $orch,
+          worker: null,
+          detail: {
+            notify_event: $notify,
+            prompt: "Wake me when: CI passes or fails on any of my PRs, a PR gets changes-requested or is merged or closed, or the base branch receives a push that would put my PRs BEHIND",
+            persistent: true,
+            context: {pr_numbers: $prs, tickets: $tickets}
+          }
+        }')" 2>/dev/null || true
+    fi
   fi
 
   # Parse repo from PR URL (e.g. https://github.com/org/repo/pull/123)
@@ -1412,6 +1502,19 @@ Signal-file fields the script reads/writes:
 | `rebaseAttempts`         | orchestrate-auto-rebase    | Auto-dispatch counter (max = `--max-rebases`)              |
 | `lastRebaseDispatchedAt` | orchestrate-auto-rebase    | Timestamp of the most recent dispatch (for the dashboard)  |
 | `rebaseCommit`           | rebase worker              | SHA of the rebased HEAD (written by the dispatched worker) |
+
+**Deregister from catalyst-filter (CTL-257):** When all workers in the current wave reach a
+terminal state and Phase 4 exits, emit `filter.deregister` so the daemon stops routing events
+to this orchestrator:
+
+```bash
+if catalyst-filter status >/dev/null 2>&1; then
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg orch "${ORCH_NAME}" \
+    '{ts: (now | todate), event: "filter.deregister", orchestrator: $orch, worker: null, detail: null}')" \
+    2>/dev/null || true
+fi
+```
 
 ### Phase 5: Post-Merge Verification (Anti-Reward-Hacking)
 
