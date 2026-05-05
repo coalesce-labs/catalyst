@@ -500,6 +500,9 @@ Filters that read `.scope.repo` / `.scope.pr` / `.scope.ticket` only match v2 en
 Filters that read `.event` / `.worker` / `.orchestrator` work for both. Choose based on
 which sources you need to match — webhook events use v2, orchestrator events use v1.
 
+For the exact fields present in each event type (including which events populate `.scope.pr`
+vs. which carry PR numbers in `detail.prNumbers`), see [[event-schema]].
+
 ## Quick reference
 
 ```bash

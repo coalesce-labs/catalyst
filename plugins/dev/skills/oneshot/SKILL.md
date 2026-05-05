@@ -604,7 +604,9 @@ MAX_CI_FIX_ATTEMPTS=3
 PR_DONE=false
 
 while [ "$PR_DONE" = "false" ]; do
-  # Two-phase event wait (see [[wait-for-github]])
+  # Two-phase event wait (see [[wait-for-github]]).
+  # Filter field reference: [[event-schema]] — note check_suite/workflow_run use
+  # detail.prNumbers, not scope.pr. PR/review events DO populate scope.pr.
   if [ "$USE_REST" != "true" ]; then
     EVENT=$(catalyst-events wait-for \
       --filter "(.scope.pr == ${PR_NUMBER}) and (
