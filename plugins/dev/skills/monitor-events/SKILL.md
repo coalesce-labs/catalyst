@@ -85,15 +85,39 @@ fi
 
 The orchestrator's Phase 4 used to poll every 2–3 minutes for every active worker. With
 CTL-210, the orchestrator runs a `Monitor` watching all PR/CI/push/lifecycle events, and
-the reactive scan drops to a 10-minute idle fallback as the safety net (CTL-243):
+the reactive scan drops to a 10-minute idle fallback as the safety net (CTL-243).
+
+The recommended shape is **scope-aware**, generated from the orchestrator's worker
+signal directory (CTL-240):
 
 ```text
 Use the `Monitor` tool with this command:
 
+FILTER=$(catalyst-events build-orchestrator-filter "$ORCH_DIR")
+catalyst-events tail --filter "$FILTER"
+
+When a notification arrives, re-evaluate the affected worker's state via the
+canonical `gh pr view` query. Do NOT trust the event's payload as the source
+of truth — use it only as a wake-up trigger.
+```
+
+`build-orchestrator-filter` reads `${ORCH_DIR}/workers/*.json` and emits a single jq
+predicate that scopes catalyst-origin events by orchestrator name, github events by
+branch-ref prefix and PR-number set, `check_suite` / `workflow_run` events by
+`detail.prNumbers`, and linear events by ticket. Re-build it after dispatching new
+workers so the PR/ticket sets stay in sync.
+
+If you need a hand-rolled equivalent (e.g. the orchestrator name isn't yet known, or
+you only want broad event-type coverage and don't care about scoping out sibling
+orchestrators), the broad form is:
+
+```text
 catalyst-events tail --filter '
   (.event | startswith("github.pr.")) or
   (.event | startswith("github.pr_review")) or
+  (.event | startswith("github.issue_comment")) or
   (.event | startswith("github.check_")) or
+  (.event | startswith("github.workflow_run")) or
   (.event | startswith("github.deployment")) or
   (.event == "github.push") or
   (.event | startswith("linear.issue.")) or
@@ -105,13 +129,11 @@ catalyst-events tail --filter '
   (.event == "attention-raised") or
   (.event == "attention-resolved")
 '
-
-When a notification arrives, re-evaluate the affected worker's state via the
-canonical `gh pr view` query. Do NOT trust the event's payload as the source
-of truth — use it only as a wake-up trigger.
 ```
 
-The orchestrator's filter is intentionally broad — it covers every event type that
+`pr_review_comment` events are where Codex review threads land (required for CTL-64
+BLOCKED auto-fixup detection); `workflow_run.completed` is the most reliable
+CI-done signal. The filter is intentionally broad — it covers every event type that
 could require a dashboard re-render, a fix-up dispatch, or a merge-confirmation
 re-scan. See `orchestrate/SKILL.md` Phase 4 for the wake-up classification table that
 maps each event to its reaction.
@@ -239,6 +261,21 @@ treated as human-authored — the safer default.
 - **Iteration cap.** `MAX_ITER=20` prevents runaway loops on a stuck failure
   mode. Apply per-failure-type fix budgets inside each handler too (e.g. give
   up after 3 distinct fix attempts on the same CI check).
+- **Do NOT pipe `catalyst-events tail` through `awk`/`sed`/`grep` (CTL-240).**
+  BSD awk and similar line-oriented tools buffer stdout in 4 KB blocks when
+  stdout is not a TTY (the Monitor harness captures it). With the typical
+  ~1–3 events/min orchestrator cadence the buffer never fills and notifications
+  stall silently for 15+ minutes despite live PR activity. All filtering belongs
+  inside the `--filter` jq predicate. Use `catalyst-events build-orchestrator-filter
+  "$ORCH_DIR"` to generate a complete scope-aware predicate from the worker signal
+  directory instead of hand-rolling secondary pipes.
+- **`github.*` events carry `orchestrator: null` and `worker: null` (CTL-240).**
+  Real webhook events are scoped only by `.scope.repo`, `.scope.ref`, `.scope.pr`,
+  `.scope.sha`, and `.detail.prNumbers`. A scope predicate like
+  `.orchestrator == "orch-foo"` will silently drop every github event.
+  Use branch-ref prefix matching (`.scope.ref | startswith("refs/heads/orch-foo-")`)
+  and PR-number-set matching (`.scope.pr | IN(501,502)`) instead — or use
+  `build-orchestrator-filter` which handles this for you.
 
 ### Long-lived precedent
 

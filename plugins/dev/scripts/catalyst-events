@@ -20,6 +20,7 @@
 # Commands:
 #   tail [--filter <jq>] [--since-line <N>]
 #   wait-for [--filter <jq>] [--timeout <sec>]
+#   build-orchestrator-filter <orch-dir>
 #   help
 
 set -uo pipefail
@@ -219,6 +220,117 @@ cmd_wait_for() {
   done
 }
 
+# Build a single jq predicate that matches every event relevant to the given
+# orchestrator. Reads <orch-dir>/workers/*.json to learn ticket IDs and PR
+# numbers, then emits a multi-line predicate covering:
+#
+#   - catalyst-origin events for this orchestrator (.orchestrator == ORCH)
+#   - worker lifecycle events for any in-orch ticket (.worker matches set)
+#   - github events scoped by branch-ref prefix (refs/heads/<orch>-...)
+#   - github events scoped to a known PR number (.scope.pr or detail.prNumbers)
+#   - linear events scoped to an in-orch ticket (.scope.ticket)
+#
+# The output is intended to be passed verbatim as `--filter "$FILTER"` to
+# `tail` or `wait-for`; do NOT compose with downstream awk/sed/grep — those
+# buffer stdout and silently drop low-rate events (CTL-240).
+cmd_build_orchestrator_filter() {
+  local orch_dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help) cmd_help; return 0 ;;
+      -*) echo "error: unknown flag: $1" >&2; return 2 ;;
+      *)
+        if [[ -z "$orch_dir" ]]; then
+          orch_dir="$1"
+        else
+          echo "error: too many positional arguments" >&2
+          return 2
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$orch_dir" ]]; then
+    echo "error: orchestrator directory required" >&2
+    echo "usage: catalyst-events build-orchestrator-filter <orch-dir>" >&2
+    return 2
+  fi
+  if [[ ! -d "$orch_dir/workers" ]]; then
+    echo "error: $orch_dir/workers directory not found" >&2
+    return 2
+  fi
+
+  shopt -s nullglob
+  local signal_files=("$orch_dir"/workers/*.json)
+  shopt -u nullglob
+  if [[ ${#signal_files[@]} -eq 0 ]]; then
+    echo "error: no worker signal files in $orch_dir/workers" >&2
+    return 2
+  fi
+
+  # Derive orchestrator name from the first signal file with a non-null value;
+  # fall back to the orch directory's basename if every signal is missing it.
+  local orch_name=""
+  for f in "${signal_files[@]}"; do
+    local cand
+    cand=$(jq -r '.orchestrator // empty' "$f" 2>/dev/null || true)
+    if [[ -n "$cand" && "$cand" != "null" ]]; then
+      orch_name="$cand"
+      break
+    fi
+  done
+  if [[ -z "$orch_name" ]]; then
+    orch_name="$(basename "$orch_dir")"
+  fi
+
+  # Collect ticket IDs (one per signal) and any non-null PR numbers across all
+  # signals. Tickets are required to construct the worker/ticket clauses; PRs
+  # are optional — the helper handles early-stage orchestrators where no PRs
+  # have been opened yet.
+  local tickets=() prs=()
+  for f in "${signal_files[@]}"; do
+    local t p
+    t=$(jq -r '.ticket // empty' "$f" 2>/dev/null || true)
+    p=$(jq -r '.pr.number // empty' "$f" 2>/dev/null || true)
+    if [[ -n "$t" && "$t" != "null" ]]; then
+      tickets+=("$t")
+    fi
+    if [[ -n "$p" && "$p" != "null" ]]; then
+      prs+=("$p")
+    fi
+  done
+
+  if [[ ${#tickets[@]} -eq 0 ]]; then
+    echo "error: no .ticket fields found in $orch_dir/workers/*.json" >&2
+    return 2
+  fi
+
+  # Build jq stream literals: "CTL-100","CTL-101"  and  501,502
+  local ticket_stream pr_stream=""
+  ticket_stream=$(printf '"%s",' "${tickets[@]}")
+  ticket_stream="${ticket_stream%,}"
+  if [[ ${#prs[@]} -gt 0 ]]; then
+    pr_stream=$(printf '%s,' "${prs[@]}")
+    pr_stream="${pr_stream%,}"
+  fi
+
+  # Emit a single parenthesized jq predicate. Each clause is itself
+  # parenthesized; clauses are joined by `or` so the predicate evaluates to
+  # boolean true when ANY clause matches. The PR clauses are conditional —
+  # an early-stage orchestrator with no PRs still gets a valid filter.
+  printf '(\n'
+  printf '  (.orchestrator == "%s")\n' "$orch_name"
+  printf '  or ((.worker // "") | IN(%s))\n' "$ticket_stream"
+  printf '  or ((.scope.ref // "") | startswith("refs/heads/%s-"))\n' "$orch_name"
+  if [[ -n "$pr_stream" ]]; then
+    printf '  or ((.scope.pr // -1) | IN(%s))\n' "$pr_stream"
+    printf '  or ((.detail.prNumbers // []) | any(IN(%s)))\n' "$pr_stream"
+  fi
+  printf '  or ((.scope.ticket // "") | IN(%s))\n' "$ticket_stream"
+  printf ')\n'
+}
+
 cmd_help() {
   cat <<'EOF'
 catalyst-events — tail and wait-for primitives over the global event log.
@@ -226,6 +338,7 @@ catalyst-events — tail and wait-for primitives over the global event log.
 Usage:
   catalyst-events tail [--filter <jq-predicate>] [--since-line <N>]
   catalyst-events wait-for [--filter <jq-predicate>] [--timeout <sec>]
+  catalyst-events build-orchestrator-filter <orch-dir>
   catalyst-events help
 
 Examples:
@@ -245,6 +358,12 @@ Examples:
     --filter '.event == "worker-failed" and .orchestrator == "orch-foo"' \
     --timeout 600
 
+  # Tail every relevant event for one orchestrator (scoped by ticket + PR set
+  # + branch-ref prefix). Filtering belongs inside --filter; do NOT pipe tail
+  # through awk/sed/grep — buffering will swallow events.
+  FILTER=$(catalyst-events build-orchestrator-filter "$ORCH_DIR")
+  catalyst-events tail --filter "$FILTER"
+
 Environment:
   CATALYST_DIR          base directory (default: $HOME/catalyst)
   CATALYST_EVENTS_DIR   events directory (default: $CATALYST_DIR/events)
@@ -261,9 +380,10 @@ main() {
   local cmd="${1:-help}"
   shift || true
   case "$cmd" in
-    tail)     cmd_tail "$@" ;;
-    wait-for) cmd_wait_for "$@" ;;
-    help|-h|--help) cmd_help ;;
+    tail)                       cmd_tail "$@" ;;
+    wait-for)                   cmd_wait_for "$@" ;;
+    build-orchestrator-filter)  cmd_build_orchestrator_filter "$@" ;;
+    help|-h|--help)             cmd_help ;;
     *)
       echo "error: unknown command: $cmd" >&2
       cmd_help >&2
