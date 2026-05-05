@@ -212,6 +212,7 @@ it falls back to `gh pr view` polling. The disjunctive filter restores
 event-driven dispatch for those cases.
 
 ```bash
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 BASE_BRANCH=$(gh pr view "$pr_number" --json baseRefName --jq '.baseRefName')
 ITER=0
 MAX_ITER=20
@@ -237,9 +238,9 @@ while [ $ITER -lt $MAX_ITER ]; do
     ' \
     --timeout 600 || true)
 
-  # MANDATORY authoritative re-check on every wake-up.
-  MERGE_STATE=$(gh pr view "$pr_number" --json state,mergeStateStatus,mergedAt)
-  STATE=$(echo "$MERGE_STATE" | jq -r '.state')
+  # MANDATORY authoritative re-check — REST only, no GraphQL. See [[wait-for-github]].
+  PR_DATA=$(gh api "repos/${REPO}/pulls/${pr_number}" 2>/dev/null || echo '{"merged":false,"state":"open"}')
+  STATE=$(echo "$PR_DATA" | jq -r 'if .merged then "MERGED" elif .state == "closed" then "CLOSED" else "OPEN" end')
   if [ "$STATE" = "MERGED" ]; then break; fi
   if [ "$STATE" = "CLOSED" ]; then
     echo "❌ PR #$pr_number was closed without merging"
@@ -271,12 +272,13 @@ while [ $ITER -lt $MAX_ITER ]; do
 done
 ```
 
-**Why every wake-up runs `gh pr view`:** if the orch-monitor daemon is down,
-no GitHub webhook events flow into the log and `wait-for` blocks until
-timeout (600 s). The `gh pr view` after timeout is the safety net that keeps
-merge confirmation correct even when the event stream has dropped. Same rule
-applies on real event arrivals — events are wake-up triggers, never the
-source of truth.
+**Why every wake-up runs an authoritative REST check:** if the orch-monitor
+daemon is down, no GitHub webhook events flow into the log and `wait-for`
+blocks until timeout (600 s). The `gh api` REST check after timeout is the
+safety net that keeps merge confirmation correct even when the event stream
+has dropped. Same rule applies on real event arrivals — events are wake-up
+triggers, never the source of truth. See `[[wait-for-github]]` for the full
+two-phase diagnostic pattern and the full list of forbidden GraphQL patterns.
 
 The reference doc contains:
 
