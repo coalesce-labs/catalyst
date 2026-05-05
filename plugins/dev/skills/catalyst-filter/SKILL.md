@@ -85,6 +85,7 @@ STATE_SCRIPT="/path/to/plugins/dev/scripts/catalyst-state.sh"
     detail: {
       notify_event: ("filter.wake." + $orch),
       prompt: $prompt,
+      persistent: true,
       context: {
         pr_numbers: $prs,
         tickets: $tickets,
@@ -102,11 +103,20 @@ STATE_SCRIPT="/path/to/plugins/dev/scripts/catalyst-state.sh"
 | `orchestrator` | string | Orchestrator ID — used as the routing key if `detail.interest_id` is absent |
 | `detail.notify_event` | string | Event name the daemon will emit when relevant events arrive (`"filter.wake.{id}"`) |
 | `detail.prompt` | string | Natural-language description of what to wake on (see Prompt Writing below) |
+| `detail.persistent` | boolean | `true` — keep interest active after each match (continuous monitoring). `false` (default) — auto-deregister after first wake (one-shot wait). |
 | `detail.context` | object | Optional focus hints: `pr_numbers`, `tickets`, `branches` |
 | `detail.interest_id` | string | Optional override for the routing table key; defaults to `orchestrator` |
 
 The daemon picks up `filter.register` from the live log within one poll cycle (~200ms).
 On daemon restart, it scans the last 1000 lines of the log to recover active registrations.
+
+**Choosing `persistent`:**
+
+- Use `persistent: true` for continuous monitoring — the orchestrator's Phase 4 loop where you want
+  to be woken on every CI event, every PR update, every worker status change throughout the run.
+- Use `persistent: false` (the default) for one-shot waits — "tell me when this specific PR merges"
+  or "wake me when the next CI run completes". The interest is removed automatically after the first
+  wake, so no explicit `filter.deregister` is needed.
 
 ## Step 2 — Wait
 
@@ -154,8 +164,17 @@ Use `reason` as context for your diagnostic step, not as a decision signal. Conf
 
 ## Step 4 — Deregister
 
-When the orchestrator is done waiting (phase complete, shutting down, or merging), emit
-`filter.deregister` to remove the interest from the routing table:
+Deregistration happens automatically in three cases:
+
+1. **One-shot (`persistent: false`, the default)** — the daemon removes the interest immediately
+   after emitting the first wake event. No explicit deregister needed.
+
+2. **Orchestrator termination** — when `orchestrator-completed` or `orchestrator-failed` appears
+   in the event log for an orchestrator ID that has active interests, the daemon removes all of
+   that orchestrator's interests automatically.
+
+3. **Explicit deregister** — emit `filter.deregister` at any time to remove the interest
+   immediately (useful for `persistent: true` interests or early cancellation):
 
 ```bash
 "$STATE_SCRIPT" event "$(jq -nc \
@@ -163,9 +182,10 @@ When the orchestrator is done waiting (phase complete, shutting down, or merging
   '{event: "filter.deregister", detail: {interest_id: $id}}')"
 ```
 
-If the orchestrator exits without deregistering, the daemon's in-memory table retains the
-entry until the daemon restarts (it re-scans the log on restart and applies both register
-and deregister events in order).
+If a `persistent: true` orchestrator exits without emitting `filter.deregister` or
+`orchestrator-completed`/`orchestrator-failed`, the daemon's in-memory table retains the entry
+until the daemon restarts (on restart it replays the last 1000 log lines and applies all
+register, deregister, and completion events in order).
 
 ## Prompt Writing Guide
 

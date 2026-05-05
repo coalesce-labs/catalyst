@@ -51,8 +51,9 @@ export function handleRegister(event) {
     prompt: d.prompt ?? '',
     context: d.context ?? null,
     orchestrator: event.orchestrator ?? null,
+    persistent: d.persistent === true,
   });
-  console.log(`[filter] Registered: ${id} — "${d.prompt}"`);
+  console.log(`[filter] Registered: ${id} — "${d.prompt}" (persistent: ${d.persistent === true})`);
 }
 
 export function handleDeregister(event) {
@@ -63,14 +64,26 @@ export function handleDeregister(event) {
   }
 }
 
+export function handleOrchestratorTerminated(event) {
+  const orchId = event.orchestrator;
+  if (!orchId) return;
+  for (const [id, reg] of interests) {
+    if (reg.orchestrator === orchId) {
+      interests.delete(id);
+      console.log(`[filter] Auto-deregistered: ${id} (orchestrator ${orchId} terminated)`);
+    }
+  }
+}
+
 // --- Event classification ---
 
 // Returns true if this event should be completely ignored (not batched, not dispatched)
 export function shouldSkipEvent(event) {
   const name = event.event ?? '';
-  // Self-loop prevention: skip wake events the daemon itself emitted.
-  // filter.register and filter.deregister are dispatched to handlers, not skipped here.
-  return name.startsWith('filter.wake.');
+  // Self-loop prevention: skip all filter.* events the daemon produces or handles.
+  // filter.register and filter.deregister are dispatched to handlers before this is called,
+  // but skipping all filter.* here ensures no future filter.* variants reach Groq.
+  return name.startsWith('filter.');
 }
 
 export function buildGroqPrompt(events) {
@@ -165,6 +178,10 @@ async function classifyBatch(events) {
       },
     });
     console.log(`[filter] Wake: ${reg.notify_event} — ${match.reason}`);
+    if (!reg.persistent) {
+      interests.delete(match.interest_id);
+      console.log(`[filter] Auto-deregistered (one-shot): ${match.interest_id}`);
+    }
   }
 }
 
@@ -208,6 +225,12 @@ function processEvent(event) {
 
   if (shouldSkipEvent(event)) return;
   if (name === 'heartbeat') return;
+
+  // Implicitly deregister interests belonging to a terminated orchestrator.
+  // The event is still queued for Groq so other orchestrators watching for this event can fire.
+  if (name === 'orchestrator-completed' || name === 'orchestrator-failed') {
+    handleOrchestratorTerminated(event);
+  }
 
   if (!interests.size) return;
   queueEvent(event);
@@ -265,6 +288,9 @@ function loadExistingRegistrations() {
       try { event = JSON.parse(line); } catch { continue; }
       if (event.event === 'filter.register') handleRegister(event);
       if (event.event === 'filter.deregister') handleDeregister(event);
+      if (event.event === 'orchestrator-completed' || event.event === 'orchestrator-failed') {
+        handleOrchestratorTerminated(event);
+      }
     }
     if (interests.size) {
       console.log(`[filter] Recovered ${interests.size} interest(s) from log`);
