@@ -55,31 +55,68 @@ is `tail | head -n 1` with a timeout.
 ## Pattern 1 — Worker waits for its PR to merge
 
 A `claude -p` worker that just opened PR #342 needs to block until the PR merges, then
-do post-merge work. Use `wait-for`:
+do post-merge work. Use the two-phase pattern from [[wait-for-github]]: a 3-minute Phase 1
+with a diagnostic checkpoint before committing to the full 2-hour wait.
 
 ```bash
-# Block until github.pr.merged for this PR arrives — up to 2 hours.
+# Two-phase pattern — see [[wait-for-github]] for full reference.
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+EVENT=""
+_WFG_MATCHED=false
+
+# Phase 1: short wait with diagnostic checkpoint (3 minutes).
 EVENT=$(catalyst-events wait-for \
   --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
-  --timeout 7200 || true)
+  --timeout 180 2>/dev/null || true)
 
-# Mandatory fallback: ALWAYS confirm with an authoritative one-shot check.
-# wait-for can return 0 (matched) or 1 (timed out); both paths must verify.
-MERGE_STATE=$(gh pr view ${PR_NUMBER} --json state)
-STATE=$(echo "$MERGE_STATE" | jq -r '.state')
-if [ "$STATE" = "MERGED" ]; then
+if [ -n "$EVENT" ]; then
+  _WFG_MATCHED=true
+else
+  # Phase 1 timed out — run diagnostics before extending to Phase 2.
+  echo "Phase 1 timed out after 3 min — running diagnostics..."
+  STALLED=false
+  FILTER_MISMATCH=false
+
+  HEARTBEATS=$(catalyst-events tail --since "5 minutes ago" 2>/dev/null \
+    | jq -c 'select(.event == "heartbeat")' | wc -l | tr -d ' ')
+  [ "${HEARTBEATS:-0}" -eq 0 ] && { echo "WARN: No heartbeats — event log may be stalled"; STALLED=true; }
+
+  RAW_HIT=$(catalyst-events tail --since "15 minutes ago" 2>/dev/null | jq -c \
+    --argjson pr "$PR_NUMBER" \
+    'select((.scope.pr == $pr) or (.detail.number == $pr) or
+            (.detail.pull_request.number == $pr) or (tostring | contains($pr | tostring)))' | head -1)
+  if [ -n "$RAW_HIT" ]; then
+    echo "WARN: Event arrived but filter did not match. Raw event:"; echo "$RAW_HIT" | jq .
+    FILTER_MISMATCH=true
+  fi
+
+  TUNNEL_STATE=$(catalyst-monitor status --json 2>/dev/null | jq -r '.webhookTunnel.state // "unknown"')
+  [ "$TUNNEL_STATE" != "running" ] && { echo "WARN: Webhook tunnel not running"; STALLED=true; }
+
+  if [ "$FILTER_MISMATCH" = "false" ] && [ "$STALLED" = "false" ]; then
+    # Infrastructure healthy — extend to Phase 2.
+    EVENT=$(catalyst-events wait-for \
+      --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
+      --timeout 7200 2>/dev/null || true)
+    [ -n "$EVENT" ] && _WFG_MATCHED=true
+  fi
+fi
+
+# Authoritative REST confirmation — always follows any wait-for path.
+MERGED=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
+if [ "$MERGED" = "true" ]; then
   # Proceed with post-merge work
 fi
 ```
 
-**Non-negotiable:** every `wait-for` is paired with an authoritative check. Reasons:
+**Non-negotiable:** every `wait-for` is paired with an authoritative REST check. Reasons:
 
 - The orch-monitor daemon may be down. No daemon → no webhook events → `wait-for`
-  blocks until timeout. The `gh pr view` after timeout is the safety net.
+  blocks until timeout. The `gh api` call after timeout is the safety net.
 - Transient state can race the event. The webhook may arrive while the worker is doing
   setup before reaching `wait-for`. The fallback covers that gap too.
-- Filters may not match exactly. `wait-for` returns the first matching line; `gh pr view`
-  returns canonical truth.
+- Filters may not match exactly. `wait-for` returns the first matching line; `gh api`
+  returns canonical truth. Use `gh api` (REST), never `gh pr view --json` (GraphQL).
 
 ## Pattern 2 — Long-lived orchestrator wakes on multiple event types
 
@@ -172,14 +209,17 @@ the agent should *react to*, not just sleep through:
 | `github.check_suite.completed` (conclusion=`failure` / `timed_out`) | CI failed | pull failure logs, fix, push, re-enter the wait |
 | `github.pr_review.submitted` (state=`changes_requested`) | Reviewer requested changes | run `/review-comments`, push, re-enter the wait |
 | `github.push` to the base branch | PR is now BEHIND | `gh pr update-branch`, re-enter the wait |
-| `github.pr.merged` / `github.pr.closed` | terminal | confirm via `gh pr view`, exit |
+| `github.pr.merged` / `github.pr.closed` | terminal | confirm via `gh api` REST, exit |
 
 Wrap one disjunctive `wait-for` around all of them; classify with a `case` on
 `.event`; re-enter the loop on every non-terminal event. Authoritative
-`gh pr view` runs on every wake-up — same safety rule as Pattern 1.
+`gh api` REST check runs on every wake-up — same safety rule as Pattern 1.
 
 ```bash
-BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName')
+# Two-phase compliant cadence loop — see [[wait-for-github]]. The 1800s timeout
+# serves as a cadence fallback; the authoritative REST check runs on every wake-up.
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+BASE_BRANCH=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.base.ref')
 ITER=0
 MAX_ITER=20
 
@@ -200,8 +240,10 @@ while [ $ITER -lt $MAX_ITER ]; do
     ' \
     --timeout 1800 || true)
 
-  # MANDATORY authoritative re-check on every wake-up.
-  PR_STATE=$(gh pr view "$PR_NUMBER" --json state --jq '.state')
+  # MANDATORY authoritative REST re-check on every wake-up.
+  PR_STATE=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+    --jq 'if .merged then "MERGED" elif .state == "closed" then "CLOSED" else "OPEN" end' \
+    2>/dev/null || echo "OPEN")
   if [ "$PR_STATE" = "MERGED" ]; then break; fi
   if [ "$PR_STATE" = "CLOSED" ]; then exit 1; fi
 
@@ -217,8 +259,8 @@ while [ $ITER -lt $MAX_ITER ]; do
       gh pr update-branch "$PR_NUMBER" || true
       ;;
     "")
-      # Timed out — no event. The gh pr view above already confirmed
-      # we're not merged; fall through to next iteration.
+      # Timed out — no event. The gh api check above confirmed not merged;
+      # fall through to next iteration.
       ;;
   esac
 done

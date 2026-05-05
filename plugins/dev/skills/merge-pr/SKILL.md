@@ -199,8 +199,8 @@ Read and follow the full workflow in
 mechanism here is the **canonical "Reactive PR lifecycle" pattern from
 `monitor-events` (Pattern 3, CTL-228)** — a single `wait-for` that fires on
 any of: PR merged, PR closed, CI failure, review changes-requested, or push
-to the base branch. Each wake-up is paired with an authoritative `gh pr view`
-re-check; the event tells the agent *what changed*, `gh pr view` tells it
+to the base branch. Each wake-up is paired with an authoritative `gh api`
+REST re-check; the event tells the agent *what changed*, `gh api` tells it
 *the current truth*.
 
 Why a multi-event filter and not just `github.pr.merged`: most of the time
@@ -208,12 +208,14 @@ between PR-create and PR-merge is spent on CI, review, and base-branch
 churn — not waiting on a clean merge to land. Subscribing only to the merge
 event means the agent learns nothing from a check failure or a
 changes-requested review until the 600-second timeout fires, at which point
-it falls back to `gh pr view` polling. The disjunctive filter restores
+it falls back to REST polling via `gh api`. The disjunctive filter restores
 event-driven dispatch for those cases.
 
 ```bash
+# Two-phase compliant cadence loop — see [[wait-for-github]]. The 600s timeout
+# serves as a fallback cadence; the authoritative REST check runs on every wake-up.
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-BASE_BRANCH=$(gh pr view "$pr_number" --json baseRefName --jq '.baseRefName')
+BASE_BRANCH=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.base.ref')
 ITER=0
 MAX_ITER=20
 
@@ -238,9 +240,10 @@ while [ $ITER -lt $MAX_ITER ]; do
     ' \
     --timeout 600 || true)
 
-  # MANDATORY authoritative re-check — REST only, no GraphQL. See [[wait-for-github]].
-  PR_DATA=$(gh api "repos/${REPO}/pulls/${pr_number}" 2>/dev/null || echo '{"merged":false,"state":"open"}')
-  STATE=$(echo "$PR_DATA" | jq -r 'if .merged then "MERGED" elif .state == "closed" then "CLOSED" else "OPEN" end')
+  # MANDATORY authoritative REST re-check on every wake-up.
+  STATE=$(gh api "repos/${REPO}/pulls/${pr_number}" \
+    --jq 'if .merged then "MERGED" elif .state == "closed" then "CLOSED" else "OPEN" end' \
+    2>/dev/null || echo "OPEN")
   if [ "$STATE" = "MERGED" ]; then break; fi
   if [ "$STATE" = "CLOSED" ]; then
     echo "❌ PR #$pr_number was closed without merging"
@@ -265,20 +268,19 @@ while [ $ITER -lt $MAX_ITER ]; do
       gh pr update-branch "$pr_number" || true
       ;;
     "")
-      # Timeout — gh pr view above already confirmed we're not merged.
+      # Timeout — gh api check above confirmed we're not merged.
       # Diagnose blockers per the reference doc.
       ;;
   esac
 done
 ```
 
-**Why every wake-up runs an authoritative REST check:** if the orch-monitor
-daemon is down, no GitHub webhook events flow into the log and `wait-for`
-blocks until timeout (600 s). The `gh api` REST check after timeout is the
-safety net that keeps merge confirmation correct even when the event stream
-has dropped. Same rule applies on real event arrivals — events are wake-up
-triggers, never the source of truth. See `[[wait-for-github]]` for the full
-two-phase diagnostic pattern and the full list of forbidden GraphQL patterns.
+**Why every wake-up runs `gh api`:** if the orch-monitor daemon is down,
+no GitHub webhook events flow into the log and `wait-for` blocks until
+timeout (600 s). The `gh api` REST call after timeout is the safety net that keeps
+merge confirmation correct even when the event stream has dropped. Same rule
+applies on real event arrivals — events are wake-up triggers, never the
+source of truth. Use `gh api` (REST), never `gh pr view --json` (GraphQL).
 
 The reference doc contains:
 
