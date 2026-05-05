@@ -24,6 +24,8 @@ export type LinearWebhookEvent =
       teamKey: string | null;
       data: Record<string, unknown>;
       updatedFromKeys: string[];
+      /** Linear user UUID who triggered the action; null when absent. CTL-263. */
+      actorId: string | null;
     }
   | {
       kind: "comment";
@@ -58,10 +60,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function getOptStr(
-  obj: Record<string, unknown>,
-  key: string,
-): string | null {
+function getOptStr(obj: Record<string, unknown>, key: string): string | null {
   const v = obj[key];
   return typeof v === "string" && v.length > 0 ? v : null;
 }
@@ -87,17 +86,12 @@ function actionLabel(value: unknown): string {
  *
  * Priority for updates: state > priority > assignee > generic.
  */
-function issueTopic(
-  action: "create" | "update" | "remove",
-  updatedFromKeys: string[],
-): string {
+function issueTopic(action: "create" | "update" | "remove", updatedFromKeys: string[]): string {
   if (action === "create") return "linear.issue.created";
   if (action === "remove") return "linear.issue.removed";
   if (updatedFromKeys.includes("stateId")) return "linear.issue.state_changed";
-  if (updatedFromKeys.includes("priority"))
-    return "linear.issue.priority_changed";
-  if (updatedFromKeys.includes("assigneeId"))
-    return "linear.issue.assignee_changed";
+  if (updatedFromKeys.includes("priority")) return "linear.issue.priority_changed";
+  if (updatedFromKeys.includes("assigneeId")) return "linear.issue.assignee_changed";
   return "linear.issue.updated";
 }
 
@@ -109,14 +103,13 @@ function teamKeyFromData(data: Record<string, unknown>): string | null {
 
 function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
   const action = normalizeAction(payload.action);
-  if (action === null)
-    return ignored(`Issue: unknown action ${actionLabel(payload.action)}`);
+  if (action === null) return ignored(`Issue: unknown action ${actionLabel(payload.action)}`);
   const data = isObject(payload.data) ? payload.data : null;
   if (data === null) return ignored("Issue: missing data");
-  const updatedFrom = isObject(payload.updatedFrom)
-    ? payload.updatedFrom
-    : {};
+  const updatedFrom = isObject(payload.updatedFrom) ? payload.updatedFrom : {};
   const updatedFromKeys = Object.keys(updatedFrom);
+  const actor = isObject(payload.actor) ? payload.actor : null;
+  const actorId = actor !== null ? getOptStr(actor, "id") : null;
   return {
     kind: "issue",
     action,
@@ -125,13 +118,13 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     teamKey: teamKeyFromData(data),
     data,
     updatedFromKeys,
+    actorId,
   };
 }
 
 function parseComment(payload: Record<string, unknown>): LinearWebhookEvent {
   const action = normalizeAction(payload.action);
-  if (action === null)
-    return ignored(`Comment: unknown action ${actionLabel(payload.action)}`);
+  if (action === null) return ignored(`Comment: unknown action ${actionLabel(payload.action)}`);
   const data = isObject(payload.data) ? payload.data : null;
   if (data === null) return ignored("Comment: missing data");
   // Linear's Comment payload nests issue identifier under `issue.identifier`
@@ -152,8 +145,7 @@ function parseComment(payload: Record<string, unknown>): LinearWebhookEvent {
 
 function parseCycle(payload: Record<string, unknown>): LinearWebhookEvent {
   const action = normalizeAction(payload.action);
-  if (action === null)
-    return ignored(`Cycle: unknown action ${actionLabel(payload.action)}`);
+  if (action === null) return ignored(`Cycle: unknown action ${actionLabel(payload.action)}`);
   const data = isObject(payload.data) ? payload.data : null;
   if (data === null) return ignored("Cycle: missing data");
   return {
@@ -167,8 +159,7 @@ function parseCycle(payload: Record<string, unknown>): LinearWebhookEvent {
 
 function parseReaction(payload: Record<string, unknown>): LinearWebhookEvent {
   const action = normalizeAction(payload.action);
-  if (action === null)
-    return ignored(`Reaction: unknown action ${actionLabel(payload.action)}`);
+  if (action === null) return ignored(`Reaction: unknown action ${actionLabel(payload.action)}`);
   const data = isObject(payload.data) ? payload.data : null;
   if (data === null) return ignored("Reaction: missing data");
   return {
@@ -181,8 +172,7 @@ function parseReaction(payload: Record<string, unknown>): LinearWebhookEvent {
 
 function parseIssueLabel(payload: Record<string, unknown>): LinearWebhookEvent {
   const action = normalizeAction(payload.action);
-  if (action === null)
-    return ignored(`IssueLabel: unknown action ${actionLabel(payload.action)}`);
+  if (action === null) return ignored(`IssueLabel: unknown action ${actionLabel(payload.action)}`);
   const data = isObject(payload.data) ? payload.data : null;
   if (data === null) return ignored("IssueLabel: missing data");
   return {
@@ -198,13 +188,9 @@ function parseIssueLabel(payload: Record<string, unknown>): LinearWebhookEvent {
  * header; passed in by the handler). The payload's own `type` field should
  * match — we accept either as the dispatch key, preferring the header.
  */
-export function parseLinearWebhookEvent(
-  eventName: string,
-  payload: unknown,
-): LinearWebhookEvent {
+export function parseLinearWebhookEvent(eventName: string, payload: unknown): LinearWebhookEvent {
   if (!isObject(payload)) return ignored("payload is not an object");
-  const payloadType =
-    typeof payload.type === "string" ? payload.type : "";
+  const payloadType = typeof payload.type === "string" ? payload.type : "";
   const eventType = eventName.length > 0 ? eventName : payloadType;
   switch (eventType) {
     case "Issue":

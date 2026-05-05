@@ -1,12 +1,6 @@
 import { verifyLinearSignature } from "./linear-webhook-verify";
-import {
-  parseLinearWebhookEvent,
-  type LinearWebhookEvent,
-} from "./linear-webhook-events";
-import {
-  type EventLogWriter,
-  type AppendableEvent,
-} from "./event-log";
+import { parseLinearWebhookEvent, type LinearWebhookEvent } from "./linear-webhook-events";
+import { type EventLogWriter, type AppendableEvent } from "./event-log";
 
 export const LINEAR_WEBHOOK_SOURCE = "linear.webhook";
 
@@ -31,6 +25,12 @@ export interface LinearWebhookHandlerDeps {
    * so a slow consumer never blocks the webhook response.
    */
   onAccept?: (event: LinearWebhookEvent) => void | Promise<void>;
+  /**
+   * Linear user UUID for the catalyst bot. Issue events where the actor matches
+   * this value are suppressed before reaching the event log (loop prevention).
+   * CTL-263. Empty or absent = no suppression.
+   */
+  botUserId?: string;
   /** Cap for the in-memory delivery-ID dedup set. Default 1000. */
   idempotencyMax?: number;
   logger?: LinearWebhookLogger;
@@ -50,7 +50,7 @@ export interface LinearWebhookHandler {
  */
 export function buildLinearEventLogEnvelope(
   event: LinearWebhookEvent,
-  deliveryId: string,
+  deliveryId: string
 ): AppendableEvent | null {
   const id = `evt_linear_${deliveryId}`;
   switch (event.kind) {
@@ -67,6 +67,7 @@ export function buildLinearEventLogEnvelope(
           ticket: event.ticket,
           teamKey: event.teamKey,
           updatedFromKeys: event.updatedFromKeys,
+          actorId: event.actorId,
         },
       };
     case "comment":
@@ -123,9 +124,7 @@ export function buildLinearEventLogEnvelope(
   }
 }
 
-export function createLinearWebhookHandler(
-  deps: LinearWebhookHandlerDeps,
-): LinearWebhookHandler {
+export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): LinearWebhookHandler {
   const idempotencyMax = deps.idempotencyMax ?? 1000;
   const seenDeliveries: string[] = [];
   const seenDeliveriesSet = new Set<string>();
@@ -176,14 +175,29 @@ export function createLinearWebhookHandler(
       payload = JSON.parse(new TextDecoder().decode(rawBody));
     } catch (err) {
       logger.warn?.(
-        `[linear-webhook] body parse failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[linear-webhook] body parse failed: ${err instanceof Error ? err.message : String(err)}`
       );
       return new Response("invalid json body", { status: 400 });
     }
 
     const event = parseLinearWebhookEvent(eventName, payload);
+
+    // Bot-skip: suppress issue events authored by the catalyst bot to prevent
+    // write loops (worker transitions ticket → webhook fires → orchestrator wakes → loop).
+    if (
+      event.kind === "issue" &&
+      deps.botUserId &&
+      deps.botUserId.length > 0 &&
+      event.actorId === deps.botUserId
+    ) {
+      logger.info?.(
+        `[linear-webhook] suppressed bot-authored issue event for ${event.ticket ?? "unknown"}`
+      );
+      return new Response(JSON.stringify({ ok: true, kind: event.kind }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
 
     if (deps.eventLog && event.kind !== "ignored") {
       const envelope = buildLinearEventLogEnvelope(event, deliveryId);
@@ -194,7 +208,7 @@ export function createLinearWebhookHandler(
           logger.warn?.(
             `[linear-webhook] event-log append failed: ${
               err instanceof Error ? err.message : String(err)
-            }`,
+            }`
           );
         }
       }
@@ -209,7 +223,7 @@ export function createLinearWebhookHandler(
         logger.warn?.(
           `[linear-webhook] onAccept hook failed: ${
             err instanceof Error ? err.message : String(err)
-          }`,
+          }`
         );
       }
     }

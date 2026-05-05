@@ -197,6 +197,8 @@ export interface CreateServerOptions {
     secret: string;
     /** smee.io channel URL for Linear delivery. Empty = no tunnel. CTL-242. */
     smeeChannel?: string;
+    /** Linear bot user UUID for loop prevention. CTL-263. */
+    botUserId?: string;
   } | null;
 }
 
@@ -638,6 +640,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     });
     linearWebhookHandler = createLinearWebhookHandler({
       secret: linearWebhookConfig.secret,
+      botUserId: linearWebhookConfig.botUserId,
       eventLog: linearEventLog,
       emit: (type, data) => emit(type, data),
       // CTL-211 — invalidate the LinearFetcher cache on issue webhook events
@@ -1884,6 +1887,7 @@ if (import.meta.main) {
       ? {
           secret: fullWebhookConfig.linearSecret,
           smeeChannel: fullWebhookConfig.linearSmeeChannel,
+          botUserId: fullWebhookConfig.linearBotUserId || undefined,
         }
       : null;
   let summarizeHandler: SummarizeHandler | null = null;

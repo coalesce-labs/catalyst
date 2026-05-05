@@ -2,10 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import {
-  loadWebhookConfig,
-  _resetWebhookDeprecationWarning,
-} from "../lib/webhook-config";
+import { loadWebhookConfig, _resetWebhookDeprecationWarning } from "../lib/webhook-config";
 
 let tmpDir: string;
 let homeDir: string;
@@ -70,6 +67,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecret: "",
       linearSmeeChannel: "",
+      linearBotUserId: "",
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -98,6 +96,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecret: "",
       linearSmeeChannel: "",
+      linearBotUserId: "",
     });
     expect(warn).toHaveBeenCalledTimes(1);
     const msg = String(warn.mock.calls[0]?.[0] ?? "");
@@ -134,6 +133,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecret: "",
       linearSmeeChannel: "",
+      linearBotUserId: "",
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -164,6 +164,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecret: "",
       linearSmeeChannel: "",
+      linearBotUserId: "",
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -188,6 +189,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecret: "",
       linearSmeeChannel: "",
+      linearBotUserId: "",
     });
   });
 
@@ -213,6 +215,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecret: "",
       linearSmeeChannel: "",
+      linearBotUserId: "",
     });
   });
 
@@ -286,6 +289,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecret: "",
       linearSmeeChannel: "",
+      linearBotUserId: "",
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -319,6 +323,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecret: "",
       linearSmeeChannel: "",
+      linearBotUserId: "",
     });
   });
 });
@@ -359,10 +364,7 @@ describe("loadWebhookConfig watchRepos (CTL-216)", () => {
     const cfg = loadWebhookConfig(homeDir, projectConfigPath);
 
     expect(cfg).not.toBeNull();
-    expect(cfg!.watchRepos).toEqual([
-      "coalesce-labs/catalyst",
-      "coalesce-labs/adva",
-    ]);
+    expect(cfg!.watchRepos).toEqual(["coalesce-labs/catalyst", "coalesce-labs/adva"]);
   });
 
   it("ignores watchRepos in Layer 2 (home-dir config) — Layer 1 only", () => {
@@ -414,6 +416,7 @@ describe("loadWebhookConfig watchRepos (CTL-216)", () => {
       watchRepos: ["a/b"],
       linearSecret: "",
       linearSmeeChannel: "",
+      linearBotUserId: "",
     });
   });
 
@@ -729,5 +732,41 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
     expect(cfg).not.toBeNull();
     expect(cfg!.smeeChannel).toBe("");
     expect(cfg!.linearSmeeChannel).toBe("https://smee.io/linear-only");
+  });
+
+  // CTL-263: linearBotUserId
+  it("reads catalyst.monitor.linear.botUserId from Layer 1 into linearBotUserId", () => {
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: {
+            webhookSecretEnv: "CATALYST_LINEAR_WEBHOOK_SECRET",
+            botUserId: "bot-linear-uuid-abc",
+          },
+        },
+      },
+    });
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "linear-secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.linearBotUserId).toBe("bot-linear-uuid-abc");
+  });
+
+  it("linearBotUserId is empty string when not configured", () => {
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "CATALYST_LINEAR_WEBHOOK_SECRET" },
+        },
+      },
+    });
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "linear-secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.linearBotUserId).toBe("");
   });
 });
