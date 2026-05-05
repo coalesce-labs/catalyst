@@ -112,15 +112,15 @@
         "autoMergeArmedAt": {
           "type": ["string", "null"],
           "format": "date-time",
-          "description": "ISO 8601 timestamp when auto-merge was armed on the PR (written by worker on gh pr merge --auto). Null if --no-merge or arming failed."
+          "description": "Deprecated (CTL-252): auto-merge is no longer armed. Retained for schema compatibility with workers dispatched before CTL-252. Always null for CTL-252+ workers."
         },
         "mergedAt": {
           "type": ["string", "null"],
           "format": "date-time",
-          "description": "ISO 8601 timestamp when the PR was actually merged. Null until merge. Written by the WORKER after polling `gh pr view --json state,mergedAt` returns state=MERGED. Worker does not exit terminal-success until this field is set. Sourced from `gh pr view --json mergedAt`."
+          "description": "ISO 8601 timestamp when the PR was actually merged. Written by the WORKER after gh pr merge --squash --delete-branch and REST confirmation via gh api. Null until merge. Orchestrator Phase 4 writes this only as a fallback for stalled workers."
         }
       },
-      "description": "Pull request details (null until PR is created). The worker owns all fields — number, url, ciStatus, prOpenedAt, autoMergeArmedAt, and mergedAt — by polling until the PR is actually merged before exiting. The orchestrator's poll loop is a safety net for stalled workers, not the primary merge recorder."
+      "description": "Pull request details (null until PR is created). The worker owns all fields — number, url, ciStatus, prOpenedAt, and mergedAt — by actively listening and merging (CTL-252). The orchestrator's poll loop is a safety net for stalled workers only."
     },
     "linearState": {
       "type": ["string", "null"],

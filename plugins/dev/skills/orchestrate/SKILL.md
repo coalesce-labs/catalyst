@@ -612,44 +612,37 @@ MANDATORY: Before completing your contract:
 5. Code review — must pass code-reviewer agent
 6. All quality gates in config must pass
 
-Your success contract ENDS at (CTL-133, refined by CTL-211):
+Your success contract ENDS at (CTL-252):
   ✓ PR open (gh pr create succeeded)
-  ✓ Auto-merge armed (gh pr merge --auto succeeded)
-  ✓ pr.prOpenedAt, pr.autoMergeArmedAt, status="merging" written to signal file
+  ✓ Active listen loop resolved all blockers (CI, bot reviews, BEHIND) inline
+  ✓ PR merged with gh pr merge --squash --delete-branch (no --auto)
+  ✓ Optional deployment verified (if catalyst.deploy configured)
+  ✓ pr.mergedAt, deployment.url (if applicable), status="done" written to signal file
   ✓ Worker process exits cleanly
 
-DO NOT POLL. The orchestrator's Phase 4 loop owns everything past `merging`:
-merge confirmation, BEHIND/DIRTY recovery, CI auto-fixup, and the production
-deploy state machine (`merged → deploying → done | deploy-failed`). A `claude
--p` worker process is fire-and-forget — it cannot reliably stay alive for the
-hour+ that production deploy verification requires, and a polling worker
-duplicates the orchestrator's state machine while exhausting GitHub's 5,000/hr
-GraphQL rate limit.
-
-If you must block on a single event mid-implementation (e.g. waiting for a
-specific webhook before the next step), use `catalyst-events wait-for` with a
-short timeout and an authoritative `gh` fallback. See the [[monitor-events]]
-skill for the canonical pattern. NEVER run a `while true; do … sleep 30; done`
-poll loop.
+Use catalyst-events wait-for (two-phase pattern from [[wait-for-github]]) to
+listen for PR events — this is a blocking subprocess call that works reliably
+in claude -p non-interactive sessions. NEVER use gh pr view --json in any loop
+— that burns GraphQL rate limits. Use gh api REST endpoints only for state
+checks.
 
 Write these fields into your signal file as they become available:
   pr.number
   pr.url
   pr.prOpenedAt       (ISO timestamp when gh pr create returned)
-  pr.autoMergeArmedAt (ISO timestamp when gh pr merge --auto returned)
-  pr.ciStatus         (pending — orchestrator updates this past merge)
-  status              (pr-created → merging)
+  pr.mergedAt         (ISO timestamp when merge confirmed via REST)
+  pr.mergeCommitSha   (from REST response after merge)
+  pr.ciStatus         (pending → merged)
+  deployment.url      (from deployment_status event, if configured)
+  status              (pr-created → done)
 
-Status transitions YOU do NOT write (orchestrator-owned, CTL-211):
-  merged          (orchestrator confirms PR.state=MERGED)
-  deploying       (orchestrator observes github.deployment.created)
-  done            (orchestrator observes deployment_status.success on production
-                   env, OR catalyst.deploy.<repo>.skipDeployVerification=true)
-  deploy-failed   (orchestrator observes deployment_status.failure on production)
+On unrecoverable blockers (human changes-requested, DIRTY after attempts,
+CI blocked after 3 fix attempts), write status="stalled" with details and
+post a `comms attention` message — the orchestrator's Phase 4 dispatches
+remediation for stalled workers.
 
-Your work ends when you write status="merging" after arming auto-merge. If you
-hit an unrecoverable blocker before that point, write status="stalled" with
-details and post a `comms attention` message.
+Status transitions you do NOT write (orchestrator-owned fallback only):
+  done   (written by orchestrator Phase 4 ONLY when worker stalled before merge)
 
 COMMS DISCIPLINE: when posting to the shared comms channel, follow the rules in the
 catalyst-comms skill (plugins/dev/skills/catalyst-comms/SKILL.md § Posting Discipline):
@@ -885,17 +878,14 @@ done
   >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 ```
 
-**Authoritative merge confirmation (CTL-31, refined by CTL-80, CTL-133, CTL-243):**
+**Merge confirmation fallback (CTL-31, refined by CTL-80, CTL-133, CTL-243, CTL-252):**
 
-Workers exit at `status: "merging"` after arming auto-merge (CTL-133). The orchestrator's
-monitor is the **authoritative merge watcher**: it confirms merges via `gh pr view`,
-writes `pr.mergedAt` + `status: "done"` to the worker's signal file, and transitions the
-Linear ticket. Every Monitor wake-up triggered by `github.pr.merged`, `github.pr.closed`,
-`github.push`, or `github.check_suite.completed` runs this scan — and the 10-minute idle
-fallback re-runs it as a safety net so daemon-down windows do not block merge
-confirmation indefinitely. Every `gh pr view` is the canonical truth; events are
-wake-up triggers only. For each worker whose signal does not yet show `pr.mergedAt`,
-ping GitHub directly:
+Workers now exit at `status: "done"` after actively merging their own PR (CTL-252). The
+orchestrator's merge confirmation scan is a **safety-net fallback** for workers that stalled or
+crashed before completing their own merge. Every Monitor wake-up triggered by `github.pr.merged`,
+`github.pr.closed`, `github.push`, or `github.check_suite.completed` runs this scan, and the
+10-minute idle fallback re-runs it so daemon-down windows do not block indefinitely. For each
+worker whose signal shows `pr.number` but not yet `pr.mergedAt`, ping GitHub directly:
 
 ```bash
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
@@ -993,8 +983,8 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
       # Transition Linear ticket via the shared helper (CTL-69). The helper
       # reads stateMap from `.catalyst/config.json`, is idempotent, and
       # respects --state-on-merge when the operator wants a non-default
-      # state (e.g., "Shipped"). Since CTL-133, this is the primary Linear
-      # done-transition — workers exit at "merging" before merge completes.
+      # state (e.g., "Shipped"). Since CTL-252, workers write their own done-
+      # transition; this runs only as a fallback for stalled/crashed workers.
       #
       # CTL-211: only transition Linear to done when TARGET_STATUS is "done"
       # (skipDeployVerification=true). When TARGET_STATUS is "merged", the
@@ -1214,9 +1204,9 @@ The state-machine transition logic is mirrored in
 function (`nextDeployState`) so the transitions are mechanically verified by
 unit tests independently of this bash glue.
 
-Since CTL-133, workers exit at `status: "merging"` after arming auto-merge — this
-orchestrator scan is the authoritative merge watcher that writes `pr.mergedAt` +
-`status: "done"` and handles BEHIND/DIRTY/BLOCKED states.
+Since CTL-252, workers exit at `status: "done"` after actively merging their own PR — this
+orchestrator scan is a safety-net fallback that writes `pr.mergedAt` + `status: "done"` for
+workers that stalled before completing their own merge.
 
 **Drain shared comms channel for attention (CTL-111):**
 
@@ -1431,10 +1421,11 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-**Context (CTL-130):** Workers auto-merge their PRs independently via `gh pr merge --auto
---squash`. GitHub merges the PR the moment CI passes, before the orchestrator's monitor can
-intervene. Verification therefore runs **post-merge** — it surfaces gaps for remediation rather
-than gating merge.
+**Context (CTL-130, updated by CTL-252):** Workers actively merge their own PRs via `gh pr
+merge --squash --delete-branch` (no `--auto`) after the listen loop confirms CLEAN. The merge
+happens the moment the worker's listen loop confirms CI passed and reviews are satisfied.
+Verification therefore runs **post-merge** — it surfaces gaps for remediation rather than
+gating merge.
 
 The Phase 4 merge-confirmation scan (MERGED branch) already runs `orchestrate-verify.sh` on
 every merged PR when `verifyBeforeMerge` is `true` (default). Phase 5 aggregates those results

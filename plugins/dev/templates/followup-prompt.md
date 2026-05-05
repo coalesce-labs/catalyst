@@ -99,8 +99,8 @@ known parent to reference.
 5. **Run all quality gates** — typecheck, lint, tests, security review, code review. This is a
    normal PR lifecycle, not a rushed patch.
 
-6. **Ship normally** — `git commit`, `git push`, `gh pr create` against `main`. Arm auto-merge
-   with `gh pr merge --auto --squash`.
+6. **Ship normally** — `git commit`, `git push`, `gh pr create` against `main`. Then enter the
+   active listen loop (step 9) to wait for CLEAN and merge directly.
 
 7. **Signal file metadata** — your signal file at `${SIGNAL_FILE}` already has
    `followUpTo: "${PARENT_TICKET}"` set by the orchestrator. Keep it. Update `status`, `phase`,
@@ -113,23 +113,33 @@ known parent to reference.
    - <finding 2>
    ```
 
-9. **Exit at merging** (CTL-133 contract) — after PR open and auto-merge armed, write
-   `status=merging` to your signal file and exit. The orchestrator's Phase 4 poll loop owns
-   merge confirmation, BLOCKED recovery, and the `done` transition. Do NOT poll
-   `gh pr view --json`. If you need to wait on a GitHub event before pushing (e.g., CI before
-   resolving review threads), use the [[wait-for-github]] skill pattern. Call `comms_check`
-   before exiting to flush any final inbound orchestrator messages.
+9. **Active listen + merge** (CTL-252 contract) — after the PR is open, enter an event-driven
+   listen loop using [[wait-for-github]] to wait for the PR to be CLEAN (CI green + reviews
+   satisfied). Resolve blockers inline (CI failures up to 3 times, bot review threads via
+   GraphQL resolve). When CLEAN, execute the merge directly. On unrecoverable blockers (human
+   changes-requested, persistent DIRTY, CI exhausted), write `status=stalled` and post
+   `comms attention`. Do NOT poll `gh pr view --json` — use REST via `gh api` only.
 
    ```bash
-   # Check for inbound messages before exiting
+   # Wait for CLEAN state using [[wait-for-github]] two-phase pattern
+   REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+   # ... two-phase catalyst-events wait-for loop (see [[wait-for-github]]) ...
+   # On each wake-up: check inbound comms, then REST check state
    comms_check
+   # REST check via gh api "repos/${REPO}/pulls/${PR_NUMBER}"
 
-   # Transition signal to merging (terminal worker status)
+   # When PR is CLEAN — merge directly (no --auto)
+   gh pr merge ${PR_NUMBER} --squash --delete-branch
+
+   # Record done — worker writes status=done (CTL-252 contract)
    TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   jq --arg ts "$TS" \
-      '.status = "merging" | .updatedAt = $ts | .phaseTimestamps = ((.phaseTimestamps // {}) | .merging = $ts)' \
+   MERGED_AT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged_at' 2>/dev/null || echo "$TS")
+   jq --arg ts "$TS" --arg mt "$MERGED_AT" \
+      '.status = "done" | .updatedAt = $ts | .completedAt = $ts
+       | .phaseTimestamps = ((.phaseTimestamps // {}) | .done = $ts)
+       | .pr.mergedAt = $mt | .pr.ciStatus = "merged"' \
       "${SIGNAL_FILE}" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "${SIGNAL_FILE}"
-   # Exit — orchestrator Phase 4 handles merge confirmation, Linear done transition
+   # Exit — worker owns the done transition in CTL-252 contract
    ```
 
 10. **File new improvement findings (CTL-176 / CTL-183 routing)** — if this follow-up
@@ -167,5 +177,5 @@ known parent to reference.
   the whole point of this pattern.
 - Do NOT run `gh pr view --json` in a loop — a tight loop burns GitHub's 5,000/hr GraphQL rate
   limit in minutes. Use [[wait-for-github]] for any intermediate GitHub event waits.
-- Do NOT write `status=done`, `pr.mergedAt`, or `pr.ciStatus="merged"` — the orchestrator's
-  Phase 4 poll loop owns merge confirmation and the done transition. Exit at `status=merging`.
+- Do NOT use `gh pr merge --auto` — the worker owns the merge directly after the listen loop
+  confirms CLEAN. Write `status=done` with `pr.mergedAt` after the merge succeeds.
