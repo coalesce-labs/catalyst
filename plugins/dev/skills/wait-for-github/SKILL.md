@@ -32,8 +32,8 @@ Before starting any wait, confirm the event infrastructure is running:
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 
 STATUS=$(catalyst-monitor status --json 2>/dev/null)
-TUNNEL=$(echo "$STATUS" | jq -r '.webhookTunnel.state // "unknown"' 2>/dev/null)
-if [ $? -ne 0 ] || [ "$TUNNEL" != "running" ]; then
+TUNNEL=$(echo "$STATUS" | jq -r '.webhookTunnel.connected // false' 2>/dev/null)
+if [ $? -ne 0 ] || [ "$TUNNEL" != "true" ]; then
   echo "WARN: catalyst-monitor not running or tunnel not connected — using REST fallback directly"
   USE_REST=true
 fi
@@ -93,9 +93,9 @@ if [ "$USE_REST" != "true" ]; then
 
     # Diagnostic 3: tunnel state re-check
     TUNNEL_STATE=$(catalyst-monitor status --json 2>/dev/null \
-      | jq -r '.webhookTunnel.state // "unknown"')
-    echo "Tunnel state: $TUNNEL_STATE"
-    if [ "$TUNNEL_STATE" != "running" ]; then
+      | jq -r '.webhookTunnel.connected // false')
+    echo "Tunnel connected: $TUNNEL_STATE"
+    if [ "$TUNNEL_STATE" != "true" ]; then
       echo "WARN: Webhook tunnel is not running"
       STALLED=true
     fi
@@ -162,12 +162,9 @@ Never use these in any skill. They exhaust the GraphQL budget.
 
 ## Known filter pitfalls
 
-See [[event-schema]] for authoritative field names per event type. Common mistakes:
-
 | Field | Problem | Fix |
 |---|---|---|
-| `.scope.pr` | **Absent** on `github.check_suite.*` and `github.workflow_run.*` | Use `(.detail.prNumbers // [] \| contains([N]))` instead |
-| `.scope.pr` | **Absent** on `github.push` | Use `.scope.ref == "refs/heads/branch-name"` |
+| `.scope.pr` | Null on GitHub webhook events until CTL-234 ships | Also check `.detail.number` or `.detail.pull_request.number` |
 | `.scope.orchestrator` | Never set on GitHub webhook events | Do not filter GitHub events by orchestrator |
 | `.detail.conclusion` | Only on `check_run.completed`, not `check_suite.completed` | Use `.detail.status == "completed"` for suite events |
 | `.detail.state` on reviews | Casing varies (`APPROVED` vs `approved`) | Pipe through `\| ascii_downcase` before comparing |
@@ -181,9 +178,9 @@ catalyst-events wait-for \
   --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
   --timeout 180   # Phase 1; extend to 7200 after diagnostics
 
-# CI suite completed — note: .scope.pr absent, use detail.prNumbers (see [[event-schema]])
+# CI suite completed — note: check_suite has no .scope.pr; use .detail.prNumbers
 catalyst-events wait-for \
-  --filter ".event == \"github.check_suite.completed\" and (.detail.prNumbers // [] | contains([${PR_NUMBER}]))" \
+  --filter ".event == \"github.check_suite.completed\" and (.detail.prNumbers // [] | index(${PR_NUMBER}) != null)" \
   --timeout 180
 
 # Review submitted
