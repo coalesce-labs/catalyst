@@ -28,8 +28,12 @@ DEFAULT_LINEAR_SECRET_ENV="CATALYST_LINEAR_WEBHOOK_SECRET"
 FORCE=0
 ADD_REPOS=()
 LINEAR_SECRET_ENV=""
+LINEAR_REGISTER=0
+LINEAR_DEREGISTER=0
+LINEAR_WEBHOOK_URL=""
 REPO_SHAPE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 ENV_VAR_SHAPE='^[A-Z_][A-Z0-9_]*$'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat <<EOF
@@ -50,9 +54,21 @@ Options:
   --linear-secret-env <NAME> Write catalyst.monitor.linear.webhookSecretEnv = NAME
                              to ${PROJECT_CONFIG_PATH}. Default ${DEFAULT_LINEAR_SECRET_ENV}.
                              When this is the only intent flag, channel/secret
-                             setup for GitHub is skipped. Linear webhooks are
-                             registered manually via Linear's GraphQL API; see
-                             website/src/content/docs/observability/webhooks.md.
+                             setup for GitHub is skipped.
+  --linear-register          Auto-register a Linear webhook via Linear's
+                             GraphQL API (requires --webhook-url). Idempotent:
+                             re-running with the same URL no-ops based on the
+                             local Layer 2 record. Combine with --force to
+                             delete and recreate. When this is the only intent
+                             flag, channel/secret setup for GitHub is skipped.
+  --linear-deregister        Delete the Linear webhook recorded in Layer 2 and
+                             clear the local record + secret file. When this
+                             is the only intent flag, channel/secret setup for
+                             GitHub is skipped.
+  --webhook-url <https-url>  Public HTTPS URL where Linear should deliver
+                             events. When omitted with --linear-register, a
+                             new smee.io channel is auto-provisioned and the
+                             URL is written to ${HOME_CONFIG_PATH}. CTL-242.
   -h|--help                  Show this message
 
 Environment:
@@ -81,6 +97,17 @@ while [[ $# -gt 0 ]]; do
       LINEAR_SECRET_ENV="$2"
       shift 2
       ;;
+    --linear-register) LINEAR_REGISTER=1; shift ;;
+    --linear-deregister) LINEAR_DEREGISTER=1; shift ;;
+    --webhook-url)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "ERROR: --webhook-url requires an argument" >&2
+        usage
+        exit 1
+      fi
+      LINEAR_WEBHOOK_URL="$2"
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -104,6 +131,20 @@ if [[ -n "$LINEAR_SECRET_ENV" ]]; then
   fi
 fi
 
+# Validate Linear flag combinations (CTL-238).
+if [[ $LINEAR_REGISTER -eq 1 && $LINEAR_DEREGISTER -eq 1 ]]; then
+  echo "ERROR: --linear-register and --linear-deregister are mutually exclusive" >&2
+  exit 1
+fi
+if [[ $LINEAR_DEREGISTER -eq 1 && -n "$LINEAR_WEBHOOK_URL" ]]; then
+  echo "ERROR: --linear-deregister and --webhook-url are mutually exclusive" >&2
+  exit 1
+fi
+if [[ -n "$LINEAR_WEBHOOK_URL" && ! "$LINEAR_WEBHOOK_URL" =~ ^https:// ]]; then
+  echo "ERROR: --webhook-url must start with https:// (got: $LINEAR_WEBHOOK_URL)" >&2
+  exit 1
+fi
+
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "ERROR: '$1' is required but not installed" >&2
@@ -120,16 +161,64 @@ require_cmd jq
 # tolerates a missing channel.
 SKIP_GITHUB_SETUP=0
 if [[ $FORCE -eq 0 && -z "${CATALYST_SMEE_CHANNEL:-}" ]]; then
-  if [[ ${#ADD_REPOS[@]} -gt 0 || -n "$LINEAR_SECRET_ENV" ]]; then
+  if [[ ${#ADD_REPOS[@]} -gt 0 || -n "$LINEAR_SECRET_ENV" \
+        || $LINEAR_REGISTER -eq 1 || $LINEAR_DEREGISTER -eq 1 ]]; then
     SKIP_GITHUB_SETUP=1
   fi
 fi
 ADD_REPO_ONLY=$SKIP_GITHUB_SETUP
 
-if [[ $ADD_REPO_ONLY -eq 0 ]]; then
+# --linear-register without --webhook-url auto-provisions a smee channel (CTL-242)
+# and needs curl. --linear-deregister only does GraphQL + local file ops (no curl).
+LINEAR_NEEDS_SMEE=0
+if [[ $LINEAR_REGISTER -eq 1 && -z "$LINEAR_WEBHOOK_URL" ]]; then
+  LINEAR_NEEDS_SMEE=1
+fi
+
+if [[ $ADD_REPO_ONLY -eq 0 || $LINEAR_NEEDS_SMEE -eq 1 ]]; then
   require_cmd curl
+fi
+if [[ $ADD_REPO_ONLY -eq 0 ]]; then
   require_cmd openssl
 fi
+
+# Provision (or reuse) a Linear smee.io channel and write it to Layer 2.
+# Sets LINEAR_WEBHOOK_URL to the resulting URL. CTL-242.
+provision_linear_smee_channel() {
+  mkdir -p "$HOME_CONFIG_DIR"
+  if [[ ! -f "$HOME_CONFIG_PATH" ]]; then
+    echo "{}" > "$HOME_CONFIG_PATH"
+  fi
+
+  local existing_linear_channel
+  existing_linear_channel=$(jq -r '.catalyst.monitor.linear.smeeChannel // ""' "$HOME_CONFIG_PATH" 2>/dev/null || true)
+
+  if [[ -n "$existing_linear_channel" && $FORCE -eq 0 ]]; then
+    echo "Reusing existing Linear smee channel from $HOME_CONFIG_PATH: $existing_linear_channel (use --force to regenerate)"
+    LINEAR_WEBHOOK_URL="$existing_linear_channel"
+    return 0
+  fi
+
+  echo "Creating new Linear smee.io channel..."
+  local new_channel
+  new_channel=$(curl -s -L -o /dev/null -w "%{url_effective}" https://smee.io/new)
+  if [[ -z "$new_channel" || "$new_channel" != https://smee.io/* || "$new_channel" == "https://smee.io/new" ]]; then
+    echo "ERROR: failed to create Linear smee channel (got: $new_channel)" >&2
+    exit 1
+  fi
+  echo "Created Linear smee channel: $new_channel"
+
+  local tmp; tmp=$(mktemp)
+  jq --arg channel "$new_channel" '
+    .catalyst //= {}
+    | .catalyst.monitor //= {}
+    | .catalyst.monitor.linear //= {}
+    | .catalyst.monitor.linear.smeeChannel = $channel
+  ' "$HOME_CONFIG_PATH" > "$tmp"
+  mv "$tmp" "$HOME_CONFIG_PATH"
+  echo "Wrote catalyst.monitor.linear.smeeChannel to $HOME_CONFIG_PATH"
+  LINEAR_WEBHOOK_URL="$new_channel"
+}
 
 # Merge an array of new repos into .catalyst.monitor.github.watchRepos in the
 # project config, deduping while preserving insertion order. Creates parent
@@ -183,9 +272,27 @@ if [[ $SKIP_GITHUB_SETUP -eq 1 ]]; then
   if [[ -n "$LINEAR_SECRET_ENV" ]]; then
     write_linear_secret_env "$LINEAR_SECRET_ENV"
     echo "Wrote catalyst.monitor.linear.webhookSecretEnv = $LINEAR_SECRET_ENV to $PROJECT_CONFIG_PATH"
-    echo "  → Set the secret with: export $LINEAR_SECRET_ENV=<your-linear-webhook-signing-secret>"
-    echo "  → Then register the webhook URL with Linear's GraphQL API."
-    echo "  → See website/src/content/docs/observability/webhooks.md for the mutation."
+    if [[ $LINEAR_REGISTER -eq 0 && $LINEAR_DEREGISTER -eq 0 ]]; then
+      echo "  → Set the secret with: export $LINEAR_SECRET_ENV=<your-linear-webhook-signing-secret>"
+      echo "  → Then run with --linear-register --webhook-url <url> to auto-register the webhook,"
+      echo "    or see website/src/content/docs/observability/webhooks.md for manual registration."
+    fi
+  fi
+  if [[ $LINEAR_REGISTER -eq 1 ]]; then
+    if [[ -z "$LINEAR_WEBHOOK_URL" ]]; then
+      provision_linear_smee_channel
+    fi
+    helper_secret_env="${LINEAR_SECRET_ENV:-$DEFAULT_LINEAR_SECRET_ENV}"
+    helper_args=(
+      --webhook-url "$LINEAR_WEBHOOK_URL"
+      --secret-env "$helper_secret_env"
+      --config "$PROJECT_CONFIG_PATH"
+    )
+    [[ $FORCE -eq 1 ]] && helper_args+=(--force)
+    bash "${SCRIPT_DIR}/setup-linear-webhook.sh" "${helper_args[@]}"
+  elif [[ $LINEAR_DEREGISTER -eq 1 ]]; then
+    bash "${SCRIPT_DIR}/setup-linear-webhook.sh" \
+      --deregister --config "$PROJECT_CONFIG_PATH"
   fi
   exit 0
 fi
@@ -288,6 +395,24 @@ fi
 if [[ -n "$LINEAR_SECRET_ENV" ]]; then
   write_linear_secret_env "$LINEAR_SECRET_ENV"
   echo "Wrote catalyst.monitor.linear.webhookSecretEnv = $LINEAR_SECRET_ENV"
+fi
+
+# ─── 6c. --linear-register / --linear-deregister (if combined) ─────────────
+if [[ $LINEAR_REGISTER -eq 1 ]]; then
+  if [[ -z "$LINEAR_WEBHOOK_URL" ]]; then
+    provision_linear_smee_channel
+  fi
+  helper_secret_env="${LINEAR_SECRET_ENV:-$DEFAULT_LINEAR_SECRET_ENV}"
+  helper_args=(
+    --webhook-url "$LINEAR_WEBHOOK_URL"
+    --secret-env "$helper_secret_env"
+    --config "$PROJECT_CONFIG_PATH"
+  )
+  [[ $FORCE -eq 1 ]] && helper_args+=(--force)
+  bash "${SCRIPT_DIR}/setup-linear-webhook.sh" "${helper_args[@]}"
+elif [[ $LINEAR_DEREGISTER -eq 1 ]]; then
+  bash "${SCRIPT_DIR}/setup-linear-webhook.sh" \
+    --deregister --config "$PROJECT_CONFIG_PATH"
 fi
 
 # ─── 7. Print next steps ───────────────────────────────────────────────────

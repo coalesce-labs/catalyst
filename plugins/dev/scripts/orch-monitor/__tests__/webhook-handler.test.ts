@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import {
   createWebhookHandler,
   buildEventLogEnvelope,
+  attributionInputFor,
   type PrFetcherForceLike,
   type PreviewFetcherForceLike,
+  type OrchestratorResolverFn,
 } from "../lib/webhook-handler";
 import type { EventLogWriter, AppendableEvent } from "../lib/event-log";
 
@@ -423,11 +425,107 @@ describe("createWebhookHandler", () => {
     const handler = createWebhookHandler({ secret: SECRET, prFetcher: fetcher });
     const res = await handler.handle(
       makeReq(
-        { ...REPO, action: "edited" },
+        // `unrecognized_event` exercises the unhandled-event-name branch since
+        // `release` is now a recognized event (CTL-226).
+        { ...REPO, action: "whatever" },
+        { "x-github-event": "unrecognized_event" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(fetcher.forces.length).toBe(0);
+  });
+
+  // CTL-226: regression-protect the topic mapper. Before the fix, ANY
+  // pull_request payload with merged=true (including label edits on an
+  // already-merged PR) was routed to github.pr.merged, which made workers
+  // waiting on merge re-fire on every subsequent label change.
+  it("pull_request.labeled on merged PR does NOT force-fire merge dispatch", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      eventLog,
+    });
+    const res = await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "labeled",
+        // Merged PR — but the action is labeled, not closed.
+        pull_request: {
+          number: 326,
+          merged: true,
+          merged_at: "2026-05-04T06:42:52Z",
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.event).toBe("github.pr.labeled");
+    expect(eventLog.appends[0]?.event).not.toBe("github.pr.merged");
+  });
+
+  it("release.published is accepted (200) and logged", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      eventLog,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "published",
+          release: {
+            id: 1234,
+            tag_name: "catalyst-dev-v8.0.0",
+            name: "catalyst-dev v8.0.0",
+            draft: false,
+            prerelease: false,
+            html_url: "https://github.com/owner/repo/releases/tag/catalyst-dev-v8.0.0",
+          },
+        },
         { "x-github-event": "release" },
       ),
     );
     expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.event).toBe("github.release.published");
+    // No PR fetcher force — release events are repo-level, not PR-keyed.
+    expect(fetcher.forces.length).toBe(0);
+  });
+
+  it("workflow_run.completed is accepted (200) and logged", async () => {
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: fetcher,
+      eventLog,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "completed",
+          workflow_run: {
+            id: 555,
+            workflow_id: 99,
+            name: "CI",
+            head_sha: "abc123",
+            head_branch: "main",
+            status: "completed",
+            conclusion: "success",
+            run_number: 42,
+            html_url: "https://github.com/owner/repo/actions/runs/555",
+            pull_requests: [{ number: 326 }],
+          },
+        },
+        { "x-github-event": "workflow_run" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.event).toBe("github.workflow_run.completed");
     expect(fetcher.forces.length).toBe(0);
   });
 
@@ -478,6 +576,7 @@ describe("buildEventLogEnvelope", () => {
         mergedAt: "2026-05-03T12:00:00Z",
         draft: false,
         mergeable: true,
+        headRef: "",
       },
       "del-1",
     );
@@ -498,10 +597,114 @@ describe("buildEventLogEnvelope", () => {
         mergedAt: null,
         draft: false,
         mergeable: null,
+        headRef: "",
       },
       "del-2",
     );
     expect(env!.event).toBe("github.pr.closed");
+  });
+
+  // CTL-226: pull_request payloads on already-merged PRs carry merged=true
+  // for non-merge actions too (labeled, unlabeled, edited, …). The mapper
+  // must not treat any merged=true payload as a merge event — only the one
+  // with action=closed AND merged=true.
+  it("maps pull_request.labeled (merged=true) → github.pr.labeled (NOT merged)", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request",
+        repo: "o/r",
+        number: 326,
+        action: "labeled",
+        merged: true,
+        mergedAt: "2026-05-04T06:42:52Z",
+        draft: false,
+        mergeable: null,
+        headRef: "",
+      },
+      "del-pr-labeled",
+    );
+    expect(env!.event).toBe("github.pr.labeled");
+  });
+
+  it("maps pull_request.unlabeled (merged=true) → github.pr.unlabeled", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request",
+        repo: "o/r",
+        number: 326,
+        action: "unlabeled",
+        merged: true,
+        mergedAt: "2026-05-04T06:42:52Z",
+        draft: false,
+        mergeable: null,
+        headRef: "",
+      },
+      "del-pr-unlabeled",
+    );
+    expect(env!.event).toBe("github.pr.unlabeled");
+  });
+
+  it("maps pull_request.synchronize → github.pr.synchronize", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request",
+        repo: "o/r",
+        number: 1,
+        action: "synchronize",
+        merged: false,
+        mergedAt: null,
+        draft: false,
+        mergeable: null,
+        headRef: "",
+      },
+      "del-sync",
+    );
+    expect(env!.event).toBe("github.pr.synchronize");
+  });
+
+  it("maps release.published → github.release.published", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "release",
+        repo: "o/r",
+        action: "published",
+        releaseId: 1234,
+        tag: "catalyst-dev-v8.0.0",
+        name: "catalyst-dev v8.0.0",
+        draft: false,
+        prerelease: false,
+        htmlUrl: "https://github.com/o/r/releases/tag/catalyst-dev-v8.0.0",
+      },
+      "del-release",
+    );
+    expect(env!.event).toBe("github.release.published");
+    expect(env!.scope.repo).toBe("o/r");
+    expect(env!.scope.tag).toBe("catalyst-dev-v8.0.0");
+  });
+
+  it("maps workflow_run.completed → github.workflow_run.completed", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "workflow_run",
+        repo: "o/r",
+        action: "completed",
+        workflowId: 99,
+        runId: 555,
+        name: "CI",
+        headSha: "abc123",
+        headBranch: "main",
+        status: "completed",
+        conclusion: "success",
+        runNumber: 42,
+        htmlUrl: "https://github.com/o/r/actions/runs/555",
+        prNumbers: [326],
+      },
+      "del-wfr",
+    );
+    expect(env!.event).toBe("github.workflow_run.completed");
+    expect(env!.scope.sha).toBe("abc123");
+    expect(env!.detail.conclusion).toBe("success");
+    expect(env!.detail.prNumbers).toEqual([326]);
   });
 
   it("maps check_suite.completed → github.check_suite.completed", () => {
@@ -512,6 +715,7 @@ describe("buildEventLogEnvelope", () => {
         prNumbers: [1, 2],
         status: "completed",
         conclusion: "success",
+        headRef: "",
       },
       "del-3",
     );
@@ -542,6 +746,339 @@ describe("buildEventLogEnvelope", () => {
       "del-5",
     );
     expect(env).toBeNull();
+  });
+
+  it("propagates author on pull_request_review envelopes", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request_review",
+        repo: "o/r",
+        number: 50,
+        action: "submitted",
+        reviewState: "changes_requested",
+        reviewer: "codex[bot]",
+        body: "fix",
+        author: { login: "codex[bot]", type: "Bot" },
+        headRef: "",
+      },
+      "del-6",
+    );
+    expect(env!.event).toBe("github.pr_review.submitted");
+    expect(env!.detail.author).toEqual({ login: "codex[bot]", type: "Bot" });
+  });
+
+  it("propagates author on issue_comment envelopes", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "issue_comment",
+        repo: "o/r",
+        number: 80,
+        action: "created",
+        commentId: 999,
+        body: "lgtm",
+        htmlUrl: "https://example.com",
+        author: { login: "alice", type: "User" },
+      },
+      "del-7",
+    );
+    expect(env!.event).toBe("github.issue_comment.created");
+    expect(env!.detail.author).toEqual({ login: "alice", type: "User" });
+  });
+
+  it("propagates author on pull_request_review_comment envelopes", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request_review_comment",
+        repo: "o/r",
+        number: 90,
+        action: "created",
+        commentId: 7,
+        body: "nit",
+        htmlUrl: "https://example.com",
+        author: { login: "dependabot[bot]", type: "Bot" },
+        headRef: "",
+      },
+      "del-8",
+    );
+    expect(env!.event).toBe("github.pr_review_comment.created");
+    expect(env!.detail.author).toEqual({
+      login: "dependabot[bot]",
+      type: "Bot",
+    });
+  });
+});
+
+describe("attributionInputFor", () => {
+  it("extracts repo, pr, and headRef from pull_request events", () => {
+    const got = attributionInputFor({
+      kind: "pull_request",
+      repo: "o/r",
+      number: 42,
+      action: "opened",
+      merged: false,
+      mergedAt: null,
+      draft: false,
+      mergeable: null,
+      headRef: "orch-foo-CTL-1",
+    });
+    expect(got).toEqual({ repo: "o/r", pr: 42, headRef: "orch-foo-CTL-1" });
+  });
+
+  it("uses the first PR number on check_suite events", () => {
+    const got = attributionInputFor({
+      kind: "check_suite",
+      repo: "o/r",
+      prNumbers: [10, 11],
+      conclusion: "failure",
+      status: "completed",
+      headRef: "orch-foo-CTL-2",
+    });
+    expect(got).toEqual({ repo: "o/r", pr: 10, headRef: "orch-foo-CTL-2" });
+  });
+
+  it("strips refs/heads/ from push.ref to produce a bare branch name", () => {
+    const got = attributionInputFor({
+      kind: "push",
+      repo: "o/r",
+      ref: "refs/heads/orch-foo-CTL-3",
+      baseSha: "a",
+      headSha: "b",
+      commits: [],
+    });
+    expect(got).toEqual({ repo: "o/r", headRef: "orch-foo-CTL-3" });
+  });
+
+  it("returns null for events with no orchestrator-attributable fields", () => {
+    expect(
+      attributionInputFor({
+        kind: "deployment",
+        repo: "o/r",
+        deploymentId: 1,
+        environment: "prod",
+        sha: "abc",
+        refName: "main",
+        payloadUrl: null,
+      }),
+    ).toBeNull();
+    expect(
+      attributionInputFor({ kind: "ignored", reason: "skip" }),
+    ).toBeNull();
+  });
+
+  it("uses workflow_run.headBranch", () => {
+    const got = attributionInputFor({
+      kind: "workflow_run",
+      repo: "o/r",
+      action: "completed",
+      workflowId: 1,
+      runId: 2,
+      name: "CI",
+      headSha: "abc",
+      headBranch: "orch-foo-CTL-9",
+      status: "completed",
+      conclusion: "success",
+      runNumber: 1,
+      htmlUrl: "https://example.com",
+      prNumbers: [50],
+    });
+    expect(got).toEqual({
+      repo: "o/r",
+      pr: 50,
+      headRef: "orch-foo-CTL-9",
+    });
+  });
+});
+
+describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
+  const eventLog = new FakeEventLog();
+  const calls: Array<{ repo: string; pr?: number; headRef?: string }> = [];
+  const resolveOrchestrator: OrchestratorResolverFn = (input) => {
+    calls.push(input);
+    if (input.headRef?.startsWith("orch-foo-")) return "orch-foo";
+    if (input.pr === 42) return "orch-bar";
+    return null;
+  };
+
+  beforeEach(() => {
+    eventLog.appends.length = 0;
+    calls.length = 0;
+  });
+
+  it("stamps scope.orchestrator when resolver matches by head ref", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    const res = await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "synchronize",
+        pull_request: {
+          number: 1,
+          merged: false,
+          head: { ref: "orch-foo-CTL-99" },
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-foo");
+    expect(calls[0]).toEqual({
+      repo: "owner/repo",
+      pr: 1,
+      headRef: "orch-foo-CTL-99",
+    });
+  });
+
+  it("stamps scope.orchestrator when resolver matches by PR number", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    const res = await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "created",
+          issue: { number: 42, pull_request: { url: "..." } },
+          comment: { id: 1, body: "hi", html_url: "..." },
+        },
+        { "x-github-event": "issue_comment" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-bar");
+  });
+
+  it("does not stamp when resolver returns null (e.g. non-orchestrator PR)", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: {
+          number: 999,
+          merged: false,
+          head: { ref: "feature/random" },
+        },
+      }),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBeUndefined();
+  });
+
+  it("works without a resolver (envelope is unstamped, existing behavior)", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      // resolveOrchestrator omitted
+    });
+    await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: {
+          number: 1,
+          merged: false,
+          head: { ref: "orch-foo-CTL-1" },
+        },
+      }),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBeUndefined();
+  });
+
+  it("logs and continues when the resolver throws", async () => {
+    const warnings: string[] = [];
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator: () => {
+        throw new Error("disk read failed");
+      },
+      logger: { warn: (m) => warnings.push(m) },
+    });
+    const res = await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: {
+          number: 1,
+          merged: false,
+          head: { ref: "orch-foo-CTL-1" },
+        },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBeUndefined();
+    expect(warnings.some((w) => w.includes("orchestrator resolution failed"))).toBe(
+      true,
+    );
+  });
+
+  it("attributes check_suite events via head_branch", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          check_suite: {
+            status: "completed",
+            conclusion: "success",
+            head_branch: "orch-foo-CTL-1",
+            pull_requests: [],
+          },
+        },
+        { "x-github-event": "check_suite" },
+      ),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-foo");
+  });
+
+  it("attributes push events via the bare branch name", async () => {
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      resolveOrchestrator,
+    });
+    await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          ref: "refs/heads/orch-foo-CTL-2",
+          before: "a",
+          after: "b",
+          commits: [],
+        },
+        { "x-github-event": "push" },
+      ),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-foo");
+    expect(calls[0]).toEqual({
+      repo: "owner/repo",
+      headRef: "orch-foo-CTL-2",
+    });
   });
 });
 

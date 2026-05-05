@@ -18,9 +18,92 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 PID_FILE="${MONITOR_PID_FILE:-$CATALYST_DIR/monitor.pid}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 SERVER_SCRIPT="${MONITOR_SERVER_SCRIPT:-$SCRIPT_DIR/orch-monitor/server.ts}"
 MONITOR_DIR="$(cd "$(dirname "$SERVER_SCRIPT")" && pwd)"
+
+# ─── Version drift self-check ───────────────────────────────────────────────
+PLUGIN_CACHE_ROOT="${CATALYST_PLUGIN_CACHE_ROOT:-$HOME/.claude/plugins/cache/catalyst/catalyst-dev}"
+
+# Reads the running version from the version.txt adjacent to the script.
+# In both the plugin cache layout (cache/.../<X.Y.Z>/version.txt) and the source
+# tree (plugins/dev/version.txt), the file lives at SCRIPT_DIR/../version.txt.
+read_running_version() {
+  local version_file="${CATALYST_VERSION_FILE:-$SCRIPT_DIR/../version.txt}"
+  if [[ -f "$version_file" ]]; then
+    tr -d '[:space:]' < "$version_file"
+    return 0
+  fi
+  return 1
+}
+
+# Highest semver subdirectory under the plugin cache root.
+read_latest_available_version() {
+  [[ -d "$PLUGIN_CACHE_ROOT" ]] || return 1
+  local latest
+  latest=$(ls -1 "$PLUGIN_CACHE_ROOT" 2>/dev/null \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    | sort -t. -k1,1n -k2,2n -k3,3n \
+    | tail -n1)
+  [[ -n "$latest" ]] || return 1
+  printf '%s' "$latest"
+}
+
+# Returns 0 if v1 < v2, else nonzero. Empty inputs treated as not-less-than.
+version_lt() {
+  local v1="$1" v2="$2"
+  [[ -n "$v1" && -n "$v2" ]] || return 1
+  [[ "$v1" == "$v2" ]] && return 1
+  local lower
+  lower=$(printf '%s\n%s\n' "$v1" "$v2" \
+    | sort -t. -k1,1n -k2,2n -k3,3n \
+    | head -n1)
+  [[ "$lower" == "$v1" ]]
+}
+
+RUNNING_VERSION="$(read_running_version || true)"
+LATEST_AVAILABLE_VERSION="$(read_latest_available_version || true)"
+IS_STALE="false"
+if version_lt "$RUNNING_VERSION" "$LATEST_AVAILABLE_VERSION"; then
+  IS_STALE="true"
+fi
+
+read_suppress_warning() {
+  local config_path=""
+  if [[ -f ".catalyst/config.json" ]]; then
+    config_path=".catalyst/config.json"
+  elif [[ -f ".claude/config.json" ]]; then
+    config_path=".claude/config.json"
+  fi
+  [[ -n "$config_path" ]] || { echo "false"; return; }
+  command -v jq &>/dev/null || { echo "false"; return; }
+  local v
+  v=$(jq -r '.catalyst.monitor.suppressVersionWarning // false' "$config_path" 2>/dev/null)
+  echo "${v:-false}"
+}
+
+print_version_warning() {
+  [[ "$IS_STALE" == "true" ]] || return 0
+  [[ "$(read_suppress_warning)" != "true" ]] || return 0
+  echo "warning: catalyst-monitor running v${RUNNING_VERSION}; v${LATEST_AVAILABLE_VERSION} is available locally" >&2
+  echo "  remediation: bash \"\$CLAUDE_PLUGIN_ROOT/scripts/install-cli.sh\" install   # or 'git pull' if running from a clone" >&2
+  echo "  suppress: add '\"catalyst\":{\"monitor\":{\"suppressVersionWarning\":true}}' to .catalyst/config.json" >&2
+}
+
+# JSON-safe string-or-null helper for status output.
+json_quote_or_null() {
+  if [[ -n "$1" ]]; then
+    printf '"%s"' "$1"
+  else
+    printf 'null'
+  fi
+}
 
 is_alive() {
   local pid="$1"
@@ -113,6 +196,8 @@ cmd_start() {
     return 0
   fi
 
+  print_version_warning
+
   bootstrap || return 1
 
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
@@ -166,6 +251,13 @@ cmd_stop() {
   echo "Monitor stopped"
 }
 
+cmd_restart() {
+  if read_pid >/dev/null; then
+    cmd_stop
+  fi
+  cmd_start "$@"
+}
+
 cmd_status() {
   local json=0
   while [[ $# -gt 0 ]]; do
@@ -175,19 +267,40 @@ cmd_status() {
     esac
   done
 
+  local rv lv
+  rv=$(json_quote_or_null "$RUNNING_VERSION")
+  lv=$(json_quote_or_null "$LATEST_AVAILABLE_VERSION")
+
   local pid
   if pid=$(read_pid); then
     if [[ $json -eq 1 ]]; then
-      printf '{"running":true,"pid":%d,"port":%d,"url":"http://localhost:%d"}\n' \
-        "$pid" "$PORT" "$PORT"
+      # Fetch webhook tunnel state from the running daemon (2s timeout, silent on error).
+      local tunnel
+      tunnel=$(curl -s --max-time 2 "http://localhost:${PORT}/api/status/webhook-tunnel" 2>/dev/null || true)
+      # If tunnel response is empty or invalid JSON, omit the field (null).
+      if ! echo "$tunnel" | jq -e . >/dev/null 2>&1; then
+        tunnel='null'
+      fi
+      jq -n \
+        --argjson pid "$pid" \
+        --argjson port "$PORT" \
+        --argjson rv "$rv" \
+        --argjson lv "$lv" \
+        --argjson stale "$([ "$IS_STALE" = "true" ] && echo true || echo false)" \
+        --argjson tunnel "$tunnel" \
+        '{running:true,pid:$pid,port:$port,url:("http://localhost:"+($port|tostring)),runningVersion:$rv,latestAvailableVersion:$lv,isStale:$stale,webhookTunnel:$tunnel}'
     else
       echo "Monitor running (pid $pid) at http://localhost:$PORT"
     fi
     return 0
   else
     if [[ $json -eq 1 ]]; then
-      printf '{"running":false,"pid":null,"port":%d,"url":"http://localhost:%d"}\n' \
-        "$PORT" "$PORT"
+      jq -n \
+        --argjson port "$PORT" \
+        --argjson rv "$rv" \
+        --argjson lv "$lv" \
+        --argjson stale "$([ "$IS_STALE" = "true" ] && echo true || echo false)" \
+        '{running:false,pid:null,port:$port,url:("http://localhost:"+($port|tostring)),runningVersion:$rv,latestAvailableVersion:$lv,isStale:$stale}'
     else
       echo "Monitor stopped"
     fi
@@ -228,6 +341,7 @@ usage() {
   echo "Commands:"
   echo "  start [--port N]   Start monitor server in background"
   echo "  stop               Stop monitor server"
+  echo "  restart [--port N] Stop and re-start monitor server"
   echo "  status [--json]    Check if monitor is running"
   echo "  open               Start if needed, open browser to dashboard"
   echo "  url                Print the monitor URL"
@@ -239,6 +353,7 @@ shift || true
 case "$cmd" in
   start)     cmd_start "$@" ;;
   stop)      cmd_stop ;;
+  restart)   cmd_restart "$@" ;;
   status)    cmd_status "$@" ;;
   open)      cmd_open "$@" ;;
   url)       cmd_url ;;

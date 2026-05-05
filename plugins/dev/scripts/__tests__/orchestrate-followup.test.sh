@@ -81,6 +81,33 @@ run "dry-run honors --title override" expect_contains "${SCRATCH}/title.out" "ti
 run "refuses without --ticket when linearis missing (simulated)" \
   bash -c "CATALYST_ORCHESTRATOR_ID=orch-test CATALYST_ORCHESTRATOR_DIR='$ORCH_DIR' PATH=/usr/bin:/bin '$FOLLOWUP' TEST-1 --findings x --team-key TST 2>&1 | grep -qi 'linearis\\|create-worktree'"
 
+# Test 7 (CTL-231): dry-run resolves worker dir from state.json:.worktreeBase
+ORCH_DIR_2="${SCRATCH}/orch2"
+WORKTREE_BASE_2="${SCRATCH}/wt-base"
+mkdir -p "${ORCH_DIR_2}/workers"
+cat > "${ORCH_DIR_2}/state.json" <<EOF
+{"orchestrator": "orch-test", "worktreeBase": "${WORKTREE_BASE_2}"}
+EOF
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_2" \
+  "$FOLLOWUP" TEST-1 --findings "x" --team-key "TST" --ticket "TST-77" --dry-run \
+  > "${SCRATCH}/wd.out" 2>&1
+run "dry-run resolves worker dir from state.json:.worktreeBase" \
+  expect_contains "${SCRATCH}/wd.out" "worker dir: ${WORKTREE_BASE_2}/orch-test-TST-77"
+run "dry-run worker dir does NOT use dirname(ORCH_DIR)" \
+  bash -c "! grep -q 'worker dir: $(dirname "$ORCH_DIR_2")/orch-test-TST-77' '${SCRATCH}/wd.out'"
+
+# Test 8 (CTL-231): backward-compat fallback warns when state.json is missing
+ORCH_DIR_3="${SCRATCH}/parent3/orch3"
+mkdir -p "${ORCH_DIR_3}/workers"
+# No state.json — pre-CTL-228 orchestrator
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_3" \
+  "$FOLLOWUP" TEST-1 --findings "x" --team-key "TST" --ticket "TST-78" --dry-run \
+  > "${SCRATCH}/fallback.out" 2>&1
+run "fallback warns when state.json is missing" \
+  expect_contains "${SCRATCH}/fallback.out" "warn:"
+run "fallback worker dir uses dirname(ORCH_DIR) when state.json missing" \
+  expect_contains "${SCRATCH}/fallback.out" "worker dir: $(dirname "$ORCH_DIR_3")/orch-test-TST-78"
+
 echo ""
 echo "orchestrate-followup: ${PASSES} passed, ${FAILURES} failed"
 exit "$FAILURES"

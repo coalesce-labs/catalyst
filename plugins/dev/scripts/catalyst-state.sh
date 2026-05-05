@@ -28,7 +28,13 @@ LOCK_FILE="${STATE_FILE}.lock"
 EVENTS_DIR="${CATALYST_DIR}/events"
 HISTORY_DIR="${CATALYST_DIR}/history"
 RUNS_DIR="${CATALYST_DIR}/runs"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 

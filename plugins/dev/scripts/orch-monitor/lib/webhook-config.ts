@@ -4,6 +4,8 @@ import { join } from "path";
 export interface WebhookCliConfig {
   smeeChannel: string;
   secret: string;
+  /** Env-var name the GitHub webhook secret is read from (e.g. "CATALYST_WEBHOOK_SECRET"). */
+  secretEnvName: string;
   /**
    * Repos to subscribe to at startup, regardless of whether a worker has been
    * observed for them. Layer 1 only (team-wide). Empty array means
@@ -18,6 +20,13 @@ export interface WebhookCliConfig {
    * CTL-210.
    */
   linearSecret: string;
+  /**
+   * smee.io channel URL for Linear webhook delivery (Layer 2, per-machine).
+   * Read from `catalyst.monitor.linear.smeeChannel` in `~/.config/catalyst/config.json`.
+   * Env override: `CATALYST_LINEAR_SMEE_CHANNEL`. Empty string when not configured —
+   * the server then skips creating the second tunnel. CTL-242.
+   */
+  linearSmeeChannel: string;
 }
 
 interface FileExtract {
@@ -26,6 +35,8 @@ interface FileExtract {
   watchRepos: string[];
   /** Env-var name holding the Linear webhook signing secret (Layer 1). */
   linearWebhookSecretEnv: string | null;
+  /** smee.io channel URL for Linear, from Layer 2 only (per-machine). CTL-242. */
+  linearSmeeChannel: string | null;
 }
 
 let warnedDeprecatedSmeeChannel = false;
@@ -106,8 +117,14 @@ function readGithubSection(filePath: string): FileExtract | null {
     linear.webhookSecretEnv.length > 0
       ? linear.webhookSecretEnv
       : null;
+  const linearSmeeChannel =
+    linear !== null &&
+    typeof linear.smeeChannel === "string" &&
+    linear.smeeChannel.length > 0
+      ? linear.smeeChannel
+      : null;
 
-  return { smeeChannel, webhookSecretEnv, watchRepos, linearWebhookSecretEnv };
+  return { smeeChannel, webhookSecretEnv, watchRepos, linearWebhookSecretEnv, linearSmeeChannel };
 }
 
 /**
@@ -180,23 +197,36 @@ export function loadWebhookConfig(
     process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
     "";
 
+  // Linear smee channel. Layer 2 only (per-machine) — same split as GitHub
+  // smeeChannel. Env override wins. CTL-242.
+  const fileLinearSmeeChannel = homeExtract?.linearSmeeChannel ?? null;
+  const linearSmeeChannelOverride = process.env.CATALYST_LINEAR_SMEE_CHANNEL;
+  const linearSmeeChannel =
+    linearSmeeChannelOverride && linearSmeeChannelOverride.length > 0
+      ? linearSmeeChannelOverride
+      : (fileLinearSmeeChannel ?? "");
+
   // Allow Linear-only configurations: if the GitHub channel/secret are missing
   // but a Linear secret is present, return a config that disables the GitHub
   // route but enables the Linear route. CTL-210.
   if (finalChannel.length === 0 || secret.length === 0) {
-    if (linearSecret.length === 0) return null;
+    if (linearSecret.length === 0 && linearSmeeChannel.length === 0) return null;
     return {
       smeeChannel: "",
       secret: "",
+      secretEnvName: webhookSecretEnv,
       watchRepos,
       linearSecret,
+      linearSmeeChannel,
     };
   }
 
   return {
     smeeChannel: finalChannel,
     secret,
+    secretEnvName: webhookSecretEnv,
     watchRepos,
     linearSecret,
+    linearSmeeChannel,
   };
 }

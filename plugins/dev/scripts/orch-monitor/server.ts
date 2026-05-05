@@ -65,6 +65,10 @@ import {
   type WebhookHandler,
 } from "./lib/webhook-handler";
 import {
+  resolveOrchestrator as resolveOrchestratorFn,
+  type ActiveOrchestrator,
+} from "./lib/orchestrator-resolver";
+import {
   createLinearWebhookHandler,
   type LinearWebhookHandler,
 } from "./lib/linear-webhook-handler";
@@ -87,6 +91,8 @@ import {
   createEventLogWriter,
   type EventLogWriter,
 } from "./lib/event-log";
+import { validatePredicate } from "./lib/event-filter";
+import { readBacklog, tailEventLog, readTunnelEventStats } from "./lib/event-log-reader";
 import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey } from "./lib/project-key";
@@ -135,6 +141,8 @@ export interface CreateServerOptions {
   port?: number;
   hostname?: string;
   wtDir: string;
+  /** Override for the Catalyst state directory used by event log stats (default: ~/catalyst). */
+  catalystDir?: string;
   runsDir?: string | null;
   startWatcher?: boolean;
   publicDir?: string;
@@ -161,6 +169,8 @@ export interface CreateServerOptions {
   webhookConfig?: {
     smeeChannel: string;
     secret: string;
+    /** Env-var name the secret is read from (e.g. "CATALYST_WEBHOOK_SECRET"). Exposed via /api/status/webhook-tunnel. */
+    secretEnvName?: string;
     /** Local target URL — defaults to http://localhost:{port}/api/webhook. */
     target?: string;
     /** Override for tests so the real smee-client isn't invoked. */
@@ -181,9 +191,12 @@ export interface CreateServerOptions {
    * Linear webhook config. Independent of `webhookConfig` (which carries the
    * GitHub bits) so a daemon can run Linear-only or GitHub-only setups.
    * `secret` empty disables `POST /api/webhook/linear`. CTL-210.
+   * `smeeChannel` drives the second smee tunnel (CTL-242); empty means no tunnel.
    */
   linearWebhookConfig?: {
     secret: string;
+    /** smee.io channel URL for Linear delivery. Empty = no tunnel. CTL-242. */
+    smeeChannel?: string;
   } | null;
 }
 
@@ -307,7 +320,24 @@ function applyPreviewStatus(
   }
 }
 
+function safeParseJson(line: string): Record<string, unknown> | null {
+  try {
+    const v: unknown = JSON.parse(line);
+    return typeof v === "object" && v !== null && !Array.isArray(v)
+      ? (v as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 const SSE_EVENTS = EVENT_TYPES;
+// `global-event` and `global-event-backlog` are produced per-client by the
+// activity tailer in the /events handler — not by the in-process bus — so they
+// are excluded from the bus broadcast loop.
+const BUS_BROADCAST_EVENTS = SSE_EVENTS.filter(
+  (t) => t !== "global-event" && t !== "global-event-backlog",
+);
 const ALLOWED_PUBLIC_EXTENSIONS = new Set([
   ".html",
   ".css",
@@ -400,6 +430,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     port = DEFAULT_PORT,
     hostname = "0.0.0.0",
     wtDir,
+    catalystDir: catalystDirOpt,
     runsDir = null,
     startWatcher = true,
     publicDir = join(import.meta.dir, "public"),
@@ -428,7 +459,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
 
   const CATALYST_DIR =
-    process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
+    catalystDirOpt ?? process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
   const annDbPath = annotationsDbPath ?? `${CATALYST_DIR}/annotations.db`;
   try {
     openDb(annDbPath);
@@ -511,8 +542,39 @@ export function createServer(opts: CreateServerOptions): BunServer {
     return paths;
   }
 
+  // CTL-234 — orchestrator attribution for webhook events. Builds an
+  // `ActiveOrchestrator[]` snapshot for the resolver: orchestrator IDs come
+  // from `basename(orch.path)`, branch prefix is `${id}-` (the convention
+  // used by orchestrate-create-worktree), and the PR list comes from worker
+  // signal files. Cached briefly so a burst of webhooks doesn't re-scan disk
+  // for every event.
+  const ORCH_LIST_TTL_MS = 30_000;
+  let cachedOrchList: { at: number; list: ActiveOrchestrator[] } | null = null;
+
+  function getActiveOrchestrators(): ActiveOrchestrator[] {
+    const now = Date.now();
+    if (cachedOrchList && now - cachedOrchList.at < ORCH_LIST_TTL_MS) {
+      return cachedOrchList.list;
+    }
+    const snap = buildSnapshot(wtDir, buildOpts);
+    const list: ActiveOrchestrator[] = snap.orchestrators.map((orch) => {
+      const id = basename(orch.path);
+      const prs: Array<{ repo: string; number: number }> = [];
+      for (const worker of Object.values(orch.workers)) {
+        if (!worker.pr) continue;
+        const wrepo = parseRepoFromPrUrl(worker.pr.url);
+        if (wrepo === null) continue;
+        prs.push({ repo: wrepo, number: worker.pr.number });
+      }
+      return { id, branchPrefix: `${id}-`, prs };
+    });
+    cachedOrchList = { at: now, list };
+    return list;
+  }
+
   let webhookHandler: WebhookHandler | null = null;
   let webhookTunnel: WebhookTunnel | null = null;
+  let linearWebhookTunnel: WebhookTunnel | null = null;
   let webhookSubscriber: WebhookSubscriber | null = null;
   let webhookReplay: WebhookReplay | null = null;
   if (webhookConfig && prFetcher) {
@@ -529,6 +591,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
       previewFetcher: previewFetcher ?? undefined,
       findSignalPaths: findSignalPathsForRef,
       eventLog,
+      resolveOrchestrator: (input) =>
+        resolveOrchestratorFn(input, getActiveOrchestrators()),
       emit: (type, data) => emit(type, data),
       logger: {
         info: (m) => console.info(m),
@@ -576,6 +640,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
       secret: linearWebhookConfig.secret,
       eventLog: linearEventLog,
       emit: (type, data) => emit(type, data),
+      // CTL-211 — invalidate the LinearFetcher cache on issue webhook events
+      // so the dashboard reflects the new state in seconds instead of waiting
+      // for the next 5-min polling tick. Other event kinds (comment, reaction,
+      // etc.) don't change the ticket fields the dashboard renders, so they
+      // skip invalidation. The fetcher's invalidate() degrades silently when
+      // linearis is unavailable.
+      onAccept: async (event) => {
+        if (
+          linear !== null &&
+          (event.kind === "issue" || event.kind === "comment") &&
+          event.ticket !== null
+        ) {
+          await linear.invalidate(event.ticket);
+        }
+      },
       logger: {
         info: (m) => console.info(m),
         warn: (m) => console.warn(m),
@@ -629,7 +708,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const encoder = new TextEncoder();
 
   const unsubscribers: Array<() => void> = [];
-  for (const eventType of SSE_EVENTS) {
+  for (const eventType of BUS_BROADCAST_EVENTS) {
     unsubscribers.push(
       subscribe(eventType, (data) => {
         const envelope = data as MonitorEventEnvelope;
@@ -660,9 +739,27 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
         if (url.pathname === "/events") {
           const filter = parseFilter(url);
+
+          // Eagerly validate the activity predicate so we can return 400 before
+          // opening a stream. Empty-string predicate is allowed (means "no
+          // jq filter, all global events"); only validate non-empty.
+          if (
+            filter.activityPredicate !== undefined &&
+            filter.activityPredicate.trim() !== ""
+          ) {
+            const v = validatePredicate(filter.activityPredicate);
+            if (!v.ok) {
+              return new Response(
+                `activity filter error: ${v.error ?? "invalid"}`,
+                { status: 400 },
+              );
+            }
+          }
+
           let captured: ReadableStreamDefaultController<Uint8Array> | null = null;
+          let activityCtrl: AbortController | null = null;
           const stream = new ReadableStream<Uint8Array>({
-            start(controller) {
+            async start(controller) {
               captured = controller;
               sseClients.set(controller, filter);
               try {
@@ -674,9 +771,66 @@ export function createServer(opts: CreateServerOptions): BunServer {
               } catch (err) {
                 console.error(`[server] initial snapshot enqueue failed:`, err);
               }
+
+              // Activity stream multiplex: only when the client opted in via
+              // `?activity=` (predicate may be empty for "all events").
+              if (filter.activityPredicate !== undefined) {
+                const predicate = filter.activityPredicate;
+                try {
+                  const backlogLines = await readBacklog({
+                    catalystDir: CATALYST_DIR,
+                    predicate,
+                    limit: 100,
+                  });
+                  const parsed = backlogLines
+                    .map((l) => safeParseJson(l))
+                    .filter((v): v is Record<string, unknown> => v !== null);
+                  const backlogEnv = createEvent(
+                    "global-event-backlog",
+                    { events: parsed },
+                    "filesystem",
+                  );
+                  // Enqueue may race with client cancel; swallow the
+                  // ERR_INVALID_STATE that comes back if the controller has
+                  // already closed.
+                  try {
+                    controller.enqueue(
+                      encoder.encode(
+                        `event: global-event-backlog\ndata: ${JSON.stringify(backlogEnv)}\n\n`,
+                      ),
+                    );
+                  } catch {
+                    /* client cancelled */
+                  }
+                } catch (err) {
+                  console.error(`[server] activity backlog failed:`, err);
+                }
+
+                activityCtrl = new AbortController();
+                void tailEventLog({
+                  catalystDir: CATALYST_DIR,
+                  predicate,
+                  signal: activityCtrl.signal,
+                  onEvent: (line) => {
+                    const parsed = safeParseJson(line);
+                    if (parsed === null) return;
+                    const env = createEvent("global-event", parsed, "filesystem");
+                    try {
+                      controller.enqueue(
+                        encoder.encode(
+                          `event: global-event\ndata: ${JSON.stringify(env)}\n\n`,
+                        ),
+                      );
+                    } catch {
+                      activityCtrl?.abort();
+                    }
+                  },
+                });
+              }
             },
             cancel() {
               if (captured) sseClients.delete(captured);
+              activityCtrl?.abort();
             },
           });
           return new Response(stream, {
@@ -1501,6 +1655,30 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
         }
 
+        if (url.pathname === "/api/status/webhook-tunnel") {
+          const stats = readTunnelEventStats(CATALYST_DIR);
+          if (!webhookConfig) {
+            return Response.json({
+              connected: false,
+              smeeUrl: null,
+              secretEnvName: null,
+              secretPresent: false,
+              lastEventAt: stats.lastEventAt,
+              eventCount24h: stats.eventCount24h,
+              eventCount24hByRepo: stats.eventCount24hByRepo,
+            });
+          }
+          return Response.json({
+            connected: webhookTunnel?.isStarted() ?? false,
+            smeeUrl: webhookConfig.smeeChannel || null,
+            secretEnvName: webhookConfig.secretEnvName ?? "CATALYST_WEBHOOK_SECRET",
+            secretPresent: webhookConfig.secret.length > 0,
+            lastEventAt: stats.lastEventAt,
+            eventCount24h: stats.eventCount24h,
+            eventCount24hByRepo: stats.eventCount24hByRepo,
+          });
+        }
+
         return new Response("Not Found", { status: 404 });
       } catch (err) {
         console.error(`[server] fetch handler error:`, err);
@@ -1565,6 +1743,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
     }
   }
 
+  const linearSmeeChannel = opts.linearWebhookConfig?.smeeChannel ?? "";
+  if (linearSmeeChannel.length > 0) {
+    linearWebhookTunnel = createWebhookTunnel({
+      source: linearSmeeChannel,
+      target: `http://localhost:${server.port}/api/webhook/linear`,
+      logger: {
+        info: (m) => console.info(`[linear-tunnel] ${m}`),
+        error: (m) => console.error(`[linear-tunnel] ${m}`),
+      },
+    });
+    void linearWebhookTunnel.start().catch((err: unknown) => {
+      console.error(
+        `[server] linear webhook tunnel start failed:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  }
+
   if (pidFile) {
     try {
       writeFileSync(pidFile, `${process.pid}\n`);
@@ -1586,6 +1782,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     linear?.stop();
     briefingProvider?.stop();
     void webhookTunnel?.stop();
+    void linearWebhookTunnel?.stop();
     closeDb();
     sseClients.clear();
     if (pidFile) {
@@ -1676,12 +1873,18 @@ if (import.meta.main) {
       ? {
           smeeChannel: fullWebhookConfig.smeeChannel,
           secret: fullWebhookConfig.secret,
+          secretEnvName: fullWebhookConfig.secretEnvName,
           watchRepos: fullWebhookConfig.watchRepos,
         }
       : null;
   const linearWebhookConfig =
-    fullWebhookConfig && fullWebhookConfig.linearSecret.length > 0
-      ? { secret: fullWebhookConfig.linearSecret }
+    fullWebhookConfig &&
+    (fullWebhookConfig.linearSecret.length > 0 ||
+      fullWebhookConfig.linearSmeeChannel.length > 0)
+      ? {
+          secret: fullWebhookConfig.linearSecret,
+          smeeChannel: fullWebhookConfig.linearSmeeChannel,
+        }
       : null;
   let summarizeHandler: SummarizeHandler | null = null;
   if (summarizeCfg.enabled) {

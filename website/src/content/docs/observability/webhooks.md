@@ -269,6 +269,42 @@ update within a few seconds. You can also watch the event log:
 tail -F ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq 'select(.source == "github.webhook")'
 ```
 
+## Daemon liveness prerequisite
+
+The orch-monitor daemon is the only writer to `~/catalyst/events/`, so any skill that
+consumes events depends on it being alive. The Tier-1 event-driven skills are:
+
+- `orchestrate` — Phase 4 watcher and auto-fixup classifier consume events
+- `oneshot` — Phase 5 deploy-monitoring loop consumes events
+- `merge-pr` — Phase 6 wait-for-merged consumes events
+- `monitor-events` — the canonical pattern doc; reused everywhere the primitives are needed
+
+If the daemon is stopped, `catalyst-events wait-for` blocks until its 600 s timeout and
+exits non-zero. Callers fall back to `gh pr view` polling, which is functionally correct
+for merge detection but **cannot observe production deploy events** — those only arrive
+via the GitHub webhook stream that the daemon owns.
+
+`plugins/dev/scripts/check-project-setup.sh` runs a liveness check on every prereq pass.
+Behavior splits on whether the invocation is interactive:
+
+- **Interactive (TTY stdin, `CATALYST_AUTONOMOUS` unset)**: prompts to start the daemon
+  with `[Y/n]`, defaulting yes. On accept, runs `catalyst-monitor.sh start` and surfaces
+  its output. On decline, adds a non-fatal warning.
+- **Autonomous (`CATALYST_AUTONOMOUS=1` or non-TTY stdin)**: warns to stderr and
+  proceeds. CI variants (`ci-commit`, `ci-describe-pr`) and orchestrator-dispatched
+  workers take this path so a missing daemon never blocks an automation run.
+
+Manual liveness check:
+
+```bash
+plugins/dev/scripts/catalyst-monitor.sh status            # human-readable
+plugins/dev/scripts/catalyst-monitor.sh status --json     # {"running":true,"pid":N,...}
+plugins/dev/scripts/catalyst-monitor.sh start             # idempotent — no-op if alive
+```
+
+The `status --json` exit code is `0` when running and `1` when stopped, so scripts can
+gate cheaply via `if catalyst-monitor.sh status --json &>/dev/null; then ...`.
+
 ## Failure modes and recovery
 
 - **smee tunnel drops**: the daemon retries automatically. Up to 60 minutes of missed
@@ -309,42 +345,160 @@ e.g. `linear.issue.state_changed`, `linear.comment.created`.
 |------|-------|-----------|
 | `webhookSecretEnv` (env-var name only) | `catalyst.monitor.linear.webhookSecretEnv` in `.catalyst/config.json` | YES |
 | HMAC secret value | env var named above (default fallback `CATALYST_LINEAR_WEBHOOK_SECRET`) | NO (per-developer env) |
+| `smeeChannel` (Linear smee URL) | `catalyst.monitor.linear.smeeChannel` in `~/.config/catalyst/config.json` | NO (per-machine, written by `--linear-register`) |
+| Registration record (`webhookId`, `webhookUrl`, `registeredAt`, `resourceTypes`) | `catalyst.monitor.linear` in `~/.config/catalyst/config.json` | NO (per-machine, written by `--linear-register`) |
+| HMAC secret file | `~/.config/catalyst/linear-webhook-secret` (mode 600, read by `--linear-register` post-create) | NO (per-developer) |
 
 Run `setup-webhooks.sh --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET` to write the
 env-var name to `.catalyst/config.json`. Then `export CATALYST_LINEAR_WEBHOOK_SECRET=<your-secret>`
 in your shell rc file. Linear webhooks share the same Layer 1 / Layer 2 split as GitHub:
-team-wide config in `.catalyst/config.json`, per-developer values in environment.
+team-wide config in `.catalyst/config.json`, per-developer values in environment, and
+per-machine registration state in `~/.config/catalyst/config.json` (CTL-238 — mirrors the
+GitHub `smeeChannel` write).
 
-### Registering the webhook with Linear
+#### Layer 2 registration record
 
-Linear webhooks are NOT auto-registered — there is no equivalent to the `gh api`
-auto-discovery used for GitHub. Register manually via Linear's GraphQL API:
+`~/.config/catalyst/config.json` (cross-project, per-machine — never committed; written by
+`setup-webhooks.sh --linear-register` after a successful `webhookCreate`):
 
-```graphql
-mutation {
-  webhookCreate(input: {
-    url: "https://your-public-host/api/webhook/linear"
-    label: "Catalyst orch-monitor"
-    teamId: "<your-team-uuid>"
-    resourceTypes: ["Issue", "Comment", "Cycle", "Reaction", "IssueLabel"]
-  }) {
-    success
-    webhook {
-      id
-      secret    # store this — needed for Linear-Signature verification
-      enabled
+```json
+{
+  "catalyst": {
+    "monitor": {
+      "linear": {
+        "webhookId": "abc-123-uuid-from-linear",
+        "webhookUrl": "https://your-tunnel/api/webhook/linear",
+        "registeredAt": "2026-05-04T20:00:00Z",
+        "resourceTypes": ["Issue", "Comment", "IssueLabel", "Cycle", "Reaction", "Project"]
+      }
     }
   }
 }
 ```
 
-Run via the [Linear API Explorer](https://studio.apollographql.com/public/Linear-API/home).
-The `secret` field is returned exactly once — store it immediately as the value of
-your `CATALYST_LINEAR_WEBHOOK_SECRET` env var.
+This is the Linear analogue of `catalyst.monitor.github.smeeChannel` — same Layer 2 file,
+same per-machine semantics. The local record is the source of truth for idempotency on
+re-run: when the URL matches, `--linear-register` short-circuits without calling Linear's
+GraphQL API, and `--linear-deregister` reads `webhookId` from this record to call
+`webhookDelete` cleanly.
 
-For local development, use a public tunnel (`cloudflared tunnel`, `ngrok`, etc.) to expose
-`http://localhost:7400/api/webhook/linear` to the internet. Linear cannot deliver to a
-smee.io URL the way GitHub can, because Linear webhooks require a stable HTTPS endpoint.
+### Registering the webhook with Linear
+
+The setup script auto-registers the webhook for you (CTL-224) and, when no
+`--webhook-url` is supplied, auto-provisions a smee.io channel for delivery
+(CTL-242). The simplest end-to-end setup is a single command:
+
+```bash
+plugins/dev/scripts/setup-webhooks.sh \
+  --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET \
+  --linear-register
+```
+
+This creates a fresh smee.io channel, writes `catalyst.monitor.linear.smeeChannel`
+to `~/.config/catalyst/config.json`, registers the webhook against that URL
+with Linear, and writes the resulting HMAC secret to
+`~/.config/catalyst/linear-webhook-secret`. The daemon picks up the smee
+channel automatically on next start and tunnels Linear deliveries to
+`http://localhost:7400/api/webhook/linear`.
+
+To reuse an existing smee channel instead of generating a new one, set
+`CATALYST_LINEAR_SMEE_CHANNEL` before running:
+
+```bash
+CATALYST_LINEAR_SMEE_CHANNEL=https://smee.io/existing-channel \
+  plugins/dev/scripts/setup-webhooks.sh --linear-register
+```
+
+To use an existing public URL instead:
+
+```bash
+plugins/dev/scripts/setup-webhooks.sh \
+  --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET \
+  --linear-register \
+  --webhook-url https://your-tunnel/api/webhook/linear
+```
+
+The script:
+
+1. Reads your Linear API token from `~/.config/catalyst/config-<projectKey>.json`
+   (`.linear.apiToken`) — the same Layer 2 secrets file that
+   `resolve-linear-ids.sh` uses.
+2. Reads your team UUID from the Layer 1 `.catalyst/config.json` cache
+   (`catalyst.linear.teamId`). Run `resolve-linear-ids.sh` first if that
+   field is empty.
+3. Lists existing Linear webhooks. If one already targets the same URL
+   (case-insensitive match), it is reused — `--linear-register` is
+   **idempotent**.
+4. Otherwise, calls `webhookCreate` with `resourceTypes` set to the canonical
+   six: `Issue`, `Comment`, `IssueLabel`, `Cycle`, `Reaction`, `Project`.
+   `IssueRelation` is intentionally excluded — Linear does not deliver it.
+5. Persists the returned `secret` to `~/.config/catalyst/linear-webhook-secret`
+   (mode 600), mirroring the GitHub-side `~/.config/catalyst/webhook-secret`.
+6. Writes the registration record (`webhookId`, `webhookUrl`, `registeredAt`,
+   `resourceTypes`) to `~/.config/catalyst/config.json` under
+   `catalyst.monitor.linear` (CTL-238). Subsequent re-runs short-circuit on
+   this record — no Linear API call needed for the dedup decision. See
+   [Layer 2 registration record](#layer-2-registration-record) above.
+7. Prints the `export CATALYST_LINEAR_WEBHOOK_SECRET="$(cat …)"` line for
+   your shell rc.
+
+#### Idempotency on re-run (CTL-238)
+
+When you re-run `--linear-register --webhook-url <U>`, the script consults the Layer 2
+record before touching the Linear API:
+
+- **Record matches `<U>`, no `--force`** → prints `Webhook already registered (id=…); skipping`
+  and exits 0. Zero API calls.
+- **Record holds a different URL, no `--force`** → errors out, leaves the record untouched,
+  asks the user to pass `--force` to delete the old webhook and register the new URL.
+- **`--force`** → deletes the recorded webhook by ID, clears the record, calls `webhookCreate`
+  for `<U>`, rewrites the record. The list-then-match step from CTL-224 is skipped on this
+  path (we already know the world from the Layer 2 record).
+- **No record** → falls back to the CTL-224 path: list webhooks via API, dedup by URL,
+  reuse-or-create. On reuse, writes a partial Layer 2 record (no `resourceTypes` —
+  the list response doesn't expose them) so subsequent runs short-circuit locally.
+
+To rotate the secret (or change the URL), re-run with `--force`:
+
+```bash
+plugins/dev/scripts/setup-webhooks.sh \
+  --linear-register \
+  --webhook-url https://new-tunnel/api/webhook/linear \
+  --force
+```
+
+`--force` deletes the matching webhook and recreates — note that the new
+secret can only be retrieved once, so persist it immediately (the script
+does this automatically) and re-export it in any active shell.
+
+smee.io URLs work with Linear (empirically verified — Linear accepts any public HTTPS
+non-localhost URL). The limitation is offline buffering: smee.io is a pass-through relay
+and does not persist payloads, so events sent while the tunnel is offline are lost. The
+daemon's `linear.ts` polling fallback (every 5 minutes) compensates for this. For a
+durable relay see CTL-241 (Cloudflare-based store-and-forward, in progress).
+
+You can also run the helper directly without `setup-webhooks.sh` if you only
+want webhook registration (no env-var-name write):
+
+```bash
+plugins/dev/scripts/setup-linear-webhook.sh \
+  --webhook-url https://your-tunnel/api/webhook/linear
+```
+
+### Deregistering the webhook (CTL-238)
+
+To clean up a registered Linear webhook:
+
+```bash
+plugins/dev/scripts/setup-webhooks.sh --linear-deregister
+```
+
+The script reads `webhookId` from the Layer 2 registration record, calls Linear's
+`webhookDelete`, clears the record, and removes `~/.config/catalyst/linear-webhook-secret`.
+Errors cleanly with a non-zero exit when no Layer 2 record exists (nothing to delete).
+
+`--linear-deregister` and `--linear-register` are mutually exclusive — pass one or the
+other, not both.
 
 ### Signing scheme
 
@@ -385,4 +539,50 @@ catalyst-events tail --filter '.event | startswith("linear.")'
 # In another shell, cause a Linear ticket state change.
 # The first shell should print the matching event line within seconds.
 ```
+
+## Version drift detection
+
+The `catalyst-monitor` wrapper checks at startup whether it is running a stale version of
+the daemon code. This catches the case where `/plugin update` lands new code in the plugin
+cache but the active symlink (or shell alias) still points at the previous version.
+
+On `start` and `restart`, the wrapper:
+
+1. Reads the version of the script being executed (from the adjacent `version.txt`).
+2. Reads the highest semver subdirectory under `~/.claude/plugins/cache/catalyst/catalyst-dev/`.
+3. Prints a warning to stderr when the running version is older.
+
+The same fields are exposed in `status --json`:
+
+```json
+{
+  "running": true,
+  "pid": 12345,
+  "port": 7400,
+  "url": "http://localhost:7400",
+  "runningVersion": "8.1.0",
+  "latestAvailableVersion": "8.1.0",
+  "isStale": false
+}
+```
+
+The startup pre-flight (`check-setup.sh`, run by setup skills) consumes these fields and
+surfaces drift as a warning with the remediation command.
+
+To suppress the warning (e.g. when deliberately pinned to an older version), add the
+following to `.catalyst/config.json`:
+
+```json
+{
+  "catalyst": {
+    "monitor": {
+      "suppressVersionWarning": true
+    }
+  }
+}
+```
+
+When running the wrapper from a source-tree clone (no plugin cache), `runningVersion`
+comes from `plugins/dev/version.txt` and `latestAvailableVersion` is `null` if the plugin
+cache directory does not exist on the machine.
 

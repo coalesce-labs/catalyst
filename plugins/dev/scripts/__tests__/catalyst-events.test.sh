@@ -77,12 +77,12 @@ run "wait-for times out with exit 1" expect_exit 1 "$EVENTS" wait-for --timeout 
 reset_events
 (
   sleep 1
-  write_event '{"ts":"2026-05-03T00:00:00Z","event":"worker-status-change","worker":"X","detail":null}'
+  write_event '{"ts":"2026-05-03T00:00:00Z","event":"worker-status-terminal","worker":"X","detail":null}'
 ) &
 EMITTER_PID=$!
 
 START=$(date +%s)
-OUT=$("$EVENTS" wait-for --timeout 5 --filter '.event == "worker-status-change"')
+OUT=$("$EVENTS" wait-for --timeout 5 --filter '.event == "worker-status-terminal"')
 RC=$?
 END=$(date +%s)
 ELAPSED=$((END - START))
@@ -91,7 +91,7 @@ wait "$EMITTER_PID" 2>/dev/null || true
 
 run "wait-for exits 0 when match arrives" bash -c "[ '$RC' = '0' ]"
 run "wait-for prints the matching line" bash -c "
-  echo '$OUT' | grep -q 'worker-status-change'
+  echo '$OUT' | grep -q 'worker-status-terminal'
 "
 run "wait-for completes in <5s when event arrives early" bash -c "[ '$ELAPSED' -lt 5 ]"
 
@@ -205,6 +205,146 @@ TAIL_OUT=$(timeout 2 "$EVENTS" tail --since-line 1 2>/dev/null || true)
 run "tail --since-line 1 emits backlog from line 2 onward" bash -c "
   ! echo '$TAIL_OUT' | grep -q 'line-1' && echo '$TAIL_OUT' | grep -q 'line-2' && echo '$TAIL_OUT' | grep -q 'line-3'
 "
+
+# ── 13. build-orchestrator-filter — argument validation ─────────────────────
+run "build-orchestrator-filter requires an argument" \
+  expect_exit 2 "$EVENTS" build-orchestrator-filter
+
+run "build-orchestrator-filter rejects missing orch dir" \
+  expect_exit 2 "$EVENTS" build-orchestrator-filter "$SCRATCH/no-such-orch"
+
+# Empty workers/ directory — no signal files at all.
+mkdir -p "$SCRATCH/empty-orch/workers"
+run "build-orchestrator-filter rejects empty workers dir" \
+  expect_exit 2 "$EVENTS" build-orchestrator-filter "$SCRATCH/empty-orch"
+
+# ── 14. build-orchestrator-filter — produces a valid jq predicate ───────────
+ORCH_NAME="orch-test-2026-05-04"
+ORCH_DIR_FIXTURE="$SCRATCH/$ORCH_NAME"
+mkdir -p "$ORCH_DIR_FIXTURE/workers"
+
+# Two workers: one with a PR, one without.
+cat > "$ORCH_DIR_FIXTURE/workers/CTL-100.json" <<EOF
+{"ticket":"CTL-100","orchestrator":"$ORCH_NAME","status":"merging",
+ "pr":{"number":501,"url":"https://github.com/o/r/pull/501"}}
+EOF
+cat > "$ORCH_DIR_FIXTURE/workers/CTL-101.json" <<EOF
+{"ticket":"CTL-101","orchestrator":"$ORCH_NAME","status":"researching","pr":null}
+EOF
+
+FILTER=$("$EVENTS" build-orchestrator-filter "$ORCH_DIR_FIXTURE")
+RC=$?
+
+run "build-orchestrator-filter exits 0 on healthy fixture" bash -c "[ '$RC' = '0' ]"
+run "build-orchestrator-filter emits a non-empty filter" bash -c "[ -n \"\$(echo '$FILTER')\" ]"
+
+# Write the filter as a complete jq program (with select(...) wrapper) so that
+# tests can pass it via `jq -f <file>` and avoid the layered shell-quoting that
+# would otherwise eat the embedded `""` defaults inside the predicate.
+FILTER_FILE="$SCRATCH/filter.jq"
+printf 'select(%s)\n' "$FILTER" > "$FILTER_FILE"
+
+assert_match() {
+  local event="$1" file="$2"
+  echo "$event" | jq -e -f "$file" > /dev/null
+}
+assert_no_match() {
+  local event="$1" file="$2"
+  ! echo "$event" | jq -e -f "$file" > /dev/null 2>&1
+}
+
+# Smoke-test the predicate is syntactically valid jq by parsing the program file.
+run "emitted predicate parses as valid jq" bash -c "
+  echo '{}' | jq -c -f '$FILTER_FILE' > /dev/null 2>&1 || \
+  echo '{}' | jq -c '. as \$x | try (\$x | (\$x))' > /dev/null
+"
+
+# Stricter: ensure the predicate compiles as a full program (not just a parse).
+run "emitted predicate compiles end-to-end" bash -c "
+  echo 'null' | jq -c -f '$FILTER_FILE' > /dev/null 2>&1 || true
+  jq -c -f '$FILTER_FILE' /dev/null 2>/dev/null
+  test \$? -ne 3
+"
+
+# ── 15. emitted predicate — match cases ─────────────────────────────────────
+
+# (a) catalyst orchestrator event for this orch
+EVENT_A='{"event":"worker-status-change","orchestrator":"orch-test-2026-05-04","worker":"CTL-100","detail":null}'
+run "filter matches catalyst event from this orchestrator" \
+  assert_match "$EVENT_A" "$FILTER_FILE"
+
+# (b) worker lifecycle event tagged with a ticket in this orch
+EVENT_B='{"event":"worker-pr-created","orchestrator":null,"worker":"CTL-101","detail":null}'
+run "filter matches worker event for in-orch ticket" \
+  assert_match "$EVENT_B" "$FILTER_FILE"
+
+# (c) github event scoped by branch ref prefix
+EVENT_C='{"event":"github.push","orchestrator":null,"worker":null,"scope":{"repo":"o/r","ref":"refs/heads/orch-test-2026-05-04-CTL-100","sha":"abc123"}}'
+run "filter matches github event scoped by branch ref prefix" \
+  assert_match "$EVENT_C" "$FILTER_FILE"
+
+# (d) github event scoped to a known PR number
+EVENT_D='{"event":"github.pr.synchronize","orchestrator":null,"worker":null,"scope":{"repo":"o/r","pr":501}}'
+run "filter matches github event scoped to known PR" \
+  assert_match "$EVENT_D" "$FILTER_FILE"
+
+# (e) check_suite with prNumbers intersecting orch PR set
+EVENT_E='{"event":"github.check_suite.completed","orchestrator":null,"worker":null,"scope":{"repo":"o/r"},"detail":{"conclusion":"failure","prNumbers":[501]}}'
+run "filter matches check_suite event with intersecting prNumbers" \
+  assert_match "$EVENT_E" "$FILTER_FILE"
+
+# (f) linear event scoped to an in-orch ticket
+EVENT_F='{"event":"linear.issue.state_changed","orchestrator":null,"worker":null,"scope":{"ticket":"CTL-100"},"detail":{}}'
+run "filter matches linear event for in-orch ticket" \
+  assert_match "$EVENT_F" "$FILTER_FILE"
+
+# ── 16. emitted predicate — reject cases ────────────────────────────────────
+
+# (g) catalyst event from a different orchestrator
+EVENT_G='{"event":"worker-status-change","orchestrator":"orch-other-2026-05-04","worker":"FOO-99","detail":null}'
+run "filter rejects event from foreign orchestrator" \
+  assert_no_match "$EVENT_G" "$FILTER_FILE"
+
+# (h) github event scoped to a foreign branch ref
+EVENT_H='{"event":"github.push","orchestrator":null,"worker":null,"scope":{"repo":"o/r","ref":"refs/heads/orch-other-2026-05-04-FOO-99","sha":"def456"}}'
+run "filter rejects github event for foreign branch" \
+  assert_no_match "$EVENT_H" "$FILTER_FILE"
+
+# (i) github event scoped to an unknown PR number
+EVENT_I='{"event":"github.pr.synchronize","orchestrator":null,"worker":null,"scope":{"repo":"o/r","pr":999}}'
+run "filter rejects github event for unknown PR" \
+  assert_no_match "$EVENT_I" "$FILTER_FILE"
+
+# (j) check_suite with prNumbers entirely outside orch PR set
+EVENT_J='{"event":"github.check_suite.completed","orchestrator":null,"worker":null,"scope":{"repo":"o/r"},"detail":{"conclusion":"failure","prNumbers":[888,999]}}'
+run "filter rejects check_suite with non-intersecting prNumbers" \
+  assert_no_match "$EVENT_J" "$FILTER_FILE"
+
+# (k) linear event for foreign ticket
+EVENT_K='{"event":"linear.issue.state_changed","orchestrator":null,"worker":null,"scope":{"ticket":"FOO-99"},"detail":{}}'
+run "filter rejects linear event for foreign ticket" \
+  assert_no_match "$EVENT_K" "$FILTER_FILE"
+
+# ── 17. build-orchestrator-filter — no PRs yet (early-stage orchestrator) ───
+EARLY_ORCH="$SCRATCH/orch-early-2026-05-04"
+mkdir -p "$EARLY_ORCH/workers"
+cat > "$EARLY_ORCH/workers/CTL-200.json" <<EOF
+{"ticket":"CTL-200","orchestrator":"orch-early-2026-05-04","status":"researching","pr":null}
+EOF
+
+EARLY_FILTER=$("$EVENTS" build-orchestrator-filter "$EARLY_ORCH")
+EARLY_FILTER_FILE="$SCRATCH/early-filter.jq"
+printf 'select(%s)\n' "$EARLY_FILTER" > "$EARLY_FILTER_FILE"
+
+run "build-orchestrator-filter handles workers with no PRs" bash -c "
+  echo '{}' | jq -c -f '$EARLY_FILTER_FILE' > /dev/null 2>&1 || \
+  jq -c -f '$EARLY_FILTER_FILE' /dev/null 2>/dev/null; test \$? -ne 3
+"
+
+# Branch-ref scoping still works without any PRs
+EVENT_PRELESS='{"event":"github.push","orchestrator":null,"worker":null,"scope":{"repo":"o/r","ref":"refs/heads/orch-early-2026-05-04-CTL-200","sha":"a1b2"}}'
+run "filter matches branch-ref event when orch has no PRs" \
+  assert_match "$EVENT_PRELESS" "$EARLY_FILTER_FILE"
 
 # ── Summary ─────────────────────────────────────────────────────────────────
 echo

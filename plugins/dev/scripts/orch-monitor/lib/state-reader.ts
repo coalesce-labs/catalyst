@@ -71,6 +71,21 @@ export interface WorkerState {
     status: string;
     source: string;
   }>;
+  /**
+   * Production-deploy state, written by the orchestrator's Phase 4 deploy
+   * state-machine (CTL-211). Present only when the signal file has a `deploy`
+   * block — i.e. the repo's `catalyst.deploy.<repo>.skipDeployVerification` is
+   * false and the worker has reached `merged|deploying|done|deploy-failed`.
+   */
+  deploy?: {
+    startedAt?: string;
+    completedAt?: string;
+    environment?: string;
+    deploymentId?: number;
+    result?: "success" | "failure" | "error";
+    failedAttempts?: number;
+    lastFailureState?: string;
+  };
   activity?: WorkerActivity | null;
 }
 
@@ -365,6 +380,36 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
       ? signal.followUpTo
       : undefined;
 
+  // CTL-211 — surface the orchestrator-written deploy block so the dashboard
+  // can render a Deploy column without re-reading signal files.
+  let deploy: WorkerState["deploy"] = undefined;
+  if (isRecord(signal.deploy)) {
+    const d = signal.deploy;
+    deploy = {};
+    if (typeof d.startedAt === "string") deploy.startedAt = d.startedAt;
+    if (typeof d.completedAt === "string") deploy.completedAt = d.completedAt;
+    if (typeof d.environment === "string") deploy.environment = d.environment;
+    if (typeof d.deploymentId === "number" && Number.isFinite(d.deploymentId)) {
+      deploy.deploymentId = d.deploymentId;
+    }
+    if (
+      d.result === "success" ||
+      d.result === "failure" ||
+      d.result === "error"
+    ) {
+      deploy.result = d.result;
+    }
+    if (
+      typeof d.failedAttempts === "number" &&
+      Number.isFinite(d.failedAttempts)
+    ) {
+      deploy.failedAttempts = d.failedAttempts;
+    }
+    if (typeof d.lastFailureState === "string") {
+      deploy.lastFailureState = d.lastFailureState;
+    }
+  }
+
   return {
     ticket: asString(signal.ticket),
     label,
@@ -384,6 +429,7 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
     cost,
     fixupCommit,
     followUpTo,
+    deploy,
   };
 }
 

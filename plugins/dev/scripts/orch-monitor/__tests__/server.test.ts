@@ -1768,3 +1768,152 @@ describe("Linear webhook receiver — disabled (no linearWebhookConfig)", () => 
     expect(res.status).toBe(503);
   });
 });
+
+describe("GET /api/status/webhook-tunnel", () => {
+  const fakeFactory = () => ({
+    start: () => Promise.resolve({}),
+    stop: () => Promise.resolve(),
+  });
+
+  it("returns connected=true when tunnel is configured and started", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "wt-status-tunnel-conn-"));
+    const wtDir = join(tmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+
+    // Write a github event in the current month's event log
+    const now = new Date();
+    const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const eventsDir = join(tmp, "events");
+    mkdirSync(eventsDir, { recursive: true });
+    writeFileSync(
+      join(eventsDir, `${month}.jsonl`),
+      JSON.stringify({
+        ts: now.toISOString(),
+        event: "github.pr.merged",
+        scope: { repo: "org/repo" },
+        schemaVersion: 2,
+      }) + "\n",
+    );
+
+    const srv = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      catalystDir: tmp,
+      webhookConfig: {
+        smeeChannel: "https://smee.io/test",
+        secret: "s3cr3t",
+        secretEnvName: "CATALYST_WEBHOOK_SECRET",
+        tunnelFactory: fakeFactory,
+      },
+    });
+    const url = `http://localhost:${srv.port}`;
+
+    // Allow tunnel.start() microtask to complete
+    await new Promise((r) => setTimeout(r, 30));
+
+    try {
+      const res = await fetch(`${url}/api/status/webhook-tunnel`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.connected).toBe(true);
+      expect(body.smeeUrl).toBe("https://smee.io/test");
+      expect(body.secretEnvName).toBe("CATALYST_WEBHOOK_SECRET");
+      expect(body.secretPresent).toBe(true);
+      expect(typeof body.eventCount24h).toBe("number");
+      expect(body.eventCount24h).toBeGreaterThanOrEqual(1);
+      expect(typeof body.eventCount24hByRepo).toBe("object");
+    } finally {
+      void srv.stop(true);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("returns connected=false when no webhookConfig provided", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "wt-status-tunnel-noconf-"));
+    const wtDir = join(tmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+
+    const srv = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      catalystDir: tmp,
+    });
+    const url = `http://localhost:${srv.port}`;
+
+    try {
+      const res = await fetch(`${url}/api/status/webhook-tunnel`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.connected).toBe(false);
+      expect(body.smeeUrl).toBeNull();
+      expect(body.secretEnvName).toBeNull();
+      expect(body.secretPresent).toBe(false);
+      expect(body.eventCount24h).toBe(0);
+      expect(body.eventCount24hByRepo).toEqual({});
+    } finally {
+      void srv.stop(true);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("returns smeeUrl=null when smeeChannel is empty string", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "wt-status-tunnel-nochan-"));
+    const wtDir = join(tmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+
+    const srv = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      catalystDir: tmp,
+      webhookConfig: {
+        smeeChannel: "",
+        secret: "s3cr3t",
+        secretEnvName: "CATALYST_WEBHOOK_SECRET",
+        tunnelFactory: fakeFactory,
+      },
+    });
+    const url = `http://localhost:${srv.port}`;
+
+    try {
+      const res = await fetch(`${url}/api/status/webhook-tunnel`);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.smeeUrl).toBeNull();
+      expect(body.secretPresent).toBe(true);
+    } finally {
+      void srv.stop(true);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("returns secretPresent=false when secret is empty string", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "wt-status-tunnel-nosec-"));
+    const wtDir = join(tmp, "wt");
+    mkdirSync(wtDir, { recursive: true });
+
+    const srv = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      catalystDir: tmp,
+      webhookConfig: {
+        smeeChannel: "https://smee.io/test",
+        secret: "",
+        secretEnvName: "CATALYST_WEBHOOK_SECRET",
+        tunnelFactory: fakeFactory,
+      },
+    });
+    const url = `http://localhost:${srv.port}`;
+
+    try {
+      const res = await fetch(`${url}/api/status/webhook-tunnel`);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.secretPresent).toBe(false);
+    } finally {
+      void srv.stop(true);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

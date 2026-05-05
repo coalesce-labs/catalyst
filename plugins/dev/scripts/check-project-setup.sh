@@ -143,13 +143,67 @@ else
 	warnings+=(".catalyst/config.json not found — run setup-catalyst.sh to create it")
 fi
 
-# 5. Ensure workflow context file exists
-#    This is the auto-discovery backing store; skills and hooks depend on it.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 5. Check orch-monitor daemon liveness
+#    Event-driven skills (orchestrate Phase 4, oneshot Phase 5, merge-pr Phase 6) depend on
+#    the daemon to surface webhook events. Without it, catalyst-events wait-for falls back
+#    to a 600s timeout + gh pr view polling — silently degraded.
+MONITOR_SCRIPT="${SCRIPT_DIR}/catalyst-monitor.sh"
+MONITOR_PORT_RESOLVED="${MONITOR_PORT:-7400}"
+if [[ -x $MONITOR_SCRIPT ]]; then
+	if "$MONITOR_SCRIPT" status --json &>/dev/null; then
+		# Daemon is running — also check webhook tunnel connectivity (CTL-244).
+		if command -v curl &>/dev/null && command -v jq &>/dev/null; then
+			local_tunnel=$(curl -s --max-time 2 "http://localhost:${MONITOR_PORT_RESOLVED}/api/status/webhook-tunnel" 2>/dev/null || true)
+			smee_url=$(echo "$local_tunnel" | jq -r '.smeeUrl // empty' 2>/dev/null || true)
+			tunnel_connected=$(echo "$local_tunnel" | jq -r '.connected // empty' 2>/dev/null || true)
+			if [[ -n "$smee_url" && "$tunnel_connected" != "true" ]]; then
+				warnings+=("Webhook tunnel not connected (smeeUrl=${smee_url}) — GitHub events won't reach the daemon")
+				warnings+=("  Restart the monitor: $MONITOR_SCRIPT restart")
+			fi
+		fi
+	else
+		# Daemon stopped. Behavior splits on autonomous vs interactive.
+		if [[ -n ${CATALYST_AUTONOMOUS:-} ]] || [[ ! -t 0 ]]; then
+			echo -e "${YELLOW}WARN: orch-monitor daemon not running${NC}" >&2
+			echo "  Event-driven skills will degrade to polling fallback." >&2
+			echo "  Start with: $MONITOR_SCRIPT start" >&2
+		else
+			echo -e "${YELLOW}orch-monitor daemon is not running.${NC}"
+			echo "Event-driven skills (orchestrate, oneshot, merge-pr) will degrade"
+			echo "to slower polling fallback without it."
+			read -r -p "Start the monitor now? [Y/n] " yn
+			case "$yn" in
+				[Nn]*)
+					warnings+=("orch-monitor daemon not running — event-driven skills will degrade to polling")
+					;;
+				*)
+					if ! "$MONITOR_SCRIPT" start; then
+						errors+=("Failed to start orch-monitor — check log: ${CATALYST_DIR:-$HOME/catalyst}/monitor.log")
+						errors+=("  Investigate: tail -50 \"${CATALYST_DIR:-$HOME/catalyst}/monitor.log\"")
+					fi
+					;;
+			esac
+		fi
+	fi
+fi
+
+# 6. Ensure workflow context file exists
+#    This is the auto-discovery backing store; skills and hooks depend on it.
 if [[ -f "${SCRIPT_DIR}/workflow-context.sh" ]]; then
 	"${SCRIPT_DIR}/workflow-context.sh" init 2>/dev/null || true
 elif [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
 	"${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" init 2>/dev/null || true
+fi
+
+# 6. Check catalyst-* CLIs are on PATH (CTL-227)
+#    Skills like monitor-events invoke `catalyst-events` by bare name; if it's
+#    not on PATH, the skill fails with `command not found`. Use catalyst-events
+#    as the canary — it's the newest CLI and most likely to be missing on a
+#    user who upgraded but never re-ran install-cli.sh.
+if ! command -v catalyst-events &>/dev/null; then
+	warnings+=("catalyst-events not found on PATH — run: bash plugins/dev/scripts/install-cli.sh")
 fi
 
 # Report errors (fatal)
