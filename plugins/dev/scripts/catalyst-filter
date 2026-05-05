@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# catalyst-filter — semantic event routing daemon
+#
+# Tails the catalyst event log and uses Groq (Llama 3.1 8B) to classify
+# incoming events against orchestrator-registered interests, emitting
+# filter.wake.{id} events when relevant events arrive.
+#
+# Usage:
+#   catalyst-filter start     — launch daemon in background
+#   catalyst-filter stop      — stop the daemon
+#   catalyst-filter restart   — stop + start
+#   catalyst-filter status    — check if running
+#   catalyst-filter logs      — tail daemon log
+#   catalyst-filter run       — run in foreground (debugging)
+#
+# Credential: groq.apiKey in ~/.config/catalyst/config.json
+#
+# Protocol (for orchestrators):
+#   1. Emit a filter.register event at startup:
+#        catalyst-state event filter.register \
+#          --orchestrator "$ORCH_NAME" \
+#          --detail '{"notify_event":"filter.wake.'"$ORCH_NAME"'",
+#                     "prompt":"Wake me when: CI fails, PR merges, worker crashes",
+#                     "context":{"pr_numbers":[123],"tickets":["CTL-247"]}}'
+#
+#   2. Wait for the wake event:
+#        catalyst-events wait-for \
+#          --filter '.event == "filter.wake.'"$ORCH_NAME"'"' \
+#          --timeout 7200
+#
+#   3. Deregister when done:
+#        catalyst-state event filter.deregister --orchestrator "$ORCH_NAME"
+
+set -uo pipefail
+
+# Resolve SCRIPT_DIR, following symlinks (macOS + Linux compatible)
+_SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$_SOURCE" ]]; do
+  _DIR="$(cd -P "$(dirname "$_SOURCE")" && pwd)"
+  _SOURCE="$(readlink "$_SOURCE")"
+  [[ "$_SOURCE" != /* ]] && _SOURCE="$_DIR/$_SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$_SOURCE")" && pwd)"
+
+DAEMON_SCRIPT="${SCRIPT_DIR}/filter-daemon/index.mjs"
+STATE_DIR="${HOME}/.local/share/catalyst"
+PID_FILE="${STATE_DIR}/filter-daemon.pid"
+LOG_FILE="${STATE_DIR}/filter-daemon.log"
+
+_check_deps() {
+  if ! command -v node &>/dev/null; then
+    echo "ERROR: node not found in PATH" >&2
+    exit 1
+  fi
+  if [[ ! -f "$DAEMON_SCRIPT" ]]; then
+    echo "ERROR: daemon script not found: $DAEMON_SCRIPT" >&2
+    exit 1
+  fi
+}
+
+_is_running() {
+  [[ -f "$PID_FILE" ]] || return 1
+  local pid
+  pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+cmd_start() {
+  _check_deps
+  if _is_running; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    echo "catalyst-filter already running (pid $pid)"
+    return 0
+  fi
+  rm -f "$PID_FILE"
+  mkdir -p "$STATE_DIR"
+  nohup node "$DAEMON_SCRIPT" >> "$LOG_FILE" 2>&1 &
+  local pid=$!
+  sleep 0.4
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "catalyst-filter started (pid $pid)"
+    echo "  logs: $LOG_FILE"
+  else
+    echo "ERROR: catalyst-filter failed to start — check logs:" >&2
+    tail -5 "$LOG_FILE" >&2
+    exit 1
+  fi
+}
+
+cmd_stop() {
+  if ! _is_running; then
+    echo "catalyst-filter not running"
+    rm -f "$PID_FILE" 2>/dev/null || true
+    return 0
+  fi
+  local pid
+  pid=$(cat "$PID_FILE")
+  kill "$pid"
+  echo "catalyst-filter stopped (pid $pid)"
+  rm -f "$PID_FILE"
+}
+
+cmd_status() {
+  if _is_running; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    echo "running (pid $pid)"
+    return 0
+  else
+    echo "not running"
+    rm -f "$PID_FILE" 2>/dev/null || true
+    return 1
+  fi
+}
+
+cmd_logs() {
+  if [[ ! -f "$LOG_FILE" ]]; then
+    echo "No log file yet: $LOG_FILE"
+    return 1
+  fi
+  tail -f "$LOG_FILE"
+}
+
+cmd_run() {
+  _check_deps
+  exec node "$DAEMON_SCRIPT"
+}
+
+CMD="${1:-help}"
+case "$CMD" in
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_stop; sleep 0.5; cmd_start ;;
+  status)  cmd_status ;;
+  logs)    cmd_logs ;;
+  run)     cmd_run ;;
+  *)
+    cat <<'EOF'
+Usage: catalyst-filter {start|stop|restart|status|logs|run}
+
+  start    Launch daemon in background
+  stop     Stop the daemon
+  restart  Stop then start
+  status   Check if running (exit 0 = running, 1 = stopped)
+  logs     Tail daemon log (Ctrl-C to exit)
+  run      Run in foreground for debugging
+EOF
+    ;;
+esac
