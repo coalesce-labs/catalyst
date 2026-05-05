@@ -14,7 +14,10 @@ set -uo pipefail
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 PID_FILE="${FILTER_PID_FILE:-$CATALYST_DIR/filter.pid}"
 LOG_FILE="${FILTER_LOG_FILE:-$CATALYST_DIR/filter.log}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
+SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
+unset _SRC
 DAEMON_SCRIPT="${FILTER_DAEMON_SCRIPT:-$SCRIPT_DIR/filter-daemon/index.mjs}"
 
 is_alive() { kill -0 "$1" 2>/dev/null; }
