@@ -15,28 +15,12 @@
         "inReview": "In Review",
         "done": "Done",
         "canceled": "Canceled"
-      },
-      "teamId": "e7e703c4-13a8-42d4-97c1-25e342618f25",
-      "stateIds": {
-        "Planning": "b64f94a4-954d-4cb1-943f-daee603ed9f7",
-        "Research": "2d478844-8383-490f-9d8d-207363899764",
-        "In Review": "06397ace-b4ac-4a52-9754-befb13dc6e9b",
-        "Triage": "a35390a0-5ae1-474d-804d-0533e5735303",
-        "Backlog": "71a1f143-cc27-4a6c-94fb-5ba0b164020e",
-        "In Progress": "5e9c1bfb-0949-4a12-b375-c84670905c33",
-        "Done": "5d779765-6245-4f15-a2d1-a33f477b87a3",
-        "Canceled": "560f8e87-d745-420b-aa04-6ff418ae8b68"
       }
     },
     "thoughts": {
       "profile": "coalesce-labs",
       "directory": "catalyst-workspace",
       "user": null
-    },
-    "monitor": {
-      "github": {
-        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET"
-      }
     }
   }
 }

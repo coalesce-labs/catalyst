@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# catalyst-filter — manage the Groq-powered semantic event filter daemon
+#
+# Commands:
+#   start      Start filter daemon in background (idempotent)
+#   stop       Stop filter daemon
+#   restart    Stop then start
+#   status     Print running/stopped + pid
+#   logs       Tail daemon log
+#   run [args] Run daemon in foreground (debugging)
+
+set -uo pipefail
+
+CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
+PID_FILE="${FILTER_PID_FILE:-$CATALYST_DIR/filter.pid}"
+LOG_FILE="${FILTER_LOG_FILE:-$CATALYST_DIR/filter.log}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DAEMON_SCRIPT="${FILTER_DAEMON_SCRIPT:-$SCRIPT_DIR/filter-daemon/index.mjs}"
+
+is_alive() { kill -0 "$1" 2>/dev/null; }
+
+read_pid() {
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$PID_FILE" 2>/dev/null)"
+    if [[ "$pid" =~ ^[0-9]+$ ]] && is_alive "$pid"; then
+      echo "$pid"; return 0
+    fi
+    rm -f "$PID_FILE" 2>/dev/null
+  fi
+  return 1
+}
+
+resolve_runtime() {
+  if command -v bun &>/dev/null; then echo "bun"; return 0; fi
+  if command -v node &>/dev/null; then echo "node"; return 0; fi
+  echo "error: neither bun nor node found on PATH" >&2
+  return 1
+}
+
+cmd_start() {
+  if read_pid > /dev/null 2>&1; then
+    echo "catalyst-filter already running (pid $(read_pid))"
+    return 0
+  fi
+  local runtime
+  runtime=$(resolve_runtime) || return 1
+  if [[ ! -f "$DAEMON_SCRIPT" ]]; then
+    echo "error: daemon script not found: $DAEMON_SCRIPT" >&2
+    return 1
+  fi
+  mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
+  nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" > "$LOG_FILE" 2>&1 &
+  local server_pid=$!
+  disown "$server_pid" 2>/dev/null || true
+  local waited=0
+  while [[ $waited -lt 20 ]]; do
+    if [[ -f "$PID_FILE" ]]; then
+      echo "catalyst-filter started (pid $(cat "$PID_FILE"))"
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if is_alive "$server_pid"; then
+    echo "$server_pid" > "$PID_FILE"
+    echo "catalyst-filter started (pid $server_pid)"
+    return 0
+  fi
+  echo "error: catalyst-filter failed to start — check $LOG_FILE" >&2
+  return 1
+}
+
+cmd_stop() {
+  local pid
+  if ! pid=$(read_pid); then
+    echo "catalyst-filter not running"
+    return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  local waited=0
+  while [[ $waited -lt 30 ]] && is_alive "$pid"; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  is_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  rm -f "$PID_FILE" 2>/dev/null
+  echo "catalyst-filter stopped"
+}
+
+cmd_restart() {
+  cmd_stop
+  cmd_start
+}
+
+cmd_status() {
+  local pid
+  if pid=$(read_pid); then
+    echo "running (pid $pid)"
+  else
+    echo "stopped"
+  fi
+}
+
+cmd_logs() {
+  if [[ -f "$LOG_FILE" ]]; then
+    tail -f "$LOG_FILE"
+  else
+    echo "No log file: $LOG_FILE"
+  fi
+}
+
+cmd_run() {
+  local runtime
+  runtime=$(resolve_runtime) || return 1
+  exec "$runtime" "$DAEMON_SCRIPT" "$@"
+}
+
+case "${1:-}" in
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_restart ;;
+  status)  cmd_status ;;
+  logs)    cmd_logs ;;
+  run)     shift; cmd_run "$@" ;;
+  *)
+    echo "Usage: catalyst-filter {start|stop|restart|status|logs|run}" >&2
+    exit 1
+    ;;
+esac

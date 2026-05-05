@@ -47,7 +47,7 @@
           "git branch -D ${BRANCH_NAME}"
         ]
       },
-      "workerCommand": "/catalyst-dev:oneshot",
+      "workerCommand": "/oneshot",
       "workerModel": "opus",
       "thoughts": {
         "profile": "my-profile",
@@ -70,6 +70,9 @@
       "linear": {
         "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET"
       }
+    },
+    "filter": {
+      "groqModel": "llama-3.1-8b-instant"
     }
   }
 }
