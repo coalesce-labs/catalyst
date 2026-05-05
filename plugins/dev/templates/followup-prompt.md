@@ -54,22 +54,20 @@ known parent to reference.
    - <finding 2>
    ```
 
-9. **Worker contract ends at `state=MERGED`** (CTL-80) — same as a normal worker. After PR open
-   and auto-merge armed, poll until merged. CRITICAL: always include `sleep 30` — a tight loop
-   exhausts GitHub's 5,000/hr GraphQL rate limit in minutes.
+9. **Exit at merging** (CTL-133 contract) — after PR open and auto-merge armed, write
+   `status=merging` to your signal file and exit. The orchestrator's Phase 4 poll loop owns
+   merge confirmation, BLOCKED recovery, and the `done` transition. Do NOT poll
+   `gh pr view --json`. If you need to wait on a GitHub event before pushing (e.g., CI before
+   resolving review threads), use the [[wait-for-github]] skill pattern.
 
    ```bash
-   while true; do
-     MERGE_STATE=$(gh pr view ${PR_NUMBER} --json state,mergeStateStatus,mergedAt)
-     STATE=$(echo "$MERGE_STATE" | jq -r '.state')
-     [ "$STATE" = "MERGED" ] && break
-     # Resolve BEHIND/CI/review blockers
-     sleep 30
-   done
+   # Transition signal to merging (terminal worker status)
+   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   jq --arg ts "$TS" \
+      '.status = "merging" | .updatedAt = $ts | .phaseTimestamps = ((.phaseTimestamps // {}) | .merging = $ts)' \
+      "${SIGNAL_FILE}" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "${SIGNAL_FILE}"
+   # Exit — orchestrator Phase 4 handles merge confirmation, Linear done transition
    ```
-
-   Only exit when `state=MERGED` and you have written `pr.mergedAt` + `status: "done"` to
-   your signal file.
 
 10. **File new improvement findings (CTL-176 / CTL-183 routing)** — if this follow-up
     surfaces new friction worth tracking (beyond the parent findings that triggered it),
@@ -104,5 +102,7 @@ known parent to reference.
   tests missed something.
 - Do NOT omit the `followUpTo` link from your signal file or PR description — traceability is
   the whole point of this pattern.
-- Do NOT exit at `pr-created` if the PR has not merged — under CTL-80 the worker owns the
-  poll-until-MERGED loop.
+- Do NOT run `gh pr view --json` in a loop — a tight loop burns GitHub's 5,000/hr GraphQL rate
+  limit in minutes. Use [[wait-for-github]] for any intermediate GitHub event waits.
+- Do NOT write `status=done`, `pr.mergedAt`, or `pr.ciStatus="merged"` — the orchestrator's
+  Phase 4 poll loop owns merge confirmation and the done transition. Exit at `status=merging`.

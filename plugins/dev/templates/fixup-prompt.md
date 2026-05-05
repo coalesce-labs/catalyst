@@ -51,27 +51,27 @@ ${ISSUES}
      "${SIGNAL_FILE}" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "${SIGNAL_FILE}"
    ```
 
-9. **Poll until MERGED** (CTL-80 contract) — after pushing the fix-up commit, run a poll loop.
-   CRITICAL: always include `sleep 30` — a tight loop exhausts GitHub's 5,000/hr GraphQL rate
-   limit in minutes. Resolve BEHIND with update-branch API. Resolve CI failures or review
-   comments by pushing fixes. Only exit when `state=MERGED`.
+9. **Exit at merging** (CTL-133 contract) — after pushing the fix-up commit, re-arm auto-merge
+   if not already armed, write `status=merging` to your signal file, then exit. The
+   orchestrator's Phase 4 poll loop owns merge confirmation, BLOCKED recovery, and the
+   `done` transition. Do NOT poll `gh pr view --json` — that burns GraphQL rate limits.
+
+   If you need to wait for CI to pass before resolving review threads, use the
+   [[wait-for-github]] skill pattern instead of a bare poll loop.
 
    ```bash
-   while true; do
-     MERGE_STATE=$(gh pr view ${PR_NUMBER} --json state,mergeStateStatus,mergedAt)
-     STATE=$(echo "$MERGE_STATE" | jq -r '.state')
-     [ "$STATE" = "MERGED" ] && break
-     # Resolve BEHIND: gh api -X PUT /repos/{owner}/{repo}/pulls/${PR_NUMBER}/update-branch
-     # Resolve CI/review: investigate, fix, push
-     sleep 30
-   done
+   # Re-arm if not already armed (idempotent)
+   gh pr merge ${PR_NUMBER} --squash --auto --delete-branch 2>/dev/null || true
+
+   # Transition signal to merging (terminal worker status)
+   TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   jq --arg ts "$TS" \
+      '.status = "merging" | .updatedAt = $ts | .phaseTimestamps = ((.phaseTimestamps // {}) | .merging = $ts)' \
+      "${SIGNAL_FILE}" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "${SIGNAL_FILE}"
+   # Exit — orchestrator Phase 4 handles merge confirmation, Linear done transition
    ```
 
-10. **On merge**, write `pr.mergedAt`, `pr.ciStatus = "merged"`, and `status = "done"` to your
-    signal file (sourced from `gh pr view --json mergedAt`), transition the Linear ticket to
-    Done, then exit successfully.
-
-11. **File improvement findings (CTL-176 / CTL-183 routing)** — when you notice friction
+10. **File improvement findings (CTL-176 / CTL-183 routing)** — when you notice friction
     worth fixing during this fix-up (workflow gaps, bugs in adjacent code, tooling gaps),
     record it on the shared findings queue:
     ```bash
@@ -105,6 +105,8 @@ ${ISSUES}
 - Do NOT create a new PR — push to the existing branch.
 - Do NOT force-push unless the orchestrator explicitly instructed you to (history rewrites break
   review threads).
-- Do NOT exit at `pr-created` if the PR has not yet merged — under CTL-80 the worker owns the
-  poll-until-MERGED loop. Exit only at `done` (merged) or `stalled` (genuine human-gated
-  blocker).
+- Do NOT run `gh pr view --json` in a loop — a tight loop burns GitHub's 5,000/hr GraphQL rate
+  limit in minutes (120 calls/hr per worker). Use [[wait-for-github]] for any intermediate waits.
+- Do NOT write `status=done`, `pr.mergedAt`, or `pr.ciStatus="merged"` — the orchestrator's
+  Phase 4 poll loop owns merge confirmation, the done transition, and the Linear ticket update.
+  Exit at `status=merging` after arming auto-merge.
