@@ -244,11 +244,12 @@ branch — instead of `sleep 30` polling.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
-BASE_BRANCH=$(gh pr view "$pr_number" --json baseRefName --jq '.baseRefName')
+BASE_BRANCH=$(gh api "repos/${REPO}/pulls/${pr_number}" --jq '.base.ref' 2>/dev/null || echo "main")
 
 if command -v catalyst-events >/dev/null 2>&1; then
   # Reactive event-driven path. Wakes on the first actionable signal
   # (CI complete, comment, review, merge, base advance, or 5-min timeout).
+  # Two-phase compliant cadence loop — see [[wait-for-github]].
   EVENT_JSON=$(catalyst-events wait-for \
     --filter '
       (.event == "github.pr.merged" and .scope.pr == '"$pr_number"') or
@@ -265,10 +266,16 @@ if command -v catalyst-events >/dev/null 2>&1; then
     ' \
     --timeout 300 || true)
 
-  # MANDATORY authoritative re-check on every wake-up.
-  PR_STATE=$(gh pr view "$pr_number" --json state --jq '.state' 2>/dev/null || echo "OPEN")
-  CI_STATUS=$(gh pr checks "$pr_number" --json state \
-    --jq '[.[].state] | unique | join(",")' 2>/dev/null || echo "PENDING")
+  # MANDATORY authoritative REST re-check on every wake-up.
+  PR_DATA=$(gh api "repos/${REPO}/pulls/${pr_number}" \
+    --jq '{merged: .merged, state: .state, head_sha: .head.sha}' 2>/dev/null || echo '{}')
+  PR_STATE=$(echo "$PR_DATA" | jq -r 'if .merged then "MERGED" elif .state == "closed" then "CLOSED" else "OPEN" end')
+  HEAD_SHA=$(echo "$PR_DATA" | jq -r '.head_sha // ""')
+  CI_STATUS="unknown"
+  if [ -n "$HEAD_SHA" ]; then
+    CI_STATUS=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" \
+      --jq '[.check_runs[] | .conclusion // .status] | unique | join(",")' 2>/dev/null || echo "pending")
+  fi
   echo "wake: state=${PR_STATE} CI=${CI_STATUS} event=$(echo "$EVENT_JSON" | jq -r '.event // "(timeout)"')"
 else
   # Fallback when catalyst-events CLI is not installed — REST-only poll.
@@ -296,6 +303,7 @@ event-driven wake-ups. The `--timeout 300` floor prevents indefinite blocks
 when the orch-monitor daemon is down. The fallback path uses REST-only polling
 (`gh api` at 5-min intervals) — no `gh pr checks --json` or `gh pr view --json`
 in any loop. See `[[wait-for-github]]` for the full two-phase diagnostic pattern.
+The fallback path is preserved verbatim for installs without the `catalyst-events` CLI.
 
 **Step 12b: Address all review comments**
 
