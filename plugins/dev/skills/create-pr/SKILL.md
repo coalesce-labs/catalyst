@@ -271,31 +271,31 @@ if command -v catalyst-events >/dev/null 2>&1; then
     --jq '[.[].state] | unique | join(",")' 2>/dev/null || echo "PENDING")
   echo "wake: state=${PR_STATE} CI=${CI_STATUS} event=$(echo "$EVENT_JSON" | jq -r '.event // "(timeout)"')"
 else
-  # Fallback when catalyst-events CLI is not installed — sleep + poll.
-  sleep 180
-  WAITED=180
-  MAX_WAIT=300
-  while [ $WAITED -lt $MAX_WAIT ]; do
-    CI_STATUS=$(gh pr checks "$pr_number" --json state \
-      --jq '[.[].state] | unique | join(",")' 2>/dev/null || echo "PENDING")
-    COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/comments" --jq 'length')
+  # Fallback when catalyst-events CLI is not installed — REST-only poll.
+  # See [[wait-for-github]] for the full two-phase pattern.
+  COUNT=0
+  MAX=24  # 2-hour limit at 5-min intervals
+  MERGED_FLAG="false"
+  while [ "$MERGED_FLAG" != "true" ] && [ $COUNT -lt $MAX ]; do
+    sleep 300
+    COUNT=$((COUNT + 1))
+    PR_DATA=$(gh api "repos/${REPO}/pulls/${pr_number}" 2>/dev/null || echo '{"merged":false}')
+    MERGED_FLAG=$(echo "$PR_DATA" | jq -r '.merged')
+    COMMENT_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/comments" --jq 'length' 2>/dev/null || echo "0")
     REVIEW_COUNT=$(gh api "repos/${REPO}/pulls/${pr_number}/reviews" \
-      --jq '[.[] | select(.state != "APPROVED" and .state != "DISMISSED")] | length')
-    PR_STATE=$(gh pr view "$pr_number" --json state --jq '.state' 2>/dev/null || echo "OPEN")
-    echo "Poll @${WAITED}s: state=${PR_STATE} CI=${CI_STATUS} comments=${COMMENT_COUNT} reviews=${REVIEW_COUNT}"
-    [ "$PR_STATE" = "MERGED" ] && break
-    [ "$COMMENT_COUNT" -gt 0 ] || [ "$REVIEW_COUNT" -gt 0 ] && break
-    echo "$CI_STATUS" | grep -qv "PENDING\|QUEUED" && break
-    sleep 30
-    WAITED=$((WAITED + 30))
+      --jq '[.[] | select(.state != "APPROVED" and .state != "DISMISSED")] | length' 2>/dev/null || echo "0")
+    echo "REST poll @$((COUNT * 5))min: merged=${MERGED_FLAG} comments=${COMMENT_COUNT} reviews=${REVIEW_COUNT}"
+    [ "$MERGED_FLAG" = "true" ] && break
+    { [ "$COMMENT_COUNT" -gt 0 ] || [ "$REVIEW_COUNT" -gt 0 ]; } && break
   done
 fi
 ```
 
 The reactive path replaces the `sleep 180 + sleep 30` poll cadence with
 event-driven wake-ups. The `--timeout 300` floor prevents indefinite blocks
-when the orch-monitor daemon is down. The fallback path is preserved verbatim
-for installs without the `catalyst-events` CLI.
+when the orch-monitor daemon is down. The fallback path uses REST-only polling
+(`gh api` at 5-min intervals) — no `gh pr checks --json` or `gh pr view --json`
+in any loop. See `[[wait-for-github]]` for the full two-phase diagnostic pattern.
 
 **Step 12b: Address all review comments**
 
