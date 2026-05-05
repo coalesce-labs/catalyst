@@ -165,7 +165,7 @@ bootstrap() {
   fi
 
   if [[ -d "$MONITOR_DIR" ]]; then
-    if [[ ! -d "$MONITOR_DIR/node_modules" ]]; then
+    if [[ ! -d "$MONITOR_DIR/node_modules" ]] || [[ "$MONITOR_DIR/bun.lock" -nt "$MONITOR_DIR/node_modules" ]]; then
       echo "Installing orch-monitor dependencies..."
       (cd "$MONITOR_DIR" && bun install --frozen-lockfile 2>/dev/null || bun install)
     fi
