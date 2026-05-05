@@ -27,6 +27,13 @@ export interface WebhookCliConfig {
    * the server then skips creating the second tunnel. CTL-242.
    */
   linearSmeeChannel: string;
+  /**
+   * Linear user UUID for the catalyst bot. Issue events where the actor matches
+   * this ID are suppressed before reaching the event log (loop prevention). CTL-263.
+   * Read from `catalyst.monitor.linear.botUserId` in Layer 1 (project config).
+   * Empty string when not configured — no suppression.
+   */
+  linearBotUserId: string;
 }
 
 interface FileExtract {
@@ -37,6 +44,8 @@ interface FileExtract {
   linearWebhookSecretEnv: string | null;
   /** smee.io channel URL for Linear, from Layer 2 only (per-machine). CTL-242. */
   linearSmeeChannel: string | null;
+  /** Linear bot user UUID for loop prevention, from Layer 1 (project). CTL-263. */
+  linearBotUserId: string | null;
 }
 
 let warnedDeprecatedSmeeChannel = false;
@@ -63,7 +72,7 @@ function readWatchRepos(github: Record<string, unknown>): string[] {
     if (trimmed.length === 0) continue;
     if (!REPO_SHAPE.test(trimmed)) {
       console.warn(
-        `[webhook-config] Ignoring watchRepos entry "${trimmed}" — expected "owner/repo".`,
+        `[webhook-config] Ignoring watchRepos entry "${trimmed}" — expected "owner/repo".`
       );
       continue;
     }
@@ -99,9 +108,7 @@ function readGithubSection(filePath: string): FileExtract | null {
   if (github === null && linear === null) return null;
 
   const smeeChannel =
-    github !== null &&
-    typeof github.smeeChannel === "string" &&
-    github.smeeChannel.length > 0
+    github !== null && typeof github.smeeChannel === "string" && github.smeeChannel.length > 0
       ? github.smeeChannel
       : null;
   const webhookSecretEnv =
@@ -118,13 +125,22 @@ function readGithubSection(filePath: string): FileExtract | null {
       ? linear.webhookSecretEnv
       : null;
   const linearSmeeChannel =
-    linear !== null &&
-    typeof linear.smeeChannel === "string" &&
-    linear.smeeChannel.length > 0
+    linear !== null && typeof linear.smeeChannel === "string" && linear.smeeChannel.length > 0
       ? linear.smeeChannel
       : null;
+  const linearBotUserId =
+    linear !== null && typeof linear.botUserId === "string" && linear.botUserId.length > 0
+      ? linear.botUserId
+      : null;
 
-  return { smeeChannel, webhookSecretEnv, watchRepos, linearWebhookSecretEnv, linearSmeeChannel };
+  return {
+    smeeChannel,
+    webhookSecretEnv,
+    watchRepos,
+    linearWebhookSecretEnv,
+    linearSmeeChannel,
+    linearBotUserId,
+  };
 }
 
 /**
@@ -150,15 +166,14 @@ function readGithubSection(filePath: string): FileExtract | null {
  */
 export function loadWebhookConfig(
   homeConfigDir: string,
-  projectConfigPath: string,
+  projectConfigPath: string
 ): WebhookCliConfig | null {
   const projectExtract = readGithubSection(projectConfigPath);
   const homeExtract = readGithubSection(join(homeConfigDir, "config.json"));
 
   const homeChannel = homeExtract?.smeeChannel ?? null;
   const projectChannel = projectExtract?.smeeChannel ?? null;
-  const webhookSecretEnv =
-    projectExtract?.webhookSecretEnv ?? "CATALYST_WEBHOOK_SECRET";
+  const webhookSecretEnv = projectExtract?.webhookSecretEnv ?? "CATALYST_WEBHOOK_SECRET";
 
   if (projectChannel !== null && !warnedDeprecatedSmeeChannel) {
     warnedDeprecatedSmeeChannel = true;
@@ -166,19 +181,16 @@ export function loadWebhookConfig(
       "[webhook-config] Deprecated: catalyst.monitor.github.smeeChannel found in " +
         ".catalyst/config.json. The smee URL is per-machine — move it to " +
         "~/.config/catalyst/config.json. Run `setup-webhooks.sh --force` to " +
-        "migrate. Layer 1 reads will be removed in a future release.",
+        "migrate. Layer 1 reads will be removed in a future release."
     );
   }
 
   const fileChannel = homeChannel ?? projectChannel;
   const channelOverride = process.env.CATALYST_SMEE_CHANNEL;
   const finalChannel =
-    channelOverride && channelOverride.length > 0
-      ? channelOverride
-      : (fileChannel ?? "");
+    channelOverride && channelOverride.length > 0 ? channelOverride : (fileChannel ?? "");
 
-  const secret =
-    process.env[webhookSecretEnv] ?? process.env.CATALYST_SMEE_SECRET ?? "";
+  const secret = process.env[webhookSecretEnv] ?? process.env.CATALYST_SMEE_SECRET ?? "";
 
   // watchRepos is Layer 1 only — a team-default field. Reading from Layer 2
   // would let one developer's machine override the team list, which is the
@@ -188,12 +200,9 @@ export function loadWebhookConfig(
   // Linear webhook secret. Layer 1 carries the env-var name; the value lives
   // in the env var itself. Optional — empty string disables the Linear route.
   // CTL-210.
-  const linearWebhookSecretEnv =
-    projectExtract?.linearWebhookSecretEnv ?? null;
+  const linearWebhookSecretEnv = projectExtract?.linearWebhookSecretEnv ?? null;
   const linearSecret =
-    (linearWebhookSecretEnv !== null
-      ? process.env[linearWebhookSecretEnv]
-      : undefined) ??
+    (linearWebhookSecretEnv !== null ? process.env[linearWebhookSecretEnv] : undefined) ??
     process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
     "";
 
@@ -205,6 +214,9 @@ export function loadWebhookConfig(
     linearSmeeChannelOverride && linearSmeeChannelOverride.length > 0
       ? linearSmeeChannelOverride
       : (fileLinearSmeeChannel ?? "");
+
+  // Linear bot user UUID for loop prevention. Layer 1 only (project/team setting). CTL-263.
+  const linearBotUserId = projectExtract?.linearBotUserId ?? "";
 
   // Allow Linear-only configurations: if the GitHub channel/secret are missing
   // but a Linear secret is present, return a config that disables the GitHub
@@ -218,6 +230,7 @@ export function loadWebhookConfig(
       watchRepos,
       linearSecret,
       linearSmeeChannel,
+      linearBotUserId,
     };
   }
 
@@ -228,5 +241,6 @@ export function loadWebhookConfig(
     watchRepos,
     linearSecret,
     linearSmeeChannel,
+    linearBotUserId,
   };
 }
