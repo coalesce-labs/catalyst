@@ -40,6 +40,10 @@
         "stagingEnvironment": "staging",
         "skipDeployVerification": true
       }
+    },
+    "filter": {
+      "_comment": "Semantic event routing via Groq. Set GROQ_API_KEY env var to enable.",
+      "groqModel": "llama-3.1-8b-instant"
     }
   }
 }

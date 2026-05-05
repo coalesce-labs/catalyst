@@ -37,7 +37,7 @@
         "setup": [],
         "teardown": []
       },
-      "workerCommand": "/catalyst-dev:oneshot",
+      "workerCommand": "/oneshot",
       "workerModel": "opus",
       "thoughts": {
         "profile": null,
@@ -60,6 +60,9 @@
       "linear": {
         "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET"
       }
+    },
+    "filter": {
+      "groqModel": "llama-3.1-8b-instant"
     }
   }
 }
