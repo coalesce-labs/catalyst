@@ -120,10 +120,13 @@ fi
 STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
 ```
 
-**Shared comms channel (CTL-111):** if `CATALYST_COMMS_CHANNEL` is set by the orchestrator, the
-worker joins the shared channel and will post real traffic at each lifecycle boundary.
+**Shared comms channel (CTL-111 / CTL-249):** if `CATALYST_COMMS_CHANNEL` is set by the
+orchestrator, the worker joins the shared channel, posts real traffic at each lifecycle boundary,
+and reads inbound messages (directed to `$TICKET_ID`) after each phase transition.
 Best-effort — every call is wrapped so a missing `catalyst-comms` CLI never crashes the worker.
 The worker posts at **minimum 4 messages** per run: start + phase transitions + done.
+Inbound reads are driven by `comms_check` (see below) — a non-blocking poll that checks for
+`abort`, `use-event-driven`, and `reprioritize` signals from the orchestrator.
 
 ```bash
 # Resolve the catalyst-comms binary. Prefer the plugin-shipped copy so installs
@@ -145,6 +148,37 @@ comms_post() {
     --as "$TICKET_ID" --type "$type" >/dev/null 2>&1 || true
 }
 
+# Inbound comms — read messages directed to this worker at each phase boundary.
+# COMMS_LAST_READ tracks the channel file line offset so we skip historical messages.
+# Initialized after join (below) to the current end-of-file.
+CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
+COMMS_CHANNEL_FILE="${CATALYST_DIR}/comms/channels/${CATALYST_COMMS_CHANNEL:-_}.jsonl"
+COMMS_LAST_READ=0
+
+comms_check() {
+  [ -z "${CATALYST_COMMS_CHANNEL:-}" ] && return 0
+  [ -n "$COMMS_BIN" ] || return 0
+  [ -f "$COMMS_CHANNEL_FILE" ] || return 0
+  local msgs next_pos
+  # Snapshot line count BEFORE polling so messages arriving during the read
+  # window are picked up on the next call rather than silently skipped.
+  next_pos=$(wc -l < "$COMMS_CHANNEL_FILE" | tr -d ' ')
+  msgs=$("$COMMS_BIN" poll "$CATALYST_COMMS_CHANNEL" \
+    --filter-to "$TICKET_ID" --since "$COMMS_LAST_READ" 2>/dev/null || true)
+  COMMS_LAST_READ="$next_pos"
+  [ -z "$msgs" ] && return 0
+  while IFS= read -r msg; do
+    [ -z "$msg" ] && continue
+    local msg_type msg_body
+    msg_type=$(printf '%s' "$msg" | jq -r '.type // "info"' 2>/dev/null || echo "info")
+    msg_body=$(printf '%s' "$msg" | jq -r '.body // ""' 2>/dev/null || echo "")
+    echo "[comms] Inbound ($msg_type): $msg_body" >&2
+    case "$msg_body" in
+      abort*|ABORT*) echo "[comms] Abort signal — exiting" >&2; exit 1 ;;
+    esac
+  done <<< "$msgs"
+}
+
 # Once, at startup — right after orchestrator mode detection:
 if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && [ -n "$COMMS_BIN" ]; then
   "$COMMS_BIN" join "$CATALYST_COMMS_CHANNEL" \
@@ -154,6 +188,9 @@ if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && [ -n "$COMMS_BIN" ]; then
     --parent orchestrator \
     --ttl 3600 >/dev/null 2>&1 || true
   comms_post info "started oneshot for $TICKET_ID"
+  # Snapshot the channel file line count so comms_check skips pre-worker messages
+  COMMS_CHANNEL_FILE="${CATALYST_DIR}/comms/channels/${CATALYST_COMMS_CHANNEL}.jsonl"
+  [ -f "$COMMS_CHANNEL_FILE" ] && COMMS_LAST_READ=$(wc -l < "$COMMS_CHANNEL_FILE" | tr -d ' ')
 fi
 ```
 
@@ -243,6 +280,8 @@ if [ -f "$SIGNAL_FILE" ]; then
   # comfortably above the ≥2-transition floor.
   comms_post info "${OLD_STATUS} → ${NEW_STATUS}"
 fi
+# CTL-249: check for inbound orchestrator messages after each phase transition.
+comms_check
 ```
 
 **When worker creates a PR**, also update global state with PR details. Record
@@ -999,6 +1038,12 @@ error, context exhaustion):
   missing access, ambiguous spec, 3+ repeated CI failures, `status="stalled"`), `done`
   fires once at terminal success via the `done` subcommand. The existing `comms_post`
   helper in this skill already routes correctly — these rules govern *when* you call it.
+- **Worker inbound reads (CTL-249)** — `comms_check` is called after each phase transition via
+  the signal-file update block. It polls for messages directed to `$TICKET_ID` (skipping
+  pre-worker history via `$COMMS_LAST_READ`), logs all inbound messages, and exits on `abort`.
+  `catalyst-comms send` already emits `comms.message.posted` events to the global event log
+  (CTL-210), so Option B event emission is complete — extending `catalyst-events wait-for`
+  to include `comms.message` filters is tracked in CTL-247 (wait-for-github skill).
 
 **IMPORTANT: Document Storage Rules**
 

@@ -17,6 +17,62 @@ existing PR branch — not to re-do the ticket.
 
 ${ISSUES}
 
+## Comms setup
+
+If the orchestrator set `CATALYST_COMMS_CHANNEL`, join it and check for inbound messages at each
+step. This is best-effort — a missing binary never crashes the worker.
+
+```bash
+COMMS_BIN="${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"
+[ -x "$COMMS_BIN" ] || COMMS_BIN="$(command -v catalyst-comms 2>/dev/null || true)"
+[ -x "$COMMS_BIN" ] || COMMS_BIN=""
+
+comms_post() {
+  local type="$1" body="$2"
+  [ -z "${CATALYST_COMMS_CHANNEL:-}" ] && return 0
+  [ -n "$COMMS_BIN" ] || return 0
+  "$COMMS_BIN" send "$CATALYST_COMMS_CHANNEL" "$body" \
+    --as "${TICKET_ID}" --type "$type" >/dev/null 2>&1 || true
+}
+
+# Inbound comms — check for orchestrator messages at each checkpoint.
+CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
+COMMS_CHANNEL_FILE="${CATALYST_DIR}/comms/channels/${CATALYST_COMMS_CHANNEL:-_}.jsonl"
+COMMS_LAST_READ=0
+
+comms_check() {
+  [ -z "${CATALYST_COMMS_CHANNEL:-}" ] && return 0
+  [ -n "$COMMS_BIN" ] || return 0
+  [ -f "$COMMS_CHANNEL_FILE" ] || return 0
+  local msgs next_pos
+  next_pos=$(wc -l < "$COMMS_CHANNEL_FILE" | tr -d ' ')
+  msgs=$("$COMMS_BIN" poll "$CATALYST_COMMS_CHANNEL" \
+    --filter-to "${TICKET_ID}" --since "$COMMS_LAST_READ" 2>/dev/null || true)
+  COMMS_LAST_READ="$next_pos"
+  [ -z "$msgs" ] && return 0
+  while IFS= read -r msg; do
+    [ -z "$msg" ] && continue
+    local msg_type msg_body
+    msg_type=$(printf '%s' "$msg" | jq -r '.type // "info"' 2>/dev/null || echo "info")
+    msg_body=$(printf '%s' "$msg" | jq -r '.body // ""' 2>/dev/null || echo "")
+    echo "[comms] Inbound ($msg_type): $msg_body" >&2
+    case "$msg_body" in
+      abort*|ABORT*) echo "[comms] Abort signal — exiting" >&2; exit 1 ;;
+    esac
+  done <<< "$msgs"
+}
+
+if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && [ -n "$COMMS_BIN" ]; then
+  "$COMMS_BIN" join "$CATALYST_COMMS_CHANNEL" \
+    --as "${TICKET_ID}" --capabilities "fixup: ${TICKET_ID}" \
+    --orch "${CATALYST_ORCHESTRATOR_ID:-}" --parent orchestrator \
+    --ttl 3600 >/dev/null 2>&1 || true
+  comms_post info "fixup worker started for ${TICKET_ID}"
+  COMMS_CHANNEL_FILE="${CATALYST_DIR}/comms/channels/${CATALYST_COMMS_CHANNEL}.jsonl"
+  [ -f "$COMMS_CHANNEL_FILE" ] && COMMS_LAST_READ=$(wc -l < "$COMMS_CHANNEL_FILE" | tr -d ' ')
+fi
+```
+
 ## Your contract
 
 1. **Confirm the PR is OPEN** — `gh pr view ${PR_NUMBER} --json state` must return `OPEN`. If it's
@@ -57,9 +113,13 @@ ${ISSUES}
    `done` transition. Do NOT poll `gh pr view --json` — that burns GraphQL rate limits.
 
    If you need to wait for CI to pass before resolving review threads, use the
-   [[wait-for-github]] skill pattern instead of a bare poll loop.
+   [[wait-for-github]] skill pattern instead of a bare poll loop. Call `comms_check` before
+   exiting to flush any final inbound orchestrator messages.
 
    ```bash
+   # Check for inbound messages before exiting
+   comms_check
+
    # Re-arm if not already armed (idempotent)
    gh pr merge ${PR_NUMBER} --squash --auto --delete-branch 2>/dev/null || true
 
