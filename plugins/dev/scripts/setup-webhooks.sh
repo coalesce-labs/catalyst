@@ -31,9 +31,27 @@ LINEAR_SECRET_ENV=""
 LINEAR_REGISTER=0
 LINEAR_DEREGISTER=0
 LINEAR_WEBHOOK_URL=""
+REGISTER_GITHUB_HOOKS=0
 REPO_SHAPE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 ENV_VAR_SHAPE='^[A-Z_][A-Z0-9_]*$'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# GitHub events the orch-monitor daemon subscribes to at startup. The bash
+# verifier mirrors this list so hooks registered here match what the daemon
+# would otherwise create on first observation. Source of truth:
+# plugins/dev/scripts/orch-monitor/lib/webhook-subscriber.ts (DEFAULT_WEBHOOK_EVENTS).
+WEBHOOK_EVENTS=(
+  pull_request
+  pull_request_review
+  pull_request_review_thread
+  pull_request_review_comment
+  check_suite
+  status
+  push
+  issue_comment
+  deployment
+  deployment_status
+)
 
 usage() {
   cat <<EOF
@@ -69,6 +87,12 @@ Options:
                              events. When omitted with --linear-register, a
                              new smee.io channel is auto-provisioned and the
                              URL is written to ${HOME_CONFIG_PATH}. CTL-242.
+  --register-github-hooks    For each repo in catalyst.monitor.github.watchRepos,
+                             POST a webhook to the GitHub API if one pointing at
+                             the smee channel does not already exist. Off by
+                             default — without this flag the script only reports
+                             registration status. Requires \`gh\` to be installed
+                             and authenticated with admin access to each repo.
   -h|--help                  Show this message
 
 Environment:
@@ -108,6 +132,7 @@ while [[ $# -gt 0 ]]; do
       LINEAR_WEBHOOK_URL="$2"
       shift 2
       ;;
+    --register-github-hooks) REGISTER_GITHUB_HOOKS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -259,6 +284,61 @@ write_linear_secret_env() {
     .catalyst.monitor.linear.webhookSecretEnv = $env_name
   ' "$PROJECT_CONFIG_PATH" > "$tmp"
   mv "$tmp" "$PROJECT_CONFIG_PATH"
+}
+
+# Verify (and optionally register) a GitHub webhook on `repo` that delivers to
+# `channel`. Idempotent: if a hook with config.url == channel already exists,
+# the function reports it and exits without POSTing. CTL-254.
+#
+# Arguments:
+#   $1 — owner/repo
+#   $2 — smee channel URL
+#   $3 — HMAC secret (only consulted on POST; pass empty string to register
+#        without one, e.g. when called for a status-only check)
+#
+# Globals:
+#   REGISTER_GITHUB_HOOKS — 1 to POST when missing, 0 to only warn
+#   WEBHOOK_EVENTS        — array of event names to subscribe (POST path only)
+verify_github_hook() {
+  local repo="$1" channel="$2" secret="$3"
+  local hooks_json existing
+  if ! hooks_json=$(gh api "repos/${repo}/hooks" 2>&1); then
+    echo "  ⚠ ${repo}: could not list hooks (gh not authenticated, or no admin access)"
+    echo "    ${hooks_json}" | sed 's/^/      /'
+    return 0
+  fi
+  existing=$(jq -r --arg ch "$channel" \
+    '[.[] | select(.config.url == $ch)] | length' <<<"$hooks_json" 2>/dev/null || echo "0")
+  if [[ "$existing" != "0" ]]; then
+    echo "  ✓ ${repo}: webhook already registered (${channel})"
+    return 0
+  fi
+  if [[ $REGISTER_GITHUB_HOOKS -eq 0 ]]; then
+    echo "  ⚠ ${repo}: no webhook registered for ${channel}"
+    echo "    Register with: $(basename "$0") --register-github-hooks"
+    return 0
+  fi
+  # POST a new hook. Mirror the events list used by the runtime daemon.
+  local args=(api -X POST "repos/${repo}/hooks"
+    -f name=web
+    -F active=true
+    -f "config[url]=${channel}"
+    -f "config[content_type]=json")
+  if [[ -n "$secret" ]]; then
+    args+=(-f "config[secret]=${secret}")
+  fi
+  local evt
+  for evt in "${WEBHOOK_EVENTS[@]}"; do
+    args+=(-f "events[]=${evt}")
+  done
+  local err_file; err_file=$(mktemp)
+  if gh "${args[@]}" >/dev/null 2>"$err_file"; then
+    echo "  ✓ ${repo}: webhook registered (${channel})"
+  else
+    echo "  ✗ ${repo}: failed to register webhook"
+    sed 's/^/      /' "$err_file" 2>/dev/null || true
+  fi
+  rm -f "$err_file"
 }
 
 if [[ $SKIP_GITHUB_SETUP -eq 1 ]]; then
@@ -415,6 +495,31 @@ elif [[ $LINEAR_DEREGISTER -eq 1 ]]; then
     --deregister --config "$PROJECT_CONFIG_PATH"
 fi
 
+# ─── 6d. Verify GitHub webhook registration for each watched repo ───────────
+# For each repo in catalyst.monitor.github.watchRepos, call the GitHub Hooks
+# API to check whether a hook pointing at $channel already exists. Reports
+# the status; with --register-github-hooks, registers any missing hook via
+# POST. Skipped silently when watchRepos is empty.
+mapfile -t WATCH_REPOS < <(jq -r '.catalyst.monitor.github.watchRepos[]?' \
+  "$PROJECT_CONFIG_PATH" 2>/dev/null || true)
+
+if [[ ${#WATCH_REPOS[@]} -gt 0 ]]; then
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "⚠ Skipping GitHub webhook verification — \`gh\` is not installed."
+    echo "  Install GitHub CLI to verify or auto-register webhooks: https://cli.github.com"
+  else
+    echo
+    echo "Verifying GitHub webhook registration for ${#WATCH_REPOS[@]} repo(s)…"
+    secret_value=""
+    if [[ -f "$SECRET_PATH" ]]; then
+      secret_value=$(cat "$SECRET_PATH")
+    fi
+    for repo in "${WATCH_REPOS[@]}"; do
+      verify_github_hook "$repo" "$channel" "$secret_value"
+    done
+  fi
+fi
+
 # ─── 7. Print next steps ───────────────────────────────────────────────────
 cat <<EOF
 
@@ -426,5 +531,8 @@ Export the secret in your shell (and add to your ~/.zshrc / ~/.bashrc):
 
 Then restart orch-monitor — it will tunnel deliveries from $channel to
 http://localhost:7400/api/webhook and auto-subscribe each repo it observes.
+
+If any repo above shows ⚠, register its webhook with:
+  $(basename "$0") --register-github-hooks
 
 EOF

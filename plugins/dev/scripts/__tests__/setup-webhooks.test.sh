@@ -24,12 +24,17 @@ trap 'rm -rf "$SCRATCH"' EXIT
 # Per-test fake $HOME + project tree. Build a stub-bin dir that hard-fails
 # `curl` and `openssl` so any --add-repo-only invocation that accidentally
 # falls through to channel/secret provisioning is caught.
+#
+# Also stubs `gh`. The stub reads scripted responses from $GH_STUB_DIR for
+# tests that exercise webhook verification (CTL-254). When $GH_STUB_DIR is
+# unset the stub hard-fails (loud signal that gh was called outside intent).
 make_test_env() {
   local name="$1"
   local dir="${SCRATCH}/${name}"
   mkdir -p "${dir}/home/.config/catalyst"
   mkdir -p "${dir}/project/.catalyst"
   mkdir -p "${dir}/stubbin"
+  mkdir -p "${dir}/gh_stub"
   cat > "${dir}/stubbin/curl" <<'EOF'
 #!/usr/bin/env bash
 echo "FAIL: curl invoked during --add-repo-only mode" >&2
@@ -42,7 +47,33 @@ EOF
 echo "FAIL: openssl invoked during --add-repo-only mode" >&2
 exit 87
 EOF
-  chmod +x "${dir}/stubbin/curl" "${dir}/stubbin/openssl"
+  cat > "${dir}/stubbin/gh" <<'EOF'
+#!/usr/bin/env bash
+# Scriptable gh stub for setup-webhooks tests.
+#   GH_STUB_DIR/list-response.json — body returned for `gh api repos/X/hooks` (GET)
+#   GH_STUB_DIR/post-response.json — body returned for `gh api -X POST repos/X/hooks`
+#   GH_STUB_DIR/list-exit         — exit code for GET (default 0)
+#   GH_STUB_DIR/post-exit         — exit code for POST (default 0)
+#   GH_STUB_DIR/calls.log         — append-only call log
+if [[ -z "${GH_STUB_DIR:-}" ]]; then
+  echo "FAIL: gh invoked but GH_STUB_DIR is unset (test setup error)" >&2
+  exit 88
+fi
+echo "$*" >> "${GH_STUB_DIR}/calls.log"
+# `gh api -X POST repos/X/hooks ...`
+if [[ "$1" == "api" && "$2" == "-X" && "$3" == "POST" && "$4" == repos/*/hooks ]]; then
+  cat "${GH_STUB_DIR}/post-response.json" 2>/dev/null || echo '{"id":1}'
+  exit "$(cat "${GH_STUB_DIR}/post-exit" 2>/dev/null || echo 0)"
+fi
+# `gh api repos/X/hooks` (GET)
+if [[ "$1" == "api" && "$2" == repos/*/hooks ]]; then
+  cat "${GH_STUB_DIR}/list-response.json" 2>/dev/null || echo "[]"
+  exit "$(cat "${GH_STUB_DIR}/list-exit" 2>/dev/null || echo 0)"
+fi
+echo "stub: unhandled gh call: $*" >&2
+exit 1
+EOF
+  chmod +x "${dir}/stubbin/curl" "${dir}/stubbin/openssl" "${dir}/stubbin/gh"
   echo "$dir"
 }
 
@@ -439,6 +470,197 @@ test_linear_deregister_only_skips_github_setup() {
   fi
 }
 
+# ─── Tests 19-25 — GitHub webhook verification + --register-github-hooks (CTL-254)
+#
+# `run_setup_full` exercises the normal-setup path while keeping the test
+# isolated from the network: $CATALYST_SMEE_CHANNEL is set so curl is never
+# called, and the secret file is pre-seeded so openssl is never called.
+# `gh` is the only allowed external command, scripted via $GH_STUB_DIR.
+run_setup_full() {
+  local env_dir="$1"; shift
+  ( cd "${env_dir}/project" && \
+    HOME="${env_dir}/home" \
+    XDG_CONFIG_HOME="${env_dir}/home/.config" \
+    PATH="${env_dir}/stubbin:${PATH}" \
+    GH_STUB_DIR="${env_dir}/gh_stub" \
+    CATALYST_SMEE_CHANNEL="https://smee.io/test-channel" \
+    bash "$SETUP" "$@" )
+}
+
+# Pre-seed a secret file so the script's openssl-rand path is skipped.
+seed_secret() {
+  local env="$1"
+  echo "deadbeef" > "${env}/home/.config/catalyst/webhook-secret"
+  chmod 600 "${env}/home/.config/catalyst/webhook-secret"
+}
+
+# Pre-populate watchRepos so the verifier has something to iterate.
+seed_watch_repos() {
+  local env="$1"; shift
+  local repos_json; repos_json=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+  cat > "${env}/project/.catalyst/config.json" <<EOF
+{ "catalyst": { "monitor": { "github": { "watchRepos": ${repos_json} } } } }
+EOF
+}
+
+# ─── Test 19 — verifier reports already-registered hook ────────────────────
+test_verifier_reports_existing() {
+  local env; env=$(make_test_env t19)
+  seed_secret "$env"
+  seed_watch_repos "$env" "acme/api"
+  cat > "${env}/gh_stub/list-response.json" <<'EOF'
+[{"id":42,"config":{"url":"https://smee.io/test-channel","content_type":"json"}}]
+EOF
+  if ! run_setup_full "$env" > "${SCRATCH}/t19.out" 2>&1; then
+    echo "expected setup to succeed" >&2
+    cat "${SCRATCH}/t19.out" >&2
+    return 1
+  fi
+  if ! grep -q "already registered" "${SCRATCH}/t19.out"; then
+    echo "expected output to mention 'already registered'" >&2
+    cat "${SCRATCH}/t19.out" >&2
+    return 1
+  fi
+  if grep -q "^api -X POST" "${env}/gh_stub/calls.log"; then
+    echo "expected no POST to be issued when hook already exists" >&2
+    cat "${env}/gh_stub/calls.log" >&2
+    return 1
+  fi
+}
+
+# ─── Test 20 — verifier warns when hook missing and flag absent ────────────
+test_verifier_warns_missing_without_flag() {
+  local env; env=$(make_test_env t20)
+  seed_secret "$env"
+  seed_watch_repos "$env" "acme/api"
+  echo "[]" > "${env}/gh_stub/list-response.json"
+  if ! run_setup_full "$env" > "${SCRATCH}/t20.out" 2>&1; then
+    echo "expected setup to succeed (a missing hook is a warning, not an error)" >&2
+    cat "${SCRATCH}/t20.out" >&2
+    return 1
+  fi
+  if ! grep -q "no webhook registered" "${SCRATCH}/t20.out"; then
+    echo "expected output to mention 'no webhook registered'" >&2
+    cat "${SCRATCH}/t20.out" >&2
+    return 1
+  fi
+  if grep -q "^api -X POST" "${env}/gh_stub/calls.log"; then
+    echo "expected no POST without --register-github-hooks" >&2
+    cat "${env}/gh_stub/calls.log" >&2
+    return 1
+  fi
+}
+
+# ─── Test 21 — --register-github-hooks creates the missing hook ────────────
+test_registers_when_flag_set() {
+  local env; env=$(make_test_env t21)
+  seed_secret "$env"
+  seed_watch_repos "$env" "acme/api"
+  echo "[]" > "${env}/gh_stub/list-response.json"
+  echo '{"id":99}' > "${env}/gh_stub/post-response.json"
+  if ! run_setup_full "$env" --register-github-hooks > "${SCRATCH}/t21.out" 2>&1; then
+    echo "expected setup to succeed" >&2
+    cat "${SCRATCH}/t21.out" >&2
+    return 1
+  fi
+  if ! grep -q "webhook registered" "${SCRATCH}/t21.out"; then
+    echo "expected output to mention 'webhook registered'" >&2
+    cat "${SCRATCH}/t21.out" >&2
+    return 1
+  fi
+  if ! grep -q "^api -X POST repos/acme/api/hooks" "${env}/gh_stub/calls.log"; then
+    echo "expected POST to repos/acme/api/hooks" >&2
+    cat "${env}/gh_stub/calls.log" >&2
+    return 1
+  fi
+  if ! grep -q "config\[url\]=https://smee.io/test-channel" "${env}/gh_stub/calls.log"; then
+    echo "expected POST to include config[url]=<smee channel>" >&2
+    cat "${env}/gh_stub/calls.log" >&2
+    return 1
+  fi
+  if ! grep -q "events\[\]=pull_request" "${env}/gh_stub/calls.log"; then
+    echo "expected POST to include events[]=pull_request" >&2
+    cat "${env}/gh_stub/calls.log" >&2
+    return 1
+  fi
+}
+
+# ─── Test 22 — --register-github-hooks is idempotent (no POST if hook exists)
+test_register_idempotent() {
+  local env; env=$(make_test_env t22)
+  seed_secret "$env"
+  seed_watch_repos "$env" "acme/api"
+  cat > "${env}/gh_stub/list-response.json" <<'EOF'
+[{"id":42,"config":{"url":"https://smee.io/test-channel"}}]
+EOF
+  if ! run_setup_full "$env" --register-github-hooks > "${SCRATCH}/t22.out" 2>&1; then
+    echo "expected setup to succeed" >&2
+    cat "${SCRATCH}/t22.out" >&2
+    return 1
+  fi
+  if grep -q "^api -X POST" "${env}/gh_stub/calls.log"; then
+    echo "expected no POST when hook already registered (idempotent)" >&2
+    cat "${env}/gh_stub/calls.log" >&2
+    return 1
+  fi
+}
+
+# ─── Test 23 — --add-repo only mode does NOT call gh ───────────────────────
+# In this mode the script must not touch the network at all (CTL-216 contract).
+# Our gh stub fails loudly when invoked without GH_STUB_DIR set; we point PATH
+# at the stubbin (so `gh` resolves to it) but leave GH_STUB_DIR unset.
+test_add_repo_only_no_gh_calls() {
+  local env; env=$(make_test_env t23)
+  if ! run_setup "$env" --add-repo a/b > "${SCRATCH}/t23.out" 2>&1; then
+    echo "expected --add-repo only mode to succeed without invoking gh" >&2
+    cat "${SCRATCH}/t23.out" >&2
+    return 1
+  fi
+  if grep -q "FAIL: gh invoked" "${SCRATCH}/t23.out"; then
+    echo "--add-repo only mode unexpectedly invoked gh" >&2
+    cat "${SCRATCH}/t23.out" >&2
+    return 1
+  fi
+}
+
+# ─── Tests 24-25 — config templates carry the canonical monitor block (CTL-254)
+test_example_template_has_monitor_block() {
+  local file="${REPO_ROOT}/.claude/config.example.json"
+  local secret_env watch_repos linear_env comment
+  secret_env=$(jq -r '.catalyst.monitor.github.webhookSecretEnv' "$file")
+  watch_repos=$(jq -c '.catalyst.monitor.github.watchRepos' "$file")
+  linear_env=$(jq -r '.catalyst.monitor.linear.webhookSecretEnv' "$file")
+  comment=$(jq -r '.catalyst.monitor."$comment" // ""' "$file")
+  expect_eq "example.json github.webhookSecretEnv" "CATALYST_WEBHOOK_SECRET" "$secret_env" || return 1
+  expect_eq "example.json linear.webhookSecretEnv" "CATALYST_LINEAR_WEBHOOK_SECRET" "$linear_env" || return 1
+  if [[ "$watch_repos" == "null" ]]; then
+    echo "example.json watchRepos must be present" >&2
+    return 1
+  fi
+  if [[ -z "$comment" ]] || ! echo "$comment" | grep -q "Layer 2"; then
+    echo "example.json must have a \$comment mentioning Layer 2 for smeeChannel" >&2
+    echo "got: $comment" >&2
+    return 1
+  fi
+}
+
+test_template_has_monitor_block() {
+  local file="${REPO_ROOT}/.claude/config.template.json"
+  local secret_env watch_repos linear_env comment
+  secret_env=$(jq -r '.catalyst.monitor.github.webhookSecretEnv' "$file")
+  watch_repos=$(jq -c '.catalyst.monitor.github.watchRepos' "$file")
+  linear_env=$(jq -r '.catalyst.monitor.linear.webhookSecretEnv' "$file")
+  comment=$(jq -r '.catalyst.monitor."$comment" // ""' "$file")
+  expect_eq "template.json github.webhookSecretEnv" "CATALYST_WEBHOOK_SECRET" "$secret_env" || return 1
+  expect_eq "template.json linear.webhookSecretEnv" "CATALYST_LINEAR_WEBHOOK_SECRET" "$linear_env" || return 1
+  expect_eq "template.json watchRepos shape" "[]" "$watch_repos" || return 1
+  if [[ -z "$comment" ]] || ! echo "$comment" | grep -q "Layer 2"; then
+    echo "template.json must have a \$comment mentioning Layer 2 for smeeChannel" >&2
+    echo "got: $comment" >&2
+    return 1
+  fi
+}
+
 # ─── Run all ──────────────────────────────────────────────────────────────
 echo "Running setup-webhooks --add-repo tests…"
 run "single add bootstraps watchRepos" test_single_add
@@ -459,6 +681,13 @@ run "--linear-register only mode skips GitHub setup" test_linear_register_only_s
 run "combined --add-repo + --linear-register" test_combined_add_repo_and_linear_register
 run "--linear-register/-deregister mutex" test_linear_register_deregister_mutex
 run "--linear-deregister only-mode skips GitHub setup" test_linear_deregister_only_skips_github_setup
+run "verifier reports already-registered hook" test_verifier_reports_existing
+run "verifier warns missing hook (no flag)" test_verifier_warns_missing_without_flag
+run "--register-github-hooks creates missing hook" test_registers_when_flag_set
+run "--register-github-hooks is idempotent" test_register_idempotent
+run "no gh calls in --add-repo only mode" test_add_repo_only_no_gh_calls
+run "config.example.json has monitor block" test_example_template_has_monitor_block
+run "config.template.json has monitor block" test_template_has_monitor_block
 
 echo
 echo "Passed: $PASSES, Failed: $FAILURES"
