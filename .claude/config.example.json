@@ -60,6 +60,16 @@
       },
       "verifyBeforeMerge": true,
       "allowSelfReportedCompletion": false
+    },
+    "monitor": {
+      "$comment": "smeeChannel lives in Layer 2 (~/.config/catalyst/config.json) — written by setup-webhooks.sh, never committed.",
+      "github": {
+        "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET",
+        "watchRepos": ["acme-corp/api"]
+      },
+      "linear": {
+        "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET"
+      }
     }
   }
 }
