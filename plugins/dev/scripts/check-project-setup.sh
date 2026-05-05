@@ -13,6 +13,10 @@ NC='\033[0m'
 errors=()
 warnings=()
 
+# Cross-project Layer 2 home config (smeeChannel + per-project secrets files live here)
+CATALYST_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/catalyst"
+HOME_CONFIG_PATH="$CATALYST_CONFIG/config.json"
+
 # 0. Resolve config path (.catalyst/ preferred, .claude/ deprecated fallback)
 CONFIG_PATH=""
 if [[ -f ".catalyst/config.json" ]]; then
@@ -82,6 +86,23 @@ if [[ -d "thoughts" ]] && [[ ! -d "thoughts/.git" ]] && [[ ! -L "thoughts" ]]; t
 	fi
 fi
 
+# 2b. Webhook pipeline (smee binary + smeeChannel — checked independently of daemon state)
+if ! command -v smee &>/dev/null; then
+	warnings+=("smee binary not on PATH — webhook tunnel cannot start")
+	warnings+=("  Install: npm install -g smee-client")
+fi
+
+if [[ -f "$HOME_CONFIG_PATH" ]]; then
+	SMEE_CHANNEL=$(jq -r '.catalyst.monitor.github.smeeChannel // empty' "$HOME_CONFIG_PATH" 2>/dev/null)
+	if [[ -z $SMEE_CHANNEL ]]; then
+		warnings+=("Missing catalyst.monitor.github.smeeChannel in $HOME_CONFIG_PATH — webhook tunnel won't start")
+		warnings+=("  Run: bash plugins/dev/scripts/setup-webhooks.sh")
+	fi
+else
+	warnings+=("Cross-project Layer 2 config missing: $HOME_CONFIG_PATH — webhook tunnel not configured")
+	warnings+=("  Run: bash plugins/dev/scripts/setup-webhooks.sh")
+fi
+
 # 3. Check CLAUDE.md has Catalyst snippet
 if [[ -f "CLAUDE.md" ]]; then
 	if ! grep -q "Catalyst Development Workflow" CLAUDE.md 2>/dev/null; then
@@ -132,6 +153,18 @@ if [[ -n $CONFIG_PATH ]]; then
 		STATE_IDS=$(jq -r '.catalyst.linear.stateIds // empty' "$CONFIG_PATH" 2>/dev/null)
 		if [[ -z $STATE_IDS || $STATE_IDS == "null" ]]; then
 			warnings+=("Missing catalyst.linear.stateIds — run: plugins/dev/scripts/resolve-linear-ids.sh")
+		fi
+	fi
+
+	# Check Linear webhook registration (CTL-253) — gates whether Linear events reach the event log
+	if [[ -n $PROJECT_KEY ]]; then
+		SECRETS_FILE="$CATALYST_CONFIG/config-${PROJECT_KEY}.json"
+		if [[ -f $SECRETS_FILE ]]; then
+			LINEAR_WEBHOOK_ID=$(jq -r '.catalyst.monitor.linear.webhookId // empty' "$SECRETS_FILE" 2>/dev/null)
+			if [[ -z $LINEAR_WEBHOOK_ID ]]; then
+				warnings+=("Missing catalyst.monitor.linear.webhookId in $SECRETS_FILE — Linear events won't reach the event log")
+				warnings+=("  Register: bash plugins/dev/scripts/setup-webhooks.sh --linear-register")
+			fi
 		fi
 	fi
 

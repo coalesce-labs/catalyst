@@ -65,6 +65,7 @@ OPT_TOOLS=(
     "sentry-cli:Sentry CLI"
     "bun:Bun runtime"
     "direnv:direnv"
+    "smee:smee-client (webhook tunnel)"
 )
 
 for spec in "${OPT_TOOLS[@]}"; do
@@ -255,6 +256,34 @@ else
     warn "Can't check secrets — no projectKey found"
 fi
 
+# ─── 6b. Webhook Pipeline ──────────────────────────────────────────────────
+
+header "Webhook Pipeline"
+
+HOME_CONFIG_PATH="$CATALYST_CONFIG/config.json"
+if [[ -f "$HOME_CONFIG_PATH" ]]; then
+    smee_channel=$(jq -r '.catalyst.monitor.github.smeeChannel // empty' "$HOME_CONFIG_PATH" 2>/dev/null)
+    if [[ -n "$smee_channel" ]]; then
+        pass "smeeChannel configured ($smee_channel)"
+    else
+        warn "Missing catalyst.monitor.github.smeeChannel in $HOME_CONFIG_PATH — webhook tunnel won't start"
+        info "Run: bash plugins/dev/scripts/setup-webhooks.sh"
+    fi
+else
+    warn "Cross-project Layer 2 config missing: $HOME_CONFIG_PATH — webhook tunnel not configured"
+    info "Run: bash plugins/dev/scripts/setup-webhooks.sh"
+fi
+
+if [[ -n "${PROJECT_KEY:-}" && -f "${SECRETS_FILE:-}" ]]; then
+    linear_webhook_id=$(jq -r '.catalyst.monitor.linear.webhookId // empty' "$SECRETS_FILE" 2>/dev/null)
+    if [[ -n "$linear_webhook_id" ]]; then
+        pass "Linear webhook registered (id: ${linear_webhook_id:0:8}…)"
+    else
+        warn "Linear webhook not registered — Linear events won't reach the event log"
+        info "Register: bash plugins/dev/scripts/setup-webhooks.sh --linear-register"
+    fi
+fi
+
 # ─── 7. OTel Observability Stack (optional) ────────────────────────────────
 
 header "Observability Stack (optional)"
@@ -366,7 +395,7 @@ if [[ -n "$LAUNCHER" ]] && command -v jq &>/dev/null; then
         if [[ "$MONITOR_RUNNING" == "true" ]]; then
             pass "Monitor running on :$MONITOR_PORT (v$MONITOR_RV)"
         else
-            info "Monitor not running on :$MONITOR_PORT"
+            warn "Monitor not running on :$MONITOR_PORT — catalyst-events wait-for falls back to 600s polling timeout"
             info "Start with: bash $LAUNCHER start"
         fi
         if [[ "$MONITOR_STALE" == "true" ]]; then
@@ -375,13 +404,13 @@ if [[ -n "$LAUNCHER" ]] && command -v jq &>/dev/null; then
     elif (echo >/dev/tcp/localhost/"$MONITOR_PORT") 2>/dev/null; then
         pass "Monitor running on :$MONITOR_PORT"
     else
-        info "Monitor not running on :$MONITOR_PORT"
+        warn "Monitor not running on :$MONITOR_PORT — catalyst-events wait-for falls back to 600s polling timeout"
         info "Start with: bash $LAUNCHER start"
     fi
 elif (echo >/dev/tcp/localhost/"$MONITOR_PORT") 2>/dev/null; then
     pass "Monitor running on :$MONITOR_PORT"
 else
-    info "Monitor not running on :$MONITOR_PORT"
+    warn "Monitor not running on :$MONITOR_PORT — catalyst-events wait-for falls back to 600s polling timeout"
     if [[ -n "$LAUNCHER" ]]; then
         info "Start with: bash $LAUNCHER start"
     else
