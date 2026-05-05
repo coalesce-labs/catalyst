@@ -162,9 +162,12 @@ Never use these in any skill. They exhaust the GraphQL budget.
 
 ## Known filter pitfalls
 
+See [[event-schema]] for authoritative field names per event type. Common mistakes:
+
 | Field | Problem | Fix |
 |---|---|---|
-| `.scope.pr` | Null on GitHub webhook events until CTL-234 ships | Also check `.detail.number` or `.detail.pull_request.number` |
+| `.scope.pr` | **Absent** on `github.check_suite.*` and `github.workflow_run.*` | Use `(.detail.prNumbers // [] \| contains([N]))` instead |
+| `.scope.pr` | **Absent** on `github.push` | Use `.scope.ref == "refs/heads/branch-name"` |
 | `.scope.orchestrator` | Never set on GitHub webhook events | Do not filter GitHub events by orchestrator |
 | `.detail.conclusion` | Only on `check_run.completed`, not `check_suite.completed` | Use `.detail.status == "completed"` for suite events |
 | `.detail.state` on reviews | Casing varies (`APPROVED` vs `approved`) | Pipe through `\| ascii_downcase` before comparing |
@@ -178,9 +181,9 @@ catalyst-events wait-for \
   --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
   --timeout 180   # Phase 1; extend to 7200 after diagnostics
 
-# CI suite completed
+# CI suite completed — note: .scope.pr absent, use detail.prNumbers (see [[event-schema]])
 catalyst-events wait-for \
-  --filter ".event == \"github.check_suite.completed\" and .scope.pr == ${PR_NUMBER}" \
+  --filter ".event == \"github.check_suite.completed\" and (.detail.prNumbers // [] | contains([${PR_NUMBER}]))" \
   --timeout 180
 
 # Review submitted
