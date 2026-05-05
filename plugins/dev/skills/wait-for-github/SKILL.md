@@ -178,9 +178,9 @@ catalyst-events wait-for \
   --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
   --timeout 180   # Phase 1; extend to 7200 after diagnostics
 
-# CI suite completed
+# CI suite completed — note: check_suite has no .scope.pr; use .detail.prNumbers
 catalyst-events wait-for \
-  --filter ".event == \"github.check_suite.completed\" and .scope.pr == ${PR_NUMBER}" \
+  --filter ".event == \"github.check_suite.completed\" and (.detail.prNumbers // [] | index(${PR_NUMBER}) != null)" \
   --timeout 180
 
 # Review submitted
