@@ -60,3 +60,14 @@ if [[ -x "$HOME/.claude/scripts/trust-workspace.sh" ]]; then
 	echo "Running: ~/.claude/scripts/trust-workspace.sh \"${REPO_ROOT}\""
 	"$HOME/.claude/scripts/trust-workspace.sh" "${REPO_ROOT}"
 fi
+
+HOOKS_SRC="${SCRIPT_DIR}/hooks"
+HOOKS_DST="${REPO_ROOT}/.git/hooks"
+if [[ -d "$HOOKS_SRC" && -d "$HOOKS_DST" ]]; then
+	echo "Installing git hooks from scripts/hooks/"
+	for hook_file in "$HOOKS_SRC"/*; do
+		hook_name="$(basename "$hook_file")"
+		install -m 755 "$hook_file" "${HOOKS_DST}/${hook_name}"
+		echo "  Installed: $hook_name"
+	done
+fi
