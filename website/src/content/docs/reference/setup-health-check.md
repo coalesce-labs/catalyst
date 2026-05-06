@@ -34,6 +34,31 @@ bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/check-setup.sh
 
 ## What It Checks
 
+### Catalyst CLI Install
+
+The script checks that `~/.catalyst/bin/` exists and that all symlinks inside it resolve to their
+targets. The following CLIs are installed as symlinks:
+
+| CLI | Purpose |
+|-----|---------|
+| `catalyst-comms` | Agent coordination channels |
+| `catalyst-session` | Session lifecycle tracking |
+| `catalyst-state` | Global orchestrator state |
+| `catalyst-db` | SQLite database operations |
+| `catalyst-monitor` | orch-monitor start/stop/status |
+| `catalyst-thoughts` | HumanLayer thoughts shortcuts |
+| `catalyst-claude` | Claude Code wrapper with context injection |
+
+If `~/.catalyst/bin` is not on your `PATH`, the check prints the one line to add to your shell
+profile:
+
+```bash
+export PATH="$HOME/.catalyst/bin:$PATH"
+```
+
+Note: `catalyst-events` is not yet wired into `install-cli.sh`'s `CLI_NAMES` array. Until it is,
+run it via the full path: `plugins/dev/scripts/catalyst-events`.
+
 ### Tools
 
 Required CLIs (Git, jq, sqlite3, gh, humanlayer, linearis) and optional tools (agent-browser,
@@ -67,9 +92,28 @@ Automatically detects remapped ports from Docker when configured.
 
 ### Orchestration Monitor (Optional)
 
-Whether the orch-monitor web dashboard is running. If not, shows the command to start it via
-`catalyst-monitor.sh start`. The monitor is optional — it provides a real-time web UI for watching
-orchestrators and workers but isn't required for Catalyst to function.
+Whether the orch-monitor web dashboard is running. This check is classified as **`warn`** (not
+`info`) when the monitor is not running, because `catalyst-events wait-for` falls back to 600-second
+polling intervals when the monitor is absent — significantly increasing latency for event-driven
+skills. The monitor is optional but strongly recommended for orchestration workflows.
+
+If not running, the check shows the command to start it:
+
+```bash
+bash plugins/dev/scripts/catalyst-monitor.sh start
+```
+
+### Webhook Configuration
+
+Two webhook-related items are verified:
+
+| Check | Source | What it means if absent |
+|-------|--------|------------------------|
+| `smeeChannel` | Layer 2 (`~/.config/catalyst/config.json`) | No smee tunnel — monitor falls back to 10-min polling |
+| `webhookId` (Linear) | Layer 2 (`~/.config/catalyst/config-<projectKey>.json`) | Linear events not registered — monitor won't receive Linear webhook deliveries |
+
+Run `plugins/dev/scripts/setup-webhooks.sh` to provision both. See
+[Webhook Pipeline Setup](/observability/webhooks/) for the full setup guide.
 
 ### direnv
 

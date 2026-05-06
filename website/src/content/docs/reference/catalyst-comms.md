@@ -304,6 +304,7 @@ catalyst-comms status <channel>    # participants + last 10 messages
 
 ## Related
 
+- [catalyst-session](./catalyst-session/) — sibling CLI for session lifecycle tracking across skills and workers.
 - [Setup Health Check](./setup-health-check/) — how `catalyst-comms` and peers get installed.
 - [Observability](../observability/) — the monitoring side of multi-worker orchestration.
 - [Skills Reference](./skills/) — the `catalyst-comms` model-invocable skill that Claude

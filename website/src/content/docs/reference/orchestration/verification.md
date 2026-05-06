@@ -1,24 +1,25 @@
 ---
-title: Verification and reward-hacking defense
-description: How the orchestrator verifies worker output independently of the worker's own claims.
+title: Post-Merge Verification (Anti-Reward-Hacking)
+description: How the orchestrator verifies worker output independently of the worker's own claims, after the PR is merged.
 sidebar:
   order: 2
 ---
 
-Autonomous workers have an incentive to declare victory. If you let them self-report success, they'll cheerfully mark tasks "done" while types are widened to `any`, tests are marked `.skip`, and silent failures are caught by `catch(e){}`. The orchestrator defends against this with **adversarial verification** — a separate agent that re-reads the PR from scratch and challenges the worker's claims.
+Autonomous workers have an incentive to declare victory. If you let them self-report success, they'll cheerfully mark tasks "done" while types are widened to `any`, tests are marked `.skip`, and silent failures are caught by `catch(e){}`. The orchestrator defends against this with **adversarial verification** — a separate agent that re-reads the merged commit from scratch and challenges the worker's claims.
 
-## Where verification runs
+## When verification runs
 
-Verification runs in the orchestrator, not the worker. It executes after the worker reports `pr-created` but before the orchestrator lets the PR merge (or before it transitions Linear to Done).
+Workers merge their own PRs via `gh pr merge --squash --delete-branch`. After the merge is observed, the orchestrator runs `orchestrate-verify.sh` on the merged commit as a surface-gaps step. Verification does **not** gate the merge — it runs post-merge and files a remediation ticket when it finds gaps.
 
 ```
-Worker: "I wrote tests, types check, security review passed, done"
+Worker: "I wrote tests, types check, security review passed" → merges own PR
   │
   v
-Orchestrator verification agent: (re-reads PR diff, runs commands, challenges)
+Orchestrator (post-merge): runs orchestrate-verify.sh on merged commit
   │
-  ├─ verified → proceed to merge
-  └─ failed   → raise attention, re-dispatch with remediation, block merge
+  ├─ verified → advance wave, mark ticket done
+  └─ failed   → file remediation ticket; wave advancement blocked until ticket filed
+                 (or unblocked if allowSelfReportedCompletion is true)
 ```
 
 ## What verification checks
@@ -39,36 +40,29 @@ The LLM pass is done by a **different model** than the worker used (if the worke
 
 ## Verification outcomes
 
-Three possible outcomes per verification run:
+Two possible outcomes per verification run:
 
 ### 1. Pass
 
-The orchestrator records `verification-passed` in the event log. The PR is eligible to merge when CI passes. The worker is archived and its worktree is eventually cleaned up.
+The orchestrator records `verification-passed` in the event log. The wave advances normally and the ticket moves to Done.
 
-### 2. Fail — auto-remediable
+### 2. Fail — remediation ticket filed
 
-Worker produced inadequate tests or has reward-hacking patterns. The orchestrator re-dispatches the same worker with **specific remediation instructions**:
+Verification found gaps in the merged commit (missing tests, reward-hacking patterns, or a discrepancy between the PR description and the diff). The orchestrator files a new remediation ticket with specific findings:
 
 ```
-Verification found issues:
+Verification found issues in CTL-48 (merged):
 1. Added function `validateEmail` at src/auth.ts:42 has no unit tests
 2. Used `as any` at src/api.ts:88 — should be a proper type guard
 3. Test file src/auth.test.ts:112 is `.skip`'d without explanation
-
-Fix these without changing the core feature. Push when done. Do not resolve review threads until fixed.
 ```
 
-The worker runs, pushes a fix commit, the orchestrator re-verifies. Up to 3 rounds by default (configurable).
+The remediation ticket enters the backlog and can be scheduled in a future wave. Whether the current wave **waits** for the remediation ticket to be filed before advancing is controlled by `allowSelfReportedCompletion`:
 
-### 3. Fail — needs human
+- `allowSelfReportedCompletion: false` (default) — wave blocks until the remediation ticket is filed
+- `allowSelfReportedCompletion: true` — verification failures are advisory; wave advances immediately
 
-Verification found something the worker is unlikely to fix on its own:
-
-- The PR solves a different problem than the ticket describes
-- The approach contradicts a codebase convention the verifier can't articulate
-- Tests pass but the feature is subtly wrong (wrong columns in a SQL query, off-by-one in pagination)
-
-The orchestrator raises an attention item and waits. The verification event includes the full finding so the human can decide: re-dispatch with guidance, close the PR, escalate the ticket.
+Note: blocking wave advancement waits for the **ticket to be filed**, not for the issues to be resolved. The remediation work itself happens separately.
 
 ## Why worker-side checks aren't enough
 
@@ -97,30 +91,32 @@ These appear in the dashboard and the `/events` SSE stream, so you can watch ver
 
 ## Configuration
 
-Verification is on by default. To disable (not recommended):
+Controlled via `catalyst.orchestration` in `.catalyst/config.json`:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `verifyBeforeMerge` | boolean | `true` | Run adversarial verification on merged commits (post-merge) |
+| `allowSelfReportedCompletion` | boolean | `false` | When `true`, verification failures are advisory — wave advances without waiting for a remediation ticket to be filed |
+
+To disable verification (not recommended):
 
 ```json
 {
   "catalyst": {
-    "orchestrate": {
-      "verification": {
-        "enabled": false
-      }
+    "orchestration": {
+      "verifyBeforeMerge": false
     }
   }
 }
 ```
 
-To tune the retry budget:
+To allow waves to advance even when verification finds gaps:
 
 ```json
 {
   "catalyst": {
-    "orchestrate": {
-      "verification": {
-        "maxRemediationRounds": 3,
-        "verifierModel": "sonnet"
-      }
+    "orchestration": {
+      "allowSelfReportedCompletion": true
     }
   }
 }
