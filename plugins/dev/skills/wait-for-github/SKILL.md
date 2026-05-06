@@ -186,7 +186,7 @@ catalyst-events wait-for \
 
 # Review submitted
 catalyst-events wait-for \
-  --filter "(.event | startswith(\"github.pull_request_review.\")) and .scope.pr == ${PR_NUMBER}" \
+  --filter "(.event | startswith(\"github.pr_review.\")) and .scope.pr == ${PR_NUMBER}" \
   --timeout 180
 
 # REST: check PR merge state (never in a tight loop)

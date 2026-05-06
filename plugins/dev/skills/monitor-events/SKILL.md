@@ -254,7 +254,8 @@ while [ $ITER -lt $MAX_ITER ]; do
          and (.detail.conclusion == "failure" or .detail.conclusion == "timed_out")) or
       (.event == "github.pr_review.submitted"
          and .scope.pr == '"$PR_NUMBER"'
-         and .detail.state == "changes_requested") or
+         and (.detail.state == "changes_requested"
+              or (.detail.state == "commented" and (.detail.author.type // "") == "Bot"))) or
       (.event == "github.push" and .scope.ref == "refs/heads/'"$BASE_BRANCH"'")
     ' \
     --timeout 1800 || true)
@@ -272,7 +273,12 @@ while [ $ITER -lt $MAX_ITER ]; do
       # Pull failure logs, classify, fix, push. Then re-enter the loop.
       ;;
     github.pr_review.submitted)
-      # Bot vs human — handle differently. See heuristic below.
+      # Bot reviewers are addressable inline; humans require operator action.
+      # See "Bot vs human authorship" below for the routing heuristic.
+      AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.detail.author.type // "User"')
+      if [ "$AUTHOR_TYPE" = "Bot" ]; then
+        /catalyst-dev:review-comments "$PR_NUMBER"
+      fi
       ;;
     github.push)
       gh pr update-branch "$PR_NUMBER" || true
