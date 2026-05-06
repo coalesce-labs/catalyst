@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-`orch-monitor` is a Bun-based HTTP server that aggregates worker signal files, polls GitHub for PR state, and serves a live dashboard with server-sent event streams. One process powers both the web UI and the terminal UI.
+`orch-monitor` is a Bun-based HTTP server that aggregates worker signal files, receives GitHub and Linear events via webhooks (with polling fallback), and serves a live dashboard with server-sent event streams. One process powers both the web UI and the terminal UI.
 
 ![Orchestrator overview showing active waves, completion percentage, total cost, wall clock, and the worker list](https://assets.coalescelabs.ai/images/screenshots/orchestrator-2026-04-17%20at%2008.05.20%402x.png)
 

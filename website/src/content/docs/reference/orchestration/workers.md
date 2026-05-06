@@ -52,6 +52,7 @@ Located at `<orchestrator-dir>/workers/<ticket>.json`. The orchestrator creates 
 | `linearState` | string or `null` | Current Linear state name |
 | `definitionOfDone` | object | Populated at Phase 4 + 5 with real results |
 | `pid` | number | Worker's Claude process PID |
+| `cost` | object\|null | Usage/cost object populated by `orchestrate-roll-usage.sh` after the worker stream contains a `result` event. Shape: `{ inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUSD, numTurns, durationMs }` |
 
 ### The `pr` subobject
 

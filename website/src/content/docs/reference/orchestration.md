@@ -346,9 +346,10 @@ initializes worker signal files.
 
 ## Worker Dispatch
 
-Workers are launched via `claude -p` with `--output-format stream-json --verbose`, producing
-real-time NDJSON that the monitor can tail to show live worker activity. Each runs
-`/oneshot <ticket> --auto-merge` autonomously.
+Workers are dispatched by `orchestrate-dispatch-next`, which reads the `waveNPending` queues,
+validates the `workerCommand` format (must be `/<plugin>:<skill>`), and launches `claude -p`
+with `--output-format stream-json --verbose` to produce real-time NDJSON the monitor tails
+for live worker activity. Each runs `/catalyst-dev:oneshot <ticket> --auto-merge` autonomously.
 
 The dispatch prompt includes **mandatory testing requirements** — not suggestions. Workers are told
 their output will be independently verified. The `CATALYST_ORCHESTRATOR_DIR` environment variable is
@@ -746,10 +747,10 @@ consumption and cost:
 }
 ```
 
-**How it works**: Workers launched via the `claude` CLI with `--output-format json` produce a JSON
-output that includes full token counts, cost, and timing. After a worker process exits, the
-orchestrator parses this output and writes the usage data to both the worker's entry and the
-orchestrator's aggregate.
+**How it works**: Workers launched via the `claude` CLI with `--output-format stream-json` produce
+a streaming NDJSON output that includes a final `result` event with full token counts, cost, and
+timing. After a worker process exits, the orchestrator parses this output and writes the usage data
+to both the worker's entry and the orchestrator's aggregate.
 
 **Query patterns**:
 
@@ -876,7 +877,8 @@ The monitor watches `~/catalyst/wt/` for orchestrator directories (matching `orc
 | Source                                 | Data                                               | Refresh                    |
 | -------------------------------------- | -------------------------------------------------- | -------------------------- |
 | Worker signal files (`workers/*.json`) | Status, phase, PR number, definition of done       | Instant (filesystem watch) |
-| GitHub API (`gh pr view`)              | PR state (open/merged/closed), merge timestamp     | Every 30 seconds           |
+| GitHub webhook (via smee.io)           | PR state, CI status, review events                 | Within ~1s when configured |
+| GitHub API (`gh pr view`)              | PR state (open/merged/closed), merge timestamp     | Every 10 minutes (fallback when webhook not configured) |
 | Process table (`kill -0 <pid>`)        | Whether the worker's Claude process is still alive | Every 5 seconds            |
 | Orchestrator `state.json`              | Wave count, progress, attention items              | Instant (filesystem watch) |
 
