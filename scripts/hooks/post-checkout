@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Warn loudly when leaving 'main' in this clone.
+#
+# This clone has historically been the local marketplace source for the
+# installed catalyst plugin. Branch work here used to silently freeze the
+# installed plugin at this branch's HEAD (the "local marketplace trap").
+# The marketplace has since been migrated to a GitHub source, but the
+# convention still holds: do branch work in worktrees, not in this clone.
+#
+# git arg contract: $1=prev_head $2=new_head $3=branch_change (1|0)
+
+prev_head="$1"
+new_head="$2"
+branch_change="$3"
+
+[ "$branch_change" = "1" ] || exit 0
+
+# Don't warn when hook fires inside a git worktree (e.g. during 'git worktree add').
+# In a linked worktree --git-dir returns a worktree-specific path; in the main clone they match.
+git_dir="$(git rev-parse --git-dir 2>/dev/null || echo '')"
+git_common_dir="$(git rev-parse --git-common-dir 2>/dev/null || echo '')"
+[ "$git_dir" != "$git_common_dir" ] && exit 0
+
+current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+[ "$current_branch" = "main" ] && exit 0
+[ -z "$current_branch" ] && exit 0
+
+if [ -t 2 ]; then
+  red=$'\033[1;31m'
+  yellow=$'\033[1;33m'
+  reset=$'\033[0m'
+else
+  red=""
+  yellow=""
+  reset=""
+fi
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo "?")"
+project_key="$(jq -r '.catalyst.projectKey // empty' "${repo_root}/.catalyst/config.json" 2>/dev/null || echo "")"
+if [ -n "$project_key" ]; then
+  worktree_base="$HOME/catalyst/wt/${project_key}"
+else
+  worktree_base="$(dirname "$repo_root")"
+fi
+worktree_path="${worktree_base}/${current_branch//\//-}"
+
+cat >&2 <<EOF
+
+${red}╔════════════════════════════════════════════════════════════════════╗
+║  WARNING — left 'main' in the catalyst marketplace source clone    ║
+╚════════════════════════════════════════════════════════════════════╝${reset}
+
+You are now on '${yellow}${current_branch}${reset}' in:
+  ${repo_root}
+
+${yellow}Convention:${reset} this clone stays on 'main'. Do branch work in worktrees.
+
+To recover:
+  ${yellow}git switch main${reset}
+  ${yellow}git worktree add ${worktree_path} ${current_branch}${reset}
+  ${yellow}cd ${worktree_path}${reset}
+
+EOF
+
+exit 0
