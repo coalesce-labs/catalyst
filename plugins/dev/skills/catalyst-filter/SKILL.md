@@ -104,11 +104,14 @@ STATE_SCRIPT="/path/to/plugins/dev/scripts/catalyst-state.sh"
 | `detail.notify_event` | string | Event name the daemon will emit when relevant events arrive (`"filter.wake.{id}"`) |
 | `detail.prompt` | string | Natural-language description of what to wake on (see Prompt Writing below) |
 | `detail.persistent` | boolean | `true` — keep interest active after each match (continuous monitoring). `false` (default) — auto-deregister after first wake (one-shot wait). |
-| `detail.context` | object | Optional focus hints: `pr_numbers`, `tickets`, `branches` |
+| `detail.context` | object | Optional focus hints: `pr_numbers`, `tickets`, `branches`, `workers` |
 | `detail.interest_id` | string | Optional override for the routing table key; defaults to `orchestrator` |
+| `detail.session_id` | string | Optional session ID (`$CATALYST_SESSION_ID`). The daemon's watchdog uses this to clean up registrations whose session has gone stale (>3 min without heartbeat). Set this for any non-orchestrator agent. |
 
 The daemon picks up `filter.register` from the live log within one poll cycle (~200ms).
-On daemon restart, it scans the last 1000 lines of the log to recover active registrations.
+On daemon restart, it scans the last 1000 lines of the log to recover active registrations,
+and emits a `filter.daemon.startup` event so subscribers can re-register if they want
+belt-and-suspenders coverage.
 
 **Choosing `persistent`:**
 
@@ -117,6 +120,83 @@ On daemon restart, it scans the last 1000 lines of the log to recover active reg
 - Use `persistent: false` (the default) for one-shot waits — "tell me when this specific PR merges"
   or "wake me when the next CI run completes". The interest is removed automatically after the first
   wake, so no explicit `filter.deregister` is needed.
+
+### Per-agent-type registration patterns
+
+The same registration mechanism serves three distinct agent profiles. Pick the one that
+matches your agent's lifecycle.
+
+#### Orchestrator (long-lived, multi-PR scope)
+
+Routing key is the orchestrator name; one registration covers every active worker.
+
+```jsonc
+{
+  "event": "filter.register",
+  "orchestrator": "$ORCH_NAME",
+  "detail": {
+    "session_id": "$CATALYST_SESSION_ID",
+    "notify_event": "filter.wake.$ORCH_NAME",
+    "persistent": true,
+    "prompt": "Wake me when: CI passes or fails on any of my PRs; a PR gets changes-requested, is merged, or closed; the base branch receives a push that would put my PRs BEHIND; any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
+    "context": {
+      "pr_numbers": [408, 409],
+      "tickets": ["CTL-253", "CTL-254"],
+      "branches": ["...-CTL-253", "...-CTL-254"]
+    }
+  }
+}
+```
+
+#### Worker / oneshot (single-ticket scope, single PR)
+
+Routing key is the session ID. `context.workers: [$sid]` lets the daemon's heartbeat
+watchdog match this registration when the session goes stale.
+
+```jsonc
+{
+  "event": "filter.register",
+  "orchestrator": "$CATALYST_ORCHESTRATOR_ID",
+  "detail": {
+    "interest_id": "$CATALYST_SESSION_ID",
+    "session_id": "$CATALYST_SESSION_ID",
+    "notify_event": "filter.wake.$CATALYST_SESSION_ID",
+    "persistent": true,
+    "prompt": "Wake me when: CI passes or fails on PR ${PR_NUMBER}; PR ${PR_NUMBER} is merged or closed; PR ${PR_NUMBER} receives a review or changes-requested; the base branch of branch ${BRANCH} receives a push (BEHIND state); I receive a comms message addressed to ${TICKET_ID}; or my Linear ticket ${TICKET_ID} status changes",
+    "context": {
+      "pr_numbers": [535],
+      "tickets": ["CTL-269"],
+      "branches": ["fix/ctl-269-foo"],
+      "workers": ["$CATALYST_SESSION_ID"]
+    }
+  }
+}
+```
+
+A graceful trap on `EXIT/INT/TERM` should emit `filter.deregister` so the in-memory
+table doesn't carry the entry until daemon restart. The watchdog cleanup at
+`HEARTBEAT_STALE_MS` (default 3 min) is the crash-safety net.
+
+#### Long-lived utility (e.g., monitor, custom wait scripts)
+
+Same shape as the worker pattern — routing by `$CATALYST_SESSION_ID` with a
+utility-specific prompt. Set `persistent: true` so the registration survives across
+many wakes; deregister explicitly at exit.
+
+### Daemon restarts
+
+On boot the daemon emits `filter.daemon.startup` with `pid`, `recovered_interests`,
+`watchdog_interval_ms`, and `heartbeat_stale_ms`. Persistent interests are also
+recovered automatically from the last 1000 log lines, so a re-register on this event
+is belt-and-suspenders rather than required.
+
+```bash
+# Optional: re-register on daemon restart
+catalyst-events wait-for --filter '.event == "filter.daemon.startup"' --timeout 0 \
+  | while read -r evt; do
+      filter_register_self  # idempotent — overwrites the existing entry
+    done
+```
 
 ## Step 2 — Wait
 
@@ -301,8 +381,11 @@ catalyst-filter run
 # Tail daemon log
 catalyst-filter logs
 
-# Manually register an interest
+# Manually register an orchestrator interest
 catalyst-state.sh event '{"event":"filter.register","orchestrator":"my-orch","detail":{"notify_event":"filter.wake.my-orch","prompt":"Wake me on CI failure or PR merge."}}'
+
+# Manually register a session-keyed worker interest (CTL-269)
+catalyst-state.sh event '{"event":"filter.register","orchestrator":"my-orch","detail":{"interest_id":"sess_abc","session_id":"sess_abc","notify_event":"filter.wake.sess_abc","persistent":true,"prompt":"Wake me on CI events for PR 42 or comms addressed to CTL-269.","context":{"pr_numbers":[42],"tickets":["CTL-269"],"workers":["sess_abc"]}}}'
 
 # Wait for wake signal
 catalyst-events wait-for --filter '.event == "filter.wake.my-orch"' --timeout 7200

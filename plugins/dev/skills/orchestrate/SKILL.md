@@ -718,6 +718,7 @@ if catalyst-filter status >/dev/null 2>&1; then
 
   "$STATE_SCRIPT" event "$(jq -nc \
     --arg orch "${ORCH_NAME}" \
+    --arg sid "${CATALYST_SESSION_ID:-}" \
     --arg notify "filter.wake.${ORCH_NAME}" \
     --argjson prs "${ACTIVE_PRS}" \
     --argjson tickets "${ACTIVE_TICKETS}" \
@@ -728,8 +729,9 @@ if catalyst-filter status >/dev/null 2>&1; then
       orchestrator: $orch,
       worker: null,
       detail: {
+        session_id: (if $sid == "" then null else $sid end),
         notify_event: $notify,
-        prompt: "Wake me when: CI passes or fails on any of my PRs, a PR gets changes-requested or is merged or closed, or the base branch receives a push that would put my PRs BEHIND",
+        prompt: "Wake me when: CI passes or fails on any of my PRs; a PR gets changes-requested, is merged, or closed; the base branch receives a push that would put my PRs BEHIND; any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
         persistent: true,
         context: {pr_numbers: $prs, tickets: $tickets, branches: $branches}
       }
@@ -996,6 +998,7 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
         "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
       "$STATE_SCRIPT" event "$(jq -nc \
         --arg orch "${ORCH_NAME}" \
+        --arg sid "${CATALYST_SESSION_ID:-}" \
         --arg notify "filter.wake.${ORCH_NAME}" \
         --argjson prs "${_UPD_PRS}" \
         --argjson tickets "${_UPD_TICKETS}" \
@@ -1005,8 +1008,9 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
           orchestrator: $orch,
           worker: null,
           detail: {
+            session_id: (if $sid == "" then null else $sid end),
             notify_event: $notify,
-            prompt: "Wake me when: CI passes or fails on any of my PRs, a PR gets changes-requested or is merged or closed, or the base branch receives a push that would put my PRs BEHIND",
+            prompt: "Wake me when: CI passes or fails on any of my PRs; a PR gets changes-requested, is merged, or closed; the base branch receives a push that would put my PRs BEHIND; any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
             persistent: true,
             context: {pr_numbers: $prs, tickets: $tickets}
           }
@@ -1298,19 +1302,25 @@ Since CTL-252, workers exit at `status: "done"` after actively merging their own
 orchestrator scan is a safety-net fallback that writes `pr.mergedAt` + `status: "done"` for
 workers that stalled before completing their own merge.
 
-**Drain shared comms channel for attention (CTL-111):**
+**Drain shared comms channel for attention (CTL-111, CTL-269):**
 
 Workers post `type:attention` messages to `orch-${ORCH_NAME}` when blocked. On each
 wake-up, the orchestrator drains new messages from the channel and promotes any
 `attention` to a state-level attention item so the dashboard's NEEDS ATTENTION
 banner surfaces it (with author + reason).
 
+The wake mechanism for comms attention is now **unified with the filter daemon**
+(CTL-269): when a worker posts to comms, `catalyst-comms send` emits a
+`comms.message.posted` event to the unified event log; the filter daemon matches
+it against the orchestrator's `filter.register` prompt (which now mentions "any
+of my workers posts a comms message of type attention to me") and emits
+`filter.wake.${ORCH_NAME}`. The orchestrator wakes from that single event and
+runs this drain step to act on the attention.
+
 A small cursor file `${ORCH_DIR}/.comms-cursor` tracks the line count already
 processed so repeated wake-ups don't re-surface the same message. Single-writer
-(this scan) so no race. The `comms-message-posted` event type also fires through
-the unified event log, so future revisions could replace the `wc -l` cursor with
-an event-stream wake-up — for now the cursor file is the canonical drain
-mechanism.
+(this scan) so no race. The cursor-based drain remains the **action** mechanism
+even though wakes come via `filter.wake`.
 
 ```bash
 if [ -n "$COMMS_BIN" ]; then

@@ -132,6 +132,29 @@ describe("interest table", () => {
     });
     expect(getInterests().get("orch-p3").persistent).toBe(false);
   });
+
+  test("handleRegister stores session_id from detail.session_id", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-s1",
+      detail: {
+        interest_id: "sess_abc",
+        session_id: "sess_abc",
+        notify_event: "filter.wake.sess_abc",
+        prompt: "worker registration",
+      },
+    });
+    expect(getInterests().get("sess_abc").session_id).toBe("sess_abc");
+  });
+
+  test("handleRegister defaults session_id to null when absent", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-s2",
+      detail: { interest_id: "orch-s2", notify_event: "filter.wake.orch-s2", prompt: "no session" },
+    });
+    expect(getInterests().get("orch-s2").session_id).toBeNull();
+  });
 });
 
 describe("handleOrchestratorTerminated", () => {
@@ -411,5 +434,84 @@ describe("watchdog tick", () => {
     registerInterest("orch-x", { orchestrator: "orch-x", context: { workers: ["CTL-different"] } });
     runWatchdogTick();
     expect(getLastHeartbeat().get("CTL-other").notified).toBe(false);
+  });
+});
+
+describe("watchdog cleanup of stale-session registrations (CTL-269)", () => {
+  const STALE_AGO = 200_000;
+
+  beforeEach(() => {
+    clearInterests();
+    clearLastHeartbeat();
+  });
+
+  function registerSessionInterest(id, sessionId, opts = {}) {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: opts.orchestrator ?? id,
+      detail: {
+        interest_id: id,
+        session_id: sessionId,
+        notify_event: `filter.wake.${id}`,
+        prompt: "session-keyed worker",
+        context: opts.context ?? { workers: [sessionId] },
+      },
+    });
+  }
+
+  test("deletes interest whose session_id matches the stale sourceId after firing wake", () => {
+    getLastHeartbeat().set("sess_abc", { ts: Date.now() - STALE_AGO, notified: false });
+    registerSessionInterest("sess_abc", "sess_abc");
+    runWatchdogTick();
+    expect(getInterests().has("sess_abc")).toBe(false);
+  });
+
+  test("preserves interest whose session_id does NOT match the stale sourceId", () => {
+    getLastHeartbeat().set("sess_abc", { ts: Date.now() - STALE_AGO, notified: false });
+    // session_id belongs to a different session, but workers list still matches sess_abc → wake fires
+    registerSessionInterest("orch-a", "sess_other", {
+      orchestrator: "orch-a",
+      context: { workers: ["sess_abc"] },
+    });
+    runWatchdogTick();
+    expect(getInterests().has("orch-a")).toBe(true);
+  });
+
+  test("preserves interests without a session_id field (legacy / orchestrator registrations)", () => {
+    getLastHeartbeat().set("CTL-77", { ts: Date.now() - STALE_AGO, notified: false });
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-legacy",
+      detail: {
+        interest_id: "orch-legacy",
+        notify_event: "filter.wake.orch-legacy",
+        prompt: "legacy without session",
+        context: { workers: ["CTL-77"] },
+      },
+    });
+    runWatchdogTick();
+    expect(getInterests().has("orch-legacy")).toBe(true);
+    expect(getInterests().get("orch-legacy").session_id).toBeNull();
+  });
+
+  test("does not delete when wake does not fire (no matching context)", () => {
+    getLastHeartbeat().set("sess_abc", { ts: Date.now() - STALE_AGO, notified: false });
+    // Interest has matching session_id, but its workers list does not include sess_abc → no wake
+    registerSessionInterest("sess_abc", "sess_abc", {
+      orchestrator: "orch-unrelated",
+      context: { workers: ["sess_unrelated"] },
+    });
+    runWatchdogTick();
+    expect(getInterests().has("sess_abc")).toBe(true);
+  });
+
+  test("cleanup runs exactly once per stale source (subsequent ticks find no matching interest)", () => {
+    getLastHeartbeat().set("sess_abc", { ts: Date.now() - STALE_AGO, notified: false });
+    registerSessionInterest("sess_abc", "sess_abc");
+    runWatchdogTick();
+    expect(getInterests().has("sess_abc")).toBe(false);
+    // Second tick: heartbeat still stale + already notified → no new wake, no error
+    expect(() => runWatchdogTick()).not.toThrow();
+    expect(getInterests().has("sess_abc")).toBe(false);
   });
 });

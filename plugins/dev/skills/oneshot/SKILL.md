@@ -192,6 +192,58 @@ if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && [ -n "$COMMS_BIN" ]; then
   COMMS_CHANNEL_FILE="${CATALYST_DIR}/comms/channels/${CATALYST_COMMS_CHANNEL}.jsonl"
   [ -f "$COMMS_CHANNEL_FILE" ] && COMMS_LAST_READ=$(wc -l < "$COMMS_CHANNEL_FILE" | tr -d ' ')
 fi
+
+# CTL-269: catalyst-filter registration helpers. The worker registers a single
+# semantic interest after PR creation that covers CI, comms, reviews, BEHIND,
+# and Linear ticket changes. The Phase 5 listen loop then waits on a single
+# `filter.wake.${CATALYST_SESSION_ID}` event instead of the per-concern jq
+# filters. When the daemon is not running, the loop falls back to the existing
+# direct `catalyst-events wait-for` pattern.
+
+filter_daemon_running() {
+  command -v catalyst-filter >/dev/null 2>&1 || return 1
+  catalyst-filter status >/dev/null 2>&1
+}
+
+filter_register_worker() {
+  # Args: $1 = PR_NUMBER, $2 = TICKET_ID, $3 = BRANCH_NAME
+  filter_daemon_running || return 1
+  [ -n "${CATALYST_SESSION_ID:-}" ] || return 1
+  local pr="$1" ticket="$2" branch="$3"
+  local prompt="Wake me when: CI passes or fails on PR ${pr}; PR ${pr} is merged or closed; PR ${pr} receives a review or changes-requested; the base branch of branch ${branch} receives a push (BEHIND state); I receive a comms message addressed to ${ticket}; or my Linear ticket ${ticket} status changes"
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg sid "$CATALYST_SESSION_ID" \
+    --arg orch "${CATALYST_ORCHESTRATOR_ID:-}" \
+    --arg notify "filter.wake.${CATALYST_SESSION_ID}" \
+    --arg prompt "$prompt" \
+    --argjson pr "$pr" \
+    --arg ticket "$ticket" \
+    --arg branch "$branch" \
+    '{ts: (now | todate), event: "filter.register",
+      orchestrator: (if $orch == "" then null else $orch end),
+      worker: null,
+      detail: {
+        interest_id: $sid,
+        session_id: $sid,
+        notify_event: $notify,
+        persistent: true,
+        prompt: $prompt,
+        context: {pr_numbers: [$pr], tickets: [$ticket], branches: [$branch], workers: [$sid]}
+      }}')" 2>/dev/null || return 1
+  return 0
+}
+
+filter_deregister_worker() {
+  filter_daemon_running || return 0
+  [ -n "${CATALYST_SESSION_ID:-}" ] || return 0
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg sid "$CATALYST_SESSION_ID" \
+    '{ts: (now | todate), event: "filter.deregister", orchestrator: null, worker: null, detail: {interest_id: $sid}}')" 2>/dev/null || true
+}
+
+# Belt-and-suspenders: trap on EXIT/INT/TERM ensures graceful deregister.
+# Watchdog cleanup in the daemon handles crash cases via session_id matching.
+trap 'filter_deregister_worker' EXIT INT TERM
 ```
 
 If `ORCH_DIR` is detected, the worker:
@@ -579,11 +631,15 @@ EXISTING_PR=$(gh pr list --head "$(git branch --show-current)" --json number --j
 
 **Step 2: Active PR Listen Loop — Wait for CLEAN then Merge (replaces auto-merge)**
 
-After the PR is created, enter an event-driven listen loop using the [[wait-for-github]] two-phase
-pattern. The worker actively resolves blockers (CI failures, bot review threads, BEHIND) inline and
-proceeds to Step 3 only when the PR is CLEAN (CI green + reviews satisfied). On unrecoverable
-blockers (human changes-requested, persistent DIRTY) the worker writes `status: "stalled"` and
-exits; the orchestrator's Phase 4 is a safety-net fallback.
+After the PR is created, enter an event-driven listen loop. The preferred wake mechanism (CTL-269)
+is a single `filter.register` covering CI, comms inbound, reviews, BEHIND, and Linear ticket
+changes — the worker then waits on `filter.wake.${CATALYST_SESSION_ID}` and the Groq-backed filter
+daemon decides which raw events match. When the daemon is not running, the loop falls back to the
+[[wait-for-github]] two-phase pattern with per-concern jq filters. See [[catalyst-filter]] for
+registration recipes. The worker actively resolves blockers (CI failures, bot review threads,
+BEHIND) inline and proceeds to Step 3 only when the PR is CLEAN (CI green + reviews satisfied). On
+unrecoverable blockers (human changes-requested, persistent DIRTY) the worker writes
+`status: "stalled"` and exits; the orchestrator's Phase 4 is a safety-net fallback.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
@@ -599,15 +655,39 @@ TUNNEL=$(echo "$INFRA_STATUS" | jq -r '.webhookTunnel.state // "unknown"' 2>/dev
 USE_REST=false
 [ "$TUNNEL" != "running" ] && { echo "WARN: tunnel not running — using REST fallback"; USE_REST=true; }
 
+# CTL-269: register a single semantic interest covering CI, comms, reviews,
+# BEHIND, and Linear ticket changes. When this succeeds, the loop waits on a
+# single `filter.wake.${CATALYST_SESSION_ID}` event instead of running separate
+# jq filters for each concern. When it fails (daemon not running, no session id),
+# the loop falls back to the existing two-phase pattern below.
+USE_FILTER_DAEMON=false
+if filter_register_worker "$PR_NUMBER" "$TICKET_ID" "$(git branch --show-current)"; then
+  USE_FILTER_DAEMON=true
+  echo "[Phase 5] Registered filter interest for session ${CATALYST_SESSION_ID}"
+fi
+
 CI_FIX_ATTEMPTS=0
 MAX_CI_FIX_ATTEMPTS=3
 PR_DONE=false
 
 while [ "$PR_DONE" = "false" ]; do
-  # Two-phase event wait (see [[wait-for-github]]).
-  # Filter field reference: [[event-schema]] — note check_suite/workflow_run use
-  # detail.prNumbers, not scope.pr. PR/review events DO populate scope.pr.
-  if [ "$USE_REST" != "true" ]; then
+  # CTL-269 preferred path: single semantic wake covers all concerns.
+  if [ "$USE_FILTER_DAEMON" = "true" ] && [ "$USE_REST" != "true" ]; then
+    EVENT=$(catalyst-events wait-for \
+      --filter ".event == \"filter.wake.${CATALYST_SESSION_ID}\"" \
+      --timeout 600 2>/dev/null || true)
+    if [ -n "$EVENT" ]; then
+      WAKE_REASON=$(echo "$EVENT" | jq -r '.detail.reason // "unknown"' 2>/dev/null || echo "unknown")
+      echo "[Phase 5] Filter wake: ${WAKE_REASON}"
+    fi
+    # Drain inbound comms inside the loop now that filter.wake fires on
+    # comms.message.posted events too — comms_check is idempotent (advances
+    # COMMS_LAST_READ atomically) and a no-op when nothing arrived.
+    comms_check
+  elif [ "$USE_REST" != "true" ]; then
+    # Fallback: two-phase event wait (see [[wait-for-github]]).
+    # Filter field reference: [[event-schema]] — note check_suite/workflow_run use
+    # detail.prNumbers, not scope.pr. PR/review events DO populate scope.pr.
     EVENT=$(catalyst-events wait-for \
       --filter "(.scope.pr == ${PR_NUMBER} or (.detail.prNumbers // [] | contains([${PR_NUMBER}]))) and (
         .event == \"github.pr.merged\" or
@@ -641,6 +721,8 @@ while [ "$PR_DONE" = "false" ]; do
           --timeout 7200 2>/dev/null || true)
       fi
     fi
+    # Drain inbound comms after each wake so messages don't sit until phase boundary.
+    comms_check
   fi
 
   # Authoritative REST check — never gh pr view --json (GraphQL); REST only

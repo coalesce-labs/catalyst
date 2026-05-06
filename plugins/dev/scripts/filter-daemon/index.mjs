@@ -68,9 +68,11 @@ export function handleRegister(event) {
     prompt: d.prompt ?? "",
     context: d.context ?? null,
     orchestrator: event.orchestrator ?? null,
+    session_id: d.session_id ?? null,
     persistent: d.persistent === true,
   });
-  console.log(`[filter] Registered: ${id} — "${d.prompt}" (persistent: ${d.persistent === true})`);
+  const sessionTag = d.session_id ? `, session: ${d.session_id}` : "";
+  console.log(`[filter] Registered: ${id} — "${d.prompt}" (persistent: ${d.persistent === true}${sessionTag})`);
 }
 
 export function handleDeregister(event) {
@@ -256,7 +258,19 @@ export function runWatchdogTick() {
           woke = true;
         }
       }
-      if (woke) lastHeartbeat.set(sourceId, { ts: state.ts, notified: true });
+      if (woke) {
+        // CTL-269: belt-and-suspenders cleanup — after firing the stale wake,
+        // delete registrations whose session_id matches the stale sourceId.
+        // Pairs with the trap-handler deregister in oneshot/SKILL.md so crashed
+        // sessions don't leak interests across daemon restarts.
+        for (const [interestId, interest] of interests) {
+          if (interest.session_id && interest.session_id === sourceId) {
+            interests.delete(interestId);
+            console.log(`[filter] Watchdog cleanup: removed ${interestId} (stale session ${sourceId})`);
+          }
+        }
+        lastHeartbeat.set(sourceId, { ts: state.ts, notified: true });
+      }
     } else if (!stale && state.notified) {
       lastHeartbeat.set(sourceId, { ts: state.ts, notified: false });
     }
@@ -418,6 +432,21 @@ function main() {
   } catch {
     console.log(`[filter] Starting (no log file yet at ${lastLogPath})`);
   }
+
+  // CTL-269: emit startup event so subscribers can detect daemon restarts
+  // and re-register their interests. Persistent interests are also recovered
+  // from the log on boot (loadExistingRegistrations) — this is belt-and-suspenders.
+  appendEvent({
+    event: "filter.daemon.startup",
+    orchestrator: null,
+    worker: null,
+    detail: {
+      pid: process.pid,
+      recovered_interests: interests.size,
+      watchdog_interval_ms: WATCHDOG_INTERVAL_MS,
+      heartbeat_stale_ms: HEARTBEAT_STALE_MS,
+    },
+  });
 
   const pollId = setInterval(pollEventLog, POLL_MS);
   const watchdogId = startWatchdog();
