@@ -692,7 +692,7 @@ while [ "$PR_DONE" = "false" ]; do
       --filter "(.scope.pr == ${PR_NUMBER} or (.detail.prNumbers // [] | contains([${PR_NUMBER}]))) and (
         .event == \"github.pr.merged\" or
         .event == \"github.check_suite.completed\" or
-        (.event | startswith(\"github.pull_request_review\")) or
+        (.event | startswith(\"github.pr_review\")) or
         .event == \"github.push\"
       )" \
       --timeout 180 2>/dev/null || true)
@@ -715,7 +715,7 @@ while [ "$PR_DONE" = "false" ]; do
           --filter "(.scope.pr == ${PR_NUMBER} or (.detail.prNumbers // [] | contains([${PR_NUMBER}]))) and (
             .event == \"github.pr.merged\" or
             .event == \"github.check_suite.completed\" or
-            (.event | startswith(\"github.pull_request_review\")) or
+            (.event | startswith(\"github.pr_review\")) or
             .event == \"github.push\"
           )" \
           --timeout 7200 2>/dev/null || true)

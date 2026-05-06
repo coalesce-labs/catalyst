@@ -235,7 +235,8 @@ while [ $ITER -lt $MAX_ITER ]; do
          and (.detail.conclusion == "failure" or .detail.conclusion == "timed_out")) or
       (.event == "github.pr_review.submitted"
          and .scope.pr == '"$pr_number"'
-         and .detail.state == "changes_requested") or
+         and (.detail.state == "changes_requested"
+              or (.detail.state == "commented" and (.detail.author.type // "") == "Bot"))) or
       (.event == "github.push" and .scope.ref == "refs/heads/'"$BASE_BRANCH"'")
     ' \
     --timeout 600 || true)
@@ -256,12 +257,15 @@ while [ $ITER -lt $MAX_ITER ]; do
       # CI failed — diagnose via merge-blocker-diagnosis.md, push fix.
       ;;
     github.pr_review.submitted)
-      # Changes requested. Bot reviewers are addressable inline; humans
-      # require operator action. detail.author.type is "Bot" or "User".
+      # Bot reviewers (Codex, claude-code-review) are addressable inline;
+      # humans require operator action. detail.author.type is "Bot" or "User".
+      # Codex submits inline-thread reviews as state="commented", not
+      # "changes_requested" — handle both via /catalyst-dev:review-comments,
+      # which addresses the code AND resolves threads via the GraphQL
+      # resolveReviewThread mutation.
       AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.detail.author.type // "User"')
       if [ "$AUTHOR_TYPE" = "Bot" ]; then
-        # Run /catalyst-dev:review-comments to address inline.
-        :
+        /catalyst-dev:review-comments "$pr_number"
       fi
       ;;
     github.push)
