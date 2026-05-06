@@ -55,7 +55,17 @@ is `tail | head -n 1` with a timeout.
 ## Pattern 1 — Worker waits for its PR to merge
 
 A `claude -p` worker that just opened PR #342 needs to block until the PR merges, then
-do post-merge work. Use the two-phase pattern from [[wait-for-github]]: a 3-minute Phase 1
+do post-merge work.
+
+**Preferred (when `catalyst-filter` is running, CTL-269):** register a single semantic
+interest covering every concern the worker cares about (CI, comms, reviews, BEHIND,
+Linear), then wait on `filter.wake.${CATALYST_SESSION_ID}`. The Groq-backed daemon
+classifies raw events against the natural-language prompt and emits one wake per
+match. See [[catalyst-filter]] for the full registration recipe and the daemon-restart
+contract. The two-phase pattern below is the **fallback** for environments where the
+daemon is not running.
+
+Use the two-phase pattern from [[wait-for-github]]: a 3-minute Phase 1
 with a diagnostic checkpoint before committing to the full 2-hour wait.
 
 ```bash
@@ -125,6 +135,13 @@ fi
 The orchestrator's Phase 4 used to poll every 2–3 minutes for every active worker. With
 CTL-210, the orchestrator runs a `Monitor` watching all PR/CI/push/lifecycle events, and
 the reactive scan drops to a 10-minute idle fallback as the safety net (CTL-243).
+
+**Preferred (when `catalyst-filter` is running, CTL-257 + CTL-269):** the orchestrate
+skill emits `filter.register` at Phase 4 start with a prompt covering CI events,
+PR transitions, BEHIND-state pushes, comms attention from workers, and Linear ticket
+changes. Phase 4 then waits on `filter.wake.${ORCH_NAME}` for a single unified wake
+covering all those concerns. See [[catalyst-filter]]. The `Monitor`-over-`tail` pattern
+below is the **fallback** for environments without the daemon.
 
 The recommended shape is **scope-aware**, generated from the orchestrator's worker
 signal directory (CTL-240):
@@ -531,3 +548,6 @@ Environment:
   filter; the long-lived precedent for Pattern 3
 - `catalyst-comms` — agent-to-agent pub/sub on per-channel files;
   `comms.message.posted` fan-out events go through this same log
+- [[catalyst-filter]] — Groq-backed semantic event router. Preferred wake
+  mechanism when running; collapses the per-concern jq filters in Patterns 1
+  and 2 into a single `filter.register` per agent (CTL-269)
