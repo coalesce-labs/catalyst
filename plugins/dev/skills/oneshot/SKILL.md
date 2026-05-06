@@ -609,7 +609,7 @@ while [ "$PR_DONE" = "false" ]; do
   # detail.prNumbers, not scope.pr. PR/review events DO populate scope.pr.
   if [ "$USE_REST" != "true" ]; then
     EVENT=$(catalyst-events wait-for \
-      --filter "(.scope.pr == ${PR_NUMBER}) and (
+      --filter "(.scope.pr == ${PR_NUMBER} or (.detail.prNumbers // [] | contains([${PR_NUMBER}]))) and (
         .event == \"github.pr.merged\" or
         .event == \"github.check_suite.completed\" or
         (.event | startswith(\"github.pull_request_review\")) or
@@ -619,7 +619,10 @@ while [ "$PR_DONE" = "false" ]; do
 
     if [ -z "$EVENT" ]; then
       # Phase 1 timed out — run diagnostics (see [[wait-for-github]] diagnostic block)
-      HEARTBEATS=$(catalyst-events tail --since "5 minutes ago" 2>/dev/null \
+      _LOG_FILE=~/catalyst/events/$(date -u +%Y-%m).jsonl
+      _LOG_LINES=$(wc -l < "$_LOG_FILE" 2>/dev/null | tr -d ' ')
+      _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
+      HEARTBEATS=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null \
         | jq -c 'select(.event == "heartbeat")' | wc -l | tr -d ' ')
       TUNNEL_NOW=$(catalyst-monitor status --json 2>/dev/null \
         | jq -r '.webhookTunnel.state // "unknown"')
@@ -629,7 +632,7 @@ while [ "$PR_DONE" = "false" ]; do
       else
         # Infrastructure healthy — extend to Phase 2 (7200s)
         EVENT=$(catalyst-events wait-for \
-          --filter "(.scope.pr == ${PR_NUMBER}) and (
+          --filter "(.scope.pr == ${PR_NUMBER} or (.detail.prNumbers // [] | contains([${PR_NUMBER}]))) and (
             .event == \"github.pr.merged\" or
             .event == \"github.check_suite.completed\" or
             (.event | startswith(\"github.pull_request_review\")) or

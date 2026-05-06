@@ -77,14 +77,16 @@ else
   STALLED=false
   FILTER_MISMATCH=false
 
-  HEARTBEATS=$(catalyst-events tail --since "5 minutes ago" 2>/dev/null \
+  _LOG_FILE=~/catalyst/events/$(date -u +%Y-%m).jsonl
+  _LOG_LINES=$(wc -l < "$_LOG_FILE" 2>/dev/null | tr -d ' ')
+  _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
+  HEARTBEATS=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null \
     | jq -c 'select(.event == "heartbeat")' | wc -l | tr -d ' ')
   [ "${HEARTBEATS:-0}" -eq 0 ] && { echo "WARN: No heartbeats — event log may be stalled"; STALLED=true; }
 
-  RAW_HIT=$(catalyst-events tail --since "15 minutes ago" 2>/dev/null | jq -c \
+  RAW_HIT=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null | jq -c \
     --argjson pr "$PR_NUMBER" \
-    'select((.scope.pr == $pr) or (.detail.number == $pr) or
-            (.detail.pull_request.number == $pr) or (tostring | contains($pr | tostring)))' | head -1)
+    'select((.scope.pr == $pr) or (.detail.prNumbers // [] | contains([$pr])))' | head -1)
   if [ -n "$RAW_HIT" ]; then
     echo "WARN: Event arrived but filter did not match. Raw event:"; echo "$RAW_HIT" | jq .
     FILTER_MISMATCH=true
