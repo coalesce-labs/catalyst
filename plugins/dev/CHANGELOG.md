@@ -1,5 +1,49 @@
 # Changelog
 
+## [8.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.1.0...catalyst-dev-v8.2.0) (2026-05-06)
+
+
+### Features
+
+* **dev:** add catalyst-filter to plugin install scripts (CTL-259) ([#423](https://github.com/coalesce-labs/catalyst/issues/423)) ([20b7807](https://github.com/coalesce-labs/catalyst/commit/20b780770fe487dfde450eefc5ed1f6b0a8eba59))
+* **dev:** bidirectional comms — workers read inbound messages at phase boundaries (CTL-249) ([#403](https://github.com/coalesce-labs/catalyst/issues/403)) ([79aa258](https://github.com/coalesce-labs/catalyst/commit/79aa258c5d2e1fa309bff48b7825417d46e65fde))
+* **dev:** catalyst-filter daemon — Groq-powered semantic event routing (CTL-256) ([#421](https://github.com/coalesce-labs/catalyst/issues/421)) ([ceeb0ee](https://github.com/coalesce-labs/catalyst/commit/ceeb0eeb8bad2408e8f7c403df56f1fa0e3af63c))
+* **dev:** event-schema reference doc — derive from TypeScript types so agents don't guess field names ([#430](https://github.com/coalesce-labs/catalyst/issues/430)) ([e0b0821](https://github.com/coalesce-labs/catalyst/commit/e0b082144a6a9a20ea6a98694ca1cbe1f78cc67e))
+* **dev:** expose webhookTunnel state in catalyst-monitor status --json (CTL-244) ([#398](https://github.com/coalesce-labs/catalyst/issues/398)) ([643055d](https://github.com/coalesce-labs/catalyst/commit/643055d945509200b52d74b351208fc5607445d4))
+* **dev:** heartbeat watchdog in filter daemon — detect stalled workers without LLM (CTL-261) ([#428](https://github.com/coalesce-labs/catalyst/issues/428)) ([c8e337b](https://github.com/coalesce-labs/catalyst/commit/c8e337b26c6847f7b03b2b8998aadaa0d318603c))
+* **dev:** Linear issue events → filter daemon wake via bot-skip suppression (CTL-263) ([#426](https://github.com/coalesce-labs/catalyst/issues/426)) ([a2bd391](https://github.com/coalesce-labs/catalyst/commit/a2bd3919460efff54379ebdf5f83000a79361d16))
+* **dev:** orch-monitor activity feed for global event stream (CTL-225) ([#358](https://github.com/coalesce-labs/catalyst/issues/358)) ([db72cf7](https://github.com/coalesce-labs/catalyst/commit/db72cf7cabb75d2eb63af8f79842df0773b5399b))
+* **dev:** orch-monitor daemon liveness check as skill prerequisite (CTL-223) ([#356](https://github.com/coalesce-labs/catalyst/issues/356)) ([7e906ce](https://github.com/coalesce-labs/catalyst/commit/7e906cea0f6e81ac0583b72662263aaa4f827590))
+* **dev:** orch-monitor version drift self-check on startup (CTL-237) ([#381](https://github.com/coalesce-labs/catalyst/issues/381)) ([ab2edcf](https://github.com/coalesce-labs/catalyst/commit/ab2edcf24127529a306dd7d9f5196efd538a5bb2))
+* **dev:** orchestrate Phase 4 — event-driven Monitor + catalyst-events tail (CTL-243) ([#378](https://github.com/coalesce-labs/catalyst/issues/378)) ([7f3e728](https://github.com/coalesce-labs/catalyst/commit/7f3e728b2c583dbab550c459c28c207582824185))
+* **dev:** orchestrator DIRTY merge auto-recovery (CTL-232) ([#386](https://github.com/coalesce-labs/catalyst/issues/386)) ([59222b6](https://github.com/coalesce-labs/catalyst/commit/59222b67706e77ed2164583dba51dc9ebcfb912c))
+* **dev:** persist Linear webhook registration to Layer 2 (CTL-238) ([#382](https://github.com/coalesce-labs/catalyst/issues/382)) ([a730499](https://github.com/coalesce-labs/catalyst/commit/a7304997e03823c41028cdc51bd00d4207ec3485))
+* **dev:** persistent interests + explicit deregistration in filter daemon (CTL-262) ([#425](https://github.com/coalesce-labs/catalyst/issues/425)) ([d0ac7d9](https://github.com/coalesce-labs/catalyst/commit/d0ac7d9d2c510803f1c594a99ce677cc48dfae18))
+* **dev:** reactive multi-event PR lifecycle subscription (CTL-228) ([#379](https://github.com/coalesce-labs/catalyst/issues/379)) ([e407c24](https://github.com/coalesce-labs/catalyst/commit/e407c24a9a102259ef81bb29d658a12d19026908))
+* **dev:** SKILL.md for catalyst-filter — protocol docs for orchestrators (CTL-258) ([#422](https://github.com/coalesce-labs/catalyst/issues/422)) ([e42a4ac](https://github.com/coalesce-labs/catalyst/commit/e42a4acb80d4672e1518dfd10ad8609647210cdb))
+* **dev:** wait-for-github diagnostic checkpoint — update callers to two-phase pattern (CTL-251) ([#404](https://github.com/coalesce-labs/catalyst/issues/404)) ([e03f455](https://github.com/coalesce-labs/catalyst/commit/e03f455a0293ccd8160f6066a777de6a8163a2f7))
+* **dev:** wait-for-github skill — two-phase event wait with diagnostic checkpoint (CTL-247) ([7738683](https://github.com/coalesce-labs/catalyst/commit/773868316414494e7565d93174b6e60b3ccce1e0))
+* **dev:** wire catalyst-filter into orchestrate Phase 4 (CTL-257) ([#424](https://github.com/coalesce-labs/catalyst/issues/424)) ([43e36ff](https://github.com/coalesce-labs/catalyst/commit/43e36ff4988bf3e3c665c7edee27969f255c69eb))
+* **dev:** wire Linear webhook delivery via smee.io end-to-end (CTL-242) ([#396](https://github.com/coalesce-labs/catalyst/issues/396)) ([e58ae5f](https://github.com/coalesce-labs/catalyst/commit/e58ae5f4456760bad64bf88114e327a5f4b19380))
+* **dev:** worker-status-change emitter — severity tiers, coalesce, PR enrichment (CTL-229) ([#387](https://github.com/coalesce-labs/catalyst/issues/387)) ([682e817](https://github.com/coalesce-labs/catalyst/commit/682e81788c28391d30e6cda6d2e3279513a3c800))
+
+
+### Bug Fixes
+
+* **dev:** add monitor.* to config templates + verify GitHub webhook registration (CTL-254) ([#409](https://github.com/coalesce-labs/catalyst/issues/409)) ([e09d077](https://github.com/coalesce-labs/catalyst/commit/e09d07717aa1028766eb151c7084f3bd88eb4867))
+* **dev:** add wait-for-github and catalyst-filter to CLAUDE_SNIPPET.md (CTL-268) ([0b1adc4](https://github.com/coalesce-labs/catalyst/commit/0b1adc447db1e8f94f8c011e185e8d635fdf594b))
+* **dev:** add worker done comms hook to oneshot Phase 5 (CTL-236) ([#388](https://github.com/coalesce-labs/catalyst/issues/388)) ([a8d4030](https://github.com/coalesce-labs/catalyst/commit/a8d4030023ad572c8462f44ccff680d0e0667c59))
+* **dev:** correct webhookTunnel field and add smee-client dependency ([#435](https://github.com/coalesce-labs/catalyst/issues/435)) ([10edb77](https://github.com/coalesce-labs/catalyst/commit/10edb77a623d9f6e782ced7e15c87dc7eb311231))
+* **dev:** install-cli.sh adds catalyst-events + defaults to ~/.local/bin (CTL-227) ([#357](https://github.com/coalesce-labs/catalyst/issues/357)) ([5dfa3ac](https://github.com/coalesce-labs/catalyst/commit/5dfa3ac8bcd52ec4a7a5877875b2ee339bf6e37e))
+* **dev:** make orchestrate-roll-usage.sh observable (CTL-233) ([#380](https://github.com/coalesce-labs/catalyst/issues/380)) ([b61941d](https://github.com/coalesce-labs/catalyst/commit/b61941dbe809a7b1151bacc20b7a277571c78f1c))
+* **dev:** orchestrate-fixup/followup WORKER_DIR fallback (CTL-231) ([#377](https://github.com/coalesce-labs/catalyst/issues/377)) ([9386849](https://github.com/coalesce-labs/catalyst/commit/938684981c89b25cf923d7343a69f4395a8b7d6b))
+* **dev:** render DASHBOARD.md every Phase 4 cycle (CTL-230) ([#385](https://github.com/coalesce-labs/catalyst/issues/385)) ([a618055](https://github.com/coalesce-labs/catalyst/commit/a618055fe6e9119d46b7021f53900acfc9729a1e))
+* **dev:** replace polling loops in merge-pr and create-pr with wait-for-github (CTL-250) ([#402](https://github.com/coalesce-labs/catalyst/issues/402)) ([96ab764](https://github.com/coalesce-labs/catalyst/commit/96ab7640b3e712db4f8c0a6cd461bc8d6a5779e3))
+* **dev:** scope-aware Monitor filter + no-awk-pipe warning (CTL-240) ([#390](https://github.com/coalesce-labs/catalyst/issues/390)) ([7efc119](https://github.com/coalesce-labs/catalyst/commit/7efc119ef2c4cfc6895b38ef48d4e259df1ed18f))
+* **dev:** stamp orchestrator on github.* webhook events (CTL-234) ([#391](https://github.com/coalesce-labs/catalyst/issues/391)) ([56083c9](https://github.com/coalesce-labs/catalyst/commit/56083c92eb91b554e5b4ae01a4572ea8c7178c09))
+* **dev:** update fixup/followup templates to CTL-133 exit-at-merging contract (CTL-248) ([#401](https://github.com/coalesce-labs/catalyst/issues/401)) ([2454b19](https://github.com/coalesce-labs/catalyst/commit/2454b19617817f105be3fe997dddc97e5172b753))
+* **dev:** upgrade setup prereq checks for event-driven pipeline (CTL-253) ([#408](https://github.com/coalesce-labs/catalyst/issues/408)) ([2d7b8bf](https://github.com/coalesce-labs/catalyst/commit/2d7b8bfe7afb8ddd73ee78734e84dd423122d612))
+
 ## [8.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.0.0...catalyst-dev-v8.1.0)
 
 May 04, 2026
