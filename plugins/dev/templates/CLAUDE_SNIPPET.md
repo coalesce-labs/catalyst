@@ -25,12 +25,18 @@ This project uses [Catalyst](https://github.com/coalesce-labs/catalyst) for AI-a
 /create-pr            # Create PR with Linear integration
 /describe-pr          # Generate/update PR description
 /merge-pr             # Merge with verification
+/wait-for-github      # Event-driven CI/PR wait — NEVER poll gh pr view/checks directly
 ```
 
 **CI Commands (non-interactive, for automation):**
 ```
 /ci-commit            # Autonomous commit (no prompts)
 /ci-describe-pr       # Autonomous PR description
+```
+
+**Orchestration:**
+```
+/catalyst-filter      # Register semantic event interests (orchestrators only)
 ```
 
 ### Agent Teams
@@ -68,3 +74,4 @@ This project uses the thoughts system for persistent context:
 - PR descriptions → `thoughts/shared/prs/`
 
 **IMPORTANT**: NEVER write to `thoughts/searchable/` — it's a read-only search index.
+
