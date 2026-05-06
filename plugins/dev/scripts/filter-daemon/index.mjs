@@ -20,7 +20,18 @@ import { fileURLToPath } from "node:url";
 
 // --- Config ---
 const CATALYST_DIR = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
-const GROQ_API_KEY = process.env.GROQ_API_KEY ?? "";
+
+export function readGroqApiKeyFromConfig(configPath) {
+  const path = configPath ?? resolve(homedir(), ".config/catalyst/config.json");
+  try {
+    const cfg = JSON.parse(readFileSync(path, "utf8"));
+    return cfg?.groq?.apiKey ?? "";
+  } catch {
+    return "";
+  }
+}
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY || readGroqApiKeyFromConfig();
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
 const GROQ_MODEL = process.env.FILTER_GROQ_MODEL ?? "llama-3.1-8b-instant";
 const DEBOUNCE_MS = parseInt(process.env.FILTER_DEBOUNCE_MS ?? "100", 10);
@@ -488,7 +499,9 @@ function removePidFile() {
 // --- Main ---
 function main() {
   if (!GROQ_API_KEY) {
-    console.warn("[filter] WARN: GROQ_API_KEY not set — semantic filtering disabled until set");
+    console.warn(
+      "[filter] WARN: GROQ_API_KEY not set and groq.apiKey absent from ~/.config/catalyst/config.json — semantic filtering disabled"
+    );
   }
 
   writePidFile();

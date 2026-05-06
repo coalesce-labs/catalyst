@@ -2,9 +2,9 @@
 // Run: bun test plugins/dev/scripts/filter-daemon/index.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { existsSync, unlinkSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { resolve, join } from "node:path";
 import {
   handleRegister,
   handleDeregister,
@@ -19,6 +19,7 @@ import {
   runWatchdogTick,
   saveInterests,
   loadPersistedInterests,
+  readGroqApiKeyFromConfig,
 } from "./index.mjs";
 
 describe("interest table", () => {
@@ -603,5 +604,42 @@ describe("interest persistence (saveInterests / loadPersistedInterests)", () => 
     clearInterests();
     loadPersistedInterests();
     expect(getInterests().has("orch-v1")).toBe(false);
+  });
+});
+
+describe("readGroqApiKeyFromConfig", () => {
+  const tmpDir = join(tmpdir(), "filter-daemon-test-" + process.pid);
+  const configPath = join(tmpDir, "config.json");
+
+  beforeEach(() => {
+    mkdirSync(tmpDir, { recursive: true });
+  });
+
+  test("returns groq.apiKey from a valid config file", () => {
+    writeFileSync(configPath, JSON.stringify({ groq: { apiKey: "test-key-123" } }));
+    expect(readGroqApiKeyFromConfig(configPath)).toBe("test-key-123");
+    rmSync(configPath);
+  });
+
+  test("returns empty string when file does not exist", () => {
+    expect(readGroqApiKeyFromConfig(join(tmpDir, "nonexistent.json"))).toBe("");
+  });
+
+  test("returns empty string when config has no groq key", () => {
+    writeFileSync(configPath, JSON.stringify({ linear: { apiKey: "other" } }));
+    expect(readGroqApiKeyFromConfig(configPath)).toBe("");
+    rmSync(configPath);
+  });
+
+  test("returns empty string when groq.apiKey is null", () => {
+    writeFileSync(configPath, JSON.stringify({ groq: { apiKey: null } }));
+    expect(readGroqApiKeyFromConfig(configPath)).toBe("");
+    rmSync(configPath);
+  });
+
+  test("returns empty string on invalid JSON", () => {
+    writeFileSync(configPath, "not-valid-json{{{");
+    expect(readGroqApiKeyFromConfig(configPath)).toBe("");
+    rmSync(configPath);
   });
 });
