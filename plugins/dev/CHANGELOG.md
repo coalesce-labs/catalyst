@@ -1,9 +1,18 @@
 # Changelog
 
-## [8.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.1.0...catalyst-dev-v8.2.0) (2026-05-06)
+## [8.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.1.0...catalyst-dev-v8.2.0)
+
+May 06, 2026
+
+<!-- ai-enhanced -->
+
+### Groq-Powered Semantic Event Routing
+
+The catalyst-filter daemon now routes GitHub webhook and Linear events through Groq Llama 3.1 8B, letting orchestrators register natural-language intents instead of writing complex jq filters. Bidirectional comms enable mid-flight orchestrator messages to workers, and heartbeat watchdog detection catches stalled workers without LLM calls. Install the new CLIs with `catalyst-filter start` and `setup-webhooks.sh --register-github-hooks`.
 
 
-### Features
+
+### PRs
 
 * **dev:** add catalyst-filter to plugin install scripts (CTL-259) ([#423](https://github.com/coalesce-labs/catalyst/issues/423)) ([20b7807](https://github.com/coalesce-labs/catalyst/commit/20b780770fe487dfde450eefc5ed1f6b0a8eba59))
 * **dev:** bidirectional comms — workers read inbound messages at phase boundaries (CTL-249) ([#403](https://github.com/coalesce-labs/catalyst/issues/403)) ([79aa258](https://github.com/coalesce-labs/catalyst/commit/79aa258c5d2e1fa309bff48b7825417d46e65fde))
@@ -26,10 +35,6 @@
 * **dev:** wire catalyst-filter into orchestrate Phase 4 (CTL-257) ([#424](https://github.com/coalesce-labs/catalyst/issues/424)) ([43e36ff](https://github.com/coalesce-labs/catalyst/commit/43e36ff4988bf3e3c665c7edee27969f255c69eb))
 * **dev:** wire Linear webhook delivery via smee.io end-to-end (CTL-242) ([#396](https://github.com/coalesce-labs/catalyst/issues/396)) ([e58ae5f](https://github.com/coalesce-labs/catalyst/commit/e58ae5f4456760bad64bf88114e327a5f4b19380))
 * **dev:** worker-status-change emitter — severity tiers, coalesce, PR enrichment (CTL-229) ([#387](https://github.com/coalesce-labs/catalyst/issues/387)) ([682e817](https://github.com/coalesce-labs/catalyst/commit/682e81788c28391d30e6cda6d2e3279513a3c800))
-
-
-### Bug Fixes
-
 * **dev:** add monitor.* to config templates + verify GitHub webhook registration (CTL-254) ([#409](https://github.com/coalesce-labs/catalyst/issues/409)) ([e09d077](https://github.com/coalesce-labs/catalyst/commit/e09d07717aa1028766eb151c7084f3bd88eb4867))
 * **dev:** add wait-for-github and catalyst-filter to CLAUDE_SNIPPET.md (CTL-268) ([0b1adc4](https://github.com/coalesce-labs/catalyst/commit/0b1adc447db1e8f94f8c011e185e8d635fdf594b))
 * **dev:** add worker done comms hook to oneshot Phase 5 (CTL-236) ([#388](https://github.com/coalesce-labs/catalyst/issues/388)) ([a8d4030](https://github.com/coalesce-labs/catalyst/commit/a8d4030023ad572c8462f44ccff680d0e0667c59))
