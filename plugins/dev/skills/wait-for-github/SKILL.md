@@ -65,7 +65,10 @@ if [ "$USE_REST" != "true" ]; then
     FILTER_MISMATCH=false
 
     # Diagnostic 1: heartbeat check
-    HEARTBEATS=$(catalyst-events tail --since "5 minutes ago" 2>/dev/null \
+    _LOG_FILE=~/catalyst/events/$(date -u +%Y-%m).jsonl
+    _LOG_LINES=$(wc -l < "$_LOG_FILE" 2>/dev/null | tr -d ' ')
+    _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
+    HEARTBEATS=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null \
       | jq -c 'select(.event == "heartbeat")' | wc -l | tr -d ' ')
     if [ "${HEARTBEATS:-0}" -eq 0 ]; then
       echo "WARN: No heartbeats in the last 5 min — event log may be stalled"
@@ -74,13 +77,11 @@ if [ "$USE_REST" != "true" ]; then
 
     # Diagnostic 2: raw event search without the filter
     # Look for the PR by multiple fields to detect filter mismatches
-    RAW_HIT=$(catalyst-events tail --since "15 minutes ago" 2>/dev/null | jq -c \
+    RAW_HIT=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null | jq -c \
       --argjson pr "$PR_NUMBER" \
       'select(
         (.scope.pr == $pr) or
-        (.detail.number == $pr) or
-        (.detail.pull_request.number == $pr) or
-        (tostring | contains($pr | tostring))
+        (.detail.prNumbers // [] | contains([$pr]))
       )' | head -1)
 
     if [ -n "$RAW_HIT" ]; then
