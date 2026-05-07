@@ -1,6 +1,17 @@
 import { cn } from "@/lib/utils";
 import type { ActivityEvent } from "@/hooks/use-activity";
 
+function repoBasename(repo: string): string {
+  const slash = repo.lastIndexOf("/");
+  return slash >= 0 ? repo.slice(slash + 1) : repo;
+}
+
+function stripRefPrefix(ref: string): string {
+  if (ref.startsWith("refs/heads/")) return ref.slice("refs/heads/".length);
+  if (ref.startsWith("refs/tags/")) return ref.slice("refs/tags/".length);
+  return ref;
+}
+
 /**
  * One row in the activity feed: timestamp + source chip + topic chip + scope chips +
  * one-line summary of the event detail. Clicking a scope chip with both
@@ -199,18 +210,51 @@ function summarize(e: ActivityEvent): string {
   return "";
 }
 
+interface RepoColor {
+  bg?: string;
+  text?: string;
+}
+
+function RepoChip({
+  name,
+  repoColors,
+}: {
+  name: string;
+  repoColors?: Record<string, RepoColor>;
+}) {
+  const base = repoBasename(name);
+  const color = repoColors?.[name] ?? repoColors?.[base];
+  if (color?.bg && color?.text) {
+    return (
+      <span
+        className="rounded px-1.5 py-px text-[10px]"
+        style={{ backgroundColor: color.bg, color: color.text }}
+      >
+        {base}
+      </span>
+    );
+  }
+  return (
+    <span className="rounded bg-surface-3 px-1.5 py-px text-[10px] text-muted">
+      {base}
+    </span>
+  );
+}
+
 interface Props {
   event: ActivityEvent;
   onPivot?: (orchId: string, ticket: string) => void;
+  repoColors?: Record<string, RepoColor>;
 }
 
-export function ActivityEventRow({ event, onPivot }: Props) {
+export function ActivityEventRow({ event, onPivot, repoColors }: Props) {
   const scope = event.scope ?? {};
   const orch = scope.orchestrator ?? event.orchestrator ?? null;
   const worker = scope.worker ?? event.worker ?? null;
   const ticket = scope.ticket ?? null;
   const repo = scope.repo ?? null;
   const pr = scope.pr ?? null;
+  const ref = scope.ref ?? null;
 
   const isLinear = event.event.startsWith("linear.");
   const canPivot = !!(onPivot && orch && worker);
@@ -261,7 +305,15 @@ export function ActivityEventRow({ event, onPivot }: Props) {
         )}
         {!isLinear && repo && pr !== null && (
           <span className="rounded bg-surface-3 px-1.5 py-px text-[10px] text-muted">
-            {repo}#{pr}
+            {repoBasename(repo)}#{pr}
+          </span>
+        )}
+        {repo && pr === null && (
+          <RepoChip name={repo} repoColors={repoColors} />
+        )}
+        {ref && (
+          <span className="rounded bg-surface-3 px-1.5 py-px text-[10px] text-muted">
+            {stripRefPrefix(ref)}
           </span>
         )}
       </span>
