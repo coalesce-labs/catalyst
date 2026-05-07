@@ -292,11 +292,25 @@ export function ActivityEventRow({ event, onPivot, repoColors }: Props) {
             {ticket}
           </span>
         )}
-        {!isLinear && repo && pr !== null && (
-          <span className="rounded bg-surface-3 px-1.5 py-px text-[10px] text-muted">
-            {repoBasename(repo)}#{pr}
-          </span>
-        )}
+        {!isLinear && repo && pr !== null && (() => {
+          const base = repoBasename(repo);
+          const color = repoColors?.[repo] ?? repoColors?.[base];
+          if (color?.bg && color?.text) {
+            return (
+              <span
+                className="rounded px-1.5 py-px text-[10px]"
+                style={{ backgroundColor: color.bg, color: color.text }}
+              >
+                {base}#{pr}
+              </span>
+            );
+          }
+          return (
+            <span className="rounded bg-surface-3 px-1.5 py-px text-[10px] text-muted">
+              {base}#{pr}
+            </span>
+          );
+        })()}
         {repo && pr === null && (
           <RepoChip name={repo} repoColors={repoColors} />
         )}

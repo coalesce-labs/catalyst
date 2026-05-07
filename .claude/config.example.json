@@ -47,7 +47,7 @@
           "git branch -D ${BRANCH_NAME}"
         ]
       },
-      "workerCommand": "/catalyst-dev:oneshot",
+      "workerCommand": "/oneshot",
       "workerModel": "opus",
       "thoughts": {
         "profile": "my-profile",
@@ -65,7 +65,10 @@
       "$comment": "smeeChannel lives in Layer 2 (~/.config/catalyst/config.json) — written by setup-webhooks.sh, never committed.",
       "github": {
         "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET",
-        "watchRepos": ["acme-corp/api"]
+        "watchRepos": ["acme-corp/api"],
+        "repoColors": {
+          "acme-corp/api": "blue"
+        }
       },
       "linear": {
         "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET"
