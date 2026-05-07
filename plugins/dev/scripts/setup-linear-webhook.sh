@@ -3,9 +3,14 @@
 #
 # CTL-224 introduced the GraphQL plumbing. CTL-238 added Layer 2 record
 # persistence: after webhookCreate succeeds, the helper writes
-# catalyst.monitor.linear.{webhookId,webhookUrl,registeredAt,resourceTypes}
+# catalyst.monitor.linear.{webhookId,smeeChannel,registeredAt,resourceTypes}
 # to ~/.config/catalyst/config.json so re-runs decide idempotency locally and
 # --deregister has a clean handle to call webhookDelete with.
+#
+# CTL-274: the URL field is `smeeChannel` (matches what every consumer reads —
+# orch-monitor's webhook-config.ts and the sibling setup-webhooks.sh). Legacy
+# records written by earlier versions used `webhookUrl`; read paths fall back
+# to that key for back-compat and write paths migrate it on the next write.
 #
 # Reads Layer 1 .catalyst/config.json for catalyst.projectKey + catalyst.linear.teamId,
 # and Layer 2 ~/.config/catalyst/config-<projectKey>.json for linear.apiToken.
@@ -134,13 +139,19 @@ SECRET_FILE="${HOME_CONFIG_DIR}/linear-webhook-secret"
 
 # Read the Linear registration record from Layer 2 (~/.config/catalyst/config.json).
 # Outputs compact JSON or empty string when no usable record exists. A "usable"
-# record requires non-empty webhookId AND webhookUrl — partial records are ignored.
+# record requires non-empty webhookId AND a non-empty URL field — either the
+# canonical `smeeChannel` (CTL-274) or the legacy `webhookUrl` (records written
+# by pre-CTL-274 versions). The returned object is normalized to always have
+# `.smeeChannel` populated so callers don't need to handle the legacy key.
 read_linear_record() {
   [[ -f "$HOME_CONFIG_PATH" ]] || { echo ""; return 0; }
   jq -c '
-    .catalyst.monitor.linear // empty
-    | if (.webhookId // "") != "" and (.webhookUrl // "") != ""
-      then .
+    (.catalyst.monitor.linear // {}) as $r
+    | (($r.smeeChannel // "") | tostring) as $canon
+    | (($r.webhookUrl  // "") | tostring) as $legacy
+    | (if $canon != "" then $canon else $legacy end) as $url
+    | if (($r.webhookId // "") != "") and ($url != "")
+      then $r | .smeeChannel = $url
       else empty
       end
   ' "$HOME_CONFIG_PATH" 2>/dev/null
@@ -149,6 +160,9 @@ read_linear_record() {
 # Write the registration record. Pass resourceTypes as a JSON array string;
 # empty array ([]) means "unknown — omit the field" so partial records from
 # the API-list-dedup branch don't fabricate resource types.
+#
+# CTL-274: writes the canonical `smeeChannel` key and drops any legacy
+# `webhookUrl` field present from a pre-CTL-274 record.
 write_linear_record() {
   local webhook_id="$1" webhook_url="$2" resource_types_json="$3"
   local timestamp; timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -161,7 +175,8 @@ write_linear_record() {
        | .catalyst.monitor //= {}
        | .catalyst.monitor.linear //= {}
        | .catalyst.monitor.linear.webhookId = $id
-       | .catalyst.monitor.linear.webhookUrl = $url
+       | .catalyst.monitor.linear.smeeChannel = $url
+       | .catalyst.monitor.linear |= del(.webhookUrl)
        | .catalyst.monitor.linear.registeredAt = $ts
        | if ($rt | length) > 0
          then .catalyst.monitor.linear.resourceTypes = $rt
@@ -172,12 +187,14 @@ write_linear_record() {
 }
 
 # Clear the Linear registration record, preserving any sibling Layer 2 keys.
+# CTL-274: deletes both the canonical `smeeChannel` and the legacy `webhookUrl`
+# field so legacy records are also fully cleared.
 clear_linear_record() {
   [[ -f "$HOME_CONFIG_PATH" ]] || return 0
   local tmp; tmp=$(mktemp)
   jq '
     if (.catalyst.monitor.linear // null) != null
-    then .catalyst.monitor.linear |= del(.webhookId, .webhookUrl, .registeredAt, .resourceTypes)
+    then .catalyst.monitor.linear |= del(.webhookId, .smeeChannel, .webhookUrl, .registeredAt, .resourceTypes)
          | if (.catalyst.monitor.linear // {}) == {} then del(.catalyst.monitor.linear) else . end
          | if (.catalyst.monitor // {}) == {} then del(.catalyst.monitor) else . end
          | if (.catalyst // {}) == {} then del(.catalyst) else . end
@@ -255,7 +272,7 @@ if [[ $DEREGISTER -eq 1 ]]; then
     exit 1
   fi
   RECORD_ID=$(printf '%s' "$EXISTING_RECORD" | jq -r '.webhookId')
-  RECORD_URL=$(printf '%s' "$EXISTING_RECORD" | jq -r '.webhookUrl')
+  RECORD_URL=$(printf '%s' "$EXISTING_RECORD" | jq -r '.smeeChannel')
   load_api_token
   delete_via_graphql "$RECORD_ID"
   clear_linear_record
@@ -279,7 +296,7 @@ fi
 LAYER2_HANDLED=0
 EXISTING_RECORD="$(read_linear_record)"
 if [[ -n "$EXISTING_RECORD" ]]; then
-  RECORD_URL=$(printf '%s' "$EXISTING_RECORD" | jq -r '.webhookUrl')
+  RECORD_URL=$(printf '%s' "$EXISTING_RECORD" | jq -r '.smeeChannel')
   RECORD_ID=$(printf '%s' "$EXISTING_RECORD" | jq -r '.webhookId')
   if [[ "$RECORD_URL" == "$WEBHOOK_URL" && "$FORCE" -eq 0 ]]; then
     echo "Webhook already registered (id=${RECORD_ID}, url=${RECORD_URL}); skipping."

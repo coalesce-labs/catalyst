@@ -3,10 +3,15 @@
 #
 # CTL-238 adds Layer 2 record persistence for Linear webhook registration:
 # after webhookCreate succeeds, the helper writes
-# catalyst.monitor.linear.{webhookId,webhookUrl,registeredAt,resourceTypes}
+# catalyst.monitor.linear.{webhookId,smeeChannel,registeredAt,resourceTypes}
 # to ~/.config/catalyst/config.json. Re-running with the same URL no-ops
 # based on the local record (no Linear API call). --linear-deregister
 # reads the local record to call webhookDelete and clears it.
+#
+# CTL-274 renamed the URL field from `webhookUrl` to `smeeChannel` so the
+# producer matches what every consumer reads. Records written by older
+# script versions (with `webhookUrl`) still round-trip via a read fallback
+# that migrates the field on first re-run.
 #
 # Test approach: stub `curl` with a script that:
 #   • routes by GraphQL query name (parses stdin JSON .query)
@@ -227,16 +232,19 @@ test_register_writes_layer2_record() {
   local rec; rec=$(read_layer2 "$env")
   [[ -n "$rec" ]] || { echo "Layer 2 record missing"; return 1; }
   local id; id=$(printf '%s' "$rec" | jq -r '.webhookId')
-  local url; url=$(printf '%s' "$rec" | jq -r '.webhookUrl')
+  local url; url=$(printf '%s' "$rec" | jq -r '.smeeChannel')
   local ts; ts=$(printf '%s' "$rec" | jq -r '.registeredAt')
   local rt; rt=$(printf '%s' "$rec" | jq -c '.resourceTypes')
   expect_eq "webhookId" "w1" "$id" || return 1
-  expect_eq "webhookUrl" "https://foo.test/api/webhook/linear" "$url" || return 1
+  expect_eq "smeeChannel" "https://foo.test/api/webhook/linear" "$url" || return 1
   # ISO-8601 UTC timestamp shape
   if ! [[ "$ts" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
     echo "registeredAt malformed: $ts"; return 1
   fi
   expect_eq "resourceTypes" '["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]' "$rt" || return 1
+  # Legacy field must NOT be written by the new code path.
+  local has_legacy; has_legacy=$(printf '%s' "$rec" | jq 'has("webhookUrl")')
+  expect_eq "no legacy webhookUrl" "false" "$has_legacy" || return 1
 }
 
 # ─── Test 2 — idempotent re-run with same URL: no API call ─────────────────
@@ -249,7 +257,7 @@ test_idempotent_rerun_no_api_call() {
     "monitor": {
       "linear": {
         "webhookId": "w1",
-        "webhookUrl": "https://foo.test/api/webhook/linear",
+        "smeeChannel": "https://foo.test/api/webhook/linear",
         "registeredAt": "2026-05-04T20:00:00Z",
         "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
       }
@@ -277,7 +285,7 @@ test_rerun_different_url_errors_without_force() {
     "monitor": {
       "linear": {
         "webhookId": "w1",
-        "webhookUrl": "https://foo.test/api/webhook/linear",
+        "smeeChannel": "https://foo.test/api/webhook/linear",
         "registeredAt": "2026-05-04T20:00:00Z",
         "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
       }
@@ -308,7 +316,7 @@ test_force_overwrites_layer2_record() {
     "monitor": {
       "linear": {
         "webhookId": "w1",
-        "webhookUrl": "https://foo.test/api/webhook/linear",
+        "smeeChannel": "https://foo.test/api/webhook/linear",
         "registeredAt": "2026-05-04T20:00:00Z",
         "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
       }
@@ -325,9 +333,9 @@ EOF
     >/dev/null 2>&1 || return 1
 
   local id; id=$(read_layer2 "$env" | jq -r '.webhookId')
-  local url; url=$(read_layer2 "$env" | jq -r '.webhookUrl')
+  local url; url=$(read_layer2 "$env" | jq -r '.smeeChannel')
   expect_eq "webhookId now w2" "w2" "$id" || return 1
-  expect_eq "webhookUrl now bar" "https://bar.test/api/webhook/linear" "$url" || return 1
+  expect_eq "smeeChannel now bar" "https://bar.test/api/webhook/linear" "$url" || return 1
 
   # Exactly one delete + one create. NO list call (Layer 2 short-circuit avoids it).
   expect_eq "delete count" "1" "$(count_calls "$env" delete)" || return 1
@@ -344,7 +352,7 @@ test_deregister_uses_layer2_id() {
     "monitor": {
       "linear": {
         "webhookId": "w1",
-        "webhookUrl": "https://foo.test/api/webhook/linear",
+        "smeeChannel": "https://foo.test/api/webhook/linear",
         "registeredAt": "2026-05-04T20:00:00Z",
         "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
       }
@@ -426,12 +434,113 @@ test_register_falls_back_to_api_dedup_when_layer2_missing() {
   # because we couldn't observe them from a list response.
   local rec; rec=$(read_layer2 "$env")
   local id; id=$(printf '%s' "$rec" | jq -r '.webhookId')
-  local url; url=$(printf '%s' "$rec" | jq -r '.webhookUrl')
+  local url; url=$(printf '%s' "$rec" | jq -r '.smeeChannel')
   expect_eq "webhookId from list" "wOld" "$id" || return 1
-  expect_eq "webhookUrl from list" "https://foo.test/api/webhook/linear" "$url" || return 1
+  expect_eq "smeeChannel from list" "https://foo.test/api/webhook/linear" "$url" || return 1
   # resourceTypes should be absent (we don't fabricate them).
   local has_rt; has_rt=$(printf '%s' "$rec" | jq 'has("resourceTypes")')
   expect_eq "resourceTypes absent" "false" "$has_rt" || return 1
+}
+
+# ─── Test 9 — legacy webhookUrl record short-circuits + migrates (CTL-274) ─
+# A record written by the pre-CTL-274 producer uses `webhookUrl` instead of
+# `smeeChannel`. The new code must:
+#   1. Recognize it as a usable record (read fallback)
+#   2. Short-circuit on same-URL re-run (no API call)
+#   3. NOT migrate the field on a no-op short-circuit (we don't write when we
+#      have nothing new to write — keeps the no-API-call invariant simple)
+test_legacy_webhookurl_record_short_circuits() {
+  local env; env=$(make_test_env t9)
+  cat > "${env}/home/.config/catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "monitor": {
+      "linear": {
+        "webhookId": "wLegacy",
+        "webhookUrl": "https://foo.test/api/webhook/linear",
+        "registeredAt": "2026-05-01T00:00:00Z",
+        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+      }
+    }
+  }
+}
+EOF
+  # Same URL — should short-circuit on the legacy record (no API call).
+  run_helper "$env" --webhook-url "https://foo.test/api/webhook/linear" >/dev/null 2>&1 || return 1
+
+  local n; n=$(total_calls "$env")
+  expect_eq "total curl calls" "0" "$n" || return 1
+
+  # Record retains the legacy webhookId — short-circuit didn't rewrite.
+  local id; id=$(read_layer2 "$env" | jq -r '.webhookId')
+  expect_eq "webhookId preserved" "wLegacy" "$id" || return 1
+}
+
+# ─── Test 10 — legacy webhookUrl record migrates on --force (CTL-274) ──────
+# When --force triggers a fresh create, the new write_linear_record must
+# write `smeeChannel` AND drop the legacy `webhookUrl` field.
+test_legacy_webhookurl_record_migrates_on_force() {
+  local env; env=$(make_test_env t10)
+  cat > "${env}/home/.config/catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "monitor": {
+      "linear": {
+        "webhookId": "wLegacy",
+        "webhookUrl": "https://foo.test/api/webhook/linear",
+        "registeredAt": "2026-05-01T00:00:00Z",
+        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+      }
+    }
+  }
+}
+EOF
+  local DEL_RESP="${env}/del.json" CR_RESP="${env}/cr.json"
+  write_response_delete_success "$DEL_RESP"
+  write_response_create_success "$CR_RESP" "wNew" "https://foo.test/api/webhook/linear"
+  STUB_RESPONSE_DELETE="$DEL_RESP" \
+  STUB_RESPONSE_CREATE="$CR_RESP" \
+  run_helper "$env" --webhook-url "https://foo.test/api/webhook/linear" --force \
+    >/dev/null 2>&1 || return 1
+
+  local rec; rec=$(read_layer2 "$env")
+  local has_legacy; has_legacy=$(printf '%s' "$rec" | jq 'has("webhookUrl")')
+  local has_canonical; has_canonical=$(printf '%s' "$rec" | jq 'has("smeeChannel")')
+  expect_eq "legacy webhookUrl removed" "false" "$has_legacy" || return 1
+  expect_eq "canonical smeeChannel present" "true" "$has_canonical" || return 1
+  local url; url=$(printf '%s' "$rec" | jq -r '.smeeChannel')
+  expect_eq "smeeChannel value" "https://foo.test/api/webhook/linear" "$url" || return 1
+}
+
+# ─── Test 11 — legacy webhookUrl record deregisters cleanly (CTL-274) ──────
+# `--deregister` reading a legacy record must call webhookDelete with the
+# stored ID and clear both legacy and canonical keys from the record.
+test_legacy_webhookurl_record_deregisters() {
+  local env; env=$(make_test_env t11)
+  cat > "${env}/home/.config/catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "monitor": {
+      "linear": {
+        "webhookId": "wLegacy",
+        "webhookUrl": "https://foo.test/api/webhook/linear",
+        "registeredAt": "2026-05-01T00:00:00Z",
+        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+      }
+    }
+  }
+}
+EOF
+  echo "old_secret" > "${env}/home/.config/catalyst/linear-webhook-secret"
+
+  local DEL_RESP="${env}/del.json"
+  write_response_delete_success "$DEL_RESP"
+  STUB_RESPONSE_DELETE="$DEL_RESP" \
+  run_helper "$env" --deregister >/dev/null 2>&1 || return 1
+
+  local rec; rec=$(read_layer2 "$env")
+  [[ -z "$rec" || "$rec" == "null" ]] || { echo "Layer 2 record not cleared: $rec"; return 1; }
+  expect_eq "delete count" "1" "$(count_calls "$env" delete)" || return 1
 }
 
 # ─── Run all ──────────────────────────────────────────────────────────────
@@ -444,6 +553,9 @@ run "--deregister clears Layer 2 + secret" test_deregister_uses_layer2_id
 run "--deregister with no record errors" test_deregister_no_record_errors
 run "Layer 2 missing → API list+create" test_register_falls_back_to_api_when_layer2_missing
 run "Layer 2 missing → API list dedup" test_register_falls_back_to_api_dedup_when_layer2_missing
+run "legacy webhookUrl short-circuits (CTL-274)" test_legacy_webhookurl_record_short_circuits
+run "legacy webhookUrl migrates on --force (CTL-274)" test_legacy_webhookurl_record_migrates_on_force
+run "legacy webhookUrl deregisters cleanly (CTL-274)" test_legacy_webhookurl_record_deregisters
 
 echo
 echo "Passed: $PASSES, Failed: $FAILURES"
