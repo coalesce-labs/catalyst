@@ -24,6 +24,7 @@ set -uo pipefail
 WEBHOOK_URL=""
 FORCE=0
 DEREGISTER=0
+ALL_PUBLIC_TEAMS=0
 SECRET_ENV="CATALYST_LINEAR_WEBHOOK_SECRET"
 CONFIG_PATH=".catalyst/config.json"
 LABEL="Catalyst orch-monitor"
@@ -35,10 +36,10 @@ RESOURCE_TYPES=("Issue" "Comment" "IssueLabel" "Cycle" "Reaction" "Project")
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") --webhook-url <https-url> [--force]
+Usage: $(basename "$0") --webhook-url <https-url> [--force] [--all-public-teams]
                         [--secret-env <NAME>] [--config <path>]
                         [--label <text>]
-       $(basename "$0") --deregister [--config <path>]
+       $(basename "$0") --deregister [--all-public-teams] [--config <path>]
 
 Registers (or deregisters) a Linear webhook idempotently for orch-monitor.
 
@@ -46,11 +47,17 @@ Register:
   --webhook-url <url>     Public HTTPS URL where Linear should deliver events
                           (e.g. https://your-tunnel/api/webhook/linear).
   --force                 Delete existing webhook and recreate.
+  --all-public-teams      Register a workspace-wide webhook (scoped to all
+                          public teams in the workspace) instead of a
+                          single-team webhook. Stored separately in Layer 2,
+                          allowing both to coexist. Warn if conflict detected.
 
 Deregister:
   --deregister            Read the webhookId from the Layer 2 record, call
                           webhookDelete, clear the record, remove the local
                           secret file.
+  --all-public-teams      When deregistering, remove the workspace-wide
+                          webhook (if present) instead of a single-team webhook.
 
 Common options:
   --secret-env <NAME>     Env-var name printed in the export line.
@@ -73,6 +80,7 @@ while [[ $# -gt 0 ]]; do
       WEBHOOK_URL="$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --deregister) DEREGISTER=1; shift ;;
+    --all-public-teams) ALL_PUBLIC_TEAMS=1; shift ;;
     --secret-env)
       if [[ $# -lt 2 || -z "${2:-}" ]]; then
         echo "ERROR: --secret-env requires a value" >&2; exit 1
@@ -138,15 +146,28 @@ SECRET_FILE="${HOME_CONFIG_DIR}/linear-webhook-secret"
 # ─── Layer 2 record helpers (CTL-238) ──────────────────────────────────────
 
 # Read the Linear registration record from Layer 2 (~/.config/catalyst/config.json).
-# Outputs compact JSON or empty string when no usable record exists. A "usable"
-# record requires non-empty webhookId AND a non-empty URL field — either the
-# canonical `smeeChannel` (CTL-274) or the legacy `webhookUrl` (records written
-# by pre-CTL-274 versions). The returned object is normalized to always have
-# `.smeeChannel` populated so callers don't need to handle the legacy key.
+# Accepts optional $1 = key (e.g. "workspace" or team UUID). Outputs compact JSON
+# or empty string when no usable record exists.
+#
+# Backward compatibility: If catalyst.monitor.linear is a single object (pre-keyed
+# format), treat it as if it were keyed under "workspace".
+#
+# A "usable" record requires non-empty webhookId AND a non-empty URL field — either
+# the canonical `smeeChannel` (CTL-274) or the legacy `webhookUrl`. The returned
+# object is normalized to always have `.smeeChannel` populated.
 read_linear_record() {
+  local key="${1:-workspace}"
   [[ -f "$HOME_CONFIG_PATH" ]] || { echo ""; return 0; }
-  jq -c '
-    (.catalyst.monitor.linear // {}) as $r
+  jq -c --arg key "$key" '
+    (.catalyst.monitor.linear // {}) as $linear
+    | (if ($linear | type) == "object" and ($linear.webhookId // "") != ""
+        then
+          # Single object format (backward compat) — treat as "workspace" key
+          (if $key == "workspace" then $linear else empty end)
+        else
+          # Keyed object format — lookup by key
+          ($linear[$key] // {})
+        end) as $r
     | (($r.smeeChannel // "") | tostring) as $canon
     | (($r.webhookUrl  // "") | tostring) as $legacy
     | (if $canon != "" then $canon else $legacy end) as $url
@@ -157,51 +178,122 @@ read_linear_record() {
   ' "$HOME_CONFIG_PATH" 2>/dev/null
 }
 
-# Write the registration record. Pass resourceTypes as a JSON array string;
-# empty array ([]) means "unknown — omit the field" so partial records from
-# the API-list-dedup branch don't fabricate resource types.
+# Write the registration record to a keyed location in Layer 2. Supports multi-team
+# setup: records are stored under catalyst.monitor.linear[$key], where $key is
+# typically "workspace" or a team UUID.
 #
-# CTL-274: writes the canonical `smeeChannel` key and drops any legacy
-# `webhookUrl` field present from a pre-CTL-274 record.
+# Arguments:
+#   $1: key (e.g. "workspace" or team UUID)
+#   $2: webhook_id
+#   $3: webhook_url
+#   $4: resource_types_json (JSON array string)
+#
+# Backward compatibility: If the file currently has a single-object format,
+# migrate it to keyed format. On write, always use keyed format.
 write_linear_record() {
-  local webhook_id="$1" webhook_url="$2" resource_types_json="$3"
+  local key="$1" webhook_id="$2" webhook_url="$3" resource_types_json="$4"
   local timestamp; timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "$HOME_CONFIG_DIR"
   [[ -f "$HOME_CONFIG_PATH" ]] || echo "{}" > "$HOME_CONFIG_PATH"
   local tmp; tmp=$(mktemp)
-  jq --arg id "$webhook_id" --arg url "$webhook_url" --arg ts "$timestamp" \
-     --argjson rt "$resource_types_json" '
+  jq --arg key "$key" --arg id "$webhook_id" --arg url "$webhook_url" \
+     --arg ts "$timestamp" --argjson rt "$resource_types_json" '
        .catalyst //= {}
        | .catalyst.monitor //= {}
        | .catalyst.monitor.linear //= {}
-       | .catalyst.monitor.linear.webhookId = $id
-       | .catalyst.monitor.linear.smeeChannel = $url
-       | .catalyst.monitor.linear |= del(.webhookUrl)
-       | .catalyst.monitor.linear.registeredAt = $ts
-       | if ($rt | length) > 0
-         then .catalyst.monitor.linear.resourceTypes = $rt
-         else .catalyst.monitor.linear |= del(.resourceTypes)
-         end
+       | (if (.catalyst.monitor.linear | type) == "object" and
+              (.catalyst.monitor.linear.webhookId // "") != ""
+         then
+           # Migrate single-object format to keyed object
+           {"workspace": .catalyst.monitor.linear}
+         else
+           # Already keyed or empty
+           (.catalyst.monitor.linear | if type == "object" then . else {} end)
+         end) as $linear
+       | .catalyst.monitor.linear = ($linear + {
+           ($key): {
+             webhookId: $id,
+             smeeChannel: $url,
+             registeredAt: $ts
+           } + (if ($rt | length) > 0 then {resourceTypes: $rt} else {} end)
+         })
      ' "$HOME_CONFIG_PATH" > "$tmp"
   mv "$tmp" "$HOME_CONFIG_PATH"
 }
 
-# Clear the Linear registration record, preserving any sibling Layer 2 keys.
-# CTL-274: deletes both the canonical `smeeChannel` and the legacy `webhookUrl`
-# field so legacy records are also fully cleared.
+# Clear a specific Linear registration record key from the Layer 2 keyed object.
+# Accepts optional $1 = key (default "workspace"). Deletes only that key,
+# preserving other team records.
+#
+# Arguments:
+#   $1: key to delete (optional, default "workspace")
 clear_linear_record() {
+  local key="${1:-workspace}"
   [[ -f "$HOME_CONFIG_PATH" ]] || return 0
   local tmp; tmp=$(mktemp)
-  jq '
+  jq --arg key "$key" '
     if (.catalyst.monitor.linear // null) != null
-    then .catalyst.monitor.linear |= del(.webhookId, .smeeChannel, .webhookUrl, .registeredAt, .resourceTypes)
-         | if (.catalyst.monitor.linear // {}) == {} then del(.catalyst.monitor.linear) else . end
-         | if (.catalyst.monitor // {}) == {} then del(.catalyst.monitor) else . end
-         | if (.catalyst // {}) == {} then del(.catalyst) else . end
+    then
+      .catalyst.monitor.linear |= del(.[$key])
+      | if (.catalyst.monitor.linear // {}) == {} then del(.catalyst.monitor.linear) else . end
+      | if (.catalyst.monitor // {}) == {} then del(.catalyst.monitor) else . end
+      | if (.catalyst // {}) == {} then del(.catalyst) else . end
     else .
     end
   ' "$HOME_CONFIG_PATH" > "$tmp"
   mv "$tmp" "$HOME_CONFIG_PATH"
+}
+
+# Detect conflicts between workspace-wide and per-team webhooks.
+# Warns if:
+#   - Registering workspace webhook but per-team webhooks exist
+#   - Registering per-team webhook but workspace webhook exists
+#
+# Arguments:
+#   $1: key being registered ("workspace" or team UUID)
+detect_webhook_conflicts() {
+  local key="$1"
+  [[ -f "$HOME_CONFIG_PATH" ]] || return 0
+
+  # Get all registered keys (skip if linear config doesn't exist or is single object)
+  local registered_keys
+  registered_keys=$(jq -r '
+    (.catalyst.monitor.linear // {}) as $linear
+    | if ($linear | type) == "object" and ($linear.webhookId // "") != ""
+      then
+        # Single object format — this is the legacy "workspace"
+        "workspace"
+      else
+        # Keyed format — list all keys
+        ($linear | keys[]? // empty)
+      end
+  ' "$HOME_CONFIG_PATH" 2>/dev/null)
+
+  if [[ -z "$registered_keys" ]]; then
+    return 0
+  fi
+
+  if [[ "$key" == "workspace" ]]; then
+    # Registering workspace webhook — warn if per-team webhooks exist
+    for registered_key in $registered_keys; do
+      if [[ "$registered_key" != "workspace" ]]; then
+        echo "⚠️  WARNING: Per-team webhook already registered ($registered_key)" >&2
+        echo "   Workspace-wide webhook will coexist with per-team webhooks." >&2
+        echo "   Linear events will reach both webhooks." >&2
+        return 0
+      fi
+    done
+  else
+    # Registering per-team webhook — warn if workspace webhook exists
+    for registered_key in $registered_keys; do
+      if [[ "$registered_key" == "workspace" ]]; then
+        echo "⚠️  WARNING: Workspace-wide webhook already registered" >&2
+        echo "   This per-team webhook will coexist with the workspace webhook." >&2
+        echo "   Events for team $key will reach both webhooks." >&2
+        return 0
+      fi
+    done
+  fi
 }
 
 # ─── Linear API auth + GraphQL helpers ─────────────────────────────────────
@@ -265,9 +357,22 @@ delete_via_graphql() {
 
 # ─── --deregister branch ───────────────────────────────────────────────────
 if [[ $DEREGISTER -eq 1 ]]; then
-  EXISTING_RECORD="$(read_linear_record)"
+  DEREGISTER_KEY="workspace"
+  if [[ $ALL_PUBLIC_TEAMS -eq 0 ]]; then
+    # Deregister per-team webhook — need teamId
+    TEAM_ID=$(jq -r '.catalyst.linear.teamId // empty' "$CONFIG_PATH" 2>/dev/null)
+    if [[ -z "$TEAM_ID" ]]; then
+      echo "ERROR: catalyst.linear.teamId not set in $CONFIG_PATH" >&2
+      echo "       To deregister a per-team webhook, set it first." >&2
+      echo "       To deregister the workspace webhook, use: $0 --deregister --all-public-teams" >&2
+      exit 1
+    fi
+    DEREGISTER_KEY="$TEAM_ID"
+  fi
+
+  EXISTING_RECORD="$(read_linear_record "$DEREGISTER_KEY")"
   if [[ -z "$EXISTING_RECORD" ]]; then
-    echo "ERROR: no Linear webhook record found in $HOME_CONFIG_PATH" >&2
+    echo "ERROR: no Linear webhook record found for key '$DEREGISTER_KEY' in $HOME_CONFIG_PATH" >&2
     echo "       Nothing to deregister." >&2
     exit 1
   fi
@@ -275,26 +380,33 @@ if [[ $DEREGISTER -eq 1 ]]; then
   RECORD_URL=$(printf '%s' "$EXISTING_RECORD" | jq -r '.smeeChannel')
   load_api_token
   delete_via_graphql "$RECORD_ID"
-  clear_linear_record
+  clear_linear_record "$DEREGISTER_KEY"
   rm -f "$SECRET_FILE"
   echo "Deregistered Linear webhook ${RECORD_ID} (${RECORD_URL})"
-  echo "Cleared Layer 2 record + removed ${SECRET_FILE}"
+  echo "Cleared Layer 2 record for key '$DEREGISTER_KEY' + removed ${SECRET_FILE}"
   exit 0
 fi
 
 # ─── --register branch ──────────────────────────────────────────────────────
-# Need teamId for create.
-TEAM_ID=$(jq -r '.catalyst.linear.teamId // empty' "$CONFIG_PATH" 2>/dev/null)
-if [[ -z "$TEAM_ID" ]]; then
-  echo "ERROR: catalyst.linear.teamId not set in $CONFIG_PATH." >&2
-  echo "       Run plugins/dev/scripts/resolve-linear-ids.sh first to populate it." >&2
-  exit 1
+# Determine the registration key and validate preconditions.
+REGISTER_KEY="workspace"
+TEAM_ID=""
+if [[ $ALL_PUBLIC_TEAMS -eq 0 ]]; then
+  # Per-team webhook — need teamId
+  TEAM_ID=$(jq -r '.catalyst.linear.teamId // empty' "$CONFIG_PATH" 2>/dev/null)
+  if [[ -z "$TEAM_ID" ]]; then
+    echo "ERROR: catalyst.linear.teamId not set in $CONFIG_PATH." >&2
+    echo "       Run plugins/dev/scripts/resolve-linear-ids.sh first to populate it." >&2
+    echo "       Or use --all-public-teams to register a workspace-wide webhook." >&2
+    exit 1
+  fi
+  REGISTER_KEY="$TEAM_ID"
 fi
 
 # Step 1 (CTL-238): Layer 2 short-circuit. When a record exists we know the
 # webhookId locally — no need to call `webhooks { nodes }` to discover it.
 LAYER2_HANDLED=0
-EXISTING_RECORD="$(read_linear_record)"
+EXISTING_RECORD="$(read_linear_record "$REGISTER_KEY")"
 if [[ -n "$EXISTING_RECORD" ]]; then
   RECORD_URL=$(printf '%s' "$EXISTING_RECORD" | jq -r '.smeeChannel')
   RECORD_ID=$(printf '%s' "$EXISTING_RECORD" | jq -r '.webhookId')
@@ -318,9 +430,12 @@ if [[ -n "$EXISTING_RECORD" ]]; then
     echo "Deleting existing webhook ${RECORD_ID} (different URL, force)..."
   fi
   delete_via_graphql "$RECORD_ID"
-  clear_linear_record
+  clear_linear_record "$REGISTER_KEY"
   LAYER2_HANDLED=1
 fi
+
+# Detect conflicts before creating a new webhook
+detect_webhook_conflicts "$REGISTER_KEY"
 
 # Step 2: API-side dedup fallback. Runs only when no Layer 2 record was
 # present — i.e., a fresh laptop, or a webhook registered manually before
@@ -361,16 +476,29 @@ if [[ "$LAYER2_HANDLED" -eq 0 ]]; then
 fi
 
 # Step 3: create.
-# $url/$label/$teamId/$resourceTypes below are GraphQL variables, not shell vars.
-# shellcheck disable=SC2016
-CREATE_QUERY='mutation($url:String!,$label:String!,$teamId:String!,$resourceTypes:[String!]!){webhookCreate(input:{url:$url,label:$label,teamId:$teamId,resourceTypes:$resourceTypes}){success,webhook{id,secret,enabled,url}}}'
+# Choose mutation based on whether registering workspace or per-team webhook.
 RESOURCE_TYPES_JSON=$(printf '%s\n' "${RESOURCE_TYPES[@]}" | jq -R . | jq -sc .)
-CREATE_VARS=$(jq -nc \
-  --arg url "$WEBHOOK_URL" \
-  --arg label "$LABEL" \
-  --arg teamId "$TEAM_ID" \
-  --argjson resourceTypes "$RESOURCE_TYPES_JSON" \
-  '{url:$url,label:$label,teamId:$teamId,resourceTypes:$resourceTypes}')
+
+if [[ $ALL_PUBLIC_TEAMS -eq 1 ]]; then
+  # Workspace-wide webhook — use allPublicTeams: true instead of teamId.
+  # shellcheck disable=SC2016
+  CREATE_QUERY='mutation($url:String!,$label:String!,$resourceTypes:[String!]!){webhookCreate(input:{url:$url,label:$label,allPublicTeams:true,resourceTypes:$resourceTypes}){success,webhook{id,secret,enabled,url}}}'
+  CREATE_VARS=$(jq -nc \
+    --arg url "$WEBHOOK_URL" \
+    --arg label "$LABEL" \
+    --argjson resourceTypes "$RESOURCE_TYPES_JSON" \
+    '{url:$url,label:$label,allPublicTeams:true,resourceTypes:$resourceTypes}')
+else
+  # Per-team webhook — use teamId.
+  # shellcheck disable=SC2016
+  CREATE_QUERY='mutation($url:String!,$label:String!,$teamId:String!,$resourceTypes:[String!]!){webhookCreate(input:{url:$url,label:$label,teamId:$teamId,resourceTypes:$resourceTypes}){success,webhook{id,secret,enabled,url}}}'
+  CREATE_VARS=$(jq -nc \
+    --arg url "$WEBHOOK_URL" \
+    --arg label "$LABEL" \
+    --arg teamId "$TEAM_ID" \
+    --argjson resourceTypes "$RESOURCE_TYPES_JSON" \
+    '{url:$url,label:$label,teamId:$teamId,resourceTypes:$resourceTypes}')
+fi
 
 CREATE_RESP=$(linear_graphql "$CREATE_QUERY" "$CREATE_VARS" 2>&1) || {
   echo "ERROR: Linear API call (create) failed" >&2
@@ -402,7 +530,7 @@ mkdir -p "$HOME_CONFIG_DIR"
 chmod 600 "$SECRET_FILE"
 
 # Write the Layer 2 registration record (CTL-238).
-write_linear_record "$WEBHOOK_ID" "$WEBHOOK_URL" "$RESOURCE_TYPES_JSON"
+write_linear_record "$REGISTER_KEY" "$WEBHOOK_ID" "$WEBHOOK_URL" "$RESOURCE_TYPES_JSON"
 
 cat <<EOF
 Created Linear webhook $WEBHOOK_ID for $WEBHOOK_URL
