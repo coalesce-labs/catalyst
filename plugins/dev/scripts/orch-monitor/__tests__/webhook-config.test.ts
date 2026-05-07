@@ -803,3 +803,183 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
     expect(cfg!.linearBotUserId).toBe("");
   });
 });
+
+describe("loadWebhookConfig — per-team secret files (CTL-285)", () => {
+  it("reads linearSecret from per-team file when file exists", () => {
+    writeFileSync(join(homeDir, "linear-webhook-secret-ctl"), "file-secret-ctl\n");
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            ctl: { webhookId: "linear-webhook-123" },
+          },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "MY_LINEAR_SECRET" },
+        },
+      },
+    });
+    process.env.MY_LINEAR_SECRET = "env-fallback-should-not-be-used";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.linearSecrets).toEqual([{ key: "ctl", secret: "file-secret-ctl" }]);
+
+    delete process.env.MY_LINEAR_SECRET;
+  });
+
+  it("falls back to env var when per-team file does not exist", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            ctl: { webhookId: "linear-webhook-123" },
+          },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "CATALYST_LINEAR_WEBHOOK_SECRET" },
+        },
+      },
+    });
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "env-secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSecrets).toEqual([{ key: "ctl", secret: "env-secret" }]);
+  });
+
+  it("reads workspace secret from linear-webhook-secret file for workspace key", () => {
+    writeFileSync(join(homeDir, "linear-webhook-secret"), "workspace-file-secret\n");
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            workspace: { webhookId: "linear-webhook-456" },
+          },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "MY_LINEAR_SECRET" },
+        },
+      },
+    });
+    process.env.MY_LINEAR_SECRET = "env-fallback-should-not-be-used";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSecrets).toEqual([{ key: "workspace", secret: "workspace-file-secret" }]);
+
+    delete process.env.MY_LINEAR_SECRET;
+  });
+
+  it("reads legacy single-object secret from linear-webhook-secret file", () => {
+    writeFileSync(join(homeDir, "linear-webhook-secret"), "legacy-file-secret\n");
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: { webhookId: "linear-webhook-legacy" },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "MY_LINEAR_SECRET" },
+        },
+      },
+    });
+    process.env.MY_LINEAR_SECRET = "env-should-not-be-used";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSecrets).toEqual([{ key: "workspace", secret: "legacy-file-secret" }]);
+
+    delete process.env.MY_LINEAR_SECRET;
+  });
+
+  it("trims trailing newlines from file-based secrets", () => {
+    writeFileSync(join(homeDir, "linear-webhook-secret-adv"), "secret-with-newline\n");
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: { adv: { webhookId: "adv-webhook-123" } },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "CATALYST_LINEAR_WEBHOOK_SECRET" },
+        },
+      },
+    });
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSecrets).toEqual([{ key: "adv", secret: "secret-with-newline" }]);
+  });
+
+  it("prefers file over env var when both are present", () => {
+    writeFileSync(join(homeDir, "linear-webhook-secret-ctl"), "file-wins\n");
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: { ctl: { webhookId: "ctl-webhook-id" } },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "CATALYST_LINEAR_WEBHOOK_SECRET" },
+        },
+      },
+    });
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "env-loses";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSecrets).toEqual([{ key: "ctl", secret: "file-wins" }]);
+  });
+
+  it("handles multiple teams each with their own secret files", () => {
+    writeFileSync(join(homeDir, "linear-webhook-secret-adv"), "adv-secret\n");
+    writeFileSync(join(homeDir, "linear-webhook-secret-ctl"), "ctl-secret\n");
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            adv: { webhookId: "adv-webhook-id" },
+            ctl: { webhookId: "ctl-webhook-id" },
+          },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "CATALYST_LINEAR_WEBHOOK_SECRET" },
+        },
+      },
+    });
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "shared-fallback";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSecrets).toHaveLength(2);
+    expect(cfg!.linearSecrets).toContainEqual({ key: "adv", secret: "adv-secret" });
+    expect(cfg!.linearSecrets).toContainEqual({ key: "ctl", secret: "ctl-secret" });
+  });
+});

@@ -13,11 +13,14 @@ export interface WebhookCliConfig {
    */
   watchRepos: string[];
   /**
-   * Linear webhook signing secrets (CTL-273). Array of {key, secret} pairs,
-   * where key is "workspace" or a team UUID, and secret is the HMAC signing secret.
-   * Resolved from `catalyst.monitor.linear.webhookSecretEnv` env-var name in
-   * Layer 1, with fallback to `CATALYST_LINEAR_WEBHOOK_SECRET`. Empty array
-   * when no Linear config is present — the server then disables
+   * Linear webhook signing secrets (CTL-273, CTL-285). Array of {key, secret} pairs,
+   * where key is "workspace" or a team short key (e.g. "ctl", "adv"), and secret is
+   * the HMAC signing secret. Resolution order per key (CTL-285):
+   *   1. `~/.config/catalyst/linear-webhook-secret-{key}` (per-team file, mode 600)
+   *      — for "workspace" key, reads `linear-webhook-secret` (no suffix)
+   *   2. `process.env[linearWebhookSecretEnv]` from Layer 1 env-var name
+   *   3. `process.env.CATALYST_LINEAR_WEBHOOK_SECRET` (fallback)
+   * Empty array when no Linear config is present — the server then disables
    * `POST /api/webhook/linear`. The handler tries each secret in order until
    * one validates, supporting both workspace-wide and per-team webhooks.
    * CTL-210.
@@ -91,17 +94,49 @@ function readWatchRepos(github: Record<string, unknown>): string[] {
 // Backward compatibility: If catalyst.monitor.linear is a single object,
 // treat it as "workspace" key.
 //
+// Secret resolution order per key (CTL-285):
+//   1. Per-team file: ~/.config/catalyst/linear-webhook-secret-{key}
+//      (for "workspace" key: linear-webhook-secret, no suffix)
+//   2. Env var named by linearWebhookSecretEnv from Layer 1
+//   3. CATALYST_LINEAR_WEBHOOK_SECRET env var fallback
+//
 // Arguments:
 //   linear: the catalyst.monitor.linear object/dict from Layer 2
 //   linearWebhookSecretEnv: env-var name from Layer 1 (optional)
+//   homeConfigDir: path to ~/.config/catalyst/ for per-team secret files
 //
 // Returns: array of {key, secret} pairs
 function readAllLinearSecrets(
   linear: unknown,
   linearWebhookSecretEnv: string | null,
+  homeConfigDir: string,
 ): Array<{ key: string; secret: string }> {
   if (!isRecord(linear)) return [];
   const out: Array<{ key: string; secret: string }> = [];
+
+  const readSecretFile = (fileName: string): string => {
+    try {
+      return readFileSync(join(homeConfigDir, fileName), "utf8").trim();
+    } catch {
+      return "";
+    }
+  };
+
+  const resolveSecret = (key: string): string => {
+    const fileName =
+      key === "workspace"
+        ? "linear-webhook-secret"
+        : `linear-webhook-secret-${key}`;
+    const fileSecret = readSecretFile(fileName);
+    if (fileSecret.length > 0) return fileSecret;
+    return (
+      (linearWebhookSecretEnv !== null
+        ? process.env[linearWebhookSecretEnv]
+        : undefined) ??
+      process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
+      ""
+    );
+  };
 
   // Check if this is the old single-object format
   const isSingleObject =
@@ -110,12 +145,7 @@ function readAllLinearSecrets(
 
   if (isSingleObject) {
     // Legacy single-object format — treat as "workspace" key
-    const secret =
-      (linearWebhookSecretEnv !== null
-        ? process.env[linearWebhookSecretEnv]
-        : undefined) ??
-      process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
-      "";
+    const secret = resolveSecret("workspace");
     if (secret.length > 0) {
       out.push({ key: "workspace", secret });
     }
@@ -130,14 +160,7 @@ function readAllLinearSecrets(
     if (typeof entry.webhookId !== "string" || entry.webhookId.length === 0)
       continue;
 
-    // For now, all webhooks use the same secret env-var from Layer 1.
-    // In the future, per-team secrets could be stored in Layer 1.
-    const secret =
-      (linearWebhookSecretEnv !== null
-        ? process.env[linearWebhookSecretEnv]
-        : undefined) ??
-      process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
-      "";
+    const secret = resolveSecret(key);
     if (secret.length > 0) {
       out.push({ key, secret });
     }
@@ -267,13 +290,10 @@ export function loadWebhookConfig(
   let homeLinearConfig: unknown;
   try {
     const homeConfigRaw = readFileSync(join(homeConfigDir, "config.json"), "utf8");
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     const homeConfigParsed = JSON.parse(homeConfigRaw) as unknown;
     if (isRecord(homeConfigParsed) && isRecord(homeConfigParsed.catalyst)) {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
       const monitor = homeConfigParsed.catalyst.monitor;
       if (isRecord(monitor)) {
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
         homeLinearConfig = monitor.linear;
       }
     }
@@ -283,6 +303,7 @@ export function loadWebhookConfig(
   const linearSecrets = readAllLinearSecrets(
     homeLinearConfig ?? undefined,
     linearWebhookSecretEnv,
+    homeConfigDir,
   );
 
   // Linear smee channel. Layer 2 only (per-machine) — same split as GitHub

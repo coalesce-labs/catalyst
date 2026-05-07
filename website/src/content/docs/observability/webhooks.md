@@ -347,7 +347,7 @@ e.g. `linear.issue.state_changed`, `linear.comment.created`.
 | HMAC secret value | env var named above (default fallback `CATALYST_LINEAR_WEBHOOK_SECRET`) | NO (per-developer env) |
 | `smeeChannel` (Linear smee URL) | `catalyst.monitor.linear.smeeChannel` in `~/.config/catalyst/config.json` | NO (per-machine, written by `--linear-register`) |
 | Registration record (`webhookId`, `webhookUrl`, `registeredAt`, `resourceTypes`) | `catalyst.monitor.linear` in `~/.config/catalyst/config.json` | NO (per-machine, written by `--linear-register`) |
-| HMAC secret file | `~/.config/catalyst/linear-webhook-secret` (mode 600, read by `--linear-register` post-create) | NO (per-developer) |
+| HMAC secret file | `~/.config/catalyst/linear-webhook-secret-{teamKey}` for per-team (e.g. `linear-webhook-secret-ctl`), or `~/.config/catalyst/linear-webhook-secret` for workspace-wide webhooks (mode 600, written by `setup-linear-webhook.sh` post-create) | NO (per-developer) |
 
 Run `setup-webhooks.sh --linear-secret-env CATALYST_LINEAR_WEBHOOK_SECRET` to write the
 env-var name to `.catalyst/config.json`. Then `export CATALYST_LINEAR_WEBHOOK_SECRET=<your-secret>`
@@ -366,15 +366,20 @@ GitHub `smeeChannel` write).
   "catalyst": {
     "monitor": {
       "linear": {
-        "webhookId": "abc-123-uuid-from-linear",
-        "webhookUrl": "https://your-tunnel/api/webhook/linear",
-        "registeredAt": "2026-05-04T20:00:00Z",
-        "resourceTypes": ["Issue", "Comment", "IssueLabel", "Cycle", "Reaction", "Project"]
+        "ctl": {
+          "webhookId": "abc-123-uuid-from-linear",
+          "smeeChannel": "https://your-tunnel/api/webhook/linear",
+          "registeredAt": "2026-05-04T20:00:00Z",
+          "resourceTypes": ["Issue", "Comment", "IssueLabel", "Cycle", "Reaction", "Project"]
+        }
       }
     }
   }
 }
 ```
+
+Records are keyed by lowercase team key (`catalyst.linear.teamKey` from Layer 1, lowercased).
+For workspace-wide webhooks (`--all-public-teams`), the key is `"workspace"`.
 
 This is the Linear analogue of `catalyst.monitor.github.smeeChannel` — same Layer 2 file,
 same per-machine semantics. The local record is the source of truth for idempotency on
@@ -432,8 +437,11 @@ The script:
 4. Otherwise, calls `webhookCreate` with `resourceTypes` set to the canonical
    six: `Issue`, `Comment`, `IssueLabel`, `Cycle`, `Reaction`, `Project`.
    `IssueRelation` is intentionally excluded — Linear does not deliver it.
-5. Persists the returned `secret` to `~/.config/catalyst/linear-webhook-secret`
-   (mode 600), mirroring the GitHub-side `~/.config/catalyst/webhook-secret`.
+5. Persists the returned `secret` to `~/.config/catalyst/linear-webhook-secret-{teamKey}`
+   (mode 600, where `{teamKey}` is the lowercase value of `catalyst.linear.teamKey` from
+   Layer 1). For workspace-wide webhooks (`--all-public-teams`), writes to
+   `~/.config/catalyst/linear-webhook-secret` (no suffix), mirroring the GitHub-side
+   `~/.config/catalyst/webhook-secret`.
 6. Writes the registration record (`webhookId`, `webhookUrl`, `registeredAt`,
    `resourceTypes`) to `~/.config/catalyst/config.json` under
    `catalyst.monitor.linear` (CTL-238). Subsequent re-runs short-circuit on
@@ -494,8 +502,10 @@ plugins/dev/scripts/setup-webhooks.sh --linear-deregister
 ```
 
 The script reads `webhookId` from the Layer 2 registration record, calls Linear's
-`webhookDelete`, clears the record, and removes `~/.config/catalyst/linear-webhook-secret`.
-Errors cleanly with a non-zero exit when no Layer 2 record exists (nothing to delete).
+`webhookDelete`, clears the record, and removes
+`~/.config/catalyst/linear-webhook-secret-{teamKey}` (or `linear-webhook-secret` for
+workspace webhooks). Errors cleanly with a non-zero exit when no Layer 2 record exists
+(nothing to delete).
 
 `--linear-deregister` and `--linear-register` are mutually exclusive — pass one or the
 other, not both.
