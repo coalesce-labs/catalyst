@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { ActivityEvent } from "@/hooks/use-activity";
+import { summarizeLinearEvent } from "../../../lib/summarize-linear-event";
 
 function repoBasename(repo: string): string {
   const slash = repo.lastIndexOf("/");
@@ -128,33 +129,19 @@ function summarize(e: ActivityEvent): string {
     return `review ${verb} on PR #${scope.pr ?? "?"}`;
   }
   // Linear
-  if (e.event === "linear.issue.state_changed") {
-    const updatedFromKeys = (detail as { updatedFromKeys?: string[] }).updatedFromKeys ?? [];
-    const ticket = scope.ticket ?? (detail as { ticket?: string }).ticket ?? "";
-    if (updatedFromKeys.length > 0) {
-      return `${updatedFromKeys.join(", ")} changed${ticket ? " · " + ticket : ""}`;
-    }
-    const fromV = (detail as { from?: string }).from ?? "?";
-    const toV = (detail as { to?: string }).to ?? "?";
-    return `${ticket ? ticket + ": " : ""}${fromV} → ${toV}`;
-  }
   if (e.event.startsWith("linear.comment.")) {
     const action = e.event.slice("linear.comment.".length);
     const ticket = scope.ticket ?? (detail as { ticket?: string }).ticket ?? "";
     if (action === "created") return `new comment${ticket ? " · " + ticket : ""}`;
     return `comment ${action}${ticket ? " · " + ticket : ""}`;
   }
-  if (e.event.startsWith("linear.issue_label.")) {
-    return "label updated";
-  }
   if (e.event.startsWith("linear.cycle.")) {
     const action = e.event.slice("linear.cycle.".length);
     return `cycle ${action}`;
   }
-  if (e.event.startsWith("linear.issue.")) {
-    const action = e.event.slice("linear.issue.".length);
-    const ticket = scope.ticket ?? (detail as { ticket?: string }).ticket ?? "";
-    return `issue ${action}${ticket ? " · " + ticket : ""}`;
+  if (e.event.startsWith("linear.issue.") || e.event.startsWith("linear.issue_label.")) {
+    const keys = (detail as { updatedFromKeys?: string[] }).updatedFromKeys ?? [];
+    return summarizeLinearEvent(e.event, scope.ticket, keys);
   }
   if (e.event.startsWith("linear.")) {
     return `${scope.ticket ?? ""} ${e.event.slice("linear.".length)}`.trim();
