@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 630 100" fill="none" stroke="currentColor" stroke-linecap="square" stroke-linejoin="miter" stroke-miterlimit="2" role="img" aria-label="Catalyst">
+  <title>Catalyst</title>
+  <svg data-part="mark" x="0" y="0" width="100" height="100" viewBox="0 0 64 64" overflow="visible" stroke-width="6">
+    <path d="M 8 44 L 32 20 L 56 44"/>
+    <path d="M 18 52 L 32 36 L 46 52" stroke-width="4" opacity="0.75"/>
+  </svg>
+  <g data-part="wordmark" transform="translate(150, 0)" fill="currentColor" fill-rule="evenodd" stroke="none">
+    <!-- Candidate C — pixel mono (Departure Mono-inspired) -->
+    <path d="M10 20h30v10h-30zM0 30h10v40h-10zM40 30h10v10h-10zM40 60h10v10h-10zM10 70h30v10h-30zM70 20h30v10h-30zM100 30h10v50h-10zM70 40h30v10h-30zM60 50h10v20h-10zM70 70h30v10h-30zM130 0h10v70h-10zM120 20h10v10h-10zM140 20h10v10h-10zM160 60h10v10h-10zM140 70h20v10h-20zM190 20h30v10h-30zM220 30h10v50h-10zM190 40h30v10h-30zM180 50h10v20h-10zM190 70h30v10h-30zM260 0h10v70h-10zM250 0h10v10h-10zM250 70h30v10h-30zM300 20h10v40h-10zM340 20h10v70h-10zM310 60h30v10h-30zM330 80h10v10h-10zM300 90h40v10h-40zM370 20h40v10h-40zM360 30h10v20h-10zM360 50h40v10h-40zM400 60h10v10h-10zM360 70h40v10h-40zM430 0h10v70h-10zM420 20h10v10h-10zM440 20h10v10h-10zM460 60h10v10h-10zM440 70h20v10h-20z"/>
+  </g>
+</svg>
