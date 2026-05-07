@@ -1,7 +1,10 @@
 // Unit tests for filter-daemon core logic
 // Run: bun test plugins/dev/scripts/filter-daemon/index.test.mjs
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { existsSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import {
   handleRegister,
   handleDeregister,
@@ -14,6 +17,8 @@ import {
   clearLastHeartbeat,
   processEvent,
   runWatchdogTick,
+  saveInterests,
+  loadPersistedInterests,
 } from "./index.mjs";
 
 describe("interest table", () => {
@@ -513,5 +518,90 @@ describe("watchdog cleanup of stale-session registrations (CTL-269)", () => {
     // Second tick: heartbeat still stale + already notified → no new wake, no error
     expect(() => runWatchdogTick()).not.toThrow();
     expect(getInterests().has("sess_abc")).toBe(false);
+  });
+});
+
+describe("interest persistence (saveInterests / loadPersistedInterests)", () => {
+  const INTERESTS_FILE = resolve(homedir(), "catalyst", "filter-interests.json");
+
+  beforeEach(() => {
+    clearInterests();
+    try { unlinkSync(INTERESTS_FILE); } catch { /* ok if missing */ }
+  });
+
+  afterEach(() => {
+    clearInterests();
+    try { unlinkSync(INTERESTS_FILE); } catch { /* ok if missing */ }
+  });
+
+  test("saveInterests writes interests to disk and loadPersistedInterests reads them back", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-persist-1",
+      detail: {
+        interest_id: "orch-persist-1",
+        notify_event: "filter.wake.orch-persist-1",
+        prompt: "persist test",
+        persistent: true,
+      },
+    });
+    clearInterests();
+    expect(getInterests().size).toBe(0);
+
+    loadPersistedInterests();
+    expect(getInterests().has("orch-persist-1")).toBe(true);
+    expect(getInterests().get("orch-persist-1").prompt).toBe("persist test");
+  });
+
+  test("loadPersistedInterests is a no-op when file is missing", () => {
+    expect(() => loadPersistedInterests()).not.toThrow();
+    expect(getInterests().size).toBe(0);
+  });
+
+  test("handleRegister triggers save automatically", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-autosave",
+      detail: { interest_id: "orch-autosave", notify_event: "filter.wake.orch-autosave", prompt: "autosave" },
+    });
+    expect(existsSync(INTERESTS_FILE)).toBe(true);
+  });
+
+  test("handleDeregister removes entry and saves", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-del",
+      detail: { interest_id: "orch-del", notify_event: "filter.wake.orch-del", prompt: "x" },
+    });
+    handleDeregister({ event: "filter.deregister", detail: { interest_id: "orch-del" } });
+    clearInterests();
+    loadPersistedInterests();
+    expect(getInterests().has("orch-del")).toBe(false);
+  });
+
+  test("handleOrchestratorTerminated removes entries and saves", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-term",
+      detail: { interest_id: "orch-term", notify_event: "filter.wake.orch-term", prompt: "x" },
+    });
+    handleOrchestratorTerminated({ event: "orchestrator-completed", orchestrator: "orch-term" });
+    clearInterests();
+    loadPersistedInterests();
+    expect(getInterests().has("orch-term")).toBe(false);
+  });
+
+  test("saveInterests overwrites stale entries on repeated calls", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-v1",
+      detail: { interest_id: "orch-v1", notify_event: "filter.wake.orch-v1", prompt: "v1" },
+    });
+    saveInterests();
+    handleDeregister({ event: "filter.deregister", detail: { interest_id: "orch-v1" } });
+    saveInterests();
+    clearInterests();
+    loadPersistedInterests();
+    expect(getInterests().has("orch-v1")).toBe(false);
   });
 });
