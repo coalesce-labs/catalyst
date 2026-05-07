@@ -70,20 +70,20 @@ describe("createLinearWebhookHandler", () => {
     eventLog = new FakeEventLog();
   });
 
-  it("returns 503 when secret is empty", async () => {
-    const handler = createLinearWebhookHandler({ secret: "" });
+  it("returns 503 when linearSecrets is empty", async () => {
+    const handler = createLinearWebhookHandler({ linearSecrets: [] });
     const res = await handler.handle(makeReq(issueUpdatePayload()));
     expect(res.status).toBe(503);
   });
 
   it("returns 405 for non-POST", async () => {
-    const handler = createLinearWebhookHandler({ secret: SECRET });
+    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
     const res = await handler.handle(makeReq(issueUpdatePayload(), {}, "GET"));
     expect(res.status).toBe(405);
   });
 
   it("returns 401 for bad signature", async () => {
-    const handler = createLinearWebhookHandler({ secret: SECRET });
+    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
     const res = await handler.handle(
       makeReq(issueUpdatePayload(), { "linear-signature": "deadbeef" })
     );
@@ -91,20 +91,20 @@ describe("createLinearWebhookHandler", () => {
   });
 
   it("returns 400 when event header is missing", async () => {
-    const handler = createLinearWebhookHandler({ secret: SECRET });
+    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
     const res = await handler.handle(makeReq(issueUpdatePayload(), { "linear-event": "" }));
     expect(res.status).toBe(400);
   });
 
   it("returns 400 when delivery header is missing", async () => {
-    const handler = createLinearWebhookHandler({ secret: SECRET });
+    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
     const res = await handler.handle(makeReq(issueUpdatePayload(), { "linear-delivery": "" }));
     expect(res.status).toBe(400);
   });
 
   it("returns 400 for invalid JSON body", async () => {
     const bodyStr = "{not json";
-    const handler = createLinearWebhookHandler({ secret: SECRET });
+    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
     const req = new Request("http://localhost/api/webhook/linear", {
       method: "POST",
       headers: {
@@ -121,7 +121,7 @@ describe("createLinearWebhookHandler", () => {
 
   it("happy path → 200 + envelope written to event log", async () => {
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
     });
     const res = await handler.handle(makeReq(issueUpdatePayload()));
@@ -139,7 +139,7 @@ describe("createLinearWebhookHandler", () => {
   it("emits to in-process bus on success", async () => {
     const emitted: Array<{ type: string; data: unknown }> = [];
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       emit: (type, data) => emitted.push({ type, data }),
     });
@@ -150,7 +150,7 @@ describe("createLinearWebhookHandler", () => {
 
   it("idempotent on replay (same delivery id)", async () => {
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
     });
     const deliveryId = "stable-delivery-1";
@@ -170,7 +170,7 @@ describe("createLinearWebhookHandler", () => {
   it("event-log failure does not fail the request", async () => {
     eventLog.failNext = true;
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       logger: { warn: () => {} },
     });
@@ -181,7 +181,7 @@ describe("createLinearWebhookHandler", () => {
 
   it("ignored events return 200 but write no envelope", async () => {
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
     });
     const res = await handler.handle(
@@ -203,7 +203,7 @@ describe("createLinearWebhookHandler", () => {
   it("invokes onAccept after appending to event log (issue event)", async () => {
     const seen: Array<{ kind: string; ticket?: string | null }> = [];
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       onAccept: (event) => {
         // Cast just to satisfy structural read in the test
@@ -220,7 +220,7 @@ describe("createLinearWebhookHandler", () => {
   it("does not invoke onAccept on ignored events", async () => {
     const seen: number[] = [];
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       onAccept: () => {
         seen.push(1);
@@ -237,7 +237,7 @@ describe("createLinearWebhookHandler", () => {
 
   it("onAccept failure does not fail the request", async () => {
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       onAccept: () => {
         throw new Error("downstream consumer broke");
@@ -252,7 +252,7 @@ describe("createLinearWebhookHandler", () => {
 
   // CTL-263: actorId extraction through full HTTP path
   it("extracts actorId from payload.actor.id and writes it to event log detail", async () => {
-    const handler = createLinearWebhookHandler({ secret: SECRET, eventLog });
+    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }], eventLog });
     const payload = {
       action: "update",
       type: "Issue",
@@ -265,7 +265,7 @@ describe("createLinearWebhookHandler", () => {
   });
 
   it("writes actorId: null when payload has no actor field", async () => {
-    const handler = createLinearWebhookHandler({ secret: SECRET, eventLog });
+    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }], eventLog });
     const payload = {
       action: "update",
       type: "Issue",
@@ -279,7 +279,7 @@ describe("createLinearWebhookHandler", () => {
   // CTL-263: bot-skip logic
   it("suppresses issue events from bot actor — no event log append", async () => {
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       botUserId: "bot-uuid-123",
     });
@@ -297,7 +297,7 @@ describe("createLinearWebhookHandler", () => {
 
   it("suppressed bot event still returns ok:true", async () => {
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       botUserId: "bot-uuid-123",
     });
@@ -315,7 +315,7 @@ describe("createLinearWebhookHandler", () => {
 
   it("non-bot actor writes normally even when botUserId is configured", async () => {
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       botUserId: "bot-uuid-123",
     });
@@ -331,7 +331,7 @@ describe("createLinearWebhookHandler", () => {
   });
 
   it("no botUserId configured → no suppression (backwards compat)", async () => {
-    const handler = createLinearWebhookHandler({ secret: SECRET, eventLog });
+    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }], eventLog });
     const payload = {
       action: "update",
       type: "Issue",
@@ -345,7 +345,7 @@ describe("createLinearWebhookHandler", () => {
 
   it("bot-authored non-issue events (comment) are NOT suppressed", async () => {
     const handler = createLinearWebhookHandler({
-      secret: SECRET,
+      linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       botUserId: "bot-uuid-123",
     });
