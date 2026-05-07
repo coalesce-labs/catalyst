@@ -1,0 +1,6 @@
+import{c as o,j as e,am as c,o as i}from"./index-C3boShkA.js";import{S as h}from"./search-BVnuC44u.js";/**
+ * @license lucide-react v0.511.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */const d=[["path",{d:"M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8",key:"v9h5vc"}],["path",{d:"M21 3v5h-5",key:"1q7to0"}],["path",{d:"M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16",key:"3uifl3"}],["path",{d:"M8 16H3v5",key:"1cv678"}]],x=o("refresh-cw",d);function m({value:t,onChange:s,placeholder:r="Search...",className:a}){return e.jsxs("div",{className:i("flex items-center gap-2 rounded-lg border border-border bg-surface-3 px-3 py-1.5 transition-shadow focus-within:ring-1 focus-within:ring-accent/40",a),children:[e.jsx(h,{className:"h-3.5 w-3.5 shrink-0 text-muted"}),e.jsx("input",{type:"text",value:t,onChange:n=>s(n.target.value),placeholder:r,className:"min-w-0 flex-1 bg-transparent font-mono text-[13px] text-fg placeholder:text-muted focus:outline-none"}),t&&e.jsx("button",{type:"button",onClick:()=>s(""),className:"shrink-0 rounded p-0.5 text-muted transition-colors hover:text-fg",children:e.jsx(c,{className:"h-3.5 w-3.5"})})]})}export{x as R,m as S};
