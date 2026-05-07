@@ -163,8 +163,10 @@ function summarize(e: ActivityEvent): string {
   if (e.event === "comms.message.posted") {
     const channel = (detail as { channel?: string }).channel ?? "?";
     const type = (detail as { type?: string }).type ?? "info";
+    const body = (detail as { body?: string }).body ?? "";
     const from = e.worker ?? "";
-    return `[${type}] ${channel}${from ? ` (${from})` : ""}`;
+    const prefix = `[${type}] ${channel}${from ? ` (${from})` : ""}`;
+    return body ? `${prefix}: ${body}` : prefix;
   }
   // Catalyst session lifecycle
   if (e.event === "phase-changed") {

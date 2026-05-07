@@ -242,6 +242,11 @@ cmd_send() {
   # tail, monitor-events skill) can observe comms traffic without subscribing
   # to every channel file. Best-effort — failures here must NOT fail the send.
   # Per-channel files remain authoritative for agent-to-agent pub/sub. CTL-210.
+  local body_trunc="$body"
+  if [[ "$type" != "attention" && ${#body} -gt 120 ]]; then
+    body_trunc="${body:0:120}"
+    body_trunc="${body_trunc% *}…"
+  fi
   emit_global_event() {
     local script="${CATALYST_STATE_SCRIPT:-}"
     if [[ -z "$script" ]]; then
@@ -258,12 +263,13 @@ cmd_send() {
       --arg type "$type" \
       --arg id "$id" \
       --arg to "$to" \
+      --arg body "$body_trunc" \
       '{
         ts: $ts,
         event: $event,
         orchestrator: (if $orch == "" then null else $orch end),
         worker: $from,
-        detail: { channel: $ch, type: $type, msgId: $id, to: $to }
+        detail: { channel: $ch, type: $type, msgId: $id, to: $to, body: $body }
       }') || return 0
     "$script" event "$envelope" >/dev/null 2>&1 || true
   }
