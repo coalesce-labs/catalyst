@@ -2,9 +2,20 @@
 // filter-daemon/index.mjs — Groq-powered semantic event router
 // No build step, no npm dependencies. Requires Node.js >=21 or Bun.
 
-import { readFileSync, appendFileSync, writeFileSync, unlinkSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  appendFileSync,
+  writeFileSync,
+  unlinkSync,
+  mkdirSync,
+  watch,
+  openSync,
+  fstatSync,
+  readSync,
+  closeSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // --- Config ---
@@ -15,7 +26,6 @@ const GROQ_MODEL = process.env.FILTER_GROQ_MODEL ?? "llama-3.1-8b-instant";
 const DEBOUNCE_MS = parseInt(process.env.FILTER_DEBOUNCE_MS ?? "100", 10);
 const HARD_CAP_MS = parseInt(process.env.FILTER_HARD_CAP_MS ?? "500", 10);
 const MAX_BATCH_SIZE = parseInt(process.env.FILTER_BATCH_SIZE ?? "20", 10);
-const POLL_MS = parseInt(process.env.FILTER_POLL_MS ?? "200", 10);
 const LOOKBACK_LINES = 1000;
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.FILTER_WATCHDOG_INTERVAL_MS ?? "60000", 10);
 const HEARTBEAT_STALE_MS = parseInt(process.env.FILTER_HEARTBEAT_STALE_MS ?? "180000", 10);
@@ -42,6 +52,32 @@ export function getInterests() {
 
 export function clearInterests() {
   interests.clear();
+}
+
+// --- Interest persistence ---
+const INTERESTS_FILE = resolve(CATALYST_DIR, "filter-interests.json");
+
+export function saveInterests() {
+  try {
+    mkdirSync(dirname(INTERESTS_FILE), { recursive: true });
+    writeFileSync(INTERESTS_FILE, JSON.stringify([...interests.entries()], null, 2));
+  } catch (err) {
+    console.error("[filter] Failed to save interests:", err.message);
+  }
+}
+
+export function loadPersistedInterests() {
+  try {
+    const entries = JSON.parse(readFileSync(INTERESTS_FILE, "utf8"));
+    for (const [id, reg] of entries) {
+      interests.set(id, reg);
+    }
+    if (interests.size) {
+      console.log(`[filter] Loaded ${interests.size} persisted interest(s)`);
+    }
+  } catch {
+    // No file yet or parse error — fine
+  }
 }
 
 // --- Heartbeat tracking ---
@@ -73,6 +109,7 @@ export function handleRegister(event) {
   });
   const sessionTag = d.session_id ? `, session: ${d.session_id}` : "";
   console.log(`[filter] Registered: ${id} — "${d.prompt}" (persistent: ${d.persistent === true}${sessionTag})`);
+  saveInterests();
 }
 
 export function handleDeregister(event) {
@@ -80,18 +117,22 @@ export function handleDeregister(event) {
   if (!id) return;
   if (interests.delete(id)) {
     console.log(`[filter] Deregistered: ${id}`);
+    saveInterests();
   }
 }
 
 export function handleOrchestratorTerminated(event) {
   const orchId = event.orchestrator;
   if (!orchId) return;
+  let changed = false;
   for (const [id, reg] of interests) {
     if (reg.orchestrator === orchId) {
       interests.delete(id);
       console.log(`[filter] Auto-deregistered: ${id} (orchestrator ${orchId} terminated)`);
+      changed = true;
     }
   }
+  if (changed) saveInterests();
 }
 
 // --- Event classification ---
@@ -183,6 +224,11 @@ async function classifyBatch(events) {
     if (!reg) continue;
 
     const sourceIds = (match.event_indices ?? []).map((i) => events[i - 1]?.id).filter(Boolean);
+
+    if (!sourceIds.length) {
+      console.log(`[filter] No source events for ${reg.notify_event} — suppressing empty wake`);
+      continue;
+    }
 
     appendEvent({
       event: reg.notify_event,
@@ -319,47 +365,72 @@ export function processEvent(event) {
   queueEvent(event);
 }
 
-// --- Event log tailing ---
-let lastLineCount = 0;
+// --- Reactive event log tailing ---
+let lastByteOffset = 0;
 let lastLogPath = "";
+let leftoverBuf = "";
+let eventsWatcher = null;
 
-function pollEventLog() {
+function readNewEvents() {
   const logPath = getEventLogPath();
 
   if (logPath !== lastLogPath) {
-    // Month rollover: snapshot current EOF, don't replay history
+    // Month rollover: seek to end of new file to avoid replaying history
     lastLogPath = logPath;
+    leftoverBuf = "";
     try {
-      const content = readFileSync(logPath, "utf8");
-      lastLineCount = content.split("\n").filter((l) => l.trim()).length;
+      const fd = openSync(logPath, "r");
+      const stat = fstatSync(fd);
+      lastByteOffset = stat.size;
+      closeSync(fd);
     } catch {
-      lastLineCount = 0;
+      lastByteOffset = 0;
     }
     return;
   }
 
-  let content;
   try {
-    content = readFileSync(logPath, "utf8");
-  } catch {
-    return;
-  }
-
-  const lines = content.split("\n").filter((l) => l.trim());
-  if (lines.length <= lastLineCount) return;
-
-  const newLines = lines.slice(lastLineCount);
-  lastLineCount = lines.length;
-
-  for (const line of newLines) {
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
+    const fd = openSync(logPath, "r");
+    const stat = fstatSync(fd);
+    if (stat.size <= lastByteOffset) {
+      closeSync(fd);
+      return;
     }
-    processEvent(event);
+    const newByteCount = stat.size - lastByteOffset;
+    const buf = Buffer.alloc(newByteCount);
+    readSync(fd, buf, 0, newByteCount, lastByteOffset);
+    closeSync(fd);
+    lastByteOffset = stat.size;
+
+    const text = leftoverBuf + buf.toString("utf8");
+    const lines = text.split("\n");
+    leftoverBuf = lines.pop() ?? "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      processEvent(event);
+    }
+  } catch {
+    // Log file not yet created or transient read error
   }
+}
+
+function startTailing() {
+  const eventsDir = resolve(CATALYST_DIR, "events");
+  mkdirSync(eventsDir, { recursive: true });
+  // Watch the directory so we handle the "log file doesn't exist yet" case gracefully.
+  // When the current month's JSONL file changes, read only new bytes.
+  eventsWatcher = watch(eventsDir, (eventType, filename) => {
+    if (eventType !== "change") return;
+    if (filename !== null && filename !== basename(getEventLogPath())) return;
+    readNewEvents();
+  });
 }
 
 function loadExistingRegistrations() {
@@ -423,12 +494,15 @@ function main() {
   writePidFile();
 
   lastLogPath = getEventLogPath();
+  loadPersistedInterests();
   loadExistingRegistrations();
 
   try {
-    const content = readFileSync(lastLogPath, "utf8");
-    lastLineCount = content.split("\n").filter((l) => l.trim()).length;
-    console.log(`[filter] Starting from line ${lastLineCount} of ${lastLogPath}`);
+    const fd = openSync(lastLogPath, "r");
+    const stat = fstatSync(fd);
+    lastByteOffset = stat.size;
+    closeSync(fd);
+    console.log(`[filter] Starting from byte ${lastByteOffset} of ${lastLogPath}`);
   } catch {
     console.log(`[filter] Starting (no log file yet at ${lastLogPath})`);
   }
@@ -448,14 +522,14 @@ function main() {
     },
   });
 
-  const pollId = setInterval(pollEventLog, POLL_MS);
+  startTailing();
   const watchdogId = startWatchdog();
   console.log(
     `[filter] catalyst-filter daemon started (pid ${process.pid}, watchdog: ${WATCHDOG_INTERVAL_MS}ms, stale: ${HEARTBEAT_STALE_MS}ms)`
   );
 
   const shutdown = () => {
-    clearInterval(pollId);
+    eventsWatcher?.close();
     clearInterval(watchdogId);
     clearTimeout(debounceTimer);
     clearTimeout(hardCapTimer);
