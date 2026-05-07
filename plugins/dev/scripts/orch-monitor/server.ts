@@ -101,6 +101,7 @@ import { readBacklog, tailEventLog, readTunnelEventStats } from "./lib/event-log
 import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey } from "./lib/project-key";
+import { loadMonitorConfig } from "./lib/monitor-config";
 import {
   createPrometheusFetcher,
   type PrometheusFetcher,
@@ -862,6 +863,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
         if (url.pathname === "/api/snapshot") {
           return Response.json(snapshotWithPrStatus());
+        }
+
+        if (url.pathname === "/api/config") {
+          const cfg = loadMonitorConfig(`${process.cwd()}/.catalyst/config.json`);
+          return Response.json(cfg);
         }
 
         if (url.pathname === "/api/analytics") {

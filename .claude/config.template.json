@@ -37,7 +37,7 @@
         "setup": [],
         "teardown": []
       },
-      "workerCommand": "/catalyst-dev:oneshot",
+      "workerCommand": "/oneshot",
       "workerModel": "opus",
       "thoughts": {
         "profile": null,
@@ -55,7 +55,8 @@
       "$comment": "smeeChannel lives in Layer 2 (~/.config/catalyst/config.json) — written by setup-webhooks.sh, never committed.",
       "github": {
         "webhookSecretEnv": "CATALYST_WEBHOOK_SECRET",
-        "watchRepos": []
+        "watchRepos": [],
+        "repoColors": {}
       },
       "linear": {
         "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET"
