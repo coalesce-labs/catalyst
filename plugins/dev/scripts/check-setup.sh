@@ -274,8 +274,8 @@ else
     info "Run: bash plugins/dev/scripts/setup-webhooks.sh"
 fi
 
-if [[ -n "${PROJECT_KEY:-}" && -f "${SECRETS_FILE:-}" ]]; then
-    linear_webhook_id=$(jq -r '.catalyst.monitor.linear.webhookId // empty' "$SECRETS_FILE" 2>/dev/null)
+if [[ -f "$HOME_CONFIG_PATH" ]]; then
+    linear_webhook_id=$(jq -r '.catalyst.monitor.linear.webhookId // empty' "$HOME_CONFIG_PATH" 2>/dev/null)
     if [[ -n "$linear_webhook_id" ]]; then
         pass "Linear webhook registered (id: ${linear_webhook_id:0:8}…)"
     else

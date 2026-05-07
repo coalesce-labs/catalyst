@@ -156,15 +156,14 @@ if [[ -n $CONFIG_PATH ]]; then
 		fi
 	fi
 
-	# Check Linear webhook registration (CTL-253) — gates whether Linear events reach the event log
-	if [[ -n $PROJECT_KEY ]]; then
-		SECRETS_FILE="$CATALYST_CONFIG/config-${PROJECT_KEY}.json"
-		if [[ -f $SECRETS_FILE ]]; then
-			LINEAR_WEBHOOK_ID=$(jq -r '.catalyst.monitor.linear.webhookId // empty' "$SECRETS_FILE" 2>/dev/null)
-			if [[ -z $LINEAR_WEBHOOK_ID ]]; then
-				warnings+=("Missing catalyst.monitor.linear.webhookId in $SECRETS_FILE — Linear events won't reach the event log")
-				warnings+=("  Register: bash plugins/dev/scripts/setup-webhooks.sh --linear-register")
-			fi
+	# Check Linear webhook registration (CTL-253) — gates whether Linear events reach the event log.
+	# The record lives in the cross-project Layer 2 file ($HOME_CONFIG_PATH); per-project secrets
+	# files (config-<projectKey>.json) hold the API token only. See setup-linear-webhook.sh.
+	if [[ -f $HOME_CONFIG_PATH ]]; then
+		LINEAR_WEBHOOK_ID=$(jq -r '.catalyst.monitor.linear.webhookId // empty' "$HOME_CONFIG_PATH" 2>/dev/null)
+		if [[ -z $LINEAR_WEBHOOK_ID ]]; then
+			warnings+=("Missing catalyst.monitor.linear.webhookId in $HOME_CONFIG_PATH — Linear events won't reach the event log")
+			warnings+=("  Register: bash plugins/dev/scripts/setup-webhooks.sh --linear-register")
 		fi
 	fi
 
