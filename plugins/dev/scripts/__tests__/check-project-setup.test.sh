@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for check-project-setup.sh — focuses on the CTL-253 webhook-pipeline checks
-# (smee binary, smeeChannel in cross-project Layer 2, Linear webhookId in per-project Layer 2).
+# (smee binary, smeeChannel + Linear webhookId both in cross-project Layer 2 — see CTL-272).
 # Run: bash plugins/dev/scripts/__tests__/check-project-setup.test.sh
 
 set -uo pipefail
@@ -84,13 +84,15 @@ test_smee_missing() {
   local proj="$SCRATCH/proj-smee" key="proj-smee"
   make_project "$proj" "$key"
   mkdir -p "$SCRATCH/xdg/catalyst"
-  # Configured smeeChannel + webhookId so only the smee binary check fires
+  # Configured smeeChannel + webhookId (both in cross-project Layer 2) so only the
+  # smee binary check fires
   cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
-{ "catalyst": { "monitor": { "github": { "smeeChannel": "https://smee.io/abc" } } } }
+{ "catalyst": { "monitor": {
+  "github": { "smeeChannel": "https://smee.io/abc" },
+  "linear": { "webhookId": "wh_test_123" }
+} } }
 EOF
-  cat > "$SCRATCH/xdg/catalyst/config-${key}.json" <<EOF
-{ "catalyst": { "monitor": { "linear": { "webhookId": "wh_test_123" } } } }
-EOF
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
 
   local out
   out=$(run_script "$proj" 2>&1)
@@ -107,11 +109,11 @@ test_smee_channel_missing() {
   local proj="$SCRATCH/proj-channel" key="proj-channel"
   make_project "$proj" "$key"
   mkdir -p "$SCRATCH/xdg/catalyst"
-  # Empty home config — no smeeChannel
-  echo '{}' > "$SCRATCH/xdg/catalyst/config.json"
-  cat > "$SCRATCH/xdg/catalyst/config-${key}.json" <<EOF
+  # Home config has linear webhookId but no smeeChannel (so we isolate the smeeChannel warn)
+  cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
 { "catalyst": { "monitor": { "linear": { "webhookId": "wh_test_123" } } } }
 EOF
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
 
   local out
   out=$(run_script "$proj" 2>&1)
@@ -134,14 +136,14 @@ test_home_config_missing() {
 
 # ─── Test: Linear webhookId missing → warn ──────────────────────────────────
 test_linear_webhook_missing() {
-  echo "test: Linear webhookId missing in per-project Layer 2 → warn"
+  echo "test: Linear webhookId missing in cross-project Layer 2 → warn"
   local proj="$SCRATCH/proj-linear" key="proj-linear"
   make_project "$proj" "$key"
   mkdir -p "$SCRATCH/xdg/catalyst"
+  # smeeChannel present, webhookId absent — only the Linear warn should fire
   cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
 { "catalyst": { "monitor": { "github": { "smeeChannel": "https://smee.io/abc" } } } }
 EOF
-  # Per-project secrets file exists but has no webhookId
   echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
 
   local out
@@ -157,11 +159,12 @@ test_all_configured() {
   make_project "$proj" "$key"
   mkdir -p "$SCRATCH/xdg/catalyst"
   cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
-{ "catalyst": { "monitor": { "github": { "smeeChannel": "https://smee.io/abc" } } } }
+{ "catalyst": { "monitor": {
+  "github": { "smeeChannel": "https://smee.io/abc" },
+  "linear": { "webhookId": "wh_test_456" }
+} } }
 EOF
-  cat > "$SCRATCH/xdg/catalyst/config-${key}.json" <<EOF
-{ "catalyst": { "monitor": { "linear": { "webhookId": "wh_test_456" } } } }
-EOF
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
 
   local out
   out=$(run_script "$proj" 2>&1)
