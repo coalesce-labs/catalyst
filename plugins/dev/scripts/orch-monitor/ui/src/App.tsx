@@ -33,8 +33,11 @@ const CommsView = lazy(() =>
 const ActivityView = lazy(() =>
   import("./components/activity-view").then((m) => ({ default: m.ActivityView })),
 );
+const GodModeView = lazy(() =>
+  import("./components/god-mode-view").then((m) => ({ default: m.GodModeView })),
+);
 
-type TopView = "dashboard" | "comms" | "activity";
+type TopView = "dashboard" | "comms" | "activity" | "god-mode";
 
 const isDevSandbox =
   typeof window !== "undefined" &&
@@ -148,6 +151,13 @@ function Monitor() {
     setSelectedWorker(null);
   }, []);
 
+  const handleGodModeSelect = useCallback(() => {
+    setTopView("god-mode");
+    setSelectedOrchId(null);
+    setSelectedSession(null);
+    setSelectedWorker(null);
+  }, []);
+
   const handleActivityPivot = useCallback(
     (orchId: string, ticket: string) => {
       setSelectedOrchId(orchId);
@@ -215,6 +225,7 @@ function Monitor() {
         topView={topView}
         onCommsSelect={handleCommsSelect}
         onActivitySelect={handleActivitySelect}
+        onGodModeSelect={handleGodModeSelect}
       />
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -293,6 +304,10 @@ function Monitor() {
             ) : topView === "activity" ? (
               <div className="animate-fade-in">
                 <ActivityView onPivot={handleActivityPivot} />
+              </div>
+            ) : topView === "god-mode" ? (
+              <div className="animate-fade-in">
+                <GodModeView />
               </div>
             ) : effectiveOrch ? (
               <div key={effectiveOrch.id} className="animate-fade-in flex flex-col gap-4">
