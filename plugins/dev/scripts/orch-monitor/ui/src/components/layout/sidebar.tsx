@@ -17,6 +17,7 @@ import {
   Workflow,
   MessageSquare,
   Activity,
+  Zap,
 } from "lucide-react";
 
 const GROUPING_MODES = ["flat", "repo", "ticket"] as const;
@@ -36,9 +37,10 @@ interface SidebarProps {
   onGroupingModeChange: (mode: GroupingMode) => void;
   timeFilter: SessionTimeFilter;
   onTimeFilterChange: (filter: SessionTimeFilter) => void;
-  topView: "dashboard" | "comms" | "activity";
+  topView: "dashboard" | "comms" | "activity" | "god-mode";
   onCommsSelect: () => void;
   onActivitySelect: () => void;
+  onGodModeSelect: () => void;
 }
 
 export function Sidebar({
@@ -58,6 +60,7 @@ export function Sidebar({
   topView,
   onCommsSelect,
   onActivitySelect,
+  onGodModeSelect,
 }: SidebarProps) {
   const { active: activeSessions, dead: recentDead } = filterSessions(sessions, timeFilter);
   const { visible: visibleOrchs, recent: recentOrchs } = filterOrchestrators(
@@ -132,6 +135,11 @@ export function Sidebar({
         <NavItem active={topView === "activity"} onClick={onActivitySelect}>
           <Activity className="h-4 w-4 flex-shrink-0" />
           <span className="flex-1 font-medium">Activity</span>
+        </NavItem>
+
+        <NavItem active={topView === "god-mode"} onClick={onGodModeSelect}>
+          <Zap className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1 font-medium">Activity Brief</span>
         </NavItem>
 
         <SessionTimeFilterBar filter={timeFilter} onChange={onTimeFilterChange} className="mt-3 mb-1 px-2" />

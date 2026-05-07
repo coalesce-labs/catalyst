@@ -50,11 +50,16 @@ import {
 import type { BriefingProvider } from "./lib/ai-briefing";
 import type { SummarizeHandler } from "./lib/summarize";
 import { createSummarizeHandler } from "./lib/summarize";
-import { loadSummarizeConfig, type ProviderName } from "./lib/summarize/config";
+import { loadSummarizeConfig, type SummarizeConfig, type ProviderName } from "./lib/summarize/config";
 import { buildSummarizeSnapshot } from "./lib/summarize/snapshot";
 import { getProvider, type SummarizeProvider } from "./lib/summarize/providers";
 import { createCache } from "./lib/summarize/cache";
 import { createRateLimiter } from "./lib/summarize/rate-limit";
+import {
+  generateActivityBriefing,
+  type ActivityWindow,
+  VALID_ACTIVITY_WINDOWS,
+} from "./lib/activity-briefing";
 import {
   createPreviewFetcher,
   type PreviewFetcher,
@@ -156,6 +161,7 @@ export interface CreateServerOptions {
   sqlitePollIntervalMs?: number;
   briefingProvider?: BriefingProvider | null;
   summarizeHandler?: SummarizeHandler | null;
+  summarizeConfig?: SummarizeConfig;
   prometheusUrl?: string | null;
   lokiUrl?: string | null;
   prometheusFetcher?: PrometheusFetcher | null;
@@ -446,6 +452,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     sqlitePollIntervalMs,
     briefingProvider: briefingProviderOpt,
     summarizeHandler: summarizeHandlerOpt,
+    summarizeConfig: summarizeConfigOpt,
     prometheusUrl,
     lokiUrl,
     prometheusFetcher: promFetcherOpt,
@@ -498,6 +505,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   const summarizeHandler: SummarizeHandler | null =
     summarizeHandlerOpt === null ? null : (summarizeHandlerOpt ?? null);
+
+  const activityBriefingConfig: SummarizeConfig =
+    summarizeConfigOpt ?? { enabled: false, defaultProvider: "anthropic", defaultModel: "claude-sonnet-4-6", providers: {} };
 
   const prom: PrometheusFetcher | null =
     promFetcherOpt === null
@@ -1324,6 +1334,22 @@ export function createServer(opts: CreateServerOptions): BunServer {
           });
         }
 
+        if (url.pathname === "/api/briefing/activity") {
+          const windowParam = url.searchParams.get("window") ?? "30m";
+          if (!VALID_ACTIVITY_WINDOWS.has(windowParam as ActivityWindow)) {
+            return Response.json(
+              { error: "Invalid window. Use 30m, 1h, or 6h." },
+              { status: 400 },
+            );
+          }
+          const result = await generateActivityBriefing(
+            CATALYST_DIR,
+            activityBriefingConfig,
+            windowParam as ActivityWindow,
+          );
+          return Response.json(result);
+        }
+
         if (url.pathname === "/api/webhook" && req.method === "POST") {
           if (!webhookHandler) {
             return new Response("webhook receiver not configured", {
@@ -1936,6 +1962,7 @@ if (import.meta.main) {
       terminal: useTerminal,
       renderOptions: renderOpts,
       summarizeHandler,
+      summarizeConfig: summarizeCfg,
       webhookConfig,
       linearWebhookConfig,
     });
