@@ -83,3 +83,29 @@ The session container is ephemeral — the cloned tree is discarded at session e
 - **PAT rotation / scope split.** Should the thoughts-repo clone PAT be split from the GitHub MCP PAT, despite the small scope difference, to limit blast radius?
 
 These questions are explicitly out of scope for CTL-286 and tracked in CTL-295.
+
+---
+
+## Postscript (CTL-299, 2026-05-07): generic base-agent project-context resolution
+
+The startup ritual in CTL-286 hardcoded the path
+`/workspace/thoughts-repo/repos/catalyst-workspace/shared` for the project's
+shared thoughts subtree. CTL-299 generalized the base agent to operate on
+any Catalyst-pattern project, which required the thoughts symlink target
+to also become per-session-dynamic.
+
+Updated ritual (in `cma/agents/base-system-prompt.md` section 1):
+
+```bash
+THOUGHTS_DIR="${CATALYST_THOUGHTS_DIRECTORY:-$PROJECT_KEY}"
+ln -s "/workspace/thoughts-repo/repos/${THOUGHTS_DIR}/shared" /workspace/thoughts/shared
+```
+
+Where `$PROJECT_KEY` comes from the bound target repo's
+`.catalyst/config.json:catalyst.projectKey`. The optional override
+`CATALYST_THOUGHTS_DIRECTORY` is supported for projects whose thoughts
+directory name does not match their `projectKey`.
+
+This does not change the decision (still Option C — git clone). It only
+parameterizes the symlink target. The "open questions for CTL-295" above
+remain open and unchanged.
