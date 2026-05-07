@@ -2,12 +2,22 @@ import { cn } from "@/lib/utils";
 import type { ActivityEvent } from "@/hooks/use-activity";
 
 /**
- * One row in the activity feed: timestamp + topic chip + scope chips +
+ * One row in the activity feed: timestamp + source chip + topic chip + scope chips +
  * one-line summary of the event detail. Clicking a scope chip with both
  * orchestrator + worker (or v1 top-level orchestrator+worker) calls
  * `onPivot` so the parent can switch to the orchestrator view and open
  * the worker drawer.
  */
+
+type SourceLabel = "GitHub" | "Linear" | "Comms" | "Filter" | "System";
+
+const SOURCE_CHIP_STYLES: Record<SourceLabel, string> = {
+  GitHub: "bg-[#1f3a5a] text-[#9ec7f4]",
+  Linear: "bg-[#3a2a5a] text-[#c8a8f4]",
+  Comms: "bg-[#4a3a1f] text-[#f4c88a]",
+  Filter: "bg-[#1a4a3a] text-[#8af4cc]",
+  System: "bg-surface-3 text-muted",
+};
 
 const TOPIC_PREFIX_STYLES: Array<{ prefix: string; cls: string }> = [
   { prefix: "github.pr.", cls: "bg-[#3a2a5a] text-[#c8a8f4]" },
@@ -35,6 +45,24 @@ function topicStyle(topic: string): string {
     if (topic.startsWith(prefix)) return cls;
   }
   return "bg-surface-3 text-muted";
+}
+
+function deriveSource(event: ActivityEvent): SourceLabel | null {
+  if (event.event === "heartbeat") return null;
+  if (event.source) {
+    if (event.source.startsWith("github")) return "GitHub";
+    if (event.source.startsWith("linear")) return "Linear";
+  }
+  if (event.event.startsWith("github.")) return "GitHub";
+  if (event.event.startsWith("linear.")) return "Linear";
+  if (event.event.startsWith("comms.")) return "Comms";
+  if (event.event.startsWith("filter.")) {
+    const detail = (event.detail ?? {}) as Record<string, unknown>;
+    const ids = detail.source_event_ids;
+    if (!Array.isArray(ids) || ids.length === 0) return null;
+    return "Filter";
+  }
+  return "System";
 }
 
 function fmtTime(ts: string): string {
@@ -168,10 +196,21 @@ export function ActivityEventRow({ event, onPivot }: Props) {
 
   const isLinear = event.event.startsWith("linear.");
   const canPivot = !!(onPivot && orch && worker);
+  const sourceLabel = deriveSource(event);
 
   return (
     <div className="flex items-baseline gap-2 border-b border-border-subtle px-3 py-1.5 font-mono text-[12px]">
       <span className="shrink-0 text-muted tabular-nums">{fmtTime(event.ts)}</span>
+      {sourceLabel && (
+        <span
+          className={cn(
+            "shrink-0 rounded px-1.5 py-px text-[10px] font-semibold tracking-wider",
+            SOURCE_CHIP_STYLES[sourceLabel],
+          )}
+        >
+          {sourceLabel}
+        </span>
+      )}
       <span
         className={cn(
           "shrink-0 rounded px-1.5 py-px text-[10px] tracking-wider",
@@ -182,11 +221,6 @@ export function ActivityEventRow({ event, onPivot }: Props) {
       </span>
       <span className="min-w-0 flex-1 truncate text-fg">{summarize(event)}</span>
       <span className="flex shrink-0 items-center gap-1">
-        {isLinear && (
-          <span className="rounded bg-[#3a1a5a] px-1.5 py-px text-[10px] text-[#b08af8]">
-            Linear
-          </span>
-        )}
         {canPivot && (
           <button
             type="button"
