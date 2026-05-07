@@ -608,6 +608,17 @@ describe("loadWebhookConfig — Linear webhook secret (CTL-210)", () => {
   });
 
   it("Linear-only config (no GitHub channel) still loads with smeeChannel/secret empty", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            workspace: {
+              webhookId: "linear-webhook-123",
+            },
+          },
+        },
+      },
+    });
     writeProject({
       catalyst: {
         monitor: {
@@ -622,7 +633,7 @@ describe("loadWebhookConfig — Linear webhook secret (CTL-210)", () => {
     expect(cfg).not.toBeNull();
     expect(cfg!.smeeChannel).toBe("");
     expect(cfg!.secret).toBe("");
-    expect(cfg!.linearSecrets).toEqual([]);
+    expect(cfg!.linearSecrets).toEqual([{ key: "workspace", secret: "linear-only" }]);
     expect(cfg!.linearSmeeChannel).toBe("");
 
     delete process.env.MY_LINEAR_SECRET;
@@ -736,6 +747,17 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
 
   // CTL-263: linearBotUserId
   it("reads catalyst.monitor.linear.botUserId from Layer 1 into linearBotUserId", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            workspace: {
+              webhookId: "linear-webhook-123",
+            },
+          },
+        },
+      },
+    });
     writeProject({
       catalyst: {
         monitor: {
@@ -755,6 +777,17 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
   });
 
   it("linearBotUserId is empty string when not configured", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            workspace: {
+              webhookId: "linear-webhook-123",
+            },
+          },
+        },
+      },
+    });
     writeProject({
       catalyst: {
         monitor: {
