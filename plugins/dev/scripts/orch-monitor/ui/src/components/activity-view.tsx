@@ -5,6 +5,7 @@ import {
 } from "@/hooks/use-activity";
 import { ActivityTopicPalette } from "./activity-topic-palette";
 import { ActivityEventRow } from "./activity-event-row";
+import { useRepoColors } from "@/hooks/use-repo-colors";
 import { Radio } from "lucide-react";
 import { EmptyState } from "./ui/empty-state";
 
@@ -72,6 +73,7 @@ export function ActivityView({ onPivot }: ActivityViewProps) {
   }, []);
 
   const { events, status, error, live } = useActivityStream(debouncedPredicate);
+  const repoColors = useRepoColors();
 
   // Newest first in the UI; the backend returns chronological order.
   // Groq no-match wakes are pure noise — hidden before render (CTL-280).
@@ -129,6 +131,7 @@ export function ActivityView({ onPivot }: ActivityViewProps) {
                 key={`${e.ts}-${i}`}
                 event={e}
                 onPivot={onPivot}
+                repoColors={repoColors}
               />
             ))
           )}
