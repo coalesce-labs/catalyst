@@ -1704,7 +1704,7 @@ describe("Linear webhook receiver route (/api/webhook/linear) — CTL-210", () =
       wtDir,
       startWatcher: false,
       annotationsDbPath: join(linearTmp, "annotations.db"),
-      linearWebhookConfig: { secret: "linear-test-secret" },
+      linearWebhookConfig: { linearSecrets: [{ key: "test", secret: "linear-test-secret" }] },
     });
     linearUrl = `http://localhost:${linearServer.port}`;
   });

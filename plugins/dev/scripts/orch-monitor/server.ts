@@ -190,11 +190,11 @@ export interface CreateServerOptions {
   /**
    * Linear webhook config. Independent of `webhookConfig` (which carries the
    * GitHub bits) so a daemon can run Linear-only or GitHub-only setups.
-   * `secret` empty disables `POST /api/webhook/linear`. CTL-210.
+   * HMAC signing secrets array (CTL-273) — empty disables `POST /api/webhook/linear`. CTL-210.
    * `smeeChannel` drives the second smee tunnel (CTL-242); empty means no tunnel.
    */
   linearWebhookConfig?: {
-    secret: string;
+    linearSecrets: Array<{ key: string; secret: string }>;
     /** smee.io channel URL for Linear delivery. Empty = no tunnel. CTL-242. */
     smeeChannel?: string;
     /** Linear bot user UUID for loop prevention. CTL-263. */
@@ -630,7 +630,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // either or both. Shares the same EventLogWriter when both are present so
   // GitHub and Linear events interleave in the same monthly file. CTL-210.
   let linearWebhookHandler: LinearWebhookHandler | null = null;
-  if (linearWebhookConfig && linearWebhookConfig.secret.length > 0) {
+  if (linearWebhookConfig && linearWebhookConfig.linearSecrets.length > 0) {
     const linearEventLog: EventLogWriter = createEventLogWriter({
       catalystDir: CATALYST_DIR,
       logger: {
@@ -639,8 +639,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
       },
     });
     linearWebhookHandler = createLinearWebhookHandler({
-      secret: linearWebhookConfig.secret,
-      botUserId: linearWebhookConfig.botUserId,
+      linearSecrets: linearWebhookConfig?.linearSecrets ?? [],
+      botUserId: linearWebhookConfig?.botUserId,
       eventLog: linearEventLog,
       emit: (type, data) => emit(type, data),
       // CTL-211 — invalidate the LinearFetcher cache on issue webhook events
@@ -1882,10 +1882,10 @@ if (import.meta.main) {
       : null;
   const linearWebhookConfig =
     fullWebhookConfig &&
-    (fullWebhookConfig.linearSecret.length > 0 ||
+    (fullWebhookConfig.linearSecrets.length > 0 ||
       fullWebhookConfig.linearSmeeChannel.length > 0)
       ? {
-          secret: fullWebhookConfig.linearSecret,
+          linearSecrets: fullWebhookConfig.linearSecrets,
           smeeChannel: fullWebhookConfig.linearSmeeChannel,
           botUserId: fullWebhookConfig.linearBotUserId || undefined,
         }

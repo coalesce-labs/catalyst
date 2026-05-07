@@ -124,7 +124,7 @@ function readAllLinearSecrets(
 
   // Keyed object format — iterate all keys
   for (const key in linear) {
-    if (!linear.hasOwnProperty(key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(linear, key)) continue;
     const entry = linear[key];
     if (!isRecord(entry)) continue;
     if (typeof entry.webhookId !== "string" || entry.webhookId.length === 0)
@@ -267,9 +267,15 @@ export function loadWebhookConfig(
   let homeLinearConfig: unknown;
   try {
     const homeConfigRaw = readFileSync(join(homeConfigDir, "config.json"), "utf8");
-    const homeConfigParsed = JSON.parse(homeConfigRaw);
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    const homeConfigParsed = JSON.parse(homeConfigRaw) as unknown;
     if (isRecord(homeConfigParsed) && isRecord(homeConfigParsed.catalyst)) {
-      homeLinearConfig = homeConfigParsed.catalyst.monitor?.linear;
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const monitor = homeConfigParsed.catalyst.monitor;
+      if (isRecord(monitor)) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        homeLinearConfig = monitor.linear;
+      }
     }
   } catch {
     homeLinearConfig = undefined;
