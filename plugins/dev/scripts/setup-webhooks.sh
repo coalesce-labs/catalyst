@@ -30,6 +30,7 @@ ADD_REPOS=()
 LINEAR_SECRET_ENV=""
 LINEAR_REGISTER=0
 LINEAR_DEREGISTER=0
+LINEAR_ALL_PUBLIC_TEAMS=0
 LINEAR_WEBHOOK_URL=""
 REGISTER_GITHUB_HOOKS=0
 REPO_SHAPE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
@@ -79,10 +80,16 @@ Options:
                              local Layer 2 record. Combine with --force to
                              delete and recreate. When this is the only intent
                              flag, channel/secret setup for GitHub is skipped.
+  --linear-all-public-teams  When used with --linear-register, register a
+                             workspace-wide webhook (allPublicTeams: true)
+                             instead of a single-team webhook. Allows both
+                             workspace and per-team webhooks to coexist.
   --linear-deregister        Delete the Linear webhook recorded in Layer 2 and
                              clear the local record + secret file. When this
                              is the only intent flag, channel/secret setup for
                              GitHub is skipped.
+  --linear-all-public-teams  When used with --linear-deregister, remove the
+                             workspace-wide webhook instead of a per-team one.
   --webhook-url <https-url>  Public HTTPS URL where Linear should deliver
                              events. When omitted with --linear-register, a
                              new smee.io channel is auto-provisioned and the
@@ -123,6 +130,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --linear-register) LINEAR_REGISTER=1; shift ;;
     --linear-deregister) LINEAR_DEREGISTER=1; shift ;;
+    --linear-all-public-teams) LINEAR_ALL_PUBLIC_TEAMS=1; shift ;;
     --webhook-url)
       if [[ $# -lt 2 || -z "${2:-}" ]]; then
         echo "ERROR: --webhook-url requires an argument" >&2
@@ -369,10 +377,12 @@ if [[ $SKIP_GITHUB_SETUP -eq 1 ]]; then
       --config "$PROJECT_CONFIG_PATH"
     )
     [[ $FORCE -eq 1 ]] && helper_args+=(--force)
+    [[ $LINEAR_ALL_PUBLIC_TEAMS -eq 1 ]] && helper_args+=(--all-public-teams)
     bash "${SCRIPT_DIR}/setup-linear-webhook.sh" "${helper_args[@]}"
   elif [[ $LINEAR_DEREGISTER -eq 1 ]]; then
-    bash "${SCRIPT_DIR}/setup-linear-webhook.sh" \
-      --deregister --config "$PROJECT_CONFIG_PATH"
+    deregister_args=(--deregister --config "$PROJECT_CONFIG_PATH")
+    [[ $LINEAR_ALL_PUBLIC_TEAMS -eq 1 ]] && deregister_args+=(--all-public-teams)
+    bash "${SCRIPT_DIR}/setup-linear-webhook.sh" "${deregister_args[@]}"
   fi
   exit 0
 fi

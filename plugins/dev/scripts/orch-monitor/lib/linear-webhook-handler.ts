@@ -11,8 +11,14 @@ export interface LinearWebhookLogger {
 }
 
 export interface LinearWebhookHandlerDeps {
-  /** HMAC signing secret. Empty string disables the handler (returns 503). */
-  secret: string;
+  /**
+   * HMAC signing secrets (CTL-273). Array of {key, secret} pairs for multi-team support.
+   * Key is "workspace" or a team UUID. Handler tries each secret until one validates.
+   * Empty array disables the handler (returns 503).
+   * For backward compatibility with single-secret usage, callers can pass an array
+   * with a single entry.
+   */
+  linearSecrets: Array<{ key: string; secret: string }>;
   /** Optional pub/sub for SSE fan-out to UI clients. */
   emit?: (type: string, data: unknown) => void;
   /** Event-log fan-out — every accepted event is appended here. */
@@ -141,8 +147,8 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
   }
 
   async function handle(req: Request): Promise<Response> {
-    if (deps.secret.length === 0) {
-      return new Response("linear webhook secret not configured", {
+    if (deps.linearSecrets.length === 0) {
+      return new Response("linear webhook secrets not configured", {
         status: 503,
       });
     }
@@ -152,7 +158,16 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
 
     const rawBody = new Uint8Array(await req.arrayBuffer());
     const sig = req.headers.get("linear-signature");
-    if (!verifyLinearSignature(deps.secret, rawBody, sig)) {
+
+    // CTL-273: Try each secret until one validates (supports multi-team webhooks)
+    let verified = false;
+    for (const { secret } of deps.linearSecrets) {
+      if (secret && verifyLinearSignature(secret, rawBody, sig)) {
+        verified = true;
+        break;
+      }
+    }
+    if (!verified) {
       return new Response("signature verification failed", { status: 401 });
     }
 

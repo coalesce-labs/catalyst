@@ -275,12 +275,31 @@ else
 fi
 
 if [[ -f "$HOME_CONFIG_PATH" ]]; then
-    linear_webhook_id=$(jq -r '.catalyst.monitor.linear.webhookId // empty' "$HOME_CONFIG_PATH" 2>/dev/null)
-    if [[ -n "$linear_webhook_id" ]]; then
-        pass "Linear webhook registered (id: ${linear_webhook_id:0:8}…)"
-    else
+    # Check for both single-object (legacy) and keyed-object (CTL-273) formats
+    linear_config=$(jq -r '.catalyst.monitor.linear // {}' "$HOME_CONFIG_PATH" 2>/dev/null)
+
+    if [[ "$linear_config" == "{}" || "$linear_config" == "null" ]]; then
         warn "Linear webhook not registered — Linear events won't reach the event log"
         info "Register: bash plugins/dev/scripts/setup-webhooks.sh --linear-register"
+    else
+        # Check if this is the legacy single-object format or keyed object
+        single_object_id=$(echo "$linear_config" | jq -r 'select(type == "object" and .webhookId != null) | .webhookId // empty' 2>/dev/null)
+        if [[ -n "$single_object_id" ]]; then
+            # Legacy single-object format
+            pass "Linear webhook registered (legacy single-object, id: ${single_object_id:0:8}…)"
+        else
+            # Keyed-object format (CTL-273) — surface all registered webhooks
+            while IFS= read -r key; do
+                webhook_id=$(echo "$linear_config" | jq -r ".\"$key\".webhookId // empty" 2>/dev/null)
+                if [[ -n "$webhook_id" ]]; then
+                    if [[ "$key" == "workspace" ]]; then
+                        pass "Linear webhook registered (workspace-wide, id: ${webhook_id:0:8}…)"
+                    else
+                        pass "Linear webhook registered (team: ${key:0:8}…, id: ${webhook_id:0:8}…)"
+                    fi
+                fi
+            done < <(echo "$linear_config" | jq -r 'keys[]? // empty' 2>/dev/null)
+        fi
     fi
 fi
 

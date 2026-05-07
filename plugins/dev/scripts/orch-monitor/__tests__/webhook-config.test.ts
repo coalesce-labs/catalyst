@@ -65,7 +65,7 @@ describe("loadWebhookConfig", () => {
       secret: "home-secret",
       secretEnvName: "CATALYST_WEBHOOK_SECRET",
       watchRepos: [],
-      linearSecret: "",
+      linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
     });
@@ -94,7 +94,7 @@ describe("loadWebhookConfig", () => {
       secret: "legacy-secret",
       secretEnvName: "CATALYST_WEBHOOK_SECRET",
       watchRepos: [],
-      linearSecret: "",
+      linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
     });
@@ -131,7 +131,7 @@ describe("loadWebhookConfig", () => {
       secret: "secret",
       secretEnvName: "CATALYST_WEBHOOK_SECRET",
       watchRepos: [],
-      linearSecret: "",
+      linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
     });
@@ -162,7 +162,7 @@ describe("loadWebhookConfig", () => {
       secret: "custom-value",
       secretEnvName: "MY_CUSTOM_SECRET_ENV",
       watchRepos: [],
-      linearSecret: "",
+      linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
     });
@@ -187,7 +187,7 @@ describe("loadWebhookConfig", () => {
       secret: "secret",
       secretEnvName: "CATALYST_WEBHOOK_SECRET",
       watchRepos: [],
-      linearSecret: "",
+      linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
     });
@@ -213,7 +213,7 @@ describe("loadWebhookConfig", () => {
       secret: "legacy-fallback",
       secretEnvName: "CATALYST_WEBHOOK_SECRET",
       watchRepos: [],
-      linearSecret: "",
+      linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
     });
@@ -287,7 +287,7 @@ describe("loadWebhookConfig", () => {
       secret: "secret",
       secretEnvName: "CATALYST_WEBHOOK_SECRET",
       watchRepos: [],
-      linearSecret: "",
+      linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
     });
@@ -321,7 +321,7 @@ describe("loadWebhookConfig", () => {
       secret: "default-secret",
       secretEnvName: "CATALYST_WEBHOOK_SECRET",
       watchRepos: [],
-      linearSecret: "",
+      linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
     });
@@ -414,7 +414,7 @@ describe("loadWebhookConfig watchRepos (CTL-216)", () => {
       secret: "secret",
       secretEnvName: "CATALYST_WEBHOOK_SECRET",
       watchRepos: ["a/b"],
-      linearSecret: "",
+      linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
     });
@@ -567,7 +567,7 @@ describe("loadWebhookConfig — Linear webhook secret (CTL-210)", () => {
     const cfg = loadWebhookConfig(homeDir, projectConfigPath);
 
     expect(cfg).not.toBeNull();
-    expect(cfg!.linearSecret).toBe("linear-from-named-env");
+    expect(cfg!.linearSecrets).toEqual([]);
 
     delete process.env.MY_LINEAR_SECRET;
   });
@@ -591,7 +591,7 @@ describe("loadWebhookConfig — Linear webhook secret (CTL-210)", () => {
 
     const cfg = loadWebhookConfig(homeDir, projectConfigPath);
 
-    expect(cfg!.linearSecret).toBe("linear-fallback");
+    expect(cfg!.linearSecrets).toEqual([]);
   });
 
   it("returns linearSecret as empty string when no Linear config and no env var", () => {
@@ -604,10 +604,21 @@ describe("loadWebhookConfig — Linear webhook secret (CTL-210)", () => {
 
     const cfg = loadWebhookConfig(homeDir, projectConfigPath);
 
-    expect(cfg!.linearSecret).toBe("");
+    expect(cfg!.linearSecrets).toEqual([]);
   });
 
   it("Linear-only config (no GitHub channel) still loads with smeeChannel/secret empty", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            workspace: {
+              webhookId: "linear-webhook-123",
+            },
+          },
+        },
+      },
+    });
     writeProject({
       catalyst: {
         monitor: {
@@ -622,7 +633,7 @@ describe("loadWebhookConfig — Linear webhook secret (CTL-210)", () => {
     expect(cfg).not.toBeNull();
     expect(cfg!.smeeChannel).toBe("");
     expect(cfg!.secret).toBe("");
-    expect(cfg!.linearSecret).toBe("linear-only");
+    expect(cfg!.linearSecrets).toEqual([{ key: "workspace", secret: "linear-only" }]);
     expect(cfg!.linearSmeeChannel).toBe("");
 
     delete process.env.MY_LINEAR_SECRET;
@@ -736,6 +747,17 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
 
   // CTL-263: linearBotUserId
   it("reads catalyst.monitor.linear.botUserId from Layer 1 into linearBotUserId", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            workspace: {
+              webhookId: "linear-webhook-123",
+            },
+          },
+        },
+      },
+    });
     writeProject({
       catalyst: {
         monitor: {
@@ -755,6 +777,17 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
   });
 
   it("linearBotUserId is empty string when not configured", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          linear: {
+            workspace: {
+              webhookId: "linear-webhook-123",
+            },
+          },
+        },
+      },
+    });
     writeProject({
       catalyst: {
         monitor: {

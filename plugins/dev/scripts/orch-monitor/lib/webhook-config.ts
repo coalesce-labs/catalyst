@@ -13,13 +13,16 @@ export interface WebhookCliConfig {
    */
   watchRepos: string[];
   /**
-   * Linear webhook signing secret (resolved from
-   * `catalyst.monitor.linear.webhookSecretEnv` env-var name in Layer 1, with
-   * fallback to `CATALYST_LINEAR_WEBHOOK_SECRET`). Empty string when no Linear
-   * config is present — the server then disables `POST /api/webhook/linear`.
+   * Linear webhook signing secrets (CTL-273). Array of {key, secret} pairs,
+   * where key is "workspace" or a team UUID, and secret is the HMAC signing secret.
+   * Resolved from `catalyst.monitor.linear.webhookSecretEnv` env-var name in
+   * Layer 1, with fallback to `CATALYST_LINEAR_WEBHOOK_SECRET`. Empty array
+   * when no Linear config is present — the server then disables
+   * `POST /api/webhook/linear`. The handler tries each secret in order until
+   * one validates, supporting both workspace-wide and per-team webhooks.
    * CTL-210.
    */
-  linearSecret: string;
+  linearSecrets: Array<{ key: string; secret: string }>;
   /**
    * smee.io channel URL for Linear webhook delivery (Layer 2, per-machine).
    * Read from `catalyst.monitor.linear.smeeChannel` in `~/.config/catalyst/config.json`.
@@ -80,6 +83,66 @@ function readWatchRepos(github: Record<string, unknown>): string[] {
     seen.add(trimmed);
     out.push(trimmed);
   }
+  return out;
+}
+
+// Helper to extract all Linear webhook secrets from the keyed Layer 2 structure.
+// Reads each key in catalyst.monitor.linear and attempts to load its secret.
+// Backward compatibility: If catalyst.monitor.linear is a single object,
+// treat it as "workspace" key.
+//
+// Arguments:
+//   linear: the catalyst.monitor.linear object/dict from Layer 2
+//   linearWebhookSecretEnv: env-var name from Layer 1 (optional)
+//
+// Returns: array of {key, secret} pairs
+function readAllLinearSecrets(
+  linear: unknown,
+  linearWebhookSecretEnv: string | null,
+): Array<{ key: string; secret: string }> {
+  if (!isRecord(linear)) return [];
+  const out: Array<{ key: string; secret: string }> = [];
+
+  // Check if this is the old single-object format
+  const isSingleObject =
+    typeof linear.webhookId === "string" &&
+    linear.webhookId.length > 0;
+
+  if (isSingleObject) {
+    // Legacy single-object format — treat as "workspace" key
+    const secret =
+      (linearWebhookSecretEnv !== null
+        ? process.env[linearWebhookSecretEnv]
+        : undefined) ??
+      process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
+      "";
+    if (secret.length > 0) {
+      out.push({ key: "workspace", secret });
+    }
+    return out;
+  }
+
+  // Keyed object format — iterate all keys
+  for (const key in linear) {
+    if (!Object.prototype.hasOwnProperty.call(linear, key)) continue;
+    const entry = linear[key];
+    if (!isRecord(entry)) continue;
+    if (typeof entry.webhookId !== "string" || entry.webhookId.length === 0)
+      continue;
+
+    // For now, all webhooks use the same secret env-var from Layer 1.
+    // In the future, per-team secrets could be stored in Layer 1.
+    const secret =
+      (linearWebhookSecretEnv !== null
+        ? process.env[linearWebhookSecretEnv]
+        : undefined) ??
+      process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
+      "";
+    if (secret.length > 0) {
+      out.push({ key, secret });
+    }
+  }
+
   return out;
 }
 
@@ -197,14 +260,30 @@ export function loadWebhookConfig(
   // opposite of what we want. CTL-216.
   const watchRepos = projectExtract?.watchRepos ?? [];
 
-  // Linear webhook secret. Layer 1 carries the env-var name; the value lives
-  // in the env var itself. Optional — empty string disables the Linear route.
-  // CTL-210.
+  // Linear webhook secrets (CTL-273). Reads from Layer 2 keyed structure.
+  // Layer 1 carries the env-var name; the value lives in the env var itself.
+  // Optional — empty array disables the Linear route. CTL-210.
   const linearWebhookSecretEnv = projectExtract?.linearWebhookSecretEnv ?? null;
-  const linearSecret =
-    (linearWebhookSecretEnv !== null ? process.env[linearWebhookSecretEnv] : undefined) ??
-    process.env.CATALYST_LINEAR_WEBHOOK_SECRET ??
-    "";
+  let homeLinearConfig: unknown;
+  try {
+    const homeConfigRaw = readFileSync(join(homeConfigDir, "config.json"), "utf8");
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    const homeConfigParsed = JSON.parse(homeConfigRaw) as unknown;
+    if (isRecord(homeConfigParsed) && isRecord(homeConfigParsed.catalyst)) {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+      const monitor = homeConfigParsed.catalyst.monitor;
+      if (isRecord(monitor)) {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+        homeLinearConfig = monitor.linear;
+      }
+    }
+  } catch {
+    homeLinearConfig = undefined;
+  }
+  const linearSecrets = readAllLinearSecrets(
+    homeLinearConfig ?? undefined,
+    linearWebhookSecretEnv,
+  );
 
   // Linear smee channel. Layer 2 only (per-machine) — same split as GitHub
   // smeeChannel. Env override wins. CTL-242.
@@ -219,16 +298,16 @@ export function loadWebhookConfig(
   const linearBotUserId = projectExtract?.linearBotUserId ?? "";
 
   // Allow Linear-only configurations: if the GitHub channel/secret are missing
-  // but a Linear secret is present, return a config that disables the GitHub
+  // but Linear secrets are present, return a config that disables the GitHub
   // route but enables the Linear route. CTL-210.
   if (finalChannel.length === 0 || secret.length === 0) {
-    if (linearSecret.length === 0 && linearSmeeChannel.length === 0) return null;
+    if (linearSecrets.length === 0 && linearSmeeChannel.length === 0) return null;
     return {
       smeeChannel: "",
       secret: "",
       secretEnvName: webhookSecretEnv,
       watchRepos,
-      linearSecret,
+      linearSecrets,
       linearSmeeChannel,
       linearBotUserId,
     };
@@ -239,7 +318,7 @@ export function loadWebhookConfig(
     secret,
     secretEnvName: webhookSecretEnv,
     watchRepos,
-    linearSecret,
+    linearSecrets,
     linearSmeeChannel,
     linearBotUserId,
   };
