@@ -48,12 +48,13 @@ make_test_env() {
   mkdir -p "${dir}/project/.catalyst"
   mkdir -p "${dir}/stubbin"
 
-  # Layer 1 config: projectKey + teamId
+  # Layer 1 config: projectKey + teamKey + teamId
   cat > "${dir}/project/.catalyst/config.json" <<'EOF'
 {
   "catalyst": {
     "projectKey": "test-project",
     "linear": {
+      "teamKey": "TEST",
       "teamId": "11111111-2222-3333-4444-555555555555"
     }
   }
@@ -231,10 +232,13 @@ test_register_writes_layer2_record() {
 
   local rec; rec=$(read_layer2 "$env")
   [[ -n "$rec" ]] || { echo "Layer 2 record missing"; return 1; }
-  local id; id=$(printf '%s' "$rec" | jq -r '.webhookId')
-  local url; url=$(printf '%s' "$rec" | jq -r '.smeeChannel')
-  local ts; ts=$(printf '%s' "$rec" | jq -r '.registeredAt')
-  local rt; rt=$(printf '%s' "$rec" | jq -c '.resourceTypes')
+  # After CTL-285 the record is stored under the team key ("test" = lowercase "TEST")
+  local entry; entry=$(printf '%s' "$rec" | jq -c '."test" // empty')
+  [[ -n "$entry" ]] || { echo "Layer 2 keyed entry missing (expected key \"test\")"; return 1; }
+  local id; id=$(printf '%s' "$entry" | jq -r '.webhookId')
+  local url; url=$(printf '%s' "$entry" | jq -r '.smeeChannel')
+  local ts; ts=$(printf '%s' "$entry" | jq -r '.registeredAt')
+  local rt; rt=$(printf '%s' "$entry" | jq -c '.resourceTypes')
   expect_eq "webhookId" "w1" "$id" || return 1
   expect_eq "smeeChannel" "https://foo.test/api/webhook/linear" "$url" || return 1
   # ISO-8601 UTC timestamp shape
@@ -243,23 +247,28 @@ test_register_writes_layer2_record() {
   fi
   expect_eq "resourceTypes" '["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]' "$rt" || return 1
   # Legacy field must NOT be written by the new code path.
-  local has_legacy; has_legacy=$(printf '%s' "$rec" | jq 'has("webhookUrl")')
+  local has_legacy; has_legacy=$(printf '%s' "$entry" | jq 'has("webhookUrl")')
   expect_eq "no legacy webhookUrl" "false" "$has_legacy" || return 1
+  # Secret file written with team key suffix
+  local secret_path="${env}/home/.config/catalyst/linear-webhook-secret-test"
+  [[ -f "$secret_path" ]] || { echo "per-team secret file not found: $secret_path"; return 1; }
 }
 
 # ─── Test 2 — idempotent re-run with same URL: no API call ─────────────────
 test_idempotent_rerun_no_api_call() {
   local env; env=$(make_test_env t2)
-  # Pre-seed Layer 2 record.
+  # Pre-seed Layer 2 record in keyed format (team key "test" = lowercase "TEST").
   cat > "${env}/home/.config/catalyst/config.json" <<'EOF'
 {
   "catalyst": {
     "monitor": {
       "linear": {
-        "webhookId": "w1",
-        "smeeChannel": "https://foo.test/api/webhook/linear",
-        "registeredAt": "2026-05-04T20:00:00Z",
-        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        "test": {
+          "webhookId": "w1",
+          "smeeChannel": "https://foo.test/api/webhook/linear",
+          "registeredAt": "2026-05-04T20:00:00Z",
+          "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        }
       }
     }
   }
@@ -272,7 +281,7 @@ EOF
   expect_eq "total curl calls" "0" "$n" || return 1
 
   # Layer 2 record unchanged — webhookId still w1.
-  local id; id=$(read_layer2 "$env" | jq -r '.webhookId')
+  local id; id=$(read_layer2 "$env" | jq -r '."test".webhookId')
   expect_eq "record unchanged" "w1" "$id" || return 1
 }
 
@@ -284,10 +293,12 @@ test_rerun_different_url_errors_without_force() {
   "catalyst": {
     "monitor": {
       "linear": {
-        "webhookId": "w1",
-        "smeeChannel": "https://foo.test/api/webhook/linear",
-        "registeredAt": "2026-05-04T20:00:00Z",
-        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        "test": {
+          "webhookId": "w1",
+          "smeeChannel": "https://foo.test/api/webhook/linear",
+          "registeredAt": "2026-05-04T20:00:00Z",
+          "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        }
       }
     }
   }
@@ -300,7 +311,7 @@ EOF
     return 1
   fi
   # Record must be unchanged.
-  local id; id=$(read_layer2 "$env" | jq -r '.webhookId')
+  local id; id=$(read_layer2 "$env" | jq -r '."test".webhookId')
   expect_eq "record unchanged" "w1" "$id" || return 1
   # No Linear API call should happen.
   local n; n=$(total_calls "$env")
@@ -315,10 +326,12 @@ test_force_overwrites_layer2_record() {
   "catalyst": {
     "monitor": {
       "linear": {
-        "webhookId": "w1",
-        "smeeChannel": "https://foo.test/api/webhook/linear",
-        "registeredAt": "2026-05-04T20:00:00Z",
-        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        "test": {
+          "webhookId": "w1",
+          "smeeChannel": "https://foo.test/api/webhook/linear",
+          "registeredAt": "2026-05-04T20:00:00Z",
+          "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        }
       }
     }
   }
@@ -332,8 +345,8 @@ EOF
   run_helper "$env" --webhook-url "https://bar.test/api/webhook/linear" --force \
     >/dev/null 2>&1 || return 1
 
-  local id; id=$(read_layer2 "$env" | jq -r '.webhookId')
-  local url; url=$(read_layer2 "$env" | jq -r '.smeeChannel')
+  local id; id=$(read_layer2 "$env" | jq -r '."test".webhookId')
+  local url; url=$(read_layer2 "$env" | jq -r '."test".smeeChannel')
   expect_eq "webhookId now w2" "w2" "$id" || return 1
   expect_eq "smeeChannel now bar" "https://bar.test/api/webhook/linear" "$url" || return 1
 
@@ -346,22 +359,25 @@ EOF
 # ─── Test 5 — --deregister uses Layer 2 ID and clears record ───────────────
 test_deregister_uses_layer2_id() {
   local env; env=$(make_test_env t5)
+  # Pre-seed keyed Layer 2 record (team key "test" = lowercase "TEST").
   cat > "${env}/home/.config/catalyst/config.json" <<'EOF'
 {
   "catalyst": {
     "monitor": {
       "linear": {
-        "webhookId": "w1",
-        "smeeChannel": "https://foo.test/api/webhook/linear",
-        "registeredAt": "2026-05-04T20:00:00Z",
-        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        "test": {
+          "webhookId": "w1",
+          "smeeChannel": "https://foo.test/api/webhook/linear",
+          "registeredAt": "2026-05-04T20:00:00Z",
+          "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        }
       }
     }
   }
 }
 EOF
-  # Pre-seed the secret file so we can verify it's removed.
-  echo "old_secret" > "${env}/home/.config/catalyst/linear-webhook-secret"
+  # Pre-seed the per-team secret file so we can verify it's removed.
+  echo "old_secret" > "${env}/home/.config/catalyst/linear-webhook-secret-test"
 
   local DEL_RESP="${env}/del.json"
   write_response_delete_success "$DEL_RESP"
@@ -370,11 +386,12 @@ EOF
 
   # Layer 2 record cleared.
   local rec; rec=$(read_layer2 "$env")
-  [[ -z "$rec" || "$rec" == "null" ]] || { echo "Layer 2 record not cleared: $rec"; return 1; }
+  local entry; entry=$(printf '%s' "$rec" | jq -c '."test" // empty' 2>/dev/null)
+  [[ -z "$entry" ]] || { echo "Layer 2 \"test\" entry not cleared: $entry"; return 1; }
 
-  # Secret file removed.
-  if [[ -f "${env}/home/.config/catalyst/linear-webhook-secret" ]]; then
-    echo "linear-webhook-secret should be removed"
+  # Per-team secret file removed.
+  if [[ -f "${env}/home/.config/catalyst/linear-webhook-secret-test" ]]; then
+    echo "linear-webhook-secret-test should be removed"
     return 1
   fi
 
@@ -407,8 +424,8 @@ test_register_falls_back_to_api_when_layer2_missing() {
   run_helper "$env" --webhook-url "https://foo.test/api/webhook/linear" \
     >/dev/null 2>&1 || return 1
 
-  # Layer 2 record now populated.
-  local id; id=$(read_layer2 "$env" | jq -r '.webhookId')
+  # Layer 2 record now populated under the team key "test".
+  local id; id=$(read_layer2 "$env" | jq -r '."test".webhookId')
   expect_eq "webhookId" "w1" "$id" || return 1
 
   # API was called: list + create (no Layer 2 short-circuit available).
@@ -430,15 +447,15 @@ test_register_falls_back_to_api_dedup_when_layer2_missing() {
   expect_eq "create count" "0" "$(count_calls "$env" create)" || return 1
   expect_eq "delete count" "0" "$(count_calls "$env" delete)" || return 1
 
-  # Layer 2 record written with the discovered ID; resourceTypes omitted
-  # because we couldn't observe them from a list response.
+  # Layer 2 record written with the discovered ID under the team key "test";
+  # resourceTypes omitted because we couldn't observe them from a list response.
   local rec; rec=$(read_layer2 "$env")
-  local id; id=$(printf '%s' "$rec" | jq -r '.webhookId')
-  local url; url=$(printf '%s' "$rec" | jq -r '.smeeChannel')
+  local id; id=$(printf '%s' "$rec" | jq -r '."test".webhookId')
+  local url; url=$(printf '%s' "$rec" | jq -r '."test".smeeChannel')
   expect_eq "webhookId from list" "wOld" "$id" || return 1
   expect_eq "smeeChannel from list" "https://foo.test/api/webhook/linear" "$url" || return 1
   # resourceTypes should be absent (we don't fabricate them).
-  local has_rt; has_rt=$(printf '%s' "$rec" | jq 'has("resourceTypes")')
+  local has_rt; has_rt=$(printf '%s' "$rec" | jq '."test" | has("resourceTypes")')
   expect_eq "resourceTypes absent" "false" "$has_rt" || return 1
 }
 
@@ -451,15 +468,18 @@ test_register_falls_back_to_api_dedup_when_layer2_missing() {
 #      have nothing new to write — keeps the no-API-call invariant simple)
 test_legacy_webhookurl_record_short_circuits() {
   local env; env=$(make_test_env t9)
+  # Pre-seed keyed format with legacy `webhookUrl` field (CTL-274 back-compat).
   cat > "${env}/home/.config/catalyst/config.json" <<'EOF'
 {
   "catalyst": {
     "monitor": {
       "linear": {
-        "webhookId": "wLegacy",
-        "webhookUrl": "https://foo.test/api/webhook/linear",
-        "registeredAt": "2026-05-01T00:00:00Z",
-        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        "test": {
+          "webhookId": "wLegacy",
+          "webhookUrl": "https://foo.test/api/webhook/linear",
+          "registeredAt": "2026-05-01T00:00:00Z",
+          "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        }
       }
     }
   }
@@ -472,7 +492,7 @@ EOF
   expect_eq "total curl calls" "0" "$n" || return 1
 
   # Record retains the legacy webhookId — short-circuit didn't rewrite.
-  local id; id=$(read_layer2 "$env" | jq -r '.webhookId')
+  local id; id=$(read_layer2 "$env" | jq -r '."test".webhookId')
   expect_eq "webhookId preserved" "wLegacy" "$id" || return 1
 }
 
@@ -481,15 +501,18 @@ EOF
 # write `smeeChannel` AND drop the legacy `webhookUrl` field.
 test_legacy_webhookurl_record_migrates_on_force() {
   local env; env=$(make_test_env t10)
+  # Pre-seed keyed format with legacy `webhookUrl` field (CTL-274 back-compat).
   cat > "${env}/home/.config/catalyst/config.json" <<'EOF'
 {
   "catalyst": {
     "monitor": {
       "linear": {
-        "webhookId": "wLegacy",
-        "webhookUrl": "https://foo.test/api/webhook/linear",
-        "registeredAt": "2026-05-01T00:00:00Z",
-        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        "test": {
+          "webhookId": "wLegacy",
+          "webhookUrl": "https://foo.test/api/webhook/linear",
+          "registeredAt": "2026-05-01T00:00:00Z",
+          "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        }
       }
     }
   }
@@ -504,11 +527,11 @@ EOF
     >/dev/null 2>&1 || return 1
 
   local rec; rec=$(read_layer2 "$env")
-  local has_legacy; has_legacy=$(printf '%s' "$rec" | jq 'has("webhookUrl")')
-  local has_canonical; has_canonical=$(printf '%s' "$rec" | jq 'has("smeeChannel")')
+  local has_legacy; has_legacy=$(printf '%s' "$rec" | jq '."test" | has("webhookUrl")')
+  local has_canonical; has_canonical=$(printf '%s' "$rec" | jq '."test" | has("smeeChannel")')
   expect_eq "legacy webhookUrl removed" "false" "$has_legacy" || return 1
   expect_eq "canonical smeeChannel present" "true" "$has_canonical" || return 1
-  local url; url=$(printf '%s' "$rec" | jq -r '.smeeChannel')
+  local url; url=$(printf '%s' "$rec" | jq -r '."test".smeeChannel')
   expect_eq "smeeChannel value" "https://foo.test/api/webhook/linear" "$url" || return 1
 }
 
@@ -517,21 +540,24 @@ EOF
 # stored ID and clear both legacy and canonical keys from the record.
 test_legacy_webhookurl_record_deregisters() {
   local env; env=$(make_test_env t11)
+  # Pre-seed keyed format with legacy `webhookUrl` field (CTL-274 back-compat).
   cat > "${env}/home/.config/catalyst/config.json" <<'EOF'
 {
   "catalyst": {
     "monitor": {
       "linear": {
-        "webhookId": "wLegacy",
-        "webhookUrl": "https://foo.test/api/webhook/linear",
-        "registeredAt": "2026-05-01T00:00:00Z",
-        "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        "test": {
+          "webhookId": "wLegacy",
+          "webhookUrl": "https://foo.test/api/webhook/linear",
+          "registeredAt": "2026-05-01T00:00:00Z",
+          "resourceTypes": ["Issue","Comment","IssueLabel","Cycle","Reaction","Project"]
+        }
       }
     }
   }
 }
 EOF
-  echo "old_secret" > "${env}/home/.config/catalyst/linear-webhook-secret"
+  echo "old_secret" > "${env}/home/.config/catalyst/linear-webhook-secret-test"
 
   local DEL_RESP="${env}/del.json"
   write_response_delete_success "$DEL_RESP"

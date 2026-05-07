@@ -211,11 +211,8 @@ write_linear_record() {
            (.catalyst.monitor.linear | if type == "object" then . else {} end)
          end) as $linear
        | .catalyst.monitor.linear = ($linear + {
-           ($key): {
-             webhookId: $id,
-             smeeChannel: $url,
-             registeredAt: $ts
-           } + (if ($rt | length) > 0 then {resourceTypes: $rt} else {} end)
+           ($key): ({webhookId: $id, smeeChannel: $url, registeredAt: $ts}
+                    | if ($rt | length) > 0 then .resourceTypes = $rt else . end)
          })
      ' "$HOME_CONFIG_PATH" > "$tmp"
   mv "$tmp" "$HOME_CONFIG_PATH"
@@ -359,15 +356,16 @@ delete_via_graphql() {
 if [[ $DEREGISTER -eq 1 ]]; then
   DEREGISTER_KEY="workspace"
   if [[ $ALL_PUBLIC_TEAMS -eq 0 ]]; then
-    # Deregister per-team webhook — need teamId
-    TEAM_ID=$(jq -r '.catalyst.linear.teamId // empty' "$CONFIG_PATH" 2>/dev/null)
-    if [[ -z "$TEAM_ID" ]]; then
-      echo "ERROR: catalyst.linear.teamId not set in $CONFIG_PATH" >&2
+    # Deregister per-team webhook — need teamKey (lowercase = Layer 2 record key)
+    TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CONFIG_PATH" 2>/dev/null)
+    if [[ -z "$TEAM_KEY" ]]; then
+      echo "ERROR: catalyst.linear.teamKey not set in $CONFIG_PATH" >&2
       echo "       To deregister a per-team webhook, set it first." >&2
       echo "       To deregister the workspace webhook, use: $0 --deregister --all-public-teams" >&2
       exit 1
     fi
-    DEREGISTER_KEY="$TEAM_ID"
+    DEREGISTER_KEY=$(printf '%s' "$TEAM_KEY" | tr '[:upper:]' '[:lower:]')
+    SECRET_FILE="${HOME_CONFIG_DIR}/linear-webhook-secret-${DEREGISTER_KEY}"
   fi
 
   EXISTING_RECORD="$(read_linear_record "$DEREGISTER_KEY")"
@@ -392,15 +390,23 @@ fi
 REGISTER_KEY="workspace"
 TEAM_ID=""
 if [[ $ALL_PUBLIC_TEAMS -eq 0 ]]; then
-  # Per-team webhook — need teamId
+  # Per-team webhook — teamKey (lowercase) is the Layer 2 key; teamId is for the mutation
+  TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CONFIG_PATH" 2>/dev/null)
   TEAM_ID=$(jq -r '.catalyst.linear.teamId // empty' "$CONFIG_PATH" 2>/dev/null)
+  if [[ -z "$TEAM_KEY" ]]; then
+    echo "ERROR: catalyst.linear.teamKey not set in $CONFIG_PATH." >&2
+    echo "       Run plugins/dev/scripts/resolve-linear-ids.sh first to populate it." >&2
+    echo "       Or use --all-public-teams to register a workspace-wide webhook." >&2
+    exit 1
+  fi
   if [[ -z "$TEAM_ID" ]]; then
     echo "ERROR: catalyst.linear.teamId not set in $CONFIG_PATH." >&2
     echo "       Run plugins/dev/scripts/resolve-linear-ids.sh first to populate it." >&2
     echo "       Or use --all-public-teams to register a workspace-wide webhook." >&2
     exit 1
   fi
-  REGISTER_KEY="$TEAM_ID"
+  REGISTER_KEY=$(printf '%s' "$TEAM_KEY" | tr '[:upper:]' '[:lower:]')
+  SECRET_FILE="${HOME_CONFIG_DIR}/linear-webhook-secret-${REGISTER_KEY}"
 fi
 
 # Step 1 (CTL-238): Layer 2 short-circuit. When a record exists we know the
@@ -464,7 +470,7 @@ if [[ "$LAYER2_HANDLED" -eq 0 ]]; then
     # is omitted (we don't fabricate).
     echo "Reusing existing webhook $EXISTING_ID for $WEBHOOK_URL"
     echo "  (use --force to delete and recreate; secret cannot be re-fetched)"
-    write_linear_record "$EXISTING_ID" "$WEBHOOK_URL" "[]"
+    write_linear_record "$REGISTER_KEY" "$EXISTING_ID" "$WEBHOOK_URL" "[]"
     echo "Wrote Layer 2 record (partial — resourceTypes/secret not retrievable from list response)"
     exit 0
   fi

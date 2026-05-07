@@ -180,8 +180,8 @@ test_fresh_registration() {
     return 1
   }
 
-  # Secret persisted at ~/.config/catalyst/linear-webhook-secret
-  local secret_path="${env}/home/.config/catalyst/linear-webhook-secret"
+  # Secret persisted at ~/.config/catalyst/linear-webhook-secret-{teamKeyLower}
+  local secret_path="${env}/home/.config/catalyst/linear-webhook-secret-test"
   if [[ ! -f "$secret_path" ]]; then
     echo "secret file not created at $secret_path" >&2
     return 1
@@ -396,7 +396,7 @@ test_secret_file_mode_is_600() {
   run_helper "$env" --webhook-url https://example.com/api/webhook/linear \
     > /dev/null 2>&1
 
-  local secret_path="${env}/home/.config/catalyst/linear-webhook-secret"
+  local secret_path="${env}/home/.config/catalyst/linear-webhook-secret-test"
   if [[ ! -f "$secret_path" ]]; then
     echo "secret file not created" >&2
     return 1
@@ -454,19 +454,77 @@ test_webhook_url_required() {
   fi
 }
 
-# ─── Test 12 — export-line printed on stdout ────────────────────────────────
+# ─── Test 12 — missing catalyst.linear.teamKey in Layer 1 ──────────────────
+test_missing_team_key() {
+  local env; env=$(make_test_env t12a)
+  cat > "${env}/project/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-project",
+    "linear": { "teamId": "00000000-0000-0000-0000-000000000001" }
+  }
+}
+EOF
+  cat > "${env}/home/.config/catalyst/config-test-project.json" <<'EOF'
+{ "linear": { "apiToken": "lin_api_test" } }
+EOF
+
+  if run_helper "$env" --webhook-url https://example.com/api/webhook/linear \
+      > "${SCRATCH}/t12a.out" 2>&1; then
+    echo "expected non-zero exit when teamKey missing" >&2
+    cat "${SCRATCH}/t12a.out" >&2
+    return 1
+  fi
+
+  if ! grep -qi "teamKey\|resolve-linear-ids" "${SCRATCH}/t12a.out"; then
+    echo "error should mention teamKey" >&2
+    cat "${SCRATCH}/t12a.out" >&2
+    return 1
+  fi
+}
+
+# ─── Test 13 — --all-public-teams uses flat linear-webhook-secret ────────────
+test_all_public_teams_uses_flat_secret() {
+  local env; env=$(make_test_env t13)
+  seed_configs "$env"
+  fixture_empty_list "$env"
+  fixture_create_success "$env"
+
+  run_helper "$env" --all-public-teams \
+    --webhook-url https://example.com/api/webhook/linear \
+    > "${SCRATCH}/t13.out" 2>&1 || {
+    echo "expected --all-public-teams to succeed" >&2
+    cat "${SCRATCH}/t13.out" >&2
+    return 1
+  }
+
+  # Workspace webhook: secret must be at the flat path (no team-key suffix).
+  local flat_path="${env}/home/.config/catalyst/linear-webhook-secret"
+  if [[ ! -f "$flat_path" ]]; then
+    echo "expected flat linear-webhook-secret for --all-public-teams, not found" >&2
+    return 1
+  fi
+
+  # Per-team path must NOT exist for --all-public-teams.
+  if [[ -f "${env}/home/.config/catalyst/linear-webhook-secret-test" ]]; then
+    echo "--all-public-teams should not create a team-specific secret file" >&2
+    return 1
+  fi
+}
+
+# ─── Test 14 — export-line printed on stdout ────────────────────────────────
 test_export_line_printed() {
-  local env; env=$(make_test_env t12)
+  local env; env=$(make_test_env t14)
   seed_configs "$env"
   fixture_empty_list "$env"
   fixture_create_success "$env"
 
   run_helper "$env" --webhook-url https://example.com/api/webhook/linear \
-    > "${SCRATCH}/t12.out" 2>&1
+    > "${SCRATCH}/t14.out" 2>&1
 
-  if ! grep -q "export CATALYST_LINEAR_WEBHOOK_SECRET=" "${SCRATCH}/t12.out"; then
+  if ! grep -q "export CATALYST_LINEAR_WEBHOOK_SECRET=" "${SCRATCH}/t14.out"; then
     echo "expected export CATALYST_LINEAR_WEBHOOK_SECRET=... line on stdout" >&2
-    cat "${SCRATCH}/t12.out" >&2
+    cat "${SCRATCH}/t14.out" >&2
     return 1
   fi
 }
@@ -484,6 +542,8 @@ run "GraphQL error response surfaces" test_graphql_error_response
 run "secret file mode is 600" test_secret_file_mode_is_600
 run "resourceTypes match canonical 6" test_resource_types_canonical
 run "--webhook-url is required" test_webhook_url_required
+run "missing catalyst.linear.teamKey errors clearly" test_missing_team_key
+run "--all-public-teams uses flat linear-webhook-secret" test_all_public_teams_uses_flat_secret
 run "export line printed on stdout" test_export_line_printed
 
 echo
