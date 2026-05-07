@@ -89,9 +89,32 @@ function summarize(e: ActivityEvent): string {
   }
   // Linear
   if (e.event === "linear.issue.state_changed") {
+    const updatedFromKeys = (detail as { updatedFromKeys?: string[] }).updatedFromKeys ?? [];
+    const ticket = scope.ticket ?? (detail as { ticket?: string }).ticket ?? "";
+    if (updatedFromKeys.length > 0) {
+      return `${updatedFromKeys.join(", ")} changed${ticket ? " · " + ticket : ""}`;
+    }
     const fromV = (detail as { from?: string }).from ?? "?";
     const toV = (detail as { to?: string }).to ?? "?";
-    return `${scope.ticket ?? "?"}: ${fromV} → ${toV}`;
+    return `${ticket ? ticket + ": " : ""}${fromV} → ${toV}`;
+  }
+  if (e.event.startsWith("linear.comment.")) {
+    const action = e.event.slice("linear.comment.".length);
+    const ticket = scope.ticket ?? (detail as { ticket?: string }).ticket ?? "";
+    if (action === "created") return `new comment${ticket ? " · " + ticket : ""}`;
+    return `comment ${action}${ticket ? " · " + ticket : ""}`;
+  }
+  if (e.event.startsWith("linear.issue_label.")) {
+    return "label updated";
+  }
+  if (e.event.startsWith("linear.cycle.")) {
+    const action = e.event.slice("linear.cycle.".length);
+    return `cycle ${action}`;
+  }
+  if (e.event.startsWith("linear.issue.")) {
+    const action = e.event.slice("linear.issue.".length);
+    const ticket = scope.ticket ?? (detail as { ticket?: string }).ticket ?? "";
+    return `issue ${action}${ticket ? " · " + ticket : ""}`;
   }
   if (e.event.startsWith("linear.")) {
     return `${scope.ticket ?? ""} ${e.event.slice("linear.".length)}`.trim();
@@ -143,6 +166,7 @@ export function ActivityEventRow({ event, onPivot }: Props) {
   const repo = scope.repo ?? null;
   const pr = scope.pr ?? null;
 
+  const isLinear = event.event.startsWith("linear.");
   const canPivot = !!(onPivot && orch && worker);
 
   return (
@@ -158,6 +182,11 @@ export function ActivityEventRow({ event, onPivot }: Props) {
       </span>
       <span className="min-w-0 flex-1 truncate text-fg">{summarize(event)}</span>
       <span className="flex shrink-0 items-center gap-1">
+        {isLinear && (
+          <span className="rounded bg-[#3a1a5a] px-1.5 py-px text-[10px] text-[#b08af8]">
+            Linear
+          </span>
+        )}
         {canPivot && (
           <button
             type="button"
@@ -178,7 +207,7 @@ export function ActivityEventRow({ event, onPivot }: Props) {
             {ticket}
           </span>
         )}
-        {repo && pr !== null && (
+        {!isLinear && repo && pr !== null && (
           <span className="rounded bg-surface-3 px-1.5 py-px text-[10px] text-muted">
             {repo}#{pr}
           </span>
