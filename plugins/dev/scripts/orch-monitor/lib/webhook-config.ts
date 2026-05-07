@@ -173,6 +173,26 @@ function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
 }
 
+// Extract the Linear smee channel URL from a linear config object. Prefers the
+// top-level smeeChannel (legacy / current normal case) and falls back to the
+// first keyed team entry that carries one (CTL-273/285 keyed format, CTL-301).
+// Returns null if no usable channel is found.
+function readLinearSmeeChannel(linear: Record<string, unknown>): string | null {
+  if (typeof linear.smeeChannel === "string" && linear.smeeChannel.length > 0) {
+    return linear.smeeChannel;
+  }
+  for (const value of Object.values(linear)) {
+    if (
+      isRecord(value) &&
+      typeof value.smeeChannel === "string" &&
+      value.smeeChannel.length > 0
+    ) {
+      return value.smeeChannel;
+    }
+  }
+  return null;
+}
+
 function readGithubSection(filePath: string): FileExtract | null {
   let raw: string;
   try {
@@ -210,10 +230,7 @@ function readGithubSection(filePath: string): FileExtract | null {
     linear.webhookSecretEnv.length > 0
       ? linear.webhookSecretEnv
       : null;
-  const linearSmeeChannel =
-    linear !== null && typeof linear.smeeChannel === "string" && linear.smeeChannel.length > 0
-      ? linear.smeeChannel
-      : null;
+  const linearSmeeChannel = linear !== null ? readLinearSmeeChannel(linear) : null;
   const linearBotUserId =
     linear !== null && typeof linear.botUserId === "string" && linear.botUserId.length > 0
       ? linear.botUserId

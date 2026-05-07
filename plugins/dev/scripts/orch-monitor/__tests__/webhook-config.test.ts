@@ -721,6 +721,61 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
     expect(cfg!.linearSmeeChannel).toBe("https://smee.io/env-override");
   });
 
+  it("falls back to first keyed entry smeeChannel when top-level is absent (CTL-301)", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          github: { smeeChannel: "https://smee.io/github-chan" },
+          linear: {
+            adv: { webhookId: "adv-id", smeeChannel: "https://smee.io/team-keyed" },
+            ctl: { webhookId: "ctl-id", smeeChannel: "https://smee.io/team-keyed" },
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.linearSmeeChannel).toBe("https://smee.io/team-keyed");
+  });
+
+  it("prefers top-level smeeChannel over keyed entries when both are present (CTL-301)", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          github: { smeeChannel: "https://smee.io/github-chan" },
+          linear: {
+            smeeChannel: "https://smee.io/top-level-wins",
+            adv: { webhookId: "adv-id", smeeChannel: "https://smee.io/keyed-loses" },
+          },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSmeeChannel).toBe("https://smee.io/top-level-wins");
+  });
+
+  it("returns empty linearSmeeChannel when keyed entries have no smeeChannel (CTL-301)", () => {
+    writeHome({
+      catalyst: {
+        monitor: {
+          github: { smeeChannel: "https://smee.io/github-chan" },
+          linear: { adv: { webhookId: "adv-id" } },
+        },
+      },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearSmeeChannel).toBe("");
+  });
+
   it("linearSmeeChannel and smeeChannel are independent (one set, other empty)", () => {
     writeHome({
       catalyst: {
