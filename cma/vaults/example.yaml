@@ -1,0 +1,70 @@
+# Per-developer vault template for the Catalyst CMA base agent.
+#
+# DO NOT COMMIT REAL CREDENTIALS.
+#
+# Workflow:
+#   1. Copy this file to a private location, e.g.
+#        ~/.config/catalyst/cma-vault.yaml
+#      OR keep it in a private gist / 1Password secure note.
+#   2. Replace each ${...} placeholder with the real credential value.
+#   3. Register: ant beta:vaults create -f ~/.config/catalyst/cma-vault.yaml
+#   4. Capture the returned vault_id; pass at session creation as
+#        vault_ids: [<vault_id>]
+#   5. Rotate credentials when expiry is near; re-register OR use
+#        ant beta:vaults:credentials update
+#
+# Secret fields (token, access_token, refresh_token, client_secret) are
+# write-only — never returned by the CMA API after creation.
+
+name: catalyst-developer-${USER}
+
+credentials:
+  # ----- Linear MCP -----
+  # See cma/mcp/linear.md for provisioning steps.
+  - type: static_bearer
+    mcp_server_url: https://mcp.linear.app/mcp
+    token: ${LINEAR_API_KEY}        # lin_api_... from Linear -> Settings -> Account -> Security & Access
+
+  # ----- GitHub MCP (and thoughts-repo clone PAT) -----
+  # See cma/mcp/github.md for required scope. CTL-286 explicitly reuses this
+  # PAT for the session-startup git clone of coalesce-labs/thoughts.
+  - type: static_bearer
+    mcp_server_url: https://api.githubcopilot.com/mcp/
+    token: ${GITHUB_PAT}            # github_pat_... fine-grained PAT
+
+  # ----- Slack: REST fallback (Phase 1 default) -----
+  # See cma/mcp/slack.md, "Path A". Bot token from your Slack app.
+  # The mcp_server_url here is a credential-index path, not an MCP endpoint —
+  # the agent calls Slack REST directly with this token.
+  - type: static_bearer
+    mcp_server_url: https://slack.com/api/
+    token: ${SLACK_BOT_TOKEN}       # xoxb-...
+
+  # ----- Slack MCP: Path B (uncomment after OAuth dance is complete) -----
+  # See cma/mcp/slack.md, "Path B". Required only when a routine needs
+  # canvas tools, message search, or user-token operations.
+  # - type: mcp_oauth
+  #   mcp_server_url: https://mcp.slack.com/mcp
+  #   client_id: ${SLACK_CLIENT_ID}
+  #   client_secret: ${SLACK_CLIENT_SECRET}
+  #   access_token: ${SLACK_ACCESS_TOKEN}
+  #   refresh_token: ${SLACK_REFRESH_TOKEN}
+
+  # ----- Notion: REST fallback (Phase 1 default) -----
+  # See cma/mcp/notion.md, "Path A". Internal integration token from
+  # Notion -> Settings -> Connections -> Develop or manage integrations.
+  - type: static_bearer
+    mcp_server_url: https://api.notion.com/v1/
+    token: ${NOTION_TOKEN}          # secret_... or ntn_...
+
+  # ----- Notion MCP: Path B (uncomment when self-hosting MCP server) -----
+  # See cma/mcp/notion.md, "Path B". Required only when richer Notion
+  # tooling is needed.
+  # - type: static_bearer
+  #   mcp_server_url: https://your-notion-mcp.example.com/mcp
+  #   token: ${NOTION_MCP_AUTH_TOKEN}
+
+metadata:
+  catalyst_user: ${USER}
+  catalyst_role: routine-base-vault
+  catalyst_ticket: CTL-286

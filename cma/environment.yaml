@@ -1,0 +1,73 @@
+# Claude Managed Agents — shared environment for Catalyst Phase 1 Routines
+#
+# Register with:
+#   ant beta:environments create -f cma/environment.yaml
+#
+# Capture the returned environment_id and store it in your local
+# ~/.config/catalyst/cma.json (NEVER commit). Reference it at session
+# creation time as `environment_id: $ENV_ID`.
+#
+# All Phase 1 Routines (CTL-287..CTL-291) reference this single environment.
+# Per-routine differentiation lives in per-routine agent definitions, not here.
+#
+# Beta API header: managed-agents-2026-04-01
+# Reference: https://platform.claude.com/docs/en/managed-agents/environments
+
+name: catalyst-routines-base
+config:
+  type: cloud
+
+  # Base image: Ubuntu 22.04 LTS, x86_64.
+  # Pre-installed: python 3.12+, node 20+, go, rust, java, ruby, php,
+  #   git, curl, wget, jq, tar, zip, ssh, make, cmake, ripgrep, vim,
+  #   sed, awk, grep, diff.
+  # NOT pre-installed: bun, gh — added below.
+  packages:
+    apt:
+      - gh         # GitHub CLI (used by Catalyst skills via Bash(gh *))
+    npm:
+      - bun        # bun runtime (used by Catalyst dev/test scripts)
+    pip: []
+    cargo: []
+    gem: []
+    go: []
+
+  networking:
+    # `limited` enforces an explicit allowlist. Surfaces integration breakage
+    # as policy decisions rather than silent network access.
+    type: limited
+
+    allowed_hosts:
+      # GitHub family
+      - api.github.com                    # GitHub REST API
+      - github.com                        # git clone (thoughts repo) and gh CLI auth
+      - objects.githubusercontent.com     # GitHub release assets / large objects
+      - raw.githubusercontent.com         # raw file fetches
+      - api.githubcopilot.com             # GitHub MCP server endpoint
+
+      # Linear family
+      - api.linear.app                    # Linear REST API (also used by Linear MCP backend)
+      - mcp.linear.app                    # Linear MCP server endpoint
+
+      # Slack family
+      - mcp.slack.com                     # Slack MCP server endpoint
+      - slack.com                         # Slack REST API (bot-token fallback path)
+
+      # Notion family
+      - api.notion.com                    # Notion REST API (integration-token fallback path)
+      - mcp.notion.com                    # Notion hosted MCP (OAuth-only; future)
+
+      # Package registries (covered by allow_package_managers below, listed for clarity)
+      - registry.npmjs.org
+      - registry.yarnpkg.com
+
+    # Allows declared mcp_servers URLs to be reached even if not in allowed_hosts.
+    allow_mcp_servers: true
+
+    # Allows public package registries (PyPI, npm, etc.) for runtime installs.
+    allow_package_managers: true
+
+metadata:
+  catalyst_role: routine-base
+  catalyst_version: v1
+  catalyst_ticket: CTL-286
