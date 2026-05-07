@@ -74,7 +74,20 @@ export function ActivityView({ onPivot }: ActivityViewProps) {
   const { events, status, error, live } = useActivityStream(debouncedPredicate);
 
   // Newest first in the UI; the backend returns chronological order.
-  const ordered = useMemo(() => [...events].reverse(), [events]);
+  // Groq no-match wakes are pure noise — hidden before render (CTL-280).
+  const ordered = useMemo(
+    () =>
+      [...events]
+        .reverse()
+        .filter((e) => {
+          if (e.event.startsWith("filter.wake")) {
+            const detail = (e.detail ?? {}) as Record<string, unknown>;
+            return (detail.reason as string) !== "No matching events found";
+          }
+          return true;
+        }),
+    [events],
+  );
 
   return (
     <div className="flex h-[calc(100vh-140px)] gap-4">

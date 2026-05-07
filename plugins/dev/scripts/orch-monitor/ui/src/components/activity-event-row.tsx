@@ -29,6 +29,7 @@ const TOPIC_PREFIX_STYLES: Array<{ prefix: string; cls: string }> = [
   { prefix: "github.issue_comment", cls: "bg-[#4a3a1f] text-[#f4c88a]" },
   { prefix: "github.", cls: "bg-surface-3 text-muted" },
   { prefix: "linear.", cls: "bg-[#1a4a4a] text-[#8ae6f4]" },
+  { prefix: "filter.", cls: "bg-[#1a4040] text-[#7ae8e8]" },
   { prefix: "comms.", cls: "bg-[#3a4a1a] text-[#c8f48a]" },
   { prefix: "session-", cls: "bg-[#5a4a1a] text-[#f4dc8a]" },
   { prefix: "phase-", cls: "bg-[#5a4a1a] text-[#f4dc8a]" },
@@ -58,8 +59,8 @@ function deriveSource(event: ActivityEvent): SourceLabel | null {
   if (event.event.startsWith("comms.")) return "Comms";
   if (event.event.startsWith("filter.")) {
     const detail = (event.detail ?? {}) as Record<string, unknown>;
-    const ids = detail.source_event_ids;
-    if (!Array.isArray(ids) || ids.length === 0) return null;
+    const reason = (detail.reason as string) ?? "";
+    if (reason === "No matching events found") return null;
     return "Filter";
   }
   return "System";
@@ -170,6 +171,23 @@ function summarize(e: ActivityEvent): string {
   if (e.event.startsWith("worker-")) {
     const reason = (detail as { reason?: string }).reason ?? "";
     return reason || e.event;
+  }
+  // Filter daemon
+  if (e.event.startsWith("filter.wake")) {
+    const reason = (detail as { reason?: string }).reason ?? "";
+    const sourceIds = (detail as { source_event_ids?: unknown[] }).source_event_ids ?? [];
+    if (reason === "No matching events found") return "";
+    if (sourceIds.length === 0) return `Worker went silent — ${reason}`;
+    const orchId = e.orchestrator ?? (scope as { orchestrator?: string }).orchestrator ?? "?";
+    return `Filter woke ${orchId} — ${reason}`;
+  }
+  if (e.event === "filter.register") {
+    const orchId = e.orchestrator ?? (scope as { orchestrator?: string }).orchestrator ?? "?";
+    return `${orchId} registered filter interest`;
+  }
+  if (e.event === "filter.deregister") {
+    const orchId = e.orchestrator ?? (scope as { orchestrator?: string }).orchestrator ?? "?";
+    return `${orchId} deregistered interest`;
   }
   // Fallback
   try {

@@ -212,15 +212,17 @@ render() {
     ((.detail.message // .detail.text // "") | gsub("[\n\t]"; " ")),
     (.detail.ref // .scope.ref // ""),
     ((.detail.name // "") | gsub("[\n\t]"; " ")),
-    (.detail.headBranch // "")
+    (.detail.headBranch // ""),
+    ((.detail.reason // "") | gsub("[\n\t]"; " ")),
+    ((.detail.source_event_ids // []) | length | tostring)
   ] | join("")' 2>/dev/null) || return
 
-  local ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch
-  IFS=$'\001' read -r ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch <<< "$f"
+  local ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch reason src_ids_len
+  IFS=$'\001' read -r ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch reason src_ids_len <<< "$f"
 
   # Noise — skip high-frequency internal events
   case "$ev" in
-    heartbeat|archive|session-started|session-ended|filter.*) return ;;
+    heartbeat|archive|session-started|session-ended) return ;;
   esac
   [[ "$ev" == "github.check_run.completed" \
     && ( "$conclusion" == "success" || "$conclusion" == "neutral" || "$conclusion" == "skipped" ) ]] && return
@@ -257,6 +259,7 @@ render() {
     github.*) src="github" ;;
     linear.*) src="linear" ;;
     comms.*)  src="comms"  ;;
+    filter.*) src="filter" ;;
     *)
       if [[ -n "$worker" && "$worker" != "null" && -n "$orch" && "$orch" != "null" && "$worker" != "$orch" ]]; then
         src="${orch:0:9}/${worker:0:9}"
@@ -460,6 +463,26 @@ render() {
     linear.issue.*)
       c="$BLU"; lbl="linear"
       body="${ev#linear.issue.}${stitle:+ — $stitle}"
+      ;;
+    # ── Filter Events ──────────────────────────────────────────────────────
+    filter.wake*)
+      # Groq no-match noise — suppress
+      if [[ "$reason" == "No matching events found" ]]; then return; fi
+      if [[ "${src_ids_len:-0}" -gt 0 ]]; then
+        c="$CYN"; lbl="filter wake"
+        body="Filter woke ${orch:0:20} — ${reason:0:70}"
+      else
+        c="$YEL"; lbl="filter wake"
+        body="Worker went silent — ${reason:0:70}"
+      fi
+      ;;
+    filter.register)
+      c="$CYN"; lbl="filter reg"
+      body="${orch:0:20} registered filter interest"
+      ;;
+    filter.deregister)
+      c="$DIM"; lbl="filter unreg"
+      body="${orch:0:20} deregistered interest"
       ;;
     # ── Fallthrough ────────────────────────────────────────────────────────
     *)
