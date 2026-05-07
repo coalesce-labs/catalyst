@@ -32,17 +32,27 @@ Header-based control:
 5. **Repository permissions:** see scope below
 6. Copy the `github_pat_...` value once shown
 
-### Required scope (CTL-286 decision: PAT also handles thoughts clone)
+### Required scope
 
-This single PAT is used both for the GitHub MCP server **and** for the
-session-startup `git clone` of the thoughts repo (per the
-`cma/decisions/2026-05-07-thoughts-strategy.md` ADR).
+This single PAT is used for **three** things:
+
+1. The GitHub MCP server (Bearer auth)
+2. The session-startup `git clone` of the **target repo** (whichever project
+   the session is bound to via `CATALYST_TARGET_REPO`)
+3. The session-startup `git clone` of `coalesce-labs/thoughts`
+
+#### Single-PAT pattern (recommended for solo use)
+
+One PAT scoped to every repo you might target plus the thoughts repo. Easy
+vault setup, but a leak compromises everything.
 
 **Repository access:**
-- `coalesce-labs/catalyst` (read+write for code review and CI fixup routines)
-- `coalesce-labs/thoughts` (read-only for the startup git clone)
+- `coalesce-labs/catalyst` — for catalyst-targeted sessions
+- `getadva/adva` — for Adva-targeted sessions
+- `<any other Catalyst-pattern project repo>` — add as new projects come online
+- `coalesce-labs/thoughts` — for the thoughts clone (read-only)
 
-**Repository permissions on `coalesce-labs/catalyst`:**
+**Repository permissions on each *target* repo (catalyst, adva, …):**
 
 | Permission | Level | Why |
 |------------|-------|-----|
@@ -60,9 +70,31 @@ session-startup `git clone` of the thoughts repo (per the
 | Contents | Read | git clone --depth=1 of the thoughts repo |
 | Metadata | Read | Required by all PATs |
 
-Trade-off explicitly accepted by CTL-286: the same PAT covers both repos.
-A leak compromises both. Mitigation: rotate or split into two PATs later;
-CTL-295 may revisit when thoughts write-back is designed.
+#### Multi-PAT pattern (recommended for production / multi-tenant)
+
+One PAT per project, plus a separate read-only PAT for thoughts. Switch
+which PAT the session sees by binding a different vault at session-creation
+time.
+
+```yaml
+# Vault A (catalyst sessions)
+- type: static_bearer
+  mcp_server_url: https://api.githubcopilot.com/mcp/
+  token: ${GITHUB_PAT_CATALYST}     # scoped to catalyst + thoughts (or use GITHUB_PAT_THOUGHTS separately)
+
+# Vault B (adva sessions)
+- type: static_bearer
+  mcp_server_url: https://api.githubcopilot.com/mcp/
+  token: ${GITHUB_PAT_ADVA}         # scoped to adva + thoughts
+```
+
+A leak only compromises one project. The trade-off is more vaults to
+register and rotate.
+
+**Trade-off explicitly accepted by CTL-286 (single-PAT pattern):**
+the same PAT covers all repos. A leak compromises everything. Mitigation:
+rotate or switch to the multi-PAT pattern when the user count grows or a
+specific project demands tighter isolation.
 
 ## Vault entry
 
@@ -74,8 +106,10 @@ CTL-295 may revisit when thoughts write-back is designed.
 ```
 
 The same `${GITHUB_PAT}` env var is also injected into the session container
-for the thoughts-repo `git clone` (referenced from the base agent's startup
-ritual in `cma/agents/base-system-prompt.md`).
+for both the **target repo** clone (`https://github.com/${CATALYST_TARGET_REPO}.git`)
+and the **thoughts repo** clone (`https://github.com/coalesce-labs/thoughts.git`),
+both referenced from the base agent's startup ritual in
+`cma/agents/base-system-prompt.md`.
 
 ## Tools exposed
 
