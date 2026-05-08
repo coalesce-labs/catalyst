@@ -4,7 +4,9 @@ import { formatRepo, formatSource, formatEvent, formatRef, formatDetails } from 
 
 export type PivotMode = { type: "trace"; id: string } | { type: "orch"; id: string } | null;
 
-export function useFilter(events: CanonicalEvent[]) {
+export type DslPredicate = ((event: CanonicalEvent) => boolean) | null;
+
+export function useFilter(events: CanonicalEvent[], dslPredicate: DslPredicate = null) {
   const [filterText, setFilterText] = useState("");
   const [pivot, setPivot] = useState<PivotMode>(null);
 
@@ -15,6 +17,10 @@ export function useFilter(events: CanonicalEvent[]) {
       result = result.filter((e) => e.traceId === pivot.id);
     } else if (pivot?.type === "orch") {
       result = result.filter((e) => e.attributes["catalyst.orchestrator.id"] === pivot.id);
+    }
+
+    if (dslPredicate) {
+      result = result.filter(dslPredicate);
     }
 
     if (!filterText) return result;
@@ -32,7 +38,7 @@ export function useFilter(events: CanonicalEvent[]) {
         .toLowerCase();
       return row.includes(text);
     });
-  }, [events, filterText, pivot]);
+  }, [events, filterText, pivot, dslPredicate]);
 
   return { filterText, setFilterText, pivot, setPivot, filtered };
 }

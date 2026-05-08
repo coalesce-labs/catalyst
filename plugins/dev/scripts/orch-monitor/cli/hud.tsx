@@ -1,18 +1,35 @@
 #!/usr/bin/env bun
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { render, useApp, useInput, useStdout, Box, Text } from "ink";
 import { Header } from "./components/Header.tsx";
 import { EventList } from "./components/EventList.tsx";
 import { FilterInput } from "./components/FilterInput.tsx";
+import { QueryInput } from "./components/QueryInput.tsx";
 import { DetailPane } from "./components/DetailPane.tsx";
 import { useEventLog } from "./hooks/useEventLog.ts";
-import { useFilter } from "./hooks/useFilter.ts";
+import { useFilter, type DslPredicate } from "./hooks/useFilter.ts";
 import { useSelection } from "./hooks/useSelection.ts";
+import {
+  compile,
+  groqTranslate,
+  rewriteNode,
+  readGroqApiKeyFromConfig,
+  DslError,
+  GroqHttpError,
+  GroqResponseError,
+} from "../../lib/dsl-compile.mjs";
+import { SYSTEM_PROMPT } from "../../lib/dsl-prompt.mjs";
+import type { CanonicalEvent } from "../lib/canonical-event.ts";
 
 interface AppProps {
   repoFilter: string;
   predicate: string;
   sinceTs: string;
+}
+
+interface DslState {
+  dsl: object;
+  jsPredicate: (event: CanonicalEvent) => boolean;
 }
 
 function App({ repoFilter, predicate, sinceTs }: AppProps) {
@@ -22,19 +39,67 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
   const cols = stdout?.columns ?? 120;
 
   const { events, loading } = useEventLog({ repoFilter, predicate, sinceTs });
-  const { filterText, setFilterText, pivot, setPivot, filtered } = useFilter(events);
 
-  // Reserve rows: header(1) + status(1) + filter(1) = 3 chrome rows
-  const visibleRows = Math.max(1, rows - 3);
+  const [dslState, setDslState] = useState<DslState | null>(null);
+  const dslPredicate: DslPredicate = dslState?.jsPredicate ?? null;
+  const { filterText, setFilterText, pivot, setPivot, filtered } = useFilter(events, dslPredicate);
+
+  // Reserve rows: header(1) + status(1) + filter(1) + query(1) + dsl-overlay(maybe) = 4-7
+  const [showDslOverlay, setShowDslOverlay] = useState(false);
+  const overlayHeight = showDslOverlay && dslState ? Math.min(15, Math.floor(rows / 2)) : 0;
+  const chromeRows = 4 + overlayHeight;
+  const visibleRows = Math.max(1, rows - chromeRows);
   const { selectedIndex, scrollOffset, moveUp, moveDown, pageUp, pageDown, jumpToBottom } =
     useSelection(filtered.length, visibleRows);
 
   const [filterFocused, setFilterFocused] = useState(false);
+  const [queryFocused, setQueryFocused] = useState(false);
+  const [queryText, setQueryText] = useState("");
+  const [queryError, setQueryError] = useState<string | null>(null);
+  const [querySubmitting, setQuerySubmitting] = useState(false);
   const [showDetail, setShowDetail] = useState(false);
 
   const selectedEvent = filtered[selectedIndex] ?? null;
 
+  const submitQuery = useCallback(async (raw: string) => {
+    const text = raw.trim();
+    if (!text) return;
+    setQuerySubmitting(true);
+    setQueryError(null);
+    try {
+      const apiKey = process.env["GROQ_API_KEY"] || readGroqApiKeyFromConfig();
+      const dsl = await groqTranslate(text, { apiKey, systemPrompt: SYSTEM_PROMPT });
+      const rewritten = { ...dsl, filter: dsl.filter ? rewriteNode(dsl.filter) : {} };
+      const compiled = compile(rewritten);
+      setDslState({ dsl: rewritten, jsPredicate: compiled.jsPredicate });
+      setQueryFocused(false);
+      setQueryText("");
+    } catch (err) {
+      let msg = "unknown error";
+      if (err instanceof DslError) {
+        msg = err.suggestion ? `${err.message} (did you mean ${err.suggestion}?)` : err.message;
+      } else if (err instanceof GroqHttpError) {
+        msg = `Groq HTTP ${err.status}: ${err.message}`;
+      } else if (err instanceof GroqResponseError) {
+        msg = `Groq response: ${err.message}`;
+      } else if (err instanceof Error) {
+        msg = err.message;
+      }
+      setQueryError(msg);
+    } finally {
+      setQuerySubmitting(false);
+    }
+  }, []);
+
   useInput((input, key) => {
+    if (queryFocused) {
+      if (key.escape) {
+        setQueryFocused(false);
+        setQueryText("");
+        setQueryError(null);
+      }
+      return;
+    }
     if (filterFocused) {
       if (key.escape) {
         setFilterFocused(false);
@@ -46,8 +111,11 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
 
     if (key.escape) {
       setShowDetail(false);
+      setShowDslOverlay(false);
       setPivot(null);
       setFilterText("");
+      setDslState(null);
+      setQueryError(null);
       return;
     }
     if (input === "q" || (key.ctrl && input === "c")) {
@@ -60,6 +128,8 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
     if (key.pageUp) { pageUp(); return; }
     if (input === "G") { jumpToBottom(); return; }
     if (input === "/") { setFilterFocused(true); return; }
+    if (input === ":") { setQueryFocused(true); setQueryError(null); return; }
+    if (input === "?" && dslState) { setShowDslOverlay((v) => !v); return; }
     if (key.return) { setShowDetail((v) => !v); return; }
     if (input === "t" && selectedEvent?.traceId) {
       setPivot({ type: "trace", id: selectedEvent.traceId });
@@ -97,12 +167,32 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
         {pivot && (
           <Text color="cyan">{`  [${pivot.type} pivot active — r to reset]`}</Text>
         )}
+        {dslState && (
+          <Text color="magenta">{"  [DSL filter active — Esc to clear]"}</Text>
+        )}
       </Box>
+      {showDslOverlay && dslState && (
+        <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
+          <Text color="magenta" bold>Generated DSL (press ? to hide):</Text>
+          {JSON.stringify(dslState.dsl, null, 2).split("\n").slice(0, overlayHeight - 2).map((line, i) => (
+            <Text key={i}>{line}</Text>
+          ))}
+        </Box>
+      )}
       <FilterInput
         value={filterText}
         focused={filterFocused}
         onChange={setFilterText}
         pivot={pivot}
+      />
+      <QueryInput
+        value={queryText}
+        focused={queryFocused}
+        busy={querySubmitting}
+        error={queryError}
+        hasDsl={dslState !== null}
+        onChange={setQueryText}
+        onSubmit={(v) => { void submitQuery(v); }}
       />
     </Box>
   );
@@ -149,8 +239,10 @@ for (let i = 0; i < args.length; i++) {
     console.info("  ↑/↓ or j/k   move selection");
     console.info("  PgUp/PgDn    page through history");
     console.info("  Enter        toggle detail pane");
-    console.info("  /            focus filter input");
-    console.info("  Esc          clear filter / exit detail");
+    console.info("  /            focus substring filter");
+    console.info("  :            focus natural-language query (Groq)");
+    console.info("  ?            toggle generated DSL overlay (after a query is set)");
+    console.info("  Esc          clear filter / exit detail / drop DSL filter");
     console.info("  t            pivot to selected row's traceId");
     console.info("  o            pivot to selected row's orchestratorId");
     console.info("  r            clear pivot, back to live tail");
