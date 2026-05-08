@@ -1,10 +1,9 @@
 {
-  "name": "catalyst-otel-forward",
+  "name": "catalyst-broker",
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "test": "bun test"
   },
   "dependencies": {
     "pino": "^9.6.0"

@@ -5,6 +5,7 @@ import type { CanonicalEvent } from "../orch-monitor/lib/canonical-event.ts";
 import { loadForwarderConfig } from "./lib/config.ts";
 import { readCheckpoint, writeCheckpoint } from "./lib/checkpoint.ts";
 import { createTailer } from "./lib/tail.ts";
+import { log } from "./lib/logger.ts";
 import { OtlpSender } from "./lib/destinations/otlp.ts";
 import { PosthogSender } from "./lib/destinations/posthog.ts";
 import { CloudflareAESender } from "./lib/destinations/cloudflare-ae.ts";
@@ -79,12 +80,22 @@ if (import.meta.main) {
     writeCheckpoint(CHECKPOINT_PATH, { path: tailer.currentPath(), offset: 0 });
   }, 10_000);
 
-  console.log(`[otel-forward] started. OTLP=${cfg.otlp.enabled} PostHog=${cfg.posthog.enabled} CFAE=${cfg.cloudflareAE.enabled}`);
+  log.info(
+    {
+      otlpEnabled: cfg.otlp.enabled,
+      posthogEnabled: cfg.posthog.enabled,
+      cfaeEnabled: cfg.cloudflareAE.enabled,
+    },
+    "started",
+  );
 
   await tailer.run();
 
   clearInterval(flushTimer);
   clearInterval(ckTimer);
   await flush();
-  console.log(`[otel-forward] stopped. processed=${stats.processed} skipped=${stats.skipped}`);
+  log.info(
+    { processed: stats.processed, skipped: stats.skipped },
+    "stopped",
+  );
 }

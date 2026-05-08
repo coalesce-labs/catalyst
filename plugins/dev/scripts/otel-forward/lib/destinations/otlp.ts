@@ -1,6 +1,9 @@
 import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
 import { withRetry, DEFAULT_RETRY_DELAYS_MS } from "../retry.ts";
 import { appendToDlq, drainDlq } from "../dlq.ts";
+import { log } from "../logger.ts";
+
+const destLog = log.child({ destination: "otlp" });
 
 interface OtlpAttr { key: string; value: { stringValue?: string; intValue?: number } }
 
@@ -59,7 +62,10 @@ export class OtlpSender {
       }, 3, [...DEFAULT_RETRY_DELAYS_MS]);
     } catch (err) {
       appendToDlq(this.opts.dlqPath, batch);
-      console.error(`[otlp] flush failed, wrote ${batch.length} events to DLQ:`, err);
+      destLog.error(
+        { batchSize: batch.length, err: err instanceof Error ? err.message : String(err) },
+        "flush failed, wrote events to DLQ",
+      );
     }
   }
 }
