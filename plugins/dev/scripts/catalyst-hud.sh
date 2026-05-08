@@ -214,11 +214,43 @@ render() {
     ((.body.payload.name // "") | gsub("[\n\t]"; " ")),
     (.body.payload.headBranch // ""),
     ((.body.payload.reason // "") | gsub("[\n\t]"; " ")),
-    ((.body.payload.source_event_ids // []) | length | tostring)
+    ((.body.payload.source_event_ids // []) | length | tostring),
+    (.severityText // ""),
+    (.resource."service.name" // ""),
+    (.traceId // "")
   ] | join("")' 2>/dev/null) || return
 
-  local ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch reason src_ids_len
-  IFS=$'\001' read -r ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch reason src_ids_len <<< "$f"
+  local ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch reason src_ids_len severity service traceid
+  IFS=$'\001' read -r ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch reason src_ids_len severity service traceid <<< "$f"
+
+  # Derive SVC tag (4 chars) and color from resource."service.name".
+  local svc_tag="" svc_color="$DIM"
+  case "$service" in
+    catalyst.github)       svc_tag="GH";   svc_color="$BLU" ;;
+    catalyst.session)      svc_tag="SESS"; svc_color="$MAG" ;;
+    catalyst.orchestrator) svc_tag="ORCH"; svc_color="$GRN" ;;
+    catalyst.linear)       svc_tag="LIN";  svc_color="$YEL" ;;
+    catalyst.worker)       svc_tag="WORK"; svc_color="$CYN" ;;
+    catalyst.filter)       svc_tag="FLTR"; svc_color="$DIM" ;;
+    "")                    svc_tag="?";    svc_color="$DIM" ;;
+    *)                     svc_tag="${service:0:4}"; svc_color="$DIM" ;;
+  esac
+
+  # Derive SEV tag (3 chars) and color from severityText.
+  local sev_tag="INF" sev_color=""
+  case "$severity" in
+    DEBUG)  sev_tag="DBG"; sev_color="$DIM" ;;
+    INFO)   sev_tag="INF"; sev_color="" ;;
+    WARN)   sev_tag="WRN"; sev_color="$YEL" ;;
+    ERROR)  sev_tag="ERR"; sev_color="$RED$BOLD" ;;
+    "")     sev_tag="";    sev_color="$DIM" ;;
+    *)      sev_tag="${severity:0:3}"; sev_color="" ;;
+  esac
+
+  # First 8 hex of traceId for correlation. Empty when producer didn't set it
+  # (notably webhook-handler.ts) — show a dim placeholder so columns align.
+  local trace_short="${traceid:0:8}"
+  [[ -z "$trace_short" ]] && trace_short="--------"
 
   # Noise — skip high-frequency internal events. CTL-300 canonical names.
   case "$ev" in
@@ -474,15 +506,25 @@ render() {
       ;;
   esac
 
-  # TIME(8)  REPO(12)  SOURCE(20)  EVENT(14)  REF(10)  DETAILS
-  printf "${c}${BOLD}%-8s${R}  %-12s  ${DIM}%-20s${R}  ${c}%-14s${R}  ${refc}%-14s${R}  %s\n" \
-    "$t" "${repo_short:-}" "$src" "$lbl" "${prref:-}" "$body"
+  # TIME(8) SVC(4) SEV(3) EVENT(14) REPO(12) REF(14) TRACE(8) DETAILS
+  # SVC and SEV come from canonical resource/severity (CTL-308). TRACE is the
+  # first 8 hex of traceId — empty for webhook events until that producer
+  # populates it.
+  #
+  # Row color = svc_color so events from the same service are visually grouped.
+  # SEV pops with its own color (yellow=WARN, red bold=ERROR) and TRACE stays
+  # dim. ERROR severity overrides the whole row to red+bold so problems
+  # dominate visually even when grouping is on.
+  local row_color="$svc_color"
+  [[ "$severity" == "ERROR" ]] && row_color="$RED$BOLD"
+  printf "${row_color}%-8s  ${BOLD}%-4s${R}${row_color}  ${sev_color}%-3s${R}${row_color}  %-14s  %-12s  ${refc}%-14s${R}${row_color}  ${DIM}%-8s${R}${row_color}  %s${R}\n" \
+    "$t" "$svc_tag" "$sev_tag" "$lbl" "${repo_short:-}" "${prref:-}" "$trace_short" "$body"
 }
 
 # --- Header ----------------------------------------------------------------
-printf "${BOLD}${CYN}%-8s  %-12s  %-20s  %-14s  %-14s  %s${R}\n" \
-  "TIME" "REPO" "SOURCE" "EVENT" "REF" "DETAILS"
-printf "${DIM}%s${R}\n" "$(printf '%.0s─' {1..100})"
+printf "${BOLD}${CYN}%-8s  %-4s  %-3s  %-14s  %-12s  %-14s  %-8s  %s${R}\n" \
+  "TIME" "SVC" "SEV" "EVENT" "REPO" "REF" "TRACE" "DETAILS"
+printf "${DIM}%s${R}\n" "$(printf '%.0s─' {1..110})"
 
 # --- Stream ----------------------------------------------------------------
 catalyst-events tail "$@" | while IFS= read -r line; do
