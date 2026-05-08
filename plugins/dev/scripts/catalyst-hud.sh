@@ -144,7 +144,7 @@ Examples:
   catalyst-hud
   catalyst-hud --since "1 hour ago"
   catalyst-hud --since "30 minutes ago" --repo catalyst
-  catalyst-hud --filter '.event | startswith("github")'
+  catalyst-hud --filter '.attributes."event.name" | startswith("github")'
 
 Columns:
   TIME     Local time (HH:MM:SS)
@@ -196,25 +196,25 @@ render() {
   # read won't collapse consecutive empty fields (which shifts all subsequent vars).
   f=$(printf '%s' "$line" | jq -r '[
     (.ts // ""),
-    (.event // "unknown"),
-    (.orchestrator // ""),
-    (.worker // ""),
-    (.scope.repo // ""),
-    ((.scope.pr // 0) | tostring),
-    (.scope.ticket // ""),
-    (.detail.conclusion // ""),
-    ((.detail.state // "") | ascii_downcase),
-    (.detail.phase // ""),
-    (.detail.workerStatus // .detail.status // ""),
-    (.detail.channel // ""),
-    ((.detail.prNumbers // []) | map(tostring) | join(",")),
-    ((.detail.title // "") | gsub("[\n\t]"; " ")),
-    ((.detail.message // .detail.text // "") | gsub("[\n\t]"; " ")),
-    (.detail.ref // .scope.ref // ""),
-    ((.detail.name // "") | gsub("[\n\t]"; " ")),
-    (.detail.headBranch // ""),
-    ((.detail.reason // "") | gsub("[\n\t]"; " ")),
-    ((.detail.source_event_ids // []) | length | tostring)
+    (.attributes."event.name" // "unknown"),
+    (.attributes."catalyst.orchestrator.id" // ""),
+    (.attributes."catalyst.worker.ticket" // ""),
+    (.attributes."vcs.repository.name" // ""),
+    ((.attributes."vcs.pr.number" // 0) | tostring),
+    (.attributes."linear.issue.identifier" // .attributes."catalyst.worker.ticket" // ""),
+    (.attributes."cicd.pipeline.run.conclusion" // .body.payload.conclusion // ""),
+    ((.body.payload.state // "") | ascii_downcase),
+    (.body.payload.phase // ""),
+    (.body.payload.workerStatus // .body.payload.status // ""),
+    (.body.payload.channel // ""),
+    ((.body.payload.prNumbers // []) | map(tostring) | join(",")),
+    ((.body.payload.title // "") | gsub("[\n\t]"; " ")),
+    ((.body.payload.message // .body.payload.text // "") | gsub("[\n\t]"; " ")),
+    (.body.payload.ref // .attributes."vcs.ref.name" // ""),
+    ((.body.payload.name // "") | gsub("[\n\t]"; " ")),
+    (.body.payload.headBranch // ""),
+    ((.body.payload.reason // "") | gsub("[\n\t]"; " ")),
+    ((.body.payload.source_event_ids // []) | length | tostring)
   ] | join("")' 2>/dev/null) || return
 
   local ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch reason src_ids_len

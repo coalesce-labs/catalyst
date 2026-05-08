@@ -211,23 +211,3 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
   return event;
 }
 
-/** For tests — clears the cached plugin version. */
-export function _resetPluginVersionCache(): void {
-  cachedVersion = null;
-}
-
-export type ServiceName =
-  | "catalyst.github"
-  | "catalyst.linear"
-  | "catalyst.session"
-  | "catalyst.orchestrator"
-  | "catalyst.comms"
-  | "catalyst.filter";
-
-/**
- * Map a service name back to the event-name prefix.
- * "catalyst.github" → "github", "catalyst.session" → "session", etc.
- */
-export function eventNamePrefixFor(serviceName: ServiceName): string {
-  return serviceName.replace(/^catalyst\./, "");
-}

@@ -252,17 +252,17 @@ if command -v catalyst-events >/dev/null 2>&1; then
   # Two-phase compliant cadence loop — see [[wait-for-github]].
   EVENT_JSON=$(catalyst-events wait-for \
     --filter '
-      (.event == "github.pr.merged" and .scope.pr == '"$pr_number"') or
-      (.event == "github.pr.closed" and .scope.pr == '"$pr_number"') or
-      (.event == "github.check_suite.completed"
-         and (.detail.prNumbers // [] | index('"$pr_number"') != null)) or
-      (.event == "github.pr_review.submitted"
-         and .scope.pr == '"$pr_number"') or
-      (.event == "github.issue_comment.created"
-         and .scope.pr == '"$pr_number"') or
-      (.event == "github.pr_review_comment.created"
-         and .scope.pr == '"$pr_number"') or
-      (.event == "github.push" and .scope.ref == "refs/heads/'"$BASE_BRANCH"'")
+      (.attributes."event.name" == "github.pr.merged" and .attributes."vcs.pr.number" == '"$pr_number"') or
+      (.attributes."event.name" == "github.pr.closed" and .attributes."vcs.pr.number" == '"$pr_number"') or
+      (.attributes."event.name" == "github.check_suite.completed"
+         and (.body.payload.prNumbers // [] | index('"$pr_number"') != null)) or
+      (.attributes."event.name" == "github.pr_review.submitted"
+         and .attributes."vcs.pr.number" == '"$pr_number"') or
+      (.attributes."event.name" == "github.issue_comment.created"
+         and .attributes."vcs.pr.number" == '"$pr_number"') or
+      (.attributes."event.name" == "github.pr_review_comment.created"
+         and .attributes."vcs.pr.number" == '"$pr_number"') or
+      (.attributes."event.name" == "github.push" and .attributes."vcs.ref.name" == "refs/heads/'"$BASE_BRANCH"'")
     ' \
     --timeout 300 || true)
 
@@ -276,7 +276,7 @@ if command -v catalyst-events >/dev/null 2>&1; then
     CI_STATUS=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs" \
       --jq '[.check_runs[] | .conclusion // .status] | unique | join(",")' 2>/dev/null || echo "pending")
   fi
-  echo "wake: state=${PR_STATE} CI=${CI_STATUS} event=$(echo "$EVENT_JSON" | jq -r '.event // "(timeout)"')"
+  echo "wake: state=${PR_STATE} CI=${CI_STATUS} event=$(echo "$EVENT_JSON" | jq -r '.attributes."event.name" // "(timeout)"')"
 else
   # Fallback when catalyst-events CLI is not installed — REST-only poll.
   # See [[wait-for-github]] for the full two-phase pattern.
