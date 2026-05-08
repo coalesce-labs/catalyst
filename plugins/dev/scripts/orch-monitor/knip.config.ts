@@ -4,8 +4,8 @@ const config: KnipConfig = {
   ignoreExportsUsedInFile: true,
   workspaces: {
     ".": {
-      entry: ["server.ts", "catalyst-session.ts"],
-      project: ["**/*.ts", "!ui/**", "!public/**"],
+      entry: ["server.ts", "catalyst-session.ts", "cli/hud.tsx"],
+      project: ["**/*.{ts,tsx}", "!ui/**", "!public/**"],
     },
     ui: {
       entry: ["index.html", "src/components/ui/*.{ts,tsx}"],
