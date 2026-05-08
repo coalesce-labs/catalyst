@@ -18,16 +18,17 @@ Orchestrator                   Worker subprocess
      │                                 │   Phase 2: planning
      │                                 │   Phase 3: implementing
      │                                 │   Phase 4: validating
-     │                                 │   Phase 5: shipping (opens PR, arms auto-merge)
+     │                                 │   Phase 5: shipping
+     │                                 │     opens PR → enters catalyst-events wait-for loop
+     │                                 │     resolves CI failures, bot review threads, BEHIND
+     │                                 │     gh pr merge --squash --delete-branch
+     │                                 │     writes pr.mergedAt + status: done → exits
      │                                 │
-     │<─ signal file: pr-created ──────│
-     │                                 │ exits
-     │                                 │
-     │ (Phase 4 poll loop, orchestrator side)
-     │    gh pr view → merged? ──> yes: writes mergedAt, Linear=Done
+     │<─ signal file: done ────────────│
+     │   (orchestrator's Phase 4 is a safety-net fallback for stalled/crashed workers)
 ```
 
-The split between worker and orchestrator matters: the worker subprocess reliably exits at its final tool-use, before merge completes. **Polling until merged is the orchestrator's responsibility**, not the worker's. A worker that claims to poll-until-merged burns tokens and produces false signals.
+The worker owns the full PR lifecycle end-to-end: it opens the PR, enters an event-driven listen loop via `catalyst-events wait-for`, resolves blockers (CI failures, bot review threads, BEHIND) inline, executes `gh pr merge --squash --delete-branch` when the PR is CLEAN, and writes `status: "done"` before exiting. The orchestrator's Phase 4 is a fallback that handles workers that stalled before completing their own merge.
 
 ## The signal file
 
@@ -62,31 +63,30 @@ Located at `<orchestrator-dir>/workers/<ticket>.json`. The orchestrator creates 
   "url": "https://github.com/org/repo/pull/123",
   "ciStatus": "pending",
   "prOpenedAt": "2026-04-14T19:15:30Z",
-  "autoMergeArmedAt": "2026-04-14T19:15:32Z",
   "mergedAt": null
 }
 ```
 
 - `ciStatus`: `pending` | `passing` | `failing` | `unknown` | `merged`
 - `prOpenedAt` — set by worker the moment the PR is created
-- `autoMergeArmedAt` — set by worker after `gh pr merge --squash --auto`
-- `mergedAt` — **always** set by the orchestrator (or standalone `/merge-pr`), never by the worker
+- `mergedAt` — set by the worker after `gh pr merge --squash --delete-branch` completes; set by the orchestrator (fallback) for stalled workers
 
 ### State machine
 
 ```
 dispatched → researching → planning → implementing → validating → shipping → pr-created
                                                                                    │
-                                                                         (orchestrator polls)
+                                                                     (worker listen loop)
+                                                                       resolves blockers
                                                                                    │
                                                                                    v
-                                                                              merging → done
-                                                                                   │
+                                                                                 done  ← worker (primary path)
+                                                                                   │     orchestrator (fallback for stalled workers)
                                                                                    v
                                                           (at any stage) → failed | stalled
 ```
 
-The worker writes statuses up through `pr-created`. The orchestrator writes `merging` and `done` (or `failed`/`stalled` if the wave times out or verification fails).
+The worker writes all statuses through `done`. In the `pr-created` → `done` transition, the worker enters a `catalyst-events wait-for` listen loop, resolves CI failures and review blockers inline, and executes `gh pr merge --squash --delete-branch` when the PR is CLEAN. The orchestrator writes `done` only as a safety-net fallback for workers that wrote `stalled` or crashed before completing their own merge.
 
 ## The global state
 
@@ -128,9 +128,9 @@ A worker reaches a terminal state in one of three ways:
 
 | State | Means | Signal writer |
 |-------|-------|---------------|
-| `done` | PR merged, Linear=Done | Orchestrator (after observing merge) |
+| `done` | PR merged, Linear=Done | Worker (after executing merge); Orchestrator (fallback for stalled workers) |
 | `failed` | Unrecoverable error, quality gates exhausted, or human escalation | Worker (writes attention reason) |
-| `stalled` | No heartbeat / no progress for 15+ min | Orchestrator |
+| `stalled` | Worker could not resolve a blocker (CI, reviews, conflicts) or no heartbeat for 15+ min | Worker (on unrecoverable blocker); Orchestrator (on heartbeat timeout) |
 
 Terminal states set `completedAt`. No further writes to the signal file happen once terminal is reached.
 

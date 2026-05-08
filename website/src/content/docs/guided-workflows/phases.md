@@ -15,8 +15,8 @@ The guided workflow has six phases. Each one does something discrete, writes an 
 | 2 | **Plan** | `/catalyst-dev:create-plan` | `thoughts/shared/plans/YYYY-MM-DD-{ticket}-{desc}.md` | 5–20 min (interactive) |
 | 3 | **Implement** | `/catalyst-dev:implement-plan` | Code changes + tests (not committed yet) | 10–90 min |
 | 4 | **Validate** | `/catalyst-dev:validate-plan` | Validation report + quality-gate output | 2–10 min |
-| 5 | **Ship** | `/catalyst-dev:create-pr` | Commits, pushed branch, GitHub PR | 2–5 min |
-| 6 | **Merge** | `/catalyst-dev:merge-pr` | Merged PR, deleted branch, Linear state=Done | 1–20 min (waits for CI) |
+| 5 | **Ship** | `/catalyst-dev:create-pr` → active listen loop | Commits, pushed branch, GitHub PR, merged PR, deleted branch, Linear state=Done | 5–30 min |
+| 6 | **Merge** | `/catalyst-dev:merge-pr` | Merged PR, deleted branch, Linear state=Done — *standalone only* | 1–20 min |
 
 ## What each phase reads
 
@@ -27,7 +27,10 @@ Phase 2 (plan)      reads research doc path from workflow context
 Phase 3 (implement) reads plan doc path from workflow context
 Phase 4 (validate)  reads plan doc + the implementation diff
 Phase 5 (ship)      reads everything above to write the PR description, then
-                    polls gh pr view until state=MERGED before exiting
+                    enters a catalyst-events wait-for listen loop — resolves CI
+                    failures, bot review threads, and BEHIND inline — executes
+                    gh pr merge --squash --delete-branch when CLEAN, writes
+                    status: done, and exits
 ```
 
 This is why "the thoughts/ directory is the handoff mechanism" — artifacts live there so **any future session**, not just this one, can pick up where the current one left off.
@@ -76,10 +79,17 @@ If the current ticket is linked, each phase transitions it through Linear states
 | 1 Research | In Progress |
 | 2 Plan | In Progress |
 | 3 Implement | In Progress |
-| 5 Ship | In Review |
-| 6 Merge | Done |
+| 5 Ship (PR opened) | In Review |
+| 5 Ship (PR merged) | Done |
+| 6 Merge (standalone only) | Done |
 
 Phase 4 (validate) doesn't transition state — it's an internal quality check, not a milestone visible to others. Phases 1–3 stay in the same state by default because "In Progress" already covers the whole active-work span; override `stateMap.research`, `stateMap.planning`, and `stateMap.inProgress` in config if you want finer granularity.
+
+## Phase 6 and oneshot
+
+In `/catalyst-dev:oneshot` and `/catalyst-dev:orchestrate` worker runs, **Phase 6 is folded into Phase 5**. The worker enters an event-driven listen loop immediately after opening the PR, resolves any blockers inline, and executes the merge itself before exiting. There is no separate merge phase.
+
+`/catalyst-dev:merge-pr` remains available as a standalone tool for PRs that were opened outside the oneshot flow — for example, if you ran `/create-pr` manually and stopped there.
 
 ## Stopping mid-workflow
 

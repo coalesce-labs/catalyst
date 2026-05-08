@@ -378,8 +378,126 @@ event ingestion via a smee.io tunnel, with polling kept as a 10-minute fallback.
   missed during downtime are reconciled without operator action.
 - Event-log fan-out: every accepted webhook event is appended to
   `~/catalyst/events/YYYY-MM.jsonl` with topic namespace `<source>.<noun>.<verb>`
-  (e.g. `github.pr.merged`). This seeds the unified event-bus that CTL-210 (Linear
-  webhooks + consumer-side `catalyst-events` CLI) and CTL-211 (worker definition-of-
-  done = production deploy success) build on.
+  (e.g. `github.pr.merged`). This seeded the unified event-bus that CTL-210 (**shipped** —
+  Linear webhooks + consumer-side `catalyst-events` CLI) and CTL-211 (**shipped** — worker
+  definition-of-done = production deploy success) build on.
 - Steady-state GitHub API budget: 200+ tracked PRs × < 50 calls/hr (well under both
   the GraphQL and REST 5,000 calls/hr ceilings).
+
+---
+
+## ADR-013: Event-Driven Worker Waits (`wait-for-github` two-phase pattern)
+
+**Decision**: Replace all `gh pr view --json` poll loops inside worker skills with a
+`catalyst-events wait-for` blocking call that consumes the unified event log, with a
+REST-authoritative check after each wake.
+
+**Rationale**:
+
+- `gh pr view --json` uses GraphQL. A busy orchestrator with 50+ workers polling every 30s
+  exhausted the 5,000-call/hr GitHub GraphQL budget in under 11 minutes (CTL-209
+  root-cause analysis). Polling was the only viable option before the event log existed.
+- The unified event log (ADR-012) now gives workers a low-cost wake source: a single
+  `tail -f` covers all event types (CI, reviews, pushes, merges) at zero API budget cost.
+- Workers should not use GraphQL for state checks. REST (`gh api repos/{repo}/pulls/{n}`)
+  is cheaper and returns `.mergeable_state`, which encodes CI + review status in one field.
+
+**Design (two-phase)**:
+
+1. **Phase 1** (`--timeout 180`): `catalyst-events wait-for` waits for any relevant event
+   (check-suite, pr-review, push, pr-merged). On match, do a REST authoritative check.
+   On timeout (3 min without an event), run diagnostics.
+2. **Diagnostics**: count heartbeats in the last 500 log lines; re-check tunnel state. If
+   infrastructure is healthy, extend to Phase 2. If not, switch to REST fallback.
+3. **Phase 2** (`--timeout 7200`): same filter, 2-hour window. Infrastructure confirmed
+   healthy — a long wait is normal (CI queued, reviewer slow to act).
+4. **REST fallback** (`sleep 300` loop): if tunnel is down, poll every 5 min via
+   `gh api repos/{repo}/pulls/{n}`. Avoids GraphQL, stays under budget.
+
+**Consequences**:
+
+- Every skill that previously polled `gh pr view` must be rewritten to use `wait-for`.
+- The filter jq expression must cover both v1 and v2 envelope shapes (`.event` vs
+  `.attributes."event.name"`).
+- Workers must never use `.mergeable_state` as the sole decision signal — it's
+  eventually-consistent. Always follow with a REST re-check before acting.
+- The REST fallback is required for environments without a configured webhook tunnel.
+
+---
+
+## ADR-014: Worker Owns Full PR Lifecycle (CTL-252)
+
+**Decision**: Remove `gh pr merge --auto` from all worker skills. Workers enter an
+event-driven listen loop after opening a PR, resolve blockers inline, execute
+`gh pr merge --squash --delete-branch` directly when the PR is CLEAN, and write
+`status: "done"` before exiting. The orchestrator's Phase 4 is a safety-net fallback
+only for workers that stalled before completing their own merge.
+
+**Rationale**:
+
+- `gh pr merge --auto` arms GitHub's auto-merge, which merges asynchronously after all
+  required checks pass. This forces the worker to exit at `pr-created` and leaves the
+  merge to GitHub (or the orchestrator's poll loop).
+- With ADR-013's event-driven loop in place, the worker is already watching for exactly
+  the events that signal "ready to merge" (CI green, no blocking reviews, no BEHIND). At
+  that point executing `gh pr merge --squash` directly is simpler and eliminates the
+  delay between "auto-merge armed" and "GitHub actually merges."
+- Removing `--auto` shrinks the state machine: `pr-created → done` replaces
+  `pr-created → (auto-merge armed) → (orchestrator detects merged) → done`. The
+  orchestrator's Phase 4 polling loop is reduced to a fallback for crashed workers.
+
+**Consequences**:
+
+- `autoMergeArmedAt` field removed from the `pr` signal-file subobject.
+- Workers must never use `--auto` in any `gh pr merge` invocation.
+- The orchestrator's Phase 4 is now a safety net, not the primary merge path. Its poll
+  interval can be relaxed (was 30s; 10-min polling is now acceptable for fallback-only use).
+- Signal file `status: "done"` is written by the worker in the normal case. The
+  orchestrator writes it only when it detects a previously stalled worker's PR is merged.
+- Skills and documentation that said "the orchestrator polls until merged" must be updated.
+
+---
+
+## ADR-015: Bidirectional catalyst-comms (CTL-249)
+
+**Decision**: Add inbound message reads to workers. Workers poll the shared comms channel
+at each phase boundary for messages directed to `--filter-to <ticket-id>`, using a
+`COMMS_LAST_READ` cursor to skip pre-join history.
+
+**Rationale**:
+
+- Before CTL-249, comms was one-direction: workers broadcast status, the orchestrator
+  observed. The orchestrator had no way to send runtime instructions to a specific worker
+  (e.g., "skip the migration, CTL-99 is handling it").
+- Adding `--filter-to <ticket-id>` to `catalyst-comms poll` and advancing a cursor
+  at each phase transition is a minimal change: no new infrastructure, no new file format,
+  no guaranteed delivery required for the current use cases.
+
+**Design**:
+
+- Workers initialize `COMMS_LAST_READ` to the channel file's current line count at join
+  time, so pre-join history is skipped.
+- After each phase transition (signal file write), the worker calls
+  `catalyst-comms poll --filter-to $TICKET_ID --since $COMMS_LAST_READ` and advances
+  the cursor.
+- Recognized inbound signals: `abort` (worker exits immediately), future signals TBD.
+
+**ACK gap**:
+
+There is no delivery guarantee. A worker may have passed a phase boundary before an
+orchestrator-to-worker message arrives. The worker processes it only if it polls again
+before exiting. CTL-253 tracks adding an explicit ACK mechanism.
+
+**Event log integration**:
+
+`catalyst-comms send` now emits a `comms.message.posted` event to the unified event log
+(v2 OTel envelope) so orchestrators and monitoring tools can observe all comms traffic
+without polling the channel file directly.
+
+**Consequences**:
+
+- Workers produce ≥4 comms messages per run: start, N phase transitions, done (or
+  attention on block). The inbound read at each phase boundary adds no new messages but
+  adds a `poll` call per phase transition (~5 calls per run).
+- `catalyst-events wait-for` can now filter on `comms.message.posted` events to observe
+  comms traffic from within the event log pipeline.

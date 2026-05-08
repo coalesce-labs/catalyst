@@ -270,6 +270,46 @@ Orchestrators that want their workers to coordinate should:
 
 The orchestrator can monitor progress with `catalyst-comms watch` in a dedicated terminal pane.
 
+## Bidirectional Messaging
+
+Workers do not just broadcast status — the orchestrator can also send messages **directed to individual workers** (CTL-249). A worker reads inbound messages at each phase boundary without blocking.
+
+### Sending to a worker (orchestrator side)
+
+```bash
+catalyst-comms send orch-ctl-ux-apr20-wave-1 "CTL-101: please skip the migration in your scope, CTL-99 is handling it" \
+  --as orchestrator --to CTL-101 --type info
+```
+
+The `--to <ticket-id>` flag targets the message. Other workers can see the message in the channel log but are not the intended recipient.
+
+### Reading inbound messages (worker side)
+
+Workers track a `COMMS_LAST_READ` cursor (initialized to the channel file's line count at join time, so pre-join history is skipped) and poll after each phase transition:
+
+```bash
+msgs=$(catalyst-comms poll "$CHANNEL" --filter-to "$TICKET_ID" --since "$COMMS_LAST_READ")
+COMMS_LAST_READ=$(wc -l < "$CHANNEL_FILE" | tr -d ' ')
+```
+
+The cursor advances atomically — messages arriving during a read are captured on the next poll.
+
+### ACK gap
+
+There is currently **no delivery guarantee**: a worker may have already passed a phase boundary before the orchestrator's message arrives. CTL-253 tracks adding an explicit ACK mechanism. For now, treat orchestrator-to-worker messages as advisory (the worker may or may not act on them before its next check).
+
+### Event log integration
+
+`catalyst-comms send` emits a `comms.message.posted` event to the unified event log (`~/catalyst/events/YYYY-MM.jsonl`) using the v2 OTel-shaped envelope. This means orchestrators and tools that monitor the event log see all comms traffic without polling the channel file directly:
+
+```bash
+# Watch all comms messages on a channel
+catalyst-events tail --filter '.event == "comms.message.posted" and .attributes."comms.channel" == "orch-ctl-ux-apr20-wave-1"'
+
+# Messages directed at a specific worker
+catalyst-events tail --filter '.event == "comms.message.posted" and .body.payload.to == "CTL-101"'
+```
+
 ## Sub-agent Pattern
 
 When spawning a sub-agent via `Agent(...)`, pass the channel name in the prompt:
