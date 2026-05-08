@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "catalyst-otel-forward",
+      "name": "catalyst-broker",
       "dependencies": {
         "pino": "^9.6.0",
       },

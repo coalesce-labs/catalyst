@@ -21,6 +21,7 @@ import {
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import pino from "pino";
 import {
   openBrokerStateDb,
   closeBrokerStateDb,
@@ -38,6 +39,12 @@ import {
   // ticket_state (CTL-303 — ticket routing)
   upsertTicketState,
 } from "./broker-state.mjs";
+
+// --- Logger ---
+const log = pino({
+  name: "broker",
+  level: process.env.LOG_LEVEL ?? "info",
+});
 
 // --- Config ---
 const CATALYST_DIR = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
@@ -94,7 +101,7 @@ export function saveInterests() {
     mkdirSync(dirname(INTERESTS_FILE), { recursive: true });
     writeFileSync(INTERESTS_FILE, JSON.stringify([...interests.entries()], null, 2));
   } catch (err) {
-    console.error("[broker] Failed to save interests:", err.message);
+    log.error({ err: err.message }, "failed to save interests");
   }
 }
 
@@ -105,7 +112,7 @@ export function loadPersistedInterests() {
       interests.set(id, reg);
     }
     if (interests.size) {
-      console.log(`[broker] Loaded ${interests.size} persisted interest(s)`);
+      log.info({ count: interests.size }, "loaded persisted interests");
     }
   } catch {
     // No file yet or parse error — fine
@@ -160,14 +167,19 @@ export function handleRegister(event) {
     }
   }
 
+  const persistent = d.persistent === true;
   if (isPrLifecycle) {
-    const prs = (d.pr_numbers ?? []).join(",");
-    console.log(`[broker] Registered: ${id} [pr_lifecycle pr=${prs}] (persistent: ${d.persistent === true})`);
+    log.info(
+      { interestId: id, type: "pr_lifecycle", prs: d.pr_numbers ?? [], persistent },
+      "registered",
+    );
   } else if (isTicketLifecycle) {
-    const tix = (d.tickets ?? []).join(",");
-    console.log(`[broker] Registered: ${id} [ticket_lifecycle tickets=${tix}] (persistent: ${d.persistent === true})`);
+    log.info(
+      { interestId: id, type: "ticket_lifecycle", tickets: d.tickets ?? [], persistent },
+      "registered",
+    );
   } else {
-    console.log(`[broker] Registered: ${id} — "${d.prompt}" (persistent: ${d.persistent === true})`);
+    log.info({ interestId: id, prompt: d.prompt, persistent }, "registered");
   }
   saveInterests();
 }
@@ -180,7 +192,7 @@ export function handleDeregister(event) {
     if (reg && reg.interest_type === "pr_lifecycle") {
       try { deleteFilterState(id); } catch { /* DB not opened */ }
     }
-    console.log(`[broker] Deregistered: ${id}`);
+    log.info({ interestId: id }, "deregistered");
     saveInterests();
   }
 }
@@ -195,7 +207,10 @@ export function handleOrchestratorTerminated(event) {
         try { deleteFilterState(id); } catch { /* DB not opened */ }
       }
       interests.delete(id);
-      console.log(`[broker] Auto-deregistered: ${id} (orchestrator ${orchId} terminated)`);
+      log.info(
+        { interestId: id, orchestrator: orchId },
+        "auto-deregistered (orchestrator terminated)",
+      );
       changed = true;
     }
   }
@@ -235,7 +250,10 @@ export function handleAgentCheckin(event) {
     _autoRegisterPrLifecycle(sessionId, claimedPr, orchestrator, ticket);
   }
 
-  console.log(`[broker] Agent checked in: ${agentName} (session: ${sessionId}, ticket: ${ticket ?? "none"}, pr: ${claimedPr ?? "none"})`);
+  log.info(
+    { agentName, sessionId, ticket, claimedPr },
+    "agent checked in",
+  );
 }
 
 // Auto-register a pr_lifecycle interest when we learn agent ↔ PR mapping.
@@ -261,7 +279,7 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket) {
     upsertFilterStateOpen({ interestId: sessionId, prNumber, repo: "" });
   } catch { /* DB not opened */ }
 
-  console.log(`[broker] Auto-correlated pr_lifecycle for session ${sessionId} on PR #${prNumber}`);
+  log.info({ sessionId, prNumber }, "auto-correlated pr_lifecycle for session");
   saveInterests();
 }
 
@@ -283,7 +301,7 @@ export function handleAgentCheckout(event) {
     saveInterests();
   }
 
-  console.log(`[broker] Agent checked out: ${sessionId} (status: ${finalStatus})`);
+  log.info({ sessionId, status: finalStatus }, "agent checked out");
 }
 
 export function handleAgentHeartbeat(event) {
@@ -543,7 +561,10 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
 
     try { upsertFilterStateOpen({ interestId: sessionId, prNumber, repo: "" }); } catch { /* DB not opened */ }
 
-    console.log(`[broker] Auto-correlated pr_lifecycle for agent ${sessionId} (ticket ${ticket} → PR #${prNumber})`);
+    log.info(
+      { sessionId, ticket, prNumber },
+      "auto-correlated pr_lifecycle from ticket",
+    );
     saveInterests();
   }
 }
@@ -591,7 +612,7 @@ async function classifyBatch(events) {
   if (!prompts) return;
 
   if (!GROQ_API_KEY) {
-    console.error("[broker] GROQ_API_KEY not set — skipping batch of", events.length, "events");
+    log.error({ batchSize: events.length }, "GROQ_API_KEY not set — skipping batch");
     return;
   }
 
@@ -614,13 +635,13 @@ async function classifyBatch(events) {
       }),
     });
     if (!res.ok) {
-      console.error(`[broker] Groq error ${res.status}:`, await res.text());
+      log.error({ status: res.status, body: await res.text() }, "Groq error");
       return;
     }
     const data = await res.json();
     responseText = data.choices?.[0]?.message?.content ?? "[]";
   } catch (err) {
-    console.error("[broker] Groq fetch failed:", err.message);
+    log.error({ err: err.message }, "Groq fetch failed");
     return;
   }
 
@@ -628,7 +649,7 @@ async function classifyBatch(events) {
   try {
     matches = JSON.parse(responseText);
   } catch {
-    console.error("[broker] Failed to parse Groq response:", responseText);
+    log.error({ responseText }, "failed to parse Groq response");
     return;
   }
 
@@ -641,7 +662,10 @@ async function classifyBatch(events) {
     const sourceIds = (match.event_indices ?? []).map((i) => events[i - 1]?.id).filter(Boolean);
 
     if (!sourceIds.length) {
-      console.log(`[broker] No source events for ${reg.notify_event} — suppressing empty wake`);
+      log.info(
+        { notifyEvent: reg.notify_event },
+        "no source events — suppressing empty wake",
+      );
       continue;
     }
 
@@ -655,10 +679,10 @@ async function classifyBatch(events) {
         interest_id: match.interest_id,
       },
     });
-    console.log(`[broker] Wake: ${reg.notify_event} — ${match.reason}`);
+    log.info({ notifyEvent: reg.notify_event, reason: match.reason }, "wake");
     if (!reg.persistent) {
       interests.delete(match.interest_id);
-      console.log(`[broker] Auto-deregistered (one-shot): ${match.interest_id}`);
+      log.info({ interestId: match.interest_id }, "auto-deregistered (one-shot)");
     }
   }
 }
@@ -715,7 +739,10 @@ export function runWatchdogTick() {
             worker: null,
             detail: { reason, source_event_ids: [], interest_id: interestId },
           });
-          console.log(`[broker] Watchdog wake: ${interest.notify_event} — ${reason}`);
+          log.info(
+            { notifyEvent: interest.notify_event, reason },
+            "watchdog wake",
+          );
           woke = true;
         }
       }
@@ -724,7 +751,10 @@ export function runWatchdogTick() {
         for (const [interestId, interest] of interests) {
           if (interest.session_id && interest.session_id === sourceId) {
             interests.delete(interestId);
-            console.log(`[broker] Watchdog cleanup: removed ${interestId} (stale session ${sourceId})`);
+            log.info(
+              { interestId, sourceId },
+              "watchdog cleanup: removed stale session",
+            );
           }
         }
         lastHeartbeat.set(sourceId, { ts: state.ts, notified: true });
@@ -806,14 +836,17 @@ export function processEvent(event) {
         ...(m.ticket ? { ticket: m.ticket } : {}),
       },
     });
-    console.log(`[broker] Direct wake: ${reg.notify_event} — ${m.reason}`);
+    log.info(
+      { notifyEvent: reg.notify_event, reason: m.reason },
+      "direct wake",
+    );
     if (!reg.persistent) {
       interests.delete(m.interestId);
       if (reg.interest_type === "pr_lifecycle") {
         try { deleteFilterState(m.interestId); } catch { /* DB not opened */ }
       }
       saveInterests();
-      console.log(`[broker] Auto-deregistered (one-shot): ${m.interestId}`);
+      log.info({ interestId: m.interestId }, "auto-deregistered (one-shot)");
     }
   }
 
@@ -899,7 +932,7 @@ function loadExistingRegistrations() {
       }
     }
     if (interests.size) {
-      console.log(`[broker] Recovered ${interests.size} interest(s) from log`);
+      log.info({ count: interests.size }, "recovered interests from log");
     }
   } catch {
     // No log file yet — fine
@@ -920,7 +953,7 @@ function writePidFile() {
     mkdirSync(dirname(PID_FILE_PATH), { recursive: true });
     writeFileSync(PID_FILE_PATH, `${process.pid}\n`);
   } catch (err) {
-    console.error("[broker] Failed to write PID file:", err.message);
+    log.error({ err: err.message }, "failed to write PID file");
   }
 }
 
@@ -932,8 +965,8 @@ function removePidFile() {
 // --- Main ---
 function main() {
   if (!GROQ_API_KEY) {
-    console.warn(
-      "[broker] WARN: GROQ_API_KEY not set and groq.apiKey absent from ~/.config/catalyst/config.json — semantic filtering disabled"
+    log.warn(
+      "GROQ_API_KEY not set and groq.apiKey absent from ~/.config/catalyst/config.json — semantic filtering disabled",
     );
   }
 
@@ -950,9 +983,9 @@ function main() {
     const stat = fstatSync(fd);
     lastByteOffset = stat.size;
     closeSync(fd);
-    console.log(`[broker] Starting from byte ${lastByteOffset} of ${lastLogPath}`);
+    log.info({ byteOffset: lastByteOffset, logPath: lastLogPath }, "starting");
   } catch {
-    console.log(`[broker] Starting (no log file yet at ${lastLogPath})`);
+    log.info({ logPath: lastLogPath }, "starting (no log file yet)");
   }
 
   appendEvent({
@@ -970,8 +1003,13 @@ function main() {
 
   startTailing();
   const watchdogId = startWatchdog();
-  console.log(
-    `[broker] catalyst-broker daemon started (pid ${process.pid}, watchdog: ${WATCHDOG_INTERVAL_MS}ms, stale: ${HEARTBEAT_STALE_MS}ms)`
+  log.info(
+    {
+      pid: process.pid,
+      watchdogIntervalMs: WATCHDOG_INTERVAL_MS,
+      heartbeatStaleMs: HEARTBEAT_STALE_MS,
+    },
+    "catalyst-broker daemon started",
   );
 
   const shutdown = () => {
