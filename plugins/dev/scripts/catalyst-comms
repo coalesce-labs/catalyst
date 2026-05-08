@@ -33,8 +33,13 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
+# Canonical OTel-shaped event helpers (CTL-300).
+# shellcheck source=lib/canonical-event.sh
+source "${SCRIPT_DIR}/lib/canonical-event.sh"
+
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 COMMS_DIR="${CATALYST_COMMS_DIR:-$CATALYST_DIR/comms}"
+EVENTS_DIR="${CATALYST_DIR}/events"
 REGISTRY="$COMMS_DIR/channels.json"
 CHANNELS_DIR="$COMMS_DIR/channels"
 LOCK_FILE="$REGISTRY.lock"
@@ -247,33 +252,52 @@ cmd_send() {
     body_trunc="${body:0:120}"
     body_trunc="${body_trunc% *}…"
   fi
-  emit_global_event() {
-    local script="${CATALYST_STATE_SCRIPT:-}"
-    if [[ -z "$script" ]]; then
-      script="$SCRIPT_DIR/catalyst-state.sh"
+  # CTL-300: emit a canonical OTel-shaped envelope directly to the unified
+  # event log. Bypasses catalyst-state.sh to avoid an extra fork in the hot
+  # path. Best-effort — failures are silenced so a slow disk never fails send.
+  emit_canonical_comms_event() {
+    command -v jq >/dev/null 2>&1 || return 0
+    local trace_id span_id
+    trace_id="$(derive_trace_id "$orch" "")"
+    span_id="$(derive_span_id "$name" "")"
+    # Attention messages get WARN severity and event.action = "attention" so
+    # HUD/filter consumers can target them without descending into the payload.
+    local severity="INFO"
+    local action="posted"
+    local value=""
+    if [[ "$type" == "attention" ]]; then
+      severity="WARN"
+      action="attention"
+      value="attention"
     fi
-    [[ -x "$script" ]] || return 0
-    local envelope
-    envelope=$(jq -nc \
-      --arg ts "$(now_iso)" \
-      --arg event "comms.message.posted" \
-      --arg orch "$orch" \
-      --arg from "$name" \
+    local payload
+    payload=$(jq -nc \
       --arg ch "$channel" \
       --arg type "$type" \
       --arg id "$id" \
       --arg to "$to" \
       --arg body "$body_trunc" \
-      '{
-        ts: $ts,
-        event: $event,
-        orchestrator: (if $orch == "" then null else $orch end),
-        worker: $from,
-        detail: { channel: $ch, type: $type, msgId: $id, to: $to, body: $body }
-      }') || return 0
-    "$script" event "$envelope" >/dev/null 2>&1 || true
+      '{ channel: $ch, type: $type, msgId: $id, to: $to, body: $body }') || return 0
+    local extra_args=()
+    [[ -n "$orch" ]] && extra_args+=(--orch "$orch")
+    [[ -n "$name" ]] && extra_args+=(--worker "$name")
+    [[ -n "$value" ]] && extra_args+=(--value "$value")
+    local line
+    line=$(build_canonical_line \
+      --ts "$(now_iso)" \
+      --severity "$severity" \
+      --service catalyst.comms \
+      --event-name comms.message.posted \
+      --entity comms \
+      --action "$action" \
+      --label "$name" \
+      --trace-id "$trace_id" \
+      --span-id "$span_id" \
+      "${extra_args[@]}" \
+      --payload-json "$payload" 2>/dev/null) || return 0
+    canonical_jsonl_append "$EVENTS_DIR" "$line"
   }
-  emit_global_event || true
+  emit_canonical_comms_event || true
 
   echo "$id"
 }

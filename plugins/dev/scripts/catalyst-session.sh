@@ -59,6 +59,10 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
+# Canonical OTel-shaped event helpers (CTL-300).
+# shellcheck source=lib/canonical-event.sh
+source "${SCRIPT_DIR}/lib/canonical-event.sh"
+
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # ─── SQL helpers (kept in sync with catalyst-db.sh) ─────────────────────────
@@ -99,26 +103,91 @@ json_escape() {
   printf '%s' "$s"
 }
 
-# Append a JSONL event line for backward-compat consumers.
-# Swallow write errors so a missing events dir never fails the hot path.
-jsonl_append() {
-  mkdir -p "$EVENTS_DIR" 2>/dev/null || return 0
-  local month_file="${EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
-  echo "$1" >> "$month_file" 2>/dev/null || true
+# Lookup helper: read (workflow_id, ticket_key) for a session_id, used to
+# derive trace/span IDs for canonical event emission. Returns "workflow|ticket"
+# or "|" when the session row isn't yet visible.
+__session_workflow_ticket() {
+  local sid="$1"
+  db_exec "SELECT COALESCE(workflow_id,'') || '|' || COALESCE(ticket_key,'')
+           FROM sessions WHERE session_id = $(sql_quote "$sid") LIMIT 1;" 2>/dev/null \
+    || printf '|'
 }
 
-# Build a JSONL event line. Payload must already be a valid JSON fragment
-# (object, array, string, number, true/false/null) or empty → null.
-build_jsonl_line() {
-  local ts="$1" sid="$2" type="$3" payload="${4:-}"
-  [[ -z "$payload" ]] && payload="null"
-  printf '{"ts":"%s","session":"%s","event":"%s","detail":%s}' \
-    "$(json_escape "$ts")" "$(json_escape "$sid")" "$(json_escape "$type")" "$payload"
+# Map a legacy session event_type to canonical (event_name, entity, action,
+# severity). Echoes "name entity action severity" — caller splits on space.
+__session_canonical_for() {
+  case "$1" in
+    session-started) echo "session.started session started INFO" ;;
+    phase-changed)   echo "session.phase session phase INFO" ;;
+    phase-iteration) echo "session.iteration session iteration INFO" ;;
+    pr-opened)       echo "session.pr_opened pr opened INFO" ;;
+    session-ended)   echo "session.ended session ended INFO" ;;  # ERROR override applied at call site
+    heartbeat)       echo "session.heartbeat session heartbeat DEBUG" ;;
+    *)               echo "session.$1 session $1 INFO" ;;
+  esac
 }
 
-# Insert an event row into session_events. Caller supplies pre-built SQL
-# fragments when it wants to batch this with another UPDATE in one sqlite3
-# call (see cmd_phase, cmd_pr). This version is for the simple case.
+# Write a canonical JSONL event line for a session event. Looks up the
+# session row to derive trace/span IDs and additional attributes (vcs.pr.number
+# from session_prs, catalyst.phase from the payload).
+__session_emit_canonical() {
+  local sid="$1" legacy_type="$2" payload="${3:-null}" ts="$4"
+  local severity_override="${5:-}"
+
+  command -v jq >/dev/null 2>&1 || return 0
+
+  local mapping name entity action severity
+  mapping="$(__session_canonical_for "$legacy_type")"
+  read -r name entity action severity <<<"$mapping"
+  [[ -n "$severity_override" ]] && severity="$severity_override"
+
+  local row workflow ticket
+  row="$(__session_workflow_ticket "$sid")"
+  workflow="${row%%|*}"
+  ticket="${row##*|}"
+
+  local trace_id span_id
+  trace_id="$(derive_trace_id "$workflow" "$sid")"
+  span_id="$(derive_span_id "$ticket" "$sid")"
+
+  # Pull catalyst.phase out of the payload if present (phase-changed event).
+  local phase=""
+  if [[ "$legacy_type" == "phase-changed" && "$payload" != "null" ]]; then
+    phase="$(printf '%s' "$payload" | jq -r '.phase // ""' 2>/dev/null || true)"
+  fi
+
+  # Pull vcs.pr.number out for pr-opened.
+  local vcs_pr=""
+  local label="$sid"
+  if [[ "$legacy_type" == "pr-opened" && "$payload" != "null" ]]; then
+    vcs_pr="$(printf '%s' "$payload" | jq -r '.pr // ""' 2>/dev/null || true)"
+    [[ -n "$vcs_pr" ]] && label="PR #${vcs_pr}"
+  fi
+
+  local extra_args=()
+  [[ -n "$workflow" ]] && extra_args+=(--orch "$workflow")
+  [[ -n "$ticket" ]] && extra_args+=(--worker "$ticket")
+  [[ -n "$phase" ]] && extra_args+=(--phase "$phase")
+  [[ -n "$vcs_pr" ]] && extra_args+=(--vcs-pr "$vcs_pr")
+
+  local line
+  line="$(build_canonical_line \
+    --ts "$ts" \
+    --severity "$severity" \
+    --service catalyst.session \
+    --event-name "$name" \
+    --entity "$entity" \
+    --action "$action" \
+    --label "$label" \
+    --trace-id "$trace_id" \
+    --span-id "$span_id" \
+    --session "$sid" \
+    "${extra_args[@]}" \
+    --payload-json "$payload" 2>/dev/null)" || return 0
+  canonical_jsonl_append "$EVENTS_DIR" "$line"
+}
+
+# Insert an event row into session_events and append a canonical JSONL line.
 emit_event() {
   local sid="$1" type="$2" payload="${3:-}"
   local ts; ts="$(now_iso)"
@@ -129,7 +198,7 @@ emit_event() {
                    $(sql_value_or_null "$payload"),
                    $(sql_quote "$ts"));"
 
-  jsonl_append "$(build_jsonl_line "$ts" "$sid" "$type" "$payload")"
+  __session_emit_canonical "$sid" "$type" "${payload:-null}" "$ts"
 }
 
 # ─── Commands ───────────────────────────────────────────────────────────────
@@ -226,7 +295,7 @@ cmd_phase() {
            VALUES ($(sql_quote "$sid"), 'phase-changed',
                    $(sql_quote "$payload"), $(sql_quote "$ts"));"
 
-  jsonl_append "$(build_jsonl_line "$ts" "$sid" "phase-changed" "$payload")"
+  __session_emit_canonical "$sid" "phase-changed" "$payload" "$ts"
 }
 
 # Metric keys expose a stable CLI surface; internal column names live in METRIC_MAP.
@@ -416,7 +485,16 @@ cmd_end() {
   else
     payload=$(jq -nc --arg s "$status" '{status:$s}')
   fi
-  emit_event "$sid" "session-ended" "$payload"
+
+  # CTL-300: session-ended uses ERROR severity for failed status; emit_event
+  # writes INFO by default, so we override directly here.
+  local end_ts; end_ts="$(now_iso)"
+  db_exec "INSERT INTO session_events (session_id, event_type, payload, ts)
+           VALUES ($(sql_quote "$sid"), 'session-ended',
+                   $(sql_value_or_null "$payload"), $(sql_quote "$end_ts"));"
+  local sev="INFO"
+  [[ "$status" == "failed" ]] && sev="ERROR"
+  __session_emit_canonical "$sid" "session-ended" "$payload" "$end_ts" "$sev"
 
   # CTL-157: emit claude_code.session.outcome to OTLP.
   local emit_bin="${CATALYST_EMIT_OTEL_BIN:-$SCRIPT_DIR/emit-otel-event.sh}"
@@ -475,7 +553,7 @@ cmd_heartbeat() {
            WHERE session_id = $(sql_quote "$sid");"
 
   # JSONL-only event; no need to bloat session_events with per-minute pings.
-  jsonl_append "$(jq -nc --arg ts "$ts" --arg s "$sid" '{ts:$ts, session:$s, event:"heartbeat", detail:null}')"
+  __session_emit_canonical "$sid" "heartbeat" "null" "$ts" "DEBUG"
 }
 
 cmd_list() {

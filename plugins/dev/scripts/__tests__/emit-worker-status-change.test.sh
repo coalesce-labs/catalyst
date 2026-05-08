@@ -145,19 +145,19 @@ done
 "$EMITTER" flush --orch orch-b > /dev/null
 run "5 info emits + flush = 1 event in log" bash -c "[ \"\$(wc -l < '$EVENTS_FILE' | tr -d ' ')\" = '1' ]"
 run "coalesced event has 5 changes" bash -c "
-  jq -e '.detail.changes | length == 5' '$EVENTS_FILE' >/dev/null
+  jq -e '.body.payload.changes | length == 5' '$EVENTS_FILE' >/dev/null
 "
 run "coalesced event has topic worker-phase-advanced" bash -c "
-  jq -e '.event == \"worker-phase-advanced\"' '$EVENTS_FILE' >/dev/null
+  jq -e '.attributes.\"event.name\" == \"orchestrator.worker.phase_advanced\"' '$EVENTS_FILE' >/dev/null
 "
 run "coalesced event has worker:null" bash -c "
-  jq -e '.worker == null' '$EVENTS_FILE' >/dev/null
+  jq -e '(.attributes.\"catalyst.worker.ticket\" // null) == null' '$EVENTS_FILE' >/dev/null
 "
 run "coalesced event has orchestrator field" bash -c "
-  jq -e '.orchestrator == \"orch-b\"' '$EVENTS_FILE' >/dev/null
+  jq -e '.attributes.\"catalyst.orchestrator.id\" == \"orch-b\"' '$EVENTS_FILE' >/dev/null
 "
 run "coalesced changes carry per-worker ids" bash -c "
-  jq -e '[.detail.changes[].worker] == [\"CTL-100\",\"CTL-200\",\"CTL-300\",\"CTL-400\",\"CTL-500\"]' '$EVENTS_FILE' >/dev/null
+  jq -e '[.body.payload.changes[].worker] == [\"CTL-100\",\"CTL-200\",\"CTL-300\",\"CTL-400\",\"CTL-500\"]' '$EVENTS_FILE' >/dev/null
 "
 
 # ── 4. Stale queue auto-flushed on next emit ───────────────────────────────
@@ -167,10 +167,10 @@ sleep 2
 "$EMITTER" emit --orch orch-c --ticket CTL-200 --from researching --to planning --coalesce-window 1 > /dev/null
 run "stale queue flushed on next emit -> 1 event" bash -c "[ \"\$(wc -l < '$EVENTS_FILE' | tr -d ' ')\" = '1' ]"
 run "auto-flushed event has only 1 (stale) change" bash -c "
-  jq -e '.detail.changes | length == 1' '$EVENTS_FILE' >/dev/null
+  jq -e '.body.payload.changes | length == 1' '$EVENTS_FILE' >/dev/null
 "
 run "auto-flushed change is the FIRST one" bash -c "
-  jq -e '.detail.changes[0].worker == \"CTL-100\"' '$EVENTS_FILE' >/dev/null
+  jq -e '.body.payload.changes[0].worker == \"CTL-100\"' '$EVENTS_FILE' >/dev/null
 "
 
 # ── 5. Terminal during coalesce window flushes pending + emits terminal ────
@@ -182,53 +182,53 @@ run "terminal during window -> 2 events (coalesced + terminal)" bash -c "
   [ \"\$(wc -l < '$EVENTS_FILE' | tr -d ' ')\" = '2' ]
 "
 run "first event is coalesced phase-advanced with 2 changes" bash -c "
-  head -n 1 '$EVENTS_FILE' | jq -e '.event == \"worker-phase-advanced\" and (.detail.changes | length == 2)' >/dev/null
+  head -n 1 '$EVENTS_FILE' | jq -e '.attributes.\"event.name\" == \"orchestrator.worker.phase_advanced\" and (.body.payload.changes | length == 2)' >/dev/null
 "
 run "second event is worker-status-terminal" bash -c "
-  tail -n 1 '$EVENTS_FILE' | jq -e '.event == \"worker-status-terminal\"' >/dev/null
+  tail -n 1 '$EVENTS_FILE' | jq -e '.attributes.\"event.name\" == \"orchestrator.worker.status_terminal\"' >/dev/null
 "
 run "terminal event identifies worker CTL-300" bash -c "
-  tail -n 1 '$EVENTS_FILE' | jq -e '.worker == \"CTL-300\"' >/dev/null
+  tail -n 1 '$EVENTS_FILE' | jq -e '.attributes.\"catalyst.worker.ticket\" == \"CTL-300\"' >/dev/null
 "
 run "terminal event has detail.from and detail.to" bash -c "
-  tail -n 1 '$EVENTS_FILE' | jq -e '.detail.from == \"implementing\" and .detail.to == \"merging\"' >/dev/null
+  tail -n 1 '$EVENTS_FILE' | jq -e '.body.payload.from == \"implementing\" and .body.payload.to == \"merging\"' >/dev/null
 "
 
-# ── 6. PR-bearing terminal with signal file -> .detail.pr populated ────────
+# ── 6. PR-bearing terminal with signal file -> .body.payload.pr populated ────────
 reset_state
 SIGNAL="${SCRATCH}/signal-pr.json"
 build_signal "$SIGNAL" CTL-400 4242 "https://github.com/test/test/pull/4242"
 "$EMITTER" emit --orch orch-e --ticket CTL-400 --from shipping --to pr-created --signal-file "$SIGNAL" > /dev/null
 run "pr-created with signal -> 1 event" bash -c "[ \"\$(wc -l < '$EVENTS_FILE' | tr -d ' ')\" = '1' ]"
-run "pr-created event has .detail.pr.number" bash -c "
-  jq -e '.detail.pr.number == 4242' '$EVENTS_FILE' >/dev/null
+run "pr-created event has .body.payload.pr.number" bash -c "
+  jq -e '.body.payload.pr.number == 4242' '$EVENTS_FILE' >/dev/null
 "
-run "pr-created event has .detail.pr.url" bash -c "
-  jq -e '.detail.pr.url == \"https://github.com/test/test/pull/4242\"' '$EVENTS_FILE' >/dev/null
+run "pr-created event has .body.payload.pr.url" bash -c "
+  jq -e '.body.payload.pr.url == \"https://github.com/test/test/pull/4242\"' '$EVENTS_FILE' >/dev/null
 "
 
-# ── 7. PR-bearing terminal WITHOUT signal file -> .detail.pr omitted, no error
+# ── 7. PR-bearing terminal WITHOUT signal file -> .body.payload.pr omitted, no error
 reset_state
 "$EMITTER" emit --orch orch-f --ticket CTL-500 --from shipping --to merging > "${SCRATCH}/out" 2>&1
 RC=$?
 run "merging without signal returns 0" bash -c "[ '$RC' = '0' ]"
-run "merging without signal -> .detail.pr absent" bash -c "
+run "merging without signal -> .body.payload.pr absent" bash -c "
   jq -e '.detail | (.pr // null) == null' '$EVENTS_FILE' >/dev/null
 "
 
-# ── 8. Non-PR terminal (failed/stalled) -> .detail.pr omitted ──────────────
+# ── 8. Non-PR terminal (failed/stalled) -> .body.payload.pr omitted ──────────────
 reset_state
 SIGNAL="${SCRATCH}/signal-pr.json"
 build_signal "$SIGNAL" CTL-600 5050 "https://github.com/test/test/pull/5050"
 "$EMITTER" emit --orch orch-g --ticket CTL-600 --from implementing --to failed --signal-file "$SIGNAL" > /dev/null
 run "failed -> 1 event" bash -c "[ \"\$(wc -l < '$EVENTS_FILE' | tr -d ' ')\" = '1' ]"
-run "failed -> .detail.pr absent (even with signal carrying pr)" bash -c "
+run "failed -> .body.payload.pr absent (even with signal carrying pr)" bash -c "
   jq -e '.detail | (.pr // null) == null' '$EVENTS_FILE' >/dev/null
 "
 
 reset_state
 "$EMITTER" emit --orch orch-h --ticket CTL-700 --from validating --to stalled --signal-file "$SIGNAL" > /dev/null
-run "stalled -> .detail.pr absent" bash -c "
+run "stalled -> .body.payload.pr absent" bash -c "
   jq -e '.detail | (.pr // null) == null' '$EVENTS_FILE' >/dev/null
 "
 
@@ -246,7 +246,7 @@ reset_state
 "$EMITTER" flush --orch orch-j > /dev/null
 run "flush -> 1 event" bash -c "[ \"\$(wc -l < '$EVENTS_FILE' | tr -d ' ')\" = '1' ]"
 run "flush -> 2 changes in coalesced event" bash -c "
-  jq -e '.detail.changes | length == 2' '$EVENTS_FILE' >/dev/null
+  jq -e '.body.payload.changes | length == 2' '$EVENTS_FILE' >/dev/null
 "
 "$EMITTER" flush --orch orch-j > /dev/null
 run "second flush is no-op (queue cleared)" bash -c "[ \"\$(wc -l < '$EVENTS_FILE' | tr -d ' ')\" = '1' ]"
@@ -256,7 +256,7 @@ reset_state
 "$EMITTER" emit --orch orch-k --ticket CTL-1000 --from researching --to planning --coalesce-window 120 > /dev/null
 "$EMITTER" flush --orch orch-k > /dev/null
 run "coalesced event records windowSec from --coalesce-window" bash -c "
-  jq -e '.detail.windowSec == 120' '$EVENTS_FILE' >/dev/null
+  jq -e '.body.payload.windowSec == 120' '$EVENTS_FILE' >/dev/null
 "
 
 # ── 12. Different orchestrators have independent queues ────────────────────
@@ -278,8 +278,8 @@ reset_state
 SIGNAL="${SCRATCH}/signal-done.json"
 build_signal "$SIGNAL" CTL-1300 6060 "https://github.com/test/test/pull/6060"
 "$EMITTER" emit --orch orch-n --ticket CTL-1300 --from merging --to done --signal-file "$SIGNAL" > /dev/null
-run "done with signal -> .detail.pr populated" bash -c "
-  jq -e '.detail.pr.number == 6060 and .detail.pr.url == \"https://github.com/test/test/pull/6060\"' '$EVENTS_FILE' >/dev/null
+run "done with signal -> .body.payload.pr populated" bash -c "
+  jq -e '.body.payload.pr.number == 6060 and .body.payload.pr.url == \"https://github.com/test/test/pull/6060\"' '$EVENTS_FILE' >/dev/null
 "
 
 # ── 14. CATALYST_COALESCE_WINDOW_SEC env var honored ───────────────────────
@@ -287,7 +287,7 @@ reset_state
 CATALYST_COALESCE_WINDOW_SEC=99 "$EMITTER" emit --orch orch-o --ticket CTL-1400 --from researching --to planning > /dev/null
 "$EMITTER" flush --orch orch-o > /dev/null
 run "env var CATALYST_COALESCE_WINDOW_SEC respected" bash -c "
-  jq -e '.detail.windowSec == 99' '$EVENTS_FILE' >/dev/null
+  jq -e '.body.payload.windowSec == 99' '$EVENTS_FILE' >/dev/null
 "
 
 # ── 15. emit returns nonzero on missing required args ──────────────────────

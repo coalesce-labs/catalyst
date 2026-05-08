@@ -36,6 +36,10 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
+# Canonical OTel-shaped event helpers (CTL-300).
+# shellcheck source=lib/canonical-event.sh
+source "${SCRIPT_DIR}/lib/canonical-event.sh"
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 now_iso() {
@@ -121,13 +125,105 @@ state_write() {
   lock_release
 }
 
-# Append a single JSON line to the current month's event log.
-# No locking needed — POSIX atomic append for small writes.
+# Map a legacy orchestrator event_type to canonical (event_name, entity,
+# action, severity). Echoes "name entity action severity"; caller splits.
+__orch_canonical_for() {
+  case "$1" in
+    orchestrator-started)    echo "orchestrator.started orchestrator started INFO" ;;
+    orchestrator-failed)     echo "orchestrator.failed orchestrator failed ERROR" ;;
+    worker-dispatched)       echo "orchestrator.worker.dispatched worker dispatched INFO" ;;
+    worker-pr-created)       echo "orchestrator.worker.pr_created pr created INFO" ;;
+    worker-pr-merged)        echo "orchestrator.worker.pr_merged pr merged INFO" ;;
+    worker-done)             echo "orchestrator.worker.done worker done INFO" ;;
+    worker-failed)           echo "orchestrator.worker.failed worker failed ERROR" ;;
+    worker-launch-failed)    echo "orchestrator.worker.launch_failed worker launch_failed WARN" ;;
+    worker-revived)          echo "orchestrator.worker.revived worker revived WARN" ;;
+    worker-status-terminal)  echo "orchestrator.worker.status_terminal worker status_terminal INFO" ;;
+    worker-phase-advanced)   echo "orchestrator.worker.phase_advanced worker phase_advanced INFO" ;;
+    attention-raised)        echo "orchestrator.attention.raised attention raised WARN" ;;
+    attention-resolved)      echo "orchestrator.attention.resolved attention resolved INFO" ;;
+    archive)                 echo "orchestrator.archived orchestrator archived INFO" ;;
+    *)                       echo "orchestrator.$1 orchestrator $1 INFO" ;;
+  esac
+}
+
+# Translate a v1-shaped envelope `{ts, orchestrator, worker, event, detail}`
+# to a canonical OTel-shaped envelope and append. Idempotent: lines that
+# already have an `attributes` field are passed through unchanged.
+# Best-effort — write failures are silenced.
 event_append() {
-  local event_json="$1"
+  local input_json="$1"
   ensure_dirs
-  local month_file="${EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
-  echo "$event_json" >> "$month_file"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    local month_file="${EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
+    echo "$input_json" >> "$month_file"
+    return 0
+  fi
+
+  if echo "$input_json" | jq -e 'has("attributes")' >/dev/null 2>&1; then
+    canonical_jsonl_append "$EVENTS_DIR" "$input_json"
+    return 0
+  fi
+
+  local ts orch worker legacy_event detail
+  ts=$(echo "$input_json" | jq -r '.ts // ""')
+  orch=$(echo "$input_json" | jq -r '.orchestrator // ""')
+  worker=$(echo "$input_json" | jq -r '.worker // ""')
+  legacy_event=$(echo "$input_json" | jq -r '.event // ""')
+  detail=$(echo "$input_json" | jq -c '.detail // null')
+  [[ -z "$ts" ]] && ts="$(now_iso)"
+
+  local mapping name entity action severity
+  mapping=$(__orch_canonical_for "$legacy_event")
+  read -r name entity action severity <<<"$mapping"
+
+  local trace_id span_id
+  trace_id=$(derive_trace_id "$orch" "")
+  span_id=$(derive_span_id "$worker" "")
+
+  local label="${worker:-$orch}"
+  local extra_args=()
+  [[ -n "$orch" ]] && extra_args+=(--orch "$orch")
+  [[ -n "$worker" ]] && extra_args+=(--worker "$worker")
+
+  # vcs.pr.number is found at .pr (worker-pr-created/merged) or .pr.number
+  # (worker-status-terminal carries a {number,url} sub-object).
+  local pr_num
+  pr_num=$(echo "$detail" | jq -r '
+    if type == "object" then
+      if (.pr | type) == "number" then .pr
+      elif (.pr | type) == "object" and (.pr.number | type) == "number" then .pr.number
+      else ""
+      end
+    else ""
+    end' 2>/dev/null || true)
+  if [[ -n "$pr_num" && "$pr_num" != "null" ]]; then
+    extra_args+=(--vcs-pr "$pr_num")
+    label="PR #${pr_num}"
+  fi
+
+  # event.value for worker-status-terminal carries the new state.
+  if [[ "$legacy_event" == "worker-status-terminal" ]]; then
+    local val
+    val=$(echo "$detail" | jq -r 'if type=="object" and has("to") then .to else "" end' 2>/dev/null || true)
+    [[ -n "$val" ]] && extra_args+=(--value "$val")
+  fi
+
+  local line
+  line=$(build_canonical_line \
+    --ts "$ts" \
+    --severity "$severity" \
+    --service catalyst.orchestrator \
+    --event-name "$name" \
+    --entity "$entity" \
+    --action "$action" \
+    --label "$label" \
+    --trace-id "$trace_id" \
+    --span-id "$span_id" \
+    "${extra_args[@]}" \
+    --payload-json "$detail" 2>/dev/null) || return 0
+  canonical_jsonl_append "$EVENTS_DIR" "$line"
 }
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
