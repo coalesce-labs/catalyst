@@ -50,16 +50,23 @@ EOF
   cat > "${dir}/stubbin/gh" <<'EOF'
 #!/usr/bin/env bash
 # Scriptable gh stub for setup-webhooks tests.
-#   GH_STUB_DIR/list-response.json — body returned for `gh api repos/X/hooks` (GET)
-#   GH_STUB_DIR/post-response.json — body returned for `gh api -X POST repos/X/hooks`
-#   GH_STUB_DIR/list-exit         — exit code for GET (default 0)
-#   GH_STUB_DIR/post-exit         — exit code for POST (default 0)
-#   GH_STUB_DIR/calls.log         — append-only call log
+#   GH_STUB_DIR/list-response.json   — body returned for `gh api repos/X/hooks` (GET)
+#   GH_STUB_DIR/post-response.json   — body returned for `gh api -X POST repos/X/hooks`
+#   GH_STUB_DIR/delete-response.json — body returned for `gh api -X DELETE repos/X/hooks/ID`
+#   GH_STUB_DIR/list-exit            — exit code for GET (default 0)
+#   GH_STUB_DIR/post-exit            — exit code for POST (default 0)
+#   GH_STUB_DIR/delete-exit          — exit code for DELETE (default 0)
+#   GH_STUB_DIR/calls.log            — append-only call log
 if [[ -z "${GH_STUB_DIR:-}" ]]; then
   echo "FAIL: gh invoked but GH_STUB_DIR is unset (test setup error)" >&2
   exit 88
 fi
 echo "$*" >> "${GH_STUB_DIR}/calls.log"
+# `gh api -X DELETE repos/X/hooks/ID`
+if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+  cat "${GH_STUB_DIR}/delete-response.json" 2>/dev/null || echo '{}'
+  exit "$(cat "${GH_STUB_DIR}/delete-exit" 2>/dev/null || echo 0)"
+fi
 # `gh api -X POST repos/X/hooks ...`
 if [[ "$1" == "api" && "$2" == "-X" && "$3" == "POST" && "$4" == repos/*/hooks ]]; then
   cat "${GH_STUB_DIR}/post-response.json" 2>/dev/null || echo '{"id":1}'
@@ -661,6 +668,242 @@ test_template_has_monitor_block() {
   fi
 }
 
+# ─── Tests 26-33 — --uninstall flag (CTL-219) ─────────────────────────────
+#
+# `run_setup_uninstall` seeds home config with smeeChannel so no curl/openssl
+# needed, passes GH_STUB_DIR, and runs --uninstall --yes to skip confirmation.
+run_setup_uninstall() {
+  local env_dir="$1"; shift
+  ( cd "${env_dir}/project" && \
+    HOME="${env_dir}/home" \
+    XDG_CONFIG_HOME="${env_dir}/home/.config" \
+    PATH="${env_dir}/stubbin:${PATH}" \
+    GH_STUB_DIR="${env_dir}/gh_stub" \
+    bash "$SETUP" --uninstall "$@" )
+}
+
+# Seed home config with a smee channel so uninstall has something to read.
+seed_smee_channel() {
+  local env="$1" channel="${2:-https://smee.io/test-channel}"
+  mkdir -p "${env}/home/.config/catalyst"
+  cat > "${env}/home/.config/catalyst/config.json" <<EOF
+{"catalyst":{"monitor":{"github":{"smeeChannel":"${channel}"}}}}
+EOF
+}
+
+# Seed project config with webhookSecretEnv.
+seed_secret_env() {
+  local env="$1"
+  mkdir -p "${env}/project/.catalyst"
+  cat > "${env}/project/.catalyst/config.json" <<EOF
+{"catalyst":{"monitor":{"github":{"webhookSecretEnv":"CATALYST_WEBHOOK_SECRET"}}}}
+EOF
+}
+
+# ─── Test 26 — uninstall with no smee channel exits cleanly ────────────────
+test_uninstall_no_channel() {
+  local env; env=$(make_test_env t26)
+  if ! run_setup_uninstall "$env" --yes > "${SCRATCH}/t26.out" 2>&1; then
+    echo "expected exit 0 when nothing to uninstall" >&2
+    cat "${SCRATCH}/t26.out" >&2
+    return 1
+  fi
+  if ! grep -qi "nothing to uninstall" "${SCRATCH}/t26.out"; then
+    echo "expected output to mention 'nothing to uninstall'" >&2
+    cat "${SCRATCH}/t26.out" >&2
+    return 1
+  fi
+}
+
+# ─── Test 27 — --dry-run shows would-be deletion without calling DELETE ────
+test_uninstall_dry_run() {
+  local env; env=$(make_test_env t27)
+  seed_smee_channel "$env"
+  seed_watch_repos "$env" "acme/api"
+  cat > "${env}/gh_stub/list-response.json" <<'EOF'
+[{"id":42,"config":{"url":"https://smee.io/test-channel","content_type":"json"}}]
+EOF
+  if ! run_setup_uninstall "$env" --dry-run --yes > "${SCRATCH}/t27.out" 2>&1; then
+    echo "expected exit 0 for dry-run" >&2
+    cat "${SCRATCH}/t27.out" >&2
+    return 1
+  fi
+  if ! grep -q "dry-run" "${SCRATCH}/t27.out"; then
+    echo "expected dry-run mention in output" >&2
+    cat "${SCRATCH}/t27.out" >&2
+    return 1
+  fi
+  if grep -q "api -X DELETE" "${env}/gh_stub/calls.log" 2>/dev/null; then
+    echo "dry-run must not issue any DELETE calls" >&2
+    cat "${env}/gh_stub/calls.log" >&2
+    return 1
+  fi
+  # Config must remain untouched
+  local channel; channel=$(jq -r '.catalyst.monitor.github.smeeChannel // ""' \
+    "${env}/home/.config/catalyst/config.json")
+  if [[ -z "$channel" ]]; then
+    echo "dry-run must not remove smeeChannel from home config" >&2
+    return 1
+  fi
+}
+
+# ─── Test 28 — uninstall deletes hook and cleans up config ─────────────────
+test_uninstall_deletes_hook_and_config() {
+  local env; env=$(make_test_env t28)
+  seed_smee_channel "$env"
+  seed_secret "$env"
+  seed_secret_env "$env"
+  # watchRepos and webhookSecretEnv both in project config
+  cat > "${env}/project/.catalyst/config.json" <<'EOF'
+{"catalyst":{"monitor":{"github":{
+  "webhookSecretEnv":"CATALYST_WEBHOOK_SECRET",
+  "watchRepos":["acme/api"]
+}}}}
+EOF
+  cat > "${env}/gh_stub/list-response.json" <<'EOF'
+[{"id":42,"config":{"url":"https://smee.io/test-channel","content_type":"json"}}]
+EOF
+  if ! run_setup_uninstall "$env" --yes > "${SCRATCH}/t28.out" 2>&1; then
+    echo "expected exit 0" >&2
+    cat "${SCRATCH}/t28.out" >&2
+    return 1
+  fi
+  # DELETE must have been issued
+  if ! grep -q "api -X DELETE repos/acme/api/hooks/42" "${env}/gh_stub/calls.log" 2>/dev/null; then
+    echo "expected DELETE repos/acme/api/hooks/42 in calls.log" >&2
+    cat "${env}/gh_stub/calls.log" 2>/dev/null >&2
+    return 1
+  fi
+  # smeeChannel removed from home config
+  local channel; channel=$(jq -r '.catalyst.monitor.github.smeeChannel // ""' \
+    "${env}/home/.config/catalyst/config.json" 2>/dev/null || echo "MISSING_FILE")
+  if [[ -n "$channel" && "$channel" != "null" && "$channel" != "" ]]; then
+    echo "smeeChannel should be removed from home config, got: '$channel'" >&2
+    return 1
+  fi
+  # webhookSecretEnv removed from project config
+  local env_key; env_key=$(jq -r '.catalyst.monitor.github.webhookSecretEnv // ""' \
+    "${env}/project/.catalyst/config.json" 2>/dev/null || echo "")
+  if [[ -n "$env_key" ]]; then
+    echo "webhookSecretEnv should be removed from project config, got: '$env_key'" >&2
+    return 1
+  fi
+  # Secret file removed
+  if [[ -f "${env}/home/.config/catalyst/webhook-secret" ]]; then
+    echo "secret file should have been removed" >&2
+    return 1
+  fi
+}
+
+# ─── Test 29 — uninstall idempotent when hook not found ────────────────────
+test_uninstall_idempotent_no_hook() {
+  local env; env=$(make_test_env t29)
+  seed_smee_channel "$env"
+  seed_watch_repos "$env" "acme/api"
+  echo "[]" > "${env}/gh_stub/list-response.json"
+  if ! run_setup_uninstall "$env" --yes > "${SCRATCH}/t29.out" 2>&1; then
+    echo "expected exit 0 when no hook found (idempotent)" >&2
+    cat "${SCRATCH}/t29.out" >&2
+    return 1
+  fi
+  if ! grep -q "no webhook found" "${SCRATCH}/t29.out"; then
+    echo "expected 'no webhook found' message" >&2
+    cat "${SCRATCH}/t29.out" >&2
+    return 1
+  fi
+  if grep -q "api -X DELETE" "${env}/gh_stub/calls.log" 2>/dev/null; then
+    echo "expected no DELETE when hook does not exist" >&2
+    cat "${env}/gh_stub/calls.log" >&2
+    return 1
+  fi
+}
+
+# ─── Test 30 — --repo limits uninstall scope ───────────────────────────────
+test_uninstall_repo_filter() {
+  local env; env=$(make_test_env t30)
+  seed_smee_channel "$env"
+  # Two repos in watchRepos, but we only uninstall one
+  cat > "${env}/project/.catalyst/config.json" <<'EOF'
+{"catalyst":{"monitor":{"github":{"watchRepos":["acme/api","acme/web"]}}}}
+EOF
+  cat > "${env}/gh_stub/list-response.json" <<'EOF'
+[{"id":42,"config":{"url":"https://smee.io/test-channel","content_type":"json"}}]
+EOF
+  if ! run_setup_uninstall "$env" --repo acme/api --yes > "${SCRATCH}/t30.out" 2>&1; then
+    echo "expected exit 0" >&2
+    cat "${SCRATCH}/t30.out" >&2
+    return 1
+  fi
+  # Only one DELETE (for acme/api)
+  local delete_count; delete_count=$(grep -c "api -X DELETE" "${env}/gh_stub/calls.log" 2>/dev/null || echo 0)
+  if [[ "$delete_count" -ne 1 ]]; then
+    echo "expected exactly 1 DELETE, got $delete_count" >&2
+    cat "${env}/gh_stub/calls.log" 2>/dev/null >&2
+    return 1
+  fi
+  if ! grep -q "api -X DELETE repos/acme/api/hooks" "${env}/gh_stub/calls.log" 2>/dev/null; then
+    echo "expected DELETE for acme/api" >&2
+    cat "${env}/gh_stub/calls.log" 2>/dev/null >&2
+    return 1
+  fi
+}
+
+# ─── Test 31 — uninstall removes secret file ───────────────────────────────
+test_uninstall_removes_secret_file() {
+  local env; env=$(make_test_env t31)
+  seed_smee_channel "$env"
+  seed_secret "$env"
+  echo "[]" > "${env}/gh_stub/list-response.json"
+  if ! run_setup_uninstall "$env" --yes > "${SCRATCH}/t31.out" 2>&1; then
+    echo "expected exit 0" >&2
+    cat "${SCRATCH}/t31.out" >&2
+    return 1
+  fi
+  if [[ -f "${env}/home/.config/catalyst/webhook-secret" ]]; then
+    echo "secret file should have been removed" >&2
+    return 1
+  fi
+}
+
+# ─── Test 32 — --dry-run does not modify config keys ───────────────────────
+test_uninstall_dry_run_preserves_config() {
+  local env; env=$(make_test_env t32)
+  seed_smee_channel "$env"
+  seed_secret "$env"
+  seed_secret_env "$env"
+  echo "[]" > "${env}/gh_stub/list-response.json"
+  if ! run_setup_uninstall "$env" --dry-run --yes > "${SCRATCH}/t32.out" 2>&1; then
+    echo "expected exit 0" >&2
+    cat "${SCRATCH}/t32.out" >&2
+    return 1
+  fi
+  local channel; channel=$(jq -r '.catalyst.monitor.github.smeeChannel // ""' \
+    "${env}/home/.config/catalyst/config.json" 2>/dev/null || echo "")
+  if [[ -z "$channel" ]]; then
+    echo "dry-run must not remove smeeChannel" >&2
+    return 1
+  fi
+  if [[ ! -f "${env}/home/.config/catalyst/webhook-secret" ]]; then
+    echo "dry-run must not remove secret file" >&2
+    return 1
+  fi
+}
+
+# ─── Test 33 — --uninstall and --register-github-hooks are mutually exclusive
+test_uninstall_register_mutex() {
+  local env; env=$(make_test_env t33)
+  if run_setup_uninstall "$env" --register-github-hooks > "${SCRATCH}/t33.out" 2>&1; then
+    echo "expected non-zero exit for --uninstall + --register-github-hooks" >&2
+    cat "${SCRATCH}/t33.out" >&2
+    return 1
+  fi
+  if ! grep -qi "mutually exclusive" "${SCRATCH}/t33.out"; then
+    echo "expected 'mutually exclusive' error message" >&2
+    cat "${SCRATCH}/t33.out" >&2
+    return 1
+  fi
+}
+
 # ─── Run all ──────────────────────────────────────────────────────────────
 echo "Running setup-webhooks --add-repo tests…"
 run "single add bootstraps watchRepos" test_single_add
@@ -688,6 +931,17 @@ run "--register-github-hooks is idempotent" test_register_idempotent
 run "no gh calls in --add-repo only mode" test_add_repo_only_no_gh_calls
 run "config.example.json has monitor block" test_example_template_has_monitor_block
 run "config.template.json has monitor block" test_template_has_monitor_block
+
+echo
+echo "Running setup-webhooks --uninstall tests…"
+run "uninstall with no channel exits cleanly" test_uninstall_no_channel
+run "uninstall --dry-run shows deletion without calling DELETE" test_uninstall_dry_run
+run "uninstall deletes hook and cleans up config" test_uninstall_deletes_hook_and_config
+run "uninstall idempotent when hook not found" test_uninstall_idempotent_no_hook
+run "uninstall --repo limits scope to one repo" test_uninstall_repo_filter
+run "uninstall removes secret file" test_uninstall_removes_secret_file
+run "uninstall --dry-run preserves config keys" test_uninstall_dry_run_preserves_config
+run "--uninstall and --register-github-hooks are mutually exclusive" test_uninstall_register_mutex
 
 echo
 echo "Passed: $PASSES, Failed: $FAILURES"

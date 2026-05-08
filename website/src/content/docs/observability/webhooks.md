@@ -305,6 +305,171 @@ plugins/dev/scripts/catalyst-monitor.sh start             # idempotent — no-op
 The `status --json` exit code is `0` when running and `1` when stopped, so scripts can
 gate cheaply via `if catalyst-monitor.sh status --json &>/dev/null; then ...`.
 
+## Persistent setup (auto-start on login)
+
+The daemon starts on demand via `catalyst-monitor.sh start`, but it does not survive a
+reboot or login without explicit configuration. This section covers how to keep it alive
+automatically using the platform's service manager.
+
+### The secret problem
+
+You normally export the HMAC secret in your shell rc file:
+
+```bash
+export CATALYST_WEBHOOK_SECRET="$(cat ~/.config/catalyst/webhook-secret)"
+```
+
+This works for interactive shells, but **launchd and systemd do not source your shell rc**.
+They launch processes with a minimal, static environment — so the secret must reach the
+daemon another way.
+
+### macOS — launchd
+
+A wrapper script reads the secret from the file at startup, then execs the monitor.
+Template files live in `plugins/dev/scripts/orch-monitor/dist/`.
+
+**1. Copy the wrapper and plist templates:**
+
+```bash
+# Create a local copy of the wrapper (edit paths as needed)
+cp plugins/dev/scripts/orch-monitor/dist/catalyst-monitor-launchd.sh \
+  ~/.local/bin/catalyst-monitor-launchd.sh
+chmod +x ~/.local/bin/catalyst-monitor-launchd.sh
+
+# Copy the plist template
+cp plugins/dev/scripts/orch-monitor/dist/ai.coalesce.catalyst-monitor.plist \
+  ~/Library/LaunchAgents/ai.coalesce.catalyst-monitor.plist
+```
+
+**2. Edit the plist** — replace the two placeholder values:
+
+```bash
+# macOS sed in-place (no backup)
+WRAPPER="$HOME/.local/bin/catalyst-monitor-launchd.sh"
+sed -i '' \
+  "s|REPLACE_WITH_WRAPPER_PATH/catalyst-monitor-launchd.sh|${WRAPPER}|" \
+  ~/Library/LaunchAgents/ai.coalesce.catalyst-monitor.plist
+
+sed -i '' \
+  "s|REPLACE_WITH_HOME|${HOME}|g" \
+  ~/Library/LaunchAgents/ai.coalesce.catalyst-monitor.plist
+```
+
+**3. Edit the wrapper** — verify `SCRIPT_DIR` resolves to the directory containing
+`catalyst-monitor.sh` (defaults to the wrapper's own directory, so keep both files
+adjacent or adjust the path):
+
+```bash
+# The wrapper executes: ${SCRIPT_DIR}/../catalyst-monitor.sh start
+# If you moved it to ~/.local/bin, point SCRIPT_DIR at the actual scripts dir:
+MONITOR="$HOME/.claude/plugins/cache/catalyst/catalyst-dev/$(cat $HOME/.claude/plugins/cache/catalyst/catalyst-dev/version.txt 2>/dev/null || echo 'latest')/scripts"
+sed -i '' "s|SCRIPT_DIR=.*|SCRIPT_DIR=\"${MONITOR}\"|" \
+  ~/.local/bin/catalyst-monitor-launchd.sh
+```
+
+Or just hardcode the absolute path to `catalyst-monitor.sh` in the wrapper. The wrapper
+is simple enough to edit by hand.
+
+**4. Load the LaunchAgent:**
+
+```bash
+launchctl bootstrap gui/$(id -u) \
+  ~/Library/LaunchAgents/ai.coalesce.catalyst-monitor.plist
+```
+
+**5. Verify:**
+
+```bash
+launchctl list | grep catalyst-monitor   # should show the label
+tail -f ~/catalyst/monitor.log           # watch for "Server started on port 7400"
+plugins/dev/scripts/catalyst-monitor.sh status
+```
+
+**To stop and unload:**
+
+```bash
+launchctl bootout gui/$(id -u) \
+  ~/Library/LaunchAgents/ai.coalesce.catalyst-monitor.plist
+```
+
+**When you rotate the HMAC secret** (via `setup-webhooks.sh --force`), the wrapper
+automatically picks up the new value on next restart — no plist edit needed, since it
+reads the file at launch time, not at plist-install time.
+
+### Linux — systemd user unit
+
+**1. Create the env file** with the secret value:
+
+```bash
+mkdir -p ~/.config/catalyst
+# Write the secret value (not the export expression — systemd reads values literally)
+cat > ~/.config/catalyst/webhook.env <<EOF
+CATALYST_WEBHOOK_SECRET=$(cat ~/.config/catalyst/webhook-secret)
+CATALYST_DIR=$HOME/catalyst
+EOF
+chmod 600 ~/.config/catalyst/webhook.env
+```
+
+**2. Copy and edit the service unit:**
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp plugins/dev/scripts/orch-monitor/dist/catalyst-monitor.service \
+  ~/.config/systemd/user/catalyst-monitor.service
+
+# Replace the placeholder with the absolute path to catalyst-monitor.sh
+MONITOR=$(realpath plugins/dev/scripts/catalyst-monitor.sh)
+sed -i "s|REPLACE_WITH_MONITOR_PATH|${MONITOR}|" \
+  ~/.config/systemd/user/catalyst-monitor.service
+```
+
+**3. Enable and start:**
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now catalyst-monitor.service
+```
+
+**4. Verify:**
+
+```bash
+systemctl --user status catalyst-monitor.service
+journalctl --user -u catalyst-monitor.service -f
+```
+
+**When you rotate the HMAC secret**, update `~/.config/catalyst/webhook.env` and
+restart the service:
+
+```bash
+echo "CATALYST_WEBHOOK_SECRET=$(cat ~/.config/catalyst/webhook-secret)" \
+  >> ~/.config/catalyst/webhook.env  # or edit manually
+systemctl --user restart catalyst-monitor.service
+```
+
+## Uninstalling webhooks
+
+To remove all GitHub webhooks pointing at your smee channel and clean up local config:
+
+```bash
+# Interactive — prompts for confirmation
+plugins/dev/scripts/setup-webhooks.sh --uninstall
+
+# Non-interactive
+plugins/dev/scripts/setup-webhooks.sh --uninstall --yes
+
+# Preview without deleting
+plugins/dev/scripts/setup-webhooks.sh --uninstall --dry-run --yes
+
+# Remove from one repo only
+plugins/dev/scripts/setup-webhooks.sh --uninstall --repo owner/repo --yes
+```
+
+The script reads the smee channel URL from `~/.config/catalyst/config.json` and the repo
+list from `.catalyst/config.json`, then for each repo: queries the GitHub Hooks API for a
+matching webhook and deletes it. After hook removal it also removes the `smeeChannel` key
+from the home config, the `webhookSecretEnv` key from the project config, and the secret
+file at `~/.config/catalyst/webhook-secret`.
+
 ## Failure modes and recovery
 
 - **smee tunnel drops**: the daemon retries automatically. Up to 60 minutes of missed

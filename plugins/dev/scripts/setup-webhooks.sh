@@ -33,6 +33,10 @@ LINEAR_DEREGISTER=0
 LINEAR_ALL_PUBLIC_TEAMS=0
 LINEAR_WEBHOOK_URL=""
 REGISTER_GITHUB_HOOKS=0
+UNINSTALL=0
+DRY_RUN=0
+UNINSTALL_YES=0
+UNINSTALL_REPOS=()
 REPO_SHAPE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 ENV_VAR_SHAPE='^[A-Z_][A-Z0-9_]*$'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,6 +104,15 @@ Options:
                              default — without this flag the script only reports
                              registration status. Requires \`gh\` to be installed
                              and authenticated with admin access to each repo.
+  --uninstall                Remove GitHub webhooks from all watched repos (or
+                             the repos specified with --repo) and clean up local
+                             config keys and secret file. Interactive confirmation
+                             by default; use --yes to skip.
+  --dry-run                  With --uninstall: print what would be deleted without
+                             making any changes.
+  --repo <owner/repo>        With --uninstall: limit webhook removal to one repo.
+                             Repeatable. When omitted, all watchRepos are processed.
+  --yes                      With --uninstall: skip the confirmation prompt.
   -h|--help                  Show this message
 
 Environment:
@@ -141,6 +154,18 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --register-github-hooks) REGISTER_GITHUB_HOOKS=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    --yes) UNINSTALL_YES=1; shift ;;
+    --repo)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "ERROR: --repo requires an argument" >&2
+        usage
+        exit 1
+      fi
+      UNINSTALL_REPOS+=("$2")
+      shift 2
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -155,6 +180,14 @@ for repo in "${ADD_REPOS[@]}"; do
   fi
 done
 
+# Validate --repo arguments (used with --uninstall).
+for repo in "${UNINSTALL_REPOS[@]}"; do
+  if [[ ! "$repo" =~ $REPO_SHAPE ]]; then
+    echo "ERROR: --repo value '$repo' must match owner/repo (e.g. coalesce-labs/catalyst)" >&2
+    exit 1
+  fi
+done
+
 # Validate --linear-secret-env name shape (env-var conventions: uppercase,
 # alphanumeric, underscores, must not start with a digit).
 if [[ -n "$LINEAR_SECRET_ENV" ]]; then
@@ -162,6 +195,16 @@ if [[ -n "$LINEAR_SECRET_ENV" ]]; then
     echo "ERROR: --linear-secret-env value '$LINEAR_SECRET_ENV' must be a valid env-var name (uppercase letters, digits, underscores; cannot start with a digit)" >&2
     exit 1
   fi
+fi
+
+# Validate --uninstall flag combinations.
+if [[ $UNINSTALL -eq 1 && $REGISTER_GITHUB_HOOKS -eq 1 ]]; then
+  echo "ERROR: --uninstall and --register-github-hooks are mutually exclusive" >&2
+  exit 1
+fi
+if [[ $UNINSTALL -eq 1 && ${#ADD_REPOS[@]} -gt 0 ]]; then
+  echo "ERROR: use --repo with --uninstall, not --add-repo" >&2
+  exit 1
 fi
 
 # Validate Linear flag combinations (CTL-238).
@@ -348,6 +391,135 @@ verify_github_hook() {
   fi
   rm -f "$err_file"
 }
+
+# Delete the GitHub webhook on `repo` that delivers to `channel`.
+# With DRY_RUN=1, prints what would be deleted without acting.
+# Idempotent: if no matching hook exists, logs "nothing to remove" and returns 0.
+#
+# Arguments:
+#   $1 — owner/repo
+#   $2 — smee channel URL
+delete_github_hook() {
+  local repo="$1" channel="$2"
+  local hooks_json hook_id
+  if ! hooks_json=$(gh api "repos/${repo}/hooks" 2>&1); then
+    echo "  ⚠ ${repo}: could not list hooks (gh not authenticated, or no admin access)"
+    echo "    ${hooks_json}" | sed 's/^/      /'
+    return 0
+  fi
+  hook_id=$(jq -r --arg ch "$channel" \
+    '[.[] | select(.config.url == $ch)] | .[0].id // empty' <<<"$hooks_json" 2>/dev/null || true)
+  if [[ -z "$hook_id" ]]; then
+    echo "  • ${repo}: no webhook found for ${channel} (already removed or never registered)"
+    return 0
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo "  [dry-run] would delete ${repo} hook #${hook_id} (${channel})"
+    return 0
+  fi
+  local err_file; err_file=$(mktemp)
+  if gh api -X DELETE "repos/${repo}/hooks/${hook_id}" >/dev/null 2>"$err_file"; then
+    echo "  ✓ ${repo}: deleted hook #${hook_id}"
+  else
+    echo "  ✗ ${repo}: failed to delete hook #${hook_id}"
+    sed 's/^/      /' "$err_file" 2>/dev/null || true
+  fi
+  rm -f "$err_file"
+}
+
+# Remove GitHub webhooks and clean up local config. Reads the smee channel
+# from Layer 2 and watchRepos from Layer 1 to determine what to remove.
+run_uninstall() {
+  local target_repos=()
+
+  if [[ ${#UNINSTALL_REPOS[@]} -gt 0 ]]; then
+    target_repos=("${UNINSTALL_REPOS[@]}")
+  else
+    mapfile -t target_repos < <(jq -r '.catalyst.monitor.github.watchRepos[]?' \
+      "$PROJECT_CONFIG_PATH" 2>/dev/null || true)
+  fi
+
+  local channel
+  channel=$(jq -r '.catalyst.monitor.github.smeeChannel // ""' "$HOME_CONFIG_PATH" 2>/dev/null || true)
+
+  if [[ -z "$channel" ]]; then
+    echo "No smee channel configured in $HOME_CONFIG_PATH — nothing to uninstall."
+    exit 0
+  fi
+
+  echo "Uninstall plan:"
+  echo "  Channel: $channel"
+  if [[ ${#target_repos[@]} -gt 0 ]]; then
+    echo "  Repos (${#target_repos[@]}):"
+    printf '    • %s\n' "${target_repos[@]}"
+  else
+    echo "  Repos: none in watchRepos"
+  fi
+  [[ $DRY_RUN -eq 1 ]] && echo "  Mode: dry-run (no changes will be made)"
+  echo
+
+  if [[ $DRY_RUN -eq 0 && $UNINSTALL_YES -eq 0 ]]; then
+    read -r -p "Remove GitHub webhooks and local config? [y/N] " yn
+    case "$yn" in [Yy]*) ;; *) echo "Aborted."; exit 0 ;; esac
+  fi
+
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "⚠ Skipping GitHub webhook deletion — \`gh\` is not installed."
+  elif [[ ${#target_repos[@]} -gt 0 ]]; then
+    echo "Removing GitHub webhooks…"
+    for repo in "${target_repos[@]}"; do
+      delete_github_hook "$repo" "$channel"
+    done
+  else
+    echo "No repos in watchRepos — skipping GitHub webhook deletion."
+  fi
+
+  if [[ $DRY_RUN -eq 1 ]]; then
+    echo
+    echo "Dry-run complete. No changes made."
+    exit 0
+  fi
+
+  if [[ -f "$HOME_CONFIG_PATH" ]]; then
+    local tmp; tmp=$(mktemp)
+    jq '
+      del(.catalyst.monitor.github.smeeChannel)
+      | if (.catalyst.monitor.github // {}) == {} then del(.catalyst.monitor.github) else . end
+      | if (.catalyst.monitor // {}) == {} then del(.catalyst.monitor) else . end
+      | if (.catalyst // {}) == {} then del(.catalyst) else . end
+    ' "$HOME_CONFIG_PATH" > "$tmp"
+    mv "$tmp" "$HOME_CONFIG_PATH"
+    echo "Removed catalyst.monitor.github.smeeChannel from $HOME_CONFIG_PATH"
+  fi
+
+  if [[ -f "$PROJECT_CONFIG_PATH" ]]; then
+    local tmp; tmp=$(mktemp)
+    jq '
+      del(.catalyst.monitor.github.webhookSecretEnv)
+      | if (.catalyst.monitor.github // {}) == {} then del(.catalyst.monitor.github) else . end
+      | if (.catalyst.monitor // {}) == {} then del(.catalyst.monitor) else . end
+      | if (.catalyst // {}) == {} then del(.catalyst) else . end
+    ' "$PROJECT_CONFIG_PATH" > "$tmp"
+    mv "$tmp" "$PROJECT_CONFIG_PATH"
+    echo "Removed catalyst.monitor.github.webhookSecretEnv from $PROJECT_CONFIG_PATH"
+  fi
+
+  if [[ -f "$SECRET_PATH" ]]; then
+    rm -f "$SECRET_PATH"
+    echo "Removed secret file $SECRET_PATH"
+  fi
+
+  echo
+  echo "Uninstall complete."
+  echo "If any webhooks remain on GitHub, remove them at:"
+  echo "  https://github.com/<org>/<repo>/settings/hooks"
+}
+
+if [[ $UNINSTALL -eq 1 ]]; then
+  require_cmd jq
+  run_uninstall
+  exit 0
+fi
 
 if [[ $SKIP_GITHUB_SETUP -eq 1 ]]; then
   if [[ ${#ADD_REPOS[@]} -gt 0 ]]; then
