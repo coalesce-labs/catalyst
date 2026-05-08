@@ -1789,8 +1789,10 @@ describe("GET /api/status/webhook-tunnel", () => {
       join(eventsDir, `${month}.jsonl`),
       JSON.stringify({
         ts: now.toISOString(),
-        event: "github.pr.merged",
-        scope: { repo: "org/repo" },
+        attributes: {
+          "event.name": "github.pr.merged",
+          "vcs.repository.name": "org/repo",
+        },
         schemaVersion: 2,
       }) + "\n",
     );
