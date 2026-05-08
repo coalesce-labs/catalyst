@@ -2,7 +2,7 @@
 // Run: bun test plugins/dev/scripts/filter-daemon/index.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, unlinkSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, unlinkSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import {
@@ -20,7 +20,15 @@ import {
   saveInterests,
   loadPersistedInterests,
   readGroqApiKeyFromConfig,
+  tryDeterministicRoute,
 } from "./index.mjs";
+import {
+  openFilterStateDb,
+  closeFilterStateDb,
+  upsertFilterStateOpen,
+  setFilterStateMerged,
+  getFilterStateByInterest,
+} from "./filter-state.mjs";
 
 describe("interest table", () => {
   beforeEach(() => clearInterests());
@@ -641,5 +649,502 @@ describe("readGroqApiKeyFromConfig", () => {
     writeFileSync(configPath, "not-valid-json{{{");
     expect(readGroqApiKeyFromConfig(configPath)).toBe("");
     rmSync(configPath);
+  });
+});
+
+// CTL-284: deterministic event routing for pr_lifecycle interests.
+// These tests use a real per-test SQLite database for filter_state correlations,
+// matching the pattern in filter-state.test.mjs.
+
+describe("tryDeterministicRoute — pr_lifecycle", () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    clearInterests();
+    tmpDir = mkdtempSync(join(tmpdir(), "deterministic-route-test-"));
+    openFilterStateDb(join(tmpDir, "filter-state.db"));
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-A",
+      detail: {
+        interest_id: "i-A",
+        interest_type: "pr_lifecycle",
+        notify_event: "filter.wake.i-A",
+        pr_numbers: [445, 446],
+        repo: "o/r",
+        base_branches: [
+          { pr: 445, base: "main" },
+          { pr: 446, base: "develop" },
+        ],
+        persistent: true,
+      },
+    });
+  });
+
+  afterEach(() => {
+    closeFilterStateDb();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("check_suite.completed (failure) for matched PR → wake", () => {
+    const matches = tryDeterministicRoute(
+      {
+        id: "evt_1",
+        event: "github.check_suite.completed",
+        scope: { repo: "o/r" },
+        detail: { conclusion: "failure", status: "completed", prNumbers: [445] },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("i-A");
+    expect(matches[0].reason).toContain("CI failing on PR #445");
+    expect(matches[0].sourceEventId).toBe("evt_1");
+  });
+
+  test("check_suite.completed (success) for matched PR → wake", () => {
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_2",
+        event: "github.check_suite.completed",
+        scope: { repo: "o/r" },
+        detail: { conclusion: "success", status: "completed", prNumbers: [446] },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("All CI checks passing on PR #446");
+  });
+
+  test("check_suite.completed neutral/cancelled → no wake", () => {
+    const matches = tryDeterministicRoute(
+      {
+        id: "evt_2b",
+        event: "github.check_suite.completed",
+        scope: { repo: "o/r" },
+        detail: { conclusion: "cancelled", status: "completed", prNumbers: [445] },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  test("check_suite.completed for unrelated PR → no wake", () => {
+    const matches = tryDeterministicRoute(
+      {
+        id: "evt_3",
+        event: "github.check_suite.completed",
+        scope: { repo: "o/r" },
+        detail: { conclusion: "failure", status: "completed", prNumbers: [999] },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  test("pr_review.submitted (changes_requested) by human → wake without bot prefix", () => {
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_4",
+        event: "github.pr_review.submitted",
+        scope: { repo: "o/r", pr: 445 },
+        detail: {
+          state: "changes_requested",
+          reviewer: "alice",
+          body: "fix this",
+          author: { login: "alice", type: "User" },
+        },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("Changes requested by alice on PR #445");
+    expect(m.reason).toContain("blocked from merging");
+    expect(m.reason).not.toContain("(bot)");
+  });
+
+  test("pr_review.submitted (changes_requested) by bot → wake with (bot) prefix", () => {
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_5",
+        event: "github.pr_review.submitted",
+        scope: { repo: "o/r", pr: 446 },
+        detail: {
+          state: "changes_requested",
+          reviewer: "codex[bot]",
+          body: "fix this",
+          author: { login: "codex[bot]", type: "Bot" },
+        },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("Automated review comment from codex[bot]");
+    expect(m.reason).toContain("(bot)");
+  });
+
+  test("pr_review.submitted (approved) → wake with 'approved by'", () => {
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_6",
+        event: "github.pr_review.submitted",
+        scope: { repo: "o/r", pr: 445 },
+        detail: {
+          state: "approved",
+          reviewer: "alice",
+          body: "lgtm",
+          author: { login: "alice", type: "User" },
+        },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("PR #445 approved by alice");
+  });
+
+  test("pr_review_comment.created by bot → wake with bot prefix", () => {
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_7",
+        event: "github.pr_review_comment.created",
+        scope: { repo: "o/r", pr: 445 },
+        detail: {
+          commentId: 12345,
+          body: "consider X",
+          htmlUrl: "https://github.com/o/r/pull/445#discussion_r12345",
+          author: { login: "codex[bot]", type: "Bot" },
+        },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("Automated review comment from codex[bot]");
+    expect(m.reason).toContain("comment ID: 12345");
+    expect(m.reason).toContain("consider X");
+    expect(m.reason).toContain("must be marked resolved");
+  });
+
+  test("pr_review_thread.resolved → wake with thread ID", () => {
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_8",
+        event: "github.pr_review_thread.resolved",
+        scope: { repo: "o/r", pr: 445 },
+        detail: { threadId: 987 },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("Review thread 987 resolved on PR #445");
+  });
+
+  test("pr.merged → wake with merge SHA AND persists SHA to filter_state", () => {
+    upsertFilterStateOpen({ interestId: "i-A", prNumber: 445, repo: "o/r" });
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_9",
+        event: "github.pr.merged",
+        scope: { repo: "o/r", pr: 445 },
+        detail: {
+          action: "closed",
+          merged: true,
+          mergedAt: "2026-05-07T12:00:00Z",
+          mergeCommitSha: "deadbeef0001",
+          draft: false,
+          mergeable: true,
+        },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("PR #445 merged");
+    expect(m.reason).toContain("deadbeef0001");
+    expect(m.reason).toContain("waiting for deployment");
+    const row = getFilterStateByInterest("i-A");
+    expect(row.mergeCommitSha).toBe("deadbeef0001");
+    expect(row.status).toBe("merged");
+  });
+
+  test("pr.merged with null mergeCommitSha → wake with 'unknown'; no persistence", () => {
+    upsertFilterStateOpen({ interestId: "i-A", prNumber: 445, repo: "o/r" });
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_9b",
+        event: "github.pr.merged",
+        scope: { repo: "o/r", pr: 445 },
+        detail: {
+          action: "closed",
+          merged: true,
+          mergedAt: "2026-05-07T12:00:00Z",
+          mergeCommitSha: null,
+          draft: false,
+          mergeable: true,
+        },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("merge commit: unknown");
+    const row = getFilterStateByInterest("i-A");
+    expect(row.mergeCommitSha).toBeNull();
+  });
+
+  test("pr.closed (merged=false) → wake with 'closed without merging'", () => {
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_10",
+        event: "github.pr.closed",
+        scope: { repo: "o/r", pr: 445 },
+        detail: {
+          action: "closed",
+          merged: false,
+          mergedAt: null,
+          mergeCommitSha: null,
+          draft: false,
+          mergeable: null,
+        },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("PR #445 closed without merging");
+  });
+
+  test("pr.closed (merged=true) → no wake (it should have routed as pr.merged)", () => {
+    // The webhook handler maps closed+merged=true to "pr.merged", not "pr.closed".
+    // But defensive: if a weird event arrives, we shouldn't double-fire.
+    const matches = tryDeterministicRoute(
+      {
+        id: "evt_10b",
+        event: "github.pr.closed",
+        scope: { repo: "o/r", pr: 445 },
+        detail: {
+          action: "closed",
+          merged: true,
+          mergedAt: "2026-05-07T12:00:00Z",
+          mergeCommitSha: "abc",
+          draft: false,
+          mergeable: null,
+        },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  test("push to base branch of watched PR → BEHIND wake", () => {
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_11",
+        event: "github.push",
+        scope: { repo: "o/r", ref: "refs/heads/main", sha: "newhead" },
+        detail: { baseSha: "old", headSha: "newhead", commits: [] },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("Base branch main updated");
+    expect(m.reason).toContain("PR #445");
+    expect(m.reason).toContain("behind");
+  });
+
+  test("push to non-base branch → no wake", () => {
+    const matches = tryDeterministicRoute(
+      {
+        id: "evt_12",
+        event: "github.push",
+        scope: { repo: "o/r", ref: "refs/heads/feature-x", sha: "newhead" },
+        detail: { baseSha: "old", headSha: "newhead", commits: [] },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+});
+
+describe("tryDeterministicRoute — deployment correlation", () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    clearInterests();
+    tmpDir = mkdtempSync(join(tmpdir(), "deterministic-deploy-test-"));
+    openFilterStateDb(join(tmpDir, "filter-state.db"));
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-D",
+      detail: {
+        interest_id: "i-D",
+        interest_type: "pr_lifecycle",
+        notify_event: "filter.wake.i-D",
+        pr_numbers: [501],
+        repo: "o/r",
+        base_branches: [{ pr: 501, base: "main" }],
+        persistent: true,
+      },
+    });
+  });
+
+  afterEach(() => {
+    closeFilterStateDb();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("registration seeds filter_state row with status='open'", () => {
+    const row = getFilterStateByInterest("i-D");
+    expect(row).not.toBeNull();
+    expect(row.prNumber).toBe(501);
+    expect(row.status).toBe("open");
+  });
+
+  test("pr.merged → deployment.created → deployment_status.success: full chain", () => {
+    // pr.merged
+    tryDeterministicRoute(
+      {
+        id: "evt_m",
+        event: "github.pr.merged",
+        scope: { repo: "o/r", pr: 501 },
+        detail: {
+          action: "closed", merged: true, mergedAt: "2026-05-07T12:00:00Z",
+          mergeCommitSha: "shaProd", draft: false, mergeable: true,
+        },
+      },
+      getInterests(),
+    );
+    expect(getFilterStateByInterest("i-D").mergeCommitSha).toBe("shaProd");
+
+    // deployment.created matches by SHA
+    const [deployStart] = tryDeterministicRoute(
+      {
+        id: "evt_d",
+        event: "github.deployment.created",
+        scope: { repo: "o/r", environment: "production", sha: "shaProd", ref: "main" },
+        detail: { deploymentId: 7777, payloadUrl: null },
+      },
+      getInterests(),
+    );
+    expect(deployStart.reason).toContain("Deployment started");
+    expect(deployStart.reason).toContain("shaProd");
+    expect(getFilterStateByInterest("i-D").deploymentId).toBe(7777);
+    expect(getFilterStateByInterest("i-D").status).toBe("deploying");
+
+    // deployment_status.success matches by deploymentId
+    const [deployOk] = tryDeterministicRoute(
+      {
+        id: "evt_s",
+        event: "github.deployment_status.success",
+        scope: { repo: "o/r", environment: "production" },
+        detail: {
+          deploymentId: 7777, state: "success",
+          targetUrl: "https://...", environmentUrl: "https://app",
+        },
+      },
+      getInterests(),
+    );
+    expect(deployOk.reason).toContain("Deployment succeeded");
+    expect(getFilterStateByInterest("i-D").status).toBe("deployed");
+  });
+
+  test("deployment_status.failure → wake with 'Deployment failed' and status='failed'", () => {
+    upsertFilterStateOpen({ interestId: "i-D", prNumber: 501, repo: "o/r" });
+    setFilterStateMerged("i-D", "shaF");
+    tryDeterministicRoute(
+      {
+        id: "evt_d2",
+        event: "github.deployment.created",
+        scope: { repo: "o/r", environment: "production", sha: "shaF", ref: "main" },
+        detail: { deploymentId: 8888, payloadUrl: null },
+      },
+      getInterests(),
+    );
+    const [m] = tryDeterministicRoute(
+      {
+        id: "evt_s2",
+        event: "github.deployment_status.failure",
+        scope: { repo: "o/r", environment: "production" },
+        detail: {
+          deploymentId: 8888, state: "failure",
+          targetUrl: "https://err", environmentUrl: null,
+        },
+      },
+      getInterests(),
+    );
+    expect(m.reason).toContain("Deployment failed");
+    expect(m.reason).toContain("https://err");
+    expect(getFilterStateByInterest("i-D").status).toBe("failed");
+  });
+
+  test("deployment.created with unmatched SHA → no wake", () => {
+    const matches = tryDeterministicRoute(
+      {
+        id: "evt_d3",
+        event: "github.deployment.created",
+        scope: { repo: "o/r", environment: "production", sha: "unknown", ref: "main" },
+        detail: { deploymentId: 9, payloadUrl: null },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+});
+
+describe("tryDeterministicRoute — backward compat with prose interests", () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    clearInterests();
+    tmpDir = mkdtempSync(join(tmpdir(), "deterministic-bc-test-"));
+    openFilterStateDb(join(tmpDir, "filter-state.db"));
+  });
+
+  afterEach(() => {
+    closeFilterStateDb();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("prose-only registration → tryDeterministicRoute returns []", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-prose",
+      detail: {
+        interest_id: "i-prose",
+        notify_event: "filter.wake.i-prose",
+        prompt: "Wake me when the moon is full",
+        persistent: true,
+      },
+    });
+    const matches = tryDeterministicRoute(
+      {
+        id: "evt_p",
+        event: "github.pr.merged",
+        scope: { repo: "o/r", pr: 1 },
+        detail: { action: "closed", merged: true, mergeCommitSha: "x" },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  test("buildGroqPrompt excludes pr_lifecycle interests but includes prose interests", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-prose",
+      detail: {
+        interest_id: "i-prose",
+        notify_event: "filter.wake.i-prose",
+        prompt: "prose interest",
+        persistent: true,
+      },
+    });
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-pr",
+      detail: {
+        interest_id: "lifecycle-only",
+        interest_type: "pr_lifecycle",
+        notify_event: "filter.wake.lifecycle-only",
+        pr_numbers: [42],
+        repo: "o/r",
+        persistent: true,
+      },
+    });
+    const out = buildGroqPrompt([
+      { id: "evt_x", event: "github.something" },
+    ]);
+    expect(out).not.toBeNull();
+    expect(out.userPrompt).toContain("i-prose");
+    expect(out.userPrompt).toContain("prose interest");
+    // pr_lifecycle interests must NOT appear in the Groq prompt — they have no
+    // prompt text and are routed deterministically.
+    expect(out.userPrompt).not.toContain("lifecycle-only");
   });
 });

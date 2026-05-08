@@ -107,6 +107,7 @@ STATE_SCRIPT="/path/to/plugins/dev/scripts/catalyst-state.sh"
 | `detail.context` | object | Optional focus hints: `pr_numbers`, `tickets`, `branches`, `workers` |
 | `detail.interest_id` | string | Optional override for the routing table key; defaults to `orchestrator` |
 | `detail.session_id` | string | Optional session ID (`$CATALYST_SESSION_ID`). The daemon's watchdog uses this to clean up registrations whose session has gone stale (>3 min without heartbeat). Set this for any non-orchestrator agent. |
+| `detail.interest_type` | string | Optional discriminator for built-in deterministic routing. When set (e.g. `"pr_lifecycle"`), `prompt` is ignored and the daemon uses typed field comparison instead of Groq classification. See "Built-in interest types" below. |
 
 The daemon picks up `filter.register` from the live log within one poll cycle (~200ms).
 On daemon restart, it scans the last 1000 lines of the log to recover active registrations,
@@ -120,6 +121,79 @@ belt-and-suspenders coverage.
 - Use `persistent: false` (the default) for one-shot waits — "tell me when this specific PR merges"
   or "wake me when the next CI run completes". The interest is removed automatically after the first
   wake, so no explicit `filter.deregister` is needed.
+
+### Built-in interest types (CTL-284)
+
+Some interest categories are common enough that the daemon ships with deterministic
+routing for them — no Groq round-trip, no semantic prompt required. Set
+`detail.interest_type` to opt in.
+
+When `interest_type` is set, the daemon ignores `detail.prompt` for that interest and
+matches events using pure field comparison against the schema-v2 envelope. Unmatched
+events still fall through to Groq for any prose-prompt interests in the same table —
+so you can mix typed and prose interests freely.
+
+#### `pr_lifecycle`
+
+Built-in deterministic routing for the PR lifecycle: CI events, reviews, comments,
+thread resolution, merges, deployments, and base-branch pushes that would put a PR
+BEHIND. Replaces hand-written prose prompts for the common case.
+
+```jsonc
+{
+  "event": "filter.register",
+  "orchestrator": "$ORCH_NAME",
+  "detail": {
+    "interest_id": "filter.wake.$sid",
+    "interest_type": "pr_lifecycle",
+    "notify_event": "filter.wake.$sid",
+    "pr_numbers": [445, 446],
+    "repo": "coalesce-labs/catalyst",
+    "base_branches": [
+      { "pr": 445, "base": "main" },
+      { "pr": 446, "base": "main" }
+    ],
+    "persistent": true
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `interest_type` | `"pr_lifecycle"` | Discriminator. Required for deterministic routing. |
+| `pr_numbers` | `number[]` | PR numbers this interest cares about. Matched against `scope.pr` for PR/review events and `detail.prNumbers[]` for `check_suite`. |
+| `repo` | string | `org/repo` form. Stored in `filter_state` for traceability. |
+| `base_branches` | `Array<{ pr: number, base: string }>` | Per-PR base-branch map. Used to wake when `github.push` lands on a base branch (PR is now BEHIND). Optional — omit to skip BEHIND wakes. |
+
+**Routed event topics:**
+
+| Topic | Match condition | Wake reason |
+|---|---|---|
+| `github.check_suite.completed` | `detail.prNumbers ∋ pr_numbers ∧ detail.conclusion ∈ {success, failure}` | "All CI checks passing" / "CI failing on PR #N — check_suite conclusion: failure" |
+| `github.pr.merged` | `scope.pr ∈ pr_numbers` | "PR #N merged (merge commit: ...). Now waiting for deployment — do not close out until deployment succeeds." |
+| `github.pr.closed` (merged=false) | `scope.pr ∈ pr_numbers` | "PR #N closed without merging" |
+| `github.pr_review.submitted` (changes_requested) | `scope.pr ∈ pr_numbers` | "Changes requested by {reviewer} on PR #N. PR is blocked from merging until review comments are resolved." (replaced by "Automated review comment from {reviewer} (bot): Changes requested on PR #N. PR is blocked from merging until review comments are resolved." when `detail.author.type === "Bot"`) |
+| `github.pr_review.submitted` (approved) | `scope.pr ∈ pr_numbers` | "PR #N approved by {reviewer}" (with " (bot)" suffix appended when `detail.author.type === "Bot"`) |
+| `github.pr_review_comment.created` | `scope.pr ∈ pr_numbers` | "New review comment from ..." (with bot prefix when `author.type === "Bot"`) |
+| `github.pr_review_thread.resolved` | `scope.pr ∈ pr_numbers` | "Review thread {threadId} resolved on PR #N" |
+| `github.deployment.created` | `scope.sha == filter_state[interestId].merge_commit_sha` | "Deployment started for merge commit {sha} on environment {env}" |
+| `github.deployment_status.success` | `detail.deploymentId == filter_state[interestId].deployment_id` | "Deployment succeeded on {env}. Work is complete." |
+| `github.deployment_status.failure` / `.error` | same as `.success` | "Deployment failed on {env}. URL: {targetUrl}" |
+| `github.push` | `scope.ref == "refs/heads/{base}"` for some `base_branches[].base` | "Base branch {branch} updated — PR #N is now behind. Rebase may be needed." |
+
+**State persistence.** `pr_lifecycle` interests use a SQLite table at
+`~/catalyst/filter-state.db` (`bun:sqlite`, WAL mode) to track merge-commit-SHA →
+deployment_id correlations across daemon restarts. The row is seeded on registration,
+populated as the lifecycle progresses (`merge_commit_sha` on `pr.merged`, `deployment_id`
+on `deployment.created`), and removed on `filter.deregister` or
+`orchestrator-completed`/`orchestrator-failed`. The daemon never queries GitHub for SHA
+information — everything comes from event detail fields.
+
+**Mixing with prose interests.** A single agent (e.g. the orchestrator) may register
+two interests: a `pr_lifecycle` one for the typed PR-lifecycle events, and a prose one
+under a different `interest_id` for residual concerns like comms-attention or
+Linear-ticket status changes that aren't covered by the deterministic table. Both
+interests use the same `notify_event`, so the wait-for filter is unchanged.
 
 ### Per-agent-type registration patterns
 

@@ -31,6 +31,7 @@ describe("parseWebhookEvent", () => {
           number: 322,
           merged: true,
           merged_at: "2026-05-03T12:00:00Z",
+          merge_commit_sha: "deadbeef1234",
           draft: false,
           mergeable: true,
           head: { ref: "orch-foo-CTL-1" },
@@ -43,9 +44,21 @@ describe("parseWebhookEvent", () => {
       expect(got.action).toBe("closed");
       expect(got.merged).toBe(true);
       expect(got.mergedAt).toBe("2026-05-03T12:00:00Z");
+      expect(got.mergeCommitSha).toBe("deadbeef1234");
       expect(got.draft).toBe(false);
       expect(got.mergeable).toBe(true);
       expect(got.headRef).toBe("orch-foo-CTL-1");
+    });
+
+    it("returns null mergeCommitSha when payload omits it", () => {
+      const got = parseWebhookEvent("pull_request", {
+        ...REPO,
+        action: "closed",
+        pull_request: { number: 1, merged: false },
+      });
+      expect(got.kind).toBe("pull_request");
+      if (got.kind !== "pull_request") return;
+      expect(got.mergeCommitSha).toBeNull();
     });
 
     it("falls back to empty headRef when payload omits head", () => {

@@ -17,6 +17,16 @@ import {
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  openFilterStateDb,
+  closeFilterStateDb,
+  upsertFilterStateOpen,
+  setFilterStateMerged,
+  setFilterStateDeploying,
+  setFilterStateDeployed,
+  setFilterStateFailed,
+  deleteFilterState,
+} from "./filter-state.mjs";
 
 // --- Config ---
 const CATALYST_DIR = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
@@ -110,6 +120,7 @@ export function handleRegister(event) {
   const d = event.detail ?? {};
   const id = d.interest_id ?? event.orchestrator ?? d.notify_event;
   if (!id) return;
+  const isPrLifecycle = d.interest_type === "pr_lifecycle";
   interests.set(id, {
     notify_event: d.notify_event ?? `filter.wake.${id}`,
     prompt: d.prompt ?? "",
@@ -117,16 +128,52 @@ export function handleRegister(event) {
     orchestrator: event.orchestrator ?? null,
     session_id: d.session_id ?? null,
     persistent: d.persistent === true,
+    // CTL-284: built-in pr_lifecycle interest type
+    interest_type: d.interest_type ?? null,
+    pr_numbers: isPrLifecycle ? (Array.isArray(d.pr_numbers) ? d.pr_numbers : []) : null,
+    repo: isPrLifecycle ? (d.repo ?? null) : null,
+    base_branches: isPrLifecycle ? (Array.isArray(d.base_branches) ? d.base_branches : []) : null,
   });
+
+  if (isPrLifecycle) {
+    // Seed filter_state rows so deployment correlations can be persisted later.
+    // Skip silently if the DB hasn't been opened yet (e.g. in unit tests that
+    // don't call openFilterStateDb).
+    try {
+      for (const prNumber of (d.pr_numbers ?? [])) {
+        upsertFilterStateOpen({
+          interestId: id,
+          prNumber,
+          repo: d.repo ?? "",
+        });
+      }
+    } catch {
+      // filter_state DB not opened — okay for tests that don't exercise the chain
+    }
+  }
+
   const sessionTag = d.session_id ? `, session: ${d.session_id}` : "";
-  console.log(`[filter] Registered: ${id} — "${d.prompt}" (persistent: ${d.persistent === true}${sessionTag})`);
+  if (isPrLifecycle) {
+    const prs = (d.pr_numbers ?? []).join(",");
+    console.log(`[filter] Registered: ${id} [pr_lifecycle pr=${prs}] (persistent: ${d.persistent === true}${sessionTag})`);
+  } else {
+    console.log(`[filter] Registered: ${id} — "${d.prompt}" (persistent: ${d.persistent === true}${sessionTag})`);
+  }
   saveInterests();
 }
 
 export function handleDeregister(event) {
   const id = (event.detail ?? {}).interest_id ?? event.orchestrator;
   if (!id) return;
+  const reg = interests.get(id);
   if (interests.delete(id)) {
+    if (reg && reg.interest_type === "pr_lifecycle") {
+      try {
+        deleteFilterState(id);
+      } catch {
+        // filter_state DB not opened — okay for tests
+      }
+    }
     console.log(`[filter] Deregistered: ${id}`);
     saveInterests();
   }
@@ -138,12 +185,147 @@ export function handleOrchestratorTerminated(event) {
   let changed = false;
   for (const [id, reg] of interests) {
     if (reg.orchestrator === orchId) {
+      if (reg.interest_type === "pr_lifecycle") {
+        try { deleteFilterState(id); } catch { /* DB not opened */ }
+      }
       interests.delete(id);
       console.log(`[filter] Auto-deregistered: ${id} (orchestrator ${orchId} terminated)`);
       changed = true;
     }
   }
   if (changed) saveInterests();
+}
+
+// --- Deterministic event routing (CTL-284) ---
+//
+// `pr_lifecycle` interests are matched against typed schema-v2 events using
+// pure field comparison — no Groq round-trip. Returns an array of matches the
+// caller turns into `filter.wake.*` events. Side effect: persists merge SHA
+// and deployment_id into the filter_state SQLite store so PR ↔ deployment
+// correlations survive daemon restarts.
+
+function botPrefix(author, kind) {
+  const isBot = author?.type === "Bot";
+  if (kind === "review") {
+    return isBot ? "Automated review comment from " : "Changes requested by ";
+  }
+  if (kind === "comment") {
+    return isBot ? "Automated review comment from " : "New review comment from ";
+  }
+  return "";
+}
+
+export function tryDeterministicRoute(event, interestsMap) {
+  const matches = [];
+  const name = event.event ?? "";
+  const detail = event.detail ?? {};
+  const scope = event.scope ?? {};
+  const eventId = event.id ?? null;
+
+  // Deployment events have global state-machine effects: the SQLite mutators
+  // look up by SHA / deploymentId, not by interestId, so we run them ONCE per
+  // event (not once per pr_lifecycle interest) and compare the returned
+  // interestId inside the loop.
+  let deployMatchedInterest = null;
+  if (name === "github.deployment.created") {
+    try { deployMatchedInterest = setFilterStateDeploying(scope.sha, detail.deploymentId, scope.environment); } catch { /* DB not opened */ }
+  } else if (name === "github.deployment_status.success") {
+    try { deployMatchedInterest = setFilterStateDeployed(detail.deploymentId); } catch { /* DB not opened */ }
+  } else if (name === "github.deployment_status.failure" || name === "github.deployment_status.error") {
+    try { deployMatchedInterest = setFilterStateFailed(detail.deploymentId); } catch { /* DB not opened */ }
+  }
+
+  for (const [interestId, reg] of interestsMap) {
+    if (reg.interest_type !== "pr_lifecycle") continue;
+
+    let reason = null;
+    const prList = reg.pr_numbers ?? [];
+
+    if (name === "github.check_suite.completed") {
+      const eventPrs = Array.isArray(detail.prNumbers) ? detail.prNumbers : [];
+      const matchedPr = eventPrs.find((n) => prList.includes(n));
+      if (matchedPr !== undefined) {
+        if (detail.conclusion === "failure") {
+          reason = `CI failing on PR #${matchedPr} — check_suite conclusion: failure`;
+        } else if (detail.conclusion === "success") {
+          reason = `All CI checks passing on PR #${matchedPr}`;
+        }
+      }
+    } else if (name === "github.pr.merged") {
+      if (prList.includes(scope.pr)) {
+        const sha = detail.mergeCommitSha ?? "unknown";
+        reason = `PR #${scope.pr} merged (merge commit: ${sha}). Now waiting for deployment — do not close out until deployment succeeds.`;
+        if (detail.mergeCommitSha) {
+          try { setFilterStateMerged(interestId, detail.mergeCommitSha); } catch { /* DB not opened */ }
+        }
+      }
+    } else if (name === "github.pr.closed") {
+      // Defensive: webhook handler routes closed+merged=true to pr.merged, so a
+      // pr.closed event here should always have merged=false.
+      if (prList.includes(scope.pr) && detail.merged === false) {
+        reason = `PR #${scope.pr} closed without merging`;
+      }
+    } else if (name === "github.pr_review.submitted") {
+      if (prList.includes(scope.pr)) {
+        const reviewer = detail.reviewer ?? "unknown";
+        const isBot = detail.author?.type === "Bot";
+        if (detail.state === "changes_requested") {
+          if (isBot) {
+            reason = `Automated review comment from ${reviewer} (bot): Changes requested on PR #${scope.pr}. PR is blocked from merging until review comments are resolved.`;
+          } else {
+            reason = `Changes requested by ${reviewer} on PR #${scope.pr}. PR is blocked from merging until review comments are resolved.`;
+          }
+        } else if (detail.state === "approved") {
+          const tag = isBot ? " (bot)" : "";
+          reason = `PR #${scope.pr} approved by ${reviewer}${tag}`;
+        }
+      }
+    } else if (name === "github.pr_review_comment.created") {
+      if (prList.includes(scope.pr)) {
+        const author = detail.author?.login ?? "unknown";
+        const isBot = detail.author?.type === "Bot";
+        const prefix = botPrefix(detail.author, "comment");
+        const tag = isBot ? " (bot)" : "";
+        reason = `${prefix}${author}${tag} (comment ID: ${detail.commentId}): "${detail.body}". Comment must be marked resolved before merging. URL: ${detail.htmlUrl}`;
+      }
+    } else if (name === "github.pr_review_thread.resolved") {
+      if (prList.includes(scope.pr)) {
+        reason = `Review thread ${detail.threadId} resolved on PR #${scope.pr}`;
+      }
+    } else if (name === "github.deployment.created") {
+      // SHA→interestId match was computed once before the loop.
+      if (deployMatchedInterest && deployMatchedInterest.interestId === interestId) {
+        reason = `Deployment started for merge commit ${scope.sha} on environment ${scope.environment}`;
+      }
+    } else if (name === "github.deployment_status.success") {
+      if (deployMatchedInterest && deployMatchedInterest.interestId === interestId) {
+        reason = `Deployment succeeded on ${scope.environment}. Work is complete.`;
+      }
+    } else if (
+      name === "github.deployment_status.failure" ||
+      name === "github.deployment_status.error"
+    ) {
+      if (deployMatchedInterest && deployMatchedInterest.interestId === interestId) {
+        const url = detail.targetUrl ?? "(no target URL)";
+        reason = `Deployment failed on ${scope.environment}. URL: ${url}`;
+      }
+    } else if (name === "github.push") {
+      const ref = scope.ref ?? "";
+      const branch = ref.startsWith("refs/heads/")
+        ? ref.slice("refs/heads/".length)
+        : ref;
+      const matchedBase = (reg.base_branches ?? []).find((b) => b.base === branch);
+      if (matchedBase) {
+        reason = `Base branch ${branch} updated — PR #${matchedBase.pr} is now behind. Rebase may be needed.`;
+      }
+    }
+
+    if (reason) {
+      matches.push({ interestId, reason, sourceEventId: eventId });
+    }
+  }
+
+  return matches;
 }
 
 // --- Event classification ---
@@ -160,7 +342,14 @@ export function shouldSkipEvent(event) {
 export function buildGroqPrompt(events) {
   if (!interests.size) return null;
 
-  const interestLines = [...interests.entries()]
+  // CTL-284: pr_lifecycle interests are routed deterministically — they have no prompt
+  // and would only add noise (or empty entries) to the Groq classification prompt.
+  const proseInterests = [...interests.entries()].filter(
+    ([, reg]) => reg.interest_type !== "pr_lifecycle",
+  );
+  if (proseInterests.length === 0) return null;
+
+  const interestLines = proseInterests
     .map(([id, reg]) => {
       const ctx = reg.context ? ` (context: ${JSON.stringify(reg.context)})` : "";
       return `- ${id}: "${reg.prompt}"${ctx}`;
@@ -373,6 +562,39 @@ export function processEvent(event) {
   }
 
   if (!interests.size) return;
+
+  // CTL-284: deterministic short-circuit for pr_lifecycle interests.
+  // Matched events fire wakes immediately without batching to Groq.
+  const directMatches = tryDeterministicRoute(event, interests);
+  for (const m of directMatches) {
+    const reg = interests.get(m.interestId);
+    if (!reg) continue;
+    appendEvent({
+      event: reg.notify_event,
+      orchestrator: reg.orchestrator ?? m.interestId,
+      worker: null,
+      detail: {
+        reason: m.reason,
+        source_event_ids: m.sourceEventId ? [m.sourceEventId] : [],
+        interest_id: m.interestId,
+      },
+    });
+    console.log(`[filter] Direct wake: ${reg.notify_event} — ${m.reason}`);
+    if (!reg.persistent) {
+      interests.delete(m.interestId);
+      if (reg.interest_type === "pr_lifecycle") {
+        try { deleteFilterState(m.interestId); } catch { /* DB not opened */ }
+      }
+      saveInterests();
+      console.log(`[filter] Auto-deregistered (one-shot): ${m.interestId}`);
+    }
+  }
+
+  // If a deterministic match fired, don't re-route through Groq — pr_lifecycle
+  // interests are excluded from buildGroqPrompt anyway, but skipping the queue
+  // also avoids pointless batching for events that have already been handled.
+  if (directMatches.length > 0) return;
+
   queueEvent(event);
 }
 
@@ -510,6 +732,9 @@ function main() {
   loadPersistedInterests();
   loadExistingRegistrations();
 
+  // CTL-284: open the persistent filter_state DB for SHA → deployment correlation
+  openFilterStateDb();
+
   try {
     const fd = openSync(lastLogPath, "r");
     const stat = fstatSync(fd);
@@ -546,6 +771,7 @@ function main() {
     clearInterval(watchdogId);
     clearTimeout(debounceTimer);
     clearTimeout(hardCapTimer);
+    closeFilterStateDb();
     removePidFile();
     process.exit(0);
   };

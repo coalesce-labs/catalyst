@@ -152,6 +152,7 @@ export function buildEventLogEnvelope(
           action: event.action,
           merged: event.merged,
           mergedAt: event.mergedAt,
+          mergeCommitSha: event.mergeCommitSha,
           draft: event.draft,
           mergeable: event.mergeable,
         },

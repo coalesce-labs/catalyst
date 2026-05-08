@@ -574,6 +574,7 @@ describe("buildEventLogEnvelope", () => {
         action: "closed",
         merged: true,
         mergedAt: "2026-05-03T12:00:00Z",
+        mergeCommitSha: "abc123def456",
         draft: false,
         mergeable: true,
         headRef: "",
@@ -584,6 +585,28 @@ describe("buildEventLogEnvelope", () => {
     expect(env!.event).toBe("github.pr.merged");
     expect(env!.scope).toEqual({ repo: "o/r", pr: 1 });
     expect(env!.id).toBe("evt_del-1");
+    // CTL-284: mergeCommitSha is forwarded into the envelope detail so the
+    // filter daemon can correlate the merge with subsequent deployment events.
+    expect(env!.detail.mergeCommitSha).toBe("abc123def456");
+  });
+
+  it("forwards mergeCommitSha=null when GitHub hasn't finalized the merge commit", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "pull_request",
+        repo: "o/r",
+        number: 2,
+        action: "closed",
+        merged: true,
+        mergedAt: "2026-05-03T12:00:00Z",
+        mergeCommitSha: null,
+        draft: false,
+        mergeable: true,
+        headRef: "",
+      },
+      "del-1b",
+    );
+    expect(env!.detail.mergeCommitSha).toBeNull();
   });
 
   it("maps pull_request.closed (merged=false) → github.pr.closed", () => {
@@ -595,6 +618,7 @@ describe("buildEventLogEnvelope", () => {
         action: "closed",
         merged: false,
         mergedAt: null,
+        mergeCommitSha: null,
         draft: false,
         mergeable: null,
         headRef: "",
@@ -617,6 +641,7 @@ describe("buildEventLogEnvelope", () => {
         action: "labeled",
         merged: true,
         mergedAt: "2026-05-04T06:42:52Z",
+        mergeCommitSha: null,
         draft: false,
         mergeable: null,
         headRef: "",
@@ -635,6 +660,7 @@ describe("buildEventLogEnvelope", () => {
         action: "unlabeled",
         merged: true,
         mergedAt: "2026-05-04T06:42:52Z",
+        mergeCommitSha: null,
         draft: false,
         mergeable: null,
         headRef: "",
@@ -653,6 +679,7 @@ describe("buildEventLogEnvelope", () => {
         action: "synchronize",
         merged: false,
         mergedAt: null,
+        mergeCommitSha: null,
         draft: false,
         mergeable: null,
         headRef: "",
@@ -817,6 +844,7 @@ describe("attributionInputFor", () => {
       action: "opened",
       merged: false,
       mergedAt: null,
+      mergeCommitSha: null,
       draft: false,
       mergeable: null,
       headRef: "orch-foo-CTL-1",
