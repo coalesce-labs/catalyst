@@ -104,12 +104,13 @@ function migrateLegacyInterestsFile() {
   try {
     if (existsSync(LEGACY_INTERESTS_FILE) && !existsSync(INTERESTS_FILE)) {
       renameSync(LEGACY_INTERESTS_FILE, INTERESTS_FILE);
-      console.log(
-        `[broker] Migrated ${LEGACY_INTERESTS_FILE} → ${INTERESTS_FILE}`
+      log.info(
+        { from: LEGACY_INTERESTS_FILE, to: INTERESTS_FILE },
+        "migrated legacy interests file"
       );
     }
   } catch (err) {
-    console.error("[broker] Failed to migrate legacy interests file:", err.message);
+    log.error({ err: err.message }, "failed to migrate legacy interests file");
   }
 }
 
