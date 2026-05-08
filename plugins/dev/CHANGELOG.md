@@ -1,9 +1,18 @@
 # Changelog
 
-## [8.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.2.0...catalyst-dev-v8.3.0) (2026-05-08)
+## [8.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.2.0...catalyst-dev-v8.3.0)
+
+May 08, 2026
+
+<!-- ai-enhanced -->
+
+### AI Activity Brief and Broker Evolution
+
+The Catalyst plugin ecosystem now includes an AI-powered Activity Brief panel that generates executive summaries of the last 30m/1h/6h of development activity, plus a new `/god` skill for cross-project omniscient status monitoring. The core event filtering system has evolved into `catalyst-broker` with structured agent identity, automatic PR correlation, and deterministic routing for Linear ticket events. Run `catalyst-monitor.sh forward-start` to enable the new OTLP/PostHog/Cloudflare Analytics Engine telemetry forwarder that ships canonical events to external observability platforms.
 
 
-### Features
+
+### PRs
 
 * **dev:** Activity Brief panel — AI summary of recent event activity (CTL-282) ([#470](https://github.com/coalesce-labs/catalyst/issues/470)) ([e76bed7](https://github.com/coalesce-labs/catalyst/commit/e76bed7e11099c37ad99b2476bb44c7f5bbe1ee9))
 * **dev:** add /god skill — cross-project omniscient status view (CTL-193) ([#466](https://github.com/coalesce-labs/catalyst/issues/466)) ([0daed35](https://github.com/coalesce-labs/catalyst/commit/0daed35e90aaa1ef63f64bea1b20e3b5bdf07ffd))
@@ -25,10 +34,6 @@
 * **dev:** replace console.* with pino structured logging in broker + forwarder (CTL-314) ([#520](https://github.com/coalesce-labs/catalyst/issues/520)) ([8200ca8](https://github.com/coalesce-labs/catalyst/commit/8200ca8fd53ccbed42bd43f3cbf6e1f86f7cb7fd))
 * **dev:** webhook teardown script + auto-startup docs (CTL-219) ([#513](https://github.com/coalesce-labs/catalyst/issues/513)) ([33b7b79](https://github.com/coalesce-labs/catalyst/commit/33b7b7983f95344c324e1660c78d3bdc468312f8))
 * **dev:** wire Linear webhook events into HUD activity feed (CTL-275) ([#463](https://github.com/coalesce-labs/catalyst/issues/463)) ([510e6a7](https://github.com/coalesce-labs/catalyst/commit/510e6a7c900155bc2afcf7d690980ea25b064aea))
-
-
-### Bug Fixes
-
 * **dev:** align Linear webhook URL key with consumers (CTL-274) ([#450](https://github.com/coalesce-labs/catalyst/issues/450)) ([bf6ba0c](https://github.com/coalesce-labs/catalyst/commit/bf6ba0c0b6fd740b5eb2c7715472b81d53fc3f11))
 * **dev:** catalyst-hud column alignment + event-name truncation (CTL-311) ([#511](https://github.com/coalesce-labs/catalyst/issues/511)) ([f34af09](https://github.com/coalesce-labs/catalyst/commit/f34af09dcd36c3378961fab040bb7cecd24e1d66))
 * **dev:** event filter bugs — Codex reviews silently dropped (CTL-270) ([#443](https://github.com/coalesce-labs/catalyst/issues/443)) ([82b1d3f](https://github.com/coalesce-labs/catalyst/commit/82b1d3f45ff989980a8ca22922ae877d65754b22))
