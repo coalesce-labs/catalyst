@@ -21,7 +21,7 @@ Snapshots answer "what is the state right now?" — the event log answers "what 
 
 An earlier design used only the signal file. It was insufficient because:
 
-1. **Workers exit before merge** — the subprocess running `/oneshot` reliably terminates at its final tool-use, which happens before PR merge completes. If `pr.mergedAt` lived only in the signal file, it would never be written by the worker itself.
+1. **Workers write `mergedAt` but may crash before doing so** — under normal operation the worker stays alive through merge and writes `pr.mergedAt` itself. However, if the worker crashes or stalls, that write never happens. The orchestrator's fallback Phase 4 reconciles the merge and writes `done` — but it needs a fleet-wide view to know which workers to check, which the per-worker signal file alone cannot provide.
 2. **Multi-orchestrator aggregation** — a single signal file describes one worker. The dashboard needs to query across all orchestrators to show "how many waves are active right now?"
 3. **Audit trails** — status snapshots overwrite each other. The event log keeps the full history (`researching → planning → implementing → ...`) even when the worker is long gone.
 

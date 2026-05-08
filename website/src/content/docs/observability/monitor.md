@@ -79,7 +79,7 @@ One row per worker showing:
 
 ### Row 3 — Event stream
 
-Real-time event log from `~/catalyst/events.jsonl` and filesystem watches, rendered as a timeline. Filters: event type, worker ticket, orchestrator, date range.
+Real-time event log from `~/catalyst/events/YYYY-MM.jsonl` and filesystem watches, rendered as a timeline. Filters: event type, worker ticket, orchestrator, date range.
 
 ![Timeline tab showing a Gantt-style view with colored phase bars per worker across research, plan, implement, validate, ship, and merged states](https://assets.coalescelabs.ai/images/screenshots/timeline-2026-04-17%20at%2009.08.04.png)
 
@@ -138,9 +138,9 @@ You can share a filtered URL with someone else running the same monitor — the 
 
 The PID-liveness check uses `kill -0 <pid>`. If the worker is running under a different user, the check fails. The worker is actually alive — the monitor just can't see it. Additionally, the monitor can tail the worker's stream-json output file (`workers/<ticket>-stream.jsonl`) to see real-time tool calls and progress.
 
-**PR status says "merged" but the signal file says "pr-created"**:
+**Signal file stuck at `pr-created` even though PR is merged**:
 
-This is expected and intentional. The worker subprocess reliably exits at its last tool-use, before merge completes. The orchestrator (or the monitor itself) is the authoritative source for `pr.mergedAt`. The signal-file `status` stays at `pr-created` until the orchestrator updates it.
+This is a symptom of a **stalled or crashed worker**, not the happy path. Under normal operation, the worker stays alive through merge: it enters a `catalyst-events wait-for` listen loop, executes `gh pr merge --squash --delete-branch` when the PR is CLEAN, and writes `status: "done"` before exiting. A signal file that remains at `pr-created` after a GitHub merge means the worker exited before completing that sequence. Check the worker's liveness indicator — if it shows `!` (dead PID), the orchestrator's fallback Phase 4 will reconcile the merge and write `done`. If the worker is still alive but stuck, check its activity feed for a `stalled` attention item.
 
 **Monitor misses an orchestrator**:
 

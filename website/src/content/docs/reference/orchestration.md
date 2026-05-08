@@ -267,7 +267,6 @@ The orchestrator:
 | ------------------------ | ------------------------------------------------ |
 | `--name <name>`          | Name this orchestrator (default: auto-generated) |
 | `--auto <N>`             | Auto-pick top N Todo tickets (urgent/high priority first, newer first). Default N=3. |
-| `--auto-merge`           | Workers auto-merge when CI + verification pass   |
 | `--max-parallel <n>`     | Override max concurrent workers (default: 3)     |
 | `--base-branch <branch>` | Base branch for worktrees (default: main)        |
 | `--dry-run`              | Show wave plan without executing                 |
@@ -349,7 +348,8 @@ initializes worker signal files.
 Workers are dispatched by `orchestrate-dispatch-next`, which reads the `waveNPending` queues,
 validates the `workerCommand` format (must be `/<plugin>:<skill>`), and launches `claude -p`
 with `--output-format stream-json --verbose` to produce real-time NDJSON the monitor tails
-for live worker activity. Each runs `/catalyst-dev:oneshot <ticket> --auto-merge` autonomously.
+for live worker activity. Each runs `/catalyst-dev:oneshot <ticket>` autonomously — workers
+own their full PR lifecycle including merge; there is no `--auto-merge` flag.
 
 The dispatch prompt includes **mandatory testing requirements** — not suggestions. Workers are told
 their output will be independently verified. The `CATALYST_ORCHESTRATOR_DIR` environment variable is
@@ -643,6 +643,23 @@ grep '"q2-api-redesign"' ~/catalyst/events/*.jsonl | jq -r '"\(.ts) \(.worker //
 # Event types
 cat ~/catalyst/events/*.jsonl | jq -r '.event' | sort | uniq -c | sort -rn
 ```
+
+:::note[Filtering github.* and linear.* events]
+`github.*` and `linear.*` events (delivered via webhook) share the same JSONL files as
+orchestrator/worker events, but they do **not** carry `.orchestrator` or `.worker` fields.
+Filter them by event prefix or by the PR/repo context embedded in each webhook payload:
+
+```bash
+# GitHub PR events for a specific repo
+cat ~/catalyst/events/*.jsonl | jq 'select(.event | startswith("github.pr")) | select(.detail.repo == "acme-corp/api")'
+
+# Linear issue state changes
+cat ~/catalyst/events/*.jsonl | jq 'select(.event | startswith("linear.issue.state"))'
+
+# All GitHub check suite completions for a specific PR
+cat ~/catalyst/events/*.jsonl | jq 'select(.event == "github.check_suite.completed") | select(.body.payload.prNumbers // [] | contains([87]))'
+```
+:::
 
 ### The catalyst-state.sh CLI
 

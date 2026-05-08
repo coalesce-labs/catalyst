@@ -76,7 +76,15 @@ orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
 - **state.json**: Registry of active orchestrators with progress, worker status, and attention
   items. Queryable with `jq`. Schema: `plugins/dev/templates/global-state.json`.
 - **events/**: Every phase transition, PR creation, verification result, and attention item is
-  logged as a JSONL entry. Schema: `plugins/dev/templates/global-event.json`.
+  logged as a JSONL entry. Schema: `plugins/dev/templates/global-event.json`. The log has
+  multiple writers:
+  - **Bash skill layer** (`catalyst-state.sh event`) — writes v1 envelopes: `{ts, event, orchestrator, worker, detail}`
+  - **TypeScript webhook receiver** (`lib/webhook-events.ts`) — writes v2 OTel-shaped envelopes:
+    `{ts, attributes, body, resource}` for `github.*` and `linear.*` events
+  - **catalyst-comms send** — writes v2 envelopes for `comms.message.posted` events
+  Both shapes coexist in the same files. `catalyst-events` CLI and skills handle both.
+  Consumer interface: `catalyst-events tail` (streaming) and `catalyst-events wait-for`
+  (blocking single-event wait). See `website/src/content/docs/observability/catalyst-events.md`.
 - **history/**: Full orchestrator snapshots archived on completion, failure, or stale detection.
 - **Heartbeat**: Orchestrators write `lastHeartbeat` every 2-3 min. Stale entries (>10 min) are
   garbage-collected as `abandoned`.
@@ -157,10 +165,9 @@ Best practices:
 ## Agent Communication (catalyst-comms)
 
 Agents coordinate across worktrees via `catalyst-comms`, a file-based JSONL messaging system at
-`~/catalyst/comms/channels/<name>.jsonl`. Orchestrators create a shared channel
-`orch-<orchId>` at startup and export `CATALYST_COMMS_CHANNEL` to every dispatched worker's
-environment. Workers auto-join on startup and post `info` messages at each lifecycle boundary
-(start, phase transitions, PR opened), `attention` when blocked, and `done` on settle.
+`~/catalyst/comms/channels/<name>.jsonl`. The protocol is **bidirectional** (CTL-249):
+orchestrators broadcast to workers (outbound) and can also send messages directed to individual
+workers (inbound); workers poll for directed messages at each phase boundary.
 
 ```bash
 # Orchestrator side (Phase 1 init)
@@ -172,9 +179,20 @@ CATALYST_COMMS_CHANNEL="orch-${ORCH_NAME}" exec claude -p "/oneshot ${TICKET_ID}
 # Worker side (oneshot startup)
 catalyst-comms join "$CATALYST_COMMS_CHANNEL" --as "$TICKET_ID" --parent orchestrator
 
+# Outbound: orchestrator sends to a specific worker
+catalyst-comms send "orch-${ORCH_NAME}" "CTL-101: skip the migration" \
+  --as orchestrator --to CTL-101 --type info
+
+# Inbound: worker polls for messages addressed to it (at each phase boundary)
+catalyst-comms poll "orch-${ORCH_NAME}" --filter-to "$TICKET_ID" --since "$COMMS_LAST_READ"
+
 # Live tailing (human auditor)
 catalyst-comms watch "orch-${ORCH_NAME}"
 ```
+
+`catalyst-comms send` also emits a `comms.message.posted` event to the unified event log
+(v2 OTel envelope), so monitoring tools and `catalyst-events wait-for` can observe comms
+traffic from the same log file they use for GitHub/Linear events.
 
 The contract: every worker produces ≥4 messages per run. Signal files remain the authoritative
 state — comms is observability and cross-worker coordination. See

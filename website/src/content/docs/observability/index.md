@@ -55,6 +55,8 @@ bun run plugins/dev/scripts/orch-monitor/server.ts --terminal
 - [GitHub webhooks for orch-monitor](./webhooks/) — sub-5-second PR / review / deployment updates via smee.io tunnel
 - [Using the terminal UI](./terminal/) — when to prefer ANSI over the browser
 - [Event architecture](./events/) — how SSE streams and the global event log fit together
+- [catalyst-events CLI](./catalyst-events/) — command reference and jq filter cookbook for the event log
+- [Event flow — GitHub to worker](./event-flow/) — end-to-end: how a GitHub push becomes a `wait-for` wake
 - [Agent communication (`catalyst-comms`)](../reference/catalyst-comms/) — how workers coordinate with each other across worktrees
 
 ## When Not to Enable Observability

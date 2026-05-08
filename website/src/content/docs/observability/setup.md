@@ -125,7 +125,21 @@ This enables the `/api/otel/query` and `/api/otel/logs` endpoints on the monitor
 
 Alternatively, set environment variables: `OTEL_ENABLED=true`, `PROMETHEUS_URL`, `LOKI_URL`.
 
-### 5. Import the Grafana dashboard
+### 5. Set up the webhook tunnel
+
+The orch-monitor can receive GitHub and Linear events in near-real-time via a smee.io webhook tunnel. Without this step, skills that use `catalyst-events wait-for` — including `/catalyst-dev:orchestrate` Phase 4, `/catalyst-dev:oneshot` Phase 5, and `/catalyst-dev:wait-for-github` — silently fall back to REST polling with up to **10-minute latency** per event.
+
+With the tunnel configured, the same events arrive within **~1 second** of GitHub or Linear posting them.
+
+Run the setup script once per machine:
+
+```bash
+bash plugins/dev/scripts/setup-webhooks.sh
+```
+
+This creates a smee.io channel, writes the channel URL to `~/.config/catalyst/config.json`, generates an HMAC secret, and registers a webhook on each repo listed in `catalyst.monitor.github.watchRepos`. See [GitHub webhooks for orch-monitor](../webhooks/) for the full setup guide and configuration reference.
+
+### 6. Import the Grafana dashboard
 
 The claude-code-otel repo ships with a pre-built Grafana dashboard at `dashboards/claude-code.json`. Import it via Grafana → Dashboards → New → Import → Upload JSON file.
 
