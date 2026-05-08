@@ -22,6 +22,33 @@ bun run build:ui
 
 This rewrites `public/index.html` with fresh `public/assets/index-*.{js,css}` references. The committed `public/index.html` must always point to a bundle that exists in `public/assets/`, otherwise the static-asset tests in `server.test.ts` and `ui-features.test.ts` go red.
 
+## Event log analysis (`analyze-events.ts`)
+
+The `analyze-events.ts` CLI answers multi-agent event-log questions from the canonical (CTL-300) JSONL files. It normalizes canonical and legacy v1/v2 lines through one shape, drops heartbeats (76% of canonical volume), and tolerates the corrupt 2026-04 sentinel without aborting.
+
+```bash
+bun run analyze-events.ts <question> [--input <path>]...
+```
+
+Questions:
+
+- `phase-time` — per-ticket phase wall-clock + per-phase median/p90 across tickets
+- `stalls` — attention-event counts grouped by `attentionType`, plus PR review stats per PR
+- `ci-funnel` — opened → first green check_suite → merged for every PR seen, with median latencies
+- `all` — all of the above
+
+By default the CLI reads `~/catalyst/events/*.jsonl` (excludes `*.legacy`). Stats go to stderr; the JSON result goes to stdout. The CLI is deterministic given the same input files.
+
+### Adding a new question
+
+1. Add a pure function in `lib/event-analysis.ts` that takes `NormalizedEvent[]` and returns a typed result.
+2. Add fixture-based tests to `__tests__/event-analysis.test.ts` covering the canonical, legacy, and empty cases.
+3. Wire the question name into the dispatch switch in `analyze-events.ts`.
+
+### What the analyzer cannot answer today
+
+The canonical envelope does not carry cost, token-count, or model attributes. Questions like "cost-per-merged-PR" require new instrumentation. The findings writeup at `thoughts/shared/research/2026-05-08-CTL-307-event-analysis-findings.md` lists the specific gaps and recommended follow-up tickets.
+
 ## UI design
 
 See [`ui/DESIGN.md`](ui/DESIGN.md) for the design language of the monitor — surface tokens, status semantics, spacing, typography, and the policy for when to hand-roll components vs. reach for [shadcn/ui][shadcn] primitives. Read it before adding a new screen, drawer, or component.
