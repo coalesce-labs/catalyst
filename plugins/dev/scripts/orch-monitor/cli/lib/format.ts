@@ -8,7 +8,8 @@ const SKIP_EVENTS = new Set([
 ]);
 
 export function shouldSkipEvent(event: CanonicalEvent): boolean {
-  const name = event.attributes["event.name"];
+  const name = event.attributes?.["event.name"];
+  if (!name) return true; // skip legacy/malformed events missing the canonical envelope
   if (SKIP_EVENTS.has(name)) return true;
   if (name === "github.check_run.completed") {
     const c = event.attributes["cicd.pipeline.run.conclusion"];
@@ -36,7 +37,8 @@ export function formatRepo(event: CanonicalEvent): string {
 }
 
 export function formatSource(event: CanonicalEvent): string {
-  const name = event.attributes["event.name"];
+  const name = event.attributes?.["event.name"];
+  if (!name) return "legacy";
   if (name.startsWith("github.")) return "github";
   if (name.startsWith("linear.")) return "linear";
   if (name === "comms.message.posted") return "comms";
@@ -60,7 +62,8 @@ const EVENT_LABELS: Record<string, string> = {
 };
 
 export function formatEvent(event: CanonicalEvent): string {
-  const name = event.attributes["event.name"];
+  const name = event.attributes?.["event.name"];
+  if (!name) return "(legacy)";
   if (name === "github.check_suite.completed") {
     const c = event.attributes["cicd.pipeline.run.conclusion"];
     return c === "success" ? "ci pass" : "ci fail";

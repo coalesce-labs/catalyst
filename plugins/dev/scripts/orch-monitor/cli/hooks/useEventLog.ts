@@ -39,7 +39,7 @@ export function useEventLog({ predicate = "", repoFilter = "", sinceTs }: UseEve
       }
       if (repoFilter) {
         initial = initial.filter((e) => {
-          const repo = e.attributes["vcs.repository.name"] ?? "";
+          const repo = e.attributes?.["vcs.repository.name"] ?? "";
           return !repo || repo.includes(repoFilter);
         });
       }
@@ -71,7 +71,11 @@ export function useEventLog({ predicate = "", repoFilter = "", sinceTs }: UseEve
       });
     }
 
-    run().catch(() => {});
+    run().catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[catalyst-hud] load error: ${msg}\n`);
+      setLoading(false);
+    });
     return () => controller.abort();
   }, [predicate, repoFilter, sinceTs]);
 
