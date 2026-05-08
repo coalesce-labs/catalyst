@@ -228,16 +228,16 @@ while [ $ITER -lt $MAX_ITER ]; do
   # daemon down).
   EVENT_JSON=$(catalyst-events wait-for \
     --filter '
-      (.event == "github.pr.merged" and .scope.pr == '"$pr_number"') or
-      (.event == "github.pr.closed" and .scope.pr == '"$pr_number"') or
-      (.event == "github.check_suite.completed"
-         and (.detail.prNumbers // [] | index('"$pr_number"') != null)
-         and (.detail.conclusion == "failure" or .detail.conclusion == "timed_out")) or
-      (.event == "github.pr_review.submitted"
-         and .scope.pr == '"$pr_number"'
-         and (.detail.state == "changes_requested"
-              or (.detail.state == "commented" and (.detail.author.type // "") == "Bot"))) or
-      (.event == "github.push" and .scope.ref == "refs/heads/'"$BASE_BRANCH"'")
+      (.attributes."event.name" == "github.pr.merged" and .attributes."vcs.pr.number" == '"$pr_number"') or
+      (.attributes."event.name" == "github.pr.closed" and .attributes."vcs.pr.number" == '"$pr_number"') or
+      (.attributes."event.name" == "github.check_suite.completed"
+         and (.body.payload.prNumbers // [] | index('"$pr_number"') != null)
+         and (.attributes."cicd.pipeline.run.conclusion" == "failure" or .attributes."cicd.pipeline.run.conclusion" == "timed_out")) or
+      (.attributes."event.name" == "github.pr_review.submitted"
+         and .attributes."vcs.pr.number" == '"$pr_number"'
+         and (.body.payload.state == "changes_requested"
+              or (.body.payload.state == "commented" and (.body.payload.author.type // "") == "Bot"))) or
+      (.attributes."event.name" == "github.push" and .attributes."vcs.ref.name" == "refs/heads/'"$BASE_BRANCH"'")
     ' \
     --timeout 600 || true)
 
@@ -251,19 +251,19 @@ while [ $ITER -lt $MAX_ITER ]; do
     exit 1
   fi
 
-  EVENT=$(echo "$EVENT_JSON" | jq -r '.event // ""')
+  EVENT=$(echo "$EVENT_JSON" | jq -r '.attributes."event.name" // ""')
   case "$EVENT" in
     github.check_suite.completed)
       # CI failed — diagnose via merge-blocker-diagnosis.md, push fix.
       ;;
     github.pr_review.submitted)
       # Bot reviewers (Codex, claude-code-review) are addressable inline;
-      # humans require operator action. detail.author.type is "Bot" or "User".
+      # humans require operator action. body.payload.author.type is "Bot" or "User".
       # Codex submits inline-thread reviews as state="commented", not
       # "changes_requested" — handle both via /catalyst-dev:review-comments,
       # which addresses the code AND resolves threads via the GraphQL
       # resolveReviewThread mutation.
-      AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.detail.author.type // "User"')
+      AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.body.payload.author.type // "User"')
       if [ "$AUTHOR_TYPE" = "Bot" ]; then
         /catalyst-dev:review-comments "$pr_number"
       fi

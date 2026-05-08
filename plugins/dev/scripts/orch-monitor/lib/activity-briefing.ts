@@ -3,16 +3,22 @@ import { join } from "node:path";
 import type { SummarizeConfig } from "./summarize/config";
 import { getProvider, type SummarizeProvider } from "./summarize/providers";
 import { createCache, type Cache } from "./summarize/cache";
+import type { CanonicalEvent } from "./canonical-event";
 
 export type ActivityWindow = "30m" | "1h" | "6h";
 
+/**
+ * Internal projection of a CanonicalEvent (CTL-300) onto the fields the
+ * activity preprocessor cares about. We keep a flat shape with the canonical
+ * event already extracted so downstream code doesn't have to re-quote
+ * `attributes."event.name"` on every read.
+ */
 export interface RawEvent {
   ts: string;
   event: string;
   orchestrator: string | null;
   worker: string | null;
   detail: Record<string, unknown> | null;
-  scope?: { ticket?: string; pr?: number; [key: string]: unknown };
 }
 
 export interface EventThread {
@@ -69,6 +75,40 @@ function monthlyPath(catalystDir: string, d: Date): string {
   return join(catalystDir, "events", `${y}-${m}.jsonl`);
 }
 
+/**
+ * Project a CanonicalEvent onto the flat RawEvent shape the activity
+ * preprocessor consumes. Returns null if the line doesn't parse as a
+ * canonical envelope (e.g. legacy or malformed lines).
+ */
+export function projectCanonical(line: string): RawEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const env = parsed as Partial<CanonicalEvent> & {
+    attributes?: Record<string, unknown>;
+    body?: { payload?: unknown };
+  };
+  const attrs: Record<string, unknown> = env.attributes ?? {};
+  const rawName = attrs["event.name"];
+  const eventName = typeof rawName === "string" ? rawName : "";
+  const ts = typeof env.ts === "string" ? env.ts : "";
+  if (eventName === "" || ts === "") return null;
+  const rawOrch = attrs["catalyst.orchestrator.id"];
+  const orch = typeof rawOrch === "string" ? rawOrch : null;
+  const rawWorker = attrs["catalyst.worker.ticket"];
+  const worker = typeof rawWorker === "string" ? rawWorker : null;
+  const payload = env.body?.payload;
+  const detail =
+    typeof payload === "object" && payload !== null && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  return { ts, event: eventName, orchestrator: orch, worker, detail };
+}
+
 export function readActivityEvents(
   catalystDir: string,
   windowMs: number,
@@ -92,12 +132,8 @@ export function readActivityEvents(
     }
     for (const line of text.split("\n")) {
       if (!line.trim()) continue;
-      let evt: RawEvent;
-      try {
-        evt = JSON.parse(line) as RawEvent;
-      } catch {
-        continue;
-      }
+      const evt = projectCanonical(line);
+      if (evt === null) continue;
       if (evt.ts >= cutoffIso) {
         events.push(evt);
       }
@@ -106,18 +142,24 @@ export function readActivityEvents(
   return events;
 }
 
-const STRIP_EVENTS = new Set(["heartbeat", "filter.register", "filter.deregister"]);
+// CTL-300: legacy event names rewritten to canonical
+//   heartbeat → session.heartbeat
+const STRIP_EVENTS = new Set([
+  "session.heartbeat",
+  "filter.register",
+  "filter.deregister",
+]);
 
 const SIGNAL_PRIORITY: Record<string, number> = {
-  "attention-raised": 1,
-  "worker-status-terminal": 2,
+  "orchestrator.attention.raised": 1,
+  "orchestrator.worker.status_terminal": 2,
   "github.check_suite.completed": 3,
   "github.workflow_run.completed": 3,
   "github.pr.merged": 4,
   "linear.issue.state_changed": 5,
   "linear.issue.created": 5,
   "comms.message.posted": 6,
-  "worker-phase-advanced": 7,
+  "orchestrator.worker.phase_advanced": 7,
 };
 
 export function preprocessEvents(events: RawEvent[]): PreprocessResult {
@@ -141,7 +183,7 @@ export function preprocessEvents(events: RawEvent[]): PreprocessResult {
       }
     }
 
-    if (evt.event === "attention-raised") {
+    if (evt.event === "orchestrator.attention.raised") {
       const rawReason = (evt.detail as { reason?: unknown } | null)?.reason;
       attentionItems.push({
         orchestrator: evt.orchestrator,
@@ -165,8 +207,12 @@ export function preprocessEvents(events: RawEvent[]): PreprocessResult {
   }
 
   const sortedThreads = [...threads.values()].sort((a, b) => {
-    const aHasAttention = a.events.some((e) => e.event === "attention-raised");
-    const bHasAttention = b.events.some((e) => e.event === "attention-raised");
+    const aHasAttention = a.events.some(
+      (e) => e.event === "orchestrator.attention.raised",
+    );
+    const bHasAttention = b.events.some(
+      (e) => e.event === "orchestrator.attention.raised",
+    );
     if (aHasAttention && !bHasAttention) return -1;
     if (!aHasAttention && bHasAttention) return 1;
     return (b.events[0]?.ts ?? "").localeCompare(a.events[0]?.ts ?? "");

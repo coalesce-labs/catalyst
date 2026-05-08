@@ -158,14 +158,15 @@ else
   fail "reason not forwarded: $ARGS"
 fi
 
-# ─── Test 8: gc still emits orchestrator-failed event (regression) ──────────
+# ─── Test 8: gc still emits orchestrator.failed event (regression) ──────────
+# CTL-300: legacy "orchestrator-failed" → canonical "orchestrator.failed".
 echo ""
 echo "--- Test 8: existing orchestrator-failed event still emitted ---"
 EVENT_FILE=$(ls "$SCRATCH/cat7/events"/*.jsonl 2>/dev/null | head -1)
-if [[ -n "$EVENT_FILE" ]] && grep -q "orchestrator-failed" "$EVENT_FILE"; then
-  pass "orchestrator-failed event still written to JSONL"
+if [[ -n "$EVENT_FILE" ]] && grep -q '"event.name":"orchestrator.failed"' "$EVENT_FILE"; then
+  pass "orchestrator.failed canonical event written to JSONL"
 else
-  fail "orchestrator-failed event missing from JSONL"
+  fail "orchestrator.failed event missing from JSONL"
 fi
 
 # ─── Test 9: gc silent no-op when emitter binary missing ────────────────────

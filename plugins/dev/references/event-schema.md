@@ -1,576 +1,598 @@
 # Catalyst Event Schema Reference
 
 Authoritative field-level reference for all event types in `~/catalyst/events/YYYY-MM.jsonl`.
-Derived directly from the TypeScript source (`orch-monitor/lib/`) and bash scripts in `plugins/dev/scripts/`.
+Derived directly from `plugins/dev/scripts/orch-monitor/lib/canonical-event.ts` and
+`plugins/dev/scripts/lib/canonical-event.sh`.
 
 Use this when writing `catalyst-events wait-for --filter` or `catalyst-events tail --filter`
 expressions to avoid guessing field names. Wrong field names silently never match.
 
+This schema was introduced as a breaking cutover in CTL-300. All producers emit the canonical
+envelope. Legacy v1/v2 files on disk were rotated to `*.legacy.jsonl` on first canonical write.
+A future OTLP exporter sidecar (CTL-306) will transcode canonical JSONL to OTLP wire format.
+
 ---
 
-## Envelope formats
+## Canonical envelope
 
-Two schemas coexist in the same JSONL file.
-
-### v2 — webhook-sourced (TypeScript)
-
-Written by the orch-monitor webhook receiver. Source: `lib/event-log.ts`.
+Every event in `~/catalyst/events/YYYY-MM.jsonl` has this shape. One canonical envelope per line.
 
 ```json
 {
-  "ts": "2026-05-05T19:00:00.000Z",
-  "id": "evt_abc123",
-  "schemaVersion": 2,
-  "source": "github.webhook",
-  "event": "github.pr.merged",
-  "scope": {
-    "repo": "org/repo",
-    "pr": 342,
-    "orchestrator": "orch-foo",
-    "worker": null
+  "ts": "2026-05-08T18:00:00.000Z",
+  "observedTs": "2026-05-08T18:00:00.001Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": "a3f1c2d4e5b6c7d8e9f0a1b2c3d4e5f6",
+  "spanId": "b4d5e6f7a8b9c0d1",
+  "resource": {
+    "service.name": "catalyst.github",
+    "service.namespace": "catalyst",
+    "service.version": "8.2.0"
   },
-  "detail": { "action": "closed", "merged": true, "mergedAt": "2026-05-05T19:00:00Z", "draft": false, "mergeable": null },
-  "orchestrator": "orch-foo",
-  "worker": null
+  "attributes": {
+    "event.name": "github.pr.merged",
+    "event.entity": "pr",
+    "event.action": "merged",
+    "event.label": "PR #342",
+    "event.channel": "webhook",
+    "vcs.repository.name": "org/repo",
+    "vcs.pr.number": 342
+  },
+  "body": {
+    "message": "PR #342 merged in org/repo",
+    "payload": { "merged": true, "mergedAt": "2026-05-08T18:00:00Z", "draft": false, "mergeable": null }
+  }
 }
 ```
 
-`scope` fields are all optional. Flat `orchestrator`/`worker` duplicate `scope.orchestrator`/`scope.worker` for backward compatibility. GitHub events: `source = "github.webhook"`. Linear events: `source = "linear.webhook"`.
-
-### v1 — bash-sourced
-
-Written by `catalyst-session.sh`, `catalyst-state.sh`, `catalyst-comms`, and `filter-daemon`.
-
-**Session/heartbeat format** (`catalyst-session.sh`):
-```json
-{ "ts": "2026-05-05T19:00:00.000Z", "session": "sess_abc123", "event": "phase-changed", "detail": { "to": "implementing", "phase": 3 } }
-```
-
-**Orchestrator/comms/filter format** (`catalyst-state.sh`, `catalyst-comms`, `filter-daemon`):
-```json
-{ "ts": "2026-05-05T19:00:00.000Z", "orchestrator": "orch-foo", "worker": "CTL-210", "event": "attention-raised", "detail": { "attentionType": "waiting-for-user", "reason": "CI failed 3 times" } }
-```
+This shape is intentionally close to OTel `LogRecord` — it is *projectable* to OTLP/JSON by a
+future sidecar. It is **not** OTLP wire format directly. OTLP requires nesting under
+`resourceLogs[0].scopeLogs[0].logRecords[0]` and wrapping every value in `AnyValue`, which is
+hostile for jq. The sidecar (CTL-306) handles that translation mechanically.
 
 ---
 
-## GitHub events (v2 envelope, source: `github.webhook`)
+## Top-level fields
 
-### github.pr.{action}
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `ts` | string (ISO 8601) | yes | When the event happened |
+| `observedTs` | string (ISO 8601) | no | When the writer/collector saw it. Defaults to `ts`. |
+| `severityText` | `"DEBUG"` \| `"INFO"` \| `"WARN"` \| `"ERROR"` | yes | Human-readable severity |
+| `severityNumber` | number | yes | OTel severity number — see table below |
+| `traceId` | string (32 hex) \| null | yes | Trace context — null for ambient events |
+| `spanId` | string (16 hex) \| null | yes | Span context — null for ambient events |
+| `parentSpanId` | string (16 hex) \| null | no | Set when a span has a parent span |
+| `resource` | object | yes | Who emitted — service name, namespace, version |
+| `attributes` | object | yes | Typed key-value pairs. Keys may contain dots; always double-quote them in jq. |
+| `body` | object | yes | `body.message` (human-readable) + `body.payload` (structured) |
 
-Fired for every GitHub `pull_request` webhook action.
+### Severity numbers
 
-| Field | Value |
+| severityText | severityNumber | When to use |
+|---|---|---|
+| `DEBUG` | 5 | Heartbeats, filter-daemon empty wakes |
+| `INFO` | 9 | Normal lifecycle events (default) |
+| `WARN` | 13 | `attention-raised`, `worker-revived`, `worker-launch-failed`, CI failure on non-merge runs |
+| `ERROR` | 17 | `worker-failed`, `orchestrator-failed`, `deployment_status.failure`, `deployment_status.error` |
+
+---
+
+## Resource conventions
+
+`resource.service.namespace` is always `"catalyst"`. `resource.service.version` comes from
+`.claude-plugin/plugin.json`. Valid `service.name` values:
+
+| service.name | Producer |
 |---|---|
-| `event` | `github.pr.opened`, `github.pr.closed`, `github.pr.merged`, `github.pr.synchronize`, `github.pr.labeled`, `github.pr.unlabeled`, `github.pr.edited`, `github.pr.ready_for_review`, etc. |
-| `scope.repo` | `"org/repo"` |
-| `scope.pr` | PR number (integer) |
-| `detail.action` | Raw GitHub action string |
-| `detail.merged` | `true` / `false` |
-| `detail.mergedAt` | ISO timestamp or `null` |
-| `detail.draft` | `true` / `false` |
-| `detail.mergeable` | `true` / `false` / `null` |
+| `catalyst.github` | TS webhook handler (`lib/webhook-handler.ts`) |
+| `catalyst.linear` | TS webhook handler (`lib/linear-webhook-handler.ts`) |
+| `catalyst.session` | Bash (`catalyst-session.sh`) |
+| `catalyst.orchestrator` | Bash (`catalyst-state.sh`, `emit-worker-status-change.sh`) |
+| `catalyst.comms` | Bash (`catalyst-comms`) |
+| `catalyst.filter` | Bash/daemon (`filter-daemon/index.mjs`) |
 
-**`github.pr.merged` fires exactly once** — only when `action="closed"` AND `merged=true` simultaneously. Subsequent webhooks on an already-merged PR (label, edit, etc.) emit `github.pr.{action}`, not `github.pr.merged`.
+---
+
+## Attribute conventions
+
+Attribute names contain dots. In jq, always double-quote them: `.attributes."event.name"`.
+
+### `event.*` — catalyst-internal classifier
+
+| Attribute | Type | Description |
+|---|---|---|
+| `event.name` | string | Dotted: `github.pr.merged`, `session.phase`, `comms.message.posted`, etc. Always present. |
+| `event.entity` | string | Entity type: `pr`, `issue`, `check_suite`, `session`, `worker`, `attention`, … |
+| `event.action` | string | Action: `merged`, `opened`, `phase`, `attention`, `dispatched`, … |
+| `event.label` | string | Primary human-readable identifier: `PR #342`, `CTL-210`, a session id, an interest_id |
+| `event.value` | string \| number | Secondary value: `success`, a phase number, etc. |
+| `event.channel` | `"webhook"` \| `"sme.io"` | Transport channel. Absent on bash-emitted events. |
+
+### `catalyst.*` — catalyst entities
+
+| Attribute | Type | Description |
+|---|---|---|
+| `catalyst.orchestrator.id` | string | Orchestration run identifier |
+| `catalyst.worker.ticket` | string | Worker ticket key (e.g. `CTL-210`) |
+| `catalyst.session.id` | string | Claude session ID (human-readable, for joining) |
+| `catalyst.phase` | number | Current phase number |
+
+### `vcs.*` — OTel VCS semconv
+
+| Attribute | Type | Description |
+|---|---|---|
+| `vcs.repository.name` | string | `"org/repo"` |
+| `vcs.pr.number` | number | PR number (integer) |
+| `vcs.ref.name` | string | Branch or tag ref (e.g. `"refs/heads/main"`) |
+| `vcs.revision` | string | Commit SHA |
+
+### `cicd.*` — OTel CI/CD semconv
+
+| Attribute | Type | Description |
+|---|---|---|
+| `cicd.pipeline.run.id` | number | GitHub Actions run ID |
+| `cicd.pipeline.run.conclusion` | string | `"success"`, `"failure"`, `"cancelled"`, `"skipped"`, `"timed_out"` |
+| `cicd.pipeline.name` | string | Workflow name (e.g. `"CI"`) |
+
+### `linear.*` — catalyst-defined (no OTel semconv yet)
+
+| Attribute | Type | Description |
+|---|---|---|
+| `linear.issue.identifier` | string | Ticket identifier (e.g. `"CTL-210"`) |
+| `linear.team.key` | string | Team key (e.g. `"CTL"`) |
+| `linear.actor.id` | string | Linear user UUID who triggered the action |
+
+### `deployment.*` — OTel deployment semconv
+
+| Attribute | Type | Description |
+|---|---|---|
+| `deployment.environment` | string | `"production"`, `"staging"`, etc. |
+| `deployment.id` | number | GitHub deployment ID |
+
+---
+
+## Event naming
+
+`event.name` is always `<source-prefix>.<entity>.<action>`, lowercase, dot-separated. The source
+prefix is `resource.service.name` with the `catalyst.` namespace stripped:
+
+| resource.service.name | event.name prefix |
+|---|---|
+| `catalyst.github` | `github` |
+| `catalyst.linear` | `linear` |
+| `catalyst.session` | `session` |
+| `catalyst.orchestrator` | `orchestrator` |
+| `catalyst.comms` | `comms` |
+| `catalyst.filter` | `filter` |
+
+---
+
+## Trace and span ID derivation
+
+IDs are derived deterministically from orchestrator/worker identifiers. Any producer (TS or bash)
+computes the same IDs from the same inputs without coordination.
+
+```
+traceId = sha256(orchestratorId).slice(0, 32)
+       OR sha256("standalone:" + sessionId).slice(0, 32)
+       OR null (ambient event — GitHub webhooks, bare filter events)
+
+spanId  = sha256(workerTicket).slice(0, 16)
+       OR sha256(sessionId).slice(0, 16)
+       OR null
+```
+
+Both are hex-truncated SHA-256. OTel requires 32-hex trace IDs and 16-hex span IDs.
+`attributes."catalyst.session.id"` stores the human-readable Claude session ID alongside for joining.
+
+GitHub webhook events carry `traceId: null, spanId: null` — they are ambient events not
+inherently correlated to a worker. Correlation is done by consumers that join
+`attributes."vcs.pr.number"` to a worker's known PR.
+
+---
+
+## Wire format
+
+JSONL at `~/catalyst/events/YYYY-MM.jsonl`. One canonical envelope per line, no pretty-printing.
+On first canonical write, if the existing file's first line lacks an `attributes` field
+(legacy v1/v2 detection), the file is rotated to `*.legacy.jsonl` before appending — this is a
+one-time migration, already complete on any installation that ran CTL-300.
+
+---
+
+## One worked example per producer
+
+### `github.pr.merged` — catalyst.github webhook
+
+`github.pr.merged` fires exactly once: when `action="closed"` AND `merged=true` simultaneously.
 
 ```json
 {
-  "event": "github.pr.merged",
-  "scope": { "repo": "org/repo", "pr": 342 },
-  "detail": { "action": "closed", "merged": true, "mergedAt": "2026-05-05T18:00:00Z", "draft": false, "mergeable": null }
+  "ts": "2026-05-08T18:00:00.000Z",
+  "observedTs": "2026-05-08T18:00:00.001Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": null,
+  "spanId": null,
+  "resource": {
+    "service.name": "catalyst.github",
+    "service.namespace": "catalyst",
+    "service.version": "8.2.0"
+  },
+  "attributes": {
+    "event.name": "github.pr.merged",
+    "event.entity": "pr",
+    "event.action": "merged",
+    "event.label": "PR #342",
+    "event.channel": "webhook",
+    "vcs.repository.name": "org/repo",
+    "vcs.pr.number": 342
+  },
+  "body": {
+    "message": "PR #342 merged in org/repo",
+    "payload": { "merged": true, "mergedAt": "2026-05-08T18:00:00Z", "draft": false, "mergeable": null }
+  }
 }
+```
+
+`traceId`/`spanId` are null — GitHub events are ambient. `event.channel` = `"webhook"`.
+
+**check_suite and workflow_run PR resolution**: `vcs.pr.number` is set only when the associated
+`prNumbers` array has exactly one element. When multiple PRs are associated, `vcs.pr.number` is
+absent and the consumer must check `body.payload.prNumbers`. Use:
+```
+(.attributes."vcs.pr.number" == $PR) or (.body.payload.prNumbers // [] | index($PR) != null)
 ```
 
 ---
 
-### github.pr_review.{action}
-
-| Field | Value |
-|---|---|
-| `event` | `github.pr_review.submitted`, `github.pr_review.dismissed`, `github.pr_review.edited` |
-| `scope.repo` | `"org/repo"` |
-| `scope.pr` | PR number |
-| `detail.state` | `"APPROVED"`, `"CHANGES_REQUESTED"`, `"COMMENTED"`, etc. |
-| `detail.reviewer` | Reviewer login string |
-| `detail.body` | Review body text |
-| `detail.author.login` | Reviewer login |
-| `detail.author.type` | `"User"`, `"Bot"`, `"Mannequin"` |
+### `linear.issue.state_changed` — catalyst.linear webhook
 
 ```json
 {
-  "event": "github.pr_review.submitted",
-  "scope": { "repo": "org/repo", "pr": 342 },
-  "detail": { "state": "APPROVED", "reviewer": "octocat", "body": "LGTM", "author": { "login": "octocat", "type": "User" } }
+  "ts": "2026-05-08T18:05:00.000Z",
+  "observedTs": "2026-05-08T18:05:00.002Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": null,
+  "spanId": null,
+  "resource": {
+    "service.name": "catalyst.linear",
+    "service.namespace": "catalyst",
+    "service.version": "8.2.0"
+  },
+  "attributes": {
+    "event.name": "linear.issue.state_changed",
+    "event.entity": "issue",
+    "event.action": "state_changed",
+    "event.label": "CTL-210",
+    "event.channel": "webhook",
+    "linear.issue.identifier": "CTL-210",
+    "linear.team.key": "CTL",
+    "linear.actor.id": "user-uuid-here"
+  },
+  "body": {
+    "message": "linear.issue.state_changed CTL-210",
+    "payload": { "action": "update", "updatedFromKeys": ["stateId"] }
+  }
 }
 ```
 
+Update topic selection: `stateId` → `state_changed`; `priority` → `priority_changed`;
+`assigneeId` → `assignee_changed`; other → `updated`.
+
 ---
 
-### github.pr_review_thread.{action}
+### `session.phase` — catalyst.session bash
 
-| Field | Value |
-|---|---|
-| `event` | `github.pr_review_thread.resolved`, `github.pr_review_thread.unresolved` |
-| `scope.repo` | `"org/repo"` |
-| `scope.pr` | PR number |
-| `detail.threadId` | Thread ID (integer) |
+`traceId`/`spanId` are derived from orch/session context at emit time.
 
 ```json
 {
-  "event": "github.pr_review_thread.resolved",
-  "scope": { "repo": "org/repo", "pr": 342 },
-  "detail": { "threadId": 12345678 }
+  "ts": "2026-05-08T18:10:00.000Z",
+  "observedTs": "2026-05-08T18:10:00.000Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8",
+  "spanId": "d4e5f6a7b8c9d0e1",
+  "resource": {
+    "service.name": "catalyst.session",
+    "service.namespace": "catalyst",
+    "service.version": "8.2.0"
+  },
+  "attributes": {
+    "event.name": "session.phase",
+    "event.entity": "session",
+    "event.action": "phase",
+    "event.label": "sess_abc123",
+    "catalyst.session.id": "sess_abc123",
+    "catalyst.orchestrator.id": "orch-foo",
+    "catalyst.worker.ticket": "CTL-210",
+    "catalyst.phase": 3
+  },
+  "body": {
+    "message": "phase-changed sess_abc123 → phase 3",
+    "payload": { "to": "implementing", "phase": 3 }
+  }
 }
 ```
 
+ID derivation for this envelope:
+- `traceId = sha256("orch-foo").slice(0, 32)` — because an orchestrator is present
+- `spanId = sha256("CTL-210").slice(0, 16)` — because a worker ticket is present
+- For a standalone (non-orchestrated) session: `traceId = sha256("standalone:sess_abc123").slice(0, 32)`, `spanId = sha256("sess_abc123").slice(0, 16)`
+
 ---
 
-### github.check_suite.{status}
+### `orchestrator.worker.status_terminal` — catalyst.orchestrator bash
 
-> **⚠ `.scope.pr` is absent.** PR numbers are in `detail.prNumbers` (integer array).
-> Filter: `(.detail.prNumbers // [] | contains([${PR_NUMBER}]))`
-
-| Field | Value |
-|---|---|
-| `event` | `github.check_suite.completed`, `github.check_suite.queued`, `github.check_suite.in_progress` |
-| `scope.repo` | `"org/repo"` |
-| `scope.pr` | **ABSENT** — not populated on check_suite events |
-| `detail.conclusion` | `"success"`, `"failure"`, `"cancelled"`, `"skipped"`, `"timed_out"`, `null` |
-| `detail.status` | `"completed"`, `"queued"`, `"in_progress"` |
-| `detail.prNumbers` | `[342, 343]` — integer array of associated PRs |
+Emitted by `emit-worker-status-change.sh` when a worker reaches a terminal state. `event.value`
+mirrors the `to` state so HUD/filter can check it without descending into payload.
 
 ```json
 {
-  "event": "github.check_suite.completed",
-  "scope": { "repo": "org/repo" },
-  "detail": { "conclusion": "success", "status": "completed", "prNumbers": [342] }
+  "ts": "2026-05-08T18:15:00.000Z",
+  "observedTs": "2026-05-08T18:15:00.000Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8",
+  "spanId": "d4e5f6a7b8c9d0e1",
+  "resource": {
+    "service.name": "catalyst.orchestrator",
+    "service.namespace": "catalyst",
+    "service.version": "8.2.0"
+  },
+  "attributes": {
+    "event.name": "orchestrator.worker.status_terminal",
+    "event.entity": "worker",
+    "event.action": "status_terminal",
+    "event.label": "CTL-210",
+    "event.value": "done",
+    "catalyst.orchestrator.id": "orch-foo",
+    "catalyst.worker.ticket": "CTL-210"
+  },
+  "body": {
+    "message": "worker CTL-210 status_terminal → done",
+    "payload": { "from": "implementing", "to": "done", "pr": 342 }
+  }
 }
 ```
 
 ---
 
-### github.status.{state}
+### `comms.message.posted` — catalyst.comms bash (including attention variant)
 
-| Field | Value |
-|---|---|
-| `event` | `github.status.success`, `github.status.failure`, `github.status.pending`, `github.status.error` |
-| `scope.repo` | `"org/repo"` |
-| `scope.sha` | Commit SHA |
-| `detail.state` | `"success"`, `"failure"`, `"pending"`, `"error"` |
+Normal posted message (`severityText: "INFO"`):
 
 ```json
 {
-  "event": "github.status.success",
-  "scope": { "repo": "org/repo", "sha": "abc123def456" },
-  "detail": { "state": "success" }
+  "ts": "2026-05-08T18:20:00.000Z",
+  "observedTs": "2026-05-08T18:20:00.000Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8",
+  "spanId": "d4e5f6a7b8c9d0e1",
+  "resource": {
+    "service.name": "catalyst.comms",
+    "service.namespace": "catalyst",
+    "service.version": "8.2.0"
+  },
+  "attributes": {
+    "event.name": "comms.message.posted",
+    "event.entity": "comms",
+    "event.action": "posted",
+    "event.label": "CTL-210",
+    "catalyst.orchestrator.id": "orch-foo",
+    "catalyst.worker.ticket": "CTL-210"
+  },
+  "body": {
+    "message": "comms.message.posted from CTL-210",
+    "payload": { "channel": "orch-foo-2026-05-08", "type": "info", "msgId": "msg_abc123", "to": null, "body": "Implementing phase 3 now." }
+  }
 }
 ```
 
----
-
-### github.push
-
-> **⚠ `.scope.pr` is absent.** Use `.scope.ref` to match a branch.
-
-| Field | Value |
-|---|---|
-| `event` | `github.push` |
-| `scope.repo` | `"org/repo"` |
-| `scope.ref` | `"refs/heads/main"` |
-| `scope.sha` | Head commit SHA |
-| `detail.baseSha` | Previous head SHA |
-| `detail.headSha` | New head SHA |
-| `detail.commits` | `[{id: "abc123", message: "feat: ..."}]` |
+Attention variant — `event.action` is overridden to `"attention"` and `severityText` becomes
+`"WARN"`. `event.name` stays `"comms.message.posted"` for OTLP parity. Filter on either:
+- `event.action`: `.attributes."event.action" == "attention"`
+- severity: `.severityNumber >= 13`
 
 ```json
 {
-  "event": "github.push",
-  "scope": { "repo": "org/repo", "ref": "refs/heads/main", "sha": "abc123" },
-  "detail": { "baseSha": "def456", "headSha": "abc123", "commits": [{ "id": "abc123", "message": "feat: add feature" }] }
+  "severityText": "WARN",
+  "severityNumber": 13,
+  "attributes": {
+    "event.name": "comms.message.posted",
+    "event.action": "attention",
+    "event.value": "attention"
+  }
 }
 ```
 
 ---
 
-### github.issue_comment.{action}
+### `filter.wake` — catalyst.filter
 
-Only PR-attached comments are logged (issue-only comments are discarded by the parser).
-
-| Field | Value |
-|---|---|
-| `event` | `github.issue_comment.created`, `github.issue_comment.edited`, `github.issue_comment.deleted` |
-| `scope.repo` | `"org/repo"` |
-| `scope.pr` | PR number |
-| `detail.commentId` | Comment ID (integer) |
-| `detail.body` | Comment text |
-| `detail.htmlUrl` | GitHub URL |
-| `detail.author.login` | Comment author login |
-| `detail.author.type` | `"User"`, `"Bot"`, etc. |
-
----
-
-### github.pr_review_comment.{action}
-
-| Field | Value |
-|---|---|
-| `event` | `github.pr_review_comment.created`, `github.pr_review_comment.edited`, `github.pr_review_comment.deleted` |
-| `scope.repo` | `"org/repo"` |
-| `scope.pr` | PR number |
-| `detail.commentId` | Comment ID (integer) |
-| `detail.body` | Comment text |
-| `detail.htmlUrl` | GitHub URL |
-| `detail.author.login` | Author login |
-| `detail.author.type` | `"User"`, `"Bot"`, etc. |
-
----
-
-### github.deployment.created
-
-| Field | Value |
-|---|---|
-| `event` | `github.deployment.created` |
-| `scope.repo` | `"org/repo"` |
-| `scope.environment` | `"production"`, `"staging"`, etc. |
-| `scope.sha` | Deployment SHA |
-| `scope.ref` | Ref name (branch or tag) |
-| `detail.deploymentId` | Deployment ID (integer) |
-| `detail.payloadUrl` | Payload URL or `null` |
-
----
-
-### github.deployment_status.{state}
-
-| Field | Value |
-|---|---|
-| `event` | `github.deployment_status.success`, `github.deployment_status.failure`, `github.deployment_status.pending`, `github.deployment_status.error`, `github.deployment_status.in_progress` |
-| `scope.repo` | `"org/repo"` |
-| `scope.environment` | `"production"`, `"staging"`, etc. |
-| `detail.deploymentId` | Deployment ID (integer) |
-| `detail.state` | `"success"`, `"failure"`, `"pending"`, etc. |
-| `detail.targetUrl` | CI link or `null` |
-| `detail.environmentUrl` | Live URL or `null` |
+The `interest_id` is in `event.label` and `body.payload.interest_id`, not in the event name.
+Filters that previously matched `.event == "filter.wake.${id}"` now match:
+`.attributes."event.name" == "filter.wake" and .attributes."event.label" == "${id}"`.
 
 ```json
 {
-  "event": "github.deployment_status.success",
-  "scope": { "repo": "org/repo", "environment": "production" },
-  "detail": { "deploymentId": 999, "state": "success", "targetUrl": null, "environmentUrl": "https://app.example.com" }
+  "ts": "2026-05-08T18:25:00.000Z",
+  "observedTs": "2026-05-08T18:25:00.000Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8",
+  "spanId": null,
+  "resource": {
+    "service.name": "catalyst.filter",
+    "service.namespace": "catalyst",
+    "service.version": "8.2.0"
+  },
+  "attributes": {
+    "event.name": "filter.wake",
+    "event.entity": "filter",
+    "event.action": "wake",
+    "event.label": "orch-foo"
+  },
+  "body": {
+    "message": "filter.wake orch-foo",
+    "payload": {
+      "reason": "CI failure event matched worker CTL-210 interest",
+      "source_event_ids": [],
+      "interest_id": "orch-foo"
+    }
+  }
 }
 ```
 
 ---
 
-### github.release.{action}
+## All event names by producer
 
-| Field | Value |
-|---|---|
-| `event` | `github.release.published`, `github.release.created`, `github.release.edited`, `github.release.deleted`, `github.release.prereleased`, `github.release.released` |
-| `scope.repo` | `"org/repo"` |
-| `scope.tag` | Tag name (e.g. `"v8.0.0"`) |
-| `detail.action` | GitHub action string |
-| `detail.releaseId` | Release ID (integer) |
-| `detail.name` | Release name |
-| `detail.draft` | `true` / `false` |
-| `detail.prerelease` | `true` / `false` |
-| `detail.htmlUrl` | GitHub release URL |
+### catalyst.github
+
+| event.name | entity | action | severity | vcs.pr.number | notes |
+|---|---|---|---|---|---|
+| `github.pr.{action}` | `pr` | `{action}` | INFO | yes | merged, opened, closed, synchronize, labeled, etc. |
+| `github.pr_review.{action}` | `pr_review` | `{action}` | INFO | yes | submitted, dismissed, edited |
+| `github.pr_review_thread.{state}` | `pr_review_thread` | `{state}` | INFO | yes | resolved, unresolved |
+| `github.check_suite.{status}` | `check_suite` | `{status}` | INFO (WARN if conclusion=failure) | only if single PR | `body.payload.prNumbers` for multi-PR |
+| `github.status.{state}` | `status` | `{state}` | INFO/WARN/ERROR | no | `vcs.revision` = sha |
+| `github.push` | `push` | `pushed` | INFO | no | `vcs.ref.name`, `vcs.revision` |
+| `github.issue_comment.{action}` | `issue_comment` | `{action}` | INFO | yes | PR-attached only |
+| `github.pr_review_comment.{action}` | `pr_review_comment` | `{action}` | INFO | yes | |
+| `github.deployment.created` | `deployment` | `created` | INFO | no | `deployment.environment`, `deployment.id` |
+| `github.deployment_status.{state}` | `deployment_status` | `{state}` | INFO/ERROR | no | ERROR on failure/error states |
+| `github.release.{action}` | `release` | `{action}` | INFO | no | `event.label` = tag name |
+| `github.workflow_run.{action}` | `workflow_run` | `{action}` | INFO (WARN if conclusion=failure) | only if single PR | `cicd.pipeline.run.id`, `cicd.pipeline.name` |
+
+### catalyst.linear
+
+| event.name | entity | action | severity | attributes |
+|---|---|---|---|---|
+| `linear.issue.{topic}` | `issue` | `{topic}` | INFO | `linear.issue.identifier`, `linear.team.key`, `linear.actor.id` |
+| `linear.comment.{action}` | `comment` | `{action}` | INFO | `linear.issue.identifier?` |
+| `linear.cycle.{action}` | `cycle` | `{action}` | INFO | `linear.team.key?` |
+| `linear.reaction.{action}` | `reaction` | `{action}` | INFO | — |
+| `linear.issue_label.{action}` | `issue_label` | `{action}` | INFO | — |
+
+### catalyst.session
+
+| event.name | entity | action | severity | notes |
+|---|---|---|---|---|
+| `session.started` | `session` | `started` | INFO | `body.payload` = `{skill, ticket, label, workflow, status}` |
+| `session.phase` | `session` | `phase` | INFO | `catalyst.phase` attribute; `body.payload` = `{to, phase}` |
+| `session.iteration` | `session` | `iteration` | INFO | `body.payload` = `{kind, count, by}` |
+| `session.pr_opened` | `pr` | `opened` | INFO | `vcs.pr.number`; `body.payload` = `{pr, url, ci}` |
+| `session.ended` | `session` | `ended` | INFO (ERROR if failed) | `body.payload` = `{status, reason?}` |
+| `session.heartbeat` | `session` | `heartbeat` | DEBUG | `body.payload` = null |
+
+### catalyst.orchestrator
+
+| event.name | entity | action | severity | notes |
+|---|---|---|---|---|
+| `orchestrator.started` | `orchestrator` | `started` | INFO | `body.payload` = `{tickets}` |
+| `orchestrator.failed` | `orchestrator` | `failed` | ERROR | `body.payload` = `{reason}` |
+| `orchestrator.archived` | `orchestrator` | `archived` | INFO | `body.payload` = `{reason?}` |
+| `orchestrator.worker.dispatched` | `worker` | `dispatched` | INFO | |
+| `orchestrator.worker.pr_created` | `pr` | `created` | INFO | `vcs.pr.number` |
+| `orchestrator.worker.pr_merged` | `pr` | `merged` | INFO | `vcs.pr.number` |
+| `orchestrator.worker.done` | `worker` | `done` | INFO | |
+| `orchestrator.worker.failed` | `worker` | `failed` | ERROR | `body.payload` = `{reason}` |
+| `orchestrator.worker.launch_failed` | `worker` | `launch_failed` | WARN | `body.payload` = `{pid, graceSeconds}` |
+| `orchestrator.worker.revived` | `worker` | `revived` | WARN | `body.payload` = `{pid, sessionId, reviveCount, reason}` |
+| `orchestrator.worker.status_terminal` | `worker` | `status_terminal` | INFO | `event.value` = terminal state; `body.payload` = `{from, to, pr?}` |
+| `orchestrator.worker.phase_advanced` | `worker` | `phase_advanced` | INFO | `body.payload` = `{windowSec, changes}` |
+| `orchestrator.attention.raised` | `attention` | `raised` | WARN | `body.payload` = `{attentionType, reason}` |
+| `orchestrator.attention.resolved` | `attention` | `resolved` | INFO | |
+
+### catalyst.comms
+
+| event.name | event.action | severity | notes |
+|---|---|---|---|
+| `comms.message.posted` | `posted` | INFO | Normal message |
+| `comms.message.posted` | `attention` | WARN | Attention message; `event.value = "attention"` |
+
+### catalyst.filter
+
+| event.name | entity | action | severity | notes |
+|---|---|---|---|---|
+| `filter.register` | `filter` | `register` | INFO | `body.payload` = `{interest_id, notify_event, prompt, context, persistent}` |
+| `filter.deregister` | `filter` | `deregister` | INFO | `body.payload` = `{interest_id}` |
+| `filter.wake` | `filter` | `wake` | INFO | `event.label` = interest_id; `body.payload` = `{reason, source_event_ids, interest_id}` |
 
 ---
 
-### github.workflow_run.{action}
+## jq predicate cheatsheet
 
-> **⚠ `.scope.pr` is absent.** PR numbers are in `detail.prNumbers` (integer array).
-> Filter: `(.detail.prNumbers // [] | contains([${PR_NUMBER}]))`
+Attribute names contain dots — **always double-quote them in jq**. Single-quoting the outer
+expression is the simplest approach:
 
-| Field | Value |
-|---|---|
-| `event` | `github.workflow_run.completed`, `github.workflow_run.in_progress`, `github.workflow_run.requested` |
-| `scope.repo` | `"org/repo"` |
-| `scope.sha` | Head commit SHA |
-| `scope.pr` | **ABSENT** — not populated on workflow_run events |
-| `detail.action` | `"completed"`, `"in_progress"`, `"requested"` |
-| `detail.runId` | Run ID (integer) |
-| `detail.workflowId` | Workflow ID (integer) |
-| `detail.name` | Workflow name (e.g. `"CI"`, `"Build"`) |
-| `detail.headBranch` | Branch name |
-| `detail.status` | `"completed"`, `"in_progress"`, `"queued"` |
-| `detail.conclusion` | `"success"`, `"failure"`, `"cancelled"`, `"skipped"`, `null` |
-| `detail.runNumber` | Sequential run number |
-| `detail.htmlUrl` | GitHub Actions URL |
-| `detail.prNumbers` | `[342]` — integer array |
+```bash
+# Match by event name
+jq -c 'select(.attributes."event.name" == "github.pr.merged")'
 
-```json
-{
-  "event": "github.workflow_run.completed",
-  "scope": { "repo": "org/repo", "sha": "abc123" },
-  "detail": { "action": "completed", "runId": 12345, "workflowId": 678, "name": "CI", "headBranch": "my-feature", "status": "completed", "conclusion": "success", "runNumber": 42, "htmlUrl": "https://github.com/org/repo/actions/runs/12345", "prNumbers": [342] }
-}
+# Match by event name (any pr action)
+jq -c 'select(.attributes."event.name" | startswith("github.pr."))'
+
+# PR number — direct attribute
+jq -c 'select(.attributes."vcs.pr.number" == 342)'
+
+# PR number — check_suite/workflow_run (may be in body.payload.prNumbers if multi-PR)
+jq -c --argjson pr 342 'select(
+  (.attributes."vcs.pr.number" == $pr) or
+  (.body.payload.prNumbers // [] | index($pr) != null)
+)'
+
+# Severity filter
+jq -c 'select(.severityNumber >= 13)'       # WARN and above
+jq -c 'select(.severityText == "ERROR")'
+
+# Repository filter
+jq -c 'select(.attributes."vcs.repository.name" == "org/repo")'
+
+# Commit SHA
+jq -c 'select(.attributes."vcs.revision" | startswith("abc123"))'
+
+# Branch ref
+jq -c 'select(.attributes."vcs.ref.name" == "refs/heads/main")'
+
+# Deployment environment
+jq -c 'select(.attributes."deployment.environment" == "production")'
+
+# CI pipeline conclusion
+jq -c 'select(.attributes."cicd.pipeline.run.conclusion" == "failure")'
+
+# Linear ticket
+jq -c 'select(.attributes."linear.issue.identifier" == "CTL-210")'
+
+# Worker ticket
+jq -c 'select(.attributes."catalyst.worker.ticket" == "CTL-210")'
+
+# Body payload field
+jq -c 'select(.body.payload.status == "done")'
+
+# filter.wake for a specific interest
+jq -c 'select(.attributes."event.name" == "filter.wake" and .attributes."event.label" == "orch-foo")'
+
+# Attention messages (two equivalent expressions)
+jq -c 'select(.attributes."event.action" == "attention")'
+jq -c 'select(.severityNumber == 13 and (.attributes."event.name" | startswith("comms.")))'
 ```
 
 ---
 
-## Linear events (v2 envelope, source: `linear.webhook`)
+## Filter pitfalls
 
-### linear.issue.{topic}
-
-| Field | Value |
-|---|---|
-| `event` | `linear.issue.created`, `linear.issue.state_changed`, `linear.issue.priority_changed`, `linear.issue.assignee_changed`, `linear.issue.updated`, `linear.issue.removed` |
-| `scope.ticket` | Ticket identifier (e.g. `"CTL-210"`) or `undefined` if absent |
-| `detail.action` | `"create"`, `"update"`, `"remove"` |
-| `detail.ticket` | Ticket identifier or `null` |
-| `detail.teamKey` | Team key (e.g. `"CTL"`) or `null` |
-| `detail.updatedFromKeys` | Array of changed field names (e.g. `["stateId"]`) |
-| `detail.actorId` | Linear user UUID who triggered the action, or `null` |
-
-Update topic selection priority: `stateId` → `state_changed`; `priority` → `priority_changed`; `assigneeId` → `assignee_changed`; other → `updated`.
-
-```json
-{
-  "event": "linear.issue.state_changed",
-  "scope": { "ticket": "CTL-210" },
-  "detail": { "action": "update", "ticket": "CTL-210", "teamKey": "CTL", "updatedFromKeys": ["stateId"], "actorId": "user-uuid-here" }
-}
-```
-
----
-
-### linear.comment.{action}d
-
-| Field | Value |
-|---|---|
-| `event` | `linear.comment.created`, `linear.comment.updated`, `linear.comment.removed` |
-| `scope.ticket` | Ticket identifier or `undefined` |
-| `detail.action` | `"create"`, `"update"`, `"remove"` |
-| `detail.commentId` | Comment UUID or `null` |
-| `detail.issueId` | Issue UUID or `null` |
-| `detail.ticket` | Ticket identifier or `null` |
-
----
-
-### linear.cycle.{action}d
-
-| Field | Value |
-|---|---|
-| `event` | `linear.cycle.created`, `linear.cycle.updated`, `linear.cycle.removed` |
-| `scope` | `{}` (empty — no ticket or repo) |
-| `detail.action` | `"create"`, `"update"`, `"remove"` |
-| `detail.cycleId` | Cycle UUID or `null` |
-| `detail.teamKey` | Team key or `null` |
-
----
-
-### linear.reaction.{action}d
-
-| Field | Value |
-|---|---|
-| `event` | `linear.reaction.created`, `linear.reaction.updated`, `linear.reaction.removed` |
-| `scope` | `{}` |
-| `detail.action` | `"create"`, `"update"`, `"remove"` |
-| `detail.reactionId` | Reaction UUID or `null` |
-
----
-
-### linear.issue_label.{action}d
-
-| Field | Value |
-|---|---|
-| `event` | `linear.issue_label.created`, `linear.issue_label.updated`, `linear.issue_label.removed` |
-| `scope` | `{}` |
-| `detail.action` | `"create"`, `"update"`, `"remove"` |
-| `detail.labelId` | Label UUID or `null` |
-
----
-
-## Catalyst session events (v1, source: `catalyst-session.sh`)
-
-Format: `{ ts, session, event, detail }`
-
-### session-started
-
-```json
-{ "ts": "...", "session": "sess_abc123", "event": "session-started",
-  "detail": { "skill": "oneshot", "ticket": "CTL-210", "label": null, "workflow": null, "status": "researching" } }
-```
-
-| `detail` field | Type | Description |
+| Scenario | Common mistake | Correct expression |
 |---|---|---|
-| `skill` | string | Skill name that started the session |
-| `ticket` | string \| null | Linear ticket key |
-| `label` | string \| null | Human-readable label |
-| `workflow` | string \| null | Parent workflow session ID |
-| `status` | string | Initial status |
-
----
-
-### phase-changed
-
-```json
-{ "ts": "...", "session": "sess_abc123", "event": "phase-changed",
-  "detail": { "to": "implementing", "phase": 3 } }
-```
-
-| `detail` field | Type | Description |
-|---|---|---|
-| `to` | string | New status (e.g. `"researching"`, `"planning"`, `"implementing"`) |
-| `phase` | number \| null | Phase number |
-
----
-
-### pr-opened
-
-```json
-{ "ts": "...", "session": "sess_abc123", "event": "pr-opened",
-  "detail": { "pr": 342, "url": "https://github.com/org/repo/pull/342", "ci": null } }
-```
-
-| `detail` field | Type | Description |
-|---|---|---|
-| `pr` | number | PR number |
-| `url` | string \| null | PR URL |
-| `ci` | string \| null | CI status |
-
----
-
-### session-ended
-
-```json
-{ "ts": "...", "session": "sess_abc123", "event": "session-ended",
-  "detail": { "status": "done" } }
-```
-
-| `detail` field | Type | Description |
-|---|---|---|
-| `status` | `"done"` \| `"failed"` | Terminal status |
-| `reason` | string | (optional) Failure reason |
-
----
-
-### heartbeat
-
-```json
-{ "ts": "...", "session": "sess_abc123", "event": "heartbeat", "detail": null }
-```
-
----
-
-### phase-iteration
-
-```json
-{ "ts": "...", "session": "sess_abc123", "event": "phase-iteration",
-  "detail": { "kind": "fix", "count": 2, "by": 1 } }
-```
-
-| `detail` field | Type | Description |
-|---|---|---|
-| `kind` | `"plan"` \| `"fix"` | Iteration type |
-| `count` | number | New cumulative count |
-| `by` | number | Increment amount |
-
----
-
-## Orchestrator lifecycle events (v1, source: `catalyst-state.sh`)
-
-Format: `{ ts, orchestrator, worker, event, detail }`
-
-### orchestrator-started
-
-```json
-{ "ts": "...", "orchestrator": "orch-foo", "worker": null, "event": "orchestrator-started",
-  "detail": { "tickets": ["CTL-210", "CTL-211"] } }
-```
-
-### attention-raised
-
-```json
-{ "ts": "...", "orchestrator": "orch-foo", "worker": "CTL-210", "event": "attention-raised",
-  "detail": { "attentionType": "waiting-for-user", "reason": "CI failed after 3 attempts" } }
-```
-
-### attention-resolved
-
-```json
-{ "ts": "...", "orchestrator": "orch-foo", "worker": "CTL-210", "event": "attention-resolved",
-  "detail": null }
-```
-
-### orchestrator-failed
-
-```json
-{ "ts": "...", "orchestrator": "orch-foo", "worker": null, "event": "orchestrator-failed",
-  "detail": { "reason": "heartbeat expired — presumed dead" } }
-```
-
----
-
-## Comms events (v1, source: `catalyst-comms`)
-
-Format: `{ ts, orchestrator, worker, event, detail }`
-
-### comms.message.posted
-
-```json
-{ "ts": "...", "orchestrator": "orch-foo", "worker": "CTL-210", "event": "comms.message.posted",
-  "detail": { "channel": "orch-foo-2026-05-05", "type": "info", "msgId": "msg_abc123", "to": null } }
-```
-
-| `detail` field | Type | Description |
-|---|---|---|
-| `channel` | string | Channel name |
-| `type` | string | Message type (`"info"`, `"attention"`, `"done"`) |
-| `msgId` | string | Message ID |
-| `to` | string \| null | Directed recipient (null = broadcast) |
-
----
-
-## Filter daemon events (v1, source: `filter-daemon/index.mjs`)
-
-Format: `{ ts, event, orchestrator, worker, detail }`
-
-### filter.register (written by orchestrators)
-
-```json
-{ "ts": "...", "event": "filter.register", "orchestrator": "orch-foo", "worker": null,
-  "detail": { "interest_id": "orch-foo", "notify_event": "filter.wake.orch-foo",
-               "prompt": "any worker CI failure", "context": null, "persistent": false } }
-```
-
-| `detail` field | Type | Description |
-|---|---|---|
-| `interest_id` | string | Unique ID for this interest |
-| `notify_event` | string | Event name the daemon will emit on match (default: `filter.wake.{id}`) |
-| `prompt` | string | Natural language query for Groq classification |
-| `context` | object \| null | Optional context (e.g. `{workers: ["CTL-210"]}`) |
-| `persistent` | bool | If false, deregistered after first match |
-
-### filter.deregister (written by orchestrators)
-
-```json
-{ "ts": "...", "event": "filter.deregister", "orchestrator": "orch-foo", "worker": null,
-  "detail": { "interest_id": "orch-foo" } }
-```
-
-### filter.wake.{id} (written by filter-daemon on semantic match)
-
-```json
-{ "ts": "...", "event": "filter.wake.orch-foo", "orchestrator": "orch-foo", "worker": null,
-  "detail": { "reason": "CI failure event matched worker CTL-210 interest",
-               "source_event_ids": ["evt_abc123"], "interest_id": "orch-foo" } }
-```
-
-| `detail` field | Type | Description |
-|---|---|---|
-| `reason` | string | One sentence from Groq explaining the match |
-| `source_event_ids` | string[] | IDs of events that triggered the match (empty for watchdog wakes) |
-| `interest_id` | string | Interest that was matched |
-
----
-
-## Filter pitfalls summary
-
-| Event | Common mistake | Correct filter |
-|---|---|---|
-| `github.check_suite.*` | `.scope.pr == N` | `(.detail.prNumbers // [] \| contains([N]))` |
-| `github.workflow_run.*` | `.scope.pr == N` | `(.detail.prNumbers // [] \| contains([N]))` |
-| `github.push` | `.scope.pr == N` | `.scope.ref == "refs/heads/branch-name"` |
-| `github.pr_review.*` | `.detail.state == "approved"` | `.detail.state == "APPROVED"` (uppercase) or add `\| ascii_downcase` |
-| Any v1 event | `.scope.repo` / `.scope.pr` | `.event` / `.orchestrator` / `.worker` (no `scope` in v1) |
-| `catalyst-events tail --since "5 minutes ago"` | `--since` flag does not exist | Use `--since-line <N>` with a line count offset |
+| `check_suite` / `workflow_run` PR | `.attributes."vcs.pr.number" == N` alone | Also check `.body.payload.prNumbers // [] \| index(N) != null` |
+| `github.push` | `.attributes."vcs.pr.number"` | Push events have no PR; use `.attributes."vcs.ref.name"` |
+| PR review state casing | `.body.payload.state == "approved"` | `.body.payload.state == "APPROVED"` or add `\| ascii_downcase` |
+| GitHub events orchestrator | `.attributes."catalyst.orchestrator.id"` | Always null on GitHub events — do not filter by it |
+| `filter.wake` for specific id | `.attributes."event.name" == "filter.wake.${id}"` | `.attributes."event.name" == "filter.wake" and .attributes."event.label" == "${id}"` |
+| Attribute dot-notation in jq | `.attributes.event.name` | `.attributes."event.name"` (must double-quote) |

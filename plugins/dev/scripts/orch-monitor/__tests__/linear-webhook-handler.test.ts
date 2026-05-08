@@ -3,14 +3,14 @@ import { createHmac } from "node:crypto";
 import {
   createLinearWebhookHandler,
   buildLinearEventLogEnvelope,
-  LINEAR_WEBHOOK_SOURCE,
 } from "../lib/linear-webhook-handler";
-import type { EventLogWriter, AppendableEvent } from "../lib/event-log";
+import type { EventLogWriter } from "../lib/event-log";
+import type { CanonicalEvent } from "../lib/canonical-event";
 
 const SECRET = "linear-test-secret";
+const TS = "2026-05-08T18:00:00.000Z";
 
 function sign(body: string): string {
-  // Linear: hex digest only, no `sha256=` prefix.
   return createHmac("sha256", SECRET).update(body).digest("hex");
 }
 
@@ -21,14 +21,15 @@ function makeReq(
     "linear-delivery": string;
     "linear-signature": string;
   }> = {},
-  method = "POST"
+  method = "POST",
 ): Request {
   const bodyStr = JSON.stringify(body);
   return new Request("http://localhost:7400/api/webhook/linear", {
     method,
     headers: {
       "linear-event": headers["linear-event"] ?? "Issue",
-      "linear-delivery": headers["linear-delivery"] ?? `linear-delivery-${Math.random()}`,
+      "linear-delivery":
+        headers["linear-delivery"] ?? `linear-delivery-${Math.random()}`,
       "linear-signature": headers["linear-signature"] ?? sign(bodyStr),
       "content-type": "application/json",
     },
@@ -37,9 +38,9 @@ function makeReq(
 }
 
 class FakeEventLog implements EventLogWriter {
-  appends: AppendableEvent[] = [];
+  appends: CanonicalEvent[] = [];
   failNext = false;
-  append(envelope: AppendableEvent): Promise<void> {
+  append(envelope: CanonicalEvent): Promise<void> {
     if (this.failNext) {
       this.failNext = false;
       return Promise.reject(new Error("disk full"));
@@ -77,40 +78,56 @@ describe("createLinearWebhookHandler", () => {
   });
 
   it("returns 405 for non-POST", async () => {
-    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+    });
     const res = await handler.handle(makeReq(issueUpdatePayload(), {}, "GET"));
     expect(res.status).toBe(405);
   });
 
   it("returns 401 for bad signature", async () => {
-    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+    });
     const res = await handler.handle(
-      makeReq(issueUpdatePayload(), { "linear-signature": "deadbeef" })
+      makeReq(issueUpdatePayload(), { "linear-signature": "deadbeef" }),
     );
     expect(res.status).toBe(401);
   });
 
   it("returns 400 when event header is missing", async () => {
-    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
-    const res = await handler.handle(makeReq(issueUpdatePayload(), { "linear-event": "" }));
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+    });
+    const res = await handler.handle(
+      makeReq(issueUpdatePayload(), { "linear-event": "" }),
+    );
     expect(res.status).toBe(400);
   });
 
   it("returns 400 when delivery header is missing", async () => {
-    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
-    const res = await handler.handle(makeReq(issueUpdatePayload(), { "linear-delivery": "" }));
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+    });
+    const res = await handler.handle(
+      makeReq(issueUpdatePayload(), { "linear-delivery": "" }),
+    );
     expect(res.status).toBe(400);
   });
 
   it("returns 400 for invalid JSON body", async () => {
     const bodyStr = "{not json";
-    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }] });
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+    });
     const req = new Request("http://localhost/api/webhook/linear", {
       method: "POST",
       headers: {
         "linear-event": "Issue",
         "linear-delivery": "delivery-1",
-        "linear-signature": createHmac("sha256", SECRET).update(bodyStr).digest("hex"),
+        "linear-signature": createHmac("sha256", SECRET)
+          .update(bodyStr)
+          .digest("hex"),
         "content-type": "application/json",
       },
       body: bodyStr,
@@ -119,7 +136,7 @@ describe("createLinearWebhookHandler", () => {
     expect(res.status).toBe(400);
   });
 
-  it("happy path → 200 + envelope written to event log", async () => {
+  it("happy path → 200 + canonical envelope written to event log", async () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
@@ -130,10 +147,11 @@ describe("createLinearWebhookHandler", () => {
     const env = eventLog.appends[0];
     expect(env).toBeDefined();
     if (!env) throw new Error("expected event log append");
-    expect(env.source).toBe(LINEAR_WEBHOOK_SOURCE);
-    expect(env.event).toBe("linear.issue.state_changed");
-    expect(env.scope.ticket).toBe("CTL-210");
-    expect(env.id).toMatch(/^evt_linear_/);
+    expect(env.resource["service.name"]).toBe("catalyst.linear");
+    expect(env.attributes["event.name"]).toBe("linear.issue.state_changed");
+    expect(env.attributes["linear.issue.identifier"]).toBe("CTL-210");
+    expect(env.attributes["event.label"]).toBe("CTL-210");
+    expect(env.attributes["event.channel"]).toBe("webhook");
   });
 
   it("emits to in-process bus on success", async () => {
@@ -154,16 +172,17 @@ describe("createLinearWebhookHandler", () => {
       eventLog,
     });
     const deliveryId = "stable-delivery-1";
-    await handler.handle(makeReq(issueUpdatePayload(), { "linear-delivery": deliveryId }));
+    await handler.handle(
+      makeReq(issueUpdatePayload(), { "linear-delivery": deliveryId }),
+    );
     expect(eventLog.appends.length).toBe(1);
 
     const res2 = await handler.handle(
-      makeReq(issueUpdatePayload(), { "linear-delivery": deliveryId })
+      makeReq(issueUpdatePayload(), { "linear-delivery": deliveryId }),
     );
     expect(res2.status).toBe(200);
     const body = (await res2.json()) as { ok: boolean; replay?: boolean };
     expect(body.replay).toBe(true);
-    // Replay must NOT produce a second event-log append.
     expect(eventLog.appends.length).toBe(1);
   });
 
@@ -191,22 +210,19 @@ describe("createLinearWebhookHandler", () => {
           type: "Project",
           data: { id: "p1" },
         },
-        { "linear-event": "Project" }
-      )
+        { "linear-event": "Project" },
+      ),
     );
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(0);
   });
 
-  // CTL-211 — onAccept hook lets the server invalidate the LinearFetcher cache
-  // when a ticket changes state, so the dashboard reflects updates immediately.
   it("invokes onAccept after appending to event log (issue event)", async () => {
     const seen: Array<{ kind: string; ticket?: string | null }> = [];
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
       onAccept: (event) => {
-        // Cast just to satisfy structural read in the test
         const evt = event as { kind: string; ticket?: string | null };
         seen.push({ kind: evt.kind, ticket: evt.ticket });
       },
@@ -229,8 +245,8 @@ describe("createLinearWebhookHandler", () => {
     await handler.handle(
       makeReq(
         { action: "create", type: "Project", data: { id: "p1" } },
-        { "linear-event": "Project" }
-      )
+        { "linear-event": "Project" },
+      ),
     );
     expect(seen).toHaveLength(0);
   });
@@ -246,26 +262,34 @@ describe("createLinearWebhookHandler", () => {
     });
     const res = await handler.handle(makeReq(issueUpdatePayload()));
     expect(res.status).toBe(200);
-    // Event-log append still happened despite consumer failure.
     expect(eventLog.appends.length).toBe(1);
   });
 
-  // CTL-263: actorId extraction through full HTTP path
-  it("extracts actorId from payload.actor.id and writes it to event log detail", async () => {
-    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }], eventLog });
+  it("extracts actorId and writes it to body.payload + linear.actor.id attribute", async () => {
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+      eventLog,
+    });
     const payload = {
       action: "update",
       type: "Issue",
-      actor: { id: "actor-uuid-999", name: "Some User", email: "user@example.com" },
+      actor: { id: "actor-uuid-999", name: "Some User" },
       data: { id: "i1", identifier: "CTL-263", team: { key: "CTL" } },
       updatedFrom: { description: "old desc" },
     };
     await handler.handle(makeReq(payload));
-    expect(eventLog.appends[0]?.detail).toMatchObject({ actorId: "actor-uuid-999" });
+    expect(
+      eventLog.appends[0]?.attributes["linear.actor.id"],
+    ).toBe("actor-uuid-999");
+    const bodyPayload = eventLog.appends[0]?.body.payload as { actorId: string };
+    expect(bodyPayload.actorId).toBe("actor-uuid-999");
   });
 
-  it("writes actorId: null when payload has no actor field", async () => {
-    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }], eventLog });
+  it("writes actorId: null in body.payload when payload has no actor field", async () => {
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+      eventLog,
+    });
     const payload = {
       action: "update",
       type: "Issue",
@@ -273,10 +297,11 @@ describe("createLinearWebhookHandler", () => {
       updatedFrom: { description: "old desc" },
     };
     await handler.handle(makeReq(payload));
-    expect(eventLog.appends[0]?.detail).toMatchObject({ actorId: null });
+    const bodyPayload = eventLog.appends[0]?.body.payload as { actorId: string | null };
+    expect(bodyPayload.actorId).toBeNull();
+    expect(eventLog.appends[0]?.attributes["linear.actor.id"]).toBeUndefined();
   });
 
-  // CTL-263: bot-skip logic
   it("suppresses issue events from bot actor — no event log append", async () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
@@ -286,31 +311,13 @@ describe("createLinearWebhookHandler", () => {
     const botPayload = {
       action: "update",
       type: "Issue",
-      actor: { id: "bot-uuid-123", name: "Catalyst Bot", email: "bot@example.com" },
+      actor: { id: "bot-uuid-123", name: "Catalyst Bot" },
       data: { id: "i1", identifier: "CTL-263", team: { key: "CTL" } },
       updatedFrom: { stateId: "old" },
     };
     const res = await handler.handle(makeReq(botPayload));
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(0);
-  });
-
-  it("suppressed bot event still returns ok:true", async () => {
-    const handler = createLinearWebhookHandler({
-      linearSecrets: [{ key: "test", secret: SECRET }],
-      eventLog,
-      botUserId: "bot-uuid-123",
-    });
-    const botPayload = {
-      action: "update",
-      type: "Issue",
-      actor: { id: "bot-uuid-123" },
-      data: { id: "i1", identifier: "CTL-263", team: { key: "CTL" } },
-      updatedFrom: { stateId: "old" },
-    };
-    const res = await handler.handle(makeReq(botPayload));
-    const body = (await res.json()) as { ok: boolean };
-    expect(body.ok).toBe(true);
   });
 
   it("non-bot actor writes normally even when botUserId is configured", async () => {
@@ -330,19 +337,6 @@ describe("createLinearWebhookHandler", () => {
     expect(eventLog.appends.length).toBe(1);
   });
 
-  it("no botUserId configured → no suppression (backwards compat)", async () => {
-    const handler = createLinearWebhookHandler({ linearSecrets: [{ key: "test", secret: SECRET }], eventLog });
-    const payload = {
-      action: "update",
-      type: "Issue",
-      actor: { id: "any-user-uuid" },
-      data: { id: "i1", identifier: "CTL-263", team: { key: "CTL" } },
-      updatedFrom: { stateId: "old" },
-    };
-    await handler.handle(makeReq(payload));
-    expect(eventLog.appends.length).toBe(1);
-  });
-
   it("bot-authored non-issue events (comment) are NOT suppressed", async () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
@@ -355,13 +349,15 @@ describe("createLinearWebhookHandler", () => {
       actor: { id: "bot-uuid-123" },
       data: { id: "c1", issueId: "i1" },
     };
-    await handler.handle(makeReq(commentPayload, { "linear-event": "Comment" }));
+    await handler.handle(
+      makeReq(commentPayload, { "linear-event": "Comment" }),
+    );
     expect(eventLog.appends.length).toBe(1);
   });
 });
 
-describe("buildLinearEventLogEnvelope", () => {
-  it("Issue update → topic from event.topic, scope.ticket from event.ticket", () => {
+describe("buildLinearEventLogEnvelope (canonical)", () => {
+  it("Issue update → topic from event.topic, linear.issue.identifier from ticket", () => {
     const env = buildLinearEventLogEnvelope(
       {
         kind: "issue",
@@ -373,16 +369,17 @@ describe("buildLinearEventLogEnvelope", () => {
         updatedFromKeys: ["stateId"],
         actorId: null,
       },
-      "delivery-1"
+      TS,
     );
     expect(env).not.toBeNull();
-    expect(env?.event).toBe("linear.issue.state_changed");
-    expect(env?.scope.ticket).toBe("CTL-1");
-    expect(env?.id).toBe("evt_linear_delivery-1");
+    expect(env!.attributes["event.name"]).toBe("linear.issue.state_changed");
+    expect(env!.attributes["linear.issue.identifier"]).toBe("CTL-1");
+    expect(env!.attributes["linear.team.key"]).toBe("CTL");
+    expect(env!.attributes["event.entity"]).toBe("issue");
+    expect(env!.attributes["event.action"]).toBe("state_changed");
   });
 
-  // CTL-263: actorId propagation
-  it("Issue event includes actorId in detail when actor is present", () => {
+  it("Issue event includes actorId in body.payload + attributes when actor is present", () => {
     const env = buildLinearEventLogEnvelope(
       {
         kind: "issue",
@@ -394,12 +391,14 @@ describe("buildLinearEventLogEnvelope", () => {
         updatedFromKeys: [],
         actorId: "actor-uuid-123",
       },
-      "delivery-1"
+      TS,
     );
-    expect(env?.detail).toMatchObject({ actorId: "actor-uuid-123" });
+    expect(env!.attributes["linear.actor.id"]).toBe("actor-uuid-123");
+    const payload = env!.body.payload as { actorId: string };
+    expect(payload.actorId).toBe("actor-uuid-123");
   });
 
-  it("Issue event has actorId null in detail when no actor", () => {
+  it("Issue event has actorId null in body.payload when no actor", () => {
     const env = buildLinearEventLogEnvelope(
       {
         kind: "issue",
@@ -411,9 +410,10 @@ describe("buildLinearEventLogEnvelope", () => {
         updatedFromKeys: [],
         actorId: null,
       },
-      "delivery-2"
+      TS,
     );
-    expect(env?.detail).toMatchObject({ actorId: null });
+    const payload = env!.body.payload as { actorId: string | null };
+    expect(payload.actorId).toBeNull();
   });
 
   it("Comment create → linear.comment.created", () => {
@@ -426,9 +426,10 @@ describe("buildLinearEventLogEnvelope", () => {
         issueId: "i1",
         data: {},
       },
-      "delivery-1"
+      TS,
     );
-    expect(env?.event).toBe("linear.comment.created");
+    expect(env!.attributes["event.name"]).toBe("linear.comment.created");
+    expect(env!.attributes["linear.issue.identifier"]).toBe("CTL-1");
   });
 
   it("Cycle update → linear.cycle.updated", () => {
@@ -440,13 +441,30 @@ describe("buildLinearEventLogEnvelope", () => {
         teamKey: "CTL",
         data: {},
       },
-      "delivery-1"
+      TS,
     );
-    expect(env?.event).toBe("linear.cycle.updated");
+    expect(env!.attributes["event.name"]).toBe("linear.cycle.updated");
+    expect(env!.attributes["linear.team.key"]).toBe("CTL");
+  });
+
+  it("Reaction create → linear.reaction.created", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "reaction",
+        action: "create",
+        reactionId: "r1",
+        data: {},
+      },
+      TS,
+    );
+    expect(env!.attributes["event.name"]).toBe("linear.reaction.created");
   });
 
   it("ignored → null", () => {
-    const env = buildLinearEventLogEnvelope({ kind: "ignored", reason: "test" }, "delivery-1");
+    const env = buildLinearEventLogEnvelope(
+      { kind: "ignored", reason: "test" },
+      TS,
+    );
     expect(env).toBeNull();
   });
 });

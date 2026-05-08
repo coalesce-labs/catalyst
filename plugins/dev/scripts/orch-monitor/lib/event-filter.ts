@@ -39,8 +39,11 @@ export function validatePredicate(predicate: string): ValidationResult {
     // missing field) don't masquerade as compile errors. We only reject exit
     // codes 2 (usage) and 3 (compile error). Exits 0/1/4 all mean "valid
     // syntax" (matched / no-match / no-output-with-exit-status).
+    // CTL-300: canonical OTel-shaped envelope. Field validation must use the
+    // same shape producers emit, so jq predicates referencing canonical paths
+    // (.attributes."event.name", .body.payload, etc) compile cleanly.
     const sample =
-      '{"event":"test","ts":"","scope":{},"detail":{},"orchestrator":null,"worker":null}';
+      '{"ts":"","observedTs":"","severityText":"INFO","severityNumber":9,"traceId":null,"spanId":null,"resource":{"service.name":"","service.namespace":"catalyst","service.version":""},"attributes":{"event.name":""},"body":{}}';
     const r = Bun.spawnSync({
       cmd: [
         "jq",

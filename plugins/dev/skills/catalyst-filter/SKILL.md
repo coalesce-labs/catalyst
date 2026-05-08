@@ -27,7 +27,7 @@ emits `filter.wake.{id}` events that orchestrators wait for with `catalyst-event
 
 - **Very short waits (< 1 min)** — direct `catalyst-events wait-for` with a jq filter is
   simpler and has lower latency
-- **Single, precisely expressible conditions** — `.event == "github.pr.merged" and .scope.pr == 42`
+- **Single, precisely expressible conditions** — `.attributes."event.name" == "github.pr.merged" and .attributes."vcs.pr.number" == 42`
   needs no LLM
 - **`GROQ_API_KEY` is unavailable** — use the jq fallback described at the end of this doc
 
@@ -61,7 +61,7 @@ Orchestrator                         filter daemon                     Event log
     │                                     │── append filter.wake.{id} ────►│
     │                                     │                                │
     │◄── catalyst-events wait-for ────────────────────────────────────────│
-    │    (.event == "filter.wake.{id}")   │                                │
+    │    (.attributes."event.name" == "filter.wake" and .attributes."event.label" == "{id}")   │                                │
     │                                     │                                │
     │── emit filter.deregister ──────────►│                                │
 ```
@@ -266,7 +266,7 @@ is belt-and-suspenders rather than required.
 
 ```bash
 # Optional: re-register on daemon restart
-catalyst-events wait-for --filter '.event == "filter.daemon.startup"' --timeout 0 \
+catalyst-events wait-for --filter '.attributes."event.name" == "filter.daemon.startup"' --timeout 0 \
   | while read -r evt; do
       filter_register_self  # idempotent — overwrites the existing entry
     done
@@ -278,7 +278,7 @@ After registering, block on the corresponding wake event:
 
 ```bash
 EVENT=$(catalyst-events wait-for \
-  --filter ".event == \"filter.wake.${ORCH_ID}\"" \
+  --filter ".attributes.\"event.name\" == \"filter.wake\" and .attributes.\"event.label\" == \"${ORCH_ID}\"" \
   --timeout 7200 || true)
 
 # Mandatory authoritative check — always verify via REST regardless of wait outcome
@@ -401,9 +401,9 @@ if [[ "$FILTER_STATUS" == "stopped" ]] || [[ -z "${GROQ_API_KEY:-}" ]]; then
   # jq fallback — express the condition syntactically
   EVENT=$(catalyst-events wait-for \
     --filter "
-      (.event | startswith(\"github.pr.\")) or
-      (.event | startswith(\"github.check_suite.\")) or
-      (.event == \"worker-status-change\" and (.worker | IN(\"CTL-253\",\"CTL-254\")))
+      (.attributes.\"event.name\" | startswith(\"github.pr.\")) or
+      (.attributes.\"event.name\" | startswith(\"github.check_suite.\")) or
+      (.attributes.\"event.name\" == \"worker-status-change\" and (.attributes.\"catalyst.worker.ticket\" | IN(\"CTL-253\",\"CTL-254\")))
     " \
     --timeout 7200 || true)
 else
@@ -462,7 +462,7 @@ catalyst-state.sh event '{"event":"filter.register","orchestrator":"my-orch","de
 catalyst-state.sh event '{"event":"filter.register","orchestrator":"my-orch","detail":{"interest_id":"sess_abc","session_id":"sess_abc","notify_event":"filter.wake.sess_abc","persistent":true,"prompt":"Wake me on CI events for PR 42 or comms addressed to CTL-269.","context":{"pr_numbers":[42],"tickets":["CTL-269"],"workers":["sess_abc"]}}}'
 
 # Wait for wake signal
-catalyst-events wait-for --filter '.event == "filter.wake.my-orch"' --timeout 7200
+catalyst-events wait-for --filter '.attributes."event.name" == "filter.wake" and .attributes."event.label" == "my-orch"' --timeout 7200
 
 # Deregister
 catalyst-state.sh event '{"event":"filter.deregister","detail":{"interest_id":"my-orch"}}'
