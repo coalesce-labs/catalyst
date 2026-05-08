@@ -1,9 +1,18 @@
 # Changelog
 
-## [8.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.2.0...catalyst-dev-v8.3.0) (2026-05-08)
+## [8.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.2.0...catalyst-dev-v8.3.0)
+
+May 08, 2026
+
+<!-- ai-enhanced -->
+
+### Activity Brief & Deterministic PR Routing
+
+Generate AI-powered executive summaries of event log activity from the HUD sidebar with 30m/1h/6h windows. PR lifecycle events (CI, reviews, deployments, merges) now route deterministically through field comparison instead of Groq classification, eliminating false positives and latency. Workers register structured PR interests with repo/base branch fields rather than natural language prompts.
 
 
-### Features
+
+### PRs
 
 * **dev:** Activity Brief panel — AI summary of recent event activity (CTL-282) ([#470](https://github.com/coalesce-labs/catalyst/issues/470)) ([e76bed7](https://github.com/coalesce-labs/catalyst/commit/e76bed7e11099c37ad99b2476bb44c7f5bbe1ee9))
 * **dev:** add /god skill — cross-project omniscient status view (CTL-193) ([#466](https://github.com/coalesce-labs/catalyst/issues/466)) ([0daed35](https://github.com/coalesce-labs/catalyst/commit/0daed35e90aaa1ef63f64bea1b20e3b5bdf07ffd))
@@ -16,10 +25,6 @@
 * **dev:** per-repo color config for HUD scope chips (CTL-277) ([#471](https://github.com/coalesce-labs/catalyst/issues/471)) ([f952bfa](https://github.com/coalesce-labs/catalyst/commit/f952bfad7a4590ec1b93b97ce7a0e2152b3a039b))
 * **dev:** per-team Linear webhook secrets + fix pre-existing bugs (CTL-285) ([#474](https://github.com/coalesce-labs/catalyst/issues/474)) ([bbdb60f](https://github.com/coalesce-labs/catalyst/commit/bbdb60feb1843499e14dbee125b8fee62ff7db54))
 * **dev:** wire Linear webhook events into HUD activity feed (CTL-275) ([#463](https://github.com/coalesce-labs/catalyst/issues/463)) ([510e6a7](https://github.com/coalesce-labs/catalyst/commit/510e6a7c900155bc2afcf7d690980ea25b064aea))
-
-
-### Bug Fixes
-
 * **dev:** align Linear webhook URL key with consumers (CTL-274) ([#450](https://github.com/coalesce-labs/catalyst/issues/450)) ([bf6ba0c](https://github.com/coalesce-labs/catalyst/commit/bf6ba0c0b6fd740b5eb2c7715472b81d53fc3f11))
 * **dev:** event filter bugs — Codex reviews silently dropped (CTL-270) ([#443](https://github.com/coalesce-labs/catalyst/issues/443)) ([82b1d3f](https://github.com/coalesce-labs/catalyst/commit/82b1d3f45ff989980a8ca22922ae877d65754b22))
 * **dev:** keyed-format fallback for linearSmeeChannel (CTL-301) ([#493](https://github.com/coalesce-labs/catalyst/issues/493)) ([332e8e3](https://github.com/coalesce-labs/catalyst/commit/332e8e3bd87483b99207b85586855f36bebbd800))
