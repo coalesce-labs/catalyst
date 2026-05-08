@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 # catalyst-hud — Ink TUI for the catalyst event stream.
 # For SSH-from-iPad / minimal-deps fallback, use: catalyst-hud-classic
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 exec bun run "${SCRIPT_DIR}/orch-monitor/cli/hud.tsx" "$@"
