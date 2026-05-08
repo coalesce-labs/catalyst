@@ -57,6 +57,7 @@ bun run plugins/dev/scripts/orch-monitor/server.ts --terminal
 - [Event architecture](./events/) — how SSE streams and the global event log fit together
 - [catalyst-events CLI](./catalyst-events/) — command reference and jq filter cookbook for the event log
 - [Event flow — GitHub to worker](./event-flow/) — end-to-end: how a GitHub push becomes a `wait-for` wake
+- [Semantic event routing (`catalyst-filter`)](./catalyst-filter/) — daemon that routes raw events to workers and orchestrators via Groq-backed semantic matching
 - [Agent communication (`catalyst-comms`)](../reference/catalyst-comms/) — how workers coordinate with each other across worktrees
 
 ## When Not to Enable Observability
