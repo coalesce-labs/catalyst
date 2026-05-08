@@ -1173,6 +1173,55 @@ describe("createWebhookHandler — orchestrator attribution", () => {
       headRef: "orch-foo-CTL-2",
     });
   });
+
+  it("derives traceId from orchestrator ID (sha256(orchId).slice(0,32))", async () => {
+    const { createHash } = await import("node:crypto");
+    const orchId = "orch-foo-CTL-1";
+    const expectedTraceId = createHash("sha256")
+      .update(orchId)
+      .digest("hex")
+      .slice(0, 32);
+    const log = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog: log,
+      resolveOrchestrator: (input) =>
+        input.headRef === orchId ? orchId : null,
+    });
+    await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "synchronize",
+        pull_request: {
+          number: 1,
+          merged: false,
+          head: { ref: orchId },
+        },
+      }),
+    );
+    expect(log.appends.length).toBe(1);
+    expect(log.appends[0]?.traceId).toBe(expectedTraceId);
+  });
+
+  it("traceId remains null when no orchestrator is resolved", async () => {
+    const log = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog: log,
+      resolveOrchestrator: () => null,
+    });
+    await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: { number: 999, merged: false, head: { ref: "feature/random" } },
+      }),
+    );
+    expect(log.appends.length).toBe(1);
+    expect(log.appends[0]?.traceId).toBeNull();
+  });
 });
 
 describe("createWebhookHandler — event log fan-out", () => {
