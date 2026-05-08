@@ -206,28 +206,34 @@ filter_daemon_running() {
 }
 
 filter_register_worker() {
-  # Args: $1 = PR_NUMBER, $2 = TICKET_ID, $3 = BRANCH_NAME
+  # Args: $1 = PR_NUMBER, $2 = TICKET_ID, $3 = BRANCH_NAME, $4 = REPO (org/name), $5 = BASE_BRANCH (default: main)
+  # CTL-284: registers a built-in pr_lifecycle interest. The daemon routes PR
+  # events deterministically — no Groq round-trip — and persists merge-SHA →
+  # deployment correlations across restarts.
   filter_daemon_running || return 1
   [ -n "${CATALYST_SESSION_ID:-}" ] || return 1
-  local pr="$1" ticket="$2" branch="$3"
-  local prompt="Wake me when: CI passes or fails on PR ${pr}; PR ${pr} is merged or closed; PR ${pr} receives a review or changes-requested; the base branch of branch ${branch} receives a push (BEHIND state); I receive a comms message addressed to ${ticket}; or my Linear ticket ${ticket} status changes"
+  local pr="$1" ticket="$2" branch="$3" repo="$4" base="${5:-main}"
   "$STATE_SCRIPT" event "$(jq -nc \
     --arg sid "$CATALYST_SESSION_ID" \
     --arg orch "${CATALYST_ORCHESTRATOR_ID:-}" \
     --arg notify "filter.wake.${CATALYST_SESSION_ID}" \
-    --arg prompt "$prompt" \
     --argjson pr "$pr" \
     --arg ticket "$ticket" \
     --arg branch "$branch" \
+    --arg repo "$repo" \
+    --arg base "$base" \
     '{ts: (now | todate), event: "filter.register",
       orchestrator: (if $orch == "" then null else $orch end),
       worker: null,
       detail: {
         interest_id: $sid,
         session_id: $sid,
+        interest_type: "pr_lifecycle",
         notify_event: $notify,
         persistent: true,
-        prompt: $prompt,
+        pr_numbers: [$pr],
+        repo: $repo,
+        base_branches: [{pr: $pr, base: $base}],
         context: {pr_numbers: [$pr], tickets: [$ticket], branches: [$branch], workers: [$sid]}
       }}')" 2>/dev/null || return 1
   return 0
@@ -661,7 +667,10 @@ USE_REST=false
 # jq filters for each concern. When it fails (daemon not running, no session id),
 # the loop falls back to the existing two-phase pattern below.
 USE_FILTER_DAEMON=false
-if filter_register_worker "$PR_NUMBER" "$TICKET_ID" "$(git branch --show-current)"; then
+# CTL-284: pass repo + base branch so the daemon can populate filter_state for
+# deployment correlation and route base-branch pushes (PR is BEHIND).
+PR_BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "main")
+if filter_register_worker "$PR_NUMBER" "$TICKET_ID" "$(git branch --show-current)" "$REPO" "$PR_BASE_BRANCH"; then
   USE_FILTER_DAEMON=true
   echo "[Phase 5] Registered filter interest for session ${CATALYST_SESSION_ID}"
 fi

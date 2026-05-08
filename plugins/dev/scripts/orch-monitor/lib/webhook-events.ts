@@ -29,6 +29,8 @@ export type WebhookEvent =
       action: string;
       merged: boolean;
       mergedAt: string | null;
+      /** Merge commit SHA from `pull_request.merge_commit_sha` (CTL-284 — used by the filter daemon to correlate `pr.merged` with the subsequent `deployment.created` event). Null until GitHub finalizes the merge commit. */
+      mergeCommitSha: string | null;
       draft: boolean;
       mergeable: boolean | null;
       /** Head branch name (CTL-234 — used to attribute the event to an orchestrator). Empty when payload omits it. */
@@ -256,6 +258,7 @@ function parsePullRequest(
     action: getStr(payload, "action"),
     merged: getBool(pr, "merged"),
     mergedAt: getOptStr(pr, "merged_at"),
+    mergeCommitSha: getOptStr(pr, "merge_commit_sha"),
     draft: getBool(pr, "draft"),
     mergeable: getOptBool(pr, "mergeable"),
     headRef: getPrHeadRef(pr),

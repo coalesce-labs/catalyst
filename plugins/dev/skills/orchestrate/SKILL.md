@@ -731,9 +731,44 @@ if catalyst-filter status >/dev/null 2>&1; then
       detail: {
         session_id: (if $sid == "" then null else $sid end),
         notify_event: $notify,
-        prompt: "Wake me when: CI passes or fails on any of my PRs; a PR gets changes-requested, is merged, or closed; the base branch receives a push that would put my PRs BEHIND; any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
+        prompt: "Wake me when: any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
         persistent: true,
         context: {pr_numbers: $prs, tickets: $tickets, branches: $branches}
+      }
+    }')"
+
+  # CTL-284: register a SECOND interest using the built-in pr_lifecycle type.
+  # The deterministic router handles all PR/CI/review/deployment events without
+  # Groq. The prose interest above only covers the residual concerns
+  # (comms-attention and Linear ticket status changes). Both interests use the
+  # same notify_event so the wait-for filter is unchanged — wakes from either
+  # path arrive on filter.wake.${ORCH_NAME}.
+  REPO_FULL_NAME=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+  ACTIVE_BASES_JSON=$(jq -rs '[
+    .[] | select(.pr.number != null and .pr.baseRefName != null)
+        | {pr: .pr.number, base: .pr.baseRefName}
+  ]' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg orch "${ORCH_NAME}" \
+    --arg id "${ORCH_NAME}-pr-lifecycle" \
+    --arg notify "filter.wake.${ORCH_NAME}" \
+    --arg repo "${REPO_FULL_NAME}" \
+    --argjson prs "${ACTIVE_PRS}" \
+    --argjson bases "${ACTIVE_BASES_JSON}" \
+    '{
+      ts: (now | todate),
+      event: "filter.register",
+      orchestrator: $orch,
+      worker: null,
+      detail: {
+        interest_id: $id,
+        interest_type: "pr_lifecycle",
+        notify_event: $notify,
+        persistent: true,
+        pr_numbers: $prs,
+        repo: $repo,
+        base_branches: $bases
       }
     }')"
 fi
@@ -991,11 +1026,19 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
 
     # Refresh filter context with the newly discovered PR number (CTL-257).
     # Re-emitting filter.register with the same orchestrator key overwrites the prior registration.
+    # CTL-284: also refresh the pr_lifecycle interest with the new PR number.
     if catalyst-filter status >/dev/null 2>&1; then
       _UPD_PRS=$(jq -rs '[.[].pr.number // empty] | unique' \
         "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
       _UPD_TICKETS=$(jq -rs '[.[].ticket // empty]' \
         "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+      _UPD_BASES=$(jq -rs '[
+        .[] | select(.pr.number != null and .pr.baseRefName != null)
+            | {pr: .pr.number, base: .pr.baseRefName}
+      ]' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+      _UPD_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+
+      # Prose interest (residual concerns: comms-attention, ticket status)
       "$STATE_SCRIPT" event "$(jq -nc \
         --arg orch "${ORCH_NAME}" \
         --arg sid "${CATALYST_SESSION_ID:-}" \
@@ -1010,9 +1053,33 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
           detail: {
             session_id: (if $sid == "" then null else $sid end),
             notify_event: $notify,
-            prompt: "Wake me when: CI passes or fails on any of my PRs; a PR gets changes-requested, is merged, or closed; the base branch receives a push that would put my PRs BEHIND; any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
+            prompt: "Wake me when: any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
             persistent: true,
             context: {pr_numbers: $prs, tickets: $tickets}
+          }
+        }')" 2>/dev/null || true
+
+      # CTL-284: pr_lifecycle interest (deterministic PR/CI/review/deployment routing)
+      "$STATE_SCRIPT" event "$(jq -nc \
+        --arg orch "${ORCH_NAME}" \
+        --arg id "${ORCH_NAME}-pr-lifecycle" \
+        --arg notify "filter.wake.${ORCH_NAME}" \
+        --arg repo "${_UPD_REPO}" \
+        --argjson prs "${_UPD_PRS}" \
+        --argjson bases "${_UPD_BASES}" \
+        '{
+          ts: (now | todate),
+          event: "filter.register",
+          orchestrator: $orch,
+          worker: null,
+          detail: {
+            interest_id: $id,
+            interest_type: "pr_lifecycle",
+            notify_event: $notify,
+            persistent: true,
+            pr_numbers: $prs,
+            repo: $repo,
+            base_branches: $bases
           }
         }')" 2>/dev/null || true
     fi
