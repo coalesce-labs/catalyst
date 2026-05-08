@@ -300,6 +300,30 @@ Cloud, Datadog, etc.), point these URLs at your hosted Prometheus/Loki-compatibl
 
 See [Setting up the OTel stack](/observability/setup/) for the full installation guide.
 
+### Forwarders (`catalyst.observability.forwarders`)
+
+Config lives in `~/.config/catalyst/config-{projectKey}.json` under `catalyst.observability.forwarders`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `forwarders.otlp.enabled` | boolean | `false` | Enable OTLP/HTTP forwarding |
+| `forwarders.otlp.endpoint` | string | `$OTEL_EXPORTER_OTLP_ENDPOINT` | Collector URL (port 4318) |
+| `forwarders.otlp.batchSize` | number | `100` | Max events per POST |
+| `forwarders.otlp.flushIntervalMs` | number | `5000` | Flush interval in ms |
+| `forwarders.posthog.enabled` | boolean | `false` | Enable PostHog forwarding |
+| `forwarders.posthog.apiKey` | string | — | Project API key (`phc_...`) |
+| `forwarders.posthog.host` | string | `https://us.i.posthog.com` | PostHog ingest host |
+| `forwarders.posthog.batchSize` | number | `50` | Max events per POST |
+| `forwarders.posthog.flushIntervalMs` | number | `10000` | Flush interval in ms |
+| `forwarders.cloudflareAE.enabled` | boolean | `false` | Enable Cloudflare AE forwarding |
+| `forwarders.cloudflareAE.accountId` | string | — | Cloudflare account ID |
+| `forwarders.cloudflareAE.apiToken` | string | — | Cloudflare API token |
+| `forwarders.cloudflareAE.dataset` | string | `catalyst_events` | AE dataset name |
+| `forwarders.cloudflareAE.batchSize` | number | `100` | Max events per write batch |
+| `forwarders.cloudflareAE.flushIntervalMs` | number | `5000` | Flush interval in ms |
+
+See [Event Forwarding Reference](../../plugins/dev/references/event-forwarding.md) for full setup and operations guide.
+
 ### Monitor Webhook Config
 
 The orch-monitor daemon receives GitHub events through a smee.io tunnel — see
