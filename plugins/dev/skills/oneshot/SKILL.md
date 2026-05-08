@@ -193,54 +193,56 @@ if [ -n "${CATALYST_COMMS_CHANNEL:-}" ] && [ -n "$COMMS_BIN" ]; then
   [ -f "$COMMS_CHANNEL_FILE" ] && COMMS_LAST_READ=$(wc -l < "$COMMS_CHANNEL_FILE" | tr -d ' ')
 fi
 
-# CTL-269: catalyst-filter registration helpers. The worker registers a single
-# semantic interest after PR creation that covers CI, comms, reviews, BEHIND,
-# and Linear ticket changes. The Phase 5 listen loop then waits on a single
-# `filter.wake.${CATALYST_SESSION_ID}` event instead of the per-concern jq
-# filters. When the daemon is not running, the loop falls back to the existing
-# direct `catalyst-events wait-for` pattern.
+# CTL-303: broker registration helpers. The worker uses agent.checkin auto-correlation
+# instead of explicit filter.register calls. After PR creation, a second agent.checkin
+# with claimed_pr set is all the broker needs to auto-derive a pr_lifecycle interest.
+# The Phase 5 listen loop waits on filter.wake.${CATALYST_SESSION_ID} as before.
+# When the daemon is not running, the loop falls back to direct catalyst-events wait-for.
 
-filter_daemon_running() {
-  command -v catalyst-filter >/dev/null 2>&1 || return 1
-  catalyst-filter status >/dev/null 2>&1
+broker_daemon_running() {
+  command -v catalyst-broker >/dev/null 2>&1 || \
+    command -v catalyst-filter >/dev/null 2>&1 || return 1
+  { catalyst-broker status 2>/dev/null || catalyst-filter status 2>/dev/null; } | grep -q "^running"
 }
 
-filter_register_worker() {
+# CTL-303: update claimed_pr in the broker via a second agent.checkin.
+# The broker auto-derives pr_lifecycle from the check-in — no explicit filter.register needed.
+broker_claim_pr() {
   # Args: $1 = PR_NUMBER, $2 = TICKET_ID, $3 = BRANCH_NAME, $4 = REPO (org/name), $5 = BASE_BRANCH (default: main)
-  # CTL-284: registers a built-in pr_lifecycle interest. The daemon routes PR
-  # events deterministically — no Groq round-trip — and persists merge-SHA →
-  # deployment correlations across restarts.
-  filter_daemon_running || return 1
+  broker_daemon_running || return 1
   [ -n "${CATALYST_SESSION_ID:-}" ] || return 1
-  local pr="$1" ticket="$2" branch="$3" repo="$4" base="${5:-main}"
+  local pr="$1" ticket="$2" repo="$4" base="${5:-main}"
+  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   "$STATE_SCRIPT" event "$(jq -nc \
+    --arg ts "$ts" \
     --arg sid "$CATALYST_SESSION_ID" \
     --arg orch "${CATALYST_ORCHESTRATOR_ID:-}" \
-    --arg notify "filter.wake.${CATALYST_SESSION_ID}" \
     --argjson pr "$pr" \
     --arg ticket "$ticket" \
-    --arg branch "$branch" \
     --arg repo "$repo" \
     --arg base "$base" \
-    '{ts: (now | todate), event: "filter.register",
-      orchestrator: (if $orch == "" then null else $orch end),
-      worker: null,
+    '{ts: $ts, event: "agent.checkin",
       detail: {
-        interest_id: $sid,
         session_id: $sid,
-        interest_type: "pr_lifecycle",
-        notify_event: $notify,
-        persistent: true,
-        pr_numbers: [$pr],
+        ticket: (if $ticket == "" then null else $ticket end),
+        orchestrator: (if $orch == "" then null else $orch end),
+        claimed_pr: $pr,
         repo: $repo,
-        base_branches: [{pr: $pr, base: $base}],
-        context: {pr_numbers: [$pr], tickets: [$ticket], branches: [$branch], workers: [$sid]}
+        base_branches: [{pr: $pr, base: $base}]
       }}')" 2>/dev/null || return 1
   return 0
 }
 
+# Keep filter_register_worker as an alias for backward compat.
+# New code should use broker_claim_pr instead.
+filter_daemon_running() { broker_daemon_running; }
+filter_register_worker() {
+  local pr="$1" ticket="$2" branch="$3" repo="$4" base="${5:-main}"
+  broker_claim_pr "$pr" "$ticket" "$branch" "$repo" "$base"
+}
+
 filter_deregister_worker() {
-  filter_daemon_running || return 0
+  broker_daemon_running || return 0
   [ -n "${CATALYST_SESSION_ID:-}" ] || return 0
   "$STATE_SCRIPT" event "$(jq -nc \
     --arg sid "$CATALYST_SESSION_ID" \
@@ -661,18 +663,14 @@ TUNNEL=$(echo "$INFRA_STATUS" | jq -r '.webhookTunnel.state // "unknown"' 2>/dev
 USE_REST=false
 [ "$TUNNEL" != "running" ] && { echo "WARN: tunnel not running — using REST fallback"; USE_REST=true; }
 
-# CTL-269: register a single semantic interest covering CI, comms, reviews,
-# BEHIND, and Linear ticket changes. When this succeeds, the loop waits on a
-# single `filter.wake.${CATALYST_SESSION_ID}` event instead of running separate
-# jq filters for each concern. When it fails (daemon not running, no session id),
-# the loop falls back to the existing two-phase pattern below.
+# CTL-303: use broker auto-correlation. Emit a second agent.checkin with claimed_pr
+# so the broker auto-derives a pr_lifecycle interest — no explicit filter.register needed.
+# When the broker is not running, the loop falls back to the two-phase pattern below.
 USE_FILTER_DAEMON=false
-# CTL-284: pass repo + base branch so the daemon can populate filter_state for
-# deployment correlation and route base-branch pushes (PR is BEHIND).
 PR_BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "main")
-if filter_register_worker "$PR_NUMBER" "$TICKET_ID" "$(git branch --show-current)" "$REPO" "$PR_BASE_BRANCH"; then
+if broker_claim_pr "$PR_NUMBER" "$TICKET_ID" "$(git branch --show-current)" "$REPO" "$PR_BASE_BRANCH"; then
   USE_FILTER_DAEMON=true
-  echo "[Phase 5] Registered filter interest for session ${CATALYST_SESSION_ID}"
+  echo "[Phase 5] Broker registered pr_lifecycle for session ${CATALYST_SESSION_ID} on PR #${PR_NUMBER}"
 fi
 
 CI_FIX_ATTEMPTS=0

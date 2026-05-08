@@ -8,6 +8,12 @@ description:
   not running.
 ---
 
+> **Deprecated (CTL-303):** `catalyst-filter` has been superseded by `catalyst-broker`.
+> The broker daemon adds structured agent identity, `ticket_lifecycle` routing for Linear events,
+> and auto-correlation of ticket↔PR interests. All `filter.register` / `pr_lifecycle` / Groq prose
+> registration documented here continues to work unchanged — the daemon script (`catalyst-filter`)
+> is now a thin alias for `catalyst-broker`. See [[broker]] for the full updated reference.
+
 # catalyst-filter — Semantic Event Routing Protocol
 
 The `catalyst-filter` daemon sits between the raw catalyst event log and orchestrators. Instead

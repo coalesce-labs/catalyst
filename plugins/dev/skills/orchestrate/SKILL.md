@@ -695,13 +695,15 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-**Register with catalyst-filter daemon (CTL-257):** When `catalyst-filter status` returns 0,
-emit `filter.register` at Phase 4 start so the daemon pre-filters incoming events through Groq
-LLM and emits targeted `filter.wake.{ORCH_NAME}` events. This reduces the rate of wake-ups
-(and downstream `gh pr view` calls) compared to reacting to every raw GitHub webhook.
+**Register with catalyst-broker daemon (CTL-257, updated CTL-303):** When `catalyst-broker status`
+returns 0, emit `filter.register` at Phase 4 start so the daemon pre-filters incoming events and
+emits targeted `filter.wake.{ORCH_NAME}` events. Workers auto-correlate their own `pr_lifecycle`
+interests via `agent.checkin` — the orchestrator only needs to register the prose interest for
+comms-attention/ticket-status routing and the `pr_lifecycle` interest for orchestrator-level
+aggregation across all workers.
 
 ```bash
-if catalyst-filter status >/dev/null 2>&1; then
+if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2>&1; then
   ACTIVE_PRS=$(jq -rs '[.[].pr.number // empty] | unique' \
     "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
   ACTIVE_TICKETS=$(jq -rs '[.[].ticket // empty]' \
@@ -1025,10 +1027,12 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
       '.pr = ((.pr // {}) | .number = ($n | tonumber) | .url = $u)' \
       "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
 
-    # Refresh filter context with the newly discovered PR number (CTL-257).
+    # Refresh broker context with the newly discovered PR number (CTL-257, updated CTL-303).
     # Re-emitting filter.register with the same orchestrator key overwrites the prior registration.
     # CTL-284: also refresh the pr_lifecycle interest with the new PR number.
-    if catalyst-filter status >/dev/null 2>&1; then
+    # Note: workers auto-correlate their own pr_lifecycle via agent.checkin; this keeps the
+    # orchestrator-level aggregated interest up to date.
+    if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2>&1; then
       _UPD_PRS=$(jq -rs '[.[].pr.number // empty] | unique' \
         "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
       _UPD_TICKETS=$(jq -rs '[.[].ticket // empty]' \
@@ -1581,12 +1585,12 @@ Signal-file fields the script reads/writes:
 | `lastRebaseDispatchedAt` | orchestrate-auto-rebase    | Timestamp of the most recent dispatch (for the dashboard)  |
 | `rebaseCommit`           | rebase worker              | SHA of the rebased HEAD (written by the dispatched worker) |
 
-**Deregister from catalyst-filter (CTL-257):** When all workers in the current wave reach a
-terminal state and Phase 4 exits, emit `filter.deregister` so the daemon stops routing events
-to this orchestrator:
+**Deregister from catalyst-broker (CTL-257, updated CTL-303):** When all workers in the current
+wave reach a terminal state and Phase 4 exits, emit `filter.deregister` so the daemon stops
+routing events to this orchestrator:
 
 ```bash
-if catalyst-filter status >/dev/null 2>&1; then
+if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2>&1; then
   "$STATE_SCRIPT" event "$(jq -nc \
     --arg orch "${ORCH_NAME}" \
     '{ts: (now | todate), event: "filter.deregister", orchestrator: $orch, worker: null, detail: null}')" \

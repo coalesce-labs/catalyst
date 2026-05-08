@@ -7,6 +7,12 @@ description:
   other agent", or workers need to share state without HTTP.
 ---
 
+> **Consolidation in progress (CTL-303):** `catalyst-comms` is being subsumed into the
+> broker. Agent-to-agent messages already fan out to the broker's event log as
+> `comms.message.posted` events (every `send` writes to `~/catalyst/events/`), so the broker
+> can route messages using the same agent identity model as `agent.checkin`. The CLI verbs
+> documented here remain stable; this notice tracks the ongoing consolidation.
+
 # catalyst-comms — Agent Communication Protocol
 
 A file-based messaging system: each channel is a JSONL log at

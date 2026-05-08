@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
-# catalyst-filter — DEPRECATED: alias for catalyst-broker (CTL-303)
+# catalyst-broker — manage the Catalyst event broker daemon (CTL-303)
 #
-# catalyst-filter has been superseded by catalyst-broker, which adds structured
-# agent identity (agent.checkin/checkout), ticket_lifecycle routing, and
-# auto-correlation. All functionality is preserved; the daemon now runs from
-# plugins/dev/scripts/broker/ instead of filter-daemon/.
+# The broker extends the filter daemon with structured agent identity
+# (agent.checkin/checkout), auto-correlation of ticket↔PR interests, and
+# deterministic ticket_lifecycle routing for Linear webhook events.
 #
-# This shim delegates to catalyst-broker so existing scripts continue to work.
-# Update callers to use `catalyst-broker` directly.
+# Commands:
+#   start      Start broker daemon in background (idempotent)
+#   stop       Stop broker daemon
+#   restart    Stop then start
+#   status     Print running/stopped + pid
+#   logs       Tail daemon log
+#   run [args] Run daemon in foreground (debugging)
 
 set -uo pipefail
 
+CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
+PID_FILE="${BROKER_PID_FILE:-$CATALYST_DIR/broker.pid}"
+LOG_FILE="${BROKER_LOG_FILE:-$CATALYST_DIR/broker.log}"
 _SRC="${BASH_SOURCE[0]}"
 while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
-BROKER="${SCRIPT_DIR}/catalyst-broker"
-
-if [[ ! -x "$BROKER" ]]; then
-  echo "error: catalyst-broker not found at $BROKER" >&2
-  exit 1
-fi
-
-exec "$BROKER" "$@"
+DAEMON_SCRIPT="${BROKER_DAEMON_SCRIPT:-$SCRIPT_DIR/broker/index.mjs}"
 
 is_alive() { kill -0 "$1" 2>/dev/null; }
 
@@ -47,7 +47,7 @@ resolve_runtime() {
 
 cmd_start() {
   if read_pid > /dev/null 2>&1; then
-    echo "catalyst-filter already running (pid $(read_pid))"
+    echo "catalyst-broker already running (pid $(read_pid))"
     return 0
   fi
   local runtime
@@ -63,7 +63,7 @@ cmd_start() {
   local waited=0
   while [[ $waited -lt 20 ]]; do
     if [[ -f "$PID_FILE" ]]; then
-      echo "catalyst-filter started (pid $(cat "$PID_FILE"))"
+      echo "catalyst-broker started (pid $(cat "$PID_FILE"))"
       return 0
     fi
     sleep 0.1
@@ -71,17 +71,17 @@ cmd_start() {
   done
   if is_alive "$server_pid"; then
     echo "$server_pid" > "$PID_FILE"
-    echo "catalyst-filter started (pid $server_pid)"
+    echo "catalyst-broker started (pid $server_pid)"
     return 0
   fi
-  echo "error: catalyst-filter failed to start — check $LOG_FILE" >&2
+  echo "error: catalyst-broker failed to start — check $LOG_FILE" >&2
   return 1
 }
 
 cmd_stop() {
   local pid
   if ! pid=$(read_pid); then
-    echo "catalyst-filter not running"
+    echo "catalyst-broker not running"
     return 0
   fi
   kill "$pid" 2>/dev/null || true
@@ -92,7 +92,7 @@ cmd_stop() {
   done
   is_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
   rm -f "$PID_FILE" 2>/dev/null
-  echo "catalyst-filter stopped"
+  echo "catalyst-broker stopped"
 }
 
 cmd_restart() {
@@ -131,7 +131,7 @@ case "${1:-}" in
   logs)    cmd_logs ;;
   run)     shift; cmd_run "$@" ;;
   *)
-    echo "Usage: catalyst-filter {start|stop|restart|status|logs|run}" >&2
+    echo "Usage: catalyst-broker {start|stop|restart|status|logs|run}" >&2
     exit 1
     ;;
 esac
