@@ -220,9 +220,9 @@ render() {
   local ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch reason src_ids_len
   IFS=$'\001' read -r ts ev orch worker repo pr ticket conclusion state phase wstatus channel prnums title msg gitref wfname headbranch reason src_ids_len <<< "$f"
 
-  # Noise — skip high-frequency internal events
+  # Noise — skip high-frequency internal events. CTL-300 canonical names.
   case "$ev" in
-    heartbeat|archive|session-started|session-ended) return ;;
+    session.heartbeat|orchestrator.archived|session.started|session.ended) return ;;
   esac
   [[ "$ev" == "github.check_run.completed" \
     && ( "$conclusion" == "success" || "$conclusion" == "neutral" || "$conclusion" == "skipped" ) ]] && return
@@ -284,7 +284,7 @@ render() {
       c="$GRN"; lbl="merged"
       body="${stitle:+— $stitle}"
       ;;
-    github.pr.opened|github.pull_request.opened|pr-opened)
+    github.pr.opened|github.pull_request.opened|session.pr_opened)
       c="$BLU"; lbl="pr open"
       body="${stitle:+— $stitle}"
       ;;
@@ -389,29 +389,29 @@ render() {
       c="$MAG"; lbl="comms"
       body="${channel:+#$channel }${smsg:+— $smsg}"
       ;;
-    # ── Worker Events ──────────────────────────────────────────────────────
-    worker-done|worker-merged|worker-pr-merged)
+    # ── Worker Events (CTL-300 canonical names) ───────────────────────────
+    orchestrator.worker.done|orchestrator.worker.pr_merged)
       c="$GRN"; lbl="done"
-      body="${ev#worker-}"
+      body="${ev##*.}"
       ;;
-    worker-failed-hallucination)
-      c="$RED"; lbl="hallucinate"
+    orchestrator.worker.failed)
+      c="$RED"; lbl="failed"
       body="$smsg"
       ;;
-    worker-launch-failed)
+    orchestrator.worker.launch_failed)
       c="$RED"; lbl="launch fail"
       body="$smsg"
       ;;
-    worker-dispatched)
+    orchestrator.worker.dispatched)
       c="$CYN"; lbl="dispatched"
       ;;
-    worker-pr-created)
+    orchestrator.worker.pr_created)
       c="$BLU"; lbl="pr created"
       ;;
-    worker-revived)
+    orchestrator.worker.revived)
       c="$YEL"; lbl="revived"
       ;;
-    worker-status-terminal|worker-status-change)
+    orchestrator.worker.status_terminal)
       case "$wstatus" in
         done|success|completed) c="$GRN"; lbl="done"   ;;
         failed|error)           c="$RED"; lbl="failed" ;;
@@ -419,44 +419,27 @@ render() {
       esac
       body="$wstatus"
       ;;
-    # ── Orchestrator / Wave Events ─────────────────────────────────────────
-    orchestrator-started)
+    # ── Orchestrator Events (CTL-300 canonical names) ─────────────────────
+    orchestrator.started)
       c="$BLU"; lbl="orch start"
       ;;
-    orchestrator-completed)
-      c="$GRN"; lbl="orch done"
+    orchestrator.failed)
+      c="$RED"; lbl="orch fail"
+      body="$smsg"
       ;;
-    worker-phase-advanced|phase-changed)
+    orchestrator.worker.phase_advanced|session.phase)
       c="$CYN"; lbl="phase"
       body="→ $phase"
       ;;
-    phase-iteration)
+    session.iteration)
       c="$DIM"; lbl="iteration"
       ;;
-    wave-started)
-      c="$BLU"; lbl="wave start"
-      ;;
-    wave-completed)
-      c="$GRN"; lbl="wave done"
-      ;;
-    # ── Verification ───────────────────────────────────────────────────────
-    verification-passed)
-      c="$GRN"; lbl="verify ok"
-      ;;
-    verification-failed)
-      c="$RED"; lbl="verify fail"
-      body="$smsg"
-      ;;
-    verification-*)
-      c="$CYN"; lbl="verify"
-      body="${ev#verification-}"
-      ;;
-    # ── Attention ──────────────────────────────────────────────────────────
-    attention-raised)
+    # ── Attention (CTL-300 canonical names) ───────────────────────────────
+    orchestrator.attention.raised)
       c="${YEL}${BOLD}"; lbl="attention"
       body="$smsg"
       ;;
-    attention-resolved)
+    orchestrator.attention.resolved)
       c="$DIM"; lbl="resolved"
       ;;
     # ── Linear ─────────────────────────────────────────────────────────────

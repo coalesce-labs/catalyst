@@ -43,9 +43,10 @@ const TOPIC_PREFIX_STYLES: Array<{ prefix: string; cls: string }> = [
   { prefix: "filter.", cls: "bg-[#1a4040] text-[#7ae8e8]" },
   { prefix: "comms.", cls: "bg-[#3a4a1a] text-[#c8f48a]" },
   { prefix: "session.", cls: "bg-[#5a4a1a] text-[#f4dc8a]" },
+  // More-specific orchestrator prefixes must come before the catch-all
+  // `orchestrator.` since the loop returns the first match.
   { prefix: "orchestrator.worker.", cls: "bg-[#1f3a5a] text-[#9ec7f4]" },
   { prefix: "orchestrator.", cls: "bg-[#5a2a2a] text-[#f4a8a8]" },
-  { prefix: "orchestrator.attention.", cls: "bg-[#5a2a2a] text-[#f4a8a8]" },
 ];
 
 function topicStyle(topic: string): string {

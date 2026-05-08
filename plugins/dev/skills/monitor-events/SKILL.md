@@ -91,7 +91,7 @@ else
   _LOG_LINES=$(wc -l < "$_LOG_FILE" 2>/dev/null | tr -d ' ')
   _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
   HEARTBEATS=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null \
-    | jq -c 'select(.attributes."event.name" == "heartbeat")' | wc -l | tr -d ' ')
+    | jq -c 'select(.attributes."event.name" == "session.heartbeat")' | wc -l | tr -d ' ')
   [ "${HEARTBEATS:-0}" -eq 0 ] && { echo "WARN: No heartbeats — event log may be stalled"; STALLED=true; }
 
   RAW_HIT=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null | jq -c \
