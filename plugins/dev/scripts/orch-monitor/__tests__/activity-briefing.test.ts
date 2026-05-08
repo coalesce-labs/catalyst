@@ -35,9 +35,9 @@ describe("parseWindowMs", () => {
 });
 
 describe("preprocessEvents", () => {
-  it("strips heartbeat events", () => {
+  it("strips session.heartbeat events", () => {
     const events: RawEvent[] = [
-      { ts: BASE_TS, event: "heartbeat", orchestrator: null, worker: null, detail: null },
+      { ts: BASE_TS, event: "session.heartbeat", orchestrator: null, worker: null, detail: null },
     ];
     const result = preprocessEvents(events);
     expect(result.signalEvents).toHaveLength(0);
@@ -98,11 +98,11 @@ describe("preprocessEvents", () => {
     expect(result.noMatchWakeCount).toBe(0);
   });
 
-  it("keeps worker-phase-advanced as signal", () => {
+  it("keeps orchestrator.worker.phase_advanced as signal", () => {
     const events: RawEvent[] = [
       {
         ts: BASE_TS,
-        event: "worker-phase-advanced",
+        event: "orchestrator.worker.phase_advanced",
         orchestrator: "o1",
         worker: "CTL-1",
         detail: { from: "planning", to: "implementing" },
@@ -116,21 +116,21 @@ describe("preprocessEvents", () => {
     const events: RawEvent[] = [
       {
         ts: BASE_TS,
-        event: "worker-phase-advanced",
+        event: "orchestrator.worker.phase_advanced",
         orchestrator: "o1",
         worker: "CTL-1",
         detail: { from: "planning", to: "implementing" },
       },
       {
         ts: BASE_TS,
-        event: "worker-phase-advanced",
+        event: "orchestrator.worker.phase_advanced",
         orchestrator: "o1",
         worker: "CTL-2",
         detail: { from: "planning", to: "implementing" },
       },
       {
         ts: BASE_TS,
-        event: "attention-raised",
+        event: "orchestrator.attention.raised",
         orchestrator: "o1",
         worker: "CTL-1",
         detail: { reason: "CI blocked" },
@@ -143,11 +143,11 @@ describe("preprocessEvents", () => {
     expect(thread2?.events).toHaveLength(1);
   });
 
-  it("surfaces attention-raised in attentionItems", () => {
+  it("surfaces orchestrator.attention.raised in attentionItems", () => {
     const events: RawEvent[] = [
       {
         ts: BASE_TS,
-        event: "attention-raised",
+        event: "orchestrator.attention.raised",
         orchestrator: "o1",
         worker: "CTL-1",
         detail: { reason: "needs help", attentionType: "waiting-for-user" },
@@ -162,14 +162,14 @@ describe("preprocessEvents", () => {
     const events: RawEvent[] = [
       {
         ts: BASE_TS,
-        event: "worker-phase-advanced",
+        event: "orchestrator.worker.phase_advanced",
         orchestrator: "o1",
         worker: "CTL-10",
         detail: { from: "planning", to: "implementing" },
       },
       {
         ts: BASE_TS,
-        event: "attention-raised",
+        event: "orchestrator.attention.raised",
         orchestrator: "o1",
         worker: "CTL-1",
         detail: { reason: "blocked" },
@@ -215,7 +215,7 @@ describe("buildActivityPrompt", () => {
           events: [
             {
               ts: "2026-05-07T10:00:00Z",
-              event: "worker-phase-advanced",
+              event: "orchestrator.worker.phase_advanced",
               detail: { from: "planning", to: "implementing" },
             },
           ],
@@ -224,7 +224,7 @@ describe("buildActivityPrompt", () => {
       attentionItems: [],
       noMatchWakeCount: 50,
       strippedCount: 500,
-      signalEvents: [{ ts: BASE_TS, event: "worker-phase-advanced", orchestrator: "orch-abc", worker: "CTL-1", detail: {} }],
+      signalEvents: [{ ts: BASE_TS, event: "orchestrator.worker.phase_advanced", orchestrator: "orch-abc", worker: "CTL-1", detail: {} }],
       windowLabel: "30m",
     };
     const prompt = buildActivityPrompt(preprocessed);
@@ -299,7 +299,7 @@ describe("buildActivityPrompt", () => {
     const threads = Array.from({ length: 25 }, (_, i) => ({
       orchestrator: "orch",
       worker: `CTL-${i}`,
-      events: [{ ts: BASE_TS, event: "worker-phase-advanced", detail: null }],
+      events: [{ ts: BASE_TS, event: "orchestrator.worker.phase_advanced", detail: null }],
     }));
     const prompt = buildActivityPrompt({
       threads,
@@ -318,8 +318,23 @@ describe("readActivityEvents", () => {
   let tmp: string;
   let eventsDir: string;
 
-  function makeEvent(ts: string, event = "worker-phase-advanced"): string {
-    return JSON.stringify({ ts, event, orchestrator: null, worker: null, detail: null });
+  // CTL-300: readActivityEvents now expects canonical OTel-shaped envelopes,
+  // so the on-disk fixture must use the canonical shape.
+  function makeEvent(ts: string, event = "orchestrator.worker.phase_advanced"): string {
+    return JSON.stringify({
+      ts,
+      severityText: "INFO",
+      severityNumber: 9,
+      traceId: null,
+      spanId: null,
+      resource: {
+        "service.name": "catalyst.orchestrator",
+        "service.namespace": "catalyst",
+        "service.version": "8.2.0",
+      },
+      attributes: { "event.name": event },
+      body: { payload: null },
+    });
   }
 
   function monthFile(d: Date): string {

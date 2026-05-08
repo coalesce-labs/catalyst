@@ -9,36 +9,15 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { CanonicalEvent } from "../../../lib/canonical-event";
 
-export interface ActivityEventScope {
-  repo?: string;
-  pr?: number;
-  ticket?: string;
-  orchestrator?: string | null;
-  worker?: string | null;
-  sha?: string;
-  ref?: string;
-  environment?: string;
-}
-
-export interface ActivityEvent {
-  ts: string;
-  event: string;
-  scope?: ActivityEventScope;
-  detail?: unknown;
-  source?: string;
-  schemaVersion?: number;
-  // v1 backward-compat top-level fields written by the bash CLI tools.
-  orchestrator?: string | null;
-  worker?: string | null;
-  session?: string;
-  raw: unknown;
-}
+// Re-export so consumers can import from one place.
+export type { CanonicalEvent as ActivityEvent };
 
 export type ActivityStatus = "loading" | "ok" | "error";
 
 interface UseActivityStreamResult {
-  events: ActivityEvent[];
+  events: CanonicalEvent[];
   status: ActivityStatus;
   error: string | null;
   live: boolean;
@@ -48,13 +27,13 @@ interface UseActivityStreamResult {
 const MAX_EVENTS = 500;
 
 export function useActivityStream(predicate: string): UseActivityStreamResult {
-  const [events, setEvents] = useState<ActivityEvent[]>([]);
+  const [events, setEvents] = useState<CanonicalEvent[]>([]);
   const [status, setStatus] = useState<ActivityStatus>("loading");
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
   const [tick, setTick] = useState(0);
   const retry = useCallback(() => setTick((n) => n + 1), []);
-  const eventsRef = useRef<ActivityEvent[]>([]);
+  const eventsRef = useRef<CanonicalEvent[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -153,20 +132,48 @@ export function useActivityStream(predicate: string): UseActivityStreamResult {
   return { events, status, error, live, retry };
 }
 
-function projectEnvelope(raw: unknown): ActivityEvent {
+function projectEnvelope(raw: unknown): CanonicalEvent {
   const r = (raw ?? {}) as Record<string, unknown>;
+  const attrs = (r.attributes ?? {}) as Record<string, unknown>;
+  const body = (r.body ?? {}) as Record<string, unknown>;
+  const resource = (r.resource ?? {}) as Record<string, unknown>;
   return {
     ts: typeof r.ts === "string" ? r.ts : "",
-    event: typeof r.event === "string" ? r.event : "",
-    scope: (r.scope as ActivityEventScope | undefined) ?? undefined,
-    detail: r.detail,
-    source: typeof r.source === "string" ? r.source : undefined,
-    schemaVersion:
-      typeof r.schemaVersion === "number" ? r.schemaVersion : undefined,
-    orchestrator: (r.orchestrator as string | null | undefined) ?? null,
-    worker: (r.worker as string | null | undefined) ?? null,
-    session: typeof r.session === "string" ? r.session : undefined,
-    raw,
+    observedTs: typeof r.observedTs === "string" ? r.observedTs : undefined,
+    severityText:
+      r.severityText === "DEBUG" ||
+      r.severityText === "INFO" ||
+      r.severityText === "WARN" ||
+      r.severityText === "ERROR"
+        ? r.severityText
+        : "INFO",
+    severityNumber: typeof r.severityNumber === "number" ? r.severityNumber : 9,
+    traceId: typeof r.traceId === "string" ? r.traceId : null,
+    spanId: typeof r.spanId === "string" ? r.spanId : null,
+    parentSpanId:
+      r.parentSpanId === null || typeof r.parentSpanId === "string"
+        ? r.parentSpanId
+        : undefined,
+    resource: {
+      "service.name":
+        typeof resource["service.name"] === "string"
+          ? resource["service.name"]
+          : "catalyst.session",
+      "service.namespace": "catalyst",
+      "service.version":
+        typeof resource["service.version"] === "string"
+          ? resource["service.version"]
+          : "0.0.0",
+    },
+    attributes: {
+      "event.name":
+        typeof attrs["event.name"] === "string" ? attrs["event.name"] : "",
+      ...attrs,
+    },
+    body: {
+      message: typeof body.message === "string" ? body.message : undefined,
+      payload: body.payload,
+    },
   };
 }
 
@@ -175,17 +182,18 @@ function projectEnvelope(raw: unknown): ActivityEvent {
  * palette to translate chip toggles into a server-side filter.
  *
  *   buildPredicate([])                               // ""  (no filter)
- *   buildPredicate(["github.pr."])                   // (.event | startswith("github.pr."))
- *   buildPredicate(["github.pr.", "linear."])        // (.event | startswith("github.pr.")) or (.event | startswith("linear."))
- *   buildPredicate(["github.push"])                  // (.event == "github.push" or (.event | startswith("github.push-")))
+ *   buildPredicate(["github.pr."])                   // (.attributes["event.name"] | startswith("github.pr."))
+ *   buildPredicate(["github.pr.", "linear."])        // (.attributes["event.name"] | startswith("github.pr.")) or (.attributes["event.name"] | startswith("linear."))
+ *   buildPredicate(["github.push"])                  // (.attributes["event.name"] == "github.push" or (.attributes["event.name"] | startswith("github.push.")))
  */
 export function buildPredicateFromPrefixes(prefixes: string[]): string {
   if (prefixes.length === 0) return "";
+  const field = `.attributes["event.name"]`;
   const parts = prefixes.map((p) => {
-    if (p.endsWith(".")) return `(.event | startswith("${escapeJqString(p)}"))`;
-    // Bare names match exactly OR as a prefix with a hyphen separator (covers
-    // unprefixed bash topics like `worker-done`, `wave-started`, etc.).
-    return `(.event == "${escapeJqString(p)}" or (.event | startswith("${escapeJqString(p)}-")))`;
+    if (p.endsWith(".")) return `(${field} | startswith("${escapeJqString(p)}"))`;
+    // Bare names match exactly OR as a prefix with a dot separator (canonical
+    // names use dots, e.g. "session.phase", "orchestrator.worker.done").
+    return `(${field} == "${escapeJqString(p)}" or (${field} | startswith("${escapeJqString(p)}.")))`;
   });
   return parts.join(" or ");
 }

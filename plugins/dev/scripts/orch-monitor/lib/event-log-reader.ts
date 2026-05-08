@@ -178,17 +178,21 @@ export function readTunnelEventStats(
       } catch {
         continue;
       }
-      const event = evt.event;
-      if (typeof event !== "string" || !event.startsWith("github.")) continue;
+      // CTL-300: canonical envelope — event name lives at attributes."event.name"
+      // and repo lives at attributes."vcs.repository.name".
+      const attrs = evt.attributes as Record<string, unknown> | undefined;
+      const eventName = attrs ? attrs["event.name"] : undefined;
+      if (typeof eventName !== "string" || !eventName.startsWith("github.")) {
+        continue;
+      }
 
       const ts = typeof evt.ts === "string" ? evt.ts : null;
       if (ts !== null) {
         if (lastEventAt === null || ts > lastEventAt) lastEventAt = ts;
         if (ts >= cutoff24h.toISOString()) {
           eventCount24h++;
-          const scope = evt.scope as Record<string, unknown> | undefined;
-          const repo = typeof scope?.repo === "string" ? scope.repo : "";
-          if (repo) {
+          const repo = attrs ? attrs["vcs.repository.name"] : undefined;
+          if (typeof repo === "string" && repo.length > 0) {
             eventCount24hByRepo[repo] = (eventCount24hByRepo[repo] ?? 0) + 1;
           }
         }

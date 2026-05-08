@@ -683,10 +683,10 @@ while [ "$PR_DONE" = "false" ]; do
   # CTL-269 preferred path: single semantic wake covers all concerns.
   if [ "$USE_FILTER_DAEMON" = "true" ] && [ "$USE_REST" != "true" ]; then
     EVENT=$(catalyst-events wait-for \
-      --filter ".event == \"filter.wake.${CATALYST_SESSION_ID}\"" \
+      --filter ".attributes.\"event.name\" == \"filter.wake\" and .attributes.\"event.label\" == \"${CATALYST_SESSION_ID}\"" \
       --timeout 600 2>/dev/null || true)
     if [ -n "$EVENT" ]; then
-      WAKE_REASON=$(echo "$EVENT" | jq -r '.detail.reason // "unknown"' 2>/dev/null || echo "unknown")
+      WAKE_REASON=$(echo "$EVENT" | jq -r '.body.payload.reason // "unknown"' 2>/dev/null || echo "unknown")
       echo "[Phase 5] Filter wake: ${WAKE_REASON}"
     fi
     # Drain inbound comms inside the loop now that filter.wake fires on
@@ -698,11 +698,11 @@ while [ "$PR_DONE" = "false" ]; do
     # Filter field reference: [[event-schema]] — note check_suite/workflow_run use
     # detail.prNumbers, not scope.pr. PR/review events DO populate scope.pr.
     EVENT=$(catalyst-events wait-for \
-      --filter "(.scope.pr == ${PR_NUMBER} or (.detail.prNumbers // [] | contains([${PR_NUMBER}]))) and (
-        .event == \"github.pr.merged\" or
-        .event == \"github.check_suite.completed\" or
-        (.event | startswith(\"github.pr_review\")) or
-        .event == \"github.push\"
+      --filter "(.attributes.\"vcs.pr.number\" == ${PR_NUMBER} or (.body.payload.prNumbers // [] | contains([${PR_NUMBER}]))) and (
+        .attributes.\"event.name\" == \"github.pr.merged\" or
+        .attributes.\"event.name\" == \"github.check_suite.completed\" or
+        (.attributes.\"event.name\" | startswith(\"github.pr_review\")) or
+        .attributes.\"event.name\" == \"github.push\"
       )" \
       --timeout 180 2>/dev/null || true)
 
@@ -712,7 +712,7 @@ while [ "$PR_DONE" = "false" ]; do
       _LOG_LINES=$(wc -l < "$_LOG_FILE" 2>/dev/null | tr -d ' ')
       _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
       HEARTBEATS=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null \
-        | jq -c 'select(.event == "heartbeat")' | wc -l | tr -d ' ')
+        | jq -c 'select(.attributes."event.name" == "heartbeat")' | wc -l | tr -d ' ')
       TUNNEL_NOW=$(catalyst-monitor status --json 2>/dev/null \
         | jq -r '.webhookTunnel.state // "unknown"')
       if [ "${HEARTBEATS:-0}" -eq 0 ] || [ "$TUNNEL_NOW" != "running" ]; then
@@ -721,11 +721,11 @@ while [ "$PR_DONE" = "false" ]; do
       else
         # Infrastructure healthy — extend to Phase 2 (7200s)
         EVENT=$(catalyst-events wait-for \
-          --filter "(.scope.pr == ${PR_NUMBER} or (.detail.prNumbers // [] | contains([${PR_NUMBER}]))) and (
-            .event == \"github.pr.merged\" or
-            .event == \"github.check_suite.completed\" or
-            (.event | startswith(\"github.pr_review\")) or
-            .event == \"github.push\"
+          --filter "(.attributes.\"vcs.pr.number\" == ${PR_NUMBER} or (.body.payload.prNumbers // [] | contains([${PR_NUMBER}]))) and (
+            .attributes.\"event.name\" == \"github.pr.merged\" or
+            .attributes.\"event.name\" == \"github.check_suite.completed\" or
+            (.attributes.\"event.name\" | startswith(\"github.pr_review\")) or
+            .attributes.\"event.name\" == \"github.push\"
           )" \
           --timeout 7200 2>/dev/null || true)
       fi
@@ -869,9 +869,9 @@ if [ "$SKIP_DEPLOY" != "true" ] && [ -n "$MERGE_COMMIT_SHA" ]; then
     '.catalyst.deploy[$repo].timeoutSec // 1800' .catalyst/config.json 2>/dev/null || echo 1800)
 
   DEPLOY_EVENT=$(catalyst-events wait-for \
-    --filter "(.event | startswith(\"github.deployment_status\")) and
-              .detail.environment == \"${PROD_ENV}\" and
-              .detail.sha == \"${MERGE_COMMIT_SHA}\"" \
+    --filter "(.attributes.\"event.name\" | startswith(\"github.deployment_status\")) and
+              .attributes.\"deployment.environment\" == \"${PROD_ENV}\" and
+              .attributes.\"vcs.revision\" == \"${MERGE_COMMIT_SHA}\"" \
     --timeout 180 2>/dev/null || true)
 
   # Authoritative deploy lookup (REST — see [[wait-for-github]] REST fallback pattern)

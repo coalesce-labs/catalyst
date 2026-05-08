@@ -82,9 +82,9 @@ export function ActivityView({ onPivot }: ActivityViewProps) {
       [...events]
         .reverse()
         .filter((e) => {
-          if (e.event.startsWith("filter.wake")) {
-            const detail = (e.detail ?? {}) as Record<string, unknown>;
-            return (detail.reason as string) !== "No matching events found";
+          if (e.attributes["event.name"] === "filter.wake") {
+            const payload = (e.body?.payload ?? {}) as Record<string, unknown>;
+            return (payload.reason as string) !== "No matching events found";
           }
           return true;
         }),
@@ -104,7 +104,7 @@ export function ActivityView({ onPivot }: ActivityViewProps) {
             type="text"
             value={predicate}
             onChange={(e) => setPredicate(e.target.value)}
-            placeholder='jq predicate (e.g. .event == "github.pr.merged")'
+            placeholder='jq predicate (e.g. .attributes["event.name"] == "github.pr.merged")'
             spellCheck={false}
             autoCapitalize="off"
             autoComplete="off"

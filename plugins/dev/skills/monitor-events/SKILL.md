@@ -76,7 +76,7 @@ _WFG_MATCHED=false
 
 # Phase 1: short wait with diagnostic checkpoint (3 minutes).
 EVENT=$(catalyst-events wait-for \
-  --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
+  --filter ".attributes.\"event.name\" == \"github.pr.merged\" and .attributes.\"vcs.pr.number\" == ${PR_NUMBER}" \
   --timeout 180 2>/dev/null || true)
 
 if [ -n "$EVENT" ]; then
@@ -91,12 +91,12 @@ else
   _LOG_LINES=$(wc -l < "$_LOG_FILE" 2>/dev/null | tr -d ' ')
   _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
   HEARTBEATS=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null \
-    | jq -c 'select(.event == "heartbeat")' | wc -l | tr -d ' ')
+    | jq -c 'select(.attributes."event.name" == "session.heartbeat")' | wc -l | tr -d ' ')
   [ "${HEARTBEATS:-0}" -eq 0 ] && { echo "WARN: No heartbeats — event log may be stalled"; STALLED=true; }
 
   RAW_HIT=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null | jq -c \
     --argjson pr "$PR_NUMBER" \
-    'select((.scope.pr == $pr) or (.detail.prNumbers // [] | contains([$pr])))' | head -1)
+    'select((.attributes."vcs.pr.number" == $pr) or (.body.payload.prNumbers // [] | contains([$pr])))' | head -1)
   if [ -n "$RAW_HIT" ]; then
     echo "WARN: Event arrived but filter did not match. Raw event:"; echo "$RAW_HIT" | jq .
     FILTER_MISMATCH=true
@@ -108,7 +108,7 @@ else
   if [ "$FILTER_MISMATCH" = "false" ] && [ "$STALLED" = "false" ]; then
     # Infrastructure healthy — extend to Phase 2.
     EVENT=$(catalyst-events wait-for \
-      --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
+      --filter ".attributes.\"event.name\" == \"github.pr.merged\" and .attributes.\"vcs.pr.number\" == ${PR_NUMBER}" \
       --timeout 7200 2>/dev/null || true)
     [ -n "$EVENT" ] && _WFG_MATCHED=true
   fi
@@ -169,21 +169,21 @@ orchestrators), the broad form is:
 
 ```text
 catalyst-events tail --filter '
-  (.event | startswith("github.pr.")) or
-  (.event | startswith("github.pr_review")) or
-  (.event | startswith("github.issue_comment")) or
-  (.event | startswith("github.check_")) or
-  (.event | startswith("github.workflow_run")) or
-  (.event | startswith("github.deployment")) or
-  (.event == "github.push") or
-  (.event | startswith("linear.issue.")) or
-  (.event == "worker-phase-advanced") or
-  (.event == "worker-status-terminal") or
-  (.event == "worker-pr-created") or
-  (.event == "worker-done") or
-  (.event == "worker-failed") or
-  (.event == "attention-raised") or
-  (.event == "attention-resolved")
+  (.attributes."event.name" | startswith("github.pr.")) or
+  (.attributes."event.name" | startswith("github.pr_review")) or
+  (.attributes."event.name" | startswith("github.issue_comment")) or
+  (.attributes."event.name" | startswith("github.check_")) or
+  (.attributes."event.name" | startswith("github.workflow_run")) or
+  (.attributes."event.name" | startswith("github.deployment")) or
+  (.attributes."event.name" == "github.push") or
+  (.attributes."event.name" | startswith("linear.issue.")) or
+  (.attributes."event.name" == "worker-phase-advanced") or
+  (.attributes."event.name" == "worker-status-terminal") or
+  (.attributes."event.name" == "worker-pr-created") or
+  (.attributes."event.name" == "worker-done") or
+  (.attributes."event.name" == "worker-failed") or
+  (.attributes."event.name" == "attention-raised") or
+  (.attributes."event.name" == "attention-resolved")
 '
 ```
 
@@ -198,17 +198,17 @@ The orchestrator continues to maintain its 10-minute fallback scan (defense-in-d
 The fast path is event-driven; the slow path is the safety net.
 
 **Cross-orchestrator scoping (CTL-234).** When multiple orchestrators run on the same
-machine, narrow the filter with `(.orchestrator == "orch-foo")` to ignore events from
-sibling runs. As of CTL-234, the webhook receiver stamps `.scope.orchestrator` (and
+machine, narrow the filter with `(.attributes."catalyst.orchestrator.id" == "orch-foo")` to ignore events from
+sibling runs. As of CTL-234, the webhook receiver stamps `.attributes."catalyst.orchestrator.id"` (and
 the back-compat top-level `.orchestrator`) on `github.*` events for PRs whose head
 branch starts with `<orchId>-`, so the filter
 
 ```jq
-(.orchestrator == "orch-foo") and (
-  (.event | startswith("github.pr.")) or
-  (.event | startswith("github.check_")) or
-  (.event == "github.push") or
-  (.event | startswith("worker-"))
+(.attributes."catalyst.orchestrator.id" == "orch-foo") and (
+  (.attributes."event.name" | startswith("github.pr.")) or
+  (.attributes."event.name" | startswith("github.check_")) or
+  (.attributes."event.name" == "github.push") or
+  (.attributes."event.name" | startswith("worker-"))
 )
 ```
 
@@ -247,16 +247,16 @@ while [ $ITER -lt $MAX_ITER ]; do
 
   EVENT_JSON=$(catalyst-events wait-for \
     --filter '
-      (.event == "github.pr.merged" and .scope.pr == '"$PR_NUMBER"') or
-      (.event == "github.pr.closed" and .scope.pr == '"$PR_NUMBER"') or
-      (.event == "github.check_suite.completed"
-         and (.detail.prNumbers // [] | index('"$PR_NUMBER"') != null)
-         and (.detail.conclusion == "failure" or .detail.conclusion == "timed_out")) or
-      (.event == "github.pr_review.submitted"
-         and .scope.pr == '"$PR_NUMBER"'
-         and (.detail.state == "changes_requested"
-              or (.detail.state == "commented" and (.detail.author.type // "") == "Bot"))) or
-      (.event == "github.push" and .scope.ref == "refs/heads/'"$BASE_BRANCH"'")
+      (.attributes."event.name" == "github.pr.merged" and .attributes."vcs.pr.number" == '"$PR_NUMBER"') or
+      (.attributes."event.name" == "github.pr.closed" and .attributes."vcs.pr.number" == '"$PR_NUMBER"') or
+      (.attributes."event.name" == "github.check_suite.completed"
+         and (.body.payload.prNumbers // [] | index('"$PR_NUMBER"') != null)
+         and (.attributes."cicd.pipeline.run.conclusion" == "failure" or .attributes."cicd.pipeline.run.conclusion" == "timed_out")) or
+      (.attributes."event.name" == "github.pr_review.submitted"
+         and .attributes."vcs.pr.number" == '"$PR_NUMBER"'
+         and (.body.payload.state == "changes_requested"
+              or (.body.payload.state == "commented" and (.body.payload.author.type // "") == "Bot"))) or
+      (.attributes."event.name" == "github.push" and .attributes."vcs.ref.name" == "refs/heads/'"$BASE_BRANCH"'")
     ' \
     --timeout 1800 || true)
 
@@ -267,7 +267,7 @@ while [ $ITER -lt $MAX_ITER ]; do
   if [ "$PR_STATE" = "MERGED" ]; then break; fi
   if [ "$PR_STATE" = "CLOSED" ]; then exit 1; fi
 
-  EVENT=$(echo "$EVENT_JSON" | jq -r '.event // ""')
+  EVENT=$(echo "$EVENT_JSON" | jq -r '.attributes."event.name" // ""')
   case "$EVENT" in
     github.check_suite.completed)
       # Pull failure logs, classify, fix, push. Then re-enter the loop.
@@ -275,7 +275,7 @@ while [ $ITER -lt $MAX_ITER ]; do
     github.pr_review.submitted)
       # Bot reviewers are addressable inline; humans require operator action.
       # See "Bot vs human authorship" below for the routing heuristic.
-      AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.detail.author.type // "User"')
+      AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.body.payload.author.type // "User"')
       if [ "$AUTHOR_TYPE" = "Bot" ]; then
         /catalyst-dev:review-comments "$PR_NUMBER"
       fi
@@ -293,12 +293,12 @@ done
 
 ### Bot vs human authorship
 
-Review and comment events carry `detail.author = { login, type }` where `type`
+Review and comment events carry `body.payload.author = { login, type }` where `type`
 is GitHub's `user.type` field — typically `"User"` or `"Bot"`. Use it to route
 review-changes-requested events without re-fetching from the GitHub API:
 
 ```bash
-AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.detail.author.type // "User"')
+AUTHOR_TYPE=$(echo "$EVENT_JSON" | jq -r '.body.payload.author.type // "User"')
 case "$AUTHOR_TYPE" in
   Bot)
     # codex, claude-code-review, dependabot — addressable inline.
@@ -315,9 +315,9 @@ treated as human-authored — the safer default.
 
 ### Gotchas
 
-- **`check_suite.completed` has no `scope.pr`.** A check suite spans many
-  PRs; the affected PR numbers live in `detail.prNumbers`. Filter with
-  `(.detail.prNumbers // [] | index($PR) != null)`, not `.scope.pr == $PR`.
+- **`check_suite.completed` has no `vcs.pr.number`.** A check suite spans many
+  PRs; the affected PR numbers live in `body.payload.prNumbers`. Filter with
+  `(.body.payload.prNumbers // [] | index($PR) != null)`, not `.attributes."vcs.pr.number" == $PR`.
 - **The filter is one jq expression.** Clauses are joined with `or`, not
   comma. Each clause is parenthesized.
 - **Bash quoting.** The shell-variable interpolation (`'"$PR_NUMBER"'`) is
@@ -337,11 +337,12 @@ treated as human-authored — the safer default.
   "$ORCH_DIR"` to generate a complete scope-aware predicate from the worker signal
   directory instead of hand-rolling secondary pipes.
 - **`github.*` events carry `orchestrator: null` and `worker: null` (CTL-240).**
-  Real webhook events are scoped only by `.scope.repo`, `.scope.ref`, `.scope.pr`,
-  `.scope.sha`, and `.detail.prNumbers`. A scope predicate like
-  `.orchestrator == "orch-foo"` will silently drop every github event.
-  Use branch-ref prefix matching (`.scope.ref | startswith("refs/heads/orch-foo-")`)
-  and PR-number-set matching (`.scope.pr | IN(501,502)`) instead — or use
+  Real webhook events are scoped only by `.attributes."vcs.repository.name"`,
+  `.attributes."vcs.ref.name"`, `.attributes."vcs.pr.number"`,
+  `.attributes."vcs.revision"`, and `.body.payload.prNumbers`. A scope predicate like
+  `.attributes."catalyst.orchestrator.id" == "orch-foo"` will silently drop every github event.
+  Use branch-ref prefix matching (`.attributes."vcs.ref.name" | startswith("refs/heads/orch-foo-")`)
+  and PR-number-set matching (`.attributes."vcs.pr.number" | IN(501,502)`) instead — or use
   `build-orchestrator-filter` which handles this for you.
 
 ### Long-lived precedent
@@ -363,8 +364,9 @@ filter by severity instead of inspecting `.detail` fields:
 | `worker-phase-advanced` | info | routine in-flight phases (researching, planning, implementing, validating, shipping) | yes — batched per orchestrator within `windowSec` (default 30 s) | no |
 | `worker-status-terminal` | act  | actionable transitions (pr-created, merging, merged, done, failed, stalled, deploy-failed, deploying) | no — emitted immediately and flushes any pending coalesce queue | yes when `to ∈ {pr-created, merging, merged, done, deploy-failed}` |
 
-Coalesced `worker-phase-advanced` events have `worker: null` at the envelope level;
-the per-change `worker` lives inside `.detail.changes[]`:
+Coalesced `orchestrator.worker.phase_advanced` events leave
+`attributes."catalyst.worker.ticket"` unset at the envelope level; the per-change
+`worker` lives inside `.body.payload.changes[]`:
 
 ```json
 {
@@ -392,15 +394,15 @@ Subscriber recipes:
 
 ```bash
 # Subscribe to actionable transitions only (no routine progress noise)
-catalyst-events tail --filter '.event == "worker-status-terminal"'
+catalyst-events tail --filter '.attributes."event.name" == "worker-status-terminal"'
 
 # Subscribe to routine progress (already coalesced into batches)
-catalyst-events tail --filter '.event == "worker-phase-advanced"'
+catalyst-events tail --filter '.attributes."event.name" == "worker-phase-advanced"'
 
 # A worker just opened a PR — wait until it tells you the PR number
 catalyst-events wait-for --timeout 600 \
-  --filter '.event == "worker-status-terminal" and .detail.to == "pr-created" and .worker == "CTL-229"' \
-  | jq -r '.detail.pr.number'
+  --filter '.attributes."event.name" == "worker-status-terminal" and .body.payload.to == "pr-created" and .attributes."catalyst.worker.ticket" == "CTL-229"' \
+  | jq -r '.body.payload.pr.number'
 ```
 
 ## Pattern 4 — Tail everything happening to a ticket
@@ -408,7 +410,8 @@ catalyst-events wait-for --timeout 600 \
 Useful for live debugging or operator dashboards:
 
 ```bash
-catalyst-events tail --filter '.scope.ticket == "CTL-210"'
+# linear.issue.identifier for Linear-event context; catalyst.worker.ticket for worker/orchestrator context
+catalyst-events tail --filter '.attributes."linear.issue.identifier" == "CTL-210" or .attributes."catalyst.worker.ticket" == "CTL-210"'
 ```
 
 Captures GitHub PR events scoped to that ticket, Linear webhook events for the issue,
@@ -427,7 +430,7 @@ It is the wrong default when the question is *"are events flowing at all?"*
 
 ```bash
 # User runs this to "check if any events are coming through"
-catalyst-events tail --filter '.event | startswith("github.")'
+catalyst-events tail --filter '.attributes."event.name" | startswith("github.")'
 # Sits silent. User concludes: tunnel is dead.
 # Reality: tunnel is fine, just no NEW events since they started tailing.
 ```
@@ -441,17 +444,17 @@ from the start.
 
 ```bash
 # Most recent github event of any kind, regardless of repo
-catalyst-events tail --since-line 0 --filter '.event | startswith("github.")' \
+catalyst-events tail --since-line 0 --filter '.attributes."event.name" | startswith("github.")' \
   | tail -1
 
 # Hourly count over the current log file
-catalyst-events tail --since-line 0 --filter '.event | startswith("github.")' \
+catalyst-events tail --since-line 0 --filter '.attributes."event.name" | startswith("github.")' \
   | jq -r '.ts | sub("Z$"; "") | sub(":[0-9]{2}:[0-9]{2}$"; ":00:00")' \
   | sort | uniq -c
 
 # Per-repo breakdown — distinguishes "quiet repo" from "dead tunnel"
-catalyst-events tail --since-line 0 --filter '.event | startswith("github.")' \
-  | jq -r '.scope.repo' | sort | uniq -c | sort -rn
+catalyst-events tail --since-line 0 --filter '.attributes."event.name" | startswith("github.")' \
+  | jq -r '.attributes."vcs.repository.name"' | sort | uniq -c | sort -rn
 ```
 
 The per-repo breakdown is the one that most often resolves the misdiagnosis — a tunnel
@@ -470,23 +473,23 @@ unavailable, insufficient, or contradicts what you expect.
 
 | Need | Filter |
 |---|---|
-| All GitHub webhook events | `.event \| startswith("github.")` |
-| All Linear webhook events | `.event \| startswith("linear.")` |
-| One PR's merge | `.event == "github.pr.merged" and .scope.pr == 342` |
-| Any push to a branch | `.event == "github.push" and .scope.ref == "refs/heads/main"` |
-| CI completion | `.event \| startswith("github.check_suite.")` |
-| CI failure for one PR | `.event == "github.check_suite.completed" and .detail.conclusion == "failure" and (.detail.prNumbers // [] \| index(342) != null)` |
-| Review changes-requested by a bot | `.event == "github.pr_review.submitted" and .detail.state == "changes_requested" and .detail.author.type == "Bot"` |
-| Comment from a human on a PR | `.event == "github.issue_comment.created" and (.detail.author.type // "User") != "Bot"` |
-| Linear ticket state change | `.event == "linear.issue.state_changed" and .scope.ticket == "CTL-210"` |
-| Comms message in one channel | `.event == "comms.message.posted" and .detail.channel == "orch-foo"` |
-| Routine worker phase transitions (info-tier, coalesced batches; CTL-229) | `.event == "worker-phase-advanced"` |
-| Worker terminal transitions (PR-created, merging, done, fail; CTL-229) | `.event == "worker-status-terminal"` |
-| One worker's terminal events with PR number | `.event == "worker-status-terminal" and .worker == "CTL-210" and (.detail.pr.number // null)` |
-| Worker reached terminal state | `.event == "worker-done" or .event == "worker-failed"` |
-| PR review activity | `(.event \| startswith("github.pr_review")) or (.event == "github.issue_comment.created")` |
-| Deploy outcome | `.event \| startswith("github.deployment")` |
-| Attention raised in this orchestrator | `.event == "attention-raised" and .orchestrator == "orch-foo"` |
+| All GitHub webhook events | `.attributes."event.name" \| startswith("github.")` |
+| All Linear webhook events | `.attributes."event.name" \| startswith("linear.")` |
+| One PR's merge | `.attributes."event.name" == "github.pr.merged" and .attributes."vcs.pr.number" == 342` |
+| Any push to a branch | `.attributes."event.name" == "github.push" and .attributes."vcs.ref.name" == "refs/heads/main"` |
+| CI completion | `.attributes."event.name" \| startswith("github.check_suite.")` |
+| CI failure for one PR | `.attributes."event.name" == "github.check_suite.completed" and .attributes."cicd.pipeline.run.conclusion" == "failure" and (.body.payload.prNumbers // [] \| index(342) != null)` |
+| Review changes-requested by a bot | `.attributes."event.name" == "github.pr_review.submitted" and .body.payload.state == "changes_requested" and .body.payload.author.type == "Bot"` |
+| Comment from a human on a PR | `.attributes."event.name" == "github.issue_comment.created" and (.body.payload.author.type // "User") != "Bot"` |
+| Linear ticket state change | `.attributes."event.name" == "linear.issue.state_changed" and .attributes."linear.issue.identifier" == "CTL-210"` |
+| Comms message in one channel | `.attributes."event.name" == "comms.message.posted" and .body.payload.channel == "orch-foo"` |
+| Routine worker phase transitions (info-tier, coalesced batches; CTL-229) | `.attributes."event.name" == "worker-phase-advanced"` |
+| Worker terminal transitions (PR-created, merging, done, fail; CTL-229) | `.attributes."event.name" == "worker-status-terminal"` |
+| One worker's terminal events with PR number | `.attributes."event.name" == "worker-status-terminal" and .attributes."catalyst.worker.ticket" == "CTL-210" and (.body.payload.pr.number // null)` |
+| Worker reached terminal state | `.attributes."event.name" == "worker-done" or .attributes."event.name" == "worker-failed"` |
+| PR review activity | `(.attributes."event.name" \| startswith("github.pr_review")) or (.attributes."event.name" == "github.issue_comment.created")` |
+| Deploy outcome | `.attributes."event.name" \| startswith("github.deployment")` |
+| Attention raised in this orchestrator | `.attributes."event.name" == "attention-raised" and .attributes."catalyst.orchestrator.id" == "orch-foo"` |
 
 ## `--timeout` semantics
 
@@ -512,18 +515,20 @@ The event stream is a single point of failure. Mitigations:
    are written by writers that don't depend on the daemon. Daemon-down only loses
    GitHub/Linear webhook events.
 
-## v1 vs v2 envelopes
+## v1 vs v2 vs canonical envelopes
 
-The event log carries two schemas in the same file:
+The event log carries two legacy schemas plus the new canonical shape (CTL-300):
 
 - **v1** (bash writers, `catalyst-state.sh event`): `{ ts, event, orchestrator, worker, detail }`
 - **v2** (TypeScript writers, webhook receiver, CTL-209+): adds `id`, `schemaVersion: 2`,
   `source`, `scope` (replacing flat `orchestrator` / `worker` with a nested object;
   v2 still emits the flat fields too as backward-compat aliases).
+- **canonical** (CTL-300+): OTel-shaped envelope with `attributes."event.name"`, `attributes."vcs.pr.number"`,
+  etc. All new producers emit canonical; filters in this doc target canonical paths.
 
-Filters that read `.scope.repo` / `.scope.pr` / `.scope.ticket` only match v2 envelopes.
-Filters that read `.event` / `.worker` / `.orchestrator` work for both. Choose based on
-which sources you need to match — webhook events use v2, orchestrator events use v1.
+Filters that read `.attributes."vcs.repository.name"` / `.attributes."vcs.pr.number"` / `.attributes."linear.issue.identifier"` only match canonical envelopes.
+Filters that read `.attributes."event.name"` work for canonical; `.event` / `.worker` / `.orchestrator` work for v1/v2. Choose based on
+which sources you need to match — webhook events use canonical, orchestrator events may still use v1/v2.
 
 ## Quick reference
 

@@ -804,10 +804,10 @@ timeout acts as the safety-net fallback for daemon-down scenarios.
 
 ```bash
 WAKE_EVENT=$(catalyst-events wait-for \
-  --filter ".event == \"filter.wake.${ORCH_NAME}\"" \
+  --filter ".attributes.\"event.name\" == \"filter.wake\" and .attributes.\"event.label\" == \"${ORCH_NAME}\"" \
   --timeout 600 2>/dev/null || true)
 if [ -n "$WAKE_EVENT" ]; then
-  WAKE_REASON=$(echo "$WAKE_EVENT" | jq -r '.detail.reason // "unknown"' 2>/dev/null || echo "unknown")
+  WAKE_REASON=$(echo "$WAKE_EVENT" | jq -r '.body.payload.reason // "unknown"' 2>/dev/null || echo "unknown")
   echo "[Phase 4] Filter wake: ${WAKE_REASON}"
 fi
 # Always follow with an authoritative REST re-check — the reason string is informational only.
@@ -833,9 +833,10 @@ silently for 15+ minutes despite live PR activity.
 
 **GitHub event schema (CTL-240).** `github.*` webhook events carry
 `orchestrator: null` and `worker: null` on every line — they are scoped only by
-`.scope.repo`, `.scope.ref`, `.scope.pr`, `.scope.sha`, and (for `check_suite` /
-`workflow_run`) `detail.prNumbers`. Predicates that try to scope github events by
-`.orchestrator == "<orch>"` will silently drop every github event.
+`.attributes."vcs.repository.name"`, `.attributes."vcs.ref.name"`, `.attributes."vcs.pr.number"`,
+`.attributes."vcs.revision"`, and (for `check_suite` / `workflow_run`) `body.payload.prNumbers`.
+Predicates that try to scope github events by
+`.attributes."catalyst.orchestrator.id" == "<orch>"` will silently drop every github event.
 `build-orchestrator-filter` handles this correctly — prefer it over hand-rolled
 filters.
 
@@ -844,21 +845,21 @@ broad event-type recommendation is:
 
 ```text
 catalyst-events tail --filter '
-  (.event | startswith("github.pr.")) or
-  (.event | startswith("github.pr_review")) or
-  (.event | startswith("github.issue_comment")) or
-  (.event | startswith("github.check_")) or
-  (.event | startswith("github.workflow_run")) or
-  (.event | startswith("github.deployment")) or
-  (.event == "github.push") or
-  (.event | startswith("linear.issue.")) or
-  (.event == "worker-phase-advanced") or
-  (.event == "worker-status-terminal") or
-  (.event == "worker-pr-created") or
-  (.event == "worker-done") or
-  (.event == "worker-failed") or
-  (.event == "attention-raised") or
-  (.event == "attention-resolved")
+  (.attributes."event.name" | startswith("github.pr.")) or
+  (.attributes."event.name" | startswith("github.pr_review")) or
+  (.attributes."event.name" | startswith("github.issue_comment")) or
+  (.attributes."event.name" | startswith("github.check_")) or
+  (.attributes."event.name" | startswith("github.workflow_run")) or
+  (.attributes."event.name" | startswith("github.deployment")) or
+  (.attributes."event.name" == "github.push") or
+  (.attributes."event.name" | startswith("linear.issue.")) or
+  (.attributes."event.name" == "worker-phase-advanced") or
+  (.attributes."event.name" == "worker-status-terminal") or
+  (.attributes."event.name" == "worker-pr-created") or
+  (.attributes."event.name" == "worker-done") or
+  (.attributes."event.name" == "worker-failed") or
+  (.attributes."event.name" == "attention-raised") or
+  (.attributes."event.name" == "attention-resolved")
 '
 ```
 
@@ -869,9 +870,9 @@ CI-done signal). The broad form has no scope filter, so events from sibling
 orchestrators sharing the repo will also fire wake-ups; prefer
 `build-orchestrator-filter` when you have an `$ORCH_DIR` to draw on.
 
-> **Orchestrator-scoped filtering (CTL-234):** `github.*` events now carry `.scope.orchestrator`
+> **Orchestrator-scoped filtering (CTL-234):** `github.*` events now carry `.attributes."catalyst.orchestrator.id"`
 > (stamped at receive time by the webhook handler). You may safely add
-> `(.orchestrator == "${ORCH_NAME}") and (...)` to narrow the filter to this run's PRs only.
+> `(.attributes."catalyst.orchestrator.id" == "${ORCH_NAME}") and (...)` to narrow the filter to this run's PRs only.
 
 **Wake-up classification.** When a line arrives on the Monitor, classify it before
 re-entering the scan so the response stays proportional. Every reaction reads
@@ -880,17 +881,17 @@ are wake-up triggers, never sources of truth.
 
 | Event | Reaction |
 |---|---|
-| `worker-phase-advanced` | Routine in-flight progress; re-render `DASHBOARD.md`. Coalesced — `.detail.changes` carries the batch (CTL-229) |
-| `worker-status-terminal`, `worker-done`, `worker-failed` | Terminal transition; re-render `DASHBOARD.md` and run `orchestrate-dispatch-next` to fill freed slots. PR-bearing transitions carry `.detail.pr.{number,url}` (CTL-229) |
-| `worker-pr-created` | Reconcile the PR number into signal/state; re-render `DASHBOARD.md` |
-| `attention-raised`, `attention-resolved` | Re-render the `DASHBOARD.md` NEEDS ATTENTION banner |
+| `orchestrator.worker.phase_advanced` | Routine in-flight progress; re-render `DASHBOARD.md`. Coalesced — `.body.payload.changes` carries the batch (CTL-229) |
+| `orchestrator.worker.status_terminal`, `orchestrator.worker.done`, `orchestrator.worker.failed` | Terminal transition; re-render `DASHBOARD.md` and run `orchestrate-dispatch-next` to fill freed slots. PR-bearing transitions carry `.body.payload.pr.{number,url}` (CTL-229) |
+| `orchestrator.worker.pr_created` | Reconcile the PR number into signal/state; re-render `DASHBOARD.md` |
+| `orchestrator.attention.raised`, `orchestrator.attention.resolved` | Re-render the `DASHBOARD.md` NEEDS ATTENTION banner |
 | `github.pr.merged`, `github.pr.closed` | Run the merge-confirmation scan for that PR |
 | `github.pr.synchronize`, `github.push` | Re-evaluate `mergeStateStatus` for the affected PR; if DIRTY ≥2 min, `orchestrate-auto-rebase` may dispatch a rebase worker (BEHIND auto-resolves via auto-merge) |
 | `github.check_*`, `github.workflow_run.completed` | Re-check CI; if BLOCKED ≥10 min, `orchestrate-auto-fixup` may dispatch a fix-up. `workflow_run.completed` is the most reliable CI-done signal |
 | `github.pr_review*`, `github.pr_review_comment*`, `github.issue_comment.created` | Re-evaluate `mergeStateStatus`; surface review activity on the dashboard. Codex review threads land as `pr_review_comment.created` — required for CTL-64 BLOCKED auto-fixup detection |
 | `github.deployment*` | Record deploy outcome on the worker's signal file |
 | `linear.issue.state_changed` | Reconcile Linear state with the worker signal |
-| `filter.wake.{ORCH_NAME}` | Daemon-filtered semantic wake: read `.detail.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source |
+| `filter.wake` (with `attributes."event.label" == ${ORCH_NAME}`) | Daemon-filtered semantic wake: read `.body.payload.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source |
 | 10-minute idle (no event) | Run the full reactive scan as a safety net |
 
 **Ground truth is git + PR, not the signal file.** The signal file is *advisory* — it reports

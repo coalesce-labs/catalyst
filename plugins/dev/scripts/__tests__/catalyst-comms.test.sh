@@ -189,18 +189,20 @@ rm -rf "${CATALYST_DIR}/events"
 "$COMMS" join fanout-ch --as alice --ttl 300 > /dev/null
 MSG_ID=$("$COMMS" send fanout-ch "global fan-out test" --as alice --type info)
 EVENTS_FILE="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+# CTL-300: events are now canonical OTel-shaped. event.name lives at
+# .attributes."event.name", message body at .body.payload.
 run "send writes a comms.message.posted line to events.jsonl" bash -c "
-  test -f '$EVENTS_FILE' && grep -q '\"event\":\"comms.message.posted\"' '$EVENTS_FILE'
+  test -f '$EVENTS_FILE' && grep -q '\"event.name\":\"comms.message.posted\"' '$EVENTS_FILE'
 "
-run "fan-out event carries the matching msgId in detail" bash -c "
+run "fan-out event carries the matching msgId in body.payload" bash -c "
   jq -e --arg id '$MSG_ID' \
-    'select(.event == \"comms.message.posted\" and .detail.msgId == \$id)' \
+    'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)' \
     '$EVENTS_FILE' >/dev/null
 "
-run "fan-out event records channel and type in detail" bash -c "
+run "fan-out event records channel and type in body.payload" bash -c "
   jq -e --arg id '$MSG_ID' \
-    'select(.event == \"comms.message.posted\" and .detail.msgId == \$id)
-       | (.detail.channel == \"fanout-ch\" and .detail.type == \"info\")' \
+    'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)
+       | (.body.payload.channel == \"fanout-ch\" and .body.payload.type == \"info\")' \
     '$EVENTS_FILE' >/dev/null
 "
 

@@ -1,8 +1,13 @@
 import { verifyLinearSignature } from "./linear-webhook-verify";
 import { parseLinearWebhookEvent, type LinearWebhookEvent } from "./linear-webhook-events";
-import { type EventLogWriter, type AppendableEvent } from "./event-log";
+import { type EventLogWriter } from "./event-log";
+import {
+  buildCanonicalEvent,
+  type CanonicalEvent,
+  type Attributes,
+} from "./canonical-event";
 
-export const LINEAR_WEBHOOK_SOURCE = "linear.webhook";
+const LINEAR_SERVICE_NAME = "catalyst.linear" as const;
 
 export interface LinearWebhookLogger {
   info?: (msg: string) => void;
@@ -12,29 +17,26 @@ export interface LinearWebhookLogger {
 
 export interface LinearWebhookHandlerDeps {
   /**
-   * HMAC signing secrets (CTL-273). Array of {key, secret} pairs for multi-team support.
+   * HMAC signing secrets. Array of {key, secret} pairs for multi-team support.
    * Key is "workspace" or a team UUID. Handler tries each secret until one validates.
    * Empty array disables the handler (returns 503).
-   * For backward compatibility with single-secret usage, callers can pass an array
-   * with a single entry.
    */
   linearSecrets: Array<{ key: string; secret: string }>;
   /** Optional pub/sub for SSE fan-out to UI clients. */
   emit?: (type: string, data: unknown) => void;
-  /** Event-log fan-out — every accepted event is appended here. */
+  /** Event-log fan-out — every accepted event is appended here as a canonical envelope. */
   eventLog?: EventLogWriter;
   /**
    * Hook fired AFTER an event is parsed, logged, and emitted. Lets the server
    * react to ticket-scoped events without the handler needing to know about
-   * the consumers (e.g. invalidate the LinearFetcher cache on
-   * `linear.issue.state_changed`). CTL-211. Failures are logged and swallowed
-   * so a slow consumer never blocks the webhook response.
+   * the consumers. Failures are logged and swallowed so a slow consumer never
+   * blocks the webhook response.
    */
   onAccept?: (event: LinearWebhookEvent) => void | Promise<void>;
   /**
    * Linear user UUID for the catalyst bot. Issue events where the actor matches
    * this value are suppressed before reaching the event log (loop prevention).
-   * CTL-263. Empty or absent = no suppression.
+   * Empty or absent = no suppression.
    */
   botUserId?: string;
   /** Cap for the in-memory delivery-ID dedup set. Default 1000. */
@@ -48,83 +50,146 @@ export interface LinearWebhookHandler {
   markDelivery(deliveryId: string): void;
 }
 
+interface LinearCanonicalArgs {
+  ts: string;
+  eventName: string;
+  entity: string;
+  action: string;
+  label?: string | undefined;
+  severity: "DEBUG" | "INFO" | "WARN" | "ERROR";
+  attrs: Omit<Attributes, "event.name">;
+  message: string;
+  payload: unknown;
+}
+
+function canonical(args: LinearCanonicalArgs): CanonicalEvent {
+  const attributes: Attributes = {
+    ...args.attrs,
+    "event.name": args.eventName,
+    "event.entity": args.entity,
+    "event.action": args.action,
+    "event.channel": "webhook",
+  };
+  if (args.label !== undefined) {
+    attributes["event.label"] = args.label;
+  }
+  return buildCanonicalEvent({
+    ts: args.ts,
+    severityText: args.severity,
+    traceId: null,
+    spanId: null,
+    resource: { "service.name": LINEAR_SERVICE_NAME },
+    attributes,
+    body: { message: args.message, payload: args.payload },
+  });
+}
+
 /**
- * Map a parsed LinearWebhookEvent to a unified-event-log envelope.
+ * Map a parsed LinearWebhookEvent to a canonical event envelope. Returns null
+ * for `kind: "ignored"`.
  *
- * Topic namespace: `linear.<noun>.<verb>` — e.g. `linear.issue.state_changed`,
- * `linear.comment.created`. Returns null for `kind: "ignored"`.
+ * `event.name` follows `linear.<entity>.<action>` lowercase, dot-separated.
  */
 export function buildLinearEventLogEnvelope(
   event: LinearWebhookEvent,
-  deliveryId: string
-): AppendableEvent | null {
-  const id = `evt_linear_${deliveryId}`;
+  ts: string = new Date().toISOString(),
+): CanonicalEvent | null {
   switch (event.kind) {
-    case "issue":
-      return {
-        id,
-        source: LINEAR_WEBHOOK_SOURCE,
-        event: event.topic,
-        scope: {
-          ticket: event.ticket ?? undefined,
-        },
-        detail: {
+    case "issue": {
+      const attrs: Omit<Attributes, "event.name"> = {};
+      if (event.ticket !== null) attrs["linear.issue.identifier"] = event.ticket;
+      if (event.teamKey !== null) attrs["linear.team.key"] = event.teamKey;
+      if (event.actorId !== null) attrs["linear.actor.id"] = event.actorId;
+      return canonical({
+        ts,
+        eventName: event.topic,
+        entity: "issue",
+        action: event.topic.replace(/^linear\.issue\./, ""),
+        label: event.ticket ?? undefined,
+        severity: "INFO",
+        attrs,
+        message: `${event.topic}${event.ticket ? ` ${event.ticket}` : ""}`,
+        payload: {
           action: event.action,
           ticket: event.ticket,
           teamKey: event.teamKey,
           updatedFromKeys: event.updatedFromKeys,
           actorId: event.actorId,
         },
-      };
-    case "comment":
-      return {
-        id,
-        source: LINEAR_WEBHOOK_SOURCE,
-        event: `linear.comment.${event.action}d`,
-        scope: {
-          ticket: event.ticket ?? undefined,
-        },
-        detail: {
+      });
+    }
+    case "comment": {
+      const eventName = `linear.comment.${event.action}d`;
+      const attrs: Omit<Attributes, "event.name"> = {};
+      if (event.ticket !== null) attrs["linear.issue.identifier"] = event.ticket;
+      return canonical({
+        ts,
+        eventName,
+        entity: "comment",
+        action: `${event.action}d`,
+        label: event.ticket ?? undefined,
+        severity: "INFO",
+        attrs,
+        message: `${eventName}${event.ticket ? ` on ${event.ticket}` : ""}`,
+        payload: {
           action: event.action,
           commentId: event.commentId,
           issueId: event.issueId,
           ticket: event.ticket,
         },
-      };
-    case "cycle":
-      return {
-        id,
-        source: LINEAR_WEBHOOK_SOURCE,
-        event: `linear.cycle.${event.action}d`,
-        scope: {},
-        detail: {
+      });
+    }
+    case "cycle": {
+      const eventName = `linear.cycle.${event.action}d`;
+      const attrs: Omit<Attributes, "event.name"> = {};
+      if (event.teamKey !== null) attrs["linear.team.key"] = event.teamKey;
+      return canonical({
+        ts,
+        eventName,
+        entity: "cycle",
+        action: `${event.action}d`,
+        severity: "INFO",
+        attrs,
+        message: eventName,
+        payload: {
           action: event.action,
           cycleId: event.cycleId,
           teamKey: event.teamKey,
         },
-      };
-    case "reaction":
-      return {
-        id,
-        source: LINEAR_WEBHOOK_SOURCE,
-        event: `linear.reaction.${event.action}d`,
-        scope: {},
-        detail: {
+      });
+    }
+    case "reaction": {
+      const eventName = `linear.reaction.${event.action}d`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "reaction",
+        action: `${event.action}d`,
+        severity: "INFO",
+        attrs: {},
+        message: eventName,
+        payload: {
           action: event.action,
           reactionId: event.reactionId,
         },
-      };
-    case "issue_label":
-      return {
-        id,
-        source: LINEAR_WEBHOOK_SOURCE,
-        event: `linear.issue_label.${event.action}d`,
-        scope: {},
-        detail: {
+      });
+    }
+    case "issue_label": {
+      const eventName = `linear.issue_label.${event.action}d`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "issue_label",
+        action: `${event.action}d`,
+        severity: "INFO",
+        attrs: {},
+        message: eventName,
+        payload: {
           action: event.action,
           labelId: event.labelId,
         },
-      };
+      });
+    }
     case "ignored":
       return null;
   }
@@ -159,7 +224,6 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
     const rawBody = new Uint8Array(await req.arrayBuffer());
     const sig = req.headers.get("linear-signature");
 
-    // CTL-273: Try each secret until one validates (supports multi-team webhooks)
     let verified = false;
     for (const { secret } of deps.linearSecrets) {
       if (secret && verifyLinearSignature(secret, rawBody, sig)) {
@@ -198,7 +262,7 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
     const event = parseLinearWebhookEvent(eventName, payload);
 
     // Bot-skip: suppress issue events authored by the catalyst bot to prevent
-    // write loops (worker transitions ticket → webhook fires → orchestrator wakes → loop).
+    // write loops.
     if (
       event.kind === "issue" &&
       deps.botUserId &&
@@ -215,7 +279,7 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
     }
 
     if (deps.eventLog && event.kind !== "ignored") {
-      const envelope = buildLinearEventLogEnvelope(event, deliveryId);
+      const envelope = buildLinearEventLogEnvelope(event);
       if (envelope !== null) {
         try {
           await deps.eventLog.append(envelope);

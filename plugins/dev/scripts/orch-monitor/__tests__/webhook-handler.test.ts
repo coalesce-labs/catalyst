@@ -11,7 +11,8 @@ import {
   type PreviewFetcherForceLike,
   type OrchestratorResolverFn,
 } from "../lib/webhook-handler";
-import type { EventLogWriter, AppendableEvent } from "../lib/event-log";
+import type { EventLogWriter } from "../lib/event-log";
+import type { CanonicalEvent } from "../lib/canonical-event";
 
 const SECRET = "test-secret";
 
@@ -62,9 +63,9 @@ class FakePreviewFetcher implements PreviewFetcherForceLike {
 }
 
 class FakeEventLog implements EventLogWriter {
-  appends: AppendableEvent[] = [];
+  appends: CanonicalEvent[] = [];
   failNext = false;
-  append(envelope: AppendableEvent): Promise<void> {
+  append(envelope: CanonicalEvent): Promise<void> {
     if (this.failNext) {
       this.failNext = false;
       return Promise.reject(new Error("disk full"));
@@ -75,6 +76,8 @@ class FakeEventLog implements EventLogWriter {
 }
 
 const REPO = { repository: { full_name: "owner/repo" } };
+
+const TS = "2026-05-08T18:00:00.000Z";
 
 describe("createWebhookHandler", () => {
   let fetcher: FakeFetcher;
@@ -215,7 +218,6 @@ describe("createWebhookHandler", () => {
     );
     expect(res.status).toBe(200);
     expect(fetcher.forces).toEqual([{ repo: "owner/repo", number: 322 }]);
-    // findSignalPaths is only called for closed-merged
     expect(writeAttempted).toBe(false);
   });
 
@@ -381,7 +383,6 @@ describe("createWebhookHandler", () => {
     expect(r2.status).toBe(200);
     const r2body = (await r2.json()) as { ok: boolean; replay: boolean };
     expect(r2body.replay).toBe(true);
-    // No additional force calls
     expect(fetcher.forces.length).toBe(1);
   });
 
@@ -425,8 +426,6 @@ describe("createWebhookHandler", () => {
     const handler = createWebhookHandler({ secret: SECRET, prFetcher: fetcher });
     const res = await handler.handle(
       makeReq(
-        // `unrecognized_event` exercises the unhandled-event-name branch since
-        // `release` is now a recognized event (CTL-226).
         { ...REPO, action: "whatever" },
         { "x-github-event": "unrecognized_event" },
       ),
@@ -435,10 +434,6 @@ describe("createWebhookHandler", () => {
     expect(fetcher.forces.length).toBe(0);
   });
 
-  // CTL-226: regression-protect the topic mapper. Before the fix, ANY
-  // pull_request payload with merged=true (including label edits on an
-  // already-merged PR) was routed to github.pr.merged, which made workers
-  // waiting on merge re-fire on every subsequent label change.
   it("pull_request.labeled on merged PR does NOT force-fire merge dispatch", async () => {
     const eventLog = new FakeEventLog();
     const handler = createWebhookHandler({
@@ -450,7 +445,6 @@ describe("createWebhookHandler", () => {
       makeReq({
         ...REPO,
         action: "labeled",
-        // Merged PR — but the action is labeled, not closed.
         pull_request: {
           number: 326,
           merged: true,
@@ -460,8 +454,7 @@ describe("createWebhookHandler", () => {
     );
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.event).toBe("github.pr.labeled");
-    expect(eventLog.appends[0]?.event).not.toBe("github.pr.merged");
+    expect(eventLog.appends[0]?.attributes["event.name"]).toBe("github.pr.labeled");
   });
 
   it("release.published is accepted (200) and logged", async () => {
@@ -490,8 +483,7 @@ describe("createWebhookHandler", () => {
     );
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.event).toBe("github.release.published");
-    // No PR fetcher force — release events are repo-level, not PR-keyed.
+    expect(eventLog.appends[0]?.attributes["event.name"]).toBe("github.release.published");
     expect(fetcher.forces.length).toBe(0);
   });
 
@@ -525,7 +517,7 @@ describe("createWebhookHandler", () => {
     );
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.event).toBe("github.workflow_run.completed");
+    expect(eventLog.appends[0]?.attributes["event.name"]).toBe("github.workflow_run.completed");
     expect(fetcher.forces.length).toBe(0);
   });
 
@@ -557,15 +549,15 @@ describe("createWebhookHandler", () => {
     await post("b");
     expect(handler.hasSeenDelivery("a")).toBe(true);
     expect(handler.hasSeenDelivery("b")).toBe(true);
-    await post("c"); // pushes "a" out
+    await post("c");
     expect(handler.hasSeenDelivery("a")).toBe(false);
     expect(handler.hasSeenDelivery("b")).toBe(true);
     expect(handler.hasSeenDelivery("c")).toBe(true);
   });
 });
 
-describe("buildEventLogEnvelope", () => {
-  it("maps pull_request.closed (merged=true) → github.pr.merged", () => {
+describe("buildEventLogEnvelope (canonical)", () => {
+  it("maps pull_request.closed (merged=true) → github.pr.merged with vcs attributes", () => {
     const env = buildEventLogEnvelope(
       {
         kind: "pull_request",
@@ -574,39 +566,22 @@ describe("buildEventLogEnvelope", () => {
         action: "closed",
         merged: true,
         mergedAt: "2026-05-03T12:00:00Z",
-        mergeCommitSha: "abc123def456",
-        draft: false,
-        mergeable: true,
-        headRef: "",
-      },
-      "del-1",
-    );
-    expect(env).not.toBeNull();
-    expect(env!.event).toBe("github.pr.merged");
-    expect(env!.scope).toEqual({ repo: "o/r", pr: 1 });
-    expect(env!.id).toBe("evt_del-1");
-    // CTL-284: mergeCommitSha is forwarded into the envelope detail so the
-    // filter daemon can correlate the merge with subsequent deployment events.
-    expect(env!.detail.mergeCommitSha).toBe("abc123def456");
-  });
-
-  it("forwards mergeCommitSha=null when GitHub hasn't finalized the merge commit", () => {
-    const env = buildEventLogEnvelope(
-      {
-        kind: "pull_request",
-        repo: "o/r",
-        number: 2,
-        action: "closed",
-        merged: true,
-        mergedAt: "2026-05-03T12:00:00Z",
         mergeCommitSha: null,
         draft: false,
         mergeable: true,
         headRef: "",
       },
-      "del-1b",
+      TS,
     );
-    expect(env!.detail.mergeCommitSha).toBeNull();
+    expect(env).not.toBeNull();
+    expect(env!.attributes["event.name"]).toBe("github.pr.merged");
+    expect(env!.attributes["vcs.repository.name"]).toBe("o/r");
+    expect(env!.attributes["vcs.pr.number"]).toBe(1);
+    expect(env!.attributes["event.entity"]).toBe("pr");
+    expect(env!.attributes["event.action"]).toBe("merged");
+    expect(env!.attributes["event.label"]).toBe("PR #1");
+    expect(env!.attributes["event.channel"]).toBe("webhook");
+    expect(env!.resource["service.name"]).toBe("catalyst.github");
   });
 
   it("maps pull_request.closed (merged=false) → github.pr.closed", () => {
@@ -623,15 +598,11 @@ describe("buildEventLogEnvelope", () => {
         mergeable: null,
         headRef: "",
       },
-      "del-2",
+      TS,
     );
-    expect(env!.event).toBe("github.pr.closed");
+    expect(env!.attributes["event.name"]).toBe("github.pr.closed");
   });
 
-  // CTL-226: pull_request payloads on already-merged PRs carry merged=true
-  // for non-merge actions too (labeled, unlabeled, edited, …). The mapper
-  // must not treat any merged=true payload as a merge event — only the one
-  // with action=closed AND merged=true.
   it("maps pull_request.labeled (merged=true) → github.pr.labeled (NOT merged)", () => {
     const env = buildEventLogEnvelope(
       {
@@ -646,9 +617,9 @@ describe("buildEventLogEnvelope", () => {
         mergeable: null,
         headRef: "",
       },
-      "del-pr-labeled",
+      TS,
     );
-    expect(env!.event).toBe("github.pr.labeled");
+    expect(env!.attributes["event.name"]).toBe("github.pr.labeled");
   });
 
   it("maps pull_request.unlabeled (merged=true) → github.pr.unlabeled", () => {
@@ -665,9 +636,9 @@ describe("buildEventLogEnvelope", () => {
         mergeable: null,
         headRef: "",
       },
-      "del-pr-unlabeled",
+      TS,
     );
-    expect(env!.event).toBe("github.pr.unlabeled");
+    expect(env!.attributes["event.name"]).toBe("github.pr.unlabeled");
   });
 
   it("maps pull_request.synchronize → github.pr.synchronize", () => {
@@ -684,9 +655,9 @@ describe("buildEventLogEnvelope", () => {
         mergeable: null,
         headRef: "",
       },
-      "del-sync",
+      TS,
     );
-    expect(env!.event).toBe("github.pr.synchronize");
+    expect(env!.attributes["event.name"]).toBe("github.pr.synchronize");
   });
 
   it("maps release.published → github.release.published", () => {
@@ -702,14 +673,14 @@ describe("buildEventLogEnvelope", () => {
         prerelease: false,
         htmlUrl: "https://github.com/o/r/releases/tag/catalyst-dev-v8.0.0",
       },
-      "del-release",
+      TS,
     );
-    expect(env!.event).toBe("github.release.published");
-    expect(env!.scope.repo).toBe("o/r");
-    expect(env!.scope.tag).toBe("catalyst-dev-v8.0.0");
+    expect(env!.attributes["event.name"]).toBe("github.release.published");
+    expect(env!.attributes["vcs.repository.name"]).toBe("o/r");
+    expect(env!.attributes["event.label"]).toBe("catalyst-dev-v8.0.0");
   });
 
-  it("maps workflow_run.completed → github.workflow_run.completed", () => {
+  it("maps workflow_run.completed → github.workflow_run.completed with cicd attrs", () => {
     const env = buildEventLogEnvelope(
       {
         kind: "workflow_run",
@@ -726,28 +697,59 @@ describe("buildEventLogEnvelope", () => {
         htmlUrl: "https://github.com/o/r/actions/runs/555",
         prNumbers: [326],
       },
-      "del-wfr",
+      TS,
     );
-    expect(env!.event).toBe("github.workflow_run.completed");
-    expect(env!.scope.sha).toBe("abc123");
-    expect(env!.detail.conclusion).toBe("success");
-    expect(env!.detail.prNumbers).toEqual([326]);
+    expect(env!.attributes["event.name"]).toBe("github.workflow_run.completed");
+    expect(env!.attributes["vcs.revision"]).toBe("abc123");
+    expect(env!.attributes["vcs.pr.number"]).toBe(326);
+    expect(env!.attributes["cicd.pipeline.run.id"]).toBe(555);
+    expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBe("success");
+    expect(env!.attributes["cicd.pipeline.name"]).toBe("CI");
+    const payload = env!.body.payload as { prNumbers: number[] };
+    expect(payload.prNumbers).toEqual([326]);
   });
 
-  it("maps check_suite.completed → github.check_suite.completed", () => {
+  it("workflow_run with multiple PRs omits vcs.pr.number (multi-PR ambiguity)", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "workflow_run",
+        repo: "o/r",
+        action: "completed",
+        workflowId: 99,
+        runId: 555,
+        name: "CI",
+        headSha: "abc123",
+        headBranch: "main",
+        status: "completed",
+        conclusion: "success",
+        runNumber: 42,
+        htmlUrl: "https://github.com/o/r/actions/runs/555",
+        prNumbers: [326, 327],
+      },
+      TS,
+    );
+    expect(env!.attributes["vcs.pr.number"]).toBeUndefined();
+    const payload = env!.body.payload as { prNumbers: number[] };
+    expect(payload.prNumbers).toEqual([326, 327]);
+  });
+
+  it("maps check_suite.completed → github.check_suite.completed (failure → WARN)", () => {
     const env = buildEventLogEnvelope(
       {
         kind: "check_suite",
         repo: "o/r",
-        prNumbers: [1, 2],
+        prNumbers: [1],
         status: "completed",
-        conclusion: "success",
+        conclusion: "failure",
         headRef: "",
       },
-      "del-3",
+      TS,
     );
-    expect(env!.event).toBe("github.check_suite.completed");
-    expect(env!.detail.conclusion).toBe("success");
+    expect(env!.attributes["event.name"]).toBe("github.check_suite.completed");
+    expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBe("failure");
+    expect(env!.attributes["vcs.pr.number"]).toBe(1);
+    expect(env!.severityText).toBe("WARN");
+    expect(env!.severityNumber).toBe(13);
   });
 
   it("maps deployment_status.success → github.deployment_status.success", () => {
@@ -761,21 +763,39 @@ describe("buildEventLogEnvelope", () => {
         targetUrl: "https://x.pages.dev",
         environmentUrl: null,
       },
-      "del-4",
+      TS,
     );
-    expect(env!.event).toBe("github.deployment_status.success");
-    expect(env!.scope.environment).toBe("preview");
+    expect(env!.attributes["event.name"]).toBe("github.deployment_status.success");
+    expect(env!.attributes["deployment.environment"]).toBe("preview");
+    expect(env!.attributes["deployment.id"]).toBe(100);
+  });
+
+  it("deployment_status.failure → severity ERROR", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "deployment_status",
+        repo: "o/r",
+        deploymentId: 100,
+        environment: "prod",
+        state: "failure",
+        targetUrl: null,
+        environmentUrl: null,
+      },
+      TS,
+    );
+    expect(env!.severityText).toBe("ERROR");
+    expect(env!.severityNumber).toBe(17);
   });
 
   it("returns null for ignored events", () => {
     const env = buildEventLogEnvelope(
       { kind: "ignored", reason: "unknown event" },
-      "del-5",
+      TS,
     );
     expect(env).toBeNull();
   });
 
-  it("propagates author on pull_request_review envelopes", () => {
+  it("propagates author on pull_request_review payload", () => {
     const env = buildEventLogEnvelope(
       {
         kind: "pull_request_review",
@@ -788,13 +808,14 @@ describe("buildEventLogEnvelope", () => {
         author: { login: "codex[bot]", type: "Bot" },
         headRef: "",
       },
-      "del-6",
+      TS,
     );
-    expect(env!.event).toBe("github.pr_review.submitted");
-    expect(env!.detail.author).toEqual({ login: "codex[bot]", type: "Bot" });
+    expect(env!.attributes["event.name"]).toBe("github.pr_review.submitted");
+    const payload = env!.body.payload as { author: { login: string; type: string } };
+    expect(payload.author).toEqual({ login: "codex[bot]", type: "Bot" });
   });
 
-  it("propagates author on issue_comment envelopes", () => {
+  it("propagates author on issue_comment payload", () => {
     const env = buildEventLogEnvelope(
       {
         kind: "issue_comment",
@@ -806,13 +827,14 @@ describe("buildEventLogEnvelope", () => {
         htmlUrl: "https://example.com",
         author: { login: "alice", type: "User" },
       },
-      "del-7",
+      TS,
     );
-    expect(env!.event).toBe("github.issue_comment.created");
-    expect(env!.detail.author).toEqual({ login: "alice", type: "User" });
+    expect(env!.attributes["event.name"]).toBe("github.issue_comment.created");
+    const payload = env!.body.payload as { author: { login: string; type: string } };
+    expect(payload.author).toEqual({ login: "alice", type: "User" });
   });
 
-  it("propagates author on pull_request_review_comment envelopes", () => {
+  it("propagates author on pull_request_review_comment payload", () => {
     const env = buildEventLogEnvelope(
       {
         kind: "pull_request_review_comment",
@@ -825,13 +847,43 @@ describe("buildEventLogEnvelope", () => {
         author: { login: "dependabot[bot]", type: "Bot" },
         headRef: "",
       },
-      "del-8",
+      TS,
     );
-    expect(env!.event).toBe("github.pr_review_comment.created");
-    expect(env!.detail.author).toEqual({
-      login: "dependabot[bot]",
-      type: "Bot",
-    });
+    expect(env!.attributes["event.name"]).toBe("github.pr_review_comment.created");
+    const payload = env!.body.payload as { author: { login: string; type: string } };
+    expect(payload.author).toEqual({ login: "dependabot[bot]", type: "Bot" });
+  });
+
+  it("status events get sha[:7] as label and severity by state", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "status",
+        repo: "o/r",
+        sha: "abcdef0123456789",
+        state: "failure",
+      },
+      TS,
+    );
+    expect(env!.attributes["event.name"]).toBe("github.status.failure");
+    expect(env!.attributes["event.label"]).toBe("abcdef0");
+    expect(env!.severityText).toBe("ERROR");
+  });
+
+  it("push events carry vcs.ref.name and vcs.revision", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "push",
+        repo: "o/r",
+        ref: "refs/heads/main",
+        baseSha: "aaa",
+        headSha: "bbb",
+        commits: [],
+      },
+      TS,
+    );
+    expect(env!.attributes["event.name"]).toBe("github.push");
+    expect(env!.attributes["vcs.ref.name"]).toBe("refs/heads/main");
+    expect(env!.attributes["vcs.revision"]).toBe("bbb");
   });
 });
 
@@ -917,7 +969,7 @@ describe("attributionInputFor", () => {
   });
 });
 
-describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
+describe("createWebhookHandler — orchestrator attribution", () => {
   const eventLog = new FakeEventLog();
   const calls: Array<{ repo: string; pr?: number; headRef?: string }> = [];
   const resolveOrchestrator: OrchestratorResolverFn = (input) => {
@@ -932,7 +984,7 @@ describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
     calls.length = 0;
   });
 
-  it("stamps scope.orchestrator when resolver matches by head ref", async () => {
+  it("stamps catalyst.orchestrator.id when resolver matches by head ref", async () => {
     const handler = createWebhookHandler({
       secret: SECRET,
       prFetcher: new FakeFetcher(),
@@ -952,7 +1004,9 @@ describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
     );
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-foo");
+    expect(eventLog.appends[0]?.attributes["catalyst.orchestrator.id"]).toBe(
+      "orch-foo",
+    );
     expect(calls[0]).toEqual({
       repo: "owner/repo",
       pr: 1,
@@ -960,7 +1014,7 @@ describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
     });
   });
 
-  it("stamps scope.orchestrator when resolver matches by PR number", async () => {
+  it("stamps catalyst.orchestrator.id when resolver matches by PR number", async () => {
     const handler = createWebhookHandler({
       secret: SECRET,
       prFetcher: new FakeFetcher(),
@@ -980,10 +1034,12 @@ describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
     );
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-bar");
+    expect(eventLog.appends[0]?.attributes["catalyst.orchestrator.id"]).toBe(
+      "orch-bar",
+    );
   });
 
-  it("does not stamp when resolver returns null (e.g. non-orchestrator PR)", async () => {
+  it("does not stamp when resolver returns null", async () => {
     const handler = createWebhookHandler({
       secret: SECRET,
       prFetcher: new FakeFetcher(),
@@ -1002,15 +1058,16 @@ describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
       }),
     );
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.scope.orchestrator).toBeUndefined();
+    expect(
+      eventLog.appends[0]?.attributes["catalyst.orchestrator.id"],
+    ).toBeUndefined();
   });
 
-  it("works without a resolver (envelope is unstamped, existing behavior)", async () => {
+  it("works without a resolver (envelope is unstamped)", async () => {
     const handler = createWebhookHandler({
       secret: SECRET,
       prFetcher: new FakeFetcher(),
       eventLog,
-      // resolveOrchestrator omitted
     });
     await handler.handle(
       makeReq({
@@ -1024,7 +1081,9 @@ describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
       }),
     );
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.scope.orchestrator).toBeUndefined();
+    expect(
+      eventLog.appends[0]?.attributes["catalyst.orchestrator.id"],
+    ).toBeUndefined();
   });
 
   it("logs and continues when the resolver throws", async () => {
@@ -1051,7 +1110,9 @@ describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
     );
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.scope.orchestrator).toBeUndefined();
+    expect(
+      eventLog.appends[0]?.attributes["catalyst.orchestrator.id"],
+    ).toBeUndefined();
     expect(warnings.some((w) => w.includes("orchestrator resolution failed"))).toBe(
       true,
     );
@@ -1079,7 +1140,9 @@ describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
       ),
     );
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-foo");
+    expect(eventLog.appends[0]?.attributes["catalyst.orchestrator.id"]).toBe(
+      "orch-foo",
+    );
   });
 
   it("attributes push events via the bare branch name", async () => {
@@ -1102,7 +1165,9 @@ describe("createWebhookHandler — orchestrator attribution (CTL-234)", () => {
       ),
     );
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.scope.orchestrator).toBe("orch-foo");
+    expect(eventLog.appends[0]?.attributes["catalyst.orchestrator.id"]).toBe(
+      "orch-foo",
+    );
     expect(calls[0]).toEqual({
       repo: "owner/repo",
       headRef: "orch-foo-CTL-2",
@@ -1132,7 +1197,9 @@ describe("createWebhookHandler — event log fan-out", () => {
       }),
     );
     expect(eventLog.appends.length).toBe(1);
-    expect(eventLog.appends[0]?.event).toBe("github.pr.synchronize");
+    expect(eventLog.appends[0]?.attributes["event.name"]).toBe(
+      "github.pr.synchronize",
+    );
   });
 
   it("does not log replayed (already-seen) deliveries", async () => {
@@ -1186,7 +1253,6 @@ describe("createWebhookHandler — event log fan-out", () => {
       }),
     );
     expect(res.status).toBe(200);
-    // The first call's log append rejected; subsequent dispatch still ran.
     expect(fetcher.forces.some((f) => f.number === 1)).toBe(true);
   });
 
@@ -1197,6 +1263,15 @@ describe("createWebhookHandler — event log fan-out", () => {
       makeReq(
         { ...REPO, action: "edited" },
         { "x-github-event": "release" },
+      ),
+    );
+    // "edited" is a recognized release action — gets logged.
+    // To exercise the ignored path we use an unknown event type:
+    eventLog.appends.length = 0;
+    await handler.handle(
+      makeReq(
+        { ...REPO, action: "any" },
+        { "x-github-event": "unknown_event_type" },
       ),
     );
     expect(eventLog.appends.length).toBe(0);

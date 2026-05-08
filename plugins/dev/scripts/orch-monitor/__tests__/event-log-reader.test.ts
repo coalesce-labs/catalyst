@@ -226,12 +226,27 @@ describe("tailEventLog", () => {
   });
 });
 
+// CTL-300: readTunnelEventStats reads canonical envelopes — event name lives
+// at .attributes."event.name" and repo lives at .attributes."vcs.repository.name".
 function makeGithubLine(
   repo: string,
   ts: string,
   event = "github.pr.merged",
 ): string {
-  return JSON.stringify({ ts, event, scope: { repo }, schemaVersion: 2 });
+  return JSON.stringify({
+    ts,
+    severityText: "INFO",
+    severityNumber: 9,
+    traceId: null,
+    spanId: null,
+    resource: {
+      "service.name": "catalyst.github",
+      "service.namespace": "catalyst",
+      "service.version": "8.2.0",
+    },
+    attributes: { "event.name": event, "vcs.repository.name": repo },
+    body: { payload: {} },
+  });
 }
 
 describe("readTunnelEventStats", () => {
@@ -254,8 +269,16 @@ describe("readTunnelEventStats", () => {
     eventsDir();
     const lines = [
       makeGithubLine("org/a", "2026-05-04T11:00:00Z"),
-      JSON.stringify({ ts: "2026-05-04T11:01:00Z", event: "linear.issue.created", scope: {} }),
-      JSON.stringify({ ts: "2026-05-04T11:02:00Z", event: "session-started", scope: {} }),
+      JSON.stringify({
+        ts: "2026-05-04T11:01:00Z",
+        attributes: { "event.name": "linear.issue.created" },
+        body: {},
+      }),
+      JSON.stringify({
+        ts: "2026-05-04T11:02:00Z",
+        attributes: { "event.name": "session.started" },
+        body: {},
+      }),
       makeGithubLine("org/b", "2026-05-04T11:03:00Z"),
     ];
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), lines.join("\n") + "\n");
@@ -317,7 +340,10 @@ describe("readTunnelEventStats", () => {
 
   it("ignores github.* events with no ts field", () => {
     eventsDir();
-    const noTs = JSON.stringify({ event: "github.pr.merged", scope: { repo: "org/a" }, schemaVersion: 2 });
+    const noTs = JSON.stringify({
+      attributes: { "event.name": "github.pr.merged", "vcs.repository.name": "org/a" },
+      body: {},
+    });
     const withTs = makeGithubLine("org/b", "2026-05-04T11:00:00Z");
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), [noTs, withTs].join("\n") + "\n");
     const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));
@@ -326,9 +352,13 @@ describe("readTunnelEventStats", () => {
     expect(r.eventCount24hByRepo).toEqual({ "org/b": 1 });
   });
 
-  it("counts github.* events with no scope.repo in eventCount24h but not in eventCount24hByRepo", () => {
+  it("counts github.* events with no vcs.repository.name in eventCount24h but not in eventCount24hByRepo", () => {
     eventsDir();
-    const noRepo = JSON.stringify({ ts: "2026-05-04T11:00:00Z", event: "github.push", schemaVersion: 2 });
+    const noRepo = JSON.stringify({
+      ts: "2026-05-04T11:00:00Z",
+      attributes: { "event.name": "github.push" },
+      body: {},
+    });
     const withRepo = makeGithubLine("org/a", "2026-05-04T11:30:00Z");
     writeFileSync(join(workdir, "events", "2026-05.jsonl"), [noRepo, withRepo].join("\n") + "\n");
     const r = readTunnelEventStats(workdir, () => new Date("2026-05-04T12:00:00Z"));

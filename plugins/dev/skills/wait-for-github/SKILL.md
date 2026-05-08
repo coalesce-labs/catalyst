@@ -18,7 +18,7 @@ GraphQL. A single worker polling every 30 s burns 120 calls/hr; three concurrent
 the 5,000 point/hr budget in under 15 minutes.
 
 `catalyst-events wait-for` with a long timeout silently never fires when a filter is wrong.
-Observed in production: a worker sat idle for hours because `.scope.pr` was null on GitHub
+Observed in production: a worker sat idle for hours because `.attributes."vcs.pr.number"` was null on GitHub
 webhook events (root cause tracked in CTL-234). The 3-minute diagnostic checkpoint in this
 skill catches that class of failure quickly.
 
@@ -53,7 +53,7 @@ USE_REST=${USE_REST:-false}
 
 if [ "$USE_REST" != "true" ]; then
   EVENT=$(catalyst-events wait-for \
-    --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
+    --filter ".attributes.\"event.name\" == \"github.pr.merged\" and .attributes.\"vcs.pr.number\" == ${PR_NUMBER}" \
     --timeout 180 2>/dev/null || true)
 
   if [ -n "$EVENT" ]; then
@@ -69,7 +69,7 @@ if [ "$USE_REST" != "true" ]; then
     _LOG_LINES=$(wc -l < "$_LOG_FILE" 2>/dev/null | tr -d ' ')
     _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
     HEARTBEATS=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null \
-      | jq -c 'select(.event == "heartbeat")' | wc -l | tr -d ' ')
+      | jq -c 'select(.attributes."event.name" == "session.heartbeat")' | wc -l | tr -d ' ')
     if [ "${HEARTBEATS:-0}" -eq 0 ]; then
       echo "WARN: No heartbeats in the last 5 min — event log may be stalled"
       STALLED=true
@@ -80,8 +80,8 @@ if [ "$USE_REST" != "true" ]; then
     RAW_HIT=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null | jq -c \
       --argjson pr "$PR_NUMBER" \
       'select(
-        (.scope.pr == $pr) or
-        (.detail.prNumbers // [] | contains([$pr]))
+        (.attributes."vcs.pr.number" == $pr) or
+        (.body.payload.prNumbers // [] | contains([$pr]))
       )' | head -1)
 
     if [ -n "$RAW_HIT" ]; then
@@ -118,7 +118,7 @@ fi
 ```bash
 if [ "$_WFG_USE_PHASE2" = "true" ]; then
   EVENT=$(catalyst-events wait-for \
-    --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
+    --filter ".attributes.\"event.name\" == \"github.pr.merged\" and .attributes.\"vcs.pr.number\" == ${PR_NUMBER}" \
     --timeout 7200 2>/dev/null || true)
 
   [ -n "$EVENT" ] && _WFG_MATCHED=true
@@ -156,19 +156,19 @@ Never use these in any skill. They exhaust the GraphQL budget.
 | Anti-pattern | Why forbidden | Replacement |
 |---|---|---|
 | `gh pr view --json` in a poll loop | GraphQL, 2+ pts/call, 120/hr per worker | `catalyst-events wait-for` + one-shot `gh api` after match |
-| `gh pr checks --json` in a poll loop | `statusCheckRollup` field, same GraphQL cost | `catalyst-events wait-for --filter '.event \| startswith("github.check_")'` |
+| `gh pr checks --json` in a poll loop | `statusCheckRollup` field, same GraphQL cost | `catalyst-events wait-for --filter '.attributes."event.name" \| startswith("github.check_")'` |
 | `--timeout 7200` as Phase 1 | Silent stall on broken filter for up to 2 hours | Two-phase: 3 min → diagnostics → 7200 s if healthy |
 | `sleep 30` poll loops | GraphQL and compute waste at scale | Event-driven wait |
-| Any field under `statusCheckRollup` | GraphQL-only field, not available in REST | `.detail.conclusion` on `check_run.completed` events |
+| Any field under `statusCheckRollup` | GraphQL-only field, not available in REST | `.attributes."cicd.pipeline.run.conclusion"` on `check_run.completed` events |
 
 ## Known filter pitfalls
 
 | Field | Problem | Fix |
 |---|---|---|
-| `.scope.pr` | Null on GitHub webhook events until CTL-234 ships | Also check `.detail.number` or `.detail.pull_request.number` |
-| `.scope.orchestrator` | Never set on GitHub webhook events | Do not filter GitHub events by orchestrator |
-| `.detail.conclusion` | Only on `check_run.completed`, not `check_suite.completed` | Use `.detail.status == "completed"` for suite events |
-| `.detail.state` on reviews | Casing varies (`APPROVED` vs `approved`) | Pipe through `\| ascii_downcase` before comparing |
+| `.attributes."vcs.pr.number"` | Null on GitHub webhook events until CTL-234 ships | Also check `.body.payload.number` or `.body.payload.pull_request.number` |
+| `.attributes."catalyst.orchestrator.id"` | Never set on GitHub webhook events | Do not filter GitHub events by orchestrator |
+| `.attributes."cicd.pipeline.run.conclusion"` | Only on `check_run.completed`, not `check_suite.completed` | Use `.body.payload.status == "completed"` for suite events |
+| `.body.payload.state` on reviews | Casing varies (`APPROVED` vs `approved`) | Pipe through `\| ascii_downcase` before comparing |
 | Exact match on `wait-for` | Event may arrive before `wait-for` starts | Always confirm via one-shot `gh api` after match |
 
 ## Quick reference
@@ -176,17 +176,17 @@ Never use these in any skill. They exhaust the GraphQL budget.
 ```bash
 # PR merged — two-phase pattern
 catalyst-events wait-for \
-  --filter ".event == \"github.pr.merged\" and .scope.pr == ${PR_NUMBER}" \
+  --filter ".attributes.\"event.name\" == \"github.pr.merged\" and .attributes.\"vcs.pr.number\" == ${PR_NUMBER}" \
   --timeout 180   # Phase 1; extend to 7200 after diagnostics
 
-# CI suite completed — note: check_suite has no .scope.pr; use .detail.prNumbers
+# CI suite completed — note: check_suite has no vcs.pr.number; use body.payload.prNumbers
 catalyst-events wait-for \
-  --filter ".event == \"github.check_suite.completed\" and (.detail.prNumbers // [] | index(${PR_NUMBER}) != null)" \
+  --filter ".attributes.\"event.name\" == \"github.check_suite.completed\" and (.body.payload.prNumbers // [] | index(${PR_NUMBER}) != null)" \
   --timeout 180
 
 # Review submitted
 catalyst-events wait-for \
-  --filter "(.event | startswith(\"github.pr_review.\")) and .scope.pr == ${PR_NUMBER}" \
+  --filter "(.attributes.\"event.name\" | startswith(\"github.pr_review.\")) and .attributes.\"vcs.pr.number\" == ${PR_NUMBER}" \
   --timeout 180
 
 # REST: check PR merge state (never in a tight loop)

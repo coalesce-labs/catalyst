@@ -1,16 +1,19 @@
 import { writeMergedSignalFile } from "./signal-writer";
 import { verifyWebhookSignature } from "./webhook-verify";
 import { parseWebhookEvent, type WebhookEvent } from "./webhook-events";
+import { type EventLogWriter } from "./event-log";
 import {
-  type EventLogWriter,
-  type AppendableEvent,
-  WEBHOOK_SOURCE,
-} from "./event-log";
+  buildCanonicalEvent,
+  type CanonicalEvent,
+  type Attributes,
+} from "./canonical-event";
+
+const GITHUB_SERVICE_NAME = "catalyst.github" as const;
 
 /**
  * Function that resolves a (repo, pr?, headRef?) tuple to an orchestrator ID.
- * Used by the webhook handler to stamp `scope.orchestrator` on github.* events
- * (CTL-234). Returns `null` when the event doesn't belong to any active
+ * Used by the webhook handler to stamp `catalyst.orchestrator.id` on github.*
+ * events. Returns `null` when the event doesn't belong to any active
  * orchestrator (e.g. human-merged PRs to main).
  */
 export type OrchestratorResolverFn = (input: {
@@ -48,15 +51,13 @@ export interface WebhookHandlerDeps {
   findSignalPaths?: (repo: string, prNumber: number) => string[];
   /** Optional pub/sub for SSE fan-out to UI clients. */
   emit?: (type: string, data: unknown) => void;
-  /** Optional event-log fan-out (Phase 6). */
+  /** Optional event-log fan-out (writes canonical envelopes — CTL-300). */
   eventLog?: EventLogWriter;
   /**
-   * Optional orchestrator-attribution lookup (CTL-234). When provided, the
-   * handler resolves each github.* event to an active orchestrator (by PR
-   * number or head-ref prefix) and stamps `scope.orchestrator` on the
-   * envelope before appending. Without this, events arrive with
-   * `scope.orchestrator: undefined`, breaking filters of the form
-   * `(.orchestrator == "orch-foo") and (.event | startswith("github."))`.
+   * Optional orchestrator-attribution lookup. When provided, the handler
+   * resolves each github.* event to an active orchestrator (by PR number or
+   * head-ref prefix) and stamps `catalyst.orchestrator.id` on the envelope
+   * before appending.
    */
   resolveOrchestrator?: OrchestratorResolverFn;
   /** Cap for the in-memory delivery-ID dedup set. Default 1000. */
@@ -112,43 +113,69 @@ export function attributionInputFor(
 
 export interface WebhookHandler {
   handle(req: Request): Promise<Response>;
-  /** True if `deliveryId` was seen in the current process. Used by replay (Phase 3). */
+  /** True if `deliveryId` was seen in the current process. Used by replay. */
   hasSeenDelivery(deliveryId: string): boolean;
   /** Mark `deliveryId` as seen without dispatching. Used by replay primer. */
   markDelivery(deliveryId: string): void;
-  /** Last-webhook-at lookup for fallback-poll freshness filter (Phase 4). */
+  /** Last-webhook-at lookup for fallback-poll freshness filter. */
   getLastWebhookAt(repo: string, prNumber: number): number | null;
 }
 
+/** Severity for a check_suite or workflow_run conclusion. */
+function conclusionSeverity(conclusion: string | null): "INFO" | "WARN" {
+  return conclusion === "failure" || conclusion === "timed_out"
+    ? "WARN"
+    : "INFO";
+}
+
 /**
- * Map a parsed WebhookEvent to a unified-event-log envelope.
+ * Map a status `state` to severity. `success` → INFO, `failure`/`error` →
+ * ERROR/WARN, others → INFO.
+ */
+function statusSeverity(state: string): "INFO" | "WARN" | "ERROR" {
+  if (state === "failure" || state === "error") return "ERROR";
+  if (state === "pending") return "INFO";
+  return "INFO";
+}
+
+function deploymentStatusSeverity(state: string): "INFO" | "WARN" | "ERROR" {
+  if (state === "failure" || state === "error") return "ERROR";
+  return "INFO";
+}
+
+/**
+ * Map a parsed WebhookEvent to a canonical event envelope. Returns null for
+ * events that should not be logged (e.g. kind: "ignored").
  *
- * Topic namespace: `<source>.<noun>.<verb>` — e.g. `github.pr.merged`,
- * `github.check_suite.completed`, `github.deployment_status.success`.
- *
- * Returns null for events that should not be logged (e.g. kind: "ignored").
+ * `event.name` follows `<source-prefix>.<entity>.<action>` convention, e.g.
+ * `github.pr.merged`, `github.check_suite.completed`,
+ * `github.deployment_status.success`.
  */
 export function buildEventLogEnvelope(
   event: WebhookEvent,
-  deliveryId: string,
-): AppendableEvent | null {
-  const id = `evt_${deliveryId}`;
+  ts: string = new Date().toISOString(),
+): CanonicalEvent | null {
   switch (event.kind) {
     case "pull_request": {
-      // CTL-226: only `action="closed"` with `merged=true` is a real merge
-      // event. Other actions (labeled, unlabeled, edited, synchronize, …) on
-      // an already-merged PR still carry merged=true in the payload — that
-      // field describes PR state, not the webhook action — and must NOT route
-      // to github.pr.merged or workers waiting on merge will re-fire on every
-      // subsequent label edit.
-      const verb =
+      // Only `action="closed"` with `merged=true` is a real merge event.
+      // Other actions on an already-merged PR carry merged=true too — that
+      // field describes PR state, not the webhook action.
+      const action =
         event.action === "closed" && event.merged ? "merged" : event.action;
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.pr.${verb}`,
-        scope: { repo: event.repo, pr: event.number },
-        detail: {
+      const eventName = `github.pr.${action}`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "pr",
+        action,
+        label: `PR #${event.number}`,
+        severity: "INFO",
+        attrs: {
+          "vcs.repository.name": event.repo,
+          "vcs.pr.number": event.number,
+        },
+        message: `${eventName} for ${event.repo} PR #${event.number}`,
+        payload: {
           action: event.action,
           merged: event.merged,
           mergedAt: event.mergedAt,
@@ -156,126 +183,218 @@ export function buildEventLogEnvelope(
           draft: event.draft,
           mergeable: event.mergeable,
         },
-      };
+      });
     }
-    case "pull_request_review":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.pr_review.${event.action}`,
-        scope: { repo: event.repo, pr: event.number },
-        detail: {
+    case "pull_request_review": {
+      const eventName = `github.pr_review.${event.action}`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "pr_review",
+        action: event.action,
+        label: `PR #${event.number}`,
+        severity: "INFO",
+        attrs: {
+          "vcs.repository.name": event.repo,
+          "vcs.pr.number": event.number,
+        },
+        message: `${eventName} for ${event.repo} PR #${event.number} by ${event.reviewer}`,
+        payload: {
           state: event.reviewState,
           reviewer: event.reviewer,
           body: event.body,
           author: event.author,
         },
+      });
+    }
+    case "pull_request_review_thread": {
+      const eventName = `github.pr_review_thread.${event.action}`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "pr_review_thread",
+        action: event.action,
+        label: `PR #${event.number}`,
+        severity: "INFO",
+        attrs: {
+          "vcs.repository.name": event.repo,
+          "vcs.pr.number": event.number,
+        },
+        message: `${eventName} for ${event.repo} PR #${event.number}`,
+        payload: { threadId: event.threadId },
+      });
+    }
+    case "check_suite": {
+      const eventName = `github.check_suite.${event.status}`;
+      const attrs: Omit<Attributes, "event.name"> = {
+        "vcs.repository.name": event.repo,
       };
-    case "pull_request_review_thread":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.pr_review_thread.${event.action}`,
-        scope: { repo: event.repo, pr: event.number },
-        detail: { threadId: event.threadId },
-      };
-    case "check_suite":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.check_suite.${event.status}`,
-        scope: { repo: event.repo },
-        detail: {
+      if (event.prNumbers.length === 1) {
+        attrs["vcs.pr.number"] = event.prNumbers[0];
+      }
+      if (event.conclusion !== null) {
+        attrs["cicd.pipeline.run.conclusion"] = event.conclusion;
+      }
+      return canonical({
+        ts,
+        eventName,
+        entity: "check_suite",
+        action: event.status,
+        label:
+          event.prNumbers.length > 0 ? `PR #${event.prNumbers[0]}` : undefined,
+        severity: conclusionSeverity(event.conclusion),
+        attrs,
+        message: `${eventName} for ${event.repo}${
+          event.conclusion ? ` (${event.conclusion})` : ""
+        }`,
+        payload: {
           conclusion: event.conclusion,
           status: event.status,
           prNumbers: event.prNumbers,
         },
-      };
-    case "status":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.status.${event.state}`,
-        scope: { repo: event.repo, sha: event.sha },
-        detail: { state: event.state },
-      };
-    case "push":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: "github.push",
-        scope: { repo: event.repo, ref: event.ref, sha: event.headSha },
-        detail: {
+      });
+    }
+    case "status": {
+      const eventName = `github.status.${event.state}`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "status",
+        action: event.state,
+        label: event.sha.slice(0, 7),
+        severity: statusSeverity(event.state),
+        attrs: {
+          "vcs.repository.name": event.repo,
+          "vcs.revision": event.sha,
+        },
+        message: `${eventName} for ${event.repo} sha ${event.sha.slice(0, 7)}`,
+        payload: { state: event.state },
+      });
+    }
+    case "push": {
+      return canonical({
+        ts,
+        eventName: "github.push",
+        entity: "push",
+        action: "pushed",
+        label: event.headSha.slice(0, 7),
+        severity: "INFO",
+        attrs: {
+          "vcs.repository.name": event.repo,
+          "vcs.ref.name": event.ref,
+          "vcs.revision": event.headSha,
+        },
+        message: `github.push to ${event.repo} ${event.ref} (${event.headSha.slice(0, 7)})`,
+        payload: {
           baseSha: event.baseSha,
           headSha: event.headSha,
           commits: event.commits,
         },
-      };
-    case "issue_comment":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.issue_comment.${event.action}`,
-        scope: { repo: event.repo, pr: event.number },
-        detail: {
+      });
+    }
+    case "issue_comment": {
+      const eventName = `github.issue_comment.${event.action}`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "issue_comment",
+        action: event.action,
+        label: `PR #${event.number}`,
+        severity: "INFO",
+        attrs: {
+          "vcs.repository.name": event.repo,
+          "vcs.pr.number": event.number,
+        },
+        message: `${eventName} on ${event.repo} PR #${event.number} by ${event.author.login}`,
+        payload: {
           commentId: event.commentId,
           body: event.body,
           htmlUrl: event.htmlUrl,
           author: event.author,
         },
-      };
-    case "pull_request_review_comment":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.pr_review_comment.${event.action}`,
-        scope: { repo: event.repo, pr: event.number },
-        detail: {
+      });
+    }
+    case "pull_request_review_comment": {
+      const eventName = `github.pr_review_comment.${event.action}`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "pr_review_comment",
+        action: event.action,
+        label: `PR #${event.number}`,
+        severity: "INFO",
+        attrs: {
+          "vcs.repository.name": event.repo,
+          "vcs.pr.number": event.number,
+        },
+        message: `${eventName} on ${event.repo} PR #${event.number} by ${event.author.login}`,
+        payload: {
           commentId: event.commentId,
           body: event.body,
           htmlUrl: event.htmlUrl,
           author: event.author,
         },
-      };
-    case "deployment":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: "github.deployment.created",
-        scope: {
-          repo: event.repo,
-          environment: event.environment,
-          sha: event.sha,
-          ref: event.refName,
+      });
+    }
+    case "deployment": {
+      return canonical({
+        ts,
+        eventName: "github.deployment.created",
+        entity: "deployment",
+        action: "created",
+        label: event.environment,
+        severity: "INFO",
+        attrs: {
+          "vcs.repository.name": event.repo,
+          "vcs.revision": event.sha,
+          "vcs.ref.name": event.refName,
+          "deployment.environment": event.environment,
+          "deployment.id": event.deploymentId,
         },
-        detail: {
+        message: `github.deployment.created in ${event.repo} env ${event.environment}`,
+        payload: {
           deploymentId: event.deploymentId,
           payloadUrl: event.payloadUrl,
         },
-      };
-    case "deployment_status":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.deployment_status.${event.state}`,
-        scope: {
-          repo: event.repo,
-          environment: event.environment,
+      });
+    }
+    case "deployment_status": {
+      const eventName = `github.deployment_status.${event.state}`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "deployment_status",
+        action: event.state,
+        label: event.environment,
+        severity: deploymentStatusSeverity(event.state),
+        attrs: {
+          "vcs.repository.name": event.repo,
+          "deployment.environment": event.environment,
+          "deployment.id": event.deploymentId,
         },
-        detail: {
+        message: `${eventName} in ${event.repo} env ${event.environment}`,
+        payload: {
           deploymentId: event.deploymentId,
           state: event.state,
           targetUrl: event.targetUrl,
           environmentUrl: event.environmentUrl,
         },
-      };
-    case "release":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.release.${event.action}`,
-        scope: { repo: event.repo, tag: event.tag },
-        detail: {
+      });
+    }
+    case "release": {
+      const eventName = `github.release.${event.action}`;
+      return canonical({
+        ts,
+        eventName,
+        entity: "release",
+        action: event.action,
+        label: event.tag,
+        severity: "INFO",
+        attrs: {
+          "vcs.repository.name": event.repo,
+        },
+        message: `${eventName} ${event.tag} in ${event.repo}`,
+        payload: {
           action: event.action,
           releaseId: event.releaseId,
           name: event.name,
@@ -283,17 +402,35 @@ export function buildEventLogEnvelope(
           prerelease: event.prerelease,
           htmlUrl: event.htmlUrl,
         },
+      });
+    }
+    case "workflow_run": {
+      const eventName = `github.workflow_run.${event.action}`;
+      const attrs: Omit<Attributes, "event.name"> = {
+        "vcs.repository.name": event.repo,
+        "vcs.revision": event.headSha,
+        "cicd.pipeline.run.id": event.runId,
+        "cicd.pipeline.name": event.name,
       };
-    case "workflow_run":
-      return {
-        id,
-        source: WEBHOOK_SOURCE,
-        event: `github.workflow_run.${event.action}`,
-        scope: { repo: event.repo, sha: event.headSha },
-        detail: {
+      if (event.prNumbers.length === 1) {
+        attrs["vcs.pr.number"] = event.prNumbers[0];
+      }
+      if (event.conclusion !== null) {
+        attrs["cicd.pipeline.run.conclusion"] = event.conclusion;
+      }
+      return canonical({
+        ts,
+        eventName,
+        entity: "workflow_run",
+        action: event.action,
+        label:
+          event.prNumbers.length > 0 ? `PR #${event.prNumbers[0]}` : event.name,
+        severity: conclusionSeverity(event.conclusion),
+        attrs,
+        message: `${eventName} ${event.name} in ${event.repo} (${event.conclusion ?? event.status})`,
+        payload: {
           action: event.action,
           runId: event.runId,
-          workflowId: event.workflowId,
           name: event.name,
           headBranch: event.headBranch,
           status: event.status,
@@ -302,10 +439,45 @@ export function buildEventLogEnvelope(
           htmlUrl: event.htmlUrl,
           prNumbers: event.prNumbers,
         },
-      };
+      });
+    }
     case "ignored":
       return null;
   }
+}
+
+interface CanonicalBuildArgs {
+  ts: string;
+  eventName: string;
+  entity: string;
+  action: string;
+  label?: string | undefined;
+  severity: "DEBUG" | "INFO" | "WARN" | "ERROR";
+  attrs: Omit<Attributes, "event.name">;
+  message: string;
+  payload: unknown;
+}
+
+function canonical(args: CanonicalBuildArgs): CanonicalEvent {
+  const attributes: Attributes = {
+    ...args.attrs,
+    "event.name": args.eventName,
+    "event.entity": args.entity,
+    "event.action": args.action,
+    "event.channel": "webhook",
+  };
+  if (args.label !== undefined) {
+    attributes["event.label"] = args.label;
+  }
+  return buildCanonicalEvent({
+    ts: args.ts,
+    severityText: args.severity,
+    traceId: null,
+    spanId: null,
+    resource: { "service.name": GITHUB_SERVICE_NAME },
+    attributes,
+    body: { message: args.message, payload: args.payload },
+  });
 }
 
 export function createWebhookHandler(
@@ -370,17 +542,12 @@ export function createWebhookHandler(
         break;
       }
       case "status": {
-        // status events are keyed by SHA, not PR number. The fallback poll
-        // (Phase 4) catches stale state within 10 minutes; sha→PR resolution
-        // is wired up in Phase 5 via the existing preview-status helpers.
         logger.info?.(
           `[webhook] status received for ${event.repo} sha=${event.sha} state=${event.state}; no-op in Phase 1`,
         );
         break;
       }
       case "push": {
-        // BEHIND-detection signal — handled in Phase 4 via cache invalidation.
-        // For Phase 1 we just log and let the freshness filter pass through.
         logger.info?.(
           `[webhook] push received for ${event.repo} ${event.ref}; no-op in Phase 1`,
         );
@@ -399,9 +566,6 @@ export function createWebhookHandler(
       }
       case "deployment":
       case "deployment_status": {
-        // Repo-level event with a sha; we don't currently resolve sha → PR
-        // here. The 10-min preview-fetcher fallback catches missed deployment
-        // events within bounded latency. Logging only.
         logger.info?.(
           `[webhook] ${event.kind} received for ${event.repo} (env=${event.environment})`,
         );
@@ -409,8 +573,6 @@ export function createWebhookHandler(
       }
       case "release":
       case "workflow_run": {
-        // Logged-only — consumers (CTL-210 wait-for, CTL-211 deploy lifecycle)
-        // read events.jsonl. No PR cache invalidation here.
         logger.info?.(
           `[webhook] ${event.kind} received for ${event.repo} (action=${event.action})`,
         );
@@ -464,18 +626,19 @@ export function createWebhookHandler(
 
     const event = parseWebhookEvent(eventName, payload);
 
-    // Phase 6: log every accepted event to the unified event log BEFORE
-    // dispatching, so a crash mid-dispatch can be reconciled from the log on
-    // restart. Best-effort — log failures are warned and do not abort.
+    // Log every accepted event to the unified event log BEFORE dispatching, so
+    // a crash mid-dispatch can be reconciled from the log on restart.
     if (deps.eventLog && event.kind !== "ignored") {
-      const envelope = buildEventLogEnvelope(event, deliveryId);
+      const envelope = buildEventLogEnvelope(event);
       if (envelope !== null) {
         if (deps.resolveOrchestrator) {
           const attribInput = attributionInputFor(event);
           if (attribInput !== null) {
             try {
               const orchId = deps.resolveOrchestrator(attribInput);
-              if (orchId !== null) envelope.scope.orchestrator = orchId;
+              if (orchId !== null) {
+                envelope.attributes["catalyst.orchestrator.id"] = orchId;
+              }
             } catch (err) {
               logger.warn?.(
                 `[webhook] orchestrator resolution failed: ${
