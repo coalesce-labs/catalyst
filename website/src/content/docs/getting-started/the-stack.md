@@ -35,6 +35,9 @@ This is **not** a one-click installer. It's not a polished, end-to-end package t
 
 | Tool | Role |
 |------|------|
+| `catalyst-broker` | Local event broker — canonical OTel-shaped envelope, agent identity, ticket/PR auto-correlation (CTL-303) |
+| `catalyst-otel-forward` | Tail-and-forward daemon — fans canonical events out to OTLP, PostHog, and Cloudflare AE (CTL-306) |
+| `catalyst-hud` | Ink-based terminal HUD — live event stream with scrollback, filter, detail pane, trace pivot |
 | [OpenTelemetry](https://opentelemetry.io) | Structured telemetry from agent runs |
 | [Grafana](https://grafana.com) | Dashboards, alerting, log exploration |
 | SQLite | Local session store and cost tracking |
@@ -68,6 +71,7 @@ Catalyst grew out of friction I hit using other orchestration tools. A short tou
 
 - Warp
 - [Catalyst Monitor](/observability/monitor/) (web UI) — live view of orchestration waves and worker status
+- `catalyst-hud` (terminal) — live event stream from the broker
 - Linear — tickets and cycle state
 - Grafana — Claude OpenTelemetry dashboard for token and cost monitoring
 - GitHub (or [GitKraken](https://www.gitkraken.com)) — to watch PRs open, CI run, and merges land

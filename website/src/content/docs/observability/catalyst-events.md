@@ -37,20 +37,29 @@ pretty-printed JSON object. Runs until interrupted.
 # All events in real time
 catalyst-events tail
 
-# Only GitHub webhook events
-catalyst-events tail --filter '.event | startswith("github.")'
+# Only GitHub webhook events (canonical envelope, CTL-300)
+catalyst-events tail --filter '.attributes."event.name" | startswith("github.")'
 
 # Linear issue state changes for a specific ticket
-catalyst-events tail --filter '.event == "linear.issue.state_changed" and .body.payload.identifier == "CTL-48"'
+catalyst-events tail --filter '.attributes."event.name" == "linear.issue.state_changed" and .body.payload.identifier == "CTL-48"'
 
-# All worker lifecycle events
+# All worker lifecycle events (v1 envelope writers)
 catalyst-events tail --filter '.event | startswith("worker-")'
 
 # Events for one orchestrator
-catalyst-events tail --filter '.orchestrator == "orch-ctl-2026-05-01"'
+catalyst-events tail --filter '.attributes."catalyst.orchestrator.id" == "orch-ctl-2026-05-01"'
 
 # Comms messages on a specific channel
-catalyst-events tail --filter '.event == "comms.message.posted" and .attributes."comms.channel" == "orch-ctl-ux"'
+catalyst-events tail --filter '.attributes."event.name" == "comms.message.posted" and .attributes."comms.channel" == "orch-ctl-ux"'
+
+# Agent checkin / checkout (CTL-303)
+catalyst-events tail --filter '.attributes."event.name" == "agent.checkin" or .attributes."event.name" == "agent.checkout"'
+
+# Broker daemon startup
+catalyst-events tail --filter '.attributes."event.name" == "broker.daemon.startup"'
+
+# All ticket_lifecycle wake events (CTL-303)
+catalyst-events tail --filter '.attributes."event.name" | startswith("filter.wake.")'
 ```
 
 ### `wait-for`
@@ -71,14 +80,14 @@ external event without busy-polling.
 ```bash
 # Wait up to 120s for a CI result on PR #87
 catalyst-events wait-for \
-  --filter '.event == "github.check_suite.completed" and (.body.payload.prNumbers // [] | contains([87]))' \
+  --filter '.attributes."event.name" == "github.check_suite.completed" and (.body.payload.prNumbers // [] | contains([87]))' \
   --timeout 120
 
 # Wait for a specific PR to merge
 catalyst-events wait-for \
-  --filter '.event == "github.pr.merged" and .attributes."vcs.pr.number" == 87'
+  --filter '.attributes."event.name" == "github.pr.merged" and .attributes."vcs.pr.number" == 87'
 
-# Wait for a filter daemon wake event (CTL-269 semantic interests)
+# Wait for a broker wake event (CTL-303 — semantic interests)
 catalyst-events wait-for \
   --filter '.attributes."event.name" == "filter.wake" and .attributes."event.label" == "sess_abc123"' \
   --timeout 600
@@ -95,7 +104,7 @@ catalyst-events wait-for \
 When the orch-monitor is running with webhooks configured, `wait-for` returns within ~1s of
 the event arriving via GitHub/Linear webhook. Without the monitor tunnel, the daemon falls
 back to polling the event log file at 10-minute intervals — up to 600s maximum latency. See
-[Setting up the webhook tunnel](./setup/#5-set-up-the-webhook-tunnel).
+[Setting up the webhook tunnel](./setup/#7-set-up-the-webhook-tunnel).
 
 ### `build-orchestrator-filter`
 
@@ -113,11 +122,53 @@ catalyst-events wait-for --filter "$FILTER" --timeout 3600
 
 ## Event Envelope Schemas
 
-The unified event log contains events from multiple writers. Two envelope shapes coexist:
+The unified event log contains events from multiple writers. Two envelope shapes coexist —
+the canonical OTel-shaped envelope (CTL-300) is the default for new emitters, and the
+legacy v1 envelope is preserved for `catalyst-state.sh event` and the bash skills that call
+it.
+
+### Canonical envelope (CTL-300, default)
+
+Written by the webhook receiver (`lib/webhook-events.ts`), `catalyst-comms send`,
+`catalyst-broker`, `catalyst-otel-forward`, `catalyst-session.sh`, and the OTel emit scripts
+under `plugins/dev/scripts/orch-monitor/lib/`:
+
+```json
+{
+  "ts": "2026-05-01T12:00:00Z",
+  "observedTs": "2026-05-01T12:00:00Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "spanId": "1122334455667788",
+  "parentSpanId": null,
+  "resource": {
+    "service.name": "orch-monitor",
+    "service.namespace": "catalyst",
+    "service.version": "8.1.0"
+  },
+  "attributes": {
+    "event.name": "github.pr.merged",
+    "event.entity": "pr",
+    "event.action": "merged",
+    "vcs.pr.number": 87,
+    "vcs.revision": "abc123def456"
+  },
+  "body": {
+    "message": "PR #87 merged",
+    "payload": { "...full webhook payload..." }
+  }
+}
+```
+
+Top-level fields: `ts`, `observedTs`, `severityText`, `severityNumber`, `traceId`, `spanId`,
+`parentSpanId`, `resource`, `attributes`, `body`. The bare `.event` shorthand is absent —
+use `.attributes."event.name"`. The `traceId` is populated by webhook-emitted events
+(CTL-310) and is derived deterministically from orchestrator/worker identifiers.
 
 ### v1 envelope (legacy)
 
-Written by `catalyst-state.sh event` and most bash skills:
+Written by `catalyst-state.sh event` and the older bash skills that call it:
 
 ```json
 {
@@ -134,42 +185,18 @@ Written by `catalyst-state.sh event` and most bash skills:
 
 Top-level fields: `ts`, `event`, `orchestrator` (nullable), `worker` (nullable), `detail` (nullable object).
 
-### v2 envelope (OTel-shaped)
-
-Written by the webhook receiver (`lib/webhook-events.ts`) and `catalyst-comms send` (CTL-300):
-
-```json
-{
-  "ts": "2026-05-01T12:00:00Z",
-  "attributes": {
-    "event.name": "github.pr.merged",
-    "vcs.pr.number": 87,
-    "vcs.revision": "abc123def456"
-  },
-  "body": {
-    "payload": { "...full webhook payload..." }
-  },
-  "resource": {
-    "service.name": "orch-monitor"
-  }
-}
-```
-
-Top-level fields: `ts`, `attributes` (OTel attribute map), `body`, `resource`. The `.event`
-shorthand field is absent — use `.attributes."event.name"` instead.
-
 ### Identifying the envelope version
 
 ```bash
 # v1 events have a top-level .event field
 catalyst-events tail --filter '.event != null'
 
-# v2 events have .attributes."event.name"
+# Canonical events have .attributes."event.name"
 catalyst-events tail --filter '.attributes."event.name" != null'
 ```
 
-Both shapes coexist indefinitely. New tools should write v2; `catalyst-state.sh event`
-continues to write v1 for backward compatibility.
+Both shapes coexist indefinitely. New tools write the canonical envelope;
+`catalyst-state.sh event` continues to write v1 for backward compatibility.
 
 ## jq Filter Cookbook
 
@@ -189,19 +216,43 @@ continues to write v1 for backward compatibility.
 ### Match by event prefix
 
 ```bash
---filter '.event | startswith("worker-")'                     # v1 worker lifecycle
---filter '.attributes."event.name" | startswith("github.")'  # v2 GitHub webhook
---filter '.attributes."event.name" | startswith("linear.")'  # v2 Linear webhook
+--filter '.event | startswith("worker-")'                     # v1 worker lifecycle (legacy)
+--filter '.attributes."event.name" | startswith("github.")'  # canonical GitHub webhook
+--filter '.attributes."event.name" | startswith("linear.")'  # canonical Linear webhook
+--filter '.attributes."event.name" | startswith("agent.")'   # broker agent identity (CTL-303)
+--filter '.attributes."event.name" | startswith("filter.")'  # broker register/deregister/wake
+--filter '.attributes."event.name" | startswith("broker.")'  # broker daemon lifecycle
 ```
 
 ### Match by orchestrator scope
 
 ```bash
-# v1 orchestrator events
+# v1 orchestrator events (legacy)
 --filter '.orchestrator == "orch-ctl-2026-05-01"'
 
-# v2 events don't carry .orchestrator — filter by session or ticket instead
+# Canonical envelope — orchestrator id lives under attributes
+--filter '.attributes."catalyst.orchestrator.id" == "orch-ctl-2026-05-01"'
+
+# Canonical envelope — filter by ticket
 --filter '.attributes."worker.ticket" == "CTL-48"'
+```
+
+### Match a ticket_lifecycle interest (CTL-303)
+
+```bash
+# Wait for any state change on a Linear ticket — the broker's deterministic
+# ticket_lifecycle router computes the wake.
+catalyst-events wait-for \
+  --filter '.attributes."event.name" | startswith("filter.wake.")' \
+  --timeout 600
+```
+
+### Match the comms feed
+
+```bash
+# broker wake event (CTL-303) — emitted when comms.message.posted arrives for a watched channel
+catalyst-events tail \
+  --filter '.attributes."event.name" == "comms.message.posted" and .attributes."comms.channel" == "orch-ctl-ux"'
 ```
 
 ### PR lifecycle — wait for any status change

@@ -41,13 +41,20 @@ targets. The following CLIs are installed as symlinks:
 
 | CLI | Purpose |
 |-----|---------|
+| `catalyst-broker` | Local event broker — canonical OTel envelope, agent identity, ticket/PR auto-correlation (CTL-303). Primary CLI as of CTL-315. |
 | `catalyst-comms` | Agent coordination channels |
+| `catalyst-events` | Event log tail / wait-for / append CLI |
+| `catalyst-filter` | Backward-compat shim — delegates to `catalyst-broker` (CTL-315). Existing scripts keep working. |
 | `catalyst-session` | Session lifecycle tracking |
 | `catalyst-state` | Global orchestrator state |
 | `catalyst-db` | SQLite database operations |
-| `catalyst-monitor` | orch-monitor start/stop/status |
+| `catalyst-monitor` | orch-monitor start/stop/status (also exposes `forward-status` for the forwarder daemon) |
 | `catalyst-thoughts` | HumanLayer thoughts shortcuts |
 | `catalyst-claude` | Claude Code wrapper with context injection |
+| `register-thought` | Register a path with the thoughts system |
+| `workflow-context` | Read/write `.catalyst/.workflow-context.json` |
+| `catalyst-hud` | Ink-based React TUI for the live event stream (CTL-308/CTL-311/CTL-312) |
+| `catalyst-hud-classic` | Shell fallback for `catalyst-hud` |
 
 If `~/.catalyst/bin` is not on your `PATH`, the check prints the one line to add to your shell
 profile:
@@ -55,9 +62,6 @@ profile:
 ```bash
 export PATH="$HOME/.catalyst/bin:$PATH"
 ```
-
-Note: `catalyst-events` is not yet wired into `install-cli.sh`'s `CLI_NAMES` array. Until it is,
-run it via the full path: `plugins/dev/scripts/catalyst-events`.
 
 ### Tools
 
@@ -89,6 +93,41 @@ Whether OTel Docker containers are running and reachable. This is entirely optio
 works without observability. If not configured, the check notes it and points to the
 [claude-code-otel](https://github.com/ryanrozich/claude-code-otel) repo to set it up.
 Automatically detects remapped ports from Docker when configured.
+
+### Broker Daemon
+
+Whether the `catalyst-broker` daemon (CTL-303) is alive. The check verifies that
+`~/catalyst/broker.pid` references a live process and surfaces the broker's status.
+
+```bash
+catalyst-broker status
+```
+
+The broker's structured (pino) logs are written to `~/catalyst/broker.log`. Set `LOG_LEVEL`
+(default `info`) to control verbosity (CTL-314). On first start the broker performs a one-shot
+rename from the legacy `~/catalyst/filter-interests.json` to `~/catalyst/broker-interests.json` —
+nothing further is required from the user.
+
+### Forwarder Daemon
+
+Whether the `catalyst-otel-forward` daemon (CTL-306) is running. Status is reported through the
+monitor wrapper:
+
+```bash
+bash plugins/dev/scripts/catalyst-monitor.sh forward-status
+```
+
+The forwarder reads `catalyst.observability.forwarders` from
+`~/.config/catalyst/config-{projectKey}.json` (or the cross-project fallback) and tails the event
+log forward to OTLP, PostHog, and Cloudflare Analytics Engine. It honors `LOG_LEVEL` for pino
+output (CTL-314) and `OTEL_EXPORTER_OTLP_ENDPOINT` as an override for OTLP destinations.
+
+### Event Log Envelope
+
+Events written to `~/catalyst/events/YYYY-MM.jsonl` use the canonical OTel-shaped envelope
+(CTL-300): `attributes['event.name']` carries the event type, payload sits under
+`body.payload.*`, and `traceId` is propagated end-to-end — including on webhook-emitted
+canonical events (CTL-310).
 
 ### Orchestration Monitor (Optional)
 

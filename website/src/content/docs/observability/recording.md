@@ -85,7 +85,9 @@ The signal file records `pid` when the worker starts. The orch-monitor runs `kil
 
 ## Global Event Log
 
-The third source of truth is `~/catalyst/events.jsonl` — an append-only log of events across all orchestrators. Events are emitted by `catalyst-state.sh event` with schema:
+The third source of truth is `~/catalyst/events/$(date -u +%Y-%m).jsonl` — an append-only,
+monthly-rotated log of events across all orchestrators. Events are emitted by
+`catalyst-state.sh event` (v1 envelope) and by canonical CTL-300 emitters with schema:
 
 ```json
 {"ts":"2026-04-14T19:15:32Z","orchestrator":"orch-...","worker":"CTL-48","event":"worker-pr-created","detail":{"pr":123,"url":"..."}}
@@ -98,8 +100,17 @@ Event types:
 - `worker-phase-advanced`, `worker-status-terminal`, `worker-pr-created`, `worker-done`, `worker-failed`
 - `verification-started`, `verification-passed`, `verification-failed`
 - `attention-raised`, `attention-resolved`
+- `agent.checkin`, `agent.checkout` (CTL-303 — broker agent identity)
+- `broker.daemon.startup` (CTL-303 — legacy alias `filter.daemon.startup`)
+- `filter.register`, `filter.deregister`, `filter.wake.<id>` (CTL-303 — broker routing)
 
-The events.jsonl log is what backs the `/events` SSE stream exposed by the orch-monitor HTTP server — see [Event architecture](../events/) for how that flows to connected frontends.
+The newer canonical envelope shape (CTL-300) is the default for new emitters — the webhook
+receiver, `catalyst-comms send`, `catalyst-broker`, `catalyst-otel-forward`, and
+`catalyst-session.sh` all write canonical events. The v1 envelope above is preserved for
+`catalyst-state.sh event`.
+
+The monthly log is what backs the `/events` SSE stream exposed by the orch-monitor HTTP
+server — see [Event architecture](../events/) for how that flows to connected frontends.
 
 ## Verifying Everything Is Wired
 
@@ -113,7 +124,7 @@ docker compose logs -f otel-collector | grep orchestrator.id
 watch -n 5 'cat ~/catalyst/wt/<orch-dir>/workers/<ticket>.json | jq .status'
 
 # 3. Global events appending
-tail -f ~/catalyst/events.jsonl
+tail -f ~/catalyst/events/$(date -u +%Y-%m).jsonl
 
 # 4. Orch-monitor SSE stream
 curl -N http://localhost:7400/events

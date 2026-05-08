@@ -22,7 +22,7 @@ Skills call it at start, at each phase transition, and at completion. The orches
 | `tool` | `<session-id> <tool-name> [--duration MS]` | Increment tool usage histogram. |
 | `iteration` | `<session-id> --kind plan\|fix [--by N]` | Increment plan-replan or implement-fix iteration counter. |
 | `pr` | `<session-id> --number N --url URL [--ci STATUS]` | Record PR creation. Emits `pr-opened` event. |
-| `end` | `<session-id> [--status done\|failed] [--reason TEXT]` | Mark session complete. Emits `session-ended` event and a `claude_code.session.outcome` OTLP metric. |
+| `end` | `<session-id> [--status done\|failed] [--reason TEXT]` | Mark session complete. Emits `session-ended` and `session.outcome` events (canonical envelope, CTL-300) to the JSONL event log. |
 | `heartbeat` | `<session-id>` | Bump `updated_at` and emit a heartbeat event to the JSONL log. |
 | `list` | `[--active] [--skill NAME] [--ticket KEY] [--limit N]` | List sessions as JSON. |
 | `read` | `<session-id>` | Print full session state (session + metrics + tools + events + PRs). |
@@ -59,12 +59,19 @@ All session data lives in `~/catalyst/catalyst.db`:
 
 ## OTLP Emission
 
-On `end`, catalyst-session emits two OTLP payloads (when an OTLP endpoint is configured):
+`catalyst-session` itself does **not** call OTLP collectors directly. On `end` it appends two
+canonical events (CTL-300) to the JSONL event log at `~/catalyst/events/YYYY-MM.jsonl`:
 
-- **`claude_code.session.outcome`** log — carries `outcome`, `session_id`, `linear.key`, optional
-  `reason`. Used for Loki queries and alerting on failure rates (CTL-157).
-- **`claude_code.session.iterations`** metric — flushes the plan-replan and implement-fix
-  iteration counters accumulated during the session (CTL-158).
+- **`session.outcome`** — carries `outcome`, `session_id`, `linear.key`, optional `reason`. Used
+  for Loki queries and alerting on failure rates (CTL-157).
+- **`session.iterations`** — captures the plan-replan and implement-fix iteration counters
+  accumulated during the session (CTL-158).
+
+The [`catalyst-otel-forward`](/observability/forwarder/) daemon (CTL-306) tails the event log and
+ships these events to OTLP, PostHog, and Cloudflare Analytics Engine — so OTLP backends still
+receive `session.outcome` and `session.iterations`, but through the forwarder rather than from
+`catalyst-session` itself. The split keeps the session CLI fast and dependency-free, and lets a
+single forwarder fan events out to multiple destinations.
 
 ## Typical Usage in Skills
 
@@ -94,3 +101,4 @@ script is unavailable (e.g., in CI environments without the dev plugin installed
 - [Agent Communication (catalyst-comms)](./catalyst-comms/) — sibling CLI for cross-agent messaging
 - [Setup Health Check](./setup-health-check/) — verifies the session database schema and WAL mode
 - [Observability Events](../observability/events/) — the JSONL event log catalyst-session writes to
+- [Event Forwarding](/observability/forwarder/) — `catalyst-otel-forward` ships `session.outcome` and `session.iterations` to OTLP / PostHog / Cloudflare AE (CTL-306)

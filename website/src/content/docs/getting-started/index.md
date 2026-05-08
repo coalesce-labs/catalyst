@@ -23,7 +23,7 @@ The setup script checks for and installs additional dependencies automatically:
 | GitHub CLI (gh) | Optional | Opens install page |
 | Linearis CLI | Optional | Shows npm install command |
 | agent-browser | Optional | Shows npm install command |
-| Bun | Optional | For orch-monitor dashboard |
+| Bun | Required | For the broker, forwarder, HUD, and orch-monitor dashboard |
 | direnv | Recommended | Per-project env vars, API key isolation |
 
 ## Run the Setup Script
@@ -57,7 +57,7 @@ Restart Claude Code after installing.
 
 ## Install the catalyst-* CLIs
 
-Several Catalyst skills invoke shell tools by bare name (`catalyst-events`, `catalyst-comms`, `catalyst-session`, ...). Install symlinks to them on your PATH:
+Several Catalyst skills invoke shell tools by bare name (`catalyst-broker`, `catalyst-comms`, `catalyst-events`, `catalyst-filter`, `catalyst-session`, `catalyst-state`, `catalyst-db`, `catalyst-monitor`, `catalyst-thoughts`, `catalyst-claude`, `catalyst-hud`, `catalyst-hud-classic`, ...). Install symlinks to them on your PATH:
 
 ```bash
 bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/install-cli.sh
@@ -72,7 +72,11 @@ Verify the install:
 ```bash
 which catalyst-events
 catalyst-events help
+catalyst-broker --help    # canonical event broker (CTL-315)
 ```
+
+`catalyst-filter` is preserved as a backward-compatibility shim that delegates to
+`catalyst-broker` — existing scripts keep working unchanged.
 
 If you previously ran the installer and have `alias catalyst-*=...` lines in `~/.zshrc` or `~/.bashrc` pointing at a local clone, remove them — they shadow the marketplace install.
 

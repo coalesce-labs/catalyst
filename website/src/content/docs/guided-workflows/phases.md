@@ -27,10 +27,11 @@ Phase 2 (plan)      reads research doc path from workflow context
 Phase 3 (implement) reads plan doc path from workflow context
 Phase 4 (validate)  reads plan doc + the implementation diff
 Phase 5 (ship)      reads everything above to write the PR description, then
-                    enters a catalyst-events wait-for listen loop — resolves CI
-                    failures, bot review threads, and BEHIND inline — executes
-                    gh pr merge --squash --delete-branch when CLEAN, writes
-                    status: done, and exits
+                    enters a `catalyst-events wait-for` listen loop (powered by
+                    the [`catalyst-broker`](/observability/catalyst-broker/)
+                    daemon) — resolves CI failures, bot review threads, and
+                    BEHIND inline — executes gh pr merge --squash --delete-branch
+                    when CLEAN, writes status: done, and exits
 ```
 
 This is why "the thoughts/ directory is the handoff mechanism" — artifacts live there so **any future session**, not just this one, can pick up where the current one left off.

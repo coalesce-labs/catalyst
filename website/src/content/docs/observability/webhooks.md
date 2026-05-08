@@ -263,21 +263,28 @@ After exporting the secret and restarting the daemon, check the log:
 ```
 
 Trigger a `pull_request.synchronize` event by pushing to a tracked PR. The dashboard should
-update within a few seconds. You can also watch the event log:
+update within a few seconds. You can also watch the event log (canonical envelope, CTL-300):
 
 ```bash
-tail -F ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq 'select(.source == "github.webhook")'
+tail -F ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq 'select(.attributes."event.name" | startswith("github."))'
 ```
+
+As of CTL-310, every webhook-emitted event also carries a top-level `traceId` so the same
+event can be correlated across the broker, forwarder, and OTel-side traces without rejoining
+on `vcs.pr.number`.
 
 ## Daemon liveness prerequisite
 
-The orch-monitor daemon is the only writer to `~/catalyst/events/`, so any skill that
-consumes events depends on it being alive. The Tier-1 event-driven skills are:
+The orch-monitor daemon is one of two writers to `~/catalyst/events/` (the other is
+`catalyst-broker`, which appends `filter.wake.<id>` events). Any skill that consumes events
+depends on the monitor being alive. The Tier-1 event-driven skills are:
 
 - `orchestrate` — Phase 4 watcher and auto-fixup classifier consume events
 - `oneshot` — Phase 5 deploy-monitoring loop consumes events
 - `merge-pr` — Phase 6 wait-for-merged consumes events
 - `monitor-events` — the canonical pattern doc; reused everywhere the primitives are needed
+- `broker` (CTL-303) — the broker daemon is itself a Tier-1 consumer/producer; it tails
+  the event log via `fs.watch` and writes `filter.wake.<id>` events back into it
 
 If the daemon is stopped, `catalyst-events wait-for` blocks until its 600 s timeout and
 exits non-zero. Callers fall back to `gh pr view` polling, which is functionally correct
@@ -709,7 +716,7 @@ per delivery.
 
 ```bash
 # After configuring the secret and starting the daemon:
-catalyst-events tail --filter '.event | startswith("linear.")'
+catalyst-events tail --filter '.attributes."event.name" | startswith("linear.")'
 
 # In another shell, cause a Linear ticket state change.
 # The first shell should print the matching event line within seconds.
