@@ -1,5 +1,33 @@
 # Changelog
 
+## [8.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.2.0...catalyst-dev-v8.3.0) (2026-05-08)
+
+
+### Features
+
+* **dev:** Activity Brief panel — AI summary of recent event activity (CTL-282) ([#470](https://github.com/coalesce-labs/catalyst/issues/470)) ([e76bed7](https://github.com/coalesce-labs/catalyst/commit/e76bed7e11099c37ad99b2476bb44c7f5bbe1ee9))
+* **dev:** add /god skill — cross-project omniscient status view (CTL-193) ([#466](https://github.com/coalesce-labs/catalyst/issues/466)) ([0daed35](https://github.com/coalesce-labs/catalyst/commit/0daed35e90aaa1ef63f64bea1b20e3b5bdf07ffd))
+* **dev:** add color-coded source chips to activity feed (CTL-276) ([#464](https://github.com/coalesce-labs/catalyst/issues/464)) ([01565e5](https://github.com/coalesce-labs/catalyst/commit/01565e5ee6b13dad0d61c81e62c5a6f7b5fa1871))
+* **dev:** deterministic event routing for PR lifecycle (CTL-284) ([#496](https://github.com/coalesce-labs/catalyst/issues/496)) ([675cd81](https://github.com/coalesce-labs/catalyst/commit/675cd813231c728b720450fda171815c2a3e2c9f))
+* **dev:** enrich Linear issue events with human-readable descriptions (CTL-281) ([#469](https://github.com/coalesce-labs/catalyst/issues/469)) ([5d1988c](https://github.com/coalesce-labs/catalyst/commit/5d1988c4ceba2b9314e0beb503edddb8d404a801))
+* **dev:** generalize filter.register to all agent types (CTL-269) ([#441](https://github.com/coalesce-labs/catalyst/issues/441)) ([ddd493b](https://github.com/coalesce-labs/catalyst/commit/ddd493b3e28b904747f6700873970de0cbb69309))
+* **dev:** include message body in comms.message.posted events (CTL-279) ([#468](https://github.com/coalesce-labs/catalyst/issues/468)) ([ad20724](https://github.com/coalesce-labs/catalyst/commit/ad207249a2e73dcc3f984e1a37693dd556371a18))
+* **dev:** multi-team webhook support + Layer 2 config alignment (CTL-273) ([f6e1eee](https://github.com/coalesce-labs/catalyst/commit/f6e1eeeaf2fb26eee38832d683aa17772ca1675d))
+* **dev:** per-repo color config for HUD scope chips (CTL-277) ([#471](https://github.com/coalesce-labs/catalyst/issues/471)) ([f952bfa](https://github.com/coalesce-labs/catalyst/commit/f952bfad7a4590ec1b93b97ce7a0e2152b3a039b))
+* **dev:** per-team Linear webhook secrets + fix pre-existing bugs (CTL-285) ([#474](https://github.com/coalesce-labs/catalyst/issues/474)) ([bbdb60f](https://github.com/coalesce-labs/catalyst/commit/bbdb60feb1843499e14dbee125b8fee62ff7db54))
+* **dev:** wire Linear webhook events into HUD activity feed (CTL-275) ([#463](https://github.com/coalesce-labs/catalyst/issues/463)) ([510e6a7](https://github.com/coalesce-labs/catalyst/commit/510e6a7c900155bc2afcf7d690980ea25b064aea))
+
+
+### Bug Fixes
+
+* **dev:** align Linear webhook URL key with consumers (CTL-274) ([#450](https://github.com/coalesce-labs/catalyst/issues/450)) ([bf6ba0c](https://github.com/coalesce-labs/catalyst/commit/bf6ba0c0b6fd740b5eb2c7715472b81d53fc3f11))
+* **dev:** event filter bugs — Codex reviews silently dropped (CTL-270) ([#443](https://github.com/coalesce-labs/catalyst/issues/443)) ([82b1d3f](https://github.com/coalesce-labs/catalyst/commit/82b1d3f45ff989980a8ca22922ae877d65754b22))
+* **dev:** keyed-format fallback for linearSmeeChannel (CTL-301) ([#493](https://github.com/coalesce-labs/catalyst/issues/493)) ([332e8e3](https://github.com/coalesce-labs/catalyst/commit/332e8e3bd87483b99207b85586855f36bebbd800))
+* **dev:** read groq.apiKey from config.json when GROQ_API_KEY env var is absent ([#445](https://github.com/coalesce-labs/catalyst/issues/445)) ([ec5c84e](https://github.com/coalesce-labs/catalyst/commit/ec5c84ef2cc1a7a2829ef2cdfb5a0ebe590557b0))
+* **dev:** read Linear webhookId from cross-project Layer 2 (CTL-272) ([#449](https://github.com/coalesce-labs/catalyst/issues/449)) ([5ceb79e](https://github.com/coalesce-labs/catalyst/commit/5ceb79e714f47c21e895b59930f8b6f10267edd3))
+* **dev:** replace polling with fs.watch reactive tailing in filter daemon (CTL-283) ([#461](https://github.com/coalesce-labs/catalyst/issues/461)) ([c1cca6e](https://github.com/coalesce-labs/catalyst/commit/c1cca6ef78945a7748be214ef468635fb28e0585))
+* **dev:** show repo chip on non-PR GitHub events (CTL-278) ([#467](https://github.com/coalesce-labs/catalyst/issues/467)) ([d5b704e](https://github.com/coalesce-labs/catalyst/commit/d5b704eccd4dba56164b9aa1eb27b0df6326b06f))
+
 ## [8.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.1.0...catalyst-dev-v8.2.0)
 
 May 06, 2026
