@@ -1,5 +1,5 @@
 ---
-title: Semantic Event Routing (catalyst-filter)
+title: Semantic Event Routing (catalyst-broker)
 description:
   Daemon that routes raw GitHub and Linear events to orchestrators and workers using semantic
   matching — one Groq call per batch replaces dozens of hand-crafted jq predicates.
@@ -7,7 +7,7 @@ sidebar:
   order: 6
 ---
 
-`catalyst-filter` is a long-running daemon that subscribes to the global event log
+`catalyst-broker` is a long-running daemon that subscribes to the global event log
 (`~/catalyst/events/YYYY-MM.jsonl`) and delivers targeted wake events to the right orchestrators
 and workers. Instead of writing a jq predicate for every event type you care about, you register
 a natural-language intent once and the daemon handles the matching.
@@ -22,6 +22,11 @@ The daemon supports two routing paths:
 Both paths produce the same output: a `filter.wake.<id>` event in the log that your
 `catalyst-events wait-for` call is already watching for.
 
+> **Note on naming:** `catalyst-broker` is the canonical CLI as of CTL-303. The older
+> `catalyst-filter` command is preserved as a backward-compat shim — it execs `catalyst-broker`
+> with the same arguments. Existing scripts that call `catalyst-filter start` continue to work.
+> All new docs, install paths, and registrations should use `catalyst-broker`.
+
 ## Architecture
 
 ```mermaid
@@ -30,7 +35,7 @@ graph LR
   LN[Linear webhook] --> EL
   CC[Claude Code\nOTel events] --> EL
 
-  EL -->|fs.watch| FD[catalyst-filter\ndaemon]
+  EL -->|fs.watch| FD[catalyst-broker\ndaemon]
 
   FD -->|deterministic match| DET[pr_lifecycle\nrouter]
   FD -->|batch + Groq call| LLM[llama-3.1-8b-instant]
@@ -51,14 +56,14 @@ if multiple interests match. Each caller receives only the wake for its own `int
 ```bash
 # 1. Add your Groq API key (see Credential Setup below)
 # 2. Start the daemon
-catalyst-filter start
+catalyst-broker start
 
 # 3. Confirm it's running
-catalyst-filter status
+catalyst-broker status
 # → running (pid 12345)
 
 # 4. Watch the log (in a separate terminal)
-catalyst-filter logs
+catalyst-broker logs
 ```
 
 Once running, any orchestrator or worker that emits `filter.register` to the event log will
@@ -66,7 +71,7 @@ have its interests tracked automatically.
 
 ## Installation
 
-`catalyst-filter` is installed with the rest of the Catalyst CLIs when you run `setup-catalyst`.
+`catalyst-broker` is installed with the rest of the Catalyst CLIs when you run `setup-catalyst`.
 The [setup health check](./setup/) verifies the symlink resolves correctly. To install or
 re-install manually:
 
@@ -74,8 +79,8 @@ re-install manually:
 bash plugins/dev/scripts/install-cli.sh
 ```
 
-This creates `~/.catalyst/bin/catalyst-filter` (and sibling CLIs). Make sure `~/.catalyst/bin`
-is on your `PATH`:
+This creates `~/.catalyst/bin/catalyst-broker` (and sibling CLIs, including the
+`catalyst-filter` backward-compat shim). Make sure `~/.catalyst/bin` is on your `PATH`:
 
 ```bash
 export PATH="$HOME/.catalyst/bin:$PATH"
@@ -84,16 +89,18 @@ export PATH="$HOME/.catalyst/bin:$PATH"
 ## Starting and Stopping
 
 ```bash
-catalyst-filter start    # background process, writes ~/catalyst/filter.pid
-catalyst-filter stop     # SIGTERM, then SIGKILL after 3 s if still alive
-catalyst-filter restart  # stop followed by start
-catalyst-filter status   # prints "running (pid N)" or "stopped"
-catalyst-filter logs     # tail -f ~/catalyst/filter.log
-catalyst-filter run      # foreground mode (useful for debugging)
+catalyst-broker start    # background process, writes ~/catalyst/broker.pid
+catalyst-broker stop     # SIGTERM, then SIGKILL after 3 s if still alive
+catalyst-broker restart  # stop followed by start
+catalyst-broker status   # prints "running (pid N)" or "stopped"
+catalyst-broker logs     # tail -f ~/catalyst/broker.log
+catalyst-broker run      # foreground mode (useful for debugging)
 ```
 
-The daemon writes its PID to `~/catalyst/filter.pid` and logs to `~/catalyst/filter.log`.
-It persists registered interests to `~/catalyst/filter-interests.json` so they survive a restart.
+The daemon writes its PID to `~/catalyst/broker.pid` and logs to `~/catalyst/broker.log`.
+It persists registered interests to `~/catalyst/broker-interests.json` so they survive a
+restart. On first start after upgrading from CTL-303, the daemon migrates a legacy
+`filter-interests.json` to the new path automatically.
 
 The runtime prefers `bun` and falls back to `node`. Node.js ≥ 21 or Bun is required.
 
@@ -106,7 +113,7 @@ deterministically and work without a key.
 
 ```bash
 export GROQ_API_KEY="gsk_..."
-catalyst-filter start
+catalyst-broker start
 ```
 
 **Option 2 — Layer 2 config file** (persists across shells):
@@ -311,13 +318,14 @@ To use a different model:
 
 ```bash
 export FILTER_GROQ_MODEL="llama-3.3-70b-versatile"
-catalyst-filter restart
+catalyst-broker restart
 ```
 
 ## Configuration Reference
 
 All settings are environment variables. They can also be set in your shell profile before
-starting the daemon.
+starting the daemon. The `FILTER_*` env-var names are kept from the daemon's pre-broker history
+for backward compatibility — the broker reads the same names.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -332,11 +340,11 @@ starting the daemon.
 
 ## Relationship to catalyst-events wait-for
 
-`catalyst-filter` is the **preferred path** for event-driven workflows. The direct
+`catalyst-broker` is the **preferred path** for event-driven workflows. The direct
 `catalyst-events wait-for` pattern with hand-crafted jq predicates remains available as a
 fallback when the daemon is not running.
 
-**Before catalyst-filter** (direct pattern, still valid as fallback):
+**Before catalyst-broker** (direct pattern, still valid as fallback):
 
 ```bash
 catalyst-events wait-for \
@@ -350,7 +358,7 @@ catalyst-events wait-for \
   --timeout 7200
 ```
 
-**With catalyst-filter** (preferred):
+**With catalyst-broker** (preferred):
 
 ```bash
 # After emitting filter.register once, wait on a single narrow filter:
@@ -360,7 +368,7 @@ catalyst-events wait-for \
   --timeout 7200
 ```
 
-The filter-backed approach:
+The broker-backed approach:
 - Is shorter and less error-prone (no event-type enumeration)
 - Scales to new event types without changing the wait-for call
 - Handles comms messages, Linear events, and deployment status in the same registration
@@ -369,17 +377,29 @@ The filter-backed approach:
 To check whether the daemon is running before deciding which path to use:
 
 ```bash
-if catalyst-filter status 2>/dev/null | grep -q "^running"; then
-  USE_FILTER_DAEMON=true
+if catalyst-broker status 2>/dev/null | grep -q "^running"; then
+  USE_BROKER_DAEMON=true
 else
-  USE_FILTER_DAEMON=false
+  USE_BROKER_DAEMON=false
 fi
+```
+
+## Startup Event
+
+On boot the daemon emits a `broker.daemon.startup` event so subscribers can re-register their
+interests after a restart. (Releases prior to CTL-315 emitted this event under the legacy name
+`filter.daemon.startup`.) Watch for it with:
+
+```bash
+catalyst-events wait-for \
+  --filter '.attributes."event.name" == "broker.daemon.startup"' \
+  --timeout 0
 ```
 
 ## Related
 
 - [Event Architecture](./events/) — the global event log and `catalyst-events` CLI that
-  `catalyst-filter` reads and writes.
+  `catalyst-broker` reads and writes.
 - [GitHub Webhooks](./webhooks/) — how raw GitHub events enter the event log.
 - [Orchestration](../reference/orchestration/) — how orchestrators register prose interests to
   monitor their entire worker wave.
@@ -388,6 +408,7 @@ fi
 
 ## Source
 
-- CLI: [`plugins/dev/scripts/catalyst-filter`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-filter)
-- Daemon: [`plugins/dev/scripts/filter-daemon/index.mjs`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/filter-daemon/index.mjs)
-- Skill (agent-facing): [`plugins/dev/skills/catalyst-filter/SKILL.md`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/catalyst-filter/SKILL.md)
+- CLI: [`plugins/dev/scripts/catalyst-broker`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-broker)
+- Daemon: [`plugins/dev/scripts/broker/index.mjs`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/broker/index.mjs)
+- Backward-compat shim: [`plugins/dev/scripts/catalyst-filter`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/catalyst-filter)
+- Skill (agent-facing): [`plugins/dev/skills/broker/SKILL.md`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/broker/SKILL.md)

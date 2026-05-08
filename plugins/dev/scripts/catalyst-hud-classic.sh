@@ -243,6 +243,7 @@ render() {
     catalyst.orchestrator) svc_tag="ORCH"; svc_color="$GRN" ;;
     catalyst.linear)       svc_tag="LIN";  svc_color="$YEL" ;;
     catalyst.worker)       svc_tag="WORK"; svc_color="$CYN" ;;
+    catalyst.broker)       svc_tag="BRKR"; svc_color="$DIM" ;;
     catalyst.filter)       svc_tag="FLTR"; svc_color="$DIM" ;;
     "")                    svc_tag="?";    svc_color="$DIM" ;;
     *)                     svc_tag="${service:0:4}"; svc_color="$DIM" ;;
