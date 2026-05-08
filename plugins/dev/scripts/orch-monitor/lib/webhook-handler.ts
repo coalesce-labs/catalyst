@@ -4,6 +4,7 @@ import { parseWebhookEvent, type WebhookEvent } from "./webhook-events";
 import { type EventLogWriter } from "./event-log";
 import {
   buildCanonicalEvent,
+  deriveTraceId,
   type CanonicalEvent,
   type Attributes,
 } from "./canonical-event";
@@ -639,6 +640,7 @@ export function createWebhookHandler(
               if (orchId !== null) {
                 envelope.attributes["catalyst.orchestrator.id"] = orchId;
               }
+              envelope.traceId = deriveTraceId(orchId);
             } catch (err) {
               logger.warn?.(
                 `[webhook] orchestrator resolution failed: ${
