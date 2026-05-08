@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { useState } from "react";
-import { render, useApp, useInput, useStdout, Box, Text } from "ink";
+import { render, useApp, useInput, useStdin, useStdout, Box, Text } from "ink";
 import { Header } from "./components/Header.tsx";
 import { EventList } from "./components/EventList.tsx";
 import { FilterInput } from "./components/FilterInput.tsx";
@@ -17,6 +17,7 @@ interface AppProps {
 
 function App({ repoFilter, predicate, sinceTs }: AppProps) {
   const { exit } = useApp();
+  const { isRawModeSupported } = useStdin();
   const { stdout } = useStdout();
   const rows = stdout?.rows ?? 40;
   const cols = stdout?.columns ?? 120;
@@ -71,7 +72,7 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
       return;
     }
     if (input === "r") { setPivot(null); return; }
-  });
+  }, { isActive: isRawModeSupported ?? true });
 
   if (loading) {
     return <Text>Loading events…</Text>;
@@ -157,6 +158,14 @@ for (let i = 0; i < args.length; i++) {
     console.info("  q            quit");
     process.exit(0);
   }
+}
+
+if (!process.stdin.isTTY) {
+  process.stderr.write(
+    "catalyst-hud requires an interactive terminal.\n" +
+    "Open a fresh terminal tab and run catalyst-hud there — not inside a Claude Code session.\n",
+  );
+  process.exit(1);
 }
 
 render(<App repoFilter={repoFilter} predicate={predicate} sinceTs={sinceTs} />);
