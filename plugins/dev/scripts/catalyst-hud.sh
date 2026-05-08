@@ -19,6 +19,18 @@ BLU=$'\033[34m'
 MAG=$'\033[35m'
 CYN=$'\033[36m'
 
+# pad_cells str width
+# Pads str to width display cells, compensating for → (U+2192: 3 UTF-8 bytes,
+# 1 terminal cell). bash printf %-Ns counts bytes, not display cells.
+pad_cells() {
+  local str="$1" width="$2"
+  local no_arrow="${str//→/x}"  # swap each → (3 bytes) with 1-byte placeholder
+  local cell_len="${#no_arrow}"
+  local pad=$(( width - cell_len ))
+  [[ $pad -lt 0 ]] && pad=0
+  printf "%s%${pad}s" "$str" ""
+}
+
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 EVENTS_DIR="${CATALYST_EVENTS_DIR:-$CATALYST_DIR/events}"
 
@@ -517,14 +529,16 @@ render() {
   # dominate visually even when grouping is on.
   local row_color="$svc_color"
   [[ "$severity" == "ERROR" ]] && row_color="$RED$BOLD"
-  printf "${row_color}%-8s  ${BOLD}%-4s${R}${row_color}  ${sev_color}%-3s${R}${row_color}  %-14s  %-12s  ${refc}%-14s${R}${row_color}  ${DIM}%-8s${R}${row_color}  %s${R}\n" \
-    "$t" "$svc_tag" "$sev_tag" "$lbl" "${repo_short:-}" "${prref:-}" "$trace_short" "$body"
+  local ref_padded
+  ref_padded=$(pad_cells "${prref:-}" 14)
+  printf "${row_color}%-8s  ${BOLD}%-4s${R}${row_color}  ${sev_color}%-3s${R}${row_color}  %-30.30s  %-12s  ${refc}%s${R}${row_color}  ${DIM}%-8s${R}${row_color}  %s${R}\n" \
+    "$t" "$svc_tag" "$sev_tag" "$ev" "${repo_short:-}" "$ref_padded" "$trace_short" "$body"
 }
 
 # --- Header ----------------------------------------------------------------
-printf "${BOLD}${CYN}%-8s  %-4s  %-3s  %-14s  %-12s  %-14s  %-8s  %s${R}\n" \
+printf "${BOLD}${CYN}%-8s  %-4s  %-3s  %-30s  %-12s  %-14s  %-8s  %s${R}\n" \
   "TIME" "SVC" "SEV" "EVENT" "REPO" "REF" "TRACE" "DETAILS"
-printf "${DIM}%s${R}\n" "$(printf '%.0s─' {1..110})"
+printf "${DIM}%s${R}\n" "$(printf '%.0s─' {1..128})"
 
 # --- Stream ----------------------------------------------------------------
 catalyst-events tail "$@" | while IFS= read -r line; do
