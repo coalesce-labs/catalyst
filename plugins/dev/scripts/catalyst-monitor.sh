@@ -27,6 +27,9 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 SERVER_SCRIPT="${MONITOR_SERVER_SCRIPT:-$SCRIPT_DIR/orch-monitor/server.ts}"
 MONITOR_DIR="$(cd "$(dirname "$SERVER_SCRIPT")" && pwd)"
+FORWARD_PID_FILE="${CATALYST_DIR}/otel-forward.pid"
+FORWARD_LOG="${CATALYST_DIR}/otel-forward.log"
+FORWARD_SCRIPT="${SCRIPT_DIR}/otel-forward/index.ts"
 
 # ─── Version drift self-check ───────────────────────────────────────────────
 PLUGIN_CACHE_ROOT="${CATALYST_PLUGIN_CACHE_ROOT:-$HOME/.claude/plugins/cache/catalyst/catalyst-dev}"
@@ -335,6 +338,54 @@ cmd_url() {
   echo "http://localhost:$PORT"
 }
 
+read_forward_pid() {
+  if [[ -f "$FORWARD_PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$FORWARD_PID_FILE" 2>/dev/null)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      echo "$pid"; return 0
+    fi
+    rm -f "$FORWARD_PID_FILE" 2>/dev/null || true
+  fi
+  return 1
+}
+
+cmd_forward_start() {
+  if read_forward_pid >/dev/null; then
+    echo "Forwarder already running (pid $(cat "$FORWARD_PID_FILE"))"
+    return 0
+  fi
+  nohup bun run "$FORWARD_SCRIPT" > "$FORWARD_LOG" 2>&1 &
+  local fwd_pid=$!
+  disown "$fwd_pid" 2>/dev/null || true
+  echo "$fwd_pid" > "$FORWARD_PID_FILE"
+  echo "Forwarder started (pid $fwd_pid)"
+}
+
+cmd_forward_stop() {
+  local pid
+  if ! pid=$(read_forward_pid); then
+    echo "Forwarder not running"; return 0
+  fi
+  kill "$pid" 2>/dev/null || true
+  local waited=0
+  while [[ $waited -lt 30 ]] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1; waited=$((waited + 1))
+  done
+  kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+  rm -f "$FORWARD_PID_FILE" 2>/dev/null || true
+  echo "Forwarder stopped"
+}
+
+cmd_forward_status() {
+  local pid
+  if pid=$(read_forward_pid); then
+    echo "Forwarder running (pid $pid)"
+  else
+    echo "Forwarder not running"
+  fi
+}
+
 usage() {
   echo "Usage: catalyst-monitor.sh <command> [options]"
   echo ""
@@ -345,6 +396,9 @@ usage() {
   echo "  status [--json]    Check if monitor is running"
   echo "  open               Start if needed, open browser to dashboard"
   echo "  url                Print the monitor URL"
+  echo "  forward-start      Start otel-forward daemon in background"
+  echo "  forward-stop       Stop otel-forward daemon"
+  echo "  forward-status     Check if otel-forward daemon is running"
 }
 
 cmd="${1:-help}"
@@ -357,6 +411,9 @@ case "$cmd" in
   status)    cmd_status "$@" ;;
   open)      cmd_open "$@" ;;
   url)       cmd_url ;;
+  forward-start)  cmd_forward_start ;;
+  forward-stop)   cmd_forward_stop ;;
+  forward-status) cmd_forward_status ;;
   help|--help|-h) usage ;;
   *) echo "error: unknown command: $cmd" >&2; exit 1 ;;
 esac
