@@ -35,7 +35,8 @@ CLI_ENTRIES=(
   "catalyst-claude.sh:catalyst-claude"
   "register-thought.sh:register-thought"
   "workflow-context.sh:workflow-context"
-  "catalyst-hud.sh:catalyst-hud"
+  "catalyst-hud:catalyst-hud"
+  "catalyst-hud-classic.sh:catalyst-hud-classic"
 )
 
 usage() {

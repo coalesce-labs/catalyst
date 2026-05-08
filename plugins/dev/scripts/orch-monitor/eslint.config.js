@@ -11,7 +11,7 @@ export default [
   ...tseslint.configs.recommendedTypeChecked,
   security.configs.recommended,
   {
-    files: ["**/*.ts"],
+    files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
       parserOptions: {
         projectService: true,
