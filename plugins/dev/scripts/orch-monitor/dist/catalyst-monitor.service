@@ -1,0 +1,37 @@
+# systemd user unit for catalyst-monitor (Linux).
+#
+# Instructions:
+#   1. Copy this file to ~/.config/systemd/user/catalyst-monitor.service
+#      (create the directory if it doesn't exist)
+#   2. Replace REPLACE_WITH_MONITOR_PATH with the absolute path to catalyst-monitor.sh
+#      (e.g. /home/you/.claude/plugins/cache/catalyst/catalyst-dev/X.Y.Z/scripts/catalyst-monitor.sh)
+#   3. Create ~/.config/catalyst/webhook.env containing:
+#        CATALYST_WEBHOOK_SECRET=<the hex secret from ~/.config/catalyst/webhook-secret>
+#        CATALYST_DIR=/home/you/catalyst
+#   4. Enable and start:
+#        systemctl --user daemon-reload
+#        systemctl --user enable --now catalyst-monitor.service
+#   5. Verify:
+#        systemctl --user status catalyst-monitor.service
+#        journalctl --user -u catalyst-monitor.service -f
+#
+# To stop:
+#   systemctl --user stop catalyst-monitor.service
+#
+# See: website/src/content/docs/observability/webhooks.md — "Persistent setup"
+
+[Unit]
+Description=Catalyst Monitor Daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=REPLACE_WITH_MONITOR_PATH start
+EnvironmentFile=%h/.config/catalyst/webhook.env
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:%h/catalyst/monitor.log
+StandardError=append:%h/catalyst/monitor.log
+
+[Install]
+WantedBy=default.target

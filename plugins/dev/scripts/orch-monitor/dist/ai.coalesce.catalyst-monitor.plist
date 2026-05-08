@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template for catalyst-monitor (macOS).
+
+  Instructions:
+    1. Copy this file to ~/Library/LaunchAgents/ai.coalesce.catalyst-monitor.plist
+    2. Replace REPLACE_WITH_WRAPPER_PATH with the absolute path to
+       catalyst-monitor-launchd.sh (the wrapper that reads the secret from disk).
+    3. Replace REPLACE_WITH_HOME with your home directory path (e.g. /Users/you).
+    4. Load the agent:
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.coalesce.catalyst-monitor.plist
+    5. Verify it started:
+         launchctl list | grep catalyst-monitor
+         tail -f ~/catalyst/monitor.log
+
+  To stop and unload:
+    launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.coalesce.catalyst-monitor.plist
+
+  See: website/src/content/docs/observability/webhooks.md — "Persistent setup"
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.coalesce.catalyst-monitor</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_WRAPPER_PATH/catalyst-monitor-launchd.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_HOME/catalyst/monitor.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_HOME/catalyst/monitor.log</string>
+</dict>
+</plist>
