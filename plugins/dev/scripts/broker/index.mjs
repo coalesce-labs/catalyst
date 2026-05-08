@@ -17,6 +17,8 @@ import {
   fstatSync,
   readSync,
   closeSync,
+  existsSync,
+  renameSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
@@ -94,7 +96,22 @@ export function clearInterests() {
 }
 
 // --- Interest persistence ---
-const INTERESTS_FILE = resolve(CATALYST_DIR, "filter-interests.json");
+const INTERESTS_FILE = resolve(CATALYST_DIR, "broker-interests.json");
+const LEGACY_INTERESTS_FILE = resolve(CATALYST_DIR, "filter-interests.json");
+
+// One-time rename: legacy filter-interests.json → broker-interests.json on startup.
+function migrateLegacyInterestsFile() {
+  try {
+    if (existsSync(LEGACY_INTERESTS_FILE) && !existsSync(INTERESTS_FILE)) {
+      renameSync(LEGACY_INTERESTS_FILE, INTERESTS_FILE);
+      console.log(
+        `[broker] Migrated ${LEGACY_INTERESTS_FILE} → ${INTERESTS_FILE}`
+      );
+    }
+  } catch (err) {
+    console.error("[broker] Failed to migrate legacy interests file:", err.message);
+  }
+}
 
 export function saveInterests() {
   try {
@@ -971,6 +988,7 @@ function main() {
   }
 
   writePidFile();
+  migrateLegacyInterestsFile();
 
   lastLogPath = getEventLogPath();
   loadPersistedInterests();
@@ -989,7 +1007,7 @@ function main() {
   }
 
   appendEvent({
-    event: "filter.daemon.startup",
+    event: "broker.daemon.startup",
     orchestrator: null,
     worker: null,
     detail: {

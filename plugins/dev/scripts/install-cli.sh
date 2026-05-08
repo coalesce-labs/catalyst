@@ -24,6 +24,7 @@ set -uo pipefail
 # Explicit allowlist. Source name → installed command name (.sh suffix stripped).
 # Keep this in sync with check-setup.sh's "Catalyst CLI Install" section.
 CLI_ENTRIES=(
+  "catalyst-broker:catalyst-broker"
   "catalyst-comms:catalyst-comms"
   "catalyst-events:catalyst-events"
   "catalyst-filter:catalyst-filter"
