@@ -19,10 +19,12 @@ Orchestrator                   Worker subprocess
      │                                 │   Phase 3: implementing
      │                                 │   Phase 4: validating
      │                                 │   Phase 5: shipping
+     │                                 │     emits agent.checkin {claimed_pr} →
+     │                                 │       broker auto-registers pr_lifecycle interest (CTL-303)
      │                                 │     opens PR → enters catalyst-events wait-for loop
      │                                 │     resolves CI failures, bot review threads, BEHIND
      │                                 │     gh pr merge --squash --delete-branch
-     │                                 │     writes pr.mergedAt + status: done → exits
+     │                                 │     writes pr.mergedAt + status: done → emits agent.checkout → exits
      │                                 │
      │<─ signal file: done ────────────│
      │   (orchestrator's Phase 4 is a safety-net fallback for stalled/crashed workers)
@@ -87,6 +89,12 @@ dispatched → researching → planning → implementing → validating → ship
 ```
 
 The worker writes all statuses through `done`. In the `pr-created` → `done` transition, the worker enters a `catalyst-events wait-for` listen loop, resolves CI failures and review blockers inline, and executes `gh pr merge --squash --delete-branch` when the PR is CLEAN. The orchestrator writes `done` only as a safety-net fallback for workers that wrote `stalled` or crashed before completing their own merge.
+
+The listen loop is enabled by [`catalyst-broker`](/observability/catalyst-broker/)
+auto-correlation (CTL-303): the worker's `agent.checkin {claimed_pr}` event causes the broker to
+derive a `pr_lifecycle` interest for that PR, so `wait-for` receives PR/CI/review events without
+the worker calling `filter.register` manually. On `agent.checkout` the broker auto-deregisters
+the derived interests.
 
 ## The global state
 
