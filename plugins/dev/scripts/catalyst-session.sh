@@ -257,6 +257,26 @@ cmd_start() {
       status:$status}')
   emit_event "$sid" "session-started" "$payload"
 
+  # CTL-303: emit agent.checkin so the broker can auto-correlate ticket↔PR interests.
+  local checkin_ts; checkin_ts="$(now_iso)"
+  local checkin_cwd="${cwd:-$(pwd 2>/dev/null || true)}"
+  local checkin_payload
+  checkin_payload=$(jq -nc \
+    --arg session_id "$sid" \
+    --arg agent_name "${label:-${skill}}" \
+    --arg ticket "$ticket" \
+    --arg orchestrator "${workflow:-${CATALYST_ORCHESTRATOR_ID:-}}" \
+    --arg cwd "$checkin_cwd" \
+    '{session_id:$session_id,
+      agent_name:$agent_name,
+      ticket:(if $ticket == "" then null else $ticket end),
+      orchestrator:(if $orchestrator == "" then null else $orchestrator end),
+      claimed_pr:null,
+      cwd:$cwd}')
+  canonical_jsonl_append "$EVENTS_DIR" \
+    "$(jq -nc --arg ts "$checkin_ts" --argjson detail "$checkin_payload" \
+      '{ts:$ts,event:"agent.checkin",detail:$detail}' 2>/dev/null)" 2>/dev/null || true
+
   echo "$sid"
 }
 
@@ -495,6 +515,12 @@ cmd_end() {
   local sev="INFO"
   [[ "$status" == "failed" ]] && sev="ERROR"
   __session_emit_canonical "$sid" "session-ended" "$payload" "$end_ts" "$sev"
+
+  # CTL-303: emit agent.checkout so the broker can clean up auto-correlated interests.
+  local checkout_ts; checkout_ts="$(now_iso)"
+  canonical_jsonl_append "$EVENTS_DIR" \
+    "$(jq -nc --arg ts "$checkout_ts" --arg sid "$sid" --arg st "$status" \
+      '{ts:$ts,event:"agent.checkout",detail:{session_id:$sid,status:$st}}' 2>/dev/null)" 2>/dev/null || true
 
   # CTL-157: emit claude_code.session.outcome to OTLP.
   local emit_bin="${CATALYST_EMIT_OTEL_BIN:-$SCRIPT_DIR/emit-otel-event.sh}"
