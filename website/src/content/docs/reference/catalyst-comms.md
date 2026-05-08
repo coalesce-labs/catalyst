@@ -300,15 +300,19 @@ There is currently **no delivery guarantee**: a worker may have already passed a
 
 ### Event log integration
 
-`catalyst-comms send` emits a `comms.message.posted` event to the unified event log (`~/catalyst/events/YYYY-MM.jsonl`) using the v2 OTel-shaped envelope. This means orchestrators and tools that monitor the event log see all comms traffic without polling the channel file directly:
+`catalyst-comms send` emits a `comms.message.posted` event to the unified event log (`~/catalyst/events/YYYY-MM.jsonl`) using the canonical OTel envelope (CTL-300). This means orchestrators and tools that monitor the event log see all comms traffic without polling the channel file directly:
 
 ```bash
 # Watch all comms messages on a channel
-catalyst-events tail --filter '.event == "comms.message.posted" and .attributes."comms.channel" == "orch-ctl-ux-apr20-wave-1"'
+catalyst-events tail --filter '.attributes."event.name" == "comms.message.posted" and .attributes."comms.channel" == "orch-ctl-ux-apr20-wave-1"'
 
 # Messages directed at a specific worker
-catalyst-events tail --filter '.event == "comms.message.posted" and .body.payload.to == "CTL-101"'
+catalyst-events tail --filter '.attributes."event.name" == "comms.message.posted" and .body.payload.to == "CTL-101"'
 ```
+
+Comms posts ride the same `traceId` propagation rules as other canonical events (CTL-310): if a
+caller threads a `traceId` through, downstream consumers can pivot from comms traffic to the
+PR/CI/agent timeline that triggered it.
 
 ## Sub-agent Pattern
 

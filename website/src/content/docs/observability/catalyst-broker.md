@@ -98,6 +98,9 @@ catalyst-broker run      # foreground mode (useful for debugging)
 ```
 
 The daemon writes its PID to `~/catalyst/broker.pid` and logs to `~/catalyst/broker.log`.
+Logs are emitted as pino-formatted structured JSON lines (CTL-314) — pipe through `pino-pretty`
+for human-readable output, or query directly with `jq`. The log level is controlled by the
+`LOG_LEVEL` environment variable (see Configuration Reference).
 It persists registered interests to `~/catalyst/broker-interests.json` so they survive a
 restart. On first start after upgrading from CTL-303, the daemon migrates a legacy
 `filter-interests.json` to the new path automatically.
@@ -205,6 +208,36 @@ or comms messages addressed to your orchestrator:
 The `context` object is included in the Groq prompt alongside the intent so the LLM knows which
 PR numbers and tickets belong to this interest.
 
+#### ticket_lifecycle — deterministic Linear routing
+
+Mirroring `pr_lifecycle` for GitHub PRs, `ticket_lifecycle` is a deterministic interest type for
+Linear ticket events. Use it when you want to wake on state changes, comments, or PR links for a
+known ticket without paying for a Groq round-trip:
+
+```json
+{
+  "ts": "2026-05-08T07:00:00Z",
+  "event": "filter.register",
+  "orchestrator": "orch-ctl-api-2026-05-08",
+  "worker": null,
+  "detail": {
+    "interest_id": "sess_20260508_abc123",
+    "session_id": "sess_20260508_abc123",
+    "interest_type": "ticket_lifecycle",
+    "notify_event": "filter.wake.sess_20260508_abc123",
+    "persistent": true,
+    "tickets": ["CTL-253"],
+    "wake_on": ["status_done", "pr_opened", "pr_merged"]
+  }
+}
+```
+
+Supported `wake_on` values include `status_done`, `status_in_review`, `status_changed`,
+`comment_added`, `pr_opened`, and `pr_merged`. Omit `wake_on` to fire on any of them. Like
+`pr_lifecycle`, this path requires no Groq API key. See the
+[`broker` skill](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/broker/SKILL.md)
+for the full agent-facing protocol.
+
 ### filter.wake
 
 When the daemon finds a match, it appends a `filter.wake.<id>` event to the log:
@@ -254,6 +287,41 @@ The daemon also auto-deregisters interests when:
 - `orchestrator-completed` or `orchestrator-failed` events arrive with a matching orchestrator ID
 - A `session_id` has not produced a heartbeat for more than 3 minutes (watchdog cleanup)
 - `persistent: false` is set and the first wake has fired
+
+## Agent Identity and Auto-Correlation
+
+CTL-303 introduced a structured agent-identity protocol on top of the interest registration above.
+Instead of every agent hand-rolling a `filter.register`, agents emit `agent.checkin` at startup
+and `agent.checkout` at exit. The broker watches for these events and auto-derives the obvious
+interests — most notably a `pr_lifecycle` interest from a `claimed_pr` field.
+
+```json
+{
+  "ts": "2026-05-08T07:00:00Z",
+  "event": "agent.checkin",
+  "detail": {
+    "session_id": "sess_20260508_abc123",
+    "ticket": "CTL-253",
+    "orchestrator": "orch-ctl-api-2026-05-08",
+    "claimed_pr": 445,
+    "repo": "coalesce-labs/catalyst",
+    "base_branches": [{"pr": 445, "base": "main"}]
+  }
+}
+```
+
+When the broker sees `claimed_pr` in an `agent.checkin`, it registers a `pr_lifecycle` interest
+keyed on `session_id` automatically — the worker can then `wait-for` on
+`filter.wake.${session_id}` without ever calling `filter.register` itself.
+
+A second `agent.checkin` for the same `session_id` updates the existing identity (used to claim a
+PR after the worker discovers its number). On `agent.checkout` (or after the watchdog declares
+the session stale via heartbeat absence), the broker auto-deregisters all interests derived from
+that identity.
+
+The agent-facing protocol — recommended emit timing, identity fields, fallback behavior when the
+broker is not running — is documented in the [`broker`
+skill](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/broker/SKILL.md).
 
 ## Writing Effective Intent Prompts
 
@@ -337,6 +405,7 @@ for backward compatibility — the broker reads the same names.
 | `FILTER_WATCHDOG_INTERVAL_MS` | `60000` | How often the watchdog checks for stale sessions |
 | `FILTER_HEARTBEAT_STALE_MS` | `180000` | Session idle timeout before interest auto-deregistration |
 | `CATALYST_DIR` | `~/catalyst` | Directory for PID file, log, interests file, and SQLite DB |
+| `LOG_LEVEL` | `info` | pino log level: `trace` / `debug` / `info` / `warn` / `error` (CTL-314) |
 
 ## Relationship to catalyst-events wait-for
 
@@ -400,6 +469,9 @@ catalyst-events wait-for \
 
 - [Event Architecture](./events/) — the global event log and `catalyst-events` CLI that
   `catalyst-broker` reads and writes.
+- [Tail-and-forward (catalyst-otel-forward)](./forwarder/) — sibling daemon that ships canonical
+  events to OTLP / PostHog / Cloudflare Analytics Engine.
+- [Terminal HUD (catalyst-hud)](./hud/) — Ink TUI for viewing the same event stream.
 - [GitHub Webhooks](./webhooks/) — how raw GitHub events enter the event log.
 - [Orchestration](../reference/orchestration/) — how orchestrators register prose interests to
   monitor their entire worker wave.

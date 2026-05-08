@@ -125,7 +125,49 @@ This enables the `/api/otel/query` and `/api/otel/logs` endpoints on the monitor
 
 Alternatively, set environment variables: `OTEL_ENABLED=true`, `PROMETHEUS_URL`, `LOKI_URL`.
 
-### 5. Set up the webhook tunnel
+### 5. Start the broker daemon (optional)
+
+`catalyst-broker` (CTL-303) is the semantic event broker — it tails the canonical event log
+and emits targeted `filter.wake.<id>` events for registered orchestrators and workers. Skills
+that wait for ticket lifecycle changes, PR lifecycle changes, or comms messages register
+interests with the broker instead of writing bespoke jq predicates.
+
+```bash
+catalyst-broker start
+```
+
+Logs are pino-structured (CTL-314) and written to `~/catalyst/broker.log`. Set `LOG_LEVEL`
+to control verbosity:
+
+```bash
+LOG_LEVEL=info catalyst-broker start    # default
+LOG_LEVEL=debug catalyst-broker start   # full trace
+```
+
+The legacy `catalyst-filter` command is preserved as a backward-compat shim (CTL-315) and
+execs `catalyst-broker` with the same arguments. See
+[Semantic event routing (`catalyst-broker`)](./catalyst-broker/) for the full protocol.
+
+### 6. Start the event forwarder (optional)
+
+`catalyst-otel-forward` (CTL-306) is a tail-and-forward daemon that ships canonical events
+to OTLP/HTTP, PostHog, and Cloudflare Analytics Engine. Start it via the monitor wrapper:
+
+```bash
+bash plugins/dev/scripts/catalyst-monitor.sh forward-start
+```
+
+Or run it directly:
+
+```bash
+catalyst-otel-forward
+```
+
+Logs are pino-structured (CTL-314) and respect `LOG_LEVEL`. See
+[Event forwarder (`catalyst-otel-forward`)](./forwarder/) for destination configuration and
+DLQ semantics.
+
+### 7. Set up the webhook tunnel
 
 The orch-monitor can receive GitHub and Linear events in near-real-time via a smee.io webhook tunnel. Without this step, skills that use `catalyst-events wait-for` — including `/catalyst-dev:orchestrate` Phase 4, `/catalyst-dev:oneshot` Phase 5, and `/catalyst-dev:wait-for-github` — silently fall back to REST polling with up to **10-minute latency** per event.
 
@@ -139,7 +181,7 @@ bash plugins/dev/scripts/setup-webhooks.sh
 
 This creates a smee.io channel, writes the channel URL to `~/.config/catalyst/config.json`, generates an HMAC secret, and registers a webhook on each repo listed in `catalyst.monitor.github.watchRepos`. See [GitHub webhooks for orch-monitor](../webhooks/) for the full setup guide and configuration reference.
 
-### 6. Import the Grafana dashboard
+### 8. Import the Grafana dashboard
 
 The claude-code-otel repo ships with a pre-built Grafana dashboard at `dashboards/claude-code.json`. Import it via Grafana → Dashboards → New → Import → Upload JSON file.
 

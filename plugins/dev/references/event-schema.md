@@ -7,6 +7,11 @@ Derived directly from `plugins/dev/scripts/orch-monitor/lib/canonical-event.ts` 
 Use this when writing `catalyst-events wait-for --filter` or `catalyst-events tail --filter`
 expressions to avoid guessing field names. Wrong field names silently never match.
 
+For interactive/exploratory queries, use `catalyst-events query "<natural language>"`
+(see [[catalyst-events-query]]) — it translates English to a structured filter via Groq and
+validates field names against the same canonical schema documented here, so unknown fields
+fail loudly with a "did you mean" suggestion.
+
 This schema was introduced as a breaking cutover in CTL-300. All producers emit the canonical
 envelope. Legacy v1/v2 files on disk were rotated to `*.legacy.jsonl` on first canonical write.
 A future OTLP exporter sidecar (CTL-306) will transcode canonical JSONL to OTLP wire format.

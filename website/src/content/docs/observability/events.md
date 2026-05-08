@@ -9,11 +9,11 @@ Catalyst's observability layer has three tiers of durability, and frontends (web
 
 ## The three sources of truth
 
-| Source | Kind | Writer | Lifetime |
-|--------|------|--------|----------|
+| Source | Kind | Writers | Lifetime |
+|--------|------|---------|----------|
 | **Worker signal file** (`<orch-dir>/workers/<ticket>.json`) | Mutable snapshot | Worker, orchestrator | Archived with the orchestrator dir |
 | **Global state** (`~/catalyst/state.json`) | Mutable snapshot | `catalyst-state.sh worker` / `orchestrator` | Persists across all orchestrations |
-| **Global event log** (`~/catalyst/events/YYYY-MM.jsonl`) | Append-only (monthly rotation) | `catalyst-state.sh event` | Never truncated automatically |
+| **Global event log** (`~/catalyst/events/YYYY-MM.jsonl`) | Append-only (monthly rotation) | webhook receiver (`lib/webhook-events.ts`), `catalyst-state.sh event` (v1 envelope, legacy), `catalyst-comms send`, `catalyst-broker` daemon, `catalyst-otel-forward` daemon, `catalyst-session.sh`, OTel emit scripts under `plugins/dev/scripts/orch-monitor/lib/` | Never truncated automatically |
 
 Snapshots answer "what is the state right now?" — the event log answers "what happened and when?". Both matter.
 
@@ -118,17 +118,23 @@ Tails the current month's event log, printing each new line as it arrives. Use `
 any jq expression to narrow output:
 
 ```bash
-# All GitHub webhook events
-catalyst-events tail --filter '.source == "github.webhook"'
+# All GitHub webhook events (canonical envelope, CTL-300)
+catalyst-events tail --filter '.attributes."event.name" | startswith("github.")'
 
 # Linear issue state changes
-catalyst-events tail --filter '.event | startswith("linear.issue.state")'
+catalyst-events tail --filter '.attributes."event.name" | startswith("linear.issue.state")'
 
-# Events for a specific ticket
-catalyst-events tail --filter '.worker == "CTL-48"'
+# Events for a specific ticket (canonical envelope)
+catalyst-events tail --filter '.attributes."worker.ticket" == "CTL-48"'
 
-# Worker lifecycle events only
+# Worker lifecycle events written via the v1 envelope (legacy `.event` field)
 catalyst-events tail --filter '.event | startswith("worker-")'
+
+# Agent identity (CTL-303)
+catalyst-events tail --filter '.attributes."event.name" == "agent.checkin"'
+
+# Broker daemon startup
+catalyst-events tail --filter '.attributes."event.name" == "broker.daemon.startup"'
 ```
 
 ### `wait-for`
@@ -141,8 +147,8 @@ Blocks until a matching event appears (or timeout expires). Used internally by s
 need to synchronize on external events:
 
 ```bash
-# Wait up to 120s for a PR merge event for ticket CTL-48
-catalyst-events wait-for --filter '.event == "github.pr.merged" and .worker == "CTL-48"' --timeout 120
+# Wait up to 120s for a PR merge event for ticket CTL-48 (canonical envelope)
+catalyst-events wait-for --filter '.attributes."event.name" == "github.pr.merged" and .attributes."worker.ticket" == "CTL-48"' --timeout 120
 ```
 
 When the orch-monitor is running with webhooks configured, `wait-for` returns within ~1s of the
@@ -151,7 +157,9 @@ intervals (600s maximum latency).
 
 ## Event topics in the log
 
-Every record in `~/catalyst/events/YYYY-MM.jsonl` has an `event` field with a dot-namespaced topic:
+Every record in `~/catalyst/events/YYYY-MM.jsonl` carries a topic. Canonical envelopes
+(CTL-300) put it at `.attributes."event.name"`; v1 envelopes (`catalyst-state.sh event`) put
+it at `.event`.
 
 | Topic pattern | Source | Description |
 |---------------|--------|-------------|
@@ -166,7 +174,11 @@ Every record in `~/catalyst/events/YYYY-MM.jsonl` has an `event` field with a do
 | `linear.comment.created` | Linear webhook | Comment on a Linear issue |
 | `linear.cycle.*` | Linear webhook | Cycle create/update/remove |
 | `comms.message.posted` | catalyst-comms | Agent coordination message |
-| `worker-dispatched` / `worker-pr-created` / `worker-done` | Orchestrator | Worker lifecycle |
+| `agent.checkin` / `agent.checkout` | catalyst-broker (CTL-303) | Agent identity register / unregister |
+| `broker.daemon.startup` | catalyst-broker (CTL-303) | Broker daemon started; legacy alias `filter.daemon.startup` |
+| `filter.register` / `filter.deregister` | catalyst-broker | Interest registered or deregistered |
+| `filter.wake.<id>` | catalyst-broker | Wake event delivered to a registered interest |
+| `worker-dispatched` / `worker-pr-created` / `worker-done` | Orchestrator (v1 envelope) | Worker lifecycle |
 | `catalyst.*` | catalyst-session | Skill/session lifecycle events |
 
 GitHub and Linear topics arrive via webhooks when the monitor is configured (see

@@ -108,6 +108,100 @@ Product analytics via the `catalyst-analytics` plugin.
 
 **Related skills**: `/catalyst-analytics:analyze-user-behavior`, `/catalyst-analytics:segment-analysis`, `/catalyst-analytics:product-metrics`
 
+PostHog is used in two distinct ways inside Catalyst:
+
+- **Read** — the `catalyst-analytics` plugin queries PostHog for product metrics and user behavior.
+- **Write** — the `catalyst-otel-forward` daemon (CTL-306) ships canonical events to PostHog as a
+  forwarder destination. See [Event Forwarding](/observability/forwarder/) and the
+  [Forwarders configuration](/reference/configuration/#forwarders-catalystobservabilityforwarders-ctl-306).
+
+## Groq
+
+Semantic event routing for the `catalyst-broker` daemon (CTL-303).
+
+**Setup**: Add `apiKey` to `~/.config/catalyst/config.json` (Layer-2 secret):
+
+```json
+{
+  "groq": {
+    "apiKey": "gsk_..."
+  }
+}
+```
+
+**Default model**: `llama-3.1-8b-instant`. Override per-project with the `FILTER_GROQ_MODEL` env
+var or `GROQ_API_KEY` for the key itself.
+
+**Purpose**: `catalyst-broker` resolves deterministic interest types
+(`pr_lifecycle`, `ticket_lifecycle`) without calling Groq. For ambiguous prose interests it
+batches one request per debounce window and asks Groq to classify which registered interests
+match — keeping latency low and cost minimal.
+
+**Related skills / tools**: `catalyst-broker`, `catalyst-events wait-for` (downstream consumer),
+the `broker` skill protocol reference.
+
+## Cloudflare Analytics Engine
+
+Forwarder destination for the `catalyst-otel-forward` daemon (CTL-306). Cloudflare Analytics
+Engine (AE) accepts high-cardinality time-series writes via Workers HTTP API.
+
+**Setup**: under `catalyst.observability.forwarders.cloudflareAE` in
+`~/.config/catalyst/config-{projectKey}.json`:
+
+```json
+{
+  "catalyst": {
+    "observability": {
+      "forwarders": {
+        "cloudflareAE": {
+          "enabled": true,
+          "accountId": "...",
+          "apiToken": "...",
+          "dataset": "catalyst_events"
+        }
+      }
+    }
+  }
+}
+```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `accountId` | Yes | — | Cloudflare account ID |
+| `apiToken` | Yes | — | API token with Analytics Engine write scope |
+| `dataset` | No | `catalyst_events` | AE dataset name |
+
+See [Event Forwarding](/observability/forwarder/) for the full schema and end-to-end setup.
+
+## OTLP
+
+Forwarder destination for `catalyst-otel-forward` (CTL-306). Sends canonical events as
+OpenTelemetry signals over HTTP.
+
+**Setup**: configure under `catalyst.observability.forwarders.otlp`, or set the standard
+`OTEL_EXPORTER_OTLP_ENDPOINT` env var. The daemon auto-rewrites `:4317` (gRPC) to `:4318` (HTTP)
+when the env var is used, so the same endpoint string works whether your collector advertises the
+gRPC or HTTP port.
+
+```json
+{
+  "catalyst": {
+    "observability": {
+      "forwarders": {
+        "otlp": {
+          "enabled": true,
+          "endpoint": "http://localhost:4318"
+        }
+      }
+    }
+  }
+}
+```
+
+The local `claude-code-otel` Compose stack exposes the OTLP/HTTP collector on `:4318` by default.
+For hosted backends (Grafana Cloud, Honeycomb, etc.), point the endpoint at the vendor URL and
+configure auth headers via collector environment.
+
 ## Exa
 
 Optional web search and code-search augmentation for research agents via the Exa MCP server.

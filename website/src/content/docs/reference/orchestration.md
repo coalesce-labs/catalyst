@@ -355,6 +355,20 @@ The dispatch prompt includes **mandatory testing requirements** — not suggesti
 their output will be independently verified. The `CATALYST_ORCHESTRATOR_DIR` environment variable is
 set so workers know where to write their signal files.
 
+## Broker Integration
+
+Workers do **not** register filter interests by hand. Instead, each worker emits `agent.checkin`
+when it boots — including a `claimed_pr` field once the PR exists — and the
+[`catalyst-broker`](/observability/catalyst-broker/) daemon (CTL-303) auto-derives a
+`pr_lifecycle` interest from that identity record. When the worker shuts down (success or
+failure) it emits `agent.checkout`, and the broker auto-deregisters every interest it derived
+for that agent.
+
+This auto-correlation is what makes the worker's PR listen loop work without any manual
+`filter.register` plumbing. Workers can also subscribe to `ticket_lifecycle` to follow a Linear
+ticket's state changes, and to ad-hoc prose interests when they need richer routing — see the
+[`catalyst-broker` protocol reference](/observability/catalyst-broker/) for the wire format.
+
 ## Testing Enforcement (3 Layers)
 
 The orchestrator addresses a specific failure mode: **agents ship PRs with minimal tests and
@@ -656,8 +670,8 @@ cat ~/catalyst/events/*.jsonl | jq 'select(.event | startswith("github.pr")) | s
 # Linear issue state changes
 cat ~/catalyst/events/*.jsonl | jq 'select(.event | startswith("linear.issue.state"))'
 
-# All GitHub check suite completions for a specific PR
-cat ~/catalyst/events/*.jsonl | jq 'select(.event == "github.check_suite.completed") | select(.body.payload.prNumbers // [] | contains([87]))'
+# All GitHub check suite completions for a specific PR (canonical envelope, CTL-300)
+cat ~/catalyst/events/*.jsonl | jq 'select(.attributes."event.name" == "github.check_suite.completed") | select(.body.payload.prNumbers // [] | contains([87]))'
 ```
 :::
 
@@ -898,6 +912,7 @@ The monitor watches `~/catalyst/wt/` for orchestrator directories (matching `orc
 | GitHub API (`gh pr view`)              | PR state (open/merged/closed), merge timestamp     | Every 10 minutes (fallback when webhook not configured) |
 | Process table (`kill -0 <pid>`)        | Whether the worker's Claude process is still alive | Every 5 seconds            |
 | Orchestrator `state.json`              | Wave count, progress, attention items              | Instant (filesystem watch) |
+| Broker / forwarder pipeline (`catalyst-events tail`) | Canonical event stream — `agent.checkin/checkout`, `pr_lifecycle`, `ticket_lifecycle`, comms, webhooks | Real-time push (CTL-303 / CTL-306) |
 
 **Dead process detection:** If a worker's PID is recorded in its signal file but `kill -0` fails,
 the monitor marks it with a `!` indicator. This catches silently crashed workers that stopped

@@ -256,14 +256,52 @@ Never committed. One file per project, linked by `projectKey`.
 
 ### Integration Fields
 
-| Integration | Required Fields               | Used By                          |
-| ----------- | ----------------------------- | -------------------------------- |
-| Linear      | `apiToken`, `teamKey`         | catalyst-dev, catalyst-pm        |
-| Sentry      | `org`, `project`, `authToken` | catalyst-debugging               |
-| PostHog     | `apiKey`, `projectId`         | catalyst-analytics               |
-| Exa         | `apiKey`                      | catalyst-dev (external research) |
+| Integration | Required Fields               | Used By                                                     |
+| ----------- | ----------------------------- | ----------------------------------------------------------- |
+| Linear      | `apiToken`, `teamKey`         | catalyst-dev, catalyst-pm                                   |
+| Sentry      | `org`, `project`, `authToken` | catalyst-debugging                                          |
+| PostHog     | `apiKey`, `projectId`         | catalyst-analytics (read), `catalyst-otel-forward` (write)  |
+| Exa         | `apiKey`                      | catalyst-dev (external research)                            |
+| Groq        | `apiKey`                      | `catalyst-broker` (semantic-prose routing, CTL-303)         |
 
 Only configure the integrations you use. The setup script prompts for each one.
+
+### Broker (`catalyst.broker` / `groq`)
+
+The `catalyst-broker` daemon (CTL-303) is the local event broker that registered agents and skills
+wait on for relevant events. It evolved from the earlier `catalyst-filter` daemon — `catalyst-filter`
+remains as a backward-compat shim that delegates to `catalyst-broker` (CTL-315).
+
+Layer-2 secrets (`~/.config/catalyst/config-{projectKey}.json` or the cross-project
+`~/.config/catalyst/config.json`):
+
+```json
+{
+  "groq": {
+    "apiKey": "gsk_..."
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `groq.apiKey` | string | Groq API key used by `catalyst-broker` for semantic-prose classification of ambiguous events. Not required for deterministic routes (`pr_lifecycle`, `ticket_lifecycle`). Override with the `GROQ_API_KEY` env var. |
+
+Runtime files (created on demand under `$CATALYST_DIR`, default `~/catalyst/`):
+
+| Path | Purpose |
+|------|---------|
+| `~/catalyst/broker.pid` | Liveness PID file written by the daemon |
+| `~/catalyst/broker.log` | Pino structured log output (CTL-314) |
+| `~/catalyst/broker-interests.json` | Persistent interest registry |
+
+`LOG_LEVEL` (default `info`) controls broker log verbosity through pino (CTL-314). The same env
+var also gates verbosity in `catalyst-otel-forward`.
+
+On first start, `catalyst-broker` performs a one-shot rename from the legacy
+`~/catalyst/filter-interests.json` to `~/catalyst/broker-interests.json` if the legacy file
+exists. The startup line written to the event log was renamed from `filter.daemon.startup` to
+`broker.daemon.startup` at the same time; the legacy event name is no longer emitted.
 
 ### Monitor OTel Config
 
@@ -300,9 +338,13 @@ Cloud, Datadog, etc.), point these URLs at your hosted Prometheus/Loki-compatibl
 
 See [Setting up the OTel stack](/observability/setup/) for the full installation guide.
 
-### Forwarders (`catalyst.observability.forwarders`)
+### Forwarders (`catalyst.observability.forwarders`, CTL-306)
 
-Config lives in `~/.config/catalyst/config-{projectKey}.json` under `catalyst.observability.forwarders`.
+The `catalyst-otel-forward` daemon (CTL-306) tails the canonical event log
+(`~/catalyst/events/YYYY-MM.jsonl`) and fans events out to OTLP, PostHog, and Cloudflare
+Analytics Engine. Config lives in `~/.config/catalyst/config-{projectKey}.json` under
+`catalyst.observability.forwarders`; the daemon also reads the cross-project
+`~/.config/catalyst/config.json` as a fallback.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -322,7 +364,29 @@ Config lives in `~/.config/catalyst/config-{projectKey}.json` under `catalyst.ob
 | `forwarders.cloudflareAE.batchSize` | number | `100` | Max events per write batch |
 | `forwarders.cloudflareAE.flushIntervalMs` | number | `5000` | Flush interval in ms |
 
-See [Event Forwarding Reference](../../plugins/dev/references/event-forwarding.md) for full setup and operations guide.
+See [Event Forwarding](/observability/forwarder/) for full setup and operations guide.
+
+### Environment Variables
+
+A reference of the env vars Catalyst's daemons honor at runtime. File-based config wins unless
+the env var is set.
+
+| Variable | Daemon / scope | Description |
+|----------|----------------|-------------|
+| `CATALYST_DIR` | All | Base directory for runtime files. Default `~/catalyst/`. |
+| `LOG_LEVEL` | `catalyst-broker`, `catalyst-otel-forward` | Pino log level (CTL-314). Default `info`. |
+| `BROKER_PID_FILE` | `catalyst-broker` | Override broker PID path. Default `$CATALYST_DIR/broker.pid`. |
+| `BROKER_LOG_FILE` | `catalyst-broker` | Override broker log path. Default `$CATALYST_DIR/broker.log`. |
+| `GROQ_API_KEY` | `catalyst-broker` | Groq API key (overrides `groq.apiKey` in config). |
+| `FILTER_GROQ_MODEL` | `catalyst-broker` | Groq model for semantic-prose classification. Default `llama-3.1-8b-instant`. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `catalyst-otel-forward` | OTLP endpoint URL. Port `4317` is auto-rewritten to `4318` for HTTP transport. |
+| `OTEL_ENABLED`, `PROMETHEUS_URL`, `LOKI_URL` | `orch-monitor` | See [Monitor OTel Config](#monitor-otel-config). |
+| `MONITOR_PORT` | `orch-monitor` | HTTP port. Default `7400`. |
+| `CATALYST_SMEE_CHANNEL` | `orch-monitor` | Override `monitor.github.smeeChannel`. |
+| `CATALYST_DB_FILE` | All | SQLite session DB path. Default `$CATALYST_DIR/catalyst.db`. |
+| `CATALYST_ARCHIVE_ROOT` | `catalyst-archive` | Archive root. Default `$CATALYST_DIR/archives`. |
+| `CATALYST_RUNS_DIR` | `catalyst-archive` | Orchestrator runtime root. Default `$CATALYST_DIR/runs`. |
+| `CATALYST_COMMS_DIR` | `catalyst-comms` | Comms channel root. Default `$CATALYST_DIR/comms/channels`. |
 
 ### Monitor Webhook Config
 

@@ -9,7 +9,7 @@ When a Catalyst worker calls `catalyst-events wait-for`, it blocks until a speci
 in the unified log at `~/catalyst/events/YYYY-MM.jsonl`. This page explains exactly how an event
 gets from GitHub (or Linear) to that log so the waiting process wakes up.
 
-## The three paths
+## The paths in and out of the event log
 
 ```
 ┌─────────────┐
@@ -42,8 +42,31 @@ gets from GitHub (or Linear) to that log so the waiting process wakes up.
 └──────────────────┘   ~/catalyst/events/YYYY-MM.jsonl
 ```
 
-All three paths converge on the same monthly JSONL file. A worker using `catalyst-events wait-for`
-monitors that file regardless of which path produced the event.
+```
+┌──────────────────┐
+│ catalyst-broker  │ ──fs.watch on event log──> deterministic + Groq routing
+│ (CTL-303 daemon) │ ──filter.wake.<id> append──>
+└──────────────────┘   ~/catalyst/events/YYYY-MM.jsonl
+                                    │
+                       catalyst-events wait-for ──> registered agent wakes
+```
+
+```
+┌────────────────────────┐
+│ catalyst-otel-forward  │ ──byte-offset tail──>
+│ (CTL-306 daemon)       │   ~/catalyst/events/YYYY-MM.jsonl
+└────────────────────────┘
+            │
+            ├──> OTLP/HTTP collector
+            ├──> PostHog
+            └──> Cloudflare Analytics Engine
+```
+
+All inbound paths converge on the same monthly JSONL file. The broker daemon is both a
+**reader** (tails the log via `fs.watch`) and a **writer** (appends `filter.wake.<id>` events
+when a registered interest matches). The forwarder is a pure outbound consumer — it never
+writes back. Workers using `catalyst-events wait-for` monitor that file regardless of which
+path produced the event.
 
 ## Step-by-step: a GitHub PR merge
 
@@ -55,17 +78,30 @@ monitors that file regardless of which path produced the event.
 
 4. **orch-monitor verifies the HMAC signature.** Each delivery is signed by GitHub using the shared secret configured in the env var named by `catalyst.monitor.github.webhookSecretEnv` (default: `CATALYST_WEBHOOK_SECRET`). Deliveries that fail HMAC verification are dropped.
 
-5. **orch-monitor normalizes the event.** The webhook handler maps the raw GitHub payload to a v2 OTel-shaped envelope:
+5. **orch-monitor normalizes the event.** The webhook handler maps the raw GitHub payload to the
+   canonical OTel-shaped envelope (CTL-300). Filters use `.attributes."event.name"` — the
+   bare `.event` shorthand is absent. As of CTL-310, webhook-emitted events also carry a
+   top-level `traceId` so cross-service correlation against OTel traces is possible:
    ```json
    {
      "ts": "2026-05-01T14:22:01Z",
+     "severityText": "INFO",
+     "severityNumber": 9,
+     "traceId": "a1b2c3d4e5f6…",
+     "spanId": "1122334455667788",
      "attributes": {
        "event.name": "github.pr.merged",
+       "event.entity": "pr",
+       "event.action": "merged",
        "vcs.pr.number": 87,
        "vcs.revision": "abc123def"
      },
      "body": { "payload": { "...full webhook payload..." } },
-     "resource": { "service.name": "orch-monitor" }
+     "resource": {
+       "service.name": "orch-monitor",
+       "service.namespace": "catalyst",
+       "service.version": "8.1.0"
+     }
    }
    ```
 
@@ -81,7 +117,7 @@ If the smee tunnel is not configured, step 2 never happens. The orch-monitor fal
 
 Skills detect this automatically: the oneshot Phase 5 listen loop checks tunnel status before entering the event-driven path and switches to the REST fallback if the tunnel is not running.
 
-See [Setting up the webhook tunnel](./setup/#5-set-up-the-webhook-tunnel) to configure near-real-time delivery.
+See [Setting up the webhook tunnel](./setup/#7-set-up-the-webhook-tunnel) to configure near-real-time delivery.
 
 ## Linear webhook path
 
@@ -108,16 +144,57 @@ catalyst-state.sh event "$(jq -nc \
 ```
 
 These produce v1 envelopes (`.event` top-level field, no `.attributes`). `catalyst-events wait-for`
-handles both v1 and v2 shapes — the jq filter sees the raw line, so write filters that match the
-actual field location:
+handles both v1 and canonical shapes — the jq filter sees the raw line, so write filters that
+match the actual field location:
 
 ```bash
-# Match v1 worker-done
+# Match v1 worker-done (legacy)
 --filter '.event == "worker-done" and .worker == "CTL-48"'
 
-# Match v2 github.pr.merged
+# Match canonical github.pr.merged (CTL-300)
 --filter '.attributes."event.name" == "github.pr.merged"'
 ```
+
+## Canonical envelopes (CTL-300)
+
+All new emitters write the canonical shape — the webhook receiver
+(`lib/webhook-events.ts`), `catalyst-comms send`, `catalyst-broker`, `catalyst-session.sh`,
+and the OTel emit scripts under `plugins/dev/scripts/orch-monitor/lib/`. The shape mirrors
+OTel `LogRecord` so downstream forwarders can transcode to OTLP without translation:
+
+```json
+{
+  "ts": "2026-05-01T14:22:01Z",
+  "observedTs": "2026-05-01T14:22:01Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "spanId": "1122334455667788",
+  "parentSpanId": null,
+  "resource": {
+    "service.name": "orch-monitor",
+    "service.namespace": "catalyst",
+    "service.version": "8.1.0"
+  },
+  "attributes": {
+    "event.name": "github.pr.merged",
+    "event.entity": "pr",
+    "event.action": "merged",
+    "vcs.pr.number": 87,
+    "vcs.revision": "abc123def"
+  },
+  "body": {
+    "message": "PR #87 merged",
+    "payload": { "...full webhook payload..." }
+  }
+}
+```
+
+Top-level fields: `ts`, `observedTs`, `severityText`, `severityNumber`, `traceId`, `spanId`,
+`parentSpanId`, `resource`, `attributes`, `body`. The `.event` shorthand is absent — use
+`.attributes."event.name"`. The `traceId` is populated by webhook emitters as of CTL-310 and
+is derived deterministically from orchestrator/worker identifiers so any producer can compute
+the same ID without coordination.
 
 ## Replay on monitor startup
 

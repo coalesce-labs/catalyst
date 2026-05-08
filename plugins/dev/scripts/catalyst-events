@@ -21,6 +21,8 @@
 #   tail [--filter <jq>] [--since-line <N>]
 #   wait-for [--filter <jq>] [--timeout <sec>]
 #   build-orchestrator-filter <orch-dir>
+#   query <natural-language>     [--explain] [--limit N] [--since DURATION]
+#                                [--dsl '<json>']  (Groq-bypass, for tests)
 #   help
 
 set -uo pipefail
@@ -331,17 +333,108 @@ cmd_build_orchestrator_filter() {
   printf ')\n'
 }
 
+# Translate a natural-language query through Groq into a structured DSL,
+# compile it to a jq predicate, and run it against the current month's event
+# log. With --explain, prints the DSL + compiled jq and exits without running.
+# With --dsl '<json>', skips Groq entirely (used by tests and power users).
+cmd_query() {
+  local nl="" explain="" limit="" since="" dsl_override=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --explain) explain=1; shift ;;
+      --limit)   limit="$2"; shift 2 ;;
+      --since)   since="$2"; shift 2 ;;
+      --dsl)     dsl_override="$2"; shift 2 ;;
+      -h|--help) cmd_help; return 0 ;;
+      --*) echo "error: unknown query flag: $1" >&2; return 2 ;;
+      *)
+        if [[ -z "$nl" ]]; then
+          nl="$1"; shift
+        else
+          echo "error: too many positional arguments to query" >&2
+          return 2
+        fi
+        ;;
+    esac
+  done
+
+  if [[ -z "$nl" && -z "$dsl_override" ]]; then
+    echo "error: query requires a natural-language argument or --dsl" >&2
+    return 2
+  fi
+
+  # Resolve the compiler script path relative to this bash script.
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local cli="$script_dir/lib/dsl-cli.mjs"
+  if [[ ! -f "$cli" ]]; then
+    echo "error: dsl-cli.mjs not found at $cli" >&2
+    return 1
+  fi
+
+  local cli_args=()
+  [[ -n "$nl" ]] && cli_args+=(--query "$nl")
+  [[ -n "$dsl_override" ]] && cli_args+=(--dsl "$dsl_override")
+  [[ -n "$explain" ]] && cli_args+=(--explain)
+  [[ -n "$limit" ]] && cli_args+=(--limit "$limit")
+  [[ -n "$since" ]] && cli_args+=(--since "$since")
+
+  # `local var=$(cmd)` masks $? on some bash versions; capture rc explicitly.
+  local compile_out rc
+  compile_out=$(node "$cli" "${cli_args[@]}")
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    return $rc
+  fi
+
+  if [[ -n "$explain" ]]; then
+    # Pretty-print for human consumption when explain mode is requested.
+    echo "$compile_out" | jq .
+    return 0
+  fi
+
+  local predicate sort_jq limit_jq
+  predicate=$(echo "$compile_out" | jq -r '.jqPredicate')
+  sort_jq=$(echo "$compile_out" | jq -r '.jqSort // empty')
+  limit_jq=$(echo "$compile_out" | jq -r '.jqLimit // empty')
+
+  local file
+  file="$(events_file_path)"
+  [[ ! -s "$file" ]] && return 0
+
+  if [[ -n "$sort_jq" || -n "$limit_jq" ]]; then
+    # sort/limit need the full match set, so we slurp via -s. The pipeline:
+    # 1. apply_filter narrows to matches, 2. -s collects them into an array,
+    # 3. apply sort_by | reverse / limit, 4. .[] re-streams as one-per-line.
+    local post=""
+    [[ -n "$sort_jq" ]] && post="${sort_jq}"
+    if [[ -n "$limit_jq" ]]; then
+      [[ -n "$post" ]] && post="${post} | ${limit_jq}" || post="${limit_jq}"
+    fi
+    apply_filter "$predicate" < "$file" | jq -sc "${post} | .[]"
+  else
+    apply_filter "$predicate" < "$file"
+  fi
+}
+
 cmd_help() {
   cat <<'EOF'
-catalyst-events — tail and wait-for primitives over the global event log.
+catalyst-events — tail, wait-for, and natural-language query over the global event log.
 
 Usage:
   catalyst-events tail [--filter <jq-predicate>] [--since-line <N>]
   catalyst-events wait-for [--filter <jq-predicate>] [--timeout <sec>]
   catalyst-events build-orchestrator-filter <orch-dir>
+  catalyst-events query <natural-language> [--explain] [--limit N] [--since DURATION]
   catalyst-events help
 
 Examples:
+  # Natural-language query (uses Groq + GROQ_API_KEY)
+  catalyst-events query "errors in the last hour"
+  catalyst-events query "all PR events for ADV-292 and ADV-293" --explain
+  catalyst-events query --dsl '{"filter":{"field":"severityText","eq":"ERROR"}}'
+
   # Tail all GitHub events live
   catalyst-events tail --filter '.event | startswith("github.")'
 
@@ -370,9 +463,15 @@ Environment:
   CATALYST_EVENTS_FILE  override file path entirely (used by tests)
 
 Exit codes:
-  0   wait-for: matched a line
+  0   wait-for: matched a line; query: success (zero matches is not an error)
   1   wait-for: timed out
-  2   usage error
+  2   usage error (unknown flag, missing required arg, bad --timeout)
+  3   query: Groq HTTP / parse / refused error
+  4   query: DSL validation error (unknown field, bad operator)
+
+Environment for query:
+  GROQ_API_KEY   Groq API key (falls back to ~/.config/catalyst/config.json::groq.apiKey)
+  FILTER_GROQ_MODEL  Groq model override (default: llama-3.1-8b-instant)
 EOF
 }
 
@@ -383,6 +482,7 @@ main() {
     tail)                       cmd_tail "$@" ;;
     wait-for)                   cmd_wait_for "$@" ;;
     build-orchestrator-filter)  cmd_build_orchestrator_filter "$@" ;;
+    query)                      cmd_query "$@" ;;
     help|-h|--help)             cmd_help ;;
     *)
       echo "error: unknown command: $cmd" >&2
