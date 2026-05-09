@@ -69,7 +69,7 @@ export function formatEvent(event: CanonicalEvent): string {
     return c === "success" ? "ci pass" : "ci fail";
   }
   const label = EVENT_LABELS[name] ?? name;
-  return label.slice(0, 14);
+  return label.slice(0, 19);
 }
 
 export function formatRef(event: CanonicalEvent): string {
