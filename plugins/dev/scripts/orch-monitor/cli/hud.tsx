@@ -399,4 +399,11 @@ if (!process.stdin.isTTY) {
   process.exit(1);
 }
 
+// Enter the alternate screen buffer. This gives Ink a clean screen that starts
+// at (0,0), so the column header is always visible at the top regardless of any
+// discrepancy between process.stdout.rows and the actual Warp pane height.
+// process.on('exit') restores the normal screen on every exit path (q, Ctrl-C, crash).
+process.stdout.write("\x1b[?1049h\x1b[2J\x1b[H");
+process.on("exit", () => { process.stdout.write("\x1b[?1049l"); });
+
 render(<App repoFilter={repoFilter} predicate={predicate} sinceTs={sinceTs} />);
