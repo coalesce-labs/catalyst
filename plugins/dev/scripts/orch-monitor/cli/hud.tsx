@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { useState, useCallback, useEffect } from "react";
-import { render, useApp, useInput, useStdout, Box, Text } from "ink";
+import { render, useApp, useInput, Box, Text } from "ink";
 import { Header } from "./components/Header.tsx";
 import { EventList } from "./components/EventList.tsx";
 import { FilterInput } from "./components/FilterInput.tsx";
@@ -35,9 +35,23 @@ interface DslState {
 
 function App({ repoFilter, predicate, sinceTs }: AppProps) {
   const { exit } = useApp();
-  const { stdout } = useStdout();
-  const rows = stdout?.rows ?? 40;
-  const cols = stdout?.columns ?? 120;
+
+  // Track terminal dimensions as state so SIGWINCH + pane resizes trigger re-renders.
+  // We listen to both process.stdout 'resize' (most terminals) and SIGWINCH (Warp split panes).
+  const [rows, setRows] = useState(() => process.stdout.rows ?? 40);
+  const [cols, setCols] = useState(() => process.stdout.columns ?? 120);
+  useEffect(() => {
+    const update = () => {
+      setRows(process.stdout.rows ?? 40);
+      setCols(process.stdout.columns ?? 120);
+    };
+    process.stdout.on("resize", update);
+    process.on("SIGWINCH", update);
+    return () => {
+      process.stdout.off("resize", update);
+      process.off("SIGWINCH", update);
+    };
+  }, []);
 
   const { events, loading } = useEventLog({ repoFilter, predicate, sinceTs });
 
@@ -195,7 +209,7 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
   }
 
   return (
-    <Box flexDirection="column" height={rows}>
+    <Box flexDirection="column">
       <Header columns={cols} nlQuery={dslState?.nlQuery} />
       <EventList
         events={filtered}
