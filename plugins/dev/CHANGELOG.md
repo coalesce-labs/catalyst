@@ -1,5 +1,19 @@
 # Changelog
 
+## [8.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.3.0...catalyst-dev-v8.4.0) (2026-05-09)
+
+
+### Features
+
+* **dev:** event log analysis CLI — phase-time, stalls, ci-funnel (CTL-307) ([#523](https://github.com/coalesce-labs/catalyst/issues/523)) ([1f7158a](https://github.com/coalesce-labs/catalyst/commit/1f7158a407a54b49818885314216e7c222c09df0))
+* **dev:** natural-language event query for catalyst-events + TUI (CTL-313) ([#524](https://github.com/coalesce-labs/catalyst/issues/524)) ([0a8b235](https://github.com/coalesce-labs/catalyst/commit/0a8b23534c212e6940543b42cc401260df0d9d43))
+
+
+### Bug Fixes
+
+* **dev:** guard against legacy events crashing catalyst-hud ([#528](https://github.com/coalesce-labs/catalyst/issues/528)) ([f0bcf34](https://github.com/coalesce-labs/catalyst/commit/f0bcf343567c551b6425dfb558f25f7bfd21c4ce))
+* **dev:** orchestrate-verify uses `bun run test` not `bun test` (CTL-317) ([#531](https://github.com/coalesce-labs/catalyst/issues/531)) ([76fcbf8](https://github.com/coalesce-labs/catalyst/commit/76fcbf8c6ae93b203f16bd24b36ad5d1aefc70b9))
+
 ## [8.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.2.0...catalyst-dev-v8.3.0)
 
 May 08, 2026
