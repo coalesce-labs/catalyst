@@ -59,6 +59,7 @@ const HELP_LINES = [
   "",
   "Detail pane  (Enter to open/close)",
   "  j / k            scroll content     Esc           close",
+  "  n / p            next / prev event  (stays in detail — no need to close)",
   "",
   "Filters",
   "  /                substring filter — applies to all loaded events",
@@ -77,6 +78,23 @@ const HELP_LINES = [
 
 function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   const { exit } = useApp();
+
+  // Enter the alternate screen buffer after Ink initializes. Writing it before
+  // render() doesn't work because Ink's setup sequence resets terminal state.
+  // We enter here (post-mount), clear the screen, then emit a resize so Ink
+  // repaints the entire layout from (0,0) — making the header always visible.
+  useEffect(() => {
+    process.stdout.write("\x1b[?1049h\x1b[2J\x1b[H");
+    const onExit = () => { process.stdout.write("\x1b[?1049l"); };
+    process.on("exit", onExit);
+    // Let Ink settle, then force a full repaint onto the clean alternate screen.
+    const t = setTimeout(() => process.stdout.emit("resize"), 50);
+    return () => {
+      clearTimeout(t);
+      process.off("exit", onExit);
+      process.stdout.write("\x1b[?1049l");
+    };
+  }, []);
 
   // Track terminal dimensions as state so resize triggers re-renders.
   const [rows, setRows] = useState(() => process.stdout.rows ?? 40);
@@ -149,8 +167,8 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   };
 
   useEffect(() => {
-    if (showDetail) setDetailScrollTop(0);
-  }, [showDetail]);
+    setDetailScrollTop(0);
+  }, [selectedIndex]);
 
   useEffect(() => {
     if (showDslOverlay) setDslScrollTop(0);
@@ -158,15 +176,26 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
 
   const selectedEvent = filtered[selectedIndex] ?? null;
 
-  // Detail pane: up to half the screen, leaving at least 5 rows for the event list.
-  // border (2) + sticky title (1) + scroll indicator (1) = 4 overhead.
-  const maxDetailPaneRows = Math.max(10, Math.min(
-    Math.floor(layoutRows / 2),
-    layoutRows - chromeRows - 5,
-  ));
-  const detailPaneRows = showDetail && selectedEvent ? maxDetailPaneRows : 0;
+  // In detail mode, show a compact context window of rows around the selected event.
+  // The detail pane fills all remaining space (no half-screen cap).
+  const CONTEXT_ROWS = 5;
+  const CONTEXT_BEFORE = Math.floor(CONTEXT_ROWS / 2);
+  const inDetailMode = showDetail && !!selectedEvent;
+
+  const maxDetailPaneRows = inDetailMode
+    ? Math.max(10, layoutRows - chromeRows - CONTEXT_ROWS)
+    : Math.max(10, Math.min(Math.floor(layoutRows / 2), layoutRows - chromeRows - 5));
+  const detailPaneRows = inDetailMode ? maxDetailPaneRows : 0;
   const detailContentRows = Math.max(1, detailPaneRows - 4);
-  const listRows = Math.max(1, visibleRows - detailPaneRows);
+
+  // Context mode: always show CONTEXT_ROWS centered on selectedIndex.
+  // Normal mode: fill all available space.
+  const listRows = inDetailMode
+    ? Math.min(CONTEXT_ROWS, filtered.length)
+    : Math.max(1, visibleRows - detailPaneRows);
+  const listScrollOffset = inDetailMode
+    ? Math.max(0, Math.min(selectedIndex - CONTEXT_BEFORE, Math.max(0, filtered.length - CONTEXT_ROWS)))
+    : scrollOffset;
 
   const dslLines = dslState ? JSON.stringify(dslState.dsl, null, 2).split("\n") : [];
   const dslVisibleLines = Math.max(1, overlayHeight - 2);
@@ -258,6 +287,9 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     if (showDetail && !showDslOverlay) {
       if (input === "j" || key.downArrow) { setDetailScrollTop((t) => Math.min(maxDetailScroll, t + 1)); return; }
       if (input === "k" || key.upArrow) { setDetailScrollTop((t) => Math.max(0, t - 1)); return; }
+      // n/p: move to next/prev event without closing the detail pane (Gmail-style)
+      if (input === "n") { moveDown(); setDetailScrollTop(0); return; }
+      if (input === "p") { moveUp(); setDetailScrollTop(0); return; }
     }
 
     if (input === "j" || key.downArrow) { moveDown(); return; }
@@ -306,9 +338,10 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       <EventList
         events={filtered}
         selectedIndex={selectedIndex}
-        scrollOffset={scrollOffset}
+        scrollOffset={listScrollOffset}
         visibleRows={listRows}
         columns={cols}
+        compact={inDetailMode}
       />
       {showDetail && selectedEvent && (
         <DetailPane
@@ -398,12 +431,5 @@ if (!process.stdin.isTTY) {
   );
   process.exit(1);
 }
-
-// Enter the alternate screen buffer. This gives Ink a clean screen that starts
-// at (0,0), so the column header is always visible at the top regardless of any
-// discrepancy between process.stdout.rows and the actual Warp pane height.
-// process.on('exit') restores the normal screen on every exit path (q, Ctrl-C, crash).
-process.stdout.write("\x1b[?1049h\x1b[2J\x1b[H");
-process.on("exit", () => { process.stdout.write("\x1b[?1049l"); });
 
 render(<App repoFilter={repoFilter} predicate={predicate} sinceTs={sinceTs} />);

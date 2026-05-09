@@ -23,7 +23,11 @@ const LABEL_W = 14;
 export function buildDetailLines(event: CanonicalEvent, cols: number): Line[] {
   const attrs = event.attributes ?? {};
   const name = attrs["event.name"] ?? "(unknown)";
-  const ts = new Date(event.ts).toLocaleTimeString();
+  const d = new Date(event.ts);
+  const ts = d.toLocaleString(undefined, {
+    month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
   const sev = event.severityText ?? "INFO";
   const lines: Line[] = [];
 
@@ -100,7 +104,7 @@ function renderLine(line: Line, i: number, cols: number): React.ReactNode {
       return (
         <Box key={i} flexDirection="row" paddingX={1}>
           <Text bold color="white">{line.name.slice(0, nameW).padEnd(nameW)}</Text>
-          <Text dimColor>{line.ts.padStart(10)}</Text>
+          <Text color="cyan">{line.ts}</Text>
           <Text color={sevColor}>{`  ${line.sev}`}</Text>
         </Box>
       );

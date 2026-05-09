@@ -90,7 +90,7 @@ export function formatDetails(event: CanonicalEvent): string {
     const title = p["title"];
     if (typeof title === "string") return title;
     const body = p["body"];
-    if (typeof body === "string") return body.slice(0, 80);
+    if (typeof body === "string") return body.slice(0, 300);
   }
-  return msg.slice(0, 80);
+  return msg;
 }

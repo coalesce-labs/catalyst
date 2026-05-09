@@ -8,6 +8,7 @@ interface EventListProps {
   scrollOffset: number;
   visibleRows: number;
   columns: number;
+  compact?: boolean;
 }
 
 export function EventList({
@@ -16,11 +17,12 @@ export function EventList({
   scrollOffset,
   visibleRows,
   columns,
+  compact,
 }: EventListProps) {
   const visible = events.slice(scrollOffset, scrollOffset + visibleRows);
 
   return (
-    <Box flexDirection="column" flexGrow={1}>
+    <Box flexDirection="column" flexGrow={compact ? 0 : 1}>
       {visible.map((event, i) => (
         <EventRow
           key={`${event.ts}-${scrollOffset + i}`}
