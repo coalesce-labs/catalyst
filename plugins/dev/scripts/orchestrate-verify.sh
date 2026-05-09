@@ -221,7 +221,9 @@ else
   if [ -f "package.json" ]; then
     TEST_CMD=""
     if command -v bun >/dev/null 2>&1 && grep -q '"test"' package.json; then
-      TEST_CMD="bun test"
+      # `bun run test` defers to package.json#scripts.test (vitest, jest, etc).
+      # Bare `bun test` invokes Bun's native runner and hangs on vitest's `vi.*` mocks.
+      TEST_CMD="bun run test"
     elif grep -q '"test"' package.json; then
       TEST_CMD="npm test"
     fi
