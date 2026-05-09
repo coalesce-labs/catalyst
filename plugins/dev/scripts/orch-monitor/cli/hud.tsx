@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { render, useApp, useInput, Box, Text } from "ink";
 import { Header } from "./components/Header.tsx";
 import { EventList } from "./components/EventList.tsx";
@@ -33,37 +33,81 @@ interface DslState {
   nlQuery: string;
 }
 
-function App({ repoFilter, predicate, sinceTs }: AppProps) {
+/** Parse relative/absolute time specs like "24h", "7d", "30m", ISO dates. */
+function parseSinceSpec(raw: string): string | null {
+  const match = raw.match(/^(\d+)\s*(h|m|s|d|hour|min|minute|second|day)s?$/i);
+  if (match) {
+    const n = parseInt(match[1] ?? "0", 10);
+    const unit = (match[2] ?? "s").toLowerCase();
+    const ms = unit.startsWith("d") ? n * 86400000
+      : unit.startsWith("h") ? n * 3600000
+      : unit.startsWith("m") ? n * 60000
+      : n * 1000;
+    return new Date(Date.now() - ms).toISOString();
+  }
+  // Try parsing as an ISO date/datetime string
+  const d = new Date(raw);
+  if (!isNaN(d.getTime())) return d.toISOString();
+  return null;
+}
+
+const HELP_LINES = [
+  "Navigation",
+  "  j / ↓           next event         k / ↑         prev event",
+  "  PgDn             page down          PgUp          page up",
+  "  G                jump to newest (resume live tail)",
+  "",
+  "Detail pane  (Enter to open/close)",
+  "  j / k            scroll content     Esc           close",
+  "",
+  "Filters",
+  "  /                substring filter — applies to all loaded events",
+  "  :                natural-language query via Groq (needs GROQ_API_KEY)",
+  "  :since 24h       reload events from last 24 h  (also: 7d, 2h, 30m, ISO date)",
+  "  ?                show/hide the generated DSL from last query",
+  "  Esc              clear active filter / close overlay",
+  "",
+  "Pivot — narrow to related events",
+  "  t                pivot to all events sharing this event's trace ID",
+  "  o                pivot to all events from this event's orchestrator",
+  "  r                reset pivot (show all events)",
+  "",
+  "  h                this help          q / Ctrl-C    quit",
+];
+
+function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   const { exit } = useApp();
 
-  // Track terminal dimensions as state so SIGWINCH + pane resizes trigger re-renders.
+  // Track terminal dimensions as state so resize triggers re-renders.
   const [rows, setRows] = useState(() => process.stdout.rows ?? 40);
   const [cols, setCols] = useState(() => process.stdout.columns ?? 120);
+  const firstRender = useRef(true);
   useEffect(() => {
     const update = () => {
       setRows(process.stdout.rows ?? 40);
       setCols(process.stdout.columns ?? 120);
     };
     process.stdout.on("resize", update);
-    // In Bun, SIGWINCH does not automatically emit 'resize' on stdout (unlike Node.js).
-    // Forward it manually so Ink's renderer also does a full clear+redraw.
-    const onSigwinch = () => {
-      update();
-      process.stdout.emit("resize");
-    };
-    process.on("SIGWINCH", onSigwinch);
+    process.on("SIGWINCH", update);
     return () => {
       process.stdout.off("resize", update);
-      process.off("SIGWINCH", onSigwinch);
+      process.off("SIGWINCH", update);
     };
   }, []);
+  // After our state settles, tell Ink to do a full clear+redraw. Skip first mount.
+  useEffect(() => {
+    if (firstRender.current) { firstRender.current = false; return; }
+    process.stdout.emit("resize");
+  }, [rows, cols]);
 
-  // Warp split panes render their title bar inside the pty, consuming 1 row that
-  // process.stdout.rows does not account for. Subtract 2 as a safe margin so
-  // content never overflows into terminal scrollback.
+  // Warp split panes render their title bar inside the pty, so process.stdout.rows
+  // is 1-2 rows larger than the visible area. Subtract 2 as a safe margin.
   const layoutRows = Math.max(10, rows - 2);
 
-  const { events, loading } = useEventLog({ repoFilter, predicate, sinceTs });
+  // Interactive since — can be changed via `:since 24h` without restarting.
+  const [activeSinceTs, setActiveSinceTs] = useState(initSinceTs);
+
+  const { events, loading } = useEventLog({ repoFilter, predicate, sinceTs: activeSinceTs });
 
   const [dslState, setDslState] = useState<DslState | null>(null);
   const dslPredicate: DslPredicate = dslState?.jsPredicate ?? null;
@@ -72,13 +116,15 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
   // Header = column row (1) + separator (1) + optional nlQuery row (0 or 1)
   const headerRows = dslState?.nlQuery ? 3 : 2;
 
-  // DSL overlay takes up a portion of the screen when open
   const [showDslOverlay, setShowDslOverlay] = useState(false);
   const [dslScrollTop, setDslScrollTop] = useState(0);
   const overlayHeight = showDslOverlay && dslState ? Math.min(14, Math.floor(layoutRows / 2)) : 0;
 
-  // chrome = header + status(1) + filter(1) + query(1) + overlay
-  const chromeRows = headerRows + 3 + overlayHeight;
+  const [showHelp, setShowHelp] = useState(false);
+  const helpHeight = showHelp ? HELP_LINES.length + 2 : 0; // +2 for border
+
+  // chrome = header + status(1) + filter(1) + query(1) + overlays
+  const chromeRows = headerRows + 3 + overlayHeight + helpHeight;
   const visibleRows = Math.max(1, layoutRows - chromeRows);
 
   const { selectedIndex, scrollOffset, moveUp, moveDown, pageUp, pageDown, jumpToBottom, autoFollow } =
@@ -93,34 +139,40 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
   const [showDetail, setShowDetail] = useState(false);
   const [detailScrollTop, setDetailScrollTop] = useState(0);
 
-  // Reset detail scroll position whenever detail opens
+  // Brief transient status message (cleared after 3s)
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showStatus = (msg: string) => {
+    if (statusTimer.current) clearTimeout(statusTimer.current);
+    setStatusMsg(msg);
+    statusTimer.current = setTimeout(() => setStatusMsg(null), 3000);
+  };
+
   useEffect(() => {
     if (showDetail) setDetailScrollTop(0);
   }, [showDetail]);
 
-  // Reset DSL scroll when overlay opens
   useEffect(() => {
     if (showDslOverlay) setDslScrollTop(0);
   }, [showDslOverlay]);
 
   const selectedEvent = filtered[selectedIndex] ?? null;
 
-  // Detail pane: use up to half the screen, leaving at least 5 rows for the event list.
+  // Detail pane: up to half the screen, leaving at least 5 rows for the event list.
   // border (2) + sticky title (1) + scroll indicator (1) = 4 overhead.
   const maxDetailPaneRows = Math.max(10, Math.min(
     Math.floor(layoutRows / 2),
     layoutRows - chromeRows - 5,
   ));
   const detailPaneRows = showDetail && selectedEvent ? maxDetailPaneRows : 0;
-  const detailContentRows = Math.max(1, detailPaneRows - 4); // -4 for border+title+indicator overhead
+  const detailContentRows = Math.max(1, detailPaneRows - 4);
   const listRows = Math.max(1, visibleRows - detailPaneRows);
 
-  // DSL overlay scroll bounds
   const dslLines = dslState ? JSON.stringify(dslState.dsl, null, 2).split("\n") : [];
-  const dslVisibleLines = Math.max(1, overlayHeight - 2); // border overhead
+  const dslVisibleLines = Math.max(1, overlayHeight - 2);
   const maxDslScroll = Math.max(0, dslLines.length - dslVisibleLines);
 
-  // Detail pane scroll bounds (title row is sticky, so scrollable = detailLines minus title)
+  // title row is sticky in DetailPane, so scrollable = detailLines minus the title
   const detailLines = selectedEvent ? buildDetailLines(selectedEvent, cols) : [];
   const maxDetailScroll = Math.max(0, (detailLines.length - 1) - detailContentRows);
 
@@ -129,6 +181,24 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
     if (!text) return;
     setQuerySubmitting(true);
     setQueryError(null);
+
+    // :since <spec> — reload events from a different point in time
+    const sinceMatch = text.match(/^since\s+(.+)/i);
+    if (sinceMatch) {
+      const spec = (sinceMatch[1] ?? "").trim();
+      const parsed = parseSinceSpec(spec);
+      if (parsed) {
+        setActiveSinceTs(parsed);
+        setQueryFocused(false);
+        setQueryText("");
+        showStatus(`reloaded from ${spec}`);
+      } else {
+        setQueryError(`can't parse "${spec}" — try "24h", "7d", "2h", "30m", or an ISO date`);
+      }
+      setQuerySubmitting(false);
+      return;
+    }
+
     try {
       const apiKey = process.env["GROQ_API_KEY"] || readGroqApiKeyFromConfig();
       const dsl = await groqTranslate(text, { apiKey, systemPrompt: SYSTEM_PROMPT });
@@ -152,7 +222,7 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
     } finally {
       setQuerySubmitting(false);
     }
-  }, []);
+  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
 
   useInput((input, key) => {
     if (queryFocused) {
@@ -165,6 +235,7 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
     }
 
     if (key.escape) {
+      if (showHelp) { setShowHelp(false); return; }
       if (showDetail) { setShowDetail(false); return; }
       if (showDslOverlay) { setShowDslOverlay(false); return; }
       setPivot(null);
@@ -175,29 +246,20 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
     }
     if (input === "q" || (key.ctrl && input === "c")) { exit(); return; }
 
-    // Panel scroll takes priority over list navigation
-    if (showDslOverlay) {
-      if (input === "j" || key.downArrow) {
-        setDslScrollTop((t) => Math.min(maxDslScroll, t + 1));
-        return;
-      }
-      if (input === "k" || key.upArrow) {
-        setDslScrollTop((t) => Math.max(0, t - 1));
-        return;
-      }
-    }
-    if (showDetail && !showDslOverlay) {
-      if (input === "j" || key.downArrow) {
-        setDetailScrollTop((t) => Math.min(maxDetailScroll, t + 1));
-        return;
-      }
-      if (input === "k" || key.upArrow) {
-        setDetailScrollTop((t) => Math.max(0, t - 1));
-        return;
-      }
+    if (showHelp) {
+      if (input === "h") { setShowHelp(false); return; }
+      return; // swallow all keys while help is open
     }
 
-    // List navigation
+    if (showDslOverlay) {
+      if (input === "j" || key.downArrow) { setDslScrollTop((t) => Math.min(maxDslScroll, t + 1)); return; }
+      if (input === "k" || key.upArrow) { setDslScrollTop((t) => Math.max(0, t - 1)); return; }
+    }
+    if (showDetail && !showDslOverlay) {
+      if (input === "j" || key.downArrow) { setDetailScrollTop((t) => Math.min(maxDetailScroll, t + 1)); return; }
+      if (input === "k" || key.upArrow) { setDetailScrollTop((t) => Math.max(0, t - 1)); return; }
+    }
+
     if (input === "j" || key.downArrow) { moveDown(); return; }
     if (input === "k" || key.upArrow) { moveUp(); return; }
     if (key.pageDown) { pageDown(); return; }
@@ -205,18 +267,33 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
     if (input === "G") { jumpToBottom(); return; }
     if (input === "/") { setFilterFocused(true); return; }
     if (input === ":") { setQueryFocused(true); setQueryError(null); return; }
+    if (input === "h") { setShowHelp(true); return; }
     if (input === "?" && dslState) { setShowDslOverlay((v) => !v); return; }
     if (key.return) { setShowDetail((v) => !v); return; }
-    if (input === "t" && selectedEvent?.traceId) {
-      setPivot({ type: "trace", id: selectedEvent.traceId });
+    if (input === "t") {
+      if (selectedEvent?.traceId) {
+        setPivot({ type: "trace", id: selectedEvent.traceId });
+        showStatus(`pivoted to trace ${selectedEvent.traceId.slice(0, 16)}…`);
+      } else {
+        showStatus("no trace ID on this event");
+      }
       return;
     }
     if (input === "o") {
-      const orchId = selectedEvent?.attributes["catalyst.orchestrator.id"];
-      if (orchId) setPivot({ type: "orch", id: orchId });
+      const orchId = selectedEvent?.attributes["catalyst.orchestrator.id"] as string | undefined;
+      if (orchId) {
+        setPivot({ type: "orch", id: orchId });
+        showStatus(`pivoted to orchestrator ${orchId}`);
+      } else {
+        showStatus("no orchestrator ID on this event");
+      }
       return;
     }
-    if (input === "r") { setPivot(null); return; }
+    if (input === "r") {
+      setPivot(null);
+      showStatus("pivot cleared");
+      return;
+    }
   });
 
   if (loading) {
@@ -246,13 +323,22 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
           ? <Text color="green">{"  [LIVE]"}</Text>
           : <Text dimColor>{"  [PAUSED — G to follow]"}</Text>
         }
-        {pivot && <Text color="cyan">{`  [${pivot.type} pivot — r reset]`}</Text>}
+        {pivot && <Text color="cyan">{`  [${pivot.type} pivot: ${pivot.id.slice(0, 14)}… — r:reset]`}</Text>}
+        {statusMsg && <Text color="yellow">{`  ${statusMsg}`}</Text>}
       </Box>
       {showDslOverlay && dslState && (
         <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
           <Text color="magenta" bold>{`Generated DSL · j/k scroll · ? to hide (${dslScrollTop + 1}/${dslLines.length}):`}</Text>
           {dslLines.slice(dslScrollTop, dslScrollTop + dslVisibleLines).map((line, i) => (
             <Text key={i} dimColor={i > 0}>{line}</Text>
+          ))}
+        </Box>
+      )}
+      {showHelp && (
+        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Text color="cyan" bold>{"Keybindings — h or Esc to close"}</Text>
+          {HELP_LINES.map((line, i) => (
+            <Text key={i} dimColor={!line.startsWith("  ")}>{line || " "}</Text>
           ))}
         </Box>
       )}
@@ -292,34 +378,15 @@ for (let i = 0; i < args.length; i++) {
     i++;
   } else if (arg === "--since" && next) {
     i++;
-    const raw = next;
-    const match = raw.match(/^(\d+)\s*(h|m|s|hour|min|minute|second)s?$/i);
-    if (match) {
-      const n = parseInt(match[1] ?? "0", 10);
-      const unit = (match[2] ?? "s").toLowerCase();
-      const ms = unit.startsWith("h") ? n * 3600000 : unit.startsWith("m") ? n * 60000 : n * 1000;
-      sinceTs = new Date(Date.now() - ms).toISOString();
-    } else {
-      sinceTs = raw;
-    }
+    const parsed = parseSinceSpec(next);
+    sinceTs = parsed ?? next;
   } else if (arg === "--since-line") {
     i++;
   } else if (arg === "--help" || arg === "-h") {
     console.info("Usage: catalyst-hud [--repo PATTERN] [--since TIME] [--filter JQ]");
     console.info("");
-    console.info("Keybindings:");
-    console.info("  ↑/↓ or j/k   move selection (scroll detail/DSL when pane open)");
-    console.info("  PgUp/PgDn    page through history");
-    console.info("  Enter        toggle detail pane");
-    console.info("  G            jump to newest event (resume live tail)");
-    console.info("  /            focus substring filter");
-    console.info("  :            focus natural-language query (Groq)");
-    console.info("  ?            toggle generated DSL overlay");
-    console.info("  Esc          close pane / clear filter / drop DSL filter");
-    console.info("  t            pivot to selected event's traceId");
-    console.info("  o            pivot to selected event's orchestratorId");
-    console.info("  r            clear pivot");
-    console.info("  q            quit");
+    console.info("Press h inside the HUD for interactive keybinding help.");
+    console.info("TIME examples: 24h  7d  2h  30m  2026-05-01");
     process.exit(0);
   }
 }

@@ -13,8 +13,8 @@ export function Header({ columns = 120, nlQuery }: HeaderProps) {
         <Text bold color="cyan">{"TIME      "}</Text>
         <Text bold color="cyan">{"REPO        "}</Text>
         <Text bold color="cyan">{"SOURCE              "}</Text>
-        <Text bold color="cyan">{"EVENT               "}</Text>
-        <Text bold color="cyan">{"REF           "}</Text>
+        <Text bold color="cyan">{"EVENT           "}</Text>
+        <Text bold color="cyan">{"REF       "}</Text>
         <Text bold color="cyan">{"DETAILS"}</Text>
       </Box>
       <Text dimColor>{sep}</Text>
