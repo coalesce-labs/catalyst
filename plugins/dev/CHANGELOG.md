@@ -1,16 +1,21 @@
 # Changelog
 
-## [8.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.3.0...catalyst-dev-v8.4.0) (2026-05-09)
+## [8.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.3.0...catalyst-dev-v8.4.0)
+
+May 09, 2026
+
+<!-- ai-enhanced -->
+
+### Event Log Analysis CLI
+
+Query your event logs using either technical filters or plain English — get phase timing breakdowns, identify orchestration stalls, and analyze CI funnels from JSONL logs. Natural language queries like "show errors in the last hour" are translated to structured filters via Claude and work in both the CLI and live TUI. Legacy event formats are now handled gracefully to prevent the catalyst-hud loading hang.
 
 
-### Features
+
+### PRs
 
 * **dev:** event log analysis CLI — phase-time, stalls, ci-funnel (CTL-307) ([#523](https://github.com/coalesce-labs/catalyst/issues/523)) ([1f7158a](https://github.com/coalesce-labs/catalyst/commit/1f7158a407a54b49818885314216e7c222c09df0))
 * **dev:** natural-language event query for catalyst-events + TUI (CTL-313) ([#524](https://github.com/coalesce-labs/catalyst/issues/524)) ([0a8b235](https://github.com/coalesce-labs/catalyst/commit/0a8b23534c212e6940543b42cc401260df0d9d43))
-
-
-### Bug Fixes
-
 * **dev:** guard against legacy events crashing catalyst-hud ([#528](https://github.com/coalesce-labs/catalyst/issues/528)) ([f0bcf34](https://github.com/coalesce-labs/catalyst/commit/f0bcf343567c551b6425dfb558f25f7bfd21c4ce))
 * **dev:** orchestrate-verify uses `bun run test` not `bun test` (CTL-317) ([#531](https://github.com/coalesce-labs/catalyst/issues/531)) ([76fcbf8](https://github.com/coalesce-labs/catalyst/commit/76fcbf8c6ae93b203f16bd24b36ad5d1aefc70b9))
 
