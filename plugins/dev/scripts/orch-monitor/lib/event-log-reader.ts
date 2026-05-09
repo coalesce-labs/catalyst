@@ -16,6 +16,7 @@ import {
   openSync,
   readSync,
   closeSync,
+  watch,
 } from "node:fs";
 import { join } from "node:path";
 import { createFilterStream } from "./event-filter";
@@ -65,12 +66,10 @@ export interface TailEventLogOpts {
   predicate: string;
   signal: AbortSignal;
   onEvent: (line: string) => void;
-  pollMs?: number;
   now?: () => Date;
 }
 
 export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
-  const pollMs = opts.pollMs ?? 200;
   const nowFn = opts.now ?? (() => new Date());
 
   if (opts.signal.aborted) return;
@@ -82,56 +81,93 @@ export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
   // Seek to EOF — we only emit *new* lines.
   let offset = existsSync(currentPath) ? statSync(currentPath).size : 0;
 
-  try {
-    while (!opts.signal.aborted) {
-      // Detect month rollover
-      const expectedPath = monthlyPath(opts.catalystDir, nowFn());
-      if (expectedPath !== currentPath) {
-        currentPath = expectedPath;
-        offset = 0;
-      }
-
-      if (existsSync(currentPath)) {
-        const size = statSync(currentPath).size;
-        if (size > offset) {
-          const fd = openSync(currentPath, "r");
-          const len = size - offset;
-          const buf = Buffer.alloc(len);
-          try {
-            readSync(fd, buf, 0, len, offset);
-          } finally {
-            closeSync(fd);
-          }
-          offset = size;
-
-          const text = buf.toString("utf8");
-          const lines = text.split("\n").filter((l) => l.length > 0);
-          for (const l of lines) stream.write(l);
-          await stream.flush();
-        } else if (size < offset) {
-          // File truncated/replaced — restart from beginning
-          offset = 0;
-        }
-      }
-
-      // Sleep with abort responsiveness
-      await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, pollMs);
-        const onAbort = (): void => {
-          clearTimeout(t);
-          resolve();
-        };
-        if (opts.signal.aborted) {
-          clearTimeout(t);
-          resolve();
-          return;
-        }
-        opts.signal.addEventListener("abort", onAbort, { once: true });
-      });
+  async function drainNewBytes(): Promise<void> {
+    // Detect month rollover
+    const expectedPath = monthlyPath(opts.catalystDir, nowFn());
+    if (expectedPath !== currentPath) {
+      currentPath = expectedPath;
+      offset = 0;
     }
-  } finally {
-    stream.close();
+
+    if (!existsSync(currentPath)) return;
+    const size = statSync(currentPath).size;
+    if (size < offset) {
+      // File truncated/replaced — restart from beginning
+      offset = 0;
+    }
+    if (size <= offset) return;
+
+    const fd = openSync(currentPath, "r");
+    const len = size - offset;
+    const buf = Buffer.alloc(len);
+    try {
+      readSync(fd, buf, 0, len, offset);
+    } finally {
+      closeSync(fd);
+    }
+    offset = size;
+
+    const lines = buf.toString("utf8").split("\n").filter((l) => l.length > 0);
+    for (const l of lines) stream.write(l);
+    await stream.flush();
   }
+
+  // Use fs.watch (kqueue on macOS, inotify on Linux) for instant notifications.
+  // Fall back to 500ms polling if the file doesn't exist yet (watcher can only
+  // watch existing paths) or if the OS watch fails.
+  return new Promise<void>((resolve) => {
+    let watcher: ReturnType<typeof watch> | null = null;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      watcher?.close();
+      if (pollTimer !== null) clearTimeout(pollTimer);
+      stream.close();
+      resolve();
+    };
+
+    opts.signal.addEventListener("abort", cleanup, { once: true });
+
+    const onFileChange = () => {
+      if (opts.signal.aborted) return;
+      void drainNewBytes();
+    };
+
+    const startWatcher = () => {
+      if (opts.signal.aborted || settled) return;
+      if (!existsSync(currentPath)) {
+        // File not yet created — poll until it appears, then switch to watch
+        pollTimer = setTimeout(() => {
+          pollTimer = null;
+          startWatcher();
+        }, 500);
+        return;
+      }
+      try {
+        watcher = watch(currentPath, onFileChange);
+        watcher.on("error", () => {
+          // If watch fails (e.g. on some network filesystems), fall back to polling
+          watcher = null;
+          pollTimer = setTimeout(() => {
+            pollTimer = null;
+            void drainNewBytes();
+            startWatcher();
+          }, 500);
+        });
+      } catch {
+        pollTimer = setTimeout(() => {
+          pollTimer = null;
+          void drainNewBytes();
+          startWatcher();
+        }, 500);
+      }
+    };
+
+    startWatcher();
+  });
 }
 
 export interface TunnelEventStats {
