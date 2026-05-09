@@ -132,17 +132,22 @@ export function DetailPane({ event, scrollTop, maxHeight }: DetailPaneProps) {
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 120;
   const lines = buildDetailLines(event, cols);
-  const totalLines = lines.length;
+
+  // First line is always the title — pin it so it stays visible while scrolling.
+  const titleLine = lines[0];
+  const scrollable = lines.slice(1);
+  const totalScrollable = scrollable.length;
   const canUp = scrollTop > 0;
-  const canDown = scrollTop + maxHeight < totalLines;
-  const visible = lines.slice(scrollTop, scrollTop + maxHeight);
+  const canDown = scrollTop + maxHeight < totalScrollable;
+  const visible = scrollable.slice(scrollTop, scrollTop + maxHeight);
 
   return (
     <Box flexDirection="column" borderStyle="single" borderColor="gray">
+      {titleLine && renderLine(titleLine, -1, cols)}
       {visible.map((line, i) => renderLine(line, i, cols))}
       {(canUp || canDown) && (
         <Text dimColor>
-          {`  ${canUp ? "↑" : " "} ${scrollTop + 1}–${Math.min(scrollTop + maxHeight, totalLines)}/${totalLines} ${canDown ? "↓" : " "}`}
+          {`  ${canUp ? "↑" : " "} ${scrollTop + 1}–${Math.min(scrollTop + maxHeight, totalScrollable)}/${totalScrollable} ${canDown ? "↓" : " "}`}
         </Text>
       )}
     </Box>

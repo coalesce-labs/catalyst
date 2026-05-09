@@ -37,7 +37,6 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
   const { exit } = useApp();
 
   // Track terminal dimensions as state so SIGWINCH + pane resizes trigger re-renders.
-  // We listen to both process.stdout 'resize' (most terminals) and SIGWINCH (Warp split panes).
   const [rows, setRows] = useState(() => process.stdout.rows ?? 40);
   const [cols, setCols] = useState(() => process.stdout.columns ?? 120);
   useEffect(() => {
@@ -46,12 +45,23 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
       setCols(process.stdout.columns ?? 120);
     };
     process.stdout.on("resize", update);
-    process.on("SIGWINCH", update);
+    // In Bun, SIGWINCH does not automatically emit 'resize' on stdout (unlike Node.js).
+    // Forward it manually so Ink's renderer also does a full clear+redraw.
+    const onSigwinch = () => {
+      update();
+      process.stdout.emit("resize");
+    };
+    process.on("SIGWINCH", onSigwinch);
     return () => {
       process.stdout.off("resize", update);
-      process.off("SIGWINCH", update);
+      process.off("SIGWINCH", onSigwinch);
     };
   }, []);
+
+  // Warp split panes render their title bar inside the pty, consuming 1 row that
+  // process.stdout.rows does not account for. Subtract 2 as a safe margin so
+  // content never overflows into terminal scrollback.
+  const layoutRows = Math.max(10, rows - 2);
 
   const { events, loading } = useEventLog({ repoFilter, predicate, sinceTs });
 
@@ -65,11 +75,11 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
   // DSL overlay takes up a portion of the screen when open
   const [showDslOverlay, setShowDslOverlay] = useState(false);
   const [dslScrollTop, setDslScrollTop] = useState(0);
-  const overlayHeight = showDslOverlay && dslState ? Math.min(14, Math.floor(rows / 2)) : 0;
+  const overlayHeight = showDslOverlay && dslState ? Math.min(14, Math.floor(layoutRows / 2)) : 0;
 
   // chrome = header + status(1) + filter(1) + query(1) + overlay
   const chromeRows = headerRows + 3 + overlayHeight;
-  const visibleRows = Math.max(1, rows - chromeRows);
+  const visibleRows = Math.max(1, layoutRows - chromeRows);
 
   const { selectedIndex, scrollOffset, moveUp, moveDown, pageUp, pageDown, jumpToBottom, autoFollow } =
     useSelection(filtered.length, visibleRows);
@@ -95,9 +105,14 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
 
   const selectedEvent = filtered[selectedIndex] ?? null;
 
-  // Detail pane height budget: border (2) + scroll indicator (1) = 3 overhead
-  const detailPaneRows = showDetail && selectedEvent ? Math.min(18, Math.floor(rows / 3) + 1) : 0;
-  const detailContentRows = Math.max(1, detailPaneRows - 3);
+  // Detail pane: use up to half the screen, leaving at least 5 rows for the event list.
+  // border (2) + sticky title (1) + scroll indicator (1) = 4 overhead.
+  const maxDetailPaneRows = Math.max(10, Math.min(
+    Math.floor(layoutRows / 2),
+    layoutRows - chromeRows - 5,
+  ));
+  const detailPaneRows = showDetail && selectedEvent ? maxDetailPaneRows : 0;
+  const detailContentRows = Math.max(1, detailPaneRows - 4); // -4 for border+title+indicator overhead
   const listRows = Math.max(1, visibleRows - detailPaneRows);
 
   // DSL overlay scroll bounds
@@ -105,9 +120,9 @@ function App({ repoFilter, predicate, sinceTs }: AppProps) {
   const dslVisibleLines = Math.max(1, overlayHeight - 2); // border overhead
   const maxDslScroll = Math.max(0, dslLines.length - dslVisibleLines);
 
-  // Detail pane scroll bounds
+  // Detail pane scroll bounds (title row is sticky, so scrollable = detailLines minus title)
   const detailLines = selectedEvent ? buildDetailLines(selectedEvent, cols) : [];
-  const maxDetailScroll = Math.max(0, detailLines.length - detailContentRows);
+  const maxDetailScroll = Math.max(0, (detailLines.length - 1) - detailContentRows);
 
   const submitQuery = useCallback(async (raw: string) => {
     const text = raw.trim();
