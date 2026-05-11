@@ -1,7 +1,7 @@
 {
   "name": "catalyst-pm",
   "version": "6.1.0",
-  "description": "Comprehensive product management toolkit: PM skills, PRD workflows, analytics, reporting, and Linear integration",
+  "description": "Product strategy toolkit — PRDs, strategy docs, priorities, and release planning",
   "author": {
     "name": "Coalesce Labs",
     "email": "hello@coalesce.dev",
@@ -10,16 +10,14 @@
   "homepage": "https://github.com/coalesce-labs/catalyst",
   "repository": "https://github.com/coalesce-labs/catalyst.git",
   "keywords": [
-    "project-management",
-    "linear",
-    "cycles",
-    "milestones",
-    "backlog",
-    "analytics",
-    "pm",
+    "product-management",
+    "strategy",
     "prd",
-    "skills",
-    "posthog"
+    "north-star",
+    "priorities",
+    "decisions",
+    "launch",
+    "release"
   ],
   "license": "MIT",
   "agents": [

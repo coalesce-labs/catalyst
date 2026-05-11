@@ -30,27 +30,20 @@ Agents are specialized roles that skills delegate to. Each agent has a focused j
 
 ## catalyst-pm Agents
 
-### Research Agents
-
 | Agent | Purpose | Model | Source |
 |-------|---------|-------|--------|
 | `linear-research` | Gather cycle, issue, and milestone data | Haiku | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/linear-research.md) |
 
-### Analyzer Agents
+> Analyzer agents (cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer) moved to **[catalyst-pm-ops](#catalyst-pm-ops-agents)**.
+
+## catalyst-pm-ops Agents
 
 | Agent | Purpose | Model | Source |
 |-------|---------|-------|--------|
-| `cycle-analyzer` | Transform cycle data into health insights | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/cycle-analyzer.md) |
-| `milestone-analyzer` | Analyze milestone progress toward target dates | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/milestone-analyzer.md) |
-| `backlog-analyzer` | Analyze backlog health and organization | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/backlog-analyzer.md) |
-| `github-linear-analyzer` | Correlate GitHub PRs with Linear issues | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/github-linear-analyzer.md) |
-| `context-analyzer` | Track context engineering adoption | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/context-analyzer.md) |
-| `calendar-analyzer` | Summarize calendar data for planning sessions | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/calendar-analyzer.md) |
-| `code-classifier` | Classify code changes for release notes and reporting | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/code-classifier.md) |
-| `github-metrics` | Aggregate GitHub activity metrics | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/github-metrics.md) |
-| `health-scorer` | Score project health across multiple signals | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/health-scorer.md) |
-| `linear-metrics` | Aggregate Linear velocity and throughput metrics | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/linear-metrics.md) |
-| `thoughts-metrics` | Aggregate thoughts-repo activity metrics | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/agents/thoughts-metrics.md) |
+| `cycle-analyzer` | Transform cycle data into health insights | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/agents/cycle-analyzer.md) |
+| `milestone-analyzer` | Analyze milestone progress toward target dates | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/agents/milestone-analyzer.md) |
+| `backlog-analyzer` | Analyze backlog health and organization | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/agents/backlog-analyzer.md) |
+| `github-linear-analyzer` | Correlate GitHub PRs with Linear issues | Sonnet | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/agents/github-linear-analyzer.md) |
 
 ## When to Use Which Agent
 

@@ -141,103 +141,42 @@ The core development plugin. Skills covering research, planning, implementation,
 
 ## catalyst-pm
 
-Project management workflows. 46 skills covering strategy, research, planning, and reporting.
+Product strategy toolkit. 12 skills covering PRDs, strategy docs, priorities, and release planning.
 
-### Reporting & Analysis
+> Skills for cycle health, backlog ops, cadence, and Slack live in **[catalyst-pm-ops](/plugins/#catalyst-pm-ops)**.
+> Meeting skills live in **catalyst-meeting-hygiene**. User research, discovery, and metrics live in **catalyst-discovery**.
 
-| Skill | User | Model | Description | Source |
-|-------|:----:|:-----:|-------------|--------|
-| `analyze-cycle` | &#10003; | — | Cycle health report with risk analysis and recommendations | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/analyze-cycle/SKILL.md) |
-| `analyze-milestone` | &#10003; | — | Milestone progress toward target dates | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/analyze-milestone/SKILL.md) |
-| `report-daily` | &#10003; | — | Quick daily standup summary | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/report-daily/SKILL.md) |
-| `groom-backlog` | &#10003; | — | Backlog health analysis and cleanup | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/groom-backlog/SKILL.md) |
-| `sync-prs` | &#10003; | — | GitHub-Linear PR correlation and gap identification | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/sync-prs/SKILL.md) |
-| `context-daily` | &#10003; | — | Context engineering adoption dashboard | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/context-daily/SKILL.md) |
-
-### Product Strategy
+### PRDs & Review
 
 | Skill | User | Model | Description | Source |
 |-------|:----:|:-----:|-------------|--------|
-| `define-north-star` | &#10003; | — | Define north star metrics and strategic goals | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/define-north-star/SKILL.md) |
-| `write-prod-strategy` | &#10003; | — | Write product strategy documents | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/write-prod-strategy/SKILL.md) |
-| `strategy-sprint` | &#10003; | — | Run a strategy sprint session | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/strategy-sprint/SKILL.md) |
-| `expansion-strategy` | &#10003; | — | Plan expansion and growth strategies | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/expansion-strategy/SKILL.md) |
+| `prd-draft` | &#10003; | — | Create a modern PRD with guided questions and optional multi-agent review | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/prd-draft/SKILL.md) |
+| `prd-review-panel` | &#10003; | — | 7-agent parallel PRD review (eng, design, exec, legal, UXR, skeptic, customer) | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/prd-review-panel/SKILL.md) |
+| `ralph-wiggum` | &#10003; | — | Devil's-advocate review of any product doc — surfaces risks and hidden assumptions | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/ralph-wiggum/SKILL.md) |
 
-### User Research
-
-| Skill | User | Model | Description | Source |
-|-------|:----:|:-----:|-------------|--------|
-| `interview-guide` | &#10003; | — | Create structured interview guides | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/interview-guide/SKILL.md) |
-| `interview-prep` | &#10003; | — | Prepare for user interviews | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/interview-prep/SKILL.md) |
-| `user-interview` | &#10003; | — | Conduct and document user interviews | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/user-interview/SKILL.md) |
-| `interview-feedback` | &#10003; | — | Process and organize interview feedback | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/interview-feedback/SKILL.md) |
-| `user-research-synthesis` | &#10003; | — | Synthesize findings from multiple research sessions | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/user-research-synthesis/SKILL.md) |
-| `journey-map` | &#10003; | — | Create user journey maps | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/journey-map/SKILL.md) |
-
-### Feature Development
+### Strategy
 
 | Skill | User | Model | Description | Source |
 |-------|:----:|:-----:|-------------|--------|
-| `prd-draft` | &#10003; | — | Create a modern PRD with guided questions and multi-agent review | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/prd-draft/SKILL.md) |
-| `prd-review-panel` | &#10003; | — | Multi-agent PRD review panel | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/prd-review-panel/SKILL.md) |
-| `feature-metrics` | &#10003; | — | Define and track feature-level metrics | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/feature-metrics/SKILL.md) |
-| `feature-results` | &#10003; | — | Analyze feature launch results | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/feature-results/SKILL.md) |
-| `launch-checklist` | &#10003; | — | Create comprehensive launch checklists | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/launch-checklist/SKILL.md) |
+| `define-north-star` | &#10003; | — | North Star Metric framework (Frequency × Core Action × Breadth) | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/define-north-star/SKILL.md) |
+| `write-prod-strategy` | &#10003; | — | 7-component strategy doc (Objective → Roadmap) | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/write-prod-strategy/SKILL.md) |
+| `expansion-strategy` | &#10003; | — | NRR-decomposition playbook for upsell/cross-sell/seat growth | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/expansion-strategy/SKILL.md) |
+| `strategy-sprint` | &#10003; | — | 1-day / 1-week / 1-month progressive strategy sessions | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/strategy-sprint/SKILL.md) |
 
-### Experimentation
-
-| Skill | User | Model | Description | Source |
-|-------|:----:|:-----:|-------------|--------|
-| `experiment-decision` | &#10003; | — | Make data-driven experiment decisions | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/experiment-decision/SKILL.md) |
-| `experiment-metrics` | &#10003; | — | Design experiment metrics and success criteria | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/experiment-metrics/SKILL.md) |
-| `impact-sizing` | &#10003; | — | Size the impact of proposed changes | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/impact-sizing/SKILL.md) |
-
-### Meetings & Communication
+### Prioritization & Decisions
 
 | Skill | User | Model | Description | Source |
 |-------|:----:|:-----:|-------------|--------|
-| `meeting-agenda` | &#10003; | — | Create structured meeting agendas | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/meeting-agenda/SKILL.md) |
-| `meeting-notes` | &#10003; | — | Transform meeting transcripts into structured action items | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/meeting-notes/SKILL.md) |
-| `meeting-cleanup` | &#10003; | — | Clean up and organize meeting artifacts | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/meeting-cleanup/SKILL.md) |
-| `meeting-feedback` | &#10003; | — | Process meeting feedback | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/meeting-feedback/SKILL.md) |
-| `slack-message` | &#10003; | — | Draft Slack messages for various contexts | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/slack-message/SKILL.md) |
-| `status-update` | &#10003; | — | Generate status updates for stakeholders | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/status-update/SKILL.md) |
+| `prioritize` | &#10003; | — | LNO (Leverage/Neutral/Overhead) task classification | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/prioritize/SKILL.md) |
+| `impact-sizing` | &#10003; | — | Quantified feature value with driver trees and confidence bands | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/impact-sizing/SKILL.md) |
+| `decision-doc` | &#10003; | — | Structured decision capture with alternatives and tradeoffs | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/decision-doc/SKILL.md) |
 
-### Planning & Prioritization
+### Launch & Results
 
 | Skill | User | Model | Description | Source |
 |-------|:----:|:-----:|-------------|--------|
-| `daily-plan` | &#10003; | — | Create daily work plans | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/daily-plan/SKILL.md) |
-| `weekly-plan` | &#10003; | — | Create weekly work plans | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/weekly-plan/SKILL.md) |
-| `weekly-review` | &#10003; | — | Conduct weekly review sessions | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/weekly-review/SKILL.md) |
-| `prioritize` | &#10003; | — | Prioritize features and work items | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/prioritize/SKILL.md) |
-
-### Prototyping
-
-| Skill | User | Model | Description | Source |
-|-------|:----:|:-----:|-------------|--------|
-| `prototype` | &#10003; | — | Build quick prototypes | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/prototype/SKILL.md) |
-| `generate-ai-prototype` | &#10003; | — | Generate AI-powered prototypes | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/generate-ai-prototype/SKILL.md) |
-| `prototype-feedback` | &#10003; | — | Collect and organize prototype feedback | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/prototype-feedback/SKILL.md) |
-| `napkin-sketch` | &#10003; | — | Quick napkin-sketch ideation | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/napkin-sketch/SKILL.md) |
-
-### Analysis
-
-| Skill | User | Model | Description | Source |
-|-------|:----:|:-----:|-------------|--------|
-| `competitor-analysis` | &#10003; | — | Conduct competitor analysis | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/competitor-analysis/SKILL.md) |
-| `retention-analysis` | &#10003; | — | Analyze user retention patterns | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/retention-analysis/SKILL.md) |
-| `activation-analysis` | &#10003; | — | Analyze user activation funnels | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/activation-analysis/SKILL.md) |
-| `metrics-framework` | &#10003; | — | Set up leading vs lagging indicators | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/metrics-framework/SKILL.md) |
-
-### Other
-
-| Skill | User | Model | Description | Source |
-|-------|:----:|:-----:|-------------|--------|
-| `decision-doc` | &#10003; | — | Create structured decision documents | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/decision-doc/SKILL.md) |
-| `create-tickets` | &#10003; | — | Create Linear tickets from requirements | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/create-tickets/SKILL.md) |
-| `connect-mcps` | &#10003; | — | Connect and configure MCP servers | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/connect-mcps/SKILL.md) |
-| `ralph-wiggum` | &#10003; | — | Devil's advocate PRD/document review — surfaces risks and assumptions with adversarial questioning | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/ralph-wiggum/SKILL.md) |
+| `launch-checklist` | &#10003; | — | Critical-path launch planning with owners and dependencies | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/launch-checklist/SKILL.md) |
+| `feature-results` | &#10003; | — | Post-launch results doc comparing outcomes to PRD hypothesis | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/feature-results/SKILL.md) |
 
 ## catalyst-analytics
 
