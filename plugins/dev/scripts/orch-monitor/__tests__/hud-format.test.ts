@@ -7,6 +7,7 @@ import {
   formatEvent,
   formatRef,
   formatDetails,
+  formatDetailBody,
   shouldSkipEvent,
 } from "../cli/lib/format.ts";
 
@@ -189,6 +190,171 @@ describe("formatDetails", () => {
     const long = "x".repeat(100);
     const e = { ...baseEvent, body: { message: long } };
     expect(formatDetails(e)).toBe(long);
+  });
+});
+
+describe("formatDetails (sanitizer)", () => {
+  function withMessage(msg: string): CanonicalEvent {
+    return { ...baseEvent, body: { message: msg, payload: {} } };
+  }
+
+  test("decodes named HTML entities", () => {
+    expect(formatDetails(withMessage("foo&nbsp;bar"))).toBe("foo bar");
+    expect(formatDetails(withMessage("a&amp;b"))).toBe("a&b");
+    expect(formatDetails(withMessage("&lt;tag&gt;"))).toBe("<tag>");
+    expect(formatDetails(withMessage("she said &quot;hi&quot;"))).toBe('she said "hi"');
+    expect(formatDetails(withMessage("don&#39;t"))).toBe("don't");
+    expect(formatDetails(withMessage("don&apos;t"))).toBe("don't");
+  });
+
+  test("decodes numeric HTML entities (decimal and hex)", () => {
+    expect(formatDetails(withMessage("&#65;&#66;&#67;"))).toBe("ABC");
+    expect(formatDetails(withMessage("&#x41;&#x42;"))).toBe("AB");
+  });
+
+  test("passes unknown entities through unchanged", () => {
+    expect(formatDetails(withMessage("&notarealentity;x"))).toBe("&notarealentity;x");
+  });
+
+  test("extracts anchor text and drops href", () => {
+    expect(formatDetails(withMessage('<a href="https://x">label</a>'))).toBe("label");
+  });
+
+  test("anchor extraction is case-insensitive", () => {
+    expect(formatDetails(withMessage('<A HREF="X">CAPS</A>'))).toBe("CAPS");
+  });
+
+  test("anchor with surrounding text keeps surroundings", () => {
+    expect(formatDetails(withMessage('see <a href="x">docs</a> for more'))).toBe(
+      "see docs for more",
+    );
+  });
+
+  test("image with alt becomes [alt]", () => {
+    expect(formatDetails(withMessage('<img alt="caption" src="x">'))).toBe("[caption]");
+  });
+
+  test("image without alt becomes [image]", () => {
+    expect(formatDetails(withMessage('<img src="x">'))).toBe("[image]");
+  });
+
+  test("self-closing image variants are stripped", () => {
+    expect(formatDetails(withMessage('<img alt="ok" src="x" />'))).toBe("[ok]");
+  });
+
+  test("strips arbitrary HTML tags, keeps inner text", () => {
+    expect(formatDetails(withMessage("<p>hi</p>"))).toBe("hi");
+    expect(formatDetails(withMessage('<div class="x">inner</div>'))).toBe("inner");
+    expect(formatDetails(withMessage("<span>a</span> <strong>b</strong>"))).toBe("a b");
+    expect(formatDetails(withMessage("line1<br>line2"))).toBe("line1 line2");
+  });
+
+  test("strips ATX-style markdown headers", () => {
+    expect(formatDetails(withMessage("## Title"))).toBe("Title");
+    expect(formatDetails(withMessage("### Sub"))).toBe("Sub");
+    expect(formatDetails(withMessage("# Heading"))).toBe("Heading");
+  });
+
+  test("strips bold and italic markers", () => {
+    expect(formatDetails(withMessage("**bold**"))).toBe("bold");
+    expect(formatDetails(withMessage("__bold__"))).toBe("bold");
+    expect(formatDetails(withMessage("*em*"))).toBe("em");
+    expect(formatDetails(withMessage("_em_"))).toBe("em");
+    expect(formatDetails(withMessage("plain **bold** plain"))).toBe("plain bold plain");
+  });
+
+  test("does not eat snake_case identifiers", () => {
+    expect(formatDetails(withMessage("some_snake_case_var"))).toBe("some_snake_case_var");
+  });
+
+  test("strips triple-backtick code fences keeping inner text", () => {
+    expect(formatDetails(withMessage("```code block```"))).toBe("code block");
+  });
+
+  test("strips inline backticks keeping inner text", () => {
+    expect(formatDetails(withMessage("call `foo()` here"))).toBe("call foo() here");
+  });
+
+  test("collapses newlines and runs of whitespace to single space", () => {
+    expect(formatDetails(withMessage("a\nb\nc"))).toBe("a b c");
+    expect(formatDetails(withMessage("a    b\t\tc"))).toBe("a b c");
+    expect(formatDetails(withMessage("  hello  "))).toBe("hello");
+  });
+
+  test("renders the ticket's deployment example", () => {
+    const input =
+      '## Deploying catalyst with &nbsp;<a href="https://pages.dev"><img alt="Cloudflare Pages" src="x"></a> finished';
+    expect(formatDetails(withMessage(input))).toBe(
+      "Deploying catalyst with [Cloudflare Pages] finished",
+    );
+  });
+
+  test("sanitizes payload.title", () => {
+    const e = {
+      ...baseEvent,
+      body: { message: "ignored", payload: { title: "## <strong>feat</strong>: thing" } },
+    };
+    expect(formatDetails(e)).toBe("feat: thing");
+  });
+
+  test("sanitizes payload.body and truncates the raw input at 300 chars before cleanup", () => {
+    const raw = "x".repeat(295) + "<p>tail</p>";
+    const e = { ...baseEvent, body: { message: "", payload: { body: raw } } };
+    const out = formatDetails(e);
+    // First 295 'x', then sanitised slice of the rest within the 300-char raw window.
+    expect(out.startsWith("x".repeat(295))).toBe(true);
+    expect(out).not.toContain("<p>");
+  });
+
+  test("memoises by event reference (same instance → same string)", () => {
+    const e = withMessage("<p>hello &amp; goodbye</p>");
+    const first = formatDetails(e);
+    const second = formatDetails(e);
+    expect(first).toBe("hello & goodbye");
+    expect(second).toBe(first);
+  });
+
+  test("returns empty string when body is missing", () => {
+    const e = { ...baseEvent, body: undefined } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("");
+  });
+});
+
+describe("formatDetailBody", () => {
+  function withMessage(msg: string): CanonicalEvent {
+    return { ...baseEvent, body: { message: msg, payload: {} } };
+  }
+
+  test("returns empty string when message is missing", () => {
+    const e = { ...baseEvent, body: { message: "", payload: {} } };
+    expect(formatDetailBody(e)).toBe("");
+  });
+
+  test("preserves paragraph breaks", () => {
+    expect(formatDetailBody(withMessage("para 1\n\npara 2"))).toBe("para 1\n\npara 2");
+  });
+
+  test("preserves single newlines as line breaks", () => {
+    expect(formatDetailBody(withMessage("line 1\nline 2"))).toBe("line 1\nline 2");
+  });
+
+  test("collapses 3+ blank lines to a single blank line", () => {
+    expect(formatDetailBody(withMessage("a\n\n\n\nb"))).toBe("a\n\nb");
+  });
+
+  test("collapses runs of inline whitespace per line", () => {
+    expect(formatDetailBody(withMessage("a    b\nc\t\td"))).toBe("a b\nc d");
+  });
+
+  test("decodes entities and strips tags across paragraphs", () => {
+    const input = "<p>hello &amp; <strong>world</strong></p>\n\n<a href=\"x\">link</a>";
+    expect(formatDetailBody(withMessage(input))).toBe("hello & world\n\nlink");
+  });
+
+  test("memoises by event reference", () => {
+    const e = withMessage("<p>cached</p>");
+    expect(formatDetailBody(e)).toBe("cached");
+    expect(formatDetailBody(e)).toBe("cached");
   });
 });
 
