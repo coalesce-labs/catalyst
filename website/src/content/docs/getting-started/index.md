@@ -100,11 +100,20 @@ Follow the prompts to research your codebase. Catalyst will spawn parallel agent
 
 ## Optional Plugins
 
-Catalyst is a 5-plugin system. Install what you need:
+Catalyst is an 8-plugin system. Install what you need:
 
 ```bash
-# Project management (Linear integration)
+# Product strategy (PRDs, north star, prioritization)
 /plugin install catalyst-pm
+
+# PM operations (cycle/backlog/cadence/Linear ops)
+/plugin install catalyst-pm-ops
+
+# Meeting workflows (agendas, notes, cleanup)
+/plugin install catalyst-meeting-hygiene
+
+# User research, metrics, and prototyping
+/plugin install catalyst-discovery
 
 # Analytics (PostHog integration)
 /plugin install catalyst-analytics

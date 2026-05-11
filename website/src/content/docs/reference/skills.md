@@ -178,6 +178,76 @@ Product strategy toolkit. 12 skills covering PRDs, strategy docs, priorities, an
 | `launch-checklist` | &#10003; | — | Critical-path launch planning with owners and dependencies | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/launch-checklist/SKILL.md) |
 | `feature-results` | &#10003; | — | Post-launch results doc comparing outcomes to PRD hypothesis | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm/skills/feature-results/SKILL.md) |
 
+## catalyst-pm-ops
+
+Linear/GitHub ops, daily and weekly cadence, status updates, and team comms. 12 skills for day-to-day PM operations.
+
+### Cycle & Milestone Ops
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `analyze-cycle` | &#10003; | — | Cycle health report with risk analysis, capacity assessment, and actionable recommendations | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/analyze-cycle/SKILL.md) |
+| `analyze-milestone` | &#10003; | — | Milestone health with target-date assessment, blocked-issue identification, and recommendations | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/analyze-milestone/SKILL.md) |
+| `groom-backlog` | &#10003; | — | Identify orphaned issues, incorrect project assignments, and backlog health issues | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/groom-backlog/SKILL.md) |
+| `sync-prs` | &#10003; | — | Correlate GitHub PRs with Linear issues and surface orphaned PRs and issues | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/sync-prs/SKILL.md) |
+
+### Cadence & Comms
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `daily-plan` | &#10003; | — | Generate PM daily plan with Linear cycle context | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/daily-plan/SKILL.md) |
+| `weekly-plan` | &#10003; | — | Set next week's priorities from cycle and backlog data | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/weekly-plan/SKILL.md) |
+| `weekly-review` | &#10003; | — | Review week's progress, meetings, and learnings | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/weekly-review/SKILL.md) |
+| `report-daily` | &#10003; | — | Daily status report: yesterday's deliveries, current work, team members needing assignments | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/report-daily/SKILL.md) |
+| `status-update` | &#10003; | — | Generate stakeholder status updates for different audiences | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/status-update/SKILL.md) |
+| `slack-message` | &#10003; | — | Draft team communications for different Slack contexts | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/slack-message/SKILL.md) |
+| `create-tickets` | &#10003; | — | Create Linear tickets or generate formatted ticket text | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/create-tickets/SKILL.md) |
+| `connect-mcps` | &#10003; | — | Connect MCPs for real-time tool integration | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/pm-ops/skills/connect-mcps/SKILL.md) |
+
+## catalyst-meeting-hygiene
+
+Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros. 4 skills.
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `meeting-agenda` | &#10003; | — | Create structured meeting agendas for effective collaboration | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/meeting-hygiene/skills/meeting-agenda/SKILL.md) |
+| `meeting-notes` | &#10003; | — | Transform transcripts into structured action items, decisions, and key insights | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/meeting-hygiene/skills/meeting-notes/SKILL.md) |
+| `meeting-cleanup` | &#10003; | — | Batch process multiple meetings from a single day, consolidating action items | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/meeting-hygiene/skills/meeting-cleanup/SKILL.md) |
+| `meeting-feedback` | &#10003; | — | Post-meeting effectiveness retro and continuous improvement | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/meeting-hygiene/skills/meeting-feedback/SKILL.md) |
+
+## catalyst-discovery
+
+User research, metrics, experimentation, and prototyping. 14 skills for understanding users and validating hypotheses.
+
+### User Research
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `user-interview` | &#10003; | — | Systematically extract actionable insights from user interview recordings or notes | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/user-interview/SKILL.md) |
+| `user-research-synthesis` | &#10003; | — | Turn user interviews into actionable insights using advanced synthesis techniques | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/user-research-synthesis/SKILL.md) |
+| `interview-guide` | &#10003; | — | Create JTBD-based interview guides for structured discovery | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/interview-guide/SKILL.md) |
+| `journey-map` | &#10003; | — | Create user and customer journey maps (dual mode) | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/journey-map/SKILL.md) |
+| `competitor-analysis` | &#10003; | — | Deep competitive analysis with ongoing monitoring; integrates with retention-analysis and user-research-synthesis | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/competitor-analysis/SKILL.md) |
+
+### Metrics & Experiments
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `metrics-framework` | &#10003; | — | Set up leading vs lagging indicators for product decisions | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/metrics-framework/SKILL.md) |
+| `feature-metrics` | &#10003; | — | Define success metrics using the STEDII framework | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/feature-metrics/SKILL.md) |
+| `experiment-metrics` | &#10003; | — | Select trustworthy experiment metrics using the STEDII framework | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/experiment-metrics/SKILL.md) |
+| `experiment-decision` | &#10003; | — | Framework for deciding when to A/B test vs just ship | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/experiment-decision/SKILL.md) |
+| `activation-analysis` | &#10003; | — | Analyze activation using Setup → Aha → Habit framework; identifies bottlenecks | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/activation-analysis/SKILL.md) |
+| `retention-analysis` | &#10003; | — | Cohort analysis and retention optimization; identifies drivers and churn factors | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/retention-analysis/SKILL.md) |
+
+### Prototyping
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `prototype` | &#10003; | — | Advanced prototyping via Artifacts, Lovable, v0, or Bolt | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/prototype/SKILL.md) |
+| `prototype-feedback` | &#10003; | — | Build → review → iterate workflow with structured feedback collection | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/prototype-feedback/SKILL.md) |
+| `napkin-sketch` | &#10003; | — | ASCII wireframes with browser capture for design matching | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/discovery/skills/napkin-sketch/SKILL.md) |
+
 ## catalyst-analytics
 
 PostHog integration for product analytics. **~40K token context cost** — enable only when needed.

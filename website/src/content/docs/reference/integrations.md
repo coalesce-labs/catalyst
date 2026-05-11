@@ -15,11 +15,11 @@ Pull request creation, code review, and repository management via the `gh` CLI.
 
 No Catalyst-specific configuration needed — `gh` uses its own authentication.
 
-**Related skills**: `/catalyst-dev:create-pr`, `/catalyst-dev:describe-pr`, `/catalyst-dev:merge-pr`, `/catalyst-dev:commit`, `/catalyst-pm:sync-prs`
+**Related skills**: `/catalyst-dev:create-pr`, `/catalyst-dev:describe-pr`, `/catalyst-dev:merge-pr`, `/catalyst-dev:commit`, `/catalyst-pm-ops:sync-prs`
 
 ### PR-Linear Sync
 
-The `/catalyst-pm:sync-prs` skill correlates GitHub PRs with Linear issues — matching via branch names and descriptions, identifying orphaned PRs and issues, and flagging stale PRs.
+The `/catalyst-pm-ops:sync-prs` skill correlates GitHub PRs with Linear issues — matching via branch names and descriptions, identifying orphaned PRs and issues, and flagging stale PRs.
 
 ### Worktree Integration
 
@@ -33,7 +33,7 @@ Ticket management and automatic status progression via the [Linearis CLI](https:
 
 **Why CLI instead of MCP?** Linearis uses ~1K tokens vs Linear MCP's ~13K — a 13x reduction in context cost.
 
-**Related skills**: `/catalyst-dev:linear`, `/catalyst-pm:analyze-cycle`, `/catalyst-pm:analyze-milestone`, `/catalyst-pm:groom-backlog`, `/catalyst-pm:sync-prs`
+**Related skills**: `/catalyst-dev:linear`, `/catalyst-pm-ops:analyze-cycle`, `/catalyst-pm-ops:analyze-milestone`, `/catalyst-pm-ops:groom-backlog`, `/catalyst-pm-ops:sync-prs`
 
 ### Automatic Status Updates
 
