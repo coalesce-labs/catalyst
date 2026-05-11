@@ -77,8 +77,34 @@ describe("formatSource", () => {
     expect(formatSource(baseEvent)).toBe("github");
   });
 
-  test("maps comms.message.posted to 'comms'", () => {
-    const e = { ...baseEvent, attributes: { ...baseEvent.attributes, "event.name": "comms.message.posted" } };
+  test("maps comms.message.posted to sender from event.label", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "comms.message.posted",
+        "event.label": "CTL-330",
+        "catalyst.worker.ticket": "CTL-330",
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatSource(e)).toBe("CTL-330");
+  });
+
+  test("falls back to worker ticket when comms event has no label", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "comms.message.posted",
+        "catalyst.worker.ticket": "CTL-330",
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatSource(e)).toBe("CTL-330");
+  });
+
+  test("falls back to 'comms' when comms event has no label or worker", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+    } as unknown as CanonicalEvent;
     expect(formatSource(e)).toBe("comms");
   });
 
@@ -246,6 +272,42 @@ describe("formatEvent", () => {
     } as unknown as CanonicalEvent;
     expect(formatEvent(e)).toBe("broker start");
   });
+
+  test("maps comms.message.posted with type='info' to 'info'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { payload: { type: "info", channel: "orch-demo", to: "all" } },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("info");
+  });
+
+  test("maps comms.message.posted with type='attention' to 'attention'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { payload: { type: "attention", channel: "orch-demo", to: "all" } },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("attention");
+  });
+
+  test("maps comms.message.posted with type='done' to 'done'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { payload: { type: "done", channel: "orch-demo", to: "all" } },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("done");
+  });
+
+  test("falls back to 'comms' when comms event has no payload type", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { payload: {} },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("comms");
+  });
 });
 
 describe("formatRef", () => {
@@ -278,6 +340,42 @@ describe("formatRef", () => {
 
   test("returns empty string when no ref info", () => {
     const e = { ...baseEvent, attributes: { "event.name": "heartbeat" } } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("");
+  });
+
+  test("formats comms recipient with → prefix", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { payload: { type: "info", channel: "orch-demo", to: "CTL-330" } },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("→CTL-330");
+  });
+
+  test("formats comms broadcast recipient with → prefix", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { payload: { type: "info", channel: "orch-demo", to: "all" } },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("→all");
+  });
+
+  test("falls back to channel for comms when recipient is missing", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { payload: { type: "info", channel: "orch-demo" } },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("orch-demo");
+  });
+
+  test("returns empty string for comms with no recipient or channel", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { payload: {} },
+    } as unknown as CanonicalEvent;
     expect(formatRef(e)).toBe("");
   });
 });
