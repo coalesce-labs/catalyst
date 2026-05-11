@@ -132,6 +132,26 @@
         "cadence",
         "operations"
       ]
+    },
+    {
+      "name": "catalyst-meeting-hygiene",
+      "source": "./plugins/meeting-hygiene",
+      "description": "Meeting workflow skills: agenda creation, transcript processing, end-of-day batch cleanup, and effectiveness retros",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "meetings",
+        "agenda",
+        "notes",
+        "transcripts",
+        "productivity"
+      ]
     }
   ]
 }
