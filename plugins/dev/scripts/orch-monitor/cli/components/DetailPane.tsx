@@ -1,6 +1,6 @@
 import { Box, Text, useStdout } from "ink";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
-import { formatDetailBody } from "../lib/format.ts";
+import { formatDateTime, formatDetailBody } from "../lib/format.ts";
 
 export interface DetailPaneProps {
   event: CanonicalEvent;
@@ -24,11 +24,7 @@ const LABEL_W = 14;
 export function buildDetailLines(event: CanonicalEvent, cols: number): Line[] {
   const attrs = event.attributes ?? {};
   const name = attrs["event.name"] ?? "(unknown)";
-  const d = new Date(event.ts);
-  const ts = d.toLocaleString(undefined, {
-    month: "short", day: "numeric",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-  });
+  const ts = formatDateTime(event);
   const sev = event.severityText ?? "INFO";
   const lines: Line[] = [];
 
@@ -107,12 +103,19 @@ function renderLine(line: Line, i: number, cols: number): React.ReactNode {
       return <Text key={i} dimColor>{"  " + "─".repeat(Math.max(0, maxW))}</Text>;
     case "title": {
       const sevColor = (SEV_COLOR[line.sev] ?? "gray") as Parameters<typeof Text>[0]["color"];
-      const nameW = Math.max(0, maxW - 14);
+      // Compute name width from actual ts/sev lengths so the timestamp never wraps.
+      // sevText = "  <sev>" (2 leading spaces); +1 keeps a gap between name and ts.
+      const sevText = `  ${line.sev}`;
+      const budget = line.ts.length + sevText.length + 1;
+      const nameW = Math.max(0, maxW - budget);
+      const name = line.name.length > nameW
+        ? line.name.slice(0, Math.max(0, nameW - 1)) + "…"
+        : line.name.padEnd(nameW);
       return (
         <Box key={i} flexDirection="row" paddingX={1}>
-          <Text bold color="white">{line.name.slice(0, nameW).padEnd(nameW)}</Text>
+          <Text bold color="white">{name}</Text>
           <Text color="cyan">{line.ts}</Text>
-          <Text color={sevColor}>{`  ${line.sev}`}</Text>
+          <Text color={sevColor}>{sevText}</Text>
         </Box>
       );
     }
