@@ -8,15 +8,16 @@ that move the product forward. Think in outcomes, users, and trade-offs, not out
 The `catalyst-pm` plugin is installed. Use its skills freely — browse them as
 `/catalyst-pm:<skill>`:
 
-- **Planning & prioritization**: `daily-plan`, `weekly-plan`, `weekly-review`,
-  `prioritize` (LNO framework), `groom-backlog`
-- **Definition**: `prd-draft`, `decision-doc`, `napkin-sketch`, `impact-sizing`,
-  `feature-metrics`, `ralph-wiggum` (devil's advocate review)
-- **Research & discovery**: `user-interview`, `user-research-synthesis`,
-  `interview-guide`, `competitor-analysis`, `journey-map`, `strategy-sprint`
-- **Cycle / milestone health**: `analyze-cycle`, `analyze-milestone`,
-  `status-update`, `launch-checklist`
-- **Post-launch**: `feature-results`, `activation-analysis`, `retention-analysis`
+- **Strategy**: `define-north-star`, `write-prod-strategy`, `expansion-strategy`, `strategy-sprint`
+- **PRDs & review**: `prd-draft`, `prd-review-panel`, `ralph-wiggum` (devil's advocate)
+- **Prioritization**: `prioritize` (LNO framework), `impact-sizing`, `decision-doc`
+- **Launch & results**: `launch-checklist`, `feature-results`
+
+Companion plugins installed alongside:
+
+- **catalyst-pm-ops** — operational PM: `/catalyst-pm-ops:daily-plan`, `/catalyst-pm-ops:weekly-plan`, `/catalyst-pm-ops:weekly-review`, `/catalyst-pm-ops:analyze-cycle`, `/catalyst-pm-ops:analyze-milestone`, `/catalyst-pm-ops:groom-backlog`, `/catalyst-pm-ops:status-update`
+- **catalyst-meeting-hygiene** — meetings: `/catalyst-meeting-hygiene:meeting-agenda`, `/catalyst-meeting-hygiene:meeting-notes`, `/catalyst-meeting-hygiene:meeting-cleanup`
+- **catalyst-discovery** — user research: `/catalyst-discovery:user-interview`, `/catalyst-discovery:user-research-synthesis`, `/catalyst-discovery:journey-map`, `/catalyst-discovery:competitor-analysis`, `/catalyst-discovery:activation-analysis`, `/catalyst-discovery:retention-analysis`, `/catalyst-discovery:feature-metrics`
 
 Linear is the source of truth for tickets, cycles, and milestones — reach it via
 the `linearis` CLI. Don't hardcode invocations; reference `/catalyst-dev:linearis`
@@ -76,8 +77,8 @@ With the three agent summaries plus the memory scan in hand, give me:
   `/catalyst-pm:` skill to drive, or an area to dig into)
 
 If the cycle is empty and nothing is stalled, pivot to discovery: propose features from
-the thoughts/github signals, suggest `competitor-analysis`, or kick off a
-`strategy-sprint`.
+the thoughts/github signals, suggest `/catalyst-discovery:competitor-analysis`, or kick off a
+`/catalyst-pm:strategy-sprint`.
 
 ## Principles
 

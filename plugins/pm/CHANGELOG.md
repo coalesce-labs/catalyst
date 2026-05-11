@@ -1,5 +1,35 @@
 # Changelog
 
+## [7.0.0] — 2026-05-11
+
+### ⚠ BREAKING CHANGES
+
+catalyst-pm is now a focused **strategy and definition** plugin with 12 skills. 30 skills have moved to companion plugins:
+
+- **12 skills → [catalyst-pm-ops](../pm-ops/README.md)**: `analyze-cycle`, `analyze-milestone`, `groom-backlog`, `create-tickets`, `sync-prs`, `daily-plan`, `weekly-plan`, `weekly-review`, `report-daily`, `status-update`, `slack-message`, `connect-mcps`
+- **4 skills → [catalyst-meeting-hygiene](../meeting-hygiene/README.md)**: `meeting-agenda`, `meeting-notes`, `meeting-cleanup`, `meeting-feedback`
+- **14 skills → [catalyst-discovery](../discovery/README.md)**: `user-interview`, `user-research-synthesis`, `interview-guide`, `journey-map`, `competitor-analysis`, `retention-analysis`, `activation-analysis`, `feature-metrics`, `experiment-metrics`, `experiment-decision`, `metrics-framework`, `prototype`, `prototype-feedback`, `napkin-sketch`
+
+The following skills are permanently removed (not moved):
+- `generate-ai-prototype` — subsumed by `prototype` in catalyst-discovery
+- `interview-prep` — PM job-search tool, out of scope for project plugins
+- `interview-feedback` — PM job-search tool, out of scope for project plugins
+- `context-daily` — incomplete; dependencies (`github-metrics`, `thoughts-metrics`, `context-analyzer`) do not exist
+
+7 support agents removed (only `linear-research` remains): `context-analyzer`, `github-metrics`, `thoughts-metrics`, `calendar-analyzer`, `health-scorer`, `code-classifier`, `linear-metrics`.
+
+**Skills retained in catalyst-pm (12)**: `prd-draft`, `prd-review-panel`, `ralph-wiggum`, `define-north-star`, `impact-sizing`, `prioritize`, `write-prod-strategy`, `expansion-strategy`, `strategy-sprint`, `decision-doc`, `launch-checklist`, `feature-results`
+
+### Upgrade path
+
+Install the companion plugins to restore moved skills:
+
+```bash
+/plugin install catalyst-pm-ops
+/plugin install catalyst-meeting-hygiene
+/plugin install catalyst-discovery
+```
+
 ## [6.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.0.3...catalyst-pm-v6.1.0)
 
 Apr 25, 2026
