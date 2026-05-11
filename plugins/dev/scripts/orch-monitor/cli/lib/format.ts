@@ -52,7 +52,13 @@ export function formatSource(event: CanonicalEvent): string {
   if (!name) return "legacy";
   if (name.startsWith("github.")) return "github";
   if (name.startsWith("linear.")) return "linear";
-  if (name === "comms.message.posted") return "comms";
+  if (name === "comms.message.posted") {
+    const label = event.attributes["event.label"];
+    if (label) return label;
+    const worker = event.attributes["catalyst.worker.ticket"];
+    if (worker) return worker;
+    return "comms";
+  }
   // CTL-331: recognise filter.* and the legacy orchestrator.filter.* alias.
   // Surface the orchestrator id when present so users can correlate filter
   // events back to a specific orchestrator run.
@@ -75,7 +81,6 @@ const EVENT_LABELS: Record<string, string> = {
   "orchestrator.worker.done": "done",
   "orchestrator.worker.failed": "failed",
   "orchestrator.attention.raised": "attention",
-  "comms.message.posted": "comms",
   "session.phase": "phase",
   // CTL-331: filter daemon lifecycle events.
   "filter.register": "filter reg",
@@ -96,6 +101,12 @@ export function formatEvent(event: CanonicalEvent): string {
     const c = event.attributes["cicd.pipeline.run.conclusion"];
     return c === "success" ? "ci pass" : "ci fail";
   }
+  if (name === "comms.message.posted") {
+    const payload = event.body?.payload as Record<string, unknown> | undefined;
+    const type = payload?.["type"];
+    if (typeof type === "string" && type.length > 0) return type.slice(0, 15);
+    return "comms";
+  }
   // CTL-331: wake events are session-scoped (filter.wake.{sessionId}).
   // EVENT_LABELS is exact-match, so handle the prefixed family explicitly.
   if (name.startsWith("filter.wake.") || name.startsWith("orchestrator.filter.wake.")) {
@@ -106,6 +117,14 @@ export function formatEvent(event: CanonicalEvent): string {
 }
 
 export function formatRef(event: CanonicalEvent): string {
+  if (event.attributes?.["event.name"] === "comms.message.posted") {
+    const payload = event.body?.payload as Record<string, unknown> | undefined;
+    const to = payload?.["to"];
+    if (typeof to === "string" && to.length > 0) return `→${to}`;
+    const channel = payload?.["channel"];
+    if (typeof channel === "string" && channel.length > 0) return channel;
+    return "";
+  }
   const pr = event.attributes["vcs.pr.number"];
   if (pr) return `#${pr}`;
   const ticket = event.attributes["linear.issue.identifier"];
