@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { CanonicalEvent } from "../lib/canonical-event.ts";
 import {
   formatTime,
+  formatDateTime,
   formatRepo,
   formatSource,
   formatEvent,
@@ -34,6 +35,24 @@ describe("formatTime", () => {
   test("formats ISO ts as HH:MM:SS", () => {
     const result = formatTime(baseEvent);
     expect(result).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+  });
+});
+
+describe("formatDateTime", () => {
+  test("formats ISO ts as YYYY-MM-DD HH:MM:SS", () => {
+    const result = formatDateTime(baseEvent);
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  test("is always 19 characters", () => {
+    expect(formatDateTime(baseEvent).length).toBe(19);
+  });
+
+  test("uses 24h time and never emits AM/PM", () => {
+    const evening = { ...baseEvent, ts: "2026-05-11T23:51:07.000Z" };
+    const result = formatDateTime(evening);
+    expect(result).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(result).not.toMatch(/AM|PM/i);
   });
 });
 
