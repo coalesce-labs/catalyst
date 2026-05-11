@@ -21,7 +21,8 @@ Catalyst integrates with your development tools through both **CLI-based** (toke
 - **Linear** - Issue tracking, sprint planning, ticket lifecycle (CLI via
   [Linearis](https://www.npmjs.com/package/linearis))
   - `catalyst-dev`: Core research agents and workflow commands
-  - `catalyst-pm`: Advanced PM workflows (cycle analysis, milestone tracking, backlog grooming)
+  - `catalyst-pm`: Advanced PM workflows (PRDs, strategy, priorities)
+  - `catalyst-pm-ops`: Operational PM workflows (cycle analysis, milestone tracking, backlog grooming, cadence, comms)
 
 ### Version Control & Code Hosting
 
@@ -66,7 +67,7 @@ This keeps your typical session lean while having powerful tools available when 
 
 ## What's Inside
 
-**Catalyst** is a 5-plugin system for Claude Code focused on **token efficiency**, **session-aware
+**Catalyst** is a 6-plugin system for Claude Code focused on **token efficiency**, **session-aware
 MCP management**, and **persistent context** through parallel agent research, structured handoffs,
 and shared memory systems.
 
@@ -81,15 +82,20 @@ and shared memory systems.
 - Handoff system for context persistence
 - ~3.5k context (lightweight MCPs: DeepWiki, Context7)
 
-**catalyst-pm** (Optional - Enable for project management)
+**catalyst-pm** (Optional - Enable for product strategy)
 
-- 6 skills for PM workflows (cycle analysis, milestone tracking, backlog grooming)
-- 12 specialized agents for data collection and analysis
-- 39 skills for product management (PRDs, user research, metrics, interviews, strategy)
+- 34 skills for product management (PRDs, user research, metrics, interviews, strategy)
 - 7 sub-agents forming a review panel (engineering, design, executive, legal, UX, customer voice)
 - Research-first architecture (Haiku for data collection, Sonnet/Opus for analysis)
-- Cycle management and milestone tracking with target date feasibility
-- Actionable insights and recommendations (not just data dumps)
+- PRD workflows, user research synthesis, north star definition, prioritization
+
+**catalyst-pm-ops** (Optional - Enable for day-to-day PM operations)
+
+- 12 skills for Linear/GitHub project-management mechanics
+- 4 specialized agents: cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer
+- Cycle health, milestone tracking, backlog grooming, PR↔issue sync
+- Daily/weekly cadence, status updates, Slack drafting
+- Companion to [catalyst-pm](./plugins/pm-ops/README.md)
 
 **catalyst-analytics** (Optional - Enable when needed)
 
@@ -160,8 +166,11 @@ Alternatively, install plugins manually via Claude Code plugin system:
 # Install core workflow (required)
 /plugin install catalyst-dev
 
-# Optional: Install PM plugin (Linear project management)
+# Optional: Install PM plugin (strategy, PRDs, user research)
 /plugin install catalyst-pm
+
+# Optional: Install PM ops plugin (cycle/backlog/cadence operations)
+/plugin install catalyst-pm-ops
 
 # Optional: Install analytics plugin (if you use PostHog)
 /plugin install catalyst-analytics

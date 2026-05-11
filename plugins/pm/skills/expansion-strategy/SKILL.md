@@ -638,7 +638,7 @@ Median days from signup to first upgrade
 
 **Sales Playbooks:**
 
-- For go-to-market: Use `/slack-message` to draft sales team battlecards
+- For go-to-market: Use `/catalyst-pm-ops:slack-message` to draft sales team battlecards
 - For playbook docs: Reference expansion-strategy findings
 
 ### Cross-Skill Integration

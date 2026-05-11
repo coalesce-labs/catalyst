@@ -463,7 +463,7 @@ After completing analysis:
 
 - **Reference in PRDs** - "Based on competitive analysis [link], we're positioning as..."
 - **Update strategy docs** - "Competitive landscape has shifted: [insight]"
-- **Create battlecards** - Use findings for sales team (via `/slack-message`)
+- **Create battlecards** - Use findings for sales team (via `/catalyst-pm-ops:slack-message`)
 - **Inform roadmap** - Link specific competitor threats to roadmap priorities
 
 ### Cross-Skill Integration

@@ -1,0 +1,20 @@
+{
+  "name": "catalyst-pm-ops",
+  "version": "1.0.0",
+  "description": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms — extracted from catalyst-pm",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": "https://github.com/coalesce-labs/catalyst.git",
+  "keywords": ["project-management", "linear", "github", "standup", "cadence", "operations"],
+  "license": "MIT",
+  "agents": [
+    "./agents/cycle-analyzer.md",
+    "./agents/milestone-analyzer.md",
+    "./agents/backlog-analyzer.md",
+    "./agents/github-linear-analyzer.md"
+  ]
+}

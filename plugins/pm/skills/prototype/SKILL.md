@@ -529,7 +529,7 @@ If any are missing, ask before generating.
 
 - `/prototype-feedback` - Structured review and iteration loop
 - `/prd-draft` - Update PRD based on prototype learnings
-- `/create-tickets` - Turn approved prototype into engineering tasks
+- `/catalyst-pm-ops:create-tickets` - Turn approved prototype into engineering tasks
 
 **Related:**
 
@@ -566,7 +566,7 @@ Before presenting the prototype or prompt, verify:
 **After this:**
 
 - `/prototype-feedback` - Structured review loop
-- `/create-tickets` - Engineering handoff
+- `/catalyst-pm-ops:create-tickets` - Engineering handoff
 - `/feature-results` - Measure impact post-launch
 
 **Parallel use:**

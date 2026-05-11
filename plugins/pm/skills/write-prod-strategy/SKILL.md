@@ -717,14 +717,14 @@ After writing strategy:
 - **Reference in PRDs** - "This feature supports Strategic Pillar [X]" from this document
 - **Roadmap alignment** - "Q# roadmap focuses on Pillar [Y]"
 - **Team alignment** - Share with cross-functional teams for guidance
-- **Status updates** - Track progress against strategic goals in `/status-update`
+- **Status updates** - Track progress against strategic goals in `/catalyst-pm-ops:status-update`
 
 ### Cross-Skill Integration
 
 **Feeds into:**
 
 - `/prd-draft` - All PRDs should reference and support strategic pillars
-- `/status-update` - Track progress against strategy in weekly updates
+- `/catalyst-pm-ops:status-update` - Track progress against strategy in weekly updates
 - Board/investor communications - Strategy is the foundation for pitches
 - Quarterly planning - Use strategy to guide roadmap prioritization
 
@@ -749,7 +749,7 @@ After writing strategy:
 **Outputs:**
 
 - `/prd-draft` - PRDs align with strategic pillars
-- `/status-update` - Progress against strategy
+- `/catalyst-pm-ops:status-update` - Progress against strategy
 - Board/investor decks - Executive summary
 
 ## Questions to Ask Before Writing

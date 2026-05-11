@@ -72,6 +72,20 @@
           "jsonpath": "$.version"
         }
       ]
+    },
+    "plugins/pm-ops": {
+      "release-type": "simple",
+      "component": "catalyst-pm-ops",
+      "package-name": "catalyst-pm-ops",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     }
   }
 }

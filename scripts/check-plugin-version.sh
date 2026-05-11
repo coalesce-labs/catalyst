@@ -22,7 +22,7 @@ if [[ -z "$CHANGED_FILES" ]]; then
 fi
 
 # Check each plugin directory
-PLUGINS=("dev" "pm" "analytics" "debugging" "meta")
+PLUGINS=("dev" "pm" "pm-ops" "analytics" "debugging" "meta")
 NEEDS_VERSION_BUMP=()
 
 for plugin in "${PLUGINS[@]}"; do

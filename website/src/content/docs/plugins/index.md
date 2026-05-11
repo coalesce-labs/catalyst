@@ -13,7 +13,8 @@ your context lean and focused.
 | Plugin                 | Description                                                           | Context Cost | Skills | Agents |
 | ---------------------- | --------------------------------------------------------------------- | :----------: | :----: | :----: |
 | **catalyst-dev**       | Core development workflow — research, plan, implement, validate, ship |    ~3.5K     |   25   |   9    |
-| **catalyst-pm**        | Project management — cycle analysis, backlog grooming, PR sync        |   Minimal    |   46   |   12   |
+| **catalyst-pm**        | Product strategy — PRDs, user research, metrics, interviews           |   Minimal    |   34   |   8    |
+| **catalyst-pm-ops**    | PM operations — cycle health, backlog, cadence, status, Slack         |   Minimal    |   12   |   4    |
 | **catalyst-meta**      | Workflow discovery, creation, and management                          |   Minimal    |   6    |   —    |
 | **catalyst-analytics** | Product analytics via PostHog MCP                                     |     ~40K     |   3    |   —    |
 | **catalyst-debugging** | Error monitoring via Sentry MCP                                       |     ~20K     |   3    |   —    |
@@ -29,7 +30,8 @@ See the [Skills Reference](/reference/skills/) for the complete list of skills p
 
 # Install plugins
 /plugin install catalyst-dev          # Required
-/plugin install catalyst-pm           # Optional
+/plugin install catalyst-pm           # Optional — product strategy
+/plugin install catalyst-pm-ops       # Optional — PM operations
 /plugin install catalyst-analytics    # Optional
 /plugin install catalyst-debugging    # Optional
 /plugin install catalyst-meta         # Optional

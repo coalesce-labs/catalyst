@@ -649,7 +649,7 @@ After defining North Star:
 - `/write-prod-strategy` - North Star becomes the Objective component
 - `/metrics-framework` - North Star is your lagging metric anchor
 - `/feature-metrics` - Feature success metrics should ladder to North Star
-- `/status-update` - Progress toward North Star is tracked in updates
+- `/catalyst-pm-ops:status-update` - Progress toward North Star is tracked in updates
 
 **Pulls from:**
 

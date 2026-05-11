@@ -667,7 +667,7 @@ After processing meeting notes:
 ```
 You have action items from this meeting.
 
-Use `/status-update` and I'll:
+Use `/catalyst-pm-ops:status-update` and I'll:
 - Include completed action items in your update
 - Flag overdue items from previous meetings
 - Show progress on open questions
@@ -678,7 +678,7 @@ Use `/status-update` and I'll:
 After any meeting:
 
 ```
-Use `/slack-message` to:
+Use `/catalyst-pm-ops:slack-message` to:
 - Share meeting recap with attendees
 - Loop in stakeholders who missed it
 - Ask for help on open questions
@@ -765,7 +765,7 @@ Sometimes what WASN'T said is more important than what was.
 
 Meeting notes that sit in your private doc help no one.
 
-**Fix:** Share with attendees within 24 hours. Use `/slack-message` to make it easy.
+**Fix:** Share with attendees within 24 hours. Use `/catalyst-pm-ops:slack-message` to make it easy.
 
 ---
 
@@ -1036,19 +1036,19 @@ _→ Add to lessons-learned: VPs appreciate when PMs anticipate their questions_
 After processing meeting notes:
 
 - **Update PRDs** - If feature decision was made, update `/prd-draft`
-- **Create action items** - Use `/create-tickets` for engineering tasks from meeting
-- **Status updates** - Reference meeting decisions in `/status-update`
+- **Create action items** - Use `/catalyst-pm-ops:create-tickets` for engineering tasks from meeting
+- **Status updates** - Reference meeting decisions in `/catalyst-pm-ops:status-update`
 - **Research synthesis** - If customer interview, add to `/user-research-synthesis` batch
-- **Slack share** - Use `/slack-message` to share recap with broader team
+- **Slack share** - Use `/catalyst-pm-ops:slack-message` to share recap with broader team
 
 ### Cross-Skill Integration
 
 **Feeds into:**
 
 - `/prd-draft` - Meeting decisions go into PRD sections
-- `/status-update` - Meeting action items appear in weekly updates
+- `/catalyst-pm-ops:status-update` - Meeting action items appear in weekly updates
 - `/user-research-synthesis` - Customer interviews add to research synthesis
-- `/create-tickets` - Action items become engineering tickets
+- `/catalyst-pm-ops:create-tickets` - Action items become engineering tickets
 
 **Pulls from:**
 

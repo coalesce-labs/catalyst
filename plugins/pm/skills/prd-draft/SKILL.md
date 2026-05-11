@@ -677,8 +677,8 @@ Great work! Your PRD is ready for review.
 4. Move it to the next stage when ready
 
 **Want me to:**
-- `/create-tickets` -- Turn this PRD into engineering tickets
-- `/slack-message` -- Draft a Slack message announcing this PRD
+- `/catalyst-pm-ops:create-tickets` -- Turn this PRD into engineering tickets
+- `/catalyst-pm-ops:slack-message` -- Draft a Slack message announcing this PRD
 - `/feature-metrics` -- Deep-dive on success metrics with STEDII
 - `/impact-sizing` -- Quantify the user/revenue impact
 - `/generate-ai-prototype` -- Create a prototype prompt from this spec
@@ -699,8 +699,8 @@ Great work! Your PRD is ready for review.
 
 After creating PRD:
 
-- **Reference in status updates** - Feature appears in `/status-update` with link to PRD
-- **Create tickets** - Use `/create-tickets` to turn PRD sections into engineering tasks
+- **Reference in status updates** - Feature appears in `/catalyst-pm-ops:status-update` with link to PRD
+- **Create tickets** - Use `/catalyst-pm-ops:create-tickets` to turn PRD sections into engineering tasks
 - **Plan roadmap** - PRD informs quarterly prioritization
 - **Track results** - Use `/feature-results` to measure actual impact post-launch
 
@@ -710,7 +710,7 @@ After creating PRD:
 
 - `/feature-metrics` - PRD success metrics section gets detailed STEDII analysis
 - `/impact-sizing` - PRD Strategic Fit section gets quantified user/revenue impact
-- `/status-update` - PRD progress gets included in weekly updates
+- `/catalyst-pm-ops:status-update` - PRD progress gets included in weekly updates
 - `/feature-results` - PRD success criteria are measured here post-launch
 
 **Pulls from:**
