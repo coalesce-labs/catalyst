@@ -6,6 +6,7 @@ import { EventList } from "./components/EventList.tsx";
 import { FilterInput } from "./components/FilterInput.tsx";
 import { QueryInput } from "./components/QueryInput.tsx";
 import { DetailPane, buildDetailLines } from "./components/DetailPane.tsx";
+import { computeDetailLayout } from "./lib/detail-layout.ts";
 import { useEventLog } from "./hooks/useEventLog.ts";
 import { useFilter, type DslPredicate } from "./hooks/useFilter.ts";
 import { useSelection } from "./hooks/useSelection.ts";
@@ -176,33 +177,26 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
 
   const selectedEvent = filtered[selectedIndex] ?? null;
 
-  // In detail mode, show a compact context window of rows around the selected event.
-  // The detail pane fills all remaining space (no half-screen cap).
-  const CONTEXT_ROWS = 5;
-  const CONTEXT_BEFORE = Math.floor(CONTEXT_ROWS / 2);
+  // When the detail pane is open it sits flush against the status row at the
+  // bottom and the event list fills all remaining height above it (CTL-324).
+  // Layout math is extracted into a pure helper for testability.
   const inDetailMode = showDetail && !!selectedEvent;
-
-  const maxDetailPaneRows = inDetailMode
-    ? Math.max(10, layoutRows - chromeRows - CONTEXT_ROWS)
-    : Math.max(10, Math.min(Math.floor(layoutRows / 2), layoutRows - chromeRows - 5));
-  const detailPaneRows = inDetailMode ? maxDetailPaneRows : 0;
-  const detailContentRows = Math.max(1, detailPaneRows - 4);
-
-  // Context mode: always show CONTEXT_ROWS centered on selectedIndex.
-  // Normal mode: fill all available space.
-  const listRows = inDetailMode
-    ? Math.min(CONTEXT_ROWS, filtered.length)
-    : Math.max(1, visibleRows - detailPaneRows);
-  const listScrollOffset = inDetailMode
-    ? Math.max(0, Math.min(selectedIndex - CONTEXT_BEFORE, Math.max(0, filtered.length - CONTEXT_ROWS)))
-    : scrollOffset;
+  const detailLines = selectedEvent ? buildDetailLines(selectedEvent, cols) : [];
+  const { detailContentRows, listRows, listScrollOffset } =
+    computeDetailLayout({
+      visibleRows,
+      inDetailMode,
+      detailLineCount: detailLines.length,
+      selectedIndex,
+      totalEvents: filtered.length,
+      currentScrollOffset: scrollOffset,
+    });
 
   const dslLines = dslState ? JSON.stringify(dslState.dsl, null, 2).split("\n") : [];
   const dslVisibleLines = Math.max(1, overlayHeight - 2);
   const maxDslScroll = Math.max(0, dslLines.length - dslVisibleLines);
 
   // title row is sticky in DetailPane, so scrollable = detailLines minus the title
-  const detailLines = selectedEvent ? buildDetailLines(selectedEvent, cols) : [];
   const maxDetailScroll = Math.max(0, (detailLines.length - 1) - detailContentRows);
 
   const submitQuery = useCallback(async (raw: string) => {
