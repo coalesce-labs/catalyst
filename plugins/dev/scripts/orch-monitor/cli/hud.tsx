@@ -359,32 +359,38 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   }
 
   return (
-    <Box flexDirection="column">
-      <Header columns={cols} nlQuery={dslState?.nlQuery} />
-      <EventList
-        events={filtered}
-        selectedIndex={selectedIndex}
-        scrollOffset={listScrollOffset}
-        visibleRows={listRows}
-        columns={cols}
-        compact={inDetailMode || showHelp}
-      />
-      {inDetailMode && selectedEvent && (
-        <DetailPane
-          event={selectedEvent}
-          scrollTop={detailScrollTop}
-          maxHeight={detailContentRows}
+    <Box flexDirection="column" height={layoutRows} width={cols}>
+      <Box flexShrink={0}>
+        <Header columns={cols} nlQuery={dslState?.nlQuery} />
+      </Box>
+      <Box flexDirection="column" flexGrow={(inDetailMode || showHelp) ? 0 : 1} flexShrink={1}>
+        <EventList
+          events={filtered}
+          selectedIndex={selectedIndex}
+          scrollOffset={listScrollOffset}
+          visibleRows={listRows}
+          columns={cols}
+          compact={inDetailMode || showHelp}
         />
+      </Box>
+      {inDetailMode && selectedEvent && (
+        <Box flexShrink={0}>
+          <DetailPane
+            event={selectedEvent}
+            scrollTop={detailScrollTop}
+            maxHeight={detailContentRows}
+          />
+        </Box>
       )}
       {showHelp && (
-        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+        <Box flexShrink={0} flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
           <Text color="cyan" bold>{"Keybindings — h or Esc to close"}</Text>
           {HELP_LINES.slice(0, helpVisibleRows).map((line, i) => (
             <Text key={i} dimColor={!line.startsWith("  ")}>{line || " "}</Text>
           ))}
         </Box>
       )}
-      <Box flexDirection="row">
+      <Box flexDirection="row" flexShrink={0}>
         <Text dimColor>{`  ${filtered.length}/${events.length} events`}</Text>
         {autoFollow
           ? <Text color="green">{"  [LIVE]"}</Text>
@@ -394,28 +400,32 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
         {statusMsg && <Text color="yellow">{`  ${statusMsg}`}</Text>}
       </Box>
       {showDslOverlay && dslState && (
-        <Box flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
+        <Box flexShrink={0} flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
           <Text color="magenta" bold>{`Generated DSL · j/k scroll · ? to hide (${dslScrollTop + 1}/${dslLines.length}):`}</Text>
           {dslLines.slice(dslScrollTop, dslScrollTop + dslVisibleLines).map((line, i) => (
             <Text key={i} dimColor={i > 0}>{line}</Text>
           ))}
         </Box>
       )}
-      <FilterInput
-        value={filterText}
-        focused={filterFocused}
-        onChange={setFilterText}
-        pivot={pivot}
-      />
-      <QueryInput
-        value={queryText}
-        focused={queryFocused}
-        busy={querySubmitting}
-        error={queryError}
-        hasDsl={dslState !== null}
-        onChange={setQueryText}
-        onSubmit={(v) => { void submitQuery(v); }}
-      />
+      <Box flexShrink={0}>
+        <FilterInput
+          value={filterText}
+          focused={filterFocused}
+          onChange={setFilterText}
+          pivot={pivot}
+        />
+      </Box>
+      <Box flexShrink={0}>
+        <QueryInput
+          value={queryText}
+          focused={queryFocused}
+          busy={querySubmitting}
+          error={queryError}
+          hasDsl={dslState !== null}
+          onChange={setQueryText}
+          onSubmit={(v) => { void submitQuery(v); }}
+        />
+      </Box>
     </Box>
   );
 }
