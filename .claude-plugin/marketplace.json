@@ -152,6 +152,29 @@
         "transcripts",
         "productivity"
       ]
+    },
+    {
+      "name": "catalyst-discovery",
+      "source": "./plugins/discovery",
+      "description": "User research, metrics, experimentation, and prototyping skills — upstream discovery work for product teams. Enable when running user research, defining metrics, or building prototypes.",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "productivity",
+      "keywords": [
+        "user-research",
+        "metrics",
+        "experimentation",
+        "prototyping",
+        "discovery",
+        "jtbd",
+        "analytics",
+        "pm"
+      ]
     }
   ]
 }
