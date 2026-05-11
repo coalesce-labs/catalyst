@@ -1,0 +1,23 @@
+{
+  "name": "catalyst-discovery",
+  "version": "1.0.0",
+  "description": "User research, metrics, experimentation, and prototyping skills — the discovery/research companion to catalyst-pm",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce.dev",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": "https://github.com/coalesce-labs/catalyst.git",
+  "keywords": [
+    "user-research",
+    "metrics",
+    "experimentation",
+    "prototyping",
+    "discovery",
+    "jtbd",
+    "analytics",
+    "pm"
+  ],
+  "license": "MIT"
+}
