@@ -104,8 +104,7 @@ export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
           }
           offset = size;
 
-          const text = buf.toString("utf8");
-          const lines = text.split("\n").filter((l) => l.length > 0);
+          const lines = buf.toString("utf8").split("\n").filter((l) => l.length > 0);
           for (const l of lines) stream.write(l);
           await stream.flush();
         } else if (size < offset) {
@@ -114,18 +113,10 @@ export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
         }
       }
 
-      // Sleep with abort responsiveness
       await new Promise<void>((resolve) => {
         const t = setTimeout(resolve, pollMs);
-        const onAbort = (): void => {
-          clearTimeout(t);
-          resolve();
-        };
-        if (opts.signal.aborted) {
-          clearTimeout(t);
-          resolve();
-          return;
-        }
+        const onAbort = (): void => { clearTimeout(t); resolve(); };
+        if (opts.signal.aborted) { clearTimeout(t); resolve(); return; }
         opts.signal.addEventListener("abort", onAbort, { once: true });
       });
     }

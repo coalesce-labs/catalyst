@@ -128,10 +128,10 @@ describe("formatEvent", () => {
     expect(formatEvent(e)).toBe("pr open");
   });
 
-  test("truncates unknown event names to 14 chars", () => {
+  test("truncates unknown event names to 15 chars", () => {
     const e = { ...baseEvent, attributes: { "event.name": "some.very.long.event.name.here" } } as unknown as CanonicalEvent;
     const result = formatEvent(e);
-    expect(result.length).toBeLessThanOrEqual(14);
+    expect(result.length).toBeLessThanOrEqual(15);
   });
 
   test("maps orchestrator.worker.done to 'done'", () => {
@@ -185,10 +185,10 @@ describe("formatDetails", () => {
     expect(formatDetails(e)).toBe("Something happened");
   });
 
-  test("truncates long messages to 80 chars", () => {
+  test("returns long messages in full (scrollable detail pane handles overflow)", () => {
     const long = "x".repeat(100);
     const e = { ...baseEvent, body: { message: long } };
-    expect(formatDetails(e).length).toBeLessThanOrEqual(80);
+    expect(formatDetails(e)).toBe(long);
   });
 });
 
