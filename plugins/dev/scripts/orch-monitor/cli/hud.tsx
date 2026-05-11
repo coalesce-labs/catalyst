@@ -251,7 +251,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     } finally {
       setQuerySubmitting(false);
     }
-  }, []);  // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useInput((input, key) => {
     if (queryFocused) {
@@ -312,7 +312,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       return;
     }
     if (input === "o") {
-      const orchId = selectedEvent?.attributes["catalyst.orchestrator.id"] as string | undefined;
+      const orchId = selectedEvent?.attributes["catalyst.orchestrator.id"];
       if (orchId) {
         setPivot({ type: "orch", id: orchId });
         showStatus(`pivoted to orchestrator ${orchId}`);

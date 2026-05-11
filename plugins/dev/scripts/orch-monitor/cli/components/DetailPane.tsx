@@ -81,7 +81,7 @@ export function buildDetailLines(event: CanonicalEvent, cols: number): Line[] {
       lines.push({ k: "text", value: message.slice(i, i + maxW) });
     }
   }
-  if (payload && typeof payload === "object" && Object.keys(payload as object).length > 0) {
+  if (payload && typeof payload === "object" && Object.keys(payload).length > 0) {
     if (!message) lines.push({ k: "sep" });
     for (const jl of JSON.stringify(payload, null, 2).split("\n")) {
       lines.push({ k: "text", value: jl, dim: true });
