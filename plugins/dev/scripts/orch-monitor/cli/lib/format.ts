@@ -82,15 +82,129 @@ export function formatRef(event: CanonicalEvent): string {
   return "";
 }
 
+const NAMED_ENTITIES: Record<string, string> = {
+  nbsp: " ",
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+};
+
+function decodeEntities(s: string): string {
+  return s.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, ref: string) => {
+    if (ref.startsWith("#x") || ref.startsWith("#X")) {
+      const cp = parseInt(ref.slice(2), 16);
+      return Number.isFinite(cp) ? String.fromCodePoint(cp) : m;
+    }
+    if (ref.startsWith("#")) {
+      const cp = parseInt(ref.slice(1), 10);
+      return Number.isFinite(cp) ? String.fromCodePoint(cp) : m;
+    }
+    return NAMED_ENTITIES[ref.toLowerCase()] ?? m;
+  });
+}
+
+function stripImages(s: string): string {
+  return s.replace(/<img\b[^>]*?>/gi, (tag: string) => {
+    const m = tag.match(/\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    const alt = (m?.[1] ?? m?.[2] ?? m?.[3] ?? "").trim();
+    return alt ? `[${alt}]` : "[image]";
+  });
+}
+
+function unwrapAnchors(s: string): string {
+  return s.replace(/<a\b[^>]*>([\s\S]*?)<\/a\s*>/gi, "$1");
+}
+
+const BLOCK_TAGS = new Set([
+  "br",
+  "p",
+  "div",
+  "section",
+  "article",
+  "header",
+  "footer",
+  "li",
+  "ul",
+  "ol",
+  "tr",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "blockquote",
+  "pre",
+]);
+
+function stripTags(s: string): string {
+  return s.replace(/<\/?([a-zA-Z][a-zA-Z0-9]*)\b[^>]*>/g, (_m, name: string) =>
+    BLOCK_TAGS.has(name.toLowerCase()) ? "\n" : "",
+  );
+}
+
+function stripMarkdown(s: string): string {
+  return s
+    .replace(/```([\s\S]*?)```/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/(^|\n)\s{0,3}#{1,6}\s+/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/(?<![\w*])\*([^*\n]+?)\*(?!\w)/g, "$1")
+    .replace(/(?<![\w_])_([^_\n]+?)_(?!\w)/g, "$1");
+}
+
+function sanitize(input: string, mode: "oneline" | "multiline"): string {
+  if (!input) return "";
+  let s = input;
+  s = stripImages(s);
+  s = unwrapAnchors(s);
+  s = stripTags(s);
+  s = decodeEntities(s);
+  s = stripMarkdown(s);
+  if (mode === "oneline") {
+    s = s.replace(/\s+/g, " ");
+  } else {
+    s = s
+      .split(/\n/)
+      .map((line) => line.replace(/[ \t]+/g, " ").trim())
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n");
+  }
+  return s.trim();
+}
+
+const detailsCache = new WeakMap<CanonicalEvent, string>();
+const bodyCache = new WeakMap<CanonicalEvent, string>();
+
 export function formatDetails(event: CanonicalEvent): string {
+  const cached = detailsCache.get(event);
+  if (cached !== undefined) return cached;
   const payload = event.body?.payload;
   const msg = event.body?.message ?? "";
+  let raw = msg;
   if (payload && typeof payload === "object") {
     const p = payload as Record<string, unknown>;
     const title = p["title"];
-    if (typeof title === "string") return title;
-    const body = p["body"];
-    if (typeof body === "string") return body.slice(0, 300);
+    if (typeof title === "string") {
+      raw = title;
+    } else {
+      const body = p["body"];
+      if (typeof body === "string") raw = body.slice(0, 300);
+    }
   }
-  return msg;
+  const out = sanitize(raw, "oneline");
+  detailsCache.set(event, out);
+  return out;
+}
+
+export function formatDetailBody(event: CanonicalEvent): string {
+  const cached = bodyCache.get(event);
+  if (cached !== undefined) return cached;
+  const msg = event.body?.message ?? "";
+  const out = sanitize(msg, "multiline");
+  bodyCache.set(event, out);
+  return out;
 }

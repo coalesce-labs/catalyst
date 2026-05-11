@@ -1,5 +1,6 @@
 import { Box, Text, useStdout } from "ink";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
+import { formatDetailBody } from "../lib/format.ts";
 
 export interface DetailPaneProps {
   event: CanonicalEvent;
@@ -72,13 +73,19 @@ export function buildDetailLines(event: CanonicalEvent, cols: number): Line[] {
   if (event.traceId) lines.push({ k: "field", label: "trace", value: event.traceId });
   if (event.spanId) lines.push({ k: "field", label: "span", value: event.spanId });
 
-  const message = event.body?.message;
+  const message = formatDetailBody(event);
   const payload = event.body?.payload;
   if (message) {
     lines.push({ k: "sep" });
     const maxW = cols - LABEL_W - 6;
-    for (let i = 0; i < message.length; i += Math.max(1, maxW)) {
-      lines.push({ k: "text", value: message.slice(i, i + maxW) });
+    for (const para of message.split("\n")) {
+      if (para.length === 0) {
+        lines.push({ k: "text", value: "" });
+        continue;
+      }
+      for (let i = 0; i < para.length; i += Math.max(1, maxW)) {
+        lines.push({ k: "text", value: para.slice(i, i + maxW) });
+      }
     }
   }
   if (payload && typeof payload === "object" && Object.keys(payload).length > 0) {
