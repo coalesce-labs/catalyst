@@ -67,7 +67,7 @@ This keeps your typical session lean while having powerful tools available when 
 
 ## What's Inside
 
-**Catalyst** is a 6-plugin system for Claude Code focused on **token efficiency**, **session-aware
+**Catalyst** is an 8-plugin system for Claude Code focused on **token efficiency**, **session-aware
 MCP management**, and **persistent context** through parallel agent research, structured handoffs,
 and shared memory systems.
 
@@ -84,10 +84,10 @@ and shared memory systems.
 
 **catalyst-pm** (Optional - Enable for product strategy)
 
-- 34 skills for product management (PRDs, user research, metrics, interviews, strategy)
+- 12 skills for product strategy (PRDs, north star, prioritization, and release planning)
 - 7 sub-agents forming a review panel (engineering, design, executive, legal, UX, customer voice)
 - Research-first architecture (Haiku for data collection, Sonnet/Opus for analysis)
-- PRD workflows, user research synthesis, north star definition, prioritization
+- PRD workflows, north star definition, strategy sprints, expansion planning
 
 **catalyst-pm-ops** (Optional - Enable for day-to-day PM operations)
 
@@ -95,7 +95,18 @@ and shared memory systems.
 - 4 specialized agents: cycle-analyzer, milestone-analyzer, backlog-analyzer, github-linear-analyzer
 - Cycle health, milestone tracking, backlog grooming, PR↔issue sync
 - Daily/weekly cadence, status updates, Slack drafting
-- Companion to [catalyst-pm](./plugins/pm-ops/README.md)
+
+**catalyst-meeting-hygiene** (Optional - Enable for meeting workflows)
+
+- 4 skills for meeting lifecycle management
+- Agenda creation, transcript-to-action-items, end-of-day batch cleanup, effectiveness retros
+
+**catalyst-discovery** (Optional - Enable for user research and metrics)
+
+- 14 skills for understanding users and validating hypotheses
+- User interviews, research synthesis, journey maps, competitor analysis
+- Metrics framework (STEDII), activation/retention analysis, experiment planning
+- Prototyping via Artifacts, Lovable, v0, or Bolt
 
 **catalyst-analytics** (Optional - Enable when needed)
 
@@ -166,11 +177,17 @@ Alternatively, install plugins manually via Claude Code plugin system:
 # Install core workflow (required)
 /plugin install catalyst-dev
 
-# Optional: Install PM plugin (strategy, PRDs, user research)
+# Optional: Install PM plugin (strategy, PRDs, prioritization)
 /plugin install catalyst-pm
 
 # Optional: Install PM ops plugin (cycle/backlog/cadence operations)
 /plugin install catalyst-pm-ops
+
+# Optional: Install meeting hygiene plugin (agendas, notes, cleanup)
+/plugin install catalyst-meeting-hygiene
+
+# Optional: Install discovery plugin (user research, metrics, prototyping)
+/plugin install catalyst-discovery
 
 # Optional: Install analytics plugin (if you use PostHog)
 /plugin install catalyst-analytics
