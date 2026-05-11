@@ -53,7 +53,14 @@ export function formatSource(event: CanonicalEvent): string {
   if (name.startsWith("github.")) return "github";
   if (name.startsWith("linear.")) return "linear";
   if (name === "comms.message.posted") return "comms";
-  if (name.startsWith("filter.")) return "filter";
+  // CTL-331: recognise filter.* and the legacy orchestrator.filter.* alias.
+  // Surface the orchestrator id when present so users can correlate filter
+  // events back to a specific orchestrator run.
+  if (name.startsWith("filter.") || name.startsWith("orchestrator.filter.")) {
+    const orchId = event.attributes["catalyst.orchestrator.id"];
+    return orchId ?? "filter";
+  }
+  if (name === "broker.daemon.startup") return "broker";
   const orchId = event.attributes["catalyst.orchestrator.id"];
   const worker = event.attributes["catalyst.worker.ticket"];
   if (orchId && worker) return `${orchId}/${worker}`;
@@ -70,6 +77,16 @@ const EVENT_LABELS: Record<string, string> = {
   "orchestrator.attention.raised": "attention",
   "comms.message.posted": "comms",
   "session.phase": "phase",
+  // CTL-331: filter daemon lifecycle events.
+  "filter.register": "filter reg",
+  "filter.deregister": "filter dereg",
+  "filter.wake": "wake",
+  "broker.daemon.startup": "broker start",
+  // Legacy aliases for events written before catalyst-state.sh preserved the
+  // bare filter.* name (CTL-331). Keeps older log lines readable.
+  "orchestrator.filter.register": "filter reg",
+  "orchestrator.filter.deregister": "filter dereg",
+  "orchestrator.filter.wake": "wake",
 };
 
 export function formatEvent(event: CanonicalEvent): string {
@@ -78,6 +95,11 @@ export function formatEvent(event: CanonicalEvent): string {
   if (name === "github.check_suite.completed") {
     const c = event.attributes["cicd.pipeline.run.conclusion"];
     return c === "success" ? "ci pass" : "ci fail";
+  }
+  // CTL-331: wake events are session-scoped (filter.wake.{sessionId}).
+  // EVENT_LABELS is exact-match, so handle the prefixed family explicitly.
+  if (name.startsWith("filter.wake.") || name.startsWith("orchestrator.filter.wake.")) {
+    return "wake";
   }
   const label = EVENT_LABELS[name] ?? name;
   return label.slice(0, 15);

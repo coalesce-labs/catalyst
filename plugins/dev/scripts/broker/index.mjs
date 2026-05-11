@@ -23,6 +23,7 @@ import {
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import pino from "pino";
 import {
   openBrokerStateDb,
@@ -75,13 +76,92 @@ const HEARTBEAT_STALE_MS = parseInt(process.env.FILTER_HEARTBEAT_STALE_MS ?? "18
 function getEventLogPath() {
   const now = new Date();
   const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  return resolve(CATALYST_DIR, "events", `${ym}.jsonl`);
+  // Re-read CATALYST_DIR per call so tests can redirect by setting the env
+  // var. Production deployments still pin a stable value via daemon launch.
+  const catalystDir = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
+  return resolve(catalystDir, "events", `${ym}.jsonl`);
 }
 
-function appendEvent(event) {
+// Canonical envelope helpers (mirrors lib/canonical-event.sh and
+// orch-monitor/lib/canonical-event.ts so trace/span IDs match deterministically
+// across producers — CTL-331).
+
+const __PLUGIN_JSON_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  ".claude-plugin",
+  "plugin.json",
+);
+let __pluginVersionCached = null;
+
+export function pluginVersion() {
+  if (__pluginVersionCached !== null) return __pluginVersionCached;
+  try {
+    const parsed = JSON.parse(readFileSync(__PLUGIN_JSON_PATH, "utf8"));
+    __pluginVersionCached = typeof parsed?.version === "string" ? parsed.version : "0.0.0";
+  } catch {
+    __pluginVersionCached = "0.0.0";
+  }
+  return __pluginVersionCached;
+}
+
+function sha256Hex(input) {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function deriveTraceId(orchestratorId) {
+  if (orchestratorId && orchestratorId.length > 0) {
+    return sha256Hex(orchestratorId).slice(0, 32);
+  }
+  return null;
+}
+
+function deriveSpanId(workerTicket) {
+  if (workerTicket && workerTicket.length > 0) {
+    return sha256Hex(workerTicket).slice(0, 16);
+  }
+  return null;
+}
+
+const __SEVERITY_NUMBERS = { DEBUG: 5, INFO: 9, WARN: 13, ERROR: 17 };
+
+// Translate the broker's internal {event, orchestrator, worker, detail} shape
+// into a canonical OTel-style envelope. Severity defaults to INFO — broker
+// emissions today (filter.wake.*, broker.daemon.startup) are all info-level.
+export function buildCanonicalEnvelope(legacy) {
+  const eventName = legacy.event ?? "";
+  const orch = legacy.orchestrator ?? null;
+  const worker = legacy.worker ?? null;
+  const severity = legacy.severity ?? "INFO";
+  const ts = legacy.ts ?? new Date().toISOString();
+
+  const attributes = { "event.name": eventName };
+  if (orch) attributes["catalyst.orchestrator.id"] = orch;
+  if (worker) attributes["catalyst.worker.ticket"] = worker;
+
+  return {
+    ts,
+    observedTs: ts,
+    severityText: severity,
+    severityNumber: __SEVERITY_NUMBERS[severity] ?? __SEVERITY_NUMBERS.INFO,
+    traceId: deriveTraceId(orch),
+    spanId: deriveSpanId(worker),
+    resource: {
+      "service.name": "catalyst.broker",
+      "service.namespace": "catalyst",
+      "service.version": pluginVersion(),
+    },
+    attributes,
+    body: { payload: legacy.detail ?? null },
+  };
+}
+
+export function appendEvent(event) {
   const logPath = getEventLogPath();
   mkdirSync(dirname(logPath), { recursive: true });
-  appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n");
+  const canonical = buildCanonicalEnvelope(event);
+  appendFileSync(logPath, JSON.stringify(canonical) + "\n");
 }
 
 // --- Interest table ---
