@@ -1,6 +1,8 @@
 # Catalyst PM Plugin
 
-Linear-focused project management plugin — 46 skills and 12 analyzer/research agents covering cycle management, backlog grooming, GitHub-Linear correlation, strategy, PRDs, user research, meetings, prototyping, and analytics.
+Product strategy plugin — 34 skills covering strategy, PRDs, user research, metrics, interviews, prototyping, and decision-making.
+
+> **Operational PM workflows** (cycle health, backlog grooming, cadence, status updates, Slack) moved to the companion [catalyst-pm-ops](../pm-ops/README.md) plugin.
 
 > **Complete inventory:** the full list of skills and agents (with trigger contexts) lives in the website's [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/#catalyst-pm) and [Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/#catalyst-pm-agents). The sections below highlight the most commonly-used feature groups; they are not exhaustive.
 
@@ -52,143 +54,11 @@ exactly what action to take after reading any report.
 
 ## Commands
 
-### Cycle Management
-
-- `/catalyst-pm:analyze-cycle` - Analyze cycle health with actionable insights
-  - Health assessment (🟢/🟡/🔴)
-  - Risk identification (blockers, at-risk issues)
-  - Team capacity analysis
-  - Specific recommendations
-
-### Milestone Management
-
-- `/catalyst-pm:analyze-milestone` - Analyze milestone health toward target date
-  - Target date feasibility assessment
-  - Progress tracking (actual vs expected)
-  - Risk identification (behind schedule, blockers)
-  - Specific recommendations (adjust timeline, reduce scope)
-
-### `/catalyst-pm:analyze-cycle`
-
-Generate comprehensive cycle health report with recommendations.
-
-**What it does**:
-
-- Spawns linear-research agent to fetch active cycle data (Haiku)
-- Spawns cycle-analyzer agent for health assessment (Sonnet)
-- Generates progress metrics, risk factors, capacity analysis
-- Provides specific, prioritized recommendations
-
-**Output**: Health report saved to `thoughts/shared/pm/reports/`
-
-**Example**:
-
-```
-🟡 Cycle Health: Sprint 2025-W04 - At Risk
-
-Takeaway: Cycle is 45% complete with 3 days remaining. We're tracking
-slightly behind (projected 63% completion). Main risks: 2 blocked issues
-and Dave has no assigned work.
-
-Priority Actions:
-  1. Escalate TEAM-461 blocker (external dependency, 6 days)
-  2. Pair Bob with senior dev on TEAM-462 (dependency conflict)
-  3. Assign 2 backlog issues to Dave (no active work)
-```
-
-### Daily Operations
-
-- `/catalyst-pm:report-daily` - Quick daily standup report
-  - Yesterday's deliveries
-  - Current work in progress
-  - Team members needing assignments
-  - Quick blockers/risks
-
-### `/catalyst-pm:report-daily`
-
-Quick daily standup report (scannable in <30 seconds).
-
-**What it does**:
-
-- Spawns 4 parallel research agents for fast data gathering (Haiku)
-- Lists current work in progress by team member
-- Identifies team members needing work assignments
-- Flags quick blockers and stalled issues
-
-**Output**: Daily report saved to `thoughts/shared/pm/reports/`
-
-**Example**:
-
-```
-📅 Team Daily - 2025-01-27
-
-✅ Delivered yesterday: 3 issues, 2 PRs merged
-🔄 In progress: 5 issues, 3 PRs open
-👥 Need work: Dave, Emily (2 team members)
-⚠️  Blockers: 1 issue (TEAM-461)
-```
-
-### Backlog Health
-
-- `/catalyst-pm:groom-backlog` - Analyze backlog health
-  - Orphaned issues (no project)
-  - Misplaced issues (wrong project)
-  - Stale issues (>30 days inactive)
-  - Potential duplicates
-  - Missing estimates
-
-### `/catalyst-pm:groom-backlog`
-
-Analyze backlog health and generate cleanup recommendations.
-
-**What it does**:
-
-- Spawns linear-research agent to fetch backlog issues (Haiku)
-- Spawns backlog-analyzer agent for analysis (Sonnet)
-- Identifies orphaned, misplaced, stale, and duplicate issues
-- Generates batch update commands
-
-**Output**: Grooming report saved to `thoughts/shared/pm/reports/`
-
-**Options**:
-
-1. Review detailed report
-2. Apply high-confidence recommendations automatically
-3. Generate Linear update commands for manual execution
-4. Skip (report saved for later)
-
-### GitHub-Linear Sync
-
-- `/catalyst-pm:sync-prs` - Correlate GitHub PRs with Linear issues
-  - Orphaned PRs (no Linear issue)
-  - Orphaned issues (no PR)
-  - Ready to close (PR merged, issue open)
-  - Stale PRs (>14 days)
-
-### `/catalyst-pm:sync-prs`
-
-Correlate GitHub PRs with Linear issues and identify gaps.
-
-**What it does**:
-
-- Spawns parallel research for GitHub PRs and Linear issues (Haiku)
-- Spawns github-linear-analyzer agent for correlation analysis (Sonnet)
-- Identifies orphaned PRs, orphaned issues, merge candidates
-- Generates auto-close commands
-
-**Output**: Correlation report saved to `thoughts/shared/pm/reports/`
-
-**Example**:
-
-```
-🔗 PR-Linear Sync Report
-
-Health Score: 75/100
-  ✅ 8 properly linked PRs
-  ⚠️ 4 orphaned PRs need Linear issues
-  ⚠️ 2 orphaned issues need PRs
-  ✅ 2 ready to close
-```
+> **Operational skills moved to [catalyst-pm-ops](../pm-ops/README.md)**:
+> `/catalyst-pm-ops:analyze-cycle`, `/catalyst-pm-ops:analyze-milestone`, `/catalyst-pm-ops:groom-backlog`,
+> `/catalyst-pm-ops:sync-prs`, `/catalyst-pm-ops:report-daily`, `/catalyst-pm-ops:daily-plan`,
+> `/catalyst-pm-ops:weekly-plan`, `/catalyst-pm-ops:weekly-review`, `/catalyst-pm-ops:status-update`,
+> `/catalyst-pm-ops:create-tickets`, `/catalyst-pm-ops:slack-message`, `/catalyst-pm-ops:connect-mcps`
 
 ### Context Engineering
 
@@ -246,77 +116,8 @@ Priority Actions:
   - Returns structured JSON
   - Optimized for speed
 
-### Analyzer Agents (Sonnet)
-
-### `cycle-analyzer`
-
-**Purpose**: Transform raw cycle data into actionable health insights
-
-**Responsibilities**:
-
-- Calculate health scores (progress, blockers, at-risk issues)
-- Identify risk factors with specific details
-- Analyze team capacity and workload distribution
-- Generate prioritized, actionable recommendations
-
-**Returns**: Structured markdown with health assessment, risks, capacity, recommendations
-
-### `milestone-analyzer`
-
-**Purpose**: Analyze project milestone progress toward target dates
-
-**Responsibilities**:
-
-- Calculate health scores based on target date feasibility
-- Identify risk factors (behind schedule, blockers, scope creep)
-- Analyze velocity and projected completion
-- Generate timeline/scope recommendations
-
-**Returns**: Structured markdown with target date assessment, risks, velocity, recommendations
-
-### `backlog-analyzer`
-
-**Purpose**: Maintain healthy, well-organized Linear backlog
-
-**Responsibilities**:
-
-- Project assignment analysis (orphaned, misplaced issues)
-- Staleness detection (>30 days inactive)
-- Duplicate detection (similar titles/descriptions)
-- Estimation gap identification
-
-**Returns**: Structured markdown with categorized recommendations and confidence scores
-
-### `context-analyzer`
-
-**Purpose**: Track context engineering adoption across the team
-
-**Responsibilities**:
-
-- Cross-reference code repository activity vs thoughts repository activity
-- Identify developers with code commits but NO thoughts activity
-- Calculate individual adoption scores (Excellent → Not using)
-- Analyze file type breakdown (research, plans, handoffs, PRs)
-- Generate 28-day trend analysis with week-over-week growth
-- Provide prioritized action items (P1: Immediate, P2: Celebrate, P3: Growth)
-
-**Returns**: Structured markdown dashboard with adoption metrics, non-adopters, trends,
-recommendations
-
-**Key Feature**: Identifies team members NOT using context engineering (code-only developers)
-
-### `github-linear-analyzer`
-
-**Purpose**: Ensure proper GitHub-Linear correlation
-
-**Responsibilities**:
-
-- Match PRs to Linear issues via multiple methods
-- Identify orphaned PRs and issues
-- Flag stale PRs (>14 days open)
-- Detect merge candidates (PR merged, issue open)
-
-**Returns**: Correlation report with health score and actionable commands
+> **Analyzer agents moved to [catalyst-pm-ops](../pm-ops/README.md)**:
+> `cycle-analyzer`, `milestone-analyzer`, `backlog-analyzer`, `github-linear-analyzer`
 
 ## Prerequisites
 
@@ -404,61 +205,12 @@ Check that the plugin is installed:
 
 ```bash
 /plugin list
-# Should show: catalyst-pm
-
-# Run prerequisite check
-cd /path/to/your/project
-./plugins/pm/scripts/check-prerequisites.sh
+# Should show: catalyst-pm, catalyst-pm-ops
 ```
 
 ## Usage Patterns
 
-### Daily Workflow
-
-**Morning Standup**:
-
-```bash
-/catalyst-pm:context-daily
-```
-
-- See what shipped yesterday
-- Review current work
-- Identify blockers
-- Assign work to available team members
-
-### Weekly Review
-
-**Start of Week**:
-
-```bash
-/catalyst-pm:analyze-cycle
-```
-
-- Assess cycle health
-- Review capacity
-- Address blockers
-- Plan capacity adjustments
-
-**Mid-Week**:
-
-```bash
-/catalyst-pm:sync-prs
-```
-
-- Check GitHub-Linear correlation
-- Close merged issues
-- Create missing Linear issues
-
-**End of Week**:
-
-```bash
-/catalyst-pm:groom-backlog
-```
-
-- Clean up orphaned issues
-- Categorize new issues
-- Remove stale issues
-- Prepare next cycle
+> For daily standup, cycle review, backlog grooming, and PR sync workflows, see [catalyst-pm-ops](../pm-ops/README.md).
 
 ## Configuration Options
 

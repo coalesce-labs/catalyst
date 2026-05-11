@@ -33,14 +33,14 @@ Generate clear, purposeful meeting agendas that drive decisions and action. Ever
 
 Before creating an agenda, first ask these diagnostic questions:
 
-1. **Is this meeting actually necessary?** Could the outcome be achieved async (Slack thread, shared doc, or `/status-update`)?
+1. **Is this meeting actually necessary?** Could the outcome be achieved async (Slack thread, shared doc, or `/catalyst-pm-ops:status-update`)?
 2. **Who genuinely needs to be there?** If someone is only there "to stay informed," they should get notes instead.
 3. **What specific decisions or outcomes are expected?** If you can't name one, the meeting probably should not happen.
 
 If the PM realizes the meeting is not necessary, suggest an async alternative:
 
 - **For alignment:** Shared doc with comment deadline
-- **For updates:** `/status-update` sent to stakeholders
+- **For updates:** `/catalyst-pm-ops:status-update` sent to stakeholders
 - **For quick decisions:** Slack thread with a 24-hour decision deadline
 - **For feedback:** Async review in design tool/Google Docs with specific questions
 
@@ -724,7 +724,7 @@ Meeting focuses on discussing concerns, not rehashing basics.
 **Before the meeting:**
 
 - `/prd-draft` - Create spec to review in meeting
-- `/status-update` - Pre-read for stakeholder meetings
+- `/catalyst-pm-ops:status-update` - Pre-read for stakeholder meetings
 
 ## Questions to Ask Before Creating Agenda
 

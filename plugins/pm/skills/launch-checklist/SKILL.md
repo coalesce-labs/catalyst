@@ -394,14 +394,14 @@ WARNING: Any delay in this chain delays launch by the same amount.
 
 **After `/launch-checklist`:**
 
-- `/create-tickets` - Convert to Linear tasks
-- `/daily-plan` - Surface checklist items in daily planning
+- `/catalyst-pm-ops:create-tickets` - Convert to Linear tasks
+- `/catalyst-pm-ops:daily-plan` - Surface checklist items in daily planning
 - `/feature-results` - Analyze post-launch impact
 
 **During launch:**
 
-- `/weekly-review` - Track checklist progress each week
-- `/status-update` - Share launch status with stakeholders
+- `/catalyst-pm-ops:weekly-review` - Track checklist progress each week
+- `/catalyst-pm-ops:status-update` - Share launch status with stakeholders
 
 ---
 
@@ -415,9 +415,9 @@ WARNING: Any delay in this chain delays launch by the same amount.
 
 **After this:**
 
-- `/create-tickets` - Track in Linear
+- `/catalyst-pm-ops:create-tickets` - Track in Linear
 - `/feature-results` - Post-launch analysis
-- `/weekly-review` - Monitor progress weekly
+- `/catalyst-pm-ops:weekly-review` - Monitor progress weekly
 
 ---
 

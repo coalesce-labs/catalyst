@@ -779,7 +779,7 @@ Because this is one-way, we're applying extra rigor:
 ### Announcing the Decision
 
 ```
-Use `/slack-message` to announce your decision.
+Use `/catalyst-pm-ops:slack-message` to announce your decision.
 
 I'll create:
 - **For leadership:** Executive summary of decision and rationale
@@ -867,7 +867,7 @@ I'll auto-populate:
 ### Tracked in Status Updates
 
 ```
-Use `/status-update` to track implementation progress.
+Use `/catalyst-pm-ops:status-update` to track implementation progress.
 
 I'll reference:
 - Timeline from decision doc

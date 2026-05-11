@@ -342,14 +342,14 @@ Always analyze results across these default segments. Segment analysis often rev
 
 **Scenario:** Feature shipped, primary metric exceeded target by 20%. Guardrails held.
 **Root cause:** N/A (success)
-**Action:** Scale to 100%, plan v2 based on segment insights, draft announcement via `/slack-message`, update `/status-update` with win.
+**Action:** Scale to 100%, plan v2 based on segment insights, draft announcement via `/catalyst-pm-ops:slack-message`, update `/catalyst-pm-ops:status-update` with win.
 **Communication:** Lead with the number, credit the team, connect to quarterly goals.
 
 ### Pattern 2: Mixed Results
 
 **Scenario:** Primary metric hit target but guardrail metric degraded (e.g., page load time increased 15%).
 **Root cause:** Quality problem -- feature added weight to core flow.
-**Action:** Investigate quality regression, hold at current rollout %, fix guardrail before scaling. Create follow-up ticket via `/create-tickets`.
+**Action:** Investigate quality regression, hold at current rollout %, fix guardrail before scaling. Create follow-up ticket via `/catalyst-pm-ops:create-tickets`.
 **Communication:** "Feature is working as intended for users, but we identified a performance regression we need to fix before full rollout."
 
 ### Pattern 3: Clear Miss
@@ -425,10 +425,10 @@ When the PM uses `/feature-results`, I automatically:
 
 **Routing logic:**
 
-- **Ship to 100%:** Draft announcement for `/slack-message`
+- **Ship to 100%:** Draft announcement for `/catalyst-pm-ops:slack-message`
 - **Iterate:** Create follow-up experiment plan with `/experiment-decision`
 - **Kill:** Draft decision doc for `/decision-doc` explaining sunset
-- **Executive update:** Format for `/status-update` with business impact
+- **Executive update:** Format for `/catalyst-pm-ops:status-update` with business impact
 
 ---
 

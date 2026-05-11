@@ -501,7 +501,7 @@ When the PM uses `/prioritize`, I automatically:
 ### 6. Route for Action
 **Routing logic:**
 - **Define leverage work:** Link to `/prd-draft`, `/write-prod-strategy`
-- **Create blockers list:** Use `/slack-message` to request overhead elimination
+- **Create blockers list:** Use `/catalyst-pm-ops:slack-message` to request overhead elimination
 - **Track time:** Suggest time-blocking strategies to protect leverage time
 - **Weekly audit:** Use this weekly to course-correct
 

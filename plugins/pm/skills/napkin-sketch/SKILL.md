@@ -579,7 +579,7 @@ Common UI:
 
 - `/prd-draft` - Include wireframes in PRDs
 - `/generate-ai-prototype` - Use as reference for AI prototype prompts
-- `/create-tickets` - Engineers see wireframe in ticket
+- `/catalyst-pm-ops:create-tickets` - Engineers see wireframe in ticket
 
 **Follows:**
 
@@ -622,7 +622,7 @@ Before delivering the napkin sketch, verify:
 - [ ] **Mobile variant included** -- If feature is mobile/responsive, a mobile wireframe is provided
 - [ ] **Flow diagram present** -- For multi-screen features, screen-to-screen navigation is shown
 - [ ] **Context checked** -- PRD requirements, user research, and past prototypes referenced before wireframing
-- [ ] **Actionable for next step** -- Wireframe is clear enough to feed into `/generate-ai-prototype` or `/create-tickets`
+- [ ] **Actionable for next step** -- Wireframe is clear enough to feed into `/generate-ai-prototype` or `/catalyst-pm-ops:create-tickets`
 
 If any check fails, fix it before delivering. A 5-minute wireframe should save hours of miscommunication.
 

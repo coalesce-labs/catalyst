@@ -606,7 +606,7 @@ After synthesis:
 
 - `/prd-draft` - Auto-populate Hypothesis with user quotes and insights
 - `/write-prod-strategy` - Themes inform strategic pillars
-- `/status-update` - Key research findings go in stakeholder updates
+- `/catalyst-pm-ops:status-update` - Key research findings go in stakeholder updates
 - `/competitor-analysis` - If competitors mentioned, extract those mentions
 
 **Pulls from:**

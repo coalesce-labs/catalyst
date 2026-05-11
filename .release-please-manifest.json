@@ -3,5 +3,6 @@
   "plugins/pm": "6.1.0",
   "plugins/analytics": "1.3.1",
   "plugins/debugging": "1.3.1",
-  "plugins/meta": "4.0.1"
+  "plugins/meta": "4.0.1",
+  "plugins/pm-ops": "1.0.0"
 }
