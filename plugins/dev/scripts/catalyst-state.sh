@@ -143,6 +143,12 @@ __orch_canonical_for() {
     attention-raised)        echo "orchestrator.attention.raised attention raised WARN" ;;
     attention-resolved)      echo "orchestrator.attention.resolved attention resolved INFO" ;;
     archive)                 echo "orchestrator.archived orchestrator archived INFO" ;;
+    # Filter daemon lifecycle (CTL-331): keep the bare filter.* name so the HUD
+    # can label them; the wildcard fallthrough would otherwise rename them
+    # orchestrator.filter.* which has no display label.
+    filter.register)         echo "filter.register filter register INFO" ;;
+    filter.deregister)       echo "filter.deregister filter deregister INFO" ;;
+    filter.wake)             echo "filter.wake filter wake INFO" ;;
     *)                       echo "orchestrator.$1 orchestrator $1 INFO" ;;
   esac
 }

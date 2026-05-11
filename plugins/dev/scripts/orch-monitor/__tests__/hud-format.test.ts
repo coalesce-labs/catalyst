@@ -114,6 +114,46 @@ describe("formatSource", () => {
     const e = { ...baseEvent, attributes: { "event.name": "some.unknown.event" } } as unknown as CanonicalEvent;
     expect(formatSource(e)).toBe("system");
   });
+
+  // CTL-331: filter events surface the orchestrator id when present so users
+  // can correlate filter events back to a specific orchestrator run.
+  test("maps filter.* with orchestrator id to that orch id", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "filter.register",
+        "catalyst.orchestrator.id": "orch-abc",
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatSource(e)).toBe("orch-abc");
+  });
+
+  test("maps filter.* without orchestrator id to 'filter'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.sess_x" },
+    } as unknown as CanonicalEvent;
+    expect(formatSource(e)).toBe("filter");
+  });
+
+  test("maps legacy orchestrator.filter.* alias to the orchestrator id", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "orchestrator.filter.register",
+        "catalyst.orchestrator.id": "orch-abc",
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatSource(e)).toBe("orch-abc");
+  });
+
+  test("maps broker.daemon.startup to 'broker'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "broker.daemon.startup" },
+    } as unknown as CanonicalEvent;
+    expect(formatSource(e)).toBe("broker");
+  });
 });
 
 describe("formatEvent", () => {
@@ -157,6 +197,54 @@ describe("formatEvent", () => {
   test("maps orchestrator.worker.done to 'done'", () => {
     const e = { ...baseEvent, attributes: { "event.name": "orchestrator.worker.done" } } as unknown as CanonicalEvent;
     expect(formatEvent(e)).toBe("done");
+  });
+
+  // CTL-331: filter daemon lifecycle labels.
+  test("maps filter.register to 'filter reg'", () => {
+    const e = { ...baseEvent, attributes: { "event.name": "filter.register" } } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("filter reg");
+  });
+
+  test("maps filter.deregister to 'filter dereg'", () => {
+    const e = { ...baseEvent, attributes: { "event.name": "filter.deregister" } } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("filter dereg");
+  });
+
+  test("maps filter.wake to 'wake'", () => {
+    const e = { ...baseEvent, attributes: { "event.name": "filter.wake" } } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("wake");
+  });
+
+  test("maps prefixed filter.wake.{sessionId} to 'wake' (not truncated)", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.sess_20260511T203845_16d33281" },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("wake");
+  });
+
+  test("maps legacy orchestrator.filter.register alias to 'filter reg'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "orchestrator.filter.register" },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("filter reg");
+  });
+
+  test("maps legacy orchestrator.filter.wake.* alias to 'wake'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "orchestrator.filter.wake.sess_xyz" },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("wake");
+  });
+
+  test("maps broker.daemon.startup to 'broker start'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "broker.daemon.startup" },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("broker start");
   });
 });
 
