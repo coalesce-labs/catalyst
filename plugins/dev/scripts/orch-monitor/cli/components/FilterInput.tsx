@@ -17,10 +17,10 @@ export function FilterInput({ value, focused, onChange, pivot }: FilterInputProp
       )}
       <Text dimColor={!focused}>{"/ "}</Text>
       <TextInput value={value} onChange={onChange} focus={focused} placeholder="filter (substring or .jq)" />
-      <Text dimColor>
+      <Text dimColor wrap="truncate-end">
         {"  "}
         {focused ? "Esc:clear" : "/:focus"}
-        {" | t:trace o:orch r:reset | Enter:detail q:quit"}
+        {" | t:trace o:orch | Enter:detail q:quit"}
       </Text>
     </Box>
   );

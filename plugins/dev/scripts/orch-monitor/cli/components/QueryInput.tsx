@@ -23,7 +23,7 @@ export function QueryInput({ value, focused, busy, error, hasDsl, onChange, onSu
           focus={focused && !busy}
           placeholder='natural-language query (e.g. "errors today")'
         />
-        <Text dimColor>
+        <Text dimColor wrap="truncate-end">
           {"  "}
           {busy ? "translating…" : focused ? "Enter:run Esc:cancel" : ":focus"}
           {hasDsl ? " | ?:show DSL" : ""}
