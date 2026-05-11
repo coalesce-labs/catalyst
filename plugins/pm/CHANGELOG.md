@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.1.0...catalyst-pm-v7.0.0) (2026-05-11)
+
+
+### ⚠ BREAKING CHANGES
+
+* **pm:** shrink catalyst-pm to 12 strategy/PRD skills (CTL-322) ([#543](https://github.com/coalesce-labs/catalyst/issues/543))
+* **pm:** extract meeting workflow skills into catalyst-meeting-hygiene plugin (CTL-320) ([#541](https://github.com/coalesce-labs/catalyst/issues/541))
+* **pm-ops:** extract Linear/cadence/comms skills from catalyst-pm (CTL-319) ([#537](https://github.com/coalesce-labs/catalyst/issues/537))
+
+### Features
+
+* **pm-ops:** extract Linear/cadence/comms skills from catalyst-pm (CTL-319) ([#537](https://github.com/coalesce-labs/catalyst/issues/537)) ([5a9c582](https://github.com/coalesce-labs/catalyst/commit/5a9c58279129349645997d0e7b20928f93b32c4a))
+* **pm:** extract meeting workflow skills into catalyst-meeting-hygiene plugin (CTL-320) ([#541](https://github.com/coalesce-labs/catalyst/issues/541)) ([ba0c12a](https://github.com/coalesce-labs/catalyst/commit/ba0c12a19b881a325beb7029d47f1f3e8952596e))
+* **pm:** shrink catalyst-pm to 12 strategy/PRD skills (CTL-322) ([#543](https://github.com/coalesce-labs/catalyst/issues/543)) ([43b1c89](https://github.com/coalesce-labs/catalyst/commit/43b1c89db5d7536a31a82918df8555b579e53f07))
+
 ## [7.0.0] — 2026-05-11
 
 ### ⚠ BREAKING CHANGES
