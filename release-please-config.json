@@ -86,6 +86,20 @@
           "jsonpath": "$.version"
         }
       ]
+    },
+    "plugins/meeting-hygiene": {
+      "release-type": "simple",
+      "component": "catalyst-meeting-hygiene",
+      "package-name": "catalyst-meeting-hygiene",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": true,
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        }
+      ]
     }
   }
 }

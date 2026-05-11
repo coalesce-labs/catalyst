@@ -1,8 +1,10 @@
 # Catalyst PM Plugin
 
-Product strategy plugin — 34 skills covering strategy, PRDs, user research, metrics, interviews, prototyping, and decision-making.
+Product strategy plugin — 30 skills covering strategy, PRDs, user research, metrics, interviews, prototyping, and decision-making.
 
 > **Operational PM workflows** (cycle health, backlog grooming, cadence, status updates, Slack) moved to the companion [catalyst-pm-ops](../pm-ops/README.md) plugin.
+
+> **Meeting workflow skills** (agenda, notes, cleanup, effectiveness retro) moved to the companion [catalyst-meeting-hygiene](../meeting-hygiene/README.md) plugin.
 
 > **Complete inventory:** the full list of skills and agents (with trigger contexts) lives in the website's [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/#catalyst-pm) and [Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/#catalyst-pm-agents). The sections below highlight the most commonly-used feature groups; they are not exhaustive.
 
