@@ -1,19 +1,21 @@
 # Changelog
 
-## [9.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.4.0...catalyst-dev-v9.0.0) (2026-05-11)
+## [9.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.4.0...catalyst-dev-v9.0.0)
+
+May 11, 2026
+
+<!-- ai-enhanced -->
+
+### Catalyst HUD Bottom-Anchored Panels
+
+Detail panes and help overlays now anchor to the bottom of your terminal with the event list expanding to fill all remaining space above. Event rows are self-explanatory — comms events show sender/recipient/type, filter events display as "wake"/"filter reg" instead of truncated names, and all text is cleaned of HTML/Markdown markup. Column headers stay pinned when detail panes are open, and the core catalyst-pm plugin now focuses on 12 essential strategy/PRD skills with ops features moved to dedicated sibling plugins.
 
 
-### ⚠ BREAKING CHANGES
+
+### PRs
 
 * **pm:** shrink catalyst-pm to 12 strategy/PRD skills (CTL-322) ([#543](https://github.com/coalesce-labs/catalyst/issues/543))
-
-### Features
-
 * **pm:** shrink catalyst-pm to 12 strategy/PRD skills (CTL-322) ([#543](https://github.com/coalesce-labs/catalyst/issues/543)) ([43b1c89](https://github.com/coalesce-labs/catalyst/commit/43b1c89db5d7536a31a82918df8555b579e53f07))
-
-
-### Bug Fixes
-
 * **dev:** bottom-anchor catalyst-hud detail pane (CTL-324) ([#553](https://github.com/coalesce-labs/catalyst/issues/553)) ([9de7767](https://github.com/coalesce-labs/catalyst/commit/9de7767c38bc5f09c41465cd793fefe51ef333a7))
 * **dev:** bottom-anchor catalyst-hud help panel (CTL-325) ([#554](https://github.com/coalesce-labs/catalyst/issues/554)) ([474702d](https://github.com/coalesce-labs/catalyst/commit/474702db166c6a68ffe277d6767f0674ce63be42))
 * **dev:** broker writes canonical filter.wake events + HUD shows filter.* labels (CTL-331) ([#558](https://github.com/coalesce-labs/catalyst/issues/558)) ([6a28db7](https://github.com/coalesce-labs/catalyst/commit/6a28db74736b857b25328bed253566e7fc289184))
