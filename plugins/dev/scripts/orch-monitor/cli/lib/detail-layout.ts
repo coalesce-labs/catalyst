@@ -26,46 +26,82 @@ export interface DetailLayoutResult {
   listScrollOffset: number;
 }
 
+export interface BottomOverlaySize {
+  /** Rows the overlay occupies (content + borders). */
+  paneRows: number;
+  /** Rows allocated to the EventList above the overlay. */
+  listRows: number;
+  /** True when the overlay's natural height fit without capping. */
+  fits: boolean;
+}
+
+// Generic bottom-anchored overlay sizing. The overlay (detail pane, help
+// panel, future modals) renders at its natural height, but is capped so the
+// list above always retains at least `minListRows` rows.
+export function computeBottomOverlaySize(
+  visibleRows: number,
+  naturalRows: number,
+  minListRows: number = 5,
+): BottomOverlaySize {
+  const cappedMax = Math.max(minListRows + 2, visibleRows - minListRows);
+  const paneRows = Math.min(naturalRows, cappedMax);
+  const fits = naturalRows <= cappedMax;
+  const listRows = Math.max(1, visibleRows - paneRows);
+  return { paneRows, listRows, fits };
+}
+
+// Keep the selection visible after the list shrinks (an overlay opened, etc.).
+// Returns a scrollOffset clamped to [0, maxOffset]; recenters around the
+// selection only when it would otherwise fall outside the visible window.
+export function reanchorListScrollOffset(
+  selectedIndex: number,
+  totalEvents: number,
+  listRows: number,
+  currentScrollOffset: number,
+): number {
+  const safeScroll = Math.max(0, currentScrollOffset);
+  const maxOffset = Math.max(0, totalEvents - listRows);
+  let offset = Math.min(safeScroll, maxOffset);
+  if (selectedIndex < offset || selectedIndex >= offset + listRows) {
+    offset = Math.max(0, Math.min(selectedIndex - Math.floor(listRows / 2), maxOffset));
+  }
+  return offset;
+}
+
 // When in detail mode, the DetailPane renders inside a single-border Box as:
 //   borders(2) + title(1) + min(scrollable, maxHeight) + scrollbar(1 iff overflow)
 // We size the pane to its natural content height, but cap it so the list
 // always retains at least `minListRows` rows.
 export function computeDetailLayout(input: DetailLayoutInput): DetailLayoutResult {
   const minListRows = input.minListRows ?? 5;
-  const safeScroll = Math.max(0, input.currentScrollOffset);
 
   if (!input.inDetailMode) {
     return {
       detailPaneRows: 0,
       detailContentRows: 0,
       listRows: Math.max(1, input.visibleRows),
-      listScrollOffset: safeScroll,
+      listScrollOffset: Math.max(0, input.currentScrollOffset),
     };
   }
 
-  const cappedMax = Math.max(minListRows + 2, input.visibleRows - minListRows);
   const natural = input.detailLineCount + 2; // +2 for top+bottom borders
-  const paneRows = Math.min(natural, cappedMax);
-  const fits = natural <= cappedMax;
+  const { paneRows, listRows, fits } = computeBottomOverlaySize(
+    input.visibleRows,
+    natural,
+    minListRows,
+  );
   // When content fits, no scrollbar — usable scrollable = detailLineCount - 1 (title sticky).
   // When capped, layout is borders(2) + title(1) + visible + scrollbar(1) = paneRows
   //   → visible = paneRows - 4.
   const detailContentRows = fits
     ? Math.max(1, input.detailLineCount - 1)
     : Math.max(1, paneRows - 4);
-  const listRows = Math.max(1, input.visibleRows - paneRows);
-
-  const maxOffset = Math.max(0, input.totalEvents - listRows);
-  let listScrollOffset = Math.min(safeScroll, maxOffset);
-  if (
-    input.selectedIndex < listScrollOffset ||
-    input.selectedIndex >= listScrollOffset + listRows
-  ) {
-    listScrollOffset = Math.max(
-      0,
-      Math.min(input.selectedIndex - Math.floor(listRows / 2), maxOffset),
-    );
-  }
+  const listScrollOffset = reanchorListScrollOffset(
+    input.selectedIndex,
+    input.totalEvents,
+    listRows,
+    input.currentScrollOffset,
+  );
 
   return { detailPaneRows: paneRows, detailContentRows, listRows, listScrollOffset };
 }

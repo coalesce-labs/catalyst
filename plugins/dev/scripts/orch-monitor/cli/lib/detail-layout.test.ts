@@ -1,9 +1,13 @@
 // detail-layout.test.ts — verifies the layout math that decides how many rows
-// the event list vs. the detail pane get when the detail pane is open. Pure
-// math, no Ink rendering required.
+// the event list vs. the bottom overlay (detail pane, help panel) get when an
+// overlay is open. Pure math, no Ink rendering required.
 
 import { describe, test, expect } from "bun:test";
-import { computeDetailLayout } from "./detail-layout.ts";
+import {
+  computeBottomOverlaySize,
+  computeDetailLayout,
+  reanchorListScrollOffset,
+} from "./detail-layout.ts";
 
 describe("computeDetailLayout", () => {
   test("not in detail mode: list gets full visibleRows, scrollOffset unchanged", () => {
@@ -126,5 +130,73 @@ describe("computeDetailLayout", () => {
       currentScrollOffset: -5,
     });
     expect(r.listScrollOffset).toBe(0);
+  });
+});
+
+describe("computeBottomOverlaySize", () => {
+  test("natural fit: pane gets full natural height, list takes the rest", () => {
+    const r = computeBottomOverlaySize(80, 22);
+    expect(r.paneRows).toBe(22);
+    expect(r.listRows).toBe(58);
+    expect(r.fits).toBe(true);
+  });
+
+  test("capped: pane bounded so list keeps minListRows", () => {
+    const r = computeBottomOverlaySize(80, 200);
+    // cappedMax = max(7, 80-5) = 75; pane = min(200, 75) = 75
+    expect(r.paneRows).toBe(75);
+    expect(r.listRows).toBe(5);
+    expect(r.fits).toBe(false);
+  });
+
+  test("tiny terminal: minListRows + 2 floor keeps overlay visible", () => {
+    const r = computeBottomOverlaySize(10, 30);
+    // cappedMax = max(7, 5) = 7; pane = min(30, 7) = 7
+    expect(r.paneRows).toBe(7);
+    expect(r.listRows).toBe(3);
+    expect(r.fits).toBe(false);
+  });
+
+  test("custom minListRows", () => {
+    const r = computeBottomOverlaySize(40, 100, 10);
+    // cappedMax = max(12, 30) = 30
+    expect(r.paneRows).toBe(30);
+    expect(r.listRows).toBe(10);
+    expect(r.fits).toBe(false);
+  });
+
+  test("listRows floors at 1 when pane fills everything", () => {
+    const r = computeBottomOverlaySize(10, 100, 3);
+    // cappedMax = max(5, 7) = 7; pane = 7; list = 3 (above floor)
+    expect(r.listRows).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("reanchorListScrollOffset", () => {
+  test("selected already in view: offset clamped but unchanged otherwise", () => {
+    const offset = reanchorListScrollOffset(50, 200, 71, 30);
+    expect(offset).toBe(30);
+  });
+
+  test("selected falls off the bottom: recenter around selection", () => {
+    // listRows=5, selected=70 not in [20, 25) → recenter to 70 - 2 = 68
+    const offset = reanchorListScrollOffset(70, 200, 5, 20);
+    expect(offset).toBe(68);
+  });
+
+  test("clamps to maxOffset when totalEvents is small", () => {
+    // maxOffset = 100 - 71 = 29; selected=50 in [29, 100) → stays at 29
+    const offset = reanchorListScrollOffset(50, 100, 71, 50);
+    expect(offset).toBe(29);
+  });
+
+  test("negative currentScrollOffset is treated as 0", () => {
+    const offset = reanchorListScrollOffset(3, 100, 71, -5);
+    expect(offset).toBe(0);
+  });
+
+  test("listRows >= totalEvents: maxOffset is 0", () => {
+    const offset = reanchorListScrollOffset(2, 5, 10, 7);
+    expect(offset).toBe(0);
   });
 });

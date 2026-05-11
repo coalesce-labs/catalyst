@@ -6,7 +6,11 @@ import { EventList } from "./components/EventList.tsx";
 import { FilterInput } from "./components/FilterInput.tsx";
 import { QueryInput } from "./components/QueryInput.tsx";
 import { DetailPane, buildDetailLines } from "./components/DetailPane.tsx";
-import { computeDetailLayout } from "./lib/detail-layout.ts";
+import {
+  computeBottomOverlaySize,
+  computeDetailLayout,
+  reanchorListScrollOffset,
+} from "./lib/detail-layout.ts";
 import { useEventLog } from "./hooks/useEventLog.ts";
 import { useFilter, type DslPredicate } from "./hooks/useFilter.ts";
 import { useSelection } from "./hooks/useSelection.ts";
@@ -140,10 +144,11 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   const overlayHeight = showDslOverlay && dslState ? Math.min(14, Math.floor(layoutRows / 2)) : 0;
 
   const [showHelp, setShowHelp] = useState(false);
-  const helpHeight = showHelp ? HELP_LINES.length + 2 : 0; // +2 for border
 
-  // chrome = header + status(1) + filter(1) + query(1) + overlays
-  const chromeRows = headerRows + 3 + overlayHeight + helpHeight;
+  // chrome = header + status(1) + filter(1) + query(1) + dsl overlay (if any).
+  // Help and detail are bottom-anchored *inside* visibleRows via the layout
+  // helpers below — they no longer steal rows from the top.
+  const chromeRows = headerRows + 3 + overlayHeight;
   const visibleRows = Math.max(1, layoutRows - chromeRows);
 
   const { selectedIndex, scrollOffset, moveUp, moveDown, pageUp, pageDown, jumpToBottom, autoFollow } =
@@ -177,13 +182,36 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
 
   const selectedEvent = filtered[selectedIndex] ?? null;
 
-  // When the detail pane is open it sits flush against the status row at the
-  // bottom and the event list fills all remaining height above it (CTL-324).
-  // Layout math is extracted into a pure helper for testability.
-  const inDetailMode = showDetail && !!selectedEvent;
+  // Help and detail are mutually exclusive bottom-anchored overlays. Help wins
+  // when both states would be true (opening help already swallows all input,
+  // so a simultaneously rendered detail pane would be dead state).
+  // Each overlay sits flush against the status row and the event list fills
+  // all remaining height above it (CTL-324, CTL-325). Layout math is
+  // extracted into pure helpers for testability.
+  const inDetailMode = showDetail && !!selectedEvent && !showHelp;
   const detailLines = selectedEvent ? buildDetailLines(selectedEvent, cols) : [];
-  const { detailContentRows, listRows, listScrollOffset } =
-    computeDetailLayout({
+
+  let listRows: number;
+  let listScrollOffset: number;
+  let detailContentRows = 0;
+  // Visible content rows inside the help panel (excludes the 2 borders and the
+  // 1-row title). 0 when help is closed.
+  let helpVisibleRows = 0;
+
+  if (showHelp) {
+    // Natural height = HELP_LINES + title row + 2 borders.
+    const natural = HELP_LINES.length + 1 + 2;
+    const size = computeBottomOverlaySize(visibleRows, natural);
+    helpVisibleRows = Math.max(1, size.paneRows - 3);
+    listRows = size.listRows;
+    listScrollOffset = reanchorListScrollOffset(
+      selectedIndex,
+      filtered.length,
+      listRows,
+      scrollOffset,
+    );
+  } else {
+    const detail = computeDetailLayout({
       visibleRows,
       inDetailMode,
       detailLineCount: detailLines.length,
@@ -191,6 +219,10 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       totalEvents: filtered.length,
       currentScrollOffset: scrollOffset,
     });
+    detailContentRows = detail.detailContentRows;
+    listRows = detail.listRows;
+    listScrollOffset = detail.listScrollOffset;
+  }
 
   const dslLines = dslState ? JSON.stringify(dslState.dsl, null, 2).split("\n") : [];
   const dslVisibleLines = Math.max(1, overlayHeight - 2);
@@ -335,14 +367,22 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
         scrollOffset={listScrollOffset}
         visibleRows={listRows}
         columns={cols}
-        compact={inDetailMode}
+        compact={inDetailMode || showHelp}
       />
-      {showDetail && selectedEvent && (
+      {inDetailMode && selectedEvent && (
         <DetailPane
           event={selectedEvent}
           scrollTop={detailScrollTop}
           maxHeight={detailContentRows}
         />
+      )}
+      {showHelp && (
+        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+          <Text color="cyan" bold>{"Keybindings — h or Esc to close"}</Text>
+          {HELP_LINES.slice(0, helpVisibleRows).map((line, i) => (
+            <Text key={i} dimColor={!line.startsWith("  ")}>{line || " "}</Text>
+          ))}
+        </Box>
       )}
       <Box flexDirection="row">
         <Text dimColor>{`  ${filtered.length}/${events.length} events`}</Text>
@@ -358,14 +398,6 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           <Text color="magenta" bold>{`Generated DSL · j/k scroll · ? to hide (${dslScrollTop + 1}/${dslLines.length}):`}</Text>
           {dslLines.slice(dslScrollTop, dslScrollTop + dslVisibleLines).map((line, i) => (
             <Text key={i} dimColor={i > 0}>{line}</Text>
-          ))}
-        </Box>
-      )}
-      {showHelp && (
-        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-          <Text color="cyan" bold>{"Keybindings — h or Esc to close"}</Text>
-          {HELP_LINES.map((line, i) => (
-            <Text key={i} dimColor={!line.startsWith("  ")}>{line || " "}</Text>
           ))}
         </Box>
       )}
