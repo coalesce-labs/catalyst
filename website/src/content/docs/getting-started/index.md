@@ -63,9 +63,9 @@ Several Catalyst skills invoke shell tools by bare name (`catalyst-broker`, `cat
 bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/install-cli.sh
 ```
 
-Default install location is `$HOME/.local/bin` (already on PATH for most users with Python/pyenv/pipx tooling), falling back to `$HOME/.catalyst/bin`. Override with `--bin-dir <path>`.
+Default install location is `$HOME/.catalyst/bin` — the canonical Catalyst home, alongside `~/.catalyst/{runs,wt,archives,catalyst.db}`. Same pattern as `~/.cargo/bin`, `~/.volta/bin`, `~/.deno/bin`, `~/.bun/bin` — `rm -rf ~/.catalyst/` removes every trace of Catalyst from your machine. Override with `--bin-dir <path>` or `CATALYST_BIN_DIR=<path>`.
 
-If the chosen directory is not on your PATH, the installer prints the exact `export PATH=...` line to add to your shell rc and exits non-zero. Add the line, restart your shell, and re-run — or pass `--force` to install symlinks anyway (you'll still need to fix PATH before the CLIs resolve).
+If `$HOME/.catalyst/bin` isn't already on your PATH, the installer appends an `export PATH=...` line to your shell's rc file (`~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish` depending on `$SHELL`). The append is idempotent — re-running install doesn't duplicate the line. Open a new terminal (or `source ~/.zshrc`) to pick up the change.
 
 Verify the install:
 
