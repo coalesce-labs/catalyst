@@ -143,7 +143,7 @@ describe("formatSource", () => {
 
   // CTL-331: filter events surface the orchestrator id when present so users
   // can correlate filter events back to a specific orchestrator run.
-  test("maps filter.* with orchestrator id to that orch id", () => {
+  test("maps filter.register with orchestrator id to that orch id", () => {
     const e = {
       ...baseEvent,
       attributes: {
@@ -154,15 +154,15 @@ describe("formatSource", () => {
     expect(formatSource(e)).toBe("orch-abc");
   });
 
-  test("maps filter.* without orchestrator id to 'filter'", () => {
+  test("maps filter.register without orchestrator id to 'filter'", () => {
     const e = {
       ...baseEvent,
-      attributes: { "event.name": "filter.wake.sess_x" },
+      attributes: { "event.name": "filter.register" },
     } as unknown as CanonicalEvent;
     expect(formatSource(e)).toBe("filter");
   });
 
-  test("maps legacy orchestrator.filter.* alias to the orchestrator id", () => {
+  test("maps legacy orchestrator.filter.register alias to the orchestrator id", () => {
     const e = {
       ...baseEvent,
       attributes: {
@@ -171,6 +171,35 @@ describe("formatSource", () => {
       },
     } as unknown as CanonicalEvent;
     expect(formatSource(e)).toBe("orch-abc");
+  });
+
+  // CTL-337: filter.wake events are always emitted by the broker, so the SOURCE
+  // column shows "broker" regardless of which orchestrator the wake is routed to.
+  test("maps filter.wake.* to 'broker'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.sess_x" },
+    } as unknown as CanonicalEvent;
+    expect(formatSource(e)).toBe("broker");
+  });
+
+  test("maps filter.wake.* to 'broker' even when orchestrator id is present", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "filter.wake.sess_x",
+        "catalyst.orchestrator.id": "orch-abc",
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatSource(e)).toBe("broker");
+  });
+
+  test("maps legacy orchestrator.filter.wake.* alias to 'broker'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "orchestrator.filter.wake.sess_x" },
+    } as unknown as CanonicalEvent;
+    expect(formatSource(e)).toBe("broker");
   });
 
   test("maps broker.daemon.startup to 'broker'", () => {
@@ -378,6 +407,75 @@ describe("formatRef", () => {
     } as unknown as CanonicalEvent;
     expect(formatRef(e)).toBe("");
   });
+
+  // CTL-337: filter.register events surface the tickets / repo being watched
+  // so the REF column tells the user *what* the registration is observing.
+  test("formats filter.register tickets array as comma-joined list", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+      body: {
+        payload: {
+          prompt: "Wake me when…",
+          context: { tickets: ["ADV-904", "ADV-905"], pr_numbers: [], branches: [] },
+        },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("ADV-904,ADV-905");
+  });
+
+  test("formats filter.register single ticket", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+      body: { payload: { context: { tickets: ["CTL-337"] } } },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("CTL-337");
+  });
+
+  test("formats filter.register repo as basename when no tickets", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+      body: {
+        payload: {
+          interest_id: "orch-abc-pr-lifecycle",
+          interest_type: "pr_lifecycle",
+          repo: "rightsite-cloud/Adva",
+        },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("Adva");
+  });
+
+  test("returns repo as-is for filter.register when it has no slash", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+      body: { payload: { repo: "myrepo" } },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("myrepo");
+  });
+
+  test("falls back to existing behaviour when filter.register has no tickets or repo", () => {
+    // Preserve the baseEvent vcs.pr.number so we can verify the filter.register
+    // branch falls through to the PR fallback when its own context is empty.
+    const e = {
+      ...baseEvent,
+      attributes: { ...baseEvent.attributes, "event.name": "filter.register" },
+      body: { payload: {} },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("#501");
+  });
+
+  test("handles legacy orchestrator.filter.register tickets", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "orchestrator.filter.register" },
+      body: { payload: { context: { tickets: ["ADV-878", "ADV-877"] } } },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("ADV-878,ADV-877");
+  });
 });
 
 describe("formatDetails", () => {
@@ -522,6 +620,84 @@ describe("formatDetails (sanitizer)", () => {
   test("returns empty string when body is missing", () => {
     const e = { ...baseEvent, body: undefined } as unknown as CanonicalEvent;
     expect(formatDetails(e)).toBe("");
+  });
+});
+
+describe("formatDetails (filter.register)", () => {
+  // CTL-337: filter.register events surface human-readable criteria so the
+  // DETAILS column tells the user *why* the registration was made.
+  test("returns sanitised prompt when present", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+      body: {
+        message: "ignored",
+        payload: {
+          prompt: "Wake me when: any of my workers posts a comms message of type attention",
+          context: { tickets: ["ADV-904"] },
+        },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe(
+      "Wake me when: any of my workers posts a comms message of type attention",
+    );
+  });
+
+  test("returns interest_type + repo when no prompt", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+      body: {
+        message: "ignored",
+        payload: {
+          interest_id: "orch-abc-pr-lifecycle",
+          interest_type: "pr_lifecycle",
+          repo: "rightsite-cloud/Adva",
+        },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("pr_lifecycle rightsite-cloud/Adva");
+  });
+
+  test("returns interest_type alone when no repo and no prompt", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+      body: {
+        message: "ignored",
+        payload: { interest_type: "pr_lifecycle" },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("pr_lifecycle");
+  });
+
+  test("sanitises markdown and HTML in the prompt", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+      body: {
+        payload: { prompt: "Wake me when **PR merged** or <p>CI passes</p>" },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("Wake me when PR merged or CI passes");
+  });
+
+  test("handles legacy orchestrator.filter.register prompt", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "orchestrator.filter.register" },
+      body: { payload: { prompt: "Wake me when ticket changes" } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("Wake me when ticket changes");
+  });
+
+  test("falls back to generic payload handling when filter.register has neither prompt nor interest_type", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+      body: { message: "fallback message", payload: {} },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("fallback message");
   });
 });
 
