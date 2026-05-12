@@ -106,6 +106,20 @@ describe("buildCanonicalEnvelope", () => {
     expect(a.traceId).not.toBe(c.traceId);
   });
 
+  test("emits a top-level id on every envelope (CTL-344)", async () => {
+    const { buildCanonicalEnvelope } = await import("./index.mjs");
+    const a = buildCanonicalEnvelope({ event: "x", orchestrator: "orch_1", worker: null });
+    const b = buildCanonicalEnvelope({ event: "x", orchestrator: "orch_1", worker: null });
+    expect(a.id).toBeString();
+    expect(b.id).toBeString();
+    expect(a.id.length).toBeGreaterThanOrEqual(16);
+    // unique per emission
+    expect(a.id).not.toBe(b.id);
+    // trace/span stay deterministic — twin property preserved
+    expect(a.traceId).toBe(b.traceId);
+    expect(a.spanId).toBe(b.spanId);
+  });
+
   test("body.payload is null when detail is null/undefined", async () => {
     const { buildCanonicalEnvelope } = await import("./index.mjs");
     const noDetail = buildCanonicalEnvelope({ event: "x", orchestrator: null, worker: null });
@@ -162,6 +176,27 @@ describe("appendEvent — writes canonical envelopes to JSONL", () => {
     expect(events).toHaveLength(1);
     expect(events[0].attributes["event.name"]).toBe("broker.daemon.startup");
     expect(events[0].body.payload.pid).toBe(99);
+  });
+
+  test("appended line carries a non-empty id (CTL-344)", async () => {
+    const { appendEvent } = await import("./index.mjs");
+    appendEvent({
+      event: "filter.wake.id-test",
+      orchestrator: "orch_1",
+      worker: null,
+      detail: { reason: "x" },
+    });
+    appendEvent({
+      event: "filter.wake.id-test",
+      orchestrator: "orch_1",
+      worker: null,
+      detail: { reason: "x" },
+    });
+    const events = readEvents();
+    expect(events).toHaveLength(2);
+    expect(events[0].id).toBeString();
+    expect(events[0].id.length).toBeGreaterThanOrEqual(16);
+    expect(events[0].id).not.toBe(events[1].id);
   });
 
   test("appended lines are valid JSON with no legacy v1 fields at the top level", async () => {

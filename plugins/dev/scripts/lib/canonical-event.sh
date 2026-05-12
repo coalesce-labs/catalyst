@@ -87,6 +87,28 @@ derive_span_id() {
   fi
 }
 
+# generate_event_id
+# Echoes a unique-per-call event identifier. Prefers `uuidgen` (RFC-4122 v4);
+# falls back to a timestamp + RANDOM blend when uuidgen is absent. The fallback
+# is not RFC-4122-shaped but is collision-resistant at our event volume.
+generate_event_id() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen | tr 'A-Z' 'a-z'
+  else
+    printf '%s-%04x%04x-%04x%04x\n' \
+      "$(date -u +%Y%m%dT%H%M%S)" \
+      "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM"
+  fi
+}
+
+# synthesize_event_id TRACE_ID SPAN_ID TS EVENT_NAME
+# Echoes a stable 32-hex synthetic id for legacy records that have no `id`.
+# Deterministic across runs given the same inputs.
+synthesize_event_id() {
+  local trace="${1:-}" span="${2:-}" ts="${3:-}" name="${4:-}"
+  __ce_sha256_hex "${trace}:${span}:${ts}:${name}" | cut -c1-32
+}
+
 # build_canonical_line ARGS...
 #
 # Emits one canonical JSONL line on stdout. Required flags:
@@ -155,11 +177,13 @@ build_canonical_line() {
   [[ -n "$event_name" ]] || { echo "build_canonical_line: --event-name required" >&2; return 1; }
   [[ -n "$service_version" ]] || service_version="$(plugin_version)"
 
-  local sev_num
+  local sev_num event_id
   sev_num="$(severity_number "$severity")"
+  event_id="$(generate_event_id)"
 
   jq -nc \
     --arg ts "$ts" \
+    --arg id "$event_id" \
     --arg sev_text "$severity" \
     --argjson sev_num "$sev_num" \
     --arg trace_id "$trace_id" \
@@ -183,6 +207,7 @@ build_canonical_line() {
     --argjson payload "$payload" \
     '{
       ts: $ts,
+      id: $id,
       observedTs: $ts,
       severityText: $sev_text,
       severityNumber: $sev_num,

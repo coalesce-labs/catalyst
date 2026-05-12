@@ -4,6 +4,7 @@ import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.t
 
 const SAMPLE_EVENT: CanonicalEvent = {
   ts: "2026-05-08T04:34:45Z",
+  id: "11111111-2222-4333-8444-555555555555",
   observedTs: "2026-05-08T04:34:45Z",
   severityText: "INFO",
   severityNumber: 9,
@@ -51,5 +52,19 @@ describe("buildOtlpPayload", () => {
     const attrs = payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
     const prNum = attrs.find((a: any) => a.key === "vcs.pr.number");
     expect(prNum?.value?.intValue).toBe(42);
+  });
+
+  test("maps event.id to OTLP logRecordUid (CTL-344)", () => {
+    const payload = buildOtlpPayload([SAMPLE_EVENT]) as any;
+    const lr = payload.resourceLogs[0].scopeLogs[0].logRecords[0];
+    expect(lr.logRecordUid).toBe(SAMPLE_EVENT.id);
+  });
+
+  test("omits logRecordUid when event has no id (legacy events)", () => {
+    const legacy = { ...SAMPLE_EVENT };
+    delete (legacy as { id?: string }).id;
+    const payload = buildOtlpPayload([legacy as CanonicalEvent]) as any;
+    const lr = payload.resourceLogs[0].scopeLogs[0].logRecords[0];
+    expect("logRecordUid" in lr).toBe(false);
   });
 });

@@ -841,3 +841,91 @@ describe("writeBrokerStateFile (CTL-343)", () => {
     rmFile(target, { force: true });
   });
 });
+
+// ─── event.id read-site fallback (CTL-344) ───────────────────────────────────
+
+describe("CTL-344 read-site event.id fallback", () => {
+  test("tryDeterministicRoute uses real event.id when present", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-id-1",
+      detail: {
+        interest_id: "id-1",
+        notify_event: "filter.wake.id-1",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [777],
+        repo: "org/repo",
+        base_branches: [{ pr: 777, base: "main" }],
+        persistent: true,
+        session_id: "sess-id-1",
+      },
+    });
+    const realId = "11111111-2222-4333-8444-555555555555";
+    const matches = tryDeterministicRoute({
+      id: realId,
+      event: "github.pr.merged",
+      scope: { pr: 777 },
+      detail: { mergeCommitSha: "deadbeef", merged: true },
+    }, getInterests());
+    expect(matches).toHaveLength(1);
+    expect(matches[0].sourceEventId).toBe(realId);
+  });
+
+  test("tryDeterministicRoute synthesizes id when event.id is absent (legacy event)", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-id-2",
+      detail: {
+        interest_id: "id-2",
+        notify_event: "filter.wake.id-2",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [778],
+        repo: "org/repo",
+        base_branches: [{ pr: 778, base: "main" }],
+        persistent: true,
+        session_id: "sess-id-2",
+      },
+    });
+    const matches = tryDeterministicRoute({
+      ts: "2026-05-12T00:00:00Z",
+      event: "github.pr.merged",
+      scope: { pr: 778 },
+      attributes: { "event.name": "github.pr.merged" },
+      detail: { mergeCommitSha: "deadbeef", merged: true },
+    }, getInterests());
+    expect(matches).toHaveLength(1);
+    // synth fallback is a 32-char lowercase hex, not null and not the trivial empty string
+    expect(matches[0].sourceEventId).toBeString();
+    expect(matches[0].sourceEventId.length).toBe(32);
+    expect(/^[0-9a-f]{32}$/.test(matches[0].sourceEventId)).toBe(true);
+  });
+
+  test("tryTicketLifecycleRoute synthesizes id when event.id is absent (legacy event)", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-id-3",
+      detail: {
+        interest_id: "id-3",
+        notify_event: "filter.wake.id-3",
+        interest_type: "ticket_lifecycle",
+        tickets: ["CTL-999"],
+        persistent: true,
+        session_id: "sess-id-3",
+      },
+    });
+    const matches = tryTicketLifecycleRoute({
+      ts: "2026-05-12T00:00:00Z",
+      event: "linear.issue.state_changed",
+      attributes: {
+        "event.name": "linear.issue.state_changed",
+        "linear.issue.identifier": "CTL-999",
+      },
+      detail: { ticket: "CTL-999", toState: "Done" },
+    }, getInterests());
+    expect(matches.length).toBeGreaterThan(0);
+    const m = matches[0];
+    expect(m.sourceEventId).toBeString();
+    expect(m.sourceEventId.length).toBe(32);
+    expect(/^[0-9a-f]{32}$/.test(m.sourceEventId)).toBe(true);
+  });
+});

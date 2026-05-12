@@ -84,6 +84,36 @@ else
   fail "derive_span_id CTL-300" "got '$SPAN_ID' (len ${#SPAN_ID})"
 fi
 
+# generate_event_id — non-empty and uniquely random per call (CTL-344)
+EVENT_ID_1="$(generate_event_id)"
+EVENT_ID_2="$(generate_event_id)"
+if [[ ${#EVENT_ID_1} -ge 16 ]]; then
+  ok "generate_event_id length >= 16"
+else
+  fail "generate_event_id length" "got '${EVENT_ID_1}' (len ${#EVENT_ID_1})"
+fi
+if [[ "$EVENT_ID_1" != "$EVENT_ID_2" ]]; then
+  ok "generate_event_id unique across calls"
+else
+  fail "generate_event_id uniqueness" "two calls produced same id: ${EVENT_ID_1}"
+fi
+
+# synthesize_event_id — deterministic and 32-hex (CTL-344)
+SYNTH_1="$(synthesize_event_id "trace1" "span1" "2026-05-12T00:00:00Z" "test.event")"
+SYNTH_2="$(synthesize_event_id "trace1" "span1" "2026-05-12T00:00:00Z" "test.event")"
+if [[ ${#SYNTH_1} -eq 32 && "$SYNTH_1" =~ ^[0-9a-f]+$ ]]; then
+  ok "synthesize_event_id is 32-hex"
+else
+  fail "synthesize_event_id shape" "got '$SYNTH_1' (len ${#SYNTH_1})"
+fi
+expect_eq "synthesize_event_id deterministic" "$SYNTH_1" "$SYNTH_2"
+SYNTH_OTHER="$(synthesize_event_id "trace2" "span1" "2026-05-12T00:00:00Z" "test.event")"
+if [[ "$SYNTH_1" != "$SYNTH_OTHER" ]]; then
+  ok "synthesize_event_id different inputs differ"
+else
+  fail "synthesize_event_id collision" "different inputs produced same id"
+fi
+
 # Parity test: bash-derived trace id matches TS-derived trace id for the same input.
 # We check this by running the TS lib's derive function via bun.
 if command -v bun >/dev/null 2>&1; then
@@ -125,6 +155,44 @@ LINE="$(build_canonical_line \
 
 EVENT_NAME="$(echo "$LINE" | jq -r '.attributes."event.name"')"
 expect_eq "build_canonical_line event.name" "session.phase" "$EVENT_NAME"
+
+# build_canonical_line emits top-level id (CTL-344)
+ID_OUT="$(echo "$LINE" | jq -r '.id')"
+if [[ -n "$ID_OUT" && "$ID_OUT" != "null" && ${#ID_OUT} -ge 16 ]]; then
+  ok "build_canonical_line top-level id present"
+else
+  fail "build_canonical_line id" "got '$ID_OUT' (len ${#ID_OUT})"
+fi
+
+# build_canonical_line: two calls with identical inputs produce different ids
+# but identical traceId/spanId (twin property preserved for trace/span only)
+LINE_B="$(build_canonical_line \
+  --ts "2026-05-08T18:00:00.000Z" \
+  --severity INFO \
+  --service "catalyst.session" \
+  --event-name "session.phase" \
+  --trace-id "$(derive_trace_id 'orch-foo' '')" \
+  --span-id "$(derive_span_id 'CTL-300' '')")"
+LINE_C="$(build_canonical_line \
+  --ts "2026-05-08T18:00:00.000Z" \
+  --severity INFO \
+  --service "catalyst.session" \
+  --event-name "session.phase" \
+  --trace-id "$(derive_trace_id 'orch-foo' '')" \
+  --span-id "$(derive_span_id 'CTL-300' '')")"
+ID_B="$(echo "$LINE_B" | jq -r '.id')"
+ID_C="$(echo "$LINE_C" | jq -r '.id')"
+TRACE_B="$(echo "$LINE_B" | jq -r '.traceId')"
+TRACE_C="$(echo "$LINE_C" | jq -r '.traceId')"
+SPAN_B="$(echo "$LINE_B" | jq -r '.spanId')"
+SPAN_C="$(echo "$LINE_C" | jq -r '.spanId')"
+if [[ "$ID_B" != "$ID_C" ]]; then
+  ok "build_canonical_line id is unique across emissions"
+else
+  fail "build_canonical_line id uniqueness" "two emissions produced same id: $ID_B"
+fi
+expect_eq "build_canonical_line traceId stays deterministic" "$TRACE_B" "$TRACE_C"
+expect_eq "build_canonical_line spanId stays deterministic" "$SPAN_B" "$SPAN_C"
 
 SVC="$(echo "$LINE" | jq -r '.resource."service.name"')"
 expect_eq "build_canonical_line service.name" "catalyst.session" "$SVC"

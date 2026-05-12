@@ -15,6 +15,7 @@
 export const CANONICAL_FIELDS = [
   // ─── Top-level envelope fields ────────────────────────────────────────────
   { path: "ts",                            type: "string",  description: "ISO 8601 event timestamp" },
+  { path: "id",                            type: "string",  description: "Per-event UUIDv4 (CTL-344); maps to OTLP LogRecord.logRecordUid" },
   { path: "observedTs",                    type: "string",  description: "ISO 8601 timestamp the writer observed the event" },
   { path: "severityText",                  type: "enum",    description: "DEBUG | INFO | WARN | ERROR" },
   { path: "severityNumber",                type: "number",  description: "OTel severity number (5/9/13/17)" },

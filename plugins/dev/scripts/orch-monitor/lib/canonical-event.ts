@@ -6,14 +6,34 @@
  *
  * Trace/span IDs are derived deterministically from orchestrator/worker
  * identifiers so any producer (TS or bash) can compute the same IDs from
- * the same inputs without coordination.
+ * the same inputs without coordination. Per-event `id` (CTL-344) is
+ * generated at build time; one UUIDv4 per emission.
+ *
+ * Primitive helpers (`sha256Hex`, `severityNumber`, `deriveTraceId`,
+ * `deriveSpanId`, `generateEventId`, `synthesizeEventId`) live in
+ * `./canonical-event-shared` so the broker daemon can import the same
+ * code without duplicating it.
  */
 
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-export type Severity = "DEBUG" | "INFO" | "WARN" | "ERROR";
+import {
+  type Severity,
+  generateEventId,
+  severityNumber,
+} from "./canonical-event-shared";
+
+export {
+  type Severity,
+  SEVERITY_NUMBERS,
+  sha256Hex,
+  severityNumber,
+  deriveTraceId,
+  deriveSpanId,
+  generateEventId,
+  synthesizeEventId,
+} from "./canonical-event-shared";
 
 export interface Resource {
   "service.name": string;
@@ -64,6 +84,8 @@ export interface Body {
 
 export interface CanonicalEvent {
   ts: string;
+  /** Per-event UUIDv4. Generated at build time; maps to OTLP LogRecord.logRecordUid. */
+  id: string;
   observedTs?: string;
   severityText: Severity;
   severityNumber: number;
@@ -85,64 +107,6 @@ export interface BuildInput {
   resource: { "service.name": string; "service.version"?: string };
   attributes: Attributes;
   body: Body;
-}
-
-const SEVERITY_NUMBERS: Record<Severity, number> = {
-  DEBUG: 5,
-  INFO: 9,
-  WARN: 13,
-  ERROR: 17,
-};
-
-export function severityNumber(text: Severity): number {
-  return SEVERITY_NUMBERS[text];
-}
-
-function sha256Hex(input: string): string {
-  return createHash("sha256").update(input).digest("hex");
-}
-
-/**
- * Trace ID derivation. Hex-truncated SHA-256 — OTel requires 32 hex chars.
- * Returns null when no useful seed is available.
- *
- * Precedence:
- *   1. Non-empty orchestratorId → sha256(orchestratorId).slice(0, 32)
- *   2. Non-empty sessionId → sha256("standalone:" + sessionId).slice(0, 32)
- *   3. otherwise → null (ambient event with no trace context)
- */
-export function deriveTraceId(
-  orchestratorId: string | null | undefined,
-  sessionId?: string | null,
-): string | null {
-  if (orchestratorId !== null && orchestratorId !== undefined && orchestratorId.length > 0) {
-    return sha256Hex(orchestratorId).slice(0, 32);
-  }
-  if (sessionId !== null && sessionId !== undefined && sessionId.length > 0) {
-    return sha256Hex("standalone:" + sessionId).slice(0, 32);
-  }
-  return null;
-}
-
-/**
- * Span ID derivation. Hex-truncated SHA-256 — OTel requires 16 hex chars.
- *
- * Precedence:
- *   1. Non-empty workerTicket → sha256(workerTicket).slice(0, 16)
- *   2. Non-empty sessionId → sha256(sessionId).slice(0, 16)
- *   3. otherwise → null
- */
-export function deriveSpanId(
-  workerTicket: string | null | undefined,
-  sessionId?: string | null,
-): string | null {
-  if (workerTicket !== null && workerTicket !== undefined && workerTicket.length > 0) {
-    return sha256Hex(workerTicket).slice(0, 16);
-  }
-  if (sessionId !== null && sessionId !== undefined && sessionId.length > 0) {
-    return sha256Hex(sessionId).slice(0, 16);
-  }
-  return null;
 }
 
 let cachedVersion: string | null = null;
@@ -182,6 +146,7 @@ export function pluginVersion(): string {
 
 /**
  * Build a canonical event with defaults applied:
+ *   - id from generateEventId() (CTL-344)
  *   - severityNumber from severityText
  *   - observedTs defaults to ts
  *   - resource.service.namespace = "catalyst"
@@ -192,6 +157,7 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
   const version = input.resource["service.version"] ?? pluginVersion();
   const event: CanonicalEvent = {
     ts: input.ts,
+    id: generateEventId(),
     observedTs,
     severityText: input.severityText,
     severityNumber: severityNumber(input.severityText),
@@ -210,4 +176,3 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
   }
   return event;
 }
-

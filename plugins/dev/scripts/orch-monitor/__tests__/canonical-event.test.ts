@@ -3,6 +3,8 @@ import {
   severityNumber,
   deriveTraceId,
   deriveSpanId,
+  generateEventId,
+  synthesizeEventId,
   buildCanonicalEvent,
   pluginVersion,
   type CanonicalEvent,
@@ -135,6 +137,97 @@ describe("buildCanonicalEvent", () => {
     expect(ev.attributes["event.label"]).toBe("PR #342");
     expect(ev.attributes["event.channel"]).toBe("webhook");
     expect(ev.attributes["vcs.pr.number"]).toBe(342);
+  });
+});
+
+describe("generateEventId (CTL-344)", () => {
+  it("produces a non-empty UUIDv4-shaped string", () => {
+    const id = generateEventId();
+    expect(typeof id).toBe("string");
+    expect(id.length).toBeGreaterThanOrEqual(16);
+    // randomUUID returns canonical form: 8-4-4-4-12 hex digits with v4 marker
+    expect(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)).toBe(true);
+  });
+
+  it("returns a different id on each call (non-deterministic)", () => {
+    expect(generateEventId()).not.toBe(generateEventId());
+  });
+});
+
+describe("synthesizeEventId (CTL-344)", () => {
+  it("returns a 32-char lowercase hex string", () => {
+    const id = synthesizeEventId({
+      traceId: "abc",
+      spanId: "def",
+      ts: "2026-05-12T00:00:00Z",
+      attributes: { "event.name": "test.event" },
+    });
+    expect(id.length).toBe(32);
+    expect(/^[0-9a-f]{32}$/.test(id)).toBe(true);
+  });
+
+  it("is deterministic for identical inputs", () => {
+    const inputs = {
+      traceId: "abc",
+      spanId: "def",
+      ts: "2026-05-12T00:00:00Z",
+      attributes: { "event.name": "test.event" },
+    };
+    expect(synthesizeEventId(inputs)).toBe(synthesizeEventId(inputs));
+  });
+
+  it("produces different ids for different inputs", () => {
+    const a = synthesizeEventId({ ts: "2026-05-12T00:00:00Z", attributes: { "event.name": "test.a" } });
+    const b = synthesizeEventId({ ts: "2026-05-12T00:00:00Z", attributes: { "event.name": "test.b" } });
+    expect(a).not.toBe(b);
+  });
+
+  it("tolerates null/undefined trace/span and missing attributes", () => {
+    const id = synthesizeEventId({ ts: "2026-05-12T00:00:00Z" });
+    expect(id.length).toBe(32);
+  });
+});
+
+describe("buildCanonicalEvent — id (CTL-344)", () => {
+  function build(): CanonicalEvent {
+    return buildCanonicalEvent({
+      ts: "2026-05-08T18:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.github" },
+      attributes: { "event.name": "github.pr.merged" },
+      body: {},
+    });
+  }
+
+  it("populates a non-empty id on every build", () => {
+    const ev = build();
+    expect(typeof ev.id).toBe("string");
+    expect(ev.id.length).toBeGreaterThanOrEqual(16);
+  });
+
+  it("two builds with identical inputs produce different ids", () => {
+    expect(build().id).not.toBe(build().id);
+  });
+
+  it("traceId / spanId stay deterministic — twin property preserved", () => {
+    function buildWithIds(): CanonicalEvent {
+      return buildCanonicalEvent({
+        ts: "2026-05-08T18:00:00.000Z",
+        severityText: "INFO",
+        traceId: deriveTraceId("orch-foo", null),
+        spanId: deriveSpanId("CTL-300", null),
+        resource: { "service.name": "catalyst.github" },
+        attributes: { "event.name": "github.pr.merged" },
+        body: {},
+      });
+    }
+    const a = buildWithIds();
+    const b = buildWithIds();
+    expect(a.traceId).toBe(b.traceId);
+    expect(a.spanId).toBe(b.spanId);
+    expect(a.id).not.toBe(b.id);
   });
 });
 

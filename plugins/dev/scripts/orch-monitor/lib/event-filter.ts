@@ -43,7 +43,7 @@ export function validatePredicate(predicate: string): ValidationResult {
     // same shape producers emit, so jq predicates referencing canonical paths
     // (.attributes."event.name", .body.payload, etc) compile cleanly.
     const sample =
-      '{"ts":"","observedTs":"","severityText":"INFO","severityNumber":9,"traceId":null,"spanId":null,"resource":{"service.name":"","service.namespace":"catalyst","service.version":""},"attributes":{"event.name":""},"body":{}}';
+      '{"ts":"","id":"00000000-0000-4000-8000-000000000000","observedTs":"","severityText":"INFO","severityNumber":9,"traceId":null,"spanId":null,"resource":{"service.name":"","service.namespace":"catalyst","service.version":""},"attributes":{"event.name":""},"body":{}}';
     const r = Bun.spawnSync({
       cmd: [
         "jq",
