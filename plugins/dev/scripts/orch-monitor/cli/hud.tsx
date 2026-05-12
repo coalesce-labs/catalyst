@@ -2,6 +2,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { render, useApp, useInput, Box, Text } from "ink";
 import { Header } from "./components/Header.tsx";
+import { readBrokerKeyHealth, type BrokerKeyHealth } from "./lib/broker-key-health.ts";
 import { EventList } from "./components/EventList.tsx";
 import { FilterInput } from "./components/FilterInput.tsx";
 import { QueryInput } from "./components/QueryInput.tsx";
@@ -132,12 +133,22 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
 
   const { events, loading } = useEventLog({ repoFilter, predicate, sinceTs: activeSinceTs });
 
+  // CTL-343: broker key-health chip. Poll the broker state file every 5s so
+  // the chip surfaces fresh probe results without busy-reading on every render.
+  const [brokerKeyHealth, setBrokerKeyHealth] = useState<BrokerKeyHealth | null>(null);
+  useEffect(() => {
+    const refresh = () => setBrokerKeyHealth(readBrokerKeyHealth());
+    refresh();
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
+  }, []);
+
   const [dslState, setDslState] = useState<DslState | null>(null);
   const dslPredicate: DslPredicate = dslState?.jsPredicate ?? null;
   const { filterText, setFilterText, pivot, setPivot, filtered } = useFilter(events, dslPredicate);
 
-  // Header = column row (1) + separator (1) + optional nlQuery row (0 or 1)
-  const headerRows = dslState?.nlQuery ? 3 : 2;
+  // Header = optional chip row (0/1) + column row (1) + separator (1) + optional nlQuery row (0/1)
+  const headerRows = (brokerKeyHealth?.groq ? 1 : 0) + (dslState?.nlQuery ? 3 : 2);
 
   const [showDslOverlay, setShowDslOverlay] = useState(false);
   const [dslScrollTop, setDslScrollTop] = useState(0);
@@ -361,7 +372,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   return (
     <Box flexDirection="column" height={layoutRows} width={cols}>
       <Box flexShrink={0}>
-        <Header columns={cols} nlQuery={dslState?.nlQuery} />
+        <Header columns={cols} nlQuery={dslState?.nlQuery} brokerKeyHealth={brokerKeyHealth} />
       </Box>
       <Box flexDirection="column" flexGrow={(inDetailMode || showHelp) ? 0 : 1} flexShrink={1}>
         <EventList

@@ -42,6 +42,13 @@ import {
   // ticket_state (CTL-303 — ticket routing)
   upsertTicketState,
 } from "./broker-state.mjs";
+import {
+  resolveApiKey,
+  formatMissingKeyWarning,
+  formatLoadedKeyInfo,
+  probeGroq,
+  deriveGroqEndpoint,
+} from "../lib/api-key-health.mjs";
 
 // --- Logger ---
 const log = pino({
@@ -51,19 +58,42 @@ const log = pino({
 
 // --- Config ---
 const CATALYST_DIR = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
+const GLOBAL_CONFIG_PATH = resolve(homedir(), ".config/catalyst/config.json");
 
-export function readGroqApiKeyFromConfig(configPath) {
-  const path = configPath ?? resolve(homedir(), ".config/catalyst/config.json");
+// CTL-343: key resolution moved to lib/api-key-health.mjs. Read groq gateway
+// alongside the key so the chat-completions endpoint can route through a
+// configured proxy (e.g. Adva AI Gateway, Litellm, Helicone).
+export function readGroqConfig(configPath) {
+  const path = configPath ?? GLOBAL_CONFIG_PATH;
   try {
     const cfg = JSON.parse(readFileSync(path, "utf8"));
-    return cfg?.groq?.apiKey ?? "";
+    return cfg?.groq ?? null;
   } catch {
-    return "";
+    return null;
   }
 }
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY || readGroqApiKeyFromConfig();
-const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+// Retained as a named export for any external callers; new code should use
+// resolveApiKey() from lib/api-key-health.mjs directly.
+export function readGroqApiKeyFromConfig(configPath) {
+  return readGroqConfig(configPath)?.apiKey ?? "";
+}
+
+const groqKeyResolution = resolveApiKey({
+  envName: "GROQ_API_KEY",
+  configKeyPath: "groq.apiKey",
+  configPath: GLOBAL_CONFIG_PATH,
+});
+const groqConfig = readGroqConfig();
+const groqEndpoint = deriveGroqEndpoint({ gateway: groqConfig?.gateway });
+
+const GROQ_API_KEY = groqKeyResolution.value;
+const GROQ_KEY_SOURCE = groqKeyResolution.source;
+const GROQ_KEY_PREFIX = groqKeyResolution.prefix;
+const GROQ_ENDPOINT = groqEndpoint.url;
+const GROQ_EXTRA_HEADERS = groqEndpoint.extraHeaders;
+const GROQ_GATEWAY_ENABLED = groqEndpoint.gatewayEnabled;
+const GROQ_GATEWAY_BASE_URL = GROQ_GATEWAY_ENABLED ? groqConfig?.gateway?.baseUrl : null;
 const GROQ_MODEL = process.env.FILTER_GROQ_MODEL ?? "llama-3.1-8b-instant";
 const DEBOUNCE_MS = parseInt(process.env.FILTER_DEBOUNCE_MS ?? "100", 10);
 const HARD_CAP_MS = parseInt(process.env.FILTER_HARD_CAP_MS ?? "500", 10);
@@ -735,6 +765,7 @@ async function classifyBatch(events) {
     const res = await fetch(GROQ_ENDPOINT, {
       method: "POST",
       headers: {
+        ...GROQ_EXTRA_HEADERS,
         "Content-Type": "application/json",
         Authorization: `Bearer ${GROQ_API_KEY}`,
       },
@@ -1077,15 +1108,108 @@ function removePidFile() {
   try { unlinkSync(PID_FILE_PATH); } catch { /* already gone */ }
 }
 
+// --- State file (CTL-343) ---
+// ~/catalyst/broker.state.json is the single source of truth for at-a-glance
+// broker key health. Consumed by `catalyst-broker status --json`,
+// `catalyst-monitor status --json`, and the HUD header chip.
+const BROKER_STATE_FILE = resolve(CATALYST_DIR, "broker.state.json");
+
+export function buildBrokerState({ probe } = {}) {
+  return {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    keyHealth: {
+      groq: {
+        present: GROQ_KEY_SOURCE !== null,
+        source: GROQ_KEY_SOURCE,
+        prefix: GROQ_KEY_PREFIX,
+        probeStatus: probe?.status ?? (GROQ_KEY_SOURCE === null ? "missing" : "pending"),
+        probeError: probe?.error ?? null,
+        probeAt: probe ? new Date().toISOString() : null,
+        modelCount: probe?.modelCount ?? null,
+      },
+    },
+    gateway: {
+      enabled: GROQ_GATEWAY_ENABLED,
+      baseUrl: GROQ_GATEWAY_BASE_URL,
+    },
+  };
+}
+
+export function writeBrokerStateFile(state, { path = BROKER_STATE_FILE } = {}) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(state, null, 2));
+    renameSync(tmp, path);
+  } catch (err) {
+    log.warn({ err: err.message, path }, "failed to write broker state file");
+  }
+}
+
+// Exported so the state-file path is discoverable by tests.
+export function getBrokerStateFilePath() {
+  return BROKER_STATE_FILE;
+}
+
+// Logs key health at startup. Returns the resolved state-file payload
+// (pre-probe) so callers can persist it.
+export function logKeyHealthAtStartup() {
+  if (GROQ_KEY_SOURCE === null) {
+    const warning = formatMissingKeyWarning({
+      name: "GROQ_API_KEY",
+      envName: "GROQ_API_KEY",
+      configPath: GLOBAL_CONFIG_PATH,
+      configKeyPath: "groq.apiKey",
+      getUrl: "https://console.groq.com/keys",
+    });
+    // pino flattens multi-line strings — emit each line so operators see it cleanly.
+    for (const line of warning.split("\n")) log.warn(line);
+  } else {
+    log.info(
+      { source: GROQ_KEY_SOURCE, prefix: GROQ_KEY_PREFIX, model: GROQ_MODEL, endpoint: GROQ_ENDPOINT },
+      formatLoadedKeyInfo({ name: "GROQ_API_KEY", source: GROQ_KEY_SOURCE, prefix: GROQ_KEY_PREFIX }),
+    );
+    if (GROQ_GATEWAY_ENABLED) {
+      log.info({ baseUrl: GROQ_GATEWAY_BASE_URL }, "GROQ gateway enabled — routing chat completions through configured baseUrl");
+    }
+  }
+}
+
+export async function runStartupProbe() {
+  if (GROQ_KEY_SOURCE === null) {
+    return { status: "missing" };
+  }
+  const probe = await probeGroq({
+    apiKey: GROQ_API_KEY,
+    endpoint: GROQ_ENDPOINT,
+    extraHeaders: GROQ_EXTRA_HEADERS,
+  });
+  switch (probe.status) {
+    case "ok":
+      log.info({ modelCount: probe.modelCount }, "Groq probe OK");
+      break;
+    case "unauthorized":
+      log.error({ err: probe.error }, "Groq probe FAILED — semantic routing disabled");
+      break;
+    case "error":
+      log.warn({ err: probe.error }, "Groq probe could not complete — semantic routing may be impaired");
+      break;
+    case "missing":
+      // already warned at startup
+      break;
+  }
+  return probe;
+}
+
 // --- Main ---
 function main() {
-  if (!GROQ_API_KEY) {
-    log.warn(
-      "GROQ_API_KEY not set and groq.apiKey absent from ~/.config/catalyst/config.json — semantic filtering disabled",
-    );
-  }
+  logKeyHealthAtStartup();
 
   writePidFile();
+  // Write initial state (probeStatus: pending or missing). Updated after probe completes.
+  writeBrokerStateFile(buildBrokerState());
+
   migrateLegacyInterestsFile();
 
   lastLogPath = getEventLogPath();
@@ -1114,6 +1238,7 @@ function main() {
       watchdog_interval_ms: WATCHDOG_INTERVAL_MS,
       heartbeat_stale_ms: HEARTBEAT_STALE_MS,
       broker: true,
+      key_health: { source: GROQ_KEY_SOURCE, prefix: GROQ_KEY_PREFIX, gateway: GROQ_GATEWAY_ENABLED },
     },
   });
 
@@ -1128,6 +1253,13 @@ function main() {
     "catalyst-broker daemon started",
   );
 
+  // Fire the Groq /v1/models probe asynchronously so it doesn't gate startup.
+  runStartupProbe().then((probe) => {
+    writeBrokerStateFile(buildBrokerState({ probe }));
+  }).catch((err) => {
+    log.warn({ err: err.message }, "probe error suppressed");
+  });
+
   const shutdown = () => {
     eventsWatcher?.close();
     clearInterval(watchdogId);
@@ -1135,6 +1267,7 @@ function main() {
     clearTimeout(hardCapTimer);
     closeBrokerStateDb();
     removePidFile();
+    try { unlinkSync(BROKER_STATE_FILE); } catch { /* already gone */ }
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

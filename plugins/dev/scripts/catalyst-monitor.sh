@@ -274,6 +274,15 @@ cmd_status() {
   rv=$(json_quote_or_null "$RUNNING_VERSION")
   lv=$(json_quote_or_null "$LATEST_AVAILABLE_VERSION")
 
+  # CTL-343: surface broker key-health alongside monitor status so a single
+  # `catalyst-monitor status --json` call answers "is everything healthy?".
+  local brokerKeyHealth='null'
+  local brokerStateFile="${BROKER_STATE_FILE:-${CATALYST_DIR:-$HOME/catalyst}/broker.state.json}"
+  if [[ -f "$brokerStateFile" ]]; then
+    brokerKeyHealth=$(jq -c '.keyHealth // null' "$brokerStateFile" 2>/dev/null || echo 'null')
+    [[ -z "$brokerKeyHealth" ]] && brokerKeyHealth='null'
+  fi
+
   local pid
   if pid=$(read_pid); then
     if [[ $json -eq 1 ]]; then
@@ -291,7 +300,8 @@ cmd_status() {
         --argjson lv "$lv" \
         --argjson stale "$([ "$IS_STALE" = "true" ] && echo true || echo false)" \
         --argjson tunnel "$tunnel" \
-        '{running:true,pid:$pid,port:$port,url:("http://localhost:"+($port|tostring)),runningVersion:$rv,latestAvailableVersion:$lv,isStale:$stale,webhookTunnel:$tunnel}'
+        --argjson brokerKeyHealth "$brokerKeyHealth" \
+        '{running:true,pid:$pid,port:$port,url:("http://localhost:"+($port|tostring)),runningVersion:$rv,latestAvailableVersion:$lv,isStale:$stale,webhookTunnel:$tunnel,brokerKeyHealth:$brokerKeyHealth}'
     else
       echo "Monitor running (pid $pid) at http://localhost:$PORT"
     fi
@@ -303,7 +313,8 @@ cmd_status() {
         --argjson rv "$rv" \
         --argjson lv "$lv" \
         --argjson stale "$([ "$IS_STALE" = "true" ] && echo true || echo false)" \
-        '{running:false,pid:null,port:$port,url:("http://localhost:"+($port|tostring)),runningVersion:$rv,latestAvailableVersion:$lv,isStale:$stale}'
+        --argjson brokerKeyHealth "$brokerKeyHealth" \
+        '{running:false,pid:null,port:$port,url:("http://localhost:"+($port|tostring)),runningVersion:$rv,latestAvailableVersion:$lv,isStale:$stale,brokerKeyHealth:$brokerKeyHealth}'
     else
       echo "Monitor stopped"
     fi

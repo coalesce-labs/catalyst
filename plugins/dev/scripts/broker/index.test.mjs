@@ -7,6 +7,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { existsSync, readFileSync, rmSync as rmFile } from "node:fs";
 import {
   handleRegister,
   handleDeregister,
@@ -22,6 +23,8 @@ import {
   processEvent,
   tryDeterministicRoute,
   tryTicketLifecycleRoute,
+  buildBrokerState,
+  writeBrokerStateFile,
 } from "./index.mjs";
 import {
   openBrokerStateDb,
@@ -769,5 +772,72 @@ describe("shouldSkipEvent (broker)", () => {
   test("does not skip linear.* events", () => {
     expect(shouldSkipEvent({ event: "linear.issue.state_changed" })).toBe(false);
     expect(shouldSkipEvent({ event: "linear.comment.created" })).toBe(false);
+  });
+});
+
+// ─── Broker state file (CTL-343 — API key health) ───────────────────────────
+
+describe("buildBrokerState (CTL-343)", () => {
+  test("has keyHealth.groq with present/source/prefix/probeStatus/gateway shape", () => {
+    const state = buildBrokerState();
+    expect(state.pid).toBe(process.pid);
+    expect(typeof state.startedAt).toBe("string");
+    expect(state.keyHealth).toBeDefined();
+    expect(state.keyHealth.groq).toBeDefined();
+    expect("present" in state.keyHealth.groq).toBe(true);
+    expect("source" in state.keyHealth.groq).toBe(true);
+    expect("prefix" in state.keyHealth.groq).toBe(true);
+    expect("probeStatus" in state.keyHealth.groq).toBe(true);
+    expect("probeError" in state.keyHealth.groq).toBe(true);
+    expect("probeAt" in state.keyHealth.groq).toBe(true);
+    expect(state.gateway).toBeDefined();
+    expect(typeof state.gateway.enabled).toBe("boolean");
+  });
+
+  test("initial state has probeStatus 'pending' or 'missing' (no probe yet)", () => {
+    const state = buildBrokerState();
+    expect(["pending", "missing"]).toContain(state.keyHealth.groq.probeStatus);
+    expect(state.keyHealth.groq.probeAt).toBeNull();
+  });
+
+  test("with probe result, surfaces probe status + probeAt timestamp", () => {
+    const state = buildBrokerState({ probe: { status: "ok", modelCount: 41 } });
+    expect(state.keyHealth.groq.probeStatus).toBe("ok");
+    expect(state.keyHealth.groq.modelCount).toBe(41);
+    expect(state.keyHealth.groq.probeAt).not.toBeNull();
+  });
+
+  test("with probe failure, surfaces error message", () => {
+    const state = buildBrokerState({
+      probe: { status: "unauthorized", error: "HTTP 401: invalid_api_key" },
+    });
+    expect(state.keyHealth.groq.probeStatus).toBe("unauthorized");
+    expect(state.keyHealth.groq.probeError).toContain("401");
+  });
+});
+
+describe("writeBrokerStateFile (CTL-343)", () => {
+  test("writes valid JSON to a custom path", () => {
+    const target = join(tmpDir, "broker.state.json");
+    const state = buildBrokerState();
+    writeBrokerStateFile(state, { path: target });
+    expect(existsSync(target)).toBe(true);
+    const parsed = JSON.parse(readFileSync(target, "utf8"));
+    expect(parsed.pid).toBe(process.pid);
+    expect(parsed.keyHealth.groq).toBeDefined();
+    rmFile(target, { force: true });
+  });
+
+  test("overwrites existing file (atomic rename)", () => {
+    const target = join(tmpDir, "broker.state.json");
+    writeBrokerStateFile(buildBrokerState(), { path: target });
+    writeBrokerStateFile(
+      buildBrokerState({ probe: { status: "ok", modelCount: 7 } }),
+      { path: target },
+    );
+    const parsed = JSON.parse(readFileSync(target, "utf8"));
+    expect(parsed.keyHealth.groq.probeStatus).toBe("ok");
+    expect(parsed.keyHealth.groq.modelCount).toBe(7);
+    rmFile(target, { force: true });
   });
 });

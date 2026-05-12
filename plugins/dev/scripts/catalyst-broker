@@ -18,6 +18,7 @@ set -uo pipefail
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 PID_FILE="${BROKER_PID_FILE:-$CATALYST_DIR/broker.pid}"
 LOG_FILE="${BROKER_LOG_FILE:-$CATALYST_DIR/broker.log}"
+STATE_FILE="${BROKER_STATE_FILE:-$CATALYST_DIR/broker.state.json}"
 _SRC="${BASH_SOURCE[0]}"
 while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
@@ -101,9 +102,29 @@ cmd_restart() {
 }
 
 cmd_status() {
+  local json=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      *) echo "error: unknown flag for status: $1" >&2; return 1 ;;
+    esac
+  done
+
   local pid
   if pid=$(read_pid); then
-    echo "running (pid $pid)"
+    if [[ $json -eq 1 ]]; then
+      if [[ -f "$STATE_FILE" ]] && jq -e . "$STATE_FILE" >/dev/null 2>&1; then
+        jq --argjson pid "$pid" '. + {running: true, pid: $pid}' "$STATE_FILE"
+      else
+        jq -n --argjson pid "$pid" '{running: true, pid: $pid, keyHealth: null, gateway: null}'
+      fi
+    else
+      echo "running (pid $pid)"
+    fi
+    return 0
+  fi
+  if [[ $json -eq 1 ]]; then
+    jq -n '{running: false, pid: null, keyHealth: null, gateway: null}'
   else
     echo "stopped"
   fi
@@ -127,7 +148,7 @@ case "${1:-}" in
   start)   cmd_start ;;
   stop)    cmd_stop ;;
   restart) cmd_restart ;;
-  status)  cmd_status ;;
+  status)  shift; cmd_status "$@" ;;
   logs)    cmd_logs ;;
   run)     shift; cmd_run "$@" ;;
   *)
