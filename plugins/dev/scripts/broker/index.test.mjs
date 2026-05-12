@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   handleRegister,
+  handleDeregister,
   handleAgentCheckin,
   handleAgentCheckout,
   handleAgentHeartbeat,
@@ -633,6 +634,122 @@ describe("backward compat: pr_lifecycle routing unchanged in broker", () => {
     }, getInterests());
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("CI checks passing");
+  });
+});
+
+// ─── Canonical-format filter events (CTL-336) ────────────────────────────────
+
+describe("canonical-format filter events (CTL-336)", () => {
+  test("handleRegister accepts canonical filter.register event", () => {
+    handleRegister({
+      ts: "2026-05-12T15:00:00Z",
+      attributes: {
+        "event.name": "filter.register",
+        "catalyst.orchestrator.id": "orch-canon-1",
+      },
+      body: {
+        payload: {
+          interest_id: "canon-watcher-1",
+          notify_event: "filter.wake.canon-watcher-1",
+          interest_type: "pr_lifecycle",
+          pr_numbers: [123],
+          repo: "org/repo",
+          base_branches: [],
+          persistent: true,
+        },
+      },
+    });
+    const reg = getInterests().get("canon-watcher-1");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("pr_lifecycle");
+    expect(reg.pr_numbers).toEqual([123]);
+    expect(reg.orchestrator).toBe("orch-canon-1");
+    expect(reg.persistent).toBe(true);
+  });
+
+  test("handleDeregister accepts canonical filter.deregister event", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-canon-2",
+      detail: {
+        interest_id: "canon-watcher-2",
+        notify_event: "filter.wake.canon-watcher-2",
+        persistent: true,
+      },
+    });
+    expect(getInterests().has("canon-watcher-2")).toBe(true);
+
+    handleDeregister({
+      ts: "2026-05-12T15:01:00Z",
+      attributes: {
+        "event.name": "filter.deregister",
+        "catalyst.orchestrator.id": "orch-canon-2",
+      },
+      body: { payload: { interest_id: "canon-watcher-2" } },
+    });
+    expect(getInterests().has("canon-watcher-2")).toBe(false);
+  });
+
+  test("processEvent dispatches canonical filter.register", () => {
+    processEvent({
+      ts: "2026-05-12T15:02:00Z",
+      attributes: {
+        "event.name": "filter.register",
+        "catalyst.orchestrator.id": "orch-canon-3",
+      },
+      body: {
+        payload: {
+          interest_id: "canon-watcher-3",
+          notify_event: "filter.wake.canon-watcher-3",
+          interest_type: "ticket_lifecycle",
+          tickets: ["CTL-336"],
+          persistent: true,
+        },
+      },
+    });
+    expect(getInterests().has("canon-watcher-3")).toBe(true);
+  });
+
+  test("processEvent dispatches canonical filter.deregister", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-canon-4",
+      detail: {
+        interest_id: "canon-watcher-4",
+        notify_event: "filter.wake.canon-watcher-4",
+        persistent: true,
+      },
+    });
+    expect(getInterests().has("canon-watcher-4")).toBe(true);
+
+    processEvent({
+      ts: "2026-05-12T15:03:00Z",
+      attributes: {
+        "event.name": "filter.deregister",
+        "catalyst.orchestrator.id": "orch-canon-4",
+      },
+      body: { payload: { interest_id: "canon-watcher-4" } },
+    });
+    expect(getInterests().has("canon-watcher-4")).toBe(false);
+  });
+
+  test("handleRegister falls back to orchestrator from attributes when event.orchestrator is absent", () => {
+    handleRegister({
+      attributes: {
+        "event.name": "filter.register",
+        "catalyst.orchestrator.id": "orch-canon-5",
+      },
+      body: {
+        payload: {
+          interest_id: "canon-watcher-5",
+          notify_event: "filter.wake.canon-watcher-5",
+          persistent: true,
+        },
+      },
+    });
+    const reg = getInterests().get("canon-watcher-5");
+    expect(reg).toBeDefined();
+    expect(reg.orchestrator).toBe("orch-canon-5");
   });
 });
 

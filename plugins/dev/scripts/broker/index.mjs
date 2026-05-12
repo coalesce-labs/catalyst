@@ -232,9 +232,24 @@ export function clearLastHeartbeat() {
   workerToOrchestrator.clear();
 }
 
+// CTL-336: read name/payload/orchestrator from canonical OTel-format events
+// (data in `attributes` + `body.payload`) as well as legacy flat events
+// (data in `event` + `detail` + `orchestrator`). Resolved here so the
+// rest of the broker can stay shape-agnostic.
+function getEventName(event) {
+  return event.event ?? event.attributes?.["event.name"] ?? "";
+}
+function getEventPayload(event) {
+  return event.detail ?? event.body?.payload ?? {};
+}
+function getEventOrchestrator(event) {
+  return event.orchestrator ?? event.attributes?.["catalyst.orchestrator.id"] ?? null;
+}
+
 export function handleRegister(event) {
-  const d = event.detail ?? {};
-  const id = d.interest_id ?? event.orchestrator ?? d.notify_event;
+  const d = getEventPayload(event);
+  const orchestrator = getEventOrchestrator(event);
+  const id = d.interest_id ?? orchestrator ?? d.notify_event;
   if (!id) return;
   const isPrLifecycle = d.interest_type === "pr_lifecycle";
   const isTicketLifecycle = d.interest_type === "ticket_lifecycle";
@@ -242,7 +257,7 @@ export function handleRegister(event) {
     notify_event: d.notify_event ?? `filter.wake.${id}`,
     prompt: d.prompt ?? "",
     context: d.context ?? null,
-    orchestrator: event.orchestrator ?? null,
+    orchestrator: orchestrator,
     session_id: d.session_id ?? null,
     persistent: d.persistent === true,
     interest_type: d.interest_type ?? null,
@@ -283,7 +298,8 @@ export function handleRegister(event) {
 }
 
 export function handleDeregister(event) {
-  const id = (event.detail ?? {}).interest_id ?? event.orchestrator;
+  const d = getEventPayload(event);
+  const id = d.interest_id ?? getEventOrchestrator(event);
   if (!id) return;
   const reg = interests.get(id);
   if (interests.delete(id)) {
@@ -869,7 +885,7 @@ function startWatchdog() {
 
 // --- Event processing ---
 export function processEvent(event) {
-  const name = event.event ?? "";
+  const name = getEventName(event);
 
   if (name === "filter.register") {
     handleRegister(event);
@@ -1021,11 +1037,12 @@ function loadExistingRegistrations() {
     for (const line of lines.slice(-LOOKBACK_LINES)) {
       let event;
       try { event = JSON.parse(line); } catch { continue; }
-      if (event.event === "filter.register") handleRegister(event);
-      if (event.event === "filter.deregister") handleDeregister(event);
-      if (event.event === "agent.checkin") handleAgentCheckin(event);
-      if (event.event === "agent.checkout") handleAgentCheckout(event);
-      if (event.event === "orchestrator-completed" || event.event === "orchestrator-failed") {
+      const name = getEventName(event);
+      if (name === "filter.register") handleRegister(event);
+      if (name === "filter.deregister") handleDeregister(event);
+      if (name === "agent.checkin") handleAgentCheckin(event);
+      if (name === "agent.checkout") handleAgentCheckout(event);
+      if (name === "orchestrator-completed" || name === "orchestrator-failed") {
         handleOrchestratorTerminated(event);
       }
     }
