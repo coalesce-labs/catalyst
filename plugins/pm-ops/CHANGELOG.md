@@ -1,8 +1,20 @@
 # Changelog
 
-## 1.0.0 (2026-05-11)
+## [2.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v1.0.0...catalyst-pm-ops-v2.0.0)
+
+May 11, 2026
+
+<!-- ai-enhanced -->
+
+### PM Operations Plugin Split
+
+The Linear/GitHub integration, daily cadence, and team communication skills have been extracted from catalyst-pm into a dedicated catalyst-pm-ops plugin. This gives you focused project management operations in a standalone package with 12 specialized skills and 4 agents. Skills that were at `/catalyst-pm:<name>` are now at `/catalyst-pm-ops:<name>` — update any shortcuts or CLAUDE.md references to use the new paths.
 
 
-### Features
 
+### PRs
+
+* **pm-ops:** extract Linear/cadence/comms skills from catalyst-pm (CTL-319) ([#537](https://github.com/coalesce-labs/catalyst/issues/537))
+* **pm-ops:** extract Linear/cadence/comms skills from catalyst-pm (CTL-319) ([#537](https://github.com/coalesce-labs/catalyst/issues/537)) ([5a9c582](https://github.com/coalesce-labs/catalyst/commit/5a9c58279129349645997d0e7b20928f93b32c4a))
 * **pm-ops:** initial plugin — extracted from catalyst-pm ([CTL-319](https://linear.app/coalesce-labs/issue/CTL-319))
+

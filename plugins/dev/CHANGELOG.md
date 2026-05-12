@@ -1,5 +1,31 @@
 # Changelog
 
+## [9.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.4.0...catalyst-dev-v9.0.0)
+
+May 11, 2026
+
+<!-- ai-enhanced -->
+
+### Catalyst HUD Bottom-Anchored Panels
+
+Detail panes and help overlays now anchor to the bottom of your terminal with the event list expanding to fill all remaining space above. Event rows are self-explanatory — comms events show sender/recipient/type, filter events display as "wake"/"filter reg" instead of truncated names, and all text is cleaned of HTML/Markdown markup. Column headers stay pinned when detail panes are open, and the core catalyst-pm plugin now focuses on 12 essential strategy/PRD skills with ops features moved to dedicated sibling plugins.
+
+
+
+### PRs
+
+* **pm:** shrink catalyst-pm to 12 strategy/PRD skills (CTL-322) ([#543](https://github.com/coalesce-labs/catalyst/issues/543))
+* **pm:** shrink catalyst-pm to 12 strategy/PRD skills (CTL-322) ([#543](https://github.com/coalesce-labs/catalyst/issues/543)) ([43b1c89](https://github.com/coalesce-labs/catalyst/commit/43b1c89db5d7536a31a82918df8555b579e53f07))
+* **dev:** bottom-anchor catalyst-hud detail pane (CTL-324) ([#553](https://github.com/coalesce-labs/catalyst/issues/553)) ([9de7767](https://github.com/coalesce-labs/catalyst/commit/9de7767c38bc5f09c41465cd793fefe51ef333a7))
+* **dev:** bottom-anchor catalyst-hud help panel (CTL-325) ([#554](https://github.com/coalesce-labs/catalyst/issues/554)) ([474702d](https://github.com/coalesce-labs/catalyst/commit/474702db166c6a68ffe277d6767f0674ce63be42))
+* **dev:** broker writes canonical filter.wake events + HUD shows filter.* labels (CTL-331) ([#558](https://github.com/coalesce-labs/catalyst/issues/558)) ([6a28db7](https://github.com/coalesce-labs/catalyst/commit/6a28db74736b857b25328bed253566e7fc289184))
+* **dev:** catalyst-hud — make comms rows self-explanatory (CTL-330) ([#559](https://github.com/coalesce-labs/catalyst/issues/559)) ([37cdf68](https://github.com/coalesce-labs/catalyst/commit/37cdf68e0e603fb41569db4ce5b6f7b14c3e3f79))
+* **dev:** catalyst-hud detail header — 24h datetime, prevent timestamp wrap (CTL-327) ([#552](https://github.com/coalesce-labs/catalyst/issues/552)) ([8440c9b](https://github.com/coalesce-labs/catalyst/commit/8440c9b94d38958b1b7bf02d12880f36101c744f))
+* **dev:** catalyst-hud sticky column header (CTL-332) ([#560](https://github.com/coalesce-labs/catalyst/issues/560)) ([8f4447a](https://github.com/coalesce-labs/catalyst/commit/8f4447a0a0db89528bcf8f69427c35e11bea3c70))
+* **dev:** catalyst-hud UI polish — live tail, scrollable panes, redesigned detail ([#529](https://github.com/coalesce-labs/catalyst/issues/529)) ([b6fac3f](https://github.com/coalesce-labs/catalyst/commit/b6fac3fc8316dcc9664349f604f84b1856459c51))
+* **dev:** make catalyst-hud and install-cli resilient to plugin upgrades ([#538](https://github.com/coalesce-labs/catalyst/issues/538)) ([3a07708](https://github.com/coalesce-labs/catalyst/commit/3a07708257e88379c77addb13e584c56132e902b))
+* **dev:** strip HTML and Markdown markup from catalyst-hud event details (CTL-326) ([#551](https://github.com/coalesce-labs/catalyst/issues/551)) ([80870da](https://github.com/coalesce-labs/catalyst/commit/80870da0d4cd158b37c3e84e6bf893f4c6e8db6b))
+
 ## [8.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.3.0...catalyst-dev-v8.4.0)
 
 May 09, 2026
