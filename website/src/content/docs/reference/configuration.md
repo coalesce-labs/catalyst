@@ -278,14 +278,61 @@ Layer-2 secrets (`~/.config/catalyst/config-{projectKey}.json` or the cross-proj
 ```json
 {
   "groq": {
-    "apiKey": "gsk_..."
+    "apiKey": "gsk_...",
+    "gateway": {
+      "enabled": false,
+      "baseUrl": "https://gateway.internal/groq",
+      "headers": { "X-Project": "Adva AI Gateway" }
+    }
   }
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `groq.apiKey` | string | Groq API key used by `catalyst-broker` for semantic-prose classification of ambiguous events. Not required for deterministic routes (`pr_lifecycle`, `ticket_lifecycle`). Override with the `GROQ_API_KEY` env var. |
+| `groq.apiKey` | string | Groq API key used by `catalyst-broker` for semantic-prose classification of ambiguous events. Not required for deterministic routes (`pr_lifecycle`, `ticket_lifecycle`). |
+| `groq.gateway.enabled` | boolean | When `true`, route Groq chat-completions through a configured gateway (e.g. Litellm, Helicone, Adva AI Gateway) so all Catalyst traffic lands in one dashboard regardless of which key owns the underlying calls. Defaults to `false` (call `https://api.groq.com` directly). |
+| `groq.gateway.baseUrl` | string | Gateway base URL. The broker appends `/chat/completions` for completions and `/v1/models` for the startup probe. Trailing slashes are stripped. |
+| `groq.gateway.headers` | object | Extra headers merged into every Groq request — useful for project-tag headers required by your gateway. |
+
+#### Key resolution precedence (CTL-343)
+
+`catalyst-broker` resolves the Groq API key with three layers, in this order:
+
+1. `process.env.GROQ_API_KEY` — highest priority. Set per-project via direnv, or for one-off
+   overrides.
+2. `~/.config/catalyst/config-<projectKey>.json` → `groq.apiKey` — per-project secrets when a
+   `projectKey` is configured.
+3. `~/.config/catalyst/config.json` → `groq.apiKey` — cross-project default.
+
+If none of the three resolve, the broker logs a multi-line warning at startup naming the missing
+key, the config path, the env var, and the Groq signup URL. Semantic-prose routing is then
+disabled until a key is provided; deterministic routes continue to work.
+
+#### Startup probe + status surface (CTL-343)
+
+At daemon start the broker issues a single `GET /v1/models` against the resolved endpoint to
+surface a 401/403 within seconds rather than hours later. The result is recorded in the runtime
+state file (below) under `keyHealth.groq.probeStatus`:
+
+| Probe status | Meaning |
+|--------------|---------|
+| `ok` | Key is valid, response 200, `modelCount` populated |
+| `unauthorized` | 401 or 403 — key is present but invalid; semantic routing disabled |
+| `error` | Network error or 5xx |
+| `missing` | No key resolved (see precedence above) |
+| `pending` | State file written, probe still in flight (~first second of startup) |
+
+Consumers:
+
+```sh
+catalyst-broker status --json     # broker-only view
+catalyst-monitor status --json    # monitor + broker key-health combined
+```
+
+The HUD (`catalyst-hud`) renders a colour-coded chip in the header — green/yellow/red — and the
+key's first 12 characters with its resolution source (`env`, `project-config`, or `config`),
+so the operator can sanity-check "is this the right key?" at a glance.
 
 Runtime files (created on demand under `$CATALYST_DIR`, default `~/catalyst/`):
 
@@ -293,6 +340,7 @@ Runtime files (created on demand under `$CATALYST_DIR`, default `~/catalyst/`):
 |------|---------|
 | `~/catalyst/broker.pid` | Liveness PID file written by the daemon |
 | `~/catalyst/broker.log` | Pino structured log output (CTL-314) |
+| `~/catalyst/broker.state.json` | Key-health + gateway state surface (CTL-343), removed on clean shutdown |
 | `~/catalyst/broker-interests.json` | Persistent interest registry |
 
 `LOG_LEVEL` (default `info`) controls broker log verbosity through pino (CTL-314). The same env
