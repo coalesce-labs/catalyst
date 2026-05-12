@@ -59,6 +59,12 @@ export function formatSource(event: CanonicalEvent): string {
     if (worker) return worker;
     return "comms";
   }
+  // CTL-337: filter.wake events are always emitted by the broker; the
+  // orchestrator id on the wake is the recipient, not the source. Return
+  // "broker" so the SOURCE column shows who actually sent the event.
+  if (name.startsWith("filter.wake.") || name.startsWith("orchestrator.filter.wake.")) {
+    return "broker";
+  }
   // CTL-331: recognise filter.* and the legacy orchestrator.filter.* alias.
   // Surface the orchestrator id when present so users can correlate filter
   // events back to a specific orchestrator run.
@@ -117,13 +123,29 @@ export function formatEvent(event: CanonicalEvent): string {
 }
 
 export function formatRef(event: CanonicalEvent): string {
-  if (event.attributes?.["event.name"] === "comms.message.posted") {
+  const name = event.attributes?.["event.name"];
+  if (name === "comms.message.posted") {
     const payload = event.body?.payload as Record<string, unknown> | undefined;
     const to = payload?.["to"];
     if (typeof to === "string" && to.length > 0) return `→${to}`;
     const channel = payload?.["channel"];
     if (typeof channel === "string" && channel.length > 0) return channel;
     return "";
+  }
+  // CTL-337: filter.register events watch a specific set of tickets (semantic
+  // interest) or a specific repo (structured interest like pr_lifecycle).
+  // Surface that in REF so the user sees what the registration observes.
+  if (name?.startsWith("filter.register") || name?.startsWith("orchestrator.filter.register")) {
+    const payload = event.body?.payload as Record<string, unknown> | undefined;
+    const ctx = payload?.["context"] as Record<string, unknown> | undefined;
+    const tickets = ctx?.["tickets"];
+    if (Array.isArray(tickets) && tickets.length > 0) {
+      return (tickets as string[]).join(",");
+    }
+    const repo = payload?.["repo"];
+    if (typeof repo === "string" && repo.length > 0) {
+      return repo.includes("/") ? (repo.split("/").pop() ?? repo) : repo;
+    }
   }
   const pr = event.attributes["vcs.pr.number"];
   if (pr) return `#${pr}`;
@@ -234,7 +256,28 @@ const bodyCache = new WeakMap<CanonicalEvent, string>();
 export function formatDetails(event: CanonicalEvent): string {
   const cached = detailsCache.get(event);
   if (cached !== undefined) return cached;
+  const name = event.attributes?.["event.name"];
   const payload = event.body?.payload;
+  // CTL-337: filter.register events carry a human-readable prompt (semantic
+  // interest) or an interest_type + repo (structured interest). Surface that
+  // in DETAILS so the user sees *why* the registration was made.
+  if (name?.startsWith("filter.register") || name?.startsWith("orchestrator.filter.register")) {
+    const p = payload as Record<string, unknown> | undefined;
+    const prompt = p?.["prompt"];
+    if (typeof prompt === "string" && prompt.length > 0) {
+      const out = sanitize(prompt, "oneline");
+      detailsCache.set(event, out);
+      return out;
+    }
+    const itype = p?.["interest_type"];
+    if (typeof itype === "string" && itype.length > 0) {
+      const repo = p?.["repo"];
+      const text = typeof repo === "string" && repo.length > 0 ? `${itype} ${repo}` : itype;
+      const out = sanitize(text, "oneline");
+      detailsCache.set(event, out);
+      return out;
+    }
+  }
   const msg = event.body?.message ?? "";
   let raw = msg;
   if (payload && typeof payload === "object") {
