@@ -403,6 +403,38 @@ Y_WAVE=$(jq -r '.wave' "${ORCH_DIR}/workers/Y.json")
 [ "$Y_WAVE" = "10" ] && pass "Y.wave=10" || fail "Y.wave=10" "got: $Y_WAVE"
 scratch_teardown
 
+echo "test 23 (CTL-334): worker subshell does not inherit parent herestring stdin"
+scratch_setup
+# Replace the fake claude with one that captures its own stdin to a per-pid
+# file. With the stdin leak, the first worker(s) would see the leftover
+# `<wave>\t<ticket>` rows from the dispatcher's `done <<< "$PENDING"` loop.
+cat > "${SCRATCH}/bin/claude" <<EOF2
+#!/usr/bin/env bash
+# Drain stdin into a deterministic file so the test can inspect it.
+cat <&0 > "${SCRATCH}/stdin-\$\$.log" 2>/dev/null || true
+sleep 30 &
+disown \$! 2>/dev/null || true
+EOF2
+chmod +x "${SCRATCH}/bin/claude"
+write_state "demo" 4 '{"wave1Pending": ["T-1", "T-2", "T-3"]}'
+for T in T-1 T-2 T-3; do make_worktree "demo" "$T"; done
+OUT=$(run_dispatch 2>"${SCRATCH}/err")
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "T-1,T-2,T-3" ] && pass "all 3 dispatched in one call" \
+  || fail "all 3 dispatched in one call" "got: $DISPATCHED (stdin leak symptom: only first N-1 dispatched)"
+# Every captured stdin file must be empty (no inherited herestring content).
+LEAK_COUNT=0
+for SF in "${SCRATCH}"/stdin-*.log; do
+  [ -e "$SF" ] || continue
+  if [ -s "$SF" ]; then
+    LEAK_COUNT=$((LEAK_COUNT+1))
+    echo "    LEAK in $SF: $(head -c 200 "$SF")" >&2
+  fi
+done
+[ "$LEAK_COUNT" = "0" ] && pass "no worker received leftover herestring on stdin" \
+  || fail "no worker received leftover herestring on stdin" "$LEAK_COUNT worker(s) saw stdin content"
+scratch_teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

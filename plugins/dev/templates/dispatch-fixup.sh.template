@@ -50,5 +50,7 @@ PROMPT_BODY="$(cat "${PROMPT_FILE}")"
     --verbose \
     --dangerously-skip-permissions \
     -p "${PROMPT_BODY}"
-) > "${STREAM_FILE}" 2> "${LOG_FILE}" &
+) > "${STREAM_FILE}" 2> "${LOG_FILE}" </dev/null &
+# </dev/null on the worker subshell prevents claude -p from inheriting the
+# parent shell's stdin (e.g. a herestring feeding a `read` loop). See CTL-334.
 echo "Dispatched fix-up worker via claude CLI (pid $!)"
