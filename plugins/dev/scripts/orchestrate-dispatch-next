@@ -242,7 +242,11 @@ while IFS=$'\t' read -r W T; do
       --verbose \
       --dangerously-skip-permissions \
       -p "${WORKER_COMMAND} ${T} ${WORKER_ARGS}"
-  ) > "$STREAM" 2> "$STDERR" &
+  ) > "$STREAM" 2> "$STDERR" </dev/null &
+  # </dev/null above: claude -p reads stdin even in non-interactive mode. Without
+  # this, the worker inherits the parent's open herestring (`done <<< "$PENDING"`
+  # below) and treats leftover `<wave>\t<ticket>` lines as additional prompt
+  # input, blowing up the first AskUserQuestion. See CTL-334.
   PID=$!
 
   NOW2=$(now_iso)
