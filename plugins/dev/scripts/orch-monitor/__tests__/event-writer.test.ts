@@ -25,6 +25,7 @@ function readMonth(baseDir: string, ts: Date): string {
 function sampleEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
   return {
     ts: "2026-05-08T18:00:00.000Z",
+    id: "00000000-0000-4000-8000-000000000000",
     observedTs: "2026-05-08T18:00:00.000Z",
     severityText: "INFO",
     severityNumber: 9,

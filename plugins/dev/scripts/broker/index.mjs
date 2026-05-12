@@ -23,7 +23,6 @@ import {
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
 import pino from "pino";
 import {
   openBrokerStateDb,
@@ -49,6 +48,16 @@ import {
   probeGroq,
   deriveGroqEndpoint,
 } from "../lib/api-key-health.mjs";
+// Canonical-event primitives shared with orch-monitor (CTL-344). Bun
+// transpiles the .ts import on the fly; the file uses only node: builtins so
+// the broker's minimal dep surface stays intact.
+import {
+  severityNumber,
+  deriveTraceId,
+  deriveSpanId,
+  generateEventId,
+  synthesizeEventId,
+} from "../orch-monitor/lib/canonical-event-shared.ts";
 
 // --- Logger ---
 const log = pino({
@@ -112,9 +121,11 @@ function getEventLogPath() {
   return resolve(catalystDir, "events", `${ym}.jsonl`);
 }
 
-// Canonical envelope helpers (mirrors lib/canonical-event.sh and
-// orch-monitor/lib/canonical-event.ts so trace/span IDs match deterministically
-// across producers — CTL-331).
+// Canonical envelope helpers. Primitives (sha256Hex, severityNumber,
+// deriveTraceId, deriveSpanId, generateEventId, synthesizeEventId) live in
+// orch-monitor/lib/canonical-event-shared.ts and are imported above (CTL-344).
+// pluginVersion is broker-local because the broker resolves plugin.json
+// relative to its own location and shouldn't share orch-monitor's resolver.
 
 const __PLUGIN_JSON_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -136,26 +147,6 @@ export function pluginVersion() {
   return __pluginVersionCached;
 }
 
-function sha256Hex(input) {
-  return createHash("sha256").update(input).digest("hex");
-}
-
-function deriveTraceId(orchestratorId) {
-  if (orchestratorId && orchestratorId.length > 0) {
-    return sha256Hex(orchestratorId).slice(0, 32);
-  }
-  return null;
-}
-
-function deriveSpanId(workerTicket) {
-  if (workerTicket && workerTicket.length > 0) {
-    return sha256Hex(workerTicket).slice(0, 16);
-  }
-  return null;
-}
-
-const __SEVERITY_NUMBERS = { DEBUG: 5, INFO: 9, WARN: 13, ERROR: 17 };
-
 // Translate the broker's internal {event, orchestrator, worker, detail} shape
 // into a canonical OTel-style envelope. Severity defaults to INFO — broker
 // emissions today (filter.wake.*, broker.daemon.startup) are all info-level.
@@ -172,9 +163,10 @@ export function buildCanonicalEnvelope(legacy) {
 
   return {
     ts,
+    id: generateEventId(),
     observedTs: ts,
     severityText: severity,
-    severityNumber: __SEVERITY_NUMBERS[severity] ?? __SEVERITY_NUMBERS.INFO,
+    severityNumber: severityNumber(severity),
     traceId: deriveTraceId(orch),
     spanId: deriveSpanId(worker),
     resource: {
@@ -473,7 +465,8 @@ export function tryDeterministicRoute(event, interestsMap) {
   const name = event.event ?? "";
   const detail = event.detail ?? {};
   const scope = event.scope ?? {};
-  const eventId = event.id ?? null;
+  // CTL-344: real id on new envelopes, synthetic id for legacy events.
+  const eventId = event.id ?? synthesizeEventId(event);
 
   let deployMatchedInterest = null;
   if (name === "github.deployment.created") {
@@ -588,7 +581,8 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
   const detail = event.detail ?? {};
   const scope = event.scope ?? {};
   const attrs = event.attributes ?? {};
-  const eventId = event.id ?? null;
+  // CTL-344: real id on new envelopes, synthetic id for legacy events.
+  const eventId = event.id ?? synthesizeEventId(event);
 
   // Extract the ticket this event concerns. Linear canonical events carry
   // `attributes["linear.issue.identifier"]`; legacy/flat events use `detail.ticket`.
@@ -804,7 +798,15 @@ async function classifyBatch(events) {
     const reg = interests.get(match.interest_id);
     if (!reg) continue;
 
-    const sourceIds = (match.event_indices ?? []).map((i) => events[i - 1]?.id).filter(Boolean);
+    // CTL-344: prefer real event.id; fall back to synthesized id for legacy
+    // events. .filter(Boolean) strips any indices pointing past the batch end.
+    const sourceIds = (match.event_indices ?? [])
+      .map((i) => {
+        const e = events[i - 1];
+        if (!e) return null;
+        return e.id ?? synthesizeEventId(e);
+      })
+      .filter(Boolean);
 
     if (!sourceIds.length) {
       log.info(

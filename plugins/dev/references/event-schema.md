@@ -25,6 +25,7 @@ Every event in `~/catalyst/events/YYYY-MM.jsonl` has this shape. One canonical e
 ```json
 {
   "ts": "2026-05-08T18:00:00.000Z",
+  "id": "11111111-2222-4333-8444-555555555555",
   "observedTs": "2026-05-08T18:00:00.001Z",
   "severityText": "INFO",
   "severityNumber": 9,
@@ -63,6 +64,7 @@ hostile for jq. The sidecar (CTL-306) handles that translation mechanically.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `ts` | string (ISO 8601) | yes | When the event happened |
+| `id` | string (UUIDv4) | yes (new since CTL-344) | Per-record unique identifier. Generated at write time; never reused. Maps to OTLP `LogRecord.logRecordUid` on forward. Pre-CTL-344 records may lack this field; readers should fall back to a stable synthesized id from `traceId + spanId + ts + attributes."event.name"`. |
 | `observedTs` | string (ISO 8601) | no | When the writer/collector saw it. Defaults to `ts`. |
 | `severityText` | `"DEBUG"` \| `"INFO"` \| `"WARN"` \| `"ERROR"` | yes | Human-readable severity |
 | `severityNumber` | number | yes | OTel severity number — see table below |
@@ -216,6 +218,7 @@ one-time migration, already complete on any installation that ran CTL-300.
 ```json
 {
   "ts": "2026-05-08T18:00:00.000Z",
+  "id": "11111111-2222-4333-8444-555555555555",
   "observedTs": "2026-05-08T18:00:00.001Z",
   "severityText": "INFO",
   "severityNumber": 9,

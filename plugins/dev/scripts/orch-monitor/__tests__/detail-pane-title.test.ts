@@ -4,6 +4,7 @@ import { buildDetailLines } from "../cli/components/DetailPane.tsx";
 
 const baseEvent: CanonicalEvent = {
   ts: "2026-05-11T11:51:07.000Z",
+  id: "00000000-0000-4000-8000-000000000000",
   severityText: "INFO",
   severityNumber: 9,
   traceId: "abc123def456abc123def456abc123de",

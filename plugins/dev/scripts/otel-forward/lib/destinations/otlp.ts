@@ -28,6 +28,8 @@ export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
           severityText: ev.severityText,
           ...(ev.traceId ? { traceId: ev.traceId } : {}),
           ...(ev.spanId ? { spanId: ev.spanId } : {}),
+          // CTL-344: per-event UUID maps to OTel LogRecord.logRecordUid.
+          ...(ev.id ? { logRecordUid: ev.id } : {}),
           body: { stringValue: ev.body?.message ?? ev.attributes?.["event.name"] ?? "" },
           attributes: toAttrArray((ev.attributes as unknown as Record<string, unknown>) ?? {}),
         }],
