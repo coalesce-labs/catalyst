@@ -18,6 +18,20 @@ export interface BrokerKeyHealth {
   };
 }
 
+// CTL-352: broader read of broker.state.json including the new liveness
+// fields (interestCount, lastWakeAt, lastRegisterAt, startedAt). The legacy
+// BrokerKeyHealth shape is preserved as a subset for existing consumers.
+export interface BrokerState extends BrokerKeyHealth {
+  interestCount?: number;
+  lastWakeAt?: string | null;
+  lastRegisterAt?: string | null;
+  startedAt?: string;
+}
+
+export type BrokerInterestStatus = "ok" | "startup" | "degraded" | "unknown";
+
+const DEGRADED_GRACE_MS = 5 * 60 * 1000;
+
 /** Path of the broker's state file (override via $BROKER_STATE_FILE). */
 export function brokerStateFilePath(): string {
   if (process.env.BROKER_STATE_FILE) return process.env.BROKER_STATE_FILE;
@@ -59,4 +73,67 @@ export function chipColor(status: ProbeStatus): string {
     case "error": return "red";
     case "pending": return "cyan";
   }
+}
+
+// CTL-352: broker.state.json reader that surfaces liveness fields in
+// addition to keyHealth. Returns null on missing file / parse error so
+// consumers can render an "unknown" chip without crashing.
+export function readBrokerState(path?: string): BrokerState | null {
+  const target = path ?? brokerStateFilePath();
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(target, "utf8"));
+    if (!parsed || typeof parsed !== "object") return null;
+    const obj = parsed as Record<string, unknown>;
+    const kh = (obj.keyHealth ?? null) as BrokerKeyHealth | null;
+    const result: BrokerState = { ...(kh ?? {}) };
+    if (typeof obj.interestCount === "number") result.interestCount = obj.interestCount;
+    if (typeof obj.lastWakeAt === "string" || obj.lastWakeAt === null) {
+      result.lastWakeAt = obj.lastWakeAt;
+    }
+    if (typeof obj.lastRegisterAt === "string" || obj.lastRegisterAt === null) {
+      result.lastRegisterAt = obj.lastRegisterAt;
+    }
+    if (typeof obj.startedAt === "string") result.startedAt = obj.startedAt;
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+// CTL-352: classify the broker's interest table for HUD pill colouring.
+// "ok" — there is at least one registered interest.
+// "startup" — table is empty but broker has been up < 5 min (warmup grace).
+// "degraded" — table is empty AND broker has been up > 5 min (the silent-dead
+//   mode CTL-350 surfaced).
+// "unknown" — state file missing/malformed or interestCount field absent.
+export function brokerInterestStatus(
+  state: BrokerState | null,
+  nowMs: number = Date.now(),
+): BrokerInterestStatus {
+  if (!state || typeof state.interestCount !== "number") return "unknown";
+  if (state.interestCount > 0) return "ok";
+  if (!state.startedAt) return "unknown";
+  const started = Date.parse(state.startedAt);
+  if (Number.isNaN(started)) return "unknown";
+  return nowMs - started > DEGRADED_GRACE_MS ? "degraded" : "startup";
+}
+
+export function interestChipColor(status: BrokerInterestStatus): string {
+  switch (status) {
+    case "ok": return "green";
+    case "startup": return "yellow";
+    case "degraded": return "red";
+    case "unknown": return "gray";
+  }
+}
+
+export function interestChipLabel(
+  state: BrokerState | null,
+  status: BrokerInterestStatus,
+): string {
+  if (status === "unknown" || !state || typeof state.interestCount !== "number") return "?";
+  const n = state.interestCount;
+  if (status === "ok") return `${n} interest${n === 1 ? "" : "s"}`;
+  if (status === "startup") return `${n} (starting)`;
+  return `${n} interests`;
 }

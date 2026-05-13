@@ -2,7 +2,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { render, useApp, useInput, Box, Text } from "ink";
 import { Header } from "./components/Header.tsx";
-import { readBrokerKeyHealth, type BrokerKeyHealth } from "./lib/broker-key-health.ts";
+import { readBrokerState, type BrokerState } from "./lib/broker-key-health.ts";
 import { EventList } from "./components/EventList.tsx";
 import { FilterInput } from "./components/FilterInput.tsx";
 import { QueryInput } from "./components/QueryInput.tsx";
@@ -134,11 +134,12 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
 
   const { events, loading } = useEventLog({ repoFilter, predicate, sinceTs: activeSinceTs });
 
-  // CTL-343: broker key-health chip. Poll the broker state file every 5s so
-  // the chip surfaces fresh probe results without busy-reading on every render.
-  const [brokerKeyHealth, setBrokerKeyHealth] = useState<BrokerKeyHealth | null>(null);
+  // CTL-343 / CTL-352: broker state chip(s). Poll broker.state.json every 5s
+  // so the chips surface fresh probe results AND interest-count updates
+  // without busy-reading on every render.
+  const [brokerState, setBrokerState] = useState<BrokerState | null>(null);
   useEffect(() => {
-    const refresh = () => setBrokerKeyHealth(readBrokerKeyHealth());
+    const refresh = () => setBrokerState(readBrokerState());
     refresh();
     const id = setInterval(refresh, 5000);
     return () => clearInterval(id);
@@ -149,7 +150,9 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   const { filterText, setFilterText, pivot, setPivot, filtered } = useFilter(events, dslPredicate);
 
   // Header = optional chip row (0/1) + column row (1) + separator (1) + optional nlQuery row (0/1)
-  const headerRows = (brokerKeyHealth?.groq ? 1 : 0) + (dslState?.nlQuery ? 3 : 2);
+  // CTL-352: chip row is shown whenever Groq or broker-interest data is available.
+  const hasChipRow = Boolean(brokerState?.groq) || typeof brokerState?.interestCount === "number";
+  const headerRows = (hasChipRow ? 1 : 0) + (dslState?.nlQuery ? 3 : 2);
 
   const [showDslOverlay, setShowDslOverlay] = useState(false);
   const [dslScrollTop, setDslScrollTop] = useState(0);
@@ -373,7 +376,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   return (
     <Box flexDirection="column" height={layoutRows} width={cols}>
       <Box flexShrink={0}>
-        <Header columns={cols} nlQuery={dslState?.nlQuery} brokerKeyHealth={brokerKeyHealth} />
+        <Header columns={cols} nlQuery={dslState?.nlQuery} brokerState={brokerState} />
       </Box>
       <Box flexDirection="column" flexGrow={(inDetailMode || showHelp) ? 0 : 1} flexShrink={1}>
         <EventList

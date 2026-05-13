@@ -245,6 +245,31 @@ export function clearInterests() {
   interests.clear();
 }
 
+// --- Broker liveness stats (CTL-352) -----------------------------------------
+// Mutable module state that buildBrokerState() surfaces in broker.state.json so
+// operators (and the HUD pill in Phase 3) can tell at a glance whether the
+// broker has any registered interests and when it last did real work.
+let brokerStartedAt = null;
+let lastWakeAt = null;
+let lastRegisterAt = null;
+// One-shot guard for broker.daemon.degraded — set on emission, cleared whenever
+// interests.size > 0 so a future empty window re-arms.
+let degradedEmittedAt = null;
+
+const DEGRADED_THRESHOLD_MS = 5 * 60 * 1000;
+
+// Test-only setters. Production paths only ever set these via main() and the
+// hook points below; tests use these to time-travel without touching Date.now().
+export function __setBrokerStartedAtForTest(iso) { brokerStartedAt = iso; }
+export function __resetBrokerStartedAtForTest() { brokerStartedAt = null; }
+export function __resetDegradedEmittedForTest() { degradedEmittedAt = null; }
+export function __resetBrokerLivenessForTest() {
+  brokerStartedAt = null;
+  lastWakeAt = null;
+  lastRegisterAt = null;
+  degradedEmittedAt = null;
+}
+
 // --- Interest persistence ---
 // CTL-350: resolve paths per-call so tests can redirect by setting CATALYST_DIR.
 // Production daemons still pin a stable value at launch.
@@ -280,11 +305,55 @@ function migrateLegacyInterestsFile() {
   }
 }
 
+// CTL-352: defense-in-depth for the on-disk interests file.
+//   1. Skip prose-* test residue at save (mirror of the CTL-350 load guard).
+//   2. Refuse to write an empty array unless CATALYST_BROKER_ALLOW_EMPTY_SAVE=1
+//      — protects against silent flatten-to-zero events. The on-disk file is
+//      preserved and a warn line records previousCount for forensics.
+//   3. Atomic write via tmp + rename so a crash mid-write never leaves a
+//      partial file on disk.
 export function saveInterests() {
   const interestsFile = getInterestsFile();
   try {
     mkdirSync(dirname(interestsFile), { recursive: true });
-    writeFileSync(interestsFile, JSON.stringify([...interests.entries()], null, 2));
+
+    const allEntries = [...interests.entries()];
+    const filtered = [];
+    let skipped = 0;
+    for (const [id, reg] of allEntries) {
+      if (reg?.session_id && PROSE_TEST_SESSION.test(reg.session_id)) {
+        skipped++;
+        continue;
+      }
+      filtered.push([id, reg]);
+    }
+    if (skipped > 0) {
+      log.info({ skipped }, "saveInterests: dropped prose-* test residue");
+    }
+
+    if (filtered.length === 0 && process.env.CATALYST_BROKER_ALLOW_EMPTY_SAVE !== "1") {
+      let previousCount = 0;
+      try {
+        const existing = JSON.parse(readFileSync(interestsFile, "utf8"));
+        previousCount = Array.isArray(existing) ? existing.length : 0;
+      } catch {
+        // no existing file or parse error — previousCount stays 0
+      }
+      log.warn(
+        { previousCount },
+        "refusing to save empty interests file — on-disk preserved (set CATALYST_BROKER_ALLOW_EMPTY_SAVE=1 to override)",
+      );
+      return;
+    }
+
+    const tmp = `${interestsFile}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify(filtered, null, 2));
+      renameSync(tmp, interestsFile);
+    } catch (err) {
+      try { unlinkSync(tmp); } catch { /* tmp already gone */ }
+      throw err;
+    }
   } catch (err) {
     log.error({ err: err.message }, "failed to save interests");
   }
@@ -392,6 +461,10 @@ export function handleRegister(event) {
     log.info({ interestId: id, prompt: d.prompt, persistent }, "registered");
   }
   saveInterests();
+  lastRegisterAt = new Date().toISOString();
+  // CTL-352: a fresh registration arms a future degraded event.
+  degradedEmittedAt = null;
+  persistBrokerState();
 }
 
 export function handleDeregister(event) {
@@ -405,6 +478,7 @@ export function handleDeregister(event) {
     }
     log.info({ interestId: id }, "deregistered");
     saveInterests();
+    persistBrokerState();
   }
 }
 
@@ -425,7 +499,10 @@ export function handleOrchestratorTerminated(event) {
       changed = true;
     }
   }
-  if (changed) saveInterests();
+  if (changed) {
+    saveInterests();
+    persistBrokerState();
+  }
 }
 
 // --- Agent identity (CTL-303) ------------------------------------------------
@@ -492,6 +569,9 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket) {
 
   log.info({ sessionId, prNumber }, "auto-correlated pr_lifecycle for session");
   saveInterests();
+  lastRegisterAt = new Date().toISOString();
+  degradedEmittedAt = null;
+  persistBrokerState();
 }
 
 export function handleAgentCheckout(event) {
@@ -510,6 +590,7 @@ export function handleAgentCheckout(event) {
     interests.delete(sessionId);
     try { deleteFilterState(sessionId); } catch { /* DB not opened */ }
     saveInterests();
+    persistBrokerState();
   }
 
   log.info({ sessionId, status: finalStatus }, "agent checked out");
@@ -822,7 +903,12 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
     changed = true;
   }
 
-  if (changed) saveInterests();
+  if (changed) {
+    saveInterests();
+    lastRegisterAt = new Date().toISOString();
+    degradedEmittedAt = null;
+    persistBrokerState();
+  }
 }
 
 // --- Event classification ---
@@ -927,9 +1013,17 @@ async function classifyBatch(events) {
     appendEvent(wake);
     log.info({ notifyEvent: wake.event, reason: wake.detail.reason }, "wake");
   }
+  if (wakes.length > 0) {
+    lastWakeAt = new Date().toISOString();
+    persistBrokerState();
+  }
   for (const id of oneShotsToDelete) {
     interests.delete(id);
     log.info({ interestId: id }, "auto-deregistered (one-shot)");
+  }
+  if (oneShotsToDelete.length > 0) {
+    saveInterests();
+    persistBrokerState();
   }
 }
 
@@ -1025,6 +1119,35 @@ function queueEvent(event) {
 
 export function runWatchdogTick() {
   const now = Date.now();
+
+  // CTL-352: empty-interests observability. Warn on every tick when the table
+  // is empty so a silently-dead broker is loud in broker.log, and emit a
+  // one-shot broker.daemon.degraded event after the 5-minute startup grace so
+  // downstream consumers (HUD, alerts) can pair startup ↔ degraded.
+  if (interests.size === 0) {
+    const startedTs = brokerStartedAt ? new Date(brokerStartedAt).getTime() : now;
+    const uptimeMs = now - startedTs;
+    log.warn({ uptimeMs }, "watchdog: no registered interests");
+    if (uptimeMs > DEGRADED_THRESHOLD_MS && degradedEmittedAt === null) {
+      appendEvent({
+        event: "broker.daemon.degraded",
+        orchestrator: null,
+        worker: null,
+        severity: "WARN",
+        detail: {
+          reason: "no registered interests",
+          uptimeMs,
+          brokerStartedAt,
+        },
+      });
+      degradedEmittedAt = new Date().toISOString();
+      persistBrokerState();
+    }
+  } else if (degradedEmittedAt !== null) {
+    degradedEmittedAt = null;
+  }
+
+  let watchdogWoke = false;
   for (const [sourceId, state] of lastHeartbeat) {
     const stale = now - state.ts > HEARTBEAT_STALE_MS;
     if (stale && !state.notified) {
@@ -1054,6 +1177,7 @@ export function runWatchdogTick() {
             "watchdog wake",
           );
           woke = true;
+          watchdogWoke = true;
         }
       }
       if (woke) {
@@ -1072,6 +1196,11 @@ export function runWatchdogTick() {
     } else if (!stale && state.notified) {
       lastHeartbeat.set(sourceId, { ts: state.ts, notified: false });
     }
+  }
+
+  if (watchdogWoke) {
+    lastWakeAt = new Date().toISOString();
+    persistBrokerState();
   }
 }
 
@@ -1161,7 +1290,11 @@ export function processEvent(event) {
     }
   }
 
-  if (directMatches.length > 0) return;
+  if (directMatches.length > 0) {
+    lastWakeAt = new Date().toISOString();
+    persistBrokerState();
+    return;
+  }
 
   queueEvent(event);
 }
@@ -1276,14 +1409,23 @@ function removePidFile() {
 
 // --- State file (CTL-343) ---
 // ~/catalyst/broker.state.json is the single source of truth for at-a-glance
-// broker key health. Consumed by `catalyst-broker status --json`,
-// `catalyst-monitor status --json`, and the HUD header chip.
-const BROKER_STATE_FILE = resolve(CATALYST_DIR, "broker.state.json");
+// broker liveness. Consumed by `catalyst-broker status --json`,
+// `catalyst-monitor status --json`, and the HUD header chips.
+// CTL-352: resolve path per-call so tests can redirect via CATALYST_DIR.
+export function getBrokerStateFilePath() {
+  const catalystDir = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
+  return resolve(catalystDir, "broker.state.json");
+}
 
 export function buildBrokerState({ probe } = {}) {
   return {
     pid: process.pid,
-    startedAt: new Date().toISOString(),
+    startedAt: brokerStartedAt ?? new Date().toISOString(),
+    // CTL-352: liveness fields so the HUD pill and operators can detect a
+    // silently-dead broker (interests.size === 0 with stale lastWakeAt).
+    interestCount: interests.size,
+    lastWakeAt,
+    lastRegisterAt,
     keyHealth: {
       groq: {
         present: GROQ_KEY_SOURCE !== null,
@@ -1302,20 +1444,23 @@ export function buildBrokerState({ probe } = {}) {
   };
 }
 
-export function writeBrokerStateFile(state, { path = BROKER_STATE_FILE } = {}) {
+export function writeBrokerStateFile(state, { path } = {}) {
+  const target = path ?? getBrokerStateFilePath();
   try {
-    mkdirSync(dirname(path), { recursive: true });
-    const tmp = `${path}.tmp`;
+    mkdirSync(dirname(target), { recursive: true });
+    const tmp = `${target}.tmp`;
     writeFileSync(tmp, JSON.stringify(state, null, 2));
-    renameSync(tmp, path);
+    renameSync(tmp, target);
   } catch (err) {
-    log.warn({ err: err.message, path }, "failed to write broker state file");
+    log.warn({ err: err.message, path: target }, "failed to write broker state file");
   }
 }
 
-// Exported so the state-file path is discoverable by tests.
-export function getBrokerStateFilePath() {
-  return BROKER_STATE_FILE;
+// CTL-352: internal helper called at every state mutation that should bump
+// liveness fields in broker.state.json. Single-line write + atomic rename, so
+// per-event calls (dozens/sec at peak) are cheap.
+function persistBrokerState({ probe } = {}) {
+  writeBrokerStateFile(buildBrokerState({ probe }));
 }
 
 // Logs key health at startup. Returns the resolved state-file payload
@@ -1370,6 +1515,11 @@ export async function runStartupProbe() {
 
 // --- Main ---
 function main() {
+  // CTL-352: pin brokerStartedAt before any state mutation so subsequent
+  // buildBrokerState() / runWatchdogTick() callers compute uptime against
+  // a stable instant rather than now().
+  brokerStartedAt = new Date().toISOString();
+
   logKeyHealthAtStartup();
 
   writePidFile();
