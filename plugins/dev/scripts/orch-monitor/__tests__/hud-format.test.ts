@@ -751,9 +751,12 @@ describe("formatDetails (filter.wake)", () => {
     expect(formatDetails(e)).toBe("wake → some reason");
   });
 
-  // CTL-350: 40-char truncation removed — Phase 3 <Text wrap="wrap"> handles
-  // long reasons by wrapping to multiple lines in the actual rendered row.
-  test("preserves long reasons (no truncation; row wraps in render)", () => {
+  // CTL-350 / CTL-361: 40-char truncation was removed from the formatter — it
+  // returns the full reason. CTL-361 then changed the DETAILS <Text> from
+  // wrap="wrap" to wrap="truncate", so the renderer hard-clips the cell at the
+  // right edge instead of reflowing. The formatter contract this test pins
+  // (full string, no truncation) is unchanged regardless of renderer behaviour.
+  test("preserves long reasons (no truncation; renderer clips the DETAILS cell)", () => {
     const long = "x".repeat(60);
     const e = {
       ...baseEvent,
