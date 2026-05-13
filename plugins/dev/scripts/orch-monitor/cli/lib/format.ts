@@ -1,4 +1,5 @@
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
+import { inProgressGlyph } from "./nerd-font.ts";
 
 const SKIP_EVENTS = new Set([
   "session.heartbeat",
@@ -127,6 +128,10 @@ export function formatEvent(event: CanonicalEvent): string {
 // even when the terminal applies bold/inverse styling. CI conclusion drives
 // the glyph for check_suite/check_run events; severity is the fallback for
 // everything else so error/warn rows still get a visible marker.
+// CTL-353: in-progress glyph routes through inProgressGlyph() so terminals
+// with a Nerd Font get a single-cell PUA hourglass and everything else gets a
+// single-cell ellipsis. The old ⏳ (U+23F3) is unreliable because terminals
+// disagree on its East Asian width.
 export function formatStatus(event: CanonicalEvent): string {
   const attrs = event.attributes ?? ({} as CanonicalEvent["attributes"]);
   const conclusion = attrs["cicd.pipeline.run.conclusion"];
@@ -134,7 +139,7 @@ export function formatStatus(event: CanonicalEvent): string {
   if (conclusion === "failure" || conclusion === "cancelled") return "✗ ";
   const name = attrs["event.name"];
   if (conclusion === "in_progress" || (typeof name === "string" && name.includes(".in_progress"))) {
-    return "⏳";
+    return `${inProgressGlyph()} `;
   }
   const sev = event.severityText;
   if (sev === "ERROR") return "✗ ";

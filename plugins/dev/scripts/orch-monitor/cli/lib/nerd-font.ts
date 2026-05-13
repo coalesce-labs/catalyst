@@ -1,0 +1,142 @@
+/**
+ * CTL-353: Nerd Font detection for HUD status glyphs.
+ *
+ * The CTL-351 STATUS column moved from width 2 → 3 to accommodate ⏳ (U+23F3),
+ * but ⏳ still renders jaggedly because its East_Asian_Width is N while its
+ * Emoji_Presentation is Yes — terminals disagree on whether to give it 1 or 2
+ * cells. The other status glyphs (✓ ✗ · !) are stable single-cell.
+ *
+ * Fix: when a Nerd Font is installed, render in-progress as a Private Use
+ * Area icon (U+F252 nf-fa-hourglass_half) which is guaranteed single-cell in
+ * any monospaced font that includes the Nerd Fonts patch. Otherwise fall back
+ * to "…" (U+2026 horizontal ellipsis), also guaranteed single-cell.
+ *
+ * Detection precedence:
+ *   1. CATALYST_NERD_FONT=1|0|true|false env override (CI / explicit user pref)
+ *   2. fc-list output containing "Nerd Font" (fontconfig — most reliable, works
+ *      on macOS via brew install fontconfig)
+ *   3. ~/Library/Fonts and /Library/Fonts on darwin (fallback when fontconfig
+ *      isn't installed)
+ *   4. /usr/share/fonts and /usr/local/share/fonts on linux (rare fallback)
+ *
+ * Detection runs once at module load; the result is cached in a module-level
+ * variable so EventRow's per-row formatStatus call is a single property read.
+ */
+
+import { execSync } from "node:child_process";
+import { readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+export interface NerdFontDetection {
+  detected: boolean;
+  source: "env" | "fc-list" | "darwin-fonts-dir" | "linux-fonts-dir" | "none";
+  // Human-readable hint for the startup log. e.g. "Hack Nerd Font Mono" or
+  // "set CATALYST_NERD_FONT=1 to force enable" — never null so the caller
+  // can log unconditionally.
+  hint: string;
+}
+
+// CTL-353: U+F252 is nf-fa-hourglass_half — BMP, single-cell, semantically
+// matches ⏳. PUA codepoints are only meaningful when the terminal font is a
+// Nerd Font, so we always pair this with a detection check.
+export const NERD_FONT_IN_PROGRESS = "";
+
+// Single-cell ellipsis fallback (East_Asian_Width=N, Emoji_Presentation=No, so
+// every terminal gives it exactly 1 cell).
+export const FALLBACK_IN_PROGRESS = "…";
+
+function readEnvOverride(): boolean | null {
+  const raw = process.env.CATALYST_NERD_FONT;
+  if (raw === undefined || raw === "") return null;
+  const norm = raw.trim().toLowerCase();
+  if (norm === "1" || norm === "true" || norm === "yes" || norm === "on") return true;
+  if (norm === "0" || norm === "false" || norm === "no" || norm === "off") return false;
+  return null;
+}
+
+function probeFcList(): { hit: boolean; firstMatch?: string } {
+  try {
+    const out = execSync("fc-list 2>/dev/null", {
+      encoding: "utf8",
+      timeout: 2000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const lines = out.split("\n");
+    const match = lines.find((line) => /nerd font/i.test(line));
+    if (match) {
+      const family = match.split(":")[1]?.trim() ?? "Nerd Font";
+      return { hit: true, firstMatch: family };
+    }
+    return { hit: false };
+  } catch {
+    return { hit: false };
+  }
+}
+
+function probeFontsDirs(dirs: string[]): { hit: boolean; firstMatch?: string } {
+  for (const dir of dirs) {
+    try {
+      const files = readdirSync(dir);
+      const match = files.find((f) => /nerd ?font/i.test(f));
+      if (match) return { hit: true, firstMatch: match };
+    } catch {
+      // Directory doesn't exist or isn't readable — try the next one.
+    }
+  }
+  return { hit: false };
+}
+
+function runDetection(): NerdFontDetection {
+  const override = readEnvOverride();
+  if (override !== null) {
+    return {
+      detected: override,
+      source: "env",
+      hint: `CATALYST_NERD_FONT=${override ? "1" : "0"}`,
+    };
+  }
+
+  const fc = probeFcList();
+  if (fc.hit) {
+    return { detected: true, source: "fc-list", hint: fc.firstMatch ?? "Nerd Font (fc-list)" };
+  }
+
+  if (process.platform === "darwin") {
+    const userFonts = join(homedir(), "Library", "Fonts");
+    const dir = probeFontsDirs([userFonts, "/Library/Fonts"]);
+    if (dir.hit) {
+      return { detected: true, source: "darwin-fonts-dir", hint: dir.firstMatch ?? "Nerd Font" };
+    }
+  } else if (process.platform === "linux") {
+    const userFonts = join(homedir(), ".local", "share", "fonts");
+    const dir = probeFontsDirs([userFonts, "/usr/share/fonts", "/usr/local/share/fonts"]);
+    if (dir.hit) {
+      return { detected: true, source: "linux-fonts-dir", hint: dir.firstMatch ?? "Nerd Font" };
+    }
+  }
+
+  return {
+    detected: false,
+    source: "none",
+    hint: "no Nerd Font detected — set CATALYST_NERD_FONT=1 to override or install via plugins/dev/scripts/install-nerd-fonts.sh",
+  };
+}
+
+let cached: NerdFontDetection | null = null;
+
+/** Cached detection. First call probes the system; subsequent calls return the cached result. */
+export function detectNerdFont(): NerdFontDetection {
+  if (cached === null) cached = runDetection();
+  return cached;
+}
+
+/** Test-only: reset the cache so unit tests can exercise the env-override path repeatedly. */
+export function _resetNerdFontCacheForTesting(): void {
+  cached = null;
+}
+
+/** Returns the in-progress glyph appropriate for the current terminal/font. */
+export function inProgressGlyph(): string {
+  return detectNerdFont().detected ? NERD_FONT_IN_PROGRESS : FALLBACK_IN_PROGRESS;
+}

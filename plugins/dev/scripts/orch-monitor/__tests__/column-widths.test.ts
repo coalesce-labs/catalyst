@@ -130,6 +130,49 @@ describe("status/orch/worker/event-id formatters", () => {
     expect(formatStatus(makeEvent())).toBe("· ");
   });
 
+  // CTL-353: in-progress uses Nerd Font when available, else "…". Both
+  // branches return a 2-char string (1-cell glyph + trailing space).
+  test("formatStatus: in_progress conclusion → '… ' when CATALYST_NERD_FONT=0", async () => {
+    const { _resetNerdFontCacheForTesting } = await import("../cli/lib/nerd-font.ts");
+    const prev = process.env.CATALYST_NERD_FONT;
+    process.env.CATALYST_NERD_FONT = "0";
+    _resetNerdFontCacheForTesting();
+    try {
+      const result = formatStatus(makeEvent({
+        attributes: {
+          "event.name": "github.workflow_run.in_progress",
+          "cicd.pipeline.run.conclusion": "in_progress",
+        },
+      }));
+      expect(result).toBe("… ");
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_NERD_FONT;
+      else process.env.CATALYST_NERD_FONT = prev;
+      _resetNerdFontCacheForTesting();
+    }
+  });
+
+  test("formatStatus: in_progress conclusion → PUA hourglass when CATALYST_NERD_FONT=1", async () => {
+    const { _resetNerdFontCacheForTesting } = await import("../cli/lib/nerd-font.ts");
+    const prev = process.env.CATALYST_NERD_FONT;
+    process.env.CATALYST_NERD_FONT = "1";
+    _resetNerdFontCacheForTesting();
+    try {
+      const result = formatStatus(makeEvent({
+        attributes: {
+          "event.name": "github.workflow_run.in_progress",
+          "cicd.pipeline.run.conclusion": "in_progress",
+        },
+      }));
+      expect(result.codePointAt(0)).toBe(0xf252);
+      expect(result.charAt(1)).toBe(" ");
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_NERD_FONT;
+      else process.env.CATALYST_NERD_FONT = prev;
+      _resetNerdFontCacheForTesting();
+    }
+  });
+
   test("formatOrch returns the orchestrator id when present, else empty", () => {
     expect(
       formatOrch(makeEvent({
