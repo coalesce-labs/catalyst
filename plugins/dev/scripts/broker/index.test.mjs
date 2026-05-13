@@ -1486,3 +1486,258 @@ describe("CTL-350 source_events inlining", () => {
     expect(wakes[0].detail.matched_indices_count).toBe(2);
   });
 });
+
+// ─── CTL-352 saveInterests guards ───────────────────────────────────────────
+
+describe("CTL-352 saveInterests guards", () => {
+  const REAL_REG = {
+    notify_event: "filter.wake.real-1",
+    prompt: "",
+    context: null,
+    orchestrator: "real-1",
+    session_id: null,
+    persistent: true,
+    interest_type: null,
+    pr_numbers: null,
+    repo: null,
+    base_branches: null,
+    tickets: null,
+    wake_on: null,
+  };
+
+  const PROSE_REG = {
+    notify_event: "filter.wake.prose-x",
+    prompt: "match anything",
+    context: {},
+    orchestrator: null,
+    session_id: "sess-prose-77",
+    persistent: true,
+    interest_type: null,
+    pr_numbers: null,
+    repo: null,
+    base_branches: null,
+    tickets: null,
+    wake_on: null,
+  };
+
+  afterEach(() => {
+    delete process.env.CATALYST_BROKER_ALLOW_EMPTY_SAVE;
+  });
+
+  test("prose-* rows are dropped at save (mirrors load guard)", async () => {
+    const { saveInterests } = await import("./index.mjs");
+    getInterests().set("real-1", REAL_REG);
+    getInterests().set("prose-x", PROSE_REG);
+    saveInterests();
+    const file = join(tmpDir, "broker-interests.json");
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    expect(parsed.map(([id]) => id)).toEqual(["real-1"]);
+  });
+
+  test("refuses to write empty array without escape hatch — on-disk file preserved", async () => {
+    const { saveInterests } = await import("./index.mjs");
+    const file = join(tmpDir, "broker-interests.json");
+    writeFileSync(file, JSON.stringify([["real-1", REAL_REG]], null, 2));
+    const before = readFileSync(file, "utf8");
+    clearInterests();
+    saveInterests();
+    const after = readFileSync(file, "utf8");
+    expect(after).toBe(before);
+  });
+
+  test("with CATALYST_BROKER_ALLOW_EMPTY_SAVE=1 the escape hatch permits empty write", async () => {
+    const { saveInterests } = await import("./index.mjs");
+    const file = join(tmpDir, "broker-interests.json");
+    writeFileSync(file, JSON.stringify([["real-1", REAL_REG]], null, 2));
+    clearInterests();
+    process.env.CATALYST_BROKER_ALLOW_EMPTY_SAVE = "1";
+    saveInterests();
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    expect(parsed).toEqual([]);
+  });
+
+  test("when all in-memory rows are prose-*, save is still treated as empty and refused", async () => {
+    const { saveInterests } = await import("./index.mjs");
+    const file = join(tmpDir, "broker-interests.json");
+    writeFileSync(file, JSON.stringify([["real-1", REAL_REG]], null, 2));
+    const before = readFileSync(file, "utf8");
+    clearInterests();
+    getInterests().set("prose-only", PROSE_REG);
+    saveInterests();
+    expect(readFileSync(file, "utf8")).toBe(before);
+  });
+
+  test("normal save leaves no .tmp file behind (atomic rename)", async () => {
+    const { saveInterests } = await import("./index.mjs");
+    getInterests().set("real-1", REAL_REG);
+    saveInterests();
+    const tmpFile = join(tmpDir, "broker-interests.json.tmp");
+    expect(existsSync(tmpFile)).toBe(false);
+  });
+});
+
+// ─── CTL-352 broker state + degraded event ───────────────────────────────────
+
+describe("CTL-352 broker state + degraded event", () => {
+  const STATE_FILE = () => join(tmpDir, "broker.state.json");
+
+  beforeEach(async () => {
+    const { __resetBrokerLivenessForTest } = await import("./index.mjs");
+    __resetBrokerLivenessForTest();
+  });
+
+  afterEach(async () => {
+    const { __resetBrokerLivenessForTest } = await import("./index.mjs");
+    __resetBrokerLivenessForTest();
+  });
+
+  test("buildBrokerState includes interestCount, lastWakeAt, lastRegisterAt", async () => {
+    const { buildBrokerState, __setBrokerStartedAtForTest } = await import("./index.mjs");
+    __setBrokerStartedAtForTest(new Date().toISOString());
+    const state = buildBrokerState();
+    expect(state).toHaveProperty("interestCount");
+    expect(state).toHaveProperty("lastWakeAt");
+    expect(state).toHaveProperty("lastRegisterAt");
+    expect(state.interestCount).toBe(0);
+    expect(state.lastWakeAt).toBeNull();
+    expect(state.lastRegisterAt).toBeNull();
+  });
+
+  test("handleRegister updates lastRegisterAt and persists state file", async () => {
+    const { handleRegister, buildBrokerState } = await import("./index.mjs");
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-state-1",
+      detail: { interest_id: "state-1", notify_event: "filter.wake.state-1", prompt: "p" },
+    });
+    const state = buildBrokerState();
+    expect(state.interestCount).toBe(1);
+    expect(state.lastRegisterAt).not.toBeNull();
+    expect(typeof state.lastRegisterAt).toBe("string");
+
+    expect(existsSync(STATE_FILE())).toBe(true);
+    const parsed = JSON.parse(readFileSync(STATE_FILE(), "utf8"));
+    expect(parsed.interestCount).toBe(1);
+    expect(parsed.lastRegisterAt).toBe(state.lastRegisterAt);
+  });
+
+  test("a wake firing updates lastWakeAt", async () => {
+    const { handleRegister, processEvent, buildBrokerState } = await import("./index.mjs");
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-wake-1",
+      detail: {
+        interest_id: "wake-1",
+        notify_event: "filter.wake.wake-1",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [999],
+        repo: "org/repo",
+        base_branches: [{ pr: 999, base: "main" }],
+        persistent: true,
+        session_id: "sess-wake-1",
+      },
+    });
+    const before = buildBrokerState().lastWakeAt;
+    expect(before).toBeNull();
+
+    processEvent({
+      id: "deadbeefdeadbeefdeadbeefdeadbeef",
+      ts: new Date().toISOString(),
+      event: "github.pr.merged",
+      attributes: { "event.name": "github.pr.merged" },
+      scope: { pr: 999 },
+      detail: { mergeCommitSha: "feedface", merged: true },
+    });
+    const after = buildBrokerState().lastWakeAt;
+    expect(after).not.toBeNull();
+    expect(typeof after).toBe("string");
+  });
+
+  test("broker.daemon.degraded emitted once when interests empty and uptime > 5 min", async () => {
+    const {
+      runWatchdogTick,
+      __setBrokerStartedAtForTest,
+      getInterests,
+    } = await import("./index.mjs");
+    clearInterests();
+    const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+    __setBrokerStartedAtForTest(sixMinAgo);
+
+    runWatchdogTick();
+    runWatchdogTick();
+    runWatchdogTick();
+
+    // Read the month event log; assert exactly one degraded event.
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    expect(existsSync(logPath)).toBe(true);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+    const degradedLines = lines.filter((l) => {
+      try {
+        const evt = JSON.parse(l);
+        return evt.attributes?.["event.name"] === "broker.daemon.degraded";
+      } catch { return false; }
+    });
+    expect(degradedLines).toHaveLength(1);
+    const evt = JSON.parse(degradedLines[0]);
+    expect(evt.severityText).toBe("WARN");
+    expect(evt.body.payload.reason).toBe("no registered interests");
+    expect(typeof evt.body.payload.uptimeMs).toBe("number");
+    expect(getInterests().size).toBe(0);
+  });
+
+  test("degraded NOT emitted within the 5-minute startup grace", async () => {
+    const { runWatchdogTick, __setBrokerStartedAtForTest } = await import("./index.mjs");
+    clearInterests();
+    const oneMinAgo = new Date(Date.now() - 60 * 1000).toISOString();
+    __setBrokerStartedAtForTest(oneMinAgo);
+
+    runWatchdogTick();
+
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return; // no events at all — vacuously fine
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+    const degradedLines = lines.filter((l) => {
+      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.degraded"; }
+      catch { return false; }
+    });
+    expect(degradedLines).toHaveLength(0);
+  });
+
+  test("degraded re-arms after interests come back and go empty again", async () => {
+    const {
+      runWatchdogTick,
+      __setBrokerStartedAtForTest,
+      handleRegister,
+      handleDeregister,
+    } = await import("./index.mjs");
+    clearInterests();
+    const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+    __setBrokerStartedAtForTest(sixMinAgo);
+
+    runWatchdogTick(); // emits first degraded
+
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-rearm-1",
+      detail: { interest_id: "rearm-1", notify_event: "filter.wake.rearm-1", prompt: "p" },
+    });
+    handleDeregister({
+      event: "filter.deregister",
+      orchestrator: "orch-rearm-1",
+      detail: { interest_id: "rearm-1" },
+    });
+
+    runWatchdogTick(); // should re-emit (cleared on non-empty, then armed again on empty)
+
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+    const degradedLines = lines.filter((l) => {
+      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.degraded"; }
+      catch { return false; }
+    });
+    expect(degradedLines).toHaveLength(2);
+  });
+});

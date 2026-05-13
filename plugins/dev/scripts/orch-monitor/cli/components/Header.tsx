@@ -1,27 +1,48 @@
 import { Box, Text } from "ink";
-import type { BrokerKeyHealth } from "../lib/broker-key-health.ts";
-import { chipColor, chipLabel } from "../lib/broker-key-health.ts";
+import type { BrokerState } from "../lib/broker-key-health.ts";
+import {
+  chipColor,
+  chipLabel,
+  brokerInterestStatus,
+  interestChipColor,
+  interestChipLabel,
+} from "../lib/broker-key-health.ts";
 import { computeColumnWidths } from "../lib/column-widths.ts";
 
 interface HeaderProps {
   columns?: number;
   nlQuery?: string;
-  brokerKeyHealth?: BrokerKeyHealth | null;
+  brokerState?: BrokerState | null;
 }
 
 // CTL-351: match EventRow's per-column 1-col right margin so the header
 // labels align with the row content below them at every terminal width.
-export function Header({ columns = 120, nlQuery, brokerKeyHealth }: HeaderProps) {
+// CTL-352: brokerState replaces brokerKeyHealth — same shape plus liveness
+// fields for the new interests pill. The chip row renders whenever either
+// Groq or interest data is available.
+export function Header({ columns = 120, nlQuery, brokerState }: HeaderProps) {
   const sep = "─".repeat(Math.max(0, columns - 1));
-  const groq = brokerKeyHealth?.groq;
+  const groq = brokerState?.groq;
+  const interestStatus = brokerInterestStatus(brokerState ?? null);
+  const showInterestChip = interestStatus !== "unknown";
   const w = computeColumnWidths(columns);
   return (
     <Box flexDirection="column">
-      {groq && (
+      {(groq || showInterestChip) && (
         <Box flexDirection="row">
-          <Text color={chipColor(groq.probeStatus)}>{`[Groq: ${chipLabel(groq.probeStatus)}]`}</Text>
-          {groq.present && groq.prefix && (
+          {groq && (
+            <Text color={chipColor(groq.probeStatus)}>{`[Groq: ${chipLabel(groq.probeStatus)}]`}</Text>
+          )}
+          {groq && groq.present && groq.prefix && (
             <Text dimColor>{`  ${groq.prefix}... (${groq.source ?? "unknown"})`}</Text>
+          )}
+          {showInterestChip && (
+            <Text
+              color={interestChipColor(interestStatus)}
+              inverse={interestStatus === "degraded"}
+            >
+              {`${groq ? "  " : ""}[broker: ${interestChipLabel(brokerState ?? null, interestStatus)}]`}
+            </Text>
           )}
         </Box>
       )}
