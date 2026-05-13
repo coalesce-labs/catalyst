@@ -1027,67 +1027,8 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
       '.pr = ((.pr // {}) | .number = ($n | tonumber) | .url = $u)' \
       "$WORKER_SIGNAL" > "$WORKER_SIGNAL.tmp" && mv "$WORKER_SIGNAL.tmp" "$WORKER_SIGNAL"
 
-    # Refresh broker context with the newly discovered PR number (CTL-257, updated CTL-303).
-    # Re-emitting filter.register with the same orchestrator key overwrites the prior registration.
-    # CTL-284: also refresh the pr_lifecycle interest with the new PR number.
-    # Note: workers auto-correlate their own pr_lifecycle via agent.checkin; this keeps the
-    # orchestrator-level aggregated interest up to date.
-    if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2>&1; then
-      _UPD_PRS=$(jq -rs '[.[].pr.number // empty] | unique' \
-        "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
-      _UPD_TICKETS=$(jq -rs '[.[].ticket // empty]' \
-        "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
-      _UPD_BASES=$(jq -rs '[
-        .[] | select(.pr.number != null and .pr.baseRefName != null)
-            | {pr: .pr.number, base: .pr.baseRefName}
-      ]' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
-      _UPD_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
-
-      # Prose interest (residual concerns: comms-attention, ticket status)
-      "$STATE_SCRIPT" event "$(jq -nc \
-        --arg orch "${ORCH_NAME}" \
-        --arg sid "${CATALYST_SESSION_ID:-}" \
-        --arg notify "filter.wake.${ORCH_NAME}" \
-        --argjson prs "${_UPD_PRS}" \
-        --argjson tickets "${_UPD_TICKETS}" \
-        '{
-          ts: (now | todate),
-          event: "filter.register",
-          orchestrator: $orch,
-          worker: null,
-          detail: {
-            session_id: (if $sid == "" then null else $sid end),
-            notify_event: $notify,
-            prompt: "Wake me when: any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
-            persistent: true,
-            context: {pr_numbers: $prs, tickets: $tickets}
-          }
-        }')" 2>/dev/null || true
-
-      # CTL-284: pr_lifecycle interest (deterministic PR/CI/review/deployment routing)
-      "$STATE_SCRIPT" event "$(jq -nc \
-        --arg orch "${ORCH_NAME}" \
-        --arg id "${ORCH_NAME}-pr-lifecycle" \
-        --arg notify "filter.wake.${ORCH_NAME}" \
-        --arg repo "${_UPD_REPO}" \
-        --argjson prs "${_UPD_PRS}" \
-        --argjson bases "${_UPD_BASES}" \
-        '{
-          ts: (now | todate),
-          event: "filter.register",
-          orchestrator: $orch,
-          worker: null,
-          detail: {
-            interest_id: $id,
-            interest_type: "pr_lifecycle",
-            notify_event: $notify,
-            persistent: true,
-            pr_numbers: $prs,
-            repo: $repo,
-            base_branches: $bases
-          }
-        }')" 2>/dev/null || true
-    fi
+    # CTL-341: refresh handled by the unconditional refresh block after this
+    # loop. The signal file update above (.pr.number = $n) feeds into it.
   fi
 
   # Parse repo from PR URL (e.g. https://github.com/org/repo/pull/123)
@@ -1260,6 +1201,88 @@ REMEDIATION_EOF
       ;;
   esac
 done
+```
+
+**Refresh broker registration when PR set has changed (CTL-341).** The Phase 4 start block
+above registers the orchestrator's `pr_lifecycle` interest with whatever PRs the worker signal
+files happen to expose at that moment — often the empty set, because workers have not yet
+opened PRs. Without an unconditional refresh, that empty `pr_numbers` list would persist for
+the entire orchestration run and the deterministic route in `tryDeterministicRoute` would
+never match. The merge-confirmation loop above can discover a missing `pr.number` from a
+worker's branch, but that path does not run when the worker writes its own `pr.number` before
+the orchestrator wakes (the common case in the worker-driven flow). This block runs every
+Phase 4 wake-up, computes the union of `worker.pr.number` across the signal files, diffs
+against the set last sent to the broker, and re-emits both `filter.register` events only when
+the set has changed. Idempotent at the broker (upserts by `interest_id`); the diff just keeps
+the event log quiet.
+
+```bash
+if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2>&1; then
+  _UPD_PRS=$(jq -rs '[.[].pr.number // empty] | unique' \
+    "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+  _LAST_FILE="${ORCH_DIR}/.last-pr-registration.json"
+  _LAST_PRS=$(jq -c '.prs // []' "$_LAST_FILE" 2>/dev/null || echo '[]')
+
+  if [ "$(printf '%s' "$_UPD_PRS" | jq -cS '.')" != "$(printf '%s' "$_LAST_PRS" | jq -cS '.')" ]; then
+    _UPD_TICKETS=$(jq -rs '[.[].ticket // empty]' \
+      "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+    _UPD_BASES=$(jq -rs '[
+      .[] | select(.pr.number != null and .pr.baseRefName != null)
+          | {pr: .pr.number, base: .pr.baseRefName}
+    ]' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
+    _UPD_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+
+    # Prose interest (residual concerns: comms-attention, ticket status)
+    "$STATE_SCRIPT" event "$(jq -nc \
+      --arg orch "${ORCH_NAME}" \
+      --arg sid "${CATALYST_SESSION_ID:-}" \
+      --arg notify "filter.wake.${ORCH_NAME}" \
+      --argjson prs "${_UPD_PRS}" \
+      --argjson tickets "${_UPD_TICKETS}" \
+      '{
+        ts: (now | todate),
+        event: "filter.register",
+        orchestrator: $orch,
+        worker: null,
+        detail: {
+          session_id: (if $sid == "" then null else $sid end),
+          notify_event: $notify,
+          prompt: "Wake me when: any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
+          persistent: true,
+          context: {pr_numbers: $prs, tickets: $tickets}
+        }
+      }')" 2>/dev/null || true
+
+    # CTL-284: pr_lifecycle interest (deterministic PR/CI/review/deployment routing)
+    "$STATE_SCRIPT" event "$(jq -nc \
+      --arg orch "${ORCH_NAME}" \
+      --arg id "${ORCH_NAME}-pr-lifecycle" \
+      --arg notify "filter.wake.${ORCH_NAME}" \
+      --arg repo "${_UPD_REPO}" \
+      --argjson prs "${_UPD_PRS}" \
+      --argjson bases "${_UPD_BASES}" \
+      '{
+        ts: (now | todate),
+        event: "filter.register",
+        orchestrator: $orch,
+        worker: null,
+        detail: {
+          interest_id: $id,
+          interest_type: "pr_lifecycle",
+          notify_event: $notify,
+          persistent: true,
+          pr_numbers: $prs,
+          repo: $repo,
+          base_branches: $bases
+        }
+      }')" 2>/dev/null || true
+
+    # Record the new set so the next wake-up can diff.
+    printf '{"prs":%s,"registeredAt":"%s"}\n' \
+      "$_UPD_PRS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${_LAST_FILE}.tmp" \
+      && mv "${_LAST_FILE}.tmp" "$_LAST_FILE"
+  fi
+fi
 ```
 
 **Deploy state-machine sub-loop (CTL-211)** — runs on each wake-up for any worker

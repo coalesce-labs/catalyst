@@ -672,10 +672,14 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
 }
 
 // When a PR opens linked to a ticket, auto-register pr_lifecycle for any agent
-// that checked in with that ticket but hasn't been linked to a PR yet.
+// that checked in with that ticket but hasn't been linked to a PR yet, AND
+// (CTL-341) append the new PR number to any orchestrator-level pr_lifecycle
+// interest whose orchestrator matches one of those agents.
 function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
   let agents = [];
   try { agents = getAgentsByTicket(ticket); } catch { return; }
+
+  let changed = false;
 
   for (const agent of agents) {
     if (agent.claimedPr) continue;
@@ -703,8 +707,34 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
       { sessionId, ticket, prNumber },
       "auto-correlated pr_lifecycle from ticket",
     );
-    saveInterests();
+    changed = true;
   }
+
+  // CTL-341: Also append the PR to any orchestrator-level pr_lifecycle interest
+  // whose orchestrator owns at least one agent on this ticket. The orchestrator
+  // registers its own pr_lifecycle interest at Phase 4 start, often before any
+  // worker has opened a PR — so pr_numbers starts empty. Without this update,
+  // the deterministic route in tryDeterministicRoute never matches incoming
+  // PR/CI/review events for the new PR.
+  const orchsForTicket = new Set(
+    agents.map((a) => a.orchestrator).filter((o) => o != null),
+  );
+  for (const [interestId, reg] of interestsMap) {
+    if (reg.interest_type !== "pr_lifecycle") continue;
+    if (reg.session_id !== null) continue; // worker-level — skip
+    if (!orchsForTicket.has(reg.orchestrator)) continue;
+    const prs = reg.pr_numbers ?? [];
+    if (prs.includes(prNumber)) continue;
+    reg.pr_numbers = [...prs, prNumber];
+    try { upsertFilterStateOpen({ interestId, prNumber, repo: reg.repo ?? "" }); } catch { /* DB not opened */ }
+    log.info(
+      { interestId, ticket, prNumber, orchestrator: reg.orchestrator },
+      "appended PR to orchestrator pr_lifecycle interest",
+    );
+    changed = true;
+  }
+
+  if (changed) saveInterests();
 }
 
 // --- Event classification ---
