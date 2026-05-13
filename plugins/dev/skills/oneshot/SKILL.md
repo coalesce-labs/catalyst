@@ -681,7 +681,7 @@ while [ "$PR_DONE" = "false" ]; do
   # CTL-269 preferred path: single semantic wake covers all concerns.
   if [ "$USE_FILTER_DAEMON" = "true" ] && [ "$USE_REST" != "true" ]; then
     EVENT=$(catalyst-events wait-for \
-      --filter ".attributes.\"event.name\" == \"filter.wake\" and .attributes.\"event.label\" == \"${CATALYST_SESSION_ID}\"" \
+      --filter ".attributes.\"event.name\" == \"filter.wake.${CATALYST_SESSION_ID}\"" \
       --timeout 600 2>/dev/null || true)
     if [ -n "$EVENT" ]; then
       WAKE_REASON=$(echo "$EVENT" | jq -r '.body.payload.reason // "unknown"' 2>/dev/null || echo "unknown")
