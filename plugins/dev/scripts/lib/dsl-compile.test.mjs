@@ -32,8 +32,8 @@ import {
 
 describe("CANONICAL_FIELDS whitelist", () => {
   test("contains the documented count of canonical fields", () => {
-    expect(CANONICAL_FIELDS.length).toBe(31);
-    expect(FIELD_PATH_SET.size).toBe(31);
+    expect(CANONICAL_FIELDS.length).toBe(32);
+    expect(FIELD_PATH_SET.size).toBe(32);
   });
 
   test("includes core attribute paths", () => {
