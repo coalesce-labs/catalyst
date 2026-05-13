@@ -479,6 +479,26 @@ describe("formatRef", () => {
   });
 });
 
+describe("formatRef (filter.wake)", () => {
+  // CTL-348: filter.wake events route to a specific session/orchestrator id —
+  // surface it in REF so the operator can tell whose wake fired.
+  test("returns the session id stripped of the filter.wake. prefix", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("orch-foo");
+  });
+
+  test("handles the legacy orchestrator.filter.wake.* alias", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "orchestrator.filter.wake.orch-bar" },
+    } as unknown as CanonicalEvent;
+    expect(formatRef(e)).toBe("orch-bar");
+  });
+});
+
 describe("formatDetails", () => {
   test("returns payload title when present", () => {
     const e = { ...baseEvent, body: { message: "ignored", payload: { title: "feat: add thing" } } };
@@ -699,6 +719,78 @@ describe("formatDetails (filter.register)", () => {
       body: { message: "fallback message", payload: {} },
     } as unknown as CanonicalEvent;
     expect(formatDetails(e)).toBe("fallback message");
+  });
+});
+
+describe("formatDetails (filter.wake)", () => {
+  // CTL-348: render "wake → ${reason_short}" so the HUD shows why the broker
+  // woke an orchestrator instead of an empty DETAIL cell.
+  test("renders 'wake → {reason}' from body.payload.reason", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+      body: { payload: { reason: "some reason", source_event_ids: [] } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("wake → some reason");
+  });
+
+  test("truncates long reasons to 40 chars", () => {
+    const long = "x".repeat(60);
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+      body: { payload: { reason: long, source_event_ids: [] } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("wake → " + "x".repeat(40));
+  });
+
+  test("appends (n) when source_event_ids has more than one entry", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+      body: { payload: { reason: "ci_completed", source_event_ids: ["a", "b", "c"] } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("wake → ci_completed (3)");
+  });
+
+  test("omits the arrow when reason is empty", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+      body: { payload: { reason: "", source_event_ids: ["a", "b"] } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("wake (2)");
+  });
+
+  test("handles the legacy orchestrator.filter.wake.* alias", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "orchestrator.filter.wake.orch-foo" },
+      body: { payload: { reason: "ticket changed", source_event_ids: [] } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("wake → ticket changed");
+  });
+});
+
+describe("formatDetails (broker.daemon)", () => {
+  // CTL-348: broker.daemon.* events sometimes carry a free-form payload.detail
+  // string; surface it in DETAIL when present, fall through otherwise.
+  test("renders payload.detail when present", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "broker.daemon.startup" },
+      body: { payload: { detail: "started pid=123" } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("started pid=123");
+  });
+
+  test("falls through to message when no payload.detail", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "broker.daemon.startup" },
+      body: { message: "broker started", payload: { pid: 7170 } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("broker started");
   });
 });
 

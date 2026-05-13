@@ -132,6 +132,14 @@ export function formatRef(event: CanonicalEvent): string {
     if (typeof channel === "string" && channel.length > 0) return channel;
     return "";
   }
+  // CTL-348: filter.wake.* events route to a specific session/orchestrator id —
+  // surface that id in REF so the operator can tell whose wake fired. The
+  // SOURCE column already says "broker", so REF only needs the target id with
+  // the "filter.wake." prefix stripped for readability.
+  if (name?.startsWith("filter.wake.") || name?.startsWith("orchestrator.filter.wake.")) {
+    const stripped = name.replace(/^(orchestrator\.)?filter\.wake\./, "");
+    if (stripped.length > 0) return stripped;
+  }
   // CTL-337: filter.register events watch a specific set of tickets (semantic
   // interest) or a specific repo (structured interest like pr_lifecycle).
   // Surface that in REF so the user sees what the registration observes.
@@ -258,6 +266,34 @@ export function formatDetails(event: CanonicalEvent): string {
   if (cached !== undefined) return cached;
   const name = event.attributes?.["event.name"];
   const payload = event.body?.payload;
+  // CTL-348: filter.wake.* events carry a human-readable reason and an array of
+  // source event ids. Render "wake → ${reason_short}" with an optional "(n)"
+  // suffix when more than one source event triggered the wake so operators can
+  // tell *why* the broker woke the orchestrator instead of seeing a blank cell.
+  if (name?.startsWith("filter.wake.") || name?.startsWith("orchestrator.filter.wake.")) {
+    const p = payload as Record<string, unknown> | undefined;
+    const reasonRaw = typeof p?.["reason"] === "string" ? p["reason"] : "";
+    const ids = p?.["source_event_ids"];
+    const count = Array.isArray(ids) ? ids.length : 0;
+    const reasonShort = sanitize(reasonRaw, "oneline").slice(0, 40);
+    const suffix = count > 1 ? ` (${count})` : "";
+    const out = reasonShort ? `wake → ${reasonShort}${suffix}` : `wake${suffix}`;
+    detailsCache.set(event, out);
+    return out;
+  }
+  // CTL-348: broker.daemon.* events occasionally carry a free-form detail
+  // string in their payload. Surface it when present; otherwise fall through
+  // to the generic payload/message handler below so structured payloads
+  // (pid, recovered_interests, …) still produce a non-empty cell.
+  if (name?.startsWith("broker.daemon.")) {
+    const p = payload as Record<string, unknown> | undefined;
+    const detail = p?.["detail"];
+    if (typeof detail === "string" && detail.length > 0) {
+      const out = sanitize(detail, "oneline");
+      detailsCache.set(event, out);
+      return out;
+    }
+  }
   // CTL-337: filter.register events carry a human-readable prompt (semantic
   // interest) or an interest_type + repo (structured interest). Surface that
   // in DETAILS so the user sees *why* the registration was made.
