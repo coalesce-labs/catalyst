@@ -776,6 +776,67 @@ describe("shouldSkipEvent (broker)", () => {
   });
 });
 
+// ─── shouldSkipEvent — broker self-emission guards (CTL-346) ─────────────────
+
+describe("shouldSkipEvent — broker self-emission guards (CTL-346)", () => {
+  test("skips canonical filter.wake.* event (broker self-emission)", () => {
+    expect(shouldSkipEvent({
+      attributes: { "event.name": "filter.wake.orch-1" },
+      resource: { "service.name": "catalyst.broker" },
+      body: { payload: {} },
+    })).toBe(true);
+  });
+
+  test("skips canonical broker.daemon.startup event", () => {
+    expect(shouldSkipEvent({
+      attributes: { "event.name": "broker.daemon.startup" },
+      resource: { "service.name": "catalyst.broker" },
+    })).toBe(true);
+  });
+
+  test("skips any event with resource.service.name == catalyst.broker", () => {
+    // Defense-in-depth: future broker.* event names still get skipped.
+    expect(shouldSkipEvent({
+      attributes: { "event.name": "broker.future.metric" },
+      resource: { "service.name": "catalyst.broker" },
+    })).toBe(true);
+  });
+
+  test("does not skip github.* events from other services", () => {
+    expect(shouldSkipEvent({
+      attributes: { "event.name": "github.pr.merged" },
+      resource: { "service.name": "catalyst.github-webhook" },
+    })).toBe(false);
+  });
+
+  test("does not skip canonical linear.* events from other services", () => {
+    expect(shouldSkipEvent({
+      attributes: { "event.name": "linear.issue.state_changed" },
+      resource: { "service.name": "catalyst.linear-webhook" },
+    })).toBe(false);
+  });
+
+  test("BROKER_INGEST_OWN_EMISSIONS=1 opts out — broker.daemon flows through", () => {
+    const prev = process.env.BROKER_INGEST_OWN_EMISSIONS;
+    process.env.BROKER_INGEST_OWN_EMISSIONS = "1";
+    try {
+      // filter.* still skipped (original semantics for control-plane events)
+      expect(shouldSkipEvent({
+        attributes: { "event.name": "filter.wake.orch-1" },
+        resource: { "service.name": "catalyst.broker" },
+      })).toBe(true);
+      // broker.daemon.* now passes through for debugging visibility
+      expect(shouldSkipEvent({
+        attributes: { "event.name": "broker.daemon.startup" },
+        resource: { "service.name": "catalyst.broker" },
+      })).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.BROKER_INGEST_OWN_EMISSIONS;
+      else process.env.BROKER_INGEST_OWN_EMISSIONS = prev;
+    }
+  });
+});
+
 // ─── Broker state file (CTL-343 — API key health) ───────────────────────────
 
 describe("buildBrokerState (CTL-343)", () => {
