@@ -1,5 +1,6 @@
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
+import { WIDE_HINTS_COLS } from "./FilterInput.tsx";
 
 interface QueryInputProps {
   value: string;
@@ -7,11 +8,29 @@ interface QueryInputProps {
   busy: boolean;
   error: string | null;
   hasDsl: boolean;
+  cols: number;
   onChange: (v: string) => void;
   onSubmit: (v: string) => void;
 }
 
-export function QueryInput({ value, focused, busy, error, hasDsl, onChange, onSubmit }: QueryInputProps) {
+export function formatQueryHints(
+  cols: number,
+  focused: boolean,
+  busy: boolean,
+  hasDsl: boolean,
+): string {
+  const core = busy
+    ? "translating…"
+    : focused
+      ? "Enter:run Esc:cancel"
+      : ":focus";
+  let out = core;
+  if (hasDsl) out += " | ?:show DSL";
+  if (cols >= WIDE_HINTS_COLS && !focused && !busy) out += " | h:help";
+  return out;
+}
+
+export function QueryInput({ value, focused, busy, error, hasDsl, cols, onChange, onSubmit }: QueryInputProps) {
   return (
     <Box flexDirection="column">
       <Box flexDirection="row">
@@ -25,8 +44,7 @@ export function QueryInput({ value, focused, busy, error, hasDsl, onChange, onSu
         />
         <Text dimColor wrap="truncate-end">
           {"  "}
-          {busy ? "translating…" : focused ? "Enter:run Esc:cancel" : ":focus"}
-          {hasDsl ? " | ?:show DSL" : ""}
+          {formatQueryHints(cols, focused, busy, hasDsl)}
         </Text>
       </Box>
       {error !== null && (

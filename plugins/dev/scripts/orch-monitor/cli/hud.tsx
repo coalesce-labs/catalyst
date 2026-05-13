@@ -160,7 +160,9 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
 
   const [showHelp, setShowHelp] = useState(false);
 
-  // chrome = header + status(1) + filter(1) + query(1) + dsl overlay (if any).
+  // chrome = header + separator(1) + filter(1) + query(1) + dsl overlay (if any).
+  // CTL-363: the standalone status row was folded into FilterInput and a `─`
+  // separator now sits above the footer, mirroring Header.tsx's top separator.
   // Help and detail are bottom-anchored *inside* visibleRows via the layout
   // helpers below — they no longer steal rows from the top.
   const chromeRows = headerRows + 3 + overlayHeight;
@@ -406,15 +408,6 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           ))}
         </Box>
       )}
-      <Box flexDirection="row" flexShrink={0}>
-        <Text dimColor>{`  ${filtered.length}/${events.length} events`}</Text>
-        {autoFollow
-          ? <Text color="green">{"  [LIVE]"}</Text>
-          : <Text dimColor>{"  [PAUSED — G to follow]"}</Text>
-        }
-        {pivot && <Text color="cyan">{`  [${pivot.type} pivot: ${pivot.id.slice(0, 14)}… — r:reset]`}</Text>}
-        {statusMsg && <Text color="yellow">{`  ${statusMsg}`}</Text>}
-      </Box>
       {showDslOverlay && dslState && (
         <Box flexShrink={0} flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
           <Text color="magenta" bold>{`Generated DSL · j/k scroll · ? to hide (${dslScrollTop + 1}/${dslLines.length}):`}</Text>
@@ -424,11 +417,19 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
         </Box>
       )}
       <Box flexShrink={0}>
+        <Text dimColor>{"─".repeat(Math.max(0, cols - 1))}</Text>
+      </Box>
+      <Box flexShrink={0}>
         <FilterInput
           value={filterText}
           focused={filterFocused}
           onChange={setFilterText}
           pivot={pivot}
+          cols={cols}
+          filteredCount={filtered.length}
+          totalCount={events.length}
+          autoFollow={autoFollow}
+          statusMsg={statusMsg}
         />
       </Box>
       <Box flexShrink={0}>
@@ -438,6 +439,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           busy={querySubmitting}
           error={queryError}
           hasDsl={dslState !== null}
+          cols={cols}
           onChange={setQueryText}
           onSubmit={(v) => { void submitQuery(v); }}
         />
