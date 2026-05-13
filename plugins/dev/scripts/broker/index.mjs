@@ -707,8 +707,14 @@ function matchCommsLifecycle(reg, event) {
 
 export function tryDeterministicRoute(event, interestsMap) {
   const matches = [];
-  const name = event.event ?? "";
-  const detail = event.detail ?? {};
+  // CTL-359: read event name + payload via the canonical-aware helpers so
+  // canonical OTel envelopes (where the name lives under
+  // attributes["event.name"] and the payload under body.payload) match the
+  // same routing rules as legacy flat events. Mirrors the CTL-357 fix to
+  // tryTicketLifecycleRoute. CTL-354's canonical-envelope audit caught the
+  // matching gap in tryTicketLifecycleRoute; this catches the PR/comms route.
+  const name = getEventName(event);
+  const detail = getEventPayload(event);
   const scope = event.scope ?? {};
   // CTL-344: real id on new envelopes, synthetic id for legacy events.
   const eventId = event.id ?? synthesizeEventId(event);

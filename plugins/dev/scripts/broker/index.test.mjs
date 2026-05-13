@@ -2260,3 +2260,89 @@ describe("CTL-357 tryTicketLifecycleRoute canonical envelopes", () => {
     expect(matches[0].reason).toContain("marked Done");
   });
 });
+
+// ─── CTL-359 tryDeterministicRoute canonical envelopes ───────────────────────
+
+describe("CTL-359 tryDeterministicRoute canonical envelopes", () => {
+  beforeEach(() => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-canon-pr",
+      detail: {
+        interest_id: "sess-canon-pr",
+        notify_event: "filter.wake.sess-canon-pr",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [777],
+        repo: "org/repo",
+        base_branches: [{ pr: 777, base: "main" }],
+        persistent: true,
+        session_id: "sess-canon-pr",
+      },
+    });
+  });
+
+  test("matches canonical github.pr.merged event", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.pr.merged" },
+        body: { payload: { mergeCommitSha: "deadbeef", merged: true } },
+        scope: { pr: 777 },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("sess-canon-pr");
+    expect(matches[0].reason).toContain("merged");
+    expect(matches[0].reason).toContain("deadbeef");
+  });
+
+  test("matches canonical github.check_suite.completed event", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.check_suite.completed" },
+        body: { payload: { prNumbers: [777], conclusion: "success" } },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("sess-canon-pr");
+    expect(matches[0].reason).toContain("CI checks passing");
+  });
+
+  test("matches canonical github.pr_review.submitted (changes_requested by bot)", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.pr_review.submitted" },
+        body: {
+          payload: {
+            reviewer: "coderabbitai",
+            state: "changes_requested",
+            author: { login: "coderabbitai", type: "Bot" },
+          },
+        },
+        scope: { pr: 777 },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("Automated review comment");
+    expect(matches[0].reason).toContain("coderabbitai");
+    expect(matches[0].reason).toContain("blocked from merging");
+  });
+
+  test("legacy envelope github.pr.merged continues to pass (backward compat)", () => {
+    // Re-run the existing legacy shape explicitly to lock in backward compat.
+    const matches = tryDeterministicRoute(
+      {
+        event: "github.pr.merged",
+        scope: { pr: 777 },
+        detail: { mergeCommitSha: "feedface", merged: true },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("sess-canon-pr");
+    expect(matches[0].reason).toContain("merged");
+    expect(matches[0].reason).toContain("feedface");
+  });
+});
