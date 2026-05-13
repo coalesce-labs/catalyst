@@ -122,6 +122,43 @@ export function formatEvent(event: CanonicalEvent): string {
   return label.slice(0, 15);
 }
 
+// CTL-350: STATUS column glyph. One char + trailing space so the column width
+// is exactly 2 — keeps `<Box width={2}>` rendering on a single visual cell
+// even when the terminal applies bold/inverse styling. CI conclusion drives
+// the glyph for check_suite/check_run events; severity is the fallback for
+// everything else so error/warn rows still get a visible marker.
+export function formatStatus(event: CanonicalEvent): string {
+  const attrs = event.attributes ?? ({} as CanonicalEvent["attributes"]);
+  const conclusion = attrs["cicd.pipeline.run.conclusion"];
+  if (conclusion === "success") return "✓ ";
+  if (conclusion === "failure" || conclusion === "cancelled") return "✗ ";
+  const name = attrs["event.name"];
+  if (conclusion === "in_progress" || (typeof name === "string" && name.includes(".in_progress"))) {
+    return "⏳";
+  }
+  const sev = event.severityText;
+  if (sev === "ERROR") return "✗ ";
+  if (sev === "WARN") return "! ";
+  return "· ";
+}
+
+export function formatOrch(event: CanonicalEvent): string {
+  return event.attributes?.["catalyst.orchestrator.id"] ?? "";
+}
+
+export function formatWorker(event: CanonicalEvent): string {
+  return event.attributes?.["catalyst.worker.ticket"] ?? "";
+}
+
+// CTL-344 made every canonical event carry a UUIDv4 .id. The full UUID is too
+// long for an inline column; the first 8 chars are still unique enough to
+// correlate against the `lookup_jq` query in source_events.
+export function formatEventIdShort(event: CanonicalEvent): string {
+  const id = event.id;
+  if (!id) return "";
+  return id.slice(0, 8);
+}
+
 export function formatRef(event: CanonicalEvent): string {
   const name = event.attributes?.["event.name"];
   if (name === "comms.message.posted") {
@@ -266,16 +303,46 @@ export function formatDetails(event: CanonicalEvent): string {
   if (cached !== undefined) return cached;
   const name = event.attributes?.["event.name"];
   const payload = event.body?.payload;
-  // CTL-348: filter.wake.* events carry a human-readable reason and an array of
-  // source event ids. Render "wake → ${reason_short}" with an optional "(n)"
-  // suffix when more than one source event triggered the wake so operators can
-  // tell *why* the broker woke the orchestrator instead of seeing a blank cell.
+  // CTL-348/CTL-350: filter.wake.* events render their triggering context so
+  // operators can see *why* the broker woke an orchestrator. When the wake
+  // carries structured source_events (CTL-350 Phase 2), prefer those fields
+  // over the Groq reason string — they're authoritative and pre-extracted.
+  // Falls back to reason-based rendering for legacy events emitted before
+  // Phase 2. The 40-char truncation from CTL-348 is removed; Phase 3's
+  // <Text wrap="wrap"> on the DETAILS column handles overflow at render time.
   if (name?.startsWith("filter.wake.") || name?.startsWith("orchestrator.filter.wake.")) {
     const p = payload as Record<string, unknown> | undefined;
+    const sourceEvents = Array.isArray(p?.["source_events"])
+      ? (p["source_events"] as Array<Record<string, unknown>>)
+      : [];
+    if (sourceEvents.length > 0) {
+      const first = sourceEvents[0] ?? {};
+      const evName = typeof first["name"] === "string" ? first["name"] : "event";
+      const ticket = typeof first["ticket"] === "string" ? first["ticket"] : null;
+      const pr = first["pr"];
+      const ref = ticket
+        ?? (typeof pr === "number" || (typeof pr === "string" && pr.length > 0) ? `#${pr}` : "");
+      const excerpt = first["payload_excerpt"] as Record<string, unknown> | undefined;
+      const state = excerpt?.["state"] ?? excerpt?.["conclusion"] ?? excerpt?.["action"];
+      // Only stringify primitives so we never render "[object Object]" if a
+      // future producer puts a nested shape under one of these excerpt keys.
+      const isPrimitive =
+        typeof state === "string"
+        || typeof state === "number"
+        || typeof state === "boolean";
+      const stateSuffix = isPrimitive ? ` → ${String(state)}` : "";
+      const countSuffix = sourceEvents.length > 1 ? ` (${sourceEvents.length})` : "";
+      const out = `wake ← ${evName}${ref ? ` ${ref}` : ""}${stateSuffix}${countSuffix}`
+        .replace(/\s+/g, " ")
+        .trim();
+      const sanitized = sanitize(out, "oneline");
+      detailsCache.set(event, sanitized);
+      return sanitized;
+    }
     const reasonRaw = typeof p?.["reason"] === "string" ? p["reason"] : "";
     const ids = p?.["source_event_ids"];
     const count = Array.isArray(ids) ? ids.length : 0;
-    const reasonShort = sanitize(reasonRaw, "oneline").slice(0, 40);
+    const reasonShort = sanitize(reasonRaw, "oneline");
     const suffix = count > 1 ? ` (${count})` : "";
     const out = reasonShort ? `wake → ${reasonShort}${suffix}` : `wake${suffix}`;
     detailsCache.set(event, out);

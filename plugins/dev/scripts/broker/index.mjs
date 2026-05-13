@@ -147,6 +147,54 @@ export function pluginVersion() {
   return __pluginVersionCached;
 }
 
+// CTL-350: compact summary of a triggering event, inlined into wake payloads
+// so receiving agents have enough context to act without re-fetching state
+// from GitHub/Linear/git. `lookup_jq` is a ready-to-run query against the
+// monthly-rotated event log for callers who do need full event details.
+const PAYLOAD_EXCERPT_KEYS = [
+  "state",
+  "stateType",
+  "conclusion",
+  "title",
+  "merged",
+  "action",
+];
+
+export function summarizeEvent(event) {
+  const id = event.id ?? synthesizeEventId(event);
+  const attrs = event.attributes ?? {};
+  const ts = event.ts ?? new Date().toISOString();
+  const name = event.event ?? attrs["event.name"] ?? "";
+  const payload =
+    event.body && typeof event.body === "object" && "payload" in event.body
+      ? event.body.payload
+      : event.detail ?? null;
+  const scope = event.scope ?? {};
+  const month = typeof ts === "string" ? ts.slice(0, 7) : "";
+  const excerpt = {};
+  if (payload && typeof payload === "object") {
+    for (const k of PAYLOAD_EXCERPT_KEYS) {
+      if (payload[k] !== undefined) excerpt[k] = payload[k];
+    }
+  }
+  const message = typeof event.body?.message === "string"
+    ? event.body.message.slice(0, 200)
+    : "";
+  const pr = attrs["vcs.pr.number"] ?? scope.pr ?? null;
+  const repo = attrs["vcs.repository.name"] ?? scope.repo ?? null;
+  return {
+    id,
+    name,
+    ts,
+    ticket: attrs["linear.issue.identifier"] ?? payload?.ticket ?? null,
+    pr,
+    repo,
+    message,
+    payload_excerpt: excerpt,
+    lookup_jq: `jq 'select(.id == "${id}")' ~/catalyst/events/${month}.jsonl`,
+  };
+}
+
 // Translate the broker's internal {event, orchestrator, worker, detail} shape
 // into a canonical OTel-style envelope. Severity defaults to INFO — broker
 // emissions today (filter.wake.*, broker.daemon.startup) are all info-level.
@@ -198,16 +246,32 @@ export function clearInterests() {
 }
 
 // --- Interest persistence ---
-const INTERESTS_FILE = resolve(CATALYST_DIR, "broker-interests.json");
-const LEGACY_INTERESTS_FILE = resolve(CATALYST_DIR, "filter-interests.json");
+// CTL-350: resolve paths per-call so tests can redirect by setting CATALYST_DIR.
+// Production daemons still pin a stable value at launch.
+function getInterestsFile() {
+  const catalystDir = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
+  return resolve(catalystDir, "broker-interests.json");
+}
+
+function getLegacyInterestsFile() {
+  const catalystDir = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
+  return resolve(catalystDir, "filter-interests.json");
+}
+
+// CTL-350: load-time guard. Test-only session_ids matching this pattern are
+// skipped so historical residue (sess-prose-7 etc.) does not get loaded into
+// production state and included in every Groq classification batch.
+const PROSE_TEST_SESSION = /^sess-prose-\d+$/;
 
 // One-time rename: legacy filter-interests.json → broker-interests.json on startup.
 function migrateLegacyInterestsFile() {
+  const interestsFile = getInterestsFile();
+  const legacyFile = getLegacyInterestsFile();
   try {
-    if (existsSync(LEGACY_INTERESTS_FILE) && !existsSync(INTERESTS_FILE)) {
-      renameSync(LEGACY_INTERESTS_FILE, INTERESTS_FILE);
+    if (existsSync(legacyFile) && !existsSync(interestsFile)) {
+      renameSync(legacyFile, interestsFile);
       log.info(
-        { from: LEGACY_INTERESTS_FILE, to: INTERESTS_FILE },
+        { from: legacyFile, to: interestsFile },
         "migrated legacy interests file"
       );
     }
@@ -217,22 +281,33 @@ function migrateLegacyInterestsFile() {
 }
 
 export function saveInterests() {
+  const interestsFile = getInterestsFile();
   try {
-    mkdirSync(dirname(INTERESTS_FILE), { recursive: true });
-    writeFileSync(INTERESTS_FILE, JSON.stringify([...interests.entries()], null, 2));
+    mkdirSync(dirname(interestsFile), { recursive: true });
+    writeFileSync(interestsFile, JSON.stringify([...interests.entries()], null, 2));
   } catch (err) {
     log.error({ err: err.message }, "failed to save interests");
   }
 }
 
 export function loadPersistedInterests() {
+  const interestsFile = getInterestsFile();
   try {
-    const entries = JSON.parse(readFileSync(INTERESTS_FILE, "utf8"));
+    const entries = JSON.parse(readFileSync(interestsFile, "utf8"));
+    let skipped = 0;
     for (const [id, reg] of entries) {
+      if (reg?.session_id && PROSE_TEST_SESSION.test(reg.session_id)) {
+        skipped++;
+        log.warn(
+          { interestId: id, sessionId: reg.session_id },
+          "skipping prose-* test residue"
+        );
+        continue;
+      }
       interests.set(id, reg);
     }
-    if (interests.size) {
-      log.info({ count: interests.size }, "loaded persisted interests");
+    if (interests.size || skipped) {
+      log.info({ count: interests.size, skipped }, "loaded persisted interests");
     }
   } catch {
     // No file yet or parse error — fine
@@ -554,7 +629,14 @@ export function tryDeterministicRoute(event, interestsMap) {
       }
     }
 
-    if (reason) matches.push({ interestId, reason, sourceEventId: eventId });
+    if (reason) {
+      matches.push({
+        interestId,
+        reason,
+        sourceEventId: eventId,
+        sourceEvent: summarizeEvent(event),
+      });
+    }
   }
 
   return matches;
@@ -664,7 +746,13 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
     }
 
     if (reason) {
-      matches.push({ interestId, reason, sourceEventId: eventId, ticket: matchedTicket });
+      matches.push({
+        interestId,
+        reason,
+        sourceEventId: eventId,
+        sourceEvent: summarizeEvent(event),
+        ticket: matchedTicket,
+      });
     }
   }
 
@@ -875,13 +963,13 @@ export function classifyMatches(events, matches, interestsMap) {
 
     // CTL-344: prefer real event.id; fall back to synthesized id for legacy
     // events. .filter(Boolean) strips any indices pointing past the batch end.
-    const sourceIds = indices
-      .map((i) => {
-        const e = events[i - 1];
-        if (!e) return null;
-        return e.id ?? synthesizeEventId(e);
-      })
-      .filter(Boolean);
+    // CTL-350: also build a parallel source_events array with structured
+    // metadata so receivers don't need to re-fetch from GitHub/Linear/git.
+    const sourceEvents = indices
+      .map((i) => events[i - 1])
+      .filter(Boolean)
+      .map((e) => summarizeEvent(e));
+    const sourceIds = sourceEvents.map((s) => s.id);
 
     wakes.push({
       event: reg.notify_event,
@@ -890,6 +978,7 @@ export function classifyMatches(events, matches, interestsMap) {
       detail: {
         reason: match.reason,
         source_event_ids: sourceIds,
+        source_events: sourceEvents,
         matched_indices_count: indices.length,
         interest_id: match.interest_id,
       },
@@ -951,7 +1040,14 @@ export function runWatchdogTick() {
             event: interest.notify_event,
             orchestrator: interest.orchestrator ?? interestId,
             worker: null,
-            detail: { reason, source_event_ids: [], interest_id: interestId },
+            // CTL-350: watchdog wakes have no triggering event, so source_events
+            // is always empty — receivers should fall back to the reason string.
+            detail: {
+              reason,
+              source_event_ids: [],
+              source_events: [],
+              interest_id: interestId,
+            },
           });
           log.info(
             { notifyEvent: interest.notify_event, reason },
@@ -1046,6 +1142,7 @@ export function processEvent(event) {
       detail: {
         reason: m.reason,
         source_event_ids: m.sourceEventId ? [m.sourceEventId] : [],
+        source_events: m.sourceEvent ? [m.sourceEvent] : [],
         interest_id: m.interestId,
         ...(m.ticket ? { ticket: m.ticket } : {}),
       },

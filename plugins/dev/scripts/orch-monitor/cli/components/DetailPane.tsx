@@ -66,11 +66,48 @@ export function buildDetailLines(event: CanonicalEvent, cols: number): Line[] {
   if (svcName) {
     lines.push({ k: "field", label: "service", value: svcVer ? `${svcName}  v${svcVer}` : svcName });
   }
+  // CTL-350: surface event.id (CTL-344 UUIDv4). The field is positioned above
+  // trace/span because the per-event id is the primary key operators use to
+  // correlate a HUD row with the underlying JSONL record.
+  if (event.id) lines.push({ k: "field", label: "event-id", value: event.id });
   if (event.traceId) lines.push({ k: "field", label: "trace", value: event.traceId });
   if (event.spanId) lines.push({ k: "field", label: "span", value: event.spanId });
 
   const message = formatDetailBody(event);
   const payload = event.body?.payload;
+
+  // CTL-350: promote source_events (wake-event triggering metadata) from the
+  // generic JSON dump below to labeled rows. Receivers — both human operators
+  // and downstream agents — get structured context including a copy-paste
+  // lookup_jq query for retrieving the full triggering event.
+  const sourceEvents =
+    payload && typeof payload === "object" && "source_events" in payload
+      ? (payload as Record<string, unknown>)["source_events"]
+      : undefined;
+  if (Array.isArray(sourceEvents) && sourceEvents.length > 0) {
+    lines.push({ k: "sep" });
+    sourceEvents.forEach((s, i) => {
+      const sEvt = (s ?? {}) as Record<string, unknown>;
+      const idx = sourceEvents.length > 1 ? ` [${i + 1}]` : "";
+      if (typeof sEvt["name"] === "string" && sEvt["name"].length > 0) {
+        lines.push({ k: "field", label: `source name${idx}`, value: String(sEvt["name"]) });
+      }
+      if (typeof sEvt["ticket"] === "string" && sEvt["ticket"].length > 0) {
+        lines.push({ k: "field", label: `source ticket${idx}`, value: String(sEvt["ticket"]), color: "yellow" });
+      }
+      const pr = sEvt["pr"];
+      if (typeof pr === "number" || (typeof pr === "string" && pr.length > 0)) {
+        lines.push({ k: "field", label: `source pr${idx}`, value: `#${pr}`, color: "cyan" });
+      }
+      if (typeof sEvt["id"] === "string" && sEvt["id"].length > 0) {
+        lines.push({ k: "field", label: `source id${idx}`, value: String(sEvt["id"]) });
+      }
+      if (typeof sEvt["lookup_jq"] === "string" && sEvt["lookup_jq"].length > 0) {
+        lines.push({ k: "field", label: `lookup${idx}`, value: String(sEvt["lookup_jq"]) });
+      }
+    });
+  }
+
   if (message) {
     lines.push({ k: "sep" });
     const maxW = cols - LABEL_W - 6;

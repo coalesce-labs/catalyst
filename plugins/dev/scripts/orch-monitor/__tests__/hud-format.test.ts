@@ -734,14 +734,16 @@ describe("formatDetails (filter.wake)", () => {
     expect(formatDetails(e)).toBe("wake → some reason");
   });
 
-  test("truncates long reasons to 40 chars", () => {
+  // CTL-350: 40-char truncation removed — Phase 3 <Text wrap="wrap"> handles
+  // long reasons by wrapping to multiple lines in the actual rendered row.
+  test("preserves long reasons (no truncation; row wraps in render)", () => {
     const long = "x".repeat(60);
     const e = {
       ...baseEvent,
       attributes: { "event.name": "filter.wake.orch-foo" },
       body: { payload: { reason: long, source_event_ids: [] } },
     } as unknown as CanonicalEvent;
-    expect(formatDetails(e)).toBe("wake → " + "x".repeat(40));
+    expect(formatDetails(e)).toBe("wake → " + long);
   });
 
   test("appends (n) when source_event_ids has more than one entry", () => {
@@ -769,6 +771,89 @@ describe("formatDetails (filter.wake)", () => {
       body: { payload: { reason: "ticket changed", source_event_ids: [] } },
     } as unknown as CanonicalEvent;
     expect(formatDetails(e)).toBe("wake → ticket changed");
+  });
+
+  // CTL-350: when source_events is populated, render structured triggering
+  // event info instead of the Groq reason string. Receivers no longer need to
+  // re-fetch state from GitHub/Linear/git to understand what fired the wake.
+  test("prefers source_events over reason when populated", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+      body: {
+        payload: {
+          reason: "match anything relevant",
+          source_event_ids: ["uuid-1"],
+          source_events: [{
+            id: "uuid-1",
+            name: "linear.issue.state_changed",
+            ts: "2026-05-12T21:08:40Z",
+            ticket: "ADV-87",
+            payload_excerpt: { state: "Done" },
+          }],
+        },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("wake ← linear.issue.state_changed ADV-87 → Done");
+  });
+
+  test("falls back to reason when source_events is absent", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+      body: { payload: { reason: "legacy wake reason", source_event_ids: [] } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("wake → legacy wake reason");
+  });
+
+  test("renders PR ref when source_event carries pr", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+      body: {
+        payload: {
+          source_events: [{
+            name: "github.pr.merged",
+            pr: 87,
+            payload_excerpt: { merged: true },
+          }],
+        },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toContain("github.pr.merged #87");
+  });
+
+  test("renders CI ref + conclusion suffix when source_event carries conclusion", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+      body: {
+        payload: {
+          source_events: [{
+            name: "github.check_suite.completed",
+            pr: 501,
+            payload_excerpt: { conclusion: "failure" },
+          }],
+        },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("wake ← github.check_suite.completed #501 → failure");
+  });
+
+  test("appends (N) when source_events has more than one entry", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-foo" },
+      body: {
+        payload: {
+          source_events: [
+            { name: "linear.issue.state_changed", ticket: "ADV-1" },
+            { name: "linear.issue.state_changed", ticket: "ADV-2" },
+          ],
+        },
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toContain("(2)");
   });
 });
 

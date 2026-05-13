@@ -4,7 +4,7 @@
 // Run: bun test plugins/dev/scripts/broker/index.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, rmSync as rmFile } from "node:fs";
@@ -20,10 +20,12 @@ import {
   clearInterests,
   getLastHeartbeat,
   clearLastHeartbeat,
+  loadPersistedInterests,
   processEvent,
   tryDeterministicRoute,
   tryTicketLifecycleRoute,
   classifyMatches,
+  summarizeEvent,
   buildBrokerState,
   writeBrokerStateFile,
 } from "./index.mjs";
@@ -41,6 +43,9 @@ let tmpDir;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "broker-test-"));
+  // CTL-350: redirect CATALYST_DIR so tests never write to the production
+  // ~/catalyst/broker-interests.json path during persistence operations.
+  process.env.CATALYST_DIR = tmpDir;
   openBrokerStateDb(join(tmpDir, "test.db"));
   clearInterests();
   clearLastHeartbeat();
@@ -49,6 +54,7 @@ beforeEach(() => {
 afterEach(() => {
   closeBrokerStateDb();
   rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.CATALYST_DIR;
 });
 
 // ─── ticket_lifecycle interest registration ───────────────────────────────────
@@ -1141,6 +1147,57 @@ describe("CTL-340 classifyMatches", () => {
     });
   }
 
+  // CTL-350 Phase 1: ensure tests cannot write to ~/catalyst/broker-interests.json
+  test("prose-* registrations do not write to production interests file", () => {
+    const homeDir = process.env.HOME ?? "/tmp";
+    const liveInterestsPath = join(homeDir, "catalyst", "broker-interests.json");
+    const before = existsSync(liveInterestsPath) ? readFileSync(liveInterestsPath, "utf8") : "";
+    registerProseInterest("prose-canary");
+    const after = existsSync(liveInterestsPath) ? readFileSync(liveInterestsPath, "utf8") : "";
+    expect(after).toBe(before);
+  });
+
+  test("loadPersistedInterests skips entries with session_id matching /^sess-prose-\\d+$/", () => {
+    const tmpFile = join(tmpDir, "broker-interests.json");
+    writeFileSync(
+      tmpFile,
+      JSON.stringify([
+        ["prose-99", {
+          notify_event: "filter.wake.prose-99",
+          prompt: "x",
+          session_id: "sess-prose-99",
+          persistent: true,
+          context: {},
+          orchestrator: null,
+          interest_type: null,
+          pr_numbers: null,
+          repo: null,
+          base_branches: null,
+          tickets: null,
+          wake_on: null,
+        }],
+        ["real-orch", {
+          notify_event: "filter.wake.real-orch",
+          prompt: "y",
+          session_id: null,
+          persistent: true,
+          context: {},
+          orchestrator: "real-orch",
+          interest_type: null,
+          pr_numbers: null,
+          repo: null,
+          base_branches: null,
+          tickets: null,
+          wake_on: null,
+        }],
+      ])
+    );
+    clearInterests();
+    loadPersistedInterests();
+    expect(getInterests().has("prose-99")).toBe(false);
+    expect(getInterests().has("real-orch")).toBe(true);
+  });
+
   test("emits wake for canonical events without .id (uses synthesizeEventId)", () => {
     registerProseInterest("prose-1");
     const events = [
@@ -1256,5 +1313,168 @@ describe("CTL-340 classifyMatches", () => {
     ];
     const { wakes } = classifyMatches(events, matches, getInterests());
     expect(wakes[0].orchestrator).toBe("prose-7");
+  });
+});
+
+// ─── CTL-350 Phase 2: source_events inlining ────────────────────────────────
+
+describe("CTL-350 source_events inlining", () => {
+  function registerProseInterest(id, { persistent = true, orchestrator = null } = {}) {
+    handleRegister({
+      event: "filter.register",
+      orchestrator,
+      detail: {
+        interest_id: id,
+        notify_event: `filter.wake.${id}`,
+        prompt: "match anything relevant",
+        context: {},
+        persistent,
+        session_id: `sess-${id}`,
+      },
+    });
+  }
+
+  test("summarizeEvent extracts compact fields with lookup_jq", () => {
+    const event = {
+      id: "11111111-1111-1111-1111-111111111111",
+      ts: "2026-05-12T21:08:40.000Z",
+      attributes: {
+        "event.name": "linear.issue.state_changed",
+        "linear.issue.identifier": "ADV-87",
+      },
+      body: {
+        message: "Ticket marked Done",
+        payload: { state: "Done", stateType: "completed" },
+      },
+    };
+    const s = summarizeEvent(event);
+    expect(s.id).toBe(event.id);
+    expect(s.name).toBe("linear.issue.state_changed");
+    expect(s.ts).toBe(event.ts);
+    expect(s.ticket).toBe("ADV-87");
+    expect(s.message).toBe("Ticket marked Done");
+    expect(s.payload_excerpt).toEqual({ state: "Done", stateType: "completed" });
+    expect(s.lookup_jq).toContain("2026-05.jsonl");
+    expect(s.lookup_jq).toContain(event.id);
+  });
+
+  test("summarizeEvent synthesizes id and handles legacy event shapes", () => {
+    const event = {
+      ts: "2026-05-12T21:08:40Z",
+      event: "github.pr.merged",
+      scope: { pr: 42 },
+      detail: { merged: true, mergeCommitSha: "deadbeef" },
+    };
+    const s = summarizeEvent(event);
+    expect(s.id).toBeString();
+    expect(s.id.length).toBe(32);
+    expect(s.name).toBe("github.pr.merged");
+    expect(s.payload_excerpt.merged).toBe(true);
+    expect(s.lookup_jq).toContain(s.id);
+  });
+
+  test("summarizeEvent truncates long message bodies to 200 chars", () => {
+    const event = {
+      id: "evt-long",
+      ts: "2026-05-12T21:08:40Z",
+      attributes: { "event.name": "github.pr_review_comment.created" },
+      body: { message: "x".repeat(500), payload: {} },
+    };
+    const s = summarizeEvent(event);
+    expect(s.message.length).toBe(200);
+  });
+
+  test("ticket_lifecycle wake includes sourceEvent with ticket+state", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-x",
+      detail: {
+        interest_id: "watcher-x",
+        notify_event: "filter.wake.watcher-x",
+        interest_type: "ticket_lifecycle",
+        tickets: ["ADV-87"],
+        wake_on: ["status_done"],
+        persistent: true,
+      },
+    });
+    const event = {
+      id: "uuid-1",
+      ts: "2026-05-12T21:08:40Z",
+      event: "linear.issue.state_changed",
+      detail: { state: "Done" },
+      attributes: { "linear.issue.identifier": "ADV-87" },
+    };
+    const matches = tryTicketLifecycleRoute(event, getInterests());
+    expect(matches[0].sourceEvent).toBeDefined();
+    expect(matches[0].sourceEvent.id).toBe("uuid-1");
+    expect(matches[0].sourceEvent.ticket).toBe("ADV-87");
+    expect(matches[0].sourceEvent.payload_excerpt.state).toBe("Done");
+  });
+
+  test("pr_lifecycle deterministic route attaches sourceEvent to matches", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-pr",
+      detail: {
+        interest_id: "pr-watcher",
+        notify_event: "filter.wake.pr-watcher",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [123],
+        repo: "owner/repo",
+        base_branches: [{ pr: 123, base: "main" }],
+        persistent: true,
+      },
+    });
+    const event = {
+      id: "uuid-pr",
+      ts: "2026-05-12T21:08:40Z",
+      event: "github.pr.merged",
+      scope: { pr: 123 },
+      attributes: { "event.name": "github.pr.merged", "vcs.pr.number": 123 },
+      detail: { mergeCommitSha: "deadbeef", merged: true },
+    };
+    const matches = tryDeterministicRoute(event, getInterests());
+    expect(matches[0].sourceEvent).toBeDefined();
+    expect(matches[0].sourceEvent.id).toBe("uuid-pr");
+    expect(matches[0].sourceEvent.name).toBe("github.pr.merged");
+    expect(matches[0].sourceEvent.pr).toBe(123);
+  });
+
+  test("classifyMatches builds source_events parallel to source_event_ids", () => {
+    registerProseInterest("prose-se");
+    const events = [
+      {
+        id: "uuid-a",
+        ts: "2026-05-12T21:08:40Z",
+        attributes: {
+          "event.name": "linear.issue.state_changed",
+          "linear.issue.identifier": "ADV-87",
+        },
+        body: { payload: { state: "Done" } },
+      },
+    ];
+    const matches = [
+      { interest_id: "prose-se", reason: "ticket done", event_indices: [1] },
+    ];
+    const { wakes } = classifyMatches(events, matches, getInterests());
+    expect(wakes[0].detail.source_events).toHaveLength(1);
+    expect(wakes[0].detail.source_events[0].id).toBe("uuid-a");
+    expect(wakes[0].detail.source_events[0].ticket).toBe("ADV-87");
+    expect(wakes[0].detail.source_event_ids).toEqual(["uuid-a"]);
+  });
+
+  test("classifyMatches handles indices past batch end without source_events leaks", () => {
+    registerProseInterest("prose-se2");
+    const events = [
+      { id: "uuid-a", ts: "2026-05-12T21:08:40Z", attributes: { "event.name": "foo" }, body: { payload: {} } },
+    ];
+    const matches = [
+      { interest_id: "prose-se2", reason: "match", event_indices: [1, 99] },
+    ];
+    const { wakes } = classifyMatches(events, matches, getInterests());
+    expect(wakes[0].detail.source_events).toHaveLength(1);
+    expect(wakes[0].detail.source_events[0].id).toBe("uuid-a");
+    expect(wakes[0].detail.source_event_ids).toEqual(["uuid-a"]);
+    expect(wakes[0].detail.matched_indices_count).toBe(2);
   });
 });
