@@ -159,6 +159,22 @@ describe("buildCanonicalEvent", () => {
     });
     expect(ev.attributes["vcs.repository.name"]).toBe("coalesce-labs/catalyst");
   });
+
+  it("accepts cicd.pipeline.run.status as a typed optional attribute (CTL-366)", () => {
+    const ev: CanonicalEvent = buildCanonicalEvent({
+      ts: "2026-05-08T18:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.github" },
+      attributes: {
+        "event.name": "github.workflow_run.in_progress",
+        "cicd.pipeline.run.status": "in_progress",
+      },
+      body: {},
+    });
+    expect(ev.attributes["cicd.pipeline.run.status"]).toBe("in_progress");
+  });
 });
 
 describe("generateEventId (CTL-344)", () => {

@@ -208,6 +208,7 @@ describe("phaseTime", () => {
       phase: phaseNum,
       phaseTo: phaseName,
       ciConclusion: null,
+      ciStatus: null,
       severityText: "INFO",
       bodyMessage: null,
       raw: {},
@@ -269,6 +270,7 @@ describe("phaseTime", () => {
         phase: null,
         phaseTo: null,
         ciConclusion: null,
+        ciStatus: null,
         severityText: "INFO",
         bodyMessage: null,
         raw: {},
@@ -298,6 +300,7 @@ describe("stalls", () => {
         phase: null,
         phaseTo: null,
         ciConclusion: null,
+        ciStatus: null,
         severityText: "WARN",
         bodyMessage: null,
         raw: {
@@ -314,6 +317,7 @@ describe("stalls", () => {
         phase: null,
         phaseTo: null,
         ciConclusion: null,
+        ciStatus: null,
         severityText: "WARN",
         bodyMessage: null,
         raw: {
@@ -341,6 +345,7 @@ describe("stalls", () => {
         phase: null,
         phaseTo: null,
         ciConclusion: null,
+        ciStatus: null,
         severityText: "INFO",
         bodyMessage: null,
         raw: {
@@ -362,6 +367,7 @@ describe("stalls", () => {
         phase: null,
         phaseTo: null,
         ciConclusion: null,
+        ciStatus: null,
         severityText: "INFO",
         bodyMessage: null,
         raw: { body: { payload: { state: "approved", reviewer: "alice" } } },
@@ -396,6 +402,7 @@ describe("stalls", () => {
         phase: null,
         phaseTo: null,
         ciConclusion: null,
+        ciStatus: null,
         severityText: "WARN",
         bodyMessage: null,
         raw: {
@@ -430,6 +437,7 @@ describe("ciFunnel", () => {
       phase: null,
       phaseTo: null,
       ciConclusion: null,
+      ciStatus: null,
       severityText: "INFO",
       bodyMessage: null,
       raw: {},

@@ -229,6 +229,7 @@ export function buildEventLogEnvelope(
       const eventName = `github.check_suite.${event.status}`;
       const attrs: Omit<Attributes, "event.name"> = {
         "vcs.repository.name": event.repo,
+        "cicd.pipeline.run.status": event.status,
       };
       if (event.prNumbers.length === 1) {
         attrs["vcs.pr.number"] = event.prNumbers[0];
@@ -411,6 +412,7 @@ export function buildEventLogEnvelope(
         "vcs.repository.name": event.repo,
         "vcs.revision": event.headSha,
         "cicd.pipeline.run.id": event.runId,
+        "cicd.pipeline.run.status": event.status,
         "cicd.pipeline.name": event.name,
       };
       if (event.prNumbers.length === 1) {

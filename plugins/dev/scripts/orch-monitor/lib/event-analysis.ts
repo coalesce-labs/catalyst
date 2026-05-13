@@ -19,6 +19,7 @@ export interface NormalizedEvent {
   phase: number | null;
   phaseTo: string | null;
   ciConclusion: string | null;
+  ciStatus: string | null;
   severityText: Severity | null;
   bodyMessage: string | null;
   raw: unknown;
@@ -189,6 +190,18 @@ export function normalize(line: string): NormalizedEvent | null {
     ciConclusion = asString(detail["conclusion"]);
   }
 
+  // CI status (queued | in_progress | completed) — CTL-366
+  let ciStatus: string | null = null;
+  if (isCanonical) {
+    ciStatus = asString(attrs["cicd.pipeline.run.status"]);
+  }
+  if (ciStatus === null && payload !== null) {
+    ciStatus = asString(payload["status"]);
+  }
+  if (ciStatus === null && detail !== null) {
+    ciStatus = asString(detail["status"]);
+  }
+
   const severityRaw = asString(obj.severityText);
   const severityText: Severity | null =
     severityRaw === "DEBUG" ||
@@ -210,6 +223,7 @@ export function normalize(line: string): NormalizedEvent | null {
     phase,
     phaseTo,
     ciConclusion,
+    ciStatus,
     severityText,
     bodyMessage,
     raw: obj,
