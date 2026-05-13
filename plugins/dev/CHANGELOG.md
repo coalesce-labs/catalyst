@@ -1,5 +1,36 @@
 # Changelog
 
+## [9.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.0.0...catalyst-dev-v9.1.0) (2026-05-13)
+
+
+### Features
+
+* **dev:** broker comms_lifecycle + env-gate Groq prose path (CTL-357) ([#607](https://github.com/coalesce-labs/catalyst/issues/607)) ([39adb7a](https://github.com/coalesce-labs/catalyst/commit/39adb7aaa0528ddd5254c715e742ded4dc0ac429))
+* **dev:** per-event UUID (event.id) across canonical emitters (CTL-344) ([#580](https://github.com/coalesce-labs/catalyst/issues/580)) ([2b9acc9](https://github.com/coalesce-labs/catalyst/commit/2b9acc9c399d2ebca9701ebdbffefee4316f2227))
+
+
+### Bug Fixes
+
+* **dev:** API key health — startup warning, probe, status surface, gateway (CTL-343) ([#579](https://github.com/coalesce-labs/catalyst/issues/579)) ([543449f](https://github.com/coalesce-labs/catalyst/commit/543449f7b15550cdd4a9a926c078f16153227be6))
+* **dev:** broker interests integrity + empty-state observability (CTL-352) ([#602](https://github.com/coalesce-labs/catalyst/issues/602)) ([fd09601](https://github.com/coalesce-labs/catalyst/commit/fd09601ff5c512037d4ade5f4382eafea610dd47))
+* **dev:** broker prose-match suppression gate uses Groq intent (CTL-340) ([#585](https://github.com/coalesce-labs/catalyst/issues/585)) ([6e864be](https://github.com/coalesce-labs/catalyst/commit/6e864becc45763047bbb318cd12909f2eea54f98))
+* **dev:** broker reads canonical filter.register events (CTL-336) ([#567](https://github.com/coalesce-labs/catalyst/issues/567)) ([8abc0d5](https://github.com/coalesce-labs/catalyst/commit/8abc0d5ff4d749c09702b3ca947fd95f1cb33f30))
+* **dev:** broker skips self-emitted filter.wake/broker.daemon events (CTL-346) ([#586](https://github.com/coalesce-labs/catalyst/issues/586)) ([33859e7](https://github.com/coalesce-labs/catalyst/commit/33859e71f922cb11f7348aa20d7e7770f4a68075))
+* **dev:** broker tryDeterministicRoute canonical-envelope read (CTL-359) ([#609](https://github.com/coalesce-labs/catalyst/issues/609)) ([523b6fe](https://github.com/coalesce-labs/catalyst/commit/523b6feef68496136446a51020256e4aed327185))
+* **dev:** correct filter.wake predicate in skill docs (CTL-354) ([#599](https://github.com/coalesce-labs/catalyst/issues/599)) ([b7193a4](https://github.com/coalesce-labs/catalyst/commit/b7193a4b79bc6c11dbc26aee5f4cc2f1503fed97))
+* **dev:** delete retired filter-daemon directory (CTL-349) ([#590](https://github.com/coalesce-labs/catalyst/issues/590)) ([d553c7e](https://github.com/coalesce-labs/catalyst/commit/d553c7ed827f272ce3ea030bd088c0744fe3fac9))
+* **dev:** HUD + broker observability rework (CTL-350) ([#592](https://github.com/coalesce-labs/catalyst/issues/592)) ([3d9a02b](https://github.com/coalesce-labs/catalyst/commit/3d9a02b0e0d054c891516ad22edc2876a69bd52a))
+* **dev:** HUD filter row display — DETAILS, REF, and SOURCE (CTL-337) ([#569](https://github.com/coalesce-labs/catalyst/issues/569)) ([944410e](https://github.com/coalesce-labs/catalyst/commit/944410ebb1ad5f62a7e4ea33070b46f2de7c448e))
+* **dev:** HUD glyph fixes — NF v3 codepoint move + PR space (CTL-358) ([#606](https://github.com/coalesce-labs/catalyst/issues/606)) ([17d30f4](https://github.com/coalesce-labs/catalyst/commit/17d30f4e8fe4dcb05d0b3b7e17d4baeb04142604))
+* **dev:** HUD glyph polish — SOURCE icon prefix, PR symbol, REF/ORCH dedup (CTL-355) ([#601](https://github.com/coalesce-labs/catalyst/issues/601)) ([3dfc153](https://github.com/coalesce-labs/catalyst/commit/3dfc15329cdf184c4a75457f3a09733220270225))
+* **dev:** HUD highlight uses inverse video for readable contrast (CTL-342) ([#578](https://github.com/coalesce-labs/catalyst/issues/578)) ([a257e65](https://github.com/coalesce-labs/catalyst/commit/a257e6545cce7f0632bf542b87c991fc9c98cafe))
+* **dev:** HUD in-progress glyph uses Nerd Font when available, else ellipsis (CTL-353) ([#598](https://github.com/coalesce-labs/catalyst/issues/598)) ([8baceda](https://github.com/coalesce-labs/catalyst/commit/8baceda8168fd560158adf49cb16bd1fab56211a))
+* **dev:** HUD polish + broker.daemon.shutdown event (CTL-351) ([#595](https://github.com/coalesce-labs/catalyst/issues/595)) ([dd99679](https://github.com/coalesce-labs/catalyst/commit/dd99679b42efaca8b0086c93cc70f9bf88c59907))
+* **dev:** install-cli.sh owns ~/.catalyst/bin + auto PATH bootstrap (CTL-339) ([#571](https://github.com/coalesce-labs/catalyst/issues/571)) ([3284f5a](https://github.com/coalesce-labs/catalyst/commit/3284f5a7e1e4589f8ffc1f7cc17f8f975bccdf12))
+* **dev:** orchestrate-dispatch-next leaks parent stdin into worker (CTL-334) ([#577](https://github.com/coalesce-labs/catalyst/issues/577)) ([8dfb293](https://github.com/coalesce-labs/catalyst/commit/8dfb293d6093494faeba7266fb3cae27e824bf8d))
+* **dev:** pr_lifecycle interest refresh + auto-correlate at PR open (CTL-341) ([#588](https://github.com/coalesce-labs/catalyst/issues/588)) ([eadab91](https://github.com/coalesce-labs/catalyst/commit/eadab91efffbc283005b0fa1d03aa4c9732c1327))
+* **dev:** surface wake target + reason in HUD rows (CTL-348) ([#587](https://github.com/coalesce-labs/catalyst/issues/587)) ([f1bfbb1](https://github.com/coalesce-labs/catalyst/commit/f1bfbb13e4ab6f7bc87dbfd20a18d27d918507dc))
+
 ## [9.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v8.4.0...catalyst-dev-v9.0.0)
 
 May 11, 2026
