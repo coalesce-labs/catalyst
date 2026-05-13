@@ -138,6 +138,27 @@ describe("buildCanonicalEvent", () => {
     expect(ev.attributes["event.channel"]).toBe("webhook");
     expect(ev.attributes["vcs.pr.number"]).toBe(342);
   });
+
+  // CTL-362: vcs.repository.name is the canonical attribute the HUD reads for
+  // the REPO column. Explicit assertion guards against the field being dropped
+  // or renamed during future envelope refactors.
+  it("preserves vcs.repository.name through the envelope (CTL-362)", () => {
+    const ev = buildCanonicalEvent({
+      ts: "2026-05-13T12:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.linear" },
+      attributes: {
+        "event.name": "linear.issue.state_changed",
+        "linear.team.key": "CTL",
+        "linear.issue.identifier": "CTL-362",
+        "vcs.repository.name": "coalesce-labs/catalyst",
+      },
+      body: { payload: null },
+    });
+    expect(ev.attributes["vcs.repository.name"]).toBe("coalesce-labs/catalyst");
+  });
 });
 
 describe("generateEventId (CTL-344)", () => {

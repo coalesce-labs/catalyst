@@ -172,12 +172,17 @@ event_append() {
     return 0
   fi
 
-  local ts orch worker legacy_event detail
+  local ts orch worker legacy_event detail vcs_repo
   ts=$(echo "$input_json" | jq -r '.ts // ""')
   orch=$(echo "$input_json" | jq -r '.orchestrator // ""')
   worker=$(echo "$input_json" | jq -r '.worker // ""')
   legacy_event=$(echo "$input_json" | jq -r '.event // ""')
   detail=$(echo "$input_json" | jq -c '.detail // null')
+  # CTL-362: optional vcs.repository.name. Accept either `.vcsRepo` (camelCase,
+  # preferred) or `.repo` (alias for parity with broker interest records). When
+  # set, gets stamped into attributes["vcs.repository.name"] so the HUD's REPO
+  # column populates for orchestrator-emitted events.
+  vcs_repo=$(echo "$input_json" | jq -r '.vcsRepo // .repo // ""')
   [[ -z "$ts" ]] && ts="$(now_iso)"
 
   local mapping name entity action severity
@@ -192,6 +197,7 @@ event_append() {
   local extra_args=()
   [[ -n "$orch" ]] && extra_args+=(--orch "$orch")
   [[ -n "$worker" ]] && extra_args+=(--worker "$worker")
+  [[ -n "$vcs_repo" && "$vcs_repo" != "null" ]] && extra_args+=(--vcs-repo "$vcs_repo")
 
   # vcs.pr.number is found at .pr (worker-pr-created/merged) or .pr.number
   # (worker-status-terminal carries a {number,url} sub-object).

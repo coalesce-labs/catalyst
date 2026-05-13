@@ -206,6 +206,11 @@ export interface CreateServerOptions {
     smeeChannel?: string;
     /** Linear bot user UUID for loop prevention. CTL-263. */
     botUserId?: string;
+    /** Linear team→repo map (CTL-362). When set, the handler stamps
+     * `attributes["vcs.repository.name"]` on issue/comment/cycle envelopes for
+     * teams that appear here so the HUD's REPO column populates for Linear
+     * events. Empty / absent = no enrichment (pre-CTL-362 behaviour). */
+    linearTeams?: Array<{ key: string; vcsRepo: string }>;
   } | null;
 }
 
@@ -652,6 +657,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     linearWebhookHandler = createLinearWebhookHandler({
       linearSecrets: linearWebhookConfig?.linearSecrets ?? [],
       botUserId: linearWebhookConfig?.botUserId,
+      linearTeams: linearWebhookConfig?.linearTeams ?? [],
       eventLog: linearEventLog,
       emit: (type, data) => emit(type, data),
       // CTL-211 — invalidate the LinearFetcher cache on issue webhook events
@@ -1920,6 +1926,7 @@ if (import.meta.main) {
           linearSecrets: fullWebhookConfig.linearSecrets,
           smeeChannel: fullWebhookConfig.linearSmeeChannel,
           botUserId: fullWebhookConfig.linearBotUserId || undefined,
+          linearTeams: fullWebhookConfig.linearTeams,
         }
       : null;
   let summarizeHandler: SummarizeHandler | null = null;

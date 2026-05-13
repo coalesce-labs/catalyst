@@ -468,3 +468,180 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
     expect(env).toBeNull();
   });
 });
+
+// CTL-362: when a teams map is supplied, the envelope gets
+// attributes["vcs.repository.name"] for events the lookup can resolve so the
+// HUD's REPO column populates for Linear events.
+describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
+  const TEAMS = new Map<string, string>([
+    ["CTL", "coalesce-labs/catalyst"],
+    ["ADV", "coalesce-labs/adva"],
+  ]);
+
+  it("issue with known team key → vcs.repository.name set", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "update",
+        topic: "linear.issue.state_changed",
+        ticket: "CTL-210",
+        teamKey: "CTL",
+        data: {},
+        updatedFromKeys: ["stateId"],
+        actorId: null,
+      },
+      TS,
+      TEAMS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBe("coalesce-labs/catalyst");
+    expect(env!.attributes["linear.team.key"]).toBe("CTL");
+  });
+
+  it("issue with unknown team key → vcs.repository.name omitted", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "create",
+        topic: "linear.issue.created",
+        ticket: "FOO-1",
+        teamKey: "FOO",
+        data: {},
+        updatedFromKeys: [],
+        actorId: null,
+      },
+      TS,
+      TEAMS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+    expect(env!.attributes["linear.team.key"]).toBe("FOO");
+  });
+
+  it("issue with no team key → vcs.repository.name omitted", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "create",
+        topic: "linear.issue.created",
+        ticket: "CTL-1",
+        teamKey: null,
+        data: {},
+        updatedFromKeys: [],
+        actorId: null,
+      },
+      TS,
+      TEAMS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+  });
+
+  it("comment derives team key from ticket prefix and stamps repo + linear.team.key", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "comment",
+        action: "create",
+        ticket: "ADV-42",
+        commentId: "c1",
+        issueId: "i1",
+        data: {},
+      },
+      TS,
+      TEAMS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBe("coalesce-labs/adva");
+    expect(env!.attributes["linear.team.key"]).toBe("ADV");
+    expect(env!.attributes["linear.issue.identifier"]).toBe("ADV-42");
+  });
+
+  it("comment with ticket whose prefix is unknown → no repo, no team.key", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "comment",
+        action: "create",
+        ticket: "FOO-1",
+        commentId: "c1",
+        issueId: "i1",
+        data: {},
+      },
+      TS,
+      TEAMS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+    expect(env!.attributes["linear.team.key"]).toBeUndefined();
+  });
+
+  it("comment without ticket → no repo", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "comment",
+        action: "create",
+        ticket: null,
+        commentId: "c1",
+        issueId: "i1",
+        data: {},
+      },
+      TS,
+      TEAMS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+  });
+
+  it("cycle with known team key → vcs.repository.name set", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "cycle",
+        action: "update",
+        cycleId: "c1",
+        teamKey: "CTL",
+        data: {},
+      },
+      TS,
+      TEAMS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBe("coalesce-labs/catalyst");
+  });
+
+  it("reaction events are not enriched (no team context)", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "reaction",
+        action: "create",
+        reactionId: "r1",
+        data: {},
+      },
+      TS,
+      TEAMS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+  });
+
+  it("issue_label events are not enriched (no team context)", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue_label",
+        action: "create",
+        labelId: "l1",
+        data: {},
+      },
+      TS,
+      TEAMS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+  });
+
+  it("no teamsMap supplied → no enrichment (backward-compat default)", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "create",
+        topic: "linear.issue.created",
+        ticket: "CTL-1",
+        teamKey: "CTL",
+        data: {},
+        updatedFromKeys: [],
+        actorId: null,
+      },
+      TS,
+    );
+    expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+  });
+});
