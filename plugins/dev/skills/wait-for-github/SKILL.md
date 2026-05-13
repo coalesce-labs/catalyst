@@ -166,7 +166,7 @@ Never use these in any skill. They exhaust the GraphQL budget.
 | Field | Problem | Fix |
 |---|---|---|
 | `.attributes."vcs.pr.number"` | Null on GitHub webhook events until CTL-234 ships | Also check `.body.payload.number` or `.body.payload.pull_request.number` |
-| `.attributes."catalyst.orchestrator.id"` | Never set on GitHub webhook events | Do not filter GitHub events by orchestrator |
+| `.attributes."catalyst.orchestrator.id"` | Set on github events when head-branch matches an orch prefix (CTL-234) — a bare clause matches ~60-70% of webhooks for that orchestrator | Combine with an event-type guard from [[event-name-allowlist]] (e.g. `.attributes."event.name" == "github.pr.merged" and …`) |
 | `.attributes."cicd.pipeline.run.conclusion"` | Only on `check_run.completed`, not `check_suite.completed` | Use `.body.payload.status == "completed"` for suite events |
 | `.body.payload.state` on reviews | Casing varies (`APPROVED` vs `approved`) | Pipe through `\| ascii_downcase` before comparing |
 | Exact match on `wait-for` | Event may arrive before `wait-for` starts | Always confirm via one-shot `gh api` after match |

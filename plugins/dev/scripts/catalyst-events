@@ -317,19 +317,31 @@ cmd_build_orchestrator_filter() {
     pr_stream="${pr_stream%,}"
   fi
 
-  # Emit a single parenthesized jq predicate. Each clause is itself
-  # parenthesized; clauses are joined by `or` so the predicate evaluates to
-  # boolean true when ANY clause matches. The PR clauses are conditional —
-  # an early-stage orchestrator with no PRs still gets a valid filter.
+  # Emit a single parenthesized jq predicate against canonical OTel envelopes
+  # (CTL-300, CTL-370). Each clause is parenthesized; clauses are joined by
+  # `or` so the predicate evaluates to boolean true when ANY clause matches.
+  # The PR clauses are conditional — an early-stage orchestrator with no PRs
+  # still gets a valid filter.
+  #
+  # Clause shapes:
+  #   1. catalyst.orchestrator.* events stamped with this orch's id — guarded
+  #      by the `orchestrator.` event-name prefix so it does NOT match github
+  #      webhooks that also carry the orch id (CTL-234 attribution). The bare
+  #      orch-id clause used to over-match ~60-70% of github webhooks (CTL-370).
+  #   2. worker-lifecycle events scoped by catalyst.worker.ticket.
+  #   3. github events scoped by branch ref prefix (e.g. push events).
+  #   4. github events scoped to a known PR number (single-PR webhooks).
+  #   5. check_suite / workflow_run events whose prNumbers intersect.
+  #   6. linear events scoped to an in-orch ticket.
   printf '(\n'
-  printf '  (.orchestrator == "%s")\n' "$orch_name"
-  printf '  or ((.worker // "") | IN(%s))\n' "$ticket_stream"
-  printf '  or ((.scope.ref // "") | startswith("refs/heads/%s-"))\n' "$orch_name"
+  printf '  (.attributes."catalyst.orchestrator.id" == "%s" and (.attributes."event.name" // "" | startswith("orchestrator.")))\n' "$orch_name"
+  printf '  or ((.attributes."catalyst.worker.ticket" // "") | IN(%s))\n' "$ticket_stream"
+  printf '  or ((.attributes."vcs.ref.name" // "") | startswith("refs/heads/%s-"))\n' "$orch_name"
   if [[ -n "$pr_stream" ]]; then
-    printf '  or ((.scope.pr // -1) | IN(%s))\n' "$pr_stream"
-    printf '  or ((.detail.prNumbers // []) | any(IN(%s)))\n' "$pr_stream"
+    printf '  or ((.attributes."vcs.pr.number" // -1) | IN(%s))\n' "$pr_stream"
+    printf '  or ((.body.payload.prNumbers // []) | any(IN(%s)))\n' "$pr_stream"
   fi
-  printf '  or ((.scope.ticket // "") | IN(%s))\n' "$ticket_stream"
+  printf '  or ((.attributes."linear.issue.identifier" // "") | IN(%s))\n' "$ticket_stream"
   printf ')\n'
 }
 

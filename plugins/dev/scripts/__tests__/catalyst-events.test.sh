@@ -266,64 +266,73 @@ run "emitted predicate compiles end-to-end" bash -c "
   test \$? -ne 3
 "
 
-# ── 15. emitted predicate — match cases ─────────────────────────────────────
+# ── 15. emitted predicate — match cases (canonical OTel envelopes, CTL-370) ─
 
-# (a) catalyst orchestrator event for this orch
-EVENT_A='{"event":"worker-status-change","orchestrator":"orch-test-2026-05-04","worker":"CTL-100","detail":null}'
+# (a) catalyst orchestrator event for this orch (orchestrator.* event-name guard
+# is required — see CTL-370; bare orch id without the guard would match github
+# webhooks too, which is the over-broad clause we are fixing)
+EVENT_A='{"attributes":{"event.name":"orchestrator.worker.status_terminal","catalyst.orchestrator.id":"orch-test-2026-05-04","catalyst.worker.ticket":"CTL-100"}}'
 run "filter matches catalyst event from this orchestrator" \
   assert_match "$EVENT_A" "$FILTER_FILE"
 
 # (b) worker lifecycle event tagged with a ticket in this orch
-EVENT_B='{"event":"worker-pr-created","orchestrator":null,"worker":"CTL-101","detail":null}'
+EVENT_B='{"attributes":{"event.name":"orchestrator.worker.pr_created","catalyst.worker.ticket":"CTL-101"}}'
 run "filter matches worker event for in-orch ticket" \
   assert_match "$EVENT_B" "$FILTER_FILE"
 
 # (c) github event scoped by branch ref prefix
-EVENT_C='{"event":"github.push","orchestrator":null,"worker":null,"scope":{"repo":"o/r","ref":"refs/heads/orch-test-2026-05-04-CTL-100","sha":"abc123"}}'
+EVENT_C='{"attributes":{"event.name":"github.push","vcs.repository.name":"o/r","vcs.ref.name":"refs/heads/orch-test-2026-05-04-CTL-100","vcs.revision":"abc123"}}'
 run "filter matches github event scoped by branch ref prefix" \
   assert_match "$EVENT_C" "$FILTER_FILE"
 
 # (d) github event scoped to a known PR number
-EVENT_D='{"event":"github.pr.synchronize","orchestrator":null,"worker":null,"scope":{"repo":"o/r","pr":501}}'
+EVENT_D='{"attributes":{"event.name":"github.pr.synchronize","vcs.repository.name":"o/r","vcs.pr.number":501}}'
 run "filter matches github event scoped to known PR" \
   assert_match "$EVENT_D" "$FILTER_FILE"
 
 # (e) check_suite with prNumbers intersecting orch PR set
-EVENT_E='{"event":"github.check_suite.completed","orchestrator":null,"worker":null,"scope":{"repo":"o/r"},"detail":{"conclusion":"failure","prNumbers":[501]}}'
+EVENT_E='{"attributes":{"event.name":"github.check_suite.completed","vcs.repository.name":"o/r"},"body":{"payload":{"conclusion":"failure","prNumbers":[501]}}}'
 run "filter matches check_suite event with intersecting prNumbers" \
   assert_match "$EVENT_E" "$FILTER_FILE"
 
 # (f) linear event scoped to an in-orch ticket
-EVENT_F='{"event":"linear.issue.state_changed","orchestrator":null,"worker":null,"scope":{"ticket":"CTL-100"},"detail":{}}'
+EVENT_F='{"attributes":{"event.name":"linear.issue.state_changed","linear.issue.identifier":"CTL-100"}}'
 run "filter matches linear event for in-orch ticket" \
   assert_match "$EVENT_F" "$FILTER_FILE"
 
 # ── 16. emitted predicate — reject cases ────────────────────────────────────
 
 # (g) catalyst event from a different orchestrator
-EVENT_G='{"event":"worker-status-change","orchestrator":"orch-other-2026-05-04","worker":"FOO-99","detail":null}'
+EVENT_G='{"attributes":{"event.name":"orchestrator.worker.status_terminal","catalyst.orchestrator.id":"orch-other-2026-05-04","catalyst.worker.ticket":"FOO-99"}}'
 run "filter rejects event from foreign orchestrator" \
   assert_no_match "$EVENT_G" "$FILTER_FILE"
 
 # (h) github event scoped to a foreign branch ref
-EVENT_H='{"event":"github.push","orchestrator":null,"worker":null,"scope":{"repo":"o/r","ref":"refs/heads/orch-other-2026-05-04-FOO-99","sha":"def456"}}'
+EVENT_H='{"attributes":{"event.name":"github.push","vcs.repository.name":"o/r","vcs.ref.name":"refs/heads/orch-other-2026-05-04-FOO-99","vcs.revision":"def456"}}'
 run "filter rejects github event for foreign branch" \
   assert_no_match "$EVENT_H" "$FILTER_FILE"
 
 # (i) github event scoped to an unknown PR number
-EVENT_I='{"event":"github.pr.synchronize","orchestrator":null,"worker":null,"scope":{"repo":"o/r","pr":999}}'
+EVENT_I='{"attributes":{"event.name":"github.pr.synchronize","vcs.repository.name":"o/r","vcs.pr.number":999}}'
 run "filter rejects github event for unknown PR" \
   assert_no_match "$EVENT_I" "$FILTER_FILE"
 
 # (j) check_suite with prNumbers entirely outside orch PR set
-EVENT_J='{"event":"github.check_suite.completed","orchestrator":null,"worker":null,"scope":{"repo":"o/r"},"detail":{"conclusion":"failure","prNumbers":[888,999]}}'
+EVENT_J='{"attributes":{"event.name":"github.check_suite.completed","vcs.repository.name":"o/r"},"body":{"payload":{"conclusion":"failure","prNumbers":[888,999]}}}'
 run "filter rejects check_suite with non-intersecting prNumbers" \
   assert_no_match "$EVENT_J" "$FILTER_FILE"
 
 # (k) linear event for foreign ticket
-EVENT_K='{"event":"linear.issue.state_changed","orchestrator":null,"worker":null,"scope":{"ticket":"FOO-99"},"detail":{}}'
+EVENT_K='{"attributes":{"event.name":"linear.issue.state_changed","linear.issue.identifier":"FOO-99"}}'
 run "filter rejects linear event for foreign ticket" \
   assert_no_match "$EVENT_K" "$FILTER_FILE"
+
+# (l) CTL-370 over-broad clause regression: a github webhook that carries the
+# orch id (CTL-234 stamping) but is NOT actionable must NOT match by virtue of
+# the orch-id clause alone. It either matches via PR/ref clauses or not at all.
+EVENT_L='{"attributes":{"event.name":"github.check_run.created","catalyst.orchestrator.id":"orch-test-2026-05-04","vcs.repository.name":"o/r"},"body":{"payload":{}}}'
+run "filter rejects github webhook tagged with orch id but no PR/ref match (CTL-370)" \
+  assert_no_match "$EVENT_L" "$FILTER_FILE"
 
 # ── 17. build-orchestrator-filter — no PRs yet (early-stage orchestrator) ───
 EARLY_ORCH="$SCRATCH/orch-early-2026-05-04"
@@ -342,7 +351,7 @@ run "build-orchestrator-filter handles workers with no PRs" bash -c "
 "
 
 # Branch-ref scoping still works without any PRs
-EVENT_PRELESS='{"event":"github.push","orchestrator":null,"worker":null,"scope":{"repo":"o/r","ref":"refs/heads/orch-early-2026-05-04-CTL-200","sha":"a1b2"}}'
+EVENT_PRELESS='{"attributes":{"event.name":"github.push","vcs.repository.name":"o/r","vcs.ref.name":"refs/heads/orch-early-2026-05-04-CTL-200","vcs.revision":"a1b2"}}'
 run "filter matches branch-ref event when orch has no PRs" \
   assert_match "$EVENT_PRELESS" "$EARLY_FILTER_FILE"
 
