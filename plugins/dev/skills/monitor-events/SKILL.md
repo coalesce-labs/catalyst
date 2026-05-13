@@ -42,15 +42,30 @@ runs warn-to-stderr and proceed. If you reuse the primitives outside those skill
 the status check yourself and either start the daemon (`catalyst-monitor.sh start`) or
 plan for the polling fallback.
 
-## The two primitives
+## Pattern selection & cost tradeoffs
 
-| Primitive | When | What |
-|---|---|---|
-| `Monitor` | Long-lived in-skill watch | Claude Code built-in tool; runs a background command and surfaces stdout lines as notifications |
-| `catalyst-events wait-for` | Short-lived `claude -p` worker | Bash CLI; blocks until a matching event arrives, prints the line, exits 0 |
+Three patterns are available; pick by cost shape, not just by mechanism. Listed cheapest first.
 
-Both use `catalyst-events` under the hood. `tail` is the streaming foundation; `wait-for`
-is `tail | head -n 1` with a timeout.
+| Pattern | Mechanism | Cost shape | When to use |
+|---|---|---|---|
+| **Broker interest** (preferred) | The `catalyst-broker` daemon (see [[broker]]) classifies events between Claude turns and emits `filter.wake.{id}` only on semantic match. Deterministic interest types (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`) match by typed-field comparison; prose interests go through Groq Llama 3.1 8B. | **Lowest.** Zero turns while blocked; 1 turn per matched wake. Deterministic routes cost 0 LLM tokens; prose routes ~$0.05–0.10/M tokens at small batch sizes. Pre-filtering happens out of Claude's context entirely. | Whenever the broker daemon is running. Worker-scope (single PR) and orchestrator-scope (many PRs) both supported via the same registration mechanism. |
+| **`catalyst-events wait-for` with jq** | Blocking Bash CLI; one jq predicate; exits on first match or `--timeout`. Works without the broker. | Zero turns while blocked, 1 turn per match. Same per-match cost as `Monitor` but workers usually wait for ONE specific event, so total turn count stays low. Filter expansion (CI + reviews + push + merge) widens the per-match probability. | Short-lived `claude -p` workers when the broker is not running; standalone one-shot waits; CI scripts. |
+| **`Monitor` over `catalyst-events tail`** | Claude Code's `Monitor` tool wraps `tail --filter`; every matching line surfaces as a turn-resuming notification. | Highest. 1 wake per matching line means broad filters can dominate context. | Long-lived orchestrator only. **NOT** for short-lived `claude -p` workers — they have no long-lived turn loop to consume notifications. |
+
+> **Worker contract (matches `oneshot` Phase 5, CTL-371):** dispatched workers prefer the broker
+> (Pattern 3), fall back to `wait-for` (Pattern 2) when the daemon is down, and never use
+> `Monitor`/`tail` (Pattern 1). See `plugins/dev/skills/oneshot/SKILL.md` Phase 5 and the
+> `orchestrate` dispatch prompt for the canonical invocation.
+
+> **Note on numbering.** The "Pattern N" labels in the recipe sections below (Pattern 1 — worker
+> waits for PR merge, Pattern 2 — long-lived orchestrator wakes, Pattern 3 — reactive PR lifecycle,
+> Pattern 4 — tail by ticket) are *recipe IDs*, not the cost-tier rank in the table above. The
+> recipes pre-date the broker integration; both the broker-preferred path and the `wait-for`
+> fallback inside each recipe map to the table rows above.
+
+Both `wait-for` and `Monitor` use `catalyst-events` under the hood. `tail` is the streaming
+foundation; `wait-for` is `tail | head -n 1` with a timeout. The broker reads the same event log
+as `tail` does but classifies before waking, which is why its per-wake cost is so much lower.
 
 ## Pattern 1 — Worker waits for its PR to merge
 
@@ -559,6 +574,11 @@ Environment:
   filter; the long-lived precedent for Pattern 3
 - `catalyst-comms` — agent-to-agent pub/sub on per-channel files;
   `comms.message.posted` fan-out events go through this same log
-- [[catalyst-filter]] — Groq-backed semantic event router. Preferred wake
-  mechanism when running; collapses the per-concern jq filters in Patterns 1
-  and 2 into a single `filter.register` per agent (CTL-269)
+- [[broker]] — `catalyst-broker` daemon protocol (auto-correlation via
+  `agent.checkin`, deterministic `pr_lifecycle` / `ticket_lifecycle` /
+  `comms_lifecycle` routes). Preferred wake mechanism when running;
+  collapses the per-concern jq filters in the recipes below into a single
+  `filter.wake.{id}` per agent (CTL-303, CTL-371)
+- [[catalyst-filter]] — Groq-backed semantic event router (deprecated alias
+  for the broker; prose-classification path retained but env-gated off by
+  default since CTL-357)

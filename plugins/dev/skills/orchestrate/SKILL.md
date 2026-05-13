@@ -620,11 +620,40 @@ Your success contract ENDS at (CTL-252):
   ✓ pr.mergedAt, deployment.url (if applicable), status="done" written to signal file
   ✓ Worker process exits cleanly
 
-Use catalyst-events wait-for (two-phase pattern from [[wait-for-github]]) to
-listen for PR events — this is a blocking subprocess call that works reliably
-in claude -p non-interactive sessions. NEVER use gh pr view --json in any loop
-— that burns GraphQL rate limits. Use gh api REST endpoints only for state
-checks.
+Listen for PR events using this precedence ladder (matches oneshot Phase 5):
+
+  1. PREFERRED — Broker auto-correlation (Pattern 3, lowest cost):
+     The catalyst-broker daemon classifies events between Claude turns and
+     emits filter.wake.${CATALYST_SESSION_ID} only on semantic matches.
+     The agent.checkin event emitted by catalyst-session.sh start already
+     identifies you to the broker; emit a second agent.checkin carrying
+     claimed_pr after gh pr create (the oneshot helper broker_claim_pr does
+     exactly this). The broker auto-derives a pr_lifecycle interest covering
+     CI, reviews, comments, thread resolution, merge, BEHIND pushes, and
+     deployment status — all on a single wake event. Wait on:
+       catalyst-events wait-for \
+         --filter ".attributes.\"event.name\" == \"filter.wake.${CATALYST_SESSION_ID}\"" \
+         --timeout 600
+     Deterministic routes (pr_lifecycle / ticket_lifecycle / comms_lifecycle)
+     cost zero LLM tokens. See plugins/dev/skills/broker/SKILL.md for the
+     full protocol and plugins/dev/skills/catalyst-filter/SKILL.md for
+     prose-based registration when the deterministic routes aren't enough.
+
+  2. FALLBACK — catalyst-events wait-for with explicit jq (Pattern 2):
+     When catalyst-broker status returns non-running, use the two-phase
+     pattern from plugins/dev/skills/wait-for-github/SKILL.md. Blocking
+     subprocess call; works reliably in claude -p non-interactive sessions.
+     One jq predicate covers CI / reviews / push / merge for your PR.
+
+  3. FORBIDDEN for workers — Monitor over catalyst-events tail (Pattern 1):
+     That is the orchestrator's Phase 4 pattern, not a worker pattern.
+     A short-lived claude -p worker has no long-lived turn loop to consume
+     Monitor notifications, and tail filters wake on every matching line,
+     burning context.
+
+NEVER use gh pr view --json in any loop — that burns GraphQL rate limits.
+Use gh api REST endpoints only for the authoritative state check that
+follows every wake.
 
 Write these fields into your signal file as they become available:
   pr.number
