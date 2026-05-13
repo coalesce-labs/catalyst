@@ -23,6 +23,7 @@ import {
   processEvent,
   tryDeterministicRoute,
   tryTicketLifecycleRoute,
+  classifyMatches,
   buildBrokerState,
   writeBrokerStateFile,
 } from "./index.mjs";
@@ -927,5 +928,141 @@ describe("CTL-344 read-site event.id fallback", () => {
     expect(m.sourceEventId).toBeString();
     expect(m.sourceEventId.length).toBe(32);
     expect(/^[0-9a-f]{32}$/.test(m.sourceEventId)).toBe(true);
+  });
+});
+
+// ─── classifyMatches prose-routing suppression gate (CTL-340) ────────────────
+
+describe("CTL-340 classifyMatches", () => {
+  function registerProseInterest(id, { persistent = true, orchestrator = null } = {}) {
+    handleRegister({
+      event: "filter.register",
+      orchestrator,
+      detail: {
+        interest_id: id,
+        notify_event: `filter.wake.${id}`,
+        prompt: "match anything relevant",
+        context: {},
+        persistent,
+        session_id: `sess-${id}`,
+      },
+    });
+  }
+
+  test("emits wake for canonical events without .id (uses synthesizeEventId)", () => {
+    registerProseInterest("prose-1");
+    const events = [
+      {
+        ts: "2026-05-12T20:14:00Z",
+        traceId: "1d0338f8f2ec2acf633e0d95618dee70",
+        spanId: "d30d48f47d343921",
+        resource: { "service.name": "catalyst.session" },
+        attributes: { "event.name": "session.heartbeat" },
+        body: { payload: null },
+      },
+      {
+        ts: "2026-05-12T20:14:01Z",
+        traceId: "2d0338f8f2ec2acf633e0d95618dee70",
+        spanId: "e30d48f47d343921",
+        resource: { "service.name": "catalyst.broker" },
+        attributes: { "event.name": "broker.event" },
+        body: { payload: null },
+      },
+    ];
+    const matches = [
+      { interest_id: "prose-1", reason: "both events relevant", event_indices: [1, 2] },
+    ];
+    const { wakes, oneShotsToDelete } = classifyMatches(events, matches, getInterests());
+
+    expect(wakes).toHaveLength(1);
+    const wake = wakes[0];
+    expect(wake.event).toBe("filter.wake.prose-1");
+    expect(wake.detail.source_event_ids).toHaveLength(2);
+    for (const id of wake.detail.source_event_ids) {
+      expect(/^[0-9a-f]{32}$/.test(id)).toBe(true);
+    }
+    expect(wake.detail.matched_indices_count).toBe(2);
+    expect(wake.detail.interest_id).toBe("prose-1");
+    expect(oneShotsToDelete).toEqual([]);
+  });
+
+  test("suppresses wake when match.event_indices is empty (regression guard for original suppression intent)", () => {
+    registerProseInterest("prose-2");
+    const events = [
+      { id: "evt-1", ts: "2026-05-12T20:14:00Z", event: "foo" },
+    ];
+    const matches = [
+      { interest_id: "prose-2", reason: "groq invented match", event_indices: [] },
+    ];
+    const { wakes } = classifyMatches(events, matches, getInterests());
+    expect(wakes).toHaveLength(0);
+  });
+
+  test("legacy events with real .id still resolve to that .id (regression guard)", () => {
+    registerProseInterest("prose-3");
+    const events = [
+      { id: "real-id-1", ts: "2026-05-12T20:14:00Z", event: "foo" },
+      { id: "real-id-2", ts: "2026-05-12T20:14:01Z", event: "bar" },
+    ];
+    const matches = [
+      { interest_id: "prose-3", reason: "both", event_indices: [1, 2] },
+    ];
+    const { wakes } = classifyMatches(events, matches, getInterests());
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0].detail.source_event_ids).toEqual(["real-id-1", "real-id-2"]);
+    expect(wakes[0].detail.matched_indices_count).toBe(2);
+  });
+
+  test("indices pointing past batch end emit wake with filtered ids + accurate matched_indices_count", () => {
+    registerProseInterest("prose-4");
+    const events = [
+      { id: "a", ts: "2026-05-12T20:14:00Z", event: "foo" },
+      { id: "b", ts: "2026-05-12T20:14:01Z", event: "bar" },
+    ];
+    const matches = [
+      { interest_id: "prose-4", reason: "groq returned invalid index", event_indices: [1, 2, 99] },
+    ];
+    const { wakes } = classifyMatches(events, matches, getInterests());
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0].detail.source_event_ids).toEqual(["a", "b"]);
+    expect(wakes[0].detail.matched_indices_count).toBe(3);
+  });
+
+  test("skips matches with unknown interest_id", () => {
+    const events = [{ id: "x", ts: "2026-05-12T20:14:00Z", event: "foo" }];
+    const matches = [
+      { interest_id: "does-not-exist", reason: "...", event_indices: [1] },
+    ];
+    const { wakes } = classifyMatches(events, matches, getInterests());
+    expect(wakes).toHaveLength(0);
+  });
+
+  test("non-persistent (one-shot) interest is reported in oneShotsToDelete", () => {
+    registerProseInterest("prose-5", { persistent: false });
+    const events = [{ id: "x", ts: "2026-05-12T20:14:00Z", event: "foo" }];
+    const matches = [
+      { interest_id: "prose-5", reason: "match", event_indices: [1] },
+    ];
+    const { wakes, oneShotsToDelete } = classifyMatches(events, matches, getInterests());
+    expect(wakes).toHaveLength(1);
+    expect(oneShotsToDelete).toEqual(["prose-5"]);
+  });
+
+  test("handles non-array matches gracefully (returns empty result)", () => {
+    registerProseInterest("prose-6");
+    const events = [{ id: "x", ts: "2026-05-12T20:14:00Z", event: "foo" }];
+    const { wakes, oneShotsToDelete } = classifyMatches(events, null, getInterests());
+    expect(wakes).toHaveLength(0);
+    expect(oneShotsToDelete).toEqual([]);
+  });
+
+  test("orchestrator falls back to interest_id when reg.orchestrator is null", () => {
+    registerProseInterest("prose-7", { orchestrator: null });
+    const events = [{ id: "x", ts: "2026-05-12T20:14:00Z", event: "foo" }];
+    const matches = [
+      { interest_id: "prose-7", reason: "match", event_indices: [1] },
+    ];
+    const { wakes } = classifyMatches(events, matches, getInterests());
+    expect(wakes[0].orchestrator).toBe("prose-7");
   });
 });
