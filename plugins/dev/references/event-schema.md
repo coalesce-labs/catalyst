@@ -611,6 +611,6 @@ jq -c 'select(.severityNumber == 13 and (.attributes."event.name" | startswith("
 | `check_suite` / `workflow_run` PR | `.attributes."vcs.pr.number" == N` alone | Also check `.body.payload.prNumbers // [] \| index(N) != null` |
 | `github.push` | `.attributes."vcs.pr.number"` | Push events have no PR; use `.attributes."vcs.ref.name"` |
 | PR review state casing | `.body.payload.state == "approved"` | `.body.payload.state == "APPROVED"` or add `\| ascii_downcase` |
-| GitHub events orchestrator | `.attributes."catalyst.orchestrator.id"` | Always null on GitHub events — do not filter by it |
+| GitHub events orchestrator | `.attributes."catalyst.orchestrator.id"` as a bare clause | Set on github events when head-branch matches an orch prefix (CTL-234) — never use without an event-type guard; over-broad matches ~60-70% of webhooks. See [[event-name-allowlist]] § Pitfall. |
 | `filter.wake` for specific id | `.attributes."event.name" == "filter.wake.${id}"` | `.attributes."event.name" == "filter.wake" and .attributes."event.label" == "${id}"` |
 | Attribute dot-notation in jq | `.attributes.event.name` | `.attributes."event.name"` (must double-quote) |

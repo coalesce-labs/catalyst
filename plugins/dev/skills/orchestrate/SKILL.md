@@ -669,6 +669,14 @@ Include the matched filter clause / interest_id when the wake is from the
 broker (.body.payload.interest_id, .body.payload.reason). See
 plugins/dev/skills/monitor-events/SKILL.md § Narration for the full rule.
 
+When you write a filter by hand, target the canonical event names listed in
+[[event-name-allowlist]] — anything outside that allowlist is either
+non-actionable or covered by a different lifecycle group. Do NOT use
+`.attributes."catalyst.orchestrator.id"` as a bare clause: CTL-234 stamps it
+on every github webhook tied to one of the orchestrator's PRs, so without an
+event-type guard it wakes the worker on 60-70% of unrelated webhooks. See
+[[wait-for-github]] § Known filter pitfalls.
+
 Write these fields into your signal file as they become available:
   pr.number
   pr.url
@@ -928,13 +936,13 @@ catalyst-events tail --filter '
   (.attributes."event.name" | startswith("github.deployment")) or
   (.attributes."event.name" == "github.push") or
   (.attributes."event.name" | startswith("linear.issue.")) or
-  (.attributes."event.name" == "worker-phase-advanced") or
-  (.attributes."event.name" == "worker-status-terminal") or
-  (.attributes."event.name" == "worker-pr-created") or
-  (.attributes."event.name" == "worker-done") or
-  (.attributes."event.name" == "worker-failed") or
-  (.attributes."event.name" == "attention-raised") or
-  (.attributes."event.name" == "attention-resolved")
+  (.attributes."event.name" == "orchestrator.worker.phase_advanced") or
+  (.attributes."event.name" == "orchestrator.worker.status_terminal") or
+  (.attributes."event.name" == "orchestrator.worker.pr_created") or
+  (.attributes."event.name" == "orchestrator.worker.done") or
+  (.attributes."event.name" == "orchestrator.worker.failed") or
+  (.attributes."event.name" == "orchestrator.attention.raised") or
+  (.attributes."event.name" == "orchestrator.attention.resolved")
 '
 ```
 

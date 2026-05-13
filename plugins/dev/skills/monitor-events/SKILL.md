@@ -192,13 +192,13 @@ catalyst-events tail --filter '
   (.attributes."event.name" | startswith("github.deployment")) or
   (.attributes."event.name" == "github.push") or
   (.attributes."event.name" | startswith("linear.issue.")) or
-  (.attributes."event.name" == "worker-phase-advanced") or
-  (.attributes."event.name" == "worker-status-terminal") or
-  (.attributes."event.name" == "worker-pr-created") or
-  (.attributes."event.name" == "worker-done") or
-  (.attributes."event.name" == "worker-failed") or
-  (.attributes."event.name" == "attention-raised") or
-  (.attributes."event.name" == "attention-resolved")
+  (.attributes."event.name" == "orchestrator.worker.phase_advanced") or
+  (.attributes."event.name" == "orchestrator.worker.status_terminal") or
+  (.attributes."event.name" == "orchestrator.worker.pr_created") or
+  (.attributes."event.name" == "orchestrator.worker.done") or
+  (.attributes."event.name" == "orchestrator.worker.failed") or
+  (.attributes."event.name" == "orchestrator.attention.raised") or
+  (.attributes."event.name" == "orchestrator.attention.resolved")
 '
 ```
 
@@ -489,14 +489,14 @@ Subscriber recipes:
 
 ```bash
 # Subscribe to actionable transitions only (no routine progress noise)
-catalyst-events tail --filter '.attributes."event.name" == "worker-status-terminal"'
+catalyst-events tail --filter '.attributes."event.name" == "orchestrator.worker.status_terminal"'
 
 # Subscribe to routine progress (already coalesced into batches)
-catalyst-events tail --filter '.attributes."event.name" == "worker-phase-advanced"'
+catalyst-events tail --filter '.attributes."event.name" == "orchestrator.worker.phase_advanced"'
 
 # A worker just opened a PR — wait until it tells you the PR number
 catalyst-events wait-for --timeout 600 \
-  --filter '.attributes."event.name" == "worker-status-terminal" and .body.payload.to == "pr-created" and .attributes."catalyst.worker.ticket" == "CTL-229"' \
+  --filter '.attributes."event.name" == "orchestrator.worker.status_terminal" and .body.payload.to == "pr-created" and .attributes."catalyst.worker.ticket" == "CTL-229"' \
   | jq -r '.body.payload.pr.number'
 ```
 
@@ -566,6 +566,10 @@ unavailable, insufficient, or contradicts what you expect.
 
 ## Filter cookbook
 
+All `event.name` values are the canonical OTel form that appears on disk. The
+authoritative list of actionable names for workers lives in
+[[event-name-allowlist]]; the rows below are illustrative filters built from it.
+
 | Need | Filter |
 |---|---|
 | All GitHub webhook events | `.attributes."event.name" \| startswith("github.")` |
@@ -578,13 +582,13 @@ unavailable, insufficient, or contradicts what you expect.
 | Comment from a human on a PR | `.attributes."event.name" == "github.issue_comment.created" and (.body.payload.author.type // "User") != "Bot"` |
 | Linear ticket state change | `.attributes."event.name" == "linear.issue.state_changed" and .attributes."linear.issue.identifier" == "CTL-210"` |
 | Comms message in one channel | `.attributes."event.name" == "comms.message.posted" and .body.payload.channel == "orch-foo"` |
-| Routine worker phase transitions (info-tier, coalesced batches; CTL-229) | `.attributes."event.name" == "worker-phase-advanced"` |
-| Worker terminal transitions (PR-created, merging, done, fail; CTL-229) | `.attributes."event.name" == "worker-status-terminal"` |
-| One worker's terminal events with PR number | `.attributes."event.name" == "worker-status-terminal" and .attributes."catalyst.worker.ticket" == "CTL-210" and (.body.payload.pr.number // null)` |
-| Worker reached terminal state | `.attributes."event.name" == "worker-done" or .attributes."event.name" == "worker-failed"` |
+| Routine worker phase transitions (info-tier, coalesced batches; CTL-229) | `.attributes."event.name" == "orchestrator.worker.phase_advanced"` |
+| Worker terminal transitions (PR-created, merging, done, fail; CTL-229) | `.attributes."event.name" == "orchestrator.worker.status_terminal"` |
+| One worker's terminal events with PR number | `.attributes."event.name" == "orchestrator.worker.status_terminal" and .attributes."catalyst.worker.ticket" == "CTL-210" and (.body.payload.pr.number // null)` |
+| Worker reached terminal state | `.attributes."event.name" == "orchestrator.worker.done" or .attributes."event.name" == "orchestrator.worker.failed"` |
 | PR review activity | `(.attributes."event.name" \| startswith("github.pr_review")) or (.attributes."event.name" == "github.issue_comment.created")` |
 | Deploy outcome | `.attributes."event.name" \| startswith("github.deployment")` |
-| Attention raised in this orchestrator | `.attributes."event.name" == "attention-raised" and .attributes."catalyst.orchestrator.id" == "orch-foo"` |
+| Attention raised in this orchestrator | `.attributes."event.name" == "orchestrator.attention.raised" and .attributes."catalyst.orchestrator.id" == "orch-foo"` |
 
 ## `--timeout` semantics
 

@@ -2346,3 +2346,86 @@ describe("CTL-359 tryDeterministicRoute canonical envelopes", () => {
     expect(matches[0].reason).toContain("feedface");
   });
 });
+
+// ─── CTL-370: documented allowlist ↔ broker routing-table parity ─────────────
+//
+// Asserts that `plugins/dev/references/event-name-allowlist.md` and the broker's
+// deterministic routing tables agree. If a canonical event-name appears in one
+// but not the other, this test fails — that's the drift CTL-370 was filed for.
+
+describe("CTL-370: allowlist parity with broker routing tables", () => {
+  // Closed sets extracted by reading the broker source. Update both sides
+  // together — the doc is the contract, this set is the implementation truth.
+  const PR_LIFECYCLE_ROUTED = new Set([
+    "github.check_suite.completed",
+    "github.pr.merged",
+    "github.pr.closed",
+    "github.pr_review.submitted",
+    "github.pr_review_comment.created",
+    "github.pr_review_thread.resolved",
+    "github.deployment.created",
+    "github.deployment_status.success",
+    "github.deployment_status.failure",
+    "github.deployment_status.error",
+    "github.push",
+  ]);
+  const TICKET_LIFECYCLE_ROUTED = new Set([
+    "linear.issue.state_changed",
+    "linear.issue.updated",
+    "linear.comment.created",
+    "github.pr.opened",
+    "github.pr.merged",
+    "github.pr.closed",
+  ]);
+
+  // Parse the markdown allowlist. Each `## <section>` introduces a section;
+  // event names live in bulleted lines as the first backticked token. Returns
+  // a map of section title → Set<event.name>.
+  function parseAllowlist(path) {
+    const text = readFileSync(path, "utf8");
+    const lines = text.split("\n");
+    const sections = new Map();
+    let current = null;
+    for (const raw of lines) {
+      const h = raw.match(/^##\s+([a-z_]+)\s*$/);
+      if (h) {
+        current = h[1];
+        sections.set(current, new Set());
+        continue;
+      }
+      if (!current) continue;
+      const bullet = raw.match(/^\s*[-*]\s+`([^`]+)`/);
+      if (!bullet) continue;
+      // Drop entries that are clearly kind-names (no dots) so the parser only
+      // collects canonical event.name strings.
+      if (!bullet[1].includes(".")) continue;
+      sections.get(current).add(bullet[1]);
+    }
+    return sections;
+  }
+
+  const ALLOWLIST_PATH = join(
+    import.meta.dir,
+    "..",
+    "..",
+    "references",
+    "event-name-allowlist.md",
+  );
+
+  test("event-name-allowlist.md exists at plugins/dev/references/", () => {
+    expect(existsSync(ALLOWLIST_PATH)).toBe(true);
+  });
+
+  test("documented pr_lifecycle names match broker pr_lifecycle routing table", () => {
+    const sections = parseAllowlist(ALLOWLIST_PATH);
+    const documented = sections.get("pr_lifecycle") ?? new Set();
+    // Bidirectional equality — any drift fails loudly.
+    expect([...documented].sort()).toEqual([...PR_LIFECYCLE_ROUTED].sort());
+  });
+
+  test("documented ticket_lifecycle names match broker ticket_lifecycle routing table", () => {
+    const sections = parseAllowlist(ALLOWLIST_PATH);
+    const documented = sections.get("ticket_lifecycle") ?? new Set();
+    expect([...documented].sort()).toEqual([...TICKET_LIFECYCLE_ROUTED].sort());
+  });
+});
