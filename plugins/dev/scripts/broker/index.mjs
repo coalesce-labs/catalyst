@@ -709,9 +709,21 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
 
 // --- Event classification ---
 
+// CTL-346: skip events the broker itself emitted so we never re-ingest
+// our own filter.wake.*/broker.daemon.* output (the 2026-05-12 wake feedback
+// loop). The original `event.event` read missed canonical OTel envelopes
+// where the name lives at attributes["event.name"]; the new check uses
+// getEventName + a service.name guard that catches every broker emission.
+// Opt out via BROKER_INGEST_OWN_EMISSIONS=1 for debugging.
 export function shouldSkipEvent(event) {
-  const name = event.event ?? "";
-  return name.startsWith("filter.");
+  if (process.env.BROKER_INGEST_OWN_EMISSIONS === "1") {
+    return getEventName(event).startsWith("filter.");
+  }
+  if (event.resource?.["service.name"] === "catalyst.broker") return true;
+  const name = getEventName(event);
+  if (name.startsWith("filter.")) return true;
+  if (name.startsWith("broker.daemon")) return true;
+  return false;
 }
 
 export function buildGroqPrompt(events) {
