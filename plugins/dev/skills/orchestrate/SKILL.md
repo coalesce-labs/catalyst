@@ -806,7 +806,7 @@ timeout acts as the safety-net fallback for daemon-down scenarios.
 
 ```bash
 WAKE_EVENT=$(catalyst-events wait-for \
-  --filter ".attributes.\"event.name\" == \"filter.wake\" and .attributes.\"event.label\" == \"${ORCH_NAME}\"" \
+  --filter ".attributes.\"event.name\" == \"filter.wake.${ORCH_NAME}\"" \
   --timeout 600 2>/dev/null || true)
 if [ -n "$WAKE_EVENT" ]; then
   WAKE_REASON=$(echo "$WAKE_EVENT" | jq -r '.body.payload.reason // "unknown"' 2>/dev/null || echo "unknown")
@@ -893,7 +893,7 @@ are wake-up triggers, never sources of truth.
 | `github.pr_review*`, `github.pr_review_comment*`, `github.issue_comment.created` | Re-evaluate `mergeStateStatus`; surface review activity on the dashboard. Codex review threads land as `pr_review_comment.created` — required for CTL-64 BLOCKED auto-fixup detection |
 | `github.deployment*` | Record deploy outcome on the worker's signal file |
 | `linear.issue.state_changed` | Reconcile Linear state with the worker signal |
-| `filter.wake` (with `attributes."event.label" == ${ORCH_NAME}`) | Daemon-filtered semantic wake: read `.body.payload.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source |
+| `filter.wake.${ORCH_NAME}` (matched on full dotted `event.name`) | Daemon-filtered semantic wake: read `.body.payload.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source |
 | 10-minute idle (no event) | Run the full reactive scan as a safety net |
 
 **Ground truth is git + PR, not the signal file.** The signal file is *advisory* — it reports

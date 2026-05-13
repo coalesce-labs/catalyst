@@ -67,7 +67,7 @@ Orchestrator                         filter daemon                     Event log
     │                                     │── append filter.wake.{id} ────►│
     │                                     │                                │
     │◄── catalyst-events wait-for ────────────────────────────────────────│
-    │    (.attributes."event.name" == "filter.wake" and .attributes."event.label" == "{id}")   │                                │
+    │    (.attributes."event.name" == "filter.wake.{id}")                                      │                                │
     │                                     │                                │
     │── emit filter.deregister ──────────►│                                │
 ```
@@ -284,7 +284,7 @@ After registering, block on the corresponding wake event:
 
 ```bash
 EVENT=$(catalyst-events wait-for \
-  --filter ".attributes.\"event.name\" == \"filter.wake\" and .attributes.\"event.label\" == \"${ORCH_ID}\"" \
+  --filter ".attributes.\"event.name\" == \"filter.wake.${ORCH_ID}\"" \
   --timeout 7200 || true)
 
 # Mandatory authoritative check — always verify via REST regardless of wait outcome
@@ -468,7 +468,7 @@ catalyst-state.sh event '{"event":"filter.register","orchestrator":"my-orch","de
 catalyst-state.sh event '{"event":"filter.register","orchestrator":"my-orch","detail":{"interest_id":"sess_abc","session_id":"sess_abc","notify_event":"filter.wake.sess_abc","persistent":true,"prompt":"Wake me on CI events for PR 42 or comms addressed to CTL-269.","context":{"pr_numbers":[42],"tickets":["CTL-269"],"workers":["sess_abc"]}}}'
 
 # Wait for wake signal
-catalyst-events wait-for --filter '.attributes."event.name" == "filter.wake" and .attributes."event.label" == "my-orch"' --timeout 7200
+catalyst-events wait-for --filter '.attributes."event.name" == "filter.wake.my-orch"' --timeout 7200
 
 # Deregister
 catalyst-state.sh event '{"event":"filter.deregister","detail":{"interest_id":"my-orch"}}'

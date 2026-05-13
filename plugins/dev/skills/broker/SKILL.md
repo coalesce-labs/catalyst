@@ -169,7 +169,7 @@ Omit `wake_on` (or pass `null`) to fire on all of the above.
 
 ```bash
 EVENT=$(catalyst-events wait-for \
-  --filter ".attributes.\"event.name\" == \"filter.wake\" and .attributes.\"event.label\" == \"${CATALYST_SESSION_ID}\"" \
+  --filter ".attributes.\"event.name\" == \"filter.wake.${CATALYST_SESSION_ID}\"" \
   --timeout 600 2>/dev/null || true)
 ```
 
