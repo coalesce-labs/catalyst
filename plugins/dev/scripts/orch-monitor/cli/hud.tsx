@@ -25,7 +25,7 @@ import {
   GroqHttpError,
   GroqResponseError,
 } from "../../lib/dsl-compile.mjs";
-import { SYSTEM_PROMPT } from "../../lib/dsl-prompt.mjs";
+import { buildSystemPrompt } from "../../lib/dsl-prompt.mjs";
 import type { CanonicalEvent } from "../lib/canonical-event.ts";
 
 interface AppProps {
@@ -273,7 +273,10 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
 
     try {
       const apiKey = process.env["GROQ_API_KEY"] || readGroqApiKeyFromConfig();
-      const dsl = await groqTranslate(text, { apiKey, systemPrompt: SYSTEM_PROMPT });
+      // CTL-365: inject current time per-request so "last 24 hours" etc. resolve
+      // against the wall clock rather than silently degrading to UTC midnight.
+      const systemPrompt = buildSystemPrompt({ now: new Date() });
+      const dsl = await groqTranslate(text, { apiKey, systemPrompt });
       const rewritten = { ...dsl, filter: dsl.filter ? rewriteNode(dsl.filter) : {} };
       const compiled = compile(rewritten);
       setDslState({ dsl: rewritten, jsPredicate: compiled.jsPredicate, nlQuery: text });
