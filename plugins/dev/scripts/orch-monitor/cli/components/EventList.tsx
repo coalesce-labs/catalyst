@@ -9,6 +9,10 @@ interface EventListProps {
   visibleRows: number;
   columns: number;
   compact?: boolean;
+  // CTL-351: paused = !autoFollow. Plumbed through to EventRow so the
+  // selection cursor is invisible in live mode and revealed once the user
+  // navigates via Up/Down (which pauses autoFollow inside useSelection).
+  paused?: boolean;
 }
 
 export function EventList({
@@ -18,6 +22,7 @@ export function EventList({
   visibleRows,
   columns,
   compact,
+  paused = true,
 }: EventListProps) {
   const visible = events.slice(scrollOffset, scrollOffset + visibleRows);
 
@@ -29,6 +34,7 @@ export function EventList({
           event={event}
           selected={scrollOffset + i === selectedIndex}
           columns={columns}
+          paused={paused}
         />
       ))}
     </Box>
