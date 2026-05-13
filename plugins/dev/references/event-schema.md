@@ -79,7 +79,7 @@ hostile for jq. The sidecar (CTL-306) handles that translation mechanically.
 
 | severityText | severityNumber | When to use |
 |---|---|---|
-| `DEBUG` | 5 | Heartbeats, filter-daemon empty wakes |
+| `DEBUG` | 5 | Heartbeats, broker empty wakes |
 | `INFO` | 9 | Normal lifecycle events (default) |
 | `WARN` | 13 | `attention-raised`, `worker-revived`, `worker-launch-failed`, CI failure on non-merge runs |
 | `ERROR` | 17 | `worker-failed`, `orchestrator-failed`, `deployment_status.failure`, `deployment_status.error` |
@@ -98,7 +98,7 @@ hostile for jq. The sidecar (CTL-306) handles that translation mechanically.
 | `catalyst.session` | Bash (`catalyst-session.sh`) |
 | `catalyst.orchestrator` | Bash (`catalyst-state.sh`, `emit-worker-status-change.sh`) |
 | `catalyst.comms` | Bash (`catalyst-comms`) |
-| `catalyst.filter` | Bash/daemon (`filter-daemon/index.mjs`) |
+| `catalyst.broker` | Bash/daemon (`broker/index.mjs`) — see [[broker]]. Supersedes legacy `catalyst.filter` producer (CTL-303). |
 
 ---
 

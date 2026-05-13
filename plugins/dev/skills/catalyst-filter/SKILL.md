@@ -478,5 +478,5 @@ catalyst-state.sh event '{"event":"filter.deregister","detail":{"interest_id":"m
 
 - [[monitor-events]] — canonical event-driven wait patterns (`wait-for` primitive reference)
 - [[catalyst-comms]] — agent-to-agent messaging protocol
-- `plugins/dev/scripts/catalyst-filter` — daemon CLI (start/stop/status/logs/run)
-- `plugins/dev/scripts/filter-daemon/index.mjs` — daemon implementation
+- `plugins/dev/scripts/catalyst-filter` — daemon CLI (deprecated shim; delegates to `catalyst-broker`)
+- `plugins/dev/scripts/broker/index.mjs` — daemon implementation (see [[broker]])

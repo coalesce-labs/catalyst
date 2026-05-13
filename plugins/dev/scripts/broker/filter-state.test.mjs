@@ -1,5 +1,5 @@
-// Unit tests for filter-daemon SQLite state store (CTL-284).
-// Run: bun test plugins/dev/scripts/filter-daemon/filter-state.test.mjs
+// Unit tests for broker SQLite state store (originally CTL-284, migrated in CTL-303).
+// Run: bun test plugins/dev/scripts/broker/filter-state.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
