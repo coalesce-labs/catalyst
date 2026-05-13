@@ -15,6 +15,7 @@ import {
 import { useEventLog } from "./hooks/useEventLog.ts";
 import { useFilter, type DslPredicate } from "./hooks/useFilter.ts";
 import { useSelection } from "./hooks/useSelection.ts";
+import { detectNerdFont } from "./lib/nerd-font.ts";
 import {
   compile,
   groqTranslate,
@@ -478,6 +479,17 @@ if (!process.stdin.isTTY) {
     "Open a fresh terminal tab and run catalyst-hud there.\n",
   );
   process.exit(1);
+}
+
+// CTL-353: log Nerd Font detection so the user knows whether they're seeing
+// the upgraded single-cell PUA in-progress glyph or the ellipsis fallback.
+// Writes to stderr before Ink's alternate-screen takes over — visible in the
+// parent shell's scrollback after the HUD exits.
+const nerd = detectNerdFont();
+if (nerd.detected) {
+  process.stderr.write(`catalyst-hud: nerdfont detected (${nerd.source}: ${nerd.hint})\n`);
+} else {
+  process.stderr.write(`catalyst-hud: nerdfont ${nerd.hint}\n`);
 }
 
 render(<App repoFilter={repoFilter} predicate={predicate} sinceTs={sinceTs} />);
