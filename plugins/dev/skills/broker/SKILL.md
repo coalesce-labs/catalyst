@@ -44,7 +44,8 @@ catalyst-broker logs
 |---|---|---|
 | `pr_lifecycle` | Deterministic | Watch CI, reviews, merge, deployment for a known PR number |
 | `ticket_lifecycle` | Deterministic | Watch Linear state changes, comments, PR links for a ticket |
-| (prose prompt) | Groq LLM | Anything ambiguous, cross-cutting, or complex |
+| `comms_lifecycle` | Deterministic | Watch comms-channel messages (worker → orchestrator attention/done, orchestrator → worker directives) |
+| (prose prompt) | Groq LLM (env-gated off; CTL-357) | Anything ambiguous, cross-cutting, or complex — set `CATALYST_BROKER_PROSE_ENABLED=1` to re-enable |
 
 ## 1. Auto-Correlation (The Common Case — No Registration Needed)
 
@@ -173,6 +174,125 @@ EVENT=$(catalyst-events wait-for \
   --timeout 600 2>/dev/null || true)
 ```
 
+## 4a. `comms_lifecycle` Interest Type (CTL-357)
+
+Deterministic routing for `comms.message.posted` events on a shared comms channel. Replaces the
+Groq prose interest the orchestrator used to register for "any of my workers posts an attention
+message". The routing is keyed on channel + sender + message-type, with no model call.
+
+### Subscriber kinds
+
+- **`subscriber_kind: "orchestrator"`** — wakes when one of the orchestrator's `owned_workers`
+  posts a message of an interesting type. Default `types_of_interest` is `["attention", "done"]`
+  (matches `attention` and `done`, ignores `info` heartbeats).
+- **`subscriber_kind: "worker"`** — wakes when a peer posts a message addressed to this worker
+  (`to=<subscriber_ticket>`) or to all (`to=all`). Self-posts are ignored (self-loop guard).
+  Workers default to all message types — orchestrator → worker traffic is rare and intentional.
+
+### Schema
+
+```json
+{
+  "interest_id": "<id>",
+  "interest_type": "comms_lifecycle",
+  "notify_event": "filter.wake.<id>",
+  "persistent": true,
+  "channel": "orch-<orch-id>",
+  "subscriber_kind": "orchestrator",
+  "owned_workers": ["CTL-352", "CTL-354"],
+  "types_of_interest": ["attention", "done"]
+}
+```
+
+Worker variant:
+```json
+{
+  "interest_id": "<sess-id>-comms",
+  "interest_type": "comms_lifecycle",
+  "notify_event": "filter.wake.<sess-id>",
+  "persistent": true,
+  "channel": "orch-<orch-id>",
+  "subscriber_kind": "worker",
+  "subscriber_ticket": "CTL-357"
+}
+```
+
+### Registering (orchestrator)
+
+```bash
+jq -nc \
+  --arg orch "${CATALYST_ORCHESTRATOR_ID}" \
+  --arg id "${CATALYST_ORCHESTRATOR_ID}-comms" \
+  --arg channel "orch-${CATALYST_ORCHESTRATOR_ID}" \
+  --argjson workers '["CTL-352","CTL-354"]' \
+  '{ts: (now | todate), event: "filter.register",
+    orchestrator: $orch,
+    worker: null,
+    detail: {
+      interest_id: $id,
+      interest_type: "comms_lifecycle",
+      notify_event: ("filter.wake." + $orch),
+      persistent: true,
+      channel: $channel,
+      subscriber_kind: "orchestrator",
+      owned_workers: $workers,
+      types_of_interest: ["attention", "done"]
+    }}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+```
+
+### Registering (worker)
+
+The worker uses interest_id `"${CATALYST_SESSION_ID}-comms"` (NOT just the session_id) so it
+coexists with the broker's auto-correlated `pr_lifecycle` interest (interest_id =
+session_id). Both share `notify_event: "filter.wake.${CATALYST_SESSION_ID}"`, so the
+existing `wait-for` predicate is unchanged.
+
+```bash
+jq -nc \
+  --arg sid "$CATALYST_SESSION_ID" \
+  --arg id "${CATALYST_SESSION_ID}-comms" \
+  --arg orch "${CATALYST_ORCHESTRATOR_ID}" \
+  --arg channel "$CATALYST_COMMS_CHANNEL" \
+  --arg ticket "$TICKET_ID" \
+  '{ts: (now | todate), event: "filter.register",
+    orchestrator: $orch,
+    worker: null,
+    detail: {
+      interest_id: $id,
+      interest_type: "comms_lifecycle",
+      notify_event: ("filter.wake." + $sid),
+      persistent: true,
+      session_id: $sid,
+      channel: $channel,
+      subscriber_kind: "worker",
+      subscriber_ticket: $ticket
+    }}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+```
+
+### Match logic (no Groq call)
+
+| Trigger | Condition |
+|---|---|
+| `event.name == "comms.message.posted"` | always required |
+| `body.payload.channel == reg.channel` | always required |
+| `body.payload.type` ∈ `reg.types_of_interest` | required (defaults: orchestrator → `["attention","done"]`, worker → all types) |
+| Orchestrator: `attributes."catalyst.worker.ticket"` ∈ `reg.owned_workers` | required for orchestrator subscribers |
+| Worker: `body.payload.to == reg.subscriber_ticket` OR `body.payload.to == "all"` | required for worker subscribers |
+| Worker: sender (`catalyst.worker.ticket`) != `reg.subscriber_ticket` | self-loop guard |
+
+### Wake Event Shape
+
+```json
+{
+  "event": "filter.wake.orch-2026-05-12",
+  "detail": {
+    "reason": "Worker CTL-352 posted attention on orch-orch-2026-05-12",
+    "source_event_ids": ["..."],
+    "interest_id": "orch-2026-05-12-comms"
+  }
+}
+```
+
 ## 5. `pr_lifecycle` Interest Type (CTL-284 — Unchanged)
 
 Explicit PR-number registration still works:
@@ -203,9 +323,21 @@ Events matched: `github.check_suite.completed`, `github.pr.merged`, `github.pr.c
 `github.pr_review.submitted`, `github.pr_review_comment.created`, `github.pr_review_thread.resolved`,
 `github.deployment.created`, `github.deployment_status.*`, `github.push` (base-branch pushes).
 
-## 6. Groq Prose Registration (Unchanged)
+## 6. Groq Prose Registration (Env-gated off — CTL-357)
 
-For complex / multi-condition interests, register with a natural-language prompt:
+> **Off by default.** `CATALYST_BROKER_PROSE_ENABLED=0` is the new default. Empirical evidence
+> (`orch-ctl-352-354-2026-05-12`) showed a ~95% false-positive rate on prose wakes — every
+> session heartbeat, every unrelated Linear ticket change, and every info comms post matched
+> nominally narrow interests. Prose interests already on disk are loaded but never matched against
+> events. On startup, if any prose interests are found, the broker emits a single
+> `broker.daemon.prose_disabled` info event so the operator can see them at a glance.
+>
+> Set `CATALYST_BROKER_PROSE_ENABLED=1` in the environment when launching the daemon to re-enable
+> Groq classification for prompt-based interests. Prefer the deterministic types
+> (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`) for anything routine.
+
+For complex / multi-condition interests that genuinely need fuzzy matching, register with a
+natural-language prompt:
 
 ```bash
 jq -nc \
