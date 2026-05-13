@@ -382,6 +382,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           visibleRows={listRows}
           columns={cols}
           compact={inDetailMode || showHelp}
+          paused={!autoFollow}
         />
       </Box>
       {inDetailMode && selectedEvent && (

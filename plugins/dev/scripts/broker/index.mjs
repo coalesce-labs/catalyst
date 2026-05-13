@@ -1426,18 +1426,38 @@ function main() {
     log.warn({ err: err.message }, "probe error suppressed");
   });
 
-  const shutdown = () => {
+  const shutdown = (signal) => {
     eventsWatcher?.close();
     clearInterval(watchdogId);
     clearTimeout(debounceTimer);
     clearTimeout(hardCapTimer);
+    // CTL-351: emit a parallel shutdown event so subscribers can pair
+    // broker.daemon.startup/broker.daemon.shutdown and switch their
+    // catalyst-events wait-for path to REST polling while the daemon is down.
+    // appendEvent is synchronous (appendFileSync) so the event is flushed
+    // before process.exit, even though the rest of shutdown is best-effort.
+    try {
+      appendEvent({
+        event: "broker.daemon.shutdown",
+        orchestrator: null,
+        worker: null,
+        detail: {
+          pid: process.pid,
+          signal: typeof signal === "string" ? signal : null,
+          active_interests: interests.size,
+          broker: true,
+        },
+      });
+    } catch {
+      // Best-effort — never block shutdown on telemetry.
+    }
     closeBrokerStateDb();
     removePidFile();
     try { unlinkSync(BROKER_STATE_FILE); } catch { /* already gone */ }
     process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

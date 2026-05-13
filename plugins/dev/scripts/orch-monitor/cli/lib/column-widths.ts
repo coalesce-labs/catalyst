@@ -8,7 +8,9 @@
  * sizing — both row and header read from it so they cannot drift apart.
  *
  * Optional columns appear at successive terminal-width thresholds:
- *   STATUS    ≥100 cols   one-glyph success/failure/in-progress indicator
+ *   STATUS    ≥100 cols   one-glyph success/failure/in-progress indicator.
+ *                         3 cells wide because ⏳ (U+23F3) renders 2 cells
+ *                         in most terminals and we want a trailing gutter.
  *   ORCH      ≥160 cols   full catalyst.orchestrator.id
  *   WORKER    ≥180 cols   catalyst.worker.ticket
  *   EVENT-ID  ≥200 cols   first 8 chars of the per-event UUIDv4 (CTL-344)
@@ -40,7 +42,7 @@ export function computeColumnWidths(columns: number): ColumnWidths {
   const showWorker = columns >= 180;
   const showEventId = columns >= 200;
   return {
-    status: showStatus ? 2 : 0,
+    status: showStatus ? 3 : 0,
     time: 10,
     repo: Math.min(14, Math.max(10, Math.floor(columns * 0.07))),
     source: Math.min(22, Math.max(16, Math.floor(columns * 0.1))),

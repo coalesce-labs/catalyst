@@ -42,7 +42,10 @@ describe("computeColumnWidths", () => {
     const w = computeColumnWidths(100);
     expect(w.showStatus).toBe(true);
     expect(w.showOrch).toBe(false);
-    expect(w.status).toBe(2);
+    // CTL-351: ⏳ (U+23F3) renders 2 cells wide in most terminals; +1 trailing
+    // gutter = 3-wide status column so the glyph never pushes following
+    // columns right on in-progress rows.
+    expect(w.status).toBe(3);
   });
 
   test("at 160 cols enables STATUS + ORCH", () => {

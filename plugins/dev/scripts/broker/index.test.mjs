@@ -931,6 +931,14 @@ describe("shouldSkipEvent — broker self-emission guards (CTL-346)", () => {
     })).toBe(true);
   });
 
+  // CTL-351: broker.daemon.shutdown follows the same self-emission pattern.
+  test("skips canonical broker.daemon.shutdown event", () => {
+    expect(shouldSkipEvent({
+      attributes: { "event.name": "broker.daemon.shutdown" },
+      resource: { "service.name": "catalyst.broker" },
+    })).toBe(true);
+  });
+
   test("skips any event with resource.service.name == catalyst.broker", () => {
     // Defense-in-depth: future broker.* event names still get skipped.
     expect(shouldSkipEvent({
