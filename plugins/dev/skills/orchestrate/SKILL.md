@@ -655,6 +655,20 @@ NEVER use gh pr view --json in any loop — that burns GraphQL rate limits.
 Use gh api REST endpoints only for the authoritative state check that
 follows every wake.
 
+WAKE NARRATION (MANDATORY, CTL-369): every Monitor wake and every wait-for
+return must be acknowledged with a single short line of assistant text before
+returning to the wait. A thinking-only end_turn after a Monitor wake makes the
+harness's next <task-notification> XML leak as a confusing "Human:\n<task-id>"
+phantom user message. The line shape is:
+
+  wake: <event.name> #<pr> [interest=<type>] — <action being taken>
+  wake: <event.name> — routine, staying in event loop
+  wake: <event.name> — already addressed, no-op
+
+Include the matched filter clause / interest_id when the wake is from the
+broker (.body.payload.interest_id, .body.payload.reason). See
+plugins/dev/skills/monitor-events/SKILL.md § Narration for the full rule.
+
 Write these fields into your signal file as they become available:
   pr.number
   pr.url
@@ -934,6 +948,34 @@ orchestrators sharing the repo will also fire wake-ups; prefer
 > **Orchestrator-scoped filtering (CTL-234):** `github.*` events now carry `.attributes."catalyst.orchestrator.id"`
 > (stamped at receive time by the webhook handler). You may safely add
 > `(.attributes."catalyst.orchestrator.id" == "${ORCH_NAME}") and (...)` to narrow the filter to this run's PRs only.
+
+**Wake narration (MANDATORY, CTL-369).** Every Monitor wake — including ones
+classified as routine or already-addressed — must produce a single short line of
+assistant text before returning to the wait. The Claude Code harness wraps each
+Monitor stdout line in a `<task-notification>` XML user message; if the
+orchestrator's response is `end_turn` with only `thinking` blocks and no `text`
+content, the UI renders the next `<task-notification>`'s `<task-id>` as a
+phantom `Human:\n<task-id>` line in the transcript. The narration line defeats
+that artifact and gives the operator reading the transcript later a record of
+what fired and what was decided.
+
+Line shape (pick one; keep it under ~120 characters):
+
+```text
+wake: <event.name> #<pr> [interest=<type>] — <action being taken>
+wake: <event.name> — routine, staying in event loop
+wake: <event.name> — already addressed, no-op
+wake: idle-timeout — running periodic reconciliation scan
+```
+
+Surface the matched interest when wake came from the broker
+(`filter.wake.${ORCH_NAME}`): include `.body.payload.interest_id` (or its type:
+`pr_lifecycle` / `ticket_lifecycle` / `comms_lifecycle`) and a one-clause
+restatement of `.body.payload.reason`. For broad-form `catalyst-events tail`
+wakes, surface the raw `event.name` and the PR/ticket scope instead.
+
+See `plugins/dev/skills/monitor-events/SKILL.md` § Narration for the full rule
+and the good-vs-bad transcript fixture.
 
 **Wake-up classification.** When a line arrives on the Monitor, classify it before
 re-entering the scan so the response stays proportional. Every reaction reads
