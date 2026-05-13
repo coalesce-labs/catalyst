@@ -566,6 +566,137 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
 
     expect(getInterests().get("sess-already")?.pr_numbers).toEqual(prBefore);
   });
+
+  // CTL-341: orchestrator-level pr_lifecycle interest should also pick up new PRs.
+  test("orchestrator pr_lifecycle interest gets PR appended when worker on its ticket opens PR", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: { session_id: "sess-w-A", agent_name: "worker", ticket: "CTL-275", orchestrator: "orch-A", claimed_pr: null },
+    });
+
+    // Orchestrator-level pr_lifecycle interest registered with empty pr_numbers
+    // (this is the CTL-341 bug shape — registered before any PR opened).
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-A",
+      detail: {
+        interest_id: "orch-A-pr-lifecycle",
+        interest_type: "pr_lifecycle",
+        notify_event: "filter.wake.orch-A",
+        pr_numbers: [],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    // Ticket_lifecycle interest is what triggers tryTicketLifecycleRoute on pr_opened.
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-A",
+      detail: {
+        interest_id: "tl-orch-A",
+        interest_type: "ticket_lifecycle",
+        tickets: ["CTL-275"],
+        wake_on: ["pr_opened"],
+        persistent: true,
+      },
+    });
+
+    tryTicketLifecycleRoute({
+      event: "github.pr.opened",
+      scope: { pr: 610 },
+      detail: { body: "Implements CTL-275", title: "", headRef: "" },
+    }, getInterests());
+
+    const orchReg = getInterests().get("orch-A-pr-lifecycle");
+    expect(orchReg).toBeDefined();
+    expect(orchReg.pr_numbers).toContain(610);
+  });
+
+  test("orchestrator pr_lifecycle interest is not duplicated if PR already present", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: { session_id: "sess-w-B", agent_name: "worker", ticket: "CTL-275", orchestrator: "orch-B", claimed_pr: null },
+    });
+
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-B",
+      detail: {
+        interest_id: "orch-B-pr-lifecycle",
+        interest_type: "pr_lifecycle",
+        notify_event: "filter.wake.orch-B",
+        pr_numbers: [620],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-B",
+      detail: {
+        interest_id: "tl-orch-B",
+        interest_type: "ticket_lifecycle",
+        tickets: ["CTL-275"],
+        wake_on: ["pr_opened"],
+        persistent: true,
+      },
+    });
+
+    tryTicketLifecycleRoute({
+      event: "github.pr.opened",
+      scope: { pr: 620 },
+      detail: { body: "Implements CTL-275", title: "", headRef: "" },
+    }, getInterests());
+
+    const orchReg = getInterests().get("orch-B-pr-lifecycle");
+    expect(orchReg.pr_numbers.filter((n) => n === 620)).toHaveLength(1);
+  });
+
+  test("orchestrator pr_lifecycle interest is NOT touched when no agent on watched ticket belongs to that orchestrator", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: { session_id: "sess-w-X", agent_name: "worker", ticket: "CTL-275", orchestrator: "orch-X", claimed_pr: null },
+    });
+
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-Y",
+      detail: {
+        interest_id: "orch-Y-pr-lifecycle",
+        interest_type: "pr_lifecycle",
+        notify_event: "filter.wake.orch-Y",
+        pr_numbers: [],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-X",
+      detail: {
+        interest_id: "tl-orch-X",
+        interest_type: "ticket_lifecycle",
+        tickets: ["CTL-275"],
+        wake_on: ["pr_opened"],
+        persistent: true,
+      },
+    });
+
+    tryTicketLifecycleRoute({
+      event: "github.pr.opened",
+      scope: { pr: 630 },
+      detail: { body: "Implements CTL-275", title: "", headRef: "" },
+    }, getInterests());
+
+    const orchYReg = getInterests().get("orch-Y-pr-lifecycle");
+    expect(orchYReg.pr_numbers).toEqual([]);
+  });
 });
 
 // ─── getAgentsByTicket ───────────────────────────────────────────────────────
