@@ -47,6 +47,7 @@ export const CANONICAL_FIELDS = [
 
   // ─── attributes.cicd.* ────────────────────────────────────────────────────
   { path: 'attributes."cicd.pipeline.run.id"',         type: "number", description: "GitHub Actions run ID" },
+  { path: 'attributes."cicd.pipeline.run.status"',     type: "string", description: "queued | in_progress | completed (lifecycle state on workflow_run / check_suite)" },
   { path: 'attributes."cicd.pipeline.run.conclusion"', type: "string", description: "success | failure | cancelled | skipped | timed_out" },
   { path: 'attributes."cicd.pipeline.name"',           type: "string", description: "Workflow name (e.g. CI)" },
 

@@ -124,7 +124,16 @@ Attribute names contain dots. In jq, always double-quote them: `.attributes."eve
 | `catalyst.orchestrator.id` | string | Orchestration run identifier |
 | `catalyst.worker.ticket` | string | Worker ticket key (e.g. `CTL-210`) |
 | `catalyst.session.id` | string | Claude session ID (human-readable, for joining) |
-| `catalyst.phase` | number | Current phase number |
+| `catalyst.phase` | number | Current phase number — see note below |
+
+**Note on `catalyst.phase` as the OTel "stage/step" analogue.** Stable OTel CI/CD semconv
+defines `cicd.pipeline.run.id`, `cicd.pipeline.name`, and `cicd.pipeline.run.result` — no
+LogRecord-level "stage" or "step" field. `catalyst.phase` (integer) is our project-local
+stage analogue: an ordinal that identifies which phase of a multi-step workflow emitted
+the event. Today it is emitted only by `session.phase` events (with the human-readable
+phase name in `body.payload.to`), but the attribute is reserved for any catalyst component
+that wants to label events with a stage ordinal. No new schema field is needed for the
+stage/step concept.
 
 ### `vcs.*` — OTel VCS semconv
 
@@ -140,6 +149,7 @@ Attribute names contain dots. In jq, always double-quote them: `.attributes."eve
 | Attribute | Type | Description |
 |---|---|---|
 | `cicd.pipeline.run.id` | number | GitHub Actions run ID |
+| `cicd.pipeline.run.status` | string | `"queued"`, `"in_progress"`, `"completed"` — lifecycle state on `workflow_run` and `check_suite` envelopes |
 | `cicd.pipeline.run.conclusion` | string | `"success"`, `"failure"`, `"cancelled"`, `"skipped"`, `"timed_out"` |
 | `cicd.pipeline.name` | string | Workflow name (e.g. `"CI"`) |
 
@@ -468,7 +478,7 @@ Filters that previously matched `.event == "filter.wake.${id}"` now match:
 | `github.pr.{action}` | `pr` | `{action}` | INFO | yes | merged, opened, closed, synchronize, labeled, etc. |
 | `github.pr_review.{action}` | `pr_review` | `{action}` | INFO | yes | submitted, dismissed, edited |
 | `github.pr_review_thread.{state}` | `pr_review_thread` | `{state}` | INFO | yes | resolved, unresolved |
-| `github.check_suite.{status}` | `check_suite` | `{status}` | INFO (WARN if conclusion=failure) | only if single PR | `body.payload.prNumbers` for multi-PR |
+| `github.check_suite.{status}` | `check_suite` | `{status}` | INFO (WARN if conclusion=failure) | only if single PR | `cicd.pipeline.run.status`, `body.payload.prNumbers` for multi-PR |
 | `github.status.{state}` | `status` | `{state}` | INFO/WARN/ERROR | no | `vcs.revision` = sha |
 | `github.push` | `push` | `pushed` | INFO | no | `vcs.ref.name`, `vcs.revision` |
 | `github.issue_comment.{action}` | `issue_comment` | `{action}` | INFO | yes | PR-attached only |
@@ -476,7 +486,7 @@ Filters that previously matched `.event == "filter.wake.${id}"` now match:
 | `github.deployment.created` | `deployment` | `created` | INFO | no | `deployment.environment`, `deployment.id` |
 | `github.deployment_status.{state}` | `deployment_status` | `{state}` | INFO/ERROR | no | ERROR on failure/error states |
 | `github.release.{action}` | `release` | `{action}` | INFO | no | `event.label` = tag name |
-| `github.workflow_run.{action}` | `workflow_run` | `{action}` | INFO (WARN if conclusion=failure) | only if single PR | `cicd.pipeline.run.id`, `cicd.pipeline.name` |
+| `github.workflow_run.{action}` | `workflow_run` | `{action}` | INFO (WARN if conclusion=failure) | only if single PR | `cicd.pipeline.run.id`, `cicd.pipeline.run.status`, `cicd.pipeline.name` |
 
 ### catalyst.linear
 

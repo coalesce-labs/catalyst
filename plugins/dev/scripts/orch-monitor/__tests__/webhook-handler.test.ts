@@ -703,10 +703,35 @@ describe("buildEventLogEnvelope (canonical)", () => {
     expect(env!.attributes["vcs.revision"]).toBe("abc123");
     expect(env!.attributes["vcs.pr.number"]).toBe(326);
     expect(env!.attributes["cicd.pipeline.run.id"]).toBe(555);
+    expect(env!.attributes["cicd.pipeline.run.status"]).toBe("completed");
     expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBe("success");
     expect(env!.attributes["cicd.pipeline.name"]).toBe("CI");
     const payload = env!.body.payload as { prNumbers: number[] };
     expect(payload.prNumbers).toEqual([326]);
+  });
+
+  it("workflow_run.in_progress lifts status but has no conclusion attr", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "workflow_run",
+        repo: "o/r",
+        action: "in_progress",
+        workflowId: 99,
+        runId: 556,
+        name: "CI",
+        headSha: "def456",
+        headBranch: "main",
+        status: "in_progress",
+        conclusion: null,
+        runNumber: 43,
+        htmlUrl: "https://github.com/o/r/actions/runs/556",
+        prNumbers: [328],
+      },
+      TS,
+    );
+    expect(env!.attributes["event.name"]).toBe("github.workflow_run.in_progress");
+    expect(env!.attributes["cicd.pipeline.run.status"]).toBe("in_progress");
+    expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBeUndefined();
   });
 
   it("workflow_run with multiple PRs omits vcs.pr.number (multi-PR ambiguity)", () => {
@@ -746,10 +771,28 @@ describe("buildEventLogEnvelope (canonical)", () => {
       TS,
     );
     expect(env!.attributes["event.name"]).toBe("github.check_suite.completed");
+    expect(env!.attributes["cicd.pipeline.run.status"]).toBe("completed");
     expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBe("failure");
     expect(env!.attributes["vcs.pr.number"]).toBe(1);
     expect(env!.severityText).toBe("WARN");
     expect(env!.severityNumber).toBe(13);
+  });
+
+  it("check_suite.in_progress lifts status but has no conclusion attr", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "check_suite",
+        repo: "o/r",
+        prNumbers: [2],
+        status: "in_progress",
+        conclusion: null,
+        headRef: "feature-branch",
+      },
+      TS,
+    );
+    expect(env!.attributes["event.name"]).toBe("github.check_suite.in_progress");
+    expect(env!.attributes["cicd.pipeline.run.status"]).toBe("in_progress");
+    expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBeUndefined();
   });
 
   it("maps deployment_status.success → github.deployment_status.success", () => {

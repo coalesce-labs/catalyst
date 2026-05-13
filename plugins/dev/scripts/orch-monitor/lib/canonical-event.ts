@@ -64,6 +64,7 @@ export interface Attributes {
 
   // CI/CD semconv (OTel published)
   "cicd.pipeline.run.id"?: number;
+  "cicd.pipeline.run.status"?: string;
   "cicd.pipeline.run.conclusion"?: string;
   "cicd.pipeline.name"?: string;
 
