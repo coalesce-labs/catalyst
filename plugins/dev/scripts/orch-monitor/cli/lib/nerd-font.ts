@@ -145,13 +145,24 @@ export function inProgressGlyph(): string {
 // returns (or a known prefix of them — see sourceIcon() for the matching
 // logic). All glyphs are BMP single-cell Nerd Font codepoints so they render
 // in one terminal cell next to the source label.
+//
+// CTL-358: stay inside the Font Awesome 4 BMP block (U+F000-F2E0) so glyphs
+// are stable across Nerd Fonts v2 and v3. The v3 patcher moved Material
+// Design icons (MDI) from BMP U+F500-FD46 to the supplementary plane
+// U+F0001-F1AF7 and repurposed the old codepoints — earlier MDI picks here
+// (nf-md-robot at F544, nf-md-arrange_send_to_back at F4FF) rendered as
+// arrow / silhouette glyphs in Hack Nerd Font (the current brew cask, v3).
+// Linear has no dedicated brand glyph in Nerd Fonts; the ticket icon is the
+// closest semantic match. Catalyst uses cogs (multiple gears) since
+// orchestration of many workers is the core idea.
+//
 // PUA glyphs are written as \u{…} escapes so the source file survives
 // editor / clipboard round-trips that occasionally strip non-BMP-ish chars.
 const SOURCE_ICONS: Record<string, string> = {
   github: "\u{F09B}",     // nf-fa-github
-  linear: "\u{F4FF}",     // nf-md-arrange_send_to_back (linear-y arrow)
+  linear: "\u{F145}",     // nf-fa-ticket — closest semantic match (no Linear logo in NF)
   broker: "\u{F0E7}",     // nf-fa-bolt — broker = wake router
-  catalyst: "\u{F544}",   // nf-md-robot — catalyst orchestration engine
+  catalyst: "\u{F085}",   // nf-fa-cogs — orchestrator coordinates many workers
   system: "\u{F013}",     // nf-fa-cog — generic system events
   comms: "\u{F086}",      // nf-fa-comments — agent comms channel
   filter: "\u{F0B0}",     // nf-fa-filter — legacy filter source
@@ -182,10 +193,20 @@ export function sourceIcon(source: string): string {
 
 // CTL-355: U+F407 nf-cod-git_pull_request — BMP, single-cell. Replaces "#"
 // before PR numbers in the REF column when a Nerd Font is detected.
+//
+// CTL-358: prPrefix() returns the full prefix (including a trailing space
+// when Nerd Font is detected, so the glyph and number don't visually fuse).
+// The fallback "#" stays bare since "#501" is the conventional shape.
 export const NERD_FONT_PR_PREFIX = "\u{F407}";
 export const FALLBACK_PR_PREFIX = "#";
 
-/** Returns the PR-number prefix glyph for the REF column. */
+/**
+ * Returns the PR-number prefix for the REF column —
+ *   "{glyph} " when Nerd Font is detected (e.g. " 501")
+ *   "#"       otherwise (e.g. "#501")
+ */
 export function prPrefix(): string {
-  return detectNerdFont().detected ? NERD_FONT_PR_PREFIX : FALLBACK_PR_PREFIX;
+  return detectNerdFont().detected
+    ? `${NERD_FONT_PR_PREFIX} `
+    : FALLBACK_PR_PREFIX;
 }

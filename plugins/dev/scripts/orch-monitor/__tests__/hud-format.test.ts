@@ -1036,13 +1036,15 @@ describe("formatSource / formatRef — CTL-355 Nerd Font enabled", () => {
     expect(out.slice(2)).toBe("github");
   });
 
-  test("formatSource prepends linear icon for linear.* events", () => {
+  test("formatSource prepends linear ticket icon for linear.* events", () => {
     const e = {
       ...baseEvent,
       attributes: { ...baseEvent.attributes, "event.name": "linear.issue.state_changed" },
     } as CanonicalEvent;
     const out = formatSource(e);
-    expect(out.codePointAt(0)).toBe(0xf4ff);
+    // CTL-358: nf-fa-ticket (U+F145) — Linear has no native NF logo; ticket
+    // is the closest semantic match and lives in stable FA4 BMP range.
+    expect(out.codePointAt(0)).toBe(0xf145);
     expect(out.slice(2)).toBe("linear");
   });
 
@@ -1056,7 +1058,7 @@ describe("formatSource / formatRef — CTL-355 Nerd Font enabled", () => {
     expect(out.slice(2)).toBe("broker");
   });
 
-  test("formatSource prepends robot for orchestrator-derived source", () => {
+  test("formatSource prepends cogs for orchestrator-derived source", () => {
     const e = {
       ...baseEvent,
       attributes: {
@@ -1066,13 +1068,18 @@ describe("formatSource / formatRef — CTL-355 Nerd Font enabled", () => {
       },
     } as CanonicalEvent;
     const out = formatSource(e);
-    expect(out.codePointAt(0)).toBe(0xf544);
+    // CTL-358: nf-fa-cogs (U+F085, multiple gears) — orchestration. The
+    // previous nf-md-robot (U+F544) was repurposed in Nerd Fonts v3 and
+    // rendered as a down-arrow.
+    expect(out.codePointAt(0)).toBe(0xf085);
     expect(out.slice(2)).toBe("orch-abc/CTL-312");
   });
 
-  test("formatRef uses PR glyph instead of '#' for github.pr.* events", () => {
+  test("formatRef uses PR glyph + trailing space instead of '#' for github.pr.* events", () => {
     const out = formatRef(baseEvent);
+    // CTL-358: prefix is " " (glyph + space), so out == " 501"
     expect(out.codePointAt(0)).toBe(0xf407);
-    expect(out.slice(1)).toBe("501");
+    expect(out.charAt(1)).toBe(" ");
+    expect(out.slice(2)).toBe("501");
   });
 });
