@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import type { BrokerKeyHealth } from "../lib/broker-key-health.ts";
 import { chipColor, chipLabel } from "../lib/broker-key-health.ts";
+import { computeColumnWidths } from "../lib/column-widths.ts";
 
 interface HeaderProps {
   columns?: number;
@@ -11,6 +12,7 @@ interface HeaderProps {
 export function Header({ columns = 120, nlQuery, brokerKeyHealth }: HeaderProps) {
   const sep = "─".repeat(Math.max(0, columns - 1));
   const groq = brokerKeyHealth?.groq;
+  const w = computeColumnWidths(columns);
   return (
     <Box flexDirection="column">
       {groq && (
@@ -22,12 +24,44 @@ export function Header({ columns = 120, nlQuery, brokerKeyHealth }: HeaderProps)
         </Box>
       )}
       <Box flexDirection="row">
-        <Text bold color="cyan">{"TIME      "}</Text>
-        <Text bold color="cyan">{"REPO        "}</Text>
-        <Text bold color="cyan">{"SOURCE              "}</Text>
-        <Text bold color="cyan">{"EVENT           "}</Text>
-        <Text bold color="cyan">{"REF       "}</Text>
-        <Text bold color="cyan">{"DETAILS"}</Text>
+        {w.showStatus && (
+          <Box width={w.status} flexShrink={0}>
+            <Text bold color="cyan">{"S "}</Text>
+          </Box>
+        )}
+        <Box width={w.time} flexShrink={0}>
+          <Text bold color="cyan">{"TIME"}</Text>
+        </Box>
+        <Box width={w.repo} flexShrink={0}>
+          <Text bold color="cyan">{"REPO"}</Text>
+        </Box>
+        <Box width={w.source} flexShrink={0}>
+          <Text bold color="cyan">{"SOURCE"}</Text>
+        </Box>
+        <Box width={w.event} flexShrink={0}>
+          <Text bold color="cyan">{"EVENT"}</Text>
+        </Box>
+        <Box width={w.ref} flexShrink={0}>
+          <Text bold color="cyan">{"REF"}</Text>
+        </Box>
+        {w.showOrch && (
+          <Box width={w.orch} flexShrink={0}>
+            <Text bold color="cyan">{"ORCH"}</Text>
+          </Box>
+        )}
+        {w.showWorker && (
+          <Box width={w.worker} flexShrink={0}>
+            <Text bold color="cyan">{"WORKER"}</Text>
+          </Box>
+        )}
+        {w.showEventId && (
+          <Box width={w.eventId} flexShrink={0}>
+            <Text bold color="cyan">{"EVENT-ID"}</Text>
+          </Box>
+        )}
+        <Box flexGrow={1}>
+          <Text bold color="cyan">{"DETAILS"}</Text>
+        </Box>
       </Box>
       <Text dimColor>{sep}</Text>
       {nlQuery && (
