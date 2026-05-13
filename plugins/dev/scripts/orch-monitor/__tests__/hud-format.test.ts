@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import type { CanonicalEvent } from "../lib/canonical-event.ts";
 import {
   formatTime,
@@ -11,6 +11,23 @@ import {
   formatDetailBody,
   shouldSkipEvent,
 } from "../cli/lib/format.ts";
+import { _resetNerdFontCacheForTesting } from "../cli/lib/nerd-font.ts";
+
+// CTL-355: this test file asserts the pure label/text contracts of the
+// formatters. Pin CATALYST_NERD_FONT=0 across the whole suite so the icon
+// prefix added in CTL-355 doesn't leak into the bare-label assertions; the
+// icon path is exercised separately in nerd-font.test.ts and the in-file
+// "CTL-355 Nerd Font enabled" describe block at the bottom.
+const _prevEnv = process.env.CATALYST_NERD_FONT;
+beforeAll(() => {
+  process.env.CATALYST_NERD_FONT = "0";
+  _resetNerdFontCacheForTesting();
+});
+afterAll(() => {
+  if (_prevEnv === undefined) delete process.env.CATALYST_NERD_FONT;
+  else process.env.CATALYST_NERD_FONT = _prevEnv;
+  _resetNerdFontCacheForTesting();
+});
 
 const baseEvent: CanonicalEvent = {
   ts: "2026-05-08T07:23:01.000Z",
@@ -991,5 +1008,71 @@ describe("shouldSkipEvent", () => {
       body: { payload: { reason: "ci_completed" } },
     } as unknown as CanonicalEvent;
     expect(shouldSkipEvent(e)).toBe(false);
+  });
+});
+
+// CTL-355: when Nerd Font is detected, formatSource prepends a 2-char "icon "
+// prefix and formatRef swaps "#" for the PR symbol. These tests pin
+// CATALYST_NERD_FONT=1, reset the cache, and assert the prefixed output.
+describe("formatSource / formatRef — CTL-355 Nerd Font enabled", () => {
+  const outerEnv = process.env.CATALYST_NERD_FONT;
+  beforeAll(() => {
+    process.env.CATALYST_NERD_FONT = "1";
+    _resetNerdFontCacheForTesting();
+  });
+  afterAll(() => {
+    if (outerEnv === undefined) delete process.env.CATALYST_NERD_FONT;
+    else process.env.CATALYST_NERD_FONT = outerEnv;
+    _resetNerdFontCacheForTesting();
+  });
+
+  test("formatSource prepends GitHub icon for github.* events", () => {
+    const out = formatSource(baseEvent);
+    expect(out).toBe(`\u{F09B} github`);
+    // First char is the icon (BMP, single codepoint); second char is a space;
+    // remaining chars are the bare label.
+    expect(out.codePointAt(0)).toBe(0xf09b);
+    expect(out.charAt(1)).toBe(" ");
+    expect(out.slice(2)).toBe("github");
+  });
+
+  test("formatSource prepends linear icon for linear.* events", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { ...baseEvent.attributes, "event.name": "linear.issue.state_changed" },
+    } as CanonicalEvent;
+    const out = formatSource(e);
+    expect(out.codePointAt(0)).toBe(0xf4ff);
+    expect(out.slice(2)).toBe("linear");
+  });
+
+  test("formatSource prepends broker bolt for filter.wake.* events", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-abc" },
+    } as CanonicalEvent;
+    const out = formatSource(e);
+    expect(out.codePointAt(0)).toBe(0xf0e7);
+    expect(out.slice(2)).toBe("broker");
+  });
+
+  test("formatSource prepends robot for orchestrator-derived source", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "session.phase",
+        "catalyst.orchestrator.id": "orch-abc",
+        "catalyst.worker.ticket": "CTL-312",
+      },
+    } as CanonicalEvent;
+    const out = formatSource(e);
+    expect(out.codePointAt(0)).toBe(0xf544);
+    expect(out.slice(2)).toBe("orch-abc/CTL-312");
+  });
+
+  test("formatRef uses PR glyph instead of '#' for github.pr.* events", () => {
+    const out = formatRef(baseEvent);
+    expect(out.codePointAt(0)).toBe(0xf407);
+    expect(out.slice(1)).toBe("501");
   });
 });

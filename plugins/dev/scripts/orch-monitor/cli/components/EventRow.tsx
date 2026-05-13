@@ -42,6 +42,16 @@ export function EventRow({ event, selected, columns, paused = true }: EventRowPr
   const inverse = selected && paused;
   const w = computeColumnWidths(columns);
 
+  // CTL-355: when REF would render the same value as ORCH (common for
+  // filter.wake.<orch-id> rows where the wake target IS the orchestrator id),
+  // blank REF so the operator doesn't read the same id twice on every wide
+  // row. Only takes effect when the ORCH column is visible; on narrow
+  // terminals (no ORCH) REF still shows the value because there's nowhere
+  // else to see it.
+  const refText = formatRef(event);
+  const orchText = formatOrch(event);
+  const displayRef = w.showOrch && refText !== "" && refText === orchText ? "" : refText;
+
   return (
     <Box flexDirection="row">
       {w.showStatus && (
@@ -62,11 +72,11 @@ export function EventRow({ event, selected, columns, paused = true }: EventRowPr
         <Text color={color} inverse={inverse}>{formatEvent(event)}</Text>
       </Box>
       <Box width={w.ref} flexShrink={0} marginRight={1}>
-        <Text color={color} inverse={inverse}>{formatRef(event)}</Text>
+        <Text color={color} inverse={inverse}>{displayRef}</Text>
       </Box>
       {w.showOrch && (
         <Box width={w.orch} flexShrink={0} marginRight={1}>
-          <Text color={color} inverse={inverse}>{formatOrch(event)}</Text>
+          <Text color={color} inverse={inverse}>{orchText}</Text>
         </Box>
       )}
       {w.showWorker && (

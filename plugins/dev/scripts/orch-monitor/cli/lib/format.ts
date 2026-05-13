@@ -1,5 +1,5 @@
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
-import { inProgressGlyph } from "./nerd-font.ts";
+import { inProgressGlyph, sourceIcon, prPrefix } from "./nerd-font.ts";
 
 const SKIP_EVENTS = new Set([
   "session.heartbeat",
@@ -48,7 +48,11 @@ export function formatRepo(event: CanonicalEvent): string {
   return repo.includes("/") ? (repo.split("/").pop() ?? repo) : repo;
 }
 
-export function formatSource(event: CanonicalEvent): string {
+// CTL-355: classifySource is the pure label resolver — single source of truth
+// for what the SOURCE column says. formatSource adds the Nerd Font icon
+// prefix on top. Tests cover both functions so a future icon-only mode
+// (deferred) can rely on classifySource alone.
+function classifySource(event: CanonicalEvent): string {
   const name = event.attributes?.["event.name"];
   if (!name) return "legacy";
   if (name.startsWith("github.")) return "github";
@@ -73,12 +77,17 @@ export function formatSource(event: CanonicalEvent): string {
     const orchId = event.attributes["catalyst.orchestrator.id"];
     return orchId ?? "filter";
   }
-  if (name === "broker.daemon.startup") return "broker";
+  if (name.startsWith("broker.daemon")) return "broker";
   const orchId = event.attributes["catalyst.orchestrator.id"];
   const worker = event.attributes["catalyst.worker.ticket"];
   if (orchId && worker) return `${orchId}/${worker}`;
   if (orchId) return orchId;
   return "system";
+}
+
+export function formatSource(event: CanonicalEvent): string {
+  const label = classifySource(event);
+  return `${sourceIcon(label)}${label}`;
 }
 
 const EVENT_LABELS: Record<string, string> = {
@@ -197,8 +206,10 @@ export function formatRef(event: CanonicalEvent): string {
       return repo.includes("/") ? (repo.split("/").pop() ?? repo) : repo;
     }
   }
+  // CTL-355: PR numbers get a glyph prefix —  (nf-cod-git_pull_request)
+  // when Nerd Font is detected, "#" otherwise.
   const pr = event.attributes["vcs.pr.number"];
-  if (pr) return `#${pr}`;
+  if (pr) return `${prPrefix()}${pr}`;
   const ticket = event.attributes["linear.issue.identifier"];
   if (ticket) return ticket;
   const branch = event.attributes["vcs.ref.name"];
