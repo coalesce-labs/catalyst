@@ -140,3 +140,52 @@ export function _resetNerdFontCacheForTesting(): void {
 export function inProgressGlyph(): string {
   return detectNerdFont().detected ? NERD_FONT_IN_PROGRESS : FALLBACK_IN_PROGRESS;
 }
+
+// CTL-355: SOURCE column icon prefixes. Keys match the strings formatSource()
+// returns (or a known prefix of them — see sourceIcon() for the matching
+// logic). All glyphs are BMP single-cell Nerd Font codepoints so they render
+// in one terminal cell next to the source label.
+// PUA glyphs are written as \u{…} escapes so the source file survives
+// editor / clipboard round-trips that occasionally strip non-BMP-ish chars.
+const SOURCE_ICONS: Record<string, string> = {
+  github: "\u{F09B}",     // nf-fa-github
+  linear: "\u{F4FF}",     // nf-md-arrange_send_to_back (linear-y arrow)
+  broker: "\u{F0E7}",     // nf-fa-bolt — broker = wake router
+  catalyst: "\u{F544}",   // nf-md-robot — catalyst orchestration engine
+  system: "\u{F013}",     // nf-fa-cog — generic system events
+  comms: "\u{F086}",      // nf-fa-comments — agent comms channel
+  filter: "\u{F0B0}",     // nf-fa-filter — legacy filter source
+  legacy: "\u{F128}",     // nf-fa-question — unknown / pre-canonical events
+};
+
+/**
+ * Returns a 2-char "icon + space" prefix for the given source label when a
+ * Nerd Font is detected, else "" so the label renders bare.
+ *
+ * Matches by exact label first, then by prefix family ("orch-*" → catalyst,
+ * "CTL-*" / "ADV-*" / ticket-shaped → linear ticket). Unknown sources fall
+ * through to the system cog so every row has some icon when Nerd Font is on.
+ */
+export function sourceIcon(source: string): string {
+  if (!detectNerdFont().detected) return "";
+  const exact = SOURCE_ICONS[source];
+  if (exact) return `${exact} `;
+  // Orchestrator-derived sources (e.g. "orch-ctl-352-354-2026-05-12" or
+  // "orch-ctl-352-354-2026-05-12/CTL-354") show the catalyst robot.
+  if (source.startsWith("orch-") || source.includes("/")) {
+    return `${SOURCE_ICONS.catalyst} `;
+  }
+  // Anything else (worker tickets like CTL-352 used as comms source) gets the
+  // generic system cog rather than no icon at all — keeps the column aligned.
+  return `${SOURCE_ICONS.system} `;
+}
+
+// CTL-355: U+F407 nf-cod-git_pull_request — BMP, single-cell. Replaces "#"
+// before PR numbers in the REF column when a Nerd Font is detected.
+export const NERD_FONT_PR_PREFIX = "\u{F407}";
+export const FALLBACK_PR_PREFIX = "#";
+
+/** Returns the PR-number prefix glyph for the REF column. */
+export function prPrefix(): string {
+  return detectNerdFont().detected ? NERD_FONT_PR_PREFIX : FALLBACK_PR_PREFIX;
+}
