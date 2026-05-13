@@ -693,6 +693,26 @@ BEHIND) inline and proceeds to Step 3 only when the PR is CLEAN (CI green + revi
 unrecoverable blockers (human changes-requested, persistent DIRTY) the worker writes
 `status: "stalled"` and exits; the orchestrator's Phase 4 is a safety-net fallback.
 
+**Wake narration (MANDATORY, CTL-369).** Every iteration of the listen loop —
+both on a `wait-for` return AND on each `mergeable_state` re-check — must
+produce a single short line of assistant text before re-entering the wait. This
+defeats the `Human:\n<task-id>` rendering bleed that occurs when the agent
+returns an `end_turn` containing only `thinking` blocks after a Monitor-wrapped
+wake. The line shape is:
+
+```text
+wake: <event.name> #<PR_NUMBER> [interest=<type>] — <action being taken>
+wake: <event.name> — routine, staying in event loop
+wake: <event.name> — already addressed, no-op
+wake: rest-poll — broker down, polling gh api
+```
+
+Surface `.body.payload.interest_id` and `.body.payload.reason` from the wake
+envelope when present (broker wakes carry both); for hand-rolled two-phase
+filter wakes, surface the matched `event.name` and `#${PR_NUMBER}` instead. See
+`plugins/dev/skills/monitor-events/SKILL.md` § Narration for the full rule and
+the good-vs-bad transcript fixture.
+
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 PR_OPENED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
