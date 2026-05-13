@@ -15,10 +15,18 @@ export function useSelection(totalItems: number, visibleRows: number) {
 
   // Keep selected item in the visible viewport.
   // In auto-follow mode, target visibleRows-2 (not -1) so there's always
-  // one empty row between the selected item and the status bar.
+  // one empty row between the selected item and the status bar. The UP branch
+  // mirrors the DOWN-branch anchor in autoFollow so that when a filter shrinks
+  // the list and selectedIndex jumps backwards, earlier matches stay visible
+  // instead of being stranded above the viewport (CTL-368).
   useEffect(() => {
     if (selectedIndex < scrollOffset) {
-      setScrollOffset(selectedIndex);
+      const bottomBuffer = autoFollow ? 2 : 1;
+      setScrollOffset(
+        autoFollow
+          ? Math.max(0, selectedIndex - visibleRows + bottomBuffer)
+          : selectedIndex,
+      );
     } else if (selectedIndex >= scrollOffset + visibleRows) {
       const bottomBuffer = autoFollow ? 2 : 1;
       setScrollOffset(Math.max(0, selectedIndex - visibleRows + bottomBuffer));
