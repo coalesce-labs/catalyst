@@ -68,6 +68,7 @@ describe("loadWebhookConfig", () => {
       linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
+      linearTeams: [],
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -97,6 +98,7 @@ describe("loadWebhookConfig", () => {
       linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
+      linearTeams: [],
     });
     expect(warn).toHaveBeenCalledTimes(1);
     const msg = String(warn.mock.calls[0]?.[0] ?? "");
@@ -134,6 +136,7 @@ describe("loadWebhookConfig", () => {
       linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
+      linearTeams: [],
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -165,6 +168,7 @@ describe("loadWebhookConfig", () => {
       linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
+      linearTeams: [],
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -190,6 +194,7 @@ describe("loadWebhookConfig", () => {
       linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
+      linearTeams: [],
     });
   });
 
@@ -216,6 +221,7 @@ describe("loadWebhookConfig", () => {
       linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
+      linearTeams: [],
     });
   });
 
@@ -290,6 +296,7 @@ describe("loadWebhookConfig", () => {
       linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
+      linearTeams: [],
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -324,6 +331,7 @@ describe("loadWebhookConfig", () => {
       linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
+      linearTeams: [],
     });
   });
 });
@@ -417,6 +425,7 @@ describe("loadWebhookConfig watchRepos (CTL-216)", () => {
       linearSecrets: [],
       linearSmeeChannel: "",
       linearBotUserId: "",
+      linearTeams: [],
     });
   });
 
@@ -1036,5 +1045,144 @@ describe("loadWebhookConfig — per-team secret files (CTL-285)", () => {
     expect(cfg!.linearSecrets).toHaveLength(2);
     expect(cfg!.linearSecrets).toContainEqual({ key: "adv", secret: "adv-secret" });
     expect(cfg!.linearSecrets).toContainEqual({ key: "ctl", secret: "ctl-secret" });
+  });
+});
+
+// CTL-362: catalyst.monitor.linear.teams[] is parsed into linearTeams. The
+// handler later uses this map to stamp vcs.repository.name on canonical
+// envelopes for Linear-sourced events so the HUD's REPO column populates.
+describe("loadWebhookConfig linearTeams (CTL-362)", () => {
+  it("parses a valid teams array from Layer 1", () => {
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: {
+            teams: [
+              { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
+              { key: "ADV", vcsRepo: "coalesce-labs/adva" },
+            ],
+          },
+        },
+      },
+    });
+    writeHome({
+      catalyst: { monitor: { github: { smeeChannel: "https://smee.io/h" } } },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "x";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearTeams).toEqual([
+      { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
+      { key: "ADV", vcsRepo: "coalesce-labs/adva" },
+    ]);
+  });
+
+  it("returns empty linearTeams when the field is absent", () => {
+    writeHome({
+      catalyst: { monitor: { github: { smeeChannel: "https://smee.io/h" } } },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "x";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+    expect(cfg!.linearTeams).toEqual([]);
+  });
+
+  it("returns empty linearTeams when teams is not an array", () => {
+    writeProject({
+      catalyst: { monitor: { linear: { teams: "oops-not-an-array" } } },
+    });
+    writeHome({
+      catalyst: { monitor: { github: { smeeChannel: "https://smee.io/h" } } },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "x";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+    expect(cfg!.linearTeams).toEqual([]);
+  });
+
+  it("skips entries with missing key or vcsRepo and warns", () => {
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: {
+            teams: [
+              { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
+              { key: "", vcsRepo: "missing/key" },
+              { key: "NOREPO", vcsRepo: "" },
+              { vcsRepo: "no/key-field" },
+              { key: "NOTOBJ" },
+            ],
+          },
+        },
+      },
+    });
+    writeHome({
+      catalyst: { monitor: { github: { smeeChannel: "https://smee.io/h" } } },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "x";
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearTeams).toEqual([
+      { key: "CTL", vcsRepo: "coalesce-labs/catalyst" },
+    ]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("skips entries whose vcsRepo does not match owner/repo shape", () => {
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: {
+            teams: [
+              { key: "OK", vcsRepo: "good/repo" },
+              { key: "BAD1", vcsRepo: "no-slash" },
+              { key: "BAD2", vcsRepo: "too/many/slashes" },
+              { key: "BAD3", vcsRepo: "/empty-owner" },
+            ],
+          },
+        },
+      },
+    });
+    writeHome({
+      catalyst: { monitor: { github: { smeeChannel: "https://smee.io/h" } } },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "x";
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearTeams).toEqual([{ key: "OK", vcsRepo: "good/repo" }]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("deduplicates by key — last entry wins, warn fires", () => {
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: {
+            teams: [
+              { key: "CTL", vcsRepo: "first/wins-not" },
+              { key: "CTL", vcsRepo: "second/wins" },
+            ],
+          },
+        },
+      },
+    });
+    writeHome({
+      catalyst: { monitor: { github: { smeeChannel: "https://smee.io/h" } } },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "x";
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearTeams).toEqual([{ key: "CTL", vcsRepo: "second/wins" }]);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

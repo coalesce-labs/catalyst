@@ -22,6 +22,13 @@ export interface LinearWebhookHandlerDeps {
    * Empty array disables the handler (returns 503).
    */
   linearSecrets: Array<{ key: string; secret: string }>;
+  /**
+   * Optional team→repo map (CTL-362). When an issue / comment / cycle webhook
+   * carries a team key that appears here, the canonical envelope gets
+   * `attributes["vcs.repository.name"]` set so the HUD's REPO column populates.
+   * Sourced from `catalyst.monitor.linear.teams[]` in project config.
+   */
+  linearTeams?: Array<{ key: string; vcsRepo: string }>;
   /** Optional pub/sub for SSE fan-out to UI clients. */
   emit?: (type: string, data: unknown) => void;
   /** Event-log fan-out — every accepted event is appended here as a canonical envelope. */
@@ -84,22 +91,45 @@ function canonical(args: LinearCanonicalArgs): CanonicalEvent {
   });
 }
 
+// CTL-362: derive a Linear team short key from a ticket identifier like
+// "CTL-210" → "CTL". Returns null when the ticket does not match the standard
+// Linear identifier shape (uppercase prefix, dash, digits).
+const TICKET_PREFIX_RE = /^([A-Z][A-Z0-9]+)-\d+$/;
+function deriveTeamKey(ticket: string | null): string | null {
+  if (ticket === null) return null;
+  const m = TICKET_PREFIX_RE.exec(ticket);
+  return m !== null && m[1] !== undefined ? m[1] : null;
+}
+
 /**
  * Map a parsed LinearWebhookEvent to a canonical event envelope. Returns null
  * for `kind: "ignored"`.
  *
  * `event.name` follows `linear.<entity>.<action>` lowercase, dot-separated.
+ *
+ * CTL-362: when `teamsMap` is provided, issue/comment/cycle events whose team
+ * key matches an entry get `attributes["vcs.repository.name"]` populated so the
+ * HUD's REPO column resolves. Comment events derive the team key from the
+ * ticket prefix (e.g. CTL-210 → "CTL") since the webhook payload does not
+ * carry it directly. Reaction and issue_label events have no team context and
+ * remain unenriched.
  */
 export function buildLinearEventLogEnvelope(
   event: LinearWebhookEvent,
   ts: string = new Date().toISOString(),
+  teamsMap: ReadonlyMap<string, string> = new Map(),
 ): CanonicalEvent | null {
+  const lookupRepo = (teamKey: string | null): string | undefined =>
+    teamKey !== null ? teamsMap.get(teamKey) : undefined;
+
   switch (event.kind) {
     case "issue": {
       const attrs: Omit<Attributes, "event.name"> = {};
       if (event.ticket !== null) attrs["linear.issue.identifier"] = event.ticket;
       if (event.teamKey !== null) attrs["linear.team.key"] = event.teamKey;
       if (event.actorId !== null) attrs["linear.actor.id"] = event.actorId;
+      const repo = lookupRepo(event.teamKey);
+      if (repo !== undefined) attrs["vcs.repository.name"] = repo;
       return canonical({
         ts,
         eventName: event.topic,
@@ -122,6 +152,14 @@ export function buildLinearEventLogEnvelope(
       const eventName = `linear.comment.${event.action}d`;
       const attrs: Omit<Attributes, "event.name"> = {};
       if (event.ticket !== null) attrs["linear.issue.identifier"] = event.ticket;
+      // Comments don't carry team data directly — derive from the ticket prefix
+      // so we can both stamp linear.team.key and look up vcs.repository.name.
+      const derivedTeamKey = deriveTeamKey(event.ticket);
+      const repo = lookupRepo(derivedTeamKey);
+      if (repo !== undefined) {
+        attrs["vcs.repository.name"] = repo;
+        if (derivedTeamKey !== null) attrs["linear.team.key"] = derivedTeamKey;
+      }
       return canonical({
         ts,
         eventName,
@@ -143,6 +181,8 @@ export function buildLinearEventLogEnvelope(
       const eventName = `linear.cycle.${event.action}d`;
       const attrs: Omit<Attributes, "event.name"> = {};
       if (event.teamKey !== null) attrs["linear.team.key"] = event.teamKey;
+      const repo = lookupRepo(event.teamKey);
+      if (repo !== undefined) attrs["vcs.repository.name"] = repo;
       return canonical({
         ts,
         eventName,
@@ -200,6 +240,11 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
   const seenDeliveries: string[] = [];
   const seenDeliveriesSet = new Set<string>();
   const logger = deps.logger ?? {};
+  // CTL-362: build the team→repo lookup once at construction so every webhook
+  // call shares the same map without re-parsing.
+  const teamsMap: ReadonlyMap<string, string> = new Map(
+    (deps.linearTeams ?? []).map((t) => [t.key, t.vcsRepo]),
+  );
 
   function rememberDelivery(deliveryId: string): void {
     if (seenDeliveriesSet.has(deliveryId)) return;
@@ -279,7 +324,7 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
     }
 
     if (deps.eventLog && event.kind !== "ignored") {
-      const envelope = buildLinearEventLogEnvelope(event);
+      const envelope = buildLinearEventLogEnvelope(event, undefined, teamsMap);
       if (envelope !== null) {
         try {
           await deps.eventLog.append(envelope);

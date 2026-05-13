@@ -198,6 +198,75 @@ else
   fail "orchestrator not archived: $HIST_ENTRIES entries in history"
 fi
 
+# ─── Test 10: event_append forwards vcsRepo → vcs.repository.name (CTL-362) ─
+# Confirms the orchestrator-side bash emitter populates the HUD's REPO column.
+echo ""
+echo "--- Test 10: event_append carries vcsRepo into the canonical envelope ---"
+export CATALYST_DIR="$SCRATCH/cat10"
+"$STATE_SCRIPT" init >/dev/null
+
+"$STATE_SCRIPT" event "$(jq -nc '{
+  ts: "2026-05-13T12:00:00Z",
+  orchestrator: "orch-ctl-test",
+  worker: "CTL-362",
+  event: "worker-done",
+  vcsRepo: "coalesce-labs/catalyst",
+  detail: null
+}')" >/dev/null 2>&1 || true
+
+EVENT_FILE=$(ls "$SCRATCH/cat10/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE" ]]; then
+  REPO=$(jq -r 'select(.attributes."event.name" == "orchestrator.worker.done") | .attributes."vcs.repository.name" // ""' "$EVENT_FILE" | head -1)
+  assert_eq "coalesce-labs/catalyst" "$REPO" "vcsRepo stamped onto attributes[\"vcs.repository.name\"]"
+else
+  fail "no event JSONL written for vcsRepo test"
+fi
+
+# Also confirm the `.repo` alias works.
+echo ""
+echo "--- Test 11: event_append accepts .repo as an alias for .vcsRepo ---"
+export CATALYST_DIR="$SCRATCH/cat11"
+"$STATE_SCRIPT" init >/dev/null
+
+"$STATE_SCRIPT" event "$(jq -nc '{
+  ts: "2026-05-13T12:00:00Z",
+  orchestrator: "orch-adv-test",
+  worker: "ADV-1",
+  event: "worker-done",
+  repo: "coalesce-labs/adva",
+  detail: null
+}')" >/dev/null 2>&1 || true
+
+EVENT_FILE11=$(ls "$SCRATCH/cat11/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE11" ]]; then
+  REPO=$(jq -r 'select(.attributes."event.name" == "orchestrator.worker.done") | .attributes."vcs.repository.name" // ""' "$EVENT_FILE11" | head -1)
+  assert_eq "coalesce-labs/adva" "$REPO" ".repo alias stamped onto attributes[\"vcs.repository.name\"]"
+else
+  fail "no event JSONL written for .repo alias test"
+fi
+
+# Confirm absence of vcsRepo leaves the attribute unset.
+echo ""
+echo "--- Test 12: event_append without vcsRepo omits the attribute ---"
+export CATALYST_DIR="$SCRATCH/cat12"
+"$STATE_SCRIPT" init >/dev/null
+
+"$STATE_SCRIPT" event "$(jq -nc '{
+  ts: "2026-05-13T12:00:00Z",
+  orchestrator: "orch-bare-test",
+  worker: "CTL-1",
+  event: "worker-done",
+  detail: null
+}')" >/dev/null 2>&1 || true
+
+EVENT_FILE12=$(ls "$SCRATCH/cat12/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE12" ]]; then
+  HAS_REPO=$(jq -r 'select(.attributes."event.name" == "orchestrator.worker.done") | (.attributes | has("vcs.repository.name"))' "$EVENT_FILE12" | head -1)
+  assert_eq "false" "$HAS_REPO" "no vcs.repository.name attribute when input omits it"
+else
+  fail "no event JSONL written for no-repo test"
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════"

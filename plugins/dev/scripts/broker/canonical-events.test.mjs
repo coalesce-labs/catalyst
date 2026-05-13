@@ -133,6 +133,61 @@ describe("buildCanonicalEnvelope", () => {
     });
     expect(nullDetail.body.payload).toBeNull();
   });
+
+  // CTL-362: enrich filter.wake / broker.daemon envelopes with the
+  // interest's repo so the HUD's REPO column populates.
+  test("copies legacy.repo into vcs.repository.name", async () => {
+    const { buildCanonicalEnvelope } = await import("./index.mjs");
+    const envelope = buildCanonicalEnvelope({
+      event: "filter.wake.sess_repo",
+      orchestrator: "orch_1",
+      worker: null,
+      repo: "coalesce-labs/catalyst",
+      detail: { reason: "PR #1 merged", interest_id: "sess_repo" },
+    });
+    expect(envelope.attributes["vcs.repository.name"]).toBe("coalesce-labs/catalyst");
+  });
+
+  test("accepts vcsRepo as an alias for repo", async () => {
+    const { buildCanonicalEnvelope } = await import("./index.mjs");
+    const envelope = buildCanonicalEnvelope({
+      event: "filter.wake.sess_alias",
+      orchestrator: "orch_1",
+      worker: null,
+      vcsRepo: "coalesce-labs/adva",
+      detail: null,
+    });
+    expect(envelope.attributes["vcs.repository.name"]).toBe("coalesce-labs/adva");
+  });
+
+  test("omits vcs.repository.name when repo is null/undefined/empty", async () => {
+    const { buildCanonicalEnvelope } = await import("./index.mjs");
+    const noRepo = buildCanonicalEnvelope({
+      event: "broker.daemon.startup",
+      orchestrator: null,
+      worker: null,
+      detail: { pid: 12345 },
+    });
+    expect(noRepo.attributes["vcs.repository.name"]).toBeUndefined();
+
+    const nullRepo = buildCanonicalEnvelope({
+      event: "filter.wake.sess_empty",
+      orchestrator: "orch_1",
+      worker: null,
+      repo: null,
+      detail: null,
+    });
+    expect(nullRepo.attributes["vcs.repository.name"]).toBeUndefined();
+
+    const emptyRepo = buildCanonicalEnvelope({
+      event: "filter.wake.sess_empty_str",
+      orchestrator: "orch_1",
+      worker: null,
+      repo: "",
+      detail: null,
+    });
+    expect(emptyRepo.attributes["vcs.repository.name"]).toBeUndefined();
+  });
 });
 
 describe("appendEvent — writes canonical envelopes to JSONL", () => {

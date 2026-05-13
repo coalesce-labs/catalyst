@@ -476,7 +476,11 @@ team-wide.
         }
       },
       "linear": {
-        "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET"
+        "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET",
+        "teams": [
+          { "key": "CTL", "vcsRepo": "coalesce-labs/catalyst" },
+          { "key": "ADV", "vcsRepo": "coalesce-labs/adva" }
+        ]
       }
     }
   }
@@ -490,6 +494,7 @@ team-wide.
 | `catalyst.monitor.github.watchRepos` | `.catalyst/config.json` | string[] | `[]` | Repos (owner/repo) subscribed at daemon startup — additive on top of worker-driven auto-discovery. See [Persistent watch list](/observability/webhooks/#persistent-watch-list). |
 | `catalyst.monitor.github.repoColors` | `.catalyst/config.json` | object | `{}` | Map of `"owner/repo"` → color name. Colors the repo chip in the HUD activity feed. Supported values: `blue`, `green`, `purple`, `amber`, `red`, `teal`, `cyan`, `lime`. |
 | `catalyst.monitor.linear.webhookSecretEnv` | `.catalyst/config.json` | string | `"CATALYST_LINEAR_WEBHOOK_SECRET"` | **Name** of the env var the Linear HMAC secret is read from. Empty/missing → `POST /api/webhook/linear` returns 503. See [Linear webhooks](/observability/webhooks/#linear-webhooks). |
+| `catalyst.monitor.linear.teams` | `.catalyst/config.json` | `{ key, vcsRepo }[]` | `[]` | Linear team→repo map (CTL-362). When a Linear webhook event carries a `team.key` that appears here (or a comment whose ticket prefix matches), the canonical envelope gets `attributes["vcs.repository.name"]` set so the HUD's REPO column populates for `linear.issue.*` / `linear.comment.*` / `linear.cycle.*` events. Each entry must have a non-empty `key` (team short key, e.g. `"CTL"`) and a `vcsRepo` in `"owner/repo"` shape; malformed entries are skipped with a warning. |
 | `catalyst.monitor.suppressVersionWarning` | `.catalyst/config.json` | boolean | `false` | Suppress the version-drift warning printed by `catalyst-monitor start` / `restart` when running an older daemon version than the highest available in the plugin cache. See [Version drift detection](/observability/webhooks/#version-drift-detection). |
 
 Environment variable overrides:

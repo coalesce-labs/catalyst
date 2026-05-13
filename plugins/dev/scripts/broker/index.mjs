@@ -198,16 +198,25 @@ export function summarizeEvent(event) {
 // Translate the broker's internal {event, orchestrator, worker, detail} shape
 // into a canonical OTel-style envelope. Severity defaults to INFO — broker
 // emissions today (filter.wake.*, broker.daemon.startup) are all info-level.
+//
+// CTL-362: `legacy.repo` (or the `legacy.vcsRepo` alias) populates
+// `attributes["vcs.repository.name"]` so the HUD's REPO column resolves for
+// `filter.wake.*` events. Pass it through from the interest record's `repo`
+// field at every wake-emission call site that has one.
 export function buildCanonicalEnvelope(legacy) {
   const eventName = legacy.event ?? "";
   const orch = legacy.orchestrator ?? null;
   const worker = legacy.worker ?? null;
   const severity = legacy.severity ?? "INFO";
   const ts = legacy.ts ?? new Date().toISOString();
+  const repo = legacy.repo ?? legacy.vcsRepo ?? null;
 
   const attributes = { "event.name": eventName };
   if (orch) attributes["catalyst.orchestrator.id"] = orch;
   if (worker) attributes["catalyst.worker.ticket"] = worker;
+  if (typeof repo === "string" && repo.length > 0) {
+    attributes["vcs.repository.name"] = repo;
+  }
 
   return {
     ts,
@@ -1191,6 +1200,10 @@ export function classifyMatches(events, matches, interestsMap) {
       event: reg.notify_event,
       orchestrator: reg.orchestrator ?? match.interest_id,
       worker: null,
+      // CTL-362: forward the interest's repo so the wake envelope carries
+      // vcs.repository.name when the interest tracks a specific repo (today
+      // only pr_lifecycle interests do).
+      repo: reg.repo ?? null,
       detail: {
         reason: match.reason,
         source_event_ids: sourceIds,
@@ -1285,6 +1298,9 @@ export function runWatchdogTick() {
             event: interest.notify_event,
             orchestrator: interest.orchestrator ?? interestId,
             worker: null,
+            // CTL-362: forward the interest's repo so the watchdog wake
+            // envelope carries vcs.repository.name when known.
+            repo: interest.repo ?? null,
             // CTL-350: watchdog wakes have no triggering event, so source_events
             // is always empty — receivers should fall back to the reason string.
             detail: {
@@ -1390,6 +1406,9 @@ export function processEvent(event) {
       event: reg.notify_event,
       orchestrator: reg.orchestrator ?? m.interestId,
       worker: null,
+      // CTL-362: forward the interest's repo so the wake envelope carries
+      // vcs.repository.name.
+      repo: reg.repo ?? null,
       detail: {
         reason: m.reason,
         source_event_ids: m.sourceEventId ? [m.sourceEventId] : [],

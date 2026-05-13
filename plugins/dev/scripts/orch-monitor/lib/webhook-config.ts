@@ -40,6 +40,16 @@ export interface WebhookCliConfig {
    * Empty string when not configured — no suppression.
    */
   linearBotUserId: string;
+  /**
+   * Optional team→repo mapping read from `catalyst.monitor.linear.teams[]` in
+   * Layer 1 (project config). Each entry is `{ key, vcsRepo }` where `key` is
+   * the Linear team short key (e.g. "CTL") and `vcsRepo` is the canonical
+   * `owner/repo` string written into `attributes["vcs.repository.name"]` for
+   * issue/comment/cycle events from that team. Empty array when not configured —
+   * the Linear webhook handler then leaves the repo attribute unset (current
+   * pre-CTL-362 behaviour). CTL-362.
+   */
+  linearTeams: Array<{ key: string; vcsRepo: string }>;
 }
 
 interface FileExtract {
@@ -52,6 +62,8 @@ interface FileExtract {
   linearSmeeChannel: string | null;
   /** Linear bot user UUID for loop prevention, from Layer 1 (project). CTL-263. */
   linearBotUserId: string | null;
+  /** Linear team→repo map from Layer 1 (project). CTL-362. */
+  linearTeams: Array<{ key: string; vcsRepo: string }>;
 }
 
 let warnedDeprecatedSmeeChannel = false;
@@ -173,6 +185,43 @@ function isRecord(x: unknown): x is Record<string, unknown> {
   return typeof x === "object" && x !== null && !Array.isArray(x);
 }
 
+// CTL-362: parse `catalyst.monitor.linear.teams[]` into a list of
+// `{ key, vcsRepo }` pairs. Skips entries with missing keys or repos that
+// don't match the `owner/repo` shape — same lenient-with-warnings behaviour
+// as `readWatchRepos`. Deduplicates by `key` (last entry wins, with a warn).
+function readLinearTeams(
+  linear: Record<string, unknown>,
+): Array<{ key: string; vcsRepo: string }> {
+  const raw = linear.teams;
+  if (!Array.isArray(raw)) return [];
+  const byKey = new Map<string, string>();
+  for (const entry of raw) {
+    if (!isRecord(entry)) {
+      console.warn(`[webhook-config] Ignoring linear.teams entry — not an object: ${JSON.stringify(entry)}`);
+      continue;
+    }
+    const key = typeof entry.key === "string" ? entry.key.trim() : "";
+    const vcsRepo = typeof entry.vcsRepo === "string" ? entry.vcsRepo.trim() : "";
+    if (key.length === 0) {
+      console.warn(`[webhook-config] Ignoring linear.teams entry with empty "key"`);
+      continue;
+    }
+    if (vcsRepo.length === 0 || !REPO_SHAPE.test(vcsRepo)) {
+      console.warn(
+        `[webhook-config] Ignoring linear.teams entry for key "${key}" — vcsRepo "${vcsRepo}" must match "owner/repo".`,
+      );
+      continue;
+    }
+    if (byKey.has(key)) {
+      console.warn(
+        `[webhook-config] Duplicate linear.teams entry for key "${key}" — last entry wins ("${vcsRepo}").`,
+      );
+    }
+    byKey.set(key, vcsRepo);
+  }
+  return Array.from(byKey.entries()).map(([key, vcsRepo]) => ({ key, vcsRepo }));
+}
+
 // Extract the Linear smee channel URL from a linear config object. Prefers the
 // top-level smeeChannel (legacy / current normal case) and falls back to the
 // first keyed team entry that carries one (CTL-273/285 keyed format, CTL-301).
@@ -235,6 +284,7 @@ function readGithubSection(filePath: string): FileExtract | null {
     linear !== null && typeof linear.botUserId === "string" && linear.botUserId.length > 0
       ? linear.botUserId
       : null;
+  const linearTeams = linear !== null ? readLinearTeams(linear) : [];
 
   return {
     smeeChannel,
@@ -243,6 +293,7 @@ function readGithubSection(filePath: string): FileExtract | null {
     linearWebhookSecretEnv,
     linearSmeeChannel,
     linearBotUserId,
+    linearTeams,
   };
 }
 
@@ -335,6 +386,9 @@ export function loadWebhookConfig(
   // Linear bot user UUID for loop prevention. Layer 1 only (project/team setting). CTL-263.
   const linearBotUserId = projectExtract?.linearBotUserId ?? "";
 
+  // Linear team→repo map. Layer 1 only — team-shared, committed. CTL-362.
+  const linearTeams = projectExtract?.linearTeams ?? [];
+
   // Allow Linear-only configurations: if the GitHub channel/secret are missing
   // but Linear secrets are present, return a config that disables the GitHub
   // route but enables the Linear route. CTL-210.
@@ -348,6 +402,7 @@ export function loadWebhookConfig(
       linearSecrets,
       linearSmeeChannel,
       linearBotUserId,
+      linearTeams,
     };
   }
 
@@ -359,5 +414,6 @@ export function loadWebhookConfig(
     linearSecrets,
     linearSmeeChannel,
     linearBotUserId,
+    linearTeams,
   };
 }
