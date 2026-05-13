@@ -29,8 +29,13 @@ interface EventRowProps {
 // cannot drift. `<Box width flexShrink={0}>` lets Ink truncate long content
 // instead of the previous `.slice(N-1).padEnd(N)` strings, which defeated
 // Ink's flex layout and forced orchestrator IDs to chop at `orch-adv-` on
-// wide terminals. DETAILS uses `flexGrow={1}` + `wrap="wrap"` so a long
-// Groq reason wraps to multiple lines instead of being silently clipped.
+// wide terminals.
+// CTL-361: DETAILS uses `flexGrow={1}` + `wrap="truncate"` so an overly long
+// payload hard-clips at the cell's right edge instead of reflowing onto the
+// next terminal line and visually overdrawing the next event row — which is
+// what happens with `wrap="wrap"` during aggressive terminal resizes when the
+// React `cols` state lags the physical width. Operators who need the full
+// DETAILS content open the scrollable detail pane with Enter.
 // CTL-351: every fixed-width column has a 1-col right margin so the columns
 // breathe and abutting cells (TIME↔REPO, EVENT↔REF) don't visually run
 // together on rows with short content.
@@ -90,7 +95,7 @@ export function EventRow({ event, selected, columns, paused = true }: EventRowPr
         </Box>
       )}
       <Box flexGrow={1}>
-        <Text color={color} inverse={inverse} wrap="wrap">{formatDetails(event)}</Text>
+        <Text color={color} inverse={inverse} wrap="truncate">{formatDetails(event)}</Text>
       </Box>
     </Box>
   );
