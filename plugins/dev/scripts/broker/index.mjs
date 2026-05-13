@@ -792,15 +792,48 @@ async function classifyBatch(events) {
     return;
   }
 
-  if (!Array.isArray(matches)) return;
+  const { wakes, oneShotsToDelete } = classifyMatches(events, matches, interests);
+  for (const wake of wakes) {
+    appendEvent(wake);
+    log.info({ notifyEvent: wake.event, reason: wake.detail.reason }, "wake");
+  }
+  for (const id of oneShotsToDelete) {
+    interests.delete(id);
+    log.info({ interestId: id }, "auto-deregistered (one-shot)");
+  }
+}
+
+/**
+ * Pure prose-match classifier (CTL-340). Given a batch of events, the raw
+ * Groq match array, and the interests map, returns the wakes that should be
+ * appended and the one-shot interest ids that should be deleted.
+ *
+ * Gating change vs. pre-CTL-340: the suppression guard now triggers when
+ * Groq's own `event_indices` is empty, not when post-filter id extraction
+ * produced an empty array. Indices pointing past the batch end are still
+ * dropped from `source_event_ids`, but `matched_indices_count` preserves
+ * what Groq intended for observability.
+ */
+export function classifyMatches(events, matches, interestsMap) {
+  const wakes = [];
+  const oneShotsToDelete = [];
+  if (!Array.isArray(matches)) return { wakes, oneShotsToDelete };
 
   for (const match of matches) {
-    const reg = interests.get(match.interest_id);
+    const reg = interestsMap.get(match.interest_id);
     if (!reg) continue;
+
+    const indices = match.event_indices ?? [];
+    if (indices.length === 0) {
+      // Groq returned a match without any event references — keep the
+      // original bug-catching suppression. Don't log; it fired 779×/hr in
+      // production pre-fix and drowned out real failures.
+      continue;
+    }
 
     // CTL-344: prefer real event.id; fall back to synthesized id for legacy
     // events. .filter(Boolean) strips any indices pointing past the batch end.
-    const sourceIds = (match.event_indices ?? [])
+    const sourceIds = indices
       .map((i) => {
         const e = events[i - 1];
         if (!e) return null;
@@ -808,30 +841,22 @@ async function classifyBatch(events) {
       })
       .filter(Boolean);
 
-    if (!sourceIds.length) {
-      log.info(
-        { notifyEvent: reg.notify_event },
-        "no source events — suppressing empty wake",
-      );
-      continue;
-    }
-
-    appendEvent({
+    wakes.push({
       event: reg.notify_event,
       orchestrator: reg.orchestrator ?? match.interest_id,
       worker: null,
       detail: {
         reason: match.reason,
         source_event_ids: sourceIds,
+        matched_indices_count: indices.length,
         interest_id: match.interest_id,
       },
     });
-    log.info({ notifyEvent: reg.notify_event, reason: match.reason }, "wake");
-    if (!reg.persistent) {
-      interests.delete(match.interest_id);
-      log.info({ interestId: match.interest_id }, "auto-deregistered (one-shot)");
-    }
+
+    if (!reg.persistent) oneShotsToDelete.push(match.interest_id);
   }
+
+  return { wakes, oneShotsToDelete };
 }
 
 // --- Debounce ---
