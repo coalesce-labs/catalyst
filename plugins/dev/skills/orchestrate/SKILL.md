@@ -695,12 +695,19 @@ if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-**Register with catalyst-broker daemon (CTL-257, updated CTL-303):** When `catalyst-broker status`
-returns 0, emit `filter.register` at Phase 4 start so the daemon pre-filters incoming events and
-emits targeted `filter.wake.{ORCH_NAME}` events. Workers auto-correlate their own `pr_lifecycle`
-interests via `agent.checkin` — the orchestrator only needs to register the prose interest for
-comms-attention/ticket-status routing and the `pr_lifecycle` interest for orchestrator-level
-aggregation across all workers.
+**Register with catalyst-broker daemon (CTL-257, updated CTL-303, CTL-357):** When
+`catalyst-broker status` returns 0, emit `filter.register` events at Phase 4 start so the daemon
+pre-filters incoming events and emits targeted `filter.wake.{ORCH_NAME}` events. Workers
+auto-correlate their own `pr_lifecycle` interests via `agent.checkin`; the orchestrator registers
+three deterministic interests for itself — all of them route without Groq:
+
+- `pr_lifecycle` — orchestrator-level aggregation across all worker PRs.
+- `ticket_lifecycle` — Linear ticket state changes for the orchestrator's tickets.
+- `comms_lifecycle` — worker-posted `attention` / `done` messages on the shared channel.
+
+CTL-357 retired the Groq prose interest (~95% false-positive rate). All three replacements share
+the same `notify_event: "filter.wake.${ORCH_NAME}"`, so the orchestrator's `wait-for` filter does
+not change.
 
 ```bash
 if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2>&1; then
@@ -718,39 +725,13 @@ if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2
   ACTIVE_BRANCHES_JSON=$(printf '%s\n' "${ACTIVE_BRANCHES_ARR[@]}" \
     | jq -Rnc '[inputs]' 2>/dev/null || echo '[]')
 
-  "$STATE_SCRIPT" event "$(jq -nc \
-    --arg orch "${ORCH_NAME}" \
-    --arg sid "${CATALYST_SESSION_ID:-}" \
-    --arg notify "filter.wake.${ORCH_NAME}" \
-    --argjson prs "${ACTIVE_PRS}" \
-    --argjson tickets "${ACTIVE_TICKETS}" \
-    --argjson branches "${ACTIVE_BRANCHES_JSON}" \
-    '{
-      ts: (now | todate),
-      event: "filter.register",
-      orchestrator: $orch,
-      worker: null,
-      detail: {
-        session_id: (if $sid == "" then null else $sid end),
-        notify_event: $notify,
-        prompt: "Wake me when: any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
-        persistent: true,
-        context: {pr_numbers: $prs, tickets: $tickets, branches: $branches}
-      }
-    }')"
-
-  # CTL-284: register a SECOND interest using the built-in pr_lifecycle type.
-  # The deterministic router handles all PR/CI/review/deployment events without
-  # Groq. The prose interest above only covers the residual concerns
-  # (comms-attention and Linear ticket status changes). Both interests use the
-  # same notify_event so the wait-for filter is unchanged — wakes from either
-  # path arrive on filter.wake.${ORCH_NAME}.
   REPO_FULL_NAME=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
   ACTIVE_BASES_JSON=$(jq -rs '[
     .[] | select(.pr.number != null and .pr.baseRefName != null)
         | {pr: .pr.number, base: .pr.baseRefName}
   ]' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
 
+  # CTL-284: pr_lifecycle interest (deterministic PR/CI/review/deployment routing)
   "$STATE_SCRIPT" event "$(jq -nc \
     --arg orch "${ORCH_NAME}" \
     --arg id "${ORCH_NAME}-pr-lifecycle" \
@@ -771,6 +752,55 @@ if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2
         pr_numbers: $prs,
         repo: $repo,
         base_branches: $bases
+      }
+    }')"
+
+  # CTL-303: ticket_lifecycle interest (deterministic Linear routing — replaces
+  # the "Linear ticket status changes" part of the old prose prompt)
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg orch "${ORCH_NAME}" \
+    --arg id "${ORCH_NAME}-ticket-lifecycle" \
+    --arg notify "filter.wake.${ORCH_NAME}" \
+    --argjson tickets "${ACTIVE_TICKETS}" \
+    '{
+      ts: (now | todate),
+      event: "filter.register",
+      orchestrator: $orch,
+      worker: null,
+      detail: {
+        interest_id: $id,
+        interest_type: "ticket_lifecycle",
+        notify_event: $notify,
+        persistent: true,
+        tickets: $tickets,
+        wake_on: ["status_done", "status_in_review", "status_changed"]
+      }
+    }')"
+
+  # CTL-357: comms_lifecycle interest (deterministic comms routing — replaces
+  # the "any of my workers posts a comms message of type attention" part of the
+  # old prose prompt). Defaults types_of_interest to ["attention","done"] at the
+  # broker; we set it explicitly here for clarity.
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg orch "${ORCH_NAME}" \
+    --arg id "${ORCH_NAME}-comms-lifecycle" \
+    --arg notify "filter.wake.${ORCH_NAME}" \
+    --arg channel "orch-${ORCH_NAME}" \
+    --argjson workers "${ACTIVE_TICKETS}" \
+    '{
+      ts: (now | todate),
+      event: "filter.register",
+      orchestrator: $orch,
+      worker: null,
+      detail: {
+        interest_id: $id,
+        interest_type: "comms_lifecycle",
+        notify_event: $notify,
+        persistent: true,
+        channel: $channel,
+        subscriber_kind: "orchestrator",
+        owned_workers: $workers,
+        types_of_interest: ["attention", "done"]
       }
     }')"
 fi
@@ -1203,18 +1233,18 @@ REMEDIATION_EOF
 done
 ```
 
-**Refresh broker registration when PR set has changed (CTL-341).** The Phase 4 start block
-above registers the orchestrator's `pr_lifecycle` interest with whatever PRs the worker signal
-files happen to expose at that moment — often the empty set, because workers have not yet
+**Refresh broker registration when PR set has changed (CTL-341, CTL-357).** The Phase 4 start
+block above registers the orchestrator's `pr_lifecycle` interest with whatever PRs the worker
+signal files happen to expose at that moment — often the empty set, because workers have not yet
 opened PRs. Without an unconditional refresh, that empty `pr_numbers` list would persist for
 the entire orchestration run and the deterministic route in `tryDeterministicRoute` would
 never match. The merge-confirmation loop above can discover a missing `pr.number` from a
 worker's branch, but that path does not run when the worker writes its own `pr.number` before
 the orchestrator wakes (the common case in the worker-driven flow). This block runs every
 Phase 4 wake-up, computes the union of `worker.pr.number` across the signal files, diffs
-against the set last sent to the broker, and re-emits both `filter.register` events only when
-the set has changed. Idempotent at the broker (upserts by `interest_id`); the diff just keeps
-the event log quiet.
+against the set last sent to the broker, and re-emits all three deterministic `filter.register`
+events (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`) only when the set has changed.
+Idempotent at the broker (upserts by `interest_id`); the diff just keeps the event log quiet.
 
 ```bash
 if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2>&1; then
@@ -1231,27 +1261,6 @@ if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2
           | {pr: .pr.number, base: .pr.baseRefName}
     ]' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
     _UPD_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
-
-    # Prose interest (residual concerns: comms-attention, ticket status)
-    "$STATE_SCRIPT" event "$(jq -nc \
-      --arg orch "${ORCH_NAME}" \
-      --arg sid "${CATALYST_SESSION_ID:-}" \
-      --arg notify "filter.wake.${ORCH_NAME}" \
-      --argjson prs "${_UPD_PRS}" \
-      --argjson tickets "${_UPD_TICKETS}" \
-      '{
-        ts: (now | todate),
-        event: "filter.register",
-        orchestrator: $orch,
-        worker: null,
-        detail: {
-          session_id: (if $sid == "" then null else $sid end),
-          notify_event: $notify,
-          prompt: "Wake me when: any of my workers posts a comms message of type attention to me; or one of my Linear tickets changes status",
-          persistent: true,
-          context: {pr_numbers: $prs, tickets: $tickets}
-        }
-      }')" 2>/dev/null || true
 
     # CTL-284: pr_lifecycle interest (deterministic PR/CI/review/deployment routing)
     "$STATE_SCRIPT" event "$(jq -nc \
@@ -1274,6 +1283,52 @@ if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2
           pr_numbers: $prs,
           repo: $repo,
           base_branches: $bases
+        }
+      }')" 2>/dev/null || true
+
+    # CTL-303: ticket_lifecycle interest (deterministic Linear routing)
+    "$STATE_SCRIPT" event "$(jq -nc \
+      --arg orch "${ORCH_NAME}" \
+      --arg id "${ORCH_NAME}-ticket-lifecycle" \
+      --arg notify "filter.wake.${ORCH_NAME}" \
+      --argjson tickets "${_UPD_TICKETS}" \
+      '{
+        ts: (now | todate),
+        event: "filter.register",
+        orchestrator: $orch,
+        worker: null,
+        detail: {
+          interest_id: $id,
+          interest_type: "ticket_lifecycle",
+          notify_event: $notify,
+          persistent: true,
+          tickets: $tickets,
+          wake_on: ["status_done", "status_in_review", "status_changed"]
+        }
+      }')" 2>/dev/null || true
+
+    # CTL-357: comms_lifecycle interest (deterministic comms routing — replaces
+    # the retired Groq prose interest for attention/done message routing)
+    "$STATE_SCRIPT" event "$(jq -nc \
+      --arg orch "${ORCH_NAME}" \
+      --arg id "${ORCH_NAME}-comms-lifecycle" \
+      --arg notify "filter.wake.${ORCH_NAME}" \
+      --arg channel "orch-${ORCH_NAME}" \
+      --argjson workers "${_UPD_TICKETS}" \
+      '{
+        ts: (now | todate),
+        event: "filter.register",
+        orchestrator: $orch,
+        worker: null,
+        detail: {
+          interest_id: $id,
+          interest_type: "comms_lifecycle",
+          notify_event: $notify,
+          persistent: true,
+          channel: $channel,
+          subscriber_kind: "orchestrator",
+          owned_workers: $workers,
+          types_of_interest: ["attention", "done"]
         }
       }')" 2>/dev/null || true
 

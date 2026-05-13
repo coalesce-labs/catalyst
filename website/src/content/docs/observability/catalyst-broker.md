@@ -14,10 +14,14 @@ a natural-language intent once and the daemon handles the matching.
 
 The daemon supports two routing paths:
 
-- **Deterministic (`pr_lifecycle`)** — pure field comparison for PR/CI/review/BEHIND events. No
-  Groq call, no latency beyond local I/O.
+- **Deterministic (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`)** — pure field
+  comparison for PR/CI/review/BEHIND events, Linear state changes, and comms-channel messages.
+  No Groq call, no latency beyond local I/O.
 - **Prose (Groq-backed)** — a natural-language `prompt` you write; evaluated by
-  `llama-3.1-8b-instant` in a single batched API call covering all registered interests.
+  `llama-3.1-8b-instant` in a single batched API call. **Gated off by default since CTL-357**
+  (`CATALYST_BROKER_PROSE_ENABLED=0`) due to empirically ~95% false-positive rate. Prose
+  interests on disk are accepted for backward compat but never matched. Set
+  `CATALYST_BROKER_PROSE_ENABLED=1` to re-enable.
 
 Both paths produce the same output: a `filter.wake.<id>` event in the log that your
 `catalyst-events wait-for` call is already watching for.

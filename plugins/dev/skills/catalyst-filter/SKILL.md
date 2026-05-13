@@ -8,11 +8,14 @@ description:
   not running.
 ---
 
-> **Deprecated (CTL-303):** `catalyst-filter` has been superseded by `catalyst-broker`.
-> The broker daemon adds structured agent identity, `ticket_lifecycle` routing for Linear events,
-> and auto-correlation of ticket↔PR interests. All `filter.register` / `pr_lifecycle` / Groq prose
-> registration documented here continues to work unchanged — the daemon script (`catalyst-filter`)
-> is now a thin alias for `catalyst-broker`. See [[broker]] for the full updated reference.
+> **Deprecated (CTL-303, updated CTL-357):** `catalyst-filter` has been superseded by
+> `catalyst-broker`. The broker daemon adds structured agent identity, `ticket_lifecycle` routing
+> for Linear events, `comms_lifecycle` routing for shared comms channels, and auto-correlation of
+> ticket↔PR interests. The Groq prose path described in this doc is now **env-gated off** by
+> default (`CATALYST_BROKER_PROSE_ENABLED=0`); prose interests on disk are accepted for backward
+> compat but never fire. The `filter.register` / `pr_lifecycle` / `ticket_lifecycle` /
+> `comms_lifecycle` paths are all deterministic and unchanged. See [[broker]] for the full updated
+> reference.
 
 # catalyst-filter — Semantic Event Routing Protocol
 
@@ -58,18 +61,29 @@ catalyst-filter logs
 ## Protocol Overview
 
 ```
-Orchestrator                         filter daemon                     Event log
-    │                                     │                                │
-    │── emit filter.register ────────────►│                                │
-    │                                     │  polls every 200ms ◄───────────│
-    │                                     │  batches events (100ms debounce)
-    │                                     │  calls Groq: "is this relevant?"
-    │                                     │── append filter.wake.{id} ────►│
-    │                                     │                                │
-    │◄── catalyst-events wait-for ────────────────────────────────────────│
-    │    (.attributes."event.name" == "filter.wake.{id}")                                      │                                │
-    │                                     │                                │
-    │── emit filter.deregister ──────────►│                                │
+Orchestrator                          broker daemon                       Event log
+    │                                     │                                  │
+    │── emit filter.register ────────────►│                                  │
+    │                                     │  polls every 200ms ◄─────────────│
+    │                                     │                                  │
+    │                                     │  deterministic match?            │
+    │                                     │   ├─ pr_lifecycle ──┐            │
+    │                                     │   ├─ ticket_lifecycle ┐          │
+    │                                     │   └─ comms_lifecycle ─┤          │
+    │                                     │                       ▼          │
+    │                                     │── append filter.wake.{id} ──────►│
+    │                                     │                                  │
+    │                                     │  prose path (env-gated; OFF      │
+    │                                     │  by default since CTL-357):      │
+    │                                     │   • batches events (100ms        │
+    │                                     │     debounce)                    │
+    │                                     │   • calls Groq for prose         │
+    │                                     │     interests                    │
+    │                                     │                                  │
+    │◄── catalyst-events wait-for ─────────────────────────────────────────-│
+    │    (.attributes."event.name" == "filter.wake.{id}")                    │
+    │                                     │                                  │
+    │── emit filter.deregister ──────────►│                                  │
 ```
 
 ## Step 1 — Register

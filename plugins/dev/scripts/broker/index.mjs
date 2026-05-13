@@ -383,6 +383,42 @@ export function loadPersistedInterests() {
   }
 }
 
+// CTL-357: one-shot startup event. If the Groq prose path is gated off (the
+// default) and any non-deterministic interests are sitting in the interests
+// table (loaded from disk for backward compat), emit a single
+// broker.daemon.prose_disabled event so the operator can see at a glance that
+// those entries exist but will never fire. Idempotent across the process
+// lifetime — once emitted, subsequent calls are no-ops.
+const DETERMINISTIC_INTEREST_TYPES = new Set([
+  "pr_lifecycle",
+  "ticket_lifecycle",
+  "comms_lifecycle",
+]);
+let _proseDisabledEmitted = false;
+
+export function __resetProseDisabledForTest() {
+  _proseDisabledEmitted = false;
+}
+
+export function maybeEmitProseDisabled() {
+  if (process.env.CATALYST_BROKER_PROSE_ENABLED === "1") return;
+  if (_proseDisabledEmitted) return;
+  const proseEntries = [...interests.entries()].filter(
+    ([, reg]) => !DETERMINISTIC_INTEREST_TYPES.has(reg?.interest_type ?? null),
+  );
+  if (proseEntries.length === 0) return;
+  appendEvent({
+    event: "broker.daemon.prose_disabled",
+    orchestrator: null,
+    worker: null,
+    detail: {
+      count: proseEntries.length,
+      sample: proseEntries.slice(0, 3).map(([id]) => id),
+    },
+  });
+  _proseDisabledEmitted = true;
+}
+
 // --- Heartbeat tracking ---
 // sourceId → { ts: number (Date.now()), notified: boolean }
 const lastHeartbeat = new Map();
@@ -419,6 +455,7 @@ export function handleRegister(event) {
   if (!id) return;
   const isPrLifecycle = d.interest_type === "pr_lifecycle";
   const isTicketLifecycle = d.interest_type === "ticket_lifecycle";
+  const isCommsLifecycle = d.interest_type === "comms_lifecycle";
   interests.set(id, {
     notify_event: d.notify_event ?? `filter.wake.${id}`,
     prompt: d.prompt ?? "",
@@ -434,6 +471,12 @@ export function handleRegister(event) {
     // ticket_lifecycle fields (CTL-303)
     tickets: isTicketLifecycle ? (Array.isArray(d.tickets) ? d.tickets : []) : null,
     wake_on: isTicketLifecycle ? (Array.isArray(d.wake_on) ? d.wake_on : null) : null,
+    // comms_lifecycle fields (CTL-357)
+    channel: isCommsLifecycle ? (d.channel ?? null) : null,
+    subscriber_kind: isCommsLifecycle ? (d.subscriber_kind ?? null) : null,
+    owned_workers: isCommsLifecycle ? (Array.isArray(d.owned_workers) ? d.owned_workers : null) : null,
+    subscriber_ticket: isCommsLifecycle ? (d.subscriber_ticket ?? null) : null,
+    types_of_interest: isCommsLifecycle ? (Array.isArray(d.types_of_interest) ? d.types_of_interest : null) : null,
   });
 
   if (isPrLifecycle) {
@@ -455,6 +498,17 @@ export function handleRegister(event) {
   } else if (isTicketLifecycle) {
     log.info(
       { interestId: id, type: "ticket_lifecycle", tickets: d.tickets ?? [], persistent },
+      "registered",
+    );
+  } else if (isCommsLifecycle) {
+    log.info(
+      {
+        interestId: id,
+        type: "comms_lifecycle",
+        channel: d.channel,
+        subscriberKind: d.subscriber_kind,
+        persistent,
+      },
       "registered",
     );
   } else {
@@ -616,6 +670,41 @@ function botPrefix(author, kind) {
   return "";
 }
 
+// CTL-357: default `types_of_interest` for comms_lifecycle subscribers.
+// Orchestrators only care about attention/done by default (no info-heartbeat
+// firehose). Workers default to all types — orchestrator→worker traffic is
+// rare and intentional, so we never want to silently drop it.
+const COMMS_DEFAULT_TYPES_BY_KIND = {
+  orchestrator: ["attention", "done"],
+  worker: null,
+};
+
+function matchCommsLifecycle(reg, event) {
+  if (getEventName(event) !== "comms.message.posted") return null;
+  const payload = getEventPayload(event);
+  if (!payload || typeof payload !== "object") return null;
+  if (payload.channel !== reg.channel) return null;
+
+  const allowedTypes = reg.types_of_interest ?? COMMS_DEFAULT_TYPES_BY_KIND[reg.subscriber_kind];
+  if (Array.isArray(allowedTypes) && !allowedTypes.includes(payload.type)) return null;
+
+  const sender = event.attributes?.["catalyst.worker.ticket"] ?? payload.from ?? null;
+
+  if (reg.subscriber_kind === "orchestrator") {
+    if (!Array.isArray(reg.owned_workers) || !reg.owned_workers.includes(sender)) return null;
+    return `Worker ${sender} posted ${payload.type} on ${payload.channel}`;
+  }
+
+  if (reg.subscriber_kind === "worker") {
+    if (sender && sender === reg.subscriber_ticket) return null; // self-loop guard
+    const to = payload.to;
+    if (to !== reg.subscriber_ticket && to !== "all") return null;
+    return `Message to ${reg.subscriber_ticket} (${payload.type}) on ${payload.channel} from ${sender ?? "unknown"}`;
+  }
+
+  return null;
+}
+
 export function tryDeterministicRoute(event, interestsMap) {
   const matches = [];
   const name = event.event ?? "";
@@ -634,6 +723,21 @@ export function tryDeterministicRoute(event, interestsMap) {
   }
 
   for (const [interestId, reg] of interestsMap) {
+    // CTL-357: comms_lifecycle is also deterministic — handled in this same
+    // routing pass so a single `tryDeterministicRoute` call covers both kinds.
+    if (reg.interest_type === "comms_lifecycle") {
+      const reason = matchCommsLifecycle(reg, event);
+      if (reason) {
+        matches.push({
+          interestId,
+          reason,
+          sourceEventId: eventId,
+          sourceEvent: summarizeEvent(event),
+        });
+      }
+      continue;
+    }
+
     if (reg.interest_type !== "pr_lifecycle") continue;
 
     let reason = null;
@@ -740,8 +844,12 @@ const TICKET_LIFECYCLE_ALL_WAKE_ON = [
 
 export function tryTicketLifecycleRoute(event, interestsMap) {
   const matches = [];
-  const name = event.event ?? "";
-  const detail = event.detail ?? {};
+  // CTL-357: read event name + payload via the canonical-aware helpers so
+  // canonical OTel envelopes (where the name lives under
+  // attributes["event.name"] and the payload under body.payload) match the
+  // same routing rules as legacy flat events. CTL-354 caught this gap.
+  const name = getEventName(event);
+  const detail = getEventPayload(event);
   const scope = event.scope ?? {};
   const attrs = event.attributes ?? {};
   // CTL-344: real id on new envelopes, synthetic id for legacy events.
@@ -935,7 +1043,10 @@ export function buildGroqPrompt(events) {
 
   // Deterministic-routed interest types are excluded from the Groq prompt.
   const proseInterests = [...interests.entries()].filter(
-    ([, reg]) => reg.interest_type !== "pr_lifecycle" && reg.interest_type !== "ticket_lifecycle",
+    ([, reg]) =>
+      reg.interest_type !== "pr_lifecycle" &&
+      reg.interest_type !== "ticket_lifecycle" &&
+      reg.interest_type !== "comms_lifecycle",
   );
   if (proseInterests.length === 0) return null;
 
@@ -961,7 +1072,12 @@ export function buildGroqPrompt(events) {
   return { systemPrompt, userPrompt };
 }
 
-async function classifyBatch(events) {
+export async function classifyBatch(events) {
+  // CTL-357: env-gate the Groq prose path. Default is off; existing prose
+  // interests on disk are accepted (for backward compat) but never matched
+  // against events. Flip to "1" only when the per-interest prompt is known
+  // to produce real signal, not the historical ~95% false-positive firehose.
+  if (process.env.CATALYST_BROKER_PROSE_ENABLED !== "1") return;
   const prompts = buildGroqPrompt(events);
   if (!prompts) return;
 
@@ -1531,6 +1647,11 @@ function main() {
   lastLogPath = getEventLogPath();
   loadPersistedInterests();
   loadExistingRegistrations();
+
+  // CTL-357: surface stale prose interests left on disk now that the Groq path
+  // is off by default. Single-shot info event so the HUD/operator can see them
+  // without grepping broker-interests.json.
+  maybeEmitProseDisabled();
 
   openBrokerStateDb();
 

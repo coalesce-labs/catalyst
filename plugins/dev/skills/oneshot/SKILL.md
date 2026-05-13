@@ -244,10 +244,54 @@ filter_register_worker() {
 filter_deregister_worker() {
   broker_daemon_running || return 0
   [ -n "${CATALYST_SESSION_ID:-}" ] || return 0
+  # Deregister the auto-correlated pr_lifecycle interest (interest_id = sid).
   "$STATE_SCRIPT" event "$(jq -nc \
     --arg sid "$CATALYST_SESSION_ID" \
     '{ts: (now | todate), event: "filter.deregister", orchestrator: null, worker: null, detail: {interest_id: $sid}}')" 2>/dev/null || true
+  # CTL-357: also deregister the comms_lifecycle interest (interest_id = sid-comms).
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg id "${CATALYST_SESSION_ID}-comms" \
+    '{ts: (now | todate), event: "filter.deregister", orchestrator: null, worker: null, detail: {interest_id: $id}}')" 2>/dev/null || true
 }
+
+# CTL-357: register a comms_lifecycle worker subscription so the broker wakes
+# the worker on messages directed at it (`to=$TICKET_ID` or `to=all`) on the
+# shared channel. The interest_id is "${CATALYST_SESSION_ID}-comms" — distinct
+# from the broker's auto-correlated pr_lifecycle interest (which uses just
+# the session_id) so the two interests coexist. Both share the same
+# notify_event = filter.wake.${CATALYST_SESSION_ID}, so the Phase 5 listen
+# loop predicate is unchanged. Best-effort; broker absence is fine.
+broker_register_comms() {
+  broker_daemon_running || return 0
+  [ -n "${CATALYST_SESSION_ID:-}" ] || return 0
+  [ -n "${CATALYST_COMMS_CHANNEL:-}" ] || return 0
+  [ -n "${TICKET_ID:-}" ] || return 0
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg sid "$CATALYST_SESSION_ID" \
+    --arg id "${CATALYST_SESSION_ID}-comms" \
+    --arg orch "${CATALYST_ORCHESTRATOR_ID:-}" \
+    --arg notify "filter.wake.${CATALYST_SESSION_ID}" \
+    --arg channel "$CATALYST_COMMS_CHANNEL" \
+    --arg ticket "$TICKET_ID" \
+    '{ts: (now | todate), event: "filter.register",
+      orchestrator: (if $orch == "" then null else $orch end),
+      worker: null,
+      detail: {
+        interest_id: $id,
+        interest_type: "comms_lifecycle",
+        notify_event: $notify,
+        persistent: true,
+        session_id: $sid,
+        channel: $channel,
+        subscriber_kind: "worker",
+        subscriber_ticket: $ticket
+      }}')" 2>/dev/null || true
+}
+
+# Register the worker's comms subscription once at startup. The wait-for
+# filter (filter.wake.${CATALYST_SESSION_ID}) is unchanged — this just gives
+# the broker a second deterministic reason to fire that wake.
+broker_register_comms
 
 # Belt-and-suspenders: trap on EXIT/INT/TERM ensures graceful deregister.
 # Watchdog cleanup in the daemon handles crash cases via session_id matching.

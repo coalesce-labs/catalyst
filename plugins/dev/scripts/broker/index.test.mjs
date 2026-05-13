@@ -1741,3 +1741,522 @@ describe("CTL-352 broker state + degraded event", () => {
     expect(degradedLines).toHaveLength(2);
   });
 });
+
+// ─── CTL-357 comms_lifecycle interest type ───────────────────────────────────
+
+describe("CTL-357 comms_lifecycle registration", () => {
+  test("handleRegister stores comms_lifecycle interest fields (legacy envelope)", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-comms-1",
+      detail: {
+        interest_id: "orch-comms-1-comms",
+        notify_event: "filter.wake.orch-comms-1",
+        interest_type: "comms_lifecycle",
+        channel: "orch-orch-comms-1",
+        subscriber_kind: "orchestrator",
+        owned_workers: ["CTL-100", "CTL-101"],
+        types_of_interest: ["attention", "done"],
+        persistent: true,
+      },
+    });
+    const reg = getInterests().get("orch-comms-1-comms");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("comms_lifecycle");
+    expect(reg.channel).toBe("orch-orch-comms-1");
+    expect(reg.subscriber_kind).toBe("orchestrator");
+    expect(reg.owned_workers).toEqual(["CTL-100", "CTL-101"]);
+    expect(reg.types_of_interest).toEqual(["attention", "done"]);
+    expect(reg.persistent).toBe(true);
+    // pr_lifecycle/ticket_lifecycle fields stay null
+    expect(reg.pr_numbers).toBeNull();
+    expect(reg.tickets).toBeNull();
+  });
+
+  test("handleRegister stores comms_lifecycle interest fields (canonical envelope)", () => {
+    handleRegister({
+      attributes: {
+        "event.name": "filter.register",
+        "catalyst.orchestrator.id": "orch-comms-canon",
+      },
+      body: {
+        payload: {
+          interest_id: "worker-CTL-200",
+          notify_event: "filter.wake.worker-CTL-200",
+          interest_type: "comms_lifecycle",
+          channel: "orch-orch-comms-canon",
+          subscriber_kind: "worker",
+          subscriber_ticket: "CTL-200",
+          persistent: true,
+        },
+      },
+    });
+    const reg = getInterests().get("worker-CTL-200");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("comms_lifecycle");
+    expect(reg.subscriber_kind).toBe("worker");
+    expect(reg.subscriber_ticket).toBe("CTL-200");
+    expect(reg.channel).toBe("orch-orch-comms-canon");
+  });
+
+  test("comms_lifecycle interest is excluded from Groq prompt", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-comms-2",
+      detail: {
+        interest_id: "comms-only",
+        interest_type: "comms_lifecycle",
+        channel: "orch-orch-comms-2",
+        subscriber_kind: "orchestrator",
+        owned_workers: ["CTL-300"],
+        persistent: true,
+      },
+    });
+    // No prose interest exists, so the prompt should be null entirely.
+    const prompt = buildGroqPrompt([{ event: "comms.message.posted" }]);
+    expect(prompt).toBeNull();
+  });
+});
+
+describe("CTL-357 tryDeterministicRoute — comms_lifecycle (orchestrator subscriber)", () => {
+  beforeEach(() => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-comms-orch",
+      detail: {
+        interest_id: "orch-comms-orch-comms",
+        notify_event: "filter.wake.orch-comms-orch",
+        interest_type: "comms_lifecycle",
+        channel: "orch-orch-comms-orch",
+        subscriber_kind: "orchestrator",
+        owned_workers: ["CTL-100", "CTL-101"],
+        types_of_interest: ["attention", "done"],
+        persistent: true,
+      },
+    });
+  });
+
+  const buildCommsEvent = ({ sender, channel, type, to = "all", body = "test" }) => ({
+    attributes: {
+      "event.name": "comms.message.posted",
+      "catalyst.worker.ticket": sender,
+    },
+    body: {
+      payload: { channel, type, msgId: "msg-test", to, body },
+    },
+  });
+
+  test("fires when an owned worker posts attention on the watched channel", () => {
+    const matches = tryDeterministicRoute(
+      buildCommsEvent({ sender: "CTL-100", channel: "orch-orch-comms-orch", type: "attention", body: "CI blocked" }),
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("orch-comms-orch-comms");
+    expect(matches[0].reason).toContain("CTL-100");
+    expect(matches[0].reason).toContain("attention");
+  });
+
+  test("fires when an owned worker posts done on the watched channel", () => {
+    const matches = tryDeterministicRoute(
+      buildCommsEvent({ sender: "CTL-101", channel: "orch-orch-comms-orch", type: "done" }),
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("CTL-101");
+    expect(matches[0].reason).toContain("done");
+  });
+
+  test("does NOT fire when an owned worker posts info (not in types_of_interest)", () => {
+    const matches = tryDeterministicRoute(
+      buildCommsEvent({ sender: "CTL-100", channel: "orch-orch-comms-orch", type: "info" }),
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  test("does NOT fire when a non-owned worker posts on the watched channel", () => {
+    const matches = tryDeterministicRoute(
+      buildCommsEvent({ sender: "CTL-999", channel: "orch-orch-comms-orch", type: "attention" }),
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  test("does NOT fire on a different channel", () => {
+    const matches = tryDeterministicRoute(
+      buildCommsEvent({ sender: "CTL-100", channel: "orch-other-orch", type: "attention" }),
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  test("orchestrator default types_of_interest is ['attention','done'] when omitted", () => {
+    clearInterests();
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-default",
+      detail: {
+        interest_id: "orch-default-comms",
+        notify_event: "filter.wake.orch-default",
+        interest_type: "comms_lifecycle",
+        channel: "orch-orch-default",
+        subscriber_kind: "orchestrator",
+        owned_workers: ["CTL-555"],
+        // types_of_interest omitted
+        persistent: true,
+      },
+    });
+    expect(
+      tryDeterministicRoute(
+        buildCommsEvent({ sender: "CTL-555", channel: "orch-orch-default", type: "attention" }),
+        getInterests(),
+      ),
+    ).toHaveLength(1);
+    expect(
+      tryDeterministicRoute(
+        buildCommsEvent({ sender: "CTL-555", channel: "orch-orch-default", type: "done" }),
+        getInterests(),
+      ),
+    ).toHaveLength(1);
+    expect(
+      tryDeterministicRoute(
+        buildCommsEvent({ sender: "CTL-555", channel: "orch-orch-default", type: "info" }),
+        getInterests(),
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("only matches comms.message.posted events", () => {
+    // A different event name on the watched channel should not match a comms interest.
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.pr.merged", "catalyst.worker.ticket": "CTL-100" },
+        body: { payload: { channel: "orch-orch-comms-orch", type: "attention", to: "all", body: "" } },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+});
+
+describe("CTL-357 tryDeterministicRoute — comms_lifecycle (worker subscriber)", () => {
+  beforeEach(() => {
+    handleRegister({
+      event: "filter.register",
+      detail: {
+        interest_id: "worker-CTL-357",
+        notify_event: "filter.wake.worker-CTL-357",
+        interest_type: "comms_lifecycle",
+        channel: "orch-orch-comms-worker",
+        subscriber_kind: "worker",
+        subscriber_ticket: "CTL-357",
+        persistent: true,
+      },
+    });
+  });
+
+  const buildCommsEvent = ({ sender, channel, type = "info", to, body = "test" }) => ({
+    attributes: {
+      "event.name": "comms.message.posted",
+      "catalyst.worker.ticket": sender,
+    },
+    body: {
+      payload: { channel, type, msgId: "msg-test", to, body },
+    },
+  });
+
+  test("fires when payload.to equals subscriber_ticket", () => {
+    const matches = tryDeterministicRoute(
+      buildCommsEvent({ sender: "orchestrator", channel: "orch-orch-comms-worker", to: "CTL-357", body: "rebase now" }),
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("worker-CTL-357");
+  });
+
+  test("fires when payload.to is 'all'", () => {
+    const matches = tryDeterministicRoute(
+      buildCommsEvent({ sender: "orchestrator", channel: "orch-orch-comms-worker", to: "all" }),
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+  });
+
+  test("does NOT fire when payload.to is a different worker", () => {
+    const matches = tryDeterministicRoute(
+      buildCommsEvent({ sender: "orchestrator", channel: "orch-orch-comms-worker", to: "CTL-999" }),
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  test("does NOT fire when sender is the worker itself (self-loop guard)", () => {
+    const matches = tryDeterministicRoute(
+      buildCommsEvent({ sender: "CTL-357", channel: "orch-orch-comms-worker", to: "all" }),
+      getInterests(),
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  test("worker default fires on all types when types_of_interest omitted", () => {
+    for (const type of ["info", "attention", "done"]) {
+      const matches = tryDeterministicRoute(
+        buildCommsEvent({ sender: "orchestrator", channel: "orch-orch-comms-worker", type, to: "all" }),
+        getInterests(),
+      );
+      expect(matches).toHaveLength(1);
+    }
+  });
+});
+
+// ─── CTL-357 prose env gate ──────────────────────────────────────────────────
+
+describe("CTL-357 prose env gate (CATALYST_BROKER_PROSE_ENABLED)", () => {
+  let savedEnv;
+  let savedFetch;
+
+  beforeEach(() => {
+    savedEnv = process.env.CATALYST_BROKER_PROSE_ENABLED;
+    savedFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.CATALYST_BROKER_PROSE_ENABLED;
+    else process.env.CATALYST_BROKER_PROSE_ENABLED = savedEnv;
+    globalThis.fetch = savedFetch;
+  });
+
+  test("when disabled, classifyBatch does NOT call Groq fetch", async () => {
+    delete process.env.CATALYST_BROKER_PROSE_ENABLED;
+    let fetchCalled = false;
+    globalThis.fetch = async () => {
+      fetchCalled = true;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "[]" } }] }) };
+    };
+    // Register a prose interest so classifyBatch has something to chew on.
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-prose-gate",
+      detail: {
+        interest_id: "prose-gate-1",
+        notify_event: "filter.wake.prose-gate-1",
+        prompt: "wake on anything",
+        persistent: true,
+      },
+    });
+    const { classifyBatch } = await import("./index.mjs");
+    await classifyBatch([{ event: "linear.issue.state_changed", detail: { state: "Done" } }]);
+    expect(fetchCalled).toBe(false);
+  });
+
+  test("when CATALYST_BROKER_PROSE_ENABLED=1, classifyBatch DOES call Groq fetch", async () => {
+    process.env.CATALYST_BROKER_PROSE_ENABLED = "1";
+    let fetchCalled = false;
+    globalThis.fetch = async () => {
+      fetchCalled = true;
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "[]" } }] }) };
+    };
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-prose-on",
+      detail: {
+        interest_id: "prose-on-1",
+        notify_event: "filter.wake.prose-on-1",
+        prompt: "wake on anything",
+        persistent: true,
+      },
+    });
+    // classifyBatch requires GROQ_API_KEY too; export the fake.
+    process.env.GROQ_API_KEY = "test-key";
+    const { classifyBatch } = await import("./index.mjs");
+    await classifyBatch([{ event: "linear.issue.state_changed", detail: { state: "Done" } }]);
+    expect(fetchCalled).toBe(true);
+    delete process.env.GROQ_API_KEY;
+  });
+});
+
+describe("CTL-357 broker.daemon.prose_disabled startup event", () => {
+  beforeEach(async () => {
+    const { __resetProseDisabledForTest } = await import("./index.mjs");
+    __resetProseDisabledForTest?.();
+  });
+
+  test("emits exactly one prose_disabled event when prose interests exist and gate is off", async () => {
+    delete process.env.CATALYST_BROKER_PROSE_ENABLED;
+    const { maybeEmitProseDisabled, __resetProseDisabledForTest } = await import("./index.mjs");
+    __resetProseDisabledForTest();
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-prose-stale",
+      detail: {
+        interest_id: "stale-prose-1",
+        notify_event: "filter.wake.stale-prose-1",
+        prompt: "legacy prose interest",
+        persistent: true,
+      },
+    });
+    maybeEmitProseDisabled();
+    maybeEmitProseDisabled(); // idempotent — should not double-emit
+
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    expect(existsSync(logPath)).toBe(true);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+    const proseDisabledLines = lines.filter((l) => {
+      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.prose_disabled"; }
+      catch { return false; }
+    });
+    expect(proseDisabledLines).toHaveLength(1);
+    const evt = JSON.parse(proseDisabledLines[0]);
+    expect(evt.body.payload.count).toBe(1);
+    expect(evt.body.payload.sample).toContain("stale-prose-1");
+  });
+
+  test("emits nothing when no prose interests exist", async () => {
+    delete process.env.CATALYST_BROKER_PROSE_ENABLED;
+    const { maybeEmitProseDisabled, __resetProseDisabledForTest } = await import("./index.mjs");
+    __resetProseDisabledForTest();
+    // Only register a deterministic interest.
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-no-prose",
+      detail: {
+        interest_id: "pr-only-1",
+        interest_type: "pr_lifecycle",
+        notify_event: "filter.wake.pr-only-1",
+        pr_numbers: [1],
+        repo: "x/y",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+    maybeEmitProseDisabled();
+
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return;
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+    const proseDisabledLines = lines.filter((l) => {
+      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.prose_disabled"; }
+      catch { return false; }
+    });
+    expect(proseDisabledLines).toHaveLength(0);
+  });
+
+  test("emits nothing when gate is on", async () => {
+    process.env.CATALYST_BROKER_PROSE_ENABLED = "1";
+    const { maybeEmitProseDisabled, __resetProseDisabledForTest } = await import("./index.mjs");
+    __resetProseDisabledForTest();
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-prose-on-2",
+      detail: {
+        interest_id: "prose-on-2-1",
+        notify_event: "filter.wake.prose-on-2-1",
+        prompt: "still prose",
+        persistent: true,
+      },
+    });
+    maybeEmitProseDisabled();
+
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) {
+      delete process.env.CATALYST_BROKER_PROSE_ENABLED;
+      return;
+    }
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+    const proseDisabledLines = lines.filter((l) => {
+      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.prose_disabled"; }
+      catch { return false; }
+    });
+    expect(proseDisabledLines).toHaveLength(0);
+    delete process.env.CATALYST_BROKER_PROSE_ENABLED;
+  });
+});
+
+// ─── CTL-357 tryTicketLifecycleRoute canonical envelopes ─────────────────────
+
+describe("CTL-357 tryTicketLifecycleRoute canonical envelopes", () => {
+  beforeEach(() => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-canon-ticket",
+      detail: {
+        interest_id: "watch-ctl-canon",
+        notify_event: "filter.wake.watch-ctl-canon",
+        interest_type: "ticket_lifecycle",
+        tickets: ["CTL-275"],
+        wake_on: ["status_done", "status_in_review", "status_changed", "pr_merged", "comment_added"],
+        persistent: true,
+      },
+    });
+  });
+
+  test("matches canonical linear.issue.state_changed event", () => {
+    const matches = tryTicketLifecycleRoute(
+      {
+        attributes: {
+          "event.name": "linear.issue.state_changed",
+          "linear.issue.identifier": "CTL-275",
+        },
+        body: { payload: { state: "Done" } },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("marked Done");
+  });
+
+  test("matches canonical linear.comment.created event", () => {
+    const matches = tryTicketLifecycleRoute(
+      {
+        attributes: {
+          "event.name": "linear.comment.created",
+          "linear.issue.identifier": "CTL-275",
+        },
+        body: { payload: { author: "ryan" } },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("CTL-275");
+  });
+
+  test("matches canonical github.pr.merged event with ticket reference in body", () => {
+    const matches = tryTicketLifecycleRoute(
+      {
+        attributes: {
+          "event.name": "github.pr.merged",
+          "vcs.pr.number": 999,
+        },
+        body: {
+          payload: {
+            body: "Fixes CTL-275",
+            title: "fix thing",
+            headRef: "ryan/ctl-275",
+          },
+        },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].ticket).toBe("CTL-275");
+    expect(matches[0].reason).toContain("merged");
+  });
+
+  test("legacy envelope tests continue to pass after canonical fix", () => {
+    // Re-run the existing legacy pattern explicitly to lock in backward compat.
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "linear.issue.state_changed",
+        attributes: { "linear.issue.identifier": "CTL-275" },
+        detail: { state: "Done" },
+      },
+      getInterests(),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("marked Done");
+  });
+});
