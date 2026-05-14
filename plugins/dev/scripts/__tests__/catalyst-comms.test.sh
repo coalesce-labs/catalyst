@@ -217,6 +217,63 @@ run "send succeeds when state script unavailable" bash -c "
   grep -q 'no events writer' '${CATALYST_COMMS_DIR}/channels/resilient-ch.jsonl'
 "
 
+# ── 19. send --repo stamps vcs.repository.name on fan-out event (CTL-385) ──
+reset_comms
+rm -rf "${CATALYST_DIR}/events"
+"$COMMS" join repo-flag-ch --as alice --ttl 300 > /dev/null
+MSG_ID_FLAG=$("$COMMS" send repo-flag-ch "explicit flag" \
+  --as alice --type info --repo "coalesce-labs/catalyst")
+EVENTS_FILE_FLAG="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+run "--repo flag stamps vcs.repository.name" bash -c "
+  jq -e --arg id '$MSG_ID_FLAG' \
+    'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)
+       | .attributes.\"vcs.repository.name\" == \"coalesce-labs/catalyst\"' \
+    '$EVENTS_FILE_FLAG' >/dev/null
+"
+
+# ── 20. send falls back to $REPO env when --repo not passed (CTL-385) ──────
+reset_comms
+rm -rf "${CATALYST_DIR}/events"
+"$COMMS" join repo-env-ch --as alice --ttl 300 > /dev/null
+MSG_ID_ENV=$(REPO="coalesce-labs/from-env" \
+  "$COMMS" send repo-env-ch "env fallback" --as alice --type info)
+EVENTS_FILE_ENV="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+run "\$REPO env stamps vcs.repository.name when --repo omitted" bash -c "
+  jq -e --arg id '$MSG_ID_ENV' \
+    'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)
+       | .attributes.\"vcs.repository.name\" == \"coalesce-labs/from-env\"' \
+    '$EVENTS_FILE_ENV' >/dev/null
+"
+
+# ── 21. --repo flag wins over $REPO env (CTL-385) ──────────────────────────
+reset_comms
+rm -rf "${CATALYST_DIR}/events"
+"$COMMS" join repo-prec-ch --as alice --ttl 300 > /dev/null
+MSG_ID_PREC=$(REPO="coalesce-labs/env-loser" \
+  "$COMMS" send repo-prec-ch "flag wins" --as alice --type info \
+  --repo "coalesce-labs/flag-winner")
+EVENTS_FILE_PREC="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+run "--repo flag overrides \$REPO env" bash -c "
+  jq -e --arg id '$MSG_ID_PREC' \
+    'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)
+       | .attributes.\"vcs.repository.name\" == \"coalesce-labs/flag-winner\"' \
+    '$EVENTS_FILE_PREC' >/dev/null
+"
+
+# ── 22. no --repo, no $REPO: attribute absent (CTL-385) ────────────────────
+reset_comms
+rm -rf "${CATALYST_DIR}/events"
+"$COMMS" join repo-absent-ch --as alice --ttl 300 > /dev/null
+MSG_ID_ABS=$(unset REPO && "$COMMS" send repo-absent-ch "no repo" \
+  --as alice --type info)
+EVENTS_FILE_ABS="${CATALYST_DIR}/events/$(date -u +%Y-%m).jsonl"
+run "no repo source leaves vcs.repository.name unset" bash -c "
+  jq -e --arg id '$MSG_ID_ABS' \
+    'select(.attributes.\"event.name\" == \"comms.message.posted\" and .body.payload.msgId == \$id)
+       | (.attributes | has(\"vcs.repository.name\")) == false' \
+    '$EVENTS_FILE_ABS' >/dev/null
+"
+
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"
 [ "$FAILURES" = "0" ]

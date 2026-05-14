@@ -187,6 +187,37 @@ else
   ok "emit-context errors on unknown session id"
 fi
 
+# ─── 11. $REPO env populates vcs.repository.name on session events (CTL-385) ─
+SID_REPO="$(bash "$SESSION_SCRIPT" start --skill repotest \
+            --claude-session-id "uuid-repo-1")"
+expect_not_empty "start returns id for REPO test" "$SID_REPO"
+
+REPO="coalesce-labs/catalyst" bash "$SESSION_SCRIPT" phase "$SID_REPO" \
+  "implementing" --phase 3 >/dev/null
+
+REPO_LINE="$(grep '"session.phase"' "$EF" | grep "$SID_REPO" | tail -n 1)"
+expect_not_empty "session.phase event recorded for REPO test" "$REPO_LINE"
+
+REPO_ATTR="$(printf '%s' "$REPO_LINE" | jq -r '.attributes."vcs.repository.name" // ""')"
+expect_eq "session.phase carries vcs.repository.name from \$REPO env" \
+  "coalesce-labs/catalyst" "$REPO_ATTR"
+
+# ─── 12. Absent $REPO leaves vcs.repository.name unset (CTL-385) ────────────
+SID_NOREPO="$(bash "$SESSION_SCRIPT" start --skill norepotest \
+              --claude-session-id "uuid-norepo-1")"
+expect_not_empty "start returns id for no-REPO test" "$SID_NOREPO"
+
+# Explicitly unset REPO so the parent shell's env doesn't leak in.
+(unset REPO && bash "$SESSION_SCRIPT" phase "$SID_NOREPO" \
+  "implementing" --phase 3 >/dev/null)
+
+NOREPO_LINE="$(grep '"session.phase"' "$EF" | grep "$SID_NOREPO" | tail -n 1)"
+expect_not_empty "session.phase event recorded for no-REPO test" "$NOREPO_LINE"
+
+NOREPO_HAS="$(printf '%s' "$NOREPO_LINE" | jq -r '.attributes | has("vcs.repository.name")')"
+expect_eq "session.phase omits vcs.repository.name when \$REPO unset" \
+  "false" "$NOREPO_HAS"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"
