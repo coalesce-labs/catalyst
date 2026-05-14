@@ -58,7 +58,10 @@ const HELP_LINES = [
   "  :                natural-language query via Groq (needs GROQ_API_KEY)",
   "  :since 24h       reload events from last 24 h  (also: 7d, 2h, 30m, ISO date)",
   "  ?                show generated DSL and active :since window",
-  "  Esc              clear all filters (:since, /, :query) / close overlay",
+  "  S                clear :since window (reset to initial)",
+  "  Esc (in /mode)   clear substring filter only",
+  "  Esc (in :mode)   cancel/clear query input",
+  "  Esc (top-level)  clear all active filters + close overlays",
   "",
   "Scope — narrow to related events  (live mode: first press pauses; press again to apply)",
   "  t                scope to all events sharing this event's trace ID",
@@ -319,7 +322,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       return;
     }
     if (filterFocused) {
-      if (key.escape) { setFilterFocused(false); setFilterText(""); setPivot(null); }
+      if (key.escape) { setFilterFocused(false); setFilterText(""); }
       return;
     }
 
@@ -383,6 +386,12 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     }
     if (input === "w") {
       setWrapMode((m) => m === 'truncate' ? 'wrap' : 'truncate');
+      return;
+    }
+    if (input === "S") {
+      setActiveSinceTs(initSinceTs);
+      setActiveSinceLabel(null);
+      showStatus("since cleared");
       return;
     }
   });
@@ -461,6 +470,8 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           statusMsg={statusMsg}
           activeSinceLabel={activeSinceLabel}
           wrapMode={wrapMode}
+          dslActive={dslState !== null}
+          dslLabel={dslState?.nlQuery ?? ""}
         />
       </Box>
       <Box flexShrink={0}>
