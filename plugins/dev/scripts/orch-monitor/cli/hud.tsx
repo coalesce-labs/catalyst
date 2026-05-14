@@ -29,6 +29,7 @@ import {
 } from "../../lib/dsl-compile.mjs";
 import { buildSystemPrompt } from "../../lib/dsl-prompt.mjs";
 import type { CanonicalEvent } from "../lib/canonical-event.ts";
+import { readPluginVersion, formatVersionBlock } from "./lib/version.ts";
 
 interface AppProps {
   repoFilter: string;
@@ -134,13 +135,19 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     return () => clearInterval(id);
   }, []);
 
+  // CTL-390: plugin version chip. Resolved once at startup — release-please
+  // bumps version.txt + commit.txt only between HUD invocations.
+  const versionChip = useRef(readPluginVersion()).current;
+
   const [dslState, setDslState] = useState<DslState | null>(null);
   const dslPredicate: DslPredicate = dslState?.jsPredicate ?? null;
   const { filterText, setFilterText, pivot, setPivot, filtered } = useFilter(events, dslPredicate);
 
   // Header = optional chip row (0/1) + column row (1) + separator (1) + optional nlQuery row (0/1)
   // CTL-352: chip row is shown whenever Groq or broker-interest data is available.
-  const hasChipRow = Boolean(brokerState?.groq) || typeof brokerState?.interestCount === "number";
+  // CTL-390: the version chip is always present (resolved once at startup),
+  // so the chip row is always rendered.
+  const hasChipRow = true;
   const headerRows = (hasChipRow ? 1 : 0) + (dslState?.nlQuery ? 3 : 2);
 
   const [showDslOverlay, setShowDslOverlay] = useState(false);
@@ -377,7 +384,12 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   return (
     <Box flexDirection="column" height={layoutRows} width={cols}>
       <Box flexShrink={0}>
-        <Header columns={cols} nlQuery={dslState?.nlQuery} brokerState={brokerState} />
+        <Header
+          columns={cols}
+          nlQuery={dslState?.nlQuery}
+          brokerState={brokerState}
+          version={{ display: versionChip.display, isLocal: versionChip.isLocal }}
+        />
       </Box>
       <Box flexDirection="column" flexGrow={(inDetailMode || showHelp) ? 0 : 1} flexShrink={1}>
         <EventList
@@ -481,6 +493,12 @@ for (let i = 0; i < args.length; i++) {
     console.info("");
     console.info("Press h inside the HUD for interactive keybinding help.");
     console.info("TIME examples: 24h  7d  2h  30m  2026-05-01");
+    process.exit(0);
+  } else if (arg === "--version" || arg === "-V") {
+    // CTL-390: mirror the bash helper's three-line output. The bash wrapper
+    // (catalyst-hud) intercepts this first; we keep the TS handler so
+    // `bun run cli/hud.tsx --version` from the worktree still works.
+    console.info(formatVersionBlock("catalyst-hud", readPluginVersion()));
     process.exit(0);
   }
 }
