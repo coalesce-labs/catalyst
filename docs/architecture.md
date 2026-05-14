@@ -171,23 +171,23 @@ workers (inbound); workers poll for directed messages at each phase boundary.
 
 ```bash
 # Orchestrator side (Phase 1 init)
-catalyst-comms join "orch-${ORCH_NAME}" --as orchestrator --capabilities "coordinates workers"
+catalyst-comms join "${ORCH_NAME}" --as orchestrator --capabilities "coordinates workers"
 
 # Worker dispatch env
-CATALYST_COMMS_CHANNEL="orch-${ORCH_NAME}" exec claude -p "/oneshot ${TICKET_ID}"
+CATALYST_COMMS_CHANNEL="${ORCH_NAME}" exec claude -p "/oneshot ${TICKET_ID}"
 
 # Worker side (oneshot startup)
 catalyst-comms join "$CATALYST_COMMS_CHANNEL" --as "$TICKET_ID" --parent orchestrator
 
 # Outbound: orchestrator sends to a specific worker
-catalyst-comms send "orch-${ORCH_NAME}" "CTL-101: skip the migration" \
+catalyst-comms send "${ORCH_NAME}" "CTL-101: skip the migration" \
   --as orchestrator --to CTL-101 --type info
 
 # Inbound: worker polls for messages addressed to it (at each phase boundary)
-catalyst-comms poll "orch-${ORCH_NAME}" --filter-to "$TICKET_ID" --since "$COMMS_LAST_READ"
+catalyst-comms poll "${ORCH_NAME}" --filter-to "$TICKET_ID" --since "$COMMS_LAST_READ"
 
 # Live tailing (human auditor)
-catalyst-comms watch "orch-${ORCH_NAME}"
+catalyst-comms watch "${ORCH_NAME}"
 ```
 
 `catalyst-comms send` also emits a `comms.message.posted` event to the unified event log

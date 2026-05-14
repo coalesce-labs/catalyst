@@ -113,7 +113,8 @@ now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 [ -z "$ORCH_ID" ]       && { echo "ERROR: orchestrator id not set (in state.json or --orch-id)" >&2; exit 2; }
 [ -z "$WORKTREE_BASE" ] && { echo "ERROR: worktreeBase not set (in state.json or --worktree-base)" >&2; exit 2; }
 
-[ -z "$COMMS_CHANNEL" ] && COMMS_CHANNEL="orch-${ORCH_ID}"
+# CTL-373: channel name is the orch-id directly (legacy: `orch-${ORCH_ID}`).
+[ -z "$COMMS_CHANNEL" ] && COMMS_CHANNEL="$ORCH_ID"
 
 # Session id: CLI > env > .session-id stash > empty (which becomes "")
 if [ -z "$SESSION_ID" ]; then

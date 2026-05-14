@@ -181,9 +181,14 @@ export function sourceIcon(source: string): string {
   if (!detectNerdFont().detected) return "";
   const exact = SOURCE_ICONS[source];
   if (exact) return `${exact} `;
-  // Orchestrator-derived sources (e.g. "orch-ctl-352-354-2026-05-12" or
-  // "orch-ctl-352-354-2026-05-12/CTL-354") show the catalyst robot.
-  if (source.startsWith("orch-") || source.includes("/")) {
+  // Orchestrator-derived sources show the catalyst robot. Covers both the
+  // legacy `orch-<slug>-<date>` form and the CTL-373 short form `o-<slug>`,
+  // plus the `<orch-id>/<ticket>` join used in comms source labels.
+  if (
+    source.startsWith("orch-") ||
+    source.startsWith("o-") ||
+    source.includes("/")
+  ) {
     return `${SOURCE_ICONS.catalyst} `;
   }
   // Anything else (worker tickets like CTL-352 used as comms source) gets the

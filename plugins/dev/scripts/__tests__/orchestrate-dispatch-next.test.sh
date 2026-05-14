@@ -295,7 +295,8 @@ run_dispatch --session-id "sess-abc" --worker-command "/catalyst-dev:oneshot" \
 grep -q "ORCH_ID=demo" "$CLAUDE_LOG" && pass "ORCH_ID forwarded" || fail "ORCH_ID forwarded" "log: $(cat "$CLAUDE_LOG")"
 grep -q "ORCH_DIR=${ORCH_DIR}" "$CLAUDE_LOG" && pass "ORCH_DIR forwarded" || fail "ORCH_DIR forwarded"
 grep -q "SESSION=sess-abc" "$CLAUDE_LOG" && pass "SESSION_ID forwarded" || fail "SESSION_ID forwarded"
-grep -q "COMMS=orch-demo" "$CLAUDE_LOG" && pass "COMMS channel forwarded (default orch-<id>)" || fail "COMMS channel forwarded"
+# CTL-373: channel name is the orch-id directly (legacy was `orch-${orch-id}`).
+grep -q "COMMS=demo" "$CLAUDE_LOG" && pass "COMMS channel forwarded (default = orch-id)" || fail "COMMS channel forwarded"
 grep -q -- "T-1 --auto-merge --extra" "$CLAUDE_LOG" && pass "worker args forwarded" || fail "worker args forwarded" "log: $(cat "$CLAUDE_LOG")"
 scratch_teardown
 

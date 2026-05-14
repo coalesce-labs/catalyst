@@ -49,8 +49,9 @@ assert_eq() {
 echo "CTL-111 orchestrate-comms integration tests"
 echo "==========================================="
 
-ORCH_ID="orch-test-$$"
-CH="orch-${ORCH_ID}"
+# CTL-373: orch-id uses the `o-…` short form; channel name IS the orch-id.
+ORCH_ID="o-test-$$"
+CH="${ORCH_ID}"
 CH_FILE="$CATALYST_COMMS_DIR/channels/${CH}.jsonl"
 
 # ── 1. Orchestrator join creates channel ──────────────────────────────────
@@ -162,19 +163,20 @@ echo "────────────────────────�
 # Regexes accept either the new `"$COMMS_BIN" <subcmd>` form (CTL-127) or the
 # legacy bare `catalyst-comms <subcmd>` form so the test is resilient to the
 # binary resolution refactor.
-grep -qE '(catalyst-comms|\$COMMS_BIN") join "orch-\$\{ORCH_NAME\}"' "$ORCH_SKILL" \
+# CTL-373: channel name is the orch-id directly (legacy was `orch-${ORCH_NAME}`).
+grep -qE '(catalyst-comms|\$COMMS_BIN") join "\$\{ORCH_NAME\}"' "$ORCH_SKILL" \
   && pass "orchestrate: Phase 1 join hook present" \
   || fail "orchestrate: Phase 1 join hook missing"
 
-grep -q 'CATALYST_COMMS_CHANNEL="orch-\${ORCH_NAME}"' "$ORCH_SKILL" \
+grep -q 'CATALYST_COMMS_CHANNEL="\${ORCH_NAME}"' "$ORCH_SKILL" \
   && pass "orchestrate: Phase 3 dispatch env hook present" \
   || fail "orchestrate: Phase 3 dispatch env hook missing"
 
-grep -qE '(catalyst-comms|\$COMMS_BIN") poll "orch-\$\{ORCH_NAME\}"' "$ORCH_SKILL" \
+grep -qE '(catalyst-comms|\$COMMS_BIN") poll "\$\{ORCH_NAME\}"' "$ORCH_SKILL" \
   && pass "orchestrate: Phase 4 attention poll hook present" \
   || fail "orchestrate: Phase 4 attention poll hook missing"
 
-grep -qE '(catalyst-comms|\$COMMS_BIN") done "orch-\$\{ORCH_NAME\}" --as orchestrator' "$ORCH_SKILL" \
+grep -qE '(catalyst-comms|\$COMMS_BIN") done "\$\{ORCH_NAME\}" --as orchestrator' "$ORCH_SKILL" \
   && pass "orchestrate: Phase 7 done hook present" \
   || fail "orchestrate: Phase 7 done hook missing"
 

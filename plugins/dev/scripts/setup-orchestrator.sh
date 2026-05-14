@@ -123,32 +123,62 @@ log "Initializing session database..."
 "${SCRIPT_DIR}/catalyst-db.sh" init 2>&1 | while read -r line; do log "  $line"; done
 
 # ─── Step 4: Auto-generate worktree name ──────────────────────────────────────
+# CTL-373: short-form orch-id `o-<repo>-<tickets>` (drop "orch-" prefix, drop
+# date, embed all ticket numbers). Examples:
+#   --tickets "ADV-931 ADV-932"  →  o-adv-931-932
+#   --tickets CTL-373            →  o-ctl-373
+#   --project cycle-1            →  o-cycle-1
+#   --cycle current              →  o-cycle-current
+#   --auto 5                     →  o-auto-5
 
 slugify() {
   printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c '[:alnum:]-' '-' \
     | sed -E 's/-+/-/g; s/^-//; s/-$//' | cut -c1-30
 }
 
-TODAY=$(date +%Y-%m-%d)
+# Extract the numeric portion from a ticket id: "CTL-373" → "373".
+ticket_num() {
+  printf '%s' "$1" | sed -E 's/^[A-Za-z][A-Za-z0-9]+-//'
+}
 
-SLUG=""
-if [[ -n "$PROJECT" ]]; then
-  SLUG=$(slugify "$PROJECT")
-elif [[ -n "$CYCLE" ]]; then
-  SLUG="cycle-$(slugify "$CYCLE")"
-elif [[ -n "$TICKETS" ]]; then
-  # Use first ticket as slug
-  FIRST_TICKET="${TICKETS%% *}"
-  SLUG=$(slugify "$FIRST_TICKET")
-elif [[ -n "$AUTO" ]]; then
-  SLUG="auto${AUTO}"
-fi
+# Extract the lowercase team prefix from a ticket id: "CTL-373" → "ctl".
+ticket_prefix() {
+  printf '%s' "$1" | sed -E 's/-.*$//' | LC_ALL=C tr '[:upper:]' '[:lower:]'
+}
 
-if [[ -n "$SLUG" ]]; then
-  ORCH_NAME="orch-${SLUG}-${TODAY}"
-else
-  ORCH_NAME="orch-${TODAY}"
-fi
+build_orch_name() {
+  local tickets="$1" project="$2" cycle="$3" auto="$4"
+  if [[ -n "$project" ]]; then
+    printf 'o-%s' "$(slugify "$project")"; return
+  fi
+  if [[ -n "$cycle" ]]; then
+    printf 'o-cycle-%s' "$(slugify "$cycle")"; return
+  fi
+  if [[ -n "$auto" ]]; then
+    printf 'o-auto-%s' "$(slugify "$auto")"; return
+  fi
+  if [[ -n "$tickets" ]]; then
+    # Split TICKETS on whitespace into an array
+    local arr first prefix mixed=0 t parts="" nums=""
+    read -ra arr <<< "$tickets"
+    first="${arr[0]}"
+    prefix=$(ticket_prefix "$first")
+    for t in "${arr[@]}"; do
+      [[ "$(ticket_prefix "$t")" != "$prefix" ]] && mixed=1
+    done
+    if (( mixed )); then
+      for t in "${arr[@]}"; do parts+="-$(slugify "$t")"; done
+      printf 'o%s' "$parts"
+    else
+      for t in "${arr[@]}"; do nums+="-$(ticket_num "$t")"; done
+      printf 'o-%s%s' "$prefix" "$nums"
+    fi
+    return
+  fi
+  printf 'o-run'
+}
+
+ORCH_NAME=$(build_orch_name "$TICKETS" "$PROJECT" "$CYCLE" "$AUTO")
 
 WT_DIR_CONFIG=$(jq -r '.catalyst.orchestration.worktreeDir // empty' "$CONFIG_FILE" 2>/dev/null)
 if [[ -n "$WT_DIR_CONFIG" ]]; then

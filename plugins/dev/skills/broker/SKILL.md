@@ -223,7 +223,7 @@ Worker variant:
 jq -nc \
   --arg orch "${CATALYST_ORCHESTRATOR_ID}" \
   --arg id "${CATALYST_ORCHESTRATOR_ID}-comms" \
-  --arg channel "orch-${CATALYST_ORCHESTRATOR_ID}" \
+  --arg channel "${CATALYST_ORCHESTRATOR_ID}" \
   --argjson workers '["CTL-352","CTL-354"]' \
   '{ts: (now | todate), event: "filter.register",
     orchestrator: $orch,

@@ -17,9 +17,16 @@ export function isValidChannelName(name: string): boolean {
 }
 
 export function parseOrchIdFromChannelName(name: string): string | null {
-  if (!name.startsWith("orch-")) return null;
-  const rest = name.slice(5);
-  return rest.length > 0 ? rest : null;
+  if (!name) return null;
+  if (name.startsWith("orch-")) {
+    // Legacy convention: channel = `orch-${ORCH_ID}` where ORCH_ID itself
+    // begins with "orch-". Strip one prefix.
+    const rest = name.slice(5);
+    return rest.length > 0 ? rest : null;
+  }
+  // CTL-373: new convention — channel name IS the orch-id (no re-prefix).
+  if (name.startsWith("o-") && name.length > 2) return name;
+  return null;
 }
 
 const MESSAGE_TYPE_SET = new Set<string>(COMMS_MESSAGE_TYPES);

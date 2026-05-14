@@ -61,14 +61,24 @@ describe("isValidChannelName", () => {
 });
 
 describe("parseOrchIdFromChannelName", () => {
-  it("strips orch- prefix", () => {
+  it("strips orch- prefix (legacy channel naming)", () => {
     expect(parseOrchIdFromChannelName("orch-ctl-ux-apr20")).toBe("ctl-ux-apr20");
+  });
+  it("strips one orch- from double-prefixed legacy channels", () => {
+    // Today's in-flight orchestrators have channels like `orch-orch-foo-2026-05-12`
+    expect(parseOrchIdFromChannelName("orch-orch-foo-2026-05-12")).toBe("orch-foo-2026-05-12");
+  });
+  it("returns the channel verbatim for CTL-373 short-form orch-ids", () => {
+    expect(parseOrchIdFromChannelName("o-ctl-373")).toBe("o-ctl-373");
+    expect(parseOrchIdFromChannelName("o-adv-931-932-933")).toBe("o-adv-931-932-933");
+    expect(parseOrchIdFromChannelName("o-cycle-1")).toBe("o-cycle-1");
   });
   it("returns null when not an orch channel", () => {
     expect(parseOrchIdFromChannelName("demo")).toBeNull();
   });
   it("returns null when prefix only", () => {
     expect(parseOrchIdFromChannelName("orch-")).toBeNull();
+    expect(parseOrchIdFromChannelName("o-")).toBeNull();
   });
 });
 

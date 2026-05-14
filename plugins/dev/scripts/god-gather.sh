@@ -51,10 +51,11 @@ elapsed_human() {
 }
 
 # Classify a worktree directory name into: orchestrator, worker, pm, oneshot, other
+# Recognises both the legacy `orch-<slug>-<date>` form and the CTL-373 short form `o-<slug>`.
 classify_worktree() {
   local name="$1"
   case "$name" in
-    orch-*)
+    orch-*|o-*)
       # worker: ends with TICKET-NUM (uppercase letters dash digits)
       if echo "$name" | grep -qE '[A-Z][A-Z0-9]+-[0-9]+$'; then
         echo "worker"
