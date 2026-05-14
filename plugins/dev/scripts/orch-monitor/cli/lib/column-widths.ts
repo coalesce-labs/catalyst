@@ -14,7 +14,6 @@
  *   ORCH      ≥160 cols   catalyst.orchestrator.id (truncated to 16-18 cells
  *                         with ellipsis on long multi-ticket ids; CTL-383)
  *   WORKER    ≥180 cols   catalyst.worker.ticket
- *   EVENT-ID  ≥200 cols   first 8 chars of the per-event UUIDv4 (CTL-344)
  *
  * Numeric widths for non-optional columns are clamped between sensible min
  * and max so very narrow terminals stay readable and very wide ones don't
@@ -51,20 +50,17 @@ export interface ColumnWidths {
   ref: number;
   orch: number;
   worker: number;
-  eventId: number;
   // CTL-395: explicit width so Ink writes trailing spaces and clears ghost chars
   details: number;
   showStatus: boolean;
   showOrch: boolean;
   showWorker: boolean;
-  showEventId: boolean;
 }
 
 export function computeColumnWidths(columns: number): ColumnWidths {
   const showStatus = columns >= 100;
   const showOrch = columns >= 160;
   const showWorker = columns >= 180;
-  const showEventId = columns >= 200;
 
   const status = showStatus ? 3 : 0;
   const time = 10;
@@ -77,7 +73,6 @@ export function computeColumnWidths(columns: number): ColumnWidths {
   // <Text>); the saved cells widen DETAILS at terminals ≥240 cols.
   const orch = showOrch ? Math.min(18, Math.max(16, Math.floor(columns * 0.12))) : 0;
   const worker = showWorker ? 16 : 0;
-  const eventId = showEventId ? 10 : 0;
 
   // CTL-395: each visible column (except DETAILS) has marginRight={1}.
   // CTL-391 added icon as an always-present column, so 5 always-present columns
@@ -85,9 +80,8 @@ export function computeColumnWidths(columns: number): ColumnWidths {
   const marginCount = 5 // time, repo, icon, event, ref always present
     + (showStatus ? 1 : 0)
     + (showOrch ? 1 : 0)
-    + (showWorker ? 1 : 0)
-    + (showEventId ? 1 : 0);
-  const fixedTotal = status + time + repo + icon + event + ref + orch + worker + eventId + marginCount;
+    + (showWorker ? 1 : 0);
+  const fixedTotal = status + time + repo + icon + event + ref + orch + worker + marginCount;
   const details = Math.max(20, columns - fixedTotal);
 
   return {
@@ -99,11 +93,9 @@ export function computeColumnWidths(columns: number): ColumnWidths {
     ref,
     orch,
     worker,
-    eventId,
     details,
     showStatus,
     showOrch,
     showWorker,
-    showEventId,
   };
 }

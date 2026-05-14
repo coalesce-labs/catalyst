@@ -5,7 +5,6 @@ import {
   formatStatus,
   formatOrch,
   formatWorker,
-  formatEventIdShort,
 } from "../cli/lib/format.ts";
 
 const makeEvent = (overrides: Partial<CanonicalEvent> = {}): CanonicalEvent => ({
@@ -26,16 +25,14 @@ const makeEvent = (overrides: Partial<CanonicalEvent> = {}): CanonicalEvent => (
 });
 
 describe("computeColumnWidths", () => {
-  test("at 80 cols hides STATUS, ORCH, WORKER, EVENT-ID", () => {
+  test("at 80 cols hides STATUS, ORCH, WORKER", () => {
     const w = computeColumnWidths(80);
     expect(w.showStatus).toBe(false);
     expect(w.showOrch).toBe(false);
     expect(w.showWorker).toBe(false);
-    expect(w.showEventId).toBe(false);
     expect(w.status).toBe(0);
     expect(w.orch).toBe(0);
     expect(w.worker).toBe(0);
-    expect(w.eventId).toBe(0);
   });
 
   test("at 100 cols enables STATUS only", () => {
@@ -59,17 +56,14 @@ describe("computeColumnWidths", () => {
   test("at 180 cols enables STATUS + ORCH + WORKER", () => {
     const w = computeColumnWidths(180);
     expect(w.showWorker).toBe(true);
-    expect(w.showEventId).toBe(false);
     expect(w.worker).toBe(16);
   });
 
-  test("at 200 cols enables all optional columns", () => {
+  test("at 200 cols enables STATUS + ORCH + WORKER", () => {
     const w = computeColumnWidths(200);
     expect(w.showStatus).toBe(true);
     expect(w.showOrch).toBe(true);
     expect(w.showWorker).toBe(true);
-    expect(w.showEventId).toBe(true);
-    expect(w.eventId).toBe(10);
   });
 
   test("repo and ref widths clamp to sensible bounds", () => {
@@ -139,7 +133,7 @@ describe("computeColumnWidths", () => {
   });
 });
 
-describe("status/orch/worker/event-id formatters", () => {
+describe("status/orch/worker formatters", () => {
   test("formatStatus: CI success → ✓", () => {
     expect(
       formatStatus(makeEvent({
@@ -238,13 +232,4 @@ describe("status/orch/worker/event-id formatters", () => {
     expect(formatWorker(makeEvent())).toBe("");
   });
 
-  test("formatEventIdShort returns first 8 chars of UUID", () => {
-    expect(formatEventIdShort(makeEvent())).toBe("11111111");
-  });
-
-  test("formatEventIdShort returns empty string when id missing", () => {
-    const evt = makeEvent();
-    evt.id = "";
-    expect(formatEventIdShort(evt)).toBe("");
-  });
 });

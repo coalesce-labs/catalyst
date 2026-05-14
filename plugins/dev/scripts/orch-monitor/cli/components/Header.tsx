@@ -97,11 +97,6 @@ export function Header({ columns = 120, nlQuery, brokerState, version }: HeaderP
             <Text bold color="cyan">{"WORKER"}</Text>
           </Box>
         )}
-        {w.showEventId && (
-          <Box width={w.eventId} flexShrink={0} marginRight={1}>
-            <Text bold color="cyan">{"EVENT-ID"}</Text>
-          </Box>
-        )}
         <Box width={w.details} flexShrink={0}>
           <Text bold color="cyan">{"DETAILS"}</Text>
         </Box>
