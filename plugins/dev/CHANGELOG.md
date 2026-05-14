@@ -1,5 +1,29 @@
 # Changelog
 
+## [9.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.1.0...catalyst-dev-v9.2.0) (2026-05-14)
+
+
+### Features
+
+* **dev:** broaden HUD `/` filter to substring-match across all event fields (CTL-367) ([#644](https://github.com/coalesce-labs/catalyst/issues/644)) ([f900348](https://github.com/coalesce-labs/catalyst/commit/f9003483d18319bfd2135d7eabb13b4ff1594325))
+* **dev:** enrich session events with Claude Code metadata (CTL-374) ([#638](https://github.com/coalesce-labs/catalyst/issues/638)) ([d1f78e2](https://github.com/coalesce-labs/catalyst/commit/d1f78e20e1f67a04246a497060176ebe27106ac8))
+* **dev:** HUD — merge SOURCE + EVENT columns into single wider EVENT column (CTL-364) ([#645](https://github.com/coalesce-labs/catalyst/issues/645)) ([2ad9d26](https://github.com/coalesce-labs/catalyst/commit/2ad9d2620f9e079ec172c4bb758e2be63d9cd61a))
+* **dev:** HUD footer cleanup — right-align event count, separator, width hints (CTL-363) ([#627](https://github.com/coalesce-labs/catalyst/issues/627)) ([65cb93b](https://github.com/coalesce-labs/catalyst/commit/65cb93bf2b7370956c74077a9b92f0591cb3fe8a))
+* **dev:** lift cicd.pipeline.run.status to typed canonical attribute (CTL-366) ([#632](https://github.com/coalesce-labs/catalyst/issues/632)) ([3608818](https://github.com/coalesce-labs/catalyst/commit/3608818204b8ed4f45475d80aeed8f5e755aa495))
+* **dev:** orchestrator-id short form `o-<repo>-<tickets>` (CTL-373) ([#637](https://github.com/coalesce-labs/catalyst/issues/637)) ([3353d8c](https://github.com/coalesce-labs/catalyst/commit/3353d8c62f204a59af89256a46f4f0b3b46b4025))
+* **dev:** vcs.repository.name enrichment for linear/orchestrator/broker events (CTL-362) ([#628](https://github.com/coalesce-labs/catalyst/issues/628)) ([c6e6138](https://github.com/coalesce-labs/catalyst/commit/c6e61383ac130753c80cb2ba6fbba24e6f841a3b))
+
+
+### Bug Fixes
+
+* **dev:** canonical worker-event allowlist + schema-drift cleanup (CTL-370) ([#635](https://github.com/coalesce-labs/catalyst/issues/635)) ([94ea15d](https://github.com/coalesce-labs/catalyst/commit/94ea15d9f91e1d1170851f21198c2bc59bbdabe2))
+* **dev:** HUD DETAILS column truncates instead of wrapping (CTL-361) ([#626](https://github.com/coalesce-labs/catalyst/issues/626)) ([0e4e267](https://github.com/coalesce-labs/catalyst/commit/0e4e26774742396c9acea7056b1989a4e74a8be2))
+* **dev:** HUD filtered viewport — autoFollow UP scroll anchor (CTL-368) ([#630](https://github.com/coalesce-labs/catalyst/issues/630)) ([681f351](https://github.com/coalesce-labs/catalyst/commit/681f3517a8260a3978bc29813d290cb73991ddd2))
+* **dev:** NL query — refresh prompt schema, add events catalog, inject current time (CTL-365) ([#631](https://github.com/coalesce-labs/catalyst/issues/631)) ([506eb4f](https://github.com/coalesce-labs/catalyst/commit/506eb4f0a98b0f1f5b59403e8d80a2faa9f3d138))
+* **dev:** orchestrate dispatch prompt teaches broker Pattern 3 preference (CTL-371) ([#634](https://github.com/coalesce-labs/catalyst/issues/634)) ([ce2e0f2](https://github.com/coalesce-labs/catalyst/commit/ce2e0f25174c6b4cc457b9585976904e381182f6))
+* **dev:** reconcile orchestrate Phase 4 grep pipe with monitor-events prohibition (CTL-372) ([#636](https://github.com/coalesce-labs/catalyst/issues/636)) ([4aeae33](https://github.com/coalesce-labs/catalyst/commit/4aeae33f45a7e50dc169b990dfa5abd4863c418f))
+* **dev:** require wake narration line per Monitor wake (CTL-369) ([#633](https://github.com/coalesce-labs/catalyst/issues/633)) ([1bd684d](https://github.com/coalesce-labs/catalyst/commit/1bd684dfdaf75523e65fede45352c935aeb5fa3a))
+
 ## [9.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.0.0...catalyst-dev-v9.1.0) (2026-05-13)
 
 
