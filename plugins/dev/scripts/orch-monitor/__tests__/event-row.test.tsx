@@ -37,9 +37,11 @@ const longDetailsEvent: CanonicalEvent = {
 };
 
 // EventRow returns <Box>...{children}</Box>. The DETAILS cell is the one Box
-// in the tree with flexGrow === 1 (see EventRow.tsx). Its child is the Text
-// node whose wrap prop governs reflow behaviour.
-function findDetailsTextNode(root: ReactNode): ReactElement | null {
+// in the tree with width === w.details (CTL-395: explicit width replaced the
+// former flexGrow={1}). Its child is the Text node whose wrap prop governs
+// reflow behaviour.
+function findDetailsTextNode(root: ReactNode, columns: number): ReactElement | null {
+  const w = computeColumnWidths(columns);
   function isReactElement(node: unknown): node is ReactElement {
     return (
       typeof node === "object" &&
@@ -50,8 +52,8 @@ function findDetailsTextNode(root: ReactNode): ReactElement | null {
   }
   function walk(node: ReactNode): ReactElement | null {
     if (!isReactElement(node)) return null;
-    const props = node.props as { flexGrow?: number; children?: ReactNode };
-    if (props.flexGrow === 1) {
+    const props = node.props as { width?: number; children?: ReactNode };
+    if (props.width === w.details) {
       // The DETAILS Box. Its only child is the DETAILS Text node.
       const child = props.children;
       return isReactElement(child) ? child : null;
@@ -72,37 +74,40 @@ function findDetailsTextNode(root: ReactNode): ReactElement | null {
 
 describe("EventRow DETAILS cell (CTL-361)", () => {
   test("DETAILS Text uses wrap=\"truncate\" at narrow terminal width", () => {
+    const cols = 80;
     const element = EventRow({
       event: longDetailsEvent,
       selected: false,
-      columns: 80,
+      columns: cols,
       paused: true,
     });
-    const detailsText = findDetailsTextNode(element);
+    const detailsText = findDetailsTextNode(element, cols);
     if (!detailsText) throw new Error("DETAILS Text node not found");
     expect((detailsText.props as { wrap?: string }).wrap).toBe("truncate");
   });
 
   test("DETAILS Text uses wrap=\"truncate\" at wide terminal width", () => {
+    const cols = 200;
     const element = EventRow({
       event: longDetailsEvent,
       selected: false,
-      columns: 200,
+      columns: cols,
       paused: true,
     });
-    const detailsText = findDetailsTextNode(element);
+    const detailsText = findDetailsTextNode(element, cols);
     if (!detailsText) throw new Error("DETAILS Text node not found");
     expect((detailsText.props as { wrap?: string }).wrap).toBe("truncate");
   });
 
   test("DETAILS Text receives the full formatDetails output (renderer clips, formatter does not)", () => {
+    const cols = 80;
     const element = EventRow({
       event: longDetailsEvent,
       selected: false,
-      columns: 80,
+      columns: cols,
       paused: true,
     });
-    const detailsText = findDetailsTextNode(element);
+    const detailsText = findDetailsTextNode(element, cols);
     if (!detailsText) throw new Error("DETAILS Text node not found");
     const children = (detailsText.props as { children?: unknown }).children;
     expect(children).toBe(formatDetails(longDetailsEvent));
@@ -220,10 +225,10 @@ interface CellSnapshot {
 }
 
 function collectFixedWidthCells(root: ReactNode): CellSnapshot[] {
-  // Ink's <Box> defaults flexGrow to 0, so a fixed-width cell has both an
-  // explicit width and flexGrow === 0 (or unset). The DETAILS Box opts in
-  // with flexGrow === 1 — exclude it here so this helper isolates the
-  // fixed-width column row.
+  // Collect all fixed-width cells (explicit width). CTL-395: DETAILS now also
+  // uses an explicit width instead of flexGrow={1}, so it appears in this list
+  // as the last cell. CTL-391 tests find cells by specific widths, so DETAILS
+  // being present at the end does not affect those assertions.
   const cells: CellSnapshot[] = [];
   function isReactElement(node: unknown): node is ReactElement {
     return typeof node === "object" && node !== null && "props" in node && "type" in node;
@@ -232,10 +237,9 @@ function collectFixedWidthCells(root: ReactNode): CellSnapshot[] {
     if (!isReactElement(node)) return;
     const props = node.props as {
       width?: number;
-      flexGrow?: number;
       children?: ReactNode;
     };
-    if (typeof props.width === "number" && props.flexGrow !== 1) {
+    if (typeof props.width === "number") {
       const child = props.children;
       if (isReactElement(child)) {
         const childProps = child.props as { children?: unknown; wrap?: string };
