@@ -8,6 +8,7 @@ import {
   type CanonicalEvent,
   type Attributes,
 } from "./canonical-event";
+import { type PrCacheLike } from "./pr-cache";
 
 const GITHUB_SERVICE_NAME = "catalyst.github" as const;
 
@@ -64,6 +65,10 @@ export interface WebhookHandlerDeps {
   /** Cap for the in-memory delivery-ID dedup set. Default 1000. */
   idempotencyMax?: number;
   logger?: WebhookLogger;
+  /** Optional SHA→PR cache. When provided, pull_request.opened/synchronize events
+   * populate it and check_suite/workflow_run events use it to recover PR numbers
+   * for push-triggered CI runs where pull_requests[] is empty. */
+  prCache?: PrCacheLike;
 }
 
 /**
@@ -155,6 +160,7 @@ function deploymentStatusSeverity(state: string): "INFO" | "WARN" | "ERROR" {
 export function buildEventLogEnvelope(
   event: WebhookEvent,
   ts: string = new Date().toISOString(),
+  opts?: { cachedPrNumber?: number },
 ): CanonicalEvent | null {
   switch (event.kind) {
     case "pull_request": {
@@ -231,9 +237,12 @@ export function buildEventLogEnvelope(
         "vcs.repository.name": event.repo,
         "cicd.pipeline.run.status": event.status,
       };
-      if (event.prNumbers.length === 1) {
-        attrs["vcs.pr.number"] = event.prNumbers[0];
-      }
+      if (event.headSha) attrs["vcs.revision"] = event.headSha;
+      const effectivePr =
+        event.prNumbers.length >= 1
+          ? event.prNumbers[0]
+          : opts?.cachedPrNumber ?? null;
+      if (effectivePr !== null) attrs["vcs.pr.number"] = effectivePr;
       if (event.conclusion !== null) {
         attrs["cicd.pipeline.run.conclusion"] = event.conclusion;
       }
@@ -242,8 +251,7 @@ export function buildEventLogEnvelope(
         eventName,
         entity: "check_suite",
         action: event.status,
-        label:
-          event.prNumbers.length > 0 ? `PR #${event.prNumbers[0]}` : undefined,
+        label: effectivePr !== null ? `PR #${effectivePr}` : undefined,
         severity: conclusionSeverity(event.conclusion),
         attrs,
         message: `${eventName} for ${event.repo}${
@@ -415,9 +423,12 @@ export function buildEventLogEnvelope(
         "cicd.pipeline.run.status": event.status,
         "cicd.pipeline.name": event.name,
       };
-      if (event.prNumbers.length === 1) {
-        attrs["vcs.pr.number"] = event.prNumbers[0];
-      }
+      if (event.headBranch) attrs["vcs.ref.name"] = event.headBranch;
+      const effectivePr =
+        event.prNumbers.length >= 1
+          ? event.prNumbers[0]
+          : opts?.cachedPrNumber ?? null;
+      if (effectivePr !== null) attrs["vcs.pr.number"] = effectivePr;
       if (event.conclusion !== null) {
         attrs["cicd.pipeline.run.conclusion"] = event.conclusion;
       }
@@ -427,7 +438,7 @@ export function buildEventLogEnvelope(
         entity: "workflow_run",
         action: event.action,
         label:
-          event.prNumbers.length > 0 ? `PR #${event.prNumbers[0]}` : event.name,
+          effectivePr !== null ? `PR #${effectivePr}` : event.name,
         severity: conclusionSeverity(event.conclusion),
         attrs,
         message: `${eventName} ${event.name} in ${event.repo} (${event.conclusion ?? event.status})`,
@@ -524,6 +535,18 @@ export function createWebhookHandler(
               );
             }
           }
+        }
+        if (
+          deps.prCache &&
+          event.headSha &&
+          (event.action === "opened" || event.action === "synchronize")
+        ) {
+          deps.prCache.put(
+            event.repo,
+            event.headSha,
+            event.headRef,
+            event.number,
+          );
         }
         await deps.prFetcher.force({ repo: event.repo, number: event.number });
         break;
@@ -632,7 +655,21 @@ export function createWebhookHandler(
     // Log every accepted event to the unified event log BEFORE dispatching, so
     // a crash mid-dispatch can be reconciled from the log on restart.
     if (deps.eventLog && event.kind !== "ignored") {
-      const envelope = buildEventLogEnvelope(event);
+      let cachedPrNumber: number | undefined;
+      if (
+        deps.prCache &&
+        (event.kind === "check_suite" || event.kind === "workflow_run") &&
+        event.prNumbers.length === 0 &&
+        event.headSha
+      ) {
+        cachedPrNumber =
+          deps.prCache.get(event.repo, event.headSha) ?? undefined;
+      }
+      const envelope = buildEventLogEnvelope(
+        event,
+        undefined,
+        cachedPrNumber !== undefined ? { cachedPrNumber } : undefined,
+      );
       if (envelope !== null) {
         if (deps.resolveOrchestrator) {
           const attribInput = attributionInputFor(event);

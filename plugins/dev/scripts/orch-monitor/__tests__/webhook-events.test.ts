@@ -171,13 +171,14 @@ describe("parseWebhookEvent", () => {
   });
 
   describe("check_suite", () => {
-    it("extracts pr numbers, conclusion, and head_branch", () => {
+    it("extracts pr numbers, conclusion, head_branch, and head_sha", () => {
       const got = parseWebhookEvent("check_suite", {
         ...REPO,
         check_suite: {
           status: "completed",
           conclusion: "success",
           head_branch: "orch-foo-CTL-99",
+          head_sha: "deadbeef1234",
           pull_requests: [{ number: 70 }, { number: 71 }],
         },
       });
@@ -187,9 +188,10 @@ describe("parseWebhookEvent", () => {
       expect(got.conclusion).toBe("success");
       expect(got.status).toBe("completed");
       expect(got.headRef).toBe("orch-foo-CTL-99");
+      expect(got.headSha).toBe("deadbeef1234");
     });
 
-    it("handles empty pr list", () => {
+    it("handles empty pr list and missing head_sha", () => {
       const got = parseWebhookEvent("check_suite", {
         ...REPO,
         check_suite: { status: "in_progress", pull_requests: [] },
@@ -199,6 +201,7 @@ describe("parseWebhookEvent", () => {
       expect(got.prNumbers).toEqual([]);
       expect(got.conclusion).toBeNull();
       expect(got.headRef).toBe("");
+      expect(got.headSha).toBe("");
     });
   });
 

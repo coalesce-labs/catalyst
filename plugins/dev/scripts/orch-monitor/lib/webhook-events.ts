@@ -35,6 +35,8 @@ export type WebhookEvent =
       mergeable: boolean | null;
       /** Head branch name (CTL-234 — used to attribute the event to an orchestrator). Empty when payload omits it. */
       headRef: string;
+      /** Head commit SHA from `pull_request.head.sha` (CTL-396 — used to populate the SHA→PR cache for check_suite/workflow_run correlation). Empty when payload omits it. */
+      headSha: string;
     }
   | {
       kind: "pull_request_review";
@@ -62,6 +64,8 @@ export type WebhookEvent =
       conclusion: string | null;
       status: string;
       headRef: string;
+      /** Head commit SHA from `check_suite.head_sha` (CTL-396 — used for SHA→PR cache lookup). Empty when payload omits it. */
+      headSha: string;
     }
   | {
       kind: "status";
@@ -205,6 +209,11 @@ function getPrHeadRef(pr: Record<string, unknown>): string {
   return isObject(head) ? getStr(head, "ref") : "";
 }
 
+function getPrHeadSha(pr: Record<string, unknown>): string {
+  const head = pr.head;
+  return isObject(head) ? getStr(head, "sha") : "";
+}
+
 export function parseWebhookEvent(
   eventName: string,
   payload: unknown,
@@ -262,6 +271,7 @@ function parsePullRequest(
     draft: getBool(pr, "draft"),
     mergeable: getOptBool(pr, "mergeable"),
     headRef: getPrHeadRef(pr),
+    headSha: getPrHeadSha(pr),
   };
 }
 
@@ -335,6 +345,7 @@ function parseCheckSuite(
     conclusion: getOptStr(suite, "conclusion"),
     status: getStr(suite, "status"),
     headRef: getStr(suite, "head_branch"),
+    headSha: getStr(suite, "head_sha"),
   };
 }
 

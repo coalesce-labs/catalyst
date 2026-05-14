@@ -13,6 +13,7 @@ import {
 } from "../lib/webhook-handler";
 import type { EventLogWriter } from "../lib/event-log";
 import type { CanonicalEvent } from "../lib/canonical-event";
+import type { PrCacheLike } from "../lib/pr-cache";
 
 const SECRET = "test-secret";
 
@@ -72,6 +73,18 @@ class FakeEventLog implements EventLogWriter {
     }
     this.appends.push(envelope);
     return Promise.resolve();
+  }
+}
+
+class FakePrCache implements PrCacheLike {
+  store = new Map<string, number>();
+  puts: Array<{ repo: string; headSha: string; headBranch: string; prNumber: number }> = [];
+  put(repo: string, headSha: string, headBranch: string, prNumber: number): void {
+    this.store.set(`${repo}:${headSha}`, prNumber);
+    this.puts.push({ repo, headSha, headBranch, prNumber });
+  }
+  get(repo: string, headSha: string): number | null {
+    return this.store.get(`${repo}:${headSha}`) ?? null;
   }
 }
 
@@ -556,6 +569,148 @@ describe("createWebhookHandler", () => {
   });
 });
 
+// CTL-396: pr-cache integration tests
+describe("createWebhookHandler — pr-cache (CTL-396)", () => {
+  it("pull_request.opened populates the pr cache", async () => {
+    const prCache = new FakePrCache();
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      prCache,
+    });
+    await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "opened",
+        pull_request: {
+          number: 55,
+          merged: false,
+          head: { ref: "feature-branch", sha: "abc111" },
+        },
+      }),
+    );
+    expect(prCache.puts).toEqual([
+      { repo: "owner/repo", headSha: "abc111", headBranch: "feature-branch", prNumber: 55 },
+    ]);
+  });
+
+  it("pull_request.synchronize updates the pr cache", async () => {
+    const prCache = new FakePrCache();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      prCache,
+    });
+    await handler.handle(
+      makeReq({
+        ...REPO,
+        action: "synchronize",
+        pull_request: {
+          number: 56,
+          merged: false,
+          head: { ref: "feature-branch", sha: "abc222" },
+        },
+      }),
+    );
+    expect(prCache.puts.length).toBe(1);
+    expect(prCache.puts[0]).toMatchObject({ headSha: "abc222", prNumber: 56 });
+  });
+
+  it("check_suite with empty prNumbers uses cache to set vcs.pr.number", async () => {
+    const prCache = new FakePrCache();
+    prCache.store.set("owner/repo:deadbeef", 77);
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      prCache,
+    });
+    await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          check_suite: {
+            status: "completed",
+            conclusion: "success",
+            head_sha: "deadbeef",
+            head_branch: "main",
+            pull_requests: [],
+          },
+        },
+        { "x-github-event": "check_suite" },
+      ),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.attributes["vcs.pr.number"]).toBe(77);
+  });
+
+  it("workflow_run with empty prNumbers uses cache to set vcs.pr.number", async () => {
+    const prCache = new FakePrCache();
+    prCache.store.set("owner/repo:sha999", 88);
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      prCache,
+    });
+    await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          action: "completed",
+          workflow_run: {
+            id: 888,
+            workflow_id: 1,
+            name: "CI",
+            head_sha: "sha999",
+            head_branch: "main",
+            status: "completed",
+            conclusion: "success",
+            run_number: 1,
+            html_url: "https://github.com/owner/repo/actions/runs/888",
+            pull_requests: [],
+          },
+        },
+        { "x-github-event": "workflow_run" },
+      ),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.attributes["vcs.pr.number"]).toBe(88);
+  });
+
+  it("check_suite without cache hit leaves vcs.pr.number undefined", async () => {
+    const prCache = new FakePrCache();
+    const eventLog = new FakeEventLog();
+    const handler = createWebhookHandler({
+      secret: SECRET,
+      prFetcher: new FakeFetcher(),
+      eventLog,
+      prCache,
+    });
+    await handler.handle(
+      makeReq(
+        {
+          ...REPO,
+          check_suite: {
+            status: "completed",
+            conclusion: "success",
+            head_sha: "nomatch",
+            head_branch: "main",
+            pull_requests: [],
+          },
+        },
+        { "x-github-event": "check_suite" },
+      ),
+    );
+    expect(eventLog.appends.length).toBe(1);
+    expect(eventLog.appends[0]?.attributes["vcs.pr.number"]).toBeUndefined();
+  });
+});
+
 describe("buildEventLogEnvelope (canonical)", () => {
   it("maps pull_request.closed (merged=true) → github.pr.merged with vcs attributes", () => {
     const env = buildEventLogEnvelope(
@@ -570,6 +725,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
         draft: false,
         mergeable: true,
         headRef: "",
+        headSha: "",
       },
       TS,
     );
@@ -597,6 +753,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
         draft: false,
         mergeable: null,
         headRef: "",
+        headSha: "",
       },
       TS,
     );
@@ -616,6 +773,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
         draft: false,
         mergeable: null,
         headRef: "",
+        headSha: "",
       },
       TS,
     );
@@ -635,6 +793,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
         draft: false,
         mergeable: null,
         headRef: "",
+        headSha: "",
       },
       TS,
     );
@@ -654,6 +813,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
         draft: false,
         mergeable: null,
         headRef: "",
+        headSha: "",
       },
       TS,
     );
@@ -734,7 +894,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
     expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBeUndefined();
   });
 
-  it("workflow_run with multiple PRs omits vcs.pr.number (multi-PR ambiguity)", () => {
+  it("workflow_run with multiple PRs uses the first PR number (first-match policy)", () => {
     const env = buildEventLogEnvelope(
       {
         kind: "workflow_run",
@@ -753,7 +913,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
       },
       TS,
     );
-    expect(env!.attributes["vcs.pr.number"]).toBeUndefined();
+    expect(env!.attributes["vcs.pr.number"]).toBe(326);
     const payload = env!.body.payload as { prNumbers: number[] };
     expect(payload.prNumbers).toEqual([326, 327]);
   });
@@ -767,6 +927,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
         status: "completed",
         conclusion: "failure",
         headRef: "",
+        headSha: "",
       },
       TS,
     );
@@ -787,6 +948,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
         status: "in_progress",
         conclusion: null,
         headRef: "feature-branch",
+        headSha: "",
       },
       TS,
     );
@@ -928,6 +1090,105 @@ describe("buildEventLogEnvelope (canonical)", () => {
     expect(env!.attributes["vcs.ref.name"]).toBe("refs/heads/main");
     expect(env!.attributes["vcs.revision"]).toBe("bbb");
   });
+
+  // CTL-396: check_suite with multiple PRs uses first match
+  it("check_suite with multiple PRs uses first PR number (first-match policy)", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "check_suite",
+        repo: "o/r",
+        prNumbers: [100, 101],
+        status: "completed",
+        conclusion: "success",
+        headRef: "orch-foo-CTL-99",
+        headSha: "abc456",
+      },
+      TS,
+    );
+    expect(env!.attributes["vcs.pr.number"]).toBe(100);
+  });
+
+  // CTL-396: check_suite headSha → vcs.revision
+  it("check_suite with headSha sets vcs.revision", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "check_suite",
+        repo: "o/r",
+        prNumbers: [],
+        status: "completed",
+        conclusion: "success",
+        headRef: "main",
+        headSha: "deadbeef1234",
+      },
+      TS,
+    );
+    expect(env!.attributes["vcs.revision"]).toBe("deadbeef1234");
+  });
+
+  // CTL-396: workflow_run with no PR but headBranch → vcs.ref.name
+  it("workflow_run with no PR and headBranch sets vcs.ref.name", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "workflow_run",
+        repo: "o/r",
+        action: "completed",
+        workflowId: 99,
+        runId: 600,
+        name: "Deploy",
+        headSha: "abc999",
+        headBranch: "main",
+        status: "completed",
+        conclusion: "success",
+        runNumber: 10,
+        htmlUrl: "https://github.com/o/r/actions/runs/600",
+        prNumbers: [],
+      },
+      TS,
+    );
+    expect(env!.attributes["vcs.pr.number"]).toBeUndefined();
+    expect(env!.attributes["vcs.ref.name"]).toBe("main");
+  });
+
+  // CTL-396: cachedPrNumber opt falls through when prNumbers is empty
+  it("check_suite with empty prNumbers uses cachedPrNumber from opts", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "check_suite",
+        repo: "o/r",
+        prNumbers: [],
+        status: "completed",
+        conclusion: "success",
+        headRef: "main",
+        headSha: "aabbcc",
+      },
+      TS,
+      { cachedPrNumber: 42 },
+    );
+    expect(env!.attributes["vcs.pr.number"]).toBe(42);
+  });
+
+  it("workflow_run with empty prNumbers uses cachedPrNumber from opts", () => {
+    const env = buildEventLogEnvelope(
+      {
+        kind: "workflow_run",
+        repo: "o/r",
+        action: "completed",
+        workflowId: 1,
+        runId: 700,
+        name: "CI",
+        headSha: "aabbcc",
+        headBranch: "main",
+        status: "completed",
+        conclusion: "success",
+        runNumber: 1,
+        htmlUrl: "https://github.com/o/r/actions/runs/700",
+        prNumbers: [],
+      },
+      TS,
+      { cachedPrNumber: 99 },
+    );
+    expect(env!.attributes["vcs.pr.number"]).toBe(99);
+  });
 });
 
 describe("attributionInputFor", () => {
@@ -943,6 +1204,7 @@ describe("attributionInputFor", () => {
       draft: false,
       mergeable: null,
       headRef: "orch-foo-CTL-1",
+      headSha: "",
     });
     expect(got).toEqual({ repo: "o/r", pr: 42, headRef: "orch-foo-CTL-1" });
   });
@@ -955,6 +1217,7 @@ describe("attributionInputFor", () => {
       conclusion: "failure",
       status: "completed",
       headRef: "orch-foo-CTL-2",
+      headSha: "",
     });
     expect(got).toEqual({ repo: "o/r", pr: 10, headRef: "orch-foo-CTL-2" });
   });
