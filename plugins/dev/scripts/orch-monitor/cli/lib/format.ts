@@ -156,15 +156,6 @@ export function formatWorker(event: CanonicalEvent): string {
   return event.attributes?.["catalyst.worker.ticket"] ?? "";
 }
 
-// CTL-344 made every canonical event carry a UUIDv4 .id. The full UUID is too
-// long for an inline column; the first 8 chars are still unique enough to
-// correlate against the `lookup_jq` query in source_events.
-export function formatEventIdShort(event: CanonicalEvent): string {
-  const id = event.id;
-  if (!id) return "";
-  return id.slice(0, 8);
-}
-
 export function formatRef(event: CanonicalEvent): string {
   const name = event.attributes?.["event.name"];
   if (name === "comms.message.posted") {

@@ -10,7 +10,6 @@ import {
   formatStatus,
   formatOrch,
   formatWorker,
-  formatEventIdShort,
 } from "../lib/format.ts";
 import { getRowColor } from "../lib/colors.ts";
 import { computeColumnWidths } from "../lib/column-widths.ts";
@@ -96,11 +95,6 @@ export function EventRow({ event, selected, columns, paused = true, wrapMode = '
       {w.showWorker && (
         <Box width={w.worker} flexShrink={0} marginRight={1}>
           <Text color={color} inverse={inverse}>{formatWorker(event)}</Text>
-        </Box>
-      )}
-      {w.showEventId && (
-        <Box width={w.eventId} flexShrink={0} marginRight={1}>
-          <Text color={color} inverse={inverse} dimColor>{formatEventIdShort(event)}</Text>
         </Box>
       )}
       <Box width={w.details} flexShrink={0}>

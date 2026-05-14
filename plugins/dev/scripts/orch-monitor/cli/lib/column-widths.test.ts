@@ -16,14 +16,13 @@ describe("computeColumnWidths — details field (CTL-395)", () => {
     for (const cols of [80, 100, 120, 160, 180, 200, 250, 300]) {
       const w = computeColumnWidths(cols);
       const marginCount =
-        4 + // time, repo, event, ref
+        5 + // time, repo, icon, event, ref always present
         (w.showStatus ? 1 : 0) +
         (w.showOrch ? 1 : 0) +
-        (w.showWorker ? 1 : 0) +
-        (w.showEventId ? 1 : 0);
+        (w.showWorker ? 1 : 0);
       const total =
-        w.status + w.time + w.repo + w.event + w.ref +
-        w.orch + w.worker + w.eventId + w.details + marginCount;
+        w.status + w.time + w.repo + w.icon + w.event + w.ref +
+        w.orch + w.worker + w.details + marginCount;
       expect(total).toBeLessThanOrEqual(cols);
     }
   });
