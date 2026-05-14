@@ -13,6 +13,8 @@ interface FilterInputProps {
   autoFollow: boolean;
   statusMsg: string | null;
   activeSinceLabel: string | null;
+  // CTL-384: shows [WRAP] chip when wrap mode is active.
+  wrapMode?: 'truncate' | 'wrap';
 }
 
 // CTL-363: wide-terminal hint set adds h:help / G:newest / r:reset.
@@ -49,6 +51,7 @@ export function FilterInput({
   autoFollow,
   statusMsg,
   activeSinceLabel,
+  wrapMode = 'truncate',
 }: FilterInputProps) {
   const sinceChip = formatSinceChipLabel(activeSinceLabel);
   return (
@@ -70,6 +73,7 @@ export function FilterInput({
         ? <Text color="green">{" [LIVE]"}</Text>
         : <Text dimColor>{" [PAUSED — G to follow]"}</Text>
       }
+      {wrapMode === 'wrap' && <Text color="cyan">{" [WRAP]"}</Text>}
     </Box>
   );
 }

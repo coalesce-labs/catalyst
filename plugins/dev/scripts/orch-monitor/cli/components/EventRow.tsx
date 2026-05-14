@@ -22,6 +22,9 @@ interface EventRowProps {
   // EventList passes the inverse of autoFollow so the row knows whether to
   // render an inverse-video cursor. In live mode the cursor is invisible.
   paused?: boolean;
+  // CTL-384: global wrap mode toggle. Default truncate keeps each event on one
+  // line; 'wrap' reflows long DETAILS content across multiple terminal lines.
+  wrapMode?: 'truncate' | 'wrap';
 }
 
 // CTL-350: column widths come from a shared module so EventRow and Header
@@ -38,7 +41,7 @@ interface EventRowProps {
 // CTL-351: every fixed-width column has a 1-col right margin so the columns
 // breathe and abutting cells (TIME↔REPO, EVENT↔REF) don't visually run
 // together on rows with short content.
-export function EventRow({ event, selected, columns, paused = true }: EventRowProps) {
+export function EventRow({ event, selected, columns, paused = true, wrapMode = 'truncate' }: EventRowProps) {
   const color = getRowColor(event);
   // Inverse video swaps fg/bg at the terminal level (ANSI SGR 7), guaranteeing
   // contrast across themes without composing same-family fg/bg pairs. Hidden
@@ -94,7 +97,7 @@ export function EventRow({ event, selected, columns, paused = true }: EventRowPr
         </Box>
       )}
       <Box flexGrow={1}>
-        <Text color={color} inverse={inverse} wrap="truncate">{formatDetails(event)}</Text>
+        <Text color={color} inverse={inverse} wrap={wrapMode}>{formatDetails(event)}</Text>
       </Box>
     </Box>
   );

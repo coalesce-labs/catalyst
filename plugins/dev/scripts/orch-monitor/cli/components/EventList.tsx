@@ -13,6 +13,8 @@ interface EventListProps {
   // selection cursor is invisible in live mode and revealed once the user
   // navigates via Up/Down (which pauses autoFollow inside useSelection).
   paused?: boolean;
+  // CTL-384: global wrap mode toggle forwarded to each EventRow.
+  wrapMode?: 'truncate' | 'wrap';
 }
 
 export function EventList({
@@ -23,6 +25,7 @@ export function EventList({
   columns,
   compact,
   paused = true,
+  wrapMode = 'truncate',
 }: EventListProps) {
   const visible = events.slice(scrollOffset, scrollOffset + visibleRows);
 
@@ -35,6 +38,7 @@ export function EventList({
           selected={scrollOffset + i === selectedIndex}
           columns={columns}
           paused={paused}
+          wrapMode={wrapMode}
         />
       ))}
     </Box>
