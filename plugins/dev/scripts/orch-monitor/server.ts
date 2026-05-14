@@ -69,6 +69,7 @@ import {
   createWebhookHandler,
   type WebhookHandler,
 } from "./lib/webhook-handler";
+import { createFileBasedPrCache } from "./lib/pr-cache";
 import {
   resolveOrchestrator as resolveOrchestratorFn,
   type ActiveOrchestrator,
@@ -612,6 +613,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
       resolveOrchestrator: (input) =>
         resolveOrchestratorFn(input, getActiveOrchestrators()),
       emit: (type, data) => emit(type, data),
+      prCache: createFileBasedPrCache(),
       logger: {
         info: (m) => console.info(m),
         warn: (m) => console.warn(m),
