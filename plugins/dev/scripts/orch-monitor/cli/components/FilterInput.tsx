@@ -20,7 +20,10 @@ export const WIDE_HINTS_COLS = 160;
 
 export function formatFilterHints(cols: number, focused: boolean): string {
   const focus = focused ? "Esc:clear" : "/:focus";
-  const base = `${focus} | t:trace o:orch | Enter:detail q:quit`;
+  // CTL-388: renamed "trace/orch" → "scope-tr/scope-orch" to clarify the verb
+  // (you're scoping the view to that ID, not "pivoting" through it). The o/t
+  // handlers also gained a pause-first behavior in live mode (see hud.tsx).
+  const base = `${focus} | t:scope-tr o:scope-orch | Enter:detail q:quit`;
   if (cols >= WIDE_HINTS_COLS) {
     return `${base} | h:help G:newest r:reset`;
   }
