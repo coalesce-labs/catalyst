@@ -12,6 +12,7 @@ interface FilterInputProps {
   totalCount: number;
   autoFollow: boolean;
   statusMsg: string | null;
+  activeSinceLabel: string | null;
 }
 
 // CTL-363: wide-terminal hint set adds h:help / G:newest / r:reset.
@@ -30,6 +31,13 @@ export function formatFilterHints(cols: number, focused: boolean): string {
   return base;
 }
 
+// CTL-387: footer chip text when a user-interactive `:since` is active.
+// Returns null when no active label (chip should not render).
+export function formatSinceChipLabel(activeLabel: string | null): string | null {
+  if (!activeLabel) return null;
+  return `[since: ${activeLabel}]`;
+}
+
 export function FilterInput({
   value,
   focused,
@@ -40,11 +48,16 @@ export function FilterInput({
   totalCount,
   autoFollow,
   statusMsg,
+  activeSinceLabel,
 }: FilterInputProps) {
+  const sinceChip = formatSinceChipLabel(activeSinceLabel);
   return (
     <Box flexDirection="row">
       {pivot && (
         <Text color="cyan">{`[${pivot.type}:${pivot.id.slice(0, 12)}…] `}</Text>
+      )}
+      {sinceChip && (
+        <Text color="cyan">{`${sinceChip} `}</Text>
       )}
       <Text dimColor={!focused}>{"/ "}</Text>
       <TextInput value={value} onChange={onChange} focus={focused} placeholder="filter (substring — all fields)" />
