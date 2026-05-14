@@ -1,6 +1,7 @@
 import { Box } from "ink";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
 import { EventRow } from "./EventRow.tsx";
+import type { HudColumnConfig } from "../../lib/monitor-config.ts";
 
 interface EventListProps {
   events: CanonicalEvent[];
@@ -15,6 +16,8 @@ interface EventListProps {
   paused?: boolean;
   // CTL-384: global wrap mode toggle forwarded to each EventRow.
   wrapMode?: 'truncate' | 'wrap';
+  // CTL-394: optional user column config forwarded to each EventRow.
+  columnConfig?: HudColumnConfig[] | null;
 }
 
 export function EventList({
@@ -26,6 +29,7 @@ export function EventList({
   compact,
   paused = true,
   wrapMode = 'truncate',
+  columnConfig,
 }: EventListProps) {
   const visible = events.slice(scrollOffset, scrollOffset + visibleRows);
 
@@ -39,6 +43,7 @@ export function EventList({
           columns={columns}
           paused={paused}
           wrapMode={wrapMode}
+          columnConfig={columnConfig}
         />
       ))}
     </Box>

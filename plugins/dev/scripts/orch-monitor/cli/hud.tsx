@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { homedir } from "os";
 import { render, useApp, useInput, Box, Text } from "ink";
 import { Header } from "./components/Header.tsx";
 import { readBrokerState, type BrokerState } from "./lib/broker-key-health.ts";
@@ -30,6 +31,7 @@ import {
 import { buildSystemPrompt } from "../../lib/dsl-prompt.mjs";
 import type { CanonicalEvent } from "../lib/canonical-event.ts";
 import { readPluginVersion, formatVersionBlock } from "./lib/version.ts";
+import { loadHudConfig } from "../lib/monitor-config.ts";
 
 interface AppProps {
   repoFilter: string;
@@ -132,6 +134,12 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // the chip disappears when the window matches HUD startup.
   const [activeSinceTs, setActiveSinceTs] = useState(initSinceTs);
   const [activeSinceLabel, setActiveSinceLabel] = useState<string | null>(null);
+
+  // CTL-394: load once — the user must restart the HUD to pick up config changes.
+  const hudColumnConfig = useMemo(
+    () => loadHudConfig(`${homedir()}/.config/catalyst/monitor.json`),
+    [],
+  );
 
   const { events, loading } = useEventLog({ repoFilter, predicate, sinceTs: activeSinceTs });
 
@@ -412,6 +420,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           nlQuery={dslState?.nlQuery}
           brokerState={brokerState}
           version={{ display: versionChip.display, isLocal: versionChip.isLocal }}
+          columnConfig={hudColumnConfig}
         />
       </Box>
       <Box flexDirection="column" flexGrow={(inDetailMode || showHelp) ? 0 : 1} flexShrink={1}>
@@ -432,6 +441,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
             compact={inDetailMode || showHelp}
             paused={!autoFollow}
             wrapMode={wrapMode}
+            columnConfig={hudColumnConfig}
           />
         )}
       </Box>

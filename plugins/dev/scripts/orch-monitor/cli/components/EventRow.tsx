@@ -1,18 +1,9 @@
 import { Box, Text } from "ink";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
-import {
-  formatTime,
-  formatRepo,
-  formatIcon,
-  formatEvent,
-  formatRef,
-  formatDetails,
-  formatStatus,
-  formatOrch,
-  formatWorker,
-} from "../lib/format.ts";
+import { formatRef, formatOrch } from "../lib/format.ts";
 import { getRowColor } from "../lib/colors.ts";
-import { computeColumnWidths } from "../lib/column-widths.ts";
+import { resolveColumns, hasOrchColumn } from "../lib/column-widths.ts";
+import type { HudColumnConfig } from "../../lib/monitor-config.ts";
 
 interface EventRowProps {
   event: CanonicalEvent;
@@ -25,6 +16,8 @@ interface EventRowProps {
   // CTL-384: global wrap mode toggle. Default truncate keeps each event on one
   // line; 'wrap' reflows long DETAILS content across multiple terminal lines.
   wrapMode?: 'truncate' | 'wrap';
+  // CTL-394: optional user column config loaded from ~/.config/catalyst/monitor.json.
+  columnConfig?: HudColumnConfig[] | null;
 }
 
 // CTL-350: column widths come from a shared module so EventRow and Header
@@ -34,23 +27,20 @@ interface EventRowProps {
 // wide terminals.
 // CTL-391: ICON column carries the source-family Nerd Font glyph in its
 // own 1-cell box to the left of EVENT, freeing EVENT to show the raw
-// `event.name` attribute verbatim. When no Nerd Font is detected the
-// cell renders blank but its width stays reserved so columns stay
-// aligned across heterogeneous rows.
+// `event.name` attribute verbatim.
 // CTL-395: explicit `width={w.details}` replaces `flexGrow={1}` so Ink pads
 // the cell to a fixed width and writes trailing spaces over any ghost chars
-// left by a prior longer string when the terminal narrows or the visible row
-// window scrolls new events into existing positions.
-// CTL-351: every fixed-width column has a 1-col right margin so the columns
-// breathe and abutting cells (TIME↔REPO, EVENT↔REF) don't visually run
-// together on rows with short content.
-export function EventRow({ event, selected, columns, paused = true, wrapMode = 'truncate' }: EventRowProps) {
+// left by a prior longer string.
+// CTL-394: columns are now data-driven via resolveColumns() — EventRow
+// iterates the resolved list so custom column order/visibility/widths from
+// ~/.config/catalyst/monitor.json are honoured without touching this file.
+export function EventRow({ event, selected, columns, paused = true, wrapMode = 'truncate', columnConfig }: EventRowProps) {
   const color = getRowColor(event);
   // Inverse video swaps fg/bg at the terminal level (ANSI SGR 7), guaranteeing
   // contrast across themes without composing same-family fg/bg pairs. Hidden
   // in live mode so the cursor doesn't distract from streaming events.
   const inverse = selected && paused;
-  const w = computeColumnWidths(columns);
+  const resolved = resolveColumns(columns, columnConfig);
 
   // CTL-355: when REF would render the same value as ORCH (common for
   // filter.wake.<orch-id> rows where the wake target IS the orchestrator id),
@@ -60,46 +50,22 @@ export function EventRow({ event, selected, columns, paused = true, wrapMode = '
   // else to see it.
   const refText = formatRef(event);
   const orchText = formatOrch(event);
-  const displayRef = w.showOrch && refText !== "" && refText === orchText ? "" : refText;
+  const displayRef = hasOrchColumn(resolved) && refText !== "" && refText === orchText ? "" : refText;
 
   return (
     <Box flexDirection="row">
-      {w.showStatus && (
-        <Box width={w.status} flexShrink={0} marginRight={1}>
-          <Text color={color} inverse={inverse}>{formatStatus(event)}</Text>
-        </Box>
-      )}
-      <Box width={w.time} flexShrink={0} marginRight={1}>
-        <Text color={color} inverse={inverse}>{formatTime(event)}</Text>
-      </Box>
-      <Box width={w.repo} flexShrink={0} marginRight={1}>
-        <Text color={color} inverse={inverse}>{formatRepo(event)}</Text>
-      </Box>
-      <Box width={w.icon} flexShrink={0} marginRight={1}>
-        <Text color={color} inverse={inverse}>{formatIcon(event)}</Text>
-      </Box>
-      <Box width={w.event} flexShrink={0} marginRight={1}>
-        <Text color={color} inverse={inverse} wrap="truncate">{formatEvent(event)}</Text>
-      </Box>
-      <Box width={w.ref} flexShrink={0} marginRight={1}>
-        <Text color={color} inverse={inverse}>{displayRef}</Text>
-      </Box>
-      {w.showOrch && (
-        <Box width={w.orch} flexShrink={0} marginRight={1}>
-          {/* CTL-383: long multi-ticket orchestrator ids reflow into a second
-              terminal line without wrap="truncate", doubling row height.
-              Same fix shape as EVENT (CTL-364) and DETAILS (CTL-361). */}
-          <Text color={color} inverse={inverse} wrap="truncate">{orchText}</Text>
-        </Box>
-      )}
-      {w.showWorker && (
-        <Box width={w.worker} flexShrink={0} marginRight={1}>
-          <Text color={color} inverse={inverse}>{formatWorker(event)}</Text>
-        </Box>
-      )}
-      <Box width={w.details} flexShrink={0}>
-        <Text color={color} inverse={inverse} wrap={wrapMode}>{formatDetails(event)}</Text>
-      </Box>
+      {resolved.map((col) => {
+        const isDetails = col.id === "details";
+        const text = col.id === "ref" ? displayRef : col.format(event);
+        const wrap = isDetails ? wrapMode : col.wrap;
+        return (
+          <Box key={col.id} width={col.width} flexShrink={0} marginRight={isDetails ? 0 : 1}>
+            <Text color={color} inverse={inverse} wrap={wrap} dimColor={col.dimColor}>
+              {text}
+            </Text>
+          </Box>
+        );
+      })}
     </Box>
   );
 }
