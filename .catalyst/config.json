@@ -39,6 +39,13 @@
           "coalesce-labs/catalyst": "green"
         }
       }
+    },
+    "feedback": {
+      "autoFile": true,
+      "githubRepo": "coalesce-labs/catalyst",
+      "labels": [
+        "auto-submitted"
+      ]
     }
   }
 }
