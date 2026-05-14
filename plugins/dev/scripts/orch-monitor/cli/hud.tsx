@@ -17,6 +17,7 @@ import { useFilter, type DslPredicate } from "./hooks/useFilter.ts";
 import { useSelection } from "./hooks/useSelection.ts";
 import { decidePivotAction } from "./lib/pivot-decision.ts";
 import { detectNerdFont } from "./lib/nerd-font.ts";
+import { parseSinceSpec } from "./lib/since-spec.ts";
 import {
   compile,
   groqTranslate,
@@ -41,24 +42,6 @@ interface DslState {
   nlQuery: string;
 }
 
-/** Parse relative/absolute time specs like "24h", "7d", "30m", ISO dates. */
-function parseSinceSpec(raw: string): string | null {
-  const match = raw.match(/^(\d+)\s*(h|m|s|d|hour|min|minute|second|day)s?$/i);
-  if (match) {
-    const n = parseInt(match[1] ?? "0", 10);
-    const unit = (match[2] ?? "s").toLowerCase();
-    const ms = unit.startsWith("d") ? n * 86400000
-      : unit.startsWith("h") ? n * 3600000
-      : unit.startsWith("m") ? n * 60000
-      : n * 1000;
-    return new Date(Date.now() - ms).toISOString();
-  }
-  // Try parsing as an ISO date/datetime string
-  const d = new Date(raw);
-  if (!isNaN(d.getTime())) return d.toISOString();
-  return null;
-}
-
 const HELP_LINES = [
   "Navigation",
   "  j / ↓           next event         k / ↑         prev event",
@@ -73,8 +56,8 @@ const HELP_LINES = [
   "  /                substring filter — applies to all loaded events",
   "  :                natural-language query via Groq (needs GROQ_API_KEY)",
   "  :since 24h       reload events from last 24 h  (also: 7d, 2h, 30m, ISO date)",
-  "  ?                show/hide the generated DSL from last query",
-  "  Esc              clear active filter / close overlay",
+  "  ?                show generated DSL and active :since window",
+  "  Esc              clear all filters (:since, /, :query) / close overlay",
   "",
   "Scope — narrow to related events  (live mode: first press pauses; press again to apply)",
   "  t                scope to all events sharing this event's trace ID",
@@ -131,7 +114,12 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   const layoutRows = Math.max(10, rows - 2);
 
   // Interactive since — can be changed via `:since 24h` without restarting.
+  // CTL-387: `activeSinceLabel` is the human-readable spec the user typed
+  // (e.g. "5m") for the footer chip + `?` overlay. It is `null` until the
+  // user submits a `:since` interactively, and reverts to `null` on ESC so
+  // the chip disappears when the window matches HUD startup.
   const [activeSinceTs, setActiveSinceTs] = useState(initSinceTs);
+  const [activeSinceLabel, setActiveSinceLabel] = useState<string | null>(null);
 
   const { events, loading } = useEventLog({ repoFilter, predicate, sinceTs: activeSinceTs });
 
@@ -157,7 +145,9 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
 
   const [showDslOverlay, setShowDslOverlay] = useState(false);
   const [dslScrollTop, setDslScrollTop] = useState(0);
-  const overlayHeight = showDslOverlay && dslState ? Math.min(14, Math.floor(layoutRows / 2)) : 0;
+  // CTL-387: overlay shows when either a DSL is set or a since spec is active.
+  const overlayHasContent = Boolean(dslState) || Boolean(activeSinceLabel);
+  const overlayHeight = showDslOverlay && overlayHasContent ? Math.min(14, Math.floor(layoutRows / 2)) : 0;
 
   const [showHelp, setShowHelp] = useState(false);
 
@@ -271,6 +261,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       const parsed = parseSinceSpec(spec);
       if (parsed) {
         setActiveSinceTs(parsed);
+        setActiveSinceLabel(spec);
         setQueryFocused(false);
         setQueryText("");
         showStatus(`reloaded from ${spec}`);
@@ -327,6 +318,10 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       setFilterText("");
       setDslState(null);
       setQueryError(null);
+      // CTL-387: ESC is a full reset — revert :since to the HUD-startup value
+      // so the time window matches what the user launched with.
+      setActiveSinceTs(initSinceTs);
+      setActiveSinceLabel(null);
       return;
     }
     if (input === "q" || (key.ctrl && input === "c")) { exit(); return; }
@@ -356,7 +351,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     if (input === "/") { setFilterFocused(true); return; }
     if (input === ":") { setQueryFocused(true); setQueryError(null); return; }
     if (input === "h") { setShowHelp(true); return; }
-    if (input === "?" && dslState) { setShowDslOverlay((v) => !v); return; }
+    if (input === "?" && overlayHasContent) { setShowDslOverlay((v) => !v); return; }
     if (key.return) { setShowDetail((v) => !v); return; }
     if (input === "o" || input === "t") {
       const action = decidePivotAction({ key: input, autoFollow, selectedEvent });
@@ -412,10 +407,17 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           ))}
         </Box>
       )}
-      {showDslOverlay && dslState && (
+      {showDslOverlay && overlayHasContent && (
         <Box flexShrink={0} flexDirection="column" borderStyle="round" borderColor="magenta" paddingX={1}>
-          <Text color="magenta" bold>{`Generated DSL · j/k scroll · ? to hide (${dslScrollTop + 1}/${dslLines.length}):`}</Text>
-          {dslLines.slice(dslScrollTop, dslScrollTop + dslVisibleLines).map((line, i) => (
+          <Text color="magenta" bold>{
+            dslState
+              ? `Query overlay · j/k scroll · ? to hide (${dslScrollTop + 1}/${dslLines.length}):`
+              : "Query overlay · ? to hide:"
+          }</Text>
+          {activeSinceLabel && (
+            <Text>{`Time window: ${activeSinceLabel} (since ${activeSinceTs})`}</Text>
+          )}
+          {dslState && dslLines.slice(dslScrollTop, dslScrollTop + dslVisibleLines).map((line, i) => (
             <Text key={i} dimColor={i > 0}>{line}</Text>
           ))}
         </Box>
@@ -434,6 +436,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           totalCount={events.length}
           autoFollow={autoFollow}
           statusMsg={statusMsg}
+          activeSinceLabel={activeSinceLabel}
         />
       </Box>
       <Box flexShrink={0}>
