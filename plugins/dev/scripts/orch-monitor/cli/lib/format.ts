@@ -408,10 +408,10 @@ export function formatDetails(event: CanonicalEvent): string {
     const pct = pickNumber(event.attributes?.["claude.context.used_pct"], p["context_pct"]);
     const tok = pickNumber(event.attributes?.["claude.context.tokens"], p["context_tokens"]);
     const turn = pickNumber(event.attributes?.["claude.turn"], p["turn"]);
-    const cost = typeof p["cost_usd"] === "number" ? (p["cost_usd"] as number) : null;
+    const cost = typeof p["cost_usd"] === "number" ? p["cost_usd"] : null;
     const model = typeof event.attributes?.["claude.model"] === "string"
-      ? (event.attributes["claude.model"] as string)
-      : (typeof p["model"] === "string" ? (p["model"] as string) : "");
+      ? event.attributes["claude.model"]
+      : (typeof p["model"] === "string" ? p["model"] : "");
     const parts: string[] = [];
     if (pct !== null) parts.push(`${pct}%`);
     if (tok !== null) parts.push(`${formatTokens(tok)} tok`);
