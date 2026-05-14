@@ -113,7 +113,7 @@ export function loadHudConfig(monitorJsonPath: string): HudColumnConfig[] | null
     const entry: HudColumnConfig = { id: col.id as HudColumnId };
     if (typeof col.visible === "boolean") entry.visible = col.visible;
     if (typeof col.width === "number" || col.width === "auto") {
-      entry.width = col.width as number | "auto";
+      entry.width = col.width;
     }
     if (typeof col.minTerminalWidth === "number") {
       entry.minTerminalWidth = col.minTerminalWidth;

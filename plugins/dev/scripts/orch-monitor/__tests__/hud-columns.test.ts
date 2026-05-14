@@ -289,8 +289,8 @@ describe("loadHudConfig", () => {
     const result = loadHudConfig(path);
     expect(result).not.toBeNull();
     expect(result).toHaveLength(2);
-    expect(result![0]!.id).toBe("time");
-    expect(result![1]!.id).toBe("details");
+    expect(result![0].id).toBe("time");
+    expect(result![1].id).toBe("details");
   });
 
   test("parses width and minTerminalWidth fields", () => {
@@ -304,8 +304,8 @@ describe("loadHudConfig", () => {
       },
     }));
     const result = loadHudConfig(path);
-    expect(result![0]!.width).toBe(8);
-    expect(result![0]!.minTerminalWidth).toBe(50);
+    expect(result![0].width).toBe(8);
+    expect(result![0].minTerminalWidth).toBe(50);
   });
 
   test("parses width:'auto'", () => {
@@ -314,7 +314,7 @@ describe("loadHudConfig", () => {
       hud: { columns: [{ id: "repo", width: "auto" }, { id: "details" }] },
     }));
     const result = loadHudConfig(path);
-    expect(result![0]!.width).toBe("auto");
+    expect(result![0].width).toBe("auto");
   });
 
   test("skips entries with unknown id", () => {
