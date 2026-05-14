@@ -58,9 +58,6 @@ export function Header({ columns = 120, nlQuery, brokerState }: HeaderProps) {
         <Box width={w.repo} flexShrink={0} marginRight={1}>
           <Text bold color="cyan">{"REPO"}</Text>
         </Box>
-        <Box width={w.source} flexShrink={0} marginRight={1}>
-          <Text bold color="cyan">{"SOURCE"}</Text>
-        </Box>
         <Box width={w.event} flexShrink={0} marginRight={1}>
           <Text bold color="cyan">{"EVENT"}</Text>
         </Box>

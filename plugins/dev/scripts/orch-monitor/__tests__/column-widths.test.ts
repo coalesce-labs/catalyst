@@ -86,12 +86,29 @@ describe("computeColumnWidths", () => {
     expect(w.orch).toBeLessThanOrEqual(24);
   });
 
-  test("time and event columns stay fixed at 10 and 16", () => {
+  test("time column stays fixed at 10", () => {
     for (const cols of [80, 140, 200, 300]) {
       const w = computeColumnWidths(cols);
       expect(w.time).toBe(10);
-      expect(w.event).toBe(16);
     }
+  });
+
+  // CTL-364: SOURCE column dropped; EVENT column grew + became responsive so
+  // the merged `${glyph} ${label}` content (longest: "CTL-330: attention" with
+  // a 2-char glyph prefix = 20 chars) always fits without truncation.
+  test("event column has no minimum below 22 and caps at 30 on wide terminals", () => {
+    expect(computeColumnWidths(80).event).toBeGreaterThanOrEqual(22);
+    expect(computeColumnWidths(400).event).toBeLessThanOrEqual(30);
+  });
+
+  test("event column grows monotonically with terminal width", () => {
+    const w80 = computeColumnWidths(80).event;
+    const w160 = computeColumnWidths(160).event;
+    const w240 = computeColumnWidths(240).event;
+    const w400 = computeColumnWidths(400).event;
+    expect(w160).toBeGreaterThanOrEqual(w80);
+    expect(w240).toBeGreaterThanOrEqual(w160);
+    expect(w400).toBeGreaterThanOrEqual(w240);
   });
 });
 

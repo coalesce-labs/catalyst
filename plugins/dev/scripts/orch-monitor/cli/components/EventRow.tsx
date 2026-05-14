@@ -3,8 +3,7 @@ import type { CanonicalEvent } from "../../lib/canonical-event.ts";
 import {
   formatTime,
   formatRepo,
-  formatSource,
-  formatEvent,
+  formatSourceEvent,
   formatRef,
   formatDetails,
   formatStatus,
@@ -70,11 +69,8 @@ export function EventRow({ event, selected, columns, paused = true }: EventRowPr
       <Box width={w.repo} flexShrink={0} marginRight={1}>
         <Text color={color} inverse={inverse}>{formatRepo(event)}</Text>
       </Box>
-      <Box width={w.source} flexShrink={0} marginRight={1}>
-        <Text color={color} inverse={inverse}>{formatSource(event)}</Text>
-      </Box>
       <Box width={w.event} flexShrink={0} marginRight={1}>
-        <Text color={color} inverse={inverse}>{formatEvent(event)}</Text>
+        <Text color={color} inverse={inverse} wrap="truncate">{formatSourceEvent(event)}</Text>
       </Box>
       <Box width={w.ref} flexShrink={0} marginRight={1}>
         <Text color={color} inverse={inverse}>{displayRef}</Text>

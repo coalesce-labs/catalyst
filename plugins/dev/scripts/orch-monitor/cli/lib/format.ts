@@ -135,6 +135,34 @@ export function formatEvent(event: CanonicalEvent): string {
   return label.slice(0, 15);
 }
 
+// CTL-364: merged SOURCE + EVENT column renderer. Returns
+// `${sourceIcon}${label}` where the icon is the Nerd Font glyph for the
+// source family (bare in non-Nerd-Font mode) and the label is the event
+// label — with the comms-specific embellishment of preserving the sender
+// ticket into the label so SOURCE-only info isn't lost when the column
+// disappears. formatSource and formatEvent stay exported for the filter
+// haystack and other layout-independent consumers.
+export function formatSourceEvent(event: CanonicalEvent): string {
+  const name = event.attributes?.["event.name"];
+  if (name === "comms.message.posted") {
+    const sender = event.attributes["event.label"]
+      ?? event.attributes["catalyst.worker.ticket"];
+    const payload = event.body?.payload as Record<string, unknown> | undefined;
+    const rawType = payload?.["type"];
+    const type = typeof rawType === "string" && rawType.length > 0 ? rawType : "comms";
+    // Glyph is anchored to the comms source family rather than classifySource's
+    // sender-ticket output so the icon stays semantically correct (speech
+    // bubble) regardless of which worker sent the message.
+    const icon = sourceIcon("comms");
+    if (sender && typeof sender === "string" && sender.length > 0) {
+      return `${icon}${sender}: ${type}`;
+    }
+    return `${icon}${type}`;
+  }
+  const sourceLabel = classifySource(event);
+  return `${sourceIcon(sourceLabel)}${formatEvent(event)}`;
+}
+
 // CTL-350: STATUS column glyph. One char + trailing space so the column width
 // is exactly 2 — keeps `<Box width={2}>` rendering on a single visual cell
 // even when the terminal applies bold/inverse styling. CI conclusion drives

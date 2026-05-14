@@ -5,6 +5,7 @@ import {
   formatDateTime,
   formatRepo,
   formatSource,
+  formatSourceEvent,
   formatEvent,
   formatRef,
   formatDetails,
@@ -1084,6 +1085,151 @@ describe("formatSource / formatRef — CTL-355 Nerd Font enabled", () => {
     expect(out.codePointAt(0)).toBe(0xf407);
     expect(out.charAt(1)).toBe(" ");
     expect(out.slice(2)).toBe("501");
+  });
+});
+
+// CTL-364: SOURCE + EVENT columns merged into a single EVENT column rendered
+// as `${sourceIcon}${label}`. formatSourceEvent composes the visible label;
+// formatSource and formatEvent remain exported for the filter haystack and
+// other consumers. This block covers the bare-mode (no Nerd Font) label
+// composition; the Nerd Font prefix is asserted in its own block below.
+describe("formatSourceEvent (CTL-364, bare mode)", () => {
+  // The earlier "CTL-355 Nerd Font enabled" block's afterAll deletes
+  // CATALYST_NERD_FONT and resets the detection cache, so a fresh probe
+  // here would see whatever Nerd Fonts the host machine has installed.
+  // Pin the env explicitly so this block is hermetic.
+  const innerOuterEnv = process.env.CATALYST_NERD_FONT;
+  beforeAll(() => {
+    process.env.CATALYST_NERD_FONT = "0";
+    _resetNerdFontCacheForTesting();
+  });
+  afterAll(() => {
+    if (innerOuterEnv === undefined) delete process.env.CATALYST_NERD_FONT;
+    else process.env.CATALYST_NERD_FONT = innerOuterEnv;
+    _resetNerdFontCacheForTesting();
+  });
+
+  test("github events render the event label without a source prefix", () => {
+    expect(formatSourceEvent(baseEvent)).toBe("merged");
+  });
+
+  test("linear events render the mapped event label", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { ...baseEvent.attributes, "event.name": "linear.issue.updated" },
+    } as CanonicalEvent;
+    expect(formatSourceEvent(e)).toBe(formatEvent(e));
+  });
+
+  test("filter.register renders 'filter reg'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+    } as unknown as CanonicalEvent;
+    expect(formatSourceEvent(e)).toBe("filter reg");
+  });
+
+  test("filter.wake.{sessionId} renders 'wake'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.sess_x" },
+    } as unknown as CanonicalEvent;
+    expect(formatSourceEvent(e)).toBe("wake");
+  });
+
+  test("orchestrator.worker.done renders 'done'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "orchestrator.worker.done" },
+    } as unknown as CanonicalEvent;
+    expect(formatSourceEvent(e)).toBe("done");
+  });
+
+  test("comms.message.posted with event.label sender embeds sender into the label", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "comms.message.posted",
+        "event.label": "CTL-330",
+        "catalyst.worker.ticket": "CTL-330",
+      },
+      body: { payload: { type: "attention", channel: "orch-demo", to: "all" } },
+    } as unknown as CanonicalEvent;
+    expect(formatSourceEvent(e)).toBe("CTL-330: attention");
+  });
+
+  test("comms.message.posted falls back to catalyst.worker.ticket when no event.label", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "comms.message.posted",
+        "catalyst.worker.ticket": "CTL-330",
+      },
+      body: { payload: { type: "info", channel: "orch-demo", to: "all" } },
+    } as unknown as CanonicalEvent;
+    expect(formatSourceEvent(e)).toBe("CTL-330: info");
+  });
+
+  test("comms.message.posted with no sender falls through to the bare event label", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { payload: { type: "info" } },
+    } as unknown as CanonicalEvent;
+    expect(formatSourceEvent(e)).toBe("info");
+  });
+
+  test("unknown event names match formatEvent's 15-char truncation", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "some.very.long.event.name.here" },
+    } as unknown as CanonicalEvent;
+    expect(formatSourceEvent(e)).toBe(formatEvent(e));
+    expect(formatSourceEvent(e).length).toBeLessThanOrEqual(15);
+  });
+});
+
+describe("formatSourceEvent (CTL-364, Nerd Font enabled)", () => {
+  const outerEnv = process.env.CATALYST_NERD_FONT;
+  beforeAll(() => {
+    process.env.CATALYST_NERD_FONT = "1";
+    _resetNerdFontCacheForTesting();
+  });
+  afterAll(() => {
+    if (outerEnv === undefined) delete process.env.CATALYST_NERD_FONT;
+    else process.env.CATALYST_NERD_FONT = outerEnv;
+    _resetNerdFontCacheForTesting();
+  });
+
+  test("github events get the octocat glyph + space + label", () => {
+    const out = formatSourceEvent(baseEvent);
+    expect(out.codePointAt(0)).toBe(0xf09b);
+    expect(out.charAt(1)).toBe(" ");
+    expect(out.slice(2)).toBe("merged");
+  });
+
+  test("filter.wake.* gets the broker bolt glyph + 'wake'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.wake.orch-abc" },
+    } as unknown as CanonicalEvent;
+    const out = formatSourceEvent(e);
+    expect(out.codePointAt(0)).toBe(0xf0e7);
+    expect(out.slice(2)).toBe("wake");
+  });
+
+  test("comms.message.posted with sender gets the comments glyph + 'CTL-330: attention'", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "comms.message.posted",
+        "event.label": "CTL-330",
+      },
+      body: { payload: { type: "attention" } },
+    } as unknown as CanonicalEvent;
+    const out = formatSourceEvent(e);
+    expect(out.codePointAt(0)).toBe(0xf086);
+    expect(out.slice(2)).toBe("CTL-330: attention");
   });
 });
 
