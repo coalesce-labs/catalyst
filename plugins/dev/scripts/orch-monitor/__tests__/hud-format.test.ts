@@ -1086,3 +1086,94 @@ describe("formatSource / formatRef — CTL-355 Nerd Font enabled", () => {
     expect(out.slice(2)).toBe("501");
   });
 });
+
+describe("session.context display (CTL-374)", () => {
+  test("formatEvent returns 'ctx' for session.context", () => {
+    const e: CanonicalEvent = {
+      ...baseEvent,
+      attributes: { "event.name": "session.context" },
+    };
+    expect(formatEvent(e)).toBe("ctx");
+  });
+
+  test("formatEvent returns 'ctx warn' for attention.context_pressure", () => {
+    const e: CanonicalEvent = {
+      ...baseEvent,
+      attributes: { "event.name": "attention.context_pressure" },
+    };
+    expect(formatEvent(e)).toBe("ctx warn");
+  });
+
+  test("formatDetails for session.context renders compact context summary", () => {
+    const e: CanonicalEvent = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "session.context",
+        "claude.context.used_pct": 24,
+        "claude.context.tokens": 245000,
+        "claude.turn": 126,
+        "claude.model": "claude-opus-4-7",
+      },
+      body: {
+        payload: {
+          context_pct: 24,
+          context_tokens: 245000,
+          context_max: 1_000_000,
+          turn: 126,
+          cost_usd: 23.02,
+          model: "claude-opus-4-7",
+        },
+      },
+    };
+    const out = formatDetails(e);
+    expect(out).toContain("24%");
+    expect(out).toContain("245k tok");
+    expect(out).toContain("t126");
+    expect(out).toContain("$23.02");
+  });
+
+  test("formatDetails omits cost when payload has none", () => {
+    const e: CanonicalEvent = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "session.context",
+        "claude.context.used_pct": 8,
+        "claude.context.tokens": 80000,
+        "claude.turn": 3,
+      },
+      body: {
+        payload: { context_pct: 8, context_tokens: 80000, turn: 3 },
+      },
+    };
+    const out = formatDetails(e);
+    expect(out).toContain("8%");
+    expect(out).toContain("80k tok");
+    expect(out).toContain("t3");
+    expect(out).not.toContain("$");
+  });
+
+  test("formatDetails for attention.context_pressure shows the crossing", () => {
+    const e: CanonicalEvent = {
+      ...baseEvent,
+      attributes: { "event.name": "attention.context_pressure" },
+      body: {
+        payload: { prev_pct: 50, new_pct: 72, threshold: 70 },
+      },
+    };
+    const out = formatDetails(e);
+    expect(out).toContain("50%");
+    expect(out).toContain("72%");
+    expect(out).toContain("70");
+  });
+
+  test("formatDetails falls back gracefully when payload is missing", () => {
+    const e: CanonicalEvent = {
+      ...baseEvent,
+      attributes: { "event.name": "session.context" },
+      body: { message: "context tick" },
+    };
+    // Should not throw and should return a non-empty string.
+    const out = formatDetails(e);
+    expect(typeof out).toBe("string");
+  });
+});

@@ -245,6 +245,70 @@ expect_eq "canonical_jsonl_append wrote new canonical line" "1" "$NEW_LINE_COUNT
 
 rm -rf "$SCRATCH"
 
+# --- CTL-374: Claude Code metadata typed attributes ---
+
+CLAUDE_LINE="$(build_canonical_line \
+  --ts "2026-05-13T00:00:00.000Z" \
+  --severity INFO \
+  --service "catalyst.session" \
+  --event-name "session.context" \
+  --claude-session-id "8f3b1c0e-1234-4abc-9def-0123456789ab" \
+  --claude-model "claude-opus-4-7" \
+  --claude-context-used-pct 24 \
+  --claude-context-tokens 245000 \
+  --claude-turn 126)"
+
+CLAUDE_SID="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.session.id"')"
+expect_eq "build_canonical_line claude.session.id" \
+  "8f3b1c0e-1234-4abc-9def-0123456789ab" "$CLAUDE_SID"
+
+CLAUDE_MODEL="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.model"')"
+expect_eq "build_canonical_line claude.model" "claude-opus-4-7" "$CLAUDE_MODEL"
+
+CLAUDE_PCT="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.context.used_pct"')"
+expect_eq "build_canonical_line claude.context.used_pct as integer" "24" "$CLAUDE_PCT"
+
+CLAUDE_PCT_TYPE="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.context.used_pct" | type')"
+expect_eq "build_canonical_line claude.context.used_pct is number" "number" "$CLAUDE_PCT_TYPE"
+
+CLAUDE_TOKENS="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.context.tokens"')"
+expect_eq "build_canonical_line claude.context.tokens" "245000" "$CLAUDE_TOKENS"
+
+CLAUDE_TOKENS_TYPE="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.context.tokens" | type')"
+expect_eq "build_canonical_line claude.context.tokens is number" "number" "$CLAUDE_TOKENS_TYPE"
+
+CLAUDE_TURN="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.turn"')"
+expect_eq "build_canonical_line claude.turn" "126" "$CLAUDE_TURN"
+
+CLAUDE_TURN_TYPE="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.turn" | type')"
+expect_eq "build_canonical_line claude.turn is number" "number" "$CLAUDE_TURN_TYPE"
+
+# When claude.* flags are NOT passed, the attribute keys must be absent.
+BARE_LINE="$(build_canonical_line \
+  --ts "2026-05-13T00:00:00.000Z" \
+  --severity INFO \
+  --service "catalyst.session" \
+  --event-name "session.phase")"
+
+HAS_SID="$(echo "$BARE_LINE" | jq 'has("attributes") and (.attributes | has("claude.session.id"))')"
+expect_eq "no --claude-session-id → key absent" "false" "$HAS_SID"
+
+HAS_MODEL="$(echo "$BARE_LINE" | jq '.attributes | has("claude.model")')"
+expect_eq "no --claude-model → key absent" "false" "$HAS_MODEL"
+
+HAS_PCT="$(echo "$BARE_LINE" | jq '.attributes | has("claude.context.used_pct")')"
+expect_eq "no --claude-context-used-pct → key absent" "false" "$HAS_PCT"
+
+HAS_TOKENS="$(echo "$BARE_LINE" | jq '.attributes | has("claude.context.tokens")')"
+expect_eq "no --claude-context-tokens → key absent" "false" "$HAS_TOKENS"
+
+HAS_TURN="$(echo "$BARE_LINE" | jq '.attributes | has("claude.turn")')"
+expect_eq "no --claude-turn → key absent" "false" "$HAS_TURN"
+
+# Cost MUST NOT be a typed attribute (PII gate — OTLP forwarder strips body.payload only).
+HAS_COST_ATTR="$(echo "$CLAUDE_LINE" | jq '.attributes | has("claude.cost.usd")')"
+expect_eq "claude.cost.usd is NEVER a typed attribute (PII gate)" "false" "$HAS_COST_ATTR"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"

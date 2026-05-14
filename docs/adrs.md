@@ -501,3 +501,61 @@ without polling the channel file directly.
   adds a `poll` call per phase transition (~5 calls per run).
 - `catalyst-events wait-for` can now filter on `comms.message.posted` events to observe
   comms traffic from within the event log pipeline.
+
+## ADR-016: Claude Code metadata on the canonical envelope (CTL-374)
+
+**Status**: Accepted, 2026-05-13.
+
+**Context**: Claude Code exposes per-session telemetry — context-window usage, cost,
+turn count, model — only through the statusLine pipeline (stdin JSON to whatever
+command is configured in `~/.claude/settings.json`'s `statusLine.command`). Hooks
+like `PreToolUse`, `PostToolUse`, and `Stop` do not receive that data. We want the
+HUD to display per-worker context % at a glance and workers to be able to react to
+context pressure (e.g. trigger a handoff before forced compaction).
+
+**Decision**: Add five new typed attributes to the canonical event envelope:
+
+| Attribute | Type |
+|---|---|
+| `claude.session.id` | string (Claude Code session UUID) |
+| `claude.model` | string |
+| `claude.context.used_pct` | number |
+| `claude.context.tokens` | number |
+| `claude.turn` | number |
+
+Introduce a `session.context` event type emitted by `catalyst-statusline.sh` on each
+statusLine tick when the Claude session is bound to a Catalyst session. Emit a
+companion `attention.context_pressure` event when `context_pct` crosses 70% upward.
+
+Migration `005_claude_session_metadata.sql` adds two columns to `sessions`:
+
+- `claude_session_id TEXT` — bound by `catalyst-session.sh start --claude-session-id`
+  (with fallback to `CLAUDE_CODE_SESSION_ID` env var). Indexed for fast lookups
+  when the statusline wrapper joins inbound `session_id` to a Catalyst session.
+- `last_context_pct INTEGER` — bookkeeping for threshold-crossing detection. The
+  `emit-context` subcommand reads and writes this value so callers don't have to
+  remember the previous %.
+
+**PII boundary**: `cost_usd` is intentionally **not** a typed attribute. It travels
+in `body.payload.cost_usd` only because the OTLP forwarder
+(`otel-forward/lib/destinations/otlp.ts:33-34`) forwards `attributes` and
+`body.message` verbatim but does **not** forward `body.payload`. Anything in payload
+stays on the local machine. The same gate applies to any future cost-related field.
+
+**Installation**: Users opt in by editing `~/.claude/settings.json` to point
+`statusLine.command` at `catalyst-statusline.sh`. The wrapper renders the normal
+statusline via `bunx -y ccstatusline@latest` (or any `$CATALYST_STATUSLINE_CMD`)
+and, in the background, calls `catalyst-session.sh emit-context`. The foreground
+render is detached from the emit path — emit failures never break Claude Code's
+status bar.
+
+**Rationale**:
+
+- Storing the Claude UUID lets us join statusLine ticks to the right Catalyst
+  session even when one machine hosts multiple orchestrator workers.
+- A single 70% threshold matches the existing prose guidance in
+  `implement-plan/SKILL.md` (the "context >70%, recommend handoff" rule). More
+  thresholds (50/60/80) are deferred until we have data on which ones matter.
+- Keeping cost out of typed attributes is reversible — a future ADR can promote it
+  once we have a denylist mechanism in the forwarder. The current "everything in
+  attributes ships off-machine" invariant is too strong for billing data.

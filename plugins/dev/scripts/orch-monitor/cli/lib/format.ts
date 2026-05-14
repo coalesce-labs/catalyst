@@ -98,6 +98,9 @@ const EVENT_LABELS: Record<string, string> = {
   "orchestrator.worker.failed": "failed",
   "orchestrator.attention.raised": "attention",
   "session.phase": "phase",
+  // CTL-374: Claude Code context pressure surfaced as events.
+  "session.context": "ctx",
+  "attention.context_pressure": "ctx warn",
   // CTL-331: filter daemon lifecycle events.
   "filter.register": "filter reg",
   "filter.deregister": "filter dereg",
@@ -397,6 +400,45 @@ export function formatDetails(event: CanonicalEvent): string {
       return out;
     }
   }
+  // CTL-374: session.context — compact per-tick Claude Code metadata summary.
+  // Reads typed attributes first (canonical source), falls back to payload.
+  // Format: "24% · 245k tok · t126 · $23.02 · claude-opus-4-7"
+  if (name === "session.context") {
+    const p = (payload as Record<string, unknown> | undefined) ?? {};
+    const pct = pickNumber(event.attributes?.["claude.context.used_pct"], p["context_pct"]);
+    const tok = pickNumber(event.attributes?.["claude.context.tokens"], p["context_tokens"]);
+    const turn = pickNumber(event.attributes?.["claude.turn"], p["turn"]);
+    const cost = typeof p["cost_usd"] === "number" ? (p["cost_usd"] as number) : null;
+    const model = typeof event.attributes?.["claude.model"] === "string"
+      ? (event.attributes["claude.model"] as string)
+      : (typeof p["model"] === "string" ? (p["model"] as string) : "");
+    const parts: string[] = [];
+    if (pct !== null) parts.push(`${pct}%`);
+    if (tok !== null) parts.push(`${formatTokens(tok)} tok`);
+    if (turn !== null) parts.push(`t${turn}`);
+    if (cost !== null) parts.push(`$${cost.toFixed(2)}`);
+    if (model) parts.push(model);
+    const out = sanitize(parts.length > 0 ? parts.join(" · ") : "context tick", "oneline");
+    detailsCache.set(event, out);
+    return out;
+  }
+  // CTL-374: attention.context_pressure — threshold crossing summary.
+  // Format: "context 50% → 72% (>70)"
+  if (name === "attention.context_pressure") {
+    const p = (payload as Record<string, unknown> | undefined) ?? {};
+    const prev = pickNumber(p["prev_pct"]);
+    const next = pickNumber(p["new_pct"]);
+    const thr = pickNumber(p["threshold"]);
+    let out = "context pressure";
+    if (prev !== null && next !== null && thr !== null) {
+      out = `context ${prev}% → ${next}% (>${thr})`;
+    } else if (event.body?.message) {
+      out = event.body.message;
+    }
+    const sanitized = sanitize(out, "oneline");
+    detailsCache.set(event, sanitized);
+    return sanitized;
+  }
   const msg = event.body?.message ?? "";
   let raw = msg;
   if (payload && typeof payload === "object") {
@@ -412,6 +454,30 @@ export function formatDetails(event: CanonicalEvent): string {
   const out = sanitize(raw, "oneline");
   detailsCache.set(event, out);
   return out;
+}
+
+// CTL-374 helpers — used only by session.context / attention.context_pressure
+// arms above. Coerces the first non-null numeric source to a number; returns
+// null otherwise.
+function pickNumber(...candidates: Array<unknown>): number | null {
+  for (const c of candidates) {
+    if (typeof c === "number" && Number.isFinite(c)) return c;
+    if (typeof c === "string" && c.length > 0) {
+      const n = Number(c);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  return null;
+}
+
+// Compact a token count into a human-readable suffix ("245k", "1.2m", "950").
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return `${m >= 10 ? m.toFixed(0) : m.toFixed(1)}m`;
+  }
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(Math.round(n));
 }
 
 export function formatDetailBody(event: CanonicalEvent): string {

@@ -177,6 +177,36 @@ function summarize(e: ActivityEvent): string {
     const prNum = pr ?? (payload as { pr?: number }).pr ?? "?";
     return `PR #${prNum} opened`;
   }
+  // CTL-374: Claude Code metadata snapshot.
+  if (eventName === "session.context") {
+    const pct = (payload as { context_pct?: number }).context_pct;
+    const tok = (payload as { context_tokens?: number }).context_tokens;
+    const turn = (payload as { turn?: number }).turn;
+    const cost = (payload as { cost_usd?: number }).cost_usd;
+    const model = (payload as { model?: string }).model;
+    const parts: string[] = [];
+    if (typeof pct === "number") parts.push(`${pct}%`);
+    if (typeof tok === "number") {
+      const compact =
+        tok >= 1_000_000 ? `${(tok / 1_000_000).toFixed(1)}m`
+        : tok >= 1_000 ? `${Math.round(tok / 1_000)}k`
+        : String(tok);
+      parts.push(`${compact} tok`);
+    }
+    if (typeof turn === "number") parts.push(`t${turn}`);
+    if (typeof cost === "number") parts.push(`$${cost.toFixed(2)}`);
+    if (typeof model === "string" && model.length > 0) parts.push(model);
+    return parts.length > 0 ? parts.join(" · ") : "context tick";
+  }
+  if (eventName === "attention.context_pressure") {
+    const prev = (payload as { prev_pct?: number }).prev_pct;
+    const next = (payload as { new_pct?: number }).new_pct;
+    const thr = (payload as { threshold?: number }).threshold;
+    if (typeof prev === "number" && typeof next === "number" && typeof thr === "number") {
+      return `context ${prev}% → ${next}% (>${thr})`;
+    }
+    return "context pressure";
+  }
   if (eventName.startsWith("orchestrator.worker.")) {
     const reason = (payload as { reason?: string }).reason ?? "";
     return reason || eventName;

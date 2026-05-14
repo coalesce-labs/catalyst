@@ -59,6 +59,14 @@ export const CANONICAL_FIELDS = [
   // ─── attributes.deployment.* ──────────────────────────────────────────────
   { path: 'attributes."deployment.environment"', type: "string", description: "production | staging | …" },
   { path: 'attributes."deployment.id"',          type: "number", description: "GitHub deployment ID" },
+
+  // ─── attributes.claude.* (Claude Code metadata, CTL-374) ──────────────────
+  // Cost is intentionally NOT a typed attribute; cost lives in body.payload only.
+  { path: 'attributes."claude.session.id"',       type: "string", description: "Claude Code session UUID (distinct from catalyst.session.id)" },
+  { path: 'attributes."claude.model"',            type: "string", description: "Claude model id (e.g. claude-opus-4-7)" },
+  { path: 'attributes."claude.context.used_pct"', type: "number", description: "Claude context window used percentage (0-100)" },
+  { path: 'attributes."claude.context.tokens"',   type: "number", description: "Current Claude context-window token usage" },
+  { path: 'attributes."claude.turn"',             type: "number", description: "Conversation turn count for the Claude session" },
 ];
 
 export const FIELD_PATH_SET = new Set(CANONICAL_FIELDS.map((f) => f.path));

@@ -76,6 +76,15 @@ export interface Attributes {
   // Deployment semconv (OTel published)
   "deployment.environment"?: string;
   "deployment.id"?: number;
+
+  // Claude Code metadata (CTL-374). PII note: cost is intentionally absent
+  // here — `cost_usd` lives in `body.payload` only because the OTLP forwarder
+  // strips body.payload before sending events off the local machine.
+  "claude.session.id"?: string;
+  "claude.model"?: string;
+  "claude.context.used_pct"?: number;
+  "claude.context.tokens"?: number;
+  "claude.turn"?: number;
 }
 
 export interface Body {
