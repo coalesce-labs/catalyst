@@ -16,7 +16,6 @@
   },
   "dependencies": {
     "ink": "^5.2.1",
-    "ink-text-input": "^6.0.0",
     "react": "^18.3.1",
     "smee-client": "^5.0.0"
   },
