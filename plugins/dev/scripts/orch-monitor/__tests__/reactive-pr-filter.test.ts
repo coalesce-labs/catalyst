@@ -68,6 +68,7 @@ describe.skipIf(JQ_PATH === null)("reactive PR lifecycle filter", () => {
       draft: false,
       mergeable: true,
       headRef: "",
+      headSha: "",
     })!;
     expect(env.attributes["event.name"]).toBe("github.pr.merged");
     expectMatch(REACTIVE_FILTER, env);
@@ -85,6 +86,7 @@ describe.skipIf(JQ_PATH === null)("reactive PR lifecycle filter", () => {
       draft: false,
       mergeable: true,
       headRef: "",
+      headSha: "",
     })!;
     expectNoMatch(REACTIVE_FILTER, env);
   });
@@ -97,6 +99,7 @@ describe.skipIf(JQ_PATH === null)("reactive PR lifecycle filter", () => {
       conclusion: "failure",
       status: "completed",
       headRef: "",
+      headSha: "",
     })!;
     expectMatch(REACTIVE_FILTER, env);
   });
@@ -109,6 +112,7 @@ describe.skipIf(JQ_PATH === null)("reactive PR lifecycle filter", () => {
       conclusion: "success",
       status: "completed",
       headRef: "",
+      headSha: "",
     })!;
     expectNoMatch(REACTIVE_FILTER, env);
   });
@@ -121,6 +125,7 @@ describe.skipIf(JQ_PATH === null)("reactive PR lifecycle filter", () => {
       conclusion: "failure",
       status: "completed",
       headRef: "",
+      headSha: "",
     })!;
     expectNoMatch(REACTIVE_FILTER, env);
   });
