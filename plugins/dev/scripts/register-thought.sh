@@ -8,6 +8,22 @@
 
 set -euo pipefail
 
+# CTL-390: --version handling (must run before the stdin read below).
+case "${1:-}" in
+  --version|-V)
+    _CV_SRC="${BASH_SOURCE[0]}"
+    while [[ -L "$_CV_SRC" ]]; do
+      _CV_D="$(cd -P "$(dirname "$_CV_SRC")" && pwd)" && _CV_SRC="$(readlink "$_CV_SRC")"
+      [[ "$_CV_SRC" != /* ]] && _CV_SRC="$_CV_D/$_CV_SRC"
+    done
+    _CV_DIR="$(cd -P "$(dirname "$_CV_SRC")" && pwd)"
+    [[ -f "${_CV_DIR}/lib/catalyst-version.sh" ]] && . "${_CV_DIR}/lib/catalyst-version.sh" \
+      && catalyst_print_version "register-thought" "${BASH_SOURCE[0]}" && exit 0
+    echo "error: catalyst-version helper missing at ${_CV_DIR}/lib/catalyst-version.sh" >&2
+    exit 1
+    ;;
+esac
+
 INPUT=$(cat 2>/dev/null || true)
 [[ -z "$INPUT" ]] && exit 0
 

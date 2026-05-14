@@ -272,12 +272,22 @@ for entry in "${CLI_ENTRIES[@]}"; do
     # version at invocation time — survives plugin upgrades without re-install.
     # The first comment line is the WRAPPER_MARKER detection signal for the
     # ~/.local/bin sweep above.
+    # CTL-390: wrapper intercepts --version|-V, prints its own resolution path,
+    # then exec's the resolved CLI with --version so the underlying tool's
+    # three-line version block follows.
     {
       echo '#!/usr/bin/env bash'
       echo "# ${WRAPPER_MARKER} (version-auto) — do not edit"
       echo '_CACHE="${HOME}/.claude/plugins/cache/catalyst/catalyst-dev"'
       echo '_LATEST=$(ls -d "${_CACHE}"/[0-9]*.*.*/ 2>/dev/null | sort -V | tail -1 | sed '"'"'s|/$||'"'"')'
       echo '[[ -z "${_LATEST}" ]] && { echo "error: catalyst-dev plugin not found in ${_CACHE}" >&2; exit 1; }'
+      echo 'case "${1:-}" in --version|-V)'
+      echo "  echo \"${dest_name} wrapper (\${BASH_SOURCE[0]})\""
+      echo "  echo \"resolves to: \${_LATEST}/scripts/${src_name}\""
+      echo '  echo "forwarding to underlying CLI for full version info..."'
+      echo '  echo ""'
+      echo "  exec \"\${_LATEST}/scripts/${src_name}\" --version ;;"
+      echo 'esac'
       echo "exec \"\${_LATEST}/scripts/${src_name}\" \"\$@\""
     } > "$link"
     chmod +x "$link"

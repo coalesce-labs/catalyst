@@ -520,6 +520,44 @@ run "second install run produces identical rc file" bash -c "
   diff -q '$SCRATCH/zshrc-after-first' '$HOME28/.zshrc'
 "
 
+# ── 29. CTL-390: cache-mode wrappers handle --version with resolution path ──
+HOME29="$SCRATCH/home29"
+BIN29="$HOME29/.catalyst/bin"
+FAKE_CACHE29="$HOME29/.claude/plugins/cache/catalyst/catalyst-dev/9.2.0/scripts"
+mkdir -p "$BIN29" "$FAKE_CACHE29"
+# Seed the cached CLI so the wrapper's exec target exists.
+cat > "$FAKE_CACHE29/catalyst-events" <<'CLI'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+  echo "catalyst-events 9.2.0"
+  echo "commit: stub-sha"
+  echo "source: stub-source"
+  exit 0
+fi
+echo "stub real"
+CLI
+chmod +x "$FAKE_CACHE29/catalyst-events"
+# install-cli writes wrappers only when SOURCE_DIR is the cache.
+run "wrapper-mode: install + --version prints resolution + delegated version" bash -c "
+  HOME='$HOME29' CATALYST_CLI_SOURCE='$FAKE_CACHE29' CATALYST_BIN_DIR='$BIN29' \
+    $INSTALL_CLI > '$SCRATCH/out29' 2>&1
+  out=\$(HOME='$HOME29' '$BIN29/catalyst-events' --version)
+  echo \"\$out\" | grep -qF 'catalyst-events wrapper' \\
+    && echo \"\$out\" | grep -qF 'resolves to' \\
+    && echo \"\$out\" | grep -qF 'forwarding' \\
+    && echo \"\$out\" | grep -qF 'catalyst-events 9.2.0' \\
+    && echo \"\$out\" | grep -qF 'commit: stub-sha'
+"
+run "wrapper-mode: -V short form works" bash -c "
+  out=\$(HOME='$HOME29' '$BIN29/catalyst-events' -V)
+  echo \"\$out\" | grep -qF 'catalyst-events wrapper' \\
+    && echo \"\$out\" | grep -qF 'catalyst-events 9.2.0'
+"
+run "wrapper-mode: non-version args still forwarded to underlying CLI" bash -c "
+  out=\$(HOME='$HOME29' '$BIN29/catalyst-events' run)
+  echo \"\$out\" | grep -qF 'stub real'
+"
+
 # ── Summary ────────────────────────────────────────────────────────────────
 echo ""
 TOTAL=$((PASSES + FAILURES))

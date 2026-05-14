@@ -13,6 +13,13 @@ interface HeaderProps {
   columns?: number;
   nlQuery?: string;
   brokerState?: BrokerState | null;
+  /**
+   * CTL-390: optional plugin-version chip shown at the right of the chip row.
+   * `display` is the short label (e.g. "v9.2.0" or "v9.2.0 · local:523b6fe");
+   * `isLocal` switches the chip to a yellow accent so hot-patched / worktree
+   * source is visually distinct from a clean release.
+   */
+  version?: { display: string; isLocal: boolean };
 }
 
 // CTL-351: match EventRow's per-column 1-col right margin so the header
@@ -20,15 +27,18 @@ interface HeaderProps {
 // CTL-352: brokerState replaces brokerKeyHealth — same shape plus liveness
 // fields for the new interests pill. The chip row renders whenever either
 // Groq or interest data is available.
-export function Header({ columns = 120, nlQuery, brokerState }: HeaderProps) {
+// CTL-390: the row also renders when a version chip is provided, so users
+// always see which catalyst-dev build their HUD is on.
+export function Header({ columns = 120, nlQuery, brokerState, version }: HeaderProps) {
   const sep = "─".repeat(Math.max(0, columns - 1));
   const groq = brokerState?.groq;
   const interestStatus = brokerInterestStatus(brokerState ?? null);
   const showInterestChip = interestStatus !== "unknown";
+  const showVersionChip = version !== undefined;
   const w = computeColumnWidths(columns);
   return (
     <Box flexDirection="column">
-      {(groq || showInterestChip) && (
+      {(groq || showInterestChip || showVersionChip) && (
         <Box flexDirection="row">
           {groq && (
             <Text color={chipColor(groq.probeStatus)}>{`[Groq: ${chipLabel(groq.probeStatus)}]`}</Text>
@@ -42,6 +52,11 @@ export function Header({ columns = 120, nlQuery, brokerState }: HeaderProps) {
               inverse={interestStatus === "degraded"}
             >
               {`${groq ? "  " : ""}[broker: ${interestChipLabel(brokerState ?? null, interestStatus)}]`}
+            </Text>
+          )}
+          {showVersionChip && (
+            <Text color={version.isLocal ? "yellow" : "gray"}>
+              {`${(groq || showInterestChip) ? "  " : ""}[${version.display}]`}
             </Text>
           )}
         </Box>
