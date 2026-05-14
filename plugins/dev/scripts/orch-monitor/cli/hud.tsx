@@ -65,6 +65,9 @@ const HELP_LINES = [
   "  o                scope to all events from this event's orchestrator",
   "  r                reset scope (show all events)",
   "",
+  "Display",
+  "  w                toggle wrap (truncate / wrap)",
+  "",
   "  h                this help          q / Ctrl-C    quit",
 ];
 
@@ -157,6 +160,9 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   const overlayHeight = showDslOverlay && overlayHasContent ? Math.min(14, Math.floor(layoutRows / 2)) : 0;
 
   const [showHelp, setShowHelp] = useState(false);
+  // CTL-384: global wrap mode toggle. Default truncate keeps one line per event;
+  // 'wrap' reflows long DETAILS for events that need full visibility.
+  const [wrapMode, setWrapMode] = useState<'truncate' | 'wrap'>('truncate');
 
   // chrome = header + separator(1) + filter(1) + query(1) + dsl overlay (if any).
   // CTL-363: the standalone status row was folded into FilterInput and a `─`
@@ -375,6 +381,10 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       showStatus("scope cleared");
       return;
     }
+    if (input === "w") {
+      setWrapMode((m) => m === 'truncate' ? 'wrap' : 'truncate');
+      return;
+    }
   });
 
   if (loading) {
@@ -400,6 +410,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           columns={cols}
           compact={inDetailMode || showHelp}
           paused={!autoFollow}
+          wrapMode={wrapMode}
         />
       </Box>
       {inDetailMode && selectedEvent && (
@@ -449,6 +460,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           autoFollow={autoFollow}
           statusMsg={statusMsg}
           activeSinceLabel={activeSinceLabel}
+          wrapMode={wrapMode}
         />
       </Box>
       <Box flexShrink={0}>
