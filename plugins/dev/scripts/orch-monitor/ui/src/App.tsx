@@ -186,7 +186,10 @@ function Monitor() {
   const handleWorkerCommsLink = useCallback(
     (ticket: string) => {
       if (!effectiveOrch) return;
-      const channelName = `orch-${effectiveOrch.id}`;
+      // CTL-373: channel name is the orch-id directly (legacy: `orch-${id}`).
+      const channelName = effectiveOrch.id.startsWith("orch-")
+        ? `orch-${effectiveOrch.id}`
+        : effectiveOrch.id;
       setCommsInitialFilter({
         channel: channelName,
         author: ticket,

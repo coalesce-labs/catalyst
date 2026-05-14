@@ -64,7 +64,6 @@ fi
 
 | Flag                     | Description                                                            |
 | ------------------------ | ---------------------------------------------------------------------- |
-| `--name <name>`          | Name this orchestrator instance (default: auto-generated from tickets) |
 | `--project <name>`       | Pull tickets from a Linear project                                     |
 | `--cycle current`        | Pull tickets from the current Linear cycle                             |
 | `--file <path>`          | Read ticket IDs from a file (one per line)                             |
@@ -448,7 +447,7 @@ orchestrator does not crash if `catalyst-comms` is missing.
 ```bash
 # Shared channel for this run. Workers will join at dispatch time.
 if [ -n "$COMMS_BIN" ]; then
-  "$COMMS_BIN" join "orch-${ORCH_NAME}" \
+  "$COMMS_BIN" join "${ORCH_NAME}" \
     --as orchestrator \
     --capabilities "coordinates workers" \
     --orch "${ORCH_NAME}" \
@@ -517,7 +516,7 @@ SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
   cd "${WORKER_DIR}" || exit 1
   CATALYST_ORCHESTRATOR_DIR="${ORCH_DIR}" \
   CATALYST_ORCHESTRATOR_ID="${ORCH_NAME}" \
-  CATALYST_COMMS_CHANNEL="orch-${ORCH_NAME}" \
+  CATALYST_COMMS_CHANNEL="${ORCH_NAME}" \
   CATALYST_SESSION_ID="${CATALYST_SESSION_ID:-}" \
   exec nohup claude \
     -n "${ORCH_NAME}-${TICKET_ID}" \
@@ -836,7 +835,7 @@ if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2
     --arg orch "${ORCH_NAME}" \
     --arg id "${ORCH_NAME}-comms-lifecycle" \
     --arg notify "filter.wake.${ORCH_NAME}" \
-    --arg channel "orch-${ORCH_NAME}" \
+    --arg channel "${ORCH_NAME}" \
     --argjson workers "${ACTIVE_TICKETS}" \
     '{
       ts: (now | todate),
@@ -1416,7 +1415,7 @@ if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2
       --arg orch "${ORCH_NAME}" \
       --arg id "${ORCH_NAME}-comms-lifecycle" \
       --arg notify "filter.wake.${ORCH_NAME}" \
-      --arg channel "orch-${ORCH_NAME}" \
+      --arg channel "${ORCH_NAME}" \
       --argjson workers "${_UPD_TICKETS}" \
       '{
         ts: (now | todate),
@@ -1557,7 +1556,7 @@ workers that stalled before completing their own merge.
 
 **Drain shared comms channel for attention (CTL-111, CTL-269):**
 
-Workers post `type:attention` messages to `orch-${ORCH_NAME}` when blocked. On each
+Workers post `type:attention` messages to `${ORCH_NAME}` when blocked. On each
 wake-up, the orchestrator drains new messages from the channel and promotes any
 `attention` to a state-level attention item so the dashboard's NEEDS ATTENTION
 banner surfaces it (with author + reason).
@@ -1579,13 +1578,13 @@ even though wakes come via `filter.wake`.
 if [ -n "$COMMS_BIN" ]; then
   CURSOR_FILE="${ORCH_DIR}/.comms-cursor"
   SINCE=$(cat "$CURSOR_FILE" 2>/dev/null || echo 0)
-  CH_FILE="${HOME}/catalyst/comms/channels/orch-${ORCH_NAME}.jsonl"
+  CH_FILE="${HOME}/catalyst/comms/channels/${ORCH_NAME}.jsonl"
   TOTAL=$(wc -l < "$CH_FILE" 2>/dev/null | tr -d ' ' || echo 0)
 
   if [ "${TOTAL:-0}" -gt "${SINCE:-0}" ]; then
     # `poll` here is the catalyst-comms CLI subcommand name (read since cursor),
     # not a poll-loop metaphor — the orchestrator runs this on wake-up only.
-    "$COMMS_BIN" poll "orch-${ORCH_NAME}" --since "$SINCE" 2>/dev/null | \
+    "$COMMS_BIN" poll "${ORCH_NAME}" --since "$SINCE" 2>/dev/null | \
     while IFS= read -r MSG; do
       MSG_TYPE=$(echo "$MSG" | jq -r '.type // ""' 2>/dev/null)
       MSG_FROM=$(echo "$MSG" | jq -r '.from // ""' 2>/dev/null)
@@ -2050,7 +2049,7 @@ When all waves are complete:
 # participant and is advisory — rc is ignored. Channel cleanup is deferred to
 # CTL-110's archive sweep (do NOT call `catalyst-comms gc` here — gc is global).
 if [ -n "$COMMS_BIN" ]; then
-  "$COMMS_BIN" done "orch-${ORCH_NAME}" --as orchestrator >/dev/null 2>&1 || true
+  "$COMMS_BIN" done "${ORCH_NAME}" --as orchestrator >/dev/null 2>&1 || true
 fi
 
 # Mark completed in global state

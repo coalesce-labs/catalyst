@@ -30,7 +30,7 @@ usage() {
 usage: orchestrate-roll-usage.sh --orch <id> --ticket <id> [--orch-dir <dir>] [-v]
 
 required:
-  --orch <id>        orchestrator id (e.g. orch-ctl-115-116)
+  --orch <id>        orchestrator id (e.g. o-ctl-115-116)
   --ticket <id>      worker ticket id (e.g. CTL-115)
 
 optional:
