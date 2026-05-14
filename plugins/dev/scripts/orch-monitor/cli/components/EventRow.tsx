@@ -77,7 +77,10 @@ export function EventRow({ event, selected, columns, paused = true }: EventRowPr
       </Box>
       {w.showOrch && (
         <Box width={w.orch} flexShrink={0} marginRight={1}>
-          <Text color={color} inverse={inverse}>{orchText}</Text>
+          {/* CTL-383: long multi-ticket orchestrator ids reflow into a second
+              terminal line without wrap="truncate", doubling row height.
+              Same fix shape as EVENT (CTL-364) and DETAILS (CTL-361). */}
+          <Text color={color} inverse={inverse} wrap="truncate">{orchText}</Text>
         </Box>
       )}
       {w.showWorker && (

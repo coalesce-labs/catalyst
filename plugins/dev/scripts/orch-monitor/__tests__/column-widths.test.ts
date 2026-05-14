@@ -81,9 +81,22 @@ describe("computeColumnWidths", () => {
     expect(wide.ref).toBeLessThanOrEqual(20);
   });
 
-  test("orch width clamps at 24 even on very wide terminals", () => {
+  // CTL-383: ORCH cap tightened from 24 → 18 so wide terminals leave more
+  // room for DETAILS. Long orchestrator ids are still legible because the row
+  // truncates with an ellipsis (see CTL-383 ORCH cell test in event-row.test.tsx)
+  // and the substring filter (CTL-367) covers deep search.
+  test("orch width clamps at 18 even on very wide terminals (CTL-383)", () => {
     const w = computeColumnWidths(400);
-    expect(w.orch).toBeLessThanOrEqual(24);
+    expect(w.orch).toBeLessThanOrEqual(18);
+  });
+
+  test("orch width stays in the 16-18 range whenever ORCH is shown (CTL-383)", () => {
+    for (const cols of [160, 180, 200, 240, 320, 400]) {
+      const w = computeColumnWidths(cols);
+      expect(w.showOrch).toBe(true);
+      expect(w.orch).toBeGreaterThanOrEqual(16);
+      expect(w.orch).toBeLessThanOrEqual(18);
+    }
   });
 
   test("time column stays fixed at 10", () => {

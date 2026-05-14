@@ -11,7 +11,8 @@
  *   STATUS    ≥100 cols   one-glyph success/failure/in-progress indicator.
  *                         3 cells wide because ⏳ (U+23F3) renders 2 cells
  *                         in most terminals and we want a trailing gutter.
- *   ORCH      ≥160 cols   full catalyst.orchestrator.id
+ *   ORCH      ≥160 cols   catalyst.orchestrator.id (truncated to 16-18 cells
+ *                         with ellipsis on long multi-ticket ids; CTL-383)
  *   WORKER    ≥180 cols   catalyst.worker.ticket
  *   EVENT-ID  ≥200 cols   first 8 chars of the per-event UUIDv4 (CTL-344)
  *
@@ -53,7 +54,10 @@ export function computeColumnWidths(columns: number): ColumnWidths {
     repo: Math.min(14, Math.max(10, Math.floor(columns * 0.07))),
     event: Math.min(30, Math.max(22, Math.floor(columns * 0.13))),
     ref: Math.min(20, Math.max(10, Math.floor(columns * 0.08))),
-    orch: showOrch ? Math.min(24, Math.max(16, Math.floor(columns * 0.12))) : 0,
+    // CTL-383: cap tightened from 24 → 18. Long multi-ticket orchestrator ids
+    // truncate with an ellipsis (see EventRow.tsx wrap="truncate" on the ORCH
+    // <Text>); the saved cells widen DETAILS at terminals ≥240 cols.
+    orch: showOrch ? Math.min(18, Math.max(16, Math.floor(columns * 0.12))) : 0,
     worker: showWorker ? 16 : 0,
     eventId: showEventId ? 10 : 0,
     showStatus,
