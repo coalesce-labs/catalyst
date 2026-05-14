@@ -102,7 +102,7 @@ export function Header({ columns = 120, nlQuery, brokerState, version }: HeaderP
             <Text bold color="cyan">{"EVENT-ID"}</Text>
           </Box>
         )}
-        <Box flexGrow={1}>
+        <Box width={w.details} flexShrink={0}>
           <Text bold color="cyan">{"DETAILS"}</Text>
         </Box>
       </Box>

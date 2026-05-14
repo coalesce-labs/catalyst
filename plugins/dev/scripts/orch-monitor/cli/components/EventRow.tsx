@@ -38,12 +38,10 @@ interface EventRowProps {
 // `event.name` attribute verbatim. When no Nerd Font is detected the
 // cell renders blank but its width stays reserved so columns stay
 // aligned across heterogeneous rows.
-// CTL-361: DETAILS uses `flexGrow={1}` + `wrap="truncate"` so an overly long
-// payload hard-clips at the cell's right edge instead of reflowing onto the
-// next terminal line and visually overdrawing the next event row — which is
-// what happens with `wrap="wrap"` during aggressive terminal resizes when the
-// React `cols` state lags the physical width. Operators who need the full
-// DETAILS content open the scrollable detail pane with Enter.
+// CTL-395: explicit `width={w.details}` replaces `flexGrow={1}` so Ink pads
+// the cell to a fixed width and writes trailing spaces over any ghost chars
+// left by a prior longer string when the terminal narrows or the visible row
+// window scrolls new events into existing positions.
 // CTL-351: every fixed-width column has a 1-col right margin so the columns
 // breathe and abutting cells (TIME↔REPO, EVENT↔REF) don't visually run
 // together on rows with short content.
@@ -105,7 +103,7 @@ export function EventRow({ event, selected, columns, paused = true, wrapMode = '
           <Text color={color} inverse={inverse} dimColor>{formatEventIdShort(event)}</Text>
         </Box>
       )}
-      <Box flexGrow={1}>
+      <Box width={w.details} flexShrink={0}>
         <Text color={color} inverse={inverse} wrap={wrapMode}>{formatDetails(event)}</Text>
       </Box>
     </Box>
