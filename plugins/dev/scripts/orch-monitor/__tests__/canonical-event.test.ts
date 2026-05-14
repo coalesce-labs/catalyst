@@ -278,3 +278,50 @@ describe("pluginVersion", () => {
     expect(pluginVersion()).toBe(pluginVersion());
   });
 });
+
+describe("buildCanonicalEvent — Claude Code metadata (CTL-374)", () => {
+  it("round-trips claude.* typed attributes with correct types", () => {
+    const ev: CanonicalEvent = buildCanonicalEvent({
+      ts: "2026-05-13T00:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.session" },
+      attributes: {
+        "event.name": "session.context",
+        "claude.session.id": "8f3b1c0e-1234-4abc-9def-0123456789ab",
+        "claude.model": "claude-opus-4-7",
+        "claude.context.used_pct": 24,
+        "claude.context.tokens": 245000,
+        "claude.turn": 126,
+      },
+      body: { payload: { cost_usd: 23.02, context_max: 1_000_000 } },
+    });
+    expect(ev.attributes["claude.session.id"]).toBe(
+      "8f3b1c0e-1234-4abc-9def-0123456789ab",
+    );
+    expect(ev.attributes["claude.model"]).toBe("claude-opus-4-7");
+    expect(ev.attributes["claude.context.used_pct"]).toBe(24);
+    expect(ev.attributes["claude.context.tokens"]).toBe(245000);
+    expect(ev.attributes["claude.turn"]).toBe(126);
+  });
+
+  it("does NOT permit claude.cost.usd as a typed attribute (PII gate)", () => {
+    // The Attributes interface should not declare claude.cost.usd.
+    // Cost lives in body.payload only — the OTLP forwarder strips body.payload.
+    const ev: CanonicalEvent = buildCanonicalEvent({
+      ts: "2026-05-13T00:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.session" },
+      attributes: { "event.name": "session.context" },
+      body: { payload: { cost_usd: 23.02 } },
+    });
+    // Runtime check: cost must not appear in attributes (PII gate). Serialising
+    // the object lets us assert key absence without casting through unknown.
+    expect(JSON.stringify(ev.attributes)).not.toContain("claude.cost.usd");
+    // Cost is allowed in payload.
+    expect((ev.body.payload as Record<string, unknown>).cost_usd).toBe(23.02);
+  });
+});

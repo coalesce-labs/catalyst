@@ -113,6 +113,15 @@ __session_workflow_ticket() {
     || printf '|'
 }
 
+# CTL-374: read claude_session_id for a session_id. Returns the UUID (or empty
+# string when the row is missing or the column is NULL). Cheap (≤1ms) and idempotent.
+__session_claude_id() {
+  local sid="$1"
+  db_exec "SELECT COALESCE(claude_session_id,'')
+           FROM sessions WHERE session_id = $(sql_quote "$sid") LIMIT 1;" 2>/dev/null \
+    || printf ''
+}
+
 # Map a legacy session event_type to canonical (event_name, entity, action,
 # severity). Echoes "name entity action severity" — caller splits on space.
 __session_canonical_for() {
@@ -170,6 +179,11 @@ __session_emit_canonical() {
   [[ -n "$phase" ]] && extra_args+=(--phase "$phase")
   [[ -n "$vcs_pr" ]] && extra_args+=(--vcs-pr "$vcs_pr")
 
+  # CTL-374: attach claude.session.id when bound on the sessions row.
+  local claude_sid
+  claude_sid="$(__session_claude_id "$sid")"
+  [[ -n "$claude_sid" ]] && extra_args+=(--claude-session-id "$claude_sid")
+
   local line
   line="$(build_canonical_line \
     --ts "$ts" \
@@ -205,20 +219,26 @@ emit_event() {
 
 cmd_start() {
   local skill="" ticket="" label="" workflow="" status="running" explicit_pid="" cwd="" git_branch=""
+  local claude_session_id=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --skill)    skill="$2"; shift 2 ;;
-      --ticket)   ticket="$2"; shift 2 ;;
-      --label)    label="$2"; shift 2 ;;
-      --workflow) workflow="$2"; shift 2 ;;
-      --status)   status="$2"; shift 2 ;;
-      --pid)      explicit_pid="$2"; shift 2 ;;
-      --cwd)      cwd="$2"; shift 2 ;;
-      --branch)   git_branch="$2"; shift 2 ;;
+      --skill)              skill="$2"; shift 2 ;;
+      --ticket)             ticket="$2"; shift 2 ;;
+      --label)              label="$2"; shift 2 ;;
+      --workflow)           workflow="$2"; shift 2 ;;
+      --status)             status="$2"; shift 2 ;;
+      --pid)                explicit_pid="$2"; shift 2 ;;
+      --cwd)                cwd="$2"; shift 2 ;;
+      --branch)             git_branch="$2"; shift 2 ;;
+      --claude-session-id)  claude_session_id="$2"; shift 2 ;;
       *) echo "error: unknown flag for start: $1" >&2; return 1 ;;
     esac
   done
   [[ -n "$skill" ]] || { echo "error: start requires --skill NAME" >&2; return 1; }
+
+  # CTL-374: fall back to CLAUDE_CODE_SESSION_ID env when flag not given.
+  # Flag wins over env (caller has direct knowledge).
+  [[ -z "$claude_session_id" ]] && claude_session_id="${CLAUDE_CODE_SESSION_ID:-}"
 
   # Generate a sortable, reasonably-unique session id without forking uuidgen
   # (uuidgen fork ~10ms, which we want to keep for the callers, not ourselves).
@@ -231,7 +251,7 @@ cmd_start() {
   local pid="${explicit_pid:-$$}"
 
   db_exec "INSERT INTO sessions
-             (session_id, workflow_id, ticket_key, label, skill_name, status, phase, pid, started_at, updated_at, cwd, git_branch)
+             (session_id, workflow_id, ticket_key, label, skill_name, status, phase, pid, started_at, updated_at, cwd, git_branch, claude_session_id)
            VALUES
              ($(sql_quote "$sid"),
               $(sql_value_or_null "$workflow"),
@@ -244,7 +264,8 @@ cmd_start() {
               $(sql_quote "$ts"),
               $(sql_quote "$ts"),
               $(sql_value_or_null "$cwd"),
-              $(sql_value_or_null "$git_branch"));"
+              $(sql_value_or_null "$git_branch"),
+              $(sql_value_or_null "$claude_session_id"));"
 
   # start is not on the hot path (one-shot per session), so jq is fine here.
   local payload
@@ -580,6 +601,147 @@ cmd_heartbeat() {
 
   # JSONL-only event; no need to bloat session_events with per-minute pings.
   __session_emit_canonical "$sid" "heartbeat" "null" "$ts" "DEBUG"
+}
+
+# Threshold above which an upward crossing emits attention.context_pressure.
+# Matches the prose guidance in plugins/dev/skills/implement-plan/SKILL.md.
+CATALYST_CTX_THRESHOLD="${CATALYST_CTX_THRESHOLD:-70}"
+
+# cmd_emit_context SID --context-pct N [--context-tokens N] [--context-max N]
+#                      [--turn N] [--model NAME] [--cost-usd D] [--effort LEVEL]
+#
+# Emits a `session.context` canonical event with Claude Code metadata. When the
+# new --context-pct crosses CATALYST_CTX_THRESHOLD upward (from < threshold to
+# >= threshold), additionally emits `attention.context_pressure` so the worker
+# or orchestrator can trigger a handoff. The previous % is stored on the
+# sessions row (`last_context_pct`) so callers do not have to remember it.
+#
+# Cost (--cost-usd) is intentionally kept out of typed attributes (PII gate) —
+# it travels in body.payload only, which the OTLP forwarder strips.
+cmd_emit_context() {
+  local sid="${1:-}"
+  [[ -n "$sid" ]] || { echo "error: emit-context requires <session-id>" >&2; return 1; }
+  shift
+
+  local pct="" tokens="" ctx_max="" turn="" model="" cost="" effort=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --context-pct)    pct="$2"; shift 2 ;;
+      --context-tokens) tokens="$2"; shift 2 ;;
+      --context-max)    ctx_max="$2"; shift 2 ;;
+      --turn)           turn="$2"; shift 2 ;;
+      --model)          model="$2"; shift 2 ;;
+      --cost-usd)       cost="$2"; shift 2 ;;
+      --effort)         effort="$2"; shift 2 ;;
+      *) echo "error: unknown flag for emit-context: $1" >&2; return 1 ;;
+    esac
+  done
+
+  # Required: at least --context-pct, and the session must exist.
+  [[ -n "$pct" ]] || { echo "error: emit-context requires --context-pct" >&2; return 1; }
+
+  local prev_pct claude_sid
+  # Single SQL round-trip — returns "prev|claude" or empty when row missing.
+  local row
+  row="$(db_exec "SELECT COALESCE(last_context_pct,'') || '|' || COALESCE(claude_session_id,'')
+                  FROM sessions WHERE session_id = $(sql_quote "$sid") LIMIT 1;" 2>/dev/null)"
+  if [[ -z "$row" ]]; then
+    echo "error: session not found: $sid" >&2
+    return 1
+  fi
+  prev_pct="${row%%|*}"
+  claude_sid="${row##*|}"
+
+  command -v jq >/dev/null 2>&1 || return 0
+
+  local ts; ts="$(now_iso)"
+  local payload
+  payload=$(jq -nc \
+    --argjson pct "${pct:-null}" \
+    --argjson tokens "${tokens:-null}" \
+    --argjson context_max "${ctx_max:-null}" \
+    --argjson turn "${turn:-null}" \
+    --argjson cost "${cost:-null}" \
+    --arg model "$model" \
+    --arg effort "$effort" \
+    '{context_pct: $pct,
+      context_tokens: (if $tokens == null then null else $tokens end),
+      context_max: (if $context_max == null then null else $context_max end),
+      turn: (if $turn == null then null else $turn end),
+      model: (if $model == "" then null else $model end),
+      cost_usd: (if $cost == null then null else $cost end),
+      effort: (if $effort == "" then null else $effort end)}')
+
+  # Build claude.* extra args for typed attributes
+  local extra_args=()
+  [[ -n "$claude_sid" ]] && extra_args+=(--claude-session-id "$claude_sid")
+  [[ -n "$model" ]] && extra_args+=(--claude-model "$model")
+  [[ -n "$pct" ]] && extra_args+=(--claude-context-used-pct "$pct")
+  [[ -n "$tokens" ]] && extra_args+=(--claude-context-tokens "$tokens")
+  [[ -n "$turn" ]] && extra_args+=(--claude-turn "$turn")
+
+  # Workflow/ticket lookup for trace/span derivation.
+  local trow workflow ticket
+  trow="$(__session_workflow_ticket "$sid")"
+  workflow="${trow%%|*}"
+  ticket="${trow##*|}"
+  local trace_id span_id
+  trace_id="$(derive_trace_id "$workflow" "$sid")"
+  span_id="$(derive_span_id "$ticket" "$sid")"
+  [[ -n "$workflow" ]] && extra_args+=(--orch "$workflow")
+  [[ -n "$ticket" ]] && extra_args+=(--worker "$ticket")
+
+  local ctx_line
+  ctx_line="$(build_canonical_line \
+    --ts "$ts" \
+    --severity INFO \
+    --service catalyst.session \
+    --event-name "session.context" \
+    --entity session \
+    --action context \
+    --label "$sid" \
+    --trace-id "$trace_id" \
+    --span-id "$span_id" \
+    --session "$sid" \
+    "${extra_args[@]}" \
+    --payload-json "$payload" 2>/dev/null)" || return 1
+  canonical_jsonl_append "$EVENTS_DIR" "$ctx_line"
+
+  # Threshold-crossing detection: emit attention.context_pressure when we
+  # cross CATALYST_CTX_THRESHOLD upward (prev < threshold <= new).
+  if [[ "$pct" =~ ^[0-9]+$ ]] && [[ "$prev_pct" =~ ^[0-9]+$ ]]; then
+    if (( prev_pct < CATALYST_CTX_THRESHOLD )) && (( pct >= CATALYST_CTX_THRESHOLD )); then
+      local att_payload
+      att_payload=$(jq -nc \
+        --argjson prev "$prev_pct" \
+        --argjson new "$pct" \
+        --argjson thr "$CATALYST_CTX_THRESHOLD" \
+        '{prev_pct: $prev, new_pct: $new, threshold: $thr}')
+      local att_line
+      att_line="$(build_canonical_line \
+        --ts "$ts" \
+        --severity WARN \
+        --service catalyst.session \
+        --event-name "attention.context_pressure" \
+        --entity attention \
+        --action raised \
+        --label "$sid" \
+        --trace-id "$trace_id" \
+        --span-id "$span_id" \
+        --session "$sid" \
+        "${extra_args[@]}" \
+        --message "context crossed ${CATALYST_CTX_THRESHOLD}%: ${prev_pct} → ${pct}" \
+        --payload-json "$att_payload" 2>/dev/null)" || true
+      [[ -n "$att_line" ]] && canonical_jsonl_append "$EVENTS_DIR" "$att_line"
+    fi
+  fi
+
+  # Persist the new pct so the next call has a baseline. Only update when the
+  # value is a clean integer — defensive against malformed inputs.
+  if [[ "$pct" =~ ^[0-9]+$ ]]; then
+    db_exec "UPDATE sessions SET last_context_pct = ${pct},
+             updated_at = $(sql_quote "$ts") WHERE session_id = $(sql_quote "$sid");"
+  fi
 }
 
 cmd_list() {
@@ -1066,6 +1228,7 @@ case "$cmd" in
   pr)        cmd_pr "$@" ;;
   end)       cmd_end "$@" ;;
   heartbeat) cmd_heartbeat "$@" ;;
+  emit-context) cmd_emit_context "$@" ;;
   list)      cmd_list "$@" ;;
   read)      cmd_read "$@" ;;
   history)   cmd_history "$@" ;;

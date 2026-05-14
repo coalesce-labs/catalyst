@@ -135,6 +135,15 @@ synthesize_event_id() {
 #   --message STR         body.message
 #   --payload-json JSON   body.payload (must be valid JSON; default null)
 #   --service-version VER service.version (default = plugin_version)
+#
+# Claude Code metadata (CTL-374). Cost is intentionally NOT a typed attribute —
+# put `cost_usd` in --payload-json instead. The OTLP forwarder strips body.payload
+# before sending off the local machine.
+#   --claude-session-id ID         claude.session.id (Claude Code session UUID)
+#   --claude-model NAME            claude.model (e.g. claude-opus-4-7)
+#   --claude-context-used-pct N    claude.context.used_pct (integer)
+#   --claude-context-tokens N      claude.context.tokens (integer)
+#   --claude-turn N                claude.turn (integer)
 build_canonical_line() {
   local ts="" severity="" service="" event_name=""
   local trace_id="" span_id=""
@@ -143,6 +152,8 @@ build_canonical_line() {
   local vcs_pr="" vcs_repo="" linear_ticket=""
   local message="" payload="null"
   local service_version=""
+  local claude_session_id="" claude_model=""
+  local claude_context_used_pct="" claude_context_tokens="" claude_turn=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -167,6 +178,11 @@ build_canonical_line() {
       --message)         message="$2"; shift 2 ;;
       --payload-json)    payload="${2:-null}"; shift 2 ;;
       --service-version) service_version="$2"; shift 2 ;;
+      --claude-session-id)         claude_session_id="$2"; shift 2 ;;
+      --claude-model)              claude_model="$2"; shift 2 ;;
+      --claude-context-used-pct)   claude_context_used_pct="$2"; shift 2 ;;
+      --claude-context-tokens)     claude_context_tokens="$2"; shift 2 ;;
+      --claude-turn)               claude_turn="$2"; shift 2 ;;
       *) echo "build_canonical_line: unknown flag: $1" >&2; return 1 ;;
     esac
   done
@@ -205,6 +221,11 @@ build_canonical_line() {
     --arg linear_ticket "$linear_ticket" \
     --arg message "$message" \
     --argjson payload "$payload" \
+    --arg claude_session_id "$claude_session_id" \
+    --arg claude_model "$claude_model" \
+    --arg claude_context_used_pct "$claude_context_used_pct" \
+    --arg claude_context_tokens "$claude_context_tokens" \
+    --arg claude_turn "$claude_turn" \
     '{
       ts: $ts,
       id: $id,
@@ -232,6 +253,11 @@ build_canonical_line() {
         + (if $vcs_pr  == "" then {} else { "vcs.pr.number": ($vcs_pr | tonumber) } end)
         + (if $vcs_repo == "" then {} else { "vcs.repository.name": $vcs_repo } end)
         + (if $linear_ticket == "" then {} else { "linear.issue.identifier": $linear_ticket } end)
+        + (if $claude_session_id == "" then {} else { "claude.session.id": $claude_session_id } end)
+        + (if $claude_model == "" then {} else { "claude.model": $claude_model } end)
+        + (if $claude_context_used_pct == "" then {} else { "claude.context.used_pct": ($claude_context_used_pct | tonumber) } end)
+        + (if $claude_context_tokens == "" then {} else { "claude.context.tokens": ($claude_context_tokens | tonumber) } end)
+        + (if $claude_turn == "" then {} else { "claude.turn": ($claude_turn | tonumber) } end)
       ),
       body: (
         (if $message == "" then {} else { message: $message } end)
