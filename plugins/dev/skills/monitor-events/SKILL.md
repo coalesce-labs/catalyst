@@ -423,14 +423,36 @@ treated as human-authored — the safer default.
 - **Iteration cap.** `MAX_ITER=20` prevents runaway loops on a stuck failure
   mode. Apply per-failure-type fix budgets inside each handler too (e.g. give
   up after 3 distinct fix attempts on the same CI check).
-- **Do NOT pipe `catalyst-events tail` through `awk`/`sed`/`grep` (CTL-240).**
-  BSD awk and similar line-oriented tools buffer stdout in 4 KB blocks when
-  stdout is not a TTY (the Monitor harness captures it). With the typical
-  ~1–3 events/min orchestrator cadence the buffer never fills and notifications
-  stall silently for 15+ minutes despite live PR activity. All filtering belongs
-  inside the `--filter` jq predicate. Use `catalyst-events build-orchestrator-filter
-  "$ORCH_DIR"` to generate a complete scope-aware predicate from the worker signal
-  directory instead of hand-rolling secondary pipes.
+- **All filtering belongs inside the `--filter` jq predicate (CTL-240, CTL-372).**
+  Do NOT add a downstream `| grep …` / `| awk …` / `| sed …` / `| jq …`
+  post-pipe to a `catalyst-events tail` invocation. The primary reason is
+  clarity: `--filter` is the single place a reader can look to know what
+  reaches the consumer. Splitting filter logic across two stages hides
+  conditions and invites small regressions (someone drops the
+  `--line-buffered` flag, or the post-pipe pattern no longer matches the
+  canonical envelope). Use `catalyst-events build-orchestrator-filter
+  "$ORCH_DIR"` to generate a complete scope-aware predicate from the worker
+  signal directory instead of hand-rolling secondary pipes.
+
+  Secondary reason (the historical CTL-240 concern): BSD `awk`, unflagged
+  BSD `grep`, and unflagged `sed` buffer stdout in 4 KB blocks when stdout
+  is not a TTY (the Monitor harness captures it). With the typical
+  ~1–3 events/min orchestrator cadence the buffer never fills and
+  notifications stall silently for 15+ minutes despite live PR activity.
+  `grep --line-buffered` and `jq --unbuffered` DO mechanically flush per
+  line on macOS and Linux (per their man pages), so the buffering failure
+  mode is conditional, not absolute — but you should still not need either
+  flag, because filtering belongs in `--filter`.
+
+  Anti-pattern: `| grep -v '"event.name":"filter.wake"'` on the
+  orchestrator's Monitor (observed in real sessions). Wrong for two reasons:
+  (a) `filter.wake.*` envelopes are canonical-only and do not satisfy any
+  clause of `build-orchestrator-filter`'s v1 predicate, so they never reach
+  the consumer in the first place. (b) The pattern would also strip the
+  orchestrator's OWN intended `filter.wake.${ORCH_NAME}` wake — the event
+  the orchestrator registered for. Since CTL-346 the broker no longer
+  re-classifies its own emissions, so there is no feedback loop to defend
+  against on the consumer side either.
 - **`github.*` events carry `orchestrator: null` and `worker: null` (CTL-240).**
   Real webhook events are scoped only by `.attributes."vcs.repository.name"`,
   `.attributes."vcs.ref.name"`, `.attributes."vcs.pr.number"`,
