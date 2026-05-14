@@ -13,7 +13,7 @@
 #
 # Commands:
 #   join <ch> --as <name> [--capabilities S] [--parent P] [--orch O] [--ttl N] [--topic T]
-#   send <ch> <body> [--as <name>] [--type TYPE] [--to N|all] [--re MSG_ID] [--parent P] [--orch O]
+#   send <ch> <body> [--as <name>] [--type TYPE] [--to N|all] [--re MSG_ID] [--parent P] [--orch O] [--repo NAME]
 #   poll <ch> [--since N] [--filter-to N] [--wait] [--limit N]
 #   done <ch> --as <name>
 #   leave <ch> --as <name>
@@ -183,7 +183,7 @@ cmd_join() {
 }
 
 cmd_send() {
-  local channel="" body="" name="" type="info" to="all" re="" parent="" orch=""
+  local channel="" body="" name="" type="info" to="all" re="" parent="" orch="" repo=""
 
   [[ $# -lt 2 ]] && { echo "error: send requires <channel> <body>" >&2; return 1; }
   channel="$1"; shift
@@ -197,9 +197,14 @@ cmd_send() {
       --re)     re="$2"; shift 2 ;;
       --parent) parent="$2"; shift 2 ;;
       --orch)   orch="$2"; shift 2 ;;
+      --repo)   repo="$2"; shift 2 ;;
       *) echo "error: unknown send flag: $1" >&2; return 1 ;;
     esac
   done
+
+  # CTL-385: fall back to $REPO env when --repo not passed so workers don't
+  # have to thread the flag through every comms_post call site.
+  [[ -z "$repo" ]] && repo="${REPO:-}"
 
   require_flag "--as" "$name" || return 1
   require_channel "$channel" || return 1
@@ -282,6 +287,10 @@ cmd_send() {
     [[ -n "$orch" ]] && extra_args+=(--orch "$orch")
     [[ -n "$name" ]] && extra_args+=(--worker "$name")
     [[ -n "$value" ]] && extra_args+=(--value "$value")
+    # CTL-385: stamp vcs.repository.name when the sender knows its repo.
+    # `repo` is set on the enclosing cmd_send scope via --repo flag or the
+    # $REPO env fallback.
+    [[ -n "$repo" ]] && extra_args+=(--vcs-repo "$repo")
     local line
     line=$(build_canonical_line \
       --ts "$(now_iso)" \
@@ -581,9 +590,11 @@ Commands:
   join <ch> --as <name> [--capabilities S] [--parent P] [--orch O] [--ttl N] [--topic T]
       Join a channel (auto-creates if missing). Idempotent re-joins update lastSeen.
 
-  send <ch> <body> --as <name> [--type TYPE] [--to N|all] [--re MSG_ID]
+  send <ch> <body> --as <name> [--type TYPE] [--to N|all] [--re MSG_ID] [--repo NAME]
       Append a message to the channel log. Prints the message id to stdout.
-      TYPE is one of: proposal, question, answer, ack, info, attention, done
+      TYPE is one of: proposal, question, answer, ack, info, attention, done.
+      --repo NAME (or \$REPO env) stamps attributes["vcs.repository.name"] on
+      the canonical comms.message.posted event so the HUD's REPO column resolves.
 
   poll <ch> [--since N] [--filter-to N] [--wait] [--limit N]
       Stream matching messages to stdout as JSONL.

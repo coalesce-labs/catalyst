@@ -178,11 +178,18 @@ event_append() {
   worker=$(echo "$input_json" | jq -r '.worker // ""')
   legacy_event=$(echo "$input_json" | jq -r '.event // ""')
   detail=$(echo "$input_json" | jq -c '.detail // null')
-  # CTL-362: optional vcs.repository.name. Accept either `.vcsRepo` (camelCase,
-  # preferred) or `.repo` (alias for parity with broker interest records). When
-  # set, gets stamped into attributes["vcs.repository.name"] so the HUD's REPO
-  # column populates for orchestrator-emitted events.
-  vcs_repo=$(echo "$input_json" | jq -r '.vcsRepo // .repo // ""')
+  # CTL-362 / CTL-385: optional vcs.repository.name. Precedence:
+  #   1. top-level `.vcsRepo` (preferred camelCase)
+  #   2. top-level `.repo` (alias for parity with broker interest records)
+  #   3. `.detail.repo` (covers agent.checkin from broker_claim_pr and any
+  #      filter.register whose detail block names a repo)
+  #   4. `$REPO` env var (fallback for synthesized emits inside this script
+  #      that build JSON without a repo field — cmd_attention, cmd_archive, etc.)
+  # When all are unset, the attribute stays absent from the canonical envelope.
+  vcs_repo=$(echo "$input_json" | jq -r '.vcsRepo // .repo // .detail.repo // ""')
+  if [[ -z "$vcs_repo" || "$vcs_repo" == "null" ]]; then
+    vcs_repo="${REPO:-}"
+  fi
   [[ -z "$ts" ]] && ts="$(now_iso)"
 
   local mapping name entity action severity
