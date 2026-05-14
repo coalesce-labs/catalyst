@@ -7,7 +7,8 @@ import {
   interestChipColor,
   interestChipLabel,
 } from "../lib/broker-key-health.ts";
-import { computeColumnWidths } from "../lib/column-widths.ts";
+import { resolveColumns } from "../lib/column-widths.ts";
+import type { HudColumnConfig } from "../../lib/monitor-config.ts";
 
 interface HeaderProps {
   columns?: number;
@@ -20,22 +21,24 @@ interface HeaderProps {
    * source is visually distinct from a clean release.
    */
   version?: { display: string; isLocal: boolean };
+  // CTL-394: optional user column config from ~/.config/catalyst/monitor.json.
+  columnConfig?: HudColumnConfig[] | null;
 }
 
 // CTL-351: match EventRow's per-column 1-col right margin so the header
 // labels align with the row content below them at every terminal width.
 // CTL-352: brokerState replaces brokerKeyHealth — same shape plus liveness
-// fields for the new interests pill. The chip row renders whenever either
-// Groq or interest data is available.
-// CTL-390: the row also renders when a version chip is provided, so users
-// always see which catalyst-dev build their HUD is on.
-export function Header({ columns = 120, nlQuery, brokerState, version }: HeaderProps) {
+// fields for the new interests pill.
+// CTL-390: the row also renders when a version chip is provided.
+// CTL-394: column headers are now data-driven via resolveColumns() so
+// custom column configs are automatically reflected in the header row.
+export function Header({ columns = 120, nlQuery, brokerState, version, columnConfig }: HeaderProps) {
   const sep = "─".repeat(Math.max(0, columns - 1));
   const groq = brokerState?.groq;
   const interestStatus = brokerInterestStatus(brokerState ?? null);
   const showInterestChip = interestStatus !== "unknown";
   const showVersionChip = version !== undefined;
-  const w = computeColumnWidths(columns);
+  const resolved = resolveColumns(columns, columnConfig);
   return (
     <Box flexDirection="column">
       {(groq || showInterestChip || showVersionChip) && (
@@ -62,44 +65,14 @@ export function Header({ columns = 120, nlQuery, brokerState, version }: HeaderP
         </Box>
       )}
       <Box flexDirection="row">
-        {w.showStatus && (
-          <Box width={w.status} flexShrink={0} marginRight={1}>
-            <Text bold color="cyan">{"S"}</Text>
-          </Box>
-        )}
-        <Box width={w.time} flexShrink={0} marginRight={1}>
-          <Text bold color="cyan">{"TIME"}</Text>
-        </Box>
-        <Box width={w.repo} flexShrink={0} marginRight={1}>
-          <Text bold color="cyan">{"REPO"}</Text>
-        </Box>
-        {/*
-          CTL-391: ICON column header is intentionally blank. The icons
-          themselves convey their meaning and a single-char header label
-          would clutter the row without adding information.
-        */}
-        <Box width={w.icon} flexShrink={0} marginRight={1}>
-          <Text bold color="cyan">{" "}</Text>
-        </Box>
-        <Box width={w.event} flexShrink={0} marginRight={1}>
-          <Text bold color="cyan">{"EVENT"}</Text>
-        </Box>
-        <Box width={w.ref} flexShrink={0} marginRight={1}>
-          <Text bold color="cyan">{"REF"}</Text>
-        </Box>
-        {w.showOrch && (
-          <Box width={w.orch} flexShrink={0} marginRight={1}>
-            <Text bold color="cyan">{"ORCH"}</Text>
-          </Box>
-        )}
-        {w.showWorker && (
-          <Box width={w.worker} flexShrink={0} marginRight={1}>
-            <Text bold color="cyan">{"WORKER"}</Text>
-          </Box>
-        )}
-        <Box width={w.details} flexShrink={0}>
-          <Text bold color="cyan">{"DETAILS"}</Text>
-        </Box>
+        {resolved.map((col) => {
+          const isDetails = col.id === "details";
+          return (
+            <Box key={col.id} width={col.width} flexShrink={0} marginRight={isDetails ? 0 : 1}>
+              <Text bold color="cyan">{col.header}</Text>
+            </Box>
+          );
+        })}
       </Box>
       <Text dimColor>{sep}</Text>
       {nlQuery && (

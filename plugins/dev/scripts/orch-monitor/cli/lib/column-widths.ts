@@ -35,7 +35,15 @@
  * 24–40 — EVENT is now the most informative column on the row and earns
  * the extra width. Overflow still clips via `wrap="truncate"`; nothing
  * reflows.
+ *
+ * CTL-394: resolveColumns() provides a config-driven ordered column list for
+ * data-driven rendering in EventRow and Header. computeColumnWidths() is
+ * preserved unchanged for backward compat with existing tests.
  */
+
+import type { HudColumnConfig, HudColumnId } from "../../lib/monitor-config.ts";
+import { COLUMN_DESCRIPTORS, DEFAULT_COLUMN_ORDER } from "./columns.ts";
+import type { ColumnDescriptor } from "./columns.ts";
 
 export interface ColumnWidths {
   status: number;
@@ -98,4 +106,103 @@ export function computeColumnWidths(columns: number): ColumnWidths {
     showOrch,
     showWorker,
   };
+}
+
+export interface ResolvedColumn extends ColumnDescriptor {
+  /** Resolved char width. Always > 0, including DETAILS (computed from remaining space). */
+  width: number;
+}
+
+/**
+ * CTL-394: Build the ordered, visible column list for a given terminal width
+ * and optional user config.
+ *
+ * - No config (or empty array): identical to today's hardcoded column set.
+ * - Config provided: iterate in config order; unknown IDs are silently skipped.
+ *   DETAILS is always moved to last so width computation fills remaining space.
+ */
+export function resolveColumns(
+  terminalCols: number,
+  config?: HudColumnConfig[] | null,
+): ResolvedColumn[] {
+  if (!config || config.length === 0) {
+    return buildDefaultColumns(terminalCols);
+  }
+  return buildConfigColumns(terminalCols, config);
+}
+
+function buildDefaultColumns(terminalCols: number): ResolvedColumn[] {
+  const nonDetails = DEFAULT_COLUMN_ORDER
+    .filter((id) => id !== "details")
+    .map((id) => {
+      const desc = COLUMN_DESCRIPTORS[id];
+      if (!desc) return null;
+      if (terminalCols < desc.minTerminalWidth) return null;
+      return { ...desc, width: desc.computeWidth(terminalCols) } as ResolvedColumn;
+    })
+    .filter((c): c is ResolvedColumn => c !== null);
+
+  // DETAILS width = remaining space (same formula as computeColumnWidths).
+  const detailsDesc = COLUMN_DESCRIPTORS["details"];
+  if (!detailsDesc) return nonDetails;
+  const detailsWidth = computeColumnWidths(terminalCols).details;
+  return [...nonDetails, { ...detailsDesc, width: detailsWidth }];
+}
+
+function buildConfigColumns(
+  terminalCols: number,
+  config: HudColumnConfig[],
+): ResolvedColumn[] {
+  const detailsEntry = config.find((c) => c.id === "details");
+  const nonDetails = config.filter((c) => c.id !== "details");
+
+  const resolved: ResolvedColumn[] = [];
+
+  for (const entry of nonDetails) {
+    const desc = COLUMN_DESCRIPTORS[entry.id];
+    if (!desc) continue; // unknown id
+
+    // explicit visible:true with no explicit minTerminalWidth overrides the
+    // descriptor's terminal-width threshold so the user can force a column on
+    // at narrow widths (e.g. force ORCH at 80 cols).
+    const effectiveMinWidth =
+      entry.visible === true && entry.minTerminalWidth === undefined
+        ? 0
+        : (entry.minTerminalWidth ?? desc.minTerminalWidth);
+    if (terminalCols < effectiveMinWidth) continue;
+
+    // In config mode, always-visible columns (minTerminalWidth === 0) default to
+    // visible; threshold columns default to their descriptor's defaultVisible.
+    const visibleDefault = effectiveMinWidth === 0 ? true : desc.defaultVisible;
+    const visible = entry.visible ?? visibleDefault;
+    if (!visible) continue;
+
+    const width =
+      entry.width !== undefined && entry.width !== "auto"
+        ? entry.width
+        : desc.computeWidth(terminalCols);
+
+    resolved.push({ ...desc, width });
+  }
+
+  // Append DETAILS last, computing width from remaining terminal space.
+  if (detailsEntry) {
+    const desc = COLUMN_DESCRIPTORS["details"];
+    if (desc) {
+      const visible = detailsEntry.visible ?? true;
+      if (visible) {
+        const fixedTotal = resolved.reduce((sum, c) => sum + c.width, 0);
+        const marginCount = resolved.length; // each non-details column has marginRight={1}
+        const detailsWidth = Math.max(20, terminalCols - fixedTotal - marginCount);
+        resolved.push({ ...desc, width: detailsWidth });
+      }
+    }
+  }
+
+  return resolved;
+}
+
+/** Convenience: does the resolved column list include an ORCH column? */
+export function hasOrchColumn(resolved: ResolvedColumn[]): boolean {
+  return resolved.some((c) => c.id === ("orch" as HudColumnId));
 }
