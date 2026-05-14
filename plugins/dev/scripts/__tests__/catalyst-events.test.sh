@@ -334,6 +334,35 @@ EVENT_L='{"attributes":{"event.name":"github.check_run.created","catalyst.orches
 run "filter rejects github webhook tagged with orch id but no PR/ref match (CTL-370)" \
   assert_no_match "$EVENT_L" "$FILTER_FILE"
 
+# ── 16b. canonical-only broker emissions — not matched (CTL-372) ────────────
+#
+# `filter.wake.*` and `broker.daemon.*` events are emitted by the broker as
+# canonical OTel envelopes. They carry the orchestrator id at
+# `attributes."catalyst.orchestrator.id"` but the orchestrator-filter's
+# orch-id clause requires the event name to start with `orchestrator.`
+# (per the CTL-370 guard above), so these emissions are dropped before
+# they reach the consumer of `catalyst-events tail`.
+#
+# Consequence for the Monitor-tail recipe in `orchestrate/SKILL.md`: no manual
+# `| grep -v 'filter.wake'` post-pipe is needed. Such a pipe is wrong on two
+# counts — (a) the events never reach the consumer to begin with, and
+# (b) the grep pattern would also strip the orchestrator's OWN intended
+# wake event `filter.wake.${ORCH_NAME}` if that ever did reach the pipe.
+# See `plugins/dev/skills/monitor-events/SKILL.md` for the prohibition on
+# downstream filtering pipes; the rule's primary reason is keeping `--filter`
+# the single source of truth, not the secondary 4 KB buffering concern
+# (`grep --line-buffered` + `jq --unbuffered` mechanically flush per line).
+
+# (m) canonical filter.wake.${ORCH_NAME} envelope — not matched
+EVENT_M='{"ts":"2026-05-14T00:00:00Z","resource":{"service.name":"catalyst.broker"},"attributes":{"event.name":"filter.wake.orch-test-2026-05-04","catalyst.orchestrator.id":"orch-test-2026-05-04"},"body":{"payload":{"reason":"PR #501 ready","interest_id":"pr-501"}}}'
+run "filter rejects canonical filter.wake envelope (CTL-372)" \
+  assert_no_match "$EVENT_M" "$FILTER_FILE"
+
+# (n) canonical broker.daemon.startup envelope — not matched
+EVENT_N='{"ts":"2026-05-14T00:00:00Z","resource":{"service.name":"catalyst.broker"},"attributes":{"event.name":"broker.daemon.startup"},"body":{"payload":{"version":"9.1.0"}}}'
+run "filter rejects canonical broker.daemon envelope (CTL-372)" \
+  assert_no_match "$EVENT_N" "$FILTER_FILE"
+
 # ── 17. build-orchestrator-filter — no PRs yet (early-stage orchestrator) ───
 EARLY_ORCH="$SCRATCH/orch-early-2026-05-04"
 mkdir -p "$EARLY_ORCH/workers"

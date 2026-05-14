@@ -878,6 +878,10 @@ FILTER=$(catalyst-events build-orchestrator-filter "$ORCH_DIR")
 catalyst-events tail --filter "$FILTER"
 ```
 
+Use this command EXACTLY as shown — do NOT improvise a `| grep …` or `| jq …`
+post-pipe (see "Filter discipline" below for why, including the specific
+`| grep -v 'filter.wake'` anti-pattern).
+
 **catalyst-filter alternative (CTL-257):** When the filter daemon is running, you can replace
 the broad `catalyst-events tail` with a targeted `catalyst-events wait-for` on
 `filter.wake.{ORCH_NAME}`. The daemon batches raw events through Groq, classifies which are
@@ -907,12 +911,32 @@ whose `detail.prNumbers` intersect the PR set, and linear events for any in-orch
 ticket. Re-build it after `orchestrate-dispatch-next` adds new workers so the
 PR/ticket sets stay in sync.
 
-**Filter discipline (CTL-240).** All noise filtering belongs **inside** `--filter`.
-Do NOT pipe `catalyst-events tail` through `awk`/`sed`/`grep` for additional
-filtering: BSD awk (and most other line-oriented filters) buffer stdout in 4 KB
-blocks when stdout is not a TTY (the Monitor harness captures it). With the typical
-~1–3 events/min orchestrator cadence the buffer never fills and notifications stall
-silently for 15+ minutes despite live PR activity.
+**Filter discipline (CTL-240, CTL-372).** All noise filtering belongs **inside**
+`--filter`. Do NOT pipe `catalyst-events tail` through a downstream
+`awk`/`sed`/`grep`/`jq` stage for additional filtering or projection. The
+primary reason is clarity — `--filter` is the single place a reader can look
+to see what reaches the consumer. The secondary reason is buffering: BSD
+`awk` (and unflagged `grep`/`sed`) buffer stdout in 4 KB blocks when stdout
+is not a TTY, and with the typical ~1–3 events/min orchestrator cadence the
+buffer never fills and notifications stall silently for 15+ minutes despite
+live PR activity. `grep --line-buffered` and `jq --unbuffered` DO line-flush
+mechanically (per their macOS/Linux man pages), but you should still not
+need either flag because filtering belongs in `--filter`.
+
+**Anti-pattern (CTL-372):** `… | grep -v '"event.name":"filter.wake"'`.
+Observed in a real orchestrator session and is wrong for two reasons:
+(a) `filter.wake.*` events are emitted by the broker as canonical OTel
+envelopes with no top-level `.event`, `.orchestrator`, or `.scope` field.
+`build-orchestrator-filter`'s predicate reads only v1 paths, so canonical
+`filter.wake.*` events never satisfy any clause and never reach the consumer
+in the first place. (b) The grep pattern would also strip this orchestrator's
+OWN intended `filter.wake.${ORCH_NAME}` wake — the very event registered
+with the broker. Since CTL-346 the broker no longer re-classifies its own
+emissions, so there is no feedback loop to defend against on the consumer
+side either. If you find yourself wanting to remove filter.wake noise from
+`tail` output, the answer is to use `build-orchestrator-filter` (which
+already excludes them) and avoid any hand-rolled `--filter` that adds a
+`.attributes."catalyst.orchestrator.id"` clause without an event-type guard.
 
 **GitHub event schema (CTL-240).** `github.*` webhook events carry
 `orchestrator: null` and `worker: null` on every line — they are scoped only by
