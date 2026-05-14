@@ -52,6 +52,8 @@ export interface ColumnWidths {
   orch: number;
   worker: number;
   eventId: number;
+  // CTL-395: explicit width so Ink writes trailing spaces and clears ghost chars
+  details: number;
   showStatus: boolean;
   showOrch: boolean;
   showWorker: boolean;
@@ -63,19 +65,42 @@ export function computeColumnWidths(columns: number): ColumnWidths {
   const showOrch = columns >= 160;
   const showWorker = columns >= 180;
   const showEventId = columns >= 200;
+
+  const status = showStatus ? 3 : 0;
+  const time = 10;
+  const repo = Math.min(14, Math.max(10, Math.floor(columns * 0.07)));
+  const icon = 1;
+  const event = Math.min(40, Math.max(24, Math.floor(columns * 0.18)));
+  const ref = Math.min(20, Math.max(10, Math.floor(columns * 0.08)));
+  // CTL-383: cap tightened from 24 → 18. Long multi-ticket orchestrator ids
+  // truncate with an ellipsis (see EventRow.tsx wrap="truncate" on the ORCH
+  // <Text>); the saved cells widen DETAILS at terminals ≥240 cols.
+  const orch = showOrch ? Math.min(18, Math.max(16, Math.floor(columns * 0.12))) : 0;
+  const worker = showWorker ? 16 : 0;
+  const eventId = showEventId ? 10 : 0;
+
+  // CTL-395: each visible column (except DETAILS) has marginRight={1}.
+  // CTL-391 added icon as an always-present column, so 5 always-present columns
+  // (time, repo, icon, event, ref) each contribute 1 margin.
+  const marginCount = 5 // time, repo, icon, event, ref always present
+    + (showStatus ? 1 : 0)
+    + (showOrch ? 1 : 0)
+    + (showWorker ? 1 : 0)
+    + (showEventId ? 1 : 0);
+  const fixedTotal = status + time + repo + icon + event + ref + orch + worker + eventId + marginCount;
+  const details = Math.max(20, columns - fixedTotal);
+
   return {
-    status: showStatus ? 3 : 0,
-    time: 10,
-    repo: Math.min(14, Math.max(10, Math.floor(columns * 0.07))),
-    icon: 1,
-    event: Math.min(40, Math.max(24, Math.floor(columns * 0.18))),
-    ref: Math.min(20, Math.max(10, Math.floor(columns * 0.08))),
-    // CTL-383: cap tightened from 24 → 18. Long multi-ticket orchestrator ids
-    // truncate with an ellipsis (see EventRow.tsx wrap="truncate" on the ORCH
-    // <Text>); the saved cells widen DETAILS at terminals ≥240 cols.
-    orch: showOrch ? Math.min(18, Math.max(16, Math.floor(columns * 0.12))) : 0,
-    worker: showWorker ? 16 : 0,
-    eventId: showEventId ? 10 : 0,
+    status,
+    time,
+    repo,
+    icon,
+    event,
+    ref,
+    orch,
+    worker,
+    eventId,
+    details,
     showStatus,
     showOrch,
     showWorker,
