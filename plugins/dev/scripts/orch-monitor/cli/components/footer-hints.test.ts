@@ -2,8 +2,7 @@
 // by FilterInput and QueryInput. Pure string logic, no Ink rendering.
 
 import { describe, test, expect } from "bun:test";
-import { formatFilterHints, WIDE_HINTS_COLS } from "./FilterInput.tsx";
-import { formatQueryHints } from "./QueryInput.tsx";
+import { formatFilterHints, formatQueryHints, WIDE_HINTS_COLS } from "./PromptInput.tsx";
 
 describe("formatFilterHints", () => {
   test("narrow terminal — base hints only, focus label adapts", () => {

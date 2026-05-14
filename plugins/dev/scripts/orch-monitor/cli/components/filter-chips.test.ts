@@ -2,7 +2,7 @@
 // introduced in CTL-389. Pure function tests; no Ink rendering required.
 
 import { describe, test, expect } from "bun:test";
-import { buildActiveChips, formatEventCount } from "./FilterInput.tsx";
+import { buildActiveChips, formatEventCount } from "./PromptInput.tsx";
 
 describe("buildActiveChips", () => {
   const none = { activeSinceLabel: null, filterText: "", dslActive: false, dslLabel: "", pivot: null };

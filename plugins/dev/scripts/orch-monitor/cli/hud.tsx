@@ -4,8 +4,7 @@ import { render, useApp, useInput, Box, Text } from "ink";
 import { Header } from "./components/Header.tsx";
 import { readBrokerState, type BrokerState } from "./lib/broker-key-health.ts";
 import { EventList } from "./components/EventList.tsx";
-import { FilterInput } from "./components/FilterInput.tsx";
-import { QueryInput } from "./components/QueryInput.tsx";
+import { PromptInput, type InputMode } from "./components/PromptInput.tsx";
 import { DetailPane, buildDetailLines } from "./components/DetailPane.tsx";
 import { Dashboard } from "./components/Dashboard.tsx";
 import {
@@ -175,11 +174,9 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // CTL-392: full-screen dashboard overlay that takes over the event list area.
   const [showDashboard, setShowDashboard] = useState(false);
 
-  // chrome = header + separator(1) + filter(1) + query(1) + dsl overlay (if any).
-  // CTL-363: the standalone status row was folded into FilterInput and a `─`
-  // separator now sits above the footer, mirroring Header.tsx's top separator.
-  // Help and detail are bottom-anchored *inside* visibleRows via the layout
-  // helpers below — they no longer steal rows from the top.
+  // chrome = header + prompt-box(3 rows: top-border + content + bottom-border) + dsl overlay (if any).
+  // CTL-386: replaced separator(1) + filter(1) + query(1) with a single rounded PromptInput box(3).
+  // Net row count is unchanged — the box border replaces the standalone separator.
   const chromeRows = headerRows + 3 + overlayHeight;
   const visibleRows = Math.max(1, layoutRows - chromeRows);
 
@@ -195,8 +192,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     autoFollow,
   } = useSelection(filtered.length, visibleRows);
 
-  const [filterFocused, setFilterFocused] = useState(false);
-  const [queryFocused, setQueryFocused] = useState(false);
+  const [inputMode, setInputMode] = useState<InputMode>("normal");
   const [queryText, setQueryText] = useState("");
   const [queryError, setQueryError] = useState<string | null>(null);
   const [querySubmitting, setQuerySubmitting] = useState(false);
@@ -286,7 +282,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       if (parsed) {
         setActiveSinceTs(parsed);
         setActiveSinceLabel(spec);
-        setQueryFocused(false);
+        setInputMode("normal");
         setQueryText("");
         showStatus(`reloaded from ${spec}`);
       } else {
@@ -305,7 +301,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       const rewritten = { ...dsl, filter: dsl.filter ? rewriteNode(dsl.filter) : {} };
       const compiled = compile(rewritten);
       setDslState({ dsl: rewritten, jsPredicate: compiled.jsPredicate, nlQuery: text });
-      setQueryFocused(false);
+      setInputMode("normal");
       setQueryText("");
     } catch (err) {
       let msg = "unknown error";
@@ -325,15 +321,6 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   }, []);
 
   useInput((input, key) => {
-    if (queryFocused) {
-      if (key.escape) { setQueryFocused(false); setQueryText(""); setQueryError(null); }
-      return;
-    }
-    if (filterFocused) {
-      if (key.escape) { setFilterFocused(false); setFilterText(""); }
-      return;
-    }
-
     if (key.escape) {
       if (showHelp) { setShowHelp(false); return; }
       // Dashboard handles its own Esc (closes detail before dismissing itself).
@@ -380,8 +367,8 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     if (key.pageDown) { pageDown(); return; }
     if (key.pageUp) { pageUp(); return; }
     if (input === "G") { jumpToBottom(); return; }
-    if (input === "/") { setFilterFocused(true); return; }
-    if (input === ":") { setQueryFocused(true); setQueryError(null); return; }
+    if (input === "/") { setInputMode("filter"); return; }
+    if (input === ":") { setInputMode("query"); setQueryError(null); return; }
     if (input === "h") { setShowHelp(true); return; }
     if (input === "i") { setShowDashboard(true); return; }
     if (input === "?" && overlayHasContent) { setShowDslOverlay((v) => !v); return; }
@@ -411,7 +398,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       showStatus("since cleared");
       return;
     }
-  });
+  }, { isActive: inputMode === "normal" });
 
   if (loading) {
     return <Text>Loading events…</Text>;
@@ -481,13 +468,24 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
         </Box>
       )}
       <Box flexShrink={0}>
-        <Text dimColor>{"─".repeat(Math.max(0, cols - 1))}</Text>
-      </Box>
-      <Box flexShrink={0}>
-        <FilterInput
-          value={filterText}
-          focused={filterFocused}
-          onChange={setFilterText}
+        <PromptInput
+          mode={inputMode}
+          value={inputMode === "filter" ? filterText : queryText}
+          onChange={inputMode === "filter" ? setFilterText : setQueryText}
+          onSubmit={(v) => {
+            if (inputMode === "filter") {
+              setInputMode("normal");
+            } else {
+              void submitQuery(v);
+            }
+          }}
+          onModeChange={setInputMode}
+          onEsc={() => {
+            if (inputMode === "filter") setPivot(null);
+            if (inputMode === "query") setQueryError(null);
+          }}
+          busy={querySubmitting}
+          error={queryError}
           pivot={pivot}
           cols={cols}
           filteredCount={filtered.length}
@@ -498,18 +496,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           wrapMode={wrapMode}
           dslActive={dslState !== null}
           dslLabel={dslState?.nlQuery ?? ""}
-        />
-      </Box>
-      <Box flexShrink={0}>
-        <QueryInput
-          value={queryText}
-          focused={queryFocused}
-          busy={querySubmitting}
-          error={queryError}
           hasDsl={dslState !== null}
-          cols={cols}
-          onChange={setQueryText}
-          onSubmit={(v) => { void submitQuery(v); }}
         />
       </Box>
     </Box>
