@@ -44,7 +44,7 @@ export function FilterInput({
         <Text color="cyan">{`[${pivot.type}:${pivot.id.slice(0, 12)}…] `}</Text>
       )}
       <Text dimColor={!focused}>{"/ "}</Text>
-      <TextInput value={value} onChange={onChange} focus={focused} placeholder="filter (substring or .jq)" />
+      <TextInput value={value} onChange={onChange} focus={focused} placeholder="filter (substring — all fields)" />
       <Box flexGrow={1} marginLeft={2}>
         <Text dimColor wrap="truncate-end">{formatFilterHints(cols, focused)}</Text>
       </Box>
