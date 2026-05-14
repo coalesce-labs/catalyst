@@ -73,6 +73,14 @@ export function Header({ columns = 120, nlQuery, brokerState, version }: HeaderP
         <Box width={w.repo} flexShrink={0} marginRight={1}>
           <Text bold color="cyan">{"REPO"}</Text>
         </Box>
+        {/*
+          CTL-391: ICON column header is intentionally blank. The icons
+          themselves convey their meaning and a single-char header label
+          would clutter the row without adding information.
+        */}
+        <Box width={w.icon} flexShrink={0} marginRight={1}>
+          <Text bold color="cyan">{" "}</Text>
+        </Box>
         <Box width={w.event} flexShrink={0} marginRight={1}>
           <Text bold color="cyan">{"EVENT"}</Text>
         </Box>

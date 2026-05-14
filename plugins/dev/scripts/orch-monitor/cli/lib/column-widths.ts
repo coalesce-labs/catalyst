@@ -26,12 +26,27 @@
  * bubble / system cog) and the label is the event-name-derived friendly
  * string. EVENT width grew from a fixed 16 to a responsive 22–30 range so
  * the worst-case composed label (`{glyph} CTL-XXXX: attention`) always fits.
+ *
+ * CTL-391: SOURCE icon split back out into its own 1-cell ICON column to
+ * the left of EVENT, and EVENT now carries the raw `event.name` attribute
+ * (`github.pr.merged`, `filter.wake.<sessionId>`, `comms.message.posted`,
+ * …) instead of a friendly label. Raw names are longer than the legacy
+ * labels (`github.pr_review_comment.created` is 32 chars; `filter.wake.`
+ * + 32-char sessionId is 44+) so EVENT's responsive range grows to
+ * 24–40 — EVENT is now the most informative column on the row and earns
+ * the extra width. Overflow still clips via `wrap="truncate"`; nothing
+ * reflows.
  */
 
 export interface ColumnWidths {
   status: number;
   time: number;
   repo: number;
+  // CTL-391: 1-cell column carrying the source-family Nerd Font glyph.
+  // Always rendered — when no Nerd Font is detected formatIcon returns
+  // "" and the cell is visually blank, but the width stays reserved so
+  // columns below the header stay aligned.
+  icon: number;
   event: number;
   ref: number;
   orch: number;
@@ -52,7 +67,8 @@ export function computeColumnWidths(columns: number): ColumnWidths {
     status: showStatus ? 3 : 0,
     time: 10,
     repo: Math.min(14, Math.max(10, Math.floor(columns * 0.07))),
-    event: Math.min(30, Math.max(22, Math.floor(columns * 0.13))),
+    icon: 1,
+    event: Math.min(40, Math.max(24, Math.floor(columns * 0.18))),
     ref: Math.min(20, Math.max(10, Math.floor(columns * 0.08))),
     // CTL-383: cap tightened from 24 → 18. Long multi-ticket orchestrator ids
     // truncate with an ellipsis (see EventRow.tsx wrap="truncate" on the ORCH

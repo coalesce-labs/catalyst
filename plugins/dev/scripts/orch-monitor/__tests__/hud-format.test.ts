@@ -5,7 +5,7 @@ import {
   formatDateTime,
   formatRepo,
   formatSource,
-  formatSourceEvent,
+  formatIcon,
   formatEvent,
   formatRef,
   formatDetails,
@@ -230,12 +230,17 @@ describe("formatSource", () => {
   });
 });
 
+// CTL-391: formatEvent now returns the raw `event.name` attribute verbatim.
+// The pre-CTL-391 friendly-label table (merged, ci pass, wake, filter reg, …)
+// is gone — operators asked to see the actual event name as emitted. The
+// formatter never truncates; Ink's `wrap="truncate"` on the EVENT cell clips
+// long names with an ellipsis at render time.
 describe("formatEvent", () => {
-  test("maps github.pr.merged to 'merged'", () => {
-    expect(formatEvent(baseEvent)).toBe("merged");
+  test("returns raw github.pr.merged verbatim", () => {
+    expect(formatEvent(baseEvent)).toBe("github.pr.merged");
   });
 
-  test("maps github.check_suite.completed/failure to 'ci fail'", () => {
+  test("returns raw github.check_suite.completed regardless of conclusion", () => {
     const e = {
       ...baseEvent,
       attributes: {
@@ -243,118 +248,77 @@ describe("formatEvent", () => {
         "cicd.pipeline.run.conclusion": "failure",
       },
     } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("ci fail");
+    expect(formatEvent(e)).toBe("github.check_suite.completed");
   });
 
-  test("maps github.check_suite.completed/success to 'ci pass'", () => {
+  test("returns raw github.pr.opened verbatim", () => {
     const e = {
       ...baseEvent,
-      attributes: {
-        "event.name": "github.check_suite.completed",
-        "cicd.pipeline.run.conclusion": "success",
-      },
+      attributes: { ...baseEvent.attributes, "event.name": "github.pr.opened" },
+    };
+    expect(formatEvent(e)).toBe("github.pr.opened");
+  });
+
+  test("does not truncate long event names (renderer clips, formatter does not)", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "github.pr_review_comment.created" },
     } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("ci pass");
+    expect(formatEvent(e)).toBe("github.pr_review_comment.created");
   });
 
-  test("maps github.pr.opened to 'pr open'", () => {
-    const e = { ...baseEvent, attributes: { ...baseEvent.attributes, "event.name": "github.pr.opened" } };
-    expect(formatEvent(e)).toBe("pr open");
+  test("returns raw orchestrator.worker.done verbatim", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "orchestrator.worker.done" },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("orchestrator.worker.done");
   });
 
-  test("truncates unknown event names to 15 chars", () => {
-    const e = { ...baseEvent, attributes: { "event.name": "some.very.long.event.name.here" } } as unknown as CanonicalEvent;
-    const result = formatEvent(e);
-    expect(result.length).toBeLessThanOrEqual(15);
+  test("returns raw filter.register verbatim", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.register" },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("filter.register");
   });
 
-  test("maps orchestrator.worker.done to 'done'", () => {
-    const e = { ...baseEvent, attributes: { "event.name": "orchestrator.worker.done" } } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("done");
+  test("returns raw filter.deregister verbatim", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "filter.deregister" },
+    } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("filter.deregister");
   });
 
-  // CTL-331: filter daemon lifecycle labels.
-  test("maps filter.register to 'filter reg'", () => {
-    const e = { ...baseEvent, attributes: { "event.name": "filter.register" } } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("filter reg");
-  });
-
-  test("maps filter.deregister to 'filter dereg'", () => {
-    const e = { ...baseEvent, attributes: { "event.name": "filter.deregister" } } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("filter dereg");
-  });
-
-  test("maps filter.wake to 'wake'", () => {
-    const e = { ...baseEvent, attributes: { "event.name": "filter.wake" } } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("wake");
-  });
-
-  test("maps prefixed filter.wake.{sessionId} to 'wake' (not truncated)", () => {
+  test("returns the full filter.wake.<sessionId> name (no shortening)", () => {
     const e = {
       ...baseEvent,
       attributes: { "event.name": "filter.wake.sess_20260511T203845_16d33281" },
     } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("wake");
+    expect(formatEvent(e)).toBe("filter.wake.sess_20260511T203845_16d33281");
   });
 
-  test("maps legacy orchestrator.filter.register alias to 'filter reg'", () => {
-    const e = {
-      ...baseEvent,
-      attributes: { "event.name": "orchestrator.filter.register" },
-    } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("filter reg");
-  });
-
-  test("maps legacy orchestrator.filter.wake.* alias to 'wake'", () => {
-    const e = {
-      ...baseEvent,
-      attributes: { "event.name": "orchestrator.filter.wake.sess_xyz" },
-    } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("wake");
-  });
-
-  test("maps broker.daemon.startup to 'broker start'", () => {
+  test("returns raw broker.daemon.startup verbatim", () => {
     const e = {
       ...baseEvent,
       attributes: { "event.name": "broker.daemon.startup" },
     } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("broker start");
+    expect(formatEvent(e)).toBe("broker.daemon.startup");
   });
 
-  test("maps comms.message.posted with type='info' to 'info'", () => {
+  test("returns raw comms.message.posted verbatim regardless of payload type", () => {
     const e = {
       ...baseEvent,
       attributes: { "event.name": "comms.message.posted" },
       body: { payload: { type: "info", channel: "orch-demo", to: "all" } },
     } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("info");
+    expect(formatEvent(e)).toBe("comms.message.posted");
   });
 
-  test("maps comms.message.posted with type='attention' to 'attention'", () => {
-    const e = {
-      ...baseEvent,
-      attributes: { "event.name": "comms.message.posted" },
-      body: { payload: { type: "attention", channel: "orch-demo", to: "all" } },
-    } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("attention");
-  });
-
-  test("maps comms.message.posted with type='done' to 'done'", () => {
-    const e = {
-      ...baseEvent,
-      attributes: { "event.name": "comms.message.posted" },
-      body: { payload: { type: "done", channel: "orch-demo", to: "all" } },
-    } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("done");
-  });
-
-  test("falls back to 'comms' when comms event has no payload type", () => {
-    const e = {
-      ...baseEvent,
-      attributes: { "event.name": "comms.message.posted" },
-      body: { payload: {} },
-    } as unknown as CanonicalEvent;
-    expect(formatEvent(e)).toBe("comms");
+  test("falls back to '(legacy)' when event.name attribute is missing", () => {
+    const e = { ...baseEvent, attributes: {} } as unknown as CanonicalEvent;
+    expect(formatEvent(e)).toBe("(legacy)");
   });
 });
 
@@ -878,6 +842,70 @@ describe("formatDetails (filter.wake)", () => {
   });
 });
 
+describe("formatDetails (comms.message.posted, CTL-391)", () => {
+  // CTL-391: EVENT now shows the raw event.name (`comms.message.posted`), so
+  // the sender+type composition that used to live in the EVENT cell
+  // ("ADV-939: info") moves into DETAILS. The body, when present, follows
+  // the prefix after an em-dash.
+  test("prepends '<sender>: <type> — ' when sender and body are present", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "comms.message.posted",
+        "event.label": "CTL-330",
+        "catalyst.worker.ticket": "CTL-330",
+      },
+      body: { message: "stalled: CI failed", payload: { type: "attention", channel: "orch-demo", to: "all" } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("CTL-330: attention — stalled: CI failed");
+  });
+
+  test("falls back to catalyst.worker.ticket when event.label is missing", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "comms.message.posted",
+        "catalyst.worker.ticket": "CTL-330",
+      },
+      body: { message: "hi", payload: { type: "info" } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("CTL-330: info — hi");
+  });
+
+  test("omits the sender prefix when no event.label or worker ticket is present", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "comms.message.posted" },
+      body: { message: "broadcast", payload: { type: "info" } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("info — broadcast");
+  });
+
+  test("falls back to 'comms' type when payload.type is missing", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "comms.message.posted",
+        "event.label": "CTL-330",
+      },
+      body: { message: "msg", payload: {} },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("CTL-330: comms — msg");
+  });
+
+  test("renders only the prefix when the message body is empty", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "comms.message.posted",
+        "event.label": "CTL-330",
+      },
+      body: { payload: { type: "attention" } },
+    } as unknown as CanonicalEvent;
+    expect(formatDetails(e)).toBe("CTL-330: attention");
+  });
+});
+
 describe("formatDetails (broker.daemon)", () => {
   // CTL-348: broker.daemon.* events sometimes carry a free-form payload.detail
   // string; surface it in DETAIL when present, fall through otherwise.
@@ -1088,12 +1116,12 @@ describe("formatSource / formatRef — CTL-355 Nerd Font enabled", () => {
   });
 });
 
-// CTL-364: SOURCE + EVENT columns merged into a single EVENT column rendered
-// as `${sourceIcon}${label}`. formatSourceEvent composes the visible label;
-// formatSource and formatEvent remain exported for the filter haystack and
-// other consumers. This block covers the bare-mode (no Nerd Font) label
-// composition; the Nerd Font prefix is asserted in its own block below.
-describe("formatSourceEvent (CTL-364, bare mode)", () => {
+// CTL-391: the SOURCE icon — previously concatenated inside the EVENT column
+// string by formatSourceEvent — moves into its own 1-cell ICON column to the
+// left of EVENT. formatIcon returns just the BMP glyph (no trailing space)
+// when a Nerd Font is detected, or "" when not, so the cell can render
+// blank without disturbing column alignment.
+describe("formatIcon (CTL-391, bare mode)", () => {
   // The earlier "CTL-355 Nerd Font enabled" block's afterAll deletes
   // CATALYST_NERD_FONT and resets the detection cache, so a fresh probe
   // here would see whatever Nerd Fonts the host machine has installed.
@@ -1109,87 +1137,22 @@ describe("formatSourceEvent (CTL-364, bare mode)", () => {
     _resetNerdFontCacheForTesting();
   });
 
-  test("github events render the event label without a source prefix", () => {
-    expect(formatSourceEvent(baseEvent)).toBe("merged");
-  });
-
-  test("linear events render the mapped event label", () => {
-    const e = {
+  test("returns empty string for any event when no Nerd Font is detected", () => {
+    expect(formatIcon(baseEvent)).toBe("");
+    const linear = {
       ...baseEvent,
       attributes: { ...baseEvent.attributes, "event.name": "linear.issue.updated" },
     } as CanonicalEvent;
-    expect(formatSourceEvent(e)).toBe(formatEvent(e));
-  });
-
-  test("filter.register renders 'filter reg'", () => {
-    const e = {
-      ...baseEvent,
-      attributes: { "event.name": "filter.register" },
-    } as unknown as CanonicalEvent;
-    expect(formatSourceEvent(e)).toBe("filter reg");
-  });
-
-  test("filter.wake.{sessionId} renders 'wake'", () => {
-    const e = {
+    expect(formatIcon(linear)).toBe("");
+    const wake = {
       ...baseEvent,
       attributes: { "event.name": "filter.wake.sess_x" },
     } as unknown as CanonicalEvent;
-    expect(formatSourceEvent(e)).toBe("wake");
-  });
-
-  test("orchestrator.worker.done renders 'done'", () => {
-    const e = {
-      ...baseEvent,
-      attributes: { "event.name": "orchestrator.worker.done" },
-    } as unknown as CanonicalEvent;
-    expect(formatSourceEvent(e)).toBe("done");
-  });
-
-  test("comms.message.posted with event.label sender embeds sender into the label", () => {
-    const e = {
-      ...baseEvent,
-      attributes: {
-        "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
-        "catalyst.worker.ticket": "CTL-330",
-      },
-      body: { payload: { type: "attention", channel: "orch-demo", to: "all" } },
-    } as unknown as CanonicalEvent;
-    expect(formatSourceEvent(e)).toBe("CTL-330: attention");
-  });
-
-  test("comms.message.posted falls back to catalyst.worker.ticket when no event.label", () => {
-    const e = {
-      ...baseEvent,
-      attributes: {
-        "event.name": "comms.message.posted",
-        "catalyst.worker.ticket": "CTL-330",
-      },
-      body: { payload: { type: "info", channel: "orch-demo", to: "all" } },
-    } as unknown as CanonicalEvent;
-    expect(formatSourceEvent(e)).toBe("CTL-330: info");
-  });
-
-  test("comms.message.posted with no sender falls through to the bare event label", () => {
-    const e = {
-      ...baseEvent,
-      attributes: { "event.name": "comms.message.posted" },
-      body: { payload: { type: "info" } },
-    } as unknown as CanonicalEvent;
-    expect(formatSourceEvent(e)).toBe("info");
-  });
-
-  test("unknown event names match formatEvent's 15-char truncation", () => {
-    const e = {
-      ...baseEvent,
-      attributes: { "event.name": "some.very.long.event.name.here" },
-    } as unknown as CanonicalEvent;
-    expect(formatSourceEvent(e)).toBe(formatEvent(e));
-    expect(formatSourceEvent(e).length).toBeLessThanOrEqual(15);
+    expect(formatIcon(wake)).toBe("");
   });
 });
 
-describe("formatSourceEvent (CTL-364, Nerd Font enabled)", () => {
+describe("formatIcon (CTL-391, Nerd Font enabled)", () => {
   const outerEnv = process.env.CATALYST_NERD_FONT;
   beforeAll(() => {
     process.env.CATALYST_NERD_FONT = "1";
@@ -1201,53 +1164,83 @@ describe("formatSourceEvent (CTL-364, Nerd Font enabled)", () => {
     _resetNerdFontCacheForTesting();
   });
 
-  test("github events get the octocat glyph + space + label", () => {
-    const out = formatSourceEvent(baseEvent);
+  test("github events get the octocat glyph alone (no trailing space)", () => {
+    const out = formatIcon(baseEvent);
+    expect(out.length).toBe(1);
     expect(out.codePointAt(0)).toBe(0xf09b);
-    expect(out.charAt(1)).toBe(" ");
-    expect(out.slice(2)).toBe("merged");
   });
 
-  test("filter.wake.* gets the broker bolt glyph + 'wake'", () => {
+  test("linear events get the linear ticket glyph", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { ...baseEvent.attributes, "event.name": "linear.issue.state_changed" },
+    } as CanonicalEvent;
+    const out = formatIcon(e);
+    expect(out.length).toBe(1);
+    expect(out.codePointAt(0)).toBe(0xf145);
+  });
+
+  test("filter.wake.* gets the broker bolt glyph (broker is the wake source)", () => {
     const e = {
       ...baseEvent,
       attributes: { "event.name": "filter.wake.orch-abc" },
     } as unknown as CanonicalEvent;
-    const out = formatSourceEvent(e);
+    const out = formatIcon(e);
+    expect(out.length).toBe(1);
     expect(out.codePointAt(0)).toBe(0xf0e7);
-    expect(out.slice(2)).toBe("wake");
   });
 
-  test("comms.message.posted with sender gets the comments glyph + 'CTL-330: attention'", () => {
+  test("comms.message.posted anchors on the comments speech-bubble glyph regardless of sender", () => {
+    // Even when classifySource would return the sender's ticket label (e.g.
+    // "CTL-330"), the icon stays the speech bubble — the glyph belongs to
+    // the comms channel, not to the worker that posted the message.
     const e = {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
         "event.label": "CTL-330",
+        "catalyst.worker.ticket": "CTL-330",
       },
       body: { payload: { type: "attention" } },
     } as unknown as CanonicalEvent;
-    const out = formatSourceEvent(e);
+    const out = formatIcon(e);
+    expect(out.length).toBe(1);
     expect(out.codePointAt(0)).toBe(0xf086);
-    expect(out.slice(2)).toBe("CTL-330: attention");
+  });
+
+  test("orchestrator-derived sources get the catalyst cogs glyph", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "session.phase",
+        "catalyst.orchestrator.id": "orch-abc",
+        "catalyst.worker.ticket": "CTL-312",
+      },
+    } as CanonicalEvent;
+    const out = formatIcon(e);
+    expect(out.length).toBe(1);
+    expect(out.codePointAt(0)).toBe(0xf085);
   });
 });
 
 describe("session.context display (CTL-374)", () => {
-  test("formatEvent returns 'ctx' for session.context", () => {
+  // CTL-391: formatEvent returns the raw event.name verbatim. The compact
+  // "ctx" / "ctx warn" labels are gone — context details still land in the
+  // DETAILS cell via the formatDetails arms below.
+  test("formatEvent returns raw session.context verbatim", () => {
     const e: CanonicalEvent = {
       ...baseEvent,
       attributes: { "event.name": "session.context" },
     };
-    expect(formatEvent(e)).toBe("ctx");
+    expect(formatEvent(e)).toBe("session.context");
   });
 
-  test("formatEvent returns 'ctx warn' for attention.context_pressure", () => {
+  test("formatEvent returns raw attention.context_pressure verbatim", () => {
     const e: CanonicalEvent = {
       ...baseEvent,
       attributes: { "event.name": "attention.context_pressure" },
     };
-    expect(formatEvent(e)).toBe("ctx warn");
+    expect(formatEvent(e)).toBe("attention.context_pressure");
   });
 
   test("formatDetails for session.context renders compact context summary", () => {

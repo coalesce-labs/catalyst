@@ -3,7 +3,8 @@ import type { CanonicalEvent } from "../../lib/canonical-event.ts";
 import {
   formatTime,
   formatRepo,
-  formatSourceEvent,
+  formatIcon,
+  formatEvent,
   formatRef,
   formatDetails,
   formatStatus,
@@ -32,6 +33,11 @@ interface EventRowProps {
 // instead of the previous `.slice(N-1).padEnd(N)` strings, which defeated
 // Ink's flex layout and forced orchestrator IDs to chop at `orch-adv-` on
 // wide terminals.
+// CTL-391: ICON column carries the source-family Nerd Font glyph in its
+// own 1-cell box to the left of EVENT, freeing EVENT to show the raw
+// `event.name` attribute verbatim. When no Nerd Font is detected the
+// cell renders blank but its width stays reserved so columns stay
+// aligned across heterogeneous rows.
 // CTL-361: DETAILS uses `flexGrow={1}` + `wrap="truncate"` so an overly long
 // payload hard-clips at the cell's right edge instead of reflowing onto the
 // next terminal line and visually overdrawing the next event row — which is
@@ -72,8 +78,11 @@ export function EventRow({ event, selected, columns, paused = true, wrapMode = '
       <Box width={w.repo} flexShrink={0} marginRight={1}>
         <Text color={color} inverse={inverse}>{formatRepo(event)}</Text>
       </Box>
+      <Box width={w.icon} flexShrink={0} marginRight={1}>
+        <Text color={color} inverse={inverse}>{formatIcon(event)}</Text>
+      </Box>
       <Box width={w.event} flexShrink={0} marginRight={1}>
-        <Text color={color} inverse={inverse} wrap="truncate">{formatSourceEvent(event)}</Text>
+        <Text color={color} inverse={inverse} wrap="truncate">{formatEvent(event)}</Text>
       </Box>
       <Box width={w.ref} flexShrink={0} marginRight={1}>
         <Text color={color} inverse={inverse}>{displayRef}</Text>

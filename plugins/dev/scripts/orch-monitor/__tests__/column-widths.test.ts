@@ -109,9 +109,13 @@ describe("computeColumnWidths", () => {
   // CTL-364: SOURCE column dropped; EVENT column grew + became responsive so
   // the merged `${glyph} ${label}` content (longest: "CTL-330: attention" with
   // a 2-char glyph prefix = 20 chars) always fits without truncation.
-  test("event column has no minimum below 22 and caps at 30 on wide terminals", () => {
-    expect(computeColumnWidths(80).event).toBeGreaterThanOrEqual(22);
-    expect(computeColumnWidths(400).event).toBeLessThanOrEqual(30);
+  // CTL-391: EVENT now carries the raw event.name. Raw names are longer
+  // than the legacy labels (`github.pr_review_comment.created` is 32 chars,
+  // `filter.wake.<sessionId>` is 44+) so the responsive range grows to
+  // 24–40 — EVENT is the most informative column on the row.
+  test("event column has no minimum below 24 and caps at 40 on wide terminals", () => {
+    expect(computeColumnWidths(80).event).toBeGreaterThanOrEqual(24);
+    expect(computeColumnWidths(400).event).toBeLessThanOrEqual(40);
   });
 
   test("event column grows monotonically with terminal width", () => {
@@ -122,6 +126,16 @@ describe("computeColumnWidths", () => {
     expect(w160).toBeGreaterThanOrEqual(w80);
     expect(w240).toBeGreaterThanOrEqual(w160);
     expect(w400).toBeGreaterThanOrEqual(w240);
+  });
+
+  // CTL-391: 1-cell ICON column to the left of EVENT carries the source-family
+  // Nerd Font glyph. Always rendered — even at the narrowest supported width
+  // and even when no Nerd Font is detected — so columns stay aligned across
+  // rows regardless of which events the terminal has rendered so far.
+  test("icon column is a fixed 1 cell at every terminal width", () => {
+    for (const cols of [80, 100, 160, 180, 200, 300, 400]) {
+      expect(computeColumnWidths(cols).icon).toBe(1);
+    }
   });
 });
 
