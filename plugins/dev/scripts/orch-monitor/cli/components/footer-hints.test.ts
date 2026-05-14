@@ -9,7 +9,7 @@ describe("formatFilterHints", () => {
   test("narrow terminal — base hints only, focus label adapts", () => {
     const narrow = formatFilterHints(100, false);
     expect(narrow).toContain("/:focus");
-    expect(narrow).toContain("t:trace o:orch");
+    expect(narrow).toContain("t:scope-tr o:scope-orch");
     expect(narrow).toContain("Enter:detail q:quit");
     expect(narrow).not.toContain("h:help");
     expect(narrow).not.toContain("G:newest");
@@ -25,7 +25,7 @@ describe("formatFilterHints", () => {
     expect(wide).toContain("h:help");
     expect(wide).toContain("G:newest");
     expect(wide).toContain("r:reset");
-    expect(wide).toContain("t:trace o:orch");
+    expect(wide).toContain("t:scope-tr o:scope-orch");
   });
 
   test("threshold edge: at WIDE_HINTS_COLS is wide, just below is narrow", () => {

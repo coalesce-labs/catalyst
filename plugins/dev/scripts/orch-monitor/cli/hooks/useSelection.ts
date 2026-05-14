@@ -58,5 +58,22 @@ export function useSelection(totalItems: number, visibleRows: number) {
     setSelectedIndex(Math.max(0, totalItems - 1));
   }
 
-  return { selectedIndex, scrollOffset, moveUp, moveDown, pageUp, pageDown, jumpToBottom, autoFollow };
+  // CTL-388: pause live tailing without moving selectedIndex. Used by the
+  // o/t scope-key handlers in hud.tsx to make the (invisible-in-live-mode)
+  // cursor visible BEFORE the user picks an event to scope on.
+  function pauseAutoFollow() {
+    setAutoFollow(false);
+  }
+
+  return {
+    selectedIndex,
+    scrollOffset,
+    moveUp,
+    moveDown,
+    pageUp,
+    pageDown,
+    jumpToBottom,
+    pauseAutoFollow,
+    autoFollow,
+  };
 }

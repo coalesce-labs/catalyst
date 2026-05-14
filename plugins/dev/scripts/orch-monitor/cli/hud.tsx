@@ -15,6 +15,7 @@ import {
 import { useEventLog } from "./hooks/useEventLog.ts";
 import { useFilter, type DslPredicate } from "./hooks/useFilter.ts";
 import { useSelection } from "./hooks/useSelection.ts";
+import { decidePivotAction } from "./lib/pivot-decision.ts";
 import { detectNerdFont } from "./lib/nerd-font.ts";
 import {
   compile,
@@ -75,10 +76,10 @@ const HELP_LINES = [
   "  ?                show/hide the generated DSL from last query",
   "  Esc              clear active filter / close overlay",
   "",
-  "Pivot — narrow to related events",
-  "  t                pivot to all events sharing this event's trace ID",
-  "  o                pivot to all events from this event's orchestrator",
-  "  r                reset pivot (show all events)",
+  "Scope — narrow to related events  (live mode: first press pauses; press again to apply)",
+  "  t                scope to all events sharing this event's trace ID",
+  "  o                scope to all events from this event's orchestrator",
+  "  r                reset scope (show all events)",
   "",
   "  h                this help          q / Ctrl-C    quit",
 ];
@@ -168,8 +169,17 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   const chromeRows = headerRows + 3 + overlayHeight;
   const visibleRows = Math.max(1, layoutRows - chromeRows);
 
-  const { selectedIndex, scrollOffset, moveUp, moveDown, pageUp, pageDown, jumpToBottom, autoFollow } =
-    useSelection(filtered.length, visibleRows);
+  const {
+    selectedIndex,
+    scrollOffset,
+    moveUp,
+    moveDown,
+    pageUp,
+    pageDown,
+    jumpToBottom,
+    pauseAutoFollow,
+    autoFollow,
+  } = useSelection(filtered.length, visibleRows);
 
   const [filterFocused, setFilterFocused] = useState(false);
   const [queryFocused, setQueryFocused] = useState(false);
@@ -348,28 +358,19 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     if (input === "h") { setShowHelp(true); return; }
     if (input === "?" && dslState) { setShowDslOverlay((v) => !v); return; }
     if (key.return) { setShowDetail((v) => !v); return; }
-    if (input === "t") {
-      if (selectedEvent?.traceId) {
-        setPivot({ type: "trace", id: selectedEvent.traceId });
-        showStatus(`pivoted to trace ${selectedEvent.traceId.slice(0, 16)}…`);
-      } else {
-        showStatus("no trace ID on this event");
+    if (input === "o" || input === "t") {
+      const action = decidePivotAction({ key: input, autoFollow, selectedEvent });
+      if (action.kind === "pause") {
+        pauseAutoFollow();
+      } else if (action.kind === "pivot") {
+        setPivot(action.pivot);
       }
-      return;
-    }
-    if (input === "o") {
-      const orchId = selectedEvent?.attributes["catalyst.orchestrator.id"];
-      if (orchId) {
-        setPivot({ type: "orch", id: orchId });
-        showStatus(`pivoted to orchestrator ${orchId}`);
-      } else {
-        showStatus("no orchestrator ID on this event");
-      }
+      showStatus(action.status);
       return;
     }
     if (input === "r") {
       setPivot(null);
-      showStatus("pivot cleared");
+      showStatus("scope cleared");
       return;
     }
   });
