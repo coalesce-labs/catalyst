@@ -179,6 +179,11 @@ __session_emit_canonical() {
   [[ -n "$phase" ]] && extra_args+=(--phase "$phase")
   [[ -n "$vcs_pr" ]] && extra_args+=(--vcs-pr "$vcs_pr")
 
+  # CTL-385: read $REPO env to populate vcs.repository.name. Sessions table has
+  # no repo column; the env var is the lightweight shim — oneshot workers set
+  # REPO once at startup so every session.phase event carries it.
+  [[ -n "${REPO:-}" ]] && extra_args+=(--vcs-repo "$REPO")
+
   # CTL-374: attach claude.session.id when bound on the sessions row.
   local claude_sid
   claude_sid="$(__session_claude_id "$sid")"

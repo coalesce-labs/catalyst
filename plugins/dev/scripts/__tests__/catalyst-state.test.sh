@@ -267,6 +267,104 @@ else
   fail "no event JSONL written for no-repo test"
 fi
 
+# ─── Test 13: event_append extracts detail.repo (CTL-385) ───────────────────
+# Covers events that carry the repo nested inside `.detail` rather than at the
+# top level — e.g. `agent.checkin` from oneshot broker_claim_pr, or any
+# `filter.register` whose detail block names a repo.
+echo ""
+echo "--- Test 13: event_append falls back to detail.repo ---"
+export CATALYST_DIR="$SCRATCH/cat13"
+"$STATE_SCRIPT" init >/dev/null
+
+"$STATE_SCRIPT" event "$(jq -nc '{
+  ts: "2026-05-14T12:00:00Z",
+  orchestrator: "orch-ctl-test",
+  worker: "CTL-385",
+  event: "worker-done",
+  detail: { repo: "coalesce-labs/catalyst" }
+}')" >/dev/null 2>&1 || true
+
+EVENT_FILE13=$(ls "$SCRATCH/cat13/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE13" ]]; then
+  REPO=$(jq -r 'select(.attributes."event.name" == "orchestrator.worker.done") | .attributes."vcs.repository.name" // ""' "$EVENT_FILE13" | head -1)
+  assert_eq "coalesce-labs/catalyst" "$REPO" "detail.repo populates attributes[\"vcs.repository.name\"]"
+else
+  fail "no event JSONL written for detail.repo test"
+fi
+
+# ─── Test 14: event_append falls back to $REPO env (CTL-385) ────────────────
+# Covers synthesized emits inside catalyst-state.sh that build JSON without a
+# repo field (e.g. cmd_attention, cmd_archive). Orchestrator/worker contexts
+# can set $REPO once and every subsequent event picks it up.
+echo ""
+echo "--- Test 14: event_append falls back to \$REPO env var ---"
+export CATALYST_DIR="$SCRATCH/cat14"
+"$STATE_SCRIPT" init >/dev/null
+
+REPO="coalesce-labs/from-env" "$STATE_SCRIPT" event "$(jq -nc '{
+  ts: "2026-05-14T12:00:00Z",
+  orchestrator: "orch-env-test",
+  worker: "CTL-385",
+  event: "worker-done",
+  detail: null
+}')" >/dev/null 2>&1 || true
+
+EVENT_FILE14=$(ls "$SCRATCH/cat14/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE14" ]]; then
+  REPO=$(jq -r 'select(.attributes."event.name" == "orchestrator.worker.done") | .attributes."vcs.repository.name" // ""' "$EVENT_FILE14" | head -1)
+  assert_eq "coalesce-labs/from-env" "$REPO" "\$REPO env populates attributes[\"vcs.repository.name\"]"
+else
+  fail "no event JSONL written for \$REPO env test"
+fi
+unset REPO
+
+# ─── Test 15: precedence — top-level > detail.repo > $REPO env (CTL-385) ────
+echo ""
+echo "--- Test 15: top-level .repo overrides detail.repo and \$REPO env ---"
+export CATALYST_DIR="$SCRATCH/cat15"
+"$STATE_SCRIPT" init >/dev/null
+
+REPO="coalesce-labs/env-loser" "$STATE_SCRIPT" event "$(jq -nc '{
+  ts: "2026-05-14T12:00:00Z",
+  orchestrator: "orch-precedence",
+  worker: "CTL-385",
+  event: "worker-done",
+  repo: "coalesce-labs/top-winner",
+  detail: { repo: "coalesce-labs/detail-loser" }
+}')" >/dev/null 2>&1 || true
+
+EVENT_FILE15=$(ls "$SCRATCH/cat15/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE15" ]]; then
+  REPO=$(jq -r 'select(.attributes."event.name" == "orchestrator.worker.done") | .attributes."vcs.repository.name" // ""' "$EVENT_FILE15" | head -1)
+  assert_eq "coalesce-labs/top-winner" "$REPO" "top-level .repo beats detail.repo and \$REPO env"
+else
+  fail "no event JSONL written for precedence test"
+fi
+unset REPO
+
+# Confirm detail.repo beats $REPO env when top-level absent.
+echo ""
+echo "--- Test 16: detail.repo overrides \$REPO env when top-level absent ---"
+export CATALYST_DIR="$SCRATCH/cat16"
+"$STATE_SCRIPT" init >/dev/null
+
+REPO="coalesce-labs/env-loser" "$STATE_SCRIPT" event "$(jq -nc '{
+  ts: "2026-05-14T12:00:00Z",
+  orchestrator: "orch-detail-vs-env",
+  worker: "CTL-385",
+  event: "worker-done",
+  detail: { repo: "coalesce-labs/detail-winner" }
+}')" >/dev/null 2>&1 || true
+
+EVENT_FILE16=$(ls "$SCRATCH/cat16/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE16" ]]; then
+  REPO=$(jq -r 'select(.attributes."event.name" == "orchestrator.worker.done") | .attributes."vcs.repository.name" // ""' "$EVENT_FILE16" | head -1)
+  assert_eq "coalesce-labs/detail-winner" "$REPO" "detail.repo beats \$REPO env"
+else
+  fail "no event JSONL written for detail-vs-env test"
+fi
+unset REPO
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════"
