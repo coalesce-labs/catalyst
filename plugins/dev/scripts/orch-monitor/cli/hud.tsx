@@ -7,6 +7,7 @@ import { EventList } from "./components/EventList.tsx";
 import { FilterInput } from "./components/FilterInput.tsx";
 import { QueryInput } from "./components/QueryInput.tsx";
 import { DetailPane, buildDetailLines } from "./components/DetailPane.tsx";
+import { Dashboard } from "./components/Dashboard.tsx";
 import {
   computeBottomOverlaySize,
   computeDetailLayout,
@@ -70,6 +71,11 @@ const HELP_LINES = [
   "",
   "Display",
   "  w                toggle wrap (truncate / wrap)",
+  "",
+  "Dashboard  (i to open/close)",
+  "  Tab / 1-3        switch view (Interests / Workers / Orchestrators)",
+  "  j / k            move selection     Enter         open JSON detail",
+  "  Esc / i          close dashboard",
   "",
   "  h                this help          q / Ctrl-C    quit",
 ];
@@ -166,6 +172,8 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // CTL-384: global wrap mode toggle. Default truncate keeps one line per event;
   // 'wrap' reflows long DETAILS for events that need full visibility.
   const [wrapMode, setWrapMode] = useState<'truncate' | 'wrap'>('truncate');
+  // CTL-392: full-screen dashboard overlay that takes over the event list area.
+  const [showDashboard, setShowDashboard] = useState(false);
 
   // chrome = header + separator(1) + filter(1) + query(1) + dsl overlay (if any).
   // CTL-363: the standalone status row was folded into FilterInput and a `─`
@@ -328,6 +336,8 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
 
     if (key.escape) {
       if (showHelp) { setShowHelp(false); return; }
+      // Dashboard handles its own Esc (closes detail before dismissing itself).
+      if (showDashboard) { return; }
       if (showDetail) { setShowDetail(false); return; }
       if (showDslOverlay) { setShowDslOverlay(false); return; }
       setPivot(null);
@@ -345,6 +355,12 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     if (showHelp) {
       if (input === "h") { setShowHelp(false); return; }
       return; // swallow all keys while help is open
+    }
+
+    // CTL-392: while the dashboard is open, its own useInput handles
+    // Tab/1-3/j/k/Enter/PgUp/PgDn/G/Esc/i. We swallow all parent keys.
+    if (showDashboard) {
+      return;
     }
 
     if (showDslOverlay) {
@@ -367,6 +383,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     if (input === "/") { setFilterFocused(true); return; }
     if (input === ":") { setQueryFocused(true); setQueryError(null); return; }
     if (input === "h") { setShowHelp(true); return; }
+    if (input === "i") { setShowDashboard(true); return; }
     if (input === "?" && overlayHasContent) { setShowDslOverlay((v) => !v); return; }
     if (key.return) { setShowDetail((v) => !v); return; }
     if (input === "o" || input === "t") {
@@ -411,16 +428,25 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
         />
       </Box>
       <Box flexDirection="column" flexGrow={(inDetailMode || showHelp) ? 0 : 1} flexShrink={1}>
-        <EventList
-          events={filtered}
-          selectedIndex={selectedIndex}
-          scrollOffset={listScrollOffset}
-          visibleRows={listRows}
-          columns={cols}
-          compact={inDetailMode || showHelp}
-          paused={!autoFollow}
-          wrapMode={wrapMode}
-        />
+        {showDashboard ? (
+          <Dashboard
+            visibleRows={visibleRows}
+            cols={cols}
+            brokerState={brokerState}
+            onClose={() => setShowDashboard(false)}
+          />
+        ) : (
+          <EventList
+            events={filtered}
+            selectedIndex={selectedIndex}
+            scrollOffset={listScrollOffset}
+            visibleRows={listRows}
+            columns={cols}
+            compact={inDetailMode || showHelp}
+            paused={!autoFollow}
+            wrapMode={wrapMode}
+          />
+        )}
       </Box>
       {inDetailMode && selectedEvent && (
         <Box flexShrink={0}>
