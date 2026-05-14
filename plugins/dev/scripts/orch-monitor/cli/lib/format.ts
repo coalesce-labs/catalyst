@@ -90,77 +90,38 @@ export function formatSource(event: CanonicalEvent): string {
   return `${sourceIcon(label)}${label}`;
 }
 
-const EVENT_LABELS: Record<string, string> = {
-  "github.pr.merged": "merged",
-  "github.pr.opened": "pr open",
-  "github.pr.closed": "pr closed",
-  "orchestrator.worker.done": "done",
-  "orchestrator.worker.failed": "failed",
-  "orchestrator.attention.raised": "attention",
-  "session.phase": "phase",
-  // CTL-374: Claude Code context pressure surfaced as events.
-  "session.context": "ctx",
-  "attention.context_pressure": "ctx warn",
-  // CTL-331: filter daemon lifecycle events.
-  "filter.register": "filter reg",
-  "filter.deregister": "filter dereg",
-  "filter.wake": "wake",
-  "broker.daemon.startup": "broker start",
-  // Legacy aliases for events written before catalyst-state.sh preserved the
-  // bare filter.* name (CTL-331). Keeps older log lines readable.
-  "orchestrator.filter.register": "filter reg",
-  "orchestrator.filter.deregister": "filter dereg",
-  "orchestrator.filter.wake": "wake",
-};
-
+// CTL-391: EVENT column now shows the raw `event.name` attribute verbatim.
+// The pre-CTL-391 friendly-label map (`merged`, `ci pass`, `wake`, etc.) is
+// gone — operators asked to see the actual event name as emitted, not an
+// interpreted gloss. Overflow is the renderer's problem; Ink's
+// `wrap="truncate"` on the EVENT cell clips with ellipsis instead of
+// reflowing onto the next visual row.
 export function formatEvent(event: CanonicalEvent): string {
   const name = event.attributes?.["event.name"];
-  if (!name) return "(legacy)";
-  if (name === "github.check_suite.completed") {
-    const c = event.attributes["cicd.pipeline.run.conclusion"];
-    return c === "success" ? "ci pass" : "ci fail";
-  }
-  if (name === "comms.message.posted") {
-    const payload = event.body?.payload as Record<string, unknown> | undefined;
-    const type = payload?.["type"];
-    if (typeof type === "string" && type.length > 0) return type.slice(0, 15);
-    return "comms";
-  }
-  // CTL-331: wake events are session-scoped (filter.wake.{sessionId}).
-  // EVENT_LABELS is exact-match, so handle the prefixed family explicitly.
-  if (name.startsWith("filter.wake.") || name.startsWith("orchestrator.filter.wake.")) {
-    return "wake";
-  }
-  const label = EVENT_LABELS[name] ?? name;
-  return label.slice(0, 15);
+  return name ?? "(legacy)";
 }
 
-// CTL-364: merged SOURCE + EVENT column renderer. Returns
-// `${sourceIcon}${label}` where the icon is the Nerd Font glyph for the
-// source family (bare in non-Nerd-Font mode) and the label is the event
-// label — with the comms-specific embellishment of preserving the sender
-// ticket into the label so SOURCE-only info isn't lost when the column
-// disappears. formatSource and formatEvent stay exported for the filter
-// haystack and other layout-independent consumers.
-export function formatSourceEvent(event: CanonicalEvent): string {
+// CTL-391: ICON column renderer. Returns a single Nerd Font glyph for the
+// event's source family, or "" when no Nerd Font is detected (the cell
+// renders blank but its width is still reserved so the rest of the row
+// stays column-aligned). Pre-CTL-391 this glyph was concatenated inside the
+// EVENT column string by `formatSourceEvent`; pulling it back out into its
+// own 1-cell column lets EVENT show the full raw name without losing the
+// at-a-glance source signal.
+//
+// Comms messages anchor on the speech-bubble glyph rather than running
+// through `classifySource` (which returns the sender's worker ticket for
+// comms events) so the icon stays semantically correct regardless of which
+// worker sent the message.
+export function formatIcon(event: CanonicalEvent): string {
   const name = event.attributes?.["event.name"];
-  if (name === "comms.message.posted") {
-    const sender = event.attributes["event.label"]
-      ?? event.attributes["catalyst.worker.ticket"];
-    const payload = event.body?.payload as Record<string, unknown> | undefined;
-    const rawType = payload?.["type"];
-    const type = typeof rawType === "string" && rawType.length > 0 ? rawType : "comms";
-    // Glyph is anchored to the comms source family rather than classifySource's
-    // sender-ticket output so the icon stays semantically correct (speech
-    // bubble) regardless of which worker sent the message.
-    const icon = sourceIcon("comms");
-    if (sender && typeof sender === "string" && sender.length > 0) {
-      return `${icon}${sender}: ${type}`;
-    }
-    return `${icon}${type}`;
-  }
-  const sourceLabel = classifySource(event);
-  return `${sourceIcon(sourceLabel)}${formatEvent(event)}`;
+  const family = name === "comms.message.posted" ? "comms" : classifySource(event);
+  const raw = sourceIcon(family); // "{glyph} " or "" depending on Nerd Font detection
+  // sourceIcon returns "{glyph} " (glyph + trailing space) sized for inline
+  // composition with a label. The ICON column has its own marginRight, so
+  // strip the trailing space and emit just the BMP glyph.
+  const cp = raw.codePointAt(0);
+  return cp === undefined ? "" : String.fromCodePoint(cp);
 }
 
 // CTL-350: STATUS column glyph. One char + trailing space so the column width
@@ -479,7 +440,23 @@ export function formatDetails(event: CanonicalEvent): string {
       if (typeof body === "string") raw = body.slice(0, 300);
     }
   }
-  const out = sanitize(raw, "oneline");
+  let out = sanitize(raw, "oneline");
+  // CTL-391: comms.message.posted used to compose sender + type into the
+  // EVENT cell ("ADV-939: info"). EVENT now shows the raw event.name
+  // ("comms.message.posted"), so the sender + type would otherwise vanish.
+  // Prepend "<sender>: <type> — " to DETAILS so the information lands in
+  // the natural place — DETAILS already carries the message body for comms
+  // events, and the prefix reads cleanly with the body.
+  if (name === "comms.message.posted") {
+    const sender = event.attributes?.["event.label"]
+      ?? event.attributes?.["catalyst.worker.ticket"];
+    const p = payload as Record<string, unknown> | undefined;
+    const rawType = p?.["type"];
+    const type = typeof rawType === "string" && rawType.length > 0 ? rawType : "comms";
+    const senderText = typeof sender === "string" && sender.length > 0 ? `${sender}: ` : "";
+    const prefix = `${senderText}${type}`;
+    out = out.length > 0 ? `${prefix} — ${out}` : prefix;
+  }
   detailsCache.set(event, out);
   return out;
 }
