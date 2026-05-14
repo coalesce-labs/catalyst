@@ -18,13 +18,19 @@
  * Numeric widths for non-optional columns are clamped between sensible min
  * and max so very narrow terminals stay readable and very wide ones don't
  * give a single column 30% of the screen.
+ *
+ * CTL-364: SOURCE column merged into EVENT. The single combined column shows
+ * `${glyph} ${label}` where the glyph is the Nerd Font source-family icon
+ * (octocat / linear ticket / broker bolt / catalyst cogs / comms speech
+ * bubble / system cog) and the label is the event-name-derived friendly
+ * string. EVENT width grew from a fixed 16 to a responsive 22–30 range so
+ * the worst-case composed label (`{glyph} CTL-XXXX: attention`) always fits.
  */
 
 export interface ColumnWidths {
   status: number;
   time: number;
   repo: number;
-  source: number;
   event: number;
   ref: number;
   orch: number;
@@ -45,8 +51,7 @@ export function computeColumnWidths(columns: number): ColumnWidths {
     status: showStatus ? 3 : 0,
     time: 10,
     repo: Math.min(14, Math.max(10, Math.floor(columns * 0.07))),
-    source: Math.min(22, Math.max(16, Math.floor(columns * 0.1))),
-    event: 16,
+    event: Math.min(30, Math.max(22, Math.floor(columns * 0.13))),
     ref: Math.min(20, Math.max(10, Math.floor(columns * 0.08))),
     orch: showOrch ? Math.min(24, Math.max(16, Math.floor(columns * 0.12))) : 0,
     worker: showWorker ? 16 : 0,
