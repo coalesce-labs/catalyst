@@ -15,6 +15,7 @@ import {
 } from "./lib/detail-layout.ts";
 import { useEventLog } from "./hooks/useEventLog.ts";
 import { useFilter, type DslPredicate } from "./hooks/useFilter.ts";
+import { useHudMetrics } from "./hooks/useHudMetrics.ts";
 import { useSelection } from "./hooks/useSelection.ts";
 import { decidePivotAction } from "./lib/pivot-decision.ts";
 import { detectNerdFont } from "./lib/nerd-font.ts";
@@ -158,6 +159,27 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // CTL-390: plugin version chip. Resolved once at startup — release-please
   // bumps version.txt + commit.txt only between HUD invocations.
   const versionChip = useRef(readPluginVersion()).current;
+
+  // CTL-435: live operational metrics chips. The hook polls worker signal
+  // files + per-orch state.json every 5s. Heartbeats are derived from the
+  // events stream below.
+  const pollMetrics = useHudMetrics();
+  const hudStartTsRef = useRef<number>(Date.now());
+
+  // CTL-435: heartbeats received since the HUD process mounted. Counted
+  // against the same `events` array the rest of the HUD consumes, filtered
+  // to entries whose ts is at or after our mount time — so the chip is a
+  // "since you started watching" counter rather than a backlog tally.
+  const heartbeatCount = useMemo(() => {
+    const startMs = hudStartTsRef.current;
+    let n = 0;
+    for (const e of events) {
+      if (e.attributes?.["event.name"] !== "heartbeat") continue;
+      const ms = Date.parse(e.ts);
+      if (Number.isFinite(ms) && ms >= startMs) n++;
+    }
+    return n;
+  }, [events]);
 
   const [dslState, setDslState] = useState<DslState | null>(null);
   const dslPredicate: DslPredicate = dslState?.jsPredicate ?? null;
@@ -516,6 +538,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           dslActive={dslState !== null}
           dslLabel={dslState?.nlQuery ?? ""}
           hasDsl={dslState !== null}
+          metrics={{ ...pollMetrics, heartbeats: heartbeatCount }}
         />
       </Box>
     </Box>

@@ -2,7 +2,7 @@
 // introduced in CTL-389. Pure function tests; no Ink rendering required.
 
 import { describe, test, expect } from "bun:test";
-import { buildActiveChips, formatEventCount } from "./PromptInput.tsx";
+import { buildActiveChips, buildMetricsChips, formatEventCount } from "./PromptInput.tsx";
 
 describe("buildActiveChips", () => {
   const none = { activeSinceLabel: null, filterText: "", dslActive: false, dslLabel: "", pivot: null };
@@ -85,6 +85,56 @@ describe("buildActiveChips", () => {
   test("filter text chip truncates at 20 chars", () => {
     const chips = buildActiveChips({ ...none, filterText: "a".repeat(25) });
     expect(chips[0]?.label).toBe("/" + "a".repeat(20) + "…");
+  });
+});
+
+describe("buildMetricsChips", () => {
+  // CTL-435: status-line live operational metrics — always 4 chips, order
+  // fixed (workers, orchs, hb, PRs). Non-zero workers/orchs/PRs render green;
+  // hb is always gray (it's a cumulative counter, not an alert).
+  const zero = { activeWorkers: 0, activeOrchestrators: 0, heartbeats: 0, openPRs: 0 };
+
+  test("all zero → 4 chips, all gray", () => {
+    const chips = buildMetricsChips(zero);
+    expect(chips).toHaveLength(4);
+    expect(chips.every((c) => c.color === "gray")).toBe(true);
+    expect(chips.map((c) => c.label)).toEqual([
+      "workers: 0",
+      "orchs: 0",
+      "hb: 0",
+      "PRs: 0",
+    ]);
+  });
+
+  test("non-zero workers/orchs/PRs → green; hb stays gray", () => {
+    const chips = buildMetricsChips({
+      activeWorkers: 3,
+      activeOrchestrators: 1,
+      heartbeats: 47,
+      openPRs: 2,
+    });
+    expect(chips[0]).toMatchObject({ label: "workers: 3", color: "green" });
+    expect(chips[1]).toMatchObject({ label: "orchs: 1", color: "green" });
+    expect(chips[2]).toMatchObject({ label: "hb: 47", color: "gray" });
+    expect(chips[3]).toMatchObject({ label: "PRs: 2", color: "green" });
+  });
+
+  test("only some metrics non-zero — colors flip per chip independently", () => {
+    const chips = buildMetricsChips({
+      activeWorkers: 0,
+      activeOrchestrators: 1,
+      heartbeats: 5,
+      openPRs: 0,
+    });
+    expect(chips[0]).toMatchObject({ label: "workers: 0", color: "gray" });
+    expect(chips[1]).toMatchObject({ label: "orchs: 1", color: "green" });
+    expect(chips[2]).toMatchObject({ label: "hb: 5", color: "gray" });
+    expect(chips[3]).toMatchObject({ label: "PRs: 0", color: "gray" });
+  });
+
+  test("hb is gray even when very large", () => {
+    const chips = buildMetricsChips({ ...zero, heartbeats: 9999 });
+    expect(chips[2]).toMatchObject({ label: "hb: 9999", color: "gray" });
   });
 });
 

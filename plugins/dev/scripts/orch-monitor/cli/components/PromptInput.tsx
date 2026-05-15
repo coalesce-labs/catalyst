@@ -40,6 +40,26 @@ export function buildActiveChips(opts: {
   return chips;
 }
 
+export type MetricChip = { label: string; color: "green" | "gray" };
+
+// CTL-435: live operational metrics shown at the right of the status line.
+// Always returns 4 chips so the row width is predictable. Non-zero
+// workers/orchs/PRs render green; the heartbeat counter is always gray —
+// it's a cumulative tally, not an alert signal.
+export function buildMetricsChips(opts: {
+  activeWorkers: number;
+  activeOrchestrators: number;
+  heartbeats: number;
+  openPRs: number;
+}): MetricChip[] {
+  return [
+    { label: `workers: ${opts.activeWorkers}`, color: opts.activeWorkers > 0 ? "green" : "gray" },
+    { label: `orchs: ${opts.activeOrchestrators}`, color: opts.activeOrchestrators > 0 ? "green" : "gray" },
+    { label: `hb: ${opts.heartbeats}`, color: "gray" },
+    { label: `PRs: ${opts.openPRs}`, color: opts.openPRs > 0 ? "green" : "gray" },
+  ];
+}
+
 // CTL-389: collapse N/M when all events are visible.
 export function formatEventCount(filteredCount: number, totalCount: number): string {
   if (filteredCount === totalCount) return `${totalCount} events`;
@@ -95,6 +115,13 @@ interface PromptInputProps {
   dslLabel: string;
   // CTL-384: wrap mode chip
   wrapMode?: 'truncate' | 'wrap';
+  // CTL-435: live operational metrics shown at the right edge.
+  metrics?: {
+    activeWorkers: number;
+    activeOrchestrators: number;
+    heartbeats: number;
+    openPRs: number;
+  };
 }
 
 export function PromptInput({
@@ -117,6 +144,7 @@ export function PromptInput({
   dslActive,
   dslLabel,
   wrapMode = 'truncate',
+  metrics,
 }: PromptInputProps) {
   const [cursorPos, setCursorPos] = useState(0);
   const filterHistory = useRef<string[]>([]);
@@ -264,6 +292,11 @@ export function PromptInput({
           : <Text dimColor>{" [PAUSED — G to follow]"}</Text>
         }
         {wrapMode === 'wrap' && <Text color="cyan">{" [WRAP]"}</Text>}
+        {metrics && buildMetricsChips(metrics).map((chip, i) => (
+          chip.color === "green"
+            ? <Text key={`m${i}`} color="green">{` [${chip.label}]`}</Text>
+            : <Text key={`m${i}`} dimColor>{` [${chip.label}]`}</Text>
+        ))}
       </Box>
     </Box>
   );
