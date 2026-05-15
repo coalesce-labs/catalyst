@@ -76,6 +76,29 @@ export function lastPathSegment(p: string | null): string {
   return idx >= 0 ? stripped.slice(idx + 1) : stripped;
 }
 
+// FNV-1a 32-bit hash → base36, padded to 4 chars. Disambiguates workers from
+// different orchestrators in the WORKER column without lengthening the cell —
+// the full orchestrator ID is still visible in the adjacent ORCHESTRATOR column.
+export function shortOrchId(orchestrator: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < orchestrator.length; i++) {
+    h ^= orchestrator.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 1679616).toString(36).padStart(4, "0");
+}
+
+// Compress a worker/interest identifier for the HUD WORKER column. Worker names
+// follow `{orchestrator}-{ticket}`, so the raw value otherwise looks nearly
+// identical to the adjacent ORCHESTRATOR column once truncated. When the raw
+// value carries the orchestrator prefix, replace it with a short fingerprint.
+export function formatWorkerCell(rawWorker: string, orchestrator: string | null): string {
+  if (!orchestrator) return rawWorker;
+  const prefix = `${orchestrator}-`;
+  if (!rawWorker.startsWith(prefix)) return rawWorker;
+  return `${shortOrchId(orchestrator)}:${rawWorker.slice(prefix.length)}`;
+}
+
 export const DASHBOARD_VIEWS = ["interests", "workers", "orchs", "runs"] as const;
 export type DashboardView = (typeof DASHBOARD_VIEWS)[number];
 
