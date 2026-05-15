@@ -33,6 +33,8 @@ import {
   summarizeEvent,
   buildBrokerState,
   writeBrokerStateFile,
+  __getPendingBatchForTest,
+  __clearPendingBatchForTest,
   __clearEmittedWakeCacheForTest,
 } from "./index.mjs";
 import {
@@ -127,42 +129,54 @@ describe("tryTicketLifecycleRoute — Linear state changes", () => {
   });
 
   test("fires status_done on linear.issue.state_changed with 'Done' state", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "linear.issue.state_changed",
-      attributes: { "linear.issue.identifier": "CTL-275" },
-      detail: { state: "Done" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "linear.issue.state_changed",
+        attributes: { "linear.issue.identifier": "CTL-275" },
+        detail: { state: "Done" },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     expect(matches[0].interestId).toBe("watch-ctl-275");
     expect(matches[0].reason).toContain("marked Done");
   });
 
   test("fires status_in_review on 'In Review' state", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "linear.issue.state_changed",
-      attributes: { "linear.issue.identifier": "CTL-275" },
-      detail: { state: "In Review" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "linear.issue.state_changed",
+        attributes: { "linear.issue.identifier": "CTL-275" },
+        detail: { state: "In Review" },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("In Review");
   });
 
   test("fires status_changed for non-terminal state changes", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "linear.issue.state_changed",
-      attributes: { "linear.issue.identifier": "CTL-275" },
-      detail: { state: "In Progress" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "linear.issue.state_changed",
+        attributes: { "linear.issue.identifier": "CTL-275" },
+        detail: { state: "In Progress" },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("In Progress");
   });
 
   test("does not fire for unregistered ticket", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "linear.issue.state_changed",
-      attributes: { "linear.issue.identifier": "CTL-999" },
-      detail: { state: "Done" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "linear.issue.state_changed",
+        attributes: { "linear.issue.identifier": "CTL-999" },
+        detail: { state: "Done" },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(0);
   });
 
@@ -179,11 +193,14 @@ describe("tryTicketLifecycleRoute — Linear state changes", () => {
         persistent: true,
       },
     });
-    const matches = tryTicketLifecycleRoute({
-      event: "linear.issue.state_changed",
-      attributes: { "linear.issue.identifier": "CTL-275" },
-      detail: { state: "Done" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "linear.issue.state_changed",
+        attributes: { "linear.issue.identifier": "CTL-275" },
+        detail: { state: "Done" },
+      },
+      getInterests()
+    );
     const narrowMatch = matches.find((m) => m.interestId === "narrow-watch");
     expect(narrowMatch).toBeUndefined();
   });
@@ -206,22 +223,28 @@ describe("tryTicketLifecycleRoute — Linear comments", () => {
   });
 
   test("fires on linear.comment.created for watched ticket", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "linear.comment.created",
-      attributes: { "linear.issue.identifier": "CTL-275" },
-      detail: { author: "ryan" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "linear.comment.created",
+        attributes: { "linear.issue.identifier": "CTL-275" },
+        detail: { author: "ryan" },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("ryan");
     expect(matches[0].reason).toContain("CTL-275");
   });
 
   test("does not fire for unwatched ticket", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "linear.comment.created",
-      attributes: { "linear.issue.identifier": "CTL-999" },
-      detail: { author: "ryan" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "linear.comment.created",
+        attributes: { "linear.issue.identifier": "CTL-999" },
+        detail: { author: "ryan" },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(0);
   });
 });
@@ -243,42 +266,58 @@ describe("tryTicketLifecycleRoute — GitHub PR events with ticket link", () => 
   });
 
   test("fires pr_opened when PR body references watched ticket", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "github.pr.opened",
-      scope: { pr: 501 },
-      detail: { body: "Implements CTL-275\n\nThis PR does stuff", title: "fix thing", headRef: "ryan/ctl-275" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "github.pr.opened",
+        scope: { pr: 501 },
+        detail: {
+          body: "Implements CTL-275\n\nThis PR does stuff",
+          title: "fix thing",
+          headRef: "ryan/ctl-275",
+        },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("501");
     expect(matches[0].reason).toContain("CTL-275");
   });
 
   test("fires pr_merged when PR body references watched ticket", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "github.pr.merged",
-      scope: { pr: 501 },
-      detail: { body: "Fixes CTL-275", title: "", headRef: "" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "github.pr.merged",
+        scope: { pr: 501 },
+        detail: { body: "Fixes CTL-275", title: "", headRef: "" },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("merged");
     expect(matches[0].ticket).toBe("CTL-275");
   });
 
   test("does not fire when PR body has no ticket reference", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "github.pr.opened",
-      scope: { pr: 502 },
-      detail: { body: "General cleanup PR", title: "cleanup", headRef: "ryan/cleanup" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "github.pr.opened",
+        scope: { pr: 502 },
+        detail: { body: "General cleanup PR", title: "cleanup", headRef: "ryan/cleanup" },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(0);
   });
 
   test("includes ticket field in match result", () => {
-    const matches = tryTicketLifecycleRoute({
-      event: "github.pr.opened",
-      scope: { pr: 505 },
-      detail: { body: "CTL-275 implementation", title: "", headRef: "" },
-    }, getInterests());
+    const matches = tryTicketLifecycleRoute(
+      {
+        event: "github.pr.opened",
+        scope: { pr: 505 },
+        detail: { body: "CTL-275 implementation", title: "", headRef: "" },
+      },
+      getInterests()
+    );
     expect(matches[0].ticket).toBe("CTL-275");
   });
 });
@@ -296,11 +335,14 @@ describe("tryTicketLifecycleRoute — ticket_state side effects", () => {
         persistent: true,
       },
     });
-    tryTicketLifecycleRoute({
-      event: "linear.issue.state_changed",
-      attributes: { "linear.issue.identifier": "CTL-280" },
-      detail: { state: "Done" },
-    }, getInterests());
+    tryTicketLifecycleRoute(
+      {
+        event: "linear.issue.state_changed",
+        attributes: { "linear.issue.identifier": "CTL-280" },
+        detail: { state: "Done" },
+      },
+      getInterests()
+    );
     const ts = getTicketState("CTL-280");
     expect(ts).not.toBeNull();
     expect(ts.linearState).toBe("Done");
@@ -914,7 +956,12 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
   test("agent checked in with ticket gets pr_lifecycle when PR opens", () => {
     handleAgentCheckin({
       event: "agent.checkin",
-      detail: { session_id: "sess-auto", agent_name: "worker", ticket: "CTL-275", claimed_pr: null },
+      detail: {
+        session_id: "sess-auto",
+        agent_name: "worker",
+        ticket: "CTL-275",
+        claimed_pr: null,
+      },
     });
     expect(getInterests().has("sess-auto")).toBe(false);
 
@@ -931,11 +978,14 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
       },
     });
 
-    tryTicketLifecycleRoute({
-      event: "github.pr.opened",
-      scope: { pr: 601 },
-      detail: { body: "Implements CTL-275", title: "", headRef: "" },
-    }, getInterests());
+    tryTicketLifecycleRoute(
+      {
+        event: "github.pr.opened",
+        scope: { pr: 601 },
+        detail: { body: "Implements CTL-275", title: "", headRef: "" },
+      },
+      getInterests()
+    );
 
     const reg = getInterests().get("sess-auto");
     expect(reg).toBeDefined();
@@ -946,7 +996,12 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
   test("agents with existing claimed_pr are skipped during auto-correlation", () => {
     handleAgentCheckin({
       event: "agent.checkin",
-      detail: { session_id: "sess-already", agent_name: "worker", ticket: "CTL-275", claimed_pr: 500 },
+      detail: {
+        session_id: "sess-already",
+        agent_name: "worker",
+        ticket: "CTL-275",
+        claimed_pr: 500,
+      },
     });
     const prBefore = getInterests().get("sess-already")?.pr_numbers;
 
@@ -962,11 +1017,14 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
       },
     });
 
-    tryTicketLifecycleRoute({
-      event: "github.pr.opened",
-      scope: { pr: 601 },
-      detail: { body: "CTL-275 implementation", title: "", headRef: "" },
-    }, getInterests());
+    tryTicketLifecycleRoute(
+      {
+        event: "github.pr.opened",
+        scope: { pr: 601 },
+        detail: { body: "CTL-275 implementation", title: "", headRef: "" },
+      },
+      getInterests()
+    );
 
     expect(getInterests().get("sess-already")?.pr_numbers).toEqual(prBefore);
   });
@@ -975,7 +1033,13 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
   test("orchestrator pr_lifecycle interest gets PR appended when worker on its ticket opens PR", () => {
     handleAgentCheckin({
       event: "agent.checkin",
-      detail: { session_id: "sess-w-A", agent_name: "worker", ticket: "CTL-275", orchestrator: "orch-A", claimed_pr: null },
+      detail: {
+        session_id: "sess-w-A",
+        agent_name: "worker",
+        ticket: "CTL-275",
+        orchestrator: "orch-A",
+        claimed_pr: null,
+      },
     });
 
     // Orchestrator-level pr_lifecycle interest registered with empty pr_numbers
@@ -1007,11 +1071,14 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
       },
     });
 
-    tryTicketLifecycleRoute({
-      event: "github.pr.opened",
-      scope: { pr: 610 },
-      detail: { body: "Implements CTL-275", title: "", headRef: "" },
-    }, getInterests());
+    tryTicketLifecycleRoute(
+      {
+        event: "github.pr.opened",
+        scope: { pr: 610 },
+        detail: { body: "Implements CTL-275", title: "", headRef: "" },
+      },
+      getInterests()
+    );
 
     const orchReg = getInterests().get("orch-A-pr-lifecycle");
     expect(orchReg).toBeDefined();
@@ -1021,7 +1088,13 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
   test("orchestrator pr_lifecycle interest is not duplicated if PR already present", () => {
     handleAgentCheckin({
       event: "agent.checkin",
-      detail: { session_id: "sess-w-B", agent_name: "worker", ticket: "CTL-275", orchestrator: "orch-B", claimed_pr: null },
+      detail: {
+        session_id: "sess-w-B",
+        agent_name: "worker",
+        ticket: "CTL-275",
+        orchestrator: "orch-B",
+        claimed_pr: null,
+      },
     });
 
     handleRegister({
@@ -1050,11 +1123,14 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
       },
     });
 
-    tryTicketLifecycleRoute({
-      event: "github.pr.opened",
-      scope: { pr: 620 },
-      detail: { body: "Implements CTL-275", title: "", headRef: "" },
-    }, getInterests());
+    tryTicketLifecycleRoute(
+      {
+        event: "github.pr.opened",
+        scope: { pr: 620 },
+        detail: { body: "Implements CTL-275", title: "", headRef: "" },
+      },
+      getInterests()
+    );
 
     const orchReg = getInterests().get("orch-B-pr-lifecycle");
     expect(orchReg.pr_numbers.filter((n) => n === 620)).toHaveLength(1);
@@ -1063,7 +1139,13 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
   test("orchestrator pr_lifecycle interest is NOT touched when no agent on watched ticket belongs to that orchestrator", () => {
     handleAgentCheckin({
       event: "agent.checkin",
-      detail: { session_id: "sess-w-X", agent_name: "worker", ticket: "CTL-275", orchestrator: "orch-X", claimed_pr: null },
+      detail: {
+        session_id: "sess-w-X",
+        agent_name: "worker",
+        ticket: "CTL-275",
+        orchestrator: "orch-X",
+        claimed_pr: null,
+      },
     });
 
     handleRegister({
@@ -1092,11 +1174,14 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
       },
     });
 
-    tryTicketLifecycleRoute({
-      event: "github.pr.opened",
-      scope: { pr: 630 },
-      detail: { body: "Implements CTL-275", title: "", headRef: "" },
-    }, getInterests());
+    tryTicketLifecycleRoute(
+      {
+        event: "github.pr.opened",
+        scope: { pr: 630 },
+        detail: { body: "Implements CTL-275", title: "", headRef: "" },
+      },
+      getInterests()
+    );
 
     const orchYReg = getInterests().get("orch-Y-pr-lifecycle");
     expect(orchYReg.pr_numbers).toEqual([]);
@@ -1143,11 +1228,14 @@ describe("backward compat: pr_lifecycle routing unchanged in broker", () => {
         session_id: "sess-bc",
       },
     });
-    const matches = tryDeterministicRoute({
-      event: "github.pr.merged",
-      scope: { pr: 501 },
-      detail: { mergeCommitSha: "abc123", merged: true },
-    }, getInterests());
+    const matches = tryDeterministicRoute(
+      {
+        event: "github.pr.merged",
+        scope: { pr: 501 },
+        detail: { mergeCommitSha: "abc123", merged: true },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     expect(matches[0].interestId).toBe("sess-bc");
     expect(matches[0].reason).toContain("merged");
@@ -1167,10 +1255,13 @@ describe("backward compat: pr_lifecycle routing unchanged in broker", () => {
         persistent: true,
       },
     });
-    const matches = tryDeterministicRoute({
-      event: "github.check_suite.completed",
-      detail: { prNumbers: [502], conclusion: "success" },
-    }, getInterests());
+    const matches = tryDeterministicRoute(
+      {
+        event: "github.check_suite.completed",
+        detail: { prNumbers: [502], conclusion: "success" },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("CI checks passing");
     expect(matches[0].wakeStateKey).toBe("ci_conclusion:502");
@@ -1496,48 +1587,60 @@ describe("shouldSkipEvent (broker)", () => {
 
 describe("shouldSkipEvent — broker self-emission guards (CTL-346)", () => {
   test("skips canonical filter.wake.* event (broker self-emission)", () => {
-    expect(shouldSkipEvent({
-      attributes: { "event.name": "filter.wake.orch-1" },
-      resource: { "service.name": "catalyst.broker" },
-      body: { payload: {} },
-    })).toBe(true);
+    expect(
+      shouldSkipEvent({
+        attributes: { "event.name": "filter.wake.orch-1" },
+        resource: { "service.name": "catalyst.broker" },
+        body: { payload: {} },
+      })
+    ).toBe(true);
   });
 
   test("skips canonical broker.daemon.startup event", () => {
-    expect(shouldSkipEvent({
-      attributes: { "event.name": "broker.daemon.startup" },
-      resource: { "service.name": "catalyst.broker" },
-    })).toBe(true);
+    expect(
+      shouldSkipEvent({
+        attributes: { "event.name": "broker.daemon.startup" },
+        resource: { "service.name": "catalyst.broker" },
+      })
+    ).toBe(true);
   });
 
   // CTL-351: broker.daemon.shutdown follows the same self-emission pattern.
   test("skips canonical broker.daemon.shutdown event", () => {
-    expect(shouldSkipEvent({
-      attributes: { "event.name": "broker.daemon.shutdown" },
-      resource: { "service.name": "catalyst.broker" },
-    })).toBe(true);
+    expect(
+      shouldSkipEvent({
+        attributes: { "event.name": "broker.daemon.shutdown" },
+        resource: { "service.name": "catalyst.broker" },
+      })
+    ).toBe(true);
   });
 
   test("skips any event with resource.service.name == catalyst.broker", () => {
     // Defense-in-depth: future broker.* event names still get skipped.
-    expect(shouldSkipEvent({
-      attributes: { "event.name": "broker.future.metric" },
-      resource: { "service.name": "catalyst.broker" },
-    })).toBe(true);
+    expect(
+      shouldSkipEvent({
+        attributes: { "event.name": "broker.future.metric" },
+        resource: { "service.name": "catalyst.broker" },
+      })
+    ).toBe(true);
   });
 
   test("does not skip github.* events from other services", () => {
-    expect(shouldSkipEvent({
-      attributes: { "event.name": "github.pr.merged" },
-      resource: { "service.name": "catalyst.github-webhook" },
-    })).toBe(false);
+    expect(
+      shouldSkipEvent({
+        attributes: { "event.name": "github.pr.merged" },
+        resource: { "service.name": "catalyst.github-webhook" },
+      })
+    ).toBe(false);
   });
 
   test("does not skip canonical linear.* events from other services", () => {
-    expect(shouldSkipEvent({
-      attributes: { "event.name": "linear.issue.state_changed" },
-      resource: { "service.name": "catalyst.linear-webhook" },
-    })).toBe(false);
+    expect(
+      shouldSkipEvent({
+        attributes: { "event.name": "linear.issue.state_changed" },
+        resource: { "service.name": "catalyst.linear-webhook" },
+      })
+    ).toBe(false);
   });
 
   test("BROKER_INGEST_OWN_EMISSIONS=1 opts out — broker.daemon flows through", () => {
@@ -1545,15 +1648,19 @@ describe("shouldSkipEvent — broker self-emission guards (CTL-346)", () => {
     process.env.BROKER_INGEST_OWN_EMISSIONS = "1";
     try {
       // filter.* still skipped (original semantics for control-plane events)
-      expect(shouldSkipEvent({
-        attributes: { "event.name": "filter.wake.orch-1" },
-        resource: { "service.name": "catalyst.broker" },
-      })).toBe(true);
+      expect(
+        shouldSkipEvent({
+          attributes: { "event.name": "filter.wake.orch-1" },
+          resource: { "service.name": "catalyst.broker" },
+        })
+      ).toBe(true);
       // broker.daemon.* now passes through for debugging visibility
-      expect(shouldSkipEvent({
-        attributes: { "event.name": "broker.daemon.startup" },
-        resource: { "service.name": "catalyst.broker" },
-      })).toBe(false);
+      expect(
+        shouldSkipEvent({
+          attributes: { "event.name": "broker.daemon.startup" },
+          resource: { "service.name": "catalyst.broker" },
+        })
+      ).toBe(false);
     } finally {
       if (prev === undefined) delete process.env.BROKER_INGEST_OWN_EMISSIONS;
       else process.env.BROKER_INGEST_OWN_EMISSIONS = prev;
@@ -1617,10 +1724,9 @@ describe("writeBrokerStateFile (CTL-343)", () => {
   test("overwrites existing file (atomic rename)", () => {
     const target = join(tmpDir, "broker.state.json");
     writeBrokerStateFile(buildBrokerState(), { path: target });
-    writeBrokerStateFile(
-      buildBrokerState({ probe: { status: "ok", modelCount: 7 } }),
-      { path: target },
-    );
+    writeBrokerStateFile(buildBrokerState({ probe: { status: "ok", modelCount: 7 } }), {
+      path: target,
+    });
     const parsed = JSON.parse(readFileSync(target, "utf8"));
     expect(parsed.keyHealth.groq.probeStatus).toBe("ok");
     expect(parsed.keyHealth.groq.modelCount).toBe(7);
@@ -1647,12 +1753,15 @@ describe("CTL-344 read-site event.id fallback", () => {
       },
     });
     const realId = "11111111-2222-4333-8444-555555555555";
-    const matches = tryDeterministicRoute({
-      id: realId,
-      event: "github.pr.merged",
-      scope: { pr: 777 },
-      detail: { mergeCommitSha: "deadbeef", merged: true },
-    }, getInterests());
+    const matches = tryDeterministicRoute(
+      {
+        id: realId,
+        event: "github.pr.merged",
+        scope: { pr: 777 },
+        detail: { mergeCommitSha: "deadbeef", merged: true },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     expect(matches[0].sourceEventId).toBe(realId);
   });
@@ -1672,13 +1781,16 @@ describe("CTL-344 read-site event.id fallback", () => {
         session_id: "sess-id-2",
       },
     });
-    const matches = tryDeterministicRoute({
-      ts: "2026-05-12T00:00:00Z",
-      event: "github.pr.merged",
-      scope: { pr: 778 },
-      attributes: { "event.name": "github.pr.merged" },
-      detail: { mergeCommitSha: "deadbeef", merged: true },
-    }, getInterests());
+    const matches = tryDeterministicRoute(
+      {
+        ts: "2026-05-12T00:00:00Z",
+        event: "github.pr.merged",
+        scope: { pr: 778 },
+        attributes: { "event.name": "github.pr.merged" },
+        detail: { mergeCommitSha: "deadbeef", merged: true },
+      },
+      getInterests()
+    );
     expect(matches).toHaveLength(1);
     // synth fallback is a 32-char lowercase hex, not null and not the trivial empty string
     expect(matches[0].sourceEventId).toBeString();
@@ -1699,15 +1811,18 @@ describe("CTL-344 read-site event.id fallback", () => {
         session_id: "sess-id-3",
       },
     });
-    const matches = tryTicketLifecycleRoute({
-      ts: "2026-05-12T00:00:00Z",
-      event: "linear.issue.state_changed",
-      attributes: {
-        "event.name": "linear.issue.state_changed",
-        "linear.issue.identifier": "CTL-999",
+    const matches = tryTicketLifecycleRoute(
+      {
+        ts: "2026-05-12T00:00:00Z",
+        event: "linear.issue.state_changed",
+        attributes: {
+          "event.name": "linear.issue.state_changed",
+          "linear.issue.identifier": "CTL-999",
+        },
+        detail: { ticket: "CTL-999", toState: "Done" },
       },
-      detail: { ticket: "CTL-999", toState: "Done" },
-    }, getInterests());
+      getInterests()
+    );
     expect(matches.length).toBeGreaterThan(0);
     const m = matches[0];
     expect(m.sourceEventId).toBeString();
@@ -1749,34 +1864,40 @@ describe("CTL-340 classifyMatches", () => {
     writeFileSync(
       tmpFile,
       JSON.stringify([
-        ["prose-99", {
-          notify_event: "filter.wake.prose-99",
-          prompt: "x",
-          session_id: "sess-prose-99",
-          persistent: true,
-          context: {},
-          orchestrator: null,
-          interest_type: null,
-          pr_numbers: null,
-          repo: null,
-          base_branches: null,
-          tickets: null,
-          wake_on: null,
-        }],
-        ["real-orch", {
-          notify_event: "filter.wake.real-orch",
-          prompt: "y",
-          session_id: null,
-          persistent: true,
-          context: {},
-          orchestrator: "real-orch",
-          interest_type: null,
-          pr_numbers: null,
-          repo: null,
-          base_branches: null,
-          tickets: null,
-          wake_on: null,
-        }],
+        [
+          "prose-99",
+          {
+            notify_event: "filter.wake.prose-99",
+            prompt: "x",
+            session_id: "sess-prose-99",
+            persistent: true,
+            context: {},
+            orchestrator: null,
+            interest_type: null,
+            pr_numbers: null,
+            repo: null,
+            base_branches: null,
+            tickets: null,
+            wake_on: null,
+          },
+        ],
+        [
+          "real-orch",
+          {
+            notify_event: "filter.wake.real-orch",
+            prompt: "y",
+            session_id: null,
+            persistent: true,
+            context: {},
+            orchestrator: "real-orch",
+            interest_type: null,
+            pr_numbers: null,
+            repo: null,
+            base_branches: null,
+            tickets: null,
+            wake_on: null,
+          },
+        ],
       ])
     );
     clearInterests();
@@ -1824,12 +1945,8 @@ describe("CTL-340 classifyMatches", () => {
 
   test("suppresses wake when match.event_indices is empty (regression guard for original suppression intent)", () => {
     registerProseInterest("prose-2");
-    const events = [
-      { id: "evt-1", ts: "2026-05-12T20:14:00Z", event: "foo" },
-    ];
-    const matches = [
-      { interest_id: "prose-2", reason: "groq invented match", event_indices: [] },
-    ];
+    const events = [{ id: "evt-1", ts: "2026-05-12T20:14:00Z", event: "foo" }];
+    const matches = [{ interest_id: "prose-2", reason: "groq invented match", event_indices: [] }];
     const { wakes } = classifyMatches(events, matches, getInterests());
     expect(wakes).toHaveLength(0);
   });
@@ -1840,9 +1957,7 @@ describe("CTL-340 classifyMatches", () => {
       { id: "real-id-1", ts: "2026-05-12T20:14:00Z", event: "foo" },
       { id: "real-id-2", ts: "2026-05-12T20:14:01Z", event: "bar" },
     ];
-    const matches = [
-      { interest_id: "prose-3", reason: "both", event_indices: [1, 2] },
-    ];
+    const matches = [{ interest_id: "prose-3", reason: "both", event_indices: [1, 2] }];
     const { wakes } = classifyMatches(events, matches, getInterests());
     expect(wakes).toHaveLength(1);
     expect(wakes[0].detail.source_event_ids).toEqual(["real-id-1", "real-id-2"]);
@@ -1866,9 +1981,7 @@ describe("CTL-340 classifyMatches", () => {
 
   test("skips matches with unknown interest_id", () => {
     const events = [{ id: "x", ts: "2026-05-12T20:14:00Z", event: "foo" }];
-    const matches = [
-      { interest_id: "does-not-exist", reason: "...", event_indices: [1] },
-    ];
+    const matches = [{ interest_id: "does-not-exist", reason: "...", event_indices: [1] }];
     const { wakes } = classifyMatches(events, matches, getInterests());
     expect(wakes).toHaveLength(0);
   });
@@ -1876,9 +1989,7 @@ describe("CTL-340 classifyMatches", () => {
   test("non-persistent (one-shot) interest is reported in oneShotsToDelete", () => {
     registerProseInterest("prose-5", { persistent: false });
     const events = [{ id: "x", ts: "2026-05-12T20:14:00Z", event: "foo" }];
-    const matches = [
-      { interest_id: "prose-5", reason: "match", event_indices: [1] },
-    ];
+    const matches = [{ interest_id: "prose-5", reason: "match", event_indices: [1] }];
     const { wakes, oneShotsToDelete } = classifyMatches(events, matches, getInterests());
     expect(wakes).toHaveLength(1);
     expect(oneShotsToDelete).toEqual(["prose-5"]);
@@ -1895,9 +2006,7 @@ describe("CTL-340 classifyMatches", () => {
   test("orchestrator falls back to interest_id when reg.orchestrator is null", () => {
     registerProseInterest("prose-7", { orchestrator: null });
     const events = [{ id: "x", ts: "2026-05-12T20:14:00Z", event: "foo" }];
-    const matches = [
-      { interest_id: "prose-7", reason: "match", event_indices: [1] },
-    ];
+    const matches = [{ interest_id: "prose-7", reason: "match", event_indices: [1] }];
     const { wakes } = classifyMatches(events, matches, getInterests());
     expect(wakes[0].orchestrator).toBe("prose-7");
   });
@@ -2040,9 +2149,7 @@ describe("CTL-350 source_events inlining", () => {
         body: { payload: { state: "Done" } },
       },
     ];
-    const matches = [
-      { interest_id: "prose-se", reason: "ticket done", event_indices: [1] },
-    ];
+    const matches = [{ interest_id: "prose-se", reason: "ticket done", event_indices: [1] }];
     const { wakes } = classifyMatches(events, matches, getInterests());
     expect(wakes[0].detail.source_events).toHaveLength(1);
     expect(wakes[0].detail.source_events[0].id).toBe("uuid-a");
@@ -2053,11 +2160,14 @@ describe("CTL-350 source_events inlining", () => {
   test("classifyMatches handles indices past batch end without source_events leaks", () => {
     registerProseInterest("prose-se2");
     const events = [
-      { id: "uuid-a", ts: "2026-05-12T21:08:40Z", attributes: { "event.name": "foo" }, body: { payload: {} } },
+      {
+        id: "uuid-a",
+        ts: "2026-05-12T21:08:40Z",
+        attributes: { "event.name": "foo" },
+        body: { payload: {} },
+      },
     ];
-    const matches = [
-      { interest_id: "prose-se2", reason: "match", event_indices: [1, 99] },
-    ];
+    const matches = [{ interest_id: "prose-se2", reason: "match", event_indices: [1, 99] }];
     const { wakes } = classifyMatches(events, matches, getInterests());
     expect(wakes[0].detail.source_events).toHaveLength(1);
     expect(wakes[0].detail.source_events[0].id).toBe("uuid-a");
@@ -2233,11 +2343,9 @@ describe("CTL-352 broker state + degraded event", () => {
   });
 
   test("broker.daemon.degraded emitted once when interests empty and uptime > 5 min", async () => {
-    const {
-      runWatchdogTick,
-      __setBrokerStartedAtForTest,
-      getInterests,
-    } = await import("./index.mjs");
+    const { runWatchdogTick, __setBrokerStartedAtForTest, getInterests } = await import(
+      "./index.mjs"
+    );
     clearInterests();
     const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
     __setBrokerStartedAtForTest(sixMinAgo);
@@ -2255,7 +2363,9 @@ describe("CTL-352 broker state + degraded event", () => {
       try {
         const evt = JSON.parse(l);
         return evt.attributes?.["event.name"] === "broker.daemon.degraded";
-      } catch { return false; }
+      } catch {
+        return false;
+      }
     });
     expect(degradedLines).toHaveLength(1);
     const evt = JSON.parse(degradedLines[0]);
@@ -2278,19 +2388,18 @@ describe("CTL-352 broker state + degraded event", () => {
     if (!existsSync(logPath)) return; // no events at all — vacuously fine
     const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
     const degradedLines = lines.filter((l) => {
-      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.degraded"; }
-      catch { return false; }
+      try {
+        return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.degraded";
+      } catch {
+        return false;
+      }
     });
     expect(degradedLines).toHaveLength(0);
   });
 
   test("degraded re-arms after interests come back and go empty again", async () => {
-    const {
-      runWatchdogTick,
-      __setBrokerStartedAtForTest,
-      handleRegister,
-      handleDeregister,
-    } = await import("./index.mjs");
+    const { runWatchdogTick, __setBrokerStartedAtForTest, handleRegister, handleDeregister } =
+      await import("./index.mjs");
     clearInterests();
     const sixMinAgo = new Date(Date.now() - 6 * 60 * 1000).toISOString();
     __setBrokerStartedAtForTest(sixMinAgo);
@@ -2314,8 +2423,11 @@ describe("CTL-352 broker state + degraded event", () => {
     const logPath = join(tmpDir, "events", `${ym}.jsonl`);
     const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
     const degradedLines = lines.filter((l) => {
-      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.degraded"; }
-      catch { return false; }
+      try {
+        return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.degraded";
+      } catch {
+        return false;
+      }
     });
     expect(degradedLines).toHaveLength(2);
   });
@@ -2427,8 +2539,13 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (orchestrator subscr
 
   test("fires when an owned worker posts attention on the watched channel", () => {
     const matches = tryDeterministicRoute(
-      buildCommsEvent({ sender: "CTL-100", channel: "orch-orch-comms-orch", type: "attention", body: "CI blocked" }),
-      getInterests(),
+      buildCommsEvent({
+        sender: "CTL-100",
+        channel: "orch-orch-comms-orch",
+        type: "attention",
+        body: "CI blocked",
+      }),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].interestId).toBe("orch-comms-orch-comms");
@@ -2439,7 +2556,7 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (orchestrator subscr
   test("fires when an owned worker posts done on the watched channel", () => {
     const matches = tryDeterministicRoute(
       buildCommsEvent({ sender: "CTL-101", channel: "orch-orch-comms-orch", type: "done" }),
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("CTL-101");
@@ -2449,7 +2566,7 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (orchestrator subscr
   test("does NOT fire when an owned worker posts info (not in types_of_interest)", () => {
     const matches = tryDeterministicRoute(
       buildCommsEvent({ sender: "CTL-100", channel: "orch-orch-comms-orch", type: "info" }),
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(0);
   });
@@ -2457,7 +2574,7 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (orchestrator subscr
   test("does NOT fire when a non-owned worker posts on the watched channel", () => {
     const matches = tryDeterministicRoute(
       buildCommsEvent({ sender: "CTL-999", channel: "orch-orch-comms-orch", type: "attention" }),
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(0);
   });
@@ -2465,7 +2582,7 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (orchestrator subscr
   test("does NOT fire on a different channel", () => {
     const matches = tryDeterministicRoute(
       buildCommsEvent({ sender: "CTL-100", channel: "orch-other-orch", type: "attention" }),
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(0);
   });
@@ -2489,20 +2606,20 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (orchestrator subscr
     expect(
       tryDeterministicRoute(
         buildCommsEvent({ sender: "CTL-555", channel: "orch-orch-default", type: "attention" }),
-        getInterests(),
-      ),
+        getInterests()
+      )
     ).toHaveLength(1);
     expect(
       tryDeterministicRoute(
         buildCommsEvent({ sender: "CTL-555", channel: "orch-orch-default", type: "done" }),
-        getInterests(),
-      ),
+        getInterests()
+      )
     ).toHaveLength(1);
     expect(
       tryDeterministicRoute(
         buildCommsEvent({ sender: "CTL-555", channel: "orch-orch-default", type: "info" }),
-        getInterests(),
-      ),
+        getInterests()
+      )
     ).toHaveLength(0);
   });
 
@@ -2511,9 +2628,11 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (orchestrator subscr
     const matches = tryDeterministicRoute(
       {
         attributes: { "event.name": "github.pr.merged", "catalyst.worker.ticket": "CTL-100" },
-        body: { payload: { channel: "orch-orch-comms-orch", type: "attention", to: "all", body: "" } },
+        body: {
+          payload: { channel: "orch-orch-comms-orch", type: "attention", to: "all", body: "" },
+        },
       },
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(0);
   });
@@ -2547,8 +2666,13 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (worker subscriber)"
 
   test("fires when payload.to equals subscriber_ticket", () => {
     const matches = tryDeterministicRoute(
-      buildCommsEvent({ sender: "orchestrator", channel: "orch-orch-comms-worker", to: "CTL-357", body: "rebase now" }),
-      getInterests(),
+      buildCommsEvent({
+        sender: "orchestrator",
+        channel: "orch-orch-comms-worker",
+        to: "CTL-357",
+        body: "rebase now",
+      }),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].interestId).toBe("worker-CTL-357");
@@ -2557,7 +2681,7 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (worker subscriber)"
   test("fires when payload.to is 'all'", () => {
     const matches = tryDeterministicRoute(
       buildCommsEvent({ sender: "orchestrator", channel: "orch-orch-comms-worker", to: "all" }),
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
   });
@@ -2565,7 +2689,7 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (worker subscriber)"
   test("does NOT fire when payload.to is a different worker", () => {
     const matches = tryDeterministicRoute(
       buildCommsEvent({ sender: "orchestrator", channel: "orch-orch-comms-worker", to: "CTL-999" }),
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(0);
   });
@@ -2573,7 +2697,7 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (worker subscriber)"
   test("does NOT fire when sender is the worker itself (self-loop guard)", () => {
     const matches = tryDeterministicRoute(
       buildCommsEvent({ sender: "CTL-357", channel: "orch-orch-comms-worker", to: "all" }),
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(0);
   });
@@ -2581,8 +2705,13 @@ describe("CTL-357 tryDeterministicRoute — comms_lifecycle (worker subscriber)"
   test("worker default fires on all types when types_of_interest omitted", () => {
     for (const type of ["info", "attention", "done"]) {
       const matches = tryDeterministicRoute(
-        buildCommsEvent({ sender: "orchestrator", channel: "orch-orch-comms-worker", type, to: "all" }),
-        getInterests(),
+        buildCommsEvent({
+          sender: "orchestrator",
+          channel: "orch-orch-comms-worker",
+          type,
+          to: "all",
+        }),
+        getInterests()
       );
       expect(matches).toHaveLength(1);
     }
@@ -2655,6 +2784,109 @@ describe("CTL-357 prose env gate (CATALYST_BROKER_PROSE_ENABLED)", () => {
   });
 });
 
+// ─── CTL-397 comms.message.posted pre-queue filter ───────────────────────────
+
+describe("CTL-397 comms.message.posted never queued for Groq when deterministic match fails", () => {
+  beforeEach(() => {
+    __clearPendingBatchForTest();
+    // Register a comms_lifecycle interest (types_of_interest filters out info)
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-397",
+      detail: {
+        interest_id: "orch-397-comms-lifecycle",
+        notify_event: "filter.wake.orch-397",
+        interest_type: "comms_lifecycle",
+        channel: "orch-397",
+        subscriber_kind: "orchestrator",
+        owned_workers: ["CTL-500"],
+        types_of_interest: ["attention", "done"],
+        persistent: true,
+      },
+    });
+    // Register a prose interest to simulate old persisted interests that would
+    // otherwise match comms events via Groq.
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-397",
+      detail: {
+        interest_id: "orch-397-prose",
+        notify_event: "filter.wake.orch-397",
+        prompt: "wake on everything including comms",
+        persistent: true,
+      },
+    });
+  });
+
+  afterEach(() => {
+    __clearPendingBatchForTest();
+  });
+
+  test("info comms event is NOT added to pending Groq batch even when prose interests exist", () => {
+    processEvent({
+      attributes: {
+        "event.name": "comms.message.posted",
+        "catalyst.worker.ticket": "CTL-500",
+      },
+      body: {
+        payload: {
+          channel: "orch-397",
+          type: "info",
+          msgId: "msg-1",
+          to: "all",
+          body: "researching",
+        },
+      },
+    });
+    expect(__getPendingBatchForTest()).toHaveLength(0);
+  });
+
+  test("done comms event from owned worker fires a deterministic wake, not queued for Groq", () => {
+    processEvent({
+      attributes: {
+        "event.name": "comms.message.posted",
+        "catalyst.worker.ticket": "CTL-500",
+      },
+      body: {
+        payload: { channel: "orch-397", type: "done", msgId: "msg-2", to: "all", body: "" },
+      },
+    });
+    // Deterministic match fired — not added to Groq queue.
+    expect(__getPendingBatchForTest()).toHaveLength(0);
+  });
+
+  test("attention comms event from owned worker fires a deterministic wake, not queued for Groq", () => {
+    processEvent({
+      attributes: {
+        "event.name": "comms.message.posted",
+        "catalyst.worker.ticket": "CTL-500",
+      },
+      body: {
+        payload: {
+          channel: "orch-397",
+          type: "attention",
+          msgId: "msg-3",
+          to: "all",
+          body: "CI blocked",
+        },
+      },
+    });
+    expect(__getPendingBatchForTest()).toHaveLength(0);
+  });
+
+  test("non-comms event with no deterministic match IS added to pending Groq batch", () => {
+    // A linear event for an untracked ticket — no deterministic match, should queue for Groq.
+    processEvent({
+      attributes: {
+        "event.name": "linear.issue.state_changed",
+        "linear.issue.identifier": "UNRELATED-1",
+      },
+      body: { payload: { state: "Done" } },
+    });
+    expect(__getPendingBatchForTest()).toHaveLength(1);
+  });
+});
+
 describe("CTL-357 broker.daemon.prose_disabled startup event", () => {
   beforeEach(async () => {
     const { __resetProseDisabledForTest } = await import("./index.mjs");
@@ -2683,8 +2915,11 @@ describe("CTL-357 broker.daemon.prose_disabled startup event", () => {
     expect(existsSync(logPath)).toBe(true);
     const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
     const proseDisabledLines = lines.filter((l) => {
-      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.prose_disabled"; }
-      catch { return false; }
+      try {
+        return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.prose_disabled";
+      } catch {
+        return false;
+      }
     });
     expect(proseDisabledLines).toHaveLength(1);
     const evt = JSON.parse(proseDisabledLines[0]);
@@ -2717,8 +2952,11 @@ describe("CTL-357 broker.daemon.prose_disabled startup event", () => {
     if (!existsSync(logPath)) return;
     const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
     const proseDisabledLines = lines.filter((l) => {
-      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.prose_disabled"; }
-      catch { return false; }
+      try {
+        return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.prose_disabled";
+      } catch {
+        return false;
+      }
     });
     expect(proseDisabledLines).toHaveLength(0);
   });
@@ -2747,8 +2985,11 @@ describe("CTL-357 broker.daemon.prose_disabled startup event", () => {
     }
     const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
     const proseDisabledLines = lines.filter((l) => {
-      try { return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.prose_disabled"; }
-      catch { return false; }
+      try {
+        return JSON.parse(l).attributes?.["event.name"] === "broker.daemon.prose_disabled";
+      } catch {
+        return false;
+      }
     });
     expect(proseDisabledLines).toHaveLength(0);
     delete process.env.CATALYST_BROKER_PROSE_ENABLED;
@@ -2767,7 +3008,13 @@ describe("CTL-357 tryTicketLifecycleRoute canonical envelopes", () => {
         notify_event: "filter.wake.watch-ctl-canon",
         interest_type: "ticket_lifecycle",
         tickets: ["CTL-275"],
-        wake_on: ["status_done", "status_in_review", "status_changed", "pr_merged", "comment_added"],
+        wake_on: [
+          "status_done",
+          "status_in_review",
+          "status_changed",
+          "pr_merged",
+          "comment_added",
+        ],
         persistent: true,
       },
     });
@@ -2782,7 +3029,7 @@ describe("CTL-357 tryTicketLifecycleRoute canonical envelopes", () => {
         },
         body: { payload: { state: "Done" } },
       },
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("marked Done");
@@ -2797,7 +3044,7 @@ describe("CTL-357 tryTicketLifecycleRoute canonical envelopes", () => {
         },
         body: { payload: { author: "ryan" } },
       },
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("CTL-275");
@@ -2818,7 +3065,7 @@ describe("CTL-357 tryTicketLifecycleRoute canonical envelopes", () => {
           },
         },
       },
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].ticket).toBe("CTL-275");
@@ -2833,7 +3080,7 @@ describe("CTL-357 tryTicketLifecycleRoute canonical envelopes", () => {
         attributes: { "linear.issue.identifier": "CTL-275" },
         detail: { state: "Done" },
       },
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("marked Done");
@@ -2867,7 +3114,7 @@ describe("CTL-359 tryDeterministicRoute canonical envelopes", () => {
         body: { payload: { mergeCommitSha: "deadbeef", merged: true } },
         scope: { pr: 777 },
       },
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].interestId).toBe("sess-canon-pr");
@@ -2881,7 +3128,7 @@ describe("CTL-359 tryDeterministicRoute canonical envelopes", () => {
         attributes: { "event.name": "github.check_suite.completed" },
         body: { payload: { prNumbers: [777], conclusion: "success" } },
       },
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].interestId).toBe("sess-canon-pr");
@@ -2901,7 +3148,7 @@ describe("CTL-359 tryDeterministicRoute canonical envelopes", () => {
         },
         scope: { pr: 777 },
       },
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("Automated review comment");
@@ -2917,7 +3164,7 @@ describe("CTL-359 tryDeterministicRoute canonical envelopes", () => {
         scope: { pr: 777 },
         detail: { mergeCommitSha: "feedface", merged: true },
       },
-      getInterests(),
+      getInterests()
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].interestId).toBe("sess-canon-pr");
@@ -2983,13 +3230,7 @@ describe("CTL-370: allowlist parity with broker routing tables", () => {
     return sections;
   }
 
-  const ALLOWLIST_PATH = join(
-    import.meta.dir,
-    "..",
-    "..",
-    "references",
-    "event-name-allowlist.md",
-  );
+  const ALLOWLIST_PATH = join(import.meta.dir, "..", "..", "references", "event-name-allowlist.md");
 
   test("event-name-allowlist.md exists at plugins/dev/references/", () => {
     expect(existsSync(ALLOWLIST_PATH)).toBe(true);
