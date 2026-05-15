@@ -115,6 +115,12 @@ cmd_tail() {
     esac
   done
 
+  # CTL-439: exit promptly on common termination signals. Bash's default
+  # SIGTERM handling already exits, but installing a trap also covers SIGHUP
+  # (parent shell close) and SIGPIPE (downstream consumer closed the pipe)
+  # which otherwise wouldn't propagate out of the polling loops.
+  trap 'exit 0' TERM HUP PIPE INT
+
   local file
   file="$(events_file_path)"
 
@@ -134,9 +140,16 @@ cmd_tail() {
     last_lines="$(line_count "$file")"
   fi
 
+  # CTL-439: $PPID is captured at process start and is not updated when the
+  # parent dies. When our parent is reaped without delivering a signal (the
+  # orphan-to-init case), kill -0 returns non-zero and we exit cleanly.
   if command -v fswatch >/dev/null 2>&1; then
     # fswatch -o emits an event count; we re-check line count on each.
+    # The PPID check fires on each fswatch wake; the events file sees regular
+    # traffic (heartbeats, lifecycle events) so the check runs frequently
+    # enough in practice to catch orphan-to-init within the heartbeat window.
     fswatch -o "$file" 2>/dev/null | while read -r _; do
+      kill -0 "$PPID" 2>/dev/null || exit 0
       local cur
       cur="$(line_count "$file")"
       if [[ "$cur" -gt "$last_lines" ]]; then
@@ -153,6 +166,7 @@ cmd_tail() {
     done
   else
     while :; do
+      kill -0 "$PPID" 2>/dev/null || exit 0
       sleep 1
       local cur
       cur="$(line_count "$file")"
@@ -208,6 +222,10 @@ cmd_wait_for() {
     return 2
   fi
 
+  # CTL-439: symmetric with cmd_tail — exit on common termination signals
+  # so a killed Monitor / wait-for caller doesn't leave a leaked process.
+  trap 'exit 0' TERM HUP PIPE INT
+
   local file
   file="$(events_file_path)"
   local deadline=$(( $(date +%s) + timeout ))
@@ -245,6 +263,11 @@ cmd_wait_for() {
   fi
 
   while :; do
+    # CTL-439: PPID liveness check — if our parent has been reaped without
+    # delivering a signal (orphan-to-init), exit cleanly instead of blocking
+    # until --timeout (default 30 minutes).
+    kill -0 "$PPID" 2>/dev/null || exit 0
+
     if [[ "$(date +%s)" -ge "$deadline" ]]; then
       _emit_wait_event "worker.resumed" '{"outcome":"timed_out"}'
       return 1
