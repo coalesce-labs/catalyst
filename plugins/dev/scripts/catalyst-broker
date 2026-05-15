@@ -9,6 +9,7 @@
 #   start      Start broker daemon in background (idempotent)
 #   stop       Stop broker daemon
 #   restart    Stop then start
+#   probe      Exit 0 if daemon responsive, non-zero otherwise (silent, <200ms)
 #   status     Print running/stopped + pid
 #   logs       Tail daemon log
 #   run [args] Run daemon in foreground (debugging)
@@ -117,6 +118,10 @@ cmd_restart() {
   cmd_start
 }
 
+cmd_probe() {
+  read_pid > /dev/null 2>&1
+}
+
 cmd_status() {
   local json=0
   while [[ $# -gt 0 ]]; do
@@ -164,11 +169,12 @@ case "${1:-}" in
   start)   cmd_start ;;
   stop)    cmd_stop ;;
   restart) cmd_restart ;;
+  probe)   cmd_probe ;;
   status)  shift; cmd_status "$@" ;;
   logs)    cmd_logs ;;
   run)     shift; cmd_run "$@" ;;
   *)
-    echo "Usage: catalyst-broker {start|stop|restart|status|logs|run}" >&2
+    echo "Usage: catalyst-broker {start|stop|restart|probe|status|logs|run}" >&2
     exit 1
     ;;
 esac
