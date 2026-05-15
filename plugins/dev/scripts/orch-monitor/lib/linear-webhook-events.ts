@@ -26,6 +26,16 @@ export type LinearWebhookEvent =
       updatedFromKeys: string[];
       /** Linear user UUID who triggered the action; null when absent. CTL-263. */
       actorId: string | null;
+      /** Current state name from data.state.name; null when absent. CTL-424. */
+      toState: string | null;
+      /** Current priority from data.priority; null when absent. CTL-424. */
+      toPriority: number | null;
+      /** Current assignee UUID from data.assignee.id; null when absent. CTL-424. */
+      toAssigneeId: string | null;
+      /** Current assignee display name from data.assignee.name; null when absent. CTL-424. */
+      toAssigneeName: string | null;
+      /** Actor display name from actor.name; null when absent. CTL-424. */
+      actorName: string | null;
     }
   | {
       kind: "comment";
@@ -110,6 +120,13 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
   const updatedFromKeys = Object.keys(updatedFrom);
   const actor = isObject(payload.actor) ? payload.actor : null;
   const actorId = actor !== null ? getOptStr(actor, "id") : null;
+  const actorName = actor !== null ? getOptStr(actor, "name") : null;
+  const stateObj = isObject(data.state) ? data.state : null;
+  const toState = stateObj !== null ? getOptStr(stateObj, "name") : null;
+  const toPriority = typeof data.priority === "number" ? data.priority : null;
+  const assigneeObj = isObject(data.assignee) ? data.assignee : null;
+  const toAssigneeId = assigneeObj !== null ? getOptStr(assigneeObj, "id") : null;
+  const toAssigneeName = assigneeObj !== null ? getOptStr(assigneeObj, "name") : null;
   return {
     kind: "issue",
     action,
@@ -119,6 +136,11 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     data,
     updatedFromKeys,
     actorId,
+    actorName,
+    toState,
+    toPriority,
+    toAssigneeId,
+    toAssigneeName,
   };
 }
 
