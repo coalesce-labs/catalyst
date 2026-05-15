@@ -290,7 +290,7 @@ if [[ -f "$HOME_CONFIG_PATH" ]]; then
         else
             # Keyed-object format (CTL-273) — surface all registered webhooks
             while IFS= read -r key; do
-                webhook_id=$(echo "$linear_config" | jq -r ".\"$key\".webhookId // empty" 2>/dev/null)
+                webhook_id=$(echo "$linear_config" | jq -r ".\"$key\".webhookId // empty" 2>/dev/null || true)
                 if [[ -n "$webhook_id" ]]; then
                     if [[ "$key" == "workspace" ]]; then
                         pass "Linear webhook registered (workspace-wide, id: ${webhook_id:0:8}…)"
@@ -611,6 +611,39 @@ if [[ -f "CLAUDE.md" ]]; then
     fi
 else
     warn "No CLAUDE.md — agents won't have project-level workflow context"
+fi
+
+# ─── 11. Global Lifecycle Hooks ─────────────────────────────────────────────
+
+header "Global Lifecycle Hooks (agent.checkout fallback)"
+
+GLOBAL_SETTINGS="${HOME}/.claude/settings.json"
+
+if [[ -f "$GLOBAL_SETTINGS" ]] && command -v jq &>/dev/null; then
+    # Hooks are nested: .hooks.<Event>[].hooks[].command
+    if jq -r '.hooks.Stop[]?.hooks[]?.command // empty' "$GLOBAL_SETTINGS" 2>/dev/null \
+            | grep -q "emit-lifecycle-event" 2>/dev/null; then
+        pass "Stop hook → emit-lifecycle-event"
+    else
+        warn "Stop hook not wired — broker won't receive agent.checkout on unclean session exit"
+        info "Add to ~/.claude/settings.json via: /update-config"
+        info '  hooks.Stop entry: {"type":"command","command":"~/.catalyst/bin/emit-lifecycle-event"}'
+    fi
+
+    if jq -r '.hooks.SubagentStop[]?.hooks[]?.command // empty' "$GLOBAL_SETTINGS" 2>/dev/null \
+            | grep -q "emit-lifecycle-event" 2>/dev/null; then
+        pass "SubagentStop hook → emit-lifecycle-event"
+    else
+        warn "SubagentStop hook not wired — broker won't receive agent.checkout on subagent crash"
+        info "Add to ~/.claude/settings.json via: /update-config"
+        info '  hooks.SubagentStop entry: {"type":"command","command":"~/.catalyst/bin/emit-lifecycle-event"}'
+    fi
+else
+    if [[ ! -f "$GLOBAL_SETTINGS" ]]; then
+        warn "~/.claude/settings.json not found — cannot verify global lifecycle hooks"
+    else
+        warn "jq not available — skipping global lifecycle hook check"
+    fi
 fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────
