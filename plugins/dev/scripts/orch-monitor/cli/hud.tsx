@@ -235,7 +235,8 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // all remaining height above it (CTL-324, CTL-325). Layout math is
   // extracted into pure helpers for testability.
   const inDetailMode = showDetail && !!selectedEvent && !showHelp;
-  const detailLines = selectedEvent ? buildDetailLines(selectedEvent, cols) : [];
+  const innerCols = cols - 1;
+  const detailLines = selectedEvent ? buildDetailLines(selectedEvent, innerCols) : [];
 
   let listRows: number;
   let listScrollOffset: number;
@@ -415,10 +416,10 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   }
 
   return (
-    <Box flexDirection="column" height={layoutRows} width={cols}>
+    <Box flexDirection="column" height={layoutRows} width={cols} paddingLeft={1}>
       <Box flexShrink={0}>
         <Header
-          columns={cols}
+          columns={innerCols}
           nlQuery={dslState?.nlQuery}
           brokerState={brokerState}
           version={{ display: versionChip.display, isLocal: versionChip.isLocal }}
@@ -429,7 +430,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
         {showDashboard ? (
           <Dashboard
             visibleRows={visibleRows}
-            cols={cols}
+            cols={innerCols}
             brokerState={brokerState}
             onClose={() => setShowDashboard(false)}
           />
@@ -439,7 +440,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
             selectedIndex={selectedIndex}
             scrollOffset={listScrollOffset}
             visibleRows={listRows}
-            columns={cols}
+            columns={innerCols}
             compact={inDetailMode || showHelp}
             paused={!autoFollow}
             wrapMode={wrapMode}
@@ -499,7 +500,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           busy={querySubmitting}
           error={queryError}
           pivot={pivot}
-          cols={cols}
+          cols={innerCols}
           filteredCount={filtered.length}
           totalCount={events.length}
           autoFollow={autoFollow}
