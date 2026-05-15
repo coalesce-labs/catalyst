@@ -54,7 +54,10 @@ export function formatDateTime(event: CanonicalEvent): string {
 }
 
 export function formatRepo(event: CanonicalEvent): string {
-  const repo = event.attributes["vcs.repository.name"] ?? "";
+  const repo =
+    event.attributes["vcs.repository.name"] ??
+    event.attributes["linear.team.key"] ??
+    "";
   return repo.includes("/") ? (repo.split("/").pop() ?? repo) : repo;
 }
 

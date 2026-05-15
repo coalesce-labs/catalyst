@@ -89,6 +89,26 @@ describe("formatRepo", () => {
     const e = { ...baseEvent, attributes: { "event.name": "heartbeat" } } as unknown as CanonicalEvent;
     expect(formatRepo(e)).toBe("");
   });
+
+  test("falls back to linear.team.key for linear events without vcs.repository.name", () => {
+    const e = {
+      ...baseEvent,
+      attributes: { "event.name": "linear.issue.updated", "linear.team.key": "CTL" },
+    } as unknown as CanonicalEvent;
+    expect(formatRepo(e)).toBe("CTL");
+  });
+
+  test("prefers vcs.repository.name over linear.team.key when both present", () => {
+    const e = {
+      ...baseEvent,
+      attributes: {
+        "event.name": "linear.issue.updated",
+        "vcs.repository.name": "coalesce-labs/catalyst",
+        "linear.team.key": "CTL",
+      },
+    } as unknown as CanonicalEvent;
+    expect(formatRepo(e)).toBe("catalyst");
+  });
 });
 
 describe("formatSource", () => {
