@@ -823,6 +823,184 @@ describe("processEvent routes worker.waiting and worker.resumed (CTL-403)", () =
   });
 });
 
+// ─── CTL-405: orchestrator.status ────────────────────────────────────────────
+
+import {
+  handleOrchestratorStatus,
+  getOrchestratorStatusMap,
+  clearOrchestratorStatusMap,
+} from "./index.mjs";
+
+describe("handleOrchestratorStatus (CTL-405)", () => {
+  beforeEach(() => {
+    clearOrchestratorStatusMap();
+    clearLastHeartbeat();
+  });
+
+  test("stores status entry by orchestrator id", () => {
+    handleOrchestratorStatus({
+      event: "orchestrator.status",
+      orchestrator: "orch-test",
+      ts: "2026-05-15T00:00:00Z",
+      detail: {
+        orchestrator: "orch-test",
+        phase: "monitoring",
+        wave: 2,
+        active_workers: 3,
+        total_workers: 5,
+        summary: "wave 2 monitoring",
+        session_id: null,
+      },
+    });
+    const map = getOrchestratorStatusMap();
+    expect(map.has("orch-test")).toBe(true);
+    const entry = map.get("orch-test");
+    expect(entry.phase).toBe("monitoring");
+    expect(entry.wave).toBe(2);
+    expect(entry.activeWorkers).toBe(3);
+    expect(entry.totalWorkers).toBe(5);
+    expect(entry.summary).toBe("wave 2 monitoring");
+  });
+
+  test("updates lastHeartbeat for session_id when present", () => {
+    handleOrchestratorStatus({
+      event: "orchestrator.status",
+      orchestrator: "orch-hb",
+      ts: "2026-05-15T00:00:00Z",
+      detail: {
+        orchestrator: "orch-hb",
+        phase: "monitoring",
+        wave: 1,
+        active_workers: 2,
+        total_workers: 2,
+        summary: "wave 1 monitoring",
+        session_id: "sess-orch-hb",
+      },
+    });
+    expect(getLastHeartbeat().has("sess-orch-hb")).toBe(true);
+  });
+
+  test("does not crash when session_id absent", () => {
+    expect(() => handleOrchestratorStatus({
+      event: "orchestrator.status",
+      orchestrator: "orch-no-sess",
+      detail: {
+        orchestrator: "orch-no-sess",
+        phase: "dispatching",
+        wave: 1,
+      },
+    })).not.toThrow();
+    expect(getOrchestratorStatusMap().has("orch-no-sess")).toBe(true);
+  });
+
+  test("no-op when orchestrator id absent", () => {
+    handleOrchestratorStatus({ event: "orchestrator.status", detail: {} });
+    expect(getOrchestratorStatusMap().size).toBe(0);
+  });
+
+  test("processEvent routes orchestrator.status", () => {
+    processEvent({
+      event: "orchestrator.status",
+      orchestrator: "orch-pe",
+      detail: { orchestrator: "orch-pe", phase: "monitoring", wave: 1 },
+    });
+    expect(getOrchestratorStatusMap().has("orch-pe")).toBe(true);
+  });
+});
+
+describe("buildBrokerState includes activeOrchestrators (CTL-405)", () => {
+  beforeEach(() => {
+    clearOrchestratorStatusMap();
+  });
+
+  test("empty when no orchestrators have reported status", () => {
+    const state = buildBrokerState();
+    expect(Array.isArray(state.activeOrchestrators)).toBe(true);
+    expect(state.activeOrchestrators).toHaveLength(0);
+  });
+
+  test("includes orchestrator entry with correct shape", () => {
+    handleOrchestratorStatus({
+      event: "orchestrator.status",
+      orchestrator: "orch-bst2",
+      ts: "2026-05-15T00:00:00Z",
+      detail: {
+        orchestrator: "orch-bst2",
+        phase: "monitoring",
+        wave: 2,
+        active_workers: 4,
+        total_workers: 6,
+        summary: "wave 2",
+        session_id: "sess-orch-bst2",
+      },
+    });
+    const state = buildBrokerState();
+    expect(state.activeOrchestrators).toHaveLength(1);
+    const entry = state.activeOrchestrators[0];
+    expect(entry.orchestratorId).toBe("orch-bst2");
+    expect(entry.phase).toBe("monitoring");
+    expect(entry.wave).toBe(2);
+    expect(entry.activeWorkers).toBe(4);
+    expect(entry.totalWorkers).toBe(6);
+    expect(entry.sessionId).toBe("sess-orch-bst2");
+  });
+
+  test("entry removed on orchestrator termination", () => {
+    handleOrchestratorStatus({
+      event: "orchestrator.status",
+      orchestrator: "orch-term2",
+      detail: { orchestrator: "orch-term2", phase: "monitoring", wave: 1 },
+    });
+    expect(getOrchestratorStatusMap().has("orch-term2")).toBe(true);
+    // Simulate orchestrator-completed
+    processEvent({ event: "orchestrator-completed", orchestrator: "orch-term2" });
+    expect(getOrchestratorStatusMap().has("orch-term2")).toBe(false);
+    expect(buildBrokerState().activeOrchestrators).toHaveLength(0);
+  });
+});
+
+describe("watchdog treats orchestrator.status as liveness (CTL-405)", () => {
+  test("recent status event prevents stale watchdog wake for orchestrator session", () => {
+    // Register an interest that watches the orchestrator's session
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-liveness",
+      detail: {
+        interest_id: "orch-liveness",
+        notify_event: "filter.wake.orch-liveness",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [77],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+        context: { pr_numbers: [77], tickets: [], workers: ["sess-orch-live"] },
+        session_id: null,
+      },
+    });
+
+    // Backdate heartbeat to stale
+    const staleTs = Date.now() - 300_000;
+    getLastHeartbeat().set("sess-orch-live", { ts: staleTs, notified: false });
+
+    // Emit orchestrator.status with the session_id — this should refresh lastHeartbeat
+    handleOrchestratorStatus({
+      event: "orchestrator.status",
+      orchestrator: "orch-liveness",
+      detail: {
+        orchestrator: "orch-liveness",
+        phase: "monitoring",
+        wave: 1,
+        session_id: "sess-orch-live",
+      },
+    });
+
+    // Heartbeat should now be fresh
+    const hb = getLastHeartbeat().get("sess-orch-live");
+    expect(hb).toBeDefined();
+    expect(Date.now() - hb.ts).toBeLessThan(5000);
+  });
+});
+
 // ─── processEvent dispatching ────────────────────────────────────────────────
 
 describe("processEvent dispatches agent identity events", () => {

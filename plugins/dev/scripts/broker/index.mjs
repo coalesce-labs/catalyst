@@ -460,6 +460,8 @@ const lastHeartbeat = new Map();
 const workerToOrchestrator = new Map();
 // CTL-403: session_id → { timeoutAt: number, waitFor, ticket, orchestrator, reason }
 const waitingSessions = new Map();
+// CTL-405: orchestrator_id → { phase, wave, activeWorkers, totalWorkers, summary, ts, sessionId }
+const orchestratorStatusMap = new Map();
 
 export function getLastHeartbeat() {
   return lastHeartbeat;
@@ -468,6 +470,7 @@ export function getLastHeartbeat() {
 export function clearLastHeartbeat() {
   lastHeartbeat.clear();
   workerToOrchestrator.clear();
+  orchestratorStatusMap.clear();
 }
 
 export function getWorkerToOrchestrator() {
@@ -480,6 +483,14 @@ export function getWaitingSessionsMap() {
 
 export function clearWaitingSessionsMap() {
   waitingSessions.clear();
+}
+
+export function getOrchestratorStatusMap() {
+  return orchestratorStatusMap;
+}
+
+export function clearOrchestratorStatusMap() {
+  orchestratorStatusMap.clear();
 }
 
 // CTL-336: read name/payload/orchestrator from canonical OTel-format events
@@ -622,6 +633,8 @@ export function handleOrchestratorTerminated(event) {
     saveInterests();
     persistBrokerState();
   }
+  // CTL-405: clean up orchestrator status entry on termination.
+  orchestratorStatusMap.delete(orchId);
 }
 
 // --- Agent identity (CTL-303) ------------------------------------------------
@@ -789,6 +802,39 @@ export function handleWorkerResumed(event) {
   try { clearWaitingSession(sessionId); } catch { /* DB not opened */ }
 
   log.info({ sessionId, outcome: d.outcome ?? "unknown" }, "worker resumed");
+  persistBrokerState();
+}
+
+// CTL-405: handle orchestrator.status — record the orchestrator's self-reported
+// phase so the HUD / operator can see what it's doing between waves, and treat
+// the event as a liveness heartbeat so the watchdog does not fire stale wakes
+// for an orchestrator that is actively monitoring but not emitting heartbeats.
+export function handleOrchestratorStatus(event) {
+  const d = getEventPayload(event);
+  const orchId = d.orchestrator ?? getEventOrchestrator(event);
+  if (!orchId) return;
+
+  const entry = {
+    phase: d.phase ?? null,
+    wave: d.wave ?? null,
+    activeWorkers: d.active_workers ?? null,
+    totalWorkers: d.total_workers ?? null,
+    summary: d.summary ?? null,
+    ts: event.ts ?? new Date().toISOString(),
+    sessionId: d.session_id ?? null,
+  };
+
+  orchestratorStatusMap.set(orchId, entry);
+
+  // Treat status event as a heartbeat so the watchdog skips stale-session wakes
+  // for the orchestrator while it is in a monitoring loop.
+  const sessionId = entry.sessionId;
+  if (sessionId) {
+    const existing = lastHeartbeat.get(sessionId);
+    lastHeartbeat.set(sessionId, { ts: Date.now(), notified: existing?.notified ?? false });
+  }
+
+  log.info({ orchId, phase: entry.phase, wave: entry.wave, activeWorkers: entry.activeWorkers }, "orchestrator status");
   persistBrokerState();
 }
 
@@ -1635,6 +1681,12 @@ export function processEvent(event) {
     return;
   }
 
+  // CTL-405: orchestrator self-status events — liveness + phase visibility.
+  if (name === "orchestrator.status") {
+    handleOrchestratorStatus(event);
+    return;
+  }
+
   if (shouldSkipEvent(event)) return;
 
   if (name === "heartbeat") {
@@ -1902,6 +1954,17 @@ export function buildBrokerState({ probe } = {}) {
     },
     // CTL-402: surface recent agent exit reasons for observability.
     recentAgents: (() => { try { return getRecentAgents(); } catch { return []; } })(),
+    // CTL-405: live orchestrator phases for HUD / operator visibility.
+    activeOrchestrators: [...orchestratorStatusMap.entries()].map(([orchId, s]) => ({
+      orchestratorId: orchId,
+      phase: s.phase,
+      wave: s.wave,
+      activeWorkers: s.activeWorkers,
+      totalWorkers: s.totalWorkers,
+      summary: s.summary,
+      ts: s.ts,
+      sessionId: s.sessionId,
+    })),
   };
 }
 
