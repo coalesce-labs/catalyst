@@ -636,6 +636,7 @@ export function handleAgentCheckin(event) {
   const claimedPr = d.claimed_pr ?? null;
   const orchestrator = d.orchestrator ?? event.orchestrator ?? null;
   const cwd = d.cwd ?? null;
+  const repo = d.repo ?? null;
 
   try {
     upsertAgent({ agentId: sessionId, agentName, sessionId, orchestrator, ticket, claimedPr, cwd });
@@ -653,14 +654,14 @@ export function handleAgentCheckin(event) {
   // Auto-correlate: if the agent has already claimed a PR, register a
   // pr_lifecycle interest on its behalf — no explicit filter.register needed.
   if (claimedPr) {
-    _autoRegisterPrLifecycle(sessionId, claimedPr, orchestrator, ticket);
+    _autoRegisterPrLifecycle(sessionId, claimedPr, orchestrator, ticket, repo);
   }
 
   log.info({ agentName, sessionId, ticket, claimedPr }, "agent checked in");
 }
 
 // Auto-register a pr_lifecycle interest when we learn agent ↔ PR mapping.
-function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket) {
+function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, repo) {
   if (interests.has(sessionId)) return; // don't overwrite explicit registration
 
   interests.set(sessionId, {
@@ -672,14 +673,14 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket) {
     persistent: true,
     interest_type: "pr_lifecycle",
     pr_numbers: [prNumber],
-    repo: null,
+    repo: repo ?? null,
     base_branches: [],
     tickets: null,
     wake_on: null,
   });
 
   try {
-    upsertFilterStateOpen({ interestId: sessionId, prNumber, repo: "" });
+    upsertFilterStateOpen({ interestId: sessionId, prNumber, repo: repo ?? "" });
   } catch {
     /* DB not opened */
   }
@@ -1110,7 +1111,7 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
         reason = `PR #${pr} opened on ticket ${linked}`;
         // Auto-correlate: give agents watching this ticket a pr_lifecycle interest.
         if (typeof scope.pr === "number") {
-          _autoPrLifecycleFromTicket(linked, scope.pr, interestsMap);
+          _autoPrLifecycleFromTicket(linked, scope.pr, interestsMap, attrs["vcs.repository.name"] ?? null);
         }
       }
     } else if (name === "github.pr.merged") {
@@ -1140,7 +1141,7 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
 // that checked in with that ticket but hasn't been linked to a PR yet, AND
 // (CTL-341) append the new PR number to any orchestrator-level pr_lifecycle
 // interest whose orchestrator matches one of those agents.
-function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
+function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
   let agents = [];
   try {
     agents = getAgentsByTicket(ticket);
@@ -1164,14 +1165,14 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
       persistent: true,
       interest_type: "pr_lifecycle",
       pr_numbers: [prNumber],
-      repo: null,
+      repo: repo ?? null,
       base_branches: [],
       tickets: null,
       wake_on: null,
     });
 
     try {
-      upsertFilterStateOpen({ interestId: sessionId, prNumber, repo: "" });
+      upsertFilterStateOpen({ interestId: sessionId, prNumber, repo: repo ?? "" });
     } catch {
       /* DB not opened */
     }

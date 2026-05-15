@@ -423,6 +423,39 @@ describe("agent.checkin", () => {
   test("no-op when session_id missing", () => {
     expect(() => handleAgentCheckin({ event: "agent.checkin", detail: {} })).not.toThrow();
   });
+
+  test("stores repo in auto-correlated pr_lifecycle interest when provided", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: {
+        session_id: "sess-repo",
+        agent_name: "worker",
+        ticket: "CTL-412",
+        orchestrator: "orch-1",
+        claimed_pr: 714,
+        repo: "coalesce-labs/catalyst",
+      },
+    });
+    const reg = getInterests().get("sess-repo");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("pr_lifecycle");
+    expect(reg.repo).toBe("coalesce-labs/catalyst");
+  });
+
+  test("auto-correlated pr_lifecycle repo is null when not provided", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: {
+        session_id: "sess-norepo",
+        agent_name: "worker",
+        ticket: "CTL-412",
+        claimed_pr: 715,
+      },
+    });
+    const reg = getInterests().get("sess-norepo");
+    expect(reg).toBeDefined();
+    expect(reg.repo).toBeNull();
+  });
 });
 
 describe("agent.checkout", () => {
@@ -991,6 +1024,36 @@ describe("auto-correlation: github.pr.opened triggers pr_lifecycle for ticket-wa
     expect(reg).toBeDefined();
     expect(reg.interest_type).toBe("pr_lifecycle");
     expect(reg.pr_numbers).toEqual([601]);
+  });
+
+  test("auto-correlated pr_lifecycle inherits repo from github.pr.opened event", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: { session_id: "sess-repo-inherit", agent_name: "worker", ticket: "CTL-412", claimed_pr: null },
+    });
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-1",
+      detail: {
+        interest_id: "tl-repo",
+        interest_type: "ticket_lifecycle",
+        tickets: ["CTL-412"],
+        wake_on: ["pr_opened"],
+        persistent: true,
+      },
+    });
+
+    tryTicketLifecycleRoute({
+      event: "github.pr.opened",
+      scope: { pr: 714 },
+      attributes: { "vcs.repository.name": "coalesce-labs/catalyst" },
+      detail: { body: "Implements CTL-412", title: "", headRef: "" },
+    }, getInterests());
+
+    const reg = getInterests().get("sess-repo-inherit");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("pr_lifecycle");
+    expect(reg.repo).toBe("coalesce-labs/catalyst");
   });
 
   test("agents with existing claimed_pr are skipped during auto-correlation", () => {
