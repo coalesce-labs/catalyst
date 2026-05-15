@@ -132,7 +132,7 @@ const __PLUGIN_JSON_PATH = resolve(
   "..",
   "..",
   ".claude-plugin",
-  "plugin.json",
+  "plugin.json"
 );
 let __pluginVersionCached = null;
 
@@ -151,14 +151,7 @@ export function pluginVersion() {
 // so receiving agents have enough context to act without re-fetching state
 // from GitHub/Linear/git. `lookup_jq` is a ready-to-run query against the
 // monthly-rotated event log for callers who do need full event details.
-const PAYLOAD_EXCERPT_KEYS = [
-  "state",
-  "stateType",
-  "conclusion",
-  "title",
-  "merged",
-  "action",
-];
+const PAYLOAD_EXCERPT_KEYS = ["state", "stateType", "conclusion", "title", "merged", "action"];
 
 export function summarizeEvent(event) {
   const id = event.id ?? synthesizeEventId(event);
@@ -168,7 +161,7 @@ export function summarizeEvent(event) {
   const payload =
     event.body && typeof event.body === "object" && "payload" in event.body
       ? event.body.payload
-      : event.detail ?? null;
+      : (event.detail ?? null);
   const scope = event.scope ?? {};
   const month = typeof ts === "string" ? ts.slice(0, 7) : "";
   const excerpt = {};
@@ -177,9 +170,7 @@ export function summarizeEvent(event) {
       if (payload[k] !== undefined) excerpt[k] = payload[k];
     }
   }
-  const message = typeof event.body?.message === "string"
-    ? event.body.message.slice(0, 200)
-    : "";
+  const message = typeof event.body?.message === "string" ? event.body.message.slice(0, 200) : "";
   const pr = attrs["vcs.pr.number"] ?? scope.pr ?? null;
   const repo = attrs["vcs.repository.name"] ?? scope.repo ?? null;
   return {
@@ -269,9 +260,15 @@ const DEGRADED_THRESHOLD_MS = 5 * 60 * 1000;
 
 // Test-only setters. Production paths only ever set these via main() and the
 // hook points below; tests use these to time-travel without touching Date.now().
-export function __setBrokerStartedAtForTest(iso) { brokerStartedAt = iso; }
-export function __resetBrokerStartedAtForTest() { brokerStartedAt = null; }
-export function __resetDegradedEmittedForTest() { degradedEmittedAt = null; }
+export function __setBrokerStartedAtForTest(iso) {
+  brokerStartedAt = iso;
+}
+export function __resetBrokerStartedAtForTest() {
+  brokerStartedAt = null;
+}
+export function __resetDegradedEmittedForTest() {
+  degradedEmittedAt = null;
+}
 export function __resetBrokerLivenessForTest() {
   brokerStartedAt = null;
   lastWakeAt = null;
@@ -304,10 +301,7 @@ function migrateLegacyInterestsFile() {
   try {
     if (existsSync(legacyFile) && !existsSync(interestsFile)) {
       renameSync(legacyFile, interestsFile);
-      log.info(
-        { from: legacyFile, to: interestsFile },
-        "migrated legacy interests file"
-      );
+      log.info({ from: legacyFile, to: interestsFile }, "migrated legacy interests file");
     }
   } catch (err) {
     log.error({ err: err.message }, "failed to migrate legacy interests file");
@@ -350,7 +344,7 @@ export function saveInterests() {
       }
       log.warn(
         { previousCount },
-        "refusing to save empty interests file — on-disk preserved (set CATALYST_BROKER_ALLOW_EMPTY_SAVE=1 to override)",
+        "refusing to save empty interests file — on-disk preserved (set CATALYST_BROKER_ALLOW_EMPTY_SAVE=1 to override)"
       );
       return;
     }
@@ -360,7 +354,11 @@ export function saveInterests() {
       writeFileSync(tmp, JSON.stringify(filtered, null, 2));
       renameSync(tmp, interestsFile);
     } catch (err) {
-      try { unlinkSync(tmp); } catch { /* tmp already gone */ }
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* tmp already gone */
+      }
       throw err;
     }
   } catch (err) {
@@ -376,10 +374,7 @@ export function loadPersistedInterests() {
     for (const [id, reg] of entries) {
       if (reg?.session_id && PROSE_TEST_SESSION.test(reg.session_id)) {
         skipped++;
-        log.warn(
-          { interestId: id, sessionId: reg.session_id },
-          "skipping prose-* test residue"
-        );
+        log.warn({ interestId: id, sessionId: reg.session_id }, "skipping prose-* test residue");
         continue;
       }
       interests.set(id, reg);
@@ -413,7 +408,7 @@ export function maybeEmitProseDisabled() {
   if (process.env.CATALYST_BROKER_PROSE_ENABLED === "1") return;
   if (_proseDisabledEmitted) return;
   const proseEntries = [...interests.entries()].filter(
-    ([, reg]) => !DETERMINISTIC_INTEREST_TYPES.has(reg?.interest_type ?? null),
+    ([, reg]) => !DETERMINISTIC_INTEREST_TYPES.has(reg?.interest_type ?? null)
   );
   if (proseEntries.length === 0) return;
   appendEvent({
@@ -483,14 +478,22 @@ export function handleRegister(event) {
     // comms_lifecycle fields (CTL-357)
     channel: isCommsLifecycle ? (d.channel ?? null) : null,
     subscriber_kind: isCommsLifecycle ? (d.subscriber_kind ?? null) : null,
-    owned_workers: isCommsLifecycle ? (Array.isArray(d.owned_workers) ? d.owned_workers : null) : null,
+    owned_workers: isCommsLifecycle
+      ? Array.isArray(d.owned_workers)
+        ? d.owned_workers
+        : null
+      : null,
     subscriber_ticket: isCommsLifecycle ? (d.subscriber_ticket ?? null) : null,
-    types_of_interest: isCommsLifecycle ? (Array.isArray(d.types_of_interest) ? d.types_of_interest : null) : null,
+    types_of_interest: isCommsLifecycle
+      ? Array.isArray(d.types_of_interest)
+        ? d.types_of_interest
+        : null
+      : null,
   });
 
   if (isPrLifecycle) {
     try {
-      for (const prNumber of (d.pr_numbers ?? [])) {
+      for (const prNumber of d.pr_numbers ?? []) {
         upsertFilterStateOpen({ interestId: id, prNumber, repo: d.repo ?? "" });
       }
     } catch {
@@ -502,12 +505,12 @@ export function handleRegister(event) {
   if (isPrLifecycle) {
     log.info(
       { interestId: id, type: "pr_lifecycle", prs: d.pr_numbers ?? [], persistent },
-      "registered",
+      "registered"
     );
   } else if (isTicketLifecycle) {
     log.info(
       { interestId: id, type: "ticket_lifecycle", tickets: d.tickets ?? [], persistent },
-      "registered",
+      "registered"
     );
   } else if (isCommsLifecycle) {
     log.info(
@@ -518,7 +521,7 @@ export function handleRegister(event) {
         subscriberKind: d.subscriber_kind,
         persistent,
       },
-      "registered",
+      "registered"
     );
   } else {
     log.info({ interestId: id, prompt: d.prompt, persistent }, "registered");
@@ -537,7 +540,11 @@ export function handleDeregister(event) {
   const reg = interests.get(id);
   if (interests.delete(id)) {
     if (reg && reg.interest_type === "pr_lifecycle") {
-      try { deleteFilterState(id); } catch { /* DB not opened */ }
+      try {
+        deleteFilterState(id);
+      } catch {
+        /* DB not opened */
+      }
     }
     log.info({ interestId: id }, "deregistered");
     saveInterests();
@@ -552,12 +559,16 @@ export function handleOrchestratorTerminated(event) {
   for (const [id, reg] of interests) {
     if (reg.orchestrator === orchId) {
       if (reg.interest_type === "pr_lifecycle") {
-        try { deleteFilterState(id); } catch { /* DB not opened */ }
+        try {
+          deleteFilterState(id);
+        } catch {
+          /* DB not opened */
+        }
       }
       interests.delete(id);
       log.info(
         { interestId: id, orchestrator: orchId },
-        "auto-deregistered (orchestrator terminated)",
+        "auto-deregistered (orchestrator terminated)"
       );
       changed = true;
     }
@@ -601,10 +612,7 @@ export function handleAgentCheckin(event) {
     _autoRegisterPrLifecycle(sessionId, claimedPr, orchestrator, ticket);
   }
 
-  log.info(
-    { agentName, sessionId, ticket, claimedPr },
-    "agent checked in",
-  );
+  log.info({ agentName, sessionId, ticket, claimedPr }, "agent checked in");
 }
 
 // Auto-register a pr_lifecycle interest when we learn agent ↔ PR mapping.
@@ -628,7 +636,9 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket) {
 
   try {
     upsertFilterStateOpen({ interestId: sessionId, prNumber, repo: "" });
-  } catch { /* DB not opened */ }
+  } catch {
+    /* DB not opened */
+  }
 
   log.info({ sessionId, prNumber }, "auto-correlated pr_lifecycle for session");
   saveInterests();
@@ -644,14 +654,22 @@ export function handleAgentCheckout(event) {
 
   const finalStatus = d.status ?? "done";
 
-  try { markAgentDone(sessionId, finalStatus); } catch { /* DB not opened */ }
+  try {
+    markAgentDone(sessionId, finalStatus);
+  } catch {
+    /* DB not opened */
+  }
 
   // Deregister auto-derived pr_lifecycle interest so the watchdog doesn't
   // fire stale wakes after the agent exits.
   const reg = interests.get(sessionId);
   if (reg && reg.interest_type === "pr_lifecycle") {
     interests.delete(sessionId);
-    try { deleteFilterState(sessionId); } catch { /* DB not opened */ }
+    try {
+      deleteFilterState(sessionId);
+    } catch {
+      /* DB not opened */
+    }
     saveInterests();
     persistBrokerState();
   }
@@ -675,7 +693,8 @@ export function handleAgentHeartbeat(event) {
 function botPrefix(author, kind) {
   const isBot = author?.type === "Bot";
   if (kind === "review") return isBot ? "Automated review comment from " : "Changes requested by ";
-  if (kind === "comment") return isBot ? "Automated review comment from " : "New review comment from ";
+  if (kind === "comment")
+    return isBot ? "Automated review comment from " : "New review comment from ";
   return "";
 }
 
@@ -730,11 +749,30 @@ export function tryDeterministicRoute(event, interestsMap) {
 
   let deployMatchedInterest = null;
   if (name === "github.deployment.created") {
-    try { deployMatchedInterest = setFilterStateDeploying(scope.sha, detail.deploymentId, scope.environment); } catch { /* DB not opened */ }
+    try {
+      deployMatchedInterest = setFilterStateDeploying(
+        scope.sha,
+        detail.deploymentId,
+        scope.environment
+      );
+    } catch {
+      /* DB not opened */
+    }
   } else if (name === "github.deployment_status.success") {
-    try { deployMatchedInterest = setFilterStateDeployed(detail.deploymentId); } catch { /* DB not opened */ }
-  } else if (name === "github.deployment_status.failure" || name === "github.deployment_status.error") {
-    try { deployMatchedInterest = setFilterStateFailed(detail.deploymentId); } catch { /* DB not opened */ }
+    try {
+      deployMatchedInterest = setFilterStateDeployed(detail.deploymentId);
+    } catch {
+      /* DB not opened */
+    }
+  } else if (
+    name === "github.deployment_status.failure" ||
+    name === "github.deployment_status.error"
+  ) {
+    try {
+      deployMatchedInterest = setFilterStateFailed(detail.deploymentId);
+    } catch {
+      /* DB not opened */
+    }
   }
 
   for (const [interestId, reg] of interestsMap) {
@@ -773,7 +811,11 @@ export function tryDeterministicRoute(event, interestsMap) {
         const sha = detail.mergeCommitSha ?? "unknown";
         reason = `PR #${scope.pr} merged (merge commit: ${sha}). Now waiting for deployment — do not close out until deployment succeeds.`;
         if (detail.mergeCommitSha) {
-          try { setFilterStateMerged(interestId, detail.mergeCommitSha); } catch { /* DB not opened */ }
+          try {
+            setFilterStateMerged(interestId, detail.mergeCommitSha);
+          } catch {
+            /* DB not opened */
+          }
         }
       }
     } else if (name === "github.pr.closed") {
@@ -815,7 +857,10 @@ export function tryDeterministicRoute(event, interestsMap) {
       if (deployMatchedInterest && deployMatchedInterest.interestId === interestId) {
         reason = `Deployment succeeded on ${scope.environment}. Work is complete.`;
       }
-    } else if (name === "github.deployment_status.failure" || name === "github.deployment_status.error") {
+    } else if (
+      name === "github.deployment_status.failure" ||
+      name === "github.deployment_status.error"
+    ) {
       if (deployMatchedInterest && deployMatchedInterest.interestId === interestId) {
         const url = detail.targetUrl ?? "(no target URL)";
         reason = `Deployment failed on ${scope.environment}. URL: ${url}`;
@@ -854,7 +899,12 @@ export function tryDeterministicRoute(event, interestsMap) {
 //             status_changed, comment_added
 
 const TICKET_LIFECYCLE_ALL_WAKE_ON = [
-  "pr_opened", "pr_merged", "status_done", "status_in_review", "status_changed", "comment_added",
+  "pr_opened",
+  "pr_merged",
+  "status_done",
+  "status_in_review",
+  "status_changed",
+  "comment_added",
 ];
 
 export function tryTicketLifecycleRoute(event, interestsMap) {
@@ -873,10 +923,7 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
   // Extract the ticket this event concerns. Linear canonical events carry
   // `attributes["linear.issue.identifier"]`; legacy/flat events use `detail.ticket`.
   const eventTicket =
-    attrs["linear.issue.identifier"] ??
-    detail.ticket ??
-    detail.identifier ??
-    null;
+    attrs["linear.issue.identifier"] ?? detail.ticket ?? detail.identifier ?? null;
 
   // For GitHub PR events extract ticket refs from PR body / title / branch ref.
   let prBodyTickets = [];
@@ -889,12 +936,20 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
   // Side effect: update ticket_state for known state-change events.
   if (name === "linear.issue.state_changed" && eventTicket) {
     const newState = detail.state ?? detail.stateName ?? null;
-    try { upsertTicketState({ ticket: eventTicket, linearState: newState }); } catch { /* DB not opened */ }
+    try {
+      upsertTicketState({ ticket: eventTicket, linearState: newState });
+    } catch {
+      /* DB not opened */
+    }
   }
   if ((name === "github.pr.opened" || name === "github.pr.merged") && prBodyTickets.length > 0) {
     const prNum = typeof scope.pr === "number" ? scope.pr : null;
     for (const t of prBodyTickets) {
-      try { upsertTicketState({ ticket: t, prNumber: prNum }); } catch { /* DB not opened */ }
+      try {
+        upsertTicketState({ ticket: t, prNumber: prNum });
+      } catch {
+        /* DB not opened */
+      }
     }
   }
 
@@ -908,7 +963,11 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
     let reason = null;
     let matchedTicket = null;
 
-    if (name === "linear.issue.state_changed" && eventTicket && watchedTickets.includes(eventTicket)) {
+    if (
+      name === "linear.issue.state_changed" &&
+      eventTicket &&
+      watchedTickets.includes(eventTicket)
+    ) {
       matchedTicket = eventTicket;
       const newState = detail.state ?? detail.stateName ?? "unknown";
       if (wakeOn.includes("status_done") && /done/i.test(newState)) {
@@ -918,12 +977,20 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
       } else if (wakeOn.includes("status_changed")) {
         reason = `Ticket ${eventTicket} state changed to ${newState}`;
       }
-    } else if (name === "linear.issue.updated" && eventTicket && watchedTickets.includes(eventTicket)) {
+    } else if (
+      name === "linear.issue.updated" &&
+      eventTicket &&
+      watchedTickets.includes(eventTicket)
+    ) {
       if (wakeOn.includes("status_changed")) {
         matchedTicket = eventTicket;
         reason = `Ticket ${eventTicket} updated`;
       }
-    } else if (name === "linear.comment.created" && eventTicket && watchedTickets.includes(eventTicket)) {
+    } else if (
+      name === "linear.comment.created" &&
+      eventTicket &&
+      watchedTickets.includes(eventTicket)
+    ) {
       if (wakeOn.includes("comment_added")) {
         matchedTicket = eventTicket;
         const author = detail.author ?? attrs["linear.actor.id"] ?? "someone";
@@ -969,7 +1036,11 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
 // interest whose orchestrator matches one of those agents.
 function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
   let agents = [];
-  try { agents = getAgentsByTicket(ticket); } catch { return; }
+  try {
+    agents = getAgentsByTicket(ticket);
+  } catch {
+    return;
+  }
 
   let changed = false;
 
@@ -993,12 +1064,13 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
       wake_on: null,
     });
 
-    try { upsertFilterStateOpen({ interestId: sessionId, prNumber, repo: "" }); } catch { /* DB not opened */ }
+    try {
+      upsertFilterStateOpen({ interestId: sessionId, prNumber, repo: "" });
+    } catch {
+      /* DB not opened */
+    }
 
-    log.info(
-      { sessionId, ticket, prNumber },
-      "auto-correlated pr_lifecycle from ticket",
-    );
+    log.info({ sessionId, ticket, prNumber }, "auto-correlated pr_lifecycle from ticket");
     changed = true;
   }
 
@@ -1008,9 +1080,7 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
   // worker has opened a PR — so pr_numbers starts empty. Without this update,
   // the deterministic route in tryDeterministicRoute never matches incoming
   // PR/CI/review events for the new PR.
-  const orchsForTicket = new Set(
-    agents.map((a) => a.orchestrator).filter((o) => o != null),
-  );
+  const orchsForTicket = new Set(agents.map((a) => a.orchestrator).filter((o) => o != null));
   for (const [interestId, reg] of interestsMap) {
     if (reg.interest_type !== "pr_lifecycle") continue;
     if (reg.session_id !== null) continue; // worker-level — skip
@@ -1018,10 +1088,14 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap) {
     const prs = reg.pr_numbers ?? [];
     if (prs.includes(prNumber)) continue;
     reg.pr_numbers = [...prs, prNumber];
-    try { upsertFilterStateOpen({ interestId, prNumber, repo: reg.repo ?? "" }); } catch { /* DB not opened */ }
+    try {
+      upsertFilterStateOpen({ interestId, prNumber, repo: reg.repo ?? "" });
+    } catch {
+      /* DB not opened */
+    }
     log.info(
       { interestId, ticket, prNumber, orchestrator: reg.orchestrator },
-      "appended PR to orchestrator pr_lifecycle interest",
+      "appended PR to orchestrator pr_lifecycle interest"
     );
     changed = true;
   }
@@ -1061,7 +1135,7 @@ export function buildGroqPrompt(events) {
     ([, reg]) =>
       reg.interest_type !== "pr_lifecycle" &&
       reg.interest_type !== "ticket_lifecycle" &&
-      reg.interest_type !== "comms_lifecycle",
+      reg.interest_type !== "comms_lifecycle"
   );
   if (proseInterests.length === 0) return null;
 
@@ -1224,6 +1298,17 @@ let pendingBatch = [];
 let debounceTimer = null;
 let hardCapTimer = null;
 
+export function __getPendingBatchForTest() {
+  return [...pendingBatch];
+}
+export function __clearPendingBatchForTest() {
+  clearTimeout(debounceTimer);
+  clearTimeout(hardCapTimer);
+  debounceTimer = null;
+  hardCapTimer = null;
+  pendingBatch.splice(0);
+}
+
 async function flushBatch() {
   clearTimeout(debounceTimer);
   clearTimeout(hardCapTimer);
@@ -1310,10 +1395,7 @@ export function runWatchdogTick() {
               interest_id: interestId,
             },
           });
-          log.info(
-            { notifyEvent: interest.notify_event, reason },
-            "watchdog wake",
-          );
+          log.info({ notifyEvent: interest.notify_event, reason }, "watchdog wake");
           woke = true;
           watchdogWoke = true;
         }
@@ -1323,10 +1405,7 @@ export function runWatchdogTick() {
         for (const [interestId, interest] of interests) {
           if (interest.session_id && interest.session_id === sourceId) {
             interests.delete(interestId);
-            log.info(
-              { interestId, sourceId },
-              "watchdog cleanup: removed stale session",
-            );
+            log.info({ interestId, sourceId }, "watchdog cleanup: removed stale session");
           }
         }
         lastHeartbeat.set(sourceId, { ts: state.ts, notified: true });
@@ -1417,14 +1496,15 @@ export function processEvent(event) {
         ...(m.ticket ? { ticket: m.ticket } : {}),
       },
     });
-    log.info(
-      { notifyEvent: reg.notify_event, reason: m.reason },
-      "direct wake",
-    );
+    log.info({ notifyEvent: reg.notify_event, reason: m.reason }, "direct wake");
     if (!reg.persistent) {
       interests.delete(m.interestId);
       if (reg.interest_type === "pr_lifecycle") {
-        try { deleteFilterState(m.interestId); } catch { /* DB not opened */ }
+        try {
+          deleteFilterState(m.interestId);
+        } catch {
+          /* DB not opened */
+        }
       }
       saveInterests();
       log.info({ interestId: m.interestId }, "auto-deregistered (one-shot)");
@@ -1436,6 +1516,13 @@ export function processEvent(event) {
     persistBrokerState();
     return;
   }
+
+  // CTL-397: comms.message.posted is handled deterministically via comms_lifecycle
+  // interests. If no deterministic match fired (types_of_interest filtered it out,
+  // sender not in owned_workers, etc.), drop the event rather than passing it to
+  // the Groq queue — info-type phase-narration heartbeats would otherwise generate
+  // spurious filter.wake events when prose interests are present.
+  if (getEventName(event) === "comms.message.posted") return;
 
   queueEvent(event);
 }
@@ -1483,7 +1570,11 @@ function readNewEvents() {
     for (const line of lines) {
       if (!line.trim()) continue;
       let event;
-      try { event = JSON.parse(line); } catch { continue; }
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
       processEvent(event);
     }
   } catch {
@@ -1507,7 +1598,11 @@ function loadExistingRegistrations() {
     const lines = content.split("\n").filter((l) => l.trim());
     for (const line of lines.slice(-LOOKBACK_LINES)) {
       let event;
-      try { event = JSON.parse(line); } catch { continue; }
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
       const name = getEventName(event);
       if (name === "filter.register") handleRegister(event);
       if (name === "filter.deregister") handleDeregister(event);
@@ -1545,7 +1640,11 @@ function writePidFile() {
 
 function removePidFile() {
   if (!PID_FILE_PATH) return;
-  try { unlinkSync(PID_FILE_PATH); } catch { /* already gone */ }
+  try {
+    unlinkSync(PID_FILE_PATH);
+  } catch {
+    /* already gone */
+  }
 }
 
 // --- State file (CTL-343) ---
@@ -1619,11 +1718,23 @@ export function logKeyHealthAtStartup() {
     for (const line of warning.split("\n")) log.warn(line);
   } else {
     log.info(
-      { source: GROQ_KEY_SOURCE, prefix: GROQ_KEY_PREFIX, model: GROQ_MODEL, endpoint: GROQ_ENDPOINT },
-      formatLoadedKeyInfo({ name: "GROQ_API_KEY", source: GROQ_KEY_SOURCE, prefix: GROQ_KEY_PREFIX }),
+      {
+        source: GROQ_KEY_SOURCE,
+        prefix: GROQ_KEY_PREFIX,
+        model: GROQ_MODEL,
+        endpoint: GROQ_ENDPOINT,
+      },
+      formatLoadedKeyInfo({
+        name: "GROQ_API_KEY",
+        source: GROQ_KEY_SOURCE,
+        prefix: GROQ_KEY_PREFIX,
+      })
     );
     if (GROQ_GATEWAY_ENABLED) {
-      log.info({ baseUrl: GROQ_GATEWAY_BASE_URL }, "GROQ gateway enabled — routing chat completions through configured baseUrl");
+      log.info(
+        { baseUrl: GROQ_GATEWAY_BASE_URL },
+        "GROQ gateway enabled — routing chat completions through configured baseUrl"
+      );
     }
   }
 }
@@ -1645,7 +1756,10 @@ export async function runStartupProbe() {
       log.error({ err: probe.error }, "Groq probe FAILED — semantic routing disabled");
       break;
     case "error":
-      log.warn({ err: probe.error }, "Groq probe could not complete — semantic routing may be impaired");
+      log.warn(
+        { err: probe.error },
+        "Groq probe could not complete — semantic routing may be impaired"
+      );
       break;
     case "missing":
       // already warned at startup
@@ -1700,7 +1814,11 @@ function main() {
       watchdog_interval_ms: WATCHDOG_INTERVAL_MS,
       heartbeat_stale_ms: HEARTBEAT_STALE_MS,
       broker: true,
-      key_health: { source: GROQ_KEY_SOURCE, prefix: GROQ_KEY_PREFIX, gateway: GROQ_GATEWAY_ENABLED },
+      key_health: {
+        source: GROQ_KEY_SOURCE,
+        prefix: GROQ_KEY_PREFIX,
+        gateway: GROQ_GATEWAY_ENABLED,
+      },
     },
   });
 
@@ -1712,15 +1830,17 @@ function main() {
       watchdogIntervalMs: WATCHDOG_INTERVAL_MS,
       heartbeatStaleMs: HEARTBEAT_STALE_MS,
     },
-    "catalyst-broker daemon started",
+    "catalyst-broker daemon started"
   );
 
   // Fire the Groq /v1/models probe asynchronously so it doesn't gate startup.
-  runStartupProbe().then((probe) => {
-    writeBrokerStateFile(buildBrokerState({ probe }));
-  }).catch((err) => {
-    log.warn({ err: err.message }, "probe error suppressed");
-  });
+  runStartupProbe()
+    .then((probe) => {
+      writeBrokerStateFile(buildBrokerState({ probe }));
+    })
+    .catch((err) => {
+      log.warn({ err: err.message }, "probe error suppressed");
+    });
 
   const shutdown = (signal) => {
     eventsWatcher?.close();
@@ -1749,7 +1869,11 @@ function main() {
     }
     closeBrokerStateDb();
     removePidFile();
-    try { unlinkSync(BROKER_STATE_FILE); } catch { /* already gone */ }
+    try {
+      unlinkSync(BROKER_STATE_FILE);
+    } catch {
+      /* already gone */
+    }
     process.exit(0);
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
