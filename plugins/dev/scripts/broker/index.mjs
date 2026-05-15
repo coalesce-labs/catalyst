@@ -243,6 +243,26 @@ export function appendEvent(event) {
   appendFileSync(logPath, JSON.stringify(canonical) + "\n");
 }
 
+// CTL-406: idempotency cache for filter.wake emissions. Prevents the same
+// (source_event_id, interest_id) pair from producing more than one wake within
+// the TTL window — guards against double-ingest of the same log line and
+// intra-call duplicate matches across routing functions.
+const _emittedWakeCache = new Map(); // key -> expiry timestamp (ms)
+const WAKE_CACHE_TTL_MS = 60_000;
+
+function shouldSkipWake(sourceEventId, interestId) {
+  if (!sourceEventId) return false;
+  const key = `${sourceEventId}:${interestId}`;
+  const expiry = _emittedWakeCache.get(key);
+  if (expiry !== undefined && Date.now() < expiry) return true;
+  _emittedWakeCache.set(key, Date.now() + WAKE_CACHE_TTL_MS);
+  return false;
+}
+
+export function __clearEmittedWakeCacheForTest() {
+  _emittedWakeCache.clear();
+}
+
 // --- Interest table ---
 const interests = new Map();
 
@@ -1418,6 +1438,11 @@ export function processEvent(event) {
   for (const m of directMatches) {
     const reg = interests.get(m.interestId);
     if (!reg) continue;
+    // CTL-406: skip duplicate (source_event_id, interest_id) pairs.
+    if (shouldSkipWake(m.sourceEventId, m.interestId)) {
+      log.debug({ interestId: m.interestId, sourceEventId: m.sourceEventId }, "dedup: skipping duplicate wake");
+      continue;
+    }
     appendEvent({
       event: reg.notify_event,
       orchestrator: reg.orchestrator ?? m.interestId,
