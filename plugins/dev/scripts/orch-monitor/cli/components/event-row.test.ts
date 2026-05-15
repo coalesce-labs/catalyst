@@ -5,10 +5,17 @@
 // this mirror updating — they are intentionally adjacent in the file tree.
 
 import { describe, test, expect } from "bun:test";
+import { COLUMN_DESCRIPTORS } from "../lib/columns.ts";
 
 // Mirror of EventRow.tsx: DETAILS <Text> uses wrap={wrapMode}; default 'truncate'.
 function detailsWrap(wrapMode: 'truncate' | 'wrap' = 'truncate'): 'truncate' | 'wrap' {
   return wrapMode;
+}
+
+// Mirror of EventRow.tsx line 60: `col.wrap ?? "truncate"`.
+// All non-DETAILS columns must resolve to "truncate" to prevent ghost chars (CTL-416).
+function effectiveWrap(colWrap: 'truncate' | 'wrap' | undefined): 'truncate' | 'wrap' {
+  return colWrap ?? 'truncate';
 }
 
 describe("EventRow wrapMode prop (CTL-384)", () => {
@@ -22,5 +29,15 @@ describe("EventRow wrapMode prop (CTL-384)", () => {
 
   test("wrapMode='wrap' passes through as wrap", () => {
     expect(detailsWrap('wrap')).toBe('wrap');
+  });
+});
+
+describe("EventRow column wrap — no ghost chars (CTL-416)", () => {
+  test("all non-DETAILS columns resolve to truncate via col.wrap or fallback", () => {
+    for (const [id, desc] of Object.entries(COLUMN_DESCRIPTORS)) {
+      if (id === "details") continue; // DETAILS wrap is controlled by wrapMode prop
+      const resolved = effectiveWrap(desc.wrap);
+      expect(resolved, `column '${id}' must resolve to truncate to prevent ghost chars`).toBe('truncate');
+    }
   });
 });

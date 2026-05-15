@@ -26,7 +26,7 @@ export interface ColumnDescriptor {
   computeWidth: (terminalCols: number) => number;
   /** Format function for row cells. */
   format: (event: CanonicalEvent) => string;
-  /** Ink Text wrap mode. Defaults to Ink's default ("wrap") when absent. */
+  /** Ink Text wrap mode. EventRow defaults to "truncate" when absent (CTL-416). */
   wrap?: "truncate" | "wrap";
   /** Render cell text dimmed. */
   dimColor?: boolean;
@@ -42,6 +42,7 @@ export const COLUMN_DESCRIPTORS: Record<string, ColumnDescriptor> = {
     minTerminalWidth: 100,
     computeWidth: () => 3,
     format: formatStatus,
+    wrap: "truncate",
   },
   time: {
     id: "time",
@@ -50,6 +51,7 @@ export const COLUMN_DESCRIPTORS: Record<string, ColumnDescriptor> = {
     minTerminalWidth: 0,
     computeWidth: () => 10,
     format: formatTime,
+    wrap: "truncate",
   },
   repo: {
     id: "repo",
@@ -58,6 +60,7 @@ export const COLUMN_DESCRIPTORS: Record<string, ColumnDescriptor> = {
     minTerminalWidth: 0,
     computeWidth: (cols) => Math.min(14, Math.max(10, Math.floor(cols * 0.07))),
     format: formatRepo,
+    wrap: "truncate",
   },
   icon: {
     id: "icon",
@@ -68,6 +71,7 @@ export const COLUMN_DESCRIPTORS: Record<string, ColumnDescriptor> = {
     minTerminalWidth: 0,
     computeWidth: () => 1,
     format: formatIcon,
+    wrap: "truncate",
   },
   event: {
     id: "event",
@@ -88,6 +92,7 @@ export const COLUMN_DESCRIPTORS: Record<string, ColumnDescriptor> = {
     minTerminalWidth: 0,
     computeWidth: (cols) => Math.min(20, Math.max(10, Math.floor(cols * 0.08))),
     format: formatRef,
+    wrap: "truncate",
   },
   orch: {
     id: "orch",
@@ -106,6 +111,7 @@ export const COLUMN_DESCRIPTORS: Record<string, ColumnDescriptor> = {
     minTerminalWidth: 180,
     computeWidth: () => 16,
     format: formatWorker,
+    wrap: "truncate",
   },
   details: {
     id: "details",
