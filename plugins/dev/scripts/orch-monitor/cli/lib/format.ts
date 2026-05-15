@@ -449,6 +449,69 @@ export function formatDetails(event: CanonicalEvent): string {
     detailsCache.set(event, sanitized);
     return sanitized;
   }
+  // CTL-418: per-event-class structured DETAILS for GitHub and Linear events.
+  // Attributes are authoritative; payload fields used as fallback when needed.
+  if (name?.startsWith("github.pr.")) {
+    const prNum = event.attributes?.["vcs.pr.number"];
+    // Derive verb from event.name suffix (already normalized: "closed"+"merged"→"merged")
+    let verb = name.slice("github.pr.".length);
+    if (verb === "synchronize") verb = "pushed";
+    if (verb === "ready_for_review") verb = "ready";
+    if (typeof prNum === "number") {
+      const out = sanitize(`PR #${prNum} ${verb}`, "oneline");
+      detailsCache.set(event, out);
+      return out;
+    }
+  }
+  if (name?.startsWith("github.check_suite.")) {
+    const p = payload as Record<string, unknown> | undefined;
+    const conclusion =
+      event.attributes?.["cicd.pipeline.run.conclusion"] ?? p?.["conclusion"];
+    if (typeof conclusion === "string" && conclusion.length > 0) {
+      const out = sanitize(`CI: ${conclusion}`, "oneline");
+      detailsCache.set(event, out);
+      return out;
+    }
+  }
+  if (name?.startsWith("github.workflow_run.")) {
+    const p = payload as Record<string, unknown> | undefined;
+    const wfName =
+      event.attributes?.["cicd.pipeline.name"] ??
+      (typeof p?.["name"] === "string" ? p["name"] : undefined);
+    const conclusion =
+      event.attributes?.["cicd.pipeline.run.conclusion"] ??
+      (typeof p?.["conclusion"] === "string" ? p["conclusion"] : undefined);
+    if (typeof wfName === "string" && wfName.length > 0) {
+      const suffix =
+        typeof conclusion === "string" && conclusion.length > 0
+          ? `: ${conclusion}`
+          : "";
+      const out = sanitize(`${wfName}${suffix}`, "oneline");
+      detailsCache.set(event, out);
+      return out;
+    }
+  }
+  if (name?.startsWith("linear.issue.")) {
+    const p = payload as Record<string, unknown> | undefined;
+    const identifier =
+      event.attributes?.["linear.issue.identifier"] ??
+      (typeof p?.["ticket"] === "string" ? p["ticket"] : undefined);
+    const suffix = name.slice("linear.issue.".length).replace(/_/g, " ");
+    if (typeof identifier === "string" && identifier.length > 0) {
+      const out = sanitize(`${identifier}: ${suffix}`, "oneline");
+      detailsCache.set(event, out);
+      return out;
+    }
+  }
+  if (name === "session.phase") {
+    const p = payload as Record<string, unknown> | undefined;
+    const phaseName = typeof p?.["to"] === "string" ? p["to"] : "";
+    if (phaseName.length > 0) {
+      const out = sanitize(phaseName, "oneline");
+      detailsCache.set(event, out);
+      return out;
+    }
+  }
   const msg = event.body?.message ?? "";
   let raw = msg;
   if (payload && typeof payload === "object") {

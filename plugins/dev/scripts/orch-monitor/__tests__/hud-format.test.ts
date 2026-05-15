@@ -481,27 +481,34 @@ describe("formatRef (filter.wake)", () => {
   });
 });
 
+// Generic fallback event — does not match any specific handler added in CTL-418.
+// Using orchestrator.worker.done so tests exercise the generic fallback path.
+const genericEvent: CanonicalEvent = {
+  ...baseEvent,
+  attributes: { ...baseEvent.attributes, "event.name": "orchestrator.worker.done" },
+};
+
 describe("formatDetails", () => {
   test("returns payload title when present", () => {
-    const e = { ...baseEvent, body: { message: "ignored", payload: { title: "feat: add thing" } } };
+    const e = { ...genericEvent, body: { message: "ignored", payload: { title: "feat: add thing" } } };
     expect(formatDetails(e)).toBe("feat: add thing");
   });
 
   test("returns message when no payload title", () => {
-    const e = { ...baseEvent, body: { message: "Something happened", payload: {} } };
+    const e = { ...genericEvent, body: { message: "Something happened", payload: {} } };
     expect(formatDetails(e)).toBe("Something happened");
   });
 
   test("returns long messages in full (scrollable detail pane handles overflow)", () => {
     const long = "x".repeat(100);
-    const e = { ...baseEvent, body: { message: long } };
+    const e = { ...genericEvent, body: { message: long } };
     expect(formatDetails(e)).toBe(long);
   });
 });
 
 describe("formatDetails (sanitizer)", () => {
   function withMessage(msg: string): CanonicalEvent {
-    return { ...baseEvent, body: { message: msg, payload: {} } };
+    return { ...genericEvent, body: { message: msg, payload: {} } };
   }
 
   test("decodes named HTML entities", () => {
@@ -597,7 +604,7 @@ describe("formatDetails (sanitizer)", () => {
 
   test("sanitizes payload.title", () => {
     const e = {
-      ...baseEvent,
+      ...genericEvent,
       body: { message: "ignored", payload: { title: "## <strong>feat</strong>: thing" } },
     };
     expect(formatDetails(e)).toBe("feat: thing");
@@ -605,7 +612,7 @@ describe("formatDetails (sanitizer)", () => {
 
   test("sanitizes payload.body and truncates the raw input at 300 chars before cleanup", () => {
     const raw = "x".repeat(295) + "<p>tail</p>";
-    const e = { ...baseEvent, body: { message: "", payload: { body: raw } } };
+    const e = { ...genericEvent, body: { message: "", payload: { body: raw } } };
     const out = formatDetails(e);
     // First 295 'x', then sanitised slice of the rest within the 300-char raw window.
     expect(out.startsWith("x".repeat(295))).toBe(true);
@@ -621,7 +628,7 @@ describe("formatDetails (sanitizer)", () => {
   });
 
   test("returns empty string when body is missing", () => {
-    const e = { ...baseEvent, body: undefined } as unknown as CanonicalEvent;
+    const e = { ...genericEvent, body: undefined } as unknown as CanonicalEvent;
     expect(formatDetails(e)).toBe("");
   });
 });
