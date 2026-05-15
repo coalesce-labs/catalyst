@@ -2,7 +2,7 @@
 // runtime module. The TUI consumes these; the bash CLI does not need types.
 
 export class DslError extends Error {
-  code: "invalid" | "unknown_field" | "refused" | "groq_rejected";
+  code: "invalid" | "unknown_field" | "type_mismatch" | "refused" | "groq_rejected";
   field?: string;
   suggestion?: string | null;
   constructor(message: string, opts?: { code?: DslError["code"]; field?: string; suggestion?: string | null });
@@ -49,7 +49,10 @@ export interface CompiledDsl {
   jsPredicate: (event: unknown) => boolean;
 }
 
-export function validateField(path: string): { ok: true } | { ok: false; error: string; suggestion: string | null };
+export function validateField(
+  path: string,
+  opts?: { operator?: string; value?: unknown },
+): { ok: true } | { ok: false; code?: string; error: string; suggestion: string | null };
 export function getField(event: unknown, path: string): unknown;
 export function evalJs(node: DslNode, event: unknown): boolean;
 export function compileJq(node: DslNode): string;
@@ -74,4 +77,5 @@ export function rewriteNode<T>(node: T): T;
 
 export const CANONICAL_FIELDS: ReadonlyArray<{ path: string; type: string; description: string }>;
 export const FIELD_PATH_SET: ReadonlySet<string>;
+export const TIME_FIELDS: ReadonlySet<string>;
 export function suggestField(path: string, maxDistance?: number): string | null;
