@@ -443,6 +443,10 @@ export function clearLastHeartbeat() {
   workerToOrchestrator.clear();
 }
 
+export function getWorkerToOrchestrator() {
+  return workerToOrchestrator;
+}
+
 // CTL-336: read name/payload/orchestrator from canonical OTel-format events
 // (data in `attributes` + `body.payload`) as well as legacy flat events
 // (data in `event` + `detail` + `orchestrator`). Resolved here so the
@@ -660,11 +664,13 @@ export function handleAgentCheckout(event) {
 }
 
 export function handleAgentHeartbeat(event) {
-  const sessionId = event.session ?? event.worker ?? event.orchestrator;
+  const sessionId =
+    event.session ?? event.worker ?? event.orchestrator ??
+    event.attributes?.["catalyst.session.id"];
   if (!sessionId) return;
   const existing = lastHeartbeat.get(sessionId);
   lastHeartbeat.set(sessionId, { ts: Date.now(), notified: existing?.notified ?? false });
-  const orchId = event.orchestrator;
+  const orchId = event.orchestrator ?? event.attributes?.["catalyst.orchestrator.id"];
   if (orchId && sessionId !== orchId) {
     workerToOrchestrator.set(sessionId, orchId);
   }
@@ -1050,6 +1056,9 @@ export function shouldSkipEvent(event) {
   const name = getEventName(event);
   if (name.startsWith("filter.")) return true;
   if (name.startsWith("broker.daemon")) return true;
+  // CTL-401: liveness pings — handled earlier in processEvent, skip here too
+  // so they never reach the Groq queue even if the early-return path changes.
+  if (name === "session.heartbeat") return true;
   return false;
 }
 
@@ -1369,6 +1378,13 @@ export function processEvent(event) {
     return;
   }
   if (name === "agent.heartbeat") {
+    handleAgentHeartbeat(event);
+    return;
+  }
+  // CTL-401: route canonical session.heartbeat to the same watchdog liveness
+  // handler. The session ID lives in attributes["catalyst.session.id"] rather
+  // than the top-level flat field; handleAgentHeartbeat now reads both shapes.
+  if (name === "session.heartbeat") {
     handleAgentHeartbeat(event);
     return;
   }

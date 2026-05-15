@@ -19,6 +19,7 @@ import {
   getInterests,
   clearInterests,
   getLastHeartbeat,
+  getWorkerToOrchestrator,
   clearLastHeartbeat,
   loadPersistedInterests,
   processEvent,
@@ -434,6 +435,55 @@ describe("agent.heartbeat", () => {
   test("falls back to worker field", () => {
     handleAgentHeartbeat({ event: "agent.heartbeat", worker: "CTL-275" });
     expect(getLastHeartbeat().has("CTL-275")).toBe(true);
+  });
+});
+
+// CTL-401: canonical session.heartbeat routing ─────────────────────────────
+
+describe("session.heartbeat (canonical OTel)", () => {
+  test("handleAgentHeartbeat reads session ID from canonical attributes", () => {
+    handleAgentHeartbeat({
+      attributes: { "event.name": "session.heartbeat", "catalyst.session.id": "sess-canonical" },
+    });
+    expect(getLastHeartbeat().has("sess-canonical")).toBe(true);
+  });
+
+  test("handleAgentHeartbeat reads orchestrator ID from canonical attributes", () => {
+    handleAgentHeartbeat({
+      attributes: {
+        "event.name": "session.heartbeat",
+        "catalyst.session.id": "sess-w",
+        "catalyst.orchestrator.id": "orch-x",
+      },
+    });
+    expect(getWorkerToOrchestrator().get("sess-w")).toBe("orch-x");
+  });
+
+  test("flat session field still takes priority over canonical attribute", () => {
+    handleAgentHeartbeat({
+      session: "sess-flat",
+      attributes: { "catalyst.session.id": "sess-attr" },
+    });
+    expect(getLastHeartbeat().has("sess-flat")).toBe(true);
+    expect(getLastHeartbeat().has("sess-attr")).toBe(false);
+  });
+
+  test("processEvent routes session.heartbeat to lastHeartbeat", () => {
+    processEvent({
+      attributes: { "event.name": "session.heartbeat", "catalyst.session.id": "sess-proc-canonical" },
+      resource: { "service.name": "catalyst.session" },
+      body: { payload: null },
+    });
+    expect(getLastHeartbeat().has("sess-proc-canonical")).toBe(true);
+  });
+
+  test("shouldSkipEvent returns true for session.heartbeat canonical", () => {
+    expect(
+      shouldSkipEvent({
+        attributes: { "event.name": "session.heartbeat" },
+        resource: { "service.name": "catalyst.session" },
+      }),
+    ).toBe(true);
   });
 });
 
