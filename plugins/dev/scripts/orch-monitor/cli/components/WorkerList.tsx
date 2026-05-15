@@ -3,6 +3,7 @@ import type { WaitingSession } from "../lib/broker-key-health.ts";
 import type { WorkerSignal } from "../lib/worker-signals-reader.ts";
 import {
   formatRelativeTime,
+  formatWorkerCell,
   isStaleHeartbeat,
   lastPathSegment,
   truncateRight,
@@ -86,7 +87,7 @@ export function WorkerList({
         const ws = findWaitingSession(w.ticket, waitingSessions, nowMs);
         const statusColor = ws ? "magenta" : workerStatusColor(w.status);
         const statusText = ws ? `wait:${formatTimeoutRemaining(ws.timeoutAt, nowMs)}` : w.status;
-        const worker = truncateRight(w.workerName, COL_WORKER);
+        const worker = truncateRight(formatWorkerCell(w.workerName, w.orchestrator), COL_WORKER);
         const status = truncateRight(statusText, COL_STATUS);
         const phase = truncateRight(w.phase !== null ? String(w.phase) : "—", COL_PHASE);
         const pr = truncateRight(w.pr ? `#${w.pr.number}` : "—", COL_PR);

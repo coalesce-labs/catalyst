@@ -11,6 +11,8 @@ import {
   lastPathSegment,
   DASHBOARD_VIEWS,
   dashboardViewLabel,
+  shortOrchId,
+  formatWorkerCell,
 } from "./dashboard-format.ts";
 import type { BrokerInterest } from "./broker-interests-reader.ts";
 
@@ -181,6 +183,59 @@ describe("lastPathSegment", () => {
   test("no slash → whole string", () => expect(lastPathSegment("plain")).toBe("plain"));
   test("null → em-dash", () => expect(lastPathSegment(null)).toBe("—"));
   test("empty string → em-dash", () => expect(lastPathSegment("")).toBe("—"));
+});
+
+describe("shortOrchId", () => {
+  test("returns a 4-char string", () => {
+    expect(shortOrchId("o-tl-431-ctl-432")).toHaveLength(4);
+  });
+  test("is deterministic", () => {
+    const id = "o-tl-431-ctl-432-ctl-433-ctl-434-CTL-431";
+    expect(shortOrchId(id)).toBe(shortOrchId(id));
+  });
+  test("returns base36 chars only", () => {
+    expect(shortOrchId("orch-adv-944-946")).toMatch(/^[0-9a-z]{4}$/);
+  });
+  test("distinct inputs produce distinct outputs (regression guard)", () => {
+    expect(shortOrchId("orch-a")).not.toBe(shortOrchId("orch-b"));
+    expect(shortOrchId("o-tl-431-ctl-432")).not.toBe(shortOrchId("o-tl-431-ctl-433"));
+  });
+});
+
+describe("formatWorkerCell", () => {
+  test("strips orchestrator prefix and prepends short fingerprint", () => {
+    const orch = "o-tl-431-ctl-432-ctl-433";
+    const result = formatWorkerCell(`${orch}-CTL-431`, orch);
+    expect(result).toBe(`${shortOrchId(orch)}:CTL-431`);
+  });
+
+  test("null orchestrator → workerName unchanged", () => {
+    expect(formatWorkerCell("standalone-worker", null)).toBe("standalone-worker");
+  });
+
+  test("empty orchestrator → workerName unchanged", () => {
+    expect(formatWorkerCell("standalone-worker", "")).toBe("standalone-worker");
+  });
+
+  test("worker does not start with orchestrator prefix → unchanged", () => {
+    expect(formatWorkerCell("unrelated-worker", "o-foo")).toBe("unrelated-worker");
+  });
+
+  test("worker equals orchestrator exactly → unchanged (no `-` to strip)", () => {
+    expect(formatWorkerCell("o-foo", "o-foo")).toBe("o-foo");
+  });
+
+  test("worker matches orchestrator prefix without `-` separator → unchanged", () => {
+    // "o-foo-bar" starts with "o-foo" but the next char isn't `-`, so don't strip.
+    expect(formatWorkerCell("o-foobar", "o-foo")).toBe("o-foobar");
+  });
+
+  test("interest key with -pr-lifecycle suffix is stripped to lifecycle name", () => {
+    const orch = "orch-adv-944-946-947";
+    expect(formatWorkerCell(`${orch}-pr-lifecycle`, orch)).toBe(
+      `${shortOrchId(orch)}:pr-lifecycle`,
+    );
+  });
 });
 
 describe("DASHBOARD_VIEWS + dashboardViewLabel", () => {

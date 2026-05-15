@@ -1,7 +1,12 @@
 import { Box, Text } from "ink";
 import type { BrokerInterest } from "../lib/broker-interests-reader.ts";
 import type { BrokerState } from "../lib/broker-key-health.ts";
-import { formatRelativeTime, interestWatches, truncateRight } from "../lib/dashboard-format.ts";
+import {
+  formatRelativeTime,
+  formatWorkerCell,
+  interestWatches,
+  truncateRight,
+} from "../lib/dashboard-format.ts";
 
 interface InterestListProps {
   interests: BrokerInterest[];
@@ -66,7 +71,11 @@ export function InterestList({
         const orch = truncateRight(i.orchestrator ?? "—", COL_ORCH);
         // Show the session ID that will actually receive the wake event.
         // When session_id equals orchestrator (orchestrator-level interests), label it "orchestrator".
-        const workerRaw = i.session_id === i.orchestrator ? "orchestrator" : (i.session_id ?? i.key);
+        // Otherwise compress the worker/interest identifier so it isn't a near-duplicate of the
+        // ORCHESTRATOR column (workers and per-orch interest keys both start with the orch ID).
+        const workerRaw = i.session_id === i.orchestrator
+          ? "orchestrator"
+          : formatWorkerCell(i.session_id ?? i.key, i.orchestrator);
         const worker = truncateRight(workerRaw, COL_WORKER);
         const type = truncateRight(interestTypeLabel(i.interest_type), COL_TYPE);
         const watches = truncateRight(interestWatches(i), COL_WATCHES);
