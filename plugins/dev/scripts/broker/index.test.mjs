@@ -3249,3 +3249,119 @@ describe("CTL-370: allowlist parity with broker routing tables", () => {
     expect([...documented].sort()).toEqual([...TICKET_LIFECYCLE_ROUTED].sort());
   });
 });
+
+// ─── CTL-419 watchdog batching ───────────────────────────────────────────────
+
+describe("CTL-419 watchdog batching", () => {
+  // Helper: reads all parsed events from the monthly event log with a given event name.
+  function readWakeEvents(eventName) {
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return [];
+    return readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((l) => {
+        try {
+          const evt = JSON.parse(l);
+          return evt.attributes?.["event.name"] === eventName ? [evt] : [];
+        } catch { return []; }
+      });
+  }
+
+  test("two simultaneously stale sessions produce one wake event with stale_sessions[]", async () => {
+    const { runWatchdogTick, __setHeartbeatForTest } = await import("./index.mjs");
+
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-batch-1",
+      detail: {
+        interest_id: "orch-batch-1",
+        notify_event: "filter.wake.orch-batch-1",
+        persistent: true,
+      },
+    });
+    handleAgentCheckin({ event: "agent.checkin",
+      detail: { session_id: "worker-A", orchestrator: "orch-batch-1" } });
+    handleAgentCheckin({ event: "agent.checkin",
+      detail: { session_id: "worker-B", orchestrator: "orch-batch-1" } });
+
+    // Backdate both heartbeats so they appear stale (4 min ago > 3 min threshold)
+    __setHeartbeatForTest("worker-A", Date.now() - 4 * 60_000);
+    __setHeartbeatForTest("worker-B", Date.now() - 4 * 60_000);
+
+    runWatchdogTick();
+
+    const wakes = readWakeEvents("filter.wake.orch-batch-1");
+    expect(wakes).toHaveLength(1);
+    const p = wakes[0].body.payload;
+    expect(p.stale_sessions).toHaveLength(2);
+    expect(p.stale_sessions).toContain("worker-A");
+    expect(p.stale_sessions).toContain("worker-B");
+    expect(p.stale_count).toBe(2);
+    expect(p.reason).toMatch(/2 sessions stale/);
+  });
+
+  test("single stale session: payload has stale_sessions with one entry, single-session reason", async () => {
+    const { runWatchdogTick, __setHeartbeatForTest } = await import("./index.mjs");
+
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-single",
+      detail: {
+        interest_id: "orch-single",
+        notify_event: "filter.wake.orch-single",
+        persistent: true,
+      },
+    });
+    handleAgentCheckin({ event: "agent.checkin",
+      detail: { session_id: "only-worker", orchestrator: "orch-single" } });
+    __setHeartbeatForTest("only-worker", Date.now() - 4 * 60_000);
+
+    runWatchdogTick();
+
+    const wakes = readWakeEvents("filter.wake.orch-single");
+    expect(wakes).toHaveLength(1);
+    const p = wakes[0].body.payload;
+    expect(p.stale_sessions).toEqual(["only-worker"]);
+    expect(p.stale_count).toBe(1);
+    expect(p.reason).toMatch(/No heartbeat from only-worker/);
+  });
+
+  test("two orchestrators with one stale session each get independent wake events", async () => {
+    const { runWatchdogTick, __setHeartbeatForTest } = await import("./index.mjs");
+
+    handleRegister({ event: "filter.register", orchestrator: "orch-X",
+      detail: { interest_id: "orch-X", notify_event: "filter.wake.orch-X", persistent: true } });
+    handleRegister({ event: "filter.register", orchestrator: "orch-Y",
+      detail: { interest_id: "orch-Y", notify_event: "filter.wake.orch-Y", persistent: true } });
+    handleAgentCheckin({ event: "agent.checkin",
+      detail: { session_id: "worker-X1", orchestrator: "orch-X" } });
+    handleAgentCheckin({ event: "agent.checkin",
+      detail: { session_id: "worker-Y1", orchestrator: "orch-Y" } });
+
+    __setHeartbeatForTest("worker-X1", Date.now() - 4 * 60_000);
+    __setHeartbeatForTest("worker-Y1", Date.now() - 4 * 60_000);
+
+    runWatchdogTick();
+
+    expect(readWakeEvents("filter.wake.orch-X")).toHaveLength(1);
+    expect(readWakeEvents("filter.wake.orch-Y")).toHaveLength(1);
+  });
+
+  test("stale sessions not re-notified on second tick", async () => {
+    const { runWatchdogTick, __setHeartbeatForTest } = await import("./index.mjs");
+
+    handleRegister({ event: "filter.register", orchestrator: "orch-notified",
+      detail: { interest_id: "orch-notified", notify_event: "filter.wake.orch-notified", persistent: true } });
+    handleAgentCheckin({ event: "agent.checkin",
+      detail: { session_id: "stale-W", orchestrator: "orch-notified" } });
+    __setHeartbeatForTest("stale-W", Date.now() - 4 * 60_000);
+
+    runWatchdogTick();
+    runWatchdogTick();
+
+    expect(readWakeEvents("filter.wake.orch-notified")).toHaveLength(1);
+  });
+});

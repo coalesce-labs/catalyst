@@ -293,6 +293,11 @@ export function __resetBrokerStartedAtForTest() {
 export function __resetDegradedEmittedForTest() {
   degradedEmittedAt = null;
 }
+// CTL-419: backdate a session's heartbeat timestamp so tests can simulate staleness.
+export function __setHeartbeatForTest(sessionId, tsMs) {
+  const existing = lastHeartbeat.get(sessionId);
+  lastHeartbeat.set(sessionId, { ts: tsMs, notified: existing?.notified ?? false });
+}
 export function __resetBrokerLivenessForTest() {
   brokerStartedAt = null;
   lastWakeAt = null;
@@ -1472,6 +1477,12 @@ export function runWatchdogTick() {
   }
 
   let watchdogWoke = false;
+
+  // CTL-419: collect all currently-stale not-yet-notified sessions first.
+  // Then iterate interests (outer) and batch all matching stale sessions into
+  // a single appendEvent call per interest — avoids N identical wake rows in
+  // the HUD when N sessions go stale simultaneously.
+  const staleNow = new Map(); // sourceId → { ts, minsAgo }
   for (const [sourceId, state] of lastHeartbeat) {
     const stale = now - state.ts > HEARTBEAT_STALE_MS;
     // CTL-403: skip stale-wake if this session has an active wait whose timeout
@@ -1489,46 +1500,79 @@ export function runWatchdogTick() {
     }
     if (stale && !state.notified) {
       const minsAgo = Math.round((now - state.ts) / 60_000);
-      const reason = `No heartbeat from ${sourceId} for >${minsAgo} min`;
-      let woke = false;
-      for (const [interestId, interest] of interests) {
-        const workers = interest.context?.workers;
-        const orchForSource = workerToOrchestrator.get(sourceId);
-        const orchMatch = orchForSource != null && orchForSource === interest.orchestrator;
-        if ((workers != null && workers.includes(sourceId)) || (workers == null && orchMatch)) {
-          appendEvent({
-            event: interest.notify_event,
-            orchestrator: interest.orchestrator ?? interestId,
-            worker: null,
-            // CTL-362: forward the interest's repo so the watchdog wake
-            // envelope carries vcs.repository.name when known.
-            repo: interest.repo ?? null,
-            // CTL-350: watchdog wakes have no triggering event, so source_events
-            // is always empty — receivers should fall back to the reason string.
-            detail: {
-              reason,
-              source_event_ids: [],
-              source_events: [],
-              interest_id: interestId,
-            },
-          });
-          log.info({ notifyEvent: interest.notify_event, reason }, "watchdog wake");
-          woke = true;
-          watchdogWoke = true;
-        }
-      }
-      if (woke) {
-        // Belt-and-suspenders: clean up interests for the stale session.
-        for (const [interestId, interest] of interests) {
-          if (interest.session_id && interest.session_id === sourceId) {
-            interests.delete(interestId);
-            log.info({ interestId, sourceId }, "watchdog cleanup: removed stale session");
-          }
-        }
-        lastHeartbeat.set(sourceId, { ts: state.ts, notified: true });
-      }
+      staleNow.set(sourceId, { ts: state.ts, minsAgo });
     } else if (!stale && state.notified) {
       lastHeartbeat.set(sourceId, { ts: state.ts, notified: false });
+    }
+  }
+
+  // Track which sessions were actually woken so we can mark + clean up after.
+  const notifiedSessions = new Set();
+
+  for (const [interestId, interest] of interests) {
+    const matched = []; // { sourceId, ts, minsAgo }
+    for (const [sourceId, info] of staleNow) {
+      const workers = interest.context?.workers;
+      const orchForSource = workerToOrchestrator.get(sourceId);
+      const orchMatch = orchForSource != null && orchForSource === interest.orchestrator;
+      if ((workers != null && workers.includes(sourceId)) || (workers == null && orchMatch)) {
+        matched.push({ sourceId, ...info });
+      }
+    }
+    if (matched.length === 0) continue;
+
+    const isSingle = matched.length === 1;
+    const singleId = matched[0].sourceId;
+    const reason = isSingle
+      ? `No heartbeat from ${singleId} for >${matched[0].minsAgo} min`
+      : `${matched.length} sessions stale`;
+
+    appendEvent({
+      event: interest.notify_event,
+      orchestrator: interest.orchestrator ?? interestId,
+      worker: null,
+      // CTL-362: forward the interest's repo so the watchdog wake
+      // envelope carries vcs.repository.name when known.
+      repo: interest.repo ?? null,
+      // CTL-350: watchdog wakes have no triggering event, so source_events
+      // is always empty — receivers should fall back to the reason/stale_sessions.
+      // CTL-419: include stale_sessions[] and stale_count for HUD batched display.
+      detail: {
+        reason,
+        stale_sessions: matched.map((m) => m.sourceId),
+        stale_count: matched.length,
+        source_event_ids: [],
+        source_events: [],
+        interest_id: interestId,
+      },
+    });
+    log.info(
+      { notifyEvent: interest.notify_event, staleSessions: matched.map((m) => m.sourceId) },
+      "watchdog wake (batched)",
+    );
+    watchdogWoke = true;
+
+    for (const { sourceId } of matched) {
+      notifiedSessions.add(sourceId);
+    }
+  }
+
+  // Mark notified sessions and clean up their own registered interests.
+  // Done after the interests loop to avoid concurrent-modification issues.
+  if (notifiedSessions.size > 0) {
+    const toDelete = [];
+    for (const [interestId, interest] of interests) {
+      if (interest.session_id && notifiedSessions.has(interest.session_id)) {
+        toDelete.push({ interestId, sourceId: interest.session_id });
+      }
+    }
+    for (const { interestId, sourceId } of toDelete) {
+      interests.delete(interestId);
+      log.info({ interestId, sourceId }, "watchdog cleanup: removed stale session");
+    }
+    for (const sourceId of notifiedSessions) {
+      const info = staleNow.get(sourceId);
+      lastHeartbeat.set(sourceId, { ts: info.ts, notified: true });
     }
   }
 
