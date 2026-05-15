@@ -412,6 +412,52 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
     expect(env!.attributes["event.action"]).toBe("state_changed");
   });
 
+  it("state_changed event forwards toState into body.payload (CTL-399)", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "update",
+        topic: "linear.issue.state_changed",
+        ticket: "CTL-1",
+        teamKey: "CTL",
+        data: {},
+        updatedFromKeys: ["stateId"],
+        actorId: null,
+        actorName: null,
+        toState: "In Review",
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
+      },
+      TS,
+    );
+    const payload = env!.body.payload as Record<string, unknown>;
+    expect(payload["toState"]).toBe("In Review");
+  });
+
+  it("state_changed event with null toState has toState null in payload (CTL-399)", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "update",
+        topic: "linear.issue.state_changed",
+        ticket: "CTL-1",
+        teamKey: "CTL",
+        data: {},
+        updatedFromKeys: ["stateId"],
+        actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
+      },
+      TS,
+    );
+    const payload = env!.body.payload as Record<string, unknown>;
+    expect(payload["toState"]).toBeNull();
+  });
+
   it("Issue event includes actorId in body.payload + attributes when actor is present", () => {
     const env = buildLinearEventLogEnvelope(
       {

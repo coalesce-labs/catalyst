@@ -905,16 +905,18 @@ export function tryDeterministicRoute(event, interestsMap) {
     if (name === "github.check_suite.completed") {
       const eventPrs = Array.isArray(detail.prNumbers) ? detail.prNumbers : [];
       const matchedPr = eventPrs.find((n) => prList.includes(n));
-      if (matchedPr !== undefined) {
-        if (detail.conclusion === "failure") {
-          reason = `CI failing on PR #${matchedPr} — check_suite conclusion: failure`;
-          wakeStateKey = `ci_conclusion:${matchedPr}`;
-          wakeStateValue = "failure";
-        } else if (detail.conclusion === "success") {
-          reason = `All CI checks passing on PR #${matchedPr}`;
-          wakeStateKey = `ci_conclusion:${matchedPr}`;
-          wakeStateValue = "success";
+      if (matchedPr !== undefined && detail.conclusion != null) {
+        const isFailing =
+          detail.conclusion === "failure" ||
+          detail.conclusion === "timed_out" ||
+          detail.conclusion === "action_required";
+        if (isFailing) {
+          reason = `CI failing on PR #${matchedPr} — check_suite conclusion: ${detail.conclusion}`;
+        } else {
+          reason = `All CI checks passing on PR #${matchedPr} — conclusion: ${detail.conclusion}`;
         }
+        wakeStateKey = `ci_conclusion:${matchedPr}`;
+        wakeStateValue = detail.conclusion;
       }
     } else if (name === "github.pr.merged") {
       if (prList.includes(scope.pr)) {

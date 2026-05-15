@@ -1264,6 +1264,7 @@ describe("backward compat: pr_lifecycle routing unchanged in broker", () => {
     );
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("CI checks passing");
+    expect(matches[0].reason).toContain("conclusion: success");
     expect(matches[0].wakeStateKey).toBe("ci_conclusion:502");
     expect(matches[0].wakeStateValue).toBe("success");
   });
@@ -1291,6 +1292,31 @@ describe("backward compat: pr_lifecycle routing unchanged in broker", () => {
     expect(matches[0].wakeStateValue).toBe("failure");
   });
 
+  test("github.check_suite.completed timed_out fires with CI failing reason (CTL-399)", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-bc",
+      detail: {
+        interest_id: "ci-watch-timeout",
+        notify_event: "filter.wake.ci-watch-timeout",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [506],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+    const matches = tryDeterministicRoute({
+      event: "github.check_suite.completed",
+      detail: { prNumbers: [506], conclusion: "timed_out" },
+    }, getInterests());
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("CI failing");
+    expect(matches[0].reason).toContain("timed_out");
+    expect(matches[0].wakeStateKey).toBe("ci_conclusion:506");
+    expect(matches[0].wakeStateValue).toBe("timed_out");
+  });
+
   test("non-CI events have wakeStateKey null (always emit)", () => {
     handleRegister({
       event: "filter.register",
@@ -1312,6 +1338,52 @@ describe("backward compat: pr_lifecycle routing unchanged in broker", () => {
     }, getInterests());
     expect(matches).toHaveLength(1);
     expect(matches[0].wakeStateKey).toBeNull();
+  });
+
+  test("github.check_suite.completed neutral fires with CI checks passing reason (CTL-399)", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-bc",
+      detail: {
+        interest_id: "ci-watch-neutral",
+        notify_event: "filter.wake.ci-watch-neutral",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [507],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+    const matches = tryDeterministicRoute({
+      event: "github.check_suite.completed",
+      detail: { prNumbers: [507], conclusion: "neutral" },
+    }, getInterests());
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("CI checks passing");
+    expect(matches[0].reason).toContain("neutral");
+    expect(matches[0].wakeStateKey).toBe("ci_conclusion:507");
+    expect(matches[0].wakeStateValue).toBe("neutral");
+  });
+
+  test("github.check_suite.completed null conclusion does not fire (CTL-399)", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-bc",
+      detail: {
+        interest_id: "ci-watch-null",
+        notify_event: "filter.wake.ci-watch-null",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [508],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+    const matches = tryDeterministicRoute({
+      event: "github.check_suite.completed",
+      detail: { prNumbers: [508], conclusion: null },
+    }, getInterests());
+    expect(matches).toHaveLength(0);
   });
 });
 
