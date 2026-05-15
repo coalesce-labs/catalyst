@@ -426,6 +426,7 @@ the env var is set.
 | `BROKER_PID_FILE` | `catalyst-broker` | Override broker PID path. Default `$CATALYST_DIR/broker.pid`. |
 | `BROKER_LOG_FILE` | `catalyst-broker` | Override broker log path. Default `$CATALYST_DIR/broker.log`. |
 | `GROQ_API_KEY` | `catalyst-broker` | Groq API key (overrides `groq.apiKey` in config). |
+| `CATALYST_BROKER_PROSE_ENABLED` | `catalyst-broker` | Set to `1` to enable Groq-backed prose classification for open-ended interests (`interest_type: null`). Disabled by default — requires `GROQ_API_KEY` and incurs Groq API costs proportional to interest volume. When unset, prose interests persist in `broker-interests.json` but are never evaluated; the HUD marks them `[prose: OFF]`. |
 | `FILTER_GROQ_MODEL` | `catalyst-broker` | Groq model for semantic-prose classification. Default `llama-3.1-8b-instant`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `catalyst-otel-forward` | OTLP endpoint URL. Port `4317` is auto-rewritten to `4318` for HTTP transport. |
 | `OTEL_ENABLED`, `PROMETHEUS_URL`, `LOKI_URL` | `orch-monitor` | See [Monitor OTel Config](#monitor-otel-config). |
