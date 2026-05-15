@@ -145,6 +145,11 @@ export function buildLinearEventLogEnvelope(
           teamKey: event.teamKey,
           updatedFromKeys: event.updatedFromKeys,
           actorId: event.actorId,
+          actorName: event.actorName,
+          toState: event.toState,
+          toPriority: event.toPriority,
+          toAssigneeId: event.toAssigneeId,
+          toAssigneeName: event.toAssigneeName,
         },
       });
     }

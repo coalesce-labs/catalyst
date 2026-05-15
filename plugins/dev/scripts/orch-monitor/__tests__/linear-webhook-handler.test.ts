@@ -285,6 +285,34 @@ describe("createLinearWebhookHandler", () => {
     expect(bodyPayload.actorId).toBe("actor-uuid-999");
   });
 
+  it("extracts toState/actorName from webhook payload and writes to body.payload (CTL-424)", async () => {
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+      eventLog,
+    });
+    const payload = {
+      action: "update",
+      type: "Issue",
+      actor: { id: "actor-uuid-424", name: "Ryan" },
+      data: {
+        id: "i1",
+        identifier: "CTL-424",
+        team: { key: "CTL" },
+        state: { id: "state-uuid", name: "In Progress" },
+        priority: 2,
+        assignee: { id: "user-uuid-424", name: "Alice" },
+      },
+      updatedFrom: { stateId: "old-state-uuid" },
+    };
+    await handler.handle(makeReq(payload));
+    const p = eventLog.appends[0]?.body.payload as Record<string, unknown>;
+    expect(p.toState).toBe("In Progress");
+    expect(p.toPriority).toBe(2);
+    expect(p.toAssigneeId).toBe("user-uuid-424");
+    expect(p.toAssigneeName).toBe("Alice");
+    expect(p.actorName).toBe("Ryan");
+  });
+
   it("writes actorId: null in body.payload when payload has no actor field", async () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
@@ -368,6 +396,11 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         data: {},
         updatedFromKeys: ["stateId"],
         actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
       },
       TS,
     );
@@ -390,6 +423,11 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         data: {},
         updatedFromKeys: [],
         actorId: "actor-uuid-123",
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
       },
       TS,
     );
@@ -409,11 +447,70 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         data: {},
         updatedFromKeys: [],
         actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
       },
       TS,
     );
     const payload = env!.body.payload as { actorId: string | null };
     expect(payload.actorId).toBeNull();
+  });
+
+  it("Issue event serializes toState, toPriority, toAssigneeName, actorName into body.payload (CTL-424)", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "update",
+        topic: "linear.issue.state_changed",
+        ticket: "CTL-424",
+        teamKey: "CTL",
+        data: {},
+        updatedFromKeys: ["stateId"],
+        actorId: "actor-uuid-424",
+        actorName: "Ryan",
+        toState: "In Progress",
+        toPriority: 2,
+        toAssigneeId: "user-uuid-424",
+        toAssigneeName: "Alice",
+      },
+      TS,
+    );
+    const p = env!.body.payload as Record<string, unknown>;
+    expect(p.toState).toBe("In Progress");
+    expect(p.toPriority).toBe(2);
+    expect(p.toAssigneeId).toBe("user-uuid-424");
+    expect(p.toAssigneeName).toBe("Alice");
+    expect(p.actorName).toBe("Ryan");
+  });
+
+  it("Issue event with null new-field values serializes them as null (CTL-424)", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "update",
+        topic: "linear.issue.updated",
+        ticket: "CTL-424",
+        teamKey: "CTL",
+        data: {},
+        updatedFromKeys: [],
+        actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
+      },
+      TS,
+    );
+    const p = env!.body.payload as Record<string, unknown>;
+    expect(p.toState).toBeNull();
+    expect(p.toPriority).toBeNull();
+    expect(p.toAssigneeId).toBeNull();
+    expect(p.toAssigneeName).toBeNull();
+    expect(p.actorName).toBeNull();
   });
 
   it("Comment create → linear.comment.created", () => {
@@ -489,6 +586,11 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
         updatedFromKeys: ["stateId"],
         actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
       },
       TS,
       TEAMS,
@@ -508,6 +610,11 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
         updatedFromKeys: [],
         actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
       },
       TS,
       TEAMS,
@@ -527,6 +634,11 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
         updatedFromKeys: [],
         actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
       },
       TS,
       TEAMS,
@@ -639,6 +751,11 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
         updatedFromKeys: [],
         actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
       },
       TS,
     );
