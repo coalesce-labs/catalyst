@@ -231,7 +231,7 @@ export function PromptInput({
 
   return (
     <Box flexDirection="column">
-      <Box borderStyle="round" borderColor={focused ? "cyan" : "gray"} paddingX={1} flexDirection="row">
+      <Box borderStyle="round" borderColor={focused ? "cyan" : "gray"} paddingX={1} flexDirection="row" width={cols}>
         {mode === "query" ? <Text color="yellow">{"~"}</Text> : <Text color="yellow">{">"}</Text>}
         <Text>{" "}</Text>
         {focused ? (
@@ -244,7 +244,7 @@ export function PromptInput({
           <Text dimColor>{statusMsg ?? "filter or query…"}</Text>
         )}
       </Box>
-      <Box flexDirection="row" paddingX={1}>
+      <Box flexDirection="row" paddingX={1} width={cols}>
         <Box flexGrow={1}>
           {error !== null ? (
             <Text color="red" wrap="truncate-end">{error}</Text>
