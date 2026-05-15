@@ -76,7 +76,7 @@ export function lastPathSegment(p: string | null): string {
   return idx >= 0 ? stripped.slice(idx + 1) : stripped;
 }
 
-export const DASHBOARD_VIEWS = ["interests", "workers", "orchs"] as const;
+export const DASHBOARD_VIEWS = ["interests", "workers", "orchs", "runs"] as const;
 export type DashboardView = (typeof DASHBOARD_VIEWS)[number];
 
 export function dashboardViewLabel(v: DashboardView): string {
@@ -84,5 +84,6 @@ export function dashboardViewLabel(v: DashboardView): string {
     case "interests": return "Interests";
     case "workers": return "Workers";
     case "orchs": return "Orchestrators";
+    case "runs": return "Runs";
   }
 }

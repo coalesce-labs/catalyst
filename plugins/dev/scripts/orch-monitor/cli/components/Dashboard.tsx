@@ -7,6 +7,8 @@ import type { WorkerSignal } from "../lib/worker-signals-reader.ts";
 import { readWorkerSignals } from "../lib/worker-signals-reader.ts";
 import type { OrchState } from "../lib/orch-state-reader.ts";
 import { readOrchStates } from "../lib/orch-state-reader.ts";
+import type { RunRow } from "../lib/runs-reader.ts";
+import { readRunRows } from "../lib/runs-reader.ts";
 import type { BrokerState } from "../lib/broker-key-health.ts";
 import {
   DASHBOARD_VIEWS,
@@ -17,6 +19,7 @@ import {
 import { InterestList } from "./InterestList.tsx";
 import { WorkerList } from "./WorkerList.tsx";
 import { OrchList } from "./OrchList.tsx";
+import { RunsList } from "./RunsList.tsx";
 
 interface DashboardProps {
   visibleRows: number;
@@ -29,6 +32,7 @@ interface DashboardState {
   interests: BrokerInterest[];
   workers: WorkerSignal[];
   orchs: OrchState[];
+  runs: RunRow[];
 }
 
 function readAll(): DashboardState {
@@ -36,19 +40,22 @@ function readAll(): DashboardState {
     interests: readBrokerInterests(),
     workers: readWorkerSignals(),
     orchs: readOrchStates(),
+    runs: readRunRows(),
   };
 }
 
 function pickSelectedRow(view: DashboardView, state: DashboardState, idx: number): unknown {
   if (view === "interests") return state.interests[idx] ?? null;
   if (view === "workers") return state.workers[idx]?.raw ?? null;
-  return state.orchs[idx]?.raw ?? null;
+  if (view === "orchs") return state.orchs[idx]?.raw ?? null;
+  return state.runs[idx]?.raw ?? null;
 }
 
 function rowCount(view: DashboardView, state: DashboardState): number {
   if (view === "interests") return state.interests.length;
   if (view === "workers") return state.workers.length;
-  return state.orchs.length;
+  if (view === "orchs") return state.orchs.length;
+  return state.runs.length;
 }
 
 export function Dashboard({ visibleRows, cols, brokerState, onClose }: DashboardProps) {
@@ -119,6 +126,7 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
     if (input === "1") { setView("interests"); setSelectedIndex(0); setScrollOffset(0); return; }
     if (input === "2") { setView("workers"); setSelectedIndex(0); setScrollOffset(0); return; }
     if (input === "3") { setView("orchs"); setSelectedIndex(0); setScrollOffset(0); return; }
+    if (input === "4") { setView("runs"); setSelectedIndex(0); setScrollOffset(0); return; }
     if (input === "j" || key.downArrow) {
       setSelectedIndex((i) => Math.min(Math.max(0, total - 1), i + 1));
       return;
@@ -177,6 +185,15 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
             cols={cols - 4}
           />
         )}
+        {view === "runs" && (
+          <RunsList
+            rows={data.runs}
+            selectedIndex={selectedIndex}
+            scrollOffset={scrollOffset}
+            visibleRows={listBodyRows}
+            cols={cols - 4}
+          />
+        )}
       </Box>
       {showDetail && (
         <Box flexDirection="column" flexShrink={0} borderStyle="single" borderColor="gray" paddingX={1}>
@@ -187,7 +204,7 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
         </Box>
       )}
       <Box flexShrink={0} paddingX={1}>
-        <Text dimColor>Tab: switch view  ·  1/2/3: jump  ·  j/k: move  ·  Enter: detail  ·  Esc / i: close</Text>
+        <Text dimColor>Tab: switch view  ·  1-4: jump  ·  j/k: move  ·  Enter: detail  ·  Esc / i: close</Text>
       </Box>
     </Box>
   );
