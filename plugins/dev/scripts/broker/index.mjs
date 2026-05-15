@@ -997,7 +997,7 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
 
   // Side effect: update ticket_state for known state-change events.
   if (name === "linear.issue.state_changed" && eventTicket) {
-    const newState = detail.state ?? detail.stateName ?? null;
+    const newState = detail.toState ?? detail.state ?? detail.stateName ?? null;
     try { upsertTicketState({ ticket: eventTicket, linearState: newState }); } catch { /* DB not opened */ }
   }
   if ((name === "github.pr.opened" || name === "github.pr.merged") && prBodyTickets.length > 0) {
@@ -1019,7 +1019,7 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
 
     if (name === "linear.issue.state_changed" && eventTicket && watchedTickets.includes(eventTicket)) {
       matchedTicket = eventTicket;
-      const newState = detail.state ?? detail.stateName ?? "unknown";
+      const newState = detail.toState ?? detail.state ?? detail.stateName ?? "unknown";
       if (wakeOn.includes("status_done") && /done/i.test(newState)) {
         reason = `Ticket ${eventTicket} marked Done`;
       } else if (wakeOn.includes("status_in_review") && /in.?review/i.test(newState)) {
