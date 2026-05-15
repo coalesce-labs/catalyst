@@ -713,7 +713,8 @@ describe("formatDetails (filter.wake)", () => {
       attributes: { "event.name": "filter.wake.orch-foo" },
       body: { payload: { reason: "some reason", source_event_ids: [] } },
     } as unknown as CanonicalEvent;
-    expect(formatDetails(e)).toBe("wake → some reason");
+    // CTL-419: recipient short ("orch-foo") appended after reason
+    expect(formatDetails(e)).toBe("wake → some reason → orch-foo");
   });
 
   // CTL-350 / CTL-361: 40-char truncation was removed from the formatter — it
@@ -728,7 +729,7 @@ describe("formatDetails (filter.wake)", () => {
       attributes: { "event.name": "filter.wake.orch-foo" },
       body: { payload: { reason: long, source_event_ids: [] } },
     } as unknown as CanonicalEvent;
-    expect(formatDetails(e)).toBe("wake → " + long);
+    expect(formatDetails(e)).toBe("wake → " + long + " → orch-foo");
   });
 
   test("appends (n) when source_event_ids has more than one entry", () => {
@@ -737,7 +738,7 @@ describe("formatDetails (filter.wake)", () => {
       attributes: { "event.name": "filter.wake.orch-foo" },
       body: { payload: { reason: "ci_completed", source_event_ids: ["a", "b", "c"] } },
     } as unknown as CanonicalEvent;
-    expect(formatDetails(e)).toBe("wake → ci_completed (3)");
+    expect(formatDetails(e)).toBe("wake → ci_completed (3) → orch-foo");
   });
 
   test("omits the arrow when reason is empty", () => {
@@ -746,7 +747,7 @@ describe("formatDetails (filter.wake)", () => {
       attributes: { "event.name": "filter.wake.orch-foo" },
       body: { payload: { reason: "", source_event_ids: ["a", "b"] } },
     } as unknown as CanonicalEvent;
-    expect(formatDetails(e)).toBe("wake (2)");
+    expect(formatDetails(e)).toBe("wake (2) → orch-foo");
   });
 
   test("handles the legacy orchestrator.filter.wake.* alias", () => {
@@ -755,7 +756,7 @@ describe("formatDetails (filter.wake)", () => {
       attributes: { "event.name": "orchestrator.filter.wake.orch-foo" },
       body: { payload: { reason: "ticket changed", source_event_ids: [] } },
     } as unknown as CanonicalEvent;
-    expect(formatDetails(e)).toBe("wake → ticket changed");
+    expect(formatDetails(e)).toBe("wake → ticket changed → orch-foo");
   });
 
   // CTL-350: when source_events is populated, render structured triggering
@@ -779,7 +780,8 @@ describe("formatDetails (filter.wake)", () => {
         },
       },
     } as unknown as CanonicalEvent;
-    expect(formatDetails(e)).toBe("wake ← linear.issue.state_changed ADV-87 → Done");
+    // CTL-419: recipient short appended after structured wake line
+    expect(formatDetails(e)).toBe("wake ← linear.issue.state_changed ADV-87 → Done → orch-foo");
   });
 
   test("falls back to reason when source_events is absent", () => {
@@ -788,7 +790,7 @@ describe("formatDetails (filter.wake)", () => {
       attributes: { "event.name": "filter.wake.orch-foo" },
       body: { payload: { reason: "legacy wake reason", source_event_ids: [] } },
     } as unknown as CanonicalEvent;
-    expect(formatDetails(e)).toBe("wake → legacy wake reason");
+    expect(formatDetails(e)).toBe("wake → legacy wake reason → orch-foo");
   });
 
   test("renders PR ref when source_event carries pr", () => {
@@ -822,7 +824,7 @@ describe("formatDetails (filter.wake)", () => {
         },
       },
     } as unknown as CanonicalEvent;
-    expect(formatDetails(e)).toBe("wake ← github.check_suite.completed #501 → failure");
+    expect(formatDetails(e)).toBe("wake ← github.check_suite.completed #501 → failure → orch-foo");
   });
 
   test("appends (N) when source_events has more than one entry", () => {

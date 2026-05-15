@@ -1,6 +1,16 @@
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
 import { inProgressGlyph, sourceIcon, prPrefix } from "./nerd-font.ts";
 
+// CTL-419: extract the short form of a wake recipient session ID.
+// "sess_20260511T203845_16d33281" → "16d33281" (last _-delimited segment).
+// Recipient ID with no underscore (e.g. "orchestrator-1") uses the full value.
+function wakeRecipientShort(eventName: string): string {
+  const sessId = eventName.replace(/^(orchestrator\.)?filter\.wake\./, "");
+  if (!sessId) return "";
+  const parts = sessId.split("_");
+  return parts.length > 1 ? (parts[parts.length - 1] ?? sessId) : sessId;
+}
+
 const SKIP_EVENTS = new Set([
   "session.heartbeat",
   "orchestrator.archived",
@@ -311,6 +321,24 @@ export function formatDetails(event: CanonicalEvent): string {
   // <Text wrap="wrap"> on the DETAILS column handles overflow at render time.
   if (name?.startsWith("filter.wake.") || name?.startsWith("orchestrator.filter.wake.")) {
     const p = payload as Record<string, unknown> | undefined;
+    // CTL-419: append a short recipient identifier to every wake DETAILS cell so
+    // operators can see who is being woken even on narrow terminals where REF clips.
+    const recipientSuffix = ` → ${wakeRecipientShort(name)}`;
+
+    // CTL-419: multi-stale batch path — broker now emits stale_sessions[] when
+    // multiple sessions go stale for the same interest simultaneously.
+    const staleSessions = Array.isArray(p?.["stale_sessions"])
+      ? (p["stale_sessions"] as string[])
+      : null;
+    if (staleSessions !== null && staleSessions.length > 1) {
+      const out = sanitize(
+        `wake → ${staleSessions.length} sessions stale${recipientSuffix}`,
+        "oneline",
+      );
+      detailsCache.set(event, out);
+      return out;
+    }
+
     const sourceEvents = Array.isArray(p?.["source_events"])
       ? (p["source_events"] as Array<Record<string, unknown>>)
       : [];
@@ -331,7 +359,7 @@ export function formatDetails(event: CanonicalEvent): string {
         || typeof state === "boolean";
       const stateSuffix = isPrimitive ? ` → ${String(state)}` : "";
       const countSuffix = sourceEvents.length > 1 ? ` (${sourceEvents.length})` : "";
-      const out = `wake ← ${evName}${ref ? ` ${ref}` : ""}${stateSuffix}${countSuffix}`
+      const out = `wake ← ${evName}${ref ? ` ${ref}` : ""}${stateSuffix}${countSuffix}${recipientSuffix}`
         .replace(/\s+/g, " ")
         .trim();
       const sanitized = sanitize(out, "oneline");
@@ -343,7 +371,9 @@ export function formatDetails(event: CanonicalEvent): string {
     const count = Array.isArray(ids) ? ids.length : 0;
     const reasonShort = sanitize(reasonRaw, "oneline");
     const suffix = count > 1 ? ` (${count})` : "";
-    const out = reasonShort ? `wake → ${reasonShort}${suffix}` : `wake${suffix}`;
+    const out = reasonShort
+      ? `wake → ${reasonShort}${suffix}${recipientSuffix}`
+      : `wake${suffix}${recipientSuffix}`;
     detailsCache.set(event, out);
     return out;
   }
