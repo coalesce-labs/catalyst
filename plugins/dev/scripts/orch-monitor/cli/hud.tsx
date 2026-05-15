@@ -64,7 +64,7 @@ const HELP_LINES = [
   "  S                clear :since window (reset to initial)",
   "  Esc (in /mode)   clear substring filter only",
   "  Esc (in :mode)   cancel/clear query input",
-  "  Esc (top-level)  clear all active filters + close overlays",
+  "  Esc (top-level)  progressively: clear filters → reset scope → resume live tail",
   "",
   "Scope — narrow to related events  (live mode: first press pauses; press again to apply)",
   "  t                scope to all events sharing this event's trace ID",
@@ -338,14 +338,20 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       if (showDashboard) { return; }
       if (showDetail) { setShowDetail(false); return; }
       if (showDslOverlay) { setShowDslOverlay(false); return; }
-      setPivot(null);
-      setFilterText("");
-      setDslState(null);
-      setQueryError(null);
-      // CTL-387: ESC is a full reset — revert :since to the HUD-startup value
-      // so the time window matches what the user launched with.
-      setActiveSinceTs(initSinceTs);
-      setActiveSinceLabel(null);
+      // CTL-423: progressive undo — each Esc press undoes one layer of state.
+      // Layer 5: any active filter or :since window → clear it (CTL-387 reset preserved).
+      if (filterText || dslState || queryError || activeSinceLabel || activeSinceTs !== initSinceTs) {
+        setFilterText("");
+        setDslState(null);
+        setQueryError(null);
+        setActiveSinceTs(initSinceTs);
+        setActiveSinceLabel(null);
+        return;
+      }
+      // Layer 6: scope narrowed → reset scope.
+      if (pivot !== null) { setPivot(null); return; }
+      // Layer 7: paused → resume live tail.
+      if (!autoFollow) { jumpToBottom(); return; }
       return;
     }
     if (input === "q" || (key.ctrl && input === "c")) { exit(); return; }
