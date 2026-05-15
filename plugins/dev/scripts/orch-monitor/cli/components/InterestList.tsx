@@ -13,7 +13,7 @@ interface InterestListProps {
 }
 
 const COL_ORCH = 25;
-const COL_SESSION = 28;
+const COL_WORKER = 28;
 const COL_TYPE = 16;
 const COL_WATCHES = 28;
 
@@ -37,7 +37,7 @@ export function InterestList({
   cols,
   brokerState,
 }: InterestListProps) {
-  const promptW = Math.max(8, cols - COL_ORCH - COL_SESSION - COL_TYPE - COL_WATCHES - 5);
+  const promptW = Math.max(8, cols - COL_ORCH - COL_WORKER - COL_TYPE - COL_WATCHES - 5);
   const visible = interests.slice(scrollOffset, scrollOffset + visibleRows);
   const hasProse = interests.some((i) => i.interest_type === null);
   // proseEnabled is only false (not undefined) when the broker has explicitly written the field.
@@ -47,7 +47,7 @@ export function InterestList({
     <Box flexDirection="column" flexGrow={1}>
       <Box flexDirection="row">
         <Box width={COL_ORCH} flexShrink={0} marginRight={1}><Text bold color="cyan">ORCHESTRATOR</Text></Box>
-        <Box width={COL_SESSION} flexShrink={0} marginRight={1}><Text bold color="cyan">SESSION</Text></Box>
+        <Box width={COL_WORKER} flexShrink={0} marginRight={1}><Text bold color="cyan">WORKER</Text></Box>
         <Box width={COL_TYPE} flexShrink={0} marginRight={1}><Text bold color="cyan">TYPE</Text></Box>
         <Box width={COL_WATCHES} flexShrink={0} marginRight={1}><Text bold color="cyan">WATCHES</Text></Box>
         <Box flexGrow={1}>
@@ -64,7 +64,10 @@ export function InterestList({
         const selected = realIdx === selectedIndex;
         const isInactiveProse = i.interest_type === null && proseOff;
         const orch = truncateRight(i.orchestrator ?? "—", COL_ORCH);
-        const session = truncateRight(i.key, COL_SESSION);
+        // Show the session ID that will actually receive the wake event.
+        // When session_id equals orchestrator (orchestrator-level interests), label it "orchestrator".
+        const workerRaw = i.session_id === i.orchestrator ? "orchestrator" : (i.session_id ?? i.key);
+        const worker = truncateRight(workerRaw, COL_WORKER);
         const type = truncateRight(interestTypeLabel(i.interest_type), COL_TYPE);
         const watches = truncateRight(interestWatches(i), COL_WATCHES);
         const prompt = truncateRight(i.prompt || "(deterministic)", promptW);
@@ -73,8 +76,8 @@ export function InterestList({
             <Box width={COL_ORCH} flexShrink={0} marginRight={1}>
               <Text dimColor={isInactiveProse && !selected} color={selected ? "black" : "white"} inverse={selected}>{orch}</Text>
             </Box>
-            <Box width={COL_SESSION} flexShrink={0} marginRight={1}>
-              <Text dimColor={isInactiveProse && !selected} color={selected ? "black" : "magenta"} inverse={selected}>{session}</Text>
+            <Box width={COL_WORKER} flexShrink={0} marginRight={1}>
+              <Text dimColor={isInactiveProse && !selected} color={selected ? "black" : "magenta"} inverse={selected}>{worker}</Text>
             </Box>
             <Box width={COL_TYPE} flexShrink={0} marginRight={1}>
               <Text dimColor={isInactiveProse && !selected} color={i.interest_type ? "green" : "yellow"} inverse={selected}>{type}</Text>
