@@ -914,6 +914,187 @@ describe("backward compat: pr_lifecycle routing unchanged in broker", () => {
     }, getInterests());
     expect(matches).toHaveLength(1);
     expect(matches[0].reason).toContain("CI checks passing");
+    expect(matches[0].wakeStateKey).toBe("ci_conclusion:502");
+    expect(matches[0].wakeStateValue).toBe("success");
+  });
+
+  test("tryDeterministicRoute returns wakeStateKey/wakeStateValue for check_suite failure", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-bc-fail",
+      detail: {
+        interest_id: "ci-watch-fail",
+        notify_event: "filter.wake.ci-watch-fail",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [503],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+    const matches = tryDeterministicRoute({
+      event: "github.check_suite.completed",
+      detail: { prNumbers: [503], conclusion: "failure" },
+    }, getInterests());
+    expect(matches).toHaveLength(1);
+    expect(matches[0].wakeStateKey).toBe("ci_conclusion:503");
+    expect(matches[0].wakeStateValue).toBe("failure");
+  });
+
+  test("non-CI events have wakeStateKey null (always emit)", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-bc-push",
+      detail: {
+        interest_id: "ci-watch-push",
+        notify_event: "filter.wake.ci-watch-push",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [504],
+        repo: "org/repo",
+        base_branches: [{ pr: 504, base: "main" }],
+        persistent: true,
+      },
+    });
+    const matches = tryDeterministicRoute({
+      event: "github.push",
+      scope: { ref: "refs/heads/main" },
+      detail: {},
+    }, getInterests());
+    expect(matches).toHaveLength(1);
+    expect(matches[0].wakeStateKey).toBeNull();
+  });
+});
+
+// ─── CTL-407: suppress redundant wakes when downstream state unchanged ────────
+
+describe("CTL-407: suppress redundant wakes when downstream state unchanged", () => {
+  function countWakesInLog(notifyEvent) {
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return 0;
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+    return lines.filter((l) => {
+      try {
+        const evt = JSON.parse(l);
+        return evt.attributes?.["event.name"] === notifyEvent;
+      } catch { return false; }
+    }).length;
+  }
+
+  function makeCheckSuiteEvent(prNumber, conclusion) {
+    return {
+      id: `cs-${prNumber}-${conclusion}-${Math.random().toString(36).slice(2)}`,
+      ts: new Date().toISOString(),
+      event: "github.check_suite.completed",
+      detail: { prNumbers: [prNumber], conclusion },
+    };
+  }
+
+  test("3 identical check_suite.completed success events → 1 wake emitted", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-407-1",
+      detail: {
+        interest_id: "suppress-test-1",
+        notify_event: "filter.wake.suppress-test-1",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [601],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    processEvent(makeCheckSuiteEvent(601, "success"));
+    processEvent(makeCheckSuiteEvent(601, "success"));
+    processEvent(makeCheckSuiteEvent(601, "success"));
+
+    expect(countWakesInLog("filter.wake.suppress-test-1")).toBe(1);
+  });
+
+  test("check_suite failure then success → 2 wakes emitted (state changed)", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-407-2",
+      detail: {
+        interest_id: "suppress-test-2",
+        notify_event: "filter.wake.suppress-test-2",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [602],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    processEvent(makeCheckSuiteEvent(602, "failure"));
+    processEvent(makeCheckSuiteEvent(602, "failure"));
+    processEvent(makeCheckSuiteEvent(602, "success"));
+
+    expect(countWakesInLog("filter.wake.suppress-test-2")).toBe(2);
+  });
+
+  test("suppress_identical_wakes: false → all 3 wakes emitted", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-407-3",
+      detail: {
+        interest_id: "suppress-test-3",
+        notify_event: "filter.wake.suppress-test-3",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [603],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+        suppress_identical_wakes: false,
+      },
+    });
+
+    processEvent(makeCheckSuiteEvent(603, "success"));
+    processEvent(makeCheckSuiteEvent(603, "success"));
+    processEvent(makeCheckSuiteEvent(603, "success"));
+
+    expect(countWakesInLog("filter.wake.suppress-test-3")).toBe(3);
+  });
+
+  test("suppress_identical_wakes defaults to true on pr_lifecycle interests", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-407-4",
+      detail: {
+        interest_id: "suppress-test-4",
+        notify_event: "filter.wake.suppress-test-4",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [604],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+    const reg = getInterests().get("suppress-test-4");
+    expect(reg.suppress_identical_wakes).toBe(true);
+    expect(reg.last_wake_state).toEqual({});
+  });
+
+  test("last_wake_state updated after first emission", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-407-5",
+      detail: {
+        interest_id: "suppress-test-5",
+        notify_event: "filter.wake.suppress-test-5",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [605],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    processEvent(makeCheckSuiteEvent(605, "success"));
+
+    const reg = getInterests().get("suppress-test-5");
+    expect(reg.last_wake_state["ci_conclusion:605"]).toBe("success");
   });
 });
 
