@@ -383,13 +383,20 @@ cmd_build_orchestrator_filter() {
   #      orch-id clause used to over-match ~60-70% of github webhooks (CTL-370).
   #   2. worker-lifecycle events scoped by catalyst.worker.ticket.
   #   3. github events scoped by branch ref prefix (e.g. push events).
-  #   4. github events scoped to a known PR number (single-PR webhooks).
-  #   5. check_suite / workflow_run events whose prNumbers intersect.
-  #   6. linear events scoped to an in-orch ticket.
+  #   4. github.pr.* events attributed to this orch via head-ref resolution —
+  #      NOT guarded by the orchestrator. prefix so PR-merged / PR-opened events
+  #      reach the consumer even when no PR numbers are yet recorded in signal
+  #      files. The webhook handler stamps catalyst.orchestrator.id on PR events
+  #      by resolving the worker head-ref. Scoped to github.pr.* only (not all
+  #      github.*) to avoid re-introducing the CTL-370 over-broad match. (CTL-398)
+  #   5. github events scoped to a known PR number (single-PR webhooks).
+  #   6. check_suite / workflow_run events whose prNumbers intersect.
+  #   7. linear events scoped to an in-orch ticket.
   printf '(\n'
   printf '  (.attributes."catalyst.orchestrator.id" == "%s" and (.attributes."event.name" // "" | startswith("orchestrator.")))\n' "$orch_name"
   printf '  or ((.attributes."catalyst.worker.ticket" // "") | IN(%s))\n' "$ticket_stream"
   printf '  or ((.attributes."vcs.ref.name" // "") | startswith("refs/heads/%s-"))\n' "$orch_name"
+  printf '  or (.attributes."catalyst.orchestrator.id" == "%s" and (.attributes."event.name" // "" | startswith("github.pr.")))\n' "$orch_name"
   if [[ -n "$pr_stream" ]]; then
     printf '  or ((.attributes."vcs.pr.number" // -1) | IN(%s))\n' "$pr_stream"
     printf '  or ((.body.payload.prNumbers // []) | any(IN(%s)))\n' "$pr_stream"
