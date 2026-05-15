@@ -230,38 +230,41 @@ export function PromptInput({
   const countStr = formatEventCount(filteredCount, totalCount);
 
   return (
-    <Box borderStyle="round" borderColor={focused ? "cyan" : "gray"} paddingX={1} flexDirection="row">
-      {mode === "filter" && <Text color="yellow">{">"}</Text>}
-      {mode === "query" && <Text color="yellow">{"~"}</Text>}
-      {focused && <Text>{" "}</Text>}
-      {focused ? (
-        <>
-          <Text>{before}</Text>
-          <Text inverse>{atCursor}</Text>
-          <Text>{after}</Text>
-        </>
-      ) : (
-        <Text dimColor>{statusMsg ?? "press / to filter, : to query"}</Text>
-      )}
-      <Box flexGrow={1} marginLeft={2}>
-        {error !== null ? (
-          <Text color="red" wrap="truncate-end">{error}</Text>
+    <Box flexDirection="column">
+      <Box borderStyle="round" borderColor={focused ? "cyan" : "gray"} paddingX={1} flexDirection="row">
+        {mode === "query" ? <Text color="yellow">{"~"}</Text> : <Text color="yellow">{">"}</Text>}
+        <Text>{" "}</Text>
+        {focused ? (
+          <>
+            <Text>{before}</Text>
+            <Text inverse>{atCursor}</Text>
+            <Text>{after}</Text>
+          </>
         ) : (
-          <Text dimColor wrap="truncate-end">{hints}</Text>
+          <Text dimColor>{statusMsg ?? "filter or query…"}</Text>
         )}
       </Box>
-      {focused && statusMsg !== null && error === null && (
-        <Text color="yellow">{` ${statusMsg} `}</Text>
-      )}
-      <Text dimColor>{` ${countStr}`}</Text>
-      {chips.map((chip, i) => (
-        <Text key={i} color={chip.color}>{` [${chip.label}]`}</Text>
-      ))}
-      {autoFollow
-        ? <Text color="green">{" [LIVE]"}</Text>
-        : <Text dimColor>{" [PAUSED — G to follow]"}</Text>
-      }
-      {wrapMode === 'wrap' && <Text color="cyan">{" [WRAP]"}</Text>}
+      <Box flexDirection="row" paddingX={1}>
+        <Box flexGrow={1}>
+          {error !== null ? (
+            <Text color="red" wrap="truncate-end">{error}</Text>
+          ) : (
+            <Text dimColor wrap="truncate-end">{hints}</Text>
+          )}
+        </Box>
+        {focused && statusMsg !== null && error === null && (
+          <Text color="yellow">{` ${statusMsg} `}</Text>
+        )}
+        <Text dimColor>{` ${countStr}`}</Text>
+        {chips.map((chip, i) => (
+          <Text key={i} color={chip.color}>{` [${chip.label}]`}</Text>
+        ))}
+        {autoFollow
+          ? <Text color="green">{" [LIVE]"}</Text>
+          : <Text dimColor>{" [PAUSED — G to follow]"}</Text>
+        }
+        {wrapMode === 'wrap' && <Text color="cyan">{" [WRAP]"}</Text>}
+      </Box>
     </Box>
   );
 }
