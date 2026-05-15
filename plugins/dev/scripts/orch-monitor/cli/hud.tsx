@@ -183,10 +183,10 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // CTL-392: full-screen dashboard overlay that takes over the event list area.
   const [showDashboard, setShowDashboard] = useState(false);
 
-  // chrome = header + prompt-box(3 rows: top-border + content + bottom-border) + dsl overlay (if any).
+  // chrome = header + prompt-box(3 rows: top-border + content + bottom-border) + status-line(1) + dsl overlay (if any).
   // CTL-386: replaced separator(1) + filter(1) + query(1) with a single rounded PromptInput box(3).
-  // Net row count is unchanged — the box border replaces the standalone separator.
-  const chromeRows = headerRows + 3 + overlayHeight;
+  // CTL-417: split PromptInput into input-row(3) + status-row(1) = 4 rows total.
+  const chromeRows = headerRows + 4 + overlayHeight;
   const visibleRows = Math.max(1, layoutRows - chromeRows);
 
   const {
