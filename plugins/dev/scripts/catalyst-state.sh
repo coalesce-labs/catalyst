@@ -158,6 +158,7 @@ __orch_canonical_for() {
     worker-phase-advanced)   echo "orchestrator.worker.phase_advanced worker phase_advanced INFO" ;;
     attention-raised)        echo "orchestrator.attention.raised attention raised WARN" ;;
     attention-resolved)      echo "orchestrator.attention.resolved attention resolved INFO" ;;
+    orchestrator-status)     echo "orchestrator.status orchestrator status INFO" ;;
     archive)                 echo "orchestrator.archived orchestrator archived INFO" ;;
     # Filter daemon lifecycle (CTL-331): keep the bare filter.* name so the HUD
     # can label them; the wildcard fallthrough would otherwise rename them

@@ -459,6 +459,7 @@ fi
 
 ```bash
 SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
+ORCH_STATUS_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-status.sh"
 if [[ -x "$SESSION_SCRIPT" ]]; then
   CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "orchestrate" \
     --label "${ORCH_NAME}" \
@@ -471,6 +472,16 @@ fi
 ### Phase 3: Dispatch Workers
 
 For each provisioned worker worktree, dispatch a `/oneshot` session.
+
+**Emit dispatching status (CTL-405):** Before launching workers, announce the phase:
+
+```bash
+TOTAL_WORKERS=$(jq -r '.progress.totalTickets // 0' "${ORCH_DIR}/state.json" 2>/dev/null || echo 0)
+[[ -x "$ORCH_STATUS_SCRIPT" ]] && "$ORCH_STATUS_SCRIPT" emit \
+  --orch "${ORCH_NAME}" --phase dispatching --wave "${CURRENT_WAVE:-1}" \
+  --total "$TOTAL_WORKERS" \
+  --summary "wave ${CURRENT_WAVE:-1} dispatching" 2>/dev/null || true
+```
 
 **Preferred entrypoint — `orchestrate-dispatch-next` (CTL-116):**
 
@@ -743,6 +754,13 @@ Update the signal file at each phase transition using the worker-signal.json sch
 if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
   "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "monitoring" --phase 4
 fi
+ACTIVE_COUNT=$(jq -rs '[.[] | select(.status != "done" and .status != "failed")] | length' \
+  "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo 0)
+TOTAL_COUNT=$(jq -rs 'length' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo 0)
+[[ -x "$ORCH_STATUS_SCRIPT" ]] && "$ORCH_STATUS_SCRIPT" emit \
+  --orch "${ORCH_NAME}" --phase monitoring --wave "${CURRENT_WAVE:-1}" \
+  --active "$ACTIVE_COUNT" --total "$TOTAL_COUNT" \
+  --summary "wave ${CURRENT_WAVE:-1} monitoring (${ACTIVE_COUNT}/${TOTAL_COUNT} active)" 2>/dev/null || true
 ```
 
 **Register with catalyst-broker daemon (CTL-257, updated CTL-303, CTL-357):** When
@@ -1784,6 +1802,9 @@ fi
 if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
   "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "verifying" --phase 5
 fi
+[[ -x "$ORCH_STATUS_SCRIPT" ]] && "$ORCH_STATUS_SCRIPT" emit \
+  --orch "${ORCH_NAME}" --phase reviewing --wave "${CURRENT_WAVE:-1}" \
+  --summary "wave ${CURRENT_WAVE:-1} post-merge verification" 2>/dev/null || true
 ```
 
 **Context (CTL-130, updated by CTL-252):** Workers actively merge their own PRs via `gh pr
@@ -1927,6 +1948,11 @@ When ALL tickets in the current wave are merged and verified:
   --argjson wave $NEXT_WAVE \
   --argjson tickets "$(printf '%s\n' "${NEXT_WAVE_TICKETS[@]}" | jq -R . | jq -sc .)" \
   '{ts: $ts, orchestrator: $orch, worker: null, event: "wave-started", detail: {wave: $wave, tickets: $tickets}}')"
+NEXT_TOTAL=${#NEXT_WAVE_TICKETS[@]}
+[[ -x "$ORCH_STATUS_SCRIPT" ]] && "$ORCH_STATUS_SCRIPT" emit \
+  --orch "${ORCH_NAME}" --phase dispatching --wave "$NEXT_WAVE" \
+  --total "$NEXT_TOTAL" \
+  --summary "wave ${NEXT_WAVE} dispatching (${NEXT_TOTAL} tickets)" 2>/dev/null || true
 ```
 
 ### Phase 7: Completion
