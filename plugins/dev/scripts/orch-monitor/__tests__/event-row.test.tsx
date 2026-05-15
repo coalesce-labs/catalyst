@@ -29,7 +29,7 @@ const longDetailsEvent: CanonicalEvent = {
     "service.version": "0.0.0",
   },
   attributes: {
-    "event.name": "github.pr.merged",
+    "event.name": "orchestrator.worker.done",
     "vcs.repository.name": "coalesce-labs/catalyst",
     "vcs.pr.number": 501,
   },

@@ -86,9 +86,9 @@ describe("computeDetailLayout", () => {
     expect(r.listScrollOffset).toBe(20);
   });
 
-  test("selected falls off the bottom of the smaller list: recenter", () => {
-    // Before detail opens, scrollOffset=20 was fine for visibleRows=93 list with sel=70.
-    // After detail opens, listRows=5, so [20, 25) does NOT contain 70 → recenter.
+  test("selected falls off the smaller list: scroll stays, detail pane provides context", () => {
+    // CTL-420: detail pane open — keep current scroll rather than pinning selection
+    // at row 0. The detail pane already shows the selected event's content.
     const r = computeDetailLayout({
       visibleRows: 93,
       inDetailMode: true,
@@ -98,12 +98,8 @@ describe("computeDetailLayout", () => {
       currentScrollOffset: 20,
     });
     expect(r.listRows).toBe(5);
-    // recenter target = selectedIndex - floor(listRows/2) = 70 - 2 = 68
-    // maxOffset = 200 - 5 = 195 → 68 stays
-    expect(r.listScrollOffset).toBe(68);
-    // selected (70) lands in [68, 73) ✓
-    expect(70).toBeGreaterThanOrEqual(r.listScrollOffset);
-    expect(70).toBeLessThan(r.listScrollOffset + r.listRows);
+    // scroll stays at 20 (clamped to maxOffset=195, which 20 is below)
+    expect(r.listScrollOffset).toBe(20);
   });
 
   test("scrollOffset clamped to maxOffset when totalEvents is small", () => {

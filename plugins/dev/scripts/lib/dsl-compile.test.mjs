@@ -32,8 +32,8 @@ import {
 
 describe("CANONICAL_FIELDS whitelist", () => {
   test("contains the documented count of canonical fields", () => {
-    expect(CANONICAL_FIELDS.length).toBe(32);
-    expect(FIELD_PATH_SET.size).toBe(32);
+    expect(CANONICAL_FIELDS.length).toBe(38);
+    expect(FIELD_PATH_SET.size).toBe(38);
   });
 
   test("includes core attribute paths", () => {
@@ -87,6 +87,99 @@ describe("validateField", () => {
     expect(validateField(null).ok).toBe(false);
     expect(validateField(undefined).ok).toBe(false);
     expect(validateField(42).ok).toBe(false);
+  });
+});
+
+// ─── CTL-415 — type-operator validation ──────────────────────────────────────
+
+describe("validateField type-operator validation (CTL-415)", () => {
+  const TS = "2026-05-14T22:43:48.461Z";
+
+  test("accepts range operator on ts (time field)", () => {
+    expect(validateField("ts", { operator: "gte", value: TS }).ok).toBe(true);
+    expect(validateField("ts", { operator: "lt", value: TS }).ok).toBe(true);
+  });
+
+  test("accepts range operator on observedTs (time field)", () => {
+    expect(validateField("observedTs", { operator: "gte", value: TS }).ok).toBe(true);
+  });
+
+  test("accepts range operator on numeric field", () => {
+    expect(validateField("severityNumber", { operator: "gte", value: 9 }).ok).toBe(true);
+    expect(validateField('attributes."vcs.pr.number"', { operator: "gt", value: 300 }).ok).toBe(true);
+  });
+
+  test("rejects range operator on enum field regardless of value", () => {
+    const r = validateField("severityText", { operator: "gte", value: TS });
+    expect(r.ok).toBe(false);
+    expect(r.suggestion).toBe("ts");
+    expect(r.error).toContain("enum");
+  });
+
+  test("rejects range operator on enum field with non-timestamp value", () => {
+    const r = validateField("severityText", { operator: "gt", value: "INFO" });
+    expect(r.ok).toBe(false);
+    expect(r.suggestion).toBe("ts");
+  });
+
+  test("rejects timestamp value on non-time string field (traceId)", () => {
+    const r = validateField("traceId", { operator: "gte", value: TS });
+    expect(r.ok).toBe(false);
+    expect(r.suggestion).toBe("ts");
+    expect(r.error).toContain("timestamp");
+  });
+
+  test("rejects timestamp value on non-time string field (spanId)", () => {
+    const r = validateField("spanId", { operator: "gte", value: TS });
+    expect(r.ok).toBe(false);
+    expect(r.suggestion).toBe("ts");
+  });
+
+  test("eq operator bypasses type check — any field may use eq", () => {
+    expect(validateField("severityText", { operator: "eq", value: TS }).ok).toBe(true);
+  });
+
+  test("no opts — backward-compatible (whitelist-only check)", () => {
+    expect(validateField("severityText").ok).toBe(true);
+    expect(validateField("ts").ok).toBe(true);
+  });
+});
+
+describe("compileJq type-operator rejection (CTL-415)", () => {
+  const TS = "2026-05-14T22:43:48.461Z";
+
+  test("rejects timestamp gte on severityText with suggestion 'ts'", () => {
+    let err;
+    try { compileJq({ field: "severityText", gte: TS }); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(DslError);
+    expect(err.suggestion).toBe("ts");
+    expect(err.message).toContain("enum");
+  });
+
+  test("rejects timestamp gte on traceId", () => {
+    let err;
+    try { compileJq({ field: "traceId", gte: TS }); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(DslError);
+    expect(err.suggestion).toBe("ts");
+  });
+
+  test("rejects timestamp gte on spanId", () => {
+    let err;
+    try { compileJq({ field: "spanId", gte: TS }); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(DslError);
+    expect(err.suggestion).toBe("ts");
+  });
+
+  test("accepts timestamp gte on ts", () => {
+    expect(() => compileJq({ field: "ts", gte: TS })).not.toThrow();
+  });
+
+  test("accepts timestamp gte on observedTs", () => {
+    expect(() => compileJq({ field: "observedTs", gte: TS })).not.toThrow();
+  });
+
+  test("accepts non-timestamp gte on a string field (traceId)", () => {
+    expect(() => compileJq({ field: "traceId", gt: "" })).not.toThrow();
   });
 });
 
