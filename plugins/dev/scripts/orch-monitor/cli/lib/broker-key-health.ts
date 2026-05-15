@@ -38,6 +38,8 @@ export interface BrokerState extends BrokerKeyHealth {
   startedAt?: string;
   // CTL-403: sessions currently blocking in a wait-for loop.
   waitingSessions?: WaitingSession[];
+  /** CTL-421: whether CATALYST_BROKER_PROSE_ENABLED=1 was set when the broker started. */
+  proseEnabled?: boolean;
 }
 
 export type BrokerInterestStatus = "ok" | "startup" | "degraded" | "unknown";
@@ -120,6 +122,7 @@ export function readBrokerState(path?: string): BrokerState | null {
         }))
         .filter((s) => s.sessionId && s.timeoutAt);
     }
+    if (typeof obj.proseEnabled === "boolean") result.proseEnabled = obj.proseEnabled;
     return result;
   } catch {
     return null;

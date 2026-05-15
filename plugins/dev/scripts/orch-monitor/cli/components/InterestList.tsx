@@ -38,6 +38,9 @@ export function InterestList({
 }: InterestListProps) {
   const promptW = Math.max(8, cols - COL_ORCH - COL_TYPE - COL_WATCHES - 4);
   const visible = interests.slice(scrollOffset, scrollOffset + visibleRows);
+  const hasProse = interests.some((i) => i.interest_type === null);
+  // proseEnabled is only false (not undefined) when the broker has explicitly written the field.
+  const proseOff = hasProse && brokerState?.proseEnabled === false;
 
   return (
     <Box flexDirection="column" flexGrow={1}>
@@ -45,7 +48,10 @@ export function InterestList({
         <Box width={COL_ORCH} flexShrink={0} marginRight={1}><Text bold color="cyan">ORCHESTRATOR</Text></Box>
         <Box width={COL_TYPE} flexShrink={0} marginRight={1}><Text bold color="cyan">TYPE</Text></Box>
         <Box width={COL_WATCHES} flexShrink={0} marginRight={1}><Text bold color="cyan">WATCHES</Text></Box>
-        <Box flexGrow={1}><Text bold color="cyan">PROMPT</Text></Box>
+        <Box flexGrow={1}>
+          <Text bold color="cyan">PROMPT</Text>
+          {proseOff && <Text color="yellow">  [prose: OFF]</Text>}
+        </Box>
       </Box>
       <Text dimColor>{"─".repeat(Math.max(0, cols - 1))}</Text>
       {visible.length === 0 && (
@@ -54,6 +60,7 @@ export function InterestList({
       {visible.map((i, idx) => {
         const realIdx = scrollOffset + idx;
         const selected = realIdx === selectedIndex;
+        const isInactiveProse = i.interest_type === null && proseOff;
         const orch = truncateRight(i.orchestrator ?? "—", COL_ORCH);
         const type = truncateRight(interestTypeLabel(i.interest_type), COL_TYPE);
         const watches = truncateRight(interestWatches(i), COL_WATCHES);
@@ -61,13 +68,13 @@ export function InterestList({
         return (
           <Box key={`${i.key}-${realIdx}`} flexDirection="row">
             <Box width={COL_ORCH} flexShrink={0} marginRight={1}>
-              <Text color={selected ? "black" : "white"} inverse={selected}>{orch}</Text>
+              <Text dimColor={isInactiveProse && !selected} color={selected ? "black" : "white"} inverse={selected}>{orch}</Text>
             </Box>
             <Box width={COL_TYPE} flexShrink={0} marginRight={1}>
-              <Text color={i.interest_type ? "green" : "yellow"} inverse={selected}>{type}</Text>
+              <Text dimColor={isInactiveProse && !selected} color={i.interest_type ? "green" : "yellow"} inverse={selected}>{type}</Text>
             </Box>
             <Box width={COL_WATCHES} flexShrink={0} marginRight={1}>
-              <Text color={selected ? "black" : "white"} inverse={selected}>{watches}</Text>
+              <Text dimColor={isInactiveProse && !selected} color={selected ? "black" : "white"} inverse={selected}>{watches}</Text>
             </Box>
             <Box flexGrow={1}>
               <Text dimColor={!selected} inverse={selected}>{prompt}</Text>

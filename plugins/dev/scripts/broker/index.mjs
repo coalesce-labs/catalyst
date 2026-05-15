@@ -1838,6 +1838,8 @@ export function buildBrokerState({ probe } = {}) {
     lastRegisterAt,
     // CTL-403: active wait-loop sessions (empty array when no active waits).
     waitingSessions: activeWaiting,
+    // CTL-421: expose prose enabled state so the HUD can badge inactive prose interests.
+    proseEnabled: process.env.CATALYST_BROKER_PROSE_ENABLED === "1",
     keyHealth: {
       groq: {
         present: GROQ_KEY_SOURCE !== null,
