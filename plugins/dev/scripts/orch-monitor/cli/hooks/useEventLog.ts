@@ -35,7 +35,8 @@ export function useEventLog({ predicate = "", repoFilter = "", sinceTs }: UseEve
         .filter((e) => !shouldSkipEvent(e));
 
       if (sinceTs) {
-        initial = initial.filter((e) => e.ts >= sinceTs);
+        const sinceMs = new Date(sinceTs).getTime();
+        initial = initial.filter((e) => new Date(e.ts).getTime() >= sinceMs);
       }
       if (repoFilter) {
         initial = initial.filter((e) => {
@@ -55,7 +56,7 @@ export function useEventLog({ predicate = "", repoFilter = "", sinceTs }: UseEve
           try {
             const event = JSON.parse(line) as CanonicalEvent;
             if (shouldSkipEvent(event)) return;
-            if (sinceTs && event.ts < sinceTs) return;
+            if (sinceTs && new Date(event.ts).getTime() < new Date(sinceTs).getTime()) return;
             if (repoFilter) {
               const repo = event.attributes["vcs.repository.name"] ?? "";
               if (repo && !repo.includes(repoFilter)) return;
