@@ -47,6 +47,7 @@ CLI_ENTRIES=(
   "workflow-context.sh:workflow-context"
   "catalyst-hud:catalyst-hud"
   "catalyst-hud-classic.sh:catalyst-hud-classic"
+  "../hooks/emit-lifecycle-event.sh:emit-lifecycle-event"
 )
 
 # Marker embedded in generated wrapper shims so the ~/.local/bin sweep can

@@ -234,6 +234,26 @@ export function appendEvent(event) {
   appendFileSync(logPath, JSON.stringify(canonical) + "\n");
 }
 
+// CTL-406: idempotency cache for filter.wake emissions. Prevents the same
+// (source_event_id, interest_id) pair from producing more than one wake within
+// the TTL window — guards against double-ingest of the same log line and
+// intra-call duplicate matches across routing functions.
+const _emittedWakeCache = new Map(); // key -> expiry timestamp (ms)
+const WAKE_CACHE_TTL_MS = 60_000;
+
+function shouldSkipWake(sourceEventId, interestId) {
+  if (!sourceEventId) return false;
+  const key = `${sourceEventId}:${interestId}`;
+  const expiry = _emittedWakeCache.get(key);
+  if (expiry !== undefined && Date.now() < expiry) return true;
+  _emittedWakeCache.set(key, Date.now() + WAKE_CACHE_TTL_MS);
+  return false;
+}
+
+export function __clearEmittedWakeCacheForTest() {
+  _emittedWakeCache.clear();
+}
+
 // --- Interest table ---
 const interests = new Map();
 
@@ -436,6 +456,10 @@ export function getLastHeartbeat() {
 export function clearLastHeartbeat() {
   lastHeartbeat.clear();
   workerToOrchestrator.clear();
+}
+
+export function getWorkerToOrchestrator() {
+  return workerToOrchestrator;
 }
 
 // CTL-336: read name/payload/orchestrator from canonical OTel-format events
@@ -678,11 +702,13 @@ export function handleAgentCheckout(event) {
 }
 
 export function handleAgentHeartbeat(event) {
-  const sessionId = event.session ?? event.worker ?? event.orchestrator;
+  const sessionId =
+    event.session ?? event.worker ?? event.orchestrator ??
+    event.attributes?.["catalyst.session.id"];
   if (!sessionId) return;
   const existing = lastHeartbeat.get(sessionId);
   lastHeartbeat.set(sessionId, { ts: Date.now(), notified: existing?.notified ?? false });
-  const orchId = event.orchestrator;
+  const orchId = event.orchestrator ?? event.attributes?.["catalyst.orchestrator.id"];
   if (orchId && sessionId !== orchId) {
     workerToOrchestrator.set(sessionId, orchId);
   }
@@ -1124,6 +1150,9 @@ export function shouldSkipEvent(event) {
   const name = getEventName(event);
   if (name.startsWith("filter.")) return true;
   if (name.startsWith("broker.daemon")) return true;
+  // CTL-401: liveness pings — handled earlier in processEvent, skip here too
+  // so they never reach the Groq queue even if the early-return path changes.
+  if (name === "session.heartbeat") return true;
   return false;
 }
 
@@ -1451,6 +1480,13 @@ export function processEvent(event) {
     handleAgentHeartbeat(event);
     return;
   }
+  // CTL-401: route canonical session.heartbeat to the same watchdog liveness
+  // handler. The session ID lives in attributes["catalyst.session.id"] rather
+  // than the top-level flat field; handleAgentHeartbeat now reads both shapes.
+  if (name === "session.heartbeat") {
+    handleAgentHeartbeat(event);
+    return;
+  }
 
   if (shouldSkipEvent(event)) return;
 
@@ -1481,6 +1517,11 @@ export function processEvent(event) {
   for (const m of directMatches) {
     const reg = interests.get(m.interestId);
     if (!reg) continue;
+    // CTL-406: skip duplicate (source_event_id, interest_id) pairs.
+    if (shouldSkipWake(m.sourceEventId, m.interestId)) {
+      log.debug({ interestId: m.interestId, sourceEventId: m.sourceEventId }, "dedup: skipping duplicate wake");
+      continue;
+    }
     appendEvent({
       event: reg.notify_event,
       orchestrator: reg.orchestrator ?? m.interestId,

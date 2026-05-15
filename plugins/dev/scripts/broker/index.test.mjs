@@ -19,6 +19,7 @@ import {
   getInterests,
   clearInterests,
   getLastHeartbeat,
+  getWorkerToOrchestrator,
   clearLastHeartbeat,
   loadPersistedInterests,
   processEvent,
@@ -30,6 +31,7 @@ import {
   writeBrokerStateFile,
   __getPendingBatchForTest,
   __clearPendingBatchForTest,
+  __clearEmittedWakeCacheForTest,
 } from "./index.mjs";
 import {
   openBrokerStateDb,
@@ -51,6 +53,7 @@ beforeEach(() => {
   openBrokerStateDb(join(tmpDir, "test.db"));
   clearInterests();
   clearLastHeartbeat();
+  __clearEmittedWakeCacheForTest();
 });
 
 afterEach(() => {
@@ -479,6 +482,55 @@ describe("agent.heartbeat", () => {
   });
 });
 
+// CTL-401: canonical session.heartbeat routing ─────────────────────────────
+
+describe("session.heartbeat (canonical OTel)", () => {
+  test("handleAgentHeartbeat reads session ID from canonical attributes", () => {
+    handleAgentHeartbeat({
+      attributes: { "event.name": "session.heartbeat", "catalyst.session.id": "sess-canonical" },
+    });
+    expect(getLastHeartbeat().has("sess-canonical")).toBe(true);
+  });
+
+  test("handleAgentHeartbeat reads orchestrator ID from canonical attributes", () => {
+    handleAgentHeartbeat({
+      attributes: {
+        "event.name": "session.heartbeat",
+        "catalyst.session.id": "sess-w",
+        "catalyst.orchestrator.id": "orch-x",
+      },
+    });
+    expect(getWorkerToOrchestrator().get("sess-w")).toBe("orch-x");
+  });
+
+  test("flat session field still takes priority over canonical attribute", () => {
+    handleAgentHeartbeat({
+      session: "sess-flat",
+      attributes: { "catalyst.session.id": "sess-attr" },
+    });
+    expect(getLastHeartbeat().has("sess-flat")).toBe(true);
+    expect(getLastHeartbeat().has("sess-attr")).toBe(false);
+  });
+
+  test("processEvent routes session.heartbeat to lastHeartbeat", () => {
+    processEvent({
+      attributes: { "event.name": "session.heartbeat", "catalyst.session.id": "sess-proc-canonical" },
+      resource: { "service.name": "catalyst.session" },
+      body: { payload: null },
+    });
+    expect(getLastHeartbeat().has("sess-proc-canonical")).toBe(true);
+  });
+
+  test("shouldSkipEvent returns true for session.heartbeat canonical", () => {
+    expect(
+      shouldSkipEvent({
+        attributes: { "event.name": "session.heartbeat" },
+        resource: { "service.name": "catalyst.session" },
+      }),
+    ).toBe(true);
+  });
+});
+
 // ─── processEvent dispatching ────────────────────────────────────────────────
 
 describe("processEvent dispatches agent identity events", () => {
@@ -549,6 +601,93 @@ describe("processEvent dispatches agent identity events", () => {
       detail: { state: "Done" },
     });
     expect(getInterests().has("tl-oneshot")).toBe(false);
+  });
+});
+
+// ─── CTL-406: filter.wake deduplication ─────────────────────────────────────
+
+describe("filter.wake deduplication (CTL-406)", () => {
+  function wakeLinesFromLog() {
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return [];
+    return readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((l) => {
+        try {
+          const evt = JSON.parse(l);
+          return evt.attributes?.["event.name"]?.startsWith("filter.wake") ? [evt] : [];
+        } catch { return []; }
+      });
+  }
+
+  test("same source event ingested twice emits at most one wake per interest", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-dedup",
+      detail: {
+        interest_id: "pr-dedup-1",
+        notify_event: "filter.wake.orch-dedup",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [999],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    const sourceEvent = {
+      id: "src-dedup-abc123",
+      attributes: { "event.name": "github.pr.merged" },
+      scope: { pr: 999 },
+      body: { payload: { action: "closed", merged: true } },
+    };
+
+    processEvent(sourceEvent);
+    processEvent(sourceEvent); // same event ingested again
+
+    const wakes = wakeLinesFromLog();
+    const dedupWakes = wakes.filter((w) =>
+      w.body?.payload?.interest_id === "pr-dedup-1"
+    );
+    expect(dedupWakes).toHaveLength(1);
+  });
+
+  test("different source events each produce their own wake", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-dedup2",
+      detail: {
+        interest_id: "pr-dedup-2",
+        notify_event: "filter.wake.orch-dedup2",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [998],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    processEvent({
+      id: "src-event-aaa",
+      attributes: { "event.name": "github.pr.merged" },
+      scope: { pr: 998 },
+      body: { payload: { action: "closed", merged: true } },
+    });
+    processEvent({
+      id: "src-event-bbb",
+      attributes: { "event.name": "github.pr.merged" },
+      scope: { pr: 998 },
+      body: { payload: { action: "closed", merged: true } },
+    });
+
+    const wakes = wakeLinesFromLog();
+    const dedupWakes = wakes.filter((w) =>
+      w.body?.payload?.interest_id === "pr-dedup-2"
+    );
+    expect(dedupWakes).toHaveLength(2);
   });
 });
 
