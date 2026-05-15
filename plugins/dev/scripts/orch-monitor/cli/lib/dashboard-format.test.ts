@@ -184,12 +184,13 @@ describe("lastPathSegment", () => {
 });
 
 describe("DASHBOARD_VIEWS + dashboardViewLabel", () => {
-  test("has three views in order", () => {
-    expect(DASHBOARD_VIEWS).toEqual(["interests", "workers", "orchs"]);
+  test("has four views in order", () => {
+    expect(DASHBOARD_VIEWS).toEqual(["interests", "workers", "orchs", "runs"]);
   });
   test("labels for each view", () => {
     expect(dashboardViewLabel("interests")).toBe("Interests");
     expect(dashboardViewLabel("workers")).toBe("Workers");
     expect(dashboardViewLabel("orchs")).toBe("Orchestrators");
+    expect(dashboardViewLabel("runs")).toBe("Runs");
   });
 });
