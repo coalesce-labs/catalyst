@@ -40,6 +40,10 @@ import {
   getAgentsByTicket,
   // ticket_state (CTL-303 — ticket routing)
   upsertTicketState,
+  // waiting_sessions (CTL-403 — wait-loop visibility)
+  upsertWaitingSession,
+  clearWaitingSession,
+  getActiveWaitingSessions,
 } from "./broker-state.mjs";
 import {
   resolveApiKey,
@@ -453,6 +457,8 @@ export function maybeEmitProseDisabled() {
 const lastHeartbeat = new Map();
 // worker/session id → orchestrator id (inferred from heartbeat event fields)
 const workerToOrchestrator = new Map();
+// CTL-403: session_id → { timeoutAt: number, waitFor, ticket, orchestrator, reason }
+const waitingSessions = new Map();
 
 export function getLastHeartbeat() {
   return lastHeartbeat;
@@ -465,6 +471,14 @@ export function clearLastHeartbeat() {
 
 export function getWorkerToOrchestrator() {
   return workerToOrchestrator;
+}
+
+export function getWaitingSessionsMap() {
+  return waitingSessions;
+}
+
+export function clearWaitingSessionsMap() {
+  waitingSessions.clear();
 }
 
 // CTL-336: read name/payload/orchestrator from canonical OTel-format events
@@ -699,6 +713,61 @@ export function handleAgentHeartbeat(event) {
   if (orchId && sessionId !== orchId) {
     workerToOrchestrator.set(sessionId, orchId);
   }
+}
+
+// CTL-403: handle worker.waiting — record that a session is blocking in a wait
+// loop. Resets the watchdog timer and stores full detail so the watchdog can
+// skip stale-heartbeat wakes while the session is legitimately waiting.
+export function handleWorkerWaiting(event) {
+  const d = event.detail ?? {};
+  const sessionId = d.session_id;
+  if (!sessionId) return;
+
+  const timeoutMs = typeof d.timeout_ms === "number" ? d.timeout_ms : 0;
+  const since = d.since ?? new Date().toISOString();
+  const timeoutAt = new Date(new Date(since).getTime() + timeoutMs).getTime();
+
+  waitingSessions.set(sessionId, {
+    timeoutAt,
+    waitFor: d.wait_for ?? null,
+    ticket: d.ticket ?? null,
+    orchestrator: d.orchestrator ?? event.orchestrator ?? null,
+    reason: d.reason ?? null,
+  });
+
+  // Reset watchdog so the session doesn't immediately appear stale.
+  const existing = lastHeartbeat.get(sessionId);
+  lastHeartbeat.set(sessionId, { ts: Date.now(), notified: existing?.notified ?? false });
+
+  try {
+    upsertWaitingSession({
+      sessionId,
+      orchestrator: d.orchestrator ?? event.orchestrator ?? null,
+      ticket: d.ticket ?? null,
+      waitFor: d.wait_for ?? null,
+      timeoutMs,
+      since,
+      reason: d.reason ?? null,
+    });
+  } catch { /* DB not opened */ }
+
+  log.info({ sessionId, waitFor: d.wait_for, timeoutMs }, "worker waiting");
+  persistBrokerState();
+}
+
+// CTL-403: handle worker.resumed — clear the waiting record so the watchdog
+// resumes normal heartbeat-staleness tracking for this session.
+export function handleWorkerResumed(event) {
+  const d = event.detail ?? {};
+  const sessionId = d.session_id;
+  if (!sessionId) return;
+
+  waitingSessions.delete(sessionId);
+
+  try { clearWaitingSession(sessionId); } catch { /* DB not opened */ }
+
+  log.info({ sessionId, outcome: d.outcome ?? "unknown" }, "worker resumed");
+  persistBrokerState();
 }
 
 // --- Deterministic routing: pr_lifecycle (CTL-284) ---------------------------
@@ -1328,6 +1397,19 @@ export function runWatchdogTick() {
   let watchdogWoke = false;
   for (const [sourceId, state] of lastHeartbeat) {
     const stale = now - state.ts > HEARTBEAT_STALE_MS;
+    // CTL-403: skip stale-wake if this session has an active wait whose timeout
+    // has not yet elapsed. The session is legitimately blocking — not dead.
+    if (stale && waitingSessions.has(sourceId)) {
+      const ws = waitingSessions.get(sourceId);
+      if (ws.timeoutAt > now) {
+        const secsLeft = Math.round((ws.timeoutAt - now) / 1000);
+        log.debug({ sourceId, secsLeft, waitFor: ws.waitFor }, "watchdog: skipping stale check — session is legitimately waiting");
+        continue;
+      }
+      // Wait timed out — treat as stale and clean up the waiting record.
+      waitingSessions.delete(sourceId);
+      try { clearWaitingSession(sourceId); } catch { /* DB not opened */ }
+    }
     if (stale && !state.notified) {
       const minsAgo = Math.round((now - state.ts) / 60_000);
       const reason = `No heartbeat from ${sourceId} for >${minsAgo} min`;
@@ -1420,6 +1502,16 @@ export function processEvent(event) {
   // than the top-level flat field; handleAgentHeartbeat now reads both shapes.
   if (name === "session.heartbeat") {
     handleAgentHeartbeat(event);
+    return;
+  }
+
+  // CTL-403: worker wait-loop visibility events.
+  if (name === "worker.waiting") {
+    handleWorkerWaiting(event);
+    return;
+  }
+  if (name === "worker.resumed") {
+    handleWorkerResumed(event);
     return;
   }
 
@@ -1627,6 +1719,20 @@ export function getBrokerStateFilePath() {
 }
 
 export function buildBrokerState({ probe } = {}) {
+  // CTL-403: snapshot current waiting sessions for broker.state.json so the HUD
+  // can show 'waiting for X (timeout in Y)' without a separate query.
+  const now = Date.now();
+  const activeWaiting = [...waitingSessions.entries()]
+    .filter(([, ws]) => ws.timeoutAt > now)
+    .map(([sessionId, ws]) => ({
+      sessionId,
+      ticket: ws.ticket,
+      orchestrator: ws.orchestrator,
+      waitFor: ws.waitFor,
+      timeoutAt: new Date(ws.timeoutAt).toISOString(),
+      reason: ws.reason,
+    }));
+
   return {
     pid: process.pid,
     startedAt: brokerStartedAt ?? new Date().toISOString(),
@@ -1635,6 +1741,8 @@ export function buildBrokerState({ probe } = {}) {
     interestCount: interests.size,
     lastWakeAt,
     lastRegisterAt,
+    // CTL-403: active wait-loop sessions (empty array when no active waits).
+    waitingSessions: activeWaiting,
     keyHealth: {
       groq: {
         present: GROQ_KEY_SOURCE !== null,
@@ -1747,6 +1855,23 @@ function main() {
   maybeEmitProseDisabled();
 
   openBrokerStateDb();
+
+  // CTL-403: rehydrate waiting sessions from SQLite so the watchdog respects
+  // active waits that survived a broker restart.
+  try {
+    for (const ws of getActiveWaitingSessions()) {
+      waitingSessions.set(ws.sessionId, {
+        timeoutAt: new Date(ws.timeoutAt).getTime(),
+        waitFor: ws.waitFor,
+        ticket: ws.ticket,
+        orchestrator: ws.orchestrator,
+        reason: ws.reason,
+      });
+    }
+    if (waitingSessions.size > 0) {
+      log.info({ count: waitingSessions.size }, "rehydrated waiting sessions from DB");
+    }
+  } catch { /* DB might not have the table yet on old installs */ }
 
   try {
     const fd = openSync(lastLogPath, "r");

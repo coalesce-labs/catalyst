@@ -170,6 +170,27 @@ cmd_tail() {
   fi
 }
 
+_emit_wait_event() {
+  local event_name="$1" extra_fields="${2:-}"
+  [[ -n "${CATALYST_SESSION_ID:-}" ]] || return 0
+  local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local event_json
+  event_json="$(jq -cn \
+    --arg ts "$ts" \
+    --arg ev "$event_name" \
+    --arg sid "$CATALYST_SESSION_ID" \
+    --arg orch "${CATALYST_ORCHESTRATOR_ID:-}" \
+    --arg ticket "${CATALYST_TICKET_ID:-}" \
+    --argjson extra "${extra_fields:-{}}" \
+    '{ts: $ts, event: $ev, detail: ({session_id: $sid}
+       + (if $orch != "" then {orchestrator: $orch} else {} end)
+       + (if $ticket != "" then {ticket: $ticket} else {} end)
+       + $extra)}' 2>/dev/null)" || return 0
+  local dest; dest="$(events_file_path)"
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || true
+  printf '%s\n' "$event_json" >> "$dest" 2>/dev/null || true
+}
+
 cmd_wait_for() {
   local filter="" timeout="1800"
 
@@ -191,6 +212,19 @@ cmd_wait_for() {
   file="$(events_file_path)"
   local deadline=$(( $(date +%s) + timeout ))
 
+  # CTL-403: emit worker.waiting so the broker knows this session is legitimately
+  # blocking and the watchdog should not treat it as silently dead.
+  local since_iso timeout_ms waiting_extra
+  since_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  timeout_ms=$(( timeout * 1000 ))
+  waiting_extra="$(jq -cn \
+    --arg wf "$filter" \
+    --argjson tms "$timeout_ms" \
+    --arg since "$since_iso" \
+    --arg reason "catalyst-events wait-for" \
+    '{wait_for: $wf, timeout_ms: $tms, since: $since, reason: $reason}' 2>/dev/null || echo '{}')"
+  _emit_wait_event "worker.waiting" "$waiting_extra"
+
   # If the file doesn't exist yet, wait for it AND treat all of its lines as
   # "new" once it appears (the consumer started before the writer).
   local file_existed_at_start=1
@@ -198,6 +232,7 @@ cmd_wait_for() {
     file_existed_at_start=0
   fi
   if ! wait_for_file "$file" "$deadline"; then
+    _emit_wait_event "worker.resumed" '{"outcome":"timed_out"}'
     return 1
   fi
   file="$(events_file_path)"
@@ -211,6 +246,7 @@ cmd_wait_for() {
 
   while :; do
     if [[ "$(date +%s)" -ge "$deadline" ]]; then
+      _emit_wait_event "worker.resumed" '{"outcome":"timed_out"}'
       return 1
     fi
 
@@ -223,6 +259,7 @@ cmd_wait_for() {
       match="$(emit_lines_since "$file" "$last_lines" "$filter")"
       if [[ -n "$match" ]]; then
         # Only emit the FIRST matching line, then exit.
+        _emit_wait_event "worker.resumed" '{"outcome":"matched"}'
         echo "$match" | head -n 1
         return 0
       fi

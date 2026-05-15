@@ -1,4 +1,5 @@
 import { Box, Text } from "ink";
+import type { WaitingSession } from "../lib/broker-key-health.ts";
 import type { WorkerSignal } from "../lib/worker-signals-reader.ts";
 import {
   formatRelativeTime,
@@ -14,6 +15,26 @@ interface WorkerListProps {
   scrollOffset: number;
   visibleRows: number;
   cols: number;
+  waitingSessions?: WaitingSession[];
+}
+
+function findWaitingSession(ticket: string, sessions: WaitingSession[], nowMs: number): WaitingSession | null {
+  for (const ws of sessions) {
+    if (ws.ticket === ticket && ws.timeoutAt && Date.parse(ws.timeoutAt) > nowMs) {
+      return ws;
+    }
+  }
+  return null;
+}
+
+function formatTimeoutRemaining(timeoutAt: string, nowMs: number): string {
+  const ms = Date.parse(timeoutAt) - nowMs;
+  if (ms <= 0) return "0s";
+  const secs = Math.round(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  return `${Math.round(mins / 60)}h`;
 }
 
 const COL_WORKER = 32;
@@ -28,9 +49,11 @@ export function WorkerList({
   scrollOffset,
   visibleRows,
   cols,
+  waitingSessions = [],
 }: WorkerListProps) {
   const worktreeW = Math.max(8, cols - COL_WORKER - COL_STATUS - COL_PHASE - COL_PR - COL_HEARTBEAT - 6);
   const visible = workers.slice(scrollOffset, scrollOffset + visibleRows);
+  const nowMs = Date.now();
 
   return (
     <Box flexDirection="column" flexGrow={1}>
@@ -50,33 +73,44 @@ export function WorkerList({
         const realIdx = scrollOffset + idx;
         const selected = realIdx === selectedIndex;
         const stale = isStaleHeartbeat(w.lastHeartbeat);
-        const statusColor = workerStatusColor(w.status);
+        const ws = findWaitingSession(w.ticket, waitingSessions, nowMs);
+        const statusColor = ws ? "magenta" : workerStatusColor(w.status);
+        const statusText = ws ? `wait:${formatTimeoutRemaining(ws.timeoutAt, nowMs)}` : w.status;
         const worker = truncateRight(w.workerName, COL_WORKER);
-        const status = truncateRight(w.status, COL_STATUS);
+        const status = truncateRight(statusText, COL_STATUS);
         const phase = truncateRight(w.phase !== null ? String(w.phase) : "—", COL_PHASE);
         const pr = truncateRight(w.pr ? `#${w.pr.number}` : "—", COL_PR);
         const heartbeat = truncateRight(formatRelativeTime(w.lastHeartbeat), COL_HEARTBEAT);
         const worktree = truncateRight(lastPathSegment(w.worktreePath), worktreeW);
         return (
-          <Box key={`${w.workerName}-${realIdx}`} flexDirection="row">
-            <Box width={COL_WORKER} flexShrink={0} marginRight={1}>
-              <Text color={selected ? "black" : "white"} inverse={selected}>{worker}</Text>
+          <Box key={`${w.workerName}-${realIdx}`} flexDirection="column">
+            <Box flexDirection="row">
+              <Box width={COL_WORKER} flexShrink={0} marginRight={1}>
+                <Text color={selected ? "black" : "white"} inverse={selected}>{worker}</Text>
+              </Box>
+              <Box width={COL_STATUS} flexShrink={0} marginRight={1}>
+                <Text color={statusColor} inverse={selected}>{status}</Text>
+              </Box>
+              <Box width={COL_PHASE} flexShrink={0} marginRight={1}>
+                <Text dimColor={!selected} inverse={selected}>{phase}</Text>
+              </Box>
+              <Box width={COL_PR} flexShrink={0} marginRight={1}>
+                <Text color={w.pr ? "cyan" : "gray"} inverse={selected}>{pr}</Text>
+              </Box>
+              <Box width={COL_HEARTBEAT} flexShrink={0} marginRight={1}>
+                <Text color={stale && !ws ? "yellow" : undefined} dimColor={!stale && !selected} inverse={selected}>{heartbeat}</Text>
+              </Box>
+              <Box flexGrow={1}>
+                <Text dimColor={!selected} inverse={selected}>{worktree}</Text>
+              </Box>
             </Box>
-            <Box width={COL_STATUS} flexShrink={0} marginRight={1}>
-              <Text color={statusColor} inverse={selected}>{status}</Text>
-            </Box>
-            <Box width={COL_PHASE} flexShrink={0} marginRight={1}>
-              <Text dimColor={!selected} inverse={selected}>{phase}</Text>
-            </Box>
-            <Box width={COL_PR} flexShrink={0} marginRight={1}>
-              <Text color={w.pr ? "cyan" : "gray"} inverse={selected}>{pr}</Text>
-            </Box>
-            <Box width={COL_HEARTBEAT} flexShrink={0} marginRight={1}>
-              <Text color={stale ? "yellow" : undefined} dimColor={!stale && !selected} inverse={selected}>{heartbeat}</Text>
-            </Box>
-            <Box flexGrow={1}>
-              <Text dimColor={!selected} inverse={selected}>{worktree}</Text>
-            </Box>
+            {ws && selected && (
+              <Box paddingX={1}>
+                <Text color="magenta" dimColor>
+                  {`  ⏳ waiting for: ${ws.waitFor ? truncateRight(ws.waitFor, cols - 20) : "(unknown)"}`}
+                </Text>
+              </Box>
+            )}
           </Box>
         );
       })}
