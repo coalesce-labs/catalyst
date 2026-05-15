@@ -21,12 +21,12 @@ function interestTypeLabel(t: BrokerInterest["interest_type"]): string {
   return t ?? "prose";
 }
 
-function footerSummary(interests: BrokerInterest[], brokerState: BrokerState | null, now: number = Date.now()): string {
+export function footerSummary(interests: BrokerInterest[], brokerState: BrokerState | null, now: number = Date.now()): string {
   const n = interests.length;
-  const lastWake = brokerState?.lastWakeAt ? formatRelativeTime(brokerState.lastWakeAt, now) : "—";
-  const lastReg = brokerState?.lastRegisterAt ? formatRelativeTime(brokerState.lastRegisterAt, now) : "—";
+  const lastWake = brokerState?.lastWakeAt ? `${formatRelativeTime(brokerState.lastWakeAt, now)} ago` : "—";
+  const lastReg = brokerState?.lastRegisterAt ? `${formatRelativeTime(brokerState.lastRegisterAt, now)} ago` : "—";
   const uptime = brokerState?.startedAt ? formatRelativeTime(brokerState.startedAt, now) : "—";
-  return `${n} interest${n === 1 ? "" : "s"}  ·  last wake ${lastWake} ago  ·  last register ${lastReg} ago  ·  daemon up ${uptime}`;
+  return `${n} interest${n === 1 ? "" : "s"}  ·  last wake ${lastWake}  ·  last register ${lastReg}  ·  daemon up ${uptime}`;
 }
 
 export function InterestList({
