@@ -1,14 +1,9 @@
 import { Box, Text } from "ink";
 import type { BrokerState } from "../lib/broker-key-health.ts";
-import {
-  chipColor,
-  chipLabel,
-  brokerInterestStatus,
-  interestChipColor,
-  interestChipLabel,
-} from "../lib/broker-key-health.ts";
+import { brokerInterestStatus } from "../lib/broker-key-health.ts";
 import { resolveColumns } from "../lib/column-widths.ts";
 import type { HudColumnConfig } from "../../lib/monitor-config.ts";
+import { layoutHeaderChips } from "./header-chips.ts";
 
 interface HeaderProps {
   columns?: number;
@@ -32,36 +27,33 @@ interface HeaderProps {
 // CTL-390: the row also renders when a version chip is provided.
 // CTL-394: column headers are now data-driven via resolveColumns() so
 // custom column configs are automatically reflected in the header row.
+// CTL-434: chip layout is computed by layoutHeaderChips() which keeps the
+// row on a single line by abbreviating labels rather than wrapping.
 export function Header({ columns = 120, nlQuery, brokerState, version, columnConfig }: HeaderProps) {
   const sep = "─".repeat(Math.max(0, columns - 1));
   const groq = brokerState?.groq;
   const interestStatus = brokerInterestStatus(brokerState ?? null);
-  const showInterestChip = interestStatus !== "unknown";
-  const showVersionChip = version !== undefined;
+  const chips = layoutHeaderChips({
+    columns,
+    groqStatus: groq ? groq.probeStatus : null,
+    groqPresent: groq?.present ?? false,
+    groqPrefix: groq?.prefix ?? null,
+    groqSource: groq?.source ?? null,
+    interestStatus,
+    interestCount: brokerState?.interestCount ?? null,
+    versionDisplay: version?.display ?? null,
+    versionIsLocal: version?.isLocal ?? false,
+  });
   const resolved = resolveColumns(columns, columnConfig);
   return (
     <Box flexDirection="column">
-      {(groq || showInterestChip || showVersionChip) && (
+      {chips.segments.length > 0 && (
         <Box flexDirection="row">
-          {groq && (
-            <Text color={chipColor(groq.probeStatus)}>{`[Groq: ${chipLabel(groq.probeStatus)}]`}</Text>
-          )}
-          {groq && groq.present && groq.prefix && (
-            <Text dimColor>{`  ${groq.prefix}... (${groq.source ?? "unknown"})`}</Text>
-          )}
-          {showInterestChip && (
-            <Text
-              color={interestChipColor(interestStatus)}
-              inverse={interestStatus === "degraded"}
-            >
-              {`${groq ? "  " : ""}[broker: ${interestChipLabel(brokerState ?? null, interestStatus)}]`}
+          {chips.segments.map((s, i) => (
+            <Text key={i} color={s.color} inverse={s.inverse} dimColor={s.dim}>
+              {s.text}
             </Text>
-          )}
-          {showVersionChip && (
-            <Text color={version.isLocal ? "yellow" : "gray"}>
-              {`${(groq || showInterestChip) ? "  " : ""}[${version.display}]`}
-            </Text>
-          )}
+          ))}
         </Box>
       )}
       <Box flexDirection="row">
