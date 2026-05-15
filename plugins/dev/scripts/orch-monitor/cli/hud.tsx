@@ -58,6 +58,7 @@ const HELP_LINES = [
   "Filters",
   "  /                substring filter — applies to all loaded events",
   "  :                natural-language query via Groq (needs GROQ_API_KEY)",
+  "  :30m / :2h30m    reload events from last N   (bare duration — no 'since' needed)",
   "  :since 24h       reload events from last 24 h  (also: 7d, 2h, 30m, ISO date)",
   "  ?                show generated DSL and active :since window",
   "  S                clear :since window (reset to initial)",
@@ -282,10 +283,11 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     setQuerySubmitting(true);
     setQueryError(null);
 
-    // :since <spec> — reload events from a different point in time
+    // :since <spec> or bare duration (e.g. ":30m", ":2h30m", ":~1h") — reload from a time window
     const sinceMatch = text.match(/^since\s+(.+)/i);
-    if (sinceMatch) {
-      const spec = (sinceMatch[1] ?? "").trim();
+    const bareDuration = !sinceMatch && /^~?(?:\d+[hmsd])+$/i.test(text);
+    if (sinceMatch || bareDuration) {
+      const spec = sinceMatch ? (sinceMatch[1] ?? "").trim() : text.replace(/^~\s*/, "");
       const parsed = parseSinceSpec(spec);
       if (parsed) {
         setActiveSinceTs(parsed);
