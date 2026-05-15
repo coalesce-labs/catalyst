@@ -17,9 +17,14 @@ import {
 } from "../lib/dashboard-format.ts";
 
 import { InterestList } from "./InterestList.tsx";
-import { WorkerList } from "./WorkerList.tsx";
-import { OrchList } from "./OrchList.tsx";
+import { WorkerList, type WorkerSortKey } from "./WorkerList.tsx";
+import { OrchList, type OrchSortKey } from "./OrchList.tsx";
 import { RunsList } from "./RunsList.tsx";
+
+type SortDir = "asc" | "desc";
+
+const WORKER_SORT_CYCLE: WorkerSortKey[] = ["heartbeat", "status", "phase", "pr", "worker"];
+const ORCH_SORT_CYCLE: OrchSortKey[] = ["started", "active", "wave"];
 
 interface DashboardProps {
   visibleRows: number;
@@ -65,16 +70,77 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
   const [scrollOffset, setScrollOffset] = useState(0);
   const [showDetail, setShowDetail] = useState(false);
   const [detailScrollTop, setDetailScrollTop] = useState(0);
+  const [workerSortKey, setWorkerSortKey] = useState<WorkerSortKey>("heartbeat");
+  const [workerSortDir, setWorkerSortDir] = useState<SortDir>("desc");
+  const [orchSortKey, setOrchSortKey] = useState<OrchSortKey>("started");
+  const [orchSortDir, setOrchSortDir] = useState<SortDir>("desc");
 
   useEffect(() => {
     const id = setInterval(() => setData(readAll()), 5000);
     return () => clearInterval(id);
   }, []);
 
-  const total = rowCount(view, data);
+  const sortedWorkers = useMemo(() => {
+    const arr = [...data.workers];
+    const dir = workerSortDir === "asc" ? 1 : -1;
+    arr.sort((a, b) => {
+      let av: number | string, bv: number | string;
+      switch (workerSortKey) {
+        case "worker": av = a.workerName ?? ""; bv = b.workerName ?? ""; break;
+        case "status": av = a.status ?? ""; bv = b.status ?? ""; break;
+        case "phase": av = a.phase ?? (dir > 0 ? Infinity : -Infinity); bv = b.phase ?? (dir > 0 ? Infinity : -Infinity); break;
+        case "pr": av = a.pr?.number ?? (dir > 0 ? Infinity : -Infinity); bv = b.pr?.number ?? (dir > 0 ? Infinity : -Infinity); break;
+        case "heartbeat": {
+          const at = a.lastHeartbeat ? Date.parse(a.lastHeartbeat) : NaN;
+          const bt = b.lastHeartbeat ? Date.parse(b.lastHeartbeat) : NaN;
+          av = isNaN(at) ? (dir > 0 ? Infinity : -Infinity) : at;
+          bv = isNaN(bt) ? (dir > 0 ? Infinity : -Infinity) : bt;
+          break;
+        }
+      }
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      return 0;
+    });
+    return arr;
+  }, [data.workers, workerSortKey, workerSortDir]);
+
+  const sortedOrchs = useMemo(() => {
+    const arr = [...data.orchs];
+    const dir = orchSortDir === "asc" ? 1 : -1;
+    arr.sort((a, b) => {
+      let av: number | string, bv: number | string;
+      switch (orchSortKey) {
+        case "orch": av = a.orchestrator ?? a.id ?? ""; bv = b.orchestrator ?? b.id ?? ""; break;
+        case "wave": av = a.currentWave ?? (dir > 0 ? Infinity : -Infinity); bv = b.currentWave ?? (dir > 0 ? Infinity : -Infinity); break;
+        case "active": av = a.workersCount.active; bv = b.workersCount.active; break;
+        case "queue": av = a.queueLength; bv = b.queueLength; break;
+        case "started": {
+          const at = a.startedAt ? Date.parse(a.startedAt) : NaN;
+          const bt = b.startedAt ? Date.parse(b.startedAt) : NaN;
+          av = isNaN(at) ? (dir > 0 ? Infinity : -Infinity) : at;
+          bv = isNaN(bt) ? (dir > 0 ? Infinity : -Infinity) : bt;
+          break;
+        }
+        case "parallel": av = a.maxParallel ?? (dir > 0 ? Infinity : -Infinity); bv = b.maxParallel ?? (dir > 0 ? Infinity : -Infinity); break;
+      }
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      return 0;
+    });
+    return arr;
+  }, [data.orchs, orchSortKey, orchSortDir]);
+
+  const sortedData = useMemo<DashboardState>(() => ({
+    ...data,
+    workers: sortedWorkers,
+    orchs: sortedOrchs,
+  }), [data, sortedWorkers, sortedOrchs]);
+
+  const total = rowCount(view, sortedData);
 
   useEffect(() => {
-    if (selectedIndex >= total) setSelectedIndex(Math.max(0, total - 1));
+    if (selectedIndex >= total && total > 0) setSelectedIndex(Math.max(0, total - 1));
   }, [total, selectedIndex]);
 
   // Reserve rows for the tab bar (1), the bottom footer hint (1), and the
@@ -96,9 +162,9 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
   }, [selectedIndex, scrollOffset, listBodyRows]);
 
   const selectedRowJson = useMemo(() => {
-    const row = pickSelectedRow(view, data, selectedIndex);
+    const row = pickSelectedRow(view, sortedData, selectedIndex);
     return JSON.stringify(row, null, 2);
-  }, [view, data, selectedIndex]);
+  }, [view, sortedData, selectedIndex]);
 
   const detailLines = useMemo(() => selectedRowJson.split("\n"), [selectedRowJson]);
   const detailContentRows = Math.max(1, detailFootprint - 2);
@@ -138,6 +204,27 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
     if (key.pageDown) { setSelectedIndex((i) => Math.min(Math.max(0, total - 1), i + listBodyRows)); return; }
     if (key.pageUp) { setSelectedIndex((i) => Math.max(0, i - listBodyRows)); return; }
     if (input === "G") { setSelectedIndex(Math.max(0, total - 1)); return; }
+    if (input === "s") {
+      if (view === "workers") {
+        const next = WORKER_SORT_CYCLE[(WORKER_SORT_CYCLE.indexOf(workerSortKey) + 1) % WORKER_SORT_CYCLE.length] ?? "heartbeat";
+        setWorkerSortKey(next);
+        setSelectedIndex(0);
+        setScrollOffset(0);
+      } else if (view === "orchs") {
+        const next = ORCH_SORT_CYCLE[(ORCH_SORT_CYCLE.indexOf(orchSortKey) + 1) % ORCH_SORT_CYCLE.length] ?? "started";
+        setOrchSortKey(next);
+        setSelectedIndex(0);
+        setScrollOffset(0);
+      }
+      return;
+    }
+    if (input === "S") {
+      if (view === "workers") setWorkerSortDir((d) => (d === "asc" ? "desc" : "asc"));
+      else if (view === "orchs") setOrchSortDir((d) => (d === "asc" ? "desc" : "asc"));
+      setSelectedIndex(0);
+      setScrollOffset(0);
+      return;
+    }
     if (key.return) { setShowDetail(true); return; }
   });
 
@@ -158,7 +245,7 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
       <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor="cyan" paddingX={1}>
         {view === "interests" && (
           <InterestList
-            interests={data.interests}
+            interests={sortedData.interests}
             selectedIndex={selectedIndex}
             scrollOffset={scrollOffset}
             visibleRows={listBodyRows}
@@ -168,21 +255,25 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
         )}
         {view === "workers" && (
           <WorkerList
-            workers={data.workers}
+            workers={sortedData.workers}
             selectedIndex={selectedIndex}
             scrollOffset={scrollOffset}
             visibleRows={listBodyRows}
             cols={cols - 4}
             waitingSessions={brokerState?.waitingSessions}
+            sortKey={workerSortKey}
+            sortDir={workerSortDir}
           />
         )}
         {view === "orchs" && (
           <OrchList
-            orchs={data.orchs}
+            orchs={sortedData.orchs}
             selectedIndex={selectedIndex}
             scrollOffset={scrollOffset}
             visibleRows={listBodyRows}
             cols={cols - 4}
+            sortKey={orchSortKey}
+            sortDir={orchSortDir}
           />
         )}
         {view === "runs" && (
@@ -204,7 +295,7 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
         </Box>
       )}
       <Box flexShrink={0} paddingX={1}>
-        <Text dimColor>Tab: switch view  ·  1-4: jump  ·  j/k: move  ·  Enter: detail  ·  Esc / i: close</Text>
+        <Text dimColor>Tab: switch view  ·  1-4: jump  ·  j/k: move  ·  s/S: sort col/dir  ·  Enter: detail  ·  Esc / i: close</Text>
       </Box>
     </Box>
   );
