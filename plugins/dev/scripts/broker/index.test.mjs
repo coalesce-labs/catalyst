@@ -14,6 +14,10 @@ import {
   handleAgentCheckin,
   handleAgentCheckout,
   handleAgentHeartbeat,
+  handleWorkerWaiting,
+  handleWorkerResumed,
+  getWaitingSessionsMap,
+  clearWaitingSessionsMap,
   shouldSkipEvent,
   buildGroqPrompt,
   getInterests,
@@ -39,6 +43,8 @@ import {
   getAgentBySession,
   getAgentsByTicket,
   getTicketState,
+  getWaitingSession,
+  getActiveWaitingSessions,
 } from "./broker-state.mjs";
 
 // ─── Shared DB setup ─────────────────────────────────────────────────────────
@@ -54,6 +60,7 @@ beforeEach(() => {
   clearInterests();
   clearLastHeartbeat();
   __clearEmittedWakeCacheForTest();
+  clearWaitingSessionsMap();
 });
 
 afterEach(() => {
@@ -528,6 +535,258 @@ describe("session.heartbeat (canonical OTel)", () => {
         resource: { "service.name": "catalyst.session" },
       }),
     ).toBe(true);
+  });
+});
+
+// ─── CTL-403: worker.waiting / worker.resumed ────────────────────────────────
+
+describe("worker.waiting", () => {
+  test("stores session in in-memory map with computed timeoutAt", () => {
+    const since = new Date().toISOString();
+    handleWorkerWaiting({
+      event: "worker.waiting",
+      detail: {
+        session_id: "sess-waiting",
+        orchestrator: "orch-1",
+        ticket: "CTL-403",
+        wait_for: "github.pr.merged",
+        timeout_ms: 3600000,
+        since,
+        reason: "phase 5 listen loop",
+      },
+    });
+    const map = getWaitingSessionsMap();
+    expect(map.has("sess-waiting")).toBe(true);
+    const entry = map.get("sess-waiting");
+    expect(entry.waitFor).toBe("github.pr.merged");
+    expect(entry.ticket).toBe("CTL-403");
+    expect(entry.timeoutAt).toBeGreaterThan(Date.now());
+  });
+
+  test("resets heartbeat timer for the session", () => {
+    const since = new Date().toISOString();
+    handleWorkerWaiting({
+      event: "worker.waiting",
+      detail: { session_id: "sess-hb-reset", timeout_ms: 3600000, since },
+    });
+    expect(getLastHeartbeat().has("sess-hb-reset")).toBe(true);
+  });
+
+  test("persists to waiting_sessions SQLite table", () => {
+    const since = new Date().toISOString();
+    handleWorkerWaiting({
+      event: "worker.waiting",
+      detail: {
+        session_id: "sess-db",
+        orchestrator: "orch-x",
+        ticket: "CTL-403",
+        wait_for: ".attributes.\"event.name\" == \"github.pr.merged\"",
+        timeout_ms: 7200000,
+        since,
+        reason: "test",
+      },
+    });
+    const row = getWaitingSession("sess-db");
+    expect(row).not.toBeNull();
+    expect(row.ticket).toBe("CTL-403");
+    expect(row.waitFor).toBe(".attributes.\"event.name\" == \"github.pr.merged\"");
+    expect(typeof row.timeoutAt).toBe("string");
+  });
+
+  test("no-op when session_id missing", () => {
+    expect(() =>
+      handleWorkerWaiting({ event: "worker.waiting", detail: { timeout_ms: 1000, since: new Date().toISOString() } })
+    ).not.toThrow();
+    expect(getWaitingSessionsMap().size).toBe(0);
+  });
+
+  test("getActiveWaitingSessions returns only non-expired sessions", () => {
+    const future = new Date().toISOString();
+    handleWorkerWaiting({ event: "worker.waiting", detail: { session_id: "sess-past", timeout_ms: 1, since: new Date(Date.now() - 10000).toISOString() } });
+    handleWorkerWaiting({ event: "worker.waiting", detail: { session_id: "sess-future", timeout_ms: 3600000, since: future } });
+    const active = getActiveWaitingSessions();
+    const ids = active.map((s) => s.sessionId);
+    expect(ids).not.toContain("sess-past");
+    expect(ids).toContain("sess-future");
+  });
+});
+
+describe("worker.resumed", () => {
+  test("removes session from in-memory map", () => {
+    const since = new Date().toISOString();
+    handleWorkerWaiting({ event: "worker.waiting", detail: { session_id: "sess-r", timeout_ms: 3600000, since } });
+    expect(getWaitingSessionsMap().has("sess-r")).toBe(true);
+    handleWorkerResumed({ event: "worker.resumed", detail: { session_id: "sess-r", outcome: "matched" } });
+    expect(getWaitingSessionsMap().has("sess-r")).toBe(false);
+  });
+
+  test("removes session from SQLite table", () => {
+    const since = new Date().toISOString();
+    handleWorkerWaiting({ event: "worker.waiting", detail: { session_id: "sess-db-r", timeout_ms: 3600000, since } });
+    expect(getWaitingSession("sess-db-r")).not.toBeNull();
+    handleWorkerResumed({ event: "worker.resumed", detail: { session_id: "sess-db-r", outcome: "timed_out" } });
+    expect(getWaitingSession("sess-db-r")).toBeNull();
+  });
+
+  test("no-op when session_id missing", () => {
+    expect(() =>
+      handleWorkerResumed({ event: "worker.resumed", detail: {} })
+    ).not.toThrow();
+  });
+});
+
+describe("watchdog skips legitimately waiting sessions (CTL-403)", () => {
+  test("session with active wait is not woken when heartbeat is stale", async () => {
+    const { runWatchdogTick } = await import("./index.mjs");
+
+    // Register an interest watching sess-wait
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-w",
+      detail: {
+        interest_id: "orch-w",
+        notify_event: "filter.wake.orch-w",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [42],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+        context: { pr_numbers: [42], tickets: [], workers: ["sess-wait"] },
+        session_id: null,
+      },
+    });
+
+    // Simulate stale heartbeat by backdating the entry
+    const staleTs = Date.now() - 300_000;
+    getLastHeartbeat().set("sess-wait", { ts: staleTs, notified: false });
+
+    // Mark as actively waiting with timeout in the future
+    getWaitingSessionsMap().set("sess-wait", {
+      timeoutAt: Date.now() + 3_600_000,
+      waitFor: "github.pr.merged",
+      ticket: "CTL-403",
+      orchestrator: "orch-w",
+      reason: "test",
+    });
+
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+
+    runWatchdogTick();
+
+    // No filter.wake event should have been emitted for this session
+    if (existsSync(logPath)) {
+      const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+      const wakes = lines.filter((l) => {
+        try {
+          const evt = JSON.parse(l);
+          const evtName = evt.event ?? evt.attributes?.["event.name"] ?? "";
+          return evtName === "filter.wake.orch-w";
+        } catch { return false; }
+      });
+      expect(wakes).toHaveLength(0);
+    }
+    // Heartbeat entry still present (not cleaned up)
+    expect(getLastHeartbeat().has("sess-wait")).toBe(true);
+  });
+
+  test("session with EXPIRED wait IS woken as stale", async () => {
+    const { runWatchdogTick } = await import("./index.mjs");
+
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-exp",
+      detail: {
+        interest_id: "orch-exp",
+        notify_event: "filter.wake.orch-exp",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [99],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+        context: { pr_numbers: [99], tickets: [], workers: ["sess-exp"] },
+        session_id: null,
+      },
+    });
+
+    const staleTs = Date.now() - 300_000;
+    getLastHeartbeat().set("sess-exp", { ts: staleTs, notified: false });
+
+    // Expired wait (timeoutAt in the past)
+    getWaitingSessionsMap().set("sess-exp", {
+      timeoutAt: Date.now() - 1000,
+      waitFor: "github.pr.merged",
+      ticket: "CTL-403",
+      orchestrator: "orch-exp",
+      reason: "test",
+    });
+
+    runWatchdogTick();
+
+    // Expired wait should be cleaned up
+    expect(getWaitingSessionsMap().has("sess-exp")).toBe(false);
+  });
+});
+
+describe("buildBrokerState includes waitingSessions (CTL-403)", () => {
+  test("empty when no active waits", () => {
+    const state = buildBrokerState();
+    expect(Array.isArray(state.waitingSessions)).toBe(true);
+    expect(state.waitingSessions).toHaveLength(0);
+  });
+
+  test("includes active sessions with correct shape", () => {
+    const since = new Date().toISOString();
+    handleWorkerWaiting({
+      event: "worker.waiting",
+      detail: {
+        session_id: "sess-bst",
+        ticket: "CTL-403",
+        orchestrator: "orch-bst",
+        wait_for: "github.pr.merged",
+        timeout_ms: 3600000,
+        since,
+        reason: "test",
+      },
+    });
+    const state = buildBrokerState();
+    expect(state.waitingSessions).toHaveLength(1);
+    const ws = state.waitingSessions[0];
+    expect(ws.sessionId).toBe("sess-bst");
+    expect(ws.ticket).toBe("CTL-403");
+    expect(ws.waitFor).toBe("github.pr.merged");
+    expect(typeof ws.timeoutAt).toBe("string");
+  });
+
+  test("excludes expired sessions", () => {
+    getWaitingSessionsMap().set("sess-expired", {
+      timeoutAt: Date.now() - 5000,
+      waitFor: "anything",
+      ticket: "CTL-000",
+      orchestrator: null,
+      reason: null,
+    });
+    const state = buildBrokerState();
+    const ids = state.waitingSessions.map((s) => s.sessionId);
+    expect(ids).not.toContain("sess-expired");
+  });
+});
+
+describe("processEvent routes worker.waiting and worker.resumed (CTL-403)", () => {
+  test("worker.waiting is handled via processEvent", () => {
+    const since = new Date().toISOString();
+    processEvent({
+      event: "worker.waiting",
+      detail: { session_id: "sess-pe-w", timeout_ms: 3600000, since },
+    });
+    expect(getWaitingSessionsMap().has("sess-pe-w")).toBe(true);
+  });
+
+  test("worker.resumed is handled via processEvent", () => {
+    const since = new Date().toISOString();
+    processEvent({ event: "worker.waiting", detail: { session_id: "sess-pe-r", timeout_ms: 3600000, since } });
+    processEvent({ event: "worker.resumed", detail: { session_id: "sess-pe-r", outcome: "matched" } });
+    expect(getWaitingSessionsMap().has("sess-pe-r")).toBe(false);
   });
 });
 
