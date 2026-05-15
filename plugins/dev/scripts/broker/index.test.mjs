@@ -29,6 +29,7 @@ import {
   summarizeEvent,
   buildBrokerState,
   writeBrokerStateFile,
+  __clearEmittedWakeCacheForTest,
 } from "./index.mjs";
 import {
   openBrokerStateDb,
@@ -50,6 +51,7 @@ beforeEach(() => {
   openBrokerStateDb(join(tmpDir, "test.db"));
   clearInterests();
   clearLastHeartbeat();
+  __clearEmittedWakeCacheForTest();
 });
 
 afterEach(() => {
@@ -557,6 +559,93 @@ describe("processEvent dispatches agent identity events", () => {
       detail: { state: "Done" },
     });
     expect(getInterests().has("tl-oneshot")).toBe(false);
+  });
+});
+
+// ─── CTL-406: filter.wake deduplication ─────────────────────────────────────
+
+describe("filter.wake deduplication (CTL-406)", () => {
+  function wakeLinesFromLog() {
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return [];
+    return readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((l) => {
+        try {
+          const evt = JSON.parse(l);
+          return evt.attributes?.["event.name"]?.startsWith("filter.wake") ? [evt] : [];
+        } catch { return []; }
+      });
+  }
+
+  test("same source event ingested twice emits at most one wake per interest", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-dedup",
+      detail: {
+        interest_id: "pr-dedup-1",
+        notify_event: "filter.wake.orch-dedup",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [999],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    const sourceEvent = {
+      id: "src-dedup-abc123",
+      attributes: { "event.name": "github.pr.merged" },
+      scope: { pr: 999 },
+      body: { payload: { action: "closed", merged: true } },
+    };
+
+    processEvent(sourceEvent);
+    processEvent(sourceEvent); // same event ingested again
+
+    const wakes = wakeLinesFromLog();
+    const dedupWakes = wakes.filter((w) =>
+      w.body?.payload?.interest_id === "pr-dedup-1"
+    );
+    expect(dedupWakes).toHaveLength(1);
+  });
+
+  test("different source events each produce their own wake", () => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-dedup2",
+      detail: {
+        interest_id: "pr-dedup-2",
+        notify_event: "filter.wake.orch-dedup2",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [998],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+      },
+    });
+
+    processEvent({
+      id: "src-event-aaa",
+      attributes: { "event.name": "github.pr.merged" },
+      scope: { pr: 998 },
+      body: { payload: { action: "closed", merged: true } },
+    });
+    processEvent({
+      id: "src-event-bbb",
+      attributes: { "event.name": "github.pr.merged" },
+      scope: { pr: 998 },
+      body: { payload: { action: "closed", merged: true } },
+    });
+
+    const wakes = wakeLinesFromLog();
+    const dedupWakes = wakes.filter((w) =>
+      w.body?.payload?.interest_id === "pr-dedup-2"
+    );
+    expect(dedupWakes).toHaveLength(2);
   });
 });
 
