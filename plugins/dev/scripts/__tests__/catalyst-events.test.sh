@@ -300,6 +300,19 @@ EVENT_F='{"attributes":{"event.name":"linear.issue.state_changed","linear.issue.
 run "filter matches linear event for in-orch ticket" \
   assert_match "$EVENT_F" "$FILTER_FILE"
 
+# (f2) CTL-398: github.pr.merged attributed to this orch via head-ref resolution —
+# PR #999 is NOT in the known set (only 501 is), but catalyst.orchestrator.id
+# is stamped by the webhook handler from the worker head-ref, so the new
+# github.pr.* orch-id clause must match it.
+EVENT_F2='{"attributes":{"event.name":"github.pr.merged","catalyst.orchestrator.id":"orch-test-2026-05-04","vcs.repository.name":"o/r","vcs.pr.number":999}}'
+run "filter matches github.pr.merged with orch id even when PR not in known set (CTL-398)" \
+  assert_match "$EVENT_F2" "$FILTER_FILE"
+
+# (f3) CTL-398: github.pr.opened for an unknown PR — same orch id attribution path
+EVENT_F3='{"attributes":{"event.name":"github.pr.opened","catalyst.orchestrator.id":"orch-test-2026-05-04","vcs.repository.name":"o/r","vcs.pr.number":888}}'
+run "filter matches github.pr.opened with orch id even when PR not in known set (CTL-398)" \
+  assert_match "$EVENT_F3" "$FILTER_FILE"
+
 # ── 16. emitted predicate — reject cases ────────────────────────────────────
 
 # (g) catalyst event from a different orchestrator
@@ -333,6 +346,18 @@ run "filter rejects linear event for foreign ticket" \
 EVENT_L='{"attributes":{"event.name":"github.check_run.created","catalyst.orchestrator.id":"orch-test-2026-05-04","vcs.repository.name":"o/r"},"body":{"payload":{}}}'
 run "filter rejects github webhook tagged with orch id but no PR/ref match (CTL-370)" \
   assert_no_match "$EVENT_L" "$FILTER_FILE"
+
+# (l2) CTL-398: github.pr.merged with NO catalyst.orchestrator.id and PR NOT
+# in known set — must NOT match (no orch attribution, no PR number fallback).
+EVENT_L2='{"attributes":{"event.name":"github.pr.merged","vcs.repository.name":"o/r","vcs.pr.number":999}}'
+run "filter rejects github.pr.merged with no orch id and unknown PR (CTL-398)" \
+  assert_no_match "$EVENT_L2" "$FILTER_FILE"
+
+# (l3) CTL-398: github.pr.merged attributed to a DIFFERENT orchestrator —
+# must NOT match (orch id doesn't match this orch's name).
+EVENT_L3='{"attributes":{"event.name":"github.pr.merged","catalyst.orchestrator.id":"orch-other-2026-05-04","vcs.repository.name":"o/r","vcs.pr.number":999}}'
+run "filter rejects github.pr.merged attributed to a foreign orchestrator (CTL-398)" \
+  assert_no_match "$EVENT_L3" "$FILTER_FILE"
 
 # ── 16b. canonical-only broker emissions — not matched (CTL-372) ────────────
 #
