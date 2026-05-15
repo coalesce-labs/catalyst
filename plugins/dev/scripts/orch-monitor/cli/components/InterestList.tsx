@@ -19,7 +19,7 @@ interface InterestListProps {
 
 const COL_ORCH = 25;
 const COL_WORKER = 28;
-const COL_TYPE = 16;
+const COL_TYPE = 18;
 const COL_WATCHES = 28;
 
 function interestTypeLabel(t: BrokerInterest["interest_type"]): string {
@@ -42,7 +42,7 @@ export function InterestList({
   cols,
   brokerState,
 }: InterestListProps) {
-  const promptW = Math.max(8, cols - COL_ORCH - COL_WORKER - COL_TYPE - COL_WATCHES - 5);
+  const promptW = Math.max(8, cols - COL_ORCH - COL_WORKER - COL_TYPE - COL_WATCHES - 6);
   const visible = interests.slice(scrollOffset, scrollOffset + visibleRows);
   const hasProse = interests.some((i) => i.interest_type === null);
   // proseEnabled is only false (not undefined) when the broker has explicitly written the field.
@@ -53,7 +53,7 @@ export function InterestList({
       <Box flexDirection="row">
         <Box width={COL_ORCH} flexShrink={0} marginRight={1}><Text bold color="cyan">ORCHESTRATOR</Text></Box>
         <Box width={COL_WORKER} flexShrink={0} marginRight={1}><Text bold color="cyan">WORKER</Text></Box>
-        <Box width={COL_TYPE} flexShrink={0} marginRight={1}><Text bold color="cyan">TYPE</Text></Box>
+        <Box width={COL_TYPE} flexShrink={0} marginRight={2}><Text bold color="cyan">TYPE</Text></Box>
         <Box width={COL_WATCHES} flexShrink={0} marginRight={1}><Text bold color="cyan">WATCHES</Text></Box>
         <Box flexGrow={1}>
           <Text bold color="cyan">PROMPT</Text>
@@ -88,7 +88,7 @@ export function InterestList({
             <Box width={COL_WORKER} flexShrink={0} marginRight={1}>
               <Text dimColor={isInactiveProse && !selected} color={selected ? "black" : "magenta"} inverse={selected}>{worker}</Text>
             </Box>
-            <Box width={COL_TYPE} flexShrink={0} marginRight={1}>
+            <Box width={COL_TYPE} flexShrink={0} marginRight={2}>
               <Text dimColor={isInactiveProse && !selected} color={i.interest_type ? "green" : "yellow"} inverse={selected}>{type}</Text>
             </Box>
             <Box width={COL_WATCHES} flexShrink={0} marginRight={1}>
