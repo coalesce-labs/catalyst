@@ -226,21 +226,38 @@ jq -nc \
 
 Omit `wake_on` (or pass `null`) to fire on all of the above.
 
-### Wake Event Shape
+### Wake Event Shape (Canonical On-Disk Form)
 
 ```json
 {
-  "event": "filter.wake.sess_20260508_abcd",
-  "orchestrator": "my-orch",
-  "worker": null,
-  "detail": {
-    "reason": "Ticket CTL-275 marked Done",
-    "source_event_ids": ["..."],
-    "interest_id": "sess_20260508_abcd",
-    "ticket": "CTL-275"
+  "ts": "2026-05-08T18:25:00.000Z",
+  "id": "<uuid>",
+  "resource": { "service.name": "catalyst.broker" },
+  "attributes": {
+    "event.name": "filter.wake.sess_20260508_abcd",
+    "catalyst.orchestrator.id": "my-orch"
+  },
+  "body": {
+    "payload": {
+      "reason": "Ticket CTL-275 marked Done",
+      "source_event_ids": ["<uuid>"],
+      "source_events": [{
+        "id": "<uuid>",
+        "name": "linear.issue.state_changed",
+        "ts": "2026-05-08T18:24:58.000Z",
+        "ticket": "CTL-275",
+        "pr": null,
+        "repo": null,
+        "payload_excerpt": { "state": "Done", "stateType": "completed" }
+      }],
+      "interest_id": "sess_20260508_abcd",
+      "ticket": "CTL-275"
+    }
   }
 }
 ```
+
+See §10 for the complete field reference and `wake-extract` accessor.
 
 ### Waiting for a Ticket Wake
 
@@ -356,18 +373,37 @@ jq -nc \
 | Worker: `body.payload.to == reg.subscriber_ticket` OR `body.payload.to == "all"` | required for worker subscribers |
 | Worker: sender (`catalyst.worker.ticket`) != `reg.subscriber_ticket` | self-loop guard |
 
-### Wake Event Shape
+### Wake Event Shape (Canonical On-Disk Form)
 
 ```json
 {
-  "event": "filter.wake.orch-2026-05-12",
-  "detail": {
-    "reason": "Worker CTL-352 posted attention on orch-orch-2026-05-12",
-    "source_event_ids": ["..."],
-    "interest_id": "orch-2026-05-12-comms"
+  "ts": "2026-05-08T18:26:00.000Z",
+  "id": "<uuid>",
+  "resource": { "service.name": "catalyst.broker" },
+  "attributes": {
+    "event.name": "filter.wake.orch-2026-05-12",
+    "catalyst.orchestrator.id": "orch-2026-05-12"
+  },
+  "body": {
+    "payload": {
+      "reason": "Worker CTL-352 posted attention on orch-orch-2026-05-12",
+      "source_event_ids": ["<uuid>"],
+      "source_events": [{
+        "id": "<uuid>",
+        "name": "comms.message.posted",
+        "ts": "2026-05-08T18:25:59.000Z",
+        "ticket": "CTL-352",
+        "pr": null,
+        "repo": null,
+        "payload_excerpt": { "action": "attention" }
+      }],
+      "interest_id": "orch-2026-05-12-comms"
+    }
   }
 }
 ```
+
+See §10 for the complete field reference and `wake-extract` accessor.
 
 ## 5. `pr_lifecycle` Interest Type (CTL-284 — Unchanged)
 
@@ -466,3 +502,167 @@ if ! catalyst-broker status | grep -q "^running"; then
     --timeout 300 2>/dev/null || true)
 fi
 ```
+
+## 10. Wake Event Envelope Reference
+
+All `filter.wake.*` events written to the event log use the canonical OTel envelope
+(CTL-300). This section documents every field so skills can extract data from the wake
+payload directly rather than making round-trip REST/GraphQL calls.
+
+### Canonical On-Disk Shape
+
+```json
+{
+  "ts": "2026-05-08T18:25:00.000Z",
+  "id": "<uuid>",
+  "observedTs": "2026-05-08T18:25:00.000Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "resource": {
+    "service.name": "catalyst.broker",
+    "service.namespace": "catalyst"
+  },
+  "attributes": {
+    "event.name": "filter.wake.<interest_id>",
+    "catalyst.orchestrator.id": "<orch-id or null>",
+    "vcs.repository.name": "<org/repo or null>"
+  },
+  "body": {
+    "payload": {
+      "reason": "<human-readable why this fired>",
+      "source_event_ids": ["<uuid>"],
+      "source_events": [ /* compact source summaries — see below */ ],
+      "interest_id": "<id>",
+      "ticket": "<CTL-XXX or null>"
+    }
+  }
+}
+```
+
+### `body.payload` Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `reason` | string | Human-readable description of why the broker fired |
+| `source_event_ids` | string[] | UUIDs of the raw events that matched the interest |
+| `source_events` | object[] | Compact summaries of the source events (CTL-350) — see below |
+| `interest_id` | string | Which interest registration matched |
+| `ticket` | string\|null | Linear ticket ID — **only set on `ticket_lifecycle` wakes** |
+
+`source_events` is empty on watchdog wakes (stale interest, dead session).
+
+### `source_events[]` Element Structure
+
+Each element is a compact summary of one matching raw event:
+
+```json
+{
+  "id": "<event-uuid>",
+  "name": "github.check_suite.completed",
+  "ts": "2026-05-08T18:24:55.000Z",
+  "ticket": null,
+  "pr": 342,
+  "repo": "org/repo",
+  "message": "github.check_suite.completed in org/repo (truncated to 200 chars)",
+  "payload_excerpt": {
+    "state": null,
+    "stateType": null,
+    "conclusion": "failure",
+    "title": null,
+    "merged": null,
+    "action": null
+  },
+  "lookup_jq": "jq 'select(.id == \"<uuid>\")' ~/catalyst/events/2026-05.jsonl"
+}
+```
+
+`payload_excerpt` always has these six keys; any key not applicable to the source event type is `null`:
+
+| Key | Populated for |
+|---|---|
+| `conclusion` | `github.check_suite.completed`, `github.workflow_run.completed` |
+| `state` | `github.pr_review.submitted` (review state), `linear.issue.state_changed` |
+| `stateType` | `linear.issue.state_changed` (Linear state type: `completed`, `started`, etc.) |
+| `merged` | `github.pr.merged` → `true` |
+| `action` | `comms.message.posted` (message type: `attention`, `info`, `done`) |
+| `title` | `github.pr.opened`, `linear.issue.*` |
+
+### Wake Reason Strings by Interest Type
+
+#### `pr_lifecycle`
+
+| Source event | `reason` pattern |
+|---|---|
+| `github.check_suite.completed` (failure/timed_out) | `"CI failing on PR #N — check_suite conclusion: failure"` |
+| `github.check_suite.completed` (success) | `"All CI checks passing on PR #N"` |
+| `github.pr.merged` | `"PR #N merged (merge commit: SHA). Now waiting for deployment..."` |
+| `github.pr.closed` (not merged) | `"PR #N closed without merging"` |
+| `github.pr_review.submitted` (bot, changes_requested) | `"Automated review comment from {reviewer} (bot): Changes requested on PR #N..."` |
+| `github.pr_review.submitted` (human, changes_requested) | `"Changes requested by {reviewer} on PR #N..."` |
+| `github.pr_review.submitted` (approved) | `"PR #N approved by {reviewer}"` |
+| `github.pr_review_comment.created` | `"{author}: '{body}'. Comment must be marked resolved..."` |
+| `github.pr_review_thread.resolved` | `"Review thread {threadId} resolved on PR #N"` |
+| `github.deployment.created` | `"Deployment started for merge commit {sha} on environment {env}"` |
+| `github.deployment_status.success` | `"Deployment succeeded on {env}. Work is complete."` |
+| `github.deployment_status.failure/error` | `"Deployment failed on {env}. URL: {url}"` |
+| `github.push` to base branch | `"Base branch {branch} updated — PR #N is now behind. Rebase may be needed."` |
+
+#### `ticket_lifecycle`
+
+| Source event | `reason` pattern |
+|---|---|
+| `linear.issue.state_changed` (Done) | `"Ticket {id} marked Done"` |
+| `linear.issue.state_changed` (In Review) | `"Ticket {id} moved to In Review"` |
+| `linear.issue.state_changed` (other) | `"Ticket {id} state changed to {state}"` |
+| `linear.issue.updated` | `"Ticket {id} updated"` |
+| `linear.comment.created` | `"New comment on {id} by {author}"` |
+| `github.pr.opened` (linked ticket) | `"PR #N opened on ticket {id}"` |
+| `github.pr.merged` (linked ticket) | `"PR #N on ticket {id} merged"` |
+
+#### `comms_lifecycle`
+
+| Subscriber kind | `reason` pattern |
+|---|---|
+| orchestrator | `"Worker {ticket} posted {type} on {channel}"` |
+| worker | `"Message to {ticket} ({type}) on {channel} from {sender}"` |
+
+### `wake-extract` — Typed Accessor
+
+`catalyst-events wake-extract` normalizes a `filter.wake.*` event into a flat JSON object
+so skills do not need to hand-roll `jq` paths into `source_events[0].payload_excerpt.*`:
+
+```bash
+EVENT=$(catalyst-events wait-for \
+  --filter ".attributes.\"event.name\" | startswith(\"filter.wake.${CATALYST_SESSION_ID}\")" \
+  --timeout 600)
+
+FIELDS=$(echo "$EVENT" | catalyst-events wake-extract)
+
+# Read normalized fields without knowing the source event type
+PR_NUMBER=$(echo "$FIELDS"      | jq -r '.pr_number // empty')
+CI_CONCLUSION=$(echo "$FIELDS"  | jq -r '.ci_conclusion // empty')
+REVIEW_STATE=$(echo "$FIELDS"   | jq -r '.review_state // empty')
+MERGED=$(echo "$FIELDS"         | jq -r '.merged // empty')
+REASON=$(echo "$FIELDS"         | jq -r '.reason')
+```
+
+`wake-extract` output shape:
+
+```json
+{
+  "event_name": "github.check_suite.completed",
+  "interest_id": "sess_20260508_abcd",
+  "reason": "CI failing on PR #342 — check_suite conclusion: failure",
+  "pr_number": 342,
+  "ticket": null,
+  "repo": "org/repo",
+  "ci_conclusion": "failure",
+  "review_state": null,
+  "merged": null,
+  "action": null,
+  "source_event_id": "<uuid>"
+}
+```
+
+All fields are nullable. Fields not applicable to the source event type are `null`.
+When `source_events` is empty (watchdog wakes), all fields except `interest_id` and `reason` are `null` — treat the wake as a "go re-check" signal in that case.

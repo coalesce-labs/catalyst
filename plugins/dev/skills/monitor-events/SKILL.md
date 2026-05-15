@@ -312,6 +312,51 @@ skills:
 The narration line is not for the agent — it is for the *operator reading the
 transcript later*. Treat the wake as a question; treat the line as the answer.
 
+## Reading broker wake payloads
+
+When the broker daemon is running and a `filter.wake.*` event arrives, the payload contains
+richer context than just the `reason` string. Use `catalyst-events wake-extract` to normalize
+the varied payload shapes into a single predictable object:
+
+```bash
+EVENT=$(catalyst-events wait-for \
+  --filter ".attributes.\"event.name\" | startswith(\"filter.wake.${CATALYST_SESSION_ID}\")" \
+  --timeout 600)
+
+# Narrate the wake (mandatory — see Narration section above)
+FIELDS=$(echo "$EVENT" | catalyst-events wake-extract)
+REASON=$(echo "$FIELDS"   | jq -r '.reason // "unknown"')
+INTEREST=$(echo "$FIELDS" | jq -r '.interest_id // "unknown"')
+echo "wake: filter.wake [interest=${INTEREST}] — ${REASON}"
+
+# Branch on normalized fields instead of re-querying GitHub/Linear
+CI_CONCLUSION=$(echo "$FIELDS" | jq -r '.ci_conclusion // empty')
+REVIEW_STATE=$(echo "$FIELDS"  | jq -r '.review_state // empty')
+MERGED=$(echo "$FIELDS"        | jq -r '.merged // empty')
+
+case "$CI_CONCLUSION" in
+  failure|timed_out)
+    # CI failed — pull logs, fix, push without a separate gh api call
+    ;;
+esac
+case "$MERGED" in
+  true)
+    # PR merged event in the payload — still confirm via gh api REST before declaring done
+    ;;
+esac
+```
+
+See [[broker]] §10 for the complete `wake-extract` output schema and the per-interest-type
+reason string catalogue.
+
+**When `source_events` is empty** (watchdog wakes, some Groq prose wakes): all `wake-extract`
+fields are `null` except `interest_id` and `reason`. Treat the wake as a "go re-check" signal
+and fall back to the authoritative REST check.
+
+**Pattern 2/3 fallback (no broker):** the raw event patterns in this skill use raw
+`github.*` events from `wait-for`, not `filter.wake.*` wakes — `wake-extract` does not apply
+to those paths.
+
 ## Pattern 3 — Reactive PR lifecycle (multi-event wait + classify + dispatch)
 
 Pattern 1's single-event wait is fine for the happy path: the PR merges, the
