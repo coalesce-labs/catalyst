@@ -200,9 +200,13 @@ fi
 # When the daemon is not running, the loop falls back to direct catalyst-events wait-for.
 
 broker_daemon_running() {
-  command -v catalyst-broker >/dev/null 2>&1 || \
-    command -v catalyst-filter >/dev/null 2>&1 || return 1
-  { catalyst-broker status 2>/dev/null || catalyst-filter status 2>/dev/null; } | grep -q "^running"
+  if command -v catalyst-broker >/dev/null 2>&1; then
+    catalyst-broker probe 2>/dev/null
+  elif command -v catalyst-filter >/dev/null 2>&1; then
+    catalyst-filter status 2>/dev/null | grep -q "^running"
+  else
+    return 1
+  fi
 }
 
 # CTL-429: retry wrapper — daemon may be starting up or momentarily unavailable.
@@ -748,6 +752,15 @@ PR_BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName' 
 if broker_claim_pr "$PR_NUMBER" "$TICKET_ID" "$(git branch --show-current)" "$REPO" "$PR_BASE_BRANCH"; then
   USE_FILTER_DAEMON=true
   echo "[Phase 5] Broker registered pr_lifecycle for session ${CATALYST_SESSION_ID} on PR #${PR_NUMBER}"
+else
+  # Broker absent or unavailable — emit debug telemetry and proceed with two-phase fallback
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg sid "${CATALYST_SESSION_ID:-}" \
+    --arg pr "${PR_NUMBER:-}" \
+    '{ts: (now | todate), event: "broker.fallback.taken",
+      detail: {reason: "daemon absent", session_id: $sid, pr: ($pr | tonumber? // $pr)}}')" \
+    2>/dev/null || true
+  echo "[Phase 5] Broker unavailable — using two-phase wait-for fallback for PR #${PR_NUMBER}"
 fi
 
 CI_FIX_ATTEMPTS=0

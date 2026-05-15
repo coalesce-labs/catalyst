@@ -1,15 +1,15 @@
 ---
 name: wait-for-github
-version: 1.1.0
+version: 1.2.0
 description:
-  Reference for the safe two-phase GitHub event wait pattern. Use when a skill needs to block
-  on a GitHub PR event (merged, CI complete, review submitted) without hitting GraphQL rate
-  limits. Replaces `gh pr view --json` polling loops with `catalyst-events wait-for` plus a
-  REST-only fallback. Includes a 3-minute diagnostic checkpoint to detect silent filter
-  mismatches before they cause multi-hour stalls.
+  Reference for safe GitHub event waits. Preferred path uses broker auto-detect (broker_claim_pr
+  + filter.wake) for deterministic routing; falls back to two-phase catalyst-events wait-for
+  when the daemon is absent. Includes a 3-minute diagnostic checkpoint to catch silent filter
+  mismatches before they cause multi-hour stalls. Not a slash command — reference doc for skill
+  authors.
 ---
 
-# wait-for-github — Safe two-phase GitHub event wait
+# wait-for-github — Safe GitHub event wait
 
 ## What this is for
 
@@ -42,7 +42,83 @@ fi
 If `catalyst-monitor` is not running or the tunnel is not connected, skip to the REST fallback.
 Do not attempt event-driven waits against a dead daemon.
 
-## Phase 1 — Short wait with diagnostic checkpoint (3 minutes)
+## Preferred path: broker auto-detect
+
+When the broker daemon is running, register via `broker_claim_pr` so the broker auto-derives a
+`pr_lifecycle` interest and wakes this worker via `filter.wake.${CATALYST_SESSION_ID}`. This
+single semantic wake covers all concerns (CI, reviews, comms, BEHIND) with routing-layer dedup
+and watchdog support. When the daemon is absent, fall back to the two-phase raw event wait.
+
+`broker_claim_pr` handles the health check internally via `wait_for_broker_ready`, which retries
+up to 3 times (CTL-429) before declaring the daemon absent.
+
+### Prerequisites
+
+These must be defined before calling `broker_claim_pr`:
+
+- `$CATALYST_SESSION_ID` — set by `catalyst-session.sh start` at oneshot startup
+- `$STATE_SCRIPT` — path to `catalyst-state.sh` (set at oneshot startup)
+- `broker_claim_pr`, `wait_for_broker_ready`, `broker_daemon_running` functions from `oneshot/SKILL.md`
+
+### Snippet
+
+```bash
+USE_FILTER_DAEMON=false
+PR_BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "main")
+if broker_claim_pr "$PR_NUMBER" "$TICKET_ID" "$(git branch --show-current)" "$REPO" "$PR_BASE_BRANCH"; then
+  USE_FILTER_DAEMON=true
+  echo "[Phase 5] Broker registered pr_lifecycle for session ${CATALYST_SESSION_ID} on PR #${PR_NUMBER}"
+else
+  # Broker absent — emit telemetry and use two-phase fallback
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg sid "${CATALYST_SESSION_ID:-}" --arg pr "${PR_NUMBER:-}" \
+    '{ts: (now | todate), event: "broker.fallback.taken",
+      detail: {reason: "daemon absent", session_id: $sid, pr: ($pr | tonumber? // $pr)}}')" \
+    2>/dev/null || true
+  echo "[Phase 5] Broker unavailable — using two-phase wait-for fallback for PR #${PR_NUMBER}"
+fi
+
+PR_DONE=false
+while [ "$PR_DONE" = "false" ]; do
+  if [ "$USE_FILTER_DAEMON" = "true" ] && [ "$USE_REST" != "true" ]; then
+    # Broker path: single semantic wake covers all concerns (CI, reviews, comms, BEHIND)
+    EVENT=$(catalyst-events wait-for \
+      --filter ".attributes.\"event.name\" == \"filter.wake.${CATALYST_SESSION_ID}\"" \
+      --timeout 600 2>/dev/null || true)
+    WAKE_REASON=$(echo "$EVENT" | jq -r '.body.payload.reason // "unknown"' 2>/dev/null || echo "unknown")
+    echo "wake: filter.wake #${PR_NUMBER} — ${WAKE_REASON}"
+  else
+    # Two-phase fallback — see "Manual fallback" section below
+    EVENT=$(catalyst-events wait-for \
+      --filter "(.attributes.\"vcs.pr.number\" == ${PR_NUMBER} or (.body.payload.prNumbers // [] | contains([${PR_NUMBER}]))) and (
+        .attributes.\"event.name\" == \"github.pr.merged\" or
+        .attributes.\"event.name\" == \"github.check_suite.completed\" or
+        (.attributes.\"event.name\" | startswith(\"github.pr_review\")) or
+        .attributes.\"event.name\" == \"github.push\"
+      )" \
+      --timeout 180 2>/dev/null || true)
+    # ... run diagnostic checkpoint if empty (see "Manual fallback" section) ...
+  fi
+
+  # Authoritative REST check (never gh pr view --json)
+  PR_JSON=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" 2>/dev/null || echo '{}')
+  PR_MERGED=$(echo "$PR_JSON" | jq -r '.merged // false')
+  MERGE_STATE=$(echo "$PR_JSON" | jq -r '.mergeable_state // "unknown"')
+
+  [ "$PR_MERGED" = "true" ] && PR_DONE=true
+  # ... handle merge states (clean/blocked/behind/dirty/unknown) per oneshot Phase 5 ...
+
+  [ "$USE_REST" = "true" ] && sleep 300
+done
+```
+
+## Manual fallback: raw two-phase wait (no broker)
+
+Use this only when the broker daemon is absent (detected by `broker_claim_pr` returning non-zero
+above) or when you are not running inside an oneshot worker that has `broker_claim_pr` defined.
+This pattern wakes on raw GitHub webhook events and includes a diagnostic checkpoint.
+
+### Phase 1 — Short wait with diagnostic checkpoint (3 minutes)
 
 ```bash
 PR_NUMBER=342   # set by caller
@@ -113,7 +189,7 @@ if [ "$USE_REST" != "true" ]; then
 fi
 ```
 
-## Phase 2 — Extended wait (only after diagnostics confirm healthy)
+### Phase 2 — Extended wait (only after diagnostics confirm healthy)
 
 ```bash
 if [ "$_WFG_USE_PHASE2" = "true" ]; then
@@ -160,6 +236,7 @@ Never use these in any skill. They exhaust the GraphQL budget.
 | `--timeout 7200` as Phase 1 | Silent stall on broken filter for up to 2 hours | Two-phase: 3 min → diagnostics → 7200 s if healthy |
 | `sleep 30` poll loops | GraphQL and compute waste at scale | Event-driven wait |
 | Any field under `statusCheckRollup` | GraphQL-only field, not available in REST | `.attributes."cicd.pipeline.run.conclusion"` on `check_run.completed` events |
+| Skipping `broker_claim_pr` when broker is up | Bypasses routing-layer dedup + watchdog | Use broker auto-detect snippet above |
 
 ## Known filter pitfalls
 
@@ -174,10 +251,18 @@ Never use these in any skill. They exhaust the GraphQL budget.
 ## Quick reference
 
 ```bash
-# PR merged — two-phase pattern
+# PREFERRED: broker auto-detect (use when running inside oneshot worker)
+# broker_claim_pr registers a pr_lifecycle interest; wake fires on all PR events
+broker_claim_pr "$PR_NUMBER" "$TICKET_ID" "$(git branch --show-current)" "$REPO" "$PR_BASE_BRANCH"
+catalyst-events wait-for \
+  --filter ".attributes.\"event.name\" == \"filter.wake.${CATALYST_SESSION_ID}\"" \
+  --timeout 600
+
+# MANUAL FALLBACK: two-phase raw event wait (when broker is absent)
+# Phase 1 (3 min) + diagnostic checkpoint
 catalyst-events wait-for \
   --filter ".attributes.\"event.name\" == \"github.pr.merged\" and .attributes.\"vcs.pr.number\" == ${PR_NUMBER}" \
-  --timeout 180   # Phase 1; extend to 7200 after diagnostics
+  --timeout 180   # Phase 1; extend to 7200 after diagnostics confirm healthy
 
 # CI suite completed — note: check_suite has no vcs.pr.number; use body.payload.prNumbers
 catalyst-events wait-for \
@@ -192,6 +277,9 @@ catalyst-events wait-for \
 # REST: check PR merge state (never in a tight loop)
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged'
+
+# Probe broker health directly (exits 0 if running, non-zero if not)
+catalyst-broker probe; echo "exit=$?"
 ```
 
 ## Related skills
