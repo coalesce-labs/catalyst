@@ -165,6 +165,7 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
             scrollOffset={scrollOffset}
             visibleRows={listBodyRows}
             cols={cols - 4}
+            waitingSessions={brokerState?.waitingSessions}
           />
         )}
         {view === "orchs" && (

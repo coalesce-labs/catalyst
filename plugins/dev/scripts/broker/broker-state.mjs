@@ -92,6 +92,23 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
     )
   `);
 
+  // CTL-403: waiting_sessions tracks active wait-for loops so the watchdog can
+  // distinguish 'silently dead' (no heartbeat AND no active wait) from
+  // 'legitimately waiting' (no heartbeat BUT wait has not yet timed out).
+  db.run(`
+    CREATE TABLE IF NOT EXISTS waiting_sessions (
+      session_id   TEXT PRIMARY KEY,
+      orchestrator TEXT,
+      ticket       TEXT,
+      wait_for     TEXT,
+      timeout_ms   INTEGER NOT NULL,
+      since        TEXT NOT NULL,
+      timeout_at   TEXT NOT NULL,
+      reason       TEXT,
+      updated_at   TEXT NOT NULL
+    )
+  `);
+
   return db;
 }
 
@@ -255,6 +272,59 @@ function rowToAgent(row) {
     cwd: row.cwd,
     status: row.status,
     checkedInAt: row.checked_in_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// ─── waiting_sessions helpers (CTL-403) ──────────────────────────────────────
+
+export function upsertWaitingSession({ sessionId, orchestrator, ticket, waitFor, timeoutMs, since, reason }) {
+  const timeoutAt = new Date(new Date(since).getTime() + timeoutMs).toISOString();
+  ensure().run(
+    `INSERT INTO waiting_sessions
+       (session_id, orchestrator, ticket, wait_for, timeout_ms, since, timeout_at, reason, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(session_id) DO UPDATE SET
+       orchestrator = excluded.orchestrator,
+       ticket       = excluded.ticket,
+       wait_for     = excluded.wait_for,
+       timeout_ms   = excluded.timeout_ms,
+       since        = excluded.since,
+       timeout_at   = excluded.timeout_at,
+       reason       = excluded.reason,
+       updated_at   = excluded.updated_at`,
+    [sessionId, orchestrator ?? null, ticket ?? null, waitFor ?? null, timeoutMs, since, timeoutAt, reason ?? null, nowIso()],
+  );
+}
+
+export function clearWaitingSession(sessionId) {
+  ensure().run(`DELETE FROM waiting_sessions WHERE session_id = ?`, [sessionId]);
+}
+
+export function getWaitingSession(sessionId) {
+  const row = ensure()
+    .prepare(`SELECT * FROM waiting_sessions WHERE session_id = ?`)
+    .get(sessionId);
+  return row ? rowToWaitingSession(row) : null;
+}
+
+export function getActiveWaitingSessions(nowIso = new Date().toISOString()) {
+  return ensure()
+    .prepare(`SELECT * FROM waiting_sessions WHERE timeout_at > ? ORDER BY since`)
+    .all(nowIso)
+    .map(rowToWaitingSession);
+}
+
+function rowToWaitingSession(row) {
+  return {
+    sessionId: row.session_id,
+    orchestrator: row.orchestrator,
+    ticket: row.ticket,
+    waitFor: row.wait_for,
+    timeoutMs: row.timeout_ms,
+    since: row.since,
+    timeoutAt: row.timeout_at,
+    reason: row.reason,
     updatedAt: row.updated_at,
   };
 }
