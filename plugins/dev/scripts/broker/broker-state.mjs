@@ -71,6 +71,8 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
       updated_at    TEXT NOT NULL
     )
   `);
+  // CTL-402: add reason column to existing DBs (no-op on fresh installs).
+  try { db.run(`ALTER TABLE agents ADD COLUMN reason TEXT`); } catch { /* already exists */ }
   db.run(`
     CREATE INDEX IF NOT EXISTS idx_agents_ticket
       ON agents(ticket)
@@ -233,11 +235,20 @@ export function upsertAgent({ agentId, agentName, sessionId, orchestrator, ticke
   );
 }
 
-export function markAgentDone(agentId, status = "done") {
+export function markAgentDone(agentId, status = "done", reason = null) {
   ensure().run(
-    `UPDATE agents SET status = ?, updated_at = ? WHERE agent_id = ?`,
-    [status, nowIso(), agentId],
+    `UPDATE agents SET status = ?, updated_at = ?, reason = ? WHERE agent_id = ?`,
+    [status, nowIso(), reason ?? null, agentId],
   );
+}
+
+export function getRecentAgents(limit = 20) {
+  return ensure()
+    .prepare(
+      `SELECT agent_id, session_id, ticket, status, reason, checked_in_at, updated_at
+       FROM agents ORDER BY updated_at DESC LIMIT ?`,
+    )
+    .all(limit);
 }
 
 export function getAgentBySession(sessionId) {

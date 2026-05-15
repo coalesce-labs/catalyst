@@ -559,10 +559,11 @@ cmd_end() {
   __session_emit_canonical "$sid" "session-ended" "$payload" "$end_ts" "$sev"
 
   # CTL-303: emit agent.checkout so the broker can clean up auto-correlated interests.
+  # CTL-402: include reason so the broker can log and persist why the session ended.
   local checkout_ts; checkout_ts="$(now_iso)"
   canonical_jsonl_append "$EVENTS_DIR" \
-    "$(jq -nc --arg ts "$checkout_ts" --arg sid "$sid" --arg st "$status" \
-      '{ts:$ts,event:"agent.checkout",detail:{session_id:$sid,status:$st}}' 2>/dev/null)" 2>/dev/null || true
+    "$(jq -nc --arg ts "$checkout_ts" --arg sid "$sid" --arg st "$status" --arg reason "$reason" \
+      '{ts:$ts,event:"agent.checkout",detail:({session_id:$sid,status:$st}+if $reason!="" then {reason:$reason} else {} end)}' 2>/dev/null)" 2>/dev/null || true
 
   # CTL-157: emit claude_code.session.outcome to OTLP.
   local emit_bin="${CATALYST_EMIT_OTEL_BIN:-$SCRIPT_DIR/emit-otel-event.sh}"

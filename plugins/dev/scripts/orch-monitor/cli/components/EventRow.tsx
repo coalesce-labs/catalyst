@@ -31,6 +31,9 @@ interface EventRowProps {
 // CTL-395: explicit `width={w.details}` replaces `flexGrow={1}` so Ink pads
 // the cell to a fixed width and writes trailing spaces over any ghost chars
 // left by a prior longer string.
+// CTL-416: all columns now use wrap="truncate" (via col.wrap or the ?? fallback
+// in EventRow) so Ink writes exactly col.width chars per cell on every render,
+// overwriting stale terminal chars when shorter content replaces longer content.
 // CTL-394: columns are now data-driven via resolveColumns() — EventRow
 // iterates the resolved list so custom column order/visibility/widths from
 // ~/.config/catalyst/monitor.json are honoured without touching this file.
@@ -57,7 +60,7 @@ export function EventRow({ event, selected, columns, paused = true, wrapMode = '
       {resolved.map((col) => {
         const isDetails = col.id === "details";
         const text = col.id === "ref" ? displayRef : col.format(event);
-        const wrap = isDetails ? wrapMode : col.wrap;
+        const wrap = isDetails ? wrapMode : (col.wrap ?? "truncate");
         return (
           <Box key={col.id} width={col.width} flexShrink={0} marginRight={isDetails ? 0 : 1}>
             <Text color={color} inverse={inverse} wrap={wrap} dimColor={col.dimColor}>

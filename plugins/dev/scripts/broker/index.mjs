@@ -38,6 +38,7 @@ import {
   upsertAgent,
   markAgentDone,
   getAgentsByTicket,
+  getRecentAgents,
   // ticket_state (CTL-303 — ticket routing)
   upsertTicketState,
   // waiting_sessions (CTL-403 — wait-loop visibility)
@@ -698,9 +699,10 @@ export function handleAgentCheckout(event) {
   if (!sessionId) return;
 
   const finalStatus = d.status ?? "done";
+  const reason = d.reason ?? null;
 
   try {
-    markAgentDone(sessionId, finalStatus);
+    markAgentDone(sessionId, finalStatus, reason);
   } catch {
     /* DB not opened */
   }
@@ -719,7 +721,7 @@ export function handleAgentCheckout(event) {
     persistBrokerState();
   }
 
-  log.info({ sessionId, status: finalStatus }, "agent checked out");
+  log.info({ sessionId, status: finalStatus, reason }, "agent checked out");
 }
 
 export function handleAgentHeartbeat(event) {
@@ -904,16 +906,18 @@ export function tryDeterministicRoute(event, interestsMap) {
     if (name === "github.check_suite.completed") {
       const eventPrs = Array.isArray(detail.prNumbers) ? detail.prNumbers : [];
       const matchedPr = eventPrs.find((n) => prList.includes(n));
-      if (matchedPr !== undefined) {
-        if (detail.conclusion === "failure") {
-          reason = `CI failing on PR #${matchedPr} — check_suite conclusion: failure`;
-          wakeStateKey = `ci_conclusion:${matchedPr}`;
-          wakeStateValue = "failure";
-        } else if (detail.conclusion === "success") {
-          reason = `All CI checks passing on PR #${matchedPr}`;
-          wakeStateKey = `ci_conclusion:${matchedPr}`;
-          wakeStateValue = "success";
+      if (matchedPr !== undefined && detail.conclusion != null) {
+        const isFailing =
+          detail.conclusion === "failure" ||
+          detail.conclusion === "timed_out" ||
+          detail.conclusion === "action_required";
+        if (isFailing) {
+          reason = `CI failing on PR #${matchedPr} — check_suite conclusion: ${detail.conclusion}`;
+        } else {
+          reason = `All CI checks passing on PR #${matchedPr} — conclusion: ${detail.conclusion}`;
         }
+        wakeStateKey = `ci_conclusion:${matchedPr}`;
+        wakeStateValue = detail.conclusion;
       }
     } else if (name === "github.pr.merged") {
       if (prList.includes(scope.pr)) {
@@ -1896,6 +1900,8 @@ export function buildBrokerState({ probe } = {}) {
       enabled: GROQ_GATEWAY_ENABLED,
       baseUrl: GROQ_GATEWAY_BASE_URL,
     },
+    // CTL-402: surface recent agent exit reasons for observability.
+    recentAgents: (() => { try { return getRecentAgents(); } catch { return []; } })(),
   };
 }
 

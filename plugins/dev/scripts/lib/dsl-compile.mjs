@@ -12,6 +12,8 @@ import {
   FIELD_PATH_SET,
   isWhitelistedField,
   suggestField,
+  getFieldMeta,
+  TIME_FIELDS,
 } from "./dsl-fields.mjs";
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
@@ -50,18 +52,43 @@ export class GroqResponseError extends Error {
 
 // ─── Field validation ────────────────────────────────────────────────────────
 
-export function validateField(path) {
+const RANGE_OPS = new Set(["gt", "gte", "lt", "lte"]);
+const ISO_TS_RE = /^\d{4}-\d{2}-\d{2}T/;
+
+// validateField(path, opts?) — whitelist check + optional type-operator check.
+// opts.operator / opts.value enable rejecting range operators on enum fields or
+// timestamp values on non-time fields (CTL-415).
+export function validateField(path, opts) {
   if (typeof path !== "string" || path.length === 0) {
     return { ok: false, error: "field must be a non-empty string", suggestion: null };
   }
-  if (isWhitelistedField(path)) {
-    return { ok: true };
+  if (!isWhitelistedField(path)) {
+    return {
+      ok: false,
+      error: `unknown field: ${path}`,
+      suggestion: suggestField(path),
+    };
   }
-  return {
-    ok: false,
-    error: `unknown field: ${path}`,
-    suggestion: suggestField(path),
-  };
+  if (opts?.operator && RANGE_OPS.has(opts.operator)) {
+    const meta = getFieldMeta(path);
+    if (meta?.type === "enum") {
+      return {
+        ok: false,
+        code: "type_mismatch",
+        error: `field "${path}" has type "enum" — range operators (${opts.operator}) are not supported; did you mean "ts"?`,
+        suggestion: "ts",
+      };
+    }
+    if (typeof opts.value === "string" && ISO_TS_RE.test(opts.value) && !TIME_FIELDS.has(path)) {
+      return {
+        ok: false,
+        code: "type_mismatch",
+        error: `timestamp value applied to field "${path}" — use "ts" for time-based comparisons`,
+        suggestion: "ts",
+      };
+    }
+  }
+  return { ok: true };
 }
 
 // ─── Path access (JS evaluator helper) ───────────────────────────────────────
@@ -173,9 +200,10 @@ function compileLeaf(leaf) {
   if (typeof leaf.field !== "string") {
     throw new DslError("leaf node missing 'field'", { code: "invalid" });
   }
-  const v = validateField(leaf.field);
+  const rangeOp = ["gt", "gte", "lt", "lte"].find((o) => o in leaf);
+  const v = validateField(leaf.field, rangeOp ? { operator: rangeOp, value: leaf[rangeOp] } : undefined);
   if (!v.ok) {
-    throw new DslError(v.error, { code: "unknown_field", field: leaf.field, suggestion: v.suggestion });
+    throw new DslError(v.error, { code: v.code ?? "unknown_field", field: leaf.field, suggestion: v.suggestion });
   }
   const path = `.${leaf.field}`;
   if ("eq" in leaf)  return `(${path} == ${jqLiteral(leaf.eq)})`;
@@ -371,4 +399,4 @@ async function safeText(res) {
 }
 
 // Re-export so the test file and the CLI have one import path.
-export { CANONICAL_FIELDS, FIELD_PATH_SET, suggestField };
+export { CANONICAL_FIELDS, FIELD_PATH_SET, TIME_FIELDS, suggestField };

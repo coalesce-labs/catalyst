@@ -50,6 +50,32 @@ describe("parseSinceSpec", () => {
     expect(new Date(out!).toISOString().startsWith("2026-05-01")).toBe(true);
   });
 
+  test("strips leading ~ prefix", () => {
+    const out = parseSinceSpec("~30m");
+    expect(out).not.toBeNull();
+    const ageMs = Date.now() - new Date(out!).getTime();
+    expect(ageMs).toBeGreaterThanOrEqual(30 * 60_000 - 100);
+    expect(ageMs).toBeLessThanOrEqual(30 * 60_000 + 100);
+  });
+
+  test("parses compound duration 2h30m", () => {
+    const out = parseSinceSpec("2h30m");
+    expect(out).not.toBeNull();
+    const ageMs = Date.now() - new Date(out!).getTime();
+    const expected = (2 * 3600 + 30 * 60) * 1000;
+    expect(ageMs).toBeGreaterThanOrEqual(expected - 100);
+    expect(ageMs).toBeLessThanOrEqual(expected + 100);
+  });
+
+  test("parses compound duration 1h30m45s", () => {
+    const out = parseSinceSpec("1h30m45s");
+    expect(out).not.toBeNull();
+    const ageMs = Date.now() - new Date(out!).getTime();
+    const expected = (3600 + 30 * 60 + 45) * 1000;
+    expect(ageMs).toBeGreaterThanOrEqual(expected - 100);
+    expect(ageMs).toBeLessThanOrEqual(expected + 100);
+  });
+
   test("returns null for unparseable spec", () => {
     expect(parseSinceSpec("garbage")).toBeNull();
   });

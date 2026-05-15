@@ -96,12 +96,13 @@ export function computeDetailLayout(input: DetailLayoutInput): DetailLayoutResul
   const detailContentRows = fits
     ? Math.max(1, input.detailLineCount - 1)
     : Math.max(1, paneRows - 4);
-  const listScrollOffset = reanchorListScrollOffset(
-    input.selectedIndex,
-    input.totalEvents,
-    listRows,
-    input.currentScrollOffset,
-  );
+  // CTL-420: when the detail pane is open, keep the EventList at its current
+  // scroll position rather than jumping to pin the selected event at row 0.
+  // The detail pane already shows the selected event's content; forcing the
+  // list to scroll creates a "pinned row" effect that visually confuses the
+  // render order (selected row appears in the header area).
+  const maxListOffset = Math.max(0, input.totalEvents - listRows);
+  const listScrollOffset = Math.min(Math.max(0, input.currentScrollOffset), maxListOffset);
 
   return { detailPaneRows: paneRows, detailContentRows, listRows, listScrollOffset };
 }

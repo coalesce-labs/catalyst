@@ -205,11 +205,23 @@ broker_daemon_running() {
   { catalyst-broker status 2>/dev/null || catalyst-filter status 2>/dev/null; } | grep -q "^running"
 }
 
+# CTL-429: retry wrapper — daemon may be starting up or momentarily unavailable.
+# Tries up to 3 times with 2s gaps before declaring the daemon absent.
+wait_for_broker_ready() {
+  local max_attempts=3 attempt=0
+  while [ $attempt -lt $max_attempts ]; do
+    broker_daemon_running && return 0
+    attempt=$((attempt + 1))
+    [ $attempt -lt $max_attempts ] && sleep 2
+  done
+  return 1
+}
+
 # CTL-303: update claimed_pr in the broker via a second agent.checkin.
 # The broker auto-derives pr_lifecycle from the check-in — no explicit filter.register needed.
 broker_claim_pr() {
   # Args: $1 = PR_NUMBER, $2 = TICKET_ID, $3 = BRANCH_NAME, $4 = REPO (org/name), $5 = BASE_BRANCH (default: main)
-  broker_daemon_running || return 1
+  wait_for_broker_ready || return 1
   [ -n "${CATALYST_SESSION_ID:-}" ] || return 1
   local pr="$1" ticket="$2" repo="$4" base="${5:-main}"
   local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -262,7 +274,7 @@ filter_deregister_worker() {
 # notify_event = filter.wake.${CATALYST_SESSION_ID}, so the Phase 5 listen
 # loop predicate is unchanged. Best-effort; broker absence is fine.
 broker_register_comms() {
-  broker_daemon_running || return 0
+  wait_for_broker_ready || return 0
   [ -n "${CATALYST_SESSION_ID:-}" ] || return 0
   [ -n "${CATALYST_COMMS_CHANNEL:-}" ] || return 0
   [ -n "${TICKET_ID:-}" ] || return 0
@@ -506,7 +518,8 @@ fi
 
 ```bash
 if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
-  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done  # or --status failed
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done --reason "PR merged"
+  # or: "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "<why>"
 fi
 ```
 
@@ -818,7 +831,7 @@ while [ "$PR_DONE" = "false" ]; do
       "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
     comms_post attention "stalled: ${ERROR_MSG}"
     if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
-      "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed
+      "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "changes requested by ${LAST_CR}"
     fi
     exit 1
   fi
@@ -854,7 +867,7 @@ while [ "$PR_DONE" = "false" ]; do
           "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
         comms_post attention "stalled: ${ERROR_MSG}"
         if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
-          "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed
+          "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "CI blocked after ${MAX_CI_FIX_ATTEMPTS} fix attempts"
         fi
         exit 1
       fi
@@ -874,7 +887,7 @@ while [ "$PR_DONE" = "false" ]; do
         "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
       comms_post attention "stalled: ${ERROR_MSG}"
       if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
-        "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed
+        "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "merge conflicts (DIRTY)"
       fi
       exit 1
       ;;
@@ -908,7 +921,7 @@ if [ "$MERGED_OK" != "true" ]; then
     '.status = $status | .updatedAt = $ts' \
     "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
   if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
-    "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed
+    "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "merge not confirmed via REST"
   fi
   exit 1
 fi
@@ -952,7 +965,7 @@ if [ "$SKIP_DEPLOY" != "true" ] && [ -n "$MERGE_COMMIT_SHA" ]; then
         "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
       comms_post attention "deploy-failed: ${PROD_ENV} deploy failed for PR #${PR_NUMBER}"
       if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
-        "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed
+        "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "deployment failed in ${PROD_ENV}"
       fi
       exit 1
     fi
@@ -989,7 +1002,7 @@ fi
 # End session
 if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
   "$SESSION_SCRIPT" pr "$CATALYST_SESSION_ID" --number "$PR_NUMBER" --url "$PR_URL"
-  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done --reason "PR merged"
 fi
 
 # CTL-111: post done to shared comms channel
@@ -1262,7 +1275,7 @@ run:
 
 ```bash
 if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
-  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed
+  "$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status failed --reason "<why it failed>"
 fi
 ```
 

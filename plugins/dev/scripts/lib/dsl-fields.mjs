@@ -109,3 +109,11 @@ export function suggestField(path, maxDistance = 4) {
   }
   return bestDist <= maxDistance ? best : null;
 }
+
+export function getFieldMeta(path) {
+  return CANONICAL_FIELDS.find((f) => f.path === path) ?? null;
+}
+
+// Fields whose values are ISO 8601 timestamps — the only string fields that
+// accept range comparisons (gt/gte/lt/lte) with timestamp values.
+export const TIME_FIELDS = new Set(["ts", "observedTs"]);
