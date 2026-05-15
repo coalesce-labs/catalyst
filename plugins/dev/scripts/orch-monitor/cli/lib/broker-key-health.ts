@@ -18,6 +18,16 @@ export interface BrokerKeyHealth {
   };
 }
 
+// CTL-403: active wait-loop session record surfaced in broker.state.json.
+export interface WaitingSession {
+  sessionId: string;
+  ticket?: string | null;
+  orchestrator?: string | null;
+  waitFor?: string | null;
+  timeoutAt: string;
+  reason?: string | null;
+}
+
 // CTL-352: broader read of broker.state.json including the new liveness
 // fields (interestCount, lastWakeAt, lastRegisterAt, startedAt). The legacy
 // BrokerKeyHealth shape is preserved as a subset for existing consumers.
@@ -26,6 +36,8 @@ export interface BrokerState extends BrokerKeyHealth {
   lastWakeAt?: string | null;
   lastRegisterAt?: string | null;
   startedAt?: string;
+  // CTL-403: sessions currently blocking in a wait-for loop.
+  waitingSessions?: WaitingSession[];
 }
 
 export type BrokerInterestStatus = "ok" | "startup" | "degraded" | "unknown";
@@ -94,6 +106,20 @@ export function readBrokerState(path?: string): BrokerState | null {
       result.lastRegisterAt = obj.lastRegisterAt;
     }
     if (typeof obj.startedAt === "string") result.startedAt = obj.startedAt;
+    // CTL-403: parse waitingSessions array.
+    if (Array.isArray(obj.waitingSessions)) {
+      result.waitingSessions = obj.waitingSessions
+        .filter((s): s is Record<string, unknown> => !!s && typeof s === "object")
+        .map((s) => ({
+          sessionId: typeof s.sessionId === "string" ? s.sessionId : "",
+          ticket: typeof s.ticket === "string" ? s.ticket : null,
+          orchestrator: typeof s.orchestrator === "string" ? s.orchestrator : null,
+          waitFor: typeof s.waitFor === "string" ? s.waitFor : null,
+          timeoutAt: typeof s.timeoutAt === "string" ? s.timeoutAt : "",
+          reason: typeof s.reason === "string" ? s.reason : null,
+        }))
+        .filter((s) => s.sessionId && s.timeoutAt);
+    }
     return result;
   } catch {
     return null;
