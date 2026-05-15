@@ -1,5 +1,63 @@
 # Changelog
 
+## [9.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.2.0...catalyst-dev-v9.3.0) (2026-05-15)
+
+
+### Features
+
+* **dev:** --version flag on every catalyst-* CLI + commit hash (CTL-390) ([#667](https://github.com/coalesce-labs/catalyst/issues/667)) ([e6c85a1](https://github.com/coalesce-labs/catalyst/commit/e6c85a130e1a26700842f85933cc786229ff441e))
+* **dev:** add reason field to agent.checkout payload (CTL-402) ([#725](https://github.com/coalesce-labs/catalyst/issues/725)) ([dab0fac](https://github.com/coalesce-labs/catalyst/commit/dab0face199316290d80b050ef1dad8707a9bd9e))
+* **dev:** add SESSION column to HUD Interests dashboard (CTL-422) ([#739](https://github.com/coalesce-labs/catalyst/issues/739)) ([bd0a61f](https://github.com/coalesce-labs/catalyst/commit/bd0a61fcfd6edce53feb35602a64c4d949dea525))
+* **dev:** add wake-extract CLI + document wake payload schema (CTL-408) ([#726](https://github.com/coalesce-labs/catalyst/issues/726)) ([939550e](https://github.com/coalesce-labs/catalyst/commit/939550e139c66b8b2af10f11735f72caecaa0b77))
+* **dev:** add WORKER column to HUD interests table (CTL-427) ([#743](https://github.com/coalesce-labs/catalyst/issues/743)) ([cd8b811](https://github.com/coalesce-labs/catalyst/commit/cd8b811727552d1922f6444f21e87f7a18dd2787))
+* **dev:** broker wait-loop visibility — worker.waiting/resumed events (CTL-403) ([#717](https://github.com/coalesce-labs/catalyst/issues/717)) ([fa030f5](https://github.com/coalesce-labs/catalyst/commit/fa030f5b17b6d2fbf9f6f3cae250be927ede08e5))
+* **dev:** broker_claim_pr as easy path — probe command + fallback telemetry (CTL-409) ([#744](https://github.com/coalesce-labs/catalyst/issues/744)) ([16cc5dc](https://github.com/coalesce-labs/catalyst/commit/16cc5dcdeb0944fffa3fbccba205263f70fab1bf))
+* **dev:** emit orchestrator.status events for self-status announcements (CTL-405) ([#738](https://github.com/coalesce-labs/catalyst/issues/738)) ([c1679bb](https://github.com/coalesce-labs/catalyst/commit/c1679bb48f3e2808017de08bb5daa0a9340b1934))
+* **dev:** expand REPO column coverage across canonical event emitters (CTL-385) ([#665](https://github.com/coalesce-labs/catalyst/issues/665)) ([baf2d7d](https://github.com/coalesce-labs/catalyst/commit/baf2d7d6bf04a8bb0716918701e9466feff579d8))
+* **dev:** HUD — relocate EVENT-ID from row to detail pane (CTL-393) ([#684](https://github.com/coalesce-labs/catalyst/issues/684)) ([13af477](https://github.com/coalesce-labs/catalyst/commit/13af47768b82a229047fc570c40349d0aca943e5))
+* **dev:** HUD — show raw event.name in EVENT column; split icon into its own 1-char column (CTL-391) ([#668](https://github.com/coalesce-labs/catalyst/issues/668)) ([eb7e70d](https://github.com/coalesce-labs/catalyst/commit/eb7e70d72075f413d30476f49187056a15a3e70e))
+* **dev:** HUD — unified Claude-Code-style prompt input box (CTL-386) ([#688](https://github.com/coalesce-labs/catalyst/issues/688)) ([4d569e3](https://github.com/coalesce-labs/catalyst/commit/4d569e3ac7500cfb82f5c0d6dbdcb5a14b4cb7f2))
+* **dev:** HUD :since — first-class filter (overlay, ESC, footer chip) (CTL-387) ([#663](https://github.com/coalesce-labs/catalyst/issues/663)) ([3e71819](https://github.com/coalesce-labs/catalyst/commit/3e7181961982a6d51df1b6f6b96eff55d1233748))
+* **dev:** HUD broker/worker dashboard view (CTL-392) ([#678](https://github.com/coalesce-labs/catalyst/issues/678)) ([917ebdb](https://github.com/coalesce-labs/catalyst/commit/917ebdb1b204aa4f1fc1441d8129ce8b0a6285b0))
+* **dev:** HUD Claude Code-style full-width input bar with separate status line (CTL-417) ([#736](https://github.com/coalesce-labs/catalyst/issues/736)) ([e641ea4](https://github.com/coalesce-labs/catalyst/commit/e641ea477a28947c3252b12e165d1a672d095206))
+* **dev:** HUD Escape progressively undoes state — scope reset + live-tail resume (CTL-423) ([#740](https://github.com/coalesce-labs/catalyst/issues/740)) ([3321ace](https://github.com/coalesce-labs/catalyst/commit/3321acea7f84ff6f98bcd8efff3ad0c7809116c9))
+* **dev:** HUD Runs tab showing orchestrator → tickets/workers hierarchy (CTL-426) ([#742](https://github.com/coalesce-labs/catalyst/issues/742)) ([f3c85e6](https://github.com/coalesce-labs/catalyst/commit/f3c85e6ae6be36442770730a49dfa845e688f81f))
+* **dev:** HUD unified active-filter indicator in footer (CTL-389) ([#685](https://github.com/coalesce-labs/catalyst/issues/685)) ([bb74832](https://github.com/coalesce-labs/catalyst/commit/bb748328b2b3a06d4c760f6e7e2a1f27544b7ce0))
+* **dev:** HUD user-configurable column display and order (CTL-394) ([#691](https://github.com/coalesce-labs/catalyst/issues/691)) ([77ae454](https://github.com/coalesce-labs/catalyst/commit/77ae4544d12d1547e6239aa71634119b04742e97))
+* **dev:** HUD Workers/Orchestrators tabs — sortable columns (CTL-425) ([#741](https://github.com/coalesce-labs/catalyst/issues/741)) ([165d7a7](https://github.com/coalesce-labs/catalyst/commit/165d7a787efabf5a93f3f95ee18fc0996d4a8f9b))
+* **dev:** HUD wrap-mode toggle — 'w' key to flip truncate/wrap (CTL-384) ([#683](https://github.com/coalesce-labs/catalyst/issues/683)) ([b8584e1](https://github.com/coalesce-labs/catalyst/commit/b8584e1753d419ffc506f41fce5ca8c3e17359a9))
+* **dev:** per-event-class DETAILS formatting for GitHub and Linear events (CTL-418) ([#732](https://github.com/coalesce-labs/catalyst/issues/732)) ([db3f111](https://github.com/coalesce-labs/catalyst/commit/db3f1114a243b0542f52ef694a4060548786327f))
+* **dev:** populate vcs.pr.number + vcs.ref.name on check_suite/workflow_run (CTL-396) ([#687](https://github.com/coalesce-labs/catalyst/issues/687)) ([efdae78](https://github.com/coalesce-labs/catalyst/commit/efdae7873f32cf10fc8a8f4f4764eebcf01584fd))
+* **dev:** surface prose interest disabled status in HUD (CTL-421) ([#720](https://github.com/coalesce-labs/catalyst/issues/720)) ([e38636e](https://github.com/coalesce-labs/catalyst/commit/e38636e69f93bd7a651f44ec6fd52e13385cb446))
+* **dev:** wire SubagentStop/Stop hooks as agent.checkout fallback (CTL-404) ([#714](https://github.com/coalesce-labs/catalyst/issues/714)) ([5d313e7](https://github.com/coalesce-labs/catalyst/commit/5d313e7ee080f2fd6ce6166a6361f44fa63b9cbe))
+
+
+### Bug Fixes
+
+* **dev:** add 1-character left margin to HUD root container (CTL-430) ([#734](https://github.com/coalesce-labs/catalyst/issues/734)) ([37777c9](https://github.com/coalesce-labs/catalyst/commit/37777c96905e6c05f36583b672f5571257fa398a))
+* **dev:** add retry loop to broker_claim_pr and broker_register_comms (CTL-429) ([#731](https://github.com/coalesce-labs/catalyst/issues/731)) ([3c87905](https://github.com/coalesce-labs/catalyst/commit/3c879056b4b285f8c30bddb3bb120ff9b8282731))
+* **dev:** apply wrap=truncate to all HUD columns to eliminate ghost chars (CTL-416) ([#730](https://github.com/coalesce-labs/catalyst/issues/730)) ([d34c71f](https://github.com/coalesce-labs/catalyst/commit/d34c71f594e983b5854ed34a6b096ca630c1c77f))
+* **dev:** batch stale-heartbeat wakes + HUD wake recipient visibility (CTL-419) ([#722](https://github.com/coalesce-labs/catalyst/issues/722)) ([c2ebc63](https://github.com/coalesce-labs/catalyst/commit/c2ebc63266fcf59bf7615eb7eced06f007c832c8))
+* **dev:** build-orchestrator-filter drops github.pr.merged when PR not yet in signal files (CTL-398) ([#737](https://github.com/coalesce-labs/catalyst/issues/737)) ([b493715](https://github.com/coalesce-labs/catalyst/commit/b4937156cbe97d4941499d94f3ae0689e42d0f9e))
+* **dev:** dedupe filter.wake emissions by (source_event_id, interest_id) (CTL-406) ([#712](https://github.com/coalesce-labs/catalyst/issues/712)) ([985e62e](https://github.com/coalesce-labs/catalyst/commit/985e62e7c55fe20968874418d758e471df707a3d))
+* **dev:** drop comms.message.posted from Groq queue when no deterministic match (CTL-397) ([#718](https://github.com/coalesce-labs/catalyst/issues/718)) ([8f3780b](https://github.com/coalesce-labs/catalyst/commit/8f3780b422fe787dea018b44d7a7651c5e574e8f))
+* **dev:** enrich filter.wake reasons for check_suite non-success/failure conclusions (CTL-399) ([#728](https://github.com/coalesce-labs/catalyst/issues/728)) ([cfb499a](https://github.com/coalesce-labs/catalyst/commit/cfb499a217f50d25ed990e54600d9360981bf87e))
+* **dev:** HUD — eliminate ghost chars in DETAILS via explicit width (CTL-395) ([#686](https://github.com/coalesce-labs/catalyst/issues/686)) ([73c058e](https://github.com/coalesce-labs/catalyst/commit/73c058e3af2df1675b4b718f3289bc14605bfbca))
+* **dev:** HUD — truncate long orchestrator IDs in ORCH column (CTL-383) ([#662](https://github.com/coalesce-labs/catalyst/issues/662)) ([4b869fc](https://github.com/coalesce-labs/catalyst/commit/4b869fcc569b65b994cb6f4bfd0cf0b0b72a33fb))
+* **dev:** HUD detail pane no longer pins selected event at list top (CTL-420) ([#733](https://github.com/coalesce-labs/catalyst/issues/733)) ([795b2f7](https://github.com/coalesce-labs/catalyst/commit/795b2f7db03aae063675a65cc1489ef2de9a9a70))
+* **dev:** HUD pivot keys o/t pause live mode before scoping (CTL-388) ([#664](https://github.com/coalesce-labs/catalyst/issues/664)) ([9604fb7](https://github.com/coalesce-labs/catalyst/commit/9604fb7d7e21f7ee8d17d62c6c4c21bfce63065c))
+* **dev:** orchestrate-verify.sh false-positive on post-merge branch lookup (CTL-400) ([#735](https://github.com/coalesce-labs/catalyst/issues/735)) ([ef3f8e1](https://github.com/coalesce-labs/catalyst/commit/ef3f8e1599ef9611f82c80056eea39b100e5cfd0))
+* **dev:** populate REPO column for linear.* and filter.wake events (CTL-412) ([#724](https://github.com/coalesce-labs/catalyst/issues/724)) ([8b928eb](https://github.com/coalesce-labs/catalyst/commit/8b928eb1f4a0aece70844f10953fe2575bb59d39))
+* **dev:** reject range operators on wrong-typed fields in NLQ DSL (CTL-415) ([#729](https://github.com/coalesce-labs/catalyst/issues/729)) ([c150a6b](https://github.com/coalesce-labs/catalyst/commit/c150a6bd1aa2575df87fe868f86607f921058eb9))
+* **dev:** remove stale filter-input.test.ts after FilterInput.tsx deletion ([#689](https://github.com/coalesce-labs/catalyst/issues/689)) ([6b871d7](https://github.com/coalesce-labs/catalyst/commit/6b871d7a8cc31694263c745939868d8a6327846d))
+* **dev:** remove unnecessary type assertions left by CTL-394 worker ([#694](https://github.com/coalesce-labs/catalyst/issues/694)) ([e6dee50](https://github.com/coalesce-labs/catalyst/commit/e6dee50b13425ef960014f8127f02ae1e9d72dba))
+* **dev:** remove unused ink-text-input dependency from orch-monitor ([#690](https://github.com/coalesce-labs/catalyst/issues/690)) ([0fa7777](https://github.com/coalesce-labs/catalyst/commit/0fa7777a35fb420c5cf4c936f01e4f670626c59b))
+* **dev:** route bare durations to since-filter in HUD query input (CTL-414) ([#727](https://github.com/coalesce-labs/catalyst/issues/727)) ([2f0126c](https://github.com/coalesce-labs/catalyst/commit/2f0126ccdf2e3d8d4cc1c9f0799e180e5303b08b))
+* **dev:** route session.heartbeat to broker watchdog liveness map (CTL-401) ([#711](https://github.com/coalesce-labs/catalyst/issues/711)) ([f5d7649](https://github.com/coalesce-labs/catalyst/commit/f5d764946bdeb981faa0a2124d7b3193fcd5c8d1))
+* **dev:** suppress redundant broker wakes when downstream state unchanged (CTL-407) ([#719](https://github.com/coalesce-labs/catalyst/issues/719)) ([2a5293e](https://github.com/coalesce-labs/catalyst/commit/2a5293ecf324adb97f08438c7bd3aec40e9925c7))
+* **dev:** surface toState, actorName, and scalar fields in Linear webhook canonical payload (CTL-424) ([#721](https://github.com/coalesce-labs/catalyst/issues/721)) ([9e6e494](https://github.com/coalesce-labs/catalyst/commit/9e6e494f2db16e1fa8e853dcd3d9dac94d96f795))
+* **dev:** use Date.getTime() for since-filter comparison in HUD (CTL-413) ([#723](https://github.com/coalesce-labs/catalyst/issues/723)) ([81f0e34](https://github.com/coalesce-labs/catalyst/commit/81f0e3430503577527e76e2a3c4f9b77c70a52b0))
+
 ## [9.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.1.0...catalyst-dev-v9.2.0) (2026-05-14)
 
 
