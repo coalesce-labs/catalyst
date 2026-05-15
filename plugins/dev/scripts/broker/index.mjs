@@ -522,11 +522,12 @@ export function handleRegister(event) {
         : null
       : null,
     subscriber_ticket: isCommsLifecycle ? (d.subscriber_ticket ?? null) : null,
-    types_of_interest: isCommsLifecycle
-      ? Array.isArray(d.types_of_interest)
-        ? d.types_of_interest
-        : null
-      : null,
+    types_of_interest: isCommsLifecycle ? (Array.isArray(d.types_of_interest) ? d.types_of_interest : null) : null,
+    // CTL-407: suppress redundant wakes when downstream state unchanged.
+    // Defaults true for pr_lifecycle (opt-out via suppress_identical_wakes: false).
+    // False for comms_lifecycle/ticket_lifecycle (HUD and orchestrator watchers want every event).
+    suppress_identical_wakes: d.suppress_identical_wakes !== false && isPrLifecycle,
+    last_wake_state: {},
   });
 
   if (isPrLifecycle) {
@@ -889,6 +890,9 @@ export function tryDeterministicRoute(event, interestsMap) {
     if (reg.interest_type !== "pr_lifecycle") continue;
 
     let reason = null;
+    // CTL-407: dimension key + value for state-change suppression. null = always emit.
+    let wakeStateKey = null;
+    let wakeStateValue = null;
     const prList = reg.pr_numbers ?? [];
 
     if (name === "github.check_suite.completed") {
@@ -897,8 +901,12 @@ export function tryDeterministicRoute(event, interestsMap) {
       if (matchedPr !== undefined) {
         if (detail.conclusion === "failure") {
           reason = `CI failing on PR #${matchedPr} — check_suite conclusion: failure`;
+          wakeStateKey = `ci_conclusion:${matchedPr}`;
+          wakeStateValue = "failure";
         } else if (detail.conclusion === "success") {
           reason = `All CI checks passing on PR #${matchedPr}`;
+          wakeStateKey = `ci_conclusion:${matchedPr}`;
+          wakeStateValue = "success";
         }
       }
     } else if (name === "github.pr.merged") {
@@ -975,6 +983,8 @@ export function tryDeterministicRoute(event, interestsMap) {
         reason,
         sourceEventId: eventId,
         sourceEvent: summarizeEvent(event),
+        wakeStateKey,
+        wakeStateValue,
       });
     }
   }
@@ -1614,6 +1624,19 @@ export function processEvent(event) {
       log.debug({ interestId: m.interestId, sourceEventId: m.sourceEventId }, "dedup: skipping duplicate wake");
       continue;
     }
+
+    // CTL-407: suppress wake when downstream state is unchanged from last emission.
+    if (reg.suppress_identical_wakes && m.wakeStateKey !== null) {
+      if (reg.last_wake_state[m.wakeStateKey] === m.wakeStateValue) {
+        log.info(
+          { notifyEvent: reg.notify_event, wakeStateKey: m.wakeStateKey, wakeStateValue: m.wakeStateValue },
+          "suppressed redundant wake (state unchanged)",
+        );
+        continue;
+      }
+      reg.last_wake_state[m.wakeStateKey] = m.wakeStateValue;
+    }
+
     appendEvent({
       event: reg.notify_event,
       orchestrator: reg.orchestrator ?? m.interestId,
