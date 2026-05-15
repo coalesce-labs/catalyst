@@ -38,6 +38,7 @@ import {
   upsertAgent,
   markAgentDone,
   getAgentsByTicket,
+  getRecentAgents,
   // ticket_state (CTL-303 — ticket routing)
   upsertTicketState,
   // waiting_sessions (CTL-403 — wait-loop visibility)
@@ -697,9 +698,10 @@ export function handleAgentCheckout(event) {
   if (!sessionId) return;
 
   const finalStatus = d.status ?? "done";
+  const reason = d.reason ?? null;
 
   try {
-    markAgentDone(sessionId, finalStatus);
+    markAgentDone(sessionId, finalStatus, reason);
   } catch {
     /* DB not opened */
   }
@@ -718,7 +720,7 @@ export function handleAgentCheckout(event) {
     persistBrokerState();
   }
 
-  log.info({ sessionId, status: finalStatus }, "agent checked out");
+  log.info({ sessionId, status: finalStatus, reason }, "agent checked out");
 }
 
 export function handleAgentHeartbeat(event) {
@@ -1895,6 +1897,8 @@ export function buildBrokerState({ probe } = {}) {
       enabled: GROQ_GATEWAY_ENABLED,
       baseUrl: GROQ_GATEWAY_BASE_URL,
     },
+    // CTL-402: surface recent agent exit reasons for observability.
+    recentAgents: (() => { try { return getRecentAgents(); } catch { return []; } })(),
   };
 }
 
