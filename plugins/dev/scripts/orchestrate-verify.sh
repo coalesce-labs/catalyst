@@ -123,7 +123,41 @@ DIFF_RANGE="${BASE_BRANCH}..."
 PR_NUMBER=""
 PR_STATE=""
 PR_MERGE_SHA=""
-if [ -n "$BRANCH" ]; then
+
+# Prefer signal file PR metadata over branch-based lookup. After --delete-branch,
+# gh pr list --head returns nothing even with --state all, and git diff base... is
+# empty. The worker writes pr.number + pr.mergeCommitSha to the signal file before
+# deleting the branch, so use those when available.
+if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
+  SIG_PR=$(jq -r '.pr.number // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
+  SIG_SHA=$(jq -r '.pr.mergeCommitSha // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
+  if [ -n "$SIG_PR" ]; then
+    PR_NUMBER="$SIG_PR"
+    if [ -n "$SIG_SHA" ]; then
+      PR_MERGE_SHA="$SIG_SHA"
+      PR_STATE="MERGED"
+      DIFF_RANGE="${PR_MERGE_SHA}~..${PR_MERGE_SHA}"
+    else
+      # Have PR number but no merge SHA — ask REST API for authoritative state
+      REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+      if [ -n "$REPO" ]; then
+        PR_REST=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" 2>/dev/null || echo "{}")
+        if echo "$PR_REST" | jq -e '.merged == true' >/dev/null 2>&1; then
+          PR_STATE="MERGED"
+          PR_MERGE_SHA=$(echo "$PR_REST" | jq -r '.merge_commit_sha // empty' 2>/dev/null || echo "")
+          [ -n "$PR_MERGE_SHA" ] && DIFF_RANGE="${PR_MERGE_SHA}~..${PR_MERGE_SHA}"
+        elif echo "$PR_REST" | jq -e '.state == "open"' >/dev/null 2>&1; then
+          PR_STATE="OPEN"
+        else
+          PR_STATE="CLOSED"
+        fi
+      fi
+    fi
+  fi
+fi
+
+# Fall back to branch-based lookup when signal file has no pr.number
+if [ -z "$PR_NUMBER" ] && [ -n "$BRANCH" ]; then
   PR_LIST_JSON=$(gh pr list --head "$BRANCH" --state all --json number,state,mergedAt --limit 5 2>/dev/null || echo "[]")
   if [ -n "$PR_LIST_JSON" ] && [ "$PR_LIST_JSON" != "[]" ]; then
     # Prefer MERGED, then OPEN, then CLOSED

@@ -216,6 +216,49 @@ scratch_teardown
 echo
 
 # ---------------------------------------------------------------
+# NEW: Signal file pr.number+mergeCommitSha overrides empty gh pr list (CTL-400)
+# ---------------------------------------------------------------
+echo "test: signal-file pr.number+mergeCommitSha used when branch is deleted (CTL-400)"
+scratch_setup
+echo "feature" >> README.md
+git add -A && git commit -q -m "feature"
+CTL400_SHA=$(git rev-parse HEAD)
+
+# gh pr list returns [] — simulates deleted head branch after --delete-branch
+cat > "${SCRATCH}/bin/gh" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *"pr list"* ]]; then echo "[]"; exit 0; fi
+echo "stub gh: unexpected call: \$*" >&2; exit 99
+EOF
+chmod +x "${SCRATCH}/bin/gh"
+export PATH="${SCRATCH}/bin:${PATH}"
+
+# Signal file already has pr.number + pr.mergeCommitSha (written by worker before merge)
+cat > "${ORCH_DIR}/workers/TICK-CTL400.json" <<EOF
+{
+  "ticket": "TICK-CTL400",
+  "pr": {
+    "number": 698,
+    "url": "https://github.com/org/repo/pull/698",
+    "mergedAt": "2026-05-14T16:00:00Z",
+    "mergeCommitSha": "${CTL400_SHA}",
+    "ciStatus": "merged"
+  },
+  "definitionOfDone": {
+    "testsWrittenFirst": false,
+    "unitTests": {"exists": false, "count": 0},
+    "apiTests": {"exists": false, "count": 0},
+    "functionalTests": {"exists": false, "count": 0}
+  }
+}
+EOF
+run_verify "TICK-CTL400" "backend"
+echo "$OUT" | grep -q "PR #698 is MERGED" && pass "signal-file: merged PR detected via pr.number+sha" || fail "signal-file: merged PR detected" "$OUT"
+echo "$OUT" | grep -q "No PR found for branch" && fail "no false-positive when branch is deleted" "$OUT" || pass "no false-positive on deleted branch"
+scratch_teardown
+echo
+
+# ---------------------------------------------------------------
 echo
 if [ $FAILURES -eq 0 ]; then
   echo "ALL PASSED ($PASSES)"
