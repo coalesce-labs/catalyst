@@ -9,6 +9,8 @@ import {
   workerStatusColor,
 } from "../lib/dashboard-format.ts";
 
+export type WorkerSortKey = "worker" | "status" | "phase" | "pr" | "heartbeat";
+
 interface WorkerListProps {
   workers: WorkerSignal[];
   selectedIndex: number;
@@ -16,6 +18,8 @@ interface WorkerListProps {
   visibleRows: number;
   cols: number;
   waitingSessions?: WaitingSession[];
+  sortKey?: WorkerSortKey;
+  sortDir?: "asc" | "desc";
 }
 
 function findWaitingSession(ticket: string, sessions: WaitingSession[], nowMs: number): WaitingSession | null {
@@ -43,6 +47,10 @@ const COL_PHASE = 5;
 const COL_PR = 6;
 const COL_HEARTBEAT = 10;
 
+function sortIndicator(col: WorkerSortKey, sortKey: WorkerSortKey, sortDir: "asc" | "desc"): string {
+  return col === sortKey ? (sortDir === "asc" ? " ▲" : " ▼") : "";
+}
+
 export function WorkerList({
   workers,
   selectedIndex,
@@ -50,6 +58,8 @@ export function WorkerList({
   visibleRows,
   cols,
   waitingSessions = [],
+  sortKey = "heartbeat",
+  sortDir = "desc",
 }: WorkerListProps) {
   const worktreeW = Math.max(8, cols - COL_WORKER - COL_STATUS - COL_PHASE - COL_PR - COL_HEARTBEAT - 6);
   const visible = workers.slice(scrollOffset, scrollOffset + visibleRows);
@@ -58,11 +68,11 @@ export function WorkerList({
   return (
     <Box flexDirection="column" flexGrow={1}>
       <Box flexDirection="row">
-        <Box width={COL_WORKER} flexShrink={0} marginRight={1}><Text bold color="cyan">WORKER</Text></Box>
-        <Box width={COL_STATUS} flexShrink={0} marginRight={1}><Text bold color="cyan">STATUS</Text></Box>
-        <Box width={COL_PHASE} flexShrink={0} marginRight={1}><Text bold color="cyan">PHASE</Text></Box>
-        <Box width={COL_PR} flexShrink={0} marginRight={1}><Text bold color="cyan">PR</Text></Box>
-        <Box width={COL_HEARTBEAT} flexShrink={0} marginRight={1}><Text bold color="cyan">HEARTBEAT</Text></Box>
+        <Box width={COL_WORKER} flexShrink={0} marginRight={1}><Text bold color="cyan">{`WORKER${sortIndicator("worker", sortKey, sortDir)}`}</Text></Box>
+        <Box width={COL_STATUS} flexShrink={0} marginRight={1}><Text bold color="cyan">{`STATUS${sortIndicator("status", sortKey, sortDir)}`}</Text></Box>
+        <Box width={COL_PHASE} flexShrink={0} marginRight={1}><Text bold color="cyan">{`PHASE${sortIndicator("phase", sortKey, sortDir)}`}</Text></Box>
+        <Box width={COL_PR} flexShrink={0} marginRight={1}><Text bold color="cyan">{`PR${sortIndicator("pr", sortKey, sortDir)}`}</Text></Box>
+        <Box width={COL_HEARTBEAT} flexShrink={0} marginRight={1}><Text bold color="cyan">{`HEARTBEAT${sortIndicator("heartbeat", sortKey, sortDir)}`}</Text></Box>
         <Box flexGrow={1}><Text bold color="cyan">WORKTREE</Text></Box>
       </Box>
       <Text dimColor>{"─".repeat(Math.max(0, cols - 1))}</Text>

@@ -2,12 +2,16 @@ import { Box, Text } from "ink";
 import type { OrchState } from "../lib/orch-state-reader.ts";
 import { formatRelativeTime, truncateRight } from "../lib/dashboard-format.ts";
 
+export type OrchSortKey = "orch" | "wave" | "active" | "queue" | "started" | "parallel";
+
 interface OrchListProps {
   orchs: OrchState[];
   selectedIndex: number;
   scrollOffset: number;
   visibleRows: number;
   cols: number;
+  sortKey?: OrchSortKey;
+  sortDir?: "asc" | "desc";
 }
 
 const COL_ORCH = 38;
@@ -22,24 +26,30 @@ function waveLabel(o: OrchState): string {
   return `${o.currentWave ?? "?"}/${o.totalWaves ?? "?"}`;
 }
 
+function sortIndicator(col: OrchSortKey, sortKey: OrchSortKey, sortDir: "asc" | "desc"): string {
+  return col === sortKey ? (sortDir === "asc" ? " ▲" : " ▼") : "";
+}
+
 export function OrchList({
   orchs,
   selectedIndex,
   scrollOffset,
   visibleRows,
   cols,
+  sortKey = "started",
+  sortDir = "desc",
 }: OrchListProps) {
   const visible = orchs.slice(scrollOffset, scrollOffset + visibleRows);
 
   return (
     <Box flexDirection="column" flexGrow={1}>
       <Box flexDirection="row">
-        <Box width={COL_ORCH} flexShrink={0} marginRight={1}><Text bold color="cyan">ORCHESTRATOR</Text></Box>
-        <Box width={COL_WAVE} flexShrink={0} marginRight={1}><Text bold color="cyan">WAVE</Text></Box>
-        <Box width={COL_ACTIVE} flexShrink={0} marginRight={1}><Text bold color="cyan">ACTIVE</Text></Box>
-        <Box width={COL_QUEUE} flexShrink={0} marginRight={1}><Text bold color="cyan">QUEUE</Text></Box>
-        <Box width={COL_STARTED} flexShrink={0} marginRight={1}><Text bold color="cyan">STARTED</Text></Box>
-        <Box width={COL_PARALLEL} flexShrink={0}><Text bold color="cyan">PARALLEL</Text></Box>
+        <Box width={COL_ORCH} flexShrink={0} marginRight={1}><Text bold color="cyan">{`ORCHESTRATOR${sortIndicator("orch", sortKey, sortDir)}`}</Text></Box>
+        <Box width={COL_WAVE} flexShrink={0} marginRight={1}><Text bold color="cyan">{`WAVE${sortIndicator("wave", sortKey, sortDir)}`}</Text></Box>
+        <Box width={COL_ACTIVE} flexShrink={0} marginRight={1}><Text bold color="cyan">{`ACTIVE${sortIndicator("active", sortKey, sortDir)}`}</Text></Box>
+        <Box width={COL_QUEUE} flexShrink={0} marginRight={1}><Text bold color="cyan">{`QUEUE${sortIndicator("queue", sortKey, sortDir)}`}</Text></Box>
+        <Box width={COL_STARTED} flexShrink={0} marginRight={1}><Text bold color="cyan">{`STARTED${sortIndicator("started", sortKey, sortDir)}`}</Text></Box>
+        <Box width={COL_PARALLEL} flexShrink={0}><Text bold color="cyan">{`PARALLEL${sortIndicator("parallel", sortKey, sortDir)}`}</Text></Box>
       </Box>
       <Text dimColor>{"─".repeat(Math.max(0, cols - 1))}</Text>
       {visible.length === 0 && (
