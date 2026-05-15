@@ -483,6 +483,61 @@ cmd_query() {
   fi
 }
 
+cmd_wake_extract() {
+  local input="" pretty=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pretty|-p) pretty=1; shift ;;
+      -h|--help)   cmd_help; return 0 ;;
+      --*) echo "error: unknown wake-extract flag: $1" >&2; return 2 ;;
+      *)
+        if [[ -z "$input" ]]; then
+          input="$1"; shift
+        else
+          echo "error: too many positional arguments to wake-extract" >&2
+          return 2
+        fi
+        ;;
+    esac
+  done
+
+  local -a jq_opts=()
+  [[ -z "$pretty" ]] && jq_opts+=("-c")
+
+  local jq_program='
+    . as $wake |
+    ($wake.body.payload // {}) as $p |
+    ($p.source_events[0] // {}) as $se |
+    ($se.payload_excerpt // {}) as $ex |
+    {
+      event_name:      ($se.name // null),
+      interest_id:     ($p.interest_id // null),
+      reason:          ($p.reason // null),
+      pr_number:       ($se.pr // $wake.attributes["vcs.pr.number"] // null),
+      ticket:          ($p.ticket // $se.ticket // null),
+      repo:            ($se.repo // $wake.attributes["vcs.repository.name"] // null),
+      ci_conclusion:   ($ex.conclusion // null),
+      review_state:    ($ex.state // null),
+      merged:          ($ex.merged // null),
+      action:          ($ex.action // null),
+      source_event_id: ($p.source_event_ids[0] // null)
+    }
+  '
+
+  if [[ -n "$input" ]]; then
+    printf '%s\n' "$input" | jq "${jq_opts[@]}" "$jq_program" 2>/dev/null || {
+      echo "error: wake-extract: input is not valid JSON" >&2
+      return 2
+    }
+  else
+    jq "${jq_opts[@]}" "$jq_program" 2>/dev/null || {
+      echo "error: wake-extract: input is not valid JSON" >&2
+      return 2
+    }
+  fi
+}
+
 cmd_help() {
   cat <<'EOF'
 catalyst-events — tail, wait-for, and natural-language query over the global event log.
@@ -492,6 +547,7 @@ Usage:
   catalyst-events wait-for [--filter <jq-predicate>] [--timeout <sec>]
   catalyst-events build-orchestrator-filter <orch-dir>
   catalyst-events query <natural-language> [--explain] [--limit N] [--since DURATION]
+  catalyst-events wake-extract [<wake-event-json>] [--pretty]
   catalyst-events help
 
 Examples:
@@ -522,6 +578,14 @@ Examples:
   FILTER=$(catalyst-events build-orchestrator-filter "$ORCH_DIR")
   catalyst-events tail --filter "$FILTER"
 
+  # Normalize a broker wake event (stdin) — extract CI conclusion without REST
+  catalyst-events wait-for \
+    --filter '.attributes."event.name" | startswith("filter.wake.")' \
+    --timeout 600 | catalyst-events wake-extract
+
+  # Check if a wake was triggered by a CI failure (inline string arg)
+  catalyst-events wake-extract "$EVENT_JSON" | jq -r '.ci_conclusion'
+
 Environment:
   CATALYST_DIR          base directory (default: $HOME/catalyst)
   CATALYST_EVENTS_DIR   events directory (default: $CATALYST_DIR/events)
@@ -548,6 +612,7 @@ main() {
     wait-for)                   cmd_wait_for "$@" ;;
     build-orchestrator-filter)  cmd_build_orchestrator_filter "$@" ;;
     query)                      cmd_query "$@" ;;
+    wake-extract)               cmd_wake_extract "$@" ;;
     help|-h|--help)             cmd_help ;;
     *)
       echo "error: unknown command: $cmd" >&2
