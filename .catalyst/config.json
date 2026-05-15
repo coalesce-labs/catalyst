@@ -38,6 +38,12 @@
         "repoColors": {
           "coalesce-labs/catalyst": "green"
         }
+      },
+      "linear": {
+        "teams": [
+          { "key": "CTL", "vcsRepo": "coalesce-labs/catalyst" },
+          { "key": "ADV", "vcsRepo": "coalesce-labs/adva" }
+        ]
       }
     },
     "feedback": {
