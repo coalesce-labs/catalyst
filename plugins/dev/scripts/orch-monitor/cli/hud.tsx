@@ -160,6 +160,14 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // bumps version.txt + commit.txt only between HUD invocations.
   const versionChip = useRef(readPluginVersion()).current;
 
+  // CTL-473: hoist the Header `version` literal so the memoized Header can
+  // short-circuit. `versionChip` is frozen at mount via useRef, so this memo
+  // produces a single stable object reference for the component's lifetime.
+  const headerVersion = useMemo(
+    () => ({ display: versionChip.display, isLocal: versionChip.isLocal }),
+    [versionChip],
+  );
+
   // CTL-435: live operational metrics chips. The hook polls worker signal
   // files + per-orch state.json every 5s. Heartbeats are derived from the
   // events stream below.
@@ -258,7 +266,12 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // extracted into pure helpers for testability.
   const inDetailMode = showDetail && !!selectedEvent && !showHelp;
   const innerCols = cols - 1;
-  const detailLines = selectedEvent ? buildDetailLines(selectedEvent, innerCols) : [];
+  // CTL-473: memoize buildDetailLines so it only recomputes when the selected
+  // event or column width changes — was re-running on every render.
+  const detailLines = useMemo(
+    () => (selectedEvent ? buildDetailLines(selectedEvent, innerCols) : []),
+    [selectedEvent, innerCols],
+  );
 
   let listRows: number;
   let listScrollOffset: number;
@@ -293,7 +306,12 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     listScrollOffset = detail.listScrollOffset;
   }
 
-  const dslLines = dslState ? JSON.stringify(dslState.dsl, null, 2).split("\n") : [];
+  // CTL-473: memoize the JSON.stringify+split so it only recomputes when
+  // dslState changes. Was running on every render.
+  const dslLines = useMemo(
+    () => (dslState ? JSON.stringify(dslState.dsl, null, 2).split("\n") : []),
+    [dslState],
+  );
   const dslVisibleLines = Math.max(1, overlayHeight - 2);
   const maxDslScroll = Math.max(0, dslLines.length - dslVisibleLines);
 
@@ -352,6 +370,31 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
       setQuerySubmitting(false);
     }
   }, []);
+
+  // CTL-473: stabilize PromptInput callback/metric identities so the memoized
+  // PromptInput (Phase 3) can short-circuit when its props are unchanged.
+  // setState dispatchers (setInputMode/setPivot/setQueryError) are stable per
+  // React's contract — they're listed for exhaustive-deps compliance only.
+  const handlePromptSubmit = useCallback(
+    (v: string) => {
+      if (inputMode === "filter") {
+        setInputMode("normal");
+      } else {
+        void submitQuery(v);
+      }
+    },
+    [inputMode, setInputMode, submitQuery],
+  );
+
+  const handlePromptEsc = useCallback(() => {
+    if (inputMode === "filter") setPivot(null);
+    if (inputMode === "query") setQueryError(null);
+  }, [inputMode, setPivot, setQueryError]);
+
+  const promptMetrics = useMemo(
+    () => ({ ...pollMetrics, heartbeats: heartbeatCount }),
+    [pollMetrics, heartbeatCount],
+  );
 
   useInput((input, key) => {
     if (key.escape) {
@@ -450,7 +493,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           columns={innerCols}
           nlQuery={dslState?.nlQuery}
           brokerState={brokerState}
-          version={{ display: versionChip.display, isLocal: versionChip.isLocal }}
+          version={headerVersion}
           columnConfig={hudColumnConfig}
         />
       </Box>
@@ -513,18 +556,9 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           mode={inputMode}
           value={inputMode === "filter" ? filterText : queryText}
           onChange={inputMode === "filter" ? setFilterText : setQueryText}
-          onSubmit={(v) => {
-            if (inputMode === "filter") {
-              setInputMode("normal");
-            } else {
-              void submitQuery(v);
-            }
-          }}
+          onSubmit={handlePromptSubmit}
           onModeChange={setInputMode}
-          onEsc={() => {
-            if (inputMode === "filter") setPivot(null);
-            if (inputMode === "query") setQueryError(null);
-          }}
+          onEsc={handlePromptEsc}
           busy={querySubmitting}
           error={queryError}
           pivot={pivot}
@@ -538,7 +572,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
           dslActive={dslState !== null}
           dslLabel={dslState?.nlQuery ?? ""}
           hasDsl={dslState !== null}
-          metrics={{ ...pollMetrics, heartbeats: heartbeatCount }}
+          metrics={promptMetrics}
         />
       </Box>
     </Box>
