@@ -10,8 +10,9 @@
 #
 #   --ticket <ID>        Linear ticket identifier (required)
 #   --transition <name>  State map key to look up (one of: backlog, todo,
-#                        research, planning, inProgress, inReview, done,
-#                        canceled, duplicate). Required unless --state given.
+#                        research, planning, inProgress, verifying, reviewing,
+#                        inReview, done, canceled, duplicate). Required unless
+#                        --state given.
 #   --state <literal>    Literal state name (takes precedence over --transition)
 #   --config <path>      Path to .catalyst/config.json. Default: auto-discover
 #                        by walking up from CWD.
@@ -38,6 +39,8 @@ default_state_for() {
     research)    echo "In Progress" ;;
     planning)    echo "In Progress" ;;
     inProgress)  echo "In Progress" ;;
+    verifying)   echo "In Progress" ;;
+    reviewing)   echo "In Progress" ;;
     inReview)    echo "In Review" ;;
     done)        echo "Done" ;;
     canceled)    echo "Canceled" ;;

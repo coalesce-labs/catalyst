@@ -105,6 +105,8 @@ Catalyst maps workflow phases to your Linear workspace states via `stateMap` in
 | Research started | In Progress   | `stateMap.research`   |
 | Planning started | In Progress   | `stateMap.planning`   |
 | Implementation   | In Progress   | `stateMap.inProgress` |
+| Verify phase     | In Progress   | `stateMap.verifying`  |
+| Review phase     | In Progress   | `stateMap.reviewing`  |
 | PR created       | In Review     | `stateMap.inReview`   |
 | Completed        | Done          | `stateMap.done`       |
 | Canceled         | Canceled      | `stateMap.canceled`   |

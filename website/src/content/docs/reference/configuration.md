@@ -35,6 +35,8 @@ project structure, ticket conventions, and workflow state mapping.
         "research": "In Progress",
         "planning": "In Progress",
         "inProgress": "In Progress",
+        "verifying": "In Progress",
+        "reviewing": "In Progress",
         "inReview": "In Review",
         "done": "Done",
         "canceled": "Canceled"
@@ -74,11 +76,21 @@ workflow:
 | `research`   | Running `research-codebase`          | In Progress |
 | `planning`   | Running `create-plan`                | In Progress |
 | `inProgress` | Running `implement-plan`             | In Progress |
+| `verifying`  | Phase-agent verify step running      | In Progress |
+| `reviewing`  | Phase-agent review step running      | In Progress |
 | `inReview`   | Running `create-pr` or `describe-pr` | In Review   |
 | `done`       | Running `merge-pr`                   | Done        |
 | `canceled`   | Manual cancellation                  | Canceled    |
 
 Set any key to `null` to skip that automatic transition.
+
+**Finer-grained phase visibility.** The `verifying` and `reviewing` keys default to
+`In Progress` so dispatching a phase-agent transition is always safe. If you want a
+dedicated Linear lane for those phases, create `Verifying` and `Reviewing` workflow states
+in Linear admin first, then point `stateMap.verifying` and `stateMap.reviewing` at the new
+names and re-run `plugins/dev/scripts/resolve-linear-ids.sh --force` to refresh the cached
+UUIDs. Pointing `stateMap` at a state that does not exist in Linear will cause the next
+transition call to fail at the linearis layer.
 
 **`stateMap` values are auto-detected from Linear** — when you run `setup-catalyst.sh` with a Linear
 API token, the script fetches your team's actual workflow states and populates `stateMap` with the
