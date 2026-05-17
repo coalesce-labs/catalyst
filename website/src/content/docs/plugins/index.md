@@ -12,7 +12,7 @@ your context lean and focused.
 
 | Plugin                 | Description                                                           | Context Cost | Skills | Agents |
 | ---------------------- | --------------------------------------------------------------------- | :----------: | :----: | :----: |
-| **catalyst-dev**       | Core development workflow — research, plan, implement, validate, ship |    ~3.5K     |   25   |   9    |
+| **catalyst-dev**       | Core development workflow — research, plan, implement, validate, ship |    ~3.5K     |   50   |   9    |
 | **catalyst-pm**        | Product strategy — PRDs, strategy docs, priorities, and release planning |   Minimal    |   12   |   1    |
 | **catalyst-pm-ops**    | PM operations — cycle health, backlog, cadence, status, Slack         |   Minimal    |   12   |   4    |
 | **catalyst-meta**      | Workflow discovery, creation, and management                          |   Minimal    |   6    |   —    |

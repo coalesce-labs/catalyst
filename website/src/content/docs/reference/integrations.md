@@ -210,3 +210,15 @@ Optional web search and code-search augmentation for research agents via the Exa
 
 **Context cost**: MCP server — small baseline, per-query token cost.
 
+## External MCPs (user-connected)
+
+These integrations aren't bundled or managed by Catalyst — users connect them via Claude Code's MCP system (`claude mcp add ...`), and select catalyst skills consume them automatically when present. The `connect-mcps` skill in catalyst-pm-ops walks through the setup.
+
+| MCP | Used by | Purpose |
+|-----|---------|---------|
+| [Granola](https://granola.ai) | `/catalyst-dev:morning-briefing` | Pull meeting notes into the morning briefing |
+| Google Drive | `/catalyst-dev:morning-briefing`, `/catalyst-pm-ops:connect-mcps` | Surface recent docs in briefings and PM context |
+| Google Calendar | `/catalyst-dev:morning-briefing`, `/catalyst-pm-ops:daily-plan`, `/catalyst-pm-ops:connect-mcps` | Pull today's calendar into the morning briefing and daily plan |
+
+When the MCP isn't connected, the consuming skill degrades gracefully — typically by skipping the section that would have used it rather than erroring out.
+

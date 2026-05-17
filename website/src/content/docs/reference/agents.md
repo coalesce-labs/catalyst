@@ -28,6 +28,18 @@ Agents are specialized roles that skills delegate to. Each agent has a focused j
 | `github-research` | Research GitHub PRs and issues | Bash(gh) | Haiku | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/agents/github-research.md) |
 | `sentry-research` | Research Sentry errors | Bash(sentry-cli) | Haiku | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/agents/sentry-research.md) |
 
+### External Sub-Agents (used by phase-verify)
+
+The [`phase-verify`](/reference/orchestration/phase-agents/#5-phase-verify) skill delegates to three sub-agents from the third-party `pr-review-toolkit` plugin. They're not bundled with catalyst-dev — install `pr-review-toolkit` separately when running in [phase-agents mode](/reference/orchestration/phase-agents/).
+
+| Agent | Purpose | Source |
+|-------|---------|--------|
+| `code-reviewer` | Style and guideline-adherence review against project conventions | [pr-review-toolkit](https://github.com/anthropics/claude-plugins/tree/main/plugins/pr-review-toolkit/agents) |
+| `pr-test-analyzer` | Test coverage verification against new functionality | [pr-review-toolkit](https://github.com/anthropics/claude-plugins/tree/main/plugins/pr-review-toolkit/agents) |
+| `silent-failure-hunter` | Detect catch blocks, fallbacks, and validation that swallow errors silently | [pr-review-toolkit](https://github.com/anthropics/claude-plugins/tree/main/plugins/pr-review-toolkit/agents) |
+
+In legacy `oneshot-legacy` dispatch (no phase-agents), the same three sub-agents are still invoked by Phase 4 quality gates of `/catalyst-dev:oneshot` — see [oneshot Phase 4](/guided-workflows/phases/#what-each-phase-reads).
+
 ## catalyst-pm Agents
 
 | Agent | Purpose | Model | Source |
