@@ -74,10 +74,14 @@ Each skill's description includes specific phrases and contexts that tell Claude
 | `agent-browser` | "open in browser", "check the site", "take a screenshot", "fill the form", visual browser interaction |
 | `linearis` | Activates when ticket IDs like `ACME-123` appear, or when working with Linear CLI |
 | `catalyst-comms` | Activates when agents need to coordinate — "coordinate with", "tell the other agent", orchestrator-dispatched `CATALYST_COMMS_CHANNEL`, team-mode workers. See [Agent Communication](./catalyst-comms/). |
+| `morning-briefing` | "morning briefing", "daily briefing", start-of-day standup, "what's on my plate today" |
+| `briefing-followup` | "walk through the briefing", "resolve briefing decisions", after `/morning-briefing` produced today's briefing |
+| `research-curate` | "curate research", "score staleness", "regenerate research INDEX", knowledge cleanup of `thoughts/shared/` |
 | `ci-commit` | Non-interactive — used by CI pipelines and automation only |
 | `ci-describe-pr` | Non-interactive — used by CI pipelines and automation only |
+| `phase-*` (9 agents) | Orchestrator-dispatched only — spawned by `phase-agent-dispatch` after each `phase.<name>.complete.<ticket>` wake; never invoked directly |
 
-**Legend**: User column: checkmark = invoke with `/skill-name` | Model column: checkmark = Claude activates automatically | `CI` = non-interactive, for automation pipelines
+**Legend**: User column: checkmark = invoke with `/skill-name` | Model column: checkmark = Claude activates automatically | `CI` = non-interactive, for automation pipelines | `Phase` = orchestrator-dispatched only (not user- or model-invocable; spawned by `phase-agent-dispatch`)
 
 ## catalyst-dev
 
@@ -123,6 +127,14 @@ The core development plugin. Skills covering research, planning, implementation,
 | `create-worktree` | &#10003; | — | Create git worktree for parallel development without switching branches. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/create-worktree/SKILL.md) |
 | `setup-orchestrate` | &#10003; | — | Bootstrap an orchestrator worktree and print a ready-to-run launch command for `/orchestrate`. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/setup-orchestrate/SKILL.md) |
 
+### Briefings & Knowledge
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `morning-briefing` | &#10003; | — | Generate daily briefing markdown at `thoughts/briefings/YYYY-MM-DD.md` synthesized from Linear, GitHub, Granola, Drive, and Calendar — fans out to Slack DM, Slack channel, Notion, and Loom script. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/morning-briefing/SKILL.md) |
+| `briefing-followup` | &#10003; | — | Interactive walk-through of today's briefing — resolves each open decision via calendar / ticket / orchestrate / email / ADR-drift handlers, and writes resolutions back to the briefing markdown. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/briefing-followup/SKILL.md) |
+| `research-curate` | &#10003; | — | Walk `thoughts/shared/research/` and `plans/`, score each doc's staleness, regenerate `INDEX.md`, and append LLM-surfaced contradictions to `CONTRADICTIONS.md` (append-only — source docs never modified). | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/research-curate/SKILL.md) |
+
 ### Integrations & References
 
 | Skill | User | Model | Description | Source |
@@ -138,6 +150,22 @@ The core development plugin. Skills covering research, planning, implementation,
 |-------|:----:|:-----:|-------------|--------|
 | `ci-commit` | — | CI | Non-interactive variant of `/commit` for CI pipelines. Never prompts the user. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/ci-commit/SKILL.md) |
 | `ci-describe-pr` | — | CI | Non-interactive variant of `/describe-pr` for CI pipelines. Auto-detects current PR. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/ci-describe-pr/SKILL.md) |
+
+### Phase Agents (orchestrator-dispatched)
+
+The 9-phase orchestrator pipeline (CTL-447 → CTL-470) dispatches one short-lived `claude --bg` skill per phase via [`phase-agent-dispatch`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/phase-agent-dispatch). Each phase agent reads its prior phase's signal artifact, performs its work, writes its own signal artifact, and emits `phase.<name>.complete.<ticket>` — which wakes the orchestrator's `phase-agent-dispatch` to advance to the next phase. None are user- or model-invocable. See [Phase agents](./orchestration/phase-agents/) for the full pipeline, model assignment, and cost economics.
+
+| Skill | User | Model | Description | Source |
+|-------|:----:|:-----:|-------------|--------|
+| `phase-triage` | — | Phase | Triage a ticket — expand acronyms, classify (feature/bug/docs/refactor/chore), identify dependencies, estimate scope, post a triaged comment to Linear, and apply the `triaged` label. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/phase-triage/SKILL.md) |
+| `phase-research` | — | Phase | Wraps `/research-codebase` for the research phase — produces `thoughts/shared/research/<date>-<ticket>.md`. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/phase-research/SKILL.md) |
+| `phase-plan` | — | Phase | Wraps `/create-plan` for the plan phase — reads the prior research document and produces `thoughts/shared/plans/<date>-<ticket>.md`. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/phase-plan/SKILL.md) |
+| `phase-implement` | — | Phase | Wraps `/implement-plan` for the implement phase — TDD red→green→refactor, commits each plan phase as it lands, transitions Linear to in-progress. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/phase-implement/SKILL.md) |
+| `phase-verify` | — | Phase | Read-only adversarial verification of the implement-phase diff — tsc, tests, lint, security scan, reward-hacking scan, code review, test coverage, silent-failure hunt. NEVER writes application code (only test files). | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/phase-verify/SKILL.md) |
+| `phase-review` | — | Phase | Wraps the `/review` skill (gstack) — explicitly skips `/ultrareview`. Creates a remediation commit for any HIGH-severity finding with a deterministic fix. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/phase-review/SKILL.md) |
+| `phase-pr` | — | Phase | Wraps `/create-pr` to open the pull request, then writes PR number + URL into the phase signal file so `phase-monitor-merge` can read it without re-querying GitHub. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/phase-pr/SKILL.md) |
+| `phase-monitor-merge` | — | Phase | Active listen loop lifted from legacy `oneshot` Phase 5 — event-driven wait, inline resolution of CI fix-ups, bot review threads, and BEHIND rebases, then `gh pr merge --squash --delete-branch` when CLEAN and transitions Linear to done. | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/phase-monitor-merge/SKILL.md) |
+| `phase-monitor-deploy` | — | Phase | Watches the post-merge deployment on the merge SHA via `catalyst-events wait-for`, then delegates live verification to the `/canary` skill (gstack). | [Source](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/phase-monitor-deploy/SKILL.md) |
 
 ## catalyst-pm
 
