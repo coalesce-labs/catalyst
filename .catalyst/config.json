@@ -48,6 +48,9 @@
         ]
       }
     },
+    "orchestration": {
+      "dispatchMode": "phase-agents"
+    },
     "feedback": {
       "autoFile": true,
       "githubRepo": "coalesce-labs/catalyst",

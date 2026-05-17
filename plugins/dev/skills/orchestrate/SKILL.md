@@ -350,9 +350,15 @@ table + waves outline rather than a template skeleton:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
-  --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" \
+  --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" --roll-usage \
   >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 ```
+
+`--roll-usage` is the wire that fulfils the "Worker usage / cost is rolled in by the monitor pass"
+contract below (CTL-487): the dashboard helper iterates `${ORCH_DIR}/workers/*.json` and invokes
+`orchestrate-roll-usage.sh -v` per worker before rendering, with stderr captured to
+`${ORCH_DIR}/.roll-usage.log`. The per-worker call is bounded — already-rolled workers short-circuit
+on `signal.cost != null` and cost a single `jq` read.
 
 Create the orchestrator's status directory:
 
@@ -643,17 +649,22 @@ worker activity. Key event types:
 | `{"type":"system","subtype":"api_retry"}`                                                                         | Worker hit rate limit / error; shows attempt and delay          |
 | `{"type":"result"}`                                                                                               | Worker finished; contains final answer and usage stats          |
 
-**Worker usage / cost is rolled in by the monitor pass (CTL-115).** The dispatch shell backgrounds
-workers with `&` and never `wait`s on them, so usage/cost extraction cannot happen here. Phase 4
-invokes `plugins/dev/scripts/orchestrate-roll-usage.sh` once per worker per wake-up to parse the
-final `result` event from the worker's stream file and:
+**Worker usage / cost is rolled in by the monitor pass (CTL-115, wired through `update-dashboard.sh
+--roll-usage` since CTL-487).** The dispatch shell backgrounds workers with `&` and never `wait`s
+on them, so usage/cost extraction cannot happen here. Phase 4's `update-dashboard.sh` call passes
+`--roll-usage`, which iterates `${ORCH_DIR}/workers/*.json` and invokes
+`plugins/dev/scripts/orchestrate-roll-usage.sh -v` per worker before rendering. The helper parses
+the final `result` event from the worker's stream file and:
 
 1. Mirror cost into the worker's signal file (`.cost = USAGE`) — the dashboard reads signal files
    (not global state) for per-worker cost columns.
 2. Write `state.workers[ticket].usage`.
 3. Roll the delta into `state.usage` for the orchestrator-level aggregate.
 
-The helper is idempotent (gated on `signal.cost == null`) and safe to call every cycle.
+The helper is idempotent (gated on `signal.cost == null`) and safe to call every cycle. Because
+every dashboard render now sweeps every worker, `update-dashboard.sh --roll-usage` doubles as the
+periodic safety net for any worker whose stream contains a `result` event but whose `signal.cost`
+is still null. Audit trail lands at `${ORCH_DIR}/.roll-usage.log`.
 
 **Emit dispatch event and update global state** after each worker dispatch:
 
@@ -1218,24 +1229,16 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
     ".status = \"${W_STATUS}\" | .phase = ${W_PHASE} | .branch = \"${W_BRANCH}\" | .pr = ${W_PR}"
 done
 
-# Roll worker usage/cost into orch.usage (CTL-115, CTL-233). Idempotent: the
-# helper no-ops when signal.cost is already populated, so calling it every
-# cycle costs only a `jq` read per worker until the worker's stream first
-# contains a `result` event. The `-v` flag plus stderr-to-log redirect makes
-# silent skips auditable — tail `${ORCH_DIR}/.roll-usage.log` to see why a
-# worker's cost is still null.
-for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
-  TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
-  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-roll-usage.sh" \
-    --orch "${ORCH_NAME}" --ticket "${TICKET}" --orch-dir "${ORCH_DIR}" -v \
-    >/dev/null 2>>"${ORCH_DIR}/.roll-usage.log" || true
-done
-
 # Re-render DASHBOARD.md so the file artifact reflects current state (CTL-230).
-# Idempotent — same inputs produce a byte-identical file. The orch-monitor daemon
-# file-watches DASHBOARD.md and forwards changes to UI clients via SSE.
+# `--roll-usage` first iterates ${ORCH_DIR}/workers/*.json and invokes
+# orchestrate-roll-usage.sh -v per worker (CTL-115, CTL-233, CTL-487) — bounded
+# and idempotent (no-op when signal.cost is already populated) and writes the
+# audit trail to ${ORCH_DIR}/.roll-usage.log. Then renders the dashboard so the
+# refreshed signal.cost values appear in the same pass. Same inputs produce a
+# byte-identical file. The orch-monitor daemon file-watches DASHBOARD.md and
+# forwards changes to UI clients via SSE.
 "${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
-  --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" \
+  --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" --roll-usage \
   >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 ```
 
@@ -2063,7 +2066,7 @@ When all waves are complete:
 
    ```bash
    "${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
-     --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" \
+     --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" --roll-usage \
      >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 
    HANDOFF_DIR="thoughts/shared/handoffs/${ORCH_NAME}"
