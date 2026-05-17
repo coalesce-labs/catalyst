@@ -102,6 +102,34 @@ the bound project:
 write-back design. If you discover something worth recording, queue it in your
 session output for the orchestrator to act on after session end.
 
+### Opt-in write side (CTL-448, for routines that need to push back)
+
+Routines that need to persist research, plans, or briefings into the
+`coalesce-labs/thoughts` repo (e.g., the morning-briefing routine in
+Initiative 2, or the research-curation routine in Initiative 4) can call
+`humanlayer thoughts init` against the cloned tree to wire write-side sync.
+The CLI is installed in the container by `cma/environment.yaml` (pip:
+humanlayer). Routines that don't write — the default — simply skip this
+block and the init is a no-op.
+
+```bash
+# Opt-in: only routines with write-back responsibilities run this.
+if [[ "${CATALYST_THOUGHTS_WRITE_BACK:-0}" == "1" ]]; then
+  # Initialize humanlayer against the shared subtree we symlinked above.
+  # The directory it expects (per humanlayer thoughts) is the project's
+  # `${THOUGHTS_DIR}/shared` tree — that's exactly what /workspace/thoughts/shared
+  # points to. `humanlayer thoughts init` is idempotent.
+  humanlayer thoughts init \
+    --directory "/workspace/thoughts-repo/repos/${THOUGHTS_DIR}" \
+    --remote "https://x-access-token:${GITHUB_PAT}@github.com/coalesce-labs/thoughts.git" \
+    >/dev/null 2>&1 || true
+  # Routines call `humanlayer thoughts sync` at the points they want to push.
+  # Sync is no-op when nothing changed locally, so over-calling is cheap.
+fi
+```
+
+Read-side routines must leave `CATALYST_THOUGHTS_WRITE_BACK` unset.
+
 ---
 
 ## 2. Project conventions

@@ -27,7 +27,12 @@ config:
       - gh         # GitHub CLI (used by Catalyst skills via Bash(gh *))
     npm:
       - bun        # bun runtime (used by Catalyst dev/test scripts)
-    pip: []
+    pip:
+      - humanlayer # CTL-448: thoughts sync — write-side counterpart to the
+                   # read-only clone in cma/agents/base-system-prompt.md's
+                   # startup ritual. Routines that need to persist research,
+                   # plans, or briefings call `humanlayer thoughts sync` to
+                   # push back to coalesce-labs/thoughts.
     cargo: []
     gem: []
     go: []

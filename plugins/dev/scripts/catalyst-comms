@@ -226,8 +226,10 @@ cmd_send() {
   require_channel "$channel" || return 1
 
   case "$type" in
-    proposal|question|answer|ack|info|attention|done) ;;
-    *) echo "error: invalid --type '$type' (must be one of: proposal|question|answer|ack|info|attention|done)" >&2; return 1 ;;
+    # CTL-448: directive|pause|abort are inbound types used by the orchestrator
+    # to respond to phase-agent question messages and to pause/abort runs.
+    proposal|question|answer|ack|info|attention|done|directive|pause|abort) ;;
+    *) echo "error: invalid --type '$type' (must be one of: proposal|question|answer|ack|info|attention|done|directive|pause|abort)" >&2; return 1 ;;
   esac
 
   local id
@@ -269,7 +271,10 @@ cmd_send() {
   # to every channel file. Best-effort — failures here must NOT fail the send.
   # Per-channel files remain authoritative for agent-to-agent pub/sub. CTL-210.
   local body_trunc="$body"
-  if [[ "$type" != "attention" && ${#body} -gt 120 ]]; then
+  # CTL-448: directive/pause/abort carry orchestrator instructions that can
+  # exceed the 120-char heartbeat budget, so they share attention's exemption.
+  if [[ "$type" != "attention" && "$type" != "directive" && \
+        "$type" != "pause" && "$type" != "abort" && ${#body} -gt 120 ]]; then
     body_trunc="${body:0:120}"
     body_trunc="${body_trunc% *}…"
   fi
@@ -608,7 +613,8 @@ Commands:
 
   send <ch> <body> --as <name> [--type TYPE] [--to N|all] [--re MSG_ID] [--repo NAME]
       Append a message to the channel log. Prints the message id to stdout.
-      TYPE is one of: proposal, question, answer, ack, info, attention, done.
+      TYPE is one of: proposal, question, answer, ack, info, attention, done,
+      directive, pause, abort (last three: orchestrator→phase-agent, CTL-448).
       --repo NAME (or \$REPO env) stamps attributes["vcs.repository.name"] on
       the canonical comms.message.posted event so the HUD's REPO column resolves.
 
