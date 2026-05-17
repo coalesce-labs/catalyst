@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import { Box, Text, useStdout } from "ink";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
 import { formatDateTime, formatDetailBody } from "../lib/format.ts";
@@ -179,10 +180,14 @@ function renderLine(line: Line, i: number, cols: number): React.ReactNode {
   }
 }
 
-export function DetailPane({ event, scrollTop, maxHeight }: DetailPaneProps) {
+// CTL-473: memo wrap. All three props (event, scrollTop, maxHeight) are
+// referentially stable from hud.tsx after Phase 1's prop stabilization.
+function DetailPaneImpl({ event, scrollTop, maxHeight }: DetailPaneProps) {
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 120;
-  const lines = buildDetailLines(event, cols);
+  // CTL-473: avoid recomputing the detail-line array on every render. Only
+  // changes when the focused event or terminal width changes.
+  const lines = useMemo(() => buildDetailLines(event, cols), [event, cols]);
 
   // First line is always the title — pin it so it stays visible while scrolling.
   const titleLine = lines[0];
@@ -204,3 +209,6 @@ export function DetailPane({ event, scrollTop, maxHeight }: DetailPaneProps) {
     </Box>
   );
 }
+
+export const DetailPane = memo(DetailPaneImpl);
+DetailPane.displayName = "DetailPane";

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { memo, useRef, useState } from "react";
 import { Box, Text, useInput, type Key } from "ink";
 import type { PivotMode } from "../hooks/useFilter.ts";
 
@@ -124,7 +124,10 @@ interface PromptInputProps {
   };
 }
 
-export function PromptInput({
+// CTL-473: memo wrap. With Phase 1's handlePromptSubmit/handlePromptEsc
+// useCallback wraps and promptMetrics useMemo, all prop identities are now
+// stable across renders where unrelated state changed.
+function PromptInputImpl({
   mode,
   value,
   onChange,
@@ -301,3 +304,6 @@ export function PromptInput({
     </Box>
   );
 }
+
+export const PromptInput = memo(PromptInputImpl);
+PromptInput.displayName = "PromptInput";

@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Box, Text } from "ink";
 import type { BrokerState } from "../lib/broker-key-health.ts";
 import { brokerInterestStatus } from "../lib/broker-key-health.ts";
@@ -29,7 +30,10 @@ interface HeaderProps {
 // custom column configs are automatically reflected in the header row.
 // CTL-434: chip layout is computed by layoutHeaderChips() which keeps the
 // row on a single line by abbreviating labels rather than wrapping.
-export function Header({ columns = 120, nlQuery, brokerState, version, columnConfig }: HeaderProps) {
+// CTL-473: memo wrap. With Phase 1's stabilized `version` prop, this short-
+// circuits on every render where only unrelated state changed. brokerState
+// still defeats the memo every 5s (by design — that's the poll cadence).
+function HeaderImpl({ columns = 120, nlQuery, brokerState, version, columnConfig }: HeaderProps) {
   const sep = "─".repeat(Math.max(0, columns - 1));
   const groq = brokerState?.groq;
   const interestStatus = brokerInterestStatus(brokerState ?? null);
@@ -73,3 +77,6 @@ export function Header({ columns = 120, nlQuery, brokerState, version, columnCon
     </Box>
   );
 }
+
+export const Header = memo(HeaderImpl);
+Header.displayName = "Header";
