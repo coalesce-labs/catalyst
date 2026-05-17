@@ -56,7 +56,30 @@ user rather than overwriting anything.
 | `thoughts/shared/<dir>` missing | Run `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` (re-uses humanlayer when configured; warns loudly when no thoughts repo is set up) |
 | `~/.catalyst/bin/` missing OR any catalyst-* symlink absent/broken | Run `bash plugins/dev/scripts/install-cli.sh` — idempotent, safe to re-run. If `$HOME/.catalyst/bin` is not on `$PATH`, the script prints the exact line to add to `~/.zshrc` or `~/.bashrc` — relay that to the user so they can finish the one-time PATH setup. |
 | `thoughts/shared` is a regular directory (not a symlink) | **Fatal — do not auto-fix.** Tell the user the humanlayer symlink was clobbered and show recovery: `mv thoughts/shared thoughts/shared.orphaned-$(date +%Y%m%d)` then `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` |
+| Drift detected: keys present in `plugins/dev/templates/config.template.json` but missing from `.catalyst/config.json` (CTL-489) | Enumerate via `bash plugins/dev/scripts/check-config-drift.sh --json`. Generate a preview merge to a temp file via `--merge-into /tmp/merged.json` and show the user `diff -u .catalyst/config.json /tmp/merged.json`. On user confirmation, `jq` deep-merge into the real file: `bash plugins/dev/scripts/check-config-drift.sh --merge-into .catalyst/config.json.new && mv .catalyst/config.json.new .catalyst/config.json`. Merge preserves every existing user value (project on the right of jq's `*` recursive merge). |
 | Profile drift between `.catalyst/config.json` and humanlayer mapping | Run `bash plugins/dev/scripts/catalyst-thoughts.sh init-or-repair` — it now auto-repairs drift by running `humanlayer thoughts uninit --force && humanlayer thoughts init --profile <config profile> --directory <config directory>`. (Plain `humanlayer thoughts init --force` does NOT update an existing repo→profile mapping, so the `uninit` step is required.) |
+
+**Config-template drift (CTL-489).** When the template gains a key that an existing project's
+`.catalyst/config.json` lacks (the original CTL-487 silent-fallback bug — catalyst itself ran in
+`oneshot-legacy` for two months because `orchestration.dispatchMode` was absent), Phase 2 surfaces
+a unified diff and asks for confirmation before merging. Concretely:
+
+1. Run `bash plugins/dev/scripts/check-config-drift.sh --json --config .catalyst/config.json
+   --template <template>` to enumerate missing leaves. The template path comes from
+   `$CLAUDE_PLUGIN_ROOT/templates/config.template.json` in production, or
+   `plugins/dev/templates/config.template.json` when dogfooding from the repo.
+2. If the array is non-empty, generate a preview merge file via
+   `bash plugins/dev/scripts/check-config-drift.sh --merge-into /tmp/merged.json` and show the user
+   the unified diff: `diff -u .catalyst/config.json /tmp/merged.json`.
+3. Ask: "Apply these template additions? [y/N]". Default is NO — drift is non-fatal and the
+   warning will keep showing on subsequent workflow invocations until the user opts in.
+4. On confirmation, write the merged file atomically to `.catalyst/config.json` (`mv` from a
+   sibling `.tmp` file). The merge uses jq's `*` operator with the project on the right —
+   existing values always win, missing keys are added.
+5. The merge **never** overwrites existing user values. If the user has a custom
+   `catalyst.filter.groqModel`, the template's default is NOT applied to that key.
+6. If the user declines, leave `.catalyst/config.json` untouched. The drift warning continues to
+   appear on subsequent workflow invocations, providing passive nagging until resolved.
 
 For issues needing user input, explain what's needed and how to provide it:
 
@@ -78,6 +101,14 @@ After fixing, run the health check script again:
 bash "$SCRIPT" 2>&1 || true
 ```
 
+Re-run the drift check independently to confirm zero remaining drift (CTL-489):
+
+```bash
+bash plugins/dev/scripts/check-config-drift.sh \
+  --config .catalyst/config.json \
+  --template plugins/dev/templates/config.template.json
+```
+
 Compare the before/after results. Report:
 
 1. What was fixed (with counts)
@@ -96,6 +127,20 @@ Compare the before/after results. Report:
   ✅ Initialized session database
   ✅ Set WAL mode
   ✅ Created thoughts/shared/reports/
+
+── Config Drift ────────────────────────────────
+Detected 2 missing template keys:
+  • catalyst.orchestration.dispatchMode → "phase-agents"
+  • catalyst.filter.groqModel → "llama-3.1-8b-instant"
+
+Preview diff:
+  --- .catalyst/config.json
+  +++ /tmp/merged.json
+  +    "orchestration": { "dispatchMode": "phase-agents" },
+  +    "filter": { "groqModel": "llama-3.1-8b-instant" },
+
+Apply these template additions? [y/N] y
+  ✅ Merged 2 keys into .catalyst/config.json (existing values preserved)
 
 ── Verification ────────────────────────────────
 
