@@ -173,12 +173,78 @@ EOF
   assert_not_grep "no Linear webhook warn" "$out" "Missing catalyst.monitor.linear.webhookId"
 }
 
+# ─── Test: drift detected → warning appears in output (CTL-489) ─────────────
+# make_project's baseline config lacks orchestration.dispatchMode, so the drift
+# walker should surface a "Missing catalyst.orchestration.dispatchMode" warning.
+test_drift_warning_appears() {
+  echo "test: missing template key → drift warning in check-project-setup output"
+  local proj="$SCRATCH/proj-drift" key="proj-drift"
+  make_project "$proj" "$key"
+  mkdir -p "$SCRATCH/xdg/catalyst"
+  cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
+{ "catalyst": { "monitor": {
+  "github": { "smeeChannel": "https://smee.io/abc" },
+  "linear":  { "webhookId": "wh_test" }
+} } }
+EOF
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
+
+  local out
+  out=$(run_script "$proj" 2>&1)
+  assert_grep "drift warning fires for dispatchMode" "$out" \
+    "Missing catalyst.orchestration.dispatchMode"
+  assert_grep "drift warning quotes template default" "$out" \
+    'template suggests "phase-agents"'
+}
+
+# ─── Test: no drift → no drift warnings (CTL-489) ───────────────────────────
+test_no_drift() {
+  echo "test: project has every template key → no drift warnings"
+  local proj="$SCRATCH/proj-clean" key="proj-clean"
+  make_project "$proj" "$key"
+  # Replace make_project's minimal baseline with a config carrying every template leaf.
+  cat > "$proj/.catalyst/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "$key",
+    "repository": { "org": "x", "name": "y" },
+    "project": { "ticketPrefix": "CTL", "name": "x" },
+    "linear": {
+      "teamKey": "CTL",
+      "stateMap": { "research": "R" }
+    },
+    "thoughts": { "user": null },
+    "feedback": { "autoFile": false, "githubRepo": "x", "labels": [] },
+    "filter": { "groqModel": "x" },
+    "orchestration": { "dispatchMode": "phase-agents" }
+  }
+}
+EOF
+  mkdir -p "$SCRATCH/xdg/catalyst"
+  cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
+{ "catalyst": { "monitor": {
+  "github": { "smeeChannel": "https://smee.io/abc" },
+  "linear":  { "webhookId": "wh_test" }
+} } }
+EOF
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
+
+  local out
+  out=$(run_script "$proj" 2>&1)
+  assert_not_grep "no dispatchMode drift" "$out" \
+    "Missing catalyst.orchestration.dispatchMode"
+  assert_not_grep "no groqModel drift" "$out" \
+    "Missing catalyst.filter.groqModel"
+}
+
 # ─── Run ────────────────────────────────────────────────────────────────────
 test_smee_missing
 test_smee_channel_missing
 test_home_config_missing
 test_linear_webhook_missing
 test_all_configured
+test_drift_warning_appears
+test_no_drift
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"

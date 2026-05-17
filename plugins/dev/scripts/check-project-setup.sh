@@ -238,6 +238,31 @@ if ! command -v catalyst-events &>/dev/null; then
 	warnings+=("catalyst-events not found on PATH — run: bash plugins/dev/scripts/install-cli.sh")
 fi
 
+# 7. Check template drift (CTL-489) — keys in plugins/dev/templates/config.template.json
+#    but missing from .catalyst/config.json. Non-fatal; surfaces silent fallbacks
+#    (CTL-487 spent two months in legacy mode because dispatchMode was absent)
+#    at workflow-invocation time. Resolved via /catalyst-dev:setup-catalyst.
+if [[ -n $CONFIG_PATH ]]; then
+	DRIFT_SCRIPT="${SCRIPT_DIR}/check-config-drift.sh"
+	TEMPLATE_PATH=""
+	# Resolve template: prefer plugin cache (production), then sibling templates/
+	# (cache layout), then in-repo path (dogfood from arbitrary cwd).
+	if [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/templates/config.template.json" ]]; then
+		TEMPLATE_PATH="${CLAUDE_PLUGIN_ROOT}/templates/config.template.json"
+	elif [[ -f "${SCRIPT_DIR}/../templates/config.template.json" ]]; then
+		TEMPLATE_PATH="${SCRIPT_DIR}/../templates/config.template.json"
+	elif [[ -f "plugins/dev/templates/config.template.json" ]]; then
+		TEMPLATE_PATH="plugins/dev/templates/config.template.json"
+	fi
+	if [[ -x $DRIFT_SCRIPT && -n $TEMPLATE_PATH ]]; then
+		# `|| true` — drift script exits 1 on drift detected; that's a normal warning
+		# state, not a failure of this check. set -euo pipefail must not abort here.
+		while IFS= read -r line; do
+			[[ -n $line ]] && warnings+=("$line")
+		done < <(bash "$DRIFT_SCRIPT" --config "$CONFIG_PATH" --template "$TEMPLATE_PATH" 2>/dev/null || true)
+	fi
+fi
+
 # Report errors (fatal)
 if [[ ${#errors[@]} -gt 0 ]]; then
 	echo -e "${RED}ERROR: Project setup incomplete${NC}"
