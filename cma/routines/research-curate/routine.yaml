@@ -1,0 +1,118 @@
+---
+# Research-Curate — CMA Routine wiring (CTL-469)
+#
+# Phase 3 of Initiative 4 (Weekly thoughts curation Routine). Wraps the
+# /catalyst-dev:research-curate skill on a weekly Sunday-evening schedule.
+# The skill itself is committed at plugins/dev/skills/research-curate/SKILL.md
+# (CTL-467 inventory + INDEX.md, CTL-468 CONTRADICTIONS.md).
+#
+# Register with:
+#   ant beta:routines create -f cma/routines/research-curate/routine.yaml
+#
+# Validate locally before registration:
+#   bash cma/routines/research-curate/__tests__/routine-config.test.sh
+#   ant beta:routines validate -f cma/routines/research-curate/routine.yaml
+#
+# Beta API header: managed-agents-2026-04-01
+
+name: catalyst-research-curate
+
+# Per-routine agent definition. Register the agent separately via
+#   ant beta:agents create -f cma/routines/research-curate/agent.yaml
+# and reference the returned agent ID at routine registration time. For local
+# validation, this relative path lets the schema check resolve the agent file.
+agent: ./agent.yaml
+
+environment: catalyst-routines-base
+
+# Repository bindings. CMA clones each repo at the start of a run.
+# - coalesce-labs/catalyst: target repo (skill code, ADRs, project context).
+# - coalesce-labs/thoughts: read-only at /workspace/thoughts-repo and writable
+#   clone at /workspace/thoughts-writable
+#   (see cma/agents/base-system-prompt.md §1a).
+repositories:
+  - coalesce-labs/catalyst
+  - coalesce-labs/thoughts
+
+# Schedule. Standard 5-field cron. Sunday 9pm local. User-tunable —
+# edit this value and re-register with `ant beta:routines update`.
+# timezone is caller-local; CMA converts at run time.
+schedule:
+  cron: "0 21 * * 0"
+  timezone: "America/New_York"
+
+# Routine prompt. Routines are invoked autonomously, so the prompt must be
+# self-contained.
+prompt: |
+  You are the Research-Curate routine. Run the committed Catalyst skill at
+  `plugins/dev/skills/research-curate/SKILL.md` against the writable thoughts
+  clone for `thoughts/shared/research/` and `thoughts/shared/plans/`.
+
+  Steps the skill performs (see SKILL.md for the authoritative version):
+    1. Inventory the target directory — walks markdown, parses frontmatter,
+       extracts file:line refs.
+    2. Score each doc — age vs reference date, validate refs against HEAD,
+       count last-30d git log hits for top-3 tags.
+    3. Classify (current / needs-review / likely-stale).
+    4. Regenerate `<target-dir>/INDEX.md` (overwritten, deterministic).
+    5. Cluster by topic, run one LLM call per cluster, append findings to
+       `<target-dir>/CONTRADICTIONS.md` (append-only — never overwrites).
+
+  Invocation. The skill's `run.sh` accepts a positional target directory and
+  a `--git-dir` flag for the ref-validation step. Run it twice — once for
+  research, once for plans — against the writable clone directly so writes
+  land on the routine-scoped branch without relying on the §1a `briefings`
+  symlink (which is morning-briefing-specific):
+
+  ```bash
+  THOUGHTS_DIR="${CATALYST_THOUGHTS_DIRECTORY:-catalyst-workspace}"
+  WCLONE="/workspace/thoughts-writable/repos/${THOUGHTS_DIR}"
+
+  bash plugins/dev/scripts/research-curate/run.sh \
+    --git-dir /workspace/thoughts-writable \
+    "${WCLONE}/shared/research"
+
+  bash plugins/dev/scripts/research-curate/run.sh \
+    --git-dir /workspace/thoughts-writable \
+    "${WCLONE}/shared/plans"
+  ```
+
+  Write-back is handled by the base agent's startup ritual:
+    - §1a clones the thoughts repo writable at `/workspace/thoughts-writable/`
+      and checks out (or creates) the `routines/curation` branch.
+    - The skill's INDEX.md and CONTRADICTIONS.md writes land directly in the
+      writable clone (no symlink needed for this routine; absolute paths
+      above route writes into the writable tree).
+    - At session exit, the base agent commits and pushes the change to
+      `routines/curation` on `coalesce-labs/thoughts`. Rebase + retry on push
+      failure; non-zero exit on hard failure.
+
+  Success criteria:
+    - `${WCLONE}/shared/research/INDEX.md` and `${WCLONE}/shared/plans/INDEX.md`
+      regenerated.
+    - `${WCLONE}/shared/research/CONTRADICTIONS.md` and
+      `${WCLONE}/shared/plans/CONTRADICTIONS.md` either created (first run) or
+      appended-to (subsequent runs). Existing entries unchanged.
+    - Push to `routines/curation` succeeds.
+    - Source markdown files under `shared/research/` and `shared/plans/`
+      are NOT modified (the skill is contractually read-only for sources;
+      `git diff` for those paths should be empty).
+
+  Failure behavior:
+    - If either `run.sh` invocation exits non-zero, report the failure and do
+      NOT push partial state.
+    - If the push fails after one rebase retry, report the failure and exit.
+      A human will see the failed run in claude.ai/code/routines.
+
+# Environment variables. These tell the base agent's §1a to enable the
+# writable clone path and identify this routine for the commit message.
+env:
+  WRITABLE_THOUGHTS: "true"
+  THOUGHTS_WRITABLE_BRANCH: "routines/curation"
+  ROUTINE_NAME: "research-curate"
+
+metadata:
+  catalyst_role: routine
+  catalyst_ticket: CTL-469
+  catalyst_initiative: "research-curate"
+  catalyst_version: v1
