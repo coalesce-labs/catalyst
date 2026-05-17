@@ -14,10 +14,19 @@ version: 3.0.0
 
 # Oneshot
 
-End-to-end autonomous workflow that chains research → plan → implement → validate → ship → merge
-in a single session. All phases run sequentially in the current Claude Code session, invoking
-skills directly. Context is managed naturally via Claude's automatic compaction, and the
-thoughts/ system provides persistent handoff documents between phases.
+End-to-end autonomous workflow that chains research → plan → implement → validate → ship → merge in
+a single session. All phases run sequentially in the current Claude Code session, invoking skills
+directly. Context is managed naturally via Claude's automatic compaction, and the thoughts/ system
+provides persistent handoff documents between phases.
+
+> **Legacy mode for the orchestrator (post-2026-06-15).** `oneshot` remains the canonical
+> single-shot lifecycle for direct user invocation. The orchestrator's default worker dispatch is
+> also still `oneshot-legacy` — opt in to the per-phase pipeline by setting
+> `catalyst.orchestration.dispatchMode` to `"phase-agents"` in `.catalyst/config.json`, which runs
+> nine short-lived `claude --bg` skills (`phase-triage` … `phase-monitor-deploy`) instead of one
+> long `claude -p` `oneshot` worker. See
+> [Phase agents](https://catalyst.coalesce-labs.com/reference/orchestration/phase-agents/) for the
+> pipeline, model assignment, and cost economics.
 
 ## Prerequisites
 
@@ -57,44 +66,44 @@ Uses the provided text as the research query directly.
 
 ## Flags
 
-| Flag                   | Description                                            |
-| ---------------------- | ------------------------------------------------------ |
-| `--team`               | Use agent teams for parallel implementation in Phase 3 |
+| Flag                   | Description                                                   |
+| ---------------------- | ------------------------------------------------------------- |
+| `--team`               | Use agent teams for parallel implementation in Phase 3        |
 | `--label <text>`       | Custom display label for the session (overrides auto-derived) |
-| `--no-merge`           | Stop after PR creation — do NOT enter listen loop or merge |
-| `--no-ticket`          | Skip Linear ticket creation in freeform mode           |
-| `--skip-validation`    | Skip Phase 4 entirely                                  |
-| `--skip-quality-gates` | Run `/validate-plan` but skip quality gate loop        |
+| `--no-merge`           | Stop after PR creation — do NOT enter listen loop or merge    |
+| `--no-ticket`          | Skip Linear ticket creation in freeform mode                  |
+| `--skip-validation`    | Skip Phase 4 entirely                                         |
+| `--skip-quality-gates` | Run `/validate-plan` but skip quality gate loop               |
 
 ## Orchestrator Mode
 
-When running under an `/orchestrate` coordinator, oneshot writes status updates to a **worker
-signal file** so the orchestrator can track progress and run adversarial verification.
+When running under an `/orchestrate` coordinator, oneshot writes status updates to a **worker signal
+file** so the orchestrator can track progress and run adversarial verification.
 
-**Single-ticket scope contract (READ FIRST — CTL-208).** Your assigned scope is exactly the
-ticket ID passed as the first positional argument (`$1`). This is the SOLE source of truth
-for what work to do. The orchestrator state directory (`$ORCH_DIR`), wave briefings, sibling
-worker signal files, and comms channel participant lists exist for write-through state
-reporting and one-way context absorption — they NEVER expand or modify your scope.
+**Single-ticket scope contract (READ FIRST — CTL-208).** Your assigned scope is exactly the ticket
+ID passed as the first positional argument (`$1`). This is the SOLE source of truth for what work to
+do. The orchestrator state directory (`$ORCH_DIR`), wave briefings, sibling worker signal files, and
+comms channel participant lists exist for write-through state reporting and one-way context
+absorption — they NEVER expand or modify your scope.
 
 DO:
+
 - Use `${TICKET_ID}` (= `$1`) as your single ticket throughout the workflow.
-- Read your own signal file at `${ORCH_DIR}/workers/${TICKET_ID}.json` — the SPECIFIC file
-  named for your ticket, not the directory.
-- Read the briefing for your wave by exact filename: `${ORCH_DIR}/wave-${WAVE}-briefing.md`,
-  where `${WAVE}` comes from your signal file's `wave` field (set by the dispatcher in
+- Read your own signal file at `${ORCH_DIR}/workers/${TICKET_ID}.json` — the SPECIFIC file named for
+  your ticket, not the directory.
+- Read the briefing for your wave by exact filename: `${ORCH_DIR}/wave-${WAVE}-briefing.md`, where
+  `${WAVE}` comes from your signal file's `wave` field (set by the dispatcher in
   `orchestrate-dispatch-next`).
 
 DO NOT:
+
 - Enumerate `${ORCH_DIR}/workers/*.json` to discover sibling tickets.
 - Read `${ORCH_DIR}/state.json` to see what other tickets are queued or in flight.
-- Treat the wave briefing's "Wave roster" section as a list of tickets you must process —
-  the wave briefing is shared across every worker in the wave; your assigned ticket is
-  still only `$1`.
+- Treat the wave briefing's "Wave roster" section as a list of tickets you must process — the wave
+  briefing is shared across every worker in the wave; your assigned ticket is still only `$1`.
 - Treat comms channel participants (visible via `catalyst-comms status`) as your scope.
-- Ask the user to clarify which of "the tickets you see" they meant — there is exactly
-  one ticket: `$1`. If `$1` is empty or missing, fail loudly; do not search for tickets
-  to do.
+- Ask the user to clarify which of "the tickets you see" they meant — there is exactly one ticket:
+  `$1`. If `$1` is empty or missing, fail loudly; do not search for tickets to do.
 
 **Detection (checked once at startup):**
 
@@ -122,11 +131,11 @@ STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
 
 **Shared comms channel (CTL-111 / CTL-249):** if `CATALYST_COMMS_CHANNEL` is set by the
 orchestrator, the worker joins the shared channel, posts real traffic at each lifecycle boundary,
-and reads inbound messages (directed to `$TICKET_ID`) after each phase transition.
-Best-effort — every call is wrapped so a missing `catalyst-comms` CLI never crashes the worker.
-The worker posts at **minimum 4 messages** per run: start + phase transitions + done.
-Inbound reads are driven by `comms_check` (see below) — a non-blocking poll that checks for
-`abort`, `use-event-driven`, and `reprioritize` signals from the orchestrator.
+and reads inbound messages (directed to `$TICKET_ID`) after each phase transition. Best-effort —
+every call is wrapped so a missing `catalyst-comms` CLI never crashes the worker. The worker posts
+at **minimum 4 messages** per run: start + phase transitions + done. Inbound reads are driven by
+`comms_check` (see below) — a non-blocking poll that checks for `abort`, `use-event-driven`, and
+`reprioritize` signals from the orchestrator.
 
 ```bash
 # Resolve the catalyst-comms binary. Prefer the plugin-shipped copy so installs
@@ -316,22 +325,22 @@ trap 'filter_deregister_worker' EXIT INT TERM
 
 If `ORCH_DIR` is detected, the worker:
 
-1. **Reads its signal file** from `${ORCH_DIR}/workers/${TICKET_ID}.json` (the single named
-   file for this worker — do NOT list other files in the workers/ directory)
+1. **Reads its signal file** from `${ORCH_DIR}/workers/${TICKET_ID}.json` (the single named file for
+   this worker — do NOT list other files in the workers/ directory)
 2. **Updates status at each phase transition** — writes `status`, `phase`, and `updatedAt` to both
    the local signal file AND the global state at `~/catalyst/state.json`
 3. **Derives and writes `label`** to the signal file at startup (see Label Derivation below)
 4. **Emits events** to the global event log at each phase transition
 5. **Fills `definitionOfDone`** at Phase 4 (validation) and Phase 5 (ship) with actual results
 6. **Reads its wave briefing** at `${ORCH_DIR}/wave-${WAVE}-briefing.md` if it exists, where
-   `${WAVE}` is read from the worker's own signal file's `wave` field (set by dispatcher).
-   Do NOT glob `wave-*-briefing.md` — only the worker's own wave is in scope. If the signal
-   file has no `wave` field (older orchestrators), skip briefing read entirely.
+   `${WAVE}` is read from the worker's own signal file's `wave` field (set by dispatcher). Do NOT
+   glob `wave-*-briefing.md` — only the worker's own wave is in scope. If the signal file has no
+   `wave` field (older orchestrators), skip briefing read entirely.
 
 **Label Derivation** (at startup, before first phase transition):
 
-The `label` field in the signal file gives the session a human-readable display name. It is
-derived automatically unless overridden with `--label`:
+The `label` field in the signal file gives the session a human-readable display name. It is derived
+automatically unless overridden with `--label`:
 
 ```bash
 # If --label flag was provided, use it directly
@@ -404,9 +413,9 @@ fi
 comms_check
 ```
 
-**When worker creates a PR**, also update global state with PR details. Record
-`prOpenedAt` immediately so the dashboard can show how long the PR has been open
-separately from how long it took to merge:
+**When worker creates a PR**, also update global state with PR details. Record `prOpenedAt`
+immediately so the dashboard can show how long the PR has been open separately from how long it took
+to merge:
 
 ```bash
 PR_OPENED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -427,15 +436,14 @@ comms_post info "pr:#${PR_NUMBER} opened"
 
 The worker actively merges its own PR after the listen loop confirms the PR is CLEAN (CI green +
 reviews satisfied). The worker writes `pr.mergedAt` + `status: "done"` to the signal file and
-transitions the Linear ticket. The **orchestrator's Phase 4** is a safety-net fallback for
-workers that stalled or crashed before completing their own merge.
+transitions the Linear ticket. The **orchestrator's Phase 4** is a safety-net fallback for workers
+that stalled or crashed before completing their own merge.
 
 **When worker reaches terminal state** (done or failed):
 
-**Mandatory `attention` on block** (per [[catalyst-comms]] § Posting Discipline §3): in
-addition to the failure path below, the worker MUST also `comms_post attention "<reason>"`
-when it hits any of the following mid-flight, even if it is not yet writing
-`status: "failed"`:
+**Mandatory `attention` on block** (per [[catalyst-comms]] § Posting Discipline §3): in addition to
+the failure path below, the worker MUST also `comms_post attention "<reason>"` when it hits any of
+the following mid-flight, even if it is not yet writing `status: "failed"`:
 
 - scope conflict with a sibling worker
 - missing required access (CLI / credential / API)
@@ -443,9 +451,9 @@ when it hits any of the following mid-flight, even if it is not yet writing
 - same test/CI failure 3+ times after distinct fix attempts
 - writing `status: "stalled"` (any phase)
 
-Use a single `attention` per blocker (do not retry). Continue with whatever work is still
-possible, or exit if the blocker is total. The orchestrator's poll loop will promote the
-message to a state-level NEEDS ATTENTION item.
+Use a single `attention` per blocker (do not retry). Continue with whatever work is still possible,
+or exit if the blocker is total. The orchestrator's poll loop will promote the message to a
+state-level NEEDS ATTENTION item.
 
 ```bash
 if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
@@ -468,28 +476,28 @@ fi
 
 **Phase-to-status mapping for signal file:**
 
-| Phase | Signal Status | Writer |
-|-------|--------------|--------|
-| 1 start | `researching` | worker |
-| 2 start | `planning` | worker |
-| 3 start | `implementing` | worker |
-| 4 start | `validating` | worker |
-| 5 start | `shipping` | worker |
-| 5 PR opened | `pr-created` + `pr.prOpenedAt` + `pr.ciStatus: "pending"` | worker |
-| 5 PR listen loop: inline blocker handled | (worker fixes CI/reviews and loops) | worker |
-| 5 PR listen loop: human changes-requested | `status: "stalled"` + attention | worker |
-| 5 PR listen loop: unresolvable conflicts | `status: "stalled"` + attention | worker |
-| 5 PR merged by worker (skipDeployVerification=true or no deploy config) | `pr.ciStatus: "merged"` + `pr.mergedAt` + `status: "done"` + `completedAt` | worker |
-| 5 PR merged by worker (skipDeployVerification=false, CTL-211) | `pr.ciStatus: "merged"` + `pr.mergedAt` + `pr.mergeCommitSha` + `deploy.startedAt` + `deploy.environment` → waits for `deployment_status` | worker |
-| 5 deployment_status.success on production env | `status: "done"` + `deploy.completedAt` + `deploy.result: "success"` | worker (orchestrator Phase 4 as fallback) |
-| 5 deployment_status.failure on production env | `status: "deploy-failed"` + `deploy.failedAttempts` + attention | worker (orchestrator Phase 4 as fallback) |
-| 5 worker stalled/crashed — merge fallback | `pr.ciStatus: "merged"` + `pr.mergedAt` + `status: "done"` | orchestrator Phase 4 (safety net) |
-| Any failure | `failed` | worker |
+| Phase                                                                   | Signal Status                                                                                                                             | Writer                                    |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| 1 start                                                                 | `researching`                                                                                                                             | worker                                    |
+| 2 start                                                                 | `planning`                                                                                                                                | worker                                    |
+| 3 start                                                                 | `implementing`                                                                                                                            | worker                                    |
+| 4 start                                                                 | `validating`                                                                                                                              | worker                                    |
+| 5 start                                                                 | `shipping`                                                                                                                                | worker                                    |
+| 5 PR opened                                                             | `pr-created` + `pr.prOpenedAt` + `pr.ciStatus: "pending"`                                                                                 | worker                                    |
+| 5 PR listen loop: inline blocker handled                                | (worker fixes CI/reviews and loops)                                                                                                       | worker                                    |
+| 5 PR listen loop: human changes-requested                               | `status: "stalled"` + attention                                                                                                           | worker                                    |
+| 5 PR listen loop: unresolvable conflicts                                | `status: "stalled"` + attention                                                                                                           | worker                                    |
+| 5 PR merged by worker (skipDeployVerification=true or no deploy config) | `pr.ciStatus: "merged"` + `pr.mergedAt` + `status: "done"` + `completedAt`                                                                | worker                                    |
+| 5 PR merged by worker (skipDeployVerification=false, CTL-211)           | `pr.ciStatus: "merged"` + `pr.mergedAt` + `pr.mergeCommitSha` + `deploy.startedAt` + `deploy.environment` → waits for `deployment_status` | worker                                    |
+| 5 deployment_status.success on production env                           | `status: "done"` + `deploy.completedAt` + `deploy.result: "success"`                                                                      | worker (orchestrator Phase 4 as fallback) |
+| 5 deployment_status.failure on production env                           | `status: "deploy-failed"` + `deploy.failedAttempts` + attention                                                                           | worker (orchestrator Phase 4 as fallback) |
+| 5 worker stalled/crashed — merge fallback                               | `pr.ciStatus: "merged"` + `pr.mergedAt` + `status: "done"`                                                                                | orchestrator Phase 4 (safety net)         |
+| Any failure                                                             | `failed`                                                                                                                                  | worker                                    |
 
 ## Session Tracking
 
-Start a catalyst-session at the very beginning of the workflow, before Phase 1. This session
-spans the entire oneshot lifecycle and records phase transitions, PR creation, and completion.
+Start a catalyst-session at the very beginning of the workflow, before Phase 1. This session spans
+the entire oneshot lifecycle and records phase transitions, PR creation, and completion.
 
 ```bash
 SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
@@ -511,8 +519,8 @@ if [[ -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-**At each phase transition**, call BOTH the signal file update helper (above) AND the session
-phase call. The session phase call is additive — it never replaces the signal file write:
+**At each phase transition**, call BOTH the signal file update helper (above) AND the session phase
+call. The session phase call is additive — it never replaces the signal file write:
 
 ```bash
 if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
@@ -538,8 +546,8 @@ fi
 ```
 
 **Iteration counter** (see CTL-158): bump `--kind plan` whenever the plan is re-entered
-(validate-plan kicks back to create-plan) and `--kind fix` whenever an automated fix retry runs
-in Phase 4 (quality gates) or Phase 5 (CI auto-fix). The counts are flushed to OTLP as
+(validate-plan kicks back to create-plan) and `--kind fix` whenever an automated fix retry runs in
+Phase 4 (quality gates) or Phase 5 (CI auto-fix). The counts are flushed to OTLP as
 `claude_code_iteration_count_total{linear_key,kind}` at session end so downstream estimation can
 read rework signal per ticket:
 
@@ -570,8 +578,9 @@ This phase runs in the current session to allow user interaction during research
    Research complete. Would you like to create a Linear ticket from these findings?
    [y/N]
    ```
-   If yes, create a ticket via the Linearis CLI (run `linearis issues usage` for create syntax) using the research summary as description,
-   then register the ticket ID: `workflow-context.sh set-ticket "NEW-TICKET-ID"`
+   If yes, create a ticket via the Linearis CLI (run `linearis issues usage` for create syntax)
+   using the research summary as description, then register the ticket ID:
+   `workflow-context.sh set-ticket "NEW-TICKET-ID"`
 5. **Conduct research** — follow the `/catalyst-dev:research-codebase` process exactly. This is the
    single source of truth for how codebase research works (including DeepWiki orientation, sub-agent
    spawning, synthesis, and document creation). The research document MUST be written to
@@ -711,21 +720,20 @@ EXISTING_PR=$(gh pr list --head "$(git branch --show-current)" --json number --j
 **Step 2: Active PR Listen Loop — Wait for CLEAN then Merge (replaces auto-merge)**
 
 After the PR is created, enter an event-driven listen loop. The preferred wake mechanism (CTL-269)
-is a single `filter.register` covering CI, comms inbound, reviews, BEHIND, and Linear ticket
-changes — the worker then waits on `filter.wake.${CATALYST_SESSION_ID}` and the Groq-backed filter
-daemon decides which raw events match. When the daemon is not running, the loop falls back to the
+is a single `filter.register` covering CI, comms inbound, reviews, BEHIND, and Linear ticket changes
+— the worker then waits on `filter.wake.${CATALYST_SESSION_ID}` and the Groq-backed filter daemon
+decides which raw events match. When the daemon is not running, the loop falls back to the
 [[wait-for-github]] two-phase pattern with per-concern jq filters. See [[catalyst-filter]] for
 registration recipes. The worker actively resolves blockers (CI failures, bot review threads,
 BEHIND) inline and proceeds to Step 3 only when the PR is CLEAN (CI green + reviews satisfied). On
 unrecoverable blockers (human changes-requested, persistent DIRTY) the worker writes
 `status: "stalled"` and exits; the orchestrator's Phase 4 is a safety-net fallback.
 
-**Wake narration (MANDATORY, CTL-369).** Every iteration of the listen loop —
-both on a `wait-for` return AND on each `mergeable_state` re-check — must
-produce a single short line of assistant text before re-entering the wait. This
-defeats the `Human:\n<task-id>` rendering bleed that occurs when the agent
-returns an `end_turn` containing only `thinking` blocks after a Monitor-wrapped
-wake. The line shape is:
+**Wake narration (MANDATORY, CTL-369).** Every iteration of the listen loop — both on a `wait-for`
+return AND on each `mergeable_state` re-check — must produce a single short line of assistant text
+before re-entering the wait. This defeats the `Human:\n<task-id>` rendering bleed that occurs when
+the agent returns an `end_turn` containing only `thinking` blocks after a Monitor-wrapped wake. The
+line shape is:
 
 ```text
 wake: <event.name> #<PR_NUMBER> [interest=<type>] — <action being taken>
@@ -734,11 +742,10 @@ wake: <event.name> — already addressed, no-op
 wake: rest-poll — broker down, polling gh api
 ```
 
-Surface `.body.payload.interest_id` and `.body.payload.reason` from the wake
-envelope when present (broker wakes carry both); for hand-rolled two-phase
-filter wakes, surface the matched `event.name` and `#${PR_NUMBER}` instead. See
-`plugins/dev/skills/monitor-events/SKILL.md` § Narration for the full rule and
-the good-vs-bad transcript fixture.
+Surface `.body.payload.interest_id` and `.body.payload.reason` from the wake envelope when present
+(broker wakes carry both); for hand-rolled two-phase filter wakes, surface the matched `event.name`
+and `#${PR_NUMBER}` instead. See `plugins/dev/skills/monitor-events/SKILL.md` § Narration for the
+full rule and the good-vs-bad transcript fixture.
 
 ```bash
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
@@ -1036,9 +1043,9 @@ fi
 
 **Step 4: Optional Rollup Fragment Contribution (CTL-108)**
 
-Before exiting, under orchestrator mode only (`ORCH_DIR` set), the worker MAY write a
-short markdown fragment describing anything surprising, risky, or worth flagging to human
-reviewers of the whole orchestrator's output:
+Before exiting, under orchestrator mode only (`ORCH_DIR` set), the worker MAY write a short markdown
+fragment describing anything surprising, risky, or worth flagging to human reviewers of the whole
+orchestrator's output:
 
 ```bash
 if [ -n "$ORCH_DIR" ] && [ -d "$ORCH_DIR/workers" ]; then
@@ -1054,11 +1061,11 @@ fi
 
 - **File name**: MUST match `${TICKET_ID}-rollup.md` exactly — the orch-monitor scans for this
   pattern to assemble the orchestrator-level rollup briefing.
-- **Content**: keep it short. The first non-blank line becomes the one-liner in the "What
-  shipped" list in the orch-monitor UI. The rest appears under a `### ${TICKET_ID}` heading in
-  the "Gotchas" section.
-- **Optional**: skip the fragment if there is nothing reviewers need to know beyond the PR
-  title — not having a fragment is the norm, not the exception.
+- **Content**: keep it short. The first non-blank line becomes the one-liner in the "What shipped"
+  list in the orch-monitor UI. The rest appears under a `### ${TICKET_ID}` heading in the "Gotchas"
+  section.
+- **Optional**: skip the fragment if there is nothing reviewers need to know beyond the PR title —
+  not having a fragment is the norm, not the exception.
 - **No orchestrator mode**: do nothing (standalone oneshot runs do not write fragments).
 
 The orchestrator's Phase 4 poll loop transitions the Linear ticket to `stateMap.done` when it
@@ -1069,19 +1076,19 @@ confirms `state=MERGED` via the shared helper (CTL-69):
   --ticket "$TICKET_ID" --transition done --config .catalyst/config.json
 ```
 
-In standalone mode (no orchestrator), the user runs `/catalyst-dev:merge-pr` which handles
-this transition.
+In standalone mode (no orchestrator), the user runs `/catalyst-dev:merge-pr` which handles this
+transition.
 
 **Step 5: File improvement findings (CTL-176 / CTL-183 routing)**
 
-Drain the findings queue and file one ticket per entry. Orchestrator-dispatched oneshot runs
-share the orchestrator's queue (`$CATALYST_FINDINGS_FILE=$ORCH_DIR/findings.jsonl`) and the
-orchestrator's Phase 7 files everything — this step is still safe to run and will find an
-empty queue in that case. Standalone oneshot runs (no orchestrator) use a session-scoped
-queue path derived from `$CATALYST_SESSION_ID`, falling back to `.catalyst/findings/current.jsonl`.
+Drain the findings queue and file one ticket per entry. Orchestrator-dispatched oneshot runs share
+the orchestrator's queue (`$CATALYST_FINDINGS_FILE=$ORCH_DIR/findings.jsonl`) and the orchestrator's
+Phase 7 files everything — this step is still safe to run and will find an empty queue in that case.
+Standalone oneshot runs (no orchestrator) use a session-scoped queue path derived from
+`$CATALYST_SESSION_ID`, falling back to `.catalyst/findings/current.jsonl`.
 
-**Recording findings during the run.** The moment you notice friction worth fixing (workflow
-gaps, bugs spotted in adjacent code, recurring manual steps), record it on the queue:
+**Recording findings during the run.** The moment you notice friction worth fixing (workflow gaps,
+bugs spotted in adjacent code, recurring manual steps), record it on the queue:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
@@ -1090,16 +1097,15 @@ gaps, bugs spotted in adjacent code, recurring manual steps), record it on the q
   --skill oneshot --severity low
 ```
 
-Record inline, not as a post-run retrospective — context compaction loses observations that
-wait. Don't prompt the user; don't batch. Step 5 below files the whole queue in one pass.
+Record inline, not as a post-run retrospective — context compaction loses observations that wait.
+Don't prompt the user; don't batch. Step 5 below files the whole queue in one pass.
 
-**What counts:** friction the maintainer would want fixed, bugs in adjacent catalyst code
-spotted incidentally, gaps in tooling, manual steps that should be automated.
-**What doesn't:** this ticket's own follow-up TODOs (PR body), user preferences that should
-be durable memory, routine debugging. In orchestrator-dispatched workers, stdin is not a TTY
-and `CATALYST_AUTONOMOUS=1` is expected to be set — the helper silently skips filing when
-consent is not already granted, never prompts. Standalone oneshot runs prompt interactively
-once and persist "yes":
+**What counts:** friction the maintainer would want fixed, bugs in adjacent catalyst code spotted
+incidentally, gaps in tooling, manual steps that should be automated. **What doesn't:** this
+ticket's own follow-up TODOs (PR body), user preferences that should be durable memory, routine
+debugging. In orchestrator-dispatched workers, stdin is not a TTY and `CATALYST_AUTONOMOUS=1` is
+expected to be set — the helper silently skips filing when consent is not already granted, never
+prompts. Standalone oneshot runs prompt interactively once and persist "yes":
 
 ```bash
 FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
@@ -1131,7 +1137,8 @@ if [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; the
 fi
 ```
 
-**If `--no-merge` was set**, skip Steps 2–3 (listen loop and merge) entirely and report PR status instead:
+**If `--no-merge` was set**, skip Steps 2–3 (listen loop and merge) entirely and report PR status
+instead:
 
 ```
 PR ready: https://github.com/org/repo/pull/{number}
@@ -1152,8 +1159,8 @@ only as a fallback for stalled workers.
 ### Phase 6: (deprecated)
 
 Phase 6 used to run `/merge-pr` separately. Workers now exit at `status: "done"` after actively
-merging their own PR and verifying deployment (CTL-252). `/merge-pr` is still useful as a
-standalone tool for merging a PR opened outside the oneshot flow.
+merging their own PR and verifying deployment (CTL-252). `/merge-pr` is still useful as a standalone
+tool for merging a PR opened outside the oneshot flow.
 
 ## Team Mode (Optional)
 
@@ -1287,14 +1294,13 @@ State transitions throughout the lifecycle:
 | 5 (PR created)                     | → inReview   | `stateMap.inReview`   | "In Review"   |
 | 5 (PR merged by worker)            | → done       | `stateMap.done`       | "Done"        |
 
-The worker transitions the ticket to `stateMap.done` after actively merging the PR in Step 3.
-The orchestrator's Phase 4 handles this transition only as a fallback for workers that stalled
-before completing their own merge (CTL-252).
+The worker transitions the ticket to `stateMap.done` after actively merging the PR in Step 3. The
+orchestrator's Phase 4 handles this transition only as a fallback for workers that stalled before
+completing their own merge (CTL-252).
 
 ## Error Handling
 
-**All error paths must end the session.** Before presenting errors or creating handoffs, always
-run:
+**All error paths must end the session.** Before presenting errors or creating handoffs, always run:
 
 ```bash
 if [[ -n "${CATALYST_SESSION_ID:-}" && -x "$SESSION_SCRIPT" ]]; then
@@ -1325,8 +1331,10 @@ fi
 
 **If CI checks fail in Phase 5:**
 
-- Worker detects the CI failure in the active listen loop (Step 2) via REST check on `mergeable_state`
-- Worker attempts automated fix (up to 3 times) — analyzes CI failure, pushes fix commit, continues loop
+- Worker detects the CI failure in the active listen loop (Step 2) via REST check on
+  `mergeable_state`
+- Worker attempts automated fix (up to 3 times) — analyzes CI failure, pushes fix commit, continues
+  loop
 - After 3 failed fix attempts, worker writes `status: "stalled"` and posts `attention` to comms
 - The orchestrator's Phase 4 then dispatches a fix-up worker via `orchestrate-auto-fixup` (CTL-64)
 
@@ -1342,36 +1350,38 @@ error, context exhaustion):
 ## Important
 
 - **All phases run in the current session** — no separate processes are spawned
-- **thoughts/ is the handoff mechanism** — all documents persist between phases and survive compaction
+- **thoughts/ is the handoff mechanism** — all documents persist between phases and survive
+  compaction
 - **NEVER add Claude attribution** to any generated artifacts
 - **Use wiki-links** for cross-references between thoughts documents (e.g., `[[filename]]`), not
   full paths
 - **Phase 3 does NOT commit** — all git operations are deferred to Phase 5
-- **Worker's success contract is `status: "done"` (CTL-252)** — the worker opens the PR,
-  enters an event-driven listen loop using `catalyst-events wait-for`, resolves CI/review
-  blockers inline, merges when CLEAN with `gh pr merge --squash --delete-branch` (no `--auto`),
-  and writes `status: "done"` with `pr.mergedAt` and `deployment.url` (if applicable). Workers
-  do NOT use `ScheduleWakeup` (unreliable in `-p` mode) — they use `catalyst-events wait-for`
-  which is a blocking subprocess call that works reliably in non-interactive sessions
+- **Worker's success contract is `status: "done"` (CTL-252)** — the worker opens the PR, enters an
+  event-driven listen loop using `catalyst-events wait-for`, resolves CI/review blockers inline,
+  merges when CLEAN with `gh pr merge --squash --delete-branch` (no `--auto`), and writes
+  `status: "done"` with `pr.mergedAt` and `deployment.url` (if applicable). Workers do NOT use
+  `ScheduleWakeup` (unreliable in `-p` mode) — they use `catalyst-events wait-for` which is a
+  blocking subprocess call that works reliably in non-interactive sessions
 - **Worker handles BEHIND, CI failures, and bot review threads inline** — in the Phase 5 listen
-  loop; the orchestrator's Phase 4 is a safety-net fallback for workers that write `status: "stalled"`
+  loop; the orchestrator's Phase 4 is a safety-net fallback for workers that write
+  `status: "stalled"`
 - **Worker writes `pr.mergedAt` + `status: "done"`** — after actively merging the PR in Phase 5
   Step 3. The orchestrator's Phase 4 handles this only for workers that stalled before completing
-- **Worker exits cleanly after writing `status: "done"`** — this is the expected success path.
-  The orchestrator distinguishes this from stalls (no PR, no progress for 15+ minutes)
-- **Worker comms discipline** — when posting to the shared comms channel, follow the rules
-  in [[catalyst-comms]] § Posting Discipline: `info` is the default heartbeat (phase
-  transitions only, ~5–7 per session), `attention` is reserved for orchestrator action
-  (0–2 per session, MANDATORY on the escalation triggers listed there — scope conflict,
-  missing access, ambiguous spec, 3+ repeated CI failures, `status="stalled"`), `done`
-  fires once at terminal success via the `done` subcommand. The existing `comms_post`
-  helper in this skill already routes correctly — these rules govern *when* you call it.
-- **Worker inbound reads (CTL-249)** — `comms_check` is called after each phase transition via
-  the signal-file update block. It polls for messages directed to `$TICKET_ID` (skipping
-  pre-worker history via `$COMMS_LAST_READ`), logs all inbound messages, and exits on `abort`.
+- **Worker exits cleanly after writing `status: "done"`** — this is the expected success path. The
+  orchestrator distinguishes this from stalls (no PR, no progress for 15+ minutes)
+- **Worker comms discipline** — when posting to the shared comms channel, follow the rules in
+  [[catalyst-comms]] § Posting Discipline: `info` is the default heartbeat (phase transitions only,
+  ~5–7 per session), `attention` is reserved for orchestrator action (0–2 per session, MANDATORY on
+  the escalation triggers listed there — scope conflict, missing access, ambiguous spec, 3+ repeated
+  CI failures, `status="stalled"`), `done` fires once at terminal success via the `done` subcommand.
+  The existing `comms_post` helper in this skill already routes correctly — these rules govern
+  _when_ you call it.
+- **Worker inbound reads (CTL-249)** — `comms_check` is called after each phase transition via the
+  signal-file update block. It polls for messages directed to `$TICKET_ID` (skipping pre-worker
+  history via `$COMMS_LAST_READ`), logs all inbound messages, and exits on `abort`.
   `catalyst-comms send` already emits `comms.message.posted` events to the global event log
-  (CTL-210), so Option B event emission is complete — extending `catalyst-events wait-for`
-  to include `comms.message` filters is tracked in CTL-247 (wait-for-github skill).
+  (CTL-210), so Option B event emission is complete — extending `catalyst-events wait-for` to
+  include `comms.message` filters is tracked in CTL-247 (wait-for-github skill).
 
 **IMPORTANT: Document Storage Rules**
 

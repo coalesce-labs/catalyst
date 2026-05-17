@@ -15,6 +15,8 @@ quality through adversarial verification.
 
 - [Workers and signal files](./orchestration/workers/) — lifecycle, signal-file schema, state
   machine
+- [Phase agents](./orchestration/phase-agents/) — the nine-phase `claude --bg` worker pipeline that
+  replaces the long `oneshot` worker once `dispatchMode` is `"phase-agents"`
 - [Verification and reward-hacking defense](./orchestration/verification/) — how the orchestrator
   adversarially checks worker output
 - [Observability overview](/observability/) — monitoring orchestrations in real time :::
@@ -263,14 +265,14 @@ The orchestrator:
 
 ### Flags
 
-| Flag                     | Description                                      |
-| ------------------------ | ------------------------------------------------ |
-| `--name <name>`          | Name this orchestrator (default: auto-generated) |
+| Flag                     | Description                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------ |
+| `--name <name>`          | Name this orchestrator (default: auto-generated)                                     |
 | `--auto <N>`             | Auto-pick top N Todo tickets (urgent/high priority first, newer first). Default N=3. |
-| `--max-parallel <n>`     | Override max concurrent workers (default: 3)     |
-| `--base-branch <branch>` | Base branch for worktrees (default: main)        |
-| `--dry-run`              | Show wave plan without executing                 |
-| `--interactive`          | Include PM intake phase before orchestration     |
+| `--max-parallel <n>`     | Override max concurrent workers (default: 3)                                         |
+| `--base-branch <branch>` | Base branch for worktrees (default: main)                                            |
+| `--dry-run`              | Show wave plan without executing                                                     |
+| `--interactive`          | Include PM intake phase before orchestration                                         |
 
 ## Wave-Based Parallelism
 
@@ -346,10 +348,18 @@ initializes worker signal files.
 ## Worker Dispatch
 
 Workers are dispatched by `orchestrate-dispatch-next`, which reads the `waveNPending` queues,
-validates the `workerCommand` format (must be `/<plugin>:<skill>`), and launches `claude -p`
-with `--output-format stream-json --verbose` to produce real-time NDJSON the monitor tails
-for live worker activity. Each runs `/catalyst-dev:oneshot <ticket>` autonomously — workers
-own their full PR lifecycle including merge; there is no `--auto-merge` flag.
+validates the `workerCommand` format (must be `/<plugin>:<skill>`), and routes to one of two
+dispatch paths based on `catalyst.orchestration.dispatchMode`:
+
+- **`"oneshot-legacy"` (default)** — launches one long `claude -p` worker per ticket with
+  `--output-format stream-json --verbose`, producing real-time NDJSON the monitor tails for live
+  worker activity. Each runs `/catalyst-dev:oneshot <ticket>` autonomously and owns the full PR
+  lifecycle through merge.
+- **`"phase-agents"`** — dispatches nine short-lived `claude --bg` jobs per ticket, one per phase,
+  advancing on `phase.<name>.complete.<ticket>` broker events. See
+  [Phase agents](./orchestration/phase-agents/) for the full pipeline, model assignment, and cost
+  economics. This is the post–2026-06-15 path that keeps the worker dispatch on the subscription
+  pool instead of Agent-SDK-Credit.
 
 The dispatch prompt includes **mandatory testing requirements** — not suggestions. Workers are told
 their output will be independently verified. The `CATALYST_ORCHESTRATOR_DIR` environment variable is
@@ -359,10 +369,9 @@ set so workers know where to write their signal files.
 
 Workers do **not** register filter interests by hand. Instead, each worker emits `agent.checkin`
 when it boots — including a `claimed_pr` field once the PR exists — and the
-[`catalyst-broker`](/observability/catalyst-broker/) daemon (CTL-303) auto-derives a
-`pr_lifecycle` interest from that identity record. When the worker shuts down (success or
-failure) it emits `agent.checkout`, and the broker auto-deregisters every interest it derived
-for that agent.
+[`catalyst-broker`](/observability/catalyst-broker/) daemon (CTL-303) auto-derives a `pr_lifecycle`
+interest from that identity record. When the worker shuts down (success or failure) it emits
+`agent.checkout`, and the broker auto-deregisters every interest it derived for that agent.
 
 This auto-correlation is what makes the worker's PR listen loop work without any manual
 `filter.register` plumbing. Workers can also subscribe to `ticket_lifecycle` to follow a Linear
@@ -476,16 +485,16 @@ gets caught.
 
 ### Orchestration Fields
 
-| Field                         | Type         | Default                      | Description                                                     |
-| ----------------------------- | ------------ | ---------------------------- | --------------------------------------------------------------- |
-| `worktreeDir`                 | string\|null | `~/catalyst/wt/<projectKey>` | Base directory for worktrees                                    |
-| `maxParallel`                 | number       | 3                            | Max concurrent workers per wave                                 |
-| `hooks.setup`                 | string[]     | `[]`                         | Extra commands after base `worktree.setup` (orchestration-only) |
-| `hooks.teardown`              | string[]     | `[]`                         | Commands before worktree removal on wave advancement            |
-| `workerCommand`               | string       | `/catalyst-dev:oneshot`      | Plugin-namespaced skill to run in each worker. Must be `/<plugin>:<skill>`; bare slashes rejected at dispatch. |
-| `workerModel`                 | string       | `opus`                       | Model for worker sessions                                       |
-| `testRequirements`            | object       | `{"backend":["unit"]}`       | Required test types by scope                                    |
-| `verifyBeforeMerge`           | boolean      | `true`                       | Run adversarial verification on merged commits (post-merge)     |
+| Field                         | Type         | Default                      | Description                                                                                                                                         |
+| ----------------------------- | ------------ | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `worktreeDir`                 | string\|null | `~/catalyst/wt/<projectKey>` | Base directory for worktrees                                                                                                                        |
+| `maxParallel`                 | number       | 3                            | Max concurrent workers per wave                                                                                                                     |
+| `hooks.setup`                 | string[]     | `[]`                         | Extra commands after base `worktree.setup` (orchestration-only)                                                                                     |
+| `hooks.teardown`              | string[]     | `[]`                         | Commands before worktree removal on wave advancement                                                                                                |
+| `workerCommand`               | string       | `/catalyst-dev:oneshot`      | Plugin-namespaced skill to run in each worker. Must be `/<plugin>:<skill>`; bare slashes rejected at dispatch.                                      |
+| `workerModel`                 | string       | `opus`                       | Model for worker sessions                                                                                                                           |
+| `testRequirements`            | object       | `{"backend":["unit"]}`       | Required test types by scope                                                                                                                        |
+| `verifyBeforeMerge`           | boolean      | `true`                       | Run adversarial verification on merged commits (post-merge)                                                                                         |
 | `allowSelfReportedCompletion` | boolean      | `false`                      | When `true`, verification failures are advisory (wave advances). When `false` (default), failures block wave advancement until remediation is filed |
 
 ### Hook Variables
@@ -658,10 +667,10 @@ grep '"q2-api-redesign"' ~/catalyst/events/*.jsonl | jq -r '"\(.ts) \(.worker //
 cat ~/catalyst/events/*.jsonl | jq -r '.event' | sort | uniq -c | sort -rn
 ```
 
-:::note[Filtering github.* and linear.* events]
-`github.*` and `linear.*` events (delivered via webhook) share the same JSONL files as
-orchestrator/worker events, but they do **not** carry `.orchestrator` or `.worker` fields.
-Filter them by event prefix or by the PR/repo context embedded in each webhook payload:
+:::note[Filtering github.* and linear.* events] `github.*` and `linear.*` events (delivered via
+webhook) share the same JSONL files as orchestrator/worker events, but they do **not** carry
+`.orchestrator` or `.worker` fields. Filter them by event prefix or by the PR/repo context embedded
+in each webhook payload:
 
 ```bash
 # GitHub PR events for a specific repo
@@ -673,6 +682,7 @@ cat ~/catalyst/events/*.jsonl | jq 'select(.event | startswith("linear.issue.sta
 # All GitHub check suite completions for a specific PR (canonical envelope, CTL-300)
 cat ~/catalyst/events/*.jsonl | jq 'select(.attributes."event.name" == "github.check_suite.completed") | select(.body.payload.prNumbers // [] | contains([87]))'
 ```
+
 :::
 
 ### The catalyst-state.sh CLI
@@ -778,8 +788,8 @@ consumption and cost:
 }
 ```
 
-**How it works**: Workers launched via the `claude` CLI with `--output-format stream-json` produce
-a streaming NDJSON output that includes a final `result` event with full token counts, cost, and
+**How it works**: Workers launched via the `claude` CLI with `--output-format stream-json` produce a
+streaming NDJSON output that includes a final `result` event with full token counts, cost, and
 timing. After a worker process exits, the orchestrator parses this output and writes the usage data
 to both the worker's entry and the orchestrator's aggregate.
 
@@ -905,14 +915,14 @@ web access from a single process.
 
 The monitor watches `~/catalyst/wt/` for orchestrator directories (matching `orch-*`) and reads:
 
-| Source                                 | Data                                               | Refresh                    |
-| -------------------------------------- | -------------------------------------------------- | -------------------------- |
-| Worker signal files (`workers/*.json`) | Status, phase, PR number, definition of done       | Instant (filesystem watch) |
-| GitHub webhook (via smee.io)           | PR state, CI status, review events                 | Within ~1s when configured |
-| GitHub API (`gh pr view`)              | PR state (open/merged/closed), merge timestamp     | Every 10 minutes (fallback when webhook not configured) |
-| Process table (`kill -0 <pid>`)        | Whether the worker's Claude process is still alive | Every 5 seconds            |
-| Orchestrator `state.json`              | Wave count, progress, attention items              | Instant (filesystem watch) |
-| Broker / forwarder pipeline (`catalyst-events tail`) | Canonical event stream — `agent.checkin/checkout`, `pr_lifecycle`, `ticket_lifecycle`, comms, webhooks | Real-time push (CTL-303 / CTL-306) |
+| Source                                               | Data                                                                                                   | Refresh                                                 |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| Worker signal files (`workers/*.json`)               | Status, phase, PR number, definition of done                                                           | Instant (filesystem watch)                              |
+| GitHub webhook (via smee.io)                         | PR state, CI status, review events                                                                     | Within ~1s when configured                              |
+| GitHub API (`gh pr view`)                            | PR state (open/merged/closed), merge timestamp                                                         | Every 10 minutes (fallback when webhook not configured) |
+| Process table (`kill -0 <pid>`)                      | Whether the worker's Claude process is still alive                                                     | Every 5 seconds                                         |
+| Orchestrator `state.json`                            | Wave count, progress, attention items                                                                  | Instant (filesystem watch)                              |
+| Broker / forwarder pipeline (`catalyst-events tail`) | Canonical event stream — `agent.checkin/checkout`, `pr_lifecycle`, `ticket_lifecycle`, comms, webhooks | Real-time push (CTL-303 / CTL-306)                      |
 
 **Dead process detection:** If a worker's PID is recorded in its signal file but `kill -0` fails,
 the monitor marks it with a `!` indicator. This catches silently crashed workers that stopped
