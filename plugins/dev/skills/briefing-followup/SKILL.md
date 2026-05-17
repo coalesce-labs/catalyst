@@ -5,9 +5,9 @@ description:
   thoughts/briefings/YYYY-MM-DD.md (built by [[morning-briefing]]), parses the structured
   decisions: frontmatter, walks the user through each open decision, and executes the
   selected action via supported handlers — schedule calendar entry, file Linear ticket,
-  dispatch orchestrator, draft email. Phase 2 wires the real action handlers; Phase 3
-  (CTL-464) wires ADR-drift-specific actions; Phase 4 (CTL-465) writes resolutions back
-  to the briefing markdown.
+  dispatch orchestrator, draft email, plus ADR-drift-specific actions (update ADR / file
+  code-drift ticket / defer with a drift note). Phase 4 (CTL-465) writes resolutions
+  back to the briefing markdown.
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Task, mcp__*
@@ -155,7 +155,7 @@ echo "$DECISIONS_JSON" | jq -c '.[]' | while IFS= read -r dec; do
       echo "Actions: [a]pprove · [r]eject · [d]efer · [o]rchestrate · [s]kip · [q]uit"
       ;;
     adr_drift)
-      echo "Actions: [d]efer · [s]kip · [q]uit  (Phase 3 / CTL-464 will wire ADR actions)"
+      echo "Actions: [u]pdate ADR · [t]icket (code drift) · [D]efer · [s]kip · [q]uit"
       ;;
     *)
       echo "Actions: [a]pprove · [r]eject · [d]efer · [c]alendar · [t]icket · [o]rchestrate · [e]mail · [s]kip · [q]uit"
@@ -177,6 +177,9 @@ to action handlers as follows:
 | file a ticket / open Linear issue | `action-ticket.sh` → `record_resolution "$ID" file_ticket "$JSON"` | TSV + JSON |
 | dispatch orchestrator / kick off the work / run oneshot | `action-orchestrate.sh --bg` → `record_resolution "$ID" dispatch_orchestrator "$JSON"` | TSV + JSON |
 | draft email / send a note to X / message Y | `action-email.sh` → `record_resolution "$ID" draft_email "$JSON"` | TSV + JSON |
+| edit / update the ADR (adr_drift only) | `action-adr.sh --mode update --adr-file "$ADR"` → `record_resolution "$ID" adr_update "$JSON"` | TSV + JSON |
+| file code-drift ticket / fix the code (adr_drift only) | `action-adr.sh --mode ticket --adr-file "$ADR" --team CTL --summary "$SUMMARY" --drift-status "$DRIFT_STATUS"` → `record_resolution "$ID" adr_ticket "$JSON"` | TSV + JSON |
+| defer / note as intentional (adr_drift only) | `action-adr.sh --mode defer --adr-file "$ADR" --reason "$REASON"` → `record_resolution "$ID" adr_defer "$JSON"` | TSV + JSON |
 | skip | move on without logging |
 | quit / stop / done | break out of the loop |
 
@@ -241,7 +244,7 @@ echo "Logged $(wc -l < "$LOG_FILE" | tr -d ' ') response(s) to $LOG_FILE"
   returned. Phase 4 (CTL-465) reads this file to write the `resolutions:` block back
   to the briefing markdown frontmatter.
 
-## Action handlers (Phase 2 — CTL-463)
+## Action handlers (Phase 2 — CTL-463; Phase 3 — CTL-464)
 
 Per [[2026-05-16-catalyst-phase-agent-architecture]] §Initiative 3 Phase 2, the
 following sibling scripts implement the supported actions. Each emits one JSON line on
@@ -255,6 +258,9 @@ returned no usable result).
 | File a Linear ticket | `action-ticket.sh` | `{identifier, url, status: "filed"}` | `linearis` not on PATH |
 | Dispatch orchestrator | `action-orchestrate.sh` | `{orchestrator_id, status: "dispatched"}` | `claude` (or `$CATALYST_DISPATCH_CLAUDE_BIN`) not on PATH |
 | Draft an email | `action-email.sh` | `{draft_id, status: "drafted"}` | `GMAIL_OAUTH_ACCESS_TOKEN` unset |
+| Update ADR (adr_drift) | `action-adr.sh --mode update` | `{adr_file, adr_id, commit_sha, status: "updated"}` | `$EDITOR` unset, no save, or ADR not in a git repo |
+| File code-drift ticket (adr_drift) | `action-adr.sh --mode ticket` | `{identifier, url, adr_id, status: "filed"}` | `linearis` not on PATH |
+| Defer ADR drift (adr_drift) | `action-adr.sh --mode defer` | `{adr_file, adr_id, commit_sha, status: "deferred"}` | ADR not in a git repo |
 
 See `cma/mcp/google-calendar.md` and `cma/mcp/gmail.md` for the OAuth setup required
 to bypass the calendar / email soft-skip paths. Linear and orchestrator handlers
@@ -269,10 +275,10 @@ surfaces the relevant field to the user, then calls `record_resolution "$ID" <ac
 
 - **Phase 1 (CTL-462, done)**: load briefing, parse decisions, walk user through with
   placeholder Approve / Reject / Defer.
-- **Phase 2 (CTL-463, this skill version)**: action handlers — schedule calendar, file
+- **Phase 2 (CTL-463, done)**: action handlers — schedule calendar, file
   Linear ticket, dispatch orchestrator, draft email.
-- **Phase 3 (CTL-464, planned)**: ADR-drift resolution — Update ADR / Update code /
-  Defer per the parent plan.
+- **Phase 3 (CTL-464, this skill version)**: ADR-drift resolution — `action-adr.sh`
+  with `--mode update|ticket|defer` for the three options per the parent plan.
 - **Phase 4 (CTL-465, planned)**: resolutions write-back from the JSON file to the
   briefing markdown frontmatter `resolutions:` block.
 - **Phase 5 (CTL-466, planned)**: end-to-end real-briefing review session.
