@@ -1,40 +1,53 @@
-# Claude Managed Agents — base agent definition for Catalyst-pattern routines
+# Morning Briefing — per-routine agent (CTL-460)
 #
-# This base agent is generic across projects. Per-routine agents
-# (CTL-287..CTL-291 for Catalyst, future routines for Adva or any other
-# Catalyst-pattern project) inherit this definition and append routine-
-# specific behavior in their own `system` block.
-#
-# Project-specific values (repo, Linear team, state map) are NOT baked into
-# this prompt — they're resolved at session start from the bound target
-# repo's `.catalyst/config.json`. See `cma/agents/base-system-prompt.md`
-# section 1 for the startup ritual.
-#
-# ---------------------------------------------------------------------------
-# Required env vars at session creation:
-#
-#   CATALYST_TARGET_REPO         e.g., coalesce-labs/catalyst | getadva/adva
-#   CATALYST_THOUGHTS_DIRECTORY  optional override; falls back to projectKey
-#   GITHUB_PAT                   bound from the per-user vault
-# ---------------------------------------------------------------------------
+# Extends cma/agents/base.yaml via prompt composition: the routine-specific
+# extension block prepends the full base system prompt body. The base prompt's
+# §8 "Routine extension pattern" formalizes this — routines extend, they do
+# not redefine.
 #
 # Register with:
-#   ant beta:agents create -f cma/agents/base.yaml
+#   ant beta:agents create -f cma/routines/morning-briefing/agent.yaml
 #
-# When updating, run the drift check first:
-#   diff <(yq '.system' cma/agents/base.yaml) cma/agents/base-system-prompt.md
-# (See cma/README.md for the full update workflow.)
+# Re-inline the system body after editing either the routine extension OR the
+# base prompt. The build recipe lives in this directory's README.md.
 #
 # Beta API header: managed-agents-2026-04-01
-# Reference: https://platform.claude.com/docs/en/managed-agents/agent-setup
 
-name: catalyst-pattern-base
-
-# Default model. Per-routine agents may override (e.g., sonnet for cost-sensitive
-# routines like daily async update; opus for high-reasoning routines like docs drift).
+name: catalyst-morning-briefing-agent
 model: claude-opus-4-7
-
 system: |
+  # Morning Briefing — Routine extension
+
+  You are the **Morning Briefing** routine, a Catalyst Pattern Routine that
+  runs weekdays at 7am via CMA. Your job is to execute the committed skill at
+  `plugins/dev/skills/morning-briefing/SKILL.md` end-to-end against today's
+  date (UTC) and write the resulting briefing markdown back to the
+  `routines/briefings` branch on `coalesce-labs/thoughts`.
+
+  ## Specific to this routine
+
+  - **Trigger:** cron `0 7 * * 1-5` (weekdays 7am, user-tunable in routine.yaml).
+  - **Output target:** `thoughts/briefings/<date>.md` on the `routines/briefings`
+    branch of `coalesce-labs/thoughts` (writable clone, per §1a below).
+  - **Wall-clock budget:** under 10 minutes per the base prompt's routine
+    extension guidance. The skill runs 5 source-gathers in parallel; the fan-out
+    runs 4 outputs in parallel; the dominant cost is LLM synthesis of the
+    "today" / "decisions" sections.
+  - **Write-back:** the routine sets `WRITABLE_THOUGHTS=true` and
+    `THOUGHTS_WRITABLE_BRANCH=routines/briefings` in its env block. The base
+    agent's §1a clones the writable tree and the routine end-of-life block
+    commits + pushes. See [`cma/decisions/2026-05-17-briefing-write-back.md`](../../decisions/2026-05-17-briefing-write-back.md).
+
+  ## What the routine does NOT do
+
+  - It does not respond to user input (autonomous, single-fire).
+  - It does not change the read posture for other routines (read-only stays
+    the default — only routines that opt in get the writable clone).
+  - It does not touch `main` on `coalesce-labs/thoughts` (only the
+    `routines/briefings` branch).
+
+  ---
+
   # Catalyst Pattern Base — System Prompt
 
   You are a Catalyst Pattern Agent running in a Claude Managed Agents (CMA) cloud
@@ -486,55 +499,33 @@ system: |
   If the user (or the orchestrator) gives a routine-specific instruction that
   conflicts with this base prompt, follow the more specific instruction and
   flag the conflict in your final output.
-
 tools:
-  # Built-in CMA tools (file ops, code execution, web fetch)
-  - type: agent_toolset_20260401
-
-  # Surface MCP tools for each declared MCP server below.
-  - type: mcp_toolset
-    mcp_server_name: linear
-  - type: mcp_toolset
-    mcp_server_name: github
-  - type: mcp_toolset
-    mcp_server_name: slack
-  - type: mcp_toolset
-    mcp_server_name: notion
-
-# MCP server declarations. Credentials bind at session creation via vault_ids,
-# NOT here. See cma/vaults/example.yaml for the per-user vault template.
+- type: agent_toolset_20260401
+- type: mcp_toolset
+  mcp_server_name: linear
+- type: mcp_toolset
+  mcp_server_name: github
+- type: mcp_toolset
+  mcp_server_name: slack
+- type: mcp_toolset
+  mcp_server_name: notion
 mcp_servers:
-  - name: linear
-    type: streamable_http
-    url: https://mcp.linear.app/mcp
-
-  - name: github
-    type: streamable_http
-    url: https://api.githubcopilot.com/mcp/
-
-  - name: slack
-    # Slack's confidential OAuth dance must be completed before this MCP
-    # endpoint can be used. Until then, routines fall back to Slack REST
-    # (slack.com is in the env allowlist). See cma/mcp/slack.md.
-    type: streamable_http
-    url: https://mcp.slack.com/mcp
-
-  - name: notion
-    # The hosted Notion MCP at https://mcp.notion.com/mcp explicitly forbids
-    # bearer-token auth and is unreachable from a headless CMA session.
-    # Until a self-hosted notion-mcp-server is deployed, leave this URL set
-    # to the placeholder below and rely on Notion REST. See cma/mcp/notion.md.
-    type: streamable_http
-    url: https://placeholder.notion-mcp.invalid/mcp
-
-# CMA-native skills (different concept from Catalyst skills). Catalyst-style
-# skill semantics (research-codebase, validate-type-safety, etc.) are encoded
-# in the system prompt above. Porting them as CMA skills is tracked in CTL-294.
+- name: linear
+  type: streamable_http
+  url: https://mcp.linear.app/mcp
+- name: github
+  type: streamable_http
+  url: https://api.githubcopilot.com/mcp/
+- name: slack
+  type: streamable_http
+  url: https://mcp.slack.com/mcp
+- name: notion
+  type: streamable_http
+  url: https://placeholder.notion-mcp.invalid/mcp
 skills: []
-
 metadata:
-  catalyst_role: pattern-base
-  catalyst_version: v2
-  catalyst_ticket: CTL-299
-  session_inputs_required: "CATALYST_TARGET_REPO,GITHUB_PAT"
-  session_inputs_optional: "CATALYST_THOUGHTS_DIRECTORY"
+  catalyst_role: routine-agent
+  catalyst_routine: morning-briefing
+  catalyst_ticket: CTL-460
+  writable_thoughts: 'true'
+  thoughts_writable_branch: routines/briefings

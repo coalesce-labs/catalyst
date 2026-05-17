@@ -132,6 +132,81 @@ Read-side routines must leave `CATALYST_THOUGHTS_WRITE_BACK` unset.
 
 ---
 
+## 1a. Optional writable thoughts clone
+
+Some routines write per-run artifacts (briefings, curation indexes) that should
+land on a **routine-scoped branch** of `coalesce-labs/thoughts` rather than
+`main`. This keeps the artifact stream off `main` and avoids interleaving with
+research/plan write-backs handled by the §1 humanlayer path. The
+[morning-briefing routine](https://linear.app/coalesce-labs/issue/CTL-460) and
+[research-curate routine](https://linear.app/coalesce-labs/issue/CTL-469) are
+the current users; see
+[`cma/decisions/2026-05-17-briefing-write-back.md`](../decisions/2026-05-17-briefing-write-back.md)
+for the ADR.
+
+When a routine sets `WRITABLE_THOUGHTS=true` and `THOUGHTS_WRITABLE_BRANCH=<branch>`
+(routine-specific, e.g. `routines/briefings`), also run this block at session
+start:
+
+```bash
+if [ "${WRITABLE_THOUGHTS:-false}" = "true" ]; then
+  : "${THOUGHTS_WRITABLE_BRANCH:?required when WRITABLE_THOUGHTS=true}"
+
+  # Full clone (not --depth=1) so subsequent rebase + push work even when
+  # the remote branch already has history.
+  git clone \
+    "https://x-access-token:${GITHUB_PAT}@github.com/coalesce-labs/thoughts.git" \
+    /workspace/thoughts-writable
+
+  cd /workspace/thoughts-writable
+  if git ls-remote --exit-code origin "${THOUGHTS_WRITABLE_BRANCH}" >/dev/null 2>&1; then
+    git checkout "${THOUGHTS_WRITABLE_BRANCH}"
+    git pull --rebase origin "${THOUGHTS_WRITABLE_BRANCH}"
+  else
+    git checkout -b "${THOUGHTS_WRITABLE_BRANCH}"
+  fi
+  cd - >/dev/null
+
+  # Surface the writable subtree under the canonical thoughts/ path so skills
+  # that resolve thoughts/briefings/<date>.md write into the routine-scoped
+  # branch's working tree.
+  mkdir -p "/workspace/thoughts-writable/repos/${THOUGHTS_DIR}/shared/briefings"
+  ln -sfn "/workspace/thoughts-writable/repos/${THOUGHTS_DIR}/shared/briefings" \
+          /workspace/thoughts/briefings
+fi
+```
+
+At routine end, before session exit, call the write-back block:
+
+```bash
+if [ "${WRITABLE_THOUGHTS:-false}" = "true" ]; then
+  cd /workspace/thoughts-writable
+  if [ -n "$(git status --porcelain)" ]; then
+    git add -A
+    git commit -m "routine(${ROUTINE_NAME:-unknown}): ${RUN_DATE:-$(date -u +%Y-%m-%d)}"
+    if ! git push origin "${THOUGHTS_WRITABLE_BRANCH}"; then
+      # One retry: rebase against latest remote and push again.
+      git fetch origin "${THOUGHTS_WRITABLE_BRANCH}"
+      git rebase "origin/${THOUGHTS_WRITABLE_BRANCH}" || git rebase --abort
+      git push origin "${THOUGHTS_WRITABLE_BRANCH}"
+    fi
+  fi
+  cd - >/dev/null
+fi
+```
+
+`ROUTINE_NAME` is the routine slug from `routine.yaml:name` (e.g.,
+`morning-briefing`); `RUN_DATE` is the routine's date variable (e.g., `DATE`
+in morning-briefing's Step 1). Both are routine-supplied env vars — the base
+block does not synthesize them.
+
+This path is opt-in and additive: routines that leave `WRITABLE_THOUGHTS` unset
+behave exactly as before. The PAT scope on `coalesce-labs/thoughts` upgrades
+from `Contents: Read` to `Contents: Read+Write` for the routines vault — see
+`cma/mcp/github.md` for the per-routine PAT split option.
+
+---
+
 ## 2. Project conventions
 
 Read `/workspace/project-context.md` for the values that vary per project:

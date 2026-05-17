@@ -1,0 +1,88 @@
+# Morning Briefing — CMA Routine wiring (CTL-460)
+#
+# Phase 5 of Initiative 2 (Morning Briefing Routine). Wraps the
+# /catalyst-dev:morning-briefing skill on a weekday-morning schedule.
+# The skill itself is committed at plugins/dev/skills/morning-briefing/SKILL.md
+# (CTL-457 MVP, CTL-458 fan-out, CTL-459 ADR drift).
+#
+# Register with:
+#   ant beta:routines create -f cma/routines/morning-briefing/routine.yaml
+#
+# Validate locally before registration:
+#   bash cma/routines/morning-briefing/__tests__/routine-config.test.sh
+#   ant beta:routines validate -f cma/routines/morning-briefing/routine.yaml
+#
+# Beta API header: managed-agents-2026-04-01
+
+name: catalyst-morning-briefing
+
+# Per-routine agent definition. Register the agent separately via
+#   ant beta:agents create -f cma/routines/morning-briefing/agent.yaml
+# and reference the returned agent ID at routine registration time. For local
+# validation, this relative path lets the schema check resolve the agent file.
+agent: ./agent.yaml
+
+environment: catalyst-routines-base
+
+# Repository bindings. CMA clones each repo at the start of a run.
+repositories:
+  - coalesce-labs/catalyst     # target repo: skill code, ADRs, project context
+  - coalesce-labs/thoughts     # read-only at /workspace/thoughts-repo; writable
+                               #   clone at /workspace/thoughts-writable (see
+                               #   cma/agents/base-system-prompt.md §1a)
+
+# Schedule. Standard 5-field cron. Weekdays at 7am local time. User-tunable —
+# edit this value and re-register with `ant beta:routines update`.
+schedule:
+  cron: "0 7 * * 1-5"
+  timezone: "America/New_York"   # caller-local; CMA converts at run time
+
+# Routine prompt. Routines are invoked autonomously, so the prompt must be
+# self-contained.
+prompt: |
+  You are the Morning Briefing routine. Run the committed Catalyst skill at
+  `plugins/dev/skills/morning-briefing/SKILL.md` end-to-end against today's
+  date (UTC).
+
+  Steps the skill performs (see SKILL.md for the authoritative version):
+    1. Resolve target date and output path.
+    2. Gather sources (Linear, GitHub, Granola, Drive, Calendar) in parallel.
+    3. Compute decisions (ADR drift via CTL-459's adr-drift.sh, blocked PRs,
+       judgment-call tickets).
+    4. Render `thoughts/briefings/<date>.md` with validated YAML frontmatter.
+    5. Fan-out to Slack DM, Slack channel, Notion, and a Loom script file.
+    6. End the session.
+
+  Write-back is handled by the base agent's startup ritual:
+    - §1a clones the thoughts repo writable at `/workspace/thoughts-writable/`
+      and symlinks `/workspace/thoughts/briefings` to the writable subtree.
+      The skill's Step 6 render therefore lands in the writable clone.
+    - At session exit, the base agent commits and pushes the change to
+      `routines/briefings` on `coalesce-labs/thoughts`. Rebase + retry on
+      push failure; non-zero exit on hard failure.
+
+  Success criteria:
+    - `thoughts/briefings/<YYYY-MM-DD>.md` exists in the writable clone.
+    - The frontmatter validates (the skill calls validate-frontmatter.sh).
+    - Push to `routines/briefings` succeeds.
+    - The `output_status` block on the briefing markdown reflects each
+      destination's outcome (skipped, sent, or failed — never silent).
+
+  Failure behavior:
+    - If the skill exits non-zero, report the failure and do NOT push partial
+      state.
+    - If the push fails after one rebase retry, report the failure and exit.
+      A human will see the failed run in claude.ai/code/routines.
+
+# Environment variables. These tell the base agent's §1a to enable the
+# writable clone path and identify this routine for the commit message.
+env:
+  WRITABLE_THOUGHTS: "true"
+  THOUGHTS_WRITABLE_BRANCH: "routines/briefings"
+  ROUTINE_NAME: "morning-briefing"
+
+metadata:
+  catalyst_role: routine
+  catalyst_ticket: CTL-460
+  catalyst_initiative: "morning-briefing"
+  catalyst_version: v1
