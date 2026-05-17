@@ -75,16 +75,21 @@ plugins/dev/scripts/workflow-context.sh dump
 
 If the current ticket is linked, each phase transitions it through Linear states using the `stateMap` from `.catalyst/config.json`:
 
-| Phase start | Default state |
-|-------------|---------------|
-| 1 Research | In Progress |
-| 2 Plan | In Progress |
-| 3 Implement | In Progress |
-| 5 Ship (PR opened) | In Review |
-| 5 Ship (PR merged) | Done |
-| 6 Merge (standalone only) | Done |
+| Phase start | Default `stateMap` key | Default state | Fine-grained state (phase-agents, CTL-454) |
+|-------------|------------------------|---------------|--------------------------------------------|
+| 1 Triage *(phase-agents only)* | `stateMap.triaged` | In Progress | `triaged` (label) |
+| 1 Research | `stateMap.research` | In Progress | `researching` |
+| 2 Plan | `stateMap.planning` | In Progress | `planning` |
+| 3 Implement | `stateMap.inProgress` | In Progress | `inProgress` |
+| 4 Verify *(phase-agents only)* | `stateMap.verifying` | In Progress | `verifying` |
+| 4 Review *(phase-agents only)* | `stateMap.reviewing` | In Progress | `reviewing` |
+| 5 Ship (PR opened) | `stateMap.inReview` | In Review | `inReview` |
+| 5 Ship (PR merged) | `stateMap.done` | Done | `done` |
+| 6 Merge (standalone only) | `stateMap.done` | Done | `done` |
 
-Phase 4 (validate) doesn't transition state — it's an internal quality check, not a milestone visible to others. Phases 1–3 stay in the same state by default because "In Progress" already covers the whole active-work span; override `stateMap.research`, `stateMap.planning`, and `stateMap.inProgress` in config if you want finer granularity.
+By default every active-work phase maps to "In Progress" — the broad span is easier to read on Linear timelines and matches the legacy oneshot worker. For finer-grained observability (especially during phase-agents orchestration), define dedicated Linear states and point the `stateMap.*` keys at them — see [Phase agents → Configuration](/reference/orchestration/phase-agents/#configuration) for the schema.
+
+Phase 4 (validate) in the legacy single-session workflow doesn't transition state — it's an internal quality check, not a milestone visible to others. In phase-agents mode, Phase 5 (verify) and Phase 6 (review) each transition state because they're independent sub-agent passes and the orchestrator surfaces them as distinct stages on the Linear ticket.
 
 ## Phase 6 and oneshot
 

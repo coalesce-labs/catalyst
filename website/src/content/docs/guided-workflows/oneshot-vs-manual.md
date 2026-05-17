@@ -61,7 +61,7 @@ This gives you control over the two judgment-heavy phases and autonomy on the fo
 - **Context isolation** — each phase launches a fresh `claude` session, so context doesn't compound
 - **Automatic handoffs** — if any phase fails, oneshot writes a handoff doc you can resume from
 - **Quality gates wired in** — validation phase runs config-driven gates (typecheck, lint, test, build) and retries with auto-fix
-- **Auto-merge arming** — Phase 5 arms `gh pr merge --squash --auto` so the PR merges itself when CI passes
+- **Active merge ownership** — Phase 5 enters an event-driven listen loop, resolves CI failures and bot review threads inline, and executes `gh pr merge --squash --delete-branch` when the PR reaches CLEAN (per [ADR-014](https://github.com/coalesce-labs/catalyst/blob/main/docs/adrs.md#adr-014-worker-owns-full-pr-lifecycle-ctl-252))
 
 You can replicate all of this manually, but it's ~12 commands vs 1.
 
@@ -76,8 +76,8 @@ You can replicate all of this manually, but it's ~12 commands vs 1.
 
 | Flag | Effect |
 |------|--------|
-| `--auto-merge` | Arm `gh pr merge --squash --auto` at Phase 5 exit |
-| `--no-merge` | Stop after PR creation (don't arm auto-merge or wait for merge) |
+| `--auto-merge` | Default behavior — Phase 5 waits in the active listen loop and executes `gh pr merge --squash --delete-branch` when CLEAN. Included for explicitness; you can omit it. |
+| `--no-merge` | Stop after PR creation (skip the listen loop and the merge entirely) |
 | `--team` | Phase 3 runs as a multi-agent team (see [Agent Teams](/reference/agents/#agent-teams)) |
 | `--skip-validation` | Skip Phase 4 entirely (not recommended unless you're ironically just adding docs) |
 | `--skip-quality-gates` | Run `/catalyst-dev:validate-plan` but skip the config-driven gate loop |
@@ -87,4 +87,6 @@ Full reference in [the oneshot skill docs](https://github.com/coalesce-labs/cata
 
 ## A note on cost
 
-Oneshot runs four separate Opus sessions + one Sonnet session. A medium-complexity ticket usually lands $3–$10 in API costs. Manual mode is cheaper per ticket (one session, no context isolation overhead) but you pay with your own time. If you'd rather spend $5 than 90 minutes on a well-scoped ticket, oneshot is the right call.
+Oneshot runs all phases in a single Claude session (the model that started the session — typically Opus). A medium-complexity ticket usually lands $3–$10 in API costs. Manual mode is cheaper per ticket (less re-loaded context between phases) but you pay with your own time. If you'd rather spend $5 than 90 minutes on a well-scoped ticket, oneshot is the right call.
+
+When dispatched from an orchestrator running in **phase-agents mode**, the same workflow is split across nine short-lived `claude --bg` jobs with mixed model assignment (Opus for planning and verification, Sonnet for implementation, Haiku for deploy monitoring). See [Phase agents](/reference/orchestration/phase-agents/) for the cost breakdown and configuration.

@@ -108,6 +108,7 @@ The workflow runs on a few key pieces of infrastructure:
 - **Worktrees** — Catalyst is designed around git worktrees so you can have multiple features in flight at once. Each worktree gets its own workspace, its own branch, and its own local state — but they all share the same thoughts repo.
 - **Workflow context** — Local state that tracks what you've done in this worktree. It's what lets `/create-plan` automatically find your latest research and `/implement-plan` find your latest plan — no file paths to remember.
 - **Subagents** — Commands spawn specialized agents, each with a focused job and a full context window dedicated to it. A locator agent searches the whole codebase for relevant files. An analyzer agent reads those files deeply. They work in parallel, but the real benefit is focus — each agent reasons about one thing well instead of juggling everything at once.
+- **Phase-agents dispatch (opt-in)** — For orchestration runs, Catalyst can split each ticket across nine short-lived background jobs (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy). Each job runs as `claude --bg`, draws from the Max 20x subscription pool, and can be assigned a different model. See [Phase agents](/reference/orchestration/phase-agents/) for the full pipeline.
 - **Third-party integrations** — Linear for tickets, GitHub for PRs, DeepWiki and Context7 for external documentation, Sentry for error investigation.
 
 ## What This Looks Like in Practice

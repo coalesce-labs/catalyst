@@ -197,3 +197,14 @@ When running the script directly:
 
 - **0** — All checks passed (warnings are OK)
 - **N > 0** — N failures found (things that need fixing)
+
+## Orchestrator Healthcheck Flags
+
+The orchestrator's own healthcheck (`orchestrate-healthcheck`, called periodically by the `/catalyst-dev:orchestrate` skill) is separate from `check-setup.sh`. It exposes two tuning knobs for stall detection:
+
+| Flag | Default | Applies to | Purpose |
+|------|---------|------------|---------|
+| `--grace-seconds <N>` | `15` | Legacy `oneshot-legacy` workers | After a worker is dispatched, wait this long before its `PID` is checked with `kill -0`. Newly-spawned workers get a brief window to register before being declared dead. |
+| `--stale-bg-seconds <N>` | `900` | `phase-agents` workers only | Maximum age (in seconds) of `~/.claude/jobs/<bg_job_id>/state.json` before a `--bg` phase is declared `state-json-stale`. Long-running phases that legitimately exceed this should bump the value via `.catalyst/config.json`. |
+
+Defaults are usually fine. Raise `--stale-bg-seconds` if your `phase-implement` runs routinely exceed 15 minutes (e.g., heavy refactors on a Sonnet model) — the healthcheck will otherwise mark them stalled and consume revive budget. See [Orchestrator overview → Healthcheck + revive](https://github.com/coalesce-labs/catalyst/blob/main/docs/orchestrator-overview.md#healthcheck--revive) for the full state-machine context.

@@ -22,6 +22,17 @@ Orchestrator (post-merge): runs orchestrate-verify.sh on merged commit
                  (or unblocked if allowSelfReportedCompletion is true)
 ```
 
+### Pre-merge verification in phase-agents mode
+
+When the orchestrator runs in [phase-agents](/reference/orchestration/phase-agents/) mode (`dispatchMode: "phase-agents"`), adversarial verification also happens **before** the merge, inline in the worker pipeline:
+
+| Phase | Skill | Role |
+|-------|-------|------|
+| 5 `phase-verify` | (no skill — runs gates + sub-agents directly) | Read-only adversarial pass. Runs tsc, tests, lint, security scan, reward-hacking scan, plus the `code-reviewer`, `pr-test-analyzer`, and `silent-failure-hunter` sub-agents from the [`pr-review-toolkit` plugin](/reference/agents/#external-sub-agents-used-by-phase-verify). Writes `verify.json` with a `regression_risk` score. |
+| 6 `phase-review` | `/review` (gstack) | Runs the gstack `/review` skill against the diff. Creates a remediation commit for any HIGH-severity finding with a deterministic fix. Writes `review.json`. |
+
+These pre-merge passes don't replace the post-merge `orchestrate-verify.sh` step — they catch issues earlier (so remediation commits ship with the PR instead of as a follow-up ticket) while the post-merge verifier remains the backstop that fires regardless of dispatch mode.
+
 ## What verification checks
 
 The verifier runs the `orchestrate-verify.sh` script (in `plugins/dev/scripts/`) plus a dedicated LLM pass. The combined checks:
