@@ -238,6 +238,47 @@ if ! command -v catalyst-events &>/dev/null; then
 	warnings+=("catalyst-events not found on PATH — run: bash plugins/dev/scripts/install-cli.sh")
 fi
 
+# 7. Check template drift (CTL-489) — keys in plugins/dev/templates/config.template.json
+#    but missing from .catalyst/config.json. Non-fatal; surfaces silent fallbacks
+#    (CTL-487 spent two months in legacy mode because dispatchMode was absent)
+#    at workflow-invocation time. Resolved via /catalyst-dev:setup-catalyst.
+if [[ -n $CONFIG_PATH ]]; then
+	DRIFT_SCRIPT="${SCRIPT_DIR}/check-config-drift.sh"
+	TEMPLATE_PATH=""
+	# Resolve template: prefer plugin cache (production), then sibling templates/
+	# (cache layout), then in-repo path (dogfood from arbitrary cwd).
+	if [[ -n ${CLAUDE_PLUGIN_ROOT-} && -f "${CLAUDE_PLUGIN_ROOT}/templates/config.template.json" ]]; then
+		TEMPLATE_PATH="${CLAUDE_PLUGIN_ROOT}/templates/config.template.json"
+	elif [[ -f "${SCRIPT_DIR}/../templates/config.template.json" ]]; then
+		TEMPLATE_PATH="${SCRIPT_DIR}/../templates/config.template.json"
+	elif [[ -f "plugins/dev/templates/config.template.json" ]]; then
+		TEMPLATE_PATH="plugins/dev/templates/config.template.json"
+	fi
+	if [[ -x $DRIFT_SCRIPT && -n $TEMPLATE_PATH ]]; then
+		# Distinguish drift-script exit codes:
+		#   0 → no drift (silent)
+		#   1 → drift detected; stdout lines become warnings
+		#   2+ → setup error (jq missing, malformed template); surface as a
+		#        warning so the gap is visible. Previously `2>/dev/null || true`
+		#        swallowed rc=2 and rc=1 alike — exactly the CTL-487 silent-
+		#        fallback class this feature exists to surface.
+		# set -e would abort on rc=1; tolerate non-zero so we can branch on rc.
+		DRIFT_OUT=$(bash "$DRIFT_SCRIPT" --config "$CONFIG_PATH" --template "$TEMPLATE_PATH" 2>&1) && DRIFT_RC=0 || DRIFT_RC=$?
+		case $DRIFT_RC in
+			0) ;;
+			1)
+				while IFS= read -r line; do
+					[[ -n $line ]] && warnings+=("$line")
+				done <<<"$DRIFT_OUT"
+				;;
+			*)
+				# Collapse newlines so the warning stays a single bullet.
+				warnings+=("check-config-drift exited $DRIFT_RC: ${DRIFT_OUT//$'\n'/ }")
+				;;
+		esac
+	fi
+fi
+
 # Report errors (fatal)
 if [[ ${#errors[@]} -gt 0 ]]; then
 	echo -e "${RED}ERROR: Project setup incomplete${NC}"

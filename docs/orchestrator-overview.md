@@ -81,6 +81,21 @@ Without `--config <path>`, the dispatcher always uses `oneshot-legacy`; the
 `orchestrate` skill passes `--config "${REPO_ROOT}/.catalyst/config.json"` so the
 project config wins.
 
+### Config drift detection (CTL-489)
+
+When `plugins/dev/templates/config.template.json` gains a new key (e.g. CTL-452's
+`orchestration.dispatchMode`), existing projects' `.catalyst/config.json` files do not
+automatically receive it. To prevent the silent-fallback class of bug (CTL-487 — catalyst itself
+ran in `oneshot-legacy` mode for two months because the new key was absent),
+`plugins/dev/scripts/check-config-drift.sh` walks the template and emits one warning per missing
+leaf key. The drift script is wired into `check-project-setup.sh`, so every workflow that runs
+the prereq check (`/orchestrate`, `/oneshot`, `/research-codebase`, etc.) prints drift warnings
+until the user runs `/catalyst-dev:setup-catalyst`, which offers a `jq` deep-merge that adds the
+missing keys while preserving every existing user value (jq's `*` recursive merge with project
+on the right). Allow-listed roots (`projectKey`, `project.ticketPrefix`, `linear.teamKey`,
+`linear.stateMap`, `linear.stateIds`) are suppressed to avoid double-warning — those are already
+checked individually by `check-project-setup.sh`.
+
 ## The 9-phase pipeline (phase-agents mode)
 
 Canonical sequence is defined in `plugins/dev/scripts/orchestrate-phase-advance`

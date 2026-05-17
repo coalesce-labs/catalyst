@@ -173,12 +173,118 @@ EOF
   assert_not_grep "no Linear webhook warn" "$out" "Missing catalyst.monitor.linear.webhookId"
 }
 
+# ─── Test: drift detected → warning appears in output (CTL-489) ─────────────
+# make_project's baseline config lacks orchestration.dispatchMode, so the drift
+# walker should surface a "Missing catalyst.orchestration.dispatchMode" warning.
+test_drift_warning_appears() {
+  echo "test: missing template key → drift warning in check-project-setup output"
+  local proj="$SCRATCH/proj-drift" key="proj-drift"
+  make_project "$proj" "$key"
+  mkdir -p "$SCRATCH/xdg/catalyst"
+  cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
+{ "catalyst": { "monitor": {
+  "github": { "smeeChannel": "https://smee.io/abc" },
+  "linear":  { "webhookId": "wh_test" }
+} } }
+EOF
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
+
+  local out
+  out=$(run_script "$proj" 2>&1)
+  assert_grep "drift warning fires for dispatchMode" "$out" \
+    "Missing catalyst.orchestration.dispatchMode"
+  assert_grep "drift warning quotes template default" "$out" \
+    'template suggests "phase-agents"'
+  # Drift lines must land in the WARN: block (not leak out unformatted) — guards
+  # against a regression where the `while read line; do warnings+=("$line"); done`
+  # loop is removed and drift script output reaches stdout directly.
+  assert_grep "drift line lives under WARN: prefix" "$out" "WARN: Project setup has issues"
+}
+
+# ─── Test: no drift → no drift warnings (CTL-489) ───────────────────────────
+test_no_drift() {
+  echo "test: project has every template key → no drift warnings"
+  local proj="$SCRATCH/proj-clean" key="proj-clean"
+  make_project "$proj" "$key"
+  # Replace make_project's minimal baseline with a config carrying every template leaf.
+  cat > "$proj/.catalyst/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "$key",
+    "repository": { "org": "x", "name": "y" },
+    "project": { "ticketPrefix": "CTL", "name": "x" },
+    "linear": {
+      "teamKey": "CTL",
+      "stateMap": { "research": "R" }
+    },
+    "thoughts": { "user": null },
+    "feedback": { "autoFile": false, "githubRepo": "x", "labels": [] },
+    "filter": { "groqModel": "x" },
+    "orchestration": { "dispatchMode": "phase-agents" }
+  }
+}
+EOF
+  mkdir -p "$SCRATCH/xdg/catalyst"
+  cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
+{ "catalyst": { "monitor": {
+  "github": { "smeeChannel": "https://smee.io/abc" },
+  "linear":  { "webhookId": "wh_test" }
+} } }
+EOF
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
+
+  local out
+  out=$(run_script "$proj" 2>&1)
+  assert_not_grep "no dispatchMode drift" "$out" \
+    "Missing catalyst.orchestration.dispatchMode"
+  assert_not_grep "no groqModel drift" "$out" \
+    "Missing catalyst.filter.groqModel"
+}
+
+# Surfaces setup-error rc from check-config-drift (e.g. malformed template)
+# instead of swallowing it. Without the fix, rc=2 was lost to `|| true` and
+# users got zero signal that drift coverage silently no-op'd — exactly the
+# CTL-487 silent-fallback class the feature was meant to surface.
+test_drift_setup_error_surfaces() {
+  local proj="$SCRATCH/proj-drift-err"
+  local key="ctl-489-drift-err"
+  make_project "$proj" "$key"
+  mkdir -p "$SCRATCH/xdg/catalyst"
+  cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
+{ "catalyst": { "monitor": {
+  "github": { "smeeChannel": "https://smee.io/abc" },
+  "linear":  { "webhookId": "wh_test" }
+} } }
+EOF
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
+
+  # Plant a malformed template directly where check-project-setup resolves it
+  # from this worktree layout (SCRIPT_DIR/../templates/config.template.json).
+  local fake_plugin="$SCRATCH/fake-plugin"
+  mkdir -p "$fake_plugin/scripts" "$fake_plugin/templates"
+  cp "$SCRIPT" "$fake_plugin/scripts/check-project-setup.sh"
+  cp "${REPO_ROOT}/plugins/dev/scripts/check-config-drift.sh" \
+    "$fake_plugin/scripts/check-config-drift.sh"
+  echo "not json{" > "$fake_plugin/templates/config.template.json"
+
+  local out
+  out=$( cd "$proj" \
+    && env -i HOME="$HOME" PATH="/usr/bin:/bin" \
+       XDG_CONFIG_HOME="$SCRATCH/xdg" \
+       bash "$fake_plugin/scripts/check-project-setup.sh" 2>&1 )
+  assert_grep "drift-script rc=2 surfaces as a warning" "$out" \
+    "check-config-drift exited 2"
+}
+
 # ─── Run ────────────────────────────────────────────────────────────────────
 test_smee_missing
 test_smee_channel_missing
 test_home_config_missing
 test_linear_webhook_missing
 test_all_configured
+test_drift_warning_appears
+test_no_drift
+test_drift_setup_error_surfaces
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"

@@ -719,6 +719,17 @@ need to add a separate `trust-workspace.sh` command to your setup array.
 
 ## Orchestration Config
 
+:::note[Config drift detection (CTL-489)]
+Any key documented in this reference that is also present in
+`plugins/dev/templates/config.template.json` will be flagged by
+`plugins/dev/scripts/check-config-drift.sh` if it's missing from your
+`.catalyst/config.json`. Drift warnings appear on every workflow invocation as
+non-fatal yellow-bullet notes. Run `/catalyst-dev:setup-catalyst` to
+interactively merge the missing template keys without overwriting your
+existing values. See [setup-health-check](/reference/setup-health-check/) for
+the Phase 2 flow.
+:::
+
 Optional. Add this block to enable `/orchestrate` — see [Orchestration](/reference/orchestration/) for full documentation.
 
 ```json

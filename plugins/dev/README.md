@@ -109,7 +109,7 @@ Runtime utilities under `scripts/`:
 - `catalyst-monitor.sh` — On-demand orch-monitor server management (`start`, `stop`, `status`, `open`, `url`)
 - `catalyst-session.sh` — Lifecycle CLI for agent sessions (`start`, `phase`, `metric`, `tool`, `pr`, `end`, `heartbeat`, `list`, `read`, `history`). Writes to SQLite via `catalyst-db.sh` and dual-writes JSONL events for backward compatibility
 - `catalyst-state.sh` — Writes to `~/catalyst/state.json` and `~/catalyst/events/YYYY-MM.jsonl`
-- `check-prerequisites.sh` — Validate tool availability
+- `check-config-drift.sh` — Detect keys present in `templates/config.template.json` but missing from `.catalyst/config.json` (CTL-489); supports `--json` enumeration and `--merge-into` for atomic deep-merge
 - `check-project-setup.sh` — Validate workspace has thoughts system, config, etc.
 - `create-worktree.sh` — Worktree creation with setup hooks
 - `frontmatter-utils.sh` — Parse and update markdown frontmatter
