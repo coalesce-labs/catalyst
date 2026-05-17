@@ -427,6 +427,7 @@ const DETERMINISTIC_INTEREST_TYPES = new Set([
   "pr_lifecycle",
   "ticket_lifecycle",
   "comms_lifecycle",
+  "phase_lifecycle",
 ]);
 let _proseDisabledEmitted = false;
 
@@ -515,6 +516,7 @@ export function handleRegister(event) {
   const isPrLifecycle = d.interest_type === "pr_lifecycle";
   const isTicketLifecycle = d.interest_type === "ticket_lifecycle";
   const isCommsLifecycle = d.interest_type === "comms_lifecycle";
+  const isPhaseLifecycle = d.interest_type === "phase_lifecycle";
   interests.set(id, {
     notify_event: d.notify_event ?? `filter.wake.${id}`,
     prompt: d.prompt ?? "",
@@ -540,6 +542,9 @@ export function handleRegister(event) {
       : null,
     subscriber_ticket: isCommsLifecycle ? (d.subscriber_ticket ?? null) : null,
     types_of_interest: isCommsLifecycle ? (Array.isArray(d.types_of_interest) ? d.types_of_interest : null) : null,
+    // phase_lifecycle fields (CTL-447)
+    ticket: isPhaseLifecycle ? (d.ticket ?? null) : null,
+    phase_names: isPhaseLifecycle ? (Array.isArray(d.phase_names) ? d.phase_names : []) : null,
     // CTL-407: suppress redundant wakes when downstream state unchanged.
     // Defaults true for pr_lifecycle (opt-out via suppress_identical_wakes: false).
     // False for comms_lifecycle/ticket_lifecycle (HUD and orchestrator watchers want every event).
@@ -575,6 +580,17 @@ export function handleRegister(event) {
         type: "comms_lifecycle",
         channel: d.channel,
         subscriberKind: d.subscriber_kind,
+        persistent,
+      },
+      "registered"
+    );
+  } else if (isPhaseLifecycle) {
+    log.info(
+      {
+        interestId: id,
+        type: "phase_lifecycle",
+        ticket: d.ticket,
+        phaseNames: d.phase_names ?? [],
         persistent,
       },
       "registered"
@@ -721,14 +737,18 @@ export function handleAgentCheckout(event) {
   }
 
   // Deregister auto-derived pr_lifecycle interest so the watchdog doesn't
-  // fire stale wakes after the agent exits.
+  // fire stale wakes after the agent exits. CTL-447: also clean up
+  // phase_lifecycle interests registered with this session_id — orchestrators
+  // subscribe per phase under their own session and must not leak after exit.
   const reg = interests.get(sessionId);
-  if (reg && reg.interest_type === "pr_lifecycle") {
+  if (reg && (reg.interest_type === "pr_lifecycle" || reg.interest_type === "phase_lifecycle")) {
     interests.delete(sessionId);
-    try {
-      deleteFilterState(sessionId);
-    } catch {
-      /* DB not opened */
+    if (reg.interest_type === "pr_lifecycle") {
+      try {
+        deleteFilterState(sessionId);
+      } catch {
+        /* DB not opened */
+      }
     }
     saveInterests();
     persistBrokerState();
@@ -1265,6 +1285,48 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
   }
 }
 
+// --- Deterministic routing: phase_lifecycle (CTL-447) -----------------------
+//
+// Wakes registered sessions on phase boundary events of the shape
+//   phase.<name>.complete.<ticket>
+//   phase.<name>.failed.<ticket>
+//
+// where <name> matches one of the interest's phase_names and <ticket> matches
+// the interest's ticket. Used by the phase-agent orchestrator to coordinate
+// hand-off between short-lived phase agents (see plan §Initiative 1).
+const PHASE_EVENT_PATTERN = /^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+
+export function tryPhaseLifecycleRoute(event, interestsMap) {
+  const matches = [];
+  const name = getEventName(event);
+  if (!name.startsWith("phase.")) return matches;
+  const m = PHASE_EVENT_PATTERN.exec(name);
+  if (!m) return matches;
+  const [, phaseName, status, ticket] = m;
+  const eventId = event.id ?? synthesizeEventId(event);
+
+  for (const [interestId, reg] of interestsMap) {
+    if (reg.interest_type !== "phase_lifecycle") continue;
+    if (reg.ticket !== ticket) continue;
+    const phases = Array.isArray(reg.phase_names) ? reg.phase_names : [];
+    if (!phases.includes(phaseName)) continue;
+
+    const reason =
+      status === "complete"
+        ? `Phase ${phaseName} complete on ${ticket}`
+        : `Phase ${phaseName} failed on ${ticket}`;
+    matches.push({
+      interestId,
+      reason,
+      sourceEventId: eventId,
+      sourceEvent: summarizeEvent(event),
+      ticket,
+    });
+  }
+
+  return matches;
+}
+
 // --- Event classification ---
 
 // CTL-346: skip events the broker itself emitted so we never re-ingest
@@ -1292,10 +1354,7 @@ export function buildGroqPrompt(events) {
 
   // Deterministic-routed interest types are excluded from the Groq prompt.
   const proseInterests = [...interests.entries()].filter(
-    ([, reg]) =>
-      reg.interest_type !== "pr_lifecycle" &&
-      reg.interest_type !== "ticket_lifecycle" &&
-      reg.interest_type !== "comms_lifecycle"
+    ([, reg]) => !DETERMINISTIC_INTEREST_TYPES.has(reg.interest_type)
   );
   if (proseInterests.length === 0) return null;
 
@@ -1708,10 +1767,12 @@ export function processEvent(event) {
 
   if (!interests.size) return;
 
-  // Deterministic short-circuit: pr_lifecycle (CTL-284) and ticket_lifecycle (CTL-303).
+  // Deterministic short-circuit: pr_lifecycle (CTL-284), ticket_lifecycle (CTL-303),
+  // phase_lifecycle (CTL-447).
   const prMatches = tryDeterministicRoute(event, interests);
   const ticketMatches = tryTicketLifecycleRoute(event, interests);
-  const directMatches = [...prMatches, ...ticketMatches];
+  const phaseMatches = tryPhaseLifecycleRoute(event, interests);
+  const directMatches = [...prMatches, ...ticketMatches, ...phaseMatches];
 
   for (const m of directMatches) {
     const reg = interests.get(m.interestId);
@@ -1928,6 +1989,9 @@ export function buildBrokerState({ probe } = {}) {
   return {
     pid: process.pid,
     startedAt: brokerStartedAt ?? new Date().toISOString(),
+    // CTL-447: enumerate the deterministic interest types this broker supports
+    // so `catalyst-broker status --json` can advertise them to clients.
+    supportedInterestTypes: [...DETERMINISTIC_INTEREST_TYPES],
     // CTL-352: liveness fields so the HUD pill and operators can detect a
     // silently-dead broker (interests.size === 0 with stale lastWakeAt).
     interestCount: interests.size,
