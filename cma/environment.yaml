@@ -62,6 +62,20 @@ config:
       - api.notion.com                    # Notion REST API (integration-token fallback path)
       - mcp.notion.com                    # Notion hosted MCP (OAuth-only; future)
 
+      # Granola family (Path A REST; Path B MCP requires browser OAuth, not used by routines)
+      - public-api.granola.ai             # Granola REST API (primary path for routines)
+      - api.granola.ai                    # Granola internal API routes
+      - auth.granola.ai                   # Granola auth backend
+      - api.workos.com                    # WorkOS identity backend used by Granola
+      # - mcp.granola.ai                  # Granola hosted MCP (Path B; browser OAuth — not currently wireable for headless)
+
+      # Google family (Drive + Calendar; single OAuth client + REST primary)
+      - oauth2.googleapis.com             # refresh-token → access-token exchange
+      - accounts.google.com               # OAuth consent screen (initial setup only)
+      - www.googleapis.com                # Drive v3 + Calendar v3 REST
+      # - drivemcp.googleapis.com         # Google Drive hosted MCP (Path B; pending end-to-end verification)
+      # - calendarmcp.googleapis.com      # Google Calendar hosted MCP (Path B; pending end-to-end verification)
+
       # Package registries (covered by allow_package_managers below, listed for clarity)
       - registry.npmjs.org
       - registry.yarnpkg.com
