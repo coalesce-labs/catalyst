@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MorningBriefingFrontmatter",
+  "description": "YAML frontmatter contract for thoughts/briefings/YYYY-MM-DD.md (CTL-457)",
+  "type": "object",
+  "required": ["date", "generated_by", "decisions"],
+  "properties": {
+    "date": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "generated_by": {
+      "type": "string",
+      "const": "morning-briefing"
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "summary", "status"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "type": {
+            "type": "string",
+            "enum": ["adr_drift", "blocked_pr", "judgment_call", "scope_question"]
+          },
+          "summary": { "type": "string", "minLength": 1 },
+          "status": {
+            "type": "string",
+            "enum": ["open", "resolved", "deferred"]
+          },
+          "pr_url": { "type": "string" },
+          "ticket": { "type": "string" },
+          "adr": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "meetings_yesterday": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "prs_merged_yesterday": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "output_status": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "enum": ["success", "failed", "skipped"]
+      }
+    }
+  },
+  "additionalProperties": true
+}
