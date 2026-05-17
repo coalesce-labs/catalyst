@@ -268,6 +268,18 @@ run "malformed project JSON → exit 2" bash -c "bash '$DRIFT' --template '$TPL1
 # ── Test 12: missing project file → exit 2 ──────────────────────────────────
 run "missing project file → exit 2" bash -c "bash '$DRIFT' --template '$TPL1' --config '$SCRATCH/no-such-file.json' >/dev/null 2>&1; [ \$? = 2 ]"
 
+# ── Test 12b: missing template file → exit 2 ────────────────────────────────
+# Pins the template-not-found branch (separate from missing-config). Guards
+# against an install-path regression where $TEMPLATE_PATH points at a stale
+# location.
+run "missing template file → exit 2" bash -c "bash '$DRIFT' --template '$SCRATCH/no-template.json' --config '$CFG1' >/dev/null 2>&1; [ \$? = 2 ]"
+
+# ── Test 12c: --merge-into with empty FILE arg → exit 2 ─────────────────────
+# Pins the empty-merge-target guard at lines 81-84. Without this, a future
+# templating regression upstream (unset var consumed as the arg) would silently
+# write to .tmp.$$ in CWD.
+run "--merge-into '' → exit 2" bash -c "bash '$DRIFT' --template '$TPL1' --config '$CFG1' --merge-into '' >/dev/null 2>&1; [ \$? = 2 ]"
+
 # ── Test 13: runs against the real catalyst template without error ───────────
 # The catalyst repo's own .catalyst/config.json has known drift (repository.org,
 # project.name, filter.groqModel — plan's "clean" claim was overstated). The script

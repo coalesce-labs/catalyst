@@ -195,6 +195,10 @@ EOF
     "Missing catalyst.orchestration.dispatchMode"
   assert_grep "drift warning quotes template default" "$out" \
     'template suggests "phase-agents"'
+  # Drift lines must land in the WARN: block (not leak out unformatted) — guards
+  # against a regression where the `while read line; do warnings+=("$line"); done`
+  # loop is removed and drift script output reaches stdout directly.
+  assert_grep "drift line lives under WARN: prefix" "$out" "WARN: Project setup has issues"
 }
 
 # ─── Test: no drift → no drift warnings (CTL-489) ───────────────────────────
