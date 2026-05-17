@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-# Usage: run.sh [--dry-run] [--reference-date YYYY-MM-DD] [--git-dir DIR] <target-dir>
+# Usage: run.sh [--dry-run] [--reference-date YYYY-MM-DD] [--git-dir DIR]
+#               [--skip-contradictions] [--llm-cmd CMD] [--contradictions-dest PATH]
+#               <target-dir>
 #
-# Driver: walks <target-dir>, scores docs, writes INDEX.md.
-#   Default:   <target-dir>/INDEX.md is overwritten.
-#   --dry-run: writes to /tmp/research-curate-INDEX-<basename>.md instead.
+# Driver: walks <target-dir>, scores docs, writes INDEX.md, then (unless
+# --skip-contradictions) clusters docs and appends LLM-surfaced contradictions
+# to <target-dir>/CONTRADICTIONS.md.
+#   Default:   <target-dir>/INDEX.md is overwritten; CONTRADICTIONS.md appended.
+#   --dry-run: writes INDEX to /tmp/research-curate-INDEX-<basename>.md instead.
+#              (CONTRADICTIONS.md is NOT touched during dry runs.)
 #
-# Also emits one summary line to stdout per invocation:
-#   <target-dir>: current=N needs-review=M likely-stale=K
+# Summary lines on stdout:
+#   <target-dir>: current=N needs-review=M likely-stale=K → <index-path>
+#   <target-dir>: contradictions clusters=K appended=M → <contradictions-path>
 #
-# --reference-date and --git-dir are passed through to score.sh (useful for tests).
+# --reference-date and --git-dir are passed through to score.sh.
+# --llm-cmd CMD overrides the default LLM invocation for contradict.sh
+# (default: "claude -p"). Tests substitute a deterministic mock.
 
 set -uo pipefail
 
@@ -16,19 +24,28 @@ DRY_RUN=0
 REFERENCE_DATE=""
 GIT_DIR=""
 TARGET_DIR=""
+SKIP_CONTRADICTIONS=0
+LLM_CMD=""
+CONTRA_DEST=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INVENTORY="${SCRIPT_DIR}/inventory.sh"
 SCORE="${SCRIPT_DIR}/score.sh"
 GENERATE="${SCRIPT_DIR}/generate-index.sh"
+CLUSTER="${SCRIPT_DIR}/cluster.sh"
+CONTRADICT="${SCRIPT_DIR}/contradict.sh"
+APPEND="${SCRIPT_DIR}/append-contradictions.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --reference-date) REFERENCE_DATE="$2"; shift 2 ;;
     --git-dir) GIT_DIR="$2"; shift 2 ;;
+    --skip-contradictions) SKIP_CONTRADICTIONS=1; shift ;;
+    --llm-cmd) LLM_CMD="$2"; shift 2 ;;
+    --contradictions-dest) CONTRA_DEST="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,12p' "$0"
+      sed -n '2,18p' "$0"
       exit 0
       ;;
     --)
@@ -77,3 +94,32 @@ CUR=$(echo "$SCORED" | grep -c '"status":"current"' || true)
 NR=$(echo "$SCORED" | grep -c '"status":"needs-review"' || true)
 LS=$(echo "$SCORED" | grep -c '"status":"likely-stale"' || true)
 echo "${TARGET_DIR}: current=${CUR} needs-review=${NR} likely-stale=${LS} → ${DEST}"
+
+# ---------------------------------------------------------------------------
+# Contradiction detection (CTL-468). Skipped during --dry-run or when
+# --skip-contradictions is set. Pipes inventory → cluster → contradict → append.
+# ---------------------------------------------------------------------------
+if (( ! SKIP_CONTRADICTIONS )) && (( ! DRY_RUN )); then
+  CLUSTERS=$(bash "$INVENTORY" "$TARGET_DIR" | bash "$CLUSTER")
+  CLUSTER_COUNT=$(printf '%s\n' "$CLUSTERS" | grep -c '^{' || true)
+
+  if (( CLUSTER_COUNT > 0 )); then
+    CONTRA_ARGS=(--inventory-dir "$TARGET_DIR")
+    [[ -n "$LLM_CMD" ]] && CONTRA_ARGS+=(--llm-cmd "$LLM_CMD")
+
+    CONTRA=$(printf '%s\n' "$CLUSTERS" | bash "$CONTRADICT" "${CONTRA_ARGS[@]}")
+    APPEND_COUNT=$(printf '%s\n' "$CONTRA" | grep -c '^{' || true)
+
+    CONTRA_DEST="${CONTRA_DEST:-${TARGET_DIR}/CONTRADICTIONS.md}"
+    APPEND_ARGS=()
+    [[ -n "$REFERENCE_DATE" ]] && APPEND_ARGS+=(--date "$REFERENCE_DATE")
+
+    if (( APPEND_COUNT > 0 )); then
+      printf '%s\n' "$CONTRA" | bash "$APPEND" "${APPEND_ARGS[@]}" "$CONTRA_DEST"
+    fi
+
+    echo "${TARGET_DIR}: contradictions clusters=${CLUSTER_COUNT} appended=${APPEND_COUNT} → ${CONTRA_DEST}"
+  else
+    echo "${TARGET_DIR}: contradictions clusters=0 (no eligible clusters)"
+  fi
+fi
