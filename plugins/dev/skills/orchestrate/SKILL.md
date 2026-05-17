@@ -570,6 +570,25 @@ as reference for the underlying machinery.
 # pattern for legacy workers.
 ```
 
+**Phase turn-cap exhaustion on `phase.<name>.turn-cap-exhausted.<TICKET>` wake (CTL-484):**
+
+```bash
+# Same script — orchestrate-revive's continuation branch (CTL-484) detects
+# status=turn-cap-exhausted on the top-level signal + handoffPath on the
+# per-phase signal (written by phase-agent-emit-complete --handoff-path),
+# dispatches a continuation worker with CATALYST_IS_CONTINUATION=true +
+# CATALYST_HANDOFF_PATH=<path> + CATALYST_CONTINUATION_COUNT=<n>, and bumps
+# .continuationCount on a budget separate from .reviveCount (default 3 vs 10).
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-revive" \
+  --orch-dir "${ORCH_DIR}" \
+  --orch-id "${ORCH_NAME}"
+# On budget exhaustion (continuationCount ≥ MAX_CONTINUATIONS), revive marks
+# the worker stalled with attentionReason = "continuation-budget-exhausted"
+# and emits worker-continuation-budget-exhausted. The separate budget is what
+# stops cap-exhaustion runs from burning the error-revive budget — that was
+# the bug CTL-484 fixes.
+```
+
 **Dispatch mechanism — `claude` CLI with streaming JSON:**
 
 ```bash
@@ -834,8 +853,10 @@ four deterministic interests for itself — all of them route without Groq:
 - `pr_lifecycle` — orchestrator-level aggregation across all worker PRs.
 - `ticket_lifecycle` — Linear ticket state changes for the orchestrator's tickets.
 - `comms_lifecycle` — worker-posted `attention` / `done` messages on the shared channel.
-- `phase_lifecycle` (CTL-452) — `phase.<name>.complete.<TICKET>` / `phase.<name>.failed.<TICKET>`
-  events emitted by phase agents. One interest per active ticket, covering all 9 phase names.
+- `phase_lifecycle` (CTL-452, CTL-484) — `phase.<name>.complete.<TICKET>`,
+  `phase.<name>.failed.<TICKET>`, and `phase.<name>.turn-cap-exhausted.<TICKET>` events emitted
+  by phase agents. One interest per active ticket, covering all 9 phase names. The turn-cap status
+  routes through `orchestrate-revive`'s continuation branch (separate budget from error revives).
 
 CTL-357 retired the Groq prose interest (~95% false-positive rate). All four interests share the
 same `notify_event: "filter.wake.${ORCH_NAME}"`, so the orchestrator's `wait-for` filter does not
@@ -1131,6 +1152,7 @@ scan so the response stays proportional. Every reaction reads authoritative stat
 | `filter.wake.${ORCH_NAME}` (matched on full dotted `event.name`)                                | Daemon-filtered semantic wake: read `.body.payload.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source                                                                                                                   |
 | `phase.<name>.complete.<TICKET>` (via phase_lifecycle, CTL-452)                                 | Resolve the next phase via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`; that helper looks up the next phase in the canonical 9-phase sequence and calls `orchestrate-dispatch-next --phase <next> --ticket <T>`. If `completed-phase=monitor-deploy`, no advance (terminal). The advance is idempotent under redundant wakes |
 | `phase.<name>.failed.<TICKET>` (via phase_lifecycle, CTL-452)                                   | Run `orchestrate-revive` once for the affected ticket; on the **second** failure (reviveCount ≥ MAX_REVIVES), mark worker `stalled` and post `attention` to the shared comms channel. Matches the existing one-retry-then-escalate handling for legacy oneshot workers                                                                             |
+| `phase.<name>.turn-cap-exhausted.<TICKET>` (via phase_lifecycle, CTL-484)                       | Run `orchestrate-revive` (same script — its continuation branch handles this status). The branch reads `handoffPath` from the per-phase signal, dispatches a `claude --bg --resume` continuation with `CATALYST_IS_CONTINUATION=true` + `CATALYST_HANDOFF_PATH` + `CATALYST_CONTINUATION_COUNT`, and bumps `.continuationCount` on a budget separate from `.reviveCount` (default 3). On budget exhaustion: `stalled` + `attentionReason="continuation-budget-exhausted"` |
 | 10-minute idle (no event)                                                                       | Run the full reactive scan as a safety net                                                                                                                                                                                                                                                                                                         |
 
 **Ground truth is git + PR, not the signal file.** The signal file is _advisory_ — it reports the

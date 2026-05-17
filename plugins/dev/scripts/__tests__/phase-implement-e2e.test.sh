@@ -372,6 +372,47 @@ else
   fail "claude stub captured no invocation"
 fi
 
+# ─── Test 9 (CTL-484): phase-implement turn-cap handoff write + new emit shape
+echo ""
+echo "Test 9 (CTL-484): phase-implement SKILL.md has continuation preamble + handoff write block"
+if [[ -f "$SKILL_IMPLEMENT" ]]; then
+  # Prelude check for CATALYST_IS_CONTINUATION — the resumed worker reads
+  # CATALYST_HANDOFF_PATH and orients without re-walking the plan.
+  assert_grep 'CATALYST_IS_CONTINUATION' "$SKILL_IMPLEMENT" "Prelude checks CATALYST_IS_CONTINUATION env var"
+  assert_grep 'CATALYST_HANDOFF_PATH'    "$SKILL_IMPLEMENT" "Prelude reads CATALYST_HANDOFF_PATH"
+  # Failure block has a turn-cap branch that writes a handoff and emits
+  # --status turn-cap-exhausted --handoff-path <path>.
+  assert_grep 'turn-cap-exhausted' "$SKILL_IMPLEMENT" "skill body references turn-cap-exhausted status"
+  assert_grep 'turn-cap-continuation\.md|turn-cap-continuation' "$SKILL_IMPLEMENT" "writes handoff named turn-cap-continuation.md"
+  assert_grep '\-\-handoff-path' "$SKILL_IMPLEMENT" "passes --handoff-path to phase-agent-emit-complete"
+  # /goal block updated to describe the new cap-exit behavior.
+  assert_grep 'turn-cap-exhausted|continuation' "$SKILL_IMPLEMENT" "/goal block references turn-cap-exhausted or continuation"
+fi
+
+# Test 10 (CTL-484): the new emitter status round-trips through the canonical
+# event log and the per-phase signal file when invoked with --handoff-path.
+echo ""
+echo "Test 10 (CTL-484): emit-complete --status turn-cap-exhausted --handoff-path round-trip"
+fresh_env t10
+SIGNAL_T10="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-449/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-449","phase":"implement"}' > "$SIGNAL_T10"
+HANDOFF_T10="thoughts/shared/handoffs/CTL-449/2026-05-17_18-00-00_turn-cap-continuation.md"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-449 --status turn-cap-exhausted \
+  --reason "turn cap hit (75)" --handoff-path "$HANDOFF_T10" >/dev/null 2>&1
+LINE=$(read_event_line)
+if [[ -z "$LINE" ]]; then
+  fail "Test 10: no event emitted for turn-cap-exhausted"
+else
+  EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"')
+  PAYLOAD_HANDOFF=$(echo "$LINE" | jq -r '.body.payload.handoff_path')
+  assert_eq "phase.implement.turn-cap-exhausted.CTL-449" "$EVENT_NAME" "event.name uses .turn-cap-exhausted suffix"
+  assert_eq "$HANDOFF_T10" "$PAYLOAD_HANDOFF" "body.payload.handoff_path round-trips"
+fi
+SIGNAL_STATUS=$(jq -r '.status' "$SIGNAL_T10")
+SIGNAL_HANDOFF=$(jq -r '.handoffPath' "$SIGNAL_T10")
+assert_eq "turn-cap-exhausted" "$SIGNAL_STATUS" "per-phase signal status = turn-cap-exhausted"
+assert_eq "$HANDOFF_T10" "$SIGNAL_HANDOFF" "per-phase signal .handoffPath set"
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"

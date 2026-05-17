@@ -120,6 +120,80 @@ HAS_COMPLETED=$(jq -r 'has("completedAt")' "$SIGNAL")
 assert_eq "done" "$NEW_STATUS" "signal file status updated to done"
 assert_eq "true" "$HAS_COMPLETED" "signal file gained completedAt timestamp"
 
+# CTL-484: turn-cap-exhausted is a distinct status the broker can route on,
+# and --handoff-path is the orchestrator's mechanism for orienting the resumed
+# continuation worker.
+echo ""
+echo "Test 5 (CTL-484): --status turn-cap-exhausted is accepted and emits a distinct event"
+fresh_env t5
+"$EMIT_SCRIPT" --phase implement --ticket CTL-400 --status turn-cap-exhausted \
+  --reason "turn cap hit (75)" \
+  --handoff-path "thoughts/shared/handoffs/CTL-400/2026-05-17_00-00-00_turn-cap-continuation.md" \
+  >/dev/null 2>&1
+LINE=$(read_event_line)
+if [[ -z "$LINE" ]]; then
+  fail "Test 5: no event line emitted"
+else
+  EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"')
+  PAYLOAD_STATUS=$(echo "$LINE" | jq -r '.body.payload.status')
+  PAYLOAD_HANDOFF=$(echo "$LINE" | jq -r '.body.payload.handoff_path')
+  PAYLOAD_REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason')
+  SEVERITY=$(echo "$LINE" | jq -r '.severityText')
+  assert_eq "phase.implement.turn-cap-exhausted.CTL-400" "$EVENT_NAME" "event.name uses .turn-cap-exhausted suffix"
+  assert_eq "turn-cap-exhausted" "$PAYLOAD_STATUS" "body.payload.status = turn-cap-exhausted"
+  assert_eq "thoughts/shared/handoffs/CTL-400/2026-05-17_00-00-00_turn-cap-continuation.md" "$PAYLOAD_HANDOFF" "body.payload.handoff_path propagated"
+  assert_eq "turn cap hit (75)" "$PAYLOAD_REASON" "body.payload.failure_reason still carried"
+  assert_eq "WARN" "$SEVERITY" "turn-cap-exhausted → WARN severity"
+fi
+
+echo ""
+echo "Test 6 (CTL-484): signal file is updated to status=turn-cap-exhausted and gains handoffPath"
+fresh_env t6
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' > "$SIGNAL"
+HANDOFF="thoughts/shared/handoffs/CTL-100/2026-05-17_01-23-45_turn-cap-continuation.md"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status turn-cap-exhausted \
+  --reason "turn cap hit (75)" --handoff-path "$HANDOFF" >/dev/null 2>&1
+NEW_STATUS=$(jq -r '.status' "$SIGNAL")
+HANDOFF_FIELD=$(jq -r '.handoffPath' "$SIGNAL")
+REASON_FIELD=$(jq -r '.failureReason' "$SIGNAL")
+assert_eq "turn-cap-exhausted" "$NEW_STATUS" "signal file status updated to turn-cap-exhausted (not done, not failed)"
+assert_eq "$HANDOFF" "$HANDOFF_FIELD" ".handoffPath set on signal file"
+assert_eq "turn cap hit (75)" "$REASON_FIELD" ".failureReason still recorded"
+
+echo ""
+echo "Test 7 (CTL-484 parity): lib/phase-emit-complete.sh accepts --status turn-cap-exhausted"
+# phase-triage and phase-monitor-deploy source this lib instead of calling the
+# standalone script. The CTL-484 addition has to ride both surfaces — assert
+# the lib emits the same canonical event shape so phase-triage / phase-monitor
+# can opt into the cap-exit pattern without code changes.
+fresh_env t7
+LIB_HELPER="${REPO_ROOT}/plugins/dev/scripts/lib/phase-emit-complete.sh"
+if [[ ! -f "$LIB_HELPER" ]]; then
+  fail "Test 7: lib helper missing — expected at $LIB_HELPER"
+else
+  # Override CATALYST_EVENTS_FILE so the lib writes to a known file.
+  EVENTS_T7="${TEST_DIR}/lib-emit.jsonl"
+  CATALYST_EVENTS_FILE="$EVENTS_T7" bash -c "
+    set -e
+    . '$LIB_HELPER'
+    emit_phase_complete --phase triage --ticket CTL-500 \
+      --status turn-cap-exhausted --reason 'turn cap hit (10)'
+  " 2>/dev/null
+  if [[ -s "$EVENTS_T7" ]]; then
+    EVENT_NAME=$(jq -r '.attributes."event.name"' "$EVENTS_T7" | tail -n 1)
+    SEVERITY=$(jq -r '.severityText' "$EVENTS_T7" | tail -n 1)
+    MSG=$(jq -r '.body.message' "$EVENTS_T7" | tail -n 1)
+    assert_eq "phase.triage.turn-cap-exhausted.CTL-500" "$EVENT_NAME" "lib emits .turn-cap-exhausted suffix"
+    assert_eq "WARN" "$SEVERITY" "lib uses WARN severity for turn-cap-exhausted"
+    # The lib uses --reason as the message when supplied, so the default-message
+    # branch only fires when --reason is empty. Verify the message echoes the reason.
+    assert_eq "turn cap hit (10)" "$MSG" "lib message echoes --reason"
+  else
+    fail "Test 7: lib emitted no event line"
+  fi
+fi
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"

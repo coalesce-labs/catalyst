@@ -19,13 +19,24 @@ if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
   "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
 fi
 
-# Auto-discover most recent handoff (workflow context + filesystem fallback)
+# Auto-discover most recent handoff. Three-source waterfall:
+#   1. CATALYST_HANDOFF_PATH env var (CTL-484 continuation-worker contract —
+#      set by orchestrate-revive's continuation branch when it spawns
+#      `claude --bg --resume` after a turn-cap exhaustion).
+#   2. workflow-context.sh recent handoffs (interactive flows).
+#   3. (handled later in Step 4) interactive picker.
 RECENT_HANDOFF=""
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
+if [[ -n "${CATALYST_HANDOFF_PATH:-}" && -f "$CATALYST_HANDOFF_PATH" ]]; then
+  RECENT_HANDOFF="$CATALYST_HANDOFF_PATH"
+elif [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" ]]; then
   RECENT_HANDOFF=$("${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" recent handoffs)
 fi
 if [[ -n "$RECENT_HANDOFF" ]]; then
-  echo "📋 Auto-discovered recent handoff: $RECENT_HANDOFF"
+  if [[ "${CATALYST_IS_CONTINUATION:-}" == "true" ]]; then
+    echo "📋 Continuation worker — resuming from CATALYST_HANDOFF_PATH: $RECENT_HANDOFF"
+  else
+    echo "📋 Auto-discovered recent handoff: $RECENT_HANDOFF"
+  fi
 else
   echo "⚠️ No recent handoff found in workflow context or filesystem"
 fi
@@ -47,6 +58,12 @@ to be understood and continued.
 ## Initial Response
 
 Auto-discovery has already run in Prerequisites above. Check its output and follow this priority:
+
+0. **If `CATALYST_IS_CONTINUATION=true` AND `CATALYST_HANDOFF_PATH` is set** (CTL-484
+   continuation-worker contract from `orchestrate-revive`): the env-var hook in Prerequisites
+   already selected the handoff. **Skip directly to Step 3 without prompting the user** — this is
+   a background-dispatched continuation, not an interactive resume. Confirmation gates would
+   hang the worker.
 
 1. **If user provided a file path as parameter**: Use the provided path (user override). Skip to
    Step 3.

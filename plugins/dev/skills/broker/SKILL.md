@@ -45,7 +45,7 @@ catalyst-broker logs
 | `pr_lifecycle` | Deterministic | Watch CI, reviews, merge, deployment for a known PR number |
 | `ticket_lifecycle` | Deterministic | Watch Linear state changes, comments, PR links for a ticket |
 | `comms_lifecycle` | Deterministic | Watch comms-channel messages (worker → orchestrator attention/done, orchestrator → worker directives) |
-| `phase_lifecycle` | Deterministic | Watch `phase.<name>.complete.<ticket>` / `phase.<name>.failed.<ticket>` events — orchestrator hand-off between phase agents |
+| `phase_lifecycle` | Deterministic | Watch `phase.<name>.complete.<ticket>` / `phase.<name>.failed.<ticket>` / `phase.<name>.turn-cap-exhausted.<ticket>` events — orchestrator hand-off between phase agents |
 | (prose prompt) | Groq LLM (env-gated off; CTL-357) | Anything ambiguous, cross-cutting, or complex — set `CATALYST_BROKER_PROSE_ENABLED=1` to re-enable |
 
 ## 1. Auto-Correlation (The Common Case — No Registration Needed)
@@ -497,6 +497,7 @@ ticket per set of phases and is woken when a phase agent emits its terminal even
 
 - `phase.<name>.complete.<ticket>` — phase succeeded; orchestrator dispatches the next one.
 - `phase.<name>.failed.<ticket>` — phase failed; orchestrator runs the fix-up path.
+- `phase.<name>.turn-cap-exhausted.<ticket>` (CTL-484) — phase agent self-stopped at its `/goal` turn cap; orchestrator dispatches a continuation worker on a separate budget (the agent has already written a handoff at `body.payload.handoff_path`).
 
 The match is keyed on `(ticket, phase_name)` so a single orchestrator can run many tickets
 in parallel without cross-talk.
@@ -538,7 +539,7 @@ jq -nc \
 
 | Trigger | Condition |
 |---|---|
-| `event.name` matches `phase.<name>.(complete\|failed).<ticket>` | always required |
+| `event.name` matches `phase.<name>.(complete\|failed\|turn-cap-exhausted).<ticket>` | always required |
 | `<ticket>` == `reg.ticket` | required |
 | `<name>` ∈ `reg.phase_names` | required |
 

@@ -758,3 +758,119 @@ The global state (`~/catalyst/state.json`) and event log
 - Writers gain a soft dependency on the events directory being writable;
   failure to emit is silent (best-effort), preserving the direct-write
   invariant.
+
+---
+
+## ADR-019: Turn-cap exhaustion → automated handoff continuation (CTL-484)
+
+**Context**
+
+Phase agents are dispatched with a turn cap (default 75 for `phase-implement`,
+lower for other phases). The cap is enforced via prose in the agent's `/goal`
+block — when the agent self-evaluates "I have stopped after N turns" it exits,
+and Claude CLI records `~/.claude/jobs/<id>/state.json::state = "stopped"`.
+
+Until CTL-484, `orchestrate-revive` treated this terminal state identically to
+any other failure: it called `claude --bg --resume <session_id>` to relaunch
+the worker and bumped `.reviveCount`. After 10 such cap-stops the worker was
+marked `stalled` with `attentionReason: revive-budget-exhausted` — even though
+each "revive" was successful forward progress, not a recovery from a real
+error. Long-running tickets that genuinely needed >75 turns silently exhausted
+the budget meant for error recovery, the single largest gap in the
+phase-agent architecture.
+
+**Decision**
+
+Introduce `turn-cap-exhausted` as a distinct, non-terminal status that
+participates in the broker's `phase_lifecycle` routing alongside
+`complete`/`failed`. Workers that detect impending cap exhaustion write a
+structured handoff doc to `thoughts/shared/handoffs/<TICKET>/<ts>_turn-cap-continuation.md`
+and emit `phase.<name>.turn-cap-exhausted.<TICKET>` carrying the handoff path
+in its payload. `orchestrate-revive` grows a continuation branch that:
+
+1. Detects `status="turn-cap-exhausted"` + handoff path on the per-phase signal
+2. Spawns `claude --bg --resume <session_id>` with three new env vars:
+   `CATALYST_IS_CONTINUATION=true`, `CATALYST_HANDOFF_PATH=<path>`,
+   `CATALYST_CONTINUATION_COUNT=<n>`
+3. Bumps `.continuationCount` on a budget separate from `.reviveCount`
+   (default `MAX_CONTINUATIONS=3`)
+4. On budget exhaustion, transitions to `stalled` with
+   `attentionReason="continuation-budget-exhausted"`
+
+The resumed worker's `phase-implement` Prelude block reads
+`CATALYST_HANDOFF_PATH` and cat's the handoff into the transcript, telling the
+agent: "trust this summary; do not re-walk the plan."
+
+**Where it lives**
+
+- Event/status: `plugins/dev/scripts/phase-agent-emit-complete` (accepts
+  `--status turn-cap-exhausted` and `--handoff-path <path>`),
+  `plugins/dev/scripts/lib/phase-emit-complete.sh` (same)
+- Broker routing: `plugins/dev/scripts/broker/index.mjs:1297`
+  (`PHASE_EVENT_PATTERN` regex), tests in `phase-lifecycle.test.mjs`
+- Worker schema: `plugins/dev/templates/worker-signal.json` adds
+  `continuationCount`, `continuations[]`, `handoffPath`; validator in
+  `signal-schema.ts`; reader in `state-reader.ts`
+- Orchestrator script: `plugins/dev/scripts/orchestrate-revive` adds the
+  continuation branch, `spawn_continuation_bg` helper, and
+  `--max-continuations` flag
+- Resumed-worker hook: `plugins/dev/skills/resume-handoff/SKILL.md`
+  Prerequisites block now honors `CATALYST_HANDOFF_PATH`
+- Producer: `plugins/dev/skills/phase-implement/SKILL.md` Prelude has the
+  continuation orientation; Failure-handling has the turn-cap branch (writes
+  handoff, emits `--status turn-cap-exhausted`, exits 0); `/goal` block
+  describes both completion and cap-exit branches
+- Docs: `plugins/dev/references/event-name-allowlist.md` backfills the
+  `phase_lifecycle` section
+
+**Rationale**
+
+- **Distinct status, not a payload discriminator**: putting the cap-vs-error
+  distinction in `event.name` (the routable surface) is what allows the
+  broker to route it to a separate code path. Encoding it only in
+  `body.payload.failure_reason` would have required every consumer to parse
+  the reason — fragile and easy to miss.
+- **Separate budget**: `reviveCount` and `continuationCount` measure
+  different failure modes. Mixing them was the bug. Default 3
+  continuations matches typical multi-session implementation work; the
+  budget can be raised via `--max-continuations` on the script or a future
+  config setting.
+- **Worker self-detection, not external watchdog**: the agent already knows
+  its turn count (via `/goal` prose) — adding an external poller of
+  `~/.claude/jobs/state.json` would duplicate that awareness with race
+  conditions. The cost of self-detection is a `/goal` revision.
+- **Handoff file is bash-templated, not via `create-handoff` skill**: the
+  `create-handoff` skill is interactive prose. A background-only path
+  cannot prompt for confirmation, so the phase-implement skill writes the
+  file directly with the same template shape. This is acceptable because
+  the structured fields (commit SHA, diff stat, plan path) are easy to
+  produce from bash with no judgment calls.
+- **`turn-cap-exhausted` is non-terminal**: omitting `completedAt` and
+  staying off the `TERMINAL_STATUSES` list lets `orchestrate-revive` pick
+  the worker up. The monitor UI can render it distinctly (yellow vs the
+  red of `stalled`) — the schema is reserved for that.
+
+**Alternatives considered**
+
+- **Raise `MAX_REVIVES`**: papers over the actual issue. Cap-bound work
+  and error recovery are different and conflating them masks real
+  failures.
+- **Bump per-phase turn caps in config**: works for known-long tasks
+  but fails on tasks whose length isn't predictable until partway in.
+- **External watchdog reading `~/.claude/jobs/state.json`**: duplicates
+  agent self-awareness; adds a polling daemon; can't write the
+  structured handoff because the agent's context is gone.
+
+**Consequences**
+
+- Long substantive tickets can chain multiple sessions without operator
+  intervention.
+- `continuationCount` distinct from `reviveCount` lets the operator
+  diagnose "this worker is making progress but needs more turns" vs
+  "this worker is failing and needs help" at a glance.
+- Scope is `phase-implement` for v1 — other turn-bounded phases
+  (`phase-research`, `phase-plan`, etc.) have lower caps and rarely
+  exhaust; they can adopt the same pattern incrementally if rollout
+  warrants it. The shared infrastructure (event status, emitter flags,
+  broker regex, orchestrate-revive split, schema, resume hook) is
+  reusable as-is.

@@ -53,12 +53,14 @@ emit_phase_complete() {
   [[ -n "$status" ]] || { echo "emit_phase_complete: --status required" >&2; return 1; }
 
   case "$status" in
-    complete|failed|skipped) ;;
-    *) echo "emit_phase_complete: --status must be complete|failed|skipped" >&2; return 1 ;;
+    complete|failed|skipped|turn-cap-exhausted) ;;
+    *) echo "emit_phase_complete: --status must be complete|failed|skipped|turn-cap-exhausted" >&2; return 1 ;;
   esac
 
   local severity="INFO" event_name
-  [[ "$status" == "failed" ]] && severity="WARN"
+  case "$status" in
+    failed|turn-cap-exhausted) severity="WARN" ;;
+  esac
   event_name="phase.${phase}.${status}.${ticket}"
 
   local ts
@@ -71,9 +73,10 @@ emit_phase_complete() {
   local message="$reason"
   if [[ -z "$message" ]]; then
     case "$status" in
-      complete) message="Phase ${phase} complete on ${ticket}" ;;
-      failed)   message="Phase ${phase} failed on ${ticket}" ;;
-      skipped)  message="Phase ${phase} skipped on ${ticket}" ;;
+      complete)           message="Phase ${phase} complete on ${ticket}" ;;
+      failed)             message="Phase ${phase} failed on ${ticket}" ;;
+      skipped)            message="Phase ${phase} skipped on ${ticket}" ;;
+      turn-cap-exhausted) message="Phase ${phase} turn-cap-exhausted on ${ticket}" ;;
     esac
   fi
 
