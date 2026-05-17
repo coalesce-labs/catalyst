@@ -309,6 +309,73 @@ expect_eq "no --claude-turn → key absent" "false" "$HAS_TURN"
 HAS_COST_ATTR="$(echo "$CLAUDE_LINE" | jq '.attributes | has("claude.cost.usd")')"
 expect_eq "claude.cost.usd is NEVER a typed attribute (PII gate)" "false" "$HAS_COST_ATTR"
 
+# ── CTL-448: phase-agent event shape validation ────────────────────────────
+# The phase-agent dispatcher (Initiative 1 Phase 2) emits two new event names
+# via build_canonical_line through phase-agent-emit-complete:
+#   phase.<name>.complete.<ticket>
+#   phase.<name>.failed.<ticket>
+# The broker's phase_lifecycle interest type (CTL-447) only routes events
+# matching the regex below — these tests guard the shape against drift.
+
+PHASE_COMPLETE_LINE="$(build_canonical_line \
+  --ts "2026-05-17T00:00:00Z" \
+  --severity INFO \
+  --service "catalyst.phase-agent" \
+  --event-name "phase.research.complete.CTL-100" \
+  --entity "phase" \
+  --action "complete" \
+  --orch "orch-test" \
+  --worker "CTL-100" \
+  --linear-ticket "CTL-100" \
+  --payload-json '{"phase":"research","ticket":"CTL-100","status":"complete"}')"
+
+PHASE_EVENT_NAME="$(echo "$PHASE_COMPLETE_LINE" | jq -r '.attributes."event.name"')"
+expect_eq "phase.complete event.name" "phase.research.complete.CTL-100" "$PHASE_EVENT_NAME"
+
+PHASE_PATTERN_MATCH="$(printf '%s' "$PHASE_EVENT_NAME" \
+  | grep -cE '^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-[0-9]+)$' || true)"
+expect_eq "phase.complete event.name matches broker regex" "1" "$PHASE_PATTERN_MATCH"
+
+PHASE_WORKER="$(echo "$PHASE_COMPLETE_LINE" | jq -r '.attributes."catalyst.worker.ticket"')"
+expect_eq "phase.complete worker ticket attribute" "CTL-100" "$PHASE_WORKER"
+
+PHASE_LINEAR="$(echo "$PHASE_COMPLETE_LINE" | jq -r '.attributes."linear.issue.identifier"')"
+expect_eq "phase.complete linear.issue.identifier" "CTL-100" "$PHASE_LINEAR"
+
+PHASE_PAYLOAD_STATUS="$(echo "$PHASE_COMPLETE_LINE" | jq -r '.body.payload.status')"
+expect_eq "phase.complete body.payload.status" "complete" "$PHASE_PAYLOAD_STATUS"
+
+PHASE_FAILED_LINE="$(build_canonical_line \
+  --ts "2026-05-17T00:00:00Z" \
+  --severity WARN \
+  --service "catalyst.phase-agent" \
+  --event-name "phase.verify.failed.CTL-200" \
+  --entity "phase" \
+  --action "failed" \
+  --orch "orch-test" \
+  --worker "CTL-200" \
+  --linear-ticket "CTL-200" \
+  --payload-json '{"phase":"verify","ticket":"CTL-200","status":"failed","failure_reason":"goal cap"}')"
+
+PHASE_FAILED_NAME="$(echo "$PHASE_FAILED_LINE" | jq -r '.attributes."event.name"')"
+expect_eq "phase.failed event.name" "phase.verify.failed.CTL-200" "$PHASE_FAILED_NAME"
+
+PHASE_FAILED_MATCH="$(printf '%s' "$PHASE_FAILED_NAME" \
+  | grep -cE '^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-[0-9]+)$' || true)"
+expect_eq "phase.failed event.name matches broker regex" "1" "$PHASE_FAILED_MATCH"
+
+PHASE_FAILED_SEVERITY="$(echo "$PHASE_FAILED_LINE" | jq -r '.severityText')"
+expect_eq "phase.failed severity = WARN" "WARN" "$PHASE_FAILED_SEVERITY"
+
+PHASE_FAILED_REASON="$(echo "$PHASE_FAILED_LINE" | jq -r '.body.payload.failure_reason')"
+expect_eq "phase.failed body.payload.failure_reason" "goal cap" "$PHASE_FAILED_REASON"
+
+# A malformed phase event name (no ticket suffix) must NOT match the regex.
+BAD_PHASE_NAME="phase.research.complete"
+BAD_MATCH="$(printf '%s' "$BAD_PHASE_NAME" \
+  | grep -cE '^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-[0-9]+)$' || true)"
+expect_eq "malformed phase event name does NOT match broker regex" "0" "$BAD_MATCH"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"

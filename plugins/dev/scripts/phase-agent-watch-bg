@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# phase-agent-watch-bg — map `claude --bg` jobs to phase+ticket (CTL-448).
+#
+# The orchestrator's Phase 4 monitor (after the --bg cutover in Initiative 1
+# Phase 6) needs to translate `claude --bg` job state.json paths to the phase
+# agent they represent. This script does that translation by scanning
+# ${ORCH_DIR}/workers/*/phase-*.json for `bg_job_id` keys and joining them
+# against `~/.claude/jobs/<id>/state.json`.
+#
+# Subcommands:
+#
+#   list [--orch-dir <path>] [--state running|done|all] [--json]
+#     Print one line per active phase agent. JSON mode emits objects with:
+#       { ticket, phase, bg_job_id, state, endedAt, stale, signalFile }
+#     Text mode emits TSV: <ticket> <phase> <bg_job_id> <state> <endedAt> <stale>
+#
+#   status --job <id> [--json]
+#     Print the state of a single bg job by ID. JSON mode emits the same
+#     object shape as list.
+#
+#   stale [--orch-dir <path>] [--max-idle-sec N] [--json]
+#     List phase agents whose ~/.claude/jobs/<id>/state.json mtime is older
+#     than --max-idle-sec (default 900 = 15 min) AND whose state is NOT in
+#     the terminal set (done|failed|errored|stopped). These are the
+#     candidates the healthcheck should mark as stalled.
+#
+# Defaults: --orch-dir = $CATALYST_ORCHESTRATOR_DIR
+#           jobs root  = $CLAUDE_BG_JOBS_DIR or ~/.claude/jobs
+#
+# Exit codes: 0 on success (even if no jobs found), 1 on argument error.
+
+set -uo pipefail
+
+die() { echo "phase-agent-watch-bg: $*" >&2; exit 1; }
+
+CLAUDE_BG_JOBS_DIR="${CLAUDE_BG_JOBS_DIR:-$HOME/.claude/jobs}"
+
+# Resolve mtime of a file as epoch seconds across macOS/Linux.
+file_mtime_epoch() {
+  local f="$1"
+  if [[ ! -e "$f" ]]; then echo ""; return; fi
+  if stat -f %m "$f" >/dev/null 2>&1; then
+    stat -f %m "$f"
+  else
+    stat -c %Y "$f"
+  fi
+}
+
+# Read state.json for a bg job. Echoes JSON object on stdout (state, endedAt,
+# stateFilePath, mtimeEpoch). Missing job → empty object {}.
+read_bg_state() {
+  local job_id="$1"
+  local state_file="${CLAUDE_BG_JOBS_DIR}/${job_id}/state.json"
+  if [[ ! -f "$state_file" ]]; then
+    echo "{}"
+    return
+  fi
+  local mtime
+  mtime=$(file_mtime_epoch "$state_file")
+  # Read state + endedAt from the actual file, with defensive defaults.
+  jq --arg path "$state_file" --arg mtime "$mtime" \
+    '{state: (.state // .status // "unknown"),
+      endedAt: (.endedAt // .ended_at // null),
+      stateFilePath: $path,
+      mtimeEpoch: ($mtime | tonumber? // null)}' "$state_file" 2>/dev/null \
+    || echo "{}"
+}
+
+# Terminal job states — phase agent is finished.
+is_terminal_state() {
+  case "$1" in
+    done|failed|errored|stopped) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Enumerate all signal files under ${ORCH_DIR}/workers/*/phase-*.json that
+# carry a bg_job_id. Emits one JSON object per line on stdout.
+list_phase_agents() {
+  local orch_dir="$1"
+  [[ -d "${orch_dir}/workers" ]] || return 0
+  local now signal job_id payload combined state mtime endedAt stale_sec
+  now=$(date +%s)
+  shopt -s nullglob
+  for signal in "${orch_dir}/workers"/*/phase-*.json; do
+    [[ -f "$signal" ]] || continue
+    job_id=$(jq -r '.bg_job_id // empty' "$signal" 2>/dev/null)
+    [[ -n "$job_id" ]] || continue
+    payload=$(read_bg_state "$job_id")
+    state=$(echo "$payload" | jq -r '.state // "unknown"')
+    endedAt=$(echo "$payload" | jq -r '.endedAt // empty')
+    mtime=$(echo "$payload" | jq -r '.mtimeEpoch // empty')
+
+    # Compute stale: state.json older than 15 min AND state not terminal.
+    local stale="false"
+    if [[ -n "$mtime" ]] && ! is_terminal_state "$state"; then
+      stale_sec=$(( now - mtime ))
+      if [[ $stale_sec -ge 900 ]]; then stale="true"; fi
+    fi
+
+    jq -nc \
+      --slurpfile s "$signal" \
+      --argjson payload "$payload" \
+      --arg stale "$stale" \
+      --arg signalpath "$signal" \
+      '{ticket: $s[0].ticket, phase: $s[0].phase, bg_job_id: $s[0].bg_job_id,
+        state: $payload.state, endedAt: $payload.endedAt,
+        stateFilePath: $payload.stateFilePath, mtimeEpoch: $payload.mtimeEpoch,
+        stale: ($stale == "true"), signalFile: $signalpath}' \
+      2>/dev/null
+  done
+  shopt -u nullglob
+}
+
+# ─── Parse args ─────────────────────────────────────────────────────────────
+
+SUB="${1:-}"
+[[ -n "$SUB" ]] || die "subcommand required: list|status|stale"
+shift
+
+ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
+STATE_FILTER="all"
+JOB_ID=""
+MAX_IDLE_SEC=900
+OUTPUT_JSON=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir)    ORCH_DIR="$2"; shift 2 ;;
+    --state)       STATE_FILTER="$2"; shift 2 ;;
+    --job)         JOB_ID="$2"; shift 2 ;;
+    --max-idle-sec) MAX_IDLE_SEC="$2"; shift 2 ;;
+    --json)        OUTPUT_JSON=1; shift ;;
+    -h|--help)     grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)             die "unknown flag: $1" ;;
+  esac
+done
+
+case "$SUB" in
+  list)
+    [[ -n "$ORCH_DIR" ]] || die "list: --orch-dir (or CATALYST_ORCHESTRATOR_DIR) is required"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      STATE=$(echo "$line" | jq -r '.state // "unknown"')
+      case "$STATE_FILTER" in
+        all) ;;
+        running)
+          is_terminal_state "$STATE" && continue
+          ;;
+        done|failed|errored|stopped)
+          [[ "$STATE" == "$STATE_FILTER" ]] || continue
+          ;;
+      esac
+      if [[ $OUTPUT_JSON -eq 1 ]]; then
+        echo "$line"
+      else
+        TICKET=$(echo "$line" | jq -r '.ticket')
+        PHASE=$(echo "$line" | jq -r '.phase')
+        JOB=$(echo "$line" | jq -r '.bg_job_id')
+        ENDED=$(echo "$line" | jq -r '.endedAt // ""')
+        STALE=$(echo "$line" | jq -r '.stale')
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$TICKET" "$PHASE" "$JOB" "$STATE" "$ENDED" "$STALE"
+      fi
+    done < <(list_phase_agents "$ORCH_DIR")
+    ;;
+
+  status)
+    [[ -n "$JOB_ID" ]] || die "status: --job <id> is required"
+    PAYLOAD=$(read_bg_state "$JOB_ID")
+    if [[ $OUTPUT_JSON -eq 1 ]]; then
+      echo "$PAYLOAD"
+    else
+      STATE=$(echo "$PAYLOAD" | jq -r '.state // "unknown"')
+      ENDED=$(echo "$PAYLOAD" | jq -r '.endedAt // ""')
+      printf '%s\t%s\t%s\n' "$JOB_ID" "$STATE" "$ENDED"
+    fi
+    ;;
+
+  stale)
+    [[ -n "$ORCH_DIR" ]] || die "stale: --orch-dir (or CATALYST_ORCHESTRATOR_DIR) is required"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      STALE=$(echo "$line" | jq -r '.stale')
+      [[ "$STALE" == "true" ]] || continue
+      # Override the default 900s if --max-idle-sec was set lower/higher.
+      # list_phase_agents already computed staleness at the 900s default;
+      # recompute when caller passed a custom threshold.
+      if [[ "$MAX_IDLE_SEC" -ne 900 ]]; then
+        MTIME=$(echo "$line" | jq -r '.mtimeEpoch // empty')
+        NOW=$(date +%s)
+        STATE=$(echo "$line" | jq -r '.state // "unknown"')
+        if [[ -z "$MTIME" ]] || is_terminal_state "$STATE"; then continue; fi
+        if [[ $(( NOW - MTIME )) -lt "$MAX_IDLE_SEC" ]]; then continue; fi
+      fi
+      if [[ $OUTPUT_JSON -eq 1 ]]; then
+        echo "$line"
+      else
+        TICKET=$(echo "$line" | jq -r '.ticket')
+        PHASE=$(echo "$line" | jq -r '.phase')
+        JOB=$(echo "$line" | jq -r '.bg_job_id')
+        STATE=$(echo "$line" | jq -r '.state // "unknown"')
+        printf '%s\t%s\t%s\t%s\tstale\n' "$TICKET" "$PHASE" "$JOB" "$STATE"
+      fi
+    done < <(list_phase_agents "$ORCH_DIR")
+    ;;
+
+  *)
+    die "unknown subcommand: $SUB (expected list|status|stale)"
+    ;;
+esac
+
+exit 0
