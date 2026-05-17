@@ -251,7 +251,7 @@ HumanLayer profile is detected automatically via `repoMappings`, not stored in t
 
 These scripts used to be in `scripts/` but are now bundled in the Catalyst plugin:
 
-- ❌ `check-prerequisites.sh` → `plugins/dev/scripts/check-prerequisites.sh`
+- ❌ `check-prerequisites.sh` → `plugins/pm-ops/scripts/check-prerequisites.sh` and `plugins/meta/scripts/check-prerequisites.sh` (live callers). The dev plugin's copy was deleted in CTL-489 — it was orphaned.
 - ❌ `create-worktree.sh` → `plugins/dev/scripts/create-worktree.sh`
 - ❌ `workflow-context.sh` → `plugins/dev/scripts/workflow-context.sh`
 - ❌ `frontmatter-utils.sh` → `plugins/dev/scripts/frontmatter-utils.sh`
