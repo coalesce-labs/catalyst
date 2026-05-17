@@ -292,8 +292,12 @@ BG_ERR=$(mktemp)
 trap 'rm -f "$BG_OUT" "$BG_ERR"' EXIT
 
 # Use env so we propagate the dispatch env without modifying our own shell.
+# CATALYST_DISPATCH_CLAUDE_BIN mirrors the override honored by
+# orchestrate-dispatch-next so tests (and tooling) can swap the claude binary
+# without rewriting either dispatcher.
+CLAUDE_BIN="${CATALYST_DISPATCH_CLAUDE_BIN:-claude}"
 env "${DISPATCH_ENV[@]}" \
-  claude --bg --dangerously-skip-permissions --model "$MODEL" "$PROMPT" \
+  "$CLAUDE_BIN" --bg --dangerously-skip-permissions --model "$MODEL" "$PROMPT" \
   >"$BG_OUT" 2>"$BG_ERR"
 RC=$?
 
