@@ -3,21 +3,21 @@ name: morning-briefing
 description:
   Generate a daily briefing markdown at thoughts/briefings/YYYY-MM-DD.md with four sections —
   Review yesterday, Surface decisions, Plan today, Suggest orchestrator runs — synthesized from
-  Linear, GitHub, Granola, Google Drive, and Google Calendar in parallel. User-invoked from
-  `/catalyst-dev:morning-briefing` for ad-hoc runs. The CMA Routine wraps the same skill on a
-  weekday-morning schedule (Phase 5 of the parent plan).
+  Linear, GitHub, Granola, Google Drive, and Google Calendar in parallel. Then fans the briefing
+  out to four destinations (Slack DM, Slack channel, Notion page, Loom script file). User-invoked
+  from `/catalyst-dev:morning-briefing` for ad-hoc runs. The CMA Routine wraps the same skill on
+  a weekday-morning schedule (Phase 5 of the parent plan).
 disable-model-invocation: true
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, mcp__linear__*, mcp__notion__*
 ---
 
-# Morning Briefing — canonical markdown MVP
+# Morning Briefing — canonical markdown + fan-out
 
 ## When to use
 
-Invoke as `/catalyst-dev:morning-briefing` to produce today's briefing locally. Multi-output
-fan-out (Slack DM, Notion, channel post, Loom script) is **Phase 3** of the parent plan
-([[2026-05-16-catalyst-phase-agent-architecture]] §Initiative 2 Phase 3) and lives in different
-files; this skill only emits the canonical markdown.
+Invoke as `/catalyst-dev:morning-briefing` to produce today's briefing locally and fan it out
+to Slack DM, Slack channel, Notion page, and a Loom recording script
+([[2026-05-16-catalyst-phase-agent-architecture]] §Initiative 2 Phase 3).
 
 ## Flags
 
@@ -144,10 +144,50 @@ bash "$SCRIPT_DIR/render.sh" --input "$SCRATCH/input.json" --output "$OUT_PATH"
 bash "$SCRIPT_DIR/validate-frontmatter.sh" "$OUT_PATH"
 ```
 
-## Step 7: End session
+## Step 7: Fan-out (CTL-458)
+
+Run the four fan-outs in parallel against the canonical briefing file. Each script writes a
+status JSON document on stdout; the helper merges those into an `output_status:` block in the
+briefing frontmatter. Each fan-out degrades silently to `{"status":"skipped"}` if its
+credentials or destination ID are missing — the briefing always lands locally regardless.
 
 ```bash
-"$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done --reason "morning-briefing rendered"
+mkdir -p "$SCRATCH/output-status"
+
+bash "$SCRIPT_DIR/fanout-slack-dm.sh"      --in "$OUT_PATH" --date "$DATE" > "$SCRATCH/output-status/slack-dm.json"      &
+bash "$SCRIPT_DIR/fanout-slack-channel.sh" --in "$OUT_PATH" --date "$DATE" > "$SCRATCH/output-status/slack-channel.json" &
+bash "$SCRIPT_DIR/fanout-notion.sh"        --in "$OUT_PATH" --date "$DATE" > "$SCRATCH/output-status/notion.json"        &
+bash "$SCRIPT_DIR/fanout-loom-script.sh"   --in "$OUT_PATH" --date "$DATE" > "$SCRATCH/output-status/loom-script.json"   &
+wait
+
+bash "$SCRIPT_DIR/write-output-status.sh" --in "$OUT_PATH" --statuses "$SCRATCH/output-status"
+
+# Re-validate after fan-out — output_status is optional in the schema but we
+# want to fail loudly if a fan-out wrote malformed JSON.
+bash "$SCRIPT_DIR/validate-frontmatter.sh" "$OUT_PATH"
+```
+
+Fan-out destinations and their config keys:
+
+| Script                       | Credentials env var | Destination key (`.catalyst.briefing.*`) | Profile  |
+|------------------------------|---------------------|------------------------------------------|----------|
+| `fanout-slack-dm.sh`         | `SLACK_BOT_TOKEN`   | `slackDmUserId`                          | `dm`     |
+| `fanout-slack-channel.sh`    | `SLACK_BOT_TOKEN`   | `slackChannelId`                         | `channel`|
+| `fanout-notion.sh`           | `NOTION_TOKEN`      | `notionPageId`                           | `notion` |
+| `fanout-loom-script.sh`      | (none — local file) | (writes `<date>-loom-script.md`)         | `loom`   |
+
+Sanitization profiles (see `sanitize.sh`):
+
+- `dm` — full content preserved.
+- `channel` / `notion` / `loom` — strip `decisions[].summary` and `decisions[].status`, rewrite
+  the `## Surface decisions` body section to `_redacted_`, redact customer names from
+  `.catalyst.briefing.sanitizationRedactList` (case-insensitive, whole-word), and redact PR URLs
+  whose body contains any redact-list string.
+
+## Step 8: End session
+
+```bash
+"$SESSION_SCRIPT" end "$CATALYST_SESSION_ID" --status done --reason "morning-briefing rendered + fan-out"
 echo "Wrote: $OUT_PATH"
 ```
 
@@ -155,8 +195,8 @@ echo "Wrote: $OUT_PATH"
 
 The rendered markdown has YAML frontmatter validated against
 `plugins/dev/templates/briefing-frontmatter.schema.json` (required fields: `date`,
-`generated_by`, `decisions`). Four `## ...` sections follow. Empty sources render
-`_no data_` rather than failing.
+`generated_by`, `decisions`; optional `output_status` block populated by Step 7).
+Four `## ...` sections follow. Empty sources render `_no data_` rather than failing.
 
-Downstream Phase 3 fan-out scripts read this file as their sole input — they MUST NOT
-re-query the source MCPs.
+A companion `<date>-loom-script.md` lands beside the briefing whenever Step 7's loom fan-out
+runs (always, since it has no credential prerequisite).

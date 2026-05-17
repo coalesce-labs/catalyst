@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "MorningBriefingFrontmatter",
-  "description": "YAML frontmatter contract for thoughts/briefings/YYYY-MM-DD.md (CTL-457)",
+  "description": "YAML frontmatter contract for thoughts/briefings/YYYY-MM-DD.md (CTL-457 + CTL-458)",
   "type": "object",
   "required": ["date", "generated_by", "decisions"],
   "properties": {
@@ -17,7 +17,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "type", "summary", "status"],
+        "required": ["id", "type"],
         "properties": {
           "id": { "type": "string", "minLength": 1 },
           "type": {
@@ -46,11 +46,30 @@
     },
     "output_status": {
       "type": "object",
-      "additionalProperties": {
-        "type": "string",
-        "enum": ["success", "failed", "skipped"]
+      "additionalProperties": false,
+      "properties": {
+        "slack_dm":      { "$ref": "#/definitions/fanoutStatus" },
+        "slack_channel": { "$ref": "#/definitions/fanoutStatus" },
+        "notion":        { "$ref": "#/definitions/fanoutStatus" },
+        "loom_script":   { "$ref": "#/definitions/fanoutStatus" }
       }
     }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "definitions": {
+    "fanoutStatus": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["posted", "skipped", "failed"]
+        },
+        "destination": { "type": "string" },
+        "reason":      { "type": "string" },
+        "details":     { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
 }
