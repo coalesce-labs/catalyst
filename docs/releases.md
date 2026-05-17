@@ -132,6 +132,26 @@ Tags follow `<component>-v<version>` format:
 5. To verify without waiting for the cron, run
    `gh workflow run release-please-scheduled-merge.yml`
 
+## Reading the workflow logs
+
+The `release-please.yml` workflow walks every configured plugin in turn. For each plugin you'll see
+either:
+
+- `❯ component: catalyst-X` followed by no `skipping` line — that plugin contributed commits and
+  will appear in the release PR.
+- `✔ No user facing commits found since <sha> - skipping` — **per-plugin**, not global. Means
+  that specific plugin had no `feat:` / `fix:` / `perf:` commits touching its `plugins/X/` paths
+  since its last tag, so release-please correctly skips it. The `<sha>` is that plugin's
+  last-release SHA; two plugins bootstrapped together can legitimately show the same SHA.
+
+The action ends with `✔ PR https://github.com/.../pull/N` (created or remained the same) — that PR
+is the authoritative summary of what's pending. `gh pr list --label "autorelease: pending"` lists
+it directly.
+
+If you suspect releases are stuck, run `bash scripts/check-release-health.sh` (also runs daily via
+`.github/workflows/release-health.yml`). It reads the same `autorelease: pending` label and
+reports `UNHEALTHY` only when releasable commits exist with no open release PR.
+
 ## How Commit Routing Works
 
 Release-please routes commits to plugins by **file paths changed**, not by commit message scope:
