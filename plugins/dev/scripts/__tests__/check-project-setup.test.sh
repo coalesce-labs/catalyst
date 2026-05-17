@@ -241,6 +241,41 @@ EOF
     "Missing catalyst.filter.groqModel"
 }
 
+# Surfaces setup-error rc from check-config-drift (e.g. malformed template)
+# instead of swallowing it. Without the fix, rc=2 was lost to `|| true` and
+# users got zero signal that drift coverage silently no-op'd — exactly the
+# CTL-487 silent-fallback class the feature was meant to surface.
+test_drift_setup_error_surfaces() {
+  local proj="$SCRATCH/proj-drift-err"
+  local key="ctl-489-drift-err"
+  make_project "$proj" "$key"
+  mkdir -p "$SCRATCH/xdg/catalyst"
+  cat > "$SCRATCH/xdg/catalyst/config.json" <<EOF
+{ "catalyst": { "monitor": {
+  "github": { "smeeChannel": "https://smee.io/abc" },
+  "linear":  { "webhookId": "wh_test" }
+} } }
+EOF
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
+
+  # Plant a malformed template directly where check-project-setup resolves it
+  # from this worktree layout (SCRIPT_DIR/../templates/config.template.json).
+  local fake_plugin="$SCRATCH/fake-plugin"
+  mkdir -p "$fake_plugin/scripts" "$fake_plugin/templates"
+  cp "$SCRIPT" "$fake_plugin/scripts/check-project-setup.sh"
+  cp "${REPO_ROOT}/plugins/dev/scripts/check-config-drift.sh" \
+    "$fake_plugin/scripts/check-config-drift.sh"
+  echo "not json{" > "$fake_plugin/templates/config.template.json"
+
+  local out
+  out=$( cd "$proj" \
+    && env -i HOME="$HOME" PATH="/usr/bin:/bin" \
+       XDG_CONFIG_HOME="$SCRATCH/xdg" \
+       bash "$fake_plugin/scripts/check-project-setup.sh" 2>&1 )
+  assert_grep "drift-script rc=2 surfaces as a warning" "$out" \
+    "check-config-drift exited 2"
+}
+
 # ─── Run ────────────────────────────────────────────────────────────────────
 test_smee_missing
 test_smee_channel_missing
@@ -249,6 +284,7 @@ test_linear_webhook_missing
 test_all_configured
 test_drift_warning_appears
 test_no_drift
+test_drift_setup_error_surfaces
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"

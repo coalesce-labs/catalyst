@@ -83,6 +83,7 @@ if [ "$MODE" = "merge" ]; then
     exit 2
   fi
   TMP="${MERGE_OUT}.tmp.$$"
+  JQ_ERR="${MERGE_OUT}.err.$$"
   if ! jq -n \
       --slurpfile t "$TEMPLATE_PATH" \
       --slurpfile p "$CONFIG_PATH" \
@@ -91,27 +92,50 @@ if [ "$MODE" = "merge" ]; then
         walk(if type == "object"
              then with_entries(select(.key | IN("_comment","$comment","$schema") | not))
              else . end);
+      # Drop entries whose KEY is a [YOUR_*] placeholder (e.g. the deploy
+      # "[YOUR_ORG]/[YOUR_REPO]" sub-tree) AND entries whose VALUE is a
+      # [YOUR_*] placeholder string (e.g. repository.org="[YOUR_ORG]").
+      # Without the value filter, --merge-into would write placeholder
+      # literals into the user'"'"'s config — the garbage-default class
+      # this feature exists to prevent.
       def strip_placeholders:
         walk(if type == "object"
-             then with_entries(select(.key | test("\\[YOUR_(ORG|REPO)\\]") | not))
+             then with_entries(
+               select(
+                 (.key | test("\\[YOUR_(ORG|REPO)\\]") | not)
+                 and ((.value | type) != "string"
+                      or ((.value | test("\\[YOUR_(ORG|REPO)\\]")) | not))
+               ))
              else . end);
       ($t[0] | strip_meta | strip_placeholders) * ($p[0] // {})
-      ' > "$TMP" 2>/dev/null; then
-    rm -f "$TMP"
-    echo "check-config-drift: merge failed" >&2
+      ' > "$TMP" 2>"$JQ_ERR"; then
+    err=$(cat "$JQ_ERR" 2>/dev/null || true)
+    rm -f "$TMP" "$JQ_ERR"
+    echo "check-config-drift: merge failed${err:+: $err}" >&2
     exit 2
   fi
-  mv "$TMP" "$MERGE_OUT"
+  rm -f "$JQ_ERR"
+  if ! mv "$TMP" "$MERGE_OUT"; then
+    rm -f "$TMP"
+    echo "check-config-drift: failed to write $MERGE_OUT" >&2
+    exit 2
+  fi
   exit 0
 fi
 
 # Enumerate drifted leaves. The jq pipeline:
 #   1. strip $schema/$comment/_comment keys from the template
-#   2. enumerate leaf paths (paths(scalars))
+#   2. enumerate leaf paths — arrays are treated as leaves themselves, NOT
+#      descended into. `paths(type != "object")` emits both the array's path
+#      and its integer-indexed element paths; filtering on `.[-1] | type ==
+#      "string"` keeps only object-key paths and drops the array internals.
+#      Users never set array elements by integer index, so reporting
+#      "Missing catalyst.feedback.labels.0" is semantically wrong.
 #   3. drop paths whose segments hit [YOUR_ORG]/[YOUR_REPO] placeholders
 #   4. drop paths whose root is in the suppress list (already reported elsewhere)
 #   5. drop paths the project already has set (getpath returns non-null)
 #   6. emit each remaining {path, template_value} as one JSON object per line
+DRIFT_ERR=$(mktemp 2>/dev/null || echo "/tmp/check-config-drift.err.$$")
 DRIFT_JSON=$(jq -n \
   --slurpfile t "$TEMPLATE_PATH" \
   --slurpfile p "$CONFIG_PATH" \
@@ -127,18 +151,24 @@ DRIFT_JSON=$(jq -n \
     any($roots[]; . as $root
                 | ($p | length) >= ($root | length)
                   and ($p[0:($root|length)] == $root));
+  def is_object_key_path($p):
+    ($p | length) > 0 and (($p | .[-1] | type) == "string");
   ($t[0] | strip_meta) as $tmpl
   | ($p[0] // {}) as $proj
   | [ $tmpl
-      | paths(scalars) as $pp
+      | paths(type != "object") as $pp
+      | select(is_object_key_path($pp))
       | select(has_placeholder($pp) | not)
       | select(is_suppressed($pp; $suppress) | not)
       | select(($proj | getpath($pp)) == null)
       | {path: $pp, template_value: ($tmpl | getpath($pp))} ]
-  ' 2>/dev/null) || {
-    echo "check-config-drift: jq evaluation failed" >&2
+  ' 2>"$DRIFT_ERR") || {
+    err=$(cat "$DRIFT_ERR" 2>/dev/null || true)
+    rm -f "$DRIFT_ERR"
+    echo "check-config-drift: jq evaluation failed${err:+: $err}" >&2
     exit 2
 }
+rm -f "$DRIFT_ERR"
 
 COUNT=$(jq -r 'length' <<<"$DRIFT_JSON")
 

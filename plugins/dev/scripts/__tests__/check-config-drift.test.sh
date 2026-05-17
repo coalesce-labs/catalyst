@@ -295,6 +295,83 @@ if [ -f "$REAL_TPL" ] && [ -f "$REAL_CFG" ]; then
   "
 fi
 
+# ── Test 14: arrays are leaves, not descended into (regression for paths(scalars)) ──
+# Without the fix, paths(scalars) descends into arrays and yields integer-indexed
+# leaves; a project missing the feedback block would see
+# "Missing catalyst.feedback.labels.0" — semantically wrong since users never set
+# array elements by integer index. With the fix the array itself is the leaf.
+TPL14="${SCRATCH}/tpl14.json"
+CFG14="${SCRATCH}/cfg14.json"
+cat > "$TPL14" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "k",
+    "feedback": { "labels": ["auto-submitted", "needs-triage"] }
+  }
+}
+EOF
+cat > "$CFG14" <<'EOF'
+{ "catalyst": { "projectKey": "k" } }
+EOF
+run "array template leaves: no integer-indexed warning" bash -c "
+  out=\$(bash '$DRIFT' --template '$TPL14' --config '$CFG14' 2>/dev/null || true)
+  ! echo \"\$out\" | grep -q 'labels\\.0'
+"
+run "array template leaves: single warning for the labels array" bash -c "
+  out=\$(bash '$DRIFT' --template '$TPL14' --config '$CFG14' 2>/dev/null || true)
+  count=\$(echo \"\$out\" | grep -c 'Missing catalyst\\.feedback\\.labels' || true)
+  # one warning + one indented hint line both contain the substring → expect 2
+  [ \"\$count\" -ge 1 ]
+"
+run "array template leaves: --json reports the array verbatim" bash -c "
+  out=\$(bash '$DRIFT' --json --template '$TPL14' --config '$CFG14' 2>/dev/null || true)
+  v=\$(echo \"\$out\" | jq -c '[.[] | select(.path == [\"catalyst\",\"feedback\",\"labels\"])][0].template_value')
+  [ \"\$v\" = '[\"auto-submitted\",\"needs-triage\"]' ]
+"
+
+# ── Test 15: --merge-into strips placeholder VALUES, not just placeholder KEYS ──
+# Pre-fix, strip_placeholders filtered only KEYS whose name matched [YOUR_*].
+# Real keys with placeholder VALUES (repository.org='[YOUR_ORG]') flowed through
+# the merge unchanged, writing placeholder literals into the user's config —
+# the garbage-default class this feature was meant to prevent.
+TPL15="${SCRATCH}/tpl15.json"
+CFG15="${SCRATCH}/cfg15.json"
+cat > "$TPL15" <<'EOF'
+{
+  "catalyst": {
+    "repository": { "org": "[YOUR_ORG]", "name": "[YOUR_REPO]" },
+    "orchestration": { "dispatchMode": "phase-agents" }
+  }
+}
+EOF
+cat > "$CFG15" <<'EOF'
+{ "catalyst": { "repository": { "org": "real-org", "name": "real-repo" } } }
+EOF
+OUT15="${SCRATCH}/merged15.json"
+run "--merge-into: runs with placeholder-valued template keys" bash "$DRIFT" --template "$TPL15" --config "$CFG15" --merge-into "$OUT15"
+run "--merge-into: user repository values preserved" bash -c "
+  org=\$(jq -r '.catalyst.repository.org' < '$OUT15')
+  [ \"\$org\" = 'real-org' ]
+"
+run "--merge-into: placeholder VALUES never leak in" bash -c "
+  ! jq -r '.. | strings' < '$OUT15' | grep -q '\\[YOUR_'
+"
+
+# Edge case: user has NO repository block. Merge must NOT inject placeholder values.
+CFG15B="${SCRATCH}/cfg15b.json"
+cat > "$CFG15B" <<'EOF'
+{ "catalyst": { "projectKey": "k" } }
+EOF
+OUT15B="${SCRATCH}/merged15b.json"
+run "--merge-into: runs when project lacks placeholder-key block" bash "$DRIFT" --template "$TPL15" --config "$CFG15B" --merge-into "$OUT15B"
+run "--merge-into: no [YOUR_*] literal injected when block is absent" bash -c "
+  ! jq -r '.. | strings' < '$OUT15B' | grep -q '\\[YOUR_'
+"
+run "--merge-into: non-placeholder template keys still merged" bash -c "
+  v=\$(jq -r '.catalyst.orchestration.dispatchMode' < '$OUT15B')
+  [ \"\$v\" = 'phase-agents' ]
+"
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if [ "$FAILURES" = 0 ]; then

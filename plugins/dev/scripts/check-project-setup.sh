@@ -255,11 +255,27 @@ if [[ -n $CONFIG_PATH ]]; then
 		TEMPLATE_PATH="plugins/dev/templates/config.template.json"
 	fi
 	if [[ -x $DRIFT_SCRIPT && -n $TEMPLATE_PATH ]]; then
-		# `|| true` — drift script exits 1 on drift detected; that's a normal warning
-		# state, not a failure of this check. set -euo pipefail must not abort here.
-		while IFS= read -r line; do
-			[[ -n $line ]] && warnings+=("$line")
-		done < <(bash "$DRIFT_SCRIPT" --config "$CONFIG_PATH" --template "$TEMPLATE_PATH" 2>/dev/null || true)
+		# Distinguish drift-script exit codes:
+		#   0 → no drift (silent)
+		#   1 → drift detected; stdout lines become warnings
+		#   2+ → setup error (jq missing, malformed template); surface as a
+		#        warning so the gap is visible. Previously `2>/dev/null || true`
+		#        swallowed rc=2 and rc=1 alike — exactly the CTL-487 silent-
+		#        fallback class this feature exists to surface.
+		# set -e would abort on rc=1; tolerate non-zero so we can branch on rc.
+		DRIFT_OUT=$(bash "$DRIFT_SCRIPT" --config "$CONFIG_PATH" --template "$TEMPLATE_PATH" 2>&1) && DRIFT_RC=0 || DRIFT_RC=$?
+		case $DRIFT_RC in
+			0) ;;
+			1)
+				while IFS= read -r line; do
+					[[ -n $line ]] && warnings+=("$line")
+				done <<<"$DRIFT_OUT"
+				;;
+			*)
+				# Collapse newlines so the warning stays a single bullet.
+				warnings+=("check-config-drift exited $DRIFT_RC: ${DRIFT_OUT//$'\n'/ }")
+				;;
+		esac
 	fi
 fi
 
