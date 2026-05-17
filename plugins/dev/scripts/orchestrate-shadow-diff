@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# orchestrate-shadow-diff — verify CTL-483 Phase 1 dual-write invariant.
+#
+# Walks an orchestrator's workers/*.json files, diffs each against its
+# matching <name>.json.projected shadow file (stripped of the broker's
+# `_projected` audit metadata), and reports drift.
+#
+# Usage:
+#   orchestrate-shadow-diff [--json] <orchId-or-orch-dir>
+#
+# Exit codes:
+#   0 — all pairs match (or no shadow files yet — see --strict)
+#   1 — drift detected on at least one pair
+#   2 — no canonical signal files found
+#
+# By default missing shadow files are reported but do NOT fail (Phase 1
+# producers are being rolled out one at a time). Pass --strict to fail
+# when any canonical file lacks a shadow.
+
+set -uo pipefail
+
+JSON_OUT=0
+STRICT=0
+ARG=""
+
+usage() {
+  sed -n '2,18p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)   JSON_OUT=1; shift ;;
+    --strict) STRICT=1; shift ;;
+    -h|--help) usage 0 ;;
+    -*) echo "unknown flag: $1" >&2; usage ;;
+    *)  if [[ -z "$ARG" ]]; then ARG="$1"; shift; else echo "unexpected arg: $1" >&2; usage; fi ;;
+  esac
+done
+
+[[ -z "$ARG" ]] && { echo "ERROR: orchestrator id or directory required" >&2; usage; }
+
+if [[ -d "$ARG" ]]; then
+  ORCH_DIR="$ARG"
+else
+  RUNS_DIR="${CATALYST_RUNS_DIR:-${CATALYST_DIR:-$HOME/catalyst}/runs}"
+  ORCH_DIR="${RUNS_DIR}/${ARG}"
+fi
+WORKERS_DIR="${ORCH_DIR}/workers"
+
+[[ -d "$WORKERS_DIR" ]] || { echo "ERROR: no workers dir at $WORKERS_DIR" >&2; exit 2; }
+
+shopt -s nullglob
+CANONICALS=("$WORKERS_DIR"/*.json)
+# Filter out .projected files that match the glob
+FILTERED=()
+for f in "${CANONICALS[@]}"; do
+  [[ "$f" == *.projected ]] && continue
+  FILTERED+=("$f")
+done
+CANONICALS=("${FILTERED[@]}")
+
+if [[ "${#CANONICALS[@]}" -eq 0 ]]; then
+  echo "ERROR: no canonical worker signal files in $WORKERS_DIR" >&2
+  exit 2
+fi
+
+CHECKED=0
+MATCH=0
+DRIFT=0
+MISSING=0
+declare -a DRIFTS
+declare -a MISSINGS
+
+for canonical in "${CANONICALS[@]}"; do
+  ticket=$(basename "$canonical" .json)
+  shadow="${canonical}.projected"
+  CHECKED=$((CHECKED + 1))
+
+  if [[ ! -f "$shadow" ]]; then
+    MISSING=$((MISSING + 1))
+    MISSINGS+=("$ticket")
+    continue
+  fi
+
+  # Strip the broker's audit metadata before diffing
+  canon_norm=$(jq -S 'del(._projected)' "$canonical" 2>/dev/null)
+  shadow_norm=$(jq -S 'del(._projected)' "$shadow" 2>/dev/null)
+
+  if [[ "$canon_norm" == "$shadow_norm" ]]; then
+    MATCH=$((MATCH + 1))
+  else
+    DRIFT=$((DRIFT + 1))
+    DRIFTS+=("$ticket")
+  fi
+done
+
+if [[ "$JSON_OUT" -eq 1 ]]; then
+  jq -nc \
+    --argjson checked "$CHECKED" \
+    --argjson match "$MATCH" \
+    --argjson drift "$DRIFT" \
+    --argjson missing "$MISSING" \
+    --arg orchDir "$ORCH_DIR" \
+    --argjson drifts "$(printf '%s\n' "${DRIFTS[@]:-}" | jq -R . | jq -s .)" \
+    --argjson missings "$(printf '%s\n' "${MISSINGS[@]:-}" | jq -R . | jq -s .)" \
+    '{orchDir: $orchDir, checked: $checked, match: $match, drift: $drift, missing: $missing, driftTickets: ($drifts | map(select(. != ""))), missingTickets: ($missings | map(select(. != "")))}'
+else
+  echo "orchestrate-shadow-diff: $ORCH_DIR"
+  echo "  checked: $CHECKED"
+  echo "  match:   $MATCH"
+  echo "  drift:   $DRIFT"
+  echo "  missing: $MISSING (shadow file not yet emitted)"
+  if [[ "$DRIFT" -gt 0 ]]; then
+    echo "  drift tickets:"
+    for t in "${DRIFTS[@]:-}"; do
+      [[ -z "$t" ]] && continue
+      echo "    - $t"
+    done
+  fi
+  if [[ "$MISSING" -gt 0 ]] && [[ "$STRICT" -eq 1 ]]; then
+    echo "  missing tickets:"
+    for t in "${MISSINGS[@]:-}"; do
+      [[ -z "$t" ]] && continue
+      echo "    - $t"
+    done
+  fi
+fi
+
+if [[ "$DRIFT" -gt 0 ]]; then
+  exit 1
+fi
+if [[ "$STRICT" -eq 1 ]] && [[ "$MISSING" -gt 0 ]]; then
+  exit 1
+fi
+exit 0

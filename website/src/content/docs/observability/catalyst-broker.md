@@ -530,6 +530,41 @@ catalyst-events wait-for \
   --timeout 0
 ```
 
+## Worker State Projection (Phase 1, CTL-483)
+
+The broker projects `worker.state_changed` events into `<orchDir>/workers/<TICKET>.json.projected`
+shadow files. During Phase 1 of the ADR-018 migration, writers continue to write the canonical
+`<TICKET>.json` directly AND emit a `worker.state_changed` event carrying the full new state.
+The broker's `handleWorkerStateChanged` handler resolves the path via `CATALYST_RUNS_DIR` and
+writes the state byte-for-byte (with a small `_projected` audit field appended).
+
+To verify byte-for-byte agreement between canonical and shadow files for one orchestrator:
+
+```bash
+orchestrate-shadow-diff <orchId>            # human-readable summary
+orchestrate-shadow-diff --json <orchId>     # machine-readable
+orchestrate-shadow-diff --strict <orchId>   # fail when shadow files are missing
+```
+
+Exit code 0 means all pairs match (or no shadow files yet — see `--strict`). Exit code 1 means
+drift detected on at least one pair. Exit code 2 means no canonical signal files found at all.
+
+Phase 1 producers (writers that emit the event):
+
+| Writer | Status |
+|---|---|
+| `orchestrate-auto-rebase` | ✅ shipped (PoC) |
+| `orchestrate-auto-fixup` | follow-up ticket |
+| `orchestrate-dispatch-next` | follow-up ticket |
+| `orchestrate-followup` | follow-up ticket |
+| `orchestrate-healthcheck` | follow-up ticket |
+| `orchestrate-revive` | follow-up ticket |
+| oneshot skill | follow-up ticket |
+
+Once all seven writers are dual-writing and `orchestrate-shadow-diff` shows zero drift across a
+full orchestration cycle, Phase 2 removes the direct writes and the broker becomes sole writer
+at the canonical path. See ADR-018 for the full migration plan.
+
 ## Related
 
 - [Event Architecture](./events/) — the global event log and `catalyst-events` CLI that

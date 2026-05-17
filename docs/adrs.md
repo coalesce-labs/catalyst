@@ -650,3 +650,111 @@ model) is the runtime fallback when the key is missing.
   [`docs/orchestrator-overview.md`](orchestrator-overview.md). Related ADRs:
   ADR-006 (global state JSON), ADR-008 (SQLite session store), ADR-014 (worker
   owns full PR lifecycle).
+
+## ADR-018: Event-Sourced Worker Signal Files via Broker Projection (CTL-483)
+
+**Status**: Accepted, 2026-05-17. Phase 1 (dual-write) shipped; Phase 2 (cutover)
+and Phase 3 (SQLite mirror) tracked separately.
+
+**Context**: `workers/<TICKET>.json` signal files are currently written directly by
+**seven different code paths**:
+
+- `orchestrate-dispatch-next` — records PID + lastHeartbeat after dispatch
+- `orchestrate-followup` — seeds new signal files for follow-up tickets
+- The worker agent itself (`oneshot/SKILL.md` — full lifecycle transitions)
+- `orchestrate-healthcheck` — marks workers failed/stalled
+- `orchestrate-revive` — manages revive retry budget
+- `orchestrate-auto-fixup` — clears/sets `blockedSince`
+- `orchestrate-auto-rebase` — clears/sets `dirtySince`
+
+All seven use the same atomic `jq ... > tmp && mv` pattern, but there is **no
+inter-process locking**. Cross-script races (e.g. healthcheck marks a worker
+`failed` while the worker is simultaneously writing `pr-created`) are undetected
+and silent.
+
+The broker already has the relevant projection precedent: `broker-interests.json`
+is fully event-sourced from `filter.register` / `filter.deregister`
+(`broker/index.mjs:handleRegister/handleDeregister/saveInterests`). ADR-008 set
+the dual-write migration pattern for sessions (JSONL → SQLite), and ADR-011
+established the filesystem-first invariant for archive artifacts.
+
+**Decision**: Move worker state mutations from "direct file write" to "emit a
+`worker.state_changed` command event; broker projects the new state to disk".
+The event carries the FULL new state in `body.payload.state` (not a patch), so
+the broker is the simple end of the contract — no merging logic.
+
+Migration is dual-write across three phases, mirroring ADR-008:
+
+**Phase 1 (additive, this ADR)**: writers continue their direct `jq ... > tmp && mv`
+AND emit a `worker.state_changed` event. The broker projects events to a
+**shadow path** — `workers/<TICKET>.json.projected` — so direct writes are never
+raced. A new `orchestrate-shadow-diff` CLI compares canonical vs shadow files
+(stripped of audit metadata) and reports drift. PoC writer is
+`orchestrate-auto-rebase` (single helper-function entry point, minimal blast
+radius). The remaining six writers are migrated to dual-write one at a time
+under follow-up tickets.
+
+**Phase 2 (cutover)**: once `orchestrate-shadow-diff` shows zero drift across a
+full orchestration cycle for ALL seven writers, direct writes are removed.
+Broker becomes sole writer at the canonical path. `worker.state_changed`
+remains in `processEvent`; the broker dispatch is unchanged.
+
+**Phase 3 (optional)**: mirror to SQLite `worker_state` table per the ADR-011
+hybrid pattern (`worker_state` table indexed by `(orch_id, ticket)`; filesystem
+files remain the durable source of truth). Enables fast cross-orchestrator
+queries without re-parsing JSON files.
+
+**Event design**:
+
+| Field | Source |
+|---|---|
+| `event.name` | `worker.state_changed` |
+| `attributes."catalyst.orchestrator.id"` | path component |
+| `attributes."catalyst.worker.ticket"` | path component |
+| `attributes."catalyst.writer"` | audit trail (which script emitted) |
+| `body.payload.state` | full new contents of `workers/<TICKET>.json` |
+
+The full envelope plus a worked example is in
+`plugins/dev/references/event-schema.md` under `## catalyst-orchestrator`. The
+event name is registered in `plugins/dev/references/event-name-allowlist.md`
+under `### worker_lifecycle`.
+
+**Broker handler**: `handleWorkerStateChanged` (exported from
+`plugins/dev/scripts/broker/index.mjs`). Reads orchestrator + ticket from the
+event, derives the shadow path via `getProjectedWorkerStatePath`, and writes
+atomically via `writeProjectedWorkerState` (the helper adds a `_projected`
+metadata object recording `{writer, ts}` for forensic audit). Path resolution
+honors `CATALYST_RUNS_DIR` (default: `${CATALYST_DIR}/runs`). Unit tests in
+`plugins/dev/scripts/broker/worker-state.test.mjs` cover canonical + legacy
+envelope shapes, missing-field drops, atomic write, and path isolation.
+
+**Writer emit helper**: `plugins/dev/scripts/lib/emit-worker-state-changed.sh`
+is sourced by writers opting into dual-write. Best-effort — every emission
+failure path is a silent return so the direct write remains authoritative
+during Phase 1.
+
+**Feedback-loop safety**: the broker does NOT emit `worker.state_changed`
+itself, so a `shouldSkipEvent` rule is unnecessary. If a future SQLite-mirror
+handler is added in Phase 3, it will consume the same event without
+re-emitting, preserving this property.
+
+**Supersedes**: ADR-006's design for the `workers/<TICKET>.json` portion only.
+The global state (`~/catalyst/state.json`) and event log
+(`~/catalyst/events/YYYY-MM.jsonl`) decisions in ADR-006 remain in force.
+
+**Consequences**:
+
+- The race surface across seven writers collapses to "broker is sole writer"
+  after Phase 2 cutover.
+- Unblocks distributed broker — workers can POST `worker.state_changed`
+  to a remote endpoint instead of writing local files, with the broker
+  projecting from the receive side.
+- Provides a single observable mutation API for worker state, which
+  downstream tools (HUD, dashboards) can subscribe to without polling files.
+- Adds an event-log entry per worker state mutation (~5–10 per worker run).
+  Negligible at current volume (a few hundred events per orchestration).
+- During Phase 1, double disk usage for worker signals (canonical + shadow
+  copy). Each file is small (<2 KB), so the absolute cost is trivial.
+- Writers gain a soft dependency on the events directory being writable;
+  failure to emit is silent (best-effort), preserving the direct-write
+  invariant.

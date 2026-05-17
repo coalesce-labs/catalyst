@@ -87,10 +87,24 @@ parse_repo() {
   echo "$url" | sed -nE 's|https?://github\.com/([^/]+)/([^/]+)/pull/.*|\1/\2|p'
 }
 
+# CTL-483 Phase 1 dual-write: source the emit helper (best-effort — never
+# fails the script). When sourced successfully, every update_signal call
+# emits a worker.state_changed event so the broker can project the new state
+# to <signal>.projected for byte-for-byte verification before Phase 2 cutover.
+__EMIT_WSC="${SCRIPT_DIR}/lib/emit-worker-state-changed.sh"
+if [[ -r "$__EMIT_WSC" ]]; then
+  # shellcheck disable=SC1090
+  . "$__EMIT_WSC" 2>/dev/null || true
+fi
+
 update_signal() {
   local signal="$1"; shift
   local expr="$1"; shift
   jq "$@" "$expr" "$signal" > "${signal}.tmp" && mv "${signal}.tmp" "$signal"
+  if [[ "$DRY_RUN" -ne 1 ]] && command -v emit_worker_state_changed >/dev/null 2>&1; then
+    CATALYST_ORCHESTRATOR_ID="${ORCH_ID:-${CATALYST_ORCHESTRATOR_ID:-}}" \
+      emit_worker_state_changed "$signal" "orchestrate-auto-rebase" || true
+  fi
 }
 
 fetch_pr_view() {
