@@ -66,22 +66,26 @@ If a richer Linear or Notion query is needed beyond what the CLI/REST helpers ex
 
 ## Step 3: Gather "decisions"
 
-For the MVP, populate the `decisions:` array from two heuristics:
+Populate the `decisions:` array from three sources:
 
-1. **Blocked PRs** — `gh search prs --review-requested @me --state open --json …` filtered to
+1. **ADR drift** — `adr-drift.sh` reads ADR `code_assertions` frontmatter and surfaces patterns
+   that drift from the codebase. See [ADR-DRIFT.md](./ADR-DRIFT.md).
+2. **Blocked PRs** — `gh search prs --review-requested @me --state open --json …` filtered to
    PRs with no commit in the last 48h. Each becomes one `{type: blocked_pr, …}` decision.
-2. **Judgment-call Linear tickets** — `linearis issues list --team <team> --status "Triage,In Progress" --label needs-decision` (label name is informational; substitute whatever signal the operator uses).
-
-ADR drift detection is **Phase 4** of the parent plan — do NOT implement it here. Emit an empty
-list if no signals are found.
+3. **Judgment-call Linear tickets** — `linearis issues list --team <team> --status "Triage,In Progress" --label needs-decision` (label name is informational; substitute whatever signal the operator uses).
 
 Synthesize into a `decisions.json` fragment:
 
 ```bash
-cat > "$SCRATCH/decisions.json" <<JSON
-{"decisions": []}
-JSON
-# Append blocked-PR decisions / judgment-call decisions as discovered.
+# ADR drift detection (CTL-459)
+bash "$SCRIPT_DIR/adr-drift.sh" --root "$(pwd)" > "$SCRATCH/adr-drift.json"
+
+# Blocked-PR + judgment-call sources are still TODO — start with an empty fragment.
+echo '{"decisions": []}' > "$SCRATCH/decisions-other.json"
+
+# Merge all decision sources into one fragment
+jq -s '{decisions: (((.[0] // {}).decisions // []) + ((.[1] // {}).decisions // []))}' \
+  "$SCRATCH/adr-drift.json" "$SCRATCH/decisions-other.json" > "$SCRATCH/decisions.json"
 ```
 
 ## Step 4: Gather "today"
