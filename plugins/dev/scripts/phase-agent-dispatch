@@ -310,8 +310,11 @@ if [[ $RC -ne 0 ]]; then
   exit 1
 fi
 
-# Extract the bg job id — first whitespace-bounded token on stdout.
-BG_JOB_ID=$(awk 'NR==1 {print $1; exit}' "$BG_OUT")
+# Extract the bg job id — first 8-char lowercase hex on stdout (CTL-490).
+# Today's `claude --bg` prints `backgrounded · <hex>\n  claude agents ...`;
+# the previous `awk NR==1 {print $1}` captured the literal word "backgrounded".
+# Hex grep stays correct as long as job IDs remain hex tokens.
+BG_JOB_ID=$(grep -oE '[a-f0-9]{8}' "$BG_OUT" | head -1)
 [[ -n "$BG_JOB_ID" ]] || die "claude --bg returned empty job id (stdout: $(cat "$BG_OUT"))"
 
 # Record job id back into the signal file.

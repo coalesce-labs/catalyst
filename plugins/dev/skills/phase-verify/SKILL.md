@@ -7,9 +7,10 @@ description: |
   scan, code review, test coverage, silent-failure hunt. Writes
   ${ORCH_DIR}/workers/<TICKET>/verify.json then emits phase.verify.complete.<ticket>.
   Reads phase-implement.json as its prior-phase artifact. NEVER writes application
-  code — only test files allowed. Spawned via phase-agent-dispatch; not user-invoked.
-disable-model-invocation: false
-user-invocable: false
+  code — only test files allowed. Spawned via phase-agent-dispatch via slash
+  command — hence `user-invocable: true`.
+user-invocable: true
+disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Read
   - Write

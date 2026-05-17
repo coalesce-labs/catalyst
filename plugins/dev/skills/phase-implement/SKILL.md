@@ -5,10 +5,10 @@ description: |
   (CTL-449 Initiative 1 Phase 3). Reads `thoughts/shared/plans/*-<ticket>.md`,
   delegates the red→green→refactor cycle to `/catalyst-dev:implement-plan`,
   commits each plan phase as it lands, and transitions the Linear ticket to
-  `inProgress`. Dispatched as a `claude --bg` job by `phase-agent-dispatch`;
-  not user-invocable.
-disable-model-invocation: true
-user-invocable: false
+  `inProgress`. Dispatched as a `claude --bg` job by `phase-agent-dispatch`,
+  which invokes it via slash command — hence `user-invocable: true`.
+user-invocable: true
+disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Bash
   - Read

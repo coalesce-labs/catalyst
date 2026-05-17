@@ -6,10 +6,10 @@ description: |
   body: event-driven wait on `catalyst-events wait-for`, inline resolution of
   CI fix-ups, bot review threads, and BEHIND rebases, then `gh pr merge
   --squash --delete-branch` when the PR reaches CLEAN, then transitions
-  Linear to `done`. Dispatched as a `claude --bg` job by `phase-agent-dispatch`;
-  not user-invocable.
-disable-model-invocation: true
-user-invocable: false
+  Linear to `done`. Dispatched as a `claude --bg` job by `phase-agent-dispatch`,
+  which invokes it via slash command — hence `user-invocable: true`.
+user-invocable: true
+disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Bash
   - Read

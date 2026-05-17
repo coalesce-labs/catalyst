@@ -52,7 +52,10 @@ if [[ -f "$SKILL" ]]; then
   BODY=$(cat "$SKILL")
   # Frontmatter
   assert_contains "$BODY" "name: phase-research" "frontmatter declares name: phase-research"
-  assert_contains "$BODY" "user-invocable: false" "frontmatter sets user-invocable: false"
+  # CTL-490: phase skills are dispatched via `claude --bg "/catalyst-dev:phase-X ..."`,
+  # which the bg session parses as a user slash command. user-invocable MUST be true
+  # for the dispatch to resolve.
+  assert_contains "$BODY" "user-invocable: true" "frontmatter sets user-invocable: true (CTL-490)"
   assert_contains "$BODY" "Task" "allowed-tools includes Task (for invoking research-codebase)"
   assert_contains "$BODY" "Bash" "allowed-tools includes Bash"
 
@@ -95,6 +98,8 @@ mkdir -p "$STUB_DIR" "$WORKER_DIR"
 
 cat > "$STUB_DIR/claude" <<'STUB'
 #!/usr/bin/env bash
+# CTL-490: stub mimics today's real `claude --bg` stdout shape so the
+# dispatcher's hex-grep parser finds the job ID. Hex token 'a1b2c3d4'.
 LOG="${CLAUDE_STUB_LOG:-/tmp/claude-stub.log}"
 {
   echo "--ARGS--"
@@ -103,7 +108,11 @@ LOG="${CLAUDE_STUB_LOG:-/tmp/claude-stub.log}"
   env | grep -E '^CATALYST_(ORCHESTRATOR_(DIR|ID)|PHASE|TICKET)=' | sort
   echo "--END--"
 } > "$LOG"
-echo "job-research-001"
+cat <<EOF
+backgrounded · a1b2c3d4
+  claude agents             list sessions
+  claude attach a1b2c3d4    open in this terminal
+EOF
 STUB
 chmod +x "$STUB_DIR/claude"
 
@@ -125,7 +134,7 @@ if [[ -f "$SIGNAL" ]]; then
   JOB=$(jq -r '.bg_job_id' "$SIGNAL")
   assert_eq "running" "$STATUS" "signal.status = running after spawn"
   assert_eq "research" "$PHASE" "signal.phase = research"
-  assert_eq "job-research-001" "$JOB" "signal.bg_job_id = stub job id"
+  assert_eq "a1b2c3d4" "$JOB" "signal.bg_job_id = hex from stub (CTL-490)"
 fi
 
 LOG=$(cat "$CLAUDE_STUB_LOG" 2>/dev/null || echo "")

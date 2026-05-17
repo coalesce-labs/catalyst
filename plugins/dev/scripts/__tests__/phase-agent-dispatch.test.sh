@@ -46,16 +46,27 @@ if [[ ! -x "$DISPATCH" ]]; then
 fi
 
 # ─── Stub claude binary ─────────────────────────────────────────────────────
-# The stub writes a fake bg job ID to stdout and logs its args + env to
-# $CLAUDE_STUB_LOG for assertions. The bg job ID can be overridden via
-# $CLAUDE_STUB_JOB_ID for the "records the bg job id" test.
+# The stub mimics today's real `claude --bg` stdout format (CTL-490):
+#
+#   backgrounded · <hex>
+#     claude agents             list sessions
+#     claude attach <hex>       open in this terminal
+#
+# It also logs its args + env to $CLAUDE_STUB_LOG for assertions. The bg job
+# ID can be overridden via $CLAUDE_STUB_JOB_ID — must be a lowercase 8-char hex
+# string so the dispatcher's `grep -oE '[a-f0-9]{8}'` matches it.
+#
+# NOTE: This stub asserts the dispatcher's `BG_JOB_ID` parser. It does NOT
+# exercise the `claude --bg "/catalyst-dev:phase-X ..."` skill-resolution path
+# (Bug 1 in CTL-490) — that gap requires a real `claude --bg` round-trip and
+# is verified manually per the ticket's acceptance test.
 setup_claude_stub() {
   local stub_dir="$1"
   mkdir -p "$stub_dir"
   cat > "$stub_dir/claude" <<'STUB'
 #!/usr/bin/env bash
 LOG="${CLAUDE_STUB_LOG:-/tmp/claude-stub.log}"
-JOB_ID="${CLAUDE_STUB_JOB_ID:-job-stub-abc123}"
+JOB_ID="${CLAUDE_STUB_JOB_ID:-f124220a}"
 {
   echo "--ARGS--"
   printf '%s\n' "$@"
@@ -63,7 +74,13 @@ JOB_ID="${CLAUDE_STUB_JOB_ID:-job-stub-abc123}"
   env | grep -E '^CATALYST_(ORCHESTRATOR_(DIR|ID)|PHASE|TICKET)=' | sort
   echo "--END--"
 } > "$LOG"
-printf '%s\n' "$JOB_ID"
+# Mimic today's `claude --bg` multi-line stdout — the hex job ID lives on
+# line 1 after the bullet character; subsequent lines list helper commands.
+cat <<EOF
+backgrounded · ${JOB_ID}
+  claude agents             list sessions
+  claude attach ${JOB_ID}    open in this terminal
+EOF
 exit "${CLAUDE_STUB_EXIT:-0}"
 STUB
   chmod +x "$stub_dir/claude"
@@ -80,7 +97,7 @@ fresh_env() {
   mkdir -p "$STUB_DIR" "$WORKER_DIR" "$CONFIG_DIR"
   setup_claude_stub "$STUB_DIR"
   export CLAUDE_STUB_LOG="${TEST_DIR}/claude-stub.log"
-  export CLAUDE_STUB_JOB_ID="job-stub-abc123"
+  export CLAUDE_STUB_JOB_ID="f124220a"
   unset CLAUDE_STUB_EXIT
   export PATH="${STUB_DIR}:${PATH}"
 }
@@ -124,13 +141,13 @@ assert_contains "$LOG" "CATALYST_TICKET=CTL-100" "env carries CATALYST_TICKET"
 echo ""
 echo "Test 3: dispatcher records bg_job_id in signal file + stdout"
 fresh_env t3
-export CLAUDE_STUB_JOB_ID="job-xyz-789"
+export CLAUDE_STUB_JOB_ID="a1b2c3d4"
 STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
 SIGNAL="${WORKER_DIR}/phase-triage.json"
 JOB_IN_SIGNAL=$(jq -r '.bg_job_id' "$SIGNAL")
 JOB_IN_STDOUT=$(echo "$STDOUT" | jq -r '.bg_job_id')
-assert_eq "job-xyz-789" "$JOB_IN_SIGNAL" "signal.bg_job_id matches claude stub output"
-assert_eq "job-xyz-789" "$JOB_IN_STDOUT" "stdout JSON includes bg_job_id"
+assert_eq "a1b2c3d4" "$JOB_IN_SIGNAL" "signal.bg_job_id matches claude stub output"
+assert_eq "a1b2c3d4" "$JOB_IN_STDOUT" "stdout JSON includes bg_job_id"
 
 # ─── Test 4: dispatcher is idempotent (re-dispatch in-flight phase no-ops)
 echo ""
@@ -273,6 +290,36 @@ assert_contains "$LOG" "CATALYST_ORCHESTRATOR_DIR=" "env propagates CATALYST_ORC
 assert_contains "$LOG" "CATALYST_ORCHESTRATOR_ID="  "env propagates CATALYST_ORCHESTRATOR_ID"
 assert_contains "$LOG" "CATALYST_PHASE=triage"      "env propagates CATALYST_PHASE"
 assert_contains "$LOG" "CATALYST_TICKET=CTL-100"    "env propagates CATALYST_TICKET"
+
+# ─── Test 9: BG_JOB_ID parser extracts hex from realistic `claude --bg` output
+# Regression guard for CTL-490 Bug 2. The bug was `awk 'NR==1 {print $1}'`
+# capturing the literal word "backgrounded" from today's CLI format. This test
+# uses a hand-crafted fixture that mirrors the exact stdout shape from the
+# ticket repro, independent of the stub claude binary, so it stays accurate
+# even if the stub format ever drifts.
+echo ""
+echo "Test 9: BG_JOB_ID parser handles realistic claude --bg stdout format"
+fresh_env t9
+# Override the stub with one that emits the verbatim format from CTL-490's
+# forensic transcript. The hex token here is the real job ID from that
+# failed run — using it makes the regression report grep-able to the ticket.
+cat > "${STUB_DIR}/claude" <<'STUB'
+#!/usr/bin/env bash
+cat <<EOF
+backgrounded · f124220a
+  claude agents             list sessions
+  claude attach f124220a    open in this terminal
+  claude kill   f124220a    stop the session
+EOF
+exit 0
+STUB
+chmod +x "${STUB_DIR}/claude"
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+JOB_IN_SIGNAL=$(jq -r '.bg_job_id' "$SIGNAL")
+JOB_IN_STDOUT=$(echo "$STDOUT" | jq -r '.bg_job_id')
+assert_eq "f124220a" "$JOB_IN_SIGNAL" "parser extracts hex from 'backgrounded · <hex>' line"
+assert_eq "f124220a" "$JOB_IN_STDOUT" "parser does NOT capture the literal word 'backgrounded'"
 
 echo ""
 echo "─────────────────────────────────────────────"

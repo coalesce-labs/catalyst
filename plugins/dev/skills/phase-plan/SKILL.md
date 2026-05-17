@@ -5,10 +5,10 @@ description: |
   Wraps /catalyst-dev:create-plan and produces
   thoughts/shared/plans/<date>-<ticket>.md, then emits phase.plan.complete.<ticket>.
   Reads the prior research document from thoughts/shared/research/ as its
-  prior-phase artifact. Spawned via plugins/dev/scripts/phase-agent-dispatch;
-  not normally user-invoked.
-disable-model-invocation: false
-user-invocable: false
+  prior-phase artifact. Spawned via plugins/dev/scripts/phase-agent-dispatch,
+  which invokes it via slash command — hence `user-invocable: true`.
+user-invocable: true
+disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Read
   - Write

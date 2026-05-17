@@ -7,9 +7,10 @@ description: |
   transitions Linear to `inReview`), then writes the PR number + URL into the
   phase signal file so the downstream `phase-monitor-merge` agent can read it
   without re-querying GitHub. Dispatched as a `claude --bg` job by
-  `phase-agent-dispatch`; not user-invocable.
-disable-model-invocation: true
-user-invocable: false
+  `phase-agent-dispatch`, which invokes it via slash command — hence
+  `user-invocable: true`.
+user-invocable: true
+disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Bash
   - Read
