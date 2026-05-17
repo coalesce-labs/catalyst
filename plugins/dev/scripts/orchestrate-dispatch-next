@@ -18,6 +18,13 @@
 #                             [--phase <name>]            # CTL-449: dispatch a phase-agent via
 #                                                         # phase-agent-dispatch (claude --bg)
 #                                                         # instead of the legacy -p oneshot path
+#                             [--ticket <T>]              # CTL-452: target a single ticket
+#                                                         # (phase advancement); skips wave queue.
+#                                                         # Requires --phase.
+#                             [--config <path>]           # CTL-452: read catalyst.orchestration.dispatchMode.
+#                                                         # When "phase-agents", wave dispatches
+#                                                         # default to --phase triage. Default mode
+#                                                         # without --config or --phase is legacy oneshot.
 #                             [--dry-run]
 #                             [--skip-healthcheck]
 #
@@ -59,6 +66,8 @@ WORKER_COMMAND="/catalyst-dev:oneshot"
 WORKER_ARGS="--auto-merge"
 COMMS_CHANNEL=""
 PHASE=""
+SINGLE_TICKET=""
+CONFIG_PATH=""
 DRY_RUN=0
 SKIP_HEALTHCHECK=0
 
@@ -67,7 +76,7 @@ SKIP_HEALTHCHECK=0
 PHASE_DISPATCH_BIN="${CATALYST_PHASE_AGENT_DISPATCH:-${SCRIPT_DIR}/phase-agent-dispatch}"
 
 usage() {
-  sed -n '2,39p' "$0"
+  sed -n '2,46p' "$0"
   exit "${1:-1}"
 }
 
@@ -82,12 +91,42 @@ while [[ $# -gt 0 ]]; do
     --worker-args)     WORKER_ARGS="$2"; shift 2 ;;
     --comms-channel)   COMMS_CHANNEL="$2"; shift 2 ;;
     --phase)           PHASE="$2"; shift 2 ;;
+    --ticket)          SINGLE_TICKET="$2"; shift 2 ;;
+    --config)          CONFIG_PATH="$2"; shift 2 ;;
     --dry-run)         DRY_RUN=1; shift ;;
     --skip-healthcheck) SKIP_HEALTHCHECK=1; shift ;;
     -h|--help)         usage 0 ;;
     *)                 echo "unknown arg: $1" >&2; usage ;;
   esac
 done
+
+# CTL-452: --ticket requires --phase. Single-ticket dispatch is only meaningful
+# in phase-agents mode; calling --ticket without --phase is a programmer error
+# (likely a missed handoff from the orchestrator's wake handler).
+if [ -n "$SINGLE_TICKET" ] && [ -z "$PHASE" ]; then
+  echo "ERROR: --ticket requires --phase (single-ticket dispatch is for phase advancement only)" >&2
+  exit 2
+fi
+
+# CTL-452: resolve dispatchMode from config. The default when no config is
+# provided AND no --phase flag is set is "oneshot-legacy" — backward compat
+# for orchestrators that haven't been migrated yet. Explicit --phase always
+# wins over the resolved dispatchMode.
+DISPATCH_MODE="oneshot-legacy"
+if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
+  RAW_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' "$CONFIG_PATH" 2>/dev/null || echo "oneshot-legacy")
+  case "$RAW_MODE" in
+    phase-agents|oneshot-legacy) DISPATCH_MODE="$RAW_MODE" ;;
+    *) echo "WARN: invalid dispatchMode '$RAW_MODE' in $CONFIG_PATH — defaulting to oneshot-legacy" >&2 ;;
+  esac
+fi
+
+# CTL-452: when dispatchMode resolves to phase-agents AND --phase isn't on the
+# CLI, default the dispatched phase to the canonical entry point (triage).
+# Explicit --phase always overrides.
+if [ -z "$PHASE" ] && [ "$DISPATCH_MODE" = "phase-agents" ]; then
+  PHASE="triage"
+fi
 
 [ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
 [ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
@@ -166,22 +205,32 @@ if [ "$SLOTS" -le 0 ]; then
   exit 0
 fi
 
-# ─── Enumerate pending queue across every waveN, in numeric order ─────────────
-# CTL-208: emit "<wave>\t<ticket>" pairs so each dispatched worker can record its wave
-# in its signal file. The wave field lets workers read their wave briefing by exact path
-# instead of globbing wave-*-briefing.md (which would tempt them to read sibling waves).
-PENDING=$(jq -r '
-  (.queue // {})
-  | to_entries
-  | map(select(.key | test("^wave[0-9]+Pending$")))
-  | map({n: (.key | capture("^wave(?<x>[0-9]+)Pending$") | .x | tonumber),
-         tickets: .value})
-  | sort_by(.n)
-  | map(.n as $w | .tickets | map([$w, .]))
-  | flatten(1)
-  | .[]
-  | @tsv
-' "$STATE_JSON" 2>/dev/null)
+# ─── Enumerate pending tickets ────────────────────────────────────────────────
+# CTL-452: --ticket <T> targets a single ticket (phase advancement). Synthesize
+# a PENDING entry with wave=0 — the wave field is only meaningful for the
+# legacy oneshot signal-file template, and single-ticket mode is always
+# phase-mode (validated above).
+#
+# CTL-208 (legacy multi-ticket path): emit "<wave>\t<ticket>" pairs so each
+# dispatched worker can record its wave in its signal file. The wave field
+# lets workers read their wave briefing by exact path instead of globbing
+# wave-*-briefing.md (which would tempt them to read sibling waves).
+if [ -n "$SINGLE_TICKET" ]; then
+  PENDING=$(printf '0\t%s' "$SINGLE_TICKET")
+else
+  PENDING=$(jq -r '
+    (.queue // {})
+    | to_entries
+    | map(select(.key | test("^wave[0-9]+Pending$")))
+    | map({n: (.key | capture("^wave(?<x>[0-9]+)Pending$") | .x | tonumber),
+           tickets: .value})
+    | sort_by(.n)
+    | map(.n as $w | .tickets | map([$w, .]))
+    | flatten(1)
+    | .[]
+    | @tsv
+  ' "$STATE_JSON" 2>/dev/null)
+fi
 
 if [ -z "$PENDING" ]; then
   printf '{"running":%d,"slotsAfter":%d,"dispatched":[],"queueEmpty":true}\n' \

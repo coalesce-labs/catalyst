@@ -436,6 +436,155 @@ done
   || fail "no worker received leftover herestring on stdin" "$LEAK_COUNT worker(s) saw stdin content"
 scratch_teardown
 
+# ─── CTL-452: --ticket flag + dispatchMode tests ─────────────────────────────
+
+# phase_agent_dispatch_setup — install a stub phase-agent-dispatch on $PATH
+# (via CATALYST_PHASE_AGENT_DISPATCH env var) that logs argv + a fake stdout
+# summary instead of actually spawning claude --bg.
+phase_agent_dispatch_setup() {
+  cat > "${SCRATCH}/bin/phase-agent-dispatch" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$PHASE_DISPATCH_LOG"
+# Write the per-phase signal so the dispatcher's idempotency check sees it on
+# subsequent invocations — mirrors what the real helper does.
+ORCH_DIR=""; PHASE=""; TICKET=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir) ORCH_DIR="$2"; shift 2 ;;
+    --phase)    PHASE="$2"; shift 2 ;;
+    --ticket)   TICKET="$2"; shift 2 ;;
+    *)          shift ;;
+  esac
+done
+if [ -n "$ORCH_DIR" ] && [ -n "$PHASE" ] && [ -n "$TICKET" ]; then
+  mkdir -p "${ORCH_DIR}/workers/${TICKET}"
+  echo "{\"ticket\":\"${TICKET}\",\"phase\":\"${PHASE}\",\"status\":\"dispatched\",\"bg_job_id\":\"fake-${TICKET}-${PHASE}\"}" \
+    > "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+fi
+echo "{\"ticket\":\"${TICKET}\",\"phase\":\"${PHASE}\",\"bg_job_id\":\"fake-${TICKET}-${PHASE}\",\"status\":\"running\"}"
+EOF
+  chmod +x "${SCRATCH}/bin/phase-agent-dispatch"
+  export PHASE_DISPATCH_LOG="${SCRATCH}/phase-dispatch.log"
+  : > "$PHASE_DISPATCH_LOG"
+  export CATALYST_PHASE_AGENT_DISPATCH="${SCRATCH}/bin/phase-agent-dispatch"
+}
+
+# write_config DISPATCH_MODE — drop a minimal .catalyst/config.json at $SCRATCH/.catalyst
+# and return the absolute path. Caller passes via --config.
+write_config() {
+  local mode="$1"
+  mkdir -p "${SCRATCH}/.catalyst"
+  cat > "${SCRATCH}/.catalyst/config.json" <<EOF
+{"catalyst": {"orchestration": {"dispatchMode": "${mode}"}}}
+EOF
+  echo "${SCRATCH}/.catalyst/config.json"
+}
+
+echo "test 24 (CTL-452): --ticket without --phase exits 2"
+scratch_setup
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" 2>&1)
+RC=$?
+[ "$RC" = "2" ] && pass "exit 2 on --ticket without --phase" || fail "exit 2 on --ticket without --phase" "rc=$RC"
+echo "$OUT" | grep -qi "phase" && pass "stderr mentions phase" || fail "stderr mentions phase" "got: $OUT"
+scratch_teardown
+
+echo "test 25 (CTL-452): --ticket T-1 --phase research dispatches one ticket; wave queue untouched"
+scratch_setup
+phase_agent_dispatch_setup
+# Wave queue does NOT contain T-1 — proves single-ticket targeting bypasses queue.
+write_state "demo" 4 '{"wave1Pending": ["UNRELATED-1", "UNRELATED-2"]}'
+make_worktree "demo" "T-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 on single-ticket phase dispatch" || fail "exit 0" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "T-1" ] && pass "dispatched=[T-1]" || fail "dispatched=[T-1]" "got: $DISPATCHED"
+grep -q -- "--phase research" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch called with --phase research" || fail "phase-agent-dispatch called with --phase research" "log: $(cat "$PHASE_DISPATCH_LOG")"
+grep -q -- "--ticket T-1" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch called with --ticket T-1" || fail "phase-agent-dispatch called with --ticket T-1"
+# Wave queue untouched
+W1_LEN=$(jq -r '.queue.wave1Pending | length' "${ORCH_DIR}/state.json")
+[ "$W1_LEN" = "2" ] && pass "wave queue untouched (single-ticket mode)" || fail "wave queue untouched" "$W1_LEN"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude (legacy oneshot) not invoked" || fail "claude (legacy oneshot) not invoked"
+scratch_teardown
+
+echo "test 26 (CTL-452): --ticket --phase is idempotent when per-phase signal exists"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+# Pre-create the per-phase signal — dispatcher should see it and no-op.
+mkdir -p "${ORCH_DIR}/workers/T-1"
+echo '{"ticket":"T-1","phase":"research","status":"running"}' > "${ORCH_DIR}/workers/T-1/phase-research.json"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 on idempotent" || fail "exit 0 on idempotent" "rc=$RC"
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "" ] && pass "dispatched=[] on idempotent" || fail "dispatched=[] on idempotent" "got: $DISPATCHED"
+[ ! -s "$PHASE_DISPATCH_LOG" ] && pass "phase-agent-dispatch NOT called on idempotent" || fail "phase-agent-dispatch NOT called on idempotent" "log: $(cat "$PHASE_DISPATCH_LOG")"
+scratch_teardown
+
+echo "test 27 (CTL-452): dispatchMode=phase-agents in config — wave dispatches default phase=triage"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 with dispatchMode=phase-agents" || fail "exit 0" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "T-1" ] && pass "dispatched=[T-1] via phase-agents mode" || fail "dispatched=[T-1] via phase-agents mode" "got: $DISPATCHED"
+grep -q -- "--phase triage" "$PHASE_DISPATCH_LOG" && pass "default phase=triage when dispatchMode=phase-agents" || fail "default phase=triage when dispatchMode=phase-agents" "log: $(cat "$PHASE_DISPATCH_LOG")"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude (legacy oneshot) not invoked in phase-agents mode" || fail "claude not invoked in phase-agents mode"
+# Queue should be drained
+W1_LEN=$(jq -r '.queue.wave1Pending | length' "${ORCH_DIR}/state.json")
+[ "$W1_LEN" = "0" ] && pass "wave1 queue drained in phase-agents mode" || fail "wave1 queue drained" "$W1_LEN"
+scratch_teardown
+
+echo "test 28 (CTL-452): dispatchMode=oneshot-legacy in config — wave uses legacy oneshot path"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "oneshot-legacy")
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 with dispatchMode=oneshot-legacy" || fail "exit 0" "rc=$RC"
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "T-1" ] && pass "dispatched=[T-1] via legacy mode" || fail "dispatched=[T-1] via legacy mode" "got: $DISPATCHED"
+grep -q "oneshot" "$CLAUDE_LOG" && pass "claude (legacy oneshot) invoked" || fail "claude (legacy oneshot) invoked" "log: $(cat "$CLAUDE_LOG")"
+[ ! -s "$PHASE_DISPATCH_LOG" ] && pass "phase-agent-dispatch NOT invoked in legacy mode" || fail "phase-agent-dispatch NOT invoked in legacy mode"
+scratch_teardown
+
+echo "test 29 (CTL-452): no config + no --phase → defaults to legacy oneshot (backward compat)"
+scratch_setup
+phase_agent_dispatch_setup
+# No --config flag, no .catalyst/config.json — should fall through to existing oneshot behavior.
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 with no config (backward compat)" || fail "exit 0 no config" "rc=$RC"
+grep -q "oneshot" "$CLAUDE_LOG" && pass "defaults to legacy oneshot when no dispatchMode" || fail "defaults to legacy oneshot when no dispatchMode"
+[ ! -s "$PHASE_DISPATCH_LOG" ] && pass "phase-agent-dispatch NOT invoked when no dispatchMode" || fail "phase-agent-dispatch NOT invoked when no dispatchMode"
+scratch_teardown
+
+echo "test 30 (CTL-452): explicit --phase overrides dispatchMode=oneshot-legacy"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "oneshot-legacy")
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+# Explicit --phase always wins (orchestrator's phase-advance calls always set --phase)
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" --phase "implement" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "explicit --phase overrides legacy mode" || fail "exit 0" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+grep -q -- "--phase implement" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch called with --phase implement" || fail "phase-agent-dispatch called with --phase implement" "log: $(cat "$PHASE_DISPATCH_LOG")"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude (oneshot) NOT invoked when --phase explicit" || fail "claude NOT invoked when --phase explicit"
+scratch_teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

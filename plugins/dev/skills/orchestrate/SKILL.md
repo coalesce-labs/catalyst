@@ -93,6 +93,7 @@ doesn't exist). Falls back to sensible defaults if no orchestration block exists
       },
       "workerCommand": "/catalyst-dev:oneshot",
       "workerModel": "opus",
+      "dispatchMode": "phase-agents",
       "thoughts": {
         "profile": null,
         "directory": null
@@ -108,6 +109,20 @@ doesn't exist). Falls back to sensible defaults if no orchestration block exists
   }
 }
 ```
+
+**`dispatchMode` (CTL-452):**
+
+- `"phase-agents"` (default after Phase 6 lands) — the orchestrator dispatches
+  9 short-lived phase agents per ticket via `claude --bg` (subscription pool).
+  Phase 4 monitor subscribes a broker `phase_lifecycle` interest per ticket
+  and advances on `phase.<name>.complete.<TICKET>` events via the
+  `orchestrate-phase-advance` helper.
+- `"oneshot-legacy"` — the orchestrator dispatches one long `claude -p oneshot`
+  worker per ticket. Kept for rollback safety; flipping a single config key
+  reverts to the pre-CTL-452 behavior.
+
+The `workerCommand` field is still honored in legacy mode. In phase-agents
+mode it is unused (each phase has its own canonical skill).
 
 See config template for full schema documentation.
 
@@ -494,17 +509,59 @@ workers via `nohup`, updates global state, removes dispatched tickets from which
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-dispatch-next" \
   --orch-dir "${ORCH_DIR}" \
-  --orch-id "${ORCH_NAME}"
+  --orch-id "${ORCH_NAME}" \
+  --config "${REPO_ROOT}/.catalyst/config.json"
 # Emits a one-line JSON summary: {"running":R,"slotsAfter":S,"dispatched":[...][,"queueEmpty":true]}
 # Reads `orchestrator`, `worktreeBase`, `maxParallel` from state.json by default.
 # Pass --session-id / --worker-command / --worker-args / --comms-channel to override.
 # Pass --dry-run to preview without writing state or launching claude.
+#
+# CTL-452: --config gates the dispatch mode. With dispatchMode = "phase-agents",
+# the dispatcher launches phase-triage agents on `claude --bg` (subscription pool)
+# via `phase-agent-dispatch`, and the wake handler in this Phase 4 advances each
+# worker through the 9-phase sequence. With dispatchMode = "oneshot-legacy" or
+# no --config, the dispatcher uses the legacy `-p oneshot` worker (one long
+# claude session per ticket). Phase advancement calls always pass explicit
+# `--phase <name> --ticket <T>` and bypass the dispatchMode default.
 ```
 
 Call this once when the current wave is ready to dispatch, and again whenever a
 worker slot frees up. It supersedes the hand-rolled `dispatch-next.sh` pattern from
 pre-CTL-116 orchestration runs (which hardcoded `wave1Pending + wave2Pending + wave3Pending`).
 The inline block below is preserved as reference for the underlying machinery.
+
+**Phase advancement on `phase.<name>.complete.<TICKET>` wake (CTL-452):**
+
+```bash
+# Inside the wake handler — called once per phase-complete event surfaced
+# via the broker's phase_lifecycle interest.
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-phase-advance" \
+  --orch-dir "${ORCH_DIR}" \
+  --orch-id "${ORCH_NAME}" \
+  --ticket "${TICKET}" \
+  --completed-phase "${COMPLETED_PHASE}"
+# Emits one-line JSON: {"advanced": true|false, "fromPhase": "<name>", "toPhase": "<next>|null", ...}
+# The helper resolves the next phase via the canonical 9-phase sequence,
+# refuses to double-dispatch (idempotent), and delegates to dispatch-next
+# with --phase <next> --ticket <T>. If `completed-phase = monitor-deploy`,
+# the ticket has reached the terminal phase and no further advance happens.
+```
+
+**Phase failure on `phase.<name>.failed.<TICKET>` wake (CTL-452):**
+
+```bash
+# Run orchestrate-revive once. The script already implements the
+# one-retry-then-escalate policy via .reviveCount + --max-revives, and
+# CTL-452 added the --bg --resume path for phase-mode workers (legacy
+# oneshot workers continue to use -p --resume — backward compatible).
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-revive" \
+  --orch-dir "${ORCH_DIR}" \
+  --orch-id "${ORCH_NAME}"
+# On the second consecutive failure (reviveCount ≥ MAX_REVIVES), revive
+# marks the worker stalled, sets attentionReason = "revive-budget-exhausted",
+# and emits attention via catalyst-state — matching the existing escalation
+# pattern for legacy workers.
+```
 
 **Dispatch mechanism — `claude` CLI with streaming JSON:**
 
@@ -763,17 +820,19 @@ TOTAL_COUNT=$(jq -rs 'length' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo 0
   --summary "wave ${CURRENT_WAVE:-1} monitoring (${ACTIVE_COUNT}/${TOTAL_COUNT} active)" 2>/dev/null || true
 ```
 
-**Register with catalyst-broker daemon (CTL-257, updated CTL-303, CTL-357):** When
+**Register with catalyst-broker daemon (CTL-257, updated CTL-303, CTL-357, CTL-452):** When
 `catalyst-broker status` returns 0, emit `filter.register` events at Phase 4 start so the daemon
 pre-filters incoming events and emits targeted `filter.wake.{ORCH_NAME}` events. Workers
 auto-correlate their own `pr_lifecycle` interests via `agent.checkin`; the orchestrator registers
-three deterministic interests for itself — all of them route without Groq:
+four deterministic interests for itself — all of them route without Groq:
 
 - `pr_lifecycle` — orchestrator-level aggregation across all worker PRs.
 - `ticket_lifecycle` — Linear ticket state changes for the orchestrator's tickets.
 - `comms_lifecycle` — worker-posted `attention` / `done` messages on the shared channel.
+- `phase_lifecycle` (CTL-452) — `phase.<name>.complete.<TICKET>` / `phase.<name>.failed.<TICKET>`
+  events emitted by phase agents. One interest per active ticket, covering all 9 phase names.
 
-CTL-357 retired the Groq prose interest (~95% false-positive rate). All three replacements share
+CTL-357 retired the Groq prose interest (~95% false-positive rate). All four interests share
 the same `notify_event: "filter.wake.${ORCH_NAME}"`, so the orchestrator's `wait-for` filter does
 not change.
 
@@ -871,6 +930,43 @@ if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2
         types_of_interest: ["attention", "done"]
       }
     }')"
+
+  # CTL-452: phase_lifecycle interest — one per active ticket, covering all
+  # 9 canonical phase names. The broker fires filter.wake.${ORCH_NAME} on
+  # both phase.<name>.complete.<TICKET> and phase.<name>.failed.<TICKET>.
+  # The wake handler below resolves the next phase via orchestrate-phase-advance
+  # (complete) or escalates via orchestrate-revive then attention (failed).
+  #
+  # Only registered when catalyst.orchestration.dispatchMode = "phase-agents".
+  # In legacy oneshot-mode (the historical default), this block is a no-op.
+  DISPATCH_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' \
+    "${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/.catalyst/config.json" \
+    2>/dev/null || echo "oneshot-legacy")
+  if [ "$DISPATCH_MODE" = "phase-agents" ]; then
+    while IFS= read -r TICKET; do
+      [ -z "$TICKET" ] && continue
+      "$STATE_SCRIPT" event "$(jq -nc \
+        --arg orch "${ORCH_NAME}" \
+        --arg id "${ORCH_NAME}-phase-lifecycle-${TICKET}" \
+        --arg notify "filter.wake.${ORCH_NAME}" \
+        --arg ticket "$TICKET" \
+        --argjson phases '["triage","research","plan","implement","verify","review","pr","monitor-merge","monitor-deploy"]' \
+        '{
+          ts: (now | todate),
+          event: "filter.register",
+          orchestrator: $orch,
+          worker: null,
+          detail: {
+            interest_id: $id,
+            interest_type: "phase_lifecycle",
+            notify_event: $notify,
+            persistent: true,
+            ticket: $ticket,
+            phase_names: $phases
+          }
+        }')"
+    done < <(jq -r '.[]' <<< "${ACTIVE_TICKETS}")
+  fi
 fi
 ```
 
@@ -1044,6 +1140,8 @@ are wake-up triggers, never sources of truth.
 | `github.deployment*` | Record deploy outcome on the worker's signal file |
 | `linear.issue.state_changed` | Reconcile Linear state with the worker signal |
 | `filter.wake.${ORCH_NAME}` (matched on full dotted `event.name`) | Daemon-filtered semantic wake: read `.body.payload.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source |
+| `phase.<name>.complete.<TICKET>` (via phase_lifecycle, CTL-452) | Resolve the next phase via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`; that helper looks up the next phase in the canonical 9-phase sequence and calls `orchestrate-dispatch-next --phase <next> --ticket <T>`. If `completed-phase=monitor-deploy`, no advance (terminal). The advance is idempotent under redundant wakes |
+| `phase.<name>.failed.<TICKET>` (via phase_lifecycle, CTL-452) | Run `orchestrate-revive` once for the affected ticket; on the **second** failure (reviveCount ≥ MAX_REVIVES), mark worker `stalled` and post `attention` to the shared comms channel. Matches the existing one-retry-then-escalate handling for legacy oneshot workers |
 | 10-minute idle (no event) | Run the full reactive scan as a safety net |
 
 **Ground truth is git + PR, not the signal file.** The signal file is *advisory* — it reports

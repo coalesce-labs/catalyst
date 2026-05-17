@@ -10,15 +10,24 @@
 #
 # Usage:
 #   orchestrate-healthcheck --orch-dir <path> --orch-id <name>
-#                           [--grace-seconds <n>]   # default 15
+#                           [--grace-seconds <n>]    # default 15 — for the legacy PID liveness pass
+#                           [--stale-bg-seconds <n>] # default 900 (15 min) — CTL-452 phase-mode threshold
 #                           [--dry-run]
 #
 # Outputs a single JSON summary on stdout:
-#   {"checked":N,"dead":M,"deadTickets":["TID-1",...]}
+#   {"checked":N,"dead":M,"deadTickets":["TID-1",...],"stalled":S,"stalledTickets":["TID-2",...]}
+#
+# CTL-452 phase-mode pass: after the legacy PID check, scan
+# ${ORCH_DIR}/workers/<T>/phase-*.json for entries with bg_job_id; stat
+# ~/.claude/jobs/<bg_job_id>/state.json mtime; if missing OR (older than
+# --stale-bg-seconds AND .state not in done|failed|errored|stopped),
+# mark the per-phase signal status=stalled and emit worker-phase-stalled.
 #
 # Environment:
-#   CATALYST_STATE_SCRIPT   path to catalyst-state.sh (default: ../catalyst-state.sh
-#                           next to this script). Tests override this to capture calls.
+#   CATALYST_STATE_SCRIPT             path to catalyst-state.sh (default: ../catalyst-state.sh
+#                                     next to this script). Tests override this to capture calls.
+#   CATALYST_HEALTHCHECK_JOBS_ROOT    root for --bg job state dirs (default: $HOME/.claude/jobs).
+#                                     Tests override this to avoid touching the real Claude state.
 
 set -uo pipefail
 
@@ -28,21 +37,28 @@ STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
 ORCH_DIR=""
 ORCH_ID=""
 GRACE_SECONDS=15
+STALE_BG_SECONDS=900
 DRY_RUN=0
 
+# CTL-452: claude --bg writes state.json to ~/.claude/jobs/<id>/state.json by
+# default. Tests override CATALYST_HEALTHCHECK_JOBS_ROOT to avoid touching the
+# real Claude state directory.
+JOBS_ROOT="${CATALYST_HEALTHCHECK_JOBS_ROOT:-${HOME}/.claude/jobs}"
+
 usage() {
-  sed -n '2,22p' "$0"
+  sed -n '2,32p' "$0"
   exit "${1:-1}"
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --orch-dir)        ORCH_DIR="$2"; shift 2 ;;
-    --orch-id)         ORCH_ID="$2"; shift 2 ;;
-    --grace-seconds)   GRACE_SECONDS="$2"; shift 2 ;;
-    --dry-run)         DRY_RUN=1; shift ;;
-    -h|--help)         usage 0 ;;
-    *)                 echo "unknown arg: $1" >&2; usage ;;
+    --orch-dir)         ORCH_DIR="$2"; shift 2 ;;
+    --orch-id)          ORCH_ID="$2"; shift 2 ;;
+    --grace-seconds)    GRACE_SECONDS="$2"; shift 2 ;;
+    --stale-bg-seconds) STALE_BG_SECONDS="$2"; shift 2 ;;
+    --dry-run)          DRY_RUN=1; shift ;;
+    -h|--help)          usage 0 ;;
+    *)                  echo "unknown arg: $1" >&2; usage ;;
   esac
 done
 
@@ -119,6 +135,90 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   echo "LAUNCH-FAILURE: ${TICKET} (pid=${PID})" >&2
 done
 
+# ─── CTL-452: phase-mode --bg state.json mtime check ─────────────────────────
+#
+# After the legacy PID check above, scan workers/<T>/phase-*.json signals for
+# bg_job_id and stat the per-job state.json. The terminal set (done/failed/
+# errored/stopped) matches claude's own job lifecycle. The job dir is allowed
+# to be missing only briefly after dispatch — beyond --stale-bg-seconds we
+# treat it as a launch failure.
+STALLED_TICKETS=()
+PHASE_TERMINAL_STATES="done failed errored stopped stalled"
+
+mtime_of() {
+  # macOS `stat -f` vs GNU `stat -c` — fall back if neither accepts.
+  local f="$1"
+  stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo ""
+}
+
+# Iterate every per-phase signal under workers/<T>/phase-*.json. Tickets with
+# no phase-mode subdirectory are silently skipped (legacy oneshot workers).
+shopt -s nullglob
+for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
+  P_TICKET=$(jq -r '.ticket // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+  [ -z "$P_TICKET" ] && continue
+  P_PHASE=$(jq -r '.phase // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+  P_STATUS=$(jq -r '.status // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+  P_BG=$(jq -r '.bg_job_id // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+
+  # Skip terminal signals — nothing for the healthcheck to do.
+  case " $PHASE_TERMINAL_STATES " in *" $P_STATUS "*) continue ;; esac
+
+  # Phase agents without a bg_job_id haven't fully launched yet (or never
+  # claimed --bg). The legacy PID check already covers the no-bg case, so
+  # skip rather than double-flag.
+  [ -z "$P_BG" ] && continue
+
+  STATE_FILE="${JOBS_ROOT}/${P_BG}/state.json"
+  STALL_REASON=""
+  if [ ! -f "$STATE_FILE" ]; then
+    STALL_REASON="state-json-missing"
+  else
+    # Honor terminal claude state — done/failed/errored/stopped means the
+    # process correctly reached an exit. Leave it for the operator to read.
+    CLAUDE_STATE=$(jq -r '.state // ""' "$STATE_FILE" 2>/dev/null || echo "")
+    case " done failed errored stopped " in
+      *" $CLAUDE_STATE "*) continue ;;
+    esac
+    MTIME=$(mtime_of "$STATE_FILE")
+    if [ -n "$MTIME" ]; then
+      AGE=$(( $(date -u +%s) - MTIME ))
+      if [ "$AGE" -ge "$STALE_BG_SECONDS" ]; then
+        STALL_REASON="state-json-stale"
+      fi
+    fi
+  fi
+
+  [ -z "$STALL_REASON" ] && continue
+
+  STALLED_TICKETS+=("$P_TICKET")
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] ${P_TICKET} phase=${P_PHASE} bg=${P_BG}: ${STALL_REASON}" >&2
+    continue
+  fi
+
+  TS=$(now_iso)
+  jq --arg ts "$TS" --arg reason "$STALL_REASON" \
+     '.status = "stalled"
+      | .attentionReason = $reason
+      | .updatedAt = $ts
+      | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+     "$PHASE_SIGNAL" > "${PHASE_SIGNAL}.tmp" && mv "${PHASE_SIGNAL}.tmp" "$PHASE_SIGNAL"
+
+  if [ -x "$STATE_SCRIPT" ]; then
+    EVT=$(jq -nc \
+      --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$P_TICKET" \
+      --arg phase "$P_PHASE" --arg bg "$P_BG" --arg reason "$STALL_REASON" \
+      '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-phase-stalled",
+        detail:{phase:$phase, bg_job_id:$bg, reason:$reason}}')
+    "$STATE_SCRIPT" event "$EVT" >/dev/null 2>&1 || true
+    "$STATE_SCRIPT" attention "$ORCH_ID" "$STALL_REASON" "$P_TICKET" \
+      "Phase ${P_PHASE} stalled (${STALL_REASON})" >/dev/null 2>&1 || true
+  fi
+
+  echo "PHASE-STALLED: ${P_TICKET} phase=${P_PHASE} bg=${P_BG} (${STALL_REASON})" >&2
+done
+
 # Summary on stdout (machine-readable).
 DEAD_COUNT=${#DEAD_TICKETS[@]}
 if [ "$DEAD_COUNT" -eq 0 ]; then
@@ -127,8 +227,17 @@ else
   DEAD_JSON=$(printf '%s\n' "${DEAD_TICKETS[@]}" | jq -R . | jq -s .)
 fi
 
+STALLED_COUNT=${#STALLED_TICKETS[@]}
+if [ "$STALLED_COUNT" -eq 0 ]; then
+  STALLED_JSON="[]"
+else
+  STALLED_JSON=$(printf '%s\n' "${STALLED_TICKETS[@]}" | jq -R . | jq -s .)
+fi
+
 jq -nc \
   --argjson c "$CHECKED" \
   --argjson d "$DEAD_COUNT" \
   --argjson t "$DEAD_JSON" \
-  '{checked:$c, dead:$d, deadTickets:$t}'
+  --argjson s "$STALLED_COUNT" \
+  --argjson st "$STALLED_JSON" \
+  '{checked:$c, dead:$d, deadTickets:$t, stalled:$s, stalledTickets:$st}'
