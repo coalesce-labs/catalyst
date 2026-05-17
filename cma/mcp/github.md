@@ -67,8 +67,18 @@ vault setup, but a leak compromises everything.
 
 | Permission | Level | Why |
 |------------|-------|-----|
-| Contents | Read | git clone --depth=1 of the thoughts repo |
+| Contents | Read+Write[^writeback] | git clone of the thoughts repo; routines that opt in to the writable-clone path also push to a routine-scoped branch |
 | Metadata | Read | Required by all PATs |
+
+[^writeback]: `Contents: Read` is sufficient for the default read-only routines
+    (backlog triage, daily async update). Routines that opt in to the
+    writable-clone path documented in
+    [`cma/decisions/2026-05-17-briefing-write-back.md`](../decisions/2026-05-17-briefing-write-back.md)
+    (currently morning-briefing — [CTL-460](https://linear.app/coalesce-labs/issue/CTL-460) —
+    and upcoming research-curate — [CTL-469](https://linear.app/coalesce-labs/issue/CTL-469))
+    require `Contents: Read+Write` so the base agent's §1a write-back block can push the
+    routine-scoped branch (`routines/briefings`, `routines/curation`). If you keep separate
+    PATs for read-only vs writable routines, the read-only PAT can stay scoped to `Read`.
 
 #### Multi-PAT pattern (recommended for production / multi-tenant)
 
