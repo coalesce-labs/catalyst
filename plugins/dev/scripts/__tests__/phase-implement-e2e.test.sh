@@ -96,8 +96,12 @@ echo "Test 1: phase-implement SKILL.md contract (plan path + TDD per-phase + com
 assert_file "$SKILL_IMPLEMENT" "phase-implement/SKILL.md exists"
 if [[ -f "$SKILL_IMPLEMENT" ]]; then
   assert_grep '^name: phase-implement$' "$SKILL_IMPLEMENT" "frontmatter: name: phase-implement"
-  assert_grep '^disable-model-invocation: true' "$SKILL_IMPLEMENT" "frontmatter: disable-model-invocation: true"
-  assert_grep '^user-invocable: false' "$SKILL_IMPLEMENT" "frontmatter: user-invocable: false"
+  # CTL-490: phase skills are dispatched via `claude --bg "/catalyst-dev:phase-X ..."`,
+  # which the bg session parses as a user slash command. Both flags must permit
+  # invocation by humans (slash) AND the model (Skill tool) so the dispatcher
+  # path and any direct invocation both resolve.
+  assert_grep '^user-invocable: true' "$SKILL_IMPLEMENT" "frontmatter: user-invocable: true (CTL-490)"
+  assert_grep '^disable-model-invocation: false' "$SKILL_IMPLEMENT" "frontmatter: disable-model-invocation: false (CTL-490)"
   # Reads the plan from the canonical thoughts/ location (per plan §"per-phase artifact").
   # phase-agent-dispatch already validates the prior artifact glob, but the skill
   # body must also reference the path so it can read+pass it to implement-plan.
@@ -229,12 +233,18 @@ mkdir -p "${T7}/orch/workers/output" "${T7}/wt/demo-T-1" "${T7}/bin"
 # "/catalyst-dev:phase-implement T-1 …".
 cat > "${T7}/bin/claude" <<'STUB'
 #!/usr/bin/env bash
+# CTL-490: mimic today's real `claude --bg` stdout shape so the dispatcher's
+# hex-grep parser finds an 8-char hex job ID (e7f8a9b0 here).
 LOG="${CLAUDE_STUB_LOG}"
 {
   echo "args: $*"
   env | grep -E '^CATALYST_(ORCHESTRATOR_(DIR|ID)|PHASE|TICKET|COMMS_CHANNEL|SESSION_ID)=' | sort
 } >> "$LOG"
-echo "stub-bg-job-id-7"
+cat <<EOF
+backgrounded · e7f8a9b0
+  claude agents             list sessions
+  claude attach e7f8a9b0    open in this terminal
+EOF
 exit 0
 STUB
 chmod +x "${T7}/bin/claude"

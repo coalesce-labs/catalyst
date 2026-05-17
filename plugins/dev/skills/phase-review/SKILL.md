@@ -6,9 +6,10 @@ description: |
   Reads verify.json from the prior phase, runs /review against the diff, writes
   ${ORCH_DIR}/workers/<TICKET>/review.json, and creates a remediation commit for
   any HIGH-severity finding that has a deterministic fix. Emits
-  phase.review.complete.<ticket>. Spawned via phase-agent-dispatch; not user-invoked.
-disable-model-invocation: false
-user-invocable: false
+  phase.review.complete.<ticket>. Spawned via phase-agent-dispatch via slash
+  command — hence `user-invocable: true`.
+user-invocable: true
+disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Read
   - Write

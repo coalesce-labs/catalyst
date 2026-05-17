@@ -2,13 +2,15 @@
 name: _phase-agent-template
 description: |
   Reference template every phase-agent skill copies (CTL-448). The leading
-  underscore + the disable/non-invocable flags below prevent the skill loader
-  from picking this up — it is NOT a runnable skill, only a structural
-  template the nine real phase agents (phase-triage, phase-research, phase-plan,
-  phase-implement, phase-verify, phase-review, phase-pr, phase-monitor-merge,
-  phase-monitor-deploy) clone and specialize.
-disable-model-invocation: true
-user-invocable: false
+  underscore on the directory name prevents the skill loader from picking this
+  up — it is NOT a runnable skill, only a structural template the nine real
+  phase agents (phase-triage, phase-research, phase-plan, phase-implement,
+  phase-verify, phase-review, phase-pr, phase-monitor-merge, phase-monitor-deploy)
+  clone and specialize. The real phase skills MUST set `user-invocable: true`
+  so `phase-agent-dispatch`'s `claude --bg "/catalyst-dev:phase-X ..."` slash
+  command resolves (CTL-490).
+user-invocable: true
+disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Bash
   - Read
@@ -24,8 +26,9 @@ This is the structural template for every phase agent in Initiative 1
 (plan §"Phase-agent architecture"). It is NOT itself a skill — phase-N
 SKILL.md files copy this skeleton and fill in the placeholders marked with
 `{{...}}`. The leading underscore on this directory keeps the skill loader
-from registering it, and the `disable-model-invocation: true` /
-`user-invocable: false` flags are belt-and-suspenders.
+from registering it. The real phase skills set `user-invocable: true` because
+`phase-agent-dispatch` spawns them via `claude --bg "/catalyst-dev:phase-X ..."` —
+the bg session parses that as a user slash command (CTL-490).
 
 ## Contract
 

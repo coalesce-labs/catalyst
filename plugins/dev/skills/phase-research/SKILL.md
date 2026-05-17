@@ -5,9 +5,10 @@ description: |
   Wraps /catalyst-dev:research-codebase and produces
   thoughts/shared/research/<date>-<ticket>.md, then emits phase.research.complete.<ticket>.
   Reads triage.json from the worker dir as its prior-phase artifact.
-  Spawned via plugins/dev/scripts/phase-agent-dispatch; not normally user-invoked.
-disable-model-invocation: false
-user-invocable: false
+  Spawned via plugins/dev/scripts/phase-agent-dispatch, which invokes it via
+  slash command — hence `user-invocable: true`.
+user-invocable: true
+disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Read
   - Write

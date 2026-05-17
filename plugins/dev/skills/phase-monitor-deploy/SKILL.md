@@ -1,8 +1,8 @@
 ---
 name: phase-monitor-deploy
-description: Phase agent that watches the post-merge deployment for a ticket. Reads the merge SHA from phase-pr.json, subscribes via `catalyst-events wait-for` to deploy events on that SHA, then delegates a live verification check to the /canary skill (gstack). Emits phase.monitor-deploy.complete.<TICKET> on canary success, phase.monitor-deploy.failed.<TICKET> on deploy or canary failure, and phase.monitor-deploy.skipped.<TICKET> when no deploy event arrives before the timeout. Dispatched by the phase-agent orchestrator (CTL-452) — not user-invocable.
-disable-model-invocation: true
-user-invocable: false
+description: Phase agent that watches the post-merge deployment for a ticket. Reads the merge SHA from phase-pr.json, subscribes via `catalyst-events wait-for` to deploy events on that SHA, then delegates a live verification check to the /canary skill (gstack). Emits phase.monitor-deploy.complete.<TICKET> on canary success, phase.monitor-deploy.failed.<TICKET> on deploy or canary failure, and phase.monitor-deploy.skipped.<TICKET> when no deploy event arrives before the timeout. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-monitor-deploy ..."` resolves.
+user-invocable: true
+disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools: Bash, Read, Write
 version: 1.0.0
 ---

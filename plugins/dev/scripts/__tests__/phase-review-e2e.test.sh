@@ -35,7 +35,10 @@ assert_file_exists "$SKILL" "SKILL.md exists at plugins/dev/skills/phase-review/
 if [[ -f "$SKILL" ]]; then
   BODY=$(cat "$SKILL")
   assert_contains "$BODY" "name: phase-review" "frontmatter declares name: phase-review"
-  assert_contains "$BODY" "user-invocable: false" "frontmatter sets user-invocable: false"
+  # CTL-490: phase skills are dispatched via `claude --bg "/catalyst-dev:phase-X ..."`,
+  # which the bg session parses as a user slash command. user-invocable MUST be true.
+  assert_contains "$BODY" "user-invocable: true" "frontmatter sets user-invocable: true (CTL-490)"
+  assert_contains "$BODY" "disable-model-invocation: false" "frontmatter sets disable-model-invocation: false — invocable by model + user"
 
   # Allowed-tools must include Edit (since we may write remediation commits)
   assert_contains "$BODY" "Edit" "allowed-tools includes Edit (for remediation commits)"
@@ -85,13 +88,18 @@ mkdir -p "$STUB_DIR" "$WORKER_DIR"
 
 cat > "$STUB_DIR/claude" <<'STUB'
 #!/usr/bin/env bash
+# CTL-490: stub mimics today's real `claude --bg` stdout shape. Hex 'd4e5f607'.
 LOG="${CLAUDE_STUB_LOG:-/tmp/claude-stub.log}"
 {
   echo "--ARGS--"; printf '%s\n' "$@"
   echo "--ENV--"; env | grep -E '^CATALYST_(ORCHESTRATOR_(DIR|ID)|PHASE|TICKET)=' | sort
   echo "--END--"
 } > "$LOG"
-echo "job-review-004"
+cat <<EOF
+backgrounded · d4e5f607
+  claude agents             list sessions
+  claude attach d4e5f607    open in this terminal
+EOF
 STUB
 chmod +x "$STUB_DIR/claude"
 
@@ -112,7 +120,7 @@ if [[ -f "$SIGNAL" ]]; then
   assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "signal.status = running"
   assert_eq "review" "$(jq -r '.phase' "$SIGNAL")" "signal.phase = review"
   assert_eq "25" "$(jq -r '.turnCap' "$SIGNAL")" "signal.turnCap defaults to 25 (review)"
-  assert_eq "job-review-004" "$(jq -r '.bg_job_id' "$SIGNAL")" "signal.bg_job_id matches stub"
+  assert_eq "d4e5f607" "$(jq -r '.bg_job_id' "$SIGNAL")" "signal.bg_job_id matches hex from stub (CTL-490)"
 fi
 
 LOG=$(cat "$CLAUDE_STUB_LOG" 2>/dev/null || echo "")

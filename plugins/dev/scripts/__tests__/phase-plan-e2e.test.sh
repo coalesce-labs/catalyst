@@ -34,7 +34,10 @@ assert_file_exists "$SKILL" "SKILL.md exists at plugins/dev/skills/phase-plan/SK
 if [[ -f "$SKILL" ]]; then
   BODY=$(cat "$SKILL")
   assert_contains "$BODY" "name: phase-plan" "frontmatter declares name: phase-plan"
-  assert_contains "$BODY" "user-invocable: false" "frontmatter sets user-invocable: false"
+  # CTL-490: phase skills are dispatched via `claude --bg "/catalyst-dev:phase-X ..."`,
+  # which the bg session parses as a user slash command. user-invocable MUST be true.
+  assert_contains "$BODY" "user-invocable: true" "frontmatter sets user-invocable: true (CTL-490)"
+  assert_contains "$BODY" "disable-model-invocation: false" "frontmatter sets disable-model-invocation: false — invocable by model + user"
   assert_contains "$BODY" "CATALYST_ORCHESTRATOR_DIR" "prelude reads CATALYST_ORCHESTRATOR_DIR"
   assert_contains "$BODY" "CATALYST_TICKET" "prelude reads CATALYST_TICKET"
 
@@ -71,13 +74,20 @@ mkdir -p "$STUB_DIR" "$WORKER_DIR" "$RESEARCH_DIR"
 
 cat > "$STUB_DIR/claude" <<'STUB'
 #!/usr/bin/env bash
+# CTL-490: stub mimics today's real `claude --bg` stdout shape so the
+# dispatcher's hex-grep parser finds the job ID. Job ID is the 8-char hex
+# 'b2c4d6e8' — embedded in the realistic "backgrounded · <hex>" line.
 LOG="${CLAUDE_STUB_LOG:-/tmp/claude-stub.log}"
 {
   echo "--ARGS--"; printf '%s\n' "$@"
   echo "--ENV--"; env | grep -E '^CATALYST_(ORCHESTRATOR_(DIR|ID)|PHASE|TICKET)=' | sort
   echo "--END--"
 } > "$LOG"
-echo "job-plan-002"
+cat <<EOF
+backgrounded · b2c4d6e8
+  claude agents             list sessions
+  claude attach b2c4d6e8    open in this terminal
+EOF
 STUB
 chmod +x "$STUB_DIR/claude"
 
@@ -97,7 +107,7 @@ assert_file_exists "$SIGNAL" "signal file phase-plan.json written"
 if [[ -f "$SIGNAL" ]]; then
   assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "signal.status = running"
   assert_eq "plan" "$(jq -r '.phase' "$SIGNAL")" "signal.phase = plan"
-  assert_eq "job-plan-002" "$(jq -r '.bg_job_id' "$SIGNAL")" "signal.bg_job_id matches stub"
+  assert_eq "b2c4d6e8" "$(jq -r '.bg_job_id' "$SIGNAL")" "signal.bg_job_id matches hex from stub (CTL-490)"
 fi
 
 LOG=$(cat "$CLAUDE_STUB_LOG" 2>/dev/null || echo "")

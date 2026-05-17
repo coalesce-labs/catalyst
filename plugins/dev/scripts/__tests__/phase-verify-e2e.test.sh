@@ -43,7 +43,10 @@ assert_file_exists "$SKILL" "SKILL.md exists at plugins/dev/skills/phase-verify/
 if [[ -f "$SKILL" ]]; then
   BODY=$(cat "$SKILL")
   assert_contains "$BODY" "name: phase-verify" "frontmatter declares name: phase-verify"
-  assert_contains "$BODY" "user-invocable: false" "frontmatter sets user-invocable: false"
+  # CTL-490: phase skills are dispatched via `claude --bg "/catalyst-dev:phase-X ..."`,
+  # which the bg session parses as a user slash command. user-invocable MUST be true.
+  assert_contains "$BODY" "user-invocable: true" "frontmatter sets user-invocable: true (CTL-490)"
+  assert_contains "$BODY" "disable-model-invocation: false" "frontmatter sets disable-model-invocation: false — invocable by model + user"
 
   # Prelude
   assert_contains "$BODY" "CATALYST_ORCHESTRATOR_DIR" "prelude reads CATALYST_ORCHESTRATOR_DIR"
@@ -92,13 +95,18 @@ mkdir -p "$STUB_DIR" "$WORKER_DIR"
 
 cat > "$STUB_DIR/claude" <<'STUB'
 #!/usr/bin/env bash
+# CTL-490: stub mimics today's real `claude --bg` stdout shape. Hex 'c3d4e5f6'.
 LOG="${CLAUDE_STUB_LOG:-/tmp/claude-stub.log}"
 {
   echo "--ARGS--"; printf '%s\n' "$@"
   echo "--ENV--"; env | grep -E '^CATALYST_(ORCHESTRATOR_(DIR|ID)|PHASE|TICKET)=' | sort
   echo "--END--"
 } > "$LOG"
-echo "job-verify-003"
+cat <<EOF
+backgrounded · c3d4e5f6
+  claude agents             list sessions
+  claude attach c3d4e5f6    open in this terminal
+EOF
 STUB
 chmod +x "$STUB_DIR/claude"
 
@@ -117,7 +125,7 @@ if [[ -f "$SIGNAL" ]]; then
   assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "signal.status = running"
   assert_eq "verify" "$(jq -r '.phase' "$SIGNAL")" "signal.phase = verify"
   assert_eq "20" "$(jq -r '.turnCap' "$SIGNAL")" "signal.turnCap defaults to 20 (verify)"
-  assert_eq "job-verify-003" "$(jq -r '.bg_job_id' "$SIGNAL")" "signal.bg_job_id matches stub"
+  assert_eq "c3d4e5f6" "$(jq -r '.bg_job_id' "$SIGNAL")" "signal.bg_job_id matches hex from stub (CTL-490)"
 fi
 
 LOG=$(cat "$CLAUDE_STUB_LOG" 2>/dev/null || echo "")
