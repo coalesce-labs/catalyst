@@ -52,55 +52,50 @@ if [[ ! -f "$CONFIG" ]]; then
   exit 1
 fi
 
-OPEN_RELEASE_PRS=$(gh pr list --label "autorelease: pending" --state open --json headRefName --jq '.[].headRefName' 2>/dev/null || true)
+OPEN_RELEASE_PRS=$(gh pr list --label "autorelease: pending" --state open --json number,headRefName --jq '.[]' 2>/dev/null || true)
 
-STRANDED=()
+# `autorelease: pending` is release-please's canonical signal — when this label is
+# on an open PR, release-please considers all pending commits covered. This works
+# for both `separate-pull-requests: true` (per-component branches) and `false`
+# (a single shared branch like `release-please--branches--main`).
+if [[ -n "$OPEN_RELEASE_PRS" ]]; then
+  PR_NUMS=$(echo "$OPEN_RELEASE_PRS" | jq -r '.number' | paste -sd ',' -)
+  pass "Open release PR(s) present (#${PR_NUMS}) — release-please is tracking pending commits"
+else
+  # No release PR open — check whether any package has releasable commits anyway.
+  # If yes, release-please missed them and the workflow is stuck.
+  STRANDED=()
 
-for pkg in $(jq -r '.packages | keys[]' "$CONFIG"); do
-  component=$(jq -r --arg pkg "$pkg" '.packages[$pkg].component // empty' "$CONFIG")
-  if [[ -z "$component" ]]; then
-    continue
-  fi
+  for pkg in $(jq -r '.packages | keys[]' "$CONFIG"); do
+    component=$(jq -r --arg pkg "$pkg" '.packages[$pkg].component // empty' "$CONFIG")
+    if [[ -z "$component" ]]; then
+      continue
+    fi
 
-  # Find latest release tag for this component
-  latest_tag=$(git tag --list "${component}-v*" --sort=-version:refname | head -1)
+    latest_tag=$(git tag --list "${component}-v*" --sort=-version:refname | head -1)
+    if [[ -z "$latest_tag" ]]; then
+      continue
+    fi
 
-  if [[ -z "$latest_tag" ]]; then
-    # No tags yet — skip, bootstrap hasn't completed
-    continue
-  fi
+    scope="${component#catalyst-}"
 
-  # Extract the scope from the component name (e.g. catalyst-dev -> dev)
-  scope="${component#catalyst-}"
+    releasable_commits=$(git log "${latest_tag}..origin/main" --oneline --format='%s' -- "$pkg" 2>/dev/null \
+      | grep -cE "^(feat|fix|perf)(\($scope\))?!?:" || true)
 
-  # Check for releasable conventional commits since the last tag
-  releasable_commits=$(git log "${latest_tag}..origin/main" --oneline --format='%s' -- "$pkg" 2>/dev/null \
-    | grep -cE "^(feat|fix|perf)(\($scope\))?!?:" || true)
-
-  if [[ "$releasable_commits" -gt 0 ]]; then
-    # Check if there's an open release PR for this component
-    has_pr=false
-    for pr_branch in $OPEN_RELEASE_PRS; do
-      if [[ "$pr_branch" == *"$component"* ]]; then
-        has_pr=true
-        break
-      fi
-    done
-
-    if [[ "$has_pr" == "false" ]]; then
+    if [[ "$releasable_commits" -gt 0 ]]; then
       STRANDED+=("$component: $releasable_commits releasable commit(s) since $latest_tag with no open release PR")
     fi
-  fi
-done
-
-if [[ ${#STRANDED[@]} -gt 0 ]]; then
-  fail "Releasable commits on main with no open release PR"
-  for msg in "${STRANDED[@]}"; do
-    echo "  - $msg"
   done
-  echo "  This usually means the release-please workflow is failing."
-else
-  pass "No stranded releasable commits (all packages have release PRs or are up to date)"
+
+  if [[ ${#STRANDED[@]} -gt 0 ]]; then
+    fail "Releasable commits on main with no open release PR"
+    for msg in "${STRANDED[@]}"; do
+      echo "  - $msg"
+    done
+    echo "  This usually means the release-please workflow is failing."
+  else
+    pass "No stranded releasable commits (all packages are up to date)"
+  fi
 fi
 
 # --- Check 3: plugin.json versions match manifest ---

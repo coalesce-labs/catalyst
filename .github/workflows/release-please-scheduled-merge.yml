@@ -33,11 +33,31 @@ jobs:
 
           echo "Found open release PR #$PR_NUMBER"
 
-          PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
-            --json state,mergeStateStatus,mergeable)
-          STATE=$(echo "$PR_STATE" | jq -r '.state')
-          MERGE_STATE=$(echo "$PR_STATE" | jq -r '.mergeStateStatus')
-          MERGEABLE=$(echo "$PR_STATE" | jq -r '.mergeable')
+          # GitHub returns mergeStateStatus=UNKNOWN transiently while it computes
+          # mergeability after a recent push. Poll until it resolves (or give up
+          # after ~3 minutes — well past GitHub's typical sub-minute computation).
+          MAX_ATTEMPTS=18
+          ATTEMPT=0
+          while : ; do
+            PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+              --json state,mergeStateStatus,mergeable)
+            STATE=$(echo "$PR_STATE" | jq -r '.state')
+            MERGE_STATE=$(echo "$PR_STATE" | jq -r '.mergeStateStatus')
+            MERGEABLE=$(echo "$PR_STATE" | jq -r '.mergeable')
+
+            if [[ "$MERGE_STATE" != "UNKNOWN" ]]; then
+              break
+            fi
+
+            ATTEMPT=$((ATTEMPT + 1))
+            if [[ "$ATTEMPT" -ge "$MAX_ATTEMPTS" ]]; then
+              echo "::warning::PR #$PR_NUMBER mergeStateStatus stayed UNKNOWN after ${MAX_ATTEMPTS} probes (~3 min)"
+              break
+            fi
+
+            echo "PR #$PR_NUMBER mergeStateStatus=UNKNOWN (attempt $ATTEMPT/$MAX_ATTEMPTS), waiting 10s..."
+            sleep 10
+          done
 
           echo "PR #$PR_NUMBER state=$STATE mergeStateStatus=$MERGE_STATE mergeable=$MERGEABLE"
 
