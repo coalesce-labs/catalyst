@@ -15,6 +15,9 @@
 #                             [--worker-command <cmd>]    # default "/catalyst-dev:oneshot"
 #                             [--worker-args <str>]       # default "--auto-merge"
 #                             [--comms-channel <name>]    # default "orch-<orch-id>"
+#                             [--phase <name>]            # CTL-449: dispatch a phase-agent via
+#                                                         # phase-agent-dispatch (claude --bg)
+#                                                         # instead of the legacy -p oneshot path
 #                             [--dry-run]
 #                             [--skip-healthcheck]
 #
@@ -55,11 +58,16 @@ SESSION_ID=""
 WORKER_COMMAND="/catalyst-dev:oneshot"
 WORKER_ARGS="--auto-merge"
 COMMS_CHANNEL=""
+PHASE=""
 DRY_RUN=0
 SKIP_HEALTHCHECK=0
 
+# CTL-449: phase-agent-dispatch is the helper invoked when --phase is set.
+# Env-overridable so tests can stub the spawn behavior.
+PHASE_DISPATCH_BIN="${CATALYST_PHASE_AGENT_DISPATCH:-${SCRIPT_DIR}/phase-agent-dispatch}"
+
 usage() {
-  sed -n '2,36p' "$0"
+  sed -n '2,39p' "$0"
   exit "${1:-1}"
 }
 
@@ -73,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     --worker-command)  WORKER_COMMAND="$2"; shift 2 ;;
     --worker-args)     WORKER_ARGS="$2"; shift 2 ;;
     --comms-channel)   COMMS_CHANNEL="$2"; shift 2 ;;
+    --phase)           PHASE="$2"; shift 2 ;;
     --dry-run)         DRY_RUN=1; shift ;;
     --skip-healthcheck) SKIP_HEALTHCHECK=1; shift ;;
     -h|--help)         usage 0 ;;
@@ -85,10 +94,26 @@ done
 STATE_JSON="${ORCH_DIR}/state.json"
 [ ! -f "$STATE_JSON" ] && { echo "ERROR: state.json missing at $STATE_JSON" >&2; exit 2; }
 
+# CTL-449: --phase forks the dispatch path. Validate the name uses the same shape the
+# phase-agent-dispatch helper enforces (no dots — those are reserved for event-name
+# parsing). When --phase is set, --worker-command/--worker-args are ignored.
+if [ -n "$PHASE" ]; then
+  if [[ "$PHASE" == *.* ]] || [[ ! "$PHASE" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+    echo "ERROR: --phase '$PHASE' must be lowercase letters/digits/dash/underscore, no dots." >&2
+    exit 2
+  fi
+  if [ ! -x "$PHASE_DISPATCH_BIN" ]; then
+    echo "ERROR: phase-agent-dispatch helper not executable at $PHASE_DISPATCH_BIN" >&2
+    echo "       (override via CATALYST_PHASE_AGENT_DISPATCH env var)" >&2
+    exit 2
+  fi
+fi
+
 # CTL-208: workerCommand must be plugin-namespaced (/<plugin>:<skill>). A bare slash like
 # /oneshot is passed to claude as literal prompt text — no skill expansion happens and the
 # worker silently no-ops. Fail loudly here instead of silently dispatching broken workers.
-if [[ ! "$WORKER_COMMAND" =~ ^/[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$ ]]; then
+# Phase mode bypasses this check — the prompt is constructed inside phase-agent-dispatch.
+if [ -z "$PHASE" ] && [[ ! "$WORKER_COMMAND" =~ ^/[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$ ]]; then
   cat >&2 <<EOF
 ERROR: --worker-command "$WORKER_COMMAND" is not a plugin-namespaced slash command.
 
@@ -171,7 +196,16 @@ while IFS=$'\t' read -r W T; do
   [ "$SLOTS" -le 0 ] && break
 
   WORKER_DIR="${WORKTREE_BASE}/${ORCH_ID}-${T}"
-  SIGNAL_FILE="${ORCH_DIR}/workers/${T}.json"
+
+  # Idempotency key depends on which path we're on. Phase mode owns its own
+  # per-phase signal at workers/<T>/phase-<name>.json; legacy mode uses the
+  # flat workers/<T>.json. The two paths intentionally do not share state
+  # so the orchestrator can run both side-by-side during the cutover.
+  if [ -n "$PHASE" ]; then
+    SIGNAL_FILE="${ORCH_DIR}/workers/${T}/phase-${PHASE}.json"
+  else
+    SIGNAL_FILE="${ORCH_DIR}/workers/${T}.json"
+  fi
 
   if [ -f "$SIGNAL_FILE" ]; then
     # Already has a signal (idempotent — previously dispatched)
@@ -189,6 +223,62 @@ while IFS=$'\t' read -r W T; do
     continue
   fi
 
+  # ─── CTL-449: phase-agent dispatch path (claude --bg) ─────────────────────
+  if [ -n "$PHASE" ]; then
+    # Delegate the spawn to phase-agent-dispatch. It writes its own per-phase
+    # signal file, resolves model/turn-cap from .catalyst/config.json, gates
+    # on prior phase artifacts, and runs `claude --bg`. We capture its stdout
+    # JSON so we can mirror dispatch state to the global state script the
+    # same way the legacy path does.
+    PHASE_STDOUT=$(
+      cd "$WORKER_DIR" || exit 1
+      CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+      CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+      CATALYST_SESSION_ID="$SESSION_ID" \
+      "$PHASE_DISPATCH_BIN" \
+        --phase "$PHASE" \
+        --ticket "$T" \
+        --orch-dir "$ORCH_DIR" \
+        --orch-id "$ORCH_ID"
+    ) || {
+      echo "phase-agent-dispatch failed for $T phase=$PHASE — see stderr" >&2
+      continue
+    }
+
+    # State mirror: same shape as legacy events so existing monitors don't
+    # need a special-case for phase dispatches.
+    #
+    # Intentional divergence from the legacy path (see comment at signal-file
+    # selection above): we do NOT bump `.progress.inProgressTickets` here
+    # because a single ticket may dispatch through multiple phases — the
+    # legacy counter assumes one dispatch per ticket. Likewise the RUNNING
+    # count loop at line 154 globs `workers/*.json` and won't see phase-mode
+    # signals at `workers/<T>/phase-<name>.json`. Both divergences are
+    # acceptable in the MVP because phase-mode and legacy-mode never run
+    # against the same wave; the orchestrator state-machine rewrite in
+    # Initiative 1 Phase 6 reconciles both surfaces.
+    "$STATE_SCRIPT" worker "$ORCH_ID" "$T" '.status = "dispatched" | .phase = "'"$PHASE"'"' >/dev/null 2>&1 || true
+    "$STATE_SCRIPT" event "$(jq -nc \
+      --arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$T" --arg phase "$PHASE" \
+      '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-dispatched", detail: {phase: $phase}}')" \
+      >/dev/null 2>&1 || true
+
+    # Drain the wave queue (same as the legacy path below).
+    jq --arg t "$T" '
+      .queue |= (
+        (. // {}) | with_entries(
+          if (.key | test("^wave[0-9]+Pending$"))
+          then .value |= (. - [$t])
+          else . end
+        )
+      )' "$STATE_JSON" > "${STATE_JSON}.tmp" && mv "${STATE_JSON}.tmp" "$STATE_JSON"
+
+    DISPATCHED+=("$T")
+    SLOTS=$((SLOTS-1))
+    continue
+  fi
+
+  # ─── Legacy path: claude -p oneshot ───────────────────────────────────────
   # Write signal file with the shared dispatched/phase0 template.
   # CTL-208: include `wave` so the worker can read only its own wave briefing by exact path.
   NOW=$(now_iso)
