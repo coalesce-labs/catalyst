@@ -227,7 +227,8 @@ The pipeline is a billing change first and an architecture change second. Two th
    (implement) and Phase 7 (pr) and Haiku to Phase 9 (monitor-deploy).
 
 **Cost projection** (Opus 4.7 = $5/$25 per Mtok in/out; Sonnet 4.6 ≈ $3/$15; Haiku 4.5 ≈ $0.80/$4,
-sourced from the planning research; **subject to actual measurement** — see the gap below):
+sourced from the planning research; per-phase rows are **still projection-only** — see the
+validation status below):
 
 | Phase            | Model  | Est. turns | Cost (mixed) | Cost (all-Opus) |
 | ---------------- | ------ | ---------- | ------------ | --------------- |
@@ -242,12 +243,38 @@ sourced from the planning research; **subject to actual measurement** — see th
 | 9 Monitor-deploy | Haiku  | 5–15       | $0.03        | $0.20           |
 | **Total**        | mixed  | ~150       | **~$9.71**   | $11.80          |
 
-:::caution[Measurement gap — track via follow-up ticket] As of 2026-05-17 the `session_metrics`
-table in `~/catalyst/catalyst.db` shows `$0` cost across every `oneshot`, `orchestrate`, and
-`research-codebase` row over the last 30 days (535 + 51 + 34 sessions respectively). The CTL-455 fix
-to populate the table from worker stream data is merged but no run since the fix has flushed real
-numbers into the DB. The projection above is **unvalidated by real measurement** — track this as a
-follow-up before relying on the per-phase numbers. :::
+**Measured oneshot-legacy baseline** (the calibration point for the table above —
+[CTL-485](https://linear.app/coalesce-labs/issue/CTL-485), orchestrator
+`o-ctl-476-...-486`, 2026-05-17, n=7, all-Opus 4.7 with the 1M-context flag):
+
+| Statistic          | Value (USD)     |
+| ------------------ | --------------- |
+| Min / max          | $4.48 / $15.13  |
+| Median             | $8.08           |
+| Mean               | $7.95           |
+| Mean cache-read    | 4.78M tokens    |
+| Mean duration      | 555 s (~9 min)  |
+| Mean turns         | 46              |
+
+The all-Opus projection ($11.80) is ~48% higher than the measured oneshot-legacy mean. The
+documented per-run rehydration tax (~$2.25) plus coordinator overhead accounts for most of the
+gap. The order-of-magnitude is right; the per-phase split still needs a phase-agents run to
+validate row-by-row.
+
+:::note[Validation status (2026-05-17)] **CTL-455 fix is mechanically verified.** Running
+`plugins/dev/scripts/orchestrate-roll-usage.sh -v` against any completed worker writes
+`signal.cost` and a real `session_metrics` row with `cost_usd > 0`. Confirmed against 7 sibling
+workers; see
+[`thoughts/shared/research/2026-05-17-ctl-485-phase-agent-cost-validation.md`](https://github.com/coalesce-labs/catalyst/blob/main/thoughts/shared/research/2026-05-17-ctl-485-phase-agent-cost-validation.md).
+
+Two gaps remain, tracked separately:
+
+- [CTL-487](https://linear.app/coalesce-labs/issue/CTL-487) — the orchestrator monitor loop is
+  not currently invoking `orchestrate-roll-usage.sh` per worker per wake-up. Until that lands,
+  the CTL-455 fix only produces data when invoked manually.
+- [CTL-488](https://linear.app/coalesce-labs/issue/CTL-488) — per-phase rows in the projection
+  table still need an end-to-end `dispatchMode: "phase-agents"` run to validate row-by-row.
+  Blocked on CTL-487. :::
 
 ## Observing a run
 
@@ -298,8 +325,12 @@ For the first real run against a low-risk ticket:
    { "catalyst": { "orchestration": { "dispatchMode": "phase-agents" } } }
    ```
 3. **Verify `session_metrics` populates** with a single test session before committing to a full
-   run. The CTL-455 fix is what populates the table; if `cost_usd` is still `0` after a short
-   `claude --bg` job, the fix needs investigation before cost measurement is meaningful.
+   run. The CTL-455 fix populates the table via `orchestrate-roll-usage.sh`, which the
+   orchestrator's monitor loop calls per worker per wake-up. If `cost_usd` is still `0` after a
+   worker reaches `status: "done"`, check `${ORCH_DIR}/.roll-usage.log` — empty means the
+   invocation never happened (see [CTL-487](https://linear.app/coalesce-labs/issue/CTL-487)) and
+   you can manually flush by running `orchestrate-roll-usage.sh --orch <orch-id> --ticket
+   <TICKET> -v` to validate the data path independently.
 4. **Dispatch the orchestrator**:
    ```bash
    /catalyst-dev:orchestrate <TICKET> --auto-merge --max-parallel 1
