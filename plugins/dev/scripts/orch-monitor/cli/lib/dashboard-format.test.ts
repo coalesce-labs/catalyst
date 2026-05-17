@@ -147,7 +147,6 @@ describe("workerStatusColor", () => {
   test("done → green", () => expect(workerStatusColor("done")).toBe("green"));
   test("failed → red", () => expect(workerStatusColor("failed")).toBe("red"));
   test("stalled → red", () => expect(workerStatusColor("stalled")).toBe("red"));
-  test("dispatched → gray", () => expect(workerStatusColor("dispatched")).toBe("gray"));
   test("in-progress → cyan", () => {
     expect(workerStatusColor("researching")).toBe("cyan");
     expect(workerStatusColor("planning")).toBe("cyan");
@@ -155,6 +154,12 @@ describe("workerStatusColor", () => {
     expect(workerStatusColor("validating")).toBe("cyan");
     expect(workerStatusColor("shipping")).toBe("cyan");
     expect(workerStatusColor("pr-created")).toBe("cyan");
+  });
+  // CTL-476: phase-agents mode per-phase signal statuses ride the same cyan
+  // bucket as legacy in-progress statuses.
+  test("phase-agents per-phase statuses → cyan", () => {
+    expect(workerStatusColor("dispatched")).toBe("cyan");
+    expect(workerStatusColor("running")).toBe("cyan");
   });
   test("unknown → gray", () => expect(workerStatusColor("frobnicating")).toBe("gray"));
 });

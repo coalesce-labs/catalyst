@@ -52,6 +52,9 @@ const IN_PROGRESS_STATUSES = new Set([
   "validating",
   "shipping",
   "pr-created",
+  // phase-agents mode per-phase statuses (CTL-476)
+  "dispatched",
+  "running",
 ]);
 
 export function workerStatusColor(status: string): WorkerStatusColor {

@@ -45,6 +45,39 @@ function setupOrch(root: string, orchName: string, signals: Record<string, unkno
   }
 }
 
+interface PerPhaseFixture {
+  phase: string;
+  status?: string;
+  updatedAt?: string;
+  model?: string;
+}
+
+function setupPerPhaseOrch(
+  root: string,
+  orchName: string,
+  ticket: string,
+  phases: PerPhaseFixture[],
+) {
+  const dir = join(root, orchName, "workers", ticket);
+  mkdirSync(dir, { recursive: true });
+  for (const p of phases) {
+    writeFileSync(
+      join(dir, `phase-${p.phase}.json`),
+      JSON.stringify({
+        ticket,
+        phase: p.phase,
+        orchestrator: orchName,
+        model: p.model ?? "sonnet",
+        turnCap: 50,
+        status: p.status ?? "running",
+        bg_job_id: "bg-fake",
+        startedAt: p.updatedAt ?? new Date(NOW - 60_000).toISOString(),
+        updatedAt: p.updatedAt ?? new Date(NOW - 5_000).toISOString(),
+      }),
+    );
+  }
+}
+
 describe("readWorkerSignals", () => {
   let tmp: string;
   beforeEach(() => { tmp = mkdtempSync(join(tmpdir(), "hud-ws-")); });
@@ -147,6 +180,126 @@ describe("readWorkerSignals", () => {
     writeFileSync(join(tmp, "orch-a", "workers", "T-bad.json"), JSON.stringify({ status: "implementing" }));
     const out = readWorkerSignals(tmp, NOW);
     expect(out).toHaveLength(1);
+  });
+});
+
+describe("readWorkerSignals (per-phase layout)", () => {
+  let tmp: string;
+  beforeEach(() => { tmp = mkdtempSync(join(tmpdir(), "hud-ws-pa-")); });
+  afterEach(() => { rmSync(tmp, { recursive: true, force: true }); });
+
+  test("per-phase only: surfaces a single ticket as one row with phaseName", () => {
+    setupPerPhaseOrch(tmp, "orch-pa", "T-100", [{ phase: "implement" }]);
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out).toHaveLength(1);
+    const row = out[0];
+    expect(row.ticket).toBe("T-100");
+    expect(row.phaseName).toBe("implement");
+    expect(row.status).toBe("running");
+    expect(row.workerName).toBe("orch-pa-T-100");
+  });
+
+  test("per-phase: latest non-terminal phase wins when multiple files present", () => {
+    setupPerPhaseOrch(tmp, "orch-pa", "T-100", [
+      { phase: "triage", updatedAt: new Date(NOW - 10 * 60_000).toISOString() },
+      { phase: "implement", updatedAt: new Date(NOW - 60_000).toISOString() },
+    ]);
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out).toHaveLength(1);
+    expect(out[0].phaseName).toBe("implement");
+    expect(out[0].updatedAt).toBe(new Date(NOW - 60_000).toISOString());
+  });
+
+  test("per-phase + flat coexist: overlay merges phaseName onto flat signal", () => {
+    setupOrch(tmp, "orch-pa", [
+      makeSignal({
+        ticket: "T-100",
+        workerName: "orch-pa-T-100",
+        orchestrator: "orch-pa",
+        status: "implementing",
+        pr: { number: 42, url: "" },
+        worktreePath: "/tmp/wt-100",
+      }),
+    ]);
+    setupPerPhaseOrch(tmp, "orch-pa", "T-100", [
+      { phase: "verify", updatedAt: new Date(NOW - 30_000).toISOString() },
+    ]);
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out).toHaveLength(1);
+    const row = out[0];
+    expect(row.ticket).toBe("T-100");
+    expect(row.phaseName).toBe("verify");
+    expect(row.pr?.number).toBe(42);
+    expect(row.worktreePath).toBe("/tmp/wt-100");
+    expect(row.status).toBe("running"); // per-phase status wins
+  });
+
+  test("per-phase directory with no phase-*.json is skipped silently", () => {
+    setupOrch(tmp, "orch-pa", [makeSignal({ ticket: "T-flat", workerName: "orch-pa-T-flat" })]);
+    mkdirSync(join(tmp, "orch-pa", "workers", "T-empty"), { recursive: true });
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out).toHaveLength(1);
+    expect(out[0].ticket).toBe("T-flat");
+  });
+
+  test("mixed orch: flat-only ticket + per-phase-only ticket → both surface", () => {
+    setupOrch(tmp, "orch-pa", [makeSignal({ ticket: "T-A", workerName: "orch-pa-T-A", orchestrator: "orch-pa" })]);
+    setupPerPhaseOrch(tmp, "orch-pa", "T-B", [{ phase: "research" }]);
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out).toHaveLength(2);
+    const tickets = out.map((w) => w.ticket).sort();
+    expect(tickets).toEqual(["T-A", "T-B"]);
+    const phaseNames = out.map((w) => w.phaseName).sort();
+    expect(phaseNames).toEqual([null, "research"]);
+  });
+
+  test("per-phase: all-terminal phases fall back to most-recent overall", () => {
+    setupPerPhaseOrch(tmp, "orch-pa", "T-100", [
+      { phase: "triage", status: "done", updatedAt: new Date(NOW - 30 * 60_000).toISOString() },
+      { phase: "research", status: "done", updatedAt: new Date(NOW - 10 * 60_000).toISOString() },
+      { phase: "plan", status: "failed", updatedAt: new Date(NOW - 2 * 60_000).toISOString() },
+    ]);
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out).toHaveLength(1);
+    expect(out[0].phaseName).toBe("plan");
+    expect(out[0].status).toBe("failed");
+  });
+
+  test("per-phase: malformed JSON and missing required fields are skipped, valid file surfaces", () => {
+    const dir = join(tmp, "orch-pa", "workers", "T-100");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-broken.json"), "{ not valid json");
+    writeFileSync(
+      join(dir, "phase-missing-ticket.json"),
+      JSON.stringify({ phase: "verify", orchestrator: "orch-pa", status: "running" }),
+    );
+    writeFileSync(
+      join(dir, "phase-valid.json"),
+      JSON.stringify({
+        ticket: "T-100",
+        phase: "implement",
+        orchestrator: "orch-pa",
+        model: "sonnet",
+        turnCap: 50,
+        status: "running",
+        bg_job_id: "bg-good",
+        startedAt: new Date(NOW - 60_000).toISOString(),
+        updatedAt: new Date(NOW - 5_000).toISOString(),
+      }),
+    );
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out).toHaveLength(1);
+    expect(out[0].phaseName).toBe("implement");
+  });
+
+  test("legacy flat-only orch still works (no regression when no subdirs present)", () => {
+    setupOrch(tmp, "orch-legacy", [
+      makeSignal({ ticket: "T-1", workerName: "orch-legacy-T-1", orchestrator: "orch-legacy" }),
+      makeSignal({ ticket: "T-2", workerName: "orch-legacy-T-2", orchestrator: "orch-legacy", status: "researching" }),
+    ]);
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out).toHaveLength(2);
+    expect(out.every((w) => w.phaseName === null)).toBe(true);
   });
 });
 

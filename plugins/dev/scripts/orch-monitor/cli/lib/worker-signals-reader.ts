@@ -25,6 +25,9 @@ export interface WorkerSignal {
   label: string | null;
   status: string;
   phase: number | null;
+  // Per-phase mode current phase name (e.g. "implement", "monitor-merge"). Null for legacy
+  // oneshot-legacy workers that only carry the integer `phase`.
+  phaseName: string | null;
   phaseTimestamps: Record<string, string>;
   lastHeartbeat: string | null;
   startedAt: string | null;
@@ -97,6 +100,7 @@ function parseSignal(raw: unknown): WorkerSignal | null {
     label: asString(r.label),
     status,
     phase: asNumber(r.phase),
+    phaseName: asString(r.phaseName),
     phaseTimestamps: parsePhaseTimestamps(r.phaseTimestamps),
     lastHeartbeat: asString(r.lastHeartbeat),
     startedAt: asString(r.startedAt),
@@ -107,6 +111,87 @@ function parseSignal(raw: unknown): WorkerSignal | null {
     linearState: asString(r.linearState),
     definitionOfDone: r.definitionOfDone ?? null,
     raw,
+  };
+}
+
+// Per-phase signal file overlay — written by phase-agent-dispatch under
+// workers/<TICKET>/phase-<name>.json. Only phase-agents mode produces these.
+interface PerPhaseOverlay {
+  ticket: string;
+  orchestrator: string;
+  phaseName: string;
+  status: string;
+  updatedAt: string | null;
+}
+
+// Status values that indicate a phase has finished. Superset of what
+// phase-agent-dispatch writes ("dispatched", "running") so the selection
+// logic stays correct if/when phase agents stamp completion themselves.
+const PER_PHASE_TERMINAL = new Set(["done", "failed", "complete", "skipped"]);
+
+function parsePerPhaseFile(raw: unknown): PerPhaseOverlay | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const ticket = asString(r.ticket);
+  const orchestrator = asString(r.orchestrator);
+  const phaseName = asString(r.phase);
+  const status = asString(r.status);
+  if (!ticket || !orchestrator || !phaseName || !status) return null;
+  return { ticket, orchestrator, phaseName, status, updatedAt: asString(r.updatedAt) };
+}
+
+function scanPerPhaseDir(perPhaseDir: string): PerPhaseOverlay | null {
+  let entries: string[];
+  try {
+    entries = readdirSync(perPhaseDir);
+  } catch {
+    return null;
+  }
+  const overlays: PerPhaseOverlay[] = [];
+  for (const name of entries) {
+    if (!name.startsWith("phase-") || !name.endsWith(".json")) continue;
+    const full = resolve(perPhaseDir, name);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(full, "utf8"));
+    } catch {
+      continue;
+    }
+    const ov = parsePerPhaseFile(parsed);
+    if (ov) overlays.push(ov);
+  }
+  if (overlays.length === 0) return null;
+  // Prefer most-recent non-terminal phase; fall back to most-recent overall.
+  const nonTerm = overlays.filter((o) => !PER_PHASE_TERMINAL.has(o.status));
+  const pool = nonTerm.length > 0 ? nonTerm : overlays;
+  pool.sort((a, b) => {
+    const am = a.updatedAt ? Date.parse(a.updatedAt) : 0;
+    const bm = b.updatedAt ? Date.parse(b.updatedAt) : 0;
+    return bm - am;
+  });
+  return pool[0];
+}
+
+function synthesizeFromOverlay(overlay: PerPhaseOverlay): WorkerSignal {
+  return {
+    ticket: overlay.ticket,
+    orchestrator: overlay.orchestrator,
+    wave: null,
+    workerName: `${overlay.orchestrator}-${overlay.ticket}`,
+    label: null,
+    status: overlay.status,
+    phase: null,
+    phaseName: overlay.phaseName,
+    phaseTimestamps: {},
+    lastHeartbeat: overlay.updatedAt,
+    startedAt: null,
+    updatedAt: overlay.updatedAt,
+    completedAt: null,
+    worktreePath: null,
+    pr: null,
+    linearState: null,
+    definitionOfDone: null,
+    raw: overlay,
   };
 }
 
@@ -127,10 +212,26 @@ function scanOrchestratorWorkersDir(workersDir: string): WorkerSignal[] {
   } catch {
     return [];
   }
-  const out: WorkerSignal[] = [];
+
+  const flatByTicket = new Map<string, WorkerSignal>();
+  const overlayByTicket = new Map<string, PerPhaseOverlay>();
+
   for (const name of entries) {
-    if (!name.endsWith(".json") || name.endsWith("-rollup.json")) continue;
     const full = resolve(workersDir, name);
+    let entryIsDir: boolean;
+    try {
+      entryIsDir = statSync(full).isDirectory();
+    } catch {
+      continue;
+    }
+
+    if (entryIsDir) {
+      const overlay = scanPerPhaseDir(full);
+      if (overlay) overlayByTicket.set(overlay.ticket, overlay);
+      continue;
+    }
+
+    if (!name.endsWith(".json") || name.endsWith("-rollup.json")) continue;
     let parsed: unknown;
     try {
       parsed = JSON.parse(readFileSync(full, "utf8"));
@@ -138,9 +239,27 @@ function scanOrchestratorWorkersDir(workersDir: string): WorkerSignal[] {
       continue;
     }
     const sig = parseSignal(parsed);
-    if (sig) out.push(sig);
+    if (sig) flatByTicket.set(sig.ticket, sig);
   }
-  return out;
+
+  // Apply per-phase overlays. In phase-agents mode the flat file's status/phase
+  // go stale by design — the per-phase file is the authoritative live state, so
+  // we replace `status`/`updatedAt`/`lastHeartbeat` when overlaying.
+  for (const [ticket, overlay] of overlayByTicket) {
+    const existing = flatByTicket.get(ticket);
+    if (existing) {
+      existing.phaseName = overlay.phaseName;
+      existing.status = overlay.status;
+      if (overlay.updatedAt) {
+        existing.updatedAt = overlay.updatedAt;
+        existing.lastHeartbeat = overlay.updatedAt;
+      }
+    } else {
+      flatByTicket.set(ticket, synthesizeFromOverlay(overlay));
+    }
+  }
+
+  return Array.from(flatByTicket.values());
 }
 
 export function scanOrchestratorWorkers(orchDir: string): WorkerSignal[] {

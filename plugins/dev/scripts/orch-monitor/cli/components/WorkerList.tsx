@@ -44,7 +44,9 @@ function formatTimeoutRemaining(timeoutAt: string, nowMs: number): string {
 
 const COL_WORKER = 32;
 const COL_STATUS = 13;
-const COL_PHASE = 5;
+// 13 chars fits the longest phase-agents phase name ("monitor-merge"). Legacy
+// oneshot-legacy rows still render their integer phase here.
+const COL_PHASE = 13;
 const COL_PR = 6;
 const COL_HEARTBEAT = 10;
 
@@ -89,7 +91,8 @@ export function WorkerList({
         const statusText = ws ? `wait:${formatTimeoutRemaining(ws.timeoutAt, nowMs)}` : w.status;
         const worker = truncateRight(formatWorkerCell(w.workerName, w.orchestrator), COL_WORKER);
         const status = truncateRight(statusText, COL_STATUS);
-        const phase = truncateRight(w.phase !== null ? String(w.phase) : "—", COL_PHASE);
+        const phaseText: string = w.phaseName ?? (w.phase !== null ? String(w.phase) : "—");
+        const phase = truncateRight(phaseText, COL_PHASE);
         const pr = truncateRight(w.pr ? `#${w.pr.number}` : "—", COL_PR);
         const heartbeat = truncateRight(formatRelativeTime(w.lastHeartbeat), COL_HEARTBEAT);
         const worktree = truncateRight(lastPathSegment(w.worktreePath), worktreeW);
