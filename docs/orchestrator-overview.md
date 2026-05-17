@@ -3,6 +3,38 @@
 How a Catalyst orchestrator runs today (post-CTL-452, post-2026-05-17 ship). This doc
 describes what exists in `origin/main` — it is not a roadmap.
 
+## Why this exists
+
+Catalyst orchestrates AI engineering work under the constraints of LLM agents. Every
+design choice — phases, background dispatch, broker interests, the immutable event
+log — is in service of these:
+
+- **Context engineering.** Per-turn cost compounds, and long contexts hit diminishing
+  then negative returns as attention degrades ("context rot"). Breaking ticket-sized
+  work into bounded phases (research → plan → implement → verify → review → ship)
+  keeps each agent in a focused context where sharp decisions stay cheap.
+
+- **Background continuity.** Agents should keep working while the operator is away
+  from the keyboard. Phase workers run as `claude --bg` jobs and emit events when
+  they finish; the orchestrator wakes on those events and dispatches the next phase
+  asynchronously. Work does not stop when the human stops looking.
+
+- **Human-in-the-loop oversight.** When something stalls, needs a design call, or
+  surfaces a finding, observability — HUD, web dashboard, comms channel, event tail
+  — makes worker state visible without forcing the operator to reconstruct context
+  from raw logs.
+
+- **Cost-aware parallelism.** Running tickets in parallel waves multiplies throughput,
+  and it also multiplies the risk of conflicts, rework, and tokens spent on doomed
+  work. Wave scheduling lets unblocked work advance independently; revive budgets,
+  healthchecks, and turn caps cap the blast radius of any single stuck worker.
+
+- **Signal-routed IPC.** Background agents share no memory. They communicate by
+  appending to an immutable event log (`~/catalyst/events/YYYY-MM.jsonl`) and
+  registering broker interests that describe which subset of events should wake
+  them. Each agent's context loads only signals relevant to its task — no inbox
+  sweeping, no low-value polling, no spam.
+
 ## TL;DR
 
 A single operator command (`/catalyst-dev:orchestrate …`) launches an interactive
@@ -44,15 +76,15 @@ Selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`:
 | `"phase-agents"` | `claude --bg --resume /catalyst-dev:phase-<name> <TICKET> --orch-dir <ORCH_DIR>` via `phase-agent-dispatch` | Template default. One `--bg` job per phase. State at `~/.claude/jobs/<bg_job_id>/state.json`. |
 | `"oneshot-legacy"` | `claude -p /catalyst-dev:oneshot <TICKET> --auto-merge` (long-lived, streaming JSON) | Runtime default when key missing. Pre-CTL-452 model. |
 
-The dispatcher reads the key at
-`plugins/dev/scripts/orchestrate-dispatch-next:89-108`. Without `--config <path>`,
-the dispatcher always uses `oneshot-legacy`; the `orchestrate` skill passes
-`--config "${REPO_ROOT}/.catalyst/config.json"` so the project config wins.
+Dispatch-mode resolution lives in `plugins/dev/scripts/orchestrate-dispatch-next`.
+Without `--config <path>`, the dispatcher always uses `oneshot-legacy`; the
+`orchestrate` skill passes `--config "${REPO_ROOT}/.catalyst/config.json"` so the
+project config wins.
 
 ## The 9-phase pipeline (phase-agents mode)
 
-Canonical sequence is defined in `plugins/dev/scripts/orchestrate-phase-advance:72-83`
-and surfaced in `plugins/dev/skills/orchestrate/SKILL.md:105`.
+Canonical sequence is defined in `plugins/dev/scripts/orchestrate-phase-advance`
+and mirrored in the orchestrate skill's pipeline reference table.
 
 | # | Phase | Sub-skill / agent | Linear state | Signal file | Default model | Turn cap |
 |---|---|---|---|---|---|---|
@@ -67,9 +99,12 @@ and surfaced in `plugins/dev/skills/orchestrate/SKILL.md:105`.
 | 9 | `monitor-deploy` | `/canary` (gstack) | — | `phase-monitor-deploy.json` | Haiku | 30 |
 
 Each phase writes its signal file at
-`~/catalyst/runs/<orchId>/workers/<TICKET>/phase-<name>.json`. Per-phase
-turn-cap defaults are in `plugins/dev/scripts/phase-agent-dispatch:51-66`; the
-prior-artifact gate logic (which file is checked before launch) is at lines 68-82.
+`~/catalyst/runs/<orchId>/workers/<TICKET>/phase-<name>.json`. Per-phase turn-cap
+defaults live in `plugins/dev/scripts/phase-agent-dispatch` (functions
+`phase_default_turn_cap` and `resolve_turn_cap`, which honors a CLI flag override
+and the `catalyst.orchestration.phaseAgents.turnCaps[<phase>]` config key in that
+order). The prior-artifact gate — which file must already exist before a phase
+launches — sits alongside in the same script.
 
 ### State machine for one worker
 
@@ -111,10 +146,11 @@ back as `filter.wake.<ORCH_NAME>` so the orchestrator only watches one event str
 | `${ORCH_NAME}-comms-lifecycle` | `comms_lifecycle` | 1 per orchestrator | always |
 | `${ORCH_NAME}-phase-lifecycle-<TICKET>` | `phase_lifecycle` | 1 per ticket | only when `dispatchMode = "phase-agents"` |
 
-The `phase_lifecycle` interest carries `{ticket, phase_names[9]}` and the broker
-(`broker/index.mjs:1299-1335`) matches incoming events against
-`^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$` deterministically
-(no Groq).
+The `phase_lifecycle` interest carries `{ticket, phase_names[9]}`. The broker's
+`tryPhaseLifecycleRoute` function in `plugins/dev/scripts/broker/index.mjs` matches
+incoming events against
+`^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$`
+deterministically (no Groq).
 
 ```mermaid
 sequenceDiagram
@@ -143,9 +179,9 @@ sequenceDiagram
 `orchestrate-healthcheck` does two passes:
 
 1. **Legacy PID liveness** — for `workers/*.json` at `status=dispatched`, after a
-   `--grace-seconds` (default 15s) waits, checks `kill -0 $PID`. Dead PIDs →
+   `--grace-seconds` (default 15s) wait, checks `kill -0 $PID`. Dead PIDs →
    `status=failed` + `worker-launch-failed` event.
-2. **Phase-mode --bg state-file mtime** — for each `workers/*/phase-*.json` with a
+2. **Phase-mode `--bg` state-file mtime** — for each `workers/*/phase-*.json` with a
    `bg_job_id`, stats `${JOBS_ROOT}/<bg>/state.json` (where `JOBS_ROOT` defaults
    to `$HOME/.claude/jobs`). Stalled if:
    - file missing → `STALL_REASON="state-json-missing"`, OR
@@ -156,43 +192,85 @@ Revive budget: the top-level `workers/<TICKET>.json` carries `.reviveCount`. Whe
 `reviveCount >= MAX_REVIVES` (default 10), the worker is marked `stalled` with
 `attentionReason="revive-budget-exhausted"`.
 
-## Where you observe a running orchestration
+## The events JSONL is the unified log
 
-Three surfaces, all reading from filesystem state:
+Everything Catalyst does — worker dispatch, phase transitions, PR lifecycle,
+GitHub/Linear webhooks, broker wakes — flows through one append-only file at
+`~/catalyst/events/YYYY-MM.jsonl` (monthly rotation, canonical OTel-style envelope).
+This is the single source of cross-process truth.
 
 ```mermaid
 flowchart LR
-  subgraph Writers
-    OS[Orchestrator skill] --> DM[~/catalyst/runs/&lt;id&gt;/<br/>DASHBOARD.md]
-    OS --> SJ[~/catalyst/runs/&lt;id&gt;/<br/>state.json]
-    PAD[phase-agent-dispatch] --> PSF[workers/&lt;TICKET&gt;/<br/>phase-&lt;name&gt;.json]
-    BROKER[broker daemon] --> BI[~/catalyst/broker-interests.json]
-    BROKER --> EL[~/catalyst/events/<br/>YYYY-MM.jsonl]
+  subgraph Producers
+    direction TB
+    SESSION["catalyst-session.sh<br/>service.name=catalyst.session"]
+    STATE["catalyst-state.sh +<br/>emit-worker-status-change.sh<br/>service.name=catalyst.orchestrator"]
+    PHASE["phase-agent-emit-complete<br/>service.name=catalyst.phase-agent"]
+    COMMS["catalyst-comms<br/>service.name=catalyst.comms"]
+    GH["orch-monitor webhook (GitHub)<br/>service.name=catalyst.github"]
+    LIN["orch-monitor webhook (Linear)<br/>service.name=catalyst.linear"]
+    BROKER["catalyst-broker daemon<br/>service.name=catalyst.broker"]
   end
 
-  subgraph Surfaces
-    HUD[catalyst-hud<br/>Ink TUI]
-    OM[orch-monitor<br/>web dashboard]
-    CE[catalyst-events tail<br/>raw stream]
+  EL[("events JSONL<br/>~/catalyst/events/YYYY-MM.jsonl<br/>append-only")]
+
+  SESSION ==> EL
+  STATE ==> EL
+  PHASE ==> EL
+  COMMS ==> EL
+  GH ==> EL
+  LIN ==> EL
+  BROKER -- "emits filter.wake.*<br/>+ broker.daemon.*" --> EL
+
+  EL -- "tail<br/>+ shouldSkipEvent<br/>(skip catalyst.broker)" --> BROKER
+
+  subgraph Consumers
+    direction TB
+    TAIL["catalyst-events tail<br/>--filter jq"]
+    WAIT["catalyst-events wait-for<br/>--filter jq"]
+    OM["orch-monitor server<br/>SSE → web UI"]
+    HUD["catalyst-hud<br/>(Ink TUI)"]
+    FWD["catalyst-otel-forward<br/>→ OTLP/PostHog/CFAE"]
+    ANL["analyze-events.ts<br/>(offline query)"]
   end
 
-  SJ --> HUD
-  PSF -.not yet scanned.-> HUD
-  BI --> HUD
-  DM --> OM
-  EL --> CE
+  EL --> TAIL
+  EL --> WAIT
+  EL --> OM
+  EL --> HUD
+  EL --> FWD
+  EL --> ANL
 ```
 
-| Surface | Reads | Where it lives |
-|---|---|---|
-| **`catalyst-hud`** (Ink TUI) | `~/catalyst/runs/<id>/{state.json,workers/*.json}` + `~/catalyst/broker-interests.json` | `plugins/dev/scripts/orch-monitor/cli/` |
-| **orch-monitor web dashboard** | file-watches `DASHBOARD.md` → SSE; also `/api/archive/*` from `catalyst.db` | `plugins/dev/scripts/orch-monitor/` |
-| **`catalyst-events tail --filter`** | append-only JSONL at `~/catalyst/events/YYYY-MM.jsonl` | `plugins/dev/scripts/catalyst-events` |
+**The broker is both a producer and a consumer** — it tails the same log it writes
+into. The `shouldSkipEvent` function (in `broker/index.mjs`) prevents the feedback
+loop: events whose `resource."service.name"` equals `"catalyst.broker"` are dropped
+on read (belt-and-suspenders fallback also drops names prefixed `filter.` or
+`broker.daemon.`). A separate `_emittedWakeCache` (60s TTL on
+`(source_event_id, interest_id)`) deduplicates wakes when `fs.watch` fires twice
+on the same append.
+
+## Where you observe a running orchestration
+
+Four operator surfaces — three read structured state, one reads diagnostic logs:
+
+| Surface | Reads | Where it lives | When to use |
+|---|---|---|---|
+| **`catalyst-hud`** (Ink TUI) | `~/catalyst/runs/<id>/{state.json,workers/*.json}` + `~/catalyst/broker-interests.json` + `broker.state.json` | `plugins/dev/scripts/orch-monitor/cli/` | Live operator dashboard — workers, interests, broker key-health |
+| **orch-monitor web dashboard** | file-watches `DASHBOARD.md` → SSE; also `/api/archive/*` from `catalyst.db` | `plugins/dev/scripts/orch-monitor/` | Shareable browser view; archive replay |
+| **`catalyst-events tail --filter`** | append-only JSONL at `~/catalyst/events/YYYY-MM.jsonl` | `plugins/dev/scripts/catalyst-events` | Raw semantic event stream, jq-filterable |
+| **`catalyst broker logs`** | tails `~/catalyst/broker.log` (pino-structured daemon stdout) | `plugins/dev/scripts/catalyst-broker` | Broker daemon diagnostics — Groq errors, routing traces, key-missing warnings |
+
+**Broker logs vs events JSONL — these are different things.** The events log is the
+system's semantic fact record (sparse, structured, durable); `broker.log` is the
+daemon's operational diary (verbose, diagnostic). A `broker.daemon.startup` event
+appears in the events log specifically so orchestrators know to re-register their
+interests — not for human debugging. Broker errors that surface a named event go
+to both; ordinary daemon noise goes only to `broker.log`.
 
 **Known gap (as of 2026-05-17):** `catalyst-hud` scans only flat `workers/*.json`;
 per-phase `workers/<TICKET>/phase-<name>.json` files written by `phase-agent-dispatch`
-are not yet surfaced. See `worker-signals-reader.ts:42` (`scanOrchestratorWorkersDir`
-at ~line 125).
+are not yet surfaced. See `worker-signals-reader.ts::scanOrchestratorWorkersDir`.
 
 ## On Claude Code's "agent view" / agents sidebar
 
@@ -207,9 +285,10 @@ native UI surfaces.** Specifically:
   question**, not a Catalyst question, and is not described in any catalyst source.
 
 If you want to monitor a running orchestration, use `catalyst-hud`, the
-orch-monitor web dashboard, or `catalyst-events tail` — those are the three
-surfaces Catalyst owns. If you want to see backgrounded Claude jobs directly,
-consult the Claude CLI's own documentation for whatever inventory it exposes.
+orch-monitor web dashboard, `catalyst-events tail`, or `catalyst broker logs` —
+those are the four surfaces Catalyst owns. If you want to see backgrounded Claude
+jobs directly, consult the Claude CLI's own documentation for whatever inventory
+it exposes.
 
 ## Canonical artifact / state locations
 
@@ -225,7 +304,9 @@ consult the Claude CLI's own documentation for whatever inventory it exposes.
 | `~/catalyst/runs/<id>/findings.jsonl` | both | shared findings queue |
 | `~/catalyst/state.json` | `catalyst-state.sh` register/update/worker/heartbeat | global active-runs registry |
 | `~/catalyst/catalyst.db` | `catalyst-archive.ts sweep` + skill instrumentation | SQLite sessions + metrics + archive index |
-| `~/catalyst/events/YYYY-MM.jsonl` | bash skill layer + TS webhook receiver + comms | append-only event log |
+| `~/catalyst/events/YYYY-MM.jsonl` | seven producers (see "events JSONL" section) | append-only event log |
+| `~/catalyst/broker.log` | broker daemon stdout/stderr | diagnostic log (view with `catalyst broker logs`) |
+| `~/catalyst/broker.state.json` | broker daemon | liveness + key-health snapshot |
 | `~/catalyst/archives/<id>/` | `catalyst-archive.ts sweep` (filesystem-first) | post-run archived artifacts |
 | `~/catalyst/broker-interests.json` | broker daemon | live broker interest registry |
 | `~/.claude/jobs/<bg_job_id>/state.json` | **Claude CLI** (not Catalyst) | `--bg` job liveness |
@@ -250,7 +331,9 @@ Legacy `oneshot-legacy` mode is unchanged — all the above only activates when
 - [`website/src/content/docs/reference/orchestration/phase-agents.md`](../website/src/content/docs/reference/orchestration/phase-agents.md) — user-facing canonical doc shipped in PR #812
 - [`plugins/dev/skills/orchestrate/SKILL.md`](../plugins/dev/skills/orchestrate/SKILL.md) — orchestrator skill source of truth
 - [`plugins/dev/scripts/orchestrate-phase-advance`](../plugins/dev/scripts/orchestrate-phase-advance) — wake handler (canonical phase sequence)
-- [`plugins/dev/scripts/phase-agent-dispatch`](../plugins/dev/scripts/phase-agent-dispatch) — worker spawn
+- [`plugins/dev/scripts/phase-agent-dispatch`](../plugins/dev/scripts/phase-agent-dispatch) — worker spawn + turn-cap resolution
+- [`plugins/dev/scripts/broker/index.mjs`](../plugins/dev/scripts/broker/index.mjs) — broker daemon (`tryPhaseLifecycleRoute`, `shouldSkipEvent`)
+- [`plugins/dev/scripts/catalyst-events`](../plugins/dev/scripts/catalyst-events) — events CLI (tail, wait-for, query)
 - [ADR-006](adrs.md) — global state JSON design
 - [ADR-008](adrs.md) — SQLite session store
 - [ADR-014](adrs.md) — worker owns full PR lifecycle (no more `gh pr merge --auto`)
