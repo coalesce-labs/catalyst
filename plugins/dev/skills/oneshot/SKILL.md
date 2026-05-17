@@ -498,6 +498,16 @@ if [[ -x "$SESSION_SCRIPT" ]]; then
     --ticket "${TICKET_ID:-}" \
     --workflow "${CATALYST_SESSION_ID:-}")
   export CATALYST_SESSION_ID
+
+  # CTL-455: mirror the catalyst session_id into the worker signal file so
+  # `orchestrate-roll-usage.sh` can populate session_metrics when the worker's
+  # stream produces a result event. Orchestrator mode only — standalone runs
+  # have no signal file.
+  if [ -n "${ORCH_DIR:-}" ] && [ -f "${ORCH_DIR}/workers/${TICKET_ID}.json" ]; then
+    _SF="${ORCH_DIR}/workers/${TICKET_ID}.json"
+    jq --arg sid "$CATALYST_SESSION_ID" '.catalystSessionId = $sid' \
+      "$_SF" > "${_SF}.tmp" && mv "${_SF}.tmp" "$_SF"
+  fi
 fi
 ```
 
