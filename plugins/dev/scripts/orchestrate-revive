@@ -229,6 +229,75 @@ spawn_revive() {
   echo "$pid"
 }
 
+# CTL-452: spawn a revived claude --bg session for a phase-mode worker.
+# Returns "pid:<new_pid>:<new_bg_id>" on stdout, or empty on failure. The
+# bg_job_id is parsed from claude's stdout, which prints a JSON object on
+# job creation: {"id":"...","state":"running"}. We capture the first such
+# line synchronously (stdout is short for --bg) and let the process detach
+# in the background via nohup.
+spawn_revive_bg() {
+  local ticket="$1" worktree="$2" session_id="$3"
+
+  if [ ! -d "$worktree" ]; then
+    echo "ERROR: worktree missing for ${ticket}: ${worktree}" >&2
+    return 1
+  fi
+
+  local stdout_file="${ORCH_DIR}/workers/output/${ticket}-bg-stdout.log"
+  local stderr_file="${ORCH_DIR}/workers/output/${ticket}-bg-stderr.log"
+  mkdir -p "$(dirname "$stdout_file")"
+
+  (
+    cd "$worktree" || exit 1
+    CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+    CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+    exec nohup "$CLAUDE_BIN" \
+      --model "$MODEL" \
+      --dangerously-skip-permissions \
+      --bg \
+      --resume "$session_id"
+  ) > "$stdout_file" 2>> "$stderr_file" < /dev/null &
+
+  local pid=$!
+  disown "$pid" 2>/dev/null || true
+
+  # Wait briefly for stdout to materialize (real claude --bg returns almost
+  # immediately; tests stub it the same way). Cap at 5s to avoid stalling.
+  local waited=0
+  while [ ! -s "$stdout_file" ] && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited+1))
+  done
+
+  local new_bg=""
+  if [ -s "$stdout_file" ]; then
+    new_bg=$(jq -r 'select(.id) | .id' "$stdout_file" 2>/dev/null | head -1)
+  fi
+
+  echo "pid:${pid}:${new_bg}"
+}
+
+# CTL-452: detect whether the worker is in phase-agents mode. Phase-mode
+# workers have a per-ticket subdirectory under workers/ containing one or
+# more phase-<name>.json signals, AND the top-level signal carries
+# .phaseMode = true OR .activePhase = "<name>".
+is_phase_mode() {
+  local ticket="$1"
+  local phase_mode active_phase
+  phase_mode=$(jq -r '.phaseMode // false' "${ORCH_DIR}/workers/${ticket}.json" 2>/dev/null || echo "false")
+  active_phase=$(jq -r '.activePhase // ""' "${ORCH_DIR}/workers/${ticket}.json" 2>/dev/null || echo "")
+  if [ "$phase_mode" = "true" ] || [ -n "$active_phase" ]; then
+    [ -d "${ORCH_DIR}/workers/${ticket}" ] && return 0
+  fi
+  return 1
+}
+
+# CTL-452: read the active phase name for a phase-mode worker.
+active_phase_of() {
+  local ticket="$1"
+  jq -r '.activePhase // ""' "${ORCH_DIR}/workers/${ticket}.json" 2>/dev/null || echo ""
+}
+
 # ─── Main loop ────────────────────────────────────────────────────────────────
 
 CHECKED=0
@@ -344,9 +413,25 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
     continue
   fi
 
-  # Actually revive.
-  PROMPT=$(build_prompt "$STATUS")
-  NEW_PID=$(spawn_revive "$TICKET" "$WORKTREE" "$SESSION_ID" "$PROMPT" || echo "")
+  # Actually revive. CTL-452: phase-mode workers spawn via claude --bg --resume
+  # (no -p), and we capture the new bg_job_id into the per-phase signal so
+  # the broker-driven monitor loop and the state.json mtime healthcheck both
+  # see the fresh job. Legacy workers keep the original -p --resume spawn.
+  NEW_BG_JOB_ID=""
+  ACTIVE_PHASE=""
+  if is_phase_mode "$TICKET"; then
+    ACTIVE_PHASE=$(active_phase_of "$TICKET")
+    SPAWN_OUT=$(spawn_revive_bg "$TICKET" "$WORKTREE" "$SESSION_ID" || echo "")
+    # SPAWN_OUT shape: "pid:<pid>:<bg_job_id>"
+    NEW_PID="${SPAWN_OUT#pid:}"
+    NEW_PID="${NEW_PID%%:*}"
+    NEW_BG_JOB_ID="${SPAWN_OUT##*:}"
+    [ "$NEW_BG_JOB_ID" = "$SPAWN_OUT" ] && NEW_BG_JOB_ID=""  # no colon → no bg_job_id parsed
+  else
+    PROMPT=$(build_prompt "$STATUS")
+    NEW_PID=$(spawn_revive "$TICKET" "$WORKTREE" "$SESSION_ID" "$PROMPT" || echo "")
+  fi
+
   if [ -z "$NEW_PID" ]; then
     STALLED=$((STALLED+1))
     MSG="Failed to spawn claude for revive"
@@ -375,6 +460,25 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
       | .updatedAt = $ts
       | (if $err_uuid == "" then . else .lastApiErrorUuid = $err_uuid end)' \
      "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+
+  # CTL-452: phase-mode follow-up writes — update the per-phase signal's
+  # bg_job_id and re-emit the phase.<name>.dispatched event so the broker
+  # re-arms its phase_lifecycle interest (deregistered on the prior
+  # agent.checkout when the phase agent crashed).
+  if [ -n "$ACTIVE_PHASE" ]; then
+    PHASE_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${ACTIVE_PHASE}.json"
+    if [ -f "$PHASE_SIGNAL" ] && [ -n "$NEW_BG_JOB_ID" ]; then
+      jq --arg bg "$NEW_BG_JOB_ID" --arg ts "$TS" \
+         '.bg_job_id = $bg | .updatedAt = $ts' \
+         "$PHASE_SIGNAL" > "${PHASE_SIGNAL}.tmp" && mv "${PHASE_SIGNAL}.tmp" "$PHASE_SIGNAL"
+    fi
+    emit_state event "$(jq -nc \
+      --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+      --arg phase "$ACTIVE_PHASE" --arg sid "$SESSION_ID" --arg bg "$NEW_BG_JOB_ID" \
+      "{ts:\$ts, orchestrator:\$orch, worker:\$w,
+        event:(\"phase.\" + \$phase + \".dispatched\"),
+        detail:{phase:\$phase, sessionId:\$sid, bg_job_id:\$bg, revived:true}}")"
+  fi
 
   emit_state event "$(jq -nc --arg ts "$TS" --arg orch "$ORCH_ID" \
     --arg w "$TICKET" --arg sid "$SESSION_ID" --arg reason "$REVIVE_REASON" \

@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# orchestrate-phase-advance - Advance a worker to the next phase on phase.<name>.complete (CTL-452).
+#
+# The orchestrator's Phase 4 monitor calls this script when it wakes on a
+# `phase.<name>.complete.<TICKET>` event delivered via the broker's
+# `phase_lifecycle` interest. The script resolves the next phase from the
+# canonical 9-phase sequence, no-ops if it's already been dispatched
+# (idempotency under redundant wakes), and otherwise delegates to
+# `orchestrate-dispatch-next --phase <next> --ticket <T>` to spawn the
+# next phase agent.
+#
+# Usage:
+#   orchestrate-phase-advance --orch-dir <path> --orch-id <id>
+#                             --ticket <T> --completed-phase <name>
+#                             [--config <path>]
+#                             [--dry-run]
+#
+# Output (stdout, single JSON line):
+#   {"advanced": true,  "fromPhase": "research", "toPhase": "plan",
+#    "ticket": "T-1", "dryRun": false}
+#   {"advanced": false, "fromPhase": "monitor-deploy", "toPhase": null,
+#    "ticket": "T-1", "reason": "terminal"}
+#   {"advanced": false, "fromPhase": "research", "toPhase": "plan",
+#    "ticket": "T-1", "reason": "already-dispatched"}
+#
+# Exit codes: 0 (advanced or no-op idempotent), 2 (bad args / unknown phase).
+#
+# Environment overrides (for tests):
+#   CATALYST_STATE_SCRIPT       path to catalyst-state.sh (default: sibling)
+#   CATALYST_DISPATCH_NEXT_BIN  path to orchestrate-dispatch-next (default: sibling)
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+DISPATCH_NEXT_BIN="${CATALYST_DISPATCH_NEXT_BIN:-${SCRIPT_DIR}/orchestrate-dispatch-next}"
+
+ORCH_DIR=""
+ORCH_ID=""
+TICKET=""
+COMPLETED_PHASE=""
+CONFIG_PATH=""
+DRY_RUN=0
+
+usage() {
+  sed -n '2,30p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir)         ORCH_DIR="$2"; shift 2 ;;
+    --orch-id)          ORCH_ID="$2"; shift 2 ;;
+    --ticket)           TICKET="$2"; shift 2 ;;
+    --completed-phase)  COMPLETED_PHASE="$2"; shift 2 ;;
+    --config)           CONFIG_PATH="$2"; shift 2 ;;
+    --dry-run)          DRY_RUN=1; shift ;;
+    -h|--help)          usage 0 ;;
+    *)                  echo "unknown arg: $1" >&2; usage 2 ;;
+  esac
+done
+
+[ -z "$ORCH_DIR" ]        && { echo "ERROR: --orch-dir required" >&2; exit 2; }
+[ -z "$ORCH_ID" ]         && { echo "ERROR: --orch-id required" >&2; exit 2; }
+[ -z "$TICKET" ]          && { echo "ERROR: --ticket required" >&2; exit 2; }
+[ -z "$COMPLETED_PHASE" ] && { echo "ERROR: --completed-phase required" >&2; exit 2; }
+[ ! -d "$ORCH_DIR" ]      && { echo "ERROR: orch-dir does not exist: $ORCH_DIR" >&2; exit 2; }
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Canonical 9-phase sequence — single source of truth for advance order.
+# The orchestrator never re-orders these; per-phase configuration (model,
+# turn cap) is in .catalyst/config.json under catalyst.orchestration.phaseAgents.
+phase_next() {
+  case "$1" in
+    triage)          echo "research" ;;
+    research)        echo "plan" ;;
+    plan)            echo "implement" ;;
+    implement)       echo "verify" ;;
+    verify)          echo "review" ;;
+    review)          echo "pr" ;;
+    pr)              echo "monitor-merge" ;;
+    monitor-merge)   echo "monitor-deploy" ;;
+    monitor-deploy)  echo "" ;;  # terminal
+    *)               return 1 ;;
+  esac
+}
+
+NEXT_PHASE="$(phase_next "$COMPLETED_PHASE")" || {
+  echo "ERROR: unknown phase '$COMPLETED_PHASE' (not in canonical 9-phase sequence)" >&2
+  exit 2
+}
+
+# Terminal: monitor-deploy is the last phase; nothing further to dispatch.
+if [ -z "$NEXT_PHASE" ]; then
+  jq -nc --arg from "$COMPLETED_PHASE" --arg ticket "$TICKET" \
+    '{advanced: false, fromPhase: $from, toPhase: null, ticket: $ticket, reason: "terminal"}'
+  exit 0
+fi
+
+# Idempotency: if the next-phase signal already exists, the orchestrator already
+# dispatched on a prior wake (or another path) — no-op.
+NEXT_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${NEXT_PHASE}.json"
+if [ -f "$NEXT_SIGNAL" ]; then
+  jq -nc --arg from "$COMPLETED_PHASE" --arg to "$NEXT_PHASE" --arg ticket "$TICKET" \
+    '{advanced: false, fromPhase: $from, toPhase: $to, ticket: $ticket, reason: "already-dispatched"}'
+  exit 0
+fi
+
+# Dry-run: report the would-advance shape without side effects.
+if [ "$DRY_RUN" -eq 1 ]; then
+  jq -nc --arg from "$COMPLETED_PHASE" --arg to "$NEXT_PHASE" --arg ticket "$TICKET" \
+    '{advanced: true, fromPhase: $from, toPhase: $to, ticket: $ticket, dryRun: true}'
+  exit 0
+fi
+
+# Delegate the spawn to orchestrate-dispatch-next. We intentionally pass through
+# --orch-dir / --orch-id rather than letting dispatch-next resolve them from
+# state.json — the orchestrator already knows them and an explicit pass is
+# more predictable under broker-wake fan-out where many advances run in
+# parallel against the same state.json.
+DISPATCH_ARGS=(
+  --orch-dir "$ORCH_DIR"
+  --orch-id "$ORCH_ID"
+  --ticket "$TICKET"
+  --phase "$NEXT_PHASE"
+)
+[ -n "$CONFIG_PATH" ] && DISPATCH_ARGS+=( --config "$CONFIG_PATH" )
+
+if [ ! -x "$DISPATCH_NEXT_BIN" ]; then
+  echo "ERROR: dispatch-next binary not executable: $DISPATCH_NEXT_BIN" >&2
+  exit 2
+fi
+
+"$DISPATCH_NEXT_BIN" "${DISPATCH_ARGS[@]}" >/dev/null 2>&1 || {
+  echo "ERROR: dispatch-next failed for ${TICKET} phase=${NEXT_PHASE}" >&2
+  jq -nc --arg from "$COMPLETED_PHASE" --arg to "$NEXT_PHASE" --arg ticket "$TICKET" \
+    '{advanced: false, fromPhase: $from, toPhase: $to, ticket: $ticket, reason: "dispatch-failed"}'
+  exit 0
+}
+
+# Emit advancement event (best-effort — tests assert via fake state script).
+if [ -x "$STATE_SCRIPT" ]; then
+  TS="$(now_iso)"
+  "$STATE_SCRIPT" event "$(jq -nc \
+    --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+    --arg from "$COMPLETED_PHASE" --arg to "$NEXT_PHASE" \
+    '{ts:$ts, orchestrator:$orch, worker:$w,
+      event:"worker-phase-advanced",
+      detail:{fromPhase:$from, toPhase:$to}}')" >/dev/null 2>&1 || true
+fi
+
+jq -nc --arg from "$COMPLETED_PHASE" --arg to "$NEXT_PHASE" --arg ticket "$TICKET" \
+  '{advanced: true, fromPhase: $from, toPhase: $to, ticket: $ticket, dryRun: false}'

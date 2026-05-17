@@ -153,6 +153,101 @@ DEAD=$(echo "$OUT" | jq -r '.dead' 2>/dev/null || echo "")
 [ "$DEAD" = "1" ] && pass "summary.dead=1" || fail "summary.dead=1" "got: $DEAD; out: $OUT"
 scratch_teardown
 
+# ─── CTL-452: --bg phase-mode worker state.json mtime checks ─────────────────
+
+# make_phase_signal TICKET PHASE STATUS BG_JOB_ID
+# Creates ${ORCH_DIR}/workers/<TICKET>/phase-<PHASE>.json with the given
+# bg_job_id. Phase-mode signals live in a per-ticket subdirectory (NOT in
+# the flat workers/*.json space scanned by the legacy PID check).
+make_phase_signal() {
+  local ticket="$1" phase="$2" status="$3" bg="$4"
+  mkdir -p "${ORCH_DIR}/workers/${ticket}"
+  jq -n \
+    --arg t "$ticket" --arg p "$phase" --arg s "$status" --arg bg "$bg" \
+    '{ticket:$t, phase:$p, status:$s, bg_job_id:$bg,
+      startedAt:"2026-05-16T00:00:00Z", updatedAt:"2026-05-16T00:00:00Z"}' \
+    > "${ORCH_DIR}/workers/${ticket}/phase-${phase}.json"
+}
+
+# make_bg_state JOB_ID STATE [AGE_SEC]
+# Creates a fake ~/.claude/jobs/<id>/state.json. AGE_SEC, if provided, mutates
+# the mtime to that many seconds ago.
+#
+# Note on touch + timezones: macOS `touch -t [[CC]YY]MMDDhhmm[.SS]` interprets
+# the timestamp string in LOCAL time. To keep the stat-vs-now math (both Unix
+# epochs, TZ-agnostic) consistent, we must feed touch a LOCAL-time string —
+# so `date -r EPOCH` (without -u) is the correct format command on macOS.
+make_bg_state() {
+  local job="$1" state="$2" age="${3:-0}"
+  mkdir -p "${SCRATCH}/jobs/${job}"
+  echo "{\"state\":\"${state}\",\"id\":\"${job}\"}" > "${SCRATCH}/jobs/${job}/state.json"
+  if [ "$age" -gt 0 ]; then
+    local then
+    then=$(( $(date -u +%s) - age ))
+    if date -r "$then" "+%Y%m%d%H%M.%S" >/dev/null 2>&1; then
+      touch -t "$(date -r "$then" "+%Y%m%d%H%M.%S")" "${SCRATCH}/jobs/${job}/state.json"
+    else
+      touch -d "@${then}" "${SCRATCH}/jobs/${job}/state.json" 2>/dev/null || true
+    fi
+  fi
+  export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"
+}
+
+# Read status from a per-phase signal at workers/<T>/phase-<P>.json
+phase_status() {
+  local ticket="$1" phase="$2"
+  jq -r '.status' "${ORCH_DIR}/workers/${ticket}/phase-${phase}.json"
+}
+
+echo "test (CTL-452): phase-mode worker with stale state.json marked stalled"
+scratch_setup
+make_phase_signal "T-A" "implement" "running" "bg-stale"
+make_bg_state "bg-stale" "running" 1200   # 20 min — older than 15 min default
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 > "${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-A" "implement")
+[ "$ST" = "stalled" ] && pass "stale + running → stalled" || fail "stale + running → stalled" "got: $ST"
+grep -q "worker-phase-stalled" "$STATE_LOG" && pass "worker-phase-stalled event emitted" || fail "worker-phase-stalled event emitted" "log: $(cat "$STATE_LOG")"
+scratch_teardown
+
+echo "test (CTL-452): phase-mode worker with fresh state.json untouched"
+scratch_setup
+make_phase_signal "T-B" "research" "running" "bg-fresh"
+make_bg_state "bg-fresh" "running" 30   # 30s old — well within 15 min default
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 > "${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-B" "research")
+[ "$ST" = "running" ] && pass "fresh state.json → status untouched" || fail "fresh state.json → status untouched" "got: $ST"
+grep -q "worker-phase-stalled" "$STATE_LOG" && fail "no phase-stalled event for fresh job" || pass "no phase-stalled event for fresh job"
+scratch_teardown
+
+echo "test (CTL-452): phase-mode worker with state=done untouched even when stale"
+scratch_setup
+make_phase_signal "T-C" "pr" "done" "bg-done"
+make_bg_state "bg-done" "done" 2000   # very stale, but terminal
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 > "${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-C" "pr")
+[ "$ST" = "done" ] && pass "terminal job state.json → status untouched" || fail "terminal job state.json → status untouched" "got: $ST"
+scratch_teardown
+
+echo "test (CTL-452): phase-mode worker with missing job dir → stalled"
+scratch_setup
+make_phase_signal "T-D" "verify" "running" "bg-missing"
+export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"   # exists but no per-job subdir
+mkdir -p "${SCRATCH}/jobs"
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 > "${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-D" "verify")
+[ "$ST" = "stalled" ] && pass "missing job dir → stalled" || fail "missing job dir → stalled" "got: $ST"
+scratch_teardown
+
+echo "test (CTL-452): --stale-bg-seconds tunes the threshold"
+scratch_setup
+make_phase_signal "T-E" "implement" "running" "bg-customstale"
+make_bg_state "bg-customstale" "running" 120   # 2 min
+# With default 900s, this is fresh. With --stale-bg-seconds 60, it's stale.
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 --stale-bg-seconds 60 > "${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-E" "implement")
+[ "$ST" = "stalled" ] && pass "custom threshold flips fresh → stalled" || fail "custom threshold flips fresh → stalled" "got: $ST"
+scratch_teardown
+
 echo
 echo "Results: $PASSES passed, $FAILURES failed"
 [ "$FAILURES" -eq 0 ]
