@@ -92,6 +92,16 @@ orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
 This is a denormalized summary layer — per-orchestrator local state in worktrees remains the
 source of truth for crash recovery. See ADR-006 for the full design decision.
 
+**Worker signal projection (in migration, ADR-018).** Per-worker
+`workers/<TICKET>.json` files are currently written directly by seven scripts
+with no inter-process locking. CTL-483 begins moving these mutations to a
+`worker.state_changed` command event consumed by the broker, which projects
+the new state to a `<TICKET>.json.projected` shadow file. Phase 1 (this PR)
+ships the broker handler, the writer-side emit helper, and dual-write for
+`orchestrate-auto-rebase`; `orchestrate-shadow-diff` verifies byte-for-byte
+agreement between canonical and shadow files. Phase 2 removes the direct
+writes; Phase 3 mirrors to SQLite per the ADR-011 hybrid pattern. See ADR-018.
+
 ## Three-Layer Memory Architecture
 
 Catalyst uses a three-layer memory architecture to manage context across multiple projects:

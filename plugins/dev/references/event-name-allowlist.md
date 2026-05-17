@@ -67,6 +67,26 @@ A single event drives this interest:
 
 - `comms.message.posted` — filtered by `body.payload.channel`, `body.payload.type` (must be in `types_of_interest`), and recipient (`body.payload.to` matches `subscriber_ticket`, or sender is in `owned_workers` for orchestrator subscribers)
 
+## worker_lifecycle (broker projection — CTL-483)
+
+Source: `plugins/dev/scripts/broker/index.mjs:handleWorkerStateChanged`. This is a
+command event consumed by the broker for the worker-signal projection (ADR-018),
+not a wake-up target for `pr_lifecycle` / `ticket_lifecycle` interests. Worker
+agents do NOT register interests on it; the broker matches by `event.name` in
+its dispatch chain and projects the new state to
+`<orchDir>/workers/<TICKET>.json.projected`.
+
+- `worker.state_changed` — emitted by scripts that mutate
+  `workers/<TICKET>.json`. Carries the full new state in `body.payload.state`,
+  plus `attributes."catalyst.orchestrator.id"`, `attributes."catalyst.worker.ticket"`,
+  and `attributes."catalyst.writer"` (which script emitted). The broker writes
+  the state byte-for-byte (minus a `_projected` audit-metadata field) to the
+  shadow path.
+
+During Phase 1 of the ADR-018 migration, only `orchestrate-auto-rebase` emits
+this event. Phase 1 producers are being rolled out one at a time; the remaining
+six writers are tracked under follow-up tickets.
+
 ## Pitfall: bare `catalyst.orchestrator.id` clauses
 
 `plugins/dev/scripts/orch-monitor/lib/webhook-handler.ts:635-642` stamps

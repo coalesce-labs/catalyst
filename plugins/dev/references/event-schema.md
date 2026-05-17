@@ -489,6 +489,70 @@ Filters that previously matched `.event == "filter.wake.${id}"` now match:
 
 ---
 
+### `worker.state_changed` — catalyst.orchestrator (CTL-483)
+
+Emitted by scripts that mutate `workers/<TICKET>.json` as part of the Phase 1
+dual-write rollout (ADR-018). Carries the full new state in `body.payload.state`
+so the broker can project to `<orchDir>/workers/<TICKET>.json.projected`
+byte-for-byte. The `_projected` audit field added by the broker is NOT part of
+the event — it's metadata stamped at write time.
+
+```json
+{
+  "ts": "2026-05-17T18:00:00.000Z",
+  "id": "33333333-4444-4555-8666-777777777777",
+  "observedTs": "2026-05-17T18:00:00.001Z",
+  "severityText": "INFO",
+  "severityNumber": 9,
+  "traceId": "922348e23aa9b22524e048006709a6a1",
+  "spanId": "1a0513b3232a6043",
+  "resource": {
+    "service.name": "catalyst.orchestrator",
+    "service.namespace": "catalyst",
+    "service.version": "9.3.0"
+  },
+  "attributes": {
+    "event.name": "worker.state_changed",
+    "event.entity": "worker",
+    "event.action": "state_changed",
+    "event.label": "worker CTL-483 state changed by orchestrate-auto-rebase",
+    "catalyst.orchestrator.id": "o-ctl-483",
+    "catalyst.worker.ticket": "CTL-483",
+    "catalyst.writer": "orchestrate-auto-rebase",
+    "catalyst.session.id": "sess_..."
+  },
+  "body": {
+    "message": "worker CTL-483 state changed by orchestrate-auto-rebase",
+    "payload": {
+      "ticket": "CTL-483",
+      "orchestrator": "o-ctl-483",
+      "writer": "orchestrate-auto-rebase",
+      "state": {
+        "ticket": "CTL-483",
+        "status": "pr-created",
+        "phase": 5,
+        "dirtySince": null,
+        "...": "full contents of workers/<TICKET>.json"
+      }
+    }
+  }
+}
+```
+
+Required broker-handler fields:
+
+| Field | Purpose |
+|---|---|
+| `attributes."catalyst.orchestrator.id"` | path component — falls back to `body.payload.orchestrator` |
+| `attributes."catalyst.worker.ticket"` | path component — falls back to `body.payload.ticket` |
+| `attributes."catalyst.writer"` | audit trail — falls back to `body.payload.writer` then `"unknown"` |
+| `body.payload.state` | full new file contents (must be a JSON object) |
+
+Missing any of `orchestrator`, `ticket`, or `state` causes the broker to drop
+the event with a `warn` log line and write no file.
+
+---
+
 ## All event names by producer
 
 ### catalyst.github
@@ -549,6 +613,7 @@ Filters that previously matched `.event == "filter.wake.${id}"` now match:
 | `orchestrator.worker.phase_advanced` | `worker` | `phase_advanced` | INFO | `body.payload` = `{windowSec, changes}` |
 | `orchestrator.attention.raised` | `attention` | `raised` | WARN | `body.payload` = `{attentionType, reason}` |
 | `orchestrator.attention.resolved` | `attention` | `resolved` | INFO | |
+| `worker.state_changed` | `worker` | `state_changed` | INFO | `body.payload` = `{ticket, orchestrator, writer, state}`; consumed by broker projection (ADR-018) |
 
 ### catalyst.comms
 
