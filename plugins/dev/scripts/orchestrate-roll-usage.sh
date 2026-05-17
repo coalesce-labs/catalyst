@@ -127,3 +127,42 @@ jq --argjson cost "$USAGE" '.cost = $cost' "$SIGNAL_FILE" \
   --argjson u "$USAGE" >/dev/null
 
 log_action "wrote-cost"
+
+# 4. Mirror cost/tokens/duration into session_metrics via catalyst-session.sh,
+#    so `catalyst-session history|stats|compare` see the real values instead
+#    of zeros (CTL-455). Idempotency: gated by the `signal.cost != null` check
+#    at the top of this script, so this block only runs on the same invocation
+#    that writes signal.cost.
+SESSION_SH="${SCRIPT_DIR}/catalyst-session.sh"
+CATALYST_SID="$(jq -r '.catalystSessionId // ""' "$SIGNAL_FILE")"
+
+if [ -z "$CATALYST_SID" ]; then
+  # Fallback: most-recent session for this ticket. The orchestrator dispatches
+  # one worker per ticket per run, so DESC-by-started_at picks the right row.
+  CATALYST_DB="${CATALYST_DB_FILE:-${HOME}/catalyst/catalyst.db}"
+  if [ -f "$CATALYST_DB" ]; then
+    CATALYST_SID=$(sqlite3 "$CATALYST_DB" \
+      "SELECT session_id FROM sessions
+       WHERE ticket_key = '${TICKET_ID//\'/\'\'}'
+       ORDER BY started_at DESC LIMIT 1;" 2>/dev/null || true)
+  fi
+fi
+
+if [ -n "$CATALYST_SID" ] && [ -x "$SESSION_SH" ]; then
+  COST=$(echo "$USAGE" | jq -r '.costUSD')
+  ITOK=$(echo "$USAGE" | jq -r '.inputTokens')
+  OTOK=$(echo "$USAGE" | jq -r '.outputTokens')
+  CRD=$( echo "$USAGE" | jq -r '.cacheReadTokens')
+  CCR=$( echo "$USAGE" | jq -r '.cacheCreationTokens')
+  DUR=$( echo "$USAGE" | jq -r '.durationMs')
+  if "$SESSION_SH" metric "$CATALYST_SID" \
+       --cost "$COST" --input "$ITOK" --output "$OTOK" \
+       --cache-read "$CRD" --cache-creation "$CCR" --duration-ms "$DUR" \
+       >/dev/null 2>&1; then
+    log_action "wrote-metric"
+  else
+    log_action "metric-write-failed"
+  fi
+else
+  log_action "metric-skipped"
+fi

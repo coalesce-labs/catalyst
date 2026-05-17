@@ -356,6 +356,163 @@ run "missing-modelUsage: signal.cost.model is null" \
 run "missing-modelUsage: orch.usage.costUSD updated" \
   bash -c "[ \"\$(jq -r '.orchestrators[\"orch-t15\"].usage.costUSD' '$CATALYST_STATE_FILE')\" = '0.25' ]"
 
+# ─── Test 16: catalystSessionId in signal → session_metrics row populated (CTL-455) ─
+# The bug: orchestrate-roll-usage writes cost to signal + state.json but never
+# calls catalyst-session.sh metric, so the SQLite session_metrics table stays at
+# all-zero values for every cost/token/duration column.
+SESSION_SH="${REPO_ROOT}/plugins/dev/scripts/catalyst-session.sh"
+CATALYST_DB="${CATALYST_DIR}/catalyst.db"
+export CATALYST_DB_FILE="$CATALYST_DB"
+
+# Bootstrap a minimal schema — just the two tables we exercise. Mirrors the
+# columns in db-migrations/001_initial_schema.sql + 004_iteration_counts.sql.
+init_test_db() {
+  rm -f "$CATALYST_DB"
+  sqlite3 "$CATALYST_DB" <<'SQL'
+CREATE TABLE sessions (
+  session_id        TEXT PRIMARY KEY,
+  workflow_id       TEXT,
+  ticket_key        TEXT,
+  label             TEXT,
+  skill_name        TEXT NOT NULL,
+  status            TEXT NOT NULL DEFAULT 'running',
+  phase             INTEGER NOT NULL DEFAULT 0,
+  pid               INTEGER,
+  started_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL,
+  completed_at      TEXT,
+  cwd               TEXT,
+  git_branch        TEXT,
+  claude_session_id TEXT,
+  last_context_pct  INTEGER
+);
+CREATE TABLE session_metrics (
+  session_id            TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+  cost_usd              REAL NOT NULL DEFAULT 0,
+  input_tokens          INTEGER NOT NULL DEFAULT 0,
+  output_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  duration_ms           INTEGER NOT NULL DEFAULT 0,
+  updated_at            TEXT NOT NULL,
+  plan_iterations       INTEGER NOT NULL DEFAULT 0,
+  fix_iterations        INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE session_events (
+  event_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id   TEXT NOT NULL,
+  event_type   TEXT NOT NULL,
+  payload      TEXT,
+  ts           TEXT NOT NULL
+);
+SQL
+}
+
+# Insert a session row that mirrors what catalyst-session.sh start would create.
+seed_session() {
+  local sid="$1" ticket="$2"
+  sqlite3 "$CATALYST_DB" "INSERT INTO sessions
+    (session_id, ticket_key, skill_name, status, started_at, updated_at)
+    VALUES ('${sid}', '${ticket}', 'oneshot', 'running',
+            '2026-04-23T12:00:00Z', '2026-04-23T12:00:00Z');"
+}
+
+# Build a signal that includes a catalystSessionId field.
+build_signal_with_sid() {
+  local out="$1" ticket="$2" sid="$3"
+  cat > "$out" <<EOF
+{
+  "ticket": "${ticket}",
+  "orchestrator": "orch-test",
+  "workerName": "orch-test-${ticket}",
+  "status": "done",
+  "phase": 6,
+  "startedAt": "2026-04-23T12:00:00Z",
+  "updatedAt": "2026-04-23T12:30:00Z",
+  "catalystSessionId": "${sid}",
+  "phaseTimestamps": { "researching": "2026-04-23T12:00:00Z" },
+  "pr": { "number": 100, "url": "https://github.com/test/test/pull/100" }
+}
+EOF
+}
+
+ORCH_DIR=$(setup_orch "orch-t16")
+init_test_db
+SID_16="sess_t16_aaaa"
+seed_session "$SID_16" "T-16"
+build_stream_with_result "${ORCH_DIR}/workers/output/T-16-stream.jsonl" \
+  "0.75" "1500" "300" "150" "75" "8" "45000" "20000"
+build_signal_with_sid "${ORCH_DIR}/workers/T-16.json" "T-16" "$SID_16"
+
+"$HELPER" --orch "orch-t16" --ticket "T-16" --orch-dir "$ORCH_DIR"
+
+run "session_metrics.cost_usd populated from helper" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT cost_usd FROM session_metrics WHERE session_id='${SID_16}';\")\" = '0.75' ]"
+run "session_metrics.input_tokens populated" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT input_tokens FROM session_metrics WHERE session_id='${SID_16}';\")\" = '1500' ]"
+run "session_metrics.output_tokens populated" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT output_tokens FROM session_metrics WHERE session_id='${SID_16}';\")\" = '300' ]"
+run "session_metrics.cache_read_tokens populated" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT cache_read_tokens FROM session_metrics WHERE session_id='${SID_16}';\")\" = '150' ]"
+run "session_metrics.cache_creation_tokens populated" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT cache_creation_tokens FROM session_metrics WHERE session_id='${SID_16}';\")\" = '75' ]"
+run "session_metrics.duration_ms populated" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT duration_ms FROM session_metrics WHERE session_id='${SID_16}';\")\" = '45000' ]"
+
+# Idempotency: second invocation short-circuits on signal.cost != null so
+# session_metrics values do not change.
+"$HELPER" --orch "orch-t16" --ticket "T-16" --orch-dir "$ORCH_DIR"
+run "idempotent: session_metrics.cost_usd still 0.75 after re-roll" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT cost_usd FROM session_metrics WHERE session_id='${SID_16}';\")\" = '0.75' ]"
+
+# ─── Test 17: verbose 'wrote-metric' on success, 'metric-skipped' when no sid ─
+ORCH_DIR=$(setup_orch "orch-t17")
+init_test_db
+SID_17="sess_t17_bbbb"
+seed_session "$SID_17" "T-17"
+build_stream_with_result "${ORCH_DIR}/workers/output/T-17-stream.jsonl" \
+  "0.3" "100" "20" "5" "2" "1" "500" "200"
+build_signal_with_sid "${ORCH_DIR}/workers/T-17.json" "T-17" "$SID_17"
+
+LOG="${SCRATCH}/orch-t17.stderr"
+"$HELPER" --orch "orch-t17" --ticket "T-17" --orch-dir "$ORCH_DIR" -v 2>"$LOG" >/dev/null || true
+run "verbose: wrote-metric on successful metric write" \
+  bash -c "grep -q 'roll-usage\\[ticket=T-17\\]: wrote-metric' '$LOG'"
+
+# Now run a worker whose signal has no catalystSessionId AND no DB row.
+ORCH_DIR=$(setup_orch "orch-t17b")
+init_test_db
+build_stream_with_result "${ORCH_DIR}/workers/output/T-17B-stream.jsonl" \
+  "0.3" "100" "20" "5" "2" "1" "500" "200"
+build_signal "${ORCH_DIR}/workers/T-17B.json" "T-17B"  # no catalystSessionId, no seeded session
+
+LOG="${SCRATCH}/orch-t17b.stderr"
+"$HELPER" --orch "orch-t17b" --ticket "T-17B" --orch-dir "$ORCH_DIR" -v 2>"$LOG" >/dev/null || true
+run "verbose: metric-skipped when no session id resolvable" \
+  bash -c "grep -q 'roll-usage\\[ticket=T-17B\\]: metric-skipped' '$LOG'"
+run "metric-skipped: no session_metrics row created" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' 'SELECT COUNT(*) FROM session_metrics;')\" = '0' ]"
+
+# ─── Test 18: DB-fallback path — signal lacks catalystSessionId, DB has match ─
+ORCH_DIR=$(setup_orch "orch-t18")
+init_test_db
+SID_18="sess_t18_cccc"
+seed_session "$SID_18" "T-18"
+build_stream_with_result "${ORCH_DIR}/workers/output/T-18-stream.jsonl" \
+  "1.25" "5000" "1000" "500" "250" "12" "75000" "30000"
+build_signal "${ORCH_DIR}/workers/T-18.json" "T-18"  # no catalystSessionId in signal
+
+"$HELPER" --orch "orch-t18" --ticket "T-18" --orch-dir "$ORCH_DIR"
+run "DB-fallback: session_metrics.cost_usd populated via ticket lookup" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT cost_usd FROM session_metrics WHERE session_id='${SID_18}';\")\" = '1.25' ]"
+run "DB-fallback: session_metrics.input_tokens populated via ticket lookup" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT input_tokens FROM session_metrics WHERE session_id='${SID_18}';\")\" = '5000' ]"
+run "DB-fallback: session_metrics.duration_ms populated via ticket lookup" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT duration_ms FROM session_metrics WHERE session_id='${SID_18}';\")\" = '75000' ]"
+
+# Reset env so subsequent (none here) tests don't inherit the override.
+unset CATALYST_DB_FILE
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]
