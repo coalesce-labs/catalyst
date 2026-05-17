@@ -559,3 +559,94 @@ status bar.
 - Keeping cost out of typed attributes is reversible — a future ADR can promote it
   once we have a denylist mechanism in the forwarder. The current "everything in
   attributes ships off-machine" invariant is too strong for billing data.
+
+---
+
+## ADR-017: Phase-Agent Dispatch Architecture (CTL-447 → CTL-470)
+
+**Status**: Accepted, 2026-05-17.
+
+**Context**: Pre-CTL-452 orchestrators dispatched one long-lived
+`claude -p /catalyst-dev:oneshot <TICKET> --auto-merge` per ticket. That worker
+streamed JSON for the full lifecycle — research → plan → implement → verify →
+review → PR → merge → deploy — across hundreds of turns in a single context
+window. Three problems compounded:
+
+- **Context rot**: by the time `implement` finished, the worker was carrying
+  the entire research and planning transcript. Verify/review/ship phases ran on
+  a stale, near-saturated context window.
+- **Unbounded turn caps**: a single `--max-turns` had to cover all phases, so
+  it was set high enough to never block the slowest phase. Fast phases inherited
+  the same ceiling.
+- **Crash recovery from a bad place**: a stuck worker was always revived from
+  the unbounded-context state it got stuck in. There was no clean checkpoint
+  between phases.
+
+**Decision**: Dispatch workers as `claude --bg --resume
+/catalyst-dev:phase-<name> <TICKET> --orch-dir <ORCH_DIR>` — one short-lived
+`--bg` job per phase. The orchestrator walks the canonical 9-phase sequence
+(`triage` → `research` → `plan` → `implement` → `verify` → `review` → `pr` →
+`monitor-merge` → `monitor-deploy`) via `orchestrate-phase-advance`, waking on
+`phase.<name>.complete.<TICKET>` events routed by a new deterministic broker
+interest type, `phase_lifecycle` (CTL-447). Selected by
+`.catalyst/config.json → catalyst.orchestration.dispatchMode` —
+`"phase-agents"` is the template default; `"oneshot-legacy"` (the pre-CTL-452
+model) is the runtime fallback when the key is missing.
+
+**Rationale**:
+
+- A short-lived per-phase worker stays well inside its effective context
+  window. Each phase reads only the inputs it actually needs (the prior phase's
+  signal file plus any referenced thoughts documents) — research transcripts
+  don't tax the implement phase.
+- Per-phase turn caps in `phase-agent-dispatch:51-66` let `triage` cap at 10
+  turns while `implement` caps at 75, instead of every phase paying the
+  worst-case ceiling. Per-phase model selection (`catalyst.orchestration.phaseAgents`)
+  lets cheap phases (`monitor-deploy` defaults to Haiku) skip the Opus
+  per-turn cost.
+- `phase_lifecycle` is a deterministic regex match in the broker
+  (`broker/index.mjs:1299-1335`) against
+  `^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$` — no Groq
+  classification, no semantic ambiguity, one interest per ticket carrying
+  `{ticket, phase_names[9]}`. All four orchestrator interests
+  (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`, `phase_lifecycle`)
+  fire back as `filter.wake.<ORCH_NAME>`, so the orchestrator watches a single
+  event stream.
+
+**Consequences**:
+
+- **Signal file layout splits**: the flat top-level `workers/<TICKET>.json`
+  remains, and `phase-agent-dispatch` writes per-phase
+  `workers/<TICKET>/phase-<name>.json` files alongside it. `catalyst-hud`
+  currently scans only the flat file — the per-phase files are written but not
+  yet surfaced (see `worker-signals-reader.ts:42`, tracked separately).
+- **New healthcheck mode** for `--bg` state.json mtime: `orchestrate-healthcheck`
+  stats `${JOBS_ROOT}/<bg_job_id>/state.json` (default
+  `$HOME/.claude/jobs/<bg>/state.json`) and treats files older than
+  `--stale-bg-seconds` (default 900s) as stalled when `.state` is not in
+  `{done, failed, errored, stopped}`. Legacy PID liveness continues to cover
+  `oneshot-legacy` workers.
+- **Intermediate Linear states** (CTL-454) — `triaged`, `researching`,
+  `planning`, `verifying`, `reviewing`, plus the existing `inProgress` and
+  `inReview` — give per-phase Linear visibility. These map through
+  `stateMap` in `.catalyst/config.json` so projects can opt in incrementally.
+- **Revive budget** is enforced at the top-level signal file
+  (`workers/<TICKET>.json.reviveCount`). When `reviveCount >= MAX_REVIVES`
+  (default 10) the worker is marked `stalled` with
+  `attentionReason="revive-budget-exhausted"`. Revives are once-per-phase;
+  the second `phase.<name>.failed` for the same phase escalates immediately
+  rather than retrying.
+- **Legacy mode preserved**: `oneshot-legacy` is unchanged. Existing projects
+  that haven't set `dispatchMode = "phase-agents"` continue to run one
+  long-lived `claude -p /oneshot` per ticket. Cutover is per-project, not
+  forced.
+- **Implemented incrementally** across CTL-447 (broker interest type), CTL-452
+  (orchestrator state-machine rewrite + `--bg` cutover), CTL-454 (intermediate
+  Linear states), CTL-455 (session_metrics zero-value fix surfaced by the
+  cutover), and follow-ups through CTL-470.
+- The user-facing canonical reference lives at
+  [`website/src/content/docs/reference/orchestration/phase-agents.md`](../website/src/content/docs/reference/orchestration/phase-agents.md)
+  (shipped via PR #812). The internal canonical reference is
+  [`docs/orchestrator-overview.md`](orchestrator-overview.md). Related ADRs:
+  ADR-006 (global state JSON), ADR-008 (SQLite session store), ADR-014 (worker
+  owns full PR lifecycle).
