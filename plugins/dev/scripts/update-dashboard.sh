@@ -31,7 +31,7 @@ EVENTS_DIR="${CATALYST_DIR}/events"
 
 usage() {
   cat >&2 <<'EOF'
-usage: update-dashboard.sh --orch <id> [--orch-dir <dir>] [--stdout]
+usage: update-dashboard.sh --orch <id> [--orch-dir <dir>] [--stdout] [--roll-usage]
 
 required:
   --orch <id>         orchestrator id
@@ -39,17 +39,23 @@ required:
 optional:
   --orch-dir <dir>    override default ~/catalyst/runs/<orch>/
   --stdout            write to stdout instead of DASHBOARD.md
+  --roll-usage        before rendering, invoke orchestrate-roll-usage.sh -v
+                      for every signal file in ${ORCH_DIR}/workers/. Bounded
+                      and idempotent — fast no-op when signal.cost is already
+                      populated. Stderr appends to ${ORCH_DIR}/.roll-usage.log
+                      so silent skips remain auditable (CTL-487).
 EOF
   exit 2
 }
 
-ORCH_ID="" ORCH_DIR="" STDOUT_MODE=0
+ORCH_ID="" ORCH_DIR="" STDOUT_MODE=0 ROLL_USAGE=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --orch)     ORCH_ID="${2:-}"; shift 2 ;;
-    --orch-dir) ORCH_DIR="${2:-}"; shift 2 ;;
-    --stdout)   STDOUT_MODE=1; shift ;;
-    -h|--help)  usage ;;
+    --orch)        ORCH_ID="${2:-}"; shift 2 ;;
+    --orch-dir)    ORCH_DIR="${2:-}"; shift 2 ;;
+    --stdout)      STDOUT_MODE=1; shift ;;
+    --roll-usage)  ROLL_USAGE=1; shift ;;
+    -h|--help)     usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
 done
@@ -65,6 +71,29 @@ DASHBOARD_FILE="${ORCH_DIR}/DASHBOARD.md"
 if [ ! -f "$STATE_FILE" ]; then
   echo "warn: state.json not found at $STATE_FILE" >&2
   exit 0
+fi
+
+# ─── Roll-usage sweep (CTL-487) ───────────────────────────────────────────────
+# The monitor loop's contract (orchestrate/SKILL.md "Worker usage / cost is
+# rolled in by the monitor pass") requires orchestrate-roll-usage.sh to fire
+# per worker per wake-up. Hosting that loop here — in the script that's
+# already called every wake-up — guarantees the contract instead of relying
+# on the SKILL-reading agent to transcribe a separate bash block. Per-worker
+# call is bounded: gated on signal.cost == null so already-rolled workers
+# return immediately. Runs before the render so the dashboard sees fresh
+# .cost values on the same pass that populates them.
+if [ "$ROLL_USAGE" = "1" ] && [ -d "$WORKERS_DIR" ]; then
+  ROLL_SCRIPT="${SCRIPT_DIR}/orchestrate-roll-usage.sh"
+  if [ -x "$ROLL_SCRIPT" ]; then
+    ROLL_LOG="${ORCH_DIR}/.roll-usage.log"
+    for sig in "$WORKERS_DIR"/*.json; do
+      [ -f "$sig" ] || continue
+      tkt=$(jq -r '.ticket // empty' "$sig" 2>/dev/null || true)
+      [ -n "$tkt" ] || continue
+      "$ROLL_SCRIPT" --orch "$ORCH_ID" --ticket "$tkt" --orch-dir "$ORCH_DIR" -v \
+        >/dev/null 2>>"$ROLL_LOG" || true
+    done
+  fi
 fi
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
