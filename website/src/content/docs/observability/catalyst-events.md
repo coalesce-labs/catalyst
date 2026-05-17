@@ -60,6 +60,9 @@ catalyst-events tail --filter '.attributes."event.name" == "broker.daemon.startu
 
 # All ticket_lifecycle wake events (CTL-303)
 catalyst-events tail --filter '.attributes."event.name" | startswith("filter.wake.")'
+
+# All phase-agent pipeline events (CTL-452) — only emitted when dispatchMode = "phase-agents"
+catalyst-events tail --filter '.attributes."event.name" | startswith("phase.")'
 ```
 
 ### `wait-for`
@@ -90,6 +93,11 @@ catalyst-events wait-for \
 # Wait for a broker wake event (CTL-303 — semantic interests)
 catalyst-events wait-for \
   --filter '.attributes."event.name" == "filter.wake" and .attributes."event.label" == "sess_abc123"' \
+  --timeout 600
+
+# Wait for a specific phase-agent phase to complete (CTL-452)
+catalyst-events wait-for \
+  --filter '.attributes."event.name" == "phase.research.complete.CTL-48"' \
   --timeout 600
 ```
 
@@ -222,6 +230,7 @@ Both shapes coexist indefinitely. New tools write the canonical envelope;
 --filter '.attributes."event.name" | startswith("agent.")'   # broker agent identity (CTL-303)
 --filter '.attributes."event.name" | startswith("filter.")'  # broker register/deregister/wake
 --filter '.attributes."event.name" | startswith("broker.")'  # broker daemon lifecycle
+--filter '.attributes."event.name" | startswith("phase.")'   # phase-agent pipeline (CTL-452)
 ```
 
 ### Match by orchestrator scope
@@ -235,6 +244,32 @@ Both shapes coexist indefinitely. New tools write the canonical envelope;
 
 # Canonical envelope — filter by ticket
 --filter '.attributes."worker.ticket" == "CTL-48"'
+```
+
+### Match by phase event (CTL-452 — phase-agent pipeline)
+
+Phase-agent events follow the deterministic shape
+`phase.<name>.<action>.<TICKET>` where `<name>` is one of the nine canonical phases
+(triage, research, plan, implement, verify, review, pr, monitor-merge, monitor-deploy),
+`<action>` is `dispatched`, `complete`, or `failed`, and `<TICKET>` is the Linear key
+(e.g. `CTL-48`). The broker's `phase_lifecycle` interest matches the same regex
+deterministically — see [Phase agents](/reference/orchestration/phase-agents/).
+
+```bash
+# All phase-agent events
+--filter '.attributes."event.name" | startswith("phase.")'
+
+# All phase events for one ticket
+--filter '(.attributes."event.name" | startswith("phase.")) and (.attributes."event.name" | endswith(".CTL-48"))'
+
+# A single phase complete (exact match)
+--filter '.attributes."event.name" == "phase.research.complete.CTL-48"'
+
+# All phase failures across every ticket
+--filter '.attributes."event.name" | test("^phase\\.[^.]+\\.failed\\.")'
+
+# All `implement` phase events across every ticket (any action, any ticket)
+--filter '.attributes."event.name" | test("^phase\\.implement\\.")'
 ```
 
 ### Match a ticket_lifecycle interest (CTL-303)

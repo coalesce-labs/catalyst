@@ -179,6 +179,7 @@ it at `.event`.
 | `filter.register` / `filter.deregister` | catalyst-broker | Interest registered or deregistered |
 | `filter.wake.<id>` | catalyst-broker | Wake event delivered to a registered interest |
 | `worker-dispatched` / `worker-pr-created` / `worker-done` | Orchestrator (v1 envelope) | Worker lifecycle |
+| `phase.<name>.dispatched.<TICKET>` / `phase.<name>.complete.<TICKET>` / `phase.<name>.failed.<TICKET>` | `phase-agent-dispatch` + phase agents (CTL-452) | 9-phase pipeline lifecycle — emitted only when `dispatchMode = "phase-agents"` (see [Phase agents](/reference/orchestration/phase-agents/)) |
 | `catalyst.*` | catalyst-session | Skill/session lifecycle events |
 
 GitHub and Linear topics arrive via webhooks when the monitor is configured (see
