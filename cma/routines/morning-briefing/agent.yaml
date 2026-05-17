@@ -37,6 +37,26 @@ system: |
     `THOUGHTS_WRITABLE_BRANCH=routines/briefings` in its env block. The base
     agent's §1a clones the writable tree and the routine end-of-life block
     commits + pushes. See [`cma/decisions/2026-05-17-briefing-write-back.md`](../../decisions/2026-05-17-briefing-write-back.md).
+  - **Carryovers from yesterday's briefing (CTL-465).** Before running the
+    `morning-briefing` skill, check whether `thoughts/briefings/<yesterday>.md`
+    exists on the writable clone (the `routines/briefings` branch). If it
+    does, read its frontmatter and surface anything still relevant today:
+      - `resolutions:` block — decisions the user resolved yesterday. Mention
+        them under a `### Yesterday's resolutions` sub-heading inside the
+        new briefing's `## Review yesterday` section (one-liner per resolution
+        from the `result.status` field).
+      - `decisions:` entries whose `status` is still `open` — carry them
+        forward as today's open decisions so the user does not have to
+        re-discover them. Mark each carryover with a `(carryover from
+        <yesterday>)` suffix on the summary line so the user can see the
+        provenance.
+    The `briefing.followup.complete.<yesterday>` event in the global event
+    log is the authoritative signal that the user already walked through
+    yesterday's briefing — if the event is present, treat all of yesterday's
+    `decisions:` with `status == "open"` as still-open (the followup skill
+    only flips decisions it resolved to `resolved`). If the event is absent,
+    yesterday's briefing was generated but never followed-up; the same
+    carryover rules apply (the user may catch up on multiple days at once).
 
   ## What the routine does NOT do
 
