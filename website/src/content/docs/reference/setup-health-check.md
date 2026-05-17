@@ -83,6 +83,34 @@ has WAL mode enabled.
 Whether `.catalyst/config.json` exists in the current directory with the required fields:
 `projectKey`, `ticketPrefix`, `teamKey`, and `stateMap`.
 
+### Config-template drift (CTL-489)
+
+The health check also detects when `plugins/dev/templates/config.template.json` has keys that
+your `.catalyst/config.json` lacks. Missing keys appear as yellow-bullet warnings — the same
+visual treatment as the other non-fatal issues:
+
+```text
+⚠ WARN: Project setup has issues
+  • Missing catalyst.orchestration.dispatchMode in .catalyst/config.json — template suggests "phase-agents"
+    Run /catalyst-dev:setup-catalyst to apply the missing key.
+```
+
+The walker is `plugins/dev/scripts/check-config-drift.sh`. It strips comment/`$schema` keys,
+skips `[YOUR_ORG]`/`[YOUR_REPO]` placeholder branches, and suppresses the five roots that
+`check-project-setup.sh` already checks individually (`projectKey`, `project.ticketPrefix`,
+`linear.teamKey`, `linear.stateMap`, `linear.stateIds`) so you never see double-warnings.
+
+Run `/catalyst-dev:setup-catalyst` to merge the missing keys interactively. The skill calls
+`check-config-drift.sh --merge-into`, shows you a unified diff of the proposed merge, and asks
+for confirmation. On `y`, the missing keys are added via `jq` deep-merge — your existing
+values are never overwritten. If you have a custom `catalyst.filter.groqModel`, the template's
+default is **not** applied to that key.
+
+Drift warnings are non-fatal: they keep appearing on every workflow invocation as passive
+nagging until you opt in. The motivator was CTL-487, where catalyst itself spent two months
+silently running in `oneshot-legacy` dispatch mode because the new `orchestration.dispatchMode`
+key wasn't in any existing project's config.
+
 ### Secrets Config
 
 Whether `~/.config/catalyst/config-{projectKey}.json` exists and has API tokens configured.
