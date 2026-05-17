@@ -1,11 +1,23 @@
 ---
 title: Workers and signal files
-description: How the orchestrator dispatches workers, how they report progress, and the full signal-file schema.
+description:
+  How the orchestrator dispatches workers, how they report progress, and the full signal-file
+  schema.
 sidebar:
   order: 1
 ---
 
-When `/catalyst-dev:orchestrate` runs a wave, it dispatches one **worker** per ticket. Each worker is a separate Claude Code subprocess running `/catalyst-dev:oneshot` inside a dedicated git worktree. The worker communicates progress back to the orchestrator exclusively through its **signal file**.
+When `/catalyst-dev:orchestrate` runs a wave, it dispatches one **worker** per ticket. Each worker
+is a separate Claude Code subprocess running `/catalyst-dev:oneshot` inside a dedicated git
+worktree. The worker communicates progress back to the orchestrator exclusively through its **signal
+file**.
+
+:::note[Two dispatch modes share this file] This page describes the **legacy `oneshot` worker** —
+the full lifecycle in a single `claude -p` session. The newer
+[phase-agent pipeline](../phase-agents/) dispatches nine short-lived `claude --bg` jobs per ticket
+instead; each phase writes its own `phase-<name>.json` alongside the main `<ticket>.json` signal
+file described below. The state machine, status field, and field semantics on `<ticket>.json` are
+unchanged across both modes. :::
 
 ## Worker lifecycle
 
@@ -30,32 +42,37 @@ Orchestrator                   Worker subprocess
      │   (orchestrator's Phase 4 is a safety-net fallback for stalled/crashed workers)
 ```
 
-The worker owns the full PR lifecycle end-to-end: it opens the PR, enters an event-driven listen loop via `catalyst-events wait-for`, resolves blockers (CI failures, bot review threads, BEHIND) inline, executes `gh pr merge --squash --delete-branch` when the PR is CLEAN, and writes `status: "done"` before exiting. The orchestrator's Phase 4 is a fallback that handles workers that stalled before completing their own merge.
+The worker owns the full PR lifecycle end-to-end: it opens the PR, enters an event-driven listen
+loop via `catalyst-events wait-for`, resolves blockers (CI failures, bot review threads, BEHIND)
+inline, executes `gh pr merge --squash --delete-branch` when the PR is CLEAN, and writes
+`status: "done"` before exiting. The orchestrator's Phase 4 is a fallback that handles workers that
+stalled before completing their own merge.
 
 ## The signal file
 
-Located at `<orchestrator-dir>/workers/<ticket>.json`. The orchestrator creates an empty skeleton; the worker writes into it.
+Located at `<orchestrator-dir>/workers/<ticket>.json`. The orchestrator creates an empty skeleton;
+the worker writes into it.
 
 ### Fields
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `ticket` | string | The ticket ID (e.g., `CTL-48`) |
-| `orchestrator` | string | Orchestrator ID |
-| `workerName` | string | Human-readable worker name (used for tmux titles, etc.) |
-| `status` | string | Current status — see state machine below |
-| `phase` | number | 0–6, matching oneshot phases |
-| `startedAt` | ISO string | When the worker was dispatched |
-| `updatedAt` | ISO string | Last write to the signal file |
-| `lastHeartbeat` | ISO string | Most recent heartbeat (~60s cadence during long phases) |
-| `completedAt` | ISO string or `null` | Set when terminal state reached |
-| `worktreePath` | string | Absolute path to the worker's git worktree |
-| `phaseTimestamps` | object | Map of status → ISO timestamp; populated at each transition |
-| `pr` | object or `null` | Populated at Phase 5 PR creation |
-| `linearState` | string or `null` | Current Linear state name |
-| `definitionOfDone` | object | Populated at Phase 4 + 5 with real results |
-| `pid` | number | Worker's Claude process PID |
-| `cost` | object\|null | Usage/cost object populated by `orchestrate-roll-usage.sh` after the worker stream contains a `result` event. Shape: `{ inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUSD, numTurns, durationMs }` |
+| Field              | Type                 | Description                                                                                                                                                                                                               |
+| ------------------ | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ticket`           | string               | The ticket ID (e.g., `CTL-48`)                                                                                                                                                                                            |
+| `orchestrator`     | string               | Orchestrator ID                                                                                                                                                                                                           |
+| `workerName`       | string               | Human-readable worker name (used for tmux titles, etc.)                                                                                                                                                                   |
+| `status`           | string               | Current status — see state machine below                                                                                                                                                                                  |
+| `phase`            | number               | 0–6, matching oneshot phases                                                                                                                                                                                              |
+| `startedAt`        | ISO string           | When the worker was dispatched                                                                                                                                                                                            |
+| `updatedAt`        | ISO string           | Last write to the signal file                                                                                                                                                                                             |
+| `lastHeartbeat`    | ISO string           | Most recent heartbeat (~60s cadence during long phases)                                                                                                                                                                   |
+| `completedAt`      | ISO string or `null` | Set when terminal state reached                                                                                                                                                                                           |
+| `worktreePath`     | string               | Absolute path to the worker's git worktree                                                                                                                                                                                |
+| `phaseTimestamps`  | object               | Map of status → ISO timestamp; populated at each transition                                                                                                                                                               |
+| `pr`               | object or `null`     | Populated at Phase 5 PR creation                                                                                                                                                                                          |
+| `linearState`      | string or `null`     | Current Linear state name                                                                                                                                                                                                 |
+| `definitionOfDone` | object               | Populated at Phase 4 + 5 with real results                                                                                                                                                                                |
+| `pid`              | number               | Worker's Claude process PID                                                                                                                                                                                               |
+| `cost`             | object\|null         | Usage/cost object populated by `orchestrate-roll-usage.sh` after the worker stream contains a `result` event. Shape: `{ inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUSD, numTurns, durationMs }` |
 
 ### The `pr` subobject
 
@@ -71,7 +88,8 @@ Located at `<orchestrator-dir>/workers/<ticket>.json`. The orchestrator creates 
 
 - `ciStatus`: `pending` | `passing` | `failing` | `unknown` | `merged`
 - `prOpenedAt` — set by worker the moment the PR is created
-- `mergedAt` — set by the worker after `gh pr merge --squash --delete-branch` completes; set by the orchestrator (fallback) for stalled workers
+- `mergedAt` — set by the worker after `gh pr merge --squash --delete-branch` completes; set by the
+  orchestrator (fallback) for stalled workers
 
 ### State machine
 
@@ -88,17 +106,23 @@ dispatched → researching → planning → implementing → validating → ship
                                                           (at any stage) → failed | stalled
 ```
 
-The worker writes all statuses through `done`. In the `pr-created` → `done` transition, the worker enters a `catalyst-events wait-for` listen loop, resolves CI failures and review blockers inline, and executes `gh pr merge --squash --delete-branch` when the PR is CLEAN. The orchestrator writes `done` only as a safety-net fallback for workers that wrote `stalled` or crashed before completing their own merge.
+The worker writes all statuses through `done`. In the `pr-created` → `done` transition, the worker
+enters a `catalyst-events wait-for` listen loop, resolves CI failures and review blockers inline,
+and executes `gh pr merge --squash --delete-branch` when the PR is CLEAN. The orchestrator writes
+`done` only as a safety-net fallback for workers that wrote `stalled` or crashed before completing
+their own merge.
 
-The listen loop is enabled by [`catalyst-broker`](/observability/catalyst-broker/)
-auto-correlation (CTL-303): the worker's `agent.checkin {claimed_pr}` event causes the broker to
-derive a `pr_lifecycle` interest for that PR, so `wait-for` receives PR/CI/review events without
-the worker calling `filter.register` manually. On `agent.checkout` the broker auto-deregisters
-the derived interests.
+The listen loop is enabled by [`catalyst-broker`](/observability/catalyst-broker/) auto-correlation
+(CTL-303): the worker's `agent.checkin {claimed_pr}` event causes the broker to derive a
+`pr_lifecycle` interest for that PR, so `wait-for` receives PR/CI/review events without the worker
+calling `filter.register` manually. On `agent.checkout` the broker auto-deregisters the derived
+interests.
 
 ## The global state
 
-In parallel with the signal file, workers also write to `~/catalyst/state.json` via `catalyst-state.sh worker`. This is the fleet-wide aggregate that the dashboard reads — it unifies workers across multiple orchestrators. Writes are atomic (jq + mkdir-based locking).
+In parallel with the signal file, workers also write to `~/catalyst/state.json` via
+`catalyst-state.sh worker`. This is the fleet-wide aggregate that the dashboard reads — it unifies
+workers across multiple orchestrators. Writes are atomic (jq + mkdir-based locking).
 
 Schema:
 
@@ -112,43 +136,51 @@ Schema:
       "wave": 2,
       "totalWaves": 3,
       "workers": {
-        "CTL-48": { /* same shape as signal file */ }
+        "CTL-48": {
+          /* same shape as signal file */
+        }
       },
-      "attention": [
-        { "type": "verification-failed", "ticket": "CTL-48", "message": "..." }
-      ]
+      "attention": [{ "type": "verification-failed", "ticket": "CTL-48", "message": "..." }]
     }
   }
 }
 ```
 
-The `attention` array is the orchestrator's way of flagging something that needs human decision. Never auto-resolved by the orchestrator itself.
+The `attention` array is the orchestrator's way of flagging something that needs human decision.
+Never auto-resolved by the orchestrator itself.
 
 ## Heartbeats
 
-During long phases (implementation, CI waits), workers update `lastHeartbeat` without changing status. The orch-monitor treats a worker as stalled if `now - lastHeartbeat > 15 minutes`. A stalled worker is never auto-restarted — it becomes an attention item.
+During long phases (implementation, CI waits), workers update `lastHeartbeat` without changing
+status. The orch-monitor treats a worker as stalled if `now - lastHeartbeat > 15 minutes`. A stalled
+worker is never auto-restarted — it becomes an attention item.
 
-If you're writing a custom worker, heartbeat every ~60s at minimum. More often is fine; less often trips false stalled detections.
+If you're writing a custom worker, heartbeat every ~60s at minimum. More often is fine; less often
+trips false stalled detections.
 
 ## Terminal states
 
 A worker reaches a terminal state in one of three ways:
 
-| State | Means | Signal writer |
-|-------|-------|---------------|
-| `done` | PR merged, Linear=Done | Worker (after executing merge); Orchestrator (fallback for stalled workers) |
-| `failed` | Unrecoverable error, quality gates exhausted, or human escalation | Worker (writes attention reason) |
-| `stalled` | Worker could not resolve a blocker (CI, reviews, conflicts) or no heartbeat for 15+ min | Worker (on unrecoverable blocker); Orchestrator (on heartbeat timeout) |
+| State     | Means                                                                                   | Signal writer                                                               |
+| --------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `done`    | PR merged, Linear=Done                                                                  | Worker (after executing merge); Orchestrator (fallback for stalled workers) |
+| `failed`  | Unrecoverable error, quality gates exhausted, or human escalation                       | Worker (writes attention reason)                                            |
+| `stalled` | Worker could not resolve a blocker (CI, reviews, conflicts) or no heartbeat for 15+ min | Worker (on unrecoverable blocker); Orchestrator (on heartbeat timeout)      |
 
-Terminal states set `completedAt`. No further writes to the signal file happen once terminal is reached.
+Terminal states set `completedAt`. No further writes to the signal file happen once terminal is
+reached.
 
 ## Why signal files and not IPC
 
 File-based signals are intentionally boring:
 
 - **Debuggable** with `cat workers/*.json | jq`
-- **Survive process death** on both sides — neither the worker crashing nor the orchestrator restarting destroys state
+- **Survive process death** on both sides — neither the worker crashing nor the orchestrator
+  restarting destroys state
 - **Atomic on POSIX** via tmp+rename writes
-- **Pickled history** — old signal files live in archived orchestrator dirs, so you can audit past waves
+- **Pickled history** — old signal files live in archived orchestrator dirs, so you can audit past
+  waves
 
-The cost is polling latency — the orch-monitor uses `fs.watch` to avoid polling, but some consumers do poll. That's fine for a one-machine setup; for multi-host you'd front this with a real event bus.
+The cost is polling latency — the orch-monitor uses `fs.watch` to avoid polling, but some consumers
+do poll. That's fine for a one-machine setup; for multi-host you'd front this with a real event bus.
