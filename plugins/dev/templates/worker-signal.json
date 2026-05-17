@@ -39,9 +39,10 @@
         "done",
         "failed",
         "stalled",
-        "remediation"
+        "remediation",
+        "turn-cap-exhausted"
       ],
-      "description": "Current worker status"
+      "description": "Current worker status. `turn-cap-exhausted` is a non-terminal status (CTL-484) written when a phase worker self-stops at its /goal turn cap; orchestrate-revive's continuation branch picks these up to dispatch a resumed worker with a fresh turn budget."
     },
     "phase": {
       "type": "integer",
@@ -227,6 +228,29 @@
       "type": ["string", "null"],
       "format": "date-time",
       "description": "ISO 8601 timestamp of the most recent auto-fixup dispatch by orchestrate-auto-fixup (CTL-64). For dashboard/telemetry only."
+    },
+    "continuationCount": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Number of continuation workers spawned for this ticket on turn-cap exhaustion (CTL-484). Distinct from reviveCount. Capped at MAX_CONTINUATIONS (default 3) before the worker stalls with attentionReason=continuation-budget-exhausted."
+    },
+    "continuations": {
+      "type": "array",
+      "description": "Audit log of continuation dispatches (CTL-484). Each entry records when a continuation worker was spawned, the resumed session ID, and the handoff doc the next worker reads to orient itself.",
+      "items": {
+        "type": "object",
+        "required": ["ts", "sessionId", "handoffPath"],
+        "properties": {
+          "ts": { "type": "string", "format": "date-time" },
+          "sessionId": { "type": "string" },
+          "handoffPath": { "type": "string" }
+        }
+      }
+    },
+    "handoffPath": {
+      "type": ["string", "null"],
+      "description": "Path to the structured handoff doc written by the worker before exiting at turn cap (CTL-484). Written by phase-agent-emit-complete --handoff-path to the per-phase signal file at workers/<TICKET>/phase-<name>.json; read by orchestrate-revive's continuation branch to populate CATALYST_HANDOFF_PATH on the resumed claude --bg invocation."
     },
     "postMergeVerification": {
       "type": ["object", "null"],

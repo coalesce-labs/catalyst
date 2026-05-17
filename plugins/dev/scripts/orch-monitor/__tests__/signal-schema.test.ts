@@ -184,4 +184,121 @@ describe("signal file validation", () => {
       expect(validateSignalFile({ ...baseSignal, status: "deployed-yay" })).toBe(false);
     });
   });
+
+  // CTL-484 — turn-cap exhaustion is a distinct non-terminal status; the
+  // continuation worker reads continuationCount + continuations[] to enforce
+  // a separate budget from reviveCount.
+  describe("CTL-484 turn-cap-exhausted lifecycle", () => {
+    const baseSignal = {
+      ticket: "CTL-484",
+      orchestrator: "orch-test",
+      workerName: "orch-test-CTL-484",
+      phase: 3,
+      startedAt: "2026-05-17T00:00:00Z",
+      updatedAt: "2026-05-17T00:30:00Z",
+    };
+
+    it("accepts status: turn-cap-exhausted (worker self-stopped at /goal cap)", () => {
+      expect(
+        validateSignalFile({ ...baseSignal, status: "turn-cap-exhausted" }),
+      ).toBe(true);
+    });
+
+    it("accepts continuationCount as a non-negative integer", () => {
+      expect(
+        validateSignalFile({
+          ...baseSignal,
+          status: "turn-cap-exhausted",
+          continuationCount: 2,
+        }),
+      ).toBe(true);
+      expect(
+        validateSignalFile({
+          ...baseSignal,
+          status: "implementing",
+          continuationCount: 0,
+        }),
+      ).toBe(true);
+    });
+
+    it("rejects negative continuationCount", () => {
+      expect(
+        validateSignalFile({
+          ...baseSignal,
+          status: "turn-cap-exhausted",
+          continuationCount: -1,
+        }),
+      ).toBe(false);
+    });
+
+    it("rejects non-integer continuationCount", () => {
+      expect(
+        validateSignalFile({
+          ...baseSignal,
+          status: "turn-cap-exhausted",
+          continuationCount: 1.5,
+        }),
+      ).toBe(false);
+      expect(
+        validateSignalFile({
+          ...baseSignal,
+          status: "turn-cap-exhausted",
+          continuationCount: "two",
+        }),
+      ).toBe(false);
+    });
+
+    it("accepts continuations[] with valid audit entries", () => {
+      expect(
+        validateSignalFile({
+          ...baseSignal,
+          status: "turn-cap-exhausted",
+          continuationCount: 2,
+          continuations: [
+            {
+              ts: "2026-05-17T00:10:00Z",
+              sessionId: "sess_abc",
+              handoffPath: "thoughts/shared/handoffs/CTL-484/2026-05-17_00-10-00_turn-cap-continuation.md",
+            },
+            {
+              ts: "2026-05-17T00:25:00Z",
+              sessionId: "sess_def",
+              handoffPath: "thoughts/shared/handoffs/CTL-484/2026-05-17_00-25-00_turn-cap-continuation.md",
+            },
+          ],
+        }),
+      ).toBe(true);
+    });
+
+    it("accepts empty continuations[] array", () => {
+      expect(
+        validateSignalFile({
+          ...baseSignal,
+          status: "implementing",
+          continuations: [],
+        }),
+      ).toBe(true);
+    });
+
+    it("rejects continuations entry missing required keys", () => {
+      expect(
+        validateSignalFile({
+          ...baseSignal,
+          status: "turn-cap-exhausted",
+          continuationCount: 1,
+          continuations: [{ ts: "2026-05-17T00:10:00Z", sessionId: "sess_abc" }],
+        }),
+      ).toBe(false);
+    });
+
+    it("rejects continuations that is not an array", () => {
+      expect(
+        validateSignalFile({
+          ...baseSignal,
+          status: "turn-cap-exhausted",
+          continuations: "not-an-array",
+        }),
+      ).toBe(false);
+    });
+  });
 });

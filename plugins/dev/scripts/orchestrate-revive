@@ -32,6 +32,11 @@ CLAUDE_BIN="${CATALYST_REVIVE_CLAUDE_BIN:-claude}"
 ORCH_DIR=""
 ORCH_ID=""
 MAX_REVIVES=10
+# CTL-484: continuation budget is distinct from the revive budget. Workers
+# that self-stopped at their /goal turn cap are bumping continuationCount,
+# not reviveCount — the operator can tell "this worker is making steady
+# progress and just needs more turns" apart from "this worker is failing".
+MAX_CONTINUATIONS=3
 STALE_HEARTBEAT_SECONDS=900
 WORKER_COMMAND="/catalyst-dev:oneshot"
 MODEL="opus"
@@ -47,6 +52,7 @@ while [[ $# -gt 0 ]]; do
     --orch-dir)                 ORCH_DIR="$2"; shift 2 ;;
     --orch-id)                  ORCH_ID="$2"; shift 2 ;;
     --max-revives)              MAX_REVIVES="$2"; shift 2 ;;
+    --max-continuations)        MAX_CONTINUATIONS="$2"; shift 2 ;;
     --stale-heartbeat-seconds)  STALE_HEARTBEAT_SECONDS="$2"; shift 2 ;;
     --worker-command)           WORKER_COMMAND="$2"; shift 2 ;;
     --model)                    MODEL="$2"; shift 2 ;;
@@ -277,6 +283,55 @@ spawn_revive_bg() {
   echo "pid:${pid}:${new_bg}"
 }
 
+# CTL-484: spawn a continuation worker for a turn-cap-exhausted phase agent.
+# Mirrors spawn_revive_bg but adds three env vars so the resumed session can
+# orient itself from the handoff doc without re-reading the full plan.
+# Returns "pid:<new_pid>:<new_bg_job_id>" on stdout (same shape as
+# spawn_revive_bg), or empty on failure.
+spawn_continuation_bg() {
+  local ticket="$1" worktree="$2" session_id="$3"
+  local handoff_path="$4" continuation_count="$5"
+
+  if [ ! -d "$worktree" ]; then
+    echo "ERROR: worktree missing for ${ticket}: ${worktree}" >&2
+    return 1
+  fi
+
+  local stdout_file="${ORCH_DIR}/workers/output/${ticket}-bg-stdout.log"
+  local stderr_file="${ORCH_DIR}/workers/output/${ticket}-bg-stderr.log"
+  mkdir -p "$(dirname "$stdout_file")"
+
+  (
+    cd "$worktree" || exit 1
+    CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+    CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+    CATALYST_IS_CONTINUATION=true \
+    CATALYST_HANDOFF_PATH="$handoff_path" \
+    CATALYST_CONTINUATION_COUNT="$continuation_count" \
+    exec nohup "$CLAUDE_BIN" \
+      --model "$MODEL" \
+      --dangerously-skip-permissions \
+      --bg \
+      --resume "$session_id"
+  ) > "$stdout_file" 2>> "$stderr_file" < /dev/null &
+
+  local pid=$!
+  disown "$pid" 2>/dev/null || true
+
+  local waited=0
+  while [ ! -s "$stdout_file" ] && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited+1))
+  done
+
+  local new_bg=""
+  if [ -s "$stdout_file" ]; then
+    new_bg=$(jq -r 'select(.id) | .id' "$stdout_file" 2>/dev/null | head -1)
+  fi
+
+  echo "pid:${pid}:${new_bg}"
+}
+
 # CTL-452: detect whether the worker is in phase-agents mode. Phase-mode
 # workers have a per-ticket subdirectory under workers/ containing one or
 # more phase-<name>.json signals, AND the top-level signal carries
@@ -320,6 +375,7 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   WORKER_NAME=$(jq -r '.workerName // empty' "$SIGNAL")
   LAST_HEARTBEAT=$(jq -r '.lastHeartbeat // .updatedAt // empty' "$SIGNAL")
   REVIVE_COUNT=$(jq -r '.reviveCount // 0' "$SIGNAL")
+  CONTINUATION_COUNT=$(jq -r '.continuationCount // 0' "$SIGNAL")
   LAST_API_ERROR_UUID=$(jq -r '.lastApiErrorUuid // ""' "$SIGNAL")
 
   # Skip workers that have already reached a terminal state.
@@ -329,6 +385,162 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   fi
 
   CHECKED=$((CHECKED+1))
+
+  # ─── CTL-484: turn-cap-exhausted continuation branch ────────────────────
+  #
+  # Workers that self-stopped at their /goal turn cap carry
+  # status=turn-cap-exhausted on the top-level signal and a handoffPath on
+  # the per-phase signal (written by phase-agent-emit-complete --handoff-path).
+  # The branch dispatches a continuation worker with three env vars so the
+  # resumed session reads the structured handoff instead of re-walking the
+  # plan, and bumps continuationCount on a budget separate from reviveCount.
+  #
+  # Defensive: if the handoff path is missing (emitter bug, partial write)
+  # we fall through to the regular liveness-driven revive path below so the
+  # worker isn't stranded.
+  if [ "$STATUS" = "turn-cap-exhausted" ] && is_phase_mode "$TICKET"; then
+    ACTIVE_PHASE=$(active_phase_of "$TICKET")
+    PHASE_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${ACTIVE_PHASE}.json"
+    HANDOFF_PATH=""
+    if [ -f "$PHASE_SIGNAL" ]; then
+      HANDOFF_PATH=$(jq -r '.handoffPath // ""' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+    fi
+
+    if [ -n "$HANDOFF_PATH" ]; then
+      TS=$(now_iso)
+
+      # Continuation budget check — separate from revive budget.
+      if [ "$CONTINUATION_COUNT" -ge "$MAX_CONTINUATIONS" ]; then
+        STALLED=$((STALLED+1))
+        MSG="Continuation budget exhausted after ${CONTINUATION_COUNT} attempts"
+        if [ "$DRY_RUN" -eq 1 ]; then
+          echo "[dry-run] ${TICKET}: ${MSG}" >&2
+          continue
+        fi
+        jq --arg ts "$TS" --arg msg "$MSG" \
+           '.status = "stalled"
+            | .attentionReason = "continuation-budget-exhausted"
+            | .attentionMessage = $msg
+            | .updatedAt = $ts
+            | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+           "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+        emit_state attention "$ORCH_ID" "continuation-budget-exhausted" "$TICKET" "$MSG"
+        emit_state event "$(jq -nc --arg ts "$TS" --arg orch "$ORCH_ID" \
+          --arg w "$TICKET" --argjson cc "$CONTINUATION_COUNT" \
+          '{ts:$ts, orchestrator:$orch, worker:$w,
+            event:"worker-continuation-budget-exhausted",
+            detail:{continuationCount:$cc}}')"
+        echo "CONTINUATION-BUDGET-EXHAUSTED: ${TICKET} (continuationCount=${CONTINUATION_COUNT})" >&2
+        continue
+      fi
+
+      # Resolve session_id for resume.
+      SESSION_ID=$(resolve_session_id "$TICKET" "$WORKER_NAME" || echo "")
+      if [ -z "$SESSION_ID" ]; then
+        STALLED=$((STALLED+1))
+        MSG="No session_id available for continuation"
+        if [ "$DRY_RUN" -eq 1 ]; then
+          echo "[dry-run] ${TICKET}: ${MSG}" >&2
+          continue
+        fi
+        jq --arg ts "$TS" --arg msg "$MSG" \
+           '.status = "stalled"
+            | .attentionReason = "no-session-id"
+            | .attentionMessage = $msg
+            | .updatedAt = $ts
+            | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+           "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+        emit_state attention "$ORCH_ID" "no-session-id" "$TICKET" "$MSG"
+        echo "NO-SESSION-ID: ${TICKET} (continuation)" >&2
+        continue
+      fi
+
+      if [ "$DRY_RUN" -eq 1 ]; then
+        echo "[dry-run] ${TICKET}: would continue via session ${SESSION_ID} from ${HANDOFF_PATH}" >&2
+        REVIVED=$((REVIVED+1))
+        continue
+      fi
+
+      # Spawn continuation worker.
+      NEW_CC=$((CONTINUATION_COUNT+1))
+      SPAWN_OUT=$(spawn_continuation_bg "$TICKET" "$WORKTREE" "$SESSION_ID" \
+                                         "$HANDOFF_PATH" "$NEW_CC" || echo "")
+      NEW_PID="${SPAWN_OUT#pid:}"
+      NEW_PID="${NEW_PID%%:*}"
+      NEW_BG_JOB_ID="${SPAWN_OUT##*:}"
+      [ "$NEW_BG_JOB_ID" = "$SPAWN_OUT" ] && NEW_BG_JOB_ID=""
+
+      if [ -z "$NEW_PID" ]; then
+        STALLED=$((STALLED+1))
+        MSG="Failed to spawn claude for continuation"
+        jq --arg ts "$TS" --arg msg "$MSG" \
+           '.status = "stalled"
+            | .attentionReason = "continuation-spawn-failed"
+            | .attentionMessage = $msg
+            | .updatedAt = $ts
+            | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+           "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+        emit_state attention "$ORCH_ID" "continuation-spawn-failed" "$TICKET" "$MSG"
+        continue
+      fi
+
+      REVIVED=$((REVIVED+1))
+      # Map ACTIVE_PHASE → top-level workflow status so the dashboard reflects
+      # what the continuation worker is actually doing. Phase names and
+      # workflow statuses are distinct vocabularies — the mapping keeps the
+      # status column meaningful for any phase wired to turn-cap-exhausted,
+      # not just implement (v1's only producer per the plan's non-goals).
+      case "$ACTIVE_PHASE" in
+        triage|research) NEW_TOP_STATUS="researching" ;;
+        plan)            NEW_TOP_STATUS="planning" ;;
+        implement)       NEW_TOP_STATUS="implementing" ;;
+        verify|review)   NEW_TOP_STATUS="validating" ;;
+        pr)              NEW_TOP_STATUS="shipping" ;;
+        monitor-merge)   NEW_TOP_STATUS="merging" ;;
+        monitor-deploy)  NEW_TOP_STATUS="deploying" ;;
+        *)               NEW_TOP_STATUS="implementing" ;;
+      esac
+      jq --arg ts "$TS" --arg sid "$SESSION_ID" --arg hp "$HANDOFF_PATH" \
+         --arg status "$NEW_TOP_STATUS" \
+         --argjson pid "$NEW_PID" --argjson cc "$NEW_CC" \
+         '.pid = $pid
+          | .continuationCount = $cc
+          | .lastHeartbeat = $ts
+          | .updatedAt = $ts
+          | .continuations = ((.continuations // []) + [{ts:$ts, sessionId:$sid, handoffPath:$hp}])
+          | .status = $status' \
+         "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+
+      # Phase-mode follow-up: clear the per-phase turn-cap-exhausted status
+      # and re-emit phase.<name>.dispatched so the broker re-arms its
+      # phase_lifecycle interest for the continued worker.
+      if [ -f "$PHASE_SIGNAL" ]; then
+        jq --arg ts "$TS" --arg bg "$NEW_BG_JOB_ID" \
+           '.status = "running"
+            | .updatedAt = $ts
+            | (if $bg == "" then . else .bg_job_id = $bg end)' \
+           "$PHASE_SIGNAL" > "${PHASE_SIGNAL}.tmp" && mv "${PHASE_SIGNAL}.tmp" "$PHASE_SIGNAL"
+        emit_state event "$(jq -nc \
+          --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+          --arg phase "$ACTIVE_PHASE" --arg sid "$SESSION_ID" --arg bg "$NEW_BG_JOB_ID" \
+          "{ts:\$ts, orchestrator:\$orch, worker:\$w,
+            event:(\"phase.\" + \$phase + \".dispatched\"),
+            detail:{phase:\$phase, sessionId:\$sid, bg_job_id:\$bg, continuation:true}}")"
+      fi
+
+      emit_state event "$(jq -nc --arg ts "$TS" --arg orch "$ORCH_ID" \
+        --arg w "$TICKET" --argjson pid "$NEW_PID" \
+        --argjson cc "$NEW_CC" --arg hp "$HANDOFF_PATH" --arg sid "$SESSION_ID" \
+        '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-continuation-spawned",
+          detail:{pid:$pid, sessionId:$sid, continuationCount:$cc, handoffPath:$hp}}')"
+
+      echo "CONTINUED: ${TICKET} (sid=${SESSION_ID}, pid=${NEW_PID}, count=${NEW_CC}, handoff=${HANDOFF_PATH})" >&2
+      continue
+    fi
+    # No handoff path → fall through to the regular revive flow below.
+    echo "warn: turn-cap-exhausted on ${TICKET} with no handoffPath; falling back to regular revive" >&2
+  fi
+  # ─── End CTL-484 continuation branch ────────────────────────────────────
 
   # Liveness decision (CTL-63 + CTL-62):
   #   - dead PID (kill -0 fails)

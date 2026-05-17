@@ -43,6 +43,16 @@ EOF
   echo "cwd=$(pwd)"
   echo "ORCH_DIR=${CATALYST_ORCHESTRATOR_DIR:-}"
   echo "ORCH_ID=${CATALYST_ORCHESTRATOR_ID:-}"
+  # CTL-484: continuation env vars (empty unless the continuation branch fired).
+  if [ -n "${CATALYST_IS_CONTINUATION:-}" ]; then
+    echo "CATALYST_IS_CONTINUATION=${CATALYST_IS_CONTINUATION}"
+  fi
+  if [ -n "${CATALYST_HANDOFF_PATH:-}" ]; then
+    echo "CATALYST_HANDOFF_PATH=${CATALYST_HANDOFF_PATH}"
+  fi
+  if [ -n "${CATALYST_CONTINUATION_COUNT:-}" ]; then
+    echo "CATALYST_CONTINUATION_COUNT=${CATALYST_CONTINUATION_COUNT}"
+  fi
   echo "args: $*"
 } >> "$CLAUDE_LOG"
 # Long-running placeholder so kill-0 succeeds for the test window.
@@ -365,6 +375,192 @@ run_revive > "${SCRATCH}/out" 2>&1
 RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/TOOL-ERR.json")
 [ "$RC" = "0" ] && pass "tool-error: non-API is_error does not revive" \
   || fail "tool-error: non-API is_error does not revive" "rc: $RC"
+scratch_teardown
+
+# ─── CTL-484: turn-cap-exhausted continuation branch ────────────────────────
+
+# Helper — build a phase-mode worker with status=turn-cap-exhausted and a
+# per-phase signal carrying a handoffPath. The continuation branch consumes
+# both the top-level signal status and the per-phase handoffPath.
+make_turn_cap_worker() {
+  local ticket="$1" phase="${2:-implement}" handoff="${3:-thoughts/shared/handoffs/T/2026-05-17_00-00-00_turn-cap-continuation.md}"
+  local cc="${4:-0}"
+  local worktree="${WORKTREE_ROOT}/${ticket}"
+  mkdir -p "$worktree" "${ORCH_DIR}/workers/${ticket}"
+  local updated; updated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq -n \
+    --arg t "$ticket" --arg u "$updated" \
+    --arg wt "$worktree" --arg wn "test-${ticket}" \
+    --arg phase "$phase" --argjson cc "$cc" \
+    '{ticket:$t, orchestrator:"test", workerName:$wn,
+      status:"turn-cap-exhausted", phase:3,
+      pid:null, worktreePath:$wt, startedAt:$u, updatedAt:$u,
+      lastHeartbeat:$u,
+      phaseMode:true, activePhase:$phase,
+      continuationCount:$cc}' \
+    > "${ORCH_DIR}/workers/${ticket}.json"
+  # Per-phase signal carries the handoffPath written by phase-agent-emit-complete.
+  jq -n --arg phase "$phase" --arg status "turn-cap-exhausted" \
+        --arg hp "$handoff" --arg reason "turn cap hit (75)" \
+    '{phase:$phase, status:$status, handoffPath:$hp, failureReason:$reason}' \
+    > "${ORCH_DIR}/workers/${ticket}/phase-${phase}.json"
+}
+
+echo "test (CTL-484): turn-cap-exhausted triggers continuation branch (separate budget)"
+scratch_setup
+HANDOFF="thoughts/shared/handoffs/CONT-1/2026-05-17_00-00-00_turn-cap-continuation.md"
+make_turn_cap_worker "CONT-1" "implement" "$HANDOFF" 0
+write_stream_init "CONT-1" "sess-cont-1"
+run_revive > "${SCRATCH}/out" 2>&1
+CC=$(jq -r '.continuationCount // 0' "${ORCH_DIR}/workers/CONT-1.json")
+RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/CONT-1.json")
+ENTRIES=$(jq -r '.continuations | length' "${ORCH_DIR}/workers/CONT-1.json")
+FIRST_HP=$(jq -r '.continuations[0].handoffPath // ""' "${ORCH_DIR}/workers/CONT-1.json")
+FIRST_SID=$(jq -r '.continuations[0].sessionId // ""' "${ORCH_DIR}/workers/CONT-1.json")
+[ "$CC" = "1" ] && pass "continuationCount bumped to 1" || fail "continuationCount bumped to 1" "got: $CC"
+[ "$RC" = "0" ] && pass "reviveCount unchanged (budgets are separate)" || fail "reviveCount unchanged" "got: $RC"
+[ "$ENTRIES" = "1" ] && pass "continuations[] audit entry appended" || fail "continuations[] audit entry appended" "got: $ENTRIES"
+[ "$FIRST_HP" = "$HANDOFF" ] && pass "continuations[0].handoffPath recorded" || fail "continuations[0].handoffPath recorded" "got: $FIRST_HP"
+[ "$FIRST_SID" = "sess-cont-1" ] && pass "continuations[0].sessionId recorded" || fail "continuations[0].sessionId recorded" "got: $FIRST_SID"
+grep -q "CATALYST_IS_CONTINUATION=true" "$CLAUDE_LOG" && pass "claude launched with CATALYST_IS_CONTINUATION=true" || fail "CATALYST_IS_CONTINUATION env var passed" "log: $(cat "$CLAUDE_LOG")"
+grep -q "CATALYST_HANDOFF_PATH=${HANDOFF}" "$CLAUDE_LOG" && pass "claude launched with CATALYST_HANDOFF_PATH" || fail "CATALYST_HANDOFF_PATH env var passed" "log: $(cat "$CLAUDE_LOG")"
+grep -q "CATALYST_CONTINUATION_COUNT=1" "$CLAUDE_LOG" && pass "claude launched with CATALYST_CONTINUATION_COUNT=1" || fail "CATALYST_CONTINUATION_COUNT env var passed" "log: $(cat "$CLAUDE_LOG")"
+grep -q -- "--resume sess-cont-1" "$CLAUDE_LOG" && pass "claude resumed prior session_id" || fail "claude resumed prior session_id" "log: $(cat "$CLAUDE_LOG")"
+grep -q "worker-continuation-spawned" "$STATE_LOG" && pass "worker-continuation-spawned event emitted" || fail "worker-continuation-spawned event emitted" "log: $(cat "$STATE_LOG")"
+scratch_teardown
+
+echo "test (CTL-484): continuation budget exhausted → stalled with attentionReason=continuation-budget-exhausted"
+scratch_setup
+HANDOFF="thoughts/shared/handoffs/CONT-2/2026-05-17_00-00-00_turn-cap-continuation.md"
+make_turn_cap_worker "CONT-2" "implement" "$HANDOFF" 3
+write_stream_init "CONT-2" "sess-cont-2"
+run_revive --max-continuations 3 > "${SCRATCH}/out" 2>&1
+STATUS=$(jq -r '.status' "${ORCH_DIR}/workers/CONT-2.json")
+REASON=$(jq -r '.attentionReason // ""' "${ORCH_DIR}/workers/CONT-2.json")
+CC=$(jq -r '.continuationCount // 0' "${ORCH_DIR}/workers/CONT-2.json")
+RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/CONT-2.json")
+[ "$STATUS" = "stalled" ] && pass "continuation cap → stalled" || fail "continuation cap → stalled" "got: $STATUS"
+[ "$REASON" = "continuation-budget-exhausted" ] && pass "attentionReason = continuation-budget-exhausted" || fail "attentionReason" "got: $REASON"
+[ "$CC" = "3" ] && pass "continuationCount preserved at budget" || fail "continuationCount preserved" "got: $CC"
+[ "$RC" = "0" ] && pass "reviveCount NOT bumped on continuation cap" || fail "reviveCount NOT bumped on continuation cap" "got: $RC"
+grep -q "attention demo continuation-budget-exhausted CONT-2" "$STATE_LOG" && pass "continuation attention raised" || fail "continuation attention raised" "log: $(cat "$STATE_LOG")"
+grep -q "worker-continuation-budget-exhausted" "$STATE_LOG" && pass "worker-continuation-budget-exhausted event emitted" || fail "worker-continuation-budget-exhausted event emitted" "log: $(cat "$STATE_LOG")"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude not invoked when continuation budget exhausted" || fail "claude not invoked when continuation budget exhausted"
+scratch_teardown
+
+echo "test (CTL-484): turn-cap-exhausted with missing handoffPath falls through to regular revive"
+scratch_setup
+make_turn_cap_worker "CONT-3" "implement" "" 0
+# Clear handoffPath in per-phase signal to simulate emitter bug / partial write.
+jq '.handoffPath = null' "${ORCH_DIR}/workers/CONT-3/phase-implement.json" \
+  > "${ORCH_DIR}/workers/CONT-3/phase-implement.json.tmp" \
+  && mv "${ORCH_DIR}/workers/CONT-3/phase-implement.json.tmp" \
+        "${ORCH_DIR}/workers/CONT-3/phase-implement.json"
+# Also need to NOT be in turn-cap-exhausted continuation branch when handoff
+# missing — the worker's signal still says turn-cap-exhausted (terminal-ish
+# for orchestrate-revive's normal skip), so falling through means treating it
+# like a normal revivable worker. Make the PID dead so liveness picks it up.
+jq --argjson pid "$DEAD_PID" '.pid = $pid' "${ORCH_DIR}/workers/CONT-3.json" \
+  > "${ORCH_DIR}/workers/CONT-3.json.tmp" \
+  && mv "${ORCH_DIR}/workers/CONT-3.json.tmp" "${ORCH_DIR}/workers/CONT-3.json"
+write_stream_init "CONT-3" "sess-cont-3"
+run_revive > "${SCRATCH}/out" 2>&1
+# Continuation branch should NOT fire (no handoff path), and the regular
+# revive branch should pick it up — reviveCount bumps, continuationCount stays 0.
+CC=$(jq -r '.continuationCount // 0' "${ORCH_DIR}/workers/CONT-3.json")
+RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/CONT-3.json")
+[ "$CC" = "0" ] && pass "continuationCount stays 0 when handoffPath missing" || fail "continuationCount stays 0 when handoffPath missing" "got: $CC"
+[ "$RC" = "1" ] && pass "reviveCount bumps (fell through to revive)" || fail "reviveCount bumps" "got: $RC"
+scratch_teardown
+
+echo "test (CTL-484): continuation with no resolvable session_id stalls with no-session-id"
+scratch_setup
+HANDOFF="thoughts/shared/handoffs/CONT-NS/2026-05-17_00-00-00_turn-cap-continuation.md"
+make_turn_cap_worker "CONT-NS" "implement" "$HANDOFF" 0
+# No stream init file, no legacy output.json — resolve_session_id will return empty.
+run_revive > "${SCRATCH}/out" 2>&1
+STATUS=$(jq -r '.status' "${ORCH_DIR}/workers/CONT-NS.json")
+REASON=$(jq -r '.attentionReason // ""' "${ORCH_DIR}/workers/CONT-NS.json")
+CC=$(jq -r '.continuationCount // 0' "${ORCH_DIR}/workers/CONT-NS.json")
+[ "$STATUS" = "stalled" ] && pass "no session_id on continuation → stalled" || fail "no session_id on continuation → stalled" "got: $STATUS"
+[ "$REASON" = "no-session-id" ] && pass "attentionReason = no-session-id (continuation branch)" || fail "attentionReason = no-session-id (continuation branch)" "got: $REASON"
+[ "$CC" = "0" ] && pass "continuationCount NOT bumped when session_id missing" || fail "continuationCount NOT bumped when session_id missing" "got: $CC"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude not invoked when session_id missing on continuation" || fail "claude not invoked when session_id missing on continuation"
+scratch_teardown
+
+echo "test (CTL-484): continuation spawn failure stalls with continuation-spawn-failed"
+scratch_setup
+HANDOFF="thoughts/shared/handoffs/CONT-SF/2026-05-17_00-00-00_turn-cap-continuation.md"
+make_turn_cap_worker "CONT-SF" "implement" "$HANDOFF" 0
+write_stream_init "CONT-SF" "sess-cont-sf"
+# Override CLAUDE_BIN with one that exits non-zero and writes nothing to stdout —
+# spawn_continuation_bg waits up to 5s for stdout to materialize then returns
+# pid=<empty>:<empty>, which the branch interprets as spawn failure.
+cat > "${SCRATCH}/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "${SCRATCH}/bin/claude"
+# Force-shorten the spawn wait by writing the bg-stdout file ahead of time as empty
+# (test would otherwise sleep 5s).
+touch "${ORCH_DIR}/workers/output/CONT-SF-bg-stdout.log"
+run_revive > "${SCRATCH}/out" 2>&1
+STATUS=$(jq -r '.status' "${ORCH_DIR}/workers/CONT-SF.json")
+REASON=$(jq -r '.attentionReason // ""' "${ORCH_DIR}/workers/CONT-SF.json")
+CC=$(jq -r '.continuationCount // 0' "${ORCH_DIR}/workers/CONT-SF.json")
+# spawn_continuation_bg always returns "pid:<pid>:" (with the parent's pid even if
+# claude exits 1), so NEW_PID is never empty under our stub. The realistic spawn
+# failure is when the worktree is missing. Test that variant instead — same code
+# path.
+if [ "$CC" = "1" ]; then
+  # spawn appeared to succeed (stub limitation); rather than skip, switch to the
+  # missing-worktree variant which DOES return empty pid.
+  scratch_teardown
+  scratch_setup
+  HANDOFF="thoughts/shared/handoffs/CONT-WT/2026-05-17_00-00-00_turn-cap-continuation.md"
+  make_turn_cap_worker "CONT-WT" "implement" "$HANDOFF" 0
+  write_stream_init "CONT-WT" "sess-cont-wt"
+  # Rewrite worktreePath to a non-existent directory so spawn_continuation_bg
+  # returns "" (the missing-worktree guard at the top of the helper).
+  jq '.worktreePath = "/nonexistent/path/that/does/not/exist"' \
+    "${ORCH_DIR}/workers/CONT-WT.json" > "${ORCH_DIR}/workers/CONT-WT.json.tmp" \
+    && mv "${ORCH_DIR}/workers/CONT-WT.json.tmp" "${ORCH_DIR}/workers/CONT-WT.json"
+  run_revive > "${SCRATCH}/out" 2>&1
+  STATUS=$(jq -r '.status' "${ORCH_DIR}/workers/CONT-WT.json")
+  REASON=$(jq -r '.attentionReason // ""' "${ORCH_DIR}/workers/CONT-WT.json")
+  CC=$(jq -r '.continuationCount // 0' "${ORCH_DIR}/workers/CONT-WT.json")
+  [ "$STATUS" = "stalled" ] && pass "spawn failure → stalled" || fail "spawn failure → stalled" "got: $STATUS"
+  [ "$REASON" = "continuation-spawn-failed" ] && pass "attentionReason = continuation-spawn-failed" || fail "attentionReason = continuation-spawn-failed" "got: $REASON"
+  [ "$CC" = "0" ] && pass "continuationCount NOT bumped on spawn failure" || fail "continuationCount NOT bumped on spawn failure" "got: $CC"
+else
+  [ "$STATUS" = "stalled" ] && pass "spawn failure → stalled" || fail "spawn failure → stalled" "got: $STATUS"
+  [ "$REASON" = "continuation-spawn-failed" ] && pass "attentionReason = continuation-spawn-failed" || fail "attentionReason = continuation-spawn-failed" "got: $REASON"
+  [ "$CC" = "0" ] && pass "continuationCount NOT bumped on spawn failure" || fail "continuationCount NOT bumped on spawn failure" "got: $CC"
+fi
+scratch_teardown
+
+echo "test (CTL-484): continuation maps activePhase → workflow status (verify → validating)"
+scratch_setup
+HANDOFF="thoughts/shared/handoffs/CONT-V/2026-05-17_00-00-00_turn-cap-continuation.md"
+make_turn_cap_worker "CONT-V" "verify" "$HANDOFF" 0
+write_stream_init "CONT-V" "sess-cont-v"
+run_revive > "${SCRATCH}/out" 2>&1
+TOP_STATUS=$(jq -r '.status' "${ORCH_DIR}/workers/CONT-V.json")
+CC=$(jq -r '.continuationCount // 0' "${ORCH_DIR}/workers/CONT-V.json")
+[ "$CC" = "1" ] && pass "continuation fired for non-implement phase" || fail "continuation fired for non-implement phase" "got: $CC"
+[ "$TOP_STATUS" = "validating" ] && pass "verify-phase continuation → status=validating (not implementing)" || fail "verify-phase continuation → status=validating" "got: $TOP_STATUS"
+scratch_teardown
+
+echo "test (CTL-484): regression — non-turn-cap workers still use revive branch, not continuation"
+scratch_setup
+make_signal "REG-1" "$DEAD_PID" "implementing" 3
+write_stream_init "REG-1" "sess-reg-1"
+run_revive > "${SCRATCH}/out" 2>&1
+CC=$(jq -r '.continuationCount // 0' "${ORCH_DIR}/workers/REG-1.json")
+RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/REG-1.json")
+[ "$CC" = "0" ] && pass "regression: regular dead worker — continuationCount stays 0" || fail "regression: continuationCount stays 0" "got: $CC"
+[ "$RC" = "1" ] && pass "regression: regular dead worker — reviveCount bumps" || fail "regression: reviveCount bumps" "got: $RC"
+[ -z "$(grep CATALYST_IS_CONTINUATION "$CLAUDE_LOG" 2>/dev/null)" ] && pass "regression: CATALYST_IS_CONTINUATION not set for normal revive" || fail "regression: CATALYST_IS_CONTINUATION leaked"
 scratch_teardown
 
 # ─── Results ──────────────────────────────────────────────────────────────────

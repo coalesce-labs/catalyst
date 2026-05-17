@@ -65,6 +65,14 @@ export interface WorkerState {
   prMergedAt?: string | null;
   fixupCommit?: string;
   followUpTo?: string;
+  /**
+   * Continuation-worker bookkeeping (CTL-484). `continuationCount` is bumped
+   * by orchestrate-revive's continuation branch each time it spawns a resumed
+   * worker after a turn-cap exhaustion event. `continuations` is the audit
+   * log of those dispatches.
+   */
+  continuationCount?: number;
+  continuations?: Array<{ ts: string; sessionId: string; handoffPath: string }>;
   previews?: Array<{
     url: string;
     provider: string;
@@ -380,6 +388,36 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
       ? signal.followUpTo
       : undefined;
 
+  // CTL-484 — continuation-budget bookkeeping. Preserve absence (undefined)
+  // rather than defaulting to 0 in the reader so downstream consumers can
+  // distinguish "field never written" from "field written as 0".
+  const continuationCount =
+    typeof signal.continuationCount === "number" &&
+    Number.isInteger(signal.continuationCount) &&
+    signal.continuationCount >= 0
+      ? signal.continuationCount
+      : undefined;
+
+  let continuations: WorkerState["continuations"] = undefined;
+  if (Array.isArray(signal.continuations)) {
+    const entries: Array<{ ts: string; sessionId: string; handoffPath: string }> = [];
+    for (const raw of signal.continuations) {
+      if (!isRecord(raw)) continue;
+      if (
+        typeof raw.ts === "string" &&
+        typeof raw.sessionId === "string" &&
+        typeof raw.handoffPath === "string"
+      ) {
+        entries.push({
+          ts: raw.ts,
+          sessionId: raw.sessionId,
+          handoffPath: raw.handoffPath,
+        });
+      }
+    }
+    continuations = entries;
+  }
+
   // CTL-211 — surface the orchestrator-written deploy block so the dashboard
   // can render a Deploy column without re-reading signal files.
   let deploy: WorkerState["deploy"] = undefined;
@@ -429,6 +467,8 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
     cost,
     fixupCommit,
     followUpTo,
+    continuationCount,
+    continuations,
     deploy,
   };
 }

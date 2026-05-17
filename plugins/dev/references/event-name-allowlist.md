@@ -59,6 +59,21 @@ the wire:
 - `github.pr.merged` — drives `pr_merged` (when ticket id matches PR title/body/branch)
 - `github.pr.closed` — body-text ticket extraction (same scoping as opened/merged)
 
+## phase_lifecycle
+
+Source: `plugins/dev/scripts/broker/index.mjs:1297` (`PHASE_EVENT_PATTERN`)
++ `plugins/dev/scripts/broker/index.mjs:1299-1330` (`tryPhaseLifecycleRoute`).
+
+Phase-agent orchestration (CTL-447 + CTL-484) routes these on the wire:
+
+- `phase.<name>.complete.<TICKET>` — phase agent finished its `/goal` successfully
+- `phase.<name>.failed.<TICKET>` — phase agent exited with an unrecoverable error (payload `failure_reason` carries the agent's self-reported reason)
+- `phase.<name>.turn-cap-exhausted.<TICKET>` — phase agent self-stopped at its `/goal`-evaluated turn cap (CTL-484). Distinct from `failed` so `orchestrate-revive` can dispatch a continuation worker on a separate budget. Payload carries `failure_reason` ("turn cap hit (N)") and `handoff_path` pointing at the structured handoff doc the resumed worker reads to orient itself.
+
+`<name>` is a phase identifier — one of `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`. `<TICKET>` matches `[A-Za-z][A-Za-z0-9_]*-\d+` (e.g. `CTL-484`).
+
+Interest registration uses `interest_type: "phase_lifecycle"` with `ticket` + `phase_names: [...]`. The broker matches the interest's ticket and any phase in `phase_names`; statuses are not filterable at the interest level (the orchestrator's wake handler branches on the event name).
+
 ## comms_lifecycle
 
 Source: `plugins/dev/scripts/broker/index.mjs:682-706` (`matchCommsLifecycle`).

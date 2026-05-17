@@ -24,6 +24,9 @@ const VALID_STATUSES = new Set([
   "failed",
   "stalled",
   "remediation",
+  // CTL-484: worker self-stopped at /goal-evaluated turn cap. Non-terminal —
+  // orchestrate-revive's continuation branch picks these up.
+  "turn-cap-exhausted",
   // Tolerant extras that show up in practice / tests:
   "in_progress",
 ]);
@@ -67,6 +70,24 @@ export function validateSignalFile(obj: unknown): boolean {
   }
   if ("followUpTo" in o && o.followUpTo !== null && o.followUpTo !== undefined) {
     if (typeof o.followUpTo !== "string" || o.followUpTo.length === 0) return false;
+  }
+
+  // CTL-484 — continuation-budget bookkeeping. Distinct from reviveCount so the
+  // operator can tell "this worker is making steady progress and just needs
+  // more turns" apart from "this worker is failing and needs help".
+  if ("continuationCount" in o && o.continuationCount !== null && o.continuationCount !== undefined) {
+    if (typeof o.continuationCount !== "number" || !Number.isInteger(o.continuationCount)) return false;
+    if (o.continuationCount < 0) return false;
+  }
+  if ("continuations" in o && o.continuations !== null && o.continuations !== undefined) {
+    if (!Array.isArray(o.continuations)) return false;
+    for (const entry of o.continuations) {
+      if (entry === null || typeof entry !== "object") return false;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.ts !== "string" || !isIsoDateTimeString(e.ts)) return false;
+      if (typeof e.sessionId !== "string" || e.sessionId.length === 0) return false;
+      if (typeof e.handoffPath !== "string" || e.handoffPath.length === 0) return false;
+    }
   }
 
   return true;

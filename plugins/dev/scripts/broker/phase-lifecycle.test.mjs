@@ -125,6 +125,47 @@ describe("phase_lifecycle interest type", () => {
     expect(matches[0].reason).toContain("CTL-100");
   });
 
+  // Test 4b — CTL-484: turn-cap-exhausted is a distinct status the broker
+  // routes alongside complete/failed so orchestrate-revive can branch into
+  // its continuation flow with a separate budget.
+  test("phase.<name>.turn-cap-exhausted.<ticket> events fire a wake with a turn-cap reason", () => {
+    registerPhaseInterest({ phaseNames: ["implement"] });
+    const matches = tryPhaseLifecycleRoute(
+      {
+        ts: "2026-05-17T05:00:00Z",
+        attributes: { "event.name": "phase.implement.turn-cap-exhausted.CTL-100" },
+        body: {
+          payload: {
+            ticket: "CTL-100",
+            phase: "implement",
+            failure_reason: "turn cap hit (75)",
+            handoff_path:
+              "thoughts/shared/handoffs/CTL-100/2026-05-17_05-00-00_turn-cap-continuation.md",
+          },
+        },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("watcher-1");
+    expect(matches[0].reason).toMatch(/turn-cap-exhausted/i);
+    expect(matches[0].reason).toContain("CTL-100");
+  });
+
+  // Test 4c — regression: unknown statuses still fall through (no wake).
+  test("phase.<name>.<unknown>.<ticket> events are NOT routed", () => {
+    registerPhaseInterest({ phaseNames: ["implement"] });
+    const matches = tryPhaseLifecycleRoute(
+      {
+        ts: "2026-05-17T05:00:00Z",
+        attributes: { "event.name": "phase.implement.maybe-done.CTL-100" },
+        body: { payload: { ticket: "CTL-100", phase: "implement" } },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(0);
+  });
+
   // Test 5
   test("agent.checkout removes a phase_lifecycle interest registered with that session_id", () => {
     registerPhaseInterest({ interestId: "sess-A", sessionId: "sess-A" });

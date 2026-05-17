@@ -1290,11 +1290,16 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
 // Wakes registered sessions on phase boundary events of the shape
 //   phase.<name>.complete.<ticket>
 //   phase.<name>.failed.<ticket>
+//   phase.<name>.turn-cap-exhausted.<ticket>   (CTL-484)
 //
 // where <name> matches one of the interest's phase_names and <ticket> matches
 // the interest's ticket. Used by the phase-agent orchestrator to coordinate
 // hand-off between short-lived phase agents (see plan §Initiative 1).
-const PHASE_EVENT_PATTERN = /^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+//
+// CTL-484: turn-cap-exhausted is routed alongside complete/failed so the
+// orchestrator can dispatch a continuation worker (separate budget from the
+// error-revive path) without an event-name namespace collision.
+const PHASE_EVENT_PATTERN = /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
 
 export function tryPhaseLifecycleRoute(event, interestsMap) {
   const matches = [];
@@ -1314,7 +1319,9 @@ export function tryPhaseLifecycleRoute(event, interestsMap) {
     const reason =
       status === "complete"
         ? `Phase ${phaseName} complete on ${ticket}`
-        : `Phase ${phaseName} failed on ${ticket}`;
+        : status === "turn-cap-exhausted"
+          ? `Phase ${phaseName} turn-cap-exhausted on ${ticket}`
+          : `Phase ${phaseName} failed on ${ticket}`;
     matches.push({
       interestId,
       reason,
