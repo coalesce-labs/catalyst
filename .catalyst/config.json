@@ -9,9 +9,11 @@
       "stateMap": {
         "backlog": "Backlog",
         "todo": "Backlog",
-        "research": "In Progress",
-        "planning": "In Progress",
+        "research": "Research",
+        "planning": "Planning",
         "inProgress": "In Progress",
+        "verifying": "In Progress",
+        "reviewing": "In Progress",
         "inReview": "In Review",
         "done": "Done",
         "canceled": "Canceled"

@@ -54,6 +54,8 @@ build_config() {
         "research": "In Progress",
         "planning": "In Progress",
         "inProgress": "In Progress",
+        "verifying": "In Progress",
+        "reviewing": "In Progress",
         "inReview": "In Review",
         "done": "Done",
         "canceled": "Canceled",
@@ -386,6 +388,108 @@ run "oneshot SKILL.md references linear-transition.sh" \
 MERGE_SKILL="${REPO_ROOT}/plugins/dev/skills/merge-pr/SKILL.md"
 run "merge-pr SKILL.md uses linear-transition.sh" \
   bash -c "grep -q 'linear-transition.sh' '$MERGE_SKILL'"
+
+# ─── Test 20: verifying transition uses stateMap.verifying from config ────
+# Phase-agent observability (CTL-454). New transition keys for the verify and
+# review phase agents. Until the user creates dedicated Linear states, both
+# default to "In Progress" so dispatching the new transitions never errors.
+WORK20="${SCRATCH}/t20"
+BIN20="${SCRATCH}/t20/bin"
+LOG20="${SCRATCH}/t20/log"
+build_config "$WORK20"
+install_fake_linearis "$BIN20"
+touch "$LOG20"
+
+run "verifying transition uses stateMap.verifying from config" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG20' PATH='$BIN20:$PATH' \
+    '$TRANSITION' --ticket TST-20 --transition verifying --config '$WORK20/.catalyst/config.json'"
+
+run "verifying update call recorded with correct status" \
+  expect_contains "$LOG20" "linearis issues update TST-20 --status In Progress"
+
+# ─── Test 21: reviewing transition uses stateMap.reviewing from config ────
+WORK21="${SCRATCH}/t21"
+BIN21="${SCRATCH}/t21/bin"
+LOG21="${SCRATCH}/t21/log"
+build_config "$WORK21"
+install_fake_linearis "$BIN21"
+touch "$LOG21"
+
+run "reviewing transition uses stateMap.reviewing from config" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG21' PATH='$BIN21:$PATH' \
+    '$TRANSITION' --ticket TST-21 --transition reviewing --config '$WORK21/.catalyst/config.json'"
+
+run "reviewing update call recorded with correct status" \
+  expect_contains "$LOG21" "linearis issues update TST-21 --status In Progress"
+
+# ─── Test 22: verifying falls back to default 'In Progress' when stateMap missing
+# A bare-bones config without the verifying key must still resolve via
+# default_state_for() rather than erroring with "could not resolve target state".
+WORK22="${SCRATCH}/t22"
+BIN22="${SCRATCH}/t22/bin"
+LOG22="${SCRATCH}/t22/log"
+mkdir -p "${WORK22}/.catalyst"
+cat > "${WORK22}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"linear":{}}}
+EOF
+install_fake_linearis "$BIN22"
+touch "$LOG22"
+
+run "falls back to default 'In Progress' for verifying when stateMap missing" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG22' PATH='$BIN22:$PATH' \
+    '$TRANSITION' --ticket TST-22 --transition verifying --config '$WORK22/.catalyst/config.json'"
+
+run "default In Progress used for verifying when config has no stateMap" \
+  expect_contains "$LOG22" "linearis issues update TST-22 --status In Progress"
+
+# ─── Test 23: reviewing falls back to default 'In Progress' when stateMap missing
+WORK23="${SCRATCH}/t23"
+BIN23="${SCRATCH}/t23/bin"
+LOG23="${SCRATCH}/t23/log"
+mkdir -p "${WORK23}/.catalyst"
+cat > "${WORK23}/.catalyst/config.json" <<'EOF'
+{"catalyst":{"linear":{}}}
+EOF
+install_fake_linearis "$BIN23"
+touch "$LOG23"
+
+run "falls back to default 'In Progress' for reviewing when stateMap missing" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG23' PATH='$BIN23:$PATH' \
+    '$TRANSITION' --ticket TST-23 --transition reviewing --config '$WORK23/.catalyst/config.json'"
+
+run "default In Progress used for reviewing when config has no stateMap" \
+  expect_contains "$LOG23" "linearis issues update TST-23 --status In Progress"
+
+# ─── Test 24: verifying honors custom configured state name ────────────────
+# Post-Linear-admin behavior: once the user creates a "Verifying" workflow
+# state in Linear and points stateMap.verifying at it, the script must pass
+# that name through to linearis instead of the default.
+WORK24="${SCRATCH}/t24"
+BIN24="${SCRATCH}/t24/bin"
+LOG24="${SCRATCH}/t24/log"
+mkdir -p "${WORK24}/.catalyst"
+cat > "${WORK24}/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "linear": {
+      "teamKey": "TST",
+      "stateMap": {
+        "verifying": "Verifying",
+        "reviewing": "Reviewing"
+      }
+    }
+  }
+}
+EOF
+install_fake_linearis "$BIN24"
+touch "$LOG24"
+
+run "verifying honors custom 'Verifying' state name from config" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG24' PATH='$BIN24:$PATH' \
+    '$TRANSITION' --ticket TST-24 --transition verifying --config '$WORK24/.catalyst/config.json'"
+
+run "custom Verifying state passed to linearis" \
+  expect_contains "$LOG24" "linearis issues update TST-24 --status Verifying"
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
