@@ -268,9 +268,12 @@ appears in the events log specifically so orchestrators know to re-register thei
 interests — not for human debugging. Broker errors that surface a named event go
 to both; ordinary daemon noise goes only to `broker.log`.
 
-**Known gap (as of 2026-05-17):** `catalyst-hud` scans only flat `workers/*.json`;
-per-phase `workers/<TICKET>/phase-<name>.json` files written by `phase-agent-dispatch`
-are not yet surfaced. See `worker-signals-reader.ts::scanOrchestratorWorkersDir`.
+`catalyst-hud` surfaces both layouts: flat `workers/*.json` and per-phase
+`workers/<TICKET>/phase-<name>.json`. The reader
+(`worker-signals-reader.ts::scanOrchestratorWorkersDir`) descends one level into
+per-ticket subdirectories, picks the most recent non-terminal phase, and overlays
+its `phaseName`/`status` onto the flat signal so the PHASE column shows the live
+phase (e.g. `implement`, `monitor-merge`).
 
 ## On Claude Code's "agent view" / agents sidebar
 

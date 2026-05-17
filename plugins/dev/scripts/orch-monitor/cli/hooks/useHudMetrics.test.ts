@@ -16,6 +16,7 @@ function worker(overrides: Partial<WorkerSignal>): WorkerSignal {
     label: null,
     status: "researching",
     phase: 1,
+    phaseName: null,
     phaseTimestamps: {},
     lastHeartbeat: null,
     startedAt: null,
