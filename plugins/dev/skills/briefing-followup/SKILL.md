@@ -220,7 +220,52 @@ Per-decision the user may attach a one-line note (e.g., why they rejected, what 
 calendar event is for). Pass it as the third argument to `log_response` and, when
 relevant, as `--description` / `--body` to the action handler.
 
-## Step 5: End session
+## Step 5: Write resolutions back to the briefing markdown (Phase 4 — CTL-465)
+
+Before ending the session, persist the recorded resolutions into the briefing
+markdown's frontmatter `resolutions:` block and append a "## Decisions Made
+Today" section to the body. The script commits to the routine-scoped branch
+(when running inside the morning-briefing routine's writable clone) and emits
+a `briefing.followup.complete.<date>` event so the next morning's briefing
+routine can surface yesterday's decisions as carryovers.
+
+```bash
+WRITEBACK_RESULT=$(bash "$SCRIPT_DIR/writeback.sh" \
+  --briefing "$BRIEFING_PATH" \
+  --resolutions "$LOG_DIR/briefing-followup-$DATE-resolutions.json" \
+  --date "$DATE" 2>&1)
+
+WRITEBACK_STATUS=$(echo "$WRITEBACK_RESULT" | jq -r '.status // "failed"')
+case "$WRITEBACK_STATUS" in
+  updated)
+    COMMIT_SHA=$(echo "$WRITEBACK_RESULT" | jq -r '.commit_sha // "none"')
+    echo "Wrote resolutions back to $BRIEFING_PATH (commit: $COMMIT_SHA)"
+    ;;
+  skipped)
+    REASON=$(echo "$WRITEBACK_RESULT" | jq -r '.reason // "no resolutions"')
+    echo "Skipped write-back: $REASON"
+    ;;
+  *)
+    echo "Write-back failed: $WRITEBACK_RESULT" >&2
+    ;;
+esac
+```
+
+Flags that callers may pass to `writeback.sh`:
+
+| Flag | Meaning |
+|---|---|
+| `--no-commit` | Update the markdown in place but do not run `git commit`. |
+| `--no-push` | Commit but do not push. Default in cloud routine mode is push. |
+| `--no-event` | Skip emitting `briefing.followup.complete.<date>`. |
+| `--events-dir DIR` | Override the event log dir (defaults to `$CATALYST_DIR/events`). |
+
+The script is idempotent: re-running with the same resolutions file produces
+the same markdown (the previous "## Decisions Made Today" block is stripped
+before the new one is appended, and the `resolutions:` array is replaced
+rather than amended).
+
+## Step 6: End session
 
 ```bash
 echo
@@ -279,6 +324,10 @@ surfaces the relevant field to the user, then calls `record_resolution "$ID" <ac
   Linear ticket, dispatch orchestrator, draft email.
 - **Phase 3 (CTL-464, this skill version)**: ADR-drift resolution — `action-adr.sh`
   with `--mode update|ticket|defer` for the three options per the parent plan.
-- **Phase 4 (CTL-465, planned)**: resolutions write-back from the JSON file to the
-  briefing markdown frontmatter `resolutions:` block.
+- **Phase 4 (CTL-465, this skill version)**: resolutions write-back from the
+  JSON file to the briefing markdown frontmatter `resolutions:` block via
+  `writeback.sh`. Also appends a "## Decisions Made Today" section to the body,
+  commits to the routine-scoped branch (`routines/briefings` in the cloud
+  routine), and emits `briefing.followup.complete.<date>` so the next morning's
+  briefing routine reads yesterday's resolutions as carryovers.
 - **Phase 5 (CTL-466, planned)**: end-to-end real-briefing review session.
