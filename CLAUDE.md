@@ -95,6 +95,24 @@ Two-layer config system:
 Edit plugin files in `plugins/*/`, test locally (symlinks make changes immediate), restart Claude
 Code to reload. Changes are distributed via the Claude Code plugin marketplace.
 
+## Orchestration
+
+Catalyst orchestrators (`/catalyst-dev:orchestrate`) ship work as **phase-agent workers** — one
+short-lived `claude --bg` job per phase, walking a 9-phase pipeline (triage → research → plan →
+implement → verify → review → pr → monitor-merge → monitor-deploy). Legacy `oneshot-legacy` mode
+(one long-lived `claude -p /catalyst-dev:oneshot` per ticket) is preserved as a fallback. The
+mode is selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`.
+
+Cross-process communication is built on a **single unified event log** at
+`~/catalyst/events/YYYY-MM.jsonl`. Workers, the phase dispatcher, the broker, the webhook
+receiver, and `catalyst-comms send` all append; the broker daemon, the HUD, the orch-monitor web
+dashboard, and `catalyst-events wait-for` all read. The broker self-filters its own emissions via
+`shouldSkipEvent` (`plugins/dev/scripts/broker/index.mjs:1338`) so the same file can safely be
+both its input and its output.
+
+See `docs/orchestrator-overview.md` for the end-to-end run lifecycle and the Phase-Agent
+Communication section in `docs/architecture.md` for the unified data-flow diagram.
+
 @import docs/architecture.md
 
 @import docs/adrs.md

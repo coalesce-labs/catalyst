@@ -198,6 +198,66 @@ The contract: every worker produces ≥4 messages per run. Signal files remain t
 state — comms is observability and cross-worker coordination. See
 `plugins/dev/skills/catalyst-comms/SKILL.md` for the full protocol.
 
+## Phase-Agent Communication
+
+Orchestrators dispatched in `dispatchMode = "phase-agents"` spawn one short-lived `claude --bg`
+job per phase, walking the 9-phase pipeline (triage → research → plan → implement → verify →
+review → pr → monitor-merge → monitor-deploy — see `docs/orchestrator-overview.md`). Phase
+agents do **not** message each other directly. They communicate by **appending typed events to a
+single shared JSONL log** at `~/catalyst/events/YYYY-MM.jsonl`. The orchestrator wakes on those
+events via the broker (`filter.wake.<ORCH_NAME>`), advances the ticket through the canonical
+sequence in `orchestrate-phase-advance`, and dispatches the next `--bg` job.
+
+### Unified data-flow
+
+The same event log is the cross-process backbone for every observation surface:
+
+```mermaid
+flowchart LR
+  subgraph Writers
+    OS[Orchestrator skill] --> DM[~/catalyst/runs/&lt;id&gt;/<br/>DASHBOARD.md]
+    OS --> SJ[~/catalyst/runs/&lt;id&gt;/<br/>state.json]
+    PAD[phase-agent-dispatch] --> PSF[workers/&lt;TICKET&gt;/<br/>phase-&lt;name&gt;.json]
+    BROKER[broker daemon] --> BI[~/catalyst/broker-interests.json]
+    BROKER --> EL[~/catalyst/events/<br/>YYYY-MM.jsonl]
+  end
+
+  subgraph Surfaces
+    HUD[catalyst-hud<br/>Ink TUI]
+    OM[orch-monitor<br/>web dashboard]
+    CE[catalyst-events tail<br/>raw stream]
+  end
+
+  SJ --> HUD
+  PSF -.not yet scanned.-> HUD
+  BI --> HUD
+  DM --> OM
+  EL --> CE
+```
+
+Writers — phase-agent workers, `phase-agent-dispatch`, the broker daemon, the TypeScript webhook
+receiver, and `catalyst-comms send` — all append to `~/catalyst/events/YYYY-MM.jsonl`. Readers —
+`catalyst-events tail`, `catalyst-events wait-for`, the broker daemon, `catalyst-hud`, and the
+orch-monitor web dashboard — consume that log (plus per-run state files and broker registry)
+without coordinating with one another.
+
+### `shouldSkipEvent` self-filter
+
+Because the broker both **reads** and **writes** the same JSONL log, it would otherwise re-ingest
+the `filter.wake.*` and `broker.daemon.*` events it just emitted, creating a feedback loop
+(observed during the 2026-05-12 incident behind CTL-346). To prevent this, the broker classifies
+every event through `shouldSkipEvent` (`plugins/dev/scripts/broker/index.mjs:1338`) before
+processing it. The filter drops:
+
+- Anything where `resource."service.name" === "catalyst.broker"` (the broker's own emissions)
+- Event names starting with `filter.` (wakes, registrations, deregistrations)
+- Event names starting with `broker.daemon` (daemon lifecycle)
+- `session.heartbeat` (liveness pings — also short-circuited earlier in `processEvent`)
+
+`BROKER_INGEST_OWN_EMISSIONS=1` flips the rule to "accept only `filter.*` events" for debugging.
+This self-filter is what makes the single unified log safe to use as both the broker's input and
+its output.
+
 ## Context Management Principles
 
 1. **Context is precious** — Use specialized agents, not monoliths
