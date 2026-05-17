@@ -45,6 +45,7 @@ catalyst-broker logs
 | `pr_lifecycle` | Deterministic | Watch CI, reviews, merge, deployment for a known PR number |
 | `ticket_lifecycle` | Deterministic | Watch Linear state changes, comments, PR links for a ticket |
 | `comms_lifecycle` | Deterministic | Watch comms-channel messages (worker → orchestrator attention/done, orchestrator → worker directives) |
+| `phase_lifecycle` | Deterministic | Watch `phase.<name>.complete.<ticket>` / `phase.<name>.failed.<ticket>` events — orchestrator hand-off between phase agents |
 | (prose prompt) | Groq LLM (env-gated off; CTL-357) | Anything ambiguous, cross-cutting, or complex — set `CATALYST_BROKER_PROSE_ENABLED=1` to re-enable |
 
 ## 1. Auto-Correlation (The Common Case — No Registration Needed)
@@ -488,6 +489,58 @@ jq -nc \
 ```
 
 See §10 for the complete field reference and `wake-extract` accessor.
+
+## 4b. `phase_lifecycle` Interest Type (CTL-447)
+
+Deterministic routing for phase-agent boundary events. The orchestrator subscribes once per
+ticket per set of phases and is woken when a phase agent emits its terminal event:
+
+- `phase.<name>.complete.<ticket>` — phase succeeded; orchestrator dispatches the next one.
+- `phase.<name>.failed.<ticket>` — phase failed; orchestrator runs the fix-up path.
+
+The match is keyed on `(ticket, phase_name)` so a single orchestrator can run many tickets
+in parallel without cross-talk.
+
+### Schema
+
+```json
+{
+  "interest_id": "<orch-id>",
+  "interest_type": "phase_lifecycle",
+  "notify_event": "filter.wake.<orch-id>",
+  "persistent": true,
+  "ticket": "CTL-100",
+  "phase_names": ["triage", "research", "plan", "implement", "validate", "ship"]
+}
+```
+
+### Registering
+
+```bash
+jq -nc \
+  --arg orch "${CATALYST_ORCHESTRATOR_ID}" \
+  --arg ticket "$TICKET_ID" \
+  --argjson phases '["triage","research","plan","implement","validate","ship"]' \
+  '{ts: (now | todate), event: "filter.register",
+    orchestrator: $orch,
+    worker: null,
+    detail: {
+      interest_id: $orch,
+      interest_type: "phase_lifecycle",
+      notify_event: ("filter.wake." + $orch),
+      persistent: true,
+      ticket: $ticket,
+      phase_names: $phases
+    }}' >> ~/catalyst/events/$(date -u +%Y-%m).jsonl
+```
+
+### Match logic (no Groq call)
+
+| Trigger | Condition |
+|---|---|
+| `event.name` matches `phase.<name>.(complete\|failed).<ticket>` | always required |
+| `<ticket>` == `reg.ticket` | required |
+| `<name>` ∈ `reg.phase_names` | required |
 
 ## 5. `pr_lifecycle` Interest Type (CTL-284 — Unchanged)
 

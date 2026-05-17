@@ -69,7 +69,8 @@ Orchestrator                          broker daemon                       Event 
     │                                     │  deterministic match?            │
     │                                     │   ├─ pr_lifecycle ──┐            │
     │                                     │   ├─ ticket_lifecycle ┐          │
-    │                                     │   └─ comms_lifecycle ─┤          │
+    │                                     │   ├─ comms_lifecycle ─┤          │
+    │                                     │   └─ phase_lifecycle ─┤          │
     │                                     │                       ▼          │
     │                                     │── append filter.wake.{id} ──────►│
     │                                     │                                  │
@@ -214,6 +215,37 @@ two interests: a `pr_lifecycle` one for the typed PR-lifecycle events, and a pro
 under a different `interest_id` for residual concerns like comms-attention or
 Linear-ticket status changes that aren't covered by the deterministic table. Both
 interests use the same `notify_event`, so the wait-for filter is unchanged.
+
+#### `phase_lifecycle` (CTL-447)
+
+Deterministic routing for phase-agent boundary events. The orchestrator registers one
+interest per ticket that names every phase it cares about; the broker wakes it whenever
+a matching `phase.<name>.complete.<ticket>` or `phase.<name>.failed.<ticket>` event
+lands in the log.
+
+```jsonc
+{
+  "event": "filter.register",
+  "orchestrator": "$ORCH_NAME",
+  "detail": {
+    "interest_id": "$ORCH_NAME",
+    "interest_type": "phase_lifecycle",
+    "notify_event": "filter.wake.$ORCH_NAME",
+    "persistent": true,
+    "ticket": "CTL-100",
+    "phase_names": ["triage", "research", "plan", "implement", "validate", "ship"]
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `interest_type` | `"phase_lifecycle"` | Discriminator. Required for deterministic routing. |
+| `ticket` | string | Linear ticket the orchestrator is shepherding (e.g. `"CTL-100"`). Matched against the `<ticket>` segment of the event name. |
+| `phase_names` | `string[]` | Phase names the orchestrator cares about. Events for phases not in this list are ignored. |
+
+Wake reason takes the form `"Phase <name> complete on <ticket>"` or `"Phase <name> failed
+on <ticket>"`. See [[broker]] §4b for the full event-name grammar.
 
 ### Per-agent-type registration patterns
 
