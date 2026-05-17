@@ -111,6 +111,67 @@ path produced the event.
 
 8. **The worker acts.** With the PR confirmed merged, the worker records `pr.mergedAt`, transitions the Linear ticket to Done, and writes `status: "done"` to its signal file.
 
+## Step-by-step: a phase-agent wake (CTL-452)
+
+When `dispatchMode = "phase-agents"`, the orchestrator dispatches one short-lived
+`claude --bg` job per phase. Each phase emits a `phase.<name>.complete.<TICKET>`
+event that wakes the orchestrator via the broker's `phase_lifecycle` interest, and
+the orchestrator dispatches the next phase. The wake chain is deterministic — no
+Groq call, no prose evaluation.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W as Worker (claude --bg)
+  participant B as catalyst-broker
+  participant O as Orchestrator
+  participant D as orchestrate-phase-advance
+  participant P as phase-agent-dispatch
+
+  W->>B: emit phase.research.complete.CTL-101
+  B->>B: match against phase_lifecycle<br/>(ticket=CTL-101, phase_names⊇{research})
+  B->>O: fire filter.wake.<ORCH_NAME><br/>reason="Phase research complete on CTL-101"
+  O->>D: orchestrate-phase-advance --ticket CTL-101 --completed-phase research
+  D->>D: next_phase = "plan" (from canonical sequence)
+  D->>D: check idempotency<br/>(skip if phase-plan.json exists)
+  D->>P: orchestrate-dispatch-next --phase plan --ticket CTL-101
+  P->>P: claude --bg /catalyst-dev:phase-plan CTL-101
+  P->>P: capture bg_job_id from stdout
+  P->>P: write phase-plan.json with bg_job_id, status=running
+  P->>B: emit phase.plan.dispatched (re-arms phase_lifecycle interest)
+```
+
+The broker matches incoming events against the regex
+`^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$` and routes
+them to the registered `phase_lifecycle` interest by ticket. The orchestrator
+registers exactly one `phase_lifecycle` interest per ticket at Phase 4 start;
+all four broker interests (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`,
+`phase_lifecycle`) route back as the same `filter.wake.<ORCH_NAME>` so the
+orchestrator only watches one event stream.
+
+1. **Phase agent completes its one job.** Reads the prior phase's artifact, does
+   the work (research a topic, draft a plan, implement a diff, etc.), writes its
+   own `phase-<name>.json` to `${ORCH_DIR}/workers/<TICKET>/`, and emits
+   `phase.<name>.complete.<TICKET>` via `catalyst-state.sh event`.
+2. **Broker matches the deterministic interest.** No LLM call — the broker's
+   `phase_lifecycle` matcher reads the registered `(ticket, phase_names)` tuple
+   and confirms the event is in scope.
+3. **Broker fires the wake.** Appends `filter.wake.<ORCH_NAME>` to the event log
+   with `payload.reason = "Phase <name> complete on <TICKET>"`.
+4. **Orchestrator sees the wake.** Its `catalyst-events wait-for` returns; it
+   calls `orchestrate-phase-advance --completed-phase <name> --ticket <TICKET>`.
+5. **Advance computes the next phase.** From the canonical 9-phase sequence
+   (`triage → research → plan → implement → verify → review → pr → monitor-merge →
+   monitor-deploy`). Skipped if the next phase's signal file already exists
+   (idempotency).
+6. **Dispatch the next phase.** `phase-agent-dispatch` launches a fresh
+   `claude --bg /catalyst-dev:phase-<next> <TICKET>` job, captures the `bg_job_id`,
+   writes `phase-<next>.json`, and emits `phase.<next>.dispatched.<TICKET>` to
+   re-arm the broker interest for the next completion.
+
+See [Phase agents](/reference/orchestration/phase-agents/) for the per-phase
+artifact contract and turn caps.
+
 ## What happens without webhooks
 
 If the smee tunnel is not configured, step 2 never happens. The orch-monitor falls back to polling GitHub's REST API every **10 minutes** and appending `github.*` events from poll results. `catalyst-events wait-for` will wake, but with up to 600s latency instead of ~1s.

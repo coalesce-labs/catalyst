@@ -39,21 +39,29 @@ Quit with `q` or `Ctrl-C`.
 │ dispatched: 0  running: 2  pr-created: 3  done: 1 │
 │ attention: 0                        cost: $2.47   │
 ├────────────────────────────────────────────────────┤
-│ CTL-42  done        ✓   pr#118  merged    34m 12s │
-│ CTL-43  done        ✓   pr#119  merged    29m  4s │
-│ CTL-44  pr-created  ✓   pr#120  passing   12m 38s │
-│ CTL-45  implementing ✓                     8m 22s │
-│ CTL-46  validating  ✓                      4m 01s │
-│ CTL-48  researching !                      1m 15s │  ← dead PID
+│ CTL-42  done           ✓  pr#118  merged   34m 12s │
+│ CTL-43  done           ✓  pr#119  merged   29m  4s │
+│ CTL-44  monitor-merge  ✓  pr#120  passing  12m 38s │
+│ CTL-45  implement      ✓                    8m 22s │
+│ CTL-46  verify         ✓                    4m 01s │
+│ CTL-48  research       !                    1m 15s │  ← dead PID
 └────────────────────────────────────────────────────┘
 Events (most recent first):
-  19:15:32  CTL-44  worker-pr-created       pr#120
-  19:14:01  CTL-46  worker-phase-advanced   validating
-  19:13:44  CTL-48  worker-failed           crashed — PID gone
+  19:15:32  CTL-44  phase.pr.complete.CTL-44             pr#120 opened
+  19:14:01  CTL-46  phase.implement.complete.CTL-46      → verify dispatched
+  19:13:44  CTL-48  worker-failed                        crashed — PID gone
+  19:13:10  CTL-45  phase.plan.complete.CTL-45           → implement dispatched
 ```
 
+The example above is a `dispatchMode = "phase-agents"` run — the status column carries the
+canonical phase name (CTL-452) and the event stream surfaces
+`phase.<name>.complete.<TICKET>` directly. Under `dispatchMode = "oneshot-legacy"` the same
+columns instead show the oneshot status names (`researching`, `validating`, `pr-created`,
+etc.) and v1 envelope events (`worker-pr-created`, `worker-phase-advanced`). Both modes feed
+the same SSE event stream — the renderer is mode-agnostic.
+
 Color coding matches the web UI: blue for in-progress phases, green for done, red for
-failed/dead, amber for validating/shipping.
+failed/dead, amber for verify/review/monitor-merge (oneshot equivalents: validating/shipping).
 
 ## When to prefer classic over the Ink HUD
 

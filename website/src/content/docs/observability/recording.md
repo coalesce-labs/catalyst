@@ -14,10 +14,10 @@ Both layers are redundant on purpose: if OTel fails, signal files still work. If
 
 ## The Shell Wrapper
 
-When the orchestrator dispatches a worker via `claude -p`, it wraps the command in a shell script that exports Catalyst-specific resource attributes:
+When the orchestrator dispatches a worker, it wraps the spawn in a shell script that exports Catalyst-specific resource attributes. The exact command depends on `catalyst.orchestration.dispatchMode` in `.catalyst/config.json`:
 
 ```bash
-# Simplified version — the real one is in plugins/dev/skills/orchestrate/
+# Common env — set for both dispatch modes
 export OTEL_RESOURCE_ATTRIBUTES="\
 service.name=claude-code,\
 orchestrator.id=${ORCH_ID},\
@@ -25,13 +25,18 @@ worker.ticket=${TICKET_ID},\
 project.key=${PROJECT_KEY},\
 user.id=${USER}"
 
+# dispatchMode = "phase-agents" — one claude --bg job per phase (9 per ticket)
+exec claude --bg \
+  --resume "/catalyst-dev:phase-${PHASE_NAME} ${TICKET_ID} --orch-dir ${ORCH_DIR}"
+
+# dispatchMode = "oneshot-legacy" — one long-lived claude -p worker per ticket
 exec claude \
   -n "oneshot-${TICKET_ID}" \
   --output-format stream-json --verbose \
   -p "/catalyst-dev:oneshot ${TICKET_ID} --auto-merge"
 ```
 
-The `OTEL_RESOURCE_ATTRIBUTES` env var is picked up by the Claude Code OTel exporter and added to every telemetry batch. Downstream (Prometheus, Loki, Tempo) it's queryable as a label.
+The `OTEL_RESOURCE_ATTRIBUTES` env var is picked up by the Claude Code OTel exporter and added to every telemetry batch regardless of dispatch mode. Downstream (Prometheus, Loki, Tempo) it's queryable as a label. See [Phase agents](/reference/orchestration/phase-agents/) for the per-phase pipeline.
 
 ### What each attribute means
 
@@ -66,12 +71,13 @@ Independent of OTel, every worker writes a signal file at `<orchestrator-dir>/wo
     "url": "https://github.com/...",
     "ciStatus": "pending",
     "prOpenedAt": "2026-04-14T19:15:30Z",
-    "autoMergeArmedAt": "2026-04-14T19:15:32Z",
     "mergedAt": null
   },
   "pid": 63709
 }
 ```
+
+The `autoMergeArmedAt` field is no longer written. Per [ADR-014](https://github.com/coalesce-labs/catalyst/blob/main/docs/adrs.md#adr-014-worker-owns-full-pr-lifecycle-ctl-252) the worker owns the full PR lifecycle: it enters an event-driven listen loop after opening the PR, resolves CI/review blockers inline, executes `gh pr merge --squash --delete-branch` directly when the PR is CLEAN, and writes `pr.mergedAt` + `status: "done"` itself. The orchestrator's Phase 4 is a safety-net fallback only.
 
 The `phaseTimestamps` map is how the monitor builds a Gantt chart — each time a worker transitions status, it appends the new phase and its timestamp. Terminal states (`done`, `failed`, `stalled`) also set `completedAt`.
 
@@ -103,6 +109,7 @@ Event types:
 - `agent.checkin`, `agent.checkout` (CTL-303 — broker agent identity)
 - `broker.daemon.startup` (CTL-303 — legacy alias `filter.daemon.startup`)
 - `filter.register`, `filter.deregister`, `filter.wake.<id>` (CTL-303 — broker routing)
+- `phase.<name>.dispatched.<TICKET>`, `phase.<name>.complete.<TICKET>`, `phase.<name>.failed.<TICKET>` (CTL-452 — phase-agent pipeline; emitted only when `dispatchMode = "phase-agents"`)
 
 The newer canonical envelope shape (CTL-300) is the default for new emitters — the webhook
 receiver, `catalyst-comms send`, `catalyst-broker`, `catalyst-otel-forward`, and

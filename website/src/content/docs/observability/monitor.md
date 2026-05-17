@@ -69,7 +69,11 @@ One row per worker showing:
 
 - **Ticket** (click to open Linear)
 - **Status** color-coded: gray (dispatched), blue (researching/planning/implementing), amber (validating/shipping), green (done), red (failed)
-- **Phase** number (0-6)
+- **Phase** — the worker's current phase. The shape depends on `dispatchMode`:
+  - `oneshot-legacy`: integer `0`–`6` (research → plan → implement → validate → ship → pr-created → done)
+  - `phase-agents` (CTL-452): one of nine named phases — `triage`, `research`, `plan`, `implement`,
+    `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`. See
+    [Phase agents](/reference/orchestration/phase-agents/) for the canonical sequence
 - **PR** (click to open GitHub) with CI status dot
 - **Liveness** indicator: ✓ (alive), ! (dead PID), ? (no PID recorded yet)
 - **Duration** since startedAt
