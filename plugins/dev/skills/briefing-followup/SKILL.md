@@ -3,10 +3,11 @@ name: briefing-followup
 description:
   Interactive walk-through of today's morning briefing. Loads the briefing markdown at
   thoughts/briefings/YYYY-MM-DD.md (built by [[morning-briefing]]), parses the structured
-  decisions: frontmatter, and walks the user through each open decision one at a time with
-  placeholder Approve / Reject / Defer actions. Phase 1 MVP — Phase 2 wires real action
-  handlers (calendar / ticket / orchestrator / email); Phase 4 writes resolutions back to
-  the briefing markdown.
+  decisions: frontmatter, walks the user through each open decision, and executes the
+  selected action via supported handlers — schedule calendar entry, file Linear ticket,
+  dispatch orchestrator, draft email. Phase 2 wires the real action handlers; Phase 3
+  (CTL-464) wires ADR-drift-specific actions; Phase 4 (CTL-465) writes resolutions back
+  to the briefing markdown.
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Task, mcp__*
@@ -18,9 +19,10 @@ allowed-tools: Read, Write, Edit, Bash, Task, mcp__*
 
 Invoke as `/catalyst-dev:briefing-followup` after `/catalyst-dev:morning-briefing` has
 produced today's briefing. The skill reads that briefing's `decisions:` block and walks
-the user through each open decision in turn. Phase 1 surfaces placeholder actions; the
-real action handlers ship in Phase 2 ([[2026-05-16-catalyst-phase-agent-architecture]]
-§Initiative 3 Phase 2).
+the user through each open decision in turn. Phase 2 wires the real action handlers
+listed below; ADR-drift-specific actions ship in Phase 3 (CTL-464) and resolution
+write-back to the briefing markdown ships in Phase 4 (CTL-465). See
+[[2026-05-16-catalyst-phase-agent-architecture]] §Initiative 3 Phase 2.
 
 ## Flags
 
@@ -80,13 +82,15 @@ fi
 echo "$DECISION_COUNT open decision(s) to walk through."
 ```
 
-## Step 3: Decision-update placeholder log
+## Step 3: Resolve log dir + resolution recorder
 
 Resolve the log path before the loop. Inside an orchestrator dispatch
 (`$CATALYST_ORCHESTRATOR_DIR` is set), prefer the orchestrator's run directory so the
 record lands next to other worker artifacts; otherwise fall back to `/tmp` for local
-runs. Phase 4 of the parent plan replaces this placeholder with a real `resolutions:`
-write-back to the briefing markdown.
+runs. Phase 4 (CTL-465) of the parent plan replaces the placeholder log with a real
+`resolutions:` write-back to the briefing markdown; for now the recorder writes both
+a TSV log (Phase 1 contract) and a structured JSON file (Phase 2 contract that Phase 4
+will consume).
 
 ```bash
 if [[ -n "${CATALYST_ORCHESTRATOR_DIR:-}" ]]; then
@@ -104,14 +108,22 @@ log_response() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$id" "$action" "$note" \
     >> "$LOG_FILE"
 }
+
+# Structured resolution recorder — appends to a JSON array consumed by Phase 4.
+# Call after a successful action with the action name and the action's JSON output.
+record_resolution() {
+  local id="$1" action="$2" result_json="${3:-{\}}"
+  bash "$SCRIPT_DIR/record-resolution.sh" \
+    --log-dir "$LOG_DIR" --date "$DATE" \
+    --id "$id" --action "$action" --result "$result_json"
+}
 ```
 
 ## Step 4: Loop over decisions
 
-For each open decision, present the details + the placeholder action set. In Phase 1
-the action handlers are inert — they record the user's choice and continue. Phase 2
-wires real handlers ([[2026-05-16-catalyst-phase-agent-architecture]] §Initiative 3
-Phase 2).
+For each open decision, present the details and the action set filtered by decision
+type. The action handlers live in sibling scripts and each emit a one-line JSON result
+on stdout; the skill captures that JSON and feeds it to `record_resolution`.
 
 ```bash
 DECISIONS_JSON=$(bash "$SCRIPT_DIR/parse-briefing.sh" decisions "$@")
@@ -137,25 +149,73 @@ echo "$DECISIONS_JSON" | jq -c '.[]' | while IFS= read -r dec; do
   [[ -n "$TICKET" ]] && echo "ticket:  $TICKET"
   [[ -n "$ADR"    ]] && echo "adr:     $ADR"
   echo
-  echo "Actions: [a]pprove · [r]eject · [d]efer · [s]kip · [q]uit"
+
+  case "$TYPE" in
+    blocked_pr)
+      echo "Actions: [a]pprove · [r]eject · [d]efer · [o]rchestrate · [s]kip · [q]uit"
+      ;;
+    adr_drift)
+      echo "Actions: [d]efer · [s]kip · [q]uit  (Phase 3 / CTL-464 will wire ADR actions)"
+      ;;
+    *)
+      echo "Actions: [a]pprove · [r]eject · [d]efer · [c]alendar · [t]icket · [o]rchestrate · [e]mail · [s]kip · [q]uit"
+      ;;
+  esac
 done
 ```
 
 When this skill runs in an interactive Claude Code session, present each decision as
-above and use the model to interpret the user's natural-language response. Map common
-intents to the placeholder actions:
+above and use the model to interpret the user's natural-language response. Map intents
+to action handlers as follows:
 
-| User says... | Action |
-|---|---|
-| approve / accept / yes / ship it | `approve` → `log_response "$ID" approve` |
-| reject / no / dismiss | `reject` → `log_response "$ID" reject` |
-| defer / later / skip for today | `defer`  → `log_response "$ID" defer` |
+| User intent | Handler | Captures resolution? |
+|---|---|---|
+| approve / accept / yes / ship it | `log_response "$ID" approve "$NOTE"` | TSV log only |
+| reject / no / dismiss | `log_response "$ID" reject "$NOTE"` | TSV log only |
+| defer / later / skip for today | `log_response "$ID" defer "$NOTE"` | TSV log only |
+| schedule meeting / book time / put on calendar | `action-schedule.sh` → `record_resolution "$ID" schedule_calendar "$JSON"` | TSV + JSON |
+| file a ticket / open Linear issue | `action-ticket.sh` → `record_resolution "$ID" file_ticket "$JSON"` | TSV + JSON |
+| dispatch orchestrator / kick off the work / run oneshot | `action-orchestrate.sh --bg` → `record_resolution "$ID" dispatch_orchestrator "$JSON"` | TSV + JSON |
+| draft email / send a note to X / message Y | `action-email.sh` → `record_resolution "$ID" draft_email "$JSON"` | TSV + JSON |
 | skip | move on without logging |
 | quit / stop / done | break out of the loop |
 
-After each decision the user resolves, call `log_response` with the action and any free-form
-note the user provided. Continue to the next decision until the queue is empty or the user
-quits.
+### Invoking an external action
+
+When the user picks a real action handler, call the corresponding script and pass any
+context the user supplied. Each handler emits one JSON line on stdout — capture it,
+display the relevant field to the user, then call `record_resolution` so Phase 4 can
+write it back to the briefing markdown.
+
+```bash
+# Example — schedule_calendar from a judgment_call decision:
+RESULT=$(bash "$SCRIPT_DIR/action-schedule.sh" \
+  --title "$EVENT_TITLE" \
+  --start "$START_ISO8601" \
+  --end "$END_ISO8601" \
+  --description "$EVENT_DESCRIPTION")
+
+STATUS=$(echo "$RESULT" | jq -r '.status')
+case "$STATUS" in
+  scheduled) echo "Scheduled — $(echo "$RESULT" | jq -r '.html_link')" ;;
+  skipped)   echo "Skipped: $(echo "$RESULT" | jq -r '.reason')" ;;
+  *)         echo "Failed: $(echo "$RESULT" | jq -r '.reason // "unknown"')" ;;
+esac
+record_resolution "$ID" schedule_calendar "$RESULT"
+log_response "$ID" schedule_calendar "$STATUS"
+```
+
+The same pattern applies to `action-ticket.sh`, `action-orchestrate.sh`, and
+`action-email.sh` — only the script name and the action label change. All four handlers
+soft-skip cleanly when their underlying tool is missing or unauthenticated; the
+returned `{"status": "skipped", "reason": "..."}` JSON is captured the same way as a
+success result so the resolution log faithfully records what happened.
+
+### Free-form note capture
+
+Per-decision the user may attach a one-line note (e.g., why they rejected, what the
+calendar event is for). Pass it as the third argument to `log_response` and, when
+relevant, as `--description` / `--body` to the action handler.
 
 ## Step 5: End session
 
@@ -170,15 +230,49 @@ echo "Logged $(wc -l < "$LOG_FILE" | tr -d ' ') response(s) to $LOG_FILE"
 
 - **Input**: `thoughts/briefings/YYYY-MM-DD.md` produced by [[morning-briefing]],
   validated against `plugins/dev/templates/briefing-frontmatter.schema.json`.
-- **Output (Phase 1)**: a scratch log at `$CATALYST_ORCHESTRATOR_DIR/briefing-followup-<date>.log`
-  (or `/tmp/briefing-followup-<date>.log` outside orchestrator mode), one TSV line per
-  resolved decision: `<utc-timestamp>\t<id>\t<action>\t<note>`. Phase 4 of the parent
-  plan rewrites this as a `resolutions:` block on the briefing markdown frontmatter.
+- **Output (Phase 1, retained)**: a scratch log at
+  `$CATALYST_ORCHESTRATOR_DIR/briefing-followup-<date>.log` (or `/tmp/...` outside
+  orchestrator mode), one TSV line per resolved decision:
+  `<utc-timestamp>\t<id>\t<action>\t<note>`.
+- **Output (Phase 2, new)**: a structured JSON array at
+  `$LOG_DIR/briefing-followup-<date>-resolutions.json`, one entry per resolution that
+  invoked an action handler. Each entry is
+  `{decision_id, action, timestamp, result}` where `result` is the JSON the handler
+  returned. Phase 4 (CTL-465) reads this file to write the `resolutions:` block back
+  to the briefing markdown frontmatter.
 
-## Phase 1 scope (this ticket)
+## Action handlers (Phase 2 — CTL-463)
 
-Per [[2026-05-16-catalyst-phase-agent-architecture]] §Initiative 3 Phase 1 (CTL-462):
-load briefing, parse decisions, walk the user through each one with placeholder
-actions. **Action handlers ship in Phase 2 (CTL-463)** — schedule calendar entry, file
-Linear ticket, dispatch orchestrator, draft email. ADR-drift resolution is its own
-Phase 3 (CTL-464). Resolution write-back to the briefing is Phase 4 (CTL-465).
+Per [[2026-05-16-catalyst-phase-agent-architecture]] §Initiative 3 Phase 2, the
+following sibling scripts implement the supported actions. Each emits one JSON line on
+stdout and exits 0 on success or soft-skip (`{"status": "skipped", "reason": "..."}`);
+non-zero exit indicates a hard failure (handler reached but the underlying API
+returned no usable result).
+
+| Action | Script | Output JSON (success) | Soft-skip trigger |
+|---|---|---|---|
+| Schedule a calendar event | `action-schedule.sh` | `{event_id, html_link, status: "scheduled"}` | `GOOGLE_OAUTH_ACCESS_TOKEN` unset |
+| File a Linear ticket | `action-ticket.sh` | `{identifier, url, status: "filed"}` | `linearis` not on PATH |
+| Dispatch orchestrator | `action-orchestrate.sh` | `{orchestrator_id, status: "dispatched"}` | `claude` (or `$CATALYST_DISPATCH_CLAUDE_BIN`) not on PATH |
+| Draft an email | `action-email.sh` | `{draft_id, status: "drafted"}` | `GMAIL_OAUTH_ACCESS_TOKEN` unset |
+
+See `cma/mcp/google-calendar.md` and `cma/mcp/gmail.md` for the OAuth setup required
+to bypass the calendar / email soft-skip paths. Linear and orchestrator handlers
+require no extra setup beyond having `linearis` / `claude` on PATH (the standard local
+dev environment provides both).
+
+Each handler accepts `--help` to print its flag set. The skill captures the JSON,
+surfaces the relevant field to the user, then calls `record_resolution "$ID" <action>
+"$JSON"` so the result lands in the resolutions JSON file for Phase 4 write-back.
+
+## Phase scope summary
+
+- **Phase 1 (CTL-462, done)**: load briefing, parse decisions, walk user through with
+  placeholder Approve / Reject / Defer.
+- **Phase 2 (CTL-463, this skill version)**: action handlers — schedule calendar, file
+  Linear ticket, dispatch orchestrator, draft email.
+- **Phase 3 (CTL-464, planned)**: ADR-drift resolution — Update ADR / Update code /
+  Defer per the parent plan.
+- **Phase 4 (CTL-465, planned)**: resolutions write-back from the JSON file to the
+  briefing markdown frontmatter `resolutions:` block.
+- **Phase 5 (CTL-466, planned)**: end-to-end real-briefing review session.
