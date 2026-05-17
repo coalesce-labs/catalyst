@@ -491,8 +491,10 @@ gets caught.
 | `maxParallel`                 | number       | 3                            | Max concurrent workers per wave                                                                                                                     |
 | `hooks.setup`                 | string[]     | `[]`                         | Extra commands after base `worktree.setup` (orchestration-only)                                                                                     |
 | `hooks.teardown`              | string[]     | `[]`                         | Commands before worktree removal on wave advancement                                                                                                |
-| `workerCommand`               | string       | `/catalyst-dev:oneshot`      | Plugin-namespaced skill to run in each worker. Must be `/<plugin>:<skill>`; bare slashes rejected at dispatch.                                      |
-| `workerModel`                 | string       | `opus`                       | Model for worker sessions                                                                                                                           |
+| `dispatchMode`                | string       | `"oneshot-legacy"`           | Worker spawn strategy. `"oneshot-legacy"` runs one long `claude -p` worker per ticket. `"phase-agents"` dispatches nine short-lived `claude --bg` jobs per ticket — see [Phase agents](./orchestration/phase-agents/) for the pipeline, model assignment, and cost economics. |
+| `workerCommand`               | string       | `/catalyst-dev:oneshot`      | Plugin-namespaced skill to run in each worker (applies only when `dispatchMode = "oneshot-legacy"`). Must be `/<plugin>:<skill>`; bare slashes rejected at dispatch. |
+| `workerModel`                 | string       | `opus`                       | Model for legacy oneshot worker sessions. For phase-agents mode use `phaseAgents.models` instead.                                                   |
+| `phaseAgents`                 | object       | `{}`                         | Per-phase model and turn-cap overrides for `dispatchMode = "phase-agents"`. Nested keys: `models[phase]`, `modelOverrides[phase][ticket]`, `turnCaps[phase]`. See [Configuration › Orchestration Config](/reference/configuration/#orchestration-config) for the full schema and [Phase agents › Configuration](./orchestration/phase-agents/#configuration) for the canonical reference. |
 | `testRequirements`            | object       | `{"backend":["unit"]}`       | Required test types by scope                                                                                                                        |
 | `verifyBeforeMerge`           | boolean      | `true`                       | Run adversarial verification on merged commits (post-merge)                                                                                         |
 | `allowSelfReportedCompletion` | boolean      | `false`                      | When `true`, verification failures are advisory (wave advances). When `false` (default), failures block wave advancement until remediation is filed |
@@ -816,6 +818,25 @@ cat ~/catalyst/history/*.json | jq -s '[.[].usage.costUSD / .[].progress.totalTi
   process exits
 
 As these tools evolve to expose usage data, the schema is ready to accept it.
+
+#### Phase-agents cost tracking
+
+When `catalyst.orchestration.dispatchMode` is `"phase-agents"`, the worker run is decomposed into
+nine short-lived `claude --bg` jobs (one per phase) instead of a single long `claude -p` session.
+Cost rolls up the same way — each phase agent's final `result` event is captured into the
+`session_metrics` table in `~/catalyst/catalyst.db`, keyed by the phase's `session_id` and joined
+to the parent workflow via `sessions.workflow_id`.
+
+This gives you per-phase attribution that the legacy mode can't: you can see how much of a ticket's
+total cost went to `phase-implement` vs `phase-monitor-merge`, and decide whether to flip
+individual phases to Sonnet via `phaseAgents.models[phase]`. The aggregation query and the
+projected vs. actual cost table live on the [Phase agents](./orchestration/phase-agents/#cost-economics)
+page along with the per-phase model assignment guidance.
+
+:::caution[Measurement gap] As of 2026-05-17, `session_metrics.cost_usd` shows `$0` across recent
+`oneshot`, `orchestrate`, and `phase-*` rows — the CTL-455 fix to populate the table from worker
+stream data is merged but no run since the fix has flushed real numbers into the DB. Phase-agents
+cost tracking is wired end-to-end; validate it has data before relying on the per-phase numbers. :::
 
 ## Orchestration Monitor
 

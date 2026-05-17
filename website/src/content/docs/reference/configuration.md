@@ -731,8 +731,24 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
         "setup": ["bun install"],
         "teardown": []
       },
+      "dispatchMode": "oneshot-legacy",
       "workerCommand": "/catalyst-dev:oneshot",
       "workerModel": "opus",
+      "phaseAgents": {
+        "models": {
+          "implement": "sonnet",
+          "pr": "sonnet",
+          "monitor-deploy": "haiku"
+        },
+        "modelOverrides": {
+          "implement": {
+            "CTL-501": "opus"
+          }
+        },
+        "turnCaps": {
+          "implement": 100
+        }
+      },
       "testRequirements": {
         "backend": ["unit"],
         "frontend": ["unit"],
@@ -751,11 +767,17 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
 | `maxParallel` | number | 3 | Max concurrent workers |
 | `hooks.setup` | string[] | `[]` | Run after worktree creation (supports `${WORKTREE_PATH}`, `${BRANCH_NAME}`, `${TICKET_ID}`, `${REPO_NAME}`, `${DIRECTORY}` variables) |
 | `hooks.teardown` | string[] | `[]` | Run before worktree removal |
-| `workerCommand` | string | `/catalyst-dev:oneshot` | Plugin-namespaced skill to dispatch in each worker. Must be in `/<plugin>:<skill>` form — bare slashes (e.g. `/oneshot`) are rejected at dispatch. |
-| `workerModel` | string | `opus` | Model for worker sessions |
+| `dispatchMode` | string | `"oneshot-legacy"` | Worker spawn strategy. `"oneshot-legacy"` runs one long `claude -p /catalyst-dev:oneshot` per ticket (pre-CTL-452 model). `"phase-agents"` dispatches nine short-lived `claude --bg` jobs per ticket, one per phase, advancing on `phase.<name>.complete.<TICKET>` broker events. See [Phase agents](/reference/orchestration/phase-agents/) for the full pipeline. |
+| `workerCommand` | string | `/catalyst-dev:oneshot` | Plugin-namespaced skill to dispatch in each worker (applies only when `dispatchMode = "oneshot-legacy"`). Must be in `/<plugin>:<skill>` form — bare slashes (e.g. `/oneshot`) are rejected at dispatch. |
+| `workerModel` | string | `opus` | Model for legacy oneshot worker sessions (applies only when `dispatchMode = "oneshot-legacy"`). For phase-agents mode, use `phaseAgents.models` instead. |
+| `phaseAgents.models[phase]` | string | `"opus"` | Per-phase default model when `dispatchMode = "phase-agents"`. Keys are phase names: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`. Values are `opus`, `sonnet`, or `haiku`. |
+| `phaseAgents.modelOverrides[phase][ticket]` | string | none | Per-phase, per-ticket model override. Highest precedence after the `--model` CLI flag. Useful for one-off escape hatches (e.g., bumping a particularly ambiguous plan back to Opus). |
+| `phaseAgents.turnCaps[phase]` | number | per-phase default | Override the hard cap on Claude turns per phase. Per-phase defaults: triage 10, research 35, plan 25, implement 75, verify 20, review 25, pr 12, monitor-merge 50, monitor-deploy 30. |
 | `testRequirements` | object | See above | Required test types by scope (backend/frontend/fullstack) |
 | `verifyBeforeMerge` | boolean | `true` | Run adversarial verification on merged commits (post-merge) |
 | `allowSelfReportedCompletion` | boolean | `false` | When `true`, verification failures are advisory (wave advances). When `false` (default), verification failures block wave advancement until remediation is filed |
+
+Resolution order for both `phaseAgents.models` and `phaseAgents.turnCaps` is **CLI flag > `modelOverrides[phase][ticket]` > `models[phase]` (or `turnCaps[phase]`) > built-in default**. The dispatcher reads `dispatchMode` at [`plugins/dev/scripts/orchestrate-dispatch-next:117`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/orchestrate-dispatch-next); per-phase resolution lives in [`phase-agent-dispatch:158-176`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/phase-agent-dispatch).
 
 ## Feedback Config
 
