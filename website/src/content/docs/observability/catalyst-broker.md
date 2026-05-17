@@ -14,9 +14,9 @@ a natural-language intent once and the daemon handles the matching.
 
 The daemon supports two routing paths:
 
-- **Deterministic (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`)** — pure field
-  comparison for PR/CI/review/BEHIND events, Linear state changes, and comms-channel messages.
-  No Groq call, no latency beyond local I/O.
+- **Deterministic (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`, `phase_lifecycle`)** —
+  pure field comparison for PR/CI/review/BEHIND events, Linear state changes, comms-channel
+  messages, and phase-agent boundary events. No Groq call, no latency beyond local I/O.
 - **Prose (Groq-backed)** — a natural-language `prompt` you write; evaluated by
   `llama-3.1-8b-instant` in a single batched API call. **Gated off by default since CTL-357**
   (`CATALYST_BROKER_PROSE_ENABLED=0`) due to empirically ~95% false-positive rate. Prose
@@ -241,6 +241,67 @@ Supported `wake_on` values include `status_done`, `status_in_review`, `status_ch
 `pr_lifecycle`, this path requires no Groq API key. See the
 [`broker` skill](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/skills/broker/SKILL.md)
 for the full agent-facing protocol.
+
+#### phase_lifecycle — deterministic phase-agent routing
+
+Introduced in CTL-447 to support the [phase-agent
+pipeline](/reference/orchestration/phase-agents/). Use it when an orchestrator running
+`dispatchMode = "phase-agents"` needs to wake on the boundary events its phase agents emit
+(`phase.<name>.complete.<TICKET>` and `phase.<name>.failed.<TICKET>`):
+
+```json
+{
+  "ts": "2026-05-17T07:00:00Z",
+  "event": "filter.register",
+  "orchestrator": "orch-ctl-api-2026-05-17",
+  "worker": null,
+  "detail": {
+    "interest_id": "orch-ctl-api-2026-05-17-phase-lifecycle-CTL-253",
+    "session_id": "sess_20260517_abc123",
+    "interest_type": "phase_lifecycle",
+    "notify_event": "filter.wake.orch-ctl-api-2026-05-17",
+    "persistent": true,
+    "ticket": "CTL-253",
+    "phase_names": [
+      "triage", "research", "plan", "implement", "verify",
+      "review", "pr", "monitor-merge", "monitor-deploy"
+    ]
+  }
+}
+```
+
+| Field           | Required | Purpose                                                                                       |
+| --------------- | -------- | --------------------------------------------------------------------------------------------- |
+| `interest_type` | yes      | Must be `"phase_lifecycle"`.                                                                  |
+| `ticket`        | yes      | Linear ticket ID this interest is bound to (e.g. `CTL-253`).                                  |
+| `phase_names`   | yes      | Array of phase names that should produce a wake. Empty array matches nothing.                 |
+| `notify_event`  | yes      | Wake event the orchestrator's `wait-for` listens on — usually `filter.wake.<ORCH_NAME>`.      |
+| `persistent`    | no       | When `true`, the interest survives the first wake. Orchestrators set this to `true`.          |
+
+The broker matches against the regex
+`^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$` and fires `notify_event` when
+**all three** of these are true:
+
+- the event name matches the pattern,
+- the captured ticket equals `ticket`, and
+- the captured phase name is in `phase_names`.
+
+Routing is purely deterministic — no Groq call, no prose evaluation. The wake `reason` field
+reads `"Phase <name> complete on <TICKET>"` (or `"failed"`) so the orchestrator's wake handler
+(typically [`orchestrate-phase-advance`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/orchestrate-phase-advance))
+can route to the next phase without re-reading the source event.
+
+Cardinality is **one `phase_lifecycle` interest per ticket** — the orchestrator registers a fresh
+interest at Phase 4 dispatch and the broker auto-cleans it when the orchestrator emits
+`agent.checkout` (or after the watchdog declares the session stale). This is the only deterministic
+interest type gated on `dispatchMode`: in `oneshot-legacy` mode there are no `phase.*` events to
+match, so no `phase_lifecycle` interests are ever registered.
+
+The matcher lives at
+[`broker/index.mjs:1299`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/broker/index.mjs)
+(`tryPhaseLifecycleRoute`); see [Orchestrator overview › Phase 4
+monitor](https://github.com/coalesce-labs/catalyst/blob/main/docs/orchestrator-overview.md#phase-4-monitor--broker-interests--event-flow)
+for how this fits into the broader broker-interest layout.
 
 ### filter.wake
 
