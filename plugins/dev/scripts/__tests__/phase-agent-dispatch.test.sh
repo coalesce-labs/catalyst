@@ -71,7 +71,7 @@ JOB_ID="${CLAUDE_STUB_JOB_ID:-f124220a}"
   echo "--ARGS--"
   printf '%s\n' "$@"
   echo "--ENV--"
-  env | grep -E '^CATALYST_(ORCHESTRATOR_(DIR|ID)|PHASE|TICKET)=' | sort
+  env | grep -E '^(CATALYST_(ORCHESTRATOR_(DIR|ID)|PHASE|TICKET)|OTEL_RESOURCE_ATTRIBUTES)=' | sort
   echo "--END--"
 } > "$LOG"
 # Mimic today's `claude --bg` multi-line stdout — the hex job ID lives on
@@ -475,6 +475,121 @@ JOB_IN_SIGNAL=$(jq -r '.bg_job_id' "$SIGNAL")
 JOB_IN_STDOUT=$(echo "$STDOUT" | jq -r '.bg_job_id')
 assert_eq "f124220a" "$JOB_IN_SIGNAL" "parser extracts hex from 'backgrounded · <hex>' line"
 assert_eq "f124220a" "$JOB_IN_STDOUT" "parser does NOT capture the literal word 'backgrounded'"
+
+# ─── Test 10: OTEL_RESOURCE_ATTRIBUTES propagation with projectKey present (CTL-492)
+echo ""
+echo "Test 10: OTEL_RESOURCE_ATTRIBUTES composed when projectKey is set"
+fresh_env t10
+cat > "${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+    >/dev/null 2>&1 )
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" \
+  "OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100" \
+  "OTEL attrs composed with projectKey + tier-2 branch fallback"
+
+# ─── Test 11: OTEL_RESOURCE_ATTRIBUTES three-attr form when projectKey absent
+echo ""
+echo "Test 11: OTEL_RESOURCE_ATTRIBUTES falls back to three-attr form when no projectKey"
+fresh_env t11
+# Dispatch from a directory with NO .catalyst/config.json — TEST_DIR/proj has
+# an empty .catalyst dir created by fresh_env but no config.json file.
+rm -rf "${CONFIG_DIR}"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+    >/dev/null 2>&1 )
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" \
+  "OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test" \
+  "OTEL attrs three-attr form when no projectKey"
+if [[ "$LOG" == *"OTEL_RESOURCE_ATTRIBUTES="*"project="* ]]; then
+  fail "OTEL attrs three-attr form must omit project="
+else
+  pass "OTEL attrs three-attr form omits project="
+fi
+if [[ "$LOG" == *"OTEL_RESOURCE_ATTRIBUTES="*"branch="* ]]; then
+  fail "OTEL attrs three-attr form must omit branch="
+else
+  pass "OTEL attrs three-attr form omits branch="
+fi
+
+# ─── Test 12: tier-1 authoritative branch via git -C beats tier-2 constructed name
+echo ""
+echo "Test 12: tier-1 git -C branch resolution wins over tier-2 constructed name"
+fresh_env t12
+cat > "${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+# Build a real git repo at the worker-worktree location the helper computes.
+HOME_FIXTURE="${TEST_DIR}/home"
+WORKER_WT="${HOME_FIXTURE}/catalyst/wt/test-proj/orch-test-CTL-100"
+mkdir -p "$WORKER_WT"
+(
+  cd "$WORKER_WT"
+  git init -q --initial-branch=main
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  git commit --allow-empty -q -m "init"
+  git checkout -q -b bespoke-branch
+)
+HOME="$HOME_FIXTURE" \
+  bash -c "cd '${TEST_DIR}/proj' && '$DISPATCH' --phase triage --ticket CTL-100 --orch-dir '$ORCH_DIR' --orch-id orch-test >/dev/null 2>&1"
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" ",branch=bespoke-branch" \
+  "tier-1 git branch (bespoke-branch) wins over tier-2 fallback"
+
+# ─── Test 13 (CTL-492 follow-up): tier-1 → tier-2 fall-through when worker-wt
+#                                  path exists but is not a git repo
+echo ""
+echo "Test 13: tier-2 wins when worker-wt path exists without a .git entry"
+fresh_env t13
+cat > "${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+HOME_FIXTURE="${TEST_DIR}/home"
+# Materialise the worker-wt directory but DO NOT init a git repo. Mirrors
+# the real-world degradation where a previous worktree create failed mid-way
+# and left a bare directory.
+mkdir -p "${HOME_FIXTURE}/catalyst/wt/test-proj/orch-test-CTL-100"
+HOME="$HOME_FIXTURE" \
+  bash -c "cd '${TEST_DIR}/proj' && '$DISPATCH' --phase triage --ticket CTL-100 --orch-dir '$ORCH_DIR' --orch-id orch-test >/dev/null 2>&1"
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" ",branch=orch-test-CTL-100" \
+  "tier-2 constructed branch used when worker-wt has no .git"
+
+# ─── Test 14: --dry-run JSON env array contains the OTEL entry
+echo ""
+echo "Test 14: --dry-run JSON env array carries OTEL_RESOURCE_ATTRIBUTES"
+fresh_env t14
+cat > "${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+DRY=$( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null )
+OTEL_ENTRY=$(echo "$DRY" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')
+assert_eq \
+  "OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100" \
+  "$OTEL_ENTRY" \
+  "dry-run JSON env array carries the composed OTEL attribute string"
 
 echo ""
 echo "─────────────────────────────────────────────"

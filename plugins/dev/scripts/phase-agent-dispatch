@@ -154,6 +154,51 @@ config_value() {
   echo "$v"
 }
 
+# ─── OTEL resource attributes (CTL-492) ────────────────────────────────────
+#
+# Compose OTEL_RESOURCE_ATTRIBUTES for the dispatched `claude --bg` child,
+# mirroring what `~/.config/direnv/lib/otel.sh` produces for the interactive
+# orchestrator. Without this the worker emits Claude-Code metrics/logs with
+# empty `linear_key`, `branch`, `catalyst_orchestration`, and `project`
+# labels — silently dropped by Grafana panels that filter on non-empty
+# `linear_key`.
+#
+# Composition order (stable across both code paths):
+#   project=<key>,linear.key=<TICKET>,catalyst.orchestration=<ORCH_ID>[,branch=<branch>]
+#
+# Branch is resolved via a 3-tier fallback:
+#   1. authoritative `git -C <worker-wt> branch --show-current` if the
+#      worker worktree already exists (create-worktree.sh sets branch ==
+#      worktree-basename by construction);
+#   2. constructed name `<orch-id>-<ticket>` (matches the creation convention);
+#   3. omitted if `projectKey` itself is unresolvable.
+#
+# Always emits a non-empty line to stdout — at minimum the two-attribute
+# form `linear.key=<TICKET>,catalyst.orchestration=<ORCH_ID>` because both
+# values are required CLI flags by the time this runs. The caller still
+# guards on `-n` to remain defensive against future helper changes.
+compose_otel_resource_attrs() {
+  local project_key worker_wt worker_branch attrs
+  project_key="$(config_value '.catalyst.projectKey' '')"
+
+  worker_branch=""
+  if [[ -n "$project_key" ]]; then
+    worker_wt="${HOME}/catalyst/wt/${project_key}/${ORCH_ID}-${TICKET}"
+    if [[ -e "${worker_wt}/.git" ]] && command -v git >/dev/null 2>&1; then
+      worker_branch="$(git -C "$worker_wt" branch --show-current 2>/dev/null || true)"
+    fi
+    [[ -z "$worker_branch" ]] && worker_branch="${ORCH_ID}-${TICKET}"
+  fi
+
+  if [[ -n "$project_key" ]]; then
+    attrs="project=${project_key},linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
+    [[ -n "$worker_branch" ]] && attrs="${attrs},branch=${worker_branch}"
+  else
+    attrs="linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
+  fi
+  printf '%s\n' "$attrs"
+}
+
 # ─── Resolve model: CLI > modelOverrides > models > default ────────────────
 
 resolve_model() {
@@ -298,12 +343,21 @@ PROMPT="/catalyst-dev:phase-${PHASE} ${TICKET} --orch-dir ${ORCH_DIR}"
 # Pass the resolved env through so the phase agent inherits orchestrator
 # context + the humanlayer-friendly thoughts repo location. The dispatch
 # scaffold contract documents these as the implicit interface.
+#
+# We also forward `OTEL_RESOURCE_ATTRIBUTES` (CTL-492) so Claude Code's OTEL
+# SDK stamps the worker's metrics/logs with `project`, `linear.key`,
+# `catalyst.orchestration` (and `branch` when resolvable) — matching what
+# direnv produces for the interactive orchestrator.
+OTEL_RES_ATTRS="$(compose_otel_resource_attrs)"
+
 DISPATCH_ENV=(
   "CATALYST_ORCHESTRATOR_DIR=${ORCH_DIR}"
   "CATALYST_ORCHESTRATOR_ID=${ORCH_ID}"
   "CATALYST_PHASE=${PHASE}"
   "CATALYST_TICKET=${TICKET}"
 )
+[[ -n "$OTEL_RES_ATTRS" ]] && \
+  DISPATCH_ENV+=( "OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}" )
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   # Dry-run prints the command it would have run without spawning anything.
