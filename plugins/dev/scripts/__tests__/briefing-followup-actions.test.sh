@@ -113,6 +113,7 @@ install_fake_claude() {
   cat > "$bin_dir/claude" <<'EOF'
 #!/usr/bin/env bash
 echo "claude $*" >> "${FAKE_CLAUDE_LOG:-/dev/null}"
+echo "OTEL=${OTEL_RESOURCE_ATTRIBUTES:-}" >> "${FAKE_CLAUDE_LOG:-/dev/null}"
 if [[ "${FAKE_CLAUDE_NO_ORCH:-0}" == "1" ]]; then
   echo "${FAKE_CLAUDE_STDERR:-dispatch failed}" >&2
   exit 1
@@ -257,6 +258,9 @@ test_action_orchestrate() {
   assert_grep "claude invoked with -p flag" "-p" "$log_content"
   assert_grep "claude invoked with orchestrate command" \
     "/catalyst-dev:orchestrate CTL-999" "$log_content"
+  # CTL-495: claude inherits OTEL with task.type=briefing-followup.
+  assert_grep "claude inherits OTEL with task.type=briefing-followup" \
+    "task.type=briefing-followup" "$log_content"
 
   # Soft-skip path: claude not on PATH.
   local skip_out skip_ec

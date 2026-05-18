@@ -238,6 +238,18 @@ if [ -z "$PENDING" ]; then
   exit 0
 fi
 
+# CTL-495: tag OTEL stream with the activity type so Grafana cost can be sliced
+# by what the worker is doing. The phase-agent path delegates to
+# phase-agent-dispatch which composes its own OTEL_RESOURCE_ATTRIBUTES (CTL-492
+# + CTL-495 Phase 1), so this tagging only applies to the legacy oneshot path.
+# When --phase is set, the legacy path below is skipped (line ~328 `continue`),
+# so this value never reaches the phase-agent fork.
+if [ -z "$PHASE" ]; then
+  # shellcheck source=lib/task-type.sh
+  . "${SCRIPT_DIR}/lib/task-type.sh"
+  __catalyst_append_task_type "oneshot"
+fi
+
 # ─── Dispatch loop ────────────────────────────────────────────────────────────
 DISPATCHED=()
 while IFS=$'\t' read -r W T; do
