@@ -237,6 +237,178 @@ build_signal "${ORCH_DIR}/workers/TEST-1.json" "TEST-1"
 run "--roll-usage with no stream files: helper still exits 0" \
   "$HELPER" --orch "orch-cd5" --orch-dir "$ORCH_DIR" --roll-usage --stdout
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Phase-agent sweep loop tests (CTL-496)
+# Verifies that --roll-usage also walks workers/<TICKET>/phase-<NAME>.json
+# alongside the existing flat workers/<TICKET>.json layout.
+# ───────────────────────────────────────────────────────────────────────────────
+
+BG_JOBS_DIR="${SCRATCH}/claude-jobs"
+mkdir -p "$BG_JOBS_DIR"
+export CATALYST_BG_JOBS_DIR="$BG_JOBS_DIR"
+
+build_phase_signal() {
+  local out="$1" ticket="$2"; shift 2
+  local bg_job_id="" catalyst_sid=""
+  local phase_name
+  phase_name="$(basename "$out" .json)"
+  phase_name="${phase_name#phase-}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bg-job-id)            bg_job_id="$2"; shift 2 ;;
+      --catalyst-session-id)  catalyst_sid="$2"; shift 2 ;;
+      *) echo "build_phase_signal: unknown arg $1" >&2; return 1 ;;
+    esac
+  done
+  mkdir -p "$(dirname "$out")"
+  jq -n \
+    --arg ticket "$ticket" \
+    --arg phase "$phase_name" \
+    --arg bg "$bg_job_id" \
+    --arg sid "$catalyst_sid" \
+    '{
+      ticket: $ticket,
+      phase: $phase,
+      orchestrator: "orch-test",
+      status: "running",
+      startedAt: "2026-05-18T09:00:00Z",
+      updatedAt: "2026-05-18T09:30:00Z"
+    }
+    | if $bg != "" then .bg_job_id = $bg else . end
+    | if $sid != "" then .catalystSessionId = $sid else . end' > "$out"
+}
+
+build_fake_bg_state() {
+  local bg_id="$1"; shift
+  local session_id="" link_scan_path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session-id)     session_id="$2"; shift 2 ;;
+      --link-scan-path) link_scan_path="$2"; shift 2 ;;
+      *) echo "build_fake_bg_state: unknown arg $1" >&2; return 1 ;;
+    esac
+  done
+  mkdir -p "${BG_JOBS_DIR}/${bg_id}"
+  jq -n --arg sid "$session_id" --arg lsp "$link_scan_path" \
+    '{state:"working", sessionId:$sid, linkScanPath:$lsp}' \
+    > "${BG_JOBS_DIR}/${bg_id}/state.json"
+}
+
+build_phase_jsonl() {
+  local out="$1"; shift
+  local input=0 output=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --input)  input="$2"; shift 2 ;;
+      --output) output="$2"; shift 2 ;;
+      *) echo "build_phase_jsonl: unknown arg $1" >&2; return 1 ;;
+    esac
+  done
+  mkdir -p "$(dirname "$out")"
+  jq -nc \
+    --argjson input "$input" --argjson output "$output" \
+    '{type:"assistant",
+      message:{model:"claude-opus-4-7",stop_reason:"end_turn",
+        usage:{input_tokens:$input,output_tokens:$output,
+          cache_read_input_tokens:0,
+          cache_creation:{ephemeral_5m_input_tokens:0,ephemeral_1h_input_tokens:0}}}}' > "$out"
+}
+
+# ─── Test 10: sweep discovers per-phase signal files and rolls each ───────────
+ORCH_DIR=$(setup_orch "orch-ph1")
+mkdir -p "${ORCH_DIR}/workers/PH-1"
+build_phase_signal "${ORCH_DIR}/workers/PH-1/phase-research.json" "PH-1" \
+  --bg-job-id "bg-ph1a"
+build_phase_signal "${ORCH_DIR}/workers/PH-1/phase-plan.json" "PH-1" \
+  --bg-job-id "bg-ph1b"
+build_fake_bg_state "bg-ph1a" --session-id "x1" \
+  --link-scan-path "${SCRATCH}/ph1a.jsonl"
+build_fake_bg_state "bg-ph1b" --session-id "x2" \
+  --link-scan-path "${SCRATCH}/ph1b.jsonl"
+build_phase_jsonl "${SCRATCH}/ph1a.jsonl" --input 1000 --output 500
+build_phase_jsonl "${SCRATCH}/ph1b.jsonl" --input 2000 --output 1000
+
+"$HELPER" --orch "orch-ph1" --orch-dir "$ORCH_DIR" --roll-usage --stdout >/dev/null
+
+run "phase sweep: phase-research signal.cost populated" \
+  bash -c "[ \"\$(jq -r '.cost.inputTokens' '${ORCH_DIR}/workers/PH-1/phase-research.json')\" = '1000' ]"
+run "phase sweep: phase-plan signal.cost populated" \
+  bash -c "[ \"\$(jq -r '.cost.inputTokens' '${ORCH_DIR}/workers/PH-1/phase-plan.json')\" = '2000' ]"
+run "phase sweep: state.workers[PH-1].usage.inputTokens == 3000 (sum across phases)" \
+  bash -c "[ \"\$(jq -r '.orchestrators[\"orch-ph1\"].workers[\"PH-1\"].usage.inputTokens' '$CATALYST_STATE_FILE')\" = '3000' ]"
+run "phase sweep: .roll-usage.log records both phases" \
+  bash -c "grep -q 'ticket=PH-1,phase=research.*wrote-cost' '${ORCH_DIR}/.roll-usage.log' && grep -q 'ticket=PH-1,phase=plan.*wrote-cost' '${ORCH_DIR}/.roll-usage.log'"
+
+# ─── Test 11: sweep handles mixed layout (legacy flat + phase per-ticket) ─────
+ORCH_DIR=$(setup_orch "orch-ph2")
+# Legacy ticket with flat layout
+build_stream_with_result "${ORCH_DIR}/workers/output/L-1-stream.jsonl" \
+  "0.5" "5000" "500" "5" "10000"
+build_signal "${ORCH_DIR}/workers/L-1.json" "L-1"
+# Phase ticket
+mkdir -p "${ORCH_DIR}/workers/PH-2"
+build_phase_signal "${ORCH_DIR}/workers/PH-2/phase-triage.json" "PH-2" \
+  --bg-job-id "bg-ph2"
+build_fake_bg_state "bg-ph2" --session-id "y1" \
+  --link-scan-path "${SCRATCH}/ph2.jsonl"
+build_phase_jsonl "${SCRATCH}/ph2.jsonl" --input 500 --output 100
+
+"$HELPER" --orch "orch-ph2" --orch-dir "$ORCH_DIR" --roll-usage --stdout >/dev/null
+
+run "mixed: legacy L-1 flat signal.cost populated" \
+  bash -c "[ \"\$(jq -r '.cost.costUSD' '${ORCH_DIR}/workers/L-1.json')\" = '0.5' ]"
+run "mixed: phase PH-2 signal.cost populated" \
+  bash -c "[ \"\$(jq -r '.cost.inputTokens' '${ORCH_DIR}/workers/PH-2/phase-triage.json')\" = '500' ]"
+
+# ─── Test 12: phase sweep idempotent — re-running does not double-count ───────
+COST_BEFORE=$(jq -r '.orchestrators["orch-ph2"].usage.costUSD' "$CATALYST_STATE_FILE")
+"$HELPER" --orch "orch-ph2" --orch-dir "$ORCH_DIR" --roll-usage --stdout >/dev/null
+COST_AFTER=$(jq -r '.orchestrators["orch-ph2"].usage.costUSD' "$CATALYST_STATE_FILE")
+run "phase sweep idempotent: state.usage.costUSD unchanged" \
+  bash -c "[ \"$COST_BEFORE\" = \"$COST_AFTER\" ]"
+
+# ─── Test 13: .dead-*.json sidecars are skipped ───────────────────────────────
+# phase-agent-dispatch renames killed worker signals to phase-X.json.dead-*.json
+# for archival. The sweep glob must not pick these up — re-rolling them after
+# the live signal already booked the cost would double-count.
+ORCH_DIR=$(setup_orch "orch-ph3")
+mkdir -p "${ORCH_DIR}/workers/PH-3"
+build_phase_signal "${ORCH_DIR}/workers/PH-3/phase-research.json" "PH-3" \
+  --bg-job-id "bg-ph3"
+build_fake_bg_state "bg-ph3" --session-id "z1" \
+  --link-scan-path "${SCRATCH}/ph3.jsonl"
+build_phase_jsonl "${SCRATCH}/ph3.jsonl" --input 1000 --output 500
+# Create a .dead-*.json sidecar identical to the live signal
+cp "${ORCH_DIR}/workers/PH-3/phase-research.json" \
+   "${ORCH_DIR}/workers/PH-3/phase-research.json.dead-deadbeef.json"
+
+"$HELPER" --orch "orch-ph3" --orch-dir "$ORCH_DIR" --roll-usage --stdout >/dev/null
+
+run "dead sidecar: live phase-research processed" \
+  bash -c "[ \"\$(jq -r '.cost.inputTokens' '${ORCH_DIR}/workers/PH-3/phase-research.json')\" = '1000' ]"
+run "dead sidecar: .dead-*.json NOT processed (cost stays null)" \
+  bash -c "[ \"\$(jq -r '.cost // \"null\"' '${ORCH_DIR}/workers/PH-3/phase-research.json.dead-deadbeef.json')\" = 'null' ]"
+run "dead sidecar: state.workers[PH-3].usage NOT double-counted" \
+  bash -c "[ \"\$(jq -r '.orchestrators[\"orch-ph3\"].workers[\"PH-3\"].usage.inputTokens' '$CATALYST_STATE_FILE')\" = '1000' ]"
+
+# ─── Test 14: no --roll-usage flag → phase signals untouched ──────────────────
+ORCH_DIR=$(setup_orch "orch-ph4")
+mkdir -p "${ORCH_DIR}/workers/PH-4"
+build_phase_signal "${ORCH_DIR}/workers/PH-4/phase-research.json" "PH-4" \
+  --bg-job-id "bg-ph4"
+build_fake_bg_state "bg-ph4" --session-id "w1" \
+  --link-scan-path "${SCRATCH}/ph4.jsonl"
+build_phase_jsonl "${SCRATCH}/ph4.jsonl" --input 1000 --output 500
+
+"$HELPER" --orch "orch-ph4" --orch-dir "$ORCH_DIR" --stdout >/dev/null
+
+run "no --roll-usage: phase signal.cost stays null" \
+  bash -c "[ \"\$(jq -r '.cost // \"null\"' '${ORCH_DIR}/workers/PH-4/phase-research.json')\" = 'null' ]"
+run "no --roll-usage: no .roll-usage.log written" \
+  bash -c "[ ! -f '${ORCH_DIR}/.roll-usage.log' ]"
+
+unset CATALYST_BG_JOBS_DIR
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]
