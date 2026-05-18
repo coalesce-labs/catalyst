@@ -326,17 +326,38 @@ cmd_attention() {
   local attn_type="$2"
   local ticket_id="$3"
   local message="$4"
+  shift 4
+
+  # CTL-493: optional --actionable true|false. Default true.
+  # Lets orchestrate-revive's phase-agent recovery branch flag unrecoverable
+  # failures distinctly so HUD/monitor consumers can render them differently
+  # from operator-actionable attentions.
+  local actionable="true"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --actionable)
+        case "${2:-}" in
+          true|false) actionable="$2" ;;
+          *) echo "attention: --actionable must be 'true' or 'false' (got: '${2:-}')" >&2; return 2 ;;
+        esac
+        shift 2 ;;
+      *)
+        echo "attention: unknown flag '$1'" >&2
+        return 2 ;;
+    esac
+  done
 
   # Add attention item to the orchestrator and mark the worker
   state_write \
-    '.orchestrators[$oid].attention = ([{type: $atype, ticketId: $tid, message: $msg, since: $now}] + .orchestrators[$oid].attention)
+    '.orchestrators[$oid].attention = ([{type: $atype, ticketId: $tid, message: $msg, since: $now, actionable: ($act == "true")}] + .orchestrators[$oid].attention)
      | .orchestrators[$oid].workers[$tid].needsAttention = true
      | .orchestrators[$oid].workers[$tid].attentionReason = $msg
      | .orchestrators[$oid].updatedAt = $now' \
     --arg oid "$orch_id" \
     --arg atype "$attn_type" \
     --arg tid "$ticket_id" \
-    --arg msg "$message"
+    --arg msg "$message" \
+    --arg act "$actionable"
 
   # Emit event
   event_append "$(jq -nc \
@@ -345,7 +366,8 @@ cmd_attention() {
     --arg worker "$ticket_id" \
     --arg atype "$attn_type" \
     --arg msg "$message" \
-    '{ts: $ts, orchestrator: $orch, worker: $worker, event: "attention-raised", detail: {attentionType: $atype, reason: $msg}}')"
+    --arg act "$actionable" \
+    '{ts: $ts, orchestrator: $orch, worker: $worker, event: "attention-raised", detail: {attentionType: $atype, reason: $msg, actionable: ($act == "true")}}')"
 }
 
 cmd_resolve_attention() {
