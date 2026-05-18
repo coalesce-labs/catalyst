@@ -353,6 +353,21 @@ active_phase_of() {
   jq -r '.activePhase // ""' "${ORCH_DIR}/workers/${ticket}.json" 2>/dev/null || echo ""
 }
 
+# CTL-493 Phase 2: structural variant — true iff workers/<TICKET>/ contains
+# phase-*.json signals. Independent of the legacy top-level workers/<T>.json
+# (which phase-mode runs never write). Used by the per-phase iteration branch
+# below to find stalled signals the main loop misses.
+is_phase_mode_structural() {
+  local ticket="$1"
+  local dir="${ORCH_DIR}/workers/${ticket}"
+  [ -d "$dir" ] || return 1
+  local f
+  for f in "$dir"/phase-*.json; do
+    [ -e "$f" ] && return 0
+  done
+  return 1
+}
+
 # ─── Main loop ────────────────────────────────────────────────────────────────
 
 CHECKED=0
@@ -701,9 +716,47 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   echo "REVIVED: ${TICKET} (sid=${SESSION_ID}, pid=${NEW_PID}, count=${NEW_REVIVE_COUNT}, reason=${REVIVE_REASON})" >&2
 done
 
+# ─── CTL-493 Phase 2: per-phase iteration branch (structural-only) ───────────
+#
+# Walks every workers/<T>/phase-*.json signal independently of the legacy
+# top-level workers/<T>.json loop above. Phase-mode orchestrations don't write
+# the top-level signal, so the previous loop is a structural no-op for them.
+#
+# This phase ONLY counts and logs — no recovery action is taken. Phase 3
+# layers the meaningful-progress / re-dispatch / escalate decision tree on top.
+
+PHASE_MODE_WORKERS=0
+PHASE_ELIGIBLE=0
+
+shopt -s nullglob
+for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
+  [ -e "$PHASE_SIGNAL" ] || continue
+
+  P_TICKET=$(jq -r '.ticket // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+  P_PHASE=$(jq -r '.phase // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+  P_STATUS=$(jq -r '.status // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+  [ -z "$P_TICKET" ] && continue
+  [ -z "$P_PHASE" ] && continue
+
+  PHASE_MODE_WORKERS=$((PHASE_MODE_WORKERS + 1))
+
+  if [ "$P_STATUS" != "stalled" ]; then
+    continue
+  fi
+
+  PHASE_ELIGIBLE=$((PHASE_ELIGIBLE + 1))
+  echo "phase-mode worker detected: ${P_TICKET}/${P_PHASE} (status=${P_STATUS})" >&2
+
+  # Phase 3 inserts the decision tree here (truly-failed | meaningful-progress
+  # | budget-exhausted | re-dispatch).
+done
+
 jq -nc \
   --argjson c "$CHECKED" \
   --argjson r "$REVIVED" \
   --argjson s "$STALLED" \
   --argjson k "$SKIPPED" \
-  '{checked:$c, revived:$r, stalled:$s, skipped:$k}'
+  --argjson pmw "$PHASE_MODE_WORKERS" \
+  --argjson pel "$PHASE_ELIGIBLE" \
+  '{checked:$c, revived:$r, stalled:$s, skipped:$k,
+    phaseModeWorkers:$pmw, phaseEligible:$pel}'
