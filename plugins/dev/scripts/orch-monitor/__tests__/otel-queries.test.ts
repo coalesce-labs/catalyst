@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   costByTicket,
+  costByTaskType,
   tokensByType,
   cacheHitRate,
   costRateByModel,
@@ -144,6 +145,64 @@ describe("costRateByModel", () => {
     const result = await costRateByModel(prom, "5m");
     expect(result).not.toBeNull();
     expect(result!["claude-opus-4-6"]).toBeCloseTo(0.015);
+  });
+});
+
+// CTL-495: cost-by-task-type slicing (phase-research vs phase-implement vs
+// interactive vs orchestrate, etc.). Mirrors costByTicket shape but uses the
+// `task_type` Prom label (underscored conversion of the `task.type` OTEL
+// resource-attribute key).
+describe("costByTaskType", () => {
+  it("returns cost map keyed by task_type", async () => {
+    const prom = mockProm({
+      data: {
+        resultType: "vector",
+        result: [
+          { metric: { task_type: "phase-research" }, value: [1713100000, "0.91"] },
+          { metric: { task_type: "phase-implement" }, value: [1713100000, "4.27"] },
+          { metric: { task_type: "interactive" }, value: [1713100000, "0.12"] },
+        ],
+      },
+    });
+    const result = await costByTaskType(prom, "1h");
+    expect(result).not.toBeNull();
+    expect(result!["phase-research"]).toBeCloseTo(0.91);
+    expect(result!["phase-implement"]).toBeCloseTo(4.27);
+    expect(result!["interactive"]).toBeCloseTo(0.12);
+  });
+
+  it("returns null when Prometheus is unavailable", async () => {
+    const result = await costByTaskType(mockProm(null), "1h");
+    expect(result).toBeNull();
+  });
+
+  it("handles empty result set", async () => {
+    const prom = mockProm({
+      data: { resultType: "vector", result: [] },
+    });
+    const result = await costByTaskType(prom, "1h");
+    expect(result).not.toBeNull();
+    expect(Object.keys(result!)).toHaveLength(0);
+  });
+
+  // Deliberate redundancy against the data-driven tests above: pin the actual
+  // PromQL shape so a refactor that copies costByTicket and forgets to swap
+  // `linear_key` → `task_type` in both the `sum by` clause and the selector
+  // is caught here even when the mock would otherwise return the desired data.
+  it("issues PromQL with `sum by (task_type)` and `task_type=~\".+\"` selector", async () => {
+    let capturedQuery = "";
+    const prom = {
+      query: async (q: string) => {
+        capturedQuery = q;
+        return { data: { resultType: "vector" as const, result: [] } };
+      },
+      queryRange: async () => null,
+      isAvailable: () => true,
+    } as unknown as PrometheusFetcher;
+    await costByTaskType(prom, "1h");
+    expect(capturedQuery).toContain("sum by (task_type)");
+    expect(capturedQuery).toContain(`task_type=~".+"`);
+    expect(capturedQuery).toContain("claude_code_cost_usage_USD_total");
   });
 });
 
