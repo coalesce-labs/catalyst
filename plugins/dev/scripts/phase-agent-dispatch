@@ -187,9 +187,27 @@ if [[ -n "$ARTIFACT_SPEC" ]]; then
       [[ -f "$ARTIFACT_FILE" ]] || ARTIFACT_OK=0
       ;;
     glob:*)
-      # Lowercase ticket per existing thoughts naming convention
+      # CTL-494: two-step match. The lowercase-ticket-at-tail form
+      # (phase-plan prose convention) is tried first; on miss, fall back to
+      # a wider pattern that accepts the canonical create-plan form
+      # (uppercase ticket + descriptive suffix). Case-insensitive nocaseglob
+      # is the final fallback. The ticket is still required to appear in the
+      # filename, so cross-ticket lookalikes do not satisfy this gate.
+      PATTERN="${ARTIFACT_SPEC#glob:}"
       shopt -s nullglob
-      MATCHES=( ${ARTIFACT_SPEC#glob:} )
+      # shellcheck disable=SC2206  # word-splitting is required for glob expansion
+      MATCHES=( $PATTERN )
+      if [[ ${#MATCHES[@]} -eq 0 ]]; then
+        WIDE="${PATTERN/%-${TICKET,,}.md/*${TICKET}*.md}"
+        # shellcheck disable=SC2206
+        MATCHES=( $WIDE )
+        if [[ ${#MATCHES[@]} -eq 0 ]]; then
+          shopt -s nocaseglob
+          # shellcheck disable=SC2206
+          MATCHES=( $WIDE )
+          shopt -u nocaseglob
+        fi
+      fi
       shopt -u nullglob
       [[ ${#MATCHES[@]} -gt 0 ]] || ARTIFACT_OK=0
       ;;

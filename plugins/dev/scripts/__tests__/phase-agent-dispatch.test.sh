@@ -234,6 +234,64 @@ fi
 # Clean up env for subsequent tests.
 unset CATALYST_DIR
 
+# ─── Test 5b: dispatcher accepts both lowercase-tail and uppercase-suffix plan filenames (CTL-494 Phase 2)
+echo ""
+echo "Test 5b: dispatcher accepts canonical + phase-plan filename conventions"
+fresh_env t5b
+
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+
+# Form A: phase-plan prose form — lowercase, ticket at end, no descriptive suffix.
+touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-ctl-100.md"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase implement --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+    >"${TEST_DIR}/glob-a.out" 2>/dev/null )
+STATUS_A=$(jq -r '.status' "${TEST_DIR}/glob-a.out")
+assert_eq "dispatched" "$STATUS_A" "Form A: lowercase ticket at end is accepted"
+
+# Reset for next form
+rm -f "${TEST_DIR}/proj/thoughts/shared/plans/"*.md
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
+
+# Form B: canonical create-plan form — uppercase ticket + descriptive suffix.
+touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-CTL-100-some-descriptive-name.md"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase implement --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+    >"${TEST_DIR}/glob-b.out" 2>/dev/null )
+STATUS_B=$(jq -r '.status' "${TEST_DIR}/glob-b.out")
+assert_eq "dispatched" "$STATUS_B" "Form B: uppercase ticket + descriptive suffix is accepted"
+
+# Reset
+rm -f "${TEST_DIR}/proj/thoughts/shared/plans/"*.md
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
+
+# Form C: uppercase + suffix-style "-plan".
+touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-17-CTL-100-plan.md"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase implement --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+    >"${TEST_DIR}/glob-c.out" 2>/dev/null )
+STATUS_C=$(jq -r '.status' "${TEST_DIR}/glob-c.out")
+assert_eq "dispatched" "$STATUS_C" "Form C: uppercase ticket + -plan suffix is accepted"
+
+# Reset
+rm -f "${TEST_DIR}/proj/thoughts/shared/plans/"*.md
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
+
+# Form D: lookalike file for a DIFFERENT ticket must NOT match CTL-100.
+# Guards against an overly-greedy fix that strips the ticket constraint.
+touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-CTL-200-something.md"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase implement --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+    >"${TEST_DIR}/glob-d.out" 2>"${TEST_DIR}/glob-d.err" )
+RC_D=$?
+STATUS_D=$(jq -r '.status' "${TEST_DIR}/glob-d.out")
+assert_eq "2"       "$RC_D"     "Form D: different-ticket plan file does NOT satisfy CTL-100 gate"
+assert_eq "refused" "$STATUS_D" "Form D: stdout JSON status = refused"
+
 # ─── Test 6: dispatcher resolves model from config (default + override paths)
 echo ""
 echo "Test 6: dispatcher resolves model from config (default and override)"
