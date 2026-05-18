@@ -391,6 +391,27 @@ run "dead sidecar: .dead-*.json NOT processed (cost stays null)" \
 run "dead sidecar: state.workers[PH-3].usage NOT double-counted" \
   bash -c "[ \"\$(jq -r '.orchestrators[\"orch-ph3\"].workers[\"PH-3\"].usage.inputTokens' '$CATALYST_STATE_FILE')\" = '1000' ]"
 
+# ─── Test 13b: legacy flat-layout .dead-*.json sidecar is skipped ─────────────
+# Symmetric coverage for the phase-layout dead-sidecar guard (test 13). If a
+# future change ever produces .dead-*.json sidecars at the flat workers/
+# layer, the legacy sweep must skip them too — same double-count concern.
+ORCH_DIR=$(setup_orch "orch-ph3b")
+build_stream_with_result "${ORCH_DIR}/workers/output/L-DEAD-stream.jsonl" \
+  "0.5" "5000" "500" "5" "10000"
+build_signal "${ORCH_DIR}/workers/L-DEAD.json" "L-DEAD"
+# Create a flat .dead-*.json sidecar identical to the live signal.
+cp "${ORCH_DIR}/workers/L-DEAD.json" \
+   "${ORCH_DIR}/workers/L-DEAD.json.dead-deadbeef.json"
+
+"$HELPER" --orch "orch-ph3b" --orch-dir "$ORCH_DIR" --roll-usage --stdout >/dev/null
+
+run "legacy dead sidecar: live L-DEAD processed" \
+  bash -c "[ \"\$(jq -r '.cost.costUSD' '${ORCH_DIR}/workers/L-DEAD.json')\" = '0.5' ]"
+run "legacy dead sidecar: .dead-*.json NOT processed (cost stays null)" \
+  bash -c "[ \"\$(jq -r '.cost // \"null\"' '${ORCH_DIR}/workers/L-DEAD.json.dead-deadbeef.json')\" = 'null' ]"
+run "legacy dead sidecar: state.usage.costUSD NOT double-counted" \
+  bash -c "[ \"\$(jq -r '.orchestrators[\"orch-ph3b\"].usage.costUSD' '$CATALYST_STATE_FILE')\" = '0.5' ]"
+
 # ─── Test 14: no --roll-usage flag → phase signals untouched ──────────────────
 ORCH_DIR=$(setup_orch "orch-ph4")
 mkdir -p "${ORCH_DIR}/workers/PH-4"

@@ -88,8 +88,14 @@ if [ "$ROLL_USAGE" = "1" ] && [ -d "$WORKERS_DIR" ]; then
     ROLL_LOG="${ORCH_DIR}/.roll-usage.log"
 
     # Legacy flat layout: workers/<TICKET>.json (oneshot-legacy dispatch).
+    # Also skip *.dead-*.json sidecars (defensive — phase-agent-dispatch
+    # produces those today and writes them under workers/<T>/, but the
+    # filter belongs in both passes so future rename paths don't double-count).
     for sig in "$WORKERS_DIR"/*.json; do
       [ -f "$sig" ] || continue
+      case "$(basename "$sig")" in
+        *.dead-*.json) continue ;;
+      esac
       tkt=$(jq -r '.ticket // empty' "$sig" 2>/dev/null || true)
       [ -n "$tkt" ] || continue
       "$ROLL_SCRIPT" --orch "$ORCH_ID" --ticket "$tkt" --orch-dir "$ORCH_DIR" -v \

@@ -128,6 +128,22 @@ fi
 
 # Common no-op gates.
 [ -f "$SIGNAL_FILE" ] || { log_action "signal-missing"; exit 0; }
+
+# Take an exclusive lock on the signal file for the entire read-modify-write
+# cycle. Without this, two parallel sweeps (e.g. two overlapping monitor
+# wake-ups) can both pass the `signal.cost == null` check, both compute USAGE,
+# both invoke `catalyst-state.sh worker` with `+=`, and double-count
+# `state.workers[T].usage`. Phase mode hits this faster than legacy because
+# its state-workers aggregator uses `+=` (across phases), where legacy used
+# overwrite-assignment that was naturally idempotent. The lock makes both
+# modes safe. flock auto-releases when the FD closes (script exit).
+LOCK_FILE="${SIGNAL_FILE}.lock"
+exec 9>"$LOCK_FILE"
+if command -v flock >/dev/null 2>&1; then
+  flock -w 30 9 || { log_action "lock-timeout"; exit 0; }
+fi
+# Re-evaluate idempotency under the lock. If another sweep claimed this
+# signal between our existence check and now, bail cleanly.
 EXISTING=$(jq -r '.cost // "null"' "$SIGNAL_FILE")
 [ "$EXISTING" = "null" ] || { log_action "already-rolled"; exit 0; }
 
@@ -187,9 +203,12 @@ fi
 # ─── Common writes ────────────────────────────────────────────────────────────
 
 # 1. Mirror to signal file (atomic tmp+rename). Dashboard reads signal files,
-#    not state.json, for per-worker cost columns.
-jq --argjson cost "$USAGE" '.cost = $cost' "$SIGNAL_FILE" \
-  > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+#    not state.json, for per-worker cost columns. PID-suffixed tmp so a
+#    crashed parallel writer can't poison ours (the flock above already
+#    prevents the contention from happening under normal operation).
+SIGNAL_TMP="${SIGNAL_FILE}.tmp.$$"
+jq --argjson cost "$USAGE" '.cost = $cost' "$SIGNAL_FILE" > "$SIGNAL_TMP" \
+  && mv "$SIGNAL_TMP" "$SIGNAL_FILE"
 
 # 2. Per-worker entry in global state. Legacy mode overwrites (one worker per
 #    ticket per run). Phase mode aggregates so state.workers[T].usage is the

@@ -756,6 +756,34 @@ run "phase: zero-cost JSONL → zero-cost-retry" \
 run "phase: zero-cost-retry leaves signal.cost null" \
   bash -c "[ \"\$(jq -r '.cost' '${ORCH_DIR}/workers/CTL-T5/phase-research.json')\" = 'null' ]"
 
+# ─── Test 29: parallel rolls on the SAME phase signal do not double-count ────
+# Without the flock at the top of roll-usage, two parallel sweeps could both
+# pass the `signal.cost == null` check, both compute USAGE, both invoke
+# `catalyst-state.sh worker` with `+=`, and double-count state.workers[T].usage.
+# Phase mode hits this faster than legacy because phase mode uses `+=` for the
+# state-workers aggregate. (Legacy mode used overwrite-assignment, which was
+# naturally idempotent on retry.) The lock makes both modes safe.
+ORCH_DIR=$(setup_orch "orch-p6")
+build_phase_signal "${ORCH_DIR}/workers/CTL-T6/phase-research.json" "CTL-T6" \
+  --bg-job-id "fake-bg-6"
+build_fake_bg_state "fake-bg-6" --session-id "fake-claude-sess-6" \
+  --link-scan-path "${SCRATCH}/fake-cwd/fake-claude-sess-6.jsonl"
+build_jsonl_at "${SCRATCH}/fake-cwd/fake-claude-sess-6.jsonl" \
+  --model claude-opus-4-7 --input 1000 --output 500
+
+# Fire 5 in parallel on the same per-phase signal.
+for i in 1 2 3 4 5; do
+  "$HELPER" --orch "orch-p6" --ticket "CTL-T6" --phase "research" --orch-dir "$ORCH_DIR" &
+done
+wait
+
+run "phase race: signal.cost.inputTokens == 1000 (not 5000)" \
+  bash -c "[ \"\$(jq -r '.cost.inputTokens' '${ORCH_DIR}/workers/CTL-T6/phase-research.json')\" = '1000' ]"
+run "phase race: state.workers[CTL-T6].usage.inputTokens == 1000 (not 5000)" \
+  bash -c "[ \"\$(jq -r '.orchestrators[\"orch-p6\"].workers[\"CTL-T6\"].usage.inputTokens' '$CATALYST_STATE_FILE')\" = '1000' ]"
+run "phase race: state.usage.inputTokens == 1000 (not 5000)" \
+  bash -c "[ \"\$(jq -r '.orchestrators[\"orch-p6\"].usage.inputTokens' '$CATALYST_STATE_FILE')\" = '1000' ]"
+
 # Reset env so subsequent (none here) tests don't inherit the override.
 unset CATALYST_DB_FILE
 unset CATALYST_BG_JOBS_DIR
