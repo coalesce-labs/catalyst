@@ -70,6 +70,22 @@ export async function costRateByModel(
   return extractVectorMap(result, "model");
 }
 
+// CTL-495: cost slice by `task.type` resource attribute (Prom label `task_type`
+// — the OTEL SDK converts `.` to `_` on ingest). The selector excludes legacy
+// series produced before any launcher set `task.type`, matching the shape of
+// costByTicket's linear_key=~".+" guard.
+export async function costByTaskType(
+  prom: PrometheusFetcher,
+  range: string,
+): Promise<Record<string, number> | null> {
+  const r = safeDuration(range, "1h");
+  const result = await prom.query(
+    `sum by (task_type) (increase(claude_code_cost_usage_USD_total{task_type=~".+"}[${r}]))`,
+  );
+  if (!result) return null;
+  return extractVectorMap(result, "task_type");
+}
+
 export async function toolUsageByName(
   loki: LokiFetcher,
   range: string,

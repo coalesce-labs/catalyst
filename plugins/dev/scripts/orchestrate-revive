@@ -246,8 +246,13 @@ spawn_revive() {
 # job creation: {"id":"...","state":"running"}. We capture the first such
 # line synchronously (stdout is short for --bg) and let the process detach
 # in the background via nohup.
+#
+# CTL-495: optional 4th arg `active_phase` (e.g. "implement", "research")
+# tags the resumed session's OTEL stream with task.type=phase-<active_phase>.
+# When omitted, no task.type is injected (parent shell's value, if any, is
+# inherited verbatim).
 spawn_revive_bg() {
-  local ticket="$1" worktree="$2" session_id="$3"
+  local ticket="$1" worktree="$2" session_id="$3" active_phase="${4:-}"
 
   if [ ! -d "$worktree" ]; then
     echo "ERROR: worktree missing for ${ticket}: ${worktree}" >&2
@@ -258,10 +263,26 @@ spawn_revive_bg() {
   local stderr_file="${ORCH_DIR}/workers/output/${ticket}-bg-stderr.log"
   mkdir -p "$(dirname "$stdout_file")"
 
+  # CTL-495: compose OTEL_RESOURCE_ATTRIBUTES inline so the revived session
+  # carries task.type=phase-<phase>. Each revive iteration may target a
+  # different phase, so we cannot rely on the parent shell's value (which is
+  # set once by direnv for the orchestrator process). When the orchestrator
+  # already set OTEL_RESOURCE_ATTRIBUTES (the typical case), we append
+  # task.type to it; otherwise we set task.type alone.
+  local otel_attrs="${OTEL_RESOURCE_ATTRIBUTES:-}"
+  if [ -n "$active_phase" ]; then
+    if [ -n "$otel_attrs" ]; then
+      otel_attrs="${otel_attrs},task.type=phase-${active_phase}"
+    else
+      otel_attrs="task.type=phase-${active_phase}"
+    fi
+  fi
+
   (
     cd "$worktree" || exit 1
     CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
     CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+    OTEL_RESOURCE_ATTRIBUTES="$otel_attrs" \
     exec nohup "$CLAUDE_BIN" \
       --model "$MODEL" \
       --dangerously-skip-permissions \
@@ -293,9 +314,14 @@ spawn_revive_bg() {
 # orient itself from the handoff doc without re-reading the full plan.
 # Returns "pid:<new_pid>:<new_bg_job_id>" on stdout (same shape as
 # spawn_revive_bg), or empty on failure.
+#
+# CTL-495: optional 6th arg `active_phase` tags the resumed session's OTEL
+# stream with task.type=phase-<active_phase>. Continuations always resume
+# the same phase that hit the turn cap, so the value matches the original
+# phase-agent-dispatch's task.type.
 spawn_continuation_bg() {
   local ticket="$1" worktree="$2" session_id="$3"
-  local handoff_path="$4" continuation_count="$5"
+  local handoff_path="$4" continuation_count="$5" active_phase="${6:-}"
 
   if [ ! -d "$worktree" ]; then
     echo "ERROR: worktree missing for ${ticket}: ${worktree}" >&2
@@ -306,6 +332,16 @@ spawn_continuation_bg() {
   local stderr_file="${ORCH_DIR}/workers/output/${ticket}-bg-stderr.log"
   mkdir -p "$(dirname "$stdout_file")"
 
+  # CTL-495: see spawn_revive_bg for the rationale on inline composition.
+  local otel_attrs="${OTEL_RESOURCE_ATTRIBUTES:-}"
+  if [ -n "$active_phase" ]; then
+    if [ -n "$otel_attrs" ]; then
+      otel_attrs="${otel_attrs},task.type=phase-${active_phase}"
+    else
+      otel_attrs="task.type=phase-${active_phase}"
+    fi
+  fi
+
   (
     cd "$worktree" || exit 1
     CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
@@ -313,6 +349,7 @@ spawn_continuation_bg() {
     CATALYST_IS_CONTINUATION=true \
     CATALYST_HANDOFF_PATH="$handoff_path" \
     CATALYST_CONTINUATION_COUNT="$continuation_count" \
+    OTEL_RESOURCE_ATTRIBUTES="$otel_attrs" \
     exec nohup "$CLAUDE_BIN" \
       --model "$MODEL" \
       --dangerously-skip-permissions \
@@ -684,8 +721,11 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
 
       # Spawn continuation worker.
       NEW_CC=$((CONTINUATION_COUNT+1))
+      # CTL-495: pass ACTIVE_PHASE so the resumed session gets the right
+      # task.type=phase-<phase> OTEL tag.
       SPAWN_OUT=$(spawn_continuation_bg "$TICKET" "$WORKTREE" "$SESSION_ID" \
-                                         "$HANDOFF_PATH" "$NEW_CC" || echo "")
+                                         "$HANDOFF_PATH" "$NEW_CC" \
+                                         "$ACTIVE_PHASE" || echo "")
       NEW_PID="${SPAWN_OUT#pid:}"
       NEW_PID="${NEW_PID%%:*}"
       NEW_BG_JOB_ID="${SPAWN_OUT##*:}"
@@ -854,7 +894,8 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   ACTIVE_PHASE=""
   if is_phase_mode "$TICKET"; then
     ACTIVE_PHASE=$(active_phase_of "$TICKET")
-    SPAWN_OUT=$(spawn_revive_bg "$TICKET" "$WORKTREE" "$SESSION_ID" || echo "")
+    # CTL-495: pass ACTIVE_PHASE so the revived session gets task.type=phase-<phase>.
+    SPAWN_OUT=$(spawn_revive_bg "$TICKET" "$WORKTREE" "$SESSION_ID" "$ACTIVE_PHASE" || echo "")
     # SPAWN_OUT shape: "pid:<pid>:<bg_job_id>"
     NEW_PID="${SPAWN_OUT#pid:}"
     NEW_PID="${NEW_PID%%:*}"

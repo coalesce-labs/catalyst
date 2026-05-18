@@ -127,6 +127,13 @@ else
   LABEL="$(basename "$WORKTREE_PATH")"
 fi
 
+# CTL-495: tag the OTEL stream with the skill so Grafana cost can be sliced by
+# activity. SKILL is set above (defaults to "interactive"; overridden by
+# --skill flag or leading /skill-name argv). The helper is idempotent — if the
+# parent shell already exported task.type=..., the caller's value wins.
+. "${SCRIPT_DIR}/lib/task-type.sh"
+__catalyst_append_task_type "$SKILL"
+
 # ─── Start session ────────────────────────────────────────────────────────────
 
 SESSION_ARGS=(--skill "$SKILL" --cwd "$WORKTREE_PATH")

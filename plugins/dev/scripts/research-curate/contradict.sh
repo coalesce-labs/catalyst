@@ -19,6 +19,12 @@
 
 set -uo pipefail
 
+# CTL-495: tag OTEL stream as research-curate-contradict so Grafana cost can be
+# sliced. The export propagates to the eval'd $LLM_CMD subprocess below.
+# shellcheck source=../lib/task-type.sh
+. "$(dirname "$0")/../lib/task-type.sh"
+__catalyst_append_task_type "research-curate-contradict"
+
 LLM_CMD="claude -p"
 SAMPLE_CHARS=1500
 INVENTORY_DIR=""

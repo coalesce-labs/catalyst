@@ -154,17 +154,17 @@ config_value() {
   echo "$v"
 }
 
-# ─── OTEL resource attributes (CTL-492) ────────────────────────────────────
+# ─── OTEL resource attributes (CTL-492, CTL-495) ───────────────────────────
 #
 # Compose OTEL_RESOURCE_ATTRIBUTES for the dispatched `claude --bg` child,
 # mirroring what `~/.config/direnv/lib/otel.sh` produces for the interactive
 # orchestrator. Without this the worker emits Claude-Code metrics/logs with
-# empty `linear_key`, `branch`, `catalyst_orchestration`, and `project`
-# labels — silently dropped by Grafana panels that filter on non-empty
-# `linear_key`.
+# empty `linear_key`, `branch`, `catalyst_orchestration`, `project`, and
+# `task_type` labels — silently dropped by Grafana panels that filter on
+# non-empty `linear_key` and breaking the per-phase cost breakdown.
 #
 # Composition order (stable across both code paths):
-#   project=<key>,linear.key=<TICKET>,catalyst.orchestration=<ORCH_ID>[,branch=<branch>]
+#   project=<key>,linear.key=<TICKET>,catalyst.orchestration=<ORCH_ID>[,branch=<branch>],task.type=phase-<PHASE>
 #
 # Branch is resolved via a 3-tier fallback:
 #   1. authoritative `git -C <worker-wt> branch --show-current` if the
@@ -173,10 +173,16 @@ config_value() {
 #   2. constructed name `<orch-id>-<ticket>` (matches the creation convention);
 #   3. omitted if `projectKey` itself is unresolvable.
 #
+# `task.type` (CTL-495) is always present for any dispatched phase — `$PHASE`
+# is a required CLI flag validated above, so the pair never widens to empty.
+# The `phase-<PHASE>` prefix isolates phase-agent task types from launcher
+# task types (`orchestrate`, `interactive`, `briefing-followup`, etc.) so
+# Grafana legends are self-describing.
+#
 # Always emits a non-empty line to stdout — at minimum the two-attribute
-# form `linear.key=<TICKET>,catalyst.orchestration=<ORCH_ID>` because both
-# values are required CLI flags by the time this runs. The caller still
-# guards on `-n` to remain defensive against future helper changes.
+# form `linear.key=<TICKET>,catalyst.orchestration=<ORCH_ID>,task.type=phase-<PHASE>`
+# because all three values are required by the time this runs. The caller
+# still guards on `-n` to remain defensive against future helper changes.
 compose_otel_resource_attrs() {
   local project_key worker_wt worker_branch attrs
   project_key="$(config_value '.catalyst.projectKey' '')"
@@ -196,6 +202,7 @@ compose_otel_resource_attrs() {
   else
     attrs="linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
   fi
+  attrs="${attrs},task.type=phase-${PHASE}"
   printf '%s\n' "$attrs"
 }
 

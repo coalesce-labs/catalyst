@@ -46,6 +46,11 @@ if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
   exit 0
 fi
 
+# CTL-495: tag OTEL stream as briefing-followup so Grafana cost can be sliced.
+# shellcheck source=../lib/task-type.sh
+. "$(dirname "$0")/../lib/task-type.sh"
+__catalyst_append_task_type "briefing-followup"
+
 COMMAND="/catalyst-dev:orchestrate $TICKET"
 [[ -n "$WORKER_ARGS" ]] && COMMAND="$COMMAND $WORKER_ARGS"
 
