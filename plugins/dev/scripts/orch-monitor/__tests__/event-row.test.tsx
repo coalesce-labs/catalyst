@@ -1,6 +1,9 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import type { ReactElement, ReactNode } from "react";
-import { EventRow } from "../cli/components/EventRow.tsx";
+// CTL-473: import the unwrapped impl. The `EventRow` named export is a
+// MemoExoticComponent (not callable as a function); these tests walk the
+// React element tree directly, so they need the raw render function.
+import { EventRowImpl as EventRow } from "../cli/components/EventRow.tsx";
 import { formatDetails, formatEvent, formatIcon } from "../cli/lib/format.ts";
 import { computeColumnWidths } from "../cli/lib/column-widths.ts";
 import { _resetNerdFontCacheForTesting } from "../cli/lib/nerd-font.ts";

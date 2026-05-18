@@ -26,6 +26,30 @@ function monthlyPath(catalystDir: string, d: Date): string {
   return join(catalystDir, "events", `${y}-${m}.jsonl`);
 }
 
+const BACKOFF_BASE_MS = 200;
+const BACKOFF_CAP_MS = 1600;
+
+/**
+ * Idle-tick exponential backoff for the file-tail loop (CTL-473 Fix 8). On a
+ * busy tick (new bytes detected) reset to base; on an idle tick double up to
+ * the cap. Pure function so the schedule can be unit-tested without driving
+ * the async loop.
+ */
+export function nextPollMs(opts: {
+  prevMs: number;
+  sawNewBytes: boolean;
+  baseMs?: number;
+  capMs?: number;
+}): number {
+  const base = opts.baseMs ?? BACKOFF_BASE_MS;
+  const cap = opts.capMs ?? BACKOFF_CAP_MS;
+  if (opts.sawNewBytes) return base;
+  // Defensive: a sub-base prevMs (corrupt/initial-zero state) snaps to base
+  // rather than doubling from there. Backoff begins at base.
+  if (opts.prevMs < base) return base;
+  return Math.min(cap, opts.prevMs * 2);
+}
+
 export interface ReadBacklogOpts {
   catalystDir: string;
   predicate: string;
@@ -70,7 +94,8 @@ export interface TailEventLogOpts {
 }
 
 export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
-  const pollMs = opts.pollMs ?? 200;
+  const basePollMs = opts.pollMs ?? BACKOFF_BASE_MS;
+  let currentPollMs = basePollMs;
   const nowFn = opts.now ?? (() => new Date());
 
   if (opts.signal.aborted) return;
@@ -84,13 +109,15 @@ export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
 
   try {
     while (!opts.signal.aborted) {
-      // Detect month rollover
+      // Detect month rollover. Rollover does not count as "new bytes" — the
+      // next iteration will detect any newly-written content naturally.
       const expectedPath = monthlyPath(opts.catalystDir, nowFn());
       if (expectedPath !== currentPath) {
         currentPath = expectedPath;
         offset = 0;
       }
 
+      let sawNewBytes = false;
       if (existsSync(currentPath)) {
         const size = statSync(currentPath).size;
         if (size > offset) {
@@ -107,14 +134,20 @@ export async function tailEventLog(opts: TailEventLogOpts): Promise<void> {
           const lines = buf.toString("utf8").split("\n").filter((l) => l.length > 0);
           for (const l of lines) stream.write(l);
           await stream.flush();
+          sawNewBytes = true;
         } else if (size < offset) {
           // File truncated/replaced — restart from beginning
           offset = 0;
         }
       }
 
+      // CTL-473 Fix 8: back off on idle ticks. 200ms → 400ms → 800ms → 1600ms
+      // cap, reset to 200ms on any non-empty tick. Drops idle-attached CPU
+      // from 5 wakeups/sec to <1/sec while preserving snappy busy-tick latency.
+      currentPollMs = nextPollMs({ prevMs: currentPollMs, sawNewBytes, baseMs: basePollMs });
+
       await new Promise<void>((resolve) => {
-        const t = setTimeout(resolve, pollMs);
+        const t = setTimeout(resolve, currentPollMs);
         const onAbort = (): void => { clearTimeout(t); resolve(); };
         if (opts.signal.aborted) { clearTimeout(t); resolve(); return; }
         opts.signal.addEventListener("abort", onAbort, { once: true });

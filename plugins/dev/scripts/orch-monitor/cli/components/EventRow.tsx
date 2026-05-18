@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { Box, Text } from "ink";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
 import { formatRef, formatOrch } from "../lib/format.ts";
@@ -37,7 +38,12 @@ interface EventRowProps {
 // CTL-394: columns are now data-driven via resolveColumns() — EventRow
 // iterates the resolved list so custom column order/visibility/widths from
 // ~/.config/catalyst/monitor.json are honoured without touching this file.
-export function EventRow({ event, selected, columns, paused = true, wrapMode = 'truncate', columnConfig }: EventRowProps) {
+// CTL-473: memo wrap — highest single-component leverage. On every selection
+// move N-2 of N rows short-circuit because `event`, `columns`, etc. for non-
+// selected rows are unchanged from the previous render.
+// Exported (`EventRowImpl`) so __tests__/event-row.test.tsx can introspect
+// the unwrapped render output — memo's MemoExoticComponent is not callable.
+export function EventRowImpl({ event, selected, columns, paused = true, wrapMode = 'truncate', columnConfig }: EventRowProps) {
   const color = getRowColor(event);
   // Inverse video swaps fg/bg at the terminal level (ANSI SGR 7), guaranteeing
   // contrast across themes without composing same-family fg/bg pairs. Hidden
@@ -72,3 +78,6 @@ export function EventRow({ event, selected, columns, paused = true, wrapMode = '
     </Box>
   );
 }
+
+export const EventRow = memo(EventRowImpl);
+EventRow.displayName = "EventRow";
