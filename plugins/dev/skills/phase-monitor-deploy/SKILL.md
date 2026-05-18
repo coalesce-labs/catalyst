@@ -35,6 +35,12 @@ Environment:
   a stub that emits a fixture canary result.
 - `CATALYST_ORCHESTRATOR_ID`, `CATALYST_SESSION_ID` — used for event trace/span id derivation.
 
+`gh` CLI on `$PATH`, authenticated against the GitHub repo, is required only
+when `phase-monitor-merge.json` exists but `.pr.mergeCommitSha` is empty (the
+REST fallback path). In the common case (where `phase-monitor-merge` recorded
+the SHA successfully), `gh` is not invoked. The fallback also reads PR number
+from `phase-pr.json`.
+
 ## phase-monitor-merge.json contract (input shape)
 
 ```json
@@ -89,9 +95,30 @@ fi
 
 MERGE_SHA="$(jq -r '.pr.mergeCommitSha // empty' "$MERGE_FILE" 2>/dev/null)"
 if [[ -z "$MERGE_SHA" ]]; then
-  emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
-    --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha"
-  exit 1
+  # Fall back to gh REST. Mirrors orchestrate-verify.sh:131-156. PR number
+  # comes from phase-pr.json (phase-monitor-merge.json does not record it).
+  PR_FILE="$WORKER_DIR/phase-pr.json"
+  PR_NUMBER=""
+  if [[ -f "$PR_FILE" ]]; then
+    PR_NUMBER="$(jq -r '.pr.number // empty' "$PR_FILE" 2>/dev/null)"
+  fi
+  if [[ -z "$PR_NUMBER" ]]; then
+    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+      --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and no PR number available for gh REST fallback"
+    exit 1
+  fi
+  REPO="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")"
+  if [[ -z "$REPO" ]]; then
+    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+      --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh repo view returned empty"
+    exit 1
+  fi
+  MERGE_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // empty' 2>/dev/null || echo "")"
+  if [[ -z "$MERGE_SHA" ]]; then
+    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+      --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh REST fallback also returned empty for pr#${PR_NUMBER}"
+    exit 1
+  fi
 fi
 
 # 2. Subscribe to deployment_status events for this SHA. The filter accepts any
