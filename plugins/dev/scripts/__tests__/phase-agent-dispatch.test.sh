@@ -231,6 +231,48 @@ else
   pass "--dry-run refusal does not emit event"
 fi
 
+# CTL-494 Phase 1: failed-event emission is phase-agnostic — the same code
+# path produces phase.plan.failed.<TICKET> when the plan gate refuses. The
+# plan's manual-verification step (§Phase 1 Manual #1) asked for this with
+# `--phase plan` against a missing research doc; automate it here so a
+# future regression that hardcodes "research" in the event name is caught.
+# The plan phase's prior artifact is a glob under thoughts/shared/research/;
+# run from an isolated empty project dir so the relaxed glob can't ambiently
+# match a real research file in the host repo.
+rm -f "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null
+mkdir -p "${TEST_DIR}/empty-proj"
+( cd "${TEST_DIR}/empty-proj" && \
+  "$DISPATCH" --phase plan --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test \
+    >"${TEST_DIR}/plan.out" 2>/dev/null )
+RC_PLAN=$?
+assert_eq "2" "$RC_PLAN" "plan-phase refusal also exits 2"
+PLAN_EVT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+if [[ -z "$PLAN_EVT_FILE" ]]; then
+  fail "plan-phase refusal: event log not created"
+else
+  PLAN_EVT_LINE=$(grep '"phase.plan.failed.CTL-100"' "$PLAN_EVT_FILE" | head -1)
+  if [[ -n "$PLAN_EVT_LINE" ]]; then
+    pass "plan-phase refusal emits phase.plan.failed.CTL-100"
+  else
+    fail "plan-phase refusal: no phase.plan.failed.CTL-100 line in event log"
+  fi
+fi
+
+# CTL-494 Phase 1: emit-complete failing must not mask the refusal exit code.
+# The dispatcher's call uses `|| true` and `--orch-dir/--orch-id`. Force the
+# emit-complete to fail by pointing CATALYST_DIR at a path that cannot be
+# created. The dispatcher must still exit 2 with status=refused.
+export CATALYST_DIR="/dev/null/cannot-create-here"
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-research.json"
+"$DISPATCH" --phase research --ticket CTL-100 \
+  --orch-dir "$ORCH_DIR" --orch-id orch-test \
+  >"${TEST_DIR}/research-emit-fail.out" 2>"${TEST_DIR}/research-emit-fail.err"
+RC_EMIT_FAIL=$?
+STATUS_EMIT_FAIL=$(jq -r '.status' "${TEST_DIR}/research-emit-fail.out" 2>/dev/null || echo "")
+assert_eq "2" "$RC_EMIT_FAIL" "emit-complete failure does not mask exit 2"
+assert_eq "refused" "$STATUS_EMIT_FAIL" "emit-complete failure preserves status=refused in stdout"
+
 # Clean up env for subsequent tests.
 unset CATALYST_DIR
 
