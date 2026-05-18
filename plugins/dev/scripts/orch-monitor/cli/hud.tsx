@@ -242,11 +242,13 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // Brief transient status message (cleared after 3s)
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const showStatus = (msg: string) => {
+  // CTL-473: stable identity so consumers wrapped in useCallback can list it
+  // in their deps without invalidating on every render.
+  const showStatus = useCallback((msg: string) => {
     if (statusTimer.current) clearTimeout(statusTimer.current);
     setStatusMsg(msg);
     statusTimer.current = setTimeout(() => setStatusMsg(null), 3000);
-  };
+  }, []);
 
   useEffect(() => {
     setDetailScrollTop(0);
@@ -369,7 +371,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
     } finally {
       setQuerySubmitting(false);
     }
-  }, []);
+  }, [showStatus]);
 
   // CTL-473: stabilize PromptInput callback/metric identities so the memoized
   // PromptInput (Phase 3) can short-circuit when its props are unchanged.

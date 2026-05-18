@@ -79,10 +79,18 @@ export function useEventLog({ predicate = "", repoFilter = "", sinceTs }: UseEve
       // to setStates from setTimeout/async callbacks — each commit otherwise
       // fires independently.
       const coalescer = createCoalescer<CanonicalEvent>((batch) => {
-        setEvents((prev) => {
-          const next = prev.length === 0 ? batch.slice() : prev.concat(batch);
-          return next.length > MAX_EVENTS ? next.slice(next.length - MAX_EVENTS) : next;
-        });
+        try {
+          setEvents((prev) => {
+            const next = prev.length === 0 ? batch.slice() : prev.concat(batch);
+            return next.length > MAX_EVENTS ? next.slice(next.length - MAX_EVENTS) : next;
+          });
+        } catch (err: unknown) {
+          // CTL-473: never swallow flush errors silently — coalescer's
+          // scheduled flag is already reset, so dropping the throw here would
+          // lose `batch` with no trace.
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[catalyst-hud] coalesce flush error: ${msg}\n`);
+        }
       });
 
       await tailEventLog({
@@ -99,8 +107,13 @@ export function useEventLog({ predicate = "", repoFilter = "", sinceTs }: UseEve
               if (repo && !repo.includes(repoFilter)) return;
             }
             coalescer.enqueue(event);
-          } catch {
-            // ignore malformed lines
+          } catch (err: unknown) {
+            // CTL-473: only malformed JSON is expected — surface anything else
+            // (e.g. shouldSkipEvent throw, coalescer throw) so programming
+            // errors don't disappear into the catch.
+            if (err instanceof SyntaxError) return;
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(`[catalyst-hud] onEvent error: ${msg}\n`);
           }
         },
       });
