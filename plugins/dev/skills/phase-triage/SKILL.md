@@ -9,35 +9,36 @@ version: 1.0.0
 
 # phase-triage
 
-Greenfield phase agent shipped in CTL-451 (Initiative 1 Phase 5). Reads a Linear ticket,
-produces a structured triage analysis, and lands the analysis as a Linear comment + label
-so subsequent phase agents (research, plan, …) can rely on the classification.
+Greenfield phase agent shipped in CTL-451 (Initiative 1 Phase 5). Reads a Linear ticket, produces a
+structured triage analysis, and lands the analysis as a Linear comment + label so subsequent phase
+agents (research, plan, …) can rely on the classification.
 
 The skill is dispatched in two modes:
 
-- **Production**: An Opus phase agent reads `triage.json` placeholder fields produced by
-  the bash body below, then refines them with model-quality analysis (acronym expansion,
-  judgment-of-scope, dep inference) before the comment is posted.
-- **CI / test runner**: The bash body alone is self-sufficient — it derives all five
-  fields deterministically from the ticket JSON so e2e tests run without a model call.
+- **Production**: An Opus phase agent reads `triage.json` placeholder fields produced by the bash
+  body below, then refines them with model-quality analysis (acronym expansion, judgment-of-scope,
+  dep inference) before the comment is posted.
+- **CI / test runner**: The bash body alone is self-sufficient — it derives all five fields
+  deterministically from the ticket JSON so e2e tests run without a model call.
 
 Both modes produce the same `triage.json` shape and emit the same canonical phase event.
 
 ## Setup prerequisite
 
 The `triaged` workspace label must already exist in Linear. The skill applies it via
-`linearis issues update --labels triaged --label-mode add` and tolerates a non-zero exit
-(logs a warning, does not fail the phase). Future work in CTL-452 may add a
-`linearis labels create` call to bootstrap the label.
+`linearis issues update --labels triaged --label-mode add` and tolerates a non-zero exit (logs a
+warning, does not fail the phase). Future work in CTL-452 may add a `linearis labels create` call to
+bootstrap the label.
 
 ## Inputs
 
 Environment:
+
 - `TICKET` — Linear identifier (e.g. `CTL-451`). Required.
-- `WORKER_DIR` — output directory for `triage.json`. Defaults to
-  `${ORCH_DIR}/workers/${TICKET}` if set, else `$(pwd)`.
-- `ORCH_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_SESSION_ID` — used for trace/span
-  id derivation in the emitted event; all optional.
+- `WORKER_DIR` — output directory for `triage.json`. Defaults to `${ORCH_DIR}/workers/${TICKET}` if
+  set, else `$(pwd)`.
+- `ORCH_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_SESSION_ID` — used for trace/span id derivation
+  in the emitted event; all optional.
 
 ## Body
 
@@ -236,14 +237,14 @@ exit 0
 
 ## What an Opus-mode invocation adds
 
-The bash body above is fully self-sufficient — the e2e test exercises only that. When an
-Opus agent runs this skill, it should:
+The bash body above is fully self-sufficient — the e2e test exercises only that. When an Opus agent
+runs this skill, it should:
 
 1. Run the bash body to produce the baseline `triage.json` and Linear comment.
-2. Read the ticket back, refine the classification + scope estimate with model-quality
-   judgement, and re-write `triage.json` if anything changed.
-3. If the refined fields differ materially, post a follow-up `linearis issues discuss`
-   comment marking the refinement.
+2. Read the ticket back, refine the classification + scope estimate with model-quality judgement,
+   and re-write `triage.json` if anything changed.
+3. If the refined fields differ materially, post a follow-up `linearis issues discuss` comment
+   marking the refinement.
 
-The refinement step is deliberately optional — the orchestrator hand-off in CTL-452 only
-needs the `phase.triage.complete.<TICKET>` event, and the bash body already emits that.
+The refinement step is deliberately optional — the orchestrator hand-off in CTL-452 only needs the
+`phase.triage.complete.<TICKET>` event, and the bash body already emits that.
