@@ -140,7 +140,13 @@ fi
 LOCK_FILE="${SIGNAL_FILE}.lock"
 exec 9>"$LOCK_FILE"
 if command -v flock >/dev/null 2>&1; then
-  flock -w 30 9 || { log_action "lock-timeout"; exit 0; }
+  # 30s contention is not idempotency — surface to stderr unconditionally so the
+  # caller's roll-log captures it even when invoked without -v.
+  flock -w 30 9 || {
+    echo "roll-usage[ticket=${TICKET_ID}${PHASE:+,phase=${PHASE}}]: lock-timeout" >&2
+    log_action "lock-timeout"
+    exit 0
+  }
 fi
 # Re-evaluate idempotency under the lock. If another sweep claimed this
 # signal between our existence check and now, bail cleanly.
@@ -163,16 +169,26 @@ if [ -n "$PHASE" ]; then
   [ -x "$EXTRACTOR" ] && [ -f "$PRICING" ] \
     || { log_action "extract-failed"; exit 0; }
 
-  USAGE=$("$EXTRACTOR" --jsonl "$JSONL" --pricing "$PRICING" 2>/dev/null || echo "")
-  [ -n "$USAGE" ] || { log_action "extract-failed"; exit 0; }
+  # Let extractor stderr pass through to our stderr (which update-dashboard.sh
+  # tees into $ROLL_LOG). Capture exit code explicitly so a crash is
+  # distinguishable from a clean run that produced empty stdout.
+  EXTRACT_RC=0
+  USAGE=$("$EXTRACTOR" --jsonl "$JSONL" --pricing "$PRICING") || EXTRACT_RC=$?
+  if [ "$EXTRACT_RC" -ne 0 ]; then
+    log_action "extract-crashed"; exit 0
+  fi
+  [ -n "$USAGE" ] || { log_action "extract-empty"; exit 0; }
 
   # Zero-cost guard: an empty / not-yet-flushed JSONL legitimately produces a
-  # zeroed USAGE record. Don't poison signal.cost with zeros — next sweep can
-  # retry. (For a truly costless phase like phase-monitor-deploy, the signal
-  # never reaches this script in the first place because no catalyst-session
-  # was started.)
-  COSTUSD=$(echo "$USAGE" | jq -r '.costUSD')
-  if [ "$COSTUSD" = "0" ] || [ "$COSTUSD" = "0.0" ]; then
+  # zeroed USAGE record with zero tokens. Don't poison signal.cost — next
+  # sweep can retry. Gate on the token-sum (not costUSD): an unknown-model
+  # JSONL prices at zero but has non-zero tokens, and is genuine cost data we
+  # must persist rather than infinitely retry.
+  TOKEN_SUM=$(echo "$USAGE" | jq -r '
+    (.inputTokens // 0) + (.outputTokens // 0)
+    + (.cacheReadTokens // 0) + (.cacheCreationTokens // 0)
+  ')
+  if [ "$TOKEN_SUM" = "0" ]; then
     log_action "zero-cost-retry"; exit 0
   fi
 else

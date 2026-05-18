@@ -784,6 +784,33 @@ run "phase race: state.workers[CTL-T6].usage.inputTokens == 1000 (not 5000)" \
 run "phase race: state.usage.inputTokens == 1000 (not 5000)" \
   bash -c "[ \"\$(jq -r '.orchestrators[\"orch-p6\"].usage.inputTokens' '$CATALYST_STATE_FILE')\" = '1000' ]"
 
+# ─── Test 30: unknown-model JSONL → tokens persist, no infinite retry ────────
+# An unknown model (e.g. pricing.json missed an update) is priced at zero but
+# the assistant did real work — there are non-zero tokens. The retry gate must
+# NOT short-circuit as zero-cost-retry; signal.cost must populate with
+# costUSD=0 + the actual token counts. Otherwise that phase's tokens are
+# permanently lost.
+ORCH_DIR=$(setup_orch "orch-p7")
+build_phase_signal "${ORCH_DIR}/workers/CTL-T7/phase-research.json" "CTL-T7" \
+  --bg-job-id "fake-bg-7"
+build_fake_bg_state "fake-bg-7" --session-id "fake-claude-sess-7" \
+  --link-scan-path "${SCRATCH}/fake-cwd/fake-claude-sess-7.jsonl"
+build_jsonl_at "${SCRATCH}/fake-cwd/fake-claude-sess-7.jsonl" \
+  --model claude-model-not-in-pricing-table --input 1234 --output 567
+LOG="${SCRATCH}/orch-p7.stderr"
+"$HELPER" --orch "orch-p7" --ticket "CTL-T7" --phase "research" --orch-dir "$ORCH_DIR" -v 2>"$LOG" >/dev/null || true
+
+run "phase: unknown-model does NOT short-circuit as zero-cost-retry" \
+  bash -c "! grep -q 'zero-cost-retry' '$LOG'"
+run "phase: unknown-model writes wrote-cost" \
+  bash -c "grep -q 'wrote-cost' '$LOG'"
+run "phase: unknown-model signal.cost.costUSD == 0" \
+  bash -c "[ \"\$(jq -r '.cost.costUSD' '${ORCH_DIR}/workers/CTL-T7/phase-research.json')\" = '0' ]"
+run "phase: unknown-model signal.cost.inputTokens == 1234 (tokens persisted)" \
+  bash -c "[ \"\$(jq -r '.cost.inputTokens' '${ORCH_DIR}/workers/CTL-T7/phase-research.json')\" = '1234' ]"
+run "phase: unknown-model signal.cost.outputTokens == 567" \
+  bash -c "[ \"\$(jq -r '.cost.outputTokens' '${ORCH_DIR}/workers/CTL-T7/phase-research.json')\" = '567' ]"
+
 # Reset env so subsequent (none here) tests don't inherit the override.
 unset CATALYST_DB_FILE
 unset CATALYST_BG_JOBS_DIR
