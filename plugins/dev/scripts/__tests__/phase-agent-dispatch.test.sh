@@ -587,9 +587,61 @@ DRY=$( cd "${TEST_DIR}/proj" && \
   "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null )
 OTEL_ENTRY=$(echo "$DRY" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')
 assert_eq \
-  "OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100" \
+  "OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage" \
   "$OTEL_ENTRY" \
   "dry-run JSON env array carries the composed OTEL attribute string"
+
+# ─── Test 15 (CTL-495): task.type=phase-<phase> appended to OTEL attrs
+echo ""
+echo "Test 15: task.type=phase-<phase> is always present in OTEL_RESOURCE_ATTRIBUTES"
+fresh_env t15
+cat > "${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+# Case A: with projectKey set, task.type appears at the end of the composed string.
+# implement requires a plan artifact under thoughts/shared/plans/.
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-ctl-100.md"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+    >/dev/null 2>&1 )
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" ",task.type=phase-implement" \
+  "task.type=phase-implement appended with projectKey present"
+
+# Case B: phase value flows through verbatim — monitor-deploy (the longest, hyphenated).
+fresh_env t15b
+cat > "${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+# monitor-deploy requires phase-monitor-merge.json signal.
+echo '{"ticket":"CTL-100","status":"done","pr":{"mergeCommitSha":"deadbeef"}}' \
+  > "${WORKER_DIR}/phase-monitor-merge.json"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+    >/dev/null 2>&1 )
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" ",task.type=phase-monitor-deploy" \
+  "task.type=phase-monitor-deploy preserves hyphenated phase name"
+
+# Case C: even without projectKey (short form), task.type is still present.
+fresh_env t15c
+rm -rf "${CONFIG_DIR}"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+    >/dev/null 2>&1 )
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" \
+  "OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage" \
+  "task.type appended even when projectKey absent (short form)"
 
 echo ""
 echo "─────────────────────────────────────────────"
