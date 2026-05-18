@@ -33,7 +33,11 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADVANCE_BIN="${CATALYST_PHASE_ADVANCE_BIN:-${SCRIPT_DIR}/orchestrate-phase-advance}"
 REVIVE_BIN="${CATALYST_REVIVE_BIN:-${SCRIPT_DIR}/orchestrate-revive}"
-EVENTS_DIR="${CATALYST_EVENTS_DIR:-${HOME}/catalyst/events}"
+# CATALYST_EVENTS_DIR overrides the directory the helper scans for the current
+# month's event log. When unset, the directory is derived from the baseline
+# file path captured in state.json.race.startEventsFile — this is the common
+# case in production. The env var is honored for tests that mock the events
+# directory and for callers who keep the events dir somewhere non-default.
 
 ORCH_DIR=""
 ORCH_ID=""
@@ -85,7 +89,10 @@ ACTIVE_TICKETS_JSON=$(jq -rs '[.[].ticket // empty] | unique' "${WORKER_FILES[@]
 # (month rollover) scan the tail of the baseline file from $START_CURSOR to
 # its EOF, then scan the current file from line 1.
 CURRENT_MONTH=$(date -u +%Y-%m)
-CURRENT_FILE="$(dirname "$START_FILE")/${CURRENT_MONTH}.jsonl"
+# Prefer CATALYST_EVENTS_DIR when set (tests + non-default deployments);
+# otherwise derive from the baseline file's directory.
+CURRENT_DIR="${CATALYST_EVENTS_DIR:-$(dirname "$START_FILE")}"
+CURRENT_FILE="${CURRENT_DIR}/${CURRENT_MONTH}.jsonl"
 
 # Stream the matching event lines to stdout for processing.
 stream_events() {

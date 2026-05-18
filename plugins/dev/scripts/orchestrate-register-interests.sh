@@ -104,8 +104,10 @@ fi
 # (emits everything) so a mid-run upgrade still produces durable interests.
 
 LAST_FILE="${ORCH_DIR}/.last-registration.json"
-EMIT_DETERMINISTIC=1
 # Default phase_lifecycle emission set = all active tickets (initial mode).
+# The 3 deterministic interests (pr/ticket/comms) are always emitted when we
+# reach the emit block below — the only thing the refresh diff narrows is the
+# phase_lifecycle set.
 PHASE_TICKETS_JSON="$ACTIVE_TICKETS"
 
 if [ "$REFRESH" = "1" ] && [ -f "$LAST_FILE" ]; then
@@ -243,12 +245,18 @@ fi
 
 # ─── Write/update .last-registration.json ───────────────────────────────────
 # Always rewrite on success so the Phase 4 refresh can diff against current.
+# Use an explicit if/else rather than && || (SC2015) so a successful jq write
+# whose mv happens to fail is never mistaken for a jq failure.
 TMP="${LAST_FILE}.tmp.$$"
-jq -nc \
-  --argjson prs "$ACTIVE_PRS" \
-  --argjson tickets "$ACTIVE_TICKETS" \
-  --arg ts "$(now_iso)" \
-  '{prs: $prs, tickets: ($tickets | unique), registeredAt: $ts}' \
-  > "$TMP" 2>/dev/null && mv "$TMP" "$LAST_FILE" || rm -f "$TMP"
+if jq -nc \
+     --argjson prs "$ACTIVE_PRS" \
+     --argjson tickets "$ACTIVE_TICKETS" \
+     --arg ts "$(now_iso)" \
+     '{prs: $prs, tickets: ($tickets | unique), registeredAt: $ts}' \
+     > "$TMP" 2>/dev/null; then
+  mv "$TMP" "$LAST_FILE"
+else
+  rm -f "$TMP"
+fi
 
 exit 0
