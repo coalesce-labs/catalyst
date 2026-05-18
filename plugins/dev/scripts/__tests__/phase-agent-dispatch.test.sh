@@ -179,6 +179,161 @@ assert_eq "2" "$RC" "exit code 2 when prior artifact missing"
 assert_eq "refused" "$REFUSED_STATUS" "stdout JSON status = refused"
 assert_eq "no" "$SIGNAL_EXISTS" "no signal file written when refused"
 
+# CTL-494 Phase 1: refusal must also emit phase.<name>.failed.<TICKET> to the
+# event log so the orchestrator wakes in seconds instead of waiting on the
+# 16-minute state-json-stale path.
+export CATALYST_DIR="${TEST_DIR}/catalyst-events-root"
+mkdir -p "${CATALYST_DIR}/events"
+
+# Re-run the dispatch with the isolated CATALYST_DIR active.
+rm -f "$SIGNAL_RESEARCH"  # ensure refused, not idempotent
+"$DISPATCH" --phase research --ticket CTL-100 \
+  --orch-dir "$ORCH_DIR" --orch-id orch-test \
+  >"${TEST_DIR}/research2.out" 2>/dev/null
+RC2=$?
+assert_eq "2" "$RC2" "refusal still exits 2 with isolated CATALYST_DIR"
+
+# Find the JSONL event log (one file per month).
+EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+if [[ -z "$EVENT_FILE" ]]; then
+  fail "event log was not created on refusal"
+else
+  pass "event log was created on refusal"
+  EVENT_LINE=$(grep '"phase.research.failed.CTL-100"' "$EVENT_FILE" | head -1)
+  if [[ -z "$EVENT_LINE" ]]; then
+    fail "no phase.research.failed.CTL-100 event in log"
+  else
+    pass "phase.research.failed.CTL-100 event present in log"
+    EVENT_REASON=$(echo "$EVENT_LINE" | jq -r '.body.payload.failure_reason // empty')
+    assert_eq "prior_artifact_missing" "$EVENT_REASON" \
+      "failed event payload carries failure_reason=prior_artifact_missing"
+  fi
+fi
+
+# Refusal must still NOT write a signal file (existing contract preserved).
+if [[ -f "$SIGNAL_RESEARCH" ]]; then
+  fail "signal file written despite refusal"
+else
+  pass "signal file still not written when refused (with event log active)"
+fi
+
+# CTL-494 Phase 1: --dry-run refusal must NOT emit to the event log.
+rm -f "${CATALYST_DIR}/events/"*.jsonl
+"$DISPATCH" --phase research --ticket CTL-100 \
+  --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+  >"${TEST_DIR}/research-dry.out" 2>/dev/null
+RC_DRY=$?
+assert_eq "2" "$RC_DRY" "--dry-run refusal still exits 2"
+DRY_EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+if [[ -n "$DRY_EVENT_FILE" ]]; then
+  fail "--dry-run refusal should not emit event (got $DRY_EVENT_FILE)"
+else
+  pass "--dry-run refusal does not emit event"
+fi
+
+# CTL-494 Phase 1: failed-event emission is phase-agnostic — the same code
+# path produces phase.plan.failed.<TICKET> when the plan gate refuses. The
+# plan's manual-verification step (§Phase 1 Manual #1) asked for this with
+# `--phase plan` against a missing research doc; automate it here so a
+# future regression that hardcodes "research" in the event name is caught.
+# The plan phase's prior artifact is a glob under thoughts/shared/research/;
+# run from an isolated empty project dir so the relaxed glob can't ambiently
+# match a real research file in the host repo.
+rm -f "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null
+mkdir -p "${TEST_DIR}/empty-proj"
+( cd "${TEST_DIR}/empty-proj" && \
+  "$DISPATCH" --phase plan --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test \
+    >"${TEST_DIR}/plan.out" 2>/dev/null )
+RC_PLAN=$?
+assert_eq "2" "$RC_PLAN" "plan-phase refusal also exits 2"
+PLAN_EVT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+if [[ -z "$PLAN_EVT_FILE" ]]; then
+  fail "plan-phase refusal: event log not created"
+else
+  PLAN_EVT_LINE=$(grep '"phase.plan.failed.CTL-100"' "$PLAN_EVT_FILE" | head -1)
+  if [[ -n "$PLAN_EVT_LINE" ]]; then
+    pass "plan-phase refusal emits phase.plan.failed.CTL-100"
+  else
+    fail "plan-phase refusal: no phase.plan.failed.CTL-100 line in event log"
+  fi
+fi
+
+# CTL-494 Phase 1: emit-complete failing must not mask the refusal exit code.
+# The dispatcher's call uses `|| true` and `--orch-dir/--orch-id`. Force the
+# emit-complete to fail by pointing CATALYST_DIR at a path that cannot be
+# created. The dispatcher must still exit 2 with status=refused.
+export CATALYST_DIR="/dev/null/cannot-create-here"
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-research.json"
+"$DISPATCH" --phase research --ticket CTL-100 \
+  --orch-dir "$ORCH_DIR" --orch-id orch-test \
+  >"${TEST_DIR}/research-emit-fail.out" 2>"${TEST_DIR}/research-emit-fail.err"
+RC_EMIT_FAIL=$?
+STATUS_EMIT_FAIL=$(jq -r '.status' "${TEST_DIR}/research-emit-fail.out" 2>/dev/null || echo "")
+assert_eq "2" "$RC_EMIT_FAIL" "emit-complete failure does not mask exit 2"
+assert_eq "refused" "$STATUS_EMIT_FAIL" "emit-complete failure preserves status=refused in stdout"
+
+# Clean up env for subsequent tests.
+unset CATALYST_DIR
+
+# ─── Test 5b: dispatcher accepts both lowercase-tail and uppercase-suffix plan filenames (CTL-494 Phase 2)
+echo ""
+echo "Test 5b: dispatcher accepts canonical + phase-plan filename conventions"
+fresh_env t5b
+
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+
+# Form A: phase-plan prose form — lowercase, ticket at end, no descriptive suffix.
+touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-ctl-100.md"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase implement --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+    >"${TEST_DIR}/glob-a.out" 2>/dev/null )
+STATUS_A=$(jq -r '.status' "${TEST_DIR}/glob-a.out")
+assert_eq "dispatched" "$STATUS_A" "Form A: lowercase ticket at end is accepted"
+
+# Reset for next form
+rm -f "${TEST_DIR}/proj/thoughts/shared/plans/"*.md
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
+
+# Form B: canonical create-plan form — uppercase ticket + descriptive suffix.
+touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-CTL-100-some-descriptive-name.md"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase implement --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+    >"${TEST_DIR}/glob-b.out" 2>/dev/null )
+STATUS_B=$(jq -r '.status' "${TEST_DIR}/glob-b.out")
+assert_eq "dispatched" "$STATUS_B" "Form B: uppercase ticket + descriptive suffix is accepted"
+
+# Reset
+rm -f "${TEST_DIR}/proj/thoughts/shared/plans/"*.md
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
+
+# Form C: uppercase + suffix-style "-plan".
+touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-17-CTL-100-plan.md"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase implement --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+    >"${TEST_DIR}/glob-c.out" 2>/dev/null )
+STATUS_C=$(jq -r '.status' "${TEST_DIR}/glob-c.out")
+assert_eq "dispatched" "$STATUS_C" "Form C: uppercase ticket + -plan suffix is accepted"
+
+# Reset
+rm -f "${TEST_DIR}/proj/thoughts/shared/plans/"*.md
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
+
+# Form D: lookalike file for a DIFFERENT ticket must NOT match CTL-100.
+# Guards against an overly-greedy fix that strips the ticket constraint.
+touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-CTL-200-something.md"
+( cd "${TEST_DIR}/proj" && \
+  "$DISPATCH" --phase implement --ticket CTL-100 \
+    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+    >"${TEST_DIR}/glob-d.out" 2>"${TEST_DIR}/glob-d.err" )
+RC_D=$?
+STATUS_D=$(jq -r '.status' "${TEST_DIR}/glob-d.out")
+assert_eq "2"       "$RC_D"     "Form D: different-ticket plan file does NOT satisfy CTL-100 gate"
+assert_eq "refused" "$STATUS_D" "Form D: stdout JSON status = refused"
+
 # ─── Test 6: dispatcher resolves model from config (default + override paths)
 echo ""
 echo "Test 6: dispatcher resolves model from config (default and override)"

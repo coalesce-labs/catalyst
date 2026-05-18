@@ -42,6 +42,7 @@ while [ -L "$SOURCE" ]; do
   [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+EMIT_COMPLETE="${SCRIPT_DIR}/phase-agent-emit-complete"
 
 die() { echo "phase-agent-dispatch: $*" >&2; exit 1; }
 
@@ -186,9 +187,27 @@ if [[ -n "$ARTIFACT_SPEC" ]]; then
       [[ -f "$ARTIFACT_FILE" ]] || ARTIFACT_OK=0
       ;;
     glob:*)
-      # Lowercase ticket per existing thoughts naming convention
+      # CTL-494: two-step match. The lowercase-ticket-at-tail form
+      # (phase-plan prose convention) is tried first; on miss, fall back to
+      # a wider pattern that accepts the canonical create-plan form
+      # (uppercase ticket + descriptive suffix). Case-insensitive nocaseglob
+      # is the final fallback. The ticket is still required to appear in the
+      # filename, so cross-ticket lookalikes do not satisfy this gate.
+      PATTERN="${ARTIFACT_SPEC#glob:}"
       shopt -s nullglob
-      MATCHES=( ${ARTIFACT_SPEC#glob:} )
+      # shellcheck disable=SC2206  # word-splitting is required for glob expansion
+      MATCHES=( $PATTERN )
+      if [[ ${#MATCHES[@]} -eq 0 ]]; then
+        WIDE="${PATTERN/%-${TICKET,,}.md/*${TICKET}*.md}"
+        # shellcheck disable=SC2206
+        MATCHES=( $WIDE )
+        if [[ ${#MATCHES[@]} -eq 0 ]]; then
+          shopt -s nocaseglob
+          # shellcheck disable=SC2206
+          MATCHES=( $WIDE )
+          shopt -u nocaseglob
+        fi
+      fi
       shopt -u nullglob
       [[ ${#MATCHES[@]} -gt 0 ]] || ARTIFACT_OK=0
       ;;
@@ -196,17 +215,35 @@ if [[ -n "$ARTIFACT_SPEC" ]]; then
 fi
 
 if [[ "$ARTIFACT_OK" -eq 0 ]]; then
+  REFUSAL_REASON="prior_artifact_missing"
   echo "phase-agent-dispatch: refusing to launch ${PHASE} on ${TICKET}: prior artifact missing (${ARTIFACT_SPEC})" >&2
   jq -nc \
     --arg ticket "$TICKET" \
     --arg phase "$PHASE" \
     --arg model "$MODEL" \
     --arg artifact "$ARTIFACT_SPEC" \
+    --arg reason "$REFUSAL_REASON" \
     --argjson turnCap "$TURN_CAP" \
     --argjson dryRun "$DRY_RUN" \
     '{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, signalFile: null, status: "refused",
-      reason: "prior_artifact_missing", artifact: $artifact, dryRun: ($dryRun == 1)}'
+      reason: $reason, artifact: $artifact, dryRun: ($dryRun == 1)}'
+
+  # CTL-494: emit phase.<name>.failed.<TICKET> so the broker wakes the
+  # orchestrator in seconds instead of waiting on the 16-minute
+  # state-json-stale path. Best-effort: never let emit failure mask the
+  # original refusal exit code. Skipped for --dry-run so previews don't
+  # write to the live event log.
+  if [[ "$DRY_RUN" -eq 0 && -x "$EMIT_COMPLETE" ]]; then
+    "$EMIT_COMPLETE" \
+      --phase "$PHASE" \
+      --ticket "$TICKET" \
+      --status failed \
+      --reason "$REFUSAL_REASON" \
+      --orch-dir "$ORCH_DIR" \
+      --orch-id "$ORCH_ID" >/dev/null 2>&1 || true
+  fi
+
   exit 2
 fi
 
