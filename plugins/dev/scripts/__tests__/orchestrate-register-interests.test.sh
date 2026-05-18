@@ -185,10 +185,63 @@ REG_AT=$(jq -r '.registeredAt // ""' "$LAST_FILE" 2>/dev/null || echo "")
 [ -n "$REG_AT" ] && pass "registeredAt non-empty" || fail "registeredAt non-empty" "got: '$REG_AT'"
 scratch_teardown
 
-# ─── Phase 3 tests (12-15) appended in a later commit ───────────────────────
-# Tests 12-15 exercise the --refresh diff semantics (no-op when nothing
-# changed; emit only new phase_lifecycles when tickets are added). They are
-# added in the Phase 3 commit alongside the helper's --refresh evolution.
+# ─── Phase 3 tests (12-15) — --refresh diff semantics ─────────────────────
+# These tests exercise the --refresh path's diff logic: emit nothing if
+# nothing changed; emit only new phase_lifecycles when wave 2 dispatches new
+# tickets; respect the dispatchMode gate.
+
+echo "test 12: --refresh with [CTL-491] → [CTL-491, CTL-494] re-emits 3 deterministic + 1 phase_lifecycle for CTL-494 only"
+scratch_setup
+write_worker_signal "CTL-491"
+run_register >/dev/null 2>"${SCRATCH}/err"  # initial: 4 events (3 + 1 phase_lifecycle CTL-491)
+: > "$STATE_LOG"
+write_worker_signal "CTL-494"  # add wave 2 ticket
+run_register --refresh >/dev/null 2>"${SCRATCH}/err"
+TOTAL=$(wc -l < "$STATE_LOG" | tr -d ' ')
+[ "$TOTAL" = "4" ] && pass "refresh emits 4 events (3 deterministic + 1 new phase_lifecycle)" \
+  || fail "refresh emits 4 events" "got $TOTAL events: $(cat "$STATE_LOG")"
+NEW_PHASE_TICKET=$(jq -r 'select(.detail.interest_type == "phase_lifecycle") | .detail.ticket' "$STATE_LOG" | sort -u)
+[ "$NEW_PHASE_TICKET" = "CTL-494" ] && pass "only new ticket CTL-494 gets phase_lifecycle" \
+  || fail "only new ticket CTL-494 gets phase_lifecycle" "got: $NEW_PHASE_TICKET"
+scratch_teardown
+
+echo "test 13: --refresh with no change in PR set or ticket set → 0 events (no-op)"
+scratch_setup
+write_worker_signal "CTL-491" 100
+run_register >/dev/null 2>"${SCRATCH}/err"  # initial registration
+: > "$STATE_LOG"
+run_register --refresh >/dev/null 2>"${SCRATCH}/err"
+TOTAL=$(wc -l < "$STATE_LOG" | tr -d ' ')
+[ "$TOTAL" = "0" ] && pass "no-op refresh emits 0 events" \
+  || fail "no-op refresh emits 0 events" "got $TOTAL events: $(cat "$STATE_LOG")"
+scratch_teardown
+
+echo "test 14: --refresh after wave 2 dispatch updates .last-registration.json"
+scratch_setup
+write_worker_signal "CTL-491"
+run_register >/dev/null 2>"${SCRATCH}/err"
+write_worker_signal "CTL-494"
+run_register --refresh >/dev/null 2>"${SCRATCH}/err"
+LAST_FILE="${ORCH_DIR}/.last-registration.json"
+TICKETS=$(jq -c '.tickets | sort' "$LAST_FILE" 2>/dev/null || echo '[]')
+[ "$TICKETS" = '["CTL-491","CTL-494"]' ] && pass "post-refresh baseline has both tickets" \
+  || fail "post-refresh baseline has both tickets" "got: $TICKETS"
+scratch_teardown
+
+echo "test 15: --refresh in oneshot-legacy mode never emits phase_lifecycle (mode gate)"
+scratch_setup
+cat > "$CONFIG_FILE" <<'EOF'
+{"catalyst":{"orchestration":{"dispatchMode":"oneshot-legacy"}}}
+EOF
+write_worker_signal "CTL-491"
+run_register >/dev/null 2>"${SCRATCH}/err"
+: > "$STATE_LOG"
+write_worker_signal "CTL-494"
+run_register --refresh >/dev/null 2>"${SCRATCH}/err"
+PHASE_COUNT=$(count_events_of_type "phase_lifecycle")
+[ "$PHASE_COUNT" = "0" ] && pass "oneshot-legacy refresh emits 0 phase_lifecycle" \
+  || fail "oneshot-legacy refresh emits 0 phase_lifecycle" "got $PHASE_COUNT events: $(cat "$STATE_LOG")"
+scratch_teardown
 
 echo ""
 echo "─────────────────────────────────────────"

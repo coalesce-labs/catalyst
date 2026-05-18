@@ -1397,111 +1397,31 @@ REMEDIATION_EOF
 done
 ```
 
-**Refresh broker registration when PR set has changed (CTL-341, CTL-357).** The Phase 4 start block
-above registers the orchestrator's `pr_lifecycle` interest with whatever PRs the worker signal files
-happen to expose at that moment — often the empty set, because workers have not yet opened PRs.
-Without an unconditional refresh, that empty `pr_numbers` list would persist for the entire
-orchestration run and the deterministic route in `tryDeterministicRoute` would never match. The
-merge-confirmation loop above can discover a missing `pr.number` from a worker's branch, but that
-path does not run when the worker writes its own `pr.number` before the orchestrator wakes (the
-common case in the worker-driven flow). This block runs every Phase 4 wake-up, computes the union of
-`worker.pr.number` across the signal files, diffs against the set last sent to the broker, and
-re-emits all three deterministic `filter.register` events (`pr_lifecycle`, `ticket_lifecycle`,
-`comms_lifecycle`) only when the set has changed. Idempotent at the broker (upserts by
-`interest_id`); the diff just keeps the event log quiet.
+**Refresh broker registration when PR or ticket set has changed (CTL-341, CTL-357, CTL-491).** On
+every Phase 4 wake-up, re-invoke the same registration helper with `--refresh`. The helper diffs
+the current active PR + ticket sets against the prior `.last-registration.json` baseline:
+
+- If nothing changed, the helper exits 0 with zero events emitted — keeps the event log quiet.
+- If the PR set changed (a worker just opened a PR), it re-emits all three deterministic
+  interests (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`) with the updated set.
+- If the ticket set grew (wave 2 dispatched new workers mid-run), it ALSO emits a
+  `phase_lifecycle` interest for each newly-added ticket. Existing tickets already have
+  per-ticket interests upserted at the broker from the initial pre-dispatch registration.
+- Idempotent at the broker (upserts by `interest_id`); the diff just keeps the event log quiet.
+
+This block replaces the older `.last-pr-registration.json` PR-only refresh path — the helper
+covers both deterministic-set refreshes AND the previously-missing `phase_lifecycle` refresh that
+would otherwise leave wave 2 tickets without broker coverage (a localized CTL-491 race).
 
 ```bash
-if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2>&1; then
-  _UPD_PRS=$(jq -rs '[.[].pr.number // empty] | unique' \
-    "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
-  _LAST_FILE="${ORCH_DIR}/.last-pr-registration.json"
-  _LAST_PRS=$(jq -c '.prs // []' "$_LAST_FILE" 2>/dev/null || echo '[]')
-
-  if [ "$(printf '%s' "$_UPD_PRS" | jq -cS '.')" != "$(printf '%s' "$_LAST_PRS" | jq -cS '.')" ]; then
-    _UPD_TICKETS=$(jq -rs '[.[].ticket // empty]' \
-      "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
-    _UPD_BASES=$(jq -rs '[
-      .[] | select(.pr.number != null and .pr.baseRefName != null)
-          | {pr: .pr.number, base: .pr.baseRefName}
-    ]' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
-    _UPD_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
-
-    # CTL-284: pr_lifecycle interest (deterministic PR/CI/review/deployment routing)
-    "$STATE_SCRIPT" event "$(jq -nc \
-      --arg orch "${ORCH_NAME}" \
-      --arg id "${ORCH_NAME}-pr-lifecycle" \
-      --arg notify "filter.wake.${ORCH_NAME}" \
-      --arg repo "${_UPD_REPO}" \
-      --argjson prs "${_UPD_PRS}" \
-      --argjson bases "${_UPD_BASES}" \
-      '{
-        ts: (now | todate),
-        event: "filter.register",
-        orchestrator: $orch,
-        worker: null,
-        detail: {
-          interest_id: $id,
-          interest_type: "pr_lifecycle",
-          notify_event: $notify,
-          persistent: true,
-          pr_numbers: $prs,
-          repo: $repo,
-          base_branches: $bases
-        }
-      }')" 2>/dev/null || true
-
-    # CTL-303: ticket_lifecycle interest (deterministic Linear routing)
-    "$STATE_SCRIPT" event "$(jq -nc \
-      --arg orch "${ORCH_NAME}" \
-      --arg id "${ORCH_NAME}-ticket-lifecycle" \
-      --arg notify "filter.wake.${ORCH_NAME}" \
-      --argjson tickets "${_UPD_TICKETS}" \
-      '{
-        ts: (now | todate),
-        event: "filter.register",
-        orchestrator: $orch,
-        worker: null,
-        detail: {
-          interest_id: $id,
-          interest_type: "ticket_lifecycle",
-          notify_event: $notify,
-          persistent: true,
-          tickets: $tickets,
-          wake_on: ["status_done", "status_in_review", "status_changed"]
-        }
-      }')" 2>/dev/null || true
-
-    # CTL-357: comms_lifecycle interest (deterministic comms routing — replaces
-    # the retired Groq prose interest for attention/done message routing)
-    "$STATE_SCRIPT" event "$(jq -nc \
-      --arg orch "${ORCH_NAME}" \
-      --arg id "${ORCH_NAME}-comms-lifecycle" \
-      --arg notify "filter.wake.${ORCH_NAME}" \
-      --arg channel "${ORCH_NAME}" \
-      --argjson workers "${_UPD_TICKETS}" \
-      '{
-        ts: (now | todate),
-        event: "filter.register",
-        orchestrator: $orch,
-        worker: null,
-        detail: {
-          interest_id: $id,
-          interest_type: "comms_lifecycle",
-          notify_event: $notify,
-          persistent: true,
-          channel: $channel,
-          subscriber_kind: "orchestrator",
-          owned_workers: $workers,
-          types_of_interest: ["attention", "done"]
-        }
-      }')" 2>/dev/null || true
-
-    # Record the new set so the next wake-up can diff.
-    printf '{"prs":%s,"registeredAt":"%s"}\n' \
-      "$_UPD_PRS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${_LAST_FILE}.tmp" \
-      && mv "${_LAST_FILE}.tmp" "$_LAST_FILE"
-  fi
-fi
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-register-interests.sh" \
+  --orch-dir "${ORCH_DIR}" \
+  --orch-id "${ORCH_NAME}" \
+  --config "${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/.catalyst/config.json" \
+  --refresh
+# In --refresh mode the helper is a no-op when the PR + ticket sets are
+# unchanged; otherwise it emits a minimal set of filter.register events to
+# bring the broker in sync. See plugins/dev/scripts/orchestrate-register-interests.sh.
 ```
 
 **Deploy state-machine sub-loop (CTL-211)** — runs on each wake-up for any worker in `merged` or

@@ -95,6 +95,39 @@ if command -v gh >/dev/null 2>&1; then
   REPO_FULL_NAME=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
 fi
 
+# ─── Refresh-mode diff (CTL-491 Phase 3) ────────────────────────────────────
+# When --refresh is set AND a previous registration exists at
+# .last-registration.json, diff the current active set against the prior set.
+# If nothing changed, exit 0 without emitting events. Otherwise emit the 3
+# deterministic interests AND a phase_lifecycle ONLY for newly-added tickets.
+# If no baseline exists, --refresh behaves like the initial registration
+# (emits everything) so a mid-run upgrade still produces durable interests.
+
+LAST_FILE="${ORCH_DIR}/.last-registration.json"
+EMIT_DETERMINISTIC=1
+# Default phase_lifecycle emission set = all active tickets (initial mode).
+PHASE_TICKETS_JSON="$ACTIVE_TICKETS"
+
+if [ "$REFRESH" = "1" ] && [ -f "$LAST_FILE" ]; then
+  LAST_PRS=$(jq -c '.prs // []' "$LAST_FILE" 2>/dev/null || echo '[]')
+  LAST_TICKETS=$(jq -c '.tickets // []' "$LAST_FILE" 2>/dev/null || echo '[]')
+
+  CUR_PRS_N=$(jq -cS '.' <<< "$ACTIVE_PRS" 2>/dev/null || echo "$ACTIVE_PRS")
+  CUR_TKT_N=$(jq -cS '.' <<< "$ACTIVE_TICKETS" 2>/dev/null || echo "$ACTIVE_TICKETS")
+  LAST_PRS_N=$(jq -cS '.' <<< "$LAST_PRS" 2>/dev/null || echo "$LAST_PRS")
+  LAST_TKT_N=$(jq -cS '.' <<< "$LAST_TICKETS" 2>/dev/null || echo "$LAST_TICKETS")
+
+  if [ "$CUR_PRS_N" = "$LAST_PRS_N" ] && [ "$CUR_TKT_N" = "$LAST_TKT_N" ]; then
+    # Nothing changed — emit nothing, leave .last-registration.json alone.
+    exit 0
+  fi
+
+  # Phase_lifecycle is emitted only for NEW tickets (the broker already has
+  # interests for existing tickets via the initial pre-dispatch registration).
+  PHASE_TICKETS_JSON=$(jq -c --argjson old "$LAST_TICKETS" '. - $old' \
+    <<< "$ACTIVE_TICKETS" 2>/dev/null || echo "$ACTIVE_TICKETS")
+fi
+
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 emit_event() {
@@ -175,9 +208,11 @@ emit_event "$(jq -nc \
   }')"
 
 # ─── Emit phase_lifecycle interests (one per ticket, gated by mode) ─────────
+# In --refresh mode, PHASE_TICKETS_JSON contains only newly-added tickets;
+# in initial mode, it equals ACTIVE_TICKETS.
 
 if [ "$DISPATCH_MODE" = "phase-agents" ]; then
-  COUNT=$(jq 'length' <<< "$ACTIVE_TICKETS" 2>/dev/null || echo 0)
+  COUNT=$(jq 'length' <<< "$PHASE_TICKETS_JSON" 2>/dev/null || echo 0)
   if [ "$COUNT" -gt 0 ]; then
     while IFS= read -r T; do
       [ -z "$T" ] && continue
@@ -202,13 +237,12 @@ if [ "$DISPATCH_MODE" = "phase-agents" ]; then
             phase_names: $phases
           }
         }')"
-    done < <(jq -r '.[]' <<< "$ACTIVE_TICKETS")
+    done < <(jq -r '.[]' <<< "$PHASE_TICKETS_JSON")
   fi
 fi
 
 # ─── Write/update .last-registration.json ───────────────────────────────────
 # Always rewrite on success so the Phase 4 refresh can diff against current.
-LAST_FILE="${ORCH_DIR}/.last-registration.json"
 TMP="${LAST_FILE}.tmp.$$"
 jq -nc \
   --argjson prs "$ACTIVE_PRS" \
