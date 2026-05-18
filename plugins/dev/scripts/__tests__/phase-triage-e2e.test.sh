@@ -218,6 +218,45 @@ if [ -f "$TRIAGE_ACR" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Case 1c: markdown-prefixed description (CTL-498 Bug 2).
+# Asserts the summary skips a leading "## Problem" header and starts with prose.
+
+FIXTURE_MD="$TMPROOT/fixture-markdown.json"
+cat > "$FIXTURE_MD" <<'EOF'
+{
+  "identifier": "CTL-9997",
+  "title": "Surface phase-triage summary correctly",
+  "description": "## Problem\n\nThe baseline summary extraction returns the literal markdown header instead of the first sentence of prose. This breaks downstream consumers of the summary field.\n\n## Fix sketch\n\nSkip leading header lines before applying the paragraph rule.",
+  "labels": {"nodes": []}
+}
+EOF
+
+CASE_DIR_MD="$(run_case markdown "$FIXTURE_MD" CTL-9997)"
+
+assert_eq "markdown: exit code 0" 0 "$(cat "$CASE_DIR_MD/exit-code")"
+
+TRIAGE_MD="$CASE_DIR_MD/worker/triage.json"
+assert_file_exists "markdown: triage.json created" "$TRIAGE_MD"
+
+if [ -f "$TRIAGE_MD" ]; then
+  SUMMARY_MD="$(jq -r '.summary' "$TRIAGE_MD")"
+
+  # Summary must NOT be the literal "## Problem" header.
+  case "$SUMMARY_MD" in
+    "## Problem"*) fail "markdown: summary skipped header" "summary='$SUMMARY_MD' (still starts with literal header)" ;;
+    *) ok "markdown: summary does not start with markdown header" ;;
+  esac
+
+  # Summary must START WITH the first sentence of prose.
+  case "$SUMMARY_MD" in
+    "The baseline summary extraction"*)
+      ok "markdown: summary starts with the first prose sentence" ;;
+    *)
+      fail "markdown: summary content" "expected prefix 'The baseline summary extraction', got '$SUMMARY_MD'" ;;
+  esac
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Case 2: explicit bug classification + small scope
 
 FIXTURE_BUG="$TMPROOT/fixture-bug.json"

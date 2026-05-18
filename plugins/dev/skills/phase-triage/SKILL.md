@@ -149,8 +149,26 @@ DEPENDENCIES="$(printf '%s\n' "$COMBINED" \
   | jq -R . | jq -sc .)"
 DEPENDENCIES="${DEPENDENCIES:-[]}"
 
-# 2e. Summary — first paragraph of description, trimmed.
-SUMMARY="$(printf '%s' "$DESCRIPTION" | awk 'BEGIN{RS=""} {print; exit}' | head -c 400)"
+# 2e. Summary — first paragraph of prose, trimmed.
+#     Skip leading markdown headers (^#+\s+) and bullet markers (^[-*+]\s+) so a
+#     description that opens with "## Problem" yields the first sentence of prose,
+#     not the literal header. Falls back to an empty summary if the description is
+#     entirely headers/bullets/blank lines.
+SUMMARY="$(printf '%s' "$DESCRIPTION" | awk '
+  BEGIN { skipping = 1; buf = "" }
+  {
+    line = $0
+    if (skipping) {
+      if (line ~ /^[[:space:]]*$/)       { next }
+      if (line ~ /^#+[[:space:]]+/)      { next }
+      if (line ~ /^[-*+][[:space:]]+/)   { next }
+      skipping = 0
+    }
+    if (line ~ /^[[:space:]]*$/) { exit }
+    buf = (buf == "" ? line : buf " " line)
+  }
+  END { print buf }
+' | head -c 400)"
 
 # 3. Compose triage.json.
 TRIAGE_FILE="$WORKER_DIR/triage.json"
