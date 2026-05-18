@@ -37,6 +37,10 @@ MAX_REVIVES=10
 # not reviveCount — the operator can tell "this worker is making steady
 # progress and just needs more turns" apart from "this worker is failing".
 MAX_CONTINUATIONS=3
+# CTL-493: per-phase revive budget. Distinct from MAX_REVIVES (whole-worker
+# budget for legacy oneshot signals) so a phase-agent run can independently
+# track how many times each phase has been re-dispatched.
+MAX_PHASE_REVIVES=3
 STALE_HEARTBEAT_SECONDS=900
 WORKER_COMMAND="/catalyst-dev:oneshot"
 MODEL="opus"
@@ -53,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --orch-id)                  ORCH_ID="$2"; shift 2 ;;
     --max-revives)              MAX_REVIVES="$2"; shift 2 ;;
     --max-continuations)        MAX_CONTINUATIONS="$2"; shift 2 ;;
+    --max-phase-revives)        MAX_PHASE_REVIVES="$2"; shift 2 ;;
     --stale-heartbeat-seconds)  STALE_HEARTBEAT_SECONDS="$2"; shift 2 ;;
     --worker-command)           WORKER_COMMAND="$2"; shift 2 ;;
     --model)                    MODEL="$2"; shift 2 ;;
@@ -353,10 +358,73 @@ active_phase_of() {
   jq -r '.activePhase // ""' "${ORCH_DIR}/workers/${ticket}.json" 2>/dev/null || echo ""
 }
 
-# CTL-493 Phase 2: structural variant — true iff workers/<TICKET>/ contains
-# phase-*.json signals. Independent of the legacy top-level workers/<T>.json
-# (which phase-mode runs never write). Used by the per-phase iteration branch
-# below to find stalled signals the main loop misses.
+# ─── CTL-493: phase-agent recovery helpers ──────────────────────────────────
+#
+# These power the iteration loop that walks every workers/<T>/phase-*.json
+# signal (independent of the legacy top-level workers/<T>.json gate). Each
+# stalled signal goes through a three-way decision tree:
+#
+#   1. truly-failed (failureReason set) → escalate via attention, no retry
+#   2. meaningful-progress (commits/artifact/uncommitted) → emit synthetic complete
+#   3. budget exhausted → escalate via attention
+#   4. fresh stall → re-dispatch via phase-agent-dispatch, bump phaseReviveCount
+
+# Resolve the repo root the revive script should read .catalyst/config.json from.
+# Precedence: CATALYST_REVIVE_REPO_ROOT > REPO_ROOT > orchestrator state.json's
+# `repoRoot` field > the script's parent-of-parent ancestor. Tests override via
+# the env var; production gets it from the orchestrator state.
+revive_repo_root() {
+  if [ -n "${CATALYST_REVIVE_REPO_ROOT:-}" ]; then
+    echo "$CATALYST_REVIVE_REPO_ROOT"; return 0
+  fi
+  if [ -n "${REPO_ROOT:-}" ] && [ -d "${REPO_ROOT}/.catalyst" ]; then
+    echo "$REPO_ROOT"; return 0
+  fi
+  # Walk up from SCRIPT_DIR looking for the nearest .catalyst dir.
+  local d="$SCRIPT_DIR"
+  while [ "$d" != "/" ] && [ -n "$d" ]; do
+    if [ -d "$d/.catalyst" ]; then
+      echo "$d"; return 0
+    fi
+    d=$(dirname "$d")
+  done
+  # No config found — emit empty (callers tolerate missing config).
+  echo ""
+}
+
+# Resolve the worktree base directory for phase-mode workers.
+# Precedence: CATALYST_REVIVE_WORKTREE_BASE > .catalyst/config.json's
+# catalyst.orchestration.worktreeBase. Empty means "no detection possible";
+# the meaningful-progress check returns false in that case.
+revive_worktree_base() {
+  if [ -n "${CATALYST_REVIVE_WORKTREE_BASE:-}" ]; then
+    echo "$CATALYST_REVIVE_WORKTREE_BASE"; return 0
+  fi
+  local repo
+  repo=$(revive_repo_root)
+  if [ -n "$repo" ] && [ -f "$repo/.catalyst/config.json" ]; then
+    jq -r '.catalyst.orchestration.worktreeBase // ""' "$repo/.catalyst/config.json" 2>/dev/null \
+      || echo ""
+    return 0
+  fi
+  echo ""
+}
+
+# Resolve the base branch for ahead-of-base detection.
+revive_base_branch() {
+  local repo
+  repo=$(revive_repo_root)
+  if [ -n "$repo" ] && [ -f "$repo/.catalyst/config.json" ]; then
+    jq -r '.catalyst.git.baseBranch // "main"' "$repo/.catalyst/config.json" 2>/dev/null \
+      || echo "main"
+    return 0
+  fi
+  echo "main"
+}
+
+# is_phase_mode_structural TICKET
+# True iff ${ORCH_DIR}/workers/<TICKET>/ exists and contains phase-*.json
+# signals. Independent of the legacy top-level workers/<T>.json check.
 is_phase_mode_structural() {
   local ticket="$1"
   local dir="${ORCH_DIR}/workers/${ticket}"
@@ -366,6 +434,133 @@ is_phase_mode_structural() {
     [ -e "$f" ] && return 0
   done
   return 1
+}
+
+# phase_has_meaningful_progress TICKET PHASE SIGNAL_FILE
+# Returns 0 + reason on stderr iff one of:
+#   - signal's .artifact field is set
+#   - worktree has commits ahead of origin/<baseBranch>
+#   - worktree has uncommitted changes against HEAD
+# Returns 1 otherwise.
+phase_has_meaningful_progress() {
+  local ticket="$1" phase="$2" signal="$3"
+
+  # Signal 1: .artifact already populated.
+  local artifact
+  artifact=$(jq -r '.artifact // empty' "$signal" 2>/dev/null || echo "")
+  if [ -n "$artifact" ]; then
+    echo "artifact=${artifact}" >&2
+    return 0
+  fi
+
+  # Resolve worktree path: ${WORKTREE_BASE}/${ORCH_ID}-${TICKET}.
+  local wt_base
+  wt_base=$(revive_worktree_base)
+  [ -z "$wt_base" ] && return 1
+  local wt="${wt_base}/${ORCH_ID}-${ticket}"
+  if [ ! -d "$wt/.git" ] && [ ! -f "$wt/.git" ]; then
+    return 1
+  fi
+
+  local base
+  base=$(revive_base_branch)
+  local ahead
+  ahead=$(git -C "$wt" rev-list --count "origin/${base}..HEAD" 2>/dev/null || echo 0)
+  if [ "${ahead:-0}" -gt 0 ]; then
+    echo "commits-ahead=${ahead}" >&2
+    return 0
+  fi
+  # Uncommitted-but-staged → also meaningful (Q2 resolution in the plan).
+  if ! git -C "$wt" diff --quiet HEAD 2>/dev/null; then
+    echo "uncommitted-changes" >&2
+    return 0
+  fi
+  if ! git -C "$wt" diff --quiet --cached 2>/dev/null; then
+    echo "uncommitted-staged-changes" >&2
+    return 0
+  fi
+  return 1
+}
+
+# phase_is_truly_failed SIGNAL_FILE
+# True iff the signal has a .failureReason field. Set by
+# phase-agent-emit-complete --status failed when a phase agent exits with a
+# real error (distinct from healthcheck's status=stalled, attentionReason=...).
+phase_is_truly_failed() {
+  local signal="$1"
+  local fr
+  fr=$(jq -r '.failureReason // empty' "$signal" 2>/dev/null || echo "")
+  [ -n "$fr" ]
+}
+
+# phase_revive_escalate TICKET PHASE REASON
+# Helper: raise an unrecoverable attention with --actionable false. Best-effort
+# state script invocation (silenced on missing/failed).
+phase_revive_escalate() {
+  local ticket="$1" phase="$2" reason="$3"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] phase-revive: escalate ${ticket}/${phase} (${reason})" >&2
+    return 0
+  fi
+  if [ -x "$STATE_SCRIPT" ]; then
+    "$STATE_SCRIPT" attention "$ORCH_ID" "phase-failed-unrecoverable" \
+      "$ticket" "phase=${phase} reason=${reason}" --actionable false \
+      >/dev/null 2>&1 || true
+  fi
+}
+
+# phase_revive_emit_complete TICKET PHASE PROGRESS_REASON
+# Calls phase-agent-emit-complete to publish the synthetic complete event +
+# mutate the signal status to "done". Best-effort.
+phase_revive_emit_complete() {
+  local ticket="$1" phase="$2" progress_reason="$3"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] phase-revive: emit-complete ${ticket}/${phase} (${progress_reason})" >&2
+    return 0
+  fi
+  local bin
+  bin="${CATALYST_PHASE_EMIT_COMPLETE_BIN:-${SCRIPT_DIR}/phase-agent-emit-complete}"
+  if [ -x "$bin" ]; then
+    "$bin" --phase "$phase" --ticket "$ticket" --status complete \
+      --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
+      --reason "synthesized-by-revive: ${progress_reason}" \
+      >/dev/null 2>&1 || true
+  fi
+}
+
+# phase_revive_redispatch TICKET PHASE SIGNAL_FILE
+# Bumps phaseReviveCount on the signal, then calls phase-agent-dispatch.
+# phase-agent-dispatch's existing idempotency guard already lets stalled signals
+# fall through, so a separate signal reset is unnecessary — the dispatcher
+# overwrites it.
+phase_revive_redispatch() {
+  local ticket="$1" phase="$2" signal="$3" current_count="$4"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "[dry-run] phase-revive: re-dispatch ${ticket}/${phase} (count→$((current_count+1)))" >&2
+    return 0
+  fi
+  local ts next tmp
+  ts=$(now_iso)
+  next=$((current_count + 1))
+  tmp="${signal}.tmp.$$"
+  if jq --arg ts "$ts" --argjson rc "$next" \
+       '.phaseReviveCount = $rc | .updatedAt = $ts' \
+       "$signal" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$signal"
+  else
+    rm -f "$tmp"
+  fi
+
+  local bin
+  bin="${CATALYST_PHASE_DISPATCH_BIN:-${SCRIPT_DIR}/phase-agent-dispatch}"
+  if [ -x "$bin" ]; then
+    CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+    CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+    CATALYST_IS_CONTINUATION=true \
+      "$bin" --phase "$phase" --ticket "$ticket" \
+        --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
+        >/dev/null 2>&1 || true
+  fi
 }
 
 # ─── Main loop ────────────────────────────────────────────────────────────────
@@ -716,17 +911,24 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   echo "REVIVED: ${TICKET} (sid=${SESSION_ID}, pid=${NEW_PID}, count=${NEW_REVIVE_COUNT}, reason=${REVIVE_REASON})" >&2
 done
 
-# ─── CTL-493 Phase 2: per-phase iteration branch (structural-only) ───────────
+# ─── CTL-493: per-phase iteration branch ─────────────────────────────────────
 #
 # Walks every workers/<T>/phase-*.json signal independently of the legacy
 # top-level workers/<T>.json loop above. Phase-mode orchestrations don't write
-# the top-level signal, so the previous loop is a structural no-op for them.
+# the top-level signal, so the previous loop is a structural no-op for them —
+# this loop is what gives phase-agents an actual recovery path.
 #
-# This phase ONLY counts and logs — no recovery action is taken. Phase 3
-# layers the meaningful-progress / re-dispatch / escalate decision tree on top.
+# Decision tree per stalled signal:
+#   1. truly-failed (.failureReason set)     → escalate, no retry
+#   2. meaningful progress (commits/artifact) → emit synthetic complete
+#   3. budget exhausted                       → escalate
+#   4. fresh stall                            → re-dispatch, bump count
 
 PHASE_MODE_WORKERS=0
 PHASE_ELIGIBLE=0
+PHASE_REVIVED=0
+PHASE_EMIT_COMPLETE=0
+PHASE_ESCALATED=0
 
 shopt -s nullglob
 for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
@@ -747,8 +949,36 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
   PHASE_ELIGIBLE=$((PHASE_ELIGIBLE + 1))
   echo "phase-mode worker detected: ${P_TICKET}/${P_PHASE} (status=${P_STATUS})" >&2
 
-  # Phase 3 inserts the decision tree here (truly-failed | meaningful-progress
-  # | budget-exhausted | re-dispatch).
+  PHASE_REVIVE_COUNT=$(jq -r '.phaseReviveCount // 0' "$PHASE_SIGNAL" 2>/dev/null || echo 0)
+
+  # Branch 1: truly failed → escalate, no retry.
+  if phase_is_truly_failed "$PHASE_SIGNAL"; then
+    REASON=$(jq -r '.failureReason' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+    phase_revive_escalate "$P_TICKET" "$P_PHASE" "$REASON"
+    PHASE_ESCALATED=$((PHASE_ESCALATED + 1))
+    continue
+  fi
+
+  # Branch 2: meaningful progress → emit synthetic complete.
+  PROGRESS_REASON=""
+  if PROGRESS_REASON=$(phase_has_meaningful_progress "$P_TICKET" "$P_PHASE" "$PHASE_SIGNAL" 2>&1 >/dev/null); then
+    [ -z "$PROGRESS_REASON" ] && PROGRESS_REASON="meaningful-progress"
+    phase_revive_emit_complete "$P_TICKET" "$P_PHASE" "$PROGRESS_REASON"
+    PHASE_EMIT_COMPLETE=$((PHASE_EMIT_COMPLETE + 1))
+    continue
+  fi
+
+  # Branch 3: budget exhausted → escalate.
+  if [ "$PHASE_REVIVE_COUNT" -ge "$MAX_PHASE_REVIVES" ]; then
+    phase_revive_escalate "$P_TICKET" "$P_PHASE" \
+      "phase-revive-budget-exhausted count=${PHASE_REVIVE_COUNT}"
+    PHASE_ESCALATED=$((PHASE_ESCALATED + 1))
+    continue
+  fi
+
+  # Branch 4: fresh stall → re-dispatch.
+  phase_revive_redispatch "$P_TICKET" "$P_PHASE" "$PHASE_SIGNAL" "$PHASE_REVIVE_COUNT"
+  PHASE_REVIVED=$((PHASE_REVIVED + 1))
 done
 
 jq -nc \
@@ -758,5 +988,9 @@ jq -nc \
   --argjson k "$SKIPPED" \
   --argjson pmw "$PHASE_MODE_WORKERS" \
   --argjson pel "$PHASE_ELIGIBLE" \
+  --argjson prv "$PHASE_REVIVED" \
+  --argjson pec "$PHASE_EMIT_COMPLETE" \
+  --argjson pes "$PHASE_ESCALATED" \
   '{checked:$c, revived:$r, stalled:$s, skipped:$k,
-    phaseModeWorkers:$pmw, phaseEligible:$pel}'
+    phaseModeWorkers:$pmw, phaseEligible:$pel,
+    phaseRevived:$prv, phaseEmitComplete:$pec, phaseEscalated:$pes}'
