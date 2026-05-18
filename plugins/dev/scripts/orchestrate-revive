@@ -503,9 +503,11 @@ phase_revive_escalate() {
     return 0
   fi
   if [ -x "$STATE_SCRIPT" ]; then
-    "$STATE_SCRIPT" attention "$ORCH_ID" "phase-failed-unrecoverable" \
-      "$ticket" "phase=${phase} reason=${reason}" --actionable false \
-      >/dev/null 2>&1 || true
+    if ! "$STATE_SCRIPT" attention "$ORCH_ID" "phase-failed-unrecoverable" \
+         "$ticket" "phase=${phase} reason=${reason}" --actionable false \
+         >/dev/null 2>&1; then
+      echo "phase-revive: ${ticket}/${phase} helper=catalyst-state-attention exit=$?" >&2
+    fi
   fi
 }
 
@@ -521,10 +523,12 @@ phase_revive_emit_complete() {
   local bin
   bin="${CATALYST_PHASE_EMIT_COMPLETE_BIN:-${SCRIPT_DIR}/phase-agent-emit-complete}"
   if [ -x "$bin" ]; then
-    "$bin" --phase "$phase" --ticket "$ticket" --status complete \
-      --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
-      --reason "synthesized-by-revive: ${progress_reason}" \
-      >/dev/null 2>&1 || true
+    if ! "$bin" --phase "$phase" --ticket "$ticket" --status complete \
+         --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
+         --reason "synthesized-by-revive: ${progress_reason}" \
+         >/dev/null 2>&1; then
+      echo "phase-revive: ${ticket}/${phase} helper=phase-agent-emit-complete exit=$?" >&2
+    fi
   fi
 }
 
@@ -548,18 +552,25 @@ phase_revive_redispatch() {
        "$signal" > "$tmp" 2>/dev/null; then
     mv "$tmp" "$signal"
   else
+    # jq failed: signal is unreadable/corrupt. Falling through to dispatch
+    # without bumping the counter would let MAX_PHASE_REVIVES be unreachable.
     rm -f "$tmp"
+    echo "phase-revive: ${ticket}/${phase} signal_corrupt — escalating" >&2
+    phase_revive_escalate "$ticket" "$phase" "signal_corrupt"
+    return 1
   fi
 
   local bin
   bin="${CATALYST_PHASE_DISPATCH_BIN:-${SCRIPT_DIR}/phase-agent-dispatch}"
   if [ -x "$bin" ]; then
-    CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
-    CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
-    CATALYST_IS_CONTINUATION=true \
-      "$bin" --phase "$phase" --ticket "$ticket" \
-        --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
-        >/dev/null 2>&1 || true
+    if ! CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+         CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+         CATALYST_IS_CONTINUATION=true \
+         "$bin" --phase "$phase" --ticket "$ticket" \
+           --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
+           >/dev/null 2>&1; then
+      echo "phase-revive: ${ticket}/${phase} helper=phase-agent-dispatch exit=$?" >&2
+    fi
   fi
 }
 
@@ -976,9 +987,13 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
     continue
   fi
 
-  # Branch 4: fresh stall → re-dispatch.
-  phase_revive_redispatch "$P_TICKET" "$P_PHASE" "$PHASE_SIGNAL" "$PHASE_REVIVE_COUNT"
-  PHASE_REVIVED=$((PHASE_REVIVED + 1))
+  # Branch 4: fresh stall → re-dispatch. A non-zero return means the signal
+  # was unreadable and the helper already escalated.
+  if phase_revive_redispatch "$P_TICKET" "$P_PHASE" "$PHASE_SIGNAL" "$PHASE_REVIVE_COUNT"; then
+    PHASE_REVIVED=$((PHASE_REVIVED + 1))
+  else
+    PHASE_ESCALATED=$((PHASE_ESCALATED + 1))
+  fi
 done
 
 jq -nc \
