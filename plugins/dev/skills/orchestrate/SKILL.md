@@ -468,6 +468,25 @@ REPO=$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git
 The `CATALYST_ORCHESTRATOR_ID` is set to `${ORCH_NAME}` for use by workers (passed via environment
 variable alongside `CATALYST_ORCHESTRATOR_DIR`).
 
+**Capture event-log baseline (CTL-491):** Before any worker dispatch, snapshot the catalyst event
+log's current line count and file path. The Phase 4 replay step uses this to find any
+`phase.*.{complete,failed,turn-cap-exhausted}.<TICKET>` events that landed during the
+dispatch-to-monitor handoff. The new `state.json.race` object is opaque to older state.json
+consumers (they ignore unknown top-level fields via `.field // default` jq patterns).
+
+```bash
+EVENTS_DIR="${CATALYST_DIR:-$HOME/catalyst}/events"
+mkdir -p "$EVENTS_DIR"
+BASELINE_FILE="${EVENTS_DIR}/$(date -u +%Y-%m).jsonl"
+[[ -f "$BASELINE_FILE" ]] || : > "$BASELINE_FILE"
+BASELINE_LINE=$(wc -l < "$BASELINE_FILE" | tr -d ' ')
+TMP="${ORCH_DIR}/state.json.tmp.$$"
+jq --arg cursor "$BASELINE_LINE" --arg file "$BASELINE_FILE" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+   '.race = {startLineCursor: ($cursor | tonumber), startEventsFile: $file, capturedAt: $ts}' \
+   "${ORCH_DIR}/state.json" > "$TMP" \
+   && mv "$TMP" "${ORCH_DIR}/state.json" || rm -f "$TMP"
+```
+
 **Create the shared comms channel (CTL-111):** the orchestrator creates a file-based channel that
 every worker will auto-join via `CATALYST_COMMS_CHANNEL` in its dispatch env. Best-effort — the
 orchestrator does not crash if `catalyst-comms` is missing.
@@ -902,6 +921,24 @@ change.
 # Helper internals: see plugins/dev/scripts/orchestrate-register-interests.sh
 # for the exact wire format of each filter.register event. Soft-fails (exit 0)
 # when neither catalyst-broker nor catalyst-filter is running.
+```
+
+**Replay race-window phase events (CTL-491):** Before entering the event-driven wait loop, catch
+up on any `phase.<name>.{complete,failed,turn-cap-exhausted}.<TICKET>` events that landed between
+the Phase 2 baseline (`state.json.race.startLineCursor`) and now. With the Phase 3 pre-dispatch
+registration the window should be zero-length in steady state, but the replay is idempotent and
+cheap — it scans only the tail of the current month's event log past the baseline cursor and
+routes each match through `orchestrate-phase-advance` (for `complete`) or `orchestrate-revive`
+(for `failed` / `turn-cap-exhausted`). Cross-orchestrator events are filtered out by checking
+`workers/*.json` for the ticket.
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-replay-phase-events.sh" \
+  --orch-dir "${ORCH_DIR}" \
+  --orch-id "${ORCH_NAME}" || true
+# Soft-fail with || true so a malformed event log or missing baseline can't
+# stall the orchestrator; the live Monitor/wait-for path picks up new events
+# regardless. The helper exits 1 only when state.json.race is missing.
 ```
 
 **Phase 4 is event-driven, not poll-driven (CTL-210, CTL-243).** The orchestrator subscribes to the
