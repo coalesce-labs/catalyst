@@ -191,14 +191,17 @@ describe("costByTaskType", () => {
   // is caught here even when the mock would otherwise return the desired data.
   it("issues PromQL with `sum by (task_type)` and `task_type=~\".+\"` selector", async () => {
     let capturedQuery = "";
-    const prom = {
-      query: async (q: string) => {
+    const emptyResult: PrometheusQueryResult = {
+      data: { resultType: "vector", result: [] },
+    };
+    const prom: PrometheusFetcher = {
+      query: (q: string) => {
         capturedQuery = q;
-        return { data: { resultType: "vector" as const, result: [] } };
+        return Promise.resolve(emptyResult);
       },
-      queryRange: async () => null,
+      queryRange: () => Promise.resolve(emptyResult),
       isAvailable: () => true,
-    } as unknown as PrometheusFetcher;
+    };
     await costByTaskType(prom, "1h");
     expect(capturedQuery).toContain("sum by (task_type)");
     expect(capturedQuery).toContain(`task_type=~".+"`);
