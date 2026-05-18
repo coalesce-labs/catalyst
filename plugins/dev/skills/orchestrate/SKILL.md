@@ -501,6 +501,24 @@ fi
 
 For each provisioned worker worktree, dispatch a `/oneshot` session.
 
+**Register broker filter interests BEFORE dispatch (CTL-491):** Phase-agent workers can finish in
+well under a second when their work is a no-op (e.g. an already-triaged ticket). Emitting
+`filter.register` events AFTER dispatch opens a race window where the broker's interest map is
+still empty when `phase.<name>.complete.<TICKET>` arrives — `processEvent` early-returns and the
+event is dropped silently (`broker/index.mjs:1782`). Run the registration helper here so all four
+deterministic + per-ticket interests are durable in the broker BEFORE any `claude --bg`
+invocation. Idempotent at the broker (upserts by `interest_id`); the Phase 4 entry re-invokes
+the same helper as a belt-and-suspenders.
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-register-interests.sh" \
+  --orch-dir "${ORCH_DIR}" \
+  --orch-id "${ORCH_NAME}" \
+  --config "${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/.catalyst/config.json"
+# Soft-fail-safe: helper exits 0 when broker/filter daemon is down (no-op) and
+# 2 only on argument errors. See plugins/dev/scripts/orchestrate-register-interests.sh.
+```
+
 **Emit dispatching status (CTL-405):** Before launching workers, announce the phase:
 
 ```bash
@@ -855,11 +873,13 @@ TOTAL_COUNT=$(jq -rs 'length' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo 0
   --summary "wave ${CURRENT_WAVE:-1} monitoring (${ACTIVE_COUNT}/${TOTAL_COUNT} active)" 2>/dev/null || true
 ```
 
-**Register with catalyst-broker daemon (CTL-257, updated CTL-303, CTL-357, CTL-452):** When
-`catalyst-broker status` returns 0, emit `filter.register` events at Phase 4 start so the daemon
-pre-filters incoming events and emits targeted `filter.wake.{ORCH_NAME}` events. Workers
-auto-correlate their own `pr_lifecycle` interests via `agent.checkin`; the orchestrator registers
-four deterministic interests for itself — all of them route without Groq:
+**Re-register with catalyst-broker daemon (CTL-257, CTL-303, CTL-357, CTL-452, CTL-491):** Phase 3
+already invoked `orchestrate-register-interests.sh` BEFORE worker dispatch (the CTL-491 race-fix
+hoist). This Phase 4 entry calls the same helper again as a belt-and-suspenders — registration is
+idempotent at the broker (upserts by `interest_id`), and a second invocation ensures the four
+interests stay fresh even if the broker restarted between Phase 3 and Phase 4.
+
+The helper emits four deterministic interests (route without Groq):
 
 - `pr_lifecycle` — orchestrator-level aggregation across all worker PRs.
 - `ticket_lifecycle` — Linear ticket state changes for the orchestrator's tickets.
@@ -868,143 +888,20 @@ four deterministic interests for itself — all of them route without Groq:
   `phase.<name>.failed.<TICKET>`, and `phase.<name>.turn-cap-exhausted.<TICKET>` events emitted
   by phase agents. One interest per active ticket, covering all 9 phase names. The turn-cap status
   routes through `orchestrate-revive`'s continuation branch (separate budget from error revives).
+  Only registered when `catalyst.orchestration.dispatchMode = "phase-agents"`.
 
 CTL-357 retired the Groq prose interest (~95% false-positive rate). All four interests share the
 same `notify_event: "filter.wake.${ORCH_NAME}"`, so the orchestrator's `wait-for` filter does not
 change.
 
 ```bash
-if catalyst-broker status >/dev/null 2>&1 || catalyst-filter status >/dev/null 2>&1; then
-  ACTIVE_PRS=$(jq -rs '[.[].pr.number // empty] | unique' \
-    "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
-  ACTIVE_TICKETS=$(jq -rs '[.[].ticket // empty]' \
-    "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
-  ACTIVE_BRANCHES_ARR=()
-  for _WSIG in "${ORCH_DIR}/workers/"*.json; do
-    _WTKT=$(jq -r '.ticket' "$_WSIG")
-    _WDIR="${WORKTREE_BASE}/${ORCH_NAME}-${_WTKT}"
-    _WBRANCH=$(git -C "$_WDIR" branch --show-current 2>/dev/null || true)
-    [ -n "$_WBRANCH" ] && ACTIVE_BRANCHES_ARR+=("$_WBRANCH")
-  done
-  ACTIVE_BRANCHES_JSON=$(printf '%s\n' "${ACTIVE_BRANCHES_ARR[@]}" \
-    | jq -Rnc '[inputs]' 2>/dev/null || echo '[]')
-
-  REPO_FULL_NAME=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
-  ACTIVE_BASES_JSON=$(jq -rs '[
-    .[] | select(.pr.number != null and .pr.baseRefName != null)
-        | {pr: .pr.number, base: .pr.baseRefName}
-  ]' "${ORCH_DIR}/workers/"*.json 2>/dev/null || echo '[]')
-
-  # CTL-284: pr_lifecycle interest (deterministic PR/CI/review/deployment routing)
-  "$STATE_SCRIPT" event "$(jq -nc \
-    --arg orch "${ORCH_NAME}" \
-    --arg id "${ORCH_NAME}-pr-lifecycle" \
-    --arg notify "filter.wake.${ORCH_NAME}" \
-    --arg repo "${REPO_FULL_NAME}" \
-    --argjson prs "${ACTIVE_PRS}" \
-    --argjson bases "${ACTIVE_BASES_JSON}" \
-    '{
-      ts: (now | todate),
-      event: "filter.register",
-      orchestrator: $orch,
-      worker: null,
-      detail: {
-        interest_id: $id,
-        interest_type: "pr_lifecycle",
-        notify_event: $notify,
-        persistent: true,
-        pr_numbers: $prs,
-        repo: $repo,
-        base_branches: $bases
-      }
-    }')"
-
-  # CTL-303: ticket_lifecycle interest (deterministic Linear routing — replaces
-  # the "Linear ticket status changes" part of the old prose prompt)
-  "$STATE_SCRIPT" event "$(jq -nc \
-    --arg orch "${ORCH_NAME}" \
-    --arg id "${ORCH_NAME}-ticket-lifecycle" \
-    --arg notify "filter.wake.${ORCH_NAME}" \
-    --argjson tickets "${ACTIVE_TICKETS}" \
-    '{
-      ts: (now | todate),
-      event: "filter.register",
-      orchestrator: $orch,
-      worker: null,
-      detail: {
-        interest_id: $id,
-        interest_type: "ticket_lifecycle",
-        notify_event: $notify,
-        persistent: true,
-        tickets: $tickets,
-        wake_on: ["status_done", "status_in_review", "status_changed"]
-      }
-    }')"
-
-  # CTL-357: comms_lifecycle interest (deterministic comms routing — replaces
-  # the "any of my workers posts a comms message of type attention" part of the
-  # old prose prompt). Defaults types_of_interest to ["attention","done"] at the
-  # broker; we set it explicitly here for clarity.
-  "$STATE_SCRIPT" event "$(jq -nc \
-    --arg orch "${ORCH_NAME}" \
-    --arg id "${ORCH_NAME}-comms-lifecycle" \
-    --arg notify "filter.wake.${ORCH_NAME}" \
-    --arg channel "${ORCH_NAME}" \
-    --argjson workers "${ACTIVE_TICKETS}" \
-    '{
-      ts: (now | todate),
-      event: "filter.register",
-      orchestrator: $orch,
-      worker: null,
-      detail: {
-        interest_id: $id,
-        interest_type: "comms_lifecycle",
-        notify_event: $notify,
-        persistent: true,
-        channel: $channel,
-        subscriber_kind: "orchestrator",
-        owned_workers: $workers,
-        types_of_interest: ["attention", "done"]
-      }
-    }')"
-
-  # CTL-452: phase_lifecycle interest — one per active ticket, covering all
-  # 9 canonical phase names. The broker fires filter.wake.${ORCH_NAME} on
-  # both phase.<name>.complete.<TICKET> and phase.<name>.failed.<TICKET>.
-  # The wake handler below resolves the next phase via orchestrate-phase-advance
-  # (complete) or escalates via orchestrate-revive then attention (failed).
-  #
-  # Only registered when catalyst.orchestration.dispatchMode = "phase-agents".
-  # In legacy oneshot-mode (the historical default), this block is a no-op.
-  DISPATCH_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' \
-    "${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/.catalyst/config.json" \
-    2>/dev/null || echo "oneshot-legacy")
-  if [ "$DISPATCH_MODE" = "phase-agents" ]; then
-    while IFS= read -r TICKET; do
-      [ -z "$TICKET" ] && continue
-      "$STATE_SCRIPT" event "$(jq -nc \
-        --arg orch "${ORCH_NAME}" \
-        --arg id "${ORCH_NAME}-phase-lifecycle-${TICKET}" \
-        --arg notify "filter.wake.${ORCH_NAME}" \
-        --arg ticket "$TICKET" \
-        --argjson phases '["triage","research","plan","implement","verify","review","pr","monitor-merge","monitor-deploy"]' \
-        '{
-          ts: (now | todate),
-          event: "filter.register",
-          orchestrator: $orch,
-          worker: null,
-          detail: {
-            interest_id: $id,
-            interest_type: "phase_lifecycle",
-            notify_event: $notify,
-            persistent: true,
-            ticket: $ticket,
-            phase_names: $phases
-          }
-        }')"
-    done < <(jq -r '.[]' <<< "${ACTIVE_TICKETS}")
-  fi
-fi
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-register-interests.sh" \
+  --orch-dir "${ORCH_DIR}" \
+  --orch-id "${ORCH_NAME}" \
+  --config "${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/.catalyst/config.json"
+# Helper internals: see plugins/dev/scripts/orchestrate-register-interests.sh
+# for the exact wire format of each filter.register event. Soft-fails (exit 0)
+# when neither catalyst-broker nor catalyst-filter is running.
 ```
 
 **Phase 4 is event-driven, not poll-driven (CTL-210, CTL-243).** The orchestrator subscribes to the
