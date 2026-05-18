@@ -1,5 +1,47 @@
 # Changelog
 
+## [10.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.3.0...catalyst-dev-v10.0.0) (2026-05-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **dev:** turn-cap exhaustion → automated handoff continuation (CTL-484) ([#844](https://github.com/coalesce-labs/catalyst/issues/844))
+
+### Features
+
+* **dev:** add phase_lifecycle interest type to broker daemon (CTL-447) ([#795](https://github.com/coalesce-labs/catalyst/issues/795)) ([840f2ef](https://github.com/coalesce-labs/catalyst/commit/840f2ef5362c81e81f06317a0f8bd1e99ea85ae5))
+* **dev:** add phase-triage + phase-monitor-deploy skills (CTL-451) ([#802](https://github.com/coalesce-labs/catalyst/issues/802)) ([decabfd](https://github.com/coalesce-labs/catalyst/commit/decabfd975195e2dd91bfded464d20ae1b9e0c73))
+* **dev:** add verifying/reviewing transition keys for phase-agent observability (CTL-454) ([#797](https://github.com/coalesce-labs/catalyst/issues/797)) ([303e96a](https://github.com/coalesce-labs/catalyst/commit/303e96a7db1956a4420a142be0078d523d199d47))
+* **dev:** ADR-drift detector for morning-briefing Step 3 (CTL-459) ([#806](https://github.com/coalesce-labs/catalyst/issues/806)) ([d442e87](https://github.com/coalesce-labs/catalyst/commit/d442e879b05041392a60d8bfe15c6536e0ec44eb))
+* **dev:** briefing-followup action handlers — calendar/ticket/orchestrate/email (CTL-463) ([#813](https://github.com/coalesce-labs/catalyst/issues/813)) ([63383aa](https://github.com/coalesce-labs/catalyst/commit/63383aa943dbc95b1667553790ee9c2af31b158c))
+* **dev:** briefing-followup ADR-drift resolution flow (CTL-464) ([#815](https://github.com/coalesce-labs/catalyst/issues/815)) ([8207175](https://github.com/coalesce-labs/catalyst/commit/82071759f6b0d253c2d036733deb0c9006506dfe))
+* **dev:** briefing-followup resolution write-back (CTL-465) ([#816](https://github.com/coalesce-labs/catalyst/issues/816)) ([7881962](https://github.com/coalesce-labs/catalyst/commit/788196270101ad13e13ee5c4429f8767ed627c8e))
+* **dev:** briefing-followup skill MVP — load + present agenda (CTL-462) ([#808](https://github.com/coalesce-labs/catalyst/issues/808)) ([bd875bf](https://github.com/coalesce-labs/catalyst/commit/bd875bfee49e03bc820e2465e578e1684f0a9147))
+* **dev:** catalyst-hud surfaces per-phase signal files (CTL-476) ([#835](https://github.com/coalesce-labs/catalyst/issues/835)) ([2a821fa](https://github.com/coalesce-labs/catalyst/commit/2a821fabf887a9c7ea4024ca6a135a9b2a13da66))
+* **dev:** event-source workers/*.json via broker projection (CTL-483) ([#842](https://github.com/coalesce-labs/catalyst/issues/842)) ([f6c1bdb](https://github.com/coalesce-labs/catalyst/commit/f6c1bdbcf3afee11417516f49e63862cd657bbc3))
+* **dev:** HUD WORKER column strips orch prefix (CTL-431) ([#755](https://github.com/coalesce-labs/catalyst/issues/755)) ([4b89cbe](https://github.com/coalesce-labs/catalyst/commit/4b89cbeafc414764cc634311930b223ece105d04))
+* **dev:** morning-briefing skill MVP (CTL-457) ([#804](https://github.com/coalesce-labs/catalyst/issues/804)) ([d02bdaf](https://github.com/coalesce-labs/catalyst/commit/d02bdaf19c72ae4bd4c198f69c02b19e4e23959b))
+* **dev:** multi-output briefing fan-out (CTL-458) ([#807](https://github.com/coalesce-labs/catalyst/issues/807)) ([3e25223](https://github.com/coalesce-labs/catalyst/commit/3e2522382f99eddc87fc50e88bea5791365a4d20))
+* **dev:** orchestrator state-machine rewrite + --bg cutover (CTL-452) ([#809](https://github.com/coalesce-labs/catalyst/issues/809)) ([487cc38](https://github.com/coalesce-labs/catalyst/commit/487cc38f9aaeddd5a7c27d689e03165bf7764a5c))
+* **dev:** phase-agent skill scaffold + dispatch helper (CTL-448) ([#799](https://github.com/coalesce-labs/catalyst/issues/799)) ([29e91c7](https://github.com/coalesce-labs/catalyst/commit/29e91c7df17796e87d7f91f7ee3a04ace48ffde1))
+* **dev:** phase-implement + phase-pr + phase-monitor-merge skills (CTL-449) ([#803](https://github.com/coalesce-labs/catalyst/issues/803)) ([eb3c008](https://github.com/coalesce-labs/catalyst/commit/eb3c0086c791ac3642aa444b0caf7420a282d677))
+* **dev:** phase-research + phase-plan + phase-verify + phase-review skills (CTL-450) ([#801](https://github.com/coalesce-labs/catalyst/issues/801)) ([e3a4294](https://github.com/coalesce-labs/catalyst/commit/e3a4294286a0cbd7c7694aa088389ef3f555a7f6))
+* **dev:** research-curate contradiction detection + CONTRADICTIONS.md (CTL-468) ([#810](https://github.com/coalesce-labs/catalyst/issues/810)) ([185814f](https://github.com/coalesce-labs/catalyst/commit/185814fd5c0a8c09c644ea821514f5fa1ff7658d))
+* **dev:** research-curate skill — inventory + staleness + INDEX.md (CTL-467) ([#805](https://github.com/coalesce-labs/catalyst/issues/805)) ([dce7f14](https://github.com/coalesce-labs/catalyst/commit/dce7f144c8476507768e28af454f33c375a13555))
+* **dev:** turn-cap exhaustion → automated handoff continuation (CTL-484) ([#844](https://github.com/coalesce-labs/catalyst/issues/844)) ([a521ca9](https://github.com/coalesce-labs/catalyst/commit/a521ca98143ed7ec08a8673d1cf4c444371e4a15))
+
+
+### Bug Fixes
+
+* **dev:** catalyst-events tail/wait-for exit when parent dies (CTL-439) ([#762](https://github.com/coalesce-labs/catalyst/issues/762)) ([bc5b657](https://github.com/coalesce-labs/catalyst/commit/bc5b6570f3066727df2652833e87ad8522e060f5))
+* **dev:** consolidate HUD Header chip row onto single line (CTL-434) ([#758](https://github.com/coalesce-labs/catalyst/issues/758)) ([0737ed9](https://github.com/coalesce-labs/catalyst/commit/0737ed9dd68949472af730484901f223694dd7a7))
+* **dev:** HUD filter input + status row span full terminal width (CTL-433) ([#757](https://github.com/coalesce-labs/catalyst/issues/757)) ([5532042](https://github.com/coalesce-labs/catalyst/commit/55320429581162277c6d6f2da9abc9315cdd65d2))
+* **dev:** HUD interests footer drops 'ago' suffix on null timestamps (CTL-432) ([#754](https://github.com/coalesce-labs/catalyst/issues/754)) ([46887d2](https://github.com/coalesce-labs/catalyst/commit/46887d27e968f8871e6e86f5543d654291118148))
+* **dev:** populate session_metrics from worker stream cost data (CTL-455) ([#798](https://github.com/coalesce-labs/catalyst/issues/798)) ([6eeb7ec](https://github.com/coalesce-labs/catalyst/commit/6eeb7ec5f16f14bbff13f9b12405bee368720edd))
+* **dev:** unbreak phase-agent dispatch end-to-end (CTL-490) ([#848](https://github.com/coalesce-labs/catalyst/issues/848)) ([ba6fd03](https://github.com/coalesce-labs/catalyst/commit/ba6fd03faa0e07f83c57a2985518e50030c29b0c))
+* **dev:** widen HUD Interests TYPE column to 18 + add margin before WATCHES (CTL-438) ([#761](https://github.com/coalesce-labs/catalyst/issues/761)) ([cf97d3c](https://github.com/coalesce-labs/catalyst/commit/cf97d3cf42b3d8b1277be5860ee58c231363c6a5))
+* **dev:** wire orchestrate-roll-usage into monitor loop + enable phase-agents dispatch (CTL-487) ([#845](https://github.com/coalesce-labs/catalyst/issues/845)) ([3807a0f](https://github.com/coalesce-labs/catalyst/commit/3807a0f696bdbf4dbd88baceccbf5173e398246a))
+
 ## [9.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.2.0...catalyst-dev-v9.3.0) (2026-05-15)
 
 
