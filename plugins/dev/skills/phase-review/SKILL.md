@@ -73,7 +73,13 @@ fi
 
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TMP="${SIGNAL_FILE}.tmp.$$"
-jq --arg ts "$TS" '.status = "running" | .updatedAt = $ts' "$SIGNAL_FILE" > "$TMP" \
+# CTL-496: persist catalystSessionId so orchestrate-roll-usage --phase can
+# attribute cost to the right session_metrics row.
+jq --arg ts "$TS" --arg sid "${CATALYST_SESSION_ID:-}" '
+  .status = "running"
+  | .updatedAt = $ts
+  | if $sid != "" then .catalystSessionId = $sid else . end
+' "$SIGNAL_FILE" > "$TMP" \
   && mv "$TMP" "$SIGNAL_FILE"
 
 # Prior-phase artifact: verify.json from phase-verify.

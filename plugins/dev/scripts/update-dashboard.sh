@@ -86,12 +86,37 @@ if [ "$ROLL_USAGE" = "1" ] && [ -d "$WORKERS_DIR" ]; then
   ROLL_SCRIPT="${SCRIPT_DIR}/orchestrate-roll-usage.sh"
   if [ -x "$ROLL_SCRIPT" ]; then
     ROLL_LOG="${ORCH_DIR}/.roll-usage.log"
+
+    # Legacy flat layout: workers/<TICKET>.json (oneshot-legacy dispatch).
+    # Also skip *.dead-*.json sidecars (defensive — phase-agent-dispatch
+    # produces those today and writes them under workers/<T>/, but the
+    # filter belongs in both passes so future rename paths don't double-count).
     for sig in "$WORKERS_DIR"/*.json; do
       [ -f "$sig" ] || continue
+      case "$(basename "$sig")" in
+        *.dead-*.json) continue ;;
+      esac
       tkt=$(jq -r '.ticket // empty' "$sig" 2>/dev/null || true)
       [ -n "$tkt" ] || continue
       "$ROLL_SCRIPT" --orch "$ORCH_ID" --ticket "$tkt" --orch-dir "$ORCH_DIR" -v \
         >/dev/null 2>>"$ROLL_LOG" || true
+    done
+
+    # Phase-agent layout: workers/<TICKET>/phase-<NAME>.json (CTL-496).
+    # phase-agent-dispatch may also rename killed worker signals to
+    # phase-<NAME>.json.dead-<id>.json — skip those (live signal already
+    # booked the cost; re-rolling the sidecar would double-count).
+    for sig in "$WORKERS_DIR"/*/phase-*.json; do
+      [ -f "$sig" ] || continue
+      case "$(basename "$sig")" in
+        *.dead-*.json) continue ;;
+      esac
+      tkt=$(jq -r '.ticket // empty' "$sig" 2>/dev/null || true)
+      phase=$(jq -r '.phase // empty' "$sig" 2>/dev/null || true)
+      [ -n "$tkt" ] || continue
+      [ -n "$phase" ] || continue
+      "$ROLL_SCRIPT" --orch "$ORCH_ID" --ticket "$tkt" --phase "$phase" \
+        --orch-dir "$ORCH_DIR" -v >/dev/null 2>>"$ROLL_LOG" || true
     done
   fi
 fi

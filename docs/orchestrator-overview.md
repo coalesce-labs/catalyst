@@ -290,6 +290,42 @@ per-ticket subdirectories, picks the most recent non-terminal phase, and overlay
 its `phaseName`/`status` onto the flat signal so the PHASE column shows the live
 phase (e.g. `implement`, `monitor-merge`).
 
+## Cost capture
+
+Both dispatch modes write the same four cost surfaces — `signal.cost`,
+`state.workers[ticket].usage`, `state.usage`, and the `session_metrics` SQLite
+mirror — but the USAGE source differs by mode. `orchestrate-roll-usage.sh`,
+invoked by `update-dashboard.sh --roll-usage` on every monitor wake-up,
+abstracts the difference.
+
+**Legacy (`oneshot-legacy` dispatch).** Workers run as `claude -p
+--output-format stream-json`. The CLI streams a final `"type":"result"` event
+carrying `total_cost_usd`, `usage`, `num_turns`, and `duration_ms` into
+`workers/output/<TICKET>-stream.jsonl`. roll-usage parses that event into a
+USAGE record.
+
+**Phase-agent (`phase-agents` dispatch, CTL-496).** Workers run as `claude
+--bg` jobs. There is no `result` event because there is no `--output-format
+stream-json` flag on the bg invocation; instead the CLI writes the full
+conversation to `~/.claude/projects/<wt>/<sessionId>.jsonl`. roll-usage
+resolves the JSONL path via `~/.claude/jobs/<bg_job_id>/state.json
+-> linkScanPath` and shells `extract-cost-from-jsonl.sh --jsonl <path>
+--pricing claude-pricing.json` to aggregate per-assistant-event `usage` by
+model, split cache_creation by 5m / 1h TTL, and apply the per-model rates
+from a versioned `plugins/dev/scripts/claude-pricing.json`. The four
+downstream writes are then unchanged from legacy.
+
+Phase mode aggregates `state.workers[ticket].usage` across phases (`+=`),
+not overwriting, so `state.workers[T].usage.costUSD == sum(phase.cost.costUSD)`
+for that ticket. The `session_metrics` mirror finds the right row via
+`signal.catalystSessionId` (persisted by the phase-agent prelude) or, for
+in-flight runs that predate that persistence, a DB lookup keyed on
+`ticket_key + skill_name = 'phase-<name>'`.
+
+The sweep loop in `update-dashboard.sh` iterates both layouts on every
+wake-up. Killed-worker sidecars (`workers/<T>/phase-<name>.json.dead-<id>.json`)
+are skipped so booked cost is never double-counted.
+
 ## On Claude Code's "agent view" / agents sidebar
 
 Phase-agent workers run as `claude --bg` jobs and live under
@@ -319,6 +355,8 @@ it exposes.
 | `~/catalyst/runs/<id>/workers/<TICKET>.json` | `orchestrate-dispatch-next` + worker | top-level worker signal |
 | `~/catalyst/runs/<id>/workers/<TICKET>/phase-<name>.json` | `phase-agent-dispatch` | per-phase signal (phase-agents mode only) |
 | `~/catalyst/runs/<id>/workers/output/<TICKET>-{stream.jsonl,bg-stdout.log,stderr.log}` | spawned worker | worker stdio capture |
+| `~/catalyst/runs/<id>/.roll-usage.log` | `orchestrate-roll-usage.sh -v` (via `update-dashboard.sh --roll-usage`) | per-sweep audit trail of cost rollups (action codes: `wrote-cost`, `already-rolled`, `bg-state-missing`, `jsonl-missing`, `wrote-metric`, etc.) |
+| `plugins/dev/scripts/claude-pricing.json` | manual edit (version-pinned, see file header) | per-model token pricing table consumed by `extract-cost-from-jsonl.sh` in phase mode |
 | `~/catalyst/runs/<id>/findings.jsonl` | both | shared findings queue |
 | `~/catalyst/state.json` | `catalyst-state.sh` register/update/worker/heartbeat | global active-runs registry |
 | `~/catalyst/catalyst.db` | `catalyst-archive.ts sweep` + skill instrumentation | SQLite sessions + metrics + archive index |
