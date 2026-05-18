@@ -1,6 +1,6 @@
 ---
 name: phase-monitor-deploy
-description: Phase agent that watches the post-merge deployment for a ticket. Reads the merge SHA from phase-pr.json, subscribes via `catalyst-events wait-for` to deploy events on that SHA, then delegates a live verification check to the /canary skill (gstack). Emits phase.monitor-deploy.complete.<TICKET> on canary success, phase.monitor-deploy.failed.<TICKET> on deploy or canary failure, and phase.monitor-deploy.skipped.<TICKET> when no deploy event arrives before the timeout. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-monitor-deploy ..."` resolves.
+description: Phase agent that watches the post-merge deployment for a ticket. Reads the merge SHA from phase-monitor-merge.json (the signal file phase-monitor-merge writes after `gh pr merge` confirms via REST), subscribes via `catalyst-events wait-for` to deploy events on that SHA, then delegates a live verification check to the /canary skill (gstack). Emits phase.monitor-deploy.complete.<TICKET> on canary success, phase.monitor-deploy.failed.<TICKET> on deploy or canary failure, and phase.monitor-deploy.skipped.<TICKET> when no deploy event arrives before the timeout. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-monitor-deploy ..."` resolves.
 user-invocable: true
 disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools: Bash, Read, Write
@@ -22,9 +22,9 @@ the live URL).
 
 Environment:
 - `TICKET` — Linear identifier (e.g. `CTL-451`). Required.
-- `WORKER_DIR` — directory containing `phase-pr.json` (read) and where
-  `phase-monitor-deploy.json` (write) lands. Defaults to
-  `${ORCH_DIR}/workers/${TICKET}` if set, else `$(pwd)`.
+- `WORKER_DIR` — directory containing `phase-monitor-merge.json` (read,
+  primary input) and where `phase-monitor-deploy.json` (write) lands. Defaults
+  to `${ORCH_DIR}/workers/${TICKET}` if set, else `$(pwd)`.
 - `PHASE_DEPLOY_TIMEOUT_SEC` — seconds to wait for a `deployment_status` event matching
   the merge SHA. Default `1800` (30 minutes). Setting to a small value is the
   documented way to skip deploy verification in test/dev environments.
@@ -35,19 +35,28 @@ Environment:
   a stub that emits a fixture canary result.
 - `CATALYST_ORCHESTRATOR_ID`, `CATALYST_SESSION_ID` — used for event trace/span id derivation.
 
-## phase-pr.json contract (input shape)
+`gh` CLI on `$PATH`, authenticated against the GitHub repo, is required only
+when `phase-monitor-merge.json` exists but `.pr.mergeCommitSha` is empty (the
+REST fallback path). In the common case (where `phase-monitor-merge` recorded
+the SHA successfully), `gh` is not invoked. The fallback also reads PR number
+from `phase-pr.json`.
+
+## phase-monitor-merge.json contract (input shape)
 
 ```json
 {
   "pr": {
-    "number": 1234,
-    "url": "https://github.com/org/repo/pull/1234",
+    "mergedAt": "2026-05-18T22:00:00Z",
+    "ciStatus": "merged",
     "mergeCommitSha": "abc123..."
   }
 }
 ```
 
 The skill reads `.pr.mergeCommitSha` only; everything else is informational.
+The file is written by [[phase-monitor-merge]] after `gh pr merge --squash`
+confirms via REST (`gh api repos/<owner>/<repo>/pulls/<num>` returns
+`.merged == true`).
 
 ## Body
 
@@ -76,19 +85,40 @@ DEPLOY_TIMEOUT="${PHASE_DEPLOY_TIMEOUT_SEC:-1800}"
 DEPLOY_ENV="${PHASE_DEPLOY_ENV:-production}"
 CANARY_CMD="${PHASE_CANARY_CMD:-claude --model haiku -p /canary --output-format json}"
 
-# 1. Read merge SHA from the prior phase artifact.
-PR_FILE="$WORKER_DIR/phase-pr.json"
-if [[ ! -f "$PR_FILE" ]]; then
+# 1. Read merge SHA from phase-monitor-merge.json (the prior phase artifact).
+MERGE_FILE="$WORKER_DIR/phase-monitor-merge.json"
+if [[ ! -f "$MERGE_FILE" ]]; then
   emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
-    --reason "phase-pr.json missing at $PR_FILE"
+    --reason "phase-monitor-merge.json missing at $MERGE_FILE"
   exit 1
 fi
 
-MERGE_SHA="$(jq -r '.pr.mergeCommitSha // empty' "$PR_FILE" 2>/dev/null)"
+MERGE_SHA="$(jq -r '.pr.mergeCommitSha // empty' "$MERGE_FILE" 2>/dev/null)"
 if [[ -z "$MERGE_SHA" ]]; then
-  emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
-    --reason "phase-pr.json has empty .pr.mergeCommitSha"
-  exit 1
+  # Fall back to gh REST. Mirrors orchestrate-verify.sh:131-156. PR number
+  # comes from phase-pr.json (phase-monitor-merge.json does not record it).
+  PR_FILE="$WORKER_DIR/phase-pr.json"
+  PR_NUMBER=""
+  if [[ -f "$PR_FILE" ]]; then
+    PR_NUMBER="$(jq -r '.pr.number // empty' "$PR_FILE" 2>/dev/null)"
+  fi
+  if [[ -z "$PR_NUMBER" ]]; then
+    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+      --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and no PR number available for gh REST fallback"
+    exit 1
+  fi
+  REPO="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")"
+  if [[ -z "$REPO" ]]; then
+    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+      --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh repo view returned empty"
+    exit 1
+  fi
+  MERGE_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merge_commit_sha // empty' 2>/dev/null || echo "")"
+  if [[ -z "$MERGE_SHA" ]]; then
+    emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status failed \
+      --reason "phase-monitor-merge.json has empty .pr.mergeCommitSha and gh REST fallback also returned empty for pr#${PR_NUMBER}"
+    exit 1
+  fi
 fi
 
 # 2. Subscribe to deployment_status events for this SHA. The filter accepts any
