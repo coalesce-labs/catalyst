@@ -132,10 +132,25 @@ is performed.
 3. Invoke `/catalyst-dev:research-codebase` against the ticket's research question.
    That skill spawns parallel sub-agents, synthesizes findings, and writes the
    document. Do not duplicate its logic.
-4. Confirm the artifact exists at the expected path before continuing:
+4. Confirm the artifact exists at the expected path before continuing.
+   Two-step match (CTL-494) — try lowercase-tail first, then the wider
+   `*${TICKET}*.md` pattern with `nocaseglob` fallback so canonical
+   create-plan filenames (uppercase ticket + descriptive suffix) are
+   accepted alongside the phase-research prose convention:
    ```bash
-   RESEARCH_DOC=$(ls thoughts/shared/research/*-${TICKET,,}.md 2>/dev/null | tail -1)
-   [[ -f "$RESEARCH_DOC" ]] || {
+   shopt -s nullglob
+   RESEARCH_MATCHES=( thoughts/shared/research/*-${TICKET,,}.md )
+   if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
+     RESEARCH_MATCHES=( thoughts/shared/research/*${TICKET}*.md )
+     if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
+       shopt -s nocaseglob
+       RESEARCH_MATCHES=( thoughts/shared/research/*${TICKET}*.md )
+       shopt -u nocaseglob
+     fi
+   fi
+   shopt -u nullglob
+   RESEARCH_DOC="${RESEARCH_MATCHES[-1]:-}"
+   [[ -n "$RESEARCH_DOC" && -f "$RESEARCH_DOC" ]] || {
      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
        --phase "$PHASE" --ticket "$TICKET" --status failed \
        --reason "research_doc_not_written"

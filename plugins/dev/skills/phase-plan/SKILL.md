@@ -79,9 +79,20 @@ jq --arg ts "$TS" '.status = "running" | .updatedAt = $ts' "$SIGNAL_FILE" > "$TM
   && mv "$TMP" "$SIGNAL_FILE"
 
 # Prior-phase artifact: the research document. Dispatcher gates this via glob;
-# we re-read it here so we can fail loudly on race.
+# we re-read it here so we can fail loudly on race. Two-step match (CTL-494)
+# mirrors the dispatcher: lowercase-tail form first, wider *${TICKET}*.md
+# fallback with nocaseglob to also accept the canonical create-plan
+# filename convention (uppercase ticket + descriptive suffix).
 shopt -s nullglob
 RESEARCH_MATCHES=( thoughts/shared/research/*-${TICKET,,}.md )
+if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
+  RESEARCH_MATCHES=( thoughts/shared/research/*${TICKET}*.md )
+  if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
+    shopt -s nocaseglob
+    RESEARCH_MATCHES=( thoughts/shared/research/*${TICKET}*.md )
+    shopt -u nocaseglob
+  fi
+fi
 shopt -u nullglob
 if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
   echo "phase-plan: research document missing for $TICKET" >&2
@@ -126,10 +137,21 @@ research document as the input and operate non-interactively:
    asks for clarifications, answer from the research document; if the research
    document is silent on a point, default to the most conservative reasonable choice
    and record the assumption in the plan's "Open questions" section.
-3. Confirm the artifact exists:
+3. Confirm the artifact exists. Two-step match (CTL-494) — try lowercase-tail
+   first, then the wider `*${TICKET}*.md` pattern with `nocaseglob` fallback
+   so canonical create-plan filenames (uppercase ticket + descriptive
+   suffix) are accepted alongside the phase-plan prose convention:
    ```bash
    shopt -s nullglob
    PLAN_MATCHES=( thoughts/shared/plans/*-${TICKET,,}.md )
+   if [[ ${#PLAN_MATCHES[@]} -eq 0 ]]; then
+     PLAN_MATCHES=( thoughts/shared/plans/*${TICKET}*.md )
+     if [[ ${#PLAN_MATCHES[@]} -eq 0 ]]; then
+       shopt -s nocaseglob
+       PLAN_MATCHES=( thoughts/shared/plans/*${TICKET}*.md )
+       shopt -u nocaseglob
+     fi
+   fi
    shopt -u nullglob
    [[ ${#PLAN_MATCHES[@]} -gt 0 ]] || {
      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
