@@ -510,8 +510,255 @@ run "DB-fallback: session_metrics.input_tokens populated via ticket lookup" \
 run "DB-fallback: session_metrics.duration_ms populated via ticket lookup" \
   bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT duration_ms FROM session_metrics WHERE session_id='${SID_18}';\")\" = '75000' ]"
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Phase-agent mode tests (CTL-496) — `--phase <name>` sources cost from the
+# bg session JSONL via extract-cost-from-jsonl.sh instead of stream-json.
+# ───────────────────────────────────────────────────────────────────────────────
+
+PRICING="${REPO_ROOT}/plugins/dev/scripts/claude-pricing.json"
+BG_JOBS_DIR="${SCRATCH}/claude-jobs"
+mkdir -p "$BG_JOBS_DIR"
+export CATALYST_BG_JOBS_DIR="$BG_JOBS_DIR"
+
+# Build a phase-mode signal file at workers/<TICKET>/phase-<NAME>.json.
+# CTL-496 contract: bg_job_id (resolves bg state.json), catalystSessionId
+# (mirrors into session_metrics), ticket, phase, status.
+build_phase_signal() {
+  local out="$1" ticket="$2"; shift 2
+  local bg_job_id="" catalyst_sid=""
+  local phase_name
+  phase_name="$(basename "$out" .json)"
+  phase_name="${phase_name#phase-}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bg-job-id)            bg_job_id="$2"; shift 2 ;;
+      --catalyst-session-id)  catalyst_sid="$2"; shift 2 ;;
+      *) echo "build_phase_signal: unknown arg $1" >&2; return 1 ;;
+    esac
+  done
+  mkdir -p "$(dirname "$out")"
+  jq -n \
+    --arg ticket "$ticket" \
+    --arg phase "$phase_name" \
+    --arg bg "$bg_job_id" \
+    --arg sid "$catalyst_sid" \
+    '{
+      ticket: $ticket,
+      phase: $phase,
+      orchestrator: "orch-test",
+      status: "running",
+      startedAt: "2026-05-18T09:00:00Z",
+      updatedAt: "2026-05-18T09:30:00Z"
+    }
+    | if $bg != "" then .bg_job_id = $bg else . end
+    | if $sid != "" then .catalystSessionId = $sid else . end' > "$out"
+}
+
+# Build a fake ~/.claude/jobs/<id>/state.json so phase mode can resolve the
+# linkScanPath without requiring a real Claude CLI bg session.
+build_fake_bg_state() {
+  local bg_id="$1"; shift
+  local session_id="" link_scan_path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session-id)     session_id="$2"; shift 2 ;;
+      --link-scan-path) link_scan_path="$2"; shift 2 ;;
+      *) echo "build_fake_bg_state: unknown arg $1" >&2; return 1 ;;
+    esac
+  done
+  mkdir -p "${BG_JOBS_DIR}/${bg_id}"
+  jq -n \
+    --arg sid "$session_id" \
+    --arg lsp "$link_scan_path" \
+    '{state:"working", sessionId:$sid, linkScanPath:$lsp, daemonShort:$sid|.[0:8]}' \
+    > "${BG_JOBS_DIR}/${bg_id}/state.json"
+}
+
+# Build a JSONL at the specified path matching the Claude conversation schema
+# that extract-cost-from-jsonl.sh consumes.
+build_jsonl_at() {
+  local out="$1"; shift
+  local model="claude-opus-4-7" input=0 output=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --model)  model="$2"; shift 2 ;;
+      --input)  input="$2"; shift 2 ;;
+      --output) output="$2"; shift 2 ;;
+      *) echo "build_jsonl_at: unknown arg $1" >&2; return 1 ;;
+    esac
+  done
+  mkdir -p "$(dirname "$out")"
+  jq -nc \
+    --arg model "$model" \
+    --argjson input "$input" --argjson output "$output" \
+    '{type:"assistant",
+      message:{model:$model,stop_reason:"end_turn",
+        usage:{input_tokens:$input,output_tokens:$output,
+          cache_read_input_tokens:0,
+          cache_creation:{ephemeral_5m_input_tokens:0,ephemeral_1h_input_tokens:0}}}}' > "$out"
+}
+
+# Insert a session row for a specific skill_name (mirrors what catalyst-session.sh
+# start would create when invoked from the phase-agent prelude).
+build_fake_session_row() {
+  local sid="$1"; shift
+  local ticket="" skill=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --ticket) ticket="$2"; shift 2 ;;
+      --skill)  skill="$2"; shift 2 ;;
+      *) echo "build_fake_session_row: unknown arg $1" >&2; return 1 ;;
+    esac
+  done
+  sqlite3 "$CATALYST_DB" "INSERT INTO sessions
+    (session_id, ticket_key, skill_name, status, started_at, updated_at)
+    VALUES ('${sid}', '${ticket}', '${skill}', 'running',
+            '2026-05-18T09:00:00Z', '2026-05-18T09:00:00Z');"
+}
+
+# ─── Test 19: --phase resolves correct signal file path; signal.cost populated ─
+ORCH_DIR=$(setup_orch "orch-p1")
+init_test_db
+build_phase_signal "${ORCH_DIR}/workers/CTL-T1/phase-research.json" "CTL-T1" \
+  --bg-job-id "fake-bg-1" --catalyst-session-id "sess_test_research"
+build_fake_bg_state "fake-bg-1" --session-id "fake-claude-sess-1" \
+  --link-scan-path "${SCRATCH}/fake-cwd/fake-claude-sess-1.jsonl"
+build_jsonl_at "${SCRATCH}/fake-cwd/fake-claude-sess-1.jsonl" \
+  --model claude-opus-4-7 --input 1000 --output 500
+build_fake_session_row "sess_test_research" --ticket "CTL-T1" --skill "phase-research"
+
+"$HELPER" --orch "orch-p1" --ticket "CTL-T1" --phase "research" --orch-dir "$ORCH_DIR"
+run "phase: signal.cost.inputTokens populated" \
+  bash -c "[ \"\$(jq -r '.cost.inputTokens' '${ORCH_DIR}/workers/CTL-T1/phase-research.json')\" = '1000' ]"
+run "phase: signal.cost.outputTokens populated" \
+  bash -c "[ \"\$(jq -r '.cost.outputTokens' '${ORCH_DIR}/workers/CTL-T1/phase-research.json')\" = '500' ]"
+run "phase: signal.cost.model populated" \
+  bash -c "[ \"\$(jq -r '.cost.model' '${ORCH_DIR}/workers/CTL-T1/phase-research.json')\" = 'claude-opus-4-7' ]"
+run "phase: signal.cost.costUSD > 0" \
+  bash -c "[ \"\$(jq '.cost.costUSD > 0' '${ORCH_DIR}/workers/CTL-T1/phase-research.json')\" = 'true' ]"
+run "phase: flat signal file NOT created" \
+  bash -c "[ ! -f '${ORCH_DIR}/workers/CTL-T1.json' ]"
+
+# ─── Test 20: phase mode is idempotent ────────────────────────────────────────
+"$HELPER" --orch "orch-p1" --ticket "CTL-T1" --phase "research" --orch-dir "$ORCH_DIR"
+run "phase idempotent: inputTokens unchanged after re-roll" \
+  bash -c "[ \"\$(jq -r '.cost.inputTokens' '${ORCH_DIR}/workers/CTL-T1/phase-research.json')\" = '1000' ]"
+
+# ─── Test 21: phase mode aggregates across phases for state.workers[T].usage ──
+build_phase_signal "${ORCH_DIR}/workers/CTL-T1/phase-plan.json" "CTL-T1" \
+  --bg-job-id "fake-bg-2" --catalyst-session-id "sess_test_plan"
+build_fake_bg_state "fake-bg-2" --session-id "fake-claude-sess-2" \
+  --link-scan-path "${SCRATCH}/fake-cwd/fake-claude-sess-2.jsonl"
+build_jsonl_at "${SCRATCH}/fake-cwd/fake-claude-sess-2.jsonl" \
+  --model claude-opus-4-7 --input 2000 --output 1000
+build_fake_session_row "sess_test_plan" --ticket "CTL-T1" --skill "phase-plan"
+
+"$HELPER" --orch "orch-p1" --ticket "CTL-T1" --phase "plan" --orch-dir "$ORCH_DIR"
+run "phase agg: state.workers[CTL-T1].usage.inputTokens == 3000 (research+plan)" \
+  bash -c "[ \"\$(jq -r '.orchestrators[\"orch-p1\"].workers[\"CTL-T1\"].usage.inputTokens' '$CATALYST_STATE_FILE')\" = '3000' ]"
+run "phase agg: state.workers[CTL-T1].usage.outputTokens == 1500 (500+1000)" \
+  bash -c "[ \"\$(jq -r '.orchestrators[\"orch-p1\"].workers[\"CTL-T1\"].usage.outputTokens' '$CATALYST_STATE_FILE')\" = '1500' ]"
+
+# ─── Test 22: missing bg state.json → bg-state-missing action, exit 0 ─────────
+ORCH_DIR=$(setup_orch "orch-p2")
+build_phase_signal "${ORCH_DIR}/workers/CTL-T2/phase-research.json" "CTL-T2" \
+  --bg-job-id "no-such-bg"
+LOG="${SCRATCH}/orch-p2.stderr"
+"$HELPER" --orch "orch-p2" --ticket "CTL-T2" --phase "research" --orch-dir "$ORCH_DIR" -v 2>"$LOG" >/dev/null || true
+run "phase: bg-state-missing logged" \
+  bash -c "grep -q 'bg-state-missing' '$LOG'"
+run "phase: bg-state-missing leaves signal.cost null" \
+  bash -c "[ \"\$(jq -r '.cost' '${ORCH_DIR}/workers/CTL-T2/phase-research.json')\" = 'null' ]"
+
+# ─── Test 23: missing JSONL (linkScanPath) → jsonl-missing action, exit 0 ─────
+build_fake_bg_state "no-jsonl-bg" --session-id "x" --link-scan-path "/no/such/file"
+build_phase_signal "${ORCH_DIR}/workers/CTL-T2/phase-plan.json" "CTL-T2" \
+  --bg-job-id "no-jsonl-bg"
+LOG="${SCRATCH}/orch-p2-jsonl.stderr"
+"$HELPER" --orch "orch-p2" --ticket "CTL-T2" --phase "plan" --orch-dir "$ORCH_DIR" -v 2>"$LOG" >/dev/null || true
+run "phase: jsonl-missing logged" \
+  bash -c "grep -q 'jsonl-missing' '$LOG'"
+
+# ─── Test 24: session_metrics row updated via catalystSessionId from signal ────
+SID_19="sess_test_research"
+run "phase metrics: session_metrics.cost_usd > 0" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT cost_usd > 0 FROM session_metrics WHERE session_id='${SID_19}';\")\" = '1' ]"
+run "phase metrics: session_metrics.input_tokens populated" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT input_tokens FROM session_metrics WHERE session_id='${SID_19}';\")\" = '1000' ]"
+
+# ─── Test 25: DB fallback by ticket+skill_name when signal lacks catalystSessionId ─
+ORCH_DIR=$(setup_orch "orch-p3")
+init_test_db
+build_phase_signal "${ORCH_DIR}/workers/CTL-T3/phase-verify.json" "CTL-T3" \
+  --bg-job-id "fake-bg-3"  # no catalyst-session-id in signal
+build_fake_bg_state "fake-bg-3" --session-id "fake-claude-sess-3" \
+  --link-scan-path "${SCRATCH}/fake-cwd/fake-claude-sess-3.jsonl"
+build_jsonl_at "${SCRATCH}/fake-cwd/fake-claude-sess-3.jsonl" \
+  --model claude-opus-4-7 --input 100 --output 50
+build_fake_session_row "sess_test_verify" --ticket "CTL-T3" --skill "phase-verify"
+
+"$HELPER" --orch "orch-p3" --ticket "CTL-T3" --phase "verify" --orch-dir "$ORCH_DIR"
+run "phase DB-fallback: session_metrics.cost_usd > 0 via ticket+skill lookup" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT cost_usd > 0 FROM session_metrics WHERE session_id='sess_test_verify';\")\" = '1' ]"
+
+# ─── Test 26: DB fallback isolates phase by skill_name ────────────────────────
+# Two sessions for same ticket but different phases. phase=verify must NOT
+# mirror cost into the phase-research row.
+build_fake_session_row "sess_isolated_research" --ticket "CTL-T3" --skill "phase-research"
+# Sanity precondition: phase-research session_metrics is still empty
+run "phase isolation precondition: phase-research row absent" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' 'SELECT COUNT(*) FROM session_metrics WHERE session_id=\"sess_isolated_research\";')\" = '0' ]"
+# Now do a phase-verify roll on a fresh signal; this should NOT write to the
+# research row.
+build_phase_signal "${ORCH_DIR}/workers/CTL-T3/phase-verify.json" "CTL-T3" \
+  --bg-job-id "fake-bg-3"  # re-create signal (.cost now null again)
+"$HELPER" --orch "orch-p3" --ticket "CTL-T3" --phase "verify" --orch-dir "$ORCH_DIR"
+run "phase isolation: phase-verify roll did not touch phase-research row" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' 'SELECT COUNT(*) FROM session_metrics WHERE session_id=\"sess_isolated_research\";')\" = '0' ]"
+
+# ─── Test 27: verbose phase action codes ──────────────────────────────────────
+ORCH_DIR=$(setup_orch "orch-p4")
+build_phase_signal "${ORCH_DIR}/workers/CTL-T4/phase-research.json" "CTL-T4" \
+  --bg-job-id "fake-bg-4" --catalyst-session-id "sess_p4_research"
+build_fake_bg_state "fake-bg-4" --session-id "fake-claude-sess-4" \
+  --link-scan-path "${SCRATCH}/fake-cwd/fake-claude-sess-4.jsonl"
+build_jsonl_at "${SCRATCH}/fake-cwd/fake-claude-sess-4.jsonl" \
+  --model claude-opus-4-7 --input 1000 --output 500
+LOG="${SCRATCH}/orch-p4.stderr"
+"$HELPER" --orch "orch-p4" --ticket "CTL-T4" --phase "research" --orch-dir "$ORCH_DIR" -v 2>"$LOG" >/dev/null || true
+run "phase verbose: wrote-cost on successful roll" \
+  bash -c "grep -q 'roll-usage\\[ticket=CTL-T4,phase=research\\]: wrote-cost' '$LOG'"
+# Second invocation → already-rolled
+LOG="${SCRATCH}/orch-p4-2.stderr"
+"$HELPER" --orch "orch-p4" --ticket "CTL-T4" --phase "research" --orch-dir "$ORCH_DIR" -v 2>"$LOG" >/dev/null || true
+run "phase verbose: already-rolled on second invocation" \
+  bash -c "grep -q 'roll-usage\\[ticket=CTL-T4,phase=research\\]: already-rolled' '$LOG'"
+# Signal missing
+LOG="${SCRATCH}/orch-p4-3.stderr"
+"$HELPER" --orch "orch-p4" --ticket "CTL-NO-SIG" --phase "research" --orch-dir "$ORCH_DIR" -v 2>"$LOG" >/dev/null || true
+run "phase verbose: signal-missing when no signal file" \
+  bash -c "grep -q 'roll-usage\\[ticket=CTL-NO-SIG,phase=research\\]: signal-missing' '$LOG'"
+
+# ─── Test 28: zero-cost JSONL → zero-cost-retry, signal.cost stays null ───────
+# A bg session that started but hasn't produced any assistant events yet
+# will have an empty JSONL → extractor emits costUSD=0. Don't poison signal.
+ORCH_DIR=$(setup_orch "orch-p5")
+build_phase_signal "${ORCH_DIR}/workers/CTL-T5/phase-research.json" "CTL-T5" \
+  --bg-job-id "fake-bg-5"
+build_fake_bg_state "fake-bg-5" --session-id "fake-claude-sess-5" \
+  --link-scan-path "${SCRATCH}/fake-cwd/empty.jsonl"
+: > "${SCRATCH}/fake-cwd/empty.jsonl"
+mkdir -p "${SCRATCH}/fake-cwd"
+LOG="${SCRATCH}/orch-p5.stderr"
+"$HELPER" --orch "orch-p5" --ticket "CTL-T5" --phase "research" --orch-dir "$ORCH_DIR" -v 2>"$LOG" >/dev/null || true
+run "phase: zero-cost JSONL → zero-cost-retry" \
+  bash -c "grep -q 'zero-cost-retry' '$LOG'"
+run "phase: zero-cost-retry leaves signal.cost null" \
+  bash -c "[ \"\$(jq -r '.cost' '${ORCH_DIR}/workers/CTL-T5/phase-research.json')\" = 'null' ]"
+
 # Reset env so subsequent (none here) tests don't inherit the override.
 unset CATALYST_DB_FILE
+unset CATALYST_BG_JOBS_DIR
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
