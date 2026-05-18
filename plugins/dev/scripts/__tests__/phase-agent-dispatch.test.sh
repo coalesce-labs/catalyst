@@ -179,6 +179,61 @@ assert_eq "2" "$RC" "exit code 2 when prior artifact missing"
 assert_eq "refused" "$REFUSED_STATUS" "stdout JSON status = refused"
 assert_eq "no" "$SIGNAL_EXISTS" "no signal file written when refused"
 
+# CTL-494 Phase 1: refusal must also emit phase.<name>.failed.<TICKET> to the
+# event log so the orchestrator wakes in seconds instead of waiting on the
+# 16-minute state-json-stale path.
+export CATALYST_DIR="${TEST_DIR}/catalyst-events-root"
+mkdir -p "${CATALYST_DIR}/events"
+
+# Re-run the dispatch with the isolated CATALYST_DIR active.
+rm -f "$SIGNAL_RESEARCH"  # ensure refused, not idempotent
+"$DISPATCH" --phase research --ticket CTL-100 \
+  --orch-dir "$ORCH_DIR" --orch-id orch-test \
+  >"${TEST_DIR}/research2.out" 2>/dev/null
+RC2=$?
+assert_eq "2" "$RC2" "refusal still exits 2 with isolated CATALYST_DIR"
+
+# Find the JSONL event log (one file per month).
+EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+if [[ -z "$EVENT_FILE" ]]; then
+  fail "event log was not created on refusal"
+else
+  pass "event log was created on refusal"
+  EVENT_LINE=$(grep '"phase.research.failed.CTL-100"' "$EVENT_FILE" | head -1)
+  if [[ -z "$EVENT_LINE" ]]; then
+    fail "no phase.research.failed.CTL-100 event in log"
+  else
+    pass "phase.research.failed.CTL-100 event present in log"
+    EVENT_REASON=$(echo "$EVENT_LINE" | jq -r '.body.payload.failure_reason // empty')
+    assert_eq "prior_artifact_missing" "$EVENT_REASON" \
+      "failed event payload carries failure_reason=prior_artifact_missing"
+  fi
+fi
+
+# Refusal must still NOT write a signal file (existing contract preserved).
+if [[ -f "$SIGNAL_RESEARCH" ]]; then
+  fail "signal file written despite refusal"
+else
+  pass "signal file still not written when refused (with event log active)"
+fi
+
+# CTL-494 Phase 1: --dry-run refusal must NOT emit to the event log.
+rm -f "${CATALYST_DIR}/events/"*.jsonl
+"$DISPATCH" --phase research --ticket CTL-100 \
+  --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+  >"${TEST_DIR}/research-dry.out" 2>/dev/null
+RC_DRY=$?
+assert_eq "2" "$RC_DRY" "--dry-run refusal still exits 2"
+DRY_EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+if [[ -n "$DRY_EVENT_FILE" ]]; then
+  fail "--dry-run refusal should not emit event (got $DRY_EVENT_FILE)"
+else
+  pass "--dry-run refusal does not emit event"
+fi
+
+# Clean up env for subsequent tests.
+unset CATALYST_DIR
+
 # ─── Test 6: dispatcher resolves model from config (default + override paths)
 echo ""
 echo "Test 6: dispatcher resolves model from config (default and override)"
