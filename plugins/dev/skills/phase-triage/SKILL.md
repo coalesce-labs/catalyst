@@ -114,20 +114,27 @@ acronyms_json() {
   local txt="$1"
   jq -nc --arg t "$txt" '
     [
-      {a:"PR",  e:"Pull Request"},
-      {a:"CI",  e:"Continuous Integration"},
-      {a:"CLI", e:"Command-Line Interface"},
-      {a:"API", e:"Application Programming Interface"},
-      {a:"MVP", e:"Minimum Viable Product"},
-      {a:"TDD", e:"Test-Driven Development"},
-      {a:"E2E", e:"End-to-End"},
-      {a:"SHA", e:"Secure Hash Algorithm"},
-      {a:"UUID",e:"Universally Unique Identifier"},
-      {a:"JSON",e:"JavaScript Object Notation"},
-      {a:"OTel",e:"OpenTelemetry"},
-      {a:"OTLP",e:"OpenTelemetry Line Protocol"}
+      {a:"PR",     e:"Pull Request"},
+      {a:"CI",     e:"Continuous Integration"},
+      {a:"CLI",    e:"Command-Line Interface"},
+      {a:"API",    e:"Application Programming Interface"},
+      {a:"MVP",    e:"Minimum Viable Product"},
+      {a:"TDD",    e:"Test-Driven Development"},
+      {a:"E2E",    e:"End-to-End"},
+      {a:"SHA",    e:"Secure Hash Algorithm"},
+      {a:"UUID",   e:"Universally Unique Identifier"},
+      {a:"JSON",   e:"JavaScript Object Notation"},
+      {a:"OTEL",   e:"OpenTelemetry"},
+      {a:"OTLP",   e:"OpenTelemetry Line Protocol"},
+      {a:"PromQL", e:"Prometheus Query Language"},
+      {a:"bg",     e:"background"},
+      {a:"HUD",    e:"Heads-Up Display"},
+      {a:"ADR",    e:"Architecture Decision Record"}
     ]
-    | map(.a as $acr | select($t | test("\\b" + $acr + "\\b")))
+    | ($t | ascii_downcase) as $tl
+    | map(.a as $acr
+          | (.a | ascii_downcase) as $acl
+          | select($tl | test("\\b" + $acl + "\\b")))
     | map({acronym: .a, expansion: .e})
   '
 }

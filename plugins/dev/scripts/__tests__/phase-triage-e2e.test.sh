@@ -185,6 +185,39 @@ EVENT_CLASS="$(jq -r '.body.payload.classification' "$CASE_DIR/events.jsonl" 2>/
 assert_nonempty "happy: event payload includes classification" "$EVENT_CLASS"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Case 1b: all-caps + project-vocab acronyms (CTL-498 Bug 1).
+# Asserts the case-insensitive match and the extended dictionary.
+
+FIXTURE_ACRONYMS="$TMPROOT/fixture-acronyms.json"
+cat > "$FIXTURE_ACRONYMS" <<'EOF'
+{
+  "identifier": "CTL-9998",
+  "title": "Wire OTEL exporter and PromQL queries",
+  "description": "Trace the bg job via OTEL spans and surface them in the HUD. Capture metrics with PromQL; document the decision in an ADR.",
+  "labels": {"nodes": []}
+}
+EOF
+
+CASE_DIR_ACR="$(run_case acronyms "$FIXTURE_ACRONYMS" CTL-9998)"
+
+assert_eq "acronyms: exit code 0" 0 "$(cat "$CASE_DIR_ACR/exit-code")"
+
+TRIAGE_ACR="$CASE_DIR_ACR/worker/triage.json"
+assert_file_exists "acronyms: triage.json created" "$TRIAGE_ACR"
+
+if [ -f "$TRIAGE_ACR" ]; then
+  # Build a space-separated string of acronyms for substring assertions.
+  ACR_LIST="$(jq -r '.acronyms_expanded[].acronym' "$TRIAGE_ACR" | tr '\n' ' ')"
+
+  for needed in OTEL PromQL bg HUD ADR; do
+    case " $ACR_LIST " in
+      *" $needed "*) ok "acronyms: detected $needed" ;;
+      *)             fail "acronyms: missing $needed" "got: '$ACR_LIST'" ;;
+    esac
+  done
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Case 2: explicit bug classification + small scope
 
 FIXTURE_BUG="$TMPROOT/fixture-bug.json"
