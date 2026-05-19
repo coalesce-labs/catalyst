@@ -73,10 +73,14 @@ if [[ -x "$SESSION_SCRIPT" ]]; then
   export CATALYST_SESSION_ID
 fi
 
-# Mark signal file running.
+# Mark signal file running + persist catalystSessionId (CTL-496).
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TMP="${SIGNAL_FILE}.tmp.$$"
-jq --arg ts "$TS" '.status = "running" | .updatedAt = $ts' "$SIGNAL_FILE" > "$TMP" \
+jq --arg ts "$TS" --arg sid "${CATALYST_SESSION_ID:-}" '
+  .status = "running"
+  | .updatedAt = $ts
+  | if $sid != "" then .catalystSessionId = $sid else . end
+' "$SIGNAL_FILE" > "$TMP" \
   && mv "$TMP" "$SIGNAL_FILE"
 
 # Read the prior-phase artifact (triage.json). The dispatcher already gated this,

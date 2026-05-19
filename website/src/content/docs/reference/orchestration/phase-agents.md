@@ -261,20 +261,32 @@ documented per-run rehydration tax (~$2.25) plus coordinator overhead accounts f
 gap. The order-of-magnitude is right; the per-phase split still needs a phase-agents run to
 validate row-by-row.
 
-:::note[Validation status (2026-05-17)] **CTL-455 fix is mechanically verified.** Running
-`plugins/dev/scripts/orchestrate-roll-usage.sh -v` against any completed worker writes
-`signal.cost` and a real `session_metrics` row with `cost_usd > 0`. Confirmed against 7 sibling
-workers; see
-[`thoughts/shared/research/2026-05-17-ctl-485-phase-agent-cost-validation.md`](https://github.com/coalesce-labs/catalyst/blob/main/thoughts/shared/research/2026-05-17-ctl-485-phase-agent-cost-validation.md).
+:::note[Validation status (2026-05-18)] **End-to-end cost capture for `phase-agents` mode is
+landed (CTL-496).** `update-dashboard.sh --roll-usage` sweeps both `workers/<TICKET>.json`
+(legacy) and `workers/<TICKET>/phase-<NAME>.json` (phase-agents) on every monitor wake-up via
+the CTL-487 wiring, populating `signal.cost`, `state.workers[T].usage` (aggregated across phases
+with `+=`), `state.usage`, and per-phase `session_metrics` rows.
 
-Two gaps remain, tracked separately:
+Phase-mode USAGE is sourced from the bg session conversation JSONL
+(`~/.claude/projects/<wt>/<sid>.jsonl`) by
+[`extract-cost-from-jsonl.sh`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/extract-cost-from-jsonl.sh)
+because `claude --bg` does not emit the stream-json `result` event that legacy roll-usage
+parses. The extractor reads per-message `usage` blocks, splits cache_creation by 5m/1h TTL, and
+applies per-model pricing from
+[`plugins/dev/scripts/claude-pricing.json`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/claude-pricing.json)
+(version-pinned, manually updated when Anthropic publishes rate changes).
 
-- [CTL-487](https://linear.app/coalesce-labs/issue/CTL-487) — the orchestrator monitor loop is
-  not currently invoking `orchestrate-roll-usage.sh` per worker per wake-up. Until that lands,
-  the CTL-455 fix only produces data when invoked manually.
+`session_metrics` attribution is by `session_id`. Each phase agent starts its own
+`catalyst-session.sh` row with `skill_name = phase-<name>`, and the prelude persists
+`catalystSessionId` into the phase signal so roll-usage mirrors cost into the right row without
+DB heuristics. A `ticket_key + skill_name` fallback handles in-flight runs that predate the
+prelude change.
+
+Open follow-up:
+
 - [CTL-488](https://linear.app/coalesce-labs/issue/CTL-488) — per-phase rows in the projection
-  table still need an end-to-end `dispatchMode: "phase-agents"` run to validate row-by-row.
-  Blocked on CTL-487. :::
+  table still need an end-to-end `dispatchMode: "phase-agents"` run to validate row-by-row now
+  that the data path is reliable. This is now a data-collection task, not a wiring gap. :::
 
 ## Observing a run
 
@@ -325,12 +337,14 @@ For the first real run against a low-risk ticket:
    { "catalyst": { "orchestration": { "dispatchMode": "phase-agents" } } }
    ```
 3. **Verify `session_metrics` populates** with a single test session before committing to a full
-   run. The CTL-455 fix populates the table via `orchestrate-roll-usage.sh`, which the
-   orchestrator's monitor loop calls per worker per wake-up. If `cost_usd` is still `0` after a
-   worker reaches `status: "done"`, check `${ORCH_DIR}/.roll-usage.log` — empty means the
-   invocation never happened (see [CTL-487](https://linear.app/coalesce-labs/issue/CTL-487)) and
-   you can manually flush by running `orchestrate-roll-usage.sh --orch <orch-id> --ticket
-   <TICKET> -v` to validate the data path independently.
+   run. The orchestrator's monitor loop calls `update-dashboard.sh --roll-usage` on every
+   wake-up, which sweeps both `workers/<TICKET>.json` (legacy) and `workers/<TICKET>/phase-<NAME>.json`
+   (phase-agents) and writes through to signal + state + DB. If `cost_usd` is still `0` after a
+   phase reaches `status: "done"`, check `${ORCH_DIR}/.roll-usage.log` — `bg-state-missing` or
+   `jsonl-missing` action codes point at a stale or relocated `~/.claude/jobs/<bg>/state.json`;
+   `extract-failed` points at the `extract-cost-from-jsonl.sh` script. You can manually flush a
+   single phase with `orchestrate-roll-usage.sh --orch <orch-id> --ticket <TICKET> --phase
+   <NAME> -v` to validate the data path independently.
 4. **Dispatch the orchestrator**:
    ```bash
    /catalyst-dev:orchestrate <TICKET> --auto-merge --max-parallel 1

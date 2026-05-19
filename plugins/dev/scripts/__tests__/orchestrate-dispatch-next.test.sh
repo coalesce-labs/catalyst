@@ -43,6 +43,7 @@ EOF
   echo "ORCH_ID=${CATALYST_ORCHESTRATOR_ID:-}"
   echo "COMMS=${CATALYST_COMMS_CHANNEL:-}"
   echo "SESSION=${CATALYST_SESSION_ID:-}"
+  echo "OTEL=${OTEL_RESOURCE_ATTRIBUTES:-}"
   echo "args: $*"
 } >> "$CLAUDE_LOG"
 sleep 30 &
@@ -583,6 +584,36 @@ RC=$?
 [ "$RC" = "0" ] && pass "explicit --phase overrides legacy mode" || fail "exit 0" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
 grep -q -- "--phase implement" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch called with --phase implement" || fail "phase-agent-dispatch called with --phase implement" "log: $(cat "$PHASE_DISPATCH_LOG")"
 [ ! -s "$CLAUDE_LOG" ] && pass "claude (oneshot) NOT invoked when --phase explicit" || fail "claude NOT invoked when --phase explicit"
+scratch_teardown
+
+echo "test 31 (CTL-495): legacy oneshot path tags OTEL with task.type=oneshot"
+scratch_setup
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+OUT=$(run_dispatch 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "legacy dispatch exit 0" || fail "legacy dispatch exit 0" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+grep -q "OTEL=.*task.type=oneshot" "$CLAUDE_LOG" \
+  && pass "legacy claude inherits OTEL with task.type=oneshot" \
+  || fail "legacy claude OTEL has task.type=oneshot" "log: $(cat "$CLAUDE_LOG")"
+scratch_teardown
+
+echo "test 32 (CTL-495): phase-agent path does NOT pre-set task.type in dispatch-next"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
+make_worktree "demo" "T-1"
+# Phase-agent path delegates to phase-agent-dispatch which owns its own OTEL
+# composition; dispatch-next must NOT pre-tag (would idempotency-block the
+# phase-specific value). We assert the stub-phase-agent-dispatch was invoked
+# without dispatch-next having written OTEL_RESOURCE_ATTRIBUTES first.
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --phase "implement" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "phase dispatch exit 0" || fail "phase dispatch exit 0" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+# CLAUDE_LOG should be empty (phase path delegates to phase-agent-dispatch stub).
+[ ! -s "$CLAUDE_LOG" ] && pass "phase path skips legacy claude stub" || fail "phase path skips legacy claude stub"
+# phase-agent-dispatch stub was called — that helper does its own OTEL work.
+grep -q -- "--phase implement" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch invoked" || fail "phase-agent-dispatch invoked"
 scratch_teardown
 
 echo ""

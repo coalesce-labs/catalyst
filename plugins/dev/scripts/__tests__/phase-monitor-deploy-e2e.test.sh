@@ -83,16 +83,59 @@ write_deploy_event() {
 
 run_case() {
   local case_name="$1" sha="$2" deploy_state="$3" canary_status="$4" \
-        timeout_sec="$5" emit_event="$6"
+        timeout_sec="$5" emit_event="$6" \
+        signal_sha="${7-__USE_SHA__}" write_pr="${8:-no}" gh_sha="${9-__NO_STUB__}"
+
+  # signal_sha defaults to "$sha" when caller omits it; pass an explicit ""
+  # to force an empty signal (Phase 2 fallback tests).
+  if [ "$signal_sha" = "__USE_SHA__" ]; then
+    signal_sha="$sha"
+  fi
 
   local case_dir="$TMPROOT/$case_name"
   local worker="$case_dir/worker"
   mkdir -p "$worker" "$case_dir/bin"
 
-  # Fixture phase-pr.json
-  jq -nc --arg sha "$sha" '{
-    pr: {number: 1234, url: "https://example.com/pr/1234", mergeCommitSha: $sha}
-  }' > "$worker/phase-pr.json"
+  # Fixture phase-monitor-merge.json (primary input for phase-monitor-deploy).
+  jq -nc --arg sha "$signal_sha" '{
+    pr: {
+      mergedAt: "2026-05-18T22:00:00Z",
+      ciStatus: "merged",
+      mergeCommitSha: $sha
+    }
+  }' > "$worker/phase-monitor-merge.json"
+
+  # Optionally fixture phase-pr.json for the REST fallback path (Phase 2).
+  if [ "$write_pr" = "yes" ]; then
+    jq -nc '{
+      pr: {number: 1234, url: "https://example.com/pr/1234"}
+    }' > "$worker/phase-pr.json"
+  fi
+
+  # Stub `gh` on PATH when caller wants the fallback path exercised
+  # deterministically. Pass gh_sha="" to stub with an empty merge_commit_sha
+  # (Case 6); pass a non-empty SHA to stub with that SHA (Case 5); omit the
+  # argument entirely (sentinel __NO_STUB__) to skip the stub.
+  #
+  # The SKILL body calls `gh repo view --json X --jq '.X'` and `gh api ... --jq '.X'`,
+  # so the stub returns the scalar value directly (mimicking what --jq would emit).
+  if [ "$gh_sha" != "__NO_STUB__" ]; then
+    cat > "$case_dir/bin/gh" <<EOF
+#!/usr/bin/env bash
+# Minimal gh stub for phase-monitor-deploy fallback path. Returns scalar
+# strings (not JSON) to mimic gh's --jq scalar extraction.
+case "\$*" in
+  *"repo view"*)
+    printf '%s\n' "owner/repo"
+    ;;
+  *"api repos/"*"/pulls/"*)
+    printf '%s\n' "$gh_sha"
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+    chmod +x "$case_dir/bin/gh"
+  fi
 
   local events_file="$case_dir/events.jsonl"
   : > "$events_file"  # create empty so wait-for sees no history
@@ -212,10 +255,10 @@ assert_eq "skipped: emitted skipped event" \
   "phase.monitor-deploy.skipped.CTL-9999" "$SKIP_EVENT"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Case 4: phase-pr.json missing → failed event + non-zero
+# Case 4: phase-monitor-merge.json missing → failed event + non-zero
 
 MISS_DIR="$TMPROOT/missing"
-mkdir -p "$MISS_DIR/worker"  # but NO phase-pr.json
+mkdir -p "$MISS_DIR/worker"  # but NO phase-monitor-merge.json
 
 PATH="$PATH" \
 TICKET=CTL-8888 \
@@ -228,15 +271,72 @@ PHASE_EMIT_HELPER="$EMIT_HELPER" \
 MISS_EXIT=$?
 
 if [ "$MISS_EXIT" -ne 0 ]; then
-  ok "missing-pr: exits non-zero when phase-pr.json is absent"
+  ok "missing-merge: exits non-zero when phase-monitor-merge.json is absent"
 else
-  fail "missing-pr: exit code" "expected non-zero, got $MISS_EXIT"
+  fail "missing-merge: exit code" "expected non-zero, got $MISS_EXIT"
 fi
 
 MISS_EVENT="$(jq -r '.attributes."event.name"' "$MISS_DIR/events.jsonl" 2>/dev/null \
               | tail -1)"
-assert_eq "missing-pr: emits failed event" \
+assert_eq "missing-merge: emits failed event" \
   "phase.monitor-deploy.failed.CTL-8888" "$MISS_EVENT"
+
+# Failure reason should cite the new file, not phase-pr.json. The emit helper
+# stores the --reason text in body.message of the canonical event line.
+MISS_REASON="$(jq -r '.body.message // empty' \
+              "$MISS_DIR/events.jsonl" 2>/dev/null | tail -1)"
+case "$MISS_REASON" in
+  *phase-monitor-merge.json*) ok "missing-merge: failure reason cites phase-monitor-merge.json" ;;
+  *) fail "missing-merge: failure reason" "expected reason to mention phase-monitor-merge.json, got: $MISS_REASON" ;;
+esac
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 5: phase-monitor-merge.json present but .pr.mergeCommitSha empty →
+#         skill falls back to `gh api repos/.../pulls/<n>` and proceeds.
+#
+# Args: case=fallback, sha-for-deploy-event=fallbeef, deploy=success,
+#       canary=success, timeout=5s, emit=yes,
+#       signal_sha=""  (empty in signal file — triggers fallback),
+#       write_pr=yes   (so fallback can read .pr.number from phase-pr.json),
+#       gh_sha=fallbeef (what the stubbed `gh api` returns).
+
+CASE_DIR5="$(run_case fallback fallbeef success success 5 yes "" yes fallbeef)"
+
+EXIT5="$(cat "$CASE_DIR5/exit-code")"
+assert_eq "fallback: exit code 0" 0 "$EXIT5"
+
+if [ -f "$CASE_DIR5/worker/phase-monitor-deploy.json" ]; then
+  DSHA5="$(jq -r '.deploy_sha' "$CASE_DIR5/worker/phase-monitor-deploy.json")"
+  assert_eq "fallback: deploy_sha came from gh REST fallback" \
+    "fallbeef" "$DSHA5"
+fi
+
+CMPL5="$(jq -r '.attributes."event.name"' "$CASE_DIR5/events.jsonl" \
+         | tail -1)"
+assert_eq "fallback: emitted complete event after fallback" \
+  "phase.monitor-deploy.complete.CTL-9999" "$CMPL5"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 6: signal empty AND gh fallback also returns empty → still fails clean.
+#
+# write_pr=yes so the fallback gets a PR number; gh_sha="" stubs gh to return
+# {merge_commit_sha: ""} so the fallback resolves to empty too.
+
+CASE_DIR6="$(run_case fallback-fail "" success success 1 no "" yes "")"
+
+EXIT6="$(cat "$CASE_DIR6/exit-code")"
+if [ "$EXIT6" -ne 0 ]; then
+  ok "fallback-fail: exits non-zero when both signal and gh return empty"
+else
+  fail "fallback-fail: exit code" "expected non-zero, got $EXIT6"
+fi
+
+REASON6="$(jq -r '.body.message // empty' \
+          "$CASE_DIR6/events.jsonl" 2>/dev/null | tail -1)"
+case "$REASON6" in
+  *gh*|*REST*|*fallback*|*empty*) ok "fallback-fail: failure reason mentions fallback path" ;;
+  *) fail "fallback-fail: reason" "expected reason to mention gh/REST/fallback/empty, got: $REASON6" ;;
+esac
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary

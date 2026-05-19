@@ -263,5 +263,9 @@ if [[ "$LAUNCH" == true ]]; then
   log ""
   log "${GREEN}Launching claude in ${DISPLAY_PATH}...${NC}"
   cd "$WORKTREE_PATH"
+  # CTL-495: tag OTEL stream as orchestrate so Grafana cost can be sliced.
+  # shellcheck source=lib/task-type.sh
+  . "${SCRIPT_DIR}/lib/task-type.sh"
+  __catalyst_append_task_type "orchestrate"
   exec claude "/catalyst-dev:orchestrate ${TICKET_ARGS}"
 fi

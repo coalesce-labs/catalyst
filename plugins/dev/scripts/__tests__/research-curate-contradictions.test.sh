@@ -447,6 +447,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# CTL-495: contradict.sh tags OTEL with task.type=research-curate-contradict
+# ---------------------------------------------------------------------------
+MOCK_LOG_DIR_TT="$SCRATCH/task-type"
+mkdir -p "$MOCK_LOG_DIR_TT"
+FIXTURE_TT="$MOCK_LOG_DIR_TT/response.json"
+make_fixture_json "$FIXTURE_TT" "doc-a" "doc-b"
+MOCK_TT="$MOCK_LOG_DIR_TT/llm.sh"
+# Custom mock that captures OTEL_RESOURCE_ATTRIBUTES from its inherited env.
+cat > "$MOCK_TT" <<EOF
+#!/usr/bin/env bash
+# Mock LLM that records the inherited OTEL_RESOURCE_ATTRIBUTES so the test
+# can assert contradict.sh tagged task.type before invoking the LLM.
+cat >/dev/null  # drain stdin
+echo "\${OTEL_RESOURCE_ATTRIBUTES:-}" >> "${MOCK_TT}.otel.log"
+cat "$FIXTURE_TT"
+EOF
+chmod +x "$MOCK_TT"
+
+printf '%s\n' "$CLUSTERS1" \
+  | bash "$CONTRADICT" --llm-cmd "$MOCK_TT" --inventory-dir "$FIX1" \
+       >/dev/null 2>"$MOCK_LOG_DIR_TT/stderr.log" || true
+
+if grep -q 'task.type=research-curate-contradict' "${MOCK_TT}.otel.log" 2>/dev/null; then
+  ok "contradict.sh: LLM inherits OTEL_RESOURCE_ATTRIBUTES with task.type=research-curate-contradict"
+else
+  fail "contradict.sh: task.type=research-curate-contradict in env" \
+    "got: $(cat "${MOCK_TT}.otel.log" 2>/dev/null || echo MISSING)"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

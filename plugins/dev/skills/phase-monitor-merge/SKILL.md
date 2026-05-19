@@ -81,9 +81,14 @@ REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || ec
 
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TMP="${SIGNAL_FILE}.tmp.$$"
-jq --arg ts "$TS" --argjson pr "$PR_NUMBER" \
-  '.status = "running" | .updatedAt = $ts | .pr = {number: $pr}' \
-  "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+# CTL-496: persist catalystSessionId so orchestrate-roll-usage --phase can
+# attribute cost to the right session_metrics row.
+jq --arg ts "$TS" --argjson pr "$PR_NUMBER" --arg sid "${CATALYST_SESSION_ID:-}" '
+  .status = "running"
+  | .updatedAt = $ts
+  | .pr = {number: $pr}
+  | if $sid != "" then .catalystSessionId = $sid else . end
+' "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
 ```
 
 ## /goal condition

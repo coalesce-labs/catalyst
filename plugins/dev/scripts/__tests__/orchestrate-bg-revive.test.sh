@@ -52,6 +52,7 @@ EOF
   echo "args: $*"
   echo "cwd=$(pwd)"
   echo "ORCH_DIR=${CATALYST_ORCHESTRATOR_DIR:-}"
+  echo "OTEL=${OTEL_RESOURCE_ATTRIBUTES:-}"
 } >> "$CLAUDE_LOG"
 # Detect --bg presence
 HAS_BG=0
@@ -187,6 +188,37 @@ write_stream_init "T-5" "sess-5-abc"
   > "${SCRATCH}/out" 2>"${SCRATCH}/err"
 NEW_BG=$(jq -r '.bg_job_id' "${ORCH_DIR}/workers/T-5/phase-research.json")
 [ -n "$NEW_BG" ] && [ "$NEW_BG" != "bg-OLD" ] && pass "per-phase bg_job_id updated to new id" || fail "per-phase bg_job_id updated to new id" "got: $NEW_BG (was bg-OLD)"
+scratch_teardown
+
+# ─── Test 6 (CTL-495): revived session inherits task.type=phase-<phase> OTEL
+echo "test 6 (CTL-495): revived claude --bg inherits task.type=phase-<phase>"
+scratch_setup
+make_phase_signal "T-6" "implement" "implementing" "bg-old-6" "$DEAD_PID"
+write_stream_init "T-6" "sess-6-abc"
+"$REVIVE" --orch-dir "$ORCH_DIR" --orch-id "demo" --stale-heartbeat-seconds 0 \
+  > "${SCRATCH}/out" 2>"${SCRATCH}/err"
+grep -q "OTEL=.*task.type=phase-implement" "$CLAUDE_LOG" \
+  && pass "claude inherits task.type=phase-implement (revive path)" \
+  || fail "claude OTEL has task.type=phase-implement" "log: $(cat "$CLAUDE_LOG")"
+scratch_teardown
+
+# ─── Test 7 (CTL-495): each revive iteration tags with its own active phase
+echo "test 7 (CTL-495): per-worker active phase determines task.type"
+scratch_setup
+make_phase_signal "T-7a" "research" "researching" "bg-old-7a" "$DEAD_PID"
+make_phase_signal "T-7b" "verify"   "verifying"   "bg-old-7b" "$DEAD_PID"
+write_stream_init "T-7a" "sess-7a"
+write_stream_init "T-7b" "sess-7b"
+"$REVIVE" --orch-dir "$ORCH_DIR" --orch-id "demo" --stale-heartbeat-seconds 0 \
+  > "${SCRATCH}/out" 2>"${SCRATCH}/err"
+LOG=$(cat "$CLAUDE_LOG")
+# Both task.types should appear at least once (one per worker iteration).
+echo "$LOG" | grep -q "task.type=phase-research" \
+  && pass "research worker tagged task.type=phase-research" \
+  || fail "research worker tagged task.type=phase-research"
+echo "$LOG" | grep -q "task.type=phase-verify" \
+  && pass "verify worker tagged task.type=phase-verify" \
+  || fail "verify worker tagged task.type=phase-verify"
 scratch_teardown
 
 echo ""
