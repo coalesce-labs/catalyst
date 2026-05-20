@@ -657,7 +657,9 @@ export function handleOrchestratorTerminated(event) {
 
 // Handle agent.checkin: store identity and auto-derive pr_lifecycle if claimed_pr is set.
 export function handleAgentCheckin(event) {
-  const d = event.detail ?? {};
+  // CTL-360: read the payload shape-agnostically — getEventPayload accepts both
+  // the legacy flat { detail } shape and the canonical { body.payload } envelope.
+  const d = getEventPayload(event);
   const sessionId = d.session_id;
   if (!sessionId) return;
 
@@ -723,7 +725,8 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, rep
 }
 
 export function handleAgentCheckout(event) {
-  const d = event.detail ?? {};
+  // CTL-360: read the payload shape-agnostically (see handleAgentCheckin).
+  const d = getEventPayload(event);
   const sessionId = d.session_id;
   if (!sessionId) return;
 
