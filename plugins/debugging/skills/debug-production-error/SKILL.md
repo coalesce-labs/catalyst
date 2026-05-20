@@ -1,6 +1,6 @@
 ---
 name: debug-production-error
-description: Debug production errors using Sentry error tracking and analysis
+description: "Debug production errors using Sentry MCP tools. Searches issues, analyzes stack traces, identifies root causes, and suggests fixes. Use when the user mentions a Sentry error, production exception, stack trace, error monitoring, crash report, or unhandled exception."
 disable-model-invocation: false
 allowed-tools: Task, TodoWrite
 version: 1.0.0

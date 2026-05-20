@@ -1,6 +1,6 @@
 ---
 name: prd-draft
-description: Create a modern, AI-era PRD for features and initiatives. Guides through clarifying questions, generates draft, and offers multi-agent review.
+description: "Create a PRD (product requirements document) for features and initiatives. Guides through clarifying questions, generates a structured draft with hypothesis, strategic fit, non-goals, success metrics, and rollout plan, then offers multi-agent review. Use when the user asks to create a PRD, product spec, feature spec, requirements doc, or product brief."
 disable-model-invocation: false
 user-invocable: true
 ---
