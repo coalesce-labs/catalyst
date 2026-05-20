@@ -1720,11 +1720,14 @@ export function processEvent(event) {
   }
 
   // CTL-303: structured agent identity events.
-  if (name === "agent.checkin") {
+  // CTL-381: also accept the orchestrator.-prefixed name that pre-fix
+  // catalyst-state.sh wrote, so check-in events replayed on broker restart
+  // during the rollout window still route to the right handler.
+  if (name === "agent.checkin" || name === "orchestrator.agent.checkin") {
     handleAgentCheckin(event);
     return;
   }
-  if (name === "agent.checkout") {
+  if (name === "agent.checkout" || name === "orchestrator.agent.checkout") {
     handleAgentCheckout(event);
     return;
   }
@@ -1937,8 +1940,11 @@ function loadExistingRegistrations() {
       const name = getEventName(event);
       if (name === "filter.register") handleRegister(event);
       if (name === "filter.deregister") handleDeregister(event);
-      if (name === "agent.checkin") handleAgentCheckin(event);
-      if (name === "agent.checkout") handleAgentCheckout(event);
+      // CTL-381: accept the legacy orchestrator.-prefixed alias on replay too.
+      if (name === "agent.checkin" || name === "orchestrator.agent.checkin")
+        handleAgentCheckin(event);
+      if (name === "agent.checkout" || name === "orchestrator.agent.checkout")
+        handleAgentCheckout(event);
       if (name === "orchestrator-completed" || name === "orchestrator-failed") {
         handleOrchestratorTerminated(event);
       }

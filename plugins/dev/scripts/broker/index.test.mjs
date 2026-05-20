@@ -3784,3 +3784,43 @@ describe("CTL-360 agent.checkin/checkout canonical envelopes", () => {
     expect(getAgentBySession("sess-legacy-co")).toBeNull();
   });
 });
+
+// ─── CTL-381 broker routes orchestrator.-prefixed agent check-ins ────────────
+//
+// Pre-fix catalyst-state.sh renamed agent.checkin/checkout to
+// orchestrator.agent.checkin/checkout via its wildcard canonicalizer. Events
+// already written to the log (replayed on broker restart during the rollout
+// window) must still route to handleAgentCheckin/handleAgentCheckout.
+
+describe("CTL-381 broker routes orchestrator.-prefixed agent check-ins", () => {
+  test("processEvent routes orchestrator.agent.checkin to handleAgentCheckin", () => {
+    processEvent({
+      attributes: { "event.name": "orchestrator.agent.checkin" },
+      body: { payload: { session_id: "sess-ctl381-a", claimed_pr: 627, ticket: "CTL-381" } },
+    });
+    const reg = getInterests().get("sess-ctl381-a");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("pr_lifecycle");
+    expect(reg.pr_numbers).toEqual([627]);
+  });
+
+  test("processEvent still routes bare agent.checkin (regression)", () => {
+    processEvent({
+      attributes: { "event.name": "agent.checkin" },
+      body: { payload: { session_id: "sess-ctl381-b", claimed_pr: 628 } },
+    });
+    expect(getInterests().has("sess-ctl381-b")).toBe(true);
+  });
+
+  test("processEvent routes orchestrator.agent.checkout to handleAgentCheckout", () => {
+    processEvent({
+      attributes: { "event.name": "agent.checkin" },
+      body: { payload: { session_id: "sess-ctl381-c", claimed_pr: 629 } },
+    });
+    processEvent({
+      attributes: { "event.name": "orchestrator.agent.checkout" },
+      body: { payload: { session_id: "sess-ctl381-c", status: "done" } },
+    });
+    expect(getInterests().has("sess-ctl381-c")).toBe(false);
+  });
+});
