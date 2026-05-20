@@ -3678,3 +3678,109 @@ describe("CTL-419 watchdog batching", () => {
     expect(readWakeEvents("filter.wake.orch-notified")).toHaveLength(1);
   });
 });
+
+// ─── CTL-360 agent.checkin / agent.checkout canonical envelopes ──────────────
+//
+// handleAgentCheckin/handleAgentCheckout must read the payload shape-agnostically
+// via getEventPayload — accepting both the legacy flat { event, detail } shape
+// and the canonical OTel { attributes, body.payload } envelope.
+
+describe("CTL-360 agent.checkin/checkout canonical envelopes", () => {
+  test("handleAgentCheckin stores agent identity from canonical envelope", () => {
+    handleAgentCheckin({
+      attributes: { "event.name": "agent.checkin" },
+      body: {
+        payload: {
+          session_id: "sess-canon-ci",
+          agent_name: "ctl-360-worker",
+          ticket: "CTL-360",
+          orchestrator: "orch-canon",
+          claimed_pr: null,
+          cwd: "/work",
+        },
+      },
+    });
+    const agent = getAgentBySession("sess-canon-ci");
+    expect(agent).not.toBeNull();
+    expect(agent.agentName).toBe("ctl-360-worker");
+    expect(agent.ticket).toBe("CTL-360");
+    expect(agent.status).toBe("active");
+  });
+
+  test("handleAgentCheckin updates heartbeat map from canonical envelope", () => {
+    handleAgentCheckin({
+      attributes: { "event.name": "agent.checkin" },
+      body: {
+        payload: { session_id: "sess-canon-hb", agent_name: "worker", ticket: null, claimed_pr: null },
+      },
+    });
+    expect(getLastHeartbeat().has("sess-canon-hb")).toBe(true);
+  });
+
+  test("handleAgentCheckin auto-registers pr_lifecycle from canonical envelope", () => {
+    handleAgentCheckin({
+      attributes: { "event.name": "agent.checkin" },
+      body: {
+        payload: {
+          session_id: "sess-canon-pr",
+          agent_name: "worker",
+          ticket: "CTL-360",
+          orchestrator: "orch-canon",
+          claimed_pr: 808,
+        },
+      },
+    });
+    const reg = getInterests().get("sess-canon-pr");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("pr_lifecycle");
+    expect(reg.pr_numbers).toEqual([808]);
+    expect(reg.notify_event).toBe("filter.wake.sess-canon-pr");
+  });
+
+  test("handleAgentCheckin legacy flat envelope still works (backward compat)", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: { session_id: "sess-legacy-ci", agent_name: "worker", ticket: "CTL-360", claimed_pr: null },
+    });
+    const agent = getAgentBySession("sess-legacy-ci");
+    expect(agent).not.toBeNull();
+    expect(agent.agentName).toBe("worker");
+  });
+
+  test("handleAgentCheckout marks agent done from canonical envelope", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: { session_id: "sess-canon-co", agent_name: "worker", claimed_pr: null },
+    });
+    handleAgentCheckout({
+      attributes: { "event.name": "agent.checkout" },
+      body: { payload: { session_id: "sess-canon-co", status: "done" } },
+    });
+    expect(getAgentBySession("sess-canon-co")).toBeNull();
+  });
+
+  test("handleAgentCheckout removes auto-correlated pr_lifecycle from canonical envelope", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: { session_id: "sess-canon-clean", agent_name: "worker", claimed_pr: 501 },
+    });
+    expect(getInterests().has("sess-canon-clean")).toBe(true);
+    handleAgentCheckout({
+      attributes: { "event.name": "agent.checkout" },
+      body: { payload: { session_id: "sess-canon-clean", status: "done" } },
+    });
+    expect(getInterests().has("sess-canon-clean")).toBe(false);
+  });
+
+  test("handleAgentCheckout legacy flat envelope still works (backward compat)", () => {
+    handleAgentCheckin({
+      event: "agent.checkin",
+      detail: { session_id: "sess-legacy-co", agent_name: "worker", claimed_pr: null },
+    });
+    handleAgentCheckout({
+      event: "agent.checkout",
+      detail: { session_id: "sess-legacy-co", status: "done" },
+    });
+    expect(getAgentBySession("sess-legacy-co")).toBeNull();
+  });
+});
