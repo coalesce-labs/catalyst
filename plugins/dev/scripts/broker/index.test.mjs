@@ -3977,3 +3977,103 @@ describe("CTL-381 tryDeterministicRoute — true canonical envelopes (no scope)"
     expect(matches[0].reason).toContain("merged");
   });
 });
+
+// ─── CTL-381 base_branches preserved on auto-registration ────────────────────
+//
+// _autoRegisterPrLifecycle hardcoded base_branches: [], discarding the
+// base_branches array broker_claim_pr sends — so the github.push rebase
+// detection branch could never match an auto-correlated interest.
+
+describe("CTL-381 base_branches preserved on auto-registration", () => {
+  test("handleAgentCheckin carries base_branches into the auto-registered interest", () => {
+    handleAgentCheckin({
+      attributes: { "event.name": "agent.checkin" },
+      body: {
+        payload: {
+          session_id: "sess-bb",
+          claimed_pr: 808,
+          base_branches: [{ pr: 808, base: "main" }],
+        },
+      },
+    });
+    expect(getInterests().get("sess-bb").base_branches).toEqual([{ pr: 808, base: "main" }]);
+  });
+
+  test("handleAgentCheckin defaults base_branches to [] when absent", () => {
+    handleAgentCheckin({
+      attributes: { "event.name": "agent.checkin" },
+      body: { payload: { session_id: "sess-bb-none", claimed_pr: 809 } },
+    });
+    expect(getInterests().get("sess-bb-none").base_branches).toEqual([]);
+  });
+});
+
+// ─── CTL-381 end-to-end: check-in → canonical webhook → filter.wake ──────────
+//
+// The capstone test that proves all three layers compose: an agent.checkin
+// auto-registers a pr_lifecycle interest carrying base_branches, then
+// canonical webhook events (no top-level scope) each emit a filter.wake to
+// the JSONL event log — the chain the CTL-381 failing run never completed.
+
+describe("CTL-381 end-to-end: check-in → canonical webhook → filter.wake", () => {
+  function countWakesInLog(notifyEvent) {
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return 0;
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+    return lines.filter((l) => {
+      try {
+        const evt = JSON.parse(l);
+        return evt.attributes?.["event.name"] === notifyEvent;
+      } catch {
+        return false;
+      }
+    }).length;
+  }
+
+  test("agent.checkin then canonical check_suite/pr.merged/push each emit filter.wake", () => {
+    // Layer 1: broker_claim_pr-style check-in auto-registers a pr_lifecycle
+    // interest carrying base_branches.
+    processEvent({
+      attributes: { "event.name": "agent.checkin" },
+      body: {
+        payload: {
+          session_id: "sess-e2e",
+          claimed_pr: 900,
+          base_branches: [{ pr: 900, base: "main" }],
+        },
+      },
+    });
+    const reg = getInterests().get("sess-e2e");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("pr_lifecycle");
+    expect(reg.base_branches).toEqual([{ pr: 900, base: "main" }]);
+
+    // Layer 2 + 3: each true-canonical webhook event (no top-level scope)
+    // routes and appends a filter.wake.sess-e2e to the log.
+
+    // canonical check_suite.completed → reads body.payload.prNumbers
+    processEvent({
+      id: "e2e-cs-1",
+      attributes: { "event.name": "github.check_suite.completed" },
+      body: { payload: { prNumbers: [900], conclusion: "success" } },
+    });
+    expect(countWakesInLog("filter.wake.sess-e2e")).toBe(1);
+
+    // canonical github.pr.merged → reads attributes["vcs.pr.number"]
+    processEvent({
+      id: "e2e-merged-1",
+      attributes: { "event.name": "github.pr.merged", "vcs.pr.number": 900 },
+      body: { payload: { mergeCommitSha: "abc1234", merged: true } },
+    });
+    expect(countWakesInLog("filter.wake.sess-e2e")).toBe(2);
+
+    // canonical github.push to base branch → reads attributes["vcs.ref.name"]
+    processEvent({
+      id: "e2e-push-1",
+      attributes: { "event.name": "github.push", "vcs.ref.name": "main" },
+      body: { payload: {} },
+    });
+    expect(countWakesInLog("filter.wake.sess-e2e")).toBe(3);
+  });
+});

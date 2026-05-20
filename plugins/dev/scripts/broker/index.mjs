@@ -699,15 +699,26 @@ export function handleAgentCheckin(event) {
 
   // Auto-correlate: if the agent has already claimed a PR, register a
   // pr_lifecycle interest on its behalf — no explicit filter.register needed.
+  // CTL-381: thread d.base_branches through so github.push rebase detection
+  // works for the auto-registered interest.
   if (claimedPr) {
-    _autoRegisterPrLifecycle(sessionId, claimedPr, orchestrator, ticket, repo);
+    _autoRegisterPrLifecycle(
+      sessionId,
+      claimedPr,
+      orchestrator,
+      ticket,
+      repo,
+      d.base_branches
+    );
   }
 
   log.info({ agentName, sessionId, ticket, claimedPr }, "agent checked in");
 }
 
 // Auto-register a pr_lifecycle interest when we learn agent ↔ PR mapping.
-function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, repo) {
+// CTL-381: baseBranches is the base_branches array broker_claim_pr sends —
+// preserve it so the github.push rebase-detection branch can match.
+function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, repo, baseBranches) {
   if (interests.has(sessionId)) return; // don't overwrite explicit registration
 
   interests.set(sessionId, {
@@ -720,7 +731,7 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, rep
     interest_type: "pr_lifecycle",
     pr_numbers: [prNumber],
     repo: repo ?? null,
-    base_branches: [],
+    base_branches: Array.isArray(baseBranches) ? baseBranches : [],
     tickets: null,
     wake_on: null,
   });
