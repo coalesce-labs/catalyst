@@ -1,5 +1,12 @@
 # Changelog
 
+## [10.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.0.0...catalyst-dev-v10.1.0) (2026-05-18)
+
+
+### Features
+
+* **dev:** propagate OTEL_RESOURCE_ATTRIBUTES to phase-agent claude --bg children (CTL-492) ([#862](https://github.com/coalesce-labs/catalyst/issues/862)) ([19166f0](https://github.com/coalesce-labs/catalyst/commit/19166f0bf7e97ac547eb8afe4364282d41f9dca3))
+
 ## [10.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v9.3.0...catalyst-dev-v10.0.0) (2026-05-18)
 
 
