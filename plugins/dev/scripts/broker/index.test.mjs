@@ -3784,3 +3784,296 @@ describe("CTL-360 agent.checkin/checkout canonical envelopes", () => {
     expect(getAgentBySession("sess-legacy-co")).toBeNull();
   });
 });
+
+// ─── CTL-381 broker routes orchestrator.-prefixed agent check-ins ────────────
+//
+// Pre-fix catalyst-state.sh renamed agent.checkin/checkout to
+// orchestrator.agent.checkin/checkout via its wildcard canonicalizer. Events
+// already written to the log (replayed on broker restart during the rollout
+// window) must still route to handleAgentCheckin/handleAgentCheckout.
+
+describe("CTL-381 broker routes orchestrator.-prefixed agent check-ins", () => {
+  test("processEvent routes orchestrator.agent.checkin to handleAgentCheckin", () => {
+    processEvent({
+      attributes: { "event.name": "orchestrator.agent.checkin" },
+      body: { payload: { session_id: "sess-ctl381-a", claimed_pr: 627, ticket: "CTL-381" } },
+    });
+    const reg = getInterests().get("sess-ctl381-a");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("pr_lifecycle");
+    expect(reg.pr_numbers).toEqual([627]);
+  });
+
+  test("processEvent still routes bare agent.checkin (regression)", () => {
+    processEvent({
+      attributes: { "event.name": "agent.checkin" },
+      body: { payload: { session_id: "sess-ctl381-b", claimed_pr: 628 } },
+    });
+    expect(getInterests().has("sess-ctl381-b")).toBe(true);
+  });
+
+  test("processEvent routes orchestrator.agent.checkout to handleAgentCheckout", () => {
+    processEvent({
+      attributes: { "event.name": "agent.checkin" },
+      body: { payload: { session_id: "sess-ctl381-c", claimed_pr: 629 } },
+    });
+    processEvent({
+      attributes: { "event.name": "orchestrator.agent.checkout" },
+      body: { payload: { session_id: "sess-ctl381-c", status: "done" } },
+    });
+    expect(getInterests().has("sess-ctl381-c")).toBe(false);
+  });
+});
+
+// ─── CTL-381 tryDeterministicRoute — true canonical envelopes (no scope) ─────
+//
+// The canonical OTel webhook envelope carries no top-level `scope`. The PR
+// number lives at attributes["vcs.pr.number"], the ref at
+// attributes["vcs.ref.name"], the sha at attributes["vcs.revision"], and the
+// environment at attributes["deployment.environment"]. tryDeterministicRoute
+// must resolve those via getEventScope so canonical events route correctly.
+
+describe("CTL-381 tryDeterministicRoute — true canonical envelopes (no scope)", () => {
+  beforeEach(() => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-canon-pr",
+      detail: {
+        interest_id: "sess-canon-pr",
+        notify_event: "filter.wake.sess-canon-pr",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [777],
+        repo: "org/repo",
+        base_branches: [{ pr: 777, base: "main" }],
+        persistent: true,
+        session_id: "sess-canon-pr",
+      },
+    });
+  });
+
+  test("github.pr.merged routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.pr.merged", "vcs.pr.number": 777 },
+        body: { payload: { mergeCommitSha: "deadbeef", merged: true } },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("sess-canon-pr");
+    expect(matches[0].reason).toContain("merged");
+  });
+
+  test("github.pr.closed routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.pr.closed", "vcs.pr.number": 777 },
+        body: { payload: { merged: false } },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("closed without merging");
+  });
+
+  test("github.pr_review.submitted routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.pr_review.submitted", "vcs.pr.number": 777 },
+        body: {
+          payload: {
+            reviewer: "alice",
+            state: "changes_requested",
+            author: { login: "alice", type: "User" },
+          },
+        },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("Changes requested");
+    expect(matches[0].reason).toContain("blocked from merging");
+  });
+
+  test("github.pr_review_comment.created routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: {
+          "event.name": "github.pr_review_comment.created",
+          "vcs.pr.number": 777,
+        },
+        body: {
+          payload: {
+            author: { login: "bob", type: "User" },
+            commentId: 12345,
+            body: "please fix this",
+            htmlUrl: "https://github.com/org/repo/pull/777#discussion_r12345",
+          },
+        },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("bob");
+    expect(matches[0].reason).toContain("12345");
+  });
+
+  test("github.pr_review_thread.resolved routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: {
+          "event.name": "github.pr_review_thread.resolved",
+          "vcs.pr.number": 777,
+        },
+        body: { payload: { threadId: "thread-9" } },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("resolved");
+    expect(matches[0].reason).toContain("777");
+  });
+
+  test("github.push routes via attributes['vcs.ref.name']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.push", "vcs.ref.name": "main" },
+        body: { payload: {} },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("Base branch main updated");
+  });
+
+  test("github.deployment.created routes via attributes vcs.revision/environment", () => {
+    // deployment matching relies on filter-state DB rows; assert the event
+    // resolves sha + environment from attributes without throwing and produces
+    // a deterministic (possibly empty) match list.
+    const matches = tryDeterministicRoute(
+      {
+        attributes: {
+          "event.name": "github.deployment.created",
+          "vcs.revision": "deadbeef",
+          "deployment.environment": "production",
+        },
+        body: { payload: { deploymentId: "deploy-1" } },
+      },
+      getInterests()
+    );
+    expect(Array.isArray(matches)).toBe(true);
+  });
+
+  test("legacy scope.pr still routes (backward compat)", () => {
+    const matches = tryDeterministicRoute(
+      {
+        event: "github.pr.merged",
+        scope: { pr: 777 },
+        detail: { mergeCommitSha: "feedface", merged: true },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("merged");
+  });
+});
+
+// ─── CTL-381 base_branches preserved on auto-registration ────────────────────
+//
+// _autoRegisterPrLifecycle hardcoded base_branches: [], discarding the
+// base_branches array broker_claim_pr sends — so the github.push rebase
+// detection branch could never match an auto-correlated interest.
+
+describe("CTL-381 base_branches preserved on auto-registration", () => {
+  test("handleAgentCheckin carries base_branches into the auto-registered interest", () => {
+    handleAgentCheckin({
+      attributes: { "event.name": "agent.checkin" },
+      body: {
+        payload: {
+          session_id: "sess-bb",
+          claimed_pr: 808,
+          base_branches: [{ pr: 808, base: "main" }],
+        },
+      },
+    });
+    expect(getInterests().get("sess-bb").base_branches).toEqual([{ pr: 808, base: "main" }]);
+  });
+
+  test("handleAgentCheckin defaults base_branches to [] when absent", () => {
+    handleAgentCheckin({
+      attributes: { "event.name": "agent.checkin" },
+      body: { payload: { session_id: "sess-bb-none", claimed_pr: 809 } },
+    });
+    expect(getInterests().get("sess-bb-none").base_branches).toEqual([]);
+  });
+});
+
+// ─── CTL-381 end-to-end: check-in → canonical webhook → filter.wake ──────────
+//
+// The capstone test that proves all three layers compose: an agent.checkin
+// auto-registers a pr_lifecycle interest carrying base_branches, then
+// canonical webhook events (no top-level scope) each emit a filter.wake to
+// the JSONL event log — the chain the CTL-381 failing run never completed.
+
+describe("CTL-381 end-to-end: check-in → canonical webhook → filter.wake", () => {
+  function countWakesInLog(notifyEvent) {
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return 0;
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
+    return lines.filter((l) => {
+      try {
+        const evt = JSON.parse(l);
+        return evt.attributes?.["event.name"] === notifyEvent;
+      } catch {
+        return false;
+      }
+    }).length;
+  }
+
+  test("agent.checkin then canonical check_suite/pr.merged/push each emit filter.wake", () => {
+    // Layer 1: broker_claim_pr-style check-in auto-registers a pr_lifecycle
+    // interest carrying base_branches.
+    processEvent({
+      attributes: { "event.name": "agent.checkin" },
+      body: {
+        payload: {
+          session_id: "sess-e2e",
+          claimed_pr: 900,
+          base_branches: [{ pr: 900, base: "main" }],
+        },
+      },
+    });
+    const reg = getInterests().get("sess-e2e");
+    expect(reg).toBeDefined();
+    expect(reg.interest_type).toBe("pr_lifecycle");
+    expect(reg.base_branches).toEqual([{ pr: 900, base: "main" }]);
+
+    // Layer 2 + 3: each true-canonical webhook event (no top-level scope)
+    // routes and appends a filter.wake.sess-e2e to the log.
+
+    // canonical check_suite.completed → reads body.payload.prNumbers
+    processEvent({
+      id: "e2e-cs-1",
+      attributes: { "event.name": "github.check_suite.completed" },
+      body: { payload: { prNumbers: [900], conclusion: "success" } },
+    });
+    expect(countWakesInLog("filter.wake.sess-e2e")).toBe(1);
+
+    // canonical github.pr.merged → reads attributes["vcs.pr.number"]
+    processEvent({
+      id: "e2e-merged-1",
+      attributes: { "event.name": "github.pr.merged", "vcs.pr.number": 900 },
+      body: { payload: { mergeCommitSha: "abc1234", merged: true } },
+    });
+    expect(countWakesInLog("filter.wake.sess-e2e")).toBe(2);
+
+    // canonical github.push to base branch → reads attributes["vcs.ref.name"]
+    processEvent({
+      id: "e2e-push-1",
+      attributes: { "event.name": "github.push", "vcs.ref.name": "main" },
+      body: { payload: {} },
+    });
+    expect(countWakesInLog("filter.wake.sess-e2e")).toBe(3);
+  });
+});

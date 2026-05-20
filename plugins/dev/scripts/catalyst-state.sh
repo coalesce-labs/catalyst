@@ -166,6 +166,12 @@ __orch_canonical_for() {
     filter.register)         echo "filter.register filter register INFO" ;;
     filter.deregister)       echo "filter.deregister filter deregister INFO" ;;
     filter.wake)             echo "filter.wake filter wake INFO" ;;
+    # Agent identity events (CTL-381): keep the bare name — the broker
+    # dispatches on an exact `agent.checkin` / `agent.checkout` match.
+    # The wildcard fallthrough would rename them orchestrator.agent.*,
+    # which processEvent never routes to handleAgentCheckin.
+    agent.checkin)           echo "agent.checkin agent checkin INFO" ;;
+    agent.checkout)          echo "agent.checkout agent checkout INFO" ;;
     *)                       echo "orchestrator.$1 orchestrator $1 INFO" ;;
   esac
 }

@@ -508,6 +508,20 @@ function getEventOrchestrator(event) {
   return event.orchestrator ?? event.attributes?.["catalyst.orchestrator.id"] ?? null;
 }
 
+// CTL-381: canonical OTel webhook envelopes carry no top-level `scope`.
+// Resolve PR/ref/sha/environment from `event.scope` (legacy) OR `attributes`
+// (canonical), mirroring how getEventPayload bridges detail / body.payload.
+function getEventScope(event) {
+  const scope = event.scope ?? {};
+  const attrs = event.attributes ?? {};
+  return {
+    pr: scope.pr ?? attrs["vcs.pr.number"] ?? undefined,
+    ref: scope.ref ?? attrs["vcs.ref.name"] ?? undefined,
+    sha: scope.sha ?? attrs["vcs.revision"] ?? undefined,
+    environment: scope.environment ?? attrs["deployment.environment"] ?? undefined,
+  };
+}
+
 export function handleRegister(event) {
   const d = getEventPayload(event);
   const orchestrator = getEventOrchestrator(event);
@@ -685,15 +699,26 @@ export function handleAgentCheckin(event) {
 
   // Auto-correlate: if the agent has already claimed a PR, register a
   // pr_lifecycle interest on its behalf — no explicit filter.register needed.
+  // CTL-381: thread d.base_branches through so github.push rebase detection
+  // works for the auto-registered interest.
   if (claimedPr) {
-    _autoRegisterPrLifecycle(sessionId, claimedPr, orchestrator, ticket, repo);
+    _autoRegisterPrLifecycle(
+      sessionId,
+      claimedPr,
+      orchestrator,
+      ticket,
+      repo,
+      d.base_branches
+    );
   }
 
   log.info({ agentName, sessionId, ticket, claimedPr }, "agent checked in");
 }
 
 // Auto-register a pr_lifecycle interest when we learn agent ↔ PR mapping.
-function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, repo) {
+// CTL-381: baseBranches is the base_branches array broker_claim_pr sends —
+// preserve it so the github.push rebase-detection branch can match.
+function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, repo, baseBranches) {
   if (interests.has(sessionId)) return; // don't overwrite explicit registration
 
   interests.set(sessionId, {
@@ -706,7 +731,7 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, rep
     interest_type: "pr_lifecycle",
     pr_numbers: [prNumber],
     repo: repo ?? null,
-    base_branches: [],
+    base_branches: Array.isArray(baseBranches) ? baseBranches : [],
     tickets: null,
     wake_on: null,
   });
@@ -916,7 +941,10 @@ export function tryDeterministicRoute(event, interestsMap) {
   // matching gap in tryTicketLifecycleRoute; this catches the PR/comms route.
   const name = getEventName(event);
   const detail = getEventPayload(event);
-  const scope = event.scope ?? {};
+  // CTL-381: canonical-aware — resolves PR/ref/sha/environment from
+  // `attributes` on true-canonical OTel envelopes that carry no top-level
+  // `scope`, while still reading legacy `event.scope` when present.
+  const scope = getEventScope(event);
   // CTL-344: real id on new envelopes, synthetic id for legacy events.
   const eventId = event.id ?? synthesizeEventId(event);
 
@@ -1720,11 +1748,14 @@ export function processEvent(event) {
   }
 
   // CTL-303: structured agent identity events.
-  if (name === "agent.checkin") {
+  // CTL-381: also accept the orchestrator.-prefixed name that pre-fix
+  // catalyst-state.sh wrote, so check-in events replayed on broker restart
+  // during the rollout window still route to the right handler.
+  if (name === "agent.checkin" || name === "orchestrator.agent.checkin") {
     handleAgentCheckin(event);
     return;
   }
-  if (name === "agent.checkout") {
+  if (name === "agent.checkout" || name === "orchestrator.agent.checkout") {
     handleAgentCheckout(event);
     return;
   }
@@ -1937,8 +1968,11 @@ function loadExistingRegistrations() {
       const name = getEventName(event);
       if (name === "filter.register") handleRegister(event);
       if (name === "filter.deregister") handleDeregister(event);
-      if (name === "agent.checkin") handleAgentCheckin(event);
-      if (name === "agent.checkout") handleAgentCheckout(event);
+      // CTL-381: accept the legacy orchestrator.-prefixed alias on replay too.
+      if (name === "agent.checkin" || name === "orchestrator.agent.checkin")
+        handleAgentCheckin(event);
+      if (name === "agent.checkout" || name === "orchestrator.agent.checkout")
+        handleAgentCheckout(event);
       if (name === "orchestrator-completed" || name === "orchestrator-failed") {
         handleOrchestratorTerminated(event);
       }

@@ -365,6 +365,50 @@ else
 fi
 unset REPO
 
+# ─── Test 17: event_append keeps agent.checkin's bare name (CTL-381) ─────────
+# The orchestrator.* wildcard in __orch_canonical_for must NOT rename
+# agent.checkin — the broker dispatches on the exact name "agent.checkin".
+echo ""
+echo "--- Test 17: event_append keeps agent.checkin's bare name ---"
+export CATALYST_DIR="$SCRATCH/cat17"
+"$STATE_SCRIPT" init >/dev/null
+
+"$STATE_SCRIPT" event "$(jq -nc '{
+  ts: "2026-05-20T12:00:00Z",
+  event: "agent.checkin",
+  detail: { session_id: "sess-ctl381", claimed_pr: 627, repo: "coalesce-labs/catalyst" }
+}')" >/dev/null 2>&1 || true
+
+EVENT_FILE17=$(ls "$SCRATCH/cat17/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE17" ]]; then
+  NAME=$(jq -r '.attributes."event.name"' "$EVENT_FILE17" | head -1)
+  assert_eq "agent.checkin" "$NAME" "agent.checkin keeps its bare canonical name"
+else
+  fail "no event JSONL written for agent.checkin test"
+fi
+
+# ─── Test 18: event_append keeps agent.checkout's bare name (CTL-381) ────────
+# Same exemption for agent.checkout — the broker dispatches on the exact
+# name "agent.checkout".
+echo ""
+echo "--- Test 18: event_append keeps agent.checkout's bare name ---"
+export CATALYST_DIR="$SCRATCH/cat18"
+"$STATE_SCRIPT" init >/dev/null
+
+"$STATE_SCRIPT" event "$(jq -nc '{
+  ts: "2026-05-20T12:00:00Z",
+  event: "agent.checkout",
+  detail: { session_id: "sess-ctl381", status: "done" }
+}')" >/dev/null 2>&1 || true
+
+EVENT_FILE18=$(ls "$SCRATCH/cat18/events"/*.jsonl 2>/dev/null | head -1)
+if [[ -n "$EVENT_FILE18" ]]; then
+  NAME=$(jq -r '.attributes."event.name"' "$EVENT_FILE18" | head -1)
+  assert_eq "agent.checkout" "$NAME" "agent.checkout keeps its bare canonical name"
+else
+  fail "no event JSONL written for agent.checkout test"
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════"
