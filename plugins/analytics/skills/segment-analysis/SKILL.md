@@ -1,6 +1,6 @@
 ---
 name: segment-analysis
-description: Analyze user segments and cohorts for targeted insights
+description: "Analyze user segments, cohorts, and customer groups using PostHog data. Creates retention tables, compares segment behavior, and generates group breakdowns. Use when the user asks about customer segmentation, cohort retention, user group comparison, churn analysis, or funnel analysis by segment."
 disable-model-invocation: false
 allowed-tools: Task, TodoWrite
 version: 1.0.0
