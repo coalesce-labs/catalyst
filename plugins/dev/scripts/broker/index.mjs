@@ -508,6 +508,20 @@ function getEventOrchestrator(event) {
   return event.orchestrator ?? event.attributes?.["catalyst.orchestrator.id"] ?? null;
 }
 
+// CTL-381: canonical OTel webhook envelopes carry no top-level `scope`.
+// Resolve PR/ref/sha/environment from `event.scope` (legacy) OR `attributes`
+// (canonical), mirroring how getEventPayload bridges detail / body.payload.
+function getEventScope(event) {
+  const scope = event.scope ?? {};
+  const attrs = event.attributes ?? {};
+  return {
+    pr: scope.pr ?? attrs["vcs.pr.number"] ?? undefined,
+    ref: scope.ref ?? attrs["vcs.ref.name"] ?? undefined,
+    sha: scope.sha ?? attrs["vcs.revision"] ?? undefined,
+    environment: scope.environment ?? attrs["deployment.environment"] ?? undefined,
+  };
+}
+
 export function handleRegister(event) {
   const d = getEventPayload(event);
   const orchestrator = getEventOrchestrator(event);
@@ -916,7 +930,10 @@ export function tryDeterministicRoute(event, interestsMap) {
   // matching gap in tryTicketLifecycleRoute; this catches the PR/comms route.
   const name = getEventName(event);
   const detail = getEventPayload(event);
-  const scope = event.scope ?? {};
+  // CTL-381: canonical-aware — resolves PR/ref/sha/environment from
+  // `attributes` on true-canonical OTel envelopes that carry no top-level
+  // `scope`, while still reading legacy `event.scope` when present.
+  const scope = getEventScope(event);
   // CTL-344: real id on new envelopes, synthetic id for legacy events.
   const eventId = event.id ?? synthesizeEventId(event);
 

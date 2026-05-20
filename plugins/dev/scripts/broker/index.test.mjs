@@ -3824,3 +3824,156 @@ describe("CTL-381 broker routes orchestrator.-prefixed agent check-ins", () => {
     expect(getInterests().has("sess-ctl381-c")).toBe(false);
   });
 });
+
+// ─── CTL-381 tryDeterministicRoute — true canonical envelopes (no scope) ─────
+//
+// The canonical OTel webhook envelope carries no top-level `scope`. The PR
+// number lives at attributes["vcs.pr.number"], the ref at
+// attributes["vcs.ref.name"], the sha at attributes["vcs.revision"], and the
+// environment at attributes["deployment.environment"]. tryDeterministicRoute
+// must resolve those via getEventScope so canonical events route correctly.
+
+describe("CTL-381 tryDeterministicRoute — true canonical envelopes (no scope)", () => {
+  beforeEach(() => {
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-canon-pr",
+      detail: {
+        interest_id: "sess-canon-pr",
+        notify_event: "filter.wake.sess-canon-pr",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [777],
+        repo: "org/repo",
+        base_branches: [{ pr: 777, base: "main" }],
+        persistent: true,
+        session_id: "sess-canon-pr",
+      },
+    });
+  });
+
+  test("github.pr.merged routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.pr.merged", "vcs.pr.number": 777 },
+        body: { payload: { mergeCommitSha: "deadbeef", merged: true } },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("sess-canon-pr");
+    expect(matches[0].reason).toContain("merged");
+  });
+
+  test("github.pr.closed routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.pr.closed", "vcs.pr.number": 777 },
+        body: { payload: { merged: false } },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("closed without merging");
+  });
+
+  test("github.pr_review.submitted routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.pr_review.submitted", "vcs.pr.number": 777 },
+        body: {
+          payload: {
+            reviewer: "alice",
+            state: "changes_requested",
+            author: { login: "alice", type: "User" },
+          },
+        },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("Changes requested");
+    expect(matches[0].reason).toContain("blocked from merging");
+  });
+
+  test("github.pr_review_comment.created routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: {
+          "event.name": "github.pr_review_comment.created",
+          "vcs.pr.number": 777,
+        },
+        body: {
+          payload: {
+            author: { login: "bob", type: "User" },
+            commentId: 12345,
+            body: "please fix this",
+            htmlUrl: "https://github.com/org/repo/pull/777#discussion_r12345",
+          },
+        },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("bob");
+    expect(matches[0].reason).toContain("12345");
+  });
+
+  test("github.pr_review_thread.resolved routes via attributes['vcs.pr.number']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: {
+          "event.name": "github.pr_review_thread.resolved",
+          "vcs.pr.number": 777,
+        },
+        body: { payload: { threadId: "thread-9" } },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("resolved");
+    expect(matches[0].reason).toContain("777");
+  });
+
+  test("github.push routes via attributes['vcs.ref.name']", () => {
+    const matches = tryDeterministicRoute(
+      {
+        attributes: { "event.name": "github.push", "vcs.ref.name": "main" },
+        body: { payload: {} },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("Base branch main updated");
+  });
+
+  test("github.deployment.created routes via attributes vcs.revision/environment", () => {
+    // deployment matching relies on filter-state DB rows; assert the event
+    // resolves sha + environment from attributes without throwing and produces
+    // a deterministic (possibly empty) match list.
+    const matches = tryDeterministicRoute(
+      {
+        attributes: {
+          "event.name": "github.deployment.created",
+          "vcs.revision": "deadbeef",
+          "deployment.environment": "production",
+        },
+        body: { payload: { deploymentId: "deploy-1" } },
+      },
+      getInterests()
+    );
+    expect(Array.isArray(matches)).toBe(true);
+  });
+
+  test("legacy scope.pr still routes (backward compat)", () => {
+    const matches = tryDeterministicRoute(
+      {
+        event: "github.pr.merged",
+        scope: { pr: 777 },
+        detail: { mergeCommitSha: "feedface", merged: true },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].reason).toContain("merged");
+  });
+});
