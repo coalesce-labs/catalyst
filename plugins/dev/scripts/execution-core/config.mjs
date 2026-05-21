@@ -53,3 +53,10 @@ export const RECONCILE_INTERVAL_MS =
 // into one reconcile poll per affected project per burst.
 export const EVENT_DEBOUNCE_MS =
   Number(process.env.EXECUTION_CORE_DEBOUNCE_MS) || 5_000;
+
+// CTL-533: a worker whose signal has not been updated within this window is
+// "stale" — a precondition for the Step G stalled scan to consult git/PR
+// state. A stale signal alone is never stall evidence (CTL-32). Default 15 min,
+// matching the legacy `date -u -v-15M` cutoff in orchestrate/SKILL.md.
+export const STALE_WORKER_CUTOFF_MS =
+  Number(process.env.EXECUTION_CORE_STALE_WORKER_CUTOFF_MS) || 15 * 60_000;
