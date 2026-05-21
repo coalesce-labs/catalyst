@@ -83,6 +83,16 @@ describe("buildDependencyEdges", () => {
       expected: [],
     },
     {
+      name: "forward-compat `blocked_by` on inverseRelations → reversed edge",
+      issues: [issue("CTL-1"), issue("CTL-2", "Backlog", [], [inv("blocked_by", "CTL-1")])],
+      expected: [{ from: "CTL-2", to: "CTL-1" }],
+    },
+    {
+      name: "malformed inverse relation node (missing peer identifier) is skipped",
+      issues: [issue("CTL-1", "Backlog", [], [{ id: "i-x", type: "blocks", issue: {} }])],
+      expected: [],
+    },
+    {
       name: "missing relations / inverseRelations containers do not throw",
       issues: [{ identifier: "CTL-1", state: { name: "Backlog" } }],
       expected: [],
@@ -157,6 +167,12 @@ describe("computeReadySet", () => {
       edges: [{ from: "CTL-1", to: "CTL-2" }],
       options: { terminalStatuses: ["Shipped"] },
       expected: { ready: ["CTL-2"], blocked: [] },
+    },
+    {
+      name: "issue with missing state object → treated as eligible, ready",
+      issues: [{ identifier: "CTL-1", relations: { nodes: [] }, inverseRelations: { nodes: [] } }],
+      edges: [],
+      expected: { ready: ["CTL-1"], blocked: [] },
     },
   ];
 
@@ -284,6 +300,41 @@ describe("detectCycles", () => {
         },
       ],
     },
+    {
+      name: "three-node cycle A→B→C→A → one anomaly with all three members",
+      nodes: ["CTL-1", "CTL-2", "CTL-3"],
+      edges: [
+        ["CTL-1", "CTL-2"],
+        ["CTL-2", "CTL-3"],
+        ["CTL-3", "CTL-1"],
+      ],
+      expected: [
+        {
+          type: "dependency_cycle",
+          severity: "error",
+          members: ["CTL-1", "CTL-2", "CTL-3"],
+          reason: "Circular dependency among 3 issues: CTL-1, CTL-2, CTL-3.",
+        },
+      ],
+    },
+    {
+      name: "two cycles sharing a node → merged into one anomaly",
+      nodes: ["CTL-1", "CTL-2", "CTL-3"],
+      edges: [
+        ["CTL-1", "CTL-2"],
+        ["CTL-2", "CTL-1"],
+        ["CTL-2", "CTL-3"],
+        ["CTL-3", "CTL-2"],
+      ],
+      expected: [
+        {
+          type: "dependency_cycle",
+          severity: "error",
+          members: ["CTL-1", "CTL-2", "CTL-3"],
+          reason: "Circular dependency among 3 issues: CTL-1, CTL-2, CTL-3.",
+        },
+      ],
+    },
   ];
 
   for (const c of cases) {
@@ -324,5 +375,26 @@ describe("analyzeDependencyGraph", () => {
   test("acyclic graph → no anomalies", () => {
     const issues = [issue("CTL-1", "Backlog", [rel("blocks", "CTL-2")]), issue("CTL-2", "Backlog")];
     expect(analyzeDependencyGraph(issues).anomalies).toEqual([]);
+  });
+});
+
+// CTL-530 verify phase: null/undefined inputs must degrade gracefully rather
+// than throw — every export guards with `?? []`, so assert that contract.
+describe("null / undefined inputs degrade gracefully", () => {
+  test("buildDependencyEdges(null | undefined) → []", () => {
+    expect(buildDependencyEdges(undefined)).toEqual([]);
+    expect(buildDependencyEdges(null)).toEqual([]);
+  });
+
+  test("computeReadySet(undefined, undefined) → empty partition", () => {
+    expect(computeReadySet(undefined, undefined)).toEqual({ ready: [], blocked: [] });
+  });
+
+  test("detectCycles(undefined, undefined) → []", () => {
+    expect(detectCycles(undefined, undefined)).toEqual([]);
+  });
+
+  test("analyzeDependencyGraph(undefined) → empty result", () => {
+    expect(analyzeDependencyGraph(undefined)).toEqual({ ready: [], blocked: [], anomalies: [] });
   });
 });
