@@ -2,7 +2,15 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test monitor.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  unlinkSync,
+  appendFileSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,9 +20,13 @@ import {
   handleStateChangedEvent,
   startMonitor,
   stopMonitor,
+  seedTailerFromCursor,
+  readNewEvents,
+  __tailerOffset,
   __resetForTests,
 } from "./monitor.mjs";
 import { setProjectEligible, getEligibleSet, dropProject } from "./eligible-set.mjs";
+import { loadCursor, saveCursor } from "./event-cursor.mjs";
 
 let catalystDir;
 let enrollmentDir;
@@ -263,5 +275,109 @@ describe("lifecycle", () => {
     stopMonitor(); // clears the queued debounce timer
     await sleep(80);
     expect(exec.calls).toBe(0);
+  });
+});
+
+// --- CTL-539: durable cursor wiring ---------------------------------------
+
+// eventLogPath / appendEventLog — resolve and append to the current UTC
+// month's log under the temp CATALYST_DIR (the path getEventLogPath() uses).
+function eventLogPath() {
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  return join(catalystDir, "events", `${ym}.jsonl`);
+}
+function appendEventLog(line) {
+  mkdirSync(join(catalystDir, "events"), { recursive: true });
+  appendFileSync(eventLogPath(), line);
+}
+
+describe("seedTailerFromCursor", () => {
+  test("no cursor file → tailer offset = EOF (poll-only parity)", () => {
+    appendEventLog('{"event":"a"}\n{"event":"b"}\n');
+    const size = statSync(eventLogPath()).size;
+    seedTailerFromCursor();
+    expect(__tailerOffset()).toBe(size);
+  });
+
+  test("no event log file at all → tailer offset = 0 (poll-only mode)", () => {
+    seedTailerFromCursor();
+    expect(__tailerOffset()).toBe(0);
+  });
+
+  test("valid cursor → tailer offset = saved offset", () => {
+    appendEventLog('{"event":"a"}\n{"event":"b"}\n{"event":"c"}\n');
+    const midpoint = 14; // a partial offset into the log
+    saveCursor({ logPath: eventLogPath(), byteOffset: midpoint });
+    seedTailerFromCursor();
+    expect(__tailerOffset()).toBe(midpoint);
+  });
+
+  test("stale cursor (offset > size) → tailer offset = EOF", () => {
+    appendEventLog('{"event":"a"}\n');
+    const size = statSync(eventLogPath()).size;
+    saveCursor({ logPath: eventLogPath(), byteOffset: 999999 });
+    seedTailerFromCursor();
+    expect(__tailerOffset()).toBe(size);
+  });
+});
+
+describe("readNewEvents — cursor persistence", () => {
+  test("persists the cursor after draining new bytes", () => {
+    appendEventLog('{"event":"first"}\n');
+    seedTailerFromCursor(); // seed at EOF of the one-line log
+    appendEventLog('{"event":"second"}\n'); // a new append while tailing
+    readNewEvents();
+    const size = statSync(eventLogPath()).size;
+    expect(loadCursor()).toEqual({ logPath: eventLogPath(), byteOffset: size });
+    expect(__tailerOffset()).toBe(size);
+  });
+});
+
+describe("startMonitor — resumeFromCursor", () => {
+  test("resumeFromCursor:false keeps the seed-at-EOF behavior", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = execReturning({ ENG: [node("ENG-1")] });
+    appendEventLog('{"event":"a"}\n{"event":"b"}\n');
+    const size = statSync(eventLogPath()).size;
+    startMonitor({
+      exec,
+      resumeFromCursor: false,
+      reconcileIntervalMs: 60_000,
+    });
+    expect(__tailerOffset()).toBe(size); // EOF — no cursor consulted
+  });
+
+  test("resumeFromCursor:true drains the gap between cursor and EOF", () => {
+    // alpha holds ENG-1 + ENG-2; an event in the downtime gap moved ENG-1 OUT
+    // of Todo. resumeFromCursor:true must drain that gap on startup and remove
+    // ENG-1 — proving the durable cursor, not a re-seed, drove the resume.
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
+    // Pre-write a downtime-gap event and pin the cursor at offset 0.
+    appendEventLog(
+      `${JSON.stringify({
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "In Progress" },
+      })}\n`,
+    );
+    saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
+    startMonitor({ exec, resumeFromCursor: true, reconcileIntervalMs: 60_000 });
+    // startup reconcileAll seeded {ENG-1, ENG-2}; the gap drain removed ENG-1.
+    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+  });
+
+  test("resumeFromCursor defaults to true (the gap is drained without the flag)", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
+    appendEventLog(
+      `${JSON.stringify({
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Done" },
+      })}\n`,
+    );
+    saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
+    startMonitor({ exec, reconcileIntervalMs: 60_000 }); // no resumeFromCursor
+    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
   });
 });

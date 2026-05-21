@@ -24,6 +24,7 @@ export {
   reconcileAll,
   handleStateChangedEvent,
   seedTailerAtEof,
+  seedTailerFromCursor,
   startTailing,
   startMonitor,
   stopMonitor,
