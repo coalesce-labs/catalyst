@@ -27,9 +27,10 @@ assert_contains() {
 # Builds an isolated repo + stub humanlayer, runs the real create-worktree.sh.
 #   $1 INIT_MODE: fail | noop-ok | real
 #   $2 SETUP_JSON: optional catalyst.worktree.setup array (selects config-driven path)
+#   $3 HOOKS_JSON: optional --hooks-json array (exercises the orchestration-hooks path)
 # Sets globals: OUTPUT, EXIT, WT_PATH, SRC, SCRATCH
 run_create_worktree() {
-	local INIT_MODE="$1" SETUP_JSON="${2-}"
+	local INIT_MODE="$1" SETUP_JSON="${2-}" HOOKS_JSON="${3-}"
 	SCRATCH="$(mktemp -d -t cwt-ctl513-XXXXXX)"
 	SRC="$SCRATCH/src"
 	local WT="$SCRATCH/wt" BIN="$SCRATCH/bin" FAKEHOME="$SCRATCH/home"
@@ -57,8 +58,12 @@ case "\$1 \$2" in
 esac
 STUB
 	chmod +x "$BIN/humanlayer"
+	local -a CW_ARGS=(t-CTL-999 main --worktree-dir "$WT")
+	if [[ -n $HOOKS_JSON ]]; then
+		CW_ARGS+=(--hooks-json "$HOOKS_JSON")
+	fi
 	OUTPUT="$(cd "$SRC" && PATH="$BIN:$PATH" HOME="$FAKEHOME" \
-		bash "$CREATE_WT" t-CTL-999 main --worktree-dir "$WT" 2>&1)"
+		bash "$CREATE_WT" "${CW_ARGS[@]}" 2>&1)"
 	EXIT=$?
 	WT_PATH="$WT/t-CTL-999"
 }
@@ -98,6 +103,18 @@ rm -rf "$SCRATCH"
 echo "Test 5: existing thoughts/shared check still fires on noop-ok init"
 run_create_worktree noop-ok ""
 assert_eq "1" "$EXIT" "exits 1 when init reports OK but creates nothing"
+rm -rf "$SCRATCH"
+
+# Case 6 — orchestration-hooks path (--hooks-json), thoughts init FAILS → exit 1.
+# A config-driven setup with no thoughts init keeps the auto-detected path (and
+# its command-v-humanlayer flag) out of the picture, isolating the --hooks-json
+# branch as the sole THOUGHTS_INIT_EXPECTED setter. This is the path the
+# orchestrator actually uses, so it must be guarded.
+echo "Test 6: orchestration-hooks (--hooks-json) failed thoughts init fails fast"
+run_create_worktree fail '["echo config-step"]' '["humanlayer thoughts init --directory t"]'
+assert_eq "1" "$EXIT" "exits 1 when --hooks-json thoughts init fails"
+assert_contains "$OUTPUT" "thoughts/shared" "error names thoughts/shared"
+if [[ ! -d $WT_PATH ]]; then pass "worktree removed"; else fail "worktree not removed"; fi
 rm -rf "$SCRATCH"
 
 echo ""
