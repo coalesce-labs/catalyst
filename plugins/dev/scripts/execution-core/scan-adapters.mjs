@@ -16,6 +16,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+import { log } from "./config.mjs";
+
 // run — a fail-soft synchronous subprocess. Returns trimmed stdout, or "" on
 // any non-zero exit / spawn error.
 function run(cmd, args, opts = {}) {
@@ -138,18 +140,43 @@ export function makeScanAdapters({
   };
 
   const comms = {
-    readSince: (cursor) => readChannelSince(channelFile, cursor),
+    readSince: (cursor) => readChannelSince(channelFile, orchId, cursor),
   };
 
   return { git, gh, deploy, comms };
 }
 
-// loadConfig — read .catalyst/config.json; {} on any failure.
+// loadConfig — read .catalyst/config.json. With no --config the absent file is
+// silent; an explicitly-named config that is missing or unparseable is logged
+// loudly — falling back to {} silently flips deployField defaults
+// (skipDeployVerification → true) for every worker, so the failure must be
+// visible rather than swallowed.
 function loadConfig(configPath) {
   if (!configPath) return {};
+  let text;
   try {
-    return JSON.parse(readFileSync(configPath, "utf8"));
-  } catch {
+    text = readFileSync(configPath, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") {
+      log.warn(
+        { configPath },
+        "scan: --config file not found; falling back to deploy defaults",
+      );
+    } else {
+      log.error(
+        { configPath, code: err?.code, err: err?.message },
+        "scan: --config unreadable; falling back to deploy defaults",
+      );
+    }
+    return {};
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    log.error(
+      { configPath, err: err?.message },
+      "scan: --config is not valid JSON; falling back to deploy defaults",
+    );
     return {};
   }
 }
@@ -171,13 +198,26 @@ function parseJson(text, fallback) {
 }
 
 // readChannelSince — read comms-channel JSONL messages after `cursor` lines.
-function readChannelSince(channelFile, cursor) {
+// The default path follows the orchestrator channel convention,
+// channels/orch-<orchId>.jsonl — `channels/` itself is a directory, so reading
+// it directly would EISDIR and silently drop every comms-attention.
+function readChannelSince(channelFile, orchId, cursor) {
   const file =
-    channelFile ?? join(homedir(), "catalyst", "comms", "channels");
+    channelFile ??
+    join(homedir(), "catalyst", "comms", "channels", `orch-${orchId}.jsonl`);
   let text;
   try {
     text = readFileSync(file, "utf8");
-  } catch {
+  } catch (err) {
+    // A not-yet-created channel file is normal (no worker has posted yet).
+    // Any other error — EISDIR, EACCES — is a real misconfiguration that
+    // would otherwise silently disable Step F; surface it.
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { file, code: err?.code, err: err?.message },
+        "scan: comms channel unreadable; skipping comms-drain",
+      );
+    }
     return [];
   }
   const lines = text.split("\n").filter((l) => l.trim().length > 0);

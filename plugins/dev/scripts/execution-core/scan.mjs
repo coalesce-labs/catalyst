@@ -64,7 +64,10 @@ export function runScan({
       collect(
         { patches, attentions, events },
         sig,
-        nextDeployState(deployInputs(sig, derived, adapters, nowMs, event)),
+        normalizeDeployResult(
+          nextDeployState(deployInputs(sig, derived, adapters, nowMs, event)),
+          sig,
+        ),
       );
     }
 
@@ -161,6 +164,23 @@ function stalledInputs(sig, derived, nowMs) {
     commitCount: derived.commitCount,
     remoteBranchExists: derived.remoteBranchExists,
     branch: derived.branch,
+  };
+}
+
+// normalizeDeployResult — nextDeployState (the canonical orch-monitor .ts state
+// machine) returns `attention` as a bare string, but every other Step result
+// and every attentions[] consumer uses the structured { kind, ticket, message }
+// shape. Wrap the deploy result's attention so collect() emits a uniform
+// attention item carrying a ticket the orchestrator can route on.
+function normalizeDeployResult(result, sig) {
+  if (!result || typeof result.attention !== "string") return result;
+  return {
+    ...result,
+    attention: {
+      kind: "deploy",
+      ticket: sig.ticket,
+      message: result.attention,
+    },
   };
 }
 
