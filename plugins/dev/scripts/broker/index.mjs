@@ -224,52 +224,54 @@ export function __clearEmittedWakeCacheForTest() {
   _emittedWakeCache.clear();
 }
 
-// --- Interest table ---
-const interests = new Map();
+// --- Shared in-memory state (CTL-529) ---
+// The interest table, heartbeat/identity maps, and liveness counters were
+// extracted to ./state.mjs so the router and projection share exactly one
+// instance of each. The maps are aliased to module-local consts below —
+// getInterests() etc. return identity-stable references, so the resident
+// router/projection call sites keep mutating the canonical instances
+// unchanged. Liveness counters are primitives, reached via state.mjs get/set
+// pairs (an ESM importer cannot reassign an imported binding).
+import {
+  getInterests,
+  getLastHeartbeat,
+  getWorkerToOrchestrator,
+  getWaitingSessionsMap,
+  getOrchestratorStatusMap,
+  getBrokerStartedAt,
+  setBrokerStartedAt,
+  getLastWakeAt,
+  setLastWakeAt,
+  getLastRegisterAt,
+  setLastRegisterAt,
+  getDegradedEmittedAt,
+  setDegradedEmittedAt,
+} from "./state.mjs";
 
-export function getInterests() {
-  return interests;
-}
+export {
+  getInterests,
+  clearInterests,
+  getLastHeartbeat,
+  clearLastHeartbeat,
+  getWorkerToOrchestrator,
+  getWaitingSessionsMap,
+  clearWaitingSessionsMap,
+  getOrchestratorStatusMap,
+  clearOrchestratorStatusMap,
+  __setBrokerStartedAtForTest,
+  __resetBrokerStartedAtForTest,
+  __resetDegradedEmittedForTest,
+  __setHeartbeatForTest,
+  __resetBrokerLivenessForTest,
+} from "./state.mjs";
 
-export function clearInterests() {
-  interests.clear();
-}
-
-// --- Broker liveness stats (CTL-352) -----------------------------------------
-// Mutable module state that buildBrokerState() surfaces in broker.state.json so
-// operators (and the HUD pill in Phase 3) can tell at a glance whether the
-// broker has any registered interests and when it last did real work.
-let brokerStartedAt = null;
-let lastWakeAt = null;
-let lastRegisterAt = null;
-// One-shot guard for broker.daemon.degraded — set on emission, cleared whenever
-// interests.size > 0 so a future empty window re-arms.
-let degradedEmittedAt = null;
+const interests = getInterests();
+const lastHeartbeat = getLastHeartbeat();
+const workerToOrchestrator = getWorkerToOrchestrator();
+const waitingSessions = getWaitingSessionsMap();
+const orchestratorStatusMap = getOrchestratorStatusMap();
 
 const DEGRADED_THRESHOLD_MS = 5 * 60 * 1000;
-
-// Test-only setters. Production paths only ever set these via main() and the
-// hook points below; tests use these to time-travel without touching Date.now().
-export function __setBrokerStartedAtForTest(iso) {
-  brokerStartedAt = iso;
-}
-export function __resetBrokerStartedAtForTest() {
-  brokerStartedAt = null;
-}
-export function __resetDegradedEmittedForTest() {
-  degradedEmittedAt = null;
-}
-// CTL-419: backdate a session's heartbeat timestamp so tests can simulate staleness.
-export function __setHeartbeatForTest(sessionId, tsMs) {
-  const existing = lastHeartbeat.get(sessionId);
-  lastHeartbeat.set(sessionId, { ts: tsMs, notified: existing?.notified ?? false });
-}
-export function __resetBrokerLivenessForTest() {
-  brokerStartedAt = null;
-  lastWakeAt = null;
-  lastRegisterAt = null;
-  degradedEmittedAt = null;
-}
 
 // --- Interest persistence ---
 // CTL-350: resolve paths per-call so tests can redirect by setting CATALYST_DIR.
@@ -413,46 +415,6 @@ export function maybeEmitProseDisabled() {
   _proseDisabledEmitted = true;
 }
 
-// --- Heartbeat tracking ---
-// sourceId → { ts: number (Date.now()), notified: boolean }
-const lastHeartbeat = new Map();
-// worker/session id → orchestrator id (inferred from heartbeat event fields)
-const workerToOrchestrator = new Map();
-// CTL-403: session_id → { timeoutAt: number, waitFor, ticket, orchestrator, reason }
-const waitingSessions = new Map();
-// CTL-405: orchestrator_id → { phase, wave, activeWorkers, totalWorkers, summary, ts, sessionId }
-const orchestratorStatusMap = new Map();
-
-export function getLastHeartbeat() {
-  return lastHeartbeat;
-}
-
-export function clearLastHeartbeat() {
-  lastHeartbeat.clear();
-  workerToOrchestrator.clear();
-  orchestratorStatusMap.clear();
-}
-
-export function getWorkerToOrchestrator() {
-  return workerToOrchestrator;
-}
-
-export function getWaitingSessionsMap() {
-  return waitingSessions;
-}
-
-export function clearWaitingSessionsMap() {
-  waitingSessions.clear();
-}
-
-export function getOrchestratorStatusMap() {
-  return orchestratorStatusMap;
-}
-
-export function clearOrchestratorStatusMap() {
-  orchestratorStatusMap.clear();
-}
-
 // CTL-336: read name/payload/orchestrator from canonical OTel-format events
 // (data in `attributes` + `body.payload`) as well as legacy flat events
 // (data in `event` + `detail` + `orchestrator`). Resolved here so the
@@ -572,9 +534,9 @@ export function handleRegister(event) {
     log.info({ interestId: id, prompt: d.prompt, persistent }, "registered");
   }
   saveInterests();
-  lastRegisterAt = new Date().toISOString();
+  setLastRegisterAt(new Date().toISOString());
   // CTL-352: a fresh registration arms a future degraded event.
-  degradedEmittedAt = null;
+  setDegradedEmittedAt(null);
   persistBrokerState();
 }
 
@@ -703,8 +665,8 @@ function _autoRegisterPrLifecycle(sessionId, prNumber, orchestrator, ticket, rep
 
   log.info({ sessionId, prNumber }, "auto-correlated pr_lifecycle for session");
   saveInterests();
-  lastRegisterAt = new Date().toISOString();
-  degradedEmittedAt = null;
+  setLastRegisterAt(new Date().toISOString());
+  setDegradedEmittedAt(null);
   persistBrokerState();
 }
 
@@ -1278,8 +1240,8 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
 
   if (changed) {
     saveInterests();
-    lastRegisterAt = new Date().toISOString();
-    degradedEmittedAt = null;
+    setLastRegisterAt(new Date().toISOString());
+    setDegradedEmittedAt(null);
     persistBrokerState();
   }
 }
@@ -1444,7 +1406,7 @@ export async function classifyBatch(events) {
     log.info({ notifyEvent: wake.event, reason: wake.detail.reason }, "wake");
   }
   if (wakes.length > 0) {
-    lastWakeAt = new Date().toISOString();
+    setLastWakeAt(new Date().toISOString());
     persistBrokerState();
   }
   for (const id of oneShotsToDelete) {
@@ -1570,10 +1532,11 @@ export function runWatchdogTick() {
   // one-shot broker.daemon.degraded event after the 5-minute startup grace so
   // downstream consumers (HUD, alerts) can pair startup ↔ degraded.
   if (interests.size === 0) {
+    const brokerStartedAt = getBrokerStartedAt();
     const startedTs = brokerStartedAt ? new Date(brokerStartedAt).getTime() : now;
     const uptimeMs = now - startedTs;
     log.warn({ uptimeMs }, "watchdog: no registered interests");
-    if (uptimeMs > DEGRADED_THRESHOLD_MS && degradedEmittedAt === null) {
+    if (uptimeMs > DEGRADED_THRESHOLD_MS && getDegradedEmittedAt() === null) {
       appendEvent({
         event: "broker.daemon.degraded",
         orchestrator: null,
@@ -1585,11 +1548,11 @@ export function runWatchdogTick() {
           brokerStartedAt,
         },
       });
-      degradedEmittedAt = new Date().toISOString();
+      setDegradedEmittedAt(new Date().toISOString());
       persistBrokerState();
     }
-  } else if (degradedEmittedAt !== null) {
-    degradedEmittedAt = null;
+  } else if (getDegradedEmittedAt() !== null) {
+    setDegradedEmittedAt(null);
   }
 
   let watchdogWoke = false;
@@ -1693,7 +1656,7 @@ export function runWatchdogTick() {
   }
 
   if (watchdogWoke) {
-    lastWakeAt = new Date().toISOString();
+    setLastWakeAt(new Date().toISOString());
     persistBrokerState();
   }
 }
@@ -1842,7 +1805,7 @@ export function processEvent(event) {
   }
 
   if (directMatches.length > 0) {
-    lastWakeAt = new Date().toISOString();
+    setLastWakeAt(new Date().toISOString());
     persistBrokerState();
     return;
   }
@@ -2015,15 +1978,15 @@ export function buildBrokerState({ probe } = {}) {
 
   return {
     pid: process.pid,
-    startedAt: brokerStartedAt ?? new Date().toISOString(),
+    startedAt: getBrokerStartedAt() ?? new Date().toISOString(),
     // CTL-447: enumerate the deterministic interest types this broker supports
     // so `catalyst-broker status --json` can advertise them to clients.
     supportedInterestTypes: [...DETERMINISTIC_INTEREST_TYPES],
     // CTL-352: liveness fields so the HUD pill and operators can detect a
     // silently-dead broker (interests.size === 0 with stale lastWakeAt).
     interestCount: interests.size,
-    lastWakeAt,
-    lastRegisterAt,
+    lastWakeAt: getLastWakeAt(),
+    lastRegisterAt: getLastRegisterAt(),
     // CTL-403: active wait-loop sessions (empty array when no active waits).
     waitingSessions: activeWaiting,
     // CTL-421: expose prose enabled state so the HUD can badge inactive prose interests.
@@ -2212,7 +2175,7 @@ function main() {
   // CTL-352: pin brokerStartedAt before any state mutation so subsequent
   // buildBrokerState() / runWatchdogTick() callers compute uptime against
   // a stable instant rather than now().
-  brokerStartedAt = new Date().toISOString();
+  setBrokerStartedAt(new Date().toISOString());
 
   logKeyHealthAtStartup();
 
