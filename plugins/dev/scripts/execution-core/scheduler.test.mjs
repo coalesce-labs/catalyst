@@ -4,7 +4,13 @@
 // Phase 3 adds the selection-core blocks; Phases 4-5 extend this same file.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  appendFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,14 +24,27 @@ import {
   deriveAdvancement,
   listStartedTickets,
   schedulerTick,
+  startScheduler,
+  stopScheduler,
+  __resetForTests,
 } from "./scheduler.mjs";
 
 let orchDir;
+let catalystDir;
+let prevCatalystDir;
 beforeEach(() => {
   orchDir = mkdtempSync(join(tmpdir(), "sched-"));
+  // Redirect CATALYST_DIR so getEventLogPath() resolves under a fixture —
+  // the same redirect monitor.test.mjs uses.
+  prevCatalystDir = process.env.CATALYST_DIR;
+  catalystDir = mkdtempSync(join(tmpdir(), "sched-cat-"));
+  process.env.CATALYST_DIR = catalystDir;
 });
 afterEach(() => {
   rmSync(orchDir, { recursive: true, force: true });
+  if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+  else process.env.CATALYST_DIR = prevCatalystDir;
+  rmSync(catalystDir, { recursive: true, force: true });
 });
 
 function writeSignal(ticket, phase, status) {
@@ -35,6 +54,16 @@ function writeSignal(ticket, phase, status) {
     join(dir, `phase-${phase}.json`),
     JSON.stringify({ ticket, phase, status }),
   );
+}
+
+// appendToEventLog — mkdirSync <CATALYST_DIR>/events/ and append to the
+// current UTC YYYY-MM.jsonl (the path getEventLogPath() resolves).
+function appendToEventLog(line) {
+  const dir = join(catalystDir, "events");
+  mkdirSync(dir, { recursive: true });
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  appendFileSync(join(dir, `${ym}.jsonl`), line);
 }
 
 describe("readPhaseSignals", () => {
@@ -301,5 +330,84 @@ describe("listStartedTickets", () => {
       "CTL-2",
       "CTL-3",
     ]);
+  });
+});
+
+// ── Phase 5: the pull-loop daemon ──
+
+describe("startScheduler / stopScheduler", () => {
+  afterEach(() => __resetForTests());
+
+  test("startScheduler runs one tick immediately", () => {
+    const dispatch = fakeDispatch();
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ maxParallel: 1 }),
+    );
+    writeSignal("CTL-1", "triage", "done"); // research owed
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [],
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+    expect(dispatch.calls).toEqual([
+      { orchDir, ticket: "CTL-1", phase: "research" },
+    ]);
+  });
+
+  test("the periodic timer fires another tick", async () => {
+    const dispatch = fakeDispatch();
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ maxParallel: 1 }),
+    );
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [],
+      tickIntervalMs: 20,
+      debounceMs: 5,
+    });
+    writeSignal("CTL-2", "triage", "done"); // becomes owed after the first tick
+    await new Promise((r) => setTimeout(r, 60));
+    expect(dispatch.calls.some((c) => c.ticket === "CTL-2")).toBe(true);
+  });
+
+  test("an event-log change triggers a debounced tick", async () => {
+    const dispatch = fakeDispatch();
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ maxParallel: 1 }),
+    );
+    // Pre-create the event log so the later append is an in-place change
+    // (fs.watch fires `change`), not a create (`rename`). In production the
+    // event log always exists — workers append to it continuously.
+    appendToEventLog("");
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [],
+      tickIntervalMs: 60_000,
+      debounceMs: 10,
+    });
+    writeSignal("CTL-3", "triage", "done");
+    // Appending to the event log must wake the scheduler. The await covers
+    // macOS FSEvents watcher latency (observed ~40ms) plus the debounce.
+    appendToEventLog('{"event":"phase.triage.complete.CTL-3"}\n');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(
+      dispatch.calls.some(
+        (c) => c.ticket === "CTL-3" && c.phase === "research",
+      ),
+    ).toBe(true);
+  });
+
+  test("stopScheduler is idempotent and safe before start", () => {
+    expect(() => {
+      stopScheduler();
+      stopScheduler();
+    }).not.toThrow();
   });
 });

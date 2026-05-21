@@ -6,17 +6,21 @@
 // tickets are advanced phase-by-phase through the FSM. Every dispatch is
 // idempotent (signal-file existence guard).
 //
+// Daemon correctness rests on the periodic tick — every action is re-derived
+// from filesystem state, so the periodic pass alone guarantees forward
+// progress. The event-log watcher is purely a latency optimization.
+//
 // Composes: lib/dependency-graph.mjs (readiness), scheduler-rank.mjs (ranking),
 // lib/phase-fsm.mjs (phase advancement, Phase 4), eligible-set.mjs (candidates).
 
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, watch, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyzeDependencyGraph } from "../lib/dependency-graph.mjs";
 import { PHASES, transition, isTerminal } from "../lib/phase-fsm.mjs";
 import { rankTickets } from "./scheduler-rank.mjs";
-import { log, getEligibleDir } from "./config.mjs";
+import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -222,3 +226,109 @@ export function schedulerTick(orchDir, { readEligible, dispatch = defaultDispatc
 
   return { advanced, dispatched, freeSlots, ready: ready.map((t) => t.identifier) };
 }
+
+// ─── Phase 5: the pull-loop daemon ───
+
+// Periodic tick interval — the correctness backstop. The event fast path makes
+// the daemon react sooner; this guarantees forward progress if events are missed.
+const TICK_INTERVAL_MS = Number(process.env.SCHEDULER_TICK_INTERVAL_MS) || 30_000;
+// Debounce window — a burst of event-log appends coalesces into one tick.
+const TICK_DEBOUNCE_MS = Number(process.env.SCHEDULER_DEBOUNCE_MS) || 2_000;
+
+// --- daemon module state ---
+let tickTimer = null;
+let debounceTimer = null;
+let watcher = null;
+let runningOpts = null;
+
+function runTick() {
+  try {
+    schedulerTick(runningOpts.orchDir, {
+      readEligible: runningOpts.readEligible,
+      dispatch: runningOpts.dispatch,
+    });
+  } catch (err) {
+    // A tick must never crash the daemon — log and let the next tick retry.
+    log.error({ err: err.message }, "scheduler: tick failed");
+  }
+}
+
+function scheduleDebouncedTick(debounceMs) {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(runTick, debounceMs);
+}
+
+// startScheduler — immediate authoritative tick, arm the periodic timer, then
+// start the event-log fast path. `dispatch` / `readEligible` are injectable so
+// a test drives a hermetic daemon.
+export function startScheduler({
+  orchDir,
+  dispatch,
+  readEligible,
+  tickIntervalMs = TICK_INTERVAL_MS,
+  debounceMs = TICK_DEBOUNCE_MS,
+} = {}) {
+  if (!orchDir) throw new Error("startScheduler: orchDir is required");
+  runningOpts = { orchDir, dispatch, readEligible };
+
+  runTick(); // authoritative initial pass
+  tickTimer = setInterval(runTick, tickIntervalMs);
+
+  // Event fast path: any change to the event log wakes a debounced tick. No
+  // parsing — schedulerTick re-derives every action from filesystem state, so
+  // "something changed, re-tick" is both correct and cheap.
+  //
+  // The event type is deliberately NOT filtered: macOS fs.watch on a directory
+  // reports `rename` even for in-place appends, while Linux reports `change`.
+  // Reacting to either keeps the fast path working on both platforms; the
+  // periodic tick is the correctness backstop regardless.
+  const eventsDir = dirname(getEventLogPath());
+  mkdirSync(eventsDir, { recursive: true });
+  watcher = watch(eventsDir, (_eventType, filename) => {
+    if (filename !== null && filename !== basename(getEventLogPath())) return;
+    scheduleDebouncedTick(debounceMs);
+  });
+}
+
+// stopScheduler — clear the timer, the debounce timer, and the watcher.
+// Idempotent and safe to call before startScheduler.
+export function stopScheduler() {
+  if (tickTimer) {
+    clearInterval(tickTimer);
+    tickTimer = null;
+  }
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+  watcher?.close();
+  watcher = null;
+  runningOpts = null;
+}
+
+// __resetForTests — clear daemon state between unit tests. Not part of the
+// public contract; the index.mjs barrel does not re-export it.
+export function __resetForTests() {
+  stopScheduler();
+}
+
+// --- standalone entrypoint (operator dry-run / CTL-554 wires the real daemon) ---
+function main() {
+  const idx = process.argv.indexOf("--orch-dir");
+  const orchDir = idx >= 0 ? process.argv[idx + 1] : process.env.CATALYST_ORCHESTRATOR_DIR;
+  if (!orchDir) {
+    console.error("usage: bun scheduler.mjs --orch-dir <path>");
+    process.exit(1);
+  }
+  log.info({ orchDir }, "execution-core scheduler starting");
+  startScheduler({ orchDir });
+  const shutdown = (sig) => {
+    log.info({ sig }, "execution-core scheduler shutting down");
+    stopScheduler();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+if (import.meta.main) main();
