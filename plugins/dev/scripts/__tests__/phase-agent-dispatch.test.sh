@@ -669,6 +669,15 @@ SIGNAL="${WORKER_DIR}/phase-triage.json"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "launch failure leaves signal at stalled"
 assert_eq "false" "$(jq -r 'has("failureReason")' "$SIGNAL")" \
 	"launch-failure signal has no failureReason (Loop 2 redispatch-eligible)"
+assert_eq "claude-bg-launch-failed" "$(jq -r '.attentionReason' "$SIGNAL")" \
+	"launch-failure signal records attentionReason (the cause string, not failureReason)"
+# CTL-511: the signal file says "stalled" (recovery-eligible) but the dispatch
+# stdout JSON still reports status="failed" — the synchronous dispatch attempt
+# DID fail. The two intentionally diverge: orchestrate-revive reads the signal
+# file, not dispatch stdout. Pin both so a future change cannot silently
+# collapse them.
+assert_eq "failed" "$(jq -r '.status' "${TEST_DIR}/t16.out")" \
+	"dispatch stdout reports status=failed (distinct from the stalled signal file)"
 if grep -rqs '"phase.triage.failed.CTL-100"' "${CATALYST_DIR}/events/"; then
 	pass "launch failure emits phase.triage.failed.CTL-100 event"
 else
@@ -694,6 +703,8 @@ SIGNAL="${WORKER_DIR}/phase-triage.json"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "empty job id leaves signal at stalled"
 assert_eq "false" "$(jq -r 'has("failureReason")' "$SIGNAL")" \
 	"empty-job-id signal has no failureReason (Loop 2 redispatch-eligible)"
+assert_eq "claude-bg-empty-job-id" "$(jq -r '.attentionReason' "$SIGNAL")" \
+	"empty-job-id signal records attentionReason (the cause string, not failureReason)"
 if grep -rqs '"phase.triage.failed.CTL-100"' "${CATALYST_DIR}/events/"; then
 	pass "empty job id emits phase.triage.failed.CTL-100 event"
 else
@@ -709,6 +720,21 @@ SIGNAL="${WORKER_DIR}/phase-triage.json"
 assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "successful launch leaves signal at running"
 assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" "successful launch stdout status=running"
 assert_eq "f124220a" "$(jq -r '.bg_job_id' "$SIGNAL")" "successful launch records bg_job_id"
+
+echo ""
+echo "Test 19 (CTL-511): launch failure still flips signal to stalled when EMIT_COMPLETE is absent"
+# The signal-file write (step 1) must not depend on the event emit (step 2).
+# If EMIT_COMPLETE resolution ever breaks, recovery must degrade to the slow
+# healthcheck path — NOT silently leave the signal frozen at "dispatched".
+fresh_env t19
+export CLAUDE_STUB_EXIT=1
+export CATALYST_EMIT_COMPLETE="${TEST_DIR}/no-such-emit-complete"
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>/dev/null 2>&1
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" \
+	"signal still reaches stalled when EMIT_COMPLETE is missing (step 1 independent of step 2)"
+unset CLAUDE_STUB_EXIT CATALYST_EMIT_COMPLETE
 
 echo ""
 echo "─────────────────────────────────────────────"

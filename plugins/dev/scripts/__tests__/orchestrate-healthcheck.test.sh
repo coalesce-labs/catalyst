@@ -283,6 +283,12 @@ if [ "$HAS_FR" = "false" ]; then
 else
 	fail "stalled signal has no failureReason" "got has: $HAS_FR"
 fi
+AR=$(jq -r '.attentionReason' "${ORCH_DIR}/workers/CTL-904/phase-monitor-merge.json")
+if [ "$AR" = "state-json-missing" ]; then
+	pass "stalled signal records attentionReason=state-json-missing (the cause string)"
+else
+	fail "stalled signal records attentionReason" "got: $AR"
+fi
 if grep -rqs '"phase.monitor-merge.failed.CTL-904"' "${CATALYST_DIR}/events/"; then
 	pass "healthcheck emits phase.monitor-merge.failed.CTL-904 to wake the orchestrator"
 else
@@ -325,6 +331,49 @@ if grep -rqs '"phase.implement.failed.CTL-906"' "${CATALYST_DIR}/events/"; then
 	fail "--dry-run emitted a phase.*.failed event"
 else
 	pass "--dry-run emits no phase.*.failed event"
+fi
+unset CATALYST_DIR
+scratch_teardown
+
+echo "test (CTL-511): phase signal still flips to stalled when EMIT_COMPLETE is missing"
+# The signal-file write must not depend on the event emit. If EMIT_COMPLETE
+# resolution breaks, recovery must degrade to the slow path — not silently
+# leave the signal frozen.
+scratch_setup
+export CATALYST_DIR="${SCRATCH}/catalyst"
+mkdir -p "${CATALYST_DIR}/events"
+make_phase_signal "CTL-908" "verify" "running" "bg-ctl511-e"
+export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"
+mkdir -p "${SCRATCH}/jobs"
+export CATALYST_EMIT_COMPLETE="${SCRATCH}/no-such-emit-complete"
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >/dev/null 2>&1
+ST=$(phase_status "CTL-908" "verify")
+if [ "$ST" = "stalled" ]; then
+	pass "signal still reaches stalled when EMIT_COMPLETE is missing (stall write independent of emit)"
+else
+	fail "signal flip depends on EMIT_COMPLETE" "got: $ST"
+fi
+unset CATALYST_DIR CATALYST_EMIT_COMPLETE
+scratch_teardown
+
+echo "test (CTL-511 Phase 4): healthcheck is idempotent — two runs emit exactly one phase.*.failed"
+# Phase 4 wires healthcheck into every reactive scan; its safety rests on
+# idempotency. The second run must see status="stalled" (a terminal state) and
+# skip — emitting no duplicate event, so the reactive-scan call site cannot
+# cause a wake storm.
+scratch_setup
+export CATALYST_DIR="${SCRATCH}/catalyst"
+mkdir -p "${CATALYST_DIR}/events"
+make_phase_signal "CTL-907" "monitor-merge" "running" "bg-ctl511-d"
+export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"
+mkdir -p "${SCRATCH}/jobs"
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >/dev/null 2>&1
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >/dev/null 2>&1
+EVT_COUNT=$(grep -rhs '"phase.monitor-merge.failed.CTL-907"' "${CATALYST_DIR}/events/" | wc -l | tr -d ' ')
+if [ "$EVT_COUNT" = "1" ]; then
+	pass "two healthcheck runs emit exactly one phase.*.failed (stalled signal skipped on rerun)"
+else
+	fail "healthcheck not idempotent across runs" "phase.*.failed count=$EVT_COUNT (expected 1)"
 fi
 unset CATALYST_DIR
 scratch_teardown
