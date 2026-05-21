@@ -113,6 +113,66 @@ writes the results to `.catalyst/config.json`. Re-run with `--force` after chang
 in Linear. The cache is optional — `linear-transition.sh` falls back to name-based calls when
 `stateIds` is absent.
 
+### Execution-Core State Contract
+
+When `orchestration.dispatchMode` is `"execution-core"`, the team's Linear
+workflow states become the daemon's state machine, and `stateMap` is rewritten
+to a fixed **9-phase → 5-state collapse**. Setup tooling owns this contract — it
+is not a one-off migration.
+
+| `stateMap` key | Execution-core value |
+| -------------- | -------------------- |
+| `backlog`      | `Backlog`            |
+| `todo`         | `Ready`              |
+| `triage`       | `Triage`             |
+| `research`     | `Research`           |
+| `planning`     | `Plan`               |
+| `inProgress`   | `Implement`          |
+| `verifying`    | `Validate`           |
+| `reviewing`    | `Validate`           |
+| `inReview`     | `PR`                 |
+| `done`         | `Done`               |
+| `canceled`     | `Canceled`           |
+
+`verify` + `review` collapse to `Validate`; `pr` + `monitor-merge` +
+`monitor-deploy` collapse to `PR`. The six **contract states** —
+`Ready`, `Research`, `Plan`, `Implement`, `Validate`, `PR` (`Triage` already
+exists in every team workflow) — are ensured in Linear by
+`plugins/dev/scripts/setup-execution-core-states.sh`. That script is idempotent,
+runs once per team, and is invoked automatically by `setup-catalyst.sh` for
+`execution-core` repos. It writes the collapse `stateMap`, refreshes `stateIds`,
+and upserts the team's registry entry. Run it directly with `--dry-run --json`
+to preview the contract without writing anything.
+
+### Central Registry (`~/catalyst/execution-core/registry.json`)
+
+For `execution-core` teams, the central registry is the single source of
+`team → repoRoot → eligibleQuery`. It is **execution-core only** — `phase-agents`
+and `oneshot-legacy` repos never write or read it. Schema:
+
+```jsonc
+{
+  "projects": [
+    {
+      "team": "CTL",
+      "repoRoot": "/abs/path/to/repo",
+      "eligibleQuery": { "status": "Ready", "project": null, "label": null, "priority": null }
+    }
+  ]
+}
+```
+
+All registry access flows through `plugins/dev/scripts/execution-core/registry.mjs`
+(`listProjects`, `getProjectConfig`, `upsertProjectEntry`, plus a
+`list | get | upsert` CLI) so the access path stays a single seam. The registry
+is the successor to the per-repo enrollment records under
+`~/catalyst/execution-core/projects/`.
+
+`check-project-setup.sh` adds an **execution-core verification check**: when a
+repo is `dispatchMode: execution-core`, it warns if any contract state is
+missing from `stateMap`/`stateIds` or if no registry entry exists for the team,
+pointing the operator at `setup-catalyst` / `setup-execution-core-states.sh`.
+
 ### Plain-Language State Flow
 
 In most teams, the intended meaning is:
