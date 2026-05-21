@@ -4,13 +4,7 @@
 // Phase 3 adds the selection-core blocks; Phases 4-5 extend this same file.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import {
-  mkdtempSync,
-  rmSync,
-  mkdirSync,
-  writeFileSync,
-  appendFileSync,
-} from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -24,6 +18,7 @@ import {
   deriveAdvancement,
   listStartedTickets,
   schedulerTick,
+  readAllEligibleTickets,
   startScheduler,
   stopScheduler,
   __resetForTests,
@@ -50,10 +45,7 @@ afterEach(() => {
 function writeSignal(ticket, phase, status) {
   const dir = join(orchDir, "workers", ticket);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    join(dir, `phase-${phase}.json`),
-    JSON.stringify({ ticket, phase, status }),
-  );
+  writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, status }));
 }
 
 // appendToEventLog — mkdirSync <CATALYST_DIR>/events/ and append to the
@@ -64,6 +56,19 @@ function appendToEventLog(line) {
   const now = new Date();
   const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
   appendFileSync(join(dir, `${ym}.jsonl`), line);
+}
+
+// eligibleDir / writeEligibleProjection — getEligibleDir() resolves to
+// <CATALYST_DIR>/execution-core/eligible (config.mjs); write a per-project
+// projection there so readAllEligibleTickets() reads a fixture. `raw` writes
+// arbitrary file content (used for the malformed-JSON case).
+const eligibleDir = () => join(catalystDir, "execution-core", "eligible");
+function writeEligibleProjection(projectKey, body, { raw = false } = {}) {
+  mkdirSync(eligibleDir(), { recursive: true });
+  writeFileSync(
+    join(eligibleDir(), `${projectKey}.json`),
+    raw ? body : JSON.stringify(body),
+  );
 }
 
 describe("readPhaseSignals", () => {
@@ -82,14 +87,10 @@ describe("readPhaseSignals", () => {
 
 describe("isTicketInFlight", () => {
   test("a non-terminal signal means in-flight", () => {
-    expect(isTicketInFlight({ triage: "done", research: "running" })).toBe(
-      true,
-    );
+    expect(isTicketInFlight({ triage: "done", research: "running" })).toBe(true);
   });
   test("plan done + no later signal (advance window) is still in-flight", () => {
-    expect(
-      isTicketInFlight({ triage: "done", research: "done", plan: "done" }),
-    ).toBe(true);
+    expect(isTicketInFlight({ triage: "done", research: "done", plan: "done" })).toBe(true);
   });
   test("monitor-deploy done is terminal success → NOT in-flight", () => {
     expect(isTicketInFlight({ "monitor-deploy": "done" })).toBe(false);
@@ -112,10 +113,7 @@ describe("listInFlightTickets / readMaxParallel / computeFreeSlots", () => {
   });
   test("readMaxParallel reads state.json, defaults to 1", () => {
     expect(readMaxParallel(orchDir)).toBe(1);
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 3 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
     expect(readMaxParallel(orchDir)).toBe(3);
   });
   test("computeFreeSlots never goes negative", () => {
@@ -154,6 +152,31 @@ describe("computeReadyTickets", () => {
   test("empty eligible set → empty ready set", () => {
     expect(computeReadyTickets([])).toEqual([]);
   });
+  test("a blocker outside the eligible set does not block (finished/non-Todo)", () => {
+    // The eligible set is all-Todo; a finished (Done/Canceled) or otherwise
+    // non-Todo blocker is simply absent from it. buildDependencyEdges drops
+    // any edge with an out-of-set endpoint, so CTL-1's blocked_by edge to the
+    // absent CTL-99 is dropped and CTL-1 is ready.
+    const ready = computeReadyTickets([
+      tk("CTL-1", 2, "x", {
+        nodes: [{ type: "blocked_by", relatedIssue: { identifier: "CTL-99" } }],
+      }),
+    ]);
+    expect(ready.map((t) => t.identifier)).toEqual(["CTL-1"]);
+  });
+  test("a mutual dependency cycle leaves both tickets blocked — no crash", () => {
+    // CTL-A blocked_by CTL-B and CTL-B blocked_by CTL-A. The scheduler must
+    // tolerate the cycle: both partition as blocked, neither is dispatched.
+    const ready = computeReadyTickets([
+      tk("CTL-A", 1, "x", {
+        nodes: [{ type: "blocked_by", relatedIssue: { identifier: "CTL-B" } }],
+      }),
+      tk("CTL-B", 1, "x", {
+        nodes: [{ type: "blocked_by", relatedIssue: { identifier: "CTL-A" } }],
+      }),
+    ]);
+    expect(ready).toEqual([]);
+  });
 });
 
 describe("selectDispatchable", () => {
@@ -165,6 +188,10 @@ describe("selectDispatchable", () => {
   });
   test("freeSlots 0 → selects nothing", () => {
     expect(selectDispatchable([tk("A")], new Set(), 0)).toEqual([]);
+  });
+  test("caps the selection at freeSlots when more tickets are ready", () => {
+    const ranked = [tk("A"), tk("B"), tk("C")];
+    expect(selectDispatchable(ranked, new Set(), 1).map((t) => t.identifier)).toEqual(["A"]);
   });
 });
 
@@ -184,9 +211,7 @@ function fakeDispatch({ code = 0 } = {}) {
 describe("deriveAdvancement", () => {
   test("latest phase done → returns the FSM successor", () => {
     expect(deriveAdvancement({ triage: "done" })).toBe("research");
-    expect(
-      deriveAdvancement({ triage: "done", research: "done", plan: "done" }),
-    ).toBe("implement");
+    expect(deriveAdvancement({ triage: "done", research: "done", plan: "done" })).toBe("implement");
   });
   test("latest phase not done → null (nothing owed)", () => {
     expect(deriveAdvancement({ triage: "done", research: "running" })).toBeNull();
@@ -198,6 +223,9 @@ describe("deriveAdvancement", () => {
   test("monitor-deploy done → null (pipeline terminal)", () => {
     expect(deriveAdvancement({ "monitor-deploy": "done" })).toBeNull();
   });
+  test("latest phase failed → null (nothing owed — revive is another owner's job)", () => {
+    expect(deriveAdvancement({ implement: "failed" })).toBeNull();
+  });
   test("no signals → null", () => {
     expect(deriveAdvancement({})).toBeNull();
   });
@@ -205,10 +233,7 @@ describe("deriveAdvancement", () => {
 
 describe("schedulerTick — new-work pull", () => {
   test("dispatches triage for the top-ranked ready ticket into a free slot", () => {
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 2 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     const dispatch = fakeDispatch();
     const eligible = [
       {
@@ -236,10 +261,7 @@ describe("schedulerTick — new-work pull", () => {
   });
 
   test("respects maxParallel — no dispatch when slots are full", () => {
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 1 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     writeSignal("CTL-1", "implement", "running"); // 1 in-flight, ceiling 1
     const dispatch = fakeDispatch();
     const eligible = [
@@ -258,10 +280,7 @@ describe("schedulerTick — new-work pull", () => {
   });
 
   test("is idempotent — a second tick re-dispatches nothing", () => {
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 2 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     const eligible = [
       {
         identifier: "CTL-5",
@@ -285,24 +304,16 @@ describe("schedulerTick — new-work pull", () => {
   });
 
   test("advancement sweep dispatches the owed next phase for an in-flight ticket", () => {
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 1 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     writeSignal("CTL-7", "triage", "done"); // research is owed
     const dispatch = fakeDispatch();
     const r = schedulerTick(orchDir, { readEligible: () => [], dispatch });
-    expect(dispatch.calls).toEqual([
-      { orchDir, ticket: "CTL-7", phase: "research" },
-    ]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
   });
 
   test("a failed-dispatch (non-zero exit) is a soft skip, not a throw", () => {
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 1 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 1 });
     const eligible = [
       {
@@ -318,6 +329,35 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toEqual([]); // dispatch failed → not recorded
     // no throw — the tick completes
   });
+
+  test("one tick both advances an in-flight ticket and pulls new work", () => {
+    // maxParallel 2; CTL-7 in-flight at triage:done (advances to research,
+    // still 1 in-flight); 1 free slot remains → CTL-X is pulled. The
+    // advancement sweep must NOT consume the slot the pull then fills.
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ maxParallel: 2 }),
+    );
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const eligible = [
+      {
+        identifier: "CTL-X",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    const r = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    expect(r.dispatched).toEqual(["CTL-X"]);
+    expect(dispatch.calls).toEqual([
+      { orchDir, ticket: "CTL-7", phase: "research" },
+      { orchDir, ticket: "CTL-X", phase: "triage" },
+    ]);
+  });
 });
 
 describe("listStartedTickets", () => {
@@ -325,11 +365,34 @@ describe("listStartedTickets", () => {
     writeSignal("CTL-1", "implement", "running");
     writeSignal("CTL-2", "triage", "failed");
     writeSignal("CTL-3", "monitor-deploy", "done");
-    expect([...listStartedTickets(orchDir)].sort()).toEqual([
-      "CTL-1",
-      "CTL-2",
-      "CTL-3",
-    ]);
+    expect([...listStartedTickets(orchDir)].sort()).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+  });
+});
+
+describe("readAllEligibleTickets", () => {
+  test("returns [] when the eligible dir does not exist", () => {
+    expect(readAllEligibleTickets()).toEqual([]);
+  });
+  test("concatenates tickets across every per-project projection", () => {
+    writeEligibleProjection("alpha", { tickets: [{ identifier: "A-1" }] });
+    writeEligibleProjection("beta", {
+      tickets: [{ identifier: "B-1" }, { identifier: "B-2" }],
+    });
+    expect(
+      readAllEligibleTickets()
+        .map((t) => t.identifier)
+        .sort(),
+    ).toEqual(["A-1", "B-1", "B-2"]);
+  });
+  test("skips a malformed projection file and still returns the valid ones", () => {
+    writeEligibleProjection("good", { tickets: [{ identifier: "G-1" }] });
+    writeEligibleProjection("bad", "{ not valid json", { raw: true });
+    expect(readAllEligibleTickets().map((t) => t.identifier)).toEqual(["G-1"]);
+  });
+  test("skips a projection whose `tickets` field is not an array", () => {
+    writeEligibleProjection("shapeless", { tickets: "nope" });
+    writeEligibleProjection("ok", { tickets: [{ identifier: "OK-1" }] });
+    expect(readAllEligibleTickets().map((t) => t.identifier)).toEqual(["OK-1"]);
   });
 });
 
@@ -340,10 +403,7 @@ describe("startScheduler / stopScheduler", () => {
 
   test("startScheduler runs one tick immediately", () => {
     const dispatch = fakeDispatch();
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 1 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     writeSignal("CTL-1", "triage", "done"); // research owed
     startScheduler({
       orchDir,
@@ -352,17 +412,12 @@ describe("startScheduler / stopScheduler", () => {
       tickIntervalMs: 60_000,
       debounceMs: 5,
     });
-    expect(dispatch.calls).toEqual([
-      { orchDir, ticket: "CTL-1", phase: "research" },
-    ]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-1", phase: "research" }]);
   });
 
   test("the periodic timer fires another tick", async () => {
     const dispatch = fakeDispatch();
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 1 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     startScheduler({
       orchDir,
       dispatch,
@@ -377,10 +432,7 @@ describe("startScheduler / stopScheduler", () => {
 
   test("an event-log change triggers a debounced tick", async () => {
     const dispatch = fakeDispatch();
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 1 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     // Pre-create the event log so the later append is an in-place change
     // (fs.watch fires `change`), not a create (`rename`). In production the
     // event log always exists — workers append to it continuously.
@@ -397,11 +449,7 @@ describe("startScheduler / stopScheduler", () => {
     // macOS FSEvents watcher latency (observed ~40ms) plus the debounce.
     appendToEventLog('{"event":"phase.triage.complete.CTL-3"}\n');
     await new Promise((r) => setTimeout(r, 400));
-    expect(
-      dispatch.calls.some(
-        (c) => c.ticket === "CTL-3" && c.phase === "research",
-      ),
-    ).toBe(true);
+    expect(dispatch.calls.some((c) => c.ticket === "CTL-3" && c.phase === "research")).toBe(true);
   });
 
   test("stopScheduler is idempotent and safe before start", () => {
