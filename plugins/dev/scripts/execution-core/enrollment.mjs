@@ -90,6 +90,10 @@ export function loadProjectConfig(repoRoot) {
   return {
     team: eligibleQuery.team ?? catalyst?.linear?.teamKey ?? null,
     status: eligibleQuery.status ?? "Todo",
+    // CTL-565: the Linear state whose →transition one-shot-dispatches the
+    // triage phase agent. Distinct from `status` (the scheduler-eligible
+    // state). Defaults to "Triage".
+    triageStatus: eligibleQuery.triageStatus ?? "Triage",
     project: eligibleQuery.project ?? null,
     label: eligibleQuery.label ?? null,
     priority: eligibleQuery.priority ?? null,

@@ -136,6 +136,7 @@ describe("loadProjectConfig", () => {
     expect(q).toEqual({
       team: "ENG",
       status: "Todo",
+      triageStatus: "Triage",
       project: "Platform",
       label: "ready",
       priority: 2,
@@ -173,6 +174,28 @@ describe("loadProjectConfig", () => {
     expect(q.project).toBeNull();
     expect(q.label).toBeNull();
     expect(q.priority).toBeNull();
+  });
+
+  test("defaults triageStatus to 'Triage' when absent (CTL-565)", () => {
+    const repoRoot = writeRepo({
+      linear: { teamKey: "ENG" },
+      orchestration: {
+        executionCore: { eligibleQuery: { team: "ENG", status: "Ready" } },
+      },
+    });
+    expect(loadProjectConfig(repoRoot).triageStatus).toBe("Triage");
+  });
+
+  test("honors an explicit eligibleQuery.triageStatus override (CTL-565)", () => {
+    const repoRoot = writeRepo({
+      linear: { teamKey: "ENG" },
+      orchestration: {
+        executionCore: {
+          eligibleQuery: { team: "ENG", status: "Ready", triageStatus: "Intake" },
+        },
+      },
+    });
+    expect(loadProjectConfig(repoRoot).triageStatus).toBe("Intake");
   });
 
   test("returns null (project skipped) when executionCore.eligibleQuery is absent", () => {

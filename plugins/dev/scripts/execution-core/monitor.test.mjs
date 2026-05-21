@@ -1,7 +1,7 @@
 // Unit tests for the execution-core monitor core (CTL-535 Phase 4).
 // Run: cd plugins/dev/scripts/execution-core && bun test monitor.test.mjs
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import {
   mkdtempSync,
   rmSync,
@@ -236,6 +236,131 @@ describe("handleStateChangedEvent", () => {
     await sleep(60);
     expect(exec.calls).toBe(0);
     expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-1"]);
+  });
+});
+
+// --- CTL-565 Phase 1: three-way toState split + triage one-shot dispatch -----
+
+describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
+  const orchDir = "/orch";
+
+  test("toState === triageStatus one-shot-dispatches the triage phase agent", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" }); // triageStatus defaults to "Triage"
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+      },
+      { dispatch, orchDir },
+    );
+    expect(dispatch).toHaveBeenCalledWith({ orchDir, ticket: "ENG-1", phase: "triage" });
+  });
+
+  test("toState === eligible status (Ready) schedules a reconcile, never a triage dispatch", async () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-9", teamKey: "ENG", toState: "Ready" },
+      },
+      { exec, dispatch, orchDir, debounceMs: 30 },
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+    await sleep(70);
+    expect(exec.calls).toBe(1); // the debounced reconcile ran
+  });
+
+  test("toState that is neither Triage nor Ready fast-path-removes the ticket", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    setProjectEligible("alpha", [node("ENG-1"), node("ENG-2")], {
+      source: "reconcile",
+      query: { team: "ENG", status: "Ready" },
+    });
+    handleStateChangedEvent({
+      event: "linear.issue.state_changed",
+      detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
+    });
+    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+  });
+
+  test("a triage dispatch failure is logged and never throws", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    const dispatch = () => ({ code: 9, stderr: "x" });
+    expect(() =>
+      handleStateChangedEvent(
+        {
+          event: "linear.issue.state_changed",
+          detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+        },
+        { dispatch, orchDir },
+      ),
+    ).not.toThrow();
+  });
+
+  test("a →Triage transition with no orchDir wired does not throw or dispatch", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    expect(() =>
+      handleStateChangedEvent(
+        {
+          event: "linear.issue.state_changed",
+          detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+        },
+        { dispatch },
+      ),
+    ).not.toThrow();
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("a drag-out (toState neither Triage nor Ready) invokes abortWorker", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    const abortWorker = mock(() => ({ aborted: true }));
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
+      },
+      { orchDir, abortWorker },
+    );
+    expect(abortWorker).toHaveBeenCalledWith("/orch", "ENG-1", {
+      projectKey: expect.any(String),
+      repoRoot: expect.any(String),
+    });
+  });
+
+  test("a drag-out still removes the ticket from the eligible projection", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    setProjectEligible("alpha", [node("ENG-1"), node("ENG-2")], {
+      source: "reconcile",
+      query: { team: "ENG", status: "Ready" },
+    });
+    const abortWorker = mock(() => ({ aborted: true }));
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Canceled" },
+      },
+      { orchDir, abortWorker },
+    );
+    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+  });
+
+  test("a drag-out with no orchDir wired removes the ticket and does not throw", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    const abortWorker = mock(() => ({ aborted: true }));
+    expect(() =>
+      handleStateChangedEvent(
+        {
+          event: "linear.issue.state_changed",
+          detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
+        },
+        { abortWorker },
+      ),
+    ).not.toThrow();
+    expect(abortWorker).not.toHaveBeenCalled(); // no orchDir → abort skipped
   });
 });
 

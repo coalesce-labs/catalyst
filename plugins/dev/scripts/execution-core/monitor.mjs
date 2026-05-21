@@ -23,6 +23,8 @@ import { listEnrolledProjects, loadProjectConfig } from "./enrollment.mjs";
 import { runEligibleQuery } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject } from "./eligible-set.mjs";
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
+import { dispatchTicket } from "./dispatch.mjs";
+import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
 
 // --- Event parsing -------------------------------------------------------
 
@@ -115,25 +117,65 @@ const dirtyTimers = new Map();
 
 // handleStateChangedEvent — fold one state_changed event into the eligible
 // sets of every project whose query team matches the event's team.
+//
+// CTL-565 two-state trigger: the toState branch is a three-way split.
+//   →triageStatus  one-shot-dispatches the triage phase agent (NOT the
+//                  eligible set — a Triage ticket is never scheduler-pulled).
+//   →status (Ready) reconciles into the scheduler-eligible set.
+//   anything else   the leave-path — a confident immediate removal.
 export function handleStateChangedEvent(
   event,
-  { exec, debounceMs = EVENT_DEBOUNCE_MS } = {},
+  {
+    exec,
+    debounceMs = EVENT_DEBOUNCE_MS,
+    dispatch,
+    orchDir,
+    abortWorker = defaultAbortWorker,
+  } = {},
 ) {
   const parsed = parseStateChangedEvent(event);
   if (!parsed) return;
   for (const p of listEnrolledProjects()) {
     const query = loadProjectConfig(p.repoRoot);
     if (!query || query.team !== parsed.teamKey) continue;
-    if (parsed.toState && parsed.toState !== query.status) {
-      // Left the eligible state — a confident immediate removal. removeTicket
-      // persists the projection itself; removing a non-member is a safe no-op.
-      removeTicket(p.projectKey, parsed.identifier);
-    } else {
-      // Entered (or an unknown new state) — the event cannot confirm
+
+    if (parsed.toState === query.triageStatus) {
+      // →Triage — one-shot dispatch the triage phase agent. NOT the eligible
+      // set: a Triage ticket is never scheduler-pulled. Idempotent downstream
+      // (phase-agent-dispatch no-ops an existing signal file).
+      dispatchTriage(parsed.identifier, { dispatch, orchDir });
+    } else if (!parsed.toState || parsed.toState === query.status) {
+      // →Ready (or an unknown new state) — the event cannot confirm
       // project/label/priority scoping, so a full poll is required. Debounce
       // it so a burst of events coalesces into one reconcile.
       scheduleDirtyReconcile(p.projectKey, p.repoRoot, { exec, debounceMs });
+    } else {
+      // Left both watched states (→Backlog/→Canceled). Confident immediate
+      // removal, then abort any in-flight worker and tear down its worktree.
+      // removeTicket persists the projection itself; removing a non-member is
+      // a safe no-op. abortWorker no-ops when the ticket was never dispatched.
+      removeTicket(p.projectKey, parsed.identifier);
+      if (orchDir) {
+        abortWorker(orchDir, parsed.identifier, {
+          projectKey: p.projectKey,
+          repoRoot: p.repoRoot,
+        });
+      }
     }
+  }
+}
+
+// dispatchTriage — fire the triage phase agent for a →Triage transition. Guards
+// a missing orchDir (a standalone monitor with no daemon wiring) and logs —
+// never throws — a non-zero dispatch.
+function dispatchTriage(identifier, { dispatch, orchDir }) {
+  if (!orchDir) {
+    log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
+    return;
+  }
+  const r = dispatchTicket(orchDir, identifier, "triage", { dispatch });
+  if (r.code !== 0) {
+    log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
   }
 }
 
@@ -275,8 +317,15 @@ export function startMonitor({
   debounceMs = EVENT_DEBOUNCE_MS,
   reconcileIntervalMs = RECONCILE_INTERVAL_MS,
   resumeFromCursor = true,
+  orchDir,
+  dispatch,
+  abortWorker,
 } = {}) {
-  tailerOpts = { exec, debounceMs };
+  // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
+  // tailer-driven readNewEvents → handleStateChangedEvent path can one-shot-
+  // dispatch triage and abort a dragged-out worker. When abortWorker is left
+  // undefined, handleStateChangedEvent falls back to its real default.
+  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker };
   reconcileAll({ exec });
   if (resumeFromCursor) {
     seedTailerFromCursor();
