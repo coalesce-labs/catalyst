@@ -156,6 +156,50 @@ if [[ -n $CONFIG_PATH ]]; then
 		fi
 	fi
 
+	# Execution-core Linear-state contract check (CTL-564). Only when the repo is
+	# dispatchMode: execution-core: verify the 6 contract states are present in
+	# both stateMap VALUES and stateIds KEYS, and that a central registry entry
+	# exists for the team. Local-only — reads stateIds (already resolved from
+	# Linear by resolve-linear-ids.sh) and the registry file; no API call. Gaps
+	# are warnings, consistent with every other linear-config issue here.
+	DISPATCH_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // empty' "$CONFIG_PATH" 2>/dev/null)
+	if [[ $DISPATCH_MODE == "execution-core" ]]; then
+		# The contract states this check expects. Mirrors contract_states() in
+		# setup-execution-core-states.sh — keep the two in sync (different
+		# languages, so a shared constant is not possible).
+		EXECUTION_CORE_CONTRACT_STATES=(Ready Research Plan Implement Validate PR)
+		execution_core_gaps=0
+		for contract_state in "${EXECUTION_CORE_CONTRACT_STATES[@]}"; do
+			in_state_map=$(jq -r --arg s "$contract_state" \
+				'[.catalyst.linear.stateMap // {} | to_entries[].value] | index($s) // empty' \
+				"$CONFIG_PATH" 2>/dev/null)
+			in_state_ids=$(jq -r --arg s "$contract_state" \
+				'.catalyst.linear.stateIds // {} | has($s) | if . then "yes" else empty end' \
+				"$CONFIG_PATH" 2>/dev/null)
+			if [[ -z $in_state_map || -z $in_state_ids ]]; then
+				warnings+=("Execution-core contract state '$contract_state' missing from stateMap/stateIds in $CONFIG_PATH")
+				execution_core_gaps=$((execution_core_gaps + 1))
+			fi
+		done
+
+		# Registry entry — resolved via the same logic as registry.mjs/config.mjs.
+		REGISTRY_PATH="${CATALYST_DIR:-$HOME/catalyst}/execution-core/registry.json"
+		registry_has_team=""
+		if [[ -f $REGISTRY_PATH && -n $TEAM_KEY ]]; then
+			registry_has_team=$(jq -r --arg t "$TEAM_KEY" \
+				'[.projects // [] | .[] | select(.team == $t)] | length | if . > 0 then "yes" else empty end' \
+				"$REGISTRY_PATH" 2>/dev/null)
+		fi
+		if [[ -z $registry_has_team ]]; then
+			warnings+=("No execution-core registry entry for team '$TEAM_KEY' in $REGISTRY_PATH")
+			execution_core_gaps=$((execution_core_gaps + 1))
+		fi
+
+		if [[ $execution_core_gaps -gt 0 ]]; then
+			warnings+=("  Run setup-catalyst or plugins/dev/scripts/setup-execution-core-states.sh to fix the contract")
+		fi
+	fi
+
 	# Check Linear webhook registration (CTL-253) — gates whether Linear events reach the event log.
 	# The record lives in the cross-project Layer 2 file ($HOME_CONFIG_PATH); per-project secrets
 	# files (config-<projectKey>.json) hold the API token only. See setup-linear-webhook.sh.
