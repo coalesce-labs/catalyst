@@ -47,7 +47,17 @@
     },
     "orchestration": {
       "_comment": "Worker dispatch mode. 'phase-agents' (default) dispatches the 9-phase pipeline on claude --bg; 'oneshot-legacy' keeps the pre-CTL-452 single-shot oneshot worker on claude -p.",
-      "dispatchMode": "phase-agents"
+      "dispatchMode": "phase-agents",
+      "executionCore": {
+        "_comment": "M4 scheduler. eligibleQuery selects the per-project pickable ticket set the Todo-state monitor maintains. team falls back to catalyst.linear.teamKey; status is the literal Linear workflow state name; project/label/priority are optional narrowing filters (priority is a floor).",
+        "eligibleQuery": {
+          "status": "Todo",
+          "team": null,
+          "project": null,
+          "label": null,
+          "priority": null
+        }
+      }
     }
   }
 }

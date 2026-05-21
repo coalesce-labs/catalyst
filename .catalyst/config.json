@@ -49,7 +49,16 @@
       }
     },
     "orchestration": {
-      "dispatchMode": "phase-agents"
+      "dispatchMode": "phase-agents",
+      "executionCore": {
+        "eligibleQuery": {
+          "status": "Todo",
+          "team": null,
+          "project": null,
+          "label": null,
+          "priority": null
+        }
+      }
     },
     "feedback": {
       "autoFile": true,

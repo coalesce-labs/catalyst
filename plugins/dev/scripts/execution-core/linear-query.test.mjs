@@ -1,0 +1,139 @@
+// Unit tests for the execution-core Linear eligible query (CTL-535 Phase 2).
+// Run: cd plugins/dev/scripts/execution-core && bun test linear-query.test.mjs
+
+import { describe, test, expect } from "bun:test";
+import { buildLinearisArgs, runEligibleQuery } from "./linear-query.mjs";
+
+// A fake exec returning a canned linearis result. `exec(cmd, args)` ->
+// { code, stdout, stderr } — the injectable seam runEligibleQuery uses so a
+// test never shells out to the real linearis CLI.
+function fakeExec({ code = 0, stdout = "", stderr = "" } = {}) {
+  const calls = [];
+  const fn = (cmd, args) => {
+    calls.push({ cmd, args });
+    return { code, stdout, stderr };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+function ticketsJson(nodes) {
+  return JSON.stringify({ nodes });
+}
+
+describe("buildLinearisArgs", () => {
+  test("includes --team and --status (both mandatory; --status requires --team)", () => {
+    const args = buildLinearisArgs({ team: "ENG", status: "Todo" });
+    expect(args.slice(0, 2)).toEqual(["issues", "list"]);
+    expect(args[args.indexOf("--team") + 1]).toBe("ENG");
+    expect(args[args.indexOf("--status") + 1]).toBe("Todo");
+  });
+
+  test("includes --project / --label only when set", () => {
+    const without = buildLinearisArgs({ team: "ENG", status: "Todo" });
+    expect(without).not.toContain("--project");
+    expect(without).not.toContain("--label");
+
+    const withBoth = buildLinearisArgs({
+      team: "ENG",
+      status: "Todo",
+      project: "Platform",
+      label: "ready",
+    });
+    expect(withBoth[withBoth.indexOf("--project") + 1]).toBe("Platform");
+    expect(withBoth[withBoth.indexOf("--label") + 1]).toBe("ready");
+  });
+
+  test("omits --priority from argv (priority is a post-filter floor, not server-side)", () => {
+    const args = buildLinearisArgs({ team: "ENG", status: "Todo", priority: 2 });
+    expect(args).not.toContain("--priority");
+  });
+
+  test("includes a --limit", () => {
+    const args = buildLinearisArgs({ team: "ENG", status: "Todo" });
+    expect(args).toContain("--limit");
+    expect(Number(args[args.indexOf("--limit") + 1])).toBeGreaterThan(0);
+  });
+
+  test("throws when query.team is null (cannot satisfy --status requires --team)", () => {
+    expect(() => buildLinearisArgs({ team: null, status: "Todo" })).toThrow();
+  });
+});
+
+describe("runEligibleQuery", () => {
+  const query = { team: "ENG", status: "Todo", project: null, label: null, priority: null };
+
+  test("parses { nodes: [...] } into [{ identifier, title, state, priority, ... }]", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([
+        {
+          identifier: "ENG-1",
+          title: "First",
+          state: { name: "Todo" },
+          priority: 2,
+          project: { name: "Platform" },
+          updatedAt: "2026-05-21T00:00:00Z",
+        },
+      ]),
+    });
+    const tickets = runEligibleQuery(query, { exec });
+    expect(tickets).toHaveLength(1);
+    expect(tickets[0]).toMatchObject({
+      identifier: "ENG-1",
+      title: "First",
+      state: "Todo",
+      priority: 2,
+      project: "Platform",
+      updatedAt: "2026-05-21T00:00:00Z",
+    });
+  });
+
+  test("priority floor 2 keeps priority 1 and 2, drops 3, 4, and 0 (no priority)", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([
+        { identifier: "ENG-1", state: { name: "Todo" }, priority: 1 },
+        { identifier: "ENG-2", state: { name: "Todo" }, priority: 2 },
+        { identifier: "ENG-3", state: { name: "Todo" }, priority: 3 },
+        { identifier: "ENG-4", state: { name: "Todo" }, priority: 4 },
+        { identifier: "ENG-0", state: { name: "Todo" }, priority: 0 },
+      ]),
+    });
+    const tickets = runEligibleQuery({ ...query, priority: 2 }, { exec });
+    expect(tickets.map((t) => t.identifier).sort()).toEqual(["ENG-1", "ENG-2"]);
+  });
+
+  test("no priority floor keeps every returned ticket", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([
+        { identifier: "ENG-1", state: { name: "Todo" }, priority: 1 },
+        { identifier: "ENG-3", state: { name: "Todo" }, priority: 3 },
+        { identifier: "ENG-0", state: { name: "Todo" }, priority: 0 },
+      ]),
+    });
+    expect(runEligibleQuery(query, { exec })).toHaveLength(3);
+  });
+
+  test("returns [] for { nodes: [] }", () => {
+    const exec = fakeExec({ stdout: ticketsJson([]) });
+    expect(runEligibleQuery(query, { exec })).toEqual([]);
+  });
+
+  test("throws (does NOT silently return []) when linearis exits non-zero", () => {
+    const exec = fakeExec({ code: 1, stderr: "linearis: auth failed" });
+    expect(() => runEligibleQuery(query, { exec })).toThrow(/exit 1/);
+  });
+
+  test("throws on unparseable linearis stdout", () => {
+    const exec = fakeExec({ stdout: "not json at all" });
+    expect(() => runEligibleQuery(query, { exec })).toThrow();
+  });
+
+  test("passes the resolved team and status through to the linearis argv", () => {
+    const exec = fakeExec({ stdout: ticketsJson([]) });
+    runEligibleQuery({ ...query, team: "PLAT", status: "Backlog" }, { exec });
+    const args = exec.calls[0].args;
+    expect(exec.calls[0].cmd).toBe("linearis");
+    expect(args[args.indexOf("--team") + 1]).toBe("PLAT");
+    expect(args[args.indexOf("--status") + 1]).toBe("Backlog");
+  });
+});

@@ -1,0 +1,138 @@
+// eligible-set.mjs - execution-core eligible-set projection (CTL-535 Phase 3).
+//
+// Holds the in-memory eligible state (per project, a Map of pickable tickets)
+// and persists it as an atomic per-project JSON projection at
+// ~/catalyst/execution-core/eligible/<projectKey>.json. Mirrors the broker's
+// projection.mjs: tmp + renameSync atomic writes, skip-write-when-unchanged.
+
+import {
+  writeFileSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  mkdirSync,
+  existsSync,
+} from "node:fs";
+import { join } from "node:path";
+import { getEligibleDir, log } from "./config.mjs";
+
+// projectKey -> { tickets: Map<identifier, ticket>, source, query }
+const eligible = new Map();
+
+function projectionPath(projectKey) {
+  return join(getEligibleDir(), `${projectKey}.json`);
+}
+
+// Deterministic ticket order: lexicographic by identifier.
+function byIdentifier(a, b) {
+  return String(a.identifier).localeCompare(String(b.identifier));
+}
+
+// Stable content signature - identifiers + states + priorities only. The
+// projection's updatedAt timestamp always differs between writes, so the
+// skip-when-unchanged check compares ticket content, never the serialized
+// body. JSON.stringify of the tuple list is collision-proof (its escaping
+// disambiguates any separator that could appear inside a field).
+function contentKey(tickets) {
+  return JSON.stringify(
+    tickets.map((t) => [t.identifier, t.state, t.priority]),
+  );
+}
+
+function sortedTickets(projectKey) {
+  const entry = eligible.get(projectKey);
+  if (!entry) return [];
+  return [...entry.tickets.values()].sort(byIdentifier);
+}
+
+// Atomic projection write, skipped when ticket content is unchanged so a
+// steady-state reconcile produces zero disk writes.
+function writeProjection(projectKey) {
+  const entry = eligible.get(projectKey);
+  if (!entry) return;
+  const tickets = sortedTickets(projectKey);
+  const file = projectionPath(projectKey);
+
+  if (existsSync(file)) {
+    try {
+      const prev = JSON.parse(readFileSync(file, "utf8"));
+      if (
+        Array.isArray(prev.tickets) &&
+        contentKey(prev.tickets) === contentKey(tickets)
+      ) {
+        return; // on-disk projection already has identical ticket content
+      }
+    } catch {
+      // unreadable / malformed existing file - fall through and rewrite
+    }
+  }
+
+  const body = JSON.stringify(
+    {
+      projectKey,
+      updatedAt: new Date().toISOString(),
+      source: entry.source,
+      query: entry.query,
+      tickets,
+    },
+    null,
+    2,
+  );
+  mkdirSync(getEligibleDir(), { recursive: true });
+  const tmp = `${file}.tmp`;
+  try {
+    writeFileSync(tmp, body);
+    renameSync(tmp, file);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* tmp already gone */
+    }
+    throw err;
+  }
+}
+
+// setProjectEligible - replace a project's eligible set and persist it.
+export function setProjectEligible(projectKey, tickets, { source, query } = {}) {
+  const map = new Map();
+  for (const t of tickets) map.set(t.identifier, { ...t });
+  eligible.set(projectKey, {
+    tickets: map,
+    source: source ?? null,
+    query: query ?? null,
+  });
+  writeProjection(projectKey);
+}
+
+// removeTicket - drop one ticket from a project's eligible set. Returns true
+// and rewrites the projection when the ticket was a member; returns false
+// (no rewrite) otherwise. Removing a non-member is a safe no-op: the
+// event-driven fast path can fire for a ticket that was never eligible.
+export function removeTicket(projectKey, identifier) {
+  const entry = eligible.get(projectKey);
+  if (!entry || !entry.tickets.has(identifier)) return false;
+  entry.tickets.delete(identifier);
+  entry.source = "event"; // a removal is always event-driven
+  writeProjection(projectKey);
+  return true;
+}
+
+// dropProject - forget a project entirely: in-memory entry + projection file.
+export function dropProject(projectKey) {
+  eligible.delete(projectKey);
+  try {
+    unlinkSync(projectionPath(projectKey));
+  } catch (err) {
+    // ENOENT is expected (no projection written yet); anything else is logged.
+    if (err?.code !== "ENOENT") {
+      log.warn({ projectKey, err: err.message }, "failed to remove projection file");
+    }
+  }
+}
+
+// getEligibleSet - a sorted copy of a project's eligible tickets. Callers may
+// mutate the result freely; the internal state is never exposed.
+export function getEligibleSet(projectKey) {
+  return sortedTickets(projectKey).map((t) => ({ ...t }));
+}

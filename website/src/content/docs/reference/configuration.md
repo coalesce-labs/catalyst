@@ -760,6 +760,15 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
           "implement": 100
         }
       },
+      "executionCore": {
+        "eligibleQuery": {
+          "status": "Todo",
+          "team": null,
+          "project": null,
+          "label": null,
+          "priority": null
+        }
+      },
       "testRequirements": {
         "backend": ["unit"],
         "frontend": ["unit"],
@@ -787,6 +796,11 @@ Optional. Add this block to enable `/orchestrate` — see [Orchestration](/refer
 | `testRequirements` | object | See above | Required test types by scope (backend/frontend/fullstack) |
 | `verifyBeforeMerge` | boolean | `true` | Run adversarial verification on merged commits (post-merge) |
 | `allowSelfReportedCompletion` | boolean | `false` | When `true`, verification failures are advisory (wave advances). When `false` (default), verification failures block wave advancement until remediation is filed |
+| `executionCore.eligibleQuery.status` | string\|null | `"Todo"` | Literal Linear workflow state name for "pickable" tickets the M4 Todo-state monitor tracks. |
+| `executionCore.eligibleQuery.team` | string\|null | `catalyst.linear.teamKey` | Linear team key for the eligible-set query (`--status` requires `--team`, so this must resolve). |
+| `executionCore.eligibleQuery.project` | string\|null | none | Optional project-name narrowing filter. |
+| `executionCore.eligibleQuery.label` | string\|null | none | Optional label narrowing filter. |
+| `executionCore.eligibleQuery.priority` | number\|null | none | Optional priority floor (1=Urgent … 4=Low); tickets with a more-urgent-or-equal priority are kept. |
 
 Resolution order for both `phaseAgents.models` and `phaseAgents.turnCaps` is **CLI flag > `modelOverrides[phase][ticket]` > `models[phase]` (or `turnCaps[phase]`) > built-in default**. The dispatcher reads `dispatchMode` at [`plugins/dev/scripts/orchestrate-dispatch-next:117`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/orchestrate-dispatch-next); per-phase resolution lives in [`phase-agent-dispatch:158-176`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/phase-agent-dispatch).
 
