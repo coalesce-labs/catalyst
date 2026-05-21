@@ -82,14 +82,39 @@ export function listInFlightTickets(orchDir) {
 }
 
 // readMaxParallel — the run's worker-slot ceiling from state.json (parity with
-// orchestrate-dispatch-next:176). Defaults to 1 when unset/unreadable.
+// orchestrate-dispatch-next:176). Defaults to 1 when unset/unreadable. ENOENT is
+// expected and stays silent; any other read error or a JSON parse failure would
+// otherwise silently cap the run to one slot forever, so it is logged loudly
+// before the fallback to keep the cause operator-visible.
 export function readMaxParallel(orchDir) {
+  let raw;
   try {
-    const n = JSON.parse(readFileSync(join(orchDir, "state.json"), "utf8"))?.maxParallel;
-    return Number.isInteger(n) && n > 0 ? n : 1;
-  } catch {
+    raw = readFileSync(join(orchDir, "state.json"), "utf8");
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      log.error(
+        { err: err.message, code: err.code, orchDir },
+        "scheduler: state.json unreadable — defaulting maxParallel to 1"
+      );
+    }
     return 1;
   }
+  let n;
+  try {
+    n = JSON.parse(raw)?.maxParallel;
+  } catch (err) {
+    log.error(
+      { err: err.message, orchDir },
+      "scheduler: state.json is not valid JSON — defaulting maxParallel to 1"
+    );
+    return 1;
+  }
+  if (Number.isInteger(n) && n > 0) return n;
+  log.warn(
+    { maxParallel: n, orchDir },
+    "scheduler: state.json has no valid maxParallel — defaulting to 1"
+  );
+  return 1;
 }
 
 // computeFreeSlots — never negative (an over-subscribed run yields 0).
@@ -154,11 +179,20 @@ export function listStartedTickets(orchDir) {
 
 // readAllEligibleTickets — concatenate every per-project eligible projection
 // (~/catalyst/execution-core/eligible/*.json — the CTL-535 monitor's output).
+// ENOENT on the dir is expected and stays silent; any other read error or a
+// malformed projection is logged — a persistent upstream bug (the monitor
+// writing bad JSON every reconcile) must not look like a healthy idle scheduler.
 export function readAllEligibleTickets() {
   let files;
   try {
     files = readdirSync(getEligibleDir());
-  } catch {
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      log.warn(
+        { err: err.message, code: err.code, dir: getEligibleDir() },
+        "scheduler: eligible dir unreadable — treating as empty"
+      );
+    }
     return []; // eligible dir not created yet
   }
   const all = [];
@@ -167,8 +201,11 @@ export function readAllEligibleTickets() {
     try {
       const proj = JSON.parse(readFileSync(join(getEligibleDir(), f), "utf8"));
       if (Array.isArray(proj?.tickets)) all.push(...proj.tickets);
-    } catch {
-      // malformed projection — skip, the next reconcile rewrites it
+    } catch (err) {
+      log.warn(
+        { err: err.message, file: f },
+        "scheduler: malformed eligible projection — skipping"
+      );
     }
   }
   return all;

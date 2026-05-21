@@ -68,6 +68,26 @@ function writeEligibleProjection(projectKey, body, { raw = false } = {}) {
   writeFileSync(join(eligibleDir(), `${projectKey}.json`), raw ? body : JSON.stringify(body));
 }
 
+// waitFor — poll `predicate` every `intervalMs` until it returns truthy, or
+// throw after `timeoutMs`. Replaces fixed-duration sleeps in the daemon tests:
+// fs.watch / timer delivery latency is variable (macOS FSEvents spikes well past
+// a fixed sleep, and can drop an event that lands before the watch finishes
+// registering), so a fixed sleep races the watcher and flakes. A bounded poll is
+// deterministic — it returns as soon as the condition holds and only fails if it
+// genuinely never does. `onTick` runs once per poll, so a test can re-trigger a
+// droppable event each iteration instead of relying on a single delivery.
+async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 25, onTick } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    onTick?.();
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  if (!predicate()) {
+    throw new Error(`waitFor: predicate not satisfied within ${timeoutMs}ms`);
+  }
+}
+
 describe("readPhaseSignals", () => {
   test("returns a phase→status map for a worker dir", () => {
     writeSignal("CTL-1", "triage", "done");
@@ -420,7 +440,7 @@ describe("startScheduler / stopScheduler", () => {
       debounceMs: 5,
     });
     writeSignal("CTL-2", "triage", "done"); // becomes owed after the first tick
-    await new Promise((r) => setTimeout(r, 60));
+    await waitFor(() => dispatch.calls.some((c) => c.ticket === "CTL-2"));
     expect(dispatch.calls.some((c) => c.ticket === "CTL-2")).toBe(true);
   });
 
@@ -439,11 +459,17 @@ describe("startScheduler / stopScheduler", () => {
       debounceMs: 10,
     });
     writeSignal("CTL-3", "triage", "done");
-    // Appending to the event log must wake the scheduler. The await covers
-    // macOS FSEvents watcher latency (observed ~40ms) plus the debounce.
-    appendToEventLog('{"event":"phase.triage.complete.CTL-3"}\n');
-    await new Promise((r) => setTimeout(r, 400));
-    expect(dispatch.calls.some((c) => c.ticket === "CTL-3" && c.phase === "research")).toBe(true);
+    const dispatched = () =>
+      dispatch.calls.some((c) => c.ticket === "CTL-3" && c.phase === "research");
+    // Appending to the event log must wake the scheduler. macOS FSEvents can
+    // drop an append that lands before the watcher finishes registering, so
+    // re-append once per poll — each append is a fresh chance for the watcher to
+    // fire — instead of racing a single fixed sleep against watcher latency.
+    await waitFor(dispatched, {
+      intervalMs: 100,
+      onTick: () => appendToEventLog('{"event":"phase.triage.complete.CTL-3"}\n'),
+    });
+    expect(dispatched()).toBe(true);
   });
 
   test("stopScheduler is idempotent and safe before start", () => {
