@@ -283,9 +283,17 @@ if [ -n "$CONFIG_FILE" ]; then
 	SETUP_COMMANDS=$(jq -c '.catalyst.worktree.setup // empty' "$CONFIG_FILE" 2>/dev/null)
 fi
 
+# CTL-513: track whether `humanlayer thoughts init` is attempted by any setup
+# path, so the post-setup sanity check below fires only when thoughts/ is
+# genuinely expected (no false positives for projects that don't use thoughts).
+THOUGHTS_INIT_EXPECTED=false
+
 if [ -n "$SETUP_COMMANDS" ] && [ "$SETUP_COMMANDS" != "null" ] && [ "$SETUP_COMMANDS" != "[]" ]; then
 	# ── Config-driven setup ──
 	echo -e "${YELLOW}🔧 Running project setup from config...${NC}"
+	if [[ "$SETUP_COMMANDS" == *"thoughts init"* ]]; then
+		THOUGHTS_INIT_EXPECTED=true
+	fi
 	run_hook_array "$SETUP_COMMANDS" "setup"
 else
 	# ── Auto-detected setup (backwards compatibility) ──
@@ -313,6 +321,7 @@ else
 
 	# 2. Initialize thoughts
 	if command -v humanlayer >/dev/null 2>&1; then
+		THOUGHTS_INIT_EXPECTED=true
 		INIT_CMD="humanlayer thoughts init --directory $THOUGHTS_DIRECTORY"
 		if [ -n "$THOUGHTS_PROFILE" ]; then
 			INIT_CMD="$INIT_CMD --profile $THOUGHTS_PROFILE"
@@ -345,7 +354,30 @@ fi
 # These run AFTER the base setup (config-driven or auto-detected)
 if [ -n "$HOOKS_JSON" ] && [ "$HOOKS_JSON" != "[]" ]; then
 	echo -e "${YELLOW}🔧 Running orchestration hooks...${NC}"
+	if [[ "$HOOKS_JSON" == *"thoughts init"* ]]; then
+		THOUGHTS_INIT_EXPECTED=true
+	fi
 	run_hook_array "$HOOKS_JSON" "orchestration"
+fi
+
+# CTL-513: Fail loudly if thoughts init was attempted but produced no thoughts/
+# symlinks. A failed `humanlayer thoughts init` only emits a ⚠️ warning via
+# run_hook_array (or the auto-detected else-branch) and is otherwise silent;
+# the missing thoughts/shared then surfaces ~30 min later as a phase-plan
+# `prior_artifact_missing` failure. Catch it here, at creation time, instead.
+if [ "$THOUGHTS_INIT_EXPECTED" = true ] && [ ! -d "thoughts/shared" ]; then
+	echo -e "${RED}❌ Error: thoughts/shared/ missing after setup hooks${NC}"
+	echo "  Working directory: $(pwd)"
+	echo "  Expected path: $(pwd)/thoughts/shared/"
+	echo "  'humanlayer thoughts init' was attempted but did not create the"
+	echo "  thoughts/ symlinks. Likely cause: a corrupted"
+	echo "  ~/.config/humanlayer/humanlayer.json (concurrent 'thoughts init'"
+	echo "  write race) dropped init into an interactive prompt that failed."
+	echo -e "${RED}  Cleaning up worktree...${NC}"
+	cd - >/dev/null
+	git worktree remove --force "$WORKTREE_PATH"
+	git branch -D "$WORKTREE_NAME" 2>/dev/null || true
+	exit 1
 fi
 
 # Allow direnv AFTER all setup hooks have run (hooks like setup-env.sh may modify .envrc)
