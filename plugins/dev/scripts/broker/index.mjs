@@ -24,11 +24,19 @@ import {
   closeBrokerStateDb,
   getActiveWaitingSessions,
 } from "./broker-state.mjs";
-import {
-  formatMissingKeyWarning,
-  formatLoadedKeyInfo,
-  probeGroq,
-} from "../lib/api-key-health.mjs";
+// CTL-532: re-export the worker-state store helpers through the barrel.
+export {
+  upsertWorkerState,
+  getWorkerState,
+  getWorkerStatesByOrchestrator,
+  getAllWorkerStates,
+  recordReviveEvent,
+  getReviveCount,
+  getProjectionMeta,
+  setProjectionMeta,
+  getStaleWorkers,
+} from "./broker-state.mjs";
+import { formatMissingKeyWarning, formatLoadedKeyInfo, probeGroq } from "../lib/api-key-health.mjs";
 import {
   log,
   GLOBAL_CONFIG_PATH,
@@ -44,16 +52,13 @@ import {
   HEARTBEAT_STALE_MS,
   getEventLogPath,
 } from "./config.mjs";
-import {
-  getInterests,
-  getWaitingSessionsMap,
-  setBrokerStartedAt,
-} from "./state.mjs";
+import { getInterests, getWaitingSessionsMap, setBrokerStartedAt } from "./state.mjs";
 import {
   migrateLegacyInterestsFile,
   loadPersistedInterests,
   buildBrokerState,
   writeBrokerStateFile,
+  replayWorkerStateProjection,
 } from "./projection.mjs";
 import {
   appendEvent,
@@ -61,17 +66,15 @@ import {
   startWatchdog,
   clearDebounceTimers,
 } from "./router.mjs";
-import {
-  seedTailer,
-  startTailing,
-  stopTailing,
-  loadExistingRegistrations,
-} from "./tailer.mjs";
+import { seedTailer, startTailing, stopTailing, loadExistingRegistrations } from "./tailer.mjs";
 
 // --- Public re-export barrel (CTL-529) ---
 // The execution-core split moved every public symbol into a named module.
-// index.mjs re-exports all 55 of them so the import surface — depended on by
+// index.mjs re-exports all 67 of them so the import surface — depended on by
 // the broker test suite — is byte-for-byte preserved. See barrel-exports.test.mjs.
+// CTL-532 added 12 worker-state-projection symbols: 9 store helpers (Phase 1),
+// the pure reduceWorkerStateEvent reducer (Phase 2), and the
+// projectWorkerStateEvent + replayWorkerStateProjection drivers (Phase 3).
 export { readGroqConfig, readGroqApiKeyFromConfig } from "./config.mjs";
 export {
   getInterests,
@@ -97,6 +100,9 @@ export {
   writeBrokerStateFile,
   getProjectedWorkerStatePath,
   writeProjectedWorkerState,
+  reduceWorkerStateEvent,
+  projectWorkerStateEvent,
+  replayWorkerStateProjection,
 } from "./projection.mjs";
 export {
   pluginVersion,
@@ -255,6 +261,10 @@ function main() {
 
   openBrokerStateDb();
 
+  // CTL-532: rebuild the event-sourced worker_state projection from the
+  // current-month event log. Idempotent — safe to run on every (re)start.
+  replayWorkerStateProjection();
+
   // CTL-403: rehydrate waiting sessions from SQLite so the watchdog respects
   // active waits that survived a broker restart.
   try {
@@ -270,7 +280,9 @@ function main() {
     if (waitingSessions.size > 0) {
       log.info({ count: waitingSessions.size }, "rehydrated waiting sessions from DB");
     }
-  } catch { /* DB might not have the table yet on old installs */ }
+  } catch {
+    /* DB might not have the table yet on old installs */
+  }
 
   const logPath = getEventLogPath();
   try {

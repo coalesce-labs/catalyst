@@ -72,7 +72,11 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
     )
   `);
   // CTL-402: add reason column to existing DBs (no-op on fresh installs).
-  try { db.run(`ALTER TABLE agents ADD COLUMN reason TEXT`); } catch { /* already exists */ }
+  try {
+    db.run(`ALTER TABLE agents ADD COLUMN reason TEXT`);
+  } catch {
+    /* already exists */
+  }
   db.run(`
     CREATE INDEX IF NOT EXISTS idx_agents_ticket
       ON agents(ticket)
@@ -111,6 +115,55 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
     )
   `);
 
+  // CTL-532: event-sourced worker-state projection (ADR-018 Phase 3).
+  // One row per (orchestrator, ticket) holding phase/status/PR/revive-count
+  // derived purely from the durable event stream. Rebuilt idempotently on
+  // every broker start by replayWorkerStateProjection().
+  db.run(`
+    CREATE TABLE IF NOT EXISTS worker_state (
+      orchestrator   TEXT NOT NULL,
+      ticket         TEXT NOT NULL,
+      phase          TEXT,
+      status         TEXT,
+      pr_number      INTEGER,
+      revive_count   INTEGER NOT NULL DEFAULT 0,
+      last_event_id  TEXT,
+      last_event_ts  TEXT,
+      updated_at     TEXT NOT NULL,
+      PRIMARY KEY (orchestrator, ticket)
+    )
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_worker_state_orchestrator
+      ON worker_state(orchestrator)
+  `);
+
+  // CTL-532: idempotency ledger for revive counting — re-folding a seen
+  // event id is a no-op, so a full-log replay never double-counts revives.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS worker_revive_events (
+      event_id      TEXT PRIMARY KEY,
+      orchestrator  TEXT NOT NULL,
+      ticket        TEXT NOT NULL,
+      ts            TEXT NOT NULL
+    )
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_worker_revive_lookup
+      ON worker_revive_events(orchestrator, ticket)
+  `);
+
+  // CTL-532: single-row observability/watermark record (id pinned to 1).
+  db.run(`
+    CREATE TABLE IF NOT EXISTS projection_meta (
+      id             INTEGER PRIMARY KEY CHECK (id = 1),
+      last_event_id  TEXT,
+      last_event_ts  TEXT,
+      events_folded  INTEGER NOT NULL DEFAULT 0,
+      updated_at     TEXT NOT NULL
+    )
+  `);
+
   return db;
 }
 
@@ -142,7 +195,7 @@ export function upsertFilterStateOpen({ interestId, prNumber, repo }) {
        deployment_id = NULL,
        environment = NULL,
        updated_at = excluded.updated_at`,
-    [interestId, prNumber, repo, nowIso()],
+    [interestId, prNumber, repo, nowIso()]
   );
 }
 
@@ -151,7 +204,7 @@ export function setFilterStateMerged(interestId, mergeCommitSha) {
     `UPDATE filter_state
        SET merge_commit_sha = ?, status = 'merged', updated_at = ?
        WHERE interest_id = ?`,
-    [mergeCommitSha, nowIso(), interestId],
+    [mergeCommitSha, nowIso(), interestId]
   );
   return result.changes > 0 ? { interestId } : null;
 }
@@ -165,7 +218,7 @@ export function setFilterStateDeploying(mergeCommitSha, deploymentId, environmen
     `UPDATE filter_state
        SET deployment_id = ?, environment = ?, status = 'deploying', updated_at = ?
        WHERE interest_id = ?`,
-    [deploymentId, environment, nowIso(), row.interest_id],
+    [deploymentId, environment, nowIso(), row.interest_id]
   );
   return { interestId: row.interest_id };
 }
@@ -177,7 +230,7 @@ export function setFilterStateDeployed(deploymentId) {
   if (!row) return null;
   ensure().run(
     `UPDATE filter_state SET status = 'deployed', updated_at = ? WHERE interest_id = ?`,
-    [nowIso(), row.interest_id],
+    [nowIso(), row.interest_id]
   );
   return { interestId: row.interest_id };
 }
@@ -187,10 +240,10 @@ export function setFilterStateFailed(deploymentId) {
     .prepare(`SELECT interest_id FROM filter_state WHERE deployment_id = ? LIMIT 1`)
     .get(deploymentId);
   if (!row) return null;
-  ensure().run(
-    `UPDATE filter_state SET status = 'failed', updated_at = ? WHERE interest_id = ?`,
-    [nowIso(), row.interest_id],
-  );
+  ensure().run(`UPDATE filter_state SET status = 'failed', updated_at = ? WHERE interest_id = ?`, [
+    nowIso(),
+    row.interest_id,
+  ]);
   return { interestId: row.interest_id };
 }
 
@@ -199,9 +252,7 @@ export function deleteFilterState(interestId) {
 }
 
 export function getFilterStateByInterest(interestId) {
-  const row = ensure()
-    .prepare(`SELECT * FROM filter_state WHERE interest_id = ?`)
-    .get(interestId);
+  const row = ensure().prepare(`SELECT * FROM filter_state WHERE interest_id = ?`).get(interestId);
   if (!row) return null;
   return {
     interestId: row.interest_id,
@@ -217,7 +268,15 @@ export function getFilterStateByInterest(interestId) {
 
 // ─── agents helpers ──────────────────────────────────────────────────────────
 
-export function upsertAgent({ agentId, agentName, sessionId, orchestrator, ticket, claimedPr, cwd }) {
+export function upsertAgent({
+  agentId,
+  agentName,
+  sessionId,
+  orchestrator,
+  ticket,
+  claimedPr,
+  cwd,
+}) {
   const ts = nowIso();
   ensure().run(
     `INSERT INTO agents
@@ -231,43 +290,61 @@ export function upsertAgent({ agentId, agentName, sessionId, orchestrator, ticke
        cwd           = excluded.cwd,
        status        = 'active',
        updated_at    = excluded.updated_at`,
-    [agentId, agentName, sessionId, orchestrator ?? null, ticket ?? null, claimedPr ?? null, cwd ?? null, ts, ts],
+    [
+      agentId,
+      agentName,
+      sessionId,
+      orchestrator ?? null,
+      ticket ?? null,
+      claimedPr ?? null,
+      cwd ?? null,
+      ts,
+      ts,
+    ]
   );
 }
 
 export function markAgentDone(agentId, status = "done", reason = null) {
-  ensure().run(
-    `UPDATE agents SET status = ?, updated_at = ?, reason = ? WHERE agent_id = ?`,
-    [status, nowIso(), reason ?? null, agentId],
-  );
+  ensure().run(`UPDATE agents SET status = ?, updated_at = ?, reason = ? WHERE agent_id = ?`, [
+    status,
+    nowIso(),
+    reason ?? null,
+    agentId,
+  ]);
 }
 
 export function getRecentAgents(limit = 20) {
   return ensure()
     .prepare(
       `SELECT agent_id, session_id, ticket, status, reason, checked_in_at, updated_at
-       FROM agents ORDER BY updated_at DESC LIMIT ?`,
+       FROM agents ORDER BY updated_at DESC LIMIT ?`
     )
     .all(limit);
 }
 
 export function getAgentBySession(sessionId) {
   const row = ensure()
-    .prepare(`SELECT * FROM agents WHERE session_id = ? AND status = 'active' ORDER BY checked_in_at DESC LIMIT 1`)
+    .prepare(
+      `SELECT * FROM agents WHERE session_id = ? AND status = 'active' ORDER BY checked_in_at DESC LIMIT 1`
+    )
     .get(sessionId);
   return row ? rowToAgent(row) : null;
 }
 
 export function getAgentsByTicket(ticket) {
   return ensure()
-    .prepare(`SELECT * FROM agents WHERE ticket = ? AND status = 'active' ORDER BY checked_in_at DESC`)
+    .prepare(
+      `SELECT * FROM agents WHERE ticket = ? AND status = 'active' ORDER BY checked_in_at DESC`
+    )
     .all(ticket)
     .map(rowToAgent);
 }
 
 export function getAgentsByOrchestrator(orchestrator) {
   return ensure()
-    .prepare(`SELECT * FROM agents WHERE orchestrator = ? AND status = 'active' ORDER BY checked_in_at DESC`)
+    .prepare(
+      `SELECT * FROM agents WHERE orchestrator = ? AND status = 'active' ORDER BY checked_in_at DESC`
+    )
     .all(orchestrator)
     .map(rowToAgent);
 }
@@ -289,7 +366,15 @@ function rowToAgent(row) {
 
 // ─── waiting_sessions helpers (CTL-403) ──────────────────────────────────────
 
-export function upsertWaitingSession({ sessionId, orchestrator, ticket, waitFor, timeoutMs, since, reason }) {
+export function upsertWaitingSession({
+  sessionId,
+  orchestrator,
+  ticket,
+  waitFor,
+  timeoutMs,
+  since,
+  reason,
+}) {
   const timeoutAt = new Date(new Date(since).getTime() + timeoutMs).toISOString();
   ensure().run(
     `INSERT INTO waiting_sessions
@@ -304,7 +389,17 @@ export function upsertWaitingSession({ sessionId, orchestrator, ticket, waitFor,
        timeout_at   = excluded.timeout_at,
        reason       = excluded.reason,
        updated_at   = excluded.updated_at`,
-    [sessionId, orchestrator ?? null, ticket ?? null, waitFor ?? null, timeoutMs, since, timeoutAt, reason ?? null, nowIso()],
+    [
+      sessionId,
+      orchestrator ?? null,
+      ticket ?? null,
+      waitFor ?? null,
+      timeoutMs,
+      since,
+      timeoutAt,
+      reason ?? null,
+      nowIso(),
+    ]
   );
 }
 
@@ -350,14 +445,12 @@ export function upsertTicketState({ ticket, linearState, prNumber }) {
        linear_state = COALESCE(excluded.linear_state, linear_state),
        pr_number    = COALESCE(excluded.pr_number, pr_number),
        updated_at   = excluded.updated_at`,
-    [ticket, linearState ?? null, prNumber ?? null, nowIso()],
+    [ticket, linearState ?? null, prNumber ?? null, nowIso()]
   );
 }
 
 export function getTicketState(ticket) {
-  const row = ensure()
-    .prepare(`SELECT * FROM ticket_state WHERE ticket = ?`)
-    .get(ticket);
+  const row = ensure().prepare(`SELECT * FROM ticket_state WHERE ticket = ?`).get(ticket);
   if (!row) return null;
   return {
     ticket: row.ticket,
@@ -365,4 +458,155 @@ export function getTicketState(ticket) {
     prNumber: row.pr_number,
     updatedAt: row.updated_at,
   };
+}
+
+// ─── worker_state helpers (CTL-532) ──────────────────────────────────────────
+
+// Statuses that mean the worker has finished — used by getStaleWorkers (and the
+// projection reducer) so "terminal" is defined exactly once.
+export const WORKER_TERMINAL_STATUSES = new Set(["done", "failed", "complete"]);
+
+// upsertWorkerState — last-write-wins for phase/status gated on the event
+// watermark; pr_number is COALESCE-sticky; revive_count is monotone (MAX);
+// last_event_ts/last_event_id advance to the high-water mark. Mirrors the
+// upsertTicketState COALESCE idiom but adds a watermark gate so an
+// out-of-order (older) event can never regress phase/status.
+export function upsertWorkerState({
+  orchestrator,
+  ticket,
+  phase,
+  status,
+  prNumber,
+  reviveCount,
+  eventId,
+  eventTs,
+}) {
+  if (!orchestrator || !ticket) return;
+  ensure().run(
+    `INSERT INTO worker_state
+       (orchestrator, ticket, phase, status, pr_number, revive_count,
+        last_event_id, last_event_ts, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(orchestrator, ticket) DO UPDATE SET
+       -- phase/status only move forward when the incoming event is at least
+       -- as recent as the last folded event (watermark gate).
+       phase = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+              AND excluded.phase IS NOT NULL
+         THEN excluded.phase ELSE worker_state.phase END,
+       status = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+              AND excluded.status IS NOT NULL
+         THEN excluded.status ELSE worker_state.status END,
+       pr_number    = COALESCE(excluded.pr_number, worker_state.pr_number),
+       revive_count = MAX(excluded.revive_count, worker_state.revive_count),
+       last_event_id = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+         THEN excluded.last_event_id ELSE worker_state.last_event_id END,
+       last_event_ts = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+         THEN excluded.last_event_ts ELSE worker_state.last_event_ts END,
+       updated_at   = excluded.updated_at`,
+    [
+      orchestrator,
+      ticket,
+      phase ?? null,
+      status ?? null,
+      prNumber ?? null,
+      reviveCount ?? 0,
+      eventId ?? null,
+      eventTs ?? null,
+      nowIso(),
+    ]
+  );
+}
+
+export function getWorkerState(orchestrator, ticket) {
+  const row = ensure()
+    .prepare(`SELECT * FROM worker_state WHERE orchestrator = ? AND ticket = ?`)
+    .get(orchestrator, ticket);
+  return row ?? null;
+}
+
+export function getWorkerStatesByOrchestrator(orchestrator) {
+  return ensure()
+    .prepare(`SELECT * FROM worker_state WHERE orchestrator = ? ORDER BY ticket`)
+    .all(orchestrator);
+}
+
+export function getAllWorkerStates() {
+  return ensure().prepare(`SELECT * FROM worker_state ORDER BY orchestrator, ticket`).all();
+}
+
+// recordReviveEvent — INSERT OR IGNORE into the idempotency ledger; returns
+// true only when a genuinely new row was inserted (changes > 0), so a re-fold
+// of a previously seen revive event id is a safe no-op.
+export function recordReviveEvent({ eventId, orchestrator, ticket, ts }) {
+  if (!eventId || !orchestrator || !ticket) return false;
+  const result = ensure().run(
+    `INSERT OR IGNORE INTO worker_revive_events (event_id, orchestrator, ticket, ts)
+     VALUES (?, ?, ?, ?)`,
+    [eventId, orchestrator, ticket, ts ?? nowIso()]
+  );
+  return result.changes > 0;
+}
+
+export function getReviveCount(orchestrator, ticket) {
+  const row = ensure()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM worker_revive_events
+       WHERE orchestrator = ? AND ticket = ?`
+    )
+    .get(orchestrator, ticket);
+  return row?.n ?? 0;
+}
+
+export function getProjectionMeta() {
+  const row = ensure().prepare(`SELECT * FROM projection_meta WHERE id = 1`).get();
+  if (!row) return null;
+  return {
+    lastEventId: row.last_event_id,
+    lastEventTs: row.last_event_ts,
+    eventsFolded: row.events_folded,
+  };
+}
+
+export function setProjectionMeta({ lastEventId, lastEventTs, eventsFolded }) {
+  ensure().run(
+    `INSERT INTO projection_meta (id, last_event_id, last_event_ts, events_folded, updated_at)
+     VALUES (1, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       last_event_id = excluded.last_event_id,
+       last_event_ts = excluded.last_event_ts,
+       events_folded = excluded.events_folded,
+       updated_at    = excluded.updated_at`,
+    [lastEventId ?? null, lastEventTs ?? null, eventsFolded ?? 0, nowIso()]
+  );
+}
+
+// getStaleWorkers — event-sourced liveness read. Returns non-terminal rows
+// whose last_event_ts is STRICTLY older than `thresholdMs` before `nowIso`.
+// This is the positive, event-sourced replacement for the signal-mtime
+// heuristic in orchestrate-healthcheck Pass 2 (no caller wired in CTL-532).
+export function getStaleWorkers(thresholdMs, nowIso = new Date().toISOString()) {
+  const cutoff = new Date(new Date(nowIso).getTime() - thresholdMs).toISOString();
+  const terminal = [...WORKER_TERMINAL_STATUSES];
+  const placeholders = terminal.map(() => "?").join(", ");
+  return ensure()
+    .prepare(
+      `SELECT * FROM worker_state
+       WHERE last_event_ts IS NOT NULL
+         AND last_event_ts < ?
+         AND (status IS NULL OR status NOT IN (${placeholders}))
+       ORDER BY last_event_ts`
+    )
+    .all(cutoff, ...terminal);
 }

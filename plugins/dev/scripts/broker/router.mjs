@@ -44,6 +44,7 @@ import {
   persistBrokerState,
   getProjectedWorkerStatePath,
   writeProjectedWorkerState,
+  projectWorkerStateEvent,
 } from "./projection.mjs";
 import {
   upsertFilterStateOpen,
@@ -304,7 +305,11 @@ export function handleRegister(event) {
         : null
       : null,
     subscriber_ticket: isCommsLifecycle ? (d.subscriber_ticket ?? null) : null,
-    types_of_interest: isCommsLifecycle ? (Array.isArray(d.types_of_interest) ? d.types_of_interest : null) : null,
+    types_of_interest: isCommsLifecycle
+      ? Array.isArray(d.types_of_interest)
+        ? d.types_of_interest
+        : null
+      : null,
     // phase_lifecycle fields (CTL-447)
     ticket: isPhaseLifecycle ? (d.ticket ?? null) : null,
     phase_names: isPhaseLifecycle ? (Array.isArray(d.phase_names) ? d.phase_names : []) : null,
@@ -451,14 +456,7 @@ export function handleAgentCheckin(event) {
   // CTL-381: thread d.base_branches through so github.push rebase detection
   // works for the auto-registered interest.
   if (claimedPr) {
-    _autoRegisterPrLifecycle(
-      sessionId,
-      claimedPr,
-      orchestrator,
-      ticket,
-      repo,
-      d.base_branches
-    );
+    _autoRegisterPrLifecycle(sessionId, claimedPr, orchestrator, ticket, repo, d.base_branches);
   }
 
   log.info({ agentName, sessionId, ticket, claimedPr }, "agent checked in");
@@ -536,7 +534,9 @@ export function handleAgentCheckout(event) {
 
 export function handleAgentHeartbeat(event) {
   const sessionId =
-    event.session ?? event.worker ?? event.orchestrator ??
+    event.session ??
+    event.worker ??
+    event.orchestrator ??
     event.attributes?.["catalyst.session.id"];
   if (!sessionId) return;
   const existing = lastHeartbeat.get(sessionId);
@@ -581,7 +581,9 @@ export function handleWorkerWaiting(event) {
       since,
       reason: d.reason ?? null,
     });
-  } catch { /* DB not opened */ }
+  } catch {
+    /* DB not opened */
+  }
 
   log.info({ sessionId, waitFor: d.wait_for, timeoutMs }, "worker waiting");
   persistBrokerState();
@@ -596,7 +598,11 @@ export function handleWorkerResumed(event) {
 
   waitingSessions.delete(sessionId);
 
-  try { clearWaitingSession(sessionId); } catch { /* DB not opened */ }
+  try {
+    clearWaitingSession(sessionId);
+  } catch {
+    /* DB not opened */
+  }
 
   log.info({ sessionId, outcome: d.outcome ?? "unknown" }, "worker resumed");
   persistBrokerState();
@@ -631,7 +637,10 @@ export function handleOrchestratorStatus(event) {
     lastHeartbeat.set(sessionId, { ts: Date.now(), notified: existing?.notified ?? false });
   }
 
-  log.info({ orchId, phase: entry.phase, wave: entry.wave, activeWorkers: entry.activeWorkers }, "orchestrator status");
+  log.info(
+    { orchId, phase: entry.phase, wave: entry.wave, activeWorkers: entry.activeWorkers },
+    "orchestrator status"
+  );
   persistBrokerState();
 }
 
@@ -906,7 +915,11 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
   // Side effect: update ticket_state for known state-change events.
   if (name === "linear.issue.state_changed" && eventTicket) {
     const newState = detail.toState ?? detail.state ?? detail.stateName ?? null;
-    try { upsertTicketState({ ticket: eventTicket, linearState: newState }); } catch { /* DB not opened */ }
+    try {
+      upsertTicketState({ ticket: eventTicket, linearState: newState });
+    } catch {
+      /* DB not opened */
+    }
   }
   if ((name === "github.pr.opened" || name === "github.pr.merged") && prBodyTickets.length > 0) {
     const prNum = typeof scope.pr === "number" ? scope.pr : null;
@@ -970,7 +983,12 @@ export function tryTicketLifecycleRoute(event, interestsMap) {
         reason = `PR #${pr} opened on ticket ${linked}`;
         // Auto-correlate: give agents watching this ticket a pr_lifecycle interest.
         if (typeof scope.pr === "number") {
-          _autoPrLifecycleFromTicket(linked, scope.pr, interestsMap, attrs["vcs.repository.name"] ?? null);
+          _autoPrLifecycleFromTicket(
+            linked,
+            scope.pr,
+            interestsMap,
+            attrs["vcs.repository.name"] ?? null
+          );
         }
       }
     } else if (name === "github.pr.merged") {
@@ -1088,7 +1106,8 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
 // CTL-484: turn-cap-exhausted is routed alongside complete/failed so the
 // orchestrator can dispatch a continuation worker (separate budget from the
 // error-revive path) without an event-name namespace collision.
-const PHASE_EVENT_PATTERN = /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+const PHASE_EVENT_PATTERN =
+  /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
 
 export function tryPhaseLifecycleRoute(event, interestsMap) {
   const matches = [];
@@ -1398,12 +1417,19 @@ export function runWatchdogTick() {
       const ws = waitingSessions.get(sourceId);
       if (ws.timeoutAt > now) {
         const secsLeft = Math.round((ws.timeoutAt - now) / 1000);
-        log.debug({ sourceId, secsLeft, waitFor: ws.waitFor }, "watchdog: skipping stale check — session is legitimately waiting");
+        log.debug(
+          { sourceId, secsLeft, waitFor: ws.waitFor },
+          "watchdog: skipping stale check — session is legitimately waiting"
+        );
         continue;
       }
       // Wait timed out — treat as stale and clean up the waiting record.
       waitingSessions.delete(sourceId);
-      try { clearWaitingSession(sourceId); } catch { /* DB not opened */ }
+      try {
+        clearWaitingSession(sourceId);
+      } catch {
+        /* DB not opened */
+      }
     }
     if (stale && !state.notified) {
       const minsAgo = Math.round((now - state.ts) / 60_000);
@@ -1455,7 +1481,7 @@ export function runWatchdogTick() {
     });
     log.info(
       { notifyEvent: interest.notify_event, staleSessions: matched.map((m) => m.sourceId) },
-      "watchdog wake (batched)",
+      "watchdog wake (batched)"
     );
     watchdogWoke = true;
 
@@ -1496,6 +1522,11 @@ export function startWatchdog() {
 // --- Event processing ---
 export function processEvent(event) {
   const name = getEventName(event);
+
+  // CTL-532: fold every event into the worker-state projection (best-effort,
+  // non-consuming — the projection is a side-channel observer and never
+  // returns, so existing routing below is untouched).
+  projectWorkerStateEvent(event);
 
   if (name === "filter.register") {
     handleRegister(event);
@@ -1586,7 +1617,10 @@ export function processEvent(event) {
     if (!reg) continue;
     // CTL-406: skip duplicate (source_event_id, interest_id) pairs.
     if (shouldSkipWake(m.sourceEventId, m.interestId)) {
-      log.debug({ interestId: m.interestId, sourceEventId: m.sourceEventId }, "dedup: skipping duplicate wake");
+      log.debug(
+        { interestId: m.interestId, sourceEventId: m.sourceEventId },
+        "dedup: skipping duplicate wake"
+      );
       continue;
     }
 
@@ -1594,8 +1628,12 @@ export function processEvent(event) {
     if (reg.suppress_identical_wakes && m.wakeStateKey !== null) {
       if (reg.last_wake_state[m.wakeStateKey] === m.wakeStateValue) {
         log.info(
-          { notifyEvent: reg.notify_event, wakeStateKey: m.wakeStateKey, wakeStateValue: m.wakeStateValue },
-          "suppressed redundant wake (state unchanged)",
+          {
+            notifyEvent: reg.notify_event,
+            wakeStateKey: m.wakeStateKey,
+            wakeStateValue: m.wakeStateValue,
+          },
+          "suppressed redundant wake (state unchanged)"
         );
         continue;
       }
@@ -1657,12 +1695,18 @@ export function handleWorkerStateChanged(event) {
   const orchestrator = getEventOrchestrator(event);
   const ticket = event.attributes?.["catalyst.worker.ticket"] ?? payload.ticket;
   if (!orchestrator || !ticket) {
-    log.warn({ orchestrator, ticket }, "worker.state_changed missing orchestrator/ticket — dropping");
+    log.warn(
+      { orchestrator, ticket },
+      "worker.state_changed missing orchestrator/ticket — dropping"
+    );
     return;
   }
   const state = payload.state;
   if (!state || typeof state !== "object") {
-    log.warn({ orchestrator, ticket }, "worker.state_changed missing body.payload.state — dropping");
+    log.warn(
+      { orchestrator, ticket },
+      "worker.state_changed missing body.payload.state — dropping"
+    );
     return;
   }
   const target = getProjectedWorkerStatePath(orchestrator, ticket);
