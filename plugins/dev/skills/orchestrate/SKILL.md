@@ -84,6 +84,7 @@ fi
 | `--prd <path>`            | Run PRD review panel + ticket creation before orchestration                         |
 | `--dry-run`               | Show wave plan without executing                                                    |
 | `--state-on-merge <name>` | Linear state to set on PR merge. Default: `stateMap.done` (typically "Done")        |
+| `--stop`                  | Deregister this project from the `execution-core` daemon (removes the enrollment record) and exit. Works regardless of the configured `dispatchMode`. |
 
 ## Configuration
 
@@ -243,6 +244,9 @@ fi
 WORKER_MODEL=$(jq -r '.catalyst.orchestration.workerModel // "opus"' "$CONFIG_FILE" 2>/dev/null)
 VERIFY_BEFORE_MERGE=$(jq -r '.catalyst.orchestration.verifyBeforeMerge // "true"' "$CONFIG_FILE" 2>/dev/null)
 ALLOW_SELF_REPORTED=$(jq -r '.catalyst.orchestration.allowSelfReportedCompletion // "false"' "$CONFIG_FILE" 2>/dev/null)
+
+# CTL-554: dispatchMode drives the execution-core fork below (after Phase 2).
+DISPATCH_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' "$CONFIG_FILE" 2>/dev/null)
 ```
 
 **Create ALL worktrees using `create-worktree.sh`** — both orchestrator and workers go through the
@@ -520,6 +524,33 @@ if [[ -x "$SESSION_SCRIPT" ]]; then
   "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "dispatching" --phase 3
 fi
 ```
+
+### execution-core dispatch fork (CTL-554)
+
+`dispatchMode: "execution-core"` and the `--stop` flag both short-circuit the wave loop. Evaluate
+this **before Phase 3** — when it applies, no workers are dispatched and no Phase 4 monitor session
+starts. The routing helper resolves `projectKey`/`repoRoot` (the main working tree, even when
+`/orchestrate` runs from a linked worktree) and writes or removes the enrollment record.
+
+- **Invoked with `--stop`** — deregister this project from the execution-core daemon and exit,
+  regardless of the configured `dispatchMode`:
+
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-execution-core-route.sh" stop
+  # Removes ~/catalyst/execution-core/projects/<projectKey>.json; the running
+  # daemon drops the project on its next reconcile. Exit 0 — do not continue.
+  ```
+
+- **`DISPATCH_MODE` is `execution-core` (no `--stop`)** — enroll this project and ensure the
+  machine-level daemon, then exit:
+
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-execution-core-route.sh" enroll
+  # Writes the enrollment record and ensures the daemon is running. No wave
+  # loop, no Phase 4 session. Exit 0 — do not continue to Phase 3.
+  ```
+
+- **Any other `DISPATCH_MODE`** — continue to Phase 3 below.
 
 ### Phase 3: Dispatch Workers
 
