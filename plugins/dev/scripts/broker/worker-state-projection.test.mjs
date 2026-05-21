@@ -804,3 +804,180 @@ describe("liveness surface (CTL-532)", () => {
 function mkdtempSyncEnsure(filePath) {
   mkdirSync(join(filePath, ".."), { recursive: true });
 }
+
+// ─── verify-phase coverage backfill (CTL-532) ────────────────────────────────
+// These tests were added by the orchestrator verify phase to pin documented
+// design behaviors that the original suite left uncovered: the
+// orchestrator.worker.status_terminal reducer branch, the equal-timestamp
+// watermark tie-break, the launch_failed/done lifecycle aliases, the
+// worker.state_changed missing-state guard, and the store early-return guards.
+
+function workerLifecycleEvent({
+  name,
+  orchestrator = "orch-1",
+  ticket = "CTL-1",
+  ts = "2026-05-21T01:00:00.000Z",
+  id,
+  payload = {},
+  attributes = {},
+}) {
+  return {
+    ts,
+    ...(id ? { id } : {}),
+    attributes: {
+      "event.name": name,
+      "catalyst.orchestrator.id": orchestrator,
+      "catalyst.worker.ticket": ticket,
+      ...attributes,
+    },
+    body: { payload },
+  };
+}
+
+describe("reduceWorkerStateEvent — status_terminal branch (CTL-532)", () => {
+  test("status_terminal with payload.status → patch carries that status", () => {
+    const r = reduceWorkerStateEvent(
+      workerLifecycleEvent({
+        name: "orchestrator.worker.status_terminal",
+        ticket: "CTL-77",
+        payload: { status: "done" },
+      })
+    );
+    expect(r).not.toBeNull();
+    expect(r.kind).toBe("worker_lifecycle");
+    expect(r.ticket).toBe("CTL-77");
+    expect(r.patch).toEqual({ status: "done" });
+  });
+
+  test("status_terminal with only a PR number → patch carries prNumber, no status", () => {
+    const r = reduceWorkerStateEvent(
+      workerLifecycleEvent({
+        name: "orchestrator.worker.status_terminal",
+        ticket: "CTL-77",
+        payload: { pr: { number: 88 } },
+      })
+    );
+    expect(r).not.toBeNull();
+    expect(r.patch).toEqual({ prNumber: 88 });
+  });
+
+  test("status_terminal with neither status nor PR → reducer returns null", () => {
+    const r = reduceWorkerStateEvent(
+      workerLifecycleEvent({
+        name: "orchestrator.worker.status_terminal",
+        ticket: "CTL-77",
+        payload: {},
+      })
+    );
+    expect(r).toBeNull();
+  });
+
+  test("a terminal status_terminal event excludes the worker from getStaleWorkers", () => {
+    projectWorkerStateEvent(
+      workerLifecycleEvent({
+        name: "orchestrator.worker.status_terminal",
+        ticket: "CTL-DONE",
+        ts: "2026-05-21T09:00:00.000Z",
+        id: "st-done-1",
+        payload: { status: "done" },
+      })
+    );
+    const stale = getStaleWorkers(30 * 60 * 1000, "2026-05-21T11:00:00.000Z");
+    expect(stale.map((r) => r.ticket)).not.toContain("CTL-DONE");
+  });
+});
+
+describe("reduceWorkerStateEvent — lifecycle aliases (CTL-532)", () => {
+  test("orchestrator.worker.launch_failed → status=failed", () => {
+    const r = reduceWorkerStateEvent(
+      workerLifecycleEvent({ name: "orchestrator.worker.launch_failed" })
+    );
+    expect(r.patch).toEqual({ status: "failed" });
+  });
+
+  test("orchestrator.worker.done → status=done", () => {
+    const r = reduceWorkerStateEvent(workerLifecycleEvent({ name: "orchestrator.worker.done" }));
+    expect(r.patch).toEqual({ status: "done" });
+  });
+
+  test("unknown orchestrator.worker.* action → null", () => {
+    const r = reduceWorkerStateEvent(
+      workerLifecycleEvent({ name: "orchestrator.worker.some_future_action" })
+    );
+    expect(r).toBeNull();
+  });
+});
+
+describe("reduceWorkerStateEvent — worker.state_changed guards (CTL-532)", () => {
+  test("worker.state_changed with no state object → null", () => {
+    const r = reduceWorkerStateEvent({
+      ts: "2026-05-21T03:00:00.000Z",
+      id: "wsc-nostate",
+      attributes: {
+        "event.name": "worker.state_changed",
+        "catalyst.orchestrator.id": "demo",
+        "catalyst.worker.ticket": "T-1",
+      },
+      body: { payload: { ticket: "T-1" } },
+    });
+    expect(r).toBeNull();
+  });
+
+  test("state.prNumber takes precedence over a nested state.pr.number", () => {
+    const r = reduceWorkerStateEvent({
+      ts: "2026-05-21T03:00:00.000Z",
+      id: "wsc-prec",
+      attributes: {
+        "event.name": "worker.state_changed",
+        "catalyst.orchestrator.id": "demo",
+        "catalyst.worker.ticket": "T-2",
+      },
+      body: { payload: { state: { status: "pr", prNumber: 5, pr: { number: 9 } } } },
+    });
+    expect(r.patch.prNumber).toBe(5);
+  });
+});
+
+describe("upsertWorkerState — equal-timestamp watermark tie (CTL-532)", () => {
+  test("an event at the SAME eventTs overwrites phase/status (>= gate, last write wins)", () => {
+    const ts = "2026-05-21T04:00:00.000Z";
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CTL-TIE",
+      phase: "research",
+      status: "phase-complete",
+      eventId: "tie-a",
+      eventTs: ts,
+    });
+    upsertWorkerState({
+      orchestrator: "orch-1",
+      ticket: "CTL-TIE",
+      phase: "plan",
+      status: "phase-failed",
+      eventId: "tie-b",
+      eventTs: ts,
+    });
+    const row = getWorkerState("orch-1", "CTL-TIE");
+    expect(row.phase).toBe("plan");
+    expect(row.status).toBe("phase-failed");
+    expect(row.last_event_id).toBe("tie-b");
+  });
+});
+
+describe("store helper guards (CTL-532)", () => {
+  test("upsertWorkerState with a missing orchestrator/ticket is a silent no-op", () => {
+    upsertWorkerState({ orchestrator: null, ticket: "CTL-1", phase: "research", eventId: "g1" });
+    upsertWorkerState({ orchestrator: "orch-1", ticket: null, phase: "research", eventId: "g2" });
+    expect(getAllWorkerStates().length).toBe(0);
+  });
+
+  test("recordReviveEvent returns false when a required key is missing", () => {
+    expect(
+      recordReviveEvent({ eventId: null, orchestrator: "orch-1", ticket: "CTL-1" })
+    ).toBe(false);
+    expect(
+      recordReviveEvent({ eventId: "r1", orchestrator: null, ticket: "CTL-1" })
+    ).toBe(false);
+    expect(getReviveCount("orch-1", "CTL-1")).toBe(0);
+  });
+});
