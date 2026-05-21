@@ -65,10 +65,7 @@ function appendToEventLog(line) {
 const eligibleDir = () => join(catalystDir, "execution-core", "eligible");
 function writeEligibleProjection(projectKey, body, { raw = false } = {}) {
   mkdirSync(eligibleDir(), { recursive: true });
-  writeFileSync(
-    join(eligibleDir(), `${projectKey}.json`),
-    raw ? body : JSON.stringify(body),
-  );
+  writeFileSync(join(eligibleDir(), `${projectKey}.json`), raw ? body : JSON.stringify(body));
 }
 
 describe("readPhaseSignals", () => {
@@ -334,10 +331,7 @@ describe("schedulerTick — new-work pull", () => {
     // maxParallel 2; CTL-7 in-flight at triage:done (advances to research,
     // still 1 in-flight); 1 free slot remains → CTL-X is pulled. The
     // advancement sweep must NOT consume the slot the pull then fills.
-    writeFileSync(
-      join(orchDir, "state.json"),
-      JSON.stringify({ maxParallel: 2 }),
-    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     writeSignal("CTL-7", "triage", "done");
     const dispatch = fakeDispatch();
     const eligible = [
@@ -381,7 +375,7 @@ describe("readAllEligibleTickets", () => {
     expect(
       readAllEligibleTickets()
         .map((t) => t.identifier)
-        .sort(),
+        .sort()
     ).toEqual(["A-1", "B-1", "B-2"]);
   });
   test("skips a malformed projection file and still returns the valid ones", () => {

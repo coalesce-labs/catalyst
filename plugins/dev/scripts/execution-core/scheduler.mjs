@@ -111,17 +111,13 @@ export function computeReadyTickets(eligibleTickets) {
 export function selectDispatchable(rankedReady, excludeTickets, freeSlots) {
   if (freeSlots <= 0) return [];
   const exclude = excludeTickets ?? new Set();
-  return (rankedReady ?? [])
-    .filter((t) => !exclude.has(t.identifier))
-    .slice(0, freeSlots);
+  return (rankedReady ?? []).filter((t) => !exclude.has(t.identifier)).slice(0, freeSlots);
 }
 
 // ─── Phase 4: dispatch and FSM-driven phase advancement ───
 
 // orchestrate-dispatch-next sits one directory up from execution-core/.
-const DISPATCH_BIN = fileURLToPath(
-  new URL("../orchestrate-dispatch-next", import.meta.url),
-);
+const DISPATCH_BIN = fileURLToPath(new URL("../orchestrate-dispatch-next", import.meta.url));
 
 // defaultDispatch — shell out to orchestrate-dispatch-next, which delegates to
 // phase-agent-dispatch (idempotent: an existing dispatched/running/done signal
@@ -130,7 +126,7 @@ function defaultDispatch({ orchDir, ticket, phase }) {
   const res = spawnSync(
     DISPATCH_BIN,
     ["--orch-dir", orchDir, "--ticket", ticket, "--phase", phase],
-    { encoding: "utf8" },
+    { encoding: "utf8" }
   );
   if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
@@ -149,7 +145,7 @@ export function listStartedTickets(orchDir) {
     return new Set(
       readdirSync(join(orchDir, "workers"), { withFileTypes: true })
         .filter((d) => d.isDirectory())
-        .map((d) => d.name),
+        .map((d) => d.name)
     );
   } catch {
     return new Set();
@@ -190,7 +186,7 @@ export function deriveAdvancement(signals) {
   if (latest === null || sig[latest] !== "done") return null;
   const next = transition(
     { phase: latest, reviveCount: 0, parkedFrom: null },
-    { type: "complete" },
+    { type: "complete" }
   );
   if (isTerminal(next)) return null; // pipeline reached monitor-deploy → done
   if (next.phase in sig) return null; // successor already dispatched

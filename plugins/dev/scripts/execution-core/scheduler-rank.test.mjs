@@ -8,9 +8,7 @@ const t = (id, priority, createdAt) => ({ identifier: id, priority, createdAt })
 
 describe("priorityRank", () => {
   test("Urgent..Low map to 1..4; No priority (0) maps to 5", () => {
-    expect([1, 2, 3, 4, 0].map((p) => priorityRank({ priority: p }))).toEqual([
-      1, 2, 3, 4, 5,
-    ]);
+    expect([1, 2, 3, 4, 0].map((p) => priorityRank({ priority: p }))).toEqual([1, 2, 3, 4, 5]);
   });
   test("missing / non-numeric priority ranks as No priority (5)", () => {
     expect(priorityRank({})).toBe(5);
@@ -27,21 +25,14 @@ describe("compareTickets", () => {
   });
   test("equal priority: older createdAt sorts first (FIFO fairness)", () => {
     expect(
-      compareTickets(
-        t("A", 2, "2026-05-01T00:00:00Z"),
-        t("B", 2, "2026-05-10T00:00:00Z"),
-      ),
+      compareTickets(t("A", 2, "2026-05-01T00:00:00Z"), t("B", 2, "2026-05-10T00:00:00Z"))
     ).toBeLessThan(0);
   });
   test("missing createdAt sorts last within equal priority", () => {
-    expect(
-      compareTickets(t("A", 2, null), t("B", 2, "2026-05-01T00:00:00Z")),
-    ).toBeGreaterThan(0);
+    expect(compareTickets(t("A", 2, null), t("B", 2, "2026-05-01T00:00:00Z"))).toBeGreaterThan(0);
   });
   test("identical priority + createdAt: identifier breaks the tie (total order)", () => {
-    expect(compareTickets(t("ENG-1", 2, "x"), t("ENG-2", 2, "x"))).toBeLessThan(
-      0,
-    );
+    expect(compareTickets(t("ENG-1", 2, "x"), t("ENG-2", 2, "x"))).toBeLessThan(0);
   });
 });
 
