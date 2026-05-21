@@ -63,13 +63,26 @@ echo "0"
 EOF
   chmod +x "${SCRATCH}/bin/cpuprobe"
   export CATALYST_EXECUTOR_CPU_PROBE="${SCRATCH}/bin/cpuprobe"
+
+  # CTL-558: fake linear-transition.sh — logs argv, exit code is overridable
+  # via LINEAR_TRANSITION_EXIT so a best-effort failure can be exercised.
+  cat > "${SCRATCH}/bin/linear-transition.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$LINEAR_TRANSITION_LOG"
+exit "${LINEAR_TRANSITION_EXIT:-0}"
+EOF
+  chmod +x "${SCRATCH}/bin/linear-transition.sh"
+  export LINEAR_TRANSITION_LOG="${SCRATCH}/linear-transition.log"
+  : > "$LINEAR_TRANSITION_LOG"
+  export CATALYST_LINEAR_TRANSITION_BIN="${SCRATCH}/bin/linear-transition.sh"
 }
 
 scratch_teardown() {
   rm -rf "$SCRATCH"
-  unset SCRATCH ORCH_DIR STATE_LOG DISPATCH_LOG CLAUDE_LOG
+  unset SCRATCH ORCH_DIR STATE_LOG DISPATCH_LOG CLAUDE_LOG LINEAR_TRANSITION_LOG
   unset CATALYST_STATE_SCRIPT CATALYST_DISPATCH_NEXT_BIN
   unset CATALYST_DISPATCH_CLAUDE_BIN CATALYST_EXECUTOR_CPU_PROBE
+  unset CATALYST_LINEAR_TRANSITION_BIN LINEAR_TRANSITION_EXIT
 }
 
 # make_phase_signal TICKET PHASE STATUS [EXTRA_JQ]
@@ -217,6 +230,60 @@ OUT=$(run_advance --ticket "T-1" --completed-phase "research" --dry-run 2>"${SCR
 echo "$OUT" | jq -e '.dryRun == true' >/dev/null \
   && pass "dry-run reported" || fail "dry-run reported" "got: $OUT"
 [ ! -s "$CLAUDE_LOG" ] && pass "claude stop NOT called in dry-run" || fail "claude stop NOT called in dry-run" "log: $(cat "$CLAUDE_LOG")"
+scratch_teardown
+
+echo "test 13 (CTL-558): advancing to a phase writes the mapped Linear status"
+scratch_setup
+make_phase_signal "T-1" "research" "done"
+run_advance --ticket "T-1" --completed-phase "research" >/dev/null 2>"${SCRATCH}/err"
+# research → plan → linear-transition --transition planning
+grep -q -- "--transition planning" "$LINEAR_TRANSITION_LOG" \
+  && pass "linear-transition --transition planning for research→plan" \
+  || fail "linear-transition --transition planning for research→plan" "log: $(cat "$LINEAR_TRANSITION_LOG")"
+grep -q -- "--ticket T-1" "$LINEAR_TRANSITION_LOG" \
+  && pass "linear-transition --ticket T-1" || fail "linear-transition --ticket T-1" "log: $(cat "$LINEAR_TRANSITION_LOG")"
+scratch_teardown
+
+echo "test 14 (CTL-558): each non-terminal advance maps to the right stateMap key"
+scratch_setup
+declare -a KEYMAP=(triage:research research:planning plan:inProgress implement:verifying verify:reviewing review:inReview pr:inReview monitor-merge:inReview)
+for pair in "${KEYMAP[@]}"; do
+  FROM="${pair%%:*}"
+  KEY="${pair##*:}"
+  : > "$LINEAR_TRANSITION_LOG"
+  make_phase_signal "TKEY-${FROM}" "$FROM" "done"
+  run_advance --ticket "TKEY-${FROM}" --completed-phase "$FROM" >/dev/null 2>"${SCRATCH}/err"
+  grep -q -- "--transition ${KEY}" "$LINEAR_TRANSITION_LOG" \
+    && pass "completed-phase ${FROM} → --transition ${KEY}" \
+    || fail "completed-phase ${FROM} → --transition ${KEY}" "log: $(cat "$LINEAR_TRANSITION_LOG")"
+done
+scratch_teardown
+
+echo "test 15 (CTL-558): terminal monitor-deploy does NOT call linear-transition"
+scratch_setup
+make_phase_signal "T-1" "monitor-deploy" "done"
+run_advance --ticket "T-1" --completed-phase "monitor-deploy" >/dev/null 2>"${SCRATCH}/err"
+# monitor-deploy is terminal — orchestrate-phase-advance returns before any
+# write; terminal Done is phase-monitor-merge's job (plan Phase 4 §1).
+[ ! -s "$LINEAR_TRANSITION_LOG" ] \
+  && pass "no linear-transition call on terminal monitor-deploy" \
+  || fail "no linear-transition call on terminal monitor-deploy" "log: $(cat "$LINEAR_TRANSITION_LOG")"
+scratch_teardown
+
+echo "test 16 (CTL-558): a failed linear-transition never changes the advance exit code"
+scratch_setup
+make_phase_signal "T-1" "research" "done"
+LINEAR_TRANSITION_EXIT=2 run_advance --ticket "T-1" --completed-phase "research" >/dev/null 2>"${SCRATCH}/err"
+RC=$?
+[ "$RC" = "0" ] && pass "status write is best-effort (advance exit 0)" || fail "status write is best-effort (advance exit 0)" "rc=$RC"
+scratch_teardown
+
+echo "test 17 (CTL-558): --config is forwarded to linear-transition when set"
+scratch_setup
+make_phase_signal "T-1" "research" "done"
+run_advance --ticket "T-1" --completed-phase "research" --config "/tmp/x/.catalyst/config.json" >/dev/null 2>"${SCRATCH}/err"
+grep -q -- "--config /tmp/x/.catalyst/config.json" "$LINEAR_TRANSITION_LOG" \
+  && pass "--config forwarded to linear-transition" || fail "--config forwarded to linear-transition" "log: $(cat "$LINEAR_TRANSITION_LOG")"
 scratch_teardown
 
 echo ""

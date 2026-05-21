@@ -36,6 +36,9 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
 DISPATCH_NEXT_BIN="${CATALYST_DISPATCH_NEXT_BIN:-${SCRIPT_DIR}/orchestrate-dispatch-next}"
+# CTL-558: the bash status-write chokepoint — phase-agents mode's deterministic
+# Linear write site, mirroring the execution-core scheduler.
+LINEAR_TRANSITION_BIN="${CATALYST_LINEAR_TRANSITION_BIN:-${SCRIPT_DIR}/linear-transition.sh}"
 
 # shellcheck source=lib/executor.sh
 source "${SCRIPT_DIR}/lib/executor.sh"
@@ -91,6 +94,23 @@ phase_next() {
   esac
 }
 
+# linear_key_for_phase — the .catalyst.linear.stateMap key for a phase (CTL-558).
+# This is the bash mirror of PHASE_LINEAR_KEY in lib/phase-fsm.mjs — KEEP THE
+# TWO IN SYNC (bash cannot import the .mjs). `triage` has no status key (the
+# human owns the Triage state). linear-transition.sh resolves the key → state
+# name via the repo's stateMap, so this stays correct on a stale config.
+linear_key_for_phase() {
+  case "$1" in
+    research)                        echo "research" ;;
+    plan)                            echo "planning" ;;
+    implement)                       echo "inProgress" ;;
+    verify)                          echo "verifying" ;;
+    review)                          echo "reviewing" ;;
+    pr|monitor-merge|monitor-deploy) echo "inReview" ;;
+    *)                               echo "" ;;  # triage / unknown — no write
+  esac
+}
+
 NEXT_PHASE="$(phase_next "$COMPLETED_PHASE")" || {
   echo "ERROR: unknown phase '$COMPLETED_PHASE' (not in canonical 9-phase sequence)" >&2
   exit 2
@@ -143,6 +163,20 @@ fi
     '{advanced: false, fromPhase: $from, toPhase: $to, ticket: $ticket, reason: "dispatch-failed"}'
   exit 0
 }
+
+# CTL-558: deterministic Linear status write-back for phase-agents mode. Now
+# that the next phase agent is dispatched, write its mapped Linear state via the
+# bash chokepoint linear-transition.sh (idempotent — it read-compares first).
+# Best-effort: a failed write must NOT change this script's exit code, exactly
+# like the execution-core scheduler's safeWrite. Terminal `Done` is NOT written
+# here — orchestrate-phase-advance never advances past monitor-deploy; phase-
+# agents-mode terminal Done is phase-monitor-merge's `--transition done`.
+LINEAR_KEY="$(linear_key_for_phase "$NEXT_PHASE")"
+if [ -n "$LINEAR_KEY" ] && [ -x "$LINEAR_TRANSITION_BIN" ]; then
+  TRANSITION_ARGS=( --ticket "$TICKET" --transition "$LINEAR_KEY" )
+  [ -n "$CONFIG_PATH" ] && TRANSITION_ARGS+=( --config "$CONFIG_PATH" )
+  "$LINEAR_TRANSITION_BIN" "${TRANSITION_ARGS[@]}" >/dev/null 2>&1 || true
+fi
 
 # CTL-567: reap the predecessor phase's `claude --bg` job now that its successor
 # is dispatched. This script runs ONLY on `phase.<name>.complete` — `failed` and

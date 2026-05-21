@@ -70,6 +70,14 @@ assert_grep() {
     fail "$label — pattern '$pattern' not found in $(basename "$file")"
   fi
 }
+assert_not_grep() {
+  local pattern="$1" file="$2" label="$3"
+  if grep -q -E -- "$pattern" "$file" 2>/dev/null; then
+    fail "$label — pattern '$pattern' unexpectedly present in $(basename "$file")"
+  else
+    pass "$label"
+  fi
+}
 
 # Per-test sandbox for emit-complete invocations.
 fresh_env() {
@@ -111,16 +119,17 @@ if [[ -f "$SKILL_IMPLEMENT" ]]; then
   assert_grep '/catalyst-dev:implement-plan' "$SKILL_IMPLEMENT" "delegates to /catalyst-dev:implement-plan"
 fi
 
-# ─── Test 2: phase-implement updates Linear to inProgress + has correct /goal
+# ─── Test 2: phase-implement does NOT self-transition Linear + has correct /goal
 echo ""
-echo "Test 2: phase-implement transitions Linear to inProgress and declares /goal"
+echo "Test 2: phase-implement leaves Linear write-back to the coordinator (CTL-558)"
 if [[ -f "$SKILL_IMPLEMENT" ]]; then
-  # Linear transition. Uses the shared linear-transition.sh helper (CTL-69)
-  # rather than rolling its own GraphQL call.
-  assert_grep 'linear-transition\.sh' "$SKILL_IMPLEMENT" "calls linear-transition.sh"
-  assert_grep 'inProgress' "$SKILL_IMPLEMENT" "transitions Linear to inProgress"
+  # CTL-558: Linear status write-back moved to the deterministic coordinator
+  # (execution-core scheduler / orchestrate-phase-advance). The phase agent no
+  # longer shells linear-transition.sh.
+  assert_not_grep 'linear-transition\.sh' "$SKILL_IMPLEMENT" "does NOT shell linear-transition.sh"
+  assert_not_grep '[-][-]transition inProgress' "$SKILL_IMPLEMENT" "does NOT self-transition Linear to inProgress"
   # /goal condition exists and matches the plan's transcript-evaluable shape
-  # (git diff non-empty AND tests pass AND Linear=inProgress).
+  # (git diff non-empty AND tests pass).
   assert_grep '^/goal' "$SKILL_IMPLEMENT" "declares a /goal line"
   assert_grep 'git diff' "$SKILL_IMPLEMENT" "/goal references git diff (diff non-empty)"
 fi

@@ -224,6 +224,13 @@ If ticket was extracted from branch:
 # Skip silently if CLI not available.
 ```
 
+**Skip the status transition (step 1) when `CATALYST_PHASE` is set** — under a
+phase agent the deterministic coordinator (CTL-558) owns the Linear status
+write-back (the execution-core scheduler / `orchestrate-phase-advance` writes
+the `inReview`-equivalent state on the `pr` phase). This status transition is
+only for interactive `/catalyst-dev:create-pr` use; the PR-link comment (step 2)
+is still posted in both modes.
+
 ### 12. Post-PR Monitoring & Resolution Loop
 
 **CRITICAL: Creating the PR is NOT the end of this skill.** You MUST monitor CI checks, wait for
