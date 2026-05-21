@@ -3,7 +3,7 @@
 // Pure execution-core module: data in → data out, no I/O, no imports — a true
 // leaf module (cf. broker/state.mjs). Given Linear issues with their relations
 // it computes the ready set (eligible status AND no unfinished blocker) and
-// detects dependency cycles via a Kahn-style topological pass.
+// detects dependency cycles via Tarjan's strongly-connected-component pass.
 //
 // Canonical directed edge { from, to } means `from` blocks `to`: `to` depends
 // on `from` and cannot start until `from` finishes.
@@ -84,66 +84,74 @@ export function computeReadySet(issues, edges, options = {}) {
   return { ready, blocked };
 }
 
-// detectCycles — find dependency cycles via a Kahn-style topological pass
-// (CTL-530). Source-peel: repeatedly drop indegree-0 nodes (the Kahn pass);
-// survivors are in or downstream of a cycle. Sink-peel: repeatedly drop
-// outdegree-0 survivors; what remains is the set of nodes on a cycle. Those
-// are grouped by weakly-connected component — one anomaly per component.
-// Returns Anomaly[] ordered by first member.
+// detectCycles — find dependency cycles via Tarjan's strongly-connected-
+// component algorithm (CTL-530). Each SCC with more than one node is a cycle;
+// a single-node SCC is a cycle only when that node carries a self-loop edge.
+// A node that merely bridges two cycles — sitting on a one-way path between
+// them — falls into its own singleton SCC and is correctly excluded, and two
+// cycles joined by a one-way edge stay separate anomalies. Returns Anomaly[]
+// ordered by first member.
 export function detectCycles(nodeIds, edges) {
-  const live = new Set(nodeIds ?? []);
-  const liveEdges = (edges ?? []).filter((e) => live.has(e.from) && live.has(e.to));
+  const nodes = [...new Set(nodeIds ?? [])];
+  const nodeSet = new Set(nodes);
 
-  // peel(side): repeatedly delete nodes whose degree on `side` ("to" =
-  // indegree, "from" = outdegree) is 0, recomputed against the shrinking
-  // `live` set so removals cascade.
-  const peel = (side) => {
-    let changed = true;
-    while (changed) {
-      changed = false;
-      const deg = new Map([...live].map((n) => [n, 0]));
-      for (const e of liveEdges) {
-        if (!live.has(e.from) || !live.has(e.to)) continue;
-        deg.set(e[side], deg.get(e[side]) + 1);
-      }
-      for (const [n, d] of deg) {
-        if (d === 0) {
-          live.delete(n);
-          changed = true;
-        }
-      }
-    }
-  };
-  peel("to"); // Kahn source-peel — drop indegree-0 nodes
-  peel("from"); // sink-peel — drop outdegree-0 nodes
-
-  // `live` now holds exactly the nodes on (or bridging) a cycle. Group by
-  // weakly-connected component over the residual subgraph.
-  const adj = new Map([...live].map((n) => [n, new Set()]));
-  for (const e of liveEdges) {
-    if (!live.has(e.from) || !live.has(e.to) || e.from === e.to) continue;
-    adj.get(e.from).add(e.to);
-    adj.get(e.to).add(e.from);
+  // Adjacency over in-set nodes. Self-loops are tracked apart from the
+  // adjacency list so a singleton SCC can still be flagged as a one-issue
+  // cycle; out-of-set and malformed edges are dropped.
+  const adj = new Map(nodes.map((n) => [n, []]));
+  const selfLoop = new Set();
+  for (const e of edges ?? []) {
+    if (!e || !nodeSet.has(e.from) || !nodeSet.has(e.to)) continue;
+    if (e.from === e.to) selfLoop.add(e.from);
+    else adj.get(e.from).push(e.to);
   }
 
-  const anomalies = [];
-  const visited = new Set();
-  for (const start of [...live].sort()) {
-    if (visited.has(start)) continue;
-    const members = [];
-    const queue = [start];
-    visited.add(start);
-    while (queue.length > 0) {
-      const node = queue.shift();
-      members.push(node);
-      for (const peer of adj.get(node)) {
-        if (!visited.has(peer)) {
-          visited.add(peer);
-          queue.push(peer);
-        }
+  // Tarjan's SCC: a single DFS that stamps each node with a discovery `index`
+  // and a `lowlink` (the lowest index reachable from it). A node whose lowlink
+  // equals its own index roots an SCC, which is then popped off the stack.
+  const index = new Map();
+  const lowlink = new Map();
+  const onStack = new Set();
+  const stack = [];
+  const sccs = [];
+  let counter = 0;
+
+  const strongConnect = (v) => {
+    index.set(v, counter);
+    lowlink.set(v, counter);
+    counter += 1;
+    stack.push(v);
+    onStack.add(v);
+    for (const w of adj.get(v)) {
+      if (!index.has(w)) {
+        strongConnect(w);
+        lowlink.set(v, Math.min(lowlink.get(v), lowlink.get(w)));
+      } else if (onStack.has(w)) {
+        lowlink.set(v, Math.min(lowlink.get(v), index.get(w)));
       }
     }
-    members.sort();
+    if (lowlink.get(v) === index.get(v)) {
+      const scc = [];
+      let w;
+      do {
+        w = stack.pop();
+        onStack.delete(w);
+        scc.push(w);
+      } while (w !== v);
+      sccs.push(scc);
+    }
+  };
+  for (const n of nodes) {
+    if (!index.has(n)) strongConnect(n);
+  }
+
+  // An SCC is a cycle when it has multiple members, or a lone member that
+  // links to itself. One anomaly per cycle, members sorted, anomalies ordered
+  // by first member.
+  const anomalies = [];
+  for (const scc of sccs) {
+    if (scc.length === 1 && !selfLoop.has(scc[0])) continue;
+    const members = [...scc].sort();
     anomalies.push({
       type: "dependency_cycle",
       severity: "error",
@@ -154,6 +162,9 @@ export function detectCycles(nodeIds, edges) {
           : `Circular dependency among ${members.length} issues: ${members.join(", ")}.`,
     });
   }
+  anomalies.sort((a, b) =>
+    a.members[0] < b.members[0] ? -1 : a.members[0] > b.members[0] ? 1 : 0
+  );
   return anomalies;
 }
 

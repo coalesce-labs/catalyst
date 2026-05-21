@@ -335,6 +335,35 @@ describe("detectCycles", () => {
         },
       ],
     },
+    {
+      // Regression for the SCC upgrade: two DISTINCT cycles joined only by a
+      // one-way path stay separate anomalies, and the bridge node (CTL-3 —
+      // indegree 1, outdegree 1, on no cycle) is excluded from both.
+      name: "two cycles joined by a one-way bridge → two anomalies, bridge node excluded",
+      nodes: ["CTL-1", "CTL-2", "CTL-3", "CTL-4", "CTL-5"],
+      edges: [
+        ["CTL-1", "CTL-2"],
+        ["CTL-2", "CTL-1"],
+        ["CTL-2", "CTL-3"],
+        ["CTL-3", "CTL-4"],
+        ["CTL-4", "CTL-5"],
+        ["CTL-5", "CTL-4"],
+      ],
+      expected: [
+        {
+          type: "dependency_cycle",
+          severity: "error",
+          members: ["CTL-1", "CTL-2"],
+          reason: "Circular dependency among 2 issues: CTL-1, CTL-2.",
+        },
+        {
+          type: "dependency_cycle",
+          severity: "error",
+          members: ["CTL-4", "CTL-5"],
+          reason: "Circular dependency among 2 issues: CTL-4, CTL-5.",
+        },
+      ],
+    },
   ];
 
   for (const c of cases) {
