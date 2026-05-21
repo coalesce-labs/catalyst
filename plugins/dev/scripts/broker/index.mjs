@@ -5,40 +5,23 @@
 // (agent.checkin/checkout), auto-correlation of ticket↔PR interests, and
 // deterministic ticket_lifecycle routing for Linear webhook events. Groq-based
 // prose classification remains for everything ambiguous.
+//
+// CTL-529: restructured into the execution-core process skeleton. The broker
+// logic now lives in named modules with explicit boundaries —
+//   config.mjs     — logger, env constants, log-path, Groq config (leaf)
+//   state.mjs      — shared in-memory singletons (leaf)
+//   projection.mjs — interest persistence, broker.state.json, worker shadow
+//   router.mjs     — emission, handlers, matchers, Groq, debounce, watchdog
+//   tailer.mjs     — reactive event-log follow + startup replay
+// index.mjs is the thin daemon entrypoint (main/shutdown, PID + key-health)
+// plus the re-export barrel that preserves the public import surface.
 
-import {
-  readFileSync,
-  appendFileSync,
-  writeFileSync,
-  unlinkSync,
-  mkdirSync,
-  watch,
-  openSync,
-  fstatSync,
-  readSync,
-  closeSync,
-} from "node:fs";
-import { resolve, dirname, basename } from "node:path";
+import { writeFileSync, unlinkSync, mkdirSync, openSync, fstatSync, closeSync } from "node:fs";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   openBrokerStateDb,
   closeBrokerStateDb,
-  // filter_state (CTL-284 — PR↔deploy correlation)
-  upsertFilterStateOpen,
-  setFilterStateMerged,
-  setFilterStateDeploying,
-  setFilterStateDeployed,
-  setFilterStateFailed,
-  deleteFilterState,
-  // agents (CTL-303 — structured identity)
-  upsertAgent,
-  markAgentDone,
-  getAgentsByTicket,
-  // ticket_state (CTL-303 — ticket routing)
-  upsertTicketState,
-  // waiting_sessions (CTL-403 — wait-loop visibility)
-  upsertWaitingSession,
-  clearWaitingSession,
   getActiveWaitingSessions,
 } from "./broker-state.mjs";
 import {
@@ -46,25 +29,8 @@ import {
   formatLoadedKeyInfo,
   probeGroq,
 } from "../lib/api-key-health.mjs";
-// Canonical-event primitives shared with orch-monitor (CTL-344). Bun
-// transpiles the .ts import on the fly; the file uses only node: builtins so
-// the broker's minimal dep surface stays intact.
-import {
-  severityNumber,
-  deriveTraceId,
-  deriveSpanId,
-  generateEventId,
-  synthesizeEventId,
-} from "../orch-monitor/lib/canonical-event-shared.ts";
-
-// CTL-529: the logger, env-var constants, getEventLogPath(), the Groq config
-// readers, and DETERMINISTIC_INTEREST_TYPES were extracted to ./config.mjs as
-// the leaf module of the execution-core split. readGroqConfig /
-// readGroqApiKeyFromConfig were `export function`s in this file, so they are
-// re-exported below to keep the public import surface unchanged.
 import {
   log,
-  CATALYST_DIR,
   GLOBAL_CONFIG_PATH,
   GROQ_API_KEY,
   GROQ_KEY_SOURCE,
@@ -74,41 +40,64 @@ import {
   GROQ_GATEWAY_ENABLED,
   GROQ_GATEWAY_BASE_URL,
   GROQ_MODEL,
-  DEBOUNCE_MS,
-  HARD_CAP_MS,
-  MAX_BATCH_SIZE,
-  LOOKBACK_LINES,
   WATCHDOG_INTERVAL_MS,
   HEARTBEAT_STALE_MS,
-  ORCH_STATUS_REPLAY_STALE_MS,
-  DETERMINISTIC_INTEREST_TYPES,
   getEventLogPath,
 } from "./config.mjs";
-
-export { readGroqConfig, readGroqApiKeyFromConfig } from "./config.mjs";
-
-// --- Router (CTL-529) ---
-// Wake emission, the canonical-aware event readers, the registration + agent
-// handlers, the three deterministic matchers, the Groq prose path, debounce
-// batching, the watchdog, and the processEvent dispatch were extracted to
-// ./router.mjs. They are imported here for main()/shutdown() and the tailer;
-// the public symbols are re-exported so the import surface is unchanged.
+import {
+  getInterests,
+  getWaitingSessionsMap,
+  setBrokerStartedAt,
+} from "./state.mjs";
+import {
+  migrateLegacyInterestsFile,
+  loadPersistedInterests,
+  buildBrokerState,
+  writeBrokerStateFile,
+} from "./projection.mjs";
 import {
   appendEvent,
   maybeEmitProseDisabled,
-  getEventName,
   startWatchdog,
   clearDebounceTimers,
-  processEvent,
-  handleRegister,
-  handleDeregister,
-  handleAgentCheckin,
-  handleAgentCheckout,
-  handleOrchestratorStatus,
-  handleOrchestratorTerminated,
-  isOrchestratorStatusFresh,
 } from "./router.mjs";
+import {
+  seedTailer,
+  startTailing,
+  stopTailing,
+  loadExistingRegistrations,
+} from "./tailer.mjs";
 
+// --- Public re-export barrel (CTL-529) ---
+// The execution-core split moved every public symbol into a named module.
+// index.mjs re-exports all 55 of them so the import surface — depended on by
+// the broker test suite — is byte-for-byte preserved. See barrel-exports.test.mjs.
+export { readGroqConfig, readGroqApiKeyFromConfig } from "./config.mjs";
+export {
+  getInterests,
+  clearInterests,
+  getLastHeartbeat,
+  clearLastHeartbeat,
+  getWorkerToOrchestrator,
+  getWaitingSessionsMap,
+  clearWaitingSessionsMap,
+  getOrchestratorStatusMap,
+  clearOrchestratorStatusMap,
+  __setBrokerStartedAtForTest,
+  __resetBrokerStartedAtForTest,
+  __resetDegradedEmittedForTest,
+  __setHeartbeatForTest,
+  __resetBrokerLivenessForTest,
+} from "./state.mjs";
+export {
+  saveInterests,
+  loadPersistedInterests,
+  getBrokerStateFilePath,
+  buildBrokerState,
+  writeBrokerStateFile,
+  getProjectedWorkerStatePath,
+  writeProjectedWorkerState,
+} from "./projection.mjs";
 export {
   pluginVersion,
   summarizeEvent,
@@ -140,181 +129,11 @@ export {
   processEvent,
   handleWorkerStateChanged,
 } from "./router.mjs";
+export { loadExistingRegistrations } from "./tailer.mjs";
 
-// --- Shared in-memory state (CTL-529) ---
-// The interest table, heartbeat/identity maps, and liveness counters were
-// extracted to ./state.mjs so the router and projection share exactly one
-// instance of each. The maps are aliased to module-local consts below —
-// getInterests() etc. return identity-stable references, so the resident
-// router/projection call sites keep mutating the canonical instances
-// unchanged. Liveness counters are primitives, reached via state.mjs get/set
-// pairs (an ESM importer cannot reassign an imported binding).
-import {
-  getInterests,
-  getLastHeartbeat,
-  getWorkerToOrchestrator,
-  getWaitingSessionsMap,
-  getOrchestratorStatusMap,
-  getBrokerStartedAt,
-  setBrokerStartedAt,
-  setLastWakeAt,
-  setLastRegisterAt,
-  getDegradedEmittedAt,
-  setDegradedEmittedAt,
-} from "./state.mjs";
-
-export {
-  getInterests,
-  clearInterests,
-  getLastHeartbeat,
-  clearLastHeartbeat,
-  getWorkerToOrchestrator,
-  getWaitingSessionsMap,
-  clearWaitingSessionsMap,
-  getOrchestratorStatusMap,
-  clearOrchestratorStatusMap,
-  __setBrokerStartedAtForTest,
-  __resetBrokerStartedAtForTest,
-  __resetDegradedEmittedForTest,
-  __setHeartbeatForTest,
-  __resetBrokerLivenessForTest,
-} from "./state.mjs";
-
+// Identity-stable aliases for the shared maps main()/shutdown() read.
 const interests = getInterests();
-const lastHeartbeat = getLastHeartbeat();
-const workerToOrchestrator = getWorkerToOrchestrator();
 const waitingSessions = getWaitingSessionsMap();
-const orchestratorStatusMap = getOrchestratorStatusMap();
-
-// --- Interest persistence + projections (CTL-529) ---
-// Interest persistence, the broker.state.json builder/writer, and the
-// worker-state shadow writers were extracted to ./projection.mjs. They are
-// imported here for main() and the resident router code; the public symbols
-// are re-exported so the import surface is unchanged.
-import {
-  migrateLegacyInterestsFile,
-  saveInterests,
-  loadPersistedInterests,
-  buildBrokerState,
-  writeBrokerStateFile,
-  persistBrokerState,
-  getProjectedWorkerStatePath,
-  writeProjectedWorkerState,
-} from "./projection.mjs";
-
-export {
-  saveInterests,
-  loadPersistedInterests,
-  getBrokerStateFilePath,
-  buildBrokerState,
-  writeBrokerStateFile,
-  getProjectedWorkerStatePath,
-  writeProjectedWorkerState,
-} from "./projection.mjs";
-
-// --- Reactive event log tailing ---
-let lastByteOffset = 0;
-let lastLogPath = "";
-let leftoverBuf = "";
-let eventsWatcher = null;
-
-function readNewEvents() {
-  const logPath = getEventLogPath();
-
-  if (logPath !== lastLogPath) {
-    lastLogPath = logPath;
-    leftoverBuf = "";
-    try {
-      const fd = openSync(logPath, "r");
-      const stat = fstatSync(fd);
-      lastByteOffset = stat.size;
-      closeSync(fd);
-    } catch {
-      lastByteOffset = 0;
-    }
-    return;
-  }
-
-  try {
-    const fd = openSync(logPath, "r");
-    const stat = fstatSync(fd);
-    if (stat.size <= lastByteOffset) {
-      closeSync(fd);
-      return;
-    }
-    const newByteCount = stat.size - lastByteOffset;
-    const buf = Buffer.alloc(newByteCount);
-    readSync(fd, buf, 0, newByteCount, lastByteOffset);
-    closeSync(fd);
-    lastByteOffset = stat.size;
-
-    const text = leftoverBuf + buf.toString("utf8");
-    const lines = text.split("\n");
-    leftoverBuf = lines.pop() ?? "";
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      processEvent(event);
-    }
-  } catch {
-    // Log file not yet created or transient read error
-  }
-}
-
-function startTailing() {
-  const eventsDir = resolve(CATALYST_DIR, "events");
-  mkdirSync(eventsDir, { recursive: true });
-  eventsWatcher = watch(eventsDir, (eventType, filename) => {
-    if (eventType !== "change") return;
-    if (filename !== null && filename !== basename(getEventLogPath())) return;
-    readNewEvents();
-  });
-}
-
-export function loadExistingRegistrations(logPath = lastLogPath) {
-  try {
-    const content = readFileSync(logPath, "utf8");
-    const lines = content.split("\n").filter((l) => l.trim());
-    for (const line of lines.slice(-LOOKBACK_LINES)) {
-      let event;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const name = getEventName(event);
-      if (name === "filter.register") handleRegister(event);
-      if (name === "filter.deregister") handleDeregister(event);
-      // CTL-381: accept the legacy orchestrator.-prefixed alias on replay too.
-      if (name === "agent.checkin" || name === "orchestrator.agent.checkin")
-        handleAgentCheckin(event);
-      if (name === "agent.checkout" || name === "orchestrator.agent.checkout")
-        handleAgentCheckout(event);
-      // CTL-507: replay orchestrator.status so activeOrchestrators survives a
-      // broker restart. Chronological replay + the terminate block below mean a
-      // status followed by a completed/failed resolves to set-then-delete. The
-      // freshness gate skips ancient status events so a long-dead orchestrator
-      // is not resurrected.
-      if (name === "orchestrator.status" && isOrchestratorStatusFresh(event)) {
-        handleOrchestratorStatus(event);
-      }
-      if (name === "orchestrator-completed" || name === "orchestrator-failed") {
-        handleOrchestratorTerminated(event);
-      }
-    }
-    if (interests.size) {
-      log.info({ count: interests.size }, "recovered interests from log");
-    }
-  } catch {
-    // No log file yet — fine
-  }
-}
 
 // --- PID file ---
 function parsePidFilePath() {
@@ -423,7 +242,9 @@ function main() {
 
   migrateLegacyInterestsFile();
 
-  lastLogPath = getEventLogPath();
+  // CTL-529: seed the tailer's log path before loadExistingRegistrations(),
+  // which defaults its logPath arg to the tailer's lastLogPath.
+  seedTailer({ logPath: getEventLogPath() });
   loadPersistedInterests();
   loadExistingRegistrations();
 
@@ -451,14 +272,15 @@ function main() {
     }
   } catch { /* DB might not have the table yet on old installs */ }
 
+  const logPath = getEventLogPath();
   try {
-    const fd = openSync(lastLogPath, "r");
+    const fd = openSync(logPath, "r");
     const stat = fstatSync(fd);
-    lastByteOffset = stat.size;
     closeSync(fd);
-    log.info({ byteOffset: lastByteOffset, logPath: lastLogPath }, "starting");
+    seedTailer({ logPath, byteOffset: stat.size });
+    log.info({ byteOffset: stat.size, logPath }, "starting");
   } catch {
-    log.info({ logPath: lastLogPath }, "starting (no log file yet)");
+    log.info({ logPath }, "starting (no log file yet)");
   }
 
   appendEvent({
@@ -500,7 +322,7 @@ function main() {
     });
 
   const shutdown = (signal) => {
-    eventsWatcher?.close();
+    stopTailing();
     clearInterval(watchdogId);
     // CTL-529: the debounce timer handles are router module-internal.
     clearDebounceTimers();
