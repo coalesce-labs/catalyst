@@ -115,6 +115,14 @@ const MAX_BATCH_SIZE = parseInt(process.env.FILTER_BATCH_SIZE ?? "20", 10);
 const LOOKBACK_LINES = 1000;
 const WATCHDOG_INTERVAL_MS = parseInt(process.env.FILTER_WATCHDOG_INTERVAL_MS ?? "60000", 10);
 const HEARTBEAT_STALE_MS = parseInt(process.env.FILTER_HEARTBEAT_STALE_MS ?? "180000", 10);
+// CTL-507: replayed orchestrator.status events older than this are skipped on
+// startup so a crashed-without-terminate orchestrator is not resurrected into
+// activeOrchestrators. Generous default (6h) — far longer than the gap between
+// an orchestrator's phase-transition status emissions, so a live orchestrator is
+// never dropped; only prunes ancient entries on quiet systems where the
+// 1000-line replay window spans days.
+const ORCH_STATUS_REPLAY_STALE_MS = parseInt(
+  process.env.FILTER_ORCH_STATUS_REPLAY_STALE_MS ?? "21600000", 10);
 
 // --- Event log ---
 function getEventLogPath() {
@@ -884,6 +892,15 @@ export function handleOrchestratorStatus(event) {
 
   log.info({ orchId, phase: entry.phase, wave: entry.wave, activeWorkers: entry.activeWorkers }, "orchestrator status");
   persistBrokerState();
+}
+
+// CTL-507: replay-only freshness check. Live status events are always fresh;
+// this guards only loadExistingRegistrations(). Missing/unparseable ts → stale
+// (cannot verify age — conservative; matches pre-fix empty-state behavior).
+export function isOrchestratorStatusFresh(event, nowMs = Date.now()) {
+  const tsMs = Date.parse(event?.ts ?? "");
+  if (Number.isNaN(tsMs)) return false;
+  return nowMs - tsMs <= ORCH_STATUS_REPLAY_STALE_MS;
 }
 
 // --- Deterministic routing: pr_lifecycle (CTL-284) ---------------------------
@@ -1954,9 +1971,9 @@ function startTailing() {
   });
 }
 
-function loadExistingRegistrations() {
+export function loadExistingRegistrations(logPath = lastLogPath) {
   try {
-    const content = readFileSync(lastLogPath, "utf8");
+    const content = readFileSync(logPath, "utf8");
     const lines = content.split("\n").filter((l) => l.trim());
     for (const line of lines.slice(-LOOKBACK_LINES)) {
       let event;
@@ -1973,6 +1990,14 @@ function loadExistingRegistrations() {
         handleAgentCheckin(event);
       if (name === "agent.checkout" || name === "orchestrator.agent.checkout")
         handleAgentCheckout(event);
+      // CTL-507: replay orchestrator.status so activeOrchestrators survives a
+      // broker restart. Chronological replay + the terminate block below mean a
+      // status followed by a completed/failed resolves to set-then-delete. The
+      // freshness gate skips ancient status events so a long-dead orchestrator
+      // is not resurrected.
+      if (name === "orchestrator.status" && isOrchestratorStatusFresh(event)) {
+        handleOrchestratorStatus(event);
+      }
       if (name === "orchestrator-completed" || name === "orchestrator-failed") {
         handleOrchestratorTerminated(event);
       }
