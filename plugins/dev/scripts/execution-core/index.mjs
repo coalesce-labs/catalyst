@@ -8,6 +8,8 @@
 
 import { startMonitor, stopMonitor } from "./monitor.mjs";
 import { log } from "./config.mjs";
+import { runScan } from "./scan.mjs";
+import { makeScanAdapters } from "./scan-adapters.mjs";
 
 // --- Barrel re-exports (every public symbol of the monitor) -------------
 export * from "./config.mjs";
@@ -38,8 +40,67 @@ export {
   readAllEligibleTickets,
 } from "./scheduler.mjs";
 
+// --- CTL-533: deterministic per-event scan module -----------------------
+export * from "./signal-reader.mjs";
+export * from "./merge-state.mjs";
+export * from "./stalled-detector.mjs";
+export * from "./comms-drain.mjs";
+export * from "./deploy-state.mjs";
+export { runScan } from "./scan.mjs";
+
+// --- CLI arg parsing ----------------------------------------------------
+// parseFlags — minimal `--key value` parser for the scan subcommand.
+function parseFlags(argv) {
+  const flags = {};
+  for (let i = 0; i < argv.length; i += 2) {
+    const key = argv[i];
+    if (typeof key === "string" && key.startsWith("--")) {
+      flags[key.slice(2)] = argv[i + 1];
+    }
+  }
+  return flags;
+}
+
+// runScanCli — `bun index.mjs scan --orch-dir <dir> --orch-id <id> [...]`.
+// Builds real git/gh/deploy/comms adapters, runs one deterministic scan, and
+// prints the result JSON to stdout. Apply-nothing dry run (CTL-533 Phase 4):
+// the integration ticket wires the patches back to disk.
+function runScanCli(argv) {
+  const flags = parseFlags(argv);
+  const orchDir = flags["orch-dir"];
+  const orchId = flags["orch-id"];
+  if (!orchDir || !orchId) {
+    log.error("scan requires --orch-dir <dir> and --orch-id <id>");
+    process.exit(2);
+  }
+  const adapters = makeScanAdapters({
+    orchId,
+    worktreeBase: flags["worktree-base"] ?? `${orchDir}/../worktrees`,
+    configPath: flags["config"] ?? null,
+    channelFile: flags["channel-file"] ?? null,
+  });
+  const result = runScan({
+    orchDir,
+    orchId,
+    event: null,
+    nowMs: Date.now(),
+    commsCursor: Number(flags["comms-cursor"]) || 0,
+    adapters,
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  process.exit(0);
+}
+
 // --- Standalone entrypoint ----------------------------------------------
 function main() {
+  const argv = process.argv.slice(2);
+  // CTL-533: `scan` subcommand — one-shot deterministic scan dry run.
+  if (argv[0] === "scan") {
+    runScanCli(argv.slice(1));
+    return;
+  }
+
+  // Default: the CTL-535 Todo-state monitor.
   log.info("execution-core Todo-state monitor starting");
   startMonitor();
   const shutdown = (sig) => {
