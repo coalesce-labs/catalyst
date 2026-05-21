@@ -23,7 +23,6 @@ import {
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import pino from "pino";
 import {
   openBrokerStateDb,
   closeBrokerStateDb,
@@ -47,11 +46,9 @@ import {
   getActiveWaitingSessions,
 } from "./broker-state.mjs";
 import {
-  resolveApiKey,
   formatMissingKeyWarning,
   formatLoadedKeyInfo,
   probeGroq,
-  deriveGroqEndpoint,
 } from "../lib/api-key-health.mjs";
 // Canonical-event primitives shared with orch-monitor (CTL-344). Bun
 // transpiles the .ts import on the fly; the file uses only node: builtins so
@@ -64,75 +61,35 @@ import {
   synthesizeEventId,
 } from "../orch-monitor/lib/canonical-event-shared.ts";
 
-// --- Logger ---
-const log = pino({
-  name: "broker",
-  level: process.env.LOG_LEVEL ?? "info",
-});
+// CTL-529: the logger, env-var constants, getEventLogPath(), the Groq config
+// readers, and DETERMINISTIC_INTEREST_TYPES were extracted to ./config.mjs as
+// the leaf module of the execution-core split. readGroqConfig /
+// readGroqApiKeyFromConfig were `export function`s in this file, so they are
+// re-exported below to keep the public import surface unchanged.
+import {
+  log,
+  CATALYST_DIR,
+  GLOBAL_CONFIG_PATH,
+  GROQ_API_KEY,
+  GROQ_KEY_SOURCE,
+  GROQ_KEY_PREFIX,
+  GROQ_ENDPOINT,
+  GROQ_EXTRA_HEADERS,
+  GROQ_GATEWAY_ENABLED,
+  GROQ_GATEWAY_BASE_URL,
+  GROQ_MODEL,
+  DEBOUNCE_MS,
+  HARD_CAP_MS,
+  MAX_BATCH_SIZE,
+  LOOKBACK_LINES,
+  WATCHDOG_INTERVAL_MS,
+  HEARTBEAT_STALE_MS,
+  ORCH_STATUS_REPLAY_STALE_MS,
+  DETERMINISTIC_INTEREST_TYPES,
+  getEventLogPath,
+} from "./config.mjs";
 
-// --- Config ---
-const CATALYST_DIR = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
-const GLOBAL_CONFIG_PATH = resolve(homedir(), ".config/catalyst/config.json");
-
-// CTL-343: key resolution moved to lib/api-key-health.mjs. Read groq gateway
-// alongside the key so the chat-completions endpoint can route through a
-// configured proxy (e.g. Adva AI Gateway, Litellm, Helicone).
-export function readGroqConfig(configPath) {
-  const path = configPath ?? GLOBAL_CONFIG_PATH;
-  try {
-    const cfg = JSON.parse(readFileSync(path, "utf8"));
-    return cfg?.groq ?? null;
-  } catch {
-    return null;
-  }
-}
-
-// Retained as a named export for any external callers; new code should use
-// resolveApiKey() from lib/api-key-health.mjs directly.
-export function readGroqApiKeyFromConfig(configPath) {
-  return readGroqConfig(configPath)?.apiKey ?? "";
-}
-
-const groqKeyResolution = resolveApiKey({
-  envName: "GROQ_API_KEY",
-  configKeyPath: "groq.apiKey",
-  configPath: GLOBAL_CONFIG_PATH,
-});
-const groqConfig = readGroqConfig();
-const groqEndpoint = deriveGroqEndpoint({ gateway: groqConfig?.gateway });
-
-const GROQ_API_KEY = groqKeyResolution.value;
-const GROQ_KEY_SOURCE = groqKeyResolution.source;
-const GROQ_KEY_PREFIX = groqKeyResolution.prefix;
-const GROQ_ENDPOINT = groqEndpoint.url;
-const GROQ_EXTRA_HEADERS = groqEndpoint.extraHeaders;
-const GROQ_GATEWAY_ENABLED = groqEndpoint.gatewayEnabled;
-const GROQ_GATEWAY_BASE_URL = GROQ_GATEWAY_ENABLED ? groqConfig?.gateway?.baseUrl : null;
-const GROQ_MODEL = process.env.FILTER_GROQ_MODEL ?? "llama-3.1-8b-instant";
-const DEBOUNCE_MS = parseInt(process.env.FILTER_DEBOUNCE_MS ?? "100", 10);
-const HARD_CAP_MS = parseInt(process.env.FILTER_HARD_CAP_MS ?? "500", 10);
-const MAX_BATCH_SIZE = parseInt(process.env.FILTER_BATCH_SIZE ?? "20", 10);
-const LOOKBACK_LINES = 1000;
-const WATCHDOG_INTERVAL_MS = parseInt(process.env.FILTER_WATCHDOG_INTERVAL_MS ?? "60000", 10);
-const HEARTBEAT_STALE_MS = parseInt(process.env.FILTER_HEARTBEAT_STALE_MS ?? "180000", 10);
-// CTL-507: replayed orchestrator.status events older than this are skipped on
-// startup so a crashed-without-terminate orchestrator is not resurrected into
-// activeOrchestrators. Generous default (6h) — far longer than the gap between
-// an orchestrator's phase-transition status emissions, so a live orchestrator is
-// never dropped; only prunes ancient entries on quiet systems where the
-// 1000-line replay window spans days.
-const ORCH_STATUS_REPLAY_STALE_MS = parseInt(
-  process.env.FILTER_ORCH_STATUS_REPLAY_STALE_MS ?? "21600000", 10);
-
-// --- Event log ---
-function getEventLogPath() {
-  const now = new Date();
-  const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  // Re-read CATALYST_DIR per call so tests can redirect by setting the env
-  // var. Production deployments still pin a stable value via daemon launch.
-  const catalystDir = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
-  return resolve(catalystDir, "events", `${ym}.jsonl`);
-}
+export { readGroqConfig, readGroqApiKeyFromConfig } from "./config.mjs";
 
 // Canonical envelope helpers. Primitives (sha256Hex, severityNumber,
 // deriveTraceId, deriveSpanId, generateEventId, synthesizeEventId) live in
@@ -431,12 +388,6 @@ export function loadPersistedInterests() {
 // broker.daemon.prose_disabled event so the operator can see at a glance that
 // those entries exist but will never fire. Idempotent across the process
 // lifetime — once emitted, subsequent calls are no-ops.
-const DETERMINISTIC_INTEREST_TYPES = new Set([
-  "pr_lifecycle",
-  "ticket_lifecycle",
-  "comms_lifecycle",
-  "phase_lifecycle",
-]);
 let _proseDisabledEmitted = false;
 
 export function __resetProseDisabledForTest() {
