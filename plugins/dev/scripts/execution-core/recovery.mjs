@@ -5,10 +5,13 @@
 // (via the canonical signal reader), and classifies every in-flight claude --bg
 // worker's liveness so a restart resumes mid-run with no lost workers.
 
-import { statSync, readFileSync } from "node:fs";
+import { statSync, readFileSync, openSync, fstatSync, closeSync } from "node:fs";
 import { join } from "node:path";
-import { getJobsRoot, log } from "./config.mjs";
+import { getJobsRoot, getEventLogPath, log } from "./config.mjs";
 import { readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
+import { reconcileAll } from "./monitor.mjs";
+import { listEnrolledProjects } from "./enrollment.mjs";
+import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime
@@ -64,4 +67,41 @@ export function reconstructWorkerState(orchDir, { statJob = defaultStatJob } = {
     );
   }
   return buckets;
+}
+
+// recoverStartup — the boot-time reconstruction CTL-554's daemon calls. Rebuilds
+// routing state (reconcileAll — authoritative Linear poll), loads the durable
+// event-log cursor, and classifies every in-flight worker. Returns a
+// RecoveryReport; throws nothing the daemon must handle (reconcile is internally
+// best-effort, worker scan is filesystem-pure).
+export function recoverStartup({ orchDir, exec, statJob } = {}) {
+  if (!orchDir) throw new Error("recoverStartup: orchDir is required");
+
+  // (1) Routing state — reconcileAll re-globs enrollment + polls Linear per
+  //     project; reconcileProject internally swallows poll/write failures.
+  reconcileAll({ exec });
+  const projects = listEnrolledProjects().map((p) => p.projectKey);
+
+  // (2) Durable event-log cursor — what the monitor's fast path will resume at.
+  const logPath = getEventLogPath();
+  let fileSize = 0;
+  try {
+    const fd = openSync(logPath, "r");
+    fileSize = fstatSync(fd).size;
+    closeSync(fd);
+  } catch {
+    /* no event log yet — poll-only mode */
+  }
+  const cursor = loadCursor();
+  const startOffset = resolveStartOffset({ cursor, logPath, fileSize });
+
+  // (3) Dispatch/worker state — classify in-flight claude --bg workers.
+  const workers = reconstructWorkerState(orchDir, { statJob });
+
+  return {
+    recoveredAt: new Date().toISOString(),
+    routing: { projects, projectCount: projects.length },
+    cursor: { logPath, byteOffset: startOffset, resumed: startOffset !== fileSize },
+    workers,
+  };
 }

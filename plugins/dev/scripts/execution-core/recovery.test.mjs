@@ -12,7 +12,11 @@ import {
   classifyWorker,
   reconstructWorkerState,
   defaultStatJob,
+  recoverStartup,
 } from "./recovery.mjs";
+import { saveCursor } from "./event-cursor.mjs";
+import { dropProject } from "./eligible-set.mjs";
+import { existsSync, appendFileSync } from "node:fs";
 
 let orchDir;
 
@@ -246,5 +250,167 @@ describe("defaultStatJob", () => {
     const res = defaultStatJob("job-corrupt");
     expect(res?.exists).toBe(true);
     expect(res?.state).toBeNull();
+  });
+});
+
+// --- recoverStartup — composition (Phase 3) -------------------------------
+
+describe("recoverStartup", () => {
+  let catalystDir;
+  let prevCatalystDir;
+  let enrollmentDir;
+  const enrolledKeys = new Set();
+
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    catalystDir = mkdtempSync(join(tmpdir(), "exec-core-recover-"));
+    process.env.CATALYST_DIR = catalystDir;
+    enrollmentDir = join(catalystDir, "execution-core", "projects");
+    mkdirSync(enrollmentDir, { recursive: true });
+    enrolledKeys.clear();
+  });
+
+  afterEach(() => {
+    for (const k of enrolledKeys) dropProject(k);
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(catalystDir, { recursive: true, force: true });
+  });
+
+  // Stub a repo + enrollment record so reconcileAll has a project to reconcile.
+  function enroll(projectKey, eligibleQuery) {
+    const repoRoot = mkdtempSync(join(catalystDir, `repo-${projectKey}-`));
+    mkdirSync(join(repoRoot, ".catalyst"), { recursive: true });
+    const catalyst = { linear: { teamKey: eligibleQuery?.team ?? "T" } };
+    if (eligibleQuery) catalyst.orchestration = { executionCore: { eligibleQuery } };
+    writeFileSync(
+      join(repoRoot, ".catalyst", "config.json"),
+      JSON.stringify({ catalyst }),
+    );
+    writeFileSync(
+      join(enrollmentDir, `${projectKey}.json`),
+      JSON.stringify({ projectKey, repoRoot }),
+    );
+    enrolledKeys.add(projectKey);
+    return repoRoot;
+  }
+
+  // A mocked linearis exec keyed on the --team flag.
+  function mockExec(nodesByTeam) {
+    return (_cmd, args) => {
+      const team = args[args.indexOf("--team") + 1];
+      return {
+        code: 0,
+        stdout: JSON.stringify({ nodes: nodesByTeam[team] ?? [] }),
+        stderr: "",
+      };
+    };
+  }
+
+  const node = (identifier) => ({
+    identifier,
+    state: { name: "Todo" },
+    priority: 2,
+  });
+
+  // Append a line to the current UTC month's event log.
+  function eventLogPath() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    return join(catalystDir, "events", `${ym}.jsonl`);
+  }
+  function appendEvent(line) {
+    mkdirSync(join(catalystDir, "events"), { recursive: true });
+    appendFileSync(eventLogPath(), line);
+  }
+
+  test("throws when orchDir is missing", () => {
+    expect(() => recoverStartup({})).toThrow(/orchDir is required/);
+  });
+
+  test("rebuilds routing state — eligible projection exists after recoverStartup", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = mockExec({ ENG: [node("ENG-1")] });
+    recoverStartup({ orchDir, exec, statJob: () => null });
+    expect(
+      existsSync(join(catalystDir, "execution-core", "eligible", "alpha.json")),
+    ).toBe(true);
+  });
+
+  test("report.routing carries the enrolled project list", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("beta", { team: "PLAT", status: "Todo" });
+    const exec = mockExec({ ENG: [], PLAT: [] });
+    const report = recoverStartup({ orchDir, exec, statJob: () => null });
+    expect(report.routing.projectCount).toBe(2);
+    expect([...report.routing.projects].sort()).toEqual(["alpha", "beta"]);
+  });
+
+  test("report.cursor.resumed is true when a valid cursor is saved", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = mockExec({ ENG: [] });
+    appendEvent('{"event":"x"}\n{"event":"y"}\n'); // non-empty log
+    saveCursor({ logPath: eventLogPath(), byteOffset: 0 }); // cursor at start
+    const report = recoverStartup({ orchDir, exec, statJob: () => null });
+    expect(report.cursor.resumed).toBe(true);
+    expect(report.cursor.byteOffset).toBe(0);
+    expect(report.cursor.logPath).toBe(eventLogPath());
+  });
+
+  test("report.cursor.resumed is false when no cursor file exists", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = mockExec({ ENG: [] });
+    appendEvent('{"event":"x"}\n');
+    const report = recoverStartup({ orchDir, exec, statJob: () => null });
+    expect(report.cursor.resumed).toBe(false);
+  });
+
+  test("report.workers carries the running/dead/terminal/unknown buckets", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = mockExec({ ENG: [] });
+    writeNested("CTL-RUN", "research", { status: "running", bg_job_id: "job-run" });
+    writeNested("CTL-DEAD", "plan", { status: "running", bg_job_id: "job-dead" });
+    const report = recoverStartup({
+      orchDir,
+      exec,
+      statJob: (id) => (id === "job-run" ? { exists: true, mtimeMs: 1 } : null),
+    });
+    expect(report.workers.running.map((w) => w.ticket)).toEqual(["CTL-RUN"]);
+    expect(report.workers.dead.map((w) => w.ticket)).toEqual(["CTL-DEAD"]);
+    expect(report.workers.terminal).toEqual([]);
+    expect(report.workers.unknown).toEqual([]);
+  });
+
+  test("report.recoveredAt is an ISO-8601 timestamp", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = mockExec({ ENG: [] });
+    const report = recoverStartup({ orchDir, exec, statJob: () => null });
+    expect(report.recoveredAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+    expect(Number.isNaN(Date.parse(report.recoveredAt))).toBe(false);
+  });
+
+  test("a reconcile-poll failure does not abort recovery (routing best-effort)", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    writeNested("CTL-RUN", "research", { status: "running", bg_job_id: "job-run" });
+    // exec returns a non-zero code → runEligibleQuery throws → reconcileProject
+    // swallows it. recoverStartup must still return a report with workers.
+    const failingExec = () => ({ code: 1, stdout: "", stderr: "linearis down" });
+    let report;
+    expect(() => {
+      report = recoverStartup({
+        orchDir,
+        exec: failingExec,
+        statJob: () => ({ exists: true, mtimeMs: 1 }),
+      });
+    }).not.toThrow();
+    expect(report.workers.running.map((w) => w.ticket)).toEqual(["CTL-RUN"]);
+  });
+
+  test("no event log at all → cursor.byteOffset 0, resumed false (poll-only)", () => {
+    enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = mockExec({ ENG: [] });
+    const report = recoverStartup({ orchDir, exec, statJob: () => null });
+    expect(report.cursor.byteOffset).toBe(0);
+    expect(report.cursor.resumed).toBe(false);
   });
 });

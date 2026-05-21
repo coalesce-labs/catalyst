@@ -40,6 +40,15 @@ export {
   readAllEligibleTickets,
 } from "./scheduler.mjs";
 
+// --- CTL-539: crash-recovery & startup reconstruction --------------------
+export * from "./event-cursor.mjs";
+export {
+  defaultStatJob,
+  classifyWorker,
+  reconstructWorkerState,
+  recoverStartup,
+} from "./recovery.mjs";
+
 // --- CTL-533: deterministic per-event scan module -----------------------
 export * from "./signal-reader.mjs";
 export * from "./merge-state.mjs";
