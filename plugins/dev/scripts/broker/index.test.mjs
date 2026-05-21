@@ -1001,6 +1001,65 @@ describe("watchdog treats orchestrator.status as liveness (CTL-405)", () => {
   });
 });
 
+// ─── CTL-507: loadExistingRegistrations replays orchestrator.status ───────────
+
+import { loadExistingRegistrations } from "./index.mjs";
+
+describe("loadExistingRegistrations replays orchestrator.status (CTL-507)", () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ctl507-"));
+    clearOrchestratorStatusMap();
+    clearInterests();
+  });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  function writeLog(events) {
+    const path = join(tmpDir, "events.jsonl");
+    writeFileSync(path, events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    return path;
+  }
+
+  test("populates orchestratorStatusMap from a logged status event", () => {
+    const path = writeLog([
+      { event: "orchestrator.status", orchestrator: "orch-r1",
+        ts: new Date().toISOString(),
+        detail: { orchestrator: "orch-r1", phase: "monitoring", wave: 2,
+                  active_workers: 3, total_workers: 5, summary: "wave 2",
+                  session_id: "sess-r1" } },
+    ]);
+    loadExistingRegistrations(path);
+    const entry = getOrchestratorStatusMap().get("orch-r1");
+    expect(entry).toBeDefined();
+    expect(entry.phase).toBe("monitoring");
+    expect(entry.wave).toBe(2);
+  });
+
+  test("status then orchestrator-completed leaves the map empty", () => {
+    const path = writeLog([
+      { event: "orchestrator.status", orchestrator: "orch-r2",
+        ts: new Date().toISOString(),
+        detail: { orchestrator: "orch-r2", phase: "monitoring", wave: 1 } },
+      { event: "orchestrator-completed", orchestrator: "orch-r2" },
+    ]);
+    loadExistingRegistrations(path);
+    expect(getOrchestratorStatusMap().has("orch-r2")).toBe(false);
+  });
+
+  test("last status wins when an orchestrator reports twice", () => {
+    const path = writeLog([
+      { event: "orchestrator.status", orchestrator: "orch-r3",
+        ts: new Date().toISOString(),
+        detail: { orchestrator: "orch-r3", phase: "dispatching", wave: 1 } },
+      { event: "orchestrator.status", orchestrator: "orch-r3",
+        ts: new Date().toISOString(),
+        detail: { orchestrator: "orch-r3", phase: "monitoring", wave: 1 } },
+    ]);
+    loadExistingRegistrations(path);
+    expect(getOrchestratorStatusMap().get("orch-r3").phase).toBe("monitoring");
+  });
+});
+
 // ─── processEvent dispatching ────────────────────────────────────────────────
 
 describe("processEvent dispatches agent identity events", () => {

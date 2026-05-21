@@ -1954,9 +1954,9 @@ function startTailing() {
   });
 }
 
-function loadExistingRegistrations() {
+export function loadExistingRegistrations(logPath = lastLogPath) {
   try {
-    const content = readFileSync(lastLogPath, "utf8");
+    const content = readFileSync(logPath, "utf8");
     const lines = content.split("\n").filter((l) => l.trim());
     for (const line of lines.slice(-LOOKBACK_LINES)) {
       let event;
@@ -1973,6 +1973,10 @@ function loadExistingRegistrations() {
         handleAgentCheckin(event);
       if (name === "agent.checkout" || name === "orchestrator.agent.checkout")
         handleAgentCheckout(event);
+      // CTL-507: replay orchestrator.status so activeOrchestrators survives a
+      // broker restart. Chronological replay + the terminate block below mean a
+      // status followed by a completed/failed resolves to set-then-delete.
+      if (name === "orchestrator.status") handleOrchestratorStatus(event);
       if (name === "orchestrator-completed" || name === "orchestrator-failed") {
         handleOrchestratorTerminated(event);
       }
