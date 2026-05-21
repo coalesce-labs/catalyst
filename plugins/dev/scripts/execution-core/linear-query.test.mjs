@@ -136,4 +136,39 @@ describe("runEligibleQuery", () => {
     expect(args[args.indexOf("--team") + 1]).toBe("PLAT");
     expect(args[args.indexOf("--status") + 1]).toBe("Backlog");
   });
+
+  // CTL-536: the scheduler's priority tie-break needs createdAt; the readiness
+  // filter (analyzeDependencyGraph) needs relations / inverseRelations.
+  test("captures createdAt when present", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([
+        {
+          identifier: "ENG-1",
+          state: { name: "Todo" },
+          priority: 2,
+          createdAt: "2026-05-01T00:00:00Z",
+        },
+      ]),
+    });
+    expect(runEligibleQuery(query, { exec })[0].createdAt).toBe("2026-05-01T00:00:00Z");
+  });
+
+  test("createdAt is null when absent (never undefined)", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([{ identifier: "ENG-1", state: { name: "Todo" } }]),
+    });
+    expect(runEligibleQuery(query, { exec })[0].createdAt).toBeNull();
+  });
+
+  test("passes relations / inverseRelations through verbatim for the dependency graph", () => {
+    const relations = {
+      nodes: [{ type: "blocks", relatedIssue: { identifier: "ENG-2" } }],
+    };
+    const exec = fakeExec({
+      stdout: ticketsJson([{ identifier: "ENG-1", state: { name: "Todo" }, relations }]),
+    });
+    const t = runEligibleQuery(query, { exec })[0];
+    expect(t.relations).toEqual(relations);
+    expect(t.inverseRelations).toEqual({ nodes: [] });
+  });
 });

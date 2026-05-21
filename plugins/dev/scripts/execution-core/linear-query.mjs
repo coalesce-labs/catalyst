@@ -16,9 +16,7 @@ const DEFAULT_LIMIT = 200;
 // filter (keep more-urgent-or-equal), not a server-side equality match.
 export function buildLinearisArgs(query) {
   if (!query.team) {
-    throw new Error(
-      "eligibleQuery.team is required (linearis --status requires --team)",
-    );
+    throw new Error("eligibleQuery.team is required (linearis --status requires --team)");
   }
   const args = [
     "issues",
@@ -52,6 +50,13 @@ function defaultExec(cmd, args) {
 // normalizeTicket — flatten linearis's nested shape into a stable record.
 // `state` and `project` arrive as `{ name }` objects from the Linear API;
 // a missing `priority` normalizes to 0 ("No priority", the least urgent).
+//
+// CTL-536: `createdAt` feeds the pull-loop scheduler's priority tie-break;
+// `relations` / `inverseRelations` feed analyzeDependencyGraph
+// (lib/dependency-graph.mjs). Relations default to an empty node list so the
+// graph builder can read `.nodes` unconditionally. Relation capture depends on
+// `linearis issues list` emitting them — if it omits relations the graph
+// simply sees no edges and the scheduler degrades to `ready == eligible`.
 function normalizeTicket(node) {
   return {
     identifier: node.identifier ?? null,
@@ -60,6 +65,9 @@ function normalizeTicket(node) {
     priority: typeof node.priority === "number" ? node.priority : 0,
     project: node.project?.name ?? node.project ?? null,
     updatedAt: node.updatedAt ?? null,
+    createdAt: node.createdAt ?? null,
+    relations: node.relations ?? { nodes: [] },
+    inverseRelations: node.inverseRelations ?? { nodes: [] },
   };
 }
 
@@ -70,9 +78,7 @@ function normalizeTicket(node) {
 export function runEligibleQuery(query, { exec = defaultExec } = {}) {
   const { code, stdout, stderr } = exec("linearis", buildLinearisArgs(query));
   if (code !== 0) {
-    throw new Error(
-      `linearis issues list failed (exit ${code}): ${(stderr || "").trim()}`,
-    );
+    throw new Error(`linearis issues list failed (exit ${code}): ${(stderr || "").trim()}`);
   }
   let parsed;
   try {
@@ -84,9 +90,7 @@ export function runEligibleQuery(query, { exec = defaultExec } = {}) {
   // Priority is a floor: keep tickets whose priority is more-urgent-or-equal
   // (1=Urgent … 4=Low). 0 ("No priority") is always below any floor.
   if (query.priority != null) {
-    tickets = tickets.filter(
-      (t) => t.priority >= 1 && t.priority <= query.priority,
-    );
+    tickets = tickets.filter((t) => t.priority >= 1 && t.priority <= query.priority);
   }
   return tickets;
 }
