@@ -11,6 +11,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 BROKER_DIR="${REPO_ROOT}/plugins/dev/scripts/broker"
+EXECUTION_CORE_DIR="${REPO_ROOT}/plugins/dev/scripts/execution-core"
 
 SHELL_TEST_DIR="${SHELL_TEST_DIR:-${SCRIPT_DIR}/__tests__}"
 # +x test: distinguishes "unset" (use default) from "set to empty" (smoke test).
@@ -58,7 +59,18 @@ ensure_broker_deps() {
 	(cd "$BROKER_DIR" && bun install --frozen-lockfile) || true
 }
 
+# execution-core (CTL-535) — its bun suite imports `pino`, so deps must be
+# present before the suite runs, mirroring ensure_broker_deps.
+ensure_execution_core_deps() {
+	[[ $SKIP_BUN == "1" ]] && return 0
+	command -v bun >/dev/null 2>&1 || return 0
+	[[ -d "${EXECUTION_CORE_DIR}/node_modules" ]] && return 0
+	echo "installing execution-core deps..."
+	(cd "$EXECUTION_CORE_DIR" && bun install --frozen-lockfile) || true
+}
+
 ensure_broker_deps
+ensure_execution_core_deps
 
 echo "=== Shell suite ==="
 shopt -s nullglob
@@ -86,6 +98,15 @@ else
 		bun_fail=$((bun_fail + 1))
 		failed_suites+=("broker bun suite")
 		echo "  FAIL broker bun suite"
+	fi
+	# execution-core surface (CTL-535)
+	if (cd "$EXECUTION_CORE_DIR" && bun test); then
+		bun_pass=$((bun_pass + 1))
+		echo "  PASS execution-core bun suite"
+	else
+		bun_fail=$((bun_fail + 1))
+		failed_suites+=("execution-core bun suite")
+		echo "  FAIL execution-core bun suite"
 	fi
 	# lib surface — run from broker/ per lib/*.test.mjs documented run directive
 	if (cd "$BROKER_DIR" && bun test ../lib/*.test.mjs); then
