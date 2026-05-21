@@ -14,7 +14,7 @@
 #   2. Update the phase signal file
 #        ${ORCH_DIR}/workers/<TICKET>/phase-<name>.json
 #      with status=done|failed, completedAt timestamp, and (on failure) a
-#      failureReason field.
+#      failureReason field. Skipped when --no-signal-update is passed.
 #
 #   3. End the catalyst-session via catalyst-session.sh end so OTel session
 #      outcomes are emitted and the SQLite row is closed.
@@ -27,7 +27,15 @@
 #     [--reason <text>] \
 #     [--orch-dir <path>] \
 #     [--orch-id <id>] \
-#     [--session-id <id>]
+#     [--session-id <id>] \
+#     [--no-signal-update]
+#
+# --no-signal-update (CTL-511): emit the canonical event (step 1) and end the
+#   catalyst-session (step 3) but skip the signal-file mutation (step 2). Used
+#   by phase-agent-dispatch and orchestrate-healthcheck, which write the signal
+#   to status="stalled" themselves and only need this script to wake the
+#   orchestrator with the event — flipping the signal to "failed" here would
+#   make orchestrate-revive Loop 2 skip the redispatch.
 #
 # Defaults: --orch-dir = $CATALYST_ORCHESTRATOR_DIR
 #           --orch-id  = $CATALYST_ORCHESTRATOR_ID
@@ -68,19 +76,21 @@ HANDOFF_PATH=""
 ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
 ORCH_ID="${CATALYST_ORCHESTRATOR_ID:-}"
 SESSION_ID="${CATALYST_SESSION_ID:-}"
+NO_SIGNAL_UPDATE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --phase)        PHASE="$2"; shift 2 ;;
-    --ticket)       TICKET="$2"; shift 2 ;;
-    --status)       STATUS="$2"; shift 2 ;;
-    --reason)       REASON="$2"; shift 2 ;;
-    --handoff-path) HANDOFF_PATH="$2"; shift 2 ;;
-    --orch-dir)     ORCH_DIR="$2"; shift 2 ;;
-    --orch-id)      ORCH_ID="$2"; shift 2 ;;
-    --session-id)   SESSION_ID="$2"; shift 2 ;;
-    -h|--help)      grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *)              die "unknown flag: $1" ;;
+    --phase)             PHASE="$2"; shift 2 ;;
+    --ticket)            TICKET="$2"; shift 2 ;;
+    --status)            STATUS="$2"; shift 2 ;;
+    --reason)            REASON="$2"; shift 2 ;;
+    --handoff-path)      HANDOFF_PATH="$2"; shift 2 ;;
+    --orch-dir)          ORCH_DIR="$2"; shift 2 ;;
+    --orch-id)           ORCH_ID="$2"; shift 2 ;;
+    --session-id)        SESSION_ID="$2"; shift 2 ;;
+    --no-signal-update)  NO_SIGNAL_UPDATE=1; shift ;;
+    -h|--help)           grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)                   die "unknown flag: $1" ;;
   esac
 done
 
@@ -147,8 +157,12 @@ if [[ -n "$LINE" ]]; then
 fi
 
 # ─── 2. Update phase signal file ────────────────────────────────────────────
+#
+# CTL-511: --no-signal-update callers (phase-agent-dispatch launch-failure,
+# orchestrate-healthcheck stall) have already written the signal to
+# status="stalled" and need only the event from step 1 — skip the mutation.
 
-if [[ -n "$ORCH_DIR" ]]; then
+if [[ -n "$ORCH_DIR" && "$NO_SIGNAL_UPDATE" -eq 0 ]]; then
   SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
   if [[ -f "$SIGNAL_FILE" ]]; then
     # CTL-484: turn-cap-exhausted is a non-terminal status the continuation

@@ -194,6 +194,40 @@ else
   fi
 fi
 
+# ─── CTL-511: --no-signal-update event-only mode ────────────────────────────
+# Phases 2 and 3 of CTL-511 need to wake the orchestrator with a
+# phase.<name>.failed event WITHOUT mutating the signal file — the signal must
+# stay at status:"stalled" (no failureReason) so orchestrate-revive Loop 2
+# redispatches it. --no-signal-update is that shared primitive.
+echo ""
+echo "Test 8 (CTL-511): --no-signal-update emits the event but leaves the signal file untouched"
+fresh_env t8
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-plan.json"
+# Pre-seed the signal as orchestrate-healthcheck / the launch-failure path
+# would leave it: status:"stalled", no failureReason.
+echo '{"ticket":"CTL-100","phase":"plan","status":"stalled"}' > "$SIGNAL"
+BEFORE=$(cat "$SIGNAL")
+"$EMIT_SCRIPT" --phase plan --ticket CTL-100 --status failed \
+  --reason launch-failed --no-signal-update >/dev/null 2>&1
+LINE=$(read_event_line)
+if [[ -z "$LINE" ]]; then
+  fail "Test 8: --no-signal-update emitted no event line"
+else
+  EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"')
+  assert_eq "phase.plan.failed.CTL-100" "$EVENT_NAME" "--no-signal-update still emits phase.<name>.failed event"
+fi
+assert_eq "$BEFORE" "$(cat "$SIGNAL")" "--no-signal-update leaves the signal file byte-identical"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "--no-signal-update keeps signal status at stalled"
+assert_eq "false" "$(jq -r 'has("failureReason")' "$SIGNAL")" "--no-signal-update does not write failureReason"
+
+echo ""
+echo "Test 9 (CTL-511 regression): default mode (no flag) still mutates the signal file"
+fresh_env t9
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-plan.json"
+echo '{"ticket":"CTL-100","phase":"plan","status":"running"}' > "$SIGNAL"
+"$EMIT_SCRIPT" --phase plan --ticket CTL-100 --status failed >/dev/null 2>&1
+assert_eq "failed" "$(jq -r '.status' "$SIGNAL")" "default mode still flips signal status to failed"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"
