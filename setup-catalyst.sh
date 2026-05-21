@@ -312,6 +312,44 @@ update_config_with_linear_states() {
 	fi
 }
 
+# Ensure the execution-core Linear-state contract (CTL-564). A thin wrapper:
+# only when the resolved config's orchestration.dispatchMode is "execution-core"
+# does it invoke the standalone setup-execution-core-states.sh, which ensures the
+# contract states exist, writes the 9->5 collapse stateMap, refreshes stateIds,
+# and upserts the central registry entry. For phase-agents / oneshot-legacy repos
+# this is a silent no-op. A non-zero exit from the standalone script (e.g. a
+# Linear-permission failure) is tolerated (|| true) so it never aborts setup.
+setup_execution_core_states() {
+	# Resolve config the same way update_config_with_linear_states does:
+	# .catalyst/ with a .claude/ backward-compat fallback.
+	local config_file="${PROJECT_DIR}/.catalyst/config.json"
+	if [[ ! -f $config_file && -f "${PROJECT_DIR}/.claude/config.json" ]]; then
+		config_file="${PROJECT_DIR}/.claude/config.json"
+	fi
+	[[ -f $config_file ]] || return 0
+
+	local dispatch_mode
+	dispatch_mode=$(jq -r '.catalyst.orchestration.dispatchMode // empty' "$config_file" 2>/dev/null)
+	# Gate: only execution-core repos get the state-contract step.
+	[[ $dispatch_mode == "execution-core" ]] || return 0
+
+	# Locate the standalone script — installed plugin root or the repo checkout.
+	local states_script=""
+	if [[ -n ${CLAUDE_PLUGIN_ROOT:-} && -f "${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh" ]]; then
+		states_script="${CLAUDE_PLUGIN_ROOT}/scripts/setup-execution-core-states.sh"
+	elif [[ -f "plugins/dev/scripts/setup-execution-core-states.sh" ]]; then
+		states_script="plugins/dev/scripts/setup-execution-core-states.sh"
+	fi
+	if [[ -z $states_script ]]; then
+		print_warning "execution-core repo, but setup-execution-core-states.sh not found — skipping state contract"
+		return 0
+	fi
+
+	echo ""
+	echo "🔗 Ensuring execution-core Linear-state contract..."
+	bash "$states_script" --config "$config_file" || true
+}
+
 # Discover existing Sentry auth token
 discover_sentry_token() {
 	local token=""
@@ -2115,6 +2153,7 @@ main() {
 	setup_humanlayer_config
 	setup_catalyst_secrets
 	update_config_with_linear_states
+	setup_execution_core_states
 	init_session_database
 	init_humanlayer_thoughts
 	sync_thoughts

@@ -81,6 +81,20 @@ a unified diff and asks for confirmation before merging. Concretely:
 6. If the user declines, leave `.catalyst/config.json` untouched. The drift warning continues to
    appear on subsequent workflow invocations, providing passive nagging until resolved.
 
+**Execution-core state contract (CTL-564).** When a repo's
+`catalyst.orchestration.dispatchMode` is `execution-core`, `setup-catalyst.sh`
+runs an extra step — `setup_execution_core_states` — right after the Linear
+workflow-state fetch. That step delegates to the standalone
+`plugins/dev/scripts/setup-execution-core-states.sh`, which ensures the team's
+contract workflow states exist (`Ready` + `Research`, `Plan`, `Implement`,
+`Validate`, `PR`; `Triage` already exists), writes the 9-phase → 5-state
+collapse `stateMap`, refreshes `stateIds`, and upserts the team's entry in the
+central `~/catalyst/execution-core/registry.json`. The step is a silent no-op
+for `phase-agents` / `oneshot-legacy` repos, and a Linear-permission failure in
+the standalone script never aborts setup. The standalone script is also
+idempotent and can be run directly per team (`setup-execution-core-states.sh
+--config .catalyst/config.json [--dry-run] [--json]`).
+
 For issues needing user input, explain what's needed and how to provide it:
 
 | Issue | What to tell the user |
