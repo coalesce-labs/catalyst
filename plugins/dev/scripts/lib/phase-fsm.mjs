@@ -99,11 +99,38 @@ export function transition(state, event) {
     );
   }
 
-  // Pipeline-phase happy path. (failed / turn-cap-exhausted / park / resume and the
-  // needs-input branch are added in Phase 2.)
-  if (PHASES.includes(state.phase) && event.type === "complete") {
-    return { phase: NEXT_PHASE[state.phase], reviveCount: 0, parkedFrom: null };
+  // ─── Park state: only 'resume' is legal ───
+  if (state.phase === PARK_STATE) {
+    if (event.type === "resume") {
+      return { phase: state.parkedFrom, reviveCount: state.reviveCount, parkedFrom: null };
+    }
+    throw new PhaseFsmError(`needs-input only accepts 'resume', got '${event.type}'`);
   }
 
-  throw new PhaseFsmError(`no transition for event '${event.type}' from phase '${state.phase}'`);
+  // ─── Pipeline phase ───
+  switch (event.type) {
+    case "complete":
+      return { phase: NEXT_PHASE[state.phase], reviveCount: 0, parkedFrom: null };
+
+    case "failed":
+      // Revive once per phase; the 2nd failure escalates to the terminal failure sink.
+      return state.reviveCount < REVIVE_BUDGET
+        ? { phase: state.phase, reviveCount: state.reviveCount + 1, parkedFrom: null }
+        : { phase: TERMINAL_FAILURE, reviveCount: state.reviveCount, parkedFrom: null };
+
+    case "turn-cap-exhausted":
+      // Continuation self-loop — same phase, revive budget untouched.
+      return { phase: state.phase, reviveCount: state.reviveCount, parkedFrom: null };
+
+    case "park":
+      return { phase: PARK_STATE, reviveCount: state.reviveCount, parkedFrom: state.phase };
+
+    case "resume":
+      throw new PhaseFsmError(`'resume' is only valid from '${PARK_STATE}'`);
+
+    default:
+      throw new PhaseFsmError(
+        `no transition for event '${event.type}' from phase '${state.phase}'`
+      );
+  }
 }

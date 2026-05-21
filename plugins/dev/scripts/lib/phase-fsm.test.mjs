@@ -3,7 +3,14 @@
 
 import { describe, test, expect } from "bun:test";
 
-import { PHASES, PhaseFsmError, initialState, isTerminal, transition } from "./phase-fsm.mjs";
+import {
+  PHASES,
+  REVIVE_BUDGET,
+  PhaseFsmError,
+  initialState,
+  isTerminal,
+  transition,
+} from "./phase-fsm.mjs";
 
 // ─── Phase 1: module scaffold + happy-path pipeline ───
 
@@ -108,6 +115,101 @@ describe("transition — input validation throws PhaseFsmError", () => {
   test("rejects unknown event type", () => {
     expect(() =>
       transition({ phase: "triage", reviveCount: 0, parkedFrom: null }, { type: "explode" })
+    ).toThrow(PhaseFsmError);
+  });
+});
+
+// ─── Phase 2: failure / revive / escalation + turn-cap + needs-input park ───
+
+describe("transition — failed: revive once, then escalate", () => {
+  test("REVIVE_BUDGET is 1", () => {
+    expect(REVIVE_BUDGET).toBe(1);
+  });
+
+  for (const phase of PHASES) {
+    test(`${phase}: 1st failure revives in place (reviveCount 0 -> 1)`, () => {
+      const next = transition({ phase, reviveCount: 0, parkedFrom: null }, { type: "failed" });
+      expect(next).toEqual({ phase, reviveCount: 1, parkedFrom: null });
+    });
+
+    test(`${phase}: 2nd failure escalates to stalled`, () => {
+      const next = transition({ phase, reviveCount: 1, parkedFrom: null }, { type: "failed" });
+      expect(next.phase).toBe("stalled");
+    });
+  }
+
+  test("stalled is terminal — any event throws", () => {
+    expect(() =>
+      transition({ phase: "stalled", reviveCount: 1, parkedFrom: null }, { type: "failed" })
+    ).toThrow(PhaseFsmError);
+  });
+});
+
+describe("transition — turn-cap-exhausted: continuation self-loop", () => {
+  for (const phase of PHASES) {
+    test(`${phase}: stays in place, reviveCount preserved`, () => {
+      expect(
+        transition({ phase, reviveCount: 1, parkedFrom: null }, { type: "turn-cap-exhausted" })
+      ).toEqual({ phase, reviveCount: 1, parkedFrom: null });
+    });
+  }
+  test("does not consume the revive budget", () => {
+    const next = transition(
+      { phase: "implement", reviveCount: 0, parkedFrom: null },
+      { type: "turn-cap-exhausted" }
+    );
+    expect(next.reviveCount).toBe(0);
+  });
+});
+
+describe("transition — park: any phase parks into needs-input", () => {
+  for (const phase of PHASES) {
+    test(`${phase} --park--> needs-input (parkedFrom recorded)`, () => {
+      expect(transition({ phase, reviveCount: 0, parkedFrom: null }, { type: "park" })).toEqual({
+        phase: "needs-input",
+        reviveCount: 0,
+        parkedFrom: phase,
+      });
+    });
+  }
+  test("park preserves reviveCount", () => {
+    const next = transition(
+      { phase: "research", reviveCount: 1, parkedFrom: null },
+      { type: "park" }
+    );
+    expect(next.reviveCount).toBe(1);
+  });
+});
+
+describe("transition — resume: needs-input returns to the parked phase", () => {
+  test("resume returns to parkedFrom and clears it", () => {
+    expect(
+      transition({ phase: "needs-input", reviveCount: 0, parkedFrom: "plan" }, { type: "resume" })
+    ).toEqual({ phase: "plan", reviveCount: 0, parkedFrom: null });
+  });
+  test("resume preserves reviveCount", () => {
+    const next = transition(
+      { phase: "needs-input", reviveCount: 1, parkedFrom: "verify" },
+      { type: "resume" }
+    );
+    expect(next.reviveCount).toBe(1);
+  });
+
+  for (const type of ["complete", "failed", "turn-cap-exhausted", "park"]) {
+    test(`needs-input rejects event '${type}'`, () => {
+      expect(() =>
+        transition({ phase: "needs-input", reviveCount: 0, parkedFrom: "plan" }, { type })
+      ).toThrow(PhaseFsmError);
+    });
+  }
+  test("resume from a pipeline phase throws", () => {
+    expect(() =>
+      transition({ phase: "triage", reviveCount: 0, parkedFrom: null }, { type: "resume" })
+    ).toThrow(PhaseFsmError);
+  });
+  test("needs-input with a missing parkedFrom throws", () => {
+    expect(() =>
+      transition({ phase: "needs-input", reviveCount: 0, parkedFrom: null }, { type: "resume" })
     ).toThrow(PhaseFsmError);
   });
 });
