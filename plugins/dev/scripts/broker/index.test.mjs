@@ -1003,7 +1003,7 @@ describe("watchdog treats orchestrator.status as liveness (CTL-405)", () => {
 
 // ─── CTL-507: loadExistingRegistrations replays orchestrator.status ───────────
 
-import { loadExistingRegistrations } from "./index.mjs";
+import { loadExistingRegistrations, isOrchestratorStatusFresh } from "./index.mjs";
 
 describe("loadExistingRegistrations replays orchestrator.status (CTL-507)", () => {
   let tmpDir;
@@ -1057,6 +1057,43 @@ describe("loadExistingRegistrations replays orchestrator.status (CTL-507)", () =
     ]);
     loadExistingRegistrations(path);
     expect(getOrchestratorStatusMap().get("orch-r3").phase).toBe("monitoring");
+  });
+
+  // ─── CTL-507 Phase 2: freshness gate ───────────────────────────────────────
+
+  test("fresh status (recent ts) is considered fresh", () => {
+    expect(isOrchestratorStatusFresh(
+      { ts: new Date().toISOString() }, Date.now())).toBe(true);
+  });
+
+  test("ancient status (ts well past the window) is stale", () => {
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    expect(isOrchestratorStatusFresh({ ts: old }, Date.now())).toBe(false);
+  });
+
+  test("missing or unparseable ts is treated as stale", () => {
+    expect(isOrchestratorStatusFresh({}, Date.now())).toBe(false);
+    expect(isOrchestratorStatusFresh({ ts: "not-a-date" }, Date.now())).toBe(false);
+  });
+
+  test("replay skips an ancient status event", () => {
+    const path = writeLog([
+      { event: "orchestrator.status", orchestrator: "orch-old",
+        ts: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(),
+        detail: { orchestrator: "orch-old", phase: "monitoring", wave: 1 } },
+    ]);
+    loadExistingRegistrations(path);
+    expect(getOrchestratorStatusMap().has("orch-old")).toBe(false);
+  });
+
+  test("replay keeps a recent status event", () => {
+    const path = writeLog([
+      { event: "orchestrator.status", orchestrator: "orch-new",
+        ts: new Date().toISOString(),
+        detail: { orchestrator: "orch-new", phase: "monitoring", wave: 1 } },
+    ]);
+    loadExistingRegistrations(path);
+    expect(getOrchestratorStatusMap().has("orch-new")).toBe(true);
   });
 });
 
