@@ -310,3 +310,15 @@ describe("runScan", () => {
     expect(out.newCommsCursor).toBe(6);
   });
 });
+
+describe("index.mjs barrel", () => {
+  test("re-exports runScan, readWorkerSignals and the decision functions", async () => {
+    const barrel = await import("./index.mjs");
+    expect(typeof barrel.runScan).toBe("function");
+    expect(typeof barrel.readWorkerSignals).toBe("function");
+    expect(typeof barrel.nextMergeState).toBe("function");
+    expect(typeof barrel.detectStalled).toBe("function");
+    expect(typeof barrel.drainComms).toBe("function");
+    expect(typeof barrel.nextDeployState).toBe("function");
+  });
+});
