@@ -44,6 +44,7 @@ import {
   persistBrokerState,
   getProjectedWorkerStatePath,
   writeProjectedWorkerState,
+  projectWorkerStateEvent,
 } from "./projection.mjs";
 import {
   upsertFilterStateOpen,
@@ -1496,6 +1497,11 @@ export function startWatchdog() {
 // --- Event processing ---
 export function processEvent(event) {
   const name = getEventName(event);
+
+  // CTL-532: fold every event into the worker-state projection (best-effort,
+  // non-consuming — the projection is a side-channel observer and never
+  // returns, so existing routing below is untouched).
+  projectWorkerStateEvent(event);
 
   if (name === "filter.register") {
     handleRegister(event);

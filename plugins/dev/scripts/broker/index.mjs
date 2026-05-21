@@ -66,6 +66,7 @@ import {
   loadPersistedInterests,
   buildBrokerState,
   writeBrokerStateFile,
+  replayWorkerStateProjection,
 } from "./projection.mjs";
 import {
   appendEvent,
@@ -82,10 +83,11 @@ import {
 
 // --- Public re-export barrel (CTL-529) ---
 // The execution-core split moved every public symbol into a named module.
-// index.mjs re-exports all 65 of them so the import surface — depended on by
+// index.mjs re-exports all 67 of them so the import surface — depended on by
 // the broker test suite — is byte-for-byte preserved. See barrel-exports.test.mjs.
-// CTL-532 added the 9 worker-state store helpers (Phase 1) + the pure
-// reduceWorkerStateEvent reducer (Phase 2).
+// CTL-532 added 12 worker-state-projection symbols: 9 store helpers (Phase 1),
+// the pure reduceWorkerStateEvent reducer (Phase 2), and the
+// projectWorkerStateEvent + replayWorkerStateProjection drivers (Phase 3).
 export { readGroqConfig, readGroqApiKeyFromConfig } from "./config.mjs";
 export {
   getInterests,
@@ -112,6 +114,8 @@ export {
   getProjectedWorkerStatePath,
   writeProjectedWorkerState,
   reduceWorkerStateEvent,
+  projectWorkerStateEvent,
+  replayWorkerStateProjection,
 } from "./projection.mjs";
 export {
   pluginVersion,
@@ -269,6 +273,10 @@ function main() {
   maybeEmitProseDisabled();
 
   openBrokerStateDb();
+
+  // CTL-532: rebuild the event-sourced worker_state projection from the
+  // current-month event log. Idempotent — safe to run on every (re)start.
+  replayWorkerStateProjection();
 
   // CTL-403: rehydrate waiting sessions from SQLite so the watchdog respects
   // active waits that survived a broker restart.

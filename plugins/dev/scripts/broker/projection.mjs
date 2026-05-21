@@ -18,6 +18,7 @@ import {
   GROQ_GATEWAY_ENABLED,
   GROQ_GATEWAY_BASE_URL,
   DETERMINISTIC_INTEREST_TYPES,
+  getEventLogPath,
 } from "./config.mjs";
 import {
   getInterests,
@@ -27,7 +28,13 @@ import {
   getLastWakeAt,
   getLastRegisterAt,
 } from "./state.mjs";
-import { getRecentAgents } from "./broker-state.mjs";
+import {
+  getRecentAgents,
+  upsertWorkerState,
+  recordReviveEvent,
+  getReviveCount,
+  setProjectionMeta,
+} from "./broker-state.mjs";
 
 // Identity-stable aliases for the shared maps — disk I/O lives here, the data
 // lives in state.mjs (research Open Question #1).
@@ -463,4 +470,82 @@ export function reduceWorkerStateEvent(event) {
 // for the revive ledger so legacy revive events still dedupe across replays.
 function synthesizeWorkerEventId(name, ts, ticket) {
   return createHash("sha256").update(`${name} ${ts ?? ""} ${ticket ?? ""}`).digest("hex");
+}
+
+// projectWorkerStateEvent — best-effort driver: fold one event into the
+// SQLite worker_state projection. Never throws into the caller's event loop.
+export function projectWorkerStateEvent(event) {
+  try {
+    const r = reduceWorkerStateEvent(event);
+    if (!r) return;
+    if (r.kind === "revive") {
+      const isNew = recordReviveEvent({
+        eventId: r.eventId,
+        orchestrator: r.orchestrator,
+        ticket: r.ticket,
+        ts: r.ts,
+      });
+      if (isNew) {
+        upsertWorkerState({
+          orchestrator: r.orchestrator,
+          ticket: r.ticket,
+          reviveCount: getReviveCount(r.orchestrator, r.ticket),
+          eventId: r.eventId,
+          eventTs: r.ts,
+        });
+      }
+      return;
+    }
+    upsertWorkerState({
+      orchestrator: r.orchestrator,
+      ticket: r.ticket,
+      ...r.patch,
+      eventId: r.eventId,
+      eventTs: r.ts,
+    });
+  } catch (err) {
+    log.warn({ err: err.message }, "projectWorkerStateEvent failed (best-effort)");
+  }
+}
+
+// replayWorkerStateProjection — startup replay: fold the whole current-month
+// event log into worker_state. Idempotent so it is correct whether the broker
+// just started cold, restarted after a crash, or has been running live.
+// TODO(CTL-532-followup): replayWorkerStateProjection and
+// loadExistingRegistrations both readFileSync the (large) current-month log at
+// startup — share a single startup file read.
+export function replayWorkerStateProjection() {
+  try {
+    const logPath = getEventLogPath();
+    let raw;
+    try {
+      raw = readFileSync(logPath, "utf8");
+    } catch {
+      // No log file yet (fresh install) — nothing to replay.
+      return;
+    }
+    let eventsFolded = 0;
+    let lastEventId = null;
+    let lastEventTs = null;
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue; // skip malformed lines
+      }
+      projectWorkerStateEvent(event);
+      eventsFolded++;
+      const ts = event?.ts ?? event?.observedTs ?? null;
+      if (ts && (!lastEventTs || ts >= lastEventTs)) {
+        lastEventTs = ts;
+        lastEventId = event?.id ?? lastEventId;
+      }
+    }
+    setProjectionMeta({ lastEventId, lastEventTs, eventsFolded });
+    log.info({ eventsFolded, logPath }, "replayed worker-state projection");
+  } catch (err) {
+    log.warn({ err: err.message }, "replayWorkerStateProjection failed (best-effort)");
+  }
 }

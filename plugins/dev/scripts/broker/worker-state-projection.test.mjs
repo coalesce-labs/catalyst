@@ -5,9 +5,10 @@
 // Tiers:
 //   - store helpers (Phase 1): worker_state / worker_revive_events / projection_meta
 //   - pure reducer (Phase 2): reduceWorkerStateEvent
+//   - projection integration (Phase 3): driver + router hook + startup replay
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -21,6 +22,9 @@ import {
   setProjectionMeta,
   getStaleWorkers,
   reduceWorkerStateEvent,
+  projectWorkerStateEvent,
+  replayWorkerStateProjection,
+  processEvent,
 } from "./index.mjs";
 // DB lifecycle is imported directly from broker-state.mjs (the
 // broker-state.test.mjs precedent) — these are not part of the pinned barrel.
@@ -399,4 +403,150 @@ describe("reduceWorkerStateEvent (CTL-532)", () => {
     expect(reduceWorkerStateEvent(event)).toEqual(reduceWorkerStateEvent(event));
   });
 });
+
+// ─── Phase 3: projection driver, router hook, startup replay ─────────────────
+
+function monthLogPath(dir) {
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  return join(dir, "events", `${ym}.jsonl`);
+}
+
+describe("projection integration (CTL-532)", () => {
+  test("processEvent(phaseCompleteEvent) → getWorkerState row has phase + status", () => {
+    processEvent(canonicalPhaseEvent({ name: "phase.research.complete.CTL-1", id: "p1" }));
+    const row = getWorkerState("orch-1", "CTL-1");
+    expect(row).not.toBeNull();
+    expect(row.phase).toBe("research");
+    expect(row.status).toBe("phase-complete");
+  });
+
+  test("projectWorkerStateEvent on an OLDER out-of-order event does not regress phase/status", () => {
+    projectWorkerStateEvent(canonicalPhaseEvent({ name: "phase.plan.complete.CTL-2", id: "p-new", ts: "2026-05-21T05:00:00.000Z" }));
+    projectWorkerStateEvent(canonicalPhaseEvent({ name: "phase.research.failed.CTL-2", id: "p-old", ts: "2026-05-21T01:00:00.000Z" }));
+    const row = getWorkerState("orch-1", "CTL-2");
+    expect(row.phase).toBe("plan");
+    expect(row.status).toBe("phase-complete");
+  });
+
+  test("projectWorkerStateEvent of a revived event increments revive_count via the ledger", () => {
+    const revived = (id) => ({
+      ts: "2026-05-21T01:00:00.000Z",
+      id,
+      attributes: {
+        "event.name": "orchestrator.worker.revived",
+        "catalyst.orchestrator.id": "orch-1",
+        "catalyst.worker.ticket": "CTL-9",
+      },
+      body: { payload: { reviveCount: 1 } },
+    });
+    projectWorkerStateEvent(revived("rev-a"));
+    projectWorkerStateEvent(revived("rev-b"));
+    expect(getWorkerState("orch-1", "CTL-9").revive_count).toBe(2);
+    // Re-folding the same ids does not double-count.
+    projectWorkerStateEvent(revived("rev-a"));
+    projectWorkerStateEvent(revived("rev-b"));
+    expect(getWorkerState("orch-1", "CTL-9").revive_count).toBe(2);
+  });
+
+  test("replayWorkerStateProjection over a fixture log builds the expected rows", () => {
+    const prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = tmpDir;
+    try {
+      const lines = [
+        JSON.stringify(canonicalPhaseEvent({ name: "phase.research.complete.CTL-1", id: "r1", ts: "2026-05-21T01:00:00.000Z" })),
+        JSON.stringify(canonicalPhaseEvent({ name: "phase.plan.complete.CTL-1", id: "r2", ts: "2026-05-21T02:00:00.000Z" })),
+        JSON.stringify(canonicalPhaseEvent({ name: "phase.triage.complete.CTL-2", id: "r3", ts: "2026-05-21T01:30:00.000Z" })),
+        "not-json-skip-me",
+        "",
+      ];
+      const path = monthLogPath(tmpDir);
+      mkdtempSyncEnsure(path);
+      writeFileSync(path, lines.join("\n") + "\n");
+      replayWorkerStateProjection();
+      expect(getWorkerState("orch-1", "CTL-1").phase).toBe("plan");
+      expect(getWorkerState("orch-1", "CTL-2").phase).toBe("triage");
+      const meta = getProjectionMeta();
+      expect(meta).not.toBeNull();
+      expect(meta.eventsFolded).toBeGreaterThan(0);
+    } finally {
+      if (prevDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prevDir;
+    }
+  });
+
+  test("IDEMPOTENT REPLAY: running replay twice yields byte-identical rows", () => {
+    const prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = tmpDir;
+    try {
+      const revived = (id, ticket) => JSON.stringify({
+        ts: "2026-05-21T01:00:00.000Z", id,
+        attributes: {
+          "event.name": "orchestrator.worker.revived",
+          "catalyst.orchestrator.id": "orch-1",
+          "catalyst.worker.ticket": ticket,
+        },
+        body: { payload: { reviveCount: 1 } },
+      });
+      const lines = [
+        JSON.stringify(canonicalPhaseEvent({ name: "phase.research.complete.CTL-1", id: "r1", ts: "2026-05-21T01:00:00.000Z" })),
+        revived("rev-1", "CTL-1"),
+        revived("rev-2", "CTL-1"),
+        JSON.stringify(canonicalPhaseEvent({ name: "phase.plan.complete.CTL-1", id: "r2", ts: "2026-05-21T02:00:00.000Z" })),
+      ];
+      const path = monthLogPath(tmpDir);
+      mkdtempSyncEnsure(path);
+      writeFileSync(path, lines.join("\n") + "\n");
+
+      replayWorkerStateProjection();
+      const first = JSON.stringify(getAllWorkerStates());
+      const reviveFirst = getReviveCount("orch-1", "CTL-1");
+
+      replayWorkerStateProjection();
+      const second = JSON.stringify(getAllWorkerStates());
+      const reviveSecond = getReviveCount("orch-1", "CTL-1");
+
+      expect(second).toBe(first);
+      expect(reviveSecond).toBe(reviveFirst);
+      expect(reviveSecond).toBe(2);
+    } finally {
+      if (prevDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prevDir;
+    }
+  });
+
+  test("CRASH-ONLY RESTART: rows survive close/reopen and replay catches up", () => {
+    const dbPath = join(tmpDir, "crash.db");
+    closeBrokerStateDb();
+    openBrokerStateDb(dbPath);
+    projectWorkerStateEvent(canonicalPhaseEvent({ name: "phase.research.complete.CTL-1", id: "c1", ts: "2026-05-21T01:00:00.000Z" }));
+    closeBrokerStateDb();
+
+    // Reopen the same DB file — rows must still be there.
+    openBrokerStateDb(dbPath);
+    const survived = getWorkerState("orch-1", "CTL-1");
+    expect(survived).not.toBeNull();
+    expect(survived.phase).toBe("research");
+
+    // A newer event after restart advances the row.
+    projectWorkerStateEvent(canonicalPhaseEvent({ name: "phase.plan.complete.CTL-1", id: "c2", ts: "2026-05-21T02:00:00.000Z" }));
+    expect(getWorkerState("orch-1", "CTL-1").phase).toBe("plan");
+  });
+
+  test("replayWorkerStateProjection does not throw when the log file is missing", () => {
+    const prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = join(tmpDir, "no-such-dir");
+    try {
+      expect(() => replayWorkerStateProjection()).not.toThrow();
+    } finally {
+      if (prevDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = prevDir;
+    }
+  });
+});
+
+// Helper: ensure the directory for a fixture log path exists.
+function mkdtempSyncEnsure(filePath) {
+  mkdirSync(join(filePath, ".."), { recursive: true });
+}
 
