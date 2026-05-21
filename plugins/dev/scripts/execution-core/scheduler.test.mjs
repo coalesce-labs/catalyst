@@ -249,7 +249,7 @@ describe("deriveAdvancement", () => {
 });
 
 describe("schedulerTick — new-work pull", () => {
-  test("dispatches triage for the top-ranked ready ticket into a free slot", () => {
+  test("dispatches research for the top-ranked ready ticket into a free slot", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     const dispatch = fakeDispatch();
     const eligible = [
@@ -273,8 +273,27 @@ describe("schedulerTick — new-work pull", () => {
     const r = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
     // 2 free slots, both ready → both dispatched, urgent (CTL-8) first.
     expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-8", "CTL-9"]);
-    expect(dispatch.calls.every((c) => c.phase === "triage")).toBe(true);
+    // CTL-565: new-work enters the pipeline at research, not triage.
+    expect(dispatch.calls.every((c) => c.phase === "research")).toBe(true);
     expect(r.dispatched).toEqual(["CTL-8", "CTL-9"]);
+  });
+
+  test("new-work pull dispatches Ready tickets at the research phase, not triage (CTL-565)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    const eligible = [
+      {
+        identifier: "CTL-1",
+        priority: 2,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    expect(dispatch.calls).toHaveLength(1);
+    expect(dispatch.calls[0]).toMatchObject({ ticket: "CTL-1", phase: "research" });
   });
 
   test("respects maxParallel — no dispatch when slots are full", () => {
@@ -369,7 +388,8 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toEqual(["CTL-X"]);
     expect(dispatch.calls).toEqual([
       { orchDir, ticket: "CTL-7", phase: "research" },
-      { orchDir, ticket: "CTL-X", phase: "triage" },
+      // CTL-565: new-work pull enters at research, not triage.
+      { orchDir, ticket: "CTL-X", phase: "research" },
     ]);
   });
 });
@@ -497,9 +517,10 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     const eligible = [tk("CTL-9")];
 
-    // Tick 1 — dispatches PHASES[0] (triage) for the ready ticket. The stub
-    // writes the dispatched signal the real phase-agent-dispatch would have
-    // written BEFORE spawning claude --bg (signal-first ordering).
+    // Tick 1 — dispatches the new-work entry phase (research, CTL-565) for the
+    // ready ticket. The stub writes the dispatched signal the real
+    // phase-agent-dispatch would have written BEFORE spawning claude --bg
+    // (signal-first ordering).
     const calls = [];
     const dispatch = (args) => {
       calls.push(`${args.ticket}:${args.phase}`);
@@ -513,7 +534,7 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
     // Tick 2 (post-restart) re-derives everything from the filesystem.
     const r2 = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
 
-    // CTL-9 now has a worker dir → excluded from the pull. triage:dispatched
+    // CTL-9 now has a worker dir → excluded from the pull. research:dispatched
     // is not 'done' → deriveAdvancement returns null. No re-dispatch.
     expect(r2.dispatched).toEqual([]);
     expect(r2.advanced).toEqual([]);
@@ -521,7 +542,7 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
     const byKey = new Map();
     for (const k of calls) byKey.set(k, (byKey.get(k) ?? 0) + 1);
     expect([...byKey.values()].every((n) => n === 1)).toBe(true);
-    expect(calls).toEqual(["CTL-9:triage"]);
+    expect(calls).toEqual(["CTL-9:research"]);
   });
 
   test("an orphan 'dispatched' signal (bg_job_id:null) is not re-dispatched", () => {

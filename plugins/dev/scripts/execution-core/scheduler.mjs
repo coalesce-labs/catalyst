@@ -30,6 +30,12 @@ import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
 // phase, not just the status.
 const TERMINAL_PHASE = "monitor-deploy";
 
+// New work enters the pipeline at `research`: a Ready ticket has already been
+// triaged (the →Triage watcher dispatched its triage agent — monitor.mjs). The
+// scheduler never dispatches `triage`. CTL-565 Part B. Deliberately NOT
+// PHASES[0] ("triage"); the FSM still owns chaining research → plan → … .
+const NEW_WORK_ENTRY_PHASE = "research";
+
 // readPhaseSignals — { phase: status } for one ticket's workers/<T>/phase-*.json.
 export function readPhaseSignals(orchDir, ticket) {
   const dir = join(orchDir, "workers", ticket);
@@ -236,7 +242,7 @@ export function schedulerTick(orchDir, { readEligible, dispatch = defaultDispatc
 
   const dispatched = [];
   for (const t of selected) {
-    const r = dispatchTicket(orchDir, t.identifier, PHASES[0], { dispatch });
+    const r = dispatchTicket(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, { dispatch });
     if (r.code === 0) dispatched.push(t.identifier);
     else log.warn({ ticket: t.identifier, code: r.code }, "scheduler: dispatch failed");
   }

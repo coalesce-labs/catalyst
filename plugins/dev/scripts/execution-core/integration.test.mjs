@@ -269,8 +269,9 @@ describe("execution-core integration — crash recovery (CTL-539)", () => {
       debounceMs: 5,
     });
     // startScheduler ran one tick → ENG-NEW (the eligible ready ticket) was
-    // dispatched into a free slot.
-    expect(dispatchCalls).toContain("ENG-NEW:triage");
+    // dispatched into a free slot at the research entry phase (CTL-565: a Ready
+    // ticket is already triaged, so new work enters at research, not triage).
+    expect(dispatchCalls).toContain("ENG-NEW:research");
 
     // An event lands; drain the tailer deterministically (fs.watch is flaky).
     appendEventLog(stateChangedLine("ENG-NEW", "ENG", "Todo"));
@@ -339,8 +340,8 @@ describe("execution-core integration — crash recovery (CTL-539)", () => {
     for (const k of dispatchCalls) byKey.set(k, (byKey.get(k) ?? 0) + 1);
     const duplicates = [...byKey.entries()].filter(([, n]) => n > 1);
     expect(duplicates).toEqual([]);
-    // ENG-NEW:triage in particular is never re-dispatched after the restart.
-    expect(byKey.get("ENG-NEW:triage")).toBe(1);
+    // ENG-NEW:research in particular is never re-dispatched after the restart.
+    expect(byKey.get("ENG-NEW:research")).toBe(1);
 
     rmSync(orchDir, { recursive: true, force: true });
   });
