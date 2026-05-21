@@ -14,12 +14,14 @@
 // lib/phase-fsm.mjs (phase advancement, Phase 4), eligible-set.mjs (candidates).
 
 import { readdirSync, readFileSync, watch, mkdirSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { join, dirname, basename } from "node:path";
-import { fileURLToPath } from "node:url";
 import { analyzeDependencyGraph } from "../lib/dependency-graph.mjs";
+// PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
+// ("triage") is intentionally NO LONGER the new-work entry phase — new work
+// enters at NEW_WORK_ENTRY_PHASE ("research"), see schedulerTick.
 import { PHASES, transition, isTerminal } from "../lib/phase-fsm.mjs";
 import { rankTickets } from "./scheduler-rank.mjs";
+import { defaultDispatch, dispatchTicket } from "./dispatch.mjs";
 import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
@@ -140,27 +142,9 @@ export function selectDispatchable(rankedReady, excludeTickets, freeSlots) {
 }
 
 // ─── Phase 4: dispatch and FSM-driven phase advancement ───
-
-// orchestrate-dispatch-next sits one directory up from execution-core/.
-const DISPATCH_BIN = fileURLToPath(new URL("../orchestrate-dispatch-next", import.meta.url));
-
-// defaultDispatch — shell out to orchestrate-dispatch-next, which delegates to
-// phase-agent-dispatch (idempotent: an existing dispatched/running/done signal
-// is a no-op). Injected in tests so no test ever spawns a real worker.
-function defaultDispatch({ orchDir, ticket, phase }) {
-  const res = spawnSync(
-    DISPATCH_BIN,
-    ["--orch-dir", orchDir, "--ticket", ticket, "--phase", phase],
-    { encoding: "utf8" }
-  );
-  if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
-  return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
-}
-
-// dispatchTicket — thin seam over the injectable dispatch function.
-export function dispatchTicket(orchDir, ticket, phase, { dispatch = defaultDispatch } = {}) {
-  return dispatch({ orchDir, ticket, phase });
-}
+//
+// The dispatch adapter (defaultDispatch / dispatchTicket) lives in dispatch.mjs
+// (CTL-565) so the monitor's →Triage one-shot dispatch shares the same seam.
 
 // listStartedTickets — every ticket that already has a worker dir, in any
 // status. The pull step excludes these so a finished/failed ticket is never

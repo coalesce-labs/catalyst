@@ -62,7 +62,10 @@ export function startDaemon({
   _stopScheduler = stopSchedulerFn;
 
   recover({ orchDir }); // CTL-539 — rebuild routing + worker state on boot
-  monitorFn(); // CTL-535 — Todo-state monitor + event tailer
+  // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
+  // agent on a →Triage transition. `dispatch` stays an injectable default
+  // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
+  monitorFn({ orchDir }); // CTL-535 + CTL-565 — two-state trigger monitor
   schedulerFn({ orchDir }); // CTL-536 — pull-loop scheduler
 
   if (watchEnrollment) {
