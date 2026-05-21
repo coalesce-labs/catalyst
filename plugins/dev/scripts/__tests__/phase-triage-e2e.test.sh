@@ -6,11 +6,12 @@
 #   2. Stand up a fake `linearis` shim on PATH:
 #        - `linearis issues read <id>` → prints fixture JSON
 #        - `linearis issues discuss <id> --body <text>` → records call to a log
-#        - `linearis issues update <id> --labels ... --label-mode add` → records call
+#      (CTL-558: phase-triage no longer calls `linearis issues update` for the
+#       `triaged` label — the coordinator's label sweep owns it.)
 #   3. Point CATALYST_EVENTS_FILE at a tempfile.
 #   4. Extract the executable bash body from the skill (fenced by
 #      `bash phase-triage-body`).
-#   5. Run it with TICKET set; assert artifact + comment + label + event.
+#   5. Run it with TICKET set; assert artifact + comment + event (no label call).
 #
 # Run: bash plugins/dev/scripts/__tests__/phase-triage-e2e.test.sh
 
@@ -177,10 +178,13 @@ else
 	fail "happy: discuss call" "no 'discuss' entry in linearis log:$(printf '\n%s' "$(cat "$LINEARIS_LOG" 2>/dev/null)")"
 fi
 
+# CTL-558: the `triaged` label is applied by the coordinator (the execution-core
+# scheduler's label sweep), NOT by phase-triage. The skill must NOT call
+# `linearis issues update` for the label any more.
 if grep -q '^update$' "$LINEARIS_LOG" 2>/dev/null; then
-	ok "happy: linearis issues update was called"
+	fail "happy: no label update call" "phase-triage still calls 'linearis issues update' — the coordinator owns the triaged label (CTL-558)"
 else
-	fail "happy: update call" "no 'update' entry in linearis log"
+	ok "happy: phase-triage does not self-apply the triaged label (coordinator owns it, CTL-558)"
 fi
 
 # Assert: emitted event has the right shape

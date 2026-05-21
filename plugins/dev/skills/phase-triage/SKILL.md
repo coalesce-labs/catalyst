@@ -1,6 +1,6 @@
 ---
 name: phase-triage
-description: Phase agent that triages a Linear ticket — expands acronyms, classifies (feature/bug/docs/refactor/chore), identifies dependencies, estimates scope, writes triage.json, posts a triaged comment to Linear, and applies the `triaged` label. Emits phase.triage.complete.<TICKET> on success and phase.triage.failed.<TICKET> on error. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-triage ..."` resolves.
+description: Phase agent that triages a Linear ticket — expands acronyms, classifies (feature/bug/docs/refactor/chore), identifies dependencies, estimates scope, writes triage.json, and posts a triaged comment to Linear. The `triaged` label is applied by the coordinator (CTL-558). Emits phase.triage.complete.<TICKET> on success and phase.triage.failed.<TICKET> on error. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-triage ..."` resolves.
 user-invocable: true
 disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools: Bash, Read, Write, Grep
@@ -25,10 +25,10 @@ Both modes produce the same `triage.json` shape and emit the same canonical phas
 
 ## Setup prerequisite
 
-The `triaged` workspace label must already exist in Linear. The skill applies it via
-`linearis issues update --labels triaged --label-mode add` and tolerates a non-zero exit (logs a
-warning, does not fail the phase). Future work in CTL-452 may add a `linearis labels create` call to
-bootstrap the label.
+The `triaged` workspace label must already exist in Linear. The label is applied by the
+deterministic coordinator (CTL-558) — the execution-core scheduler's label sweep tags `triaged`
+once the triage phase signal is `done` — not by this skill. `linearis` has no label-create, so the
+label must be created in the workspace beforehand.
 
 ## Inputs
 
@@ -224,10 +224,9 @@ if ! linearis issues discuss "$TICKET" --body "$COMMENT_BODY" >/dev/null 2>&1; t
   exit 1
 fi
 
-# 5. Apply the `triaged` label. Tolerate failure (label may not exist yet).
-if ! linearis issues update "$TICKET" --labels triaged --label-mode add >/dev/null 2>&1; then
-  echo "phase-triage: warning — could not apply triaged label (does it exist in the workspace?)" >&2
-fi
+# 5. The `triaged` label is applied by the coordinator (CTL-558): the
+#    execution-core scheduler's label sweep tags `triaged` once the triage
+#    phase signal is `done`. The phase agent no longer applies the label.
 
 # 6. Emit the canonical phase event.
 emit_phase_complete --phase triage --ticket "$TICKET" --status complete \

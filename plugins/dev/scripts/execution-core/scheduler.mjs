@@ -13,7 +13,7 @@
 // Composes: lib/dependency-graph.mjs (readiness), scheduler-rank.mjs (ranking),
 // lib/phase-fsm.mjs (phase advancement, Phase 4), eligible-set.mjs (candidates).
 
-import { readdirSync, readFileSync, watch, mkdirSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync, watch, mkdirSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { analyzeDependencyGraph, referencedBlockerIds } from "../lib/dependency-graph.mjs";
 // PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
@@ -270,6 +270,31 @@ function safeWrite(fn, ctx) {
   }
 }
 
+// labelOnce — apply a Linear label to a ticket at most once for the run's
+// lifetime (CTL-558). `linearis` label-add has no read-compare, so without a
+// guard the scheduler would re-hit the API on every 30s tick. A once-marker
+// file at workers/<T>/.linear-label-<label>.applied (restart-safe — persists
+// with the worker dir) records a successful apply. Best-effort: any throw is
+// logged and swallowed, never aborting the tick.
+function labelOnce(orchDir, ticket, label, writeStatus) {
+  const marker = join(orchDir, "workers", ticket, `.linear-label-${label}.applied`);
+  if (existsSync(marker)) return;
+  try {
+    const res = writeStatus.applyLabel({ ticket, label });
+    // Write the marker only on a confirmed apply — a failed label-write is
+    // retried next tick. A fake that returns undefined (test stubs) is treated
+    // as success so the once-semantics stay testable without a real result.
+    if (res === undefined || res?.applied) {
+      writeFileSync(marker, "");
+    }
+  } catch (err) {
+    log.warn(
+      { ticket, label, err: err.message },
+      "scheduler: label write-back threw — continuing tick",
+    );
+  }
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
 // every action from filesystem state. `exec` is the injectable seam for the D5
@@ -327,14 +352,24 @@ export function schedulerTick(
     }
   }
 
-  // (3) Terminal-Done sweep (CTL-558) — deriveAdvancement returns null once
-  // monitor-deploy completes, so terminal `Done` is not a dispatch. Sweep every
-  // started ticket and write `Done` for any whose monitor-deploy signal is done.
-  // Idempotent — linear-transition.sh read-compares, so a re-applied Done is a
-  // no-op skip.
+  // (3) Terminal-Done + label sweep (CTL-558) — one pass over every started
+  // ticket. deriveAdvancement returns null once monitor-deploy completes, so
+  // terminal `Done` is not a dispatch — it needs this dedicated sweep. In the
+  // same pass: apply the `triaged` label on triage completion, and the flat
+  // `needs-human` label when any phase signal is `stalled` (D7 — the worker
+  // keeps its phase state, it does not bounce to Triage). Status writes are
+  // idempotent via linear-transition.sh; label writes are guarded once-per-run
+  // by labelOnce's marker file.
   for (const ticket of listStartedTickets(orchDir)) {
-    if (readPhaseSignals(orchDir, ticket)["monitor-deploy"] === "done") {
+    const signals = readPhaseSignals(orchDir, ticket);
+    if (signals["monitor-deploy"] === "done") {
       safeWrite(() => writeStatus.applyTerminalDone({ ticket }), { ticket });
+    }
+    if (signals.triage === "done") {
+      labelOnce(orchDir, ticket, "triaged", writeStatus);
+    }
+    if (Object.values(signals).some((s) => s === "stalled")) {
+      labelOnce(orchDir, ticket, "needs-human", writeStatus);
     }
   }
 
