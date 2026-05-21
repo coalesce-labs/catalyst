@@ -716,8 +716,9 @@ is still null. Audit trail lands at `${ORCH_DIR}/.roll-usage.log`.
 
 **Post-dispatch health check (CTL-87):**
 
-After the wave's per-worker dispatch loop has completed, run the batch health check **once per
-wave**. It sleeps briefly (default 15s — configurable via `--grace-seconds`), then verifies that
+After the wave's per-worker dispatch loop has completed, run the batch health check. This is the
+**per-wave** invocation (CTL-511 added a second call site — see the reactive scan in Phase 4). It
+sleeps briefly (default 15s — configurable via `--grace-seconds`), then verifies that
 every worker still sitting at `status="dispatched"`/`phase=0` has a live PID. Any worker whose PID
 has already died is transitioned to `status="failed"` with `failureReason="launch-failure"`, an
 attention item of type `launch-failure` is raised, and a `worker-launch-failed` event is emitted.
@@ -739,6 +740,12 @@ Healthy workers are untouched. Workers that have already advanced past `dispatch
 `researching`) are skipped because reaching a later status is itself proof of life. This check
 complements the 15-minute stalled-worker detection in Phase 4 — healthcheck catches launch failures,
 the stalled-worker scan catches workers that die mid-run.
+
+**CTL-511:** the same `orchestrate-healthcheck` script also runs inside the reactive scan (Phase 4)
+on every wake-up and every 10-minute idle tick — it is no longer a once-per-wave-only check. That
+second call site catches phase agents that die *after* launch (printing a job id, then exiting
+before their terminal emit), bounding detection to one scan interval. The healthcheck is idempotent
+— terminal and `stalled` signals are skipped — so the extra call site adds no duplicate work.
 
 **Worker dispatch prompt includes mandatory testing AND lifecycle requirements:**
 
@@ -1110,6 +1117,18 @@ git/PR, the orchestrator reconciles the signal from the authoritative source.
 **Reactive scan (per wake-up):**
 
 ```bash
+# CTL-511: re-run the phase-agent stall scan on every reactive scan (every wake
+# + the 10-min idle fallback), not just once per dispatch wave. A phase agent
+# that dies after launch is flipped to status:"stalled" here; orchestrate-healthcheck
+# then emits phase.<name>.failed to wake orchestrate-revive within one scan
+# interval instead of ~14 h. Idempotent — terminal/stalled signals are skipped,
+# so frequent runs are safe. --grace-seconds 0 skips the 15s legacy-PID settle
+# sleep: the phase-mode state.json check has its own --stale-bg-seconds
+# threshold, so the sleep would only add latency to every wake.
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-healthcheck" \
+  --orch-dir "${ORCH_DIR}" --orch-id "${ORCH_NAME}" --grace-seconds 0 \
+  >/dev/null 2>&1 || true
+
 # For each active worker:
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
   TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")

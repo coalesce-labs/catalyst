@@ -663,13 +663,10 @@ SIGNAL="${WORKER_DIR}/phase-triage.json"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "launch failure leaves signal at stalled"
 assert_eq "false" "$(jq -r 'has("failureReason")' "$SIGNAL")" \
   "launch-failure signal has no failureReason (Loop 2 redispatch-eligible)"
-EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
-if [[ -z "$EVENT_FILE" ]]; then
-  fail "launch failure emitted no event log"
+if grep -rqs '"phase.triage.failed.CTL-100"' "${CATALYST_DIR}/events/"; then
+  pass "launch failure emits phase.triage.failed.CTL-100 event"
 else
-  grep -q '"phase.triage.failed.CTL-100"' "$EVENT_FILE" \
-    && pass "launch failure emits phase.triage.failed.CTL-100 event" \
-    || fail "no phase.triage.failed.CTL-100 event on launch failure"
+  fail "no phase.triage.failed.CTL-100 event on launch failure"
 fi
 unset CLAUDE_STUB_EXIT CATALYST_DIR
 
@@ -677,7 +674,7 @@ echo ""
 echo "Test 17 (CTL-511): claude --bg with no hex job id → signal stalled + phase.*.failed emitted"
 fresh_env t17
 # Override the stub: exit 0 but print no 8-char hex token.
-cat > "${STUB_DIR}/claude" <<'STUB'
+cat >"${STUB_DIR}/claude" <<'STUB'
 #!/usr/bin/env bash
 echo "started, no job id present"
 exit 0
@@ -691,13 +688,10 @@ SIGNAL="${WORKER_DIR}/phase-triage.json"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "empty job id leaves signal at stalled"
 assert_eq "false" "$(jq -r 'has("failureReason")' "$SIGNAL")" \
   "empty-job-id signal has no failureReason (Loop 2 redispatch-eligible)"
-EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
-if [[ -z "$EVENT_FILE" ]]; then
-  fail "empty job id emitted no event log"
+if grep -rqs '"phase.triage.failed.CTL-100"' "${CATALYST_DIR}/events/"; then
+  pass "empty job id emits phase.triage.failed.CTL-100 event"
 else
-  grep -q '"phase.triage.failed.CTL-100"' "$EVENT_FILE" \
-    && pass "empty job id emits phase.triage.failed.CTL-100 event" \
-    || fail "no phase.triage.failed.CTL-100 event on empty job id"
+  fail "no phase.triage.failed.CTL-100 event on empty job id"
 fi
 unset CATALYST_DIR
 

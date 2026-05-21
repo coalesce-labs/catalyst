@@ -261,20 +261,25 @@ scratch_setup
 export CATALYST_DIR="${SCRATCH}/catalyst"
 mkdir -p "${CATALYST_DIR}/events"
 make_phase_signal "CTL-904" "monitor-merge" "running" "bg-ctl511-a"
-export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"   # exists, no per-job subdir → state-json-missing
+export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs" # exists, no per-job subdir → state-json-missing
 mkdir -p "${SCRATCH}/jobs"
-"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 > "${SCRATCH}/out" 2>&1
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
 ST=$(phase_status "CTL-904" "monitor-merge")
-[ "$ST" = "stalled" ] && pass "healthcheck still flips signal to stalled" || fail "healthcheck still flips signal to stalled" "got: $ST"
-HAS_FR=$(jq -r 'has("failureReason")' "${ORCH_DIR}/workers/CTL-904/phase-monitor-merge.json")
-[ "$HAS_FR" = "false" ] && pass "stalled signal has no failureReason (Loop 2 redispatch-eligible)" || fail "stalled signal has no failureReason" "got has: $HAS_FR"
-EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
-if [ -z "$EVENT_FILE" ]; then
-  fail "healthcheck emitted no phase.*.failed event log"
+if [ "$ST" = "stalled" ]; then
+  pass "healthcheck still flips signal to stalled"
 else
-  grep -q '"phase.monitor-merge.failed.CTL-904"' "$EVENT_FILE" \
-    && pass "healthcheck emits phase.monitor-merge.failed.CTL-904 to wake the orchestrator" \
-    || fail "healthcheck emitted no phase.monitor-merge.failed.CTL-904 event"
+  fail "healthcheck still flips signal to stalled" "got: $ST"
+fi
+HAS_FR=$(jq -r 'has("failureReason")' "${ORCH_DIR}/workers/CTL-904/phase-monitor-merge.json")
+if [ "$HAS_FR" = "false" ]; then
+  pass "stalled signal has no failureReason (Loop 2 redispatch-eligible)"
+else
+  fail "stalled signal has no failureReason" "got has: $HAS_FR"
+fi
+if grep -rqs '"phase.monitor-merge.failed.CTL-904"' "${CATALYST_DIR}/events/"; then
+  pass "healthcheck emits phase.monitor-merge.failed.CTL-904 to wake the orchestrator"
+else
+  fail "healthcheck emitted no phase.monitor-merge.failed.CTL-904 event"
 fi
 unset CATALYST_DIR
 scratch_teardown
@@ -286,8 +291,12 @@ mkdir -p "${CATALYST_DIR}/events"
 make_phase_signal "CTL-905" "verify" "running" "bg-ctl511-b"
 export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"
 mkdir -p "${SCRATCH}/jobs"
-"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 > "${SCRATCH}/out" 2>&1
-grep -q "worker-phase-stalled" "$STATE_LOG" && pass "worker-phase-stalled event still emitted (regression)" || fail "worker-phase-stalled event still emitted" "log: $(cat "$STATE_LOG")"
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+if grep -q "worker-phase-stalled" "$STATE_LOG"; then
+  pass "worker-phase-stalled event still emitted (regression)"
+else
+  fail "worker-phase-stalled event still emitted" "log: $(cat "$STATE_LOG")"
+fi
 unset CATALYST_DIR
 scratch_teardown
 
@@ -298,13 +307,39 @@ mkdir -p "${CATALYST_DIR}/events"
 make_phase_signal "CTL-906" "implement" "running" "bg-ctl511-c"
 export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"
 mkdir -p "${SCRATCH}/jobs"
-"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 --dry-run > "${SCRATCH}/out" 2>&1
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 --dry-run >"${SCRATCH}/out" 2>&1
 ST=$(phase_status "CTL-906" "implement")
-[ "$ST" = "running" ] && pass "--dry-run leaves phase signal unchanged" || fail "--dry-run leaves phase signal unchanged" "got: $ST"
-DRY_EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
-[ -z "$DRY_EVENT_FILE" ] && pass "--dry-run emits no phase.*.failed event" || fail "--dry-run emits no phase.*.failed event" "got: $DRY_EVENT_FILE"
+if [ "$ST" = "running" ]; then
+  pass "--dry-run leaves phase signal unchanged"
+else
+  fail "--dry-run leaves phase signal unchanged" "got: $ST"
+fi
+if grep -rqs '"phase.implement.failed.CTL-906"' "${CATALYST_DIR}/events/"; then
+  fail "--dry-run emitted a phase.*.failed event"
+else
+  pass "--dry-run emits no phase.*.failed event"
+fi
 unset CATALYST_DIR
 scratch_teardown
+
+# ─── CTL-511 Phase 4: orchestrate-healthcheck runs on every reactive scan ───
+# A phase agent that dies after launch is detected only when orchestrate-healthcheck
+# next scans it. Wiring it into the orchestrator's reactive scan (every wake +
+# the 10-min idle fallback) bounds detection latency to one scan interval
+# instead of the once-per-wave-only behavior. Doc-placement assertion in the
+# style of the repo's other docs-drift tests.
+echo "test (CTL-511 Phase 4): SKILL.md runs orchestrate-healthcheck in the reactive scan, not only per-wave"
+SKILL_MD="${REPO_ROOT}/plugins/dev/skills/orchestrate/SKILL.md"
+if [ ! -f "$SKILL_MD" ]; then
+  fail "orchestrate/SKILL.md not found at $SKILL_MD"
+else
+  HC_COUNT=$(grep -c 'scripts/orchestrate-healthcheck' "$SKILL_MD")
+  if [ "$HC_COUNT" -ge 2 ]; then
+    pass "SKILL.md invokes orchestrate-healthcheck beyond the once-per-wave dispatch (count=$HC_COUNT)"
+  else
+    fail "orchestrate-healthcheck still appears only once (per-wave only)" "count=$HC_COUNT"
+  fi
+fi
 
 echo
 echo "Results: $PASSES passed, $FAILURES failed"
