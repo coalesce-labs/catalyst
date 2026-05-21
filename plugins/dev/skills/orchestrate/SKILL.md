@@ -71,19 +71,20 @@ fi
 
 ## Flags
 
-| Flag                      | Description                                                                         |
-| ------------------------- | ----------------------------------------------------------------------------------- |
-| `--project <name>`        | Pull tickets from a Linear project                                                  |
-| `--cycle current`         | Pull tickets from the current Linear cycle                                          |
-| `--file <path>`           | Read ticket IDs from a file (one per line)                                          |
-| `--auto <N>`              | Auto-pick top N Todo tickets: urgent/high priority first, newer first. Default N=3. |
-| `--auto-merge`            | Workers auto-merge PRs when CI + verification pass                                  |
-| `--max-parallel <n>`      | Override config `maxParallel` (default: 3)                                          |
-| `--base-branch <branch>`  | Base branch for worktrees (default: main)                                           |
-| `--interactive`           | Include PM intake phase before orchestration                                        |
-| `--prd <path>`            | Run PRD review panel + ticket creation before orchestration                         |
-| `--dry-run`               | Show wave plan without executing                                                    |
-| `--state-on-merge <name>` | Linear state to set on PR merge. Default: `stateMap.done` (typically "Done")        |
+| Flag                      | Description                                                                                                                                           |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--project <name>`        | Pull tickets from a Linear project                                                                                                                    |
+| `--cycle current`         | Pull tickets from the current Linear cycle                                                                                                            |
+| `--file <path>`           | Read ticket IDs from a file (one per line)                                                                                                            |
+| `--auto <N>`              | Auto-pick top N Todo tickets: urgent/high priority first, newer first. Default N=3.                                                                   |
+| `--auto-merge`            | Workers auto-merge PRs when CI + verification pass                                                                                                    |
+| `--max-parallel <n>`      | Override config `maxParallel` (default: 3)                                                                                                            |
+| `--base-branch <branch>`  | Base branch for worktrees (default: main)                                                                                                             |
+| `--interactive`           | Include PM intake phase before orchestration                                                                                                          |
+| `--prd <path>`            | Run PRD review panel + ticket creation before orchestration                                                                                           |
+| `--dry-run`               | Show wave plan without executing                                                                                                                      |
+| `--state-on-merge <name>` | Linear state to set on PR merge. Default: `stateMap.done` (typically "Done")                                                                          |
+| `--stop`                  | Deregister this project from the `execution-core` daemon (removes the enrollment record) and exit. Works regardless of the configured `dispatchMode`. |
 
 ## Configuration
 
@@ -127,6 +128,11 @@ doesn't exist). Falls back to sensible defaults if no orchestration block exists
   the `orchestrate-phase-advance` helper.
 - `"oneshot-legacy"` — the orchestrator dispatches one long `claude -p oneshot` worker per ticket.
   Kept for rollback safety; flipping a single config key reverts to the pre-CTL-452 behavior.
+- `"execution-core"` (CTL-554) — daemon-served. `/orchestrate` runs no wave loop and no Phase 4
+  session: it writes a per-project enrollment record to
+  `~/catalyst/execution-core/projects/<projectKey>.json`, ensures the single machine-level
+  execution-core daemon is running, and exits. The daemon directory-watches enrolled projects and
+  serves each by composing the CTL-535 monitor, CTL-536 scheduler, and CTL-539 recovery modules.
 
 The `workerCommand` field is still honored in legacy mode. In phase-agents mode it is unused (each
 phase has its own canonical skill).
@@ -238,6 +244,9 @@ fi
 WORKER_MODEL=$(jq -r '.catalyst.orchestration.workerModel // "opus"' "$CONFIG_FILE" 2>/dev/null)
 VERIFY_BEFORE_MERGE=$(jq -r '.catalyst.orchestration.verifyBeforeMerge // "true"' "$CONFIG_FILE" 2>/dev/null)
 ALLOW_SELF_REPORTED=$(jq -r '.catalyst.orchestration.allowSelfReportedCompletion // "false"' "$CONFIG_FILE" 2>/dev/null)
+
+# CTL-554: dispatchMode drives the execution-core fork below (after Phase 2).
+DISPATCH_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' "$CONFIG_FILE" 2>/dev/null)
 ```
 
 **Create ALL worktrees using `create-worktree.sh`** — both orchestrator and workers go through the
@@ -515,6 +524,33 @@ if [[ -x "$SESSION_SCRIPT" ]]; then
   "$SESSION_SCRIPT" phase "$CATALYST_SESSION_ID" "dispatching" --phase 3
 fi
 ```
+
+### execution-core dispatch fork (CTL-554)
+
+`dispatchMode: "execution-core"` and the `--stop` flag both short-circuit the wave loop. Evaluate
+this **before Phase 3** — when it applies, no workers are dispatched and no Phase 4 monitor session
+starts. The routing helper resolves `projectKey`/`repoRoot` (the main working tree, even when
+`/orchestrate` runs from a linked worktree) and writes or removes the enrollment record.
+
+- **Invoked with `--stop`** — deregister this project from the execution-core daemon and exit,
+  regardless of the configured `dispatchMode`:
+
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-execution-core-route.sh" stop
+  # Removes ~/catalyst/execution-core/projects/<projectKey>.json; the running
+  # daemon drops the project on its next reconcile. Exit 0 — do not continue.
+  ```
+
+- **`DISPATCH_MODE` is `execution-core` (no `--stop`)** — enroll this project and ensure the
+  machine-level daemon, then exit:
+
+  ```bash
+  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-execution-core-route.sh" enroll
+  # Writes the enrollment record and ensures the daemon is running. No wave
+  # loop, no Phase 4 session. Exit 0 — do not continue to Phase 3.
+  ```
+
+- **Any other `DISPATCH_MODE`** — continue to Phase 3 below.
 
 ### Phase 3: Dispatch Workers
 

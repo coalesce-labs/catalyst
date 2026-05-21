@@ -52,9 +52,9 @@ STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
 CLAUDE_BIN="${CATALYST_DISPATCH_CLAUDE_BIN:-claude}"
 # When the env var is defined (even if empty), honor it. Empty → no healthcheck.
 if [ -n "${CATALYST_DISPATCH_HEALTHCHECK+x}" ]; then
-  HEALTHCHECK_BIN="$CATALYST_DISPATCH_HEALTHCHECK"
+	HEALTHCHECK_BIN="$CATALYST_DISPATCH_HEALTHCHECK"
 else
-  HEALTHCHECK_BIN="${SCRIPT_DIR}/orchestrate-healthcheck"
+	HEALTHCHECK_BIN="${SCRIPT_DIR}/orchestrate-healthcheck"
 fi
 
 ORCH_DIR=""
@@ -76,36 +76,78 @@ SKIP_HEALTHCHECK=0
 PHASE_DISPATCH_BIN="${CATALYST_PHASE_AGENT_DISPATCH:-${SCRIPT_DIR}/phase-agent-dispatch}"
 
 usage() {
-  sed -n '2,46p' "$0"
-  exit "${1:-1}"
+	sed -n '2,46p' "$0"
+	exit "${1:-1}"
 }
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --orch-dir)        ORCH_DIR="$2"; shift 2 ;;
-    --orch-id)         ORCH_ID="$2"; shift 2 ;;
-    --worktree-base)   WORKTREE_BASE="$2"; shift 2 ;;
-    --max-parallel)    MAX_PARALLEL="$2"; shift 2 ;;
-    --session-id)      SESSION_ID="$2"; shift 2 ;;
-    --worker-command)  WORKER_COMMAND="$2"; shift 2 ;;
-    --worker-args)     WORKER_ARGS="$2"; shift 2 ;;
-    --comms-channel)   COMMS_CHANNEL="$2"; shift 2 ;;
-    --phase)           PHASE="$2"; shift 2 ;;
-    --ticket)          SINGLE_TICKET="$2"; shift 2 ;;
-    --config)          CONFIG_PATH="$2"; shift 2 ;;
-    --dry-run)         DRY_RUN=1; shift ;;
-    --skip-healthcheck) SKIP_HEALTHCHECK=1; shift ;;
-    -h|--help)         usage 0 ;;
-    *)                 echo "unknown arg: $1" >&2; usage ;;
-  esac
+	case "$1" in
+	--orch-dir)
+		ORCH_DIR="$2"
+		shift 2
+		;;
+	--orch-id)
+		ORCH_ID="$2"
+		shift 2
+		;;
+	--worktree-base)
+		WORKTREE_BASE="$2"
+		shift 2
+		;;
+	--max-parallel)
+		MAX_PARALLEL="$2"
+		shift 2
+		;;
+	--session-id)
+		SESSION_ID="$2"
+		shift 2
+		;;
+	--worker-command)
+		WORKER_COMMAND="$2"
+		shift 2
+		;;
+	--worker-args)
+		WORKER_ARGS="$2"
+		shift 2
+		;;
+	--comms-channel)
+		COMMS_CHANNEL="$2"
+		shift 2
+		;;
+	--phase)
+		PHASE="$2"
+		shift 2
+		;;
+	--ticket)
+		SINGLE_TICKET="$2"
+		shift 2
+		;;
+	--config)
+		CONFIG_PATH="$2"
+		shift 2
+		;;
+	--dry-run)
+		DRY_RUN=1
+		shift
+		;;
+	--skip-healthcheck)
+		SKIP_HEALTHCHECK=1
+		shift
+		;;
+	-h | --help) usage 0 ;;
+	*)
+		echo "unknown arg: $1" >&2
+		usage
+		;;
+	esac
 done
 
 # CTL-452: --ticket requires --phase. Single-ticket dispatch is only meaningful
 # in phase-agents mode; calling --ticket without --phase is a programmer error
 # (likely a missed handoff from the orchestrator's wake handler).
 if [ -n "$SINGLE_TICKET" ] && [ -z "$PHASE" ]; then
-  echo "ERROR: --ticket requires --phase (single-ticket dispatch is for phase advancement only)" >&2
-  exit 2
+	echo "ERROR: --ticket requires --phase (single-ticket dispatch is for phase advancement only)" >&2
+	exit 2
 fi
 
 # CTL-452: resolve dispatchMode from config. The default when no config is
@@ -114,46 +156,55 @@ fi
 # wins over the resolved dispatchMode.
 DISPATCH_MODE="oneshot-legacy"
 if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
-  RAW_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' "$CONFIG_PATH" 2>/dev/null || echo "oneshot-legacy")
-  case "$RAW_MODE" in
-    phase-agents|oneshot-legacy) DISPATCH_MODE="$RAW_MODE" ;;
-    *) echo "WARN: invalid dispatchMode '$RAW_MODE' in $CONFIG_PATH — defaulting to oneshot-legacy" >&2 ;;
-  esac
+	RAW_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' "$CONFIG_PATH" 2>/dev/null || echo "oneshot-legacy")
+	case "$RAW_MODE" in
+	phase-agents | oneshot-legacy | execution-core) DISPATCH_MODE="$RAW_MODE" ;;
+	*) echo "WARN: invalid dispatchMode '$RAW_MODE' in $CONFIG_PATH — defaulting to oneshot-legacy" >&2 ;;
+	esac
 fi
 
 # CTL-452: when dispatchMode resolves to phase-agents AND --phase isn't on the
 # CLI, default the dispatched phase to the canonical entry point (triage).
 # Explicit --phase always overrides.
 if [ -z "$PHASE" ] && [ "$DISPATCH_MODE" = "phase-agents" ]; then
-  PHASE="triage"
+	PHASE="triage"
 fi
 
-[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
-[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+[ -z "$ORCH_DIR" ] && {
+	echo "ERROR: --orch-dir required" >&2
+	exit 2
+}
+[ ! -d "$ORCH_DIR/workers" ] && {
+	echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2
+	exit 2
+}
 STATE_JSON="${ORCH_DIR}/state.json"
-[ ! -f "$STATE_JSON" ] && { echo "ERROR: state.json missing at $STATE_JSON" >&2; exit 2; }
+[ ! -f "$STATE_JSON" ] && {
+	echo "ERROR: state.json missing at $STATE_JSON" >&2
+	exit 2
+}
 
 # CTL-449: --phase forks the dispatch path. Validate the name uses the same shape the
 # phase-agent-dispatch helper enforces (no dots — those are reserved for event-name
 # parsing). When --phase is set, --worker-command/--worker-args are ignored.
 if [ -n "$PHASE" ]; then
-  if [[ "$PHASE" == *.* ]] || [[ ! "$PHASE" =~ ^[a-z][a-z0-9_-]*$ ]]; then
-    echo "ERROR: --phase '$PHASE' must be lowercase letters/digits/dash/underscore, no dots." >&2
-    exit 2
-  fi
-  if [ ! -x "$PHASE_DISPATCH_BIN" ]; then
-    echo "ERROR: phase-agent-dispatch helper not executable at $PHASE_DISPATCH_BIN" >&2
-    echo "       (override via CATALYST_PHASE_AGENT_DISPATCH env var)" >&2
-    exit 2
-  fi
+	if [[ $PHASE == *.* ]] || [[ ! $PHASE =~ ^[a-z][a-z0-9_-]*$ ]]; then
+		echo "ERROR: --phase '$PHASE' must be lowercase letters/digits/dash/underscore, no dots." >&2
+		exit 2
+	fi
+	if [ ! -x "$PHASE_DISPATCH_BIN" ]; then
+		echo "ERROR: phase-agent-dispatch helper not executable at $PHASE_DISPATCH_BIN" >&2
+		echo "       (override via CATALYST_PHASE_AGENT_DISPATCH env var)" >&2
+		exit 2
+	fi
 fi
 
 # CTL-208: workerCommand must be plugin-namespaced (/<plugin>:<skill>). A bare slash like
 # /oneshot is passed to claude as literal prompt text — no skill expansion happens and the
 # worker silently no-ops. Fail loudly here instead of silently dispatching broken workers.
 # Phase mode bypasses this check — the prompt is constructed inside phase-agent-dispatch.
-if [ -z "$PHASE" ] && [[ ! "$WORKER_COMMAND" =~ ^/[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$ ]]; then
-  cat >&2 <<EOF
+if [ -z "$PHASE" ] && [[ ! $WORKER_COMMAND =~ ^/[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$ ]]; then
+	cat >&2 <<EOF
 ERROR: --worker-command "$WORKER_COMMAND" is not a plugin-namespaced slash command.
 
 Plugin skills must be invoked as /<plugin-name>:<skill-name>, e.g. /catalyst-dev:oneshot.
@@ -165,44 +216,50 @@ If this came from .catalyst/config.json, change:
 to:
   catalyst.orchestration.workerCommand: "/catalyst-dev:oneshot"
 EOF
-  exit 2
+	exit 2
 fi
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 # Resolve defaults from state.json when not supplied on the CLI.
-[ -z "$ORCH_ID" ]       && ORCH_ID=$(jq -r '.orchestrator // ""' "$STATE_JSON")
+[ -z "$ORCH_ID" ] && ORCH_ID=$(jq -r '.orchestrator // ""' "$STATE_JSON")
 [ -z "$WORKTREE_BASE" ] && WORKTREE_BASE=$(jq -r '.worktreeBase // ""' "$STATE_JSON")
-[ -z "$MAX_PARALLEL" ]  && MAX_PARALLEL=$(jq -r '.maxParallel // 1' "$STATE_JSON")
-[ -z "$ORCH_ID" ]       && { echo "ERROR: orchestrator id not set (in state.json or --orch-id)" >&2; exit 2; }
-[ -z "$WORKTREE_BASE" ] && { echo "ERROR: worktreeBase not set (in state.json or --worktree-base)" >&2; exit 2; }
+[ -z "$MAX_PARALLEL" ] && MAX_PARALLEL=$(jq -r '.maxParallel // 1' "$STATE_JSON")
+[ -z "$ORCH_ID" ] && {
+	echo "ERROR: orchestrator id not set (in state.json or --orch-id)" >&2
+	exit 2
+}
+[ -z "$WORKTREE_BASE" ] && {
+	echo "ERROR: worktreeBase not set (in state.json or --worktree-base)" >&2
+	exit 2
+}
 
 # CTL-373: channel name is the orch-id directly (legacy: `orch-${ORCH_ID}`).
 [ -z "$COMMS_CHANNEL" ] && COMMS_CHANNEL="$ORCH_ID"
 
 # Session id: CLI > env > .session-id stash > empty (which becomes "")
 if [ -z "$SESSION_ID" ]; then
-  SESSION_ID="${CATALYST_SESSION_ID:-}"
-  if [ -z "$SESSION_ID" ] && [ -f "$ORCH_DIR/.session-id" ]; then
-    SESSION_ID=$(cat "$ORCH_DIR/.session-id" 2>/dev/null || echo "")
-  fi
+	SESSION_ID="${CATALYST_SESSION_ID-}"
+	if [ -z "$SESSION_ID" ] && [ -f "$ORCH_DIR/.session-id" ]; then
+		SESSION_ID=$(cat "$ORCH_DIR/.session-id" 2>/dev/null || echo "")
+	fi
 fi
 
 # ─── Count non-terminal workers ───────────────────────────────────────────────
 RUNNING=0
 for SIGNAL in "$ORCH_DIR/workers/"*.json; do
-  [ -f "$SIGNAL" ] || continue
-  S=$(jq -r '.status // ""' "$SIGNAL" 2>/dev/null)
-  case "$S" in
-    done|failed|stalled|"") ;;
-    *) RUNNING=$((RUNNING+1));;
-  esac
+	[ -f "$SIGNAL" ] || continue
+	S=$(jq -r '.status // ""' "$SIGNAL" 2>/dev/null)
+	case "$S" in
+	done | failed | stalled | "") ;;
+	*) RUNNING=$((RUNNING + 1)) ;;
+	esac
 done
 
 SLOTS=$((MAX_PARALLEL - RUNNING))
 if [ "$SLOTS" -le 0 ]; then
-  printf '{"running":%d,"slotsAfter":0,"dispatched":[]}\n' "$RUNNING"
-  exit 0
+	printf '{"running":%d,"slotsAfter":0,"dispatched":[]}\n' "$RUNNING"
+	exit 0
 fi
 
 # ─── Enumerate pending tickets ────────────────────────────────────────────────
@@ -216,9 +273,9 @@ fi
 # lets workers read their wave briefing by exact path instead of globbing
 # wave-*-briefing.md (which would tempt them to read sibling waves).
 if [ -n "$SINGLE_TICKET" ]; then
-  PENDING=$(printf '0\t%s' "$SINGLE_TICKET")
+	PENDING=$(printf '0\t%s' "$SINGLE_TICKET")
 else
-  PENDING=$(jq -r '
+	PENDING=$(jq -r '
     (.queue // {})
     | to_entries
     | map(select(.key | test("^wave[0-9]+Pending$")))
@@ -233,9 +290,9 @@ else
 fi
 
 if [ -z "$PENDING" ]; then
-  printf '{"running":%d,"slotsAfter":%d,"dispatched":[],"queueEmpty":true}\n' \
-    "$RUNNING" "$SLOTS"
-  exit 0
+	printf '{"running":%d,"slotsAfter":%d,"dispatched":[],"queueEmpty":true}\n' \
+		"$RUNNING" "$SLOTS"
+	exit 0
 fi
 
 # CTL-495: tag OTEL stream with the activity type so Grafana cost can be sliced
@@ -245,113 +302,113 @@ fi
 # When --phase is set, the legacy path below is skipped (line ~328 `continue`),
 # so this value never reaches the phase-agent fork.
 if [ -z "$PHASE" ]; then
-  # shellcheck source=lib/task-type.sh
-  . "${SCRIPT_DIR}/lib/task-type.sh"
-  __catalyst_append_task_type "oneshot"
+	# shellcheck source=lib/task-type.sh
+	. "${SCRIPT_DIR}/lib/task-type.sh"
+	__catalyst_append_task_type "oneshot"
 fi
 
 # ─── Dispatch loop ────────────────────────────────────────────────────────────
 DISPATCHED=()
 while IFS=$'\t' read -r W T; do
-  [ -z "$T" ] && continue
-  [ "$SLOTS" -le 0 ] && break
+	[ -z "$T" ] && continue
+	[ "$SLOTS" -le 0 ] && break
 
-  WORKER_DIR="${WORKTREE_BASE}/${ORCH_ID}-${T}"
+	WORKER_DIR="${WORKTREE_BASE}/${ORCH_ID}-${T}"
 
-  # Idempotency key depends on which path we're on. Phase mode owns its own
-  # per-phase signal at workers/<T>/phase-<name>.json; legacy mode uses the
-  # flat workers/<T>.json. The two paths intentionally do not share state
-  # so the orchestrator can run both side-by-side during the cutover.
-  if [ -n "$PHASE" ]; then
-    SIGNAL_FILE="${ORCH_DIR}/workers/${T}/phase-${PHASE}.json"
-  else
-    SIGNAL_FILE="${ORCH_DIR}/workers/${T}.json"
-  fi
+	# Idempotency key depends on which path we're on. Phase mode owns its own
+	# per-phase signal at workers/<T>/phase-<name>.json; legacy mode uses the
+	# flat workers/<T>.json. The two paths intentionally do not share state
+	# so the orchestrator can run both side-by-side during the cutover.
+	if [ -n "$PHASE" ]; then
+		SIGNAL_FILE="${ORCH_DIR}/workers/${T}/phase-${PHASE}.json"
+	else
+		SIGNAL_FILE="${ORCH_DIR}/workers/${T}.json"
+	fi
 
-  if [ -f "$SIGNAL_FILE" ]; then
-    # Already has a signal (idempotent — previously dispatched)
-    continue
-  fi
+	if [ -f "$SIGNAL_FILE" ]; then
+		# Already has a signal (idempotent — previously dispatched)
+		continue
+	fi
 
-  if [ ! -d "$WORKER_DIR" ]; then
-    echo "skip $T: worktree missing ($WORKER_DIR)" >&2
-    continue
-  fi
+	if [ ! -d "$WORKER_DIR" ]; then
+		echo "skip $T: worktree missing ($WORKER_DIR)" >&2
+		continue
+	fi
 
-  if [ "$DRY_RUN" -eq 1 ]; then
-    DISPATCHED+=("$T")
-    SLOTS=$((SLOTS-1))
-    continue
-  fi
+	if [ "$DRY_RUN" -eq 1 ]; then
+		DISPATCHED+=("$T")
+		SLOTS=$((SLOTS - 1))
+		continue
+	fi
 
-  # ─── CTL-449: phase-agent dispatch path (claude --bg) ─────────────────────
-  if [ -n "$PHASE" ]; then
-    # Delegate the spawn to phase-agent-dispatch. It writes its own per-phase
-    # signal file, resolves model/turn-cap from .catalyst/config.json, gates
-    # on prior phase artifacts, and runs `claude --bg`. We capture its stdout
-    # JSON so we can mirror dispatch state to the global state script the
-    # same way the legacy path does.
-    PHASE_STDOUT=$(
-      cd "$WORKER_DIR" || exit 1
-      CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
-      CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
-      CATALYST_SESSION_ID="$SESSION_ID" \
-      "$PHASE_DISPATCH_BIN" \
-        --phase "$PHASE" \
-        --ticket "$T" \
-        --orch-dir "$ORCH_DIR" \
-        --orch-id "$ORCH_ID"
-    ) || {
-      echo "phase-agent-dispatch failed for $T phase=$PHASE — see stderr" >&2
-      continue
-    }
+	# ─── CTL-449: phase-agent dispatch path (claude --bg) ─────────────────────
+	if [ -n "$PHASE" ]; then
+		# Delegate the spawn to phase-agent-dispatch. It writes its own per-phase
+		# signal file, resolves model/turn-cap from .catalyst/config.json, gates
+		# on prior phase artifacts, and runs `claude --bg`. We capture its stdout
+		# JSON so we can mirror dispatch state to the global state script the
+		# same way the legacy path does.
+		PHASE_STDOUT=$(
+			cd "$WORKER_DIR" || exit 1
+			CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+				CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+				CATALYST_SESSION_ID="$SESSION_ID" \
+				"$PHASE_DISPATCH_BIN" \
+				--phase "$PHASE" \
+				--ticket "$T" \
+				--orch-dir "$ORCH_DIR" \
+				--orch-id "$ORCH_ID"
+		) || {
+			echo "phase-agent-dispatch failed for $T phase=$PHASE — see stderr" >&2
+			continue
+		}
 
-    # State mirror: same shape as legacy events so existing monitors don't
-    # need a special-case for phase dispatches.
-    #
-    # Intentional divergence from the legacy path (see comment at signal-file
-    # selection above): we do NOT bump `.progress.inProgressTickets` here
-    # because a single ticket may dispatch through multiple phases — the
-    # legacy counter assumes one dispatch per ticket. Likewise the RUNNING
-    # count loop at line 154 globs `workers/*.json` and won't see phase-mode
-    # signals at `workers/<T>/phase-<name>.json`. Both divergences are
-    # acceptable in the MVP because phase-mode and legacy-mode never run
-    # against the same wave; the orchestrator state-machine rewrite in
-    # Initiative 1 Phase 6 reconciles both surfaces.
-    "$STATE_SCRIPT" worker "$ORCH_ID" "$T" '.status = "dispatched" | .phase = "'"$PHASE"'"' >/dev/null 2>&1 || true
-    "$STATE_SCRIPT" event "$(jq -nc \
-      --arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$T" --arg phase "$PHASE" \
-      '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-dispatched", detail: {phase: $phase}}')" \
-      >/dev/null 2>&1 || true
+		# State mirror: same shape as legacy events so existing monitors don't
+		# need a special-case for phase dispatches.
+		#
+		# Intentional divergence from the legacy path (see comment at signal-file
+		# selection above): we do NOT bump `.progress.inProgressTickets` here
+		# because a single ticket may dispatch through multiple phases — the
+		# legacy counter assumes one dispatch per ticket. Likewise the RUNNING
+		# count loop at line 154 globs `workers/*.json` and won't see phase-mode
+		# signals at `workers/<T>/phase-<name>.json`. Both divergences are
+		# acceptable in the MVP because phase-mode and legacy-mode never run
+		# against the same wave; the orchestrator state-machine rewrite in
+		# Initiative 1 Phase 6 reconciles both surfaces.
+		"$STATE_SCRIPT" worker "$ORCH_ID" "$T" '.status = "dispatched" | .phase = "'"$PHASE"'"' >/dev/null 2>&1 || true
+		"$STATE_SCRIPT" event "$(jq -nc \
+			--arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$T" --arg phase "$PHASE" \
+			'{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-dispatched", detail: {phase: $phase}}')" \
+			>/dev/null 2>&1 || true
 
-    # Drain the wave queue (same as the legacy path below).
-    jq --arg t "$T" '
+		# Drain the wave queue (same as the legacy path below).
+		jq --arg t "$T" '
       .queue |= (
         (. // {}) | with_entries(
           if (.key | test("^wave[0-9]+Pending$"))
           then .value |= (. - [$t])
           else . end
         )
-      )' "$STATE_JSON" > "${STATE_JSON}.tmp" && mv "${STATE_JSON}.tmp" "$STATE_JSON"
+      )' "$STATE_JSON" >"${STATE_JSON}.tmp" && mv "${STATE_JSON}.tmp" "$STATE_JSON"
 
-    DISPATCHED+=("$T")
-    SLOTS=$((SLOTS-1))
-    continue
-  fi
+		DISPATCHED+=("$T")
+		SLOTS=$((SLOTS - 1))
+		continue
+	fi
 
-  # ─── Legacy path: claude -p oneshot ───────────────────────────────────────
-  # Write signal file with the shared dispatched/phase0 template.
-  # CTL-208: include `wave` so the worker can read only its own wave briefing by exact path.
-  NOW=$(now_iso)
-  jq -n \
-    --arg ticket "$T" \
-    --arg orch "$ORCH_ID" \
-    --argjson wave "$W" \
-    --arg name "${ORCH_ID}-${T}" \
-    --arg label "oneshot ${T}" \
-    --arg ts "$NOW" \
-    --arg wt "$WORKER_DIR" \
-    '{
+	# ─── Legacy path: claude -p oneshot ───────────────────────────────────────
+	# Write signal file with the shared dispatched/phase0 template.
+	# CTL-208: include `wave` so the worker can read only its own wave briefing by exact path.
+	NOW=$(now_iso)
+	jq -n \
+		--arg ticket "$T" \
+		--arg orch "$ORCH_ID" \
+		--argjson wave "$W" \
+		--arg name "${ORCH_ID}-${T}" \
+		--arg label "oneshot ${T}" \
+		--arg ts "$NOW" \
+		--arg wt "$WORKER_DIR" \
+		'{
       ticket: $ticket,
       orchestrator: $orch,
       wave: $wave,
@@ -375,76 +432,76 @@ while IFS=$'\t' read -r W T; do
         codeReview: {passed: false},
         rewardHackingScan: {passed: false}
       }
-    }' > "$SIGNAL_FILE"
+    }' >"$SIGNAL_FILE"
 
-  STREAM="${ORCH_DIR}/workers/output/${T}-stream.jsonl"
-  STDERR="${ORCH_DIR}/workers/output/${T}-stderr.log"
-  mkdir -p "${ORCH_DIR}/workers/output"
+	STREAM="${ORCH_DIR}/workers/output/${T}-stream.jsonl"
+	STDERR="${ORCH_DIR}/workers/output/${T}-stderr.log"
+	mkdir -p "${ORCH_DIR}/workers/output"
 
-  (
-    cd "$WORKER_DIR" || exit 1
-    CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
-    CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
-    CATALYST_COMMS_CHANNEL="$COMMS_CHANNEL" \
-    CATALYST_SESSION_ID="$SESSION_ID" \
-    CATALYST_FINDINGS_FILE="${ORCH_DIR}/findings.jsonl" \
-    exec nohup "$CLAUDE_BIN" \
-      -n "${ORCH_ID}-${T}" \
-      --output-format stream-json \
-      --verbose \
-      --dangerously-skip-permissions \
-      -p "${WORKER_COMMAND} ${T} ${WORKER_ARGS}"
-  ) > "$STREAM" 2> "$STDERR" </dev/null &
-  # </dev/null above: claude -p reads stdin even in non-interactive mode. Without
-  # this, the worker inherits the parent's open herestring (`done <<< "$PENDING"`
-  # below) and treats leftover `<wave>\t<ticket>` lines as additional prompt
-  # input, blowing up the first AskUserQuestion. See CTL-334.
-  PID=$!
+	(
+		cd "$WORKER_DIR" || exit 1
+		CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+			CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
+			CATALYST_COMMS_CHANNEL="$COMMS_CHANNEL" \
+			CATALYST_SESSION_ID="$SESSION_ID" \
+			CATALYST_FINDINGS_FILE="${ORCH_DIR}/findings.jsonl" \
+			exec nohup "$CLAUDE_BIN" \
+			-n "${ORCH_ID}-${T}" \
+			--output-format stream-json \
+			--verbose \
+			--dangerously-skip-permissions \
+			-p "${WORKER_COMMAND} ${T} ${WORKER_ARGS}"
+	) >"$STREAM" 2>"$STDERR" </dev/null &
+	# </dev/null above: claude -p reads stdin even in non-interactive mode. Without
+	# this, the worker inherits the parent's open herestring (`done <<< "$PENDING"`
+	# below) and treats leftover `<wave>\t<ticket>` lines as additional prompt
+	# input, blowing up the first AskUserQuestion. See CTL-334.
+	PID=$!
 
-  NOW2=$(now_iso)
-  jq --argjson pid "$PID" --arg ts "$NOW2" \
-    '.pid = $pid | .lastHeartbeat = $ts' \
-    "$SIGNAL_FILE" > "${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
+	NOW2=$(now_iso)
+	jq --argjson pid "$PID" --arg ts "$NOW2" \
+		'.pid = $pid | .lastHeartbeat = $ts' \
+		"$SIGNAL_FILE" >"${SIGNAL_FILE}.tmp" && mv "${SIGNAL_FILE}.tmp" "$SIGNAL_FILE"
 
-  # Mirror into global state (best-effort — logged via fake script in tests).
-  "$STATE_SCRIPT" worker "$ORCH_ID" "$T" '.status = "dispatched" | .phase = 0' >/dev/null 2>&1 || true
-  "$STATE_SCRIPT" update "$ORCH_ID" '.progress.inProgressTickets += 1' >/dev/null 2>&1 || true
-  "$STATE_SCRIPT" event "$(jq -nc \
-    --arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$T" \
-    '{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-dispatched", detail: null}')" \
-    >/dev/null 2>&1 || true
+	# Mirror into global state (best-effort — logged via fake script in tests).
+	"$STATE_SCRIPT" worker "$ORCH_ID" "$T" '.status = "dispatched" | .phase = 0' >/dev/null 2>&1 || true
+	"$STATE_SCRIPT" update "$ORCH_ID" '.progress.inProgressTickets += 1' >/dev/null 2>&1 || true
+	"$STATE_SCRIPT" event "$(jq -nc \
+		--arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$T" \
+		'{ts: $ts, orchestrator: $orch, worker: $w, event: "worker-dispatched", detail: null}')" \
+		>/dev/null 2>&1 || true
 
-  # Remove ticket from whichever waveNPending list it came from.
-  jq --arg t "$T" '
+	# Remove ticket from whichever waveNPending list it came from.
+	jq --arg t "$T" '
     .queue |= (
       (. // {}) | with_entries(
         if (.key | test("^wave[0-9]+Pending$"))
         then .value |= (. - [$t])
         else . end
       )
-    )' "$STATE_JSON" > "${STATE_JSON}.tmp" && mv "${STATE_JSON}.tmp" "$STATE_JSON"
+    )' "$STATE_JSON" >"${STATE_JSON}.tmp" && mv "${STATE_JSON}.tmp" "$STATE_JSON"
 
-  DISPATCHED+=("$T")
-  SLOTS=$((SLOTS-1))
-done <<< "$PENDING"
+	DISPATCHED+=("$T")
+	SLOTS=$((SLOTS - 1))
+done <<<"$PENDING"
 
 # ─── Dry-run also drains the queue conceptually, but in memory only ───────────
 if [ "$DRY_RUN" -eq 1 ] && [ "${#DISPATCHED[@]}" -gt 0 ]; then
-  : # queue was NOT mutated; intentional for dry-run
+	: # queue was NOT mutated; intentional for dry-run
 fi
 
 # ─── Post-dispatch healthcheck (skip in dry-run or if disabled) ───────────────
-if [ "$DRY_RUN" -eq 0 ] && [ "$SKIP_HEALTHCHECK" -eq 0 ] \
-   && [ "${#DISPATCHED[@]}" -gt 0 ] \
-   && [ -n "$HEALTHCHECK_BIN" ] && [ -x "$HEALTHCHECK_BIN" ]; then
-  "$HEALTHCHECK_BIN" --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" >/dev/null 2>&1 || true
+if [ "$DRY_RUN" -eq 0 ] && [ "$SKIP_HEALTHCHECK" -eq 0 ] &&
+	[ "${#DISPATCHED[@]}" -gt 0 ] &&
+	[ -n "$HEALTHCHECK_BIN" ] && [ -x "$HEALTHCHECK_BIN" ]; then
+	"$HEALTHCHECK_BIN" --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" >/dev/null 2>&1 || true
 fi
 
 # ─── Emit final JSON summary ──────────────────────────────────────────────────
 if [ "${#DISPATCHED[@]}" -eq 0 ]; then
-  DISPATCHED_JSON='[]'
+	DISPATCHED_JSON='[]'
 else
-  DISPATCHED_JSON=$(printf '%s\n' "${DISPATCHED[@]}" | jq -R . | jq -sc .)
+	DISPATCHED_JSON=$(printf '%s\n' "${DISPATCHED[@]}" | jq -R . | jq -sc .)
 fi
 printf '{"running":%d,"slotsAfter":%d,"dispatched":%s}\n' \
-  "$RUNNING" "$SLOTS" "$DISPATCHED_JSON"
+	"$RUNNING" "$SLOTS" "$DISPATCHED_JSON"

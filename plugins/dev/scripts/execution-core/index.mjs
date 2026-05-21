@@ -10,6 +10,7 @@ import { startMonitor, stopMonitor } from "./monitor.mjs";
 import { log } from "./config.mjs";
 import { runScan } from "./scan.mjs";
 import { makeScanAdapters } from "./scan-adapters.mjs";
+import { writeEnrollmentRecord, removeEnrollmentRecord } from "./enrollment.mjs";
 
 // --- Barrel re-exports (every public symbol of the monitor) -------------
 export * from "./config.mjs";
@@ -107,6 +108,28 @@ function main() {
   // CTL-533: `scan` subcommand — one-shot deterministic scan dry run.
   if (argv[0] === "scan") {
     runScanCli(argv.slice(1));
+    return;
+  }
+
+  // CTL-554: `enroll` / `unenroll` subcommands — the enrollment-record
+  // lifecycle /orchestrate drives in execution-core dispatchMode. parseFlags
+  // is the shared `--key value` parser already used by the scan subcommand.
+  if (argv[0] === "enroll") {
+    const opts = parseFlags(argv.slice(1)); // --project-key, --repo-root
+    const rec = writeEnrollmentRecord({
+      projectKey: opts["project-key"],
+      repoRoot: opts["repo-root"],
+    });
+    log.info(
+      { projectKey: rec.projectKey, repoRoot: rec.repoRoot },
+      "execution-core: enrolled project"
+    );
+    return;
+  }
+  if (argv[0] === "unenroll") {
+    const opts = parseFlags(argv.slice(1));
+    removeEnrollmentRecord(opts["project-key"]);
+    log.info({ projectKey: opts["project-key"] }, "execution-core: unenrolled project");
     return;
   }
 

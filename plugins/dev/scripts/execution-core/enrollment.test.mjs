@@ -2,10 +2,15 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test enrollment.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listEnrolledProjects, loadProjectConfig } from "./enrollment.mjs";
+import {
+  listEnrolledProjects,
+  loadProjectConfig,
+  writeEnrollmentRecord,
+  removeEnrollmentRecord,
+} from "./enrollment.mjs";
 
 let catalystDir;
 let enrollmentDir;
@@ -29,7 +34,7 @@ afterEach(() => {
 function writeRecord(name, obj) {
   writeFileSync(
     join(enrollmentDir, name),
-    typeof obj === "string" ? obj : JSON.stringify(obj, null, 2),
+    typeof obj === "string" ? obj : JSON.stringify(obj, null, 2)
   );
 }
 
@@ -39,10 +44,7 @@ function writeRecord(name, obj) {
 function writeRepo(catalyst) {
   const repoRoot = mkdtempSync(join(catalystDir, "repo-"));
   mkdirSync(join(repoRoot, ".catalyst"), { recursive: true });
-  writeFileSync(
-    join(repoRoot, ".catalyst", "config.json"),
-    JSON.stringify({ catalyst }, null, 2),
-  );
+  writeFileSync(join(repoRoot, ".catalyst", "config.json"), JSON.stringify({ catalyst }, null, 2));
   return repoRoot;
 }
 
@@ -191,5 +193,62 @@ describe("loadProjectConfig", () => {
     mkdirSync(join(repoRoot, ".catalyst"), { recursive: true });
     writeFileSync(join(repoRoot, ".catalyst", "config.json"), "{ broken");
     expect(loadProjectConfig(repoRoot)).toBeNull();
+  });
+});
+
+describe("writeEnrollmentRecord", () => {
+  test("writes a record that listEnrolledProjects reads back", () => {
+    writeEnrollmentRecord({ projectKey: "demo", repoRoot: "/repos/demo" });
+    const got = listEnrolledProjects();
+    expect(got).toHaveLength(1);
+    expect(got[0]).toMatchObject({ projectKey: "demo", repoRoot: "/repos/demo" });
+    expect(got[0].status).toBe("active");
+    expect(typeof got[0].enrolledAt).toBe("string");
+  });
+
+  test("creates the projects/ directory if absent", () => {
+    // afterEach already removes the tree; remove projects/ explicitly then write
+    rmSync(enrollmentDir, { recursive: true, force: true });
+    writeEnrollmentRecord({ projectKey: "demo", repoRoot: "/r/d" });
+    expect(listEnrolledProjects().map((p) => p.projectKey)).toEqual(["demo"]);
+  });
+
+  test("is atomic — leaves no .tmp file behind", () => {
+    writeEnrollmentRecord({ projectKey: "demo", repoRoot: "/r/d" });
+    expect(readdirSync(enrollmentDir).some((f) => f.endsWith(".tmp"))).toBe(false);
+  });
+
+  test("re-enrolling overwrites the existing record (idempotent)", () => {
+    writeEnrollmentRecord({ projectKey: "demo", repoRoot: "/r/old" });
+    writeEnrollmentRecord({ projectKey: "demo", repoRoot: "/r/new" });
+    const got = listEnrolledProjects();
+    expect(got).toHaveLength(1);
+    expect(got[0].repoRoot).toBe("/r/new");
+  });
+
+  test("throws on an unsafe projectKey (path traversal)", () => {
+    expect(() => writeEnrollmentRecord({ projectKey: "../escape", repoRoot: "/r" })).toThrow();
+    expect(() => writeEnrollmentRecord({ projectKey: "a/b", repoRoot: "/r" })).toThrow();
+  });
+
+  test("throws when projectKey or repoRoot is missing", () => {
+    expect(() => writeEnrollmentRecord({ repoRoot: "/r" })).toThrow();
+    expect(() => writeEnrollmentRecord({ projectKey: "demo" })).toThrow();
+  });
+});
+
+describe("removeEnrollmentRecord", () => {
+  test("deletes the record file", () => {
+    writeEnrollmentRecord({ projectKey: "demo", repoRoot: "/r/d" });
+    removeEnrollmentRecord("demo");
+    expect(listEnrolledProjects()).toEqual([]);
+  });
+
+  test("is a no-op when the record does not exist", () => {
+    expect(() => removeEnrollmentRecord("nonexistent")).not.toThrow();
+  });
+
+  test("throws on an unsafe projectKey", () => {
+    expect(() => removeEnrollmentRecord("../escape")).toThrow();
   });
 });

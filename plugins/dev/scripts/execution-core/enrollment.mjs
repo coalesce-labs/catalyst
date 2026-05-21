@@ -1,12 +1,24 @@
-// enrollment.mjs — execution-core enrollment reader (CTL-535 Phase 1).
+// enrollment.mjs — execution-core enrollment reader + writer.
 //
-// Reads the enrollment records CTL-554 writes to
-// ~/catalyst/execution-core/projects/*.json, and resolves each enrolled
-// project's eligibleQuery from its live <repoRoot>/.catalyst/config.json.
-// CTL-535 is a pure CONSUMER of the enrollment contract — it never writes
-// enrollment records (CTL-554 owns enrollment lifecycle).
+// CTL-535 Phase 1 added the READER half: listEnrolledProjects() globs
+// ~/catalyst/execution-core/projects/*.json and loadProjectConfig() resolves
+// each enrolled project's eligibleQuery from its live
+// <repoRoot>/.catalyst/config.json.
+//
+// CTL-554 adds the WRITER half: writeEnrollmentRecord()/removeEnrollmentRecord()
+// own the enrollment lifecycle that /orchestrate drives in execution-core
+// dispatchMode. Records written here are read back verbatim by
+// listEnrolledProjects() — the two halves share isSafePathSegment().
 
-import { readdirSync, readFileSync } from "node:fs";
+import {
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  unlinkSync,
+  mkdirSync,
+  rmSync,
+} from "node:fs";
 import { resolve } from "node:path";
 import { getEnrollmentDir, log } from "./config.mjs";
 
@@ -48,7 +60,7 @@ export function listEnrolledProjects() {
     if (!isSafePathSegment(record.projectKey)) {
       log.warn(
         { file, projectKey: record.projectKey },
-        "skipping enrollment record with unsafe projectKey (not a valid path segment)",
+        "skipping enrollment record with unsafe projectKey (not a valid path segment)"
       );
       continue;
     }
@@ -82,4 +94,57 @@ export function loadProjectConfig(repoRoot) {
     label: eligibleQuery.label ?? null,
     priority: eligibleQuery.priority ?? null,
   };
+}
+
+// writeEnrollmentRecord — enroll a project (CTL-554). Writes
+// ~/catalyst/execution-core/projects/<projectKey>.json atomically (tmp +
+// renameSync, mirroring eligible-set.mjs) so listEnrolledProjects() never
+// observes a torn write. The `status` field is stamped "active" for operator
+// observability only; the reader still treats file presence as the enrollment
+// signal and never filters on status. Re-enrolling overwrites in place.
+export function writeEnrollmentRecord({ projectKey, repoRoot, enrolledAt, status } = {}) {
+  if (!projectKey || !repoRoot) {
+    throw new Error("writeEnrollmentRecord: projectKey and repoRoot are required");
+  }
+  if (!isSafePathSegment(projectKey)) {
+    throw new Error(`writeEnrollmentRecord: unsafe projectKey '${projectKey}'`);
+  }
+  const dir = getEnrollmentDir();
+  mkdirSync(dir, { recursive: true });
+  const file = resolve(dir, `${projectKey}.json`);
+  const record = {
+    projectKey,
+    repoRoot,
+    enrolledAt: enrolledAt ?? new Date().toISOString(),
+    status: status ?? "active",
+  };
+  const tmp = `${file}.tmp`;
+  try {
+    writeFileSync(tmp, JSON.stringify(record, null, 2));
+    renameSync(tmp, file);
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* tmp already gone */
+    }
+    throw err;
+  }
+  return record;
+}
+
+// removeEnrollmentRecord — deregister a project (CTL-554's /orchestrate
+// --stop). Deleting the record file is the unenrollment signal; the daemon
+// drops the project on its next reconcile. A no-op when the record is already
+// absent, so --stop is idempotent.
+export function removeEnrollmentRecord(projectKey) {
+  if (!projectKey || !isSafePathSegment(projectKey)) {
+    throw new Error(`removeEnrollmentRecord: unsafe projectKey '${projectKey}'`);
+  }
+  const file = resolve(getEnrollmentDir(), `${projectKey}.json`);
+  try {
+    rmSync(file, { force: true });
+  } catch {
+    /* already gone */
+  }
 }
