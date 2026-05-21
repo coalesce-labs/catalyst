@@ -115,14 +115,10 @@ shopt -u nullglob
 PLAN_PATH="${PLAN_MATCHES[0]}"
 echo "phase-implement: plan = ${PLAN_PATH}"
 
-# 5. Transition Linear to inProgress (worker-owned state per plan §Linear
-#    Integration). Best-effort — Linear connectivity issues should not block
-#    the implementation work.
-LINEAR_TRANSITION="${PLUGIN_ROOT}/scripts/linear-transition.sh"
-if [[ -x "$LINEAR_TRANSITION" ]]; then
-  "$LINEAR_TRANSITION" --ticket "$TICKET" --transition inProgress \
-    --config .catalyst/config.json 2>/dev/null || true
-fi
+# 5. Linear status is written by the coordinator (CTL-558): the execution-core
+#    scheduler / orchestrate-phase-advance applies the `Implement` state when
+#    it commits the implement-phase transition. The phase agent no longer
+#    transitions Linear itself.
 ```
 
 ## /goal condition
@@ -134,9 +130,8 @@ Plan §"Per-phase /goal conditions":
 ```
 /goal "I have run /catalyst-dev:implement-plan on ${PLAN_PATH} to completion
        AND `git diff <base>..HEAD` on this branch is non-empty AND the targeted
-       tests pass (I have printed the test command + `exit 0` to my transcript)
-       AND I have updated Linear to inProgress (the linear-transition.sh
-       output line is in my transcript);
+       tests pass (I have printed the test command + `exit 0` to my transcript);
+       (Linear status is written by the coordinator — CTL-558 — not this agent.)
        OR I am within ~5 turns of the 75-turn cap, in which case I have
        (a) written a structured handoff to
            thoughts/shared/handoffs/${TICKET}/<ts>_turn-cap-continuation.md

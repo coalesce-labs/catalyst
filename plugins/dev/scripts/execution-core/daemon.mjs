@@ -66,6 +66,9 @@ export function startDaemon({
   // agent on a →Triage transition. `dispatch` stays an injectable default
   // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
   monitorFn({ orchDir }); // CTL-535 + CTL-565 — two-state trigger monitor
+  // CTL-558: the scheduler writes Linear status via its default `writeStatus`
+  // (linear-write.mjs) on every committed phase transition — no daemon wiring
+  // needed; production uses the real module, tests inject fakes.
   schedulerFn({ orchDir }); // CTL-536 — pull-loop scheduler
 
   if (watchEnrollment) {

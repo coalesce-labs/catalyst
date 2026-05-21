@@ -358,6 +358,12 @@ If ticket found:
 # Skip silently if CLI not available.
 ```
 
+**Skip the status transition (step 1) when `CATALYST_PHASE` is set** — under a
+phase agent the deterministic coordinator (CTL-558) owns the Linear status
+write-back. This status transition is only for interactive
+`/catalyst-dev:describe-pr` use; the PR-link comment (step 2) is still posted in
+both modes.
+
 ### 14. Report results
 
 **If first-time generation:**

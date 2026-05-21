@@ -110,15 +110,9 @@ fi
 RESEARCH_DOC="${RESEARCH_MATCHES[-1]}"
 ```
 
-## Linear state transition
-
-```bash
-LT="${PLUGIN_ROOT}/scripts/linear-transition.sh"
-if [[ -x "$LT" ]]; then
-  "$LT" --ticket "$TICKET" --transition planning --config .catalyst/config.json \
-    >/dev/null 2>&1 || true
-fi
-```
+<!-- Linear status is written by the coordinator (CTL-558): the execution-core
+     scheduler / orchestrate-phase-advance applies the mapped state on every
+     committed phase transition. The phase agent no longer transitions Linear. -->
 
 ## /goal
 

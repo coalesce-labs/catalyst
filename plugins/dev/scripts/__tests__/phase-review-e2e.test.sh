@@ -67,8 +67,9 @@ if [[ -f "$SKILL" ]]; then
   assert_contains "$BODY" "phase-agent-emit-complete" "body calls phase-agent-emit-complete"
   assert_contains "$BODY" '--status complete' "body emits --status complete on success"
 
-  # Linear intermediate state — reviewing (CTL-454)
-  assert_contains "$BODY" "reviewing" "body transitions Linear ticket to reviewing state"
+  # CTL-558: Linear status write-back moved to the deterministic coordinator —
+  # the phase agent no longer carries the linear-transition prose.
+  assert_not_contains "$BODY" "--transition reviewing" "body does NOT self-transition Linear (coordinator owns it, CTL-558)"
 
   assert_contains "$BODY" "/goal" "body declares a /goal block"
 

@@ -13,7 +13,7 @@
 // Composes: lib/dependency-graph.mjs (readiness), scheduler-rank.mjs (ranking),
 // lib/phase-fsm.mjs (phase advancement, Phase 4), eligible-set.mjs (candidates).
 
-import { readdirSync, readFileSync, watch, mkdirSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync, watch, mkdirSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { analyzeDependencyGraph, referencedBlockerIds } from "../lib/dependency-graph.mjs";
 // PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
@@ -23,6 +23,10 @@ import { PHASES, transition, isTerminal } from "../lib/phase-fsm.mjs";
 import { rankTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket } from "./dispatch.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
+// CTL-558: the deterministic Linear status/label write seam. The whole module
+// is injected as `writeStatus` so tests pass fakes; production uses the real
+// module (best-effort — every write swallows its own failures).
+import * as linearWrite from "./linear-write.mjs";
 import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
@@ -255,12 +259,50 @@ export function deriveAdvancement(signals) {
   return next.phase;
 }
 
-// schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull.
-// Idempotent and restart-safe — derives every action from filesystem state.
-// `exec` is the injectable seam for the D5 out-of-set blocker-state fetch.
+// safeWrite — run a best-effort Linear-write call (CTL-558). A write failure
+// must never abort the tick: a thrown error is logged and swallowed. `ctx` is
+// merged into the log line so the failing { ticket, phase } stays visible.
+function safeWrite(fn, ctx) {
+  try {
+    fn();
+  } catch (err) {
+    log.warn({ ...ctx, err: err.message }, "scheduler: Linear write-back threw — continuing tick");
+  }
+}
+
+// labelOnce — apply a Linear label to a ticket at most once for the run's
+// lifetime (CTL-558). `linearis` label-add has no read-compare, so without a
+// guard the scheduler would re-hit the API on every 30s tick. A once-marker
+// file at workers/<T>/.linear-label-<label>.applied (restart-safe — persists
+// with the worker dir) records a successful apply. Best-effort: any throw is
+// logged and swallowed, never aborting the tick.
+function labelOnce(orchDir, ticket, label, writeStatus) {
+  const marker = join(orchDir, "workers", ticket, `.linear-label-${label}.applied`);
+  if (existsSync(marker)) return;
+  try {
+    const res = writeStatus.applyLabel({ ticket, label });
+    // Write the marker only on a confirmed apply — a failed label-write is
+    // retried next tick. A fake that returns undefined (test stubs) is treated
+    // as success so the once-semantics stay testable without a real result.
+    if (res === undefined || res?.applied) {
+      writeFileSync(marker, "");
+    }
+  } catch (err) {
+    log.warn(
+      { ticket, label, err: err.message },
+      "scheduler: label write-back threw — continuing tick",
+    );
+  }
+}
+
+// schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
+// (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
+// every action from filesystem state. `exec` is the injectable seam for the D5
+// out-of-set blocker-state fetch; `writeStatus` is the injectable Linear-write
+// seam (CTL-558) — defaults to the real linear-write.mjs module.
 export function schedulerTick(
   orchDir,
-  { readEligible, dispatch = defaultDispatch, exec } = {},
+  { readEligible, dispatch = defaultDispatch, exec, writeStatus = linearWrite } = {},
 ) {
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
   const advanced = [];
@@ -268,8 +310,17 @@ export function schedulerTick(
     const next = deriveAdvancement(readPhaseSignals(orchDir, ticket));
     if (!next) continue;
     const r = dispatchTicket(orchDir, ticket, next, { dispatch });
-    if (r.code === 0) advanced.push({ ticket, phase: next });
-    else log.warn({ ticket, phase: next, code: r.code }, "scheduler: advance dispatch failed");
+    if (r.code === 0) {
+      advanced.push({ ticket, phase: next });
+      // CTL-558: write the dispatched phase's mapped Linear status. Idempotent
+      // (linear-transition.sh read-compares first); never aborts the tick.
+      safeWrite(() => writeStatus.applyPhaseStatus({ ticket, phase: next }), {
+        ticket,
+        phase: next,
+      });
+    } else {
+      log.warn({ ticket, phase: next, code: r.code }, "scheduler: advance dispatch failed");
+    }
   }
 
   // (2) New-work pull — fill free slots with top-ranked ready tickets. D5:
@@ -285,8 +336,41 @@ export function schedulerTick(
   const dispatched = [];
   for (const t of selected) {
     const r = dispatchTicket(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, { dispatch });
-    if (r.code === 0) dispatched.push(t.identifier);
-    else log.warn({ ticket: t.identifier, code: r.code }, "scheduler: dispatch failed");
+    if (r.code === 0) {
+      dispatched.push(t.identifier);
+      // CTL-558: write the entry-phase (`research`) status for the new ticket.
+      safeWrite(
+        () =>
+          writeStatus.applyPhaseStatus({
+            ticket: t.identifier,
+            phase: NEW_WORK_ENTRY_PHASE,
+          }),
+        { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE },
+      );
+    } else {
+      log.warn({ ticket: t.identifier, code: r.code }, "scheduler: dispatch failed");
+    }
+  }
+
+  // (3) Terminal-Done + label sweep (CTL-558) — one pass over every started
+  // ticket. deriveAdvancement returns null once monitor-deploy completes, so
+  // terminal `Done` is not a dispatch — it needs this dedicated sweep. In the
+  // same pass: apply the `triaged` label on triage completion, and the flat
+  // `needs-human` label when any phase signal is `stalled` (D7 — the worker
+  // keeps its phase state, it does not bounce to Triage). Status writes are
+  // idempotent via linear-transition.sh; label writes are guarded once-per-run
+  // by labelOnce's marker file.
+  for (const ticket of listStartedTickets(orchDir)) {
+    const signals = readPhaseSignals(orchDir, ticket);
+    if (signals["monitor-deploy"] === "done") {
+      safeWrite(() => writeStatus.applyTerminalDone({ ticket }), { ticket });
+    }
+    if (signals.triage === "done") {
+      labelOnce(orchDir, ticket, "triaged", writeStatus);
+    }
+    if (Object.values(signals).some((s) => s === "stalled")) {
+      labelOnce(orchDir, ticket, "needs-human", writeStatus);
+    }
   }
 
   return { advanced, dispatched, freeSlots, ready: ready.map((t) => t.identifier) };
@@ -312,6 +396,7 @@ function runTick() {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
       exec: runningOpts.exec,
+      writeStatus: runningOpts.writeStatus,
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -325,19 +410,22 @@ function scheduleDebouncedTick(debounceMs) {
 }
 
 // startScheduler — immediate authoritative tick, arm the periodic timer, then
-// start the event-log fast path. `dispatch` / `readEligible` / `exec` are
-// injectable so a test drives a hermetic daemon (`exec` is the D5 blocker-state
-// fetch seam, CTL-565).
+// start the event-log fast path. `dispatch` / `readEligible` / `exec` /
+// `writeStatus` are injectable so a test drives a hermetic daemon (`exec` is
+// the D5 blocker-state fetch seam, CTL-565; `writeStatus` is the CTL-558
+// Linear-write seam — undefined here defaults to the real module in
+// schedulerTick).
 export function startScheduler({
   orchDir,
   dispatch,
   readEligible,
   exec,
+  writeStatus,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
   if (!orchDir) throw new Error("startScheduler: orchDir is required");
-  runningOpts = { orchDir, dispatch, readEligible, exec };
+  runningOpts = { orchDir, dispatch, readEligible, exec, writeStatus };
 
   runTick(); // authoritative initial pass
   tickTimer = setInterval(runTick, tickIntervalMs);

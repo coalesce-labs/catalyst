@@ -21,6 +21,8 @@ export * from "./eligible-set.mjs";
 // kill-on-drag-out abort module.
 export * from "./dispatch.mjs";
 export * from "./abort-worker.mjs";
+// CTL-558: the deterministic Linear status/label write seam (D9 write mirror).
+export * from "./linear-write.mjs";
 // monitor.mjs is re-exported explicitly so the test-only __resetForTests
 // helper stays out of the public barrel.
 export {

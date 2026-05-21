@@ -25,6 +25,7 @@ pass() { PASSES=$((PASSES + 1)); echo "  PASS: $1"; }
 
 assert_eq() { [[ "$1" == "$2" ]] && pass "$3" || fail "$3 — expected '$1', got '$2'"; }
 assert_contains() { [[ "$1" == *"$2"* ]] && pass "$3" || fail "$3 — '$2' not found"; }
+assert_not_contains() { [[ "$1" != *"$2"* ]] && pass "$3" || fail "$3 — '$2' unexpectedly present"; }
 assert_file_exists() { [[ -f "$1" ]] && pass "$2" || fail "$2 — file missing: $1"; }
 
 # ─── Contract ───────────────────────────────────────────────────────────────
@@ -54,8 +55,9 @@ if [[ -f "$SKILL" ]]; then
   assert_contains "$BODY" '--status complete' "body emits --status complete on success"
   assert_contains "$BODY" '--status failed' "body emits --status failed on error path"
 
-  # Linear intermediate state — plan uses 'planning' (existing state, not new)
-  assert_contains "$BODY" "planning" "body transitions Linear ticket to planning state"
+  # CTL-558: Linear status write-back moved to the deterministic coordinator —
+  # the phase agent no longer carries the linear-transition prose.
+  assert_not_contains "$BODY" "--transition planning" "body does NOT self-transition Linear (coordinator owns it, CTL-558)"
 
   assert_contains "$BODY" "/goal" "body declares a /goal block"
 fi

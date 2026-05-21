@@ -40,6 +40,10 @@ assert_contains() {
   local haystack="$1" needle="$2" label="$3"
   [[ "$haystack" == *"$needle"* ]] && pass "$label" || fail "$label — '$needle' not found"
 }
+assert_not_contains() {
+  local haystack="$1" needle="$2" label="$3"
+  [[ "$haystack" != *"$needle"* ]] && pass "$label" || fail "$label — '$needle' unexpectedly present"
+}
 assert_file_exists() {
   [[ -f "$1" ]] && pass "$2" || fail "$2 — file missing: $1"
 }
@@ -79,8 +83,9 @@ if [[ -f "$SKILL" ]]; then
   assert_contains "$BODY" '--status complete' "body emits --status complete on success"
   assert_contains "$BODY" '--status failed' "body emits --status failed on error path"
 
-  # Linear state transition (CTL-454 intermediate states)
-  assert_contains "$BODY" "researching" "body transitions Linear ticket to researching state"
+  # CTL-558: Linear status write-back moved to the deterministic coordinator —
+  # the phase agent no longer carries the linear-transition prose.
+  assert_not_contains "$BODY" "--transition researching" "body does NOT self-transition Linear (coordinator owns it, CTL-558)"
 
   # /goal block (turn cap)
   assert_contains "$BODY" "/goal" "body declares a /goal block"

@@ -4,7 +4,14 @@
 // Phase 3 adds the selection-core blocks; Phases 4-5 extend this same file.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  appendFileSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -662,5 +669,173 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
     expect(dispatch.calls).toHaveLength(0);
     expect(r.dispatched).toEqual([]);
     expect(r.advanced).toEqual([]);
+  });
+});
+
+// ── CTL-558: deterministic Linear status write-back from the scheduler ──
+
+describe("schedulerTick — Linear status write-back (CTL-558)", () => {
+  const readyTicket = (id, priority = 2) => ({
+    identifier: id,
+    priority,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+  const okDispatch = fakeDispatch();
+  const failDispatch = fakeDispatch({ code: 1 });
+
+  test("writes the dispatched phase's status after a successful advancement dispatch", () => {
+    // research done → advancement owes `plan`
+    writeSignal("CTL-1", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const writes = [];
+    const writeStatus = {
+      applyPhaseStatus: (a) => writes.push(a),
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: okDispatch, writeStatus });
+    expect(writes).toContainEqual(
+      expect.objectContaining({ ticket: "CTL-1", phase: "plan" })
+    );
+  });
+
+  test("writes `research` status for a new-work pull dispatch", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writes = [];
+    const writeStatus = {
+      applyPhaseStatus: (a) => writes.push(a),
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [readyTicket("CTL-2")],
+      dispatch: okDispatch,
+      writeStatus,
+    });
+    expect(writes).toContainEqual(
+      expect.objectContaining({ ticket: "CTL-2", phase: "research" })
+    );
+  });
+
+  test("does NOT write status when the dispatch fails", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writes = [];
+    const writeStatus = {
+      applyPhaseStatus: (a) => writes.push(a),
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [readyTicket("CTL-3")],
+      dispatch: failDispatch,
+      writeStatus,
+    });
+    expect(writes).toHaveLength(0);
+  });
+
+  test("writes terminal Done when a ticket's monitor-deploy signal is done", () => {
+    writeSignal("CTL-4", "monitor-deploy", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: (a) => dones.push(a),
+      applyLabel: () => {},
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: okDispatch, writeStatus });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-4" }));
+  });
+
+  test("a status-write throw never aborts the tick", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writeStatus = {
+      applyPhaseStatus: () => {
+        throw new Error("boom");
+      },
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+    };
+    expect(() =>
+      schedulerTick(orchDir, {
+        readEligible: () => [readyTicket("CTL-5")],
+        dispatch: okDispatch,
+        writeStatus,
+      })
+    ).not.toThrow();
+  });
+});
+
+// ── CTL-558: deterministic label write-back (triaged / needs-human) ──
+
+describe("schedulerTick — label write-back (CTL-558)", () => {
+  const noWrites = () => ({
+    applyPhaseStatus() {},
+    applyTerminalDone() {},
+  });
+
+  test("applies the `triaged` label when a ticket's triage signal is done", () => {
+    writeSignal("CTL-6", "triage", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const labels = [];
+    const writeStatus = { ...noWrites(), applyLabel: (a) => labels.push(a) };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(labels).toContainEqual(
+      expect.objectContaining({ ticket: "CTL-6", label: "triaged" })
+    );
+  });
+
+  test("applies `needs-human` when any phase signal is stalled", () => {
+    writeSignal("CTL-7", "implement", "stalled");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const labels = [];
+    const writeStatus = { ...noWrites(), applyLabel: (a) => labels.push(a) };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(labels).toContainEqual(
+      expect.objectContaining({ ticket: "CTL-7", label: "needs-human" })
+    );
+  });
+
+  test("does not re-apply a label once the .applied marker exists", () => {
+    writeSignal("CTL-7", "implement", "stalled");
+    writeFileSync(
+      join(orchDir, "workers", "CTL-7", ".linear-label-needs-human.applied"),
+      ""
+    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const labels = [];
+    const writeStatus = { ...noWrites(), applyLabel: (a) => labels.push(a) };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(labels).toHaveLength(0);
+  });
+
+  test("writes the .applied marker only after applyLabel reports applied:true", () => {
+    writeSignal("CTL-8", "triage", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const markerPath = join(orchDir, "workers", "CTL-8", ".linear-label-triaged.applied");
+    // applyLabel reports failure → no marker written → retried next tick.
+    const failWrite = { ...noWrites(), applyLabel: () => ({ applied: false }) };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus: failWrite });
+    expect(existsSync(markerPath)).toBe(false);
+    // applyLabel succeeds → marker written → not retried.
+    const okWrite = { ...noWrites(), applyLabel: () => ({ applied: true }) };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus: okWrite });
+    expect(existsSync(markerPath)).toBe(true);
+  });
+
+  test("a label-write throw never aborts the tick", () => {
+    writeSignal("CTL-9", "triage", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => {
+        throw new Error("label boom");
+      },
+    };
+    expect(() =>
+      schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus })
+    ).not.toThrow();
   });
 });
