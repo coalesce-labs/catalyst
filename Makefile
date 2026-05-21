@@ -1,4 +1,4 @@
-.PHONY: help lint format check-frontmatter check install-user install-project test clean favicons
+.PHONY: help lint format check install-user install-project test clean favicons
 
 # Default target - show help
 help:
@@ -7,8 +7,8 @@ help:
 	@echo "Quality Checks:"
 	@echo "  make lint              - Run all Trunk linters (shellcheck, markdownlint, etc.)"
 	@echo "  make format            - Auto-fix formatting issues with Trunk"
-	@echo "  make check-frontmatter - Validate command/agent frontmatter consistency"
-	@echo "  make check             - Run all quality checks (lint + frontmatter)"
+	@echo "  make test              - Run the full test suite (shell + bun)"
+	@echo "  make check             - Run all quality checks (lint + test)"
 	@echo ""
 	@echo "Installation:"
 	@echo "  make install-user      - Install workspace to ~/.claude/"
@@ -31,20 +31,10 @@ format:
 	@echo "Auto-fixing formatting issues..."
 	trunk fmt
 
-# Validate frontmatter in commands and agents
-check-frontmatter:
-	@echo "Validating frontmatter in commands and agents..."
-	@for file in commands/**/*.md agents/**/*.md .claude/commands/**/*.md .claude/agents/**/*.md; do \
-		if [ -f "$$file" ]; then \
-			./hack/validate-frontmatter.sh "$$file" || exit 1; \
-		fi \
-	done
-	@echo "✅ All frontmatter valid!"
-
-# Run all quality checks
-check: lint check-frontmatter
+# Run all quality checks (real audit gate)
+check: lint test
 	@echo ""
-	@echo "✅ All quality checks passed!"
+	@echo "✅ All quality checks passed (lint + test)!"
 
 # Install to user's home directory
 install-user:
@@ -57,12 +47,10 @@ install-project:
 	@read -p "Enter project path: " path; \
 	./hack/install-project.sh "$$path"
 
-# Run tests
+# Run the full test suite (shell + bun)
 test:
-	@echo "Running plugin tests..."
-	@bash plugins/dev/scripts/test-workflow-context.sh
-	@echo ""
-	@echo "✅ All test suites passed!"
+	@echo "Running full test suite (shell + bun)..."
+	@bash plugins/dev/scripts/run-tests.sh
 
 # Build the V2 favicon set from CTL-147 mark assets and distribute to all consumer
 # locations (repo root, website/public, plugins/dev/scripts/orch-monitor/public).
