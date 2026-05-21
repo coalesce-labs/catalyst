@@ -19,6 +19,7 @@ import {
   listStartedTickets,
   schedulerTick,
   readAllEligibleTickets,
+  hydrateOutOfSetBlockers,
   startScheduler,
   stopScheduler,
   __resetForTests,
@@ -427,6 +428,94 @@ describe("readAllEligibleTickets", () => {
     writeEligibleProjection("shapeless", { tickets: "nope" });
     writeEligibleProjection("ok", { tickets: [{ identifier: "OK-1" }] });
     expect(readAllEligibleTickets().map((t) => t.identifier)).toEqual(["OK-1"]);
+  });
+});
+
+// ── CTL-565 D5: out-of-set blocker-state hydration ──
+
+describe("hydrateOutOfSetBlockers / D5 readiness", () => {
+  // blkTk — an eligible ticket carrying a `blocked_by` relation to `blockedBy`.
+  const blkTk = (id, { priority = 2, blockedBy } = {}) => ({
+    identifier: id,
+    priority,
+    createdAt: "x",
+    state: "Todo",
+    relations: blockedBy
+      ? { nodes: [{ type: "blocked_by", relatedIssue: { identifier: blockedBy } }] }
+      : { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  test("fetches each unique out-of-set blocker once (deduped)", () => {
+    const fetched = [];
+    const exec = (_cmd, args) => {
+      fetched.push(args[2]);
+      return { code: 0, stdout: JSON.stringify({ state: { name: "Backlog" } }), stderr: "" };
+    };
+    const map = hydrateOutOfSetBlockers(
+      [blkTk("CTL-1", { blockedBy: "CTL-99" }), blkTk("CTL-2", { blockedBy: "CTL-99" })],
+      { exec },
+    );
+    expect(fetched).toEqual(["CTL-99"]); // deduped — one fetch
+    expect(map).toEqual({ "CTL-99": "Backlog" });
+  });
+
+  test("an in-set blocker is not fetched (only out-of-set blockers hydrate)", () => {
+    const fetched = [];
+    const exec = (_cmd, args) => {
+      fetched.push(args[2]);
+      return { code: 0, stdout: JSON.stringify({ state: { name: "Backlog" } }), stderr: "" };
+    };
+    // CTL-2 is in the eligible set, so the CTL-1→CTL-2 edge is in-set.
+    hydrateOutOfSetBlockers(
+      [blkTk("CTL-1", { blockedBy: "CTL-2" }), blkTk("CTL-2")],
+      { exec },
+    );
+    expect(fetched).toEqual([]);
+  });
+
+  test("a Ready ticket blocked by a Backlog out-of-set blocker is not dispatched", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ state: { name: "Backlog" } }),
+      stderr: "",
+    });
+    schedulerTick(orchDir, {
+      readEligible: () => [blkTk("CTL-1", { blockedBy: "CTL-99" })],
+      dispatch,
+      exec,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+
+  test("a Ready ticket blocked by a Done out-of-set blocker IS dispatched", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ state: { name: "Done" } }),
+      stderr: "",
+    });
+    schedulerTick(orchDir, {
+      readEligible: () => [blkTk("CTL-1", { blockedBy: "CTL-99" })],
+      dispatch,
+      exec,
+    });
+    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-1"]);
+  });
+
+  test("a failed blocker fetch fails safe — the dependent is held back, not dispatched", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
+    schedulerTick(orchDir, {
+      readEligible: () => [blkTk("CTL-1", { blockedBy: "CTL-99" })],
+      dispatch,
+      exec,
+    });
+    expect(dispatch.calls).toHaveLength(0);
   });
 });
 

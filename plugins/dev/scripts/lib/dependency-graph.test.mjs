@@ -8,6 +8,7 @@ import {
   computeReadySet,
   detectCycles,
   analyzeDependencyGraph,
+  referencedBlockerIds,
 } from "./dependency-graph.mjs";
 
 // issue(id, state, relations[], inverseRelations[]) — terse fixture builder.
@@ -372,6 +373,52 @@ describe("detectCycles", () => {
       expect(detectCycles(c.nodes, edges)).toEqual(c.expected);
     });
   }
+});
+
+// CTL-565 D5 — out-of-set blocker-state awareness. A Ready ticket blocked by a
+// ticket outside the eligible set must be held back unless the blocker's live
+// Linear state is terminal. The blocker is passed as a { id: stateName } map,
+// never injected into the issue list (that would make blockers dispatchable).
+describe("D5 — out-of-set blocker-state hydration", () => {
+  test("a Ready ticket blocked by a non-terminal out-of-set blocker is held back", () => {
+    // CTL-1 is eligible with an inverse `blocks` edge from out-of-set CTL-99.
+    const issues = [issue("CTL-1", "Backlog", [], [inv("blocks", "CTL-99")])];
+    const r = analyzeDependencyGraph(issues, { blockerStates: { "CTL-99": "Backlog" } });
+    expect(r.ready).toEqual([]);
+    expect(r.blocked).toEqual(["CTL-1"]);
+  });
+
+  test("a Ready ticket blocked by a Done out-of-set blocker is ready", () => {
+    const issues = [issue("CTL-1", "Backlog", [], [inv("blocks", "CTL-99")])];
+    const r = analyzeDependencyGraph(issues, { blockerStates: { "CTL-99": "Done" } });
+    expect(r.ready).toEqual(["CTL-1"]);
+  });
+
+  test("with no blockerStates supplied, an out-of-set blocker still does not block (legacy)", () => {
+    const issues = [issue("CTL-1", "Backlog", [], [inv("blocks", "CTL-99")])];
+    expect(analyzeDependencyGraph(issues).ready).toEqual(["CTL-1"]);
+  });
+
+  test("an out-of-set blocker is never itself classified as ready/blocked", () => {
+    const issues = [issue("CTL-1", "Backlog", [], [inv("blocks", "CTL-99")])];
+    const r = analyzeDependencyGraph(issues, { blockerStates: { "CTL-99": "Backlog" } });
+    expect(r.ready).not.toContain("CTL-99");
+    expect(r.blocked).not.toContain("CTL-99");
+  });
+
+  test("a Canceled out-of-set blocker does not block (terminal)", () => {
+    const issues = [issue("CTL-1", "Backlog", [], [inv("blocks", "CTL-99")])];
+    expect(analyzeDependencyGraph(issues, { blockerStates: { "CTL-99": "Canceled" } }).ready)
+      .toEqual(["CTL-1"]);
+  });
+
+  test("referencedBlockerIds returns every blocked-by peer regardless of membership", () => {
+    const issues = [
+      issue("CTL-1", "Backlog", [], [inv("blocks", "CTL-99")]),
+      issue("CTL-2", "Backlog", [rel("blocked_by", "CTL-88")]),
+    ];
+    expect(referencedBlockerIds(issues).sort()).toEqual(["CTL-88", "CTL-99"]);
+  });
 });
 
 describe("analyzeDependencyGraph", () => {

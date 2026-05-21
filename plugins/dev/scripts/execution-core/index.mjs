@@ -42,6 +42,7 @@ export {
   selectDispatchable,
   deriveAdvancement,
   readAllEligibleTickets,
+  hydrateOutOfSetBlockers,
 } from "./scheduler.mjs";
 
 // --- CTL-539: crash-recovery & startup reconstruction --------------------

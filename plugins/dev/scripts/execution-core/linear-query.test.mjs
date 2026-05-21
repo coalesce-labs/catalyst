@@ -2,7 +2,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-query.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { buildLinearisArgs, runEligibleQuery } from "./linear-query.mjs";
+import { buildLinearisArgs, runEligibleQuery, fetchTicketState } from "./linear-query.mjs";
 
 // A fake exec returning a canned linearis result. `exec(cmd, args)` ->
 // { code, stdout, stderr } — the injectable seam runEligibleQuery uses so a
@@ -170,5 +170,42 @@ describe("runEligibleQuery", () => {
     const t = runEligibleQuery(query, { exec })[0];
     expect(t.relations).toEqual(relations);
     expect(t.inverseRelations).toEqual({ nodes: [] });
+  });
+});
+
+// CTL-565 D5 — fetchTicketState wraps `linearis issues read <id>` to hydrate
+// an out-of-set blocker's live Linear state. linearis emits JSON by default
+// (its header: "CLI for Linear.app with JSON output") — no --json flag exists.
+describe("fetchTicketState", () => {
+  test("runs `linearis issues read <id>` and returns the state name", () => {
+    const exec = (cmd, args) => {
+      expect(cmd).toBe("linearis");
+      expect(args).toEqual(["issues", "read", "CTL-99"]);
+      return {
+        code: 0,
+        stdout: JSON.stringify({ identifier: "CTL-99", state: { name: "Backlog" } }),
+        stderr: "",
+      };
+    };
+    expect(fetchTicketState("CTL-99", { exec })).toBe("Backlog");
+  });
+
+  test("returns null on a non-zero linearis exit (caller fails safe)", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "not found" });
+    expect(fetchTicketState("CTL-99", { exec })).toBeNull();
+  });
+
+  test("returns null on unparseable stdout", () => {
+    const exec = () => ({ code: 0, stdout: "not json", stderr: "" });
+    expect(fetchTicketState("CTL-99", { exec })).toBeNull();
+  });
+
+  test("accepts a flat string `state` field too", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-99", state: "Done" }),
+      stderr: "",
+    });
+    expect(fetchTicketState("CTL-99", { exec })).toBe("Done");
   });
 });

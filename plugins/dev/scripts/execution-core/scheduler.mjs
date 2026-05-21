@@ -15,13 +15,14 @@
 
 import { readdirSync, readFileSync, watch, mkdirSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import { analyzeDependencyGraph } from "../lib/dependency-graph.mjs";
+import { analyzeDependencyGraph, referencedBlockerIds } from "../lib/dependency-graph.mjs";
 // PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
 // ("triage") is intentionally NO LONGER the new-work entry phase — new work
 // enters at NEW_WORK_ENTRY_PHASE ("research"), see schedulerTick.
 import { PHASES, transition, isTerminal } from "../lib/phase-fsm.mjs";
 import { rankTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket } from "./dispatch.mjs";
+import { fetchTicketState } from "./linear-query.mjs";
 import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
@@ -130,12 +131,41 @@ export function computeFreeSlots(maxParallel, inFlightCount) {
   return Math.max(0, maxParallel - inFlightCount);
 }
 
+// A blocker fetch that failed (or any non-terminal hydrated state) holds the
+// dependent back. The sentinel is a deliberately non-terminal placeholder
+// state so a failed `linearis issues read` fails safe — the dependent is
+// treated as blocked, never silently dispatched. CTL-565 D5.
+const UNFETCHED_BLOCKER_STATE = "__unfetched__";
+
+// hydrateOutOfSetBlockers — find every blocker referenced by an eligible
+// ticket's blocked-by edge that is NOT itself in the eligible set, fetch its
+// live Linear state once, and return a { identifier: stateName } map. A failed
+// fetch yields the non-terminal UNFETCHED_BLOCKER_STATE sentinel so the
+// dependent is held back — failing safe. CTL-565 D5.
+export function hydrateOutOfSetBlockers(
+  eligibleTickets,
+  { exec, fetchState = fetchTicketState } = {},
+) {
+  const list = eligibleTickets ?? [];
+  const inSet = new Set(list.map((t) => t?.identifier).filter(Boolean));
+  const externalBlockers = referencedBlockerIds(list).filter((id) => !inSet.has(id));
+  const blockerStates = {};
+  for (const id of externalBlockers) {
+    const state = fetchState(id, { exec });
+    blockerStates[id] = state ?? UNFETCHED_BLOCKER_STATE; // non-terminal → fails safe
+  }
+  return blockerStates;
+}
+
 // computeReadyTickets — eligible tickets with no open blocker, priority-ranked.
 // analyzeDependencyGraph returns ready identifier strings; map back to the full
 // ticket objects (selection and dispatch need priority/createdAt) and rank.
-export function computeReadyTickets(eligibleTickets) {
+//
+// CTL-565 D5: options.blockerStates is threaded into the readiness filter so a
+// dependent blocked by a non-terminal out-of-set blocker is held back.
+export function computeReadyTickets(eligibleTickets, { blockerStates } = {}) {
   const list = eligibleTickets ?? [];
-  const readyIds = new Set(analyzeDependencyGraph(list).ready);
+  const readyIds = new Set(analyzeDependencyGraph(list, { blockerStates }).ready);
   return rankTickets(list.filter((t) => readyIds.has(t.identifier)));
 }
 
@@ -222,7 +252,11 @@ export function deriveAdvancement(signals) {
 
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull.
 // Idempotent and restart-safe — derives every action from filesystem state.
-export function schedulerTick(orchDir, { readEligible, dispatch = defaultDispatch } = {}) {
+// `exec` is the injectable seam for the D5 out-of-set blocker-state fetch.
+export function schedulerTick(
+  orchDir,
+  { readEligible, dispatch = defaultDispatch, exec } = {},
+) {
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
   const advanced = [];
   for (const ticket of listInFlightTickets(orchDir)) {
@@ -233,9 +267,12 @@ export function schedulerTick(orchDir, { readEligible, dispatch = defaultDispatc
     else log.warn({ ticket, phase: next, code: r.code }, "scheduler: advance dispatch failed");
   }
 
-  // (2) New-work pull — fill free slots with top-ranked ready tickets.
+  // (2) New-work pull — fill free slots with top-ranked ready tickets. D5:
+  // hydrate the live state of every out-of-set blocker first so a Ready ticket
+  // blocked by a non-terminal out-of-set ticket is held back.
   const eligible = readEligible ? readEligible() : readAllEligibleTickets();
-  const ready = computeReadyTickets(eligible);
+  const blockerStates = hydrateOutOfSetBlockers(eligible, { exec });
+  const ready = computeReadyTickets(eligible, { blockerStates });
   const inFlightCount = listInFlightTickets(orchDir).size; // recomputed post-sweep
   const freeSlots = computeFreeSlots(readMaxParallel(orchDir), inFlightCount);
   const selected = selectDispatchable(ready, listStartedTickets(orchDir), freeSlots);
@@ -269,6 +306,7 @@ function runTick() {
     schedulerTick(runningOpts.orchDir, {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
+      exec: runningOpts.exec,
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -282,17 +320,19 @@ function scheduleDebouncedTick(debounceMs) {
 }
 
 // startScheduler — immediate authoritative tick, arm the periodic timer, then
-// start the event-log fast path. `dispatch` / `readEligible` are injectable so
-// a test drives a hermetic daemon.
+// start the event-log fast path. `dispatch` / `readEligible` / `exec` are
+// injectable so a test drives a hermetic daemon (`exec` is the D5 blocker-state
+// fetch seam, CTL-565).
 export function startScheduler({
   orchDir,
   dispatch,
   readEligible,
+  exec,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
   if (!orchDir) throw new Error("startScheduler: orchDir is required");
-  runningOpts = { orchDir, dispatch, readEligible };
+  runningOpts = { orchDir, dispatch, readEligible, exec };
 
   runTick(); // authoritative initial pass
   tickTimer = setInterval(runTick, tickIntervalMs);

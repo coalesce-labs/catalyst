@@ -71,6 +71,23 @@ function normalizeTicket(node) {
   };
 }
 
+// fetchTicketState — the current Linear workflow-state name of one ticket, or
+// null on any failure (the D5 caller fails safe: a null state holds the
+// dependent back). Wraps `linearis issues read <identifier>`; linearis emits
+// JSON by default (its CLI header: "CLI for Linear.app with JSON output") so
+// there is NO --json flag to pass. Used to hydrate out-of-set blocker states
+// the bulk eligible query cannot see. CTL-565 D5.
+export function fetchTicketState(identifier, { exec = defaultExec } = {}) {
+  const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
+  if (code !== 0) return null;
+  try {
+    const node = JSON.parse(stdout);
+    return node?.state?.name ?? node?.state ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // runEligibleQuery — run the query, parse + normalize, apply the priority
 // floor. A non-zero linearis exit THROWS (never a silent []): a silent empty
 // would let one failed poll flatten a project's eligible set to zero. The

@@ -13,19 +13,28 @@
 const DEFAULT_TERMINAL_STATUSES = ["Done", "Canceled"];
 
 // buildDependencyEdges — normalize Linear relations into canonical directed
-// edges (CTL-530). Only edges whose BOTH endpoints are in the input set are
-// kept; non-blocking types (related, duplicate) are ignored; results are
-// deduped by (from,to). Live `linearis` emits only `blocks`; the API-native
-// `blocked_by` form is also accepted for forward-compat.
-export function buildDependencyEdges(issues) {
+// edges (CTL-530). An edge is kept when both endpoints are in-set, OR (CTL-565
+// D5) when `to` is in-set and `from` is a declared external blocker — so an
+// out-of-set blocker's edge survives for computeReadySet. Non-blocking types
+// (related, duplicate) are ignored; results are deduped by (from,to). Live
+// `linearis` emits only `blocks`; the API-native `blocked_by` form is also
+// accepted for forward-compat.
+//
+// options.externalIds — out-of-set blocker identifiers (D5) that remain valid
+// edge endpoints on the `from` side.
+export function buildDependencyEdges(issues, { externalIds } = {}) {
   const list = issues ?? [];
   const inSet = new Set(list.map((i) => i?.identifier).filter(Boolean));
+  const ext = externalIds instanceof Set ? externalIds : new Set(externalIds ?? []);
   const seen = new Set();
   const edges = [];
 
   const add = (from, to) => {
     if (!from || !to) return; // malformed node — missing peer identifier
-    if (!inSet.has(from) || !inSet.has(to)) return; // out-of-set edge
+    // Keep an edge only when `to` is in-set AND `from` is either in-set or a
+    // declared external blocker. A genuinely out-of-set edge is dropped.
+    if (!inSet.has(to)) return;
+    if (!inSet.has(from) && !ext.has(from)) return;
     const key = `${from} ${to}`;
     if (seen.has(key)) return; // dedup symmetric relations/inverseRelations
     seen.add(key);
@@ -55,21 +64,34 @@ export function buildDependencyEdges(issues) {
 
 // computeReadySet — partition eligible issues into ready vs blocked (CTL-530).
 // An issue is eligible when its status is not terminal. An eligible issue is
-// blocked when some in-set edge points at it from an UNFINISHED blocker;
-// otherwise it is ready. Terminal issues appear in neither list. Returns
+// blocked when some edge points at it from an UNFINISHED blocker; otherwise it
+// is ready. Terminal issues appear in neither list. Returns
 // { ready: string[], blocked: string[] }, both sorted.
+//
+// CTL-565 D5: options.blockerStates is a { identifier: stateName } map for
+// out-of-set blockers. A blocker absent from `issues` is non-blocking ONLY
+// when blockerStates omits it (legacy) or says it is terminal; a non-terminal
+// out-of-set blocker now blocks.
 export function computeReadySet(issues, edges, options = {}) {
   const list = issues ?? [];
   const terminal = new Set(options.terminalStatuses ?? DEFAULT_TERMINAL_STATUSES);
+  const blockerStates = options.blockerStates ?? {};
   const isTerminal = (issue) => terminal.has(issue?.state?.name);
   const byId = new Map(list.filter((i) => i?.identifier).map((i) => [i.identifier, i]));
 
-  // An issue is blocked if any unfinished blocker points at it. A blocker that
-  // is unknown (out-of-set) or terminal does not block.
+  // An issue is blocked if any unfinished blocker points at it. An in-set
+  // blocker blocks unless it is terminal. An out-of-set blocker blocks only
+  // when blockerStates carries a non-terminal state for it; an unknown
+  // out-of-set blocker (no hydrated state) is non-blocking — legacy behavior.
   const blockedIds = new Set();
   for (const { from, to } of edges ?? []) {
-    const blocker = byId.get(from);
-    if (blocker && !isTerminal(blocker)) blockedIds.add(to);
+    const inSetBlocker = byId.get(from);
+    if (inSetBlocker) {
+      if (!isTerminal(inSetBlocker)) blockedIds.add(to);
+    } else if (from in blockerStates) {
+      if (!terminal.has(blockerStates[from])) blockedIds.add(to);
+    }
+    // else: unknown out-of-set blocker, no hydrated state — non-blocking.
   }
 
   const ready = [];
@@ -168,13 +190,43 @@ export function detectCycles(nodeIds, edges) {
   return anomalies;
 }
 
+// referencedBlockerIds — every `from` identifier referenced by a `blocked-by`
+// edge across the issue list, regardless of set membership (CTL-565 D5). The
+// D5 hydration step uses this to discover out-of-set blocker ids BEFORE
+// buildDependencyEdges can be told which external endpoints to retain. Kept
+// separate so buildDependencyEdges stays single-purpose.
+export function referencedBlockerIds(issues) {
+  const list = issues ?? [];
+  const blockerIds = new Set();
+  const add = (id) => {
+    if (id) blockerIds.add(id);
+  };
+  for (const issue of list) {
+    const self = issue?.identifier;
+    for (const node of issue?.relations?.nodes ?? []) {
+      const peer = node?.relatedIssue?.identifier;
+      if (node?.type === "blocked_by") add(peer); // peer blocks self
+    }
+    for (const node of issue?.inverseRelations?.nodes ?? []) {
+      const peer = node?.issue?.identifier;
+      if (node?.type === "blocks" && self) add(peer); // peer blocks self
+    }
+  }
+  return [...blockerIds];
+}
+
 // analyzeDependencyGraph — public entry point (CTL-530). Composes edge
 // extraction, the readiness filter, and cycle detection over an array of
 // Linear issues. Returns { ready, blocked, anomalies } — ready/blocked are
 // sorted identifier arrays, anomalies a sorted Anomaly[].
+//
+// CTL-565 D5: options.blockerStates ({ id: stateName }) makes the out-of-set
+// blockers it names valid edge endpoints AND feeds their state to the
+// readiness filter.
 export function analyzeDependencyGraph(issues, options = {}) {
   const list = issues ?? [];
-  const edges = buildDependencyEdges(list);
+  const externalIds = Object.keys(options.blockerStates ?? {});
+  const edges = buildDependencyEdges(list, { externalIds });
   const { ready, blocked } = computeReadySet(list, edges, options);
   const anomalies = detectCycles(list.map((i) => i?.identifier).filter(Boolean), edges);
   return { ready, blocked, anomalies };
