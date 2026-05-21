@@ -24,6 +24,7 @@ import {
 const DEFAULT_MAX_PARALLEL = 3;
 
 let _watcher = null;
+let _debounceTimer = null;
 let _stopMonitor = null;
 let _stopScheduler = null;
 let _pidFile = null;
@@ -68,15 +69,22 @@ export function startDaemon({
     // The fs.watch target must exist — the daemon may boot before any project
     // has enrolled, so create the enrollment dir first.
     mkdirSync(getEnrollmentDir(), { recursive: true });
-    let timer = null;
     _watcher = watch(getEnrollmentDir(), () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
+      // _debounceTimer is module-scoped so stopDaemon can cancel a pending
+      // reconcile that would otherwise fire after teardown.
+      clearTimeout(_debounceTimer);
+      _debounceTimer = setTimeout(() => {
         log.info("execution-core daemon: enrollment dir changed — reconciling");
         try {
           reconcile();
         } catch (err) {
-          log.warn({ err: err.message }, "reconcile failed");
+          // A reconcile failure means enrollment changes silently stop being
+          // applied — newly enrolled projects are never picked up. Surface it
+          // at error level with the full error, not a swallowed warning.
+          log.error(
+            { err },
+            "execution-core daemon: reconcile failed — enrollment changes are NOT being applied"
+          );
         }
       }, debounceMs);
     });
@@ -91,8 +99,9 @@ export function startDaemon({
   log.info({ orchDir }, "execution-core daemon started");
 }
 
-// stopDaemon — tear down the watcher, the composed monitor + scheduler, and
-// the PID file. Idempotent and safe to call when nothing is running.
+// stopDaemon — tear down the watcher, the pending debounce, the composed
+// monitor + scheduler, and the PID file. Idempotent and safe to call when
+// nothing is running.
 export function stopDaemon() {
   if (_watcher) {
     try {
@@ -101,6 +110,10 @@ export function stopDaemon() {
       /* watcher already closed */
     }
     _watcher = null;
+  }
+  if (_debounceTimer) {
+    clearTimeout(_debounceTimer);
+    _debounceTimer = null;
   }
   if (_stopMonitor) {
     try {
@@ -130,7 +143,24 @@ export function stopDaemon() {
 function main() {
   const idx = process.argv.indexOf("--pid-file");
   const pidFile = idx >= 0 ? process.argv[idx + 1] : null;
-  startDaemon({ pidFile });
+
+  // A post-startup throw (a monitor/scheduler timer callback, the watcher)
+  // must not leave a half-dead daemon holding a valid PID file — that makes
+  // every health check lie. Exit non-zero with a tagged fatal log instead.
+  const fatal = (label) => (err) => {
+    log.error({ err }, `execution-core daemon: ${label} — exiting`);
+    process.exit(1);
+  };
+  process.on("uncaughtException", fatal("uncaught exception"));
+  process.on("unhandledRejection", fatal("unhandled rejection"));
+
+  try {
+    startDaemon({ pidFile });
+  } catch (err) {
+    log.error({ err }, "execution-core daemon: failed to start");
+    process.exit(1);
+  }
+
   const shutdown = (sig) => {
     log.info({ sig }, "execution-core daemon shutting down");
     stopDaemon();

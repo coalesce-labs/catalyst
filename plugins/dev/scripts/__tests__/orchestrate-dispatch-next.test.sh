@@ -630,6 +630,7 @@ CONFIG_PATH=$(write_config "execution-core")
 write_state "demo" 4 '{"wave1Pending": []}'
 "$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err" >/dev/null
 RC=$?
+# if/then/else (not `&& pass || fail`) keeps the new lines shellcheck-SC2015-clean
 if [ "$RC" = "0" ]; then pass "exit 0 with dispatchMode=execution-core"; else fail "exit 0" "rc=$RC"; fi
 if ! grep -q "invalid dispatchMode" "${SCRATCH}/err"; then
 	pass "no 'invalid dispatchMode' WARN for execution-core"

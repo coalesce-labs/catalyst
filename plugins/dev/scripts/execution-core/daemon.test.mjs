@@ -98,7 +98,13 @@ describe("startDaemon", () => {
       debounceMs: 20,
     });
     writeEnrollmentRecord({ projectKey: "demo", repoRoot: "/r/d" });
-    await new Promise((r) => setTimeout(r, 60));
+    // Poll up to 2s rather than a fixed wait — fs.watch delivery latency plus
+    // the debounce timer varies under concurrent full-suite load, so a fixed
+    // 60ms wait is flaky. The reconcile only has to fire once.
+    const deadline = Date.now() + 2000;
+    while (reconciled === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect(reconciled).toBeGreaterThan(0);
   });
 });
