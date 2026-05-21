@@ -145,6 +145,20 @@ describe("reconcileProject", () => {
     expect(() => reconcileProject("alpha", repoRoot, { exec })).not.toThrow();
     expect(exec.calls).toBe(0);
   });
+
+  test("does not crash the daemon when the projection write fails", () => {
+    const repoRoot = enroll("alpha", { team: "ENG", status: "Todo" });
+    const exec = execReturning({ ENG: [node("ENG-1")] });
+    // Make the projection path a non-empty directory so renameSync fails,
+    // simulating a disk/permission fault during the projection write. The
+    // throw must be swallowed: reconcileProject runs inside the setInterval
+    // reconcile timer, so an uncaught error would kill the monitor process.
+    const projDir = join(catalystDir, "execution-core", "eligible", "alpha.json");
+    mkdirSync(projDir, { recursive: true });
+    writeFileSync(join(projDir, "sentinel"), "x");
+    expect(() => reconcileProject("alpha", repoRoot, { exec })).not.toThrow();
+    rmSync(projDir, { recursive: true, force: true });
+  });
 });
 
 describe("handleStateChangedEvent", () => {

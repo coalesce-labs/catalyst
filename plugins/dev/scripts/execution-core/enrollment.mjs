@@ -10,6 +10,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { getEnrollmentDir, log } from "./config.mjs";
 
+// A projectKey is used verbatim as a filesystem path segment for the
+// eligible-set projection (eligible/<projectKey>.json). Reject anything that
+// is not a single safe path component so a malformed enrollment record can
+// never traverse out of the eligible/ directory (e.g. projectKey "../foo").
+function isSafePathSegment(key) {
+  return /^[A-Za-z0-9._-]+$/.test(key) && key !== "." && key !== "..";
+}
+
 // listEnrolledProjects() — one record per *.json in the enrollment dir.
 // The PRESENCE of a record file is the enrollment signal (CTL-554's --stop
 // removes the file); the unpinned `status` field is NOT a filter (plan
@@ -35,6 +43,13 @@ export function listEnrolledProjects() {
     }
     if (!record?.projectKey || !record?.repoRoot) {
       log.warn({ file }, "skipping enrollment record missing projectKey or repoRoot");
+      continue;
+    }
+    if (!isSafePathSegment(record.projectKey)) {
+      log.warn(
+        { file, projectKey: record.projectKey },
+        "skipping enrollment record with unsafe projectKey (not a valid path segment)",
+      );
       continue;
     }
     projects.push({

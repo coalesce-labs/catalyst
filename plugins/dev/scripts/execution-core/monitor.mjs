@@ -74,7 +74,20 @@ export function reconcileProject(projectKey, repoRoot, { exec } = {}) {
     );
     return;
   }
-  setProjectEligible(projectKey, tickets, { source: "reconcile", query });
+  try {
+    setProjectEligible(projectKey, tickets, { source: "reconcile", query });
+  } catch (err) {
+    // A projection write/rename failure (disk full, permissions) must NOT
+    // crash the daemon: reconcileProject runs inside reconcileAll, itself
+    // driven by the setInterval reconcile timer, so an uncaught throw here
+    // would kill the process. The in-memory eligible set is already current
+    // (setProjectEligible updates the Map before persisting), so the next
+    // reconcile tick retries the disk write.
+    log.error(
+      { projectKey, err: err.message },
+      "eligible-set projection write failed — daemon continues, retry next reconcile",
+    );
+  }
 }
 
 // reconcileAll — full reconcile of every enrolled project (the missed-webhook

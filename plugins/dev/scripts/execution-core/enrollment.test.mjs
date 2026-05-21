@@ -89,6 +89,17 @@ describe("listEnrolledProjects", () => {
     expect(got.map((p) => p.projectKey)).toEqual(["ok"]);
   });
 
+  test("skips a record whose projectKey is not a safe path segment", () => {
+    // projectKey is used verbatim as the eligible/<projectKey>.json path
+    // segment — a record carrying path-traversal sequences must be rejected.
+    writeRecord("ok.json", { projectKey: "ok", repoRoot: "/repos/ok" });
+    writeRecord("traverse.json", { projectKey: "../escape", repoRoot: "/repos/x" });
+    writeRecord("dotdot.json", { projectKey: "..", repoRoot: "/repos/y" });
+    writeRecord("slash.json", { projectKey: "a/b", repoRoot: "/repos/z" });
+    const got = listEnrolledProjects();
+    expect(got.map((p) => p.projectKey)).toEqual(["ok"]);
+  });
+
   test("returns [] when the enrollment dir does not exist", () => {
     rmSync(enrollmentDir, { recursive: true, force: true });
     expect(listEnrolledProjects()).toEqual([]);
