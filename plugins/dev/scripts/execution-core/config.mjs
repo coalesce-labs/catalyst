@@ -41,6 +41,14 @@ export function getCursorPath() {
   return resolve(getExecutionCoreDir(), "cursor.json");
 }
 
+// CTL-564: the central execution-core registry — the single source for
+// team → repoRoot → eligibleQuery. The D4 successor to the per-repo
+// enrollment records; all access flows through registry.mjs (the D9 cloud
+// seam — file today, a Supabase table later).
+export function getRegistryPath() {
+  return resolve(getExecutionCoreDir(), "registry.json");
+}
+
 // Root for `claude --bg` job state dirs — ~/.claude/jobs/<bg_job_id>/state.json.
 // Env name matches orchestrate-healthcheck's CATALYST_HEALTHCHECK_JOBS_ROOT so
 // tests override one variable for both.
