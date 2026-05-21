@@ -522,12 +522,12 @@ For each provisioned worker worktree, dispatch a `/oneshot` session.
 
 **Register broker filter interests BEFORE dispatch (CTL-491):** Phase-agent workers can finish in
 well under a second when their work is a no-op (e.g. an already-triaged ticket). Emitting
-`filter.register` events AFTER dispatch opens a race window where the broker's interest map is
-still empty when `phase.<name>.complete.<TICKET>` arrives — `processEvent` early-returns and the
-event is dropped silently (`broker/index.mjs:1782`). Run the registration helper here so all four
-deterministic + per-ticket interests are durable in the broker BEFORE any `claude --bg`
-invocation. Idempotent at the broker (upserts by `interest_id`); the Phase 4 entry re-invokes
-the same helper as a belt-and-suspenders.
+`filter.register` events AFTER dispatch opens a race window where the broker's interest map is still
+empty when `phase.<name>.complete.<TICKET>` arrives — `processEvent` early-returns and the event is
+dropped silently (`broker/index.mjs:1782`). Run the registration helper here so all four
+deterministic + per-ticket interests are durable in the broker BEFORE any `claude --bg` invocation.
+Idempotent at the broker (upserts by `interest_id`); the Phase 4 entry re-invokes the same helper as
+a belt-and-suspenders.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-register-interests.sh" \
@@ -686,12 +686,12 @@ worker activity. Key event types:
 | `{"type":"system","subtype":"api_retry"}`                                                                         | Worker hit rate limit / error; shows attempt and delay          |
 | `{"type":"result"}`                                                                                               | Worker finished; contains final answer and usage stats          |
 
-**Worker usage / cost is rolled in by the monitor pass (CTL-115, wired through `update-dashboard.sh
---roll-usage` since CTL-487).** The dispatch shell backgrounds workers with `&` and never `wait`s
-on them, so usage/cost extraction cannot happen here. Phase 4's `update-dashboard.sh` call passes
-`--roll-usage`, which iterates `${ORCH_DIR}/workers/*.json` and invokes
-`plugins/dev/scripts/orchestrate-roll-usage.sh -v` per worker before rendering. The helper parses
-the final `result` event from the worker's stream file and:
+**Worker usage / cost is rolled in by the monitor pass (CTL-115, wired through
+`update-dashboard.sh --roll-usage` since CTL-487).** The dispatch shell backgrounds workers with `&`
+and never `wait`s on them, so usage/cost extraction cannot happen here. Phase 4's
+`update-dashboard.sh` call passes `--roll-usage`, which iterates `${ORCH_DIR}/workers/*.json` and
+invokes `plugins/dev/scripts/orchestrate-roll-usage.sh -v` per worker before rendering. The helper
+parses the final `result` event from the worker's stream file and:
 
 1. Mirror cost into the worker's signal file (`.cost = USAGE`) — the dashboard reads signal files
    (not global state) for per-worker cost columns.
@@ -700,8 +700,8 @@ the final `result` event from the worker's stream file and:
 
 The helper is idempotent (gated on `signal.cost == null`) and safe to call every cycle. Because
 every dashboard render now sweeps every worker, `update-dashboard.sh --roll-usage` doubles as the
-periodic safety net for any worker whose stream contains a `result` event but whose `signal.cost`
-is still null. Audit trail lands at `${ORCH_DIR}/.roll-usage.log`.
+periodic safety net for any worker whose stream contains a `result` event but whose `signal.cost` is
+still null. Audit trail lands at `${ORCH_DIR}/.roll-usage.log`.
 
 **Emit dispatch event and update global state** after each worker dispatch:
 
@@ -716,14 +716,15 @@ is still null. Audit trail lands at `${ORCH_DIR}/.roll-usage.log`.
 
 **Post-dispatch health check (CTL-87):**
 
-After the wave's per-worker dispatch loop has completed, run the batch health check **once per
-wave**. It sleeps briefly (default 15s — configurable via `--grace-seconds`), then verifies that
-every worker still sitting at `status="dispatched"`/`phase=0` has a live PID. Any worker whose PID
-has already died is transitioned to `status="failed"` with `failureReason="launch-failure"`, an
-attention item of type `launch-failure` is raised, and a `worker-launch-failed` event is emitted.
-This means dead-on-arrival workers surface in under 30 seconds instead of after the 15-minute
-stalled-worker timeout, and the orchestrator can re-dispatch them (via `orchestrate-fixup` or a
-manual redispatch) in the same wave.
+After the wave's per-worker dispatch loop has completed, run the batch health check. This is the
+**per-wave** invocation (CTL-511 added a second call site — see the reactive scan in Phase 4). It
+sleeps briefly (default 15s — configurable via `--grace-seconds`), then verifies that every worker
+still sitting at `status="dispatched"`/`phase=0` has a live PID. Any worker whose PID has already
+died is transitioned to `status="failed"` with `failureReason="launch-failure"`, an attention item
+of type `launch-failure` is raised, and a `worker-launch-failed` event is emitted. This means
+dead-on-arrival workers surface in under 30 seconds instead of after the 15-minute stalled-worker
+timeout, and the orchestrator can re-dispatch them (via `orchestrate-fixup` or a manual redispatch)
+in the same wave.
 
 ```bash
 # Run ONCE, after all workers in this wave have been dispatched.
@@ -739,6 +740,12 @@ Healthy workers are untouched. Workers that have already advanced past `dispatch
 `researching`) are skipped because reaching a later status is itself proof of life. This check
 complements the 15-minute stalled-worker detection in Phase 4 — healthcheck catches launch failures,
 the stalled-worker scan catches workers that die mid-run.
+
+**CTL-511:** the same `orchestrate-healthcheck` script also runs inside the reactive scan (Phase 4)
+on every wake-up and every 10-minute idle tick — it is no longer a once-per-wave-only check. That
+second call site catches phase agents that die _after_ launch (printing a job id, then exiting
+before their terminal emit), bounding detection to one scan interval. The healthcheck is idempotent
+— terminal and `stalled` signals are skipped — so the extra call site adds no duplicate work.
 
 **Worker dispatch prompt includes mandatory testing AND lifecycle requirements:**
 
@@ -904,8 +911,8 @@ The helper emits four deterministic interests (route without Groq):
 - `ticket_lifecycle` — Linear ticket state changes for the orchestrator's tickets.
 - `comms_lifecycle` — worker-posted `attention` / `done` messages on the shared channel.
 - `phase_lifecycle` (CTL-452, CTL-484) — `phase.<name>.complete.<TICKET>`,
-  `phase.<name>.failed.<TICKET>`, and `phase.<name>.turn-cap-exhausted.<TICKET>` events emitted
-  by phase agents. One interest per active ticket, covering all 9 phase names. The turn-cap status
+  `phase.<name>.failed.<TICKET>`, and `phase.<name>.turn-cap-exhausted.<TICKET>` events emitted by
+  phase agents. One interest per active ticket, covering all 9 phase names. The turn-cap status
   routes through `orchestrate-revive`'s continuation branch (separate budget from error revives).
   Only registered when `catalyst.orchestration.dispatchMode = "phase-agents"`.
 
@@ -923,13 +930,13 @@ change.
 # when neither catalyst-broker nor catalyst-filter is running.
 ```
 
-**Replay race-window phase events (CTL-491):** Before entering the event-driven wait loop, catch
-up on any `phase.<name>.{complete,failed,turn-cap-exhausted}.<TICKET>` events that landed between
-the Phase 2 baseline (`state.json.race.startLineCursor`) and now. With the Phase 3 pre-dispatch
+**Replay race-window phase events (CTL-491):** Before entering the event-driven wait loop, catch up
+on any `phase.<name>.{complete,failed,turn-cap-exhausted}.<TICKET>` events that landed between the
+Phase 2 baseline (`state.json.race.startLineCursor`) and now. With the Phase 3 pre-dispatch
 registration the window should be zero-length in steady state, but the replay is idempotent and
-cheap — it scans only the tail of the current month's event log past the baseline cursor and
-routes each match through `orchestrate-phase-advance` (for `complete`) or `orchestrate-revive`
-(for `failed` / `turn-cap-exhausted`). Cross-orchestrator events are filtered out by checking
+cheap — it scans only the tail of the current month's event log past the baseline cursor and routes
+each match through `orchestrate-phase-advance` (for `complete`) or `orchestrate-revive` (for
+`failed` / `turn-cap-exhausted`). Cross-orchestrator events are filtered out by checking
 `workers/*.json` for the ticket.
 
 ```bash
@@ -1082,23 +1089,23 @@ transcript fixture.
 scan so the response stays proportional. Every reaction reads authoritative state from `gh pr view`,
 `git rev-list`, or the signal file — events are wake-up triggers, never sources of truth.
 
-| Event                                                                                           | Reaction                                                                                                                                                                                                                                                                                                                                           |
-| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `orchestrator.worker.phase_advanced`                                                            | Routine in-flight progress; re-render `DASHBOARD.md`. Coalesced — `.body.payload.changes` carries the batch (CTL-229)                                                                                                                                                                                                                              |
-| `orchestrator.worker.status_terminal`, `orchestrator.worker.done`, `orchestrator.worker.failed` | Terminal transition; re-render `DASHBOARD.md` and run `orchestrate-dispatch-next` to fill freed slots. PR-bearing transitions carry `.body.payload.pr.{number,url}` (CTL-229)                                                                                                                                                                      |
-| `orchestrator.worker.pr_created`                                                                | Reconcile the PR number into signal/state; re-render `DASHBOARD.md`                                                                                                                                                                                                                                                                                |
-| `orchestrator.attention.raised`, `orchestrator.attention.resolved`                              | Re-render the `DASHBOARD.md` NEEDS ATTENTION banner                                                                                                                                                                                                                                                                                                |
-| `github.pr.merged`, `github.pr.closed`                                                          | Run the merge-confirmation scan for that PR                                                                                                                                                                                                                                                                                                        |
-| `github.pr.synchronize`, `github.push`                                                          | Re-evaluate `mergeStateStatus` for the affected PR; if DIRTY ≥2 min, `orchestrate-auto-rebase` may dispatch a rebase worker (BEHIND auto-resolves via auto-merge)                                                                                                                                                                                  |
-| `github.check_*`, `github.workflow_run.completed`                                               | Re-check CI; if BLOCKED ≥10 min, `orchestrate-auto-fixup` may dispatch a fix-up. `workflow_run.completed` is the most reliable CI-done signal                                                                                                                                                                                                      |
-| `github.pr_review*`, `github.pr_review_comment*`, `github.issue_comment.created`                | Re-evaluate `mergeStateStatus`; surface review activity on the dashboard. Codex review threads land as `pr_review_comment.created` — required for CTL-64 BLOCKED auto-fixup detection                                                                                                                                                              |
-| `github.deployment*`                                                                            | Record deploy outcome on the worker's signal file                                                                                                                                                                                                                                                                                                  |
-| `linear.issue.state_changed`                                                                    | Reconcile Linear state with the worker signal                                                                                                                                                                                                                                                                                                      |
-| `filter.wake.${ORCH_NAME}` (matched on full dotted `event.name`)                                | Daemon-filtered semantic wake: read `.body.payload.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source                                                                                                                   |
-| `phase.<name>.complete.<TICKET>` (via phase_lifecycle, CTL-452)                                 | Resolve the next phase via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`; that helper looks up the next phase in the canonical 9-phase sequence and calls `orchestrate-dispatch-next --phase <next> --ticket <T>`. If `completed-phase=monitor-deploy`, no advance (terminal). The advance is idempotent under redundant wakes |
-| `phase.<name>.failed.<TICKET>` (via phase_lifecycle, CTL-452)                                   | Run `orchestrate-revive` once for the affected ticket; on the **second** failure (reviveCount ≥ MAX_REVIVES), mark worker `stalled` and post `attention` to the shared comms channel. Matches the existing one-retry-then-escalate handling for legacy oneshot workers                                                                             |
+| Event                                                                                           | Reaction                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `orchestrator.worker.phase_advanced`                                                            | Routine in-flight progress; re-render `DASHBOARD.md`. Coalesced — `.body.payload.changes` carries the batch (CTL-229)                                                                                                                                                                                                                                                                                                                                                     |
+| `orchestrator.worker.status_terminal`, `orchestrator.worker.done`, `orchestrator.worker.failed` | Terminal transition; re-render `DASHBOARD.md` and run `orchestrate-dispatch-next` to fill freed slots. PR-bearing transitions carry `.body.payload.pr.{number,url}` (CTL-229)                                                                                                                                                                                                                                                                                             |
+| `orchestrator.worker.pr_created`                                                                | Reconcile the PR number into signal/state; re-render `DASHBOARD.md`                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `orchestrator.attention.raised`, `orchestrator.attention.resolved`                              | Re-render the `DASHBOARD.md` NEEDS ATTENTION banner                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `github.pr.merged`, `github.pr.closed`                                                          | Run the merge-confirmation scan for that PR                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `github.pr.synchronize`, `github.push`                                                          | Re-evaluate `mergeStateStatus` for the affected PR; if DIRTY ≥2 min, `orchestrate-auto-rebase` may dispatch a rebase worker (BEHIND auto-resolves via auto-merge)                                                                                                                                                                                                                                                                                                         |
+| `github.check_*`, `github.workflow_run.completed`                                               | Re-check CI; if BLOCKED ≥10 min, `orchestrate-auto-fixup` may dispatch a fix-up. `workflow_run.completed` is the most reliable CI-done signal                                                                                                                                                                                                                                                                                                                             |
+| `github.pr_review*`, `github.pr_review_comment*`, `github.issue_comment.created`                | Re-evaluate `mergeStateStatus`; surface review activity on the dashboard. Codex review threads land as `pr_review_comment.created` — required for CTL-64 BLOCKED auto-fixup detection                                                                                                                                                                                                                                                                                     |
+| `github.deployment*`                                                                            | Record deploy outcome on the worker's signal file                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `linear.issue.state_changed`                                                                    | Reconcile Linear state with the worker signal                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `filter.wake.${ORCH_NAME}` (matched on full dotted `event.name`)                                | Daemon-filtered semantic wake: read `.body.payload.reason` for log context, then run the full reactive scan. The reason describes what triggered the daemon (e.g., "CI failed on PR #416") but is never the authoritative source                                                                                                                                                                                                                                          |
+| `phase.<name>.complete.<TICKET>` (via phase_lifecycle, CTL-452)                                 | Resolve the next phase via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`; that helper looks up the next phase in the canonical 9-phase sequence and calls `orchestrate-dispatch-next --phase <next> --ticket <T>`. If `completed-phase=monitor-deploy`, no advance (terminal). The advance is idempotent under redundant wakes                                                                                                                        |
+| `phase.<name>.failed.<TICKET>` (via phase_lifecycle, CTL-452)                                   | Run `orchestrate-revive` once for the affected ticket; on the **second** failure (reviveCount ≥ MAX_REVIVES), mark worker `stalled` and post `attention` to the shared comms channel. Matches the existing one-retry-then-escalate handling for legacy oneshot workers                                                                                                                                                                                                    |
 | `phase.<name>.turn-cap-exhausted.<TICKET>` (via phase_lifecycle, CTL-484)                       | Run `orchestrate-revive` (same script — its continuation branch handles this status). The branch reads `handoffPath` from the per-phase signal, dispatches a `claude --bg --resume` continuation with `CATALYST_IS_CONTINUATION=true` + `CATALYST_HANDOFF_PATH` + `CATALYST_CONTINUATION_COUNT`, and bumps `.continuationCount` on a budget separate from `.reviveCount` (default 3). On budget exhaustion: `stalled` + `attentionReason="continuation-budget-exhausted"` |
-| 10-minute idle (no event)                                                                       | Run the full reactive scan as a safety net                                                                                                                                                                                                                                                                                                         |
+| 10-minute idle (no event)                                                                       | Run the full reactive scan as a safety net                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 **Ground truth is git + PR, not the signal file.** The signal file is _advisory_ — it reports the
 worker's self-described phase. Authoritative decisions (done, stalled) come from `gh pr view` /
@@ -1110,6 +1117,18 @@ git/PR, the orchestrator reconciles the signal from the authoritative source.
 **Reactive scan (per wake-up):**
 
 ```bash
+# CTL-511: re-run the phase-agent stall scan on every reactive scan (every wake
+# + the 10-min idle fallback), not just once per dispatch wave. A phase agent
+# that dies after launch is flipped to status:"stalled" here; orchestrate-healthcheck
+# then emits phase.<name>.failed to wake orchestrate-revive within one scan
+# interval instead of ~14 h. Idempotent — terminal/stalled signals are skipped,
+# so frequent runs are safe. --grace-seconds 0 skips the 15s legacy-PID settle
+# sleep: the phase-mode state.json check has its own --stale-bg-seconds
+# threshold, so the sleep would only add latency to every wake.
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-healthcheck" \
+  --orch-dir "${ORCH_DIR}" --orch-id "${ORCH_NAME}" --grace-seconds 0 \
+  >/dev/null 2>&1 || true
+
 # For each active worker:
 for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
   TICKET=$(jq -r '.ticket' "$WORKER_SIGNAL")
@@ -1398,20 +1417,20 @@ done
 ```
 
 **Refresh broker registration when PR or ticket set has changed (CTL-341, CTL-357, CTL-491).** On
-every Phase 4 wake-up, re-invoke the same registration helper with `--refresh`. The helper diffs
-the current active PR + ticket sets against the prior `.last-registration.json` baseline:
+every Phase 4 wake-up, re-invoke the same registration helper with `--refresh`. The helper diffs the
+current active PR + ticket sets against the prior `.last-registration.json` baseline:
 
 - If nothing changed, the helper exits 0 with zero events emitted — keeps the event log quiet.
-- If the PR set changed (a worker just opened a PR), it re-emits all three deterministic
-  interests (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`) with the updated set.
-- If the ticket set grew (wave 2 dispatched new workers mid-run), it ALSO emits a
-  `phase_lifecycle` interest for each newly-added ticket. Existing tickets already have
-  per-ticket interests upserted at the broker from the initial pre-dispatch registration.
+- If the PR set changed (a worker just opened a PR), it re-emits all three deterministic interests
+  (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`) with the updated set.
+- If the ticket set grew (wave 2 dispatched new workers mid-run), it ALSO emits a `phase_lifecycle`
+  interest for each newly-added ticket. Existing tickets already have per-ticket interests upserted
+  at the broker from the initial pre-dispatch registration.
 - Idempotent at the broker (upserts by `interest_id`); the diff just keeps the event log quiet.
 
-This block replaces the older `.last-pr-registration.json` PR-only refresh path — the helper
-covers both deterministic-set refreshes AND the previously-missing `phase_lifecycle` refresh that
-would otherwise leave wave 2 tickets without broker coverage (a localized CTL-491 race).
+This block replaces the older `.last-pr-registration.json` PR-only refresh path — the helper covers
+both deterministic-set refreshes AND the previously-missing `phase_lifecycle` refresh that would
+otherwise leave wave 2 tickets without broker coverage (a localized CTL-491 race).
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-register-interests.sh" \

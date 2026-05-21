@@ -37,14 +37,19 @@ set -uo pipefail
 # ─── Resolve script dir through symlinks ────────────────────────────────────
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
-  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-  SOURCE="$(readlink "$SOURCE")"
-  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+	DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+	SOURCE="$(readlink "$SOURCE")"
+	[[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-EMIT_COMPLETE="${SCRIPT_DIR}/phase-agent-emit-complete"
+# CTL-511: CATALYST_EMIT_COMPLETE is a test override (mirrors orchestrate-healthcheck)
+# so the launch-failure tests can point at a stub or a non-existent path.
+EMIT_COMPLETE="${CATALYST_EMIT_COMPLETE:-${SCRIPT_DIR}/phase-agent-emit-complete}"
 
-die() { echo "phase-agent-dispatch: $*" >&2; exit 1; }
+die() {
+	echo "phase-agent-dispatch: $*" >&2
+	exit 1
+}
 
 # ─── Defaults ───────────────────────────────────────────────────────────────
 
@@ -55,18 +60,18 @@ DEFAULT_TURN_CAP=50
 # Per-phase default turn caps (mirrors plan §Initiative 1 Phase 6 config block).
 # Used as the last fallback before DEFAULT_TURN_CAP when config is absent.
 phase_default_turn_cap() {
-  case "$1" in
-    triage)         echo 10 ;;
-    research)       echo 35 ;;
-    plan)           echo 25 ;;
-    implement)      echo 75 ;;
-    verify)         echo 20 ;;
-    review)         echo 25 ;;
-    pr)             echo 12 ;;
-    monitor-merge)  echo 50 ;;
-    monitor-deploy) echo 30 ;;
-    *)              echo "$DEFAULT_TURN_CAP" ;;
-  esac
+	case "$1" in
+	triage) echo 10 ;;
+	research) echo 35 ;;
+	plan) echo 25 ;;
+	implement) echo 75 ;;
+	verify) echo 20 ;;
+	review) echo 25 ;;
+	pr) echo 12 ;;
+	monitor-merge) echo 50 ;;
+	monitor-deploy) echo 30 ;;
+	*) echo "$DEFAULT_TURN_CAP" ;;
+	esac
 }
 
 # Prior-phase artifact lookup. Returns one of two shapes:
@@ -75,83 +80,114 @@ phase_default_turn_cap() {
 #                           the filename includes a date)
 # Empty output means this phase is the entry point — no prior artifact.
 prior_artifact_for_phase() {
-  case "$1" in
-    triage)         echo "" ;;
-    research)       echo "signal:triage.json" ;;
-    plan)           echo "glob:thoughts/shared/research/*-${TICKET,,}.md" ;;
-    implement)      echo "glob:thoughts/shared/plans/*-${TICKET,,}.md" ;;
-    verify)         echo "signal:phase-implement.json" ;;
-    review)         echo "signal:verify.json" ;;
-    pr)             echo "signal:review.json" ;;
-    monitor-merge)  echo "signal:phase-pr.json" ;;
-    monitor-deploy) echo "signal:phase-monitor-merge.json" ;;
-    *)              echo "" ;;
-  esac
+	case "$1" in
+	triage) echo "" ;;
+	research) echo "signal:triage.json" ;;
+	plan) echo "glob:thoughts/shared/research/*-${TICKET,,}.md" ;;
+	implement) echo "glob:thoughts/shared/plans/*-${TICKET,,}.md" ;;
+	verify) echo "signal:phase-implement.json" ;;
+	review) echo "signal:verify.json" ;;
+	pr) echo "signal:review.json" ;;
+	monitor-merge) echo "signal:phase-pr.json" ;;
+	monitor-deploy) echo "signal:phase-monitor-merge.json" ;;
+	*) echo "" ;;
+	esac
 }
 
 # ─── Parse args ─────────────────────────────────────────────────────────────
 
 PHASE=""
 TICKET=""
-ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
-ORCH_ID="${CATALYST_ORCHESTRATOR_ID:-}"
+ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR-}"
+ORCH_ID="${CATALYST_ORCHESTRATOR_ID-}"
 MODEL_FLAG=""
 TURN_CAP_FLAG=""
 CONFIG=""
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --phase)     PHASE="$2"; shift 2 ;;
-    --ticket)    TICKET="$2"; shift 2 ;;
-    --orch-dir)  ORCH_DIR="$2"; shift 2 ;;
-    --orch-id)   ORCH_ID="$2"; shift 2 ;;
-    --model)     MODEL_FLAG="$2"; shift 2 ;;
-    --turn-cap)  TURN_CAP_FLAG="$2"; shift 2 ;;
-    --config)    CONFIG="$2"; shift 2 ;;
-    --dry-run)   DRY_RUN=1; shift ;;
-    -h|--help)   grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *)           die "unknown flag: $1" ;;
-  esac
+	case "$1" in
+	--phase)
+		PHASE="$2"
+		shift 2
+		;;
+	--ticket)
+		TICKET="$2"
+		shift 2
+		;;
+	--orch-dir)
+		ORCH_DIR="$2"
+		shift 2
+		;;
+	--orch-id)
+		ORCH_ID="$2"
+		shift 2
+		;;
+	--model)
+		MODEL_FLAG="$2"
+		shift 2
+		;;
+	--turn-cap)
+		TURN_CAP_FLAG="$2"
+		shift 2
+		;;
+	--config)
+		CONFIG="$2"
+		shift 2
+		;;
+	--dry-run)
+		DRY_RUN=1
+		shift
+		;;
+	-h | --help)
+		grep '^#' "$0" | sed 's/^# \{0,1\}//'
+		exit 0
+		;;
+	*) die "unknown flag: $1" ;;
+	esac
 done
 
-[[ -n "$PHASE" ]]    || die "--phase is required"
-[[ -n "$TICKET" ]]   || die "--ticket is required"
-[[ -n "$ORCH_DIR" ]] || die "--orch-dir (or CATALYST_ORCHESTRATOR_DIR) is required"
+[[ -n $PHASE ]] || die "--phase is required"
+[[ -n $TICKET ]] || die "--ticket is required"
+[[ -n $ORCH_DIR ]] || die "--orch-dir (or CATALYST_ORCHESTRATOR_DIR) is required"
 
-if [[ ! "$TICKET" =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
-  die "invalid --ticket: $TICKET (expected e.g. CTL-100)"
+if [[ ! $TICKET =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
+	die "invalid --ticket: $TICKET (expected e.g. CTL-100)"
 fi
-if [[ "$PHASE" == *.* ]]; then
-  die "invalid --phase: $PHASE (dots are reserved for event name parsing)"
+if [[ $PHASE == *.* ]]; then
+	die "invalid --phase: $PHASE (dots are reserved for event name parsing)"
 fi
 
 # ─── Resolve config path ────────────────────────────────────────────────────
 
 resolve_config() {
-  if [[ -n "$CONFIG" && -f "$CONFIG" ]]; then echo "$CONFIG"; return; fi
-  local dir
-  dir="$(pwd)"
-  while [[ "$dir" != "/" ]]; do
-    if [[ -f "${dir}/.catalyst/config.json" ]]; then
-      echo "${dir}/.catalyst/config.json"; return
-    fi
-    dir="$(dirname "$dir")"
-  done
-  echo ""
+	if [[ -n $CONFIG && -f $CONFIG ]]; then
+		echo "$CONFIG"
+		return
+	fi
+	local dir
+	dir="$(pwd)"
+	while [[ $dir != "/" ]]; do
+		if [[ -f "${dir}/.catalyst/config.json" ]]; then
+			echo "${dir}/.catalyst/config.json"
+			return
+		fi
+		dir="$(dirname "$dir")"
+	done
+	echo ""
 }
 CONFIG_PATH="$(resolve_config)"
 
 config_value() {
-  local key="$1" default="$2"
-  if [[ -z "$CONFIG_PATH" ]] || ! command -v jq >/dev/null 2>&1; then
-    echo "$default"
-    return
-  fi
-  local v
-  v=$(jq -r "$key // empty" "$CONFIG_PATH" 2>/dev/null)
-  [[ -z "$v" ]] && v="$default"
-  echo "$v"
+	local key="$1" default="$2"
+	if [[ -z $CONFIG_PATH ]] || ! command -v jq >/dev/null 2>&1; then
+		echo "$default"
+		return
+	fi
+	local v
+	v=$(jq -r "$key // empty" "$CONFIG_PATH" 2>/dev/null)
+	[[ -z $v ]] && v="$default"
+	echo "$v"
 }
 
 # ─── OTEL resource attributes (CTL-492, CTL-495) ───────────────────────────
@@ -184,47 +220,56 @@ config_value() {
 # because all three values are required by the time this runs. The caller
 # still guards on `-n` to remain defensive against future helper changes.
 compose_otel_resource_attrs() {
-  local project_key worker_wt worker_branch attrs
-  project_key="$(config_value '.catalyst.projectKey' '')"
+	local project_key worker_wt worker_branch attrs
+	project_key="$(config_value '.catalyst.projectKey' '')"
 
-  worker_branch=""
-  if [[ -n "$project_key" ]]; then
-    worker_wt="${HOME}/catalyst/wt/${project_key}/${ORCH_ID}-${TICKET}"
-    if [[ -e "${worker_wt}/.git" ]] && command -v git >/dev/null 2>&1; then
-      worker_branch="$(git -C "$worker_wt" branch --show-current 2>/dev/null || true)"
-    fi
-    [[ -z "$worker_branch" ]] && worker_branch="${ORCH_ID}-${TICKET}"
-  fi
+	worker_branch=""
+	if [[ -n $project_key ]]; then
+		worker_wt="${HOME}/catalyst/wt/${project_key}/${ORCH_ID}-${TICKET}"
+		if [[ -e "${worker_wt}/.git" ]] && command -v git >/dev/null 2>&1; then
+			worker_branch="$(git -C "$worker_wt" branch --show-current 2>/dev/null || true)"
+		fi
+		[[ -z $worker_branch ]] && worker_branch="${ORCH_ID}-${TICKET}"
+	fi
 
-  if [[ -n "$project_key" ]]; then
-    attrs="project=${project_key},linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
-    [[ -n "$worker_branch" ]] && attrs="${attrs},branch=${worker_branch}"
-  else
-    attrs="linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
-  fi
-  attrs="${attrs},task.type=phase-${PHASE}"
-  printf '%s\n' "$attrs"
+	if [[ -n $project_key ]]; then
+		attrs="project=${project_key},linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
+		[[ -n $worker_branch ]] && attrs="${attrs},branch=${worker_branch}"
+	else
+		attrs="linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
+	fi
+	attrs="${attrs},task.type=phase-${PHASE}"
+	printf '%s\n' "$attrs"
 }
 
 # ─── Resolve model: CLI > modelOverrides > models > default ────────────────
 
 resolve_model() {
-  if [[ -n "$MODEL_FLAG" ]]; then echo "$MODEL_FLAG"; return; fi
-  local override
-  override=$(config_value \
-    ".catalyst.orchestration.phaseAgents.modelOverrides[\"${PHASE}\"][\"${TICKET}\"]" \
-    "")
-  if [[ -n "$override" ]]; then echo "$override"; return; fi
-  config_value ".catalyst.orchestration.phaseAgents.models[\"${PHASE}\"]" "$DEFAULT_MODEL"
+	if [[ -n $MODEL_FLAG ]]; then
+		echo "$MODEL_FLAG"
+		return
+	fi
+	local override
+	override=$(config_value \
+		".catalyst.orchestration.phaseAgents.modelOverrides[\"${PHASE}\"][\"${TICKET}\"]" \
+		"")
+	if [[ -n $override ]]; then
+		echo "$override"
+		return
+	fi
+	config_value ".catalyst.orchestration.phaseAgents.models[\"${PHASE}\"]" "$DEFAULT_MODEL"
 }
 MODEL="$(resolve_model)"
 
 # ─── Resolve turn cap: CLI > config.turnCaps > per-phase default ───────────
 
 resolve_turn_cap() {
-  if [[ -n "$TURN_CAP_FLAG" ]]; then echo "$TURN_CAP_FLAG"; return; fi
-  config_value ".catalyst.orchestration.phaseAgents.turnCaps[\"${PHASE}\"]" \
-    "$(phase_default_turn_cap "$PHASE")"
+	if [[ -n $TURN_CAP_FLAG ]]; then
+		echo "$TURN_CAP_FLAG"
+		return
+	fi
+	config_value ".catalyst.orchestration.phaseAgents.turnCaps[\"${PHASE}\"]" \
+		"$(phase_default_turn_cap "$PHASE")"
 }
 TURN_CAP="$(resolve_turn_cap)"
 
@@ -232,71 +277,71 @@ TURN_CAP="$(resolve_turn_cap)"
 
 ARTIFACT_SPEC="$(prior_artifact_for_phase "$PHASE")"
 ARTIFACT_OK=1
-if [[ -n "$ARTIFACT_SPEC" ]]; then
-  case "$ARTIFACT_SPEC" in
-    signal:*)
-      ARTIFACT_FILE="${ORCH_DIR}/workers/${TICKET}/${ARTIFACT_SPEC#signal:}"
-      [[ -f "$ARTIFACT_FILE" ]] || ARTIFACT_OK=0
-      ;;
-    glob:*)
-      # CTL-494: two-step match. The lowercase-ticket-at-tail form
-      # (phase-plan prose convention) is tried first; on miss, fall back to
-      # a wider pattern that accepts the canonical create-plan form
-      # (uppercase ticket + descriptive suffix). Case-insensitive nocaseglob
-      # is the final fallback. The ticket is still required to appear in the
-      # filename, so cross-ticket lookalikes do not satisfy this gate.
-      PATTERN="${ARTIFACT_SPEC#glob:}"
-      shopt -s nullglob
-      # shellcheck disable=SC2206  # word-splitting is required for glob expansion
-      MATCHES=( $PATTERN )
-      if [[ ${#MATCHES[@]} -eq 0 ]]; then
-        WIDE="${PATTERN/%-${TICKET,,}.md/*${TICKET}*.md}"
-        # shellcheck disable=SC2206
-        MATCHES=( $WIDE )
-        if [[ ${#MATCHES[@]} -eq 0 ]]; then
-          shopt -s nocaseglob
-          # shellcheck disable=SC2206
-          MATCHES=( $WIDE )
-          shopt -u nocaseglob
-        fi
-      fi
-      shopt -u nullglob
-      [[ ${#MATCHES[@]} -gt 0 ]] || ARTIFACT_OK=0
-      ;;
-  esac
+if [[ -n $ARTIFACT_SPEC ]]; then
+	case "$ARTIFACT_SPEC" in
+	signal:*)
+		ARTIFACT_FILE="${ORCH_DIR}/workers/${TICKET}/${ARTIFACT_SPEC#signal:}"
+		[[ -f $ARTIFACT_FILE ]] || ARTIFACT_OK=0
+		;;
+	glob:*)
+		# CTL-494: two-step match. The lowercase-ticket-at-tail form
+		# (phase-plan prose convention) is tried first; on miss, fall back to
+		# a wider pattern that accepts the canonical create-plan form
+		# (uppercase ticket + descriptive suffix). Case-insensitive nocaseglob
+		# is the final fallback. The ticket is still required to appear in the
+		# filename, so cross-ticket lookalikes do not satisfy this gate.
+		PATTERN="${ARTIFACT_SPEC#glob:}"
+		shopt -s nullglob
+		# shellcheck disable=SC2206  # word-splitting is required for glob expansion
+		MATCHES=($PATTERN)
+		if [[ ${#MATCHES[@]} -eq 0 ]]; then
+			WIDE="${PATTERN/%-${TICKET,,}.md/*${TICKET}*.md}"
+			# shellcheck disable=SC2206
+			MATCHES=($WIDE)
+			if [[ ${#MATCHES[@]} -eq 0 ]]; then
+				shopt -s nocaseglob
+				# shellcheck disable=SC2206
+				MATCHES=($WIDE)
+				shopt -u nocaseglob
+			fi
+		fi
+		shopt -u nullglob
+		[[ ${#MATCHES[@]} -gt 0 ]] || ARTIFACT_OK=0
+		;;
+	esac
 fi
 
-if [[ "$ARTIFACT_OK" -eq 0 ]]; then
-  REFUSAL_REASON="prior_artifact_missing"
-  echo "phase-agent-dispatch: refusing to launch ${PHASE} on ${TICKET}: prior artifact missing (${ARTIFACT_SPEC})" >&2
-  jq -nc \
-    --arg ticket "$TICKET" \
-    --arg phase "$PHASE" \
-    --arg model "$MODEL" \
-    --arg artifact "$ARTIFACT_SPEC" \
-    --arg reason "$REFUSAL_REASON" \
-    --argjson turnCap "$TURN_CAP" \
-    --argjson dryRun "$DRY_RUN" \
-    '{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
+if [[ $ARTIFACT_OK -eq 0 ]]; then
+	REFUSAL_REASON="prior_artifact_missing"
+	echo "phase-agent-dispatch: refusing to launch ${PHASE} on ${TICKET}: prior artifact missing (${ARTIFACT_SPEC})" >&2
+	jq -nc \
+		--arg ticket "$TICKET" \
+		--arg phase "$PHASE" \
+		--arg model "$MODEL" \
+		--arg artifact "$ARTIFACT_SPEC" \
+		--arg reason "$REFUSAL_REASON" \
+		--argjson turnCap "$TURN_CAP" \
+		--argjson dryRun "$DRY_RUN" \
+		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, signalFile: null, status: "refused",
       reason: $reason, artifact: $artifact, dryRun: ($dryRun == 1)}'
 
-  # CTL-494: emit phase.<name>.failed.<TICKET> so the broker wakes the
-  # orchestrator in seconds instead of waiting on the 16-minute
-  # state-json-stale path. Best-effort: never let emit failure mask the
-  # original refusal exit code. Skipped for --dry-run so previews don't
-  # write to the live event log.
-  if [[ "$DRY_RUN" -eq 0 && -x "$EMIT_COMPLETE" ]]; then
-    "$EMIT_COMPLETE" \
-      --phase "$PHASE" \
-      --ticket "$TICKET" \
-      --status failed \
-      --reason "$REFUSAL_REASON" \
-      --orch-dir "$ORCH_DIR" \
-      --orch-id "$ORCH_ID" >/dev/null 2>&1 || true
-  fi
+	# CTL-494: emit phase.<name>.failed.<TICKET> so the broker wakes the
+	# orchestrator in seconds instead of waiting on the 16-minute
+	# state-json-stale path. Best-effort: never let emit failure mask the
+	# original refusal exit code. Skipped for --dry-run so previews don't
+	# write to the live event log.
+	if [[ $DRY_RUN -eq 0 && -x $EMIT_COMPLETE ]]; then
+		"$EMIT_COMPLETE" \
+			--phase "$PHASE" \
+			--ticket "$TICKET" \
+			--status failed \
+			--reason "$REFUSAL_REASON" \
+			--orch-dir "$ORCH_DIR" \
+			--orch-id "$ORCH_ID" >/dev/null 2>&1 || true
+	fi
 
-  exit 2
+	exit 2
 fi
 
 # ─── Write phase signal file (with idempotency) ────────────────────────────
@@ -308,40 +353,78 @@ mkdir -p "$WORKER_DIR" 2>/dev/null || die "cannot create $WORKER_DIR"
 # Idempotency: if a signal exists and its status is one of dispatched|running|done,
 # we no-op. Failed signals are overwritten (retry path).
 EXISTING_STATUS=""
-if [[ -f "$SIGNAL_FILE" ]]; then
-  EXISTING_STATUS=$(jq -r '.status // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
+if [[ -f $SIGNAL_FILE ]]; then
+	EXISTING_STATUS=$(jq -r '.status // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
 fi
 
-if [[ "$EXISTING_STATUS" == "dispatched" || "$EXISTING_STATUS" == "running" || "$EXISTING_STATUS" == "done" ]]; then
-  EXISTING_JOB=$(jq -r '.bg_job_id // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
-  jq -nc \
-    --arg ticket "$TICKET" \
-    --arg phase "$PHASE" \
-    --arg model "$MODEL" \
-    --argjson turnCap "$TURN_CAP" \
-    --arg job "$EXISTING_JOB" \
-    --arg signal "$SIGNAL_FILE" \
-    --arg status "$EXISTING_STATUS" \
-    --argjson dryRun "$DRY_RUN" \
-    '{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
+if [[ $EXISTING_STATUS == "dispatched" || $EXISTING_STATUS == "running" || $EXISTING_STATUS == "done" ]]; then
+	EXISTING_JOB=$(jq -r '.bg_job_id // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
+	jq -nc \
+		--arg ticket "$TICKET" \
+		--arg phase "$PHASE" \
+		--arg model "$MODEL" \
+		--argjson turnCap "$TURN_CAP" \
+		--arg job "$EXISTING_JOB" \
+		--arg signal "$SIGNAL_FILE" \
+		--arg status "$EXISTING_STATUS" \
+		--argjson dryRun "$DRY_RUN" \
+		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: (if $job == "" then null else $job end),
       signalFile: $signal, status: $status, idempotent: true,
       dryRun: ($dryRun == 1)}'
-  exit 0
+	exit 0
 fi
 
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 jq -nc \
-  --arg ticket "$TICKET" \
-  --arg phase "$PHASE" \
-  --arg model "$MODEL" \
-  --argjson turnCap "$TURN_CAP" \
-  --arg orch "$ORCH_ID" \
-  --arg ts "$TS" \
-  '{ticket: $ticket, phase: $phase, orchestrator: $orch, model: $model,
+	--arg ticket "$TICKET" \
+	--arg phase "$PHASE" \
+	--arg model "$MODEL" \
+	--argjson turnCap "$TURN_CAP" \
+	--arg orch "$ORCH_ID" \
+	--arg ts "$TS" \
+	'{ticket: $ticket, phase: $phase, orchestrator: $orch, model: $model,
     turnCap: $turnCap, status: "dispatched", bg_job_id: null,
-    startedAt: $ts, updatedAt: $ts}' > "$SIGNAL_FILE" \
-  || die "failed to write signal file $SIGNAL_FILE"
+    startedAt: $ts, updatedAt: $ts}' >"$SIGNAL_FILE" ||
+	die "failed to write signal file $SIGNAL_FILE"
+
+# ─── CTL-511: launch-failure recovery helper ────────────────────────────────
+#
+# Called when `claude --bg` never produces a live worker (non-zero exit, or an
+# exit-0 run that prints no job id). Without this the signal file froze at
+# status="dispatched" and no phase.* event ever reached the broker, so the
+# orchestrator stayed blind until the periodic healthcheck (or, before CTL-511,
+# ~14 h). This:
+#   1. Rewrites the signal to status="stalled" — the one status orchestrate-revive
+#      Loop 2 redispatches. We deliberately use `attentionReason` (not
+#      `failureReason`): a `failureReason` would trip Loop 2 Branch 1's escalate
+#      path, which does NOT retry.
+#   2. Emits phase.<PHASE>.failed.<TICKET> via phase-agent-emit-complete's
+#      --no-signal-update mode (event only — step 1 above already owns the
+#      signal file, and a non-event-only emit would flip it to "failed").
+mark_launch_failed() {
+	local reason="$1"
+	local ts
+	ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	if [[ -f $SIGNAL_FILE ]]; then
+		local tmp="${SIGNAL_FILE}.tmp.$$"
+		if jq --arg ts "$ts" --arg reason "$reason" \
+			'.status = "stalled"
+        | .attentionReason = $reason
+        | .updatedAt = $ts
+        | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+			"$SIGNAL_FILE" >"$tmp" 2>/dev/null; then
+			mv "$tmp" "$SIGNAL_FILE"
+		else
+			rm -f "$tmp"
+		fi
+	fi
+	if [[ -x $EMIT_COMPLETE ]]; then
+		"$EMIT_COMPLETE" --phase "$PHASE" --ticket "$TICKET" --status failed \
+			--reason "$reason" --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
+			--no-signal-update >/dev/null 2>&1 || true
+	fi
+}
 
 # ─── Build prompt + spawn claude --bg ──────────────────────────────────────
 
@@ -358,28 +441,28 @@ PROMPT="/catalyst-dev:phase-${PHASE} ${TICKET} --orch-dir ${ORCH_DIR}"
 OTEL_RES_ATTRS="$(compose_otel_resource_attrs)"
 
 DISPATCH_ENV=(
-  "CATALYST_ORCHESTRATOR_DIR=${ORCH_DIR}"
-  "CATALYST_ORCHESTRATOR_ID=${ORCH_ID}"
-  "CATALYST_PHASE=${PHASE}"
-  "CATALYST_TICKET=${TICKET}"
+	"CATALYST_ORCHESTRATOR_DIR=${ORCH_DIR}"
+	"CATALYST_ORCHESTRATOR_ID=${ORCH_ID}"
+	"CATALYST_PHASE=${PHASE}"
+	"CATALYST_TICKET=${TICKET}"
 )
-[[ -n "$OTEL_RES_ATTRS" ]] && \
-  DISPATCH_ENV+=( "OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}" )
+[[ -n $OTEL_RES_ATTRS ]] &&
+	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")
 
-if [[ "$DRY_RUN" -eq 1 ]]; then
-  # Dry-run prints the command it would have run without spawning anything.
-  jq -nc \
-    --arg ticket "$TICKET" \
-    --arg phase "$PHASE" \
-    --arg model "$MODEL" \
-    --argjson turnCap "$TURN_CAP" \
-    --arg prompt "$PROMPT" \
-    --arg signal "$SIGNAL_FILE" \
-    --argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
-    '{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
+if [[ $DRY_RUN -eq 1 ]]; then
+	# Dry-run prints the command it would have run without spawning anything.
+	jq -nc \
+		--arg ticket "$TICKET" \
+		--arg phase "$PHASE" \
+		--arg model "$MODEL" \
+		--argjson turnCap "$TURN_CAP" \
+		--arg prompt "$PROMPT" \
+		--arg signal "$SIGNAL_FILE" \
+		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
+		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, prompt: $prompt, signalFile: $signal,
       env: $env, status: "dispatched", dryRun: true}'
-  exit 0
+	exit 0
 fi
 
 # Spawn the phase agent. `claude --bg` writes the new job ID to stdout as
@@ -395,17 +478,18 @@ trap 'rm -f "$BG_OUT" "$BG_ERR"' EXIT
 # without rewriting either dispatcher.
 CLAUDE_BIN="${CATALYST_DISPATCH_CLAUDE_BIN:-claude}"
 env "${DISPATCH_ENV[@]}" \
-  "$CLAUDE_BIN" --bg --dangerously-skip-permissions --model "$MODEL" "$PROMPT" \
-  >"$BG_OUT" 2>"$BG_ERR"
+	"$CLAUDE_BIN" --bg --dangerously-skip-permissions --model "$MODEL" "$PROMPT" \
+	>"$BG_OUT" 2>"$BG_ERR"
 RC=$?
 
 if [[ $RC -ne 0 ]]; then
-  echo "phase-agent-dispatch: claude --bg exited $RC: $(cat "$BG_ERR")" >&2
-  jq -n --arg status "failed" --arg reason "claude_bg_failed" \
-        --arg signal "$SIGNAL_FILE" \
-        '. + {status: $status, reason: $reason, signalFile: $signal}' \
-        <<<'{}'
-  exit 1
+	echo "phase-agent-dispatch: claude --bg exited $RC: $(cat "$BG_ERR")" >&2
+	mark_launch_failed "claude-bg-launch-failed"
+	jq -n --arg status "failed" --arg reason "claude_bg_failed" \
+		--arg signal "$SIGNAL_FILE" \
+		'. + {status: $status, reason: $reason, signalFile: $signal}' \
+		<<<'{}'
+	exit 1
 fi
 
 # Extract the bg job id — first 8-char lowercase hex on stdout (CTL-490).
@@ -413,23 +497,26 @@ fi
 # the previous `awk NR==1 {print $1}` captured the literal word "backgrounded".
 # Hex grep stays correct as long as job IDs remain hex tokens.
 BG_JOB_ID=$(grep -oE '[a-f0-9]{8}' "$BG_OUT" | head -1)
-[[ -n "$BG_JOB_ID" ]] || die "claude --bg returned empty job id (stdout: $(cat "$BG_OUT"))"
+if [[ -z $BG_JOB_ID ]]; then
+	mark_launch_failed "claude-bg-empty-job-id"
+	die "claude --bg returned empty job id (stdout: $(cat "$BG_OUT"))"
+fi
 
 # Record job id back into the signal file.
 TS2=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 TMP="${SIGNAL_FILE}.tmp.$$"
 jq --arg job "$BG_JOB_ID" --arg ts "$TS2" \
-   '.bg_job_id = $job | .status = "running" | .updatedAt = $ts' \
-   "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+	'.bg_job_id = $job | .status = "running" | .updatedAt = $ts' \
+	"$SIGNAL_FILE" >"$TMP" && mv "$TMP" "$SIGNAL_FILE"
 
 jq -nc \
-  --arg ticket "$TICKET" \
-  --arg phase "$PHASE" \
-  --arg model "$MODEL" \
-  --argjson turnCap "$TURN_CAP" \
-  --arg job "$BG_JOB_ID" \
-  --arg signal "$SIGNAL_FILE" \
-  '{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
+	--arg ticket "$TICKET" \
+	--arg phase "$PHASE" \
+	--arg model "$MODEL" \
+	--argjson turnCap "$TURN_CAP" \
+	--arg job "$BG_JOB_ID" \
+	--arg signal "$SIGNAL_FILE" \
+	'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
     bg_job_id: $job, signalFile: $signal, status: "running", dryRun: false}'
 
 exit 0

@@ -26,6 +26,9 @@
 # Environment:
 #   CATALYST_STATE_SCRIPT             path to catalyst-state.sh (default: ../catalyst-state.sh
 #                                     next to this script). Tests override this to capture calls.
+#   CATALYST_EMIT_COMPLETE            path to phase-agent-emit-complete (default: next to this
+#                                     script). CTL-511: emits phase.<name>.failed when a phase
+#                                     signal is flipped to stalled, waking the orchestrator.
 #   CATALYST_HEALTHCHECK_JOBS_ROOT    root for --bg job state dirs (default: $HOME/.claude/jobs).
 #                                     Tests override this to avoid touching the real Claude state.
 
@@ -33,6 +36,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+# CTL-511: phase-agent-emit-complete emits the broker-routable phase.<name>.failed
+# event when a phase signal is flipped to stalled. Test-overridable.
+EMIT_COMPLETE="${CATALYST_EMIT_COMPLETE:-${SCRIPT_DIR}/phase-agent-emit-complete}"
 
 ORCH_DIR=""
 ORCH_ID=""
@@ -46,29 +52,56 @@ DRY_RUN=0
 JOBS_ROOT="${CATALYST_HEALTHCHECK_JOBS_ROOT:-${HOME}/.claude/jobs}"
 
 usage() {
-  sed -n '2,32p' "$0"
-  exit "${1:-1}"
+	sed -n '2,35p' "$0"
+	exit "${1:-1}"
 }
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --orch-dir)         ORCH_DIR="$2"; shift 2 ;;
-    --orch-id)          ORCH_ID="$2"; shift 2 ;;
-    --grace-seconds)    GRACE_SECONDS="$2"; shift 2 ;;
-    --stale-bg-seconds) STALE_BG_SECONDS="$2"; shift 2 ;;
-    --dry-run)          DRY_RUN=1; shift ;;
-    -h|--help)          usage 0 ;;
-    *)                  echo "unknown arg: $1" >&2; usage ;;
-  esac
+	case "$1" in
+	--orch-dir)
+		ORCH_DIR="$2"
+		shift 2
+		;;
+	--orch-id)
+		ORCH_ID="$2"
+		shift 2
+		;;
+	--grace-seconds)
+		GRACE_SECONDS="$2"
+		shift 2
+		;;
+	--stale-bg-seconds)
+		STALE_BG_SECONDS="$2"
+		shift 2
+		;;
+	--dry-run)
+		DRY_RUN=1
+		shift
+		;;
+	-h | --help) usage 0 ;;
+	*)
+		echo "unknown arg: $1" >&2
+		usage
+		;;
+	esac
 done
 
-[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
-[ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
-[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+[ -z "$ORCH_DIR" ] && {
+	echo "ERROR: --orch-dir required" >&2
+	exit 2
+}
+[ -z "$ORCH_ID" ] && {
+	echo "ERROR: --orch-id required" >&2
+	exit 2
+}
+[ ! -d "$ORCH_DIR/workers" ] && {
+	echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2
+	exit 2
+}
 
 # Give freshly-dispatched processes a moment to fail before we judge them.
 if [ "$GRACE_SECONDS" -gt 0 ]; then
-  sleep "$GRACE_SECONDS"
+	sleep "$GRACE_SECONDS"
 fi
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -78,61 +111,61 @@ DEAD_TICKETS=()
 
 shopt -s nullglob
 for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
-  # Skip non-worker JSON files (fixup prompts, misc artifacts) — a real signal
-  # has at minimum a .ticket field.
-  TICKET=$(jq -r '.ticket // empty' "$SIGNAL" 2>/dev/null || echo "")
-  [ -z "$TICKET" ] && continue
+	# Skip non-worker JSON files (fixup prompts, misc artifacts) — a real signal
+	# has at minimum a .ticket field.
+	TICKET=$(jq -r '.ticket // empty' "$SIGNAL" 2>/dev/null || echo "")
+	[ -z "$TICKET" ] && continue
 
-  STATUS=$(jq -r '.status // empty' "$SIGNAL")
-  PHASE=$(jq -r '.phase // 0' "$SIGNAL")
-  PID=$(jq -r '.pid // empty' "$SIGNAL")
+	STATUS=$(jq -r '.status // empty' "$SIGNAL")
+	PHASE=$(jq -r '.phase // 0' "$SIGNAL")
+	PID=$(jq -r '.pid // empty' "$SIGNAL")
 
-  # Only inspect workers that haven't announced themselves yet. Anything that
-  # moved off `dispatched`/phase 0 is clearly alive; anything terminal should
-  # not be relitigated.
-  [ "$STATUS" != "dispatched" ] && continue
-  [ "$PHASE" != "0" ] && continue
-  [ -z "$PID" ] && continue
+	# Only inspect workers that haven't announced themselves yet. Anything that
+	# moved off `dispatched`/phase 0 is clearly alive; anything terminal should
+	# not be relitigated.
+	[ "$STATUS" != "dispatched" ] && continue
+	[ "$PHASE" != "0" ] && continue
+	[ -z "$PID" ] && continue
 
-  CHECKED=$((CHECKED+1))
+	CHECKED=$((CHECKED + 1))
 
-  if kill -0 "$PID" 2>/dev/null; then
-    continue
-  fi
+	if kill -0 "$PID" 2>/dev/null; then
+		continue
+	fi
 
-  # PID is dead — this is a launch failure.
-  DEAD_TICKETS+=("$TICKET")
-  MSG="Worker PID ${PID} died within ${GRACE_SECONDS}s of dispatch"
+	# PID is dead — this is a launch failure.
+	DEAD_TICKETS+=("$TICKET")
+	MSG="Worker PID ${PID} died within ${GRACE_SECONDS}s of dispatch"
 
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] ${TICKET}: ${MSG}" >&2
-    continue
-  fi
+	if [ "$DRY_RUN" -eq 1 ]; then
+		echo "[dry-run] ${TICKET}: ${MSG}" >&2
+		continue
+	fi
 
-  TS=$(now_iso)
-  jq --arg status "failed" \
-     --arg reason "launch-failure" \
-     --arg ts "$TS" \
-     '.status = $status
+	TS=$(now_iso)
+	jq --arg status "failed" \
+		--arg reason "launch-failure" \
+		--arg ts "$TS" \
+		'.status = $status
       | .failureReason = $reason
       | .updatedAt = $ts
       | .completedAt = $ts
       | .phaseTimestamps = ((.phaseTimestamps // {}) | .failed = $ts)' \
-     "$SIGNAL" > "${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
+		"$SIGNAL" >"${SIGNAL}.tmp" && mv "${SIGNAL}.tmp" "$SIGNAL"
 
-  if [ -x "$STATE_SCRIPT" ]; then
-    "$STATE_SCRIPT" attention "$ORCH_ID" "launch-failure" "$TICKET" "$MSG"
-    "$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET" \
-      '.status = "failed" | .attentionReason = "'"${MSG//\"/\\\"}"'"'
-    EVT=$(jq -nc \
-      --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
-      --argjson pid "$PID" --argjson grace "$GRACE_SECONDS" \
-      '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-launch-failed",
+	if [ -x "$STATE_SCRIPT" ]; then
+		"$STATE_SCRIPT" attention "$ORCH_ID" "launch-failure" "$TICKET" "$MSG"
+		"$STATE_SCRIPT" worker "$ORCH_ID" "$TICKET" \
+			'.status = "failed" | .attentionReason = "'"${MSG//\"/\\\"}"'"'
+		EVT=$(jq -nc \
+			--arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+			--argjson pid "$PID" --argjson grace "$GRACE_SECONDS" \
+			'{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-launch-failed",
         detail:{pid:$pid, graceSeconds:$grace}}')
-    "$STATE_SCRIPT" event "$EVT"
-  fi
+		"$STATE_SCRIPT" event "$EVT"
+	fi
 
-  echo "LAUNCH-FAILURE: ${TICKET} (pid=${PID})" >&2
+	echo "LAUNCH-FAILURE: ${TICKET} (pid=${PID})" >&2
 done
 
 # ─── CTL-452: phase-mode --bg state.json mtime check ─────────────────────────
@@ -146,98 +179,111 @@ STALLED_TICKETS=()
 PHASE_TERMINAL_STATES="done failed errored stopped stalled"
 
 mtime_of() {
-  # macOS `stat -f` vs GNU `stat -c` — fall back if neither accepts.
-  local f="$1"
-  stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo ""
+	# macOS `stat -f` vs GNU `stat -c` — fall back if neither accepts.
+	local f="$1"
+	stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo ""
 }
 
 # Iterate every per-phase signal under workers/<T>/phase-*.json. Tickets with
 # no phase-mode subdirectory are silently skipped (legacy oneshot workers).
 shopt -s nullglob
 for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
-  P_TICKET=$(jq -r '.ticket // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
-  [ -z "$P_TICKET" ] && continue
-  P_PHASE=$(jq -r '.phase // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
-  P_STATUS=$(jq -r '.status // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
-  P_BG=$(jq -r '.bg_job_id // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+	P_TICKET=$(jq -r '.ticket // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+	[ -z "$P_TICKET" ] && continue
+	P_PHASE=$(jq -r '.phase // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+	P_STATUS=$(jq -r '.status // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+	P_BG=$(jq -r '.bg_job_id // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
 
-  # Skip terminal signals — nothing for the healthcheck to do.
-  case " $PHASE_TERMINAL_STATES " in *" $P_STATUS "*) continue ;; esac
+	# Skip terminal signals — nothing for the healthcheck to do.
+	case " $PHASE_TERMINAL_STATES " in *" $P_STATUS "*) continue ;; esac
 
-  # Phase agents without a bg_job_id haven't fully launched yet (or never
-  # claimed --bg). The legacy PID check already covers the no-bg case, so
-  # skip rather than double-flag.
-  [ -z "$P_BG" ] && continue
+	# Phase agents without a bg_job_id haven't fully launched yet (or never
+	# claimed --bg). The legacy PID check already covers the no-bg case, so
+	# skip rather than double-flag.
+	[ -z "$P_BG" ] && continue
 
-  STATE_FILE="${JOBS_ROOT}/${P_BG}/state.json"
-  STALL_REASON=""
-  if [ ! -f "$STATE_FILE" ]; then
-    STALL_REASON="state-json-missing"
-  else
-    # Honor terminal claude state — done/failed/errored/stopped means the
-    # process correctly reached an exit. Leave it for the operator to read.
-    CLAUDE_STATE=$(jq -r '.state // ""' "$STATE_FILE" 2>/dev/null || echo "")
-    case " done failed errored stopped " in
-      *" $CLAUDE_STATE "*) continue ;;
-    esac
-    MTIME=$(mtime_of "$STATE_FILE")
-    if [ -n "$MTIME" ]; then
-      AGE=$(( $(date -u +%s) - MTIME ))
-      if [ "$AGE" -ge "$STALE_BG_SECONDS" ]; then
-        STALL_REASON="state-json-stale"
-      fi
-    fi
-  fi
+	STATE_FILE="${JOBS_ROOT}/${P_BG}/state.json"
+	STALL_REASON=""
+	if [ ! -f "$STATE_FILE" ]; then
+		STALL_REASON="state-json-missing"
+	else
+		# Honor terminal claude state — done/failed/errored/stopped means the
+		# process correctly reached an exit. Leave it for the operator to read.
+		CLAUDE_STATE=$(jq -r '.state // ""' "$STATE_FILE" 2>/dev/null || echo "")
+		case " done failed errored stopped " in
+		*" $CLAUDE_STATE "*) continue ;;
+		esac
+		MTIME=$(mtime_of "$STATE_FILE")
+		if [ -n "$MTIME" ]; then
+			AGE=$(($(date -u +%s) - MTIME))
+			if [ "$AGE" -ge "$STALE_BG_SECONDS" ]; then
+				STALL_REASON="state-json-stale"
+			fi
+		fi
+	fi
 
-  [ -z "$STALL_REASON" ] && continue
+	[ -z "$STALL_REASON" ] && continue
 
-  STALLED_TICKETS+=("$P_TICKET")
-  if [ "$DRY_RUN" -eq 1 ]; then
-    echo "[dry-run] ${P_TICKET} phase=${P_PHASE} bg=${P_BG}: ${STALL_REASON}" >&2
-    continue
-  fi
+	STALLED_TICKETS+=("$P_TICKET")
+	if [ "$DRY_RUN" -eq 1 ]; then
+		echo "[dry-run] ${P_TICKET} phase=${P_PHASE} bg=${P_BG}: ${STALL_REASON}" >&2
+		continue
+	fi
 
-  TS=$(now_iso)
-  jq --arg ts "$TS" --arg reason "$STALL_REASON" \
-     '.status = "stalled"
+	TS=$(now_iso)
+	jq --arg ts "$TS" --arg reason "$STALL_REASON" \
+		'.status = "stalled"
       | .attentionReason = $reason
       | .updatedAt = $ts
       | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
-     "$PHASE_SIGNAL" > "${PHASE_SIGNAL}.tmp" && mv "${PHASE_SIGNAL}.tmp" "$PHASE_SIGNAL"
+		"$PHASE_SIGNAL" >"${PHASE_SIGNAL}.tmp" && mv "${PHASE_SIGNAL}.tmp" "$PHASE_SIGNAL"
 
-  if [ -x "$STATE_SCRIPT" ]; then
-    EVT=$(jq -nc \
-      --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$P_TICKET" \
-      --arg phase "$P_PHASE" --arg bg "$P_BG" --arg reason "$STALL_REASON" \
-      '{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-phase-stalled",
+	if [ -x "$STATE_SCRIPT" ]; then
+		EVT=$(jq -nc \
+			--arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$P_TICKET" \
+			--arg phase "$P_PHASE" --arg bg "$P_BG" --arg reason "$STALL_REASON" \
+			'{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-phase-stalled",
         detail:{phase:$phase, bg_job_id:$bg, reason:$reason}}')
-    "$STATE_SCRIPT" event "$EVT" >/dev/null 2>&1 || true
-    "$STATE_SCRIPT" attention "$ORCH_ID" "$STALL_REASON" "$P_TICKET" \
-      "Phase ${P_PHASE} stalled (${STALL_REASON})" >/dev/null 2>&1 || true
-  fi
+		"$STATE_SCRIPT" event "$EVT" >/dev/null 2>&1 || true
+		"$STATE_SCRIPT" attention "$ORCH_ID" "$STALL_REASON" "$P_TICKET" \
+			"Phase ${P_PHASE} stalled (${STALL_REASON})" >/dev/null 2>&1 || true
+	fi
 
-  echo "PHASE-STALLED: ${P_TICKET} phase=${P_PHASE} bg=${P_BG} (${STALL_REASON})" >&2
+	# CTL-511: emit phase.<name>.failed.<TICKET> so the broker's phase_lifecycle
+	# route wakes the orchestrator immediately. worker-phase-stalled (above) does
+	# not match the broker's PHASE_EVENT_PATTERN, so before this the orchestrator
+	# only learned of the stall on its own 10-minute idle fallback. --no-signal-update
+	# is essential: the jq above already wrote status="stalled" and a non-event-only
+	# emit would flip it to "failed", which orchestrate-revive Loop 2 skips.
+	if [ -x "$EMIT_COMPLETE" ]; then
+		"$EMIT_COMPLETE" \
+			--phase "$P_PHASE" --ticket "$P_TICKET" --status failed \
+			--reason "$STALL_REASON" --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
+			--no-signal-update >/dev/null 2>&1 || true
+	fi
+
+	echo "PHASE-STALLED: ${P_TICKET} phase=${P_PHASE} bg=${P_BG} (${STALL_REASON})" >&2
 done
 
 # Summary on stdout (machine-readable).
 DEAD_COUNT=${#DEAD_TICKETS[@]}
 if [ "$DEAD_COUNT" -eq 0 ]; then
-  DEAD_JSON="[]"
+	DEAD_JSON="[]"
 else
-  DEAD_JSON=$(printf '%s\n' "${DEAD_TICKETS[@]}" | jq -R . | jq -s .)
+	DEAD_JSON=$(printf '%s\n' "${DEAD_TICKETS[@]}" | jq -R . | jq -s .)
 fi
 
 STALLED_COUNT=${#STALLED_TICKETS[@]}
 if [ "$STALLED_COUNT" -eq 0 ]; then
-  STALLED_JSON="[]"
+	STALLED_JSON="[]"
 else
-  STALLED_JSON=$(printf '%s\n' "${STALLED_TICKETS[@]}" | jq -R . | jq -s .)
+	STALLED_JSON=$(printf '%s\n' "${STALLED_TICKETS[@]}" | jq -R . | jq -s .)
 fi
 
 jq -nc \
-  --argjson c "$CHECKED" \
-  --argjson d "$DEAD_COUNT" \
-  --argjson t "$DEAD_JSON" \
-  --argjson s "$STALLED_COUNT" \
-  --argjson st "$STALLED_JSON" \
-  '{checked:$c, dead:$d, deadTickets:$t, stalled:$s, stalledTickets:$st}'
+	--argjson c "$CHECKED" \
+	--argjson d "$DEAD_COUNT" \
+	--argjson t "$DEAD_JSON" \
+	--argjson s "$STALLED_COUNT" \
+	--argjson st "$STALLED_JSON" \
+	'{checked:$c, dead:$d, deadTickets:$t, stalled:$s, stalledTickets:$st}'
