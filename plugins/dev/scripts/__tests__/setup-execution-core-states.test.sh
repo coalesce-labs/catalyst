@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# Shell tests for setup-execution-core-states.sh (CTL-564 Phase 2).
+#
+# Two layers:
+#   1. Unit  — source the script (sourcing guard suppresses main) and assert
+#              its pure helpers directly.
+#   2. E2E   — run the script with a fake `curl` earlier on PATH returning
+#              canned GraphQL responses, against a fixture .catalyst/config.json.
+#
+# Run: bash plugins/dev/scripts/__tests__/setup-execution-core-states.test.sh
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+SCRIPT="${REPO_ROOT}/plugins/dev/scripts/setup-execution-core-states.sh"
+
+FAILURES=0
+PASSES=0
+SCRATCH="$(mktemp -d)"
+trap 'rm -rf "$SCRATCH"' EXIT
+
+run() {
+  local name="$1"; shift
+  if "$@" > "${SCRATCH}/out" 2>&1; then
+    PASSES=$((PASSES+1))
+    echo "  PASS: $name"
+  else
+    FAILURES=$((FAILURES+1))
+    echo "  FAIL: $name"
+    echo "    command: $*"
+    echo "    output:"
+    sed 's/^/      /' "${SCRATCH}/out"
+  fi
+}
+
+echo "setup-execution-core-states tests"
+
+# ─── Layer 1: pure helper unit tests (source with the guard suppressing main) ─
+# shellcheck source=/dev/null
+source "$SCRIPT"
+
+# build_execution_core_state_map — exact 11-key collapse map.
+STATE_MAP_JSON="$(build_execution_core_state_map)"
+
+run "state map is valid JSON" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e ."
+
+run "state map has 11 keys" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e 'length == 11'"
+
+run "state map todo -> Ready" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.todo == \"Ready\"'"
+
+run "state map triage -> Triage" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.triage == \"Triage\"'"
+
+run "state map research -> Research" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.research == \"Research\"'"
+
+run "state map planning -> Plan" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.planning == \"Plan\"'"
+
+run "state map inProgress -> Implement" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.inProgress == \"Implement\"'"
+
+run "state map verifying -> Validate" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.verifying == \"Validate\"'"
+
+run "state map reviewing -> Validate" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.reviewing == \"Validate\"'"
+
+run "state map inReview -> PR" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.inReview == \"PR\"'"
+
+run "state map backlog -> Backlog" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.backlog == \"Backlog\"'"
+
+run "state map done -> Done" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.done == \"Done\"'"
+
+run "state map canceled -> Canceled" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.canceled == \"Canceled\"'"
+
+# contract_states — exactly Ready Research Plan Implement Validate PR (no Triage).
+CONTRACT="$(contract_states)"
+
+run "contract_states lists the 6 contract names" \
+  bash -c "[ \"\$(echo '$CONTRACT' | jq -r '.[].name' | sort | tr '\n' ' ')\" = 'Implement Plan PR Ready Research Validate ' ]"
+
+run "contract_states excludes Triage" \
+  bash -c "! echo '$CONTRACT' | jq -e '.[] | select(.name == \"Triage\")'"
+
+run "contract_states: Ready is unstarted" \
+  bash -c "echo '$CONTRACT' | jq -e '.[] | select(.name==\"Ready\") | .type == \"unstarted\"'"
+
+run "contract_states: Research is unstarted" \
+  bash -c "echo '$CONTRACT' | jq -e '.[] | select(.name==\"Research\") | .type == \"unstarted\"'"
+
+run "contract_states: Plan is started" \
+  bash -c "echo '$CONTRACT' | jq -e '.[] | select(.name==\"Plan\") | .type == \"started\"'"
+
+run "contract_states: Implement is started" \
+  bash -c "echo '$CONTRACT' | jq -e '.[] | select(.name==\"Implement\") | .type == \"started\"'"
+
+run "contract_states: Validate is started" \
+  bash -c "echo '$CONTRACT' | jq -e '.[] | select(.name==\"Validate\") | .type == \"started\"'"
+
+run "contract_states: PR is started" \
+  bash -c "echo '$CONTRACT' | jq -e '.[] | select(.name==\"PR\") | .type == \"started\"'"
+
+# missing_contract_states — diff against a fetched-states JSON fixture.
+FETCHED_PARTIAL='[{"name":"Triage","type":"started"},{"name":"Research","type":"unstarted"},{"name":"Plan","type":"started"}]'
+MISSING="$(missing_contract_states "$FETCHED_PARTIAL")"
+
+run "missing_contract_states returns the absent contract states" \
+  bash -c "[ \"\$(echo '$MISSING' | tr ' ' '\n' | grep -v '^\$' | sort | tr '\n' ' ')\" = 'Implement PR Ready Validate ' ]"
+
+FETCHED_ALL='[{"name":"Triage","type":"started"},{"name":"Ready","type":"unstarted"},{"name":"Research","type":"unstarted"},{"name":"Plan","type":"started"},{"name":"Implement","type":"started"},{"name":"Validate","type":"started"},{"name":"PR","type":"started"}]'
+
+run "missing_contract_states returns empty when all present (idempotent)" \
+  bash -c "[ -z \"\$(missing_contract_states '$FETCHED_ALL' | tr -d '[:space:]')\" ]"
+
+# build_workflow_state_create_mutation — GraphQL mutation string.
+MUTATION="$(build_workflow_state_create_mutation 'team-uuid-123' 'Validate' 'started' '#abcdef')"
+
+run "mutation contains workflowStateCreate" \
+  bash -c "echo '$MUTATION' | grep -q 'workflowStateCreate'"
+
+run "mutation contains the teamId" \
+  bash -c "echo '$MUTATION' | grep -q 'team-uuid-123'"
+
+run "mutation contains the state name" \
+  bash -c "echo '$MUTATION' | grep -q 'Validate'"
+
+run "mutation contains the type" \
+  bash -c "echo '$MUTATION' | grep -q 'started'"
+
+# ─── Layer 2: E2E with a stubbed curl ────────────────────────────────────────
+
+# Build a fixture repo with .catalyst/config.json + a git repo + secrets.
+build_repo() {
+  local dir="$1" team_key="${2:-CTL}"
+  mkdir -p "${dir}/.catalyst"
+  cat > "${dir}/.catalyst/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-project",
+    "linear": {
+      "teamKey": "${team_key}",
+      "stateMap": {
+        "backlog": "Backlog",
+        "inProgress": "In Progress",
+        "inReview": "In Review",
+        "done": "Done"
+      }
+    },
+    "orchestration": {
+      "dispatchMode": "execution-core",
+      "executionCore": { "eligibleQuery": { "status": "Todo" } }
+    }
+  }
+}
+EOF
+  git -C "$dir" init -q 2>/dev/null || true
+}
+
+build_secrets() {
+  local home="$1"
+  mkdir -p "${home}/.config/catalyst"
+  cat > "${home}/.config/catalyst/config-test-project.json" <<'EOF'
+{
+  "catalyst": { "linear": { "apiToken": "lin_api_fake_token_12345" } }
+}
+EOF
+}
+
+FAKE_TEAM_ID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+# install_fake_curl — a curl stub. The states query returns whichever set the
+# caller specifies; the workflowStateCreate mutation either succeeds or errors.
+# $1 = bin dir, $2 = "all"|"partial", $3 = "ok"|"create-fails"
+install_fake_curl() {
+  local bin_dir="$1" states="$2" create="${3:-ok}"
+  mkdir -p "$bin_dir"
+
+  local states_nodes
+  if [ "$states" = "all" ]; then
+    states_nodes='{"id":"s-triage","name":"Triage","type":"started"},{"id":"s-ready","name":"Ready","type":"unstarted"},{"id":"s-research","name":"Research","type":"unstarted"},{"id":"s-plan","name":"Plan","type":"started"},{"id":"s-impl","name":"Implement","type":"started"},{"id":"s-val","name":"Validate","type":"started"},{"id":"s-pr","name":"PR","type":"started"},{"id":"s-backlog","name":"Backlog","type":"backlog"},{"id":"s-done","name":"Done","type":"completed"},{"id":"s-cancel","name":"Canceled","type":"canceled"}'
+  else
+    states_nodes='{"id":"s-triage","name":"Triage","type":"started"},{"id":"s-research","name":"Research","type":"unstarted"},{"id":"s-plan","name":"Plan","type":"started"},{"id":"s-backlog","name":"Backlog","type":"backlog"},{"id":"s-done","name":"Done","type":"completed"}'
+  fi
+
+  local create_resp
+  if [ "$create" = "create-fails" ]; then
+    create_resp='{"errors":[{"message":"insufficient permissions"}]}'
+  else
+    create_resp='{"data":{"workflowStateCreate":{"success":true,"workflowState":{"id":"new-state-id"}}}}'
+  fi
+
+  cat > "${bin_dir}/curl" <<SCRIPT
+#!/usr/bin/env bash
+# Read the request body to distinguish a states query from a create mutation.
+body=""
+for arg in "\$@"; do
+  case "\$arg" in
+    *workflowStateCreate*) body="create" ;;
+    *workflowStates*|*states*) [ -z "\$body" ] && body="query" ;;
+  esac
+done
+# -d @- form: body comes from stdin
+if [ -z "\$body" ]; then
+  stdin_body="\$(cat)"
+  case "\$stdin_body" in
+    *workflowStateCreate*) body="create" ;;
+    *) body="query" ;;
+  esac
+fi
+if [ "\$body" = "create" ]; then
+  echo '${create_resp}'
+else
+  echo '{"data":{"teams":{"nodes":[{"id":"${FAKE_TEAM_ID}","workflowStates":{"nodes":[${states_nodes}]}}]}}}'
+fi
+exit 0
+SCRIPT
+  chmod +x "${bin_dir}/curl"
+}
+
+# ─── Test: --dry-run --json reports actions, writes nothing ───────────────────
+WORK_DR="${SCRATCH}/dryrun"
+BIN_DR="${SCRATCH}/dryrun/bin"
+HOME_DR="${SCRATCH}/dryrun/home"
+build_repo "$WORK_DR"
+build_secrets "$HOME_DR"
+install_fake_curl "$BIN_DR" "all" "ok"
+BEFORE_DR="$(cat "${WORK_DR}/.catalyst/config.json")"
+
+HOME="$HOME_DR" PATH="$BIN_DR:$PATH" CATALYST_DIR="${SCRATCH}/dryrun/catalyst" \
+  "$SCRIPT" --config "${WORK_DR}/.catalyst/config.json" --dry-run --json \
+  > "${SCRATCH}/dryrun-out" 2>&1 || true
+
+run "--dry-run --json emits JSON" \
+  bash -c "jq -e . '${SCRATCH}/dryrun-out'"
+
+AFTER_DR="$(cat "${WORK_DR}/.catalyst/config.json")"
+run "--dry-run writes nothing to config" \
+  bash -c "[ \"\$BEFORE_DR\" = \"\$AFTER_DR\" ]"
+
+run "--dry-run creates no registry file" \
+  bash -c "[ ! -f '${SCRATCH}/dryrun/catalyst/execution-core/registry.json' ]"
+
+# ─── Test: states all present -> writes stateMap, no workflowStateCreate ──────
+WORK_OK="${SCRATCH}/ok"
+BIN_OK="${SCRATCH}/ok/bin"
+HOME_OK="${SCRATCH}/ok/home"
+build_repo "$WORK_OK"
+build_secrets "$HOME_OK"
+install_fake_curl "$BIN_OK" "all" "ok"
+
+run "exit 0 when all contract states present" \
+  bash -c "HOME='$HOME_OK' PATH='$BIN_OK:$PATH' CATALYST_DIR='${SCRATCH}/ok/catalyst' \
+    '$SCRIPT' --config '${WORK_OK}/.catalyst/config.json'"
+
+run "writes execution-core stateMap (verifying -> Validate)" \
+  bash -c "jq -e '.catalyst.linear.stateMap.verifying == \"Validate\"' '${WORK_OK}/.catalyst/config.json'"
+
+run "writes execution-core stateMap (inReview -> PR)" \
+  bash -c "jq -e '.catalyst.linear.stateMap.inReview == \"PR\"' '${WORK_OK}/.catalyst/config.json'"
+
+run "upserts a registry entry for the team" \
+  bash -c "jq -e '.projects[] | select(.team == \"CTL\")' '${SCRATCH}/ok/catalyst/execution-core/registry.json'"
+
+# ─── Test: idempotent — re-run produces identical config ─────────────────────
+CONFIG_AFTER1="$(cat "${WORK_OK}/.catalyst/config.json")"
+HOME="$HOME_OK" PATH="$BIN_OK:$PATH" CATALYST_DIR="${SCRATCH}/ok/catalyst" \
+  "$SCRIPT" --config "${WORK_OK}/.catalyst/config.json" > /dev/null 2>&1 || true
+CONFIG_AFTER2="$(cat "${WORK_OK}/.catalyst/config.json")"
+run "re-run is idempotent (config unchanged)" \
+  bash -c "[ \"\$CONFIG_AFTER1\" = \"\$CONFIG_AFTER2\" ]"
+
+# ─── Test: workflowStateCreate fails -> states_incomplete + fallback printed ──
+WORK_FAIL="${SCRATCH}/fail"
+BIN_FAIL="${SCRATCH}/fail/bin"
+HOME_FAIL="${SCRATCH}/fail/home"
+build_repo "$WORK_FAIL"
+build_secrets "$HOME_FAIL"
+install_fake_curl "$BIN_FAIL" "partial" "create-fails"
+
+HOME="$HOME_FAIL" PATH="$BIN_FAIL:$PATH" CATALYST_DIR="${SCRATCH}/fail/catalyst" \
+  "$SCRIPT" --config "${WORK_FAIL}/.catalyst/config.json" \
+  > "${SCRATCH}/fail-out" 2>&1
+FAIL_RC=$?
+
+run "create-failure prints admin fallback instructions" \
+  bash -c "grep -qi 'linear' '${SCRATCH}/fail-out' && grep -qiE 'admin|app|manually' '${SCRATCH}/fail-out'"
+
+run "create-failure flags states_incomplete (exit 3)" \
+  bash -c "[ '$FAIL_RC' = '3' ]"
+
+echo ""
+echo "Results: ${PASSES} passed, ${FAILURES} failed"
+[ "$FAILURES" = "0" ]
