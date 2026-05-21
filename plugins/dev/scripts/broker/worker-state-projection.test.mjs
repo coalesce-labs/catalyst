@@ -6,6 +6,7 @@
 //   - store helpers (Phase 1): worker_state / worker_revive_events / projection_meta
 //   - pure reducer (Phase 2): reduceWorkerStateEvent
 //   - projection integration (Phase 3): driver + router hook + startup replay
+//   - liveness surface (Phase 4): buildBrokerState.workerStates
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -25,6 +26,7 @@ import {
   projectWorkerStateEvent,
   replayWorkerStateProjection,
   processEvent,
+  buildBrokerState,
 } from "./index.mjs";
 // DB lifecycle is imported directly from broker-state.mjs (the
 // broker-state.test.mjs precedent) — these are not part of the pinned barrel.
@@ -545,8 +547,25 @@ describe("projection integration (CTL-532)", () => {
   });
 });
 
+// ─── Phase 4: liveness surface ───────────────────────────────────────────────
+
+describe("liveness surface (CTL-532)", () => {
+  test("buildBrokerState() includes a workerStates array reflecting upserted rows", () => {
+    upsertWorkerState({ orchestrator: "orch-1", ticket: "CTL-1", phase: "implement", status: "implement", eventId: "e1", eventTs: "2026-05-21T01:00:00.000Z" });
+    const state = buildBrokerState();
+    expect(Array.isArray(state.workerStates)).toBe(true);
+    expect(state.workerStates.length).toBe(1);
+    expect(state.workerStates[0].ticket).toBe("CTL-1");
+  });
+
+  test("buildBrokerState() returns an empty workerStates array when there are no rows", () => {
+    const state = buildBrokerState();
+    expect(Array.isArray(state.workerStates)).toBe(true);
+    expect(state.workerStates.length).toBe(0);
+  });
+});
+
 // Helper: ensure the directory for a fixture log path exists.
 function mkdtempSyncEnsure(filePath) {
   mkdirSync(join(filePath, ".."), { recursive: true });
 }
-

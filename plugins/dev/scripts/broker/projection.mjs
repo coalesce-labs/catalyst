@@ -31,6 +31,7 @@ import {
 import {
   getRecentAgents,
   upsertWorkerState,
+  getAllWorkerStates,
   recordReviveEvent,
   getReviveCount,
   setProjectionMeta,
@@ -210,6 +211,8 @@ export function buildBrokerState({ probe } = {}) {
     },
     // CTL-402: surface recent agent exit reasons for observability.
     recentAgents: (() => { try { return getRecentAgents(); } catch { return []; } })(),
+    // CTL-532: event-sourced per-worker projection for HUD / operator visibility.
+    workerStates: (() => { try { return getAllWorkerStates(); } catch { return []; } })(),
     // CTL-405: live orchestrator phases for HUD / operator visibility.
     activeOrchestrators: [...orchestratorStatusMap.entries()].map(([orchId, s]) => ({
       orchestratorId: orchId,
