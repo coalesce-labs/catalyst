@@ -15,7 +15,8 @@
 #                           [--dry-run]
 #
 # Outputs a single JSON summary on stdout:
-#   {"checked":N,"dead":M,"deadTickets":["TID-1",...],"stalled":S,"stalledTickets":["TID-2",...]}
+#   {"checked":N,"dead":M,"deadTickets":["TID-1",...],"stalled":S,
+#    "stalledTickets":["TID-2",...],"reaped":R}
 #
 # CTL-452 phase-mode pass: after the legacy PID check, scan
 # ${ORCH_DIR}/workers/<T>/phase-*.json for entries with bg_job_id; stat
@@ -31,6 +32,12 @@
 #                                     signal is flipped to stalled, waking the orchestrator.
 #   CATALYST_HEALTHCHECK_JOBS_ROOT    root for --bg job state dirs (default: $HOME/.claude/jobs).
 #                                     Tests override this to avoid touching the real Claude state.
+#   CATALYST_WATCH_BG_BIN             path to phase-agent-watch-bg (default: sibling). CTL-567:
+#                                     the reap sweep delegates to its `reap` subcommand.
+#
+# CTL-567 reap sweep: after the stall checks, `claude stop` every phase signal
+# at status="done" whose bg job is still alive (delegated to
+# phase-agent-watch-bg reap --scope done). The summary gains a "reaped" count.
 
 set -uo pipefail
 
@@ -39,6 +46,8 @@ STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
 # CTL-511: phase-agent-emit-complete emits the broker-routable phase.<name>.failed
 # event when a phase signal is flipped to stalled. Test-overridable.
 EMIT_COMPLETE="${CATALYST_EMIT_COMPLETE:-${SCRIPT_DIR}/phase-agent-emit-complete}"
+# CTL-567: phase-agent-watch-bg owns the reap scan. Test-overridable.
+WATCH_BG="${CATALYST_WATCH_BG_BIN:-${SCRIPT_DIR}/phase-agent-watch-bg}"
 
 ORCH_DIR=""
 ORCH_ID=""
@@ -265,6 +274,23 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
 	echo "PHASE-STALLED: ${P_TICKET} phase=${P_PHASE} bg=${P_BG} (${STALL_REASON})" >&2
 done
 
+# ─── CTL-567: reap completed-but-still-running phase bg jobs ──────────────────
+#
+# Backstop for the dispatcher reap in orchestrate-phase-advance: `claude stop`
+# every phase signal at status="done" whose bg job is still alive. The scan is
+# delegated to `phase-agent-watch-bg reap` so there is a single reaping
+# implementation. --scope done leaves failed / turn-cap-exhausted / stalled /
+# running signals alone (the ticket's exemptions). Best-effort — a missing or
+# failing watch-bg never derails the healthcheck.
+REAPED_COUNT=0
+if [ -x "$WATCH_BG" ]; then
+	REAP_ARGS=(reap --orch-dir "$ORCH_DIR" --scope "done" --json)
+	[ "$DRY_RUN" -eq 1 ] && REAP_ARGS+=(--dry-run)
+	REAP_OUT=$("$WATCH_BG" "${REAP_ARGS[@]}" 2>/dev/null || echo '{}')
+	REAPED_COUNT=$(echo "$REAP_OUT" | jq -r '.reaped // 0' 2>/dev/null || echo 0)
+	[ -n "$REAPED_COUNT" ] || REAPED_COUNT=0
+fi
+
 # Summary on stdout (machine-readable).
 DEAD_COUNT=${#DEAD_TICKETS[@]}
 if [ "$DEAD_COUNT" -eq 0 ]; then
@@ -286,4 +312,5 @@ jq -nc \
 	--argjson t "$DEAD_JSON" \
 	--argjson s "$STALLED_COUNT" \
 	--argjson st "$STALLED_JSON" \
-	'{checked:$c, dead:$d, deadTickets:$t, stalled:$s, stalledTickets:$st}'
+	--argjson r "$REAPED_COUNT" \
+	'{checked:$c, dead:$d, deadTickets:$t, stalled:$s, stalledTickets:$st, reaped:$r}'

@@ -76,13 +76,30 @@ Use `--force` to bypass the preconditions (you own the consequences).
    - For the runs dir: no `workers/*.json` has `status: "in_progress"` or `alive: true`
      (or `--force`).
 
-5. **Delete**
+5. **Stop background jobs** (CTL-567)
+
+   A `phase-agents` run spawns one `claude --bg` job per phase; a completed bg job keeps
+   its process alive until the ~1h supervisor reaper. Before deleting the runtime
+   directory, `claude stop` every remaining job of the run:
+
+   ```bash
+   plugins/dev/scripts/phase-agent-watch-bg reap \
+     --orch-dir ~/catalyst/runs/<orchId> --scope all
+   ```
+
+   `--scope all` is correct here — the run is terminal, so the mid-run exemptions
+   (failed-pending-revive, turn-cap-exhausted) no longer apply. Prefer `claude stop` over
+   `claude rm`: phase agents for one ticket share a worktree, so `claude rm` could delete a
+   live sibling's worktree. With `--dry-run`, pass `--dry-run` through. A missing run
+   directory or `phase-agent-watch-bg` is non-fatal — skip and continue.
+
+6. **Delete**
 
    - `git worktree remove <path>` for each worktree (add `--force` if step 4 flagged dirty
      state AND user passed `--force`).
    - `rm -rf ~/catalyst/runs/<orchId>/` for the runs directory.
 
-6. **Verify**
+7. **Verify**
 
    - Re-run the archive listing to confirm the orchestrator is still discoverable:
 
@@ -99,6 +116,7 @@ On success, print a summary:
 ```
 Teardown complete for <orchId>
   archived to: ~/catalyst/archives/<orchId>/
+  bg jobs stopped: <N>
   deleted:
     runs: ~/catalyst/runs/<orchId>/
     worktrees: <paths...>

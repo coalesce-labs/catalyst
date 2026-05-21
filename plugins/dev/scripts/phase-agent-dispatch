@@ -46,6 +46,12 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 # so the launch-failure tests can point at a stub or a non-existent path.
 EMIT_COMPLETE="${CATALYST_EMIT_COMPLETE:-${SCRIPT_DIR}/phase-agent-emit-complete}"
 
+# CTL-567: the executor seam — `claude --bg` (the launch below) and `claude stop`
+# (the reap) both resolve their binary through lib/executor.sh, so a cloud
+# executor can swap the launch and the stop together (design doc D9).
+# shellcheck source=lib/executor.sh
+source "${SCRIPT_DIR}/lib/executor.sh"
+
 die() {
 	echo "phase-agent-dispatch: $*" >&2
 	exit 1
@@ -473,10 +479,10 @@ BG_ERR=$(mktemp)
 trap 'rm -f "$BG_OUT" "$BG_ERR"' EXIT
 
 # Use env so we propagate the dispatch env without modifying our own shell.
-# CATALYST_DISPATCH_CLAUDE_BIN mirrors the override honored by
-# orchestrate-dispatch-next so tests (and tooling) can swap the claude binary
-# without rewriting either dispatcher.
-CLAUDE_BIN="${CATALYST_DISPATCH_CLAUDE_BIN:-claude}"
+# CLAUDE_BIN resolves through the executor seam (lib/executor.sh) — the same
+# function the reap path uses for `claude stop`. CATALYST_DISPATCH_CLAUDE_BIN
+# still overrides it, so existing tests and tooling are unaffected.
+CLAUDE_BIN="$(executor_claude_bin)"
 env "${DISPATCH_ENV[@]}" \
 	"$CLAUDE_BIN" --bg --dangerously-skip-permissions --model "$MODEL" "$PROMPT" \
 	>"$BG_OUT" 2>"$BG_ERR"

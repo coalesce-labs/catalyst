@@ -24,12 +24,34 @@
 #     the terminal set (done|failed|errored|stopped). These are the
 #     candidates the healthcheck should mark as stalled.
 #
+#   reap [--orch-dir <path>] [--scope done|all] [--dry-run] [--json]
+#     `claude stop` the bg jobs of phase agents (CTL-567). Classification is
+#     off the Catalyst phase signal `.status`, NOT the daemon state.json.
+#       --scope done (default): only signals with status="done". Safe mid-run —
+#         failed / turn-cap-exhausted / running signals are left alone.
+#       --scope all: every signal carrying a bg_job_id. For run-end teardown.
+#     A CPU safety belt (lib/executor.sh) never reaps an actively-computing
+#     process. --dry-run reports candidates without stopping anything. Prints a
+#     summary {scanned, reaped, skipped, dryRun, results:[...]}.
+#
 # Defaults: --orch-dir = $CATALYST_ORCHESTRATOR_DIR
 #           jobs root  = $CLAUDE_BG_JOBS_DIR or ~/.claude/jobs
 #
 # Exit codes: 0 on success (even if no jobs found), 1 on argument error.
 
 set -uo pipefail
+
+# ─── Resolve script dir through symlinks (sources lib/executor.sh) ──────────
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# shellcheck source=lib/executor.sh
+source "${SCRIPT_DIR}/lib/executor.sh"
 
 die() { echo "phase-agent-watch-bg: $*" >&2; exit 1; }
 
@@ -98,12 +120,17 @@ list_phase_agents() {
       if [[ $stale_sec -ge 900 ]]; then stale="true"; fi
     fi
 
+    # signalStatus is the Catalyst phase signal `.status` (dispatched/running/
+    # done/failed/turn-cap-exhausted/stalled) — distinct from `state` above,
+    # which is the (unreliable) daemon state.json value. `reap` classifies off
+    # signalStatus per CTL-567.
     jq -nc \
       --slurpfile s "$signal" \
       --argjson payload "$payload" \
       --arg stale "$stale" \
       --arg signalpath "$signal" \
       '{ticket: $s[0].ticket, phase: $s[0].phase, bg_job_id: $s[0].bg_job_id,
+        signalStatus: $s[0].status,
         state: $payload.state, endedAt: $payload.endedAt,
         stateFilePath: $payload.stateFilePath, mtimeEpoch: $payload.mtimeEpoch,
         stale: ($stale == "true"), signalFile: $signalpath}' \
@@ -115,7 +142,7 @@ list_phase_agents() {
 # ─── Parse args ─────────────────────────────────────────────────────────────
 
 SUB="${1:-}"
-[[ -n "$SUB" ]] || die "subcommand required: list|status|stale"
+[[ -n "$SUB" ]] || die "subcommand required: list|status|stale|reap"
 shift
 
 ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
@@ -123,6 +150,8 @@ STATE_FILTER="all"
 JOB_ID=""
 MAX_IDLE_SEC=900
 OUTPUT_JSON=0
+SCOPE="done"
+DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -130,6 +159,8 @@ while [[ $# -gt 0 ]]; do
     --state)       STATE_FILTER="$2"; shift 2 ;;
     --job)         JOB_ID="$2"; shift 2 ;;
     --max-idle-sec) MAX_IDLE_SEC="$2"; shift 2 ;;
+    --scope)       SCOPE="$2"; shift 2 ;;
+    --dry-run)     DRY_RUN=1; shift ;;
     --json)        OUTPUT_JSON=1; shift ;;
     -h|--help)     grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)             die "unknown flag: $1" ;;
@@ -204,8 +235,63 @@ case "$SUB" in
     done < <(list_phase_agents "$ORCH_DIR")
     ;;
 
+  reap)
+    [[ -n "$ORCH_DIR" ]] || die "reap: --orch-dir (or CATALYST_ORCHESTRATOR_DIR) is required"
+    case "$SCOPE" in
+      done|all) ;;
+      *) die "reap: --scope must be 'done' or 'all' (got: $SCOPE)" ;;
+    esac
+
+    SCANNED=0
+    REAPED=0
+    SKIPPED=0
+    RESULTS="[]"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      JOB=$(echo "$line" | jq -r '.bg_job_id // empty')
+      [[ -n "$JOB" ]] || continue
+      SIGSTATUS=$(echo "$line" | jq -r '.signalStatus // ""')
+      # --scope done leaves running / failed / turn-cap-exhausted / stalled
+      # signals alone (the ticket's exemptions). --scope all takes everything
+      # — only correct at run-end teardown, when no revive can follow.
+      if [[ "$SCOPE" == "done" && "$SIGSTATUS" != "done" ]]; then
+        continue
+      fi
+      SCANNED=$((SCANNED + 1))
+      TICKET=$(echo "$line" | jq -r '.ticket')
+      PHASE=$(echo "$line" | jq -r '.phase')
+      if [[ $DRY_RUN -eq 1 ]]; then
+        RESULT="would-reap"
+      else
+        RESULT=$(executor_reap "$JOB" || true)
+      fi
+      case "$RESULT" in
+        stopped|would-reap) REAPED=$((REAPED + 1)) ;;
+        *)                  SKIPPED=$((SKIPPED + 1)) ;;
+      esac
+      RESULTS=$(echo "$RESULTS" | jq -c \
+        --arg t "$TICKET" --arg p "$PHASE" --arg j "$JOB" --arg r "$RESULT" \
+        '. + [{ticket: $t, phase: $p, bg_job_id: $j, result: $r}]')
+    done < <(list_phase_agents "$ORCH_DIR")
+
+    DRY_JSON=$([[ $DRY_RUN -eq 1 ]] && echo true || echo false)
+    SUMMARY=$(jq -nc \
+      --argjson scanned "$SCANNED" --argjson reaped "$REAPED" \
+      --argjson skipped "$SKIPPED" --argjson dry "$DRY_JSON" \
+      --argjson results "$RESULTS" \
+      '{scanned: $scanned, reaped: $reaped, skipped: $skipped,
+        dryRun: $dry, results: $results}')
+    if [[ $OUTPUT_JSON -eq 1 ]]; then
+      echo "$SUMMARY"
+    else
+      echo "$SUMMARY" | jq -r \
+        '"reap: \(.scanned) scanned, \(.reaped) reaped, \(.skipped) skipped" +
+         (if .dryRun then " (dry-run)" else "" end)'
+    fi
+    ;;
+
   *)
-    die "unknown subcommand: $SUB (expected list|status|stale)"
+    die "unknown subcommand: $SUB (expected list|status|stale|reap)"
     ;;
 esac
 
