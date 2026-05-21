@@ -15,6 +15,9 @@ import {
   computeFreeSlots,
   computeReadyTickets,
   selectDispatchable,
+  deriveAdvancement,
+  listStartedTickets,
+  schedulerTick,
 } from "./scheduler.mjs";
 
 let orchDir;
@@ -133,5 +136,170 @@ describe("selectDispatchable", () => {
   });
   test("freeSlots 0 → selects nothing", () => {
     expect(selectDispatchable([tk("A")], new Set(), 0)).toEqual([]);
+  });
+});
+
+// ── Phase 4: dispatch and FSM-driven phase advancement ──
+
+// A dispatch stub: records every call, returns a configurable exit code.
+function fakeDispatch({ code = 0 } = {}) {
+  const calls = [];
+  const fn = (args) => {
+    calls.push(args);
+    return { code, stdout: "", stderr: "" };
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+describe("deriveAdvancement", () => {
+  test("latest phase done → returns the FSM successor", () => {
+    expect(deriveAdvancement({ triage: "done" })).toBe("research");
+    expect(
+      deriveAdvancement({ triage: "done", research: "done", plan: "done" }),
+    ).toBe("implement");
+  });
+  test("latest phase not done → null (nothing owed)", () => {
+    expect(deriveAdvancement({ triage: "done", research: "running" })).toBeNull();
+  });
+  test("successor already has a signal → null (already advanced)", () => {
+    expect(deriveAdvancement({ triage: "done", research: "running" })).toBeNull();
+    expect(deriveAdvancement({ research: "done", plan: "dispatched" })).toBeNull();
+  });
+  test("monitor-deploy done → null (pipeline terminal)", () => {
+    expect(deriveAdvancement({ "monitor-deploy": "done" })).toBeNull();
+  });
+  test("no signals → null", () => {
+    expect(deriveAdvancement({})).toBeNull();
+  });
+});
+
+describe("schedulerTick — new-work pull", () => {
+  test("dispatches triage for the top-ranked ready ticket into a free slot", () => {
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ maxParallel: 2 }),
+    );
+    const dispatch = fakeDispatch();
+    const eligible = [
+      {
+        identifier: "CTL-9",
+        priority: 4,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+      {
+        identifier: "CTL-8",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    const r = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    // 2 free slots, both ready → both dispatched, urgent (CTL-8) first.
+    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-8", "CTL-9"]);
+    expect(dispatch.calls.every((c) => c.phase === "triage")).toBe(true);
+    expect(r.dispatched).toEqual(["CTL-8", "CTL-9"]);
+  });
+
+  test("respects maxParallel — no dispatch when slots are full", () => {
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ maxParallel: 1 }),
+    );
+    writeSignal("CTL-1", "implement", "running"); // 1 in-flight, ceiling 1
+    const dispatch = fakeDispatch();
+    const eligible = [
+      {
+        identifier: "CTL-2",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    const r = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    expect(dispatch.calls).toHaveLength(0);
+    expect(r.dispatched).toEqual([]);
+  });
+
+  test("is idempotent — a second tick re-dispatches nothing", () => {
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ maxParallel: 2 }),
+    );
+    const eligible = [
+      {
+        identifier: "CTL-5",
+        priority: 2,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    // First tick dispatches; the stub also writes the signal
+    // phase-agent-dispatch would.
+    const dispatch = (args) => {
+      writeSignal(args.ticket, args.phase, "dispatched");
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    const second = fakeDispatch();
+    schedulerTick(orchDir, { readEligible: () => eligible, dispatch: second });
+    expect(second.calls).toHaveLength(0); // CTL-5 already started → not re-pulled
+  });
+
+  test("advancement sweep dispatches the owed next phase for an in-flight ticket", () => {
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ maxParallel: 1 }),
+    );
+    writeSignal("CTL-7", "triage", "done"); // research is owed
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, { readEligible: () => [], dispatch });
+    expect(dispatch.calls).toEqual([
+      { orchDir, ticket: "CTL-7", phase: "research" },
+    ]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+  });
+
+  test("a failed-dispatch (non-zero exit) is a soft skip, not a throw", () => {
+    writeFileSync(
+      join(orchDir, "state.json"),
+      JSON.stringify({ maxParallel: 1 }),
+    );
+    const dispatch = fakeDispatch({ code: 1 });
+    const eligible = [
+      {
+        identifier: "CTL-3",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    const r = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    expect(r.dispatched).toEqual([]); // dispatch failed → not recorded
+    // no throw — the tick completes
+  });
+});
+
+describe("listStartedTickets", () => {
+  test("returns every worker dir regardless of status (started ≠ in-flight)", () => {
+    writeSignal("CTL-1", "implement", "running");
+    writeSignal("CTL-2", "triage", "failed");
+    writeSignal("CTL-3", "monitor-deploy", "done");
+    expect([...listStartedTickets(orchDir)].sort()).toEqual([
+      "CTL-1",
+      "CTL-2",
+      "CTL-3",
+    ]);
   });
 });
