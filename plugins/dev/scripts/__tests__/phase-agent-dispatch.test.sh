@@ -643,6 +643,73 @@ assert_contains "$LOG" \
   "OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage" \
   "task.type appended even when projectKey absent (short form)"
 
+# ─── CTL-511: claude --bg launch failure → signal stalled + phase.*.failed ───
+# A launch failure must leave the signal at status="stalled" with NO
+# failureReason (so orchestrate-revive Loop 2 redispatches it) and emit
+# phase.<name>.failed.<TICKET> (so the broker wakes the orchestrator in
+# seconds instead of waiting on the periodic healthcheck).
+
+echo ""
+echo "Test 16 (CTL-511): claude --bg non-zero exit → signal stalled + phase.*.failed emitted"
+fresh_env t16
+export CLAUDE_STUB_EXIT=1
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+  >"${TEST_DIR}/t16.out" 2>"${TEST_DIR}/t16.err"
+RC=$?
+assert_eq "1" "$RC" "dispatch exits 1 on claude --bg launch failure"
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "launch failure leaves signal at stalled"
+assert_eq "false" "$(jq -r 'has("failureReason")' "$SIGNAL")" \
+  "launch-failure signal has no failureReason (Loop 2 redispatch-eligible)"
+EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+if [[ -z "$EVENT_FILE" ]]; then
+  fail "launch failure emitted no event log"
+else
+  grep -q '"phase.triage.failed.CTL-100"' "$EVENT_FILE" \
+    && pass "launch failure emits phase.triage.failed.CTL-100 event" \
+    || fail "no phase.triage.failed.CTL-100 event on launch failure"
+fi
+unset CLAUDE_STUB_EXIT CATALYST_DIR
+
+echo ""
+echo "Test 17 (CTL-511): claude --bg with no hex job id → signal stalled + phase.*.failed emitted"
+fresh_env t17
+# Override the stub: exit 0 but print no 8-char hex token.
+cat > "${STUB_DIR}/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "started, no job id present"
+exit 0
+STUB
+chmod +x "${STUB_DIR}/claude"
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+  >"${TEST_DIR}/t17.out" 2>"${TEST_DIR}/t17.err" || true
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "empty job id leaves signal at stalled"
+assert_eq "false" "$(jq -r 'has("failureReason")' "$SIGNAL")" \
+  "empty-job-id signal has no failureReason (Loop 2 redispatch-eligible)"
+EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+if [[ -z "$EVENT_FILE" ]]; then
+  fail "empty job id emitted no event log"
+else
+  grep -q '"phase.triage.failed.CTL-100"' "$EVENT_FILE" \
+    && pass "empty job id emits phase.triage.failed.CTL-100 event" \
+    || fail "no phase.triage.failed.CTL-100 event on empty job id"
+fi
+unset CATALYST_DIR
+
+echo ""
+echo "Test 18 (CTL-511 regression): a successful launch still ends at status:running"
+fresh_env t18
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "successful launch leaves signal at running"
+assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" "successful launch stdout status=running"
+assert_eq "f124220a" "$(jq -r '.bg_job_id' "$SIGNAL")" "successful launch records bg_job_id"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"

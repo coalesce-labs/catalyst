@@ -343,6 +343,44 @@ jq -nc \
     startedAt: $ts, updatedAt: $ts}' > "$SIGNAL_FILE" \
   || die "failed to write signal file $SIGNAL_FILE"
 
+# ─── CTL-511: launch-failure recovery helper ────────────────────────────────
+#
+# Called when `claude --bg` never produces a live worker (non-zero exit, or an
+# exit-0 run that prints no job id). Without this the signal file froze at
+# status="dispatched" and no phase.* event ever reached the broker, so the
+# orchestrator stayed blind until the periodic healthcheck (or, before CTL-511,
+# ~14 h). This:
+#   1. Rewrites the signal to status="stalled" — the one status orchestrate-revive
+#      Loop 2 redispatches. We deliberately use `attentionReason` (not
+#      `failureReason`): a `failureReason` would trip Loop 2 Branch 1's escalate
+#      path, which does NOT retry.
+#   2. Emits phase.<PHASE>.failed.<TICKET> via phase-agent-emit-complete's
+#      --no-signal-update mode (event only — step 1 above already owns the
+#      signal file, and a non-event-only emit would flip it to "failed").
+mark_launch_failed() {
+  local reason="$1"
+  local ts
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if [[ -f "$SIGNAL_FILE" ]]; then
+    local tmp="${SIGNAL_FILE}.tmp.$$"
+    if jq --arg ts "$ts" --arg reason "$reason" \
+       '.status = "stalled"
+        | .attentionReason = $reason
+        | .updatedAt = $ts
+        | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+       "$SIGNAL_FILE" > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$SIGNAL_FILE"
+    else
+      rm -f "$tmp"
+    fi
+  fi
+  if [[ -x "$EMIT_COMPLETE" ]]; then
+    "$EMIT_COMPLETE" --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "$reason" --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
+      --no-signal-update >/dev/null 2>&1 || true
+  fi
+}
+
 # ─── Build prompt + spawn claude --bg ──────────────────────────────────────
 
 PROMPT="/catalyst-dev:phase-${PHASE} ${TICKET} --orch-dir ${ORCH_DIR}"
@@ -401,6 +439,7 @@ RC=$?
 
 if [[ $RC -ne 0 ]]; then
   echo "phase-agent-dispatch: claude --bg exited $RC: $(cat "$BG_ERR")" >&2
+  mark_launch_failed "claude-bg-launch-failed"
   jq -n --arg status "failed" --arg reason "claude_bg_failed" \
         --arg signal "$SIGNAL_FILE" \
         '. + {status: $status, reason: $reason, signalFile: $signal}' \
@@ -413,7 +452,10 @@ fi
 # the previous `awk NR==1 {print $1}` captured the literal word "backgrounded".
 # Hex grep stays correct as long as job IDs remain hex tokens.
 BG_JOB_ID=$(grep -oE '[a-f0-9]{8}' "$BG_OUT" | head -1)
-[[ -n "$BG_JOB_ID" ]] || die "claude --bg returned empty job id (stdout: $(cat "$BG_OUT"))"
+if [[ -z "$BG_JOB_ID" ]]; then
+  mark_launch_failed "claude-bg-empty-job-id"
+  die "claude --bg returned empty job id (stdout: $(cat "$BG_OUT"))"
+fi
 
 # Record job id back into the signal file.
 TS2=$(date -u +%Y-%m-%dT%H:%M:%SZ)
