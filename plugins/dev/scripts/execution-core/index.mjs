@@ -26,6 +26,17 @@ export {
   startMonitor,
   stopMonitor,
 } from "./monitor.mjs";
+// scheduler.mjs (CTL-536) — re-exported explicitly so the test-only
+// __resetForTests helper stays out of the public barrel.
+export {
+  schedulerTick,
+  startScheduler,
+  stopScheduler,
+  computeReadyTickets,
+  selectDispatchable,
+  deriveAdvancement,
+  readAllEligibleTickets,
+} from "./scheduler.mjs";
 
 // --- Standalone entrypoint ----------------------------------------------
 function main() {
