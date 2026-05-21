@@ -12,6 +12,9 @@ import {
   transition,
 } from "./phase-fsm.mjs";
 
+// Render an arbitrary value as a readable test-name fragment.
+const label = (v) => (v === undefined ? "undefined" : Array.isArray(v) ? "[]" : JSON.stringify(v));
+
 // ─── Phase 1: module scaffold + happy-path pipeline ───
 
 describe("initialState", () => {
@@ -75,6 +78,17 @@ describe("isTerminal", () => {
   });
 });
 
+describe("isTerminal — input validation throws PhaseFsmError", () => {
+  // isTerminal funnels through the same assertState as transition; its
+  // validation contract needs its own coverage so a dropped assertState
+  // call would not silently return false.
+  for (const bad of [null, undefined, 42, "done", []]) {
+    test(`rejects bad state ${label(bad)}`, () => {
+      expect(() => isTerminal(bad)).toThrow(PhaseFsmError);
+    });
+  }
+});
+
 describe("transition — terminal states have no outgoing edges", () => {
   test("any event from done throws", () => {
     expect(() =>
@@ -85,11 +99,8 @@ describe("transition — terminal states have no outgoing edges", () => {
 
 describe("transition — input validation throws PhaseFsmError", () => {
   // bun's test.each spreads array rows as args, so a bare `[]` row would pass
-  // zero args and inject an uncalled `done` callback — a plain for-loop avoids
-  // that and matches the happy-path block's idiom above.
-  const label = (v) =>
-    v === undefined ? "undefined" : Array.isArray(v) ? "[]" : JSON.stringify(v);
-
+  // zero args and inject an uncalled `done` callback — the plain for-loops
+  // below avoid that and match the happy-path block's idiom above.
   for (const bad of [null, undefined, 42, "triage", []]) {
     test(`rejects bad state ${label(bad)}`, () => {
       expect(() => transition(bad, { type: "complete" })).toThrow(PhaseFsmError);
@@ -100,12 +111,16 @@ describe("transition — input validation throws PhaseFsmError", () => {
       transition({ phase: "bogus", reviveCount: 0, parkedFrom: null }, { type: "complete" })
     ).toThrow(PhaseFsmError);
   });
-  test("rejects negative / non-integer reviveCount", () => {
-    expect(() =>
-      transition({ phase: "triage", reviveCount: -1, parkedFrom: null }, { type: "complete" })
-    ).toThrow(PhaseFsmError);
-  });
-  for (const bad of [null, undefined, 42, "complete", {}]) {
+  // -1 hits the `< 0` operand; 1.5 / "0" / NaN are caught only by the
+  // !Number.isInteger operand — both sides of the predicate are exercised.
+  for (const reviveCount of [-1, 1.5, "0", NaN]) {
+    test(`rejects bad reviveCount ${String(reviveCount)}`, () => {
+      expect(() =>
+        transition({ phase: "triage", reviveCount, parkedFrom: null }, { type: "complete" })
+      ).toThrow(PhaseFsmError);
+    });
+  }
+  for (const bad of [null, undefined, 42, "complete", {}, []]) {
     test(`rejects bad event ${label(bad)}`, () => {
       expect(() => transition({ phase: "triage", reviveCount: 0, parkedFrom: null }, bad)).toThrow(
         PhaseFsmError
@@ -212,4 +227,14 @@ describe("transition — resume: needs-input returns to the parked phase", () =>
       transition({ phase: "needs-input", reviveCount: 0, parkedFrom: null }, { type: "resume" })
     ).toThrow(PhaseFsmError);
   });
+  // parkedFrom must be a *pipeline* phase — a known-but-non-pipeline state
+  // name (done / stalled / needs-input) must still be rejected, else resume
+  // could jump straight into a terminal state.
+  for (const parkedFrom of ["done", "stalled", "needs-input"]) {
+    test(`needs-input with non-pipeline parkedFrom '${parkedFrom}' throws`, () => {
+      expect(() =>
+        transition({ phase: "needs-input", reviveCount: 0, parkedFrom }, { type: "resume" })
+      ).toThrow(PhaseFsmError);
+    });
+  }
 });
