@@ -248,6 +248,64 @@ ST=$(phase_status "T-E" "implement")
 [ "$ST" = "stalled" ] && pass "custom threshold flips fresh → stalled" || fail "custom threshold flips fresh → stalled" "got: $ST"
 scratch_teardown
 
+# ─── CTL-511: phase stall also emits phase.<name>.failed to wake the orchestrator ───
+#
+# The legacy worker-phase-stalled event does not match the broker's
+# PHASE_EVENT_PATTERN, so a flipped-to-stalled signal never woke the
+# orchestrator. CTL-511 adds a phase.<name>.failed.<TICKET> emission alongside
+# it. The signal must stay at status="stalled" with NO failureReason so
+# orchestrate-revive Loop 2 redispatches it.
+
+echo "test (CTL-511): phase stall emits phase.<name>.failed event to wake the orchestrator"
+scratch_setup
+export CATALYST_DIR="${SCRATCH}/catalyst"
+mkdir -p "${CATALYST_DIR}/events"
+make_phase_signal "CTL-904" "monitor-merge" "running" "bg-ctl511-a"
+export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"   # exists, no per-job subdir → state-json-missing
+mkdir -p "${SCRATCH}/jobs"
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 > "${SCRATCH}/out" 2>&1
+ST=$(phase_status "CTL-904" "monitor-merge")
+[ "$ST" = "stalled" ] && pass "healthcheck still flips signal to stalled" || fail "healthcheck still flips signal to stalled" "got: $ST"
+HAS_FR=$(jq -r 'has("failureReason")' "${ORCH_DIR}/workers/CTL-904/phase-monitor-merge.json")
+[ "$HAS_FR" = "false" ] && pass "stalled signal has no failureReason (Loop 2 redispatch-eligible)" || fail "stalled signal has no failureReason" "got has: $HAS_FR"
+EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+if [ -z "$EVENT_FILE" ]; then
+  fail "healthcheck emitted no phase.*.failed event log"
+else
+  grep -q '"phase.monitor-merge.failed.CTL-904"' "$EVENT_FILE" \
+    && pass "healthcheck emits phase.monitor-merge.failed.CTL-904 to wake the orchestrator" \
+    || fail "healthcheck emitted no phase.monitor-merge.failed.CTL-904 event"
+fi
+unset CATALYST_DIR
+scratch_teardown
+
+echo "test (CTL-511 regression): worker-phase-stalled event still emitted alongside phase.*.failed"
+scratch_setup
+export CATALYST_DIR="${SCRATCH}/catalyst"
+mkdir -p "${CATALYST_DIR}/events"
+make_phase_signal "CTL-905" "verify" "running" "bg-ctl511-b"
+export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"
+mkdir -p "${SCRATCH}/jobs"
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 > "${SCRATCH}/out" 2>&1
+grep -q "worker-phase-stalled" "$STATE_LOG" && pass "worker-phase-stalled event still emitted (regression)" || fail "worker-phase-stalled event still emitted" "log: $(cat "$STATE_LOG")"
+unset CATALYST_DIR
+scratch_teardown
+
+echo "test (CTL-511): --dry-run emits no phase.*.failed event and no signal mutation"
+scratch_setup
+export CATALYST_DIR="${SCRATCH}/catalyst"
+mkdir -p "${CATALYST_DIR}/events"
+make_phase_signal "CTL-906" "implement" "running" "bg-ctl511-c"
+export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs"
+mkdir -p "${SCRATCH}/jobs"
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 --dry-run > "${SCRATCH}/out" 2>&1
+ST=$(phase_status "CTL-906" "implement")
+[ "$ST" = "running" ] && pass "--dry-run leaves phase signal unchanged" || fail "--dry-run leaves phase signal unchanged" "got: $ST"
+DRY_EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
+[ -z "$DRY_EVENT_FILE" ] && pass "--dry-run emits no phase.*.failed event" || fail "--dry-run emits no phase.*.failed event" "got: $DRY_EVENT_FILE"
+unset CATALYST_DIR
+scratch_teardown
+
 echo
 echo "Results: $PASSES passed, $FAILURES failed"
 [ "$FAILURES" -eq 0 ]

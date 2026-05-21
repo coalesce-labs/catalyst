@@ -26,6 +26,9 @@
 # Environment:
 #   CATALYST_STATE_SCRIPT             path to catalyst-state.sh (default: ../catalyst-state.sh
 #                                     next to this script). Tests override this to capture calls.
+#   CATALYST_EMIT_COMPLETE            path to phase-agent-emit-complete (default: next to this
+#                                     script). CTL-511: emits phase.<name>.failed when a phase
+#                                     signal is flipped to stalled, waking the orchestrator.
 #   CATALYST_HEALTHCHECK_JOBS_ROOT    root for --bg job state dirs (default: $HOME/.claude/jobs).
 #                                     Tests override this to avoid touching the real Claude state.
 
@@ -33,6 +36,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+# CTL-511: phase-agent-emit-complete emits the broker-routable phase.<name>.failed
+# event when a phase signal is flipped to stalled. Test-overridable.
+EMIT_COMPLETE="${CATALYST_EMIT_COMPLETE:-${SCRIPT_DIR}/phase-agent-emit-complete}"
 
 ORCH_DIR=""
 ORCH_ID=""
@@ -46,7 +52,7 @@ DRY_RUN=0
 JOBS_ROOT="${CATALYST_HEALTHCHECK_JOBS_ROOT:-${HOME}/.claude/jobs}"
 
 usage() {
-  sed -n '2,32p' "$0"
+  sed -n '2,35p' "$0"
   exit "${1:-1}"
 }
 
@@ -214,6 +220,19 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
     "$STATE_SCRIPT" event "$EVT" >/dev/null 2>&1 || true
     "$STATE_SCRIPT" attention "$ORCH_ID" "$STALL_REASON" "$P_TICKET" \
       "Phase ${P_PHASE} stalled (${STALL_REASON})" >/dev/null 2>&1 || true
+  fi
+
+  # CTL-511: emit phase.<name>.failed.<TICKET> so the broker's phase_lifecycle
+  # route wakes the orchestrator immediately. worker-phase-stalled (above) does
+  # not match the broker's PHASE_EVENT_PATTERN, so before this the orchestrator
+  # only learned of the stall on its own 10-minute idle fallback. --no-signal-update
+  # is essential: the jq above already wrote status="stalled" and a non-event-only
+  # emit would flip it to "failed", which orchestrate-revive Loop 2 skips.
+  if [ -x "$EMIT_COMPLETE" ]; then
+    "$EMIT_COMPLETE" \
+      --phase "$P_PHASE" --ticket "$P_TICKET" --status failed \
+      --reason "$STALL_REASON" --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
+      --no-signal-update >/dev/null 2>&1 || true
   fi
 
   echo "PHASE-STALLED: ${P_TICKET} phase=${P_PHASE} bg=${P_BG} (${STALL_REASON})" >&2
