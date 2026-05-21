@@ -70,6 +70,37 @@ fi
 "$SCRIPT" probe || pass "probe exits non-zero after stop"
 teardown
 
+echo "test 4 (CTL-554): start fails loudly when the daemon never writes its PID file"
+setup
+# A daemon that stays alive but never writes a PID file — simulates a hang
+# mid-init. cmd_start must NOT fabricate a PID file or report success.
+NOPID="$SCRATCH/nopid-daemon.sh"
+cat >"$NOPID" <<'EOF'
+#!/usr/bin/env bash
+sleep 30
+EOF
+chmod +x "$NOPID"
+export EXECUTION_CORE_DAEMON_SCRIPT="$NOPID"
+OUT=$("$SCRIPT" start 2>&1)
+RC=$?
+if [ "$RC" != "0" ]; then
+	pass "start exits non-zero on a hung daemon"
+else
+	fail "start exits non-zero on a hung daemon" "rc=$RC"
+fi
+if [ ! -f "$SCRATCH/execution-core/daemon.pid" ]; then
+	pass "start does not fabricate a PID file"
+else
+	fail "start does not fabricate a PID file" "pidfile present"
+fi
+if echo "$OUT" | grep -qi "hung"; then
+	pass "start reports the degraded state"
+else
+	fail "start reports the degraded state" "out=$OUT"
+fi
+pkill -f "nopid-daemon.sh" 2>/dev/null || true
+teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

@@ -25,8 +25,13 @@ fi
 
 # repoRoot = canonical main working tree. `git rev-parse --git-common-dir`
 # returns the main repo's .git even from a linked worktree; its parent is the
-# main working tree.
-COMMON_DIR=$(git rev-parse --git-common-dir)
+# main working tree. Guard the call: under `set -euo pipefail` an unguarded
+# failure aborts with git's raw "fatal: not a git repository" (exit 128) and
+# no script-level context about whether enrollment partially happened.
+COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null) || {
+	echo "error: orchestrate-execution-core-route.sh must run inside a git repository" >&2
+	exit 1
+}
 case "$COMMON_DIR" in
 /*) ;;
 *) COMMON_DIR="$(pwd)/$COMMON_DIR" ;;
@@ -39,13 +44,27 @@ PROJECT_KEY=$(jq -r '.catalyst.project.key // empty' "$CONFIG" 2>/dev/null || tr
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EC_INDEX="$SCRIPT_DIR/execution-core/index.mjs"
-ENSURE_DAEMON="${EXECUTION_CORE_ENSURE_DAEMON:-$SCRIPT_DIR/catalyst-execution-core start}"
+# Daemon-lifecycle helper — a single executable path, never a command string.
+# Invoked as `"$EC_DAEMON" <subcommand>` so the path and the subcommand never
+# share one word-split-prone string: the old unquoted `$ENSURE_DAEMON`
+# expansion broke if SCRIPT_DIR contained a space. Overridable for tests.
+EC_DAEMON="${EXECUTION_CORE_ENSURE_DAEMON:-$SCRIPT_DIR/catalyst-execution-core}"
 
 case "$ACTION" in
 enroll)
 	bun "$EC_INDEX" enroll --project-key "$PROJECT_KEY" --repo-root "$REPO_ROOT"
-	$ENSURE_DAEMON
-	echo "execution-core: enrolled $PROJECT_KEY ($REPO_ROOT); daemon ensured"
+	# Ensure-and-verify: `start` is best-effort, `probe` is the authoritative
+	# check that the daemon is actually serving before we report success. The
+	# old code printed "daemon ensured" unconditionally — even when the daemon
+	# never came up.
+	"$EC_DAEMON" start || true
+	if "$EC_DAEMON" probe; then
+		echo "execution-core: enrolled $PROJECT_KEY ($REPO_ROOT); daemon running"
+	else
+		echo "error: execution-core enrolled $PROJECT_KEY but the daemon is not" \
+			"running — check the daemon log" >&2
+		exit 1
+	fi
 	;;
 stop)
 	bun "$EC_INDEX" unenroll --project-key "$PROJECT_KEY"
