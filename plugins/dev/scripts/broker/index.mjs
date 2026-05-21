@@ -24,6 +24,18 @@ import {
   closeBrokerStateDb,
   getActiveWaitingSessions,
 } from "./broker-state.mjs";
+// CTL-532: re-export the worker-state store helpers through the barrel.
+export {
+  upsertWorkerState,
+  getWorkerState,
+  getWorkerStatesByOrchestrator,
+  getAllWorkerStates,
+  recordReviveEvent,
+  getReviveCount,
+  getProjectionMeta,
+  setProjectionMeta,
+  getStaleWorkers,
+} from "./broker-state.mjs";
 import {
   formatMissingKeyWarning,
   formatLoadedKeyInfo,
@@ -70,8 +82,9 @@ import {
 
 // --- Public re-export barrel (CTL-529) ---
 // The execution-core split moved every public symbol into a named module.
-// index.mjs re-exports all 55 of them so the import surface — depended on by
+// index.mjs re-exports all 64 of them so the import surface — depended on by
 // the broker test suite — is byte-for-byte preserved. See barrel-exports.test.mjs.
+// CTL-532 added the 9 worker-state store helpers (Phase 1).
 export { readGroqConfig, readGroqApiKeyFromConfig } from "./config.mjs";
 export {
   getInterests,

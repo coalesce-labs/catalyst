@@ -111,6 +111,55 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
     )
   `);
 
+  // CTL-532: event-sourced worker-state projection (ADR-018 Phase 3).
+  // One row per (orchestrator, ticket) holding phase/status/PR/revive-count
+  // derived purely from the durable event stream. Rebuilt idempotently on
+  // every broker start by replayWorkerStateProjection().
+  db.run(`
+    CREATE TABLE IF NOT EXISTS worker_state (
+      orchestrator   TEXT NOT NULL,
+      ticket         TEXT NOT NULL,
+      phase          TEXT,
+      status         TEXT,
+      pr_number      INTEGER,
+      revive_count   INTEGER NOT NULL DEFAULT 0,
+      last_event_id  TEXT,
+      last_event_ts  TEXT,
+      updated_at     TEXT NOT NULL,
+      PRIMARY KEY (orchestrator, ticket)
+    )
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_worker_state_orchestrator
+      ON worker_state(orchestrator)
+  `);
+
+  // CTL-532: idempotency ledger for revive counting — re-folding a seen
+  // event id is a no-op, so a full-log replay never double-counts revives.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS worker_revive_events (
+      event_id      TEXT PRIMARY KEY,
+      orchestrator  TEXT NOT NULL,
+      ticket        TEXT NOT NULL,
+      ts            TEXT NOT NULL
+    )
+  `);
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_worker_revive_lookup
+      ON worker_revive_events(orchestrator, ticket)
+  `);
+
+  // CTL-532: single-row observability/watermark record (id pinned to 1).
+  db.run(`
+    CREATE TABLE IF NOT EXISTS projection_meta (
+      id             INTEGER PRIMARY KEY CHECK (id = 1),
+      last_event_id  TEXT,
+      last_event_ts  TEXT,
+      events_folded  INTEGER NOT NULL DEFAULT 0,
+      updated_at     TEXT NOT NULL
+    )
+  `);
+
   return db;
 }
 
@@ -365,4 +414,159 @@ export function getTicketState(ticket) {
     prNumber: row.pr_number,
     updatedAt: row.updated_at,
   };
+}
+
+// ─── worker_state helpers (CTL-532) ──────────────────────────────────────────
+
+// Statuses that mean the worker has finished — used by getStaleWorkers (and the
+// projection reducer) so "terminal" is defined exactly once.
+export const WORKER_TERMINAL_STATUSES = new Set(["done", "failed", "complete"]);
+
+// upsertWorkerState — last-write-wins for phase/status gated on the event
+// watermark; pr_number is COALESCE-sticky; revive_count is monotone (MAX);
+// last_event_ts/last_event_id advance to the high-water mark. Mirrors the
+// upsertTicketState COALESCE idiom but adds a watermark gate so an
+// out-of-order (older) event can never regress phase/status.
+export function upsertWorkerState({
+  orchestrator,
+  ticket,
+  phase,
+  status,
+  prNumber,
+  reviveCount,
+  eventId,
+  eventTs,
+}) {
+  if (!orchestrator || !ticket) return;
+  ensure().run(
+    `INSERT INTO worker_state
+       (orchestrator, ticket, phase, status, pr_number, revive_count,
+        last_event_id, last_event_ts, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(orchestrator, ticket) DO UPDATE SET
+       -- phase/status only move forward when the incoming event is at least
+       -- as recent as the last folded event (watermark gate).
+       phase = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+              AND excluded.phase IS NOT NULL
+         THEN excluded.phase ELSE worker_state.phase END,
+       status = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+              AND excluded.status IS NOT NULL
+         THEN excluded.status ELSE worker_state.status END,
+       pr_number    = COALESCE(excluded.pr_number, worker_state.pr_number),
+       revive_count = MAX(excluded.revive_count, worker_state.revive_count),
+       last_event_id = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+         THEN excluded.last_event_id ELSE worker_state.last_event_id END,
+       last_event_ts = CASE
+         WHEN excluded.last_event_ts IS NOT NULL
+              AND (worker_state.last_event_ts IS NULL
+                   OR excluded.last_event_ts >= worker_state.last_event_ts)
+         THEN excluded.last_event_ts ELSE worker_state.last_event_ts END,
+       updated_at   = excluded.updated_at`,
+    [
+      orchestrator,
+      ticket,
+      phase ?? null,
+      status ?? null,
+      prNumber ?? null,
+      reviveCount ?? 0,
+      eventId ?? null,
+      eventTs ?? null,
+      nowIso(),
+    ],
+  );
+}
+
+export function getWorkerState(orchestrator, ticket) {
+  const row = ensure()
+    .prepare(`SELECT * FROM worker_state WHERE orchestrator = ? AND ticket = ?`)
+    .get(orchestrator, ticket);
+  return row ?? null;
+}
+
+export function getWorkerStatesByOrchestrator(orchestrator) {
+  return ensure()
+    .prepare(`SELECT * FROM worker_state WHERE orchestrator = ? ORDER BY ticket`)
+    .all(orchestrator);
+}
+
+export function getAllWorkerStates() {
+  return ensure()
+    .prepare(`SELECT * FROM worker_state ORDER BY orchestrator, ticket`)
+    .all();
+}
+
+// recordReviveEvent — INSERT OR IGNORE into the idempotency ledger; returns
+// true only when a genuinely new row was inserted (changes > 0), so a re-fold
+// of a previously seen revive event id is a safe no-op.
+export function recordReviveEvent({ eventId, orchestrator, ticket, ts }) {
+  if (!eventId || !orchestrator || !ticket) return false;
+  const result = ensure().run(
+    `INSERT OR IGNORE INTO worker_revive_events (event_id, orchestrator, ticket, ts)
+     VALUES (?, ?, ?, ?)`,
+    [eventId, orchestrator, ticket, ts ?? nowIso()],
+  );
+  return result.changes > 0;
+}
+
+export function getReviveCount(orchestrator, ticket) {
+  const row = ensure()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM worker_revive_events
+       WHERE orchestrator = ? AND ticket = ?`,
+    )
+    .get(orchestrator, ticket);
+  return row?.n ?? 0;
+}
+
+export function getProjectionMeta() {
+  const row = ensure()
+    .prepare(`SELECT * FROM projection_meta WHERE id = 1`)
+    .get();
+  if (!row) return null;
+  return {
+    lastEventId: row.last_event_id,
+    lastEventTs: row.last_event_ts,
+    eventsFolded: row.events_folded,
+  };
+}
+
+export function setProjectionMeta({ lastEventId, lastEventTs, eventsFolded }) {
+  ensure().run(
+    `INSERT INTO projection_meta (id, last_event_id, last_event_ts, events_folded, updated_at)
+     VALUES (1, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       last_event_id = excluded.last_event_id,
+       last_event_ts = excluded.last_event_ts,
+       events_folded = excluded.events_folded,
+       updated_at    = excluded.updated_at`,
+    [lastEventId ?? null, lastEventTs ?? null, eventsFolded ?? 0, nowIso()],
+  );
+}
+
+// getStaleWorkers — event-sourced liveness read. Returns non-terminal rows
+// whose last_event_ts is STRICTLY older than `thresholdMs` before `nowIso`.
+// This is the positive, event-sourced replacement for the signal-mtime
+// heuristic in orchestrate-healthcheck Pass 2 (no caller wired in CTL-532).
+export function getStaleWorkers(thresholdMs, nowIso = new Date().toISOString()) {
+  const cutoff = new Date(new Date(nowIso).getTime() - thresholdMs).toISOString();
+  const terminal = [...WORKER_TERMINAL_STATUSES];
+  const placeholders = terminal.map(() => "?").join(", ");
+  return ensure()
+    .prepare(
+      `SELECT * FROM worker_state
+       WHERE last_event_ts IS NOT NULL
+         AND last_event_ts < ?
+         AND (status IS NULL OR status NOT IN (${placeholders}))
+       ORDER BY last_event_ts`,
+    )
+    .all(cutoff, ...terminal);
 }

@@ -3,9 +3,10 @@
 // singleton getters return identity-stable references. Goes RED if any
 // extraction phase drops a re-export or breaks getter identity.
 //
-// Note: index.mjs has 55 `export` declarations (verified via
-// `grep -cE '^export ' index.mjs`). The CTL-529 plan prose says "56" but its
-// own enumerated list — and the file — is 55; this test pins the real count.
+// Note: the barrel re-exports 64 public symbols (CTL-529 established 55; CTL-532
+// Phase 1 added the 9 worker-state store helpers). The count is the length of
+// the enumerated REQUIRED_EXPORTS list below — `grep -cE '^export '`
+// undercounts because most re-exports are multi-name `export { … } from` blocks.
 import { describe, test, expect } from "bun:test";
 import * as barrel from "./index.mjs";
 
@@ -36,14 +37,18 @@ const REQUIRED_EXPORTS = [
   "readGroqConfig", "readGroqApiKeyFromConfig",
   // thin main
   "logKeyHealthAtStartup", "runStartupProbe",
+  // CTL-532: worker-state projection — store helpers (broker-state.mjs)
+  "upsertWorkerState", "getWorkerState", "getWorkerStatesByOrchestrator",
+  "getAllWorkerStates", "recordReviveEvent", "getReviveCount",
+  "getProjectionMeta", "setProjectionMeta", "getStaleWorkers",
 ];
 
 describe("CTL-529 barrel contract", () => {
-  test("all 55 public symbols re-export from ./index.mjs", () => {
+  test("all 64 public symbols re-export from ./index.mjs", () => {
     for (const name of REQUIRED_EXPORTS) {
       expect(typeof barrel[name], `missing export: ${name}`).not.toBe("undefined");
     }
-    expect(REQUIRED_EXPORTS.length).toBe(55);
+    expect(REQUIRED_EXPORTS.length).toBe(64);
   });
 
   test("singleton getters return identity-stable live references", () => {
