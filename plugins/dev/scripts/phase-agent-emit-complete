@@ -51,9 +51,9 @@ set -uo pipefail
 # ─── Resolve script dir through symlinks ────────────────────────────────────
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
-  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
-  SOURCE="$(readlink "$SOURCE")"
-  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+	DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+	SOURCE="$(readlink "$SOURCE")"
+	[[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
 done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
@@ -63,7 +63,10 @@ source "${SCRIPT_DIR}/lib/canonical-event.sh"
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 EVENTS_DIR="${CATALYST_DIR}/events"
 
-die() { echo "phase-agent-emit-complete: $*" >&2; exit 1; }
+die() {
+	echo "phase-agent-emit-complete: $*" >&2
+	exit 1
+}
 warn() { echo "phase-agent-emit-complete: warn: $*" >&2; }
 
 # ─── Parse args ─────────────────────────────────────────────────────────────
@@ -73,51 +76,81 @@ TICKET=""
 STATUS=""
 REASON=""
 HANDOFF_PATH=""
-ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR:-}"
-ORCH_ID="${CATALYST_ORCHESTRATOR_ID:-}"
-SESSION_ID="${CATALYST_SESSION_ID:-}"
+ORCH_DIR="${CATALYST_ORCHESTRATOR_DIR-}"
+ORCH_ID="${CATALYST_ORCHESTRATOR_ID-}"
+SESSION_ID="${CATALYST_SESSION_ID-}"
 NO_SIGNAL_UPDATE=0
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --phase)             PHASE="$2"; shift 2 ;;
-    --ticket)            TICKET="$2"; shift 2 ;;
-    --status)            STATUS="$2"; shift 2 ;;
-    --reason)            REASON="$2"; shift 2 ;;
-    --handoff-path)      HANDOFF_PATH="$2"; shift 2 ;;
-    --orch-dir)          ORCH_DIR="$2"; shift 2 ;;
-    --orch-id)           ORCH_ID="$2"; shift 2 ;;
-    --session-id)        SESSION_ID="$2"; shift 2 ;;
-    --no-signal-update)  NO_SIGNAL_UPDATE=1; shift ;;
-    -h|--help)           grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *)                   die "unknown flag: $1" ;;
-  esac
+	case "$1" in
+	--phase)
+		PHASE="$2"
+		shift 2
+		;;
+	--ticket)
+		TICKET="$2"
+		shift 2
+		;;
+	--status)
+		STATUS="$2"
+		shift 2
+		;;
+	--reason)
+		REASON="$2"
+		shift 2
+		;;
+	--handoff-path)
+		HANDOFF_PATH="$2"
+		shift 2
+		;;
+	--orch-dir)
+		ORCH_DIR="$2"
+		shift 2
+		;;
+	--orch-id)
+		ORCH_ID="$2"
+		shift 2
+		;;
+	--session-id)
+		SESSION_ID="$2"
+		shift 2
+		;;
+	--no-signal-update)
+		NO_SIGNAL_UPDATE=1
+		shift
+		;;
+	-h | --help)
+		grep '^#' "$0" | sed 's/^# \{0,1\}//'
+		exit 0
+		;;
+	*) die "unknown flag: $1" ;;
+	esac
 done
 
-[[ -n "$PHASE" ]]  || die "--phase is required"
-[[ -n "$TICKET" ]] || die "--ticket is required"
-[[ -n "$STATUS" ]] || die "--status is required"
+[[ -n $PHASE ]] || die "--phase is required"
+[[ -n $TICKET ]] || die "--ticket is required"
+[[ -n $STATUS ]] || die "--status is required"
 
 case "$STATUS" in
-  complete|failed|turn-cap-exhausted) ;;
-  *) die "--status must be 'complete', 'failed', or 'turn-cap-exhausted' (got: $STATUS)" ;;
+complete | failed | turn-cap-exhausted) ;;
+*) die "--status must be 'complete', 'failed', or 'turn-cap-exhausted' (got: $STATUS)" ;;
 esac
 
 # Validate ticket shape against the same pattern the broker uses.
-if [[ ! "$TICKET" =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
-  die "invalid --ticket: $TICKET (expected e.g. CTL-100)"
+if [[ ! $TICKET =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
+	die "invalid --ticket: $TICKET (expected e.g. CTL-100)"
 fi
 
 # Validate phase name (no dots — they would break the event name parser).
-if [[ "$PHASE" == *.* ]]; then
-  die "invalid --phase: $PHASE (dots are reserved for event name parsing)"
+if [[ $PHASE == *.* ]]; then
+	die "invalid --phase: $PHASE (dots are reserved for event name parsing)"
 fi
 
 # ─── 1. Emit canonical event ────────────────────────────────────────────────
 
 EVENT_NAME="phase.${PHASE}.${STATUS}.${TICKET}"
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-SEVERITY=$([[ "$STATUS" == "complete" ]] && echo INFO || echo WARN)
+SEVERITY=$([[ $STATUS == "complete" ]] && echo INFO || echo WARN)
 TRACE_ID=$(derive_trace_id "$ORCH_ID" "$SESSION_ID")
 SPAN_ID=$(derive_span_id "$TICKET" "$SESSION_ID")
 
@@ -126,34 +159,34 @@ SPAN_ID=$(derive_span_id "$TICKET" "$SESSION_ID")
 # The broker's tryPhaseLifecycleRoute parser reads only event.name + ticket,
 # so payload extras don't change routing.
 PAYLOAD=$(jq -nc \
-  --arg phase "$PHASE" \
-  --arg ticket "$TICKET" \
-  --arg status "$STATUS" \
-  --arg reason "$REASON" \
-  --arg handoff "$HANDOFF_PATH" \
-  '{phase: $phase, ticket: $ticket, status: $status}
+	--arg phase "$PHASE" \
+	--arg ticket "$TICKET" \
+	--arg status "$STATUS" \
+	--arg reason "$REASON" \
+	--arg handoff "$HANDOFF_PATH" \
+	'{phase: $phase, ticket: $ticket, status: $status}
    + (if $reason == "" then {} else {failure_reason: $reason} end)
    + (if $handoff == "" then {} else {handoff_path: $handoff} end)')
 
 LINE=$(build_canonical_line \
-  --ts "$TS" \
-  --severity "$SEVERITY" \
-  --service "catalyst.phase-agent" \
-  --event-name "$EVENT_NAME" \
-  --trace-id "$TRACE_ID" \
-  --span-id "$SPAN_ID" \
-  --entity "phase" \
-  --action "$STATUS" \
-  --orch "$ORCH_ID" \
-  --worker "$TICKET" \
-  --session "$SESSION_ID" \
-  --linear-ticket "$TICKET" \
-  --message "Phase ${PHASE} ${STATUS} on ${TICKET}" \
-  --payload-json "$PAYLOAD" \
-  2>/dev/null) || warn "failed to build canonical event line"
+	--ts "$TS" \
+	--severity "$SEVERITY" \
+	--service "catalyst.phase-agent" \
+	--event-name "$EVENT_NAME" \
+	--trace-id "$TRACE_ID" \
+	--span-id "$SPAN_ID" \
+	--entity "phase" \
+	--action "$STATUS" \
+	--orch "$ORCH_ID" \
+	--worker "$TICKET" \
+	--session "$SESSION_ID" \
+	--linear-ticket "$TICKET" \
+	--message "Phase ${PHASE} ${STATUS} on ${TICKET}" \
+	--payload-json "$PAYLOAD" \
+	2>/dev/null) || warn "failed to build canonical event line"
 
-if [[ -n "$LINE" ]]; then
-  canonical_jsonl_append "$EVENTS_DIR" "$LINE" || warn "failed to append event to ${EVENTS_DIR}"
+if [[ -n $LINE ]]; then
+	canonical_jsonl_append "$EVENTS_DIR" "$LINE" || warn "failed to append event to ${EVENTS_DIR}"
 fi
 
 # ─── 2. Update phase signal file ────────────────────────────────────────────
@@ -162,69 +195,69 @@ fi
 # orchestrate-healthcheck stall) have already written the signal to
 # status="stalled" and need only the event from step 1 — skip the mutation.
 
-if [[ -n "$ORCH_DIR" && "$NO_SIGNAL_UPDATE" -eq 0 ]]; then
-  SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
-  if [[ -f "$SIGNAL_FILE" ]]; then
-    # CTL-484: turn-cap-exhausted is a non-terminal status the continuation
-    # branch of orchestrate-revive picks up. Map the canonical event status to
-    # the signal-file status separately so the broker (which only sees event
-    # names) and orchestrate-revive (which reads the per-phase signal file)
-    # agree on the distinction.
-    case "$STATUS" in
-      complete)           NEW_STATUS="done" ;;
-      failed)             NEW_STATUS="failed" ;;
-      turn-cap-exhausted) NEW_STATUS="turn-cap-exhausted" ;;
-    esac
-    # turn-cap-exhausted is NOT a terminal state — leave completedAt unset so
-    # consumers can distinguish "worker stopped at cap, awaiting continuation"
-    # from "worker reached its definition of done".
-    if [[ "$STATUS" == "turn-cap-exhausted" ]]; then
-      SET_COMPLETED='.'
-    else
-      SET_COMPLETED='.completedAt = $ts'
-    fi
-    TMP="${SIGNAL_FILE}.tmp.$$"
-    if jq --arg status "$NEW_STATUS" \
-          --arg ts "$TS" \
-          --arg reason "$REASON" \
-          --arg handoff "$HANDOFF_PATH" \
-          ".status = \$status
+if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
+	SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+	if [[ -f $SIGNAL_FILE ]]; then
+		# CTL-484: turn-cap-exhausted is a non-terminal status the continuation
+		# branch of orchestrate-revive picks up. Map the canonical event status to
+		# the signal-file status separately so the broker (which only sees event
+		# names) and orchestrate-revive (which reads the per-phase signal file)
+		# agree on the distinction.
+		case "$STATUS" in
+		complete) NEW_STATUS="done" ;;
+		failed) NEW_STATUS="failed" ;;
+		turn-cap-exhausted) NEW_STATUS="turn-cap-exhausted" ;;
+		esac
+		# turn-cap-exhausted is NOT a terminal state — leave completedAt unset so
+		# consumers can distinguish "worker stopped at cap, awaiting continuation"
+		# from "worker reached its definition of done".
+		if [[ $STATUS == "turn-cap-exhausted" ]]; then
+			SET_COMPLETED='.'
+		else
+			SET_COMPLETED='.completedAt = $ts'
+		fi
+		TMP="${SIGNAL_FILE}.tmp.$$"
+		if jq --arg status "$NEW_STATUS" \
+			--arg ts "$TS" \
+			--arg reason "$REASON" \
+			--arg handoff "$HANDOFF_PATH" \
+			".status = \$status
            | ${SET_COMPLETED}
            | .updatedAt = \$ts
            | (if \$reason  == \"\" then . else .failureReason = \$reason end)
            | (if \$handoff == \"\" then . else .handoffPath    = \$handoff end)" \
-          "$SIGNAL_FILE" > "$TMP" 2>/dev/null; then
-      mv "$TMP" "$SIGNAL_FILE"
-    else
-      rm -f "$TMP"
-      warn "failed to update signal file $SIGNAL_FILE"
-    fi
-  else
-    warn "signal file not found: $SIGNAL_FILE (skipping update)"
-  fi
+			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then
+			mv "$TMP" "$SIGNAL_FILE"
+		else
+			rm -f "$TMP"
+			warn "failed to update signal file $SIGNAL_FILE"
+		fi
+	else
+		warn "signal file not found: $SIGNAL_FILE (skipping update)"
+	fi
 fi
 
 # ─── 3. End catalyst-session ────────────────────────────────────────────────
 
-if [[ -n "$SESSION_ID" ]] && [[ -x "${SCRIPT_DIR}/catalyst-session.sh" ]]; then
-  # catalyst-session.sh end only accepts done|failed. turn-cap-exhausted maps
-  # to `failed` for the session DB (the session genuinely stopped before its
-  # /goal completed) but the reason carries the disambiguating signal so
-  # downstream telemetry can tell cap-exits apart from real errors (CTL-484).
-  case "$STATUS" in
-    complete)           SESSION_OUTCOME=done ;;
-    turn-cap-exhausted) SESSION_OUTCOME=failed ;;
-    *)                  SESSION_OUTCOME=failed ;;
-  esac
-  REASON_FLAG=()
-  if [[ -n "$REASON" ]]; then
-    REASON_FLAG=(--reason "$REASON")
-  elif [[ "$STATUS" == "turn-cap-exhausted" ]]; then
-    REASON_FLAG=(--reason "turn-cap-exhausted")
-  fi
-  "${SCRIPT_DIR}/catalyst-session.sh" end "$SESSION_ID" \
-    --status "$SESSION_OUTCOME" "${REASON_FLAG[@]}" >/dev/null 2>&1 \
-    || warn "catalyst-session.sh end failed for $SESSION_ID"
+if [[ -n $SESSION_ID ]] && [[ -x "${SCRIPT_DIR}/catalyst-session.sh" ]]; then
+	# catalyst-session.sh end only accepts done|failed. turn-cap-exhausted maps
+	# to `failed` for the session DB (the session genuinely stopped before its
+	# /goal completed) but the reason carries the disambiguating signal so
+	# downstream telemetry can tell cap-exits apart from real errors (CTL-484).
+	case "$STATUS" in
+	complete) SESSION_OUTCOME=done ;;
+	turn-cap-exhausted) SESSION_OUTCOME=failed ;;
+	*) SESSION_OUTCOME=failed ;;
+	esac
+	REASON_FLAG=()
+	if [[ -n $REASON ]]; then
+		REASON_FLAG=(--reason "$REASON")
+	elif [[ $STATUS == "turn-cap-exhausted" ]]; then
+		REASON_FLAG=(--reason "turn-cap-exhausted")
+	fi
+	"${SCRIPT_DIR}/catalyst-session.sh" end "$SESSION_ID" \
+		--status "$SESSION_OUTCOME" "${REASON_FLAG[@]}" >/dev/null 2>&1 ||
+		warn "catalyst-session.sh end failed for $SESSION_ID"
 fi
 
 exit 0

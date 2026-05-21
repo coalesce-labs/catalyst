@@ -19,30 +19,36 @@ PASSES=0
 SCRATCH="$(mktemp -d -t phase-agent-dispatch-test-XXXXXX)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
-fail() { FAILURES=$((FAILURES + 1)); echo "  FAIL: $1"; }
-pass() { PASSES=$((PASSES + 1)); echo "  PASS: $1"; }
+fail() {
+	FAILURES=$((FAILURES + 1))
+	echo "  FAIL: $1"
+}
+pass() {
+	PASSES=$((PASSES + 1))
+	echo "  PASS: $1"
+}
 
 assert_eq() {
-  local expected="$1" actual="$2" label="$3"
-  if [[ "$expected" == "$actual" ]]; then
-    pass "$label"
-  else
-    fail "$label — expected '$expected', got '$actual'"
-  fi
+	local expected="$1" actual="$2" label="$3"
+	if [[ $expected == "$actual" ]]; then
+		pass "$label"
+	else
+		fail "$label — expected '$expected', got '$actual'"
+	fi
 }
 
 assert_contains() {
-  local haystack="$1" needle="$2" label="$3"
-  if [[ "$haystack" == *"$needle"* ]]; then
-    pass "$label"
-  else
-    fail "$label — '$needle' not found in '$haystack'"
-  fi
+	local haystack="$1" needle="$2" label="$3"
+	if [[ $haystack == *"$needle"* ]]; then
+		pass "$label"
+	else
+		fail "$label — '$needle' not found in '$haystack'"
+	fi
 }
 
-if [[ ! -x "$DISPATCH" ]]; then
-  echo "FATAL: $DISPATCH not found or not executable" >&2
-  exit 1
+if [[ ! -x $DISPATCH ]]; then
+	echo "FATAL: $DISPATCH not found or not executable" >&2
+	exit 1
 fi
 
 # ─── Stub claude binary ─────────────────────────────────────────────────────
@@ -61,9 +67,9 @@ fi
 # (Bug 1 in CTL-490) — that gap requires a real `claude --bg` round-trip and
 # is verified manually per the ticket's acceptance test.
 setup_claude_stub() {
-  local stub_dir="$1"
-  mkdir -p "$stub_dir"
-  cat > "$stub_dir/claude" <<'STUB'
+	local stub_dir="$1"
+	mkdir -p "$stub_dir"
+	cat >"$stub_dir/claude" <<'STUB'
 #!/usr/bin/env bash
 LOG="${CLAUDE_STUB_LOG:-/tmp/claude-stub.log}"
 JOB_ID="${CLAUDE_STUB_JOB_ID:-f124220a}"
@@ -83,23 +89,23 @@ backgrounded · ${JOB_ID}
 EOF
 exit "${CLAUDE_STUB_EXIT:-0}"
 STUB
-  chmod +x "$stub_dir/claude"
+	chmod +x "$stub_dir/claude"
 }
 
 # Build a fresh per-test orch fixture and put the stub claude on PATH first.
 fresh_env() {
-  local tag="$1"
-  TEST_DIR="${SCRATCH}/${tag}"
-  STUB_DIR="${TEST_DIR}/bin"
-  ORCH_DIR="${TEST_DIR}/orch"
-  WORKER_DIR="${ORCH_DIR}/workers/CTL-100"
-  CONFIG_DIR="${TEST_DIR}/proj/.catalyst"
-  mkdir -p "$STUB_DIR" "$WORKER_DIR" "$CONFIG_DIR"
-  setup_claude_stub "$STUB_DIR"
-  export CLAUDE_STUB_LOG="${TEST_DIR}/claude-stub.log"
-  export CLAUDE_STUB_JOB_ID="f124220a"
-  unset CLAUDE_STUB_EXIT
-  export PATH="${STUB_DIR}:${PATH}"
+	local tag="$1"
+	TEST_DIR="${SCRATCH}/${tag}"
+	STUB_DIR="${TEST_DIR}/bin"
+	ORCH_DIR="${TEST_DIR}/orch"
+	WORKER_DIR="${ORCH_DIR}/workers/CTL-100"
+	CONFIG_DIR="${TEST_DIR}/proj/.catalyst"
+	mkdir -p "$STUB_DIR" "$WORKER_DIR" "$CONFIG_DIR"
+	setup_claude_stub "$STUB_DIR"
+	export CLAUDE_STUB_LOG="${TEST_DIR}/claude-stub.log"
+	export CLAUDE_STUB_JOB_ID="f124220a"
+	unset CLAUDE_STUB_EXIT
+	export PATH="${STUB_DIR}:${PATH}"
 }
 
 # ─── Test 1: dispatcher writes the per-phase signal file with the right schema
@@ -107,20 +113,20 @@ echo "Test 1: dispatcher writes signal file with correct schema"
 fresh_env t1
 OUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>&1)
 SIGNAL="${WORKER_DIR}/phase-triage.json"
-if [[ ! -f "$SIGNAL" ]]; then
-  fail "signal file created: $SIGNAL"
+if [[ ! -f $SIGNAL ]]; then
+	fail "signal file created: $SIGNAL"
 else
-  pass "signal file created at expected path"
-  TICKET_FIELD=$(jq -r '.ticket' "$SIGNAL")
-  PHASE_FIELD=$(jq -r '.phase' "$SIGNAL")
-  MODEL_FIELD=$(jq -r '.model' "$SIGNAL")
-  TURN_CAP_FIELD=$(jq -r '.turnCap' "$SIGNAL")
-  STATUS_FIELD=$(jq -r '.status' "$SIGNAL")
-  assert_eq "CTL-100" "$TICKET_FIELD" "signal.ticket"
-  assert_eq "triage"  "$PHASE_FIELD"  "signal.phase"
-  assert_eq "opus"    "$MODEL_FIELD"  "signal.model defaulted to opus"
-  assert_eq "10"      "$TURN_CAP_FIELD" "signal.turnCap defaulted to 10 (triage)"
-  assert_eq "running" "$STATUS_FIELD" "signal.status = running after bg spawn"
+	pass "signal file created at expected path"
+	TICKET_FIELD=$(jq -r '.ticket' "$SIGNAL")
+	PHASE_FIELD=$(jq -r '.phase' "$SIGNAL")
+	MODEL_FIELD=$(jq -r '.model' "$SIGNAL")
+	TURN_CAP_FIELD=$(jq -r '.turnCap' "$SIGNAL")
+	STATUS_FIELD=$(jq -r '.status' "$SIGNAL")
+	assert_eq "CTL-100" "$TICKET_FIELD" "signal.ticket"
+	assert_eq "triage" "$PHASE_FIELD" "signal.phase"
+	assert_eq "opus" "$MODEL_FIELD" "signal.model defaulted to opus"
+	assert_eq "10" "$TURN_CAP_FIELD" "signal.turnCap defaulted to 10 (triage)"
+	assert_eq "running" "$STATUS_FIELD" "signal.status = running after bg spawn"
 fi
 
 # ─── Test 2: dispatcher launches claude --bg with the right env vars
@@ -159,9 +165,9 @@ rm -f "$CLAUDE_STUB_LOG"
 STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
 IDEMPOTENT=$(echo "$STDOUT" | jq -r '.idempotent // false')
 LOG_REWRITTEN="no"
-[[ -f "$CLAUDE_STUB_LOG" ]] && LOG_REWRITTEN="yes"
+[[ -f $CLAUDE_STUB_LOG ]] && LOG_REWRITTEN="yes"
 assert_eq "true" "$IDEMPOTENT" "second dispatch reports idempotent: true"
-assert_eq "no"   "$LOG_REWRITTEN" "second dispatch did NOT re-invoke claude --bg"
+assert_eq "no" "$LOG_REWRITTEN" "second dispatch did NOT re-invoke claude --bg"
 
 # ─── Test 5: dispatcher refuses to launch if prior phase artifact is missing
 echo ""
@@ -174,7 +180,7 @@ STDOUT_JSON=$(cat "${TEST_DIR}/research.out")
 REFUSED_STATUS=$(echo "$STDOUT_JSON" | jq -r '.status' 2>/dev/null || echo "")
 SIGNAL_RESEARCH="${WORKER_DIR}/phase-research.json"
 SIGNAL_EXISTS="no"
-[[ -f "$SIGNAL_RESEARCH" ]] && SIGNAL_EXISTS="yes"
+[[ -f $SIGNAL_RESEARCH ]] && SIGNAL_EXISTS="yes"
 assert_eq "2" "$RC" "exit code 2 when prior artifact missing"
 assert_eq "refused" "$REFUSED_STATUS" "stdout JSON status = refused"
 assert_eq "no" "$SIGNAL_EXISTS" "no signal file written when refused"
@@ -186,49 +192,49 @@ export CATALYST_DIR="${TEST_DIR}/catalyst-events-root"
 mkdir -p "${CATALYST_DIR}/events"
 
 # Re-run the dispatch with the isolated CATALYST_DIR active.
-rm -f "$SIGNAL_RESEARCH"  # ensure refused, not idempotent
+rm -f "$SIGNAL_RESEARCH" # ensure refused, not idempotent
 "$DISPATCH" --phase research --ticket CTL-100 \
-  --orch-dir "$ORCH_DIR" --orch-id orch-test \
-  >"${TEST_DIR}/research2.out" 2>/dev/null
+	--orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/research2.out" 2>/dev/null
 RC2=$?
 assert_eq "2" "$RC2" "refusal still exits 2 with isolated CATALYST_DIR"
 
 # Find the JSONL event log (one file per month).
 EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
-if [[ -z "$EVENT_FILE" ]]; then
-  fail "event log was not created on refusal"
+if [[ -z $EVENT_FILE ]]; then
+	fail "event log was not created on refusal"
 else
-  pass "event log was created on refusal"
-  EVENT_LINE=$(grep '"phase.research.failed.CTL-100"' "$EVENT_FILE" | head -1)
-  if [[ -z "$EVENT_LINE" ]]; then
-    fail "no phase.research.failed.CTL-100 event in log"
-  else
-    pass "phase.research.failed.CTL-100 event present in log"
-    EVENT_REASON=$(echo "$EVENT_LINE" | jq -r '.body.payload.failure_reason // empty')
-    assert_eq "prior_artifact_missing" "$EVENT_REASON" \
-      "failed event payload carries failure_reason=prior_artifact_missing"
-  fi
+	pass "event log was created on refusal"
+	EVENT_LINE=$(grep '"phase.research.failed.CTL-100"' "$EVENT_FILE" | head -1)
+	if [[ -z $EVENT_LINE ]]; then
+		fail "no phase.research.failed.CTL-100 event in log"
+	else
+		pass "phase.research.failed.CTL-100 event present in log"
+		EVENT_REASON=$(echo "$EVENT_LINE" | jq -r '.body.payload.failure_reason // empty')
+		assert_eq "prior_artifact_missing" "$EVENT_REASON" \
+			"failed event payload carries failure_reason=prior_artifact_missing"
+	fi
 fi
 
 # Refusal must still NOT write a signal file (existing contract preserved).
-if [[ -f "$SIGNAL_RESEARCH" ]]; then
-  fail "signal file written despite refusal"
+if [[ -f $SIGNAL_RESEARCH ]]; then
+	fail "signal file written despite refusal"
 else
-  pass "signal file still not written when refused (with event log active)"
+	pass "signal file still not written when refused (with event log active)"
 fi
 
 # CTL-494 Phase 1: --dry-run refusal must NOT emit to the event log.
 rm -f "${CATALYST_DIR}/events/"*.jsonl
 "$DISPATCH" --phase research --ticket CTL-100 \
-  --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
-  >"${TEST_DIR}/research-dry.out" 2>/dev/null
+	--orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+	>"${TEST_DIR}/research-dry.out" 2>/dev/null
 RC_DRY=$?
 assert_eq "2" "$RC_DRY" "--dry-run refusal still exits 2"
 DRY_EVENT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
-if [[ -n "$DRY_EVENT_FILE" ]]; then
-  fail "--dry-run refusal should not emit event (got $DRY_EVENT_FILE)"
+if [[ -n $DRY_EVENT_FILE ]]; then
+	fail "--dry-run refusal should not emit event (got $DRY_EVENT_FILE)"
 else
-  pass "--dry-run refusal does not emit event"
+	pass "--dry-run refusal does not emit event"
 fi
 
 # CTL-494 Phase 1: failed-event emission is phase-agnostic — the same code
@@ -241,22 +247,22 @@ fi
 # match a real research file in the host repo.
 rm -f "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null
 mkdir -p "${TEST_DIR}/empty-proj"
-( cd "${TEST_DIR}/empty-proj" && \
-  "$DISPATCH" --phase plan --ticket CTL-100 \
-    --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >"${TEST_DIR}/plan.out" 2>/dev/null )
+(cd "${TEST_DIR}/empty-proj" &&
+	"$DISPATCH" --phase plan --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>"${TEST_DIR}/plan.out" 2>/dev/null)
 RC_PLAN=$?
 assert_eq "2" "$RC_PLAN" "plan-phase refusal also exits 2"
 PLAN_EVT_FILE=$(ls "${CATALYST_DIR}/events/"*.jsonl 2>/dev/null | head -1)
-if [[ -z "$PLAN_EVT_FILE" ]]; then
-  fail "plan-phase refusal: event log not created"
+if [[ -z $PLAN_EVT_FILE ]]; then
+	fail "plan-phase refusal: event log not created"
 else
-  PLAN_EVT_LINE=$(grep '"phase.plan.failed.CTL-100"' "$PLAN_EVT_FILE" | head -1)
-  if [[ -n "$PLAN_EVT_LINE" ]]; then
-    pass "plan-phase refusal emits phase.plan.failed.CTL-100"
-  else
-    fail "plan-phase refusal: no phase.plan.failed.CTL-100 line in event log"
-  fi
+	PLAN_EVT_LINE=$(grep '"phase.plan.failed.CTL-100"' "$PLAN_EVT_FILE" | head -1)
+	if [[ -n $PLAN_EVT_LINE ]]; then
+		pass "plan-phase refusal emits phase.plan.failed.CTL-100"
+	else
+		fail "plan-phase refusal: no phase.plan.failed.CTL-100 line in event log"
+	fi
 fi
 
 # CTL-494 Phase 1: emit-complete failing must not mask the refusal exit code.
@@ -266,8 +272,8 @@ fi
 export CATALYST_DIR="/dev/null/cannot-create-here"
 rm -f "${ORCH_DIR}/workers/CTL-100/phase-research.json"
 "$DISPATCH" --phase research --ticket CTL-100 \
-  --orch-dir "$ORCH_DIR" --orch-id orch-test \
-  >"${TEST_DIR}/research-emit-fail.out" 2>"${TEST_DIR}/research-emit-fail.err"
+	--orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/research-emit-fail.out" 2>"${TEST_DIR}/research-emit-fail.err"
 RC_EMIT_FAIL=$?
 STATUS_EMIT_FAIL=$(jq -r '.status' "${TEST_DIR}/research-emit-fail.out" 2>/dev/null || echo "")
 assert_eq "2" "$RC_EMIT_FAIL" "emit-complete failure does not mask exit 2"
@@ -285,10 +291,10 @@ mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
 
 # Form A: phase-plan prose form — lowercase, ticket at end, no descriptive suffix.
 touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-ctl-100.md"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase implement --ticket CTL-100 \
-    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
-    >"${TEST_DIR}/glob-a.out" 2>/dev/null )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+		>"${TEST_DIR}/glob-a.out" 2>/dev/null)
 STATUS_A=$(jq -r '.status' "${TEST_DIR}/glob-a.out")
 assert_eq "dispatched" "$STATUS_A" "Form A: lowercase ticket at end is accepted"
 
@@ -298,10 +304,10 @@ rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
 
 # Form B: canonical create-plan form — uppercase ticket + descriptive suffix.
 touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-CTL-100-some-descriptive-name.md"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase implement --ticket CTL-100 \
-    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
-    >"${TEST_DIR}/glob-b.out" 2>/dev/null )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+		>"${TEST_DIR}/glob-b.out" 2>/dev/null)
 STATUS_B=$(jq -r '.status' "${TEST_DIR}/glob-b.out")
 assert_eq "dispatched" "$STATUS_B" "Form B: uppercase ticket + descriptive suffix is accepted"
 
@@ -311,10 +317,10 @@ rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
 
 # Form C: uppercase + suffix-style "-plan".
 touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-17-CTL-100-plan.md"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase implement --ticket CTL-100 \
-    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
-    >"${TEST_DIR}/glob-c.out" 2>/dev/null )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+		>"${TEST_DIR}/glob-c.out" 2>/dev/null)
 STATUS_C=$(jq -r '.status' "${TEST_DIR}/glob-c.out")
 assert_eq "dispatched" "$STATUS_C" "Form C: uppercase ticket + -plan suffix is accepted"
 
@@ -325,20 +331,20 @@ rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
 # Form D: lookalike file for a DIFFERENT ticket must NOT match CTL-100.
 # Guards against an overly-greedy fix that strips the ticket constraint.
 touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-CTL-200-something.md"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase implement --ticket CTL-100 \
-    --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
-    >"${TEST_DIR}/glob-d.out" 2>"${TEST_DIR}/glob-d.err" )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+		>"${TEST_DIR}/glob-d.out" 2>"${TEST_DIR}/glob-d.err")
 RC_D=$?
 STATUS_D=$(jq -r '.status' "${TEST_DIR}/glob-d.out")
-assert_eq "2"       "$RC_D"     "Form D: different-ticket plan file does NOT satisfy CTL-100 gate"
+assert_eq "2" "$RC_D" "Form D: different-ticket plan file does NOT satisfy CTL-100 gate"
 assert_eq "refused" "$STATUS_D" "Form D: stdout JSON status = refused"
 
 # ─── Test 6: dispatcher resolves model from config (default + override paths)
 echo ""
 echo "Test 6: dispatcher resolves model from config (default and override)"
 fresh_env t6
-cat > "${CONFIG_DIR}/config.json" <<EOF
+cat >"${CONFIG_DIR}/config.json" <<EOF
 {
   "catalyst": {
     "orchestration": {
@@ -356,31 +362,31 @@ EOF
 mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
 touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-16-ctl-100.md"
 # Default path: ticket = CTL-100 → models.implement = sonnet
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >"${TEST_DIR}/m1.out" 2>/dev/null )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>"${TEST_DIR}/m1.out" 2>/dev/null)
 MODEL_DEFAULT=$(jq -r '.model' "${TEST_DIR}/m1.out")
 assert_eq "sonnet" "$MODEL_DEFAULT" "models.implement default → sonnet"
 
 # Override path: ticket = CTL-999 → modelOverrides.implement.CTL-999 = opus
 touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-16-ctl-999.md"
 mkdir -p "${ORCH_DIR}/workers/CTL-999"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase implement --ticket CTL-999 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >"${TEST_DIR}/m2.out" 2>/dev/null )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-999 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>"${TEST_DIR}/m2.out" 2>/dev/null)
 MODEL_OVERRIDE=$(jq -r '.model' "${TEST_DIR}/m2.out")
 assert_eq "opus" "$MODEL_OVERRIDE" "modelOverrides.implement.CTL-999 beats default"
 
 # CLI flag wins both
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --model haiku \
-    >"${TEST_DIR}/m3.out" 2>/dev/null )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --model haiku \
+		>"${TEST_DIR}/m3.out" 2>/dev/null)
 mkdir -p "${ORCH_DIR}/workers/CTL-100"
 # Clean prior signal so this isn't idempotent no-op
 rm -f "${ORCH_DIR}/workers/CTL-100/phase-implement.json"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --model haiku \
-    >"${TEST_DIR}/m3.out" 2>/dev/null )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --model haiku \
+		>"${TEST_DIR}/m3.out" 2>/dev/null)
 MODEL_CLI=$(jq -r '.model' "${TEST_DIR}/m3.out")
 assert_eq "haiku" "$MODEL_CLI" "CLI --model beats config"
 
@@ -388,7 +394,7 @@ assert_eq "haiku" "$MODEL_CLI" "CLI --model beats config"
 echo ""
 echo "Test 7: dispatcher resolves turn cap from config"
 fresh_env t7
-cat > "${CONFIG_DIR}/config.json" <<EOF
+cat >"${CONFIG_DIR}/config.json" <<EOF
 {
   "catalyst": {
     "orchestration": {
@@ -399,31 +405,31 @@ cat > "${CONFIG_DIR}/config.json" <<EOF
   }
 }
 EOF
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >"${TEST_DIR}/tc.out" 2>/dev/null )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>"${TEST_DIR}/tc.out" 2>/dev/null)
 TC_CONFIG=$(jq -r '.turnCap' "${TEST_DIR}/tc.out")
 assert_eq "99" "$TC_CONFIG" "config turnCaps.triage = 99 applied"
 
 # CLI overrides config
 rm -f "${ORCH_DIR}/workers/CTL-100/phase-triage.json"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --turn-cap 42 \
-    >"${TEST_DIR}/tc2.out" 2>/dev/null )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --turn-cap 42 \
+		>"${TEST_DIR}/tc2.out" 2>/dev/null)
 TC_CLI=$(jq -r '.turnCap' "${TEST_DIR}/tc2.out")
 assert_eq "42" "$TC_CLI" "CLI --turn-cap beats config"
 
 # Fallback per-phase default
 fresh_env t7b
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase research --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >"${TEST_DIR}/tc3.out" 2>"${TEST_DIR}/tc3.err" )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase research --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>"${TEST_DIR}/tc3.out" 2>"${TEST_DIR}/tc3.err")
 RC=$?
 # research requires triage.json — create it first then re-dispatch
-echo '{"ticket":"CTL-100","status":"done"}' > "${WORKER_DIR}/triage.json"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase research --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >"${TEST_DIR}/tc3.out" 2>/dev/null )
+echo '{"ticket":"CTL-100","status":"done"}' >"${WORKER_DIR}/triage.json"
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase research --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>"${TEST_DIR}/tc3.out" 2>/dev/null)
 TC_FALLBACK=$(jq -r '.turnCap' "${TEST_DIR}/tc3.out")
 assert_eq "35" "$TC_FALLBACK" "per-phase default for research is 35"
 
@@ -442,9 +448,9 @@ LOG=$(cat "$CLAUDE_STUB_LOG")
 # the env var name is the same regardless and the env carries the orch dir
 # the phase agent uses to resolve all other paths.)
 assert_contains "$LOG" "CATALYST_ORCHESTRATOR_DIR=" "env propagates CATALYST_ORCHESTRATOR_DIR"
-assert_contains "$LOG" "CATALYST_ORCHESTRATOR_ID="  "env propagates CATALYST_ORCHESTRATOR_ID"
-assert_contains "$LOG" "CATALYST_PHASE=triage"      "env propagates CATALYST_PHASE"
-assert_contains "$LOG" "CATALYST_TICKET=CTL-100"    "env propagates CATALYST_TICKET"
+assert_contains "$LOG" "CATALYST_ORCHESTRATOR_ID=" "env propagates CATALYST_ORCHESTRATOR_ID"
+assert_contains "$LOG" "CATALYST_PHASE=triage" "env propagates CATALYST_PHASE"
+assert_contains "$LOG" "CATALYST_TICKET=CTL-100" "env propagates CATALYST_TICKET"
 
 # ─── Test 9: BG_JOB_ID parser extracts hex from realistic `claude --bg` output
 # Regression guard for CTL-490 Bug 2. The bug was `awk 'NR==1 {print $1}'`
@@ -458,7 +464,7 @@ fresh_env t9
 # Override the stub with one that emits the verbatim format from CTL-490's
 # forensic transcript. The hex token here is the real job ID from that
 # failed run — using it makes the regression report grep-able to the ticket.
-cat > "${STUB_DIR}/claude" <<'STUB'
+cat >"${STUB_DIR}/claude" <<'STUB'
 #!/usr/bin/env bash
 cat <<EOF
 backgrounded · f124220a
@@ -480,20 +486,20 @@ assert_eq "f124220a" "$JOB_IN_STDOUT" "parser does NOT capture the literal word 
 echo ""
 echo "Test 10: OTEL_RESOURCE_ATTRIBUTES composed when projectKey is set"
 fresh_env t10
-cat > "${CONFIG_DIR}/config.json" <<EOF
+cat >"${CONFIG_DIR}/config.json" <<EOF
 {
   "catalyst": {
     "projectKey": "test-proj"
   }
 }
 EOF
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >/dev/null 2>&1 )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
-  "OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100" \
-  "OTEL attrs composed with projectKey + tier-2 branch fallback"
+	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100" \
+	"OTEL attrs composed with projectKey + tier-2 branch fallback"
 
 # ─── Test 11: OTEL_RESOURCE_ATTRIBUTES three-attr form when projectKey absent
 echo ""
@@ -502,29 +508,29 @@ fresh_env t11
 # Dispatch from a directory with NO .catalyst/config.json — TEST_DIR/proj has
 # an empty .catalyst dir created by fresh_env but no config.json file.
 rm -rf "${CONFIG_DIR}"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >/dev/null 2>&1 )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
-  "OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test" \
-  "OTEL attrs three-attr form when no projectKey"
-if [[ "$LOG" == *"OTEL_RESOURCE_ATTRIBUTES="*"project="* ]]; then
-  fail "OTEL attrs three-attr form must omit project="
+	"OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test" \
+	"OTEL attrs three-attr form when no projectKey"
+if [[ $LOG == *"OTEL_RESOURCE_ATTRIBUTES="*"project="* ]]; then
+	fail "OTEL attrs three-attr form must omit project="
 else
-  pass "OTEL attrs three-attr form omits project="
+	pass "OTEL attrs three-attr form omits project="
 fi
-if [[ "$LOG" == *"OTEL_RESOURCE_ATTRIBUTES="*"branch="* ]]; then
-  fail "OTEL attrs three-attr form must omit branch="
+if [[ $LOG == *"OTEL_RESOURCE_ATTRIBUTES="*"branch="* ]]; then
+	fail "OTEL attrs three-attr form must omit branch="
 else
-  pass "OTEL attrs three-attr form omits branch="
+	pass "OTEL attrs three-attr form omits branch="
 fi
 
 # ─── Test 12: tier-1 authoritative branch via git -C beats tier-2 constructed name
 echo ""
 echo "Test 12: tier-1 git -C branch resolution wins over tier-2 constructed name"
 fresh_env t12
-cat > "${CONFIG_DIR}/config.json" <<EOF
+cat >"${CONFIG_DIR}/config.json" <<EOF
 {
   "catalyst": {
     "projectKey": "test-proj"
@@ -536,25 +542,25 @@ HOME_FIXTURE="${TEST_DIR}/home"
 WORKER_WT="${HOME_FIXTURE}/catalyst/wt/test-proj/orch-test-CTL-100"
 mkdir -p "$WORKER_WT"
 (
-  cd "$WORKER_WT"
-  git init -q --initial-branch=main
-  git config user.email "test@example.com"
-  git config user.name "Test"
-  git commit --allow-empty -q -m "init"
-  git checkout -q -b bespoke-branch
+	cd "$WORKER_WT"
+	git init -q --initial-branch=main
+	git config user.email "test@example.com"
+	git config user.name "Test"
+	git commit --allow-empty -q -m "init"
+	git checkout -q -b bespoke-branch
 )
 HOME="$HOME_FIXTURE" \
-  bash -c "cd '${TEST_DIR}/proj' && '$DISPATCH' --phase triage --ticket CTL-100 --orch-dir '$ORCH_DIR' --orch-id orch-test >/dev/null 2>&1"
+	bash -c "cd '${TEST_DIR}/proj' && '$DISPATCH' --phase triage --ticket CTL-100 --orch-dir '$ORCH_DIR' --orch-id orch-test >/dev/null 2>&1"
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" ",branch=bespoke-branch" \
-  "tier-1 git branch (bespoke-branch) wins over tier-2 fallback"
+	"tier-1 git branch (bespoke-branch) wins over tier-2 fallback"
 
 # ─── Test 13 (CTL-492 follow-up): tier-1 → tier-2 fall-through when worker-wt
 #                                  path exists but is not a git repo
 echo ""
 echo "Test 13: tier-2 wins when worker-wt path exists without a .git entry"
 fresh_env t13
-cat > "${CONFIG_DIR}/config.json" <<EOF
+cat >"${CONFIG_DIR}/config.json" <<EOF
 {
   "catalyst": {
     "projectKey": "test-proj"
@@ -567,35 +573,35 @@ HOME_FIXTURE="${TEST_DIR}/home"
 # and left a bare directory.
 mkdir -p "${HOME_FIXTURE}/catalyst/wt/test-proj/orch-test-CTL-100"
 HOME="$HOME_FIXTURE" \
-  bash -c "cd '${TEST_DIR}/proj' && '$DISPATCH' --phase triage --ticket CTL-100 --orch-dir '$ORCH_DIR' --orch-id orch-test >/dev/null 2>&1"
+	bash -c "cd '${TEST_DIR}/proj' && '$DISPATCH' --phase triage --ticket CTL-100 --orch-dir '$ORCH_DIR' --orch-id orch-test >/dev/null 2>&1"
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" ",branch=orch-test-CTL-100" \
-  "tier-2 constructed branch used when worker-wt has no .git"
+	"tier-2 constructed branch used when worker-wt has no .git"
 
 # ─── Test 14: --dry-run JSON env array contains the OTEL entry
 echo ""
 echo "Test 14: --dry-run JSON env array carries OTEL_RESOURCE_ATTRIBUTES"
 fresh_env t14
-cat > "${CONFIG_DIR}/config.json" <<EOF
+cat >"${CONFIG_DIR}/config.json" <<EOF
 {
   "catalyst": {
     "projectKey": "test-proj"
   }
 }
 EOF
-DRY=$( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null )
+DRY=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
 OTEL_ENTRY=$(echo "$DRY" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')
 assert_eq \
-  "OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage" \
-  "$OTEL_ENTRY" \
-  "dry-run JSON env array carries the composed OTEL attribute string"
+	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage" \
+	"$OTEL_ENTRY" \
+	"dry-run JSON env array carries the composed OTEL attribute string"
 
 # ─── Test 15 (CTL-495): task.type=phase-<phase> appended to OTEL attrs
 echo ""
 echo "Test 15: task.type=phase-<phase> is always present in OTEL_RESOURCE_ATTRIBUTES"
 fresh_env t15
-cat > "${CONFIG_DIR}/config.json" <<EOF
+cat >"${CONFIG_DIR}/config.json" <<EOF
 {
   "catalyst": {
     "projectKey": "test-proj"
@@ -606,16 +612,16 @@ EOF
 # implement requires a plan artifact under thoughts/shared/plans/.
 mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
 touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-ctl-100.md"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >/dev/null 2>&1 )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" ",task.type=phase-implement" \
-  "task.type=phase-implement appended with projectKey present"
+	"task.type=phase-implement appended with projectKey present"
 
 # Case B: phase value flows through verbatim — monitor-deploy (the longest, hyphenated).
 fresh_env t15b
-cat > "${CONFIG_DIR}/config.json" <<EOF
+cat >"${CONFIG_DIR}/config.json" <<EOF
 {
   "catalyst": {
     "projectKey": "test-proj"
@@ -624,24 +630,24 @@ cat > "${CONFIG_DIR}/config.json" <<EOF
 EOF
 # monitor-deploy requires phase-monitor-merge.json signal.
 echo '{"ticket":"CTL-100","status":"done","pr":{"mergeCommitSha":"deadbeef"}}' \
-  > "${WORKER_DIR}/phase-monitor-merge.json"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >/dev/null 2>&1 )
+	>"${WORKER_DIR}/phase-monitor-merge.json"
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase monitor-deploy --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" ",task.type=phase-monitor-deploy" \
-  "task.type=phase-monitor-deploy preserves hyphenated phase name"
+	"task.type=phase-monitor-deploy preserves hyphenated phase name"
 
 # Case C: even without projectKey (short form), task.type is still present.
 fresh_env t15c
 rm -rf "${CONFIG_DIR}"
-( cd "${TEST_DIR}/proj" && \
-  "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-    >/dev/null 2>&1 )
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
-  "OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage" \
-  "task.type appended even when projectKey absent (short form)"
+	"OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage" \
+	"task.type appended even when projectKey absent (short form)"
 
 # ─── CTL-511: claude --bg launch failure → signal stalled + phase.*.failed ───
 # A launch failure must leave the signal at status="stalled" with NO
@@ -656,17 +662,17 @@ export CLAUDE_STUB_EXIT=1
 export CATALYST_DIR="${TEST_DIR}/catalyst-events"
 mkdir -p "${CATALYST_DIR}/events"
 "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-  >"${TEST_DIR}/t16.out" 2>"${TEST_DIR}/t16.err"
+	>"${TEST_DIR}/t16.out" 2>"${TEST_DIR}/t16.err"
 RC=$?
 assert_eq "1" "$RC" "dispatch exits 1 on claude --bg launch failure"
 SIGNAL="${WORKER_DIR}/phase-triage.json"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "launch failure leaves signal at stalled"
 assert_eq "false" "$(jq -r 'has("failureReason")' "$SIGNAL")" \
-  "launch-failure signal has no failureReason (Loop 2 redispatch-eligible)"
+	"launch-failure signal has no failureReason (Loop 2 redispatch-eligible)"
 if grep -rqs '"phase.triage.failed.CTL-100"' "${CATALYST_DIR}/events/"; then
-  pass "launch failure emits phase.triage.failed.CTL-100 event"
+	pass "launch failure emits phase.triage.failed.CTL-100 event"
 else
-  fail "no phase.triage.failed.CTL-100 event on launch failure"
+	fail "no phase.triage.failed.CTL-100 event on launch failure"
 fi
 unset CLAUDE_STUB_EXIT CATALYST_DIR
 
@@ -683,15 +689,15 @@ chmod +x "${STUB_DIR}/claude"
 export CATALYST_DIR="${TEST_DIR}/catalyst-events"
 mkdir -p "${CATALYST_DIR}/events"
 "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
-  >"${TEST_DIR}/t17.out" 2>"${TEST_DIR}/t17.err" || true
+	>"${TEST_DIR}/t17.out" 2>"${TEST_DIR}/t17.err" || true
 SIGNAL="${WORKER_DIR}/phase-triage.json"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "empty job id leaves signal at stalled"
 assert_eq "false" "$(jq -r 'has("failureReason")' "$SIGNAL")" \
-  "empty-job-id signal has no failureReason (Loop 2 redispatch-eligible)"
+	"empty-job-id signal has no failureReason (Loop 2 redispatch-eligible)"
 if grep -rqs '"phase.triage.failed.CTL-100"' "${CATALYST_DIR}/events/"; then
-  pass "empty job id emits phase.triage.failed.CTL-100 event"
+	pass "empty job id emits phase.triage.failed.CTL-100 event"
 else
-  fail "no phase.triage.failed.CTL-100 event on empty job id"
+	fail "no phase.triage.failed.CTL-100 event on empty job id"
 fi
 unset CATALYST_DIR
 
@@ -708,6 +714,6 @@ echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then
-  exit 1
+	exit 1
 fi
 exit 0
