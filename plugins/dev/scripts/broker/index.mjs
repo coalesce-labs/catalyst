@@ -82,9 +82,10 @@ import {
 
 // --- Public re-export barrel (CTL-529) ---
 // The execution-core split moved every public symbol into a named module.
-// index.mjs re-exports all 64 of them so the import surface — depended on by
+// index.mjs re-exports all 65 of them so the import surface — depended on by
 // the broker test suite — is byte-for-byte preserved. See barrel-exports.test.mjs.
-// CTL-532 added the 9 worker-state store helpers (Phase 1).
+// CTL-532 added the 9 worker-state store helpers (Phase 1) + the pure
+// reduceWorkerStateEvent reducer (Phase 2).
 export { readGroqConfig, readGroqApiKeyFromConfig } from "./config.mjs";
 export {
   getInterests,
@@ -110,6 +111,7 @@ export {
   writeBrokerStateFile,
   getProjectedWorkerStatePath,
   writeProjectedWorkerState,
+  reduceWorkerStateEvent,
 } from "./projection.mjs";
 export {
   pluginVersion,

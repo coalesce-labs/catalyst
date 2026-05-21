@@ -4,6 +4,7 @@
 //
 // Tiers:
 //   - store helpers (Phase 1): worker_state / worker_revive_events / projection_meta
+//   - pure reducer (Phase 2): reduceWorkerStateEvent
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -19,6 +20,7 @@ import {
   getProjectionMeta,
   setProjectionMeta,
   getStaleWorkers,
+  reduceWorkerStateEvent,
 } from "./index.mjs";
 // DB lifecycle is imported directly from broker-state.mjs (the
 // broker-state.test.mjs precedent) — these are not part of the pinned barrel.
@@ -193,3 +195,208 @@ describe("worker_state store helpers (CTL-532)", () => {
     expect(meta.eventsFolded).toBe(99);
   });
 });
+
+// ─── Phase 2: the pure event reducer ─────────────────────────────────────────
+
+function canonicalPhaseEvent({ name, orchestrator = "orch-1", ts = "2026-05-21T01:00:00.000Z", id = "evt-phase-1" }) {
+  // The ticket is the last dotted segment of a phase.<name>.<status>.<TICKET> name.
+  const ticket = name.split(".").pop();
+  return {
+    ts,
+    id,
+    observedTs: ts,
+    attributes: {
+      "event.name": name,
+      "catalyst.orchestrator.id": orchestrator,
+      "linear.issue.identifier": ticket,
+    },
+    body: { payload: { ticket, phase_name: name.split(".")[1] } },
+  };
+}
+
+describe("reduceWorkerStateEvent (CTL-532)", () => {
+  test("phase.research.complete.CTL-1 → phase=research, status=phase-complete", () => {
+    const r = reduceWorkerStateEvent(canonicalPhaseEvent({ name: "phase.research.complete.CTL-1" }));
+    expect(r).not.toBeNull();
+    expect(r.kind).toBe("phase");
+    expect(r.orchestrator).toBe("orch-1");
+    expect(r.ticket).toBe("CTL-1");
+    expect(r.patch).toEqual({ phase: "research", status: "phase-complete" });
+  });
+
+  test("phase.plan.failed.CTL-1 → status=phase-failed", () => {
+    const r = reduceWorkerStateEvent(canonicalPhaseEvent({ name: "phase.plan.failed.CTL-1" }));
+    expect(r.patch).toEqual({ phase: "plan", status: "phase-failed" });
+  });
+
+  test("phase.implement.turn-cap-exhausted.CTL-1 → status=turn-cap-exhausted", () => {
+    const r = reduceWorkerStateEvent(canonicalPhaseEvent({ name: "phase.implement.turn-cap-exhausted.CTL-1" }));
+    expect(r.patch).toEqual({ phase: "implement", status: "turn-cap-exhausted" });
+  });
+
+  test("canonical worker.state_changed → patch carries status/phase/prNumber/reviveCount", () => {
+    const event = {
+      ts: "2026-05-21T03:00:00.000Z",
+      id: "wsc-1",
+      attributes: {
+        "event.name": "worker.state_changed",
+        "catalyst.orchestrator.id": "demo",
+        "catalyst.worker.ticket": "T-3",
+      },
+      body: {
+        payload: {
+          ticket: "T-3",
+          orchestrator: "demo",
+          state: {
+            ticket: "T-3", status: "pr-created", phase_name: "pr",
+            pr: { number: 42 }, phaseReviveCount: 2,
+          },
+        },
+      },
+    };
+    const r = reduceWorkerStateEvent(event);
+    expect(r.kind).toBe("worker_state");
+    expect(r.orchestrator).toBe("demo");
+    expect(r.ticket).toBe("T-3");
+    expect(r.patch.status).toBe("pr-created");
+    expect(r.patch.phase).toBe("pr");
+    expect(r.patch.prNumber).toBe(42);
+    expect(r.patch.reviveCount).toBe(2);
+  });
+
+  test("worker.state_changed reads numeric state.phase and scalar state.pr too", () => {
+    const event = {
+      ts: "2026-05-21T03:00:00.000Z",
+      id: "wsc-2",
+      attributes: {
+        "event.name": "worker.state_changed",
+        "catalyst.orchestrator.id": "demo",
+        "catalyst.worker.ticket": "T-9",
+      },
+      body: { payload: { ticket: "T-9", state: { status: "implement", phase: 3, pr: 77, reviveCount: 1 } } },
+    };
+    const r = reduceWorkerStateEvent(event);
+    expect(r.patch.phase).toBe(3);
+    expect(r.patch.prNumber).toBe(77);
+    expect(r.patch.reviveCount).toBe(1);
+  });
+
+  test("legacy flat worker.state_changed (event/detail/orchestrator) → same patch shape", () => {
+    const event = {
+      event: "worker.state_changed",
+      ts: "2026-05-21T03:00:00.000Z",
+      orchestrator: "orch-legacy",
+      detail: {
+        ticket: "CTL-50",
+        state: { status: "verify", phase_name: "verify", pr: { number: 12 } },
+      },
+    };
+    const r = reduceWorkerStateEvent(event);
+    expect(r.kind).toBe("worker_state");
+    expect(r.orchestrator).toBe("orch-legacy");
+    expect(r.ticket).toBe("CTL-50");
+    expect(r.patch.status).toBe("verify");
+    expect(r.patch.phase).toBe("verify");
+    expect(r.patch.prNumber).toBe(12);
+  });
+
+  test("orchestrator.worker.dispatched → status=dispatched", () => {
+    const event = {
+      ts: "2026-05-21T01:00:00.000Z",
+      attributes: {
+        "event.name": "orchestrator.worker.dispatched",
+        "catalyst.orchestrator.id": "orch-1",
+        "catalyst.worker.ticket": "CTL-1",
+      },
+      body: { payload: null },
+    };
+    const r = reduceWorkerStateEvent(event);
+    expect(r.kind).toBe("worker_lifecycle");
+    expect(r.patch).toEqual({ status: "dispatched" });
+  });
+
+  test("orchestrator.worker.pr_created → status=pr-created, prNumber from vcs.pr.number", () => {
+    const event = {
+      ts: "2026-05-21T01:00:00.000Z",
+      attributes: {
+        "event.name": "orchestrator.worker.pr_created",
+        "catalyst.orchestrator.id": "orch-1",
+        "catalyst.worker.ticket": "CTL-255",
+        "vcs.pr.number": 510,
+      },
+      body: { payload: { pr: 510, url: "https://github.com/o/r/pull/510" } },
+    };
+    const r = reduceWorkerStateEvent(event);
+    expect(r.patch.status).toBe("pr-created");
+    expect(r.patch.prNumber).toBe(510);
+  });
+
+  test("orchestrator.worker.revived → kind=revive, eventId present", () => {
+    const event = {
+      ts: "2026-05-21T01:00:00.000Z",
+      id: "rev-evt-1",
+      attributes: {
+        "event.name": "orchestrator.worker.revived",
+        "catalyst.orchestrator.id": "orch-1",
+        "catalyst.worker.ticket": "CTL-330",
+      },
+      body: { payload: { pid: 13601, reviveCount: 1, reason: "pid-dead" } },
+    };
+    const r = reduceWorkerStateEvent(event);
+    expect(r.kind).toBe("revive");
+    expect(r.eventId).toBe("rev-evt-1");
+    expect(r.orchestrator).toBe("orch-1");
+    expect(r.ticket).toBe("CTL-330");
+  });
+
+  test("revived event with no id synthesizes a deterministic eventId", () => {
+    const make = () => ({
+      ts: "2026-05-21T01:00:00.000Z",
+      attributes: {
+        "event.name": "orchestrator.worker.revived",
+        "catalyst.orchestrator.id": "orch-1",
+        "catalyst.worker.ticket": "CTL-330",
+      },
+      body: { payload: { reviveCount: 1 } },
+    });
+    const a = reduceWorkerStateEvent(make());
+    const b = reduceWorkerStateEvent(make());
+    expect(a.eventId).toBeTruthy();
+    expect(a.eventId).toBe(b.eventId);
+  });
+
+  test("orchestrator.worker.failed → status=failed", () => {
+    const event = {
+      ts: "2026-05-21T01:00:00.000Z",
+      attributes: {
+        "event.name": "orchestrator.worker.failed",
+        "catalyst.orchestrator.id": "orch-1",
+        "catalyst.worker.ticket": "CTL-1",
+      },
+    };
+    expect(reduceWorkerStateEvent(event).patch).toEqual({ status: "failed" });
+  });
+
+  test("irrelevant events reduce to null (filter.wake, github.pr.merged)", () => {
+    expect(reduceWorkerStateEvent({ attributes: { "event.name": "filter.wake" } })).toBeNull();
+    expect(reduceWorkerStateEvent({ event: "session.heartbeat" })).toBeNull();
+    expect(reduceWorkerStateEvent({ attributes: { "event.name": "github.pr.merged", "vcs.pr.number": 5 } })).toBeNull();
+  });
+
+  test("missing ticket → null; missing orchestrator → null", () => {
+    expect(reduceWorkerStateEvent({
+      ts: "2026-05-21T01:00:00.000Z",
+      attributes: { "event.name": "orchestrator.worker.dispatched", "catalyst.orchestrator.id": "orch-1" },
+    })).toBeNull();
+    expect(reduceWorkerStateEvent({
+      ts: "2026-05-21T01:00:00.000Z",
+      attributes: { "event.name": "orchestrator.worker.dispatched", "catalyst.worker.ticket": "CTL-1" },
+    })).toBeNull();
+  });
+
+  test("IDEMPOTENCY: reduce(event) twice returns deep-equal results (pure)", () => {
+    const event = canonicalPhaseEvent({ name: "phase.research.complete.CTL-1" });
+    expect(reduceWorkerStateEvent(event)).toEqual(reduceWorkerStateEvent(event));
+  });
+});
+

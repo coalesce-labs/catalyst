@@ -8,6 +8,7 @@
 // so it sits cleanly below the router in the dependency DAG.
 
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync, renameSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
 import {
@@ -281,4 +282,185 @@ export function writeProjectedWorkerState(target, state, meta = {}) {
   } catch (err) {
     log.warn({ err: err.message, path: target }, "failed to write projected worker state");
   }
+}
+
+// ─── CTL-532: event-sourced worker-state projection (ADR-018 Phase 3) ─────────
+//
+// reduceWorkerStateEvent folds the `phase.*`, `worker.state_changed`, and
+// `orchestrator.worker.*` event families into a normalized patch. It is a PURE
+// function — no I/O, no router.mjs import — so re-folding the same events (in
+// any order) converges to the same row. The watermark gate in
+// upsertWorkerState makes the fold order-independent.
+
+// --- envelope bridging ---
+// Canonical OTel envelopes carry data under `attributes` + `body.payload`;
+// legacy flat envelopes carry it under `event` + `detail` + `orchestrator`.
+// These local copies of the router's getEventName/Payload/Orchestrator logic
+// keep this module pure and DAG-clean (projection.mjs must not import router.mjs).
+function localEventName(event) {
+  return event.event ?? event.attributes?.["event.name"] ?? "";
+}
+function localPayload(event) {
+  return event.detail ?? event.body?.payload ?? {};
+}
+function localOrchestrator(event) {
+  return event.orchestrator ?? event.attributes?.["catalyst.orchestrator.id"] ?? null;
+}
+function localTicket(event, payload) {
+  return (
+    event.attributes?.["catalyst.worker.ticket"] ??
+    event.attributes?.["linear.issue.identifier"] ??
+    payload?.ticket ??
+    payload?.worker ??
+    null
+  );
+}
+
+// keep in sync with router.mjs PHASE_EVENT_PATTERN
+const WORKER_PHASE_EVENT_PATTERN =
+  /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+
+// phase.<name>.<status> → projected worker `status` value.
+const PHASE_STATUS_MAP = {
+  complete: "phase-complete",
+  failed: "phase-failed",
+  "turn-cap-exhausted": "turn-cap-exhausted",
+};
+
+// orchestrator.worker.<action> events that map directly to a status with no
+// other side effects. pr_created / status_terminal / revived are special-cased.
+const WORKER_LIFECYCLE_STATUS = {
+  dispatched: "dispatched",
+  done: "done",
+  failed: "failed",
+  launch_failed: "failed",
+};
+
+// Pick the first defined PR number from a state object, accepting both the
+// nested `pr: { number }` shape (real worker.state_changed payloads) and a
+// scalar `pr` / `prNumber`.
+function extractPrNumber(state) {
+  if (!state || typeof state !== "object") return undefined;
+  if (state.prNumber != null) return state.prNumber;
+  if (state.pr && typeof state.pr === "object") return state.pr.number ?? undefined;
+  if (typeof state.pr === "number") return state.pr;
+  return undefined;
+}
+
+export function reduceWorkerStateEvent(event) {
+  if (!event || typeof event !== "object") return null;
+  const name = localEventName(event);
+  if (!name) return null;
+
+  const payload = localPayload(event);
+  const orchestrator = localOrchestrator(event);
+  const ts = event.ts ?? event.observedTs ?? null;
+
+  // --- phase.<name>.<status>.<TICKET> ---
+  if (name.startsWith("phase.")) {
+    const m = WORKER_PHASE_EVENT_PATTERN.exec(name);
+    if (!m) return null;
+    const [, phaseName, rawStatus, ticketFromName] = m;
+    const ticket = localTicket(event, payload) ?? ticketFromName;
+    if (!orchestrator || !ticket) return null;
+    return {
+      orchestrator,
+      ticket,
+      ts,
+      eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
+      kind: "phase",
+      patch: { phase: phaseName, status: PHASE_STATUS_MAP[rawStatus] },
+    };
+  }
+
+  // --- worker.state_changed (full signal-file snapshot) ---
+  if (name === "worker.state_changed") {
+    const ticket = localTicket(event, payload);
+    if (!orchestrator || !ticket) return null;
+    const state = payload?.state;
+    if (!state || typeof state !== "object") return null;
+    const patch = {};
+    const phase = state.phase_name ?? state.phase;
+    if (phase != null) patch.phase = phase;
+    if (state.status != null) patch.status = state.status;
+    const prNumber = extractPrNumber(state);
+    if (prNumber != null) patch.prNumber = prNumber;
+    const reviveCount = Math.max(
+      Number(state.phaseReviveCount ?? 0) || 0,
+      Number(state.reviveCount ?? 0) || 0,
+    );
+    if (reviveCount > 0) patch.reviveCount = reviveCount;
+    return {
+      orchestrator,
+      ticket,
+      ts,
+      eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
+      kind: "worker_state",
+      patch,
+    };
+  }
+
+  // --- orchestrator.worker.* lifecycle events ---
+  if (name.startsWith("orchestrator.worker.")) {
+    const action = name.slice("orchestrator.worker.".length);
+    const ticket = localTicket(event, payload);
+    if (!orchestrator || !ticket) return null;
+
+    if (action === "revived") {
+      return {
+        orchestrator,
+        ticket,
+        ts,
+        eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
+        kind: "revive",
+        patch: {},
+      };
+    }
+
+    const prNumber =
+      payload?.pr?.number ??
+      (typeof payload?.pr === "number" ? payload.pr : undefined) ??
+      event.attributes?.["vcs.pr.number"];
+
+    if (action === "pr_created") {
+      const patch = { status: "pr-created" };
+      if (prNumber != null) patch.prNumber = prNumber;
+      return {
+        orchestrator, ticket, ts,
+        eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
+        kind: "worker_lifecycle", patch,
+      };
+    }
+
+    if (action === "status_terminal") {
+      const patch = {};
+      if (payload?.status != null) patch.status = payload.status;
+      if (prNumber != null) patch.prNumber = prNumber;
+      if (patch.status == null && patch.prNumber == null) return null;
+      return {
+        orchestrator, ticket, ts,
+        eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
+        kind: "worker_lifecycle", patch,
+      };
+    }
+
+    const status = WORKER_LIFECYCLE_STATUS[action];
+    if (status) {
+      return {
+        orchestrator, ticket, ts,
+        eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
+        kind: "worker_lifecycle",
+        patch: { status },
+      };
+    }
+    return null;
+  }
+
+  return null;
+}
+
+// Deterministic fallback event id for envelopes that carry no `id` — required
+// for the revive ledger so legacy revive events still dedupe across replays.
+function synthesizeWorkerEventId(name, ts, ticket) {
+  return createHash("sha256").update(`${name} ${ts ?? ""} ${ticket ?? ""}`).digest("hex");
 }
