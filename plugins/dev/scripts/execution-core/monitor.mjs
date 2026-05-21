@@ -24,6 +24,7 @@ import { runEligibleQuery } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject } from "./eligible-set.mjs";
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { dispatchTicket } from "./dispatch.mjs";
+import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
 
 // --- Event parsing -------------------------------------------------------
 
@@ -124,7 +125,13 @@ const dirtyTimers = new Map();
 //   anything else   the leave-path — a confident immediate removal.
 export function handleStateChangedEvent(
   event,
-  { exec, debounceMs = EVENT_DEBOUNCE_MS, dispatch, orchDir } = {},
+  {
+    exec,
+    debounceMs = EVENT_DEBOUNCE_MS,
+    dispatch,
+    orchDir,
+    abortWorker = defaultAbortWorker,
+  } = {},
 ) {
   const parsed = parseStateChangedEvent(event);
   if (!parsed) return;
@@ -143,10 +150,17 @@ export function handleStateChangedEvent(
       // it so a burst of events coalesces into one reconcile.
       scheduleDirtyReconcile(p.projectKey, p.repoRoot, { exec, debounceMs });
     } else {
-      // Left both watched states — a confident immediate removal. removeTicket
-      // persists the projection itself; removing a non-member is a safe no-op.
+      // Left both watched states (→Backlog/→Canceled). Confident immediate
+      // removal, then abort any in-flight worker and tear down its worktree.
+      // removeTicket persists the projection itself; removing a non-member is
+      // a safe no-op. abortWorker no-ops when the ticket was never dispatched.
       removeTicket(p.projectKey, parsed.identifier);
-      // Phase 4 attaches the kill-on-drag-out abort hook here.
+      if (orchDir) {
+        abortWorker(orchDir, parsed.identifier, {
+          projectKey: p.projectKey,
+          repoRoot: p.repoRoot,
+        });
+      }
     }
   }
 }
@@ -305,10 +319,13 @@ export function startMonitor({
   resumeFromCursor = true,
   orchDir,
   dispatch,
+  abortWorker,
 } = {}) {
-  // CTL-565: orchDir + dispatch are stored in tailerOpts so the tailer-driven
-  // readNewEvents → handleStateChangedEvent path can one-shot-dispatch triage.
-  tailerOpts = { exec, debounceMs, orchDir, dispatch };
+  // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
+  // tailer-driven readNewEvents → handleStateChangedEvent path can one-shot-
+  // dispatch triage and abort a dragged-out worker. When abortWorker is left
+  // undefined, handleStateChangedEvent falls back to its real default.
+  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker };
   reconcileAll({ exec });
   if (resumeFromCursor) {
     seedTailerFromCursor();

@@ -117,6 +117,9 @@ describe("isTicketInFlight", () => {
     expect(isTicketInFlight({ implement: "failed" })).toBe(false);
     expect(isTicketInFlight({ verify: "stalled" })).toBe(false);
   });
+  test("an 'aborted' signal frees the slot (CTL-565 kill-on-drag-out)", () => {
+    expect(isTicketInFlight({ research: "done", implement: "aborted" })).toBe(false);
+  });
   test("no signals at all → NOT in-flight", () => {
     expect(isTicketInFlight({})).toBe(false);
   });

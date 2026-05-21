@@ -17,8 +17,10 @@ export * from "./config.mjs";
 export * from "./enrollment.mjs";
 export * from "./linear-query.mjs";
 export * from "./eligible-set.mjs";
-// CTL-565: the shared worker-dispatch adapter (D9 executor seam).
+// CTL-565: the shared worker-dispatch adapter (D9 executor seam) and the
+// kill-on-drag-out abort module.
 export * from "./dispatch.mjs";
+export * from "./abort-worker.mjs";
 // monitor.mjs is re-exported explicitly so the test-only __resetForTests
 // helper stays out of the public barrel.
 export {

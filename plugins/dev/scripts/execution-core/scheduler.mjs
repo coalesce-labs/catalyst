@@ -61,14 +61,19 @@ export function readPhaseSignals(orchDir, ticket) {
 
 // isTicketInFlight — true when a ticket still occupies a worker slot. Pure over
 // a phase→status map. In-flight = has ≥1 signal AND is neither pipeline-complete
-// (monitor-deploy done) nor failed/stalled. A ticket mid-advance (plan done, no
-// later signal yet) is still in-flight — correct slot accounting through the
-// advance window.
+// (monitor-deploy done) nor failed/stalled/aborted. A ticket mid-advance (plan
+// done, no later signal yet) is still in-flight — correct slot accounting
+// through the advance window.
+//
+// CROSS-REFERENCE (CTL-565): the failed/stalled/aborted set here is NOT the
+// same as SETTLED_STATUSES in abort-worker.mjs — a non-terminal `done` is
+// settled-as-a-signal there but still in-flight here. The divergence is
+// intentional; do not collapse the two into one shared constant.
 export function isTicketInFlight(signals) {
   const phases = Object.keys(signals ?? {});
   if (phases.length === 0) return false;
   for (const [phase, status] of Object.entries(signals)) {
-    if (status === "failed" || status === "stalled") return false;
+    if (status === "failed" || status === "stalled" || status === "aborted") return false;
     if (phase === TERMINAL_PHASE && status === "done") return false;
   }
   return true;

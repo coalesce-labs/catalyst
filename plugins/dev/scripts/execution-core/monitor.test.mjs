@@ -314,6 +314,54 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
     ).not.toThrow();
     expect(dispatch).not.toHaveBeenCalled();
   });
+
+  test("a drag-out (toState neither Triage nor Ready) invokes abortWorker", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    const abortWorker = mock(() => ({ aborted: true }));
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
+      },
+      { orchDir, abortWorker },
+    );
+    expect(abortWorker).toHaveBeenCalledWith("/orch", "ENG-1", {
+      projectKey: expect.any(String),
+      repoRoot: expect.any(String),
+    });
+  });
+
+  test("a drag-out still removes the ticket from the eligible projection", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    setProjectEligible("alpha", [node("ENG-1"), node("ENG-2")], {
+      source: "reconcile",
+      query: { team: "ENG", status: "Ready" },
+    });
+    const abortWorker = mock(() => ({ aborted: true }));
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Canceled" },
+      },
+      { orchDir, abortWorker },
+    );
+    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+  });
+
+  test("a drag-out with no orchDir wired removes the ticket and does not throw", () => {
+    enroll("alpha", { team: "ENG", status: "Ready" });
+    const abortWorker = mock(() => ({ aborted: true }));
+    expect(() =>
+      handleStateChangedEvent(
+        {
+          event: "linear.issue.state_changed",
+          detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
+        },
+        { abortWorker },
+      ),
+    ).not.toThrow();
+    expect(abortWorker).not.toHaveBeenCalled(); // no orchDir → abort skipped
+  });
 });
 
 describe("lifecycle", () => {
