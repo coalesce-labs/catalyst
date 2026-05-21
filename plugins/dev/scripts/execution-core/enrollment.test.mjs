@@ -2,13 +2,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test enrollment.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import {
-  mkdtempSync,
-  rmSync,
-  mkdirSync,
-  writeFileSync,
-  readdirSync,
-} from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -40,7 +34,7 @@ afterEach(() => {
 function writeRecord(name, obj) {
   writeFileSync(
     join(enrollmentDir, name),
-    typeof obj === "string" ? obj : JSON.stringify(obj, null, 2),
+    typeof obj === "string" ? obj : JSON.stringify(obj, null, 2)
   );
 }
 
@@ -50,10 +44,7 @@ function writeRecord(name, obj) {
 function writeRepo(catalyst) {
   const repoRoot = mkdtempSync(join(catalystDir, "repo-"));
   mkdirSync(join(repoRoot, ".catalyst"), { recursive: true });
-  writeFileSync(
-    join(repoRoot, ".catalyst", "config.json"),
-    JSON.stringify({ catalyst }, null, 2),
-  );
+  writeFileSync(join(repoRoot, ".catalyst", "config.json"), JSON.stringify({ catalyst }, null, 2));
   return repoRoot;
 }
 
@@ -236,10 +227,8 @@ describe("writeEnrollmentRecord", () => {
   });
 
   test("throws on an unsafe projectKey (path traversal)", () => {
-    expect(() => writeEnrollmentRecord({ projectKey: "../escape", repoRoot: "/r" }))
-      .toThrow();
-    expect(() => writeEnrollmentRecord({ projectKey: "a/b", repoRoot: "/r" }))
-      .toThrow();
+    expect(() => writeEnrollmentRecord({ projectKey: "../escape", repoRoot: "/r" })).toThrow();
+    expect(() => writeEnrollmentRecord({ projectKey: "a/b", repoRoot: "/r" })).toThrow();
   });
 
   test("throws when projectKey or repoRoot is missing", () => {

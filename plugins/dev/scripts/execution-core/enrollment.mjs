@@ -60,7 +60,7 @@ export function listEnrolledProjects() {
     if (!isSafePathSegment(record.projectKey)) {
       log.warn(
         { file, projectKey: record.projectKey },
-        "skipping enrollment record with unsafe projectKey (not a valid path segment)",
+        "skipping enrollment record with unsafe projectKey (not a valid path segment)"
       );
       continue;
     }

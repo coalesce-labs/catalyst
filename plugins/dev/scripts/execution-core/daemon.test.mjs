@@ -6,14 +6,7 @@
 // composition logic is exercised deterministically.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import {
-  mkdtempSync,
-  rmSync,
-  mkdirSync,
-  existsSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { startDaemon, stopDaemon } from "./daemon.mjs";

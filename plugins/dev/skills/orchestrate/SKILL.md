@@ -71,19 +71,19 @@ fi
 
 ## Flags
 
-| Flag                      | Description                                                                         |
-| ------------------------- | ----------------------------------------------------------------------------------- |
-| `--project <name>`        | Pull tickets from a Linear project                                                  |
-| `--cycle current`         | Pull tickets from the current Linear cycle                                          |
-| `--file <path>`           | Read ticket IDs from a file (one per line)                                          |
-| `--auto <N>`              | Auto-pick top N Todo tickets: urgent/high priority first, newer first. Default N=3. |
-| `--auto-merge`            | Workers auto-merge PRs when CI + verification pass                                  |
-| `--max-parallel <n>`      | Override config `maxParallel` (default: 3)                                          |
-| `--base-branch <branch>`  | Base branch for worktrees (default: main)                                           |
-| `--interactive`           | Include PM intake phase before orchestration                                        |
-| `--prd <path>`            | Run PRD review panel + ticket creation before orchestration                         |
-| `--dry-run`               | Show wave plan without executing                                                    |
-| `--state-on-merge <name>` | Linear state to set on PR merge. Default: `stateMap.done` (typically "Done")        |
+| Flag                      | Description                                                                                                                                           |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--project <name>`        | Pull tickets from a Linear project                                                                                                                    |
+| `--cycle current`         | Pull tickets from the current Linear cycle                                                                                                            |
+| `--file <path>`           | Read ticket IDs from a file (one per line)                                                                                                            |
+| `--auto <N>`              | Auto-pick top N Todo tickets: urgent/high priority first, newer first. Default N=3.                                                                   |
+| `--auto-merge`            | Workers auto-merge PRs when CI + verification pass                                                                                                    |
+| `--max-parallel <n>`      | Override config `maxParallel` (default: 3)                                                                                                            |
+| `--base-branch <branch>`  | Base branch for worktrees (default: main)                                                                                                             |
+| `--interactive`           | Include PM intake phase before orchestration                                                                                                          |
+| `--prd <path>`            | Run PRD review panel + ticket creation before orchestration                                                                                           |
+| `--dry-run`               | Show wave plan without executing                                                                                                                      |
+| `--state-on-merge <name>` | Linear state to set on PR merge. Default: `stateMap.done` (typically "Done")                                                                          |
 | `--stop`                  | Deregister this project from the `execution-core` daemon (removes the enrollment record) and exit. Works regardless of the configured `dispatchMode`. |
 
 ## Configuration

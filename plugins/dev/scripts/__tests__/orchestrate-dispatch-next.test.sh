@@ -11,29 +11,36 @@ DISPATCH="${REPO_ROOT}/plugins/dev/scripts/orchestrate-dispatch-next"
 FAILURES=0
 PASSES=0
 
-pass() { PASSES=$((PASSES+1)); echo "  PASS: $1"; }
-fail() { FAILURES=$((FAILURES+1)); echo "  FAIL: $1"; [ $# -ge 2 ] && echo "    $2"; }
+pass() {
+	PASSES=$((PASSES + 1))
+	echo "  PASS: $1"
+}
+fail() {
+	FAILURES=$((FAILURES + 1))
+	echo "  FAIL: $1"
+	[ $# -ge 2 ] && echo "    $2"
+}
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 scratch_setup() {
-  SCRATCH="$(mktemp -d)"
-  ORCH_DIR="${SCRATCH}/orch"
-  WORKTREE_ROOT="${SCRATCH}/wt"
-  mkdir -p "${ORCH_DIR}/workers/output" "${SCRATCH}/bin" "${WORKTREE_ROOT}"
+	SCRATCH="$(mktemp -d)"
+	ORCH_DIR="${SCRATCH}/orch"
+	WORKTREE_ROOT="${SCRATCH}/wt"
+	mkdir -p "${ORCH_DIR}/workers/output" "${SCRATCH}/bin" "${WORKTREE_ROOT}"
 
-  # Fake catalyst-state.sh — logs argv so tests can assert.
-  cat > "${SCRATCH}/bin/catalyst-state.sh" <<'EOF'
+	# Fake catalyst-state.sh — logs argv so tests can assert.
+	cat >"${SCRATCH}/bin/catalyst-state.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "$@" >> "$STATE_LOG"
 EOF
-  chmod +x "${SCRATCH}/bin/catalyst-state.sh"
-  export STATE_LOG="${SCRATCH}/state.log"
-  : > "$STATE_LOG"
-  export CATALYST_STATE_SCRIPT="${SCRATCH}/bin/catalyst-state.sh"
+	chmod +x "${SCRATCH}/bin/catalyst-state.sh"
+	export STATE_LOG="${SCRATCH}/state.log"
+	: >"$STATE_LOG"
+	export CATALYST_STATE_SCRIPT="${SCRATCH}/bin/catalyst-state.sh"
 
-  # Fake claude binary — logs argv + env then sleeps so kill-0 sees a live PID.
-  cat > "${SCRATCH}/bin/claude" <<'EOF'
+	# Fake claude binary — logs argv + env then sleeps so kill-0 sees a live PID.
+	cat >"${SCRATCH}/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 {
   echo "---"
@@ -49,29 +56,29 @@ EOF
 sleep 30 &
 disown $! 2>/dev/null || true
 EOF
-  chmod +x "${SCRATCH}/bin/claude"
-  export CLAUDE_LOG="${SCRATCH}/claude.log"
-  : > "$CLAUDE_LOG"
-  export CATALYST_DISPATCH_CLAUDE_BIN="${SCRATCH}/bin/claude"
+	chmod +x "${SCRATCH}/bin/claude"
+	export CLAUDE_LOG="${SCRATCH}/claude.log"
+	: >"$CLAUDE_LOG"
+	export CATALYST_DISPATCH_CLAUDE_BIN="${SCRATCH}/bin/claude"
 
-  # Disable the post-dispatch healthcheck in tests (would try to re-read signals
-  # and might interfere with assertions). The script honors an empty env var.
-  export CATALYST_DISPATCH_HEALTHCHECK=""
+	# Disable the post-dispatch healthcheck in tests (would try to re-read signals
+	# and might interfere with assertions). The script honors an empty env var.
+	export CATALYST_DISPATCH_HEALTHCHECK=""
 }
 
 scratch_teardown() {
-  pkill -f "sleep 30" 2>/dev/null || true
-  rm -rf "$SCRATCH"
-  unset STATE_LOG CLAUDE_LOG CATALYST_STATE_SCRIPT CATALYST_DISPATCH_CLAUDE_BIN
-  unset CATALYST_DISPATCH_HEALTHCHECK SCRATCH ORCH_DIR WORKTREE_ROOT
+	pkill -f "sleep 30" 2>/dev/null || true
+	rm -rf "$SCRATCH"
+	unset STATE_LOG CLAUDE_LOG CATALYST_STATE_SCRIPT CATALYST_DISPATCH_CLAUDE_BIN
+	unset CATALYST_DISPATCH_HEALTHCHECK SCRATCH ORCH_DIR WORKTREE_ROOT
 }
 
 # write_state ORCH_ID MAX_PARALLEL JQ_QUEUE
 # Writes a minimal state.json into ORCH_DIR with the given orchestrator name,
 # maxParallel, and a .queue object supplied as a JSON literal.
 write_state() {
-  local orch="$1" mp="$2" queue="$3"
-  cat > "${ORCH_DIR}/state.json" <<EOF
+	local orch="$1" mp="$2" queue="$3"
+	cat >"${ORCH_DIR}/state.json" <<EOF
 {
   "orchestrator": "${orch}",
   "startedAt": "$(now_iso)",
@@ -89,22 +96,22 @@ EOF
 # make_worktree ORCH_ID TICKET — create an empty directory so the dispatcher's
 # worktree existence check passes.
 make_worktree() {
-  mkdir -p "${WORKTREE_ROOT}/${1}-${2}"
+	mkdir -p "${WORKTREE_ROOT}/${1}-${2}"
 }
 
 # make_running_signal TICKET STATUS — seed a pre-existing signal so the
 # running-count logic observes it.
 make_running_signal() {
-  local t="$1" s="$2"
-  jq -n --arg t "$t" --arg s "$s" --arg ts "$(now_iso)" \
-    '{ticket: $t, orchestrator: "demo", workerName: ("demo-" + $t),
+	local t="$1" s="$2"
+	jq -n --arg t "$t" --arg s "$s" --arg ts "$(now_iso)" \
+		'{ticket: $t, orchestrator: "demo", workerName: ("demo-" + $t),
       label: ("oneshot " + $t), status: $s, phase: 3,
       startedAt: $ts, updatedAt: $ts}' \
-    > "${ORCH_DIR}/workers/${t}.json"
+		>"${ORCH_DIR}/workers/${t}.json"
 }
 
 run_dispatch() {
-  "$DISPATCH" --orch-dir "$ORCH_DIR" "$@"
+	"$DISPATCH" --orch-dir "$ORCH_DIR" "$@"
 }
 
 # ─── Test cases ───────────────────────────────────────────────────────────────
@@ -156,7 +163,7 @@ OUT=$(run_dispatch 2>"${SCRATCH}/err")
 DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
 [ "$DISPATCHED" = "A,B,C,D" ] && pass "drains waves in order" || fail "drains waves in order" "got: $DISPATCHED"
 for T in A B C D; do
-  [ -f "${ORCH_DIR}/workers/${T}.json" ] && pass "$T signal created" || fail "$T signal created"
+	[ -f "${ORCH_DIR}/workers/${T}.json" ] && pass "$T signal created" || fail "$T signal created"
 done
 scratch_teardown
 
@@ -226,8 +233,8 @@ DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
 [ "$DISPATCHED" = "A,B" ] && pass "A and B dispatched, MISSING skipped" || fail "A and B dispatched, MISSING skipped" "got: $DISPATCHED"
 grep -qi "MISSING" "${SCRATCH}/err" && pass "stderr mentions missing worktree" || fail "stderr mentions missing" "stderr: $(cat "${SCRATCH}/err")"
 # MISSING stays in wave1Pending
-jq -e '.queue.wave1Pending | contains(["MISSING"])' "${ORCH_DIR}/state.json" >/dev/null \
-  && pass "MISSING left in queue" || fail "MISSING left in queue"
+jq -e '.queue.wave1Pending | contains(["MISSING"])' "${ORCH_DIR}/state.json" >/dev/null &&
+	pass "MISSING left in queue" || fail "MISSING left in queue"
 scratch_teardown
 
 echo "test 9: idempotent — skips tickets that already have a signal"
@@ -266,8 +273,8 @@ make_worktree "demo" "A"
 OUT=$(run_dispatch 2>"${SCRATCH}/err")
 RC=$?
 [ "$RC" = "0" ] && pass "exit 0 when full" || fail "exit 0 when full"
-echo "$OUT" | jq -e '.slotsAfter == 0 and .dispatched == []' >/dev/null \
-  && pass "slotsAfter=0 dispatched=[]" || fail "slotsAfter=0 dispatched=[]" "got: $OUT"
+echo "$OUT" | jq -e '.slotsAfter == 0 and .dispatched == []' >/dev/null &&
+	pass "slotsAfter=0 dispatched=[]" || fail "slotsAfter=0 dispatched=[]" "got: $OUT"
 [ ! -f "${ORCH_DIR}/workers/A.json" ] && pass "A not dispatched" || fail "A not dispatched"
 scratch_teardown
 
@@ -292,7 +299,7 @@ scratch_setup
 write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
 make_worktree "demo" "T-1"
 run_dispatch --session-id "sess-abc" --worker-command "/catalyst-dev:oneshot" \
-  --worker-args "--auto-merge --extra" 2>"${SCRATCH}/err" >/dev/null
+	--worker-args "--auto-merge --extra" 2>"${SCRATCH}/err" >/dev/null
 grep -q "ORCH_ID=demo" "$CLAUDE_LOG" && pass "ORCH_ID forwarded" || fail "ORCH_ID forwarded" "log: $(cat "$CLAUDE_LOG")"
 grep -q "ORCH_DIR=${ORCH_DIR}" "$CLAUDE_LOG" && pass "ORCH_DIR forwarded" || fail "ORCH_DIR forwarded"
 grep -q "SESSION=sess-abc" "$CLAUDE_LOG" && pass "SESSION_ID forwarded" || fail "SESSION_ID forwarded"
@@ -333,12 +340,12 @@ scratch_teardown
 
 echo "test 17: no .queue key → treated as empty queue"
 scratch_setup
-cat > "${ORCH_DIR}/state.json" <<EOF
+cat >"${ORCH_DIR}/state.json" <<EOF
 {"orchestrator": "demo", "worktreeBase": "${WORKTREE_ROOT}", "maxParallel": 2}
 EOF
 OUT=$(run_dispatch 2>"${SCRATCH}/err")
-echo "$OUT" | jq -e '.queueEmpty == true' >/dev/null \
-  && pass "queueEmpty when .queue missing" || fail "queueEmpty when .queue missing" "got: $OUT"
+echo "$OUT" | jq -e '.queueEmpty == true' >/dev/null &&
+	pass "queueEmpty when .queue missing" || fail "queueEmpty when .queue missing" "got: $OUT"
 scratch_teardown
 
 echo "test 18 (CTL-208): rejects bare /oneshot worker-command with exit 2"
@@ -348,12 +355,12 @@ make_worktree "demo" "T-1"
 OUT=$(run_dispatch --worker-command "/oneshot" 2>&1)
 RC=$?
 [ "$RC" = "2" ] && pass "exit code 2 on bare /oneshot" || fail "exit code 2 on bare /oneshot" "got rc=$RC"
-echo "$OUT" | grep -q "plugin-namespaced" \
-  && pass "stderr mentions plugin-namespaced" \
-  || fail "stderr mentions plugin-namespaced" "got: $OUT"
-echo "$OUT" | grep -q "/catalyst-dev:oneshot" \
-  && pass "stderr suggests /catalyst-dev:oneshot" \
-  || fail "stderr suggests /catalyst-dev:oneshot"
+echo "$OUT" | grep -q "plugin-namespaced" &&
+	pass "stderr mentions plugin-namespaced" ||
+	fail "stderr mentions plugin-namespaced" "got: $OUT"
+echo "$OUT" | grep -q "/catalyst-dev:oneshot" &&
+	pass "stderr suggests /catalyst-dev:oneshot" ||
+	fail "stderr suggests /catalyst-dev:oneshot"
 [ ! -f "${ORCH_DIR}/workers/T-1.json" ] && pass "no signal created when rejected" || fail "no signal created"
 [ ! -s "$CLAUDE_LOG" ] && pass "claude not invoked when rejected" || fail "claude not invoked"
 scratch_teardown
@@ -410,7 +417,7 @@ scratch_setup
 # Replace the fake claude with one that captures its own stdin to a per-pid
 # file. With the stdin leak, the first worker(s) would see the leftover
 # `<wave>\t<ticket>` rows from the dispatcher's `done <<< "$PENDING"` loop.
-cat > "${SCRATCH}/bin/claude" <<EOF2
+cat >"${SCRATCH}/bin/claude" <<EOF2
 #!/usr/bin/env bash
 # Drain stdin into a deterministic file so the test can inspect it.
 cat <&0 > "${SCRATCH}/stdin-\$\$.log" 2>/dev/null || true
@@ -422,19 +429,19 @@ write_state "demo" 4 '{"wave1Pending": ["T-1", "T-2", "T-3"]}'
 for T in T-1 T-2 T-3; do make_worktree "demo" "$T"; done
 OUT=$(run_dispatch 2>"${SCRATCH}/err")
 DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
-[ "$DISPATCHED" = "T-1,T-2,T-3" ] && pass "all 3 dispatched in one call" \
-  || fail "all 3 dispatched in one call" "got: $DISPATCHED (stdin leak symptom: only first N-1 dispatched)"
+[ "$DISPATCHED" = "T-1,T-2,T-3" ] && pass "all 3 dispatched in one call" ||
+	fail "all 3 dispatched in one call" "got: $DISPATCHED (stdin leak symptom: only first N-1 dispatched)"
 # Every captured stdin file must be empty (no inherited herestring content).
 LEAK_COUNT=0
 for SF in "${SCRATCH}"/stdin-*.log; do
-  [ -e "$SF" ] || continue
-  if [ -s "$SF" ]; then
-    LEAK_COUNT=$((LEAK_COUNT+1))
-    echo "    LEAK in $SF: $(head -c 200 "$SF")" >&2
-  fi
+	[ -e "$SF" ] || continue
+	if [ -s "$SF" ]; then
+		LEAK_COUNT=$((LEAK_COUNT + 1))
+		echo "    LEAK in $SF: $(head -c 200 "$SF")" >&2
+	fi
 done
-[ "$LEAK_COUNT" = "0" ] && pass "no worker received leftover herestring on stdin" \
-  || fail "no worker received leftover herestring on stdin" "$LEAK_COUNT worker(s) saw stdin content"
+[ "$LEAK_COUNT" = "0" ] && pass "no worker received leftover herestring on stdin" ||
+	fail "no worker received leftover herestring on stdin" "$LEAK_COUNT worker(s) saw stdin content"
 scratch_teardown
 
 # ─── CTL-452: --ticket flag + dispatchMode tests ─────────────────────────────
@@ -443,7 +450,7 @@ scratch_teardown
 # (via CATALYST_PHASE_AGENT_DISPATCH env var) that logs argv + a fake stdout
 # summary instead of actually spawning claude --bg.
 phase_agent_dispatch_setup() {
-  cat > "${SCRATCH}/bin/phase-agent-dispatch" <<'EOF'
+	cat >"${SCRATCH}/bin/phase-agent-dispatch" <<'EOF'
 #!/usr/bin/env bash
 echo "$@" >> "$PHASE_DISPATCH_LOG"
 # Write the per-phase signal so the dispatcher's idempotency check sees it on
@@ -464,21 +471,21 @@ if [ -n "$ORCH_DIR" ] && [ -n "$PHASE" ] && [ -n "$TICKET" ]; then
 fi
 echo "{\"ticket\":\"${TICKET}\",\"phase\":\"${PHASE}\",\"bg_job_id\":\"fake-${TICKET}-${PHASE}\",\"status\":\"running\"}"
 EOF
-  chmod +x "${SCRATCH}/bin/phase-agent-dispatch"
-  export PHASE_DISPATCH_LOG="${SCRATCH}/phase-dispatch.log"
-  : > "$PHASE_DISPATCH_LOG"
-  export CATALYST_PHASE_AGENT_DISPATCH="${SCRATCH}/bin/phase-agent-dispatch"
+	chmod +x "${SCRATCH}/bin/phase-agent-dispatch"
+	export PHASE_DISPATCH_LOG="${SCRATCH}/phase-dispatch.log"
+	: >"$PHASE_DISPATCH_LOG"
+	export CATALYST_PHASE_AGENT_DISPATCH="${SCRATCH}/bin/phase-agent-dispatch"
 }
 
 # write_config DISPATCH_MODE — drop a minimal .catalyst/config.json at $SCRATCH/.catalyst
 # and return the absolute path. Caller passes via --config.
 write_config() {
-  local mode="$1"
-  mkdir -p "${SCRATCH}/.catalyst"
-  cat > "${SCRATCH}/.catalyst/config.json" <<EOF
+	local mode="$1"
+	mkdir -p "${SCRATCH}/.catalyst"
+	cat >"${SCRATCH}/.catalyst/config.json" <<EOF
 {"catalyst": {"orchestration": {"dispatchMode": "${mode}"}}}
 EOF
-  echo "${SCRATCH}/.catalyst/config.json"
+	echo "${SCRATCH}/.catalyst/config.json"
 }
 
 echo "test 24 (CTL-452): --ticket without --phase exits 2"
@@ -517,7 +524,7 @@ write_state "demo" 4 '{"wave1Pending": []}'
 make_worktree "demo" "T-1"
 # Pre-create the per-phase signal — dispatcher should see it and no-op.
 mkdir -p "${ORCH_DIR}/workers/T-1"
-echo '{"ticket":"T-1","phase":"research","status":"running"}' > "${ORCH_DIR}/workers/T-1/phase-research.json"
+echo '{"ticket":"T-1","phase":"research","status":"running"}' >"${ORCH_DIR}/workers/T-1/phase-research.json"
 OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
 RC=$?
 [ "$RC" = "0" ] && pass "exit 0 on idempotent" || fail "exit 0 on idempotent" "rc=$RC"
@@ -593,9 +600,9 @@ make_worktree "demo" "T-1"
 OUT=$(run_dispatch 2>"${SCRATCH}/err")
 RC=$?
 [ "$RC" = "0" ] && pass "legacy dispatch exit 0" || fail "legacy dispatch exit 0" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
-grep -q "OTEL=.*task.type=oneshot" "$CLAUDE_LOG" \
-  && pass "legacy claude inherits OTEL with task.type=oneshot" \
-  || fail "legacy claude OTEL has task.type=oneshot" "log: $(cat "$CLAUDE_LOG")"
+grep -q "OTEL=.*task.type=oneshot" "$CLAUDE_LOG" &&
+	pass "legacy claude inherits OTEL with task.type=oneshot" ||
+	fail "legacy claude OTEL has task.type=oneshot" "log: $(cat "$CLAUDE_LOG")"
 scratch_teardown
 
 echo "test 32 (CTL-495): phase-agent path does NOT pre-set task.type in dispatch-next"
@@ -623,10 +630,12 @@ CONFIG_PATH=$(write_config "execution-core")
 write_state "demo" 4 '{"wave1Pending": []}'
 "$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err" >/dev/null
 RC=$?
-[ "$RC" = "0" ] && pass "exit 0 with dispatchMode=execution-core" || fail "exit 0" "rc=$RC"
-! grep -q "invalid dispatchMode" "${SCRATCH}/err" \
-  && pass "no 'invalid dispatchMode' WARN for execution-core" \
-  || fail "no WARN for execution-core" "stderr=$(cat "${SCRATCH}/err")"
+if [ "$RC" = "0" ]; then pass "exit 0 with dispatchMode=execution-core"; else fail "exit 0" "rc=$RC"; fi
+if ! grep -q "invalid dispatchMode" "${SCRATCH}/err"; then
+	pass "no 'invalid dispatchMode' WARN for execution-core"
+else
+	fail "no WARN for execution-core" "stderr=$(cat "${SCRATCH}/err")"
+fi
 scratch_teardown
 
 echo ""

@@ -122,7 +122,7 @@ function main() {
     });
     log.info(
       { projectKey: rec.projectKey, repoRoot: rec.repoRoot },
-      "execution-core: enrolled project",
+      "execution-core: enrolled project"
     );
     return;
   }

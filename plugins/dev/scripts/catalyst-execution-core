@@ -26,111 +26,121 @@ LOG_FILE="${EXECUTION_CORE_LOG_FILE:-$EC_DIR/daemon.log}"
 
 # Resolve this script's directory through symlinks (catalyst-broker:39-42).
 _SRC="${BASH_SOURCE[0]}"
-while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
+while [[ -L $_SRC ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 
 DAEMON_SCRIPT="${EXECUTION_CORE_DAEMON_SCRIPT:-$SCRIPT_DIR/execution-core/daemon.mjs}"
-RUNTIME="${EXECUTION_CORE_RUNTIME:-}"   # empty → resolve_runtime picks bun/node
+RUNTIME="${EXECUTION_CORE_RUNTIME-}" # empty → resolve_runtime picks bun/node
 
 is_alive() { kill -0 "$1" 2>/dev/null; }
 
 read_pid() {
-  if [[ -f "$PID_FILE" ]]; then
-    local pid
-    pid="$(cat "$PID_FILE" 2>/dev/null)"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && is_alive "$pid"; then
-      echo "$pid"; return 0
-    fi
-    rm -f "$PID_FILE" 2>/dev/null
-  fi
-  return 1
+	if [[ -f $PID_FILE ]]; then
+		local pid
+		pid="$(cat "$PID_FILE" 2>/dev/null)"
+		if [[ $pid =~ ^[0-9]+$ ]] && is_alive "$pid"; then
+			echo "$pid"
+			return 0
+		fi
+		rm -f "$PID_FILE" 2>/dev/null
+	fi
+	return 1
 }
 
 resolve_runtime() {
-  if [[ -n "$RUNTIME" ]]; then echo "$RUNTIME"; return 0; fi
-  if command -v bun &>/dev/null; then echo "bun"; return 0; fi
-  if command -v node &>/dev/null; then echo "node"; return 0; fi
-  echo "error: neither bun nor node found on PATH" >&2
-  return 1
+	if [[ -n $RUNTIME ]]; then
+		echo "$RUNTIME"
+		return 0
+	fi
+	if command -v bun &>/dev/null; then
+		echo "bun"
+		return 0
+	fi
+	if command -v node &>/dev/null; then
+		echo "node"
+		return 0
+	fi
+	echo "error: neither bun nor node found on PATH" >&2
+	return 1
 }
 
 cmd_start() {
-  if read_pid > /dev/null 2>&1; then
-    echo "catalyst-execution-core already running (pid $(read_pid))"
-    return 0
-  fi
-  local runtime
-  runtime=$(resolve_runtime) || return 1
-  if [[ ! -f "$DAEMON_SCRIPT" ]]; then
-    echo "error: daemon script not found: $DAEMON_SCRIPT" >&2
-    return 1
-  fi
-  mkdir -p "$EC_DIR" 2>/dev/null || true
-  nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" > "$LOG_FILE" 2>&1 &
-  local server_pid=$!
-  disown "$server_pid" 2>/dev/null || true
-  local waited=0
-  while [[ $waited -lt 20 ]]; do
-    if [[ -f "$PID_FILE" ]]; then
-      echo "catalyst-execution-core started (pid $(cat "$PID_FILE"))"
-      return 0
-    fi
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-  if is_alive "$server_pid"; then
-    echo "$server_pid" > "$PID_FILE"
-    echo "catalyst-execution-core started (pid $server_pid)"
-    return 0
-  fi
-  echo "error: catalyst-execution-core failed to start — check $LOG_FILE" >&2
-  return 1
+	if read_pid >/dev/null 2>&1; then
+		echo "catalyst-execution-core already running (pid $(read_pid))"
+		return 0
+	fi
+	local runtime
+	runtime=$(resolve_runtime) || return 1
+	if [[ ! -f $DAEMON_SCRIPT ]]; then
+		echo "error: daemon script not found: $DAEMON_SCRIPT" >&2
+		return 1
+	fi
+	mkdir -p "$EC_DIR" 2>/dev/null || true
+	nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1 &
+	local server_pid=$!
+	disown "$server_pid" 2>/dev/null || true
+	local waited=0
+	while [[ $waited -lt 20 ]]; do
+		if [[ -f $PID_FILE ]]; then
+			echo "catalyst-execution-core started (pid $(cat "$PID_FILE"))"
+			return 0
+		fi
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+	if is_alive "$server_pid"; then
+		echo "$server_pid" >"$PID_FILE"
+		echo "catalyst-execution-core started (pid $server_pid)"
+		return 0
+	fi
+	echo "error: catalyst-execution-core failed to start — check $LOG_FILE" >&2
+	return 1
 }
 
 cmd_stop() {
-  local pid
-  if ! pid=$(read_pid); then
-    echo "catalyst-execution-core not running"
-    return 0
-  fi
-  kill "$pid" 2>/dev/null || true
-  local waited=0
-  while [[ $waited -lt 30 ]] && is_alive "$pid"; do
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-  is_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
-  rm -f "$PID_FILE" 2>/dev/null
-  echo "catalyst-execution-core stopped"
+	local pid
+	if ! pid=$(read_pid); then
+		echo "catalyst-execution-core not running"
+		return 0
+	fi
+	kill "$pid" 2>/dev/null || true
+	local waited=0
+	while [[ $waited -lt 30 ]] && is_alive "$pid"; do
+		sleep 0.1
+		waited=$((waited + 1))
+	done
+	is_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+	rm -f "$PID_FILE" 2>/dev/null
+	echo "catalyst-execution-core stopped"
 }
 
 cmd_restart() {
-  cmd_stop
-  cmd_start
+	cmd_stop
+	cmd_start
 }
 
 cmd_probe() {
-  read_pid > /dev/null 2>&1
+	read_pid >/dev/null 2>&1
 }
 
 cmd_status() {
-  local pid
-  if pid=$(read_pid); then
-    echo "running (pid $pid)"
-    return 0
-  fi
-  echo "stopped"
+	local pid
+	if pid=$(read_pid); then
+		echo "running (pid $pid)"
+		return 0
+	fi
+	echo "stopped"
 }
 
-case "${1:-}" in
-  start)   cmd_start ;;
-  stop)    cmd_stop ;;
-  restart) cmd_restart ;;
-  probe)   cmd_probe ;;
-  status)  cmd_status ;;
-  *)
-    echo "Usage: catalyst-execution-core {start|stop|restart|probe|status}" >&2
-    exit 1
-    ;;
+case "${1-}" in
+start) cmd_start ;;
+stop) cmd_stop ;;
+restart) cmd_restart ;;
+probe) cmd_probe ;;
+status) cmd_status ;;
+*)
+	echo "Usage: catalyst-execution-core {start|stop|restart|probe|status}" >&2
+	exit 1
+	;;
 esac

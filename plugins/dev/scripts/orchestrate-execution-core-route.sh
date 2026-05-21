@@ -17,10 +17,10 @@ set -euo pipefail
 # Note: a literal `{enroll|stop}` inside a `${1:?...}` default-error message
 # would mis-close the parameter expansion on its first `}`, so validate
 # explicitly instead.
-ACTION="${1:-}"
+ACTION="${1-}"
 if [ -z "$ACTION" ]; then
-  echo "usage: orchestrate-execution-core-route.sh {enroll|stop}" >&2
-  exit 1
+	echo "usage: orchestrate-execution-core-route.sh {enroll|stop}" >&2
+	exit 1
 fi
 
 # repoRoot = canonical main working tree. `git rev-parse --git-common-dir`
@@ -28,8 +28,8 @@ fi
 # main working tree.
 COMMON_DIR=$(git rev-parse --git-common-dir)
 case "$COMMON_DIR" in
-  /*) ;;
-  *) COMMON_DIR="$(pwd)/$COMMON_DIR" ;;
+/*) ;;
+*) COMMON_DIR="$(pwd)/$COMMON_DIR" ;;
 esac
 REPO_ROOT=$(cd "$(dirname "$COMMON_DIR")" && pwd)
 
@@ -42,17 +42,17 @@ EC_INDEX="$SCRIPT_DIR/execution-core/index.mjs"
 ENSURE_DAEMON="${EXECUTION_CORE_ENSURE_DAEMON:-$SCRIPT_DIR/catalyst-execution-core start}"
 
 case "$ACTION" in
-  enroll)
-    bun "$EC_INDEX" enroll --project-key "$PROJECT_KEY" --repo-root "$REPO_ROOT"
-    $ENSURE_DAEMON
-    echo "execution-core: enrolled $PROJECT_KEY ($REPO_ROOT); daemon ensured"
-    ;;
-  stop)
-    bun "$EC_INDEX" unenroll --project-key "$PROJECT_KEY"
-    echo "execution-core: deregistered $PROJECT_KEY (daemon keeps serving other projects)"
-    ;;
-  *)
-    echo "unknown action: $ACTION" >&2
-    exit 1
-    ;;
+enroll)
+	bun "$EC_INDEX" enroll --project-key "$PROJECT_KEY" --repo-root "$REPO_ROOT"
+	$ENSURE_DAEMON
+	echo "execution-core: enrolled $PROJECT_KEY ($REPO_ROOT); daemon ensured"
+	;;
+stop)
+	bun "$EC_INDEX" unenroll --project-key "$PROJECT_KEY"
+	echo "execution-core: deregistered $PROJECT_KEY (daemon keeps serving other projects)"
+	;;
+*)
+	echo "unknown action: $ACTION" >&2
+	exit 1
+	;;
 esac
