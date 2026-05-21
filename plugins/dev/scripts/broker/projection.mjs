@@ -7,7 +7,14 @@
 // config + state + broker-state.mjs and never imports router.mjs or tailer.mjs,
 // so it sits cleanly below the router in the dependency DAG.
 
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, renameSync, existsSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  unlinkSync,
+  renameSync,
+  existsSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { resolve, dirname } from "node:path";
@@ -210,9 +217,21 @@ export function buildBrokerState({ probe } = {}) {
       baseUrl: GROQ_GATEWAY_BASE_URL,
     },
     // CTL-402: surface recent agent exit reasons for observability.
-    recentAgents: (() => { try { return getRecentAgents(); } catch { return []; } })(),
+    recentAgents: (() => {
+      try {
+        return getRecentAgents();
+      } catch {
+        return [];
+      }
+    })(),
     // CTL-532: event-sourced per-worker projection for HUD / operator visibility.
-    workerStates: (() => { try { return getAllWorkerStates(); } catch { return []; } })(),
+    workerStates: (() => {
+      try {
+        return getAllWorkerStates();
+      } catch {
+        return [];
+      }
+    })(),
     // CTL-405: live orchestrator phases for HUD / operator visibility.
     activeOrchestrators: [...orchestratorStatusMap.entries()].map(([orchId, s]) => ({
       orchestratorId: orchId,
@@ -262,8 +281,7 @@ export function persistBrokerState({ probe } = {}) {
 
 export function getProjectedWorkerStatePath(orchestratorId, ticket) {
   const runsDir =
-    process.env.CATALYST_RUNS_DIR ??
-    `${process.env.CATALYST_DIR ?? `${homedir()}/catalyst`}/runs`;
+    process.env.CATALYST_RUNS_DIR ?? `${process.env.CATALYST_DIR ?? `${homedir()}/catalyst`}/runs`;
   return resolve(runsDir, orchestratorId, "workers", `${ticket}.json.projected`);
 }
 
@@ -397,7 +415,7 @@ export function reduceWorkerStateEvent(event) {
     if (prNumber != null) patch.prNumber = prNumber;
     const reviveCount = Math.max(
       Number(state.phaseReviveCount ?? 0) || 0,
-      Number(state.reviveCount ?? 0) || 0,
+      Number(state.reviveCount ?? 0) || 0
     );
     if (reviveCount > 0) patch.reviveCount = reviveCount;
     return {
@@ -436,9 +454,12 @@ export function reduceWorkerStateEvent(event) {
       const patch = { status: "pr-created" };
       if (prNumber != null) patch.prNumber = prNumber;
       return {
-        orchestrator, ticket, ts,
+        orchestrator,
+        ticket,
+        ts,
         eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
-        kind: "worker_lifecycle", patch,
+        kind: "worker_lifecycle",
+        patch,
       };
     }
 
@@ -448,16 +469,21 @@ export function reduceWorkerStateEvent(event) {
       if (prNumber != null) patch.prNumber = prNumber;
       if (patch.status == null && patch.prNumber == null) return null;
       return {
-        orchestrator, ticket, ts,
+        orchestrator,
+        ticket,
+        ts,
         eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
-        kind: "worker_lifecycle", patch,
+        kind: "worker_lifecycle",
+        patch,
       };
     }
 
     const status = WORKER_LIFECYCLE_STATUS[action];
     if (status) {
       return {
-        orchestrator, ticket, ts,
+        orchestrator,
+        ticket,
+        ts,
         eventId: event.id ?? synthesizeWorkerEventId(name, ts, ticket),
         kind: "worker_lifecycle",
         patch: { status },
@@ -472,7 +498,9 @@ export function reduceWorkerStateEvent(event) {
 // Deterministic fallback event id for envelopes that carry no `id` — required
 // for the revive ledger so legacy revive events still dedupe across replays.
 function synthesizeWorkerEventId(name, ts, ticket) {
-  return createHash("sha256").update(`${name} ${ts ?? ""} ${ticket ?? ""}`).digest("hex");
+  return createHash("sha256")
+    .update(`${name} ${ts ?? ""} ${ticket ?? ""}`)
+    .digest("hex");
 }
 
 // projectWorkerStateEvent — best-effort driver: fold one event into the

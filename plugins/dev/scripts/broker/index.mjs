@@ -36,11 +36,7 @@ export {
   setProjectionMeta,
   getStaleWorkers,
 } from "./broker-state.mjs";
-import {
-  formatMissingKeyWarning,
-  formatLoadedKeyInfo,
-  probeGroq,
-} from "../lib/api-key-health.mjs";
+import { formatMissingKeyWarning, formatLoadedKeyInfo, probeGroq } from "../lib/api-key-health.mjs";
 import {
   log,
   GLOBAL_CONFIG_PATH,
@@ -56,11 +52,7 @@ import {
   HEARTBEAT_STALE_MS,
   getEventLogPath,
 } from "./config.mjs";
-import {
-  getInterests,
-  getWaitingSessionsMap,
-  setBrokerStartedAt,
-} from "./state.mjs";
+import { getInterests, getWaitingSessionsMap, setBrokerStartedAt } from "./state.mjs";
 import {
   migrateLegacyInterestsFile,
   loadPersistedInterests,
@@ -74,12 +66,7 @@ import {
   startWatchdog,
   clearDebounceTimers,
 } from "./router.mjs";
-import {
-  seedTailer,
-  startTailing,
-  stopTailing,
-  loadExistingRegistrations,
-} from "./tailer.mjs";
+import { seedTailer, startTailing, stopTailing, loadExistingRegistrations } from "./tailer.mjs";
 
 // --- Public re-export barrel (CTL-529) ---
 // The execution-core split moved every public symbol into a named module.
@@ -293,7 +280,9 @@ function main() {
     if (waitingSessions.size > 0) {
       log.info({ count: waitingSessions.size }, "rehydrated waiting sessions from DB");
     }
-  } catch { /* DB might not have the table yet on old installs */ }
+  } catch {
+    /* DB might not have the table yet on old installs */
+  }
 
   const logPath = getEventLogPath();
   try {

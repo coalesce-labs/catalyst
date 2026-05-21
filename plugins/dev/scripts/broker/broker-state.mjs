@@ -72,7 +72,11 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
     )
   `);
   // CTL-402: add reason column to existing DBs (no-op on fresh installs).
-  try { db.run(`ALTER TABLE agents ADD COLUMN reason TEXT`); } catch { /* already exists */ }
+  try {
+    db.run(`ALTER TABLE agents ADD COLUMN reason TEXT`);
+  } catch {
+    /* already exists */
+  }
   db.run(`
     CREATE INDEX IF NOT EXISTS idx_agents_ticket
       ON agents(ticket)
@@ -191,7 +195,7 @@ export function upsertFilterStateOpen({ interestId, prNumber, repo }) {
        deployment_id = NULL,
        environment = NULL,
        updated_at = excluded.updated_at`,
-    [interestId, prNumber, repo, nowIso()],
+    [interestId, prNumber, repo, nowIso()]
   );
 }
 
@@ -200,7 +204,7 @@ export function setFilterStateMerged(interestId, mergeCommitSha) {
     `UPDATE filter_state
        SET merge_commit_sha = ?, status = 'merged', updated_at = ?
        WHERE interest_id = ?`,
-    [mergeCommitSha, nowIso(), interestId],
+    [mergeCommitSha, nowIso(), interestId]
   );
   return result.changes > 0 ? { interestId } : null;
 }
@@ -214,7 +218,7 @@ export function setFilterStateDeploying(mergeCommitSha, deploymentId, environmen
     `UPDATE filter_state
        SET deployment_id = ?, environment = ?, status = 'deploying', updated_at = ?
        WHERE interest_id = ?`,
-    [deploymentId, environment, nowIso(), row.interest_id],
+    [deploymentId, environment, nowIso(), row.interest_id]
   );
   return { interestId: row.interest_id };
 }
@@ -226,7 +230,7 @@ export function setFilterStateDeployed(deploymentId) {
   if (!row) return null;
   ensure().run(
     `UPDATE filter_state SET status = 'deployed', updated_at = ? WHERE interest_id = ?`,
-    [nowIso(), row.interest_id],
+    [nowIso(), row.interest_id]
   );
   return { interestId: row.interest_id };
 }
@@ -236,10 +240,10 @@ export function setFilterStateFailed(deploymentId) {
     .prepare(`SELECT interest_id FROM filter_state WHERE deployment_id = ? LIMIT 1`)
     .get(deploymentId);
   if (!row) return null;
-  ensure().run(
-    `UPDATE filter_state SET status = 'failed', updated_at = ? WHERE interest_id = ?`,
-    [nowIso(), row.interest_id],
-  );
+  ensure().run(`UPDATE filter_state SET status = 'failed', updated_at = ? WHERE interest_id = ?`, [
+    nowIso(),
+    row.interest_id,
+  ]);
   return { interestId: row.interest_id };
 }
 
@@ -248,9 +252,7 @@ export function deleteFilterState(interestId) {
 }
 
 export function getFilterStateByInterest(interestId) {
-  const row = ensure()
-    .prepare(`SELECT * FROM filter_state WHERE interest_id = ?`)
-    .get(interestId);
+  const row = ensure().prepare(`SELECT * FROM filter_state WHERE interest_id = ?`).get(interestId);
   if (!row) return null;
   return {
     interestId: row.interest_id,
@@ -266,7 +268,15 @@ export function getFilterStateByInterest(interestId) {
 
 // ─── agents helpers ──────────────────────────────────────────────────────────
 
-export function upsertAgent({ agentId, agentName, sessionId, orchestrator, ticket, claimedPr, cwd }) {
+export function upsertAgent({
+  agentId,
+  agentName,
+  sessionId,
+  orchestrator,
+  ticket,
+  claimedPr,
+  cwd,
+}) {
   const ts = nowIso();
   ensure().run(
     `INSERT INTO agents
@@ -280,43 +290,61 @@ export function upsertAgent({ agentId, agentName, sessionId, orchestrator, ticke
        cwd           = excluded.cwd,
        status        = 'active',
        updated_at    = excluded.updated_at`,
-    [agentId, agentName, sessionId, orchestrator ?? null, ticket ?? null, claimedPr ?? null, cwd ?? null, ts, ts],
+    [
+      agentId,
+      agentName,
+      sessionId,
+      orchestrator ?? null,
+      ticket ?? null,
+      claimedPr ?? null,
+      cwd ?? null,
+      ts,
+      ts,
+    ]
   );
 }
 
 export function markAgentDone(agentId, status = "done", reason = null) {
-  ensure().run(
-    `UPDATE agents SET status = ?, updated_at = ?, reason = ? WHERE agent_id = ?`,
-    [status, nowIso(), reason ?? null, agentId],
-  );
+  ensure().run(`UPDATE agents SET status = ?, updated_at = ?, reason = ? WHERE agent_id = ?`, [
+    status,
+    nowIso(),
+    reason ?? null,
+    agentId,
+  ]);
 }
 
 export function getRecentAgents(limit = 20) {
   return ensure()
     .prepare(
       `SELECT agent_id, session_id, ticket, status, reason, checked_in_at, updated_at
-       FROM agents ORDER BY updated_at DESC LIMIT ?`,
+       FROM agents ORDER BY updated_at DESC LIMIT ?`
     )
     .all(limit);
 }
 
 export function getAgentBySession(sessionId) {
   const row = ensure()
-    .prepare(`SELECT * FROM agents WHERE session_id = ? AND status = 'active' ORDER BY checked_in_at DESC LIMIT 1`)
+    .prepare(
+      `SELECT * FROM agents WHERE session_id = ? AND status = 'active' ORDER BY checked_in_at DESC LIMIT 1`
+    )
     .get(sessionId);
   return row ? rowToAgent(row) : null;
 }
 
 export function getAgentsByTicket(ticket) {
   return ensure()
-    .prepare(`SELECT * FROM agents WHERE ticket = ? AND status = 'active' ORDER BY checked_in_at DESC`)
+    .prepare(
+      `SELECT * FROM agents WHERE ticket = ? AND status = 'active' ORDER BY checked_in_at DESC`
+    )
     .all(ticket)
     .map(rowToAgent);
 }
 
 export function getAgentsByOrchestrator(orchestrator) {
   return ensure()
-    .prepare(`SELECT * FROM agents WHERE orchestrator = ? AND status = 'active' ORDER BY checked_in_at DESC`)
+    .prepare(
+      `SELECT * FROM agents WHERE orchestrator = ? AND status = 'active' ORDER BY checked_in_at DESC`
+    )
     .all(orchestrator)
     .map(rowToAgent);
 }
@@ -338,7 +366,15 @@ function rowToAgent(row) {
 
 // ─── waiting_sessions helpers (CTL-403) ──────────────────────────────────────
 
-export function upsertWaitingSession({ sessionId, orchestrator, ticket, waitFor, timeoutMs, since, reason }) {
+export function upsertWaitingSession({
+  sessionId,
+  orchestrator,
+  ticket,
+  waitFor,
+  timeoutMs,
+  since,
+  reason,
+}) {
   const timeoutAt = new Date(new Date(since).getTime() + timeoutMs).toISOString();
   ensure().run(
     `INSERT INTO waiting_sessions
@@ -353,7 +389,17 @@ export function upsertWaitingSession({ sessionId, orchestrator, ticket, waitFor,
        timeout_at   = excluded.timeout_at,
        reason       = excluded.reason,
        updated_at   = excluded.updated_at`,
-    [sessionId, orchestrator ?? null, ticket ?? null, waitFor ?? null, timeoutMs, since, timeoutAt, reason ?? null, nowIso()],
+    [
+      sessionId,
+      orchestrator ?? null,
+      ticket ?? null,
+      waitFor ?? null,
+      timeoutMs,
+      since,
+      timeoutAt,
+      reason ?? null,
+      nowIso(),
+    ]
   );
 }
 
@@ -399,14 +445,12 @@ export function upsertTicketState({ ticket, linearState, prNumber }) {
        linear_state = COALESCE(excluded.linear_state, linear_state),
        pr_number    = COALESCE(excluded.pr_number, pr_number),
        updated_at   = excluded.updated_at`,
-    [ticket, linearState ?? null, prNumber ?? null, nowIso()],
+    [ticket, linearState ?? null, prNumber ?? null, nowIso()]
   );
 }
 
 export function getTicketState(ticket) {
-  const row = ensure()
-    .prepare(`SELECT * FROM ticket_state WHERE ticket = ?`)
-    .get(ticket);
+  const row = ensure().prepare(`SELECT * FROM ticket_state WHERE ticket = ?`).get(ticket);
   if (!row) return null;
   return {
     ticket: row.ticket,
@@ -481,7 +525,7 @@ export function upsertWorkerState({
       eventId ?? null,
       eventTs ?? null,
       nowIso(),
-    ],
+    ]
   );
 }
 
@@ -499,9 +543,7 @@ export function getWorkerStatesByOrchestrator(orchestrator) {
 }
 
 export function getAllWorkerStates() {
-  return ensure()
-    .prepare(`SELECT * FROM worker_state ORDER BY orchestrator, ticket`)
-    .all();
+  return ensure().prepare(`SELECT * FROM worker_state ORDER BY orchestrator, ticket`).all();
 }
 
 // recordReviveEvent — INSERT OR IGNORE into the idempotency ledger; returns
@@ -512,7 +554,7 @@ export function recordReviveEvent({ eventId, orchestrator, ticket, ts }) {
   const result = ensure().run(
     `INSERT OR IGNORE INTO worker_revive_events (event_id, orchestrator, ticket, ts)
      VALUES (?, ?, ?, ?)`,
-    [eventId, orchestrator, ticket, ts ?? nowIso()],
+    [eventId, orchestrator, ticket, ts ?? nowIso()]
   );
   return result.changes > 0;
 }
@@ -521,16 +563,14 @@ export function getReviveCount(orchestrator, ticket) {
   const row = ensure()
     .prepare(
       `SELECT COUNT(*) AS n FROM worker_revive_events
-       WHERE orchestrator = ? AND ticket = ?`,
+       WHERE orchestrator = ? AND ticket = ?`
     )
     .get(orchestrator, ticket);
   return row?.n ?? 0;
 }
 
 export function getProjectionMeta() {
-  const row = ensure()
-    .prepare(`SELECT * FROM projection_meta WHERE id = 1`)
-    .get();
+  const row = ensure().prepare(`SELECT * FROM projection_meta WHERE id = 1`).get();
   if (!row) return null;
   return {
     lastEventId: row.last_event_id,
@@ -548,7 +588,7 @@ export function setProjectionMeta({ lastEventId, lastEventTs, eventsFolded }) {
        last_event_ts = excluded.last_event_ts,
        events_folded = excluded.events_folded,
        updated_at    = excluded.updated_at`,
-    [lastEventId ?? null, lastEventTs ?? null, eventsFolded ?? 0, nowIso()],
+    [lastEventId ?? null, lastEventTs ?? null, eventsFolded ?? 0, nowIso()]
   );
 }
 
@@ -566,7 +606,7 @@ export function getStaleWorkers(thresholdMs, nowIso = new Date().toISOString()) 
        WHERE last_event_ts IS NOT NULL
          AND last_event_ts < ?
          AND (status IS NULL OR status NOT IN (${placeholders}))
-       ORDER BY last_event_ts`,
+       ORDER BY last_event_ts`
     )
     .all(cutoff, ...terminal);
 }
