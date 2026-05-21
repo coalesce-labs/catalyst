@@ -41,11 +41,45 @@ export const NEXT_PHASE = {
   "monitor-deploy": TERMINAL_SUCCESS,
 };
 
+// ─── Phase → Linear stateMap key — the 9→5 collapse (CTL-558) ───
+// Each pipeline phase maps to a `.catalyst.linear.stateMap` key; linear-transition.sh
+// resolves that key to a Linear workflow-state name (config stateMap > default_state_for).
+// The keys are the legacy stateMap vocabulary — an execution-core repo's stateMap
+// re-targets the SAME keys onto the 5 collapsed states (Research/Plan/Implement/
+// Validate/PR), see setup-execution-core-states.sh:build_execution_core_state_map.
+//   • `triage` → null: the human owns the Triage state; the daemon only tags `triaged`.
+//   • verify + review collapse onto `verifying`/`reviewing` (both → Validate).
+//   • pr + monitor-merge + monitor-deploy collapse onto `inReview` (→ PR) while in flight;
+//     terminal Done is written separately on monitor-deploy completion (TERMINAL_LINEAR_KEY).
+export const PHASE_LINEAR_KEY = {
+  triage: null,
+  research: "research",
+  plan: "planning",
+  implement: "inProgress",
+  verify: "verifying",
+  review: "reviewing",
+  pr: "inReview",
+  "monitor-merge": "inReview",
+  "monitor-deploy": "inReview",
+};
+
+// The stateMap key for the terminal success state — written when monitor-deploy completes.
+export const TERMINAL_LINEAR_KEY = "done";
+
 export class PhaseFsmError extends Error {
   constructor(message) {
     super(message);
     this.name = "PhaseFsmError";
   }
+}
+
+// linearKeyForPhase — the stateMap key for a pipeline phase, or null for `triage`.
+// Throws PhaseFsmError on an unknown phase so a typo fails loudly, never silently no-ops.
+export function linearKeyForPhase(phase) {
+  if (!(phase in PHASE_LINEAR_KEY)) {
+    throw new PhaseFsmError(`no Linear key for unknown phase '${phase}'`);
+  }
+  return PHASE_LINEAR_KEY[phase];
 }
 
 // ─── Validation helpers (private) ───

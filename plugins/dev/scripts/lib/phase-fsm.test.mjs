@@ -7,6 +7,9 @@ import {
   PHASES,
   REVIVE_BUDGET,
   PhaseFsmError,
+  PHASE_LINEAR_KEY,
+  TERMINAL_LINEAR_KEY,
+  linearKeyForPhase,
   initialState,
   isTerminal,
   transition,
@@ -237,4 +240,48 @@ describe("transition — resume: needs-input returns to the parked phase", () =>
       ).toThrow(PhaseFsmError);
     });
   }
+});
+
+// ─── CTL-558: phase → Linear stateMap-key declaration (the 9→5 collapse) ───
+
+describe("PHASE_LINEAR_KEY — the 9→5 collapse (CTL-558)", () => {
+  test("declares an entry for every one of the 9 phases", () => {
+    for (const p of PHASES) expect(p in PHASE_LINEAR_KEY).toBe(true);
+  });
+  test("maps the in-flight phases to their stateMap keys", () => {
+    expect(PHASE_LINEAR_KEY).toMatchObject({
+      research: "research",
+      plan: "planning",
+      implement: "inProgress",
+      verify: "verifying",
+      review: "reviewing",
+      pr: "inReview",
+      "monitor-merge": "inReview",
+      "monitor-deploy": "inReview",
+    });
+  });
+  test("triage has no status key — the human owns the Triage state", () => {
+    expect(PHASE_LINEAR_KEY.triage).toBeNull();
+  });
+  test("verify and review carry the legacy verifying/reviewing keys (both resolve to Validate)", () => {
+    // The keys stay distinct (verifying ≠ reviewing) — the 9→5 collapse happens
+    // at the resolved state-NAME level: an execution-core stateMap re-targets both
+    // keys onto the single `Validate` state. linear-transition.sh owns key→name.
+    expect(PHASE_LINEAR_KEY.verify).toBe("verifying");
+    expect(PHASE_LINEAR_KEY.review).toBe("reviewing");
+  });
+  test("pr, monitor-merge, monitor-deploy collapse onto the PR-equivalent key", () => {
+    expect(PHASE_LINEAR_KEY.pr).toBe(PHASE_LINEAR_KEY["monitor-merge"]);
+    expect(PHASE_LINEAR_KEY.pr).toBe(PHASE_LINEAR_KEY["monitor-deploy"]);
+  });
+  test("TERMINAL_LINEAR_KEY is the done key", () => {
+    expect(TERMINAL_LINEAR_KEY).toBe("done");
+  });
+  test("linearKeyForPhase returns the key, or null for triage", () => {
+    expect(linearKeyForPhase("research")).toBe("research");
+    expect(linearKeyForPhase("triage")).toBeNull();
+  });
+  test("linearKeyForPhase throws PhaseFsmError on an unknown phase", () => {
+    expect(() => linearKeyForPhase("bogus")).toThrow(PhaseFsmError);
+  });
 });
