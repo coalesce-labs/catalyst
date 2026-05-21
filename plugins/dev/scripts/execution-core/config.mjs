@@ -35,6 +35,22 @@ export function getEligibleDir() {
   return resolve(getExecutionCoreDir(), "eligible");
 }
 
+// The durable event-log tailer cursor — monitor.mjs persists its byte offset
+// here so a daemon restart resumes the fast path instead of re-seeding at EOF.
+export function getCursorPath() {
+  return resolve(getExecutionCoreDir(), "cursor.json");
+}
+
+// Root for `claude --bg` job state dirs — ~/.claude/jobs/<bg_job_id>/state.json.
+// Env name matches orchestrate-healthcheck's CATALYST_HEALTHCHECK_JOBS_ROOT so
+// tests override one variable for both.
+export function getJobsRoot() {
+  return (
+    process.env.CATALYST_HEALTHCHECK_JOBS_ROOT ??
+    resolve(homedir(), ".claude", "jobs")
+  );
+}
+
 // The unified monthly event log. UTC month to match the writer —
 // orch-monitor/lib/event-writer.ts uses getUTCFullYear/getUTCMonth, so the
 // tailer must resolve the same path or it would follow the wrong file.

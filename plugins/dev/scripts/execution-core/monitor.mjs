@@ -22,6 +22,7 @@ import {
 import { listEnrolledProjects, loadProjectConfig } from "./enrollment.mjs";
 import { runEligibleQuery } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject } from "./eligible-set.mjs";
+import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
 
 // --- Event parsing -------------------------------------------------------
 
@@ -158,25 +159,49 @@ let watcher = null;
 let reconcileTimer = null;
 let tailerOpts = {};
 
+// fileSizeOrZero — current byte size of a file, or 0 when it does not exist
+// (the poll-only state). Shared by both tailer seeders.
+function fileSizeOrZero(path) {
+  try {
+    const fd = openSync(path, "r");
+    const { size } = fstatSync(fd);
+    closeSync(fd);
+    return size;
+  } catch {
+    return 0; // log file does not exist yet — poll-only mode
+  }
+}
+
 // seedTailerAtEof — pin the tailer to the current end of the event log so the
 // startup reconcile poll (not a log replay) is the authoritative rebuild.
 export function seedTailerAtEof() {
   lastLogPath = getEventLogPath();
   leftoverBuf = "";
-  try {
-    const fd = openSync(lastLogPath, "r");
-    lastByteOffset = fstatSync(fd).size;
-    closeSync(fd);
-  } catch {
-    lastByteOffset = 0; // log file does not exist yet — poll-only mode
-  }
+  lastByteOffset = fileSizeOrZero(lastLogPath);
+}
+
+// seedTailerFromCursor — pin the tailer to the durable cursor's saved offset so
+// a daemon restart resumes the fast path mid-stream. resolveStartOffset falls
+// back to EOF for a missing/stale/rotated cursor; the periodic reconcile is the
+// correctness backstop either way. CTL-539.
+export function seedTailerFromCursor() {
+  lastLogPath = getEventLogPath();
+  leftoverBuf = "";
+  lastByteOffset = resolveStartOffset({
+    cursor: loadCursor(),
+    logPath: lastLogPath,
+    fileSize: fileSizeOrZero(lastLogPath),
+  });
 }
 
 // readNewEvents — drain bytes appended since the last call, parse each
 // complete line, and feed it to handleStateChangedEvent. A leftover buffer
 // carries partial lines; on month rollover the new file is re-seeded at its
 // current size (its tail is not replayed).
-function readNewEvents() {
+//
+// Exported for deterministic test drives + the CTL-539 startup gap-drain; the
+// index.mjs barrel deliberately does not re-export it.
+export function readNewEvents() {
   const logPath = getEventLogPath();
   if (logPath !== lastLogPath) {
     lastLogPath = logPath;
@@ -202,6 +227,9 @@ function readNewEvents() {
     readSync(fd, buf, 0, newByteCount, lastByteOffset);
     closeSync(fd);
     lastByteOffset = size;
+    // CTL-539: persist the durable cursor so a restart resumes here. saveCursor
+    // is best-effort — it swallows and logs its own write failures.
+    saveCursor({ logPath: lastLogPath, byteOffset: lastByteOffset });
 
     const text = leftoverBuf + buf.toString("utf8");
     const lines = text.split("\n");
@@ -238,15 +266,24 @@ export function startTailing() {
 // --- Lifecycle -----------------------------------------------------------
 
 // startMonitor — immediate reconcileAll (authoritative initial rebuild), seed
-// the tailer at EOF, start tailing, then arm the periodic reconcile timer.
+// the tailer, start tailing, then arm the periodic reconcile timer. With
+// resumeFromCursor (default, CTL-539) the tailer resumes from the durable
+// cursor and the cursor→EOF downtime gap is drained immediately; otherwise it
+// seeds at EOF (the legacy poll-only-on-startup behavior).
 export function startMonitor({
   exec,
   debounceMs = EVENT_DEBOUNCE_MS,
   reconcileIntervalMs = RECONCILE_INTERVAL_MS,
+  resumeFromCursor = true,
 } = {}) {
   tailerOpts = { exec, debounceMs };
   reconcileAll({ exec });
-  seedTailerAtEof();
+  if (resumeFromCursor) {
+    seedTailerFromCursor();
+    readNewEvents(); // drain the cursor→EOF downtime gap immediately
+  } else {
+    seedTailerAtEof();
+  }
   startTailing();
   reconcileTimer = setInterval(() => reconcileAll({ exec }), reconcileIntervalMs);
 }
@@ -262,6 +299,12 @@ export function stopMonitor() {
   dirtyTimers.clear();
   watcher?.close();
   watcher = null;
+}
+
+// __tailerOffset — the tailer's current byte offset. Test-only, for
+// deterministic cursor-seeding assertions; kept out of the index.mjs barrel.
+export function __tailerOffset() {
+  return lastByteOffset;
 }
 
 // __resetForTests — clear all module-level state between unit tests. Not part
