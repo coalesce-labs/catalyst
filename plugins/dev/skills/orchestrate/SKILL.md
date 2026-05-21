@@ -127,6 +127,11 @@ doesn't exist). Falls back to sensible defaults if no orchestration block exists
   the `orchestrate-phase-advance` helper.
 - `"oneshot-legacy"` — the orchestrator dispatches one long `claude -p oneshot` worker per ticket.
   Kept for rollback safety; flipping a single config key reverts to the pre-CTL-452 behavior.
+- `"execution-core"` (CTL-554) — daemon-served. `/orchestrate` runs no wave loop and no Phase 4
+  session: it writes a per-project enrollment record to
+  `~/catalyst/execution-core/projects/<projectKey>.json`, ensures the single machine-level
+  execution-core daemon is running, and exits. The daemon directory-watches enrolled projects and
+  serves each by composing the CTL-535 monitor, CTL-536 scheduler, and CTL-539 recovery modules.
 
 The `workerCommand` field is still honored in legacy mode. In phase-agents mode it is unused (each
 phase has its own canonical skill).

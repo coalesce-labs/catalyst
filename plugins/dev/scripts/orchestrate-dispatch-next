@@ -116,7 +116,7 @@ DISPATCH_MODE="oneshot-legacy"
 if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ]; then
   RAW_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' "$CONFIG_PATH" 2>/dev/null || echo "oneshot-legacy")
   case "$RAW_MODE" in
-    phase-agents|oneshot-legacy) DISPATCH_MODE="$RAW_MODE" ;;
+    phase-agents|oneshot-legacy|execution-core) DISPATCH_MODE="$RAW_MODE" ;;
     *) echo "WARN: invalid dispatchMode '$RAW_MODE' in $CONFIG_PATH — defaulting to oneshot-legacy" >&2 ;;
   esac
 fi

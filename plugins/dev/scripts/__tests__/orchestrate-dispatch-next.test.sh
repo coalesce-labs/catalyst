@@ -616,6 +616,19 @@ RC=$?
 grep -q -- "--phase implement" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch invoked" || fail "phase-agent-dispatch invoked"
 scratch_teardown
 
+echo "test 33 (CTL-554): dispatchMode=execution-core in config is accepted without a WARN"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "execution-core")
+write_state "demo" 4 '{"wave1Pending": []}'
+"$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err" >/dev/null
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 with dispatchMode=execution-core" || fail "exit 0" "rc=$RC"
+! grep -q "invalid dispatchMode" "${SCRATCH}/err" \
+  && pass "no 'invalid dispatchMode' WARN for execution-core" \
+  || fail "no WARN for execution-core" "stderr=$(cat "${SCRATCH}/err")"
+scratch_teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"
