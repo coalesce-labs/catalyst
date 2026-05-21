@@ -479,3 +479,75 @@ describe("startScheduler / stopScheduler", () => {
     }).not.toThrow();
   });
 });
+
+// ── CTL-539: idempotent-dispatch proof — re-deriving the tick after a
+// "crash" can never double-dispatch the same {ticket, phase} ──
+
+describe("CTL-539 — idempotent dispatch across a crash", () => {
+  const tk = (id, priority = 2) => ({
+    identifier: id,
+    priority,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  test("re-running schedulerTick after a 'crash' never dispatches the same {ticket,phase} twice", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const eligible = [tk("CTL-9")];
+
+    // Tick 1 — dispatches PHASES[0] (triage) for the ready ticket. The stub
+    // writes the dispatched signal the real phase-agent-dispatch would have
+    // written BEFORE spawning claude --bg (signal-first ordering).
+    const calls = [];
+    const dispatch = (args) => {
+      calls.push(`${args.ticket}:${args.phase}`);
+      writeSignal(args.ticket, args.phase, "dispatched");
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const r1 = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    expect(r1.dispatched).toEqual(["CTL-9"]);
+
+    // "Crash" — the daemon dies; the dispatched signal survives on disk.
+    // Tick 2 (post-restart) re-derives everything from the filesystem.
+    const r2 = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+
+    // CTL-9 now has a worker dir → excluded from the pull. triage:dispatched
+    // is not 'done' → deriveAdvancement returns null. No re-dispatch.
+    expect(r2.dispatched).toEqual([]);
+    expect(r2.advanced).toEqual([]);
+    // Every {ticket,phase} appears exactly once across both ticks.
+    const byKey = new Map();
+    for (const k of calls) byKey.set(k, (byKey.get(k) ?? 0) + 1);
+    expect([...byKey.values()].every((n) => n === 1)).toBe(true);
+    expect(calls).toEqual(["CTL-9:triage"]);
+  });
+
+  test("an orphan 'dispatched' signal (bg_job_id:null) is not re-dispatched", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // Pre-write the orphan signal a crash mid-dispatch leaves: the signal was
+    // written but claude --bg never spawned, so bg_job_id is null.
+    const dir = join(orchDir, "workers", "CTL-7");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-triage.json"),
+      JSON.stringify({
+        ticket: "CTL-7",
+        phase: "triage",
+        status: "dispatched",
+        bg_job_id: null,
+      }),
+    );
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [tk("CTL-7")],
+      dispatch,
+    });
+    // CTL-7 has a worker dir → excluded from the new-work pull; triage is
+    // dispatched (not done) → nothing owed. The orphan is not re-dispatched.
+    expect(dispatch.calls).toHaveLength(0);
+    expect(r.dispatched).toEqual([]);
+    expect(r.advanced).toEqual([]);
+  });
+});
