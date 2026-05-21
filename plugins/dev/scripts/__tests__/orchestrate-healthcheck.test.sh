@@ -397,6 +397,68 @@ else
 	fi
 fi
 
+# ─── CTL-567: reap sweep delegates to phase-agent-watch-bg ───────────────────
+#
+# After the stall checks, the healthcheck `claude stop`s completed phase jobs by
+# calling `phase-agent-watch-bg reap --scope done`. Stub watch-bg so the test
+# never touches the real `claude` binary.
+
+# install_fake_watch_bg [REAPED_COUNT]
+install_fake_watch_bg() {
+	export WATCHBG_LOG="${SCRATCH}/watchbg.log"
+	: >"$WATCHBG_LOG"
+	export FAKE_REAPED="${1:-2}"
+	cat >"${SCRATCH}/bin/phase-agent-watch-bg" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$WATCHBG_LOG"
+echo "{\"scanned\":${FAKE_REAPED:-0},\"reaped\":${FAKE_REAPED:-0},\"skipped\":0,\"dryRun\":false,\"results\":[]}"
+EOF
+	chmod +x "${SCRATCH}/bin/phase-agent-watch-bg"
+	export CATALYST_WATCH_BG_BIN="${SCRATCH}/bin/phase-agent-watch-bg"
+}
+
+echo "test (CTL-567): healthcheck calls phase-agent-watch-bg reap --scope done"
+scratch_setup
+install_fake_watch_bg 2
+make_phase_signal "T-R1" "research" "done" "bg-r1"
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+if grep -q -- "reap" "$WATCHBG_LOG" && grep -q -- "--scope done" "$WATCHBG_LOG"; then
+	pass "reap invoked with --scope done"
+else
+	fail "reap invoked with --scope done" "log: $(cat "$WATCHBG_LOG")"
+fi
+grep -q -- "--orch-dir ${ORCH_DIR}" "$WATCHBG_LOG" && pass "reap passed --orch-dir" || fail "reap passed --orch-dir" "log: $(cat "$WATCHBG_LOG")"
+unset WATCHBG_LOG FAKE_REAPED CATALYST_WATCH_BG_BIN
+scratch_teardown
+
+echo "test (CTL-567): summary JSON carries the reaped count from watch-bg"
+scratch_setup
+install_fake_watch_bg 3
+OUT=$("$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 2>/dev/null)
+REAPED=$(echo "$OUT" | jq -r '.reaped' 2>/dev/null || echo "")
+[ "$REAPED" = "3" ] && pass "summary.reaped=3" || fail "summary.reaped=3" "got: $REAPED; out: $OUT"
+unset WATCHBG_LOG FAKE_REAPED CATALYST_WATCH_BG_BIN
+scratch_teardown
+
+echo "test (CTL-567): --dry-run forwards --dry-run to the reap sweep"
+scratch_setup
+install_fake_watch_bg 0
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 --dry-run >/dev/null 2>&1
+grep -q -- "--dry-run" "$WATCHBG_LOG" && pass "--dry-run forwarded to watch-bg" || fail "--dry-run forwarded to watch-bg" "log: $(cat "$WATCHBG_LOG")"
+unset WATCHBG_LOG FAKE_REAPED CATALYST_WATCH_BG_BIN
+scratch_teardown
+
+echo "test (CTL-567): missing watch-bg binary is non-fatal — summary.reaped=0"
+scratch_setup
+export CATALYST_WATCH_BG_BIN="${SCRATCH}/bin/no-such-watch-bg"
+OUT=$("$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 2>/dev/null)
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 with watch-bg absent" || fail "exit 0 with watch-bg absent" "rc=$RC"
+REAPED=$(echo "$OUT" | jq -r '.reaped' 2>/dev/null || echo "")
+[ "$REAPED" = "0" ] && pass "summary.reaped=0 when watch-bg absent" || fail "summary.reaped=0 when watch-bg absent" "got: $REAPED; out: $OUT"
+unset CATALYST_WATCH_BG_BIN
+scratch_teardown
+
 echo
 echo "Results: $PASSES passed, $FAILURES failed"
 [ "$FAILURES" -eq 0 ]

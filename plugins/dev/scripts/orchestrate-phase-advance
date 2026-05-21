@@ -28,12 +28,17 @@
 # Environment overrides (for tests):
 #   CATALYST_STATE_SCRIPT       path to catalyst-state.sh (default: sibling)
 #   CATALYST_DISPATCH_NEXT_BIN  path to orchestrate-dispatch-next (default: sibling)
+#   CATALYST_DISPATCH_CLAUDE_BIN, CATALYST_EXECUTOR_JOBS_ROOT,
+#   CATALYST_EXECUTOR_CPU_PROBE — see lib/executor.sh (predecessor reap, CTL-567)
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
 DISPATCH_NEXT_BIN="${CATALYST_DISPATCH_NEXT_BIN:-${SCRIPT_DIR}/orchestrate-dispatch-next}"
+
+# shellcheck source=lib/executor.sh
+source "${SCRIPT_DIR}/lib/executor.sh"
 
 ORCH_DIR=""
 ORCH_ID=""
@@ -139,6 +144,24 @@ fi
   exit 0
 }
 
+# CTL-567: reap the predecessor phase's `claude --bg` job now that its successor
+# is dispatched. This script runs ONLY on `phase.<name>.complete` — `failed` and
+# `turn-cap-exhausted` route to orchestrate-revive, never here — so the job
+# reaped is always a genuinely-completed phase, and the parked / failed-pending-
+# revive / turn-cap exemptions are satisfied structurally. The `status == "done"`
+# guard is belt-and-suspenders; executor_reap applies the CPU safety belt.
+REAPED_PRED=false
+PRED_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${COMPLETED_PHASE}.json"
+if [ -f "$PRED_SIGNAL" ]; then
+  PRED_STATUS="$(jq -r '.status // empty' "$PRED_SIGNAL" 2>/dev/null || echo "")"
+  PRED_BG="$(jq -r '.bg_job_id // empty' "$PRED_SIGNAL" 2>/dev/null || echo "")"
+  if [ "$PRED_STATUS" = "done" ] && [ -n "$PRED_BG" ]; then
+    REAP_RESULT="$(executor_reap "$PRED_BG" 2>/dev/null || true)"
+    [ "$REAP_RESULT" = "stopped" ] && REAPED_PRED=true
+    echo "phase-advance: reap predecessor ${COMPLETED_PHASE} bg=${PRED_BG} → ${REAP_RESULT:-unknown}" >&2
+  fi
+fi
+
 # Emit advancement event (best-effort — tests assert via fake state script).
 if [ -x "$STATE_SCRIPT" ]; then
   TS="$(now_iso)"
@@ -151,4 +174,6 @@ if [ -x "$STATE_SCRIPT" ]; then
 fi
 
 jq -nc --arg from "$COMPLETED_PHASE" --arg to "$NEXT_PHASE" --arg ticket "$TICKET" \
-  '{advanced: true, fromPhase: $from, toPhase: $to, ticket: $ticket, dryRun: false}'
+  --argjson reaped "$REAPED_PRED" \
+  '{advanced: true, fromPhase: $from, toPhase: $to, ticket: $ticket,
+    dryRun: false, reapedPredecessor: $reaped}'

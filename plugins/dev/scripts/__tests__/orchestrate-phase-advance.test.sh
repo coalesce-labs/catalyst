@@ -41,12 +41,35 @@ EOF
   export DISPATCH_LOG="${SCRATCH}/dispatch.log"
   : > "$DISPATCH_LOG"
   export CATALYST_DISPATCH_NEXT_BIN="${SCRATCH}/bin/orchestrate-dispatch-next"
+
+  # CTL-567: fake `claude` for the predecessor reap — logs `stop` calls.
+  cat > "${SCRATCH}/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$CLAUDE_LOG"
+case "$1" in
+  stop)   exit 0 ;;
+  agents) echo '[]' ;;
+esac
+EOF
+  chmod +x "${SCRATCH}/bin/claude"
+  export CLAUDE_LOG="${SCRATCH}/claude.log"
+  : > "$CLAUDE_LOG"
+  export CATALYST_DISPATCH_CLAUDE_BIN="${SCRATCH}/bin/claude"
+
+  # Idle CPU probe so the safety belt always permits the reap.
+  cat > "${SCRATCH}/bin/cpuprobe" <<'EOF'
+#!/usr/bin/env bash
+echo "0"
+EOF
+  chmod +x "${SCRATCH}/bin/cpuprobe"
+  export CATALYST_EXECUTOR_CPU_PROBE="${SCRATCH}/bin/cpuprobe"
 }
 
 scratch_teardown() {
   rm -rf "$SCRATCH"
-  unset SCRATCH ORCH_DIR STATE_LOG DISPATCH_LOG
+  unset SCRATCH ORCH_DIR STATE_LOG DISPATCH_LOG CLAUDE_LOG
   unset CATALYST_STATE_SCRIPT CATALYST_DISPATCH_NEXT_BIN
+  unset CATALYST_DISPATCH_CLAUDE_BIN CATALYST_EXECUTOR_CPU_PROBE
 }
 
 # make_phase_signal TICKET PHASE STATUS [EXTRA_JQ]
@@ -153,6 +176,47 @@ for pair in "${SEQ[@]}"; do
   TOPHASE=$(echo "$OUT" | jq -r '.toPhase')
   [ "$TOPHASE" = "$TO" ] && pass "$FROM → $TO" || fail "$FROM → $TO" "got toPhase=$TOPHASE for OUT=$OUT"
 done
+scratch_teardown
+
+echo "test 9 (CTL-567): predecessor with status=done + bg_job_id is reaped"
+scratch_setup
+make_phase_signal "T-1" "research" "done" '.bg_job_id = "abc12345"'
+OUT=$(run_advance --ticket "T-1" --completed-phase "research" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0" || fail "exit 0" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+echo "$OUT" | jq -e '.advanced == true and .reapedPredecessor == true' >/dev/null \
+  && pass "reapedPredecessor=true in output" || fail "reapedPredecessor=true in output" "got: $OUT"
+grep -q -- "stop abc12345" "$CLAUDE_LOG" \
+  && pass "claude stop called on predecessor bg job" || fail "claude stop called on predecessor bg job" "log: $(cat "$CLAUDE_LOG")"
+scratch_teardown
+
+echo "test 10 (CTL-567): predecessor with bg_job_id but status!=done is NOT reaped"
+scratch_setup
+make_phase_signal "T-1" "research" "running" '.bg_job_id = "abc12345"'
+OUT=$(run_advance --ticket "T-1" --completed-phase "research" 2>"${SCRATCH}/err")
+echo "$OUT" | jq -e '.advanced == true and .reapedPredecessor == false' >/dev/null \
+  && pass "reapedPredecessor=false for non-done predecessor" || fail "reapedPredecessor=false for non-done predecessor" "got: $OUT"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude stop NOT called" || fail "claude stop NOT called" "log: $(cat "$CLAUDE_LOG")"
+scratch_teardown
+
+echo "test 11 (CTL-567): predecessor with no bg_job_id — advance still succeeds, no reap"
+scratch_setup
+make_phase_signal "T-1" "plan" "done"
+OUT=$(run_advance --ticket "T-1" --completed-phase "plan" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 with no bg_job_id" || fail "exit 0 with no bg_job_id" "rc=$RC"
+echo "$OUT" | jq -e '.advanced == true and .reapedPredecessor == false' >/dev/null \
+  && pass "advances, reapedPredecessor=false" || fail "advances, reapedPredecessor=false" "got: $OUT"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude stop NOT called" || fail "claude stop NOT called"
+scratch_teardown
+
+echo "test 12 (CTL-567): --dry-run never reaps (returns before dispatch)"
+scratch_setup
+make_phase_signal "T-1" "research" "done" '.bg_job_id = "abc12345"'
+OUT=$(run_advance --ticket "T-1" --completed-phase "research" --dry-run 2>"${SCRATCH}/err")
+echo "$OUT" | jq -e '.dryRun == true' >/dev/null \
+  && pass "dry-run reported" || fail "dry-run reported" "got: $OUT"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude stop NOT called in dry-run" || fail "claude stop NOT called in dry-run" "log: $(cat "$CLAUDE_LOG")"
 scratch_teardown
 
 echo ""
