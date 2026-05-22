@@ -148,20 +148,28 @@ if [[ -n $CONFIG_PATH ]]; then
 		warnings+=("  Run setup-catalyst.sh or add linear config manually — see docs/reference/configuration")
 	fi
 
-	# Check for cached Linear UUIDs (CTL-207) — reduces API calls during orchestrator runs
+	# Check for the cached Linear UUID registry (CTL-207, CTL-577). stateIds is a
+	# machine-level derived cache at ~/.config/catalyst/linear-state-ids.json,
+	# resolved on demand by resolve-linear-ids.sh (and auto-resolved by
+	# linear-transition.sh on a cache miss) — never committed to git.
 	if [[ -n $TEAM_KEY ]]; then
-		STATE_IDS=$(jq -r '.catalyst.linear.stateIds // empty' "$CONFIG_PATH" 2>/dev/null)
-		if [[ -z $STATE_IDS || $STATE_IDS == "null" ]]; then
-			warnings+=("Missing catalyst.linear.stateIds — run: plugins/dev/scripts/resolve-linear-ids.sh")
+		STATE_IDS_REGISTRY="${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/linear-state-ids.json"
+		registry_has_state_ids=""
+		if [[ -f $STATE_IDS_REGISTRY ]]; then
+			registry_has_state_ids=$(jq -r --arg t "$TEAM_KEY" \
+				'.[$t].stateIds // {} | if length > 0 then "yes" else empty end' \
+				"$STATE_IDS_REGISTRY" 2>/dev/null)
+		fi
+		if [[ -z $registry_has_state_ids ]]; then
+			warnings+=("Linear state-id cache not yet resolved for team '$TEAM_KEY' — generated on demand, or run: plugins/dev/scripts/resolve-linear-ids.sh")
 		fi
 	fi
 
-	# Execution-core Linear-state contract check (CTL-564). Only when the repo is
-	# dispatchMode: execution-core: verify the 6 contract states are present in
-	# both stateMap VALUES and stateIds KEYS, and that a central registry entry
-	# exists for the team. Local-only — reads stateIds (already resolved from
-	# Linear by resolve-linear-ids.sh) and the registry file; no API call. Gaps
-	# are warnings, consistent with every other linear-config issue here.
+	# Execution-core Linear-state contract check (CTL-564, CTL-577). Only when the
+	# repo is dispatchMode: execution-core: verify the 6 contract states are
+	# present in stateMap VALUES (the authored contract), and that a central
+	# registry entry exists for the team. Local-only — no API call. Gaps are
+	# warnings, consistent with every other linear-config issue here.
 	DISPATCH_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // empty' "$CONFIG_PATH" 2>/dev/null)
 	if [[ $DISPATCH_MODE == "execution-core" ]]; then
 		# The contract states this check expects. Mirrors contract_states() in
@@ -173,11 +181,8 @@ if [[ -n $CONFIG_PATH ]]; then
 			in_state_map=$(jq -r --arg s "$contract_state" \
 				'[.catalyst.linear.stateMap // {} | to_entries[].value] | index($s) // empty' \
 				"$CONFIG_PATH" 2>/dev/null)
-			in_state_ids=$(jq -r --arg s "$contract_state" \
-				'.catalyst.linear.stateIds // {} | has($s) | if . then "yes" else empty end' \
-				"$CONFIG_PATH" 2>/dev/null)
-			if [[ -z $in_state_map || -z $in_state_ids ]]; then
-				warnings+=("Execution-core contract state '$contract_state' missing from stateMap/stateIds in $CONFIG_PATH")
+			if [[ -z $in_state_map ]]; then
+				warnings+=("Execution-core contract state '$contract_state' missing from stateMap in $CONFIG_PATH")
 				execution_core_gaps=$((execution_core_gaps + 1))
 			fi
 		done

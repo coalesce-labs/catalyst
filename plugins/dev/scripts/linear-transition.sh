@@ -116,11 +116,34 @@ if [ -z "$TARGET_STATE" ]; then
   exit 1
 fi
 
-# ─── Look up cached UUID for the target state (CTL-207) ───────────────────
-TARGET_STATE_ID=""
+# ─── Look up the cached UUID from the machine-level registry (CTL-577) ─────
+# stateIds is a derived cache keyed by teamKey at
+# ~/.config/catalyst/linear-state-ids.json — never committed, never stale in
+# git. On a cache miss we resolve once (resolve-linear-ids.sh fetches the whole
+# team set in one call), then re-read. If the resolve cannot run, STATUS_ARG
+# falls back to the state name, which linearis resolves correctly anyway.
+REGISTRY_PATH="${HOME}/.config/catalyst/linear-state-ids.json"
+TEAM_KEY=""
 if [ -n "$CONFIG_PATH" ] && [ -f "$CONFIG_PATH" ] && command -v jq >/dev/null 2>&1; then
-  TARGET_STATE_ID=$(jq -r --arg s "$TARGET_STATE" \
-    '.catalyst.linear.stateIds[$s] // empty' "$CONFIG_PATH" 2>/dev/null)
+  TEAM_KEY=$(jq -r '.catalyst.linear.teamKey // empty' "$CONFIG_PATH" 2>/dev/null)
+fi
+
+lookup_state_id() {
+  [ -n "$TEAM_KEY" ] && [ -f "$REGISTRY_PATH" ] && command -v jq >/dev/null 2>&1 || return 0
+  jq -r --arg t "$TEAM_KEY" --arg s "$TARGET_STATE" \
+    '.[$t].stateIds[$s] // empty' "$REGISTRY_PATH" 2>/dev/null
+}
+
+TARGET_STATE_ID="$(lookup_state_id)"
+
+# Cache miss → resolve once, then re-read. Skipped under --dry-run (no side
+# effects) and when there is no teamKey (the resolver requires one).
+if [ -z "$TARGET_STATE_ID" ] && [ -n "$TEAM_KEY" ] && [ "$DRY_RUN" -ne 1 ]; then
+  RESOLVER="${SCRIPT_DIR}/resolve-linear-ids.sh"
+  if [ -x "$RESOLVER" ] && [ -n "$CONFIG_PATH" ]; then
+    bash "$RESOLVER" --config "$CONFIG_PATH" --force >/dev/null 2>&1 || true
+    TARGET_STATE_ID="$(lookup_state_id)"
+  fi
 fi
 STATUS_ARG="${TARGET_STATE_ID:-$TARGET_STATE}"
 
