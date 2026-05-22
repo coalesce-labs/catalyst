@@ -195,7 +195,7 @@ main() {
   local query payload response
   # $teamKey is a GraphQL variable inside this single-quoted query, not a shell var.
   # shellcheck disable=SC2016
-  query='query($teamKey: String!) { teams(filter: { key: { eq: $teamKey } }) { nodes { id workflowStates { nodes { id name type } } } } }'
+  query='query($teamKey: String!) { teams(filter: { key: { eq: $teamKey } }) { nodes { id states { nodes { id name type } } } } }'
   payload=$(jq -nc --arg q "$query" --arg k "$team_key" '{query: $q, variables: {teamKey: $k}}')
   response=$(linear_graphql_post "$token" "$payload")
 
@@ -213,7 +213,7 @@ main() {
     return 2
   fi
   team_id=$(echo "$team_node" | jq -r '.id')
-  fetched_states=$(echo "$team_node" | jq -c '.workflowStates.nodes // []')
+  fetched_states=$(echo "$team_node" | jq -c '.states.nodes // []')
 
   # --- diff against the contract ---
   local missing

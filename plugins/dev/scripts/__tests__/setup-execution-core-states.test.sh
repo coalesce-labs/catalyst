@@ -205,7 +205,7 @@ body=""
 for arg in "\$@"; do
   case "\$arg" in
     *workflowStateCreate*) body="create" ;;
-    *workflowStates*|*states*) [ -z "\$body" ] && body="query" ;;
+    *states*) [ -z "\$body" ] && body="query" ;;
   esac
 done
 # -d @- form: body comes from stdin
@@ -219,7 +219,7 @@ fi
 if [ "\$body" = "create" ]; then
   echo '${create_resp}'
 else
-  echo '{"data":{"teams":{"nodes":[{"id":"${FAKE_TEAM_ID}","workflowStates":{"nodes":[${states_nodes}]}}]}}}'
+  echo '{"data":{"teams":{"nodes":[{"id":"${FAKE_TEAM_ID}","states":{"nodes":[${states_nodes}]}}]}}}'
 fi
 exit 0
 SCRIPT
