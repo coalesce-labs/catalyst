@@ -7,9 +7,10 @@
 // advancing the ticket on its next tick. The bg kill and the worktree teardown
 // are best-effort, behind the injectable killJob / teardownWorktree seams (D9).
 
-import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join } from "node:path";
+import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
+import { log } from "./config.mjs";
 
 // Signal statuses that mean a phase no longer holds a live worker — left as-is.
 //
@@ -40,19 +41,6 @@ export function defaultKillJob(bgJobId) {
   return false;
 }
 
-// defaultTeardownWorktree — `git worktree remove --force` the worker's worktree.
-// Path convention: ~/catalyst/wt/<projectKey>/<orchId>-<ticket>
-// (phase-agent-dispatch). Runs with `-C <repoRoot>` so it works regardless of
-// the daemon's cwd. Never throws.
-export function defaultTeardownWorktree({ projectKey, orchId, ticket, repoRoot }) {
-  if (!projectKey || !orchId || !ticket || !repoRoot) return false;
-  const wt = join(process.env.HOME ?? "", "catalyst", "wt", projectKey, `${orchId}-${ticket}`);
-  const res = spawnSync("git", ["-C", repoRoot, "worktree", "remove", "--force", wt], {
-    encoding: "utf8",
-  });
-  return !res.error && (res.status ?? 1) === 0;
-}
-
 // abortWorker — abort an in-flight ticket dragged out of {Triage, Ready}.
 // Returns { aborted, signalsMarked, jobsKilled, worktreeRemoved }. A ticket
 // that was never dispatched (no worker dir) or has only settled signals is a
@@ -60,12 +48,7 @@ export function defaultTeardownWorktree({ projectKey, orchId, ticket, repoRoot }
 export function abortWorker(
   orchDir,
   ticket,
-  {
-    projectKey,
-    repoRoot,
-    killJob = defaultKillJob,
-    teardownWorktree = defaultTeardownWorktree,
-  } = {},
+  { repoRoot, killJob = defaultKillJob, teardownWorktree = defaultTeardownWorktree } = {},
 ) {
   const empty = { aborted: false, signalsMarked: [], jobsKilled: [], worktreeRemoved: false };
   const dir = join(orchDir, "workers", ticket);
@@ -110,12 +93,26 @@ export function abortWorker(
     }
   }
 
+  // Worktree teardown is SKIPPED while a bg job is still live in it: a
+  // `git worktree remove --force` would yank the filesystem out from under a
+  // running `claude` worker. defaultKillJob is a no-op (no `claude` bg-kill
+  // verb exists), so a recorded-but-unkilled job means the worker is presumed
+  // alive — leave its worktree for a later sweep (the scheduler's terminal-Done
+  // teardown once the phase settles, or an operator). A ticket with no bg job
+  // (never reached `claude --bg`) is safe to tear down now.
+  const liveJobs = [...jobIds].filter((id) => !jobsKilled.includes(id));
   let worktreeRemoved = false;
-  try {
-    worktreeRemoved =
-      teardownWorktree({ projectKey, orchId: basename(orchDir), ticket, repoRoot }) === true;
-  } catch {
-    /* best-effort */
+  if (liveJobs.length > 0) {
+    log.warn(
+      { ticket, liveJobs },
+      "abort-worker: worktree teardown skipped — a bg job is still live in it",
+    );
+  } else {
+    try {
+      worktreeRemoved = teardownWorktree({ repoRoot, ticket }) === true;
+    } catch {
+      /* best-effort */
+    }
   }
 
   return { aborted: true, signalsMarked, jobsKilled, worktreeRemoved };

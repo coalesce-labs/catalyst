@@ -222,7 +222,12 @@ main() {
 
   local state_map registry_query
   state_map="$(build_execution_core_state_map)"
-  registry_query=$(jq -nc '{ status: "Ready", project: null, label: null, priority: null }')
+  # CTL-582: triageStatus is the →Triage trigger state the daemon watches,
+  # distinct from `status` (the scheduler-eligible state). resolveEligibleQuery
+  # defaults it to "Triage" too, but pin it here so the registry entry is
+  # self-describing.
+  registry_query=$(jq -nc \
+    '{ status: "Ready", triageStatus: "Triage", project: null, label: null, priority: null }')
 
   # --- dry-run: report intent, write nothing ---
   if [[ $dry_run -eq 1 ]]; then

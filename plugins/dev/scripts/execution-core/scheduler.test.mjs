@@ -839,3 +839,127 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     ).not.toThrow();
   });
 });
+
+// ── CTL-582: worktree teardown on terminal Done ──
+
+describe("schedulerTick — worktree teardown on Done (CTL-582)", () => {
+  // teardownWorktreeOnce resolves repoRoot from the registry; write a fixture
+  // under the test's CATALYST_DIR so the resolution succeeds.
+  function writeRegistry(team, repoRoot) {
+    const ecDir = join(catalystDir, "execution-core");
+    mkdirSync(ecDir, { recursive: true });
+    writeFileSync(
+      join(ecDir, "registry.json"),
+      JSON.stringify({ projects: [{ team, repoRoot, eligibleQuery: {} }] }),
+    );
+  }
+  const noStatusWrites = () => ({
+    applyPhaseStatus() {},
+    applyTerminalDone() {},
+    applyLabel() {},
+  });
+  const markerPath = (ticket) =>
+    join(orchDir, "workers", ticket, ".worktree-removed");
+
+  test("calls teardownWorktree with { repoRoot, ticket } when monitor-deploy is done", () => {
+    writeSignal("CTL-4", "monitor-deploy", "done");
+    writeRegistry("CTL", "/repo/ctl");
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: noStatusWrites(),
+      teardownWorktree: (a) => {
+        calls.push(a);
+        return true;
+      },
+    });
+    expect(calls).toEqual([{ repoRoot: "/repo/ctl", ticket: "CTL-4" }]);
+  });
+
+  test("a once-marker makes teardown fire a single time across ticks", () => {
+    writeSignal("CTL-4", "monitor-deploy", "done");
+    writeRegistry("CTL", "/repo/ctl");
+    let count = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: noStatusWrites(),
+      teardownWorktree: () => {
+        count += 1;
+        return true;
+      },
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(count).toBe(1);
+    expect(existsSync(markerPath("CTL-4"))).toBe(true);
+  });
+
+  test("a teardown that returns false is retried — no once-marker written", () => {
+    writeSignal("CTL-4", "monitor-deploy", "done");
+    writeRegistry("CTL", "/repo/ctl");
+    let count = 0;
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: noStatusWrites(),
+      teardownWorktree: () => {
+        count += 1;
+        return false; // git failure — not yet torn down
+      },
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    expect(count).toBe(2);
+    expect(existsSync(markerPath("CTL-4"))).toBe(false);
+  });
+
+  test("a thrown teardown never aborts the tick", () => {
+    writeSignal("CTL-4", "monitor-deploy", "done");
+    writeRegistry("CTL", "/repo/ctl");
+    expect(() =>
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        writeStatus: noStatusWrites(),
+        teardownWorktree: () => {
+          throw new Error("boom");
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  test("no teardown when the ticket has not reached terminal Done", () => {
+    writeSignal("CTL-5", "implement", "done"); // mid-pipeline, not monitor-deploy
+    writeRegistry("CTL", "/repo/ctl");
+    let called = false;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: noStatusWrites(),
+      teardownWorktree: () => {
+        called = true;
+        return true;
+      },
+    });
+    expect(called).toBe(false);
+  });
+
+  test("no teardown + no marker when the ticket's team has no registry entry", () => {
+    writeSignal("CTL-4", "monitor-deploy", "done");
+    // deliberately no writeRegistry — getProjectConfig("CTL") resolves to null
+    let called = false;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: noStatusWrites(),
+      teardownWorktree: () => {
+        called = true;
+        return true;
+      },
+    });
+    expect(called).toBe(false);
+    expect(existsSync(markerPath("CTL-4"))).toBe(false); // retryable — no marker
+  });
+});

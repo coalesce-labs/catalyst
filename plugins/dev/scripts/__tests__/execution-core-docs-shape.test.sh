@@ -31,10 +31,6 @@ echo "execution-core docs shape tests"
 # Template: jq-stripped (comments removed) must be valid JSON.
 check "config.template.json is valid JSON" jq -e . "$TEMPLATE"
 
-# Template: the executionCore _comment mentions the contract Ready state.
-check "template executionCore comment mentions the contract" \
-  grep -qi "execution-core state contract\|registry" "$TEMPLATE"
-
 # configuration.md: documents the central registry.
 check "configuration.md documents registry.json" \
   grep -qF "registry.json" "$CONFIG_DOC"

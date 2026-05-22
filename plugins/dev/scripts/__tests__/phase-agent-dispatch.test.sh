@@ -501,6 +501,27 @@ assert_contains "$LOG" \
 	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100" \
 	"OTEL attrs composed with projectKey + tier-2 branch fallback"
 
+# ─── Test 10b: CATALYST_EXECUTION_CORE drops the orchId prefix (CTL-582) ──────
+# Execution-core dispatches one worktree per ticket (~/catalyst/wt/<key>/<TICKET>),
+# so the OTEL branch fallback is the bare ticket — not <orchId>-<ticket>.
+echo ""
+echo "Test 10b: CATALYST_EXECUTION_CORE composes the no-orchId worktree branch"
+fresh_env t10b
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+(cd "${TEST_DIR}/proj" &&
+	CATALYST_EXECUTION_CORE=1 "$DISPATCH" --phase triage --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" \
+	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=CTL-100" \
+	"execution-core OTEL branch drops the orchId prefix (CTL-100, not orch-test-CTL-100)"
+
 # ─── Test 11: OTEL_RESOURCE_ATTRIBUTES three-attr form when projectKey absent
 echo ""
 echo "Test 11: OTEL_RESOURCE_ATTRIBUTES falls back to three-attr form when no projectKey"

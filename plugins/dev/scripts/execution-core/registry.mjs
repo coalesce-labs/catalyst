@@ -59,6 +59,23 @@ export function getProjectConfig(team) {
   return listProjects().find((p) => p.team === team) ?? null;
 }
 
+// resolveEligibleQuery — normalize a registry entry into the runnable query the
+// monitor + linear-query layer needs. The entry's `team` lives at the top level
+// (the eligibleQuery object never carries it); this is the single place it is
+// merged in and the per-field defaults are applied. `status` defaults to the
+// execution-core contract state "Ready"; `triageStatus` to "Triage" (CTL-565).
+export function resolveEligibleQuery(entry) {
+  const eq = entry?.eligibleQuery ?? {};
+  return {
+    team: entry?.team ?? null,
+    status: eq.status ?? "Ready",
+    triageStatus: eq.triageStatus ?? "Triage",
+    project: eq.project ?? null,
+    label: eq.label ?? null,
+    priority: eq.priority ?? null,
+  };
+}
+
 // upsertProjectEntry — idempotently write a team's registry entry. Creates the
 // execution-core/ dir if absent; replaces an entry with a matching `team` in
 // place (never duplicates); preserves every other entry. The write is atomic

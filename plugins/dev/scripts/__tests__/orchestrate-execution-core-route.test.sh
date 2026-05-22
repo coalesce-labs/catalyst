@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Shell tests for orchestrate-execution-core-route.sh — the /orchestrate
-# execution-core routing helper (CTL-554).
+# execution-core routing helper (CTL-554, CTL-582). CTL-582 (D4) retired the
+# enroll/stop actions — enrolled projects are the central registry.json — so
+# the helper now only ensures the machine-level daemon is running.
 # Run: bash plugins/dev/scripts/__tests__/orchestrate-execution-core-route.test.sh
 
 set -uo pipefail
@@ -21,56 +23,47 @@ fail() {
 	[ $# -ge 2 ] && echo "    $2"
 }
 
-# Physical scratch path so logical `pwd` in the helper matches the fixture
-# strings even on macOS, where mktemp lives under a /var → /private/var link.
 SCRATCH=$(cd "$(mktemp -d)" && pwd -P)
 
-# Fixture: a git repo with a linked worktree. The helper is run FROM the
-# worktree and must resolve repoRoot to the main working tree.
-git init -q "$SCRATCH/main"
-(cd "$SCRATCH/main" &&
-	git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init)
-mkdir -p "$SCRATCH/main/.catalyst"
-echo '{"catalyst":{"project":{"key":"demoproj"}}}' \
-	>"$SCRATCH/main/.catalyst/config.json"
-git -C "$SCRATCH/main" worktree add -q -b feature "$SCRATCH/wt" >/dev/null 2>&1
+# A stub daemon that succeeds for every subcommand (`start`, `probe`).
+cat >"$SCRATCH/daemon-ok" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$SCRATCH/daemon-ok"
 
-RECORD="$SCRATCH/cat/execution-core/projects/demoproj.json"
+# A stub daemon whose `probe` fails (start ok, probe non-zero) — the daemon
+# never came up.
+cat >"$SCRATCH/daemon-down" <<'EOF'
+#!/usr/bin/env bash
+[ "${1-}" = "probe" ] && exit 1
+exit 0
+EOF
+chmod +x "$SCRATCH/daemon-down"
 
-echo "test 1 (CTL-554): enroll from a worktree resolves repoRoot to the main tree"
-OUT=$(cd "$SCRATCH/wt" &&
-	CATALYST_DIR="$SCRATCH/cat" EXECUTION_CORE_ENSURE_DAEMON=":" \
-		bash "$HELPER" enroll 2>&1)
+echo "test 1 (CTL-582): exits 0 and points at the registry when the daemon is up"
+OUT=$(EXECUTION_CORE_ENSURE_DAEMON="$SCRATCH/daemon-ok" bash "$HELPER" 2>&1)
 RC=$?
-if [ "$RC" = "0" ]; then pass "enroll exits 0"; else fail "enroll exits 0" "rc=$RC out=$OUT"; fi
-if [ -f "$RECORD" ]; then
-	pass "enroll wrote record under resolved projectKey"
+if [ "$RC" = "0" ]; then
+	pass "exits 0 when the daemon probes ok"
 else
-	fail "enroll wrote record" "no file at $RECORD"
+	fail "exits 0" "rc=$RC out=$OUT"
 fi
-RR=$(jq -r '.repoRoot' "$RECORD" 2>/dev/null)
-if [ "$RR" = "$SCRATCH/main" ]; then
-	pass "repoRoot resolved to main worktree"
+if echo "$OUT" | grep -q "registry"; then
+	pass "reports projects are registry-managed"
 else
-	fail "repoRoot = main worktree" "got '$RR' want '$SCRATCH/main'"
-fi
-PK=$(jq -r '.projectKey' "$RECORD" 2>/dev/null)
-if [ "$PK" = "demoproj" ]; then
-	pass "projectKey read from .catalyst/config.json"
-else
-	fail "projectKey from config" "got '$PK'"
+	fail "reports registry-managed" "out=$OUT"
 fi
 
-echo "test 2 (CTL-554): stop removes the enrollment record"
-(cd "$SCRATCH/wt" && CATALYST_DIR="$SCRATCH/cat" bash "$HELPER" stop) >/dev/null 2>&1
-if [ ! -f "$RECORD" ]; then
-	pass "stop removed the record"
+echo "test 2 (CTL-582): exits non-zero when the daemon never comes up"
+OUT=$(EXECUTION_CORE_ENSURE_DAEMON="$SCRATCH/daemon-down" bash "$HELPER" 2>&1)
+RC=$?
+if [ "$RC" != "0" ]; then
+	pass "exits non-zero when probe fails"
 else
-	fail "stop removed the record" "record still at $RECORD"
+	fail "exits non-zero" "rc=$RC out=$OUT"
 fi
 
-# cleanup
-git -C "$SCRATCH/main" worktree remove --force "$SCRATCH/wt" 2>/dev/null || true
 rm -rf "$SCRATCH"
 
 echo ""

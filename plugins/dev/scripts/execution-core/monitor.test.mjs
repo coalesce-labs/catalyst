@@ -1,5 +1,9 @@
-// Unit tests for the execution-core monitor core (CTL-535 Phase 4).
+// Unit tests for the execution-core monitor core (CTL-535 Phase 4, CTL-582).
 // Run: cd plugins/dev/scripts/execution-core && bun test monitor.test.mjs
+//
+// CTL-582: the monitor discovers projects from the central registry.json
+// (registry.mjs) and keys the eligible projection on Linear team — the
+// per-repo enrollment records are gone.
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import {
@@ -7,7 +11,6 @@ import {
   rmSync,
   mkdirSync,
   writeFileSync,
-  unlinkSync,
   appendFileSync,
   statSync,
 } from "node:fs";
@@ -29,9 +32,9 @@ import { setProjectEligible, getEligibleSet, dropProject } from "./eligible-set.
 import { loadCursor, saveCursor } from "./event-cursor.mjs";
 
 let catalystDir;
-let enrollmentDir;
 let prevCatalystDir;
-const enrolledKeys = new Set();
+const enrolledTeams = new Set();
+const registryEntries = [];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -39,44 +42,46 @@ beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
   catalystDir = mkdtempSync(join(tmpdir(), "exec-core-mon-"));
   process.env.CATALYST_DIR = catalystDir;
-  enrollmentDir = join(catalystDir, "execution-core", "projects");
-  mkdirSync(enrollmentDir, { recursive: true });
+  mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
   __resetForTests();
-  enrolledKeys.clear();
+  enrolledTeams.clear();
+  registryEntries.length = 0;
 });
 
 afterEach(() => {
   stopMonitor();
   __resetForTests();
-  for (const k of enrolledKeys) dropProject(k);
+  for (const t of enrolledTeams) dropProject(t);
   if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
   else process.env.CATALYST_DIR = prevCatalystDir;
   rmSync(catalystDir, { recursive: true, force: true });
 });
 
-// Create a stub repo + enrollment record. `eligibleQuery` null => enrolled
-// but unconfigured. Returns the repoRoot.
-function enroll(projectKey, eligibleQuery) {
-  const repoRoot = mkdtempSync(join(catalystDir, `repo-${projectKey}-`));
-  mkdirSync(join(repoRoot, ".catalyst"), { recursive: true });
-  const catalyst = { linear: { teamKey: eligibleQuery?.team ?? "T" } };
-  if (eligibleQuery) {
-    catalyst.orchestration = { executionCore: { eligibleQuery } };
-  }
+// writeRegistry — persist the current registryEntries to registry.json (the
+// file the monitor reads via registry.mjs).
+function writeRegistry() {
   writeFileSync(
-    join(repoRoot, ".catalyst", "config.json"),
-    JSON.stringify({ catalyst }),
+    join(catalystDir, "execution-core", "registry.json"),
+    JSON.stringify({ projects: registryEntries }, null, 2),
   );
-  writeFileSync(
-    join(enrollmentDir, `${projectKey}.json`),
-    JSON.stringify({ projectKey, repoRoot }),
-  );
-  enrolledKeys.add(projectKey);
+}
+
+// enroll — register a team in the central registry. `eligibleQuery` is the
+// inner query object ({status, ...}); `team` is the top-level registry key.
+// Returns a stub repoRoot the registry entry points at.
+function enroll(team, eligibleQuery) {
+  const repoRoot = mkdtempSync(join(catalystDir, `repo-${team}-`));
+  registryEntries.push({ team, repoRoot, eligibleQuery: eligibleQuery ?? null });
+  writeRegistry();
+  enrolledTeams.add(team);
   return repoRoot;
 }
 
-function unenroll(projectKey) {
-  unlinkSync(join(enrollmentDir, `${projectKey}.json`));
+// unenroll — drop a team from the registry (an operator registry edit).
+function unenroll(team) {
+  const i = registryEntries.findIndex((e) => e.team === team);
+  if (i >= 0) registryEntries.splice(i, 1);
+  writeRegistry();
 }
 
 // A fake exec keyed on the linearis `--team` argv flag. Tracks call count.
@@ -137,46 +142,45 @@ describe("parseStateChangedEvent", () => {
 
 describe("reconcileProject", () => {
   test("runs the query and writes the eligible set", () => {
-    const repoRoot = enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
-    reconcileProject("alpha", repoRoot, { exec });
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-1", "ENG-2"]);
+    reconcileProject("ENG", { exec });
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1", "ENG-2"]);
   });
 
   test("preserves the prior eligible set when runEligibleQuery throws", () => {
-    const repoRoot = enroll("alpha", { team: "ENG", status: "Todo" });
-    setProjectEligible("alpha", [node("ENG-PRIOR")], { source: "reconcile", query: {} });
+    enroll("ENG", { status: "Todo" });
+    setProjectEligible("ENG", [node("ENG-PRIOR")], { source: "reconcile", query: {} });
     const throwingExec = () => ({ code: 1, stdout: "", stderr: "linearis down" });
-    reconcileProject("alpha", repoRoot, { exec: throwingExec });
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-PRIOR"]);
+    reconcileProject("ENG", { exec: throwingExec });
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-PRIOR"]);
   });
 
-  test("skips (no crash) a project whose loadProjectConfig returns null", () => {
-    const repoRoot = enroll("alpha", null); // enrolled, no executionCore config
+  test("skips (no crash) a team with no registry entry", () => {
     const exec = execReturning({});
-    expect(() => reconcileProject("alpha", repoRoot, { exec })).not.toThrow();
+    expect(() => reconcileProject("NOSUCH", { exec })).not.toThrow();
     expect(exec.calls).toBe(0);
   });
 
   test("does not crash the daemon when the projection write fails", () => {
-    const repoRoot = enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1")] });
     // Make the projection path a non-empty directory so renameSync fails,
     // simulating a disk/permission fault during the projection write. The
     // throw must be swallowed: reconcileProject runs inside the setInterval
     // reconcile timer, so an uncaught error would kill the monitor process.
-    const projDir = join(catalystDir, "execution-core", "eligible", "alpha.json");
+    const projDir = join(catalystDir, "execution-core", "eligible", "ENG.json");
     mkdirSync(projDir, { recursive: true });
     writeFileSync(join(projDir, "sentinel"), "x");
-    expect(() => reconcileProject("alpha", repoRoot, { exec })).not.toThrow();
+    expect(() => reconcileProject("ENG", { exec })).not.toThrow();
     rmSync(projDir, { recursive: true, force: true });
   });
 });
 
 describe("handleStateChangedEvent", () => {
   test("an event whose toState != eligible status fast-path-removes the ticket", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
-    setProjectEligible("alpha", [node("ENG-1"), node("ENG-2")], {
+    enroll("ENG", { status: "Todo" });
+    setProjectEligible("ENG", [node("ENG-1"), node("ENG-2")], {
       source: "reconcile",
       query: { team: "ENG", status: "Todo" },
     });
@@ -184,11 +188,11 @@ describe("handleStateChangedEvent", () => {
       event: "linear.issue.state_changed",
       detail: { ticket: "ENG-1", teamKey: "ENG", toState: "In Progress" },
     });
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
   });
 
   test("an event whose toState == eligible status schedules a debounced reconcile (no immediate poll)", async () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-9")] });
     handleStateChangedEvent(
       {
@@ -200,11 +204,11 @@ describe("handleStateChangedEvent", () => {
     expect(exec.calls).toBe(0); // not polled synchronously
     await sleep(70);
     expect(exec.calls).toBe(1);
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-9"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
   });
 
   test("multiple events for one project within the debounce window coalesce into one reconcile", async () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-9")] });
     for (const ticket of ["ENG-7", "ENG-8", "ENG-9"]) {
       handleStateChangedEvent(
@@ -219,9 +223,9 @@ describe("handleStateChangedEvent", () => {
     expect(exec.calls).toBe(1);
   });
 
-  test("an event whose teamKey matches no enrolled project's query team is ignored", async () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
-    setProjectEligible("alpha", [node("ENG-1")], {
+  test("an event whose teamKey matches no registered team is ignored", async () => {
+    enroll("ENG", { status: "Todo" });
+    setProjectEligible("ENG", [node("ENG-1")], {
       source: "reconcile",
       query: { team: "ENG", status: "Todo" },
     });
@@ -235,7 +239,7 @@ describe("handleStateChangedEvent", () => {
     );
     await sleep(60);
     expect(exec.calls).toBe(0);
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-1"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
   });
 });
 
@@ -245,7 +249,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
   const orchDir = "/orch";
 
   test("toState === triageStatus one-shot-dispatches the triage phase agent", () => {
-    enroll("alpha", { team: "ENG", status: "Ready" }); // triageStatus defaults to "Triage"
+    enroll("ENG", { status: "Ready" }); // triageStatus defaults to "Triage"
     const dispatch = mock(() => ({ code: 0 }));
     handleStateChangedEvent(
       {
@@ -258,7 +262,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
   });
 
   test("toState === eligible status (Ready) schedules a reconcile, never a triage dispatch", async () => {
-    enroll("alpha", { team: "ENG", status: "Ready" });
+    enroll("ENG", { status: "Ready" });
     const exec = execReturning({ ENG: [node("ENG-9")] });
     const dispatch = mock(() => ({ code: 0 }));
     handleStateChangedEvent(
@@ -274,8 +278,8 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
   });
 
   test("toState that is neither Triage nor Ready fast-path-removes the ticket", () => {
-    enroll("alpha", { team: "ENG", status: "Ready" });
-    setProjectEligible("alpha", [node("ENG-1"), node("ENG-2")], {
+    enroll("ENG", { status: "Ready" });
+    setProjectEligible("ENG", [node("ENG-1"), node("ENG-2")], {
       source: "reconcile",
       query: { team: "ENG", status: "Ready" },
     });
@@ -283,11 +287,11 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
       event: "linear.issue.state_changed",
       detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
     });
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
   });
 
   test("a triage dispatch failure is logged and never throws", () => {
-    enroll("alpha", { team: "ENG", status: "Ready" });
+    enroll("ENG", { status: "Ready" });
     const dispatch = () => ({ code: 9, stderr: "x" });
     expect(() =>
       handleStateChangedEvent(
@@ -301,7 +305,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
   });
 
   test("a →Triage transition with no orchDir wired does not throw or dispatch", () => {
-    enroll("alpha", { team: "ENG", status: "Ready" });
+    enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));
     expect(() =>
       handleStateChangedEvent(
@@ -316,7 +320,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
   });
 
   test("a drag-out (toState neither Triage nor Ready) invokes abortWorker", () => {
-    enroll("alpha", { team: "ENG", status: "Ready" });
+    enroll("ENG", { status: "Ready" });
     const abortWorker = mock(() => ({ aborted: true }));
     handleStateChangedEvent(
       {
@@ -326,14 +330,13 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
       { orchDir, abortWorker },
     );
     expect(abortWorker).toHaveBeenCalledWith("/orch", "ENG-1", {
-      projectKey: expect.any(String),
       repoRoot: expect.any(String),
     });
   });
 
   test("a drag-out still removes the ticket from the eligible projection", () => {
-    enroll("alpha", { team: "ENG", status: "Ready" });
-    setProjectEligible("alpha", [node("ENG-1"), node("ENG-2")], {
+    enroll("ENG", { status: "Ready" });
+    setProjectEligible("ENG", [node("ENG-1"), node("ENG-2")], {
       source: "reconcile",
       query: { team: "ENG", status: "Ready" },
     });
@@ -345,11 +348,11 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
       },
       { orchDir, abortWorker },
     );
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
   });
 
   test("a drag-out with no orchDir wired removes the ticket and does not throw", () => {
-    enroll("alpha", { team: "ENG", status: "Ready" });
+    enroll("ENG", { status: "Ready" });
     const abortWorker = mock(() => ({ aborted: true }));
     expect(() =>
       handleStateChangedEvent(
@@ -366,29 +369,29 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
 
 describe("lifecycle", () => {
   test("startMonitor runs an immediate reconcileAll", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1")] });
     startMonitor({ exec, reconcileIntervalMs: 60_000 });
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-1"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
   });
 
-  test("reconcileAll re-globs the enrollment dir — a new record is picked up, a removed one is dropped", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+  test("reconcileAll re-reads the registry — a new team is picked up, a removed one is dropped", () => {
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1")], PLAT: [node("PLAT-1")] });
     reconcileAll({ exec });
-    expect(getEligibleSet("alpha")).toHaveLength(1);
+    expect(getEligibleSet("ENG")).toHaveLength(1);
 
-    enroll("beta", { team: "PLAT", status: "Todo" });
+    enroll("PLAT", { status: "Todo" });
     reconcileAll({ exec });
-    expect(getEligibleSet("beta").map((t) => t.identifier)).toEqual(["PLAT-1"]);
+    expect(getEligibleSet("PLAT").map((t) => t.identifier)).toEqual(["PLAT-1"]);
 
-    unenroll("alpha");
+    unenroll("ENG");
     reconcileAll({ exec });
-    expect(getEligibleSet("alpha")).toEqual([]); // dropProject'd
+    expect(getEligibleSet("ENG")).toEqual([]); // dropProject'd
   });
 
   test("stopMonitor clears pending debounce timers (a queued reconcile never fires)", async () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-9")] });
     handleStateChangedEvent(
       {
@@ -461,7 +464,7 @@ describe("readNewEvents — cursor persistence", () => {
 
 describe("startMonitor — resumeFromCursor", () => {
   test("resumeFromCursor:false keeps the seed-at-EOF behavior", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1")] });
     appendEventLog('{"event":"a"}\n{"event":"b"}\n');
     const size = statSync(eventLogPath()).size;
@@ -474,10 +477,10 @@ describe("startMonitor — resumeFromCursor", () => {
   });
 
   test("resumeFromCursor:true drains the gap between cursor and EOF", () => {
-    // alpha holds ENG-1 + ENG-2; an event in the downtime gap moved ENG-1 OUT
+    // ENG holds ENG-1 + ENG-2; an event in the downtime gap moved ENG-1 OUT
     // of Todo. resumeFromCursor:true must drain that gap on startup and remove
     // ENG-1 — proving the durable cursor, not a re-seed, drove the resume.
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
     // Pre-write a downtime-gap event and pin the cursor at offset 0.
     appendEventLog(
@@ -489,11 +492,11 @@ describe("startMonitor — resumeFromCursor", () => {
     saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
     startMonitor({ exec, resumeFromCursor: true, reconcileIntervalMs: 60_000 });
     // startup reconcileAll seeded {ENG-1, ENG-2}; the gap drain removed ENG-1.
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
   });
 
   test("resumeFromCursor defaults to true (the gap is drained without the flag)", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
     appendEventLog(
       `${JSON.stringify({
@@ -503,6 +506,6 @@ describe("startMonitor — resumeFromCursor", () => {
     );
     saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
     startMonitor({ exec, reconcileIntervalMs: 60_000 }); // no resumeFromCursor
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
   });
 });

@@ -84,7 +84,7 @@ fi
 | `--prd <path>`            | Run PRD review panel + ticket creation before orchestration                                                                                           |
 | `--dry-run`               | Show wave plan without executing                                                                                                                      |
 | `--state-on-merge <name>` | Linear state to set on PR merge. Default: `stateMap.done` (typically "Done")                                                                          |
-| `--stop`                  | Deregister this project from the `execution-core` daemon (removes the enrollment record) and exit. Works regardless of the configured `dispatchMode`. |
+| `--stop`                  | Print how to deregister an `execution-core` project (edit the central registry) and exit. Works regardless of the configured `dispatchMode`. |
 
 ## Configuration
 
@@ -128,11 +128,11 @@ doesn't exist). Falls back to sensible defaults if no orchestration block exists
   the `orchestrate-phase-advance` helper.
 - `"oneshot-legacy"` — the orchestrator dispatches one long `claude -p oneshot` worker per ticket.
   Kept for rollback safety; flipping a single config key reverts to the pre-CTL-452 behavior.
-- `"execution-core"` (CTL-554) — daemon-served. `/orchestrate` runs no wave loop and no Phase 4
-  session: it writes a per-project enrollment record to
-  `~/catalyst/execution-core/projects/<projectKey>.json`, ensures the single machine-level
-  execution-core daemon is running, and exits. The daemon directory-watches enrolled projects and
-  serves each by composing the CTL-535 monitor, CTL-536 scheduler, and CTL-539 recovery modules.
+- `"execution-core"` (CTL-554, CTL-582) — daemon-served. `/orchestrate` runs no wave loop and no
+  Phase 4 session: it just ensures the single machine-level execution-core daemon is running and
+  exits. Enrolled projects are the central registry `~/catalyst/execution-core/registry.json`
+  (maintained by `setup-execution-core-states.sh`); the daemon watches that file and serves each
+  team by composing the CTL-535 monitor, CTL-536 scheduler, and CTL-539 recovery modules.
 
 The `workerCommand` field is still honored in legacy mode. In phase-agents mode it is unused (each
 phase has its own canonical skill).
@@ -525,29 +525,32 @@ if [[ -x "$SESSION_SCRIPT" ]]; then
 fi
 ```
 
-### execution-core dispatch fork (CTL-554)
+### execution-core dispatch fork (CTL-554, CTL-582)
 
 `dispatchMode: "execution-core"` and the `--stop` flag both short-circuit the wave loop. Evaluate
 this **before Phase 3** — when it applies, no workers are dispatched and no Phase 4 monitor session
-starts. The routing helper resolves `projectKey`/`repoRoot` (the main working tree, even when
-`/orchestrate` runs from a linked worktree) and writes or removes the enrollment record.
+starts.
 
-- **Invoked with `--stop`** — deregister this project from the execution-core daemon and exit,
-  regardless of the configured `dispatchMode`:
+CTL-582 (D4) made the central registry `~/catalyst/execution-core/registry.json` the single source
+of enrolled projects, maintained by `setup-execution-core-states.sh`. `/orchestrate` no longer
+writes per-project enrollment records — there is nothing to enroll here.
+
+- **Invoked with `--stop`** — execution-core projects are deregistered by editing the central
+  registry, not by `/orchestrate`. Print the guidance and exit 0:
 
   ```bash
-  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-execution-core-route.sh" stop
-  # Removes ~/catalyst/execution-core/projects/<projectKey>.json; the running
-  # daemon drops the project on its next reconcile. Exit 0 — do not continue.
+  echo "execution-core: enrolled projects are the central registry" \
+    "~/catalyst/execution-core/registry.json — remove the team's entry there to deregister."
+  # Exit 0 — do not continue.
   ```
 
-- **`DISPATCH_MODE` is `execution-core` (no `--stop`)** — enroll this project and ensure the
-  machine-level daemon, then exit:
+- **`DISPATCH_MODE` is `execution-core` (no `--stop`)** — ensure the machine-level daemon is
+  running, then exit:
 
   ```bash
-  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-execution-core-route.sh" enroll
-  # Writes the enrollment record and ensures the daemon is running. No wave
-  # loop, no Phase 4 session. Exit 0 — do not continue to Phase 3.
+  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-execution-core-route.sh"
+  # Ensures the daemon is running. No enrollment, no wave loop, no Phase 4
+  # session. Exit 0 — do not continue to Phase 3.
   ```
 
 - **Any other `DISPATCH_MODE`** — continue to Phase 3 below.

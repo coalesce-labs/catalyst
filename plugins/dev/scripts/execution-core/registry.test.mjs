@@ -12,7 +12,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { getRegistryPath } from "./config.mjs";
-import { listProjects, getProjectConfig, upsertProjectEntry } from "./registry.mjs";
+import {
+  listProjects,
+  getProjectConfig,
+  upsertProjectEntry,
+  resolveEligibleQuery,
+} from "./registry.mjs";
 
 let catalystDir;
 let registryDir;
@@ -174,6 +179,62 @@ describe("upsertProjectEntry", () => {
       team: "CTL",
       repoRoot: "/repos/ctl",
       eligibleQuery: { status: "Ready" },
+    });
+  });
+});
+
+describe("resolveEligibleQuery", () => {
+  test("merges the entry's team and applies defaults for an absent eligibleQuery", () => {
+    expect(resolveEligibleQuery({ team: "CTL", repoRoot: "/r" })).toEqual({
+      team: "CTL",
+      status: "Ready",
+      triageStatus: "Triage",
+      project: null,
+      label: null,
+      priority: null,
+    });
+  });
+
+  test("threads the entry's team onto the query (eligibleQuery never carries team)", () => {
+    const q = resolveEligibleQuery({ team: "ADV", eligibleQuery: { status: "Ready" } });
+    expect(q.team).toBe("ADV");
+    expect(q.status).toBe("Ready");
+  });
+
+  test("status defaults to Ready (the execution-core contract state) when absent", () => {
+    expect(resolveEligibleQuery({ team: "CTL", eligibleQuery: {} }).status).toBe("Ready");
+  });
+
+  test("triageStatus defaults to Triage but an explicit value is preserved", () => {
+    expect(resolveEligibleQuery({ team: "CTL", eligibleQuery: {} }).triageStatus).toBe("Triage");
+    expect(
+      resolveEligibleQuery({ team: "CTL", eligibleQuery: { triageStatus: "Intake" } }).triageStatus,
+    ).toBe("Intake");
+  });
+
+  test("explicit project/label/priority are preserved", () => {
+    const q = resolveEligibleQuery({
+      team: "CTL",
+      eligibleQuery: { status: "Ready", project: "P", label: "L", priority: 2 },
+    });
+    expect(q).toEqual({
+      team: "CTL",
+      status: "Ready",
+      triageStatus: "Triage",
+      project: "P",
+      label: "L",
+      priority: 2,
+    });
+  });
+
+  test("a non-object eligibleQuery (hand-edited registry) degrades to defaults", () => {
+    expect(resolveEligibleQuery({ team: "CTL", eligibleQuery: "garbage" })).toEqual({
+      team: "CTL",
+      status: "Ready",
+      triageStatus: "Triage",
+      project: null,
+      label: null,
+      priority: null,
     });
   });
 });

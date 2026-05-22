@@ -258,40 +258,35 @@ describe("defaultStatJob", () => {
 describe("recoverStartup", () => {
   let catalystDir;
   let prevCatalystDir;
-  let enrollmentDir;
-  const enrolledKeys = new Set();
+  const enrolledTeams = new Set();
+  const registryEntries = [];
 
   beforeEach(() => {
     prevCatalystDir = process.env.CATALYST_DIR;
     catalystDir = mkdtempSync(join(tmpdir(), "exec-core-recover-"));
     process.env.CATALYST_DIR = catalystDir;
-    enrollmentDir = join(catalystDir, "execution-core", "projects");
-    mkdirSync(enrollmentDir, { recursive: true });
-    enrolledKeys.clear();
+    mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
+    enrolledTeams.clear();
+    registryEntries.length = 0;
   });
 
   afterEach(() => {
-    for (const k of enrolledKeys) dropProject(k);
+    for (const t of enrolledTeams) dropProject(t);
     if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
     else process.env.CATALYST_DIR = prevCatalystDir;
     rmSync(catalystDir, { recursive: true, force: true });
   });
 
-  // Stub a repo + enrollment record so reconcileAll has a project to reconcile.
-  function enroll(projectKey, eligibleQuery) {
-    const repoRoot = mkdtempSync(join(catalystDir, `repo-${projectKey}-`));
-    mkdirSync(join(repoRoot, ".catalyst"), { recursive: true });
-    const catalyst = { linear: { teamKey: eligibleQuery?.team ?? "T" } };
-    if (eligibleQuery) catalyst.orchestration = { executionCore: { eligibleQuery } };
+  // Register a team in the central registry so reconcileAll has a project to
+  // reconcile. Returns the stub repoRoot the registry entry points at.
+  function enroll(team, eligibleQuery) {
+    const repoRoot = mkdtempSync(join(catalystDir, `repo-${team}-`));
+    registryEntries.push({ team, repoRoot, eligibleQuery: eligibleQuery ?? null });
     writeFileSync(
-      join(repoRoot, ".catalyst", "config.json"),
-      JSON.stringify({ catalyst }),
+      join(catalystDir, "execution-core", "registry.json"),
+      JSON.stringify({ projects: registryEntries }, null, 2),
     );
-    writeFileSync(
-      join(enrollmentDir, `${projectKey}.json`),
-      JSON.stringify({ projectKey, repoRoot }),
-    );
-    enrolledKeys.add(projectKey);
+    enrolledTeams.add(team);
     return repoRoot;
   }
 
@@ -329,25 +324,25 @@ describe("recoverStartup", () => {
   });
 
   test("rebuilds routing state — eligible projection exists after recoverStartup", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [node("ENG-1")] });
     recoverStartup({ orchDir, exec, statJob: () => null });
     expect(
-      existsSync(join(catalystDir, "execution-core", "eligible", "alpha.json")),
+      existsSync(join(catalystDir, "execution-core", "eligible", "ENG.json")),
     ).toBe(true);
   });
 
   test("report.routing carries the enrolled project list", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
-    enroll("beta", { team: "PLAT", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
+    enroll("PLAT", { status: "Todo" });
     const exec = mockExec({ ENG: [], PLAT: [] });
     const report = recoverStartup({ orchDir, exec, statJob: () => null });
     expect(report.routing.projectCount).toBe(2);
-    expect([...report.routing.projects].sort()).toEqual(["alpha", "beta"]);
+    expect([...report.routing.projects].sort()).toEqual(["ENG", "PLAT"]);
   });
 
   test("report.cursor.resumed is true when a valid cursor is saved", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [] });
     appendEvent('{"event":"x"}\n{"event":"y"}\n'); // non-empty log
     saveCursor({ logPath: eventLogPath(), byteOffset: 0 }); // cursor at start
@@ -358,7 +353,7 @@ describe("recoverStartup", () => {
   });
 
   test("report.cursor.resumed is false when no cursor file exists", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [] });
     appendEvent('{"event":"x"}\n');
     const report = recoverStartup({ orchDir, exec, statJob: () => null });
@@ -366,7 +361,7 @@ describe("recoverStartup", () => {
   });
 
   test("report.workers carries the running/dead/terminal/unknown buckets", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [] });
     writeNested("CTL-RUN", "research", { status: "running", bg_job_id: "job-run" });
     writeNested("CTL-DEAD", "plan", { status: "running", bg_job_id: "job-dead" });
@@ -382,7 +377,7 @@ describe("recoverStartup", () => {
   });
 
   test("report.recoveredAt is an ISO-8601 timestamp", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [] });
     const report = recoverStartup({ orchDir, exec, statJob: () => null });
     expect(report.recoveredAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
@@ -390,7 +385,7 @@ describe("recoverStartup", () => {
   });
 
   test("a reconcile-poll failure does not abort recovery (routing best-effort)", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     writeNested("CTL-RUN", "research", { status: "running", bg_job_id: "job-run" });
     // exec returns a non-zero code → runEligibleQuery throws → reconcileProject
     // swallows it. recoverStartup must still return a report with workers.
@@ -407,7 +402,7 @@ describe("recoverStartup", () => {
   });
 
   test("no event log at all → cursor.byteOffset 0, resumed false (poll-only)", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [] });
     const report = recoverStartup({ orchDir, exec, statJob: () => null });
     expect(report.cursor.byteOffset).toBe(0);

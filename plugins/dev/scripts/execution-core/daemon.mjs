@@ -2,7 +2,8 @@
 // daemon.mjs — the execution-core composing daemon (CTL-554). Wires the
 // CTL-539 recovery contract, the CTL-535 Todo-state monitor, and the CTL-536
 // pull-loop scheduler into one long-lived machine-level process, and owns the
-// fs.watch on the enrollment directory that CTL-535 left to CTL-554.
+// fs.watch on the central registry.json (CTL-582 D4 — the single source of
+// enrolled projects).
 //
 // `orchDir` for all three composed functions is a single machine-level
 // directory — getExecutionCoreDir() (~/catalyst/execution-core/). The daemon
@@ -11,7 +12,7 @@
 
 import { watch, writeFileSync, renameSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
-import { getExecutionCoreDir, getEnrollmentDir, log, EVENT_DEBOUNCE_MS } from "./config.mjs";
+import { getExecutionCoreDir, log, EVENT_DEBOUNCE_MS } from "./config.mjs";
 import {
   recoverStartup,
   startMonitor,
@@ -52,7 +53,7 @@ export function startDaemon({
   stopMonitor: stopMonitorFn = stopMonitor,
   stopScheduler: stopSchedulerFn = stopScheduler,
   reconcile = reconcileAll,
-  watchEnrollment = true,
+  watchRegistry = true,
   debounceMs = EVENT_DEBOUNCE_MS,
   pidFile = null,
 } = {}) {
@@ -71,25 +72,28 @@ export function startDaemon({
   // needed; production uses the real module, tests inject fakes.
   schedulerFn({ orchDir }); // CTL-536 — pull-loop scheduler
 
-  if (watchEnrollment) {
-    // The fs.watch target must exist — the daemon may boot before any project
-    // has enrolled, so create the enrollment dir first.
-    mkdirSync(getEnrollmentDir(), { recursive: true });
-    _watcher = watch(getEnrollmentDir(), () => {
+  if (watchRegistry) {
+    // Watch the execution-core dir for registry.json changes — the registry is
+    // the single source of enrolled projects (CTL-582 D4). ensureState already
+    // created the dir. registry.mjs writes the registry tmp+rename, so the
+    // directory watch sees the rename; the filename filter ignores the noisy
+    // state.json / cursor.json writes that share the directory.
+    _watcher = watch(getExecutionCoreDir(), (_eventType, filename) => {
+      if (filename !== null && filename !== "registry.json") return;
       // _debounceTimer is module-scoped so stopDaemon can cancel a pending
       // reconcile that would otherwise fire after teardown.
       clearTimeout(_debounceTimer);
       _debounceTimer = setTimeout(() => {
-        log.info("execution-core daemon: enrollment dir changed — reconciling");
+        log.info("execution-core daemon: registry changed — reconciling");
         try {
           reconcile();
         } catch (err) {
-          // A reconcile failure means enrollment changes silently stop being
-          // applied — newly enrolled projects are never picked up. Surface it
-          // at error level with the full error, not a swallowed warning.
+          // A reconcile failure means registry changes silently stop being
+          // applied — newly registered projects are never picked up. Surface
+          // it at error level with the full error, not a swallowed warning.
           log.error(
             { err },
-            "execution-core daemon: reconcile failed — enrollment changes are NOT being applied"
+            "execution-core daemon: reconcile failed — registry changes are NOT being applied"
           );
         }
       }, debounceMs);
