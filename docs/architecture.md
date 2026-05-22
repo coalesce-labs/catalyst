@@ -62,8 +62,7 @@ orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
 ├── history/                # Archived orchestrator snapshots
 │   └── <id>--<timestamp>.json
 ├── execution-core/         # Execution-core daemon state
-│   ├── registry.json       # Central team → repoRoot → eligibleQuery registry
-│   └── projects/           # Legacy per-repo enrollment records (pre-registry)
+│   └── registry.json       # Central team → repoRoot → eligibleQuery registry
 └── wt/                     # Worktrees (existing)
 ```
 
@@ -93,8 +92,9 @@ orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
   `team → repoRoot → eligibleQuery` registry. The Linear-state contract that drives the
   execution-core daemon is **setup-tooling-owned** (design decision D8): `setup-catalyst.sh`
   ensures the contract workflow states, writes the 9-phase → 5-state collapse `stateMap`, and
-  upserts each team's registry entry. The registry is the D4 successor to the per-repo
-  enrollment records under `execution-core/projects/`, and all access flows through the
+  upserts each team's registry entry. The execution-core daemon reads the registry directly
+  (D4); the per-repo enrollment records CTL-554 wrote under `execution-core/projects/` and the
+  `/orchestrate` enroll step they relied on were retired in CTL-582. All access flows through the
   `registry.mjs` `list-projects` / `get-project-config` interface — the D9 cloud seam, so the
   store can later become a Supabase table without touching callers.
 - **Heartbeat**: Orchestrators write `lastHeartbeat` every 2-3 min. Stale entries (>10 min) are

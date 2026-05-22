@@ -27,10 +27,6 @@ export function getExecutionCoreDir() {
   return resolve(catalystDir(), "execution-core");
 }
 
-export function getEnrollmentDir() {
-  return resolve(getExecutionCoreDir(), "projects");
-}
-
 export function getEligibleDir() {
   return resolve(getExecutionCoreDir(), "eligible");
 }

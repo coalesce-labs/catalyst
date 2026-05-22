@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Tests that config.template.json carries the executionCore.eligibleQuery key
-# so check-config-drift.sh has a structural baseline for the new M4 scheduler
-# config surface (CTL-535 Phase 1, research §4).
+# Tests config.template.json's orchestration config surface so check-config-drift.sh
+# has a structural baseline. CTL-582 (D4) removed the per-repo executionCore
+# block — enrolled projects are the central registry.json — so the template
+# carries only dispatchMode under orchestration.
 # Run: bash plugins/dev/scripts/__tests__/execution-core-config-drift.test.sh
 
 set -uo pipefail
@@ -28,16 +29,14 @@ echo "execution-core config drift tests"
 
 check "config.template.json exists" test -f "$TEMPLATE"
 
-check "template carries executionCore.eligibleQuery" \
-  jq -e '.catalyst.orchestration.executionCore.eligibleQuery' "$TEMPLATE"
+check "template carries orchestration.dispatchMode" \
+  jq -e '.catalyst.orchestration.dispatchMode' "$TEMPLATE"
 
-check "eligibleQuery.status is a string" \
-  jq -e '.catalyst.orchestration.executionCore.eligibleQuery.status | type == "string"' "$TEMPLATE"
-
-check "eligibleQuery carries team/project/label/priority keys" \
-  jq -e '.catalyst.orchestration.executionCore.eligibleQuery
-         | has("team") and has("project") and has("label") and has("priority")' \
-  "$TEMPLATE"
+# CTL-582 (D4): the per-repo executionCore block is retired — the daemon reads
+# the central ~/catalyst/execution-core/registry.json. The template must NOT
+# carry the executionCore key back in.
+check "template no longer carries the per-repo executionCore block" \
+  jq -e '.catalyst.orchestration | has("executionCore") | not' "$TEMPLATE"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
