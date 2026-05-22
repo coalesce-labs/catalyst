@@ -276,6 +276,55 @@ EOF
     "check-config-drift exited 2"
 }
 
+# ─── Test: stateIds cache registry absent → warn (CTL-577) ──────────────────
+test_state_ids_cache_missing() {
+  echo "test: stateIds cache registry absent → warn"
+  local proj="$SCRATCH/proj-sid-missing" key="proj-sid-missing"
+  make_project "$proj" "$key"
+  mkdir -p "$SCRATCH/xdg/catalyst"
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
+  rm -f "$SCRATCH/xdg/catalyst/linear-state-ids.json"
+
+  local out
+  out=$(run_script "$proj" 2>&1)
+  assert_grep "stateIds cache warn fires when registry absent" "$out" \
+    "Linear state-id cache not yet resolved for team 'CTL'"
+}
+
+# ─── Test: stateIds cache registry present but no entry for team → warn ──────
+test_state_ids_cache_no_entry() {
+  echo "test: stateIds cache registry present but no entry for team → warn"
+  local proj="$SCRATCH/proj-sid-noentry" key="proj-sid-noentry"
+  make_project "$proj" "$key"
+  mkdir -p "$SCRATCH/xdg/catalyst"
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
+  echo '{"ADV":{"resolvedAt":"2026-01-01T00:00:00Z","stateIds":{"Done":"x"}}}' \
+    > "$SCRATCH/xdg/catalyst/linear-state-ids.json"
+
+  local out
+  out=$(run_script "$proj" 2>&1)
+  assert_grep "stateIds cache warn fires when no entry for team CTL" "$out" \
+    "Linear state-id cache not yet resolved for team 'CTL'"
+}
+
+# ─── Test: stateIds cache registry has the team entry → no warn (CTL-577) ────
+# Also implicitly proves XDG_CONFIG_HOME is honored — the registry is found at
+# $XDG_CONFIG_HOME/catalyst/linear-state-ids.json.
+test_state_ids_cache_present() {
+  echo "test: stateIds cache registry has the team entry → no warn"
+  local proj="$SCRATCH/proj-sid-present" key="proj-sid-present"
+  make_project "$proj" "$key"
+  mkdir -p "$SCRATCH/xdg/catalyst"
+  echo '{}' > "$SCRATCH/xdg/catalyst/config-${key}.json"
+  echo '{"CTL":{"resolvedAt":"2026-05-22T00:00:00Z","stateIds":{"Research":"r-id","Done":"d-id"}}}' \
+    > "$SCRATCH/xdg/catalyst/linear-state-ids.json"
+
+  local out
+  out=$(run_script "$proj" 2>&1)
+  assert_not_grep "stateIds cache warn suppressed when entry present" "$out" \
+    "Linear state-id cache not yet resolved"
+}
+
 # ─── Run ────────────────────────────────────────────────────────────────────
 test_smee_missing
 test_smee_channel_missing
@@ -285,6 +334,9 @@ test_all_configured
 test_drift_warning_appears
 test_no_drift
 test_drift_setup_error_surfaces
+test_state_ids_cache_missing
+test_state_ids_cache_no_entry
+test_state_ids_cache_present
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"

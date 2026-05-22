@@ -285,18 +285,20 @@ main() {
     "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
   echo "Wrote execution-core stateMap to $config"
 
-  # --- refresh stateIds via resolve-linear-ids.sh --force ---
+  # --- refresh the machine-local stateIds cache via resolve-linear-ids.sh --force ---
+  # CTL-577: stateIds is cached in ~/.config/catalyst/linear-state-ids.json,
+  # keyed by teamKey — not committed to .catalyst/config.json.
   local script_dir resolve
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   resolve="${script_dir}/resolve-linear-ids.sh"
   if [[ -x $resolve ]]; then
     if bash "$resolve" --config "$config" --force >/dev/null 2>&1; then
-      echo "Refreshed stateIds via resolve-linear-ids.sh"
+      echo "Refreshed stateIds cache (~/.config/catalyst/linear-state-ids.json)"
     else
-      echo "WARNING: resolve-linear-ids.sh failed — stateIds may be stale" >&2
+      echo "WARNING: resolve-linear-ids.sh failed — stateIds cache may be stale" >&2
     fi
   else
-    echo "WARNING: resolve-linear-ids.sh not found — stateIds not refreshed" >&2
+    echo "WARNING: resolve-linear-ids.sh not found — stateIds cache not refreshed" >&2
   fi
 
   # --- upsert the central registry entry via registry.mjs ---

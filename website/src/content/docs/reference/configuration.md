@@ -61,7 +61,6 @@ project structure, ticket conventions, and workflow state mapping.
 | `catalyst.linear.teamKey`       | string       | Linear team identifier used in ticket IDs (e.g., "ACME" for ACME-123). Must match `ticketPrefix`. |
 | `catalyst.linear.teamId`        | string\|null | Cached Linear team UUID. Resolved by `resolve-linear-ids.sh`.                                     |
 | `catalyst.linear.stateMap`      | object       | Maps workflow phases to your Linear workspace state names                                         |
-| `catalyst.linear.stateIds`      | object\|null | Map of Linear state display names to UUIDs. Eliminates per-call UUID resolution.                  |
 | `catalyst.thoughts.user`        | string\|null | HumanLayer thoughts user name                                                                     |
 
 ### State Map
@@ -98,20 +97,36 @@ correct names. Manual customization is only needed for non-standard state names.
 
 ### Cached UUIDs
 
-The `teamId` and `stateIds` fields cache Linear UUIDs so that `linear-transition.sh` can pass them
-directly to the linearis CLI, skipping per-call name-to-UUID resolution. This reduces Linear API
-requests by ~17% per state transition — significant during orchestrator runs with parallel workers.
+`linear-transition.sh` passes Linear UUIDs directly to the linearis CLI to skip per-call
+name-to-UUID resolution — roughly a 17% drop in Linear API requests per state transition,
+significant during orchestrator runs with parallel workers.
 
-Populate the cache by running:
+- **`teamId`** is cached in `.catalyst/config.json` — a Linear team UUID is stable.
+- **`stateIds`** is a **machine-local derived cache** at `~/.config/catalyst/linear-state-ids.json`
+  — a registry keyed by Linear `teamKey`. It is **never committed to git**, so the UUID table can
+  never travel stale (the failure mode behind CTL-575/576). Each entry records a `resolvedAt`
+  timestamp:
+
+  ```json
+  {
+    "CTL": {
+      "resolvedAt": "2026-05-22T15:00:00Z",
+      "stateIds": { "Backlog": "71a1…", "Plan": "b64f…", "Done": "5d77…" }
+    }
+  }
+  ```
+
+Populate or refresh the cache explicitly:
 
 ```bash
-plugins/dev/scripts/resolve-linear-ids.sh
+plugins/dev/scripts/resolve-linear-ids.sh          # resolve if not already cached
+plugins/dev/scripts/resolve-linear-ids.sh --force  # re-resolve after Linear state changes
 ```
 
-This makes a single Linear GraphQL query to fetch all workflow states for the configured team and
-writes the results to `.catalyst/config.json`. Re-run with `--force` after changing workflow states
-in Linear. The cache is optional — `linear-transition.sh` falls back to name-based calls when
-`stateIds` is absent.
+`resolve-linear-ids.sh` makes a single Linear GraphQL query for the team's whole state set. The
+cache is also **self-healing** — on a cache miss `linear-transition.sh` resolves it automatically,
+and if the resolver cannot run it falls back to name-based calls (always correct). `stateMap`
+remains the single committed source of truth.
 
 ### Execution-Core State Contract
 
@@ -140,7 +155,8 @@ is not a one-off migration.
 exists in every team workflow) — are ensured in Linear by
 `plugins/dev/scripts/setup-execution-core-states.sh`. That script is idempotent,
 runs once per team, and is invoked automatically by `setup-catalyst.sh` for
-`execution-core` repos. It writes the collapse `stateMap`, refreshes `stateIds`,
+`execution-core` repos. It writes the collapse `stateMap`, refreshes the
+machine-local `stateIds` cache,
 and upserts the team's registry entry. Run it directly with `--dry-run --json`
 to preview the contract without writing anything.
 

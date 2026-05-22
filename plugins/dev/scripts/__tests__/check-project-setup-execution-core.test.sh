@@ -29,14 +29,14 @@ build_project() {
   mkdir -p "$dir/thoughts/shared/research" "$dir/thoughts/shared/plans" \
     "$dir/thoughts/shared/handoffs" "$dir/thoughts/shared/prs" "$dir/thoughts/shared/reports"
 
-  local state_map state_ids
+  # CTL-577: stateIds is no longer in config — the contract check validates
+  # stateMap (the authored contract) only.
+  local state_map
   if [[ $full == "1" ]]; then
     state_map='{"backlog":"Backlog","todo":"Ready","triage":"Triage","research":"Research","planning":"Plan","inProgress":"Implement","verifying":"Validate","reviewing":"Validate","inReview":"PR","done":"Done","canceled":"Canceled"}'
-    state_ids='{"Backlog":"id-b","Triage":"id-t","Ready":"id-rd","Research":"id-rs","Plan":"id-pl","Implement":"id-im","Validate":"id-va","PR":"id-pr","Done":"id-dn","Canceled":"id-cn"}'
   else
-    # missing Validate and PR from both stateMap values and stateIds keys
+    # missing Validate and PR from stateMap values
     state_map='{"backlog":"Backlog","todo":"Ready","triage":"Triage","research":"Research","planning":"Plan","inProgress":"Implement","done":"Done","canceled":"Canceled"}'
-    state_ids='{"Backlog":"id-b","Triage":"id-t","Ready":"id-rd","Research":"id-rs","Plan":"id-pl","Implement":"id-im","Done":"id-dn","Canceled":"id-cn"}'
   fi
 
   cat > "$dir/.catalyst/config.json" <<EOF
@@ -46,8 +46,7 @@ build_project() {
     "project": { "ticketPrefix": "CTL" },
     "linear": {
       "teamKey": "CTL",
-      "stateMap": ${state_map},
-      "stateIds": ${state_ids}
+      "stateMap": ${state_map}
     },
     "orchestration": { "dispatchMode": "${mode}" }
   }
@@ -67,11 +66,14 @@ EOF
 }
 
 # run_check <project-dir> <catalyst-dir> — run the script, capture output.
+# XDG_CONFIG_HOME is pinned at a scratch dir so the CTL-577 stateIds-cache
+# check reads a hermetic (absent) registry, not the developer's real one.
 run_check() {
   local cwd="$1" catalyst_dir="$2"
   ( cd "$cwd" \
     && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin" \
        CATALYST_AUTONOMOUS=1 CATALYST_DIR="$catalyst_dir" \
+       XDG_CONFIG_HOME="${SCRATCH}/xdg" \
        bash "$SCRIPT" 2>&1 )
 }
 

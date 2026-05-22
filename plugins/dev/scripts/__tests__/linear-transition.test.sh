@@ -19,6 +19,14 @@ PASSES=0
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
+# CTL-577: the stateIds UUID cache is a machine-level registry at
+# $HOME/.config/catalyst/linear-state-ids.json. Fake HOME so the registry path
+# is hermetic — an absent registry makes every transition fall back to the
+# state name (always correct), which is what the name-based tests below expect.
+export HOME="${SCRATCH}/home"
+mkdir -p "${HOME}/.config/catalyst"
+REGISTRY="${HOME}/.config/catalyst/linear-state-ids.json"
+
 run() {
   local name="$1"; shift
   if "$@" > "${SCRATCH}/out" 2>&1; then
@@ -95,6 +103,29 @@ fi
 exit 0
 EOF
   chmod +x "${bin_dir}/linearis"
+}
+
+# Install a fake `curl` that echoes a canned GraphQL response, so the real
+# resolve-linear-ids.sh (shelled out by linear-transition.sh on a cache miss)
+# can succeed inside the auto-resolve happy-path tests (CTL-577).
+install_fake_curl() {
+  local bin_dir="$1" response="$2"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/curl" <<SCRIPT
+#!/usr/bin/env bash
+echo '${response}'
+SCRIPT
+  chmod +x "${bin_dir}/curl"
+}
+
+# Write a Layer-2 secrets file under the faked HOME so resolve-linear-ids.sh
+# can locate an API token. <project_key> must match the config's projectKey.
+build_secrets() {
+  local project_key="$1"
+  mkdir -p "${HOME}/.config/catalyst"
+  cat > "${HOME}/.config/catalyst/config-${project_key}.json" <<'EOF'
+{ "linear": { "apiToken": "lin_api_fake_token" } }
+EOF
 }
 
 [ -x "$TRANSITION" ] || { echo "SKIP: $TRANSITION not present yet (expected during TDD)"; }
@@ -294,7 +325,7 @@ run "state names with spaces passed through correctly" \
 run "multi-word state name preserved" \
   expect_contains "$LOG13" "linearis issues update TST-13 --status In Review"
 
-# ─── Test 14: UUID pass-through when stateIds cached (CTL-207) ────────────
+# ─── Test 14: UUID pass-through when stateIds cached in the registry (CTL-577)
 WORK14="${SCRATCH}/t14"
 BIN14="${SCRATCH}/t14/bin"
 LOG14="${SCRATCH}/t14/log"
@@ -307,11 +338,18 @@ cat > "${WORK14}/.catalyst/config.json" <<'EOF'
       "stateMap": {
         "done": "Done",
         "inReview": "In Review"
-      },
-      "stateIds": {
-        "Done": "44444444-5555-6666-7777-888888888888",
-        "In Review": "33333333-4444-5555-6666-777777777777"
       }
+    }
+  }
+}
+EOF
+cat > "$REGISTRY" <<'EOF'
+{
+  "TST": {
+    "resolvedAt": "2026-05-22T00:00:00Z",
+    "stateIds": {
+      "Done": "44444444-5555-6666-7777-888888888888",
+      "In Review": "33333333-4444-5555-6666-777777777777"
     }
   }
 }
@@ -319,29 +357,30 @@ EOF
 install_fake_linearis "$BIN14"
 touch "$LOG14"
 
-run "UUID passed to --status when stateIds cached" \
+run "UUID passed to --status when stateIds cached in registry" \
   bash -c "FAKE_LINEARIS_LOG='$LOG14' PATH='$BIN14:$PATH' \
     '$TRANSITION' --ticket TST-14 --transition done --config '$WORK14/.catalyst/config.json'"
 
 run "update call uses UUID instead of state name" \
   expect_contains "$LOG14" "linearis issues update TST-14 --status 44444444-5555-6666-7777-888888888888"
 
-# ─── Test 15: falls back to name when stateIds not present ────────────────
+# ─── Test 15: falls back to name when no registry entry exists (CTL-577) ──
 WORK15="${SCRATCH}/t15"
 BIN15="${SCRATCH}/t15/bin"
 LOG15="${SCRATCH}/t15/log"
 build_config "$WORK15"
 install_fake_linearis "$BIN15"
 touch "$LOG15"
+rm -f "$REGISTRY"   # no registry → cache miss → auto-resolve fails (no secrets) → name fallback
 
-run "falls back to state name when no stateIds" \
+run "falls back to state name when registry absent" \
   bash -c "FAKE_LINEARIS_LOG='$LOG15' PATH='$BIN15:$PATH' \
     '$TRANSITION' --ticket TST-15 --transition done --config '$WORK15/.catalyst/config.json'"
 
-run "name-based update when stateIds absent" \
+run "name-based update when registry absent" \
   expect_contains "$LOG15" "linearis issues update TST-15 --status Done"
 
-# ─── Test 16: partial stateIds — uses UUID for cached, name for uncached ──
+# ─── Test 16: partial registry — name fallback for an uncached state (CTL-577)
 WORK16="${SCRATCH}/t16"
 BIN16="${SCRATCH}/t16/bin"
 LOG16="${SCRATCH}/t16/log"
@@ -349,15 +388,23 @@ mkdir -p "${WORK16}/.catalyst"
 cat > "${WORK16}/.catalyst/config.json" <<'EOF'
 {
   "catalyst": {
+    "projectKey": "test",
     "linear": {
       "teamKey": "TST",
       "stateMap": {
         "done": "Done",
         "inReview": "In Review"
-      },
-      "stateIds": {
-        "Done": "44444444-5555-6666-7777-888888888888"
       }
+    }
+  }
+}
+EOF
+cat > "$REGISTRY" <<'EOF'
+{
+  "TST": {
+    "resolvedAt": "2026-05-22T00:00:00Z",
+    "stateIds": {
+      "Done": "44444444-5555-6666-7777-888888888888"
     }
   }
 }
@@ -365,11 +412,11 @@ EOF
 install_fake_linearis "$BIN16"
 touch "$LOG16"
 
-run "partial stateIds: name for uncached state" \
+run "partial registry: name fallback for uncached state" \
   bash -c "FAKE_LINEARIS_STATE='Backlog' FAKE_LINEARIS_LOG='$LOG16' PATH='$BIN16:$PATH' \
     '$TRANSITION' --ticket TST-16 --transition inReview --config '$WORK16/.catalyst/config.json'"
 
-run "In Review passed as name (not in stateIds)" \
+run "In Review passed as name (not in registry)" \
   expect_contains "$LOG16" "linearis issues update TST-16 --status In Review"
 
 # ─── Test 17: orchestrate SKILL.md references the helper (no drift) ───────
@@ -490,6 +537,72 @@ run "verifying honors custom 'Verifying' state name from config" \
 
 run "custom Verifying state passed to linearis" \
   expect_contains "$LOG24" "linearis issues update TST-24 --status Verifying"
+
+# ─── Test 25: cache-miss auto-resolve happy path (CTL-577) ───────────────
+# On a registry cache miss, linear-transition.sh shells out to the real
+# resolve-linear-ids.sh. With a fake curl + secrets the resolver succeeds:
+# the registry is created and the transition uses the freshly-resolved UUID.
+WORK25="${SCRATCH}/t25"
+BIN25="${SCRATCH}/t25/bin"
+LOG25="${SCRATCH}/t25/log"
+DONE_UUID="aaaa1111-2222-3333-4444-555566667777"
+RESP25="{\"data\":{\"teams\":{\"nodes\":[{\"id\":\"team-tst-uuid\",\"states\":{\"nodes\":[{\"id\":\"${DONE_UUID}\",\"name\":\"Done\",\"type\":\"completed\"}]}}]}}}"
+mkdir -p "${WORK25}/.catalyst"
+cat > "${WORK25}/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test",
+    "linear": {
+      "teamKey": "TST",
+      "stateMap": { "done": "Done" }
+    }
+  }
+}
+EOF
+install_fake_linearis "$BIN25"
+install_fake_curl "$BIN25" "$RESP25"
+build_secrets "test"
+touch "$LOG25"
+rm -f "$REGISTRY"
+
+run "cache-miss transition auto-resolves and exits 0" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG25' PATH='$BIN25:$PATH' \
+    '$TRANSITION' --ticket TST-25 --transition done --config '$WORK25/.catalyst/config.json'"
+
+run "auto-resolve created the registry entry" \
+  bash -c "[ -f '$REGISTRY' ] && jq -e '.[\"TST\"].stateIds[\"Done\"] == \"$DONE_UUID\"' '$REGISTRY'"
+
+run "transition used the auto-resolved UUID" \
+  expect_contains "$LOG25" "linearis issues update TST-25 --status $DONE_UUID"
+
+# ─── Test 26: --dry-run skips auto-resolve — no registry side effect ──────
+WORK26="${SCRATCH}/t26"
+BIN26="${SCRATCH}/t26/bin"
+LOG26="${SCRATCH}/t26/log"
+mkdir -p "${WORK26}/.catalyst"
+cat > "${WORK26}/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test",
+    "linear": {
+      "teamKey": "TST",
+      "stateMap": { "done": "Done" }
+    }
+  }
+}
+EOF
+install_fake_linearis "$BIN26"
+install_fake_curl "$BIN26" "$RESP25"
+build_secrets "test"
+touch "$LOG26"
+rm -f "$REGISTRY"
+
+run "--dry-run transition exits 0 on a cache miss" \
+  bash -c "FAKE_LINEARIS_LOG='$LOG26' PATH='$BIN26:$PATH' \
+    '$TRANSITION' --ticket TST-26 --transition done --dry-run --config '$WORK26/.catalyst/config.json'"
+
+run "--dry-run did NOT create the registry (auto-resolve skipped)" \
+  bash -c "[ ! -f '$REGISTRY' ]"
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
