@@ -9,9 +9,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // create-worktree.sh sits one directory up from execution-core/.
-const CREATE_WORKTREE_BIN = fileURLToPath(
-  new URL("../create-worktree.sh", import.meta.url),
-);
+const CREATE_WORKTREE_BIN = fileURLToPath(new URL("../create-worktree.sh", import.meta.url));
 
 // createWorktree — run create-worktree.sh with cwd === repoRoot so the script
 // resolves projectKey / worktreeDir from that repo's .catalyst/config.json.
