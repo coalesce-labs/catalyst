@@ -19,7 +19,7 @@ import {
   EVENT_DEBOUNCE_MS,
   log,
 } from "./config.mjs";
-import { listEnrolledProjects, loadProjectConfig } from "./enrollment.mjs";
+import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject } from "./eligible-set.mjs";
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
@@ -51,34 +51,35 @@ export function parseStateChangedEvent(event) {
 
 // --- Reconcile -----------------------------------------------------------
 
-// Projects that have been reconciled at least once — used by reconcileAll to
-// detect un-enrolled projects that must be dropProject'd.
+// Teams that have been reconciled at least once — used by reconcileAll to
+// detect teams dropped from the registry that must be dropProject'd.
 const knownProjects = new Set();
 
-// reconcileProject — the authoritative per-project rebuild. A failed poll
-// THROWS inside runEligibleQuery; we log and return, preserving the prior
-// eligible set rather than flattening it to empty.
-export function reconcileProject(projectKey, repoRoot, { exec } = {}) {
-  const query = loadProjectConfig(repoRoot);
-  if (!query) {
-    log.warn(
-      { projectKey },
-      "enrolled but no executionCore.eligibleQuery — skipping",
-    );
+// reconcileProject — the authoritative per-project rebuild, keyed by Linear
+// team (CTL-582: the eligible projection and reconcile both key on `team`).
+// Re-resolves the team's registry entry each call so an operator's registry
+// edit is picked up without a daemon restart. A failed poll THROWS inside
+// runEligibleQuery; we log and return, preserving the prior eligible set
+// rather than flattening it to empty.
+export function reconcileProject(team, { exec } = {}) {
+  const entry = getProjectConfig(team);
+  if (!entry) {
+    log.warn({ team }, "reconcile: no registry entry for team — skipping");
     return;
   }
+  const query = resolveEligibleQuery(entry);
   let tickets;
   try {
     tickets = runEligibleQuery(query, { exec });
   } catch (err) {
     log.error(
-      { projectKey, err: err.message },
+      { team, err: err.message },
       "reconcile poll failed — preserving prior eligible set",
     );
     return;
   }
   try {
-    setProjectEligible(projectKey, tickets, { source: "reconcile", query });
+    setProjectEligible(team, tickets, { source: "reconcile", query });
   } catch (err) {
     // A projection write/rename failure (disk full, permissions) must NOT
     // crash the daemon: reconcileProject runs inside reconcileAll, itself
@@ -87,32 +88,32 @@ export function reconcileProject(projectKey, repoRoot, { exec } = {}) {
     // (setProjectEligible updates the Map before persisting), so the next
     // reconcile tick retries the disk write.
     log.error(
-      { projectKey, err: err.message },
+      { team, err: err.message },
       "eligible-set projection write failed — daemon continues, retry next reconcile",
     );
   }
 }
 
-// reconcileAll — full reconcile of every enrolled project (the missed-webhook
-// backstop). Re-globs the enrollment directory each call so newly enrolled
-// projects are picked up and un-enrolled ones are dropped within one tick.
+// reconcileAll — full reconcile of every registered team (the missed-webhook
+// backstop). Re-reads registry.json each call so a team added to the registry
+// is picked up and one removed is dropped within one tick.
 export function reconcileAll({ exec } = {}) {
-  const enrolled = listEnrolledProjects();
-  const seen = new Set(enrolled.map((p) => p.projectKey));
-  for (const p of enrolled) reconcileProject(p.projectKey, p.repoRoot, { exec });
+  const projects = listProjects();
+  const seen = new Set(projects.map((p) => p.team));
+  for (const p of projects) reconcileProject(p.team, { exec });
   for (const stale of knownProjects) {
     if (!seen.has(stale)) {
       dropProject(stale);
-      log.info({ projectKey: stale }, "project no longer enrolled — dropped");
+      log.info({ team: stale }, "team no longer in the registry — dropped");
     }
   }
   knownProjects.clear();
-  for (const k of seen) knownProjects.add(k);
+  for (const t of seen) knownProjects.add(t);
 }
 
 // --- Event-driven fast path ---------------------------------------------
 
-// projectKey -> pending debounce timer handle.
+// team -> pending debounce timer handle.
 const dirtyTimers = new Map();
 
 // handleStateChangedEvent — fold one state_changed event into the eligible
@@ -135,9 +136,9 @@ export function handleStateChangedEvent(
 ) {
   const parsed = parseStateChangedEvent(event);
   if (!parsed) return;
-  for (const p of listEnrolledProjects()) {
-    const query = loadProjectConfig(p.repoRoot);
-    if (!query || query.team !== parsed.teamKey) continue;
+  for (const p of listProjects()) {
+    const query = resolveEligibleQuery(p);
+    if (query.team !== parsed.teamKey) continue;
 
     if (parsed.toState === query.triageStatus) {
       // →Triage — one-shot dispatch the triage phase agent. NOT the eligible
@@ -148,18 +149,15 @@ export function handleStateChangedEvent(
       // →Ready (or an unknown new state) — the event cannot confirm
       // project/label/priority scoping, so a full poll is required. Debounce
       // it so a burst of events coalesces into one reconcile.
-      scheduleDirtyReconcile(p.projectKey, p.repoRoot, { exec, debounceMs });
+      scheduleDirtyReconcile(p.team, { exec, debounceMs });
     } else {
       // Left both watched states (→Backlog/→Canceled). Confident immediate
       // removal, then abort any in-flight worker and tear down its worktree.
       // removeTicket persists the projection itself; removing a non-member is
       // a safe no-op. abortWorker no-ops when the ticket was never dispatched.
-      removeTicket(p.projectKey, parsed.identifier);
+      removeTicket(p.team, parsed.identifier);
       if (orchDir) {
-        abortWorker(orchDir, parsed.identifier, {
-          projectKey: p.projectKey,
-          repoRoot: p.repoRoot,
-        });
+        abortWorker(orchDir, parsed.identifier, { repoRoot: p.repoRoot });
       }
     }
   }
@@ -179,13 +177,13 @@ function dispatchTriage(identifier, { dispatch, orchDir }) {
   }
 }
 
-function scheduleDirtyReconcile(projectKey, repoRoot, { exec, debounceMs }) {
-  clearTimeout(dirtyTimers.get(projectKey));
+function scheduleDirtyReconcile(team, { exec, debounceMs }) {
+  clearTimeout(dirtyTimers.get(team));
   dirtyTimers.set(
-    projectKey,
+    team,
     setTimeout(() => {
-      dirtyTimers.delete(projectKey);
-      reconcileProject(projectKey, repoRoot, { exec });
+      dirtyTimers.delete(team);
+      reconcileProject(team, { exec });
     }, debounceMs),
   );
 }

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { getJobsRoot, getEventLogPath, log } from "./config.mjs";
 import { readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
-import { listEnrolledProjects } from "./enrollment.mjs";
+import { listProjects } from "./registry.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
@@ -77,10 +77,10 @@ export function reconstructWorkerState(orchDir, { statJob = defaultStatJob } = {
 export function recoverStartup({ orchDir, exec, statJob } = {}) {
   if (!orchDir) throw new Error("recoverStartup: orchDir is required");
 
-  // (1) Routing state — reconcileAll re-globs enrollment + polls Linear per
-  //     project; reconcileProject internally swallows poll/write failures.
+  // (1) Routing state — reconcileAll re-reads the registry + polls Linear per
+  //     team; reconcileProject internally swallows poll/write failures.
   reconcileAll({ exec });
-  const projects = listEnrolledProjects().map((p) => p.projectKey);
+  const projects = listProjects().map((p) => p.team);
 
   // (2) Durable event-log cursor — what the monitor's fast path will resume at.
   const logPath = getEventLogPath();

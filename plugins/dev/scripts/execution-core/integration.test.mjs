@@ -1,8 +1,8 @@
 // End-to-end integration tests for the execution-core Todo-state monitor
-// (CTL-535 Phase 5). Each test builds a temp CATALYST_DIR with a stubbed
-// enrollment dir + repo config and a mocked linearis exec — nothing touches
-// the real Linear API or the developer's ~/catalyst. The four AC* tests map
-// 1:1 onto the ticket's acceptance criteria.
+// (CTL-535 Phase 5, CTL-582). Each test builds a temp CATALYST_DIR with a
+// stubbed central registry.json and a mocked linearis exec — nothing touches
+// the real Linear API or the developer's ~/catalyst. The AC* tests map 1:1
+// onto the ticket's acceptance criteria.
 // Run: cd plugins/dev/scripts/execution-core && bun test integration.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
@@ -35,11 +35,11 @@ import { recoverStartup, defaultStatJob } from "./recovery.mjs";
 import { loadCursor } from "./event-cursor.mjs";
 
 let catalystDir;
-let enrollmentDir;
 let prevCatalystDir;
 let jobsRoot;
 let prevJobsRoot;
-const enrolledKeys = new Set();
+const enrolledTeams = new Set();
+const registryEntries = [];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -47,8 +47,7 @@ beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
   catalystDir = mkdtempSync(join(tmpdir(), "exec-core-int-"));
   process.env.CATALYST_DIR = catalystDir;
-  enrollmentDir = join(catalystDir, "execution-core", "projects");
-  mkdirSync(enrollmentDir, { recursive: true });
+  mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
   // A fake ~/.claude/jobs root so the worker-liveness scan never touches real
   // Claude state (the env var orchestrate-healthcheck + getJobsRoot share).
   prevJobsRoot = process.env.CATALYST_HEALTHCHECK_JOBS_ROOT;
@@ -56,7 +55,8 @@ beforeEach(() => {
   process.env.CATALYST_HEALTHCHECK_JOBS_ROOT = jobsRoot;
   __resetForTests();
   __resetScheduler();
-  enrolledKeys.clear();
+  enrolledTeams.clear();
+  registryEntries.length = 0;
 });
 
 afterEach(() => {
@@ -64,7 +64,7 @@ afterEach(() => {
   stopScheduler();
   __resetForTests();
   __resetScheduler();
-  for (const k of enrolledKeys) dropProject(k);
+  for (const t of enrolledTeams) dropProject(t);
   if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
   else process.env.CATALYST_DIR = prevCatalystDir;
   if (prevJobsRoot === undefined) delete process.env.CATALYST_HEALTHCHECK_JOBS_ROOT;
@@ -73,20 +73,17 @@ afterEach(() => {
   rmSync(catalystDir, { recursive: true, force: true });
 });
 
-function enroll(projectKey, eligibleQuery) {
-  const repoRoot = mkdtempSync(join(catalystDir, `repo-${projectKey}-`));
-  mkdirSync(join(repoRoot, ".catalyst"), { recursive: true });
-  const catalyst = { linear: { teamKey: eligibleQuery?.team ?? "T" } };
-  if (eligibleQuery) catalyst.orchestration = { executionCore: { eligibleQuery } };
+// enroll — register a team in the central registry.json. `eligibleQuery` is
+// the inner query object ({status, ...}); `team` is the top-level registry
+// key. Returns the stub repoRoot the registry entry points at.
+function enroll(team, eligibleQuery) {
+  const repoRoot = mkdtempSync(join(catalystDir, `repo-${team}-`));
+  registryEntries.push({ team, repoRoot, eligibleQuery: eligibleQuery ?? null });
   writeFileSync(
-    join(repoRoot, ".catalyst", "config.json"),
-    JSON.stringify({ catalyst }),
+    join(catalystDir, "execution-core", "registry.json"),
+    JSON.stringify({ projects: registryEntries }, null, 2),
   );
-  writeFileSync(
-    join(enrollmentDir, `${projectKey}.json`),
-    JSON.stringify({ projectKey, repoRoot }),
-  );
-  enrolledKeys.add(projectKey);
+  enrolledTeams.add(team);
   return repoRoot;
 }
 
@@ -117,79 +114,79 @@ function mockExec(nodesByTeam) {
 
 describe("execution-core integration — acceptance criteria", () => {
   test("AC1 — a state_changed event INTO the eligible state triggers a reconcile that adds the ticket", async () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const reported = { ENG: [] };
     const exec = mockExec(reported);
     startMonitor({ exec, debounceMs: 25, reconcileIntervalMs: 60_000 });
-    expect(getEligibleSet("alpha")).toEqual([]); // startup reconcile: empty
+    expect(getEligibleSet("ENG")).toEqual([]); // startup reconcile: empty
 
     reported.ENG = [node("ENG-9")]; // linearis now reports ENG-9 as Todo
     handleStateChangedEvent(evt("ENG-9", "ENG", "Todo"), { exec, debounceMs: 25 });
     await sleep(70);
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-9"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
   });
 
   test("AC1b — a state_changed event OUT of the eligible state removes the ticket immediately", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [node("ENG-1"), node("ENG-2")] });
     startMonitor({ exec, reconcileIntervalMs: 60_000 });
-    expect(getEligibleSet("alpha")).toHaveLength(2);
+    expect(getEligibleSet("ENG")).toHaveLength(2);
 
     handleStateChangedEvent(evt("ENG-1", "ENG", "In Progress"));
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-2"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
   });
 
   test("AC2 — the reconcile poll catches a missed webhook (no event written, the poll still converges)", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const reported = { ENG: [] };
     const exec = mockExec(reported);
     startMonitor({ exec, reconcileIntervalMs: 60_000 });
-    expect(getEligibleSet("alpha")).toEqual([]);
+    expect(getEligibleSet("ENG")).toEqual([]);
 
     reported.ENG = [node("ENG-5")]; // webhook missed — linearis truth changed
     reconcileAll({ exec }); // the periodic backstop tick
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-5"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-5"]);
   });
 
   test("AC3 — poll-only mode: with no event log file at all, startMonitor + the reconcile poll produce a correct set", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [node("ENG-1")] });
     // no events/ directory, no log file exists
     expect(() => startMonitor({ exec, reconcileIntervalMs: 60_000 })).not.toThrow();
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-1"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
   });
 
   test("AC4 — the configurable query is honored: a priority floor narrows which tickets land in the set", () => {
-    enroll("alpha", { team: "ENG", status: "Todo", priority: 2 });
+    enroll("ENG", { status: "Todo", priority: 2 });
     const exec = mockExec({
       ENG: [node("ENG-1", 1), node("ENG-2", 2), node("ENG-3", 3), node("ENG-0", 0)],
     });
     startMonitor({ exec, reconcileIntervalMs: 60_000 });
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-1", "ENG-2"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1", "ENG-2"]);
   });
 });
 
 describe("execution-core integration — rebuild + isolation", () => {
   test("the startup reconcile rebuilds the eligible set from scratch (no persisted state needed)", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [node("ENG-1")] });
     startMonitor({ exec, reconcileIntervalMs: 60_000 });
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-1"]);
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
     expect(
-      existsSync(join(catalystDir, "execution-core", "eligible", "alpha.json")),
+      existsSync(join(catalystDir, "execution-core", "eligible", "ENG.json")),
     ).toBe(true);
   });
 
   test("a second enrolled project is served independently (per-project isolation)", () => {
-    enroll("alpha", { team: "ENG", status: "Todo" });
-    enroll("beta", { team: "PLAT", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
+    enroll("PLAT", { status: "Todo" });
     const exec = mockExec({
       ENG: [node("ENG-1")],
       PLAT: [node("PLAT-1"), node("PLAT-2")],
     });
     startMonitor({ exec, reconcileIntervalMs: 60_000 });
-    expect(getEligibleSet("alpha").map((t) => t.identifier)).toEqual(["ENG-1"]);
-    expect(getEligibleSet("beta").map((t) => t.identifier)).toEqual([
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
+    expect(getEligibleSet("PLAT").map((t) => t.identifier)).toEqual([
       "PLAT-1",
       "PLAT-2",
     ]);
@@ -237,7 +234,7 @@ describe("execution-core integration — crash recovery (CTL-539)", () => {
     const orchDir = mkdtempSync(join(catalystDir, "orch-"));
     mkdirSync(join(orchDir, "workers"), { recursive: true });
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    enroll("alpha", { team: "ENG", status: "Todo" });
+    enroll("ENG", { status: "Todo" });
 
     const reported = { ENG: [node("ENG-NEW")] };
     const exec = mockExec(reported);
@@ -254,7 +251,7 @@ describe("execution-core integration — crash recovery (CTL-539)", () => {
       });
       return { code: 0, stdout: "", stderr: "" };
     };
-    const readEligible = () => getEligibleSet("alpha");
+    const readEligible = () => getEligibleSet("ENG");
 
     // Pre-create the event log so later appends are in-place changes.
     appendEventLog("");

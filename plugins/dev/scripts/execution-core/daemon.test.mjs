@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { startDaemon, stopDaemon } from "./daemon.mjs";
-import { writeEnrollmentRecord } from "./enrollment.mjs";
+import { upsertProjectEntry } from "./registry.mjs";
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.
 let catalystDir;
@@ -20,7 +20,7 @@ beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
   catalystDir = mkdtempSync(join(tmpdir(), "exec-core-daemon-"));
   process.env.CATALYST_DIR = catalystDir;
-  mkdirSync(join(catalystDir, "execution-core", "projects"), { recursive: true });
+  mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
 });
 
 afterEach(() => {
@@ -41,7 +41,7 @@ describe("startDaemon", () => {
       recover: (o) => calls.push(["recover", o.orchDir]),
       startMonitor: () => calls.push(["monitor"]),
       startScheduler: (o) => calls.push(["scheduler", o.orchDir]),
-      watchEnrollment: false,
+      watchRegistry: false,
     });
     expect(calls.map((c) => c[0])).toEqual(["recover", "monitor", "scheduler"]);
     // recover + scheduler both got the machine-level orchDir
@@ -53,7 +53,7 @@ describe("startDaemon", () => {
       recover: () => {},
       startMonitor: () => {},
       startScheduler: () => {},
-      watchEnrollment: false,
+      watchRegistry: false,
     });
     const statePath = join(process.env.CATALYST_DIR, "execution-core", "state.json");
     expect(existsSync(statePath)).toBe(true);
@@ -68,7 +68,7 @@ describe("startDaemon", () => {
       recover: () => {},
       startMonitor: () => {},
       startScheduler: () => {},
-      watchEnrollment: false,
+      watchRegistry: false,
     });
     expect(JSON.parse(readFileSync(statePath, "utf8")).maxParallel).toBe(9);
   });
@@ -79,13 +79,13 @@ describe("startDaemon", () => {
       recover: () => {},
       startMonitor: () => {},
       startScheduler: () => {},
-      watchEnrollment: false,
+      watchRegistry: false,
       pidFile,
     });
     expect(Number(readFileSync(pidFile, "utf8").trim())).toBe(process.pid);
   });
 
-  test("reconciles when the enrollment directory changes (debounced)", async () => {
+  test("reconciles when the registry changes (debounced)", async () => {
     let reconciled = 0;
     startDaemon({
       recover: () => {},
@@ -94,10 +94,10 @@ describe("startDaemon", () => {
       reconcile: () => {
         reconciled++;
       },
-      watchEnrollment: true,
+      watchRegistry: true,
       debounceMs: 20,
     });
-    writeEnrollmentRecord({ projectKey: "demo", repoRoot: "/r/d" });
+    upsertProjectEntry({ team: "DEMO", repoRoot: "/r/d", eligibleQuery: { status: "Ready" } });
     // Poll up to 2s rather than a fixed wait — fs.watch delivery latency plus
     // the debounce timer varies under concurrent full-suite load, so a fixed
     // 60ms wait is flaky. The reconcile only has to fire once.
@@ -119,7 +119,7 @@ describe("stopDaemon", () => {
       startScheduler: () => {},
       stopMonitor: () => stopped.push("monitor"),
       stopScheduler: () => stopped.push("scheduler"),
-      watchEnrollment: false,
+      watchRegistry: false,
       pidFile,
     });
     stopDaemon();
