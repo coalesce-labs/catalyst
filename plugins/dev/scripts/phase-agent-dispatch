@@ -231,11 +231,24 @@ compose_otel_resource_attrs() {
 
 	worker_branch=""
 	if [[ -n $project_key ]]; then
-		worker_wt="${HOME}/catalyst/wt/${project_key}/${ORCH_ID}-${TICKET}"
+		# CTL-582: execution-core dispatches one worktree per ticket
+		# (~/catalyst/wt/<key>/<TICKET>, no orchId prefix); the legacy/phase-agents
+		# path keeps the <orchId>-<ticket> worker-worktree convention.
+		if [[ -n ${CATALYST_EXECUTION_CORE:-} ]]; then
+			worker_wt="${HOME}/catalyst/wt/${project_key}/${TICKET}"
+		else
+			worker_wt="${HOME}/catalyst/wt/${project_key}/${ORCH_ID}-${TICKET}"
+		fi
 		if [[ -e "${worker_wt}/.git" ]] && command -v git >/dev/null 2>&1; then
 			worker_branch="$(git -C "$worker_wt" branch --show-current 2>/dev/null || true)"
 		fi
-		[[ -z $worker_branch ]] && worker_branch="${ORCH_ID}-${TICKET}"
+		if [[ -z $worker_branch ]]; then
+			if [[ -n ${CATALYST_EXECUTION_CORE:-} ]]; then
+				worker_branch="${TICKET}"
+			else
+				worker_branch="${ORCH_ID}-${TICKET}"
+			fi
+		fi
 	fi
 
 	if [[ -n $project_key ]]; then

@@ -1,31 +1,100 @@
-// dispatch.mjs — execution-core worker-dispatch adapter (CTL-565).
+// dispatch.mjs — execution-core worker-dispatch adapter (CTL-565, CTL-582).
 //
 // The single executor seam (D9): the trigger/state layer emits a phase-owed
-// intent { orchDir, ticket, phase }; the executor is pluggable. defaultDispatch
-// shells out to orchestrate-dispatch-next (local claude --bg); a cloud fork
+// intent { orchDir, ticket, phase }; the executor is pluggable. A cloud fork
 // swaps the injected dispatch function at one call site.
 //
+// CTL-582 made defaultDispatch self-contained: resolve the ticket's project
+// from the central registry, create (or reuse) its git worktree, then run
+// phase-agent-dispatch IN that worktree. It no longer shells out to
+// orchestrate-dispatch-next — the daemon has no orchestrator/worktreeBase to
+// satisfy that script's wave-dispatch contract.
+//
 // Extracted from scheduler.mjs so both the scheduler's pull loop AND the
-// monitor's →Triage one-shot dispatch share one adapter — they must not each
-// hardcode their own shell-out.
+// monitor's →Triage one-shot dispatch share one adapter.
 
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { getProjectConfig } from "./registry.mjs";
+import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
 
-// orchestrate-dispatch-next sits one directory up from execution-core/.
-const DISPATCH_BIN = fileURLToPath(new URL("../orchestrate-dispatch-next", import.meta.url));
+// phase-agent-dispatch sits one directory up from execution-core/.
+const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
+  new URL("../phase-agent-dispatch", import.meta.url),
+);
 
-// defaultDispatch — shell out to orchestrate-dispatch-next, which delegates to
-// phase-agent-dispatch (idempotent: an existing dispatched/running/done signal
-// is a no-op). Injected in tests so no test ever spawns a real worker.
-export function defaultDispatch({ orchDir, ticket, phase }) {
+// teamOf — "CTL-123" → "CTL". Null for anything not <prefix>-<n>. The team
+// prefix is the registry key that resolves a ticket to its repo.
+export function teamOf(ticket) {
+  const m = /^([A-Za-z][A-Za-z0-9_]*)-[0-9]+$/.exec(ticket ?? "");
+  return m ? m[1] : null;
+}
+
+// defaultResolveProject — registry lookup: a ticket's team → { team, repoRoot }.
+// Null when the ticket is malformed or no registry entry exists for its team.
+function defaultResolveProject(ticket) {
+  const team = teamOf(ticket);
+  if (!team) return null;
+  const entry = getProjectConfig(team);
+  return entry ? { team, repoRoot: entry.repoRoot } : null;
+}
+
+// defaultRunPhaseAgent — spawn phase-agent-dispatch with cwd === the worktree so
+// its --config ancestor-walk and prior-artifact globs (thoughts/shared/…)
+// resolve against the worker's checkout. The orchId is the ticket itself
+// (execution-core has no long-lived orchestrator); CATALYST_EXECUTION_CORE
+// tells phase-agent-dispatch to compose OTEL attrs for the one-worktree-per-
+// ticket path. Returns { code, stdout, stderr } — never throws.
+function defaultRunPhaseAgent({ orchDir, ticket, phase, worktreePath }) {
   const res = spawnSync(
-    DISPATCH_BIN,
-    ["--orch-dir", orchDir, "--ticket", ticket, "--phase", phase],
-    { encoding: "utf8" },
+    PHASE_AGENT_DISPATCH_BIN,
+    ["--phase", phase, "--ticket", ticket, "--orch-dir", orchDir, "--orch-id", ticket],
+    {
+      cwd: worktreePath,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CATALYST_ORCHESTRATOR_DIR: orchDir,
+        CATALYST_ORCHESTRATOR_ID: ticket,
+        CATALYST_PHASE: phase,
+        CATALYST_TICKET: ticket,
+        CATALYST_EXECUTION_CORE: "1",
+      },
+    },
   );
   if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
+// defaultDispatch — execution-core worker dispatch. Resolve the project, create
+// (or reuse) the worktree, run phase-agent-dispatch in it. The three steps are
+// injectable seams so the unit test never spawns a real script. A failure at
+// any step returns a non-zero code with a descriptive stderr — never silent.
+export function defaultDispatch(
+  { orchDir, ticket, phase },
+  {
+    resolveProject = defaultResolveProject,
+    createWorktree = defaultCreateWorktree,
+    runPhaseAgent = defaultRunPhaseAgent,
+  } = {},
+) {
+  const project = resolveProject(ticket);
+  if (!project) {
+    return {
+      code: 1,
+      stdout: "",
+      stderr: `dispatch: no registry entry for the team of ${ticket}`,
+    };
+  }
+  const wt = createWorktree({ ticket, repoRoot: project.repoRoot });
+  if (wt.code !== 0 || !wt.worktreePath) {
+    return {
+      code: wt.code || 1,
+      stdout: "",
+      stderr: `dispatch: worktree provisioning failed for ${ticket}: ${wt.stderr}`,
+    };
+  }
+  return runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath });
 }
 
 // dispatchTicket — thin seam over the injectable dispatch function.
