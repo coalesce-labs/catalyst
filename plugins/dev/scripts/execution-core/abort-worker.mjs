@@ -10,6 +10,7 @@
 import { readdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
+import { log } from "./config.mjs";
 
 // Signal statuses that mean a phase no longer holds a live worker — left as-is.
 //
@@ -92,11 +93,26 @@ export function abortWorker(
     }
   }
 
+  // Worktree teardown is SKIPPED while a bg job is still live in it: a
+  // `git worktree remove --force` would yank the filesystem out from under a
+  // running `claude` worker. defaultKillJob is a no-op (no `claude` bg-kill
+  // verb exists), so a recorded-but-unkilled job means the worker is presumed
+  // alive — leave its worktree for a later sweep (the scheduler's terminal-Done
+  // teardown once the phase settles, or an operator). A ticket with no bg job
+  // (never reached `claude --bg`) is safe to tear down now.
+  const liveJobs = [...jobIds].filter((id) => !jobsKilled.includes(id));
   let worktreeRemoved = false;
-  try {
-    worktreeRemoved = teardownWorktree({ repoRoot, ticket }) === true;
-  } catch {
-    /* best-effort */
+  if (liveJobs.length > 0) {
+    log.warn(
+      { ticket, liveJobs },
+      "abort-worker: worktree teardown skipped — a bg job is still live in it",
+    );
+  } else {
+    try {
+      worktreeRemoved = teardownWorktree({ repoRoot, ticket }) === true;
+    } catch {
+      /* best-effort */
+    }
   }
 
   return { aborted: true, signalsMarked, jobsKilled, worktreeRemoved };

@@ -68,6 +68,38 @@ describe("abortWorker", () => {
     expect(calls).toEqual([{ repoRoot: "/repo", ticket: "CTL-1" }]);
   });
 
+  test("skips worktree teardown while a bg job is still live (unkilled)", () => {
+    // killJob returns false (no `claude` bg-kill verb) → the job is presumed
+    // alive → tearing down its worktree would yank the fs from under it.
+    writeSignal("CTL-1", "plan", { status: "running", bg_job_id: "live-1" });
+    let teardownCalled = false;
+    const r = abortWorker(orchDir, "CTL-1", {
+      repoRoot: "/repo",
+      killJob: () => false,
+      teardownWorktree: () => {
+        teardownCalled = true;
+        return true;
+      },
+    });
+    expect(teardownCalled).toBe(false);
+    expect(r.worktreeRemoved).toBe(false);
+    expect(r.aborted).toBe(true); // signals are still marked
+  });
+
+  test("tears the worktree down once every bg job was confirmed killed", () => {
+    writeSignal("CTL-1", "plan", { status: "running", bg_job_id: "k-1" });
+    let teardownArgs = null;
+    abortWorker(orchDir, "CTL-1", {
+      repoRoot: "/repo",
+      killJob: () => true, // confirmed killed → safe to remove the worktree
+      teardownWorktree: (a) => {
+        teardownArgs = a;
+        return true;
+      },
+    });
+    expect(teardownArgs).toEqual({ repoRoot: "/repo", ticket: "CTL-1" });
+  });
+
   test("a ticket with no worker dir is a clean no-op", () => {
     const r = abortWorker(orchDir, "CTL-NOPE", {
       killJob: () => {

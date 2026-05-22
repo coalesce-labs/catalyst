@@ -308,7 +308,17 @@ function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
   const marker = join(orchDir, "workers", ticket, ".worktree-removed");
   if (existsSync(marker)) return;
   const entry = getProjectConfig(teamOf(ticket));
-  if (!entry?.repoRoot) return; // unresolvable team — retry next tick
+  if (!entry?.repoRoot) {
+    // The codebase favors loud failures: a Done ticket whose team is absent
+    // from the registry can never have its worktree resolved here — surface it
+    // rather than silently leaking the worktree. No marker is written, so a
+    // restored registry entry is retried on a later tick.
+    log.warn(
+      { ticket },
+      "scheduler: worktree teardown deferred — ticket's team has no registry entry",
+    );
+    return;
+  }
   try {
     if (teardownWorktree({ repoRoot: entry.repoRoot, ticket })) {
       writeFileSync(marker, "");

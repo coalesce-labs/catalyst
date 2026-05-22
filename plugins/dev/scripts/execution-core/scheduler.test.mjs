@@ -945,4 +945,21 @@ describe("schedulerTick — worktree teardown on Done (CTL-582)", () => {
     });
     expect(called).toBe(false);
   });
+
+  test("no teardown + no marker when the ticket's team has no registry entry", () => {
+    writeSignal("CTL-4", "monitor-deploy", "done");
+    // deliberately no writeRegistry — getProjectConfig("CTL") resolves to null
+    let called = false;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: noStatusWrites(),
+      teardownWorktree: () => {
+        called = true;
+        return true;
+      },
+    });
+    expect(called).toBe(false);
+    expect(existsSync(markerPath("CTL-4"))).toBe(false); // retryable — no marker
+  });
 });

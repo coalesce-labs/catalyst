@@ -88,7 +88,7 @@ describe("defaultDispatch", () => {
       return { code: 0, worktreePath: null, stderr: "" };
     };
     const r = defaultDispatch({ orchDir: "/ec", ticket: "CTL-9", phase: "research" }, s);
-    expect(r.code).not.toBe(0);
+    expect(r.code).toBe(1); // wt.code || 1 — the 0 falls through to the fallback
     expect(s.calls.map((c) => c[0])).toEqual(["resolve", "create"]);
   });
 

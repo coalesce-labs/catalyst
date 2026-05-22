@@ -226,6 +226,17 @@ describe("resolveEligibleQuery", () => {
       priority: 2,
     });
   });
+
+  test("a non-object eligibleQuery (hand-edited registry) degrades to defaults", () => {
+    expect(resolveEligibleQuery({ team: "CTL", eligibleQuery: "garbage" })).toEqual({
+      team: "CTL",
+      status: "Ready",
+      triageStatus: "Triage",
+      project: null,
+      label: null,
+      priority: null,
+    });
+  });
 });
 
 describe("CLI (import.meta.main)", () => {

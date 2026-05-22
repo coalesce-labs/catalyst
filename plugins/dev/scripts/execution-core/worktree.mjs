@@ -16,7 +16,8 @@ const CREATE_WORKTREE_BIN = fileURLToPath(new URL("../create-worktree.sh", impor
 // `--reuse-existing` makes it idempotent: the second…ninth phase of a ticket
 // short-circuit to the existing worktree. Returns { code, worktreePath, stderr }
 // — never throws. `worktreePath` is parsed from the trailing WORKTREE_PATH=
-// line create-worktree.sh always prints on success.
+// line create-worktree.sh prints on a successful create and on the
+// --reuse-existing short-circuit.
 export function createWorktree({ ticket, repoRoot }, { spawn = spawnSync } = {}) {
   const res = spawn(CREATE_WORKTREE_BIN, [ticket, "main", "--reuse-existing"], {
     cwd: repoRoot,
