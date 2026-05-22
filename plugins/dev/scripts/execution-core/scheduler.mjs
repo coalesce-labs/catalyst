@@ -21,8 +21,10 @@ import { analyzeDependencyGraph, referencedBlockerIds } from "../lib/dependency-
 // enters at NEW_WORK_ENTRY_PHASE ("research"), see schedulerTick.
 import { PHASES, transition, isTerminal } from "../lib/phase-fsm.mjs";
 import { rankTickets } from "./scheduler-rank.mjs";
-import { defaultDispatch, dispatchTicket } from "./dispatch.mjs";
+import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
+import { getProjectConfig } from "./registry.mjs";
+import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -295,14 +297,45 @@ function labelOnce(orchDir, ticket, label, writeStatus) {
   }
 }
 
+// teardownWorktreeOnce — remove a ticket's git worktree once it reaches
+// terminal Done (CTL-582 Phase 4). The terminal sweep revisits every started
+// ticket each tick, so a once-marker at workers/<T>/.worktree-removed makes
+// teardown fire a single time. repoRoot is resolved from the central registry
+// by the ticket's team. Best-effort: an unresolvable team or a thrown teardown
+// is swallowed — never aborts the tick. The marker is written only on a
+// confirmed teardown (worktree gone), so a transient git failure retries.
+function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
+  const marker = join(orchDir, "workers", ticket, ".worktree-removed");
+  if (existsSync(marker)) return;
+  const entry = getProjectConfig(teamOf(ticket));
+  if (!entry?.repoRoot) return; // unresolvable team — retry next tick
+  try {
+    if (teardownWorktree({ repoRoot: entry.repoRoot, ticket })) {
+      writeFileSync(marker, "");
+    }
+  } catch (err) {
+    log.warn(
+      { ticket, err: err.message },
+      "scheduler: worktree teardown threw — continuing tick",
+    );
+  }
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
-// (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
-// every action from filesystem state. `exec` is the injectable seam for the D5
-// out-of-set blocker-state fetch; `writeStatus` is the injectable Linear-write
-// seam (CTL-558) — defaults to the real linear-write.mjs module.
+// (3) terminal-Done sweep (CTL-558) + worktree teardown (CTL-582). Idempotent
+// and restart-safe — derives every action from filesystem state. `exec` is the
+// injectable seam for the D5 out-of-set blocker-state fetch; `writeStatus` is
+// the injectable Linear-write seam (CTL-558); `teardownWorktree` is the
+// injectable worktree-teardown seam (CTL-582) — both default to the real module.
 export function schedulerTick(
   orchDir,
-  { readEligible, dispatch = defaultDispatch, exec, writeStatus = linearWrite } = {},
+  {
+    readEligible,
+    dispatch = defaultDispatch,
+    exec,
+    writeStatus = linearWrite,
+    teardownWorktree = defaultTeardownWorktree,
+  } = {},
 ) {
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
   const advanced = [];
@@ -364,6 +397,8 @@ export function schedulerTick(
     const signals = readPhaseSignals(orchDir, ticket);
     if (signals["monitor-deploy"] === "done") {
       safeWrite(() => writeStatus.applyTerminalDone({ ticket }), { ticket });
+      // CTL-582: the ticket reached terminal Done — tear down its worktree.
+      teardownWorktreeOnce(orchDir, ticket, teardownWorktree);
     }
     if (signals.triage === "done") {
       labelOnce(orchDir, ticket, "triaged", writeStatus);
@@ -397,6 +432,7 @@ function runTick() {
       dispatch: runningOpts.dispatch,
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
+      teardownWorktree: runningOpts.teardownWorktree,
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -411,21 +447,22 @@ function scheduleDebouncedTick(debounceMs) {
 
 // startScheduler — immediate authoritative tick, arm the periodic timer, then
 // start the event-log fast path. `dispatch` / `readEligible` / `exec` /
-// `writeStatus` are injectable so a test drives a hermetic daemon (`exec` is
-// the D5 blocker-state fetch seam, CTL-565; `writeStatus` is the CTL-558
-// Linear-write seam — undefined here defaults to the real module in
-// schedulerTick).
+// `writeStatus` / `teardownWorktree` are injectable so a test drives a hermetic
+// daemon (`exec` is the D5 blocker-state fetch seam, CTL-565; `writeStatus` is
+// the CTL-558 Linear-write seam; `teardownWorktree` is the CTL-582 worktree
+// seam — each undefined here defaults to the real module in schedulerTick).
 export function startScheduler({
   orchDir,
   dispatch,
   readEligible,
   exec,
   writeStatus,
+  teardownWorktree,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
   if (!orchDir) throw new Error("startScheduler: orchDir is required");
-  runningOpts = { orchDir, dispatch, readEligible, exec, writeStatus };
+  runningOpts = { orchDir, dispatch, readEligible, exec, writeStatus, teardownWorktree };
 
   runTick(); // authoritative initial pass
   tickTimer = setInterval(runTick, tickIntervalMs);

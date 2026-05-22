@@ -4,7 +4,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, basename } from "node:path";
+import { join } from "node:path";
 import { abortWorker } from "./abort-worker.mjs";
 
 let orchDir;
@@ -54,11 +54,10 @@ describe("abortWorker", () => {
     expect(killed).toEqual(["abc"]);
   });
 
-  test("calls teardownWorktree once with the derived coordinates", () => {
+  test("calls teardownWorktree once with { repoRoot, ticket }", () => {
     writeSignal("CTL-1", "plan", { status: "running" });
     const calls = [];
     abortWorker(orchDir, "CTL-1", {
-      projectKey: "catalyst",
       repoRoot: "/repo",
       killJob: () => {},
       teardownWorktree: (a) => {
@@ -66,9 +65,7 @@ describe("abortWorker", () => {
         return true;
       },
     });
-    expect(calls).toEqual([
-      { projectKey: "catalyst", orchId: basename(orchDir), ticket: "CTL-1", repoRoot: "/repo" },
-    ]);
+    expect(calls).toEqual([{ repoRoot: "/repo", ticket: "CTL-1" }]);
   });
 
   test("a ticket with no worker dir is a clean no-op", () => {

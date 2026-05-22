@@ -7,9 +7,9 @@
 // advancing the ticket on its next tick. The bg kill and the worktree teardown
 // are best-effort, behind the injectable killJob / teardownWorktree seams (D9).
 
-import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join } from "node:path";
+import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
 
 // Signal statuses that mean a phase no longer holds a live worker — left as-is.
 //
@@ -40,19 +40,6 @@ export function defaultKillJob(bgJobId) {
   return false;
 }
 
-// defaultTeardownWorktree — `git worktree remove --force` the worker's worktree.
-// Path convention: ~/catalyst/wt/<projectKey>/<orchId>-<ticket>
-// (phase-agent-dispatch). Runs with `-C <repoRoot>` so it works regardless of
-// the daemon's cwd. Never throws.
-export function defaultTeardownWorktree({ projectKey, orchId, ticket, repoRoot }) {
-  if (!projectKey || !orchId || !ticket || !repoRoot) return false;
-  const wt = join(process.env.HOME ?? "", "catalyst", "wt", projectKey, `${orchId}-${ticket}`);
-  const res = spawnSync("git", ["-C", repoRoot, "worktree", "remove", "--force", wt], {
-    encoding: "utf8",
-  });
-  return !res.error && (res.status ?? 1) === 0;
-}
-
 // abortWorker — abort an in-flight ticket dragged out of {Triage, Ready}.
 // Returns { aborted, signalsMarked, jobsKilled, worktreeRemoved }. A ticket
 // that was never dispatched (no worker dir) or has only settled signals is a
@@ -60,12 +47,7 @@ export function defaultTeardownWorktree({ projectKey, orchId, ticket, repoRoot }
 export function abortWorker(
   orchDir,
   ticket,
-  {
-    projectKey,
-    repoRoot,
-    killJob = defaultKillJob,
-    teardownWorktree = defaultTeardownWorktree,
-  } = {},
+  { repoRoot, killJob = defaultKillJob, teardownWorktree = defaultTeardownWorktree } = {},
 ) {
   const empty = { aborted: false, signalsMarked: [], jobsKilled: [], worktreeRemoved: false };
   const dir = join(orchDir, "workers", ticket);
@@ -112,8 +94,7 @@ export function abortWorker(
 
   let worktreeRemoved = false;
   try {
-    worktreeRemoved =
-      teardownWorktree({ projectKey, orchId: basename(orchDir), ticket, repoRoot }) === true;
+    worktreeRemoved = teardownWorktree({ repoRoot, ticket }) === true;
   } catch {
     /* best-effort */
   }
