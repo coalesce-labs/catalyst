@@ -126,13 +126,16 @@ describe("execution-core integration — acceptance criteria", () => {
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
   });
 
-  test("AC1b — a state_changed event OUT of the eligible state removes the ticket immediately", () => {
+  test("AC1b — a state_changed event OUT to a drag-out state removes the ticket immediately", () => {
     enroll("ENG", { status: "Todo" });
     const exec = mockExec({ ENG: [node("ENG-1"), node("ENG-2")] });
     startMonitor({ exec, reconcileIntervalMs: 60_000 });
     expect(getEligibleSet("ENG")).toHaveLength(2);
 
-    handleStateChangedEvent(evt("ENG-1", "ENG", "In Progress"));
+    // CTL-584: the leave-path fires only for DRAG_OUT_STATES (Backlog /
+    // Canceled / Duplicate). "In Progress" pre-CTL-584 was the broad-kill
+    // example; under the new model it is a pipeline state and a no-op.
+    handleStateChangedEvent(evt("ENG-1", "ENG", "Canceled"));
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
   });
 
