@@ -756,10 +756,32 @@ jq --arg ts "$PR_OPENED_AT" '.pr.prOpenedAt = $ts | .status = "pr-created"' \
   "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp" && mv "$SIGNAL_FILE.tmp" "$SIGNAL_FILE"
 
 # Pre-flight: verify event infrastructure (from [[wait-for-github]])
+# CTL-572: probe .webhookTunnel.connected — the field that exists. The old
+# probe read a field catalyst-monitor never emits, so it always resolved to
+# "unknown" and forced REST polling on every run. .connected is optimistic
+# (EventSource.isStarted(), not live delivery), so also fall back when the
+# tunnel has gone quiet: no webhook event across the shared smee channel for
+# TUNNEL_STALE_AGE_SEC.
 INFRA_STATUS=$(catalyst-monitor status --json 2>/dev/null)
-TUNNEL=$(echo "$INFRA_STATUS" | jq -r '.webhookTunnel.state // "unknown"' 2>/dev/null)
+TUNNEL_STALE_AGE_SEC="${CATALYST_TUNNEL_STALE_AGE_SEC:-21600}"  # 6h default
 USE_REST=false
-[ "$TUNNEL" != "running" ] && { echo "WARN: tunnel not running — using REST fallback"; USE_REST=true; }
+TUNNEL_CONNECTED=$(echo "$INFRA_STATUS" | jq -r '.webhookTunnel.connected // false' 2>/dev/null)
+if [ "$TUNNEL_CONNECTED" != "true" ]; then
+  echo "WARN: webhook tunnel not connected — using REST fallback"
+  USE_REST=true
+else
+  # Staleness guard. jq handles the ISO-8601 math (portable across GNU/BSD date).
+  # lastEventAt absent (null) => fresh monitor, NOT treated as stale.
+  TUNNEL_EVENT_AGE=$(echo "$INFRA_STATUS" | jq -r '
+    (.webhookTunnel.lastEventAt // "") as $t
+    | if $t == "" then ""
+      else (now - (($t | sub("\\.[0-9]+Z$"; "Z")) | fromdateiso8601)) | floor
+      end' 2>/dev/null)
+  if [ -n "$TUNNEL_EVENT_AGE" ] && [ "$TUNNEL_EVENT_AGE" -gt "$TUNNEL_STALE_AGE_SEC" ]; then
+    echo "WARN: webhook tunnel last event ${TUNNEL_EVENT_AGE}s ago (> ${TUNNEL_STALE_AGE_SEC}s) — stale, using REST fallback"
+    USE_REST=true
+  fi
+fi
 
 # CTL-303: use broker auto-correlation. Emit a second agent.checkin with claimed_pr
 # so the broker auto-derives a pr_lifecycle interest — no explicit filter.register needed.
@@ -818,9 +840,11 @@ while [ "$PR_DONE" = "false" ]; do
       _SINCE_LINE=$(( ${_LOG_LINES:-0} > 500 ? ${_LOG_LINES:-0} - 500 : 0 ))
       HEARTBEATS=$(catalyst-events tail --since-line "$_SINCE_LINE" 2>/dev/null \
         | jq -c 'select(.attributes."event.name" == "heartbeat")' | wc -l | tr -d ' ')
+      # CTL-572: probe .webhookTunnel.connected (the field that exists). The
+      # HEARTBEATS == 0 term remains the stronger liveness signal here.
       TUNNEL_NOW=$(catalyst-monitor status --json 2>/dev/null \
-        | jq -r '.webhookTunnel.state // "unknown"')
-      if [ "${HEARTBEATS:-0}" -eq 0 ] || [ "$TUNNEL_NOW" != "running" ]; then
+        | jq -r '.webhookTunnel.connected // false')
+      if [ "${HEARTBEATS:-0}" -eq 0 ] || [ "$TUNNEL_NOW" != "true" ]; then
         echo "Infrastructure issue detected — switching to REST polling"
         USE_REST=true
       else
