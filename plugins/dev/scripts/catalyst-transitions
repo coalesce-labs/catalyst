@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# catalyst-transitions — live, human-readable transition log for the
+# execution-core. Tails the Catalyst event log and renders Linear state
+# transitions and orchestrator phase events as they happen, e.g.
+#
+#   14:06:05  CTL-123   Research → Plan          Ryan Rozich
+#   14:07:11  CTL-123   ┄ plan complete
+#
+# The `linear.issue.state_changed` event carries only the destination
+# state (`toState`), never the previous one, so the "from" side is
+# reconstructed from a ticket → last-seen-state map built as the stream
+# is consumed. The first time a ticket is seen its prior state is unknown
+# and shown as "·".
+#
+# Built on `catalyst-events tail`, which does the file following, month
+# rollover, and EOF-seek — this script only filters and formats.
+#
+# Usage:
+#   catalyst-transitions [--team KEY] [--ticket ID] [--linear-only]
+#                        [--phase-only] [--since-line N] [--no-color]
+#
+# Options:
+#   --team KEY      only show tickets whose identifier starts with KEY-
+#   --ticket ID     only show one ticket (e.g. CTL-123)
+#   --linear-only   show only Linear state transitions
+#   --phase-only    show only orchestrator phase.* events
+#   --since-line N  start from line N of the event log instead of a live
+#                   tail from the end — useful to replay recent history
+#   --no-color      disable ANSI color
+#   -h, --help      show this help
+#
+# Exit: runs until interrupted (Ctrl-C).
+
+set -uo pipefail
+
+# --version handling (early, before any arg parsing) — mirrors catalyst-events.
+case "${1:-}" in
+  --version|-V)
+    _CV_SRC="${BASH_SOURCE[0]}"
+    while [[ -L "$_CV_SRC" ]]; do
+      _CV_D="$(cd -P "$(dirname "$_CV_SRC")" && pwd)" && _CV_SRC="$(readlink "$_CV_SRC")"
+      [[ "$_CV_SRC" != /* ]] && _CV_SRC="$_CV_D/$_CV_SRC"
+    done
+    _CV_DIR="$(cd -P "$(dirname "$_CV_SRC")" && pwd)"
+    [[ -f "${_CV_DIR}/lib/catalyst-version.sh" ]] && . "${_CV_DIR}/lib/catalyst-version.sh" \
+      && catalyst_print_version "catalyst-transitions" "${BASH_SOURCE[0]}" && exit 0
+    echo "error: catalyst-version helper missing at ${_CV_DIR}/lib/catalyst-version.sh" >&2
+    exit 1
+    ;;
+esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() { sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+# --- arg parsing ------------------------------------------------------------
+ONLY_TEAM="" ONLY_TICKET="" SINCE_LINE="" KIND="both" COLOR="auto"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --team)        ONLY_TEAM="${2:-}"; shift 2 ;;
+    --ticket)      ONLY_TICKET="${2:-}"; shift 2 ;;
+    --linear-only) KIND="linear"; shift ;;
+    --phase-only)  KIND="phase"; shift ;;
+    --since-line)  SINCE_LINE="${2:-}"; shift 2 ;;
+    --no-color)    COLOR="off"; shift ;;
+    -h|--help)     usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; echo "try --help" >&2; exit 1 ;;
+  esac
+done
+
+# --color auto: on only when stdout is a terminal.
+if [[ "$COLOR" == "auto" ]]; then
+  [[ -t 1 ]] && COLOR="on" || COLOR="off"
+fi
+if [[ "$COLOR" == "on" ]]; then
+  C_DIM=$'\033[2m'; C_RESET=$'\033[0m'
+  C_TICKET=$'\033[1;36m'; C_TO=$'\033[1;32m'; C_FROM=$'\033[0m'
+  C_FAIL=$'\033[1;31m'; C_SKIP=$'\033[33m'
+else
+  C_DIM="" C_RESET="" C_TICKET="" C_TO="" C_FROM="" C_FAIL="" C_SKIP=""
+fi
+
+# --- locate catalyst-events -------------------------------------------------
+EVENTS="${SCRIPT_DIR}/catalyst-events"
+if [[ ! -x "$EVENTS" ]]; then
+  if command -v catalyst-events >/dev/null 2>&1; then
+    EVENTS="catalyst-events"
+  else
+    echo "error: catalyst-events not found next to this script or on PATH" >&2
+    exit 1
+  fi
+fi
+command -v jq >/dev/null 2>&1 || { echo "error: jq required" >&2; exit 1; }
+
+# --- build the catalyst-events tail predicate -------------------------------
+# A single jq predicate, evaluated inside select(...) by catalyst-events.
+# Matches both the canonical OTel envelope (.attributes."event.name") and the
+# older v2 webhook envelope (.event).
+NAME_EXPR='(.attributes."event.name" // .event // "")'
+case "$KIND" in
+  linear) PREDICATE="(${NAME_EXPR} == \"linear.issue.state_changed\")" ;;
+  phase)  PREDICATE="(${NAME_EXPR} | startswith(\"phase.\"))" ;;
+  both)   PREDICATE="(${NAME_EXPR} | (. == \"linear.issue.state_changed\" or startswith(\"phase.\")))" ;;
+esac
+
+# --- jq formatter: each event → a TSV row "kind\tts\tticket\ta\tb" ----------
+FORMATTER='
+  (.attributes."event.name" // .event // "") as $name
+  | (.ts // "") as $ts
+  | if $name == "linear.issue.state_changed" then
+      [ "L", $ts,
+        (.attributes."linear.issue.identifier" // .scope.ticket // "?"),
+        (.body.payload.toState // ""),
+        (.body.payload.actorName // "") ]
+    elif ($name | startswith("phase.")) then
+      ($name | split(".")) as $p
+      | [ "P", $ts,
+          (.attributes."linear.issue.identifier" // .body.payload.ticket // ($p[3] // "?")),
+          (.body.payload.phase // $p[1] // "?"),
+          (.body.payload.status // .attributes."event.action" // $p[2] // "?") ]
+    else empty end
+  | @tsv
+'
+
+# --- render: stateful TSV → colored lines -----------------------------------
+# Holds ticket → last-seen Linear state so the "from" side can be shown.
+render() {
+  declare -A LAST
+  local kind ts ticket a b time from to
+  while IFS=$'\t' read -r kind ts ticket a b; do
+    [[ -z "$kind" ]] && continue
+    # scope filters (applied here so the jq stays simple)
+    [[ -n "$ONLY_TICKET" && "$ticket" != "$ONLY_TICKET" ]] && continue
+    [[ -n "$ONLY_TEAM" && "$ticket" != ${ONLY_TEAM}-* ]] && continue
+
+    time="${ts:11:8}"; [[ -z "$time" ]] && time="--:--:--"
+
+    if [[ "$kind" == "L" ]]; then
+      to="${a:-?}"; [[ -z "$to" ]] && to="?"
+      from="${LAST[$ticket]:-·}"
+      LAST["$ticket"]="$to"
+      printf '%s%s%s  %s%-9s%s  %s%s%s → %s%s%s  %s%s%s\n' \
+        "$C_DIM" "$time" "$C_RESET" \
+        "$C_TICKET" "$ticket" "$C_RESET" \
+        "$C_FROM" "$from" "$C_RESET" \
+        "$C_TO" "$to" "$C_RESET" \
+        "$C_DIM" "$b" "$C_RESET"
+    else
+      # phase event — dimmed; failed/skipped get a color cue
+      local acolor="$C_DIM"
+      case "$b" in
+        fail|failed)   acolor="$C_FAIL" ;;
+        skip|skipped)  acolor="$C_SKIP" ;;
+      esac
+      printf '%s%s  %-9s  ┄ %s%s%s %s%s%s\n' \
+        "$C_DIM" "$time" "$ticket" \
+        "$C_RESET$C_DIM" "$a" "$C_RESET" \
+        "$acolor" "$b" "$C_RESET"
+    fi
+  done
+}
+
+# --- banner (stderr, so stdout stays a clean stream) ------------------------
+{
+  echo "catalyst-transitions — watching ${KIND} events"
+  [[ -n "$ONLY_TEAM"   ]] && echo "  team:   ${ONLY_TEAM}"
+  [[ -n "$ONLY_TICKET" ]] && echo "  ticket: ${ONLY_TICKET}"
+  echo "  log:    ${CATALYST_EVENTS_DIR:-${CATALYST_DIR:-$HOME/catalyst}/events}/$(date -u +%Y-%m).jsonl"
+  echo "  Ctrl-C to stop."
+  echo ""
+} >&2
+
+# --- run --------------------------------------------------------------------
+# catalyst-events tail follows the log; jq formats; render adds state + color.
+"$EVENTS" tail --filter "$PREDICATE" ${SINCE_LINE:+--since-line "$SINCE_LINE"} \
+  | jq -r --unbuffered "$FORMATTER" 2>/dev/null \
+  | render

@@ -37,6 +37,7 @@ CLI_ENTRIES=(
   "catalyst-comms:catalyst-comms"
   "catalyst-events:catalyst-events"
   "catalyst-filter:catalyst-filter"
+  "catalyst-transitions:catalyst-transitions"
   "catalyst-session.sh:catalyst-session"
   "catalyst-state.sh:catalyst-state"
   "catalyst-db.sh:catalyst-db"
