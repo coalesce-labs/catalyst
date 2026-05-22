@@ -26,6 +26,18 @@ import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { dispatchTicket } from "./dispatch.mjs";
 import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
 
+// DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
+// ticket". The monitor classifies these as a kill: remove the ticket from the
+// eligible projection and abort any in-flight worker. CTL-584: any other
+// non-Triage/non-Ready state — including the daemon's own CTL-558 write-backs
+// (Research/Plan/Implement/Validate/PR/Done) — is a NO-OP, not a kill. The
+// design (2026-05-21-linear-state-machine-trigger-model.md, "Human Override /
+// Kill") names Backlog/Canceled; Duplicate is included because Linear ships it
+// by default and users sometimes pick it instead of Canceled. Conservative
+// enumeration: a missed kill is recoverable (the next reconcile drops the
+// ticket from the eligible set anyway), a wrong kill destroys live work.
+const DRAG_OUT_STATES = new Set(["Backlog", "Canceled", "Duplicate"]);
+
 // --- Event parsing -------------------------------------------------------
 
 // parseStateChangedEvent — accept both the canonical OTel envelope
@@ -119,11 +131,18 @@ const dirtyTimers = new Map();
 // handleStateChangedEvent — fold one state_changed event into the eligible
 // sets of every project whose query team matches the event's team.
 //
-// CTL-565 two-state trigger: the toState branch is a three-way split.
-//   →triageStatus  one-shot-dispatches the triage phase agent (NOT the
-//                  eligible set — a Triage ticket is never scheduler-pulled).
-//   →status (Ready) reconciles into the scheduler-eligible set.
-//   anything else   the leave-path — a confident immediate removal.
+// CTL-565 + CTL-584 — the toState branch is a four-way split:
+//   →triageStatus              one-shot-dispatches the triage phase agent
+//                              (NOT the eligible set — a Triage ticket is
+//                              never scheduler-pulled).
+//   →status (Ready)            reconciles into the scheduler-eligible set
+//                              (debounced).
+//   →DRAG_OUT_STATES           the leave-path — confident immediate removal
+//                              + abortWorker on the in-flight worker.
+//   anything else (pipeline)   no-op. Research/Plan/Implement/Validate/PR/
+//                              Done are the daemon's own CTL-558 write-backs
+//                              echoed back; an unknown state is conservatively
+//                              treated as a hand-edit we don't recognize.
 export function handleStateChangedEvent(
   event,
   {
@@ -150,15 +169,28 @@ export function handleStateChangedEvent(
       // project/label/priority scoping, so a full poll is required. Debounce
       // it so a burst of events coalesces into one reconcile.
       scheduleDirtyReconcile(p.team, { exec, debounceMs });
-    } else {
-      // Left both watched states (→Backlog/→Canceled). Confident immediate
-      // removal, then abort any in-flight worker and tear down its worktree.
-      // removeTicket persists the projection itself; removing a non-member is
-      // a safe no-op. abortWorker no-ops when the ticket was never dispatched.
+    } else if (DRAG_OUT_STATES.has(parsed.toState)) {
+      // Drag-out to Backlog/Canceled/Duplicate — kill signal. Confident
+      // immediate removal, then abort any in-flight worker and tear down its
+      // worktree. removeTicket persists the projection itself; removing a
+      // non-member is a safe no-op. abortWorker no-ops when the ticket was
+      // never dispatched.
       removeTicket(p.team, parsed.identifier);
       if (orchDir) {
         abortWorker(orchDir, parsed.identifier, { repoRoot: p.repoRoot });
       }
+    } else {
+      // Pipeline state (the daemon's own CTL-558 write-back —
+      // Research/Plan/Implement/Validate/PR/Done) or an unknown state. No-op:
+      // the daemon must never kill its own worker on hearing its own write-
+      // back echoed through the broker, and an unknown state is conservatively
+      // treated as a hand-edit we don't recognize (let the next reconcile sort
+      // it out — a missed kill is safe, a wrong kill destroys live work).
+      // CTL-584.
+      log.debug(
+        { ticket: parsed.identifier, toState: parsed.toState },
+        "monitor: non-trigger toState — no-op",
+      );
     }
   }
 }

@@ -178,18 +178,12 @@ describe("reconcileProject", () => {
 });
 
 describe("handleStateChangedEvent", () => {
-  test("an event whose toState != eligible status fast-path-removes the ticket", () => {
-    enroll("ENG", { status: "Todo" });
-    setProjectEligible("ENG", [node("ENG-1"), node("ENG-2")], {
-      source: "reconcile",
-      query: { team: "ENG", status: "Todo" },
-    });
-    handleStateChangedEvent({
-      event: "linear.issue.state_changed",
-      detail: { ticket: "ENG-1", teamKey: "ENG", toState: "In Progress" },
-    });
-    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
-  });
+  // CTL-584: the pre-CTL-565 "toState != eligible status → fast-path-remove"
+  // case is now covered by the parameterized DRAG_OUT_STATES test in the
+  // CTL-565 two-state-trigger block below (Backlog/Canceled/Duplicate). The
+  // old single-case version is dropped as redundant — its example toState
+  // ("In Progress") was a pipeline state under the new model, not a leave-path
+  // trigger.
 
   test("an event whose toState == eligible status schedules a debounced reconcile (no immediate poll)", async () => {
     enroll("ENG", { status: "Todo" });
@@ -277,18 +271,25 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
     expect(exec.calls).toBe(1); // the debounced reconcile ran
   });
 
-  test("toState that is neither Triage nor Ready fast-path-removes the ticket", () => {
-    enroll("ENG", { status: "Ready" });
-    setProjectEligible("ENG", [node("ENG-1"), node("ENG-2")], {
-      source: "reconcile",
-      query: { team: "ENG", status: "Ready" },
-    });
-    handleStateChangedEvent({
-      event: "linear.issue.state_changed",
-      detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
-    });
-    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
-  });
+  // CTL-584: drag-out kill fires only for the enumerated DRAG_OUT_STATES.
+  // Backlog/Canceled/Duplicate each fast-path-remove the ticket from the
+  // eligible projection. Daemon-written pipeline states (covered below) do
+  // NOT.
+  test.each(["Backlog", "Canceled", "Duplicate"])(
+    "toState %s fast-path-removes the ticket from the eligible projection",
+    (toState) => {
+      enroll("ENG", { status: "Ready" });
+      setProjectEligible("ENG", [node("ENG-1"), node("ENG-2")], {
+        source: "reconcile",
+        query: { team: "ENG", status: "Ready" },
+      });
+      handleStateChangedEvent({
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState },
+      });
+      expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
+    },
+  );
 
   test("a triage dispatch failure is logged and never throws", () => {
     enroll("ENG", { status: "Ready" });
@@ -319,37 +320,27 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
-  test("a drag-out (toState neither Triage nor Ready) invokes abortWorker", () => {
-    enroll("ENG", { status: "Ready" });
-    const abortWorker = mock(() => ({ aborted: true }));
-    handleStateChangedEvent(
-      {
-        event: "linear.issue.state_changed",
-        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
-      },
-      { orchDir, abortWorker },
-    );
-    expect(abortWorker).toHaveBeenCalledWith("/orch", "ENG-1", {
-      repoRoot: expect.any(String),
-    });
-  });
-
-  test("a drag-out still removes the ticket from the eligible projection", () => {
-    enroll("ENG", { status: "Ready" });
-    setProjectEligible("ENG", [node("ENG-1"), node("ENG-2")], {
-      source: "reconcile",
-      query: { team: "ENG", status: "Ready" },
-    });
-    const abortWorker = mock(() => ({ aborted: true }));
-    handleStateChangedEvent(
-      {
-        event: "linear.issue.state_changed",
-        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Canceled" },
-      },
-      { orchDir, abortWorker },
-    );
-    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
-  });
+  // CTL-584: every DRAG_OUT_STATES toState invokes abortWorker. The drop of
+  // the parallel "a drag-out still removes" test is intentional — the
+  // parameterized fast-path-remove test above already covers Canceled, the
+  // dropped test's distinguishing case.
+  test.each(["Backlog", "Canceled", "Duplicate"])(
+    "toState %s invokes abortWorker for the in-flight worker",
+    (toState) => {
+      enroll("ENG", { status: "Ready" });
+      const abortWorker = mock(() => ({ aborted: true }));
+      handleStateChangedEvent(
+        {
+          event: "linear.issue.state_changed",
+          detail: { ticket: "ENG-1", teamKey: "ENG", toState },
+        },
+        { orchDir, abortWorker },
+      );
+      expect(abortWorker).toHaveBeenCalledWith("/orch", "ENG-1", {
+        repoRoot: expect.any(String),
+      });
+    },
+  );
 
   test("a drag-out with no orchDir wired removes the ticket and does not throw", () => {
     enroll("ENG", { status: "Ready" });
@@ -364,6 +355,55 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
       ),
     ).not.toThrow();
     expect(abortWorker).not.toHaveBeenCalled(); // no orchDir → abort skipped
+  });
+
+  // CTL-584: the daemon's own CTL-558 status write-backs (Research / Plan /
+  // Implement / Validate / PR / Done) must be no-ops in the monitor — the
+  // pipeline must never kill its own worker on hearing its own write echo.
+  // The eligible projection is unchanged; abortWorker + dispatch are never
+  // called. This is the negative coverage the original test suite missed.
+  test.each(["Research", "Plan", "Implement", "Validate", "PR", "Done"])(
+    "toState %s (daemon-written pipeline state) is a no-op — no removal, no abortWorker",
+    (toState) => {
+      enroll("ENG", { status: "Ready" });
+      setProjectEligible("ENG", [node("ENG-1"), node("ENG-2")], {
+        source: "reconcile",
+        query: { team: "ENG", status: "Ready" },
+      });
+      const abortWorker = mock(() => ({ aborted: true }));
+      const dispatch = mock(() => ({ code: 0 }));
+      handleStateChangedEvent(
+        {
+          event: "linear.issue.state_changed",
+          detail: { ticket: "ENG-1", teamKey: "ENG", toState },
+        },
+        { orchDir, abortWorker, dispatch },
+      );
+      expect(abortWorker).not.toHaveBeenCalled();
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1", "ENG-2"]);
+    },
+  );
+
+  // CTL-584: an unknown toState is conservatively treated as a no-op — a
+  // missed kill is recoverable (next reconcile drops it from the eligible
+  // set); a wrong kill destroys live work.
+  test("an unknown toState is a no-op — no removal, no abortWorker (conservative default)", () => {
+    enroll("ENG", { status: "Ready" });
+    setProjectEligible("ENG", [node("ENG-1")], {
+      source: "reconcile",
+      query: { team: "ENG", status: "Ready" },
+    });
+    const abortWorker = mock(() => ({ aborted: true }));
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Mystery" },
+      },
+      { orchDir, abortWorker },
+    );
+    expect(abortWorker).not.toHaveBeenCalled();
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
   });
 });
 
@@ -477,16 +517,19 @@ describe("startMonitor — resumeFromCursor", () => {
   });
 
   test("resumeFromCursor:true drains the gap between cursor and EOF", () => {
-    // ENG holds ENG-1 + ENG-2; an event in the downtime gap moved ENG-1 OUT
-    // of Todo. resumeFromCursor:true must drain that gap on startup and remove
-    // ENG-1 — proving the durable cursor, not a re-seed, drove the resume.
+    // ENG holds ENG-1 + ENG-2; an event in the downtime gap dragged ENG-1
+    // OUT (Backlog — DRAG_OUT_STATES). resumeFromCursor:true must drain that
+    // gap on startup and remove ENG-1 — proving the durable cursor, not a
+    // re-seed, drove the resume. CTL-584: toState must be a drag-out for the
+    // leave-path to fire (was "In Progress" pre-CTL-584 when the leave-path
+    // fired on anything non-Triage/non-Ready).
     enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
     // Pre-write a downtime-gap event and pin the cursor at offset 0.
     appendEventLog(
       `${JSON.stringify({
         event: "linear.issue.state_changed",
-        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "In Progress" },
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
       })}\n`,
     );
     saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
@@ -501,7 +544,10 @@ describe("startMonitor — resumeFromCursor", () => {
     appendEventLog(
       `${JSON.stringify({
         event: "linear.issue.state_changed",
-        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Done" },
+        // CTL-584: a drag-out state — "Done" was a pipeline state under the
+        // new model (not a leave-trigger), so we use Canceled here to drive
+        // the gap-drain removal.
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Canceled" },
       })}\n`,
     );
     saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
