@@ -432,7 +432,13 @@ export function schedulerTick(
   // by labelOnce's marker file.
   for (const ticket of listStartedTickets(orchDir)) {
     const signals = readPhaseSignals(orchDir, ticket);
-    if (signals["monitor-deploy"] === "done") {
+    // CTL-589 (CTL-512 followup): `skipped` is the second terminal status for
+    // monitor-deploy — emitted when no GitHub Deployments arrive within the
+    // probe timeout (the skipDeployVerification path). It must trigger the
+    // same Linear Done write + worktree teardown as `done`, matching the
+    // isTicketInFlight gate at line ~93. Without this, the ticket lingers
+    // at `PR` in Linear and the worktree leaks on disk indefinitely.
+    if (signals["monitor-deploy"] === "done" || signals["monitor-deploy"] === "skipped") {
       safeWrite(() => writeStatus.applyTerminalDone({ ticket }), { ticket });
       // CTL-582: the ticket reached terminal Done — tear down its worktree.
       teardownWorktreeOnce(orchDir, ticket, teardownWorktree);

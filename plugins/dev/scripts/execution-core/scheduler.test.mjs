@@ -772,6 +772,22 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
     expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-4" }));
   });
 
+  test("writes terminal Done when a ticket's monitor-deploy signal is skipped (CTL-589)", () => {
+    // CTL-512 fixed isTicketInFlight to treat `skipped` as terminal; this is
+    // the matching half — the terminal-Done sweep must also fire on `skipped`
+    // so the Linear ticket actually lands at Done (not stale at PR).
+    writeSignal("CTL-4", "monitor-deploy", "skipped");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: (a) => dones.push(a),
+      applyLabel: () => {},
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: okDispatch, writeStatus });
+    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-4" }));
+  });
+
   test("a status-write throw never aborts the tick", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const writeStatus = {
@@ -886,6 +902,25 @@ describe("schedulerTick — worktree teardown on Done (CTL-582)", () => {
 
   test("calls teardownWorktree with { repoRoot, ticket } when monitor-deploy is done", () => {
     writeSignal("CTL-4", "monitor-deploy", "done");
+    writeRegistry("CTL", "/repo/ctl");
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: noStatusWrites(),
+      teardownWorktree: (a) => {
+        calls.push(a);
+        return true;
+      },
+    });
+    expect(calls).toEqual([{ repoRoot: "/repo/ctl", ticket: "CTL-4" }]);
+  });
+
+  test("calls teardownWorktree when monitor-deploy is skipped (CTL-589)", () => {
+    // CTL-512 followup — `skipped` is the second terminal status for
+    // monitor-deploy; without this, the worktree leaks on disk forever for
+    // tickets whose deploy verification was skipped.
+    writeSignal("CTL-4", "monitor-deploy", "skipped");
     writeRegistry("CTL", "/repo/ctl");
     const calls = [];
     schedulerTick(orchDir, {
