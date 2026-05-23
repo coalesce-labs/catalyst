@@ -2401,6 +2401,11 @@ test/auth.test.ts: add regression test for the null-token path" \
   --dispatch
 ```
 
+`--issues` accepts a multi-line value verbatim — pass each blocker on its own
+line as shown above and the rendered prompt's `## Blockers to resolve` section
+will contain every line in order. No caller-side escaping or `\n`-joining is
+required.
+
 What this does:
 
 1. Renders `templates/fixup-prompt.md` → `${ORCH_DIR}/workers/fixup-${TICKET}-prompt.md`
