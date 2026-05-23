@@ -22,7 +22,11 @@ const ARTIFACT_NAMES = new Set([
 ]);
 
 // Terminal worker statuses — exported so decision modules share one set.
-const TERMINAL = new Set(["done", "failed", "stalled", "turn-cap-exhausted"]);
+// CTL-512: 'skipped' is the monitor-deploy terminal when no deployment_status
+// event arrived before the timeout (phase-monitor-deploy SKILL.md). Ranked
+// the same as 'done' by byActivePhase: a skipped terminal must never shadow
+// an in-flight phase.
+const TERMINAL = new Set(["done", "failed", "stalled", "turn-cap-exhausted", "skipped"]);
 
 // readWorkerSignals — glob both layouts under ${orchDir}/workers/ and return
 // a canonical WorkerSignal per worker:

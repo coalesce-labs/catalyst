@@ -120,6 +120,29 @@ describe("isTicketInFlight", () => {
   test("monitor-deploy done is terminal success → NOT in-flight", () => {
     expect(isTicketInFlight({ "monitor-deploy": "done" })).toBe(false);
   });
+  test("monitor-deploy skipped is terminal success → NOT in-flight (CTL-512)", () => {
+    expect(isTicketInFlight({ "monitor-deploy": "skipped" })).toBe(false);
+  });
+  test("monitor-deploy skipped with earlier phases done → NOT in-flight (CTL-512)", () => {
+    expect(
+      isTicketInFlight({
+        triage: "done",
+        research: "done",
+        plan: "done",
+        implement: "done",
+        verify: "done",
+        review: "done",
+        pr: "done",
+        "monitor-merge": "done",
+        "monitor-deploy": "skipped",
+      })
+    ).toBe(false);
+  });
+  test("non-terminal phase with status=skipped (defensive) → still in-flight (CTL-512)", () => {
+    // skipped is only a recognized terminal for monitor-deploy. Treating it as
+    // terminal on any other phase would silently free slots on producer bugs.
+    expect(isTicketInFlight({ triage: "skipped" })).toBe(true);
+  });
   test("a failed or stalled signal is terminal → NOT in-flight", () => {
     expect(isTicketInFlight({ implement: "failed" })).toBe(false);
     expect(isTicketInFlight({ verify: "stalled" })).toBe(false);

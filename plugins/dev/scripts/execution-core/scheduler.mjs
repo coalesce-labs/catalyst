@@ -85,7 +85,12 @@ export function isTicketInFlight(signals) {
   if (phases.length === 0) return false;
   for (const [phase, status] of Object.entries(signals)) {
     if (status === "failed" || status === "stalled" || status === "aborted") return false;
-    if (phase === TERMINAL_PHASE && status === "done") return false;
+    // CTL-512: monitor-deploy `skipped` is terminal-success — the producer
+    // emits it when no deployment_status event arrived before the timeout
+    // (phase-monitor-deploy/SKILL.md). Only recognized for TERMINAL_PHASE;
+    // a `skipped` on any other phase keeps the slot held so a producer bug
+    // can't silently leak it.
+    if (phase === TERMINAL_PHASE && (status === "done" || status === "skipped")) return false;
   }
   return true;
 }
