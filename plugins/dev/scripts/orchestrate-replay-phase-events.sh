@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # orchestrate-replay-phase-events.sh (CTL-491) — one-shot replay of any
-# phase.*.{complete,failed,turn-cap-exhausted}.<TICKET> events that landed in
-# the catalyst event log between the orchestrator's startup line cursor and
-# the current end-of-file. Routes each event through orchestrate-phase-advance
-# (complete) or orchestrate-revive (failed | turn-cap-exhausted).
+# phase.*.{complete,failed,turn-cap-exhausted,skipped}.<TICKET> events that
+# landed in the catalyst event log between the orchestrator's startup line
+# cursor and the current end-of-file. Routes each event through
+# orchestrate-phase-advance (complete | skipped) or orchestrate-revive
+# (failed | turn-cap-exhausted).
+#
+# CTL-512: skipped is the monitor-deploy terminal-no-deploy status. Routed
+# the same as complete because phase-advance is a no-op for monitor-deploy
+# (terminal phase) — the advance call's side effect is purely the broker
+# wake that frees the wave slot via the scheduler's in-flight predicate.
 #
 # Defends against any future re-introduction of the CTL-491 race window. With
 # the Phase 1 fix in place, this script's output should be empty in steady
@@ -110,7 +116,7 @@ stream_events() {
 
 # Match the canonical event-name regex from broker/index.mjs:1302.
 # phase.<phase>.<status>.<ticket>
-PHASE_REGEX='^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted)\.([A-Za-z][A-Za-z0-9_]*-[0-9]+)$'
+PHASE_REGEX='^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted|skipped)\.([A-Za-z][A-Za-z0-9_]*-[0-9]+)$'
 
 REVIVE_TRIGGERED=0  # we only need to invoke revive ONCE per replay regardless
                     # of how many failed/turn-cap events we see — revive scans
@@ -148,7 +154,10 @@ while IFS= read -r LINE; do
   [ "$IN_ORCH" = "true" ] || continue
 
   case "$STATUS" in
-    complete)
+    complete|skipped)
+      # CTL-512: skipped is terminal-equivalent for routing — phase-advance
+      # no-ops on monitor-deploy. Coalescing under one arm avoids divergent
+      # dispatch paths for two statuses that share a handler.
       if [ -x "$ADVANCE_BIN" ]; then
         "$ADVANCE_BIN" --orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
           --ticket "$TICKET" --completed-phase "$PHASE_NAME" >/dev/null 2>&1 || true
