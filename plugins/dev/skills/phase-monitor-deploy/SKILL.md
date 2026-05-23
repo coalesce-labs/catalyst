@@ -67,6 +67,13 @@ __PM_SCRIPT_PATH="${BASH_SOURCE[0]:-${0}}"
 __PM_SKILL_DIR="$(cd "$(dirname "$__PM_SCRIPT_PATH")" && pwd 2>/dev/null || pwd)"
 __PM_REPO_ROOT="${PHASE_AGENT_REPO_ROOT:-$(cd "$__PM_SKILL_DIR/../../../.." 2>/dev/null && pwd || pwd)}"
 __PM_LIB="${PHASE_EMIT_HELPER:-${__PM_REPO_ROOT}/plugins/dev/scripts/lib/phase-emit-complete.sh}"
+# CTL-512: emit terminal events via the production wrapper so the signal
+# file's `status` field is written canonically. The lib helper at
+# $__PM_LIB only emits events — it never touches the signal file, which
+# is why pre-CTL-512 skipped runs relied on orchestrate-revive to
+# synthesize a `done` status. The wrapper also handles the broker emit,
+# the session DB close, and the completedAt timestamp.
+__PM_WRAPPER="${PHASE_EMIT_WRAPPER:-${__PM_REPO_ROOT}/plugins/dev/scripts/phase-agent-emit-complete}"
 
 if [[ ! -r "$__PM_LIB" ]]; then
   echo "phase-monitor-deploy: cannot find phase-emit-complete.sh at $__PM_LIB" >&2
@@ -74,6 +81,11 @@ if [[ ! -r "$__PM_LIB" ]]; then
 fi
 # shellcheck disable=SC1090
 . "$__PM_LIB"
+
+if [[ ! -x "$__PM_WRAPPER" ]]; then
+  echo "phase-monitor-deploy: cannot find phase-agent-emit-complete wrapper at $__PM_WRAPPER" >&2
+  exit 1
+fi
 
 : "${TICKET:?phase-monitor-deploy: TICKET env var required}"
 
@@ -156,9 +168,15 @@ if [[ -z "$DEPLOY_EVENT" ]]; then
       reason: "no deployment_status event matched within timeout"
     }' > "$WORKER_DIR/phase-monitor-deploy.json"
 
-  emit_phase_complete --phase monitor-deploy --ticket "$TICKET" --status skipped \
-    --reason "no deployment_status event for $MERGE_SHA on env $DEPLOY_ENV within ${DEPLOY_TIMEOUT}s" \
-    --payload-json "$(cat "$WORKER_DIR/phase-monitor-deploy.json")"
+  # CTL-512: use the production wrapper so the signal file's `status` field
+  # is written canonically (status: "skipped", completedAt set). The wrapper
+  # merges these fields on top of the artifact JSON above without clobbering
+  # deploy_state / deploy_sha / canary_result. Pre-CTL-512 this branch went
+  # through the lib helper, which emitted the event but never touched the
+  # signal file — orchestrate-revive then synthesized a `done` status by
+  # accident, masking the leak.
+  "$__PM_WRAPPER" --phase monitor-deploy --ticket "$TICKET" --status skipped \
+    --reason "no deployment_status event for $MERGE_SHA on env $DEPLOY_ENV within ${DEPLOY_TIMEOUT}s"
   exit 0
 fi
 
