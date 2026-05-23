@@ -463,17 +463,67 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(appendEvent.calls.length).toBe(0);
   });
 
-  test("'noop' for a running signal whose bg job is alive (no emit)", () => {
+  test("'noop' for a running signal whose bg job is FRESH (state.json mtime within staleMs)", () => {
+    // CTL-588: a `running` classification + fresh state.json mtime → live worker.
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
-      statJob: () => ({ exists: true, mtimeMs: 1 }), // bg alive
+      statJob: () => ({ exists: true, mtimeMs: 1_000_000 }),
       probes: { implement: probe },
       emitComplete: emit,
       appendEvent: recorder(undefined),
+      // Pin "now" near the bg mtime so the staleness check sees a fresh worker.
+      now: () => 1_000_500,
     });
     expect(r).toBe("noop");
     expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-588: 'running' with a STALE bg state.json (> staleMs) is treated as effectively dead", () => {
+    // The bug CTL-588 fixes: claude --bg leaves the job dir behind after the
+    // worker exits, so classifyWorker stays `running` indefinitely. We catch
+    // this via mtime — a real worker updates state.json every few seconds.
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent,
+      now: () => 1_000 + 6 * 60 * 1000, // 6 minutes past mtime — stale
+    });
+    expect(r).toBe("reclaimed");
+    expect(probe.calls.length).toBe(1);
+    expect(emit.calls.length).toBe(1);
+    expect(appendEvent.calls.length).toBe(1);
+  });
+
+  test("CTL-588: 'running' with a FRESH bg state.json (under staleMs) is NOT reclaimed", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => ({ exists: true, mtimeMs: 1_000_000 }),
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      now: () => 1_000_000 + 4 * 60 * 1000, // 4 minutes — under threshold
+    });
+    expect(r).toBe("noop");
+    expect(probe.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-588: staleMs is honored when explicitly passed (override)", () => {
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => ({ exists: true, mtimeMs: 100 }),
+      probes: { implement: () => true },
+      emitComplete: () => ({ code: 0 }),
+      appendEvent: () => {},
+      now: () => 100 + 60_000,
+      staleMs: 30_000, // 30s threshold — 1 min IS stale
+    });
+    expect(r).toBe("reclaimed");
   });
 
   test("'noop' for an unknown signal (no bg_job_id)", () => {
