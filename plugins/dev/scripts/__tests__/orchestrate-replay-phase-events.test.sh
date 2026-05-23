@@ -199,6 +199,21 @@ RC=$?
 echo "$OUT" | grep -qi "baseline" && pass "stderr mentions baseline" || fail "stderr mentions baseline" "got: $OUT"
 scratch_teardown
 
+echo "test 9a (CTL-512): phase.monitor-deploy.skipped.CTL-512 in window → invokes phase-advance (same as complete)"
+scratch_setup
+write_worker "CTL-512"
+write_state_with_baseline
+emit_phase_event "monitor-deploy" "skipped" "CTL-512"
+run_replay >/dev/null 2>"${SCRATCH}/err"
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 for skipped event" || fail "exit 0 for skipped event" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+ADV_COUNT=$(wc -l < "$ADVANCE_LOG" | tr -d ' ')
+[ "$ADV_COUNT" = "1" ] && pass "phase-advance invoked once for skipped" || fail "phase-advance invoked once for skipped" "log: $(cat "$ADVANCE_LOG")"
+grep -q -- "--completed-phase monitor-deploy" "$ADVANCE_LOG" && pass "--completed-phase monitor-deploy forwarded for skipped" || fail "--completed-phase monitor-deploy forwarded for skipped" "log: $(cat "$ADVANCE_LOG")"
+grep -q -- "--ticket CTL-512" "$ADVANCE_LOG" && pass "--ticket CTL-512 forwarded for skipped" || fail "--ticket CTL-512" "log: $(cat "$ADVANCE_LOG")"
+[ ! -s "$REVIVE_LOG" ] && pass "revive NOT invoked for skipped (terminal-success path)" || fail "revive NOT invoked for skipped" "log: $(cat "$REVIVE_LOG")"
+scratch_teardown
+
 echo "test 9: month rollover — baseline points to last month, current EOF is in new month"
 scratch_setup
 write_worker "CTL-491"

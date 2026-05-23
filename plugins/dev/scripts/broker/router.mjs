@@ -1098,6 +1098,7 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
 //   phase.<name>.complete.<ticket>
 //   phase.<name>.failed.<ticket>
 //   phase.<name>.turn-cap-exhausted.<ticket>   (CTL-484)
+//   phase.<name>.skipped.<ticket>              (CTL-512)
 //
 // where <name> matches one of the interest's phase_names and <ticket> matches
 // the interest's ticket. Used by the phase-agent orchestrator to coordinate
@@ -1106,8 +1107,11 @@ function _autoPrLifecycleFromTicket(ticket, prNumber, interestsMap, repo) {
 // CTL-484: turn-cap-exhausted is routed alongside complete/failed so the
 // orchestrator can dispatch a continuation worker (separate budget from the
 // error-revive path) without an event-name namespace collision.
+// CTL-512: skipped is the monitor-deploy terminal-no-deploy status. Routed
+// the same as complete (phase-advance is a no-op for monitor-deploy) so the
+// scheduler frees the wave slot.
 const PHASE_EVENT_PATTERN =
-  /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+  /^phase\.([^.]+)\.(complete|failed|turn-cap-exhausted|skipped)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
 
 export function tryPhaseLifecycleRoute(event, interestsMap) {
   const matches = [];
@@ -1129,7 +1133,9 @@ export function tryPhaseLifecycleRoute(event, interestsMap) {
         ? `Phase ${phaseName} complete on ${ticket}`
         : status === "turn-cap-exhausted"
           ? `Phase ${phaseName} turn-cap-exhausted on ${ticket}`
-          : `Phase ${phaseName} failed on ${ticket}`;
+          : status === "skipped"
+            ? `Phase ${phaseName} skipped on ${ticket}`
+            : `Phase ${phaseName} failed on ${ticket}`;
     matches.push({
       interestId,
       reason,

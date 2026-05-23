@@ -238,6 +238,40 @@ echo '{"ticket":"CTL-100","phase":"plan","status":"running"}' >"$SIGNAL"
 assert_eq "failed" "$(jq -r '.status' "$SIGNAL")" "default mode still flips signal status to failed"
 
 echo ""
+echo "Test 10 (CTL-512): --status skipped is accepted and emits a distinct event"
+fresh_env t10
+"$EMIT_SCRIPT" --phase monitor-deploy --ticket CTL-512 --status skipped \
+	--reason "no deployment_status event for SHA on env within 1800s" \
+	>/dev/null 2>&1
+LINE=$(read_event_line)
+if [[ -z $LINE ]]; then
+	fail "Test 10: no event line emitted"
+else
+	EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"')
+	PAYLOAD_STATUS=$(echo "$LINE" | jq -r '.body.payload.status')
+	PAYLOAD_REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason')
+	SEVERITY=$(echo "$LINE" | jq -r '.severityText')
+	assert_eq "phase.monitor-deploy.skipped.CTL-512" "$EVENT_NAME" "event.name uses .skipped suffix"
+	assert_eq "skipped" "$PAYLOAD_STATUS" "body.payload.status = skipped"
+	assert_eq "no deployment_status event for SHA on env within 1800s" "$PAYLOAD_REASON" "body.payload.failure_reason carries reason"
+	assert_eq "INFO" "$SEVERITY" "skipped → INFO severity (successful terminal, not an error)"
+fi
+
+echo ""
+echo "Test 11 (CTL-512): signal file is updated to status=skipped, completedAt set, bg_job_id preserved"
+fresh_env t11
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-monitor-deploy.json"
+echo '{"ticket":"CTL-100","phase":"monitor-deploy","status":"running","bg_job_id":"abc"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase monitor-deploy --ticket CTL-100 --status skipped \
+	--reason "no deployment_status event" >/dev/null 2>&1
+NEW_STATUS=$(jq -r '.status' "$SIGNAL")
+HAS_COMPLETED=$(jq -r 'has("completedAt")' "$SIGNAL")
+BG=$(jq -r '.bg_job_id' "$SIGNAL")
+assert_eq "skipped" "$NEW_STATUS" "signal file status updated to skipped"
+assert_eq "true" "$HAS_COMPLETED" "skipped is terminal → completedAt set"
+assert_eq "abc" "$BG" "bg_job_id preserved (memory: project_phase_monitor_deploy_signal_overwrite)"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then

@@ -153,6 +153,61 @@ describe("readWorkerSignals", () => {
     expect(sigs[0].status).toBe("running");
   });
 
+  test("byActivePhase ranks status='skipped' as terminal (CTL-512)", () => {
+    // A worker dir with one in-flight phase and a later skipped monitor-deploy
+    // must report the in-flight phase as active, not the skipped terminal —
+    // the same ranking as for status='done'. Smoke test for the TERMINAL
+    // set including 'skipped'.
+    const dir = join(workersDir(), "CTL-512");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({
+        ticket: "CTL-512",
+        phase: "research",
+        status: "running",
+        updatedAt: "2026-05-21T01:00:00Z",
+      }),
+    );
+    writeFileSync(
+      join(dir, "phase-monitor-deploy.json"),
+      JSON.stringify({
+        ticket: "CTL-512",
+        phase: "monitor-deploy",
+        status: "skipped",
+        updatedAt: "2026-05-21T02:00:00Z",
+      }),
+    );
+    // NOTE: phase-monitor-deploy.json is in ARTIFACT_NAMES so it is filtered
+    // out as an artifact, not as a signal. To exercise byActivePhase with a
+    // skipped terminal we use a fresh worker dir whose terminal signal is on
+    // a different phase name.
+    const dir2 = join(workersDir(), "CTL-512B");
+    mkdirSync(dir2, { recursive: true });
+    writeFileSync(
+      join(dir2, "phase-research.json"),
+      JSON.stringify({
+        ticket: "CTL-512B",
+        phase: "research",
+        status: "running",
+        updatedAt: "2026-05-21T01:00:00Z",
+      }),
+    );
+    writeFileSync(
+      join(dir2, "phase-pr.json"),
+      JSON.stringify({
+        ticket: "CTL-512B",
+        phase: "pr",
+        status: "skipped",
+        updatedAt: "2026-05-21T02:00:00Z",
+      }),
+    );
+    const sigs = readWorkerSignals(orchDir);
+    const m = byTicket(sigs);
+    expect(m.get("CTL-512B").phase).toBe("research");
+    expect(m.get("CTL-512B").status).toBe("running");
+  });
+
   test("tolerates malformed JSON — skips the file, does not throw", () => {
     writeFlat("CTL-1", { phase: 1, pid: 1, status: "running" });
     writeFileSync(join(workersDir(), "CTL-bad.json"), "{ not json");

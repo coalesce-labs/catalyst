@@ -5,8 +5,11 @@
 # three things in a single invocation:
 #
 #   1. Emit the broker-routable canonical event
-#        phase.<name>.complete.<ticket>   (status=complete)
-#        phase.<name>.failed.<ticket>     (status=failed)
+#        phase.<name>.complete.<ticket>             (status=complete)
+#        phase.<name>.failed.<ticket>               (status=failed)
+#        phase.<name>.turn-cap-exhausted.<ticket>   (CTL-484 continuation)
+#        phase.<name>.skipped.<ticket>              (CTL-512, monitor-deploy
+#                                                    terminal-no-deploy)
 #      to ~/catalyst/events/YYYY-MM.jsonl using build_canonical_line from
 #      lib/canonical-event.sh. The broker's phase_lifecycle interest type
 #      (CTL-447) routes this to the orchestrator session that registered it.
@@ -132,8 +135,8 @@ done
 [[ -n $STATUS ]] || die "--status is required"
 
 case "$STATUS" in
-complete | failed | turn-cap-exhausted) ;;
-*) die "--status must be 'complete', 'failed', or 'turn-cap-exhausted' (got: $STATUS)" ;;
+complete | failed | turn-cap-exhausted | skipped) ;;
+*) die "--status must be 'complete', 'failed', 'turn-cap-exhausted', or 'skipped' (got: $STATUS)" ;;
 esac
 
 # Validate ticket shape against the same pattern the broker uses.
@@ -150,7 +153,7 @@ fi
 
 EVENT_NAME="phase.${PHASE}.${STATUS}.${TICKET}"
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-SEVERITY=$([[ $STATUS == "complete" ]] && echo INFO || echo WARN)
+SEVERITY=$([[ $STATUS == "complete" || $STATUS == "skipped" ]] && echo INFO || echo WARN)
 TRACE_ID=$(derive_trace_id "$ORCH_ID" "$SESSION_ID")
 SPAN_ID=$(derive_span_id "$TICKET" "$SESSION_ID")
 
@@ -207,10 +210,12 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		complete) NEW_STATUS="done" ;;
 		failed) NEW_STATUS="failed" ;;
 		turn-cap-exhausted) NEW_STATUS="turn-cap-exhausted" ;;
+		skipped) NEW_STATUS="skipped" ;; # CTL-512: monitor-deploy terminal-no-deploy
 		esac
 		# turn-cap-exhausted is NOT a terminal state — leave completedAt unset so
 		# consumers can distinguish "worker stopped at cap, awaiting continuation"
-		# from "worker reached its definition of done".
+		# from "worker reached its definition of done". CTL-512: skipped IS terminal
+		# (slot frees), so it falls through to the default SET_COMPLETED branch.
 		if [[ $STATUS == "turn-cap-exhausted" ]]; then
 			SET_COMPLETED='.'
 		else
@@ -244,8 +249,12 @@ if [[ -n $SESSION_ID ]] && [[ -x "${SCRIPT_DIR}/catalyst-session.sh" ]]; then
 	# to `failed` for the session DB (the session genuinely stopped before its
 	# /goal completed) but the reason carries the disambiguating signal so
 	# downstream telemetry can tell cap-exits apart from real errors (CTL-484).
+	# CTL-512: skipped maps to `done` — the session reached its /goal (the
+	# producer decided no deploy event was coming and exited cleanly) and the
+	# wave slot frees on the canonical phase event.
 	case "$STATUS" in
 	complete) SESSION_OUTCOME=done ;;
+	skipped) SESSION_OUTCOME=done ;;
 	turn-cap-exhausted) SESSION_OUTCOME=failed ;;
 	*) SESSION_OUTCOME=failed ;;
 	esac

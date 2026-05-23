@@ -93,7 +93,13 @@ run_case() {
   fi
 
   local case_dir="$TMPROOT/$case_name"
-  local worker="$case_dir/worker"
+  # CTL-512: lay the worker dir under $orch_dir/workers/CTL-9999 so the
+  # phase-agent-emit-complete wrapper can locate phase-monitor-deploy.json
+  # via ${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json. WORKER_DIR is
+  # still passed explicitly so the skill body's resolution order
+  # (WORKER_DIR > ORCH_DIR/workers/TICKET > cwd) sticks.
+  local orch_dir="$case_dir/orch"
+  local worker="$orch_dir/workers/CTL-9999"
   mkdir -p "$worker" "$case_dir/bin"
 
   # Fixture phase-monitor-merge.json (primary input for phase-monitor-deploy).
@@ -152,10 +158,25 @@ EOF
   # AFTER catalyst-events wait-for has begun watching from EOF. This mirrors
   # the production flow where the deploy webhook arrives after the worker
   # has started waiting.
+  # CTL-512: when the skill body uses the phase-agent-emit-complete wrapper
+  # for the skipped branch, the wrapper writes events to
+  # $CATALYST_DIR/events/YYYY-MM.jsonl (NOT $CATALYST_EVENTS_FILE — that's a
+  # lib-helper-only override). Pre-seed CATALYST_DIR so the wrapper's
+  # canonical_jsonl_append lands the event in the same scratch dir we read
+  # back; mirror the file into $events_file for the existing assertion.
+  local catalyst_dir="$case_dir/catalyst"
+  mkdir -p "$catalyst_dir/events"
+  local month
+  month=$(date -u +%Y-%m)
+  : > "$catalyst_dir/events/${month}.jsonl"
+
   (
     PATH="$case_dir/bin:$PATH" \
     TICKET=CTL-9999 \
     WORKER_DIR="$worker" \
+    CATALYST_DIR="$catalyst_dir" \
+    CATALYST_ORCHESTRATOR_DIR="$orch_dir" \
+    CATALYST_ORCHESTRATOR_ID="orch-test" \
     CATALYST_EVENTS_FILE="$events_file" \
     PHASE_DEPLOY_TIMEOUT_SEC="$timeout_sec" \
     PHASE_DEPLOY_ENV="production" \
@@ -189,16 +210,16 @@ EXIT="$(cat "$CASE_DIR/exit-code")"
 assert_eq "success: exit code 0" 0 "$EXIT"
 
 assert_file_exists "success: phase-monitor-deploy.json created" \
-  "$CASE_DIR/worker/phase-monitor-deploy.json"
+  "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json"
 
-if [ -f "$CASE_DIR/worker/phase-monitor-deploy.json" ]; then
-  DSHA="$(jq -r '.deploy_sha' "$CASE_DIR/worker/phase-monitor-deploy.json")"
+if [ -f "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json" ]; then
+  DSHA="$(jq -r '.deploy_sha' "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json")"
   assert_eq "success: deploy_sha matches phase-pr.json" "abc123" "$DSHA"
 
-  DSTATE="$(jq -r '.deploy_state' "$CASE_DIR/worker/phase-monitor-deploy.json")"
+  DSTATE="$(jq -r '.deploy_state' "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json")"
   assert_eq "success: deploy_state recorded" "success" "$DSTATE"
 
-  CR_STATUS="$(jq -r '.canary_result.status' "$CASE_DIR/worker/phase-monitor-deploy.json")"
+  CR_STATUS="$(jq -r '.canary_result.status' "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json")"
   assert_eq "success: canary_result.status recorded" "success" "$CR_STATUS"
 fi
 
@@ -244,13 +265,27 @@ CASE_DIR3="$(run_case skipped abc789 success success 1 no)"
 EXIT3="$(cat "$CASE_DIR3/exit-code")"
 assert_eq "skipped: exit code 0" 0 "$EXIT3"
 
-if [ -f "$CASE_DIR3/worker/phase-monitor-deploy.json" ]; then
-  SSTATE="$(jq -r '.deploy_state' "$CASE_DIR3/worker/phase-monitor-deploy.json")"
+if [ -f "$CASE_DIR3/orch/workers/CTL-9999/phase-monitor-deploy.json" ]; then
+  SSTATE="$(jq -r '.deploy_state' "$CASE_DIR3/orch/workers/CTL-9999/phase-monitor-deploy.json")"
   assert_eq "skipped: deploy_state == skipped" "skipped" "$SSTATE"
+
+  # CTL-512: signal status is written by the wrapper now (not just the
+  # artifact's deploy_state). The execution-core scheduler's
+  # isTicketInFlight predicate reads .status and treats 'skipped' on
+  # monitor-deploy as terminal-success so the wave slot frees.
+  SIG_STATUS="$(jq -r '.status' "$CASE_DIR3/orch/workers/CTL-9999/phase-monitor-deploy.json")"
+  assert_eq "skipped: signal status == skipped (CTL-512)" "skipped" "$SIG_STATUS"
+
+  HAS_COMPLETED="$(jq -r 'has("completedAt")' "$CASE_DIR3/orch/workers/CTL-9999/phase-monitor-deploy.json")"
+  assert_eq "skipped: signal has completedAt (terminal, CTL-512)" "true" "$HAS_COMPLETED"
 fi
 
-SKIP_EVENT="$(jq -r '.attributes."event.name"' "$CASE_DIR3/events.jsonl" \
-              | tail -1)"
+# CTL-512: skipped now flows through phase-agent-emit-complete, which emits
+# to $CATALYST_DIR/events/YYYY-MM.jsonl rather than $CATALYST_EVENTS_FILE.
+SKIP_MONTH=$(date -u +%Y-%m)
+SKIP_EVENT="$(jq -r '.attributes."event.name" // empty' \
+              "$CASE_DIR3/catalyst/events/${SKIP_MONTH}.jsonl" 2>/dev/null \
+              | grep '^phase\.monitor-deploy\.' | tail -1)"
 assert_eq "skipped: emitted skipped event" \
   "phase.monitor-deploy.skipped.CTL-9999" "$SKIP_EVENT"
 
@@ -305,8 +340,8 @@ CASE_DIR5="$(run_case fallback fallbeef success success 5 yes "" yes fallbeef)"
 EXIT5="$(cat "$CASE_DIR5/exit-code")"
 assert_eq "fallback: exit code 0" 0 "$EXIT5"
 
-if [ -f "$CASE_DIR5/worker/phase-monitor-deploy.json" ]; then
-  DSHA5="$(jq -r '.deploy_sha' "$CASE_DIR5/worker/phase-monitor-deploy.json")"
+if [ -f "$CASE_DIR5/orch/workers/CTL-9999/phase-monitor-deploy.json" ]; then
+  DSHA5="$(jq -r '.deploy_sha' "$CASE_DIR5/orch/workers/CTL-9999/phase-monitor-deploy.json")"
   assert_eq "fallback: deploy_sha came from gh REST fallback" \
     "fallbeef" "$DSHA5"
 fi

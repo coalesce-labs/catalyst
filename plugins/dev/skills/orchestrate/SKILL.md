@@ -124,8 +124,9 @@ doesn't exist). Falls back to sensible defaults if no orchestration block exists
 
 - `"phase-agents"` (default after Phase 6 lands) — the orchestrator dispatches 9 short-lived phase
   agents per ticket via `claude --bg` (subscription pool). Phase 4 monitor subscribes a broker
-  `phase_lifecycle` interest per ticket and advances on `phase.<name>.complete.<TICKET>` events via
-  the `orchestrate-phase-advance` helper.
+  `phase_lifecycle` interest per ticket and advances on
+  `phase.<name>.{complete,skipped}.<TICKET>` events via the `orchestrate-phase-advance` helper
+  (CTL-512: `skipped` is a monitor-deploy terminal-no-deploy status routed the same as `complete`).
 - `"oneshot-legacy"` — the orchestrator dispatches one long `claude -p oneshot` worker per ticket.
   Kept for rollback safety; flipping a single config key reverts to the pre-CTL-452 behavior.
 - `"execution-core"` (CTL-554, CTL-582) — daemon-served. `/orchestrate` runs no wave loop and no
@@ -479,7 +480,7 @@ variable alongside `CATALYST_ORCHESTRATOR_DIR`).
 
 **Capture event-log baseline (CTL-491):** Before any worker dispatch, snapshot the catalyst event
 log's current line count and file path. The Phase 4 replay step uses this to find any
-`phase.*.{complete,failed,turn-cap-exhausted}.<TICKET>` events that landed during the
+`phase.*.{complete,failed,turn-cap-exhausted,skipped}.<TICKET>` events that landed during the
 dispatch-to-monitor handoff. The new `state.json.race` object is opaque to older state.json
 consumers (they ignore unknown top-level fields via `.field // default` jq patterns).
 
@@ -949,11 +950,14 @@ The helper emits four deterministic interests (route without Groq):
 - `pr_lifecycle` — orchestrator-level aggregation across all worker PRs.
 - `ticket_lifecycle` — Linear ticket state changes for the orchestrator's tickets.
 - `comms_lifecycle` — worker-posted `attention` / `done` messages on the shared channel.
-- `phase_lifecycle` (CTL-452, CTL-484) — `phase.<name>.complete.<TICKET>`,
-  `phase.<name>.failed.<TICKET>`, and `phase.<name>.turn-cap-exhausted.<TICKET>` events emitted by
-  phase agents. One interest per active ticket, covering all 9 phase names. The turn-cap status
-  routes through `orchestrate-revive`'s continuation branch (separate budget from error revives).
-  Only registered when `catalyst.orchestration.dispatchMode = "phase-agents"`.
+- `phase_lifecycle` (CTL-452, CTL-484, CTL-512) — `phase.<name>.complete.<TICKET>`,
+  `phase.<name>.failed.<TICKET>`, `phase.<name>.turn-cap-exhausted.<TICKET>`, and
+  `phase.<name>.skipped.<TICKET>` events emitted by phase agents. One interest per active ticket,
+  covering all 9 phase names. The turn-cap status routes through `orchestrate-revive`'s continuation
+  branch (separate budget from error revives). The skipped status (CTL-512, monitor-deploy
+  terminal-no-deploy) routes the same as complete via `orchestrate-phase-advance` — advance no-ops
+  on monitor-deploy, so the wake's purpose is to free the wave slot via the scheduler's in-flight
+  predicate. Only registered when `catalyst.orchestration.dispatchMode = "phase-agents"`.
 
 CTL-357 retired the Groq prose interest (~95% false-positive rate). All four interests share the
 same `notify_event: "filter.wake.${ORCH_NAME}"`, so the orchestrator's `wait-for` filter does not
@@ -970,12 +974,12 @@ change.
 ```
 
 **Replay race-window phase events (CTL-491):** Before entering the event-driven wait loop, catch up
-on any `phase.<name>.{complete,failed,turn-cap-exhausted}.<TICKET>` events that landed between the
-Phase 2 baseline (`state.json.race.startLineCursor`) and now. With the Phase 3 pre-dispatch
-registration the window should be zero-length in steady state, but the replay is idempotent and
-cheap — it scans only the tail of the current month's event log past the baseline cursor and routes
-each match through `orchestrate-phase-advance` (for `complete`) or `orchestrate-revive` (for
-`failed` / `turn-cap-exhausted`). Cross-orchestrator events are filtered out by checking
+on any `phase.<name>.{complete,failed,turn-cap-exhausted,skipped}.<TICKET>` events that landed
+between the Phase 2 baseline (`state.json.race.startLineCursor`) and now. With the Phase 3
+pre-dispatch registration the window should be zero-length in steady state, but the replay is
+idempotent and cheap — it scans only the tail of the current month's event log past the baseline
+cursor and routes each match through `orchestrate-phase-advance` (for `complete` / `skipped`) or
+`orchestrate-revive` (for `failed` / `turn-cap-exhausted`). Cross-orchestrator events are filtered out by checking
 `workers/*.json` for the ticket.
 
 ```bash
@@ -1144,6 +1148,7 @@ scan so the response stays proportional. Every reaction reads authoritative stat
 | `phase.<name>.complete.<TICKET>` (via phase_lifecycle, CTL-452)                                 | Resolve the next phase via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`; that helper looks up the next phase in the canonical 9-phase sequence and calls `orchestrate-dispatch-next --phase <next> --ticket <T>`. If `completed-phase=monitor-deploy`, no advance (terminal). The advance is idempotent under redundant wakes                                                                                                                        |
 | `phase.<name>.failed.<TICKET>` (via phase_lifecycle, CTL-452)                                   | Run `orchestrate-revive` once for the affected ticket; on the **second** failure (reviveCount ≥ MAX_REVIVES), mark worker `stalled` and post `attention` to the shared comms channel. Matches the existing one-retry-then-escalate handling for legacy oneshot workers                                                                                                                                                                                                    |
 | `phase.<name>.turn-cap-exhausted.<TICKET>` (via phase_lifecycle, CTL-484)                       | Run `orchestrate-revive` (same script — its continuation branch handles this status). The branch reads `handoffPath` from the per-phase signal, dispatches a `claude --bg --resume` continuation with `CATALYST_IS_CONTINUATION=true` + `CATALYST_HANDOFF_PATH` + `CATALYST_CONTINUATION_COUNT`, and bumps `.continuationCount` on a budget separate from `.reviveCount` (default 3). On budget exhaustion: `stalled` + `attentionReason="continuation-budget-exhausted"` |
+| `phase.<name>.skipped.<TICKET>` (via phase_lifecycle, CTL-512)                                   | Same as `complete`: resolve via `orchestrate-phase-advance --ticket <T> --completed-phase <name>`. Only emitted by `phase-monitor-deploy` when no `deployment_status` event arrived before `PHASE_DEPLOY_TIMEOUT_SEC`. Because `completed-phase=monitor-deploy`, the advance no-ops (terminal); the wake's purpose is to free the wave slot via the scheduler's in-flight predicate (`scheduler.mjs:isTicketInFlight`)                                                                                                                                                                       |
 | 10-minute idle (no event)                                                                       | Run the full reactive scan as a safety net                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 **Ground truth is git + PR, not the signal file.** The signal file is _advisory_ — it reports the

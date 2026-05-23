@@ -152,7 +152,45 @@ describe("phase_lifecycle interest type", () => {
     expect(matches[0].reason).toContain("CTL-100");
   });
 
-  // Test 4c — regression: unknown statuses still fall through (no wake).
+  // Test 4c — CTL-512: skipped is a terminal status the broker routes
+  // alongside complete/failed so the scheduler frees the wave slot.
+  test("phase.<name>.skipped.<ticket> events fire a wake with a skipped reason", () => {
+    registerPhaseInterest({ phaseNames: ["monitor-deploy"] });
+    const matches = tryPhaseLifecycleRoute(
+      {
+        ts: "2026-05-17T05:00:00Z",
+        attributes: { "event.name": "phase.monitor-deploy.skipped.CTL-100" },
+        body: {
+          payload: {
+            ticket: "CTL-100",
+            phase: "monitor-deploy",
+            status: "skipped",
+            failure_reason: "no deployment_status event for SHA in env within 1800s",
+          },
+        },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0].interestId).toBe("watcher-1");
+    expect(matches[0].reason).toMatch(/phase monitor-deploy skipped/i);
+    expect(matches[0].reason).toContain("CTL-100");
+  });
+
+  test("phase.<name>.skipped.<ticket> ignored for tickets not registered", () => {
+    registerPhaseInterest({ ticket: "CTL-100", phaseNames: ["monitor-deploy"] });
+    const matches = tryPhaseLifecycleRoute(
+      {
+        ts: "2026-05-17T05:00:00Z",
+        attributes: { "event.name": "phase.monitor-deploy.skipped.CTL-999" },
+        body: { payload: { ticket: "CTL-999", phase: "monitor-deploy" } },
+      },
+      getInterests()
+    );
+    expect(matches).toHaveLength(0);
+  });
+
+  // Test 4d — regression: unknown statuses still fall through (no wake).
   test("phase.<name>.<unknown>.<ticket> events are NOT routed", () => {
     registerPhaseInterest({ phaseNames: ["implement"] });
     const matches = tryPhaseLifecycleRoute(
