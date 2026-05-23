@@ -13,6 +13,7 @@ import {
   reconstructWorkerState,
   defaultStatJob,
   recoverStartup,
+  reclaimDeadWorkIfPossible,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -407,5 +408,173 @@ describe("recoverStartup", () => {
     const report = recoverStartup({ orchDir, exec, statJob: () => null });
     expect(report.cursor.byteOffset).toBe(0);
     expect(report.cursor.resumed).toBe(false);
+  });
+});
+
+// --- CTL-574: reclaim-dead-work --------------------------------------------
+
+// implementSignal — a bg-shaped phase-implement signal with the orchestrator +
+// session-id fields the reclaim path threads into emit-complete.
+function implementSignal({ ticket = "CTL-9", status = "running", bgJobId = "job-x" } = {}) {
+  return {
+    ticket,
+    phase: "implement",
+    status,
+    liveness: { kind: "bg", value: bgJobId },
+    signalPath: `/x/${ticket}/phase-implement.json`,
+    raw: {
+      ticket,
+      phase: "implement",
+      orchestrator: ticket,
+      status,
+      bg_job_id: bgJobId,
+      catalystSessionId: `sess_${ticket}_abc`,
+    },
+  };
+}
+
+// spies — record calls without bun:test's mock() so the assertions read plain.
+function recorder(returnValue) {
+  const calls = [];
+  const fn = (...args) => {
+    calls.push(args);
+    return typeof returnValue === "function" ? returnValue(...args) : returnValue;
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+describe("reclaimDeadWorkIfPossible", () => {
+  const orch = "/orch";
+
+  test("'noop' for a terminal signal (no emit, no probe)", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "done" }), {
+      statJob: () => null,
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent,
+    });
+    expect(r).toBe("noop");
+    expect(probe.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+    expect(appendEvent.calls.length).toBe(0);
+  });
+
+  test("'noop' for a running signal whose bg job is alive (no emit)", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => ({ exists: true, mtimeMs: 1 }), // bg alive
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+    });
+    expect(r).toBe("noop");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("'noop' for an unknown signal (no bg_job_id)", () => {
+    const sig = implementSignal();
+    sig.liveness = { kind: "bg", value: null };
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => null,
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+    });
+    expect(r).toBe("noop");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("'not-applicable' when the phase has no registered probe", () => {
+    const sig = { ...implementSignal(), phase: "research" };
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => null, // bg dead
+      probes: { implement: recorder(true) }, // research not registered
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+    });
+    expect(r).toBe("not-applicable");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("'not-done' when the dead worker's probe returns false (no emit)", () => {
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null, // bg dead
+      probes: { implement: recorder(false) }, // probe: work NOT done
+      emitComplete: emit,
+      appendEvent,
+    });
+    expect(r).toBe("not-done");
+    expect(emit.calls.length).toBe(0);
+    expect(appendEvent.calls.length).toBe(0);
+  });
+
+  test("'reclaimed' fires append-event THEN emit-complete (in that order, with full flag set)", () => {
+    const order = [];
+    const appendEvent = (...args) => {
+      order.push(["append", ...args]);
+    };
+    const emit = (...args) => {
+      order.push(["emit", ...args]);
+      return { code: 0 };
+    };
+    const sig = implementSignal();
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => null, // bg dead
+      probes: { implement: () => true }, // work done
+      emitComplete: emit,
+      appendEvent,
+      repoRoot: "/repo",
+    });
+    expect(r).toBe("reclaimed");
+    // order: append first, then emit.
+    expect(order[0][0]).toBe("append");
+    expect(order[1][0]).toBe("emit");
+    // append-event payload mentions the phase + ticket + orch id.
+    expect(order[0][1]).toEqual({
+      phase: "implement",
+      ticket: "CTL-9",
+      orchId: "CTL-9",
+    });
+    // emit-complete receives the orchDir and the signal.
+    expect(order[1][1]).toEqual({ orchDir: orch, signal: sig });
+  });
+
+  test("'reclaim-failed' when emit-complete returns non-zero (event still appended)", () => {
+    const appendEvent = recorder(undefined);
+    const emit = recorder({ code: 1, stderr: "boom" });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      probes: { implement: () => true },
+      emitComplete: emit,
+      appendEvent,
+    });
+    expect(r).toBe("reclaim-failed");
+    expect(appendEvent.calls.length).toBe(1);
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("repoRoot is forwarded to the probe (so the probe can resolve the worktree)", () => {
+    let seen = null;
+    const probe = (args) => {
+      seen = args;
+      return true;
+    };
+    reclaimDeadWorkIfPossible(orch, implementSignal({ ticket: "CTL-42" }), {
+      statJob: () => null,
+      probes: { implement: probe },
+      emitComplete: () => ({ code: 0 }),
+      appendEvent: () => {},
+      repoRoot: "/repo/x",
+    });
+    expect(seen).toEqual({ ticket: "CTL-42", repoRoot: "/repo/x" });
   });
 });

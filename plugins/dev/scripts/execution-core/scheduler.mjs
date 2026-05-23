@@ -25,6 +25,11 @@ import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
 import { getProjectConfig } from "./registry.mjs";
 import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
+import { readWorkerSignals } from "./signal-reader.mjs";
+// CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
+// is the real recovery-module function; tests inject a fake. See
+// reclaimDeadWorkIfPossible in recovery.mjs for the decision tree.
+import { reclaimDeadWorkIfPossible as defaultReclaimDeadWork } from "./recovery.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -345,8 +350,25 @@ export function schedulerTick(
     exec,
     writeStatus = linearWrite,
     teardownWorktree = defaultTeardownWorktree,
+    reclaimDeadWork = defaultReclaimDeadWork,
   } = {},
 ) {
+  // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
+  // died but whose work was committed before the death. Runs BEFORE the
+  // advancement sweep so a reclaimed phase advances the same tick. Iterates
+  // every active worker signal (readWorkerSignals returns one per ticket — the
+  // active, non-terminal-first phase) and asks reclaimDeadWork to decide.
+  // Reclaim is a strict superset of "do nothing": only the dead+work-done case
+  // mutates the signal; all other classes (terminal/running/unknown/not-done/
+  // not-applicable) are zero-action no-ops.
+  const reclaimed = [];
+  for (const sig of readWorkerSignals(orchDir)) {
+    const team = teamOf(sig.ticket);
+    const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+    const r = reclaimDeadWork(orchDir, sig, { repoRoot });
+    if (r === "reclaimed") reclaimed.push({ ticket: sig.ticket, phase: sig.phase });
+  }
+
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
   const advanced = [];
   for (const ticket of listInFlightTickets(orchDir)) {
@@ -418,7 +440,7 @@ export function schedulerTick(
     }
   }
 
-  return { advanced, dispatched, freeSlots, ready: ready.map((t) => t.identifier) };
+  return { reclaimed, advanced, dispatched, freeSlots, ready: ready.map((t) => t.identifier) };
 }
 
 // ─── Phase 5: the pull-loop daemon ───
