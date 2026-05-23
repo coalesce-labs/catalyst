@@ -963,3 +963,132 @@ describe("schedulerTick — worktree teardown on Done (CTL-582)", () => {
     expect(existsSync(markerPath("CTL-4"))).toBe(false); // retryable — no marker
   });
 });
+
+// --- CTL-574: reclaim-dead-work step in schedulerTick -----------------------
+
+describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
+  // writeNestedSignal — write a worker signal with the full shape signal-reader
+  // produces (status + bg_job_id), so classifyWorker can be driven by the real
+  // pipeline. The reclaim path uses this signal's phase + ticket.
+  function writeNestedSignal(ticket, phase, body) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, ...body }),
+    );
+  }
+
+  test("schedulerTick calls the injected reclaimDeadWork once per worker signal", () => {
+    // Two in-flight tickets with a single phase signal each — readWorkerSignals
+    // returns one (active) per ticket, so reclaimDeadWork is called twice.
+    writeNestedSignal("CTL-1", "implement", { status: "running", bg_job_id: "j1" });
+    writeNestedSignal("CTL-2", "implement", { status: "running", bg_job_id: "j2" });
+
+    const reclaimDeadWork = recorder("noop");
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
+      teardownWorktree: () => true,
+      reclaimDeadWork,
+    });
+    expect(reclaimDeadWork.calls.length).toBe(2);
+    // each call gets (orchDir, signal, { repoRoot }).
+    for (const args of reclaimDeadWork.calls) {
+      expect(args[0]).toBe(orchDir);
+      expect(args[1].phase).toBe("implement");
+      expect(["CTL-1", "CTL-2"]).toContain(args[1].ticket);
+      expect(typeof args[2]).toBe("object");
+      expect(args[2]).toHaveProperty("repoRoot");
+    }
+  });
+
+  test("a 'reclaimed' result flips the signal (via emit-complete) so advancement fires the next phase same tick", () => {
+    // The reclaim's emit-complete spawns phase-agent-emit-complete which flips
+    // the signal on disk. In this unit test we don't actually run that script,
+    // so we simulate it by mutating the on-disk signal inside the injected
+    // reclaimDeadWork itself — the canonical "reclaim outcome" the production
+    // path produces.
+    writeNestedSignal("CTL-1", "implement", { status: "running", bg_job_id: "j1" });
+    writeNestedSignal("CTL-1", "research", { status: "done" });
+    writeNestedSignal("CTL-1", "plan", { status: "done" });
+    writeNestedSignal("CTL-1", "triage", { status: "done" });
+
+    const reclaimDeadWork = (_orchDir, sig) => {
+      // simulate the emit-complete signal flip
+      const signalPath = join(orchDir, "workers", sig.ticket, `phase-${sig.phase}.json`);
+      writeFileSync(
+        signalPath,
+        JSON.stringify({ ticket: sig.ticket, phase: sig.phase, status: "done", completedAt: "t" }),
+      );
+      return "reclaimed";
+    };
+    const dispatch = recorder({ code: 0 });
+    const writeStatus = { applyPhaseStatus: () => {}, applyTerminalDone: () => {} };
+
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork,
+    });
+
+    // Advancement saw the reclaimed implement: dispatch was called with the
+    // next phase (`verify`) for CTL-1. dispatchTicket invokes the seam as
+    // `dispatch({ orchDir, ticket, phase })`, so calls[i][0] is the object.
+    const verifyDispatches = dispatch.calls.filter((args) => args[0]?.phase === "verify");
+    expect(verifyDispatches.length).toBe(1);
+    expect(verifyDispatches[0][0].ticket).toBe("CTL-1");
+
+    // The tick's return object reports the reclaim alongside the advance.
+    expect(result.reclaimed).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+    expect(result.advanced).toEqual([{ ticket: "CTL-1", phase: "verify" }]);
+  });
+
+  test("a 'noop' / 'not-done' / 'not-applicable' result is invisible to advancement", () => {
+    writeNestedSignal("CTL-1", "implement", { status: "running", bg_job_id: "j1" });
+
+    // reclaim returns not-done — signal stays running, advancement skips.
+    const reclaimDeadWork = () => "not-done";
+    const dispatch = recorder({ code: 0 });
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
+      teardownWorktree: () => true,
+      reclaimDeadWork,
+    });
+    expect(dispatch.calls.length).toBe(0);
+    expect(result.reclaimed).toEqual([]);
+  });
+
+  test("default reclaimDeadWork is wired to the real recovery function (no injection still safe)", () => {
+    // No injected reclaimDeadWork. With no dead workers in the fixture, the
+    // real reclaim short-circuits to 'noop' for every signal and the tick is
+    // a normal-path no-op. This proves the default seam doesn't throw on a
+    // clean tick.
+    expect(() =>
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: () => ({ code: 0 }),
+        writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
+        teardownWorktree: () => true,
+      }),
+    ).not.toThrow();
+  });
+});
+
+// recorder — small spy that records args and returns either a constant value or
+// a function-derived value. Local to this describe to avoid leaking into the
+// existing block-scope helpers.
+function recorder(returnValue) {
+  const calls = [];
+  const fn = (...args) => {
+    calls.push(args);
+    return typeof returnValue === "function" ? returnValue(...args) : returnValue;
+  };
+  fn.calls = calls;
+  return fn;
+}
