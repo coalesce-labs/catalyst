@@ -107,37 +107,40 @@ PR_NUMBER="${PR_NUMBER:-UNKNOWN}"
 PR_URL="${PR_URL:-UNKNOWN}"
 
 render() {
-  # Substitute ${VAR} placeholders from a template file. Only replaces variables we know about;
-  # leaves the rest literal so templates stay readable.
+  # CTL-380: substitute ${VAR} placeholders via jq -Rs so newline-bearing values
+  # (notably $ISSUES, which orchestrate-auto-fixup joins with \n) flow through
+  # verbatim. The previous awk -v implementation hit "newline in string" on
+  # BSD/mawk and silently truncated multi-line values to their first line.
   local template="$1"
-  awk -v tid="$TICKET_ID" \
-      -v orch="$ORCH_NAME" \
-      -v wd="$WORKER_DIR" \
-      -v bn="$BRANCH_NAME" \
-      -v prn="$PR_NUMBER" \
-      -v pru="$PR_URL" \
-      -v sf="$SIGNAL_FILE" \
-      -v issues="$ISSUES" \
-      -v od="$ORCH_DIR" \
-      -v pf="$PROMPT_FILE" \
-      -v wm="$WORKER_MODEL" \
-      -v scope="dev" \
-  '{
-    gsub(/\$\{TICKET_ID\}/, tid);
-    gsub(/\$\{ORCH_NAME\}/, orch);
-    gsub(/\$\{ORCH_DIR\}/, od);
-    gsub(/\$\{WORKTREE_PATH\}/, wd);
-    gsub(/\$\{WORKER_DIR\}/, wd);
-    gsub(/\$\{BRANCH_NAME\}/, bn);
-    gsub(/\$\{PR_NUMBER\}/, prn);
-    gsub(/\$\{PR_URL\}/, pru);
-    gsub(/\$\{SIGNAL_FILE\}/, sf);
-    gsub(/\$\{ISSUES\}/, issues);
-    gsub(/\$\{PROMPT_FILE\}/, pf);
-    gsub(/\$\{WORKER_MODEL\}/, wm);
-    gsub(/\$\{SCOPE\}/, scope);
-    print;
-  }' "$template"
+  jq -Rsr \
+    --arg tid    "$TICKET_ID" \
+    --arg orch   "$ORCH_NAME" \
+    --arg od     "$ORCH_DIR" \
+    --arg wd     "$WORKER_DIR" \
+    --arg bn     "$BRANCH_NAME" \
+    --arg prn    "$PR_NUMBER" \
+    --arg pru    "$PR_URL" \
+    --arg sf     "$SIGNAL_FILE" \
+    --arg issues "$ISSUES" \
+    --arg pf     "$PROMPT_FILE" \
+    --arg wm     "$WORKER_MODEL" \
+    --arg scope  "dev" \
+    '
+      gsub("\\$\\{TICKET_ID\\}";     $tid)
+      | gsub("\\$\\{ORCH_NAME\\}";    $orch)
+      | gsub("\\$\\{ORCH_DIR\\}";     $od)
+      | gsub("\\$\\{WORKTREE_PATH\\}";$wd)
+      | gsub("\\$\\{WORKER_DIR\\}";   $wd)
+      | gsub("\\$\\{BRANCH_NAME\\}";  $bn)
+      | gsub("\\$\\{PR_NUMBER\\}";    $prn)
+      | gsub("\\$\\{PR_URL\\}";       $pru)
+      | gsub("\\$\\{SIGNAL_FILE\\}";  $sf)
+      | gsub("\\$\\{ISSUES\\}";       $issues)
+      | gsub("\\$\\{PROMPT_FILE\\}";  $pf)
+      | gsub("\\$\\{WORKER_MODEL\\}"; $wm)
+      | gsub("\\$\\{SCOPE\\}";        $scope)
+      | sub("\n$"; "")
+    ' "$template"
 }
 
 if [ "$DRY_RUN" -eq 1 ]; then

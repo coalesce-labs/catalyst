@@ -31,6 +31,14 @@ expect_contains() {
   grep -q -- "$needle" "$file" || { echo "    missing: $needle"; return 1; }
 }
 
+expect_not_contains() {
+  local file="$1" needle="$2"
+  if grep -q -- "$needle" "$file"; then
+    echo "    unexpected match: $needle in $file"
+    return 1
+  fi
+}
+
 expect_exit() {
   local expected="$1"; shift
   set +e
@@ -127,6 +135,34 @@ CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_4" \
   "$FIXUP" TEST-4 --issues "x" --pr 9 --worker-dir "$EXPLICIT_DIR" > "${SCRATCH}/run4.out" 2>&1
 run "--worker-dir override wins over state.json" \
   expect_contains "${ORCH_DIR_4}/workers/dispatch-fixup-TEST-4.sh" "WORKER_DIR=\"${EXPLICIT_DIR}\""
+
+# Test 9 (CTL-380): render() preserves multi-line --issues verbatim. The previous
+# awk -v implementation hit "newline in string" on BSD/mawk and silently truncated
+# $ISSUES to its first line, which broke orchestrate-auto-fixup whenever there
+# were ≥2 unresolved review threads.
+ORCH_DIR_5="${SCRATCH}/orch5"
+mkdir -p "${ORCH_DIR_5}/workers"
+ISSUES_ML=$'foo.ts:10: null deref in handler\nbar.ts:25: missing await on async call\nbaz.ts:7: unused import after refactor'
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_5" \
+  "$FIXUP" TEST-5 --issues "$ISSUES_ML" --pr 13 \
+    > "${SCRATCH}/run5.stdout" 2> "${SCRATCH}/run5.stderr" || true
+PROMPT_5="${ORCH_DIR_5}/workers/fixup-TEST-5-prompt.md"
+
+run "multi-line --issues: no 'newline in string' warnings on stderr" \
+  expect_not_contains "${SCRATCH}/run5.stderr" "newline in string"
+run "multi-line --issues: line 1 present in rendered prompt" \
+  expect_contains "$PROMPT_5" "foo.ts:10: null deref in handler"
+run "multi-line --issues: line 2 present in rendered prompt" \
+  expect_contains "$PROMPT_5" "bar.ts:25: missing await on async call"
+run "multi-line --issues: line 3 present in rendered prompt" \
+  expect_contains "$PROMPT_5" "baz.ts:7: unused import after refactor"
+# All N input lines land under the '## Blockers to resolve' section (count match)
+run "multi-line --issues: all 3 lines under '## Blockers to resolve'" \
+  bash -c "
+    awk '/^## Blockers to resolve\$/{f=1;next}/^## /{f=0}f' '$PROMPT_5' \
+      | grep -cE '^(foo|bar|baz)\.ts:[0-9]+:' \
+      | grep -qx 3
+  "
 
 echo ""
 echo "orchestrate-fixup: ${PASSES} passed, ${FAILURES} failed"
