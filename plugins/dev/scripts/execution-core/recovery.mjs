@@ -173,21 +173,40 @@ function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
   }
 }
 
+// STALE_MS — a healthy claude --bg worker updates ~/.claude/jobs/<id>/state.json
+// every few seconds (heartbeats, output appends, scan offsets). A state.json
+// untouched longer than this is conclusive evidence the worker stopped (CTL-588).
+// 5 minutes is a generous gap that won't false-positive a worker idling on a
+// long tool call.
+const STALE_MS = 5 * 60 * 1000;
+
 // reclaimDeadWorkIfPossible — one signal in, one decision out. The five-way
 // return discriminates the cases an operator might need to investigate:
 //
-//   'noop'             not 'dead' (terminal / running / unknown). No action.
-//   'not-applicable'   'dead' but the phase has no registered work-done probe.
-//                      Out of scope for CTL-574; CTL-587's territory.
-//   'not-done'         'dead' + probe says the work is NOT committed. The
-//                      worker really did die mid-implement. CTL-587 will
+//   'noop'             not effectively dead (terminal / unknown / live running).
+//                      No action.
+//   'not-applicable'   effectively dead but the phase has no registered
+//                      work-done probe. Out of scope for CTL-574; CTL-587's
+//                      territory.
+//   'not-done'         effectively dead + probe says the work is NOT committed.
+//                      The worker really did die mid-implement. CTL-587 will
 //                      re-dispatch when that lands.
-//   'reclaimed'        'dead' + work IS done. Reclaim succeeded — the canonical
-//                      audit + complete events were appended, the signal was
-//                      flipped, the session was ended.
-//   'reclaim-failed'   'dead' + work IS done BUT emit-complete exited non-zero.
-//                      The signal is NOT mutated (the emit-complete script
-//                      writes via atomic rename); the next tick retries.
+//   'reclaimed'        effectively dead + work IS done. Reclaim succeeded —
+//                      the canonical audit + complete events were appended,
+//                      the signal was flipped, the session was ended.
+//   'reclaim-failed'   effectively dead + work IS done BUT emit-complete
+//                      exited non-zero. The signal is NOT mutated (emit-
+//                      complete writes via atomic rename); the next tick
+//                      retries.
+//
+// CTL-588: "effectively dead" is broader than classifyWorker's `dead`. The
+// canonical `dead` requires the bg job dir to be GONE, but claude --bg leaves
+// job dirs behind indefinitely after the worker exits (memory
+// project_phase_agent_bg_no_reap). A worker that really died, but whose dir
+// lingers, classifies as `running`. We add a freshness check: a `running`
+// signal whose bg state.json hasn't been touched in `staleMs` is treated as
+// effectively dead. classifyWorker itself is unchanged — only this consumer
+// needs the stronger liveness signal.
 export function reclaimDeadWorkIfPossible(
   orchDir,
   signal,
@@ -197,10 +216,21 @@ export function reclaimDeadWorkIfPossible(
     probes = WORK_DONE_PROBES,
     emitComplete = defaultEmitComplete,
     appendEvent = defaultAppendReclaimEvent,
+    now = Date.now,
+    staleMs = STALE_MS,
   } = {},
 ) {
   const klass = classifyWorker(signal, { statJob });
-  if (klass !== "dead") return "noop";
+  let effectivelyDead = klass === "dead";
+  if (klass === "running" && signal?.liveness?.value) {
+    // The same statJob call classifyWorker just made is cheap to repeat once;
+    // keeps the freshness check local to this consumer.
+    const job = statJob(signal.liveness.value);
+    if (job && typeof job.mtimeMs === "number" && now() - job.mtimeMs > staleMs) {
+      effectivelyDead = true;
+    }
+  }
+  if (!effectivelyDead) return "noop";
   if (!hasProbe(signal.phase)) return "not-applicable";
 
   const probe = probes[signal.phase];
