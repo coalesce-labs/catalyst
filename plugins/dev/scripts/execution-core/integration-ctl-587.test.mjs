@@ -11,14 +11,7 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test integration-ctl-587.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import {
-  mkdtempSync,
-  rmSync,
-  mkdirSync,
-  writeFileSync,
-  existsSync,
-  appendFileSync,
-} from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedulerTick } from "./scheduler.mjs";
@@ -54,10 +47,7 @@ afterEach(() => {
 function seedSignal(ticket, phase, body) {
   const dir = join(orchDir, "workers", ticket);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    join(dir, `phase-${phase}.json`),
-    JSON.stringify({ ticket, phase, ...body }),
-  );
+  writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
 }
 
 function appendEvent(envelope) {
@@ -119,17 +109,13 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
         }),
     });
 
-    expect(result.revived).toEqual([
-      { ticket: "CTL-587-A", phase: "implement" },
-    ]);
+    expect(result.revived).toEqual([{ ticket: "CTL-587-A", phase: "implement" }]);
     expect(result.escalated).toEqual([]);
     expect(reviveDispatchCalls).toHaveLength(1);
     expect(reviveDispatchCalls[0].ticket).toBe("CTL-587-A");
     expect(reviveDispatchCalls[0].phase).toBe("implement");
     // Marker file was written (operator-friendly forensic crumb).
-    expect(
-      existsSync(join(orchDir, "workers", "CTL-587-A", ".revive-1.applied")),
-    ).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-587-A", ".revive-1.applied"))).toBe(true);
   });
 
   test("budget exhausted: 2 prior revive events → 'escalated' + needs-human label", () => {
@@ -173,9 +159,7 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
         }),
     });
 
-    expect(result.escalated).toEqual([
-      { ticket: "CTL-587-B", phase: "implement" },
-    ]);
+    expect(result.escalated).toEqual([{ ticket: "CTL-587-B", phase: "implement" }]);
     expect(result.revived).toEqual([]);
     expect(reviveDispatchCalls).toHaveLength(0);
     expect(labelCalls).toEqual(["CTL-587-B"]);
@@ -215,13 +199,9 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
         }),
     });
 
-    expect(result.reviveSuppressed).toEqual([
-      { ticket: "CTL-587-C", phase: "implement" },
-    ]);
+    expect(result.reviveSuppressed).toEqual([{ ticket: "CTL-587-C", phase: "implement" }]);
     expect(reviveDispatchCalls).toHaveLength(0);
-    expect(
-      existsSync(join(orchDir, "workers", "CTL-587-C", ".revive-1.applied")),
-    ).toBe(false); // no marker on suppression
+    expect(existsSync(join(orchDir, "workers", "CTL-587-C", ".revive-1.applied"))).toBe(false); // no marker on suppression
   });
 
   test("no-probe phase (pr) on a dead worker → 'escalated' immediately", () => {
@@ -257,9 +237,7 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
         }),
     });
 
-    expect(result.escalated).toEqual([
-      { ticket: "CTL-587-D", phase: "pr" },
-    ]);
+    expect(result.escalated).toEqual([{ ticket: "CTL-587-D", phase: "pr" }]);
     expect(labelCalls).toEqual(["CTL-587-D"]);
   });
 });

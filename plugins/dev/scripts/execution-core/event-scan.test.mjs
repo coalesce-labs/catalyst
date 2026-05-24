@@ -12,19 +12,10 @@ import { describe, test, expect } from "bun:test";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import {
-  countReviveEvents,
-  countDistinctRevivingTickets,
-} from "./event-scan.mjs";
+import { countReviveEvents, countDistinctRevivingTickets } from "./event-scan.mjs";
 
 // makeEvent — minimal envelope mirroring buildEventEnvelope in recovery.mjs.
-function makeEvent({
-  phase = "implement",
-  action = "revive",
-  ticket,
-  orchId,
-  ts,
-}) {
+function makeEvent({ phase = "implement", action = "revive", ticket, orchId, ts }) {
   return JSON.stringify({
     ts,
     attributes: {
@@ -49,9 +40,7 @@ function tempLog(lines) {
 describe("countReviveEvents", () => {
   test("missing event log returns 0 (cold start)", () => {
     const dir = mkdtempSync(join(tmpdir(), "evtscan-"));
-    expect(
-      countReviveEvents({ ticket: "CTL-9", path: join(dir, "events.jsonl") }),
-    ).toBe(0);
+    expect(countReviveEvents({ ticket: "CTL-9", path: join(dir, "events.jsonl") })).toBe(0);
   });
 
   test("counts only the matching ticket + phase + action", () => {
@@ -83,9 +72,7 @@ describe("countReviveEvents", () => {
       makeEvent({ ticket: "CTL-9", ts: "2026-05-24T00:05:00Z" }),
       makeEvent({ ticket: "CTL-9", ts: "2026-05-24T00:10:00Z" }),
     ]);
-    expect(
-      countReviveEvents({ ticket: "CTL-9", path, since: "2026-05-24T00:04:00Z" }),
-    ).toBe(2);
+    expect(countReviveEvents({ ticket: "CTL-9", path, since: "2026-05-24T00:04:00Z" })).toBe(2);
   });
 
   test("throws when ticket is missing (programmer error)", () => {
@@ -118,7 +105,7 @@ describe("countDistinctRevivingTickets", () => {
         windowMs: 10 * 60 * 1000,
         now: () => nowMs,
         path,
-      }),
+      })
     ).toBe(2);
   });
 
@@ -129,7 +116,7 @@ describe("countDistinctRevivingTickets", () => {
         windowMs: 600_000,
         now: () => 0,
         path: join(dir, "no-such-file.jsonl"),
-      }),
+      })
     ).toBe(0);
   });
 
@@ -153,15 +140,13 @@ describe("countDistinctRevivingTickets", () => {
         windowMs: 10 * 60 * 1000,
         now: () => nowMs,
         path,
-      }),
+      })
     ).toBe(1);
   });
 
   test("throws when windowMs is missing", () => {
     const { path } = tempLog([]);
-    expect(() =>
-      countDistinctRevivingTickets({ now: () => 0, path }),
-    ).toThrow();
+    expect(() => countDistinctRevivingTickets({ now: () => 0, path })).toThrow();
   });
 
   test("ignores events with unparseable ts", () => {
@@ -175,7 +160,7 @@ describe("countDistinctRevivingTickets", () => {
         windowMs: 10 * 60 * 1000,
         now: () => nowMs,
         path,
-      }),
+      })
     ).toBe(1);
   });
 });

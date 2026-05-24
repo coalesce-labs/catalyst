@@ -24,12 +24,20 @@ PASSES=0
 SCRATCH="$(mktemp -d -t ctl-587-test-kill-XXXXXX)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
-fail() { FAILURES=$((FAILURES + 1)); echo "  FAIL: $1"; }
-pass() { PASSES=$((PASSES + 1)); echo "  PASS: $1"; }
+fail() {
+	FAILURES=$((FAILURES + 1))
+	echo "  FAIL: $1"
+}
+pass() {
+	PASSES=$((PASSES + 1))
+	echo "  PASS: $1"
+}
 assert_eq() {
 	local expected="$1" actual="$2" label="$3"
-	if [[ $expected == "$actual" ]]; then pass "$label"
-	else fail "$label — expected '$expected', got '$actual'"
+	if [[ $expected == "$actual" ]]; then
+		pass "$label"
+	else
+		fail "$label — expected '$expected', got '$actual'"
 	fi
 }
 
@@ -76,7 +84,7 @@ fresh_env() {
 echo "Test 1: CATALYST_TEST_KILL_PHASE=implement:before-launch aborts before spawn"
 fresh_env t1
 (
-	cd "${TEST_DIR}/proj"
+	cd "${TEST_DIR}/proj" || exit
 	CATALYST_TEST_KILL_PHASE="implement:before-launch" \
 		"$DISPATCH" --phase implement --ticket CTL-9 \
 		--orch-dir "$ORCH_DIR" --orch-id orch-test \
@@ -107,7 +115,7 @@ echo ""
 echo "Test 2: CATALYST_TEST_KILL_PHASE with non-matching phase falls through"
 fresh_env t2
 (
-	cd "${TEST_DIR}/proj"
+	cd "${TEST_DIR}/proj" || exit
 	CATALYST_TEST_KILL_PHASE="research:before-launch" \
 		"$DISPATCH" --phase implement --ticket CTL-9 \
 		--orch-dir "$ORCH_DIR" --orch-id orch-test \
@@ -127,7 +135,7 @@ echo "Test 3: env unset → dispatcher behaves identically to pre-CTL-587"
 fresh_env t3
 unset CATALYST_TEST_KILL_PHASE
 (
-	cd "${TEST_DIR}/proj"
+	cd "${TEST_DIR}/proj" || exit
 	"$DISPATCH" --phase implement --ticket CTL-9 \
 		--orch-dir "$ORCH_DIR" --orch-id orch-test \
 		>"${TEST_DIR}/t3.out" 2>"${TEST_DIR}/t3.err"
@@ -186,7 +194,7 @@ awk '
   /^```bash$/ && !found { found=1; next }
   /^```$/ && found && !done { done=1; exit }
   found && !done { print }
-' "$SKILL_MD" > "${PRELUDE_DIR}/prelude.sh"
+' "$SKILL_MD" >"${PRELUDE_DIR}/prelude.sh"
 # Append the planned kill-hook check — RED test, this is what we expect the
 # real SKILL.md to contain once Phase 1 lands. Once SKILL.md has the hook,
 # this append becomes a no-op duplicate so it stays harmless.
@@ -194,13 +202,13 @@ awk '
 # again is idempotent: a second matching check still exits 137.)
 chmod +x "${PRELUDE_DIR}/prelude.sh"
 (
-	cd "${TEST_DIR}/proj"
+	cd "${TEST_DIR}/proj" || exit
 	CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
-	CATALYST_ORCHESTRATOR_ID="orch-test" \
-	CATALYST_PHASE="implement" \
-	CATALYST_TICKET="CTL-9" \
-	CATALYST_TEST_KILL_PHASE="implement:after-prelude" \
-	PLUGIN_ROOT="${TEST_DIR}/nonexistent-plugin-root" \
+		CATALYST_ORCHESTRATOR_ID="orch-test" \
+		CATALYST_PHASE="implement" \
+		CATALYST_TICKET="CTL-9" \
+		CATALYST_TEST_KILL_PHASE="implement:after-prelude" \
+		PLUGIN_ROOT="${TEST_DIR}/nonexistent-plugin-root" \
 		bash "${PRELUDE_DIR}/prelude.sh" >"${TEST_DIR}/t5.out" 2>"${TEST_DIR}/t5.err"
 )
 RC=$?

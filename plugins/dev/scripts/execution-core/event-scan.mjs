@@ -42,12 +42,7 @@ function safeParse(line) {
 // match the optional filters. Used by recovery.mjs to enforce MAX_REVIVES on a
 // per-ticket basis. orchId is currently always set in the envelope but the
 // match is tolerant of a missing attribute on either side (defensive default).
-export function countReviveEvents({
-  ticket,
-  orchId,
-  since,
-  path = getEventLogPath(),
-} = {}) {
+export function countReviveEvents({ ticket, orchId, since, path = getEventLogPath() } = {}) {
   if (!ticket) throw new Error("countReviveEvents: ticket required");
   const target = `phase.implement.revive.${ticket}`;
   let n = 0;
