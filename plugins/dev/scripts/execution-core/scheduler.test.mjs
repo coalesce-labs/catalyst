@@ -29,6 +29,7 @@ import {
   hydrateOutOfSetBlockers,
   startScheduler,
   stopScheduler,
+  preflightWorkspaceLabels,
   __resetForTests,
 } from "./scheduler.mjs";
 
@@ -1333,3 +1334,129 @@ function recorder(returnValue) {
   fn.calls = calls;
   return fn;
 }
+
+// ── CTL-585: daemon-start preflight for missing workspace labels ──
+
+describe("preflightWorkspaceLabels (CTL-585)", () => {
+  test("warns once per missing label per team", () => {
+    const warnings = [];
+    const fakeLog = {
+      warn: (obj, msg) => warnings.push({ obj, msg }),
+      info: () => {},
+      error: () => {},
+    };
+    const exec = (cmd, args) => {
+      expect(cmd).toBe("linearis");
+      expect(args.slice(0, 3)).toEqual(["labels", "list", "--team"]);
+      const team = args[3];
+      // linearis labels list emits JSON ({nodes:[{name,...},...]}).
+      // CTL is missing both expected labels; ENG has both.
+      const nodes = team === "CTL"
+        ? [{ name: "orchestrate" }, { name: "enhancement" }]
+        : [{ name: "triaged" }, { name: "needs-human" }, { name: "bug" }];
+      return { code: 0, stdout: JSON.stringify({ nodes }), stderr: "" };
+    };
+    preflightWorkspaceLabels({
+      teams: ["CTL", "ENG"],
+      exec,
+      log: fakeLog,
+    });
+    const ctlWarns = warnings.filter(
+      (w) => w.obj?.team === "CTL" && w.msg.includes("missing required label"),
+    );
+    expect(ctlWarns.map((w) => w.obj.label).sort()).toEqual([
+      "needs-human",
+      "triaged",
+    ]);
+    const engWarns = warnings.filter((w) => w.obj?.team === "ENG");
+    expect(engWarns).toHaveLength(0);
+  });
+
+  test("does not throw on a linearis spawn failure", () => {
+    const fakeLog = { warn: () => {}, info: () => {}, error: () => {} };
+    const exec = () => ({ code: 127, stdout: "", stderr: "ENOENT" });
+    expect(() =>
+      preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog }),
+    ).not.toThrow();
+  });
+
+  test("does not throw on a thrown exec", () => {
+    const fakeLog = { warn: () => {}, info: () => {}, error: () => {} };
+    const exec = () => {
+      throw new Error("boom");
+    };
+    expect(() =>
+      preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog }),
+    ).not.toThrow();
+  });
+
+  test("real JSON shape with both labels present produces zero warnings", () => {
+    // Regression: an early draft split stdout on newlines, which produced
+    // false-positive warnings against the real JSON output every daemon start.
+    const warnings = [];
+    const fakeLog = {
+      warn: (obj, msg) => warnings.push({ obj, msg }),
+      info: () => {},
+      error: () => {},
+    };
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        nodes: [
+          { name: "triaged", color: "#000" },
+          { name: "needs-human", color: "#fff" },
+          { name: "bug" },
+        ],
+      }),
+      stderr: "",
+    });
+    preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog });
+    expect(warnings).toHaveLength(0);
+  });
+
+  test("non-JSON stdout is a soft skip, not a throw", () => {
+    const infos = [];
+    const fakeLog = {
+      warn: () => {},
+      info: (obj, msg) => infos.push({ obj, msg }),
+      error: () => {},
+    };
+    const exec = () => ({ code: 0, stdout: "not json at all", stderr: "" });
+    expect(() =>
+      preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog }),
+    ).not.toThrow();
+    expect(infos.some((i) => i.msg.includes("stdout is not JSON"))).toBe(true);
+  });
+
+  test("empty teams list is a no-op", () => {
+    const fakeLog = { warn: () => {}, info: () => {}, error: () => {} };
+    let calls = 0;
+    const exec = () => {
+      calls += 1;
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    preflightWorkspaceLabels({ teams: [], exec, log: fakeLog });
+    expect(calls).toBe(0);
+  });
+});
+
+describe("startScheduler — preflight wiring (CTL-585)", () => {
+  afterEach(() => __resetForTests());
+
+  test("invokes preflightWorkspaceLabels once at startup using listProjects() teams", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const calls = [];
+    const fakePreflight = (opts) => calls.push(opts);
+    startScheduler({
+      orchDir,
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: { applyPhaseStatus() {}, applyTerminalDone() {}, applyLabel() {} },
+      preflight: fakePreflight,
+      tickIntervalMs: 1_000_000, // suppress the periodic tick from firing in-test
+    });
+    stopScheduler();
+    expect(calls).toHaveLength(1);
+    expect(Array.isArray(calls[0].teams)).toBe(true);
+  });
+});

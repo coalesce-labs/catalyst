@@ -28,7 +28,9 @@ Both modes produce the same `triage.json` shape and emit the same canonical phas
 The `triaged` workspace label must already exist in Linear. The label is applied by the
 deterministic coordinator (CTL-558) — the execution-core scheduler's label sweep tags `triaged`
 once the triage phase signal is `done` — not by this skill. `linearis` has no label-create, so the
-label must be created in the workspace beforehand.
+label must be created in the workspace beforehand. Verify with
+`linearis labels list --team <TEAM>`; create missing labels in the Linear workspace UI. The
+execution-core scheduler logs a startup warning per missing label (CTL-585).
 
 ## Inputs
 
@@ -227,6 +229,8 @@ fi
 # 5. The `triaged` label is applied by the coordinator (CTL-558): the
 #    execution-core scheduler's label sweep tags `triaged` once the triage
 #    phase signal is `done`. The phase agent no longer applies the label.
+#    The label must already exist in the workspace — verify with
+#    `linearis labels list --team <TEAM>` (CTL-585).
 
 # 6. Emit the canonical phase event.
 emit_phase_complete --phase triage --ticket "$TICKET" --status complete \

@@ -14,6 +14,7 @@
 // lib/phase-fsm.mjs (phase advancement, Phase 4), eligible-set.mjs (candidates).
 
 import { readdirSync, readFileSync, writeFileSync, existsSync, watch, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, dirname, basename } from "node:path";
 import { analyzeDependencyGraph, referencedBlockerIds } from "../lib/dependency-graph.mjs";
 // PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
@@ -23,7 +24,7 @@ import { PHASES, transition, isTerminal } from "../lib/phase-fsm.mjs";
 import { rankTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
-import { getProjectConfig } from "./registry.mjs";
+import { getProjectConfig, listProjects } from "./registry.mjs";
 import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
 import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
@@ -321,6 +322,75 @@ function labelOnce(orchDir, ticket, label, writeStatus) {
   }
 }
 
+// REQUIRED_WORKSPACE_LABELS — the flat labels the CTL-558 coordinator sweep
+// writes. Both must pre-exist in the Linear workspace; linearis has no
+// `labels create`. CTL-585's preflight warns once at daemon start if either
+// is missing, so an operator sees the contract gap before the per-tick label
+// sweep starts (and so the missing-label short-circuit in labelOnce does not
+// surprise a fresh operator).
+const REQUIRED_WORKSPACE_LABELS = ["triaged", "needs-human"];
+
+// preflightWorkspaceLabels — best-effort daemon-start check. For each team,
+// list the team's labels and warn once per missing expected label. `exec`
+// defaults to a spawnSync wrapper that normalises the result shape; `log`
+// defaults to the module logger. Never throws — a broken linearis (missing
+// binary, network outage) logs a single info line and returns.
+export function preflightWorkspaceLabels({
+  teams,
+  exec = defaultPreflightExec,
+  log: logger = log,
+} = {}) {
+  if (!Array.isArray(teams) || teams.length === 0) return;
+  for (const team of teams) {
+    try {
+      const { code, stdout, stderr } = exec("linearis", [
+        "labels", "list", "--team", team,
+      ]);
+      if (code !== 0) {
+        logger.info(
+          { team, code, stderr },
+          "scheduler: workspace-label preflight skipped — linearis labels list failed",
+        );
+        continue;
+      }
+      // linearis labels list emits JSON ({nodes: [{name, ...}, ...]}) — match
+      // the parsing used in linear-query.mjs:100-106. A non-JSON stdout is
+      // treated as a soft preflight skip, not a throw.
+      let names = [];
+      try {
+        const parsed = JSON.parse(String(stdout || "{}"));
+        names = (parsed?.nodes ?? []).map((n) => n?.name).filter(Boolean);
+      } catch (err) {
+        logger.info(
+          { team, err: err.message },
+          "scheduler: workspace-label preflight skipped — linearis stdout is not JSON",
+        );
+        continue;
+      }
+      const present = new Set(names);
+      for (const label of REQUIRED_WORKSPACE_LABELS) {
+        if (!present.has(label)) {
+          logger.warn(
+            { team, label },
+            "scheduler: Linear workspace is missing required label — create it in the Linear UI; the label sweep will skip this label for this run",
+          );
+        }
+      }
+    } catch (err) {
+      logger.info(
+        { team, err: err.message },
+        "scheduler: workspace-label preflight threw — swallowed",
+      );
+    }
+  }
+}
+
+function defaultPreflightExec(cmd, args) {
+  const res = spawnSync(cmd, args, { encoding: "utf8" });
+  if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
+  return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
 // teardownWorktreeOnce — remove a ticket's git worktree once it reaches
 // terminal Done (CTL-582 Phase 4). The terminal sweep revisits every started
 // ticket each tick, so a once-marker at workers/<T>/.worktree-removed makes
@@ -550,11 +620,21 @@ export function startScheduler({
   exec,
   writeStatus,
   teardownWorktree,
+  preflight = preflightWorkspaceLabels, // CTL-585
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
   if (!orchDir) throw new Error("startScheduler: orchDir is required");
   runningOpts = { orchDir, dispatch, readEligible, exec, writeStatus, teardownWorktree };
+
+  // CTL-585: warn once at startup if the Linear workspace lacks the labels
+  // the CTL-558 sweep writes. Best-effort — never blocks startup.
+  try {
+    const teams = listProjects().map((p) => p.team).filter(Boolean);
+    preflight({ teams });
+  } catch (err) {
+    log.info({ err: err.message }, "scheduler: preflight wrapper threw — swallowed");
+  }
 
   runTick(); // authoritative initial pass
   tickTimer = setInterval(runTick, tickIntervalMs);
