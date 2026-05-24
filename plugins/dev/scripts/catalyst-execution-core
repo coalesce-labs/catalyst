@@ -89,16 +89,19 @@ cmd_start() {
 		sleep 0.1
 		waited=$((waited + 1))
 	done
-	# The daemon writes its own PID file last — only after recover, monitor,
-	# and scheduler boot (daemon.mjs). A missing PID file with the process
-	# still alive means it is hung mid-init. Fabricating a PID file here would
-	# defeat that "fully initialized" signal and report success for a daemon
-	# that may never finish booting, so report the uncertain state and fail.
-	# The daemon stays the sole PID-file writer.
+	# CTL-586: the daemon writes its PID file early — immediately after
+	# ensureState, before recover/monitor/scheduler boot (daemon.mjs). PID
+	# presence means "process up", not "fully reconciled" — the
+	# "execution-core daemon started" log line remains the fully-booted
+	# signal. A missing PID file after 2s with the process still alive means
+	# the daemon wedged before its very-first synchronous write completed —
+	# a hard failure, not a transient slow-boot. Fabricating a PID file here
+	# would mask a daemon that never wrote one, so report and fail. The
+	# daemon stays the sole PID-file writer.
 	if is_alive "$server_pid"; then
 		echo "error: catalyst-execution-core process $server_pid is alive but has" \
-			"not written its PID file after 2s — daemon may be hung mid-init;" \
-			"check $LOG_FILE" >&2
+			"not written its PID file after 2s — daemon wedged before initial" \
+			"write; check $LOG_FILE" >&2
 		return 1
 	fi
 	echo "error: catalyst-execution-core failed to start — check $LOG_FILE" >&2

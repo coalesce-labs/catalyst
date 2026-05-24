@@ -62,50 +62,66 @@ export function startDaemon({
   _stopMonitor = stopMonitorFn;
   _stopScheduler = stopSchedulerFn;
 
-  recover({ orchDir }); // CTL-539 — rebuild routing + worker state on boot
-  // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
-  // agent on a →Triage transition. `dispatch` stays an injectable default
-  // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
-  monitorFn({ orchDir }); // CTL-535 + CTL-565 — two-state trigger monitor
-  // CTL-558: the scheduler writes Linear status via its default `writeStatus`
-  // (linear-write.mjs) on every committed phase transition — no daemon wiring
-  // needed; production uses the real module, tests inject fakes.
-  schedulerFn({ orchDir }); // CTL-536 — pull-loop scheduler
-
-  if (watchRegistry) {
-    // Watch the execution-core dir for registry.json changes — the registry is
-    // the single source of enrolled projects (CTL-582 D4). ensureState already
-    // created the dir. registry.mjs writes the registry tmp+rename, so the
-    // directory watch sees the rename; the filename filter ignores the noisy
-    // state.json / cursor.json writes that share the directory.
-    _watcher = watch(getExecutionCoreDir(), (_eventType, filename) => {
-      if (filename !== null && filename !== "registry.json") return;
-      // _debounceTimer is module-scoped so stopDaemon can cancel a pending
-      // reconcile that would otherwise fire after teardown.
-      clearTimeout(_debounceTimer);
-      _debounceTimer = setTimeout(() => {
-        log.info("execution-core daemon: registry changed — reconciling");
-        try {
-          reconcile();
-        } catch (err) {
-          // A reconcile failure means registry changes silently stop being
-          // applied — newly registered projects are never picked up. Surface
-          // it at error level with the full error, not a swallowed warning.
-          log.error(
-            { err },
-            "execution-core daemon: reconcile failed — registry changes are NOT being applied"
-          );
-        }
-      }, debounceMs);
-    });
-  }
-
+  // CTL-586: write the PID file BEFORE the synchronous boot work
+  // (recover/monitor/scheduler each trigger a blocking reconcile that fans
+  // out one spawnSync("linearis", ...) per registered team). The wrapper's
+  // 2s PID-file poll (catalyst-execution-core:83-91) otherwise times out
+  // and reports "may be hung mid-init" against a daemon that is in fact
+  // booting normally. PID-file presence now means "process up" — callers
+  // do `kill 0 <pid>` for liveness; the daemon stays the sole writer.
   if (pidFile) {
     _pidFile = pidFile;
     const tmp = `${pidFile}.tmp`;
     writeFileSync(tmp, String(process.pid));
     renameSync(tmp, pidFile);
   }
+
+  // A throw from any composed boot step must not leave a stale PID file —
+  // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level
+  // try/catch logs and process.exit(1)s as before.
+  try {
+    recover({ orchDir }); // CTL-539 — rebuild routing + worker state on boot
+    // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
+    // agent on a →Triage transition. `dispatch` stays an injectable default
+    // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
+    monitorFn({ orchDir }); // CTL-535 + CTL-565 — two-state trigger monitor
+    // CTL-558: the scheduler writes Linear status via its default `writeStatus`
+    // (linear-write.mjs) on every committed phase transition — no daemon wiring
+    // needed; production uses the real module, tests inject fakes.
+    schedulerFn({ orchDir }); // CTL-536 — pull-loop scheduler
+
+    if (watchRegistry) {
+      // Watch the execution-core dir for registry.json changes — the registry is
+      // the single source of enrolled projects (CTL-582 D4). ensureState already
+      // created the dir. registry.mjs writes the registry tmp+rename, so the
+      // directory watch sees the rename; the filename filter ignores the noisy
+      // state.json / cursor.json writes that share the directory.
+      _watcher = watch(getExecutionCoreDir(), (_eventType, filename) => {
+        if (filename !== null && filename !== "registry.json") return;
+        // _debounceTimer is module-scoped so stopDaemon can cancel a pending
+        // reconcile that would otherwise fire after teardown.
+        clearTimeout(_debounceTimer);
+        _debounceTimer = setTimeout(() => {
+          log.info("execution-core daemon: registry changed — reconciling");
+          try {
+            reconcile();
+          } catch (err) {
+            // A reconcile failure means registry changes silently stop being
+            // applied — newly registered projects are never picked up. Surface
+            // it at error level with the full error, not a swallowed warning.
+            log.error(
+              { err },
+              "execution-core daemon: reconcile failed — registry changes are NOT being applied"
+            );
+          }
+        }, debounceMs);
+      });
+    }
+  } catch (err) {
+    stopDaemon();
+    throw err;
+  }
+
   log.info({ orchDir }, "execution-core daemon started");
 }
 

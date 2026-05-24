@@ -85,6 +85,77 @@ describe("startDaemon", () => {
     expect(Number(readFileSync(pidFile, "utf8").trim())).toBe(process.pid);
   });
 
+  // CTL-586: the wrapper's 2s PID-file poll otherwise times out against a
+  // daemon doing N × spawnSync("linearis") inside recover/monitor/scheduler.
+  // The write must land BEFORE any composed boot step runs.
+  test("writes the PID file BEFORE invoking recover (so the wrapper's poll sees it)", () => {
+    const pidFile = join(process.env.CATALYST_DIR, "daemon.pid");
+    let pidFileExistedBeforeRecover = false;
+    startDaemon({
+      recover: () => {
+        pidFileExistedBeforeRecover = existsSync(pidFile);
+      },
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      pidFile,
+    });
+    expect(pidFileExistedBeforeRecover).toBe(true);
+    expect(Number(readFileSync(pidFile, "utf8").trim())).toBe(process.pid);
+  });
+
+  // CTL-586: a synchronous throw from any composed boot step must trigger
+  // stopDaemon's PID-file unlink — otherwise the moved-up write leaves a
+  // stale PID file pointing at a dead pid.
+  test("removes the PID file if recover throws synchronously", () => {
+    const pidFile = join(process.env.CATALYST_DIR, "daemon.pid");
+    const boom = new Error("simulated recover failure");
+    expect(() =>
+      startDaemon({
+        recover: () => {
+          throw boom;
+        },
+        startMonitor: () => {},
+        startScheduler: () => {},
+        watchRegistry: false,
+        pidFile,
+      })
+    ).toThrow("simulated recover failure");
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  test("removes the PID file if startMonitor throws synchronously", () => {
+    const pidFile = join(process.env.CATALYST_DIR, "daemon.pid");
+    expect(() =>
+      startDaemon({
+        recover: () => {},
+        startMonitor: () => {
+          throw new Error("simulated monitor failure");
+        },
+        startScheduler: () => {},
+        watchRegistry: false,
+        pidFile,
+      })
+    ).toThrow("simulated monitor failure");
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  test("removes the PID file if startScheduler throws synchronously", () => {
+    const pidFile = join(process.env.CATALYST_DIR, "daemon.pid");
+    expect(() =>
+      startDaemon({
+        recover: () => {},
+        startMonitor: () => {},
+        startScheduler: () => {
+          throw new Error("simulated scheduler failure");
+        },
+        watchRegistry: false,
+        pidFile,
+      })
+    ).toThrow("simulated scheduler failure");
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
   test("reconciles when the registry changes (debounced)", async () => {
     let reconciled = 0;
     startDaemon({
