@@ -20,6 +20,7 @@ import {
   mkdirSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getRegistryPath, log } from "./config.mjs";
 
 // listProjects() — every well-formed entry in the registry. Missing file → [].
@@ -182,7 +183,18 @@ function main(argv) {
   }
 }
 
-if (import.meta.main) {
+// CTL-578: portable entrypoint detection. `import.meta.main` is native to Bun
+// and Node ≥22.16; older Node treats it as undefined, which under the prior
+// `if (import.meta.main)` gate made `node registry.mjs upsert ...` a silent
+// no-op. Fall back to comparing the module URL against argv[1] so this CLI
+// fires under any runtime that exposes either signal.
+const isEntry =
+  import.meta.main === true ||
+  (typeof import.meta.url === "string" &&
+    process.argv[1] &&
+    fileURLToPath(import.meta.url) === process.argv[1]);
+
+if (isEntry) {
   try {
     process.exit(main(process.argv.slice(2)));
   } catch (err) {

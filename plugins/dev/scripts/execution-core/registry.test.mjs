@@ -298,4 +298,36 @@ describe("CLI (import.meta.main)", () => {
     const out = JSON.parse(runCli(["list"]));
     expect(out).toHaveLength(1);
   });
+
+  // CTL-578: under the original Bun-only `import.meta.main` gate, invoking
+  // `node registry.mjs upsert ...` was a silent no-op (import.meta.main is
+  // undefined in Node) — it exited 0 having written nothing. The portable
+  // entrypoint check (fileURLToPath(import.meta.url) === argv[1]) makes
+  // Node-runner upsert behave identically to Bun.
+  test("CTL-578: node CLI upsert writes a project entry", () => {
+    // Locate node explicitly; skip if not on PATH (rare on dev machines).
+    const which = execFileSync("which", ["node"], { encoding: "utf8" }).trim();
+    if (!which) return;
+    const out = execFileSync(
+      which,
+      [
+        registryCli,
+        "upsert",
+        "--team",
+        "TST",
+        "--repo-root",
+        "/repos/tst",
+        "--eligible-query",
+        '{"status":"Ready"}',
+      ],
+      { env: { ...process.env, CATALYST_DIR: catalystDir }, encoding: "utf8" },
+    );
+    const entry = JSON.parse(out);
+    expect(entry.team).toBe("TST");
+    expect(entry.repoRoot).toBe("/repos/tst");
+    // Re-read via the library API to confirm it actually landed on disk.
+    const projects = listProjects();
+    expect(projects).toHaveLength(1);
+    expect(projects[0].team).toBe("TST");
+  });
 });
