@@ -13,6 +13,8 @@ import {
   closeSync,
   appendFileSync,
   mkdirSync,
+  writeFileSync,
+  existsSync,
 } from "node:fs";
 import { dirname } from "node:path";
 import { join } from "node:path";
@@ -25,6 +27,12 @@ import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { WORK_DONE_PROBES, hasProbe } from "./work-done-probes.mjs";
+import { defaultDispatch } from "./dispatch.mjs";
+import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
+import {
+  countReviveEvents as defaultCountReviveEvents,
+  countDistinctRevivingTickets as defaultCountDistinctRevivingTickets,
+} from "./event-scan.mjs";
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
 const EMIT_COMPLETE_BIN = fileURLToPath(
@@ -126,15 +134,13 @@ function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
-// defaultAppendReclaimEvent — append a canonical phase.<phase>.reclaim.<ticket>
-// envelope to the event log. Shape mirrors lib/canonical-event.sh; only one
-// caller needs it, so we inline rather than wrap the bash builder. Best-effort:
-// a write failure is logged but does not abort the reclaim (the next
-// phase.<phase>.complete event still tells the story).
-function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
+// buildEventEnvelope — shared canonical-event builder for the reclaim,
+// revive, escalated, and revive-suppressed audit events (CTL-574 + CTL-587).
+// Shape mirrors lib/canonical-event.sh. Centralizing it here keeps the four
+// per-action helpers tiny and prevents shape drift between actions.
+function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {} }) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-  const eventName = `phase.${phase}.reclaim.${ticket}`;
-  const line =
+  return (
     JSON.stringify({
       ts,
       id: randomBytes(8).toString("hex"),
@@ -148,28 +154,161 @@ function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
         "service.namespace": "catalyst",
       },
       attributes: {
-        "event.name": eventName,
+        "event.name": `phase.${phase}.${action}.${ticket}`,
         "event.entity": "phase",
-        "event.action": "reclaim",
+        "event.action": action,
         "event.label": ticket,
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
       },
-      body: {
-        payload: {
-          phase,
-          ticket,
-          status: "reclaim",
-          reason: "work-done-despite-dead-bg",
-        },
-      },
-    }) + "\n";
+      body: { payload: { phase, ticket, status: action, reason, ...payloadExtras } },
+    }) + "\n"
+  );
+}
+
+function appendEnvelopeBestEffort(line, kind) {
   const logPath = getEventLogPath();
   try {
     mkdirSync(dirname(logPath), { recursive: true });
     appendFileSync(logPath, line);
   } catch (err) {
-    log.warn({ err: err.message }, "reclaim-dead-work: failed to append reclaim event");
+    log.warn({ err: err.message, kind }, "recovery: event append failed");
+  }
+}
+
+// defaultAppendReclaimEvent — phase.<phase>.reclaim.<ticket>. The CTL-574 path:
+// the worker died but its work committed, so the scheduler can advance.
+function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
+  appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "reclaim",
+      reason: "work-done-despite-dead-bg",
+    }),
+    "reclaim",
+  );
+}
+
+// CTL-587: three new audit-only event helpers. The broker's PHASE_EVENT_PATTERN
+// in router.mjs only matches complete|failed|turn-cap-exhausted|skipped, so
+// revive/escalated/revive-suppressed events are deliberately ignored by the
+// orchestrator and exist purely for operator forensics + the per-ticket
+// revive counter (event-scan.mjs::countReviveEvents).
+
+function defaultAppendReviveEvent({
+  phase,
+  ticket,
+  orchId,
+  attempt,
+  reason,
+  prev_state_json_mtime,
+  prev_bg_job_id,
+}) {
+  appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "revive",
+      reason,
+      payloadExtras: { attempt, prev_state_json_mtime, prev_bg_job_id },
+    }),
+    "revive",
+  );
+}
+
+function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_attempt_count }) {
+  appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "escalated",
+      reason,
+      payloadExtras: { final_attempt_count },
+    }),
+    "escalated",
+  );
+}
+
+function defaultAppendReviveSuppressedEvent({
+  phase,
+  ticket,
+  orchId,
+  window_distinct_tickets,
+}) {
+  appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "revive-suppressed",
+      reason: "storm-breaker-open",
+      payloadExtras: { window_distinct_tickets, window_ms: STORM_WINDOW_MS },
+    }),
+    "revive-suppressed",
+  );
+}
+
+// CTL-587 default seams — all overridable for tests, all best-effort for prod.
+
+// defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass
+// the phase-agent-dispatch idempotency guard at lines 374-395; `stalled` is the
+// single status that falls through), then call defaultDispatch. Mirrors the
+// orchestrate-revive precedent (orchestrate-revive:577-611).
+function defaultReviveDispatch({ orchDir, ticket, phase }) {
+  const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+  if (existsSync(signalPath)) {
+    try {
+      const sig = JSON.parse(readFileSync(signalPath, "utf8"));
+      sig.status = "stalled";
+      sig.attentionReason = "ctl-587-revive-reset";
+      sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+      writeFileSync(signalPath, JSON.stringify(sig, null, 2));
+    } catch (err) {
+      log.warn({ ticket, phase, err: err.message }, "revive: signal reset failed");
+      return { code: 1, stdout: "", stderr: err.message };
+    }
+  }
+  return defaultDispatch({ orchDir, ticket, phase });
+}
+
+// defaultApplyStalledLabel — apply the flat `needs-human` label via the
+// CTL-587-enhanced applyLabel (which reads back to verify the write landed,
+// closing the silent-success gap per memory project_linear_transition_silent_success).
+function defaultApplyStalledLabel({ ticket }) {
+  return defaultApplyLabel({ ticket, label: "needs-human" });
+}
+
+// defaultKillBgJob — best-effort `kill -9` of a lingering bg pid. Gated by the
+// caller on KILL_RECENT_ACTIVITY_MS so we never SIGKILL a worker whose
+// state.json was touched recently. The bg-job pid lives in
+// ~/.claude/jobs/<id>/pid (Claude Code job-state convention); a missing pid
+// file is the normal case for a reaped job.
+function defaultKillBgJob({ bgJobId }) {
+  if (!bgJobId) return;
+  try {
+    const pidPath = join(getJobsRoot(), bgJobId, "pid");
+    if (!existsSync(pidPath)) return;
+    const pid = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
+    if (!Number.isFinite(pid) || pid <= 1) return;
+    spawnSync("kill", ["-9", String(pid)], { stdio: "ignore" });
+  } catch (err) {
+    log.warn({ bgJobId, err: err.message }, "revive: defensive kill failed");
+  }
+}
+
+// defaultWriteReviveMarker — write workers/<ticket>/.revive-<N>.applied as an
+// operator-friendly forensic crumb. The authoritative counter is in
+// events.jsonl; the marker is just a quick `ls`-able count for operators.
+function defaultWriteReviveMarker({ orchDir, ticket, attempt }) {
+  try {
+    const path = join(orchDir, "workers", ticket, `.revive-${attempt}.applied`);
+    writeFileSync(path, new Date().toISOString());
+  } catch (err) {
+    log.warn({ ticket, attempt, err: err.message }, "revive: marker write failed");
   }
 }
 
@@ -180,33 +319,52 @@ function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
 // long tool call.
 const STALE_MS = 5 * 60 * 1000;
 
-// reclaimDeadWorkIfPossible — one signal in, one decision out. The five-way
-// return discriminates the cases an operator might need to investigate:
+// CTL-587 — auto-revival constants. MAX_REVIVES is the per-ticket budget
+// (counted from events.jsonl). STORM_WINDOW_MS + STORM_THRESHOLD form the
+// breaker that suppresses revives when too many tickets are reviving at once
+// (a Linear-side or fleet-wide outage). KILL_RECENT_ACTIVITY_MS gates the
+// defensive SIGKILL: only fire when the bg state.json has been quiet for that
+// long — i.e. the worker really is gone, not just idling on a long tool call.
+const MAX_REVIVES = 2;
+const STORM_WINDOW_MS = 10 * 60 * 1000;
+const STORM_THRESHOLD = 3;
+const KILL_RECENT_ACTIVITY_MS = 30 * 1000;
+
+// reclaimDeadWorkIfPossible — one signal in, one decision out. CTL-587 widens
+// the return set from CTL-574's five values to seven, transforming the two
+// silent dead-ends ('not-applicable' and 'not-done') into actionable outcomes:
 //
-//   'noop'             not effectively dead (terminal / unknown / live running).
-//                      No action.
-//   'not-applicable'   effectively dead but the phase has no registered
-//                      work-done probe. Out of scope for CTL-574; CTL-587's
-//                      territory.
-//   'not-done'         effectively dead + probe says the work is NOT committed.
-//                      The worker really did die mid-implement. CTL-587 will
-//                      re-dispatch when that lands.
-//   'reclaimed'        effectively dead + work IS done. Reclaim succeeded —
-//                      the canonical audit + complete events were appended,
-//                      the signal was flipped, the session was ended.
-//   'reclaim-failed'   effectively dead + work IS done BUT emit-complete
-//                      exited non-zero. The signal is NOT mutated (emit-
-//                      complete writes via atomic rename); the next tick
-//                      retries.
+//   'noop'                not effectively dead (terminal / unknown / live).
+//                         No action.
+//   'reclaimed'           effectively dead + work IS done. CTL-574 happy path
+//                         — canonical reclaim audit appended, emit-complete
+//                         flipped the signal, session ended.
+//   'reclaim-failed'      effectively dead + work IS done BUT emit-complete
+//                         exited non-zero. Signal NOT mutated (atomic rename);
+//                         next tick retries.
+//   'revived'             effectively dead + probe says work NOT done + revive
+//                         budget available + storm-breaker closed. Signal was
+//                         reset to 'stalled' to bypass the dispatcher's
+//                         idempotency guard; defaultDispatch was invoked; the
+//                         worker-dir .revive-N.applied marker was written.
+//   'revive-suppressed'   effectively dead + work NOT done + storm-breaker
+//                         OPEN (>3 distinct tickets reviving in last 10min).
+//                         No dispatch; suppress event audited; next tick
+//                         re-evaluates the window.
+//   'escalated'           effectively dead + (revive budget exhausted OR no
+//                         work-done probe registered for this phase). needs-human
+//                         label applied (via the CTL-587 verified applyLabel);
+//                         ticket stays where it is for human triage.
 //
-// CTL-588: "effectively dead" is broader than classifyWorker's `dead`. The
-// canonical `dead` requires the bg job dir to be GONE, but claude --bg leaves
-// job dirs behind indefinitely after the worker exits (memory
-// project_phase_agent_bg_no_reap). A worker that really died, but whose dir
-// lingers, classifies as `running`. We add a freshness check: a `running`
-// signal whose bg state.json hasn't been touched in `staleMs` is treated as
-// effectively dead. classifyWorker itself is unchanged — only this consumer
-// needs the stronger liveness signal.
+// CTL-588 still defines "effectively dead" as classifyWorker:'dead' OR a
+// 'running' signal whose bg state.json mtime is older than staleMs.
+//
+// The function stays pure given its injected seams: statJob / probes /
+// emitComplete / appendEvent (pre-CTL-587) plus the six CTL-587 seams
+// (appendReviveEvent, appendEscalatedEvent, appendReviveSuppressedEvent,
+// reviveDispatch, applyStalledLabel, killBgJob, countReviveEvents,
+// countDistinctRevivingTickets, writeReviveMarker). All have real defaults
+// for prod; tests override every one.
 export function reclaimDeadWorkIfPossible(
   orchDir,
   signal,
@@ -216,51 +374,162 @@ export function reclaimDeadWorkIfPossible(
     probes = WORK_DONE_PROBES,
     emitComplete = defaultEmitComplete,
     appendEvent = defaultAppendReclaimEvent,
+    appendReviveEvent = defaultAppendReviveEvent,
+    appendEscalatedEvent = defaultAppendEscalatedEvent,
+    appendReviveSuppressedEvent = defaultAppendReviveSuppressedEvent,
+    reviveDispatch = defaultReviveDispatch,
+    applyStalledLabel = defaultApplyStalledLabel,
+    killBgJob = defaultKillBgJob,
+    countReviveEvents = defaultCountReviveEvents,
+    countDistinctRevivingTickets = defaultCountDistinctRevivingTickets,
+    writeReviveMarker = defaultWriteReviveMarker,
     now = Date.now,
     staleMs = STALE_MS,
   } = {},
 ) {
   const klass = classifyWorker(signal, { statJob });
   let effectivelyDead = klass === "dead";
+  // CTL-587: capture the bg state.json mtime so the defensive kill + the revive
+  // audit payload can both reference it without re-statting.
+  let prevStateJsonMtime = null;
   if (klass === "running" && signal?.liveness?.value) {
-    // The same statJob call classifyWorker just made is cheap to repeat once;
-    // keeps the freshness check local to this consumer.
     const job = statJob(signal.liveness.value);
-    if (job && typeof job.mtimeMs === "number" && now() - job.mtimeMs > staleMs) {
-      effectivelyDead = true;
+    if (job && typeof job.mtimeMs === "number") {
+      prevStateJsonMtime = job.mtimeMs;
+      if (now() - job.mtimeMs > staleMs) effectivelyDead = true;
     }
   }
   if (!effectivelyDead) return "noop";
-  if (!hasProbe(signal.phase)) return "not-applicable";
 
-  const probe = probes[signal.phase];
-  if (!probe({ ticket: signal.ticket, repoRoot })) {
-    log.info(
-      { ticket: signal.ticket, phase: signal.phase },
-      "reclaim-dead-work: dead worker, work NOT done — left for CTL-587",
-    );
-    return "not-done";
+  const { ticket, phase } = signal;
+  const orchId = signal.raw?.orchestrator;
+  const prevBgJobId = signal.raw?.bg_job_id ?? null;
+
+  // (A) No probe registered for this phase → escalate. The pre-CTL-587 silent
+  //     'not-applicable' return is now an actionable outcome: the worker is
+  //     dead, we cannot prove its work landed, and no automation can recover
+  //     — so the human needs to look. needs-human label applied (verified by
+  //     the CTL-587 applyLabel read-back).
+  if (!hasProbe(phase)) {
+    appendEscalatedEvent({
+      phase,
+      ticket,
+      orchId,
+      reason: "no-probe-for-phase",
+      final_attempt_count: 0,
+    });
+    applyStalledLabel({ ticket });
+    log.warn({ ticket, phase }, "ctl-587: escalated (no probe registered for phase)");
+    return "escalated";
   }
 
-  appendEvent({
-    phase: signal.phase,
-    ticket: signal.ticket,
-    orchId: signal.raw?.orchestrator,
+  // (B) Probe says work IS done → CTL-574 reclaim. Unchanged.
+  const probe = probes[phase];
+  if (probe({ ticket, repoRoot })) {
+    appendEvent({ phase, ticket, orchId });
+    const r = emitComplete({ orchDir, signal });
+    if (r.code !== 0) {
+      log.warn(
+        { ticket, phase, code: r.code, stderr: r.stderr },
+        "reclaim-dead-work: emit-complete failed; will retry next tick",
+      );
+      return "reclaim-failed";
+    }
+    log.info({ ticket, phase }, "reclaim-dead-work: dead worker reclaimed (work was committed)");
+    return "reclaimed";
+  }
+
+  // (C) Probe says work is NOT done → CTL-587 revive territory. Today only
+  //     `implement` has a probe; this branch's escalation is defensive for
+  //     a future phase whose probe also returns false.
+  if (phase !== "implement") {
+    appendEscalatedEvent({
+      phase,
+      ticket,
+      orchId,
+      reason: "non-implement-not-done",
+      final_attempt_count: 0,
+    });
+    applyStalledLabel({ ticket });
+    return "escalated";
+  }
+
+  // Per-ticket revive budget from events.jsonl. The events file is the
+  // authoritative counter — surviving daemon restarts, more truthful than the
+  // signal file (which the dispatcher rewrites each spawn).
+  const priorRevives = countReviveEvents({ ticket, orchId });
+  if (priorRevives >= MAX_REVIVES) {
+    appendEscalatedEvent({
+      phase,
+      ticket,
+      orchId,
+      reason: "revive-budget-exhausted",
+      final_attempt_count: priorRevives,
+    });
+    applyStalledLabel({ ticket });
+    log.warn({ ticket, phase, priorRevives }, "ctl-587: escalated (revive budget exhausted)");
+    return "escalated";
+  }
+
+  // Storm-breaker: if many distinct tickets are reviving inside the window,
+  // assume something is wrong fleet-wide and suppress (do nothing this tick).
+  const distinctStormTickets = countDistinctRevivingTickets({
+    windowMs: STORM_WINDOW_MS,
+    now,
   });
-
-  const r = emitComplete({ orchDir, signal });
-  if (r.code !== 0) {
+  if (distinctStormTickets > STORM_THRESHOLD) {
+    appendReviveSuppressedEvent({
+      phase,
+      ticket,
+      orchId,
+      window_distinct_tickets: distinctStormTickets,
+    });
     log.warn(
-      { ticket: signal.ticket, phase: signal.phase, code: r.code, stderr: r.stderr },
-      "reclaim-dead-work: emit-complete failed; will retry next tick",
+      { ticket, phase, distinctStormTickets },
+      "ctl-587: revive suppressed (storm-breaker open)",
     );
-    return "reclaim-failed";
+    return "revive-suppressed";
   }
-  log.info(
-    { ticket: signal.ticket, phase: signal.phase },
-    "reclaim-dead-work: dead worker reclaimed (work was committed)",
-  );
-  return "reclaimed";
+
+  // Defensive kill: if state.json has been quiet long enough we're confident
+  // the bg process is gone, so a SIGKILL on its pid is harmless and prevents
+  // a zombie holding a worktree lock. The kill is best-effort and pid-file-gated
+  // — if no pid file exists (the normal post-exit state) it's a no-op.
+  if (
+    prevStateJsonMtime !== null &&
+    now() - prevStateJsonMtime > KILL_RECENT_ACTIVITY_MS &&
+    prevBgJobId
+  ) {
+    killBgJob({ bgJobId: prevBgJobId });
+  }
+
+  const attempt = priorRevives + 1;
+  // Emit BEFORE the dispatch so a daemon crash mid-revive leaves the event
+  // behind. The next tick's count(events) sees attempt N — correctly entering
+  // attempt N+1 instead of repeating N forever.
+  appendReviveEvent({
+    phase,
+    ticket,
+    orchId,
+    attempt,
+    reason: "work-not-done-after-stale-bg",
+    prev_state_json_mtime: prevStateJsonMtime,
+    prev_bg_job_id: prevBgJobId,
+  });
+  const dispatchRes = reviveDispatch({ orchDir, ticket, phase });
+  if (dispatchRes.code === 0) {
+    writeReviveMarker({ orchDir, ticket, attempt });
+    log.info({ ticket, phase, attempt }, "ctl-587: revived");
+  } else {
+    // Dispatch failed; the next tick will retry. The marker is intentionally
+    // NOT written so the marker-file count stays an accurate "successful
+    // revives" record (audit-vs-marker drift is fine: the event is the truth).
+    log.warn(
+      { ticket, phase, attempt, code: dispatchRes.code, stderr: dispatchRes.stderr },
+      "ctl-587: revive dispatch failed; will retry next tick",
+    );
+  }
+  return "revived";
 }
 
 // recoverStartup — the boot-time reconstruction CTL-554's daemon calls. Rebuilds
