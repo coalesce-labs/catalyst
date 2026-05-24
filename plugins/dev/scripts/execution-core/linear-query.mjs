@@ -88,6 +88,24 @@ export function fetchTicketState(identifier, { exec = defaultExec } = {}) {
   }
 }
 
+// fetchTicketLabels — current label-name list for one ticket, or null on any
+// failure. CTL-587: used by linear-write.mjs::applyLabel for the
+// verify-write-landed step that closes the silent-success gap in linearis
+// label writes (memory project_linear_transition_silent_success). The shape
+// `labels.nodes[].name` is the Linear API contract — confirmed by
+// orch-monitor/lib/linear.ts and pre-assign-migrations.sh. null is the
+// "did not land — retry next tick" signal callers interpret as verify-failed.
+export function fetchTicketLabels(identifier, { exec = defaultExec } = {}) {
+  const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
+  if (code !== 0) return null;
+  try {
+    const node = JSON.parse(stdout);
+    return node?.labels?.nodes?.map((n) => n.name) ?? [];
+  } catch {
+    return null;
+  }
+}
+
 // runEligibleQuery — run the query, parse + normalize, apply the priority
 // floor. A non-zero linearis exit THROWS (never a silent []): a silent empty
 // would let one failed poll flatten a project's eligible set to zero. The

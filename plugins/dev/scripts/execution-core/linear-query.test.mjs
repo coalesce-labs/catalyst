@@ -2,7 +2,12 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test linear-query.test.mjs
 
 import { describe, test, expect } from "bun:test";
-import { buildLinearisArgs, runEligibleQuery, fetchTicketState } from "./linear-query.mjs";
+import {
+  buildLinearisArgs,
+  runEligibleQuery,
+  fetchTicketState,
+  fetchTicketLabels,
+} from "./linear-query.mjs";
 
 // A fake exec returning a canned linearis result. `exec(cmd, args)` ->
 // { code, stdout, stderr } — the injectable seam runEligibleQuery uses so a
@@ -207,5 +212,62 @@ describe("fetchTicketState", () => {
       stderr: "",
     });
     expect(fetchTicketState("CTL-99", { exec })).toBe("Done");
+  });
+});
+
+// CTL-587 — fetchTicketLabels reads back the current label list for a ticket.
+// Used by applyLabel's verify-write-landed step to close the silent-success
+// gap (linearis can exit 0 without the label actually landing — see memory
+// project_linear_transition_silent_success).
+describe("fetchTicketLabels", () => {
+  test("returns label names from linearis JSON", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        identifier: "CTL-9",
+        labels: { nodes: [{ name: "triaged" }, { name: "needs-human" }] },
+      }),
+      stderr: "",
+    });
+    expect(fetchTicketLabels("CTL-9", { exec })).toEqual(["triaged", "needs-human"]);
+  });
+
+  test("returns [] when labels.nodes is empty", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-9", labels: { nodes: [] } }),
+      stderr: "",
+    });
+    expect(fetchTicketLabels("CTL-9", { exec })).toEqual([]);
+  });
+
+  test("returns null on a non-zero linearis exit (read failure → retry next tick)", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
+    expect(fetchTicketLabels("CTL-9", { exec })).toBeNull();
+  });
+
+  test("returns null on JSON parse error", () => {
+    const exec = () => ({ code: 0, stdout: "not json", stderr: "" });
+    expect(fetchTicketLabels("CTL-9", { exec })).toBeNull();
+  });
+
+  test("returns [] when labels object is missing from the response", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-9" }),
+      stderr: "",
+    });
+    expect(fetchTicketLabels("CTL-9", { exec })).toEqual([]);
+  });
+
+  test("invokes linearis issues read <id>", () => {
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 0, stdout: JSON.stringify({ labels: { nodes: [] } }), stderr: "" };
+    };
+    fetchTicketLabels("CTL-9", { exec });
+    expect(calls[0].cmd).toBe("linearis");
+    expect(calls[0].args).toEqual(["issues", "read", "CTL-9"]);
   });
 });

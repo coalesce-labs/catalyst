@@ -97,17 +97,87 @@ describe("applyTerminalDone", () => {
 });
 
 describe("applyLabel", () => {
+  // okExec returns exit-0 for BOTH the update call AND the CTL-587 read-back —
+  // the read-back returns labels.nodes containing the requested label so the
+  // existing pre-CTL-587 tests still see `applied: true`.
+  function makeOkExec(calls, { readbackLabels } = {}) {
+    return (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[0] === "issues" && args[1] === "update") {
+        return { code: 0, stdout: JSON.stringify({ action: "transitioned" }), stderr: "" };
+      }
+      if (args[0] === "issues" && args[1] === "read") {
+        const label = args[2] === "CTL-1" ? "needs-human" : "needs-human";
+        const labels = readbackLabels ?? [{ name: label }];
+        return { code: 0, stdout: JSON.stringify({ labels: { nodes: labels } }), stderr: "" };
+      }
+      return { code: 127, stdout: "", stderr: "unexpected" };
+    };
+  }
+
   test("shells linearis issues update --labels <l> --label-mode add", () => {
     const calls = [];
-    applyLabel({ ticket: "CTL-1", label: "needs-human", exec: okExec(calls) });
+    applyLabel({ ticket: "CTL-1", label: "needs-human", exec: makeOkExec(calls) });
     const args = calls[0].args;
     expect(args.slice(0, 3)).toEqual(["issues", "update", "CTL-1"]);
     expect(args).toContain("--labels");
     expect(args[args.indexOf("--labels") + 1]).toBe("needs-human");
     expect(args[args.indexOf("--label-mode") + 1]).toBe("add");
   });
+
   test("never throws on a failed label exec", () => {
     const exec = () => ({ code: 1, stdout: "", stderr: "no such label" });
     expect(() => applyLabel({ ticket: "CTL-1", label: "needs-human", exec })).not.toThrow();
+  });
+
+  // CTL-587: verify-write-landed. Closes the silent-success gap in linearis
+  // label writes (memory project_linear_transition_silent_success): the
+  // update exits 0 but the label never lands. The read-back makes applied:true
+  // mean the label is actually on the ticket.
+  test("CTL-587: write succeeds AND read-back confirms label present → applied:true", () => {
+    const calls = [];
+    const exec = makeOkExec(calls); // read-back returns the label
+    const r = applyLabel({ ticket: "CTL-1", label: "needs-human", exec });
+    expect(r).toEqual({ applied: true });
+    expect(calls[0].args.slice(0, 2)).toEqual(["issues", "update"]);
+    expect(calls[1].args.slice(0, 2)).toEqual(["issues", "read"]);
+  });
+
+  test("CTL-587: write succeeds BUT read-back missing label → applied:false, verify-failed", () => {
+    const calls = [];
+    const exec = makeOkExec(calls, { readbackLabels: [] }); // empty labels
+    const r = applyLabel({ ticket: "CTL-1", label: "needs-human", exec });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("verify-failed");
+  });
+
+  test("CTL-587: write fails → applied:false, write-failed (NO read-back attempted)", () => {
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 1, stdout: "", stderr: "rate limited" };
+    };
+    const r = applyLabel({ ticket: "CTL-1", label: "needs-human", exec });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("write-failed");
+    expect(calls).toHaveLength(1); // only the update; no read-back attempted
+  });
+
+  test("CTL-587: read-back returns null (linearis read failure) → applied:false, verify-failed", () => {
+    const exec = (cmd, args) => {
+      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
+      if (args[1] === "read") return { code: 1, stdout: "", stderr: "" };
+      return { code: 127 };
+    };
+    const r = applyLabel({ ticket: "CTL-1", label: "needs-human", exec });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("verify-failed");
+  });
+
+  test("CTL-587: throw in exec is swallowed → applied:false (existing behaviour preserved)", () => {
+    const exec = () => {
+      throw new Error("exec died");
+    };
+    expect(applyLabel({ ticket: "CTL-1", label: "needs-human", exec }).applied).toBe(false);
   });
 });
