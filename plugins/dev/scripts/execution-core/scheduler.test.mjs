@@ -1138,6 +1138,105 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
   });
 });
 
+// CTL-587: scheduler Step 0 returns parallel arrays for the new outcomes
+// from reclaimDeadWorkIfPossible — revived, reviveSuppressed, escalated —
+// alongside the pre-existing reclaimed[]. Existing consumers that ignore
+// unknown keys are unaffected.
+describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
+  function writeNestedSignal(ticket, phase, body) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, ...body }),
+    );
+  }
+
+  const writeStatus = {
+    applyPhaseStatus: () => {},
+    applyTerminalDone: () => {},
+    applyLabel: () => ({ applied: true }),
+  };
+
+  test("'revived' result populates result.revived (and leaves reclaimed empty)", () => {
+    writeNestedSignal("CTL-7", "implement", { status: "running", bg_job_id: "bg-7" });
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork: () => "revived",
+    });
+    expect(result.revived).toEqual([{ ticket: "CTL-7", phase: "implement" }]);
+    expect(result.reclaimed).toEqual([]);
+    expect(result.escalated).toEqual([]);
+    expect(result.reviveSuppressed).toEqual([]);
+  });
+
+  test("'revive-suppressed' result populates result.reviveSuppressed", () => {
+    writeNestedSignal("CTL-8", "implement", { status: "running", bg_job_id: "bg-8" });
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork: () => "revive-suppressed",
+    });
+    expect(result.reviveSuppressed).toEqual([{ ticket: "CTL-8", phase: "implement" }]);
+    expect(result.revived).toEqual([]);
+  });
+
+  test("'escalated' result populates result.escalated", () => {
+    writeNestedSignal("CTL-9", "pr", { status: "running", bg_job_id: "bg-9" });
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork: () => "escalated",
+    });
+    expect(result.escalated).toEqual([{ ticket: "CTL-9", phase: "pr" }]);
+  });
+
+  test("mixed returns across multiple signals end up in the right buckets", () => {
+    writeNestedSignal("CTL-7", "implement", { status: "running", bg_job_id: "bg-7" });
+    writeNestedSignal("CTL-8", "implement", { status: "running", bg_job_id: "bg-8" });
+    writeNestedSignal("CTL-9", "pr", { status: "running", bg_job_id: "bg-9" });
+    const reclaimDeadWork = (_orchDir, sig) => {
+      if (sig.ticket === "CTL-7") return "revived";
+      if (sig.ticket === "CTL-8") return "reclaimed";
+      if (sig.ticket === "CTL-9") return "escalated";
+      return "noop";
+    };
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork,
+    });
+    expect(result.revived).toEqual([{ ticket: "CTL-7", phase: "implement" }]);
+    expect(result.escalated).toEqual([{ ticket: "CTL-9", phase: "pr" }]);
+    // reclaimed: emit-complete is stubbed via the seam, but the canonical
+    // path mutates the signal — we just check the array is populated.
+    expect(result.reclaimed.map((e) => e.ticket)).toContain("CTL-8");
+  });
+
+  test("clean tick (no dead workers) returns empty arrays for every CTL-587 outcome", () => {
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork: () => "noop",
+    });
+    expect(result.revived).toEqual([]);
+    expect(result.reviveSuppressed).toEqual([]);
+    expect(result.escalated).toEqual([]);
+    expect(result.reclaimed).toEqual([]);
+  });
+});
+
 // recorder — small spy that records args and returns either a constant value or
 // a function-derived value. Local to this describe to avoid leaking into the
 // existing block-scope helpers.

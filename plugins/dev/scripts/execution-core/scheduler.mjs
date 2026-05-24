@@ -366,12 +366,38 @@ export function schedulerTick(
   // Reclaim is a strict superset of "do nothing": only the dead+work-done case
   // mutates the signal; all other classes (terminal/running/unknown/not-done/
   // not-applicable) are zero-action no-ops.
+  // CTL-587: reclaimDeadWork now returns up to 7 discriminators. The four
+  // that callers can act on (HUD, daemon log) populate parallel arrays; the
+  // other three (noop, not-done, not-applicable, reclaim-failed) are silent
+  // because they describe "no externally-visible change" — the next tick
+  // will re-evaluate. The 'reviveSuppressed' bucket is the storm-breaker
+  // marker; 'escalated' fires `needs-human` via the per-phase recovery path.
   const reclaimed = [];
+  const revived = [];
+  const reviveSuppressed = [];
+  const escalated = [];
   for (const sig of readWorkerSignals(orchDir)) {
     const team = teamOf(sig.ticket);
     const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
     const r = reclaimDeadWork(orchDir, sig, { repoRoot });
-    if (r === "reclaimed") reclaimed.push({ ticket: sig.ticket, phase: sig.phase });
+    const entry = { ticket: sig.ticket, phase: sig.phase };
+    switch (r) {
+      case "reclaimed":
+        reclaimed.push(entry);
+        break;
+      case "revived":
+        revived.push(entry);
+        break;
+      case "revive-suppressed":
+        reviveSuppressed.push(entry);
+        break;
+      case "escalated":
+        escalated.push(entry);
+        break;
+      default:
+        // noop | not-done | not-applicable | reclaim-failed → invisible.
+        break;
+    }
   }
 
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
@@ -451,7 +477,16 @@ export function schedulerTick(
     }
   }
 
-  return { reclaimed, advanced, dispatched, freeSlots, ready: ready.map((t) => t.identifier) };
+  return {
+    reclaimed,
+    revived,
+    reviveSuppressed,
+    escalated,
+    advanced,
+    dispatched,
+    freeSlots,
+    ready: ready.map((t) => t.identifier),
+  };
 }
 
 // ─── Phase 5: the pull-loop daemon ───
