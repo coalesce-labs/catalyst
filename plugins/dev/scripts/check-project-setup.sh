@@ -196,7 +196,11 @@ if [[ -n $CONFIG_PATH ]]; then
 				"$REGISTRY_PATH" 2>/dev/null)
 		fi
 		if [[ -z $registry_has_team ]]; then
-			warnings+=("No execution-core registry entry for team '$TEAM_KEY' in $REGISTRY_PATH")
+			# CTL-578: under execution-core dispatch the team MUST be in
+			# registry.json — the daemon is blind to a team that's not there.
+			# Absence is a hard failure, not a warning.
+			errors+=("No execution-core registry entry for team '$TEAM_KEY' in $REGISTRY_PATH")
+			errors+=("  Run setup-catalyst or plugins/dev/scripts/setup-execution-core-states.sh to fix")
 			execution_core_gaps=$((execution_core_gaps + 1))
 		fi
 
