@@ -8,13 +8,46 @@
 
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import pino from "pino";
 
-// --- Logger ---
-export const log = pino({
-  name: "execution-core",
-  level: process.env.LOG_LEVEL ?? "info",
-});
+// --- Logger (CTL-578) ---
+// Pino is the daemon's runtime logger. A worktree checkout that hasn't run
+// `bun install` cannot resolve it — and any module graph that includes
+// config.mjs (registry.mjs, monitor.mjs, …) used to crash at module-load
+// before any code ran. Wrap the import in try/catch and substitute a
+// console-shim with the same pino-compatible surface so callers degrade
+// gracefully instead of aborting.
+let log;
+try {
+  const { default: pino } = await import("pino");
+  log = pino({
+    name: "execution-core",
+    level: process.env.LOG_LEVEL ?? "info",
+  });
+} catch (err) {
+  const emit = (level) => (...args) => {
+    // pino-style: log.info(obj, msg) OR log.info(msg). Console-shim flattens.
+    const stream =
+      level === "error" || level === "fatal" ? process.stderr : process.stdout;
+    stream.write(
+      `[execution-core:${level}] ${args
+        .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+        .join(" ")}\n`,
+    );
+  };
+  log = {
+    info: emit("info"),
+    warn: emit("warn"),
+    error: emit("error"),
+    debug: emit("debug"),
+    fatal: emit("fatal"),
+    trace: emit("trace"),
+    child: () => log,
+  };
+  process.stderr.write(
+    `[execution-core] WARN: pino unavailable (${err?.message ?? err}); using console shim\n`,
+  );
+}
+export { log };
 
 // --- Paths ---
 // Re-resolved per call so tests can redirect by setting CATALYST_DIR;
