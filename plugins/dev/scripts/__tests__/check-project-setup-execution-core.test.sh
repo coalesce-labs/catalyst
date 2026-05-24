@@ -123,15 +123,53 @@ else
   echo "$OUT4" | sed 's/^/    /'
 fi
 
-# ─── Test 5: execution-core warnings never set exit 1 (warnings-only → exit 0) ─
+# ─── Test 5: execution-core + missing registry entry → hard error (CTL-578) ──
+# Promoted from warning to error: under execution-core dispatch the daemon is
+# blind to a team whose entry is absent, so health checks must fail loudly.
 P5="${SCRATCH}/p5"
 CD5="$(build_project "$P5" "execution-core" 0 0)"
 run_check "$P5" "$CD5" > /dev/null 2>&1
 RC5=$?
-if [[ $RC5 -eq 0 ]]; then
-  pass "execution-core gap stays a warning — script still exits 0"
+if [[ $RC5 -eq 1 ]]; then
+  pass "execution-core missing-registry-entry is a hard error (exit 1)"
 else
-  fail "execution-core gap stays a warning — script still exits 0 (got rc=$RC5)"
+  fail "execution-core missing-registry-entry is a hard error (got rc=$RC5)"
+fi
+
+# ─── Test 6: execution-core + missing registry alone → exit 1 (CTL-578) ──────
+# Even when contract states ARE present, an absent registry entry still fails.
+P6="${SCRATCH}/p6"
+CD6="$(build_project "$P6" "execution-core" 1 0)"
+run_check "$P6" "$CD6" > /dev/null 2>&1
+RC6=$?
+if [[ $RC6 -eq 1 ]]; then
+  pass "execution-core contract-OK + missing registry exits 1"
+else
+  fail "execution-core contract-OK + missing registry exits 1 (got rc=$RC6)"
+fi
+
+# ─── Test 7: execution-core + full setup → exit 0 (CTL-578) ──────────────────
+P7="${SCRATCH}/p7"
+CD7="$(build_project "$P7" "execution-core" 1 1)"
+run_check "$P7" "$CD7" > /dev/null 2>&1
+RC7=$?
+if [[ $RC7 -eq 0 ]]; then
+  pass "fully-configured execution-core repo exits 0"
+else
+  fail "fully-configured execution-core repo exits 0 (got rc=$RC7)"
+fi
+
+# ─── Test 8: phase-agents missing registry → still warning, exit 0 (CTL-578) ─
+# The error-promotion is gated on DISPATCH_MODE=execution-core; phase-agents
+# mode is unaffected — the registry-absent state is irrelevant there.
+P8="${SCRATCH}/p8"
+CD8="$(build_project "$P8" "phase-agents" 1 0)"
+run_check "$P8" "$CD8" > /dev/null 2>&1
+RC8=$?
+if [[ $RC8 -eq 0 ]]; then
+  pass "phase-agents missing registry stays exit 0 (mode-gated)"
+else
+  fail "phase-agents missing registry stays exit 0 (got rc=$RC8)"
 fi
 
 echo ""
