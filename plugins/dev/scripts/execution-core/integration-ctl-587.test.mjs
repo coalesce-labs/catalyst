@@ -1,0 +1,253 @@
+// CTL-587 end-to-end integration tests.
+//
+// Exercises the full revive loop through schedulerTick + the real
+// reclaimDeadWorkIfPossible, with the daemon-side I/O seams (statJob,
+// emitComplete, applyStalledLabel, dispatch, killBgJob) stubbed. The intent is
+// to pin the wiring: a dead worker on first strike → 'revived' + new dispatch;
+// budget exhausted → 'escalated' + needs-human; storm-breaker open →
+// 'revive-suppressed' + no dispatch. The earlier per-module unit tests cover
+// the branch matrix; this file proves the seams compose.
+//
+// Run: cd plugins/dev/scripts/execution-core && bun test integration-ctl-587.test.mjs
+
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync, appendFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { schedulerTick } from "./scheduler.mjs";
+import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
+import { countReviveEvents } from "./event-scan.mjs";
+
+let orchDir;
+let catalystDir;
+let prevCatalystDir;
+let eventLogPath;
+
+beforeEach(() => {
+  prevCatalystDir = process.env.CATALYST_DIR;
+  catalystDir = mkdtempSync(join(tmpdir(), "ctl587-int-"));
+  // Safety: refuse to run if the temp path somehow escaped tmpdir() — the
+  // test writes through default-real event-log paths and a misconfigured
+  // CATALYST_DIR could dirty the host's real ~/.catalyst/events/. Pin the
+  // contract loudly rather than silently corrupting an operator's log.
+  if (!catalystDir.startsWith(tmpdir())) {
+    throw new Error(`integration test refused: catalystDir not under tmpdir: ${catalystDir}`);
+  }
+  process.env.CATALYST_DIR = catalystDir;
+  // Pre-create the events dir so appends in the recovery audit path land
+  // somewhere predictable. The default event-log path resolves under
+  // CATALYST_DIR/events/<YYYY-MM>.jsonl — we seed it explicitly for the
+  // budget-exhaustion test.
+  mkdirSync(join(catalystDir, "events"), { recursive: true });
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  eventLogPath = join(catalystDir, "events", `${ym}.jsonl`);
+  orchDir = join(catalystDir, "orch");
+  mkdirSync(join(orchDir, "workers"), { recursive: true });
+});
+
+afterEach(() => {
+  if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+  else process.env.CATALYST_DIR = prevCatalystDir;
+  rmSync(catalystDir, { recursive: true, force: true });
+});
+
+function seedSignal(ticket, phase, body) {
+  const dir = join(orchDir, "workers", ticket);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
+}
+
+function appendEvent(envelope) {
+  appendFileSync(eventLogPath, JSON.stringify(envelope) + "\n");
+}
+
+function makeReviveEnvelope({ ticket, ts }) {
+  return {
+    ts,
+    attributes: {
+      "event.name": `phase.implement.revive.${ticket}`,
+      "event.entity": "phase",
+      "event.action": "revive",
+      "event.label": ticket,
+      "catalyst.orchestration": ticket,
+      "linear.issue.identifier": ticket,
+    },
+    body: { payload: { phase: "implement", ticket, status: "revive" } },
+  };
+}
+
+describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
+  test("first-strike: dead worker → 'revived' on next schedulerTick", () => {
+    seedSignal("CTL-587-A", "implement", {
+      status: "running",
+      bg_job_id: "nonexistent-bg-id",
+      orchestrator: "test-orch",
+    });
+
+    const reviveDispatchCalls = [];
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      teardownWorktree: () => true,
+      // Defer to the real reclaim function — the per-tick I/O seams that
+      // would touch the filesystem are stubbed, but the real
+      // defaultAppendReviveEvent runs against the temp events.jsonl. The
+      // round-trip assertion at the end of the test confirms the envelope
+      // shape this writes matches what countReviveEvents reads.
+      reclaimDeadWork: (od, sig, opts) =>
+        reclaimDeadWorkIfPossible(od, sig, {
+          ...opts,
+          // bg job dir is gone — classifyWorker → 'dead' → effectivelyDead
+          statJob: () => null,
+          probes: { implement: () => false }, // work NOT done
+          reviveDispatch: (args) => {
+            reviveDispatchCalls.push(args);
+            return { code: 0 };
+          },
+          applyStalledLabel: () => ({ applied: true }),
+          killBgJob: () => {},
+          // No prior revive events.
+          countReviveEvents: () => 0,
+          countDistinctRevivingTickets: () => 1,
+        }),
+    });
+
+    expect(result.revived).toEqual([{ ticket: "CTL-587-A", phase: "implement" }]);
+    expect(result.escalated).toEqual([]);
+    expect(reviveDispatchCalls).toHaveLength(1);
+    expect(reviveDispatchCalls[0].ticket).toBe("CTL-587-A");
+    expect(reviveDispatchCalls[0].phase).toBe("implement");
+    // Marker file was written (operator-friendly forensic crumb).
+    expect(existsSync(join(orchDir, "workers", "CTL-587-A", ".revive-1.applied"))).toBe(true);
+    // Envelope round-trip: the real defaultAppendReviveEvent wrote a
+    // phase.implement.revive.CTL-587-A envelope; countReviveEvents reads it
+    // back. A field-name regression in buildEventEnvelope would break this.
+    expect(countReviveEvents({ ticket: "CTL-587-A", path: eventLogPath })).toBe(1);
+  });
+
+  test("budget exhausted: 2 prior revive events → 'escalated' + needs-human label", () => {
+    seedSignal("CTL-587-B", "implement", {
+      status: "running",
+      bg_job_id: "nonexistent-bg-id",
+      orchestrator: "CTL-587-B",
+    });
+    // Pre-seed events.jsonl with two prior revives so the budget is exhausted.
+    appendEvent(makeReviveEnvelope({ ticket: "CTL-587-B", ts: "2026-05-23T00:00:00Z" }));
+    appendEvent(makeReviveEnvelope({ ticket: "CTL-587-B", ts: "2026-05-23T00:05:00Z" }));
+
+    const labelCalls = [];
+    const reviveDispatchCalls = [];
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      teardownWorktree: () => true,
+      reclaimDeadWork: (od, sig, opts) =>
+        reclaimDeadWorkIfPossible(od, sig, {
+          ...opts,
+          statJob: () => null, // bg dead
+          probes: { implement: () => false }, // work NOT done
+          reviveDispatch: (args) => {
+            reviveDispatchCalls.push(args);
+            return { code: 0 };
+          },
+          applyStalledLabel: ({ ticket }) => {
+            labelCalls.push(ticket);
+            return { applied: true };
+          },
+          killBgJob: () => {},
+          // Use the default countReviveEvents → reads the real events.jsonl
+          // we seeded above (no override).
+        }),
+    });
+
+    expect(result.escalated).toEqual([{ ticket: "CTL-587-B", phase: "implement" }]);
+    expect(result.revived).toEqual([]);
+    expect(reviveDispatchCalls).toHaveLength(0);
+    expect(labelCalls).toEqual(["CTL-587-B"]);
+  });
+
+  test("storm-breaker open: 4 distinct tickets reviving → 'revive-suppressed', no dispatch", () => {
+    seedSignal("CTL-587-C", "implement", {
+      status: "running",
+      bg_job_id: "nonexistent-bg-id",
+      orchestrator: "CTL-587-C",
+    });
+
+    const reviveDispatchCalls = [];
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      teardownWorktree: () => true,
+      reclaimDeadWork: (od, sig, opts) =>
+        reclaimDeadWorkIfPossible(od, sig, {
+          ...opts,
+          statJob: () => null,
+          probes: { implement: () => false },
+          reviveDispatch: (args) => {
+            reviveDispatchCalls.push(args);
+            return { code: 0 };
+          },
+          applyStalledLabel: () => ({ applied: true }),
+          killBgJob: () => {},
+          countReviveEvents: () => 0,
+          countDistinctRevivingTickets: () => 4, // > STORM_THRESHOLD=3
+        }),
+    });
+
+    expect(result.reviveSuppressed).toEqual([{ ticket: "CTL-587-C", phase: "implement" }]);
+    expect(reviveDispatchCalls).toHaveLength(0);
+    expect(existsSync(join(orchDir, "workers", "CTL-587-C", ".revive-1.applied"))).toBe(false); // no marker on suppression
+  });
+
+  test("no-probe phase (pr) on a dead worker → 'escalated' immediately", () => {
+    seedSignal("CTL-587-D", "pr", {
+      status: "running",
+      bg_job_id: "nonexistent-bg-id",
+      orchestrator: "CTL-587-D",
+    });
+
+    const labelCalls = [];
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      teardownWorktree: () => true,
+      reclaimDeadWork: (od, sig, opts) =>
+        reclaimDeadWorkIfPossible(od, sig, {
+          ...opts,
+          statJob: () => null, // bg dead
+          // Default probes registry — only 'implement' has a probe; pr does not.
+          applyStalledLabel: ({ ticket }) => {
+            labelCalls.push(ticket);
+            return { applied: true };
+          },
+          reviveDispatch: () => {
+            throw new Error("revive must not be called for no-probe escalation");
+          },
+        }),
+    });
+
+    expect(result.escalated).toEqual([{ ticket: "CTL-587-D", phase: "pr" }]);
+    expect(labelCalls).toEqual(["CTL-587-D"]);
+  });
+});

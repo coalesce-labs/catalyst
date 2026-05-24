@@ -5,7 +5,7 @@
 // this same file with recoverStartup composition tests.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +14,9 @@ import {
   defaultStatJob,
   recoverStartup,
   reclaimDeadWorkIfPossible,
+  defaultReviveDispatch,
+  defaultKillBgJob,
+  defaultAppendReviveEvent,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -540,31 +543,53 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(emit.calls.length).toBe(0);
   });
 
-  test("'not-applicable' when the phase has no registered probe", () => {
+  // CTL-587: this case used to return 'not-applicable' (a silent dead-end).
+  // It now escalates immediately — no probe means no way to verify the work,
+  // so the human must look. needs-human label is applied via the injected seam.
+  test("CTL-587: dead worker on a no-probe phase → 'escalated' + needs-human label", () => {
     const sig = { ...implementSignal(), phase: "research" };
+    sig.raw.phase = "research";
     const emit = recorder({ code: 0 });
+    const appendEscalated = recorder(undefined);
+    const applyLabel = recorder({ applied: true });
     const r = reclaimDeadWorkIfPossible(orch, sig, {
       statJob: () => null, // bg dead
       probes: { implement: recorder(true) }, // research not registered
       emitComplete: emit,
       appendEvent: recorder(undefined),
+      appendEscalatedEvent: appendEscalated,
+      applyStalledLabel: applyLabel,
     });
-    expect(r).toBe("not-applicable");
+    expect(r).toBe("escalated");
     expect(emit.calls.length).toBe(0);
+    expect(appendEscalated.calls[0][0].reason).toBe("no-probe-for-phase");
+    expect(applyLabel.calls[0][0].ticket).toBe("CTL-9");
   });
 
-  test("'not-done' when the dead worker's probe returns false (no emit)", () => {
+  // CTL-587: this case used to return 'not-done' (the other silent dead-end).
+  // It now enters the revive path. With reviveCount=0 and storm window open
+  // the return is 'revived' and the dispatcher seam fires once.
+  test("CTL-587: dead worker + probe says NOT done → 'revived' (first attempt)", () => {
     const emit = recorder({ code: 0 });
-    const appendEvent = recorder(undefined);
+    const appendRevive = recorder(undefined);
+    const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
       statJob: () => null, // bg dead
       probes: { implement: recorder(false) }, // probe: work NOT done
       emitComplete: emit,
-      appendEvent,
+      appendEvent: recorder(undefined),
+      appendReviveEvent: appendRevive,
+      reviveDispatch,
+      countReviveEvents: recorder(0),
+      countDistinctRevivingTickets: recorder(1),
+      writeReviveMarker: recorder(undefined),
+      killBgJob: recorder(undefined),
+      applyStalledLabel: recorder({ applied: true }),
     });
-    expect(r).toBe("not-done");
-    expect(emit.calls.length).toBe(0);
-    expect(appendEvent.calls.length).toBe(0);
+    expect(r).toBe("revived");
+    expect(emit.calls.length).toBe(0); // CTL-574 reclaim path NOT taken
+    expect(appendRevive.calls.length).toBe(1);
+    expect(reviveDispatch.calls.length).toBe(1);
   });
 
   test("'reclaimed' fires append-event THEN emit-complete (in that order, with full flag set)", () => {
@@ -626,5 +651,441 @@ describe("reclaimDeadWorkIfPossible", () => {
       repoRoot: "/repo/x",
     });
     expect(seen).toEqual({ ticket: "CTL-42", repoRoot: "/repo/x" });
+  });
+});
+
+// --- CTL-587: revive / revive-suppressed / escalated branches ---------------
+//
+// The pre-CTL-587 'not-applicable' and 'not-done' returns were silent dead-ends.
+// CTL-587 turns them into actions:
+//   - 'not-applicable' (no probe)             → 'escalated' + needs-human label
+//   - 'not-done' + budget available + no storm → 'revived' (re-dispatch)
+//   - 'not-done' + budget exhausted           → 'escalated' + needs-human label
+//   - 'not-done' + storm-breaker open         → 'revive-suppressed' (next tick)
+
+describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () => {
+  // setupReviveScenario stages an effectively-dead worker (running signal +
+  // stale state.json mtime) and threads every CTL-587 seam through opts.
+  function setupReviveScenario({
+    reviveCount = 0,
+    distinctRevivingTickets = 1,
+    probeResult = false, // false = "work not done" → enters CTL-587 territory
+    phase = "implement",
+    ticket = "CTL-9",
+    bgJobId = "bg-9",
+    stateJsonMtime = 1_000, // far in the past — staleness triggers
+    nowMs = 1_000 + 6 * 60 * 1000, // 6 min past mtime — > STALE_MS
+  } = {}) {
+    const sig = {
+      ...implementSignal({ ticket, status: "running", bgJobId }),
+      phase,
+    };
+    sig.raw.phase = phase;
+    return {
+      orch: "/orch",
+      sig,
+      opts: {
+        repoRoot: "/repo",
+        statJob: () => ({ exists: true, mtimeMs: stateJsonMtime }),
+        probes: phase === "implement" ? { implement: recorder(probeResult) } : {},
+        emitComplete: recorder({ code: 0 }),
+        appendEvent: recorder(undefined),
+        appendReviveEvent: recorder(undefined),
+        appendEscalatedEvent: recorder(undefined),
+        appendReviveSuppressedEvent: recorder(undefined),
+        reviveDispatch: recorder({ code: 0 }),
+        applyStalledLabel: recorder({ applied: true }),
+        killBgJob: recorder(undefined),
+        countReviveEvents: recorder(reviveCount),
+        countDistinctRevivingTickets: recorder(distinctRevivingTickets),
+        writeReviveMarker: recorder(undefined),
+        now: () => nowMs,
+        staleMs: 5 * 60 * 1000,
+      },
+    };
+  }
+
+  test("first revive: count=0, no storm → 'revived', event before dispatch, marker written", () => {
+    const s = setupReviveScenario({ reviveCount: 0 });
+    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(r).toBe("revived");
+    expect(s.opts.appendReviveEvent.calls.length).toBe(1);
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+    expect(s.opts.writeReviveMarker.calls.length).toBe(1);
+    expect(s.opts.appendReviveEvent.calls[0][0].attempt).toBe(1);
+  });
+
+  test("second revive: count=1 → still 'revived', attempt=2", () => {
+    const s = setupReviveScenario({ reviveCount: 1 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    expect(s.opts.appendReviveEvent.calls[0][0].attempt).toBe(2);
+  });
+
+  test("budget exhausted: count=2 → 'escalated', applies needs-human label, no dispatch", () => {
+    const s = setupReviveScenario({ reviveCount: 2 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
+    expect(s.opts.applyStalledLabel.calls[0][0].ticket).toBe("CTL-9");
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].final_attempt_count).toBe(2);
+  });
+
+  test("storm-breaker: distinct=4 > 3 → 'revive-suppressed', no dispatch", () => {
+    const s = setupReviveScenario({ reviveCount: 0, distinctRevivingTickets: 4 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revive-suppressed");
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+    expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(1);
+    expect(s.opts.appendReviveSuppressedEvent.calls[0][0].window_distinct_tickets).toBe(4);
+  });
+
+  test("storm-breaker at the threshold: distinct=3 is NOT suppressed (>3, not >=3)", () => {
+    const s = setupReviveScenario({ reviveCount: 0, distinctRevivingTickets: 3 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+  });
+
+  test("not-applicable (no probe registered for phase) → 'escalated' immediately", () => {
+    const s = setupReviveScenario({ phase: "pr" });
+    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(r).toBe("escalated");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].phase).toBe("pr");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("no-probe-for-phase");
+    expect(s.opts.applyStalledLabel.calls.length).toBe(1);
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("defensive kill: fires when state.json mtime > KILL_RECENT_ACTIVITY_MS old", () => {
+    // 60s past now — older than the 30s kill threshold.
+    const s = setupReviveScenario({
+      stateJsonMtime: 1_000,
+      nowMs: 1_000 + 6 * 60 * 1000, // 6min past — also stale
+    });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.killBgJob.calls.length).toBe(1);
+    expect(s.opts.killBgJob.calls[0][0].bgJobId).toBe("bg-9");
+  });
+
+  test("defensive kill: does NOT fire when classifyWorker:dead path is taken (no mtime captured)", () => {
+    // When statJob returns null (bg dir gone), classifyWorker returns 'dead'
+    // directly → prevStateJsonMtime stays null → the kill gate at
+    // recovery.mjs sees no mtime and skips. The separate freshness-vs-kill
+    // gate is exercised by the next test.
+    const sig = implementSignal({ ticket: "CTL-9", status: "running", bgJobId: "bg-9" });
+    const opts = {
+      ...setupReviveScenario().opts,
+      statJob: () => null,
+      now: () => 0,
+    };
+    reclaimDeadWorkIfPossible("/orch", sig, opts);
+    expect(opts.killBgJob.calls.length).toBe(0);
+  });
+
+  test("revive event payload contains attempt, reason, prev_state_json_mtime, prev_bg_job_id", () => {
+    const s = setupReviveScenario({ reviveCount: 0 });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    const body = s.opts.appendReviveEvent.calls[0][0];
+    expect(body.attempt).toBe(1);
+    expect(body.reason).toBe("work-not-done-after-stale-bg");
+    expect(typeof body.prev_state_json_mtime).toBe("number");
+    expect(body.prev_bg_job_id).toBe("bg-9");
+  });
+
+  test("escalation still records 'escalated' even when applyStalledLabel fails (no dispatch)", () => {
+    // Failure to apply the label still returns 'escalated' so the scheduler
+    // records the outcome. The labelOnce semantics in scheduler.mjs guard
+    // re-application — a verify-failed result returns no marker, so the next
+    // tick retries the label apply.
+    const s = setupReviveScenario({ reviveCount: 2 });
+    s.opts.applyStalledLabel = recorder({ applied: false, reason: "verify-failed" });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("revive emits event BEFORE dispatch (audit-survives-crash ordering)", () => {
+    // If the daemon crashes mid-revive AFTER appending the event but BEFORE
+    // dispatch, the next tick correctly sees attempt N in events.jsonl and
+    // enters attempt N+1. The reverse order would lose the attempt counter.
+    const order = [];
+    const s = setupReviveScenario({ reviveCount: 0 });
+    s.opts.appendReviveEvent = (...args) => {
+      order.push(["event", ...args]);
+    };
+    s.opts.reviveDispatch = (...args) => {
+      order.push(["dispatch", ...args]);
+      return { code: 0 };
+    };
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(order[0][0]).toBe("event");
+    expect(order[1][0]).toBe("dispatch");
+  });
+
+  test("revive dispatch failure does NOT write the marker (next tick retries)", () => {
+    const s = setupReviveScenario({ reviveCount: 0 });
+    s.opts.appendReviveEvent = recorder(true); // event lands
+    s.opts.reviveDispatch = recorder({ code: 1, stderr: "dispatch boom" });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    // The event still gets appended (it tracks the attempt), but the marker
+    // is only written on a successful dispatch.
+    expect(s.opts.appendReviveEvent.calls.length).toBe(1);
+    expect(s.opts.writeReviveMarker.calls.length).toBe(0);
+  });
+
+  // Audit-budget invariant: if the revive event append fails (disk full,
+  // EROFS, permissions), the per-ticket counter cannot be enforced on the
+  // next tick. Better to skip the dispatch and retry next tick than to spawn
+  // a worker we cannot account for. Returns 'revive-suppressed' so the
+  // scheduler logs the suppression and re-evaluates.
+  test("audit-append failure → 'revive-suppressed', dispatch NOT invoked, no marker", () => {
+    const s = setupReviveScenario({ reviveCount: 0 });
+    s.opts.appendReviveEvent = recorder(false); // simulate append failure
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revive-suppressed");
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+    expect(s.opts.writeReviveMarker.calls.length).toBe(0);
+    // Operator forensics trail: a 'revive-suppressed' audit event is emitted
+    // with reason: audit-append-failed so the suppression is visible in
+    // events.jsonl (distinct from the storm-breaker case).
+    expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(1);
+    expect(s.opts.appendReviveSuppressedEvent.calls[0][0].reason).toBe("audit-append-failed");
+  });
+
+  // Defensive-kill freshness gate: a `running` worker with a stale-but-not-yet-
+  // KILL_RECENT_ACTIVITY_MS-stale state.json mtime must NOT be SIGKILL'd. We
+  // override staleMs so the worker still classifies as effectively dead (via
+  // the freshness path) but the kill threshold (30s) is NOT crossed.
+  test("defensive kill: state.json mtime within KILL_RECENT_ACTIVITY_MS → no kill", () => {
+    const s = setupReviveScenario({
+      stateJsonMtime: 1_000,
+      nowMs: 1_000 + 20_000, // 20s past mtime — under 30s kill threshold
+    });
+    // Override staleMs so the worker IS effectively dead via the freshness
+    // path even though only 20s have elapsed. This isolates the kill gate
+    // from the staleness gate.
+    s.opts.staleMs = 10_000;
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.killBgJob.calls.length).toBe(0);
+  });
+});
+
+// --- CTL-587: default-seam behavioural tests --------------------------------
+// The above describe block uses injected stubs for all seams. These tests
+// exercise the REAL defaults — the load-bearing logic inside
+// defaultReviveDispatch, defaultKillBgJob, and the audit-event envelope shape.
+// Without these, a regression in (a) the signal-reset half of revive dispatch,
+// (b) the pid-recycling guard, or (c) the envelope shape would slip past every
+// other test, because every other test stubs them out.
+
+describe("defaultReviveDispatch — signal-reset behaviour", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl587-revdisp-"));
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  function seed(ticket, phase, body) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, ...body }),
+    );
+    return join(dir, `phase-${phase}.json`);
+  }
+
+  test("missing signal file → returns code:1 stderr:'signal-missing', no dispatch", () => {
+    const dispatch = recorder({ code: 0 });
+    const r = defaultReviveDispatch(
+      { orchDir, ticket: "CTL-9", phase: "implement" },
+      { dispatch },
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toBe("signal-missing");
+    expect(dispatch.calls.length).toBe(0);
+  });
+
+  test("signal present → flips to 'stalled' with attentionReason and calls dispatch", () => {
+    const signalPath = seed("CTL-9", "implement", {
+      status: "running",
+      bg_job_id: "bg-9",
+      orchestrator: "test-orch",
+    });
+    const dispatch = recorder({ code: 0 });
+    const r = defaultReviveDispatch(
+      { orchDir, ticket: "CTL-9", phase: "implement" },
+      { dispatch },
+    );
+    expect(r.code).toBe(0);
+    const sig = JSON.parse(readFileSync(signalPath, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.attentionReason).toBe("ctl-587-revive-reset");
+    expect(typeof sig.updatedAt).toBe("string");
+    // Original fields preserved.
+    expect(sig.bg_job_id).toBe("bg-9");
+    expect(sig.orchestrator).toBe("test-orch");
+    expect(dispatch.calls.length).toBe(1);
+    expect(dispatch.calls[0][0]).toEqual({
+      orchDir,
+      ticket: "CTL-9",
+      phase: "implement",
+    });
+  });
+
+  test("signal flip happens BEFORE dispatch (so dispatcher sees 'stalled')", () => {
+    const signalPath = seed("CTL-9", "implement", { status: "running" });
+    let seenStatus = null;
+    const dispatch = () => {
+      seenStatus = JSON.parse(readFileSync(signalPath, "utf8")).status;
+      return { code: 0 };
+    };
+    defaultReviveDispatch({ orchDir, ticket: "CTL-9", phase: "implement" }, { dispatch });
+    expect(seenStatus).toBe("stalled");
+  });
+
+  test("malformed JSON in signal → returns code:1 with err message, no dispatch", () => {
+    const dir = join(orchDir, "workers", "CTL-9");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-implement.json"), "{ not json");
+    const dispatch = recorder({ code: 0 });
+    const r = defaultReviveDispatch(
+      { orchDir, ticket: "CTL-9", phase: "implement" },
+      { dispatch },
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/JSON|json/i);
+    expect(dispatch.calls.length).toBe(0);
+  });
+
+  test("signal write uses tmp + rename (atomic — no partial file visible)", () => {
+    // We can't observe the rename directly without racing it, but we can
+    // confirm no `.tmp.*` files linger after the call — proves the rename
+    // actually moved the tmp into place.
+    seed("CTL-9", "implement", { status: "running", bg_job_id: "bg-9" });
+    defaultReviveDispatch({ orchDir, ticket: "CTL-9", phase: "implement" }, {
+      dispatch: () => ({ code: 0 }),
+    });
+    const dir = join(orchDir, "workers", "CTL-9");
+    const leftovers = readdirSync(dir).filter((f) => f.includes(".tmp."));
+    expect(leftovers).toEqual([]);
+  });
+});
+
+describe("defaultKillBgJob — pid-recycling guard", () => {
+  let jobsRootDir;
+  beforeEach(() => {
+    jobsRootDir = mkdtempSync(join(tmpdir(), "ctl587-jobs-"));
+  });
+  afterEach(() => {
+    rmSync(jobsRootDir, { recursive: true, force: true });
+  });
+
+  function seedPid(bgJobId, pid) {
+    const dir = join(jobsRootDir, bgJobId);
+    mkdirSync(dir, { recursive: true });
+    if (pid !== undefined) writeFileSync(join(dir, "pid"), String(pid));
+  }
+
+  test("missing bgJobId → no spawn invocation", () => {
+    const spawn = recorder({ status: 0, stdout: "claude\n", stderr: "" });
+    defaultKillBgJob({ bgJobId: null }, { spawn, jobsRoot: () => jobsRootDir });
+    expect(spawn.calls.length).toBe(0);
+  });
+
+  test("missing pid file → no spawn invocation", () => {
+    // bgJobId set but no pid file written.
+    const spawn = recorder({ status: 0, stdout: "claude\n", stderr: "" });
+    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
+    expect(spawn.calls.length).toBe(0);
+  });
+
+  test("pid <= 1 (init / invalid) → no spawn invocation", () => {
+    seedPid("bg-9", "1");
+    const spawn = recorder({ status: 0, stdout: "claude\n", stderr: "" });
+    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
+    expect(spawn.calls.length).toBe(0);
+  });
+
+  test("non-numeric pid → no spawn invocation", () => {
+    seedPid("bg-9", "abc");
+    const spawn = recorder({ status: 0, stdout: "claude\n", stderr: "" });
+    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
+    expect(spawn.calls.length).toBe(0);
+  });
+
+  test("ps exit non-zero (pid gone) → ps invoked, kill is NOT invoked", () => {
+    seedPid("bg-9", "12345");
+    const calls = [];
+    const spawn = (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "ps") return { status: 1, stdout: "", stderr: "" };
+      return { status: 0 };
+    };
+    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
+    expect(calls.filter((c) => c.cmd === "ps").length).toBe(1);
+    expect(calls.filter((c) => c.cmd === "kill").length).toBe(0);
+  });
+
+  test("ps says pid is 'node' (recycled to non-claude process) → kill skipped", () => {
+    seedPid("bg-9", "12345");
+    const calls = [];
+    const spawn = (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "ps") return { status: 0, stdout: "node\n", stderr: "" };
+      return { status: 0 };
+    };
+    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
+    expect(calls.filter((c) => c.cmd === "kill").length).toBe(0);
+  });
+
+  test("happy path: ps confirms 'claude' → kill -9 issued with the pid", () => {
+    seedPid("bg-9", "12345");
+    const calls = [];
+    const spawn = (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "ps") return { status: 0, stdout: "claude\n", stderr: "" };
+      if (cmd === "kill") return { status: 0, stdout: "", stderr: "" };
+      return { status: 127 };
+    };
+    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
+    const killCalls = calls.filter((c) => c.cmd === "kill");
+    expect(killCalls).toHaveLength(1);
+    expect(killCalls[0].args).toEqual(["-9", "12345"]);
+  });
+});
+
+describe("revive event envelope round-trip (write → countReviveEvents)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl587-rt-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  test("defaultAppendReviveEvent writes an envelope that countReviveEvents counts", async () => {
+    // Dynamic-import so the test sees process.env.CATALYST_DIR set above.
+    const { countReviveEvents } = await import("./event-scan.mjs");
+    const ok = defaultAppendReviveEvent({
+      phase: "implement",
+      ticket: "CTL-RT-1",
+      orchId: "orch-rt",
+      attempt: 1,
+      reason: "work-not-done-after-stale-bg",
+      prev_state_json_mtime: 12345,
+      prev_bg_job_id: "bg-rt-1",
+    });
+    expect(ok).toBe(true);
+    // The default path resolves the event log via getEventLogPath, so a no-
+    // arg call must find the envelope we just wrote.
+    expect(countReviveEvents({ ticket: "CTL-RT-1" })).toBe(1);
+    expect(countReviveEvents({ ticket: "CTL-RT-1", orchId: "orch-rt" })).toBe(1);
+    // orchId mismatch returns 0 — proves the orchId attribute round-trips.
+    expect(countReviveEvents({ ticket: "CTL-RT-1", orchId: "wrong-orch" })).toBe(0);
   });
 });

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { linearKeyForPhase, TERMINAL_LINEAR_KEY } from "../lib/phase-fsm.mjs";
 import { getProjectConfig } from "./registry.mjs";
 import { log } from "./config.mjs";
+import { fetchTicketLabels } from "./linear-query.mjs";
 
 // linear-transition.sh sits one directory up from execution-core/ — mirrors the
 // sibling-bin spawnSync pattern dispatch.mjs uses for orchestrate-dispatch-next.
@@ -94,13 +95,22 @@ export function applyTerminalDone({ ticket, resolveRepoRoot, exec }) {
   return runTransition({ ticket, key: TERMINAL_LINEAR_KEY, resolveRepoRoot, exec });
 }
 
-// applyLabel — additively apply a Linear label (triaged, needs-human). Best-effort:
-// `--label-mode add` is additive so a re-applied label is harmless; callers guard
-// re-application with a once-marker (scheduler.mjs) since linearis has no
-// read-compare for labels.
+// applyLabel — additively apply a Linear label (triaged, needs-human) AND verify
+// the write landed. CTL-587: per memory project_linear_transition_silent_success,
+// linearis can exit 0 on a label update that did NOT actually land (rate
+// limiting, transient API). The read-back via fetchTicketLabels closes that
+// silent-success gap: `applied: true` now means a follow-up `linearis issues
+// read` confirmed the label is on the ticket. `applied: false` comes with a
+// `reason` discriminator so callers can distinguish:
+//   - 'write-failed'   — the update itself exited non-zero (no read-back run)
+//   - 'verify-failed'  — update exited 0 but the read-back is missing the label
+//                        (the silent-success case) OR the read-back exec failed
+//   - 'exception'      — the exec itself threw
+// All three are retryable next tick: labelOnce (scheduler.mjs) only writes its
+// marker when applied: true, so a failure naturally retries.
 export function applyLabel({ ticket, label, exec = defaultExec }) {
   try {
-    const { code, stderr } = exec("linearis", [
+    const writeRes = exec("linearis", [
       "issues",
       "update",
       ticket,
@@ -109,15 +119,27 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
       "--label-mode",
       "add",
     ]);
-    if (code !== 0) {
-      log.warn({ ticket, label, code, stderr }, "linear-write: label not applied");
+    if (writeRes.code !== 0) {
+      log.warn(
+        { ticket, label, code: writeRes.code, stderr: writeRes.stderr },
+        "linear-write: label write failed (exit non-zero)"
+      );
+      return { applied: false, reason: "write-failed" };
     }
-    return { applied: code === 0 };
+    const labels = fetchTicketLabels(ticket, { exec });
+    if (!Array.isArray(labels) || !labels.includes(label)) {
+      log.warn(
+        { ticket, label, readback: labels },
+        "linear-write: label write exit-0 but read-back missing label (silent-success gap)"
+      );
+      return { applied: false, reason: "verify-failed" };
+    }
+    return { applied: true };
   } catch (err) {
     log.warn(
       { ticket, label, err: err.message },
       "linear-write: label write threw — swallowed"
     );
-    return { applied: false };
+    return { applied: false, reason: "exception" };
   }
 }
