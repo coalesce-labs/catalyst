@@ -105,6 +105,17 @@ jq --arg ts "$TS" --arg sid "${CATALYST_SESSION_ID:-}" '
 ' "$SIGNAL_FILE" > "$TMP" \
   && mv "$TMP" "$SIGNAL_FILE"
 
+# CTL-587: test-kill after-prelude. Exits AFTER the signal is flipped to
+# running (so classifyWorker sees a non-terminal worker) but BEFORE any
+# commit work, so reclaimDeadWorkIfPossible's implement-probe returns false
+# on the next staleness tick and the revive path engages. Mode suffix
+# `${PHASE}:after-prelude` keeps the env var phase-agnostic — only the
+# matching phase aborts.
+if [[ "${CATALYST_TEST_KILL_PHASE:-}" == "${PHASE}:after-prelude" ]]; then
+  echo "[CTL-587 test-kill] aborting after prelude" >&2
+  exit 137
+fi
+
 # 4. Locate the approved plan. The dispatcher already validated this glob;
 #    we re-resolve to capture the actual filename for the delegated skill.
 TICKET_LC="$(printf '%s' "$TICKET" | tr '[:upper:]' '[:lower:]')"

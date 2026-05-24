@@ -445,6 +445,27 @@ mark_launch_failed() {
 	fi
 }
 
+# ─── CTL-587: test-kill injection hook ─────────────────────────────────────
+#
+# `CATALYST_TEST_KILL_PHASE=<phase>:<mode>` lets the CTL-587 integration tests
+# exercise the dead-worker revival paths without an OOM or kill -9. Two modes:
+#   before-launch  — abort before the claude --bg spawn. Signal flips to
+#                    `stalled` via mark_launch_failed (exercises the escalation
+#                    branch in recovery.mjs::reclaimDeadWorkIfPossible).
+#   after-prelude  — handled in phase-implement/SKILL.md prelude (this script
+#                    no-ops for that mode and lets the spawn proceed; the
+#                    prelude itself exits 137 AFTER flipping the signal to
+#                    `running`, exercising the revive path).
+# A non-matching phase or unset env falls through to the normal dispatch path.
+if [[ -n ${CATALYST_TEST_KILL_PHASE:-} ]]; then
+	TK_PHASE="${CATALYST_TEST_KILL_PHASE%%:*}"
+	TK_MODE="${CATALYST_TEST_KILL_PHASE#*:}"
+	if [[ $TK_PHASE == "$PHASE" && $TK_MODE == "before-launch" ]]; then
+		mark_launch_failed "test-kill-before-launch"
+		exit 1
+	fi
+fi
+
 # ─── Build prompt + spawn claude --bg ──────────────────────────────────────
 
 PROMPT="/catalyst-dev:phase-${PHASE} ${TICKET} --orch-dir ${ORCH_DIR}"
