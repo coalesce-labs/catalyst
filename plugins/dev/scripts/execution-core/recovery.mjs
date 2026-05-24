@@ -14,6 +14,7 @@ import {
   appendFileSync,
   mkdirSync,
   writeFileSync,
+  renameSync,
   existsSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -187,6 +188,8 @@ function appendEnvelopeBestEffort(line, kind) {
 
 // defaultAppendReclaimEvent — phase.<phase>.reclaim.<ticket>. The CTL-574 path:
 // the worker died but its work committed, so the scheduler can advance.
+// Returns true iff the audit append succeeded (CTL-587 contract — callers may
+// gate on success; today the reclaim caller does not).
 function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
@@ -209,8 +212,9 @@ function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
 // defaultAppendReviveEvent — returns true iff the audit append succeeded.
 // reclaimDeadWorkIfPossible gates the dispatch on this so a failed append
 // does not lose the budget counter (next tick would repeat attempt N instead
-// of advancing to N+1).
-function defaultAppendReviveEvent({
+// of advancing to N+1). Exported so the round-trip test can confirm the
+// envelope shape this writes matches what countReviveEvents reads.
+export function defaultAppendReviveEvent({
   phase,
   ticket,
   orchId,
@@ -246,11 +250,15 @@ function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_atte
   );
 }
 
+// reason defaults to the storm-breaker case; the audit-append-failed branch
+// passes its own discriminator so operators can filter the two suppression
+// causes apart in events.jsonl.
 function defaultAppendReviveSuppressedEvent({
   phase,
   ticket,
   orchId,
   window_distinct_tickets,
+  reason = "storm-breaker-open",
 }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
@@ -258,7 +266,7 @@ function defaultAppendReviveSuppressedEvent({
       ticket,
       orchId,
       action: "revive-suppressed",
-      reason: "storm-breaker-open",
+      reason,
       payloadExtras: { window_distinct_tickets, window_ms: STORM_WINDOW_MS },
     }),
     "revive-suppressed",
@@ -276,7 +284,12 @@ function defaultAppendReviveSuppressedEvent({
 // idempotency guard rejects the spawn for any non-failed signal. A missing
 // signal file is therefore treated as an error — falling through to dispatch
 // without a signal would silently no-op and burn the revive budget.
-function defaultReviveDispatch({ orchDir, ticket, phase }) {
+//
+// Exported with an injectable `dispatch` seam so the default behaviour itself
+// can be unit-tested (every test in recovery.test.mjs that overrides the
+// outer `reviveDispatch` would otherwise leave the signal-reset logic — the
+// load-bearing half — uncovered).
+export function defaultReviveDispatch({ orchDir, ticket, phase }, { dispatch = defaultDispatch } = {}) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   if (!existsSync(signalPath)) {
     log.warn(
@@ -290,12 +303,17 @@ function defaultReviveDispatch({ orchDir, ticket, phase }) {
     sig.status = "stalled";
     sig.attentionReason = "ctl-587-revive-reset";
     sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-    writeFileSync(signalPath, JSON.stringify(sig, null, 2));
+    // Atomic write — mirrors abort-worker.mjs:77-79 ("the signal is the source
+    // of truth"). A bare writeFileSync would let a concurrent reader observe a
+    // partially-written file and misclassify the worker as 'unknown'.
+    const tmp = `${signalPath}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(sig, null, 2));
+    renameSync(tmp, signalPath);
   } catch (err) {
     log.warn({ ticket, phase, err: err.message }, "revive: signal reset failed");
     return { code: 1, stdout: "", stderr: err.message };
   }
-  return defaultDispatch({ orchDir, ticket, phase });
+  return dispatch({ orchDir, ticket, phase });
 }
 
 // defaultApplyStalledLabel — apply the flat `needs-human` label via the
@@ -325,17 +343,23 @@ function defaultApplyStalledLabel({ ticket }) {
 // `claude` process before signalling to defensively avoid SIGKILL'ing a
 // recycled pid (~5+ minutes after the worker exited the PID space is fair
 // game for unrelated processes).
-function defaultKillBgJob({ bgJobId }) {
+//
+// `spawn` and `jobsRoot` are injectable for tests; production defaults call
+// the real spawnSync against the real ~/.claude/jobs.
+export function defaultKillBgJob(
+  { bgJobId },
+  { spawn = spawnSync, jobsRoot = getJobsRoot } = {},
+) {
   if (!bgJobId) return;
   try {
-    const pidPath = join(getJobsRoot(), bgJobId, "pid");
+    const pidPath = join(jobsRoot(), bgJobId, "pid");
     if (!existsSync(pidPath)) return;
     const pid = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
     if (!Number.isFinite(pid) || pid <= 1) return;
     // Verify the pid still belongs to a claude process before SIGKILL'ing.
     // `ps -p <pid> -o comm=` prints just the command; exit 1 means the pid
     // is gone. On any verification doubt, skip the kill (best-effort).
-    const ps = spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+    const ps = spawn("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
     if (ps.status !== 0 || !(ps.stdout || "").toLowerCase().includes("claude")) {
       log.info(
         { bgJobId, pid, comm: (ps.stdout || "").trim() },
@@ -343,7 +367,7 @@ function defaultKillBgJob({ bgJobId }) {
       );
       return;
     }
-    const k = spawnSync("kill", ["-9", String(pid)], { encoding: "utf8" });
+    const k = spawn("kill", ["-9", String(pid)], { encoding: "utf8" });
     log.info(
       { bgJobId, pid, code: k.status },
       "revive: defensive kill issued",
@@ -580,6 +604,18 @@ export function reclaimDeadWorkIfPossible(
       { ticket, phase, attempt },
       "ctl-587: revive event append failed — aborting dispatch to preserve budget counter (will retry next tick)",
     );
+    // Best-effort suppression audit so operators see SOMETHING in events.jsonl
+    // (if the audit log is writeable for this kind even though the revive
+    // kind failed — e.g. a transient EAGAIN on the prior write). The
+    // suppressed event uses a distinct reason so it can be filtered from the
+    // storm-breaker case.
+    appendReviveSuppressedEvent({
+      phase,
+      ticket,
+      orchId,
+      window_distinct_tickets: 0, // not applicable — audit failure, not storm
+      reason: "audit-append-failed",
+    });
     return "revive-suppressed";
   }
   const dispatchRes = reviveDispatch({ orchDir, ticket, phase });

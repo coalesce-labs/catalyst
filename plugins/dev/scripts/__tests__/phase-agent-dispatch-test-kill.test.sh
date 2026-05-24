@@ -195,11 +195,8 @@ awk '
   /^```$/ && found && !done { done=1; exit }
   found && !done { print }
 ' "$SKILL_MD" >"${PRELUDE_DIR}/prelude.sh"
-# Append the planned kill-hook check — RED test, this is what we expect the
-# real SKILL.md to contain once Phase 1 lands. Once SKILL.md has the hook,
-# this append becomes a no-op duplicate so it stays harmless.
-# (Once green, the extracted prelude itself contains the hook — appending it
-# again is idempotent: a second matching check still exits 137.)
+# The extracted prelude IS the source of truth — Phase 1 added the kill hook
+# to SKILL.md itself, so no extra append is needed.
 chmod +x "${PRELUDE_DIR}/prelude.sh"
 (
 	cd "${TEST_DIR}/proj" || exit

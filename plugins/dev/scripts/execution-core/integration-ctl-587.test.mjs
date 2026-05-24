@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedulerTick } from "./scheduler.mjs";
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
+import { countReviveEvents } from "./event-scan.mjs";
 
 let orchDir;
 let catalystDir;
@@ -25,6 +26,13 @@ let eventLogPath;
 beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
   catalystDir = mkdtempSync(join(tmpdir(), "ctl587-int-"));
+  // Safety: refuse to run if the temp path somehow escaped tmpdir() — the
+  // test writes through default-real event-log paths and a misconfigured
+  // CATALYST_DIR could dirty the host's real ~/.catalyst/events/. Pin the
+  // contract loudly rather than silently corrupting an operator's log.
+  if (!catalystDir.startsWith(tmpdir())) {
+    throw new Error(`integration test refused: catalystDir not under tmpdir: ${catalystDir}`);
+  }
   process.env.CATALYST_DIR = catalystDir;
   // Pre-create the events dir so appends in the recovery audit path land
   // somewhere predictable. The default event-log path resolves under
@@ -74,7 +82,6 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     seedSignal("CTL-587-A", "implement", {
       status: "running",
       bg_job_id: "nonexistent-bg-id",
-      liveness: { kind: "bg", value: "nonexistent-bg-id" },
       orchestrator: "test-orch",
     });
 
@@ -88,9 +95,11 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
         applyLabel: () => ({ applied: true }),
       },
       teardownWorktree: () => true,
-      // Capture the call but defer to the real reclaim function via injected
-      // seams. We exercise the wiring here, not the internal branch matrix
-      // (covered exhaustively in recovery.test.mjs).
+      // Defer to the real reclaim function — the per-tick I/O seams that
+      // would touch the filesystem are stubbed, but the real
+      // defaultAppendReviveEvent runs against the temp events.jsonl. The
+      // round-trip assertion at the end of the test confirms the envelope
+      // shape this writes matches what countReviveEvents reads.
       reclaimDeadWork: (od, sig, opts) =>
         reclaimDeadWorkIfPossible(od, sig, {
           ...opts,
@@ -116,13 +125,16 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     expect(reviveDispatchCalls[0].phase).toBe("implement");
     // Marker file was written (operator-friendly forensic crumb).
     expect(existsSync(join(orchDir, "workers", "CTL-587-A", ".revive-1.applied"))).toBe(true);
+    // Envelope round-trip: the real defaultAppendReviveEvent wrote a
+    // phase.implement.revive.CTL-587-A envelope; countReviveEvents reads it
+    // back. A field-name regression in buildEventEnvelope would break this.
+    expect(countReviveEvents({ ticket: "CTL-587-A", path: eventLogPath })).toBe(1);
   });
 
   test("budget exhausted: 2 prior revive events → 'escalated' + needs-human label", () => {
     seedSignal("CTL-587-B", "implement", {
       status: "running",
       bg_job_id: "nonexistent-bg-id",
-      liveness: { kind: "bg", value: "nonexistent-bg-id" },
       orchestrator: "CTL-587-B",
     });
     // Pre-seed events.jsonl with two prior revives so the budget is exhausted.
@@ -169,7 +181,6 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     seedSignal("CTL-587-C", "implement", {
       status: "running",
       bg_job_id: "nonexistent-bg-id",
-      liveness: { kind: "bg", value: "nonexistent-bg-id" },
       orchestrator: "CTL-587-C",
     });
 
@@ -208,7 +219,6 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     seedSignal("CTL-587-D", "pr", {
       status: "running",
       bg_job_id: "nonexistent-bg-id",
-      liveness: { kind: "bg", value: "nonexistent-bg-id" },
       orchestrator: "CTL-587-D",
     });
 
