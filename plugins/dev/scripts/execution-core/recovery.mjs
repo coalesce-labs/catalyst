@@ -166,20 +166,29 @@ function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtr
   );
 }
 
+// appendEnvelopeBestEffort — try to append; return true on success, false on
+// any failure. Revive event callers gate the dispatch on this return value:
+// the per-ticket revive counter lives in events.jsonl, so a missed append
+// means countReviveEvents undercounts on the next tick and the budget cannot
+// be enforced. Better to skip the dispatch than to lose the counter.
 function appendEnvelopeBestEffort(line, kind) {
   const logPath = getEventLogPath();
   try {
     mkdirSync(dirname(logPath), { recursive: true });
     appendFileSync(logPath, line);
+    return true;
   } catch (err) {
-    log.warn({ err: err.message, kind }, "recovery: event append failed");
+    // log.error (not warn) — a daemon-health-critical failure: the audit log
+    // is unwriteable. Disk full, EACCES, EROFS during incident response.
+    log.error({ err: err.message, kind }, "recovery: event append failed");
+    return false;
   }
 }
 
 // defaultAppendReclaimEvent — phase.<phase>.reclaim.<ticket>. The CTL-574 path:
 // the worker died but its work committed, so the scheduler can advance.
 function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
-  appendEnvelopeBestEffort(
+  return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase,
       ticket,
@@ -197,6 +206,10 @@ function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
 // orchestrator and exist purely for operator forensics + the per-ticket
 // revive counter (event-scan.mjs::countReviveEvents).
 
+// defaultAppendReviveEvent — returns true iff the audit append succeeded.
+// reclaimDeadWorkIfPossible gates the dispatch on this so a failed append
+// does not lose the budget counter (next tick would repeat attempt N instead
+// of advancing to N+1).
 function defaultAppendReviveEvent({
   phase,
   ticket,
@@ -206,7 +219,7 @@ function defaultAppendReviveEvent({
   prev_state_json_mtime,
   prev_bg_job_id,
 }) {
-  appendEnvelopeBestEffort(
+  return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase,
       ticket,
@@ -220,7 +233,7 @@ function defaultAppendReviveEvent({
 }
 
 function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_attempt_count }) {
-  appendEnvelopeBestEffort(
+  return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase,
       ticket,
@@ -239,7 +252,7 @@ function defaultAppendReviveSuppressedEvent({
   orchId,
   window_distinct_tickets,
 }) {
-  appendEnvelopeBestEffort(
+  return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase,
       ticket,
@@ -258,19 +271,29 @@ function defaultAppendReviveSuppressedEvent({
 // the phase-agent-dispatch idempotency guard at lines 374-395; `stalled` is the
 // single status that falls through), then call defaultDispatch. Mirrors the
 // orchestrate-revive precedent (orchestrate-revive:577-611).
+//
+// The reset is load-bearing: without flipping to `stalled` the dispatcher's
+// idempotency guard rejects the spawn for any non-failed signal. A missing
+// signal file is therefore treated as an error — falling through to dispatch
+// without a signal would silently no-op and burn the revive budget.
 function defaultReviveDispatch({ orchDir, ticket, phase }) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
-  if (existsSync(signalPath)) {
-    try {
-      const sig = JSON.parse(readFileSync(signalPath, "utf8"));
-      sig.status = "stalled";
-      sig.attentionReason = "ctl-587-revive-reset";
-      sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-      writeFileSync(signalPath, JSON.stringify(sig, null, 2));
-    } catch (err) {
-      log.warn({ ticket, phase, err: err.message }, "revive: signal reset failed");
-      return { code: 1, stdout: "", stderr: err.message };
-    }
+  if (!existsSync(signalPath)) {
+    log.warn(
+      { ticket, phase, signalPath },
+      "revive: signal file missing — cannot reset to stalled, refusing dispatch",
+    );
+    return { code: 1, stdout: "", stderr: "signal-missing" };
+  }
+  try {
+    const sig = JSON.parse(readFileSync(signalPath, "utf8"));
+    sig.status = "stalled";
+    sig.attentionReason = "ctl-587-revive-reset";
+    sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    writeFileSync(signalPath, JSON.stringify(sig, null, 2));
+  } catch (err) {
+    log.warn({ ticket, phase, err: err.message }, "revive: signal reset failed");
+    return { code: 1, stdout: "", stderr: err.message };
   }
   return defaultDispatch({ orchDir, ticket, phase });
 }
@@ -278,15 +301,30 @@ function defaultReviveDispatch({ orchDir, ticket, phase }) {
 // defaultApplyStalledLabel — apply the flat `needs-human` label via the
 // CTL-587-enhanced applyLabel (which reads back to verify the write landed,
 // closing the silent-success gap per memory project_linear_transition_silent_success).
+// Logs the `reason` discriminator on failure so operators see WHY the label
+// didn't land (rate limit, API shape change, exec exception) — not just that
+// it didn't. The escalation path returns 'escalated' regardless; the next
+// scheduler tick re-runs this function via labelOnce semantics (no marker is
+// written on applied:false, so retry naturally occurs).
 function defaultApplyStalledLabel({ ticket }) {
-  return defaultApplyLabel({ ticket, label: "needs-human" });
+  const res = defaultApplyLabel({ ticket, label: "needs-human" });
+  if (!res?.applied) {
+    log.warn(
+      { ticket, reason: res?.reason },
+      "ctl-587: needs-human label not confirmed on escalation — operator may miss this ticket until retry lands",
+    );
+  }
+  return res;
 }
 
 // defaultKillBgJob — best-effort `kill -9` of a lingering bg pid. Gated by the
 // caller on KILL_RECENT_ACTIVITY_MS so we never SIGKILL a worker whose
 // state.json was touched recently. The bg-job pid lives in
 // ~/.claude/jobs/<id>/pid (Claude Code job-state convention); a missing pid
-// file is the normal case for a reaped job.
+// file is the normal case for a reaped job. We verify the pid still maps to a
+// `claude` process before signalling to defensively avoid SIGKILL'ing a
+// recycled pid (~5+ minutes after the worker exited the PID space is fair
+// game for unrelated processes).
 function defaultKillBgJob({ bgJobId }) {
   if (!bgJobId) return;
   try {
@@ -294,7 +332,22 @@ function defaultKillBgJob({ bgJobId }) {
     if (!existsSync(pidPath)) return;
     const pid = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
     if (!Number.isFinite(pid) || pid <= 1) return;
-    spawnSync("kill", ["-9", String(pid)], { stdio: "ignore" });
+    // Verify the pid still belongs to a claude process before SIGKILL'ing.
+    // `ps -p <pid> -o comm=` prints just the command; exit 1 means the pid
+    // is gone. On any verification doubt, skip the kill (best-effort).
+    const ps = spawnSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+    if (ps.status !== 0 || !(ps.stdout || "").toLowerCase().includes("claude")) {
+      log.info(
+        { bgJobId, pid, comm: (ps.stdout || "").trim() },
+        "revive: defensive kill skipped — pid does not belong to a claude process",
+      );
+      return;
+    }
+    const k = spawnSync("kill", ["-9", String(pid)], { encoding: "utf8" });
+    log.info(
+      { bgJobId, pid, code: k.status },
+      "revive: defensive kill issued",
+    );
   } catch (err) {
     log.warn({ bgJobId, err: err.message }, "revive: defensive kill failed");
   }
@@ -507,7 +560,13 @@ export function reclaimDeadWorkIfPossible(
   // Emit BEFORE the dispatch so a daemon crash mid-revive leaves the event
   // behind. The next tick's count(events) sees attempt N — correctly entering
   // attempt N+1 instead of repeating N forever.
-  appendReviveEvent({
+  //
+  // The audit emit can fail (disk full, EROFS, permissions during incident).
+  // The per-ticket revive counter LIVES in events.jsonl, so a missed append
+  // means the next tick will undercount and the budget cannot be enforced.
+  // Safer to skip this dispatch and retry next tick than to spawn a worker
+  // we cannot account for.
+  const eventLanded = appendReviveEvent({
     phase,
     ticket,
     orchId,
@@ -516,6 +575,13 @@ export function reclaimDeadWorkIfPossible(
     prev_state_json_mtime: prevStateJsonMtime,
     prev_bg_job_id: prevBgJobId,
   });
+  if (eventLanded === false) {
+    log.error(
+      { ticket, phase, attempt },
+      "ctl-587: revive event append failed — aborting dispatch to preserve budget counter (will retry next tick)",
+    );
+    return "revive-suppressed";
+  }
   const dispatchRes = reviveDispatch({ orchDir, ticket, phase });
   if (dispatchRes.code === 0) {
     writeReviveMarker({ orchDir, ticket, attempt });

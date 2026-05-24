@@ -824,11 +824,25 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
 
   test("revive dispatch failure does NOT write the marker (next tick retries)", () => {
     const s = setupReviveScenario({ reviveCount: 0 });
+    s.opts.appendReviveEvent = recorder(true); // event lands
     s.opts.reviveDispatch = recorder({ code: 1, stderr: "dispatch boom" });
     expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
     // The event still gets appended (it tracks the attempt), but the marker
     // is only written on a successful dispatch.
     expect(s.opts.appendReviveEvent.calls.length).toBe(1);
+    expect(s.opts.writeReviveMarker.calls.length).toBe(0);
+  });
+
+  // Audit-budget invariant: if the revive event append fails (disk full,
+  // EROFS, permissions), the per-ticket counter cannot be enforced on the
+  // next tick. Better to skip the dispatch and retry next tick than to spawn
+  // a worker we cannot account for. Returns 'revive-suppressed' so the
+  // scheduler logs the suppression and re-evaluates.
+  test("audit-append failure → 'revive-suppressed', dispatch NOT invoked, no marker", () => {
+    const s = setupReviveScenario({ reviveCount: 0 });
+    s.opts.appendReviveEvent = recorder(false); // simulate append failure
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revive-suppressed");
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
     expect(s.opts.writeReviveMarker.calls.length).toBe(0);
   });
 });
