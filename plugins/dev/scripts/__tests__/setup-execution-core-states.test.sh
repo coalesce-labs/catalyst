@@ -297,6 +297,124 @@ run "create-failure prints admin fallback instructions" \
 run "create-failure flags states_incomplete (exit 3)" \
   bash -c "[ '$FAIL_RC' = '3' ]"
 
+# ─── Test: missing node_modules/pino in execution-core dir (CTL-578) ─────────
+# Repro: when `plugins/dev/scripts/execution-core/node_modules` is absent,
+# `registry.mjs` fails to load because `config.mjs` cannot resolve `pino`.
+# After Phases 2-3 land, setup auto-installs (or the shim absorbs the miss)
+# and the upsert succeeds.
+WORK_PINO="${SCRATCH}/pino"
+BIN_PINO="${SCRATCH}/pino/bin"
+HOME_PINO="${SCRATCH}/pino/home"
+build_repo "$WORK_PINO"
+build_secrets "$HOME_PINO"
+install_fake_curl "$BIN_PINO" "all" "ok"
+
+STAGED_SCRIPT_DIR="${SCRATCH}/pino/scripts"
+mkdir -p "${STAGED_SCRIPT_DIR}/execution-core"
+cp "$SCRIPT" "${STAGED_SCRIPT_DIR}/setup-execution-core-states.sh"
+cp "${REPO_ROOT}/plugins/dev/scripts/resolve-linear-ids.sh" \
+   "${STAGED_SCRIPT_DIR}/resolve-linear-ids.sh" 2>/dev/null || true
+cp "${REPO_ROOT}/plugins/dev/scripts/execution-core/registry.mjs" \
+   "${STAGED_SCRIPT_DIR}/execution-core/registry.mjs"
+cp "${REPO_ROOT}/plugins/dev/scripts/execution-core/config.mjs" \
+   "${STAGED_SCRIPT_DIR}/execution-core/config.mjs"
+cp "${REPO_ROOT}/plugins/dev/scripts/execution-core/package.json" \
+   "${STAGED_SCRIPT_DIR}/execution-core/package.json"
+cp "${REPO_ROOT}/plugins/dev/scripts/execution-core/bun.lock" \
+   "${STAGED_SCRIPT_DIR}/execution-core/bun.lock" 2>/dev/null || true
+# Intentionally NO bun install — node_modules/ absent.
+
+HOME="$HOME_PINO" PATH="$BIN_PINO:$PATH" \
+  CATALYST_DIR="${SCRATCH}/pino/catalyst" \
+  "${STAGED_SCRIPT_DIR}/setup-execution-core-states.sh" \
+    --config "${WORK_PINO}/.catalyst/config.json" \
+    > "${SCRATCH}/pino-out" 2>&1
+PINO_RC=$?
+
+run "missing-pino: registry.json contains team after setup" \
+  bash -c "jq -e '.projects[] | select(.team == \"CTL\")' \
+    '${SCRATCH}/pino/catalyst/execution-core/registry.json'"
+
+run "missing-pino: setup exits 0 only when the team is actually registered" \
+  bash -c "[ '$PINO_RC' = '0' ]"
+
+# ─── Test: missing-pino with bun unavailable -> fail loudly (CTL-578) ────────
+WORK_LOUD="${SCRATCH}/loud"
+BIN_LOUD="${SCRATCH}/loud/bin"
+HOME_LOUD="${SCRATCH}/loud/home"
+build_repo "$WORK_LOUD"
+build_secrets "$HOME_LOUD"
+install_fake_curl "$BIN_LOUD" "all" "ok"
+
+STAGED_LOUD_DIR="${SCRATCH}/loud/scripts"
+mkdir -p "${STAGED_LOUD_DIR}/execution-core"
+cp "$SCRIPT" "${STAGED_LOUD_DIR}/setup-execution-core-states.sh"
+cp "${REPO_ROOT}/plugins/dev/scripts/resolve-linear-ids.sh" \
+   "${STAGED_LOUD_DIR}/resolve-linear-ids.sh" 2>/dev/null || true
+cp "${REPO_ROOT}/plugins/dev/scripts/execution-core/registry.mjs" \
+   "${STAGED_LOUD_DIR}/execution-core/registry.mjs"
+cp "${REPO_ROOT}/plugins/dev/scripts/execution-core/config.mjs" \
+   "${STAGED_LOUD_DIR}/execution-core/config.mjs"
+
+# Find host jq + git binaries so we can hand-build a minimal PATH that
+# lacks bun (so ensure_execution_core_deps must fail-loudly).
+HOST_JQ=$(command -v jq); HOST_GIT=$(command -v git)
+ln -sf "$HOST_JQ"  "${BIN_LOUD}/jq"  2>/dev/null || cp "$HOST_JQ"  "${BIN_LOUD}/jq"
+ln -sf "$HOST_GIT" "${BIN_LOUD}/git" 2>/dev/null || cp "$HOST_GIT" "${BIN_LOUD}/git"
+
+HOME="$HOME_LOUD" PATH="$BIN_LOUD:/usr/bin:/bin" \
+  CATALYST_DIR="${SCRATCH}/loud/catalyst" \
+  "${STAGED_LOUD_DIR}/setup-execution-core-states.sh" \
+    --config "${WORK_LOUD}/.catalyst/config.json" \
+    > "${SCRATCH}/loud-out" 2>&1
+LOUD_RC=$?
+
+run "no-bun + no-deps: runner stderr surfaced (mentions pino/registry/module)" \
+  bash -c "grep -qiE 'pino|registry|cannot find package|module not found|node_modules' '${SCRATCH}/loud-out'"
+
+run "no-bun + no-deps: exits non-zero (registry upsert is a hard failure)" \
+  bash -c "[ '$LOUD_RC' != '0' ]"
+
+# ─── Test: post-upsert verification — corrupt registry detection (CTL-578) ───
+# After upsert returns 0, the script jq-reads registry.json to confirm the team
+# landed. If the runner is a noop that exits 0 without writing the file, the
+# script must fail rather than silently trust the runner's exit code.
+WORK_VERIFY="${SCRATCH}/verify"
+HOME_VERIFY="${SCRATCH}/verify/home"
+BIN_VERIFY="${SCRATCH}/verify/bin"
+build_repo "$WORK_VERIFY"
+build_secrets "$HOME_VERIFY"
+install_fake_curl "$BIN_VERIFY" "all" "ok"
+
+STAGED_VERIFY_DIR="${SCRATCH}/verify/scripts"
+mkdir -p "${STAGED_VERIFY_DIR}/execution-core/node_modules"
+# Stub node_modules so ensure_execution_core_deps short-circuits.
+cp "$SCRIPT" "${STAGED_VERIFY_DIR}/setup-execution-core-states.sh"
+cp "${REPO_ROOT}/plugins/dev/scripts/resolve-linear-ids.sh" \
+   "${STAGED_VERIFY_DIR}/resolve-linear-ids.sh" 2>/dev/null || true
+cat > "${STAGED_VERIFY_DIR}/execution-core/registry.mjs" <<'NOOP'
+#!/usr/bin/env node
+// Noop fake — exit 0, write nothing. Simulates a runner that "succeeded"
+// without actually mutating registry.json.
+process.exit(0);
+NOOP
+chmod +x "${STAGED_VERIFY_DIR}/execution-core/registry.mjs"
+mkdir -p "${SCRATCH}/verify/catalyst/execution-core"
+echo '{"projects":[]}' > "${SCRATCH}/verify/catalyst/execution-core/registry.json"
+
+HOME="$HOME_VERIFY" PATH="$BIN_VERIFY:$PATH" \
+  CATALYST_DIR="${SCRATCH}/verify/catalyst" \
+  "${STAGED_VERIFY_DIR}/setup-execution-core-states.sh" \
+    --config "${WORK_VERIFY}/.catalyst/config.json" \
+    > "${SCRATCH}/verify-out" 2>&1
+VERIFY_RC=$?
+
+run "post-upsert verification fails when team not in registry.json (exit 4)" \
+  bash -c "[ '$VERIFY_RC' = '4' ]"
+
+run "post-upsert verification surfaces the missing-team in stderr" \
+  bash -c "grep -qiE 'not present|missing|not registered|verify' '${SCRATCH}/verify-out'"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

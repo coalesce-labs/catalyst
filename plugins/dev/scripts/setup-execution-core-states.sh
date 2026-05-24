@@ -23,6 +23,9 @@
 #   2  Linear API call failed (states query)
 #   3  states incomplete — a workflowStateCreate failed, fallback printed
 #      (callers such as setup-catalyst.sh may tolerate this)
+#   4  registry upsert failed — runner crash, missing deps without an installer,
+#      or post-upsert verification found the team absent from registry.json
+#      (CTL-578)
 
 set -uo pipefail
 
@@ -95,6 +98,28 @@ MUTATION
 
 # Cosmetic default color for created contract states (a neutral blue).
 CONTRACT_STATE_COLOR="#5e6ad2"
+
+# CTL-578: ensure execution-core/ has node_modules before invoking registry.mjs.
+# Without this, a fresh worktree checkout silently fails the upsert because
+# config.mjs cannot resolve `pino` (under runtimes that don't auto-install).
+# Returns 0 on success, non-zero when deps are missing and `bun` is unavailable
+# (or when the install itself fails).
+ensure_execution_core_deps() {
+  local exec_dir="$1"
+  if [[ -d "${exec_dir}/node_modules" ]]; then
+    return 0
+  fi
+  if ! command -v bun >/dev/null 2>&1; then
+    echo "ERROR: ${exec_dir}/node_modules missing and 'bun' not on PATH; cannot install registry.mjs deps" >&2
+    return 1
+  fi
+  echo "Installing execution-core dependencies in ${exec_dir} (CTL-578)..." >&2
+  if ! (cd "$exec_dir" && bun install --frozen-lockfile >&2); then
+    echo "ERROR: bun install --frozen-lockfile failed in ${exec_dir}" >&2
+    return 1
+  fi
+  return 0
+}
 
 # --- GraphQL transport ------------------------------------------------------
 # Isolated so tests can stub it via a fake `curl` earlier on PATH.
@@ -306,25 +331,50 @@ main() {
     echo "WARNING: resolve-linear-ids.sh not found — stateIds cache not refreshed" >&2
   fi
 
-  # --- upsert the central registry entry via registry.mjs ---
+  # --- upsert the central registry entry via registry.mjs (CTL-578) ---
+  # Three things changed vs. the original silent flow:
+  #   1. `ensure_execution_core_deps` runs `bun install` if node_modules is
+  #      missing, so a fresh worktree never silently no-ops on a pino import.
+  #   2. Stderr is captured (not 2>&1-suppressed) and surfaced on failure.
+  #   3. The runner's exit 0 is cross-checked by jq-reading registry.json —
+  #      a runner that "succeeds" without writing the team fails the script.
   local registry_mjs runner=""
-  registry_mjs="${script_dir}/execution-core/registry.mjs"
+  local exec_dir="${script_dir}/execution-core"
+  registry_mjs="${exec_dir}/registry.mjs"
   if command -v bun >/dev/null 2>&1; then
     runner="bun"
   elif command -v node >/dev/null 2>&1; then
     runner="node"
   fi
-  if [[ -n $runner && -f $registry_mjs ]]; then
+
+  local registry_failed=0
+  if [[ -z $runner || ! -f $registry_mjs ]]; then
+    echo "ERROR: cannot run registry.mjs (no bun/node, or module missing at ${registry_mjs})" >&2
+    registry_failed=1
+  elif ! ensure_execution_core_deps "$exec_dir"; then
+    registry_failed=1
+  else
+    local upsert_err
+    upsert_err="$(mktemp)"
     if "$runner" "$registry_mjs" upsert \
       --team "$team_key" \
       --repo-root "$repo_root" \
-      --eligible-query "$registry_query" >/dev/null 2>&1; then
-      echo "Upserted registry entry for team $team_key"
+      --eligible-query "$registry_query" 2>"$upsert_err" >/dev/null; then
+      local registry_path="${CATALYST_DIR:-$HOME/catalyst}/execution-core/registry.json"
+      if [[ -f $registry_path ]] && \
+         jq -e --arg t "$team_key" '.projects[]? | select(.team == $t)' \
+           "$registry_path" >/dev/null 2>&1; then
+        echo "Upserted registry entry for team $team_key"
+      else
+        echo "ERROR: registry.mjs upsert exited 0 but team '$team_key' not present in $registry_path" >&2
+        registry_failed=1
+      fi
     else
-      echo "WARNING: registry.mjs upsert failed for team $team_key" >&2
+      echo "ERROR: registry.mjs upsert failed for team $team_key" >&2
+      sed 's/^/  /' "$upsert_err" >&2
+      registry_failed=1
     fi
-  else
-    echo "WARNING: cannot run registry.mjs (no bun/node, or module missing)" >&2
+    rm -f "$upsert_err"
   fi
 
   # --- summary ---
@@ -342,6 +392,9 @@ main() {
 
   if [[ $states_incomplete -eq 1 ]]; then
     return 3
+  fi
+  if [[ $registry_failed -eq 1 ]]; then
+    return 4
   fi
   return 0
 }
