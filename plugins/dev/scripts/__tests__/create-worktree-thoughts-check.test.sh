@@ -58,7 +58,7 @@ case "\$1 \$2" in
 esac
 STUB
 	chmod +x "$BIN/humanlayer"
-	local -a CW_ARGS=(t-CTL-999 main --worktree-dir "$WT")
+	local -a CW_ARGS=(t-CTL-999 main --worktree-dir "$WT" --skip-fetch)
 	if [[ -n $HOOKS_JSON ]]; then
 		CW_ARGS+=(--hooks-json "$HOOKS_JSON")
 	fi
