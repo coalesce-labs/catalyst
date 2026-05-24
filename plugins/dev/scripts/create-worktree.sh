@@ -1,6 +1,6 @@
 #!/bin/bash
 # create-worktree.sh - Create a git worktree for isolated development
-# Usage: ./create-worktree.sh [worktree_name] [base_branch] [--worktree-dir <path>] [--hooks-json <json>] [--orchestration <name>] [--reuse-existing]
+# Usage: ./create-worktree.sh [worktree_name] [base_branch] [--worktree-dir <path>] [--hooks-json <json>] [--orchestration <name>] [--reuse-existing] [--skip-fetch]
 #
 # Options:
 #   --worktree-dir <path>       Override worktree base directory (used by orchestrator)
@@ -9,6 +9,10 @@
 #   --reuse-existing            If the worktree already exists, skip creation/setup
 #                               and succeed. Makes the script idempotent for tab-config
 #                               launchers that re-open a long-lived worktree (e.g. "pm").
+#   --skip-fetch                Do not fetch the base branch from origin before
+#                               creating the worktree. Use for offline or
+#                               test-isolated invocations; the new branch will
+#                               be rooted on the local <base_branch> tip.
 
 set -e
 
@@ -24,6 +28,7 @@ OVERRIDE_WORKTREE_DIR=""
 HOOKS_JSON=""
 ORCHESTRATION_NAME=""
 REUSE_EXISTING=false
+SKIP_FETCH=false
 
 while [[ $# -gt 0 ]]; do
 	case $1 in
@@ -31,6 +36,7 @@ while [[ $# -gt 0 ]]; do
 		--hooks-json) HOOKS_JSON="$2"; shift 2 ;;
 		--orchestration) ORCHESTRATION_NAME="$2"; shift 2 ;;
 		--reuse-existing) REUSE_EXISTING=true; shift ;;
+		--skip-fetch) SKIP_FETCH=true; shift ;;
 		*) POSITIONAL+=("$1"); shift ;;
 	esac
 done
@@ -125,7 +131,16 @@ if git show-ref --verify --quiet "refs/heads/${WORKTREE_NAME}"; then
 	git worktree add "$WORKTREE_PATH" "$WORKTREE_NAME"
 else
 	echo "🆕 Creating new branch: ${WORKTREE_NAME}"
-	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$BASE_BRANCH"
+	START_POINT="$BASE_BRANCH"
+	if [ "$SKIP_FETCH" = false ]; then
+		if git fetch --quiet origin "$BASE_BRANCH" 2>/dev/null; then
+			START_POINT="refs/remotes/origin/${BASE_BRANCH}"
+			echo "🔄 Fetched origin/${BASE_BRANCH}; rooting on remote tip"
+		else
+			echo -e "${YELLOW}⚠️  Could not fetch origin/${BASE_BRANCH}; falling back to local ${BASE_BRANCH} (worker may branch off stale ref)${NC}" >&2
+		fi
+	fi
+	git worktree add -b "$WORKTREE_NAME" "$WORKTREE_PATH" "$START_POINT"
 fi
 
 # Copy .claude directory if it exists (Claude Code native config)
