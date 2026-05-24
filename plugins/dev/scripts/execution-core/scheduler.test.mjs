@@ -877,6 +877,90 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
       schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus })
     ).not.toThrow();
   });
+
+  // CTL-585: short-circuit the per-tick retry on an unrecoverable miss.
+  test("writes the .skipped marker on reason:'missing-label' and stops retrying", () => {
+    writeSignal("CTL-10", "triage", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const skipped = join(orchDir, "workers", "CTL-10", ".linear-label-triaged.skipped");
+    const applied = join(orchDir, "workers", "CTL-10", ".linear-label-triaged.applied");
+
+    let calls = 0;
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => {
+        calls += 1;
+        return { applied: false, reason: "missing-label" };
+      },
+    };
+
+    // Tick 1: missing-label → .skipped written, .applied not written.
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(existsSync(skipped)).toBe(true);
+    expect(existsSync(applied)).toBe(false);
+    expect(calls).toBe(1);
+
+    // Tick 2: marker present → applyLabel never invoked again.
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(calls).toBe(1);
+  });
+
+  test("a transient failure still retries on the next tick", () => {
+    writeSignal("CTL-11", "triage", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const skipped = join(orchDir, "workers", "CTL-11", ".linear-label-triaged.skipped");
+
+    let calls = 0;
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => {
+        calls += 1;
+        return { applied: false, reason: "transient" };
+      },
+    };
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(calls).toBe(2);
+    expect(existsSync(skipped)).toBe(false);
+  });
+
+  test("a rate-limited failure still retries on the next tick", () => {
+    writeSignal("CTL-12", "triage", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    let calls = 0;
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => {
+        calls += 1;
+        return { applied: false, reason: "rate-limited" };
+      },
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(calls).toBe(2);
+  });
+
+  test("a pre-existing .skipped marker prevents re-attempt", () => {
+    writeSignal("CTL-13", "triage", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // Pre-seed the .skipped marker (simulates a previous daemon run that hit
+    // the missing-label path).
+    writeFileSync(
+      join(orchDir, "workers", "CTL-13", ".linear-label-triaged.skipped"),
+      ""
+    );
+    let calls = 0;
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => {
+        calls += 1;
+        return { applied: true, reason: null };
+      },
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(calls).toBe(0);
+  });
 });
 
 // ── CTL-582: worktree teardown on terminal Done ──

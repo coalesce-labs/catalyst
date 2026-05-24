@@ -283,21 +283,35 @@ function safeWrite(fn, ctx) {
 }
 
 // labelOnce — apply a Linear label to a ticket at most once for the run's
-// lifetime (CTL-558). `linearis` label-add has no read-compare, so without a
-// guard the scheduler would re-hit the API on every 30s tick. A once-marker
-// file at workers/<T>/.linear-label-<label>.applied (restart-safe — persists
-// with the worker dir) records a successful apply. Best-effort: any throw is
-// logged and swallowed, never aborting the tick.
+// lifetime (CTL-558, CTL-585). `linearis` label-add has no read-compare,
+// so without a guard the scheduler would re-hit the API on every tick.
+//
+// Two marker files at workers/<T>/.linear-label-<label>.{applied,skipped}
+// (restart-safe — persist with the worker dir) record terminal outcomes:
+//   .applied — applyLabel returned applied:true. Happy path.
+//   .skipped — applyLabel returned reason:"missing-label". The workspace
+//              lacks the label; retrying inside this daemon's lifetime
+//              would just storm the Linear API (CTL-585). An operator
+//              creates the label in the Linear UI and deletes this
+//              marker to re-arm the apply.
+//
+// Transient failures (reason:"rate-limited", "transient", undefined) write
+// no marker so the next tick retries — CTL-558's recovery contract.
 function labelOnce(orchDir, ticket, label, writeStatus) {
-  const marker = join(orchDir, "workers", ticket, `.linear-label-${label}.applied`);
-  if (existsSync(marker)) return;
+  const base = join(orchDir, "workers", ticket, `.linear-label-${label}`);
+  if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return;
   try {
     const res = writeStatus.applyLabel({ ticket, label });
-    // Write the marker only on a confirmed apply — a failed label-write is
-    // retried next tick. A fake that returns undefined (test stubs) is treated
-    // as success so the once-semantics stay testable without a real result.
+    // A fake that returns undefined (test stubs) is treated as success so
+    // the once-semantics stay testable without a real result.
     if (res === undefined || res?.applied) {
-      writeFileSync(marker, "");
+      writeFileSync(`${base}.applied`, "");
+    } else if (res?.reason === "missing-label") {
+      writeFileSync(`${base}.skipped`, "");
+      log.warn(
+        { ticket, label },
+        "scheduler: label missing in workspace — skipping retries for this run",
+      );
     }
   } catch (err) {
     log.warn(
