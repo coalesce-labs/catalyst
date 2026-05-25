@@ -301,10 +301,86 @@ describe("dispatch cool-down helpers", () => {
   });
 
   test("a malformed marker is treated as absent (not in cool-down)", () => {
-    const p = dispatchCooldownPath(orchDir, "CTL-1", "research");
-    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
-    writeFileSync(p, "not json");
+    // recordDispatchFailure creates the cool-down dir + a valid marker; then
+    // corrupt the file in place so the path stays decoupled from its location.
+    recordDispatchFailure(orchDir, "CTL-1", "research", 2, 5_000);
+    writeFileSync(dispatchCooldownPath(orchDir, "CTL-1", "research"), "not json");
     expect(inDispatchCooldown(orchDir, "CTL-1", "research", 6_000)).toBe(false);
+  });
+});
+
+// ── CTL-624: dispatch cool-down wired into schedulerTick ──
+describe("dispatch cool-down (schedulerTick)", () => {
+  const eligibleOne = (id) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  test("a refused new-work dispatch (code 2) writes a cool-down marker and stops re-dispatching", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 2 });
+    const marker = dispatchCooldownPath(orchDir, "CTL-3", "research");
+
+    // Tick 1 at t=1000: dispatch refused → 1 call, marker written.
+    schedulerTick(orchDir, { readEligible: () => eligibleOne("CTL-3"), dispatch, now: () => 1_000 });
+    expect(dispatch.calls).toHaveLength(1);
+    expect(existsSync(marker)).toBe(true);
+
+    // Tick 2 at t=30_000 (< 60 s window): suppressed → still 1 call.
+    schedulerTick(orchDir, { readEligible: () => eligibleOne("CTL-3"), dispatch, now: () => 30_000 });
+    expect(dispatch.calls).toHaveLength(1);
+
+    // Tick 3 at t=70_000 (> 60 s window): re-dispatch fires → 2 calls.
+    schedulerTick(orchDir, { readEligible: () => eligibleOne("CTL-3"), dispatch, now: () => 70_000 });
+    expect(dispatch.calls).toHaveLength(2);
+  });
+
+  test("a successful dispatch clears any prior cool-down marker", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const marker = dispatchCooldownPath(orchDir, "CTL-4", "research");
+
+    // First a refusal seeds the marker.
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-4"),
+      dispatch: fakeDispatch({ code: 2 }),
+      now: () => 1_000,
+    });
+    expect(existsSync(marker)).toBe(true);
+
+    // After the window, a successful dispatch clears it.
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-4"),
+      dispatch: fakeDispatch({ code: 0 }),
+      now: () => 70_000,
+    });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("a pre-seeded in-window marker suppresses the dispatch entirely (calls === 0)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    recordDispatchFailure(orchDir, "CTL-5", "research", 2, 1_000);
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, { readEligible: () => eligibleOne("CTL-5"), dispatch, now: () => 20_000 });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+
+  test("a refused advancement dispatch is throttled by the cool-down", () => {
+    writeSignal("CTL-6", "research", "done"); // FSM next = plan
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 2 });
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+    expect(dispatch.calls).toHaveLength(1);
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-6", "plan"))).toBe(true);
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 30_000 });
+    expect(dispatch.calls).toHaveLength(1); // suppressed within window
   });
 });
 
