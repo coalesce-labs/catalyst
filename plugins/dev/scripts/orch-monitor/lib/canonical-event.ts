@@ -39,6 +39,12 @@ export interface Resource {
   "service.name": string;
   "service.namespace": "catalyst";
   "service.version": string;
+  // CTL-636: optional orchestration-context resource keys. Present only when
+  // the event carries the corresponding data; omitted otherwise so external
+  // (webhook / broker-daemon) events keep the bare 3-key block.
+  "project"?: string;
+  "linear.key"?: string;
+  "catalyst.orchestration"?: string;
 }
 
 export interface Attributes {
@@ -114,7 +120,13 @@ export interface BuildInput {
   traceId: string | null;
   spanId: string | null;
   parentSpanId?: string | null;
-  resource: { "service.name": string; "service.version"?: string };
+  resource: {
+    "service.name": string;
+    "service.version"?: string;
+    "project"?: string;
+    "linear.key"?: string;
+    "catalyst.orchestration"?: string;
+  };
   attributes: Attributes;
   body: Body;
 }
@@ -154,6 +166,16 @@ export function pluginVersion(): string {
   return cachedVersion;
 }
 
+/** CTL-636: pull `project=<val>` out of the ambient OTEL_RESOURCE_ATTRIBUTES
+ *  env (set by phase-agent-dispatch for --bg workers and by direnv for
+ *  interactive sessions). Mirrors the bash parse in emit-otel-event.sh:82-88. */
+function projectFromEnv(): string | undefined {
+  const raw = process.env.OTEL_RESOURCE_ATTRIBUTES;
+  if (!raw) return undefined;
+  const m = raw.match(/(?:^|,)project=([^,]+)/);
+  return m ? m[1] : undefined;
+}
+
 /**
  * Build a canonical event with defaults applied:
  *   - id from generateEventId() (CTL-344)
@@ -165,6 +187,24 @@ export function pluginVersion(): string {
 export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
   const observedTs = input.observedTs ?? input.ts;
   const version = input.resource["service.version"] ?? pluginVersion();
+
+  const resource: Resource = {
+    "service.name": input.resource["service.name"],
+    "service.namespace": "catalyst",
+    "service.version": version,
+  };
+  // CTL-636: promote orchestration context into resource. Explicit resource
+  // input wins; otherwise fall back to the matching attribute (TS emitters
+  // already set these) or the ambient env (project only).
+  const project = input.resource["project"] ?? projectFromEnv();
+  if (project) resource["project"] = project;
+  const linearKey =
+    input.resource["linear.key"] ?? input.attributes["linear.issue.identifier"];
+  if (linearKey) resource["linear.key"] = linearKey;
+  const catOrch =
+    input.resource["catalyst.orchestration"] ?? input.attributes["catalyst.orchestrator.id"];
+  if (catOrch) resource["catalyst.orchestration"] = catOrch;
+
   const event: CanonicalEvent = {
     ts: input.ts,
     id: generateEventId(),
@@ -173,11 +213,7 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
     severityNumber: severityNumber(input.severityText),
     traceId: input.traceId,
     spanId: input.spanId,
-    resource: {
-      "service.name": input.resource["service.name"],
-      "service.namespace": "catalyst",
-      "service.version": version,
-    },
+    resource,
     attributes: input.attributes,
     body: input.body,
   };

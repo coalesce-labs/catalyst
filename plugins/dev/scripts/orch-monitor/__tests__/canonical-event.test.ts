@@ -114,6 +114,85 @@ describe("buildCanonicalEvent", () => {
     expect(ev.spanId).toBe("b".repeat(16));
   });
 
+  it("promotes linear.issue.identifier and catalyst.orchestrator.id into resource (CTL-636)", () => {
+    const ev = buildCanonicalEvent({
+      ts: "2026-05-25T18:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.session" },
+      attributes: {
+        "event.name": "session.phase",
+        "linear.issue.identifier": "CTL-636",
+        "catalyst.orchestrator.id": "CTL-636",
+      },
+      body: {},
+    });
+    expect(ev.resource["linear.key"]).toBe("CTL-636");
+    expect(ev.resource["catalyst.orchestration"]).toBe("CTL-636");
+    // attributes must be preserved, not moved
+    expect(ev.attributes["linear.issue.identifier"]).toBe("CTL-636");
+    expect(ev.attributes["catalyst.orchestrator.id"]).toBe("CTL-636");
+  });
+
+  it("omits the new resource keys when no orchestration context is present (CTL-636)", () => {
+    // Clear the ambient env so a project= set by the orchestration test runner
+    // cannot pollute the no-context assertion.
+    const prev = process.env.OTEL_RESOURCE_ATTRIBUTES;
+    delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+    try {
+      const ev = buildCanonicalEvent({
+        ts: "2026-05-25T18:00:00.000Z",
+        severityText: "INFO",
+        traceId: null,
+        spanId: null,
+        resource: { "service.name": "catalyst.github" },
+        attributes: { "event.name": "github.pr.merged" },
+        body: {},
+      });
+      expect("linear.key" in ev.resource).toBe(false);
+      expect("catalyst.orchestration" in ev.resource).toBe(false);
+      expect("project" in ev.resource).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+      else process.env.OTEL_RESOURCE_ATTRIBUTES = prev;
+    }
+  });
+
+  it("prefers an explicit resource key over the attribute fallback (CTL-636)", () => {
+    const ev = buildCanonicalEvent({
+      ts: "2026-05-25T18:00:00.000Z",
+      severityText: "INFO",
+      traceId: null,
+      spanId: null,
+      resource: { "service.name": "catalyst.session", "linear.key": "CTL-999" },
+      attributes: { "event.name": "x", "linear.issue.identifier": "CTL-636" },
+      body: {},
+    });
+    expect(ev.resource["linear.key"]).toBe("CTL-999");
+  });
+
+  it("sources project from OTEL_RESOURCE_ATTRIBUTES when present (CTL-636)", () => {
+    const prev = process.env.OTEL_RESOURCE_ATTRIBUTES;
+    process.env.OTEL_RESOURCE_ATTRIBUTES =
+      "project=catalyst-workspace,linear.key=CTL-636,catalyst.orchestration=CTL-636";
+    try {
+      const ev = buildCanonicalEvent({
+        ts: "2026-05-25T18:00:00.000Z",
+        severityText: "INFO",
+        traceId: null,
+        spanId: null,
+        resource: { "service.name": "catalyst.session" },
+        attributes: { "event.name": "x" },
+        body: {},
+      });
+      expect(ev.resource["project"]).toBe("catalyst-workspace");
+    } finally {
+      if (prev === undefined) delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+      else process.env.OTEL_RESOURCE_ATTRIBUTES = prev;
+    }
+  });
+
   it("preserves event.name, entity, action, label, channel attribute set", () => {
     const ev: CanonicalEvent = buildCanonicalEvent({
       ts: "2026-05-08T18:00:00.000Z",
