@@ -251,7 +251,12 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
     | select($c != null)
     | select($c.author.__typename == "Bot")
     | select($files | index($t.path) != null)
-    | select(($c.createdAt | fromdateiso8601) < $commitEpoch)
+    # createdAt is non-nullable in GitHub schema, but guard defensively: a null
+    # or unparseable value yields empty here (via the `?` form) so only THIS
+    # node is dropped — not the whole stream — and a parse failure errs toward
+    # leaving the thread unresolved (auto-fixup still catches it).
+    | select(($c.createdAt | type) == "string")
+    | select(($c.createdAt | fromdateiso8601?) < $commitEpoch)
     | $t.id
   ' "$THREADS_FILE" 2>/dev/null > "$ELIGIBLE_IDS" || true
 

@@ -392,6 +392,23 @@ grep -q "TH2" "$RESOLVE_LOG" && fail "human thread TH2 must not be resolved" "lo
 grep -q "TH3" "$RESOLVE_LOG" && fail "untouched-path thread TH3 must not be resolved" "log: $(cat "$RESOLVE_LOG")" || pass "untouched-path thread TH3 left unresolved"
 scratch_teardown
 
+echo "test: (J) a thread with null createdAt does not abort the stream; valid thread still resolves"
+scratch_setup
+seed_blocked "R-9"
+set_changed_files '["src/foo.ts"]'
+# TH_NULL has a null createdAt (must be dropped without killing the jq stream);
+# TH_OK is fully eligible and must still be resolved.
+set_threads '[
+  {"id":"TH_NULL","path":"src/foo.ts","line":3,"author":"codex","type":"Bot","createdAt":null,"body":"weird"},
+  {"id":"TH_OK","path":"src/foo.ts","line":42,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:00:00Z","body":"null check"}
+]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 2>/dev/null)
+RES=$(echo "$OUT" | jq -r '.resolved')
+[ "$RES" = "1" ] && pass "valid thread resolved despite null-createdAt sibling (.resolved=1)" || fail "valid thread resolved despite null-createdAt sibling" "out: $OUT"
+grep -q "TH_OK" "$RESOLVE_LOG" && pass "resolved the valid thread TH_OK" || fail "resolved TH_OK" "log: $(cat "$RESOLVE_LOG")"
+grep -q "TH_NULL" "$RESOLVE_LOG" && fail "null-createdAt thread must not be resolved" "log: $(cat "$RESOLVE_LOG")" || pass "null-createdAt thread left unresolved"
+scratch_teardown
+
 echo "test: (G) --dry-run counts would-resolve but mutates nothing"
 scratch_setup
 seed_blocked "R-8"
