@@ -23,7 +23,10 @@ FAILURES=0
 PASSES=0
 
 pass() { PASSES=$((PASSES+1)); echo "  PASS: $1"; }
-fail() { FAILURES=$((FAILURES+1)); echo "  FAIL: $1"; [ $# -ge 2 ] && echo "    $2"; }
+# Always return 0: the arg-validation tests leave `set -e` active, and a
+# single-arg fail() would otherwise return non-zero and abort the run early,
+# masking the remaining tests. Totals are reported via $FAILURES at the end.
+fail() { FAILURES=$((FAILURES+1)); echo "  FAIL: $1"; [ $# -ge 2 ] && echo "    $2"; return 0; }
 
 scratch_setup() {
   SCRATCH="$(mktemp -d)"
@@ -274,6 +277,133 @@ set +e
 RC=$?
 set -e
 [ "$RC" = "0" ] && pass "junk JSON does not crash (rc=0)" || fail "junk JSON does not crash" "rc=$RC; out: $(cat "${SCRATCH}/out")"
+scratch_teardown
+
+# ── Phase 2: eligibility predicate + resolution + recheck ────────────────────
+#
+# Eligibility = bot author AND last-commit touches thread path AND commit landed
+# after the thread's comment. Default commits fixture: committedDate
+# 2026-04-16T11:30:00Z. A "before" comment is 11:00:00Z; an "after" one is 11:45.
+
+# Seed a stable BLOCKED worker ready for resolution. Sets ticket R-<n>.
+seed_blocked() {
+  local ticket="$1"
+  make_signal "$ticket" "pr-created" "42" "https://github.com/o/r/pull/42" "$(ts_ago 30)"
+  set_pr_view "OPEN" "BLOCKED"
+  set_commits "abc123" "2026-04-16T11:30:00Z"
+  set_rest "blocked"
+}
+
+echo
+echo "test: (A) eligible bot thread (touched path, commit after comment) → RESOLVED"
+scratch_setup
+seed_blocked "R-1"
+set_changed_files '["src/foo.ts"]'
+set_threads '[{"id":"TH1","path":"src/foo.ts","line":42,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:00:00Z","body":"null check"}]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 2>/dev/null)
+RES=$(echo "$OUT" | jq -r '.resolved')
+[ "$RES" = "1" ] && pass "summary.resolved=1" || fail "summary.resolved=1" "out: $OUT"
+grep -q "TH1" "$RESOLVE_LOG" && pass "resolveReviewThread called with thread id TH1" || fail "resolveReviewThread called with TH1" "log: $(cat "$RESOLVE_LOG")"
+CNT=$(jq -r '.resolvedThreadCount // 0' "${ORCH_DIR}/workers/R-1.json")
+[ "$CNT" = "1" ] && pass "signal resolvedThreadCount=1" || fail "signal resolvedThreadCount=1" "got: $CNT"
+TRA=$(jq -r '.threadsResolvedAt // empty' "${ORCH_DIR}/workers/R-1.json")
+[ -n "$TRA" ] && pass "signal threadsResolvedAt set" || fail "signal threadsResolvedAt set"
+grep -q "worker-threads-auto-resolved" "$STATE_LOG" && pass "emitted worker-threads-auto-resolved event" || fail "emitted worker-threads-auto-resolved event" "log: $(cat "$STATE_LOG")"
+scratch_teardown
+
+echo "test: (H) after resolving, authoritative REST recheck is invoked, rechecked=1"
+scratch_setup
+seed_blocked "R-1H"
+set_changed_files '["src/foo.ts"]'
+set_threads '[{"id":"TH1","path":"src/foo.ts","line":42,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:00:00Z","body":"null check"}]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 2>/dev/null)
+RECH=$(echo "$OUT" | jq -r '.rechecked')
+[ "$RECH" = "1" ] && pass "summary.rechecked=1" || fail "summary.rechecked=1" "out: $OUT"
+grep -q "RECHECK_CALLED" "$RECHECK_LOG" && grep -q "/pulls/42" "$RECHECK_LOG" && pass "REST recheck called on pulls/42" || fail "REST recheck called on pulls/42" "log: $(cat "$RECHECK_LOG")"
+scratch_teardown
+
+echo "test: (B) human-authored thread is NEVER resolved"
+scratch_setup
+seed_blocked "R-2"
+set_changed_files '["src/foo.ts"]'
+set_threads '[{"id":"TH1","path":"src/foo.ts","line":42,"author":"alice","type":"User","createdAt":"2026-04-16T11:00:00Z","body":"please fix"}]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 2>/dev/null)
+RES=$(echo "$OUT" | jq -r '.resolved')
+[ "$RES" = "0" ] && pass "human thread not resolved (.resolved=0)" || fail "human thread not resolved" "out: $OUT"
+[ ! -s "$RESOLVE_LOG" ] && pass "no resolveReviewThread call for human thread" || fail "no resolveReviewThread call for human thread" "log: $(cat "$RESOLVE_LOG")"
+scratch_teardown
+
+echo "test: (C) bot thread whose path the last commit did NOT touch → not resolved"
+scratch_setup
+seed_blocked "R-3"
+set_changed_files '["src/other.ts"]'
+set_threads '[{"id":"TH1","path":"src/foo.ts","line":42,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:00:00Z","body":"null check"}]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 2>/dev/null)
+RES=$(echo "$OUT" | jq -r '.resolved')
+[ "$RES" = "0" ] && pass "untouched-path thread not resolved" || fail "untouched-path thread not resolved" "out: $OUT"
+[ ! -s "$RESOLVE_LOG" ] && pass "no resolve when path untouched" || fail "no resolve when path untouched"
+scratch_teardown
+
+echo "test: (D) bot thread whose comment is NEWER than the last commit → not resolved"
+scratch_setup
+seed_blocked "R-4"
+set_changed_files '["src/foo.ts"]'
+# commit committedDate 11:30; comment raised at 11:45 (AFTER the push) → not addressed.
+set_threads '[{"id":"TH1","path":"src/foo.ts","line":42,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:45:00Z","body":"new concern"}]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 2>/dev/null)
+RES=$(echo "$OUT" | jq -r '.resolved')
+[ "$RES" = "0" ] && pass "comment-after-commit thread not resolved" || fail "comment-after-commit thread not resolved" "out: $OUT"
+scratch_teardown
+
+echo "test: (E) already-resolved thread is never selected"
+scratch_setup
+seed_blocked "R-5"
+set_changed_files '["src/foo.ts"]'
+set_threads '[{"id":"TH1","path":"src/foo.ts","line":42,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:00:00Z","body":"null check","isResolved":true}]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 2>/dev/null)
+RES=$(echo "$OUT" | jq -r '.resolved')
+[ "$RES" = "0" ] && pass "already-resolved thread not re-resolved" || fail "already-resolved thread not re-resolved" "out: $OUT"
+scratch_teardown
+
+echo "test: (I) outdated thread is never selected"
+scratch_setup
+seed_blocked "R-6"
+set_changed_files '["src/foo.ts"]'
+set_threads '[{"id":"TH1","path":"src/foo.ts","line":42,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:00:00Z","body":"null check","isOutdated":true}]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 2>/dev/null)
+RES=$(echo "$OUT" | jq -r '.resolved')
+[ "$RES" = "0" ] && pass "outdated thread not resolved" || fail "outdated thread not resolved" "out: $OUT"
+scratch_teardown
+
+echo "test: (F) mixed set resolves exactly the eligible bot thread"
+scratch_setup
+seed_blocked "R-7"
+set_changed_files '["src/foo.ts"]'
+set_threads '[
+  {"id":"TH1","path":"src/foo.ts","line":42,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:00:00Z","body":"eligible"},
+  {"id":"TH2","path":"src/foo.ts","line":7,"author":"alice","type":"User","createdAt":"2026-04-16T11:00:00Z","body":"human"},
+  {"id":"TH3","path":"src/bar.ts","line":1,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:00:00Z","body":"untouched path"}
+]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 2>/dev/null)
+RES=$(echo "$OUT" | jq -r '.resolved')
+[ "$RES" = "1" ] && pass "exactly 1 thread resolved in mixed set" || fail "exactly 1 thread resolved in mixed set" "out: $OUT"
+grep -q "TH1" "$RESOLVE_LOG" && pass "resolved the eligible bot thread TH1" || fail "resolved TH1" "log: $(cat "$RESOLVE_LOG")"
+grep -q "TH2" "$RESOLVE_LOG" && fail "human thread TH2 must not be resolved" "log: $(cat "$RESOLVE_LOG")" || pass "human thread TH2 left unresolved"
+grep -q "TH3" "$RESOLVE_LOG" && fail "untouched-path thread TH3 must not be resolved" "log: $(cat "$RESOLVE_LOG")" || pass "untouched-path thread TH3 left unresolved"
+scratch_teardown
+
+echo "test: (G) --dry-run counts would-resolve but mutates nothing"
+scratch_setup
+seed_blocked "R-8"
+set_changed_files '["src/foo.ts"]'
+set_threads '[{"id":"TH1","path":"src/foo.ts","line":42,"author":"codex","type":"Bot","createdAt":"2026-04-16T11:00:00Z","body":"null check"}]'
+OUT=$("$RESOLVE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 10 --dry-run 2>/dev/null)
+RES=$(echo "$OUT" | jq -r '.resolved')
+[ "$RES" = "1" ] && pass "dry-run counts the would-resolve (.resolved=1)" || fail "dry-run counts would-resolve" "out: $OUT"
+[ ! -s "$RESOLVE_LOG" ] && pass "dry-run makes no resolveReviewThread call" || fail "dry-run makes no resolveReviewThread call" "log: $(cat "$RESOLVE_LOG")"
+[ ! -s "$STATE_LOG" ] && pass "dry-run makes no state-script call" || fail "dry-run makes no state-script call" "log: $(cat "$STATE_LOG")"
+CNT=$(jq -r '.resolvedThreadCount // empty' "${ORCH_DIR}/workers/R-8.json")
+[ -z "$CNT" ] && pass "dry-run does not mutate the signal" || fail "dry-run does not mutate the signal" "got: $CNT"
 scratch_teardown
 
 echo

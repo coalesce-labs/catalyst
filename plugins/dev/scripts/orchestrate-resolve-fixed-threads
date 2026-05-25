@@ -118,6 +118,29 @@ fetch_pr_view() {
     > "$out" 2>/dev/null
 }
 
+# Fetch review threads with enough metadata to resolve and gate them: the thread
+# `id` (node ID, required by the mutation), each comment's `__typename` (bot vs
+# human discriminant) and `createdAt`. Extends orchestrate-auto-fixup:172-184.
+fetch_resolvable_threads() {
+  local repo="$1" pr_num="$2" out="$3"
+  local owner name
+  owner="${repo%%/*}"; name="${repo##*/}"
+  local query='query($owner: String!, $repo: String!, $pr: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { reviewThreads(first: 100) { nodes { id isResolved isOutdated path line comments(first: 1) { nodes { author { login __typename } createdAt body } } } } } } }'
+  "$GH_BIN" api graphql \
+    -f query="$query" \
+    -F owner="$owner" \
+    -F repo="$name" \
+    -F pr="$pr_num" \
+    > "$out" 2>/dev/null
+}
+
+# Resolve a single review thread by node ID. review-thread-resolution.md:36-43.
+resolve_thread() {
+  local thread_id="$1"
+  local mutation='mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } } }'
+  "$GH_BIN" api graphql -f query="$mutation" -f threadId="$thread_id" >/dev/null 2>&1
+}
+
 # ─── Main loop ──────────────────────────────────────────────────────────────
 
 CHECKED=0
@@ -189,8 +212,91 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   # Passed all skip gates — this PR is a candidate for thread resolution.
   CHECKED=$((CHECKED+1))
 
-  # Phase 2 inserts eligibility + resolution + recheck here. Phase 1 is a safe
-  # no-op skeleton: it never resolves a thread (RESOLVED stays 0).
+  OWNER="${REPO%%/*}"; NAME="${REPO##*/}"
+
+  # Last pushed commit on the PR — read from the remote (the worker's worktree
+  # may be gone after death). gh pr view --json commits → last commit oid +
+  # committedDate; api repos/.../commits/<oid> → changed-file set.
+  COMMITS_FILE="${TMP_DIR}/commits-${TICKET}.json"
+  if ! "$GH_BIN" -R "$REPO" pr view "$PR_NUMBER" --json commits > "$COMMITS_FILE" 2>/dev/null; then
+    continue
+  fi
+  LAST_OID=$(jq -r '.commits[-1].oid // empty' "$COMMITS_FILE" 2>/dev/null || echo "")
+  LAST_COMMITTED=$(jq -r '.commits[-1].committedDate // empty' "$COMMITS_FILE" 2>/dev/null || echo "")
+  [ -z "$LAST_OID" ] && continue
+  COMMIT_EPOCH=$(iso_epoch "$LAST_COMMITTED")
+  [ -z "$COMMIT_EPOCH" ] && continue
+
+  CHANGED_FILE="${TMP_DIR}/changed-${TICKET}.json"
+  if ! "$GH_BIN" -R "$REPO" api "repos/${OWNER}/${NAME}/commits/${LAST_OID}" > "$CHANGED_FILE" 2>/dev/null; then
+    continue
+  fi
+  CHANGED_FILES_JSON=$(jq -c '[.files[]?.filename]' "$CHANGED_FILE" 2>/dev/null || echo "[]")
+
+  # Fetch resolvable threads and select the eligible ones in one jq pass:
+  #   unresolved AND not outdated AND bot author AND path touched by last commit
+  #   AND comment raised before the commit landed.
+  THREADS_FILE="${TMP_DIR}/threads-${TICKET}.json"
+  if ! fetch_resolvable_threads "$REPO" "$PR_NUMBER" "$THREADS_FILE"; then
+    continue
+  fi
+  ELIGIBLE_IDS="${TMP_DIR}/eligible-${TICKET}.txt"
+  jq -r \
+    --argjson files "$CHANGED_FILES_JSON" \
+    --argjson commitEpoch "$COMMIT_EPOCH" '
+    .data.repository.pullRequest.reviewThreads.nodes[]?
+    | select(.isResolved == false and .isOutdated == false)
+    | . as $t
+    | (.comments.nodes[0] // null) as $c
+    | select($c != null)
+    | select($c.author.__typename == "Bot")
+    | select($files | index($t.path) != null)
+    | select(($c.createdAt | fromdateiso8601) < $commitEpoch)
+    | $t.id
+  ' "$THREADS_FILE" 2>/dev/null > "$ELIGIBLE_IDS" || true
+
+  RESOLVED_THIS_PR=0
+  while IFS= read -r THREAD_ID; do
+    [ -z "$THREAD_ID" ] && continue
+    if [ "$DRY_RUN" -eq 1 ]; then
+      # Dry-run convention: count the would-resolve, but make no mutation.
+      RESOLVED_THIS_PR=$((RESOLVED_THIS_PR+1))
+      continue
+    fi
+    if resolve_thread "$THREAD_ID"; then
+      RESOLVED_THIS_PR=$((RESOLVED_THIS_PR+1))
+    fi
+  done < "$ELIGIBLE_IDS"
+
+  RESOLVED=$((RESOLVED + RESOLVED_THIS_PR))
+
+  # Nothing resolved → no recheck, no signal mutation.
+  [ "$RESOLVED_THIS_PR" -eq 0 ] && continue
+  [ "$DRY_RUN" -eq 1 ] && continue
+
+  # Re-check the authoritative merge state via REST (never `gh pr view
+  # --json mergeable`, which lies under GraphQL eventual consistency).
+  RECHECK_FILE="${TMP_DIR}/recheck-${TICKET}.json"
+  RECHECK_MERGE_STATE=""
+  if "$GH_BIN" -R "$REPO" api "repos/${OWNER}/${NAME}/pulls/${PR_NUMBER}" > "$RECHECK_FILE" 2>/dev/null; then
+    RECHECKED=$((RECHECKED+1))
+    RECHECK_MERGE_STATE=$(jq -r '.mergeable_state // empty' "$RECHECK_FILE" 2>/dev/null || echo "")
+  fi
+
+  TS=$(now_iso)
+  update_signal "$SIGNAL" \
+    '.resolvedThreadCount = ((.resolvedThreadCount // 0) + $n)
+     | .threadsResolvedAt = $ts
+     | .updatedAt = $ts' \
+    --argjson n "$RESOLVED_THIS_PR" --arg ts "$TS"
+
+  emit_state event "$(jq -nc \
+    --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+    --argjson pr "$PR_NUMBER" --argjson n "$RESOLVED_THIS_PR" \
+    --arg ms "$RECHECK_MERGE_STATE" \
+    '{ts:$ts, orchestrator:$orch, worker:$w,
+      event:"worker-threads-auto-resolved",
+      detail:{pr:$pr, resolved:$n, mergeStateStatus:$ms}}')"
 done
 
 jq -nc \
