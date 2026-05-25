@@ -348,6 +348,10 @@ while IFS=$'\t' read -r W T; do
 		# on prior phase artifacts, and runs `claude --bg`. We capture its stdout
 		# JSON so we can mirror dispatch state to the global state script the
 		# same way the legacy path does.
+		# </dev/null (CTL-605): phase-agent-dispatch launches `claude --bg` with
+		# fd 0 inherited; without this the bg job drains the dispatch loop's
+		# `done <<<"$PENDING"` herestring and only one ticket dispatches per call.
+		# Same root cause as the legacy path's guard at line ~454 (CTL-334).
 		PHASE_STDOUT=$(
 			cd "$WORKER_DIR" || exit 1
 			CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
@@ -357,7 +361,7 @@ while IFS=$'\t' read -r W T; do
 				--phase "$PHASE" \
 				--ticket "$T" \
 				--orch-dir "$ORCH_DIR" \
-				--orch-id "$ORCH_ID"
+				--orch-id "$ORCH_ID" </dev/null
 		) || {
 			echo "phase-agent-dispatch failed for $T phase=$PHASE — see stderr" >&2
 			continue

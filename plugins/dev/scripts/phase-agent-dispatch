@@ -517,9 +517,12 @@ trap 'rm -f "$BG_OUT" "$BG_ERR"' EXIT
 # function the reap path uses for `claude stop`. CATALYST_DISPATCH_CLAUDE_BIN
 # still overrides it, so existing tests and tooling are unaffected.
 CLAUDE_BIN="$(executor_claude_bin)"
+# </dev/null (CTL-605): `claude --bg` reads stdin; redirect it so a caller that
+# invokes us from inside a herestring/`while read` loop can't have its loop
+# stdin drained. Harmless for normal callers (fd 0 already a tty/pipe).
 env "${DISPATCH_ENV[@]}" \
 	"$CLAUDE_BIN" --bg --dangerously-skip-permissions --model "$MODEL" "$PROMPT" \
-	>"$BG_OUT" 2>"$BG_ERR"
+	>"$BG_OUT" 2>"$BG_ERR" </dev/null
 RC=$?
 
 if [[ $RC -ne 0 ]]; then
