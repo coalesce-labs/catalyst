@@ -93,13 +93,15 @@ EOF
 
 run_verify() {
   local ticket="$1" req="${2:-backend}"
+  shift 2
+  # Any remaining args (e.g. --test-convention adjacency) pass through.
   set +e
   OUT=$("$VERIFY" \
     --worktree "$SCRATCH" \
     --ticket "$ticket" \
     --base-branch main \
     --signal-file "${ORCH_DIR}/workers/${ticket}.json" \
-    --test-requirements "$req" 2>&1)
+    --test-requirements "$req" "$@" 2>&1)
   RC=$?
   set -e
 }
@@ -437,6 +439,108 @@ run_verify "TICK-596F" "backend"
 echo "$OUT" | grep -qE "'as any' cast" && pass "CTL-596 #3: added cast detected" || fail "CTL-596 #3: added cast detected" "$OUT"
 scratch_teardown
 echo
+
+# ---------------------------------------------------------------
+# CTL-596 defect #2: --test-convention adjacency NARROWS (ignores config root)
+# ---------------------------------------------------------------
+# Proves the flag is a real narrowing: the same config-declared test/** root
+# that glob mode honors (TICK-596D) must NOT be honored under adjacency, so the
+# source reports Missing tests.
+echo "test: adjacency mode does not honor config-declared test root (CTL-596 #2)"
+scratch_setup
+git checkout -q main
+mkdir -p src/tools test/tools
+cat > vitest.config.ts <<'EOF'
+export default { test: { include: ["test/**/*.test.ts"] } };
+EOF
+cat > test/tools/run.test.ts <<'EOF'
+import { run } from '../../src/tools/run';
+test('run', () => { run(); });
+EOF
+git add -A && git commit -q -m "vitest config + test root on base"
+git checkout -q feature
+git merge -q --no-edit main 2>/dev/null || git rebase -q main
+cat > src/tools/run.ts <<'EOF'
+export const run = () => 1;
+EOF
+seed_changes_and_gh '[]' \
+  '{"state":"MERGED","mergeStateStatus":"UNKNOWN","mergeCommit":{"oid":"{{MERGE_SHA}}"}}'
+make_signal "TICK-596G"
+run_verify "TICK-596G" "backend" --test-convention adjacency
+echo "$OUT" | grep -q "Missing tests for" && pass "CTL-596 #2: adjacency ignores config root (narrowing verified)" || fail "CTL-596 #2: adjacency should ignore config root" "$OUT"
+scratch_teardown
+echo
+
+# ---------------------------------------------------------------
+# CTL-596 defect #3: pre-existing console.log over threshold does NOT FAIL
+# ---------------------------------------------------------------
+# The >2 threshold pattern is where added-line vs whole-file confusion bites
+# hardest: a legacy file with 3 console.log the PR merely touches must PASS.
+echo "test: pre-existing console.log (>2) on a touched file does not fail Check #7 (CTL-596 #3)"
+scratch_setup
+mkdir -p src
+git checkout -q main
+cat > src/noisy.ts <<'EOF'
+export const a = () => { console.log('a'); };
+export const b = () => { console.log('b'); };
+export const c = () => { console.log('c'); };
+export const d = () => { console.log('d'); };
+EOF
+cat > src/noisy.test.ts <<'EOF'
+import { a } from './noisy';
+test('a', () => { a(); });
+EOF
+git add -A && git commit -q -m "noisy with pre-existing console.log"
+git checkout -q feature
+git merge -q --no-edit main 2>/dev/null || git rebase -q main
+# PR appends one benign line — adds zero console.log.
+echo 'export const e = () => 2;' >> src/noisy.ts
+seed_changes_and_gh '[]' \
+  '{"state":"MERGED","mergeStateStatus":"UNKNOWN","mergeCommit":{"oid":"{{MERGE_SHA}}"}}'
+make_signal "TICK-596H"
+run_verify "TICK-596H" "backend"
+echo "$OUT" | grep -qE "console.log statements" && fail "CTL-596 #3: pre-existing console.log must not fail" "$OUT" || pass "CTL-596 #3: pre-existing console.log ignored"
+scratch_teardown
+echo
+
+# ---------------------------------------------------------------
+# CTL-596 defect #1: diff range resolves via origin/<base> (production path)
+# ---------------------------------------------------------------
+# TICK-596A covers the local-main fallback (scratch repos have no origin).
+# Production worktrees track origin/<base>; this fixture creates a real origin
+# so the `git rev-parse origin/main` preference branch is exercised.
+echo "test: changeset resolves against origin/main when present (CTL-596 #1)"
+scratch_setup
+git checkout -q main
+ORIGIN596="$(mktemp -d)"
+git init -q --bare "$ORIGIN596"
+git remote add origin "$ORIGIN596"
+git push -q origin main
+git checkout -q feature
+mkdir -p src
+cat > src/origin.ts <<'EOF'
+export const o = () => 1;
+EOF
+cat > src/origin.test.ts <<'EOF'
+import { o } from './origin';
+test('o', () => { o(); });
+EOF
+seed_changes_and_gh '[]' \
+  '{"state":"MERGED","mergeStateStatus":"UNKNOWN","mergeCommit":{"oid":"{{MERGE_SHA}}"}}'
+make_signal "TICK-596J"
+run_verify "TICK-596J" "backend"
+echo "$OUT" | grep -q "Source files changed: 1" && pass "CTL-596 #1: changeset resolved via origin/main" || fail "CTL-596 #1: changeset resolved via origin/main" "$OUT"
+echo "$OUT" | grep -q "No changed files found" && fail "CTL-596 #1: must not abort with origin/main present" "$OUT" || pass "CTL-596 #1: no empty-diff abort (origin path)"
+rm -rf "$ORIGIN596"; unset ORIGIN596
+scratch_teardown
+echo
+
+# Note (CTL-596): no empty-catch DETECTION fixture. The detection uses
+# `grep -Pzo`, which silently no-ops under BSD grep (the script runs `#!/bin/bash`
+# non-interactively, so `grep` is /usr/bin/grep, not ugrep/GNU). The plan scoped
+# the matcher as an unchanged "documented assumption", so the only CTL-596 change
+# here is the ADDED_LINES gate in front of it. The platform no-op is filed as a
+# separate finding rather than fixed in this PR.
 
 # ---------------------------------------------------------------
 echo

@@ -284,8 +284,10 @@ else
     FOUND_TEST=false
     # CTL-596 #2: stem match — <stem>(.<qualifier>)*.(test|spec).<ext>. Matches
     # -service suffixes, .integration qualifiers, and config-declared roots that
-    # the old literal-candidate list missed.
-    STEM_RE="${BASENAME}([.-][A-Za-z0-9]+)*\.(test|spec)${EXT//./\\.}\$"
+    # the old literal-candidate list missed. Escape regex metachars in the stem
+    # (e.g. a dotted basename) so it can't over-match an unrelated test file.
+    BASENAME_RE=$(printf '%s' "$BASENAME" | sed -E 's/[.[\*+?(){}^$|]/\\&/g')
+    STEM_RE="${BASENAME_RE}([.-][A-Za-z0-9]+)*\.(test|spec)${EXT//./\\.}\$"
 
     # 1) test files already present in the diff
     if echo "$CHANGED_FILES" | grep -qE "(^|/)${STEM_RE}"; then
@@ -303,7 +305,10 @@ else
       fi
       while read -r ROOT; do
         [ -d "$ROOT" ] || continue
-        if find "$ROOT" -type f 2>/dev/null | grep -qE "(^|/)${STEM_RE}"; then
+        # CTL-596: prune node_modules/.git so a root-level config (ROOT=".")
+        # does not turn this into a whole-worktree scan over installed deps.
+        if find "$ROOT" \( -name node_modules -o -name .git \) -prune -o -type f -print 2>/dev/null \
+             | grep -qE "(^|/)${STEM_RE}"; then
           FOUND_TEST=true; break
         fi
       done <<< "$ROOTS"
@@ -518,7 +523,10 @@ for SRC in $SOURCE_FILES; do
 
   # Empty catch blocks — gate the whole-file span match behind "file has ≥1
   # added line" so untouched files no longer trip it (CTL-596 #3).
-  ADDED_LINES=$(git diff "$DIFF_RANGE" -- "$SRC" 2>/dev/null | grep -c '^+' || echo 0)
+  # grep -c always emits a single integer (0 on no match); avoid the
+  # `|| echo 0` idiom that produces the broken "0\n0" string (see count_lines).
+  ADDED_LINES=$(git diff "$DIFF_RANGE" -- "$SRC" 2>/dev/null | grep -c '^+')
+  ADDED_LINES=${ADDED_LINES:-0}
   if [ "${ADDED_LINES:-0}" -gt 0 ] && grep -Pzo 'catch\s*\([^)]*\)\s*\{\s*\}' "$SRC" >/dev/null 2>&1; then
     RH_ISSUES+=("Empty catch block in $SRC")
   fi
