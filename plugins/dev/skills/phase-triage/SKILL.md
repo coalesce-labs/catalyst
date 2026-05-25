@@ -90,18 +90,22 @@ ${DESCRIPTION}"
 
 # 2. Derive the five triage fields deterministically (the bash fallback path).
 
-# 2a. Classification — first-match over a small regex table.
-classify() {
-  local txt; txt="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  case "$txt" in
-    *' bug '*|*'fix'*|*'bugfix'*|*'broken'*|*'regression'*) echo bug ;;
-    *' doc '*|*'docs'*|*'documentation'*|*'readme'*)        echo docs ;;
-    *'refactor'*|*'rename'*|*'cleanup'*|*'extract '*)        echo refactor ;;
-    *'chore'*|*'bump'*|*'dependency update'*|*'deps:'*)      echo chore ;;
-    *)                                                       echo feature ;;
-  esac
-}
-CLASSIFICATION="$(classify " $COMBINED ")"
+# 2a. Classification — first-match over a small regex table. Inlined (no helper
+#    function) so the body carries no bare positional parameter. At dispatch the
+#    skill is rendered as a slash command (`/catalyst-dev:phase-triage <TICKET>
+#    --orch-dir <PATH>`) and Claude Code substitutes bare positional tokens
+#    everywhere — including inside this fenced bash — so the second positional
+#    would become the literal "--orch-dir" flag and break every match (CTL-602).
+#    Keep this block free of bare positional tokens (a "$" immediately followed
+#    by a digit); braced and command-substitution forms are unaffected.
+_PT_LOWER="$(printf '%s' " $COMBINED " | tr '[:upper:]' '[:lower:]')"
+case "$_PT_LOWER" in
+  *' bug '*|*'fix'*|*'bugfix'*|*'broken'*|*'regression'*) CLASSIFICATION=bug ;;
+  *' doc '*|*'docs'*|*'documentation'*|*'readme'*)        CLASSIFICATION=docs ;;
+  *'refactor'*|*'rename'*|*'cleanup'*|*'extract '*)        CLASSIFICATION=refactor ;;
+  *'chore'*|*'bump'*|*'dependency update'*|*'deps:'*)      CLASSIFICATION=chore ;;
+  *)                                                       CLASSIFICATION=feature ;;
+esac
 
 # 2b. Estimated scope — word count thresholds.
 WORD_COUNT="$(printf '%s' "$DESCRIPTION" | wc -w | tr -d ' ')"
@@ -112,36 +116,35 @@ else                                  ESTIMATED_SCOPE=epic
 fi
 
 # 2c. Acronym expansion — built-in dictionary; only emit acronyms actually present
-#    in the title+description.
-acronyms_json() {
-  local txt="$1"
-  jq -nc --arg t "$txt" '
-    [
-      {a:"PR",     e:"Pull Request"},
-      {a:"CI",     e:"Continuous Integration"},
-      {a:"CLI",    e:"Command-Line Interface"},
-      {a:"API",    e:"Application Programming Interface"},
-      {a:"MVP",    e:"Minimum Viable Product"},
-      {a:"TDD",    e:"Test-Driven Development"},
-      {a:"E2E",    e:"End-to-End"},
-      {a:"SHA",    e:"Secure Hash Algorithm"},
-      {a:"UUID",   e:"Universally Unique Identifier"},
-      {a:"JSON",   e:"JavaScript Object Notation"},
-      {a:"OTEL",   e:"OpenTelemetry"},
-      {a:"OTLP",   e:"OpenTelemetry Line Protocol"},
-      {a:"PromQL", e:"Prometheus Query Language"},
-      {a:"bg",     e:"background"},
-      {a:"HUD",    e:"Heads-Up Display"},
-      {a:"ADR",    e:"Architecture Decision Record"}
-    ]
-    | ($t | ascii_downcase) as $tl
-    | map(.a as $acr
-          | (.a | ascii_downcase) as $acl
-          | select($tl | test("\\b" + $acl + "\\b")))
-    | map({acronym: .a, expansion: .e})
-  '
-}
-ACRONYMS_EXPANDED="$(acronyms_json "$COMBINED")"
+#    in the title+description. Inlined (no helper function) so the body carries no
+#    bare positional parameter, which slash-command arg substitution would clobber
+#    at dispatch (CTL-602). The jq variables below ($t and friends) are not bare
+#    "$"-then-digit tokens, so they are unaffected.
+ACRONYMS_EXPANDED="$(jq -nc --arg t "$COMBINED" '
+  [
+    {a:"PR",     e:"Pull Request"},
+    {a:"CI",     e:"Continuous Integration"},
+    {a:"CLI",    e:"Command-Line Interface"},
+    {a:"API",    e:"Application Programming Interface"},
+    {a:"MVP",    e:"Minimum Viable Product"},
+    {a:"TDD",    e:"Test-Driven Development"},
+    {a:"E2E",    e:"End-to-End"},
+    {a:"SHA",    e:"Secure Hash Algorithm"},
+    {a:"UUID",   e:"Universally Unique Identifier"},
+    {a:"JSON",   e:"JavaScript Object Notation"},
+    {a:"OTEL",   e:"OpenTelemetry"},
+    {a:"OTLP",   e:"OpenTelemetry Line Protocol"},
+    {a:"PromQL", e:"Prometheus Query Language"},
+    {a:"bg",     e:"background"},
+    {a:"HUD",    e:"Heads-Up Display"},
+    {a:"ADR",    e:"Architecture Decision Record"}
+  ]
+  | ($t | ascii_downcase) as $tl
+  | map(.a as $acr
+        | (.a | ascii_downcase) as $acl
+        | select($tl | test("\\b" + $acl + "\\b")))
+  | map({acronym: .a, expansion: .e})
+')"
 
 # 2d. Dependencies — other CTL-style identifiers referenced in body, excluding self.
 #     Match any TEAM-NNN pattern; dedupe; exclude the ticket itself.
@@ -157,21 +160,24 @@ DEPENDENCIES="${DEPENDENCIES:-[]}"
 #     description that opens with "## Problem" yields the first sentence of prose,
 #     not the literal header. Falls back to an empty summary if the description is
 #     entirely headers/bullets/blank lines.
-SUMMARY="$(printf '%s' "$DESCRIPTION" | awk '
-  BEGIN { skipping = 1; buf = "" }
-  {
-    line = $0
-    if (skipping) {
-      if (line ~ /^[[:space:]]*$/)       { next }
-      if (line ~ /^#+[[:space:]]+/)      { next }
-      if (line ~ /^[-*+][[:space:]]+/)   { next }
-      skipping = 0
-    }
-    if (line ~ /^[[:space:]]*$/) { exit }
-    buf = (buf == "" ? line : buf " " line)
-  }
-  END { print buf }
-' | head -c 400)"
+#     Implemented as a pure-bash loop rather than awk: awk's whole-line field is a
+#     bare positional token, which Claude Code's slash-command arg substitution
+#     would rewrite to the ticket id at dispatch, turning every line into broken
+#     awk arithmetic (CTL-602). This loop uses only bash+zsh-safe constructs
+#     ([[ =~ ]], <<<, head -c) and carries no bare "$"-then-digit token.
+SUMMARY=""
+_PT_SKIPPING=1
+while IFS= read -r line; do
+  if [ "$_PT_SKIPPING" -eq 1 ]; then
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^#+[[:space:]]+ ]] && continue
+    [[ "$line" =~ ^[-*+][[:space:]]+ ]] && continue
+    _PT_SKIPPING=0
+  fi
+  [[ "$line" =~ ^[[:space:]]*$ ]] && break
+  if [ -z "$SUMMARY" ]; then SUMMARY="$line"; else SUMMARY="$SUMMARY $line"; fi
+done <<< "$DESCRIPTION"
+SUMMARY="$(printf '%s' "$SUMMARY" | head -c 400)"
 
 # 3. Compose triage.json.
 TRIAGE_FILE="$WORKER_DIR/triage.json"
