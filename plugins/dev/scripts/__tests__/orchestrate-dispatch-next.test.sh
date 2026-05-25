@@ -114,6 +114,17 @@ run_dispatch() {
 	"$DISPATCH" --orch-dir "$ORCH_DIR" "$@"
 }
 
+# make_phase_signal TICKET PHASE STATUS — seed a nested phase-mode signal at
+# workers/<T>/phase-<PHASE>.json so the phase-aware running counter (CTL-605
+# Bug 2) observes it.
+make_phase_signal() {
+	local t="$1" p="$2" s="$3"
+	mkdir -p "${ORCH_DIR}/workers/${t}"
+	jq -n --arg t "$t" --arg p "$p" --arg s "$s" --arg ts "$(now_iso)" \
+		'{ticket: $t, phase: $p, status: $s, updatedAt: $ts}' \
+		>"${ORCH_DIR}/workers/${t}/phase-${p}.json"
+}
+
 # ─── Test cases ───────────────────────────────────────────────────────────────
 
 echo "test 1: empty queue reports queueEmpty and exits 0"
@@ -695,6 +706,69 @@ for SF in "${PHASE_STDIN_DIR}"/stdin-*.log; do
 done
 [ "$LEAK_COUNT" = "0" ] && pass "no phase worker received leftover herestring on stdin" ||
 	fail "no phase worker received leftover herestring on stdin" "$LEAK_COUNT saw stdin content"
+scratch_teardown
+
+echo "test 35 (CTL-605 Bug 2): nested phase signals count toward RUNNING and enforce maxParallel"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 2 '{"wave1Pending": ["NEW-1"]}'
+make_phase_signal "BUSY-A" "implement" "running"
+make_phase_signal "BUSY-B" "research" "running"
+make_worktree "demo" "NEW-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+RUNNING=$(echo "$OUT" | jq -r '.running')
+[ "$RUNNING" = "2" ] && pass "nested in-flight counted (running=2)" || fail "running=2" "got: $RUNNING"
+echo "$OUT" | jq -e '.slotsAfter == 0 and .dispatched == []' >/dev/null &&
+	pass "cap enforced — no dispatch when full" || fail "cap enforced" "got: $OUT"
+scratch_teardown
+
+echo "test 36 (CTL-605 Bug 2): monitor-deploy done frees the slot"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 1 '{"wave1Pending": ["NEW-1"]}'
+make_phase_signal "SHIPPED" "monitor-deploy" "done"
+make_worktree "demo" "NEW-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+[ "$(echo "$OUT" | jq -r '.running')" = "0" ] && pass "monitor-deploy done not counted" || fail "monitor-deploy done not counted" "$OUT"
+[ "$(echo "$OUT" | jq -r '.dispatched | join(",")')" = "NEW-1" ] && pass "freed slot dispatched NEW-1" || fail "freed slot dispatched NEW-1" "$OUT"
+scratch_teardown
+
+echo "test 37 (CTL-605 Bug 2): mid-pipeline done (non-monitor) still holds slot"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 1 '{"wave1Pending": ["NEW-1"]}'
+make_phase_signal "MIDWAY" "implement" "done" # done, but not monitor-deploy
+make_worktree "demo" "NEW-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+[ "$(echo "$OUT" | jq -r '.running')" = "1" ] && pass "mid-pipeline done still in-flight" || fail "mid-pipeline done still in-flight" "$OUT"
+echo "$OUT" | jq -e '.dispatched == []' >/dev/null && pass "cap held — NEW-1 not dispatched" || fail "cap held" "$OUT"
+scratch_teardown
+
+echo "test 38 (CTL-605 Bug 2): failed/stalled phase is terminal (frees slot)"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 1 '{"wave1Pending": ["NEW-1"]}'
+make_phase_signal "BROKEN" "verify" "failed"
+make_worktree "demo" "NEW-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+[ "$(echo "$OUT" | jq -r '.running')" = "0" ] && pass "failed phase terminal" || fail "failed phase terminal" "$OUT"
+scratch_teardown
+
+echo "test 39 (CTL-605 Bug 2 / OQ2): single-ticket advance is NOT slot-gated when cap full"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 1 '{"wave1Pending": []}'
+make_phase_signal "ADV-1" "implement" "running" # cap=1 already full
+make_worktree "demo" "ADV-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "ADV-1" --phase "verify" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "advance exits 0 despite full cap" || fail "advance exits 0" "rc=$RC err=$(cat "${SCRATCH}/err")"
+[ "$(echo "$OUT" | jq -r '.dispatched | join(",")')" = "ADV-1" ] && pass "advance dispatched despite full cap" || fail "advance dispatched" "$OUT"
+grep -q -- "--phase verify" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch called for verify" || fail "verify dispatched" "$(cat "$PHASE_DISPATCH_LOG")"
 scratch_teardown
 
 echo ""
