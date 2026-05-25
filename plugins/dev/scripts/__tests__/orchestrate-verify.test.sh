@@ -306,6 +306,84 @@ scratch_teardown
 echo
 
 # ---------------------------------------------------------------
+# CTL-596 defect #2: __tests__/ sibling with -service suffix is recognized
+# ---------------------------------------------------------------
+echo "test: src/core/__tests__/foo-service.test.ts covers src/core/foo-service.ts (CTL-596 #2)"
+scratch_setup
+mkdir -p src/core/__tests__
+cat > src/core/foo-service.ts <<'EOF'
+export const foo = () => 1;
+EOF
+cat > src/core/__tests__/foo-service.test.ts <<'EOF'
+import { foo } from '../foo-service';
+test('foo', () => { foo(); });
+EOF
+seed_changes_and_gh '[]' \
+  '{"state":"MERGED","mergeStateStatus":"UNKNOWN","mergeCommit":{"oid":"{{MERGE_SHA}}"}}'
+make_signal "TICK-596B"
+run_verify "TICK-596B" "backend"
+echo "$OUT" | grep -q "Missing tests for" && fail "CTL-596 #2: __tests__ sibling should be found" "$OUT" || pass "CTL-596 #2: __tests__ sibling recognized"
+scratch_teardown
+echo
+
+# ---------------------------------------------------------------
+# CTL-596 defect #2: qualifier .integration.test.ts is recognized
+# ---------------------------------------------------------------
+echo "test: __tests__/widget.integration.test.ts covers src/widget.ts (CTL-596 #2)"
+scratch_setup
+mkdir -p src/__tests__
+cat > src/widget.ts <<'EOF'
+export const w = () => 1;
+EOF
+cat > src/__tests__/widget.integration.test.ts <<'EOF'
+import { w } from '../widget';
+test('w', () => { w(); });
+EOF
+seed_changes_and_gh '[]' \
+  '{"state":"MERGED","mergeStateStatus":"UNKNOWN","mergeCommit":{"oid":"{{MERGE_SHA}}"}}'
+make_signal "TICK-596C"
+run_verify "TICK-596C" "backend"
+echo "$OUT" | grep -q "Missing tests for" && fail "CTL-596 #2: qualifier test should be found" "$OUT" || pass "CTL-596 #2: qualifier test recognized"
+scratch_teardown
+echo
+
+# ---------------------------------------------------------------
+# CTL-596 defect #2: config-declared test/** root is honored
+# ---------------------------------------------------------------
+# Note (CTL-596): the config (vitest.config.ts) and the test live on the BASE,
+# not in the PR — this is realistic (config pre-exists) and avoids two artifacts
+# of the unchanged file-categorization (:191): a *.config.ts counts as a "source
+# file" needing its own test, and a test file in the diff would be matched by the
+# stem-in-diff step before test_roots_for runs. Putting both on base forces the
+# on-disk config-root discovery path (step 2) to be the thing under test.
+echo "test: vitest include test/**/*.test.ts covers src/tools/run.ts (CTL-596 #2)"
+scratch_setup
+git checkout -q main
+mkdir -p src/tools test/tools
+cat > vitest.config.ts <<'EOF'
+export default { test: { include: ["test/**/*.test.ts"] } };
+EOF
+cat > test/tools/run.test.ts <<'EOF'
+import { run } from '../../src/tools/run';
+test('run', () => { run(); });
+EOF
+git add -A && git commit -q -m "vitest config + test root on base"
+git checkout -q feature
+git merge -q --no-edit main 2>/dev/null || git rebase -q main
+# The PR adds only the source file; its test already lives under the
+# config-declared test/ root.
+cat > src/tools/run.ts <<'EOF'
+export const run = () => 1;
+EOF
+seed_changes_and_gh '[]' \
+  '{"state":"MERGED","mergeStateStatus":"UNKNOWN","mergeCommit":{"oid":"{{MERGE_SHA}}"}}'
+make_signal "TICK-596D"
+run_verify "TICK-596D" "backend"
+echo "$OUT" | grep -q "Missing tests for" && fail "CTL-596 #2: config-declared test root should be honored" "$OUT" || pass "CTL-596 #2: config test root recognized"
+scratch_teardown
+echo
+
+# ---------------------------------------------------------------
 echo
 if [ $FAILURES -eq 0 ]; then
   echo "ALL PASSED ($PASSES)"

@@ -10,7 +10,8 @@
 #     --ticket <ID> \
 #     --base-branch <branch> \
 #     --signal-file <path> \
-#     [--test-requirements <backend|frontend|fullstack>]
+#     [--test-requirements <backend|frontend|fullstack>] \
+#     [--test-convention <glob|adjacency>]   # default: glob (CTL-596 #2)
 #
 # Exit codes:
 #   0 — PASS (all required coverage present)
@@ -54,12 +55,48 @@ count_matches() {
   echo "${n:-0}"
 }
 
+# CTL-596 #2: locate the configured test root(s) for the package nearest to a
+# source file. Reads vitest/jest `include` globs when present; otherwise falls
+# back to the source dir subtree (vitest default: tests colocated or under
+# __tests__). Emits the directory prefixes (one per line) to search.
+test_roots_for() {
+  local src="$1" dir pkg cfg glob
+  dir=$(dirname "$src")
+  # nearest dir containing a vitest/jest config (walk up to AND INCLUDING the
+  # repo root "."). The break-after-check structure ensures "." is tested —
+  # a leading `while [ "$pkg" != "." ]` would skip a root-level config.
+  pkg="$dir"
+  while true; do
+    for cfg in vitest.config.ts vitest.config.js vitest.config.mjs \
+               jest.config.ts jest.config.js jest.config.mjs; do
+      if [ -f "${pkg}/${cfg}" ]; then
+        # crude but sufficient: pull the leading literal segment of each
+        # include glob, e.g. "test/**/*.test.ts" -> "test"
+        grep -oE 'include[^]]*\]' "${pkg}/${cfg}" 2>/dev/null \
+          | grep -oE '"[^"*]+' | tr -d '"' \
+          | sed -E 's#/+$##' \
+          | while read -r glob; do
+              [ -n "$glob" ] && echo "${pkg%/}/${glob%%/**}"
+            done
+        echo "$pkg"   # always also search the package root subtree
+        return
+      fi
+    done
+    { [ "$pkg" = "." ] || [ "$pkg" = "/" ]; } && break
+    pkg=$(dirname "$pkg")
+  done
+  echo "$dir"   # no config found — default to the source dir subtree
+}
+
 # Parse arguments
 WORKTREE=""
 TICKET=""
 BASE_BRANCH="main"
 SIGNAL_FILE=""
 TEST_REQUIREMENTS="backend"
+# CTL-596 #2: glob = config-aware discovery (default); adjacency = legacy
+# colocated/__tests__-only matching. Additive — no existing caller passes it.
+TEST_CONVENTION="glob"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -68,6 +105,7 @@ while [[ $# -gt 0 ]]; do
     --base-branch) BASE_BRANCH="$2"; shift 2 ;;
     --signal-file) SIGNAL_FILE="$2"; shift 2 ;;
     --test-requirements) TEST_REQUIREMENTS="$2"; shift 2 ;;
+    --test-convention) TEST_CONVENTION="$2"; shift 2 ;;
     *) echo -e "${RED}Unknown option: $1${NC}"; exit 2 ;;
   esac
 done
@@ -237,26 +275,37 @@ else
   # Check if test files exist for changed source files
   MISSING_TESTS=()
   for SRC in $SOURCE_FILES; do
-    # Derive expected test file paths
     DIR=$(dirname "$SRC")
     BASENAME=$(basename "$SRC" | sed -E 's/\.(ts|tsx|js|jsx|py|go|rs)$//')
     EXT=$(echo "$SRC" | grep -oE '\.[^.]+$')
 
-    # Common test file patterns
     FOUND_TEST=false
-    for PATTERN in \
-      "${DIR}/${BASENAME}.test${EXT}" \
-      "${DIR}/${BASENAME}.spec${EXT}" \
-      "${DIR}/__tests__/${BASENAME}${EXT}" \
-      "${DIR}/__tests__/${BASENAME}.test${EXT}" \
-      "${DIR}/../__tests__/${BASENAME}${EXT}" \
-      "test/${DIR}/${BASENAME}${EXT}" \
-      "tests/${DIR}/${BASENAME}${EXT}"; do
-      if [ -f "$PATTERN" ] || echo "$CHANGED_FILES" | grep -qF "$PATTERN"; then
-        FOUND_TEST=true
-        break
+    # CTL-596 #2: stem match — <stem>(.<qualifier>)*.(test|spec).<ext>. Matches
+    # -service suffixes, .integration qualifiers, and config-declared roots that
+    # the old literal-candidate list missed.
+    STEM_RE="${BASENAME}([.-][A-Za-z0-9]+)*\.(test|spec)${EXT//./\\.}\$"
+
+    # 1) test files already present in the diff
+    if echo "$CHANGED_FILES" | grep -qE "(^|/)${STEM_RE}"; then
+      FOUND_TEST=true
+    fi
+
+    # 2) on-disk search across plausible roots (skipped in adjacency mode)
+    if [ "$FOUND_TEST" = false ]; then
+      if [ "$TEST_CONVENTION" = "adjacency" ]; then
+        ROOTS=$(printf '%s\n%s\n%s\n' "$DIR" "${DIR}/__tests__" "${DIR}/../__tests__" | sort -u)
+      else
+        ROOTS=$(printf '%s\n%s\n%s\n%s\n' \
+                  "$DIR" "${DIR}/__tests__" "${DIR}/../__tests__" \
+                  "$(test_roots_for "$SRC")" | sort -u)
       fi
-    done
+      while read -r ROOT; do
+        [ -d "$ROOT" ] || continue
+        if find "$ROOT" -type f 2>/dev/null | grep -qE "(^|/)${STEM_RE}"; then
+          FOUND_TEST=true; break
+        fi
+      done <<< "$ROOTS"
+    fi
 
     if [ "$FOUND_TEST" = false ]; then
       MISSING_TESTS+=("$SRC")
