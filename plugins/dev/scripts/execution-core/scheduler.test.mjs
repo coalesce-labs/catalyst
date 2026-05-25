@@ -11,6 +11,7 @@ import {
   writeFileSync,
   appendFileSync,
   existsSync,
+  readFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +31,10 @@ import {
   startScheduler,
   stopScheduler,
   preflightWorkspaceLabels,
+  inDispatchCooldown,
+  recordDispatchFailure,
+  clearDispatchCooldown,
+  dispatchCooldownPath,
   __resetForTests,
 } from "./scheduler.mjs";
 
@@ -259,6 +264,49 @@ function fakeDispatch({ code = 0 } = {}) {
   fn.calls = calls;
   return fn;
 }
+
+// ── CTL-624: per-(ticket,phase) dispatch cool-down helpers ──
+describe("dispatch cool-down helpers", () => {
+  test("no marker → not in cool-down", () => {
+    expect(inDispatchCooldown(orchDir, "CTL-1", "research", 1_000)).toBe(false);
+  });
+
+  test("recordDispatchFailure writes a timestamped marker", () => {
+    recordDispatchFailure(orchDir, "CTL-1", "research", 2, 5_000);
+    const p = dispatchCooldownPath(orchDir, "CTL-1", "research");
+    expect(existsSync(p)).toBe(true);
+    const m = JSON.parse(readFileSync(p, "utf8"));
+    expect(m).toMatchObject({ phase: "research", code: 2, failedAt: 5_000 });
+  });
+
+  test("within the window → in cool-down; past the window → not", () => {
+    recordDispatchFailure(orchDir, "CTL-1", "research", 2, 5_000);
+    // 30 s later (< 60 s window) → still cooling down.
+    expect(inDispatchCooldown(orchDir, "CTL-1", "research", 35_000)).toBe(true);
+    // 61 s later (> 60 s window) → window elapsed.
+    expect(inDispatchCooldown(orchDir, "CTL-1", "research", 66_000)).toBe(false);
+  });
+
+  test("cool-down is per-(ticket,phase)", () => {
+    recordDispatchFailure(orchDir, "CTL-1", "research", 2, 5_000);
+    expect(inDispatchCooldown(orchDir, "CTL-1", "plan", 6_000)).toBe(false);
+    expect(inDispatchCooldown(orchDir, "CTL-2", "research", 6_000)).toBe(false);
+  });
+
+  test("clearDispatchCooldown removes the marker (idempotent if absent)", () => {
+    recordDispatchFailure(orchDir, "CTL-1", "research", 2, 5_000);
+    clearDispatchCooldown(orchDir, "CTL-1", "research");
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-1", "research"))).toBe(false);
+    expect(() => clearDispatchCooldown(orchDir, "CTL-1", "research")).not.toThrow();
+  });
+
+  test("a malformed marker is treated as absent (not in cool-down)", () => {
+    const p = dispatchCooldownPath(orchDir, "CTL-1", "research");
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+    writeFileSync(p, "not json");
+    expect(inDispatchCooldown(orchDir, "CTL-1", "research", 6_000)).toBe(false);
+  });
+});
 
 describe("deriveAdvancement", () => {
   test("latest phase done → returns the FSM successor", () => {

@@ -13,7 +13,7 @@
 // Composes: lib/dependency-graph.mjs (readiness), scheduler-rank.mjs (ranking),
 // lib/phase-fsm.mjs (phase advancement, Phase 4), eligible-set.mjs (candidates).
 
-import { readdirSync, readFileSync, writeFileSync, existsSync, watch, mkdirSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync, watch, mkdirSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname, basename } from "node:path";
 import { analyzeDependencyGraph, referencedBlockerIds } from "../lib/dependency-graph.mjs";
@@ -322,6 +322,53 @@ function labelOnce(orchDir, ticket, label, writeStatus) {
   }
 }
 
+// CTL-624: dispatch cool-down marker. Mirrors the labelOnce once-marker
+// convention (workers/<T>/.linear-label-*), but the marker carries a timestamp
+// and the guard is time-based: re-dispatch is suppressed only while
+// now - failedAt < DISPATCH_COOLDOWN_MS, so the window self-heals once the
+// upstream artifact appears (unlike labelOnce's permanent .skipped marker).
+export function dispatchCooldownPath(orchDir, ticket, phase) {
+  return join(orchDir, "workers", ticket, `.dispatch-cooldown-${phase}.json`);
+}
+
+export function inDispatchCooldown(orchDir, ticket, phase, now) {
+  const p = dispatchCooldownPath(orchDir, ticket, phase);
+  let failedAt;
+  try {
+    failedAt = JSON.parse(readFileSync(p, "utf8"))?.failedAt;
+  } catch {
+    return false; // absent / malformed → treat as no cool-down
+  }
+  if (typeof failedAt !== "number") return false;
+  return now - failedAt < DISPATCH_COOLDOWN_MS;
+}
+
+export function recordDispatchFailure(orchDir, ticket, phase, code, now) {
+  const dir = join(orchDir, "workers", ticket);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      dispatchCooldownPath(orchDir, ticket, phase),
+      JSON.stringify({ phase, code, failedAt: now }),
+    );
+  } catch (err) {
+    // Never let a marker write crash the tick — worst case is the next tick
+    // retries (the pre-CTL-624 behavior).
+    log.warn(
+      { ticket, phase, err: err.message },
+      "scheduler: dispatch cool-down marker write failed — continuing",
+    );
+  }
+}
+
+export function clearDispatchCooldown(orchDir, ticket, phase) {
+  try {
+    rmSync(dispatchCooldownPath(orchDir, ticket, phase), { force: true });
+  } catch {
+    // best-effort — a stale marker just means one suppressed re-dispatch
+  }
+}
+
 // REQUIRED_WORKSPACE_LABELS — the flat labels the CTL-558 coordinator sweep
 // writes. Both must pre-exist in the Linear workspace; linearis has no
 // `labels create`. CTL-585's preflight warns once at daemon start if either
@@ -470,6 +517,7 @@ export function schedulerTick(
     writeStatus = linearWrite,
     teardownWorktree = defaultTeardownWorktree,
     reclaimDeadWork = defaultReclaimDeadWork,
+    now = Date.now, // CTL-624: injectable clock for the dispatch cool-down
   } = {},
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -611,6 +659,15 @@ export function schedulerTick(
 const TICK_INTERVAL_MS = Number(process.env.SCHEDULER_TICK_INTERVAL_MS) || 30_000;
 // Debounce window — a burst of event-log appends coalesces into one tick.
 const TICK_DEBOUNCE_MS = Number(process.env.SCHEDULER_DEBOUNCE_MS) || 2_000;
+
+// CTL-624: per-(ticket,phase) dispatch cool-down. When a dispatch is refused
+// (e.g. prior_artifact_missing → phase-agent-dispatch exit 2) the dispatcher
+// writes no signal file, so isTicketInFlight frees the slot and the next
+// debounced tick re-dispatches immediately — a 2–4 events/sec storm. A
+// timestamped marker under workers/<T>/ throttles re-dispatch of the same
+// (ticket,phase) to one attempt per window. Time-based (not a permanent
+// .skipped marker like labelOnce) so it self-heals once the artifact appears.
+const DISPATCH_COOLDOWN_MS = Number(process.env.SCHEDULER_DISPATCH_COOLDOWN_MS) || 60_000;
 
 // --- daemon module state ---
 let tickTimer = null;
