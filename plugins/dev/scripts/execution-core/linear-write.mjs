@@ -95,19 +95,34 @@ export function applyTerminalDone({ ticket, resolveRepoRoot, exec }) {
   return runTransition({ ticket, key: TERMINAL_LINEAR_KEY, resolveRepoRoot, exec });
 }
 
-// applyLabel — additively apply a Linear label (triaged, needs-human) AND verify
-// the write landed. CTL-587: per memory project_linear_transition_silent_success,
-// linearis can exit 0 on a label update that did NOT actually land (rate
-// limiting, transient API). The read-back via fetchTicketLabels closes that
-// silent-success gap: `applied: true` now means a follow-up `linearis issues
-// read` confirmed the label is on the ticket. `applied: false` comes with a
-// `reason` discriminator so callers can distinguish:
-//   - 'write-failed'   — the update itself exited non-zero (no read-back run)
-//   - 'verify-failed'  — update exited 0 but the read-back is missing the label
-//                        (the silent-success case) OR the read-back exec failed
-//   - 'exception'      — the exec itself threw
-// All three are retryable next tick: labelOnce (scheduler.mjs) only writes its
-// marker when applied: true, so a failure naturally retries.
+// applyLabel — additively apply a Linear label (triaged, needs-human), classify
+// any failure, AND verify a successful write actually landed. Returns a tagged
+// { applied, reason } shape callers use to decide retry vs short-circuit.
+//
+// Two failure axes are folded together here:
+//   1. CTL-585 — when the write exits non-zero, classifyLabelFailure maps the
+//      stderr to a reason so callers can stop the retry storm on the one
+//      unrecoverable case ("missing-label": the workspace has no such label;
+//      retrying every tick just storms the Linear API).
+//   2. CTL-587 — when the write exits 0, linearis can still have silently NOT
+//      applied the label (rate limiting, transient API). A read-back via
+//      fetchTicketLabels closes that silent-success gap, so `applied: true`
+//      means a follow-up read confirmed the label is on the ticket.
+//
+// reason values:
+//   null            — success (applied: true)
+//   "missing-label" — workspace lacks the label; create it in the Linear UI.
+//                     Unrecoverable inside one daemon lifetime — callers
+//                     (scheduler.labelOnce) write a .skipped marker and do not
+//                     retry it this run.
+//   "rate-limited"  — Linear write rate-cap hit; retry next tick.
+//   "verify-failed" — write exited 0 but the read-back is missing the label
+//                     (the silent-success case) OR the read-back exec failed;
+//                     retry next tick.
+//   "transient"     — every other failure (network, spawn error, unknown
+//                     stderr, exec threw); retry next tick.
+// All reasons except "missing-label" are retryable next tick: labelOnce only
+// writes its .applied marker when applied: true, so a failure naturally retries.
 export function applyLabel({ ticket, label, exec = defaultExec }) {
   try {
     const writeRes = exec("linearis", [
@@ -120,11 +135,12 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
       "add",
     ]);
     if (writeRes.code !== 0) {
+      const reason = classifyLabelFailure(writeRes.stderr);
       log.warn(
-        { ticket, label, code: writeRes.code, stderr: writeRes.stderr },
+        { ticket, label, code: writeRes.code, reason, stderr: writeRes.stderr },
         "linear-write: label write failed (exit non-zero)"
       );
-      return { applied: false, reason: "write-failed" };
+      return { applied: false, reason };
     }
     const labels = fetchTicketLabels(ticket, { exec });
     if (!Array.isArray(labels) || !labels.includes(label)) {
@@ -134,12 +150,23 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
       );
       return { applied: false, reason: "verify-failed" };
     }
-    return { applied: true };
+    return { applied: true, reason: null };
   } catch (err) {
     log.warn(
-      { ticket, label, err: err.message },
+      { ticket, label, reason: "transient", err: err.message },
       "linear-write: label write threw — swallowed"
     );
-    return { applied: false, reason: "exception" };
+    return { applied: false, reason: "transient" };
   }
+}
+
+// classifyLabelFailure — map a `linearis issues update --labels` stderr to
+// one of the tagged reason codes. Both substrings are the literal forms
+// observed in ~/catalyst/execution-core/daemon.log during the CTL-380 QA
+// run (CTL-585 research §3, §7).
+function classifyLabelFailure(stderr) {
+  const s = String(stderr ?? "");
+  if (s.includes("not found")) return "missing-label";
+  if (s.includes("Rate limit")) return "rate-limited";
+  return "transient";
 }

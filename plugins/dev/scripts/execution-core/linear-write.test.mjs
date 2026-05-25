@@ -138,7 +138,7 @@ describe("applyLabel", () => {
     const calls = [];
     const exec = makeOkExec(calls); // read-back returns the label
     const r = applyLabel({ ticket: "CTL-1", label: "needs-human", exec });
-    expect(r).toEqual({ applied: true });
+    expect(r).toEqual({ applied: true, reason: null });
     expect(calls[0].args.slice(0, 2)).toEqual(["issues", "update"]);
     expect(calls[1].args.slice(0, 2)).toEqual(["issues", "read"]);
   });
@@ -151,20 +151,8 @@ describe("applyLabel", () => {
     expect(r.reason).toBe("verify-failed");
   });
 
-  test("CTL-587: write fails → applied:false, write-failed (NO read-back attempted)", () => {
-    const calls = [];
-    const exec = (cmd, args) => {
-      calls.push({ cmd, args });
-      return { code: 1, stdout: "", stderr: "rate limited" };
-    };
-    const r = applyLabel({ ticket: "CTL-1", label: "needs-human", exec });
-    expect(r.applied).toBe(false);
-    expect(r.reason).toBe("write-failed");
-    expect(calls).toHaveLength(1); // only the update; no read-back attempted
-  });
-
   test("CTL-587: read-back returns null (linearis read failure) → applied:false, verify-failed", () => {
-    const exec = (cmd, args) => {
+    const exec = (_cmd, args) => {
       if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
       if (args[1] === "read") return { code: 1, stdout: "", stderr: "" };
       return { code: 127 };
@@ -179,5 +167,48 @@ describe("applyLabel", () => {
       throw new Error("exec died");
     };
     expect(applyLabel({ ticket: "CTL-1", label: "needs-human", exec }).applied).toBe(false);
+  });
+
+  // CTL-585: tagged-reason return contract on the write-failure path. A
+  // non-zero exit is classified so callers can short-circuit the one
+  // unrecoverable case (missing-label) instead of storming the Linear API.
+  // The success path still flows through the CTL-587 read-back above.
+  test("CTL-585: zero exit + read-back confirms → applied:true, reason:null", () => {
+    const calls = [];
+    const exec = makeOkExec(calls, { readbackLabels: [{ name: "triaged" }] });
+    const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
+    expect(r).toEqual({ applied: true, reason: null });
+  });
+  test("CTL-585: classifies a missing-label stderr as reason:'missing-label' (no read-back)", () => {
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 1, stdout: "", stderr: 'Label "triaged" not found' };
+    };
+    const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
+    expect(r).toEqual({ applied: false, reason: "missing-label" });
+    expect(calls).toHaveLength(1); // write failed → no read-back attempted
+  });
+  test("CTL-585: classifies a rate-limit stderr as reason:'rate-limited'", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "Rate limit exceeded" });
+    const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
+    expect(r).toEqual({ applied: false, reason: "rate-limited" });
+  });
+  test("CTL-585: any other non-zero exit is reason:'transient'", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
+    const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+  test("CTL-585: a spawn-error (code 127) is reason:'transient'", () => {
+    const exec = () => ({ code: 127, stdout: "", stderr: "ENOENT" });
+    const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+  test("CTL-585: a thrown exec is reason:'transient' and never throws", () => {
+    const exec = () => {
+      throw new Error("spawn boom");
+    };
+    const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
   });
 });
