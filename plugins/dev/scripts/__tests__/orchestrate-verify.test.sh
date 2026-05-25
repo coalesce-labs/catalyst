@@ -259,6 +259,53 @@ scratch_teardown
 echo
 
 # ---------------------------------------------------------------
+# CTL-596 defect #1: merge SHA absent from worktree objects must NOT abort
+# ---------------------------------------------------------------
+echo "test: merged PR whose merge SHA is not a local object still diffs (CTL-596 #1)"
+scratch_setup
+mkdir -p src
+cat > src/widget.ts <<'EOF'
+export const f = () => 1;
+EOF
+cat > src/widget.test.ts <<'EOF'
+import { f } from './widget';
+test('f', () => { f(); });
+EOF
+git add -A && git commit -q -m "feature work"
+
+# gh pr list returns [] (deleted head branch). Signal file carries a merge SHA
+# that does NOT exist in this repo's object database (40 hex chars, all dead).
+cat > "${SCRATCH}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"pr list"* ]]; then echo "[]"; exit 0; fi
+if [[ "$*" == *"repo view"* ]]; then echo "org/repo"; exit 0; fi
+if [[ "$*" == *"api repos"* ]]; then echo '{"merged":true,"merge_commit_sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}'; exit 0; fi
+echo "stub gh: unexpected: $*" >&2; exit 99
+EOF
+chmod +x "${SCRATCH}/bin/gh"
+export PATH="${SCRATCH}/bin:${PATH}"
+
+cat > "${ORCH_DIR}/workers/TICK-596A.json" <<'EOF'
+{
+  "ticket": "TICK-596A",
+  "pr": { "number": 700, "mergeCommitSha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" },
+  "definitionOfDone": {
+    "testsWrittenFirst": false,
+    "unitTests": {"exists": false, "count": 0},
+    "apiTests": {"exists": false, "count": 0},
+    "functionalTests": {"exists": false, "count": 0}
+  }
+}
+EOF
+run_verify "TICK-596A" "backend"
+# Must NOT abort with the empty-diff error, and MUST see the changed source file.
+echo "$OUT" | grep -q "No changed files found" && fail "CTL-596 #1: must not abort on absent merge SHA" "$OUT" || pass "CTL-596 #1: no empty-diff abort"
+echo "$OUT" | grep -q "Source files changed: 1" && pass "CTL-596 #1: changeset resolved via merge-base" || fail "CTL-596 #1: changeset resolved via merge-base" "$OUT"
+[ "$RC" -ne 2 ] && pass "CTL-596 #1: did not exit 2 (rc=$RC)" || fail "CTL-596 #1: exited 2" "rc=$RC; out: $OUT"
+scratch_teardown
+echo
+
+# ---------------------------------------------------------------
 echo
 if [ $FAILURES -eq 0 ]; then
   echo "ALL PASSED ($PASSES)"

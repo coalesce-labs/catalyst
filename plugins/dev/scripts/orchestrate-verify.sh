@@ -136,7 +136,10 @@ if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
     if [ -n "$SIG_SHA" ]; then
       PR_MERGE_SHA="$SIG_SHA"
       PR_STATE="MERGED"
-      DIFF_RANGE="${PR_MERGE_SHA}~..${PR_MERGE_SHA}"
+      # CTL-596 #1: do NOT derive DIFF_RANGE from the merge SHA — it is not in
+      # this worktree's object DB after --delete-branch. The authoritative
+      # merge-base range is computed below (before Check #1). Merge SHA stays
+      # set for Check #8 PR-state reporting.
     else
       # Have PR number but no merge SHA — ask REST API for authoritative state
       REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
@@ -145,7 +148,7 @@ if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
         if echo "$PR_REST" | jq -e '.merged == true' >/dev/null 2>&1; then
           PR_STATE="MERGED"
           PR_MERGE_SHA=$(echo "$PR_REST" | jq -r '.merge_commit_sha // empty' 2>/dev/null || echo "")
-          [ -n "$PR_MERGE_SHA" ] && DIFF_RANGE="${PR_MERGE_SHA}~..${PR_MERGE_SHA}"
+          # CTL-596 #1: merge SHA kept for Check #8 only; DIFF_RANGE set below.
         elif echo "$PR_REST" | jq -e '.state == "open"' >/dev/null 2>&1; then
           PR_STATE="OPEN"
         else
@@ -167,9 +170,27 @@ if [ -z "$PR_NUMBER" ] && [ -n "$BRANCH" ]; then
   if [ "$PR_STATE" = "MERGED" ] && [ -n "$PR_NUMBER" ]; then
     PR_VIEW_JSON=$(gh pr view "$PR_NUMBER" --json mergeCommit 2>/dev/null || echo "{}")
     PR_MERGE_SHA=$(echo "$PR_VIEW_JSON" | jq -r '.mergeCommit.oid // empty' 2>/dev/null || echo "")
-    if [ -n "$PR_MERGE_SHA" ]; then
-      DIFF_RANGE="${PR_MERGE_SHA}~..${PR_MERGE_SHA}"
-    fi
+    # CTL-596 #1: merge SHA kept for Check #8 only; DIFF_RANGE set below.
+  fi
+fi
+
+# CTL-596 #1: Resolve the diff range from objects guaranteed present in the
+# worker worktree. The GitHub squash-merge commit is NOT in this worktree's
+# object DB after --delete-branch, so a SHA~..SHA range diffs to nothing.
+# merge-base(base, HEAD)..HEAD is the worker's true changeset both pre- and
+# post-merge (the worktree retains its checked-out branch tip regardless of
+# remote/local branch deletion). The merge SHA stays resolved above for the
+# Check #8 PR-state report.
+BASE_REF="$BASE_BRANCH"
+if git rev-parse --verify --quiet "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
+  BASE_REF="origin/${BASE_BRANCH}"
+elif ! git rev-parse --verify --quiet "$BASE_BRANCH" >/dev/null 2>&1; then
+  BASE_REF=""
+fi
+if [ -n "$BASE_REF" ] && git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  MERGE_BASE=$(git merge-base "$BASE_REF" HEAD 2>/dev/null || echo "")
+  if [ -n "$MERGE_BASE" ]; then
+    DIFF_RANGE="${MERGE_BASE}..HEAD"
   fi
 fi
 
