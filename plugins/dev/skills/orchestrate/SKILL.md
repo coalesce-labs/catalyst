@@ -1796,7 +1796,7 @@ Signal-file fields the script reads/writes:
 
 **Auto-dispatch rebase workers for DIRTY PRs (CTL-232):**
 
-After auto-fixup, a third pass detects PRs stuck in `state=OPEN, mergeStateStatus=DIRTY` (merge
+After auto-fixup, a further pass detects PRs stuck in `state=OPEN, mergeStateStatus=DIRTY` (merge
 conflicts that GitHub's auto-merge cannot resolve on its own — it can only handle BEHIND, never
 DIRTY) and dispatches `orchestrate-rebase` to spawn a worker that rebases the PR branch onto current
 base, resolves conflicts, and force-pushes (`--force-with-lease`).
