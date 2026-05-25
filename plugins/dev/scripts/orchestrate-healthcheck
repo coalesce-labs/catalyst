@@ -55,6 +55,16 @@ GRACE_SECONDS=15
 STALE_BG_SECONDS=900
 DRY_RUN=0
 
+# CTL-509: git-activity liveness guard. When a worker's --bg state.json mtime is
+# stale, consult its worktree's most-recent commit timestamp before flagging
+# state-json-stale — a recent commit proves the worker is alive (it just blocked
+# in one long synchronous tool call without claude touching state.json).
+# GIT_ACTIVITY_SECONDS defaults to STALE_BG_SECONDS after arg parse so
+# --stale-bg-seconds keeps the two aligned unless --git-activity-seconds overrides.
+GIT_GUARD="${CATALYST_HEALTHCHECK_GIT_GUARD:-1}"
+GIT_ACTIVITY_SECONDS=""
+WORKTREE_BASE_OVERRIDE="${CATALYST_HEALTHCHECK_WORKTREE_BASE:-}"
+
 # CTL-452: claude --bg writes state.json to ~/.claude/jobs/<id>/state.json by
 # default. Tests override CATALYST_HEALTHCHECK_JOBS_ROOT to avoid touching the
 # real Claude state directory.
@@ -87,6 +97,14 @@ while [[ $# -gt 0 ]]; do
 		DRY_RUN=1
 		shift
 		;;
+	--no-git-guard)
+		GIT_GUARD=0
+		shift
+		;;
+	--git-activity-seconds)
+		GIT_ACTIVITY_SECONDS="$2"
+		shift 2
+		;;
 	-h | --help) usage 0 ;;
 	*)
 		echo "unknown arg: $1" >&2
@@ -94,6 +112,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+# CTL-509: default the git-activity window to the stale-bg threshold so a single
+# --stale-bg-seconds keeps both aligned unless --git-activity-seconds overrides.
+[ -z "$GIT_ACTIVITY_SECONDS" ] && GIT_ACTIVITY_SECONDS="$STALE_BG_SECONDS"
 
 [ -z "$ORCH_DIR" ] && {
 	echo "ERROR: --orch-dir required" >&2
@@ -185,12 +207,58 @@ done
 # to be missing only briefly after dispatch — beyond --stale-bg-seconds we
 # treat it as a launch failure.
 STALLED_TICKETS=()
+SUPPRESSED_TICKETS=() # CTL-509: workers left running by the git-activity guard
 PHASE_TERMINAL_STATES="done failed errored stopped stalled"
 
 mtime_of() {
 	# macOS `stat -f` vs GNU `stat -c` — fall back if neither accepts.
 	local f="$1"
 	stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo ""
+}
+
+# CTL-509: resolve the worktree base for phase-mode workers. Precedence:
+# CATALYST_HEALTHCHECK_WORKTREE_BASE > ${ORCH_DIR}/state.json .worktreeBase >
+# <repo>/.catalyst/config.json catalyst.orchestration.worktreeBase. Mirrors
+# orchestrate-revive:432-445 (revive_worktree_base) with the state.json fallback
+# added — this repo's config.json carries worktreeBase=null, but state.json
+# always records the live base. Empty means "no detection possible".
+# DRY candidate: a shared sourced lib could host this + revive's copy; kept local
+# this phase to avoid regressing the revive path.
+hc_worktree_base() {
+	if [ -n "$WORKTREE_BASE_OVERRIDE" ]; then
+		echo "$WORKTREE_BASE_OVERRIDE"
+		return 0
+	fi
+	local b
+	b=$(jq -r '.worktreeBase // empty' "${ORCH_DIR}/state.json" 2>/dev/null || echo "")
+	if [ -n "$b" ]; then
+		echo "$b"
+		return 0
+	fi
+	if [ -f "${SCRIPT_DIR}/../../../.catalyst/config.json" ]; then
+		jq -r '.catalyst.orchestration.worktreeBase // empty' \
+			"${SCRIPT_DIR}/../../../.catalyst/config.json" 2>/dev/null || echo ""
+		return 0
+	fi
+	echo ""
+}
+
+# CTL-509: git-activity liveness probe. Returns 0 (live) iff the guard is on, a
+# worktree base resolves, the worktree is a git repo, and its most-recent commit
+# is younger than GIT_ACTIVITY_SECONDS. Any failure to resolve/read falls through
+# to return 1 (not live) so the caller flags state-json-stale exactly as today.
+git_worker_is_live() {
+	[ "$GIT_GUARD" = "1" ] || return 1
+	local ticket="$1" base wt last now age
+	base=$(hc_worktree_base)
+	[ -z "$base" ] && return 1
+	wt="${base}/${ORCH_ID}-${ticket}"
+	{ [ -d "$wt/.git" ] || [ -f "$wt/.git" ]; } || return 1
+	last=$(git -C "$wt" log -1 --format=%ct HEAD 2>/dev/null || echo "")
+	[ -z "$last" ] && return 1
+	now=$(date -u +%s)
+	age=$((now - last))
+	[ "$age" -lt "$GIT_ACTIVITY_SECONDS" ] # 0 == live
 }
 
 # Iterate every per-phase signal under workers/<T>/phase-*.json. Tickets with
@@ -232,6 +300,26 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
 	fi
 
 	[ -z "$STALL_REASON" ] && continue
+
+	# CTL-509: before honoring a stale-mtime stall, consult git commit recency on
+	# the worker's worktree. A worker stuck in one long tool call (bun install +
+	# tests) stops touching state.json, but a recent commit proves it is alive —
+	# suppress the false stall. Mirrors the execution-core JS guard
+	# (stalled-detector.mjs:40-46), which is inactive in phase-agents mode.
+	# state-json-missing is NOT guarded (a missing job dir is a real launch failure).
+	if [ "$STALL_REASON" = "state-json-stale" ] && git_worker_is_live "$P_TICKET"; then
+		SUPPRESSED_TICKETS+=("$P_TICKET")
+		if [ "$DRY_RUN" -eq 1 ]; then
+			echo "[dry-run] ${P_TICKET} phase=${P_PHASE} bg=${P_BG}: stale-mtime suppressed (recent-git-activity)" >&2
+		elif [ -x "$STATE_SCRIPT" ]; then
+			EVT=$(jq -nc --arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$P_TICKET" \
+				--arg phase "$P_PHASE" --arg bg "$P_BG" \
+				'{ts:$ts, orchestrator:$orch, worker:$w, event:"worker-phase-stale-suppressed",
+          detail:{phase:$phase, bg_job_id:$bg, reason:"recent-git-activity"}}')
+			"$STATE_SCRIPT" event "$EVT" >/dev/null 2>&1 || true
+		fi
+		continue # leave signal running; no attention, no phase.*.failed
+	fi
 
 	STALLED_TICKETS+=("$P_TICKET")
 	if [ "$DRY_RUN" -eq 1 ]; then
@@ -306,6 +394,14 @@ else
 	STALLED_JSON=$(printf '%s\n' "${STALLED_TICKETS[@]}" | jq -R . | jq -s .)
 fi
 
+# CTL-509: additive summary fields for workers the git-activity guard left running.
+SUPPRESSED_COUNT=${#SUPPRESSED_TICKETS[@]}
+if [ "$SUPPRESSED_COUNT" -eq 0 ]; then
+	SUPPRESSED_JSON="[]"
+else
+	SUPPRESSED_JSON=$(printf '%s\n' "${SUPPRESSED_TICKETS[@]}" | jq -R . | jq -s .)
+fi
+
 jq -nc \
 	--argjson c "$CHECKED" \
 	--argjson d "$DEAD_COUNT" \
@@ -313,4 +409,7 @@ jq -nc \
 	--argjson s "$STALLED_COUNT" \
 	--argjson st "$STALLED_JSON" \
 	--argjson r "$REAPED_COUNT" \
-	'{checked:$c, dead:$d, deadTickets:$t, stalled:$s, stalledTickets:$st, reaped:$r}'
+	--argjson gs "$SUPPRESSED_COUNT" \
+	--argjson gst "$SUPPRESSED_JSON" \
+	'{checked:$c, dead:$d, deadTickets:$t, stalled:$s, stalledTickets:$st, reaped:$r,
+	  gitActiveSuppressed:$gs, gitActiveSuppressedTickets:$gst}'
