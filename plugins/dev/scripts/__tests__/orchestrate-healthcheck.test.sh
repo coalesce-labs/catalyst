@@ -206,6 +206,33 @@ phase_status() {
 	jq -r '.status' "${ORCH_DIR}/workers/${ticket}/phase-${phase}.json"
 }
 
+# Read an arbitrary field from a per-phase signal.
+phase_field() {
+	local ticket="$1" phase="$2" field="$3"
+	jq -r ".${field}" "${ORCH_DIR}/workers/${ticket}/phase-${phase}.json"
+}
+
+# ─── CTL-509: git-activity liveness guard helpers ────────────────────────────
+#
+# make_worktree_commit TICKET AGE_SEC [ORCH_ID]
+# Build a real git worktree at ${SCRATCH}/wt/${ORCH_ID}-${TICKET} with one commit
+# whose committer date is AGE_SEC in the past, and point the healthcheck's
+# worktree-base override at ${SCRATCH}/wt. ORCH_ID in these tests is "demo".
+make_worktree_commit() {
+	local ticket="$1" age_sec="$2" orch_id="${3:-demo}"
+	local wt="${SCRATCH}/wt/${orch_id}-${ticket}"
+	mkdir -p "$wt"
+	git -C "$wt" init -q
+	git -C "$wt" config user.email t@t && git -C "$wt" config user.name t
+	echo x >"$wt/f"
+	git -C "$wt" add -A
+	local when
+	when=$(($(date -u +%s) - age_sec))
+	GIT_AUTHOR_DATE="@${when}" GIT_COMMITTER_DATE="@${when}" \
+		git -C "$wt" commit -q -m "c"
+	export CATALYST_HEALTHCHECK_WORKTREE_BASE="${SCRATCH}/wt"
+}
+
 echo "test (CTL-452): phase-mode worker with stale state.json marked stalled"
 scratch_setup
 make_phase_signal "T-A" "implement" "running" "bg-stale"
@@ -457,6 +484,133 @@ RC=$?
 REAPED=$(echo "$OUT" | jq -r '.reaped' 2>/dev/null || echo "")
 [ "$REAPED" = "0" ] && pass "summary.reaped=0 when watch-bg absent" || fail "summary.reaped=0 when watch-bg absent" "got: $REAPED; out: $OUT"
 unset CATALYST_WATCH_BG_BIN
+scratch_teardown
+
+# ─── CTL-509: git-activity liveness guard ────────────────────────────────────
+#
+# A live phase-implement worker that blocks in one long synchronous tool call
+# (bun install + a full test suite) stops touching its --bg state.json for
+# >15 min, so the stale-mtime branch falsely flags it. Before honoring a
+# state-json-stale flag, the healthcheck consults git commit recency on the
+# worker's worktree: a recent commit proves the worker is alive and the stall
+# is suppressed. Mirrors the execution-core JS guard (stalled-detector.mjs),
+# inactive in phase-agents mode. state-json-missing is NEVER guarded.
+
+echo "test (CTL-509): recent commit suppresses a stale-mtime stall"
+scratch_setup
+make_phase_signal "T-G" "implement" "running" "bg-stale-g"
+make_bg_state "bg-stale-g" "running" 1200 # 20 min — stale
+make_worktree_commit "T-G" 60            # committed 60s ago — alive
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-G" "implement")
+[ "$ST" = "running" ] && pass "recent commit → left running (not stalled)" || fail "recent commit → left running" "got: $ST"
+grep -q "worker-phase-stalled" "$STATE_LOG" && fail "no worker-phase-stalled for live worker" "log: $(cat "$STATE_LOG")" || pass "no worker-phase-stalled for live worker"
+unset CATALYST_HEALTHCHECK_WORKTREE_BASE
+scratch_teardown
+
+echo "test (CTL-509): old commit does not rescue a genuinely stuck worker"
+scratch_setup
+make_phase_signal "T-H" "implement" "running" "bg-stale-h"
+make_bg_state "bg-stale-h" "running" 1200
+make_worktree_commit "T-H" 1800 # 30 min ago — outside the 900s window
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-H" "implement")
+[ "$ST" = "stalled" ] && pass "old commit → still stalled" || fail "old commit → still stalled" "got: $ST"
+unset CATALYST_HEALTHCHECK_WORKTREE_BASE
+scratch_teardown
+
+echo "test (CTL-509): no worktree → falls through to stalled (graceful degradation)"
+scratch_setup
+make_phase_signal "T-I" "implement" "running" "bg-stale-i"
+make_bg_state "bg-stale-i" "running" 1200
+mkdir -p "${SCRATCH}/wt-empty" # base exists but has no demo-T-I subdir
+export CATALYST_HEALTHCHECK_WORKTREE_BASE="${SCRATCH}/wt-empty"
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-I" "implement")
+[ "$ST" = "stalled" ] && pass "no worktree → degrades to stalled" || fail "no worktree → degrades to stalled" "got: $ST"
+unset CATALYST_HEALTHCHECK_WORKTREE_BASE
+scratch_teardown
+
+echo "test (CTL-509): state-json-missing is never suppressed even with a recent commit"
+scratch_setup
+make_phase_signal "T-J" "implement" "running" "bg-missing-j"
+export CATALYST_HEALTHCHECK_JOBS_ROOT="${SCRATCH}/jobs" # exists, no per-job subdir
+mkdir -p "${SCRATCH}/jobs"
+make_worktree_commit "T-J" 60 # recent commit — but state.json is MISSING, not stale
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-J" "implement")
+AR=$(phase_field "T-J" "implement" "attentionReason")
+[ "$ST" = "stalled" ] && pass "missing state.json → stalled despite recent commit" || fail "missing state.json → stalled" "got: $ST"
+[ "$AR" = "state-json-missing" ] && pass "attentionReason=state-json-missing (not suppressed)" || fail "attentionReason=state-json-missing" "got: $AR"
+unset CATALYST_HEALTHCHECK_WORKTREE_BASE
+scratch_teardown
+
+echo "test (CTL-509): --no-git-guard disables suppression"
+scratch_setup
+make_phase_signal "T-K" "implement" "running" "bg-stale-k"
+make_bg_state "bg-stale-k" "running" 1200
+make_worktree_commit "T-K" 60
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 --no-git-guard >"${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-K" "implement")
+[ "$ST" = "stalled" ] && pass "--no-git-guard → stalled despite recent commit" || fail "--no-git-guard → stalled" "got: $ST"
+unset CATALYST_HEALTHCHECK_WORKTREE_BASE
+scratch_teardown
+
+echo "test (CTL-509): CATALYST_HEALTHCHECK_GIT_GUARD=0 disables suppression"
+scratch_setup
+make_phase_signal "T-L" "implement" "running" "bg-stale-l"
+make_bg_state "bg-stale-l" "running" 1200
+make_worktree_commit "T-L" 60
+CATALYST_HEALTHCHECK_GIT_GUARD=0 "$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-L" "implement")
+[ "$ST" = "stalled" ] && pass "GIT_GUARD=0 → stalled despite recent commit" || fail "GIT_GUARD=0 → stalled" "got: $ST"
+unset CATALYST_HEALTHCHECK_WORKTREE_BASE
+scratch_teardown
+
+echo "test (CTL-509): --git-activity-seconds tunes the window"
+scratch_setup
+make_phase_signal "T-M" "implement" "running" "bg-stale-m"
+make_bg_state "bg-stale-m" "running" 1200
+make_worktree_commit "T-M" 300 # 5 min ago
+# With a 120s window, the 300s-old commit is OUTSIDE the window → still stalled.
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 --git-activity-seconds 120 >"${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-M" "implement")
+[ "$ST" = "stalled" ] && pass "commit outside tuned window → stalled" || fail "commit outside tuned window → stalled" "got: $ST"
+unset CATALYST_HEALTHCHECK_WORKTREE_BASE
+scratch_teardown
+
+echo "test (CTL-509): suppression emits worker-phase-stale-suppressed, NOT worker-phase-stalled"
+scratch_setup
+make_phase_signal "T-N" "implement" "running" "bg-stale-n"
+make_bg_state "bg-stale-n" "running" 1200
+make_worktree_commit "T-N" 60
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+grep -q "worker-phase-stale-suppressed" "$STATE_LOG" && pass "emits worker-phase-stale-suppressed" || fail "emits worker-phase-stale-suppressed" "log: $(cat "$STATE_LOG")"
+grep -q "worker-phase-stalled" "$STATE_LOG" && fail "no worker-phase-stalled on suppression" "log: $(cat "$STATE_LOG")" || pass "no worker-phase-stalled on suppression"
+grep -q "attention demo .* T-N" "$STATE_LOG" && fail "no attention on suppression" "log: $(cat "$STATE_LOG")" || pass "no attention on suppression"
+unset CATALYST_HEALTHCHECK_WORKTREE_BASE
+scratch_teardown
+
+echo "test (CTL-509): summary JSON reports gitActiveSuppressed"
+scratch_setup
+make_phase_signal "T-O" "implement" "running" "bg-stale-o"
+make_bg_state "bg-stale-o" "running" 1200
+make_worktree_commit "T-O" 60
+OUT=$("$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 2>/dev/null)
+SUP=$(echo "$OUT" | jq -r '.gitActiveSuppressed' 2>/dev/null || echo "")
+[ "$SUP" = "1" ] && pass "summary.gitActiveSuppressed=1 for suppressed worker" || fail "summary.gitActiveSuppressed=1" "got: $SUP; out: $OUT"
+unset CATALYST_HEALTHCHECK_WORKTREE_BASE
+scratch_teardown
+
+echo "test (CTL-509): summary JSON reports gitActiveSuppressed=0 for a normal stall"
+scratch_setup
+make_phase_signal "T-P" "implement" "running" "bg-stale-p"
+make_bg_state "bg-stale-p" "running" 1200 # stale, no worktree configured → normal stall
+OUT=$("$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 2>/dev/null)
+SUP=$(echo "$OUT" | jq -r '.gitActiveSuppressed' 2>/dev/null || echo "")
+ST=$(phase_status "T-P" "implement")
+[ "$ST" = "stalled" ] && pass "normal stall still flagged (no worktree)" || fail "normal stall still flagged" "got: $ST"
+[ "$SUP" = "0" ] && pass "summary.gitActiveSuppressed=0 for normal stall" || fail "summary.gitActiveSuppressed=0" "got: $SUP; out: $OUT"
 scratch_teardown
 
 echo
