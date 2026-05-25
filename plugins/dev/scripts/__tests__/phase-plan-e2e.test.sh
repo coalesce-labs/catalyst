@@ -14,6 +14,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 SKILL="${REPO_ROOT}/plugins/dev/skills/phase-plan/SKILL.md"
 DISPATCH="${REPO_ROOT}/plugins/dev/scripts/phase-agent-dispatch"
+# shellcheck source=lib/linearis-stub.sh
+source "${SCRIPT_DIR}/lib/linearis-stub.sh"
 
 FAILURES=0
 PASSES=0
@@ -60,6 +62,12 @@ if [[ -f "$SKILL" ]]; then
   assert_not_contains "$BODY" "--transition planning" "body does NOT self-transition Linear (coordinator owns it, CTL-558)"
 
   assert_contains "$BODY" "/goal" "body declares a /goal block"
+
+  # CTL-632: Linear comment-mirror block must be present.
+  assert_contains "$BODY" "phase-plan-mirror" "body contains uniquely-named mirror fence"
+  assert_contains "$BODY" ".linear-mirror-" "body references the per-phase marker file"
+  assert_contains "$BODY" "linearis issues discuss" "body calls linearis issues discuss"
+  assert_contains "$BODY" "linearis discuss failed (continuing)" "body has fail-open warning string"
 fi
 
 # ─── E2E: dispatcher launches phase-plan when research doc present ─────────
@@ -132,6 +140,113 @@ RC=$?
 REFUSED=$(echo "$OUT" | jq -r '.status' 2>/dev/null || echo "")
 assert_eq "2" "$RC" "exit code 2 when research doc missing"
 assert_eq "refused" "$REFUSED" "stdout status = refused"
+
+# ─── CTL-632: Linear comment-mirror runtime exercises ────────────────────
+echo ""
+echo "Test 4: phase-plan mirror block — happy/fail-open/idempotent"
+
+MIRROR_BODY_FILE="${SCRATCH}/mirror-body.sh"
+awk '
+  /^```bash phase-plan-mirror$/ {capture=1; next}
+  /^```$/ {if (capture) {capture=0}}
+  capture { print }
+' "$SKILL" > "$MIRROR_BODY_FILE"
+
+if [[ -s "$MIRROR_BODY_FILE" ]]; then
+  pass "mirror block extractable from SKILL.md"
+else
+  fail "mirror block extractable" "no \`\`\`bash phase-plan-mirror\`\`\` fence found"
+fi
+
+run_mirror_case() {
+  local case_name="$1" stub_kind="$2" preseed_marker="${3:-}"
+  local case_dir="${SCRATCH}/mirror-${case_name}"
+  local worker_dir="${case_dir}/orch/workers/CTL-450"
+  local plan_doc="${case_dir}/plan.md"
+  local research_doc="${case_dir}/research.md"
+  mkdir -p "$case_dir/bin" "$worker_dir"
+
+  cat >"$plan_doc" <<'DOC'
+# Plan: CTL-450 — fixture plan title
+
+## Overview
+
+Stuff happens.
+
+## Phase 1 — first
+
+## Phase 2 — second
+DOC
+
+  cat >"$research_doc" <<'DOC'
+# Research: CTL-450
+DOC
+
+  if [[ "$stub_kind" == "ok" ]]; then
+    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+  else
+    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+  fi
+
+  if [[ -n "$preseed_marker" ]]; then
+    : > "$worker_dir/.linear-mirror-plan"
+  fi
+
+  PATH="$case_dir/bin:$PATH" \
+    ORCH_DIR="${case_dir}/orch" \
+    TICKET="CTL-450" \
+    PHASE="plan" \
+    PLAN_DOC="$plan_doc" \
+    RESEARCH_DOC="$research_doc" \
+    bash "$MIRROR_BODY_FILE" >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
+  echo "$?" > "$case_dir/exit-code"
+  echo "$case_dir"
+}
+
+CASE_A="$(run_mirror_case happy ok)"
+assert_eq "0" "$(cat "$CASE_A/exit-code")" "mirror happy: exit 0"
+LOG_A="$CASE_A/linearis-calls.log"
+if grep -q '^discuss$' "$LOG_A" 2>/dev/null; then
+  pass "mirror happy: discuss landed"
+else
+  fail "mirror happy: discuss" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+if grep -q 'Phase Plan' "$LOG_A" 2>/dev/null; then
+  pass "mirror happy: body contains 'Phase Plan' header"
+else
+  fail "mirror happy: header" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+if grep -q 'plan.md' "$LOG_A" 2>/dev/null; then
+  pass "mirror happy: body contains plan doc path"
+else
+  fail "mirror happy: plan path" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+if grep -q 'research.md' "$LOG_A" 2>/dev/null; then
+  pass "mirror happy: body contains research backlink"
+else
+  fail "mirror happy: research backlink" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+MARKER_A="$CASE_A/orch/workers/CTL-450/.linear-mirror-plan"
+[[ -e "$MARKER_A" ]] && pass "mirror happy: marker written" || fail "mirror happy: marker" "missing $MARKER_A"
+
+CASE_B="$(run_mirror_case failopen fail)"
+assert_eq "0" "$(cat "$CASE_B/exit-code")" "mirror fail-open: exit 0 (continue past failed post)"
+MARKER_B="$CASE_B/orch/workers/CTL-450/.linear-mirror-plan"
+[[ ! -e "$MARKER_B" ]] && pass "mirror fail-open: no marker on failed post" || fail "mirror fail-open: marker" "should not exist"
+if grep -q 'linearis discuss failed (continuing)' "$CASE_B/stderr.log" 2>/dev/null; then
+  pass "mirror fail-open: warning to stderr"
+else
+  fail "mirror fail-open: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_B/stderr.log" 2>/dev/null)")"
+fi
+
+CASE_C="$(run_mirror_case idempot ok seed)"
+assert_eq "0" "$(cat "$CASE_C/exit-code")" "mirror idempotent: exit 0"
+LOG_C="$CASE_C/linearis-calls.log"
+if [[ ! -f "$LOG_C" ]] || ! grep -q '^discuss$' "$LOG_C" 2>/dev/null; then
+  pass "mirror idempotent: discuss skipped"
+else
+  fail "mirror idempotent: discuss" "marker not honored"
+fi
 
 echo ""
 echo "─────────────────────────────────────────────"

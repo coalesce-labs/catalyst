@@ -174,7 +174,38 @@ TMP="${SIGNAL_FILE}.tmp.$$"
 jq --arg ts "$TS" --arg doc "$PLAN_DOC" \
   '.updatedAt = $ts | .artifact = $doc' \
   "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+```
 
+Mirror the phase output to Linear as a single comment (CTL-632). Fail-open
+and idempotent via the per-phase marker file. Uniquely-named fence so the
+e2e test can extract just this block.
+
+```bash phase-plan-mirror
+LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
+if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
+  PLAN_TITLE="$(awk '/^# /{print; exit}' "${PLAN_DOC}" | sed 's/^# //')"
+  PLAN_PHASES_COUNT="$(grep -c '^## Phase ' "${PLAN_DOC}" || true)"
+  : "${PLAN_PHASES_COUNT:=0}"
+  MIRROR_BODY="$(cat <<EOF
+**Phase Plan**
+
+- **Document**: \`${PLAN_DOC}\`
+- **Title**: ${PLAN_TITLE:-_untitled_}
+- **Phases**: ${PLAN_PHASES_COUNT}
+- **Research backlink**: \`${RESEARCH_DOC}\`
+
+_Posted automatically by phase-plan (CTL-632)._
+EOF
+)"
+  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+    : > "${LINEAR_MIRROR_MARKER}"
+  else
+    echo "phase-plan: linearis discuss failed (continuing)" >&2
+  fi
+fi
+```
+
+```bash
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete
 
