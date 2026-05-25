@@ -20,6 +20,7 @@ import {
   startScheduler,
   stopScheduler,
   reconcileAll,
+  createTicketStateCache,
 } from "./index.mjs";
 
 const DEFAULT_MAX_PARALLEL = 3;
@@ -81,14 +82,19 @@ export function startDaemon({
   // try/catch logs and process.exit(1)s as before.
   try {
     recover({ orchDir }); // CTL-539 — rebuild routing + worker state on boot
+    // CTL-634: one shared TTL state cache. The monitor write-through populates
+    // it on every state_changed event; the scheduler read path consults it
+    // during out-of-set blocker hydration. A single instance threaded into
+    // both is what turns a write-through into a guaranteed next-tick hit.
+    const cache = createTicketStateCache();
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
-    monitorFn({ orchDir }); // CTL-535 + CTL-565 — two-state trigger monitor
+    monitorFn({ orchDir, cache }); // CTL-535 + CTL-565 + CTL-634
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
-    schedulerFn({ orchDir }); // CTL-536 — pull-loop scheduler
+    schedulerFn({ orchDir, cache }); // CTL-536 + CTL-634 — pull-loop scheduler
 
     if (watchRegistry) {
       // Watch the execution-core dir for registry.json changes — the registry is

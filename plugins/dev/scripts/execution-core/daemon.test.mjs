@@ -48,6 +48,27 @@ describe("startDaemon", () => {
     expect(calls[0][1]).toBe(calls[2][1]);
   });
 
+  // CTL-634: one cache instance is created in startDaemon and threaded into
+  // BOTH composed boots, so the monitor's write-through and the scheduler's
+  // read path share state. Capture each boot's `cache` arg and assert identity.
+  test("constructs one cache and passes the SAME instance to monitor and scheduler", () => {
+    let monitorCache;
+    let schedulerCache;
+    startDaemon({
+      recover: () => {},
+      startMonitor: (o) => {
+        monitorCache = o.cache;
+      },
+      startScheduler: (o) => {
+        schedulerCache = o.cache;
+      },
+      watchRegistry: false,
+    });
+    expect(monitorCache).toBeDefined();
+    expect(typeof monitorCache.get).toBe("function"); // it's a cache instance
+    expect(schedulerCache).toBe(monitorCache); // same instance, not two
+  });
+
   test("ensures a machine-level state.json with a default maxParallel", () => {
     startDaemon({
       recover: () => {},
