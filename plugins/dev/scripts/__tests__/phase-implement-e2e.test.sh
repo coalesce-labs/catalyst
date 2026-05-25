@@ -35,6 +35,8 @@ PHASE_DISPATCH="${REPO_ROOT}/plugins/dev/scripts/phase-agent-dispatch"
 SKILL_IMPLEMENT="${REPO_ROOT}/plugins/dev/skills/phase-implement/SKILL.md"
 SKILL_PR="${REPO_ROOT}/plugins/dev/skills/phase-pr/SKILL.md"
 SKILL_MONITOR_MERGE="${REPO_ROOT}/plugins/dev/skills/phase-monitor-merge/SKILL.md"
+# shellcheck source=lib/linearis-stub.sh
+source "${SCRIPT_DIR}/lib/linearis-stub.sh"
 
 FAILURES=0
 PASSES=0
@@ -431,6 +433,189 @@ SIGNAL_STATUS=$(jq -r '.status' "$SIGNAL_T10")
 SIGNAL_HANDOFF=$(jq -r '.handoffPath' "$SIGNAL_T10")
 assert_eq "turn-cap-exhausted" "$SIGNAL_STATUS" "per-phase signal status = turn-cap-exhausted"
 assert_eq "$HANDOFF_T10" "$SIGNAL_HANDOFF" "per-phase signal .handoffPath set"
+
+# ─── Test 11 (CTL-632): phase-implement Linear comment-mirror block ──────
+echo ""
+echo "Test 11 (CTL-632): phase-implement contract — mirror block present"
+if [[ -f "$SKILL_IMPLEMENT" ]]; then
+  assert_grep 'phase-implement-mirror' "$SKILL_IMPLEMENT" "body contains uniquely-named mirror fence"
+  assert_grep '\.linear-mirror-' "$SKILL_IMPLEMENT" "body references the per-phase marker file"
+  assert_grep 'linearis issues discuss' "$SKILL_IMPLEMENT" "body calls linearis issues discuss"
+  assert_grep 'linearis discuss failed \(continuing\)' "$SKILL_IMPLEMENT" "body has fail-open warning string"
+fi
+
+# ─── Test 12 (CTL-632): runtime mirror exercises ──────────────────────────
+echo ""
+echo "Test 12 (CTL-632): phase-implement mirror — happy/fail-open/idempotent/no-base"
+
+MIRROR_BODY_FILE="${SCRATCH}/mirror-body.sh"
+awk '
+  /^```bash phase-implement-mirror$/ {capture=1; next}
+  /^```$/ {if (capture) {capture=0}}
+  capture { print }
+' "$SKILL_IMPLEMENT" > "$MIRROR_BODY_FILE"
+
+if [[ -s "$MIRROR_BODY_FILE" ]]; then
+  pass "mirror block extractable from SKILL.md"
+else
+  fail "mirror block extractable — no \`\`\`bash phase-implement-mirror\`\`\` fence found"
+fi
+
+# Build a throwaway git repo so the mirror block's git rev-parse / merge-base
+# / log / diff calls have something to operate on.
+build_git_fixture() {
+  local repo_dir="$1" with_base="${2:-yes}"
+  mkdir -p "$repo_dir"
+  (
+    cd "$repo_dir" || exit 1
+    git init --quiet --initial-branch=main
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    echo "base" > base.txt
+    git add base.txt
+    git commit --quiet -m "base commit"
+    if [[ "$with_base" == "yes" ]]; then
+      # Set up an origin/main ref that lags behind, so the mirror's
+      # BASE_REF fallback chain works (try origin/main first).
+      git update-ref refs/remotes/origin/main HEAD
+    fi
+    # Make a feature commit on top so HEAD..origin/main is non-empty.
+    git checkout --quiet -b feature
+    echo "change one" > a.txt
+    git add a.txt
+    git commit --quiet -m "feat: first commit"
+    echo "change two" > b.txt
+    git add b.txt
+    git commit --quiet -m "feat: second commit"
+  )
+}
+
+run_implement_mirror() {
+  local case_name="$1" stub_kind="$2" preseed_marker="${3:-}" git_base="${4:-yes}"
+  local case_dir="${SCRATCH}/imp-mirror-${case_name}"
+  local worker_dir="${case_dir}/orch/workers/CTL-449"
+  local repo_dir="${case_dir}/repo"
+  mkdir -p "$case_dir/bin" "$worker_dir"
+
+  build_git_fixture "$repo_dir" "$git_base"
+
+  if [[ "$stub_kind" == "ok" ]]; then
+    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+  else
+    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+  fi
+
+  if [[ -n "$preseed_marker" ]]; then
+    : > "$worker_dir/.linear-mirror-implement"
+  fi
+
+  (
+    cd "$repo_dir" || exit 1
+    PATH="$case_dir/bin:$PATH" \
+      ORCH_DIR="${case_dir}/orch" \
+      TICKET="CTL-449" \
+      PHASE="implement" \
+      bash "$MIRROR_BODY_FILE" >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
+    echo "$?" > "$case_dir/exit-code"
+  )
+  echo "$case_dir"
+}
+
+# Case A: happy — git fixture has origin/main, two commits on feature.
+CASE_A="$(run_implement_mirror happy ok '' yes)"
+assert_eq "0" "$(cat "$CASE_A/exit-code")" "mirror-implement happy: exit 0"
+LOG_A="$CASE_A/linearis-calls.log"
+if grep -q '^discuss$' "$LOG_A" 2>/dev/null; then
+  pass "mirror-implement happy: discuss landed"
+else
+  fail "mirror-implement happy: discuss" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+if grep -q 'Phase Implement' "$LOG_A" 2>/dev/null; then
+  pass "mirror-implement happy: body contains 'Phase Implement' header"
+else
+  fail "mirror-implement happy: header" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+if grep -qE 'feat: (first|second) commit' "$LOG_A" 2>/dev/null; then
+  pass "mirror-implement happy: body contains commit subjects"
+else
+  fail "mirror-implement happy: commit subjects" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+if grep -qE '(Branch|feature)' "$LOG_A" 2>/dev/null; then
+  pass "mirror-implement happy: body contains branch name"
+else
+  fail "mirror-implement happy: branch" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+MARKER_A="$CASE_A/orch/workers/CTL-449/.linear-mirror-implement"
+[[ -e "$MARKER_A" ]] && pass "mirror-implement happy: marker written" || fail "marker missing $MARKER_A"
+
+# Case B: fail-open.
+CASE_B="$(run_implement_mirror failopen fail '' yes)"
+assert_eq "0" "$(cat "$CASE_B/exit-code")" "mirror-implement fail-open: exit 0"
+MARKER_B="$CASE_B/orch/workers/CTL-449/.linear-mirror-implement"
+[[ ! -e "$MARKER_B" ]] && pass "mirror-implement fail-open: no marker" || fail "marker should not exist"
+if grep -q 'linearis discuss failed (continuing)' "$CASE_B/stderr.log" 2>/dev/null; then
+  pass "mirror-implement fail-open: warning to stderr"
+else
+  fail "mirror-implement fail-open: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_B/stderr.log" 2>/dev/null)")"
+fi
+
+# Case C: idempotent.
+CASE_C="$(run_implement_mirror idempot ok seed yes)"
+assert_eq "0" "$(cat "$CASE_C/exit-code")" "mirror-implement idempotent: exit 0"
+LOG_C="$CASE_C/linearis-calls.log"
+if [[ ! -f "$LOG_C" ]] || ! grep -q '^discuss$' "$LOG_C" 2>/dev/null; then
+  pass "mirror-implement idempotent: discuss skipped"
+else
+  fail "mirror-implement idempotent: discuss" "marker not honored"
+fi
+
+# Case D: no-base-branch — fixture omits origin/main; delete main too so the
+# block falls through to the `_base branch unknown_` arm. The mirror block must
+# still post (the plan picks the "post anyway" arm).
+build_git_fixture_no_base() {
+  local repo_dir="$1"
+  mkdir -p "$repo_dir"
+  (
+    cd "$repo_dir" || exit 1
+    git init --quiet --initial-branch=feature
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    echo "x" > x.txt
+    git add x.txt
+    git commit --quiet -m "feat: solo commit"
+    # No main, no origin/main.
+  )
+}
+
+CASE_D_DIR="${SCRATCH}/imp-mirror-nobase"
+WORKER_D="${CASE_D_DIR}/orch/workers/CTL-449"
+REPO_D="${CASE_D_DIR}/repo"
+mkdir -p "$CASE_D_DIR/bin" "$WORKER_D"
+build_git_fixture_no_base "$REPO_D"
+linearis_stub_install "$CASE_D_DIR/bin" "$CASE_D_DIR/linearis-calls.log"
+
+(
+  cd "$REPO_D" || exit 1
+  PATH="$CASE_D_DIR/bin:$PATH" \
+    ORCH_DIR="${CASE_D_DIR}/orch" \
+    TICKET="CTL-449" \
+    PHASE="implement" \
+    bash "$MIRROR_BODY_FILE" >"$CASE_D_DIR/stdout.log" 2>"$CASE_D_DIR/stderr.log"
+  echo "$?" > "$CASE_D_DIR/exit-code"
+)
+
+assert_eq "0" "$(cat "$CASE_D_DIR/exit-code")" "mirror-implement no-base: exit 0"
+LOG_D="$CASE_D_DIR/linearis-calls.log"
+if grep -q '^discuss$' "$LOG_D" 2>/dev/null; then
+  pass "mirror-implement no-base: still posts (the chosen arm)"
+else
+  fail "mirror-implement no-base: discuss" "log:$(printf '\n%s' "$(cat "$LOG_D" 2>/dev/null)")"
+fi
+if grep -q '_base branch unknown_' "$LOG_D" 2>/dev/null; then
+  pass "mirror-implement no-base: body renders fallback marker"
+else
+  fail "mirror-implement no-base: fallback" "log:$(printf '\n%s' "$(cat "$LOG_D" 2>/dev/null)")"
+fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""

@@ -21,6 +21,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 SKILL_FILE="${REPO_ROOT}/plugins/dev/skills/phase-triage/SKILL.md"
 EMIT_HELPER="${REPO_ROOT}/plugins/dev/scripts/lib/phase-emit-complete.sh"
+# CTL-632 Phase 6 refactor: adopt the shared linearis-stub helper.
+# shellcheck source=lib/linearis-stub.sh
+source "${SCRIPT_DIR}/lib/linearis-stub.sh"
 
 PASS=0
 FAIL=0
@@ -86,39 +89,8 @@ run_case() {
 	local case_dir="$TMPROOT/$case_name"
 	mkdir -p "$case_dir/bin"
 
-	# Build the `linearis` stub.
-	cat >"$case_dir/bin/linearis" <<EOF
-#!/usr/bin/env bash
-LOG="$case_dir/linearis-calls.log"
-case "\$1" in
-  issues)
-    case "\$2" in
-      read)
-        printf '%s\n' "\$@" >> "\$LOG"
-        cat "$fixture"
-        ;;
-      discuss)
-        printf '%s\n' "\$@" >> "\$LOG"
-        # Mirror linearis: return JSON-ish "ok"
-        echo '{"ok": true, "kind": "discuss"}'
-        ;;
-      update)
-        printf '%s\n' "\$@" >> "\$LOG"
-        echo '{"ok": true, "kind": "update"}'
-        ;;
-      *)
-        printf 'linearis stub: unsupported issues subcommand: %s\n' "\$2" >&2
-        exit 2
-        ;;
-    esac
-    ;;
-  *)
-    printf 'linearis stub: unsupported domain: %s\n' "\$1" >&2
-    exit 2
-    ;;
-esac
-EOF
-	chmod +x "$case_dir/bin/linearis"
+	# CTL-632: use the shared helper instead of inlining the stub body.
+	linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log" "$fixture"
 
 	# Run the skill body with the stub on PATH.
 	local events_file="$case_dir/events.jsonl"

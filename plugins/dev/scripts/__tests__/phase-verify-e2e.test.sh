@@ -23,6 +23,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 SKILL="${REPO_ROOT}/plugins/dev/skills/phase-verify/SKILL.md"
 DISPATCH="${REPO_ROOT}/plugins/dev/scripts/phase-agent-dispatch"
+# shellcheck source=lib/linearis-stub.sh
+source "${SCRIPT_DIR}/lib/linearis-stub.sh"
 
 FAILURES=0
 PASSES=0
@@ -83,6 +85,12 @@ if [[ -f "$SKILL" ]]; then
   assert_not_contains "$BODY" "--transition verifying" "body does NOT self-transition Linear (coordinator owns it, CTL-558)"
 
   assert_contains "$BODY" "/goal" "body declares a /goal block"
+
+  # CTL-632: Linear comment-mirror block must be present.
+  assert_contains "$BODY" "phase-verify-mirror" "body contains uniquely-named mirror fence"
+  assert_contains "$BODY" ".linear-mirror-" "body references the per-phase marker file"
+  assert_contains "$BODY" "linearis issues discuss" "body calls linearis issues discuss"
+  assert_contains "$BODY" "linearis discuss failed (continuing)" "body has fail-open warning string"
 fi
 
 # ─── E2E: dispatcher launches phase-verify when phase-implement.json exists ─
@@ -148,6 +156,125 @@ RC=$?
 REFUSED=$(echo "$OUT" | jq -r '.status' 2>/dev/null || echo "")
 assert_eq "2" "$RC" "exit code 2 when phase-implement.json missing"
 assert_eq "refused" "$REFUSED" "stdout status = refused"
+
+# ─── CTL-632: Linear comment-mirror runtime exercises ────────────────────
+echo ""
+echo "Test 4: phase-verify mirror block — happy/fail-open/idempotent/findings-render"
+
+MIRROR_BODY_FILE="${SCRATCH}/mirror-body.sh"
+awk '
+  /^```bash phase-verify-mirror$/ {capture=1; next}
+  /^```$/ {if (capture) {capture=0}}
+  capture { print }
+' "$SKILL" > "$MIRROR_BODY_FILE"
+
+if [[ -s "$MIRROR_BODY_FILE" ]]; then
+  pass "mirror block extractable from SKILL.md"
+else
+  fail "mirror block extractable — no \`\`\`bash phase-verify-mirror\`\`\` fence found"
+fi
+
+run_verify_mirror() {
+  local case_name="$1" stub_kind="$2" gates_json="$3" findings_json="$4" \
+        regression_risk="$5" tests_attempted="$6" preseed_marker="${7:-}"
+  local case_dir="${SCRATCH}/verify-mirror-${case_name}"
+  local worker_dir="${case_dir}/orch/workers/CTL-450"
+  mkdir -p "$case_dir/bin" "$worker_dir"
+
+  if [[ "$stub_kind" == "ok" ]]; then
+    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+  else
+    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+  fi
+
+  if [[ -n "$preseed_marker" ]]; then
+    : > "$worker_dir/.linear-mirror-verify"
+  fi
+
+  PATH="$case_dir/bin:$PATH" \
+    ORCH_DIR="${case_dir}/orch" \
+    TICKET="CTL-450" \
+    PHASE="verify" \
+    GATES_JSON="$gates_json" \
+    FINDINGS_JSON="$findings_json" \
+    REGRESSION_RISK="$regression_risk" \
+    TESTS_ATTEMPTED="$tests_attempted" \
+    ARTIFACT="${worker_dir}/verify.json" \
+    bash "$MIRROR_BODY_FILE" >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
+  echo "$?" > "$case_dir/exit-code"
+  echo "$case_dir"
+}
+
+GATES_PASS='{"tsc":{"status":"pass","summary":"clean"},"tests":{"status":"pass","summary":"42/42"},"lint":{"status":"skipped"}}'
+GATES_FAIL='{"tsc":{"status":"fail","summary":"3 errors"},"tests":{"status":"pass"}}'
+FINDINGS_EMPTY='[]'
+FINDINGS_TWO='[{"severity":"high","kind":"type","file":"a.ts","line":1,"message":"x"},{"severity":"low","kind":"lint","file":"b.ts","line":2,"message":"y"}]'
+
+# Case A: happy — pass gates, no findings.
+CASE_A="$(run_verify_mirror happy ok "$GATES_PASS" "$FINDINGS_EMPTY" 2 1)"
+assert_eq "0" "$(cat "$CASE_A/exit-code")" "mirror-verify happy: exit 0"
+LOG_A="$CASE_A/linearis-calls.log"
+if grep -q '^discuss$' "$LOG_A" 2>/dev/null; then
+  pass "mirror-verify happy: discuss landed"
+else
+  fail "mirror-verify happy: discuss" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+if grep -q 'Phase Verify' "$LOG_A" 2>/dev/null; then
+  pass "mirror-verify happy: body has 'Phase Verify' header"
+else
+  fail "mirror-verify happy: header" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+if grep -qE 'Regression risk.*2' "$LOG_A" 2>/dev/null; then
+  pass "mirror-verify happy: regression risk rendered"
+else
+  fail "mirror-verify happy: regression_risk" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+# All three gates referenced in body.
+for g in tsc tests lint; do
+  if grep -qE "\\*\\*${g}\\*\\*" "$LOG_A" 2>/dev/null; then
+    pass "mirror-verify happy: gate '$g' in body"
+  else
+    fail "mirror-verify happy: gate '$g'" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+  fi
+done
+MARKER_A="$CASE_A/orch/workers/CTL-450/.linear-mirror-verify"
+[[ -e "$MARKER_A" ]] && pass "mirror-verify happy: marker written" || fail "marker missing $MARKER_A"
+
+# Case B: fail-open.
+CASE_B="$(run_verify_mirror failopen fail "$GATES_PASS" "$FINDINGS_EMPTY" 0 0)"
+assert_eq "0" "$(cat "$CASE_B/exit-code")" "mirror-verify fail-open: exit 0"
+MARKER_B="$CASE_B/orch/workers/CTL-450/.linear-mirror-verify"
+[[ ! -e "$MARKER_B" ]] && pass "mirror-verify fail-open: no marker" || fail "marker should not exist"
+if grep -q 'linearis discuss failed (continuing)' "$CASE_B/stderr.log" 2>/dev/null; then
+  pass "mirror-verify fail-open: warning"
+else
+  fail "mirror-verify fail-open: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_B/stderr.log" 2>/dev/null)")"
+fi
+
+# Case C: idempotent.
+CASE_C="$(run_verify_mirror idempot ok "$GATES_PASS" "$FINDINGS_EMPTY" 0 0 seed)"
+assert_eq "0" "$(cat "$CASE_C/exit-code")" "mirror-verify idempotent: exit 0"
+LOG_C="$CASE_C/linearis-calls.log"
+if [[ ! -f "$LOG_C" ]] || ! grep -q '^discuss$' "$LOG_C" 2>/dev/null; then
+  pass "mirror-verify idempotent: discuss skipped"
+else
+  fail "mirror-verify idempotent: discuss" "marker not honored"
+fi
+
+# Case D: findings-render — 2 findings, both severities surfaced + full JSON in details.
+CASE_D="$(run_verify_mirror findings ok "$GATES_FAIL" "$FINDINGS_TWO" 8 0)"
+assert_eq "0" "$(cat "$CASE_D/exit-code")" "mirror-verify findings: exit 0"
+LOG_D="$CASE_D/linearis-calls.log"
+if grep -q 'high' "$LOG_D" 2>/dev/null && grep -q 'low' "$LOG_D" 2>/dev/null; then
+  pass "mirror-verify findings: both severity strings present"
+else
+  fail "mirror-verify findings: severities" "log:$(printf '\n%s' "$(cat "$LOG_D" 2>/dev/null)")"
+fi
+if grep -q '<details>' "$LOG_D" 2>/dev/null && grep -qE 'a\.ts|b\.ts' "$LOG_D" 2>/dev/null; then
+  pass "mirror-verify findings: full JSON in <details>"
+else
+  fail "mirror-verify findings: details JSON" "log:$(printf '\n%s' "$(cat "$LOG_D" 2>/dev/null)")"
+fi
 
 echo ""
 echo "─────────────────────────────────────────────"

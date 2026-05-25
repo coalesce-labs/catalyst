@@ -198,7 +198,69 @@ TMP="${SIGNAL_FILE}.tmp.$$"
 jq --arg ts "$TS" --arg artifact "$ARTIFACT" \
   '.updatedAt = $ts | .artifact = $artifact' \
   "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+```
 
+Mirror the phase output to Linear as a single comment (CTL-632). Renders
+the PASS/FAIL result label, findings-by-severity, remediation commit SHA,
+and the full findings JSON inside a `<details>` block. Body is
+hard-truncated to 30,000 bytes. Fail-open and idempotent via the
+per-phase marker file.
+
+```bash phase-review-mirror
+LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
+if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
+  if [[ "${REVIEW_PASSED}" == "true" ]]; then
+    RESULT_LABEL="PASS"
+  else
+    RESULT_LABEL="FAIL"
+  fi
+  FINDINGS_COUNT="$(printf '%s' "${REVIEW_FINDINGS_JSON}" | jq -r 'length' 2>/dev/null || echo 0)"
+  FINDINGS_BY_SEVERITY="$(printf '%s' "${REVIEW_FINDINGS_JSON}" | jq -r '
+    group_by(.severity)
+    | map("- " + (.[0].severity // "unknown") + ": " + (length|tostring))
+    | join("\n")' 2>/dev/null)"
+  FINDINGS_PRETTY="$(printf '%s' "${REVIEW_FINDINGS_JSON}" | jq -r '.' 2>/dev/null)"
+  if [[ -n "${REMEDIATION_SHA}" ]]; then
+    REMEDIATION_LINE="- **Remediation commit**: \`${REMEDIATION_SHA}\`"
+  else
+    REMEDIATION_LINE="- **Remediation commit**: _none_"
+  fi
+  MIRROR_BODY="$(cat <<EOF
+**Phase Review**
+
+- **Result**: ${RESULT_LABEL}
+- **Findings**: ${FINDINGS_COUNT}
+${REMEDIATION_LINE}
+
+**Findings by severity**:
+${FINDINGS_BY_SEVERITY:-_none_}
+
+<details>
+<summary>Full findings JSON</summary>
+
+\`\`\`json
+${FINDINGS_PRETTY}
+\`\`\`
+
+</details>
+
+_Posted automatically by phase-review (CTL-632)._
+EOF
+)"
+  if [[ ${#MIRROR_BODY} -gt 30000 ]]; then
+    MIRROR_BODY="${MIRROR_BODY:0:30000}
+
+_... (truncated)_"
+  fi
+  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+    : > "${LINEAR_MIRROR_MARKER}"
+  else
+    echo "phase-review: linearis discuss failed (continuing)" >&2
+  fi
+fi
+```
+
+```bash
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete
 
