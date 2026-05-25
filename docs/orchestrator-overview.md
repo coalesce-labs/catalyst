@@ -204,6 +204,16 @@ sequenceDiagram
    - mtime older than `--stale-bg-seconds` (default 900s) AND `.state` not in
      `{done, failed, errored, stopped}` → `STALL_REASON="state-json-stale"`
 
+   A **git-activity liveness guard** (CTL-509) protects the `state-json-stale`
+   branch: before flagging, it reads the worker worktree's most-recent commit
+   timestamp and, if it is newer than `--git-activity-seconds` (defaults to
+   `--stale-bg-seconds`), suppresses the stall (signal left `running`, a
+   `worker-phase-stale-suppressed` event logged, `gitActiveSuppressed` bumped in
+   the summary). This mirrors the execution-core `stalled-detector.mjs` guard
+   (inactive in phase-agents mode) so a live worker blocked in one long tool call
+   is not falsely re-dispatched. It never guards `state-json-missing` and is
+   opt-out via `--no-git-guard` / `CATALYST_HEALTHCHECK_GIT_GUARD=0`.
+
 Revive budget: the top-level `workers/<TICKET>.json` carries `.reviveCount`. When
 `reviveCount >= MAX_REVIVES` (default 10), the worker is marked `stalled` with
 `attentionReason="revive-budget-exhausted"`.
