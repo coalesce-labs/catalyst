@@ -1,3 +1,4 @@
+<!-- CTL tracer bullet: 2026-05-25 — verifies execution-core pickup -->
 # Orchestrator Overview
 
 How a Catalyst orchestrator runs today (post-CTL-452, post-2026-05-17 ship). This doc
