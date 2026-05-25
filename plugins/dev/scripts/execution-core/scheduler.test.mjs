@@ -1460,3 +1460,77 @@ describe("startScheduler — preflight wiring (CTL-585)", () => {
     expect(Array.isArray(calls[0].teams)).toBe(true);
   });
 });
+
+// ── CTL-597: terminal-Done once-marker (.terminal-done.applied) ──
+
+describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
+  // Helper consistent with the existing suites: a writeStatus whose label/phase
+  // writes are no-ops; only applyTerminalDone is the subject under test.
+  function terminalNoWrites() {
+    return { applyPhaseStatus() {}, applyLabel() {} };
+  }
+
+  test("does not re-write terminal Done once the .terminal-done.applied marker exists", () => {
+    writeSignal("CTL-20", "monitor-deploy", "done");
+    writeFileSync(
+      join(orchDir, "workers", "CTL-20", ".terminal-done.applied"),
+      ""
+    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dones = [];
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: (a) => dones.push(a),
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    // Marker present → applyTerminalDone (and its Linear read) is never called.
+    expect(dones).toHaveLength(0);
+  });
+
+  test("writes the .terminal-done.applied marker only after applyTerminalDone reports applied:true", () => {
+    writeSignal("CTL-21", "monitor-deploy", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const markerPath = join(orchDir, "workers", "CTL-21", ".terminal-done.applied");
+    // applied:false → no marker → retried next tick.
+    const failWrite = { ...terminalNoWrites(), applyTerminalDone: () => ({ applied: false }) };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus: failWrite });
+    expect(existsSync(markerPath)).toBe(false);
+    // applied:true → marker written → not retried.
+    const okWrite = { ...terminalNoWrites(), applyTerminalDone: () => ({ applied: true }) };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus: okWrite });
+    expect(existsSync(markerPath)).toBe(true);
+  });
+
+  test("fires applyTerminalDone once across ticks (skipped is also terminal, CTL-589)", () => {
+    writeSignal("CTL-22", "monitor-deploy", "skipped");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    let count = 0;
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: () => {
+        count++;
+        return { applied: true };
+      },
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(count).toBe(1);
+    expect(existsSync(join(orchDir, "workers", "CTL-22", ".terminal-done.applied"))).toBe(true);
+  });
+
+  test("a terminal-Done write throw never aborts the tick", () => {
+    writeSignal("CTL-23", "monitor-deploy", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const writeStatus = {
+      ...terminalNoWrites(),
+      applyTerminalDone: () => {
+        throw new Error("terminal boom");
+      },
+    };
+    expect(() =>
+      schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus })
+    ).not.toThrow();
+    // No marker on a thrown apply → retried next tick.
+    expect(existsSync(join(orchDir, "workers", "CTL-23", ".terminal-done.applied"))).toBe(false);
+  });
+});

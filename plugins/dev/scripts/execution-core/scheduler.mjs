@@ -425,6 +425,36 @@ function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
   }
 }
 
+// terminalDoneOnce — write the terminal `Done` Linear state for a ticket at
+// most once for the run's lifetime (CTL-597). The terminal sweep revisits every
+// started worker dir each tick, and applyTerminalDone → linear-transition.sh
+// does an unconditional `linearis issues read` before it can decide the state
+// already matches — so without a guard every terminal dir burns one Linear API
+// read per tick, exhausting the rate-limit cap. A once-marker at
+// workers/<T>/.terminal-done.applied (restart-safe — persists with the worker
+// dir) records a confirmed apply, mirroring labelOnce / teardownWorktreeOnce.
+// Best-effort: any throw is logged and swallowed, never aborting the tick.
+function terminalDoneOnce(orchDir, ticket, writeStatus) {
+  const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
+  if (existsSync(marker)) return;
+  try {
+    const res = writeStatus.applyTerminalDone({ ticket });
+    // Write the marker only on a confirmed apply — a failed write is retried
+    // next tick. Note applyTerminalDone returns applied:true even for the
+    // already-Done `action:"skipped"` outcome, so the marker lands on the first
+    // confirming tick. A fake that returns undefined (test stubs) is treated as
+    // success so the once-semantics stay testable without a real result.
+    if (res === undefined || res?.applied) {
+      writeFileSync(marker, "");
+    }
+  } catch (err) {
+    log.warn(
+      { ticket, err: err.message },
+      "scheduler: terminal-Done write-back threw — continuing tick",
+    );
+  }
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558) + worktree teardown (CTL-582). Idempotent
 // and restart-safe — derives every action from filesystem state. `exec` is the
@@ -549,7 +579,8 @@ export function schedulerTick(
     // isTicketInFlight gate at line ~93. Without this, the ticket lingers
     // at `PR` in Linear and the worktree leaks on disk indefinitely.
     if (signals["monitor-deploy"] === "done" || signals["monitor-deploy"] === "skipped") {
-      safeWrite(() => writeStatus.applyTerminalDone({ ticket }), { ticket });
+      // CTL-597: once-marker guards the per-tick Linear read (was safeWrite-only).
+      terminalDoneOnce(orchDir, ticket, writeStatus);
       // CTL-582: the ticket reached terminal Done — tear down its worktree.
       teardownWorktreeOnce(orchDir, ticket, teardownWorktree);
     }
