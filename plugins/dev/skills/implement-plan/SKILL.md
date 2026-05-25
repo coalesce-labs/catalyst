@@ -79,6 +79,12 @@ Once you have a plan path:
 - **Extract ticket from plan frontmatter** (`source_ticket` field) and update Linear state
   to `stateMap.inProgress` from config using Linearis CLI (run `linearis issues usage` for syntax).
   If Linearis CLI is not available, skip silently and continue implementation.
+  **Skip the status transition when `CATALYST_PHASE` is set** — under a phase agent
+  (e.g. `phase-implement`, or this skill invoked as a sub-task from `phase-pr` /
+  `phase-monitor-merge` during PR resolution / CI fix-up loops) the deterministic
+  coordinator (CTL-558) owns the Linear status write-back. A direct write here
+  would regress the ticket from `PR` back to `Implement`, producing operator-visible
+  state flicker (CTL-601). Mirrors the gate in `create-pr/SKILL.md:227-232`.
 - Think deeply about how the pieces fit together
 - Create a todo list to track your progress
 - Start implementing if you understand what needs to be done
@@ -388,4 +394,9 @@ If a ticket is detected (from plan document's `source_ticket` frontmatter or fro
 
 - **At implementation start** (Step 3): Update ticket status to `stateMap.inProgress` from config
   using Linearis CLI (run `linearis issues usage` for syntax).
+- **Skip the status transition when `CATALYST_PHASE` is set** — the deterministic coordinator
+  (CTL-558) owns Linear write-back under phase agents. See the gate at Step 3 above for
+  details. CTL-601 — without this gate, invoking this skill as a sub-task from another phase
+  agent (typical in `phase-pr` / `phase-monitor-merge` resolution loops) regresses the ticket
+  state to `Implement` and produces operator-visible flicker.
 - If Linearis CLI not available, skip silently and continue implementation
