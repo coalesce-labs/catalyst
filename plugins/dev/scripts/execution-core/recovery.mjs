@@ -30,6 +30,15 @@ import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { WORK_DONE_PROBES, hasProbe } from "./work-done-probes.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
+// CTL-638: pull the once-marker + per-(ticket, phase) cool-down primitives
+// from the shared leaf module. labelOnce is the same guard CTL-585 introduced
+// for scheduler.mjs's `needs-human` path — pre-CTL-638 the recovery sweep's
+// escalation call bypassed it entirely.
+import {
+  labelOnce,
+  inEscalationCooldown as defaultInEscalationCooldown,
+  recordEscalation as defaultRecordEscalation,
+} from "./label-guard.mjs";
 import {
   countReviveEvents as defaultCountReviveEvents,
   countDistinctRevivingTickets as defaultCountDistinctRevivingTickets,
@@ -316,23 +325,31 @@ export function defaultReviveDispatch({ orchDir, ticket, phase }, { dispatch = d
   return dispatch({ orchDir, ticket, phase });
 }
 
-// defaultApplyStalledLabel — apply the flat `needs-human` label via the
-// CTL-587-enhanced applyLabel (which reads back to verify the write landed,
-// closing the silent-success gap per memory project_linear_transition_silent_success).
-// Logs the `reason` discriminator on failure so operators see WHY the label
-// didn't land (rate limit, API shape change, exec exception) — not just that
-// it didn't. The escalation path returns 'escalated' regardless; the next
-// scheduler tick re-runs this function via labelOnce semantics (no marker is
-// written on applied:false, so retry naturally occurs).
-function defaultApplyStalledLabel({ ticket }) {
-  const res = defaultApplyLabel({ ticket, label: "needs-human" });
-  if (!res?.applied) {
-    log.warn(
-      { ticket, reason: res?.reason },
-      "ctl-587: needs-human label not confirmed on escalation — operator may miss this ticket until retry lands",
-    );
-  }
-  return res;
+// defaultApplyStalledLabel — apply the flat `needs-human` label through the
+// CTL-585 `labelOnce` guard (CTL-638). The pre-CTL-638 implementation called
+// `applyLabel` directly; the comment then claimed "the next scheduler tick
+// re-runs this function via labelOnce semantics" but no labelOnce wrapper
+// existed on this path — the recovery sweep's three escalation call sites
+// (no-probe-for-phase, non-implement-not-done, revive-budget-exhausted) all
+// bypassed CTL-585's marker-file guard. On a rate-limit, applyLabel returned
+// applied:false → no marker written → every scheduler tick (debounced to 2s
+// by the event-log fast path) re-fired the write, exhausting Linear's 2,500/hr
+// quota at ~28 writes/min.
+//
+// Routing through labelOnce gives this path the same once-per-daemon-lifetime
+// semantics as scheduler.mjs:653's stalled-signal label sweep:
+//   • On applied:true → writes workers/<T>/.linear-label-needs-human.applied.
+//     The next tick short-circuits before touching Linear.
+//   • On reason:"missing-label" → writes .skipped (operator creates the label
+//     manually + deletes the marker to re-arm).
+//   • On any transient failure (rate-limited, undefined, throw) → no marker,
+//     next tick retries. CTL-638's per-(ticket, phase) escalation cool-down
+//     (in label-guard.mjs) is the SECOND layer of protection for this case:
+//     even if labelOnce keeps retrying the write, the cool-down suppresses
+//     the audit-event + label-call pair entirely so the scheduler's own
+//     event-log fast path stops self-feeding.
+function defaultApplyStalledLabel({ orchDir, ticket }) {
+  return labelOnce(orchDir, ticket, "needs-human", { applyLabel: defaultApplyLabel });
 }
 
 // defaultKillBgJob — best-effort `kill -9` of a lingering bg pid. Gated by the
@@ -460,6 +477,12 @@ export function reclaimDeadWorkIfPossible(
     countReviveEvents = defaultCountReviveEvents,
     countDistinctRevivingTickets = defaultCountDistinctRevivingTickets,
     writeReviveMarker = defaultWriteReviveMarker,
+    // CTL-638 — per-(ticket, phase) escalation cool-down. Defaults read/write
+    // markers under orchDir/.escalation-cooldowns/; tests can inject fakes to
+    // run multiple escalations against the same scenario without filesystem
+    // I/O, or to drive the cool-down clock independently of `now`.
+    inEscalationCooldownFn = defaultInEscalationCooldown,
+    recordEscalationFn = defaultRecordEscalation,
     now = Date.now,
     staleMs = STALE_MS,
   } = {},
@@ -482,22 +505,38 @@ export function reclaimDeadWorkIfPossible(
   const orchId = signal.raw?.orchestrator;
   const prevBgJobId = signal.raw?.bg_job_id ?? null;
 
-  // (A) No probe registered for this phase → escalate. The pre-CTL-587 silent
-  //     'not-applicable' return is now an actionable outcome: the worker is
-  //     dead, we cannot prove its work landed, and no automation can recover
-  //     — so the human needs to look. needs-human label applied (verified by
-  //     the CTL-587 applyLabel read-back).
-  if (!hasProbe(phase)) {
+  // CTL-638 — escalation helper. Wraps the appendEscalatedEvent + applyStalledLabel
+  // pair in a per-(ticket, phase) cool-down. Pre-CTL-638 the three escalation
+  // call sites duplicated the same 9-line block, and each one re-emitted the
+  // audit event on every tick — feeding the scheduler's own event-log watcher
+  // back into the next tick (28/min sustained storm). Returning
+  // "escalation-suppressed" lets schedulerTick bucket the suppression as
+  // invisible (the original escalation event was already emitted).
+  function escalateOnce(reason, finalAttemptCount) {
+    if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
+      return "escalation-suppressed";
+    }
     appendEscalatedEvent({
       phase,
       ticket,
       orchId,
-      reason: "no-probe-for-phase",
-      final_attempt_count: 0,
+      reason,
+      final_attempt_count: finalAttemptCount,
     });
-    applyStalledLabel({ ticket });
-    log.warn({ ticket, phase }, "ctl-587: escalated (no probe registered for phase)");
+    applyStalledLabel({ orchDir, ticket });
+    recordEscalationFn(orchDir, ticket, phase, reason, now());
+    log.warn({ ticket, phase, reason }, "ctl-587: escalated");
     return "escalated";
+  }
+
+  // (A) No probe registered for this phase → escalate. The pre-CTL-587 silent
+  //     'not-applicable' return is now an actionable outcome: the worker is
+  //     dead, we cannot prove its work landed, and no automation can recover
+  //     — so the human needs to look. needs-human label applied (verified by
+  //     the CTL-587 applyLabel read-back). CTL-638 routes through escalateOnce
+  //     so the same (ticket, phase) cannot re-fire within the cool-down window.
+  if (!hasProbe(phase)) {
+    return escalateOnce("no-probe-for-phase", 0);
   }
 
   // (B) Probe says work IS done → CTL-574 reclaim. Unchanged.
@@ -520,15 +559,7 @@ export function reclaimDeadWorkIfPossible(
   //     `implement` has a probe; this branch's escalation is defensive for
   //     a future phase whose probe also returns false.
   if (phase !== "implement") {
-    appendEscalatedEvent({
-      phase,
-      ticket,
-      orchId,
-      reason: "non-implement-not-done",
-      final_attempt_count: 0,
-    });
-    applyStalledLabel({ ticket });
-    return "escalated";
+    return escalateOnce("non-implement-not-done", 0);
   }
 
   // Per-ticket revive budget from events.jsonl. The events file is the
@@ -536,16 +567,7 @@ export function reclaimDeadWorkIfPossible(
   // signal file (which the dispatcher rewrites each spawn).
   const priorRevives = countReviveEvents({ ticket, orchId });
   if (priorRevives >= MAX_REVIVES) {
-    appendEscalatedEvent({
-      phase,
-      ticket,
-      orchId,
-      reason: "revive-budget-exhausted",
-      final_attempt_count: priorRevives,
-    });
-    applyStalledLabel({ ticket });
-    log.warn({ ticket, phase, priorRevives }, "ctl-587: escalated (revive budget exhausted)");
-    return "escalated";
+    return escalateOnce("revive-budget-exhausted", priorRevives);
   }
 
   // Storm-breaker: if many distinct tickets are reviving inside the window,

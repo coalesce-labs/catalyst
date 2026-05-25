@@ -866,6 +866,159 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
   });
 });
 
+// --- CTL-638: per-(ticket, phase) escalation cool-down ---------------------
+//
+// Pre-CTL-638 the recovery sweep re-fired `appendEscalatedEvent` +
+// `applyStalledLabel` on every tick the same (ticket, phase) classified
+// effectively-dead — and each `appendEscalatedEvent` append to events.jsonl
+// re-triggered the scheduler's own fs.watch fast path, debouncing to ~2s
+// (a self-feeding ~28/min storm that exhausted Linear's 2,500/hr quota in <1h).
+//
+// The cool-down throttles the audit-event + label-call pair so a tight
+// scheduler-tick loop emits at most one escalation per (ticket, phase) per
+// window. `applyStalledLabel` is ALSO routed through labelOnce for a second
+// layer of protection — if the cool-down marker is deleted mid-incident, the
+// `.linear-label-needs-human.applied` marker still prevents re-attempts.
+
+describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl638-"));
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  // Re-create setupReviveScenario inline so we can swap `s.orch` to a REAL
+  // tmpdir without disturbing the upper-scope helper. The cool-down primitives
+  // need a writable orchDir to record markers.
+  function setupAt(orchPath, overrides = {}) {
+    const sig = {
+      ...implementSignal({ ticket: "CTL-9", status: "running", bgJobId: "bg-9" }),
+      phase: overrides.phase ?? "implement",
+    };
+    sig.raw.phase = overrides.phase ?? "implement";
+    return {
+      orch: orchPath,
+      sig,
+      opts: {
+        repoRoot: "/repo",
+        statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+        probes: overrides.phase === "implement" || !overrides.phase
+          ? { implement: recorder(overrides.probeResult ?? false) }
+          : {},
+        emitComplete: recorder({ code: 0 }),
+        appendEvent: recorder(undefined),
+        appendReviveEvent: recorder(undefined),
+        appendEscalatedEvent: recorder(undefined),
+        appendReviveSuppressedEvent: recorder(undefined),
+        reviveDispatch: recorder({ code: 0 }),
+        applyStalledLabel: recorder({ applied: true }),
+        killBgJob: recorder(undefined),
+        countReviveEvents: recorder(overrides.reviveCount ?? 0),
+        countDistinctRevivingTickets: recorder(1),
+        writeReviveMarker: recorder(undefined),
+        now: () => overrides.nowMs ?? 1_000 + 6 * 60 * 1000,
+        staleMs: 5 * 60 * 1000,
+        // inEscalationCooldownFn / recordEscalationFn use real defaults so we
+        // exercise the actual filesystem-backed cool-down primitive end-to-end.
+      },
+    };
+  }
+
+  test("acceptance: second tick on same (ticket, phase) suppresses — exactly one event + one label write", () => {
+    const s = setupAt(orchDir, { phase: "pr" }); // no-probe branch
+
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
+    expect(s.opts.applyStalledLabel.calls.length).toBe(1);
+
+    // 1,500 simulated ticks in the storm window — every one suppressed.
+    for (let i = 0; i < 1500; i++) {
+      expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalation-suppressed");
+    }
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(1); // NOT 1,501
+    expect(s.opts.applyStalledLabel.calls.length).toBe(1); // NOT 1,501
+  });
+
+  test("escalation re-fires after the cool-down window elapses", () => {
+    let clock = 5_000_000;
+    const s = setupAt(orchDir, { phase: "pr", nowMs: clock });
+    s.opts.now = () => clock;
+
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    clock += 10 * 60 * 1000 + 1; // jump past the 10-min default window
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(2);
+  });
+
+  test("different phase on the same ticket gets an independent cool-down (pr → monitor-merge advancement)", () => {
+    // Reproduces the live CTL-624 timeline: escalations on `pr` for a stretch,
+    // then on `monitor-merge` after `pr` completes. Both should escalate; only
+    // the WITHIN-phase repeats are suppressed.
+    const sPr = setupAt(orchDir, { phase: "pr" });
+    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("escalation-suppressed");
+
+    const sMm = setupAt(orchDir, { phase: "monitor-merge" });
+    expect(reclaimDeadWorkIfPossible(sMm.orch, sMm.sig, sMm.opts)).toBe("escalated");
+  });
+
+  test("revive-budget-exhausted branch also respects the cool-down", () => {
+    // Repro: implement phase, budget exhausted → escalation path. Second tick
+    // must suppress just like the no-probe branch.
+    const s = setupAt(orchDir, { phase: "implement", reviveCount: 2 });
+
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalation-suppressed");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
+  });
+
+  test("injected cool-down seams (inEscalationCooldownFn / recordEscalationFn) are honored", () => {
+    // The cool-down primitives are overridable for tests that want to drive
+    // the gate independently of the filesystem (or to assert calls).
+    const inCd = recorder(false);
+    const recCd = recorder(undefined);
+    const s = setupAt(orchDir, { phase: "pr" });
+    s.opts.inEscalationCooldownFn = inCd;
+    s.opts.recordEscalationFn = recCd;
+
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(inCd.calls.length).toBe(1);
+    expect(recCd.calls.length).toBe(1);
+    // recordEscalationFn signature: (orchDir, ticket, phase, reason, now)
+    expect(recCd.calls[0][1]).toBe("CTL-9");
+    expect(recCd.calls[0][2]).toBe("pr");
+    expect(recCd.calls[0][3]).toBe("no-probe-for-phase");
+  });
+
+  test("escalation-suppressed return path does NOT call appendEscalatedEvent / applyStalledLabel / recordEscalationFn", () => {
+    // Pure-fake seams to make the suppression observable as zero side-effects.
+    const s = setupAt(orchDir, { phase: "pr" });
+    s.opts.inEscalationCooldownFn = recorder(true); // cool-down already armed
+    s.opts.recordEscalationFn = recorder(undefined);
+
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalation-suppressed");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
+    expect(s.opts.applyStalledLabel.calls.length).toBe(0);
+    expect(s.opts.recordEscalationFn.calls.length).toBe(0);
+  });
+
+  test("applyStalledLabel is called with orchDir (so labelOnce can scope its marker)", () => {
+    // Regression guard for the signature change. The default seam now needs
+    // orchDir to drive labelOnce's per-ticket marker; without it, labelOnce
+    // would write to /workers/<T>/.linear-label-needs-human.applied — a
+    // relative path that depends on cwd and silently fails on most systems.
+    const s = setupAt(orchDir, { phase: "pr" });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.applyStalledLabel.calls[0][0]).toEqual({
+      orchDir: s.orch,
+      ticket: "CTL-9",
+    });
+  });
+});
+
 // --- CTL-587: default-seam behavioural tests --------------------------------
 // The above describe block uses injected stubs for all seams. These tests
 // exercise the REAL defaults — the load-bearing logic inside

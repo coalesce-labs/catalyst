@@ -35,6 +35,12 @@ import { reclaimDeadWorkIfPossible as defaultReclaimDeadWork } from "./recovery.
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
 import * as linearWrite from "./linear-write.mjs";
+// CTL-638: labelOnce moved out of this file into a shared leaf module so the
+// recovery-sweep escalation path can use the same once-marker guard. Keeping
+// labelOnce here would force recovery.mjs → scheduler.mjs to import it, but
+// scheduler.mjs already imports reclaimDeadWorkIfPossible from recovery.mjs —
+// a cycle. label-guard.mjs is the leaf module both can import.
+import { labelOnce } from "./label-guard.mjs";
 import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
@@ -283,44 +289,9 @@ function safeWrite(fn, ctx) {
   }
 }
 
-// labelOnce — apply a Linear label to a ticket at most once for the run's
-// lifetime (CTL-558, CTL-585). `linearis` label-add has no read-compare,
-// so without a guard the scheduler would re-hit the API on every tick.
-//
-// Two marker files at workers/<T>/.linear-label-<label>.{applied,skipped}
-// (restart-safe — persist with the worker dir) record terminal outcomes:
-//   .applied — applyLabel returned applied:true. Happy path.
-//   .skipped — applyLabel returned reason:"missing-label". The workspace
-//              lacks the label; retrying inside this daemon's lifetime
-//              would just storm the Linear API (CTL-585). An operator
-//              creates the label in the Linear UI and deletes this
-//              marker to re-arm the apply.
-//
-// Transient failures (reason:"rate-limited", "transient", undefined) write
-// no marker so the next tick retries — CTL-558's recovery contract.
-function labelOnce(orchDir, ticket, label, writeStatus) {
-  const base = join(orchDir, "workers", ticket, `.linear-label-${label}`);
-  if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return;
-  try {
-    const res = writeStatus.applyLabel({ ticket, label });
-    // A fake that returns undefined (test stubs) is treated as success so
-    // the once-semantics stay testable without a real result.
-    if (res === undefined || res?.applied) {
-      writeFileSync(`${base}.applied`, "");
-    } else if (res?.reason === "missing-label") {
-      writeFileSync(`${base}.skipped`, "");
-      log.warn(
-        { ticket, label },
-        "scheduler: label missing in workspace — skipping retries for this run",
-      );
-    }
-  } catch (err) {
-    log.warn(
-      { ticket, label, err: err.message },
-      "scheduler: label write-back threw — continuing tick",
-    );
-  }
-}
+// CTL-585 labelOnce now lives in `label-guard.mjs` (CTL-638 re-home — see the
+// import block at the top of this file). The shared module also hosts the
+// per-(ticket, phase) escalation cool-down used by the recovery sweep.
 
 // CTL-624: dispatch cool-down marker. Conceptually mirrors the labelOnce
 // once-marker (workers/<T>/.linear-label-*), but with two deliberate
@@ -563,6 +534,12 @@ export function schedulerTick(
         break;
       case "escalated":
         escalated.push(entry);
+        break;
+      case "escalation-suppressed":
+        // CTL-638: the per-(ticket, phase) cool-down throttled the audit event
+        // and label write. Invisible by design — operators saw the original
+        // escalation in events.jsonl already; surfacing this would re-recreate
+        // the noise the cool-down exists to prevent.
         break;
       default:
         // noop | not-done | not-applicable | reclaim-failed → invisible.
