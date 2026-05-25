@@ -37,6 +37,7 @@ import {
   dispatchCooldownPath,
   __resetForTests,
 } from "./scheduler.mjs";
+import { createTicketStateCache } from "./linear-cache.mjs";
 
 let orchDir;
 let catalystDir;
@@ -328,16 +329,28 @@ describe("dispatch cool-down (schedulerTick)", () => {
     const marker = dispatchCooldownPath(orchDir, "CTL-3", "research");
 
     // Tick 1 at t=1000: dispatch refused → 1 call, marker written.
-    schedulerTick(orchDir, { readEligible: () => eligibleOne("CTL-3"), dispatch, now: () => 1_000 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-3"),
+      dispatch,
+      now: () => 1_000,
+    });
     expect(dispatch.calls).toHaveLength(1);
     expect(existsSync(marker)).toBe(true);
 
     // Tick 2 at t=30_000 (< 60 s window): suppressed → still 1 call.
-    schedulerTick(orchDir, { readEligible: () => eligibleOne("CTL-3"), dispatch, now: () => 30_000 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-3"),
+      dispatch,
+      now: () => 30_000,
+    });
     expect(dispatch.calls).toHaveLength(1);
 
     // Tick 3 at t=70_000 (> 60 s window): re-dispatch fires → 2 calls.
-    schedulerTick(orchDir, { readEligible: () => eligibleOne("CTL-3"), dispatch, now: () => 70_000 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-3"),
+      dispatch,
+      now: () => 70_000,
+    });
     expect(dispatch.calls).toHaveLength(2);
   });
 
@@ -366,7 +379,11 @@ describe("dispatch cool-down (schedulerTick)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     recordDispatchFailure(orchDir, "CTL-5", "research", 2, 1_000);
     const dispatch = fakeDispatch({ code: 0 });
-    schedulerTick(orchDir, { readEligible: () => eligibleOne("CTL-5"), dispatch, now: () => 20_000 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-5"),
+      dispatch,
+      now: () => 20_000,
+    });
     expect(dispatch.calls).toHaveLength(0);
   });
 
@@ -612,7 +629,7 @@ describe("hydrateOutOfSetBlockers / D5 readiness", () => {
     };
     const map = hydrateOutOfSetBlockers(
       [blkTk("CTL-1", { blockedBy: "CTL-99" }), blkTk("CTL-2", { blockedBy: "CTL-99" })],
-      { exec },
+      { exec }
     );
     expect(fetched).toEqual(["CTL-99"]); // deduped — one fetch
     expect(map).toEqual({ "CTL-99": "Backlog" });
@@ -625,10 +642,7 @@ describe("hydrateOutOfSetBlockers / D5 readiness", () => {
       return { code: 0, stdout: JSON.stringify({ state: { name: "Backlog" } }), stderr: "" };
     };
     // CTL-2 is in the eligible set, so the CTL-1→CTL-2 edge is in-set.
-    hydrateOutOfSetBlockers(
-      [blkTk("CTL-1", { blockedBy: "CTL-2" }), blkTk("CTL-2")],
-      { exec },
-    );
+    hydrateOutOfSetBlockers([blkTk("CTL-1", { blockedBy: "CTL-2" }), blkTk("CTL-2")], { exec });
     expect(fetched).toEqual([]);
   });
 
@@ -674,6 +688,83 @@ describe("hydrateOutOfSetBlockers / D5 readiness", () => {
       exec,
     });
     expect(dispatch.calls).toHaveLength(0);
+  });
+});
+
+// CTL-634 Tier 1 — an opt-in cache deduplicates out-of-set blocker reads
+// across ticks. The blocker-ticket fixture matches the D5 `blkTk` shape above
+// verbatim: a `blocked_by` relation carrying `relatedIssue.identifier`, the
+// edge `referencedBlockerIds` reads.
+describe("hydrateOutOfSetBlockers — cache reuse (CTL-634)", () => {
+  const blkTk = (id, blockedBy) => ({
+    identifier: id,
+    priority: 2,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [{ type: "blocked_by", relatedIssue: { identifier: blockedBy } }] },
+    inverseRelations: { nodes: [] },
+  });
+
+  test("reads an out-of-set blocker once across two hydrations within TTL", () => {
+    const cache = createTicketStateCache({ now: () => 0, ttlMs: 60_000 });
+    const fetched = [];
+    const exec = (_cmd, args) => {
+      fetched.push(args[2]);
+      return { code: 0, stdout: JSON.stringify({ state: { name: "Backlog" } }), stderr: "" };
+    };
+    const eligible = [blkTk("CTL-1", "CTL-99")];
+    hydrateOutOfSetBlockers(eligible, { exec, cache });
+    hydrateOutOfSetBlockers(eligible, { exec, cache });
+    expect(fetched).toEqual(["CTL-99"]); // one read, second hydration is a hit
+  });
+
+  test("preserves the fail-safe: a failed fetch is the sentinel AND is not cached", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    const exec = () => {
+      calls += 1;
+      return { code: 1, stdout: "", stderr: "" };
+    };
+    const eligible = [blkTk("CTL-1", "CTL-99")];
+    const a = hydrateOutOfSetBlockers(eligible, { exec, cache });
+    const b = hydrateOutOfSetBlockers(eligible, { exec, cache });
+    expect(a["CTL-99"]).toBe("__unfetched__");
+    expect(b["CTL-99"]).toBe("__unfetched__");
+    expect(calls).toBe(2); // never cached the failure
+  });
+});
+
+// CTL-634 — schedulerTick threads the cache into hydration and logs per-tick
+// stats. Asserting the observable cache counters (a log-line assertion is
+// impractical under bun:test): one tick that hydrates an out-of-set blocker
+// records exactly one cache miss.
+describe("schedulerTick — cache stats (CTL-634)", () => {
+  const blkTk = (id, blockedBy) => ({
+    identifier: id,
+    priority: 2,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [{ type: "blocked_by", relatedIssue: { identifier: blockedBy } }] },
+    inverseRelations: { nodes: [] },
+  });
+
+  test("a tick that hydrates an out-of-set blocker records cache activity", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const cache = createTicketStateCache({ now: () => 0 });
+    const dispatch = fakeDispatch({ code: 0 });
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ state: { name: "Backlog" } }),
+      stderr: "",
+    });
+    schedulerTick(orchDir, {
+      readEligible: () => [blkTk("CTL-1", "CTL-99")],
+      dispatch,
+      exec,
+      cache,
+    });
+    const s = cache.stats();
+    expect(s.misses + s.hits).toBeGreaterThan(0); // the hydrate read went through the cache
   });
 });
 
@@ -805,7 +896,7 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
         phase: "triage",
         status: "dispatched",
         bg_job_id: null,
-      }),
+      })
     );
     const dispatch = fakeDispatch();
     const r = schedulerTick(orchDir, {
@@ -845,9 +936,7 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
       applyLabel: () => {},
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: okDispatch, writeStatus });
-    expect(writes).toContainEqual(
-      expect.objectContaining({ ticket: "CTL-1", phase: "plan" })
-    );
+    expect(writes).toContainEqual(expect.objectContaining({ ticket: "CTL-1", phase: "plan" }));
   });
 
   test("writes `research` status for a new-work pull dispatch", () => {
@@ -863,9 +952,7 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
       dispatch: okDispatch,
       writeStatus,
     });
-    expect(writes).toContainEqual(
-      expect.objectContaining({ ticket: "CTL-2", phase: "research" })
-    );
+    expect(writes).toContainEqual(expect.objectContaining({ ticket: "CTL-2", phase: "research" }));
   });
 
   test("does NOT write status when the dispatch fails", () => {
@@ -946,9 +1033,7 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     const labels = [];
     const writeStatus = { ...noWrites(), applyLabel: (a) => labels.push(a) };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(labels).toContainEqual(
-      expect.objectContaining({ ticket: "CTL-6", label: "triaged" })
-    );
+    expect(labels).toContainEqual(expect.objectContaining({ ticket: "CTL-6", label: "triaged" }));
   });
 
   test("applies `needs-human` when any phase signal is stalled", () => {
@@ -964,10 +1049,7 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
 
   test("does not re-apply a label once the .applied marker exists", () => {
     writeSignal("CTL-7", "implement", "stalled");
-    writeFileSync(
-      join(orchDir, "workers", "CTL-7", ".linear-label-needs-human.applied"),
-      ""
-    );
+    writeFileSync(join(orchDir, "workers", "CTL-7", ".linear-label-needs-human.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const labels = [];
     const writeStatus = { ...noWrites(), applyLabel: (a) => labels.push(a) };
@@ -981,11 +1063,19 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     const markerPath = join(orchDir, "workers", "CTL-8", ".linear-label-triaged.applied");
     // applyLabel reports failure → no marker written → retried next tick.
     const failWrite = { ...noWrites(), applyLabel: () => ({ applied: false }) };
-    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus: failWrite });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: failWrite,
+    });
     expect(existsSync(markerPath)).toBe(false);
     // applyLabel succeeds → marker written → not retried.
     const okWrite = { ...noWrites(), applyLabel: () => ({ applied: true }) };
-    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus: okWrite });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: okWrite,
+    });
     expect(existsSync(markerPath)).toBe(true);
   });
 
@@ -1071,10 +1161,7 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     // Pre-seed the .skipped marker (simulates a previous daemon run that hit
     // the missing-label path).
-    writeFileSync(
-      join(orchDir, "workers", "CTL-13", ".linear-label-triaged.skipped"),
-      ""
-    );
+    writeFileSync(join(orchDir, "workers", "CTL-13", ".linear-label-triaged.skipped"), "");
     let calls = 0;
     const writeStatus = {
       ...noWrites(),
@@ -1098,7 +1185,7 @@ describe("schedulerTick — worktree teardown on Done (CTL-582)", () => {
     mkdirSync(ecDir, { recursive: true });
     writeFileSync(
       join(ecDir, "registry.json"),
-      JSON.stringify({ projects: [{ team, repoRoot, eligibleQuery: {} }] }),
+      JSON.stringify({ projects: [{ team, repoRoot, eligibleQuery: {} }] })
     );
   }
   const noStatusWrites = () => ({
@@ -1106,8 +1193,7 @@ describe("schedulerTick — worktree teardown on Done (CTL-582)", () => {
     applyTerminalDone() {},
     applyLabel() {},
   });
-  const markerPath = (ticket) =>
-    join(orchDir, "workers", ticket, ".worktree-removed");
+  const markerPath = (ticket) => join(orchDir, "workers", ticket, ".worktree-removed");
 
   test("calls teardownWorktree with { repoRoot, ticket } when monitor-deploy is done", () => {
     writeSignal("CTL-4", "monitor-deploy", "done");
@@ -1193,7 +1279,7 @@ describe("schedulerTick — worktree teardown on Done (CTL-582)", () => {
         teardownWorktree: () => {
           throw new Error("boom");
         },
-      }),
+      })
     ).not.toThrow();
   });
 
@@ -1240,10 +1326,7 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
   function writeNestedSignal(ticket, phase, body) {
     const dir = join(orchDir, "workers", ticket);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      join(dir, `phase-${phase}.json`),
-      JSON.stringify({ ticket, phase, ...body }),
-    );
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
   }
 
   test("schedulerTick calls the injected reclaimDeadWork once per worker signal", () => {
@@ -1287,7 +1370,7 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
       const signalPath = join(orchDir, "workers", sig.ticket, `phase-${sig.phase}.json`);
       writeFileSync(
         signalPath,
-        JSON.stringify({ ticket: sig.ticket, phase: sig.phase, status: "done", completedAt: "t" }),
+        JSON.stringify({ ticket: sig.ticket, phase: sig.phase, status: "done", completedAt: "t" })
       );
       return "reclaimed";
     };
@@ -1342,7 +1425,7 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
         dispatch: () => ({ code: 0 }),
         writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
         teardownWorktree: () => true,
-      }),
+      })
     ).not.toThrow();
   });
 });
@@ -1355,10 +1438,7 @@ describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
   function writeNestedSignal(ticket, phase, body) {
     const dir = join(orchDir, "workers", ticket);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      join(dir, `phase-${phase}.json`),
-      JSON.stringify({ ticket, phase, ...body }),
-    );
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
   }
 
   const writeStatus = {
@@ -1475,9 +1555,10 @@ describe("preflightWorkspaceLabels (CTL-585)", () => {
       const team = args[3];
       // linearis labels list emits JSON ({nodes:[{name,...},...]}).
       // CTL is missing both expected labels; ENG has both.
-      const nodes = team === "CTL"
-        ? [{ name: "orchestrate" }, { name: "enhancement" }]
-        : [{ name: "triaged" }, { name: "needs-human" }, { name: "bug" }];
+      const nodes =
+        team === "CTL"
+          ? [{ name: "orchestrate" }, { name: "enhancement" }]
+          : [{ name: "triaged" }, { name: "needs-human" }, { name: "bug" }];
       return { code: 0, stdout: JSON.stringify({ nodes }), stderr: "" };
     };
     preflightWorkspaceLabels({
@@ -1486,12 +1567,9 @@ describe("preflightWorkspaceLabels (CTL-585)", () => {
       log: fakeLog,
     });
     const ctlWarns = warnings.filter(
-      (w) => w.obj?.team === "CTL" && w.msg.includes("missing required label"),
+      (w) => w.obj?.team === "CTL" && w.msg.includes("missing required label")
     );
-    expect(ctlWarns.map((w) => w.obj.label).sort()).toEqual([
-      "needs-human",
-      "triaged",
-    ]);
+    expect(ctlWarns.map((w) => w.obj.label).sort()).toEqual(["needs-human", "triaged"]);
     const engWarns = warnings.filter((w) => w.obj?.team === "ENG");
     expect(engWarns).toHaveLength(0);
   });
@@ -1499,9 +1577,7 @@ describe("preflightWorkspaceLabels (CTL-585)", () => {
   test("does not throw on a linearis spawn failure", () => {
     const fakeLog = { warn: () => {}, info: () => {}, error: () => {} };
     const exec = () => ({ code: 127, stdout: "", stderr: "ENOENT" });
-    expect(() =>
-      preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog }),
-    ).not.toThrow();
+    expect(() => preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog })).not.toThrow();
   });
 
   test("does not throw on a thrown exec", () => {
@@ -1509,9 +1585,7 @@ describe("preflightWorkspaceLabels (CTL-585)", () => {
     const exec = () => {
       throw new Error("boom");
     };
-    expect(() =>
-      preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog }),
-    ).not.toThrow();
+    expect(() => preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog })).not.toThrow();
   });
 
   test("real JSON shape with both labels present produces zero warnings", () => {
@@ -1546,9 +1620,7 @@ describe("preflightWorkspaceLabels (CTL-585)", () => {
       error: () => {},
     };
     const exec = () => ({ code: 0, stdout: "not json at all", stderr: "" });
-    expect(() =>
-      preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog }),
-    ).not.toThrow();
+    expect(() => preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog })).not.toThrow();
     expect(infos.some((i) => i.msg.includes("stdout is not JSON"))).toBe(true);
   });
 
@@ -1596,10 +1668,7 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
 
   test("does not re-write terminal Done once the .terminal-done.applied marker exists", () => {
     writeSignal("CTL-20", "monitor-deploy", "done");
-    writeFileSync(
-      join(orchDir, "workers", "CTL-20", ".terminal-done.applied"),
-      ""
-    );
+    writeFileSync(join(orchDir, "workers", "CTL-20", ".terminal-done.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dones = [];
     const writeStatus = {
@@ -1617,11 +1686,19 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     const markerPath = join(orchDir, "workers", "CTL-21", ".terminal-done.applied");
     // applied:false → no marker → retried next tick.
     const failWrite = { ...terminalNoWrites(), applyTerminalDone: () => ({ applied: false }) };
-    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus: failWrite });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: failWrite,
+    });
     expect(existsSync(markerPath)).toBe(false);
     // applied:true → marker written → not retried.
     const okWrite = { ...terminalNoWrites(), applyTerminalDone: () => ({ applied: true }) };
-    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus: okWrite });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: okWrite,
+    });
     expect(existsSync(markerPath)).toBe(true);
   });
 

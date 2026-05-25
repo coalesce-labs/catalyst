@@ -8,6 +8,7 @@ import {
   fetchTicketState,
   fetchTicketLabels,
 } from "./linear-query.mjs";
+import { createTicketStateCache } from "./linear-cache.mjs";
 
 // A fake exec returning a canned linearis result. `exec(cmd, args)` ->
 // { code, stdout, stderr } — the injectable seam runEligibleQuery uses so a
@@ -269,5 +270,45 @@ describe("fetchTicketLabels", () => {
     fetchTicketLabels("CTL-9", { exec });
     expect(calls[0].cmd).toBe("linearis");
     expect(calls[0].args).toEqual(["issues", "read", "CTL-9"]);
+  });
+});
+
+// CTL-634 Tier 1 — fetchTicketState consults/populates an opt-in cache. The
+// cache is opt-in so the four tests above (which omit it) are unchanged; a
+// failed read is NEVER cached so the D5 fail-safe re-reads next call.
+describe("fetchTicketState — cache (CTL-634)", () => {
+  test("serves a second read from cache without a second exec", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    const exec = () => {
+      calls += 1;
+      return { code: 0, stdout: JSON.stringify({ state: { name: "Done" } }), stderr: "" };
+    };
+    expect(fetchTicketState("CTL-1", { exec, cache })).toBe("Done");
+    expect(fetchTicketState("CTL-1", { exec, cache })).toBe("Done");
+    expect(calls).toBe(1); // second read was a cache hit
+  });
+
+  test("does NOT cache a failed read (null) — re-execs next call (fail-safe)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    let calls = 0;
+    const exec = () => {
+      calls += 1;
+      return { code: 1, stdout: "", stderr: "boom" };
+    };
+    expect(fetchTicketState("CTL-1", { exec, cache })).toBeNull();
+    expect(fetchTicketState("CTL-1", { exec, cache })).toBeNull();
+    expect(calls).toBe(2); // null never cached → both calls hit exec
+  });
+
+  test("without a cache, behaves exactly as before (every call execs)", () => {
+    let calls = 0;
+    const exec = () => {
+      calls += 1;
+      return { code: 0, stdout: JSON.stringify({ state: { name: "Ready" } }), stderr: "" };
+    };
+    fetchTicketState("CTL-1", { exec });
+    fetchTicketState("CTL-1", { exec });
+    expect(calls).toBe(2);
   });
 });

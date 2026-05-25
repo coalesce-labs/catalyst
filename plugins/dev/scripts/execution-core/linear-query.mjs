@@ -77,14 +77,26 @@ function normalizeTicket(node) {
 // JSON by default (its CLI header: "CLI for Linear.app with JSON output") so
 // there is NO --json flag to pass. Used to hydrate out-of-set blocker states
 // the bulk eligible query cannot see. CTL-565 D5.
-export function fetchTicketState(identifier, { exec = defaultExec } = {}) {
+// CTL-634: an opt-in `cache` (createTicketStateCache) deduplicates the
+// per-tick re-reads the scheduler issues for the same out-of-set blocker.
+// Consult before exec; populate only on a successful, non-null parse. A
+// failed/unparseable read is NEVER cached so the D5 fail-safe re-reads next
+// tick. The param is opt-in — callers that omit it exec on every call exactly
+// as before.
+export function fetchTicketState(identifier, { exec = defaultExec, cache } = {}) {
+  if (cache) {
+    const cached = cache.get(identifier);
+    if (cached !== undefined) return cached; // hit
+  }
   const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
-  if (code !== 0) return null;
+  if (code !== 0) return null; // fail-safe — not cached
   try {
     const node = JSON.parse(stdout);
-    return node?.state?.name ?? node?.state ?? null;
+    const state = node?.state?.name ?? node?.state ?? null;
+    if (cache && state != null) cache.set(identifier, state); // populate on success only
+    return state;
   } catch {
-    return null;
+    return null; // unparseable — not cached
   }
 }
 
