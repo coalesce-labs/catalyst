@@ -43,15 +43,17 @@ count_lines() {
   fi
 }
 
-# Count regex matches in a file. Always emits a single integer.
-count_matches() {
-  local pattern="$1" file="$2"
-  if [ ! -f "$file" ]; then
-    echo 0
-    return
-  fi
+# CTL-596 #3: count regex matches only in lines ADDED by the diff range, not
+# the whole file — so pre-existing patterns the PR never touched don't FAIL.
+# Strips the `+++ b/...` header so the filename itself is never counted.
+# $3 is the diff range (DIFF_RANGE).
+count_added_matches() {
+  local pattern="$1" file="$2" range="$3"
+  if [ ! -f "$file" ]; then echo 0; return; fi
   local n
-  n=$(grep -cE "$pattern" "$file" 2>/dev/null)
+  n=$(git diff "$range" -- "$file" 2>/dev/null \
+      | grep '^+' | grep -v '^+++' \
+      | grep -cE "$pattern" 2>/dev/null)
   echo "${n:-0}"
 }
 
@@ -498,33 +500,39 @@ RH_ISSUES=()
 for SRC in $SOURCE_FILES; do
   if [ ! -f "$SRC" ]; then continue; fi
 
+  # CTL-596 #3: count only patterns ADDED by this changeset (not the whole
+  # file), so a PR that merely touches a file with pre-existing `as any`,
+  # @ts-ignore, console.log, or `!` no longer FAILs verification.
+
   # as any casts
-  AS_ANY_COUNT=$(count_matches 'as any' "$SRC")
+  AS_ANY_COUNT=$(count_added_matches 'as any' "$SRC" "$DIFF_RANGE")
   if [ "$AS_ANY_COUNT" -gt 0 ]; then
     RH_ISSUES+=("$AS_ANY_COUNT 'as any' cast(s) in $SRC")
   fi
 
   # @ts-ignore / @ts-expect-error without explanation
-  TS_IGNORE_COUNT=$(count_matches '@ts-(ignore|expect-error)' "$SRC")
+  TS_IGNORE_COUNT=$(count_added_matches '@ts-(ignore|expect-error)' "$SRC" "$DIFF_RANGE")
   if [ "$TS_IGNORE_COUNT" -gt 0 ]; then
     RH_ISSUES+=("$TS_IGNORE_COUNT @ts-ignore/@ts-expect-error in $SRC")
   fi
 
-  # Empty catch blocks
-  if grep -Pzo 'catch\s*\([^)]*\)\s*\{\s*\}' "$SRC" >/dev/null 2>&1; then
+  # Empty catch blocks — gate the whole-file span match behind "file has ≥1
+  # added line" so untouched files no longer trip it (CTL-596 #3).
+  ADDED_LINES=$(git diff "$DIFF_RANGE" -- "$SRC" 2>/dev/null | grep -c '^+' || echo 0)
+  if [ "${ADDED_LINES:-0}" -gt 0 ] && grep -Pzo 'catch\s*\([^)]*\)\s*\{\s*\}' "$SRC" >/dev/null 2>&1; then
     RH_ISSUES+=("Empty catch block in $SRC")
   fi
 
   # console.log left in (non-test files)
   if ! echo "$SRC" | grep -qE '(test|spec)'; then
-    LOG_COUNT=$(count_matches 'console\.log' "$SRC")
+    LOG_COUNT=$(count_added_matches 'console\.log' "$SRC" "$DIFF_RANGE")
     if [ "$LOG_COUNT" -gt 2 ]; then
       RH_ISSUES+=("$LOG_COUNT console.log statements in $SRC (possible debug leftovers)")
     fi
   fi
 
   # Non-null assertions (!)
-  BANG_COUNT=$(count_matches '\w+!' "$SRC")
+  BANG_COUNT=$(count_added_matches '\w+!' "$SRC" "$DIFF_RANGE")
   if [ "$BANG_COUNT" -gt 5 ]; then
     RH_ISSUES+=("$BANG_COUNT non-null assertions in $SRC (excessive)")
   fi

@@ -384,6 +384,61 @@ scratch_teardown
 echo
 
 # ---------------------------------------------------------------
+# CTL-596 defect #3: pre-existing `as any` the PR never touched must NOT FAIL
+# ---------------------------------------------------------------
+# Note (CTL-596): the PR must MODIFY legacy.ts (Check #7 only inspects changed
+# source files) — appending a benign line puts it in the changeset while the
+# pre-existing casts stay on untouched lines. Whole-file grep counts 3 (old =
+# FAIL); added-line delta counts 0 (new = PASS).
+echo "test: pre-existing as any casts on base do not fail Check #7 (CTL-596 #3)"
+scratch_setup
+mkdir -p src
+git checkout -q main
+cat > src/legacy.ts <<'EOF'
+export const a = (x: unknown) => x as any;
+export const b = (x: unknown) => x as any;
+export const c = (x: unknown) => x as any;
+EOF
+cat > src/legacy.test.ts <<'EOF'
+import { a } from './legacy';
+test('a', () => { a(1); });
+EOF
+git add -A && git commit -q -m "legacy with pre-existing casts"
+git checkout -q feature
+git merge -q --no-edit main 2>/dev/null || git rebase -q main
+# PR appends a benign line — legacy.ts is now in the diff, but the ADDED line
+# contains zero `as any`.
+echo 'export const d = () => 2;' >> src/legacy.ts
+seed_changes_and_gh '[]' \
+  '{"state":"MERGED","mergeStateStatus":"UNKNOWN","mergeCommit":{"oid":"{{MERGE_SHA}}"}}'
+make_signal "TICK-596E"
+run_verify "TICK-596E" "backend"
+echo "$OUT" | grep -qE "'as any' cast" && fail "CTL-596 #3: pre-existing casts must not fail" "$OUT" || pass "CTL-596 #3: pre-existing casts ignored"
+scratch_teardown
+echo
+
+# ---------------------------------------------------------------
+# CTL-596 defect #3: an ADDED `as any` still FAILs Check #7
+# ---------------------------------------------------------------
+echo "test: a newly added as any still fails Check #7 (CTL-596 #3)"
+scratch_setup
+mkdir -p src
+cat > src/added.ts <<'EOF'
+export const g = (x: unknown) => x as any;
+EOF
+cat > src/added.test.ts <<'EOF'
+import { g } from './added';
+test('g', () => { g(1); });
+EOF
+seed_changes_and_gh '[]' \
+  '{"state":"MERGED","mergeStateStatus":"UNKNOWN","mergeCommit":{"oid":"{{MERGE_SHA}}"}}'
+make_signal "TICK-596F"
+run_verify "TICK-596F" "backend"
+echo "$OUT" | grep -qE "'as any' cast" && pass "CTL-596 #3: added cast detected" || fail "CTL-596 #3: added cast detected" "$OUT"
+scratch_teardown
+echo
+
+# ---------------------------------------------------------------
 echo
 if [ $FAILURES -eq 0 ]; then
   echo "ALL PASSED ($PASSES)"
