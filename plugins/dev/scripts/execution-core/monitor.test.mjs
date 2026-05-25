@@ -77,6 +77,14 @@ function enroll(team, eligibleQuery) {
   return repoRoot;
 }
 
+// writeTriageArtifact — mark a ticket as already-triaged (CTL-625). orchDir is
+// a real tmpdir; the monitor checks workers/<ticket>/triage.json.
+function writeTriageArtifact(orchDir, ticket) {
+  const dir = join(orchDir, "workers", ticket);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "triage.json"), JSON.stringify({ ticket }));
+}
+
 // unenroll — drop a team from the registry (an operator registry edit).
 function unenroll(team) {
   const i = registryEntries.findIndex((e) => e.team === team);
@@ -255,8 +263,10 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
     expect(dispatch).toHaveBeenCalledWith({ orchDir, ticket: "ENG-1", phase: "triage" });
   });
 
-  test("toState === eligible status (Ready) schedules a reconcile, never a triage dispatch", async () => {
+  test("→Ready with an existing triage.json reconciles, never a triage dispatch", async () => {
     enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core"); // real dir (beforeEach made it)
+    writeTriageArtifact(realOrchDir, "ENG-9");
     const exec = execReturning({ ENG: [node("ENG-9")] });
     const dispatch = mock(() => ({ code: 0 }));
     handleStateChangedEvent(
@@ -264,11 +274,49 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
         event: "linear.issue.state_changed",
         detail: { ticket: "ENG-9", teamKey: "ENG", toState: "Ready" },
       },
-      { exec, dispatch, orchDir, debounceMs: 30 },
+      { exec, dispatch, orchDir: realOrchDir, debounceMs: 30 },
     );
     expect(dispatch).not.toHaveBeenCalled();
     await sleep(70);
     expect(exec.calls).toBe(1); // the debounced reconcile ran
+  });
+
+  test("CTL-625: →Ready with no triage.json auto-dispatches triage (Backlog→Ready-direct)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core"); // real dir, NO triage.json
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-9", teamKey: "ENG", toState: "Ready" },
+      },
+      { exec, dispatch, orchDir: realOrchDir, debounceMs: 30 },
+    );
+    expect(dispatch).toHaveBeenCalledWith({
+      orchDir: realOrchDir,
+      ticket: "ENG-9",
+      phase: "triage",
+    });
+    expect(exec.calls).toBe(0); // did NOT reconcile (no new-work pull → no storm)
+  });
+
+  test("CTL-625: →Ready with no orchDir wired falls back to reconcile, never throws", async () => {
+    enroll("ENG", { status: "Ready" });
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    const dispatch = mock(() => ({ code: 0 }));
+    expect(() =>
+      handleStateChangedEvent(
+        {
+          event: "linear.issue.state_changed",
+          detail: { ticket: "ENG-9", teamKey: "ENG", toState: "Ready" },
+        },
+        { exec, dispatch, debounceMs: 30 }, // no orchDir
+      ),
+    ).not.toThrow();
+    expect(dispatch).not.toHaveBeenCalled();
+    await sleep(70);
+    expect(exec.calls).toBe(1);
   });
 
   // CTL-584: drag-out kill fires only for the enumerated DRAG_OUT_STATES.

@@ -160,6 +160,10 @@ machine-local `stateIds` cache,
 and upserts the team's registry entry. Run it directly with `--dry-run --json`
 to preview the contract without writing anything.
 
+Moving a ticket **Backlog → Ready** directly (skipping `Triage`) is supported:
+if no `triage.json` exists yet, the monitor auto-runs the triage phase before
+the ticket enters the pipeline at `Research`. (CTL-625)
+
 ### Central Registry (`~/catalyst/execution-core/registry.json`)
 
 For `execution-core` teams, the central registry is the single source of
