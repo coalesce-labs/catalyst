@@ -164,7 +164,43 @@ TMP="${SIGNAL_FILE}.tmp.$$"
 jq --arg ts "$TS" --arg doc "$RESEARCH_DOC" \
   '.updatedAt = $ts | .artifact = $doc' \
   "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+```
 
+Mirror the phase output to Linear as a single comment (CTL-632). Fail-open
+(a failed Linear post must not break the phase) and idempotent (re-walks
+after orchestrator restart skip already-posted phases via a marker file).
+The fence is uniquely named so the e2e test can extract just this block.
+
+```bash phase-research-mirror
+LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
+if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
+  RESEARCH_TITLE="$(awk '/^# /{print; exit}' "${RESEARCH_DOC}" | sed 's/^# //')"
+  RESEARCH_SUMMARY="$(awk '/^## Summary/{flag=1; next} /^## /{flag=0} flag && NF' "${RESEARCH_DOC}" | head -5)"
+  MIRROR_BODY="$(cat <<EOF
+**Phase Research**
+
+- **Document**: \`${RESEARCH_DOC}\`
+- **Title**: ${RESEARCH_TITLE:-_untitled_}
+
+<details>
+<summary>Summary preview</summary>
+
+${RESEARCH_SUMMARY}
+
+</details>
+
+_Posted automatically by phase-research (CTL-632)._
+EOF
+)"
+  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+    : > "${LINEAR_MIRROR_MARKER}"
+  else
+    echo "phase-research: linearis discuss failed (continuing)" >&2
+  fi
+fi
+```
+
+```bash
 # Emit phase-complete event, close signal file, end catalyst-session.
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete
