@@ -10,7 +10,8 @@
 #     --ticket <ID> \
 #     --base-branch <branch> \
 #     --signal-file <path> \
-#     [--test-requirements <backend|frontend|fullstack>]
+#     [--test-requirements <backend|frontend|fullstack>] \
+#     [--test-convention <glob|adjacency>]   # default: glob (CTL-596 #2)
 #
 # Exit codes:
 #   0 — PASS (all required coverage present)
@@ -42,16 +43,51 @@ count_lines() {
   fi
 }
 
-# Count regex matches in a file. Always emits a single integer.
-count_matches() {
-  local pattern="$1" file="$2"
-  if [ ! -f "$file" ]; then
-    echo 0
-    return
-  fi
+# CTL-596 #3: count regex matches only in lines ADDED by the diff range, not
+# the whole file — so pre-existing patterns the PR never touched don't FAIL.
+# Strips the `+++ b/...` header so the filename itself is never counted.
+# $3 is the diff range (DIFF_RANGE).
+count_added_matches() {
+  local pattern="$1" file="$2" range="$3"
+  if [ ! -f "$file" ]; then echo 0; return; fi
   local n
-  n=$(grep -cE "$pattern" "$file" 2>/dev/null)
+  n=$(git diff "$range" -- "$file" 2>/dev/null \
+      | grep '^+' | grep -v '^+++' \
+      | grep -cE "$pattern" 2>/dev/null)
   echo "${n:-0}"
+}
+
+# CTL-596 #2: locate the configured test root(s) for the package nearest to a
+# source file. Reads vitest/jest `include` globs when present; otherwise falls
+# back to the source dir subtree (vitest default: tests colocated or under
+# __tests__). Emits the directory prefixes (one per line) to search.
+test_roots_for() {
+  local src="$1" dir pkg cfg glob
+  dir=$(dirname "$src")
+  # nearest dir containing a vitest/jest config (walk up to AND INCLUDING the
+  # repo root "."). The break-after-check structure ensures "." is tested —
+  # a leading `while [ "$pkg" != "." ]` would skip a root-level config.
+  pkg="$dir"
+  while true; do
+    for cfg in vitest.config.ts vitest.config.js vitest.config.mjs \
+               jest.config.ts jest.config.js jest.config.mjs; do
+      if [ -f "${pkg}/${cfg}" ]; then
+        # crude but sufficient: pull the leading literal segment of each
+        # include glob, e.g. "test/**/*.test.ts" -> "test"
+        grep -oE 'include[^]]*\]' "${pkg}/${cfg}" 2>/dev/null \
+          | grep -oE '"[^"*]+' | tr -d '"' \
+          | sed -E 's#/+$##' \
+          | while read -r glob; do
+              [ -n "$glob" ] && echo "${pkg%/}/${glob%%/**}"
+            done
+        echo "$pkg"   # always also search the package root subtree
+        return
+      fi
+    done
+    { [ "$pkg" = "." ] || [ "$pkg" = "/" ]; } && break
+    pkg=$(dirname "$pkg")
+  done
+  echo "$dir"   # no config found — default to the source dir subtree
 }
 
 # Parse arguments
@@ -60,6 +96,9 @@ TICKET=""
 BASE_BRANCH="main"
 SIGNAL_FILE=""
 TEST_REQUIREMENTS="backend"
+# CTL-596 #2: glob = config-aware discovery (default); adjacency = legacy
+# colocated/__tests__-only matching. Additive — no existing caller passes it.
+TEST_CONVENTION="glob"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -68,6 +107,7 @@ while [[ $# -gt 0 ]]; do
     --base-branch) BASE_BRANCH="$2"; shift 2 ;;
     --signal-file) SIGNAL_FILE="$2"; shift 2 ;;
     --test-requirements) TEST_REQUIREMENTS="$2"; shift 2 ;;
+    --test-convention) TEST_CONVENTION="$2"; shift 2 ;;
     *) echo -e "${RED}Unknown option: $1${NC}"; exit 2 ;;
   esac
 done
@@ -136,7 +176,10 @@ if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
     if [ -n "$SIG_SHA" ]; then
       PR_MERGE_SHA="$SIG_SHA"
       PR_STATE="MERGED"
-      DIFF_RANGE="${PR_MERGE_SHA}~..${PR_MERGE_SHA}"
+      # CTL-596 #1: do NOT derive DIFF_RANGE from the merge SHA — it is not in
+      # this worktree's object DB after --delete-branch. The authoritative
+      # merge-base range is computed below (before Check #1). Merge SHA stays
+      # set for Check #8 PR-state reporting.
     else
       # Have PR number but no merge SHA — ask REST API for authoritative state
       REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
@@ -145,7 +188,7 @@ if [ -n "$SIGNAL_FILE" ] && [ -f "$SIGNAL_FILE" ]; then
         if echo "$PR_REST" | jq -e '.merged == true' >/dev/null 2>&1; then
           PR_STATE="MERGED"
           PR_MERGE_SHA=$(echo "$PR_REST" | jq -r '.merge_commit_sha // empty' 2>/dev/null || echo "")
-          [ -n "$PR_MERGE_SHA" ] && DIFF_RANGE="${PR_MERGE_SHA}~..${PR_MERGE_SHA}"
+          # CTL-596 #1: merge SHA kept for Check #8 only; DIFF_RANGE set below.
         elif echo "$PR_REST" | jq -e '.state == "open"' >/dev/null 2>&1; then
           PR_STATE="OPEN"
         else
@@ -167,9 +210,27 @@ if [ -z "$PR_NUMBER" ] && [ -n "$BRANCH" ]; then
   if [ "$PR_STATE" = "MERGED" ] && [ -n "$PR_NUMBER" ]; then
     PR_VIEW_JSON=$(gh pr view "$PR_NUMBER" --json mergeCommit 2>/dev/null || echo "{}")
     PR_MERGE_SHA=$(echo "$PR_VIEW_JSON" | jq -r '.mergeCommit.oid // empty' 2>/dev/null || echo "")
-    if [ -n "$PR_MERGE_SHA" ]; then
-      DIFF_RANGE="${PR_MERGE_SHA}~..${PR_MERGE_SHA}"
-    fi
+    # CTL-596 #1: merge SHA kept for Check #8 only; DIFF_RANGE set below.
+  fi
+fi
+
+# CTL-596 #1: Resolve the diff range from objects guaranteed present in the
+# worker worktree. The GitHub squash-merge commit is NOT in this worktree's
+# object DB after --delete-branch, so a SHA~..SHA range diffs to nothing.
+# merge-base(base, HEAD)..HEAD is the worker's true changeset both pre- and
+# post-merge (the worktree retains its checked-out branch tip regardless of
+# remote/local branch deletion). The merge SHA stays resolved above for the
+# Check #8 PR-state report.
+BASE_REF="$BASE_BRANCH"
+if git rev-parse --verify --quiet "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
+  BASE_REF="origin/${BASE_BRANCH}"
+elif ! git rev-parse --verify --quiet "$BASE_BRANCH" >/dev/null 2>&1; then
+  BASE_REF=""
+fi
+if [ -n "$BASE_REF" ] && git rev-parse --verify --quiet HEAD >/dev/null 2>&1; then
+  MERGE_BASE=$(git merge-base "$BASE_REF" HEAD 2>/dev/null || echo "")
+  if [ -n "$MERGE_BASE" ]; then
+    DIFF_RANGE="${MERGE_BASE}..HEAD"
   fi
 fi
 
@@ -216,26 +277,42 @@ else
   # Check if test files exist for changed source files
   MISSING_TESTS=()
   for SRC in $SOURCE_FILES; do
-    # Derive expected test file paths
     DIR=$(dirname "$SRC")
     BASENAME=$(basename "$SRC" | sed -E 's/\.(ts|tsx|js|jsx|py|go|rs)$//')
     EXT=$(echo "$SRC" | grep -oE '\.[^.]+$')
 
-    # Common test file patterns
     FOUND_TEST=false
-    for PATTERN in \
-      "${DIR}/${BASENAME}.test${EXT}" \
-      "${DIR}/${BASENAME}.spec${EXT}" \
-      "${DIR}/__tests__/${BASENAME}${EXT}" \
-      "${DIR}/__tests__/${BASENAME}.test${EXT}" \
-      "${DIR}/../__tests__/${BASENAME}${EXT}" \
-      "test/${DIR}/${BASENAME}${EXT}" \
-      "tests/${DIR}/${BASENAME}${EXT}"; do
-      if [ -f "$PATTERN" ] || echo "$CHANGED_FILES" | grep -qF "$PATTERN"; then
-        FOUND_TEST=true
-        break
+    # CTL-596 #2: stem match — <stem>(.<qualifier>)*.(test|spec).<ext>. Matches
+    # -service suffixes, .integration qualifiers, and config-declared roots that
+    # the old literal-candidate list missed. Escape regex metachars in the stem
+    # (e.g. a dotted basename) so it can't over-match an unrelated test file.
+    BASENAME_RE=$(printf '%s' "$BASENAME" | sed -E 's/[.[\*+?(){}^$|]/\\&/g')
+    STEM_RE="${BASENAME_RE}([.-][A-Za-z0-9]+)*\.(test|spec)${EXT//./\\.}\$"
+
+    # 1) test files already present in the diff
+    if echo "$CHANGED_FILES" | grep -qE "(^|/)${STEM_RE}"; then
+      FOUND_TEST=true
+    fi
+
+    # 2) on-disk search across plausible roots (skipped in adjacency mode)
+    if [ "$FOUND_TEST" = false ]; then
+      if [ "$TEST_CONVENTION" = "adjacency" ]; then
+        ROOTS=$(printf '%s\n%s\n%s\n' "$DIR" "${DIR}/__tests__" "${DIR}/../__tests__" | sort -u)
+      else
+        ROOTS=$(printf '%s\n%s\n%s\n%s\n' \
+                  "$DIR" "${DIR}/__tests__" "${DIR}/../__tests__" \
+                  "$(test_roots_for "$SRC")" | sort -u)
       fi
-    done
+      while read -r ROOT; do
+        [ -d "$ROOT" ] || continue
+        # CTL-596: prune node_modules/.git so a root-level config (ROOT=".")
+        # does not turn this into a whole-worktree scan over installed deps.
+        if find "$ROOT" \( -name node_modules -o -name .git \) -prune -o -type f -print 2>/dev/null \
+             | grep -qE "(^|/)${STEM_RE}"; then
+          FOUND_TEST=true; break
+        fi
+      done <<< "$ROOTS"
+    fi
 
     if [ "$FOUND_TEST" = false ]; then
       MISSING_TESTS+=("$SRC")
@@ -428,33 +505,42 @@ RH_ISSUES=()
 for SRC in $SOURCE_FILES; do
   if [ ! -f "$SRC" ]; then continue; fi
 
+  # CTL-596 #3: count only patterns ADDED by this changeset (not the whole
+  # file), so a PR that merely touches a file with pre-existing `as any`,
+  # @ts-ignore, console.log, or `!` no longer FAILs verification.
+
   # as any casts
-  AS_ANY_COUNT=$(count_matches 'as any' "$SRC")
+  AS_ANY_COUNT=$(count_added_matches 'as any' "$SRC" "$DIFF_RANGE")
   if [ "$AS_ANY_COUNT" -gt 0 ]; then
     RH_ISSUES+=("$AS_ANY_COUNT 'as any' cast(s) in $SRC")
   fi
 
   # @ts-ignore / @ts-expect-error without explanation
-  TS_IGNORE_COUNT=$(count_matches '@ts-(ignore|expect-error)' "$SRC")
+  TS_IGNORE_COUNT=$(count_added_matches '@ts-(ignore|expect-error)' "$SRC" "$DIFF_RANGE")
   if [ "$TS_IGNORE_COUNT" -gt 0 ]; then
     RH_ISSUES+=("$TS_IGNORE_COUNT @ts-ignore/@ts-expect-error in $SRC")
   fi
 
-  # Empty catch blocks
-  if grep -Pzo 'catch\s*\([^)]*\)\s*\{\s*\}' "$SRC" >/dev/null 2>&1; then
+  # Empty catch blocks — gate the whole-file span match behind "file has ≥1
+  # added line" so untouched files no longer trip it (CTL-596 #3).
+  # grep -c always emits a single integer (0 on no match); avoid the
+  # `|| echo 0` idiom that produces the broken "0\n0" string (see count_lines).
+  ADDED_LINES=$(git diff "$DIFF_RANGE" -- "$SRC" 2>/dev/null | grep -c '^+')
+  ADDED_LINES=${ADDED_LINES:-0}
+  if [ "${ADDED_LINES:-0}" -gt 0 ] && grep -Pzo 'catch\s*\([^)]*\)\s*\{\s*\}' "$SRC" >/dev/null 2>&1; then
     RH_ISSUES+=("Empty catch block in $SRC")
   fi
 
   # console.log left in (non-test files)
   if ! echo "$SRC" | grep -qE '(test|spec)'; then
-    LOG_COUNT=$(count_matches 'console\.log' "$SRC")
+    LOG_COUNT=$(count_added_matches 'console\.log' "$SRC" "$DIFF_RANGE")
     if [ "$LOG_COUNT" -gt 2 ]; then
       RH_ISSUES+=("$LOG_COUNT console.log statements in $SRC (possible debug leftovers)")
     fi
   fi
 
   # Non-null assertions (!)
-  BANG_COUNT=$(count_matches '\w+!' "$SRC")
+  BANG_COUNT=$(count_added_matches '\w+!' "$SRC" "$DIFF_RANGE")
   if [ "$BANG_COUNT" -gt 5 ]; then
     RH_ISSUES+=("$BANG_COUNT non-null assertions in $SRC (excessive)")
   fi
