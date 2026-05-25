@@ -61,6 +61,34 @@ for skill in create-pr describe-pr; do
   fi
 done
 
+# CTL-601: implement-plan is invoked as a sub-task from inside other phase
+# agents (e.g. create-pr's Post-PR Monitoring & Resolution Loop calls it to
+# address review-comment fix-ups; monitor-merge calls it for CI fix-ups).
+# Without the CATALYST_PHASE gate, implement-plan writes stateMap.inProgress
+# directly, regressing the ticket state from PR back to Implement
+# (CTL-600 tracer-bullet evidence: 2 regression flickers during pr + monitor-merge).
+# Same risk for code-first-draft (could be called from re-implementation loops).
+echo "Test: implement-plan / code-first-draft gate inProgress writes on CATALYST_PHASE"
+for skill in implement-plan code-first-draft; do
+  f="${SKILLS_DIR}/${skill}/SKILL.md"
+  if [[ ! -f "$f" ]]; then
+    # code-first-draft is optional; only fail if it exists AND lacks the gate.
+    [[ "$skill" == "implement-plan" ]] && fail "${skill}/SKILL.md exists"
+    continue
+  fi
+  # If the skill writes stateMap.inProgress, it MUST also reference CATALYST_PHASE.
+  if grep -qE "stateMap\.inProgress|--transition[[:space:]]+inProgress|status.*[Ii]n.?[Pp]rogress" "$f"; then
+    if grep -q "CATALYST_PHASE" "$f"; then
+      pass "${skill} writes inProgress AND gates on CATALYST_PHASE"
+    else
+      fail "${skill} writes inProgress but does NOT gate on CATALYST_PHASE" \
+        "$(grep -nE 'stateMap\.inProgress|--transition[[:space:]]+inProgress' "$f" | head -2)"
+    fi
+  else
+    pass "${skill} does not write inProgress (vacuously safe)"
+  fi
+done
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"
