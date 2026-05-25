@@ -19,11 +19,17 @@ linear_team_keys_cache_path() {
 
 # Print the cached allowlist, one key per line, sorted+deduped. Empty output
 # means "no allowlist available — fail open".
+# NB: the local is named cache_path, NOT path. Under zsh `path` is a special
+# array tied to $PATH; `local path; path=<file>` would clobber PATH to the
+# cache-file path for the rest of the function, making `sort`/`jq` resolve to
+# "command not found" so the loader always failed open under zsh (CTL-633
+# phase-review finding #1, zsh-runtime class). Bash treats `path` as ordinary,
+# which is why the bash test suites never caught this.
 linear_team_keys_load() {
-	local path
-	path="$(linear_team_keys_cache_path)"
-	[[ -r "$path" ]] || return 0
-	jq -r '.keys[]? // empty' "$path" 2>/dev/null | sort -u
+	local cache_path
+	cache_path="$(linear_team_keys_cache_path)"
+	[[ -r "$cache_path" ]] || return 0
+	jq -r '.keys[]? // empty' "$cache_path" 2>/dev/null | sort -u
 }
 
 # Filter stdin tokens (TEAM-NNN, one per line) through the allowlist. Empty

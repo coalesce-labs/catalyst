@@ -37,15 +37,37 @@
 
 # Source the team-key allowlist helper. Fail-open if the file is missing
 # (defensive — both helpers ship together via CTL-633).
-_pr_skip_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+#
+# Dir resolution must work under BOTH bash and zsh. The Catalyst Bash tool runs
+# zsh, where ${BASH_SOURCE[0]} is unset — so a BASH_SOURCE-only resolver
+# collapsed to the CWD and silently failed to source the sibling lib (CTL-633
+# phase-review finding #1). The producers (create-pr/describe-pr/ci-describe-pr)
+# all source us via "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-pr-skip.sh", so
+# CLAUDE_PLUGIN_ROOT is the reliable anchor in the real runtime; fall back to
+# BASH_SOURCE for `bash linear-pr-skip.sh` direct exec and bash sourcers.
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" \
+	&& -r "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-team-keys.sh" ]]; then
+	_pr_skip_dir="${CLAUDE_PLUGIN_ROOT}/scripts/lib"
+elif [[ -n "${BASH_SOURCE:-}" ]]; then
+	_pr_skip_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+	_pr_skip_dir=""
+fi
 # shellcheck source=/dev/null
-[[ -r "$_pr_skip_dir/linear-team-keys.sh" ]] \
+[[ -n "$_pr_skip_dir" && -r "$_pr_skip_dir/linear-team-keys.sh" ]] \
 	&& source "$_pr_skip_dir/linear-team-keys.sh"
 
 # Pipe stdin through linear_team_keys_filter if it's defined; passthrough
 # otherwise (handles the "team-keys helper not sourced" edge case).
+#
+# Use `command -v`, NOT `declare -F`: under zsh `declare -F <name>` returns
+# success for an ABSENT function, so the guard wrongly called the missing
+# filter (`command not found`) and dropped ALL output with exit 0 — silently
+# nullifying the sibling-skip guard (CTL-633 phase-review finding #1). `command
+# -v` correctly reports absence under both bash and zsh, so fail-open `cat`
+# actually triggers. (`type -t` would be a bash-only builtin — broken in zsh.)
 _pr_skip_filter() {
-	if declare -F linear_team_keys_filter >/dev/null 2>&1; then
+	if command -v linear_team_keys_filter >/dev/null 2>&1; then
 		linear_team_keys_filter
 	else
 		cat
