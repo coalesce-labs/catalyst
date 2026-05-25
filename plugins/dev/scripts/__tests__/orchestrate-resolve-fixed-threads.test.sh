@@ -406,6 +406,27 @@ CNT=$(jq -r '.resolvedThreadCount // empty' "${ORCH_DIR}/workers/R-8.json")
 [ -z "$CNT" ] && pass "dry-run does not mutate the signal" || fail "dry-run does not mutate the signal" "got: $CNT"
 scratch_teardown
 
+# ── Phase 3: SKILL.md wiring + doc-drift guard ───────────────────────────────
+
+echo
+echo "test: SKILL.md references the new script (prevents doc drift)"
+grep -q "orchestrate-resolve-fixed-threads" "$SKILL_MD" \
+  && pass "SKILL.md references orchestrate-resolve-fixed-threads" || fail "SKILL.md references orchestrate-resolve-fixed-threads"
+
+echo "test: SKILL.md documents the resolvedThreadCount signal field"
+grep -q "resolvedThreadCount" "$SKILL_MD" \
+  && pass "SKILL.md documents resolvedThreadCount" || fail "SKILL.md documents resolvedThreadCount"
+
+echo "test: the new step is documented BEFORE orchestrate-auto-fixup"
+# `|| true` keeps a no-match (grep rc=1) from aborting under the active `set -e`.
+RESOLVE_LINE=$(grep -n "orchestrate-resolve-fixed-threads" "$SKILL_MD" | head -1 | cut -d: -f1 || true)
+FIXUP_LINE=$(grep -n '"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-auto-fixup"' "$SKILL_MD" | head -1 | cut -d: -f1 || true)
+if [ -n "$RESOLVE_LINE" ] && [ -n "$FIXUP_LINE" ] && [ "$RESOLVE_LINE" -lt "$FIXUP_LINE" ]; then
+  pass "resolve-fixed-threads step precedes auto-fixup (resolve@${RESOLVE_LINE} < fixup@${FIXUP_LINE})"
+else
+  fail "resolve-fixed-threads step precedes auto-fixup" "resolve@${RESOLVE_LINE:-none} fixup@${FIXUP_LINE:-none}"
+fi
+
 echo
 echo "Results: $PASSES passed, $FAILURES failed"
 [ "$FAILURES" -eq 0 ]

@@ -1730,10 +1730,39 @@ with an attention item so you can decide between manual intervention and a fresh
 resume uses `workers/output/<ticket>-stream.jsonl` (with legacy / transcript fallbacks) to find the
 original `session_id`.
 
+**Auto-resolve already-fixed bot review threads (CTL-378):**
+
+After revive and **before** auto-fixup, a pass resolves unresolved **bot** review threads that the
+worker's last pushed commit already addressed — closing the gap where a fix-up worker pushes a
+correct fix but dies before calling `resolveReviewThread`, which would otherwise make auto-fixup
+dispatch a wasteful second worker.
+
+```bash
+"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-resolve-fixed-threads" \
+  --orch-dir "$ORCH_DIR" \
+  --orch-id "$ORCH_NAME"
+```
+
+It reads the shared `blockedSince` clock (written by auto-fixup) and acts only on PRs stably BLOCKED
+for `--stable-minutes` (default 10). A thread is auto-resolved only when ALL hold: its author is a
+bot (`__typename == "Bot"`); the PR's last pushed commit touches the thread's file; and that commit
+landed after the thread's comment. Human-authored threads are never auto-resolved. After resolving
+≥1 thread it re-checks the authoritative merge state via REST (`repos/{owner}/{repo}/pulls/{n}`).
+
+| Field                 | Written by                        | Purpose                                       |
+| --------------------- | --------------------------------- | --------------------------------------------- |
+| `resolvedThreadCount` | orchestrate-resolve-fixed-threads | Cumulative count of auto-resolved bot threads |
+| `threadsResolvedAt`   | orchestrate-resolve-fixed-threads | Timestamp of the most recent auto-resolution  |
+
+Because this runs *before* auto-fixup on the same cycle, any thread it resolves disappears from
+auto-fixup's unresolved-thread count, so auto-fixup will not classify the PR as `threads-unresolved`
+or consume a `fixupAttempts` budget slot for work that is already done.
+
 **Auto-dispatch fix-up workers for BLOCKED PRs (CTL-64):**
 
-After revive, a second pass detects PRs stuck in `state=OPEN, mergeStateStatus=BLOCKED` and either
-auto-dispatches `orchestrate-fixup` or escalates to an attention item depending on the cause.
+After resolve-fixed-threads, a further pass detects PRs stuck in `state=OPEN,
+mergeStateStatus=BLOCKED` and either auto-dispatches `orchestrate-fixup` or escalates to an attention
+item depending on the cause.
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-auto-fixup" \
