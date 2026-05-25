@@ -27,7 +27,11 @@ if [[ -n "${__CATALYST_PHASE_EMIT_SOURCED:-}" ]]; then
 fi
 __CATALYST_PHASE_EMIT_SOURCED=1
 
-__PEC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve this file's own dir portably: BASH_SOURCE under bash; under zsh
+# BASH_SOURCE is unset for a sourced file, so fall back to prompt-expansion %x
+# (the sourced file's path). Verified in both shells (CTL-618).
+__PEC_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
+__PEC_LIB_DIR="$(cd "$(dirname "$__PEC_SELF")" && pwd)"
 
 # canonical-event.sh provides build_canonical_line / canonical_jsonl_append /
 # derive_trace_id / derive_span_id / plugin_version.
@@ -35,13 +39,14 @@ __PEC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${__PEC_LIB_DIR}/canonical-event.sh"
 
 emit_phase_complete() {
-  local phase="" ticket="" status="" reason="" payload="null"
+  # 'status' is a read-only special var in zsh ($?); use phase_status (CTL-618)
+  local phase="" ticket="" phase_status="" reason="" payload="null"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --phase)        phase="$2"; shift 2 ;;
       --ticket)       ticket="$2"; shift 2 ;;
-      --status)       status="$2"; shift 2 ;;
+      --status)       phase_status="$2"; shift 2 ;;
       --reason)       reason="$2"; shift 2 ;;
       --payload-json) payload="${2:-null}"; shift 2 ;;
       *) echo "emit_phase_complete: unknown flag: $1" >&2; return 1 ;;
@@ -50,18 +55,18 @@ emit_phase_complete() {
 
   [[ -n "$phase"  ]] || { echo "emit_phase_complete: --phase required"  >&2; return 1; }
   [[ -n "$ticket" ]] || { echo "emit_phase_complete: --ticket required" >&2; return 1; }
-  [[ -n "$status" ]] || { echo "emit_phase_complete: --status required" >&2; return 1; }
+  [[ -n "$phase_status" ]] || { echo "emit_phase_complete: --status required" >&2; return 1; }
 
-  case "$status" in
+  case "$phase_status" in
     complete|failed|skipped|turn-cap-exhausted) ;;
     *) echo "emit_phase_complete: --status must be complete|failed|skipped|turn-cap-exhausted" >&2; return 1 ;;
   esac
 
   local severity="INFO" event_name
-  case "$status" in
+  case "$phase_status" in
     failed|turn-cap-exhausted) severity="WARN" ;;
   esac
-  event_name="phase.${phase}.${status}.${ticket}"
+  event_name="phase.${phase}.${phase_status}.${ticket}"
 
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
@@ -72,7 +77,7 @@ emit_phase_complete() {
 
   local message="$reason"
   if [[ -z "$message" ]]; then
-    case "$status" in
+    case "$phase_status" in
       complete)           message="Phase ${phase} complete on ${ticket}" ;;
       failed)             message="Phase ${phase} failed on ${ticket}" ;;
       skipped)            message="Phase ${phase} skipped on ${ticket}" ;;
@@ -100,7 +105,7 @@ emit_phase_complete() {
     --trace-id "$trace_id" \
     --span-id "$span_id" \
     --entity "phase" \
-    --action "$status" \
+    --action "$phase_status" \
     --linear-ticket "$ticket" \
     --orch "${CATALYST_ORCHESTRATOR_ID:-}" \
     --session "${CATALYST_SESSION_ID:-}" \
@@ -123,6 +128,8 @@ emit_phase_complete() {
 # When run as a script (not sourced), expose the function via CLI shimming so
 # downstream callers without bash-source semantics can still invoke it.
 # Detect script-mode by checking BASH_SOURCE[0] vs $0.
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# Auto-run only when executed directly under bash (the shebang path). Under zsh
+# this file is always sourced and BASH_SOURCE is unset, so the guard is false.
+if [[ -n "${BASH_SOURCE:-}" && "${BASH_SOURCE[0]}" == "${0}" ]]; then
   emit_phase_complete "$@"
 fi
