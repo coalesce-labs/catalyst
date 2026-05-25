@@ -39,6 +39,26 @@ describe("buildOtlpPayload", () => {
     expect(svcName?.value?.stringValue).toBe("catalyst.session");
   });
 
+  test("propagates CTL-636 resource keys to OTLP resource.attributes", () => {
+    const event: CanonicalEvent = {
+      ...SAMPLE_EVENT,
+      resource: {
+        ...SAMPLE_EVENT.resource,
+        "project": "catalyst-workspace",
+        "linear.key": "CTL-636",
+        "catalyst.orchestration": "CTL-636",
+      },
+    };
+    const payload = buildOtlpPayload([event]) as any;
+    const resAttrs = payload.resourceLogs[0].resource.attributes;
+    const get = (k: string) => resAttrs.find((a: any) => a.key === k)?.value?.stringValue;
+    expect(get("project")).toBe("catalyst-workspace");
+    expect(get("linear.key")).toBe("CTL-636");
+    expect(get("catalyst.orchestration")).toBe("CTL-636");
+    // base key still present
+    expect(get("service.name")).toBe("catalyst.session");
+  });
+
   test("maps string attributes to stringValue", () => {
     const payload = buildOtlpPayload([SAMPLE_EVENT]) as any;
     const logAttrs = payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
