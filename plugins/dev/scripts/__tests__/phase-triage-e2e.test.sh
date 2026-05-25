@@ -60,12 +60,29 @@ if [ ! -s "$SKILL_BODY_FILE" ]; then
 	exit 1
 fi
 
-# Per-case runner. $1=case-name, $2=fixture-json-path, $3=ticket, $4=expected-status
+# ─────────────────────────────────────────────────────────────────────────────
+# CTL-602 static guard: the body must contain NO bare $<digit> token. Claude
+# Code's slash-command arg substitution ($0→ticket, $1→--orch-dir, …) rewrites
+# bare $N everywhere — including inside fenced bash — at dispatch, corrupting the
+# deterministic fallback. Braced ${N} and parenthesized $(N) are not bare $N and
+# are allowed; this filter excludes them.
+echo "phase-triage CTL-602 substitution-resilience guards"
+BARE_POSITIONALS="$(grep -nE '\$[0-9]' "$SKILL_BODY_FILE" | grep -vE '\$\{|\$\(' || true)"
+if [ -n "$BARE_POSITIONALS" ]; then
+	fail "ctl602-static: body has no bare \$<digit> (would be clobbered by slash-arg substitution)" \
+		"offending lines:$(printf '\n%s' "$BARE_POSITIONALS")"
+else
+	ok "ctl602-static: body has no bare \$<digit> tokens"
+fi
+
+# Per-case runner. $1=case-name, $2=fixture-json-path, $3=ticket,
+# $4=optional body-file override (defaults to the extracted $SKILL_BODY_FILE).
 TMPROOT="$(mktemp -d -t phase-triage-test.XXXXXX)"
 trap 'rm -rf "$TMPROOT" "$SKILL_BODY_FILE"' EXIT
 
 run_case() {
 	local case_name="$1" fixture="$2" ticket="$3"
+	local body_file="${4:-$SKILL_BODY_FILE}"
 	local case_dir="$TMPROOT/$case_name"
 	mkdir -p "$case_dir/bin"
 
@@ -112,7 +129,7 @@ EOF
 		CATALYST_EVENTS_FILE="$events_file" \
 		PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
 		PHASE_EMIT_HELPER="$EMIT_HELPER" \
-		bash "$SKILL_BODY_FILE" >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
+		bash "$body_file" >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
 	echo $? >"$case_dir/exit-code"
 
 	# Stash for later assertions
@@ -328,6 +345,57 @@ fi
 
 FAIL_EVENT="$(jq -r '.attributes."event.name"' "$FAIL_DIR/events.jsonl" 2>/dev/null | head -1)"
 assert_eq "lin-fail: emits phase.triage.failed event" "phase.triage.failed.CTL-9001" "$FAIL_EVENT"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CTL-602 dynamic guard: simulate Claude Code slash-command arg substitution on
+# the extracted body, then run the SUBSTITUTED body. A real dispatch is
+# `/catalyst-dev:phase-triage <TICKET> --orch-dir <PATH>`, so $0→<TICKET>,
+# $1→--orch-dir, $2→<PATH>. The sed targets bare $N only (the `[0-9]` immediately
+# follows `$`); `${N}` and `$(N)` are untouched, matching the documented behavior.
+# Pre-fix this corrupts classify()/acronyms_json()/awk and the case fails; the
+# fixed (no-bare-$N) body is unaffected by the sed and still produces correct output.
+
+SUBST_BODY="$(mktemp -t phase-triage-subst.XXXXXX.sh)"
+# shellcheck disable=SC2064
+trap 'rm -rf "$TMPROOT" "$SKILL_BODY_FILE" "$SUBST_BODY"' EXIT
+# Single quotes are deliberate: sed must receive the literal patterns \$0/\$1/\$2,
+# not shell-expanded values. (shellcheck SC2016 is a false positive here.)
+# shellcheck disable=SC2016
+sed -e 's/\$0/CTL-9999/g' \
+	-e 's/\$1/--orch-dir/g' \
+	-e 's#\$2#/tmp/orch#g' \
+	"$SKILL_BODY_FILE" >"$SUBST_BODY"
+
+CASE_DIR_SUBST="$(run_case subst "$FIXTURE_HAPPY" CTL-9999 "$SUBST_BODY")"
+
+assert_eq "ctl602-dynamic: substituted body exits 0" 0 "$(cat "$CASE_DIR_SUBST/exit-code")"
+
+TRIAGE_SUBST="$CASE_DIR_SUBST/worker/triage.json"
+assert_file_exists "ctl602-dynamic: substituted body produced triage.json" "$TRIAGE_SUBST"
+
+if [ -f "$TRIAGE_SUBST" ]; then
+	# FIXTURE_HAPPY has no bug/doc/refactor/chore keyword → must classify as feature.
+	# Pre-fix, $1→--orch-dir means the case never matches and it accidentally still
+	# yields feature — so also assert acronyms + summary, which pre-fix break hard.
+	CLASS_SUBST="$(jq -r '.classification' "$TRIAGE_SUBST")"
+	assert_eq "ctl602-dynamic: classification survives substitution" "feature" "$CLASS_SUBST"
+
+	ACR_SUBST="$(jq '.acronyms_expanded | length' "$TRIAGE_SUBST")"
+	if [ "${ACR_SUBST:-0}" -ge 1 ]; then
+		ok "ctl602-dynamic: acronym expansion survives substitution (≥1)"
+	else
+		fail "ctl602-dynamic: acronym expansion" "expected ≥1 acronym after substitution, got $ACR_SUBST"
+	fi
+
+	SUMMARY_SUBST="$(jq -r '.summary' "$TRIAGE_SUBST")"
+	# Pre-fix, awk $0→CTL-9999 collapses every line to the number -9999; the fixed
+	# body yields the real first prose sentence. Assert it starts with the fixture's
+	# opening prose and is not the corrupted numeric form.
+	case "$SUMMARY_SUBST" in
+	"Wire the CLI tool"*) ok "ctl602-dynamic: summary survives substitution (real prose, not awk-corrupted)" ;;
+	*) fail "ctl602-dynamic: summary content" "expected prefix 'Wire the CLI tool', got '$SUMMARY_SUBST'" ;;
+	esac
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary
