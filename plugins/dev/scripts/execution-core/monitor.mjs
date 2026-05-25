@@ -11,8 +11,8 @@
 // RECONCILE (it may have entered) — the payload carries no project/label/
 // priority, so additions and scoping are resolved exclusively by the poll.
 
-import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync } from "node:fs";
-import { dirname, basename } from "node:path";
+import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync } from "node:fs";
+import { dirname, basename, join } from "node:path";
 import {
   getEventLogPath,
   RECONCILE_INTERVAL_MS,
@@ -165,10 +165,28 @@ export function handleStateChangedEvent(
       // (phase-agent-dispatch no-ops an existing signal file).
       dispatchTriage(parsed.identifier, { dispatch, orchDir });
     } else if (!parsed.toState || parsed.toState === query.status) {
-      // →Ready (or an unknown new state) — the event cannot confirm
-      // project/label/priority scoping, so a full poll is required. Debounce
-      // it so a burst of events coalesces into one reconcile.
-      scheduleDirtyReconcile(p.team, { exec, debounceMs });
+      // →Ready (or an unknown new state). CTL-625: a confirmed →Ready
+      // (toState === query.status) for a ticket with no prior triage.json means
+      // the user moved Backlog→Ready directly, skipping →Triage. Auto-dispatch
+      // triage (same seam as →Triage) so "Ready" transparently triages-then-
+      // proceeds instead of dead-locking the research prior-artifact gate. The
+      // triage agent's phase.triage.complete advances the ticket to research via
+      // the scheduler's advancement sweep, so we do NOT also reconcile here —
+      // reconciling would let the new-work pull dispatch research before
+      // triage.json exists (the no-backoff storm CTL-625 fixes). An unknown new
+      // state (!parsed.toState), an already-triaged Ready, or a standalone
+      // monitor with no orchDir falls through to the debounced reconcile
+      // (the event cannot confirm project/label/priority scoping, so a full
+      // poll is required; debounced so a burst coalesces into one reconcile).
+      if (
+        parsed.toState === query.status &&
+        orchDir &&
+        !hasTriageArtifact(orchDir, parsed.identifier)
+      ) {
+        dispatchTriage(parsed.identifier, { dispatch, orchDir });
+      } else {
+        scheduleDirtyReconcile(p.team, { exec, debounceMs });
+      }
     } else if (DRAG_OUT_STATES.has(parsed.toState)) {
       // Drag-out to Backlog/Canceled/Duplicate — kill signal. Confident
       // immediate removal, then abort any in-flight worker and tear down its
@@ -207,6 +225,13 @@ function dispatchTriage(identifier, { dispatch, orchDir }) {
   if (r.code !== 0) {
     log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
   }
+}
+
+// hasTriageArtifact — does a triage.json exist for this ticket's worker dir?
+// CTL-625: the marker that distinguishes an already-triaged Ready ticket from
+// a Backlog→Ready-direct entry that skipped the triage phase agent.
+function hasTriageArtifact(orchDir, ticket) {
+  return existsSync(join(orchDir, "workers", ticket, "triage.json"));
 }
 
 function scheduleDirtyReconcile(team, { exec, debounceMs }) {
