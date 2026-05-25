@@ -220,7 +220,67 @@ TMP="${SIGNAL_FILE}.tmp.$$"
 jq --arg ts "$TS" --arg artifact "$ARTIFACT" \
   '.updatedAt = $ts | .artifact = $artifact' \
   "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+```
 
+Mirror the phase output to Linear as a single comment (CTL-632). Renders
+regression risk, per-gate pass/fail/skip, findings-by-severity, and the
+full findings JSON inside a `<details>` block. Body is hard-truncated to
+30,000 bytes (well under Linear's effective comment cap) with a marker.
+Fail-open and idempotent via the per-phase marker file.
+
+```bash phase-verify-mirror
+LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
+if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
+  GATES_RENDERED="$(printf '%s' "${GATES_JSON}" | jq -r '
+    to_entries
+    | map("- **" + .key + "**: " + (.value.status // "unknown")
+          + (if .value.summary then " — " + .value.summary else "" end))
+    | join("\n")' 2>/dev/null)"
+  FINDINGS_COUNT="$(printf '%s' "${FINDINGS_JSON}" | jq -r 'length' 2>/dev/null || echo 0)"
+  FINDINGS_BY_SEVERITY="$(printf '%s' "${FINDINGS_JSON}" | jq -r '
+    group_by(.severity)
+    | map("- " + (.[0].severity // "unknown") + ": " + (length|tostring))
+    | join("\n")' 2>/dev/null)"
+  FINDINGS_PRETTY="$(printf '%s' "${FINDINGS_JSON}" | jq -r '.' 2>/dev/null)"
+  MIRROR_BODY="$(cat <<EOF
+**Phase Verify**
+
+- **Regression risk**: ${REGRESSION_RISK} / 10
+- **Tests attempted**: ${TESTS_ATTEMPTED}
+- **Findings**: ${FINDINGS_COUNT}
+
+**Gates**:
+${GATES_RENDERED}
+
+**Findings by severity**:
+${FINDINGS_BY_SEVERITY:-_none_}
+
+<details>
+<summary>Full findings JSON</summary>
+
+\`\`\`json
+${FINDINGS_PRETTY}
+\`\`\`
+
+</details>
+
+_Posted automatically by phase-verify (CTL-632)._
+EOF
+)"
+  if [[ ${#MIRROR_BODY} -gt 30000 ]]; then
+    MIRROR_BODY="${MIRROR_BODY:0:30000}
+
+_... (truncated)_"
+  fi
+  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+    : > "${LINEAR_MIRROR_MARKER}"
+  else
+    echo "phase-verify: linearis discuss failed (continuing)" >&2
+  fi
+fi
+```
+
+```bash
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete
 
