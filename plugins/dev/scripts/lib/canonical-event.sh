@@ -132,6 +132,15 @@ synthesize_event_id() {
 #   --vcs-pr N            vcs.pr.number (integer)
 #   --vcs-repo NAME       vcs.repository.name
 #   --linear-ticket KEY   linear.issue.identifier
+#
+# CTL-636: optional resource-block orchestration context. When omitted, --orch
+# and --linear-ticket are promoted into the resource block automatically, and
+# `project` is read from the ambient OTEL_RESOURCE_ATTRIBUTES env. These flags
+# override that promotion; each key is omitted from the resource block when its
+# resolved value is empty.
+#   --project NAME                resource.project
+#   --linear-key KEY              resource."linear.key" (default: --linear-ticket)
+#   --catalyst-orchestration ID   resource."catalyst.orchestration" (default: --orch)
 #   --message STR         body.message
 #   --payload-json JSON   body.payload (must be valid JSON; default null)
 #   --service-version VER service.version (default = plugin_version)
@@ -152,6 +161,8 @@ build_canonical_line() {
   local vcs_pr="" vcs_repo="" linear_ticket=""
   local message="" payload="null"
   local service_version=""
+  # CTL-636: optional resource-block orchestration context.
+  local project="" linear_key="" cat_orch=""
   local claude_session_id="" claude_model=""
   local claude_context_used_pct="" claude_context_tokens="" claude_turn=""
 
@@ -175,6 +186,9 @@ build_canonical_line() {
       --vcs-pr)          vcs_pr="$2"; shift 2 ;;
       --vcs-repo)        vcs_repo="$2"; shift 2 ;;
       --linear-ticket)   linear_ticket="$2"; shift 2 ;;
+      --project)                project="$2"; shift 2 ;;
+      --linear-key)             linear_key="$2"; shift 2 ;;
+      --catalyst-orchestration) cat_orch="$2"; shift 2 ;;
       --message)         message="$2"; shift 2 ;;
       --payload-json)    payload="${2:-null}"; shift 2 ;;
       --service-version) service_version="$2"; shift 2 ;;
@@ -192,6 +206,18 @@ build_canonical_line() {
   [[ -n "$service"    ]] || { echo "build_canonical_line: --service required" >&2; return 1; }
   [[ -n "$event_name" ]] || { echo "build_canonical_line: --event-name required" >&2; return 1; }
   [[ -n "$service_version" ]] || service_version="$(plugin_version)"
+
+  # CTL-636: promote orchestration context into the resource block. Existing
+  # callers already pass --orch / --linear-ticket (which land in attributes);
+  # mirror them into resource without a call-site change. Explicit --linear-key /
+  # --catalyst-orchestration / --project override. `project` is parsed from the
+  # ambient OTEL_RESOURCE_ATTRIBUTES the same way emit-otel-event.sh:82-88 does.
+  [[ -n "$linear_key" ]] || linear_key="$linear_ticket"
+  [[ -n "$cat_orch" ]]   || cat_orch="$orch"
+  if [[ -z "$project" && -n "${OTEL_RESOURCE_ATTRIBUTES:-}" ]]; then
+    project="$(printf '%s\n' "$OTEL_RESOURCE_ATTRIBUTES" \
+      | grep -oE 'project=[^,]+' | head -1 | cut -d= -f2- || true)"
+  fi
 
   local sev_num event_id
   sev_num="$(severity_number "$severity")"
@@ -219,6 +245,9 @@ build_canonical_line() {
     --arg vcs_pr "$vcs_pr" \
     --arg vcs_repo "$vcs_repo" \
     --arg linear_ticket "$linear_ticket" \
+    --arg project "$project" \
+    --arg linear_key "$linear_key" \
+    --arg cat_orch "$cat_orch" \
     --arg message "$message" \
     --argjson payload "$payload" \
     --arg claude_session_id "$claude_session_id" \
@@ -234,11 +263,16 @@ build_canonical_line() {
       severityNumber: $sev_num,
       traceId: (if $trace_id == "" then null else $trace_id end),
       spanId:  (if $span_id  == "" then null else $span_id  end),
-      resource: {
-        "service.name": $svc_name,
-        "service.namespace": "catalyst",
-        "service.version": $svc_ver
-      },
+      resource: (
+        {
+          "service.name": $svc_name,
+          "service.namespace": "catalyst",
+          "service.version": $svc_ver
+        }
+        + (if $project    == "" then {} else { "project": $project } end)
+        + (if $linear_key == "" then {} else { "linear.key": $linear_key } end)
+        + (if $cat_orch   == "" then {} else { "catalyst.orchestration": $cat_orch } end)
+      ),
       attributes: (
         { "event.name": $event_name }
         + (if $entity  == "" then {} else { "event.entity": $entity }  end)
