@@ -1,0 +1,312 @@
+#!/usr/bin/env bash
+# orchestrate-resolve-fixed-threads - Auto-resolve already-fixed bot review threads (CTL-378).
+#
+# Runs as part of the orchestrator's Phase 4 monitoring cycle, AFTER orchestrate-revive
+# and BEFORE orchestrate-auto-fixup. For each non-terminal worker signal whose PR has
+# been sitting in state=OPEN, mergeStateStatus=BLOCKED for at least --stable-minutes, it
+# detects unresolved *bot* review threads that the worker's last pushed commit already
+# addressed and resolves them via the resolveReviewThread GraphQL mutation, then re-checks
+# the authoritative merge state.
+#
+# This closes the gap where a fix-up worker pushes a correct fix but dies before calling
+# resolveReviewThread — leaving the PR BLOCKED and triggering a wasteful second fix-up
+# worker on the next orchestrate-auto-fixup pass. Because this runs *before* auto-fixup on
+# the same cycle, any thread it resolves disappears from auto-fixup's unresolved count.
+#
+# A thread is auto-resolved only when ALL hold:
+#   (a) its comment author is a bot (GraphQL author.__typename == "Bot");
+#   (b) the PR's last pushed commit touches the thread's file (path-granularity);
+#   (c) that commit landed AFTER the thread's comment (committedDate > comment.createdAt).
+# Human-authored threads are NEVER auto-resolved.
+#
+# Usage:
+#   orchestrate-resolve-fixed-threads --orch-dir <path> --orch-id <id>
+#                                     [--stable-minutes <n>]    # default 10
+#                                     [--dry-run]
+#
+# Outputs a single-line JSON summary on stdout:
+#   {"checked":N,"resolved":M,"rechecked":K,"skipped":S}
+#
+# Environment overrides:
+#   CATALYST_STATE_SCRIPT              path to catalyst-state.sh (default: sibling)
+#   CATALYST_RESOLVE_THREADS_GH_BIN    gh binary (default: CATALYST_AUTO_FIXUP_GH_BIN, then `gh`)
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+# gh override falls back to the auto-fixup var so the two passes share one test stub.
+GH_BIN="${CATALYST_RESOLVE_THREADS_GH_BIN:-${CATALYST_AUTO_FIXUP_GH_BIN:-gh}}"
+
+ORCH_DIR=""
+ORCH_ID=""
+STABLE_MINUTES=10
+DRY_RUN=0
+
+usage() {
+  sed -n '2,33p' "$0"
+  exit "${1:-1}"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir)       ORCH_DIR="$2"; shift 2 ;;
+    --orch-id)        ORCH_ID="$2"; shift 2 ;;
+    --stable-minutes) STABLE_MINUTES="$2"; shift 2 ;;
+    --dry-run)        DRY_RUN=1; shift ;;
+    -h|--help)        usage 0 ;;
+    *)                echo "unknown arg: $1" >&2; usage ;;
+  esac
+done
+
+[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
+[ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
+[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+
+# ─── Shared helpers (kept in sync with orchestrate-auto-fixup:67-102) ──────────
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Seconds since the given ISO timestamp, or 999999 if missing/unparseable.
+seconds_since() {
+  local ts="$1"
+  [ -z "$ts" ] && { echo 999999; return; }
+  local then
+  then=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null \
+        || date -u -d "$ts" +%s 2>/dev/null \
+        || echo "")
+  [ -z "$then" ] && { echo 999999; return; }
+  local now; now=$(date -u +%s)
+  echo $(( now - then ))
+}
+
+# Epoch seconds for an ISO timestamp, or empty if unparseable.
+iso_epoch() {
+  local ts="$1"
+  [ -z "$ts" ] && { echo ""; return; }
+  date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null \
+    || date -u -d "$ts" +%s 2>/dev/null \
+    || echo ""
+}
+
+# Emit a state-script call (event, etc.). Silent on missing script or dry-run.
+emit_state() {
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  [ -x "$STATE_SCRIPT" ] || return 0
+  "$STATE_SCRIPT" "$@" >/dev/null 2>&1 || true
+}
+
+# Parse owner/repo from a github PR URL.
+parse_repo() {
+  local url="$1"
+  echo "$url" | sed -nE 's|https?://github\.com/([^/]+)/([^/]+)/pull/.*|\1/\2|p'
+}
+
+# Write a jq-style expression into the given signal file atomically.
+update_signal() {
+  local signal="$1"; shift
+  local expr="$1"; shift
+  jq "$@" "$expr" "$signal" > "${signal}.tmp" && mv "${signal}.tmp" "$signal"
+}
+
+# ─── Network helpers ───────────────────────────────────────────────────────────
+
+fetch_pr_view() {
+  local repo="$1" pr_num="$2" out="$3"
+  "$GH_BIN" -R "$repo" pr view "$pr_num" \
+    --json state,mergeStateStatus \
+    > "$out" 2>/dev/null
+}
+
+# Fetch review threads with enough metadata to resolve and gate them: the thread
+# `id` (node ID, required by the mutation), each comment's `__typename` (bot vs
+# human discriminant) and `createdAt`. Extends orchestrate-auto-fixup:172-184.
+fetch_resolvable_threads() {
+  local repo="$1" pr_num="$2" out="$3"
+  local owner name
+  owner="${repo%%/*}"; name="${repo##*/}"
+  local query='query($owner: String!, $repo: String!, $pr: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr) { reviewThreads(first: 100) { nodes { id isResolved isOutdated path line comments(first: 1) { nodes { author { login __typename } createdAt body } } } } } } }'
+  "$GH_BIN" api graphql \
+    -f query="$query" \
+    -F owner="$owner" \
+    -F repo="$name" \
+    -F pr="$pr_num" \
+    > "$out" 2>/dev/null
+}
+
+# Resolve a single review thread by node ID. review-thread-resolution.md:36-43.
+resolve_thread() {
+  local thread_id="$1"
+  local mutation='mutation($threadId: ID!) { resolveReviewThread(input: {threadId: $threadId}) { thread { isResolved } } }'
+  "$GH_BIN" api graphql -f query="$mutation" -f threadId="$thread_id" >/dev/null 2>&1
+}
+
+# ─── Main loop ──────────────────────────────────────────────────────────────
+
+CHECKED=0
+RESOLVED=0
+RECHECKED=0
+SKIPPED=0
+
+TERMINAL=" done failed stalled "
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+shopt -s nullglob
+for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
+  TICKET=$(jq -r '.ticket // empty' "$SIGNAL" 2>/dev/null || echo "")
+  [ -z "$TICKET" ] && continue
+
+  STATUS=$(jq -r '.status // empty' "$SIGNAL" 2>/dev/null || echo "")
+  if [[ "$TERMINAL" == *" $STATUS "* ]]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  PR_NUMBER=$(jq -r '.pr.number // empty' "$SIGNAL" 2>/dev/null || echo "")
+  PR_URL=$(jq -r '.pr.url // empty' "$SIGNAL" 2>/dev/null || echo "")
+  if [ -z "$PR_NUMBER" ] || [ -z "$PR_URL" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  REPO=$(parse_repo "$PR_URL")
+  if [ -z "$REPO" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  PR_VIEW="${TMP_DIR}/pr-${TICKET}.json"
+  fetch_pr_view "$REPO" "$PR_NUMBER" "$PR_VIEW" || { SKIPPED=$((SKIPPED+1)); continue; }
+  if [ ! -s "$PR_VIEW" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  STATE=$(jq -r '.state // "UNKNOWN"' "$PR_VIEW")
+  MERGE_STATE=$(jq -r '.mergeStateStatus // "UNKNOWN"' "$PR_VIEW")
+
+  # Only act on OPEN+BLOCKED. We do NOT touch blockedSince — auto-fixup owns
+  # that clock (writing here would race its first-observation logic).
+  if [ "$STATE" != "OPEN" ] || [ "$MERGE_STATE" != "BLOCKED" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # blockedSince must already be set by auto-fixup's prior observation. If it is
+  # absent, auto-fixup has not yet recorded the first BLOCKED tick — defer to it.
+  BLOCKED_SINCE=$(jq -r '.blockedSince // empty' "$SIGNAL")
+  if [ -z "$BLOCKED_SINCE" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # Still within the stability window — defer.
+  AGE=$(seconds_since "$BLOCKED_SINCE")
+  STABLE_SECONDS=$(( STABLE_MINUTES * 60 ))
+  if [ "$AGE" -lt "$STABLE_SECONDS" ]; then
+    SKIPPED=$((SKIPPED+1))
+    continue
+  fi
+
+  # Passed all skip gates — this PR is a candidate for thread resolution.
+  CHECKED=$((CHECKED+1))
+
+  OWNER="${REPO%%/*}"; NAME="${REPO##*/}"
+
+  # Last pushed commit on the PR — read from the remote (the worker's worktree
+  # may be gone after death). gh pr view --json commits → last commit oid +
+  # committedDate; api repos/.../commits/<oid> → changed-file set.
+  COMMITS_FILE="${TMP_DIR}/commits-${TICKET}.json"
+  if ! "$GH_BIN" -R "$REPO" pr view "$PR_NUMBER" --json commits > "$COMMITS_FILE" 2>/dev/null; then
+    continue
+  fi
+  LAST_OID=$(jq -r '.commits[-1].oid // empty' "$COMMITS_FILE" 2>/dev/null || echo "")
+  LAST_COMMITTED=$(jq -r '.commits[-1].committedDate // empty' "$COMMITS_FILE" 2>/dev/null || echo "")
+  [ -z "$LAST_OID" ] && continue
+  COMMIT_EPOCH=$(iso_epoch "$LAST_COMMITTED")
+  [ -z "$COMMIT_EPOCH" ] && continue
+
+  CHANGED_FILE="${TMP_DIR}/changed-${TICKET}.json"
+  if ! "$GH_BIN" -R "$REPO" api "repos/${OWNER}/${NAME}/commits/${LAST_OID}" > "$CHANGED_FILE" 2>/dev/null; then
+    continue
+  fi
+  CHANGED_FILES_JSON=$(jq -c '[.files[]?.filename]' "$CHANGED_FILE" 2>/dev/null || echo "[]")
+
+  # Fetch resolvable threads and select the eligible ones in one jq pass:
+  #   unresolved AND not outdated AND bot author AND path touched by last commit
+  #   AND comment raised before the commit landed.
+  THREADS_FILE="${TMP_DIR}/threads-${TICKET}.json"
+  if ! fetch_resolvable_threads "$REPO" "$PR_NUMBER" "$THREADS_FILE"; then
+    continue
+  fi
+  ELIGIBLE_IDS="${TMP_DIR}/eligible-${TICKET}.txt"
+  jq -r \
+    --argjson files "$CHANGED_FILES_JSON" \
+    --argjson commitEpoch "$COMMIT_EPOCH" '
+    .data.repository.pullRequest.reviewThreads.nodes[]?
+    | select(.isResolved == false and .isOutdated == false)
+    | . as $t
+    | (.comments.nodes[0] // null) as $c
+    | select($c != null)
+    | select($c.author.__typename == "Bot")
+    | select($files | index($t.path) != null)
+    # createdAt is non-nullable in GitHub schema, but guard defensively: a null
+    # or unparseable value yields empty here (via the `?` form) so only THIS
+    # node is dropped — not the whole stream — and a parse failure errs toward
+    # leaving the thread unresolved (auto-fixup still catches it).
+    | select(($c.createdAt | type) == "string")
+    | select(($c.createdAt | fromdateiso8601?) < $commitEpoch)
+    | $t.id
+  ' "$THREADS_FILE" 2>/dev/null > "$ELIGIBLE_IDS" || true
+
+  RESOLVED_THIS_PR=0
+  while IFS= read -r THREAD_ID; do
+    [ -z "$THREAD_ID" ] && continue
+    if [ "$DRY_RUN" -eq 1 ]; then
+      # Dry-run convention: count the would-resolve, but make no mutation.
+      RESOLVED_THIS_PR=$((RESOLVED_THIS_PR+1))
+      continue
+    fi
+    if resolve_thread "$THREAD_ID"; then
+      RESOLVED_THIS_PR=$((RESOLVED_THIS_PR+1))
+    fi
+  done < "$ELIGIBLE_IDS"
+
+  RESOLVED=$((RESOLVED + RESOLVED_THIS_PR))
+
+  # Nothing resolved → no recheck, no signal mutation.
+  [ "$RESOLVED_THIS_PR" -eq 0 ] && continue
+  [ "$DRY_RUN" -eq 1 ] && continue
+
+  # Re-check the authoritative merge state via REST (never `gh pr view
+  # --json mergeable`, which lies under GraphQL eventual consistency).
+  RECHECK_FILE="${TMP_DIR}/recheck-${TICKET}.json"
+  RECHECK_MERGE_STATE=""
+  if "$GH_BIN" -R "$REPO" api "repos/${OWNER}/${NAME}/pulls/${PR_NUMBER}" > "$RECHECK_FILE" 2>/dev/null; then
+    RECHECKED=$((RECHECKED+1))
+    RECHECK_MERGE_STATE=$(jq -r '.mergeable_state // empty' "$RECHECK_FILE" 2>/dev/null || echo "")
+  fi
+
+  TS=$(now_iso)
+  update_signal "$SIGNAL" \
+    '.resolvedThreadCount = ((.resolvedThreadCount // 0) + $n)
+     | .threadsResolvedAt = $ts
+     | .updatedAt = $ts' \
+    --argjson n "$RESOLVED_THIS_PR" --arg ts "$TS"
+
+  emit_state event "$(jq -nc \
+    --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+    --argjson pr "$PR_NUMBER" --argjson n "$RESOLVED_THIS_PR" \
+    --arg ms "$RECHECK_MERGE_STATE" \
+    '{ts:$ts, orchestrator:$orch, worker:$w,
+      event:"worker-threads-auto-resolved",
+      detail:{pr:$pr, resolved:$n, mergeStateStatus:$ms}}')"
+done
+
+jq -nc \
+  --argjson c "$CHECKED" \
+  --argjson r "$RESOLVED" \
+  --argjson k "$RECHECKED" \
+  --argjson s "$SKIPPED" \
+  '{checked:$c, resolved:$r, rechecked:$k, skipped:$s}'
