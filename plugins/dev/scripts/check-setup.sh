@@ -450,10 +450,19 @@ if command -v direnv &>/dev/null; then
         warn "Missing $DIRENV_CONFIG/lib/profiles.sh — use_profile won't work"
     fi
 
-    if [[ -f "$DIRENV_CONFIG/lib/otel.sh" ]]; then
-        pass "Library: otel.sh"
+    # CTL-637: compare installed copy against vendored source-of-truth.
+    VENDORED_OTEL="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/direnv/lib/otel.sh"
+    INSTALLED_OTEL="$DIRENV_CONFIG/lib/otel.sh"
+    if [[ -f "$INSTALLED_OTEL" ]]; then
+        if [[ -f "$VENDORED_OTEL" ]] && ! cmp -s "$VENDORED_OTEL" "$INSTALLED_OTEL"; then
+            warn "Library: otel.sh present but differs from vendored copy (CTL-637 dedup may be missing)"
+            info "Re-install: cp '$VENDORED_OTEL' '$INSTALLED_OTEL' && direnv reload"
+        else
+            pass "Library: otel.sh (matches vendored copy)"
+        fi
     else
-        warn "Missing $DIRENV_CONFIG/lib/otel.sh — use_otel_context won't work"
+        warn "Missing $INSTALLED_OTEL — use_otel_context won't work"
+        [[ -f "$VENDORED_OTEL" ]] && info "Install: cp '$VENDORED_OTEL' '$INSTALLED_OTEL'"
     fi
 
     profile_count=$(ls "$DIRENV_CONFIG/profiles/"*.env 2>/dev/null | wc -l | tr -d ' ')

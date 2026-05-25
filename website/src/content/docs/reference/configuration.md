@@ -1108,12 +1108,21 @@ available in all `.envrc` files:
 # Later profiles override earlier ones.
 ```
 
-**`use_otel_context`** — sets `OTEL_RESOURCE_ATTRIBUTES` for telemetry correlation:
+**`use_otel_context`** — sets `OTEL_RESOURCE_ATTRIBUTES` for telemetry correlation. The
+canonical source lives at `plugins/dev/direnv/lib/otel.sh` in the catalyst repo; install it
+into `~/.config/direnv/lib/`:
 
 ```bash
-# ~/.config/direnv/lib/otel.sh
-# Sets project, hostname, git.branch, linear.key, catalyst.orchestration
+cp ~/.claude/plugins/marketplaces/catalyst/plugins/dev/direnv/lib/otel.sh \
+   ~/.config/direnv/lib/otel.sh
+direnv reload
 ```
+
+The function sets `project`, `hostname`, `branch`, `linear.key`, and `catalyst.orchestration`.
+It dedups `OTEL_RESOURCE_ATTRIBUTES` on every direnv reload (last-write-wins per key, per
+CTL-637) — older copies of the file accumulate duplicate keys across multiple `cd` events.
+`check-setup.sh` warns if the installed copy differs from the vendored source and prints the
+re-install command.
 
 ### Profile Files
 
