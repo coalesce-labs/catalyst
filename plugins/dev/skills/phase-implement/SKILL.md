@@ -204,6 +204,61 @@ before `stalled` + `attentionReason=continuation-budget-exhausted`.
 
 ## End block (terminal emit — copy verbatim)
 
+Mirror the phase output to Linear as a single comment (CTL-632). Re-derives
+the commit list at end-block time (no captured variable upstream), falling
+back to `_base branch unknown_` if neither `origin/main` nor `main` exists.
+Fail-open and idempotent via the per-phase marker file. Uniquely-named
+fence so the e2e test can extract just this block.
+
+```bash phase-implement-mirror
+LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
+if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
+  BASE_REF=""
+  if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+    BASE_REF="origin/main"
+  elif git rev-parse --verify --quiet main >/dev/null 2>&1; then
+    BASE_REF="main"
+  fi
+  BASE_SHA=""
+  if [[ -n "${BASE_REF}" ]]; then
+    BASE_SHA="$(git merge-base HEAD "${BASE_REF}" 2>/dev/null || true)"
+  fi
+  if [[ -n "${BASE_SHA}" ]]; then
+    COMMIT_LIST="$(git log --no-merges --oneline "${BASE_SHA}..HEAD" 2>/dev/null | sed 's/^/- /')"
+    COMMIT_COUNT="$(printf '%s\n' "${COMMIT_LIST}" | grep -c '^- ' || true)"
+    : "${COMMIT_COUNT:=0}"
+    DIFF_STAT="$(git diff --stat "${BASE_SHA}..HEAD" 2>/dev/null | tail -1)"
+  else
+    COMMIT_LIST="_base branch unknown_"
+    COMMIT_COUNT="?"
+    DIFF_STAT="_unavailable_"
+  fi
+  BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "${TICKET}")"
+  MIRROR_BODY="$(cat <<EOF
+**Phase Implement**
+
+- **Branch**: \`${BRANCH_NAME}\`
+- **Commits**: ${COMMIT_COUNT}
+- **Diff**: ${DIFF_STAT}
+
+<details>
+<summary>Commit list</summary>
+
+${COMMIT_LIST}
+
+</details>
+
+_Posted automatically by phase-implement (CTL-632)._
+EOF
+)"
+  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+    : > "${LINEAR_MIRROR_MARKER}"
+  else
+    echo "phase-implement: linearis discuss failed (continuing)" >&2
+  fi
+fi
+```
+
 ```bash
 EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
 if [[ -x "$EMIT" ]]; then
