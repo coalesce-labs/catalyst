@@ -470,6 +470,45 @@ export function defaultReadRuntimeEpoch({
   return { epoch, epochSource, bootEpoch, daemonEpoch };
 }
 
+// detectColdStart — proves every prior claude --bg worker is dead by comparing
+// each job's state.json mtime against the runtime epoch (max OS boot, daemon
+// start). COLD when the epoch is newer than ALL job mtimes (vacuously true with
+// zero jobs). The single hard invariant: an UNREADABLE epoch (0 / "none") can
+// prove nothing, so it is NEVER cold — the conservative CTL-588 stale-wait
+// remains the fallback. Enumerates ALL dirs under getJobsRoot() (not just
+// signalled bg_job_ids) so a live sibling-orchestrator worker can veto the
+// verdict. Pure aside from injected seams; never throws.
+export function detectColdStart({
+  jobsRoot = getJobsRoot(),
+  readDir = readdirSync,
+  statJob = defaultStatJob,
+  readEpoch = defaultReadRuntimeEpoch,
+} = {}) {
+  const { epoch, epochSource } = readEpoch();
+
+  let ids = [];
+  try {
+    ids = readDir(jobsRoot);
+  } catch {
+    ids = []; // jobs root absent → zero jobs
+  }
+
+  let jobsChecked = 0;
+  let newestJobMtime = 0;
+  for (const id of ids) {
+    const job = statJob(id);
+    if (!job || typeof job.mtimeMs !== "number") continue; // no usable evidence
+    jobsChecked += 1;
+    if (job.mtimeMs > newestJobMtime) newestJobMtime = job.mtimeMs;
+  }
+
+  // Unreadable epoch proves nothing. Otherwise cold iff every job mtime predates
+  // the epoch (vacuously true when jobsChecked === 0).
+  const coldStart = epoch > 0 && newestJobMtime < epoch;
+
+  return { coldStart, epoch, epochSource, jobsChecked, newestJobMtime };
+}
+
 // defaultWriteReviveMarker — write workers/<ticket>/.revive-<N>.applied as an
 // operator-friendly forensic crumb. The authoritative counter is in
 // events.jsonl; the marker is just a quick `ls`-able count for operators.

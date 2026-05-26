@@ -20,6 +20,7 @@ import {
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
+  detectColdStart,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -1321,6 +1322,70 @@ describe("runtime epoch readers", () => {
     test("both 0 → epoch 0, epochSource none", () => {
       const res = defaultReadRuntimeEpoch({ readBoot: () => 0, readDaemon: () => 0 });
       expect(res).toMatchObject({ epoch: 0, epochSource: "none" });
+    });
+  });
+
+  describe("detectColdStart", () => {
+    // Helper: build a statJob that maps job id → mtimeMs (or null when absent).
+    const statJobFrom = (map) => (id) =>
+      id in map ? { exists: true, mtimeMs: map[id], state: {} } : null;
+
+    test("(a) cold when epoch newer than ALL job mtimes", () => {
+      const res = detectColdStart({
+        readEpoch: () => ({ epoch: 5000, epochSource: "daemon", bootEpoch: 1000, daemonEpoch: 5000 }),
+        readDir: () => ["j1", "j2"],
+        statJob: statJobFrom({ j1: 1000, j2: 4000 }),
+      });
+      expect(res).toMatchObject({ coldStart: true, epoch: 5000, epochSource: "daemon", jobsChecked: 2, newestJobMtime: 4000 });
+    });
+
+    test("(b) NOT cold when any job mtime >= epoch", () => {
+      const res = detectColdStart({
+        readEpoch: () => ({ epoch: 5000, epochSource: "boot", bootEpoch: 5000, daemonEpoch: 0 }),
+        readDir: () => ["j1", "j2"],
+        statJob: statJobFrom({ j1: 1000, j2: 6000 }), // j2 touched after epoch → alive
+      });
+      expect(res.coldStart).toBe(false);
+      expect(res.newestJobMtime).toBe(6000);
+    });
+
+    test("(c) zero jobs + readable epoch → vacuously cold", () => {
+      const res = detectColdStart({
+        readEpoch: () => ({ epoch: 5000, epochSource: "boot", bootEpoch: 5000, daemonEpoch: 0 }),
+        readDir: () => [],
+        statJob: () => null,
+      });
+      expect(res).toMatchObject({ coldStart: true, jobsChecked: 0, newestJobMtime: 0 });
+    });
+
+    test("(d) unreadable epoch (0 / 'none') → NOT cold, regardless of jobs", () => {
+      const res = detectColdStart({
+        readEpoch: () => ({ epoch: 0, epochSource: "none", bootEpoch: 0, daemonEpoch: 0 }),
+        readDir: () => ["j1"],
+        statJob: statJobFrom({ j1: 1000 }),
+      });
+      expect(res.coldStart).toBe(false);
+      expect(res.epochSource).toBe("none");
+    });
+
+    test("job dir present but state.json missing (statJob null) is ignored, not counted alive", () => {
+      const res = detectColdStart({
+        readEpoch: () => ({ epoch: 5000, epochSource: "daemon", bootEpoch: 0, daemonEpoch: 5000 }),
+        readDir: () => ["j1", "ghost"],
+        statJob: statJobFrom({ j1: 1000 }), // "ghost" → null (no state.json)
+      });
+      // ghost has no mtime evidence; j1 < epoch → still cold. jobsChecked counts dirs with a usable mtime.
+      expect(res.coldStart).toBe(true);
+      expect(res.jobsChecked).toBe(1);
+    });
+
+    test("missing jobs root (readDir throws) → jobsChecked 0, vacuously cold when epoch readable", () => {
+      const res = detectColdStart({
+        readEpoch: () => ({ epoch: 5000, epochSource: "boot", bootEpoch: 5000, daemonEpoch: 0 }),
+        readDir: () => { throw new Error("ENOENT"); },
+        statJob: () => null,
+      });
+      expect(res).toMatchObject({ coldStart: true, jobsChecked: 0 });
     });
   });
 });
