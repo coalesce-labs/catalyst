@@ -13,7 +13,15 @@
 // Composes: lib/dependency-graph.mjs (readiness), scheduler-rank.mjs (ranking),
 // lib/phase-fsm.mjs (phase advancement, Phase 4), eligible-set.mjs (candidates).
 
-import { readdirSync, readFileSync, writeFileSync, existsSync, watch, mkdirSync, rmSync } from "node:fs";
+import {
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  watch,
+  mkdirSync,
+  rmSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname, basename } from "node:path";
 import { analyzeDependencyGraph, referencedBlockerIds } from "../lib/dependency-graph.mjs";
@@ -170,16 +178,19 @@ const UNFETCHED_BLOCKER_STATE = "__unfetched__";
 // live Linear state once, and return a { identifier: stateName } map. A failed
 // fetch yields the non-terminal UNFETCHED_BLOCKER_STATE sentinel so the
 // dependent is held back — failing safe. CTL-565 D5.
+// CTL-634: the opt-in `cache` is threaded into each fetchState call so the
+// same out-of-set blocker is read at most once per TTL window across ticks.
+// Absent the cache, every tick re-reads (the pre-CTL-634 behavior).
 export function hydrateOutOfSetBlockers(
   eligibleTickets,
-  { exec, fetchState = fetchTicketState } = {},
+  { exec, fetchState = fetchTicketState, cache } = {}
 ) {
   const list = eligibleTickets ?? [];
   const inSet = new Set(list.map((t) => t?.identifier).filter(Boolean));
   const externalBlockers = referencedBlockerIds(list).filter((id) => !inSet.has(id));
   const blockerStates = {};
   for (const id of externalBlockers) {
-    const state = fetchState(id, { exec });
+    const state = fetchState(id, { exec, cache });
     blockerStates[id] = state ?? UNFETCHED_BLOCKER_STATE; // non-terminal → fails safe
   }
   return blockerStates;
@@ -328,14 +339,14 @@ export function recordDispatchFailure(orchDir, ticket, phase, code, now) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       dispatchCooldownPath(orchDir, ticket, phase),
-      JSON.stringify({ phase, code, failedAt: now }),
+      JSON.stringify({ phase, code, failedAt: now })
     );
   } catch (err) {
     // Never let a marker write crash the tick — worst case is the next tick
     // retries (the pre-CTL-624 behavior).
     log.warn(
       { ticket, phase, err: err.message },
-      "scheduler: dispatch cool-down marker write failed — continuing",
+      "scheduler: dispatch cool-down marker write failed — continuing"
     );
   }
 }
@@ -369,13 +380,11 @@ export function preflightWorkspaceLabels({
   if (!Array.isArray(teams) || teams.length === 0) return;
   for (const team of teams) {
     try {
-      const { code, stdout, stderr } = exec("linearis", [
-        "labels", "list", "--team", team,
-      ]);
+      const { code, stdout, stderr } = exec("linearis", ["labels", "list", "--team", team]);
       if (code !== 0) {
         logger.info(
           { team, code, stderr },
-          "scheduler: workspace-label preflight skipped — linearis labels list failed",
+          "scheduler: workspace-label preflight skipped — linearis labels list failed"
         );
         continue;
       }
@@ -389,7 +398,7 @@ export function preflightWorkspaceLabels({
       } catch (err) {
         logger.info(
           { team, err: err.message },
-          "scheduler: workspace-label preflight skipped — linearis stdout is not JSON",
+          "scheduler: workspace-label preflight skipped — linearis stdout is not JSON"
         );
         continue;
       }
@@ -398,14 +407,14 @@ export function preflightWorkspaceLabels({
         if (!present.has(label)) {
           logger.warn(
             { team, label },
-            "scheduler: Linear workspace is missing required label — create it in the Linear UI; the label sweep will skip this label for this run",
+            "scheduler: Linear workspace is missing required label — create it in the Linear UI; the label sweep will skip this label for this run"
           );
         }
       }
     } catch (err) {
       logger.info(
         { team, err: err.message },
-        "scheduler: workspace-label preflight threw — swallowed",
+        "scheduler: workspace-label preflight threw — swallowed"
       );
     }
   }
@@ -435,7 +444,7 @@ function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
     // restored registry entry is retried on a later tick.
     log.warn(
       { ticket },
-      "scheduler: worktree teardown deferred — ticket's team has no registry entry",
+      "scheduler: worktree teardown deferred — ticket's team has no registry entry"
     );
     return;
   }
@@ -444,10 +453,7 @@ function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
       writeFileSync(marker, "");
     }
   } catch (err) {
-    log.warn(
-      { ticket, err: err.message },
-      "scheduler: worktree teardown threw — continuing tick",
-    );
+    log.warn({ ticket, err: err.message }, "scheduler: worktree teardown threw — continuing tick");
   }
 }
 
@@ -476,7 +482,7 @@ function terminalDoneOnce(orchDir, ticket, writeStatus) {
   } catch (err) {
     log.warn(
       { ticket, err: err.message },
-      "scheduler: terminal-Done write-back threw — continuing tick",
+      "scheduler: terminal-Done write-back threw — continuing tick"
     );
   }
 }
@@ -497,7 +503,8 @@ export function schedulerTick(
     teardownWorktree = defaultTeardownWorktree,
     reclaimDeadWork = defaultReclaimDeadWork,
     now = Date.now, // CTL-624: injectable clock for the dispatch cool-down
-  } = {},
+    cache, // CTL-634: opt-in out-of-set blocker state cache
+  } = {}
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
   // died but whose work was committed before the death. Runs BEFORE the
@@ -573,7 +580,11 @@ export function schedulerTick(
   // hydrate the live state of every out-of-set blocker first so a Ready ticket
   // blocked by a non-terminal out-of-set ticket is held back.
   const eligible = readEligible ? readEligible() : readAllEligibleTickets();
-  const blockerStates = hydrateOutOfSetBlockers(eligible, { exec });
+  const blockerStates = hydrateOutOfSetBlockers(eligible, { exec, cache });
+  // CTL-634: surface the cache hit-rate once per tick. Log-line-only matches
+  // the daemon's pino-only observability convention (schedulerTick's return
+  // object is discarded by runTick, so a metric must be logged, not returned).
+  if (cache) log.info(cache.stats(), "scheduler: cache stats");
   const ready = computeReadyTickets(eligible, { blockerStates });
   const inFlightCount = listInFlightTickets(orchDir).size; // recomputed post-sweep
   const freeSlots = computeFreeSlots(readMaxParallel(orchDir), inFlightCount);
@@ -593,7 +604,7 @@ export function schedulerTick(
             ticket: t.identifier,
             phase: NEW_WORK_ENTRY_PHASE,
           }),
-        { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE },
+        { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
       );
     } else {
       recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, r.code, now()); // CTL-624: arm the cool-down window
@@ -674,6 +685,7 @@ function runTick() {
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
       teardownWorktree: runningOpts.teardownWorktree,
+      cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -699,17 +711,20 @@ export function startScheduler({
   exec,
   writeStatus,
   teardownWorktree,
+  cache, // CTL-634: shared out-of-set blocker state cache (from startDaemon)
   preflight = preflightWorkspaceLabels, // CTL-585
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
   if (!orchDir) throw new Error("startScheduler: orchDir is required");
-  runningOpts = { orchDir, dispatch, readEligible, exec, writeStatus, teardownWorktree };
+  runningOpts = { orchDir, dispatch, readEligible, exec, writeStatus, teardownWorktree, cache };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels
   // the CTL-558 sweep writes. Best-effort — never blocks startup.
   try {
-    const teams = listProjects().map((p) => p.team).filter(Boolean);
+    const teams = listProjects()
+      .map((p) => p.team)
+      .filter(Boolean);
     preflight({ teams });
   } catch (err) {
     log.info({ err: err.message }, "scheduler: preflight wrapper threw — swallowed");

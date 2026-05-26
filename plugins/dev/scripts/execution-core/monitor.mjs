@@ -13,12 +13,7 @@
 
 import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
-import {
-  getEventLogPath,
-  RECONCILE_INTERVAL_MS,
-  EVENT_DEBOUNCE_MS,
-  log,
-} from "./config.mjs";
+import { getEventLogPath, RECONCILE_INTERVAL_MS, EVENT_DEBOUNCE_MS, log } from "./config.mjs";
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject } from "./eligible-set.mjs";
@@ -49,10 +44,7 @@ export function parseStateChangedEvent(event) {
   if (name !== "linear.issue.state_changed") return null;
   const payload = event?.body?.payload ?? event?.detail ?? {};
   const identifier =
-    event?.attributes?.["linear.issue.identifier"] ??
-    payload.ticket ??
-    payload.identifier ??
-    null;
+    event?.attributes?.["linear.issue.identifier"] ?? payload.ticket ?? payload.identifier ?? null;
   if (!identifier) return null;
   return {
     identifier,
@@ -84,10 +76,7 @@ export function reconcileProject(team, { exec } = {}) {
   try {
     tickets = runEligibleQuery(query, { exec });
   } catch (err) {
-    log.error(
-      { team, err: err.message },
-      "reconcile poll failed — preserving prior eligible set",
-    );
+    log.error({ team, err: err.message }, "reconcile poll failed — preserving prior eligible set");
     return;
   }
   try {
@@ -101,7 +90,7 @@ export function reconcileProject(team, { exec } = {}) {
     // reconcile tick retries the disk write.
     log.error(
       { team, err: err.message },
-      "eligible-set projection write failed — daemon continues, retry next reconcile",
+      "eligible-set projection write failed — daemon continues, retry next reconcile"
     );
   }
 }
@@ -151,10 +140,17 @@ export function handleStateChangedEvent(
     dispatch,
     orchDir,
     abortWorker = defaultAbortWorker,
-  } = {},
+    cache, // CTL-634: write-through target shared with the scheduler read path
+  } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
   if (!parsed) return;
+  // CTL-634: write-through — refresh the cached state so the next scheduler
+  // tick's out-of-set blocker hydration is a hit instead of a re-read. set()
+  // ignores a null toState, so an event without an extractable state is a safe
+  // no-op. Runs before the project loop because the cache is keyed by ticket
+  // identifier, independent of which project's eligible set the event touches.
+  if (cache) cache.set(parsed.identifier, parsed.toState);
   for (const p of listProjects()) {
     const query = resolveEligibleQuery(p);
     if (query.team !== parsed.teamKey) continue;
@@ -207,7 +203,7 @@ export function handleStateChangedEvent(
       // CTL-584.
       log.debug(
         { ticket: parsed.identifier, toState: parsed.toState },
-        "monitor: non-trigger toState — no-op",
+        "monitor: non-trigger toState — no-op"
       );
     }
   }
@@ -241,7 +237,7 @@ function scheduleDirtyReconcile(team, { exec, debounceMs }) {
     setTimeout(() => {
       dirtyTimers.delete(team);
       reconcileProject(team, { exec });
-    }, debounceMs),
+    }, debounceMs)
   );
 }
 
@@ -375,12 +371,15 @@ export function startMonitor({
   orchDir,
   dispatch,
   abortWorker,
+  cache, // CTL-634: shared state cache for event-driven write-through
 } = {}) {
   // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
   // tailer-driven readNewEvents → handleStateChangedEvent path can one-shot-
   // dispatch triage and abort a dragged-out worker. When abortWorker is left
   // undefined, handleStateChangedEvent falls back to its real default.
-  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker };
+  // CTL-634: cache rides in tailerOpts too so the tailer's write-through path
+  // populates the same instance the scheduler reads.
+  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache };
   reconcileAll({ exec });
   if (resumeFromCursor) {
     seedTailerFromCursor();

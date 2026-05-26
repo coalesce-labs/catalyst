@@ -15,6 +15,10 @@ import { makeScanAdapters } from "./scan-adapters.mjs";
 export * from "./config.mjs";
 export * from "./registry.mjs";
 export * from "./linear-query.mjs";
+// CTL-634: the Tier 1 TTL state cache, shared by the monitor write-through and
+// the scheduler read path. daemon.mjs imports createTicketStateCache from this
+// barrel alongside its other deps.
+export * from "./linear-cache.mjs";
 export * from "./eligible-set.mjs";
 // CTL-565: the shared worker-dispatch adapter (D9 executor seam) and the
 // kill-on-drag-out abort module.
