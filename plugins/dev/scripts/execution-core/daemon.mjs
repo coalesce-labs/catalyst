@@ -10,9 +10,18 @@
 // idempotently ensures a minimal <orchDir>/state.json so the CTL-536 scheduler
 // has a maxParallel value to read.
 
-import { watch, writeFileSync, renameSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
-import { resolve } from "node:path";
-import { getExecutionCoreDir, log, EVENT_DEBOUNCE_MS } from "./config.mjs";
+import {
+  watch,
+  writeFileSync,
+  renameSync,
+  mkdirSync,
+  existsSync,
+  unlinkSync,
+  statSync,
+  readFileSync,
+} from "node:fs";
+import { resolve, dirname, basename } from "node:path";
+import { getExecutionCoreDir, getEventLogPath, log, EVENT_DEBOUNCE_MS } from "./config.mjs";
 import {
   recoverStartup,
   startMonitor,
@@ -22,6 +31,8 @@ import {
   reconcileAll,
   createTicketStateCache,
 } from "./index.mjs";
+import { Reaper } from "./reaper.mjs";
+import { startOrphanReaperTimer } from "./orphan-reaper-timer.mjs";
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -30,6 +41,12 @@ let _debounceTimer = null;
 let _stopMonitor = null;
 let _stopScheduler = null;
 let _pidFile = null;
+// CTL-649: reap-intent reconciler + periodic orphan-sweep timer.
+let _reaper = null;
+let _orphanTimer = null;
+let _eventWatcher = null;
+let _eventDebounceTimer = null;
+let _eventLogCursor = 0;
 
 // ensureState — idempotently write a minimal machine-level state.json so the
 // CTL-536 scheduler has a maxParallel to read. Never overwrites an operator's
@@ -57,6 +74,10 @@ export function startDaemon({
   watchRegistry = true,
   debounceMs = EVENT_DEBOUNCE_MS,
   pidFile = null,
+  // CTL-649: reaper + orphan-sweep timer. Disable via env knob for tests
+  // that only exercise monitor + scheduler.
+  enableReaper = process.env.EXECUTION_CORE_DISABLE_REAPER !== "1",
+  orphanReaperConfig = null,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -123,12 +144,103 @@ export function startDaemon({
         }, debounceMs);
       });
     }
+
+    if (enableReaper) {
+      startReaperAndTimer({ orphanReaperConfig, debounceMs });
+    }
   } catch (err) {
     stopDaemon();
     throw err;
   }
 
   log.info({ orchDir }, "execution-core daemon started");
+}
+
+// startReaperAndTimer — wire the Reaper (CTL-649 Phase 4) and the periodic
+// orphan-reaper timer (CTL-649 Phase 9) into the daemon. The reaper consumes
+// `*.reap-requested` lines appended to the canonical event log by yielding
+// workers, supersede paths, abort-worker, and PR-merged cleanup — and runs
+// the appropriate executor for each.
+//
+// Boot replay is best-effort: if it throws, log and continue with live
+// consumption only.
+function startReaperAndTimer({ orphanReaperConfig, debounceMs }) {
+  const eventLogPath = getEventLogPath();
+  _reaper = new Reaper({});
+
+  // Boot replay: cover for any intents that landed while the daemon was down.
+  _reaper.bootReplay(eventLogPath).catch((err) => {
+    log.error({ err }, "reaper: bootReplay threw");
+  });
+  // Initialize the cursor to the current tail so the live-tail loop only
+  // sees lines appended AFTER the replay completed.
+  try {
+    if (existsSync(eventLogPath)) _eventLogCursor = statSync(eventLogPath).size;
+  } catch {
+    _eventLogCursor = 0;
+  }
+
+  // fs.watch the events dir; on rename/change to the current month's file,
+  // debounce-read the new tail and hand each parsed line to reaper.handle().
+  const eventsDir = dirname(eventLogPath);
+  const targetName = basename(eventLogPath);
+  try {
+    mkdirSync(eventsDir, { recursive: true });
+    _eventWatcher = watch(eventsDir, (_evt, filename) => {
+      if (filename !== null && filename !== targetName) return;
+      clearTimeout(_eventDebounceTimer);
+      _eventDebounceTimer = setTimeout(consumeEventTail, debounceMs);
+    });
+  } catch (err) {
+    log.error({ err }, "reaper: event-log watch failed — relying on boot replay only");
+  }
+
+  const cfg = orphanReaperConfig ?? {};
+  _orphanTimer = startOrphanReaperTimer({
+    enabled: cfg.enabled !== false,
+    intervalSeconds: cfg.intervalSeconds ?? 600,
+  });
+}
+
+// consumeEventTail — read bytes appended to the event log since the cursor
+// last advanced, parse each line, and dispatch to the reaper.
+function consumeEventTail() {
+  if (!_reaper) return;
+  const path = getEventLogPath();
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    return;
+  }
+  if (stats.size < _eventLogCursor) {
+    // File rotated or truncated — restart from 0.
+    _eventLogCursor = 0;
+  }
+  if (stats.size === _eventLogCursor) return;
+  // Cheap-and-correct: read the whole file then slice from cursor. Event
+  // logs typically stay under a few MB per month; this avoids fd juggling.
+  let content;
+  try {
+    const full = readFileSync(path, "utf8");
+    content = full.slice(_eventLogCursor);
+  } catch (err) {
+    log.error({ err }, "reaper: event-log read failed");
+    return;
+  }
+  _eventLogCursor = stats.size;
+  for (const line of content.split("\n")) {
+    if (!line) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    _reaper.handle(event).catch((err) => {
+      log.error({ err, event: event.event }, "reaper: handle threw");
+    });
+  }
 }
 
 // stopDaemon — tear down the watcher, the pending debounce, the composed
@@ -161,6 +273,29 @@ export function stopDaemon() {
       /* scheduler not running */
     }
   }
+  // CTL-649: tear down reaper + orphan timer + event-log watcher.
+  if (_eventWatcher) {
+    try {
+      _eventWatcher.close();
+    } catch {
+      /* already closed */
+    }
+    _eventWatcher = null;
+  }
+  if (_eventDebounceTimer) {
+    clearTimeout(_eventDebounceTimer);
+    _eventDebounceTimer = null;
+  }
+  if (_orphanTimer) {
+    try {
+      _orphanTimer.stop();
+    } catch {
+      /* timer already stopped */
+    }
+    _orphanTimer = null;
+  }
+  _reaper = null;
+  _eventLogCursor = 0;
   if (_pidFile) {
     try {
       unlinkSync(_pidFile);

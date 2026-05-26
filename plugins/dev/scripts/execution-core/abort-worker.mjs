@@ -11,6 +11,7 @@ import { readdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
 import { log } from "./config.mjs";
+import { emitReapIntent } from "./reap-intent.mjs";
 
 // Signal statuses that mean a phase no longer holds a live worker — left as-is.
 //
@@ -91,6 +92,14 @@ export function abortWorker(
     } catch {
       /* best-effort */
     }
+    // CTL-649: emit a reap-intent so the daemon reaper issues `claude stop`
+    // on the supervisor entry. defaultKillJob is a no-op (see its comment) —
+    // pre-CTL-649 these abort paths NEVER killed the bg supervisor. The
+    // reconciler picks up this event and does the work behind one seam.
+    emitReapIntent("phase.abort.reap-requested", {
+      ticket,
+      bgJobId: id,
+    }).catch(() => {});
   }
 
   // Worktree teardown is SKIPPED while a bg job is still live in it: a

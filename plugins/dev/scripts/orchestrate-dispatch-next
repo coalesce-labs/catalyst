@@ -170,6 +170,31 @@ if [ -z "$PHASE" ] && [ "$DISPATCH_MODE" = "phase-agents" ]; then
 	PHASE="triage"
 fi
 
+# CTL-649: refuse to dispatch in phase-agents mode if the execution-core daemon
+# is down. The reaper inside the daemon consumes `*.reap-requested` events
+# emitted by phase-agent yield/supersede/abort/merge paths — silently failing
+# to start with the daemon down means those events accumulate without a
+# consumer (boot-replay catches up on restart, but the leak is worse than
+# necessary in the interim). Bypass with CATALYST_DISPATCH_SKIP_DAEMON_PROBE=1
+# for tests and the few one-shot wrappers that legitimately dispatch with no
+# reaper present.
+if [ "$DISPATCH_MODE" = "phase-agents" ] && [ "${CATALYST_DISPATCH_SKIP_DAEMON_PROBE:-0}" != "1" ]; then
+	EXEC_CORE_BIN="${CATALYST_EXECUTION_CORE_BIN:-$(command -v catalyst-execution-core 2>/dev/null || true)}"
+	if [ -z "$EXEC_CORE_BIN" ]; then
+		# Walk up looking for the in-repo script if not on PATH.
+		_p="$(dirname "$0")"
+		[ -x "$_p/catalyst-execution-core" ] && EXEC_CORE_BIN="$_p/catalyst-execution-core"
+	fi
+	if [ -n "$EXEC_CORE_BIN" ] && [ -x "$EXEC_CORE_BIN" ]; then
+		if ! "$EXEC_CORE_BIN" probe >/dev/null 2>&1; then
+			echo "ERROR: execution-core daemon is not running." >&2
+			echo "       start it with: catalyst-execution-core start" >&2
+			echo "       (or set CATALYST_DISPATCH_SKIP_DAEMON_PROBE=1 to bypass)" >&2
+			exit 2
+		fi
+	fi
+fi
+
 [ -z "$ORCH_DIR" ] && {
 	echo "ERROR: --orch-dir required" >&2
 	exit 2

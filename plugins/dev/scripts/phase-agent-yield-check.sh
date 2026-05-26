@@ -76,10 +76,31 @@ if [[ ! -d "${JOBS_ROOT}/${OTHER_JOB}" ]]; then
   exit 1
 fi
 
-# Real yield case — write sidecar, exit 0.
+# Real yield case — write sidecar, emit reap-intent so the daemon reaper can
+# `claude stop` our supervisor (CTL-649). Pre-CTL-649 the yielding worker
+# simply exited and left its supervisor entry running as idle — that's the
+# inverse-yield ORPHAN class (#2/#3 in CTL-649). The emit is best-effort:
+# even if the event log is unwritable, the yield itself proceeds.
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 mkdir -p "$WORKER_DIR"
 cat > "${WORKER_DIR}/.phase-${PHASE}-yield" <<EOF
 {"yieldedAt":"${TS}","ourJob":"${OUR_JOB}","canonicalJob":"${OTHER_JOB}","reason":"bg_job_id_mismatch_other_alive","phase":"${PHASE}"}
 EOF
+
+# Source emit-reap-intent.sh from sibling lib/.
+_yield_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_yield_script_dir}/lib/emit-reap-intent.sh" ]]; then
+  # shellcheck source=./lib/emit-reap-intent.sh
+  . "${_yield_script_dir}/lib/emit-reap-intent.sh"
+  TICKET_FROM_SIGNAL="$(jq -r '.ticket // empty' "$SIGNAL" 2>/dev/null || echo "")"
+  WT_FROM_SIGNAL="$(jq -r '.worktreePath // empty' "$SIGNAL" 2>/dev/null || echo "")"
+  emit_reap_intent phase.yield.reap-requested \
+    --ticket "${TICKET_FROM_SIGNAL:-unknown}" \
+    --phase "$PHASE" \
+    --bg-job-id "$OUR_JOB" \
+    ${WT_FROM_SIGNAL:+--worktree-path "$WT_FROM_SIGNAL"} \
+    --canonical-bg-job-id "$OTHER_JOB" \
+    --reason "duplicate-of-canonical" 2>/dev/null || true
+fi
+
 exit 0
