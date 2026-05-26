@@ -53,6 +53,27 @@ describe("createWorktree", () => {
     expect(r.worktreePath).toBeNull();
     expect(r.stderr).toMatch(/ENOENT/);
   });
+
+  // CTL-615 — expectedBranch plumbing
+  test("expectedBranch is appended as --expected-branch <name> to argv", () => {
+    const calls = [];
+    const spawn = (cmd, args, opts) => {
+      calls.push({ cmd, args, opts });
+      return { status: 0, stdout: "WORKTREE_PATH=/wt/CTL-6\n", stderr: "" };
+    };
+    createWorktree({ ticket: "CTL-6", repoRoot: "/repo", expectedBranch: "CTL-6" }, { spawn });
+    expect(calls[0].args).toEqual(["CTL-6", "main", "--reuse-existing", "--expected-branch", "CTL-6"]);
+  });
+
+  test("expectedBranch omitted → argv unchanged (backwards compatible)", () => {
+    const calls = [];
+    const spawn = (_cmd, args) => {
+      calls.push(args);
+      return { status: 0, stdout: "WORKTREE_PATH=/wt/CTL-6\n", stderr: "" };
+    };
+    createWorktree({ ticket: "CTL-6", repoRoot: "/repo" }, { spawn });
+    expect(calls[0]).toEqual(["CTL-6", "main", "--reuse-existing"]);
+  });
 });
 
 describe("parseWorktreeForBranch", () => {

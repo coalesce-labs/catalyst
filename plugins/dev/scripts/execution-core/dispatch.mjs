@@ -70,8 +70,17 @@ function defaultRunPhaseAgent({ orchDir, ticket, phase, worktreePath }) {
 // (or reuse) the worktree, run phase-agent-dispatch in it. The three steps are
 // injectable seams so the unit test never spawns a real script. A failure at
 // any step returns a non-zero code with a descriptive stderr — never silent.
+//
+// CTL-615: now also threads `expectedBranch: ticket` into createWorktree
+// (which forwards --expected-branch to the script) and, when callers pass
+// `expectedWorktreePath`, cross-checks that against the path createWorktree
+// actually resolved. A mismatch returns `revive-aborted-wrong-cwd` without
+// launching the phase agent — so a revive can never land in a stranger's
+// worktree even if the registry resolution chain is corrupt. The dispatch
+// result always carries `worktreePath` so callers (defaultReviveDispatch)
+// can record / cross-check on later cycles.
 export function defaultDispatch(
-  { orchDir, ticket, phase },
+  { orchDir, ticket, phase, expectedWorktreePath },
   {
     resolveProject = defaultResolveProject,
     createWorktree = defaultCreateWorktree,
@@ -86,15 +95,27 @@ export function defaultDispatch(
       stderr: `dispatch: no registry entry for the team of ${ticket}`,
     };
   }
-  const wt = createWorktree({ ticket, repoRoot: project.repoRoot });
+  const wt = createWorktree({ ticket, repoRoot: project.repoRoot, expectedBranch: ticket });
   if (wt.code !== 0 || !wt.worktreePath) {
     return {
       code: wt.code || 1,
       stdout: "",
       stderr: `dispatch: worktree provisioning failed for ${ticket}: ${wt.stderr}`,
+      worktreePath: wt.worktreePath ?? null,
     };
   }
-  return runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath });
+  if (expectedWorktreePath && expectedWorktreePath !== wt.worktreePath) {
+    return {
+      code: 1,
+      stdout: "",
+      stderr:
+        `dispatch: revive-aborted-wrong-cwd — expected ${expectedWorktreePath}, ` +
+        `got ${wt.worktreePath} for ${ticket}`,
+      worktreePath: wt.worktreePath,
+    };
+  }
+  const res = runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath });
+  return { ...res, worktreePath: wt.worktreePath };
 }
 
 // dispatchTicket — thin seam over the injectable dispatch function.

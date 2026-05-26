@@ -47,14 +47,20 @@ describe("defaultDispatch", () => {
     const s = baseSeams();
     const r = defaultDispatch({ orchDir: "/ec", ticket: "CTL-1", phase: "research" }, s);
     expect(s.calls.map((c) => c[0])).toEqual(["resolve", "create", "run"]);
-    expect(s.calls[1][1]).toEqual({ ticket: "CTL-1", repoRoot: "/repo" });
+    // CTL-615: createWorktree now receives expectedBranch === ticket.
+    expect(s.calls[1][1]).toEqual({
+      ticket: "CTL-1",
+      repoRoot: "/repo",
+      expectedBranch: "CTL-1",
+    });
     expect(s.calls[2][1]).toEqual({
       orchDir: "/ec",
       ticket: "CTL-1",
       phase: "research",
       worktreePath: "/wt/CTL-1",
     });
-    expect(r).toEqual({ code: 0, stdout: "ok", stderr: "" });
+    // CTL-615: dispatch result now also surfaces worktreePath.
+    expect(r).toEqual({ code: 0, stdout: "ok", stderr: "", worktreePath: "/wt/CTL-1" });
   });
 
   test("no registry entry → code 1, createWorktree never called", () => {
@@ -92,11 +98,92 @@ describe("defaultDispatch", () => {
     expect(s.calls.map((c) => c[0])).toEqual(["resolve", "create"]);
   });
 
-  test("the runPhaseAgent result is returned verbatim", () => {
+  test("the runPhaseAgent result is returned verbatim (plus worktreePath — CTL-615)", () => {
     const s = baseSeams();
     s.runPhaseAgent = () => ({ code: 7, stdout: "", stderr: "phase boom" });
     const r = defaultDispatch({ orchDir: "/ec", ticket: "CTL-1", phase: "plan" }, s);
-    expect(r).toEqual({ code: 7, stdout: "", stderr: "phase boom" });
+    expect(r).toEqual({ code: 7, stdout: "", stderr: "phase boom", worktreePath: "/wt/CTL-1" });
+  });
+});
+
+describe("defaultDispatch — worktreePath / expectedBranch wiring (CTL-615)", () => {
+  const baseSeams = () => {
+    const calls = [];
+    return {
+      calls,
+      resolveProject: (ticket) => {
+        calls.push(["resolve", ticket]);
+        return { team: "CTL", repoRoot: "/repo" };
+      },
+      createWorktree: (args) => {
+        calls.push(["create", args]);
+        return { code: 0, worktreePath: `/wt/${args.ticket}`, stderr: "" };
+      },
+      runPhaseAgent: (args) => {
+        calls.push(["run", args]);
+        return { code: 0, stdout: "ok", stderr: "" };
+      },
+    };
+  };
+
+  test("passes expectedBranch: ticket through to createWorktree", () => {
+    const s = baseSeams();
+    defaultDispatch({ orchDir: "/ec", ticket: "CTL-7", phase: "implement" }, s);
+    const createCall = s.calls.find((c) => c[0] === "create");
+    expect(createCall[1].expectedBranch).toBe("CTL-7");
+  });
+
+  test("the dispatch result carries the resolved worktreePath", () => {
+    const s = baseSeams();
+    const r = defaultDispatch({ orchDir: "/ec", ticket: "CTL-8", phase: "implement" }, s);
+    expect(r.worktreePath).toBe("/wt/CTL-8");
+  });
+
+  test("expectedWorktreePath match → dispatch proceeds, runs phase agent", () => {
+    const s = baseSeams();
+    const r = defaultDispatch(
+      {
+        orchDir: "/ec",
+        ticket: "CTL-9",
+        phase: "implement",
+        expectedWorktreePath: "/wt/CTL-9",
+      },
+      s,
+    );
+    expect(r.code).toBe(0);
+    expect(s.calls.some((c) => c[0] === "run")).toBe(true);
+  });
+
+  test("expectedWorktreePath mismatch → code:1, runPhaseAgent never called, reason='revive-aborted-wrong-cwd'", () => {
+    const s = baseSeams();
+    s.createWorktree = (args) => {
+      s.calls.push(["create", args]);
+      return { code: 0, worktreePath: "/wt/ADV-1129", stderr: "" };
+    };
+    const r = defaultDispatch(
+      {
+        orchDir: "/ec",
+        ticket: "CTL-9",
+        phase: "implement",
+        expectedWorktreePath: "/wt/CTL-9",
+      },
+      s,
+    );
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/revive-aborted-wrong-cwd/);
+    expect(r.worktreePath).toBe("/wt/ADV-1129");
+    expect(s.calls.map((c) => c[0])).toEqual(["resolve", "create"]);
+  });
+
+  test("expectedWorktreePath unset (initial dispatch) → no comparison, proceeds normally", () => {
+    const s = baseSeams();
+    s.createWorktree = (args) => {
+      s.calls.push(["create", args]);
+      return { code: 0, worktreePath: "/wt/whatever", stderr: "" };
+    };
+    const r = defaultDispatch({ orchDir: "/ec", ticket: "CTL-9", phase: "research" }, s);
+    expect(r.code).toBe(0);
+    expect(s.calls.some((c) => c[0] === "run")).toBe(true);
   });
 });
 

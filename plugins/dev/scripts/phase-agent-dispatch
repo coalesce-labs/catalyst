@@ -395,6 +395,12 @@ if [[ $EXISTING_STATUS == "dispatched" || $EXISTING_STATUS == "running" || $EXIS
 fi
 
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# CTL-615: persist the dispatcher's cwd as the canonical worktreePath. The
+# caller (execution-core defaultRunPhaseAgent) sets cwd === the freshly-
+# resolved worktree, so `pwd` is the ground-truth land site for this
+# dispatch. A later revive reads this field back and asserts the registry-
+# derived path matches it before launching the bg worker.
+WORKTREE_PATH_RESOLVED="$(pwd)"
 jq -nc \
 	--arg ticket "$TICKET" \
 	--arg phase "$PHASE" \
@@ -402,8 +408,10 @@ jq -nc \
 	--argjson turnCap "$TURN_CAP" \
 	--arg orch "$ORCH_ID" \
 	--arg ts "$TS" \
+	--arg wt "$WORKTREE_PATH_RESOLVED" \
 	'{ticket: $ticket, phase: $phase, orchestrator: $orch, model: $model,
     turnCap: $turnCap, status: "dispatched", bg_job_id: null,
+    worktreePath: $wt,
     startedAt: $ts, updatedAt: $ts}' >"$SIGNAL_FILE" ||
 	die "failed to write signal file $SIGNAL_FILE"
 

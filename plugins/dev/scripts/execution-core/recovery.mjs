@@ -309,8 +309,16 @@ export function defaultReviveDispatch({ orchDir, ticket, phase }, { dispatch = d
     );
     return { code: 1, stdout: "", stderr: "signal-missing" };
   }
+  // CTL-615: capture the previously-dispatched worktreePath so dispatch can
+  // cross-check the registry-resolved path against the canonical cwd before
+  // launching the bg worker. Pre-CTL-615 signals lack the field; in that case
+  // we omit expectedWorktreePath and fall through to legacy behaviour.
+  let expectedWorktreePath;
   try {
     const sig = JSON.parse(readFileSync(signalPath, "utf8"));
+    if (typeof sig.worktreePath === "string" && sig.worktreePath.length > 0) {
+      expectedWorktreePath = sig.worktreePath;
+    }
     sig.status = "stalled";
     sig.attentionReason = "ctl-587-revive-reset";
     sig.updatedAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -324,7 +332,9 @@ export function defaultReviveDispatch({ orchDir, ticket, phase }, { dispatch = d
     log.warn({ ticket, phase, err: err.message }, "revive: signal reset failed");
     return { code: 1, stdout: "", stderr: err.message };
   }
-  return dispatch({ orchDir, ticket, phase });
+  const dispatchArgs = { orchDir, ticket, phase };
+  if (expectedWorktreePath) dispatchArgs.expectedWorktreePath = expectedWorktreePath;
+  return dispatch(dispatchArgs);
 }
 
 // defaultApplyStalledLabel — apply the flat `needs-human` label through the

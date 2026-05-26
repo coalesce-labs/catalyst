@@ -141,6 +141,11 @@ function parseSignal(path, layout) {
         : { kind: "bg", value: raw.bg_job_id ?? null },
     updatedAt: raw.updatedAt ?? null,
     pr: raw.pr ?? null,
+    // CTL-615: the absolute worktree path the dispatch landed in. The
+    // canonical cwd of record; revive cross-checks against the registry-
+    // derived path to catch wrong-cwd redispatch (memory: ADV-1134). Null
+    // for pre-CTL-615 signals — revive treats null as "skip check".
+    worktreePath: raw.worktreePath ?? null,
     raw,
   };
 }
