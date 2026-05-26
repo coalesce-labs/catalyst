@@ -149,6 +149,22 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
     continue
   fi
 
+  # CTL-617: skip rebase dispatch while phase-monitor-merge owns the worktree.
+  # phase-monitor-merge handles BEHIND inline (plugins/dev/skills/phase-monitor-merge/SKILL.md);
+  # dispatching a parallel rebase worker into the same worktree is the
+  # two-merge-owners race from CTL-133. The "dispatched|running|done" set
+  # mirrors phase-agent-dispatch's idempotency guard.
+  MONITOR_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-monitor-merge.json"
+  if [ -f "$MONITOR_SIGNAL" ]; then
+    MONITOR_STATUS=$(jq -r '.status // empty' "$MONITOR_SIGNAL" 2>/dev/null || echo "")
+    case "$MONITOR_STATUS" in
+      dispatched|running|done)
+        SKIPPED=$((SKIPPED+1))
+        continue
+        ;;
+    esac
+  fi
+
   CHECKED=$((CHECKED+1))
 
   PR_VIEW="${TMP_DIR}/pr-${TICKET}.json"
