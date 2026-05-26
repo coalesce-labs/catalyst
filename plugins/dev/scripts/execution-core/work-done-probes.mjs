@@ -3,9 +3,11 @@
 // at module load.
 //
 // The registry maps phase name → probe function. `implement` checks commit state
-// (CTL-574); `research`/`plan` check for a complete on-disk artifact (CTL-604).
-// Only `verify`/`review`/`pr`/`monitor-*` remain without a probe — they have no
-// single on-disk artifact and stay CTL-587's auto-revival responsibility.
+// (CTL-574); `research`/`plan` check for a complete on-disk artifact (CTL-604);
+// `triage`/`verify`/`review`/`monitor-deploy` validate a worker-dir JSON artifact's
+// content and `pr`/`monitor-merge` query the PR's REST merge state (CTL-641).
+// Every pipeline phase now carries a probe — branch (A) "no-probe-for-phase"
+// escalation is reached only by a genuinely-unknown phase name.
 
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
@@ -53,6 +55,145 @@ export function resolveWorktree({ ticket, repoRoot } = {}, { runGit = defaultRun
   const list = runGit(["-C", repoRoot, "worktree", "list", "--porcelain"]);
   if (list.code !== 0) return null;
   return parseWorktreeForBranch(list.stdout, ticket) || null;
+}
+
+// defaultReadFile — read a file as utf8. Returns { ok, content }; never throws
+// (ENOENT / EACCES → { ok: false, content: "" }). Mirrors defaultRunGit's
+// never-throw contract so probes keep their safe-default-false logic linear.
+export function defaultReadFile(path, { read = readFileSync } = {}) {
+  try {
+    return { ok: true, content: read(path, "utf8") };
+  } catch {
+    return { ok: false, content: "" };
+  }
+}
+
+// readJson — { ok, value } parse of a worker-dir JSON artifact. ok=false on a
+// missing file OR a parse error (both mean "not done").
+function readJson(path, readFile) {
+  const { ok, content } = readFile(path);
+  if (!ok) return { ok: false, value: null };
+  try {
+    return { ok: true, value: JSON.parse(content) };
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
+// workerArtifact — ${orchDir}/workers/<ticket>/<name>; the canonical worker-dir
+// JSON/signal layout (signal-reader.mjs).
+const workerArtifact = (orchDir, ticket, name) => `${orchDir}/workers/${ticket}/${name}`;
+
+// CTL-641: JSON worker-dir probes (triage, verify, review, monitor-deploy).
+// Each validates artifact CONTENT, not mere existence (memory
+// project_phase_rewalk_artifact_validation: a truncated artifact must read as
+// not-done). Field shapes verified against the phase skills + real archived
+// artifacts: triage.json {classification,…}, verify.json
+// {regression_risk,findings,tests_attempted,gates,generatedAt} (phase-verify
+// SKILL.md:182-189), review.json
+// {findings,remediationCommit,reviewPassed,generatedAt} (phase-review
+// SKILL.md:167-175), phase-monitor-deploy.json {deploy_state,…}.
+
+function triageProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile } = {}) {
+  if (!ticket || !orchDir) return false;
+  const { ok, value } = readJson(workerArtifact(orchDir, ticket, "triage.json"), readFile);
+  return ok && typeof value?.classification === "string" && value.classification.trim() !== "";
+}
+
+function verifyProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile } = {}) {
+  if (!ticket || !orchDir) return false;
+  const { ok, value } = readJson(workerArtifact(orchDir, ticket, "verify.json"), readFile);
+  if (!ok || !value) return false;
+  return (
+    Array.isArray(value.findings) &&
+    "regression_risk" in value &&
+    "tests_attempted" in value &&
+    "gates" in value &&
+    typeof value.generatedAt === "string"
+  );
+}
+
+function reviewProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile } = {}) {
+  if (!ticket || !orchDir) return false;
+  const { ok, value } = readJson(workerArtifact(orchDir, ticket, "review.json"), readFile);
+  if (!ok || !value) return false;
+  return (
+    Array.isArray(value.findings) &&
+    typeof value.reviewPassed === "boolean" &&
+    "remediationCommit" in value &&
+    typeof value.generatedAt === "string"
+  );
+}
+
+// deploy_state ∈ {success, skipped} is terminal-done (signal-reader.mjs:29 ranks
+// `skipped` the same as `done`: no deployment_status arrived before the timeout).
+const DEPLOY_DONE_STATES = new Set(["success", "skipped"]);
+function monitorDeployProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile } = {}) {
+  if (!ticket || !orchDir) return false;
+  const { ok, value } = readJson(workerArtifact(orchDir, ticket, "phase-monitor-deploy.json"), readFile);
+  return ok && DEPLOY_DONE_STATES.has(value?.deploy_state);
+}
+
+// CTL-641 Phase 3: gh-backed probes (pr, monitor-merge). pr is done when its PR
+// is open or already merged; monitor-merge is done when the PR is merged. The
+// PR number/url come from the worker-dir signal; the merge state comes from the
+// REST endpoint (`gh api repos/<slug>/pulls/<n>` → lowercase `.state`/`.merged`,
+// per research §4 — NOT `gh pr view --json state`, whose GraphQL state is
+// uppercase and would never compare equal to "open").
+
+// defaultRunGh — `gh <args>` with stdout/stderr captured; never throws.
+export function defaultRunGh(args, { spawn = spawnSync } = {}) {
+  const res = spawn("gh", args, { encoding: "utf8" });
+  if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
+  return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
+// prInfoFromSignal — read { number, url } from a worker-dir signal's .pr. null
+// on any miss (missing file, parse error, no number).
+function prInfoFromSignal(orchDir, ticket, signalName, readFile) {
+  const { ok, value } = readJson(workerArtifact(orchDir, ticket, signalName), readFile);
+  if (!ok || !value?.pr?.number) return null;
+  return { number: value.pr.number, url: value.pr.url ?? null };
+}
+
+// repoSlugFromUrl — "https://github.com/owner/repo/pull/42" → "owner/repo", or null.
+function repoSlugFromUrl(url) {
+  const m = typeof url === "string" && url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+  return m ? m[1] : null;
+}
+
+// ghPullRest — REST pull payload ({ state, merged, … }) for a PR, or null on any
+// gh/parse failure. Slug from the PR url; when absent, gh substitutes
+// {owner}/{repo} from the cwd repo.
+function ghPullRest(pr, runGh) {
+  const slug = repoSlugFromUrl(pr.url) || "{owner}/{repo}";
+  const res = runGh(["api", `repos/${slug}/pulls/${pr.number}`]);
+  if (res.code !== 0) return null;
+  try {
+    return JSON.parse(res.stdout);
+  } catch {
+    return null;
+  }
+}
+
+function prProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile, runGh = defaultRunGh } = {}) {
+  if (!ticket || !orchDir) return false;
+  const pr = prInfoFromSignal(orchDir, ticket, "phase-pr.json", readFile);
+  if (!pr) return false;
+  const json = ghPullRest(pr, runGh);
+  // open or already-merged both mean the PR phase landed its artifact.
+  return json?.state === "open" || json?.merged === true;
+}
+
+function monitorMergeProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile, runGh = defaultRunGh } = {}) {
+  if (!ticket || !orchDir) return false;
+  const mm = prInfoFromSignal(orchDir, ticket, "phase-monitor-merge.json", readFile);
+  const prSig = prInfoFromSignal(orchDir, ticket, "phase-pr.json", readFile);
+  const number = mm?.number ?? prSig?.number;
+  if (!number) return false;
+  // phase-monitor-merge.json omits .pr.url, so prefer phase-pr.json for the slug.
+  const url = prSig?.url ?? mm?.url ?? null;
+  return ghPullRest({ number, url }, runGh)?.merged === true;
 }
 
 // implementProbe — commits-ahead>0 vs origin/main + clean tree on the worktree
@@ -141,12 +282,19 @@ const planProbe = artifactProbe("thoughts/shared/plans", {
 });
 
 // WORK_DONE_PROBES — phase → probe. Adding a probe is the entire opt-in for a
-// phase to participate in the CTL-574 reclaim sweep. Phases without an entry
-// (verify/review/pr/monitor-*) remain CTL-587's responsibility (auto-revival).
+// phase to participate in the CTL-574 reclaim sweep. All nine pipeline phases
+// now have an entry; only a genuinely-unknown phase falls through to CTL-587's
+// branch-(A) escalation.
 export const WORK_DONE_PROBES = {
   implement: implementProbe,
   research: researchProbe,
   plan: planProbe,
+  triage: triageProbe,
+  verify: verifyProbe,
+  review: reviewProbe,
+  pr: prProbe,
+  "monitor-merge": monitorMergeProbe,
+  "monitor-deploy": monitorDeployProbe,
 };
 
 // hasProbe — true when the given phase has a registered probe. Used by the

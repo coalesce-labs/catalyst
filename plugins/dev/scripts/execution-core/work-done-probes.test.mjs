@@ -7,6 +7,7 @@ import {
   hasProbe,
   defaultRunGit,
   resolveWorktree,
+  defaultReadFile,
 } from "./work-done-probes.mjs";
 
 // makeRunGit — a deterministic `git` fake keyed on the trailing positional args.
@@ -84,18 +85,144 @@ ${"Overview prose to clear the size floor. ".repeat(8)}
 - [ ] tests pass
 `;
 
+// CTL-604 + CTL-641: every pipeline phase now carries a probe — implement
+// (CTL-574), research/plan (CTL-604), and triage/verify/review/pr/monitor-merge/
+// monitor-deploy (CTL-641). hasProbe is false only for a genuinely-unknown phase,
+// keeping the recovery sweep's branch (A) "no-probe-for-phase" escalation as a
+// defensive guard.
 describe("WORK_DONE_PROBES — registry shape", () => {
-  test("implement, research, and plan are registered; other phases are not", () => {
-    for (const phase of ["implement", "research", "plan"]) {
+  test("all 9 pipeline phases are registered", () => {
+    for (const phase of [
+      "implement", "triage", "research", "plan",
+      "verify", "review", "pr", "monitor-merge", "monitor-deploy",
+    ]) {
       expect(hasProbe(phase)).toBe(true);
     }
-    for (const phase of [
-      "triage",
-      "verify", "review", "pr", "monitor-merge", "monitor-deploy",
-      "unknown-phase",
-    ]) {
+  });
+  test("a genuinely-unknown phase is not registered", () => {
+    for (const phase of ["unknown-phase", "deploy", ""]) {
       expect(hasProbe(phase)).toBe(false);
     }
+  });
+});
+
+// makeReadFile — deterministic fs fake keyed on absolute path. Returns the
+// { ok, content } shape of defaultReadFile; an unknown path is a miss.
+function makeReadFile(files) {
+  return (path) => (path in files ? { ok: true, content: files[path] } : { ok: false, content: "" });
+}
+
+const ORCH = "/orch";
+const wpath = (ticket, name) => `${ORCH}/workers/${ticket}/${name}`;
+
+describe("WORK_DONE_PROBES.triage", () => {
+  test("true when triage.json parses with non-empty classification", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "triage.json")]: JSON.stringify({ classification: "feature", summary: "x" }),
+    });
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(true);
+  });
+  test("false when classification empty/missing (truncated)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "triage.json")]: JSON.stringify({ summary: "x" }) });
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when classification is whitespace-only (truncated)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "triage.json")]: JSON.stringify({ classification: "   " }) });
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when file missing", () => {
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+  test("false on invalid JSON (parse error is safe)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "triage.json")]: "{not json" });
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false on missing input (no readFile call)", () => {
+    const readFile = () => { throw new Error("readFile must not be called"); };
+    expect(WORK_DONE_PROBES.triage({ ticket: null, orchDir: ORCH }, { readFile })).toBe(false);
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: null }, { readFile })).toBe(false);
+  });
+});
+
+// verify.json real schema (phase-verify SKILL.md:182-189):
+//   {regression_risk:int, findings:[...], tests_attempted:int, gates:{...}, generatedAt:string}
+describe("WORK_DONE_PROBES.verify", () => {
+  test("true with all required keys present", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "verify.json")]: JSON.stringify({
+        regression_risk: 1, findings: [], tests_attempted: 0, gates: {}, generatedAt: "2026-05-26T00:00:00Z",
+      }),
+    });
+    expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(true);
+  });
+  test("false when a required key is absent (truncated)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "verify.json")]: JSON.stringify({ findings: [] }) });
+    expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when findings is not an array (truncated)", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "verify.json")]: JSON.stringify({
+        regression_risk: 1, findings: "oops", tests_attempted: 0, gates: {}, generatedAt: "x",
+      }),
+    });
+    expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false on missing file / invalid JSON", () => {
+    expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+});
+
+// review.json real schema (phase-review SKILL.md:167-175):
+//   {findings:[...], remediationCommit:string|null, reviewPassed:bool, generatedAt:string}
+describe("WORK_DONE_PROBES.review", () => {
+  test("true with findings[], reviewPassed bool, remediationCommit present, generatedAt", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "review.json")]: JSON.stringify({
+        findings: [], remediationCommit: null, reviewPassed: true, generatedAt: "2026-05-26T00:00:00Z",
+      }),
+    });
+    expect(WORK_DONE_PROBES.review({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(true);
+  });
+  test("false when reviewPassed is not a boolean (truncated)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "review.json")]: JSON.stringify({ findings: [], generatedAt: "x" }) });
+    expect(WORK_DONE_PROBES.review({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when remediationCommit key absent (truncated)", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "review.json")]: JSON.stringify({ findings: [], reviewPassed: true, generatedAt: "x" }),
+    });
+    expect(WORK_DONE_PROBES.review({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false on missing file", () => {
+    expect(WORK_DONE_PROBES.review({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+});
+
+// monitor-deploy: deploy_state ∈ {success, skipped} is done (signal-reader.mjs:29
+// ranks skipped as terminal-equivalent); anything else / missing is not.
+describe("WORK_DONE_PROBES['monitor-deploy']", () => {
+  test.each(["success", "skipped"])("true when deploy_state=%s", (state) => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "phase-monitor-deploy.json")]: JSON.stringify({ deploy_state: state, deploy_sha: "abc", completed_at: "x" }),
+    });
+    expect(WORK_DONE_PROBES["monitor-deploy"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(true);
+  });
+  test("false when deploy_state=failure", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "phase-monitor-deploy.json")]: JSON.stringify({ deploy_state: "failure" }) });
+    expect(WORK_DONE_PROBES["monitor-deploy"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when deploy_state absent / file missing", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "phase-monitor-deploy.json")]: JSON.stringify({ status: "running" }) });
+    expect(WORK_DONE_PROBES["monitor-deploy"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+    expect(WORK_DONE_PROBES["monitor-deploy"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+});
+
+describe("defaultReadFile — never throws", () => {
+  test("missing file → { ok: false, content: '' }", () => {
+    const r = defaultReadFile("/no/such/path/xyz.json");
+    expect(r.ok).toBe(false);
+    expect(r.content).toBe("");
   });
 });
 
@@ -436,5 +563,86 @@ describe("WORK_DONE_PROBES.research/plan — input guards (no fs/git spawn)", ()
         { runGit: boom, listArtifacts: boom, readArtifact: boom },
       ),
     ).toBe(false);
+    expect(
+      WORK_DONE_PROBES.plan(
+        { ticket: "CTL-604", repoRoot: null },
+        { runGit: boom, listArtifacts: boom, readArtifact: boom },
+      ),
+    ).toBe(false);
+  });
+});
+
+// --- CTL-641 Phase 3: gh REST probes (pr, monitor-merge) -------------------
+// pr is done when its PR is open (or already merged); monitor-merge is done
+// when the PR is merged. The PR number/url is read from the worker-dir signal
+// (.pr.number / .pr.url). We query the REST endpoint `gh api
+// repos/<slug>/pulls/<n>` (research §4 — REST `.state`/`.merged`, NOT GraphQL,
+// whose state field is uppercase). The repo slug is parsed from .pr.url; when
+// absent we fall back to gh's `{owner}/{repo}` placeholder (cwd inference).
+
+// makeRunGh — deterministic `gh` fake keyed on the joined args.
+function makeRunGh(responses) {
+  return (args) => responses[args.join(" ")] ?? { code: 1, stdout: "", stderr: "no match" };
+}
+
+describe("WORK_DONE_PROBES.pr", () => {
+  // url "u" has no parseable slug → falls back to the {owner}/{repo} placeholder.
+  const readFile = makeReadFile({ [wpath("CTL-1", "phase-pr.json")]: JSON.stringify({ pr: { number: 42, url: "u" } }) });
+  test("true when PR state is open (REST)", () => {
+    const runGh = makeRunGh({ "api repos/{owner}/{repo}/pulls/42": { code: 0, stdout: JSON.stringify({ state: "open" }), stderr: "" } });
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(true);
+  });
+  test("true when PR already merged (pr phase still done)", () => {
+    const runGh = makeRunGh({ "api repos/{owner}/{repo}/pulls/42": { code: 0, stdout: JSON.stringify({ state: "closed", merged: true }), stderr: "" } });
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(true);
+  });
+  test("false when PR is closed-unmerged", () => {
+    const runGh = makeRunGh({ "api repos/{owner}/{repo}/pulls/42": { code: 0, stdout: JSON.stringify({ state: "closed", merged: false }), stderr: "" } });
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(false);
+  });
+  test("real github url → slug parsed into the REST path", () => {
+    const rf = makeReadFile({
+      [wpath("CTL-1", "phase-pr.json")]: JSON.stringify({ pr: { number: 42, url: "https://github.com/coalesce-labs/catalyst/pull/42" } }),
+    });
+    const runGh = makeRunGh({ "api repos/coalesce-labs/catalyst/pulls/42": { code: 0, stdout: JSON.stringify({ state: "open" }), stderr: "" } });
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile: rf, runGh })).toBe(true);
+  });
+  test("false when no PR number on the signal (no gh call)", () => {
+    const runGh = () => { throw new Error("runGh must not be called"); };
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({ [wpath("CTL-1", "phase-pr.json")]: "{}" }), runGh })).toBe(false);
+  });
+  test("false when gh fails (safe default)", () => {
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh: makeRunGh({}) })).toBe(false);
+  });
+  test("false on missing input (no readFile/gh call)", () => {
+    const boom = () => { throw new Error("must not be called"); };
+    expect(WORK_DONE_PROBES.pr({ ticket: null, orchDir: ORCH }, { readFile: boom, runGh: boom })).toBe(false);
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: null }, { readFile: boom, runGh: boom })).toBe(false);
+  });
+});
+
+describe("WORK_DONE_PROBES['monitor-merge']", () => {
+  // phase-monitor-merge.json carries .pr.number but NOT .pr.url (it writes
+  // `.pr = {number}` only) — the probe reads the url from phase-pr.json.
+  const readFile = makeReadFile({
+    [wpath("CTL-1", "phase-monitor-merge.json")]: JSON.stringify({ pr: { number: 42 } }),
+    [wpath("CTL-1", "phase-pr.json")]: JSON.stringify({ pr: { number: 42, url: "https://github.com/coalesce-labs/catalyst/pull/42" } }),
+  });
+  test("true when merged==true (REST)", () => {
+    const runGh = makeRunGh({ "api repos/coalesce-labs/catalyst/pulls/42": { code: 0, stdout: JSON.stringify({ merged: true }), stderr: "" } });
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(true);
+  });
+  test("false when merged==false", () => {
+    const runGh = makeRunGh({ "api repos/coalesce-labs/catalyst/pulls/42": { code: 0, stdout: JSON.stringify({ merged: false }), stderr: "" } });
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(false);
+  });
+  test("falls back to phase-pr.json number when monitor-merge signal lacks one", () => {
+    const rf = makeReadFile({ [wpath("CTL-1", "phase-pr.json")]: JSON.stringify({ pr: { number: 7, url: "u" } }) });
+    const runGh = makeRunGh({ "api repos/{owner}/{repo}/pulls/7": { code: 0, stdout: JSON.stringify({ merged: true }), stderr: "" } });
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile: rf, runGh })).toBe(true);
+  });
+  test("false when no PR number anywhere / gh fails", () => {
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}), runGh: () => { throw new Error("no"); } })).toBe(false);
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh: makeRunGh({}) })).toBe(false);
   });
 });
