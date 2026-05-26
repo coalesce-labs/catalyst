@@ -49,6 +49,13 @@ STALE_HEARTBEAT_SECONDS=900
 WORKER_COMMAND="/catalyst-dev:oneshot"
 MODEL="opus"
 DRY_RUN=0
+# CTL-613: --probe-helper invokes one helper function from the test harness
+# without running the main revive loop. PROBE_HELPER holds the function name,
+# PROBE_ARG holds its single argument. When set, the script skips
+# --orch-dir/--orch-id validation, defines its helpers, dispatches the call,
+# and exits with the helper's return code.
+PROBE_HELPER=""
+PROBE_ARG=""
 
 usage() {
   sed -n '2,32p' "$0"
@@ -66,14 +73,17 @@ while [[ $# -gt 0 ]]; do
     --worker-command)           WORKER_COMMAND="$2"; shift 2 ;;
     --model)                    MODEL="$2"; shift 2 ;;
     --dry-run)                  DRY_RUN=1; shift ;;
+    --probe-helper)             PROBE_HELPER="$2"; PROBE_ARG="${3:-}"; shift 3 ;;
     -h|--help)                  usage 0 ;;
     *)                          echo "unknown arg: $1" >&2; usage ;;
   esac
 done
 
-[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
-[ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
-[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+if [ -z "$PROBE_HELPER" ]; then
+  [ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
+  [ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
+  [ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+fi
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -133,6 +143,37 @@ resolve_session_id() {
   fi
 
   return 1
+}
+
+# CTL-613: resolve the Claude session_id for a phase-mode worker spawned via
+# `claude --bg`. The bg job dir is the source of truth — its state.json
+# carries a `linkScanPath` field whose basename (minus `.jsonl`) is the
+# Claude session id used for `--resume`. This is the fallback used by the
+# per-phase turn-cap-exhausted continuation branch because phase-mode workers
+# don't write the legacy stream JSONL that `resolve_session_id` reads.
+#
+# Returns:
+#   stdout: session_id on success, empty on failure
+#   exit:   0 on success, 1 on failure
+#
+# CATALYST_REVIVE_JOBS_DIR overrides ~/.claude/jobs for tests.
+resolve_phase_session_id() {
+  local bg_job_id="$1"
+  [ -z "$bg_job_id" ] && return 1
+  local jobs_dir="${CATALYST_REVIVE_JOBS_DIR:-${HOME}/.claude/jobs}"
+  local state_file="${jobs_dir}/${bg_job_id}/state.json"
+  [ -f "$state_file" ] || return 1
+  local link_path
+  link_path=$(jq -r '.linkScanPath // empty' "$state_file" 2>/dev/null || echo "")
+  [ -z "$link_path" ] && return 1
+  case "$link_path" in
+    *.jsonl) : ;;
+    *) return 1 ;;
+  esac
+  local sid
+  sid=$(basename "$link_path" .jsonl)
+  [ -z "$sid" ] && return 1
+  echo "$sid"
 }
 
 # Detect an API stream-idle-timeout failure in the tail of the worker's stream
@@ -604,6 +645,24 @@ phase_revive_escalate() {
   fi
 }
 
+# CTL-613: phase_worktree_path TICKET
+# Returns the worktreePath for a phase-mode worker by reading the
+# orchestrator's state.json (workers[] array). Phase-mode per-phase signals
+# do not carry worktreePath directly — it lives on the orchestrator state.
+# Returns empty + rc=1 on miss (no state.json, no matching ticket, or empty
+# worktreePath field).
+phase_worktree_path() {
+  local ticket="$1"
+  local state="${ORCH_DIR}/state.json"
+  [ -f "$state" ] || return 1
+  local wt
+  wt=$(jq -r --arg t "$ticket" \
+    '.workers[]? | select(.ticket == $t) | .worktreePath // empty' \
+    "$state" 2>/dev/null | head -1)
+  [ -z "$wt" ] && return 1
+  echo "$wt"
+}
+
 # phase_revive_emit_complete TICKET PHASE PROGRESS_REASON
 # Calls phase-agent-emit-complete to publish the synthetic complete event +
 # mutate the signal status to "done". Best-effort.
@@ -666,6 +725,21 @@ phase_revive_redispatch() {
     fi
   fi
 }
+
+# ─── CTL-613: probe-helper dispatch ─────────────────────────────────────────
+#
+# Test harness shim: when `--probe-helper FUNC ARG` was passed, invoke the
+# named helper with the single arg, then exit with the helper's return code.
+# Used by orchestrate-revive.test.sh to unit-test helpers (resolve_phase_session_id,
+# phase_worktree_path) without driving the full revive loop.
+if [ -n "$PROBE_HELPER" ]; then
+  case "$PROBE_HELPER" in
+    resolve_phase_session_id|phase_worktree_path) ;;
+    *) echo "ERROR: --probe-helper does not allow ${PROBE_HELPER}" >&2; exit 2 ;;
+  esac
+  "$PROBE_HELPER" "$PROBE_ARG"
+  exit $?
+fi
 
 # ─── Main loop ────────────────────────────────────────────────────────────────
 

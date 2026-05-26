@@ -563,6 +563,96 @@ RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/REG-1.json")
 [ -z "$(grep CATALYST_IS_CONTINUATION "$CLAUDE_LOG" 2>/dev/null)" ] && pass "regression: CATALYST_IS_CONTINUATION not set for normal revive" || fail "regression: CATALYST_IS_CONTINUATION leaked"
 scratch_teardown
 
+# ─── CTL-613: phase-mode session_id resolver (resolve_phase_session_id) ─────
+#
+# Unit tests for the new helper that resolves a Claude session_id from a
+# `claude --bg` job's state.json (bg_job_id → ~/.claude/jobs/<bg>/state.json
+# → linkScanPath → basename → strip .jsonl). Tests invoke the helper via the
+# `--probe-helper` flag.
+
+probe_resolver() {
+  # Echo just the resolver's stdout (one-line session id or empty); return its rc.
+  "$REVIVE" --probe-helper resolve_phase_session_id "$1"
+}
+
+echo "test (CTL-613): resolve_phase_session_id — bg_job_id → linkScanPath → session_id"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/cafe1234"
+jq -n '{linkScanPath:"/Users/ryan/.claude/projects/-foo-bar/abcdef12-3456-7890-abcd-ef1234567890.jsonl"}' \
+  > "${CATALYST_REVIVE_JOBS_DIR}/cafe1234/state.json"
+OUT=$(probe_resolver "cafe1234"); RC=$?
+[ "$RC" = "0" ] && pass "resolver rc=0 on happy path" || fail "resolver rc=0 on happy path" "got rc=$RC"
+[ "$OUT" = "abcdef12-3456-7890-abcd-ef1234567890" ] && pass "resolver returns session_id basename" || fail "resolver session_id" "got: $OUT"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): resolve_phase_session_id — missing state.json → rc=1 empty"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/dead0000"
+OUT=$(probe_resolver "dead0000"); RC=$?
+[ "$RC" != "0" ] && pass "missing state.json → rc!=0" || fail "missing state.json → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "missing state.json → empty stdout" || fail "missing state.json → empty stdout" "got: $OUT"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): resolve_phase_session_id — malformed linkScanPath → rc=1 empty"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/bad00001"
+jq -n '{linkScanPath:"/garbage/no-extension"}' \
+  > "${CATALYST_REVIVE_JOBS_DIR}/bad00001/state.json"
+OUT=$(probe_resolver "bad00001"); RC=$?
+[ "$RC" != "0" ] && pass "malformed linkScanPath → rc!=0" || fail "malformed linkScanPath → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "malformed linkScanPath → empty stdout" || fail "malformed linkScanPath → empty stdout" "got: $OUT"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): resolve_phase_session_id — empty bg_job_id arg → rc=1 empty"
+scratch_setup
+OUT=$(probe_resolver ""); RC=$?
+[ "$RC" != "0" ] && pass "empty bg_job_id → rc!=0" || fail "empty bg_job_id → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "empty bg_job_id → empty stdout" || fail "empty bg_job_id → empty stdout" "got: $OUT"
+scratch_teardown
+
+# ─── CTL-613: phase_worktree_path resolver ──────────────────────────────────
+#
+# Unit tests for the helper that resolves a phase-mode worker's worktree
+# path from the orchestrator's state.json (workers[] array). Invoked via
+# the same --probe-helper shim.
+
+probe_worktree() {
+  "$REVIVE" --orch-dir "$ORCH_DIR" --orch-id "test" \
+    --probe-helper phase_worktree_path "$1"
+}
+
+echo "test (CTL-613): phase_worktree_path — workers[ticket].worktreePath → stdout, rc=0"
+scratch_setup
+jq -n '{workers:[{ticket:"WT-1", worktreePath:"/tmp/wt-1"}]}' \
+  > "${ORCH_DIR}/state.json"
+OUT=$(probe_worktree "WT-1"); RC=$?
+[ "$RC" = "0" ] && pass "phase_worktree_path rc=0 on happy path" || fail "phase_worktree_path rc=0 on happy path" "got rc=$RC"
+[ "$OUT" = "/tmp/wt-1" ] && pass "phase_worktree_path returns worktreePath" || fail "phase_worktree_path worktreePath" "got: $OUT"
+scratch_teardown
+
+echo "test (CTL-613): phase_worktree_path — ticket missing → rc=1 empty"
+scratch_setup
+jq -n '{workers:[{ticket:"WT-1", worktreePath:"/tmp/wt-1"}]}' \
+  > "${ORCH_DIR}/state.json"
+OUT=$(probe_worktree "WT-MISSING"); RC=$?
+[ "$RC" != "0" ] && pass "missing ticket → rc!=0" || fail "missing ticket → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "missing ticket → empty stdout" || fail "missing ticket → empty stdout" "got: $OUT"
+scratch_teardown
+
+echo "test (CTL-613): phase_worktree_path — state.json missing → rc=1 empty"
+scratch_setup
+# Intentionally do not write state.json.
+OUT=$(probe_worktree "WT-1"); RC=$?
+[ "$RC" != "0" ] && pass "missing state.json → rc!=0" || fail "missing state.json → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "missing state.json → empty stdout" || fail "missing state.json → empty stdout" "got: $OUT"
+scratch_teardown
+
 # ─── Results ──────────────────────────────────────────────────────────────────
 
 echo ""
