@@ -776,7 +776,7 @@ export function reclaimDeadWorkIfPossible(
 // event-log cursor, and classifies every in-flight worker. Returns a
 // RecoveryReport; throws nothing the daemon must handle (reconcile is internally
 // best-effort, worker scan is filesystem-pure).
-export function recoverStartup({ orchDir, exec, statJob } = {}) {
+export function recoverStartup({ orchDir, exec, statJob, detectCold = detectColdStart } = {}) {
   if (!orchDir) throw new Error("recoverStartup: orchDir is required");
 
   // (1) Routing state — reconcileAll re-reads the registry + polls Linear per
@@ -800,10 +800,17 @@ export function recoverStartup({ orchDir, exec, statJob } = {}) {
   // (3) Dispatch/worker state — classify in-flight claude --bg workers.
   const workers = reconstructWorkerState(orchDir, { statJob });
 
+  // (4) Cold-start verdict (CTL-640) — does every prior --bg worker pre-date the
+  //     runtime epoch? Surfaced for a downstream consumer (CTL-639) to gate the
+  //     STALE_MS stale-wait. Pass statJob so a test-redirected jobs root flows
+  //     through both the worker reconstruction and the cold-start scan.
+  const coldStart = detectCold({ statJob });
+
   return {
     recoveredAt: new Date().toISOString(),
     routing: { projects, projectCount: projects.length },
     cursor: { logPath, byteOffset: startOffset, resumed: startOffset !== fileSize },
     workers,
+    coldStart,
   };
 }

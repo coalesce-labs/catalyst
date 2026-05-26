@@ -416,6 +416,18 @@ describe("recoverStartup", () => {
     expect(report.cursor.byteOffset).toBe(0);
     expect(report.cursor.resumed).toBe(false);
   });
+
+  test("RecoveryReport includes the coldStart verdict (CTL-640)", () => {
+    enroll("ENG", { status: "Todo" });
+    const exec = mockExec({ ENG: [] });
+    const report = recoverStartup({
+      orchDir,
+      exec,
+      statJob: () => null,
+      detectCold: () => ({ coldStart: true, epoch: 5000, epochSource: "daemon", jobsChecked: 0, newestJobMtime: 0 }),
+    });
+    expect(report.coldStart).toMatchObject({ coldStart: true, epochSource: "daemon" });
+  });
 });
 
 // --- CTL-574: reclaim-dead-work --------------------------------------------
