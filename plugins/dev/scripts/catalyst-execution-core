@@ -172,11 +172,25 @@ cmd_status() {
 	echo "stopped"
 }
 
-# Source-safety (CTL-635): when sourced (e.g. by the test suite to unit-test
-# helpers), define functions but do not dispatch a command. `(return 0 2>/dev/null)`
-# succeeds only when this file is sourced; the negation guards execution to the
-# direct-invocation case.
-if ! (return 0 2>/dev/null); then
+# CTL-649 Phase 5: route a noun (sessions|worktrees|branches|tidy) to its mjs
+# module under execution-core/cli/. The audit CLI lives inside this same binary
+# — no new wrapper symlink, no new plist. resolve_runtime picks bun/node.
+exec_runtime_module() {
+	local module="$1"
+	shift
+	local module_path="$SCRIPT_DIR/execution-core/cli/${module}.mjs"
+	if [[ ! -f $module_path ]]; then
+		echo "error: execution-core module not found: $module_path" >&2
+		return 1
+	fi
+	local runtime
+	runtime="$(resolve_runtime)" || return 1
+	exec "$runtime" "$module_path" "$@"
+}
+
+# CTL-649 Phase 5: the daemon-lifecycle verbs, dispatched from both the
+# `daemon` noun and the backcompat top-level aliases.
+dispatch_daemon() {
 	case "${1-}" in
 	start) cmd_start ;;
 	stop) cmd_stop ;;
@@ -184,7 +198,33 @@ if ! (return 0 2>/dev/null); then
 	probe) cmd_probe ;;
 	status) cmd_status ;;
 	*)
-		echo "Usage: catalyst-execution-core {start|stop|restart|probe|status}" >&2
+		echo "Usage: catalyst-execution-core daemon {start|stop|restart|probe|status}" >&2
+		exit 1
+		;;
+	esac
+}
+
+# Source-safety (CTL-635): when sourced (e.g. by the test suite to unit-test
+# helpers), define functions but do not dispatch a command. `(return 0 2>/dev/null)`
+# succeeds only when this file is sourced; the negation guards execution to the
+# direct-invocation case.
+if ! (return 0 2>/dev/null); then
+	case "${1-}" in
+	# Backcompat aliases — operator muscle memory for the daemon verbs.
+	start | stop | restart | probe | status) dispatch_daemon "$1" ;;
+	daemon)
+		shift
+		dispatch_daemon "${1-}"
+		;;
+	# CTL-649 audit CLI nouns — each routes to execution-core/cli/<noun>.mjs.
+	sessions | worktrees | branches | tidy)
+		module="$1"
+		shift
+		exec_runtime_module "$module" "$@"
+		;;
+	*)
+		echo "Usage: catalyst-execution-core {daemon|sessions|worktrees|branches|tidy} ..." >&2
+		echo "  daemon {start|stop|restart|probe|status}  (also as top-level aliases)" >&2
 		exit 1
 		;;
 	esac

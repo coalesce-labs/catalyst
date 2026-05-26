@@ -2,7 +2,32 @@
 // (CTL-649 Phase 9). Pure: clock and emit are injectable so tests use a fake
 // clock; production wiring runs with setInterval and emitReapIntent.
 
+import { readFileSync } from "node:fs";
 import { emitReapIntent } from "./reap-intent.mjs";
+import { log } from "./config.mjs";
+
+/**
+ * readOrphanReaperConfig — pull { enabled, intervalSeconds } out of a project's
+ * .catalyst/config.json → catalyst.orchestration.orphanReaper. Returns {} for a
+ * null/missing/unparseable file or absent key, so callers fall back to the
+ * built-in defaults (enabled, 600s). Never throws.
+ */
+export function readOrphanReaperConfig(configPath) {
+  if (!configPath) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { configPath, err: err.message },
+        "orphan-reaper: config unreadable; using defaults"
+      );
+    }
+    return {};
+  }
+  return parsed?.catalyst?.orchestration?.orphanReaper ?? {};
+}
 
 function realClock() {
   return {

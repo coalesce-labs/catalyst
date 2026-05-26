@@ -1,6 +1,6 @@
 // reap-intent.test.mjs — emitter unit tests (CTL-649 Phase 4).
 import { describe, it, expect, beforeEach } from "bun:test";
-import { mkdtempSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -81,5 +81,21 @@ describe("emitReapIntent", () => {
     const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
     expect(last).not.toHaveProperty("reason");
     expect(last).not.toHaveProperty("worktree_path");
+  });
+
+  it("returns false (never throws) when the event log is unwritable", async () => {
+    // Make a parent path component a regular file so mkdirSync(events) fails
+    // with ENOTDIR. Producers rely on this false return to fall back to an
+    // inline reap rather than crashing the sweep mid-flight.
+    const blocker = join(SCRATCH, "notdir");
+    writeFileSync(blocker, "x");
+    process.env.CATALYST_DIR = blocker; // events/ would have to live under a file
+    const { emitReapIntent } = await freshModule();
+    const ok = await emitReapIntent("phase.abort.reap-requested", {
+      ticket: "CTL-1",
+      phase: "implement",
+      bgJobId: "abc12345",
+    });
+    expect(ok).toBe(false);
   });
 });

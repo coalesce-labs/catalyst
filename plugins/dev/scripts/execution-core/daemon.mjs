@@ -32,7 +32,7 @@ import {
   createTicketStateCache,
 } from "./index.mjs";
 import { Reaper } from "./reaper.mjs";
-import { startOrphanReaperTimer } from "./orphan-reaper-timer.mjs";
+import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -311,6 +311,14 @@ function main() {
   const idx = process.argv.indexOf("--pid-file");
   const pidFile = idx >= 0 ? process.argv[idx + 1] : null;
 
+  // CTL-649 Phase 9: thread the periodic-reaper config from .catalyst/config.json
+  // into the timer. Path is env-overridable (CATALYST_CONFIG_FILE); otherwise
+  // the daemon reads the launch-cwd's config. Absent/partial config falls back
+  // to the built-in defaults (enabled, 600s) inside startReaperAndTimer.
+  const configPath =
+    process.env.CATALYST_CONFIG_FILE || resolve(process.cwd(), ".catalyst", "config.json");
+  const orphanReaperConfig = readOrphanReaperConfig(configPath);
+
   // A post-startup throw (a monitor/scheduler timer callback, the watcher)
   // must not leave a half-dead daemon holding a valid PID file — that makes
   // every health check lie. Exit non-zero with a tagged fatal log instead.
@@ -322,7 +330,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile });
+    startDaemon({ pidFile, orphanReaperConfig });
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);
