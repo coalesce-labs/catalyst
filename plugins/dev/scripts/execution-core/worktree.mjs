@@ -18,8 +18,17 @@ const CREATE_WORKTREE_BIN = fileURLToPath(new URL("../create-worktree.sh", impor
 // — never throws. `worktreePath` is parsed from the trailing WORKTREE_PATH=
 // line create-worktree.sh prints on a successful create and on the
 // --reuse-existing short-circuit.
-export function createWorktree({ ticket, repoRoot }, { spawn = spawnSync } = {}) {
-  const res = spawn(CREATE_WORKTREE_BIN, [ticket, "main", "--reuse-existing"], {
+//
+// CTL-615: when `expectedBranch` is supplied, the script's --reuse-existing
+// short-circuit validates the existing worktree is on that branch and exits
+// non-zero on mismatch. The daemon's revive path passes ticket as the
+// expectedBranch so a project-key collision (~/catalyst/wt/CTL/CTL-T3
+// pointing at a worktree checked out to ADV-1129) surfaces immediately
+// instead of silently landing the redispatch in the wrong tree.
+export function createWorktree({ ticket, repoRoot, expectedBranch }, { spawn = spawnSync } = {}) {
+  const argv = [ticket, "main", "--reuse-existing"];
+  if (expectedBranch) argv.push("--expected-branch", expectedBranch);
+  const res = spawn(CREATE_WORKTREE_BIN, argv, {
     cwd: repoRoot,
     encoding: "utf8",
   });

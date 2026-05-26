@@ -29,6 +29,7 @@ HOOKS_JSON=""
 ORCHESTRATION_NAME=""
 REUSE_EXISTING=false
 SKIP_FETCH=false
+EXPECTED_BRANCH=""
 
 while [[ $# -gt 0 ]]; do
 	case $1 in
@@ -37,6 +38,13 @@ while [[ $# -gt 0 ]]; do
 		--orchestration) ORCHESTRATION_NAME="$2"; shift 2 ;;
 		--reuse-existing) REUSE_EXISTING=true; shift ;;
 		--skip-fetch) SKIP_FETCH=true; shift ;;
+		# CTL-615: when --reuse-existing returns an existing worktree dir,
+		# assert its HEAD is on this branch. Mismatch → exit 64 with a
+		# clear diagnostic. The daemon's revive path passes the ticket name
+		# so a project-key collision (~/catalyst/wt/CTL/CTL-T3 checked out
+		# to ADV-1129) is caught before the bg worker spawns into the wrong
+		# tree.
+		--expected-branch) EXPECTED_BRANCH="$2"; shift 2 ;;
 		*) POSITIONAL+=("$1"); shift ;;
 	esac
 done
@@ -117,6 +125,17 @@ fi
 # Check if worktree already exists
 if [ -d "$WORKTREE_PATH" ]; then
 	if [ "$REUSE_EXISTING" = true ]; then
+		# CTL-615: when the caller declared which branch this path MUST be
+		# on, verify HEAD before short-circuiting. A mismatch is the
+		# wrong-cwd ADV-1134 signature — fail loud rather than land a
+		# revive in a stranger's worktree.
+		if [ -n "$EXPECTED_BRANCH" ]; then
+			CUR_BRANCH="$(git -C "$WORKTREE_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+			if [ "$CUR_BRANCH" != "$EXPECTED_BRANCH" ]; then
+				echo -e "${RED}❌ create-worktree: expected-branch mismatch — path ${WORKTREE_PATH} is on '${CUR_BRANCH}', expected '${EXPECTED_BRANCH}' (CTL-615)${NC}" >&2
+				exit 64
+			fi
+		fi
 		echo -e "${GREEN}♻️  Reusing existing worktree: $WORKTREE_PATH${NC}"
 		echo "WORKTREE_PATH=${WORKTREE_PATH}"
 		exit 0

@@ -1354,6 +1354,42 @@ describe("defaultReviveDispatch — signal-reset behaviour", () => {
     });
   });
 
+  test("signal.worktreePath is forwarded to dispatch as expectedWorktreePath (CTL-615)", () => {
+    seed("CTL-15", "implement", {
+      status: "running",
+      bg_job_id: "bg-15",
+      worktreePath: "/wt/CTL/CTL-15",
+    });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-15", phase: "implement" },
+      { dispatch },
+    );
+    expect(dispatch.calls.length).toBe(1);
+    expect(dispatch.calls[0][0]).toEqual({
+      orchDir,
+      ticket: "CTL-15",
+      phase: "implement",
+      expectedWorktreePath: "/wt/CTL/CTL-15",
+    });
+  });
+
+  test("signal without worktreePath → dispatch called without expectedWorktreePath (CTL-615 migration)", () => {
+    seed("CTL-16", "implement", { status: "running", bg_job_id: "bg-16" });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-16", phase: "implement" },
+      { dispatch },
+    );
+    expect(dispatch.calls[0][0]).toEqual({
+      orchDir,
+      ticket: "CTL-16",
+      phase: "implement",
+    });
+    // No expectedWorktreePath key at all — undefined means "no check".
+    expect("expectedWorktreePath" in dispatch.calls[0][0]).toBe(false);
+  });
+
   test("signal flip happens BEFORE dispatch (so dispatcher sees 'stalled')", () => {
     const signalPath = seed("CTL-9", "implement", { status: "running" });
     let seenStatus = null;
