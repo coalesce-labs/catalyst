@@ -563,14 +563,16 @@ describe("reclaimDeadWorkIfPossible", () => {
   // It now escalates immediately — no probe means no way to verify the work,
   // so the human must look. needs-human label is applied via the injected seam.
   test("CTL-587: dead worker on a no-probe phase → 'escalated' + needs-human label", () => {
-    const sig = { ...implementSignal(), phase: "research" };
-    sig.raw.phase = "research";
+    // CTL-604: research/plan now have probes, so use `verify` — still probe-less
+    // — as the example of a phase that hits branch (A) escalation.
+    const sig = { ...implementSignal(), phase: "verify" };
+    sig.raw.phase = "verify";
     const emit = recorder({ code: 0 });
     const appendEscalated = recorder(undefined);
     const applyLabel = recorder({ applied: true });
     const r = reclaimDeadWorkIfPossible(orch, sig, {
       statJob: () => null, // bg dead
-      probes: { implement: recorder(true) }, // research not registered
+      probes: { implement: recorder(true) }, // verify not registered
       emitComplete: emit,
       appendEvent: recorder(undefined),
       appendEscalatedEvent: appendEscalated,
