@@ -580,6 +580,48 @@ DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
 [ ! -s "$PHASE_DISPATCH_LOG" ] && pass "phase-agent-dispatch NOT called on idempotent" || fail "phase-agent-dispatch NOT called on idempotent" "log: $(cat "$PHASE_DISPATCH_LOG")"
 scratch_teardown
 
+echo "test 26b (CTL-604): re-dispatches when per-phase signal is failed (not just file-exists)"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+mkdir -p "${ORCH_DIR}/workers/T-1"
+# A failed signal must NOT block re-dispatch — a dead worker that never
+# recovered should be relaunched, not stranded on mere file existence.
+echo '{"ticket":"T-1","phase":"research","status":"failed"}' >"${ORCH_DIR}/workers/T-1/phase-research.json"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 on failed re-dispatch" || fail "exit 0 on failed re-dispatch" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "T-1" ] && pass "failed per-phase signal re-dispatched" || fail "failed per-phase signal re-dispatched" "got: $DISPATCHED"
+grep -q -- "--ticket T-1" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch called for failed re-dispatch" || fail "phase-agent-dispatch called for failed re-dispatch" "log: $(cat "$PHASE_DISPATCH_LOG")"
+scratch_teardown
+
+echo "test 26c (CTL-604): re-dispatches when per-phase signal is stalled"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+mkdir -p "${ORCH_DIR}/workers/T-1"
+echo '{"ticket":"T-1","phase":"research","status":"stalled"}' >"${ORCH_DIR}/workers/T-1/phase-research.json"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "T-1" ] && pass "stalled per-phase signal re-dispatched" || fail "stalled per-phase signal re-dispatched" "got: $DISPATCHED"
+scratch_teardown
+
+echo "test 26d (CTL-604): does NOT re-dispatch a done per-phase signal"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+mkdir -p "${ORCH_DIR}/workers/T-1"
+echo '{"ticket":"T-1","phase":"research","status":"done"}' >"${ORCH_DIR}/workers/T-1/phase-research.json"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "" ] && pass "done per-phase signal NOT re-dispatched" || fail "done per-phase signal NOT re-dispatched" "got: $DISPATCHED"
+[ ! -s "$PHASE_DISPATCH_LOG" ] && pass "phase-agent-dispatch NOT called for done signal" || fail "phase-agent-dispatch NOT called for done signal" "log: $(cat "$PHASE_DISPATCH_LOG")"
+scratch_teardown
+
 echo "test 27 (CTL-452): dispatchMode=phase-agents in config — wave dispatches default phase=triage"
 scratch_setup
 phase_agent_dispatch_setup
@@ -769,6 +811,58 @@ RC=$?
 [ "$RC" = "0" ] && pass "advance exits 0 despite full cap" || fail "advance exits 0" "rc=$RC err=$(cat "${SCRATCH}/err")"
 [ "$(echo "$OUT" | jq -r '.dispatched | join(",")')" = "ADV-1" ] && pass "advance dispatched despite full cap" || fail "advance dispatched" "$OUT"
 grep -q -- "--phase verify" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch called for verify" || fail "verify dispatched" "$(cat "$PHASE_DISPATCH_LOG")"
+scratch_teardown
+echo "test 40 (CTL-604): --ticket --phase re-dispatches when per-phase signal is 'failed'"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+# Pre-existing signal at status:failed — a dead phase that never emitted complete.
+mkdir -p "${ORCH_DIR}/workers/T-1"
+echo '{"ticket":"T-1","phase":"research","status":"failed"}' >"${ORCH_DIR}/workers/T-1/phase-research.json"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "exit 0 on failed re-dispatch" || fail "exit 0 on failed re-dispatch" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "T-1" ] && pass "failed signal IS re-dispatched" || fail "failed signal IS re-dispatched" "got: $DISPATCHED"
+grep -q -- "--phase research" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch called for re-dispatch" || fail "phase-agent-dispatch called for re-dispatch" "log: $(cat "$PHASE_DISPATCH_LOG")"
+scratch_teardown
+
+echo "test 41 (CTL-604): --ticket --phase re-dispatches when per-phase signal is 'stalled'"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+mkdir -p "${ORCH_DIR}/workers/T-1"
+echo '{"ticket":"T-1","phase":"plan","status":"stalled"}' >"${ORCH_DIR}/workers/T-1/phase-plan.json"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "plan" 2>"${SCRATCH}/err")
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "T-1" ] && pass "stalled signal IS re-dispatched" || fail "stalled signal IS re-dispatched" "got: $DISPATCHED"
+scratch_teardown
+
+echo "test 42 (CTL-604): --ticket --phase still no-ops when per-phase signal is 'running'"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+mkdir -p "${ORCH_DIR}/workers/T-1"
+echo '{"ticket":"T-1","phase":"research","status":"running"}' >"${ORCH_DIR}/workers/T-1/phase-research.json"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "" ] && pass "running signal NOT re-dispatched" || fail "running signal NOT re-dispatched" "got: $DISPATCHED"
+[ ! -s "$PHASE_DISPATCH_LOG" ] && pass "phase-agent-dispatch NOT called for running" || fail "phase-agent-dispatch NOT called for running" "log: $(cat "$PHASE_DISPATCH_LOG")"
+scratch_teardown
+
+echo "test 43 (CTL-604): --ticket --phase still no-ops when per-phase signal is 'done'"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+mkdir -p "${ORCH_DIR}/workers/T-1"
+echo '{"ticket":"T-1","phase":"research","status":"done"}' >"${ORCH_DIR}/workers/T-1/phase-research.json"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "" ] && pass "done signal NOT re-dispatched" || fail "done signal NOT re-dispatched" "got: $DISPATCHED"
 scratch_teardown
 
 echo ""

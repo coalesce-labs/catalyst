@@ -160,20 +160,50 @@ detect_api_error_in_stream() {
 
   # Scan the last 50 lines for a matching API-error result event.
   # The jq filter returns the uuid of the most recent matching event, or nothing.
+  # CTL-604: also match a socket-connection-closed / bg-idle stream result.
+  # The reported incident died with "API Error: The socket connection was
+  # closed unexpectedly" (and, for a bg-idle resume, "running as a background
+  # agent"); neither matched the old regex, so the worker fell through to the
+  # less-informative pid-dead reason instead of being recognised as a recoverable
+  # stream error.
+  local api_error_re="Stream idle timeout|partial response received|socket connection was closed|running as a background agent"
   local uuid
   uuid=$(tail -n 50 "$stream" 2>/dev/null \
-    | jq -r 'select(.type == "result" and .is_error == true)
+    | jq -r --arg re "$api_error_re" \
+            'select(.type == "result" and .is_error == true)
              | select(
-                 (.api_error_status // "" | tostring
-                   | test("Stream idle timeout|partial response received"; "i"))
+                 (.api_error_status // "" | tostring | test($re; "i"))
                  or
-                 ((.result // "" | tostring)
-                   | test("Stream idle timeout|partial response received"; "i"))
+                 ((.result // "" | tostring) | test($re; "i"))
                )
              | .uuid // empty' 2>/dev/null \
     | tail -n 1)
   [ -n "$uuid" ] && { echo "$uuid"; return 0; }
   return 1
+}
+
+# CTL-604: classify a `claude --bg --resume` attempt's resume stderr so the
+# caller can tell three outcomes apart and not record a false successful revive:
+#   "alive"    the agent is still running as a bg job; the resume was rejected
+#              ("currently running as a background agent (bg)"). The worker is
+#              NOT dead — this must NOT bump reviveCount or record pid-dead.
+#   "failed"   any other non-empty stderr — a hard resume error; the caller
+#              records revive-spawn-failed rather than a successful revive.
+#   "launched" empty stderr — a clean resume (the normal path).
+# Single source of truth for the alive-vs-failed-vs-launched decision so the
+# detector and the caller agree.
+classify_resume_stderr() {
+  local stderr_text="$1"
+  if [ -z "$stderr_text" ]; then
+    echo "launched"
+    return 0
+  fi
+  if printf '%s' "$stderr_text" \
+       | grep -qiE "currently running as a background agent \(bg\)|already running as a background agent"; then
+    echo "alive"
+    return 0
+  fi
+  echo "failed"
 }
 
 # Emit a fresh-start event via the state script (no-op when state script is
@@ -263,6 +293,11 @@ spawn_revive_bg() {
   local stderr_file="${ORCH_DIR}/workers/output/${ticket}-bg-stderr.log"
   mkdir -p "$(dirname "$stdout_file")"
 
+  # CTL-604: record the stderr file size before this invocation so we can read
+  # ONLY the bytes this resume appends (the file is append-only across revives).
+  local stderr_pre=0
+  [ -f "$stderr_file" ] && stderr_pre=$(wc -c < "$stderr_file" 2>/dev/null | tr -d ' ')
+
   # CTL-495: compose OTEL_RESOURCE_ATTRIBUTES inline so the revived session
   # carries task.type=phase-<phase>. Each revive iteration may target a
   # different phase, so we cannot rely on the parent shell's value (which is
@@ -295,18 +330,35 @@ spawn_revive_bg() {
 
   # Wait briefly for stdout to materialize (real claude --bg returns almost
   # immediately; tests stub it the same way). Cap at 5s to avoid stalling.
+  # CTL-604: also stop early if the resume produced new stderr (a bg-idle/hard
+  # error never materializes stdout, so the loop would otherwise burn the full
+  # cap before we classify the failure).
   local waited=0
   while [ ! -s "$stdout_file" ] && [ "$waited" -lt 50 ]; do
+    local stderr_now=0
+    [ -f "$stderr_file" ] && stderr_now=$(wc -c < "$stderr_file" 2>/dev/null | tr -d ' ')
+    [ "$stderr_now" -gt "$stderr_pre" ] && break
     sleep 0.1
     waited=$((waited+1))
   done
+
+  # CTL-604: read only the stderr this resume appended and classify the outcome.
+  local resume_stderr=""
+  if [ -f "$stderr_file" ]; then
+    resume_stderr=$(tail -c "+$((stderr_pre + 1))" "$stderr_file" 2>/dev/null)
+  fi
+  local outcome
+  outcome=$(classify_resume_stderr "$resume_stderr")
 
   local new_bg=""
   if [ -s "$stdout_file" ]; then
     new_bg=$(jq -r 'select(.id) | .id' "$stdout_file" 2>/dev/null | head -1)
   fi
 
-  echo "pid:${pid}:${new_bg}"
+  # CTL-604: prefix the result with the outcome so the caller can tell
+  # "launched" (fresh revive) from "alive" (agent still running — no-op) and
+  # "failed" (hard resume error). Shape: "<outcome>:pid:<pid>:<bg_job_id>".
+  echo "${outcome}:pid:${pid}:${new_bg}"
 }
 
 # CTL-484: spawn a continuation worker for a turn-cap-exhausted phase agent.
@@ -892,11 +944,19 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   # see the fresh job. Legacy workers keep the original -p --resume spawn.
   NEW_BG_JOB_ID=""
   ACTIVE_PHASE=""
+  RESUME_OUTCOME="launched"
   if is_phase_mode "$TICKET"; then
     ACTIVE_PHASE=$(active_phase_of "$TICKET")
     # CTL-495: pass ACTIVE_PHASE so the revived session gets task.type=phase-<phase>.
     SPAWN_OUT=$(spawn_revive_bg "$TICKET" "$WORKTREE" "$SESSION_ID" "$ACTIVE_PHASE" || echo "")
-    # SPAWN_OUT shape: "pid:<pid>:<bg_job_id>"
+    # CTL-604: SPAWN_OUT shape: "<outcome>:pid:<pid>:<bg_job_id>" where outcome
+    # is launched|alive|failed. Strip the outcome prefix before parsing pid/bg.
+    RESUME_OUTCOME="${SPAWN_OUT%%:*}"
+    case "$RESUME_OUTCOME" in
+      launched | alive | failed) SPAWN_OUT="${SPAWN_OUT#*:}" ;;
+      *) RESUME_OUTCOME="launched" ;;  # legacy shape (no prefix) → treat as launched
+    esac
+    # Remaining shape: "pid:<pid>:<bg_job_id>"
     NEW_PID="${SPAWN_OUT#pid:}"
     NEW_PID="${NEW_PID%%:*}"
     NEW_BG_JOB_ID="${SPAWN_OUT##*:}"
@@ -904,6 +964,20 @@ for SIGNAL in "${ORCH_DIR}"/workers/*.json; do
   else
     PROMPT=$(build_prompt "$STATUS")
     NEW_PID=$(spawn_revive "$TICKET" "$WORKTREE" "$SESSION_ID" "$PROMPT" || echo "")
+  fi
+
+  # CTL-604: the agent is still running as a bg job (resume rejected) — NOT dead.
+  # Do not bump reviveCount or record pid-dead; leave the signal untouched and
+  # let the next sweep re-check liveness. This is the false-pid-dead fix.
+  if [ "$RESUME_OUTCOME" = "alive" ]; then
+    echo "STILL-ALIVE: ${TICKET} (resume rejected — agent running as bg; no revive recorded)" >&2
+    continue
+  fi
+
+  # CTL-604: a hard resume error (failed) is a real spawn failure → record
+  # revive-spawn-failed rather than a successful revive.
+  if [ "$RESUME_OUTCOME" = "failed" ]; then
+    NEW_PID=""
   fi
 
   if [ -z "$NEW_PID" ]; then
