@@ -80,6 +80,22 @@ SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-/Users/ryan/.claude/plugins/cache/catalyst/catalyst-dev/$(jq -r .version "${CLAUDE_PLUGIN_ROOT:-.}/.claude-plugin/plugin.json" 2>/dev/null || echo 0.0.0)}"
 
+# 0. Codified bg_job_id yield (CTL-615). If the signal file's bg_job_id
+#    names a DIFFERENT live bg job, we are a redispatch duplicate of a
+#    still-running canonical worker. Bow out without touching the signal,
+#    without emitting any phase event. The helper writes a yield sidecar
+#    `${ORCH_DIR}/workers/${TICKET}/.phase-${PHASE}-yield` so the
+#    operator/daemon can attribute the no-op. Exit 0 by design — this is
+#    NOT a failure; the canonical worker keeps running.
+YIELD_CHECK="${PLUGIN_ROOT}/scripts/phase-agent-yield-check.sh"
+if [[ -x "$YIELD_CHECK" ]] && bash "$YIELD_CHECK" \
+     --signal "$SIGNAL_FILE" \
+     --phase "$PHASE" \
+     --worker-dir "$(dirname "$SIGNAL_FILE")"; then
+  echo "phase-${PHASE}: yielding to canonical worker (CTL-615)" >&2
+  exit 0
+fi
+
 # 1. Join the shared comms channel (best-effort — phase agents must not crash
 #    if catalyst-comms is unavailable).
 COMMS="${PLUGIN_ROOT}/scripts/catalyst-comms"

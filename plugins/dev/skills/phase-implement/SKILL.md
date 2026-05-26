@@ -73,6 +73,22 @@ SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 [[ -n "$PLUGIN_ROOT" ]] || PLUGIN_ROOT="$(dirname "$(dirname "$(dirname "$(realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo .)")")")"
 
+# 0. Codified bg_job_id yield (CTL-615). If the signal file's bg_job_id
+#    names a DIFFERENT live bg job, we are a redispatch duplicate of a
+#    still-running canonical worker. Bow out without touching the signal,
+#    without emitting any phase event. Encodes operator memories
+#    #43/#44/#49/#50 — the playbook is now code. phase-implement carries
+#    the highest blast radius (commits land here), so it gets the gate
+#    even though the template inheritance also provides it.
+YIELD_CHECK="${PLUGIN_ROOT}/scripts/phase-agent-yield-check.sh"
+if [[ -x "$YIELD_CHECK" ]] && bash "$YIELD_CHECK" \
+     --signal "$SIGNAL_FILE" \
+     --phase "$PHASE" \
+     --worker-dir "$(dirname "$SIGNAL_FILE")"; then
+  echo "phase-${PHASE}: yielding to canonical worker (CTL-615)" >&2
+  exit 0
+fi
+
 # 1. Join the shared comms channel (best-effort).
 COMMS="${PLUGIN_ROOT}/scripts/catalyst-comms"
 [[ -x "$COMMS" ]] || COMMS="$(command -v catalyst-comms 2>/dev/null || true)"
