@@ -613,6 +613,69 @@ ST=$(phase_status "T-P" "implement")
 [ "$SUP" = "0" ] && pass "summary.gitActiveSuppressed=0 for normal stall" || fail "summary.gitActiveSuppressed=0" "got: $SUP; out: $OUT"
 scratch_teardown
 
+# ─── CTL-607: current-phase guard — reaped predecessor not stalled ───────────
+
+echo "test (CTL-607): non-current predecessor with stale bg is NOT flipped to stalled"
+scratch_setup
+# T-NC has TWO per-phase signals — triage (predecessor, non-current) and
+# implement (current). Triage's bg state.json is stale; implement is fresh.
+# Pre-guard, healthcheck flips triage to stalled + emits phase.triage.failed
+# (which is precisely what manufactures the revive-storm precondition).
+# Post-guard, the predecessor is left alone.
+make_phase_signal "T-NC" "triage"    "running" "bg-pre-stale"
+make_phase_signal "T-NC" "implement" "running" "bg-cur-fresh"
+make_bg_state "bg-pre-stale" "running" 1200  # 20 min — stale
+make_bg_state "bg-cur-fresh" "running" 30    # fresh
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+ST_PRE=$(phase_status "T-NC" "triage")
+ST_CUR=$(phase_status "T-NC" "implement")
+[ "$ST_PRE" = "running" ] \
+  && pass "non-current predecessor left at running (not flipped to stalled)" \
+  || fail "non-current predecessor not stalled" "got: $ST_PRE"
+[ "$ST_CUR" = "running" ] \
+  && pass "current phase left at running (fresh bg)" \
+  || fail "current phase left at running" "got: $ST_CUR"
+if grep "worker-phase-stalled" "$STATE_LOG" | grep -q '"worker":"T-NC"' && \
+   grep "worker-phase-stalled" "$STATE_LOG" | grep -q '"phase":"triage"'; then
+  fail "no worker-phase-stalled for non-current predecessor T-NC/triage" "log: $(cat "$STATE_LOG")"
+else
+  pass "no worker-phase-stalled event for non-current predecessor T-NC/triage"
+fi
+scratch_teardown
+
+echo "test (CTL-607): current phase still stalls when its own bg is dead"
+scratch_setup
+# T-CURDEAD: triage is terminal (done — represents reaped predecessor that
+# already completed normally), implement is current with stale bg. The guard
+# must NOT suppress the current-phase stall — the worker-phase-stalled event
+# must still fire for the current phase.
+make_phase_signal "T-CURDEAD" "triage"    "done"    "bg-pre-done"
+make_phase_signal "T-CURDEAD" "implement" "running" "bg-cur-stale"
+make_bg_state "bg-pre-done" "done"    100
+make_bg_state "bg-cur-stale" "running" 1200  # stale
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+ST_CUR=$(phase_status "T-CURDEAD" "implement")
+[ "$ST_CUR" = "stalled" ] \
+  && pass "current implement still flipped to stalled (CTL-587 sentinel preserved)" \
+  || fail "current implement flipped to stalled" "got: $ST_CUR"
+if grep "worker-phase-stalled" "$STATE_LOG" | grep -q '"worker":"T-CURDEAD"'; then
+  pass "worker-phase-stalled emit fires for genuine current-phase stall"
+else
+  fail "worker-phase-stalled emit fires for current-phase stall" "log: $(cat "$STATE_LOG")"
+fi
+scratch_teardown
+
+echo "test (CTL-607): single-signal baseline unchanged (guard is no-op when current == only)"
+scratch_setup
+make_phase_signal "T-LONE" "implement" "running" "bg-lone-stale"
+make_bg_state "bg-lone-stale" "running" 1200
+"$HEALTHCHECK" --orch-dir "$ORCH_DIR" --orch-id "demo" --grace-seconds 0 >"${SCRATCH}/out" 2>&1
+ST=$(phase_status "T-LONE" "implement")
+[ "$ST" = "stalled" ] \
+  && pass "lone current phase still stalls (guard a no-op for single signal)" \
+  || fail "lone current phase still stalls" "got: $ST"
+scratch_teardown
+
 echo
 echo "Results: $PASSES passed, $FAILURES failed"
 [ "$FAILURES" -eq 0 ]

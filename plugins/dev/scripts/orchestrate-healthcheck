@@ -64,6 +64,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
+
+# CTL-607: current-phase guard helper (latest_phase_in_dir + PHASES mirror).
+# shellcheck source=lib/phase-sequence.sh
+. "${SCRIPT_DIR}/lib/phase-sequence.sh"
 # CTL-511: phase-agent-emit-complete emits the broker-routable phase.<name>.failed
 # event when a phase signal is flipped to stalled. Test-overridable.
 EMIT_COMPLETE="${CATALYST_EMIT_COMPLETE:-${SCRIPT_DIR}/phase-agent-emit-complete}"
@@ -291,6 +295,17 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
 	P_PHASE=$(jq -r '.phase // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
 	P_STATUS=$(jq -r '.status // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
 	P_BG=$(jq -r '.bg_job_id // empty' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+
+	# CTL-607: only health-check the ticket's CURRENT (latest-index) phase.
+	# Flagging a reaped EARLIER phase as stalled is precisely what lets
+	# orchestrate-revive Loop 2 re-dispatch a duplicate agent; suppress at
+	# the source so the precondition never forms. The current phase's own
+	# stall detection is unaffected (it == latest), so CTL-587 / CTL-509
+	# continue to work for the live phase agent.
+	CURRENT_PHASE=$(latest_phase_in_dir "$(dirname "$PHASE_SIGNAL")")
+	if [ -n "$CURRENT_PHASE" ] && [ "$P_PHASE" != "$CURRENT_PHASE" ]; then
+		continue
+	fi
 
 	# Skip terminal signals — nothing for the healthcheck to do.
 	case " $PHASE_TERMINAL_STATES " in *" $P_STATUS "*) continue ;; esac
