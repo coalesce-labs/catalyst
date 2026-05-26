@@ -397,6 +397,35 @@ export function defaultKillBgJob(
   }
 }
 
+// defaultPidAlive — positive keep-alive check (CTL-610). Returns true iff the
+// bg job's recorded pid is still a live `claude` process. This is the inverse
+// use of the same primitive defaultKillBgJob uses to gate its SIGKILL: read
+// ~/.claude/jobs/<id>/pid, verify via `ps -p <pid> -o comm=` that the pid maps
+// to a claude process. It signals "alive, do not revive", never kills.
+// Best-effort: any doubt (missing pid file, unreadable, recycled pid, falsy
+// id, throwing seam) returns false so the caller falls through to its existing
+// revive path. Critically, the production seam returning false on a missing
+// pid file keeps every pre-CTL-610 revive test (which uses bgJobId "bg-9"
+// with no real pid file) green when the alive-quiet guard goes live.
+// `spawn` and `jobsRoot` are injectable for tests; production defaults call
+// the real spawnSync against the real ~/.claude/jobs.
+export function defaultPidAlive(
+  { bgJobId },
+  { spawn = spawnSync, jobsRoot = getJobsRoot } = {},
+) {
+  if (!bgJobId) return false;
+  try {
+    const pidPath = join(jobsRoot(), bgJobId, "pid");
+    if (!existsSync(pidPath)) return false;
+    const pid = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
+    if (!Number.isFinite(pid) || pid <= 1) return false;
+    const ps = spawn("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+    return ps.status === 0 && (ps.stdout || "").toLowerCase().includes("claude");
+  } catch {
+    return false;
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // CTL-640: cold-start detection. The reference epoch = max(OS boot, claude-daemon
 // start). If that epoch is newer than EVERY ~/.claude/jobs/<id>/state.json mtime,
