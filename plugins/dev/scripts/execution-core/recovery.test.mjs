@@ -563,16 +563,17 @@ describe("reclaimDeadWorkIfPossible", () => {
   // It now escalates immediately — no probe means no way to verify the work,
   // so the human must look. needs-human label is applied via the injected seam.
   test("CTL-587: dead worker on a no-probe phase → 'escalated' + needs-human label", () => {
-    // CTL-604: research/plan now have probes, so use `verify` — still probe-less
-    // — as the example of a phase that hits branch (A) escalation.
-    const sig = { ...implementSignal(), phase: "verify" };
-    sig.raw.phase = "verify";
+    // CTL-604/CTL-641: implement/research/plan/triage/verify/review/monitor-deploy
+    // now have probes, so use `pr` — still probe-less — as the example of a phase
+    // that hits branch (A) escalation.
+    const sig = { ...implementSignal(), phase: "pr" };
+    sig.raw.phase = "pr";
     const emit = recorder({ code: 0 });
     const appendEscalated = recorder(undefined);
     const applyLabel = recorder({ applied: true });
     const r = reclaimDeadWorkIfPossible(orch, sig, {
       statJob: () => null, // bg dead
-      probes: { implement: recorder(true) }, // verify not registered
+      probes: { implement: recorder(true) }, // pr not registered
       emitComplete: emit,
       appendEvent: recorder(undefined),
       appendEscalatedEvent: appendEscalated,
@@ -655,7 +656,7 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(emit.calls.length).toBe(1);
   });
 
-  test("repoRoot is forwarded to the probe (so the probe can resolve the worktree)", () => {
+  test("repoRoot + orchDir are forwarded to the probe (CTL-641: probes resolve worker-dir + worktree artifacts)", () => {
     let seen = null;
     const probe = (args) => {
       seen = args;
@@ -668,7 +669,55 @@ describe("reclaimDeadWorkIfPossible", () => {
       appendEvent: () => {},
       repoRoot: "/repo/x",
     });
-    expect(seen).toEqual({ ticket: "CTL-42", repoRoot: "/repo/x" });
+    // orchDir is the function's first positional arg (`orch` === "/orch").
+    expect(seen).toEqual({ ticket: "CTL-42", repoRoot: "/repo/x", orchDir: orch });
+  });
+
+  // CTL-641: a dead NON-implement worker is reclaimed when its probe says the
+  // artifact is complete (branch B). When the probe says it is NOT complete it
+  // enters CTL-604's phase-agnostic revive path (branch C) — CTL-604 removed the
+  // earlier "re-dispatch stays implement-only" rule, so every probe-backed phase
+  // (including the CTL-641 JSON worker-dir phases) is re-dispatched fresh rather
+  // than dead-ended at needs-human.
+  test("CTL-641: non-implement phase with probe true → 'reclaimed' (emit-complete called)", () => {
+    const sig = { ...implementSignal({ ticket: "CTL-7" }), phase: "verify" };
+    sig.raw.phase = "verify";
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => null, // bg dead
+      probes: { verify: () => true }, // artifact complete
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      repoRoot: "/repo",
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("CTL-641: non-implement phase with probe false → 'revived' (CTL-604 phase-agnostic re-dispatch)", () => {
+    const sig = { ...implementSignal({ ticket: "CTL-7" }), phase: "verify" };
+    sig.raw.phase = "verify";
+    const emit = recorder({ code: 0 });
+    const appendRevive = recorder(undefined);
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => null, // bg dead
+      probes: { verify: () => false }, // artifact NOT complete
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      appendReviveEvent: appendRevive,
+      reviveDispatch,
+      countReviveEvents: recorder(0),
+      countDistinctRevivingTickets: recorder(1),
+      writeReviveMarker: recorder(undefined),
+      killBgJob: recorder(undefined),
+      applyStalledLabel: recorder({ applied: true }),
+      repoRoot: "/repo",
+    });
+    expect(r).toBe("revived");
+    expect(emit.calls.length).toBe(0); // not reclaimed
+    expect(appendRevive.calls.length).toBe(1);
+    expect(reviveDispatch.calls.length).toBe(1); // CTL-604: non-implement phases re-dispatch too
   });
 });
 

@@ -7,6 +7,7 @@ import {
   hasProbe,
   defaultRunGit,
   resolveWorktree,
+  defaultReadFile,
 } from "./work-done-probes.mjs";
 
 // makeRunGit — a deterministic `git` fake keyed on the trailing positional args.
@@ -84,18 +85,149 @@ ${"Overview prose to clear the size floor. ".repeat(8)}
 - [ ] tests pass
 `;
 
+// CTL-604 + CTL-641: the merged registry covers implement (CTL-574),
+// research/plan (CTL-604), and triage/verify/review/monitor-deploy (CTL-641).
+// pr/monitor-merge stay unregistered (no single on-disk artifact) — the recovery
+// sweep's "no-probe-for-phase" escalation stays a defensive guard for those and
+// for any genuinely-unknown phase.
 describe("WORK_DONE_PROBES — registry shape", () => {
-  test("implement, research, and plan are registered; other phases are not", () => {
-    for (const phase of ["implement", "research", "plan"]) {
+  test("all probe-backed phases are registered", () => {
+    for (const phase of [
+      "implement",
+      "research",
+      "plan",
+      "triage",
+      "verify",
+      "review",
+      "monitor-deploy",
+    ]) {
       expect(hasProbe(phase)).toBe(true);
     }
-    for (const phase of [
-      "triage",
-      "verify", "review", "pr", "monitor-merge", "monitor-deploy",
-      "unknown-phase",
-    ]) {
+  });
+  test("probe-less phases and unknown phases are not registered", () => {
+    for (const phase of ["pr", "monitor-merge", "unknown-phase"]) {
       expect(hasProbe(phase)).toBe(false);
     }
+  });
+});
+
+// makeReadFile — deterministic fs fake keyed on absolute path. Returns the
+// { ok, content } shape of defaultReadFile; an unknown path is a miss.
+function makeReadFile(files) {
+  return (path) => (path in files ? { ok: true, content: files[path] } : { ok: false, content: "" });
+}
+
+const ORCH = "/orch";
+const wpath = (ticket, name) => `${ORCH}/workers/${ticket}/${name}`;
+
+describe("WORK_DONE_PROBES.triage", () => {
+  test("true when triage.json parses with non-empty classification", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "triage.json")]: JSON.stringify({ classification: "feature", summary: "x" }),
+    });
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(true);
+  });
+  test("false when classification empty/missing (truncated)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "triage.json")]: JSON.stringify({ summary: "x" }) });
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when classification is whitespace-only (truncated)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "triage.json")]: JSON.stringify({ classification: "   " }) });
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when file missing", () => {
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+  test("false on invalid JSON (parse error is safe)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "triage.json")]: "{not json" });
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false on missing input (no readFile call)", () => {
+    const readFile = () => { throw new Error("readFile must not be called"); };
+    expect(WORK_DONE_PROBES.triage({ ticket: null, orchDir: ORCH }, { readFile })).toBe(false);
+    expect(WORK_DONE_PROBES.triage({ ticket: "CTL-1", orchDir: null }, { readFile })).toBe(false);
+  });
+});
+
+// verify.json real schema (phase-verify SKILL.md:182-189):
+//   {regression_risk:int, findings:[...], tests_attempted:int, gates:{...}, generatedAt:string}
+describe("WORK_DONE_PROBES.verify", () => {
+  test("true with all required keys present", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "verify.json")]: JSON.stringify({
+        regression_risk: 1, findings: [], tests_attempted: 0, gates: {}, generatedAt: "2026-05-26T00:00:00Z",
+      }),
+    });
+    expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(true);
+  });
+  test("false when a required key is absent (truncated)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "verify.json")]: JSON.stringify({ findings: [] }) });
+    expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when findings is not an array (truncated)", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "verify.json")]: JSON.stringify({
+        regression_risk: 1, findings: "oops", tests_attempted: 0, gates: {}, generatedAt: "x",
+      }),
+    });
+    expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false on missing file / invalid JSON", () => {
+    expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+});
+
+// review.json real schema (phase-review SKILL.md:167-175):
+//   {findings:[...], remediationCommit:string|null, reviewPassed:bool, generatedAt:string}
+describe("WORK_DONE_PROBES.review", () => {
+  test("true with findings[], reviewPassed bool, remediationCommit present, generatedAt", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "review.json")]: JSON.stringify({
+        findings: [], remediationCommit: null, reviewPassed: true, generatedAt: "2026-05-26T00:00:00Z",
+      }),
+    });
+    expect(WORK_DONE_PROBES.review({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(true);
+  });
+  test("false when reviewPassed is not a boolean (truncated)", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "review.json")]: JSON.stringify({ findings: [], generatedAt: "x" }) });
+    expect(WORK_DONE_PROBES.review({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when remediationCommit key absent (truncated)", () => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "review.json")]: JSON.stringify({ findings: [], reviewPassed: true, generatedAt: "x" }),
+    });
+    expect(WORK_DONE_PROBES.review({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false on missing file", () => {
+    expect(WORK_DONE_PROBES.review({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+});
+
+// monitor-deploy: deploy_state ∈ {success, skipped} is done (signal-reader.mjs:29
+// ranks skipped as terminal-equivalent); anything else / missing is not.
+describe("WORK_DONE_PROBES['monitor-deploy']", () => {
+  test.each(["success", "skipped"])("true when deploy_state=%s", (state) => {
+    const readFile = makeReadFile({
+      [wpath("CTL-1", "phase-monitor-deploy.json")]: JSON.stringify({ deploy_state: state, deploy_sha: "abc", completed_at: "x" }),
+    });
+    expect(WORK_DONE_PROBES["monitor-deploy"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(true);
+  });
+  test("false when deploy_state=failure", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "phase-monitor-deploy.json")]: JSON.stringify({ deploy_state: "failure" }) });
+    expect(WORK_DONE_PROBES["monitor-deploy"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+  });
+  test("false when deploy_state absent / file missing", () => {
+    const readFile = makeReadFile({ [wpath("CTL-1", "phase-monitor-deploy.json")]: JSON.stringify({ status: "running" }) });
+    expect(WORK_DONE_PROBES["monitor-deploy"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile })).toBe(false);
+    expect(WORK_DONE_PROBES["monitor-deploy"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+});
+
+describe("defaultReadFile — never throws", () => {
+  test("missing file → { ok: false, content: '' }", () => {
+    const r = defaultReadFile("/no/such/path/xyz.json");
+    expect(r.ok).toBe(false);
+    expect(r.content).toBe("");
   });
 });
 

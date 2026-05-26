@@ -690,9 +690,11 @@ export function reclaimDeadWorkIfPossible(
     return escalateOnce("no-probe-for-phase", 0);
   }
 
-  // (B) Probe says work IS done → CTL-574 reclaim. Unchanged.
+  // (B) Probe says work IS done → CTL-574 reclaim. CTL-641 threads orchDir
+  //     (already this function's first param) so worker-dir / worktree probes
+  //     can locate their artifact; implementProbe ignores the extra key.
   const probe = probes[phase];
-  if (probe({ ticket, repoRoot })) {
+  if (probe({ ticket, repoRoot, orchDir })) {
     appendEvent({ phase, ticket, orchId });
     const r = emitComplete({ orchDir, signal });
     if (r.code !== 0) {
