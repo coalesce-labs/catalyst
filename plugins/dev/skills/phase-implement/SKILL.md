@@ -259,6 +259,40 @@ EOF
 fi
 ```
 
+Then the empty-branch self-emit gate (CTL-608). Runs **before** the terminal
+`--status complete` so a worker cannot self-report implement success on an empty
+ticket branch (0 commits ahead of its integration base). This is the ADV-1128
+failure mode: sub-agent commits stranded in nested `.claude/worktrees/agent-*`
+worktrees never reach `refs/heads/<ticket>`, leaving HEAD at base and opening an
+empty PR. Uniquely-named fence so the e2e harness can extract+exercise it; uses
+only POSIX/zsh-safe `git rev-list --count` (no `${VAR,,}` / `shopt`). Fail-open
+(warn + allow) only when the base is unresolvable, mirroring the mirror block's
+`_base branch unknown_` tolerance.
+
+```bash phase-implement-empty-branch-gate
+EMPTY_BRANCH_GATE_BASE=""
+if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+  EMPTY_BRANCH_GATE_BASE="origin/main"
+elif git rev-parse --verify --quiet main >/dev/null 2>&1; then
+  EMPTY_BRANCH_GATE_BASE="main"
+fi
+if [[ -n "${EMPTY_BRANCH_GATE_BASE}" ]]; then
+  AHEAD="$(git rev-list --count "${EMPTY_BRANCH_GATE_BASE}..HEAD" 2>/dev/null || echo 0)"
+  if [[ "${AHEAD:-0}" -le 0 ]]; then
+    echo "phase-implement: 0 commits ahead of ${EMPTY_BRANCH_GATE_BASE}; refusing to emit complete on an empty branch (CTL-608)" >&2
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "empty_branch:0_commits_ahead_of_${EMPTY_BRANCH_GATE_BASE}"
+    [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
+      "phase-implement failed: empty branch (0 commits ahead of ${EMPTY_BRANCH_GATE_BASE})" \
+      --as "$TICKET" --type attention --orch "$ORCH_ID" >/dev/null 2>&1 || true
+    exit 1
+  fi
+else
+  echo "phase-implement: could not resolve integration base (no origin/main or main); skipping empty-branch gate (CTL-608)" >&2
+fi
+```
+
 ```bash
 EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
 if [[ -x "$EMIT" ]]; then

@@ -617,6 +617,129 @@ else
   fail "mirror-implement no-base: fallback" "log:$(printf '\n%s' "$(cat "$LOG_D" 2>/dev/null)")"
 fi
 
+# ─── Test 13 (CTL-608): phase-implement empty-branch self-emit gate ───────
+echo ""
+echo "Test 13 (CTL-608): phase-implement contract — empty-branch gate present"
+if [[ -f "$SKILL_IMPLEMENT" ]]; then
+  # The gate must live in its own uniquely-named fence so this harness can
+  # extract+run it, exactly like the mirror fence (Test 12).
+  assert_grep 'phase-implement-empty-branch-gate' "$SKILL_IMPLEMENT" "body contains uniquely-named empty-branch gate fence"
+  assert_grep 'rev-list --count' "$SKILL_IMPLEMENT" "gate counts commits-ahead via rev-list --count"
+  assert_grep 'empty_branch:' "$SKILL_IMPLEMENT" "gate emits failure reason prefixed empty_branch:"
+fi
+
+# ─── Test 14 (CTL-608): empty-branch gate runtime — empty/non-empty/no-base ─
+echo ""
+echo "Test 14 (CTL-608): phase-implement empty-branch gate — empty/non-empty/base-unknown"
+
+GATE_BODY_FILE="${SCRATCH}/empty-branch-gate.sh"
+awk '
+  /^```bash phase-implement-empty-branch-gate$/ {capture=1; next}
+  /^```$/ {if (capture) {capture=0}}
+  capture { print }
+' "$SKILL_IMPLEMENT" > "$GATE_BODY_FILE"
+
+if [[ -s "$GATE_BODY_FILE" ]]; then
+  pass "empty-branch gate extractable from SKILL.md"
+else
+  fail "empty-branch gate extractable — no \`\`\`bash phase-implement-empty-branch-gate\`\`\` fence found"
+fi
+
+# Stub phase-agent-emit-complete under $PLUGIN_ROOT/scripts/ — the gate calls
+# "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" directly. Captures argv to
+# $EMIT_CAPTURE so the gate's --status / --reason can be asserted.
+install_emit_stub() {
+  local plugin_root="$1"
+  mkdir -p "$plugin_root/scripts"
+  cat > "$plugin_root/scripts/phase-agent-emit-complete" <<'STUB'
+#!/usr/bin/env bash
+# CTL-608 test stub: capture argv so the gate's terminal emit can be asserted.
+echo "$*" >> "${EMIT_CAPTURE:-/dev/null}"
+exit 0
+STUB
+  chmod +x "$plugin_root/scripts/phase-agent-emit-complete"
+}
+
+# Empty branch: HEAD == origin/main (0 commits ahead).
+build_git_fixture_empty() {
+  local repo_dir="$1"
+  mkdir -p "$repo_dir"
+  (
+    cd "$repo_dir" || exit 1
+    git init --quiet --initial-branch=main
+    git config user.email "test@example.com"
+    git config user.name "Test"
+    echo "base" > base.txt
+    git add base.txt
+    git commit --quiet -m "base commit"
+    git update-ref refs/remotes/origin/main HEAD
+    # Branch sits exactly at origin/main — nothing committed ahead.
+    git checkout --quiet -b feature
+  )
+}
+
+run_empty_branch_gate() {
+  local case_name="$1" fixture_fn="$2"
+  local case_dir="${SCRATCH}/imp-gate-${case_name}"
+  local repo_dir="${case_dir}/repo"
+  local plugin_root="${case_dir}/plugin"
+  mkdir -p "$case_dir"
+  "$fixture_fn" "$repo_dir"
+  install_emit_stub "$plugin_root"
+  (
+    cd "$repo_dir" || exit 1
+    EMIT_CAPTURE="${case_dir}/emit-capture.log" \
+      PLUGIN_ROOT="$plugin_root" \
+      PHASE="implement" \
+      TICKET="CTL-449" \
+      COMMS="" \
+      CHANNEL="orch-e2e" \
+      ORCH_ID="orch-e2e" \
+      bash "$GATE_BODY_FILE" >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
+    echo "$?" > "$case_dir/exit-code"
+  )
+  echo "$case_dir"
+}
+
+# Case E — empty branch: gate must emit --status failed (empty_branch:) + exit 1.
+CASE_E="$(run_empty_branch_gate empty build_git_fixture_empty)"
+assert_eq "1" "$(cat "$CASE_E/exit-code")" "gate empty-branch: exit 1"
+if grep -q -- '--status failed' "$CASE_E/emit-capture.log" 2>/dev/null; then
+  pass "gate empty-branch: emits --status failed"
+else
+  fail "gate empty-branch: --status failed" "capture:$(printf '\n%s' "$(cat "$CASE_E/emit-capture.log" 2>/dev/null)")"
+fi
+if grep -q 'empty_branch:' "$CASE_E/emit-capture.log" 2>/dev/null; then
+  pass "gate empty-branch: reason prefixed empty_branch:"
+else
+  fail "gate empty-branch: reason" "capture:$(printf '\n%s' "$(cat "$CASE_E/emit-capture.log" 2>/dev/null)")"
+fi
+
+# Case F — non-empty branch (origin/main + 2 commits ahead): gate falls through,
+# exit 0, no --status failed captured.
+CASE_F="$(run_empty_branch_gate nonempty build_git_fixture)"
+assert_eq "0" "$(cat "$CASE_F/exit-code")" "gate non-empty: exit 0 (falls through)"
+if grep -q -- '--status failed' "$CASE_F/emit-capture.log" 2>/dev/null; then
+  fail "gate non-empty: must NOT emit --status failed" "capture:$(printf '\n%s' "$(cat "$CASE_F/emit-capture.log" 2>/dev/null)")"
+else
+  pass "gate non-empty: no --status failed (gate is silent on success)"
+fi
+
+# Case G — base unknown (no origin/main, no main): fail-open, exit 0, warn on
+# stderr, no --status failed.
+CASE_G="$(run_empty_branch_gate nobase build_git_fixture_no_base)"
+assert_eq "0" "$(cat "$CASE_G/exit-code")" "gate base-unknown: exit 0 (fail-open)"
+if grep -q -- '--status failed' "$CASE_G/emit-capture.log" 2>/dev/null; then
+  fail "gate base-unknown: must NOT emit --status failed" "capture:$(printf '\n%s' "$(cat "$CASE_G/emit-capture.log" 2>/dev/null)")"
+else
+  pass "gate base-unknown: no --status failed"
+fi
+if grep -q 'could not resolve integration base' "$CASE_G/stderr.log" 2>/dev/null; then
+  pass "gate base-unknown: warns on stderr"
+else
+  fail "gate base-unknown: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_G/stderr.log" 2>/dev/null)")"
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"
