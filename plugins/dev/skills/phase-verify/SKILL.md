@@ -132,6 +132,47 @@ BASE_BRANCH="${BASE_BRANCH:-main}"
 DIFF_RANGE="origin/${BASE_BRANCH}...HEAD"
 ```
 
+#### CTL-608: empty-branch backstop
+
+Defense-in-depth for the live `phase-implement` empty-branch gate. That gate runs
+in the phase-implement End block, but the execution-core **reclaim-dead-work**
+path emits `implement-complete` on a worker's behalf *without* running that End
+block — so an empty branch (0 commits ahead) can still reach verify. Counting
+commits-ahead here means an empty branch emits `phase.verify.failed` instead of
+running the full gate suite and advancing an empty branch to `phase-pr`. Reuses
+`BASE_BRANCH` from step 1; uses only POSIX/zsh-safe `git rev-list --count`.
+Fail-open (warn + continue) when the base is unresolvable, matching
+phase-implement and the mirror block's `_base branch unknown_` tolerance.
+Uniquely-named fence so the e2e harness can extract+exercise it.
+
+```bash phase-verify-empty-branch-gate
+# CTL-608: backstop — an empty branch (0 commits ahead) means there is nothing
+# to verify and advancing would open an empty PR. phase-implement's gate should
+# already have caught this; this is defense-in-depth for the reclaim path.
+# Fail-open if the base is unresolvable (warn + continue), matching phase-implement.
+VERIFY_GATE_BASE=""
+if git rev-parse --verify --quiet "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
+  VERIFY_GATE_BASE="origin/${BASE_BRANCH}"
+elif git rev-parse --verify --quiet "${BASE_BRANCH}" >/dev/null 2>&1; then
+  VERIFY_GATE_BASE="${BASE_BRANCH}"
+fi
+if [[ -n "${VERIFY_GATE_BASE}" ]]; then
+  VERIFY_AHEAD="$(git rev-list --count "${VERIFY_GATE_BASE}..HEAD" 2>/dev/null || echo 0)"
+  if [[ "${VERIFY_AHEAD:-0}" -le 0 ]]; then
+    echo "phase-verify: 0 commits ahead of ${VERIFY_GATE_BASE}; empty branch, nothing to verify (CTL-608)" >&2
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "empty_branch:0_commits_ahead_of_${VERIFY_GATE_BASE}"
+    [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
+      "phase-verify failed: empty branch (0 commits ahead of ${VERIFY_GATE_BASE})" \
+      --as "$TICKET" --type attention --orch "$ORCH_ID" >/dev/null 2>&1 || true
+    exit 1
+  fi
+else
+  echo "phase-verify: could not resolve integration base (no origin/${BASE_BRANCH} or ${BASE_BRANCH}); skipping empty-branch gate (CTL-608)" >&2
+fi
+```
+
 ### 2. Run read-only gates
 
 Run each gate; record pass/fail/skip into the in-memory results map. Do not stop
