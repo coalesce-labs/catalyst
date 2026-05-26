@@ -514,11 +514,11 @@ export function schedulerTick(
   // Reclaim is a strict superset of "do nothing": only the dead+work-done case
   // mutates the signal; all other classes (terminal/running/unknown/not-done/
   // not-applicable) are zero-action no-ops.
-  // CTL-587: reclaimDeadWork now returns up to 7 discriminators. The four
+  // CTL-587: reclaimDeadWork now returns up to 8 discriminators. The four
   // that callers can act on (HUD, daemon log) populate parallel arrays; the
-  // other three (noop, not-done, not-applicable, reclaim-failed) are silent
-  // because they describe "no externally-visible change" — the next tick
-  // will re-evaluate. The 'reviveSuppressed' bucket is the storm-breaker
+  // others (noop, not-done, not-applicable, reclaim-failed, superseded-noop)
+  // are silent because they describe "no externally-visible change" — the next
+  // tick will re-evaluate. The 'reviveSuppressed' bucket is the storm-breaker
   // marker; 'escalated' fires `needs-human` via the per-phase recovery path.
   const reclaimed = [];
   const revived = [];
@@ -550,6 +550,9 @@ export function schedulerTick(
         break;
       default:
         // noop | not-done | not-applicable | reclaim-failed → invisible.
+        // CTL-606: superseded-noop also buckets here — a dead predecessor signal
+        // the ticket has already advanced past. Invisible by design (the active
+        // phase is progressing normally); surfacing it would be noise.
         break;
     }
   }

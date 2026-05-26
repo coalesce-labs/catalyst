@@ -24,7 +24,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { getJobsRoot, getEventLogPath, log } from "./config.mjs";
-import { readWorkerSignals, TERMINAL } from "./signal-reader.mjs";
+import { phaseIndex } from "../lib/phase-fsm.mjs";
+import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
@@ -569,6 +570,14 @@ const KILL_RECENT_ACTIVITY_MS = 30 * 1000;
 //                         probe-less phase: verify/review/pr/monitor-*).
 //                         needs-human label applied (via the CTL-587 verified
 //                         applyLabel); ticket stays where it is for human triage.
+//   'superseded-noop'     effectively dead BUT the signal's phase precedes the
+//                         ticket's latest-dispatched phase (CTL-606). The ticket
+//                         has already advanced; the dead signal is a leftover
+//                         predecessor (left at `running`, never flipped to
+//                         `done`) that readWorkerSignals→byActivePhase ranked
+//                         ahead of the genuinely-active terminal phase. No
+//                         escalate/revive/reclaim — acting would spuriously flag
+//                         needs-human or spawn a duplicate worker at a past phase.
 //
 // CTL-588 still defines "effectively dead" as classifyWorker:'dead' OR a
 // 'running' signal whose bg state.json mtime is older than staleMs.
@@ -603,6 +612,9 @@ export function reclaimDeadWorkIfPossible(
     // I/O, or to drive the cool-down clock independently of `now`.
     inEscalationCooldownFn = defaultInEscalationCooldown,
     recordEscalationFn = defaultRecordEscalation,
+    // CTL-606 — supersede guard. Returns the ticket's dispatched phase names so
+    // the guard can detect a dead signal the pipeline has already advanced past.
+    listTicketPhases = (t) => listDispatchedPhases(orchDir, t),
     now = Date.now,
     staleMs = STALE_MS,
   } = {},
@@ -622,6 +634,25 @@ export function reclaimDeadWorkIfPossible(
   if (!effectivelyDead) return "noop";
 
   const { ticket, phase } = signal;
+
+  // CTL-606 — supersede guard. The reclaim sweep is fed ONE signal per ticket by
+  // readWorkerSignals→byActivePhase, which ranks by status+recency, NOT phase
+  // order. A stale predecessor left at `running` (never flipped to `done`) can
+  // therefore shadow the real, already-advanced phase and be handed here. If the
+  // dead signal's phase precedes the ticket's latest-dispatched phase, the ticket
+  // has moved on — escalating or reviving it would spuriously flag needs-human or
+  // spawn a duplicate worker at a past phase. No-op. Runs only after the dead
+  // check above, so live signals pay no filesystem read.
+  const dispatched = listTicketPhases(ticket);
+  const latestIdx = dispatched.reduce((max, p) => {
+    const i = phaseIndex(p);
+    return i > max ? i : max;
+  }, -1);
+  if (phaseIndex(phase) < latestIdx) {
+    log.info({ ticket, phase, latestPhaseIndex: latestIdx }, "ctl-606: superseded phase, no-op");
+    return "superseded-noop";
+  }
+
   const orchId = signal.raw?.orchestrator;
   const prevBgJobId = signal.raw?.bg_job_id ?? null;
 
