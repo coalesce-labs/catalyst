@@ -367,8 +367,21 @@ while IFS=$'\t' read -r W T; do
 	fi
 
 	if [ -f "$SIGNAL_FILE" ]; then
-		# Already has a signal (idempotent — previously dispatched)
-		continue
+		# CTL-604: status-aware idempotency. A signal that is still in flight
+		# (running/dispatched/…) or already terminal-success (done/merged) means a
+		# prior dispatch is owned elsewhere — skip. But a failed/stalled signal is
+		# re-dispatchable: a worker that died without recovery must be relaunched,
+		# not stranded on mere file existence. Default (missing/malformed status)
+		# stays conservative — skip — so we never double-dispatch a live worker.
+		EXISTING_STATUS=$(jq -r '.status // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
+		case "$EXISTING_STATUS" in
+		failed | stalled)
+			: # fall through to (re-)dispatch
+			;;
+		*)
+			continue
+			;;
+		esac
 	fi
 
 	if [ ! -d "$WORKER_DIR" ]; then

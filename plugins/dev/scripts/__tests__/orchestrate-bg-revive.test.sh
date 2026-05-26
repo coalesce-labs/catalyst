@@ -221,6 +221,55 @@ echo "$LOG" | grep -q "task.type=phase-verify" \
   || fail "verify worker tagged task.type=phase-verify"
 scratch_teardown
 
+# ─── Test 8 (CTL-604): socket-close in the stream is detected as an API error ─
+# A live, non-stale worker whose stream shows "socket connection was closed"
+# must be revived (api-stream-idle-timeout), not ignored. Before CTL-604 the
+# detector regex matched only "Stream idle timeout|partial response received",
+# so socket-death fell through and the worker silently stalled.
+echo "test 8 (CTL-604): socket-close stream error is detected → revived (api-stream-idle-timeout)"
+scratch_setup
+sleep 600 &
+LIVE_PID=$!
+disown "$LIVE_PID" 2>/dev/null || true
+make_phase_signal "T-8" "implement" "implementing" "bg-old-8" "$LIVE_PID"
+write_stream_init "T-8" "sess-8-abc"
+# Append a socket-close result error event (with a uuid the detector requires).
+echo '{"type":"result","is_error":true,"uuid":"err-8-uuid","api_error_status":"API Error: The socket connection was closed unexpectedly"}' \
+  >> "${ORCH_DIR}/workers/output/T-8-stream.jsonl"
+# High stale threshold so the ONLY revive trigger is the API-error detection.
+"$REVIVE" --orch-dir "$ORCH_DIR" --orch-id "demo" --stale-heartbeat-seconds 99999 \
+  > "${SCRATCH}/out" 2>"${SCRATCH}/err"
+RC8=$(jq -r '.reviveCount' "${ORCH_DIR}/workers/T-8.json")
+REASON8=$(jq -r '.lastReviveReason' "${ORCH_DIR}/workers/T-8.json")
+[ "$RC8" = "1" ] && pass "socket-close triggered a revive (reviveCount=1)" || fail "socket-close triggered a revive" "reviveCount=$RC8 stderr=$(cat "${SCRATCH}/err")"
+[ "$REASON8" = "api-stream-idle-timeout" ] && pass "lastReviveReason=api-stream-idle-timeout (not pid-dead)" || fail "lastReviveReason=api-stream-idle-timeout" "got: $REASON8"
+kill "$LIVE_PID" 2>/dev/null || true
+scratch_teardown
+
+# ─── Test 9 (CTL-604): a resume refused because the agent is still a bg job ───
+# must NOT be recorded as a successful pid-dead revive. The previous turn died
+# (socket close) but the process lives; claude refuses --resume. spawn_revive_bg
+# now reads stderr and reports "alive" so the caller leaves reviveCount alone.
+echo "test 9 (CTL-604): resume refused (agent still bg-alive) → NOT a false pid-dead revive"
+scratch_setup
+# Override the fake claude: refuse the resume on stderr, emit no bg-job stdout.
+cat > "${SCRATCH}/bin/claude" <<'EOF'
+#!/usr/bin/env bash
+echo "args: $*" >> "$CLAUDE_LOG"
+echo "Error: session is currently running as a background agent (bg)" >&2
+exit 1
+EOF
+chmod +x "${SCRATCH}/bin/claude"
+make_phase_signal "T-9" "implement" "implementing" "bg-old-9" "$DEAD_PID"
+write_stream_init "T-9" "sess-9-abc"
+"$REVIVE" --orch-dir "$ORCH_DIR" --orch-id "demo" --stale-heartbeat-seconds 0 \
+  > "${SCRATCH}/out" 2>"${SCRATCH}/err"
+RC9=$(jq -r '.reviveCount' "${ORCH_DIR}/workers/T-9.json")
+REASON9=$(jq -r '.lastReviveReason // ""' "${ORCH_DIR}/workers/T-9.json")
+[ "$RC9" = "0" ] && pass "reviveCount NOT incremented (no false revive)" || fail "reviveCount NOT incremented" "got: $RC9"
+[ "$REASON9" != "pid-dead" ] && pass "lastReviveReason NOT set to pid-dead" || fail "lastReviveReason NOT set to pid-dead" "got: $REASON9"
+scratch_teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"
