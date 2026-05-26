@@ -114,6 +114,17 @@ run_dispatch() {
 	"$DISPATCH" --orch-dir "$ORCH_DIR" "$@"
 }
 
+# make_phase_signal TICKET PHASE STATUS — seed a nested phase-mode signal at
+# workers/<T>/phase-<PHASE>.json so the phase-aware running counter (CTL-605
+# Bug 2) observes it.
+make_phase_signal() {
+	local t="$1" p="$2" s="$3"
+	mkdir -p "${ORCH_DIR}/workers/${t}"
+	jq -n --arg t "$t" --arg p "$p" --arg s "$s" --arg ts "$(now_iso)" \
+		'{ticket: $t, phase: $p, status: $s, updatedAt: $ts}' \
+		>"${ORCH_DIR}/workers/${t}/phase-${p}.json"
+}
+
 # ─── Test cases ───────────────────────────────────────────────────────────────
 
 echo "test 1: empty queue reports queueEmpty and exits 0"
@@ -488,6 +499,42 @@ EOF
 	echo "${SCRATCH}/.catalyst/config.json"
 }
 
+# phase_agent_dispatch_drain_setup — like phase_agent_dispatch_setup, but the
+# stub also drains its own stdin to a per-pid file. This models the real bug:
+# phase-agent-dispatch synchronously launches `claude --bg` with fd 0 inherited,
+# which drains the dispatch loop's `done <<<"$PENDING"` herestring. With the leak
+# (missing </dev/null on the caller's command substitution) the leftover
+# `<wave>\t<ticket>` rows land in stdin-<pid>.log here and the outer loop stops
+# after the first ticket. Used by the CTL-605 Bug 1 regression test.
+phase_agent_dispatch_drain_setup() {
+	cat >"${SCRATCH}/bin/phase-agent-dispatch" <<'EOF'
+#!/usr/bin/env bash
+cat <&0 > "${PHASE_STDIN_DIR}/stdin-$$.log" 2>/dev/null || true
+echo "$@" >> "$PHASE_DISPATCH_LOG"
+ORCH_DIR=""; PHASE=""; TICKET=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --orch-dir) ORCH_DIR="$2"; shift 2 ;;
+    --phase)    PHASE="$2"; shift 2 ;;
+    --ticket)   TICKET="$2"; shift 2 ;;
+    *)          shift ;;
+  esac
+done
+if [ -n "$ORCH_DIR" ] && [ -n "$PHASE" ] && [ -n "$TICKET" ]; then
+  mkdir -p "${ORCH_DIR}/workers/${TICKET}"
+  echo "{\"ticket\":\"${TICKET}\",\"phase\":\"${PHASE}\",\"status\":\"dispatched\"}" \
+    > "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+fi
+echo "{\"ticket\":\"${TICKET}\",\"phase\":\"${PHASE}\",\"bg_job_id\":\"fake-${TICKET}\",\"status\":\"running\"}"
+EOF
+	chmod +x "${SCRATCH}/bin/phase-agent-dispatch"
+	export PHASE_DISPATCH_LOG="${SCRATCH}/phase-dispatch.log"
+	: >"$PHASE_DISPATCH_LOG"
+	export PHASE_STDIN_DIR="${SCRATCH}/phase-stdin"
+	mkdir -p "$PHASE_STDIN_DIR"
+	export CATALYST_PHASE_AGENT_DISPATCH="${SCRATCH}/bin/phase-agent-dispatch"
+}
+
 echo "test 24 (CTL-452): --ticket without --phase exits 2"
 scratch_setup
 write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
@@ -637,6 +684,91 @@ if ! grep -q "invalid dispatchMode" "${SCRATCH}/err"; then
 else
 	fail "no WARN for execution-core" "stderr=$(cat "${SCRATCH}/err")"
 fi
+scratch_teardown
+
+echo "test 34 (CTL-605 Bug 1): phase-agents multi-ticket wave dispatches all in one call; no stdin leak"
+scratch_setup
+phase_agent_dispatch_drain_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 4 '{"wave1Pending": ["T-1", "T-2", "T-3"]}'
+for T in T-1 T-2 T-3; do make_worktree "demo" "$T"; done
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | sort | join(",")')
+[ "$DISPATCHED" = "T-1,T-2,T-3" ] && pass "all 3 dispatched in one phase-agents call" ||
+	fail "all 3 dispatched in one phase-agents call" "got: $DISPATCHED (leak symptom: only first ticket)"
+LEAK_COUNT=0
+for SF in "${PHASE_STDIN_DIR}"/stdin-*.log; do
+	[ -e "$SF" ] || continue
+	if [ -s "$SF" ]; then
+		LEAK_COUNT=$((LEAK_COUNT + 1))
+		echo "    LEAK in $SF: $(head -c 200 "$SF")" >&2
+	fi
+done
+[ "$LEAK_COUNT" = "0" ] && pass "no phase worker received leftover herestring on stdin" ||
+	fail "no phase worker received leftover herestring on stdin" "$LEAK_COUNT saw stdin content"
+scratch_teardown
+
+echo "test 35 (CTL-605 Bug 2): nested phase signals count toward RUNNING and enforce maxParallel"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 2 '{"wave1Pending": ["NEW-1"]}'
+make_phase_signal "BUSY-A" "implement" "running"
+make_phase_signal "BUSY-B" "research" "running"
+make_worktree "demo" "NEW-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+RUNNING=$(echo "$OUT" | jq -r '.running')
+[ "$RUNNING" = "2" ] && pass "nested in-flight counted (running=2)" || fail "running=2" "got: $RUNNING"
+echo "$OUT" | jq -e '.slotsAfter == 0 and .dispatched == []' >/dev/null &&
+	pass "cap enforced — no dispatch when full" || fail "cap enforced" "got: $OUT"
+scratch_teardown
+
+echo "test 36 (CTL-605 Bug 2): monitor-deploy done frees the slot"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 1 '{"wave1Pending": ["NEW-1"]}'
+make_phase_signal "SHIPPED" "monitor-deploy" "done"
+make_worktree "demo" "NEW-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+[ "$(echo "$OUT" | jq -r '.running')" = "0" ] && pass "monitor-deploy done not counted" || fail "monitor-deploy done not counted" "$OUT"
+[ "$(echo "$OUT" | jq -r '.dispatched | join(",")')" = "NEW-1" ] && pass "freed slot dispatched NEW-1" || fail "freed slot dispatched NEW-1" "$OUT"
+scratch_teardown
+
+echo "test 37 (CTL-605 Bug 2): mid-pipeline done (non-monitor) still holds slot"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 1 '{"wave1Pending": ["NEW-1"]}'
+make_phase_signal "MIDWAY" "implement" "done" # done, but not monitor-deploy
+make_worktree "demo" "NEW-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+[ "$(echo "$OUT" | jq -r '.running')" = "1" ] && pass "mid-pipeline done still in-flight" || fail "mid-pipeline done still in-flight" "$OUT"
+echo "$OUT" | jq -e '.dispatched == []' >/dev/null && pass "cap held — NEW-1 not dispatched" || fail "cap held" "$OUT"
+scratch_teardown
+
+echo "test 38 (CTL-605 Bug 2): failed/stalled phase is terminal (frees slot)"
+scratch_setup
+phase_agent_dispatch_setup
+CONFIG_PATH=$(write_config "phase-agents")
+write_state "demo" 1 '{"wave1Pending": ["NEW-1"]}'
+make_phase_signal "BROKEN" "verify" "failed"
+make_worktree "demo" "NEW-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --config "$CONFIG_PATH" 2>"${SCRATCH}/err")
+[ "$(echo "$OUT" | jq -r '.running')" = "0" ] && pass "failed phase terminal" || fail "failed phase terminal" "$OUT"
+scratch_teardown
+
+echo "test 39 (CTL-605 Bug 2 / OQ2): single-ticket advance is NOT slot-gated when cap full"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 1 '{"wave1Pending": []}'
+make_phase_signal "ADV-1" "implement" "running" # cap=1 already full
+make_worktree "demo" "ADV-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "ADV-1" --phase "verify" 2>"${SCRATCH}/err")
+RC=$?
+[ "$RC" = "0" ] && pass "advance exits 0 despite full cap" || fail "advance exits 0" "rc=$RC err=$(cat "${SCRATCH}/err")"
+[ "$(echo "$OUT" | jq -r '.dispatched | join(",")')" = "ADV-1" ] && pass "advance dispatched despite full cap" || fail "advance dispatched" "$OUT"
+grep -q -- "--phase verify" "$PHASE_DISPATCH_LOG" && pass "phase-agent-dispatch called for verify" || fail "verify dispatched" "$(cat "$PHASE_DISPATCH_LOG")"
 scratch_teardown
 
 echo ""

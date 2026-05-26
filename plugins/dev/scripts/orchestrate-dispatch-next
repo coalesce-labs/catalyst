@@ -246,7 +246,20 @@ if [ -z "$SESSION_ID" ]; then
 fi
 
 # ─── Count non-terminal workers ───────────────────────────────────────────────
+# CTL-605: count BOTH signal layouts.
+#   • Legacy flat   workers/<T>.json         — one signal == one ticket
+#   • Phase-mode    workers/<T>/phase-*.json — a pipeline of phases per ticket
+# A ticket holds a parallelism slot until its pipeline reaches a terminal
+# end-state. For the nested layout we mirror execution-core/scheduler.mjs
+# isTicketInFlight (scheduler.mjs:90-103), the proven phase-aware predicate:
+# terminal when any phase is failed/stalled/aborted, or monitor-deploy is
+# done/skipped; in-flight otherwise — INCLUDING a non-monitor `done` whose next
+# phase signal isn't written yet (mid-pipeline gap). This intentionally differs
+# from the flat loop's "any done is terminal" rule, which is correct for the
+# one-signal-per-ticket legacy layout.
 RUNNING=0
+
+# Legacy flat layout (unchanged).
 for SIGNAL in "$ORCH_DIR/workers/"*.json; do
 	[ -f "$SIGNAL" ] || continue
 	S=$(jq -r '.status // ""' "$SIGNAL" 2>/dev/null)
@@ -256,8 +269,35 @@ for SIGNAL in "$ORCH_DIR/workers/"*.json; do
 	esac
 done
 
+# Phase-mode nested layout (CTL-605 Bug 2).
+for WDIR in "$ORCH_DIR/workers/"*/; do
+	[ -d "$WDIR" ] || continue
+	HAS_PHASE=0
+	TERMINAL=0
+	for PF in "$WDIR"phase-*.json; do
+		[ -f "$PF" ] || continue
+		HAS_PHASE=1
+		PNAME=$(basename "$PF" .json)
+		PNAME=${PNAME#phase-}
+		PS=$(jq -r '.status // ""' "$PF" 2>/dev/null)
+		case "$PS" in
+		failed | stalled | aborted) TERMINAL=1 ;;
+		esac
+		if [ "$PNAME" = "monitor-deploy" ]; then
+			case "$PS" in done | skipped) TERMINAL=1 ;; esac
+		fi
+	done
+	[ "$HAS_PHASE" -eq 1 ] || continue
+	[ "$TERMINAL" -eq 1 ] && continue
+	RUNNING=$((RUNNING + 1))
+done
+
 SLOTS=$((MAX_PARALLEL - RUNNING))
-if [ "$SLOTS" -le 0 ]; then
+# CTL-605 (OQ2): the cap admits NEW tickets (wave fill). Single-ticket
+# phase-advance (--ticket --phase) advances an already-in-flight ticket and keeps
+# the in-flight count constant, so it must never be slot-gated — otherwise
+# advancement deadlocks once the cap is full. Skip the gate in single-ticket mode.
+if [ -z "$SINGLE_TICKET" ] && [ "$SLOTS" -le 0 ]; then
 	printf '{"running":%d,"slotsAfter":0,"dispatched":[]}\n' "$RUNNING"
 	exit 0
 fi
@@ -311,7 +351,8 @@ fi
 DISPATCHED=()
 while IFS=$'\t' read -r W T; do
 	[ -z "$T" ] && continue
-	[ "$SLOTS" -le 0 ] && break
+	# CTL-605 (OQ2): single-ticket advance is never slot-gated (see RUNNING count).
+	[ -z "$SINGLE_TICKET" ] && [ "$SLOTS" -le 0 ] && break
 
 	WORKER_DIR="${WORKTREE_BASE}/${ORCH_ID}-${T}"
 
@@ -348,6 +389,10 @@ while IFS=$'\t' read -r W T; do
 		# on prior phase artifacts, and runs `claude --bg`. We capture its stdout
 		# JSON so we can mirror dispatch state to the global state script the
 		# same way the legacy path does.
+		# </dev/null (CTL-605): phase-agent-dispatch launches `claude --bg` with
+		# fd 0 inherited; without this the bg job drains the dispatch loop's
+		# `done <<<"$PENDING"` herestring and only one ticket dispatches per call.
+		# Same root cause as the legacy path's guard at line ~454 (CTL-334).
 		PHASE_STDOUT=$(
 			cd "$WORKER_DIR" || exit 1
 			CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
@@ -357,7 +402,7 @@ while IFS=$'\t' read -r W T; do
 				--phase "$PHASE" \
 				--ticket "$T" \
 				--orch-dir "$ORCH_DIR" \
-				--orch-id "$ORCH_ID"
+				--orch-id "$ORCH_ID" </dev/null
 		) || {
 			echo "phase-agent-dispatch failed for $T phase=$PHASE — see stderr" >&2
 			continue
@@ -369,12 +414,13 @@ while IFS=$'\t' read -r W T; do
 		# Intentional divergence from the legacy path (see comment at signal-file
 		# selection above): we do NOT bump `.progress.inProgressTickets` here
 		# because a single ticket may dispatch through multiple phases — the
-		# legacy counter assumes one dispatch per ticket. Likewise the RUNNING
-		# count loop at line 154 globs `workers/*.json` and won't see phase-mode
-		# signals at `workers/<T>/phase-<name>.json`. Both divergences are
-		# acceptable in the MVP because phase-mode and legacy-mode never run
-		# against the same wave; the orchestrator state-machine rewrite in
-		# Initiative 1 Phase 6 reconciles both surfaces.
+		# legacy counter assumes one dispatch per ticket. (CTL-605 fixed the other
+		# former divergence: the RUNNING count loop above now also enumerates the
+		# nested workers/<T>/phase-*.json layout, so phase-mode parallelism is
+		# enforced.) The remaining inProgressTickets divergence is acceptable in
+		# the MVP because phase-mode and legacy-mode never run against the same
+		# wave; the orchestrator state-machine rewrite in Initiative 1 Phase 6
+		# reconciles both surfaces.
 		"$STATE_SCRIPT" worker "$ORCH_ID" "$T" '.status = "dispatched" | .phase = "'"$PHASE"'"' >/dev/null 2>&1 || true
 		"$STATE_SCRIPT" event "$(jq -nc \
 			--arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$T" --arg phase "$PHASE" \
