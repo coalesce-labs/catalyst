@@ -85,27 +85,22 @@ ${"Overview prose to clear the size floor. ".repeat(8)}
 - [ ] tests pass
 `;
 
-// CTL-604 + CTL-641: the merged registry covers implement (CTL-574),
-// research/plan (CTL-604), and triage/verify/review/monitor-deploy (CTL-641).
-// pr/monitor-merge stay unregistered (no single on-disk artifact) — the recovery
-// sweep's "no-probe-for-phase" escalation stays a defensive guard for those and
-// for any genuinely-unknown phase.
+// CTL-604 + CTL-641: every pipeline phase now carries a probe — implement
+// (CTL-574), research/plan (CTL-604), and triage/verify/review/pr/monitor-merge/
+// monitor-deploy (CTL-641). hasProbe is false only for a genuinely-unknown phase,
+// keeping the recovery sweep's branch (A) "no-probe-for-phase" escalation as a
+// defensive guard.
 describe("WORK_DONE_PROBES — registry shape", () => {
-  test("all probe-backed phases are registered", () => {
+  test("all 9 pipeline phases are registered", () => {
     for (const phase of [
-      "implement",
-      "research",
-      "plan",
-      "triage",
-      "verify",
-      "review",
-      "monitor-deploy",
+      "implement", "triage", "research", "plan",
+      "verify", "review", "pr", "monitor-merge", "monitor-deploy",
     ]) {
       expect(hasProbe(phase)).toBe(true);
     }
   });
-  test("probe-less phases and unknown phases are not registered", () => {
-    for (const phase of ["pr", "monitor-merge", "unknown-phase"]) {
+  test("a genuinely-unknown phase is not registered", () => {
+    for (const phase of ["unknown-phase", "deploy", ""]) {
       expect(hasProbe(phase)).toBe(false);
     }
   });
@@ -568,5 +563,86 @@ describe("WORK_DONE_PROBES.research/plan — input guards (no fs/git spawn)", ()
         { runGit: boom, listArtifacts: boom, readArtifact: boom },
       ),
     ).toBe(false);
+    expect(
+      WORK_DONE_PROBES.plan(
+        { ticket: "CTL-604", repoRoot: null },
+        { runGit: boom, listArtifacts: boom, readArtifact: boom },
+      ),
+    ).toBe(false);
+  });
+});
+
+// --- CTL-641 Phase 3: gh REST probes (pr, monitor-merge) -------------------
+// pr is done when its PR is open (or already merged); monitor-merge is done
+// when the PR is merged. The PR number/url is read from the worker-dir signal
+// (.pr.number / .pr.url). We query the REST endpoint `gh api
+// repos/<slug>/pulls/<n>` (research §4 — REST `.state`/`.merged`, NOT GraphQL,
+// whose state field is uppercase). The repo slug is parsed from .pr.url; when
+// absent we fall back to gh's `{owner}/{repo}` placeholder (cwd inference).
+
+// makeRunGh — deterministic `gh` fake keyed on the joined args.
+function makeRunGh(responses) {
+  return (args) => responses[args.join(" ")] ?? { code: 1, stdout: "", stderr: "no match" };
+}
+
+describe("WORK_DONE_PROBES.pr", () => {
+  // url "u" has no parseable slug → falls back to the {owner}/{repo} placeholder.
+  const readFile = makeReadFile({ [wpath("CTL-1", "phase-pr.json")]: JSON.stringify({ pr: { number: 42, url: "u" } }) });
+  test("true when PR state is open (REST)", () => {
+    const runGh = makeRunGh({ "api repos/{owner}/{repo}/pulls/42": { code: 0, stdout: JSON.stringify({ state: "open" }), stderr: "" } });
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(true);
+  });
+  test("true when PR already merged (pr phase still done)", () => {
+    const runGh = makeRunGh({ "api repos/{owner}/{repo}/pulls/42": { code: 0, stdout: JSON.stringify({ state: "closed", merged: true }), stderr: "" } });
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(true);
+  });
+  test("false when PR is closed-unmerged", () => {
+    const runGh = makeRunGh({ "api repos/{owner}/{repo}/pulls/42": { code: 0, stdout: JSON.stringify({ state: "closed", merged: false }), stderr: "" } });
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(false);
+  });
+  test("real github url → slug parsed into the REST path", () => {
+    const rf = makeReadFile({
+      [wpath("CTL-1", "phase-pr.json")]: JSON.stringify({ pr: { number: 42, url: "https://github.com/coalesce-labs/catalyst/pull/42" } }),
+    });
+    const runGh = makeRunGh({ "api repos/coalesce-labs/catalyst/pulls/42": { code: 0, stdout: JSON.stringify({ state: "open" }), stderr: "" } });
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile: rf, runGh })).toBe(true);
+  });
+  test("false when no PR number on the signal (no gh call)", () => {
+    const runGh = () => { throw new Error("runGh must not be called"); };
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({ [wpath("CTL-1", "phase-pr.json")]: "{}" }), runGh })).toBe(false);
+  });
+  test("false when gh fails (safe default)", () => {
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh: makeRunGh({}) })).toBe(false);
+  });
+  test("false on missing input (no readFile/gh call)", () => {
+    const boom = () => { throw new Error("must not be called"); };
+    expect(WORK_DONE_PROBES.pr({ ticket: null, orchDir: ORCH }, { readFile: boom, runGh: boom })).toBe(false);
+    expect(WORK_DONE_PROBES.pr({ ticket: "CTL-1", orchDir: null }, { readFile: boom, runGh: boom })).toBe(false);
+  });
+});
+
+describe("WORK_DONE_PROBES['monitor-merge']", () => {
+  // phase-monitor-merge.json carries .pr.number but NOT .pr.url (it writes
+  // `.pr = {number}` only) — the probe reads the url from phase-pr.json.
+  const readFile = makeReadFile({
+    [wpath("CTL-1", "phase-monitor-merge.json")]: JSON.stringify({ pr: { number: 42 } }),
+    [wpath("CTL-1", "phase-pr.json")]: JSON.stringify({ pr: { number: 42, url: "https://github.com/coalesce-labs/catalyst/pull/42" } }),
+  });
+  test("true when merged==true (REST)", () => {
+    const runGh = makeRunGh({ "api repos/coalesce-labs/catalyst/pulls/42": { code: 0, stdout: JSON.stringify({ merged: true }), stderr: "" } });
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(true);
+  });
+  test("false when merged==false", () => {
+    const runGh = makeRunGh({ "api repos/coalesce-labs/catalyst/pulls/42": { code: 0, stdout: JSON.stringify({ merged: false }), stderr: "" } });
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh })).toBe(false);
+  });
+  test("falls back to phase-pr.json number when monitor-merge signal lacks one", () => {
+    const rf = makeReadFile({ [wpath("CTL-1", "phase-pr.json")]: JSON.stringify({ pr: { number: 7, url: "u" } }) });
+    const runGh = makeRunGh({ "api repos/{owner}/{repo}/pulls/7": { code: 0, stdout: JSON.stringify({ merged: true }), stderr: "" } });
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile: rf, runGh })).toBe(true);
+  });
+  test("false when no PR number anywhere / gh fails", () => {
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}), runGh: () => { throw new Error("no"); } })).toBe(false);
+    expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh: makeRunGh({}) })).toBe(false);
   });
 });

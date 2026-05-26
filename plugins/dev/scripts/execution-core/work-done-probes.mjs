@@ -5,8 +5,9 @@
 // The registry maps phase name → probe function. `implement` checks commit state
 // (CTL-574); `research`/`plan` check for a complete on-disk artifact (CTL-604);
 // `triage`/`verify`/`review`/`monitor-deploy` validate a worker-dir JSON artifact's
-// content (CTL-641). Only `pr`/`monitor-merge` remain without a probe — they have
-// no single on-disk artifact and stay CTL-587's auto-revival responsibility.
+// content and `pr`/`monitor-merge` query the PR's REST merge state (CTL-641).
+// Every pipeline phase now carries a probe — branch (A) "no-probe-for-phase"
+// escalation is reached only by a genuinely-unknown phase name.
 
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
@@ -133,6 +134,68 @@ function monitorDeployProbe({ ticket, orchDir } = {}, { readFile = defaultReadFi
   return ok && DEPLOY_DONE_STATES.has(value?.deploy_state);
 }
 
+// CTL-641 Phase 3: gh-backed probes (pr, monitor-merge). pr is done when its PR
+// is open or already merged; monitor-merge is done when the PR is merged. The
+// PR number/url come from the worker-dir signal; the merge state comes from the
+// REST endpoint (`gh api repos/<slug>/pulls/<n>` → lowercase `.state`/`.merged`,
+// per research §4 — NOT `gh pr view --json state`, whose GraphQL state is
+// uppercase and would never compare equal to "open").
+
+// defaultRunGh — `gh <args>` with stdout/stderr captured; never throws.
+export function defaultRunGh(args, { spawn = spawnSync } = {}) {
+  const res = spawn("gh", args, { encoding: "utf8" });
+  if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
+  return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+}
+
+// prInfoFromSignal — read { number, url } from a worker-dir signal's .pr. null
+// on any miss (missing file, parse error, no number).
+function prInfoFromSignal(orchDir, ticket, signalName, readFile) {
+  const { ok, value } = readJson(workerArtifact(orchDir, ticket, signalName), readFile);
+  if (!ok || !value?.pr?.number) return null;
+  return { number: value.pr.number, url: value.pr.url ?? null };
+}
+
+// repoSlugFromUrl — "https://github.com/owner/repo/pull/42" → "owner/repo", or null.
+function repoSlugFromUrl(url) {
+  const m = typeof url === "string" && url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+  return m ? m[1] : null;
+}
+
+// ghPullRest — REST pull payload ({ state, merged, … }) for a PR, or null on any
+// gh/parse failure. Slug from the PR url; when absent, gh substitutes
+// {owner}/{repo} from the cwd repo.
+function ghPullRest(pr, runGh) {
+  const slug = repoSlugFromUrl(pr.url) || "{owner}/{repo}";
+  const res = runGh(["api", `repos/${slug}/pulls/${pr.number}`]);
+  if (res.code !== 0) return null;
+  try {
+    return JSON.parse(res.stdout);
+  } catch {
+    return null;
+  }
+}
+
+function prProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile, runGh = defaultRunGh } = {}) {
+  if (!ticket || !orchDir) return false;
+  const pr = prInfoFromSignal(orchDir, ticket, "phase-pr.json", readFile);
+  if (!pr) return false;
+  const json = ghPullRest(pr, runGh);
+  // open or already-merged both mean the PR phase landed its artifact.
+  return json?.state === "open" || json?.merged === true;
+}
+
+function monitorMergeProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile, runGh = defaultRunGh } = {}) {
+  if (!ticket || !orchDir) return false;
+  const mm = prInfoFromSignal(orchDir, ticket, "phase-monitor-merge.json", readFile);
+  const prSig = prInfoFromSignal(orchDir, ticket, "phase-pr.json", readFile);
+  const number = mm?.number ?? prSig?.number;
+  if (!number) return false;
+  // phase-monitor-merge.json omits .pr.url, so prefer phase-pr.json for the slug.
+  const url = prSig?.url ?? mm?.url ?? null;
+  return ghPullRest({ number, url }, runGh)?.merged === true;
+}
+
 // implementProbe — commits-ahead>0 vs origin/main + clean tree on the worktree
 // bound to refs/heads/<ticket>. The worktree path is resolved from `git worktree
 // list --porcelain` (not reconstructed from projectKey config) so it's correct
@@ -219,8 +282,9 @@ const planProbe = artifactProbe("thoughts/shared/plans", {
 });
 
 // WORK_DONE_PROBES — phase → probe. Adding a probe is the entire opt-in for a
-// phase to participate in the CTL-574 reclaim sweep. Phases without an entry
-// (verify/review/pr/monitor-*) remain CTL-587's responsibility (auto-revival).
+// phase to participate in the CTL-574 reclaim sweep. All nine pipeline phases
+// now have an entry; only a genuinely-unknown phase falls through to CTL-587's
+// branch-(A) escalation.
 export const WORK_DONE_PROBES = {
   implement: implementProbe,
   research: researchProbe,
@@ -228,6 +292,8 @@ export const WORK_DONE_PROBES = {
   triage: triageProbe,
   verify: verifyProbe,
   review: reviewProbe,
+  pr: prProbe,
+  "monitor-merge": monitorMergeProbe,
   "monitor-deploy": monitorDeployProbe,
 };
 

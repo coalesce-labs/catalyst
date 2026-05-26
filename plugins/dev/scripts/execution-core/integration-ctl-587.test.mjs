@@ -215,14 +215,18 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     expect(existsSync(join(orchDir, "workers", "CTL-587-C", ".revive-1.applied"))).toBe(false); // no marker on suppression
   });
 
-  test("no-probe phase (pr) on a dead worker → 'escalated' immediately", () => {
+  // CTL-641 + CTL-604: pr now has a probe, but a dead pr worker whose
+  // phase-pr.json carries no .pr.number reads as not-done → branch (C). CTL-604
+  // made branch (C) phase-agnostic, so (with budget available) the worker is
+  // re-dispatched fresh rather than dead-ended — 'revived', reviveDispatch fires.
+  test("not-done pr phase on a dead worker → 'revived' (budget available)", () => {
     seedSignal("CTL-587-D", "pr", {
       status: "running",
       bg_job_id: "nonexistent-bg-id",
       orchestrator: "CTL-587-D",
     });
 
-    const labelCalls = [];
+    const reviveDispatchCalls = [];
     const result = schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
@@ -236,18 +240,19 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
         reclaimDeadWorkIfPossible(od, sig, {
           ...opts,
           statJob: () => null, // bg dead
-          // Default probes registry — only 'implement' has a probe; pr does not.
-          applyStalledLabel: ({ ticket }) => {
-            labelCalls.push(ticket);
-            return { applied: true };
+          // Default probes registry: pr's real probe reads .pr.number from
+          // phase-pr.json; the seeded signal has none → not-done → branch (C).
+          reviveDispatch: (args) => {
+            reviveDispatchCalls.push(args);
+            return { code: 0 };
           },
-          reviveDispatch: () => {
-            throw new Error("revive must not be called for no-probe escalation");
-          },
+          killBgJob: () => {},
+          // No prior revive events for CTL-587-D → budget available (0 < 2).
         }),
     });
 
-    expect(result.escalated).toEqual([{ ticket: "CTL-587-D", phase: "pr" }]);
-    expect(labelCalls).toEqual(["CTL-587-D"]);
+    expect(result.revived).toEqual([{ ticket: "CTL-587-D", phase: "pr" }]);
+    expect(result.escalated).toEqual([]);
+    expect(reviveDispatchCalls).toHaveLength(1);
   });
 });

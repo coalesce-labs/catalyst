@@ -562,26 +562,32 @@ describe("reclaimDeadWorkIfPossible", () => {
   // CTL-587: this case used to return 'not-applicable' (a silent dead-end).
   // It now escalates immediately — no probe means no way to verify the work,
   // so the human must look. needs-human label is applied via the injected seam.
-  test("CTL-587: dead worker on a no-probe phase → 'escalated' + needs-human label", () => {
-    // CTL-604/CTL-641: implement/research/plan/triage/verify/review/monitor-deploy
-    // now have probes, so use `pr` — still probe-less — as the example of a phase
-    // that hits branch (A) escalation.
-    const sig = { ...implementSignal(), phase: "pr" };
-    sig.raw.phase = "pr";
+  test("CTL-587: dead worker, probe NOT done + revive budget exhausted → 'escalated' + needs-human label", () => {
+    // CTL-641: every pipeline phase now has a probe, so the old branch-(A)
+    // "no-probe-for-phase" escalation is unreachable for real phases (and CTL-606's
+    // supersede guard throws on a non-PHASES phase before branch (A) is reached).
+    // The reachable "dead worker → needs-human" path is branch (C) once the revive
+    // budget is spent.
+    const sig = { ...implementSignal(), phase: "verify" };
+    sig.raw.phase = "verify";
     const emit = recorder({ code: 0 });
     const appendEscalated = recorder(undefined);
     const applyLabel = recorder({ applied: true });
+    const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, sig, {
       statJob: () => null, // bg dead
-      probes: { implement: recorder(true) }, // pr not registered
+      probes: { verify: recorder(false) }, // artifact NOT complete
       emitComplete: emit,
       appendEvent: recorder(undefined),
       appendEscalatedEvent: appendEscalated,
       applyStalledLabel: applyLabel,
+      reviveDispatch,
+      countReviveEvents: recorder(2), // budget exhausted (MAX_REVIVES)
     });
     expect(r).toBe("escalated");
     expect(emit.calls.length).toBe(0);
-    expect(appendEscalated.calls[0][0].reason).toBe("no-probe-for-phase");
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(appendEscalated.calls[0][0].reason).toBe("revive-budget-exhausted");
     expect(applyLabel.calls[0][0].ticket).toBe("CTL-9");
   });
 
@@ -754,11 +760,10 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
       opts: {
         repoRoot: "/repo",
         statJob: () => ({ exists: true, mtimeMs: stateJsonMtime }),
-        // CTL-604: inject a probe for any probed phase (implement/research/plan)
-        // so branch (B)/(C) is exercised; probe-less phases (pr/verify/…) get {}.
-        probes: ["implement", "research", "plan"].includes(phase)
-          ? { [phase]: recorder(probeResult) }
-          : {},
+        // CTL-641: every pipeline phase now has a probe, so inject one for
+        // whatever phase the scenario uses (an unregistered phase still hits
+        // branch (A) before the probe is dereferenced, so a stub is harmless).
+        probes: { [phase]: recorder(probeResult) },
         emitComplete: recorder({ code: 0 }),
         appendEvent: recorder(undefined),
         appendReviveEvent: recorder(undefined),
@@ -815,12 +820,17 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
   });
 
-  test("not-applicable (no probe registered for phase) → 'escalated' immediately", () => {
-    const s = setupReviveScenario({ phase: "pr" });
+  // CTL-641: pr/monitor-merge are now registered, so branch (A) is reached only
+  // by a genuinely-unknown phase. Use one to keep the no-probe guard under test.
+  test("probe NOT done + revive budget exhausted → 'escalated' immediately", () => {
+    // CTL-641/CTL-606: branch (A) "no-probe-for-phase" is now unreachable (all
+    // real phases are probed; unknown phases throw at the supersede guard). The
+    // budget-exhausted escalation is the reachable dead-end-to-human path.
+    const s = setupReviveScenario({ phase: "verify", probeResult: false, reviveCount: 2 });
     const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
     expect(r).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].phase).toBe("pr");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("no-probe-for-phase");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].phase).toBe("verify");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
     expect(s.opts.applyStalledLabel.calls.length).toBe(1);
     expect(s.opts.reviveDispatch.calls.length).toBe(0);
   });
@@ -1005,9 +1015,13 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
       opts: {
         repoRoot: "/repo",
         statJob: () => ({ exists: true, mtimeMs: 1_000 }),
-        probes: overrides.phase === "implement" || !overrides.phase
-          ? { implement: recorder(overrides.probeResult ?? false) }
-          : {},
+        // CTL-641 + CTL-606: every real phase now has a probe (so branch (A) is
+        // skipped) and CTL-606's supersede guard throws on a non-PHASES phase, so
+        // these storm-prevention tests can no longer reach the old branch-(A)
+        // no-probe escalation. They instead drive the reachable branch-(C)
+        // revive-budget-exhausted escalation: a probe-false real phase with the
+        // revive budget exhausted (reviveCount default below = MAX_REVIVES).
+        probes: { [overrides.phase ?? "implement"]: recorder(overrides.probeResult ?? false) },
         emitComplete: recorder({ code: 0 }),
         appendEvent: recorder(undefined),
         appendReviveEvent: recorder(undefined),
@@ -1016,7 +1030,7 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
         reviveDispatch: recorder({ code: 0 }),
         applyStalledLabel: recorder({ applied: true }),
         killBgJob: recorder(undefined),
-        countReviveEvents: recorder(overrides.reviveCount ?? 0),
+        countReviveEvents: recorder(overrides.reviveCount ?? 2), // default = MAX_REVIVES → budget-exhausted escalation
         countDistinctRevivingTickets: recorder(1),
         writeReviveMarker: recorder(undefined),
         now: () => overrides.nowMs ?? 1_000 + 6 * 60 * 1000,
@@ -1028,7 +1042,7 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
   }
 
   test("acceptance: second tick on same (ticket, phase) suppresses — exactly one event + one label write", () => {
-    const s = setupAt(orchDir, { phase: "pr" }); // no-probe branch
+    const s = setupAt(orchDir, { phase: "pr" }); // branch (C): revive-budget-exhausted
 
     expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
@@ -1091,7 +1105,7 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
     // recordEscalationFn signature: (orchDir, ticket, phase, reason, now)
     expect(recCd.calls[0][1]).toBe("CTL-9");
     expect(recCd.calls[0][2]).toBe("pr");
-    expect(recCd.calls[0][3]).toBe("no-probe-for-phase");
+    expect(recCd.calls[0][3]).toBe("revive-budget-exhausted");
   });
 
   test("escalation-suppressed return path does NOT call appendEscalatedEvent / applyStalledLabel / recordEscalationFn", () => {
