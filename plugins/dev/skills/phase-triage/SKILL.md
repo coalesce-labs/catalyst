@@ -226,11 +226,14 @@ _Triaged automatically by the phase-triage agent (CTL-451)._
 EOF
 )"
 
-if ! linearis issues discuss "$TICKET" --body "$COMMENT_BODY" >/dev/null 2>&1; then
-  emit_phase_complete --phase triage --ticket "$TICKET" --status failed \
-    --reason "linearis issues discuss failed"
-  exit 1
-fi
+# CTL-614: the Linear comment post is best-effort. triage.json is already on
+# disk; the canonical pipeline contract is `phase.triage.complete.<TICKET>`
+# (see CTL-452). A transient `linearis issues discuss` failure (notably the
+# rolling-hour HTTP 429 rate-limit from `linearis`) must NOT escalate the
+# ticket to `needs-human`. Capture stderr and surface it so operators can
+# still diagnose 429s from `daemon.log`.
+DISCUSS_STDERR="$(linearis issues discuss "$TICKET" --body "$COMMENT_BODY" 2>&1 >/dev/null)" \
+  || echo "phase-triage: linearis issues discuss failed (continuing): ${DISCUSS_STDERR}" >&2
 
 # 5. The `triaged` label is applied by the coordinator (CTL-558): the
 #    execution-core scheduler's label sweep tags `triaged` once the triage
