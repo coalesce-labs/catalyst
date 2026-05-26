@@ -1511,6 +1511,26 @@ describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
     expect(result.reclaimed.map((e) => e.ticket)).toContain("CTL-8");
   });
 
+  test("CTL-610: 'alive-quiet-suppressed' is invisible by design — no crash, not in any bucket", () => {
+    // The alive-quiet guard exists precisely to suppress noise. Bucketing it
+    // explicitly into result.revived / .reviveSuppressed / .escalated would
+    // re-create the very revive-storm reporting the guard exists to eliminate.
+    // It MUST handle the case without crashing, and MUST NOT populate any of
+    // the visible buckets — the next tick re-evaluates.
+    writeNestedSignal("CTL-10", "implement", { status: "running", bg_job_id: "bg-10" });
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork: () => "alive-quiet-suppressed",
+    });
+    expect(result.revived).toEqual([]);
+    expect(result.reviveSuppressed).toEqual([]);
+    expect(result.escalated).toEqual([]);
+    expect(result.reclaimed).toEqual([]);
+  });
+
   test("clean tick (no dead workers) returns empty arrays for every CTL-587 outcome", () => {
     const result = schedulerTick(orchDir, {
       readEligible: () => [],

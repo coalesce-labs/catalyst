@@ -16,6 +16,7 @@ import {
   reclaimDeadWorkIfPossible,
   defaultReviveDispatch,
   defaultKillBgJob,
+  defaultPidAlive,
   defaultAppendReviveEvent,
   readBootEpoch,
   readDaemonEpoch,
@@ -977,6 +978,160 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
   });
 });
 
+// --- CTL-610: alive-quiet keep-alive guard (branch (C0)) -------------------
+//
+// A worker can be effectively-dead by state.json mtime (5min stale) yet still
+// be alive-blocked-on-a-long-tool-call — the pre-first-output window for
+// research/plan sub-agent fan-outs, or a long synchronous Edit/Bash inside
+// implement. Pre-CTL-610 such a worker was revived (duplicate `claude --bg`
+// spawn, budget consumed, eventual escalation), producing the documented
+// ~50%-of-workers revive storm in 14-ticket runs. The (C0) guard inverts the
+// PID liveness check defaultKillBgJob already uses: when bg pid is a live
+// `claude` process AND state.json mtime is within HUNG_CUTOFF_MS, suppress
+// the revive entirely — no dispatch, no budget consumed, no marker, no kill,
+// no events.jsonl append, log-only. Past the cutoff the worker is treated as
+// genuinely hung and the existing revive path runs.
+
+describe("reclaimDeadWorkIfPossible — CTL-610 alive-quiet keep-alive guard", () => {
+  // Inline scenario builder mirroring setupReviveScenario but with the CTL-610
+  // pidAlive + hungCutoffMs seams added. The same defaults (effectively dead by
+  // mtime, probe says NOT done) so we exercise branch (C) territory; the (C0)
+  // guard sits at the top of (C), before priorRevives is consulted.
+  function setupAliveQuietScenario({
+    pidAlive = () => true, // bg pid is a live claude process
+    hungCutoffMs = 15 * 60 * 1000, // CTL-610 default
+    reviveCount = 0,
+    probeResult = false,
+    phase = "implement",
+    ticket = "CTL-9",
+    bgJobId = "bg-9",
+    stateJsonMtime = 1_000,
+    // 6 min past mtime — staleMs (5min) crossed, well within hungCutoffMs (15min).
+    nowMs = 1_000 + 6 * 60 * 1000,
+  } = {}) {
+    const sig = {
+      ...implementSignal({ ticket, status: "running", bgJobId }),
+      phase,
+    };
+    sig.raw.phase = phase;
+    return {
+      orch: "/orch",
+      sig,
+      opts: {
+        repoRoot: "/repo",
+        statJob: () => ({ exists: true, mtimeMs: stateJsonMtime }),
+        probes: { [phase]: recorder(probeResult) },
+        emitComplete: recorder({ code: 0 }),
+        appendEvent: recorder(undefined),
+        appendReviveEvent: recorder(undefined),
+        appendEscalatedEvent: recorder(undefined),
+        appendReviveSuppressedEvent: recorder(undefined),
+        reviveDispatch: recorder({ code: 0 }),
+        applyStalledLabel: recorder({ applied: true }),
+        killBgJob: recorder(undefined),
+        countReviveEvents: recorder(reviveCount),
+        countDistinctRevivingTickets: recorder(1),
+        writeReviveMarker: recorder(undefined),
+        pidAlive: recorder(pidAlive()),
+        hungCutoffMs,
+        now: () => nowMs,
+        staleMs: 5 * 60 * 1000,
+      },
+    };
+  }
+
+  test("alive pid within hung cutoff → 'alive-quiet-suppressed' (no dispatch, no budget, no marker, no kill, no events)", () => {
+    const s = setupAliveQuietScenario({ pidAlive: () => true, reviveCount: 0 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+    expect(s.opts.appendReviveEvent.calls.length).toBe(0);
+    expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(0);
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
+    expect(s.opts.writeReviveMarker.calls.length).toBe(0);
+    expect(s.opts.killBgJob.calls.length).toBe(0);
+    expect(s.opts.applyStalledLabel.calls.length).toBe(0);
+    // The guard MUST consult pidAlive — otherwise it cannot decide
+    expect(s.opts.pidAlive.calls.length).toBeGreaterThanOrEqual(1);
+    expect(s.opts.pidAlive.calls[0][0].bgJobId).toBe("bg-9");
+  });
+
+  test("alive pid but past hung cutoff → 'revived' (genuinely hung, existing path runs)", () => {
+    // 20 min past mtime > 15 min hung cutoff → fall through to existing revive
+    const s = setupAliveQuietScenario({
+      pidAlive: () => true,
+      stateJsonMtime: 1_000,
+      nowMs: 1_000 + 20 * 60 * 1000,
+    });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+    expect(s.opts.appendReviveEvent.calls.length).toBe(1);
+  });
+
+  test("dead pid → 'revived' (regression-shaped — existing CTL-587 path unchanged)", () => {
+    const s = setupAliveQuietScenario({ pidAlive: () => false });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("alive pid + revive budget exhausted → still 'alive-quiet-suppressed' (NEVER false-escalate a live worker)", () => {
+    // The (C0) guard MUST run before the budget-exhausted check, otherwise a
+    // live but quiet worker would be falsely escalated to needs-human just
+    // because two prior false-revives consumed its budget. This is the worst
+    // case the guard exists to prevent.
+    const s = setupAliveQuietScenario({ pidAlive: () => true, reviveCount: 2 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
+    expect(s.opts.applyStalledLabel.calls.length).toBe(0);
+  });
+
+  test("alive pid + storm-breaker open → still 'alive-quiet-suppressed' (guard runs before storm check)", () => {
+    // A live worker is alive regardless of fleet-wide storm conditions; the
+    // guard short-circuits storm bookkeeping too (no audit event emitted).
+    const s = setupAliveQuietScenario({ pidAlive: () => true });
+    s.opts.countDistinctRevivingTickets = recorder(4); // storm threshold open
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+    expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(0);
+  });
+
+  test("work-done (branch B) wins over alive-quiet (B returns before C0 is reached)", () => {
+    const s = setupAliveQuietScenario({ pidAlive: () => true, probeResult: true });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
+    // Guard MUST NOT have been consulted — branch (B) returned first
+    expect(s.opts.pidAlive.calls.length).toBe(0);
+  });
+
+  test("production default seam returns false for a fake bgJobId → guard inert, existing revive path runs", () => {
+    // The original setupReviveScenario (in the CTL-587 describe block) uses
+    // bgJobId 'bg-9' with no real ~/.claude/jobs/bg-9/pid file and injects
+    // NO pidAlive seam — so the production defaultPidAlive runs and returns
+    // false on the missing pid file. The (C0) guard is therefore inert for
+    // every pre-CTL-610 revive test, and they continue to pass unchanged.
+    // This test asserts that contract explicitly using the same conditions.
+    const s = setupAliveQuietScenario({ reviveCount: 0 });
+    // Strip the test-injected pidAlive so we exercise the production default.
+    delete s.opts.pidAlive;
+    // bg-9 has no pid file under the real ~/.claude/jobs → defaultPidAlive
+    // returns false → guard inert → existing revive path runs.
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+  });
+
+  test("guard inert when prevStateJsonMtime is null (classifyWorker:'dead' path) — falls through to revive", () => {
+    // When statJob returns null (bg dir gone), classifyWorker returns 'dead'
+    // directly; prevStateJsonMtime stays null. The (C0) guard's first
+    // conjunct (prevStateJsonMtime !== null) MUST fail-closed here so a real
+    // crash still revives even if a (mis-)injected pidAlive lied "true".
+    const sig = implementSignal({ ticket: "CTL-9", status: "running", bgJobId: "bg-9" });
+    const opts = {
+      ...setupAliveQuietScenario().opts,
+      statJob: () => null, // bg dir gone → classifyWorker:'dead'
+      pidAlive: () => true,
+      now: () => 0,
+    };
+    // A 'dead' bg implies a real crash → revive must still fire.
+    expect(reclaimDeadWorkIfPossible("/orch", sig, opts)).toBe("revived");
+  });
+});
+
 // --- CTL-638: per-(ticket, phase) escalation cool-down ---------------------
 //
 // Pre-CTL-638 the recovery sweep re-fired `appendEscalatedEvent` +
@@ -1318,6 +1473,110 @@ describe("defaultKillBgJob — pid-recycling guard", () => {
     const killCalls = calls.filter((c) => c.cmd === "kill");
     expect(killCalls).toHaveLength(1);
     expect(killCalls[0].args).toEqual(["-9", "12345"]);
+  });
+});
+
+// CTL-610: defaultPidAlive is the positive inverse of the ps-verify inside
+// defaultKillBgJob. It answers "is this bg job's pid still a live `claude`
+// process?" as a keep-alive signal. Best-effort: every doubt (missing pid
+// file, recycled pid, unreadable pid, falsy id) returns false so the caller's
+// existing revive path is preserved — critically, existing setupReviveScenario
+// tests use bgJobId "bg-9" with no real pid file under the real ~/.claude/jobs,
+// so the production default-seamed defaultPidAlive must return false there.
+describe("defaultPidAlive — positive bg-pid keep-alive (CTL-610)", () => {
+  let jobsRootDir;
+  beforeEach(() => {
+    jobsRootDir = mkdtempSync(join(tmpdir(), "ctl610-jobs-"));
+  });
+  afterEach(() => {
+    rmSync(jobsRootDir, { recursive: true, force: true });
+  });
+
+  function seedPid(bgJobId, pid) {
+    const dir = join(jobsRootDir, bgJobId);
+    mkdirSync(dir, { recursive: true });
+    if (pid !== undefined) writeFileSync(join(dir, "pid"), String(pid));
+  }
+
+  test("falsy bgJobId → false, no spawn", () => {
+    const spawn = recorder({ status: 0, stdout: "claude\n" });
+    expect(defaultPidAlive({ bgJobId: null }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
+    expect(spawn.calls.length).toBe(0);
+  });
+
+  test("missing pid file → false (the default-safe case existing revive tests rely on)", () => {
+    // bgJobId set but no pid file → fall through to false; production seam
+    // therefore leaves every existing setupReviveScenario (bg-9, no pid) green.
+    const spawn = recorder({ status: 0, stdout: "claude\n" });
+    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
+    expect(spawn.calls.length).toBe(0);
+  });
+
+  test("non-numeric pid file → false, no spawn", () => {
+    seedPid("bg-9", "abc");
+    const spawn = recorder({ status: 0, stdout: "claude\n" });
+    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
+    expect(spawn.calls.length).toBe(0);
+  });
+
+  test("pid <= 1 → false, no spawn (init / invalid)", () => {
+    seedPid("bg-9", "1");
+    const spawn = recorder({ status: 0, stdout: "claude\n" });
+    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
+    expect(spawn.calls.length).toBe(0);
+  });
+
+  test("ps exit non-zero (pid gone) → false, ps was invoked exactly once", () => {
+    seedPid("bg-9", "12345");
+    const calls = [];
+    const spawn = (cmd, args) => {
+      calls.push({ cmd, args });
+      return { status: 1, stdout: "", stderr: "" };
+    };
+    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
+    expect(calls.filter((c) => c.cmd === "ps").length).toBe(1);
+  });
+
+  test("ps says 'node' (pid recycled to non-claude process) → false", () => {
+    seedPid("bg-9", "12345");
+    const spawn = () => ({ status: 0, stdout: "node\n", stderr: "" });
+    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
+  });
+
+  test("happy path: pid file present + ps says 'claude' → true, ps invoked with -p <pid> -o comm=", () => {
+    seedPid("bg-9", "12345");
+    const calls = [];
+    const spawn = (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "ps") return { status: 0, stdout: "claude\n", stderr: "" };
+      return { status: 127 };
+    };
+    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(true);
+    expect(calls.filter((c) => c.cmd === "ps")).toHaveLength(1);
+    expect(calls.find((c) => c.cmd === "ps").args).toEqual(["-p", "12345", "-o", "comm="]);
+  });
+
+  test("case-insensitive match: ps stdout 'Claude' (capitalised) is still a claude process", () => {
+    seedPid("bg-9", "12345");
+    const spawn = () => ({ status: 0, stdout: "Claude\n", stderr: "" });
+    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(true);
+  });
+
+  test("substring match: ps stdout 'claude-bg' still counts (process name truncations)", () => {
+    seedPid("bg-9", "12345");
+    const spawn = () => ({ status: 0, stdout: "claude-bg\n", stderr: "" });
+    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(true);
+  });
+
+  test("never throws on a hostile jobsRoot (returns false)", () => {
+    // jobsRoot resolver throws — defaultPidAlive must swallow.
+    const spawn = recorder({ status: 0, stdout: "claude\n" });
+    expect(
+      defaultPidAlive({ bgJobId: "bg-9" }, {
+        spawn,
+        jobsRoot: () => { throw new Error("boom"); },
+      }),
+    ).toBe(false);
   });
 });
 

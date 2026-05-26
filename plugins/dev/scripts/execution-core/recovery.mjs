@@ -397,6 +397,35 @@ export function defaultKillBgJob(
   }
 }
 
+// defaultPidAlive — positive keep-alive check (CTL-610). Returns true iff the
+// bg job's recorded pid is still a live `claude` process. This is the inverse
+// use of the same primitive defaultKillBgJob uses to gate its SIGKILL: read
+// ~/.claude/jobs/<id>/pid, verify via `ps -p <pid> -o comm=` that the pid maps
+// to a claude process. It signals "alive, do not revive", never kills.
+// Best-effort: any doubt (missing pid file, unreadable, recycled pid, falsy
+// id, throwing seam) returns false so the caller falls through to its existing
+// revive path. Critically, the production seam returning false on a missing
+// pid file keeps every pre-CTL-610 revive test (which uses bgJobId "bg-9"
+// with no real pid file) green when the alive-quiet guard goes live.
+// `spawn` and `jobsRoot` are injectable for tests; production defaults call
+// the real spawnSync against the real ~/.claude/jobs.
+export function defaultPidAlive(
+  { bgJobId },
+  { spawn = spawnSync, jobsRoot = getJobsRoot } = {},
+) {
+  if (!bgJobId) return false;
+  try {
+    const pidPath = join(jobsRoot(), bgJobId, "pid");
+    if (!existsSync(pidPath)) return false;
+    const pid = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
+    if (!Number.isFinite(pid) || pid <= 1) return false;
+    const ps = spawn("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
+    return ps.status === 0 && (ps.stdout || "").toLowerCase().includes("claude");
+  } catch {
+    return false;
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // CTL-640: cold-start detection. The reference epoch = max(OS boot, claude-daemon
 // start). If that epoch is newer than EVERY ~/.claude/jobs/<id>/state.json mtime,
@@ -541,6 +570,16 @@ const STORM_WINDOW_MS = 10 * 60 * 1000;
 const STORM_THRESHOLD = 3;
 const KILL_RECENT_ACTIVITY_MS = 30 * 1000;
 
+// CTL-610 — hung cutoff for the alive-quiet keep-alive guard. A worker flagged
+// effectively-dead by stale state.json mtime but whose bg pid is still a live
+// `claude` process is alive-but-blocked-on-a-long-tool-call (a research/plan
+// sub-agent fan-out, or a long synchronous Edit/Bash inside implement), not
+// crashed — so we suppress its revive up to this bound. Past it, even a live
+// pid is treated as genuinely hung and revived as before. 15 minutes matches
+// the legacy STALE_BG_SECONDS the original ticket cites — a live worker gets
+// the full original grace before we conclude it is hung.
+const HUNG_CUTOFF_MS = 15 * 60 * 1000;
+
 // reclaimDeadWorkIfPossible — one signal in, one decision out. CTL-587 widens
 // the return set from CTL-574's five values to seven, transforming the two
 // silent dead-ends ('not-applicable' and 'not-done') into actionable outcomes:
@@ -578,6 +617,18 @@ const KILL_RECENT_ACTIVITY_MS = 30 * 1000;
 //                         ahead of the genuinely-active terminal phase. No
 //                         escalate/revive/reclaim — acting would spuriously flag
 //                         needs-human or spawn a duplicate worker at a past phase.
+//   'alive-quiet-suppressed' effectively dead by state.json mtime AND probe says
+//                         work NOT done BUT the bg pid is still a live `claude`
+//                         process within HUNG_CUTOFF_MS (CTL-610). The worker
+//                         is alive-blocked-on-a-long-tool-call (the pre-first-
+//                         output window for research/plan, or a long sync
+//                         Edit/Bash inside implement), not crashed. Suppress
+//                         the revive: no duplicate spawn, no budget consumed,
+//                         no .revive-N.applied marker, no defensive kill, no
+//                         events.jsonl append — log-only (to avoid the CTL-638
+//                         self-feeding storm). A dead pid (real crash) or a
+//                         live pid past the cutoff (genuinely hung) falls
+//                         through to the existing revive path.
 //
 // CTL-588 still defines "effectively dead" as classifyWorker:'dead' OR a
 // 'running' signal whose bg state.json mtime is older than staleMs.
@@ -615,6 +666,14 @@ export function reclaimDeadWorkIfPossible(
     // CTL-606 — supersede guard. Returns the ticket's dispatched phase names so
     // the guard can detect a dead signal the pipeline has already advanced past.
     listTicketPhases = (t) => listDispatchedPhases(orchDir, t),
+    // CTL-610 — alive-quiet keep-alive guard. pidAlive is the positive
+    // inverse of defaultKillBgJob's ps-verify: "is bg pid a live `claude`
+    // process?" Returning true within hungCutoffMs suppresses the revive
+    // entirely (the worker is alive on a long tool call, not crashed).
+    // Production defaults: pidAlive reads ~/.claude/jobs/<bg>/pid; the cutoff
+    // matches the legacy 15-min STALE_BG_SECONDS.
+    pidAlive = defaultPidAlive,
+    hungCutoffMs = HUNG_CUTOFF_MS,
     now = Date.now,
     staleMs = STALE_MS,
   } = {},
@@ -715,6 +774,33 @@ export function reclaimDeadWorkIfPossible(
   //     artifact is re-dispatched fresh rather than dead-ended at needs-human.
   //     defaultReviveDispatch is phase-agnostic (resets the signal to `stalled`
   //     and re-launches via phase-agent-dispatch).
+
+  // (C0) CTL-610 — alive-quiet keep-alive guard. The worker is effectively-dead
+  //     by state.json mtime and its probe reads not-done, but if its bg pid is
+  //     still a live `claude` process within the hung cutoff, it is alive-
+  //     blocked on a long synchronous tool call (the pre-first-output window
+  //     for research/plan, or a long Edit/Bash inside implement), not crashed.
+  //     Suppress the revive — no duplicate spawn, no budget spent, no marker,
+  //     no kill, no events.jsonl append (log-only, to avoid the CTL-638
+  //     self-feeding storm). A dead pid (real crash) or a live pid past the
+  //     cutoff (genuinely hung) falls through to the existing revive path
+  //     below. Runs BEFORE priorRevives so a live worker is never falsely
+  //     escalated to needs-human just because two prior false-revives consumed
+  //     its budget; runs BEFORE the storm-breaker so liveness wins over
+  //     fleet-wide noise. The first conjunct (prevStateJsonMtime !== null)
+  //     fails-closed on the classifyWorker:'dead' path (job dir gone — a real
+  //     crash) so the guard cannot mask one.
+  if (
+    prevStateJsonMtime !== null &&
+    now() - prevStateJsonMtime < hungCutoffMs &&
+    pidAlive({ bgJobId: prevBgJobId })
+  ) {
+    log.info(
+      { ticket, phase, prevBgJobId, prevStateJsonMtime },
+      "ctl-610: revive suppressed — bg pid alive within hung cutoff (worker is quiet, not dead)",
+    );
+    return "alive-quiet-suppressed";
+  }
 
   // Per-ticket revive budget from events.jsonl. The events file is the
   // authoritative counter — surviving daemon restarts, more truthful than the
