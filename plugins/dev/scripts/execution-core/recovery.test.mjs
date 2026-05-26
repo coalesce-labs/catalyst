@@ -1437,3 +1437,55 @@ describe("runtime epoch readers", () => {
     });
   });
 });
+
+describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
+  const orch = "/orch";
+
+  test("dead predecessor (triage) while a later phase is dispatched → 'superseded-noop', NO escalate", () => {
+    const escalate = recorder(undefined); // appendEscalatedEvent spy
+    const applyLabel = recorder(undefined); // applyStalledLabel spy
+    const triageSig = {
+      ticket: "CTL-9",
+      phase: "triage",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: {
+        ticket: "CTL-9",
+        phase: "triage",
+        orchestrator: "CTL-9",
+        status: "running",
+        bg_job_id: "job-old",
+      },
+    };
+    const r = reclaimDeadWorkIfPossible(orch, triageSig, {
+      statJob: () => null, // dead bg job
+      listTicketPhases: () => ["triage", "research", "plan", "implement"],
+      appendEscalatedEvent: escalate,
+      applyStalledLabel: applyLabel,
+    });
+    expect(r).toBe("superseded-noop");
+    expect(escalate.calls.length).toBe(0);
+    expect(applyLabel.calls.length).toBe(0);
+  });
+
+  test("dead signal IS the latest dispatched phase → guard does NOT fire (existing behavior)", () => {
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      listTicketPhases: () => ["triage", "research", "plan", "implement"],
+      probes: { implement: recorder(true) }, // work done → 'reclaimed'
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+    });
+    expect(r).toBe("reclaimed");
+  });
+
+  test("guard never fires for a live signal (no filesystem read on the hot path)", () => {
+    const listSpy = recorder(["triage", "research", "plan", "implement"]);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => ({ exists: true, mtimeMs: Date.now() }), // fresh → not dead
+      listTicketPhases: listSpy,
+    });
+    expect(r).toBe("noop");
+    expect(listSpy.calls.length).toBe(0); // guard runs only after the dead check
+  });
+});
