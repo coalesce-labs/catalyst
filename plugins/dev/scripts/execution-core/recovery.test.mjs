@@ -17,6 +17,9 @@ import {
   defaultReviveDispatch,
   defaultKillBgJob,
   defaultAppendReviveEvent,
+  readBootEpoch,
+  readDaemonEpoch,
+  defaultReadRuntimeEpoch,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -1240,5 +1243,84 @@ describe("revive event envelope round-trip (write → countReviveEvents)", () =>
     expect(countReviveEvents({ ticket: "CTL-RT-1", orchId: "orch-rt" })).toBe(1);
     // orchId mismatch returns 0 — proves the orchId attribute round-trips.
     expect(countReviveEvents({ ticket: "CTL-RT-1", orchId: "wrong-orch" })).toBe(0);
+  });
+});
+
+// CTL-640: cold-start detection — runtime epoch readers + detectColdStart.
+describe("runtime epoch readers", () => {
+  describe("readBootEpoch", () => {
+    test("darwin: parses `sec = <n>` from kern.boottime → ms", () => {
+      const spawn = (cmd, args) => {
+        expect(cmd).toBe("sysctl");
+        expect(args).toEqual(["-n", "kern.boottime"]);
+        return {
+          status: 0,
+          stdout: "{ sec = 1779212952, usec = 3402 } Tue May 19 12:49:12 2026\n",
+          stderr: "",
+        };
+      };
+      expect(readBootEpoch({ platform: "darwin", spawn })).toBe(1779212952 * 1000);
+    });
+
+    test("linux: parses `btime <n>` from /proc/stat → ms", () => {
+      const readFile = (p) => {
+        expect(p).toBe("/proc/stat");
+        return "cpu  1 2 3\nbtime 1779212952\nprocesses 99\n";
+      };
+      expect(readBootEpoch({ platform: "linux", readFile })).toBe(1779212952 * 1000);
+    });
+
+    test("unknown platform → 0", () => {
+      expect(readBootEpoch({ platform: "sunos" })).toBe(0);
+    });
+
+    test("spawn failure / unparseable output → 0", () => {
+      const spawn = () => ({ status: 1, stdout: "", stderr: "boom" });
+      expect(readBootEpoch({ platform: "darwin", spawn })).toBe(0);
+    });
+  });
+
+  describe("readDaemonEpoch", () => {
+    test("returns newest immediate-subdir mtime (ms)", () => {
+      const readDir = (root) => {
+        expect(root).toContain("cc-daemon-");
+        return ["old", "new"];
+      };
+      const statDir = (p) => (p.endsWith("new") ? { mtimeMs: 2000 } : { mtimeMs: 1000 });
+      expect(readDaemonEpoch({ socketRoot: "/tmp/cc-daemon-501", readDir, statDir })).toBe(2000);
+    });
+
+    test("missing socket root → 0", () => {
+      const readDir = () => {
+        throw new Error("ENOENT");
+      };
+      expect(readDaemonEpoch({ socketRoot: "/tmp/cc-daemon-501", readDir })).toBe(0);
+    });
+
+    test("no subdirs → 0", () => {
+      expect(readDaemonEpoch({ socketRoot: "/tmp/cc-daemon-501", readDir: () => [] })).toBe(0);
+    });
+  });
+
+  describe("defaultReadRuntimeEpoch", () => {
+    test("epoch = max(boot, daemon); epochSource names the winner", () => {
+      const res = defaultReadRuntimeEpoch({ readBoot: () => 1000, readDaemon: () => 5000 });
+      expect(res).toMatchObject({
+        epoch: 5000,
+        epochSource: "daemon",
+        bootEpoch: 1000,
+        daemonEpoch: 5000,
+      });
+    });
+
+    test("boot wins when daemon unreadable (0)", () => {
+      const res = defaultReadRuntimeEpoch({ readBoot: () => 8000, readDaemon: () => 0 });
+      expect(res).toMatchObject({ epoch: 8000, epochSource: "boot" });
+    });
+
+    test("both 0 → epoch 0, epochSource none", () => {
+      const res = defaultReadRuntimeEpoch({ readBoot: () => 0, readDaemon: () => 0 });
+      expect(res).toMatchObject({ epoch: 0, epochSource: "none" });
+    });
   });
 });

@@ -8,6 +8,7 @@
 import {
   statSync,
   readFileSync,
+  readdirSync,
   openSync,
   fstatSync,
   closeSync,
@@ -392,6 +393,81 @@ export function defaultKillBgJob(
   } catch (err) {
     log.warn({ bgJobId, err: err.message }, "revive: defensive kill failed");
   }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// CTL-640: cold-start detection. The reference epoch = max(OS boot, claude-daemon
+// start). If that epoch is newer than EVERY ~/.claude/jobs/<id>/state.json mtime,
+// every recorded --bg worker pre-dates the epoch and is provably dead → COLD
+// START. A false COLD is dangerous (unlocks aggressive recovery → storm risk),
+// so every reader fails open to 0 (the conservative floor) and the verdict biases
+// toward WARM. CTL-640 produces this signal only; consuming it is downstream.
+// ──────────────────────────────────────────────────────────────────────────
+
+// readBootEpoch — OS boot time in epoch-ms, or 0 if unobtainable.
+//   darwin: `sysctl -n kern.boottime` → "{ sec = <n>, usec = ... } <date>"
+//   linux:  /proc/stat line "btime <n>" (absolute boot epoch seconds; stable,
+//           unlike /proc/uptime which drifts with clock adjustments).
+// Injectable platform/spawn/readFile for deterministic tests. Never throws.
+export function readBootEpoch({
+  platform = process.platform,
+  spawn = spawnSync,
+  readFile = (p) => readFileSync(p, "utf8"),
+} = {}) {
+  try {
+    if (platform === "darwin") {
+      const res = spawn("sysctl", ["-n", "kern.boottime"], { encoding: "utf8" });
+      if (res.status !== 0) return 0;
+      const m = /sec\s*=\s*(\d+)/.exec(res.stdout || "");
+      return m ? Number(m[1]) * 1000 : 0;
+    }
+    if (platform === "linux") {
+      const m = /^btime\s+(\d+)/m.exec(readFile("/proc/stat") || "");
+      return m ? Number(m[1]) * 1000 : 0;
+    }
+  } catch {
+    /* fall through to 0 */
+  }
+  return 0;
+}
+
+// readDaemonEpoch — claude-daemon instance start in epoch-ms, or 0. The
+// per-instance socket dir /tmp/cc-daemon-<uid>/<instance>/ is recreated on each
+// daemon restart, so the newest immediate-subdir mtime IS the current instance's
+// start. (roster.json `updatedAt` is a heartbeat and is deliberately not used.)
+export function readDaemonEpoch({
+  socketRoot = `/tmp/cc-daemon-${process.getuid?.() ?? ""}`,
+  readDir = (p) => readdirSync(p),
+  statDir = (p) => statSync(p),
+} = {}) {
+  try {
+    let newest = 0;
+    for (const name of readDir(socketRoot)) {
+      try {
+        const m = statDir(join(socketRoot, name)).mtimeMs;
+        if (typeof m === "number" && m > newest) newest = m;
+      } catch {
+        /* skip unreadable entry */
+      }
+    }
+    return newest;
+  } catch {
+    return 0; // socket root absent
+  }
+}
+
+// defaultReadRuntimeEpoch — the cold-start reference epoch = max(boot, daemon).
+// epochSource names the winner for forensics; "none" when neither is readable.
+export function defaultReadRuntimeEpoch({
+  readBoot = readBootEpoch,
+  readDaemon = readDaemonEpoch,
+} = {}) {
+  const bootEpoch = readBoot();
+  const daemonEpoch = readDaemon();
+  const epoch = Math.max(bootEpoch, daemonEpoch);
+  let epochSource = "none";
+  if (epoch > 0) epochSource = daemonEpoch >= bootEpoch ? "daemon" : "boot";
+  return { epoch, epochSource, bootEpoch, daemonEpoch };
 }
 
 // defaultWriteReviveMarker — write workers/<ticket>/.revive-<N>.applied as an
