@@ -93,12 +93,55 @@ if [ ! -f "$SCRATCH/execution-core/daemon.pid" ]; then
 else
 	fail "start does not fabricate a PID file" "pidfile present"
 fi
-if echo "$OUT" | grep -qi "hung"; then
+if echo "$OUT" | grep -qi "wedged"; then
 	pass "start reports the degraded state"
 else
 	fail "start reports the degraded state" "out=$OUT"
 fi
 pkill -f "nopid-daemon.sh" 2>/dev/null || true
+teardown
+
+echo "test 5 (CTL-635): _neutralize_otel_attrs transform"
+# shellcheck source=/dev/null
+source "$SCRIPT" # source-safe: dispatch guarded, helpers defined
+POISONED="project=adva,hostname=mac-1,branch=CTL-635-x,linear.key=ADV-1039,catalyst.orchestration=CTL-635,task.type=phase-plan"
+OUT="$(_neutralize_otel_attrs "$POISONED")"
+# poisoning keys gone
+if ! echo "$OUT" | grep -q 'linear.key='; then pass "drops linear.key"; else fail "drops linear.key" "out=$OUT"; fi
+if ! echo "$OUT" | grep -q 'catalyst.orchestration='; then pass "drops catalyst.orchestration"; else fail "drops catalyst.orchestration" "out=$OUT"; fi
+if ! echo "$OUT" | grep -q 'branch='; then pass "drops branch"; else fail "drops branch" "out=$OUT"; fi
+if ! echo "$OUT" | grep -q 'task.type='; then pass "drops task.type"; else fail "drops task.type" "out=$OUT"; fi
+if ! echo "$OUT" | grep -q 'project=adva'; then pass "drops borrowed project"; else fail "drops borrowed project" "out=$OUT"; fi
+# neutral identity + honest attrs preserved
+if echo "$OUT" | grep -q 'project=catalyst'; then pass "stamps project=catalyst"; else fail "stamps project=catalyst" "out=$OUT"; fi
+if echo "$OUT" | grep -q 'catalyst.role=execution-core-daemon'; then pass "stamps daemon role"; else fail "stamps daemon role" "out=$OUT"; fi
+if echo "$OUT" | grep -q 'hostname=mac-1'; then pass "preserves hostname"; else fail "preserves hostname" "out=$OUT"; fi
+# empty input still yields the neutral identity
+OUT_EMPTY="$(_neutralize_otel_attrs "")"
+if echo "$OUT_EMPTY" | grep -q 'catalyst.role=execution-core-daemon'; then pass "empty input → neutral identity"; else fail "empty input → neutral identity" "out=$OUT_EMPTY"; fi
+
+echo "test 6 (CTL-635): start neutralizes the daemon's OTEL_RESOURCE_ATTRIBUTES"
+setup
+# fake daemon that records the OTEL env it was launched with, then behaves normally
+ENVDUMP="$SCRATCH/otel-env.txt"
+REC="$SCRATCH/rec-daemon.sh"
+cat >"$REC" <<EOF
+#!/usr/bin/env bash
+printf '%s' "\${OTEL_RESOURCE_ATTRIBUTES-}" > "$ENVDUMP"
+while [ \$# -gt 0 ]; do [ "\$1" = "--pid-file" ] && echo \$\$ > "\$2"; shift; done
+sleep 30
+EOF
+chmod +x "$REC"
+export EXECUTION_CORE_DAEMON_SCRIPT="$REC"
+export EXECUTION_CORE_RUNTIME="bash"
+# simulate a poisoned launch environment
+export OTEL_RESOURCE_ATTRIBUTES="project=adva,hostname=mac-1,linear.key=ADV-1039,catalyst.orchestration=CTL-635"
+"$SCRIPT" start >/dev/null 2>&1
+sleep 0.3
+GOT="$(cat "$ENVDUMP" 2>/dev/null)"
+if ! echo "$GOT" | grep -q 'linear.key='; then pass "daemon env has no linear.key"; else fail "daemon env has no linear.key" "got=$GOT"; fi
+if echo "$GOT" | grep -q 'catalyst.role=execution-core-daemon'; then pass "daemon env carries neutral identity"; else fail "daemon env carries neutral identity" "got=$GOT"; fi
+unset OTEL_RESOURCE_ATTRIBUTES
 teardown
 
 echo ""

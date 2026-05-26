@@ -65,6 +65,27 @@ resolve_runtime() {
 	return 1
 }
 
+# CTL-635: the daemon's --bg-spare pool freezes OTEL_RESOURCE_ATTRIBUTES at warm
+# time and it is immutable thereafter, so every phase worker's
+# claude_code_cost_usage_USD_total inherits whatever per-ticket context the
+# launch shell composed. Strip the per-ticket keys and stamp a neutral, honest
+# daemon identity so bg cost lands in one truthful bucket instead of a borrowed
+# ticket. (Per-ticket attribution requires Option D — Anthropic per-job env API.)
+_neutralize_otel_attrs() {
+	local raw="${1-}" out="" pair key
+	local IFS=','
+	for pair in $raw; do
+		[[ -z $pair ]] && continue
+		key="${pair%%=*}"
+		case "$key" in
+		project | branch | linear.key | catalyst.orchestration | task.type) continue ;;
+		*) out="${out:+$out,}$pair" ;;
+		esac
+	done
+	out="${out:+$out,}project=catalyst,catalyst.role=execution-core-daemon"
+	printf '%s' "$out"
+}
+
 cmd_start() {
 	if read_pid >/dev/null 2>&1; then
 		echo "catalyst-execution-core already running (pid $(read_pid))"
@@ -77,6 +98,12 @@ cmd_start() {
 		return 1
 	fi
 	mkdir -p "$EC_DIR" 2>/dev/null || true
+	# CTL-635: scrub inherited per-ticket OTEL attrs so the spare pool freezes a
+	# neutral daemon bucket, not a borrowed ticket. (Assign then export separately
+	# to avoid masking the helper's return value — SC2155.)
+	local neutral_otel
+	neutral_otel="$(_neutralize_otel_attrs "${OTEL_RESOURCE_ATTRIBUTES-}")"
+	export OTEL_RESOURCE_ATTRIBUTES="$neutral_otel"
 	nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1 &
 	local server_pid=$!
 	disown "$server_pid" 2>/dev/null || true
@@ -126,6 +153,8 @@ cmd_stop() {
 }
 
 cmd_restart() {
+	# CTL-635: restart re-applies OTEL env hygiene for free — the scrub lives in
+	# cmd_start, which re-warms a fresh daemon (and its spare pool) on restart.
 	cmd_stop
 	cmd_start
 }
@@ -143,14 +172,20 @@ cmd_status() {
 	echo "stopped"
 }
 
-case "${1-}" in
-start) cmd_start ;;
-stop) cmd_stop ;;
-restart) cmd_restart ;;
-probe) cmd_probe ;;
-status) cmd_status ;;
-*)
-	echo "Usage: catalyst-execution-core {start|stop|restart|probe|status}" >&2
-	exit 1
-	;;
-esac
+# Source-safety (CTL-635): when sourced (e.g. by the test suite to unit-test
+# helpers), define functions but do not dispatch a command. `(return 0 2>/dev/null)`
+# succeeds only when this file is sourced; the negation guards execution to the
+# direct-invocation case.
+if ! (return 0 2>/dev/null); then
+	case "${1-}" in
+	start) cmd_start ;;
+	stop) cmd_stop ;;
+	restart) cmd_restart ;;
+	probe) cmd_probe ;;
+	status) cmd_status ;;
+	*)
+		echo "Usage: catalyst-execution-core {start|stop|restart|probe|status}" >&2
+		exit 1
+		;;
+	esac
+fi
