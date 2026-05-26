@@ -66,6 +66,27 @@ function isPhaseSignalFile(name) {
   return name.startsWith("phase-");
 }
 
+// listDispatchedPhases — the phase NAMES dispatched for one ticket: every
+// workers/<ticket>/phase-<name>.json (artifacts excluded). Pure over the
+// filesystem; carries no phase-order knowledge — callers map names→indices via
+// phaseIndex (phase-fsm.mjs). The primitive behind the CTL-606 supersede guard.
+export function listDispatchedPhases(orchDir, ticket) {
+  const dir = join(orchDir, "workers", ticket);
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return []; // no worker dir yet
+  }
+  const phases = [];
+  for (const name of names) {
+    if (!isPhaseSignalFile(name)) continue;
+    const m = /^phase-(.+)\.json$/.exec(name);
+    if (m) phases.push(m[1]);
+  }
+  return phases;
+}
+
 // readNestedDir — collect workers/<T>/phase-*.json, drop artifacts, and pick
 // the active phase: the latest updatedAt, preferring a non-terminal status so
 // a freshly-written terminal signal never shadows an in-flight phase.

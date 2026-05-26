@@ -5,7 +5,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readWorkerSignals } from "./signal-reader.mjs";
+import { readWorkerSignals, listDispatchedPhases } from "./signal-reader.mjs";
 
 let orchDir;
 
@@ -251,5 +251,38 @@ describe("readWorkerSignals", () => {
     writeFileSync(join(dir, "triage.json"), JSON.stringify({ artifact: true }));
     const sigs = readWorkerSignals(orchDir);
     expect(sigs).toEqual([]);
+  });
+});
+
+// --- CTL-606: listDispatchedPhases ----------------------------------------
+
+describe("listDispatchedPhases", () => {
+  test("returns every dispatched phase name under workers/<ticket>/", () => {
+    writeNested("CTL-9", "triage", { status: "done" });
+    writeNested("CTL-9", "research", { status: "done" });
+    writeNested("CTL-9", "plan", { status: "running" });
+    expect(listDispatchedPhases(orchDir, "CTL-9").sort()).toEqual([
+      "plan",
+      "research",
+      "triage",
+    ]);
+  });
+
+  test("ignores phase-output artifacts (triage/verify/review/phase-monitor-deploy.json)", () => {
+    writeNested("CTL-9", "implement", { status: "running" });
+    const dir = join(workersDir(), "CTL-9");
+    for (const name of [
+      "triage.json",
+      "verify.json",
+      "review.json",
+      "phase-monitor-deploy.json",
+    ]) {
+      writeFileSync(join(dir, name), JSON.stringify({ artifact: true }));
+    }
+    expect(listDispatchedPhases(orchDir, "CTL-9")).toEqual(["implement"]);
+  });
+
+  test("returns [] when the worker dir does not exist", () => {
+    expect(listDispatchedPhases(orchDir, "NOPE")).toEqual([]);
   });
 });
