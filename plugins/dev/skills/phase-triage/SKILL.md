@@ -199,7 +199,7 @@ jq -nc \
     generated_at: $generated_at
   }' > "$TRIAGE_FILE"
 
-# 4. Post triage comment to Linear.
+# 4. Post triage comment to Linear (best-effort: failure does not escalate the phase, CTL-614).
 # Render the dep + acronym lists with jq using single-quoted jq programs and
 # Unicode escapes for backticks (`) so the surrounding bash heredoc does
 # not need to escape them.
