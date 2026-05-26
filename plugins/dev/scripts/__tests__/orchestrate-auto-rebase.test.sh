@@ -262,6 +262,77 @@ ATTEMPTS=$(jq -r '.rebaseAttempts // 0' "${ORCH_DIR}/workers/T-10.json")
 [ "$ATTEMPTS" = "0" ] && pass "rebaseAttempts not bumped on dispatch failure" || fail "rebaseAttempts not bumped on dispatch failure" "got: $ATTEMPTS"
 scratch_teardown
 
+# CTL-617: gate dispatch on phase-monitor-merge ownership.
+# phase-monitor-merge handles BEHIND inline; auto-rebase dispatching a
+# parallel rebase worker into the same worktree is the two-merge-owners
+# race. The "dispatched|running|done" set mirrors phase-agent-dispatch's
+# idempotency guard.
+
+echo "test: dispatch skipped when phase-monitor-merge is running"
+scratch_setup
+old=$(date -u -v-10M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+set_pr_view "OPEN" "DIRTY" "main"
+make_signal "CTL-617A" "running" "901" "https://github.com/coalesce-labs/catalyst/pull/901" "$old" "0"
+mkdir -p "${ORCH_DIR}/workers/CTL-617A"
+jq -n '{ticket:"CTL-617A", phase:"monitor-merge", status:"running"}' \
+  > "${ORCH_DIR}/workers/CTL-617A/phase-monitor-merge.json"
+"$AUTO_REBASE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 1 > "${SCRATCH}/out" 2>&1
+[ ! -s "$REBASE_LOG" ] && pass "no rebase dispatch when phase-monitor-merge is running" \
+  || fail "no rebase dispatch when phase-monitor-merge is running" "log: $(cat "$REBASE_LOG")"
+scratch_teardown
+
+echo "test: dispatch skipped when phase-monitor-merge is dispatched"
+scratch_setup
+old=$(date -u -v-10M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+set_pr_view "OPEN" "DIRTY" "main"
+make_signal "CTL-617D" "running" "903" "https://github.com/coalesce-labs/catalyst/pull/903" "$old" "0"
+mkdir -p "${ORCH_DIR}/workers/CTL-617D"
+jq -n '{ticket:"CTL-617D", phase:"monitor-merge", status:"dispatched"}' \
+  > "${ORCH_DIR}/workers/CTL-617D/phase-monitor-merge.json"
+"$AUTO_REBASE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 1 > "${SCRATCH}/out" 2>&1
+[ ! -s "$REBASE_LOG" ] && pass "no rebase dispatch when phase-monitor-merge is dispatched" \
+  || fail "no rebase dispatch when phase-monitor-merge is dispatched" "log: $(cat "$REBASE_LOG")"
+scratch_teardown
+
+echo "test: dispatch skipped when phase-monitor-merge is done"
+scratch_setup
+old=$(date -u -v-10M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+set_pr_view "OPEN" "DIRTY" "main"
+make_signal "CTL-617E" "running" "904" "https://github.com/coalesce-labs/catalyst/pull/904" "$old" "0"
+mkdir -p "${ORCH_DIR}/workers/CTL-617E"
+jq -n '{ticket:"CTL-617E", phase:"monitor-merge", status:"done"}' \
+  > "${ORCH_DIR}/workers/CTL-617E/phase-monitor-merge.json"
+"$AUTO_REBASE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 1 > "${SCRATCH}/out" 2>&1
+[ ! -s "$REBASE_LOG" ] && pass "no rebase dispatch when phase-monitor-merge is done" \
+  || fail "no rebase dispatch when phase-monitor-merge is done" "log: $(cat "$REBASE_LOG")"
+scratch_teardown
+
+echo "test: dispatch proceeds when phase-monitor-merge signal absent (negative control)"
+scratch_setup
+old=$(date -u -v-10M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+set_pr_view "OPEN" "DIRTY" "main"
+make_signal "CTL-617B" "running" "902" "https://github.com/coalesce-labs/catalyst/pull/902" "$old" "0"
+# Deliberately do NOT create workers/CTL-617B/phase-monitor-merge.json.
+"$AUTO_REBASE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 1 > "${SCRATCH}/out" 2>&1
+grep -q "^REBASE_CALLED " "$REBASE_LOG" \
+  && pass "dispatch proceeds without phase-monitor-merge signal" \
+  || fail "dispatch proceeds without phase-monitor-merge signal" "REBASE_LOG empty; expected REBASE_CALLED"
+scratch_teardown
+
+echo "test: dispatch proceeds when phase-monitor-merge is failed (non-live status)"
+scratch_setup
+old=$(date -u -v-10M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ)
+set_pr_view "OPEN" "DIRTY" "main"
+make_signal "CTL-617C" "running" "905" "https://github.com/coalesce-labs/catalyst/pull/905" "$old" "0"
+mkdir -p "${ORCH_DIR}/workers/CTL-617C"
+jq -n '{ticket:"CTL-617C", phase:"monitor-merge", status:"failed"}' \
+  > "${ORCH_DIR}/workers/CTL-617C/phase-monitor-merge.json"
+"$AUTO_REBASE" --orch-dir "$ORCH_DIR" --orch-id demo --stable-minutes 1 > "${SCRATCH}/out" 2>&1
+grep -q "^REBASE_CALLED " "$REBASE_LOG" \
+  && pass "dispatch proceeds when phase-monitor-merge is failed" \
+  || fail "dispatch proceeds when phase-monitor-merge is failed" "REBASE_LOG: $(cat "$REBASE_LOG")"
+scratch_teardown
+
 echo
 echo "orchestrate-auto-rebase: ${PASSES} passed, ${FAILURES} failed"
 exit "$FAILURES"
