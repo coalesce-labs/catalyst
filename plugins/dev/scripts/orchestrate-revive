@@ -29,6 +29,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_SCRIPT="${CATALYST_STATE_SCRIPT:-${SCRIPT_DIR}/catalyst-state.sh}"
 CLAUDE_BIN="${CATALYST_REVIVE_CLAUDE_BIN:-claude}"
 
+# CTL-607: current-phase guard helper (latest_phase_in_dir + PHASES mirror).
+# shellcheck source=lib/phase-sequence.sh
+. "${SCRIPT_DIR}/lib/phase-sequence.sh"
+
 ORCH_DIR=""
 ORCH_ID=""
 MAX_REVIVES=10
@@ -1055,6 +1059,7 @@ PHASE_ELIGIBLE=0
 PHASE_REVIVED=0
 PHASE_EMIT_COMPLETE=0
 PHASE_ESCALATED=0
+PHASE_SKIPPED_NONCURRENT=0  # CTL-607
 
 shopt -s nullglob
 for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
@@ -1069,6 +1074,19 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
   PHASE_MODE_WORKERS=$((PHASE_MODE_WORKERS + 1))
 
   if [ "$P_STATUS" != "stalled" ]; then
+    continue
+  fi
+
+  # CTL-607: only the ticket's CURRENT (latest-index) phase is a live work
+  # item. A stalled signal for an EARLIER phase is a reaping artifact
+  # (predecessor bg job reaped on advance, then flipped to stalled by
+  # orchestrate-healthcheck). Reviving it spawns a duplicate agent in the
+  # same worktree. Skip it. The current phase's own stalled signal still
+  # passes (CTL-587 re-dispatch sentinel preserved).
+  CURRENT_PHASE=$(latest_phase_in_dir "$(dirname "$PHASE_SIGNAL")")
+  if [ -n "$CURRENT_PHASE" ] && [ "$P_PHASE" != "$CURRENT_PHASE" ]; then
+    echo "phase-revive: skip ${P_TICKET}/${P_PHASE} stalled — not current phase (current=${CURRENT_PHASE})" >&2
+    PHASE_SKIPPED_NONCURRENT=$((PHASE_SKIPPED_NONCURRENT + 1))
     continue
   fi
 
@@ -1121,6 +1139,8 @@ jq -nc \
   --argjson prv "$PHASE_REVIVED" \
   --argjson pec "$PHASE_EMIT_COMPLETE" \
   --argjson pes "$PHASE_ESCALATED" \
+  --argjson psnc "$PHASE_SKIPPED_NONCURRENT" \
   '{checked:$c, revived:$r, stalled:$s, skipped:$k,
     phaseModeWorkers:$pmw, phaseEligible:$pel,
-    phaseRevived:$prv, phaseEmitComplete:$pec, phaseEscalated:$pes}'
+    phaseRevived:$prv, phaseEmitComplete:$pec, phaseEscalated:$pes,
+    phaseSkippedNonCurrent:$psnc}'

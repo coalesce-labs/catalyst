@@ -341,6 +341,78 @@ else
 fi
 scratch_teardown
 
+# ─── Test F (CTL-607): predecessor + current in one dir → only current revives
+echo "test F (CTL-607): stalled triage + stalled implement → only implement revives"
+scratch_setup
+WORKTREE_BASE="${SCRATCH}/worktrees"
+set_repo_root_for_revive
+make_per_phase_signal "T-DUP" "triage"    "stalled"
+make_per_phase_signal "T-DUP" "implement" "stalled"
+run_revive
+grep -q "dispatch-called.*--phase implement.*T-DUP" "$DISPATCH_LOG" \
+  && pass "dispatch fired for implement (current phase)" \
+  || fail "dispatch fired for implement (current phase)" "log: $(cat "$DISPATCH_LOG")"
+if grep -q "dispatch-called.*--phase triage.*T-DUP" "$DISPATCH_LOG"; then
+  fail "dispatch must NOT fire for triage (non-current)" "log: $(cat "$DISPATCH_LOG")"
+else
+  pass "dispatch NOT called for triage (non-current)"
+fi
+PRV=$(jq -r '.phaseRevived' "$OUT_JSON")
+[ "$PRV" = "1" ] \
+  && pass "phaseRevived == 1" \
+  || fail "phaseRevived == 1" "got '$PRV' summary: $(cat "$OUT_JSON")"
+PSNC=$(jq -r '.phaseSkippedNonCurrent' "$OUT_JSON")
+[ "$PSNC" = "1" ] \
+  && pass "phaseSkippedNonCurrent == 1" \
+  || fail "phaseSkippedNonCurrent == 1" "got '$PSNC' summary: $(cat "$OUT_JSON")"
+grep -q "skip .*T-DUP.*triage.*not current phase.*current=implement" "$OUT_ERR" \
+  && pass "stderr explains skip" \
+  || fail "stderr explains skip" "stderr: $(cat "$OUT_ERR")"
+scratch_teardown
+
+# ─── Test G (CTL-607 / CTL-587 preservation): lone current-phase stall revives
+echo "test G (CTL-607): single stalled current phase → revived (CTL-587 preserved)"
+scratch_setup
+WORKTREE_BASE="${SCRATCH}/worktrees"
+set_repo_root_for_revive
+make_per_phase_signal "T-CUR" "implement" "stalled"
+run_revive
+grep -q "dispatch-called.*--phase implement.*T-CUR" "$DISPATCH_LOG" \
+  && pass "lone current phase revived" \
+  || fail "lone current phase revived" "log: $(cat "$DISPATCH_LOG")"
+PRV=$(jq -r '.phaseRevived' "$OUT_JSON")
+[ "$PRV" = "1" ] \
+  && pass "phaseRevived == 1 (CTL-587 sentinel preserved)" \
+  || fail "phaseRevived == 1 (CTL-587 sentinel preserved)" "got '$PRV' summary: $(cat "$OUT_JSON")"
+PSNC=$(jq -r '.phaseSkippedNonCurrent' "$OUT_JSON")
+[ "$PSNC" = "0" ] \
+  && pass "phaseSkippedNonCurrent == 0" \
+  || fail "phaseSkippedNonCurrent == 0" "got '$PSNC' summary: $(cat "$OUT_JSON")"
+scratch_teardown
+
+# ─── Test H (CTL-607): predecessor stalled + current running ─────────────────
+echo "test H (CTL-607): predecessor stalled + current running → predecessor skipped"
+scratch_setup
+WORKTREE_BASE="${SCRATCH}/worktrees"
+set_repo_root_for_revive
+make_per_phase_signal "T-RUN" "triage"    "stalled"
+make_per_phase_signal "T-RUN" "implement" "running"
+run_revive
+if grep -q "dispatch-called.*T-RUN" "$DISPATCH_LOG"; then
+  fail "no dispatch for T-RUN (predecessor must skip, running must pass stall filter)" "log: $(cat "$DISPATCH_LOG")"
+else
+  pass "no dispatch for T-RUN"
+fi
+PRV=$(jq -r '.phaseRevived' "$OUT_JSON")
+[ "$PRV" = "0" ] \
+  && pass "phaseRevived == 0" \
+  || fail "phaseRevived == 0" "got '$PRV' summary: $(cat "$OUT_JSON")"
+PSNC=$(jq -r '.phaseSkippedNonCurrent' "$OUT_JSON")
+[ "$PSNC" = "1" ] \
+  && pass "phaseSkippedNonCurrent == 1 (predecessor)" \
+  || fail "phaseSkippedNonCurrent == 1 (predecessor)" "got '$PSNC' summary: $(cat "$OUT_JSON")"
+scratch_teardown
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"
