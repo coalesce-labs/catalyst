@@ -82,6 +82,19 @@ export function linearKeyForPhase(phase) {
   return PHASE_LINEAR_KEY[phase];
 }
 
+// phaseIndex — 0-based position of a pipeline phase in the canonical PHASES
+// sequence. The missing comparator (CTL-606): lets consumers decide whether a
+// phase precedes another without re-deriving the order. Throws PhaseFsmError on
+// an unknown phase so a typo fails loudly rather than silently returning -1
+// (which would misorder before `triage`).
+export function phaseIndex(phase) {
+  const idx = PHASES.indexOf(phase);
+  if (idx === -1) {
+    throw new PhaseFsmError(`unknown phase '${phase}'`);
+  }
+  return idx;
+}
+
 // ─── Validation helpers (private) ───
 function assertState(state) {
   if (state === null || typeof state !== "object" || Array.isArray(state)) {

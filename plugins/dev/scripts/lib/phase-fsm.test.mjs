@@ -10,6 +10,7 @@ import {
   PHASE_LINEAR_KEY,
   TERMINAL_LINEAR_KEY,
   linearKeyForPhase,
+  phaseIndex,
   initialState,
   isTerminal,
   transition,
@@ -17,6 +18,23 @@ import {
 
 // Render an arbitrary value as a readable test-name fragment.
 const label = (v) => (v === undefined ? "undefined" : Array.isArray(v) ? "[]" : JSON.stringify(v));
+
+// ─── CTL-606: phaseIndex — the canonical 0-based phase-order comparator ───
+
+describe("phaseIndex", () => {
+  test("returns the canonical 0-based index for every pipeline phase", () => {
+    PHASES.forEach((p, i) => expect(phaseIndex(p)).toBe(i));
+  });
+  test("triage < research < … < monitor-deploy (monotonic ordering)", () => {
+    expect(phaseIndex("triage")).toBeLessThan(phaseIndex("research"));
+    expect(phaseIndex("implement")).toBeLessThan(phaseIndex("verify"));
+    expect(phaseIndex("monitor-merge")).toBeLessThan(phaseIndex("monitor-deploy"));
+  });
+  test("throws PhaseFsmError on an unknown phase (fail loud, never silent -1)", () => {
+    expect(() => phaseIndex("bogus")).toThrow(PhaseFsmError);
+    expect(() => phaseIndex(null)).toThrow(PhaseFsmError);
+  });
+});
 
 // ─── Phase 1: module scaffold + happy-path pipeline ───
 
