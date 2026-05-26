@@ -319,6 +319,81 @@ FAIL_EVENT="$(jq -r '.attributes."event.name"' "$FAIL_DIR/events.jsonl" 2>/dev/n
 assert_eq "lin-fail: emits phase.triage.failed event" "phase.triage.failed.CTL-9001" "$FAIL_EVENT"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Case 4 (CTL-614): linearis issues discuss returns 429 — must NOT fail phase.
+# triage.json + phase.triage.complete event must still be produced, and the
+# 429 stderr must surface to the skill's stderr (no longer swallowed).
+
+DISCUSS_429_DIR="$TMPROOT/discuss-429"
+mkdir -p "$DISCUSS_429_DIR/bin"
+
+FIXTURE_429="$TMPROOT/fixture-429.json"
+cat >"$FIXTURE_429" <<'EOF'
+{
+  "identifier": "CTL-9002",
+  "title": "Some real ticket",
+  "description": "Fix a thing.",
+  "labels": {"nodes": []}
+}
+EOF
+
+cat >"$DISCUSS_429_DIR/bin/linearis" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  issues)
+    case "\$2" in
+      read)
+        cat "$FIXTURE_429"
+        ;;
+      discuss)
+        echo "Error: Rate limit exceeded. Only 2500 requests are allowed per 1 hour." >&2
+        exit 1
+        ;;
+      *)
+        echo "linearis stub: unsupported issues subcommand: \$2" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    echo "linearis stub: unsupported domain: \$1" >&2
+    exit 2
+    ;;
+esac
+EOF
+chmod +x "$DISCUSS_429_DIR/bin/linearis"
+
+PATH="$DISCUSS_429_DIR/bin:$PATH" \
+	TICKET=CTL-9002 \
+	WORKER_DIR="$DISCUSS_429_DIR/worker" \
+	CATALYST_EVENTS_FILE="$DISCUSS_429_DIR/events.jsonl" \
+	PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
+	PHASE_EMIT_HELPER="$EMIT_HELPER" \
+	bash "$SKILL_BODY_FILE" >"$DISCUSS_429_DIR/stdout.log" 2>"$DISCUSS_429_DIR/stderr.log"
+D429_EXIT=$?
+
+assert_eq "discuss-429: exit code 0 (best-effort)" 0 "$D429_EXIT"
+assert_file_exists "discuss-429: triage.json written despite discuss failure" \
+	"$DISCUSS_429_DIR/worker/triage.json"
+
+D429_EVENT="$(jq -r '.attributes."event.name"' "$DISCUSS_429_DIR/events.jsonl" 2>/dev/null | head -1)"
+assert_eq "discuss-429: emits phase.triage.complete (not failed)" \
+	"phase.triage.complete.CTL-9002" "$D429_EVENT"
+
+if grep -q 'linearis issues discuss failed' "$DISCUSS_429_DIR/stderr.log" 2>/dev/null; then
+	ok "discuss-429: skill stderr logs the discuss failure (operator visibility)"
+else
+	fail "discuss-429: stderr surfacing" \
+		"expected 'linearis issues discuss failed' in stderr; got: $(cat "$DISCUSS_429_DIR/stderr.log" 2>/dev/null)"
+fi
+
+if grep -q 'Rate limit exceeded' "$DISCUSS_429_DIR/stderr.log" 2>/dev/null; then
+	ok "discuss-429: skill stderr includes the underlying 429 message (no longer swallowed)"
+else
+	fail "discuss-429: 429 message surfacing" \
+		"expected 'Rate limit exceeded' in stderr; got: $(cat "$DISCUSS_429_DIR/stderr.log" 2>/dev/null)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CTL-602 dynamic guard: simulate Claude Code slash-command arg substitution on
 # the extracted body, then run the SUBSTITUTED body. A real dispatch is
 # `/catalyst-dev:phase-triage <TICKET> --orch-dir <PATH>`, so $0→<TICKET>,
