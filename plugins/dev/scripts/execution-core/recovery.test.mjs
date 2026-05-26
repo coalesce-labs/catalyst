@@ -705,7 +705,11 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
       opts: {
         repoRoot: "/repo",
         statJob: () => ({ exists: true, mtimeMs: stateJsonMtime }),
-        probes: phase === "implement" ? { implement: recorder(probeResult) } : {},
+        // CTL-604: inject a probe for any probed phase (implement/research/plan)
+        // so branch (B)/(C) is exercised; probe-less phases (pr/verify/…) get {}.
+        probes: ["implement", "research", "plan"].includes(phase)
+          ? { [phase]: recorder(probeResult) }
+          : {},
         emitComplete: recorder({ code: 0 }),
         appendEvent: recorder(undefined),
         appendReviveEvent: recorder(undefined),
@@ -769,6 +773,36 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.appendEscalatedEvent.calls[0][0].phase).toBe("pr");
     expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("no-probe-for-phase");
     expect(s.opts.applyStalledLabel.calls.length).toBe(1);
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+  });
+
+  // CTL-604: research/plan now share the bounded revive/re-dispatch path with
+  // implement. A worker that died before writing its artifact (probe=false) is
+  // re-dispatched, not dead-ended at needs-human.
+  test("dead research worker, probe NOT done, budget+storm OK → 'revived', no escalation", () => {
+    const s = setupReviveScenario({ phase: "research", probeResult: false, reviveCount: 0 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+    expect(s.opts.appendReviveEvent.calls.length).toBe(1);
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
+  });
+
+  test("dead plan worker, probe NOT done → 'revived'", () => {
+    const s = setupReviveScenario({ phase: "plan", probeResult: false, reviveCount: 0 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("dead research worker, revive budget exhausted → 'escalated' (revive-budget-exhausted)", () => {
+    const s = setupReviveScenario({ phase: "research", probeResult: false, reviveCount: 2 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("dead research worker, storm-breaker open → 'revive-suppressed'", () => {
+    const s = setupReviveScenario({ phase: "research", probeResult: false, distinctRevivingTickets: 4 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revive-suppressed");
     expect(s.opts.reviveDispatch.calls.length).toBe(0);
   });
 

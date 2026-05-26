@@ -330,8 +330,9 @@ export function defaultReviveDispatch({ orchDir, ticket, phase }, { dispatch = d
 // CTL-585 `labelOnce` guard (CTL-638). The pre-CTL-638 implementation called
 // `applyLabel` directly; the comment then claimed "the next scheduler tick
 // re-runs this function via labelOnce semantics" but no labelOnce wrapper
-// existed on this path — the recovery sweep's three escalation call sites
-// (no-probe-for-phase, non-implement-not-done, revive-budget-exhausted) all
+// existed on this path — the recovery sweep's escalation call sites
+// (no-probe-for-phase, revive-budget-exhausted; non-implement-not-done was
+// removed in CTL-604 when research/plan gained probes) all
 // bypassed CTL-585's marker-file guard. On a rate-limit, applyLabel returned
 // applied:false → no marker written → every scheduler tick (debounced to 2s
 // by the event-log fast path) re-fired the write, exhausting Linear's 2,500/hr
@@ -556,14 +557,18 @@ const KILL_RECENT_ACTIVITY_MS = 30 * 1000;
 //                         reset to 'stalled' to bypass the dispatcher's
 //                         idempotency guard; defaultDispatch was invoked; the
 //                         worker-dir .revive-N.applied marker was written.
+//                         CTL-604: implement/research/plan (every probed phase)
+//                         share this path — a probed worker that died before
+//                         writing its artifact is re-dispatched, not escalated.
 //   'revive-suppressed'   effectively dead + work NOT done + storm-breaker
 //                         OPEN (>3 distinct tickets reviving in last 10min).
 //                         No dispatch; suppress event audited; next tick
 //                         re-evaluates the window.
 //   'escalated'           effectively dead + (revive budget exhausted OR no
-//                         work-done probe registered for this phase). needs-human
-//                         label applied (via the CTL-587 verified applyLabel);
-//                         ticket stays where it is for human triage.
+//                         work-done probe registered for this phase — i.e. a
+//                         probe-less phase: verify/review/pr/monitor-*).
+//                         needs-human label applied (via the CTL-587 verified
+//                         applyLabel); ticket stays where it is for human triage.
 //
 // CTL-588 still defines "effectively dead" as classifyWorker:'dead' OR a
 // 'running' signal whose bg state.json mtime is older than staleMs.
@@ -670,12 +675,13 @@ export function reclaimDeadWorkIfPossible(
     return "reclaimed";
   }
 
-  // (C) Probe says work is NOT done → CTL-587 revive territory. Today only
-  //     `implement` has a probe; this branch's escalation is defensive for
-  //     a future phase whose probe also returns false.
-  if (phase !== "implement") {
-    return escalateOnce("non-implement-not-done", 0);
-  }
+  // (C) Probe says work is NOT done → CTL-587 revive territory. CTL-604: every
+  //     phase that reaches here has a probe (branch (A) already returned for the
+  //     probe-less phases), so implement/research/plan all share the bounded
+  //     revive/re-dispatch path below. A worker that died before writing its
+  //     artifact is re-dispatched fresh rather than dead-ended at needs-human.
+  //     defaultReviveDispatch is phase-agnostic (resets the signal to `stalled`
+  //     and re-launches via phase-agent-dispatch).
 
   // Per-ticket revive budget from events.jsonl. The events file is the
   // authoritative counter — surviving daemon restarts, more truthful than the
