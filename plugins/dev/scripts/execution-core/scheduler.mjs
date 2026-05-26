@@ -548,6 +548,16 @@ export function schedulerTick(
         // escalation in events.jsonl already; surfacing this would re-recreate
         // the noise the cool-down exists to prevent.
         break;
+      case "alive-quiet-suppressed":
+        // CTL-610: the bg worker is alive (kill -0) but quiet on a long tool
+        // call (the pre-first-output window for research/plan, or a long
+        // synchronous Edit/Bash inside implement). Invisible by design — no
+        // duplicate spawn, no state change; the next tick re-evaluates the
+        // mtime + pidAlive pair. Surfacing it in result.revived / .escalated
+        // / .reviveSuppressed would re-create the very revive-storm noise the
+        // (C0) guard exists to suppress (and would re-feed the scheduler's own
+        // fs.watch fast path via any audit-event write — CTL-638 lineage).
+        break;
       default:
         // noop | not-done | not-applicable | reclaim-failed → invisible.
         // CTL-606: superseded-noop also buckets here — a dead predecessor signal
