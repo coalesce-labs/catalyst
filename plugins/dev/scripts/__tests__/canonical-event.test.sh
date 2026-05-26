@@ -200,6 +200,47 @@ expect_eq "build_canonical_line service.name" "catalyst.session" "$SVC"
 NAMESPACE="$(echo "$LINE" | jq -r '.resource."service.namespace"')"
 expect_eq "build_canonical_line service.namespace" "catalyst" "$NAMESPACE"
 
+# CTL-636: orchestration context promoted into the resource block.
+LINE_RES="$(build_canonical_line \
+  --ts "2026-05-25T18:00:00Z" \
+  --severity INFO \
+  --service "catalyst.session" \
+  --event-name "phase.plan.complete" \
+  --orch "CTL-636" \
+  --linear-ticket "CTL-636")"
+
+LINEAR_KEY_OUT="$(echo "$LINE_RES" | jq -r '.resource."linear.key" // ""')"
+expect_eq "build_canonical_line promotes --linear-ticket to resource.linear.key" "CTL-636" "$LINEAR_KEY_OUT"
+
+ORCH_OUT="$(echo "$LINE_RES" | jq -r '.resource."catalyst.orchestration" // ""')"
+expect_eq "build_canonical_line promotes --orch to resource.catalyst.orchestration" "CTL-636" "$ORCH_OUT"
+
+# attributes preserved, not moved
+ATTR_LINEAR="$(echo "$LINE_RES" | jq -r '.attributes."linear.issue.identifier" // ""')"
+expect_eq "build_canonical_line keeps linear.issue.identifier in attributes" "CTL-636" "$ATTR_LINEAR"
+
+# absent when no context
+LINE_BARE="$(build_canonical_line \
+  --ts "2026-05-25T18:00:00Z" --severity INFO \
+  --service "catalyst.session" --event-name "session.heartbeat")"
+BARE_LINEAR="$(echo "$LINE_BARE" | jq -r '.resource | has("linear.key")')"
+expect_eq "build_canonical_line omits linear.key with no context" "false" "$BARE_LINEAR"
+
+# explicit override wins
+LINE_OVR="$(build_canonical_line \
+  --ts "2026-05-25T18:00:00Z" --severity INFO \
+  --service "catalyst.session" --event-name "x" \
+  --linear-ticket "CTL-636" --linear-key "CTL-999")"
+OVR_OUT="$(echo "$LINE_OVR" | jq -r '.resource."linear.key"')"
+expect_eq "build_canonical_line --linear-key overrides promotion" "CTL-999" "$OVR_OUT"
+
+# project sourced from OTEL_RESOURCE_ATTRIBUTES
+LINE_PROJ="$(OTEL_RESOURCE_ATTRIBUTES='project=catalyst-workspace,linear.key=CTL-636' \
+  build_canonical_line --ts "2026-05-25T18:00:00Z" --severity INFO \
+  --service "catalyst.session" --event-name "x")"
+PROJ_OUT="$(echo "$LINE_PROJ" | jq -r '.resource."project" // ""')"
+expect_eq "build_canonical_line sources project from OTEL_RESOURCE_ATTRIBUTES" "catalyst-workspace" "$PROJ_OUT"
+
 SEV_NUM="$(echo "$LINE" | jq -r '.severityNumber')"
 expect_eq "build_canonical_line severityNumber" "9" "$SEV_NUM"
 
