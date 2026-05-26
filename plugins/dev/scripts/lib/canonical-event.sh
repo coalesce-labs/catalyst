@@ -22,7 +22,9 @@ __CATALYST_CANONICAL_SOURCED=1
 # Resolve plugin.json relative to this file:
 #   plugins/dev/scripts/lib/canonical-event.sh
 #   plugins/dev/.claude-plugin/plugin.json
-__CE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Portable self-path: BASH_SOURCE under bash, prompt-expansion %x under zsh (CTL-618).
+__CE_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
+__CE_LIB_DIR="$(cd "$(dirname "$__CE_SELF")" && pwd)"
 __CE_PLUGIN_JSON="${__CE_LIB_DIR}/../../.claude-plugin/plugin.json"
 __CE_VERSION_CACHED=""
 
