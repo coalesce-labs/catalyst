@@ -6,14 +6,7 @@
 // per-repo enrollment records are gone.
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import {
-  mkdtempSync,
-  rmSync,
-  mkdirSync,
-  writeFileSync,
-  appendFileSync,
-  statSync,
-} from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -30,6 +23,8 @@ import {
 } from "./monitor.mjs";
 import { setProjectEligible, getEligibleSet, dropProject } from "./eligible-set.mjs";
 import { loadCursor, saveCursor } from "./event-cursor.mjs";
+import { createTicketStateCache } from "./linear-cache.mjs";
+import { fetchTicketState } from "./linear-query.mjs";
 
 let catalystDir;
 let prevCatalystDir;
@@ -62,7 +57,7 @@ afterEach(() => {
 function writeRegistry() {
   writeFileSync(
     join(catalystDir, "execution-core", "registry.json"),
-    JSON.stringify({ projects: registryEntries }, null, 2),
+    JSON.stringify({ projects: registryEntries }, null, 2)
   );
 }
 
@@ -143,7 +138,7 @@ describe("parseStateChangedEvent", () => {
       parseStateChangedEvent({
         attributes: { "event.name": "linear.issue.state_changed" },
         body: { payload: { teamKey: "ENG", toState: "Todo" } },
-      }),
+      })
     ).toBeNull();
   });
 });
@@ -201,7 +196,7 @@ describe("handleStateChangedEvent", () => {
         event: "linear.issue.state_changed",
         detail: { ticket: "ENG-9", teamKey: "ENG", toState: "Todo" },
       },
-      { exec, debounceMs: 30 },
+      { exec, debounceMs: 30 }
     );
     expect(exec.calls).toBe(0); // not polled synchronously
     await sleep(70);
@@ -218,7 +213,7 @@ describe("handleStateChangedEvent", () => {
           event: "linear.issue.state_changed",
           detail: { ticket, teamKey: "ENG", toState: "Todo" },
         },
-        { exec, debounceMs: 30 },
+        { exec, debounceMs: 30 }
       );
     }
     await sleep(80);
@@ -237,7 +232,7 @@ describe("handleStateChangedEvent", () => {
         event: "linear.issue.state_changed",
         detail: { ticket: "OTHER-1", teamKey: "OTHER", toState: "In Progress" },
       },
-      { exec, debounceMs: 30 },
+      { exec, debounceMs: 30 }
     );
     await sleep(60);
     expect(exec.calls).toBe(0);
@@ -258,7 +253,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
         event: "linear.issue.state_changed",
         detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
       },
-      { dispatch, orchDir },
+      { dispatch, orchDir }
     );
     expect(dispatch).toHaveBeenCalledWith({ orchDir, ticket: "ENG-1", phase: "triage" });
   });
@@ -274,7 +269,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
         event: "linear.issue.state_changed",
         detail: { ticket: "ENG-9", teamKey: "ENG", toState: "Ready" },
       },
-      { exec, dispatch, orchDir: realOrchDir, debounceMs: 30 },
+      { exec, dispatch, orchDir: realOrchDir, debounceMs: 30 }
     );
     expect(dispatch).not.toHaveBeenCalled();
     await sleep(70);
@@ -291,7 +286,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
         event: "linear.issue.state_changed",
         detail: { ticket: "ENG-9", teamKey: "ENG", toState: "Ready" },
       },
-      { exec, dispatch, orchDir: realOrchDir, debounceMs: 30 },
+      { exec, dispatch, orchDir: realOrchDir, debounceMs: 30 }
     );
     expect(dispatch).toHaveBeenCalledWith({
       orchDir: realOrchDir,
@@ -311,8 +306,8 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
           event: "linear.issue.state_changed",
           detail: { ticket: "ENG-9", teamKey: "ENG", toState: "Ready" },
         },
-        { exec, dispatch, debounceMs: 30 }, // no orchDir
-      ),
+        { exec, dispatch, debounceMs: 30 } // no orchDir
+      )
     ).not.toThrow();
     expect(dispatch).not.toHaveBeenCalled();
     await sleep(70);
@@ -336,7 +331,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
         detail: { ticket: "ENG-1", teamKey: "ENG", toState },
       });
       expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
-    },
+    }
   );
 
   test("a triage dispatch failure is logged and never throws", () => {
@@ -348,8 +343,8 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
           event: "linear.issue.state_changed",
           detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
         },
-        { dispatch, orchDir },
-      ),
+        { dispatch, orchDir }
+      )
     ).not.toThrow();
   });
 
@@ -362,8 +357,8 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
           event: "linear.issue.state_changed",
           detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
         },
-        { dispatch },
-      ),
+        { dispatch }
+      )
     ).not.toThrow();
     expect(dispatch).not.toHaveBeenCalled();
   });
@@ -382,12 +377,12 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
           event: "linear.issue.state_changed",
           detail: { ticket: "ENG-1", teamKey: "ENG", toState },
         },
-        { orchDir, abortWorker },
+        { orchDir, abortWorker }
       );
       expect(abortWorker).toHaveBeenCalledWith("/orch", "ENG-1", {
         repoRoot: expect.any(String),
       });
-    },
+    }
   );
 
   test("a drag-out with no orchDir wired removes the ticket and does not throw", () => {
@@ -399,8 +394,8 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
           event: "linear.issue.state_changed",
           detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
         },
-        { abortWorker },
-      ),
+        { abortWorker }
+      )
     ).not.toThrow();
     expect(abortWorker).not.toHaveBeenCalled(); // no orchDir → abort skipped
   });
@@ -425,12 +420,12 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
           event: "linear.issue.state_changed",
           detail: { ticket: "ENG-1", teamKey: "ENG", toState },
         },
-        { orchDir, abortWorker, dispatch },
+        { orchDir, abortWorker, dispatch }
       );
       expect(abortWorker).not.toHaveBeenCalled();
       expect(dispatch).not.toHaveBeenCalled();
       expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1", "ENG-2"]);
-    },
+    }
   );
 
   // CTL-584: an unknown toState is conservatively treated as a no-op — a
@@ -448,7 +443,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
         event: "linear.issue.state_changed",
         detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Mystery" },
       },
-      { orchDir, abortWorker },
+      { orchDir, abortWorker }
     );
     expect(abortWorker).not.toHaveBeenCalled();
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
@@ -486,7 +481,7 @@ describe("lifecycle", () => {
         event: "linear.issue.state_changed",
         detail: { ticket: "ENG-9", teamKey: "ENG", toState: "Todo" },
       },
-      { exec, debounceMs: 40 },
+      { exec, debounceMs: 40 }
     );
     stopMonitor(); // clears the queued debounce timer
     await sleep(80);
@@ -578,7 +573,7 @@ describe("startMonitor — resumeFromCursor", () => {
       `${JSON.stringify({
         event: "linear.issue.state_changed",
         detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Backlog" },
-      })}\n`,
+      })}\n`
     );
     saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
     startMonitor({ exec, resumeFromCursor: true, reconcileIntervalMs: 60_000 });
@@ -596,10 +591,47 @@ describe("startMonitor — resumeFromCursor", () => {
         // new model (not a leave-trigger), so we use Canceled here to drive
         // the gap-drain removal.
         detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Canceled" },
-      })}\n`,
+      })}\n`
     );
     saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
     startMonitor({ exec, reconcileIntervalMs: 60_000 }); // no resumeFromCursor
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
+  });
+});
+
+// CTL-634 Tier 1 — every state_changed event write-through-refreshes the
+// cached state so the next scheduler tick's out-of-set blocker hydration is a
+// hit instead of a re-read. The write-through runs before the project loop, so
+// it needs no enrolled team — set() ignores a null toState, making an event
+// with no extractable state a safe no-op.
+describe("handleStateChangedEvent — cache write-through (CTL-634)", () => {
+  test("writes the toState into the cache so a later read is a hit (zero exec)", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "CTL-99", teamKey: "ENG", toState: "Done" },
+      },
+      { cache }
+    );
+    let calls = 0;
+    const execProbe = () => {
+      calls += 1;
+      return { code: 0, stdout: "{}", stderr: "" };
+    };
+    expect(fetchTicketState("CTL-99", { exec: execProbe, cache })).toBe("Done");
+    expect(calls).toBe(0); // served entirely from the written-through cache
+  });
+
+  test("a missing toState does not write a bogus cache entry", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "CTL-99", teamKey: "ENG" }, // no toState
+      },
+      { cache }
+    );
+    expect(cache.get("CTL-99")).toBeUndefined();
   });
 });
