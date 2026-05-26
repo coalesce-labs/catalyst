@@ -38,6 +38,7 @@ import {
   recordDispatchFailure,
   clearDispatchCooldown,
   dispatchCooldownPath,
+  verifyDispatchedSignal,
   __resetForTests,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
@@ -270,6 +271,11 @@ function fakeDispatch({ code = 0 } = {}) {
   return fn;
 }
 
+// CTL-611: verifier-pass stub. The default verifyDispatchedSignal reads the
+// signal file and is `false` for tests that don't write one — pass this to
+// schedulerTick to opt out of demotion for non-CTL-611 tests.
+const verifyOk = () => ({ ok: true });
+
 // ── CTL-624: per-(ticket,phase) dispatch cool-down helpers ──
 describe("dispatch cool-down helpers", () => {
   test("no marker → not in cool-down", () => {
@@ -375,6 +381,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       readEligible: () => eligibleOne("CTL-4"),
       dispatch: fakeDispatch({ code: 0 }),
       now: () => 70_000,
+      verifyDispatched: verifyOk, // CTL-611: not testing the verifier here
     });
     expect(existsSync(marker)).toBe(false);
   });
@@ -559,7 +566,11 @@ describe("schedulerTick — new-work pull", () => {
         inverseRelations: { nodes: [] },
       },
     ];
-    const r = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk, // CTL-611: bypass the dispatch verifier
+    });
     // 2 free slots, both ready → both dispatched, urgent (CTL-8) first.
     expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-8", "CTL-9"]);
     // CTL-565: new-work enters the pipeline at research, not triage.
@@ -638,7 +649,11 @@ describe("schedulerTick — new-work pull", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     writeSignal("CTL-7", "triage", "done"); // research is owed
     const dispatch = fakeDispatch();
-    const r = schedulerTick(orchDir, { readEligible: () => [], dispatch });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      verifyDispatched: verifyOk, // CTL-611: bypass dispatch verifier
+    });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
   });
@@ -678,7 +693,11 @@ describe("schedulerTick — new-work pull", () => {
         inverseRelations: { nodes: [] },
       },
     ];
-    const r = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk, // CTL-611: bypass dispatch verifier
+    });
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
     expect(r.dispatched).toEqual(["CTL-X"]);
     expect(dispatch.calls).toEqual([
@@ -1095,12 +1114,25 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
       writeSignal(args.ticket, args.phase, "dispatched");
       return { code: 0, stdout: "", stderr: "" };
     };
-    const r1 = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    // CTL-611: inject verifyOk — the stub writes status:"dispatched" with no
+    // bg_job_id (the intermediate state phase-agent-dispatch leaves before
+    // spawn at :406). The verifier correctly rejects that shape; the real
+    // dispatch only returns AFTER status flips to running + bg_job_id is set.
+    // The idempotency proof here is orthogonal to verification.
+    const r1 = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+    });
     expect(r1.dispatched).toEqual(["CTL-9"]);
 
     // "Crash" — the daemon dies; the dispatched signal survives on disk.
     // Tick 2 (post-restart) re-derives everything from the filesystem.
-    const r2 = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    const r2 = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+    });
 
     // CTL-9 now has a worker dir → excluded from the pull. research:dispatched
     // is not 'done' → deriveAdvancement returns null. No re-dispatch.
@@ -1165,7 +1197,12 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
       applyTerminalDone: () => {},
       applyLabel: () => {},
     };
-    schedulerTick(orchDir, { readEligible: () => [], dispatch: okDispatch, writeStatus });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus,
+      verifyDispatched: verifyOk, // CTL-611
+    });
     expect(writes).toContainEqual(expect.objectContaining({ ticket: "CTL-1", phase: "plan" }));
   });
 
@@ -1181,6 +1218,7 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
       readEligible: () => [readyTicket("CTL-2")],
       dispatch: okDispatch,
       writeStatus,
+      verifyDispatched: verifyOk, // CTL-611
     });
     expect(writes).toContainEqual(expect.objectContaining({ ticket: "CTL-2", phase: "research" }));
   });
@@ -1613,6 +1651,7 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
       writeStatus,
       teardownWorktree: () => true,
       reclaimDeadWork,
+      verifyDispatched: verifyOk, // CTL-611: not testing dispatch verification
     });
 
     // Advancement saw the reclaimed implement: dispatch was called with the
@@ -2090,5 +2129,221 @@ describe("CTL-653: schedulerTick verify⇄remediate cycle (end-to-end)", () => {
     expect(verifySig.status).toBe("stalled");
     expect(verifySig.stalledReason).toBe("remediate-cycle-cap-exhausted");
     expect(existsSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+});
+
+// ── CTL-611: post-dispatch verifier + phase.dispatch.failed event ─────────
+//
+// Two defects in the existing dispatch flow:
+//   Gap 1: rc=0 with no successor signal (--dry-run leak / half-write) was
+//          silently treated as a real advance. The verifier closes this.
+//   Gap 2: rc!=0 wrote a cool-down marker but emitted no event, so the
+//          broker / HUD / operator never saw the dropped advancement.
+// Every dispatch failure (real or demoted) now appends a single
+// phase.dispatch.failed.<TICKET> entry to ~/catalyst/events/YYYY-MM.jsonl.
+
+// readEventLogLines — read every line of the current UTC YYYY-MM.jsonl under
+// the redirected CATALYST_DIR; returns [] when the file does not exist (the
+// happy-path regression assertion). Each line is parsed as a canonical
+// envelope.
+function readEventLogLines() {
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const logPath = join(catalystDir, "events", `${ym}.jsonl`);
+  if (!existsSync(logPath)) return [];
+  return readFileSync(logPath, "utf8")
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map((l) => JSON.parse(l));
+}
+
+// dispatchFailedEvents — narrow the unified log to just the CTL-611 emissions
+// for a given ticket. The canonical name is phase.dispatch.failed.<TICKET>.
+function dispatchFailedEvents(ticket) {
+  return readEventLogLines().filter(
+    (e) => e?.attributes?.["event.name"] === `phase.dispatch.failed.${ticket}`
+  );
+}
+
+describe("verifyDispatchedSignal (CTL-611)", () => {
+  test("returns false when signal file is absent", () => {
+    expect(verifyDispatchedSignal(orchDir, "CTL-100", "research")).toEqual({
+      ok: false,
+      reason: "signal_missing",
+    });
+  });
+
+  test("returns false when bg_job_id is null (--dry-run leak shape)", () => {
+    const dir = join(orchDir, "workers", "CTL-101");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-101", phase: "research", status: "dispatched", bg_job_id: null })
+    );
+    expect(verifyDispatchedSignal(orchDir, "CTL-101", "research")).toEqual({
+      ok: false,
+      reason: "bg_job_id_missing",
+    });
+  });
+
+  test("returns false when status is not runnable (e.g. stalled)", () => {
+    const dir = join(orchDir, "workers", "CTL-102");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-102", phase: "research", status: "stalled", bg_job_id: "abc" })
+    );
+    expect(verifyDispatchedSignal(orchDir, "CTL-102", "research")).toEqual({
+      ok: false,
+      reason: "status_not_runnable",
+    });
+  });
+
+  test("returns true on a healthy dispatched signal", () => {
+    const dir = join(orchDir, "workers", "CTL-103");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-103", phase: "research", status: "running", bg_job_id: "abcd1234" })
+    );
+    expect(verifyDispatchedSignal(orchDir, "CTL-103", "research")).toEqual({ ok: true });
+  });
+});
+
+describe("phase.dispatch.failed event emission (CTL-611)", () => {
+  const eligibleOne = (id) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      labels: ["Ready"],
+      blockedBy: [],
+      raw: { team: { key: "CTL" } },
+    },
+  ];
+
+  test("advancement sweep demotes rc=0 + missing bg job to failure", () => {
+    // FSM owes plan; fakeDispatch returns rc=0 but does NOT write the signal.
+    writeSignal("CTL-200", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0, writeSignal: false });
+
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 1_000,
+    });
+
+    expect(dispatch.calls).toHaveLength(1);
+    // Demotion: no advance recorded.
+    expect(result?.advanced ?? []).not.toContainEqual({ ticket: "CTL-200", phase: "plan" });
+    // Cool-down marker exists (failure-on-disk effect).
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-200", "plan"))).toBe(true);
+    // Exactly one event emitted with verify_failed reason + code=0.
+    const events = dispatchFailedEvents("CTL-200");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload).toMatchObject({
+      target_phase: "plan",
+      code: 0,
+    });
+    expect(events[0].body.payload.reason).toMatch(/^verify_failed:/);
+  });
+
+  test("advancement sweep emits phase.dispatch.failed on rc!=0", () => {
+    writeSignal("CTL-201", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 1 });
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+
+    const events = dispatchFailedEvents("CTL-201");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload).toMatchObject({
+      target_phase: "plan",
+      code: 1,
+      reason: "dispatch_nonzero_exit",
+    });
+  });
+
+  test("new-work sweep emits phase.dispatch.failed on rc!=0", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 1 });
+
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-202"),
+      dispatch,
+      now: () => 1_000,
+    });
+
+    const events = dispatchFailedEvents("CTL-202");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload).toMatchObject({
+      target_phase: "research",
+      code: 1,
+      reason: "dispatch_nonzero_exit",
+    });
+  });
+
+  test("new-work sweep demotes rc=0 + missing bg job to failure", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0, writeSignal: false });
+
+    const result = schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-203"),
+      dispatch,
+      now: () => 1_000,
+    });
+
+    expect(dispatch.calls).toHaveLength(1);
+    expect(result?.dispatched ?? []).not.toContain("CTL-203");
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-203", "research"))).toBe(true);
+    const events = dispatchFailedEvents("CTL-203");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload).toMatchObject({ target_phase: "research", code: 0 });
+    expect(events[0].body.payload.reason).toMatch(/^verify_failed:/);
+  });
+
+  test("event is emitted exactly once per failure (cool-down suppresses retry)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 1 });
+
+    // Tick 1: failure → 1 dispatch, 1 event.
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-204"),
+      dispatch,
+      now: () => 1_000,
+    });
+    // Tick 2 inside the 60s window: suppressed by cool-down → 0 new dispatch,
+    // 0 new event (the dispatch never re-attempts so emission never fires).
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-204"),
+      dispatch,
+      now: () => 30_000,
+    });
+
+    expect(dispatch.calls).toHaveLength(1);
+    expect(dispatchFailedEvents("CTL-204")).toHaveLength(1);
+  });
+
+  test("successful dispatch with verified signal does NOT emit phase.dispatch.failed", () => {
+    // Advancement happy-path regression — verifier returns ok, no failure
+    // event is appended. fakeDispatch does not write a signal, so the
+    // verifier is injected directly to assert the success-branch behaviour.
+    writeSignal("CTL-205", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 1_000,
+      verifyDispatched: verifyOk,
+    });
+
+    expect(dispatch.calls).toHaveLength(1);
+    expect(dispatchFailedEvents("CTL-205")).toHaveLength(0);
+    // No cool-down marker either — verifier ok ⇒ existing CTL-624 clear path.
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-205", "plan"))).toBe(false);
   });
 });
