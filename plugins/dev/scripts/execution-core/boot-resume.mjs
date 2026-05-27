@@ -76,7 +76,11 @@ export function activePhaseForTicket(signals) {
 export function selectBootResumeCandidates({
   orchDir,
   agents,
-  maxParallel = readMaxParallel(orchDir),
+  // CTL-665: committed executionCore concurrency knobs, threaded from the
+  // daemon. The boot-resume ceiling honors config-first precedence + bounds the
+  // same way the new-work pull does; an empty {} keeps the legacy state.json path.
+  concurrency = {},
+  maxParallel = readMaxParallel(orchDir, concurrency),
   logger = log,
 } = {}) {
   const inFlight = listInFlightTickets(orchDir);
@@ -141,13 +145,14 @@ export function reconcileBootResume({
   reviveDispatch = defaultReviveDispatch,
   appendEvent = defaultAppendBootResumeEvent,
   orchId = undefined, // threaded into the audit envelope
+  concurrency = {}, // CTL-665: committed executionCore concurrency knobs (from startDaemon)
 } = {}) {
   if (!report || report.coldStart !== true) {
     return { dispatched: 0, failed: 0, skipped: "not-cold-start" };
   }
 
   const liveAgentList = resolveAgents(agents);
-  const candidates = selectBootResumeCandidates({ orchDir, agents: liveAgentList });
+  const candidates = selectBootResumeCandidates({ orchDir, agents: liveAgentList, concurrency });
 
   let dispatched = 0;
   let failed = 0;

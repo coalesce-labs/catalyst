@@ -23,6 +23,10 @@ assert_doc_has "setup-health-check doc covers Config-template drift" \
   "website/src/content/docs/reference/setup-health-check.md" "Config-template drift"
 assert_doc_has "configuration ref links to drift behavior" \
   "website/src/content/docs/reference/configuration.md" "check-config-drift.sh"
+# CTL-665: the configuration reference documents the committed execution-core
+# worker-slot concurrency knob.
+assert_doc_has "configuration ref documents executionCore.maxParallel (CTL-665)" \
+  "website/src/content/docs/reference/configuration.md" "executionCore.maxParallel"
 
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"

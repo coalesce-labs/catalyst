@@ -811,6 +811,11 @@ export function schedulerTick(
     reclaimDeadWork = defaultReclaimDeadWork,
     now = Date.now, // CTL-624: injectable clock for the dispatch cool-down
     cache, // CTL-634: opt-in out-of-set blocker state cache
+    // CTL-665: the committed worker-slot concurrency knobs (maxParallel +
+    // minParallel/maxParallelCeiling bounds), threaded from the daemon via
+    // startScheduler → runningOpts → runTick. Empty {} preserves the legacy
+    // state.json-only ceiling for every test that doesn't thread it.
+    concurrency = {},
     // CTL-657: concurrency = the real count of live `background` claude agents,
     // NOT a scan of workers/ + signal files. A leaked-but-running worker freed
     // its slot on paper (signal flipped terminal while the process lived on) and
@@ -1009,7 +1014,9 @@ export function schedulerTick(
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal
   // but process alive) still consumes a slot; a duplicate spawn is counted.
   const inFlightCount = liveBackgroundCount();
-  const freeSlots = computeFreeSlots(readMaxParallel(orchDir), inFlightCount);
+  // CTL-665: config-first ceiling — a committed executionCore.maxParallel
+  // (threaded via `concurrency`) wins over state.json; clamped to the bounds.
+  const freeSlots = computeFreeSlots(readMaxParallel(orchDir, concurrency), inFlightCount);
   const selected = selectDispatchable(ready, listStartedTickets(orchDir), freeSlots);
 
   const dispatched = [];
@@ -1158,6 +1165,7 @@ function runTick() {
       writeStatus: runningOpts.writeStatus,
       teardownWorktree: runningOpts.teardownWorktree,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
+      concurrency: runningOpts.concurrency, // CTL-665: committed slot-ceiling knobs
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -1184,12 +1192,13 @@ export function startScheduler({
   writeStatus,
   teardownWorktree,
   cache, // CTL-634: shared out-of-set blocker state cache (from startDaemon)
+  concurrency = {}, // CTL-665: committed executionCore concurrency knobs (from startDaemon)
   preflight = preflightWorkspaceLabels, // CTL-585
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
   if (!orchDir) throw new Error("startScheduler: orchDir is required");
-  runningOpts = { orchDir, dispatch, readEligible, exec, writeStatus, teardownWorktree, cache };
+  runningOpts = { orchDir, dispatch, readEligible, exec, writeStatus, teardownWorktree, cache, concurrency };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels
   // the CTL-558 sweep writes. Best-effort — never blocks startup.

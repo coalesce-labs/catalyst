@@ -884,6 +884,46 @@ config — it lives in the central registry's `eligibleQuery` (see [Central
 Registry](#central-registry-catalystexecution-coreregistryjson) above), written
 by `setup-execution-core-states.sh`.
 
+### Execution-core concurrency (`executionCore.maxParallel`)
+
+The **execution-core scheduler** (the daemon-served `dispatchMode`) reads its
+worker-slot ceiling from a **committed** `orchestration.executionCore` block —
+distinct from the legacy wave-`/orchestrate` `orchestration.maxParallel` above.
+This is the source of truth for how many `claude --bg` phase workers the daemon
+runs concurrently across all enrolled projects.
+
+```json
+{
+  "catalyst": {
+    "orchestration": {
+      "executionCore": {
+        "maxParallel": 4,
+        "minParallel": 1,
+        "maxParallelCeiling": 10
+      }
+    }
+  }
+}
+```
+
+| Field                            | Type   | Default | Description                                                                                                                                                                                                       |
+| -------------------------------- | ------ | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `executionCore.maxParallel`      | number | `4`     | Committed worker-slot ceiling for the execution-core scheduler. **Distinct from** the legacy wave `orchestration.maxParallel` (default 3) — these are separate code paths. The committed value is authoritative.   |
+| `executionCore.minParallel`      | number | `1`     | Lower clamp on the resolved ceiling. Bound for the future adaptive-concurrency feature; given immediate teeth (a resolved value below it is raised to it).                                                          |
+| `executionCore.maxParallelCeiling` | number | `10`    | Upper clamp on the resolved ceiling (the safe ceiling on the reference host). A resolved value above it is lowered to it.                                                                                          |
+
+**Precedence:** the committed `executionCore.maxParallel` wins. The runtime
+`~/catalyst/execution-core/state.json` `maxParallel` is an **optional back-compat
+fallback**, consulted only when the committed config omits a valid value; a
+shared hardcoded default is the last resort. The resolved value is then clamped
+into `[minParallel, maxParallelCeiling]` when those bounds are present.
+
+:::note The default stays **4**. The operator bump to **10** is a separate, later
+config edit gated on CTL-661/662/663 being live — this knob is plumbing only.
+The `executionCore` block carries **only** these three concurrency keys in the
+template; `eligibleQuery` is intentionally central (registry.json, CTL-582 D4).
+:::
+
 Resolution order for both `phaseAgents.models` and `phaseAgents.turnCaps` is **CLI flag >
 `modelOverrides[phase][ticket]` > `models[phase]` (or `turnCaps[phase]`) > built-in default**. The
 dispatcher reads `dispatchMode` at

@@ -660,6 +660,50 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toEqual(["CTL-8", "CTL-9"]);
   });
 
+  // CTL-665: a committed executionCore.maxParallel threaded via `concurrency`
+  // drives the new-work ceiling end-to-end, overriding a smaller state.json value.
+  test("concurrency.maxParallel overrides state.json for the new-work ceiling (CTL-665)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    const eligible = [
+      {
+        identifier: "CTL-1",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+      {
+        identifier: "CTL-2",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+      {
+        identifier: "CTL-3",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk, // CTL-611: bypass the dispatch verifier
+      liveBackgroundCount: () => 0,
+      // committed config raises the ceiling from state.json's 1 to 3.
+      concurrency: { maxParallel: 3, minParallel: 1, maxParallelCeiling: 10 },
+    });
+    // state.json caps at 1, but the threaded config ceiling is 3 → all 3 dispatch.
+    expect(dispatch.calls).toHaveLength(3);
+    expect(r.dispatched).toHaveLength(3);
+  });
+
   test("new-work pull dispatches Ready tickets at the research phase, not triage (CTL-565)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch();
@@ -1214,6 +1258,18 @@ describe("startScheduler / stopScheduler", () => {
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-1", phase: "research" }]);
   });
+
+  // CTL-665: startScheduler's forward of the threaded `concurrency` into the
+  // immediate runTick → schedulerTick is a trivial one-property pass-through
+  // (runningOpts.concurrency), identical to the existing untested cache /
+  // writeStatus forwards. It is covered transitively: the "new-work ceiling"
+  // schedulerTick test (above) proves schedulerTick honors `concurrency`, and the
+  // daemon "threads the concurrency knobs into startScheduler" test proves
+  // startDaemon supplies it. A dedicated startScheduler dispatch-count assertion
+  // is intentionally omitted — it can only observe `concurrency` through the
+  // freeSlots-gated new-work pull, whose count depends on the live
+  // countBackgroundAgents() shell-out (not injectable through startScheduler),
+  // making such a test environment-fragile without adding coverage.
 
   test("the periodic timer fires another tick", async () => {
     const dispatch = fakeDispatch();

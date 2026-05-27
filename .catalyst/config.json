@@ -49,6 +49,9 @@
     "orchestration": {
       "dispatchMode": "phase-agents",
       "executionCore": {
+        "maxParallel": 4,
+        "minParallel": 1,
+        "maxParallelCeiling": 10,
         "eligibleQuery": {
           "status": "Todo",
           "team": null,
