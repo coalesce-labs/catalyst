@@ -26,9 +26,15 @@
 #   * short job id         ← signal .bg_job_id, else first 8 hex of the uuid
 #   * working directory    ← bg state .cwd, else $PWD
 #
-# Cost/token totals are intentionally NOT emitted: the only reliable number
-# excludes sub-agent sessions (see CTL-666 to add a true sub-agent-inclusive
-# rollup, likely via OTEL).
+# Cost/token total (CTL-666): a best-effort, sub-agent-inclusive figure computed
+# via extract-cost-from-jsonl.sh --include-subagents over the resolved parent
+# JSONL (which also sums <parent>/subagents/*.jsonl). It is timing-safe — the
+# sub-agent JSONLs are fully written by End-block time — and fail-soft: the
+# `~$X.XX · <N> tokens (incl. sub-agents)` segment is appended to line 1 ONLY
+# when a positive cost resolves; otherwise the footer is byte-identical to
+# before. The canonical (exact, scrape-validated) total via an OTEL/Prometheus
+# query by linear_key remains a future enhancement (CTL-666 Open Questions) —
+# no shell PromQL client exists yet.
 #
 # Usage: phase-mirror-footer.sh --orch-dir <dir> --ticket <id> --phase <name>
 
@@ -106,11 +112,50 @@ fmt_duration() {
   fi
 }
 
+# Humanize a token count: ≥1M → "X.XM", ≥1k → "X.Xk", else the raw integer.
+# Pure bash/awk; fail-soft to the raw value for non-numeric input.
+humanize_tokens() {
+  local n="$1"
+  [[ "$n" =~ ^[0-9]+$ ]] || { printf '%s' "$n"; return; }
+  if [ "$n" -ge 1000000 ]; then
+    awk "BEGIN{printf \"%.1fM\", $n/1000000}"
+  elif [ "$n" -ge 1000 ]; then
+    awk "BEGIN{printf \"%.1fk\", $n/1000}"
+  else
+    printf '%s' "$n"
+  fi
+}
+
+# ── CTL-666 cost segment (fail-soft, sub-agent-inclusive) ─────────────────────
+# Compute a true cost/token total via the Phase-1 extractor with
+# --include-subagents, but only when the parent JSONL, the extractor, and the
+# pricing table all resolve. Every call is guarded (the footer runs under
+# `set -uo pipefail` with NO -e), so no branch here can produce a non-zero exit
+# or leak error text into the comment body. The segment is appended to LINE1
+# only when a strictly-positive cost resolves; otherwise it is omitted entirely
+# and the footer stays byte-identical to the pre-CTL-666 output.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+EXTRACTOR="${SCRIPT_DIR}/../extract-cost-from-jsonl.sh"
+PRICING="${CATALYST_MIRROR_PRICING:-${SCRIPT_DIR}/../claude-pricing.json}"
+COST_SEG=""
+if [ -n "$JSONL" ] && [ -f "$JSONL" ] && [ -x "$EXTRACTOR" ] && [ -f "$PRICING" ]; then
+  USAGE_JSON="$(bash "$EXTRACTOR" --jsonl "$JSONL" --pricing "$PRICING" \
+    --include-subagents 2>/dev/null || true)"
+  if [ -n "$USAGE_JSON" ]; then
+    COST_USD="$(jq -r '.costUSD // 0' <<<"$USAGE_JSON" 2>/dev/null || echo 0)"
+    TOK_TOTAL="$(jq -r '((.inputTokens//0)+(.outputTokens//0)+(.cacheReadTokens//0)+(.cacheCreationTokens//0))' <<<"$USAGE_JSON" 2>/dev/null || echo 0)"
+    if awk "BEGIN{exit !($COST_USD > 0)}" 2>/dev/null; then
+      COST_SEG="~\$$(printf '%.2f' "$COST_USD" 2>/dev/null || echo "$COST_USD") · $(humanize_tokens "$TOK_TOTAL") tokens (incl. sub-agents)"
+    fi
+  fi
+fi
+
 # ── Line 1: run metadata ──────────────────────────────────────────────────────
 LINE1="model \`${MODEL}\` · ${SUBS} sub-agent(s) launched"
 if [ "$ACTIVE_MS" -gt 0 ]; then
   LINE1="${LINE1} · active $(fmt_duration "$ACTIVE_MS")"
 fi
+[ -n "$COST_SEG" ] && LINE1="${LINE1} · ${COST_SEG}"
 
 # ── Line 2: identifiers + cwd (omit unknown id pieces) ────────────────────────
 LINE2="catalyst session \`${CAT_SID:-—}\`"
