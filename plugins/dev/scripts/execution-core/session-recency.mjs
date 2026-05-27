@@ -19,7 +19,10 @@ export function defaultProjectsDir() {
 // `<sessionId>.jsonl` and lives one level under the projects dir (the
 // intervening directory is the URL-encoded project cwd), so we scan the
 // project dirs rather than doing a full recursive walk.
-function findTranscript(sessionId, projectsDir) {
+//
+// CTL-650: exported so the wait-watcher can locate a session's transcript
+// without duplicating the project-dir scan. Visibility-only change.
+export function findTranscript(sessionId, projectsDir) {
   let entries;
   try {
     entries = readdirSync(projectsDir, { withFileTypes: true });
