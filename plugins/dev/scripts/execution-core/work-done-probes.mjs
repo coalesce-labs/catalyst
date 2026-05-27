@@ -330,3 +330,29 @@ export const WORK_DONE_PROBES = {
 export function hasProbe(phase) {
   return Object.prototype.hasOwnProperty.call(WORK_DONE_PROBES, phase);
 }
+
+// CTL-664: human-readable description of what each work-done probe verifies.
+// Co-located with WORK_DONE_PROBES so adding a probe and describing it stay in
+// one place (the first probe-descriptions test enforces a description for every
+// registered probe). Surfaced in the enriched phase.*.reclaim payload
+// (probe_checked) so an operator reading the event/HUD knows what evidence the
+// daemon used to declare the dead worker's work complete.
+export const WORK_DONE_PROBE_DESCRIPTIONS = {
+  implement: "commits ahead of origin/main + clean worktree",
+  remediate: "commits ahead of origin/main + clean worktree",
+  research: "≥200-byte research md naming the ticket with ## Summary / ## Code References",
+  plan: "≥200-byte plan with ## Phase and Success Criteria",
+  triage: "triage.json with a non-empty classification",
+  verify: "verify.json with findings[], regression_risk, tests_attempted, gates, generatedAt",
+  review: "review.json with findings[], reviewPassed, remediationCommit, generatedAt",
+  pr: "GitHub PR state=open or merged=true",
+  "monitor-merge": "GitHub PR merged=true",
+  "monitor-deploy": "phase-monitor-deploy.json with deploy_state in {success,skipped}",
+};
+
+// describeProbe — the probe-checked string for the enriched reclaim payload.
+// Falls back to "unknown" for an unregistered phase (branch (A) territory, where
+// a dead worker has no probe and is escalated rather than reclaimed).
+export function describeProbe(phase) {
+  return WORK_DONE_PROBE_DESCRIPTIONS[phase] ?? "unknown";
+}
