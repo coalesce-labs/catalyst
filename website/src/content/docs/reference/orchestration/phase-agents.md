@@ -49,15 +49,42 @@ Turn caps follow the same precedence: `--turn-cap` CLI flag >
 
 ### Linear comment trail (CTL-632)
 
-Every phase from `phase-triage` through `phase-review` (phases 1–6) mirrors its output back to the
-Linear ticket as a single comment in its End block — not just `phase-triage`. So the ticket
+Every phase from `phase-triage` through `phase-monitor-deploy` (phases 1–9) mirrors its output back
+to the Linear ticket as a single comment in its End block — not just `phase-triage`. So the ticket
 accumulates a running commentary as the pipeline walks: the triaged classification, then the
-research summary, the plan summary, the implement summary, the verify gates + findings, and the
-review verdict. The mirror is **idempotent** — guarded by a per-phase marker file
+research summary, the plan summary, the implement summary (files/lines), the verify gates +
+findings, the review verdict, the PR (with pre-merge verification), the merge outcome (CI rollup +
+bot/Codex reviews handled + time-to-merge), and the deploy (environment + preview URL + canary
+verdict). The mirror is **idempotent** — guarded by a per-phase marker file
 (`${ORCH_DIR}/workers/${TICKET}/.linear-mirror-<phase>`) so a re-dispatched or revived phase agent
 doesn't double-post — and **fail-open** (a `linearis` failure logs and continues, never blocking the
 phase). Each comment body is hard-truncated to 30,000 bytes (under Linear's effective comment cap)
 with a truncation marker.
+
+**Caveat:** the mirror lives in each skill's End block, so a phase the execution-core daemon
+*reclaims* (false-declares dead and advances past) never runs its End block and posts no comment —
+the daemon's reclaim path has no mirror fallback.
+
+#### Run-metadata footer
+
+Every mirror comment ends with a shared footer rendered by
+`plugins/dev/scripts/lib/phase-mirror-footer.sh`:
+
+```
+---
+_model `claude-opus-4-7` · 3 sub-agent(s) launched · active 7m 52s_
+_catalyst session `sess_…` · job `bc222a77` · session uuid `bc222a77-…` · cwd `/…/wt/…`_
+```
+
+- **model / sub-agent count / active working duration** are read from the worker's conversation
+  JSONL (resolved via the signal's `bg_job_id` → `~/.claude/jobs/<bg>/state.json` → `.linkScanPath`).
+  _active_ is the sum of `turn_duration` events — actual compute time, **not** wall-clock — so a
+  mostly-waiting phase like `phase-monitor-merge` reports only the time it was working.
+- **identifiers + cwd** let an operator resume or inspect the exact session.
+- The footer is **best-effort**: each field degrades to a placeholder independently and the helper
+  never fails the comment. **Cost/token totals are intentionally omitted** — the only number
+  reliably available at post time excludes sub-agent sessions; a true sub-agent-inclusive rollup
+  (likely via OTEL/Prometheus, which Grafana already aggregates per ticket) is tracked in CTL-666.
 
 ### 1. `phase-triage`
 
@@ -143,6 +170,12 @@ matching `$PHASE_DEPLOY_ENV` (default `production`), then runs the `/canary` ski
 verify the live deployment. Writes `phase-monitor-deploy.json` and emits
 `phase.monitor-deploy.complete.<TICKET>`, `.failed.<TICKET>`, or `.skipped.<TICKET>`. Uses Haiku by
 default — most of the work is polling and reading deployment status events.
+
+On a successful deploy it extracts the **preview / environment URL** from the `deployment_status`
+event (`environmentUrl`, falling back to `targetUrl`), persists it to the signal as structured data
+(`.deployment.url`) so a HUD or agent can link straight to the running deploy, and mirrors a deploy
+comment to Linear (environment + clickable preview URL + canary verdict). As the terminal phase,
+this is the last automated comment on the ticket.
 
 Skipped automatically when no deploy event arrives within the wall-clock timeout, so projects
 without deployment hooks don't block on this phase forever.

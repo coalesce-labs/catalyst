@@ -308,6 +308,12 @@ ${FINDINGS_PRETTY}
 _Posted automatically by phase-verify (CTL-632)._
 EOF
 )"
+  MIRROR_FOOTER=""
+  if [[ -n "${PLUGIN_ROOT:-}" && -x "${PLUGIN_ROOT}/scripts/lib/phase-mirror-footer.sh" ]]; then
+    MIRROR_FOOTER="$("${PLUGIN_ROOT}/scripts/lib/phase-mirror-footer.sh" --orch-dir "${ORCH_DIR}" --ticket "${TICKET}" --phase "${PHASE}" 2>/dev/null || true)"
+  fi
+  [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
+${MIRROR_FOOTER}"
   if [[ ${#MIRROR_BODY} -gt 30000 ]]; then
     MIRROR_BODY="${MIRROR_BODY:0:30000}
 

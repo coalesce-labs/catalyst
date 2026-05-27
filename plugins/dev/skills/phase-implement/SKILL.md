@@ -244,10 +244,18 @@ if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
     COMMIT_COUNT="$(printf '%s\n' "${COMMIT_LIST}" | grep -c '^- ' || true)"
     : "${COMMIT_COUNT:=0}"
     DIFF_STAT="$(git diff --stat "${BASE_SHA}..HEAD" 2>/dev/null | tail -1)"
+    NAME_STATUS="$(git diff --name-status "${BASE_SHA}..HEAD" 2>/dev/null)"
+    FILES_ADDED="$(printf '%s\n' "${NAME_STATUS}" | grep -c '^A' || true)"
+    FILES_MODIFIED="$(printf '%s\n' "${NAME_STATUS}" | grep -c '^M' || true)"
+    FILES_DELETED="$(printf '%s\n' "${NAME_STATUS}" | grep -c '^D' || true)"
+    LINES_ADDED="$(git diff --numstat "${BASE_SHA}..HEAD" 2>/dev/null | awk '$1 ~ /^[0-9]+$/ {a+=$1} END {print a+0}')"
+    LINES_DELETED="$(git diff --numstat "${BASE_SHA}..HEAD" 2>/dev/null | awk '$2 ~ /^[0-9]+$/ {d+=$2} END {print d+0}')"
   else
     COMMIT_LIST="_base branch unknown_"
     COMMIT_COUNT="?"
     DIFF_STAT="_unavailable_"
+    FILES_ADDED="?"; FILES_MODIFIED="?"; FILES_DELETED="?"
+    LINES_ADDED="?"; LINES_DELETED="?"
   fi
   BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "${TICKET}")"
   MIRROR_BODY="$(cat <<EOF
@@ -255,6 +263,8 @@ if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
 
 - **Branch**: \`${BRANCH_NAME}\`
 - **Commits**: ${COMMIT_COUNT}
+- **Files**: ${FILES_ADDED} added, ${FILES_MODIFIED} modified, ${FILES_DELETED} deleted
+- **Lines**: +${LINES_ADDED} / -${LINES_DELETED}
 - **Diff**: ${DIFF_STAT}
 
 <details>
@@ -267,6 +277,17 @@ ${COMMIT_LIST}
 _Posted automatically by phase-implement (CTL-632)._
 EOF
 )"
+  MIRROR_FOOTER=""
+  if [[ -n "${PLUGIN_ROOT:-}" && -x "${PLUGIN_ROOT}/scripts/lib/phase-mirror-footer.sh" ]]; then
+    MIRROR_FOOTER="$("${PLUGIN_ROOT}/scripts/lib/phase-mirror-footer.sh" --orch-dir "${ORCH_DIR}" --ticket "${TICKET}" --phase "${PHASE}" 2>/dev/null || true)"
+  fi
+  [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
+${MIRROR_FOOTER}"
+  if [[ ${#MIRROR_BODY} -gt 30000 ]]; then
+    MIRROR_BODY="${MIRROR_BODY:0:30000}
+
+_... (truncated)_"
+  fi
   if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
     : > "${LINEAR_MIRROR_MARKER}"
   else

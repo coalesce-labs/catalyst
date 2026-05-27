@@ -133,6 +133,79 @@ the reasoning happens upstream in `create-pr` itself.
 
 ## End block
 
+Mirror the phase output to Linear as a single comment (CTL-632). Describes the
+PR that was opened (number, URL, title, files changed, additions/deletions,
+commit count) plus the pre-merge verification surfaced from the verify phase's
+`verify.json` (test/typecheck/lint gate status + regression risk) so the trail
+records what was checked before the PR went up. PR metadata is re-read from the
+phase signal file (`.pr.number`/`.pr.url`, written in the phase-specific work
+above) and enriched via `gh pr view`; the verify summary is fail-soft if no
+`verify.json` exists. Body hard-truncated to 30,000 bytes. Fail-open and
+idempotent via the per-phase marker file. Uniquely-named fence so the e2e test
+can extract just this block.
+
+```bash phase-pr-mirror
+LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
+if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
+  PR_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+  PR_NUMBER="$(jq -r '.pr.number // empty' "${PR_SIGNAL}" 2>/dev/null || true)"
+  PR_URL="$(jq -r '.pr.url // empty' "${PR_SIGNAL}" 2>/dev/null || true)"
+  PR_VIEW="{}"
+  if [[ -n "${PR_NUMBER}" ]]; then
+    PR_VIEW="$(gh pr view "${PR_NUMBER}" --json title,files,additions,deletions,commits 2>/dev/null || echo '{}')"
+  fi
+  PR_TITLE="$(printf '%s' "${PR_VIEW}" | jq -r '.title // "_untitled_"' 2>/dev/null || echo '_untitled_')"
+  FILES_CHANGED="$(printf '%s' "${PR_VIEW}" | jq -r '(.files // []) | length' 2>/dev/null || echo '?')"
+  ADDITIONS="$(printf '%s' "${PR_VIEW}" | jq -r '.additions // "?"' 2>/dev/null || echo '?')"
+  DELETIONS="$(printf '%s' "${PR_VIEW}" | jq -r '.deletions // "?"' 2>/dev/null || echo '?')"
+  COMMIT_COUNT="$(printf '%s' "${PR_VIEW}" | jq -r '(.commits // []) | length' 2>/dev/null || echo '?')"
+  VERIFY_JSON_FILE="${ORCH_DIR}/workers/${TICKET}/verify.json"
+  VERIFY_RENDERED="_no verify.json found — verification ran in a prior phase or was skipped_"
+  if [[ -f "${VERIFY_JSON_FILE}" ]]; then
+    VERIFY_RENDERED="$(jq -r '
+      ("- **Regression risk**: " + ((.regression_risk // "?")|tostring) + " / 10")
+      + "\n"
+      + ((.gates // {})
+         | to_entries
+         | map(select(.key | test("test|typecheck|lint|coverage")))
+         | map("- **" + .key + "**: " + (.value.status // "unknown")
+               + (if .value.summary then " — " + .value.summary else "" end))
+         | join("\n"))
+    ' "${VERIFY_JSON_FILE}" 2>/dev/null || echo '_verify.json unreadable_')"
+  fi
+  MIRROR_BODY="$(cat <<EOF
+**Phase PR** — opened PR #${PR_NUMBER:-?}
+
+- **PR**: ${PR_URL:-_url unavailable_}
+- **Title**: ${PR_TITLE}
+- **Files changed**: ${FILES_CHANGED} (+${ADDITIONS} / -${DELETIONS})
+- **Commits**: ${COMMIT_COUNT}
+
+**Pre-merge verification** (from the verify phase):
+${VERIFY_RENDERED}
+
+_Posted automatically by phase-pr (CTL-632)._
+EOF
+)"
+  MIRROR_FOOTER=""
+  if [[ -n "${PLUGIN_ROOT:-}" && -x "${PLUGIN_ROOT}/scripts/lib/phase-mirror-footer.sh" ]]; then
+    MIRROR_FOOTER="$("${PLUGIN_ROOT}/scripts/lib/phase-mirror-footer.sh" --orch-dir "${ORCH_DIR}" --ticket "${TICKET}" --phase "${PHASE}" 2>/dev/null || true)"
+  fi
+  [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
+${MIRROR_FOOTER}"
+  if [[ ${#MIRROR_BODY} -gt 30000 ]]; then
+    MIRROR_BODY="${MIRROR_BODY:0:30000}
+
+_... (truncated)_"
+  fi
+  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+    : > "${LINEAR_MIRROR_MARKER}"
+  else
+    echo "phase-pr: linearis discuss failed (continuing)" >&2
+  fi
+fi
+```
+
 ```bash
 EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
 if [[ -x "$EMIT" ]]; then

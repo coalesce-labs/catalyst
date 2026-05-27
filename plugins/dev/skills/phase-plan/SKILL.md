@@ -197,6 +197,12 @@ if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
 _Posted automatically by phase-plan (CTL-632)._
 EOF
 )"
+  MIRROR_FOOTER=""
+  if [[ -n "${PLUGIN_ROOT:-}" && -x "${PLUGIN_ROOT}/scripts/lib/phase-mirror-footer.sh" ]]; then
+    MIRROR_FOOTER="$("${PLUGIN_ROOT}/scripts/lib/phase-mirror-footer.sh" --orch-dir "${ORCH_DIR}" --ticket "${TICKET}" --phase "${PHASE}" 2>/dev/null || true)"
+  fi
+  [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
+${MIRROR_FOOTER}"
   if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
     : > "${LINEAR_MIRROR_MARKER}"
   else

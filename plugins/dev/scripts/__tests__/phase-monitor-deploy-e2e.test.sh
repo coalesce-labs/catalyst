@@ -25,6 +25,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 SKILL_FILE="${REPO_ROOT}/plugins/dev/skills/phase-monitor-deploy/SKILL.md"
 EMIT_HELPER="${REPO_ROOT}/plugins/dev/scripts/lib/phase-emit-complete.sh"
+# shellcheck source=lib/linearis-stub.sh
+source "${SCRIPT_DIR}/lib/linearis-stub.sh"
 
 PASS=0
 FAIL=0
@@ -59,12 +61,12 @@ TMPROOT="$(mktemp -d -t phase-monitor-deploy-test.XXXXXX)"
 trap 'rm -rf "$TMPROOT" "$SKILL_BODY_FILE"' EXIT
 
 # Helper: write a fixture canonical OTel event line for a deployment_status into $1.
-# $2 = sha, $3 = env, $4 = state ("success"|"failure")
+# $2 = sha, $3 = env, $4 = state ("success"|"failure"), $5 = environmentUrl (optional)
 write_deploy_event() {
-  local out_file="$1" sha="$2" env="$3" state="$4"
+  local out_file="$1" sha="$2" env="$3" state="$4" url="${5:-}"
   jq -nc \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --arg sha "$sha" --arg env "$env" --arg state "$state" \
+    --arg sha "$sha" --arg env "$env" --arg state "$state" --arg url "$url" \
     '{
       ts: $ts,
       id: "fixture-deploy-event",
@@ -77,7 +79,7 @@ write_deploy_event() {
         "deployment.environment": $env,
         "deployment.state": $state
       },
-      body: {payload: {state: $state}}
+      body: {payload: ({state: $state} + (if $url != "" then {environmentUrl: $url} else {} end))}
     }' >> "$out_file"
 }
 
@@ -154,6 +156,11 @@ jq -nc --arg s "$canary_status" '{status: \$s, observations: ["fixture"]}'
 EOF
   chmod +x "$case_dir/bin/canary-stub"
 
+  # linearis stub (CTL-632 deploy mirror): keep the skill's `linearis issues
+  # discuss` call hermetic — case_dir/bin is first on PATH so this shadows any
+  # real linearis. Logs each call so we can assert the mirror posted.
+  linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+
   # Run the skill body in the background so we can append the deploy event
   # AFTER catalyst-events wait-for has begun watching from EOF. This mirrors
   # the production flow where the deploy webhook arrives after the worker
@@ -192,7 +199,9 @@ EOF
     # Give wait-for time to start. Its inner loop sleeps 1s, so we wait 2s
     # after writing to make sure the next poll picks it up.
     sleep 2
-    write_deploy_event "$events_file" "$sha" "production" "$deploy_state"
+    local deploy_url=""
+    [ "$deploy_state" = "success" ] && deploy_url="https://preview.example.dev/ctl-9999"
+    write_deploy_event "$events_file" "$sha" "production" "$deploy_state" "$deploy_url"
   fi
 
   wait "$skill_pid"
@@ -221,6 +230,24 @@ if [ -f "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json" ]; then
 
   CR_STATUS="$(jq -r '.canary_result.status' "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json")"
   assert_eq "success: canary_result.status recorded" "success" "$CR_STATUS"
+
+  # CTL-632 deploy mirror: preview URL persisted as structured data.
+  DURL="$(jq -r '.deployment.url' "$CASE_DIR/orch/workers/CTL-9999/phase-monitor-deploy.json")"
+  assert_eq "success: deployment.url persisted from environmentUrl" \
+    "https://preview.example.dev/ctl-9999" "$DURL"
+fi
+
+# CTL-632 deploy mirror: a Linear comment was posted with the env + preview URL.
+if grep -q '^discuss$' "$CASE_DIR/linearis-calls.log" 2>/dev/null; then
+  ok "success: deploy mirror posted to Linear"
+else
+  fail "success: deploy mirror posted" "no discuss in $(cat "$CASE_DIR/linearis-calls.log" 2>/dev/null)"
+fi
+if grep -q 'Phase Monitor-Deploy' "$CASE_DIR/linearis-calls.log" 2>/dev/null \
+   && grep -q 'preview.example.dev/ctl-9999' "$CASE_DIR/linearis-calls.log" 2>/dev/null; then
+  ok "success: deploy mirror body has header + preview URL"
+else
+  fail "success: deploy mirror body" "log: $(cat "$CASE_DIR/linearis-calls.log" 2>/dev/null)"
 fi
 
 # Canary stub was invoked exactly once
