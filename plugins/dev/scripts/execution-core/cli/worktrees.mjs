@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { emitReapIntent } from "../reap-intent.mjs";
 import { parseArgs, ArgError } from "./args.mjs";
 import { buildRows as buildSessionRows, buildLiveSessionsByWorktree } from "./sessions.mjs";
+import { resolveRepoRoot, runGitCapture } from "./repo.mjs";
 
 const GH_BIN = process.env.CATALYST_GH_BIN || "gh";
 const DEFAULT_STALE_DAYS = Number(process.env.CATALYST_WORKTREE_STALE_DAYS) || 14;
@@ -109,24 +110,30 @@ export function classify({
 
 // ─── I/O sources ─────────────────────────────────────────────────────────────
 
-function gitWorktreePorcelain() {
-  try {
-    return execFileSync("git", ["worktree", "list", "--porcelain"], { encoding: "utf8" });
-  } catch {
-    return "";
-  }
+/**
+ * gitWorktreePorcelain — `git worktree list --porcelain`, anchored to repoRoot
+ * (resolved lazily when omitted) and routed through runGitCapture so a git
+ * failure THROWS a clean wrapped error instead of swallowing to "" (CTL-675).
+ * Exported for tests; `run` is the injectable git runner.
+ */
+export function gitWorktreePorcelain(repoRoot, run) {
+  const cwd = repoRoot ?? resolveRepoRoot();
+  return runGitCapture(["worktree", "list", "--porcelain"], run ? { cwd, run } : { cwd });
 }
 
 /**
  * ghPrList — every PR (any state) as { number, headRefName, state } with state
  * lowercased to open|closed|merged. Empty on any gh failure (no auth, no remote).
+ * cwd is anchored to repoRoot for correct repo auto-detect (CTL-675), but a gh
+ * failure stays swallowed-to-empty — "no PRs" is not the silent-no-op bug.
  */
-export function ghPrList() {
+export function ghPrList(repoRoot) {
+  const cwd = repoRoot ?? resolveRepoRoot();
   try {
     const out = execFileSync(
       GH_BIN,
       ["pr", "list", "--state", "all", "--limit", "500", "--json", "number,headRefName,state"],
-      { encoding: "utf8" }
+      { cwd, encoding: "utf8" }
     );
     const parsed = JSON.parse(out);
     return (Array.isArray(parsed) ? parsed : []).map((p) => ({
@@ -155,8 +162,9 @@ function mtimeMsFor(path) {
  * session rows; tests pass fixtures.
  */
 export async function buildRows({
-  porcelain = gitWorktreePorcelain(),
-  prs = ghPrList(),
+  repoRoot, // undefined → the git/gh helpers resolve lazily (CTL-675)
+  porcelain = gitWorktreePorcelain(repoRoot),
+  prs = ghPrList(repoRoot),
   liveByWorktree,
   mtimeFor = mtimeMsFor,
   linearStateFor = () => null,
@@ -272,7 +280,7 @@ export async function runWorktreesPrune({
 const WORKTREES_SPEC = {
   booleans: ["json", "yes", "dry-run", "include-stale"],
   numbers: ["max", "stale-days"],
-  strings: [],
+  strings: ["repo-root"],
 };
 
 /**
@@ -293,11 +301,12 @@ export function parseWorktreeArgs(argv) {
   if (raw["include-stale"] !== undefined) out.includeStale = raw["include-stale"];
   if (raw.max !== undefined) out.max = raw.max;
   if (raw["stale-days"] !== undefined) out.staleDays = raw["stale-days"];
+  if (raw["repo-root"] !== undefined) out.repoRoot = raw["repo-root"];
   return out;
 }
 
-async function cmdList({ json, staleDays }) {
-  const rows = await buildRows({ staleDays: staleDays ?? DEFAULT_STALE_DAYS });
+async function cmdList({ json, staleDays, repoRoot }) {
+  const rows = await buildRows({ repoRoot, staleDays: staleDays ?? DEFAULT_STALE_DAYS });
   if (json) {
     process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
     return 0;
@@ -313,7 +322,7 @@ async function cmdList({ json, staleDays }) {
 }
 
 async function cmdPrune(opts) {
-  const rows = await buildRows({ staleDays: opts.staleDays ?? DEFAULT_STALE_DAYS });
+  const rows = await buildRows({ repoRoot: opts.repoRoot, staleDays: opts.staleDays ?? DEFAULT_STALE_DAYS });
   const { planned, emitted, plannedRows, skippedRows } = await runWorktreesPrune({ ...opts, rows });
   const isDryRun = !(opts.yes && !opts.dryRun);
   if (opts.json) {
@@ -337,8 +346,9 @@ async function cmdPrune(opts) {
 function usage() {
   process.stderr.write(
     "Usage: catalyst-execution-core worktrees {list|prune} [flags]\n" +
-      "  list  [--json] [--stale-days N]\n" +
-      "  prune [--yes] [--dry-run] [--json] [--max N] [--include-stale]\n"
+      "  list  [--json] [--stale-days N] [--repo-root <path>]\n" +
+      "  prune [--yes] [--dry-run] [--json] [--max N] [--include-stale] [--repo-root <path>]\n" +
+      "  Repo resolution: --repo-root → $CATALYST_REPO_ROOT → current repo → first registry project.\n"
   );
 }
 
