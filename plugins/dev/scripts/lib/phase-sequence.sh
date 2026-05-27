@@ -15,6 +15,22 @@
 # shellcheck disable=SC2034  # PHASES is consumed by sourcing scripts
 PHASES=(triage research plan implement verify review pr monitor-merge monitor-deploy)
 
+# CTL-667: the BUILD phases that get a fresh-dispatch rebase onto origin/<base>.
+# Strict subset of PHASES — keep in that set (the phase-sequence drift test +
+# the CTL-667 subset guard assert this). triage/pr/remediate and the monitor-*
+# phases are intentionally excluded (see plan: What We're NOT Doing).
+# shellcheck disable=SC2034  # REBASE_PHASES is consumed by sourcing scripts
+REBASE_PHASES=(research plan implement verify review)
+
+# is_rebase_phase PHASE → exit 0 if PHASE is a front-load-rebase build phase.
+is_rebase_phase() {
+  local phase="$1" p
+  for p in "${REBASE_PHASES[@]}"; do
+    [[ $p == "$phase" ]] && return 0
+  done
+  return 1
+}
+
 # latest_phase_in_dir DIR
 # Echoes the highest-index PHASES entry that has a workers/<T>/phase-<name>.json
 # present in DIR, or the empty string if none. Mirrors scheduler.mjs:270
