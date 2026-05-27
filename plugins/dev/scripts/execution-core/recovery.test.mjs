@@ -15,6 +15,7 @@ import {
   recoverStartup,
   reclaimDeadWorkIfPossible,
   defaultReviveDispatch,
+  resolvePhaseSessionId,
   defaultKillBgJob,
   defaultPidAlive,
   defaultAppendReviveEvent,
@@ -1796,5 +1797,53 @@ describe("readBootSince — CTL-655 boot-time window reader", () => {
     // Empty-string bootedAt is also rejected.
     writeFileSync(join(dir, "daemon-boot.json"), JSON.stringify({ bootedAt: "" }));
     expect(readBootSince(dir)).toBeUndefined();
+  });
+});
+
+// CTL-658 — JS port of orchestrate-revive's resolve_phase_session_id. Resolves a
+// `claude --resume`-compatible session UUID from a dead worker's bg_job_id by
+// reading <jobsDir>/<bg_job_id>/state.json → .linkScanPath → basename minus .jsonl.
+// Mirrors the bash unit tests at __tests__/orchestrate-revive.test.sh:578-617.
+describe("resolvePhaseSessionId", () => {
+  let jobsDir;
+  beforeEach(() => {
+    jobsDir = mkdtempSync(join(tmpdir(), "exec-core-jobs-"));
+  });
+  afterEach(() => {
+    rmSync(jobsDir, { recursive: true, force: true });
+  });
+
+  test("happy path — linkScanPath .jsonl returns the UUID basename", () => {
+    mkdirSync(join(jobsDir, "cafe1234"), { recursive: true });
+    writeFileSync(
+      join(jobsDir, "cafe1234", "state.json"),
+      JSON.stringify({ linkScanPath: "/p/9f8e-uuid.jsonl" }),
+    );
+    expect(resolvePhaseSessionId("cafe1234", { jobsDir })).toBe("9f8e-uuid");
+  });
+
+  test("missing state.json returns null", () => {
+    mkdirSync(join(jobsDir, "nostate"), { recursive: true });
+    expect(resolvePhaseSessionId("nostate", { jobsDir })).toBeNull();
+  });
+
+  test("malformed linkScanPath (not .jsonl) returns null", () => {
+    mkdirSync(join(jobsDir, "baddir"), { recursive: true });
+    writeFileSync(
+      join(jobsDir, "baddir", "state.json"),
+      JSON.stringify({ linkScanPath: "/p/some-dir" }),
+    );
+    expect(resolvePhaseSessionId("baddir", { jobsDir })).toBeNull();
+  });
+
+  test("empty / null bgJobId returns null without fs access", () => {
+    expect(resolvePhaseSessionId(null, { jobsDir })).toBeNull();
+    expect(resolvePhaseSessionId("", { jobsDir })).toBeNull();
+  });
+
+  test("state.json without linkScanPath returns null", () => {
+    mkdirSync(join(jobsDir, "nolink"), { recursive: true });
+    writeFileSync(join(jobsDir, "nolink", "state.json"), JSON.stringify({}));
+    expect(resolvePhaseSessionId("nolink", { jobsDir })).toBeNull();
   });
 });

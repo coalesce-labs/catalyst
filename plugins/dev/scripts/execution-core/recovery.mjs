@@ -19,7 +19,8 @@ import {
   existsSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { join } from "node:path";
+import { join, basename } from "node:path";
+import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -53,6 +54,31 @@ import {
 const EMIT_COMPLETE_BIN = fileURLToPath(
   new URL("../phase-agent-emit-complete", import.meta.url),
 );
+
+// resolvePhaseSessionId — JS port of orchestrate-revive's resolve_phase_session_id
+// (orchestrate-revive:160-177). Resolves a `claude --resume`-compatible session
+// UUID from a dead worker's bg_job_id by reading the job's state.json linkScanPath.
+// Returns null on any miss (no bgJobId, no state.json, no/!.jsonl linkScanPath).
+// MUST stay in sync with the bash resolver — they read the same on-disk contract
+// and honour the same CATALYST_REVIVE_JOBS_DIR override (NOT getJobsRoot's
+// CATALYST_HEALTHCHECK_JOBS_ROOT) so a test overriding one env var matches bash.
+export function resolvePhaseSessionId(
+  bgJobId,
+  { jobsDir = process.env.CATALYST_REVIVE_JOBS_DIR || join(homedir(), ".claude", "jobs") } = {},
+) {
+  if (!bgJobId) return null;
+  const stateFile = join(jobsDir, bgJobId, "state.json");
+  if (!existsSync(stateFile)) return null;
+  let linkPath;
+  try {
+    linkPath = JSON.parse(readFileSync(stateFile, "utf8"))?.linkScanPath;
+  } catch {
+    return null;
+  }
+  if (typeof linkPath !== "string" || !linkPath.endsWith(".jsonl")) return null;
+  const sid = basename(linkPath, ".jsonl");
+  return sid || null;
+}
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime
