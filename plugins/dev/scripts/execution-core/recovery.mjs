@@ -1149,11 +1149,14 @@ export function reclaimDeadWorkIfPossible(
         reason: "ctl-661-reclaim-happy-path",
       }).catch(() => {});
     }
-    // CTL-664: derive the reclaim observability fields from values already
-    // computed above. `death_signal` distinguishes an absent bg job (klass
-    // 'dead') from a running-but-stale one (mtime); kept as a single const so
-    // Phase 3's mirror body reuses it without recomputation.
-    const death_signal = klass === "dead" ? "absent" : "mtime";
+    // CTL-664/CTL-662: derive the reclaim observability fields from values
+    // already computed above. Post-CTL-662 this reclaim branch is reached ONLY
+    // for an `absent` bg job or an idle-confirmed one — `busy` returns at
+    // alive-busy-suppressed and an unconfirmed `idle` returns at idle-pending
+    // above, and mtime is no longer a reclaim trigger. So the death signal
+    // reflects the liveness verdict the trigger actually acted on, never the
+    // obsolete "mtime". Kept as a single const so the mirror body reuses it.
+    const death_signal = live === "absent" ? "absent" : "idle-confirmed";
     const probe_checked = describeProbe(phase);
     appendEvent({
       phase,

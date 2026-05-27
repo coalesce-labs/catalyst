@@ -655,22 +655,30 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(order[1][1]).toEqual({ orchDir: orch, signal: sig });
   });
 
-  test("CTL-664: reclaim of an mtime-stale worker reports death_signal='mtime' + prev_state_json_mtime", () => {
+  // CTL-662: mtime is no longer a reclaim trigger, so a reclaim is never
+  // labeled death_signal='mtime'. The branch-(B) reclaim is reached only for an
+  // `absent` bg job or an idle-confirmed one — the death signal must report that
+  // liveness verdict. prev_state_json_mtime survives as pure telemetry (the last
+  // state.json write time), independent of the death-signal decision.
+  test("CTL-662: reclaim of an idle-confirmed worker reports death_signal='idle-confirmed' (never 'mtime') + prev_state_json_mtime", () => {
     const staleMtime = 1_000;
     let appended = null;
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), {
-      statJob: () => ({ mtimeMs: staleMtime }), // exists but stale
-      now: () => staleMtime + 10 * 60_000, // > STALE_MS
+      statJob: () => ({ mtimeMs: staleMtime }), // state.json present but stale — NOT a trigger
+      liveness: () => "idle", // CTL-662: status is the trigger
+      bumpIdleStreak: () => 99, // already past IDLE_CONFIRM_TICKS → reclaim-eligible
+      resetIdleStreak: () => {},
       probes: { implement: () => true },
       emitComplete: () => ({ code: 0 }),
       appendEvent: (args) => {
         appended = args;
       },
-      postReclaimMirror: () => {}, // stubbed (Phase 3 seam)
+      postReclaimMirror: () => {}, // keep hermetic (no linearis spawn)
       repoRoot: "/repo",
     });
     expect(r).toBe("reclaimed");
-    expect(appended.death_signal).toBe("mtime");
+    expect(appended.death_signal).toBe("idle-confirmed");
+    expect(appended.death_signal).not.toBe("mtime");
     expect(appended.prev_state_json_mtime).toBe(staleMtime);
   });
 
