@@ -817,18 +817,22 @@ const HUNG_CUTOFF_MS = 15 * 60 * 1000;
 //                         ahead of the genuinely-active terminal phase. No
 //                         escalate/revive/reclaim — acting would spuriously flag
 //                         needs-human or spawn a duplicate worker at a past phase.
-//   'alive-quiet-suppressed' effectively dead by state.json mtime AND probe says
-//                         work NOT done BUT the bg pid is still a live `claude`
-//                         process within HUNG_CUTOFF_MS (CTL-610). The worker
-//                         is alive-blocked-on-a-long-tool-call (the pre-first-
-//                         output window for research/plan, or a long sync
-//                         Edit/Bash inside implement), not crashed. Suppress
-//                         the revive: no duplicate spawn, no budget consumed,
-//                         no .revive-N.applied marker, no defensive kill, no
+//   'alive-quiet-suppressed' effectively dead by state.json mtime BUT the bg pid
+//                         is still a live `claude agents` session within
+//                         HUNG_CUTOFF_MS (CTL-610). The worker is alive-blocked-
+//                         on-a-long-tool-call (the pre-first-output window for
+//                         research/plan, or a long sync Edit/Bash inside
+//                         implement), not crashed. CTL-661 HOISTS this gate
+//                         ahead of branches (A)/(B)/(C): a live-but-quiet worker
+//                         is now suppressed regardless of whether its probe
+//                         reads done (B), its phase has no probe (A), or its
+//                         work is not done (C) — never reclaimed, escalated, or
+//                         revived. No duplicate spawn, no budget consumed, no
+//                         .revive-N.applied marker, no defensive kill, no
 //                         events.jsonl append — log-only (to avoid the CTL-638
-//                         self-feeding storm). A dead pid (real crash) or a
-//                         live pid past the cutoff (genuinely hung) falls
-//                         through to the existing revive path.
+//                         self-feeding storm). A dead pid (real crash) or a live
+//                         pid past the cutoff (genuinely hung) opens the gate and
+//                         falls through to the branches below.
 //
 // CTL-588 still defines "effectively dead" as classifyWorker:'dead' OR a
 // 'running' signal whose bg state.json mtime is older than staleMs.
@@ -965,12 +969,41 @@ export function reclaimDeadWorkIfPossible(
     return "escalated";
   }
 
+  // (C0→hoisted) CTL-661 — alive-quiet liveness gate, repositioned ahead of
+  //     ALL downstream branches (was at the top of branch (C), recovery.mjs
+  //     :891-901 pre-CTL-661). A worker flagged effectively-dead by stale
+  //     state.json mtime but still a live `claude agents` session within
+  //     hungCutoffMs is alive-blocked-on-a-long-tool-call (the pre-first-output
+  //     window for research/plan sub-agent fan-outs, or a long synchronous
+  //     Edit/Bash inside implement), not crashed. Suppressing HERE — before
+  //     branch (A) escalate, branch (B) reclaim, and the branch (C) revive —
+  //     means a live-but-quiet worker is never reclaimed, escalated, or revived
+  //     on ANY path; it is left to finish on its own (its own emit-complete is
+  //     authoritative) or to genuinely die (mtime past the cutoff → the gate
+  //     opens and it falls through to the branches below). The first conjunct
+  //     (prevStateJsonMtime !== null) fails-closed on the classifyWorker:'dead'
+  //     path (job dir gone — a real crash) so the gate cannot mask one.
+  const isAliveQuiet = () =>
+    prevStateJsonMtime !== null &&
+    now() - prevStateJsonMtime < hungCutoffMs &&
+    pidAlive({ bgJobId: prevBgJobId });
+  if (isAliveQuiet()) {
+    log.info(
+      { ticket, phase, prevBgJobId, prevStateJsonMtime },
+      "ctl-661: reclaim suppressed — bg pid alive within hung cutoff (worker quiet, not dead); gate precedes branches A/B/C",
+    );
+    return "alive-quiet-suppressed";
+  }
+
   // (A) No probe registered for this phase → escalate. The pre-CTL-587 silent
   //     'not-applicable' return is now an actionable outcome: the worker is
   //     dead, we cannot prove its work landed, and no automation can recover
   //     — so the human needs to look. needs-human label applied (verified by
   //     the CTL-587 applyLabel read-back). CTL-638 routes through escalateOnce
   //     so the same (ticket, phase) cannot re-fire within the cool-down window.
+  //     CTL-661: a LIVE worker on a probe-less phase no longer reaches here —
+  //     the hoisted alive-quiet gate above suppresses it first, so this branch
+  //     only escalates a genuinely-dead probe-less worker.
   if (!hasProbe(phase)) {
     return escalateOnce("no-probe-for-phase", 0);
   }
@@ -1001,32 +1034,12 @@ export function reclaimDeadWorkIfPossible(
   //     defaultReviveDispatch is phase-agnostic (resets the signal to `stalled`
   //     and re-launches via phase-agent-dispatch).
 
-  // (C0) CTL-610 — alive-quiet keep-alive guard. The worker is effectively-dead
-  //     by state.json mtime and its probe reads not-done, but if its bg pid is
-  //     still a live `claude` process within the hung cutoff, it is alive-
-  //     blocked on a long synchronous tool call (the pre-first-output window
-  //     for research/plan, or a long Edit/Bash inside implement), not crashed.
-  //     Suppress the revive — no duplicate spawn, no budget spent, no marker,
-  //     no kill, no events.jsonl append (log-only, to avoid the CTL-638
-  //     self-feeding storm). A dead pid (real crash) or a live pid past the
-  //     cutoff (genuinely hung) falls through to the existing revive path
-  //     below. Runs BEFORE priorRevives so a live worker is never falsely
-  //     escalated to needs-human just because two prior false-revives consumed
-  //     its budget; runs BEFORE the storm-breaker so liveness wins over
-  //     fleet-wide noise. The first conjunct (prevStateJsonMtime !== null)
-  //     fails-closed on the classifyWorker:'dead' path (job dir gone — a real
-  //     crash) so the guard cannot mask one.
-  if (
-    prevStateJsonMtime !== null &&
-    now() - prevStateJsonMtime < hungCutoffMs &&
-    pidAlive({ bgJobId: prevBgJobId })
-  ) {
-    log.info(
-      { ticket, phase, prevBgJobId, prevStateJsonMtime },
-      "ctl-610: revive suppressed — bg pid alive within hung cutoff (worker is quiet, not dead)",
-    );
-    return "alive-quiet-suppressed";
-  }
+  // CTL-661: the CTL-610 alive-quiet guard that formerly sat HERE (branch (C0))
+  // has been hoisted ahead of branches (A) and (B) — see the `isAliveQuiet`
+  // gate above. By the time control reaches this point the worker is either
+  // pid-dead (a real crash) or a live pid past the hung cutoff (genuinely hung),
+  // so the revive/escalate path below is correct for both. No duplicate guard
+  // is needed; removing it keeps the predicate single-sourced.
 
   // Per-ticket revive budget from events.jsonl. The events file is the
   // authoritative counter — more truthful than the signal file (which the
