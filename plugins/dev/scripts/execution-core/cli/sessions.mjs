@@ -27,6 +27,7 @@ import { readWorkerSignals, TERMINAL } from "../signal-reader.mjs";
 import { emitReapIntent } from "../reap-intent.mjs";
 import { getRunsRoot } from "../config.mjs";
 import { lastSeenMsForSession } from "../session-recency.mjs";
+import { parseArgs, ArgError } from "./args.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 
@@ -206,6 +207,13 @@ function psLinesSnapshot() {
   }
 }
 
+// roundOrNull — coerce a recency reading to an integer ms so JSON output never
+// leaks sub-millisecond float noise (devex finding #5: lastSeenMs showed
+// `5531440.273925781`). Preserves null/undefined unchanged.
+function roundOrNull(ms) {
+  return ms == null ? null : Math.round(ms);
+}
+
 // ─── buildRows: the read-path join ───────────────────────────────────────────
 
 /**
@@ -262,7 +270,7 @@ export async function buildRows({
       // as AGE in the table. lastSeenMs is the RECENCY signal (since transcript
       // mtime) — a freshly-touched session is in use regardless of class/age.
       elapsedMs: s.startedAt ? now - s.startedAt : null,
-      lastSeenMs: s.sessionId ? lastSeen(s.sessionId, { now }) : null,
+      lastSeenMs: s.sessionId ? roundOrNull(lastSeen(s.sessionId, { now })) : null,
       rssKb: s.pid ? rssTotalForPid(snapshot, s.pid) : 0,
     });
   }
@@ -290,7 +298,14 @@ export function buildLiveSessionsByWorktree(rows) {
 /**
  * runPrune — emit one `phase.abort.reap-requested` per prunable row. Dry-run is
  * the default (no --yes ⇒ nothing emitted). Self-session is always skipped.
- * Returns { planned, emitted } counts.
+ *
+ * Returns `{ planned, emitted, plannedRows, skippedRows }`. `plannedRows` carry
+ * the fields a JSON consumer needs to inspect the destructive plan before
+ * acting (`sessions prune --dry-run --json | jq '.planned'`); `skippedRows`
+ * record each protection that fired with a stable machine `reason`
+ * (self-session / interactive / recently-active / not-in-category). The human
+ * log output (when `--json` is absent) is emitted here as before, byte-for-byte;
+ * the JSON rendering lives in `cmdPrune`.
  */
 export async function runPrune({
   rows,
@@ -303,20 +318,28 @@ export async function runPrune({
   includeInteractive = false,
   minIdleMs = 15 * 60 * 1000,
   categories,
+  json = false,
   env = process.env,
 } = {}) {
   const active = new Set(categories ?? DEFAULT_PRUNE_CATEGORIES);
   if (includeIdle) active.add("IDLE");
 
+  // When --json is requested the structured object is the sole stdout payload;
+  // suppress the per-row human log lines so they don't corrupt the JSON stream.
+  const humanLog = json ? () => {} : log;
+
   const live = yes && !dryRun;
   let planned = 0;
   let emitted = 0;
+  const plannedRows = [];
+  const skippedRows = [];
   for (const row of rows) {
     // Cap on planned (not emitted) so --max bounds the dry-run plan too, and
     // is consistent with worktrees/branches prune.
     if (planned >= max) break;
     if (isSelfSession(row.sessionId, env)) {
-      log(`skipping self-session ${row.shortId} (controlling session)`);
+      humanLog(`skipping self-session ${row.shortId} (controlling session)`);
+      skippedRows.push({ shortId: row.shortId, reason: "self-session" });
       continue;
     }
     // Interactive sessions are the operator's own terminal windows. The
@@ -324,24 +347,36 @@ export async function runPrune({
     // a prune/timer must never reap the operator's other live windows. These two
     // guards run in BOTH dry-run and live so the plan reflects a real prune.
     if (row.kind === "interactive" && !includeInteractive) {
-      log(`skipping ${row.shortId} [protected: interactive]`);
+      humanLog(`skipping ${row.shortId} [protected: interactive]`);
+      skippedRows.push({ shortId: row.shortId, reason: "interactive" });
       continue;
     }
     // A transcript touched within minIdleMs means the session is in use right
     // now, regardless of its idle/orphan classification.
     if (row.lastSeenMs != null && row.lastSeenMs < minIdleMs) {
-      log(
+      humanLog(
         `skipping ${row.shortId} [protected: recently active, last_seen ${Math.round(
           row.lastSeenMs / 1000
         )}s]`
       );
+      skippedRows.push({ shortId: row.shortId, reason: "recently-active" });
       continue;
     }
-    if (!active.has(row.classification)) continue;
+    if (!active.has(row.classification)) {
+      skippedRows.push({ shortId: row.shortId, reason: "not-in-category" });
+      continue;
+    }
 
     planned++;
+    plannedRows.push({
+      shortId: row.shortId,
+      classification: row.classification,
+      ticket: row.ticket ?? null,
+      phase: row.phase ?? null,
+      cwd: row.cwd ?? null,
+    });
     if (!live) {
-      log(`[dry-run] would reap ${row.shortId} (${row.classification}) ${row.cwd ?? ""}`);
+      humanLog(`[dry-run] would reap ${row.shortId} (${row.classification}) ${row.cwd ?? ""}`);
       continue;
     }
     await emit("phase.abort.reap-requested", {
@@ -353,56 +388,45 @@ export async function runPrune({
     });
     emitted++;
   }
-  return { planned, emitted };
+  return { planned, emitted, plannedRows, skippedRows };
 }
 
 // ─── arg parsing ─────────────────────────────────────────────────────────────
 
+// The strict spec the shared parser validates against. Unknown flags and
+// non-numeric --max/--min-idle-seconds throw ArgError instead of silently
+// reverting to a default or NaN-ing a safety guard (devex findings #1, #2).
+const SESSIONS_SPEC = {
+  booleans: ["json", "yes", "dry-run", "include-idle", "include-interactive"],
+  numbers: ["max", "min-idle-seconds"],
+  strings: ["ticket", "phase", "categories"],
+};
+
 /**
- * parseArgs — minimal flag parser for the sessions subcommands. Boolean flags
- * (--json/--yes/--dry-run/--include-idle/--include-interactive) take no value;
- * --max and --min-idle-seconds coerce to a number (the latter ×1000 → minIdleMs);
- * --categories splits on commas; everything else is a string value.
+ * parseSessionArgs — strict flag parser for the sessions subcommands. Delegates
+ * validation to the shared `parseArgs(argv, spec)` (rejects unknown flags and
+ * non-numeric numbers), then maps the kebab-case result onto the option names
+ * cmdList/cmdShow/runPrune consume: --dry-run→dryRun, --include-idle→includeIdle,
+ * --include-interactive→includeInteractive, --min-idle-seconds→minIdleMs (×1000),
+ * --categories→split on comma.
+ *
+ * @throws {ArgError} on an unknown flag, a missing value, or a non-numeric number.
  */
-export function parseArgs(argv) {
+export function parseSessionArgs(argv) {
+  const raw = parseArgs(argv, SESSIONS_SPEC);
   const out = {};
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    switch (arg) {
-      case "--json":
-        out.json = true;
-        break;
-      case "--yes":
-        out.yes = true;
-        break;
-      case "--dry-run":
-        out.dryRun = true;
-        break;
-      case "--include-idle":
-        out.includeIdle = true;
-        break;
-      case "--include-interactive":
-        out.includeInteractive = true;
-        break;
-      case "--min-idle-seconds":
-        out.minIdleMs = Number(argv[++i]) * 1000;
-        break;
-      case "--max":
-        out.max = Number(argv[++i]);
-        break;
-      case "--ticket":
-        out.ticket = argv[++i];
-        break;
-      case "--phase":
-        out.phase = argv[++i];
-        break;
-      case "--categories":
-        out.categories = String(argv[++i]).split(",");
-        break;
-      default:
-        break;
-    }
+  if (raw.json !== undefined) out.json = raw.json;
+  if (raw.yes !== undefined) out.yes = raw.yes;
+  if (raw["dry-run"] !== undefined) out.dryRun = raw["dry-run"];
+  if (raw["include-idle"] !== undefined) out.includeIdle = raw["include-idle"];
+  if (raw["include-interactive"] !== undefined) {
+    out.includeInteractive = raw["include-interactive"];
   }
+  if (raw.max !== undefined) out.max = raw.max;
+  if (raw["min-idle-seconds"] !== undefined) out.minIdleMs = raw["min-idle-seconds"] * 1000;
+  if (raw.ticket !== undefined) out.ticket = raw.ticket;
+  if (raw.phase !== undefined) out.phase = raw.phase;
+  if (raw.categories !== undefined) out.categories = String(raw.categories).split(",");
   return out;
 }
 
@@ -453,8 +477,22 @@ async function cmdPrune(opts) {
   // ignoring scope flags on a destructive command is a footgun.
   if (opts.ticket) rows = rows.filter((r) => r.ticket === opts.ticket);
   if (opts.phase) rows = rows.filter((r) => r.phase === opts.phase);
-  const { planned, emitted } = await runPrune({ ...opts, rows });
-  const verb = opts.yes && !opts.dryRun ? "reaped" : "planned (dry-run)";
+  const { planned, emitted, plannedRows, skippedRows } = await runPrune({ ...opts, rows });
+  const isDryRun = !(opts.yes && !opts.dryRun);
+  if (opts.json) {
+    // One structured object so a headless agent can inspect the destructive
+    // plan before acting: `sessions prune --dry-run --json | jq '.planned'`.
+    process.stdout.write(
+      `${JSON.stringify({
+        dryRun: isDryRun,
+        planned: plannedRows,
+        skipped: skippedRows,
+        emitted,
+      })}\n`
+    );
+    return 0;
+  }
+  const verb = isDryRun ? "planned (dry-run)" : "reaped";
   process.stderr.write(`sessions prune: ${emitted || planned} ${verb}\n`);
   return 0;
 }
@@ -499,7 +537,7 @@ function usage() {
 
 async function main(argv) {
   const sub = argv[0];
-  const opts = parseArgs(argv.slice(1));
+  const opts = parseSessionArgs(argv.slice(1));
   switch (sub) {
     case "list":
       return cmdList(opts);
@@ -522,6 +560,17 @@ const isEntry =
 if (isEntry) {
   main(process.argv.slice(2))
     .then((code) => process.exit(code ?? 0))
+    .catch((err) => {
+      // A bad/unknown flag is operator error, not a crash: print the message
+      // and usage, exit 2. Re-throw anything else so genuine bugs still surface
+      // with a stack trace via the default uncaught-rejection path.
+      if (err instanceof ArgError) {
+        process.stderr.write(`error: ${err.message}\n`);
+        usage();
+        process.exit(2);
+      }
+      throw err;
+    })
     .catch((err) => {
       process.stderr.write(`sessions: ${err.message}\n`);
       process.exit(1);

@@ -15,8 +15,9 @@ import {
   buildRows,
   buildLiveSessionsByWorktree,
   runPrune,
-  parseArgs,
+  parseSessionArgs,
 } from "./sessions.mjs";
+import { ArgError } from "./args.mjs";
 
 describe("classifyRow (priority chain DONE → ORPHAN → IDLE → UNKNOWN → KEEP)", () => {
   it("DONE wins over ORPHAN, IDLE, KEEP", () => {
@@ -250,6 +251,19 @@ describe("buildRows (joins agents + worker signals + rss, injected deps)", () =>
     expect(rows[0].ticket).toBe("CTL-1");
     expect(rows[0].phase).toBe("implement");
     expect(rows[0].classification).toBe("UNKNOWN");
+  });
+
+  it("rounds lastSeenMs to an integer (devex finding #5 — no float noise)", async () => {
+    const rows = await buildRows({
+      agents,
+      signalsByBgJobId,
+      psLines,
+      cwdExists: () => true,
+      lastSeen: () => 5531440.273925781,
+      now: 5000,
+    });
+    expect(rows[0].lastSeenMs).toBe(5531440);
+    expect(Number.isInteger(rows[0].lastSeenMs)).toBe(true);
   });
 });
 
@@ -519,9 +533,128 @@ describe("runPrune — recency protection (transcript touched within minIdleMs)"
   });
 });
 
-describe("parseArgs", () => {
+describe("runPrune — structured rows for --json (inspectable destructive plan)", () => {
+  const saved = process.env.CLAUDE_CODE_SESSION_ID;
+  beforeEach(() => {
+    process.env.CLAUDE_CODE_SESSION_ID = "11111111-aaaa-bbbb-cccc-dddddddddddd";
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = saved;
+  });
+
+  const mixedRows = () => [
+    // self → skipped self-session
+    {
+      sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd",
+      shortId: "11111111",
+      classification: "ORPHAN",
+      ticket: "CTL-1",
+      phase: "implement",
+      cwd: "/wt/CTL-1",
+    },
+    // interactive → skipped interactive
+    {
+      sessionId: "22222222-aaaa-bbbb-cccc-dddddddddddd",
+      shortId: "22222222",
+      classification: "ORPHAN",
+      kind: "interactive",
+      ticket: "CTL-2",
+      phase: "research",
+      cwd: "/wt/CTL-2",
+    },
+    // recently active → skipped recently-active
+    {
+      sessionId: "33333333-aaaa-bbbb-cccc-dddddddddddd",
+      shortId: "33333333",
+      classification: "ORPHAN",
+      kind: "background",
+      lastSeenMs: 5000,
+      ticket: "CTL-3",
+      phase: "plan",
+      cwd: "/wt/CTL-3",
+    },
+    // reapable → planned
+    {
+      sessionId: "44444444-aaaa-bbbb-cccc-dddddddddddd",
+      shortId: "44444444",
+      classification: "ORPHAN",
+      kind: "background",
+      ticket: "CTL-4",
+      phase: "verify",
+      cwd: "/wt/CTL-4",
+    },
+  ];
+
+  it("returns documented planned rows for reapable sessions", async () => {
+    const { plannedRows } = await runPrune({ rows: mixedRows(), emit: () => {} });
+    expect(plannedRows).toEqual([
+      {
+        shortId: "44444444",
+        classification: "ORPHAN",
+        ticket: "CTL-4",
+        phase: "verify",
+        cwd: "/wt/CTL-4",
+      },
+    ]);
+  });
+
+  it("records skipped rows with the correct machine reasons", async () => {
+    const { skippedRows } = await runPrune({ rows: mixedRows(), emit: () => {} });
+    expect(skippedRows).toContainEqual({ shortId: "11111111", reason: "self-session" });
+    expect(skippedRows).toContainEqual({ shortId: "22222222", reason: "interactive" });
+    expect(skippedRows).toContainEqual({ shortId: "33333333", reason: "recently-active" });
+  });
+
+  it("records not-in-category for an excluded classification", async () => {
+    const { skippedRows } = await runPrune({
+      rows: [
+        {
+          sessionId: "55555555-aaaa-bbbb-cccc-dddddddddddd",
+          shortId: "55555555",
+          classification: "KEEP",
+          kind: "background",
+          cwd: "/wt/CTL-5",
+        },
+      ],
+      emit: () => {},
+    });
+    expect(skippedRows).toContainEqual({ shortId: "55555555", reason: "not-in-category" });
+  });
+
+  it("emitted is 0 in dry-run; dryRun-derived plan still lists the row", async () => {
+    const emitted = [];
+    const result = await runPrune({
+      rows: mixedRows(),
+      emit: (e, f) => emitted.push({ e, f }),
+      // no --yes ⇒ dry-run
+    });
+    expect(result.emitted).toBe(0);
+    expect(emitted.length).toBe(0);
+    expect(result.plannedRows.length).toBe(1);
+  });
+
+  it("emits live (emitted reflects count) when --yes and not dry-run", async () => {
+    const emitted = [];
+    const result = await runPrune({
+      rows: mixedRows(),
+      emit: (e, f) => emitted.push({ e, f }),
+      yes: true,
+    });
+    expect(result.emitted).toBe(1);
+    expect(emitted.length).toBe(1);
+  });
+
+  it("suppresses human log lines when json:true (clean JSON stream)", async () => {
+    const logged = [];
+    await runPrune({ rows: mixedRows(), emit: () => {}, log: (m) => logged.push(m), json: true });
+    expect(logged.length).toBe(0);
+  });
+});
+
+describe("parseSessionArgs (strict shared parser + option mapping)", () => {
   it("parses flags and values", () => {
-    expect(parseArgs(["--json", "--ticket", "CTL-1", "--max", "20", "--yes"])).toEqual({
+    expect(parseSessionArgs(["--json", "--ticket", "CTL-1", "--max", "20", "--yes"])).toEqual({
       json: true,
       ticket: "CTL-1",
       max: 20,
@@ -529,22 +662,35 @@ describe("parseArgs", () => {
     });
   });
 
-  it("parses --dry-run and --include-idle booleans", () => {
-    expect(parseArgs(["--dry-run", "--include-idle"])).toEqual({
+  it("parses --dry-run and --include-idle booleans (mapped to camelCase)", () => {
+    expect(parseSessionArgs(["--dry-run", "--include-idle"])).toEqual({
       dryRun: true,
       includeIdle: true,
     });
   });
 
   it("parses --categories as a comma list", () => {
-    expect(parseArgs(["--categories", "DONE,ORPHAN"]).categories).toEqual(["DONE", "ORPHAN"]);
+    expect(parseSessionArgs(["--categories", "DONE,ORPHAN"]).categories).toEqual([
+      "DONE",
+      "ORPHAN",
+    ]);
   });
 
   it("parses --include-interactive boolean", () => {
-    expect(parseArgs(["--include-interactive"])).toEqual({ includeInteractive: true });
+    expect(parseSessionArgs(["--include-interactive"])).toEqual({ includeInteractive: true });
   });
 
-  it("parses --min-idle-seconds into minIdleMs (×1000)", () => {
-    expect(parseArgs(["--min-idle-seconds", "900"])).toEqual({ minIdleMs: 900000 });
+  it("maps --min-idle-seconds 60 → minIdleMs 60000 (×1000)", () => {
+    expect(parseSessionArgs(["--min-idle-seconds", "60"])).toEqual({ minIdleMs: 60000 });
+  });
+
+  it("THROWS ArgError on an unknown flag (devex finding #1 — no silent exit 0)", () => {
+    expect(() => parseSessionArgs(["--include-interactiv"])).toThrow(ArgError);
+    expect(() => parseSessionArgs(["--bogus"])).toThrow(/unknown flag: --bogus/);
+  });
+
+  it("THROWS ArgError on --min-idle-seconds abc (devex finding #2 — no silent NaN)", () => {
+    expect(() => parseSessionArgs(["--min-idle-seconds", "abc"])).toThrow(ArgError);
+    expect(() => parseSessionArgs(["--min-idle-seconds", "abc"])).toThrow(/expects a number/);
   });
 });

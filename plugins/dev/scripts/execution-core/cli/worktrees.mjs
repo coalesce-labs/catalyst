@@ -19,6 +19,7 @@ import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { emitReapIntent } from "../reap-intent.mjs";
+import { parseArgs, ArgError } from "./args.mjs";
 import { buildRows as buildSessionRows, buildLiveSessionsByWorktree } from "./sessions.mjs";
 
 const GH_BIN = process.env.CATALYST_GH_BIN || "gh";
@@ -219,10 +220,26 @@ export async function runWorktreesPrune({
   const live = yes && !dryRun;
   let planned = 0;
   let emitted = 0;
+  const plannedRows = [];
+  const skippedRows = [];
   for (const row of rows) {
-    if (planned >= max) break;
-    if (!active.has(row.classification)) continue;
+    if (planned >= max) {
+      skippedRows.push({ path: row.path, reason: "max-reached" });
+      continue;
+    }
+    if (!active.has(row.classification)) {
+      // STALE without --include-stale, and LIVE/ACTIVE, are intentionally
+      // left alone — surface the machine reason so a --json caller sees why.
+      const reason = row.classification === "STALE" ? "stale-not-included" : "not-prunable";
+      skippedRows.push({ path: row.path, reason });
+      continue;
+    }
     planned++;
+    plannedRows.push({
+      path: row.path,
+      branch: row.branch ?? null,
+      classification: row.classification,
+    });
     if (!live) {
       log(`[dry-run] would prune ${row.path} (${row.classification})`);
       continue;
@@ -244,37 +261,38 @@ export async function runWorktreesPrune({
     });
     emitted++;
   }
-  return { planned, emitted };
+  return { planned, emitted, plannedRows, skippedRows };
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
-function parseArgs(argv) {
+// The strict spec the shared parser validates against. Unknown flags and
+// non-numeric --max/--stale-days throw ArgError instead of silently reverting
+// to a default or NaN-ing a guard (devex findings #1, #2).
+const WORKTREES_SPEC = {
+  booleans: ["json", "yes", "dry-run", "include-stale"],
+  numbers: ["max", "stale-days"],
+  strings: [],
+};
+
+/**
+ * parseWorktreeArgs — strict flag parser for the worktrees subcommands.
+ * Delegates validation to the shared `parseArgs(argv, spec)` (rejects unknown
+ * flags and non-numeric numbers), then maps the kebab-case result onto the
+ * option names cmdList/runWorktreesPrune consume: --dry-run→dryRun,
+ * --include-stale→includeStale, --stale-days→staleDays.
+ *
+ * @throws {ArgError} on an unknown flag, a missing value, or a non-numeric number.
+ */
+export function parseWorktreeArgs(argv) {
+  const raw = parseArgs(argv, WORKTREES_SPEC);
   const out = {};
-  for (let i = 0; i < argv.length; i++) {
-    switch (argv[i]) {
-      case "--json":
-        out.json = true;
-        break;
-      case "--yes":
-        out.yes = true;
-        break;
-      case "--dry-run":
-        out.dryRun = true;
-        break;
-      case "--include-stale":
-        out.includeStale = true;
-        break;
-      case "--max":
-        out.max = Number(argv[++i]);
-        break;
-      case "--stale-days":
-        out.staleDays = Number(argv[++i]);
-        break;
-      default:
-        break;
-    }
-  }
+  if (raw.json !== undefined) out.json = raw.json;
+  if (raw.yes !== undefined) out.yes = raw.yes;
+  if (raw["dry-run"] !== undefined) out.dryRun = raw["dry-run"];
+  if (raw["include-stale"] !== undefined) out.includeStale = raw["include-stale"];
+  if (raw.max !== undefined) out.max = raw.max;
+  if (raw["stale-days"] !== undefined) out.staleDays = raw["stale-days"];
   return out;
 }
 
@@ -296,8 +314,22 @@ async function cmdList({ json, staleDays }) {
 
 async function cmdPrune(opts) {
   const rows = await buildRows({ staleDays: opts.staleDays ?? DEFAULT_STALE_DAYS });
-  const { planned, emitted } = await runWorktreesPrune({ ...opts, rows });
-  const verb = opts.yes && !opts.dryRun ? "pruned" : "planned (dry-run)";
+  const { planned, emitted, plannedRows, skippedRows } = await runWorktreesPrune({ ...opts, rows });
+  const isDryRun = !(opts.yes && !opts.dryRun);
+  if (opts.json) {
+    // One structured object so a headless agent can inspect the destructive
+    // plan before acting: `worktrees prune --dry-run --json | jq '.planned'`.
+    process.stdout.write(
+      `${JSON.stringify({
+        dryRun: isDryRun,
+        planned: plannedRows,
+        skipped: skippedRows,
+        emitted,
+      })}\n`
+    );
+    return 0;
+  }
+  const verb = isDryRun ? "planned (dry-run)" : "pruned";
   process.stderr.write(`worktrees prune: ${emitted || planned} ${verb}\n`);
   return 0;
 }
@@ -306,13 +338,13 @@ function usage() {
   process.stderr.write(
     "Usage: catalyst-execution-core worktrees {list|prune} [flags]\n" +
       "  list  [--json] [--stale-days N]\n" +
-      "  prune [--yes] [--dry-run] [--max N] [--include-stale]\n"
+      "  prune [--yes] [--dry-run] [--json] [--max N] [--include-stale]\n"
   );
 }
 
 async function main(argv) {
   const sub = argv[0];
-  const opts = parseArgs(argv.slice(1));
+  const opts = parseWorktreeArgs(argv.slice(1));
   switch (sub) {
     case "list":
       return cmdList(opts);
@@ -333,6 +365,17 @@ const isEntry =
 if (isEntry) {
   main(process.argv.slice(2))
     .then((code) => process.exit(code ?? 0))
+    .catch((err) => {
+      // A bad/unknown flag is operator error, not a crash: print the message
+      // and usage, exit 2. Re-throw anything else so genuine bugs still surface
+      // with a stack trace via the default uncaught-rejection path.
+      if (err instanceof ArgError) {
+        process.stderr.write(`error: ${err.message}\n`);
+        usage();
+        process.exit(2);
+      }
+      throw err;
+    })
     .catch((err) => {
       process.stderr.write(`worktrees: ${err.message}\n`);
       process.exit(1);

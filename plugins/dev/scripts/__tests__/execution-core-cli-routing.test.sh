@@ -118,6 +118,52 @@ else
 	fail "daemon bogus fails with daemon usage" "rc=$RC out=$OUT"
 fi
 
+echo "test 8 (CTL-649): '--help' exits 0 with a per-noun description + tidy --dry-run pointer"
+OUT="$("$SCRIPT" --help 2>/dev/null)"
+RC=$?
+if [ "$RC" = "0" ] &&
+	echo "$OUT" | grep -q "long-lived execution-core daemon" &&
+	echo "$OUT" | grep -q "inventory / reap leaked" &&
+	echo "$OUT" | grep -q "tidy --dry-run"; then
+	pass "--help exits 0 with rich per-noun help"
+else
+	fail "--help exits 0 with rich per-noun help" "rc=$RC out=$OUT"
+fi
+
+echo "test 8b (CTL-649): 'help'/'-h' also print the help to stdout, exit 0"
+if "$SCRIPT" help 2>/dev/null | grep -q "tidy --dry-run" && "$SCRIPT" -h 2>/dev/null | grep -q "tidy --dry-run"; then
+	pass "help / -h print help and exit 0"
+else
+	fail "help / -h print help and exit 0"
+fi
+
+echo "test 9 (CTL-649): unknown noun names the bad input and exits 1"
+OUT="$("$SCRIPT" frobnicate 2>&1)"
+RC=$?
+if [ "$RC" = "1" ] && echo "$OUT" | grep -q "unknown command: frobnicate"; then
+	pass "unknown noun names the bad input, exit 1"
+else
+	fail "unknown noun names the bad input, exit 1" "rc=$RC out=$OUT"
+fi
+
+echo "test 10 (CTL-649): 'daemon status --json' emits JSON with a running key"
+OUT="$("$SCRIPT" daemon status --json 2>/dev/null)"
+RC=$?
+if [ "$RC" = "0" ] && echo "$OUT" | grep -q '"running"'; then
+	pass "daemon status --json emits JSON with running key"
+else
+	fail "daemon status --json emits JSON with running key" "rc=$RC out=$OUT"
+fi
+
+echo "test 10b (CTL-649): top-level 'status --json' alias also emits JSON"
+OUT="$("$SCRIPT" status --json 2>/dev/null)"
+RC=$?
+if [ "$RC" = "0" ] && echo "$OUT" | grep -q '"running":false'; then
+	pass "status --json alias emits JSON (daemon down → running:false)"
+else
+	fail "status --json alias emits JSON (daemon down → running:false)" "rc=$RC out=$OUT"
+fi
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

@@ -9,7 +9,9 @@ import {
   ticketFromBranch,
   buildRows,
   runWorktreesPrune,
+  parseWorktreeArgs,
 } from "./worktrees.mjs";
+import { ArgError } from "./args.mjs";
 
 describe("parseWorktreeList (git worktree list --porcelain)", () => {
   const porcelain = [
@@ -250,5 +252,73 @@ describe("runWorktreesPrune", () => {
       max: 3,
     });
     expect(emitted.filter((e) => e.event === "pr.merged.cleanup-requested").length).toBe(3);
+  });
+});
+
+describe("runWorktreesPrune — structured rows for --json (inspectable plan)", () => {
+  const mixedRows = () => [
+    { path: "/wt/M", branch: "M", ticket: "M", classification: "MERGED" },
+    { path: "/wt/L", branch: "L", ticket: "L", classification: "LIVE" },
+    { path: "/wt/A", branch: "A", ticket: "A", classification: "ACTIVE" },
+    { path: "/wt/S", branch: "S", ticket: "S", classification: "STALE" },
+  ];
+
+  it("returns planned rows with path/branch/classification", async () => {
+    const { plannedRows } = await runWorktreesPrune({ rows: mixedRows(), emit: () => {} });
+    expect(plannedRows).toEqual([{ path: "/wt/M", branch: "M", classification: "MERGED" }]);
+  });
+
+  it("records skipped rows with machine reasons", async () => {
+    const { skippedRows } = await runWorktreesPrune({ rows: mixedRows(), emit: () => {} });
+    expect(skippedRows).toContainEqual({ path: "/wt/L", reason: "not-prunable" });
+    expect(skippedRows).toContainEqual({ path: "/wt/A", reason: "not-prunable" });
+    expect(skippedRows).toContainEqual({ path: "/wt/S", reason: "stale-not-included" });
+  });
+
+  it("reports max-reached as the skip reason once the cap is hit", async () => {
+    const rows = Array.from({ length: 3 }, (_, i) => ({
+      path: `/wt/CTL-${i}`,
+      branch: `CTL-${i}`,
+      classification: "MERGED",
+    }));
+    const { skippedRows } = await runWorktreesPrune({ rows, emit: () => {}, max: 1 });
+    expect(skippedRows).toContainEqual({ path: "/wt/CTL-1", reason: "max-reached" });
+    expect(skippedRows).toContainEqual({ path: "/wt/CTL-2", reason: "max-reached" });
+  });
+
+  it("emitted is 0 in dry-run even though rows are planned", async () => {
+    const { planned, emitted, plannedRows } = await runWorktreesPrune({
+      rows: mixedRows(),
+      emit: () => {},
+    });
+    expect(planned).toBe(1);
+    expect(emitted).toBe(0);
+    expect(plannedRows.length).toBe(1);
+  });
+});
+
+describe("parseWorktreeArgs (strict shared parser + option mapping)", () => {
+  it("maps kebab flags onto option names", () => {
+    expect(
+      parseWorktreeArgs(["--json", "--yes", "--dry-run", "--include-stale", "--max", "5", "--stale-days", "7"])
+    ).toEqual({
+      json: true,
+      yes: true,
+      dryRun: true,
+      includeStale: true,
+      max: 5,
+      staleDays: 7,
+    });
+  });
+
+  it("THROWS ArgError on an unknown flag (devex finding #1 — no silent exit 0)", () => {
+    expect(() => parseWorktreeArgs(["--include-stal"])).toThrow(ArgError);
+    expect(() => parseWorktreeArgs(["--bogus"])).toThrow(/unknown flag: --bogus/);
+  });
+
+  it("THROWS ArgError on --stale-days abc (devex finding #2 — no silent NaN)", () => {
+    expect(() => parseWorktreeArgs(["--stale-days", "abc"])).toThrow(ArgError);
+    expect(() => parseWorktreeArgs(["--stale-days", "abc"])).toThrow(/expects a number/);
+    expect(() => parseWorktreeArgs(["--max", "abc"])).toThrow(ArgError);
   });
 });

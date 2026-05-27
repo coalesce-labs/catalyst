@@ -14,7 +14,10 @@
 
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { parseArgs, ArgError } from "./args.mjs";
 import { ghPrList } from "./worktrees.mjs";
+
+const SCOPES = new Set(["local", "remote", "both"]);
 
 const DEFAULT_STALE_DAYS = Number(process.env.CATALYST_BRANCH_STALE_DAYS) || 30;
 const ABANDONED_DEFAULT = ["MERGED_LOCAL", "MERGED_REMOTE"];
@@ -213,9 +216,22 @@ export async function runBranchesPrune({
 
   let planned = 0;
   let deleted = 0;
+  const plannedRows = [];
+  const skippedRows = [];
   for (const row of rows) {
-    if (planned >= max) break;
-    if (!allowed.has(row.classification)) continue;
+    if (planned >= max) {
+      skippedRows.push({ name: row.name, reason: "max-reached" });
+      continue;
+    }
+    if (!allowed.has(row.classification)) {
+      // Unmerged classes without --force, plus WORKTREE_BACKED/ACTIVE, are
+      // intentionally untouched — surface the machine reason for --json.
+      const reason = FORCE_CLASSES.includes(row.classification)
+        ? "force-required"
+        : "not-prunable";
+      skippedRows.push({ name: row.name, reason });
+      continue;
+    }
 
     // Which side does this class delete from?
     const side =
@@ -227,8 +243,12 @@ export async function runBranchesPrune({
     const sides = side ? [side] : [row.scope === "remote" ? "remote" : "local"];
 
     for (const s of sides) {
-      if (scope !== "both" && scope !== s) continue;
+      if (scope !== "both" && scope !== s) {
+        skippedRows.push({ name: row.name, reason: "out-of-scope" });
+        continue;
+      }
       planned++;
+      plannedRows.push({ name: row.name, scope: s, classification: row.classification });
       if (!live) {
         log(`[dry-run] would delete ${s} branch ${row.name} (${row.classification})`);
         continue;
@@ -238,40 +258,46 @@ export async function runBranchesPrune({
       deleted++;
     }
   }
-  return { planned, deleted };
+  return { planned, deleted, plannedRows, skippedRows };
 }
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
-function parseArgs(argv) {
+// The strict spec the shared parser validates against. Unknown flags and
+// non-numeric --max/--stale-days throw ArgError instead of silently reverting
+// to a default or NaN-ing a guard (devex findings #1, #2).
+const BRANCHES_SPEC = {
+  booleans: ["json", "yes", "dry-run", "force"],
+  numbers: ["max", "stale-days"],
+  strings: ["scope"],
+};
+
+/**
+ * parseBranchArgs — strict flag parser for the branches subcommands. Delegates
+ * validation to the shared `parseArgs(argv, spec)` (rejects unknown flags and
+ * non-numeric numbers), then maps the kebab-case result onto the option names
+ * cmdList/runBranchesPrune consume: --dry-run→dryRun, --stale-days→staleDays.
+ * Also validates --scope ∈ {local,remote,both}; an out-of-range value would
+ * silently neuter the prune side-filter, so it throws ArgError.
+ *
+ * @throws {ArgError} on an unknown flag, a missing value, a non-numeric number,
+ *                    or a --scope outside {local,remote,both}.
+ */
+export function parseBranchArgs(argv) {
+  const raw = parseArgs(argv, BRANCHES_SPEC);
   const out = {};
-  for (let i = 0; i < argv.length; i++) {
-    switch (argv[i]) {
-      case "--json":
-        out.json = true;
-        break;
-      case "--yes":
-        out.yes = true;
-        break;
-      case "--dry-run":
-        out.dryRun = true;
-        break;
-      case "--force":
-        out.force = true;
-        break;
-      case "--scope":
-        out.scope = argv[++i];
-        break;
-      case "--max":
-        out.max = Number(argv[++i]);
-        break;
-      case "--stale-days":
-        out.staleDays = Number(argv[++i]);
-        break;
-      default:
-        break;
+  if (raw.json !== undefined) out.json = raw.json;
+  if (raw.yes !== undefined) out.yes = raw.yes;
+  if (raw["dry-run"] !== undefined) out.dryRun = raw["dry-run"];
+  if (raw.force !== undefined) out.force = raw.force;
+  if (raw.scope !== undefined) {
+    if (!SCOPES.has(raw.scope)) {
+      throw new ArgError(`flag --scope expects one of local|remote|both, got '${raw.scope}'`);
     }
+    out.scope = raw.scope;
   }
+  if (raw.max !== undefined) out.max = raw.max;
+  if (raw["stale-days"] !== undefined) out.staleDays = raw["stale-days"];
   return out;
 }
 
@@ -292,8 +318,22 @@ async function cmdList({ json, staleDays }) {
 
 async function cmdPrune(opts) {
   const rows = await buildRows({ staleDays: opts.staleDays ?? DEFAULT_STALE_DAYS });
-  const { planned, deleted } = await runBranchesPrune({ ...opts, rows });
-  const verb = opts.yes && !opts.dryRun ? "deleted" : "planned (dry-run)";
+  const { planned, deleted, plannedRows, skippedRows } = await runBranchesPrune({ ...opts, rows });
+  const isDryRun = !(opts.yes && !opts.dryRun);
+  if (opts.json) {
+    // One structured object so a headless agent can inspect the destructive
+    // plan before acting: `branches prune --dry-run --json | jq '.planned'`.
+    process.stdout.write(
+      `${JSON.stringify({
+        dryRun: isDryRun,
+        planned: plannedRows,
+        skipped: skippedRows,
+        deleted,
+      })}\n`
+    );
+    return 0;
+  }
+  const verb = isDryRun ? "planned (dry-run)" : "deleted";
   process.stderr.write(`branches prune: ${deleted || planned} ${verb}\n`);
   return 0;
 }
@@ -302,13 +342,13 @@ function usage() {
   process.stderr.write(
     "Usage: catalyst-execution-core branches {list|prune} [flags]\n" +
       "  list  [--json] [--scope local|remote|both] [--stale-days N]\n" +
-      "  prune [--yes] [--dry-run] [--scope ...] [--force] [--max N]\n"
+      "  prune [--yes] [--dry-run] [--json] [--scope ...] [--force] [--max N]\n"
   );
 }
 
 async function main(argv) {
   const sub = argv[0];
-  const opts = parseArgs(argv.slice(1));
+  const opts = parseBranchArgs(argv.slice(1));
   switch (sub) {
     case "list":
       return cmdList(opts);
@@ -329,6 +369,17 @@ const isEntry =
 if (isEntry) {
   main(process.argv.slice(2))
     .then((code) => process.exit(code ?? 0))
+    .catch((err) => {
+      // A bad/unknown flag is operator error, not a crash: print the message
+      // and usage, exit 2. Re-throw anything else so genuine bugs still surface
+      // with a stack trace via the default uncaught-rejection path.
+      if (err instanceof ArgError) {
+        process.stderr.write(`error: ${err.message}\n`);
+        usage();
+        process.exit(2);
+      }
+      throw err;
+    })
     .catch((err) => {
       process.stderr.write(`branches: ${err.message}\n`);
       process.exit(1);

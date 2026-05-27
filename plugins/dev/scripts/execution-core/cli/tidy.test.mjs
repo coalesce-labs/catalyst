@@ -4,7 +4,8 @@
 // orphans (the Component-5 leak, inverted). All four steps are injected.
 
 import { describe, it, expect } from "bun:test";
-import { runTidy } from "./tidy.mjs";
+import { runTidy, parseTidyArgs } from "./tidy.mjs";
+import { ArgError } from "./args.mjs";
 
 describe("runTidy", () => {
   it("invokes sessions → worktrees → branches → git-wt-prune in that exact order", async () => {
@@ -152,5 +153,110 @@ describe("runTidy", () => {
     });
     expect(result.completed).toEqual(["sessions", "worktrees", "branches", "git-wt-prune"]);
     expect(result.failedAt).toBeNull();
+  });
+
+  it("propagates --json to every sub-prune (so they return rows, not print)", async () => {
+    const seen = {};
+    await runTidy({
+      cmdSessions: (opts) => {
+        seen.s = opts.json;
+      },
+      cmdWorktrees: (opts) => {
+        seen.w = opts.json;
+      },
+      cmdBranches: (opts) => {
+        seen.b = opts.json;
+      },
+      cmdGitWorktreePrune: () => {},
+      json: true,
+      dryRun: true,
+    });
+    expect(seen).toEqual({ s: true, w: true, b: true });
+  });
+});
+
+describe("parseTidyArgs (strict)", () => {
+  it("maps kebab flags onto the sub-prune option names", () => {
+    const opts = parseTidyArgs([
+      "--json",
+      "--dry-run",
+      "--include-idle",
+      "--include-interactive",
+      "--include-stale",
+      "--force",
+      "--max",
+      "7",
+      "--min-idle-seconds",
+      "60",
+      "--stale-days",
+      "3",
+    ]);
+    expect(opts).toEqual({
+      json: true,
+      dryRun: true,
+      includeIdle: true,
+      includeInteractive: true,
+      includeStale: true,
+      force: true,
+      max: 7,
+      minIdleMs: 60000,
+      staleDays: 3,
+    });
+  });
+
+  it("REJECTS an unknown flag (finding #1)", () => {
+    expect(() => parseTidyArgs(["--include-idl"])).toThrow(ArgError);
+    expect(() => parseTidyArgs(["--bogus"])).toThrow(/unknown flag: --bogus/);
+  });
+
+  it("REJECTS a non-numeric number flag (finding #2)", () => {
+    expect(() => parseTidyArgs(["--max", "abc"])).toThrow(/--max expects a number/);
+    expect(() => parseTidyArgs(["--min-idle-seconds", "NaN"])).toThrow(ArgError);
+  });
+});
+
+describe("runTidy --json shape", () => {
+  it("returns { dryRun-able, steps, aborted:false, abortedAt:null } on success", async () => {
+    const result = await runTidy({
+      cmdSessions: () => ({ planned: 1, emitted: 0, plannedRows: [{ shortId: "abc" }], skippedRows: [] }),
+      cmdWorktrees: () => ({ planned: 0, emitted: 0, plannedRows: [], skippedRows: [] }),
+      cmdBranches: () => ({ planned: 0, deleted: 0, plannedRows: [], skippedRows: [] }),
+      cmdGitWorktreePrune: () => {},
+      json: true,
+      yes: true,
+    });
+    expect(result.aborted).toBe(false);
+    expect(result.abortedAt).toBeNull();
+    expect(result.steps.map((s) => s.step)).toEqual([
+      "sessions",
+      "worktrees",
+      "branches",
+      "git-worktree-prune",
+    ]);
+    // Each prune step carries its structured plannedRows/skippedRows through.
+    expect(result.steps[0].plannedRows).toEqual([{ shortId: "abc" }]);
+    expect(result.steps[0].skippedRows).toEqual([]);
+  });
+
+  it("reflects an injected step failure via aborted / abortedAt (+ remaining steps skipped)", async () => {
+    const result = await runTidy({
+      cmdSessions: () => ({ planned: 0, emitted: 0, plannedRows: [], skippedRows: [] }),
+      cmdWorktrees: () => {
+        throw new Error("worktree boom");
+      },
+      cmdBranches: () => {
+        throw new Error("should not run");
+      },
+      cmdGitWorktreePrune: () => {
+        throw new Error("should not run");
+      },
+      json: true,
+      yes: true,
+      log: () => {},
+    });
+    expect(result.aborted).toBe(true);
+    expect(result.abortedAt).toBe("worktrees");
+    expect(result.steps.map((s) => s.step)).toEqual(["sessions", "worktrees"]);
+    expect(result.steps[1].error).toBe("worktree boom");
   });
 });

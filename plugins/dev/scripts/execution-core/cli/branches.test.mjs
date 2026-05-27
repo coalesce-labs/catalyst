@@ -3,7 +3,8 @@
 // directly (git branch -D / git push origin --delete), NOT through the reaper.
 
 import { describe, it, expect } from "bun:test";
-import { classify, buildRows, runBranchesPrune } from "./branches.mjs";
+import { classify, buildRows, runBranchesPrune, parseBranchArgs } from "./branches.mjs";
+import { ArgError } from "./args.mjs";
 
 describe("branches classify", () => {
   it("WORKTREE_BACKED when checked out in some worktree", () => {
@@ -192,5 +193,116 @@ describe("runBranchesPrune", () => {
     });
     expect(forced).toContainEqual(["local", "CTL-7"]);
     expect(forced).toContainEqual(["remote", "CTL-8"]);
+  });
+});
+
+describe("runBranchesPrune — structured rows for --json (inspectable plan)", () => {
+  const mixedRows = () => [
+    { name: "CTL-1", scope: "local", classification: "MERGED_LOCAL", mergedIntoMain: true },
+    { name: "CTL-2", scope: "remote", classification: "MERGED_REMOTE" },
+    { name: "CTL-9", scope: "local", classification: "ORPHAN_LOCAL", mergedIntoMain: false },
+    { name: "main", scope: "both", classification: "WORKTREE_BACKED" },
+  ];
+
+  it("returns planned rows with name/scope/classification", async () => {
+    const { plannedRows } = await runBranchesPrune({
+      rows: mixedRows(),
+      deleteLocalBranch: () => {},
+      deleteRemoteBranch: () => {},
+    });
+    expect(plannedRows).toContainEqual({
+      name: "CTL-1",
+      scope: "local",
+      classification: "MERGED_LOCAL",
+    });
+    expect(plannedRows).toContainEqual({
+      name: "CTL-2",
+      scope: "remote",
+      classification: "MERGED_REMOTE",
+    });
+    // ORPHAN_LOCAL needs --force → not planned.
+    expect(plannedRows.find((r) => r.name === "CTL-9")).toBeUndefined();
+  });
+
+  it("records skipped rows with machine reasons", async () => {
+    const { skippedRows } = await runBranchesPrune({
+      rows: mixedRows(),
+      deleteLocalBranch: () => {},
+      deleteRemoteBranch: () => {},
+    });
+    expect(skippedRows).toContainEqual({ name: "CTL-9", reason: "force-required" });
+    expect(skippedRows).toContainEqual({ name: "main", reason: "not-prunable" });
+  });
+
+  it("records out-of-scope skips", async () => {
+    const { skippedRows } = await runBranchesPrune({
+      rows: [
+        { name: "CTL-1", scope: "local", classification: "MERGED_LOCAL", mergedIntoMain: true },
+      ],
+      deleteLocalBranch: () => {},
+      deleteRemoteBranch: () => {},
+      scope: "remote",
+    });
+    expect(skippedRows).toContainEqual({ name: "CTL-1", reason: "out-of-scope" });
+  });
+
+  it("deleted is 0 in dry-run even though rows are planned", async () => {
+    const { planned, deleted, plannedRows } = await runBranchesPrune({
+      rows: mixedRows(),
+      deleteLocalBranch: () => {},
+      deleteRemoteBranch: () => {},
+    });
+    expect(planned).toBe(2);
+    expect(deleted).toBe(0);
+    expect(plannedRows.length).toBe(2);
+  });
+});
+
+describe("parseBranchArgs (strict shared parser + option mapping)", () => {
+  it("maps kebab flags onto option names", () => {
+    expect(
+      parseBranchArgs([
+        "--json",
+        "--yes",
+        "--dry-run",
+        "--force",
+        "--scope",
+        "remote",
+        "--max",
+        "5",
+        "--stale-days",
+        "7",
+      ])
+    ).toEqual({
+      json: true,
+      yes: true,
+      dryRun: true,
+      force: true,
+      scope: "remote",
+      max: 5,
+      staleDays: 7,
+    });
+  });
+
+  it("THROWS ArgError on an unknown flag (devex finding #1 — no silent exit 0)", () => {
+    expect(() => parseBranchArgs(["--forc"])).toThrow(ArgError);
+    expect(() => parseBranchArgs(["--bogus"])).toThrow(/unknown flag: --bogus/);
+  });
+
+  it("THROWS ArgError on --stale-days abc (devex finding #2 — no silent NaN)", () => {
+    expect(() => parseBranchArgs(["--stale-days", "abc"])).toThrow(ArgError);
+    expect(() => parseBranchArgs(["--stale-days", "abc"])).toThrow(/expects a number/);
+    expect(() => parseBranchArgs(["--max", "abc"])).toThrow(ArgError);
+  });
+
+  it("THROWS ArgError on --scope sideways (out-of-range scope)", () => {
+    expect(() => parseBranchArgs(["--scope", "sideways"])).toThrow(ArgError);
+    expect(() => parseBranchArgs(["--scope", "sideways"])).toThrow(/local\|remote\|both/);
+  });
+
+  it("accepts each valid scope", () => {
+    expect(parseBranchArgs(["--scope", "local"]).scope).toBe("local");
+    expect(parseBranchArgs(["--scope", "remote"]).scope).toBe("remote");
+    expect(parseBranchArgs(["--scope", "both"]).scope).toBe("both");
   });
 });
