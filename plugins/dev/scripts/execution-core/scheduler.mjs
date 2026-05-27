@@ -30,6 +30,7 @@ import { analyzeDependencyGraph, referencedBlockerIds } from "../lib/dependency-
 // enters at NEW_WORK_ENTRY_PHASE ("research"), see schedulerTick.
 import {
   PHASES,
+  NEXT_PHASE,
   transition,
   isTerminal,
   REMEDIATE_PHASE,
@@ -46,6 +47,8 @@ import { fetchTicketState } from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
 import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
 import { readWorkerSignals } from "./signal-reader.mjs";
+import { countBackgroundAgents } from "./claude-agents.mjs";
+import { emitReapIntent } from "./reap-intent.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
 // is the real recovery-module function; tests inject a fake. See
 // reclaimDeadWorkIfPossible in recovery.mjs for the decision tree.
@@ -176,6 +179,55 @@ export function readMaxParallel(orchDir) {
 // computeFreeSlots — never negative (an over-subscribed run yields 0).
 export function computeFreeSlots(maxParallel, inFlightCount) {
   return Math.max(0, maxParallel - inFlightCount);
+}
+
+// readPhaseSignalRaw — the full parsed phase-<phase>.json for one ticket, or
+// null. readPhaseSignals returns only {phase: status}; the predecessor reap
+// needs the worker's bg_job_id, which lives in the raw signal.
+function readPhaseSignalRaw(orchDir, ticket, phase) {
+  try {
+    return JSON.parse(
+      readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"),
+    );
+  } catch {
+    return null;
+  }
+}
+
+// predecessorPhaseOf — the completed phase whose happy-path successor is `next`
+// (i.e. the worker that just finished and triggered this advance), or null.
+// Uses the NEXT_PHASE inversion so it is unambiguous on every linear edge; the
+// router-only remediate detour (no NEXT_PHASE entry) yields null and is left to
+// the periodic orphan reaper as a backstop.
+export function predecessorPhaseOf(signals, next) {
+  for (const [phase, status] of Object.entries(signals ?? {})) {
+    if (status === "done" && NEXT_PHASE[phase] === next) return phase;
+  }
+  return null;
+}
+
+// emitPredecessorReap — CTL-657 Bug 2: stop the predecessor worker now that its
+// successor is dispatched. orchestrate-phase-advance already does this on the
+// shell advance path (CTL-567), but the daemon scheduler's dispatchTicket path
+// bypassed that emit, so on a normal scheduler-driven phase switch the just-
+// finished worker was never nominated for stopping (only 1 predecessor reap
+// ever emitted across 12+ advances). Fire-and-forget — the reaper issues the
+// `claude stop`. No-op when the predecessor has no recorded bg_job_id (e.g. the
+// new-work entry phase, or a unit-test signal with no bg_job_id) so it never
+// shells out or appends to the event log spuriously.
+function emitPredecessorReap(orchDir, ticket, signals, next) {
+  const pred = predecessorPhaseOf(signals, next);
+  if (!pred) return;
+  const raw = readPhaseSignalRaw(orchDir, ticket, pred);
+  const bgJobId = raw?.bg_job_id;
+  if (!bgJobId) return;
+  emitReapIntent("phase.predecessor.reap-requested", {
+    ticket,
+    phase: pred,
+    bgJobId,
+    worktreePath: raw?.worktreePath,
+    reason: "ctl-657-scheduler-advance",
+  }).catch(() => {});
 }
 
 // A blocker fetch that failed (or any non-terminal hydrated state) holds the
@@ -598,6 +650,14 @@ export function schedulerTick(
     reclaimDeadWork = defaultReclaimDeadWork,
     now = Date.now, // CTL-624: injectable clock for the dispatch cool-down
     cache, // CTL-634: opt-in out-of-set blocker state cache
+    // CTL-657: concurrency = the real count of live `background` claude agents,
+    // NOT a scan of workers/ + signal files. A leaked-but-running worker freed
+    // its slot on paper (signal flipped terminal while the process lived on) and
+    // per-ticket duplicates went uncounted — so the daemon over-dispatched into
+    // the 28GB pileup. Querying `claude agents` makes a still-alive worker hold
+    // its slot. Interactive sessions are excluded (unlimited). Injectable for
+    // tests so a unit tick need not shell out to `claude`.
+    liveBackgroundCount = () => countBackgroundAgents(),
   } = {}
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -688,6 +748,8 @@ export function schedulerTick(
     if (r.code === 0) {
       clearDispatchCooldown(orchDir, ticket, next); // CTL-624: success clears any prior cool-down
       advanced.push({ ticket, phase: next });
+      // CTL-657: stop the predecessor worker now that its successor is live.
+      emitPredecessorReap(orchDir, ticket, signals, next);
       // CTL-558: write the dispatched phase's mapped Linear status. Idempotent
       // (linear-transition.sh read-compares first); never aborts the tick.
       safeWrite(() => writeStatus.applyPhaseStatus({ ticket, phase: next }), {
@@ -710,7 +772,10 @@ export function schedulerTick(
   // object is discarded by runTick, so a metric must be logged, not returned).
   if (cache) log.info(cache.stats(), "scheduler: cache stats");
   const ready = computeReadyTickets(eligible, { blockerStates });
-  const inFlightCount = listInFlightTickets(orchDir).size; // recomputed post-sweep
+  // CTL-657: the in-flight count is the live `background` claude-agents count,
+  // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal
+  // but process alive) still consumes a slot; a duplicate spawn is counted.
+  const inFlightCount = liveBackgroundCount();
   const freeSlots = computeFreeSlots(readMaxParallel(orchDir), inFlightCount);
   const selected = selectDispatchable(ready, listStartedTickets(orchDir), freeSlots);
 

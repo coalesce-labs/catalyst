@@ -29,6 +29,8 @@ import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-read
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
+import { isBgJobAlive, claudeStop } from "./claude-agents.mjs";
+import { shortIdFromSessionId } from "./claude-ids.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { WORK_DONE_PROBES, hasProbe } from "./work-done-probes.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
@@ -388,72 +390,45 @@ function defaultApplyStalledLabel({ orchDir, ticket }) {
   return labelOnce(orchDir, ticket, "needs-human", { applyLabel: defaultApplyLabel });
 }
 
-// defaultKillBgJob — best-effort `kill -9` of a lingering bg pid. Gated by the
-// caller on KILL_RECENT_ACTIVITY_MS so we never SIGKILL a worker whose
-// state.json was touched recently. The bg-job pid lives in
-// ~/.claude/jobs/<id>/pid (Claude Code job-state convention); a missing pid
-// file is the normal case for a reaped job. We verify the pid still maps to a
-// `claude` process before signalling to defensively avoid SIGKILL'ing a
-// recycled pid (~5+ minutes after the worker exited the PID space is fair
-// game for unrelated processes).
-//
-// `spawn` and `jobsRoot` are injectable for tests; production defaults call
-// the real spawnSync against the real ~/.claude/jobs.
-export function defaultKillBgJob(
-  { bgJobId },
-  { spawn = spawnSync, jobsRoot = getJobsRoot } = {},
-) {
+// defaultKillBgJob — terminate a dead/abandoned bg worker (CTL-657). Pre-CTL-657
+// this SIGKILL'd a pid read from ~/.claude/jobs/<id>/pid — a guaranteed no-op on
+// Claude Code 2.1.152 (no per-job pid file, so `existsSync(pidPath)` was always
+// false). Now it issues `claude stop <shortId>`, the primitive that actually
+// deregisters the session and frees its RAM. Best-effort; never throws. A
+// malformed id is a no-op (and never shells out — keeps the "bg-9" revive
+// fixtures deterministic). `stop` is injectable for tests; the production
+// default calls the real `claude stop`.
+export function defaultKillBgJob({ bgJobId }, { stop = claudeStop } = {}) {
   if (!bgJobId) return;
+  let shortId;
   try {
-    const pidPath = join(jobsRoot(), bgJobId, "pid");
-    if (!existsSync(pidPath)) return;
-    const pid = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
-    if (!Number.isFinite(pid) || pid <= 1) return;
-    // Verify the pid still belongs to a claude process before SIGKILL'ing.
-    // `ps -p <pid> -o comm=` prints just the command; exit 1 means the pid
-    // is gone. On any verification doubt, skip the kill (best-effort).
-    const ps = spawn("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
-    if (ps.status !== 0 || !(ps.stdout || "").toLowerCase().includes("claude")) {
-      log.info(
-        { bgJobId, pid, comm: (ps.stdout || "").trim() },
-        "revive: defensive kill skipped — pid does not belong to a claude process",
-      );
-      return;
-    }
-    const k = spawn("kill", ["-9", String(pid)], { encoding: "utf8" });
-    log.info(
-      { bgJobId, pid, code: k.status },
-      "revive: defensive kill issued",
-    );
-  } catch (err) {
-    log.warn({ bgJobId, err: err.message }, "revive: defensive kill failed");
+    shortId = shortIdFromSessionId(bgJobId);
+  } catch {
+    return;
+  }
+  const res = stop(shortId);
+  if (res?.ok) {
+    log.info({ bgJobId, shortId }, "revive: claude stop issued for dead bg worker");
+  } else {
+    log.warn({ bgJobId, shortId, err: res?.error }, "revive: claude stop failed");
   }
 }
 
-// defaultPidAlive — positive keep-alive check (CTL-610). Returns true iff the
-// bg job's recorded pid is still a live `claude` process. This is the inverse
-// use of the same primitive defaultKillBgJob uses to gate its SIGKILL: read
-// ~/.claude/jobs/<id>/pid, verify via `ps -p <pid> -o comm=` that the pid maps
-// to a claude process. It signals "alive, do not revive", never kills.
-// Best-effort: any doubt (missing pid file, unreadable, recycled pid, falsy
-// id, throwing seam) returns false so the caller falls through to its existing
-// revive path. Critically, the production seam returning false on a missing
-// pid file keeps every pre-CTL-610 revive test (which uses bgJobId "bg-9"
-// with no real pid file) green when the alive-quiet guard goes live.
-// `spawn` and `jobsRoot` are injectable for tests; production defaults call
-// the real spawnSync against the real ~/.claude/jobs.
-export function defaultPidAlive(
-  { bgJobId },
-  { spawn = spawnSync, jobsRoot = getJobsRoot } = {},
-) {
-  if (!bgJobId) return false;
+// defaultPidAlive — positive keep-alive check (CTL-610, rebuilt for CTL-657).
+// Returns true iff the bg worker is still a live `claude agents` session. It
+// signals "alive, do not revive", never kills. Pre-CTL-657 this read
+// ~/.claude/jobs/<id>/pid — absent on CC 2.1.152, so it ALWAYS returned false
+// and the daemon false-dead-revived every live worker (the 79-event revive
+// storm this ticket exists to kill). Now liveness comes from `claude agents`:
+// a crashed worker drops off the list, a live one (busy or idle between turns)
+// stays. Best-effort: any doubt (falsy/malformed id, failed `claude agents`
+// read) returns false so the caller falls through to its existing revive path.
+// A non-short-id ("bg-9" test fixture) returns false WITHOUT shelling out, so
+// every pre-CTL-610 revive test stays green unchanged. `isAlive` is injectable
+// for tests; the production default queries the real `claude agents`.
+export function defaultPidAlive({ bgJobId }, { isAlive = isBgJobAlive } = {}) {
   try {
-    const pidPath = join(jobsRoot(), bgJobId, "pid");
-    if (!existsSync(pidPath)) return false;
-    const pid = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
-    if (!Number.isFinite(pid) || pid <= 1) return false;
-    const ps = spawn("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" });
-    return ps.status === 0 && (ps.stdout || "").toLowerCase().includes("claude");
+    return isAlive(bgJobId);
   } catch {
     return false;
   }
@@ -929,15 +904,15 @@ export function reclaimDeadWorkIfPossible(
     return "revive-suppressed";
   }
 
-  // Defensive kill: if state.json has been quiet long enough we're confident
-  // the bg process is gone, so a SIGKILL on its pid is harmless and prevents
-  // a zombie holding a worktree lock. The kill is best-effort and pid-file-gated
-  // — if no pid file exists (the normal post-exit state) it's a no-op.
+  // Defensive stop: if state.json has been quiet long enough we're confident
+  // the worker is abandoned, so we stop it to free RAM and release any worktree
+  // lock. CTL-657: killBgJob now issues `claude stop <shortId>` (the pre-CTL-657
+  // pid-file SIGKILL was a guaranteed no-op on CC 2.1.152 — no per-job pid file).
   //
   // CTL-649: also emit a reap-intent so the daemon reaper has authoritative
-  // visibility and can issue `claude stop` on the supervisor entry (kill -9
-  // hits the OS pid but the claude supervisor lingers as idle/dead-pid). The
-  // inline kill stays so behaviour cannot regress.
+  // visibility and stops the same session via its own `claude stop`. The inline
+  // stop stays so a standalone reconcile (no reaper consuming the log) cannot
+  // regress to leaking the worker.
   if (
     prevStateJsonMtime !== null &&
     now() - prevStateJsonMtime > KILL_RECENT_ACTIVITY_MS &&
