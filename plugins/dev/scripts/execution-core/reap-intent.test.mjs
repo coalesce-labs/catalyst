@@ -46,12 +46,43 @@ describe("emitReapIntent", () => {
     await expect(emitReapIntent("bogus.event", {})).rejects.toThrow(/unknown/);
   });
 
-  it("exposes REAP_INTENT_TYPES with 8 entries", async () => {
+  it("exposes REAP_INTENT_TYPES with 10 entries", async () => {
     const { REAP_INTENT_TYPES } = await freshModule();
-    expect(REAP_INTENT_TYPES.length).toBe(8);
+    expect(REAP_INTENT_TYPES.length).toBe(10);
     expect(REAP_INTENT_TYPES).toContain("phase.yield.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("pr.merged.cleanup-requested");
     expect(REAP_INTENT_TYPES).toContain("orphans.reap-requested");
+  });
+
+  it("accepts phase.reclaim.reap-requested (CTL-661 hole #3)", async () => {
+    const { emitReapIntent } = await freshModule();
+    const ok = await emitReapIntent("phase.reclaim.reap-requested", {
+      ticket: "CTL-661",
+      phase: "implement",
+      bgJobId: "abc12345",
+      reason: "ctl-661-reclaim-happy-path",
+    });
+    expect(ok).toBe(true);
+    const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
+    expect(last.event).toBe("phase.reclaim.reap-requested");
+    expect(last.bg_job_id).toBe("abc12345");
+  });
+
+  it("accepts phase.reconcile.reap-requested with canonical/dominant fields (CTL-661 hole #4)", async () => {
+    const { emitReapIntent } = await freshModule();
+    const ok = await emitReapIntent("phase.reconcile.reap-requested", {
+      ticket: "CTL-661",
+      phase: "verify",
+      bgJobId: "bbbb2222",
+      canonicalBgJobId: "aaaa1111",
+      dominantPhase: "verify",
+      reason: "ctl-661-one-worker-per-ticket",
+    });
+    expect(ok).toBe(true);
+    const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
+    expect(last.event).toBe("phase.reconcile.reap-requested");
+    expect(last.canonical_bg_job_id).toBe("aaaa1111");
+    expect(last.dominant_phase).toBe("verify");
   });
 
   it("camelCase keys map to snake_case JSON fields", async () => {

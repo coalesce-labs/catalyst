@@ -29,7 +29,7 @@ import { phaseIndex } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
-import { emitReapIntent } from "./reap-intent.mjs";
+import { emitReapIntent as emitReapIntentDefault } from "./reap-intent.mjs";
 import { isBgJobAlive, claudeStop } from "./claude-agents.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
@@ -890,6 +890,11 @@ export function reclaimDeadWorkIfPossible(
     // bg_job_id, no state.json, no .jsonl linkScanPath) preserves the pre-CTL-658
     // fresh-dispatch behaviour exactly.
     resolveSession = resolvePhaseSessionId,
+    // CTL-661 — reap-intent emitter seam. Defaults to the module producer; the
+    // supersede guard, the branch-(B) reclaim reap, and the branch-(C) revive
+    // reap all route through this so a test can inject a spy. Aliased default
+    // (emitReapIntentDefault) keeps the production wiring identical.
+    emitReapIntent = emitReapIntentDefault,
     now = Date.now,
     staleMs = STALE_MS,
   } = {},
@@ -1013,6 +1018,22 @@ export function reclaimDeadWorkIfPossible(
   //     can locate their artifact; implementProbe ignores the extra key.
   const probe = probes[phase];
   if (probe({ ticket, repoRoot, orchDir })) {
+    // CTL-661 hole #3: a worker reaching branch (B) has already passed the
+    // hoisted alive-quiet gate, so it is either pid-dead (nothing to stop) or
+    // live-but-past-hung-cutoff (genuinely hung → must be stopped). Emit a
+    // fire-and-forget reap-intent BEFORE emitComplete so the reaper stops any
+    // lingering session rather than letting a hung-but-live worker keep running
+    // past its own reclaim. No-op when no bg_job_id was recorded — mirrors the
+    // CTL-606 supersede-guard guard above.
+    if (prevBgJobId) {
+      emitReapIntent("phase.reclaim.reap-requested", {
+        ticket,
+        phase,
+        bgJobId: prevBgJobId,
+        worktreePath: signal.raw?.worktreePath,
+        reason: "ctl-661-reclaim-happy-path",
+      }).catch(() => {});
+    }
     appendEvent({ phase, ticket, orchId });
     const r = emitComplete({ orchDir, signal });
     if (r.code !== 0) {

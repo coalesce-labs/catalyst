@@ -15,6 +15,12 @@ export const REAP_INTENT_TYPES = Object.freeze([
   "phase.supersede.reap-requested",
   "phase.revive.reap-requested",
   "phase.abort.reap-requested",
+  // CTL-661 hole #3: the reclaim happy path (recovery.mjs branch (B)) nominates
+  // the (possibly genuinely-hung) worker it is reclaiming for a stop.
+  "phase.reclaim.reap-requested",
+  // CTL-661 hole #4: the per-ticket reconciliation sweep (reaper.mjs
+  // reconcileTicketWorkers) reaps every non-canonical live bg session.
+  "phase.reconcile.reap-requested",
   "worktree.presweep.reap-requested",
   "pr.merged.cleanup-requested",
   "orphans.reap-requested",

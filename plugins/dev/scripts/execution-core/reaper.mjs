@@ -100,6 +100,12 @@ export class Reaper {
         case "phase.supersede.reap-requested":
         case "phase.revive.reap-requested":
         case "phase.abort.reap-requested":
+        // CTL-661 hole #3: single-target stop of a reclaimed (genuinely-hung)
+        // worker on the recovery happy path. Busy-OK, like the others.
+        case "phase.reclaim.reap-requested":
+        // CTL-661 hole #4: single-target stop of a non-canonical live bg session
+        // identified by the per-ticket reconciliation sweep.
+        case "phase.reconcile.reap-requested":
           await this._handleBgReap(event);
           break;
         case "worktree.presweep.reap-requested":

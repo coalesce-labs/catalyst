@@ -732,6 +732,80 @@ describe("reclaimDeadWorkIfPossible", () => {
   });
 });
 
+// --- CTL-661 Phase 2: reap-intent on the reclaim happy path (B) -------------
+//
+// When a stale-by-mtime worker reaches branch (B) (probe says work IS done) it
+// has already cleared the hoisted alive-quiet gate, so it is either pid-dead or
+// genuinely hung. Before emitComplete, the reclaim emits a fire-and-forget
+// phase.reclaim.reap-requested so the reaper stops any lingering session.
+describe("reclaimDeadWorkIfPossible — CTL-661 reclaim happy-path reap-intent", () => {
+  const orch = "/orch";
+
+  // A stale (6-min-quiet) running implement signal that reaches branch (B):
+  // probe true, pidAlive false (so the alive-quiet gate does NOT suppress).
+  function staleReclaimable({ bgJobId = "job-x", worktreePath = "/wt/CTL-9" } = {}) {
+    const sig = implementSignal({ bgJobId });
+    sig.raw.worktreePath = worktreePath;
+    return sig;
+  }
+
+  test("branch (B) emits phase.reclaim.reap-requested with bgJobId before reclaiming", () => {
+    const emitReap = recorder(Promise.resolve(true));
+    const r = reclaimDeadWorkIfPossible(orch, staleReclaimable(), {
+      statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+      probes: { implement: () => true },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      pidAlive: () => false, // genuinely dead → alive-quiet gate stays open
+      emitReapIntent: emitReap,
+      now: () => 1_000 + 6 * 60 * 1000, // 6 min past mtime — stale
+    });
+    expect(r).toBe("reclaimed");
+    expect(emitReap.calls.length).toBe(1);
+    const [eventType, fields] = emitReap.calls[0];
+    expect(eventType).toBe("phase.reclaim.reap-requested");
+    expect(fields).toMatchObject({
+      ticket: "CTL-9",
+      phase: "implement",
+      bgJobId: "job-x",
+      worktreePath: "/wt/CTL-9",
+      reason: "ctl-661-reclaim-happy-path",
+    });
+  });
+
+  test("branch (B) does NOT emit a reap-intent when the worker has no bg_job_id", () => {
+    // liveness.value present (so statJob can stale-flag it) but raw.bg_job_id
+    // absent — mirrors the supersede-guard no-op.
+    const sig = {
+      ticket: "CTL-9",
+      phase: "implement",
+      status: "running",
+      liveness: { kind: "bg", value: "job-x" },
+      signalPath: "/x/CTL-9/phase-implement.json",
+      raw: {
+        ticket: "CTL-9",
+        phase: "implement",
+        orchestrator: "CTL-9",
+        status: "running",
+        catalystSessionId: "sess_CTL-9_abc",
+        // no bg_job_id
+      },
+    };
+    const emitReap = recorder(Promise.resolve(true));
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+      probes: { implement: () => true },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      pidAlive: () => false,
+      emitReapIntent: emitReap,
+      now: () => 1_000 + 6 * 60 * 1000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emitReap.calls.length).toBe(0);
+  });
+});
+
 // --- CTL-587: revive / revive-suppressed / escalated branches ---------------
 //
 // The pre-CTL-587 'not-applicable' and 'not-done' returns were silent dead-ends.
