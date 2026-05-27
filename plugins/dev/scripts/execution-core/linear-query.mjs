@@ -174,6 +174,43 @@ export function fetchTicketLabels(identifier, { exec = defaultExec } = {}) {
   }
 }
 
+// classifyTicketResolution — CTL-671 3-valued phantom probe. Distinguishes a
+// DEFINITIVELY non-existent ticket (clean exit 0, empty/null node) from a
+// TRANSIENT failure (nonzero exit: auth/network/rate-limit/not-found — all
+// indistinguishable). Only "not-found" may trigger quarantine; "unknown" is the
+// fail-safe that re-checks next tick. Sibling to fetchTicketState, which
+// conflates both as null (line ~86) — existing callers are unchanged.
+//
+// SAFETY: the only path to "not-found" is a DEFINITIVE missing-ticket signal.
+// Everything ambiguous (nonzero exit, unparseable, or a non-"not found" error
+// body) returns "unknown" so a Linear outage never quarantines a real ticket.
+//
+// OBSERVED CONTRACT (CTL-671, verified against the real CLI 2026-05-27):
+// `linearis issues read CTL-9` for a MISSING ticket exits **0** (not nonzero!)
+// with body `{"error": "Issue with identifier \"CTL-9\" not found"}`. A real
+// ticket exits 0 with `{"identifier": "...", "id": "...", ...}`. So the
+// discriminator is the BODY, not the exit code: a "not found" error string is
+// the definitive not-found; any other error body (auth/network/rate-limit) is
+// transient → unknown.
+export function classifyTicketResolution(identifier, { exec = defaultExec } = {}) {
+  const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
+  if (code !== 0) return "unknown"; // nonzero is ambiguous — NEVER not-found
+  let node;
+  try {
+    node = JSON.parse(stdout);
+  } catch {
+    return "unknown"; // unparseable — fail safe, re-check next tick
+  }
+  if (node == null) return "not-found";
+  // The real missing-ticket shape: exit 0 + { error: "...not found" }. Only a
+  // "not found" error is definitive; any other error body is transient.
+  if (typeof node.error === "string") {
+    return /not\s*found/i.test(node.error) ? "not-found" : "unknown";
+  }
+  const id = node?.identifier ?? node?.id ?? null;
+  return id ? "exists" : "not-found";
+}
+
 // runEligibleQuery — run the query, parse + normalize, apply the priority
 // floor. A non-zero linearis exit THROWS (never a silent []): a silent empty
 // would let one failed poll flatten a project's eligible set to zero. The
