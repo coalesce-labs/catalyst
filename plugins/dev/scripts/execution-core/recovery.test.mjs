@@ -19,6 +19,7 @@ import {
   defaultKillBgJob,
   defaultPidAlive,
   defaultAppendReviveEvent,
+  defaultAppendReclaimEvent,
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   readBootEpoch,
@@ -643,14 +644,40 @@ describe("reclaimDeadWorkIfPossible", () => {
     // order: append first, then emit.
     expect(order[0][0]).toBe("append");
     expect(order[1][0]).toBe("emit");
-    // append-event payload mentions the phase + ticket + orch id.
-    expect(order[0][1]).toEqual({
+    // append-event payload includes the phase + ticket + orch id (CTL-574) PLUS
+    // the CTL-664 enrichment.
+    expect(order[0][1]).toMatchObject({
       phase: "implement",
       ticket: "CTL-9",
       orchId: "CTL-9",
+      death_signal: "absent", // statJob:()=>null → klass 'dead' → absent
+      probe_passed: true,
+      probe_checked: expect.any(String),
+      completion_origin: "inferred",
+      reclaimed_bg_job_id: "job-x", // implementSignal default bgJobId
     });
+    expect(order[0][1].stopped_bg_job_ids).toEqual([]); // CTL-661 placeholder
     // emit-complete receives the orchDir and the signal.
     expect(order[1][1]).toEqual({ orchDir: orch, signal: sig });
+  });
+
+  test("CTL-664: reclaim of an mtime-stale worker reports death_signal='mtime' + prev_state_json_mtime", () => {
+    const staleMtime = 1_000;
+    let appended = null;
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), {
+      statJob: () => ({ mtimeMs: staleMtime }), // exists but stale
+      now: () => staleMtime + 10 * 60_000, // > STALE_MS
+      probes: { implement: () => true },
+      emitComplete: () => ({ code: 0 }),
+      appendEvent: (args) => {
+        appended = args;
+      },
+      postReclaimMirror: () => {}, // stubbed (Phase 3 seam)
+      repoRoot: "/repo",
+    });
+    expect(r).toBe("reclaimed");
+    expect(appended.death_signal).toBe("mtime");
+    expect(appended.prev_state_json_mtime).toBe(staleMtime);
   });
 
   test("'reclaim-failed' when emit-complete returns non-zero (event still appended)", () => {
@@ -2005,6 +2032,66 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
         worktree_path: "/x",
       }),
     ).toBe(false);
+  });
+});
+
+// CTL-664: enriched reclaim event envelope round-trip. Mirror the CTL-660
+// dispatch round-trip: point CATALYST_DIR at a temp dir, call the helper, read
+// back the JSONL line, and assert the enriched payload fields the HUD DETAILS
+// fallback (title/body) and the audit consumers (completion_origin etc.) read.
+describe("reclaim event envelope round-trip (CTL-664)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl664-reclaim-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("defaultAppendReclaimEvent writes the enriched payload + HUD title/body", () => {
+    const ok = defaultAppendReclaimEvent({
+      phase: "implement",
+      ticket: "CTL-RC-1",
+      orchId: "orch-rc",
+      death_signal: "absent",
+      prev_state_json_mtime: null,
+      probe_passed: true,
+      probe_checked: "commits ahead of origin/main + clean worktree",
+      completion_origin: "inferred",
+      reclaimed_bg_job_id: "bg-rc",
+      stopped_bg_job_ids: [],
+      title: "phase implement reclaimed (work-done-despite-dead-bg)",
+      body: "Daemon reclaimed dead implement worker for CTL-RC-1.",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.implement.reclaim.CTL-RC-1");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("reclaim");
+    expect(env.body.payload.reason).toBe("work-done-despite-dead-bg");
+    expect(env.body.payload.completion_origin).toBe("inferred");
+    expect(env.body.payload.death_signal).toBe("absent");
+    expect(env.body.payload.probe_passed).toBe(true);
+    expect(env.body.payload.reclaimed_bg_job_id).toBe("bg-rc");
+    expect(env.body.payload.stopped_bg_job_ids).toEqual([]);
+    expect(env.body.payload.title).toContain("reclaimed");
+    expect(typeof env.body.payload.body).toBe("string");
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-rc");
   });
 });
 

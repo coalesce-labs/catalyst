@@ -33,7 +33,7 @@ import { emitReapIntent as emitReapIntentDefault } from "./reap-intent.mjs";
 import { isBgJobAlive, claudeStop } from "./claude-agents.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
-import { WORK_DONE_PROBES, hasProbe } from "./work-done-probes.mjs";
+import { WORK_DONE_PROBES, hasProbe, describeProbe } from "./work-done-probes.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 // CTL-638: pull the once-marker + per-(ticket, phase) cool-down primitives
@@ -230,7 +230,28 @@ function appendEnvelopeBestEffort(line, kind) {
 // the worker died but its work committed, so the scheduler can advance.
 // Returns true iff the audit append succeeded (CTL-587 contract — callers may
 // gate on success; today the reclaim caller does not).
-function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
+//
+// CTL-664: the payload is enriched beyond the original {phase,ticket,reason}.
+// All extra fields arrive as named params (single options object so existing
+// callers are unaffected by field order) and flow through buildEventEnvelope's
+// payloadExtras seam — the same mechanism the revive emitter uses. `title` /
+// `body` make the HUD reclaim row's DETAILS cell render with no HUD code change
+// (the format.ts fallback reads body.payload.title/body). Exported so the
+// round-trip test can confirm the envelope shape.
+export function defaultAppendReclaimEvent({
+  phase,
+  ticket,
+  orchId,
+  death_signal,
+  prev_state_json_mtime = null,
+  probe_passed = true,
+  probe_checked,
+  completion_origin = "inferred",
+  reclaimed_bg_job_id = null,
+  stopped_bg_job_ids = [],
+  title,
+  body,
+}) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase,
@@ -238,6 +259,17 @@ function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
       orchId,
       action: "reclaim",
       reason: "work-done-despite-dead-bg",
+      payloadExtras: {
+        death_signal,
+        prev_state_json_mtime,
+        probe_passed,
+        probe_checked,
+        completion_origin,
+        reclaimed_bg_job_id,
+        stopped_bg_job_ids,
+        title,
+        body,
+      },
     }),
     "reclaim",
   );
@@ -1034,7 +1066,28 @@ export function reclaimDeadWorkIfPossible(
         reason: "ctl-661-reclaim-happy-path",
       }).catch(() => {});
     }
-    appendEvent({ phase, ticket, orchId });
+    // CTL-664: derive the reclaim observability fields from values already
+    // computed above. `death_signal` distinguishes an absent bg job (klass
+    // 'dead') from a running-but-stale one (mtime); kept as a single const so
+    // Phase 3's mirror body reuses it without recomputation.
+    const death_signal = klass === "dead" ? "absent" : "mtime";
+    const probe_checked = describeProbe(phase);
+    appendEvent({
+      phase,
+      ticket,
+      orchId,
+      death_signal,
+      prev_state_json_mtime: prevStateJsonMtime,
+      probe_passed: true,
+      probe_checked,
+      completion_origin: "inferred",
+      reclaimed_bg_job_id: prevBgJobId,
+      // CTL-661 sources the reaped session via the reap-intent emitted above;
+      // record it here so the reclaim event mirrors the stopped set.
+      stopped_bg_job_ids: prevBgJobId ? [prevBgJobId] : [],
+      title: `phase ${phase} reclaimed (work-done-despite-dead-bg)`,
+      body: `Daemon reclaimed dead ${phase} worker for ${ticket}: ${death_signal} death signal, probe verified ${probe_checked}. bg_job_id=${prevBgJobId ?? "?"}.`,
+    });
     const r = emitComplete({ orchDir, signal });
     if (r.code !== 0) {
       log.warn(
