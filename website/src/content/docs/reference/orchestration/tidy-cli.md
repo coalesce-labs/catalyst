@@ -99,6 +99,36 @@ a typo'd `--include-interactive` used to silently do nothing. Now both error out
 reverting the flag, so a slip of the keyboard can never weaken a safety guard.
 :::
 
+## Resolving the repository root
+
+`worktrees`, `branches`, and `tidy` all shell out to `git`. They resolve which repository to operate
+on — in this order — from:
+
+1. **`--repo-root <path>`** — an explicit flag (highest precedence; accepted by all three nouns).
+2. **`$CATALYST_REPO_ROOT`** — an environment override.
+3. **The current repository** — `git rev-parse --show-toplevel` from the process working directory.
+4. **The first registry project** — the first entry in the execution-core registry with a usable
+   `repoRoot`.
+
+You do **not** need to `cd` into the repository first — pass `--repo-root` (or set
+`$CATALYST_REPO_ROOT`) and the commands work from anywhere:
+
+```bash
+# From /tmp, audit a specific repo without changing directory:
+catalyst-execution-core worktrees list --repo-root /path/to/repo
+catalyst-execution-core tidy --dry-run --repo-root /path/to/repo
+```
+
+:::caution[Outside a resolvable repo, these commands now fail loudly]
+If none of the four sources resolves a repository root, `worktrees`/`branches`/`tidy` **exit `1`**
+with a clear message (e.g. `tidy: aborted at worktrees — cannot resolve a git repo root … Pass
+--repo-root <path>.`). Previously the underlying `git` error was swallowed into an empty inventory,
+so the command **exited `0` with a success-shaped `planned (dry-run)` line** — a silent no-op. Any
+automation that relied on the old behavior (running from a non-repo directory and ignoring the exit
+code) was already a no-op; it now gets a real signal. Run from inside the repo, or pass
+`--repo-root` / `$CATALYST_REPO_ROOT`, for the unchanged success path.
+:::
+
 ## Headless / agent use
 
 Every command — not just `list`/`show` — accepts `--json` and emits a **single structured object**
