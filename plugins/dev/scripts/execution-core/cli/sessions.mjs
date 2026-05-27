@@ -5,6 +5,7 @@
 //   show  <ticket>                            single-ticket detail
 //   prune [--yes] [--dry-run] [--max N]       write path — emit reap intents
 //         [--include-idle] [--categories L]
+//         [--include-interactive] [--min-idle-seconds N]
 //
 // Read path joins:
 //   • `claude agents --json`  — authoritative live source (status idle/busy)
@@ -25,6 +26,7 @@ import { shortIdFromSessionId, isSelfSession } from "../claude-ids.mjs";
 import { readWorkerSignals, TERMINAL } from "../signal-reader.mjs";
 import { emitReapIntent } from "../reap-intent.mjs";
 import { getRunsRoot } from "../config.mjs";
+import { lastSeenMsForSession } from "../session-recency.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 
@@ -217,6 +219,7 @@ export async function buildRows({
   psLines = psLinesSnapshot(),
   cwdExists = (p) => existsSync(p),
   linearStateFor = () => null,
+  lastSeen = lastSeenMsForSession,
   now = Date.now(),
 } = {}) {
   const sessions = typeof agents === "function" ? agents() : agents;
@@ -255,7 +258,11 @@ export async function buildRows({
       signalStatus: worker?.status ?? null,
       linearState: ticket ? linearStateFor(ticket) : null,
       startedAt: s.startedAt ?? null,
+      // elapsedMs doubles as the AGE signal (wall-clock since dispatch); rendered
+      // as AGE in the table. lastSeenMs is the RECENCY signal (since transcript
+      // mtime) — a freshly-touched session is in use regardless of class/age.
       elapsedMs: s.startedAt ? now - s.startedAt : null,
+      lastSeenMs: s.sessionId ? lastSeen(s.sessionId, { now }) : null,
       rssKb: s.pid ? rssTotalForPid(snapshot, s.pid) : 0,
     });
   }
@@ -293,6 +300,8 @@ export async function runPrune({
   dryRun = false,
   max = 20,
   includeIdle = false,
+  includeInteractive = false,
+  minIdleMs = 15 * 60 * 1000,
   categories,
   env = process.env,
 } = {}) {
@@ -308,6 +317,24 @@ export async function runPrune({
     if (planned >= max) break;
     if (isSelfSession(row.sessionId, env)) {
       log(`skipping self-session ${row.shortId} (controlling session)`);
+      continue;
+    }
+    // Interactive sessions are the operator's own terminal windows. The
+    // self-guard only protects the ONE controlling session ($CLAUDE_CODE_SESSION_ID);
+    // a prune/timer must never reap the operator's other live windows. These two
+    // guards run in BOTH dry-run and live so the plan reflects a real prune.
+    if (row.kind === "interactive" && !includeInteractive) {
+      log(`skipping ${row.shortId} [protected: interactive]`);
+      continue;
+    }
+    // A transcript touched within minIdleMs means the session is in use right
+    // now, regardless of its idle/orphan classification.
+    if (row.lastSeenMs != null && row.lastSeenMs < minIdleMs) {
+      log(
+        `skipping ${row.shortId} [protected: recently active, last_seen ${Math.round(
+          row.lastSeenMs / 1000
+        )}s]`
+      );
       continue;
     }
     if (!active.has(row.classification)) continue;
@@ -333,8 +360,9 @@ export async function runPrune({
 
 /**
  * parseArgs — minimal flag parser for the sessions subcommands. Boolean flags
- * (--json/--yes/--dry-run/--include-idle) take no value; --max coerces to a
- * number; --categories splits on commas; everything else is a string value.
+ * (--json/--yes/--dry-run/--include-idle/--include-interactive) take no value;
+ * --max and --min-idle-seconds coerce to a number (the latter ×1000 → minIdleMs);
+ * --categories splits on commas; everything else is a string value.
  */
 export function parseArgs(argv) {
   const out = {};
@@ -352,6 +380,12 @@ export function parseArgs(argv) {
         break;
       case "--include-idle":
         out.includeIdle = true;
+        break;
+      case "--include-interactive":
+        out.includeInteractive = true;
+        break;
+      case "--min-idle-seconds":
+        out.minIdleMs = Number(argv[++i]) * 1000;
         break;
       case "--max":
         out.max = Number(argv[++i]);
@@ -375,6 +409,21 @@ export function parseArgs(argv) {
 // ─── CLI commands ────────────────────────────────────────────────────────────
 
 const CATEGORY_ORDER = ["KEEP", "DUPLICATE", "IDLE", "UNKNOWN", "ORPHAN", "DONE"];
+
+/**
+ * humanDuration — compact ms→"3s"/"5m"/"2h"/"4d" for the AGE/LAST_SEEN columns.
+ * Returns "-" for null/undefined so an absent recency signal reads clearly.
+ */
+function humanDuration(ms) {
+  if (ms == null) return "-";
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
 
 async function cmdList({ json, ticket, phase }) {
   let rows = await buildRows();
@@ -419,9 +468,14 @@ function printTable(rows) {
   }
   for (const r of rows) {
     const rssMb = ((r.rssKb ?? 0) / 1024).toFixed(0);
+    const interactive = r.kind === "interactive" ? " [interactive]" : "";
+    const kind = String(r.kind ?? "-").padEnd(11);
+    const age = humanDuration(r.elapsedMs).padStart(5);
+    const lastSeen = humanDuration(r.lastSeenMs).padStart(9);
     process.stdout.write(
       `${r.classification.padEnd(9)} ${r.shortId}  ${String(r.ticket ?? "-").padEnd(10)} ` +
-        `${String(r.phase ?? "-").padEnd(16)} ${String(rssMb).padStart(6)}MB  ${r.cwd ?? ""}\n`
+        `${String(r.phase ?? "-").padEnd(16)} ${kind} ${age} ${lastSeen} ` +
+        `${String(rssMb).padStart(6)}MB  ${r.cwd ?? ""}${interactive}\n`
     );
   }
   process.stdout.write("──\n");
@@ -438,7 +492,8 @@ function usage() {
     "Usage: catalyst-execution-core sessions {list|show|prune} [flags]\n" +
       "  list  [--json] [--ticket X] [--phase Y]\n" +
       "  show  <ticket>\n" +
-      "  prune [--yes] [--dry-run] [--max N] [--include-idle] [--categories LIST]\n"
+      "  prune [--yes] [--dry-run] [--max N] [--include-idle] [--include-interactive]\n" +
+      "        [--min-idle-seconds N] [--categories LIST]\n"
   );
 }
 

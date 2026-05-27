@@ -18,10 +18,12 @@ import { spawnSync, execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
 import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
+import { lastSeenMsForSession } from "./session-recency.mjs";
 import { log } from "./config.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 const DEDUPE_WINDOW_MS = Number(process.env.REAPER_DEDUPE_WINDOW_MS) || 60_000;
+const DEFAULT_MIN_IDLE_MS = 15 * 60 * 1000; // 15 min
 
 /**
  * Reaper — composes injectable executors so the unit test never shells out.
@@ -35,6 +37,16 @@ export class Reaper {
     gitWorktreeRemove = defaultGitWorktreeRemove,
     gitBranchDelete = defaultGitBranchDelete,
     cwdExists = defaultCwdExists,
+    // CTL-649 safety guards:
+    //  - includeInteractive: opt-in to reaping interactive (human) sessions.
+    //    Default false — the daemon never opts in, so a stepped-away human
+    //    window is never auto-reaped.
+    //  - minIdleMs: recency floor for the periodic sweep — a session whose
+    //    transcript was touched within this window is "still in use".
+    //  - lastSeenMs: injectable transcript-mtime probe (tests pass a fake).
+    includeInteractive = false,
+    minIdleMs = DEFAULT_MIN_IDLE_MS,
+    lastSeenMs = (sessionId) => lastSeenMsForSession(sessionId),
     log: logger = log,
   } = {}) {
     this.executorReap = executorReap;
@@ -43,8 +55,22 @@ export class Reaper {
     this.gitWorktreeRemove = gitWorktreeRemove;
     this.gitBranchDelete = gitBranchDelete;
     this.cwdExists = cwdExists;
+    this.includeInteractive = includeInteractive;
+    this.minIdleMs = minIdleMs;
+    this.lastSeenMs = lastSeenMs;
     this.log = logger;
     this._inflight = new Map(); // key → expiresAt
+  }
+
+  // `claude agents --json` reports `.kind` as "interactive" | "background".
+  // Older/edge builds may omit it (undefined/null) — callers decide how to
+  // treat the ambiguous case.
+  _isInteractive(s) {
+    return s?.kind === "interactive";
+  }
+
+  _isBackground(s) {
+    return s?.kind === "background";
   }
 
   _isDuplicate(key) {
@@ -107,6 +133,17 @@ export class Reaper {
       }
     });
     if (!target) return; // already gone, no-op
+    // CTL-649 kind guard: an explicit single-target intent (yield/supersede/
+    // predecessor/revive/abort) is authoritative — a producer already decided
+    // this specific bg worker must die — so NO recency gate here. But never
+    // reap an interactive (human) session unless explicitly opted in. We skip
+    // ONLY when kind is explicitly "interactive"; an absent/unknown kind on a
+    // protocol-targeted bg worker is still reaped (avoids regressing the leak
+    // fix if `claude` ever omits `.kind` for a bg session).
+    if (this._isInteractive(target) && !this.includeInteractive) {
+      this.log.info({ bgJobId }, "reaper: skipping interactive session");
+      return;
+    }
     // TODO(CTL-619): replace status==="idle" check with pidAlive+state.json
     // freshness once CTL-619's primitive lands. Conservative until then —
     // we never reap a session reporting `active`.
@@ -153,6 +190,16 @@ export class Reaper {
         continue;
       }
       if (isSelfSession(s.sessionId)) continue;
+      // CTL-649 kind guard: an interactive (human) session in the worktree is
+      // never auto-stopped (unless opted in) AND counts as unstoppable, so a
+      // downstream worktree-remove refuses rather than yanking a live
+      // interactive cwd out from under the user. Worktree teardown is
+      // authoritative, so NO recency gate.
+      if (this._isInteractive(s) && !this.includeInteractive) {
+        this.log.info({ sessionId: s.sessionId }, "reaper: skipping interactive session");
+        unstoppable++;
+        continue;
+      }
       // Active sessions stay safe until CTL-619 — and they count as still-live
       // so a downstream worktree-remove can refuse rather than yank a live cwd.
       if (s.status !== "idle") {
@@ -235,8 +282,34 @@ export class Reaper {
       if (!a.sessionId || !a.cwd) continue;
       if (isSelfSession(a.sessionId)) continue;
       if (a.status !== "idle") continue;
+      // CTL-649 kind guard: the periodic sweep enumerates ALL live sessions —
+      // it can see the user's interactive windows — so it is strict
+      // background-ONLY. Skip interactive AND unknown/null kinds: never
+      // auto-reap an ambiguous session. (includeInteractive relaxes this.)
+      if (!this.includeInteractive && !this._isBackground(a)) {
+        this.log.info(
+          { sessionId: a.sessionId, kind: a.kind ?? null },
+          "reaper: skipping interactive session",
+        );
+        continue;
+      }
       const exists = await this.cwdExists(a.cwd);
       if (exists) continue;
+      // CTL-649 recency guard: even with a missing cwd, a session whose
+      // transcript was touched within minIdleMs is still in use — skip it. A
+      // null lastSeen (no transcript found) does NOT block reaping.
+      const seen = this.lastSeenMs(a.sessionId);
+      if (seen !== null && seen < this.minIdleMs) {
+        this.log.info(
+          {
+            sessionId: a.sessionId,
+            lastSeenS: Math.round(seen / 1000),
+            minIdleS: Math.round(this.minIdleMs / 1000),
+          },
+          `reaper: skipping recently-active session (last_seen ${Math.round(seen / 1000)}s < min ${Math.round(this.minIdleMs / 1000)}s)`,
+        );
+        continue;
+      }
       let shortId;
       try {
         shortId = shortIdFromSessionId(a.sessionId);

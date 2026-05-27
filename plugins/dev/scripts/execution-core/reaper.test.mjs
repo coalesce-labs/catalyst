@@ -104,6 +104,64 @@ describe("Reaper._handleBgReap", () => {
     expect(emitted.find((e) => e.evt === "phase.yield.reap-failed")).toBeTruthy();
   });
 
+  it("skips an interactive target (never reap a human window via protocol intent)", async () => {
+    const executor = mock(() => Promise.resolve({ ok: true }));
+    const r = new Reaper({
+      executorReap: executor,
+      agents: agentsFixture([
+        { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: "idle", cwd: "/wt/x", kind: "interactive" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.yield.reap-requested", bg_job_id: "abc12345" });
+    expect(executor).not.toHaveBeenCalled();
+  });
+
+  it("reaps a background target", async () => {
+    const executor = mock(() => Promise.resolve({ ok: true }));
+    const r = new Reaper({
+      executorReap: executor,
+      agents: agentsFixture([
+        { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: "idle", cwd: "/wt/x", kind: "background" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.yield.reap-requested", bg_job_id: "abc12345" });
+    expect(executor).toHaveBeenCalledWith("abc12345");
+  });
+
+  it("reaps an unknown-kind target (avoids regressing the leak fix if claude omits .kind)", async () => {
+    const executor = mock(() => Promise.resolve({ ok: true }));
+    const r = new Reaper({
+      executorReap: executor,
+      agents: agentsFixture([
+        // No `kind` field — an explicit protocol intent still reaps it.
+        { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: "idle", cwd: "/wt/x" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.yield.reap-requested", bg_job_id: "abc12345" });
+    expect(executor).toHaveBeenCalledWith("abc12345");
+  });
+
+  it("includeInteractive:true reaps an interactive target via protocol intent", async () => {
+    const executor = mock(() => Promise.resolve({ ok: true }));
+    const r = new Reaper({
+      includeInteractive: true,
+      executorReap: executor,
+      agents: agentsFixture([
+        { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", status: "idle", cwd: "/wt/x", kind: "interactive" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.yield.reap-requested", bg_job_id: "abc12345" });
+    expect(executor).toHaveBeenCalledWith("abc12345");
+  });
+
   it("dedupes back-to-back intents on the same bg_job_id", async () => {
     const executor = mock(() => Promise.resolve({ ok: true }));
     const r = new Reaper({
@@ -165,6 +223,23 @@ describe("Reaper._handleWorktreePresweep", () => {
     await r.handle({ event: "worktree.presweep.reap-requested", worktree_path: "/wt/CTL-64" });
     // Only the exact-match worktree is swept; the sibling /wt/CTL-649 is safe.
     expect(stopped).toEqual(["11111111"]);
+  });
+
+  it("counts an interactive session as unstoppable and does not stop it", async () => {
+    const stopped = [];
+    const r = new Reaper({
+      executorReap: (id) => { stopped.push(id); return Promise.resolve({ ok: true }); },
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/x", status: "idle", kind: "interactive" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    // _handleWorktreePresweep returns the count of still-live (unstoppable)
+    // sessions so a downstream worktree-remove refuses.
+    const unstoppable = await r._handleWorktreePresweep({ worktree_path: "/wt/x" });
+    expect(stopped).toEqual([]);
+    expect(unstoppable).toBe(1);
   });
 
   it("normalizes a trailing slash on the worktree path", async () => {
@@ -328,10 +403,11 @@ describe("Reaper.scanOrphans", () => {
     const emitted = [];
     const r = new Reaper({
       agents: agentsFixture([
-        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle" },
-        { sessionId: "22222222-aaaa-bbbb-cccc-dddddddddddd", cwd: "/tmp", status: "idle" },
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle", kind: "background" },
+        { sessionId: "22222222-aaaa-bbbb-cccc-dddddddddddd", cwd: "/tmp", status: "idle", kind: "background" },
       ]),
       cwdExists: (p) => Promise.resolve(p === "/tmp"),
+      lastSeenMs: () => null, // no transcript → does not block reaping
       emit: (evt, fields) => { emitted.push({ evt, ...fields }); return Promise.resolve(); },
       log: silentLog(),
     });
@@ -347,14 +423,113 @@ describe("Reaper.scanOrphans", () => {
     const emitted = [];
     const r = new Reaper({
       agents: agentsFixture([
-        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle" },
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle", kind: "background" },
       ]),
       cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => null,
       emit: (evt) => { emitted.push(evt); return Promise.resolve(); },
       log: silentLog(),
     });
     await r.scanOrphans();
     expect(emitted.length).toBe(0);
+  });
+
+  it("skips an interactive cwd-missing session (never auto-reap a human window)", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle", kind: "interactive" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => null,
+      emit: (evt) => { emitted.push(evt); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(0);
+  });
+
+  it("skips an unknown/null-kind cwd-missing session (never auto-reap an ambiguous session)", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([
+        // No `kind` field at all — ambiguous, must not be auto-reaped.
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => null,
+      emit: (evt) => { emitted.push(evt); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(0);
+  });
+
+  it("skips a recently-active background orphan (lastSeenMs < minIdleMs)", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      minIdleMs: 15 * 60 * 1000,
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle", kind: "background" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => 60_000, // touched 1 min ago — still in use
+      emit: (evt) => { emitted.push(evt); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(0);
+  });
+
+  it("reaps a background orphan whose lastSeenMs >= minIdleMs", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      minIdleMs: 15 * 60 * 1000,
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle", kind: "background" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => 30 * 60 * 1000, // touched 30 min ago — stale
+      emit: (evt, fields) => { emitted.push({ evt, ...fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].bgJobId).toBe("11111111");
+  });
+
+  it("reaps a background orphan whose lastSeenMs is null (no transcript does not block)", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      minIdleMs: 15 * 60 * 1000,
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle", kind: "background" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => null,
+      emit: (evt, fields) => { emitted.push({ evt, ...fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].bgJobId).toBe("11111111");
+  });
+
+  it("includeInteractive:true lets scanOrphans reap an interactive orphan", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      includeInteractive: true,
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/missing", status: "idle", kind: "interactive" },
+      ]),
+      cwdExists: () => Promise.resolve(false),
+      lastSeenMs: () => null,
+      emit: (evt, fields) => { emitted.push({ evt, ...fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.scanOrphans();
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].bgJobId).toBe("11111111");
   });
 });
 

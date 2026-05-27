@@ -109,6 +109,12 @@ function parseArgs(argv) {
       case "--include-idle":
         out.includeIdle = true;
         break;
+      case "--include-interactive":
+        out.includeInteractive = true;
+        break;
+      case "--min-idle-seconds":
+        out.minIdleMs = Number(argv[++i]) * 1000;
+        break;
       case "--include-stale":
         out.includeStale = true;
         break;

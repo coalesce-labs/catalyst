@@ -174,7 +174,12 @@ export function startDaemon({
 // consumption only.
 function startReaperAndTimer({ orphanReaperConfig, debounceMs }) {
   const eventLogPath = getEventLogPath();
-  _reaper = new Reaper({});
+  // CTL-649: the periodic sweep honors the configured recency floor
+  // (minIdleSeconds, default 900s). includeInteractive stays at its safe
+  // default false — the daemon never opts into reaping human sessions.
+  _reaper = new Reaper({
+    minIdleMs: (orphanReaperConfig?.minIdleSeconds ?? 900) * 1000,
+  });
 
   // Boot replay: cover for any intents that landed while the daemon was down.
   _reaper.bootReplay(eventLogPath).catch((err) => {

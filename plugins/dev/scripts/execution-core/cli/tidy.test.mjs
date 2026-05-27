@@ -122,6 +122,26 @@ describe("runTidy", () => {
     expect(seen.sessions.max).toBe(7);
   });
 
+  it("propagates --include-interactive / --min-idle-seconds to the sessions step", async () => {
+    // CTL-649 interactive-session protection: these guard the operator's own
+    // terminal windows. A regression to an explicit allowlist in tidy's own
+    // parseArgs would silently drop them; `...rest` must carry them through.
+    const seen = {};
+    await runTidy({
+      cmdSessions: (opts) => {
+        seen.sessions = opts;
+      },
+      cmdWorktrees: () => {},
+      cmdBranches: () => {},
+      cmdGitWorktreePrune: () => {},
+      yes: true,
+      includeInteractive: true,
+      minIdleMs: 900000,
+    });
+    expect(seen.sessions.includeInteractive).toBe(true);
+    expect(seen.sessions.minIdleMs).toBe(900000);
+  });
+
   it("reports all four steps completed on success", async () => {
     const result = await runTidy({
       cmdSessions: () => {},

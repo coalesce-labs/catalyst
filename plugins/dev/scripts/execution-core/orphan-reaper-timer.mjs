@@ -7,10 +7,11 @@ import { emitReapIntent } from "./reap-intent.mjs";
 import { log } from "./config.mjs";
 
 /**
- * readOrphanReaperConfig — pull { enabled, intervalSeconds } out of a project's
- * .catalyst/config.json → catalyst.orchestration.orphanReaper. Returns {} for a
- * null/missing/unparseable file or absent key, so callers fall back to the
- * built-in defaults (enabled, 600s). Never throws.
+ * readOrphanReaperConfig — pull { enabled, intervalSeconds, minIdleSeconds } out
+ * of a project's .catalyst/config.json → catalyst.orchestration.orphanReaper.
+ * Returns {} for a null/missing/unparseable file or absent key, so callers fall
+ * back to the built-in defaults (enabled, 600s interval, 900s minIdle). Never
+ * throws.
  */
 export function readOrphanReaperConfig(configPath) {
   if (!configPath) return {};

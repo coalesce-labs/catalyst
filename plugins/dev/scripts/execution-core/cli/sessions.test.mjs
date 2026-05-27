@@ -175,6 +175,7 @@ describe("buildRows (joins agents + worker signals + rss, injected deps)", () =>
       psLines,
       cwdExists: () => true,
       linearStateFor: () => "Implement",
+      lastSeen: () => 7000,
       now: 5000,
     });
     expect(rows).toHaveLength(1);
@@ -185,6 +186,7 @@ describe("buildRows (joins agents + worker signals + rss, injected deps)", () =>
       "pid",
       "name",
       "cwd",
+      "kind",
       "orchestratorId",
       "ticket",
       "phase",
@@ -193,15 +195,37 @@ describe("buildRows (joins agents + worker signals + rss, injected deps)", () =>
       "signalStatus",
       "linearState",
       "elapsedMs",
+      "lastSeenMs",
       "rssKb",
     ]) {
       expect(row).toHaveProperty(key);
     }
     expect(row.shortId).toBe("11111111");
     expect(row.classification).toBe("IDLE");
+    expect(row.kind).toBe("background");
     expect(row.elapsedMs).toBe(4000);
+    expect(row.lastSeenMs).toBe(7000);
     expect(row.rssKb).toBe(81920);
     expect(row.linearState).toBe("Implement");
+  });
+
+  it("populates lastSeenMs from the injected lastSeen fn (keyed by sessionId)", async () => {
+    const seen = [];
+    const rows = await buildRows({
+      agents,
+      signalsByBgJobId,
+      psLines,
+      cwdExists: () => true,
+      lastSeen: (sessionId, { now }) => {
+        seen.push({ sessionId, now });
+        return 12345;
+      },
+      now: 5000,
+    });
+    expect(rows[0].lastSeenMs).toBe(12345);
+    expect(seen).toEqual([
+      { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", now: 5000 },
+    ]);
   });
 
   it("classifies ORPHAN when cwd is missing", async () => {
@@ -389,6 +413,112 @@ describe("runPrune — dry-run default, categories, --max", () => {
   });
 });
 
+describe("runPrune — interactive-session protection (CRITICAL)", () => {
+  const interactiveOrphan = () => [
+    {
+      sessionId: "33333333-aaaa-bbbb-cccc-dddddddddddd",
+      shortId: "33333333",
+      classification: "ORPHAN", // in the default prune set
+      kind: "interactive",
+      cwd: "/wt/CTL-3",
+    },
+  ];
+
+  it("EXCLUDES an interactive row by default even when its class is prunable", async () => {
+    const emitted = [];
+    const logged = [];
+    await runPrune({
+      rows: interactiveOrphan(),
+      emit: (e, f) => emitted.push({ e, f }),
+      log: (m) => logged.push(m),
+      yes: true,
+    });
+    expect(emitted.length).toBe(0);
+    expect(logged.some((m) => /\[protected: interactive\]/.test(m))).toBe(true);
+  });
+
+  it("INCLUDES an interactive row with includeInteractive:true", async () => {
+    const emitted = [];
+    await runPrune({
+      rows: interactiveOrphan(),
+      emit: (e, f) => emitted.push({ e, f }),
+      yes: true,
+      includeInteractive: true,
+    });
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].f.bgJobId).toBe("33333333");
+  });
+
+  it("protects interactive rows in dry-run too (plan reflects a real prune)", async () => {
+    const emitted = [];
+    const logged = [];
+    await runPrune({
+      rows: interactiveOrphan(),
+      emit: (e, f) => emitted.push({ e, f }),
+      log: (m) => logged.push(m),
+      // no --yes ⇒ dry-run
+    });
+    expect(emitted.length).toBe(0);
+    expect(logged.some((m) => /\[protected: interactive\]/.test(m))).toBe(true);
+  });
+});
+
+describe("runPrune — recency protection (transcript touched within minIdleMs)", () => {
+  const recencyRow = (lastSeenMs) => ({
+    sessionId: "44444444-aaaa-bbbb-cccc-dddddddddddd",
+    shortId: "44444444",
+    classification: "ORPHAN",
+    kind: "background",
+    lastSeenMs,
+    cwd: "/wt/CTL-4",
+  });
+
+  it("EXCLUDES a row whose lastSeenMs < minIdleMs (recently active)", async () => {
+    const emitted = [];
+    const logged = [];
+    await runPrune({
+      rows: [recencyRow(5000)], // 5s ago < 15m default
+      emit: (e, f) => emitted.push({ e, f }),
+      log: (m) => logged.push(m),
+      yes: true,
+    });
+    expect(emitted.length).toBe(0);
+    expect(logged.some((m) => /\[protected: recently active, last_seen 5s\]/.test(m))).toBe(true);
+  });
+
+  it("INCLUDES a row whose lastSeenMs >= minIdleMs (idle long enough)", async () => {
+    const emitted = [];
+    await runPrune({
+      rows: [recencyRow(20 * 60 * 1000)], // 20m ago >= 15m default
+      emit: (e, f) => emitted.push({ e, f }),
+      yes: true,
+    });
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].f.bgJobId).toBe("44444444");
+  });
+
+  it("INCLUDES a row whose lastSeenMs is null (unknown recency is not protective)", async () => {
+    const emitted = [];
+    await runPrune({
+      rows: [recencyRow(null)],
+      emit: (e, f) => emitted.push({ e, f }),
+      yes: true,
+    });
+    expect(emitted.length).toBe(1);
+  });
+
+  it("respects a custom minIdleMs threshold", async () => {
+    const emitted = [];
+    await runPrune({
+      rows: [recencyRow(20 * 60 * 1000)], // 20m
+      emit: (e, f) => emitted.push({ e, f }),
+      yes: true,
+      minIdleMs: 30 * 60 * 1000, // raise bar to 30m ⇒ 20m is now "recent"
+    });
+    expect(emitted.length).toBe(0);
+  });
+});
+
 describe("parseArgs", () => {
   it("parses flags and values", () => {
     expect(parseArgs(["--json", "--ticket", "CTL-1", "--max", "20", "--yes"])).toEqual({
@@ -408,5 +538,13 @@ describe("parseArgs", () => {
 
   it("parses --categories as a comma list", () => {
     expect(parseArgs(["--categories", "DONE,ORPHAN"]).categories).toEqual(["DONE", "ORPHAN"]);
+  });
+
+  it("parses --include-interactive boolean", () => {
+    expect(parseArgs(["--include-interactive"])).toEqual({ includeInteractive: true });
+  });
+
+  it("parses --min-idle-seconds into minIdleMs (×1000)", () => {
+    expect(parseArgs(["--min-idle-seconds", "900"])).toEqual({ minIdleMs: 900000 });
   });
 });
