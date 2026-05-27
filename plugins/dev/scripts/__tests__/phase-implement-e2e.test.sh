@@ -540,6 +540,18 @@ if grep -qE 'feat: (first|second) commit' "$LOG_A" 2>/dev/null; then
 else
   fail "mirror-implement happy: commit subjects" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
 fi
+# CTL-632 follow-on: file/line breakdown (fixture adds a.txt + b.txt = 2 files
+# added, 1 line each = +2 / -0).
+if grep -qE 'Files.*2 added, 0 modified, 0 deleted' "$LOG_A" 2>/dev/null; then
+  pass "mirror-implement happy: renders files added/modified/deleted breakdown"
+else
+  fail "mirror-implement happy: files breakdown" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
+if grep -qE 'Lines.*\+2 / -0' "$LOG_A" 2>/dev/null; then
+  pass "mirror-implement happy: renders lines added/deleted"
+else
+  fail "mirror-implement happy: lines added/deleted" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+fi
 if grep -qE '(Branch|feature)' "$LOG_A" 2>/dev/null; then
   pass "mirror-implement happy: body contains branch name"
 else
@@ -739,6 +751,269 @@ if grep -q 'could not resolve integration base' "$CASE_G/stderr.log" 2>/dev/null
 else
   fail "gate base-unknown: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_G/stderr.log" 2>/dev/null)")"
 fi
+
+# ─── Test 15 (CTL-632): phase-pr + phase-monitor-merge mirror blocks present ──
+echo ""
+echo "Test 15 (CTL-632): phase-pr + phase-monitor-merge contract — mirror blocks present"
+if [[ -f "$SKILL_PR" ]]; then
+  assert_grep 'phase-pr-mirror' "$SKILL_PR" "phase-pr: body contains uniquely-named mirror fence"
+  assert_grep '\.linear-mirror-' "$SKILL_PR" "phase-pr: references the per-phase marker file"
+  assert_grep 'linearis issues discuss' "$SKILL_PR" "phase-pr: calls linearis issues discuss"
+  assert_grep 'phase-pr: linearis discuss failed \(continuing\)' "$SKILL_PR" "phase-pr: fail-open warning string"
+  assert_grep 'verify\.json' "$SKILL_PR" "phase-pr: surfaces verify.json pre-merge verification"
+fi
+if [[ -f "$SKILL_MONITOR_MERGE" ]]; then
+  assert_grep 'phase-monitor-merge-mirror' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: body contains uniquely-named mirror fence"
+  assert_grep '\.linear-mirror-' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: references the per-phase marker file"
+  assert_grep 'linearis issues discuss' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: calls linearis issues discuss"
+  assert_grep 'phase-monitor-merge: linearis discuss failed \(continuing\)' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: fail-open warning string"
+  assert_grep 'statusCheckRollup' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: summarizes CI check rollup"
+fi
+
+# ─── Test 16 (CTL-632): phase-pr mirror runtime — happy/fail-open/idempotent ──
+echo ""
+echo "Test 16 (CTL-632): phase-pr mirror — happy / fail-open / idempotent (with gh stub)"
+
+PR_MIRROR_FILE="${SCRATCH}/pr-mirror-body.sh"
+awk '
+  /^```bash phase-pr-mirror$/ {capture=1; next}
+  /^```$/ {if (capture) {capture=0}}
+  capture { print }
+' "$SKILL_PR" > "$PR_MIRROR_FILE"
+if [[ -s "$PR_MIRROR_FILE" ]]; then
+  pass "phase-pr mirror block extractable from SKILL.md"
+else
+  fail "phase-pr mirror block extractable — no \`\`\`bash phase-pr-mirror\`\`\` fence found"
+fi
+
+# gh stub: `gh pr view <n> --json ...` returns canned PR metadata.
+install_gh_stub() {
+  local bin_dir="$1"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/gh" <<'STUB'
+#!/usr/bin/env bash
+# Minimal gh stub for phase mirror e2e: supports `gh pr view <n> --json ...`.
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+  cat <<'JSON'
+{
+  "title": "CTL-449: do the thing",
+  "url": "https://github.com/acme/repo/pull/42",
+  "files": [{"path":"a.ts"},{"path":"b.ts"},{"path":"c.ts"}],
+  "additions": 120,
+  "deletions": 7,
+  "commits": [{"oid":"1"},{"oid":"2"}],
+  "baseRefName": "main",
+  "createdAt": "2026-05-27T10:00:00Z",
+  "statusCheckRollup": [
+    {"__typename":"CheckRun","conclusion":"SUCCESS"},
+    {"__typename":"CheckRun","conclusion":"SUCCESS"},
+    {"__typename":"StatusContext","state":"SUCCESS"}
+  ],
+  "reviews": [
+    {"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED"},
+    {"author":{"login":"ryan"},"state":"APPROVED"}
+  ]
+}
+JSON
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "${bin_dir}/gh"
+}
+
+# Writes the phase-pr signal file (with .pr) + optional verify.json into a worker dir.
+seed_pr_worker() {
+  local worker_dir="$1" with_verify="${2:-yes}"
+  mkdir -p "$worker_dir"
+  cat > "${worker_dir}/phase-pr.json" <<'JSON'
+{"status":"running","ticket":"CTL-449","phase":"pr","pr":{"number":42,"url":"https://github.com/acme/repo/pull/42"}}
+JSON
+  if [[ "$with_verify" == "yes" ]]; then
+    cat > "${worker_dir}/verify.json" <<'JSON'
+{"regression_risk":3,"tests_attempted":5,"gates":{"tests":{"status":"pass","summary":"192 passed / 0 failed"},"typecheck":{"status":"pass","summary":"tsc clean"},"lint":{"status":"pass"}},"findings":[]}
+JSON
+  fi
+}
+
+run_pr_mirror() {
+  local case_name="$1" stub_kind="$2" preseed_marker="${3:-}" with_verify="${4:-yes}"
+  local case_dir="${SCRATCH}/pr-mirror-${case_name}"
+  local worker_dir="${case_dir}/orch/workers/CTL-449"
+  mkdir -p "$case_dir/bin"
+  seed_pr_worker "$worker_dir" "$with_verify"
+  install_gh_stub "$case_dir/bin"
+  if [[ "$stub_kind" == "ok" ]]; then
+    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+  else
+    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+  fi
+  [[ -n "$preseed_marker" ]] && : > "$worker_dir/.linear-mirror-pr"
+  (
+    PATH="$case_dir/bin:$PATH" \
+      ORCH_DIR="${case_dir}/orch" \
+      TICKET="CTL-449" \
+      PHASE="pr" \
+      bash "$PR_MIRROR_FILE" >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
+    echo "$?" > "$case_dir/exit-code"
+  )
+  echo "$case_dir"
+}
+
+# Case PR-A: happy — gh returns PR metadata, verify.json present.
+CASE_PRA="$(run_pr_mirror happy ok '' yes)"
+assert_eq "0" "$(cat "$CASE_PRA/exit-code")" "mirror-pr happy: exit 0"
+LOG_PRA="$CASE_PRA/linearis-calls.log"
+assert_grep '^discuss$' "$LOG_PRA" "mirror-pr happy: discuss landed"
+assert_grep 'Phase PR' "$LOG_PRA" "mirror-pr happy: body has 'Phase PR' header"
+assert_grep 'Files changed.*3' "$LOG_PRA" "mirror-pr happy: renders changed-file count"
+assert_grep 'Regression risk.*3' "$LOG_PRA" "mirror-pr happy: surfaces verify.json regression risk"
+[[ -e "$CASE_PRA/orch/workers/CTL-449/.linear-mirror-pr" ]] && pass "mirror-pr happy: marker written" || fail "mirror-pr happy: marker missing"
+
+# Case PR-B: fail-open — linearis discuss fails, no marker, warning on stderr.
+CASE_PRB="$(run_pr_mirror failopen fail '' yes)"
+assert_eq "0" "$(cat "$CASE_PRB/exit-code")" "mirror-pr fail-open: exit 0"
+[[ ! -e "$CASE_PRB/orch/workers/CTL-449/.linear-mirror-pr" ]] && pass "mirror-pr fail-open: no marker" || fail "mirror-pr fail-open: marker should not exist"
+assert_grep 'phase-pr: linearis discuss failed \(continuing\)' "$CASE_PRB/stderr.log" "mirror-pr fail-open: warning to stderr"
+
+# Case PR-C: idempotent — marker preseeded, discuss skipped.
+CASE_PRC="$(run_pr_mirror idempot ok seed yes)"
+assert_eq "0" "$(cat "$CASE_PRC/exit-code")" "mirror-pr idempotent: exit 0"
+if [[ ! -f "$CASE_PRC/linearis-calls.log" ]] || ! grep -q '^discuss$' "$CASE_PRC/linearis-calls.log" 2>/dev/null; then
+  pass "mirror-pr idempotent: discuss skipped"
+else
+  fail "mirror-pr idempotent: discuss should have been skipped (marker not honored)"
+fi
+
+# Case PR-D: no verify.json — still posts, renders the fail-soft fallback line.
+CASE_PRD="$(run_pr_mirror noverify ok '' no)"
+assert_eq "0" "$(cat "$CASE_PRD/exit-code")" "mirror-pr no-verify: exit 0"
+assert_grep '^discuss$' "$CASE_PRD/linearis-calls.log" "mirror-pr no-verify: still posts"
+assert_grep 'no verify.json found' "$CASE_PRD/linearis-calls.log" "mirror-pr no-verify: renders fallback line"
+
+# ─── Test 17 (CTL-632): phase-monitor-merge mirror runtime ────────────────────
+echo ""
+echo "Test 17 (CTL-632): phase-monitor-merge mirror — happy / fail-open / idempotent"
+
+MM_MIRROR_FILE="${SCRATCH}/mm-mirror-body.sh"
+awk '
+  /^```bash phase-monitor-merge-mirror$/ {capture=1; next}
+  /^```$/ {if (capture) {capture=0}}
+  capture { print }
+' "$SKILL_MONITOR_MERGE" > "$MM_MIRROR_FILE"
+if [[ -s "$MM_MIRROR_FILE" ]]; then
+  pass "phase-monitor-merge mirror block extractable from SKILL.md"
+else
+  fail "phase-monitor-merge mirror block extractable — no \`\`\`bash phase-monitor-merge-mirror\`\`\` fence found"
+fi
+
+seed_mm_worker() {
+  local worker_dir="$1"
+  mkdir -p "$worker_dir"
+  cat > "${worker_dir}/phase-monitor-merge.json" <<'JSON'
+{"status":"running","ticket":"CTL-449","phase":"monitor-merge","pr":{"number":42,"mergeCommitSha":"deadbeef1234","mergedAt":"2026-05-27T12:00:00Z","ciStatus":"merged"}}
+JSON
+}
+
+run_mm_mirror() {
+  local case_name="$1" stub_kind="$2" preseed_marker="${3:-}"
+  local case_dir="${SCRATCH}/mm-mirror-${case_name}"
+  local worker_dir="${case_dir}/orch/workers/CTL-449"
+  mkdir -p "$case_dir/bin"
+  seed_mm_worker "$worker_dir"
+  install_gh_stub "$case_dir/bin"
+  if [[ "$stub_kind" == "ok" ]]; then
+    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+  else
+    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+  fi
+  [[ -n "$preseed_marker" ]] && : > "$worker_dir/.linear-mirror-monitor-merge"
+  (
+    PATH="$case_dir/bin:$PATH" \
+      ORCH_DIR="${case_dir}/orch" \
+      TICKET="CTL-449" \
+      PHASE="monitor-merge" \
+      bash "$MM_MIRROR_FILE" >"$case_dir/stdout.log" 2>"$case_dir/stderr.log"
+    echo "$?" > "$case_dir/exit-code"
+  )
+  echo "$case_dir"
+}
+
+# Case MM-A: happy — gh returns CI rollup (3 SUCCESS) + 1 bot review.
+CASE_MMA="$(run_mm_mirror happy ok '')"
+assert_eq "0" "$(cat "$CASE_MMA/exit-code")" "mirror-monitor-merge happy: exit 0"
+LOG_MMA="$CASE_MMA/linearis-calls.log"
+assert_grep '^discuss$' "$LOG_MMA" "mirror-monitor-merge happy: discuss landed"
+assert_grep 'Phase Monitor-Merge' "$LOG_MMA" "mirror-monitor-merge happy: body has header"
+assert_grep '3/3 checks passed' "$LOG_MMA" "mirror-monitor-merge happy: renders CI rollup"
+assert_grep 'deadbeef1234' "$LOG_MMA" "mirror-monitor-merge happy: renders merge commit SHA"
+assert_grep 'Time to merge.*2h 0m' "$LOG_MMA" "mirror-monitor-merge happy: computes time-to-merge (10:00→12:00 = 2h)"
+assert_grep 'Bot reviews handled.*1' "$LOG_MMA" "mirror-monitor-merge happy: counts bot (Codex) reviews"
+[[ -e "$CASE_MMA/orch/workers/CTL-449/.linear-mirror-monitor-merge" ]] && pass "mirror-monitor-merge happy: marker written" || fail "mirror-monitor-merge happy: marker missing"
+
+# Case MM-B: fail-open.
+CASE_MMB="$(run_mm_mirror failopen fail '')"
+assert_eq "0" "$(cat "$CASE_MMB/exit-code")" "mirror-monitor-merge fail-open: exit 0"
+[[ ! -e "$CASE_MMB/orch/workers/CTL-449/.linear-mirror-monitor-merge" ]] && pass "mirror-monitor-merge fail-open: no marker" || fail "mirror-monitor-merge fail-open: marker should not exist"
+assert_grep 'phase-monitor-merge: linearis discuss failed \(continuing\)' "$CASE_MMB/stderr.log" "mirror-monitor-merge fail-open: warning to stderr"
+
+# Case MM-C: idempotent.
+CASE_MMC="$(run_mm_mirror idempot ok seed)"
+assert_eq "0" "$(cat "$CASE_MMC/exit-code")" "mirror-monitor-merge idempotent: exit 0"
+if [[ ! -f "$CASE_MMC/linearis-calls.log" ]] || ! grep -q '^discuss$' "$CASE_MMC/linearis-calls.log" 2>/dev/null; then
+  pass "mirror-monitor-merge idempotent: discuss skipped"
+else
+  fail "mirror-monitor-merge idempotent: discuss should have been skipped (marker not honored)"
+fi
+
+# ─── Test 18 (CTL-632 footer): mirror appends the metadata footer ─────────────
+echo ""
+echo "Test 18 (CTL-632 footer): implement mirror appends footer when PLUGIN_ROOT + bg fixture present"
+# Structural: every phase mirror skill wires the shared footer helper.
+for skill in "$SKILL_IMPLEMENT" "$SKILL_PR" "$SKILL_MONITOR_MERGE"; do
+  assert_grep 'phase-mirror-footer\.sh' "$skill" "$(basename "$(dirname "$skill")"): wires phase-mirror-footer.sh"
+done
+
+# Runtime: run the extracted implement mirror block with PLUGIN_ROOT pointed at
+# the real plugin + a bg-job fixture, and confirm the footer lands in the body.
+FOOT_DIR="${SCRATCH}/imp-mirror-footer"
+FOOT_WORKER="${FOOT_DIR}/orch/workers/CTL-449"
+FOOT_REPO="${FOOT_DIR}/repo"
+FOOT_JOBS="${FOOT_DIR}/jobs"
+mkdir -p "$FOOT_DIR/bin" "$FOOT_WORKER" "${FOOT_JOBS}/abcd1234"
+build_git_fixture "$FOOT_REPO" yes
+linearis_stub_install "$FOOT_DIR/bin" "$FOOT_DIR/linearis-calls.log"
+cat > "${FOOT_WORKER}/phase-implement.json" <<'JSON'
+{"status":"running","ticket":"CTL-449","phase":"implement","bg_job_id":"abcd1234","catalystSessionId":"sess_FOOTERTEST","model":"opus"}
+JSON
+cat > "${FOOT_DIR}/conv.jsonl" <<'JSONL'
+{"type":"assistant","message":{"model":"claude-opus-4-7","content":[{"type":"tool_use","name":"Task","input":{}}]}}
+{"type":"system","subtype":"turn_duration","durationMs":125000}
+{"type":"assistant","message":{"model":"claude-opus-4-7","content":[{"type":"text","text":"done"}]}}
+JSONL
+cat > "${FOOT_JOBS}/abcd1234/state.json" <<JSON
+{"sessionId":"abcd1234-aaaa-bbbb-cccc-000011112222","cwd":"/tmp/wt/CTL-449","linkScanPath":"${FOOT_DIR}/conv.jsonl"}
+JSON
+(
+  cd "$FOOT_REPO" || exit 1
+  env -u CLAUDE_CODE_SESSION_ID -u CATALYST_SESSION_ID \
+    PATH="$FOOT_DIR/bin:$PATH" \
+    ORCH_DIR="${FOOT_DIR}/orch" \
+    TICKET="CTL-449" \
+    PHASE="implement" \
+    PLUGIN_ROOT="${REPO_ROOT}/plugins/dev" \
+    CATALYST_BG_JOBS_DIR="${FOOT_JOBS}" \
+    bash "$MIRROR_BODY_FILE" >"$FOOT_DIR/stdout.log" 2>"$FOOT_DIR/stderr.log"
+  echo "$?" > "$FOOT_DIR/exit-code"
+)
+assert_eq "0" "$(cat "$FOOT_DIR/exit-code")" "mirror-footer: exit 0"
+LOG_FOOT="$FOOT_DIR/linearis-calls.log"
+assert_grep '^---$' "$LOG_FOOT" "mirror-footer: footer separator present in body"
+assert_grep 'model `claude-opus-4-7`' "$LOG_FOOT" "mirror-footer: footer renders model from JSONL"
+assert_grep '1 sub-agent\(s\) launched' "$LOG_FOOT" "mirror-footer: footer counts sub-agents"
+assert_grep 'active 2m 5s' "$LOG_FOOT" "mirror-footer: footer renders active working duration"
+assert_grep 'catalyst session `sess_FOOTERTEST`' "$LOG_FOOT" "mirror-footer: footer renders catalyst session id"
+assert_grep 'session uuid `abcd1234-aaaa-bbbb-cccc-000011112222`' "$LOG_FOOT" "mirror-footer: footer renders long session uuid"
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""

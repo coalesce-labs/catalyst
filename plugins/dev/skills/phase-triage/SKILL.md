@@ -245,6 +245,16 @@ _Triaged automatically by the phase-triage agent (CTL-451)._
 EOF
 )"
 
+# Append the shared run-metadata footer (CTL-632 follow-on): model, sub-agent
+# count, active working duration, session ids, cwd. Fail-soft — a missing helper
+# or unresolved orch dir simply omits the footer.
+__PT_FOOTER="${__PT_REPO_ROOT}/plugins/dev/scripts/lib/phase-mirror-footer.sh"
+if [[ -n "${ORCH_DIR:-}" && -x "${__PT_FOOTER}" ]]; then
+  MIRROR_FOOTER="$("${__PT_FOOTER}" --orch-dir "${ORCH_DIR}" --ticket "${TICKET}" --phase "triage" 2>/dev/null || true)"
+  [[ -n "${MIRROR_FOOTER}" ]] && COMMENT_BODY="${COMMENT_BODY}
+${MIRROR_FOOTER}"
+fi
+
 # CTL-614: the Linear comment post is best-effort. triage.json is already on
 # disk; the canonical pipeline contract is `phase.triage.complete.<TICKET>`
 # (see CTL-452). A transient `linearis issues discuss` failure (notably the

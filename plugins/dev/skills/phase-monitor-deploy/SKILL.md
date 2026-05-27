@@ -204,6 +204,14 @@ fi
 DEPLOY_STATE="$(printf '%s' "$DEPLOY_EVENT" \
   | jq -r '.attributes."deployment.state" // .body.payload.state // empty' 2>/dev/null)"
 
+# Preview / live environment URL from the deployment_status payload. Prefer the
+# environment URL (the actual deployed/preview site, e.g. a Cloudflare Pages
+# preview); fall back to target_url (often the CI run). Surfaced in the mirror
+# comment and persisted to the signal as structured data so a HUD/agent can link
+# straight to the running deploy.
+DEPLOY_URL="$(printf '%s' "$DEPLOY_EVENT" \
+  | jq -r '.body.payload.environmentUrl // .body.payload.environment_url // .body.payload.targetUrl // .body.payload.target_url // empty' 2>/dev/null || true)"
+
 # 3. Branch on deploy state.
 case "$DEPLOY_STATE" in
   success)
@@ -268,6 +276,7 @@ jq -nc \
   --arg sha "$MERGE_SHA" \
   --arg env "$DEPLOY_ENV" \
   --arg ts "$DEPLOY_TIME" \
+  --arg url "$DEPLOY_URL" \
   --slurpfile canary "$CANARY_OUT_FILE" \
   '{
     ticket: $ticket,
@@ -275,9 +284,44 @@ jq -nc \
     deploy_env: $env,
     deploy_state: "success",
     deploy_time: $ts,
+    deployment: ({environment: $env} + (if $url != "" then {url: $url} else {} end)),
     canary_result: ($canary | first),
     completed_at: $ts
   }' > "$RESULT_FILE"
+
+CANARY_STATUS_FOR_MIRROR="$(jq -r '.status // "unknown"' "$CANARY_OUT_FILE" 2>/dev/null || echo "unknown")"
+
+# Mirror the deploy outcome to Linear as a single comment (CTL-632). Shows the
+# environment + preview/live URL (clickable straight from the ticket) and the
+# canary verdict. Fail-open + idempotent via the per-phase marker. The footer is
+# appended via the shared helper. monitor-deploy is the terminal phase, so this
+# is the last automated comment on the ticket.
+LINEAR_MIRROR_MARKER="${WORKER_DIR}/.linear-mirror-monitor-deploy"
+if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]] && command -v linearis >/dev/null 2>&1; then
+  DEPLOY_URL_LINE="${DEPLOY_URL:-_none reported_}"
+  MIRROR_BODY="$(cat <<EOF
+**Phase Monitor-Deploy** — deployed to \`${DEPLOY_ENV}\`
+
+- **Deploy**: success · canary \`${CANARY_STATUS_FOR_MIRROR}\`
+- **Preview / environment URL**: ${DEPLOY_URL_LINE}
+- **Merge SHA**: \`${MERGE_SHA}\`
+
+_Posted automatically by phase-monitor-deploy (CTL-632)._
+EOF
+)"
+  ORCH_DIR_RESOLVED="${CATALYST_ORCHESTRATOR_DIR:-${ORCH_DIR:-$(cd "${WORKER_DIR}/../.." 2>/dev/null && pwd || echo "")}}"
+  FOOTER_BIN="${__PM_REPO_ROOT}/plugins/dev/scripts/lib/phase-mirror-footer.sh"
+  if [[ -n "${ORCH_DIR_RESOLVED}" && -x "${FOOTER_BIN}" ]]; then
+    MIRROR_FOOTER="$("${FOOTER_BIN}" --orch-dir "${ORCH_DIR_RESOLVED}" --ticket "${TICKET}" --phase "monitor-deploy" 2>/dev/null || true)"
+    [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
+${MIRROR_FOOTER}"
+  fi
+  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+    : > "${LINEAR_MIRROR_MARKER}"
+  else
+    echo "phase-monitor-deploy: linearis discuss failed (continuing)" >&2
+  fi
+fi
 
 # 6. Emit the canonical phase event based on canary status.
 if [[ "$CANARY_STATUS" == "success" ]]; then
