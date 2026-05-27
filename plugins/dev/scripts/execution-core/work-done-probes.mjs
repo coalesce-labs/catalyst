@@ -113,6 +113,24 @@ function verifyProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile } = 
   );
 }
 
+// CTL-653: readVerifyVerdict — the verdict the advancement router branches on
+// after a verify `done`. Reuses verifyProbe's verify.json read shape. Returns:
+//   "fail" — regression_risk ≥ 5 OR any severity:"high" finding (phase-verify
+//            SKILL.md:196-208 thresholds) → router detours verify → remediate.
+//   "pass" — readable verdict below threshold with no high finding → verify → review.
+//   null   — missing/malformed/non-numeric-risk artifact. Deliberately distinct
+//            from "pass" so the router can apply the conservative non-regressing
+//            default (route to review) rather than stalling on an absent verdict.
+// Pure given the injected readFile seam; never throws (readJson swallows misses).
+export function readVerifyVerdict({ ticket, orchDir } = {}, { readFile = defaultReadFile } = {}) {
+  if (!ticket || !orchDir) return null;
+  const { ok, value } = readJson(workerArtifact(orchDir, ticket, "verify.json"), readFile);
+  if (!ok || !value || typeof value.regression_risk !== "number") return null;
+  const highFinding =
+    Array.isArray(value.findings) && value.findings.some((f) => f?.severity === "high");
+  return value.regression_risk >= 5 || highFinding ? "fail" : "pass";
+}
+
 function reviewProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile } = {}) {
   if (!ticket || !orchDir) return false;
   const { ok, value } = readJson(workerArtifact(orchDir, ticket, "review.json"), readFile);

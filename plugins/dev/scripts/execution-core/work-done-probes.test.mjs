@@ -8,6 +8,7 @@ import {
   defaultRunGit,
   resolveWorktree,
   defaultReadFile,
+  readVerifyVerdict,
 } from "./work-done-probes.mjs";
 
 // makeRunGit — a deterministic `git` fake keyed on the trailing positional args.
@@ -169,6 +170,47 @@ describe("WORK_DONE_PROBES.verify", () => {
   });
   test("false on missing file / invalid JSON", () => {
     expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+});
+
+// CTL-653: readVerifyVerdict — regression_risk + high-finding → "pass"|"fail"|null.
+// Thresholds come from phase-verify SKILL.md:196-208 (risk ≥ 5 OR any high finding).
+// null (missing/malformed) is deliberately distinct from "pass" so the router can
+// pick the conservative non-regressing default (route to review) without stalling.
+describe("CTL-653: readVerifyVerdict", () => {
+  const verdict = (json) =>
+    readVerifyVerdict(
+      { ticket: "CTL-653", orchDir: ORCH },
+      { readFile: makeReadFile({ [wpath("CTL-653", "verify.json")]: JSON.stringify(json) }) }
+    );
+
+  test("regression_risk >= 5 → fail", () => {
+    expect(verdict({ regression_risk: 5, findings: [] })).toBe("fail");
+    expect(verdict({ regression_risk: 9, findings: [] })).toBe("fail");
+  });
+  test("any severity:high finding → fail (even if risk < 5)", () => {
+    expect(verdict({ regression_risk: 2, findings: [{ severity: "low" }, { severity: "high" }] })).toBe("fail");
+  });
+  test("risk < 5 and no high finding → pass", () => {
+    expect(verdict({ regression_risk: 4, findings: [{ severity: "low" }] })).toBe("pass");
+    expect(verdict({ regression_risk: 0, findings: [] })).toBe("pass");
+  });
+  test("missing/unreadable verify.json → null (router treats null as pass: no regression)", () => {
+    expect(
+      readVerifyVerdict({ ticket: "CTL-653", orchDir: ORCH }, { readFile: makeReadFile({}) })
+    ).toBeNull();
+  });
+  test("malformed verify.json (no numeric regression_risk) → null", () => {
+    expect(verdict({ findings: [] })).toBeNull();
+    expect(verdict({ regression_risk: "high", findings: [] })).toBeNull();
+  });
+  test("no readFile call on missing input → null", () => {
+    const boom = () => {
+      throw new Error("readFile must not be called");
+    };
+    expect(readVerifyVerdict({ ticket: null, orchDir: ORCH }, { readFile: boom })).toBeNull();
+    expect(readVerifyVerdict({ ticket: "CTL-653", orchDir: null }, { readFile: boom })).toBeNull();
+    expect(readVerifyVerdict(undefined, { readFile: boom })).toBeNull();
   });
 });
 
