@@ -851,7 +851,8 @@ for full documentation.
       "keepWorktreeAfterMerge": false,
       "orphanReaper": {
         "enabled": true,
-        "intervalSeconds": 600
+        "intervalSeconds": 600,
+        "minIdleSeconds": 900
       }
     }
   }
@@ -876,6 +877,7 @@ for full documentation.
 | `keepWorktreeAfterMerge`                    | boolean      | `false`                      | When `false` (default), `phase-monitor-merge` auto-tears-down the local worktree + branch after a PR merges (CTL-649): it pre-sweeps any `claude --bg` sessions still cwd'd in the worktree, then `git worktree remove` + `git branch -D`. Set `true` to leave merged worktrees in place for manual inspection.                                                                                                                                                                                                                                                                                                                                          |
 | `orphanReaper.enabled`                      | boolean      | `true`                       | When `true` (default), the execution-core daemon runs a periodic sweep (CTL-649) that emits `orphans.reap-requested`; the in-daemon reaper stops any `claude --bg` session whose cwd worktree no longer exists. Set `false` to disable the periodic backstop (the per-call-site reap-intent producers still fire).                                                                                                                                                                                                                                                                                                                                       |
 | `orphanReaper.intervalSeconds`              | number       | `600`                        | Cadence of the periodic orphan sweep in seconds (default 10 minutes). Read at daemon launch from `.catalyst/config.json` (path overridable via `CATALYST_CONFIG_FILE`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `orphanReaper.minIdleSeconds`               | number       | `900`                        | Minimum LAST_SEEN (transcript mtime age) in seconds before the periodic orphan reaper will stop a session — protects recently-active sessions. A session whose transcript was touched within this window is left alone even if classified DONE/ORPHAN/DUPLICATE. Read at daemon launch alongside `enabled`/`intervalSeconds` (default 15 minutes).                                                                                                                                                                                                                                                                                                     |
 
 For `dispatchMode: "execution-core"` the eligible-set query is **not** per-repo
 config — it lives in the central registry's `eligibleQuery` (see [Central

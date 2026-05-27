@@ -60,9 +60,23 @@ plan. The summary line ends in `planned (dry-run)` until you opt in.
 
 Additional guardrails baked into every path:
 
+- **Interactive-session protection.** `claude agents --json` reports each session's `.kind` as
+  `interactive` (a window you opened in your own terminal) or `background` (a `claude --bg` phase
+  worker). The periodic orphan reaper and `sessions prune` only ever reap `background` sessions —
+  interactive sessions are **never** reaped by default. This is the *primary* protection for your
+  own windows, and it is stronger than the self-session guard below: the kind filter spares **every**
+  interactive session you have open, whereas the self-session guard only covers the single
+  controlling session the CLI happens to be running inside. Opt in with `--include-interactive`
+  (off by default) only when you deliberately want interactive rows in scope.
+- **Recency / minimum-idle threshold.** The orphan reaper and `sessions prune` will not reap a
+  session whose LAST_SEEN (now − transcript-JSONL mtime, i.e. how recently it was active) is below a
+  minimum-idle threshold — **default 900 seconds / 15 min** — even when it is classified
+  DONE/ORPHAN/DUPLICATE. A recently-touched session is treated as in use. Tune with
+  `--min-idle-seconds <N>` (config key `catalyst.orchestration.orphanReaper.minIdleSeconds`).
 - **Self-session protection.** `sessions prune` reads `$CLAUDE_CODE_SESSION_ID` and will never reap
   the session the CLI is running inside. It logs `skipping self-session <id> (controlling session)`
-  and moves on.
+  and moves on. Note this only covers the one controlling session — the kind filter above is what
+  protects your *other* interactive windows.
 - **`--yes` is mandatory to act.** There is no other "confirm" flag and no interactive prompt — this
   is a non-interactive operator tool.
 - **`--force` gates destructive branch deletes.** `branches prune` only deletes merged refs by
@@ -134,6 +148,8 @@ single `ps` snapshot for RSS attribution, and an optional Linear-state cache. Pr
 | `--dry-run`       | `prune`             | Force dry-run even with `--yes`. Plan only.                              |
 | `--max <N>`       | `prune`             | Cap planned reaps (default `20`).                                        |
 | `--include-idle`  | `prune`             | Also reap `IDLE` rows (opt-in — an idle session may be between turns).   |
+| `--include-interactive` | `prune`       | Also reap `interactive` sessions (opt-in — off by default; these are your own terminal windows). |
+| `--min-idle-seconds <N>` | `prune`      | Skip any session whose LAST_SEEN is below `N` seconds (default `900`). A recently-active session is left alone even if classified DONE/ORPHAN/DUPLICATE. |
 | `--categories <L>`| `prune`             | Comma-separated classification list to act on, overriding the default.   |
 
 ### Classification taxonomy
@@ -150,9 +166,17 @@ Each session is classified by the priority chain **DONE → ORPHAN → IDLE → 
 | `ORPHAN`    | The session's cwd no longer exists on disk — its worktree was removed out from under it.    | Yes                |
 | `DONE`      | The worker signal is in a terminal state — the phase finished but the session lingers.      | Yes                |
 
-The default prune set is `DONE, ORPHAN, DUPLICATE`. RSS is attributed per process tree (a `--bg`
-session plus its MCP servers, pty helper, and children), so the table's totals reflect the real
-memory the leak holds, not just the root process.
+Alongside the class, each `list` row surfaces three more columns: `KIND` (`interactive` or
+`background`, from `claude agents --json`), `AGE` (now − `startedAt`, how long ago the session was
+created), and `LAST_SEEN` (now − transcript-JSONL mtime, how recently it was active). `interactive`
+rows are still **shown** in the inventory but are tagged protected and excluded from prune by
+default — only `--include-interactive` pulls them in. Taken together with the recency guard, the
+effective default auto-reap set is now **`background` + `{DONE, ORPHAN, DUPLICATE}` + LAST_SEEN past
+the `--min-idle-seconds` threshold** — a background, terminal/orphaned/duplicate session that has
+also been idle long enough to be safe.
+
+RSS is attributed per process tree (a `--bg` session plus its MCP servers, pty helper, and
+children), so the table's totals reflect the real memory the leak holds, not just the root process.
 
 ### Example
 
@@ -322,5 +346,7 @@ reports which steps completed and where it stopped (`aborted at <step>`), and th
 non-zero.
 
 `--dry-run`, `--yes`, and the resource flags (`--include-idle`, `--include-stale`, `--force`,
-`--max`) propagate to every step. The final `git worktree prune` only runs under `--yes` (it is a
-real mutation, so it is skipped in dry-run).
+`--max`) propagate to every step. The sessions-specific safety flags `--include-interactive` and
+`--min-idle-seconds <N>` likewise propagate to the `sessions` step (so a full `tidy` honors the same
+interactive-protection and recency guards as a standalone `sessions prune`). The final
+`git worktree prune` only runs under `--yes` (it is a real mutation, so it is skipped in dry-run).
