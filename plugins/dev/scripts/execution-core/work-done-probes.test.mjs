@@ -105,6 +105,44 @@ describe("WORK_DONE_PROBES — registry shape", () => {
       expect(hasProbe(phase)).toBe(false);
     }
   });
+  test("CTL-653: remediate is registered (no false-dead no-probe escalation)", () => {
+    expect(hasProbe("remediate")).toBe(true);
+  });
+});
+
+// CTL-653: remediateProbe — remediate is fix-capable like implement, so "done"
+// means a commit landed on the ticket branch + a clean tree. The point of
+// registering ANY probe (research §9) is that a false-dead during remediate
+// resolves via reclaim/revive rather than escalating no-probe-for-phase →
+// needs-human, which would defeat CTL-653's autonomy goal.
+describe("WORK_DONE_PROBES.remediate", () => {
+  test("true when worktree exists + commits-ahead > 0 + clean tree", () => {
+    const wt = "/wt/CTL-1";
+    const runGit = makeRunGit({
+      "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-1", wt), stderr: "" },
+      [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: "3\n", stderr: "" },
+      [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+    });
+    expect(WORK_DONE_PROBES.remediate({ ticket: "CTL-1", repoRoot: "/repo" }, { runGit })).toBe(true);
+  });
+  test("false when no commits ahead / dirty tree", () => {
+    const wt = "/wt/CTL-1";
+    const noCommits = makeRunGit({
+      "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-1", wt), stderr: "" },
+      [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: "0\n", stderr: "" },
+      [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+    });
+    expect(WORK_DONE_PROBES.remediate({ ticket: "CTL-1", repoRoot: "/repo" }, { runGit: noCommits })).toBe(
+      false
+    );
+  });
+  test("false on missing input (no git spawn)", () => {
+    const boom = () => {
+      throw new Error("runGit must not be called");
+    };
+    expect(WORK_DONE_PROBES.remediate({ ticket: null, repoRoot: "/repo" }, { runGit: boom })).toBe(false);
+    expect(WORK_DONE_PROBES.remediate({ ticket: "CTL-1", repoRoot: null }, { runGit: boom })).toBe(false);
+  });
 });
 
 // makeReadFile — deterministic fs fake keyed on absolute path. Returns the

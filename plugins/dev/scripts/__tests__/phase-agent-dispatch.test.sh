@@ -758,6 +758,35 @@ assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" \
 unset CLAUDE_STUB_EXIT CATALYST_EMIT_COMPLETE
 
 echo ""
+echo "Test 20 (CTL-653): remediate dispatches with turnCap 40 + verify.json prior gate"
+fresh_env t20_remediate
+# remediate's prior artifact is verify.json — create it so the gate passes.
+printf '%s\n' '{"regression_risk":7,"findings":[{"severity":"high"}],"tests_attempted":3,"gates":{},"generatedAt":"2026-05-27T00:00:00Z"}' \
+	>"${WORKER_DIR}/verify.json"
+"$DISPATCH" --phase remediate --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1
+SIGNAL_REM="${WORKER_DIR}/phase-remediate.json"
+if [[ ! -f $SIGNAL_REM ]]; then
+	fail "remediate signal file created: $SIGNAL_REM"
+else
+	pass "remediate signal file created"
+	assert_eq "remediate" "$(jq -r '.phase' "$SIGNAL_REM")" "signal.phase = remediate"
+	assert_eq "40" "$(jq -r '.turnCap' "$SIGNAL_REM")" "signal.turnCap = 40 (remediate, fix-scoped)"
+fi
+
+echo ""
+echo "Test 21 (CTL-653): remediate refuses when verify.json (prior artifact) is missing"
+fresh_env t21_remediate
+# No verify.json → the prior-artifact gate must refuse (exit 2, no signal).
+"$DISPATCH" --phase remediate --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/rem.out" 2>/dev/null
+RC_REM=$?
+assert_eq "2" "$RC_REM" "exit code 2 when remediate's verify.json is missing"
+assert_eq "refused" "$(jq -r '.status' "${TEST_DIR}/rem.out" 2>/dev/null || echo "")" \
+	"remediate stdout JSON status = refused"
+[[ -f "${WORKER_DIR}/phase-remediate.json" ]] && SIG_REM_EXISTS="yes" || SIG_REM_EXISTS="no"
+assert_eq "no" "$SIG_REM_EXISTS" "no remediate signal written when refused"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then

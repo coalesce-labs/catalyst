@@ -76,6 +76,7 @@ phase_default_turn_cap() {
 	pr) echo 12 ;;
 	monitor-merge) echo 50 ;;
 	monitor-deploy) echo 30 ;;
+	remediate) echo 40 ;; # CTL-653: fix-scoped — smaller than implement's 75
 	*) echo "$DEFAULT_TURN_CAP" ;;
 	esac
 }
@@ -96,6 +97,7 @@ prior_artifact_for_phase() {
 	pr) echo "signal:review.json" ;;
 	monitor-merge) echo "signal:phase-pr.json" ;;
 	monitor-deploy) echo "signal:phase-monitor-merge.json" ;;
+	remediate) echo "signal:verify.json" ;; # CTL-653: reads verify's findings[], NOT review.json
 	*) echo "" ;;
 	esac
 }

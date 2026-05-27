@@ -299,10 +299,18 @@ const planProbe = artifactProbe("thoughts/shared/plans", {
   allOf: ["## Phase ", "Success Criteria"],
 });
 
+// CTL-653: remediateProbe — remediate is fix-capable (like implement), so its
+// work-done signal is the same: a commit landed on the ticket branch + a clean
+// tree. It reuses implementProbe's commit-state check verbatim. Registering ANY
+// probe is the real point (research §9): without it, a false-dead during
+// remediate hits CTL-587's branch-(A) "no-probe-for-phase" escalation →
+// needs-human, defeating the very autonomy CTL-653 adds.
+const remediateProbe = implementProbe;
+
 // WORK_DONE_PROBES — phase → probe. Adding a probe is the entire opt-in for a
 // phase to participate in the CTL-574 reclaim sweep. All nine pipeline phases
-// now have an entry; only a genuinely-unknown phase falls through to CTL-587's
-// branch-(A) escalation.
+// plus the ancillary remediate phase (CTL-653) have an entry; only a
+// genuinely-unknown phase falls through to CTL-587's branch-(A) escalation.
 export const WORK_DONE_PROBES = {
   implement: implementProbe,
   research: researchProbe,
@@ -313,6 +321,7 @@ export const WORK_DONE_PROBES = {
   pr: prProbe,
   "monitor-merge": monitorMergeProbe,
   "monitor-deploy": monitorDeployProbe,
+  remediate: remediateProbe,
 };
 
 // hasProbe — true when the given phase has a registered probe. Used by the
