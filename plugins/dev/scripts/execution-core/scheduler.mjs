@@ -54,9 +54,15 @@ import { emitReapIntent } from "./reap-intent.mjs";
 // reclaimDeadWorkIfPossible in recovery.mjs for the decision tree.
 // CTL-611: defaultAppendDispatchFailedEvent — emits phase.dispatch.failed.<T>
 // to the unified event log on every dispatch failure (Gap 1 + Gap 2).
+// CTL-660: defaultAppendDispatchRequestedEvent/LaunchedEvent — the success-path
+// complement, emitted when the scheduler decides to dispatch (requested) and
+// after the bg worker is verified live (launched), so pickup→launch latency is
+// derivable from the unified event log.
 import {
   reclaimDeadWorkIfPossible as defaultReclaimDeadWork,
   defaultAppendDispatchFailedEvent,
+  defaultAppendDispatchRequestedEvent,
+  defaultAppendDispatchLaunchedEvent,
 } from "./recovery.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -451,6 +457,19 @@ function safeWrite(fn, ctx) {
   }
 }
 
+// CTL-660: best-effort guard for the dispatch-lifecycle emitters. The default
+// emitters (defaultAppendDispatchRequested/LaunchedEvent → appendEnvelopeBestEffort)
+// already swallow IO errors and return false, but the emitters are an injection
+// seam — a test or future caller could pass one that throws. An audit emit must
+// NEVER gate or abort a dispatch decision, so isolate the call here.
+function safeEmit(fn, arg, ctx) {
+  try {
+    fn(arg);
+  } catch (err) {
+    log.warn({ ...ctx, err: err.message }, "scheduler: dispatch-lifecycle emit threw — continuing tick");
+  }
+}
+
 // CTL-585 labelOnce now lives in `label-guard.mjs` (CTL-638 re-home — see the
 // import block at the top of this file). The shared module also hosts the
 // per-(ticket, phase) escalation cool-down used by the recovery sweep.
@@ -700,6 +719,11 @@ export function schedulerTick(
     // demotion path independently of fixture choice (fakeDispatch / recorder).
     verifyDispatched = verifyDispatchedSignal,
     appendDispatchFailedEvent = defaultAppendDispatchFailedEvent,
+    // CTL-660: success-path lifecycle emitters. requested fires when the
+    // scheduler DECIDES to dispatch; launched fires only after verifyDispatched
+    // confirms a live worker. Both best-effort — no branch gates on the return.
+    appendDispatchRequestedEvent = defaultAppendDispatchRequestedEvent,
+    appendDispatchLaunchedEvent = defaultAppendDispatchLaunchedEvent,
   } = {}
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -786,6 +810,12 @@ export function schedulerTick(
     });
     if (!next) continue;
     if (inDispatchCooldown(orchDir, ticket, next, now())) continue; // CTL-624: throttle refused re-dispatch
+    // CTL-660: record the dispatch DECISION before the spawn. Best-effort.
+    safeEmit(
+      appendDispatchRequestedEvent,
+      { orchId: ticket, ticket, target_phase: next, reason: "advance" },
+      { ticket, phase: next }
+    );
     const r = dispatchTicket(orchDir, ticket, next, { dispatch });
     if (r.code === 0) {
       // CTL-611: verify the dispatch actually produced a live worker before
@@ -795,6 +825,20 @@ export function schedulerTick(
       const v = verifyDispatched(orchDir, ticket, next);
       if (v.ok) {
         clearDispatchCooldown(orchDir, ticket, next); // CTL-624: success clears any prior cool-down
+        // CTL-660: record the VERIFIED launch. Re-read the signal for the
+        // bg_job_id + worktreePath the launched worker wrote.
+        const sig = readPhaseSignalRaw(orchDir, ticket, next);
+        safeEmit(
+          appendDispatchLaunchedEvent,
+          {
+            orchId: ticket,
+            ticket,
+            target_phase: next,
+            bg_job_id: sig?.bg_job_id,
+            worktree_path: sig?.worktreePath,
+          },
+          { ticket, phase: next }
+        );
         advanced.push({ ticket, phase: next });
         // CTL-657: stop the predecessor worker now that its successor is live.
         emitPredecessorReap(orchDir, ticket, signals, next);
@@ -856,6 +900,17 @@ export function schedulerTick(
   const dispatched = [];
   for (const t of selected) {
     if (inDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, now())) continue; // CTL-624: throttle refused re-dispatch
+    // CTL-660: record the new-work dispatch DECISION before the spawn.
+    safeEmit(
+      appendDispatchRequestedEvent,
+      {
+        orchId: t.identifier,
+        ticket: t.identifier,
+        target_phase: NEW_WORK_ENTRY_PHASE,
+        reason: "new-work",
+      },
+      { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
+    );
     const r = dispatchTicket(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, { dispatch });
     if (r.code === 0) {
       // CTL-611: same Gap 1 verifier as the advancement sweep — a rc=0
@@ -863,6 +918,19 @@ export function schedulerTick(
       const v = verifyDispatched(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE);
       if (v.ok) {
         clearDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-624: success clears any prior cool-down
+        // CTL-660: record the VERIFIED launch for the new ticket's entry phase.
+        const sig = readPhaseSignalRaw(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE);
+        safeEmit(
+          appendDispatchLaunchedEvent,
+          {
+            orchId: t.identifier,
+            ticket: t.identifier,
+            target_phase: NEW_WORK_ENTRY_PHASE,
+            bg_job_id: sig?.bg_job_id,
+            worktree_path: sig?.worktreePath,
+          },
+          { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
+        );
         dispatched.push(t.identifier);
         // CTL-558: write the entry-phase (`research`) status for the new ticket.
         safeWrite(

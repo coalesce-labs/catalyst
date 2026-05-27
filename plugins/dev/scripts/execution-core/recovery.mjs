@@ -363,6 +363,58 @@ export function defaultAppendDispatchFailedEvent({
   );
 }
 
+// CTL-660: success-path dispatch lifecycle events — the complement to
+// defaultAppendDispatchFailedEvent. The daemon already emits on the dispatch
+// FAILURE path (above) and on phase COMPLETION, but nothing when it DECIDES to
+// dispatch a phase or when the `claude --bg` worker LAUNCHES, so the
+// "daemon-saw-Ready → worker-launched" latency is not derivable from the
+// unified event log. These two emitters close that gap. Like every audit
+// emitter they are best-effort (no caller gates on the return); the phase slot
+// is the literal "dispatch" and the real phase rides in payload.target_phase,
+// matching the dispatch.failed shape. They are deliberately NOT in the broker's
+// PHASE_EVENT_PATTERN (complete|failed|turn-cap-exhausted|skipped) — the HUD
+// reads the unified log directly, so no broker routing is required.
+
+// defaultAppendDispatchRequestedEvent — phase.dispatch.requested.<TICKET>.
+// Emitted when the scheduler/recovery DECIDES to dispatch a phase, before the
+// `claude --bg` spawn. reason ∈ {new-work, advance, revive}.
+export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_phase, reason }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "dispatch",
+      ticket,
+      orchId,
+      action: "requested",
+      reason,
+      payloadExtras: { target_phase },
+    }),
+    "dispatch-requested",
+  );
+}
+
+// defaultAppendDispatchLaunchedEvent — phase.dispatch.launched.<TICKET>.
+// Emitted after `claude --bg` returns and the signal is verified, carrying the
+// bg-job shortId (the de-facto session discriminator) + worktree path so the
+// launched↔complete wall-clock can be computed downstream.
+export function defaultAppendDispatchLaunchedEvent({
+  orchId,
+  ticket,
+  target_phase,
+  bg_job_id,
+  worktree_path,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "dispatch",
+      ticket,
+      orchId,
+      action: "launched",
+      payloadExtras: { target_phase, bg_job_id, worktree_path },
+    }),
+    "dispatch-launched",
+  );
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass
@@ -379,7 +431,17 @@ export function defaultAppendDispatchFailedEvent({
 // can be unit-tested (every test in recovery.test.mjs that overrides the
 // outer `reviveDispatch` would otherwise leave the signal-reset logic — the
 // load-bearing half — uncovered).
-export function defaultReviveDispatch({ orchDir, ticket, phase, resumeSession }, { dispatch = defaultDispatch } = {}) {
+export function defaultReviveDispatch(
+  { orchDir, ticket, phase, resumeSession },
+  {
+    dispatch = defaultDispatch,
+    // CTL-660: success-path lifecycle emitters, injectable for tests. Default
+    // to the real best-effort helpers so production emits requested→launched
+    // on the revive path too (the failed path was already covered by CTL-611).
+    appendRequested = defaultAppendDispatchRequestedEvent,
+    appendLaunched = defaultAppendDispatchLaunchedEvent,
+  } = {},
+) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   if (!existsSync(signalPath)) {
     log.warn(
@@ -393,10 +455,16 @@ export function defaultReviveDispatch({ orchDir, ticket, phase, resumeSession },
   // launching the bg worker. Pre-CTL-615 signals lack the field; in that case
   // we omit expectedWorktreePath and fall through to legacy behaviour.
   let expectedWorktreePath;
+  // CTL-660: orchId for the lifecycle emits, read from the same parse. Falls
+  // back to undefined → buildEventEnvelope defaults it to the ticket.
+  let orchId;
   try {
     const sig = JSON.parse(readFileSync(signalPath, "utf8"));
     if (typeof sig.worktreePath === "string" && sig.worktreePath.length > 0) {
       expectedWorktreePath = sig.worktreePath;
+    }
+    if (typeof sig.orchestrator === "string" && sig.orchestrator.length > 0) {
+      orchId = sig.orchestrator;
     }
     sig.status = "stalled";
     sig.attentionReason = "ctl-587-revive-reset";
@@ -417,7 +485,30 @@ export function defaultReviveDispatch({ orchDir, ticket, phase, resumeSession },
   // spawns `claude --bg --resume <uuid>`. Only present on the resume path; a
   // cold/unresumable revive omits it and falls through to a fresh dispatch.
   if (resumeSession) dispatchArgs.resumeSession = resumeSession;
-  return dispatch(dispatchArgs);
+  // CTL-660: record the revive DECISION before the spawn (reason="revive"),
+  // then the verified launch after a clean dispatch. Both best-effort — the
+  // default emitters swallow IO errors (appendEnvelopeBestEffort); the revive
+  // proceeds regardless of either return value.
+  appendRequested({ orchId, ticket, target_phase: phase, reason: "revive" });
+  const res = dispatch(dispatchArgs);
+  if (res && res.code === 0) {
+    // Re-read the signal the dispatcher just rewrote (status dispatched/running
+    // + bg_job_id + worktreePath) so launched carries the live worker's id.
+    let sig2 = null;
+    try {
+      sig2 = JSON.parse(readFileSync(signalPath, "utf8"));
+    } catch {
+      sig2 = null;
+    }
+    appendLaunched({
+      orchId,
+      ticket,
+      target_phase: phase,
+      bg_job_id: sig2?.bg_job_id,
+      worktree_path: sig2?.worktreePath,
+    });
+  }
+  return res;
 }
 
 // defaultApplyStalledLabel — apply the flat `needs-human` label through the

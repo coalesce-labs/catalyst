@@ -515,6 +515,26 @@ export function formatDetails(event: CanonicalEvent): string {
       return out;
     }
   }
+  // CTL-660: dispatch-lifecycle events carry the real phase in
+  // body.payload.target_phase (the EVENT cell shows the literal "dispatch"
+  // slot), so render that + the discriminating field rather than the generic
+  // payload dump. Only requested/launched are claimed here; phase.dispatch.failed
+  // (CTL-611) keeps its existing generic rendering.
+  if (name?.startsWith("phase.dispatch.requested.") || name?.startsWith("phase.dispatch.launched.")) {
+    const p = payload as Record<string, unknown> | undefined;
+    const targetPhase = typeof p?.["target_phase"] === "string" ? p["target_phase"] : "?";
+    let out: string;
+    if (name.startsWith("phase.dispatch.launched.")) {
+      const bg = typeof p?.["bg_job_id"] === "string" ? p["bg_job_id"] : "";
+      out = `launched ${targetPhase}${bg ? ` bg:${bg}` : ""}`;
+    } else {
+      const reason = typeof p?.["reason"] === "string" ? p["reason"] : "";
+      out = `dispatch → ${targetPhase}${reason ? ` (${reason})` : ""}`;
+    }
+    const sanitized = sanitize(out, "oneline");
+    detailsCache.set(event, sanitized);
+    return sanitized;
+  }
   const msg = event.body?.message ?? "";
   let raw = msg;
   if (payload && typeof payload === "object") {
