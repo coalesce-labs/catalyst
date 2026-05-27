@@ -3,7 +3,7 @@
 // directly (git branch -D / git push origin --delete), NOT through the reaper.
 
 import { describe, it, expect } from "bun:test";
-import { classify, buildRows, runBranchesPrune, parseBranchArgs } from "./branches.mjs";
+import { classify, buildRows, runBranchesPrune, parseBranchArgs, gitLines } from "./branches.mjs";
 import { ArgError } from "./args.mjs";
 
 describe("branches classify", () => {
@@ -304,5 +304,34 @@ describe("parseBranchArgs (strict shared parser + option mapping)", () => {
     expect(parseBranchArgs(["--scope", "local"]).scope).toBe("local");
     expect(parseBranchArgs(["--scope", "remote"]).scope).toBe("remote");
     expect(parseBranchArgs(["--scope", "both"]).scope).toBe("both");
+  });
+
+  it("accepts --repo-root <path> (CTL-675)", () => {
+    expect(parseBranchArgs(["prune", "--repo-root", "/r"]).repoRoot).toBe("/r");
+  });
+});
+
+// CTL-675: the shared listing runner now propagates a git failure (anchored to
+// a resolved repoRoot) instead of swallowing it to [] — the silent no-op fix.
+describe("gitLines (CTL-675 throw-propagation + cwd anchor)", () => {
+  it("propagates a git failure instead of returning empty", () => {
+    const run = () => {
+      const e = new Error("x");
+      e.stderr = "fatal: not a git repository\n";
+      throw e;
+    };
+    expect(() => gitLines(["branch", "--format=%(refname:short)"], "/r", run)).toThrow(
+      /fatal: not a git repository/
+    );
+  });
+
+  it("splits stdout lines on success, anchored to repoRoot", () => {
+    let seenCwd;
+    const run = (_a, opts) => {
+      seenCwd = opts.cwd;
+      return "main\nfeat\n";
+    };
+    expect(gitLines(["branch"], "/r", run)).toEqual(["main", "feat"]);
+    expect(seenCwd).toBe("/r");
   });
 });

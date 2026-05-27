@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parseArgs, ArgError } from "./args.mjs";
 import { ghPrList } from "./worktrees.mjs";
+import { resolveRepoRoot, runGitCapture } from "./repo.mjs";
 
 const SCOPES = new Set(["local", "remote", "both"]);
 
@@ -54,59 +55,65 @@ export function classify({
 
 // ─── I/O sources ─────────────────────────────────────────────────────────────
 
-function gitLines(args) {
-  try {
-    const out = execFileSync("git", args, { encoding: "utf8" });
-    return out
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
+/**
+ * gitLines — shared listing runner. Routes through runGitCapture (anchored to a
+ * resolved repoRoot) so a git failure THROWS a clean wrapped error instead of
+ * swallowing to [] — the silent-no-op fix (CTL-675). Exported for tests; `run`
+ * is the injectable git runner.
+ */
+export function gitLines(args, repoRoot, run) {
+  const cwd = repoRoot ?? resolveRepoRoot();
+  const out = runGitCapture(args, run ? { cwd, run } : { cwd });
+  return out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
 }
 
-function listLocalBranches() {
-  return gitLines(["branch", "--format=%(refname:short)"]);
+function listLocalBranches(repoRoot) {
+  return gitLines(["branch", "--format=%(refname:short)"], repoRoot);
 }
 
-function listRemoteBranches() {
+function listRemoteBranches(repoRoot) {
   // origin/<name> → <name>; skip the symbolic origin/HEAD.
-  return gitLines(["branch", "-r", "--format=%(refname:short)"])
+  return gitLines(["branch", "-r", "--format=%(refname:short)"], repoRoot)
     .filter((b) => b.startsWith("origin/") && !b.includes("HEAD"))
     .map((b) => b.slice("origin/".length));
 }
 
-function listMergedLocal(base = "main") {
-  return new Set(gitLines(["branch", "--merged", base, "--format=%(refname:short)"]));
+function listMergedLocal(base = "main", repoRoot) {
+  return new Set(gitLines(["branch", "--merged", base, "--format=%(refname:short)"], repoRoot));
 }
 
-function worktreeBranchSet() {
+function worktreeBranchSet(repoRoot) {
+  // Route through runGitCapture so an outside-a-repo failure escalates (this is
+  // an inventory call that decides whether a branch is worktree-backed).
   const set = new Set();
-  try {
-    const out = execFileSync("git", ["worktree", "list", "--porcelain"], { encoding: "utf8" });
-    for (const line of out.split("\n")) {
-      if (line.startsWith("branch ")) {
-        set.add(
-          line
-            .slice("branch ".length)
-            .trim()
-            .replace(/^refs\/heads\//, "")
-        );
-      }
+  const out = runGitCapture(["worktree", "list", "--porcelain"], {
+    cwd: repoRoot ?? resolveRepoRoot(),
+  });
+  for (const line of out.split("\n")) {
+    if (line.startsWith("branch ")) {
+      set.add(
+        line
+          .slice("branch ".length)
+          .trim()
+          .replace(/^refs\/heads\//, "")
+      );
     }
-  } catch {
-    /* git unavailable → empty */
   }
   return set;
 }
 
-function ageDaysForBranch(name) {
+function ageDaysForBranch(name, repoRoot) {
   // A remote-only branch has no local ref — fall back to origin/<name>. stderr
-  // is dropped so a missing ref never prints `fatal: ambiguous argument`.
+  // is dropped so a missing ref never prints `fatal: ambiguous argument`. This
+  // is best-effort metadata, so it keeps its local catch → 0 (CTL-675).
+  const cwd = repoRoot ?? resolveRepoRoot();
   for (const ref of [name, `origin/${name}`]) {
     try {
       const out = execFileSync("git", ["log", "-1", "--format=%ct", ref], {
+        cwd,
         encoding: "utf8",
         stdio: ["ignore", "pipe", "ignore"],
       }).trim();
@@ -122,12 +129,13 @@ function ageDaysForBranch(name) {
 // ─── buildRows ───────────────────────────────────────────────────────────────
 
 export async function buildRows({
-  localBranches = listLocalBranches(),
-  remoteBranches = listRemoteBranches(),
-  worktreeBranches = worktreeBranchSet(),
-  mergedLocal = listMergedLocal(),
-  prs = ghPrList(),
-  ageDaysFor = ageDaysForBranch,
+  repoRoot, // undefined → the git/gh helpers resolve lazily (CTL-675)
+  localBranches = listLocalBranches(repoRoot),
+  remoteBranches = listRemoteBranches(repoRoot),
+  worktreeBranches = worktreeBranchSet(repoRoot),
+  mergedLocal = listMergedLocal("main", repoRoot),
+  prs = ghPrList(repoRoot),
+  ageDaysFor = (name) => ageDaysForBranch(name, repoRoot),
   staleDays = DEFAULT_STALE_DAYS,
 } = {}) {
   const localSet = new Set(localBranches);
@@ -169,9 +177,13 @@ export async function buildRows({
 
 // ─── prune ───────────────────────────────────────────────────────────────────
 
-async function defaultDeleteLocal(branch) {
+// Per-item action helpers: cwd is anchored (CTL-675) but they KEEP their local
+// catch → { ok:false } — a single ref failing to delete is legitimately
+// non-fatal (unlike the inventory listing calls, which escalate).
+async function defaultDeleteLocal(branch, repoRoot) {
   try {
     execFileSync("git", ["branch", "-D", branch], {
+      cwd: repoRoot ?? resolveRepoRoot(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -181,9 +193,10 @@ async function defaultDeleteLocal(branch) {
   }
 }
 
-async function defaultDeleteRemote(branch) {
+async function defaultDeleteRemote(branch, repoRoot) {
   try {
     execFileSync("git", ["push", "origin", "--delete", branch], {
+      cwd: repoRoot ?? resolveRepoRoot(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -269,7 +282,7 @@ export async function runBranchesPrune({
 const BRANCHES_SPEC = {
   booleans: ["json", "yes", "dry-run", "force"],
   numbers: ["max", "stale-days"],
-  strings: ["scope"],
+  strings: ["scope", "repo-root"],
 };
 
 /**
@@ -298,11 +311,12 @@ export function parseBranchArgs(argv) {
   }
   if (raw.max !== undefined) out.max = raw.max;
   if (raw["stale-days"] !== undefined) out.staleDays = raw["stale-days"];
+  if (raw["repo-root"] !== undefined) out.repoRoot = raw["repo-root"];
   return out;
 }
 
-async function cmdList({ json, staleDays }) {
-  const rows = await buildRows({ staleDays: staleDays ?? DEFAULT_STALE_DAYS });
+async function cmdList({ json, staleDays, repoRoot }) {
+  const rows = await buildRows({ repoRoot, staleDays: staleDays ?? DEFAULT_STALE_DAYS });
   if (json) {
     process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
     return 0;
@@ -317,8 +331,16 @@ async function cmdList({ json, staleDays }) {
 }
 
 async function cmdPrune(opts) {
-  const rows = await buildRows({ staleDays: opts.staleDays ?? DEFAULT_STALE_DAYS });
-  const { planned, deleted, plannedRows, skippedRows } = await runBranchesPrune({ ...opts, rows });
+  const rows = await buildRows({ repoRoot: opts.repoRoot, staleDays: opts.staleDays ?? DEFAULT_STALE_DAYS });
+  // Bind repoRoot into the default delete helpers via closures so the ref
+  // deletes are anchored too (CTL-675); runBranchesPrune still calls them with
+  // a single arg, and injected test deletes are untouched.
+  const { planned, deleted, plannedRows, skippedRows } = await runBranchesPrune({
+    ...opts,
+    rows,
+    deleteLocalBranch: (b) => defaultDeleteLocal(b, opts.repoRoot),
+    deleteRemoteBranch: (b) => defaultDeleteRemote(b, opts.repoRoot),
+  });
   const isDryRun = !(opts.yes && !opts.dryRun);
   if (opts.json) {
     // One structured object so a headless agent can inspect the destructive
@@ -341,8 +363,9 @@ async function cmdPrune(opts) {
 function usage() {
   process.stderr.write(
     "Usage: catalyst-execution-core branches {list|prune} [flags]\n" +
-      "  list  [--json] [--scope local|remote|both] [--stale-days N]\n" +
-      "  prune [--yes] [--dry-run] [--json] [--scope ...] [--force] [--max N]\n"
+      "  list  [--json] [--scope local|remote|both] [--stale-days N] [--repo-root <path>]\n" +
+      "  prune [--yes] [--dry-run] [--json] [--scope ...] [--force] [--max N] [--repo-root <path>]\n" +
+      "  Repo resolution: --repo-root → $CATALYST_REPO_ROOT → current repo → first registry project.\n"
   );
 }
 
