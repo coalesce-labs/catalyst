@@ -275,6 +275,46 @@ export function defaultAppendReclaimEvent({
   );
 }
 
+// CTL-664: post the reclaim Linear mirror the skill End block would have posted
+// had the worker survived. Marker-guarded by the SHARED .linear-mirror-<phase>
+// (first-writer-wins: if the skill already mirrored, the marker exists and we
+// skip — exactly the desired idempotency). Fail-open: a linearis failure logs
+// and returns without throwing, never breaking the reclaim. Seams injected for
+// recovery.test.mjs (no filesystem/network I/O).
+export function defaultPostReclaimMirror(
+  { orchDir, ticket, phase, deathSignal, probeChecked, reclaimedBgJobId },
+  {
+    existsSync: exists = existsSync,
+    writeMarker = (p) => writeFileSync(p, ""),
+    runLinearis = (t, bodyText) =>
+      spawnSync("linearis", ["issues", "discuss", t, "--body", bodyText], { encoding: "utf8" }),
+  } = {},
+) {
+  const marker = `${orchDir}/workers/${ticket}/.linear-mirror-${phase}`;
+  if (exists(marker)) return; // first-writer-wins
+  const bodyText = [
+    "**Phase Reclaim**",
+    "",
+    `- **Phase**: ${phase}`,
+    `- **Reason**: work-done-despite-dead-bg`,
+    `- **Death signal**: ${deathSignal}`,
+    `- **Probe verified**: ${probeChecked}`,
+    `- **Reclaimed bg_job_id**: \`${reclaimedBgJobId ?? "unknown"}\``,
+    "",
+    "_Posted automatically by the daemon reclaim sweep (CTL-664)._",
+  ].join("\n");
+  try {
+    const r = runLinearis(ticket, bodyText);
+    if (r && r.status === 0) {
+      writeMarker(marker);
+    } else {
+      log.warn({ ticket, phase }, "reclaim-mirror: linearis discuss failed (continuing)");
+    }
+  } catch (err) {
+    log.warn({ ticket, phase, err: err?.message }, "reclaim-mirror: post threw (continuing)");
+  }
+}
+
 // defaultAppendBootResumeEvent — phase.<phase>.boot-resume.<ticket>. The
 // CTL-654 path: a cold-start reboot re-dispatches an in-flight ticket whose
 // worktree has no live bg worker. The `boot-resume` action is deliberately
@@ -927,6 +967,11 @@ export function reclaimDeadWorkIfPossible(
     // reap all route through this so a test can inject a spy. Aliased default
     // (emitReapIntentDefault) keeps the production wiring identical.
     emitReapIntent = emitReapIntentDefault,
+    // CTL-664 — reclaim Linear mirror seam. Called on the successful reclaim
+    // path (branch (B), after emitComplete returns code 0) to post the
+    // "Phase Reclaim" comment the dead worker's skill End block never ran.
+    // Marker-guarded + fail-open; tests inject a spy to assert call order.
+    postReclaimMirror = defaultPostReclaimMirror,
     now = Date.now,
     staleMs = STALE_MS,
   } = {},
@@ -1082,9 +1127,7 @@ export function reclaimDeadWorkIfPossible(
       probe_checked,
       completion_origin: "inferred",
       reclaimed_bg_job_id: prevBgJobId,
-      // CTL-661 sources the reaped session via the reap-intent emitted above;
-      // record it here so the reclaim event mirrors the stopped set.
-      stopped_bg_job_ids: prevBgJobId ? [prevBgJobId] : [],
+      stopped_bg_job_ids: [], // CTL-661 will source the reconciled stopped set
       title: `phase ${phase} reclaimed (work-done-despite-dead-bg)`,
       body: `Daemon reclaimed dead ${phase} worker for ${ticket}: ${death_signal} death signal, probe verified ${probe_checked}. bg_job_id=${prevBgJobId ?? "?"}.`,
     });
@@ -1096,6 +1139,16 @@ export function reclaimDeadWorkIfPossible(
       );
       return "reclaim-failed";
     }
+    // CTL-664: mirror the reclaim to Linear (after emit-complete succeeds, so a
+    // reclaim-failed never posts). Reuses the Phase 2 consts — no recomputation.
+    postReclaimMirror({
+      orchDir,
+      ticket,
+      phase,
+      deathSignal: death_signal,
+      probeChecked: probe_checked,
+      reclaimedBgJobId: prevBgJobId,
+    });
     log.info({ ticket, phase }, "reclaim-dead-work: dead worker reclaimed (work was committed)");
     return "reclaimed";
   }

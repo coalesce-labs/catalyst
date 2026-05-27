@@ -20,6 +20,7 @@ import {
   defaultPidAlive,
   defaultAppendReviveEvent,
   defaultAppendReclaimEvent,
+  defaultPostReclaimMirror,
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   readBootEpoch,
@@ -516,6 +517,7 @@ describe("reclaimDeadWorkIfPossible", () => {
       probes: { implement: probe },
       emitComplete: emit,
       appendEvent,
+      postReclaimMirror: () => {}, // CTL-664: keep the test hermetic (no linearis spawn)
       now: () => 1_000 + 6 * 60 * 1000, // 6 minutes past mtime — stale
     });
     expect(r).toBe("reclaimed");
@@ -545,6 +547,7 @@ describe("reclaimDeadWorkIfPossible", () => {
       probes: { implement: () => true },
       emitComplete: () => ({ code: 0 }),
       appendEvent: () => {},
+      postReclaimMirror: () => {}, // CTL-664: keep the test hermetic (no linearis spawn)
       now: () => 100 + 60_000,
       staleMs: 30_000, // 30s threshold — 1 min IS stale
     });
@@ -638,6 +641,7 @@ describe("reclaimDeadWorkIfPossible", () => {
       probes: { implement: () => true }, // work done
       emitComplete: emit,
       appendEvent,
+      postReclaimMirror: () => {}, // CTL-664: keep the test hermetic (no linearis spawn)
       repoRoot: "/repo",
     });
     expect(r).toBe("reclaimed");
@@ -705,6 +709,7 @@ describe("reclaimDeadWorkIfPossible", () => {
       probes: { implement: probe },
       emitComplete: () => ({ code: 0 }),
       appendEvent: () => {},
+      postReclaimMirror: () => {}, // CTL-664: keep the test hermetic (no linearis spawn)
       repoRoot: "/repo/x",
     });
     // orchDir is the function's first positional arg (`orch` === "/orch").
@@ -726,6 +731,7 @@ describe("reclaimDeadWorkIfPossible", () => {
       probes: { verify: () => true }, // artifact complete
       emitComplete: emit,
       appendEvent: recorder(undefined),
+      postReclaimMirror: () => {}, // CTL-664: keep the test hermetic (no linearis spawn)
       repoRoot: "/repo",
     });
     expect(r).toBe("reclaimed");
@@ -833,6 +839,125 @@ describe("reclaimDeadWorkIfPossible — CTL-661 reclaim happy-path reap-intent",
   });
 });
 
+// --- CTL-664: reclaim Linear mirror -----------------------------------------
+//
+// On the successful reclaim path (branch B) the daemon posts the "Phase Reclaim"
+// Linear comment the dead worker's skill End block never ran. The seam is
+// marker-guarded (first-writer-wins vs a surviving skill mirror) and fail-open.
+describe("CTL-664: reclaim Linear mirror", () => {
+  const orch = "/orch";
+
+  test("postReclaimMirror is called once on a successful reclaim, after emit-complete", () => {
+    const order = [];
+    reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      probes: { implement: () => true },
+      emitComplete: () => {
+        order.push("emit");
+        return { code: 0 };
+      },
+      appendEvent: () => order.push("append"),
+      postReclaimMirror: (args) => order.push(["mirror", args]),
+      repoRoot: "/repo",
+    });
+    expect(order).toEqual([
+      "append",
+      "emit",
+      [
+        "mirror",
+        expect.objectContaining({
+          orchDir: orch,
+          ticket: "CTL-9",
+          phase: "implement",
+          deathSignal: "absent", // statJob:()=>null → klass 'dead' → absent
+          reclaimedBgJobId: "job-x", // implementSignal default bgJobId
+        }),
+      ],
+    ]);
+  });
+
+  test("postReclaimMirror is NOT called when emit-complete fails (reclaim-failed)", () => {
+    const mirror = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      probes: { implement: () => true },
+      emitComplete: () => ({ code: 1, stderr: "boom" }),
+      appendEvent: () => {},
+      postReclaimMirror: mirror,
+    });
+    expect(r).toBe("reclaim-failed");
+    expect(mirror.calls.length).toBe(0);
+  });
+});
+
+// defaultPostReclaimMirror — driven through its injected existsSync / writeMarker
+// / runLinearis seams (no filesystem or `linearis` spawn in the test).
+describe("defaultPostReclaimMirror (CTL-664)", () => {
+  const base = {
+    orchDir: "/orch",
+    ticket: "CTL-9",
+    phase: "implement",
+    deathSignal: "absent",
+    probeChecked: "commits ahead of origin/main",
+    reclaimedBgJobId: "job-x",
+  };
+
+  test("marker absent → posts the comment and writes the marker", () => {
+    const written = [];
+    const linearis = recorder({ status: 0 });
+    defaultPostReclaimMirror(base, {
+      existsSync: () => false,
+      writeMarker: (p) => written.push(p),
+      runLinearis: linearis,
+    });
+    expect(linearis.calls.length).toBe(1);
+    const [t, body] = linearis.calls[0];
+    expect(t).toBe("CTL-9");
+    expect(body).toContain("**Phase Reclaim**");
+    expect(body).toContain("work-done-despite-dead-bg");
+    expect(body).toContain("absent");
+    expect(written).toEqual(["/orch/workers/CTL-9/.linear-mirror-implement"]);
+  });
+
+  test("marker present → skips the post (first-writer-wins)", () => {
+    const linearis = recorder({ status: 0 });
+    const written = [];
+    defaultPostReclaimMirror(base, {
+      existsSync: () => true,
+      writeMarker: (p) => written.push(p),
+      runLinearis: linearis,
+    });
+    expect(linearis.calls.length).toBe(0);
+    expect(written.length).toBe(0);
+  });
+
+  test("linearis non-zero → no marker written, no throw (fail-open)", () => {
+    const written = [];
+    expect(() =>
+      defaultPostReclaimMirror(base, {
+        existsSync: () => false,
+        writeMarker: (p) => written.push(p),
+        runLinearis: () => ({ status: 1, stderr: "offline" }),
+      }),
+    ).not.toThrow();
+    expect(written.length).toBe(0);
+  });
+
+  test("runLinearis throws → swallowed, no marker, no throw (fail-open)", () => {
+    const written = [];
+    expect(() =>
+      defaultPostReclaimMirror(base, {
+        existsSync: () => false,
+        writeMarker: (p) => written.push(p),
+        runLinearis: () => {
+          throw new Error("spawn EACCES");
+        },
+      }),
+    ).not.toThrow();
+    expect(written.length).toBe(0);
+  });
+});
+
 // --- CTL-587: revive / revive-suppressed / escalated branches ---------------
 //
 // The pre-CTL-587 'not-applicable' and 'not-done' returns were silent dead-ends.
@@ -885,6 +1010,9 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
         countReviveEvents: recorder(reviveCount),
         countDistinctRevivingTickets: recorder(distinctRevivingTickets),
         writeReviveMarker: recorder(undefined),
+        // CTL-664: stub the reclaim mirror so the probeResult:true scenarios
+        // (branch B) stay hermetic and don't spawn a real `linearis`.
+        postReclaimMirror: recorder(undefined),
         readBootSince, // CTL-655: inject the boot-time window reader
         now: () => nowMs,
         staleMs: 5 * 60 * 1000,
@@ -1208,6 +1336,9 @@ describe("reclaimDeadWorkIfPossible — CTL-610 alive-quiet keep-alive guard", (
         countReviveEvents: recorder(reviveCount),
         countDistinctRevivingTickets: recorder(1),
         writeReviveMarker: recorder(undefined),
+        // CTL-664: stub the reclaim mirror so the probeResult:true scenario
+        // (branch B wins over alive-quiet) stays hermetic (no `linearis` spawn).
+        postReclaimMirror: recorder(undefined),
         pidAlive: recorder(pidAlive()),
         hungCutoffMs,
         now: () => nowMs,
@@ -2275,6 +2406,7 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
       probes: { implement: recorder(true) }, // work done → 'reclaimed'
       emitComplete: recorder({ code: 0 }),
       appendEvent: recorder(undefined),
+      postReclaimMirror: () => {}, // CTL-664: keep the test hermetic (no linearis spawn)
     });
     expect(r).toBe("reclaimed");
   });
