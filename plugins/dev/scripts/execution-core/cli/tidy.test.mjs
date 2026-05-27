@@ -213,6 +213,10 @@ describe("parseTidyArgs (strict)", () => {
     expect(() => parseTidyArgs(["--max", "abc"])).toThrow(/--max expects a number/);
     expect(() => parseTidyArgs(["--min-idle-seconds", "NaN"])).toThrow(ArgError);
   });
+
+  it("accepts --repo-root <path> (CTL-675)", () => {
+    expect(parseTidyArgs(["--repo-root", "/r"]).repoRoot).toBe("/r");
+  });
 });
 
 describe("runTidy --json shape", () => {

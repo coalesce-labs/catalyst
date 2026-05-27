@@ -25,6 +25,7 @@ import { buildRows as buildSessionRows, runPrune as runSessionsPrune } from "./s
 import { buildRows as buildWorktreeRows, runWorktreesPrune } from "./worktrees.mjs";
 import { buildRows as buildBranchRows, runBranchesPrune } from "./branches.mjs";
 import { parseArgs, ArgError } from "./args.mjs";
+import { resolveRepoRoot } from "./repo.mjs";
 
 async function defaultCmdSessions(opts) {
   const rows = await buildSessionRows({});
@@ -32,18 +33,22 @@ async function defaultCmdSessions(opts) {
 }
 
 async function defaultCmdWorktrees(opts) {
-  const rows = await buildWorktreeRows({});
+  const rows = await buildWorktreeRows({ repoRoot: opts.repoRoot });
   return runWorktreesPrune({ ...opts, rows });
 }
 
 async function defaultCmdBranches(opts) {
-  const rows = await buildBranchRows({});
+  const rows = await buildBranchRows({ repoRoot: opts.repoRoot });
   return runBranchesPrune({ ...opts, rows });
 }
 
-async function defaultCmdGitWorktreePrune() {
+async function defaultCmdGitWorktreePrune(opts = {}) {
+  // Anchor cwd to a resolved repoRoot (CTL-675); keep the best-effort swallow —
+  // this only mutates admin records and runs after worktrees+branches complete,
+  // so outside-a-repo the chain has already aborted before this is reached.
   try {
     execFileSync("git", ["worktree", "prune"], {
+      cwd: opts.repoRoot ?? resolveRepoRoot(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -136,7 +141,7 @@ const TIDY_SPEC = {
     "force",
   ],
   numbers: ["max", "min-idle-seconds", "stale-days"],
-  strings: [],
+  strings: ["repo-root"],
 };
 
 /**
@@ -165,6 +170,7 @@ export function parseTidyArgs(argv) {
   if (raw.max !== undefined) out.max = raw.max;
   if (raw["min-idle-seconds"] !== undefined) out.minIdleMs = raw["min-idle-seconds"] * 1000;
   if (raw["stale-days"] !== undefined) out.staleDays = raw["stale-days"];
+  if (raw["repo-root"] !== undefined) out.repoRoot = raw["repo-root"];
   return out;
 }
 
@@ -176,7 +182,8 @@ function usage() {
       "  Runs sessions → worktrees → branches → git worktree prune in safe order.\n" +
       "  [--json] [--dry-run] [--yes] [--max N]\n" +
       "  [--include-idle] [--include-interactive] [--min-idle-seconds N]\n" +
-      "  [--include-stale] [--stale-days N] [--force]\n"
+      "  [--include-stale] [--stale-days N] [--force] [--repo-root <path>]\n" +
+      "  Repo resolution: --repo-root → $CATALYST_REPO_ROOT → current repo → first registry project.\n"
   );
 }
 

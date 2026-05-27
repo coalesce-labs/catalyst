@@ -247,6 +247,13 @@ Backcompat: start|stop|restart|probe|status work as top-level aliases for the da
 Safe starting point:
   catalyst-execution-core tidy --dry-run     # show the full cleanup plan, change nothing
 
+Repo resolution (worktrees / branches / tidy):
+  git operations resolve their repo root, in order, from:
+    --repo-root <path> -> $CATALYST_REPO_ROOT -> the current repo -> the first
+    registry project. No `cd` into a repo is required. Run outside any
+    resolvable repo, these commands now FAIL LOUDLY (exit 1) instead of
+    silently reporting nothing to prune.
+
 Scripting:
   Every list / prune / tidy command and `daemon status` accepts --json for
   machine-readable output (pipe to jq).
