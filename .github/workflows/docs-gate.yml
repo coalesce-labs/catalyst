@@ -1,0 +1,48 @@
+name: docs-gate
+
+# Required status check for merges to main. Runs on EVERY PR (no path filter) so
+# the required context always reports — see configuration.md and CTL-670. The job
+# itself is path-aware: it only builds the docs site when docs-relevant files
+# changed, so non-docs PRs pass in seconds while docs PRs block until the build
+# is green. Cloudflare Pages still deploys via Build watch paths but is no longer
+# a required check.
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  docs-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute changed paths
+        id: changed
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" \
+               | bash scripts/ci/docs-paths-changed.sh; then
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip (no docs changes)
+        if: steps.changed.outputs.docs == 'false'
+        run: echo "No docs-relevant changes — docs build not required for this PR."
+
+      - uses: actions/setup-node@v4
+        if: steps.changed.outputs.docs == 'true'
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Build docs site
+        if: steps.changed.outputs.docs == 'true'
+        working-directory: website
+        run: |
+          npm ci
+          npm run build
