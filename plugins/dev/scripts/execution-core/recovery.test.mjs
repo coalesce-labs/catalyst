@@ -22,6 +22,7 @@ import {
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
   detectColdStart,
+  readBootSince,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -749,6 +750,10 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     bgJobId = "bg-9",
     stateJsonMtime = 1_000, // far in the past — staleness triggers
     nowMs = 1_000 + 6 * 60 * 1000, // 6 min past mtime — > STALE_MS
+    // CTL-655: boot-time window seam. Default to a no-marker reader so every
+    // existing scenario behaves exactly as before (since=undefined → the
+    // injected countReviveEvents recorder value is the unwindowed count).
+    readBootSince = () => undefined,
   } = {}) {
     const sig = {
       ...implementSignal({ ticket, status: "running", bgJobId }),
@@ -776,6 +781,7 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
         countReviveEvents: recorder(reviveCount),
         countDistinctRevivingTickets: recorder(distinctRevivingTickets),
         writeReviveMarker: recorder(undefined),
+        readBootSince, // CTL-655: inject the boot-time window reader
         now: () => nowMs,
         staleMs: 5 * 60 * 1000,
       },
@@ -845,6 +851,34 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.reviveDispatch.calls.length).toBe(1);
     expect(s.opts.appendReviveEvent.calls.length).toBe(1);
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
+  });
+
+  // CTL-655: the daemon-boot timestamp must reach countReviveEvents as `since`
+  // so the per-ticket budget windows to the current daemon run.
+  test("threads boot 'since' into countReviveEvents", () => {
+    const s = setupReviveScenario({
+      reviveCount: 0,
+      readBootSince: () => "2026-05-27T03:30:00Z",
+    });
+    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(r).toBe("revived");
+    // The boot value reached the budget counter…
+    expect(s.opts.countReviveEvents.calls[0][0].since).toBe("2026-05-27T03:30:00Z");
+    // …and the pre-existing args are still passed (no regression).
+    expect(s.opts.countReviveEvents.calls[0][0].ticket).toBe("CTL-9");
+    expect(s.opts.countReviveEvents.calls[0][0]).toHaveProperty("orchId");
+  });
+
+  // CTL-655: fail-open — a missing/unreadable marker yields no `since`, so the
+  // counter is unwindowed and the budget still exhausts (today's behavior).
+  test("omits 'since' when boot marker is absent (fail-open)", () => {
+    const s = setupReviveScenario({
+      reviveCount: 2,
+      readBootSince: () => undefined,
+    });
+    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(r).toBe("escalated");
+    expect(s.opts.countReviveEvents.calls[0][0].since).toBeUndefined();
   });
 
   test("dead plan worker, probe NOT done → 'revived'", () => {
@@ -1845,5 +1879,34 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     });
     expect(r).toBe("noop");
     expect(listSpy.calls.length).toBe(0); // guard runs only after the dead check
+  });
+});
+
+describe("readBootSince — CTL-655 boot-time window reader", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ctl655-boot-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("returns bootedAt from daemon-boot.json", () => {
+    writeFileSync(join(dir, "daemon-boot.json"), JSON.stringify({ bootedAt: "2026-05-27T03:30:00Z" }));
+    expect(readBootSince(dir)).toBe("2026-05-27T03:30:00Z");
+  });
+
+  test("returns undefined when marker missing / malformed (fail-open)", () => {
+    // Empty dir → no marker.
+    expect(readBootSince(dir)).toBeUndefined();
+    // Non-JSON body.
+    writeFileSync(join(dir, "daemon-boot.json"), "not json");
+    expect(readBootSince(dir)).toBeUndefined();
+    // Wrong-typed bootedAt (number, not ISO string).
+    writeFileSync(join(dir, "daemon-boot.json"), JSON.stringify({ bootedAt: 123 }));
+    expect(readBootSince(dir)).toBeUndefined();
+    // Empty-string bootedAt is also rejected.
+    writeFileSync(join(dir, "daemon-boot.json"), JSON.stringify({ bootedAt: "" }));
+    expect(readBootSince(dir)).toBeUndefined();
   });
 });

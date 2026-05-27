@@ -177,6 +177,108 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     expect(labelCalls).toEqual(["CTL-587-B"]);
   });
 
+  // CTL-655: a daemon-boot.json marker windows the budget to the current run.
+  // Two revives that PRE-DATE the boot fall outside the window → the ticket is
+  // revived (budget reset), exercising the real readBootSince + countReviveEvents.
+  test("budget resets after restart — pre-boot revives are not counted → 'revived'", () => {
+    seedSignal("CTL-587-RESET", "implement", {
+      status: "running",
+      bg_job_id: "nonexistent-bg-id",
+      orchestrator: "CTL-587-RESET",
+    });
+    // Two prior revives, both BEFORE the boot time T.
+    appendEvent(makeReviveEnvelope({ ticket: "CTL-587-RESET", ts: "2026-05-23T00:00:00Z" }));
+    appendEvent(makeReviveEnvelope({ ticket: "CTL-587-RESET", ts: "2026-05-23T00:05:00Z" }));
+    // Boot marker newer than both revives → they fall outside the window.
+    writeFileSync(
+      join(orchDir, "daemon-boot.json"),
+      JSON.stringify({ bootedAt: "2026-05-24T00:00:00Z" }),
+    );
+
+    const labelCalls = [];
+    const reviveDispatchCalls = [];
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      teardownWorktree: () => true,
+      reclaimDeadWork: (od, sig, opts) =>
+        reclaimDeadWorkIfPossible(od, sig, {
+          ...opts,
+          statJob: () => null, // bg dead
+          probes: { implement: () => false }, // work NOT done
+          reviveDispatch: (args) => {
+            reviveDispatchCalls.push(args);
+            return { code: 0 };
+          },
+          applyStalledLabel: ({ ticket }) => {
+            labelCalls.push(ticket);
+            return { applied: true };
+          },
+          killBgJob: () => {},
+          // Default countReviveEvents + default readBootSince (reads the marker
+          // we wrote in orchDir) — the real windowing path under test.
+        }),
+    });
+
+    expect(result.revived).toEqual([{ ticket: "CTL-587-RESET", phase: "implement" }]);
+    expect(result.escalated).toEqual([]);
+    expect(reviveDispatchCalls).toHaveLength(1);
+    expect(labelCalls).toEqual([]); // no needs-human escalation
+  });
+
+  // CTL-655 guard against an over-aggressive window: revives AT/AFTER the boot
+  // time ARE counted, so the budget still exhausts within a single daemon run.
+  test("budget still exhausts within one run — post-boot revives ARE counted → 'escalated'", () => {
+    seedSignal("CTL-587-INRUN", "implement", {
+      status: "running",
+      bg_job_id: "nonexistent-bg-id",
+      orchestrator: "CTL-587-INRUN",
+    });
+    const bootedAt = "2026-05-24T00:00:00Z";
+    // Two revives at/after the boot time → inside the window.
+    appendEvent(makeReviveEnvelope({ ticket: "CTL-587-INRUN", ts: "2026-05-25T00:00:00Z" }));
+    appendEvent(makeReviveEnvelope({ ticket: "CTL-587-INRUN", ts: "2026-05-25T00:05:00Z" }));
+    writeFileSync(join(orchDir, "daemon-boot.json"), JSON.stringify({ bootedAt }));
+
+    const labelCalls = [];
+    const reviveDispatchCalls = [];
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      teardownWorktree: () => true,
+      reclaimDeadWork: (od, sig, opts) =>
+        reclaimDeadWorkIfPossible(od, sig, {
+          ...opts,
+          statJob: () => null,
+          probes: { implement: () => false },
+          reviveDispatch: (args) => {
+            reviveDispatchCalls.push(args);
+            return { code: 0 };
+          },
+          applyStalledLabel: ({ ticket }) => {
+            labelCalls.push(ticket);
+            return { applied: true };
+          },
+          killBgJob: () => {},
+        }),
+    });
+
+    expect(result.escalated).toEqual([{ ticket: "CTL-587-INRUN", phase: "implement" }]);
+    expect(result.revived).toEqual([]);
+    expect(reviveDispatchCalls).toHaveLength(0);
+    expect(labelCalls).toEqual(["CTL-587-INRUN"]);
+  });
+
   test("storm-breaker open: 4 distinct tickets reviving → 'revive-suppressed', no dispatch", () => {
     seedSignal("CTL-587-C", "implement", {
       status: "running",

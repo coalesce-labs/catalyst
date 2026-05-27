@@ -37,6 +37,7 @@ import {
 import { Reaper } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import { reconcileBootResume } from "./boot-resume.mjs";
+import { writeBootMarker } from "./recovery.mjs"; // CTL-655: window the revive budget to this run
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -93,6 +94,11 @@ export function startDaemon({
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
+  // CTL-655: record this daemon process's start time so the first scheduler
+  // tick's reclaimDeadWorkIfPossible can window the per-ticket revive budget to
+  // the current run (a clean restart resets a budget burned by a prior storm).
+  // Must precede schedulerFn (the first reclaim read). Fail-open internally.
+  writeBootMarker(orchDir);
   _stopMonitor = stopMonitorFn;
   _stopScheduler = stopSchedulerFn;
 
