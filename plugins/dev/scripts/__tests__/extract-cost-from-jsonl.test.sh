@@ -176,6 +176,18 @@ build_jsonl_with_turns() {
   done
 }
 
+# Build a deterministic sub-agent JSONL alongside a parent at
+# <parent-without-.jsonl>/subagents/agent-<id>.jsonl — the exact path the
+# extractor derives for `--include-subagents` (research §deterministic path:
+# strip .jsonl from the parent, then /subagents/*.jsonl). Reuses the parent
+# builder so the line shape stays identical (CTL-666).
+build_subagent_jsonl() {
+  local parent="$1" id="$2"; shift 2
+  local subdir="${parent%.jsonl}/subagents"
+  mkdir -p "$subdir"
+  build_jsonl_single_model "${subdir}/agent-${id}.jsonl" "$@"
+}
+
 # Build a JSONL with a single assistant event for an unknown (unpriced) model.
 build_jsonl_unknown_model() {
   local out="$1"; shift
@@ -314,6 +326,88 @@ run "real fixture durationMs from turn_duration" \
   bash -c "[ \"\$(echo '$USAGE' | jq -r .durationMs)\" = '1406556' ]"
 run "real fixture numTurns counts only assistant" \
   bash -c "[ \"\$(echo '$USAGE' | jq -r .numTurns)\" = '2' ]"
+
+# ─── Test 12: default path ignores sub-agents (signal.cost contract guard) ────
+# A parent JSONL plus a sub-agent file with extra usage; WITHOUT the flag the
+# sub-agent file must be invisible, so existing callers (orchestrate-roll-usage,
+# which feeds signal.cost) keep byte-identical parent-only semantics.
+SA_REGR="${SCRATCH}/sa-default/parent.jsonl"
+mkdir -p "$(dirname "$SA_REGR")"
+build_jsonl_single_model "$SA_REGR" --model claude-opus-4-7 --assistant-events 1 \
+  --input-tokens 1000 --output-tokens 500
+build_subagent_jsonl "$SA_REGR" x --model claude-opus-4-7 --assistant-events 1 \
+  --input-tokens 4000 --output-tokens 2000
+USAGE=$("$HELPER" --jsonl "$SA_REGR" --pricing "$PRICING")
+run "default path ignores sub-agent file (inputTokens parent-only)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .inputTokens)\" = '1000' ]"
+run "default path ignores sub-agent file (numTurns parent-only)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .numTurns)\" = '1' ]"
+# parent cost = 1000*15/1e6 + 500*75/1e6 = 0.015 + 0.0375 = 0.0525
+run "default path ignores sub-agent file (costUSD parent-only)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .costUSD)\" = '0.0525' ]"
+
+# ─── Test 13: --include-subagents sums parent + sub-agent ─────────────────────
+USAGE=$("$HELPER" --jsonl "$SA_REGR" --pricing "$PRICING" --include-subagents)
+# input = 1000+4000 = 5000, output = 500+2000 = 2500
+# cost = 5000*15/1e6 + 2500*75/1e6 = 0.075 + 0.1875 = 0.2625
+run "include-subagents sums inputTokens (parent+sub)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .inputTokens)\" = '5000' ]"
+run "include-subagents sums outputTokens (parent+sub)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .outputTokens)\" = '2500' ]"
+run "include-subagents sums costUSD (parent+sub)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .costUSD)\" = '0.2625' ]"
+run "include-subagents numTurns is combined assistant count" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .numTurns)\" = '2' ]"
+
+# ─── Test 14: multiple sub-agent files all summed ────────────────────────────
+SA_MULTI="${SCRATCH}/sa-multi/parent.jsonl"
+mkdir -p "$(dirname "$SA_MULTI")"
+build_jsonl_single_model "$SA_MULTI" --assistant-events 1 --input-tokens 1000 --output-tokens 0
+build_subagent_jsonl "$SA_MULTI" a --assistant-events 1 --input-tokens 2000 --output-tokens 0
+build_subagent_jsonl "$SA_MULTI" b --assistant-events 1 --input-tokens 3000 --output-tokens 0
+USAGE=$("$HELPER" --jsonl "$SA_MULTI" --pricing "$PRICING" --include-subagents)
+run "multiple sub-agent files summed (inputTokens 1000+2000+3000)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .inputTokens)\" = '6000' ]"
+run "multiple sub-agent files summed (numTurns = 3)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .numTurns)\" = '3' ]"
+
+# ─── Test 15: no subagents/ dir present + flag → parent-only, exit 0 ──────────
+SA_NONE="${SCRATCH}/sa-none/parent.jsonl"
+mkdir -p "$(dirname "$SA_NONE")"
+build_jsonl_single_model "$SA_NONE" --assistant-events 1 --input-tokens 1000 --output-tokens 0
+USAGE=$("$HELPER" --jsonl "$SA_NONE" --pricing "$PRICING" --include-subagents)
+run "no subagents dir + flag → parent-only inputTokens" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .inputTokens)\" = '1000' ]"
+run "no subagents dir + flag exits 0" \
+  bash -c "'$HELPER' --jsonl '$SA_NONE' --pricing '$PRICING' --include-subagents >/dev/null"
+
+# ─── Test 16: partially-written sub-agent line tolerated ──────────────────────
+SA_TRUNC="${SCRATCH}/sa-trunc/parent.jsonl"
+mkdir -p "$(dirname "$SA_TRUNC")"
+build_jsonl_single_model "$SA_TRUNC" --assistant-events 1 --input-tokens 1000 --output-tokens 0
+build_subagent_jsonl "$SA_TRUNC" trunc --assistant-events 1 --input-tokens 2000 --output-tokens 0
+# Append a truncated/non-JSON fragment as the last line (no trailing newline).
+printf '%s' '{"type":"assistant","message":{"model":"claude-opus-4-7","usage":{"input_to' \
+  >> "${SA_TRUNC%.jsonl}/subagents/agent-trunc.jsonl"
+USAGE=$("$HELPER" --jsonl "$SA_TRUNC" --pricing "$PRICING" --include-subagents)
+# valid lines: parent 1000 + sub-agent 2000 = 3000; the truncated line dropped
+run "partial sub-agent line tolerated (valid lines still summed = 3000)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .inputTokens)\" = '3000' ]"
+run "partial sub-agent line tolerated (exit 0, no parse abort)" \
+  bash -c "'$HELPER' --jsonl '$SA_TRUNC' --pricing '$PRICING' --include-subagents >/dev/null"
+
+# ─── Test 17: durationMs still comes from the parent ──────────────────────────
+# Sub-agent JSONLs carry no system.turn_duration events; the flag must not
+# change durationMs (research §3 — sub-agent files carry zero duration).
+SA_DUR="${SCRATCH}/sa-dur/parent.jsonl"
+mkdir -p "$(dirname "$SA_DUR")"
+build_jsonl_with_durations "$SA_DUR" --turns 2 --total-ms 30000
+build_subagent_jsonl "$SA_DUR" d --assistant-events 1 --input-tokens 500 --output-tokens 0
+USAGE=$("$HELPER" --jsonl "$SA_DUR" --pricing "$PRICING" --include-subagents)
+run "durationMs unchanged by flag (parent-only turn_duration = 30000)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .durationMs)\" = '30000' ]"
+run "durationMs case still folds sub-agent tokens (inputTokens = 500)" \
+  bash -c "[ \"\$(echo '$USAGE' | jq -r .inputTokens)\" = '500' ]"
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
