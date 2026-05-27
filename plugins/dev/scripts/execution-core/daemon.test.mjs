@@ -344,6 +344,59 @@ describe("startDaemon", () => {
     }
     expect(reconciled).toBeGreaterThan(0);
   });
+
+  // CTL-650: the push-based session wait-state watcher is started from
+  // startDaemon (default-on), gated by enableWaitWatcher, and stopped in
+  // stopDaemon — mirroring the reaper's enableReaper wiring.
+  test("starts the wait-watcher when enabled (CTL-650)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startWaitWatcher: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableWaitWatcher: true,
+    });
+    expect(started).toBe(1);
+  });
+
+  test("skips the wait-watcher when disabled (CTL-650)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startWaitWatcher: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableWaitWatcher: false,
+    });
+    expect(started).toBe(0);
+  });
+
+  test("stopDaemon stops the wait-watcher (CTL-650)", () => {
+    let stopped = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startWaitWatcher: () => ({
+        stop: () => {
+          stopped++;
+        },
+      }),
+      enableWaitWatcher: true,
+    });
+    stopDaemon();
+    expect(stopped).toBe(1);
+  });
 });
 
 // CTL-649: consumeEventTail must read by BYTE offset, not JS-string code units,
