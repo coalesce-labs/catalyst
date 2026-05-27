@@ -265,26 +265,32 @@ This gives you a fully automated merge path where Catalyst can:
 
 without waiting for a human approval click.
 
-For this repo shape, the recommended required check currently enabled in GitHub is:
+For this repo shape, the recommended (and only) required check is:
 
-- `Cloudflare Pages`
+- `docs-gate`
 
-Once your repository runs the following checks on **every** PR to `main`, you should add them as
-required checks too:
+`docs-gate` is an in-repo GitHub Action (`.github/workflows/docs-gate.yml`) that runs on **every**
+PR to `main` with no path filter, so the required context always reports. It is path-aware: on
+non-docs PRs it passes in seconds, and on docs PRs (anything under `website/`, or a
+`plugins/*/CHANGELOG.md` the docs build renders) it runs `npm run build` (`astro build`) and must
+be green. This lets the slow `Cloudflare Pages` preview build be **build-watch-path gated and no
+longer required** — non-docs PRs (the ~75% that change nothing the docs site deploys) merge without
+waiting on it, while docs PRs still block on the in-CI build. See
+[CI required checks rollout](https://github.com/coalesce-labs/catalyst/blob/main/docs/ci-required-checks-rollout.md)
+for the operator runbook that performs this swap safely (CTL-670).
 
-- `audit-references`
-- `check-versions`
-- `validate`
-
-`Cloudflare Pages` covers preview deploy readiness. The other three checks are repository-owned
-guardrails:
+`audit-references`, `check-versions`, and `validate` also run on every PR and report status, but are
+**not** required gates. They are repository-owned guardrails you may add to the required set if you
+want them enforced:
 
 - `audit-references` catches broken plugin references
 - `check-versions` verifies plugin changes are releasable through Release Please
 - `validate` checks release configuration consistency
 
 If your repository has additional always-on checks, add them too. The important rule is: only mark a
-check as required if it runs on every PR to `main`.
+check as required if it runs on every PR to `main` — which is exactly why `docs-gate` (no path
+filter) is the required check and `Cloudflare Pages` (skips on non-docs PRs, posting no status) is
+not.
 
 ### Optional Human-In-The-Loop Mode
 
