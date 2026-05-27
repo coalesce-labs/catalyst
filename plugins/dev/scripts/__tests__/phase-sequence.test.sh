@@ -107,6 +107,40 @@ else
   fi
 fi
 
+# ─── 7. CTL-667: REBASE_PHASES subset + exact-set drift guard ────────────────
+# REBASE_PHASES drives the dispatch-time front-load rebase (phase-agent-dispatch).
+# It must stay a strict subset of PHASES and equal exactly the named build set —
+# adding/removing a build phase forces a conscious update here.
+echo "test 7: REBASE_PHASES subset of PHASES + exact named build set"
+missing=""
+for rp in "${REBASE_PHASES[@]}"; do
+  found=0
+  for p in "${PHASES[@]}"; do [ "$p" = "$rp" ] && found=1; done
+  [ "$found" = "1" ] || missing="$missing $rp"
+done
+[ -z "$missing" ] \
+  && pass "every REBASE_PHASES element is present in PHASES" \
+  || fail "REBASE_PHASES is a subset of PHASES" "not in PHASES:$missing"
+EXPECTED_REBASE="research plan implement verify review"
+[ "${REBASE_PHASES[*]}" = "$EXPECTED_REBASE" ] \
+  && pass "REBASE_PHASES equals exactly 'research plan implement verify review'" \
+  || fail "REBASE_PHASES exact set" "got: '${REBASE_PHASES[*]}'"
+
+# ─── 8. CTL-667: monitor phases are excluded from the front-load rebase ──────
+# Regression guard for the exemption: monitor-merge/monitor-deploy operate on the
+# PR / merged SHA and have their own BEHIND handling — they must never rebase.
+echo "test 8: is_rebase_phase false for monitor-merge and monitor-deploy"
+if is_rebase_phase monitor-merge; then
+  fail "is_rebase_phase monitor-merge → false"
+else
+  pass "is_rebase_phase monitor-merge → false"
+fi
+if is_rebase_phase monitor-deploy; then
+  fail "is_rebase_phase monitor-deploy → false"
+else
+  pass "is_rebase_phase monitor-deploy → false"
+fi
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

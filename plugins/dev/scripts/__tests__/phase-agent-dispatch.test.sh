@@ -896,6 +896,186 @@ OUT_DRY=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --o
 	--resume-session abc-uuid --dry-run 2>/dev/null)
 assert_eq "abc-uuid" "$(jq -r '.resumeSession' <<<"$OUT_DRY")" "dry-run JSON echoes resumeSession"
 
+# ─── CTL-667: front-load merge-conflict surfacing (dispatch-time rebase) ─────
+# These cases turn the per-test scratch worktree into a REAL git repo with a
+# bare `origin` and exercise the dispatcher's fresh+build-phase rebase block.
+# The dispatcher rebases its cwd, so each test cd's into the work clone.
+# CATALYST_BASE_BRANCH=main pins the rebase target for determinism.
+
+# Deterministic, non-interactive git for the fixtures.
+export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@test
+export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@test
+export GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true
+
+# git_worktree_fixture <tag> → sets GORIGIN (bare), GUP (upstream editor clone),
+# GWORK (the worktree the dispatcher runs in, on branch `work`). Seeds an initial
+# commit with shared.txt (conflict target) + a tracked .catalyst/config.json.
+git_worktree_fixture() {
+	local tag="$1"
+	GORIGIN="${TEST_DIR}/${tag}-origin.git"
+	GUP="${TEST_DIR}/${tag}-up"
+	GWORK="${TEST_DIR}/${tag}-work"
+	git init --quiet --bare -b main "$GORIGIN"
+	git clone --quiet "$GORIGIN" "$GUP" 2>/dev/null
+	(
+		cd "$GUP" || exit 1
+		printf 'base-line\n' >shared.txt
+		mkdir -p .catalyst
+		printf '{"committed":true}\n' >.catalyst/config.json
+		git add -A
+		git commit --quiet -m "initial"
+		git push --quiet origin main
+	)
+	git clone --quiet "$GORIGIN" "$GWORK" 2>/dev/null
+	(cd "$GWORK" && git checkout --quiet -b work)
+}
+# advance_origin_clean → push a non-conflicting commit (new file) to origin/main.
+advance_origin_clean() {
+	(
+		cd "$GUP" && git checkout --quiet main
+		printf 'upstream-feature\n' >upstream.txt
+		git add -A && git commit --quiet -m "upstream clean feature"
+		git push --quiet origin main
+	)
+}
+# advance_origin_conflict → push a commit editing shared.txt's only line.
+advance_origin_conflict() {
+	(
+		cd "$GUP" && git checkout --quiet main
+		printf 'upstream-edit\n' >shared.txt
+		git add -A && git commit --quiet -m "upstream conflicting edit"
+		git push --quiet origin main
+	)
+}
+# seed_local_plan_commit → in GWORK, add the implement-gate plan artifact plus a
+# local commit so the rebase has something to replay. Extra arg = a file edit
+# applied before the commit (used to construct the conflicting local delta).
+seed_local_plan_commit() {
+	mkdir -p "${GWORK}/thoughts/shared/plans"
+	printf '# plan\n' >"${GWORK}/thoughts/shared/plans/2026-05-27-ctl-100.md"
+	printf 'local-feature\n' >"${GWORK}/local.txt"
+	(cd "$GWORK" && git add -A && git commit --quiet -m "local work + plan")
+}
+
+# ─── Test 28: fresh build phase, clean rebase, behind origin/main → launches on rebased tip
+echo ""
+echo "Test 28 (CTL-667): fresh build phase clean rebase launches on the rebased tip"
+fresh_env t28_rebase_clean
+git_worktree_fixture t28
+advance_origin_clean
+seed_local_plan_commit
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+SIGNAL="${WORKER_DIR}/phase-implement.json"
+LOG_PRESENT="no"; [[ -s $CLAUDE_STUB_LOG ]] && LOG_PRESENT="yes"
+assert_eq "yes" "$LOG_PRESENT" "clean rebase: claude --bg WAS invoked"
+BASE_PRESENT="no"; [[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
+assert_eq "yes" "$BASE_PRESENT" "clean rebase: worktree HEAD now carries the new origin/main commit"
+assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "clean rebase: signal is the normal launched status (not stalled)"
+
+# ─── Test 29: fresh build phase, conflicting rebase → park stalled, no worker
+echo ""
+echo "Test 29 (CTL-667): conflicting rebase parks the phase (stalled), no worker launched"
+fresh_env t29_rebase_conflict
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+git_worktree_fixture t29
+advance_origin_conflict
+mkdir -p "${GWORK}/thoughts/shared/plans"
+printf '# plan\n' >"${GWORK}/thoughts/shared/plans/2026-05-27-ctl-100.md"
+printf 'local-edit\n' >"${GWORK}/shared.txt"
+(cd "$GWORK" && git add -A && git commit --quiet -m "local conflicting edit + plan")
+ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t29.out" 2>/dev/null)
+RC29=$?
+SIGNAL="${WORKER_DIR}/phase-implement.json"
+assert_eq "1" "$RC29" "conflict park: dispatcher exits 1"
+CLAUDE_INVOKED="no"; [[ -s $CLAUDE_STUB_LOG ]] && CLAUDE_INVOKED="yes"
+assert_eq "no" "$CLAUDE_INVOKED" "conflict park: claude --bg was NOT invoked"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "conflict park: signal status = stalled"
+assert_eq "rebase_conflict_with_origin_main" "$(jq -r '.failureReason' "$SIGNAL")" \
+	"conflict park: signal failureReason = rebase_conflict_with_origin_main"
+NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+assert_eq "$ORIG_HEAD" "$NOW_HEAD" "conflict park: worktree HEAD back at the original local commit (abort succeeded)"
+if grep -rqs '"phase.implement.failed.CTL-100"' "${CATALYST_DIR}/events/"; then
+	pass "conflict park: phase.implement.failed.CTL-100 event emitted"
+else
+	fail "conflict park: no phase.implement.failed.CTL-100 event emitted"
+fi
+unset CATALYST_DIR
+
+# ─── Test 30: resume dispatch never rebases
+echo ""
+echo "Test 30 (CTL-667): --resume-session never rebases (HEAD unchanged)"
+fresh_env t30_resume_norebase
+git_worktree_fixture t30
+advance_origin_clean
+seed_local_plan_commit
+ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test --resume-session res-uuid >/dev/null 2>&1)
+NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+assert_eq "$ORIG_HEAD" "$NOW_HEAD" "resume: worktree HEAD unchanged (no fetch/rebase ran)"
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" "--resume" "resume: the resume arm ran"
+
+# ─── Test 31: non-build phase never rebases
+echo ""
+echo "Test 31 (CTL-667): non-build phases (triage, pr) never rebase"
+fresh_env t31_nonbuild_norebase
+git_worktree_fixture t31
+advance_origin_clean
+# triage needs no prior artifact.
+ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase triage --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+assert_eq "$ORIG_HEAD" "$NOW_HEAD" "triage: worktree HEAD unchanged"
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "triage: claude invoked normally"
+# pr needs review.json as its prior artifact.
+rm -f "$CLAUDE_STUB_LOG"
+echo '{"ticket":"CTL-100","status":"done"}' >"${WORKER_DIR}/review.json"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase pr --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+NOW_HEAD2="$(cd "$GWORK" && git rev-parse HEAD)"
+assert_eq "$ORIG_HEAD" "$NOW_HEAD2" "pr: worktree HEAD unchanged"
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "pr: claude invoked normally"
+
+# ─── Test 32: re-walk idempotency — no rebase on an already-running signal
+echo ""
+echo "Test 32 (CTL-667): re-walk idempotency exits before the rebase block (HEAD unchanged)"
+fresh_env t32_rewalk_norebase
+git_worktree_fixture t32
+advance_origin_clean
+seed_local_plan_commit
+ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+# Pre-seed the signal as running → the idempotency guard (before the rebase block) fires.
+printf '%s\n' '{"ticket":"CTL-100","phase":"implement","status":"running","bg_job_id":"deadbeef"}' \
+	>"${WORKER_DIR}/phase-implement.json"
+STDOUT=$(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+assert_eq "true" "$(echo "$STDOUT" | jq -r '.idempotent // false')" "re-walk: dispatch reports idempotent:true"
+NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+assert_eq "$ORIG_HEAD" "$NOW_HEAD" "re-walk: worktree HEAD unchanged (no rebase ran)"
+
+# ─── Test 33: dirty noise survives a clean dispatch rebase
+echo ""
+echo "Test 33 (CTL-667): dirty .catalyst/config.json survives a clean dispatch rebase"
+fresh_env t33_noise_survives
+git_worktree_fixture t33
+advance_origin_clean
+seed_local_plan_commit
+# Dirty the tracked noise file — a plain rebase would refuse without the stash.
+printf '{"committed":false,"dirty":true}\n' >"${GWORK}/.catalyst/config.json"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "noise: dispatch still launched (clean rebase)"
+assert_eq '{"committed":false,"dirty":true}' "$(cat "${GWORK}/.catalyst/config.json")" \
+	"noise: dirty .catalyst/config.json content intact after the rebase"
+BASE_PRESENT="no"; [[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
+assert_eq "yes" "$BASE_PRESENT" "noise: rebase still advanced onto the new base"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"

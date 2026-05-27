@@ -66,6 +66,17 @@ source "${SCRIPT_DIR}/lib/executor.sh"
 # shellcheck source=lib/resume.sh
 source "${SCRIPT_DIR}/lib/resume.sh"
 
+# CTL-667: front-load merge-conflict surfacing. phase-sequence.sh provides the
+# is_rebase_phase build-phase predicate; worktree-rebase.sh provides the
+# mechanical fetch + noise-stash + rebase (resolve_base_branch / rebase_onto_base).
+# The fresh-dispatch rebase block (before the launch fork below) calls both so a
+# build phase starts current with merged sibling work and a conflict surfaces here
+# instead of at monitor-merge. See thoughts/shared/plans/2026-05-27-ctl-667.md.
+# shellcheck source=lib/phase-sequence.sh
+source "${SCRIPT_DIR}/lib/phase-sequence.sh"
+# shellcheck source=lib/worktree-rebase.sh
+source "${SCRIPT_DIR}/lib/worktree-rebase.sh"
+
 die() {
 	echo "phase-agent-dispatch: $*" >&2
 	exit 1
@@ -561,6 +572,54 @@ if [[ $DRY_RUN -eq 1 ]]; then
       resumeSession: (if $resumeSession == "" then null else $resumeSession end),
       env: $env, status: "dispatched", dryRun: true}'
 	exit 0
+fi
+
+# ─── CTL-667: front-load merge-conflict surfacing ──────────────────────────
+# On a FRESH dispatch of a BUILD phase, rebase this worktree (cwd) onto current
+# origin/<base> so the worker starts current with merged sibling work and any
+# conflict surfaces HERE instead of at monitor-merge. Resume dispatches
+# (RESUME_SESSION set) are skipped — the resumed session assumes the prior tree
+# (CTL-658). Non-build phases (triage/pr/remediate/monitor-*) are skipped.
+# Placed after the --dry-run early-exit (a dry run must never mutate the tree)
+# and before the launch fork. Local-only: no push, no PR interaction (build
+# branches aren't pushed until phase-pr). Helpers live in lib/worktree-rebase.sh.
+if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
+	BASE_BRANCH="$(resolve_base_branch)"
+	rebase_onto_base "$BASE_BRANCH"
+	REBASE_RC=$?
+	if [[ $REBASE_RC -eq 2 ]]; then
+		# Textual conflict with origin/<base>. Do NOT auto-resolve. Park the
+		# phase to needs-human and do NOT launch a worker. We use failureReason
+		# (not attentionReason) so neither the daemon (TERMINAL-classified →
+		# no revive) nor bash orchestrate-revive retries into the same conflict.
+		echo "phase-agent-dispatch: rebase onto origin/${BASE_BRANCH} conflicted for ${TICKET}/${PHASE}; parking" >&2
+		TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+		tmp="${SIGNAL_FILE}.tmp.$$"
+		if jq --arg ts "$TS" \
+			'.status = "stalled"
+       | .failureReason = "rebase_conflict_with_origin_main"
+       | .updatedAt = $ts
+       | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
+			"$SIGNAL_FILE" >"$tmp" 2>/dev/null; then
+			mv "$tmp" "$SIGNAL_FILE"
+		else
+			rm -f "$tmp"
+		fi
+		if [[ -x $EMIT_COMPLETE ]]; then
+			"$EMIT_COMPLETE" --phase "$PHASE" --ticket "$TICKET" --status failed \
+				--reason "rebase_conflict_with_origin_main" \
+				--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
+				--no-signal-update >/dev/null 2>&1 || true
+		fi
+		jq -n --arg status "stalled" --arg reason "rebase_conflict_with_origin_main" \
+			--arg signal "$SIGNAL_FILE" \
+			'. + {status: $status, reason: $reason, signalFile: $signal}' <<<'{}'
+		exit 1
+	elif [[ $REBASE_RC -ne 0 ]]; then
+		# fetch/other transient failure — log and proceed un-rebased (status quo;
+		# monitor-merge still catches divergence). Do NOT block the phase.
+		echo "phase-agent-dispatch: rebase preflight skipped (rc=$REBASE_RC) for ${TICKET}/${PHASE}; proceeding un-rebased" >&2
+	fi
 fi
 
 # Spawn the phase agent. `claude --bg` writes the new job ID to stdout as

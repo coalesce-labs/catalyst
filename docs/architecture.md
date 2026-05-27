@@ -229,6 +229,36 @@ single shared JSONL log** at `~/catalyst/events/YYYY-MM.jsonl`. The orchestrator
 events via the broker (`filter.wake.<ORCH_NAME>`), advances the ticket through the canonical
 sequence in `orchestrate-phase-advance`, and dispatches the next `--bg` job.
 
+### Dispatch-time rebase (front-load conflict surfacing, CTL-667)
+
+On a **fresh** dispatch of a **build** phase (`research`, `plan`, `implement`, `verify`,
+`review`), `phase-agent-dispatch` rebases the ticket's worktree (its cwd) onto current
+`origin/<base>` **before** launching the `claude --bg` worker. This front-loads divergence
+detection: the worker starts current with merged sibling work, and a conflict surfaces here
+instead of riding stale assumptions all the way to `monitor-merge` (CTL-608).
+
+The rebase is gated and mechanical:
+
+- **Fresh-only.** A resume dispatch (`--resume-session` set, CTL-658) skips it — the resumed
+  session assumes the prior tree.
+- **Build-phase-only.** `triage`/`pr`/`remediate` and the `monitor-merge`/`monitor-deploy`
+  phases are exempt (the monitor phases operate on the PR / merged SHA and have their own
+  `BEHIND` handling). The build-phase set is `is_rebase_phase` in `lib/phase-sequence.sh`,
+  drift-guarded against `PHASES`.
+- **Local-only.** It never pushes and never touches the open PR (build branches aren't pushed
+  until `phase-pr`); machine-local noise (`.catalyst/config.json`, `.trunk/*`) is stashed across
+  the rebase. The git logic lives in `lib/worktree-rebase.sh` (`resolve_base_branch` +
+  `rebase_onto_base`).
+- **Clean → proceed.** A clean rebase falls through to the normal worker launch.
+- **Conflict → park.** A textual conflict aborts the rebase (HEAD returns to the pre-rebase
+  commit), rewrites the phase signal to `status:"stalled"` +
+  `failureReason:"rebase_conflict_with_origin_main"`, emits `phase.<phase>.failed.<ticket>`, and
+  exits **without launching a worker**. The daemon TERMINAL-classifies the stalled signal (no
+  revive) and the scheduler sweep applies the `needs-human` label — the conflict is never
+  auto-resolved.
+- **Transient fetch failure → proceed un-rebased.** A flaky `git fetch` (rc≠2) is non-fatal;
+  the phase proceeds as status quo, with `monitor-merge` remaining the backstop.
+
 ### Unified data-flow
 
 The same event log is the cross-process backbone for every observation surface:

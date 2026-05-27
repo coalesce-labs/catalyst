@@ -162,6 +162,21 @@ and the `catalyst.orchestration.phaseAgents.turnCaps[<phase>]` config key in tha
 order). The prior-artifact gate — which file must already exist before a phase
 launches — sits alongside in the same script.
 
+**Dispatch-time rebase (CTL-667).** On a **fresh** dispatch of a **build** phase
+(`research`, `plan`, `implement`, `verify`, `review`), `phase-agent-dispatch`
+rebases the ticket's worktree onto current `origin/main` *before* launching the
+worker, so each build phase starts current with merged sibling work and a
+divergence surfaces at dispatch instead of riding all the way to `monitor-merge`.
+It is local-only (never pushes, never touches the PR) and mechanical: a clean
+rebase falls through to the normal launch; a textual **conflict** aborts, parks
+the ticket (`status:"stalled"` + `failureReason:"rebase_conflict_with_origin_main"`,
+`phase.<phase>.failed` emitted) and routes it to `needs-human` without launching a
+worker — conflicts are never auto-resolved. Resume dispatches (CTL-658) and the
+non-build phases (`triage`/`pr`/`remediate`/`monitor-merge`/`monitor-deploy`) skip
+the rebase; the `monitor-*` phases operate on the PR / merged SHA and keep their
+own `BEHIND` handling. Git logic lives in `lib/worktree-rebase.sh`; the build-phase
+set is `is_rebase_phase` in `lib/phase-sequence.sh`.
+
 ### State machine for one worker
 
 ```mermaid
