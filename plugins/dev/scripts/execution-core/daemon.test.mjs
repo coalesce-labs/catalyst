@@ -51,17 +51,73 @@ afterEach(() => {
 });
 
 describe("startDaemon", () => {
-  test("calls recover, startMonitor, startScheduler exactly once each", () => {
+  test("calls recover, boot, startMonitor, startScheduler exactly once each in order", () => {
     const calls = [];
     startDaemon({
       recover: (o) => calls.push(["recover", o.orchDir]),
+      // CTL-654: the boot-resume pass runs after recover, before the monitor.
+      reconcileBoot: (o) => calls.push(["boot", o.orchDir]),
       startMonitor: () => calls.push(["monitor"]),
       startScheduler: (o) => calls.push(["scheduler", o.orchDir]),
       watchRegistry: false,
     });
-    expect(calls.map((c) => c[0])).toEqual(["recover", "monitor", "scheduler"]);
-    // recover + scheduler both got the machine-level orchDir
-    expect(calls[0][1]).toBe(calls[2][1]);
+    expect(calls.map((c) => c[0])).toEqual(["recover", "boot", "monitor", "scheduler"]);
+    // recover + boot + scheduler all got the machine-level orchDir
+    expect(calls[0][1]).toBe(calls[1][1]);
+    expect(calls[0][1]).toBe(calls[3][1]);
+  });
+
+  // CTL-654: the boot-resume pass consumes the object recover() RETURNS as its
+  // `report` — the recover RecoveryReport was previously discarded.
+  test("threads recover()'s return value into reconcileBoot as report", () => {
+    const fakeReport = { coldStart: true, workers: { dead: ["CTL-1"] } };
+    let seenReport;
+    let bootCallCount = 0;
+    startDaemon({
+      recover: () => fakeReport,
+      reconcileBoot: (o) => {
+        bootCallCount++;
+        seenReport = o.report;
+      },
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+    });
+    expect(bootCallCount).toBe(1);
+    expect(seenReport).toBe(fakeReport);
+  });
+
+  // CTL-654: a throw from the boot-resume pass must not leave a stale PID file —
+  // it runs inside the same try/catch as recover/monitor/scheduler.
+  test("removes the PID file if reconcileBoot throws synchronously", () => {
+    const pidFile = join(process.env.CATALYST_DIR, "daemon.pid");
+    expect(() =>
+      startDaemon({
+        recover: () => ({ coldStart: true }),
+        reconcileBoot: () => {
+          throw new Error("simulated boot-resume failure");
+        },
+        startMonitor: () => {},
+        startScheduler: () => {},
+        watchRegistry: false,
+        pidFile,
+      })
+    ).toThrow("simulated boot-resume failure");
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  // CTL-654: the default no-arg-reconcileBoot path wires the real
+  // reconcileBootResume. A coldStart:false report must make it a safe no-op
+  // (no agent shell-out, no dispatch) and not throw.
+  test("default reconcileBoot is wired to reconcileBootResume and no-ops on a warm restart", () => {
+    expect(() =>
+      startDaemon({
+        recover: () => ({ coldStart: false, workers: {} }),
+        startMonitor: () => {},
+        startScheduler: () => {},
+        watchRegistry: false,
+      })
+    ).not.toThrow();
   });
 
   // CTL-634: one cache instance is created in startDaemon and threaded into
