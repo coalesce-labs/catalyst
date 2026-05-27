@@ -1,41 +1,110 @@
-// event-scan.mjs — CTL-587 historical scan of execution-core's events.jsonl.
+// event-scan.mjs — CTL-587 historical scan of execution-core's events.jsonl,
+// reworked for bounded memory in CTL-673.
 //
-// Two count queries no existing consumer provides:
+// Three count queries no existing consumer provides:
 //   - countReviveEvents({ticket, orchId, since, path}) — the per-ticket revive
 //     budget for recovery.mjs.
+//   - countRemediateCycles({ticket, orchId, since, path}) — the event-counted
+//     verify⇄remediate budget (CTL-653).
 //   - countDistinctRevivingTickets({windowMs, now, path}) — the storm-breaker
 //     that prevents a chain reaction when many tickets revive at once.
 //
-// Both are read-only synchronous scans of the entire events.jsonl. Pure: no
-// caching, no cursor. The file is not yet hot enough to justify either. A
-// follow-up (sized as "What We're NOT Doing" in the plan) adds a tailed cache
-// keyed on `(file size, last line ts)` if the file grows beyond ~50 MB.
+// CTL-673: the daemon calls these on its hot path — once per in-flight ticket
+// and once per reclaim-eligible signal, on every event-log write. The old
+// implementation `readFileSync`'d the WHOLE monthly log (~183 MB / ~297K lines)
+// per call, allocating a fresh giant string + array each time; observed daemon
+// RSS hit 1.8 GB after ~5h (JavaScriptCore never returns the freed pages).
 //
-// Parse failures on a line are skipped silently (best-effort). A missing log
-// returns 0 from both functions — the cold-start path the daemon hits before
-// the first event lands.
+// We now keep a per-path incremental index: a byte cursor advanced with the
+// shared `scanEventsChunked` primitive (event-tail.mjs), retaining ONLY the two
+// event families these counters query (`phase.implement.revive.*` and
+// `phase.remediate.complete.*`) as compact records. Repeated calls against the
+// same path read only newly-appended bytes; each query filters the small
+// retained list. Per-wake work becomes O(appended bytes); steady-state RSS is
+// bounded by the chunk size + the retained relevant-event list. The returned
+// numbers stay byte-identical to the old whole-file scan (existing tests guard
+// this). The only behavioral change is *when* bytes are read.
+//
+// Parse failures on a line are skipped silently (via parseEventTailChunk). A
+// missing log yields 0 from all three functions — the cold-start path the
+// daemon hits before the first event lands. The index is process-lifetime
+// in-memory state: a daemon restart re-seeds from offset 0 on the first call
+// (one bounded streaming pass), which is correct because the counters need full
+// history. Monthly rotation changes getEventLogPath() → a fresh index entry.
 
-import { existsSync, readFileSync } from "node:fs";
+import { statSync } from "node:fs";
+import { scanEventsChunked } from "./event-tail.mjs";
 import { getEventLogPath } from "./config.mjs";
 
 const REVIVE_NAME_PREFIX = "phase.implement.revive.";
+const REMEDIATE_NAME_PREFIX = "phase.remediate.complete.";
 
-function* readLinesSync(path) {
-  if (!existsSync(path)) return;
-  // events.jsonl is at MB-scale today; the whole-file read is simpler than a
-  // stream and the OS page cache makes repeat scans cheap.
-  const buf = readFileSync(path, "utf8");
-  for (const line of buf.split(/\r?\n/)) {
-    if (line) yield line;
-  }
+// Per-path incremental index. We retain ONLY the two event families the counters
+// query — a tiny fraction of the log — so memory stays bounded as the file grows.
+const _index = new Map(); // path -> { cursor, leftover, events: [{ name, orchId, ts, label }] }
+
+function isRelevant(name) {
+  return (
+    typeof name === "string" &&
+    (name.startsWith(REVIVE_NAME_PREFIX) || name.startsWith(REMEDIATE_NAME_PREFIX))
+  );
 }
 
-function safeParse(line) {
-  try {
-    return JSON.parse(line);
-  } catch {
-    return null;
+// refreshIndex — advance the path's cursor over newly-appended bytes, appending
+// any relevant events to the retained list. Resets on rotation/truncation
+// (size < cursor → a new/rolled file). A missing log is a no-op cold start
+// (events stays []). Returns the (mutated) entry so callers can filter it.
+function refreshIndex(path) {
+  let entry = _index.get(path);
+  if (!entry) {
+    entry = { cursor: 0, leftover: "", events: [] };
+    _index.set(path, entry);
   }
+  let size;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return entry; // missing log → cold start; retained events unchanged
+  }
+  if (size < entry.cursor) {
+    // File rotated or truncated — drop the stale cursor, leftover, and records.
+    entry.cursor = 0;
+    entry.leftover = "";
+    entry.events = [];
+  }
+  if (size === entry.cursor) return entry; // no new bytes — never re-reads
+  const { endOffset, leftover } = scanEventsChunked({
+    path,
+    fromOffset: entry.cursor,
+    leftover: entry.leftover,
+    onEvent: (ev) => {
+      const name = ev?.attributes?.["event.name"];
+      if (!isRelevant(name)) return;
+      entry.events.push({
+        name,
+        orchId: ev?.attributes?.["catalyst.orchestration"],
+        ts: ev?.ts,
+        label: ev?.attributes?.["event.label"],
+      });
+    },
+  });
+  entry.cursor = endOffset;
+  entry.leftover = leftover;
+  return entry;
+}
+
+// countByExactName — shared body for the two exact-name counters. Matches by
+// full `event.name`, with the optional orchId / since filters applied exactly
+// as the pre-CTL-673 whole-file scan did.
+function countByExactName(target, { orchId, since, path }) {
+  let n = 0;
+  for (const ev of refreshIndex(path).events) {
+    if (ev.name !== target) continue;
+    if (orchId && ev.orchId !== orchId) continue;
+    if (since && ev.ts && ev.ts < since) continue;
+    n++;
+  }
+  return n;
 }
 
 // countReviveEvents — number of phase.implement.revive.<ticket> envelopes that
@@ -44,18 +113,7 @@ function safeParse(line) {
 // match is tolerant of a missing attribute on either side (defensive default).
 export function countReviveEvents({ ticket, orchId, since, path = getEventLogPath() } = {}) {
   if (!ticket) throw new Error("countReviveEvents: ticket required");
-  const target = `phase.implement.revive.${ticket}`;
-  let n = 0;
-  for (const line of readLinesSync(path)) {
-    const ev = safeParse(line);
-    if (!ev) continue;
-    const name = ev?.attributes?.["event.name"];
-    if (name !== target) continue;
-    if (orchId && ev?.attributes?.["catalyst.orchestration"] !== orchId) continue;
-    if (since && ev?.ts && ev.ts < since) continue;
-    n++;
-  }
-  return n;
+  return countByExactName(`${REVIVE_NAME_PREFIX}${ticket}`, { orchId, since, path });
 }
 
 // countRemediateCycles — number of phase.remediate.complete.<ticket> envelopes
@@ -66,18 +124,7 @@ export function countReviveEvents({ ticket, orchId, since, path = getEventLogPat
 // events are durable). One completed cycle == one remediate-complete event.
 export function countRemediateCycles({ ticket, orchId, since, path = getEventLogPath() } = {}) {
   if (!ticket) throw new Error("countRemediateCycles: ticket required");
-  const target = `phase.remediate.complete.${ticket}`;
-  let n = 0;
-  for (const line of readLinesSync(path)) {
-    const ev = safeParse(line);
-    if (!ev) continue;
-    const name = ev?.attributes?.["event.name"];
-    if (name !== target) continue;
-    if (orchId && ev?.attributes?.["catalyst.orchestration"] !== orchId) continue;
-    if (since && ev?.ts && ev.ts < since) continue;
-    n++;
-  }
-  return n;
+  return countByExactName(`${REMEDIATE_NAME_PREFIX}${ticket}`, { orchId, since, path });
 }
 
 // countDistinctRevivingTickets — unique tickets that have any revive event
@@ -93,15 +140,17 @@ export function countDistinctRevivingTickets({
   if (!windowMs) throw new Error("countDistinctRevivingTickets: windowMs required");
   const cutoff = now() - windowMs;
   const seen = new Set();
-  for (const line of readLinesSync(path)) {
-    const ev = safeParse(line);
-    if (!ev) continue;
-    const name = ev?.attributes?.["event.name"];
-    if (typeof name !== "string" || !name.startsWith(REVIVE_NAME_PREFIX)) continue;
-    const tsMs = Date.parse(ev?.ts || "");
+  for (const ev of refreshIndex(path).events) {
+    if (typeof ev.name !== "string" || !ev.name.startsWith(REVIVE_NAME_PREFIX)) continue;
+    const tsMs = Date.parse(ev.ts || "");
     if (!Number.isFinite(tsMs) || tsMs < cutoff) continue;
-    const ticket = ev?.attributes?.["event.label"];
-    if (ticket) seen.add(ticket);
+    if (ev.label) seen.add(ev.label);
   }
   return seen.size;
+}
+
+// __resetEventScanIndexForTest — clear the per-path index so a suite starts from
+// a known state. Test-only; not used by production code.
+export function __resetEventScanIndexForTest() {
+  _index.clear();
 }
