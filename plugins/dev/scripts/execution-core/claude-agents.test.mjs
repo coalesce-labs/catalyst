@@ -8,6 +8,7 @@ import {
   listClaudeAgents,
   agentForShortId,
   isBgJobAlive,
+  livenessForBgJob,
   countBackgroundAgents,
   claudeStop,
 } from "./claude-agents.mjs";
@@ -76,6 +77,46 @@ describe("isBgJobAlive", () => {
   test("falls back to listing agents when no list is injected", () => {
     expect(isBgJobAlive("22222222", { exec: () => JSON.stringify(agents) })).toBe(true);
   });
+});
+
+describe("livenessForBgJob", () => {
+  // CTL-662 — the THREE-valued status reader reclaim keys on. Reuses the
+  // canonical status fixture shape `{ sessionId, status, kind }`. Covers the
+  // three-valued contract and the conservative present-but-not-idle ⇒ busy
+  // normalization (never reclaim a present worker we cannot PROVE is idle).
+  const statusAgents = [
+    { sessionId: "11111111-aaaa-bbbb-cccc-000000000001", status: "busy", kind: "background" },
+    { sessionId: "22222222-aaaa-bbbb-cccc-000000000002", status: "idle", kind: "background" },
+    { sessionId: "33333333-aaaa-bbbb-cccc-000000000003", status: "active", kind: "background" }, // synonym for busy
+    { sessionId: "44444444-aaaa-bbbb-cccc-000000000004", status: null, kind: "background" }, // present, status unknown
+  ];
+
+  test("present + status idle → 'idle'", () =>
+    expect(livenessForBgJob("22222222", { agents: statusAgents })).toBe("idle"));
+  test("present + status busy → 'busy'", () =>
+    expect(livenessForBgJob("11111111", { agents: statusAgents })).toBe("busy"));
+  test("present + status 'active' (busy synonym) → 'busy'", () =>
+    expect(livenessForBgJob("33333333", { agents: statusAgents })).toBe("busy"));
+  test("present + null status (unknown) → 'busy' (conservative: never reclaim a present worker we can't prove idle)", () =>
+    expect(livenessForBgJob("44444444", { agents: statusAgents })).toBe("busy"));
+  test("not listed → 'absent'", () =>
+    expect(livenessForBgJob("99999999", { agents: statusAgents })).toBe("absent"));
+  test("empty/falsy bgJobId → 'absent'", () =>
+    expect(livenessForBgJob("", { agents: statusAgents })).toBe("absent"));
+  test("malformed id (throws in shortIdFromSessionId, e.g. 'bg-9') → 'absent' WITHOUT shelling out", () =>
+    expect(livenessForBgJob("bg-9", { agents: statusAgents })).toBe("absent"));
+  test("failed `claude agents` read (exec throws) → 'absent'", () =>
+    expect(
+      livenessForBgJob("11111111", {
+        exec: () => {
+          throw new Error("boom");
+        },
+      }),
+    ).toBe("absent"));
+  test("accepts the full UUID form (truncates to the short id)", () =>
+    expect(
+      livenessForBgJob("22222222-aaaa-bbbb-cccc-000000000002", { agents: statusAgents }),
+    ).toBe("idle"));
 });
 
 describe("countBackgroundAgents", () => {

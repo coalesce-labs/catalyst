@@ -62,6 +62,35 @@ export function isBgJobAlive(bgJobId, { exec, agents } = {}) {
   return agentForShortId(shortId, list) !== null;
 }
 
+// livenessForBgJob — the THREE-valued liveness CTL-662's reclaim keys on:
+//   "busy"   — a live session with an open turn (or present but status not
+//              explicitly "idle": active/null/unknown all normalize to busy, the
+//              conservative direction — we never reclaim a worker we cannot PROVE
+//              is idle). A busy worker is NEVER auto-reclaimed regardless of how
+//              long its state.json mtime has been stale (the CTL-662 fix: an
+//              in-process sub-agent fan-out keeps the parent's turn busy while
+//              mtime goes stale).
+//   "idle"   — a live session with status "idle" (registered, between turns).
+//              Reclaim-eligible, but only after the caller's idle-confirmation.
+//   "absent" — not a live `claude agents` session (crashed/exited). Dead.
+// isBgJobAlive stays for the presence-only concurrency callers; this is the
+// status-aware superset. Best-effort: any doubt (falsy/malformed id, failed
+// `claude agents` read) returns "absent" so the caller falls through to its
+// existing recovery path — same fail direction as isBgJobAlive returning false.
+export function livenessForBgJob(bgJobId, { exec, agents } = {}) {
+  if (!bgJobId) return "absent";
+  let shortId;
+  try {
+    shortId = shortIdFromSessionId(bgJobId);
+  } catch {
+    return "absent";
+  }
+  const list = agents ?? listClaudeAgents({ exec });
+  const agent = agentForShortId(shortId, list);
+  if (!agent) return "absent";
+  return agent.status === "idle" ? "idle" : "busy";
+}
+
 // countBackgroundAgents — number of live sessions with kind === "background".
 // The scheduler's concurrency gate: interactive (human) sessions are unlimited
 // and MUST NOT count against maxParallel, so only `background` agents are
