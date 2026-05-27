@@ -166,6 +166,40 @@ describe("startDaemon", () => {
     expect(JSON.parse(readFileSync(statePath, "utf8")).maxParallel).toBe(9);
   });
 
+  // CTL-655: the daemon records its boot time so reclaimDeadWorkIfPossible can
+  // window the per-ticket revive budget to the current run.
+  test("writes a daemon-boot.json with a parseable ISO bootedAt", () => {
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+    });
+    const markerPath = join(process.env.CATALYST_DIR, "execution-core", "daemon-boot.json");
+    expect(existsSync(markerPath)).toBe(true);
+    const { bootedAt } = JSON.parse(readFileSync(markerPath, "utf8"));
+    expect(typeof bootedAt).toBe("string");
+    expect(Number.isFinite(Date.parse(bootedAt))).toBe(true);
+  });
+
+  test("a fresh boot overwrites bootedAt (restart resets the window)", () => {
+    const markerPath = join(process.env.CATALYST_DIR, "execution-core", "daemon-boot.json");
+    mkdirSync(dirname(markerPath), { recursive: true });
+    writeFileSync(markerPath, JSON.stringify({ bootedAt: "2000-01-01T00:00:00.000Z" }));
+    const startedAtMs = Date.now();
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+    });
+    const { bootedAt } = JSON.parse(readFileSync(markerPath, "utf8"));
+    // Rewritten (not appended/ignored): the stale marker is gone and the new
+    // timestamp is at/after this test's start.
+    expect(bootedAt).not.toBe("2000-01-01T00:00:00.000Z");
+    expect(Date.parse(bootedAt)).toBeGreaterThanOrEqual(startedAtMs);
+  });
+
   test("writes its PID to the given pidFile", () => {
     const pidFile = join(process.env.CATALYST_DIR, "daemon.pid");
     startDaemon({
