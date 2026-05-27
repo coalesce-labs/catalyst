@@ -72,6 +72,11 @@ import { writeBootMarker, clearProgressMarks } from "./recovery.mjs"; // CTL-655
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human/question on resume
+// CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
+// no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
+// so the phantom worker-dir validity sweep is operative in production.
+import { classifyTicketResolution } from "./linear-query.mjs";
+import { isBgJobAlive } from "./claude-agents.mjs";
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -351,7 +356,16 @@ export function startDaemon({
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
-    schedulerFn({ orchDir, cache, concurrency, configPath, layer2Path }); // CTL-536 + CTL-634 + CTL-665 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
+    schedulerFn({
+      orchDir,
+      cache,
+      concurrency,
+      configPath,
+      layer2Path,
+      // CTL-671: arm the phantom worker-dir validity sweep + bg-liveness reader.
+      classifyResolution: classifyTicketResolution,
+      isBgJobAlive,
+    }); // CTL-536 + CTL-634 + CTL-665 + CTL-671 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
     // CTL-684: start the side-car auto-tuner AFTER the scheduler so the
     // scheduler's first tick runs with the operator's current Layer-2 value
     // before any auto-tune adjustments. configPath + layer2Path are threaded

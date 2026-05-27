@@ -196,14 +196,22 @@ export function countTicketEventsInWindow({
   const cutoff = now() - windowMs;
   const suffix = `.${ticket}`;
   let n = 0;
-  for (const line of readLinesSync(path)) {
-    const ev = safeParse(line);
-    if (!ev) continue;
-    const name = ev?.attributes?.["event.name"];
-    if (typeof name !== "string" || !name.startsWith("phase.") || !name.endsWith(suffix)) continue;
-    const tsMs = Date.parse(ev?.ts || "");
-    if (!Number.isFinite(tsMs) || tsMs < cutoff) continue;
-    n++;
-  }
+  // CTL-671 (rebased onto CTL-673): the runaway counter must see ALL
+  // `phase.*.<ticket>` envelopes, not just the revive/remediate families the
+  // retained `_index` keeps — so it cannot reuse refreshIndex. Use the same
+  // bounded `scanEventsChunked` primitive directly (fixed-size chunks, never the
+  // pre-CTL-673 whole-file readFileSync) for a memory-safe full scan.
+  scanEventsChunked({
+    path,
+    fromOffset: 0,
+    leftover: "",
+    onEvent: (ev) => {
+      const name = ev?.attributes?.["event.name"];
+      if (typeof name !== "string" || !name.startsWith("phase.") || !name.endsWith(suffix)) return;
+      const tsMs = Date.parse(ev?.ts || "");
+      if (!Number.isFinite(tsMs) || tsMs < cutoff) return;
+      n++;
+    },
+  });
   return n;
 }

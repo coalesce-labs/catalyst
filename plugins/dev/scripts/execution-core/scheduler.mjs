@@ -3076,11 +3076,13 @@ function runTick() {
       // A test may inject its own via startScheduler({ prAdapter }); production
       // gets the real makePrView-backed adapter.
       prAdapter: runningOpts.prAdapter,
-      // CTL-671: arm the phantom worker-dir validity sweep with the real Linear
-      // probe + bg-liveness reader (schedulerTick's defaults are safe no-ops).
-      // ?? lets a daemon test inject hermetic stubs via runningOpts.
-      classifyResolution: runningOpts.classifyResolution ?? classifyTicketResolution,
-      isBgJobAlive: runningOpts.isBgJobAlive ?? defaultIsBgJobAlive,
+      // CTL-671: phantom-sweep seams threaded from startScheduler. Undefined for
+      // a direct startScheduler caller that did not opt in (unit tests) →
+      // schedulerTick's SAFE no-op defaults apply, so a bare daemon tick never
+      // shells out to linearis / `claude agents`. The real daemon (startDaemon)
+      // + the standalone main() pass the real impls to arm the sweep.
+      classifyResolution: runningOpts.classifyResolution,
+      isBgJobAlive: runningOpts.isBgJobAlive,
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -3146,8 +3148,9 @@ export function startScheduler({
     }),
   },
   preflight = preflightWorkspaceLabels, // CTL-585
-  // CTL-671: phantom-sweep seams — undefined here falls back to the real impls
-  // in runTick; a daemon test can inject hermetic stubs.
+  // CTL-671: phantom-sweep seams. Undefined → schedulerTick's safe no-op
+  // defaults (hermetic for unit tests that call startScheduler directly). The
+  // real daemon (startDaemon) and the standalone main() pass the real impls.
   classifyResolution,
   isBgJobAlive,
   tickIntervalMs = TICK_INTERVAL_MS,
@@ -3250,7 +3253,14 @@ function main() {
     process.exit(1);
   }
   log.info({ orchDir }, "execution-core scheduler starting");
-  startScheduler({ orchDir });
+  // CTL-671: arm the phantom worker-dir validity sweep + bg-liveness reader with
+  // the real impls (startScheduler defaults them to safe no-ops for hermetic
+  // unit tests). This standalone dry-run mirrors the real daemon's behavior.
+  startScheduler({
+    orchDir,
+    classifyResolution: classifyTicketResolution,
+    isBgJobAlive: defaultIsBgJobAlive,
+  });
   const shutdown = (sig) => {
     log.info({ sig }, "execution-core scheduler shutting down");
     stopScheduler();
