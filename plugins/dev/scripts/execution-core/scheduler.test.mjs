@@ -766,6 +766,7 @@ describe("schedulerTick — CTL-657 live-count concurrency & predecessor reap", 
       readEligible: () => oneEligible("CTL-2"),
       dispatch,
       liveBackgroundCount: () => 1, // 1 live bg worker, 1 slot free
+      verifyDispatched: verifyOk, // CTL-611: fakeDispatch writes no signal; bypass the verifier
     });
     expect(r.freeSlots).toBe(1);
     expect(r.dispatched).toEqual(["CTL-2"]);
@@ -781,6 +782,7 @@ describe("schedulerTick — CTL-657 live-count concurrency & predecessor reap", 
       readEligible: () => [],
       dispatch,
       liveBackgroundCount: () => 0,
+      verifyDispatched: verifyOk, // CTL-611: fakeDispatch writes no signal; bypass the verifier
     });
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "plan" }]);
     const reap = readEventLog().find(
@@ -2089,6 +2091,7 @@ describe("CTL-653: schedulerTick verify⇄remediate cycle (end-to-end)", () => {
         dispatch,
         writeStatus: noopWriteStatus,
         reclaimDeadWork: () => "noop",
+        verifyDispatched: verifyOk, // CTL-611: cyclingDispatch writes status:"done", not a runnable dispatched signal; bypass the verifier
       });
     }
   };
@@ -2274,6 +2277,7 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
       readEligible: () => eligibleOne("CTL-202"),
       dispatch,
       now: () => 1_000,
+      liveBackgroundCount: () => 0, // CTL-611: deterministic free slot post-CTL-657 rebase
     });
 
     const events = dispatchFailedEvents("CTL-202");
@@ -2293,6 +2297,7 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
       readEligible: () => eligibleOne("CTL-203"),
       dispatch,
       now: () => 1_000,
+      liveBackgroundCount: () => 0, // CTL-611: deterministic free slot post-CTL-657 rebase
     });
 
     expect(dispatch.calls).toHaveLength(1);
@@ -2313,6 +2318,7 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
       readEligible: () => eligibleOne("CTL-204"),
       dispatch,
       now: () => 1_000,
+      liveBackgroundCount: () => 0, // CTL-611: deterministic free slot post-CTL-657 rebase
     });
     // Tick 2 inside the 60s window: suppressed by cool-down → 0 new dispatch,
     // 0 new event (the dispatch never re-attempts so emission never fires).
@@ -2320,6 +2326,7 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
       readEligible: () => eligibleOne("CTL-204"),
       dispatch,
       now: () => 30_000,
+      liveBackgroundCount: () => 0, // CTL-611: deterministic free slot post-CTL-657 rebase
     });
 
     expect(dispatch.calls).toHaveLength(1);
