@@ -574,6 +574,58 @@ describe("Reaper.bootReplay", () => {
     // No throw == pass
     expect(true).toBe(true);
   });
+
+  // CTL-673: bootReplay streams the log in bounded chunks, retaining ONLY
+  // reap-relevant events, so a huge log dominated by irrelevant events never
+  // materializes into a whole-file string + array. The replay decision (skip
+  // already-completed, reap outstanding) must stay byte-identical.
+  it("streams a large log dominated by irrelevant events (only outstanding reaped)", async () => {
+    const tmpdir = (await import("node:os")).tmpdir();
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir, "reaper-boot-big-"));
+    const logPath = join(dir, "log.jsonl");
+    const lines = [];
+    for (let i = 0; i < 5000; i++) lines.push(JSON.stringify({ event: "session.heartbeat", i }));
+    lines.push(JSON.stringify({ event: "phase.yield.reap-requested", bg_job_id: "aaaaaaaa" }));
+    lines.push(JSON.stringify({ event: "phase.yield.reap-requested", bg_job_id: "bbbbbbbb" }));
+    lines.push(JSON.stringify({ event: "phase.yield.reap-complete", bg_job_id: "aaaaaaaa" }));
+    writeFileSync(logPath, lines.join("\n") + "\n");
+    const reaped = [];
+    const r = new Reaper({
+      executorReap: (id) => { reaped.push(id); return Promise.resolve({ ok: true }); },
+      agents: agentsFixture([
+        { sessionId: "bbbbbbbb-aaaa-bbbb-cccc-dddddddddddd", cwd: "/x", status: "idle" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.bootReplay(logPath);
+    expect(reaped).toEqual(["bbbbbbbb"]); // aaaaaaaa already completed → skipped
+  });
+
+  it("tolerates malformed lines interleaved in the stream", async () => {
+    const tmpdir = (await import("node:os")).tmpdir();
+    const { mkdtempSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir, "reaper-boot-bad-"));
+    const logPath = join(dir, "log.jsonl");
+    writeFileSync(logPath,
+      "not json\n" +
+      JSON.stringify({ event: "phase.yield.reap-requested", bg_job_id: "bbbbbbbb" }) + "\n" +
+      "{ truncated\n");
+    const reaped = [];
+    const r = new Reaper({
+      executorReap: (id) => { reaped.push(id); return Promise.resolve({ ok: true }); },
+      agents: agentsFixture([
+        { sessionId: "bbbbbbbb-aaaa-bbbb-cccc-dddddddddddd", cwd: "/x", status: "idle" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.bootReplay(logPath);
+    expect(reaped).toEqual(["bbbbbbbb"]); // malformed lines skipped, valid intent replayed
+  });
 });
 
 // ─── CTL-661 hole #4: pure grouping helpers ──────────────────────────────────

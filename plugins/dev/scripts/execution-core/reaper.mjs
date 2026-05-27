@@ -17,6 +17,7 @@
 import { spawnSync, execFileSync } from "node:child_process";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { scanEventsChunked } from "./event-tail.mjs";
 import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
 import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
 import { lastSeenMsForSession } from "./session-recency.mjs";
@@ -488,21 +489,28 @@ export class Reaper {
    */
   async bootReplay(eventLogPath) {
     if (!existsSync(eventLogPath)) return;
-    let content;
-    try {
-      content = readFileSync(eventLogPath, "utf8");
-    } catch {
-      return;
-    }
+    // CTL-673: stream the log in bounded chunks and retain ONLY reap-relevant
+    // events, so a 183 MB / ~297K-line log never materializes into a whole-file
+    // string + array at boot. scanEventsChunked swallows open/stat errors
+    // (returns a no-op result) and skips malformed lines via parseEventTailChunk,
+    // preserving the old `catch { return; }` best-effort behavior.
     const events = [];
-    for (const line of content.split("\n")) {
-      if (!line) continue;
-      try {
-        events.push(JSON.parse(line));
-      } catch {
-        /* malformed line — skip */
-      }
-    }
+    scanEventsChunked({
+      path: eventLogPath,
+      fromOffset: 0,
+      onEvent: (e) => {
+        const evt = e?.event;
+        if (typeof evt !== "string") return;
+        if (
+          evt.endsWith(".reap-requested") ||
+          evt.endsWith(".reap-complete") ||
+          evt.endsWith(".cleanup-complete") ||
+          evt === "pr.merged.cleanup-requested"
+        ) {
+          events.push(e); // retain ONLY reap-relevant events — bounds peak memory
+        }
+      },
+    });
     const completed = new Set();
     for (const e of events) {
       const evt = e.event;
