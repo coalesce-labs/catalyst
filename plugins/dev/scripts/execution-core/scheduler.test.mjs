@@ -1093,30 +1093,163 @@ describe("dispatch circuit breaker (CTL-671)", () => {
   });
 
   test("schedulerTick stops dispatching after THRESHOLD consecutive failures", () => {
-    writeSignal("CTL-9", "research", "done"); // in-flight; advancement → plan
-    const dispatch = fakeDispatch({ code: 2 }); // every dispatch refused
-    // Each tick is past the 60 s cool-down window so a fresh failure records.
-    for (let i = 0; i < CIRCUIT_BREAKER_THRESHOLD; i++) {
+    // Rebase note (CTL-671 onto CTL-712/CTL-713): two sibling mechanisms now
+    // co-exist on the advancement path — the CTL-712 max-dispatch-retries
+    // terminal stop (escalateDispatchExhausted at getMaxDispatchRetries()=5) and
+    // CTL-671's own circuit breaker (CIRCUIT_BREAKER_THRESHOLD=8). To isolate the
+    // CTL-671 breaker (the subject under test) we lift the CTL-712 ceiling above
+    // the breaker threshold so the breaker is the gate that fires. We also use a
+    // TRANSIENT failure code (1): CTL-712 classifies code 2 as a PERMANENT failure
+    // (PERMANENT_FAILURE_CODES) with a 30-min cooldown, which would suppress the
+    // re-dispatch retries this test relies on.
+    const prevMax = process.env.SCHEDULER_MAX_DISPATCH_RETRIES;
+    process.env.SCHEDULER_MAX_DISPATCH_RETRIES = String(CIRCUIT_BREAKER_THRESHOLD + 5);
+    try {
+      writeSignal("CTL-9", "research", "done"); // in-flight; advancement → plan
+      const dispatch = fakeDispatch({ code: 1 }); // every dispatch refused (transient)
+      // Each tick is past the 60 s cool-down window so a fresh failure records.
+      for (let i = 0; i < CIRCUIT_BREAKER_THRESHOLD; i++) {
+        schedulerTick(orchDir, {
+          readEligible: () => [],
+          dispatch,
+          now: () => (i + 1) * 70_000,
+          liveBackgroundCount: () => 0,
+        });
+      }
+      expect(dispatch.calls).toHaveLength(CIRCUIT_BREAKER_THRESHOLD);
+      const m = JSON.parse(
+        readFileSync(dispatchCooldownPath(orchDir, "CTL-9", "plan"), "utf8")
+      );
+      expect(m.consecutiveFailures).toBe(CIRCUIT_BREAKER_THRESHOLD);
+      // One more tick past the window: the top-of-loop breaker guard suppresses it.
       schedulerTick(orchDir, {
         readEligible: () => [],
         dispatch,
-        now: () => (i + 1) * 70_000,
+        now: () => (CIRCUIT_BREAKER_THRESHOLD + 2) * 70_000,
         liveBackgroundCount: () => 0,
       });
+      expect(dispatch.calls).toHaveLength(CIRCUIT_BREAKER_THRESHOLD); // no growth — breaker held
+    } finally {
+      if (prevMax === undefined) delete process.env.SCHEDULER_MAX_DISPATCH_RETRIES;
+      else process.env.SCHEDULER_MAX_DISPATCH_RETRIES = prevMax;
     }
-    expect(dispatch.calls).toHaveLength(CIRCUIT_BREAKER_THRESHOLD);
-    const m = JSON.parse(
-      readFileSync(dispatchCooldownPath(orchDir, "CTL-9", "plan"), "utf8")
-    );
-    expect(m.consecutiveFailures).toBe(CIRCUIT_BREAKER_THRESHOLD);
-    // One more tick past the window: the top-of-loop breaker guard suppresses it.
+  });
+});
+
+// ── CTL-671 Phase 3: phantom/orphan worker-dir validity sweep ──
+describe("phantom worker-dir validity sweep (CTL-671)", () => {
+  // The sweep's seams are injected directly (classifyResolution returns the
+  // 3-valued result; classifyTicketResolution's parsing is covered in
+  // linear-query.test.mjs). schedulerTick's defaults are safe no-ops, so the
+  // sweep only acts here because we arm it.
+  const resolveTo = (verdict) => () => verdict;
+  const eligibleFull = (id) => ({
+    identifier: id,
+    priority: 1,
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  test("quarantines a not-found + not-eligible + dead worker dir", () => {
+    writeSignal("CTL-9", "implement", "running");
     schedulerTick(orchDir, {
       readEligible: () => [],
-      dispatch,
-      now: () => (CIRCUIT_BREAKER_THRESHOLD + 2) * 70_000,
+      dispatch: () => ({ code: 0 }),
       liveBackgroundCount: () => 0,
+      classifyResolution: resolveTo("not-found"),
+      isBgJobAlive: () => false,
     });
-    expect(dispatch.calls).toHaveLength(CIRCUIT_BREAKER_THRESHOLD); // no growth — breaker held
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-9", "phase-implement.json"), "utf8")
+    );
+    expect(sig.status).toBe("stalled");
+    expect(sig.stalledReason).toBe("phantom-ticket");
+  });
+
+  test("does NOT quarantine when Linear resolution is unknown (outage safety)", () => {
+    writeSignal("CTL-100", "implement", "running");
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: resolveTo("unknown"), // transient outage
+      isBgJobAlive: () => false,
+    });
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-100", "phase-implement.json"), "utf8")
+    );
+    expect(sig.status).toBe("running"); // untouched
+  });
+
+  test("does NOT quarantine a ticket present in the eligible set", () => {
+    writeSignal("CTL-100", "implement", "running");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [eligibleFull("CTL-100")], // eligible → real ticket
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "not-found";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(
+      JSON.parse(
+        readFileSync(join(orchDir, "workers", "CTL-100", "phase-implement.json"), "utf8")
+      ).status
+    ).toBe("running");
+    expect(classifyCalls).toBe(0); // eligible short-circuits before the Linear probe
+  });
+
+  test("does NOT quarantine a not-found ticket whose bg job is still alive", () => {
+    writeSignal("CTL-9", "implement", "running");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "not-found";
+      },
+      isBgJobAlive: () => true, // live worker → never touched
+    });
+    expect(
+      JSON.parse(
+        readFileSync(join(orchDir, "workers", "CTL-9", "phase-implement.json"), "utf8")
+      ).status
+    ).toBe("running");
+    expect(classifyCalls).toBe(0); // bg-liveness short-circuits before the Linear probe
+  });
+
+  test("skips already-terminal signals (idempotent / no rework, never probes Linear)", () => {
+    writeSignal("CTL-9", "implement", "stalled");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "not-found";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(classifyCalls).toBe(0); // never probes a terminal ticket
+  });
+
+  test("returns the quarantined phantoms list for the daemon log / HUD", () => {
+    writeSignal("CTL-9", "implement", "running");
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: resolveTo("not-found"),
+      isBgJobAlive: () => false,
+    });
+    expect(result.quarantinedPhantoms).toEqual([{ ticket: "CTL-9", phase: "implement" }]);
   });
 });
 

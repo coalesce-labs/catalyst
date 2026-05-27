@@ -61,7 +61,7 @@ import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles } from "./event-scan.mjs";
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
-import { fetchTicketState, fetchTicketRelations } from "./linear-query.mjs";
+import { fetchTicketState, fetchTicketRelations, classifyTicketResolution } from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
 import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
 import { readWorkerSignals } from "./signal-reader.mjs";
@@ -73,7 +73,11 @@ import { readWorkerSignals } from "./signal-reader.mjs";
 // never per-tick / per-ticket — the gh subprocess only fires from inside prView
 // on the rare merged-zombie / drift path, not on construction.
 import { makePrView } from "./scan-adapters.mjs";
-import { countBackgroundAgents, getAgentsCached } from "./claude-agents.mjs";
+import {
+  countBackgroundAgents,
+  getAgentsCached,
+  isBgJobAlive as defaultIsBgJobAlive,
+} from "./claude-agents.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
 // is the real recovery-module function; tests inject a fake. See
@@ -1406,6 +1410,16 @@ export function maybeTripCircuitBreaker(orchDir, ticket, phase, opts = {}) {
   return true;
 }
 
+// CTL-671: quarantine a phantom worker dir to terminal `stalled`. Thin wrapper
+// over writeTerminalStalled with reason "phantom-ticket". The phantom sweep
+// (schedulerTick Pass 0a) only calls this after the full conjunction — Linear
+// not-found AND not-eligible AND no live bg job — so a Linear outage (unknown)
+// or a real in-flight ticket is never quarantined. Returns true when the signal
+// is (or was already) stalled, false when there was no signal to stall.
+function maybeQuarantinePhantom(orchDir, ticket, phase, opts = {}) {
+  return writeTerminalStalled(orchDir, ticket, phase, "phantom-ticket", {}, opts);
+}
+
 // CTL-611: post-dispatch verifier. A dispatch is only really successful if
 // workers/<T>/phase-<P>.json was written with a non-empty bg_job_id and a
 // runnable status. A --dry-run leak (no signal at all) or a mark_launch_failed
@@ -1728,6 +1742,16 @@ export function schedulerTick(
     // runningOpts.prAdapter → runTick, so both paths fire live. Injectable so
     // tests can exercise the pr-merged branch without shelling out to `gh`.
     prAdapter = undefined,
+    // CTL-671: phantom worker-dir validity sweep seams. classifyResolution is
+    // the 3-valued Linear probe (exists|not-found|unknown); isBgJobAlive maps a
+    // dead worker's bg_job_id to a live `claude agents` session. The DEFAULTS
+    // here are deliberately SAFE no-ops (resolution always "unknown", liveness
+    // always alive) so a bare unit tick never shells out to linearis /
+    // `claude agents` and never quarantines. The daemon (runTick) injects the
+    // real classifyTicketResolution + isBgJobAlive to arm the sweep in
+    // production; sweep-specific tests inject their own stubs.
+    classifyResolution = () => "unknown",
+    isBgJobAlive = () => true,
   } = {}
 ) {
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
@@ -1755,6 +1779,38 @@ export function schedulerTick(
       },
       { ticket, phase, source }
     );
+  }
+
+  // CTL-671: compute the eligible set ONCE per tick. Consumed by the phantom
+  // validity sweep (Pass 0a, below) and the new-work pull (Pass 2). readEligible
+  // is the test injection seam; production reads all per-project eligible
+  // projections (written exclusively from a live `linearis issues list`).
+  const eligible = readEligible ? readEligible() : readAllEligibleTickets();
+  const eligibleIds = new Set(eligible.map((t) => t.identifier));
+
+  // (0a) CTL-671 phantom/orphan validity sweep — quarantine a worker dir whose
+  // ticket is definitively non-existent in Linear, NOT in the eligible set, and
+  // has NO live bg worker. The conjunction of all three is required so a Linear
+  // outage (unknown resolution) or a real in-flight ticket is never touched.
+  // Runs BEFORE the reclaim sweep so the per-tick probe-storm path that
+  // sustained phantom CTL-9 (24,560 events) is cut on the first tick that sees
+  // it, instead of looping forever. Cheap checks (eligible membership, then
+  // bg-liveness) gate the Linear call, so a healthy fleet pays nothing.
+  const quarantinedPhantoms = [];
+  for (const sig of readWorkerSignals(orchDir)) {
+    if (!sig.ticket) continue;
+    if (!isTicketInFlight(readPhaseSignals(orchDir, sig.ticket))) continue; // skip terminal — no probe
+    if (eligibleIds.has(sig.ticket)) continue; // (a) eligible → real ticket
+    const bgId = sig.liveness?.kind === "bg" ? sig.liveness.value : null;
+    if (isBgJobAlive(bgId)) continue; // (c) live worker → cheap check before the Linear call
+    if (classifyResolution(sig.ticket, { exec }) !== "not-found") continue; // (b) definitive only
+    if (maybeQuarantinePhantom(orchDir, sig.ticket, sig.phase)) {
+      quarantinedPhantoms.push({ ticket: sig.ticket, phase: sig.phase });
+      log.warn(
+        { ticket: sig.ticket, phase: sig.phase },
+        "scheduler: quarantined phantom worker dir (not-found + not-eligible + dead bg) — CTL-671"
+      );
+    }
   }
 
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -1911,9 +1967,10 @@ export function schedulerTick(
     }
   }
 
-  // CTL-705: hoist eligible read here so both the preemption sweep (0.5) and
-  // the new-work pull (2) share a single read per tick.
-  const eligible = readEligible ? readEligible() : readAllEligibleTickets();
+  // CTL-705: the eligible read is hoisted to the top of the tick (see the CTL-671
+  // phantom-sweep block above) so the preemption sweep (0.5), the new-work pull
+  // (2), and the phantom sweep (0a) all share a single read per tick. `eligible`
+  // is already in scope here.
 
   // CTL-705: hoist the worker-slot ceiling + live background count to a SINGLE
   // read per tick, shared by the preemption sweep (0.5), the resume sweep (1.5),
@@ -2547,7 +2604,8 @@ export function schedulerTick(
 
   // (2) New-work pull — fill free slots with top-ranked ready tickets. D5:
   // hydrate the live state of every out-of-set blocker first so a Ready ticket
-  // blocked by a non-terminal out-of-set ticket is held back.
+  // blocked by a non-terminal out-of-set ticket is held back. `eligible` was
+  // computed once at the top of the tick (CTL-671) and is reused here.
   // CTL-705: `eligible` is hoisted above sweep 0.5 — used by buildGlobalRanking there.
   const blockerStates = hydrateOutOfSetBlockers(eligible, { exec, cache });
   // CTL-634: surface the cache hit-rate once per tick. Log-line-only matches
@@ -2797,8 +2855,8 @@ export function schedulerTick(
   // (4) Cooldown GC sweep (CTL-713) — reap expired markers for tickets that
   // have left the eligible set so .dispatch-cooldowns/ self-cleans instead of
   // accumulating orphans. Runs last: GC must not influence this tick's dispatch
-  // decisions.
-  const eligibleIds = new Set(eligible.map((t) => t.identifier));
+  // decisions. `eligibleIds` is computed once at the top of the tick (CTL-671
+  // phantom-sweep block) and is already in scope here.
   for (const { ticket, phase } of gcDispatchCooldowns(orchDir, eligibleIds, now())) {
     appendCooldownGcEvent({ ticket, orchId: ticket, target_phase: phase });
   }
@@ -2809,6 +2867,7 @@ export function schedulerTick(
     reviveSuppressed,
     noProgressStopped,
     escalated,
+    quarantinedPhantoms, // CTL-671 — phantom worker dirs stalled this tick
     advanced,
     dispatched,
     freeSlots,
@@ -2952,6 +3011,11 @@ function runTick() {
       // A test may inject its own via startScheduler({ prAdapter }); production
       // gets the real makePrView-backed adapter.
       prAdapter: runningOpts.prAdapter,
+      // CTL-671: arm the phantom worker-dir validity sweep with the real Linear
+      // probe + bg-liveness reader (schedulerTick's defaults are safe no-ops).
+      // ?? lets a daemon test inject hermetic stubs via runningOpts.
+      classifyResolution: runningOpts.classifyResolution ?? classifyTicketResolution,
+      isBgJobAlive: runningOpts.isBgJobAlive ?? defaultIsBgJobAlive,
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -3017,6 +3081,10 @@ export function startScheduler({
     }),
   },
   preflight = preflightWorkspaceLabels, // CTL-585
+  // CTL-671: phantom-sweep seams — undefined here falls back to the real impls
+  // in runTick; a daemon test can inject hermetic stubs.
+  classifyResolution,
+  isBgJobAlive,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
@@ -3038,6 +3106,8 @@ export function startScheduler({
     fetchRelations, // CTL-755: optional admission-gate hydration seam
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
+    classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam
+    isBgJobAlive, // CTL-671: optional phantom-sweep bg-liveness seam
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels
