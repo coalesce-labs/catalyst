@@ -20,6 +20,8 @@ import {
   isTicketInFlight,
   listInFlightTickets,
   readMaxParallel,
+  readExecutionCoreConcurrency,
+  DEFAULT_MAX_PARALLEL,
   computeFreeSlots,
   predecessorPhaseOf,
   resolveReapPredecessor,
@@ -183,6 +185,85 @@ describe("listInFlightTickets / readMaxParallel / computeFreeSlots", () => {
   test("computeFreeSlots never goes negative", () => {
     expect(computeFreeSlots(3, 1)).toBe(2);
     expect(computeFreeSlots(3, 5)).toBe(0);
+  });
+});
+
+// CTL-665 Phase 1 — the committed-config reader + readMaxParallel config-first
+// precedence + clamp. Mirrors the readOrphanReaperConfig reader contract.
+describe("readExecutionCoreConcurrency (CTL-665)", () => {
+  function writeConfig(obj) {
+    const p = join(orchDir, "config.json");
+    writeFileSync(p, JSON.stringify(obj));
+    return p;
+  }
+  test("returns {} for a null/empty configPath", () => {
+    expect(readExecutionCoreConcurrency(null)).toEqual({});
+    expect(readExecutionCoreConcurrency("")).toEqual({});
+  });
+  test("returns {} for an absent file (ENOENT silent — no throw)", () => {
+    expect(readExecutionCoreConcurrency(join(orchDir, "nope.json"))).toEqual({});
+  });
+  test("returns {} for unparseable JSON (no throw)", () => {
+    const p = join(orchDir, "bad.json");
+    writeFileSync(p, "{ not json");
+    expect(readExecutionCoreConcurrency(p)).toEqual({});
+  });
+  test("returns the catalyst.orchestration.executionCore object", () => {
+    const p = writeConfig({
+      catalyst: {
+        orchestration: {
+          executionCore: {
+            maxParallel: 4,
+            minParallel: 1,
+            maxParallelCeiling: 10,
+            eligibleQuery: { status: "Ready" },
+          },
+        },
+      },
+    });
+    expect(readExecutionCoreConcurrency(p)).toEqual({
+      maxParallel: 4,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+      eligibleQuery: { status: "Ready" },
+    });
+  });
+  test("returns {} when the key is absent", () => {
+    const p = writeConfig({ catalyst: { orchestration: {} } });
+    expect(readExecutionCoreConcurrency(p)).toEqual({});
+  });
+});
+
+describe("readMaxParallel precedence + clamp (CTL-665)", () => {
+  test("config wins over state.json", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    expect(readMaxParallel(orchDir, { maxParallel: 4 })).toBe(4);
+  });
+  test("state.json fallback when config silent", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    expect(readMaxParallel(orchDir, {})).toBe(2);
+  });
+  test("hardcoded fallback constant when both silent", () => {
+    expect(readMaxParallel(orchDir, {})).toBe(DEFAULT_MAX_PARALLEL);
+  });
+  test("clamp to ceiling", () => {
+    expect(
+      readMaxParallel(orchDir, { maxParallel: 50, minParallel: 1, maxParallelCeiling: 10 }),
+    ).toBe(10);
+  });
+  test("clamp to floor — a resolved value below minParallel is raised", () => {
+    // state.json resolves to 1; config carries only the bounds (no maxParallel),
+    // so the resolved 1 is clamped up to minParallel: 2.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    expect(readMaxParallel(orchDir, { minParallel: 2, maxParallelCeiling: 10 })).toBe(2);
+  });
+  test("no clamp when bounds absent", () => {
+    expect(readMaxParallel(orchDir, { maxParallel: 50 })).toBe(50);
+  });
+  test("backward compatibility — one-arg call unchanged (default 1, state.json 3)", () => {
+    expect(readMaxParallel(orchDir)).toBe(1);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    expect(readMaxParallel(orchDir)).toBe(3);
   });
 });
 

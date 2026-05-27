@@ -151,12 +151,70 @@ export function listInFlightTickets(orchDir) {
   return inFlight;
 }
 
-// readMaxParallel — the run's worker-slot ceiling from state.json (parity with
-// orchestrate-dispatch-next:176). Defaults to 1 when unset/unreadable. ENOENT is
-// expected and stays silent; any other read error or a JSON parse failure would
-// otherwise silently cap the run to one slot forever, so it is logged loudly
-// before the fallback to keep the cause operator-visible.
-export function readMaxParallel(orchDir) {
+// DEFAULT_MAX_PARALLEL — the single hardcoded worker-slot fallback, consulted
+// only when neither committed config nor the legacy state.json supplies a valid
+// ceiling (CTL-665 Decision 3). Exported so the daemon's literal and this
+// reader's literal can't drift.
+export const DEFAULT_MAX_PARALLEL = 1;
+
+// readExecutionCoreConcurrency — pull the committed worker-slot concurrency knobs
+// out of a project's .catalyst/config.json → catalyst.orchestration.executionCore
+// (CTL-665). Returns {} for a null/missing/unparseable file or an absent key, so
+// callers fall back to state.json + the hardcoded default. Never throws. Mirrors
+// readOrphanReaperConfig (orphan-reaper-timer.mjs:16) — the CTL-649 threading
+// precedent. Note: the returned object may also carry the central `eligibleQuery`
+// (the project config co-locates it under executionCore); readMaxParallel reads
+// only maxParallel/minParallel/maxParallelCeiling from it.
+export function readExecutionCoreConcurrency(configPath) {
+  if (!configPath) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { configPath, err: err.message },
+        "execution-core: concurrency config unreadable; using defaults"
+      );
+    }
+    return {};
+  }
+  return parsed?.catalyst?.orchestration?.executionCore ?? {};
+}
+
+// clampToBounds — raise `value` to `minParallel` and lower it to
+// `maxParallelCeiling`, but only when each bound is a valid integer (CTL-665).
+// Bounds bite only when present, so the empty-`concurrency` legacy path stays
+// unclamped — every existing state.json-driven test is untouched.
+function clampToBounds(value, { minParallel, maxParallelCeiling } = {}) {
+  let resolved = value;
+  if (Number.isInteger(minParallel) && resolved < minParallel) resolved = minParallel;
+  if (Number.isInteger(maxParallelCeiling) && resolved > maxParallelCeiling) {
+    resolved = maxParallelCeiling;
+  }
+  return resolved;
+}
+
+// readMaxParallel — the run's worker-slot ceiling, config-first (CTL-665). A
+// valid `concurrency.maxParallel` (committed config, threaded from the daemon)
+// wins; otherwise the legacy state.json `maxParallel` is the back-compat
+// fallback; otherwise the shared DEFAULT_MAX_PARALLEL. The resolved value is then
+// clamped into [minParallel, maxParallelCeiling] when those bounds are valid
+// integers. The one-arg call `readMaxParallel(orchDir)` (concurrency = {}) is
+// byte-for-byte equivalent to the pre-CTL-665 behavior: no config value, no
+// bounds, so it falls to state.json or DEFAULT_MAX_PARALLEL with no clamp.
+//
+// ENOENT on state.json is expected and stays silent; any other read error or a
+// JSON parse failure would otherwise silently cap the run, so it is logged
+// loudly before the fallback to keep the cause operator-visible.
+export function readMaxParallel(orchDir, concurrency = {}) {
+  // config-primary: a valid committed maxParallel wins outright.
+  const configMax =
+    Number.isInteger(concurrency?.maxParallel) && concurrency.maxParallel > 0
+      ? concurrency.maxParallel
+      : null;
+
+  let stateMax = null;
   let raw;
   try {
     raw = readFileSync(join(orchDir, "state.json"), "utf8");
@@ -164,27 +222,38 @@ export function readMaxParallel(orchDir) {
     if (err.code !== "ENOENT") {
       log.error(
         { err: err.message, code: err.code, orchDir },
-        "scheduler: state.json unreadable — defaulting maxParallel to 1"
+        "scheduler: state.json unreadable — defaulting maxParallel"
       );
     }
-    return 1;
   }
-  let n;
-  try {
-    n = JSON.parse(raw)?.maxParallel;
-  } catch (err) {
-    log.error(
-      { err: err.message, orchDir },
-      "scheduler: state.json is not valid JSON — defaulting maxParallel to 1"
-    );
-    return 1;
+  if (raw !== undefined) {
+    let n;
+    let parsed = true;
+    try {
+      n = JSON.parse(raw)?.maxParallel;
+    } catch (err) {
+      parsed = false;
+      log.error(
+        { err: err.message, orchDir },
+        "scheduler: state.json is not valid JSON — defaulting maxParallel"
+      );
+    }
+    if (parsed) {
+      if (Number.isInteger(n) && n > 0) {
+        stateMax = n;
+      } else if (configMax === null) {
+        // Only warn about a missing state.json ceiling when config can't cover
+        // it — a config-present run intentionally ignores state.json.
+        log.warn(
+          { maxParallel: n, orchDir },
+          "scheduler: state.json has no valid maxParallel — defaulting"
+        );
+      }
+    }
   }
-  if (Number.isInteger(n) && n > 0) return n;
-  log.warn(
-    { maxParallel: n, orchDir },
-    "scheduler: state.json has no valid maxParallel — defaulting to 1"
-  );
-  return 1;
+
+  const resolved = configMax ?? stateMax ?? DEFAULT_MAX_PARALLEL;
+  return clampToBounds(resolved, concurrency);
 }
 
 // computeFreeSlots — never negative (an over-subscribed run yields 0).
