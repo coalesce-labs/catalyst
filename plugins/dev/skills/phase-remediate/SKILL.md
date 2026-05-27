@@ -284,6 +284,11 @@ EOF
   fi
   [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
 ${MIRROR_FOOTER}"
+  if [[ ${#MIRROR_BODY} -gt 30000 ]]; then
+    MIRROR_BODY="${MIRROR_BODY:0:30000}
+
+_... (truncated)_"
+  fi
   if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
