@@ -234,6 +234,32 @@ describe("readWorkerSignals (per-phase layout)", () => {
     expect(row.status).toBe("running"); // per-phase status wins
   });
 
+  test("per-phase: surfaces stalledReason from a quarantined phase signal (CTL-671)", () => {
+    const dir = join(tmp, "orch-pa", "workers", "CTL-9");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-implement.json"),
+      JSON.stringify({
+        ticket: "CTL-9",
+        phase: "implement",
+        orchestrator: "orch-pa",
+        status: "stalled",
+        stalledReason: "phantom-ticket",
+        updatedAt: new Date(NOW - 5_000).toISOString(),
+      }),
+    );
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out).toHaveLength(1);
+    expect(out[0].status).toBe("stalled");
+    expect(out[0].stalledReason).toBe("phantom-ticket");
+  });
+
+  test("per-phase: stalledReason is null for a healthy running phase", () => {
+    setupPerPhaseOrch(tmp, "orch-pa", "T-100", [{ phase: "implement" }]);
+    const out = readWorkerSignals(tmp, NOW);
+    expect(out[0].stalledReason).toBeNull();
+  });
+
   test("per-phase directory with no phase-*.json is skipped silently", () => {
     setupOrch(tmp, "orch-pa", [makeSignal({ ticket: "T-flat", workerName: "orch-pa-T-flat" })]);
     mkdirSync(join(tmp, "orch-pa", "workers", "T-empty"), { recursive: true });

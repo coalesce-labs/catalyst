@@ -24,6 +24,10 @@ export interface WorkerSignal {
   workerName: string;
   label: string | null;
   status: string;
+  // CTL-671: why a worker is `stalled` — "phantom-ticket" (quarantined by the
+  // validity sweep), "dispatch-circuit-breaker", or "remediate-cycle-cap-exhausted".
+  // Null when not stalled. Surfaced on the worker row so an operator sees the cause.
+  stalledReason: string | null;
   phase: number | null;
   // Per-phase mode current phase name (e.g. "implement", "monitor-merge"). Null for legacy
   // oneshot-legacy workers that only carry the integer `phase`.
@@ -99,6 +103,7 @@ function parseSignal(raw: unknown): WorkerSignal | null {
     workerName,
     label: asString(r.label),
     status,
+    stalledReason: asString(r.stalledReason),
     phase: asNumber(r.phase),
     phaseName: asString(r.phaseName),
     phaseTimestamps: parsePhaseTimestamps(r.phaseTimestamps),
@@ -121,6 +126,7 @@ interface PerPhaseOverlay {
   orchestrator: string;
   phaseName: string;
   status: string;
+  stalledReason: string | null;
   updatedAt: string | null;
 }
 
@@ -137,7 +143,14 @@ function parsePerPhaseFile(raw: unknown): PerPhaseOverlay | null {
   const phaseName = asString(r.phase);
   const status = asString(r.status);
   if (!ticket || !orchestrator || !phaseName || !status) return null;
-  return { ticket, orchestrator, phaseName, status, updatedAt: asString(r.updatedAt) };
+  return {
+    ticket,
+    orchestrator,
+    phaseName,
+    status,
+    stalledReason: asString(r.stalledReason),
+    updatedAt: asString(r.updatedAt),
+  };
 }
 
 function scanPerPhaseDir(perPhaseDir: string): PerPhaseOverlay | null {
@@ -180,6 +193,7 @@ function synthesizeFromOverlay(overlay: PerPhaseOverlay): WorkerSignal {
     workerName: `${overlay.orchestrator}-${overlay.ticket}`,
     label: null,
     status: overlay.status,
+    stalledReason: overlay.stalledReason,
     phase: null,
     phaseName: overlay.phaseName,
     phaseTimestamps: {},
@@ -250,6 +264,7 @@ function scanOrchestratorWorkersDir(workersDir: string): WorkerSignal[] {
     if (existing) {
       existing.phaseName = overlay.phaseName;
       existing.status = overlay.status;
+      existing.stalledReason = overlay.stalledReason ?? existing.stalledReason;
       if (overlay.updatedAt) {
         existing.updatedAt = overlay.updatedAt;
         existing.lastHeartbeat = overlay.updatedAt;

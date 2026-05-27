@@ -276,6 +276,37 @@ The rebase is otherwise unchanged from CTL-667:
   (`.catalyst/config.json`, `.trunk/*`) is stashed across the rebase.
 - **Transient fetch failure → proceed un-rebased.** A flaky `git fetch` (rc=1) is non-fatal.
 
+### Runaway-loop guards (CTL-671)
+
+`schedulerTick` is hardened against runaway phase-dispatch/reclaim loops on phantom or
+non-resolving tickets — the failure mode where the phantom **CTL-9** (a ticket that does not exist
+in Linear) spammed ~24,560 `phase.*` events over three days, 92% of them per-tick
+`work-done-probe` reclaim storms. Three additive defenses, smallest blast radius first:
+
+- **Pass 0a — phantom worker-dir validity sweep.** Runs *before* the reclaim sweep. Quarantines a
+  `workers/<ticket>/` dir to terminal `stalled` (`stalledReason:"phantom-ticket"`) only when **all
+  three** hold: the ticket is definitively **not-found** in Linear, it is **not in the eligible
+  set**, and it has **no live bg worker**. The conjunction (plus the 3-valued
+  `classifyTicketResolution`, which maps a transient outage to `unknown`, never `not-found`)
+  guarantees a Linear outage can never quarantine a healthy, resolvable, in-flight ticket. This is
+  the path that actually sustained CTL-9 — cut on the first tick that sees it.
+  `classifyTicketResolution`/`isBgJobAlive` are safe no-ops by default in `schedulerTick` and armed
+  with the real impls by the daemon's `runTick`, so a bare unit tick never shells out.
+- **Dispatch circuit breaker.** The CTL-624 cool-down marker now carries a `consecutiveFailures`
+  counter; after `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` (default 8) consecutive failed dispatches
+  with no forward progress the ticket is quarantined to `stalled`
+  (`stalledReason:"dispatch-circuit-breaker"`). A successful dispatch clears the marker and resets
+  the counter, so a healthy ticket can never trip it. This is the **Linear-independent backstop**.
+- **Runaway-rate alert (observability only).** When a single ticket's `phase.*.<ticket>` event rate
+  crosses `SCHEDULER_RUNAWAY_THRESHOLD` (default 50) within `SCHEDULER_RUNAWAY_WINDOW_MS` (default
+  10 min), the scheduler emits exactly one `phase.dispatch.runaway.<ticket>` event per window
+  (once-per-window marker under `orchDir/.runaway-alerts/`). It surfaces a dominating ticket in the
+  HUD with an attention glyph but does **not** itself quarantine — enforcement stays with the sweep
+  + circuit breaker.
+
+Enforcement reuses the existing mechanism: a `stalled` signal makes `isTicketInFlight` drop the
+ticket and the terminal sweep applies `needs-human` via `labelOnce`.
+
 ### Unified data-flow
 
 The same event log is the cross-process backbone for every observation surface:
