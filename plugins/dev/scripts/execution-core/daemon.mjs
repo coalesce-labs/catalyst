@@ -24,6 +24,7 @@ import {
   closeSync,
 } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
+import { parseEventTailChunk } from "./event-tail.mjs";
 import { getExecutionCoreDir, getEventLogPath, log, EVENT_DEBOUNCE_MS } from "./config.mjs";
 import {
   recoverStartup,
@@ -252,33 +253,11 @@ function startReaperAndTimer({ orphanReaperConfig, debounceMs, orchDir }) {
 }
 
 // parseEventTailChunk — pure, deterministic split of a freshly-read byte chunk
-// into complete JSON events plus the trailing partial line. Stitches `leftover`
-// (the partial line carried from the previous read) onto the front of `chunk`
-// so a line split across two reads is reassembled before parsing. Returns the
-// parsed events for the COMPLETE lines and the new leftover (everything after
-// the last "\n"). Malformed complete lines are skipped — they will never be
-// revisited because their bytes are already behind the byte cursor.
-//
-// `chunk` is the utf8-decoded NEW bytes only. Decoding only the new bytes (vs.
-// JS-string-slicing the whole file) is what makes this byte-correct: a
-// multi-byte char upstream of the cursor can no longer shift code-unit indexes.
-export function parseEventTailChunk(chunk, leftover = "") {
-  const text = leftover + chunk;
-  const lines = text.split("\n");
-  // The final element is the trailing partial line (empty if the chunk ended
-  // exactly on a newline) — hold it back until the next read completes it.
-  const newLeftover = lines.pop() ?? "";
-  const events = [];
-  for (const line of lines) {
-    if (!line) continue;
-    try {
-      events.push(JSON.parse(line));
-    } catch {
-      continue; // skip a malformed complete line, keep tailing
-    }
-  }
-  return { events, leftover: newLeftover };
-}
+// into complete JSON events plus the trailing partial line. CTL-673 moved the
+// implementation to the leaf module event-tail.mjs (shared with event-scan.mjs
+// and reaper.mjs). It is imported for consumeEventTail's local use AND
+// re-exported here unchanged so daemon.test.mjs keeps importing it from daemon.mjs.
+export { parseEventTailChunk };
 
 // __resetEventTailCursorForTest — reset the module-level byte cursor + leftover
 // so a test can drive consumeEventTail deterministically against a temp file
