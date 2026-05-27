@@ -19,6 +19,8 @@ import {
   defaultKillBgJob,
   defaultPidAlive,
   defaultAppendReviveEvent,
+  defaultAppendDispatchRequestedEvent,
+  defaultAppendDispatchLaunchedEvent,
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
@@ -1633,6 +1635,97 @@ describe("revive event envelope round-trip (write → countReviveEvents)", () =>
     expect(countReviveEvents({ ticket: "CTL-RT-1", orchId: "orch-rt" })).toBe(1);
     // orchId mismatch returns 0 — proves the orchId attribute round-trips.
     expect(countReviveEvents({ ticket: "CTL-RT-1", orchId: "wrong-orch" })).toBe(0);
+  });
+});
+
+// CTL-660: success-path dispatch lifecycle events — phase.dispatch.requested
+// and phase.dispatch.launched. Mirror the revive envelope round-trip: point
+// CATALYST_DIR at a temp dir, call the helper, read back the JSONL line and
+// assert the envelope shape (event.name, body.payload, service.name).
+describe("dispatch lifecycle event envelopes (CTL-660)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl660-disp-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  // Read back the single envelope written this test (current UTC month log).
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("defaultAppendDispatchRequestedEvent writes a requested envelope", () => {
+    const ok = defaultAppendDispatchRequestedEvent({
+      orchId: "orch-rq",
+      ticket: "CTL-RQ-1",
+      target_phase: "implement",
+      reason: "advance",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.dispatch.requested.CTL-RQ-1");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("requested");
+    expect(env.body.payload.reason).toBe("advance");
+    expect(env.body.payload.target_phase).toBe("implement");
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-rq");
+  });
+
+  test("defaultAppendDispatchLaunchedEvent writes a launched envelope", () => {
+    const ok = defaultAppendDispatchLaunchedEvent({
+      orchId: "orch-lc",
+      ticket: "CTL-LC-1",
+      target_phase: "research",
+      bg_job_id: "deadbeef",
+      worktree_path: "/wt/CTL/CTL-LC-1",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.dispatch.launched.CTL-LC-1");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("launched");
+    expect(env.body.payload.target_phase).toBe("research");
+    expect(env.body.payload.bg_job_id).toBe("deadbeef");
+    expect(env.body.payload.worktree_path).toBe("/wt/CTL/CTL-LC-1");
+  });
+
+  test("both helpers are fail-open: return false when the log dir is unwriteable", () => {
+    // Point CATALYST_DIR at a path whose parent is a regular file, so the
+    // events/ mkdir + append cannot succeed. Mirrors appendEnvelopeBestEffort's
+    // documented fail-open contract (return false, never throw).
+    const filePath = join(envCatalystDir, "not-a-dir");
+    writeFileSync(filePath, "x");
+    process.env.CATALYST_DIR = join(filePath, "nested");
+    expect(
+      defaultAppendDispatchRequestedEvent({
+        orchId: "o",
+        ticket: "CTL-FAIL-1",
+        target_phase: "implement",
+        reason: "revive",
+      }),
+    ).toBe(false);
+    expect(
+      defaultAppendDispatchLaunchedEvent({
+        orchId: "o",
+        ticket: "CTL-FAIL-1",
+        target_phase: "implement",
+        bg_job_id: "x",
+        worktree_path: "/x",
+      }),
+    ).toBe(false);
   });
 });
 

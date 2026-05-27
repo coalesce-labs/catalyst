@@ -363,6 +363,58 @@ export function defaultAppendDispatchFailedEvent({
   );
 }
 
+// CTL-660: success-path dispatch lifecycle events — the complement to
+// defaultAppendDispatchFailedEvent. The daemon already emits on the dispatch
+// FAILURE path (above) and on phase COMPLETION, but nothing when it DECIDES to
+// dispatch a phase or when the `claude --bg` worker LAUNCHES, so the
+// "daemon-saw-Ready → worker-launched" latency is not derivable from the
+// unified event log. These two emitters close that gap. Like every audit
+// emitter they are best-effort (no caller gates on the return); the phase slot
+// is the literal "dispatch" and the real phase rides in payload.target_phase,
+// matching the dispatch.failed shape. They are deliberately NOT in the broker's
+// PHASE_EVENT_PATTERN (complete|failed|turn-cap-exhausted|skipped) — the HUD
+// reads the unified log directly, so no broker routing is required.
+
+// defaultAppendDispatchRequestedEvent — phase.dispatch.requested.<TICKET>.
+// Emitted when the scheduler/recovery DECIDES to dispatch a phase, before the
+// `claude --bg` spawn. reason ∈ {new-work, advance, revive}.
+export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_phase, reason }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "dispatch",
+      ticket,
+      orchId,
+      action: "requested",
+      reason,
+      payloadExtras: { target_phase },
+    }),
+    "dispatch-requested",
+  );
+}
+
+// defaultAppendDispatchLaunchedEvent — phase.dispatch.launched.<TICKET>.
+// Emitted after `claude --bg` returns and the signal is verified, carrying the
+// bg-job shortId (the de-facto session discriminator) + worktree path so the
+// launched↔complete wall-clock can be computed downstream.
+export function defaultAppendDispatchLaunchedEvent({
+  orchId,
+  ticket,
+  target_phase,
+  bg_job_id,
+  worktree_path,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "dispatch",
+      ticket,
+      orchId,
+      action: "launched",
+      payloadExtras: { target_phase, bg_job_id, worktree_path },
+    }),
+    "dispatch-launched",
+  );
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass
