@@ -228,7 +228,7 @@ describe("reconcileBootResume", () => {
     });
     // Went through defaultReviveDispatch: the signal on disk is reset to stalled.
     const sig = JSON.parse(
-      readFileSync(join(orchDir, "workers", "CTL-1", "phase-implement.json"), "utf8"),
+      readFileSync(join(orchDir, "workers", "CTL-1", "phase-implement.json"), "utf8")
     );
     expect(sig.status).toBe("stalled");
     // One audit event routed through the injected appendEvent.

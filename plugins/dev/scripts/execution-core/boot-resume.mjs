@@ -43,8 +43,7 @@ import { liveAgents } from "./cli/sessions.mjs";
 // pass inside startDaemon's synchronous boot ordering.
 export function hasLiveBgWorker(agents, worktreePath) {
   return (
-    Array.isArray(agents) &&
-    agents.some((s) => s?.kind === "background" && s?.cwd === worktreePath)
+    Array.isArray(agents) && agents.some((s) => s?.kind === "background" && s?.cwd === worktreePath)
   );
 }
 
@@ -99,7 +98,7 @@ export function selectBootResumeCandidates({
     if (!active.worktreePath) {
       logger.warn(
         { ticket, phase: active.phase },
-        "boot-resume: in-flight ticket has no worktreePath — cannot revive safely, skipping",
+        "boot-resume: in-flight ticket has no worktreePath — cannot revive safely, skipping"
       );
       continue;
     }
@@ -166,14 +165,14 @@ export function reconcileBootResume({
       failed++;
       log.warn(
         { ticket, phase, code: res?.code, stderr: res?.stderr },
-        "boot-resume: dispatch failed (continuing)",
+        "boot-resume: dispatch failed (continuing)"
       );
     }
   }
 
   log.info(
     { dispatched, failed, candidates: candidates.length },
-    "boot-resume: cold-start reconciliation complete",
+    "boot-resume: cold-start reconciliation complete"
   );
   return { dispatched, failed, candidates: candidates.length };
 }
