@@ -17,7 +17,6 @@ import {
   defaultReviveDispatch,
   resolvePhaseSessionId,
   defaultKillBgJob,
-  defaultPidAlive,
   defaultAppendReviveEvent,
   defaultAppendReclaimEvent,
   defaultPostReclaimMirror,
@@ -489,26 +488,29 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(appendEvent.calls.length).toBe(0);
   });
 
-  test("'noop' for a running signal whose bg job is FRESH (state.json mtime within staleMs)", () => {
-    // CTL-588: a `running` classification + fresh state.json mtime → live worker.
+  test("CTL-662: a BUSY worker is 'alive-busy-suppressed', never reclaimed (regardless of elapsed time)", () => {
+    // The CTL-662 fix: a busy worker (a live `claude agents` session with an open
+    // turn — e.g. an in-process sub-agent fan-out) is NEVER auto-reclaimed, even
+    // though its state.json mtime may be arbitrarily stale.
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
-      statJob: () => ({ exists: true, mtimeMs: 1_000_000 }),
+      statJob: () => ({ exists: true, mtimeMs: 1_000 }),
       probes: { implement: probe },
       emitComplete: emit,
       appendEvent: recorder(undefined),
-      // Pin "now" near the bg mtime so the staleness check sees a fresh worker.
-      now: () => 1_000_500,
+      liveness: () => "busy",
+      now: () => 1_000 + 60 * 60 * 1000, // an hour past mtime — irrelevant now
     });
-    expect(r).toBe("noop");
+    expect(r).toBe("alive-busy-suppressed");
+    expect(probe.calls.length).toBe(0); // busy short-circuits before the probe
     expect(emit.calls.length).toBe(0);
   });
 
-  test("CTL-588: 'running' with a STALE bg state.json (> staleMs) is treated as effectively dead", () => {
-    // The bug CTL-588 fixes: claude --bg leaves the job dir behind after the
-    // worker exits, so classifyWorker stays `running` indefinitely. We catch
-    // this via mtime — a real worker updates state.json every few seconds.
+  test("CTL-662: an ABSENT worker (no live session) with work done is reclaimed", () => {
+    // absent = not listed by `claude agents` (crashed/exited) → reclaim-eligible
+    // immediately, no idle-confirmation needed. Replaces the pre-CTL-662
+    // stale-mtime "effectively dead" trigger.
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const appendEvent = recorder(undefined);
@@ -518,7 +520,8 @@ describe("reclaimDeadWorkIfPossible", () => {
       emitComplete: emit,
       appendEvent,
       postReclaimMirror: () => {}, // CTL-664: keep the test hermetic (no linearis spawn)
-      now: () => 1_000 + 6 * 60 * 1000, // 6 minutes past mtime — stale
+      liveness: () => "absent",
+      now: () => 1_000,
     });
     expect(r).toBe("reclaimed");
     expect(probe.calls.length).toBe(1);
@@ -526,7 +529,7 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(appendEvent.calls.length).toBe(1);
   });
 
-  test("CTL-588: 'running' with a FRESH bg state.json (under staleMs) is NOT reclaimed", () => {
+  test("CTL-662: a BUSY worker with work done is still suppressed (left to emit its own complete)", () => {
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
@@ -534,24 +537,11 @@ describe("reclaimDeadWorkIfPossible", () => {
       probes: { implement: probe },
       emitComplete: emit,
       appendEvent: recorder(undefined),
-      now: () => 1_000_000 + 4 * 60 * 1000, // 4 minutes — under threshold
+      liveness: () => "busy",
+      now: () => 1_000_000 + 60_000,
     });
-    expect(r).toBe("noop");
-    expect(probe.calls.length).toBe(0);
+    expect(r).toBe("alive-busy-suppressed");
     expect(emit.calls.length).toBe(0);
-  });
-
-  test("CTL-588: staleMs is honored when explicitly passed (override)", () => {
-    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
-      statJob: () => ({ exists: true, mtimeMs: 100 }),
-      probes: { implement: () => true },
-      emitComplete: () => ({ code: 0 }),
-      appendEvent: () => {},
-      postReclaimMirror: () => {}, // CTL-664: keep the test hermetic (no linearis spawn)
-      now: () => 100 + 60_000,
-      staleMs: 30_000, // 30s threshold — 1 min IS stale
-    });
-    expect(r).toBe("reclaimed");
   });
 
   test("'noop' for an unknown signal (no bg_job_id)", () => {
@@ -665,22 +655,30 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(order[1][1]).toEqual({ orchDir: orch, signal: sig });
   });
 
-  test("CTL-664: reclaim of an mtime-stale worker reports death_signal='mtime' + prev_state_json_mtime", () => {
+  // CTL-662: mtime is no longer a reclaim trigger, so a reclaim is never
+  // labeled death_signal='mtime'. The branch-(B) reclaim is reached only for an
+  // `absent` bg job or an idle-confirmed one — the death signal must report that
+  // liveness verdict. prev_state_json_mtime survives as pure telemetry (the last
+  // state.json write time), independent of the death-signal decision.
+  test("CTL-662: reclaim of an idle-confirmed worker reports death_signal='idle-confirmed' (never 'mtime') + prev_state_json_mtime", () => {
     const staleMtime = 1_000;
     let appended = null;
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), {
-      statJob: () => ({ mtimeMs: staleMtime }), // exists but stale
-      now: () => staleMtime + 10 * 60_000, // > STALE_MS
+      statJob: () => ({ mtimeMs: staleMtime }), // state.json present but stale — NOT a trigger
+      liveness: () => "idle", // CTL-662: status is the trigger
+      bumpIdleStreak: () => 99, // already past IDLE_CONFIRM_TICKS → reclaim-eligible
+      resetIdleStreak: () => {},
       probes: { implement: () => true },
       emitComplete: () => ({ code: 0 }),
       appendEvent: (args) => {
         appended = args;
       },
-      postReclaimMirror: () => {}, // stubbed (Phase 3 seam)
+      postReclaimMirror: () => {}, // keep hermetic (no linearis spawn)
       repoRoot: "/repo",
     });
     expect(r).toBe("reclaimed");
-    expect(appended.death_signal).toBe("mtime");
+    expect(appended.death_signal).toBe("idle-confirmed");
+    expect(appended.death_signal).not.toBe("mtime");
     expect(appended.prev_state_json_mtime).toBe(staleMtime);
   });
 
@@ -1014,8 +1012,12 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
         // (branch B) stay hermetic and don't spawn a real `linearis`.
         postReclaimMirror: recorder(undefined),
         readBootSince, // CTL-655: inject the boot-time window reader
+        // CTL-662: the death trigger is now status, not mtime. "absent" (no live
+        // `claude agents` session) is the reclaim-eligible case these revive/
+        // escalate/storm scenarios exercise — equivalent to the pre-CTL-662
+        // stale-mtime "effectively dead" they used to stage.
+        liveness: () => "absent",
         now: () => nowMs,
-        staleMs: 5 * 60 * 1000,
       },
     };
   }
@@ -1132,30 +1134,15 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.reviveDispatch.calls.length).toBe(0);
   });
 
-  test("defensive kill: fires when state.json mtime > KILL_RECENT_ACTIVITY_MS old", () => {
-    // 60s past now — older than the 30s kill threshold.
-    const s = setupReviveScenario({
-      stateJsonMtime: 1_000,
-      nowMs: 1_000 + 6 * 60 * 1000, // 6min past — also stale
-    });
+  test("CTL-662: defensive stop fires on the revive path unconditionally (the mtime quiet-window gate is gone)", () => {
+    // Pre-CTL-662 the kill was gated on KILL_RECENT_ACTIVITY_MS (state.json quiet
+    // for ≥30s). CTL-662 removed that gate: a reclaim-eligible worker (absent, or
+    // idle-confirmed) is by definition not mid-turn, so the stop is always safe.
+    // It now fires whenever the revive path runs with a known bg_job_id.
+    const s = setupReviveScenario(); // liveness "absent", probe false → revive
     reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
     expect(s.opts.killBgJob.calls.length).toBe(1);
     expect(s.opts.killBgJob.calls[0][0].bgJobId).toBe("bg-9");
-  });
-
-  test("defensive kill: does NOT fire when classifyWorker:dead path is taken (no mtime captured)", () => {
-    // When statJob returns null (bg dir gone), classifyWorker returns 'dead'
-    // directly → prevStateJsonMtime stays null → the kill gate at
-    // recovery.mjs sees no mtime and skips. The separate freshness-vs-kill
-    // gate is exercised by the next test.
-    const sig = implementSignal({ ticket: "CTL-9", status: "running", bgJobId: "bg-9" });
-    const opts = {
-      ...setupReviveScenario().opts,
-      statJob: () => null,
-      now: () => 0,
-    };
-    reclaimDeadWorkIfPossible("/orch", sig, opts);
-    expect(opts.killBgJob.calls.length).toBe(0);
   });
 
   test("revive event payload contains attempt, reason, prev_state_json_mtime, prev_bg_job_id", () => {
@@ -1226,22 +1213,10 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.appendReviveSuppressedEvent.calls[0][0].reason).toBe("audit-append-failed");
   });
 
-  // Defensive-kill freshness gate: a `running` worker with a stale-but-not-yet-
-  // KILL_RECENT_ACTIVITY_MS-stale state.json mtime must NOT be SIGKILL'd. We
-  // override staleMs so the worker still classifies as effectively dead (via
-  // the freshness path) but the kill threshold (30s) is NOT crossed.
-  test("defensive kill: state.json mtime within KILL_RECENT_ACTIVITY_MS → no kill", () => {
-    const s = setupReviveScenario({
-      stateJsonMtime: 1_000,
-      nowMs: 1_000 + 20_000, // 20s past mtime — under 30s kill threshold
-    });
-    // Override staleMs so the worker IS effectively dead via the freshness
-    // path even though only 20s have elapsed. This isolates the kill gate
-    // from the staleness gate.
-    s.opts.staleMs = 10_000;
-    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(s.opts.killBgJob.calls.length).toBe(0);
-  });
+  // CTL-662: the pre-CTL-662 "no kill within the quiet window" case is gone —
+  // the mtime quiet-window gate no longer exists. The only remaining "no kill"
+  // scenario is CTL-658 resume-on-revive (the session's jsonl must stay intact
+  // for --resume), exercised below.
 
   // ── CTL-658: resume-on-revive. When a resume UUID resolves from the dead
   //    worker's bg_job_id, the revive dispatches with `resumeSession` AND skips
@@ -1282,48 +1257,48 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
   });
 });
 
-// --- CTL-610: alive-quiet keep-alive guard (branch (C0)) -------------------
+// --- CTL-662: busy-suppression (replaces the CTL-610/661 alive-quiet gate) -
 //
-// A worker can be effectively-dead by state.json mtime (5min stale) yet still
-// be alive-blocked-on-a-long-tool-call — the pre-first-output window for
-// research/plan sub-agent fan-outs, or a long synchronous Edit/Bash inside
-// implement. Pre-CTL-610 such a worker was revived (duplicate `claude --bg`
-// spawn, budget consumed, eventual escalation), producing the documented
-// ~50%-of-workers revive storm in 14-ticket runs. The (C0) guard inverts the
-// PID liveness check defaultKillBgJob already uses: when bg pid is a live
-// `claude` process AND state.json mtime is within HUNG_CUTOFF_MS, suppress
-// the revive entirely — no dispatch, no budget consumed, no marker, no kill,
-// no events.jsonl append, log-only. Past the cutoff the worker is treated as
-// genuinely hung and the existing revive path runs.
+// The pre-CTL-662 reclaim trigger was state.json mtime (5min stale → dead), with
+// the CTL-610/661 alive-quiet gate papering over false positives by checking the
+// bg pid within a 15min hung cutoff. CTL-662 deletes that whole time-based
+// machinery: the trigger is now the worker's `claude agents` status
+// (livenessForBgJob → busy|idle|absent). A `busy` worker — including the
+// in-process Task sub-agent fan-out that keeps the parent's turn busy while
+// state.json mtime goes arbitrarily stale (the proven worker-10d6f123 failure) —
+// is NEVER auto-reclaimed, escalated, or revived, regardless of elapsed time,
+// revive budget, or storm conditions. The sole permitted action on a busy worker
+// is the high-ceiling no-progress backstop (escalateOnce past BUSY_CEILING_MS
+// with no committed work — never a silent reclaim-and-advance).
 
-describe("reclaimDeadWorkIfPossible — CTL-610 alive-quiet keep-alive guard", () => {
-  // Inline scenario builder mirroring setupReviveScenario but with the CTL-610
-  // pidAlive + hungCutoffMs seams added. The same defaults (effectively dead by
-  // mtime, probe says NOT done) so we exercise branch (C) territory; the (C0)
-  // guard sits at the top of (C), before priorRevives is consulted.
-  function setupAliveQuietScenario({
-    pidAlive = () => true, // bg pid is a live claude process
-    hungCutoffMs = 15 * 60 * 1000, // CTL-610 default
+describe("reclaimDeadWorkIfPossible — CTL-662 busy-suppression", () => {
+  // A `busy` worker (a live `claude agents` session with an open turn). Defaults
+  // to probe=false (work not done) so we prove a busy worker is suppressed even
+  // when the work-done probe would otherwise revive it. `startedAt` is omitted by
+  // default so the busy-ceiling backstop never trips unless a test supplies it.
+  function setupBusyScenario({
     reviveCount = 0,
+    distinctRevivingTickets = 1,
     probeResult = false,
     phase = "implement",
     ticket = "CTL-9",
     bgJobId = "bg-9",
-    stateJsonMtime = 1_000,
-    // 6 min past mtime — staleMs (5min) crossed, well within hungCutoffMs (15min).
-    nowMs = 1_000 + 6 * 60 * 1000,
+    startedAt,
+    nowMs = 2_000_000,
   } = {}) {
     const sig = {
       ...implementSignal({ ticket, status: "running", bgJobId }),
       phase,
     };
     sig.raw.phase = phase;
+    if (startedAt !== undefined) sig.raw.startedAt = startedAt;
     return {
       orch: "/orch",
       sig,
       opts: {
         repoRoot: "/repo",
-        statJob: () => ({ exists: true, mtimeMs: stateJsonMtime }),
+        // mtime is arbitrarily stale — it is no longer a decision input.
+        statJob: () => ({ exists: true, mtimeMs: 1_000 }),
         probes: { [phase]: recorder(probeResult) },
         emitComplete: recorder({ code: 0 }),
         appendEvent: recorder(undefined),
@@ -1334,22 +1309,24 @@ describe("reclaimDeadWorkIfPossible — CTL-610 alive-quiet keep-alive guard", (
         applyStalledLabel: recorder({ applied: true }),
         killBgJob: recorder(undefined),
         countReviveEvents: recorder(reviveCount),
-        countDistinctRevivingTickets: recorder(1),
+        countDistinctRevivingTickets: recorder(distinctRevivingTickets),
         writeReviveMarker: recorder(undefined),
-        // CTL-664: stub the reclaim mirror so the probeResult:true scenario
-        // (branch B wins over alive-quiet) stays hermetic (no `linearis` spawn).
+        inEscalationCooldownFn: () => false,
+        recordEscalationFn: recorder(undefined),
+        liveness: recorder("busy"),
+        bumpIdleStreak: recorder(1),
+        resetIdleStreak: recorder(undefined),
+        // CTL-664: stub the reclaim mirror so a probeResult:true scenario
+        // (reclaim branch) stays hermetic (no `linearis` spawn).
         postReclaimMirror: recorder(undefined),
-        pidAlive: recorder(pidAlive()),
-        hungCutoffMs,
         now: () => nowMs,
-        staleMs: 5 * 60 * 1000,
       },
     };
   }
 
-  test("alive pid within hung cutoff → 'alive-quiet-suppressed' (no dispatch, no budget, no marker, no kill, no events)", () => {
-    const s = setupAliveQuietScenario({ pidAlive: () => true, reviveCount: 0 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+  test("busy → 'alive-busy-suppressed' (no dispatch, no budget, no marker, no kill, no escalate, no events)", () => {
+    const s = setupBusyScenario({ reviveCount: 0 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
     expect(s.opts.reviveDispatch.calls.length).toBe(0);
     expect(s.opts.appendReviveEvent.calls.length).toBe(0);
     expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(0);
@@ -1357,120 +1334,111 @@ describe("reclaimDeadWorkIfPossible — CTL-610 alive-quiet keep-alive guard", (
     expect(s.opts.writeReviveMarker.calls.length).toBe(0);
     expect(s.opts.killBgJob.calls.length).toBe(0);
     expect(s.opts.applyStalledLabel.calls.length).toBe(0);
-    // The guard MUST consult pidAlive — otherwise it cannot decide
-    expect(s.opts.pidAlive.calls.length).toBeGreaterThanOrEqual(1);
-    expect(s.opts.pidAlive.calls[0][0].bgJobId).toBe("bg-9");
+    // The trigger MUST consult liveness with the signal's bg_job_id.
+    expect(s.opts.liveness.calls.length).toBeGreaterThanOrEqual(1);
+    expect(s.opts.liveness.calls[0][0]).toBe("bg-9");
   });
 
-  test("alive pid but past hung cutoff → 'revived' (genuinely hung, existing path runs)", () => {
-    // 20 min past mtime > 15 min hung cutoff → fall through to existing revive
-    const s = setupAliveQuietScenario({
-      pidAlive: () => true,
-      stateJsonMtime: 1_000,
-      nowMs: 1_000 + 20 * 60 * 1000,
-    });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
-    expect(s.opts.reviveDispatch.calls.length).toBe(1);
-    expect(s.opts.appendReviveEvent.calls.length).toBe(1);
-  });
-
-  test("dead pid → 'revived' (regression-shaped — existing CTL-587 path unchanged)", () => {
-    const s = setupAliveQuietScenario({ pidAlive: () => false });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
-    expect(s.opts.reviveDispatch.calls.length).toBe(1);
-  });
-
-  test("alive pid + revive budget exhausted → still 'alive-quiet-suppressed' (NEVER false-escalate a live worker)", () => {
-    // The (C0) guard MUST run before the budget-exhausted check, otherwise a
-    // live but quiet worker would be falsely escalated to needs-human just
-    // because two prior false-revives consumed its budget. This is the worst
-    // case the guard exists to prevent.
-    const s = setupAliveQuietScenario({ pidAlive: () => true, reviveCount: 2 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+  test("busy + revive budget exhausted → still 'alive-busy-suppressed' (NEVER false-escalate a busy worker)", () => {
+    // The worst case the fix exists to prevent: a busy worker (a long sub-agent
+    // fan-out) whose budget two prior false-revives consumed must NOT be escalated
+    // to needs-human just because the budget is spent — it is alive and working.
+    const s = setupBusyScenario({ reviveCount: 2 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
     expect(s.opts.applyStalledLabel.calls.length).toBe(0);
   });
 
-  test("alive pid + storm-breaker open → still 'alive-quiet-suppressed' (guard runs before storm check)", () => {
-    // A live worker is alive regardless of fleet-wide storm conditions; the
-    // guard short-circuits storm bookkeeping too (no audit event emitted).
-    const s = setupAliveQuietScenario({ pidAlive: () => true });
-    s.opts.countDistinctRevivingTickets = recorder(4); // storm threshold open
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+  test("busy + storm-breaker open → still 'alive-busy-suppressed' (status check precedes storm bookkeeping)", () => {
+    const s = setupBusyScenario({ distinctRevivingTickets: 4 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
     expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(0);
   });
 
-  test("CTL-661: a LIVE worker whose work appears done is suppressed, NOT reclaimed (gate now precedes branch B)", () => {
-    // Pre-CTL-661 the alive-quiet guard sat at the top of branch (C), AFTER
-    // branch (B)'s reclaim, so a live worker whose probe read done was
-    // reclaimed (signal flipped, advanced past) even though it was still
-    // running. CTL-661 repositions the gate ahead of branches (A)/(B): a live
-    // worker within the hung cutoff is never reclaimed — it is left to finish
-    // (its own emit-complete is authoritative) or to genuinely die.
-    const s = setupAliveQuietScenario({ pidAlive: () => true, probeResult: true });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
-    // Gate MUST have been consulted and won over the work-done reclaim.
-    expect(s.opts.pidAlive.calls.length).toBeGreaterThanOrEqual(1);
+  test("busy + work appears done → 'alive-busy-suppressed', NOT reclaimed (left to emit its own complete)", () => {
+    // A busy worker whose probe reads done is still suppressed: it is live and its
+    // own emit-complete is authoritative. Reclaiming it would flip the signal out
+    // from under a running worker (the pre-CTL-661 hole the gate exists to close).
+    const s = setupBusyScenario({ probeResult: true });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
     expect(s.opts.emitComplete.calls.length).toBe(0);
     expect(s.opts.appendEvent.calls.length).toBe(0);
   });
 
-  test("production default seam returns false for a fake bgJobId → guard inert, existing revive path runs", () => {
-    // The original setupReviveScenario (in the CTL-587 describe block) uses
-    // bgJobId 'bg-9' with no real ~/.claude/jobs/bg-9/pid file and injects
-    // NO pidAlive seam — so the production defaultPidAlive runs and returns
-    // false on the missing pid file. The (C0) guard is therefore inert for
-    // every pre-CTL-610 revive test, and they continue to pass unchanged.
-    // This test asserts that contract explicitly using the same conditions.
-    const s = setupAliveQuietScenario({ reviveCount: 0 });
-    // Strip the test-injected pidAlive so we exercise the production default.
-    delete s.opts.pidAlive;
-    // bg-9 has no pid file under the real ~/.claude/jobs → defaultPidAlive
-    // returns false → guard inert → existing revive path runs.
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+  test("busy resets any in-progress idle-confirmation streak", () => {
+    // A single busy observation between idle ticks must reset the streak so a
+    // worker that flickers idle→busy→idle is never reclaimed on a stale count.
+    const s = setupBusyScenario();
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.resetIdleStreak.calls.length).toBe(1);
+    expect(s.opts.resetIdleStreak.calls[0]).toEqual(["/orch", "CTL-9", "implement"]);
+    expect(s.opts.bumpIdleStreak.calls.length).toBe(0);
   });
 
-  test("guard inert when prevStateJsonMtime is null (classifyWorker:'dead' path) — falls through to revive", () => {
-    // When statJob returns null (bg dir gone), classifyWorker returns 'dead'
-    // directly; prevStateJsonMtime stays null. The (C0) guard's first
-    // conjunct (prevStateJsonMtime !== null) MUST fail-closed here so a real
-    // crash still revives even if a (mis-)injected pidAlive lied "true".
-    const sig = implementSignal({ ticket: "CTL-9", status: "running", bgJobId: "bg-9" });
-    const opts = {
-      ...setupAliveQuietScenario().opts,
-      statJob: () => null, // bg dir gone → classifyWorker:'dead'
-      pidAlive: () => true,
-      now: () => 0,
-    };
-    // A 'dead' bg implies a real crash → revive must still fire.
-    expect(reclaimDeadWorkIfPossible("/orch", sig, opts)).toBe("revived");
+  test("busy past BUSY_CEILING_MS with NO committed work → 'escalated' (busy-ceiling-exceeded), never silent reclaim", () => {
+    // The sole long backstop. A worker busy longer than the ceiling whose
+    // work-done probe is STILL false is flagged for a human — genuinely wedged,
+    // not progressing. It is escalated, NEVER silently reclaimed-and-advanced.
+    const startedAt = "2026-05-27T00:00:00Z";
+    const s = setupBusyScenario({
+      probeResult: false,
+      startedAt,
+      nowMs: Date.parse(startedAt) + 7 * 60 * 60 * 1000, // 7h > 6h ceiling
+    });
+    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(r).toBe("escalated");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("busy-ceiling-exceeded");
+    expect(s.opts.applyStalledLabel.calls.length).toBe(1);
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("busy past BUSY_CEILING_MS but work IS done → 'alive-busy-suppressed' (progressing, not wedged)", () => {
+    // Past the ceiling but the probe reads done → it is making progress, not
+    // wedged. Suppress and let it emit its own complete; do not escalate.
+    const startedAt = "2026-05-27T00:00:00Z";
+    const s = setupBusyScenario({
+      probeResult: true,
+      startedAt,
+      nowMs: Date.parse(startedAt) + 7 * 60 * 60 * 1000,
+    });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
+  });
+
+  test("busy WITHIN BUSY_CEILING_MS is suppressed regardless of work-done (backstop not yet armed)", () => {
+    const startedAt = "2026-05-27T00:00:00Z";
+    const s = setupBusyScenario({
+      probeResult: false,
+      startedAt,
+      nowMs: Date.parse(startedAt) + 60 * 60 * 1000, // 1h < 6h ceiling
+    });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
   });
 });
 
-// --- CTL-661: reclaim liveness gate (repositioned ahead of branches A/B) ---
+// --- CTL-662: idle-confirmation + absent reclaim --------------------------
 //
-// CTL-610 introduced the alive-quiet guard but positioned it at the TOP of
-// branch (C) — after branch (A) (no-probe → escalate) and branch (B)
-// (work-done → reclaim) had already had a chance to return. A live-but-quiet
-// worker whose probe read done (B) or whose phase had no probe (A) was
-// therefore still reclaimed/escalated past while genuinely alive. CTL-661
-// hoists the same predicate ahead of (A) and (B) so a live worker within the
-// hung cutoff is suppressed on EVERY branch — never reclaimed, escalated, or
-// revived. These cases pin the repositioned semantics.
-describe("reclaimDeadWorkIfPossible — CTL-661 reclaim liveness gate", () => {
-  // Reuse the CTL-610 scenario shape. setupAliveQuietScenario is in the
-  // sibling describe block above; redeclare a local copy here so this block is
-  // self-contained and order-independent.
+// `absent` (not listed by `claude agents` → crashed/exited) is reclaim-eligible
+// immediately — absence is unambiguous. `idle` (live, between turns) is
+// reclaim-eligible only after IDLE_CONFIRM_TICKS CONSECUTIVE idle observations,
+// counted by a persisted per-(ticket, phase) streak marker (NOT an mtime window).
+// Once reclaim-eligible, the existing CTL-574/587/604 branches decide:
+// work-done → reclaim+advance; work-not-done → revive (budget/storm permitting).
+// This path replaces the pre-CTL-662 stale-mtime "effectively dead" trigger; the
+// revive/escalate/storm behaviour on it is otherwise unchanged.
+
+describe("reclaimDeadWorkIfPossible — CTL-662 idle-confirmation + absent reclaim", () => {
   function setup({
-    pidAlive = () => true,
-    hungCutoffMs = 15 * 60 * 1000,
-    reviveCount = 0,
+    live = "idle",
+    streak = 0, // the NEW post-increment count bumpIdleStreak returns this tick
+    idleConfirmTicks = 2,
     probeResult = false,
+    reviveCount = 0,
+    distinctRevivingTickets = 1,
     phase = "implement",
     ticket = "CTL-9",
     bgJobId = "bg-9",
-    stateJsonMtime = 1_000,
-    nowMs = 1_000 + 6 * 60 * 1000, // 6 min past mtime → stale, within cutoff
   } = {}) {
     const sig = {
       ...implementSignal({ ticket, status: "running", bgJobId }),
@@ -1482,7 +1450,7 @@ describe("reclaimDeadWorkIfPossible — CTL-661 reclaim liveness gate", () => {
       sig,
       opts: {
         repoRoot: "/repo",
-        statJob: () => ({ exists: true, mtimeMs: stateJsonMtime }),
+        statJob: () => ({ exists: true, mtimeMs: 1_000 }),
         probes: { [phase]: recorder(probeResult) },
         emitComplete: recorder({ code: 0 }),
         appendEvent: recorder(undefined),
@@ -1493,63 +1461,65 @@ describe("reclaimDeadWorkIfPossible — CTL-661 reclaim liveness gate", () => {
         applyStalledLabel: recorder({ applied: true }),
         killBgJob: recorder(undefined),
         countReviveEvents: recorder(reviveCount),
-        countDistinctRevivingTickets: recorder(1),
+        countDistinctRevivingTickets: recorder(distinctRevivingTickets),
         writeReviveMarker: recorder(undefined),
-        pidAlive: recorder(pidAlive()),
-        hungCutoffMs,
-        now: () => nowMs,
-        staleMs: 5 * 60 * 1000,
+        inEscalationCooldownFn: () => false,
+        recordEscalationFn: recorder(undefined),
+        listTicketPhases: () => ["triage", "research", "plan", "implement"],
+        liveness: recorder(live),
+        bumpIdleStreak: recorder(streak),
+        resetIdleStreak: recorder(undefined),
+        idleConfirmTicks,
+        now: () => 2_000_000,
       },
     };
   }
 
-  test("reclaim is suppressed when the bg worker is still live within the hung cutoff (probe says done)", () => {
-    const s = setup({ pidAlive: () => true, probeResult: true });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+  test("idle, streak below confirm threshold → 'idle-pending' (bumped, not reclaimed)", () => {
+    const s = setup({ live: "idle", streak: 1, idleConfirmTicks: 2 });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("idle-pending");
+    expect(s.opts.bumpIdleStreak.calls.length).toBe(1);
+    expect(s.opts.bumpIdleStreak.calls[0]).toEqual(["/orch", "CTL-9", "implement"]);
+    // No reclaim/revive/escalate this tick — the streak is still building.
     expect(s.opts.emitComplete.calls.length).toBe(0);
-    expect(s.opts.appendEvent.calls.length).toBe(0);
-  });
-
-  test("a genuinely dead worker (pid gone) still reclaims when work is done", () => {
-    const s = setup({ pidAlive: () => false, probeResult: true });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
-    expect(s.opts.emitComplete.calls.length).toBe(1);
-  });
-
-  test("a live worker PAST the hung cutoff is NOT suppressed (genuinely hung → reclaim allowed)", () => {
-    // 16 min past mtime > 15 min cutoff → gate predicate false → falls through
-    // to branch (B), which reclaims because the probe reads done.
-    const s = setup({
-      pidAlive: () => true,
-      probeResult: true,
-      stateJsonMtime: 1_000,
-      nowMs: 1_000 + 16 * 60 * 1000,
-    });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
-    expect(s.opts.emitComplete.calls.length).toBe(1);
-  });
-
-  // NOTE (CTL-661, plan Open Question #3): the plan also wanted a "live worker
-  // on a probe-less phase is suppressed, not escalated" case. It is not
-  // constructible: the supersede guard at the top of reclaimDeadWorkIfPossible
-  // calls phaseIndex(phase), which THROWS for any phase outside PHASES+
-  // remediate, and every phase phaseIndex accepts has a WORK_DONE_PROBES entry
-  // — so branch (A) (`!hasProbe`) is unreachable for all real phases (a
-  // pre-existing property the plan's "What We're NOT Doing" acknowledges). The
-  // gate is placed in source order BEFORE branch (A) regardless, so the
-  // hypothetical is covered; we do not fabricate a fake phaseIndex to assert
-  // an unreachable path. The realizable precedence — gate over branch (B)'s
-  // reclaim — is pinned by the work-done cases above.
-  test("the gate's bg_job_id is the signal's, not a stale value (consults pidAlive with prevBgJobId)", () => {
-    const s = setup({ pidAlive: () => true, probeResult: true, bgJobId: "bg-77" });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
-    expect(s.opts.pidAlive.calls[0][0].bgJobId).toBe("bg-77");
-  });
-
-  test("regression: a live worker whose work is NOT done is still suppressed (the original C0 case)", () => {
-    const s = setup({ pidAlive: () => true, probeResult: false });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
     expect(s.opts.reviveDispatch.calls.length).toBe(0);
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
+  });
+
+  test("idle, streak reaches confirm threshold + work done → 'reclaimed' (streak cleared)", () => {
+    const s = setup({ live: "idle", streak: 2, idleConfirmTicks: 2, probeResult: true });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
+    expect(s.opts.emitComplete.calls.length).toBe(1);
+    // Once we proceed to act, the persisted streak is cleared.
+    expect(s.opts.resetIdleStreak.calls.length).toBe(1);
+  });
+
+  test("idle, streak reaches confirm threshold + work NOT done → 'revived' (streak cleared)", () => {
+    const s = setup({ live: "idle", streak: 2, idleConfirmTicks: 2, probeResult: false });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+    expect(s.opts.resetIdleStreak.calls.length).toBe(1);
+  });
+
+  test("absent → reclaim-eligible immediately (no idle-confirmation), work done → 'reclaimed'", () => {
+    const s = setup({ live: "absent", probeResult: true });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
+    expect(s.opts.emitComplete.calls.length).toBe(1);
+    // Absence skips the streak entirely — bump is never called.
+    expect(s.opts.bumpIdleStreak.calls.length).toBe(0);
+  });
+
+  test("absent + work NOT done → 'revived' (no idle-confirmation needed)", () => {
+    const s = setup({ live: "absent", probeResult: false });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+    expect(s.opts.bumpIdleStreak.calls.length).toBe(0);
+  });
+
+  test("the trigger consults liveness with the signal's bg_job_id (not a stale value)", () => {
+    const s = setup({ live: "absent", probeResult: true, bgJobId: "bg-77" });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.liveness.calls[0][0]).toBe("bg-77");
   });
 });
 
@@ -2004,39 +1974,12 @@ describe("defaultKillBgJob — claude stop termination (CTL-657)", () => {
   });
 });
 
-// CTL-657: defaultPidAlive is the keep-alive signal "is this bg worker still a
-// live `claude agents` session?". It delegates to isBgJobAlive (claude-agents.mjs);
-// the seam is `isAlive`. Best-effort — any throw returns false so the caller's
-// existing revive path is preserved. Critically, the legacy setupReviveScenario
-// tests use bgJobId "bg-9" (not a valid short id), and isBgJobAlive returns
-// false for it WITHOUT shelling out, so those revive tests stay green unchanged.
-describe("defaultPidAlive — claude-agents keep-alive (CTL-657)", () => {
-  test("delegates to the isAlive seam (true)", () => {
-    const isAlive = recorder(true);
-    expect(defaultPidAlive({ bgJobId: "12345678" }, { isAlive })).toBe(true);
-    expect(isAlive.calls).toHaveLength(1);
-    expect(isAlive.calls[0][0]).toBe("12345678");
-  });
-
-  test("delegates to the isAlive seam (false → caller's revive path runs)", () => {
-    const isAlive = recorder(false);
-    expect(defaultPidAlive({ bgJobId: "12345678" }, { isAlive })).toBe(false);
-  });
-
-  test("a throwing isAlive seam is swallowed → false", () => {
-    const isAlive = () => {
-      throw new Error("claude agents exploded");
-    };
-    expect(defaultPidAlive({ bgJobId: "12345678" }, { isAlive })).toBe(false);
-  });
-
-  test("production default: malformed bgJobId ('bg-9') → false, no shell-out", () => {
-    // No isAlive seam → the real isBgJobAlive runs. "bg-9" is not a valid short
-    // id, so it returns false before touching `claude agents`. This is the
-    // contract every legacy setupReviveScenario (bg-9, no seam) relies on.
-    expect(defaultPidAlive({ bgJobId: "bg-9" })).toBe(false);
-  });
-});
+// CTL-662 removed defaultPidAlive (the CTL-610/657 positive keep-alive seam) and
+// its tests: its sole consumer was the alive-quiet gate's `pidAlive` injection,
+// which is gone. Reclaim eligibility no longer asks "is the bg pid alive?" (a
+// binary presence check) but "what is the worker's `claude agents` status?" (the
+// three-valued busy|idle|absent reader livenessForBgJob, covered in
+// claude-agents.test.mjs). Presence is subsumed by `absent` (not listed → dead).
 
 describe("revive event envelope round-trip (write → countReviveEvents)", () => {
   let envCatalystDir;
@@ -2411,14 +2354,18 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     expect(r).toBe("reclaimed");
   });
 
-  test("guard never fires for a live signal (no filesystem read on the hot path)", () => {
+  test("guard never fires for a busy (live) signal — no listTicketPhases read on the hot path", () => {
+    // CTL-662: a live worker is now `busy`, which returns 'alive-busy-suppressed'
+    // from the status branch ABOVE the supersede guard — so the guard's
+    // listTicketPhases read is never reached for a live worker.
     const listSpy = recorder(["triage", "research", "plan", "implement"]);
     const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
-      statJob: () => ({ exists: true, mtimeMs: Date.now() }), // fresh → not dead
+      statJob: () => ({ exists: true, mtimeMs: Date.now() }),
+      liveness: () => "busy",
       listTicketPhases: listSpy,
     });
-    expect(r).toBe("noop");
-    expect(listSpy.calls.length).toBe(0); // guard runs only after the dead check
+    expect(r).toBe("alive-busy-suppressed");
+    expect(listSpy.calls.length).toBe(0); // guard runs only on the reclaim-eligible path
   });
 });
 

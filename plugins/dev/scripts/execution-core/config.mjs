@@ -121,3 +121,21 @@ export const EVENT_DEBOUNCE_MS =
 // matching the legacy `date -u -v-15M` cutoff in orchestrate/SKILL.md.
 export const STALE_WORKER_CUTOFF_MS =
   Number(process.env.EXECUTION_CORE_STALE_WORKER_CUTOFF_MS) || 15 * 60_000;
+
+// CTL-662 — idle-confirmation streak length. A phase worker observed `idle` by
+// `claude agents` is reclaim-eligible only after this many CONSECUTIVE idle
+// observations (a counter persisted on the signal, NOT an mtime window). A
+// couple of ticks confirms the worker is genuinely between-turns done, not
+// momentarily idle between sub-agent fan-out rounds. Env-overridable so tuning
+// from real failures needs no code change (the operator decision on the ticket).
+export const IDLE_CONFIRM_TICKS =
+  Number(process.env.EXECUTION_CORE_IDLE_CONFIRM_TICKS) || 2;
+
+// CTL-662 — busy-forever backstop ceiling. With STALE_MS / HUNG_CUTOFF_MS gone,
+// this is the SOLE long backstop: a worker that stays `busy` past this elapsed
+// time with no committed work flags for human (escalateOnce) — NEVER a silent
+// reclaim-and-advance. Deliberately high (6h) so a legitimate multi-hour
+// sub-agent fan-out or a future Linear-webhook waiter never trips it; only a
+// genuinely wedged worker does. Env-overridable for tuning.
+export const BUSY_CEILING_MS =
+  Number(process.env.EXECUTION_CORE_BUSY_CEILING_MS) || 6 * 60 * 60_000;
