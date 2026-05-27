@@ -9,6 +9,8 @@ import {
   resolveWorktree,
   defaultReadFile,
   readVerifyVerdict,
+  describeProbe,
+  WORK_DONE_PROBE_DESCRIPTIONS,
 } from "./work-done-probes.mjs";
 
 // makeRunGit — a deterministic `git` fake keyed on the trailing positional args.
@@ -724,5 +726,23 @@ describe("WORK_DONE_PROBES['monitor-merge']", () => {
   test("false when no PR number anywhere / gh fails", () => {
     expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}), runGh: () => { throw new Error("no"); } })).toBe(false);
     expect(WORK_DONE_PROBES["monitor-merge"]({ ticket: "CTL-1", orchDir: ORCH }, { readFile, runGh: makeRunGh({}) })).toBe(false);
+  });
+});
+
+describe("CTL-664: probe descriptions", () => {
+  test("every registered probe has a non-empty description", () => {
+    for (const phase of Object.keys(WORK_DONE_PROBES)) {
+      expect(typeof WORK_DONE_PROBE_DESCRIPTIONS[phase]).toBe("string");
+      expect(WORK_DONE_PROBE_DESCRIPTIONS[phase].length).toBeGreaterThan(0);
+    }
+  });
+
+  test("describeProbe returns the registered description for a known phase", () => {
+    expect(describeProbe("implement")).toBe(WORK_DONE_PROBE_DESCRIPTIONS.implement);
+    expect(describeProbe("plan")).toContain("Phase"); // plan probe checks for ## Phase + Success Criteria
+  });
+
+  test("describeProbe returns a safe fallback for an unknown phase", () => {
+    expect(describeProbe("nonexistent")).toBe("unknown");
   });
 });
