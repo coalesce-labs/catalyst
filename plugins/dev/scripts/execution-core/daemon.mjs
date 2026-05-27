@@ -34,7 +34,7 @@ import {
   reconcileAll,
   createTicketStateCache,
 } from "./index.mjs";
-import { Reaper } from "./reaper.mjs";
+import { Reaper, defaultReadActivePhaseSignal } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import { reconcileBootResume } from "./boot-resume.mjs";
 import { writeBootMarker } from "./recovery.mjs"; // CTL-655: window the revive budget to this run
@@ -174,7 +174,7 @@ export function startDaemon({
     }
 
     if (enableReaper) {
-      startReaperAndTimer({ orphanReaperConfig, debounceMs });
+      startReaperAndTimer({ orphanReaperConfig, debounceMs, orchDir });
     }
   } catch (err) {
     stopDaemon();
@@ -192,13 +192,17 @@ export function startDaemon({
 //
 // Boot replay is best-effort: if it throws, log and continue with live
 // consumption only.
-function startReaperAndTimer({ orphanReaperConfig, debounceMs }) {
+function startReaperAndTimer({ orphanReaperConfig, debounceMs, orchDir }) {
   const eventLogPath = getEventLogPath();
   // CTL-649: the periodic sweep honors the configured recency floor
   // (minIdleSeconds, default 900s). includeInteractive stays at its safe
   // default false — the daemon never opts into reaping human sessions.
+  // CTL-661: bind the per-ticket reconciler's canonical-owner reader to this
+  // daemon's orchDir so the sweep resolves the authoritative active-phase
+  // bg_job_id (falling back to newest-by-last_seen when no signal is found).
   _reaper = new Reaper({
     minIdleMs: (orphanReaperConfig?.minIdleSeconds ?? 900) * 1000,
+    readActivePhaseSignal: (ticket) => defaultReadActivePhaseSignal(orchDir, ticket),
   });
 
   // Boot replay: cover for any intents that landed while the daemon was down.

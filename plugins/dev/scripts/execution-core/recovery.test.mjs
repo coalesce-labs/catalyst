@@ -732,6 +732,80 @@ describe("reclaimDeadWorkIfPossible", () => {
   });
 });
 
+// --- CTL-661 Phase 2: reap-intent on the reclaim happy path (B) -------------
+//
+// When a stale-by-mtime worker reaches branch (B) (probe says work IS done) it
+// has already cleared the hoisted alive-quiet gate, so it is either pid-dead or
+// genuinely hung. Before emitComplete, the reclaim emits a fire-and-forget
+// phase.reclaim.reap-requested so the reaper stops any lingering session.
+describe("reclaimDeadWorkIfPossible — CTL-661 reclaim happy-path reap-intent", () => {
+  const orch = "/orch";
+
+  // A stale (6-min-quiet) running implement signal that reaches branch (B):
+  // probe true, pidAlive false (so the alive-quiet gate does NOT suppress).
+  function staleReclaimable({ bgJobId = "job-x", worktreePath = "/wt/CTL-9" } = {}) {
+    const sig = implementSignal({ bgJobId });
+    sig.raw.worktreePath = worktreePath;
+    return sig;
+  }
+
+  test("branch (B) emits phase.reclaim.reap-requested with bgJobId before reclaiming", () => {
+    const emitReap = recorder(Promise.resolve(true));
+    const r = reclaimDeadWorkIfPossible(orch, staleReclaimable(), {
+      statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+      probes: { implement: () => true },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      pidAlive: () => false, // genuinely dead → alive-quiet gate stays open
+      emitReapIntent: emitReap,
+      now: () => 1_000 + 6 * 60 * 1000, // 6 min past mtime — stale
+    });
+    expect(r).toBe("reclaimed");
+    expect(emitReap.calls.length).toBe(1);
+    const [eventType, fields] = emitReap.calls[0];
+    expect(eventType).toBe("phase.reclaim.reap-requested");
+    expect(fields).toMatchObject({
+      ticket: "CTL-9",
+      phase: "implement",
+      bgJobId: "job-x",
+      worktreePath: "/wt/CTL-9",
+      reason: "ctl-661-reclaim-happy-path",
+    });
+  });
+
+  test("branch (B) does NOT emit a reap-intent when the worker has no bg_job_id", () => {
+    // liveness.value present (so statJob can stale-flag it) but raw.bg_job_id
+    // absent — mirrors the supersede-guard no-op.
+    const sig = {
+      ticket: "CTL-9",
+      phase: "implement",
+      status: "running",
+      liveness: { kind: "bg", value: "job-x" },
+      signalPath: "/x/CTL-9/phase-implement.json",
+      raw: {
+        ticket: "CTL-9",
+        phase: "implement",
+        orchestrator: "CTL-9",
+        status: "running",
+        catalystSessionId: "sess_CTL-9_abc",
+        // no bg_job_id
+      },
+    };
+    const emitReap = recorder(Promise.resolve(true));
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+      probes: { implement: () => true },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      pidAlive: () => false,
+      emitReapIntent: emitReap,
+      now: () => 1_000 + 6 * 60 * 1000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emitReap.calls.length).toBe(0);
+  });
+});
+
 // --- CTL-587: revive / revive-suppressed / escalated branches ---------------
 //
 // The pre-CTL-587 'not-applicable' and 'not-done' returns were silent dead-ends.
@@ -1168,11 +1242,19 @@ describe("reclaimDeadWorkIfPossible — CTL-610 alive-quiet keep-alive guard", (
     expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(0);
   });
 
-  test("work-done (branch B) wins over alive-quiet (B returns before C0 is reached)", () => {
+  test("CTL-661: a LIVE worker whose work appears done is suppressed, NOT reclaimed (gate now precedes branch B)", () => {
+    // Pre-CTL-661 the alive-quiet guard sat at the top of branch (C), AFTER
+    // branch (B)'s reclaim, so a live worker whose probe read done was
+    // reclaimed (signal flipped, advanced past) even though it was still
+    // running. CTL-661 repositions the gate ahead of branches (A)/(B): a live
+    // worker within the hung cutoff is never reclaimed — it is left to finish
+    // (its own emit-complete is authoritative) or to genuinely die.
     const s = setupAliveQuietScenario({ pidAlive: () => true, probeResult: true });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
-    // Guard MUST NOT have been consulted — branch (B) returned first
-    expect(s.opts.pidAlive.calls.length).toBe(0);
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+    // Gate MUST have been consulted and won over the work-done reclaim.
+    expect(s.opts.pidAlive.calls.length).toBeGreaterThanOrEqual(1);
+    expect(s.opts.emitComplete.calls.length).toBe(0);
+    expect(s.opts.appendEvent.calls.length).toBe(0);
   });
 
   test("production default seam returns false for a fake bgJobId → guard inert, existing revive path runs", () => {
@@ -1204,6 +1286,112 @@ describe("reclaimDeadWorkIfPossible — CTL-610 alive-quiet keep-alive guard", (
     };
     // A 'dead' bg implies a real crash → revive must still fire.
     expect(reclaimDeadWorkIfPossible("/orch", sig, opts)).toBe("revived");
+  });
+});
+
+// --- CTL-661: reclaim liveness gate (repositioned ahead of branches A/B) ---
+//
+// CTL-610 introduced the alive-quiet guard but positioned it at the TOP of
+// branch (C) — after branch (A) (no-probe → escalate) and branch (B)
+// (work-done → reclaim) had already had a chance to return. A live-but-quiet
+// worker whose probe read done (B) or whose phase had no probe (A) was
+// therefore still reclaimed/escalated past while genuinely alive. CTL-661
+// hoists the same predicate ahead of (A) and (B) so a live worker within the
+// hung cutoff is suppressed on EVERY branch — never reclaimed, escalated, or
+// revived. These cases pin the repositioned semantics.
+describe("reclaimDeadWorkIfPossible — CTL-661 reclaim liveness gate", () => {
+  // Reuse the CTL-610 scenario shape. setupAliveQuietScenario is in the
+  // sibling describe block above; redeclare a local copy here so this block is
+  // self-contained and order-independent.
+  function setup({
+    pidAlive = () => true,
+    hungCutoffMs = 15 * 60 * 1000,
+    reviveCount = 0,
+    probeResult = false,
+    phase = "implement",
+    ticket = "CTL-9",
+    bgJobId = "bg-9",
+    stateJsonMtime = 1_000,
+    nowMs = 1_000 + 6 * 60 * 1000, // 6 min past mtime → stale, within cutoff
+  } = {}) {
+    const sig = {
+      ...implementSignal({ ticket, status: "running", bgJobId }),
+      phase,
+    };
+    sig.raw.phase = phase;
+    return {
+      orch: "/orch",
+      sig,
+      opts: {
+        repoRoot: "/repo",
+        statJob: () => ({ exists: true, mtimeMs: stateJsonMtime }),
+        probes: { [phase]: recorder(probeResult) },
+        emitComplete: recorder({ code: 0 }),
+        appendEvent: recorder(undefined),
+        appendReviveEvent: recorder(undefined),
+        appendEscalatedEvent: recorder(undefined),
+        appendReviveSuppressedEvent: recorder(undefined),
+        reviveDispatch: recorder({ code: 0 }),
+        applyStalledLabel: recorder({ applied: true }),
+        killBgJob: recorder(undefined),
+        countReviveEvents: recorder(reviveCount),
+        countDistinctRevivingTickets: recorder(1),
+        writeReviveMarker: recorder(undefined),
+        pidAlive: recorder(pidAlive()),
+        hungCutoffMs,
+        now: () => nowMs,
+        staleMs: 5 * 60 * 1000,
+      },
+    };
+  }
+
+  test("reclaim is suppressed when the bg worker is still live within the hung cutoff (probe says done)", () => {
+    const s = setup({ pidAlive: () => true, probeResult: true });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+    expect(s.opts.emitComplete.calls.length).toBe(0);
+    expect(s.opts.appendEvent.calls.length).toBe(0);
+  });
+
+  test("a genuinely dead worker (pid gone) still reclaims when work is done", () => {
+    const s = setup({ pidAlive: () => false, probeResult: true });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
+    expect(s.opts.emitComplete.calls.length).toBe(1);
+  });
+
+  test("a live worker PAST the hung cutoff is NOT suppressed (genuinely hung → reclaim allowed)", () => {
+    // 16 min past mtime > 15 min cutoff → gate predicate false → falls through
+    // to branch (B), which reclaims because the probe reads done.
+    const s = setup({
+      pidAlive: () => true,
+      probeResult: true,
+      stateJsonMtime: 1_000,
+      nowMs: 1_000 + 16 * 60 * 1000,
+    });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
+    expect(s.opts.emitComplete.calls.length).toBe(1);
+  });
+
+  // NOTE (CTL-661, plan Open Question #3): the plan also wanted a "live worker
+  // on a probe-less phase is suppressed, not escalated" case. It is not
+  // constructible: the supersede guard at the top of reclaimDeadWorkIfPossible
+  // calls phaseIndex(phase), which THROWS for any phase outside PHASES+
+  // remediate, and every phase phaseIndex accepts has a WORK_DONE_PROBES entry
+  // — so branch (A) (`!hasProbe`) is unreachable for all real phases (a
+  // pre-existing property the plan's "What We're NOT Doing" acknowledges). The
+  // gate is placed in source order BEFORE branch (A) regardless, so the
+  // hypothetical is covered; we do not fabricate a fake phaseIndex to assert
+  // an unreachable path. The realizable precedence — gate over branch (B)'s
+  // reclaim — is pinned by the work-done cases above.
+  test("the gate's bg_job_id is the signal's, not a stale value (consults pidAlive with prevBgJobId)", () => {
+    const s = setup({ pidAlive: () => true, probeResult: true, bgJobId: "bg-77" });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+    expect(s.opts.pidAlive.calls[0][0].bgJobId).toBe("bg-77");
+  });
+
+  test("regression: a live worker whose work is NOT done is still suppressed (the original C0 case)", () => {
+    const s = setup({ pidAlive: () => true, probeResult: false });
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-quiet-suppressed");
+    expect(s.opts.reviveDispatch.calls.length).toBe(0);
   });
 });
 

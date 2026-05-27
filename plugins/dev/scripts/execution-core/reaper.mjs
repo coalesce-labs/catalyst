@@ -15,7 +15,8 @@
 // APIs. The schema, the producers, and the consumer count are all stable.
 
 import { spawnSync, execFileSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
 import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
 import { lastSeenMsForSession } from "./session-recency.mjs";
@@ -24,6 +25,25 @@ import { log } from "./config.mjs";
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 const DEDUPE_WINDOW_MS = Number(process.env.REAPER_DEDUPE_WINDOW_MS) || 60_000;
 const DEFAULT_MIN_IDLE_MS = 15 * 60 * 1000; // 15 min
+
+// CTL-661 Phase 5 — the per-ticket reconciler's spawn-grace window. A revive or
+// advance reassigns a ticket's bg_job_id to a fresh successor; for a brief
+// window two background sessions co-exist by design while the new one takes
+// over the signal. The reconciler must grant that window so it never stops a
+// legitimate freshly-spawned successor mid-handoff.
+//
+// ─── Three DISTINCT time constants — do NOT conflate (research called this out) ───
+//   • STALE_MS          (recovery.mjs, 5 min)  — dead-detection: a state.json
+//                         quiet longer than this is *candidate*-dead.
+//   • minIdleMs         (this file, 15 min)    — periodic-sweep recency floor:
+//                         a transcript touched within this is "still in use".
+//   • CLEANUP_GRACE_MS  (this file, 60 s)      — reconciler spawn-grace: a
+//                         non-canonical session younger than this is a likely
+//                         just-spawned successor; spare it this tick.
+// DEDUPE_WINDOW_MS (60 s) coincidentally shares the grace's magnitude but serves
+// a different role (suppress re-emitting the same intent), so they are kept as
+// separate named constants.
+export const CLEANUP_GRACE_MS = 60_000;
 
 /**
  * Reaper — composes injectable executors so the unit test never shells out.
@@ -47,6 +67,14 @@ export class Reaper {
     includeInteractive = false,
     minIdleMs = DEFAULT_MIN_IDLE_MS,
     lastSeenMs = (sessionId) => lastSeenMsForSession(sessionId),
+    // CTL-661 hole #4: per-ticket reconciliation seams.
+    //  - readActivePhaseSignal(ticket): the ticket's authoritative active-phase
+    //    signal { bg_job_id, phase } | null, used to pick the canonical owner.
+    //    Default returns null so the sweep falls back to newest-by-last_seen;
+    //    the daemon injects a real orchDir-backed reader.
+    //  - now: injectable clock for the Phase-5 cleanup-grace skip.
+    readActivePhaseSignal = () => null,
+    now = () => Date.now(),
     log: logger = log,
   } = {}) {
     this.executorReap = executorReap;
@@ -58,6 +86,8 @@ export class Reaper {
     this.includeInteractive = includeInteractive;
     this.minIdleMs = minIdleMs;
     this.lastSeenMs = lastSeenMs;
+    this.readActivePhaseSignal = readActivePhaseSignal;
+    this.now = now;
     this.log = logger;
     this._inflight = new Map(); // key → expiresAt
   }
@@ -100,7 +130,18 @@ export class Reaper {
         case "phase.supersede.reap-requested":
         case "phase.revive.reap-requested":
         case "phase.abort.reap-requested":
+        // CTL-661 hole #3: single-target stop of a reclaimed (genuinely-hung)
+        // worker on the recovery happy path. Busy-OK, like the others.
+        case "phase.reclaim.reap-requested":
           await this._handleBgReap(event);
+          break;
+        // CTL-661 hole #4: the reconcile event is dual-purpose, disambiguated by
+        // bg_job_id. With a target it is a per-session stop (the sweep's own
+        // emit, round-tripped through the log) → _handleBgReap. Without one it is
+        // the periodic timer's TRIGGER → run the per-ticket reconciliation sweep.
+        case "phase.reconcile.reap-requested":
+          if (event.bg_job_id) await this._handleBgReap(event);
+          else await this._handleReconcile(event);
           break;
         case "worktree.presweep.reap-requested":
           await this._handleWorktreePresweep(event);
@@ -328,6 +369,115 @@ export class Reaper {
     }
   }
 
+  // CTL-661 hole #4: trigger handler for the periodic reconcile tick.
+  async _handleReconcile(_event) {
+    await this.reconcileTicketWorkers();
+  }
+
+  /**
+   * reconcileTicketWorkers — enforce one-live-bg-worker-per-ticket. Group live
+   * `background` sessions by the ticket derived from their worktree cwd; for any
+   * ticket with >1 live session, keep the canonical owner (the active-phase
+   * signal's bg_job_id, else newest-by-last_seen) and emit a
+   * `phase.reconcile.reap-requested` for every other live session — except those
+   * younger than CLEANUP_GRACE_MS (a likely just-spawned successor still taking
+   * over the signal; the next tick re-evaluates). Interactive/unknown-kind
+   * sessions and sessions outside a recognizable worktree are never reconciled.
+   */
+  async reconcileTicketWorkers() {
+    const live = await this.agents();
+    const groups = groupBackgroundSessionsByTicket(live);
+    for (const [ticket, sessions] of groups) {
+      if (sessions.length <= 1) continue; // single live session → nothing to do
+      const signal = this.readActivePhaseSignal(ticket);
+      const dominantPhase = signal?.phase ?? null;
+      const canonical = this._resolveCanonical(ticket, sessions, signal);
+      if (!canonical) continue;
+      let canonicalShortId;
+      try {
+        canonicalShortId = shortIdFromSessionId(canonical.sessionId);
+      } catch {
+        continue; // can't name the keeper safely → leave the whole group alone
+      }
+      for (const s of sessions) {
+        if (s === canonical) continue;
+        if (isSelfSession(s.sessionId)) continue; // never reap the controller
+        let shortId;
+        try {
+          shortId = shortIdFromSessionId(s.sessionId);
+        } catch {
+          continue;
+        }
+        // Phase 5 — spawn-grace skip: a non-canonical session whose recency proxy
+        // is within CLEANUP_GRACE_MS is likely a just-spawned successor still
+        // taking over the signal. Spare it; the next tick re-evaluates. A null
+        // proxy (no transcript) does NOT spare it.
+        const seen = this.lastSeenMs(s.sessionId);
+        if (seen !== null && seen !== undefined && seen < CLEANUP_GRACE_MS) {
+          this.log.info(
+            { ticket, sessionId: s.sessionId, lastSeenS: Math.round(seen / 1000) },
+            "reaper: reconcile sparing freshly-spawned session (within cleanup grace)",
+          );
+          continue;
+        }
+        await this.emit("phase.reconcile.reap-requested", {
+          ticket,
+          phase: dominantPhase,
+          bgJobId: shortId,
+          worktreePath: s.cwd,
+          canonicalBgJobId: canonicalShortId,
+          dominantPhase,
+          reason: "ctl-661-one-worker-per-ticket",
+        });
+      }
+    }
+  }
+
+  /**
+   * _resolveCanonical — pick the live session to KEEP for a ticket group.
+   *   1. the session whose shortId matches the active-phase signal's bg_job_id;
+   *   2. else the newest session by last_seen (smallest age);
+   *   3. else (no signal, every last_seen null) the first-enumerated, + log.
+   */
+  _resolveCanonical(ticket, sessions, signal) {
+    if (signal?.bg_job_id) {
+      let target;
+      try {
+        target = shortIdFromSessionId(signal.bg_job_id);
+      } catch {
+        target = null;
+      }
+      if (target) {
+        const match = sessions.find((s) => {
+          try {
+            return shortIdFromSessionId(s.sessionId) === target;
+          } catch {
+            return false;
+          }
+        });
+        if (match) return match;
+      }
+    }
+    // Newest-by-last_seen: lastSeenMs is an AGE (ms since last activity), so the
+    // most recently active session has the SMALLEST value.
+    let best = null;
+    let bestSeen = Infinity;
+    for (const s of sessions) {
+      const seen = this.lastSeenMs(s.sessionId);
+      if (seen === null || seen === undefined) continue;
+      if (seen < bestSeen) {
+        bestSeen = seen;
+        best = s;
+      }
+    }
+    if (best) return best;
+    this.log.info(
+      { ticket },
+      "reaper: reconcile canonical fallback — no signal, no last_seen; keeping first-enumerated",
+    );
+    return sessions[0] ?? null;
+  }
+
   /**
    * bootReplay — on daemon startup, scan the current month's event log for
    * `*.reap-requested` entries with no matching `*.reap-complete` echo and
@@ -392,6 +542,77 @@ function stripTrailingSlash(p) {
 function cwdUnder(cwd, worktree) {
   if (!cwd || !worktree) return false;
   return cwd === worktree || cwd.startsWith(worktree + "/");
+}
+
+/**
+ * ticketFromCwd — derive a ticket id from a worktree cwd (CTL-661 hole #4).
+ * Worktrees follow the `…/wt/<TICKET>` convention, so the basename IS the
+ * ticket. Grouping by basename is boundary-safe by construction: `/wt/CTL-64`
+ * and `/wt/CTL-649` yield the distinct keys `CTL-64` / `CTL-649`. Returns null
+ * for an empty/unusable cwd so the reconciler never reaps on a guess.
+ */
+export function ticketFromCwd(cwd) {
+  if (!cwd || typeof cwd !== "string") return null;
+  const base = stripTrailingSlash(cwd).split("/").filter(Boolean).pop();
+  return base || null;
+}
+
+/**
+ * groupBackgroundSessionsByTicket — bucket live `background` sessions by the
+ * ticket their cwd resolves to (CTL-661 hole #4). Interactive/unknown-kind
+ * sessions, sessions without a sessionId/cwd, and sessions outside a
+ * recognizable worktree are dropped — never counted, never reaped. Returns a
+ * Map<ticket, sessions[]> preserving enumeration order within each group.
+ */
+export function groupBackgroundSessionsByTicket(live) {
+  const groups = new Map();
+  for (const s of live ?? []) {
+    if (!s || !s.sessionId || !s.cwd) continue;
+    if (s.kind !== "background") continue; // interactive/unknown never reconciled
+    const ticket = ticketFromCwd(s.cwd);
+    if (!ticket) continue;
+    if (!groups.has(ticket)) groups.set(ticket, []);
+    groups.get(ticket).push(s);
+  }
+  return groups;
+}
+
+/**
+ * defaultReadActivePhaseSignal — production reader for the reconciler's
+ * canonical-owner resolution (CTL-661 hole #4). Reads
+ * <orchDir>/workers/<ticket>/phase-*.json and returns { bg_job_id, phase } for
+ * the active worker: the `running` signal, else the newest by updatedAt. Returns
+ * null when the worker dir is absent or no signal carries a bg_job_id. Best-
+ * effort — never throws. The daemon binds `orchDir` and injects the bound form.
+ */
+export function defaultReadActivePhaseSignal(orchDir, ticket, { readDir = readdirSync, readFile = readFileSync } = {}) {
+  if (!orchDir || !ticket) return null;
+  const dir = join(orchDir, "workers", ticket);
+  let files;
+  try {
+    files = readDir(dir).filter((f) => f.startsWith("phase-") && f.endsWith(".json"));
+  } catch {
+    return null;
+  }
+  let best = null;
+  let bestRank = -1;
+  for (const f of files) {
+    let sig;
+    try {
+      sig = JSON.parse(readFile(join(dir, f), "utf8"));
+    } catch {
+      continue;
+    }
+    if (!sig?.bg_job_id) continue;
+    const running = sig.status === "running" ? 1 : 0;
+    const ts = Date.parse(sig.updatedAt ?? sig.startedAt ?? "") || 0;
+    const rank = running * 1e15 + ts; // prefer running, then newest
+    if (rank > bestRank) {
+      bestRank = rank;
+      best = sig;
+    }
+  }
+  return best ? { bg_job_id: best.bg_job_id, phase: best.phase } : null;
 }
 
 // ─── Default executors ──────────────────────────────────────────────────────

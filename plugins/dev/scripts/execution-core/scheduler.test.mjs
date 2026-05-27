@@ -22,6 +22,7 @@ import {
   readMaxParallel,
   computeFreeSlots,
   predecessorPhaseOf,
+  resolveReapPredecessor,
   computeReadyTickets,
   selectDispatchable,
   deriveAdvancement,
@@ -802,6 +803,66 @@ describe("schedulerTick — CTL-657 live-count concurrency & predecessor reap", 
       readEventLog().filter((e) => e.event === "phase.predecessor.reap-requested"),
     ).toHaveLength(0);
   });
+
+  // CTL-661 hole #2 — verify⇄remediate detour reaps, driven through schedulerTick.
+  function writeVerifyJson(ticket, regressionRisk) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "verify.json"),
+      JSON.stringify({ regression_risk: regressionRisk, findings: [], gates: {} }),
+    );
+  }
+
+  test("verify→remediate advance reaps the verify worker", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // implement+verify done; verify.json verdict-fail (regression_risk≥5) routes
+    // verify → remediate. The verify worker is the detour predecessor.
+    writeSignalWithBg("CTL-7", "implement", "done", "impl1111-0000-0000-0000-000000000000");
+    writeSignalWithBg("CTL-7", "verify", "done", "veri2222-0000-0000-0000-000000000000");
+    writeVerifyJson("CTL-7", 8);
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      liveBackgroundCount: () => 0,
+      verifyDispatched: verifyOk,
+    });
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "remediate" }]);
+    const reap = readEventLog().find(
+      (e) => e.event === "phase.predecessor.reap-requested" && e.ticket === "CTL-7",
+    );
+    expect(reap).toBeTruthy();
+    expect(reap.phase).toBe("verify");
+    expect(reap.bg_job_id).toBe("veri2222-0000-0000-0000-000000000000");
+    expect(reap.reason).toBe("ctl-661-remediate-detour");
+  });
+
+  test("remediate→verify re-entry reaps the remediate worker, NOT implement", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // implement+verify+remediate all done → maybeResetForRemediateCycle wipes the
+    // verify+remediate signals and re-dispatches a fresh verify. The remediate
+    // worker (captured before the reset) is the predecessor to reap.
+    writeSignalWithBg("CTL-7", "implement", "done", "impl1111-0000-0000-0000-000000000000");
+    writeSignalWithBg("CTL-7", "verify", "done", "veri2222-0000-0000-0000-000000000000");
+    writeSignalWithBg("CTL-7", "remediate", "done", "reme3333-0000-0000-0000-000000000000");
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      liveBackgroundCount: () => 0,
+      verifyDispatched: verifyOk,
+    });
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "verify" }]);
+    const reaps = readEventLog().filter(
+      (e) => e.event === "phase.predecessor.reap-requested" && e.ticket === "CTL-7",
+    );
+    expect(reaps).toHaveLength(1);
+    expect(reaps[0].phase).toBe("remediate");
+    expect(reaps[0].bg_job_id).toBe("reme3333-0000-0000-0000-000000000000");
+    // Explicitly NOT the long-finished implement worker.
+    expect(reaps[0].phase).not.toBe("implement");
+  });
 });
 
 describe("predecessorPhaseOf", () => {
@@ -818,6 +879,41 @@ describe("predecessorPhaseOf", () => {
   test("null for the router-only remediate detour (no NEXT_PHASE edge) and empty input", () => {
     expect(predecessorPhaseOf({ verify: "done" }, "remediate")).toBeNull();
     expect(predecessorPhaseOf(null, "plan")).toBeNull();
+  });
+});
+
+// ── CTL-661 hole #2: detour-aware reap predecessor resolution ──
+describe("resolveReapPredecessor", () => {
+  test("linear edge → NEXT_PHASE inversion (ctl-657 reason)", () => {
+    expect(resolveReapPredecessor({ research: "done" }, "plan")).toEqual({
+      phase: "research",
+      reason: "ctl-657-scheduler-advance",
+    });
+    expect(resolveReapPredecessor({ implement: "done" }, "verify")).toEqual({
+      phase: "implement",
+      reason: "ctl-657-scheduler-advance",
+    });
+  });
+
+  test("verify → remediate detour reaps the verify worker", () => {
+    expect(
+      resolveReapPredecessor({ implement: "done", verify: "done" }, "remediate"),
+    ).toEqual({ phase: "verify", reason: "ctl-661-remediate-detour" });
+  });
+
+  test("remediate → verify detour reaps remediate, NOT implement", () => {
+    const r = resolveReapPredecessor(
+      { implement: "done", verify: "done", remediate: "done" },
+      "verify",
+    );
+    expect(r).toEqual({ phase: "remediate", reason: "ctl-661-remediate-detour" });
+    expect(r.phase).not.toBe("implement");
+  });
+
+  test("no resolvable predecessor → null", () => {
+    // verify → remediate but verify is not done yet.
+    expect(resolveReapPredecessor({ implement: "done" }, "remediate")).toBeNull();
+    expect(resolveReapPredecessor(null, "plan")).toBeNull();
   });
 });
 
