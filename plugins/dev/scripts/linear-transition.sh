@@ -41,6 +41,7 @@ default_state_for() {
     inProgress)  echo "In Progress" ;;
     verifying)   echo "In Progress" ;;
     reviewing)   echo "In Progress" ;;
+    remediating) echo "In Progress" ;;  # CTL-653: fallback when no stateMap "remediating" key
     inReview)    echo "In Review" ;;
     done)        echo "Done" ;;
     canceled)    echo "Canceled" ;;

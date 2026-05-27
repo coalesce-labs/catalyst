@@ -15,6 +15,7 @@
         "inProgress": "Implement",
         "verifying": "Validate",
         "reviewing": "Validate",
+        "remediating": "Remediate",
         "inReview": "PR",
         "done": "Done",
         "canceled": "Canceled"

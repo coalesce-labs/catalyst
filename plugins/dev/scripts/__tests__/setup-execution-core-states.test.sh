@@ -46,11 +46,14 @@ STATE_MAP_JSON="$(build_execution_core_state_map)"
 run "state map is valid JSON" \
   bash -c "echo '$STATE_MAP_JSON' | jq -e ."
 
-run "state map has 11 keys" \
-  bash -c "echo '$STATE_MAP_JSON' | jq -e 'length == 11'"
+run "state map has 12 keys" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e 'length == 12'"
 
 run "state map todo -> Ready" \
   bash -c "echo '$STATE_MAP_JSON' | jq -e '.todo == \"Ready\"'"
+
+run "state map remediating -> Remediate (CTL-653)" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.remediating == \"Remediate\"'"
 
 run "state map triage -> Triage" \
   bash -c "echo '$STATE_MAP_JSON' | jq -e '.triage == \"Triage\"'"
