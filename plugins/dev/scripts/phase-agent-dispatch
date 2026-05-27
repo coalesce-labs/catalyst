@@ -16,12 +16,20 @@
 #     [--model <opus|sonnet|haiku>] \
 #     [--turn-cap <n>] \
 #     [--config <path>] \
+#     [--resume-session <uuid>] \
 #     [--dry-run]
 #
 # Defaults:
 #   --orch-dir = $CATALYST_ORCHESTRATOR_DIR
 #   --orch-id  = $CATALYST_ORCHESTRATOR_ID
 #   --config   = nearest ancestor .catalyst/config.json
+#
+# --resume-session (CTL-658): when set, spawn `claude --bg --resume <uuid>`
+#   (continue the dead worker's session) instead of a fresh `/catalyst-dev:phase-*`
+#   prompt. The daemon revive path resolves the UUID from the dead worker's
+#   bg_job_id and passes it here. A clean resume runs as-launched; an "alive"
+#   rejection marks the signal stalled (resume-rejected-alive) and exits non-zero;
+#   a hard resume failure falls back to a fresh start in the same invocation.
 #
 # Output (stdout):
 #   One JSON line with keys: ticket, phase, model, turnCap, bg_job_id,
@@ -51,6 +59,12 @@ EMIT_COMPLETE="${CATALYST_EMIT_COMPLETE:-${SCRIPT_DIR}/phase-agent-emit-complete
 # executor can swap the launch and the stop together (design doc D9).
 # shellcheck source=lib/executor.sh
 source "${SCRIPT_DIR}/lib/executor.sh"
+
+# CTL-658: shared resume-stderr classifier (classify_resume_stderr), shared with
+# orchestrate-revive's legacy bash revive path. Used when --resume-session is set
+# to tell a clean resume from an alive-rejection from a hard failure.
+# shellcheck source=lib/resume.sh
+source "${SCRIPT_DIR}/lib/resume.sh"
 
 die() {
 	echo "phase-agent-dispatch: $*" >&2
@@ -112,6 +126,9 @@ MODEL_FLAG=""
 TURN_CAP_FLAG=""
 CONFIG=""
 DRY_RUN=0
+# CTL-658: when set, spawn `claude --bg --resume $RESUME_SESSION` instead of a
+# fresh $PROMPT. Empty = today's fresh-start behaviour.
+RESUME_SESSION=""
 # CTL-649: --attempt threads the dispatch attempt number through to the
 # structured session name (`--name o-<orchId>:<ticket>:<phase>:<attempt>`).
 # Default 1 covers the cold-dispatch path; the recovery/revive callers should
@@ -151,6 +168,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--config)
 		CONFIG="$2"
+		shift 2
+		;;
+	--resume-session)
+		RESUME_SESSION="$2"
 		shift 2
 		;;
 	--dry-run)
@@ -532,10 +553,12 @@ if [[ $DRY_RUN -eq 1 ]]; then
 		--arg signal "$SIGNAL_FILE" \
 		--arg sessionName "$SESSION_NAME" \
 		--argjson attempt "$ATTEMPT" \
+		--arg resumeSession "$RESUME_SESSION" \
 		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, prompt: $prompt, signalFile: $signal,
       sessionName: $sessionName, attempt: $attempt,
+      resumeSession: (if $resumeSession == "" then null else $resumeSession end),
       env: $env, status: "dispatched", dryRun: true}'
 	exit 0
 fi
@@ -553,14 +576,57 @@ trap 'rm -f "$BG_OUT" "$BG_ERR"' EXIT
 # still overrides it, so existing tests and tooling are unaffected.
 CLAUDE_BIN="$(executor_claude_bin)"
 
+# spawn_claude_bg (CTL-658): run `claude --bg` with the shared envelope
+# (DISPATCH_ENV + --name + --model) and the caller-supplied trailing args
+# ("$PROMPT" for a fresh start, or `--resume <uuid>` for a session resume),
+# writing stdout/stderr to BG_OUT/BG_ERR. Returns claude's exit code. Both the
+# resume and fresh spawns share this so the env/name/model can never drift apart.
+#
 # </dev/null (CTL-605): `claude --bg` reads stdin; redirect it so a caller that
 # invokes us from inside a herestring/`while read` loop can't have its loop
 # stdin drained. Harmless for normal callers (fd 0 already a tty/pipe).
-env "${DISPATCH_ENV[@]}" \
-	"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-	--model "$MODEL" "$PROMPT" \
-	>"$BG_OUT" 2>"$BG_ERR" </dev/null
-RC=$?
+spawn_claude_bg() {
+	env "${DISPATCH_ENV[@]}" \
+		"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
+		--model "$MODEL" "$@" \
+		>"$BG_OUT" 2>"$BG_ERR" </dev/null
+}
+
+# CTL-658: resume-first-then-fresh launch. When --resume-session is set, attempt
+# `claude --bg --resume <uuid>` and classify its stderr:
+#   launched → use it (the dead session continues where it left off).
+#   alive    → the worker is still a live bg job; the resume was rejected. Do NOT
+#              spawn a duplicate — mark the signal stalled (resume-rejected-alive)
+#              and exit non-zero so the next daemon liveness tick re-evaluates.
+#   failed   → a hard resume error; fall back to a fresh $PROMPT start in this
+#              same invocation so the phase still gets a worker.
+# With no --resume-session this is exactly today's single fresh-start spawn.
+if [[ -n $RESUME_SESSION ]]; then
+	spawn_claude_bg --resume "$RESUME_SESSION"
+	RC=$?
+	OUTCOME="$(classify_resume_stderr "$(cat "$BG_ERR")")"
+	if [[ $RC -ne 0 || $OUTCOME != "launched" ]]; then
+		case "$OUTCOME" in
+		alive)
+			echo "phase-agent-dispatch: resume rejected — worker still running as bg ($RESUME_SESSION)" >&2
+			mark_launch_failed "resume-rejected-alive"
+			jq -n --arg status "stalled" --arg reason "resume_rejected_alive" \
+				--arg signal "$SIGNAL_FILE" \
+				'. + {status: $status, reason: $reason, signalFile: $signal}' \
+				<<<'{}'
+			exit 1
+			;;
+		*)
+			echo "phase-agent-dispatch: resume failed ($RESUME_SESSION); falling back to a fresh start: $(cat "$BG_ERR")" >&2
+			spawn_claude_bg "$PROMPT"
+			RC=$?
+			;;
+		esac
+	fi
+else
+	spawn_claude_bg "$PROMPT"
+	RC=$?
+fi
 
 if [[ $RC -ne 0 ]]; then
 	echo "phase-agent-dispatch: claude --bg exited $RC: $(cat "$BG_ERR")" >&2

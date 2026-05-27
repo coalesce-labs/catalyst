@@ -6,7 +6,7 @@
 // so no test ever spawns a real script.
 
 import { describe, test, expect } from "bun:test";
-import { dispatchTicket, defaultDispatch, teamOf } from "./dispatch.mjs";
+import { dispatchTicket, defaultDispatch, defaultRunPhaseAgent, teamOf } from "./dispatch.mjs";
 
 describe("teamOf", () => {
   test("extracts the team prefix from a ticket identifier", () => {
@@ -184,6 +184,75 @@ describe("defaultDispatch — worktreePath / expectedBranch wiring (CTL-615)", (
     const r = defaultDispatch({ orchDir: "/ec", ticket: "CTL-9", phase: "research" }, s);
     expect(r.code).toBe(0);
     expect(s.calls.some((c) => c[0] === "run")).toBe(true);
+  });
+});
+
+// CTL-658: resumeSession threads from the daemon revive seam down to the
+// phase-agent-dispatch spawn args, so the dispatched worker runs
+// `claude --bg --resume <uuid>` instead of a fresh phase-0 start.
+describe("defaultDispatch — resumeSession passthrough (CTL-658)", () => {
+  const baseSeams = () => {
+    const calls = [];
+    return {
+      calls,
+      resolveProject: () => ({ team: "CTL", repoRoot: "/repo" }),
+      createWorktree: (args) => ({ code: 0, worktreePath: `/wt/${args.ticket}`, stderr: "" }),
+      runPhaseAgent: (args) => {
+        calls.push(args);
+        return { code: 0, stdout: "ok", stderr: "" };
+      },
+    };
+  };
+
+  test("forwards resumeSession to runPhaseAgent when set", () => {
+    const s = baseSeams();
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", resumeSession: "9f8e-uuid" },
+      s,
+    );
+    expect(s.calls[0].resumeSession).toBe("9f8e-uuid");
+  });
+
+  test("forwards resumeSession: undefined on a cold dispatch (no resume)", () => {
+    const s = baseSeams();
+    defaultDispatch({ orchDir: "/ec", ticket: "CTL-1", phase: "implement" }, s);
+    expect(s.calls[0].resumeSession).toBeUndefined();
+  });
+});
+
+describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
+  // Inject a spawnSync spy so we assert the built arg array without a real spawn.
+  const spy = () => {
+    const calls = [];
+    const spawn = (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { status: 0, stdout: "ok", stderr: "" };
+    };
+    spawn.calls = calls;
+    return spawn;
+  };
+
+  test("appends --resume-session <uuid> when resumeSession is set", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1", resumeSession: "9f8e-uuid" },
+      { spawn },
+    );
+    const { args } = spawn.calls[0];
+    expect(args).toContain("--resume-session");
+    // The flag's value immediately follows the token.
+    expect(args[args.indexOf("--resume-session") + 1]).toBe("9f8e-uuid");
+  });
+
+  test("omits both tokens when resumeSession is null/undefined", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    const { args } = spawn.calls[0];
+    expect(args).not.toContain("--resume-session");
+    expect(args).toEqual(["--phase", "implement", "--ticket", "CTL-1", "--orch-dir", "/ec", "--orch-id", "CTL-1"]);
   });
 });
 

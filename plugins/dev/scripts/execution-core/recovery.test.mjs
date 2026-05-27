@@ -15,6 +15,7 @@ import {
   recoverStartup,
   reclaimDeadWorkIfPossible,
   defaultReviveDispatch,
+  resolvePhaseSessionId,
   defaultKillBgJob,
   defaultPidAlive,
   defaultAppendReviveEvent,
@@ -1010,6 +1011,44 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
     expect(s.opts.killBgJob.calls.length).toBe(0);
   });
+
+  // ── CTL-658: resume-on-revive. When a resume UUID resolves from the dead
+  //    worker's bg_job_id, the revive dispatches with `resumeSession` AND skips
+  //    the defensive kill (we are continuing the session, not retiring it).
+  test("CTL-658: resolved resume UUID is forwarded to reviveDispatch", () => {
+    const s = setupReviveScenario({ reviveCount: 0 });
+    s.opts.resolveSession = recorder("uuid-1");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+    expect(s.opts.reviveDispatch.calls[0][0].resumeSession).toBe("uuid-1");
+    // The resolver was asked about the dead worker's bg_job_id.
+    expect(s.opts.resolveSession.calls[0][0]).toBe("bg-9");
+  });
+
+  test("CTL-658: resume viable → defensive kill is SKIPPED", () => {
+    // Same quiet-state fixture that fires the kill in the test above, but with a
+    // resolvable session: the kill must not fire (its jsonl must stay intact).
+    const s = setupReviveScenario({
+      stateJsonMtime: 1_000,
+      nowMs: 1_000 + 6 * 60 * 1000, // 6min past — stale + past kill threshold
+    });
+    s.opts.resolveSession = () => "uuid-1";
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.killBgJob.calls.length).toBe(0);
+    expect(s.opts.reviveDispatch.calls[0][0].resumeSession).toBe("uuid-1");
+  });
+
+  test("CTL-658: unresumable (resolver null) → kill fires, no resumeSession (unchanged)", () => {
+    const s = setupReviveScenario({
+      stateJsonMtime: 1_000,
+      nowMs: 1_000 + 6 * 60 * 1000,
+    });
+    s.opts.resolveSession = () => null;
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.killBgJob.calls.length).toBe(1);
+    // resumeSession is null on the dispatch (the fresh-start path).
+    expect(s.opts.reviveDispatch.calls[0][0].resumeSession).toBeNull();
+  });
 });
 
 // --- CTL-610: alive-quiet keep-alive guard (branch (C0)) -------------------
@@ -1424,6 +1463,28 @@ describe("defaultReviveDispatch — signal-reset behaviour", () => {
     expect("expectedWorktreePath" in dispatch.calls[0][0]).toBe(false);
   });
 
+  // CTL-658: a resolved resume UUID is forwarded to dispatch so the spawned
+  // phase-agent-dispatch runs `claude --bg --resume <uuid>`.
+  test("resumeSession is forwarded to dispatch when set (CTL-658)", () => {
+    seed("CTL-658-A", "implement", { status: "running", bg_job_id: "bg-a" });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-658-A", phase: "implement", resumeSession: "9f8e-uuid" },
+      { dispatch },
+    );
+    expect(dispatch.calls[0][0].resumeSession).toBe("9f8e-uuid");
+  });
+
+  test("resumeSession absent → dispatch called without the key (CTL-658)", () => {
+    seed("CTL-658-B", "implement", { status: "running", bg_job_id: "bg-b" });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-658-B", phase: "implement" },
+      { dispatch },
+    );
+    expect("resumeSession" in dispatch.calls[0][0]).toBe(false);
+  });
+
   test("signal flip happens BEFORE dispatch (so dispatcher sees 'stalled')", () => {
     const signalPath = seed("CTL-9", "implement", { status: "running" });
     let seenStatus = null;
@@ -1796,5 +1857,53 @@ describe("readBootSince — CTL-655 boot-time window reader", () => {
     // Empty-string bootedAt is also rejected.
     writeFileSync(join(dir, "daemon-boot.json"), JSON.stringify({ bootedAt: "" }));
     expect(readBootSince(dir)).toBeUndefined();
+  });
+});
+
+// CTL-658 — JS port of orchestrate-revive's resolve_phase_session_id. Resolves a
+// `claude --resume`-compatible session UUID from a dead worker's bg_job_id by
+// reading <jobsDir>/<bg_job_id>/state.json → .linkScanPath → basename minus .jsonl.
+// Mirrors the bash unit tests at __tests__/orchestrate-revive.test.sh:578-617.
+describe("resolvePhaseSessionId", () => {
+  let jobsDir;
+  beforeEach(() => {
+    jobsDir = mkdtempSync(join(tmpdir(), "exec-core-jobs-"));
+  });
+  afterEach(() => {
+    rmSync(jobsDir, { recursive: true, force: true });
+  });
+
+  test("happy path — linkScanPath .jsonl returns the UUID basename", () => {
+    mkdirSync(join(jobsDir, "cafe1234"), { recursive: true });
+    writeFileSync(
+      join(jobsDir, "cafe1234", "state.json"),
+      JSON.stringify({ linkScanPath: "/p/9f8e-uuid.jsonl" }),
+    );
+    expect(resolvePhaseSessionId("cafe1234", { jobsDir })).toBe("9f8e-uuid");
+  });
+
+  test("missing state.json returns null", () => {
+    mkdirSync(join(jobsDir, "nostate"), { recursive: true });
+    expect(resolvePhaseSessionId("nostate", { jobsDir })).toBeNull();
+  });
+
+  test("malformed linkScanPath (not .jsonl) returns null", () => {
+    mkdirSync(join(jobsDir, "baddir"), { recursive: true });
+    writeFileSync(
+      join(jobsDir, "baddir", "state.json"),
+      JSON.stringify({ linkScanPath: "/p/some-dir" }),
+    );
+    expect(resolvePhaseSessionId("baddir", { jobsDir })).toBeNull();
+  });
+
+  test("empty / null bgJobId returns null without fs access", () => {
+    expect(resolvePhaseSessionId(null, { jobsDir })).toBeNull();
+    expect(resolvePhaseSessionId("", { jobsDir })).toBeNull();
+  });
+
+  test("state.json without linkScanPath returns null", () => {
+    mkdirSync(join(jobsDir, "nolink"), { recursive: true });
+    writeFileSync(join(jobsDir, "nolink", "state.json"), JSON.stringify({}));
+    expect(resolvePhaseSessionId("nolink", { jobsDir })).toBeNull();
   });
 });

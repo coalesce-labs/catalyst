@@ -19,7 +19,8 @@ import {
   existsSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { join } from "node:path";
+import { join, basename } from "node:path";
+import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -53,6 +54,31 @@ import {
 const EMIT_COMPLETE_BIN = fileURLToPath(
   new URL("../phase-agent-emit-complete", import.meta.url),
 );
+
+// resolvePhaseSessionId — JS port of orchestrate-revive's resolve_phase_session_id
+// (orchestrate-revive:160-177). Resolves a `claude --resume`-compatible session
+// UUID from a dead worker's bg_job_id by reading the job's state.json linkScanPath.
+// Returns null on any miss (no bgJobId, no state.json, no/!.jsonl linkScanPath).
+// MUST stay in sync with the bash resolver — they read the same on-disk contract
+// and honour the same CATALYST_REVIVE_JOBS_DIR override (NOT getJobsRoot's
+// CATALYST_HEALTHCHECK_JOBS_ROOT) so a test overriding one env var matches bash.
+export function resolvePhaseSessionId(
+  bgJobId,
+  { jobsDir = process.env.CATALYST_REVIVE_JOBS_DIR || join(homedir(), ".claude", "jobs") } = {},
+) {
+  if (!bgJobId) return null;
+  const stateFile = join(jobsDir, bgJobId, "state.json");
+  if (!existsSync(stateFile)) return null;
+  let linkPath;
+  try {
+    linkPath = JSON.parse(readFileSync(stateFile, "utf8"))?.linkScanPath;
+  } catch {
+    return null;
+  }
+  if (typeof linkPath !== "string" || !linkPath.endsWith(".jsonl")) return null;
+  const sid = basename(linkPath, ".jsonl");
+  return sid || null;
+}
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime
@@ -353,7 +379,7 @@ export function defaultAppendDispatchFailedEvent({
 // can be unit-tested (every test in recovery.test.mjs that overrides the
 // outer `reviveDispatch` would otherwise leave the signal-reset logic — the
 // load-bearing half — uncovered).
-export function defaultReviveDispatch({ orchDir, ticket, phase }, { dispatch = defaultDispatch } = {}) {
+export function defaultReviveDispatch({ orchDir, ticket, phase, resumeSession }, { dispatch = defaultDispatch } = {}) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   if (!existsSync(signalPath)) {
     log.warn(
@@ -387,6 +413,10 @@ export function defaultReviveDispatch({ orchDir, ticket, phase }, { dispatch = d
   }
   const dispatchArgs = { orchDir, ticket, phase };
   if (expectedWorktreePath) dispatchArgs.expectedWorktreePath = expectedWorktreePath;
+  // CTL-658: forward the resolved resume UUID so defaultDispatch → runPhaseAgent
+  // spawns `claude --bg --resume <uuid>`. Only present on the resume path; a
+  // cold/unresumable revive omits it and falls through to a fresh dispatch.
+  if (resumeSession) dispatchArgs.resumeSession = resumeSession;
   return dispatch(dispatchArgs);
 }
 
@@ -758,6 +788,13 @@ export function reclaimDeadWorkIfPossible(
     // matches the legacy 15-min STALE_BG_SECONDS.
     pidAlive = defaultPidAlive,
     hungCutoffMs = HUNG_CUTOFF_MS,
+    // CTL-658 — resume-session resolver. Maps the dead worker's bg_job_id to a
+    // `claude --resume`-compatible UUID (or null) so the revive can continue the
+    // dead session instead of re-walking from phase 0. Default reads the real
+    // ~/.claude/jobs/<bg>/state.json; tests inject a stub. A null result (no
+    // bg_job_id, no state.json, no .jsonl linkScanPath) preserves the pre-CTL-658
+    // fresh-dispatch behaviour exactly.
+    resolveSession = resolvePhaseSessionId,
     now = Date.now,
     staleMs = STALE_MS,
   } = {},
@@ -932,6 +969,21 @@ export function reclaimDeadWorkIfPossible(
     return "revive-suppressed";
   }
 
+  // CTL-658: resolve a `claude --resume`-compatible session id from the dead
+  // worker's bg_job_id BEFORE the defensive kill. When a UUID resolves we are
+  // CONTINUING this session, not retiring it — so we skip the kill + reap-intent
+  // (stopping a session we're about to resume is the ordering hazard the plan
+  // resolves) and thread the id into reviveDispatch so phase-agent-dispatch runs
+  // `claude --bg --resume <uuid>` instead of a fresh phase-0 start. A null result
+  // (no bg_job_id, no state.json, no .jsonl linkScanPath) is the unchanged path:
+  // defensive kill + fresh dispatch. Resolving here (after the budget/storm gates
+  // pass) means only an actually-reviving worker pays the one state.json read.
+  const resumeSession = prevBgJobId ? resolveSession(prevBgJobId) : null;
+  log.info(
+    { ticket, phase, prevBgJobId, resumeSession },
+    "ctl-658: revive resume id resolved",
+  );
+
   // Defensive stop: if state.json has been quiet long enough we're confident
   // the worker is abandoned, so we stop it to free RAM and release any worktree
   // lock. CTL-657: killBgJob now issues `claude stop <shortId>` (the pre-CTL-657
@@ -941,7 +993,11 @@ export function reclaimDeadWorkIfPossible(
   // visibility and stops the same session via its own `claude stop`. The inline
   // stop stays so a standalone reconcile (no reaper consuming the log) cannot
   // regress to leaking the worker.
+  //
+  // CTL-658: gated on !resumeSession — when we're resuming we must NOT stop the
+  // session (its linkScanPath jsonl must stay intact for `--resume`).
   if (
+    !resumeSession &&
     prevStateJsonMtime !== null &&
     now() - prevStateJsonMtime > KILL_RECENT_ACTIVITY_MS &&
     prevBgJobId
@@ -994,7 +1050,7 @@ export function reclaimDeadWorkIfPossible(
     });
     return "revive-suppressed";
   }
-  const dispatchRes = reviveDispatch({ orchDir, ticket, phase });
+  const dispatchRes = reviveDispatch({ orchDir, ticket, phase, resumeSession });
   if (dispatchRes.code === 0) {
     writeReviveMarker({ orchDir, ticket, attempt });
     log.info({ ticket, phase, attempt }, "ctl-587: revived");

@@ -32,6 +32,10 @@ CLAUDE_BIN="${CATALYST_REVIVE_CLAUDE_BIN:-claude}"
 # CTL-607: current-phase guard helper (latest_phase_in_dir + PHASES mirror).
 # shellcheck source=lib/phase-sequence.sh
 . "${SCRIPT_DIR}/lib/phase-sequence.sh"
+# CTL-658: shared resume-stderr classifier (classify_resume_stderr), shared with
+# phase-agent-dispatch's daemon revive path.
+# shellcheck source=lib/resume.sh
+. "${SCRIPT_DIR}/lib/resume.sh"
 
 ORCH_DIR=""
 ORCH_ID=""
@@ -227,29 +231,12 @@ detect_api_error_in_stream() {
   return 1
 }
 
-# CTL-604: classify a `claude --bg --resume` attempt's resume stderr so the
-# caller can tell three outcomes apart and not record a false successful revive:
-#   "alive"    the agent is still running as a bg job; the resume was rejected
-#              ("currently running as a background agent (bg)"). The worker is
-#              NOT dead — this must NOT bump reviveCount or record pid-dead.
-#   "failed"   any other non-empty stderr — a hard resume error; the caller
-#              records revive-spawn-failed rather than a successful revive.
-#   "launched" empty stderr — a clean resume (the normal path).
-# Single source of truth for the alive-vs-failed-vs-launched decision so the
-# detector and the caller agree.
-classify_resume_stderr() {
-  local stderr_text="$1"
-  if [ -z "$stderr_text" ]; then
-    echo "launched"
-    return 0
-  fi
-  if printf '%s' "$stderr_text" \
-       | grep -qiE "currently running as a background agent \(bg\)|already running as a background agent"; then
-    echo "alive"
-    return 0
-  fi
-  echo "failed"
-}
+# CTL-658: classify_resume_stderr lives in the shared lib/resume.sh (sourced at
+# the top of this script) so this legacy bash path and the daemon revive path
+# (phase-agent-dispatch --resume-session) share one alive/failed/launched
+# decision and cannot drift. Behavior is unchanged (CTL-604 contract) — see
+# lib/resume.sh. The --probe-helper dispatch and the resume-site call below both
+# still resolve it because the function is sourced into this script's scope.
 
 # Emit a fresh-start event via the state script (no-op when state script is
 # missing or when this is a dry run).

@@ -46,6 +46,15 @@ assert_contains() {
 	fi
 }
 
+assert_not_contains() {
+	local haystack="$1" needle="$2" label="$3"
+	if [[ $haystack != *"$needle"* ]]; then
+		pass "$label"
+	else
+		fail "$label — '$needle' unexpectedly found in '$haystack'"
+	fi
+}
+
 if [[ ! -x $DISPATCH ]]; then
 	echo "FATAL: $DISPATCH not found or not executable" >&2
 	exit 1
@@ -73,13 +82,27 @@ setup_claude_stub() {
 #!/usr/bin/env bash
 LOG="${CLAUDE_STUB_LOG:-/tmp/claude-stub.log}"
 JOB_ID="${CLAUDE_STUB_JOB_ID:-f124220a}"
+# CTL-658: detect a `--resume` invocation so a test can script the resume
+# outcome (stderr + exit) independently of the fresh-start fallback spawn that
+# may follow in the SAME dispatch.
+IS_RESUME=0
+for a in "$@"; do [ "$a" = "--resume" ] && IS_RESUME=1; done
 {
   echo "--ARGS--"
   printf '%s\n' "$@"
   echo "--ENV--"
   env | grep -E '^(CATALYST_(ORCHESTRATOR_(DIR|ID)|PHASE|TICKET)|OTEL_RESOURCE_ATTRIBUTES)=' | sort
   echo "--END--"
-} > "$LOG"
+} >> "$LOG"   # CTL-658: append (a resume-then-fresh dispatch invokes claude twice)
+# CTL-658: a --resume invocation honors the scripted resume outcome so a test
+# can drive launched (empty stderr) / alive (rejection marker) / failed (other
+# stderr) paths. A non-resume (fresh-start) invocation always succeeds below.
+if [ "$IS_RESUME" = "1" ]; then
+  [ -n "${CLAUDE_STUB_RESUME_STDERR:-}" ] && printf '%s\n' "$CLAUDE_STUB_RESUME_STDERR" >&2
+  if [ -n "${CLAUDE_STUB_RESUME_EXIT:-}" ] && [ "${CLAUDE_STUB_RESUME_EXIT}" != "0" ]; then
+    exit "${CLAUDE_STUB_RESUME_EXIT}"
+  fi
+fi
 # Mimic today's `claude --bg` multi-line stdout — the hex job ID lives on
 # line 1 after the bullet character; subsequent lines list helper commands.
 cat <<EOF
@@ -785,6 +808,93 @@ assert_eq "refused" "$(jq -r '.status' "${TEST_DIR}/rem.out" 2>/dev/null || echo
 	"remediate stdout JSON status = refused"
 [[ -f "${WORKER_DIR}/phase-remediate.json" ]] && SIG_REM_EXISTS="yes" || SIG_REM_EXISTS="no"
 assert_eq "no" "$SIG_REM_EXISTS" "no remediate signal written when refused"
+
+# ─── CTL-658: --resume-session (daemon resume-on-revive) ────────────────────
+# phase-agent-dispatch honors a resolved resume UUID by spawning
+# `claude --bg --resume <uuid>` instead of a fresh /catalyst-dev:phase-* prompt,
+# then classifies the resume stderr: launched / alive / failed-fallback.
+# triage is used as the carrier phase because it needs no prior artifact.
+
+echo ""
+echo "Test 22 (CTL-658): --resume-session plumbs --resume <uuid>, drops the fresh prompt"
+fresh_env t22_resume_flag
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	--resume-session abc-uuid >"${TEST_DIR}/t22.out" 2>/dev/null
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" "--resume" "resume invocation carries --resume flag"
+assert_contains "$LOG" "abc-uuid" "resume invocation carries the session uuid"
+assert_not_contains "$LOG" "/catalyst-dev:phase-" "resume invocation drops the fresh phase prompt"
+
+echo ""
+echo "Test 23 (CTL-658): clean resume (empty stderr) → signal running with new bg_job_id, exit 0"
+fresh_env t23_resume_launched
+export CLAUDE_STUB_JOB_ID="deadbeef"
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	--resume-session abc-uuid >"${TEST_DIR}/t23.out" 2>/dev/null
+RC23=$?
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "0" "$RC23" "clean resume exits 0"
+assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "clean resume leaves signal at running"
+assert_eq "deadbeef" "$(jq -r '.bg_job_id' "$SIGNAL")" "clean resume records the resumed bg_job_id"
+unset CLAUDE_STUB_JOB_ID
+
+echo ""
+echo "Test 24 (CTL-658): resume rejected as alive → signal stalled (resume-rejected-alive), no fresh spawn, exit non-zero"
+fresh_env t24_resume_alive
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+export CLAUDE_STUB_RESUME_STDERR="Error: session abc-uuid is currently running as a background agent (bg)"
+export CLAUDE_STUB_RESUME_EXIT=1
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	--resume-session abc-uuid >"${TEST_DIR}/t24.out" 2>/dev/null
+RC24=$?
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "1" "$RC24" "alive-rejected resume exits non-zero"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "alive-rejected resume flips signal to stalled"
+assert_eq "resume-rejected-alive" "$(jq -r '.attentionReason' "$SIGNAL")" \
+	"alive-rejected resume records attentionReason=resume-rejected-alive"
+assert_eq "resume_rejected_alive" "$(jq -r '.reason' "${TEST_DIR}/t24.out")" \
+	"alive-rejected resume stdout JSON reason=resume_rejected_alive"
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_not_contains "$LOG" "/catalyst-dev:phase-" "alive-rejected resume does NOT fall back to a fresh spawn"
+unset CLAUDE_STUB_RESUME_STDERR CLAUDE_STUB_RESUME_EXIT CATALYST_DIR
+
+echo ""
+echo "Test 25 (CTL-658): hard resume failure → fresh-start fallback in the same invocation"
+fresh_env t25_resume_fallback
+export CLAUDE_STUB_RESUME_STDERR="boom: unrecoverable resume error"
+export CLAUDE_STUB_RESUME_EXIT=1
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	--resume-session abc-uuid >"${TEST_DIR}/t25.out" 2>/dev/null
+RC25=$?
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "0" "$RC25" "fallback path exits 0 (the fresh start succeeded)"
+assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "fallback leaves signal at running"
+LOG=$(cat "$CLAUDE_STUB_LOG")
+ARGS_COUNT=$(grep -c -- '--ARGS--' "$CLAUDE_STUB_LOG")
+assert_eq "2" "$ARGS_COUNT" "claude was invoked twice (resume, then fresh fallback)"
+RESUME_COUNT=$(grep -c -- '--resume' "$CLAUDE_STUB_LOG")
+assert_eq "1" "$RESUME_COUNT" "only the first (resume) invocation carried --resume"
+assert_contains "$LOG" "/catalyst-dev:phase-triage CTL-100" "fresh fallback invocation carried the phase prompt"
+unset CLAUDE_STUB_RESUME_STDERR CLAUDE_STUB_RESUME_EXIT
+
+echo ""
+echo "Test 26 (CTL-658): no --resume-session → exactly today's single fresh-start spawn"
+fresh_env t26_no_resume
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/t26.out" 2>/dev/null
+LOG=$(cat "$CLAUDE_STUB_LOG")
+ARGS_COUNT=$(grep -c -- '--ARGS--' "$CLAUDE_STUB_LOG")
+assert_eq "1" "$ARGS_COUNT" "no-resume dispatch invokes claude exactly once"
+assert_not_contains "$LOG" "--resume" "no-resume dispatch carries no --resume flag"
+assert_contains "$LOG" "/catalyst-dev:phase-triage CTL-100" "no-resume dispatch carries the fresh phase prompt"
+
+echo ""
+echo "Test 27 (CTL-658): --dry-run --resume-session surfaces resumeSession in the JSON"
+fresh_env t27_dry_resume
+OUT_DRY=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	--resume-session abc-uuid --dry-run 2>/dev/null)
+assert_eq "abc-uuid" "$(jq -r '.resumeSession' <<<"$OUT_DRY")" "dry-run JSON echoes resumeSession"
 
 echo ""
 echo "─────────────────────────────────────────────"

@@ -45,23 +45,31 @@ function defaultResolveProject(ticket) {
 // (execution-core has no long-lived orchestrator); CATALYST_EXECUTION_CORE
 // tells phase-agent-dispatch to compose OTEL attrs for the one-worktree-per-
 // ticket path. Returns { code, stdout, stderr } — never throws.
-function defaultRunPhaseAgent({ orchDir, ticket, phase, worktreePath }) {
-  const res = spawnSync(
-    PHASE_AGENT_DISPATCH_BIN,
-    ["--phase", phase, "--ticket", ticket, "--orch-dir", orchDir, "--orch-id", ticket],
-    {
-      cwd: worktreePath,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        CATALYST_ORCHESTRATOR_DIR: orchDir,
-        CATALYST_ORCHESTRATOR_ID: ticket,
-        CATALYST_PHASE: phase,
-        CATALYST_TICKET: ticket,
-        CATALYST_EXECUTION_CORE: "1",
-      },
+//
+// CTL-658: when `resumeSession` is set (the daemon resolved a `claude --resume`-
+// compatible UUID from the dead worker's bg_job_id), append `--resume-session
+// <uuid>` so phase-agent-dispatch spawns `claude --bg --resume <uuid>` (continue
+// the dead session) instead of a fresh phase-0 `$PROMPT` start. Omitted entirely
+// when null/undefined → today's fresh-start behaviour. `spawn` is injectable so
+// the unit test can assert the built arg array without a real spawn.
+export function defaultRunPhaseAgent(
+  { orchDir, ticket, phase, worktreePath, resumeSession },
+  { spawn = spawnSync } = {},
+) {
+  const args = ["--phase", phase, "--ticket", ticket, "--orch-dir", orchDir, "--orch-id", ticket];
+  if (resumeSession) args.push("--resume-session", resumeSession);
+  const res = spawn(PHASE_AGENT_DISPATCH_BIN, args, {
+    cwd: worktreePath,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      CATALYST_ORCHESTRATOR_DIR: orchDir,
+      CATALYST_ORCHESTRATOR_ID: ticket,
+      CATALYST_PHASE: phase,
+      CATALYST_TICKET: ticket,
+      CATALYST_EXECUTION_CORE: "1",
     },
-  );
+  });
   if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
@@ -79,8 +87,11 @@ function defaultRunPhaseAgent({ orchDir, ticket, phase, worktreePath }) {
 // worktree even if the registry resolution chain is corrupt. The dispatch
 // result always carries `worktreePath` so callers (defaultReviveDispatch)
 // can record / cross-check on later cycles.
+// CTL-658: `resumeSession` (when the daemon resolved a resume UUID) is forwarded
+// verbatim to runPhaseAgent so the spawned phase-agent-dispatch carries
+// `--resume-session`. Absent on every cold dispatch — only the revive path sets it.
 export function defaultDispatch(
-  { orchDir, ticket, phase, expectedWorktreePath },
+  { orchDir, ticket, phase, expectedWorktreePath, resumeSession },
   {
     resolveProject = defaultResolveProject,
     createWorktree = defaultCreateWorktree,
@@ -114,7 +125,7 @@ export function defaultDispatch(
       worktreePath: wt.worktreePath,
     };
   }
-  const res = runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath });
+  const res = runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath, resumeSession });
   return { ...res, worktreePath: wt.worktreePath };
 }
 
