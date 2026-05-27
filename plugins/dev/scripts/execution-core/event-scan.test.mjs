@@ -12,7 +12,11 @@ import { describe, test, expect } from "bun:test";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { countReviveEvents, countDistinctRevivingTickets } from "./event-scan.mjs";
+import {
+  countReviveEvents,
+  countDistinctRevivingTickets,
+  countRemediateCycles,
+} from "./event-scan.mjs";
 
 // makeEvent — minimal envelope mirroring buildEventEnvelope in recovery.mjs.
 function makeEvent({ phase = "implement", action = "revive", ticket, orchId, ts }) {
@@ -162,5 +166,48 @@ describe("countDistinctRevivingTickets", () => {
         path,
       })
     ).toBe(1);
+  });
+});
+
+// ─── CTL-653: countRemediateCycles — the event-counted verify⇄remediate budget ───
+// Distinct from countReviveEvents (crash-revive budget) so a crash never spends
+// verdict-cycle budget. One completed cycle == one phase.remediate.complete.<T>.
+
+describe("CTL-653: countRemediateCycles", () => {
+  test("missing event log returns 0 (cold start)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "evtscan-"));
+    expect(countRemediateCycles({ ticket: "CTL-653", path: join(dir, "events.jsonl") })).toBe(0);
+  });
+
+  test("counts only phase.remediate.complete.<ticket> envelopes", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "remediate", action: "complete", ticket: "CTL-653", ts: "2026-05-27T00:00:00Z" }), // match
+      makeEvent({ phase: "remediate", action: "complete", ticket: "CTL-653", ts: "2026-05-27T00:01:00Z" }), // match
+      makeEvent({ phase: "remediate", action: "failed", ticket: "CTL-653", ts: "2026-05-27T00:02:00Z" }), // diff action
+      makeEvent({ phase: "implement", action: "revive", ticket: "CTL-653", ts: "2026-05-27T00:03:00Z" }), // diff phase
+      makeEvent({ phase: "remediate", action: "complete", ticket: "CTL-999", ts: "2026-05-27T00:04:00Z" }), // diff ticket
+      "not json", // skipped
+    ]);
+    expect(countRemediateCycles({ ticket: "CTL-653", path })).toBe(2);
+  });
+
+  test("respects orchId filter (mirrors countReviveEvents)", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "remediate", action: "complete", ticket: "CTL-653", orchId: "orch-A", ts: "2026-05-27T00:00:00Z" }),
+      makeEvent({ phase: "remediate", action: "complete", ticket: "CTL-653", orchId: "orch-B", ts: "2026-05-27T00:01:00Z" }),
+    ]);
+    expect(countRemediateCycles({ ticket: "CTL-653", orchId: "orch-A", path })).toBe(1);
+  });
+
+  test("respects since filter (mirrors countReviveEvents)", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "remediate", action: "complete", ticket: "CTL-653", ts: "2026-05-27T00:00:00Z" }),
+      makeEvent({ phase: "remediate", action: "complete", ticket: "CTL-653", ts: "2026-05-27T05:00:00Z" }),
+    ]);
+    expect(countRemediateCycles({ ticket: "CTL-653", since: "2026-05-27T01:00:00Z", path })).toBe(1);
+  });
+
+  test("throws without ticket", () => {
+    expect(() => countRemediateCycles({})).toThrow();
   });
 });

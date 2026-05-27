@@ -8,6 +8,7 @@ import {
   defaultRunGit,
   resolveWorktree,
   defaultReadFile,
+  readVerifyVerdict,
 } from "./work-done-probes.mjs";
 
 // makeRunGit — a deterministic `git` fake keyed on the trailing positional args.
@@ -104,6 +105,44 @@ describe("WORK_DONE_PROBES — registry shape", () => {
       expect(hasProbe(phase)).toBe(false);
     }
   });
+  test("CTL-653: remediate is registered (no false-dead no-probe escalation)", () => {
+    expect(hasProbe("remediate")).toBe(true);
+  });
+});
+
+// CTL-653: remediateProbe — remediate is fix-capable like implement, so "done"
+// means a commit landed on the ticket branch + a clean tree. The point of
+// registering ANY probe (research §9) is that a false-dead during remediate
+// resolves via reclaim/revive rather than escalating no-probe-for-phase →
+// needs-human, which would defeat CTL-653's autonomy goal.
+describe("WORK_DONE_PROBES.remediate", () => {
+  test("true when worktree exists + commits-ahead > 0 + clean tree", () => {
+    const wt = "/wt/CTL-1";
+    const runGit = makeRunGit({
+      "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-1", wt), stderr: "" },
+      [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: "3\n", stderr: "" },
+      [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+    });
+    expect(WORK_DONE_PROBES.remediate({ ticket: "CTL-1", repoRoot: "/repo" }, { runGit })).toBe(true);
+  });
+  test("false when no commits ahead / dirty tree", () => {
+    const wt = "/wt/CTL-1";
+    const noCommits = makeRunGit({
+      "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-1", wt), stderr: "" },
+      [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: "0\n", stderr: "" },
+      [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+    });
+    expect(WORK_DONE_PROBES.remediate({ ticket: "CTL-1", repoRoot: "/repo" }, { runGit: noCommits })).toBe(
+      false
+    );
+  });
+  test("false on missing input (no git spawn)", () => {
+    const boom = () => {
+      throw new Error("runGit must not be called");
+    };
+    expect(WORK_DONE_PROBES.remediate({ ticket: null, repoRoot: "/repo" }, { runGit: boom })).toBe(false);
+    expect(WORK_DONE_PROBES.remediate({ ticket: "CTL-1", repoRoot: null }, { runGit: boom })).toBe(false);
+  });
 });
 
 // makeReadFile — deterministic fs fake keyed on absolute path. Returns the
@@ -169,6 +208,47 @@ describe("WORK_DONE_PROBES.verify", () => {
   });
   test("false on missing file / invalid JSON", () => {
     expect(WORK_DONE_PROBES.verify({ ticket: "CTL-1", orchDir: ORCH }, { readFile: makeReadFile({}) })).toBe(false);
+  });
+});
+
+// CTL-653: readVerifyVerdict — regression_risk + high-finding → "pass"|"fail"|null.
+// Thresholds come from phase-verify SKILL.md:196-208 (risk ≥ 5 OR any high finding).
+// null (missing/malformed) is deliberately distinct from "pass" so the router can
+// pick the conservative non-regressing default (route to review) without stalling.
+describe("CTL-653: readVerifyVerdict", () => {
+  const verdict = (json) =>
+    readVerifyVerdict(
+      { ticket: "CTL-653", orchDir: ORCH },
+      { readFile: makeReadFile({ [wpath("CTL-653", "verify.json")]: JSON.stringify(json) }) }
+    );
+
+  test("regression_risk >= 5 → fail", () => {
+    expect(verdict({ regression_risk: 5, findings: [] })).toBe("fail");
+    expect(verdict({ regression_risk: 9, findings: [] })).toBe("fail");
+  });
+  test("any severity:high finding → fail (even if risk < 5)", () => {
+    expect(verdict({ regression_risk: 2, findings: [{ severity: "low" }, { severity: "high" }] })).toBe("fail");
+  });
+  test("risk < 5 and no high finding → pass", () => {
+    expect(verdict({ regression_risk: 4, findings: [{ severity: "low" }] })).toBe("pass");
+    expect(verdict({ regression_risk: 0, findings: [] })).toBe("pass");
+  });
+  test("missing/unreadable verify.json → null (router treats null as pass: no regression)", () => {
+    expect(
+      readVerifyVerdict({ ticket: "CTL-653", orchDir: ORCH }, { readFile: makeReadFile({}) })
+    ).toBeNull();
+  });
+  test("malformed verify.json (no numeric regression_risk) → null", () => {
+    expect(verdict({ findings: [] })).toBeNull();
+    expect(verdict({ regression_risk: "high", findings: [] })).toBeNull();
+  });
+  test("no readFile call on missing input → null", () => {
+    const boom = () => {
+      throw new Error("readFile must not be called");
+    };
+    expect(readVerifyVerdict({ ticket: null, orchDir: ORCH }, { readFile: boom })).toBeNull();
+    expect(readVerifyVerdict({ ticket: "CTL-653", orchDir: null }, { readFile: boom })).toBeNull();
+    expect(readVerifyVerdict(undefined, { readFile: boom })).toBeNull();
   });
 });
 

@@ -24,6 +24,8 @@ import {
   computeReadyTickets,
   selectDispatchable,
   deriveAdvancement,
+  maybeResetForRemediateCycle,
+  maybeEscalateRemediateExhausted,
   listStartedTickets,
   schedulerTick,
   readAllEligibleTickets,
@@ -38,6 +40,7 @@ import {
   __resetForTests,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
+import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 
 let orchDir;
 let catalystDir;
@@ -421,6 +424,115 @@ describe("deriveAdvancement", () => {
   });
   test("no signals → null", () => {
     expect(deriveAdvancement({})).toBeNull();
+  });
+});
+
+// ─── CTL-653: verdict + cycle routing in deriveAdvancement ───
+describe("CTL-653: deriveAdvancement verdict + cycle routing", () => {
+  const base = { triage: "done", research: "done", plan: "done", implement: "done" };
+
+  test("no opts: verify done → review (legacy default treats absent verdict as pass)", () => {
+    expect(deriveAdvancement({ ...base, verify: "done" })).toBe("review");
+  });
+  test("verdict pass → review", () => {
+    expect(deriveAdvancement({ ...base, verify: "done" }, { verifyVerdict: "pass" })).toBe("review");
+  });
+  test("verdict null → review (conservative: missing verify.json is not a regression)", () => {
+    expect(deriveAdvancement({ ...base, verify: "done" }, { verifyVerdict: null })).toBe("review");
+  });
+  test("verdict fail + cycle < cap + remediate not dispatched → remediate", () => {
+    expect(
+      deriveAdvancement({ ...base, verify: "done" }, { verifyVerdict: "fail", remediateCycleCount: 0 })
+    ).toBe("remediate");
+  });
+  test("verdict fail + remediate already dispatched this cycle → null (no double-dispatch)", () => {
+    expect(
+      deriveAdvancement(
+        { ...base, verify: "done", remediate: "running" },
+        { verifyVerdict: "fail", remediateCycleCount: 0 }
+      )
+    ).toBeNull();
+  });
+  test("verdict fail + cycle >= cap → null (escalation handled by the sweep, not a dispatch)", () => {
+    expect(
+      deriveAdvancement(
+        { ...base, verify: "done" },
+        { verifyVerdict: "fail", remediateCycleCount: REMEDIATE_CYCLE_CAP }
+      )
+    ).toBeNull();
+  });
+  test("remediate signal is invisible to the latest-phase scan (not in PHASES)", () => {
+    // a remediate `done` signal must not make remediate the 'latest' phase.
+    expect(deriveAdvancement({ ...base, verify: "done", remediate: "done" }, { verifyVerdict: "pass" })).toBe(
+      "review"
+    );
+  });
+  test("post-reset: implement done is latest → verify", () => {
+    expect(deriveAdvancement(base)).toBe("verify");
+  });
+});
+
+// ─── CTL-653: maybeResetForRemediateCycle — re-entry deletes the cycle signals ───
+describe("CTL-653: maybeResetForRemediateCycle", () => {
+  test("remediate done → deletes the 3 cycle files, keeps the rest, returns true", () => {
+    writeSignal("CTL-653", "implement", "done");
+    writeSignal("CTL-653", "verify", "done");
+    writeSignal("CTL-653", "remediate", "done");
+    const wdir = join(orchDir, "workers", "CTL-653");
+    writeFileSync(join(wdir, "verify.json"), JSON.stringify({ regression_risk: 7, findings: [] }));
+    writeFileSync(join(wdir, "triage.json"), JSON.stringify({ classification: "feature" }));
+
+    expect(maybeResetForRemediateCycle(orchDir, "CTL-653")).toBe(true);
+    expect(existsSync(join(wdir, "phase-verify.json"))).toBe(false);
+    expect(existsSync(join(wdir, "phase-remediate.json"))).toBe(false);
+    expect(existsSync(join(wdir, "verify.json"))).toBe(false);
+    // never deletes upstream signals/artifacts:
+    expect(existsSync(join(wdir, "phase-implement.json"))).toBe(true);
+    expect(existsSync(join(wdir, "triage.json"))).toBe(true);
+  });
+  test("remediate not done → no-op, returns false (cycle signals untouched)", () => {
+    writeSignal("CTL-653", "verify", "done");
+    writeSignal("CTL-653", "remediate", "running");
+    expect(maybeResetForRemediateCycle(orchDir, "CTL-653")).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-653", "phase-verify.json"))).toBe(true);
+  });
+  test("no remediate signal at all → false", () => {
+    writeSignal("CTL-653", "verify", "done");
+    expect(maybeResetForRemediateCycle(orchDir, "CTL-653")).toBe(false);
+  });
+});
+
+// ─── CTL-653: maybeEscalateRemediateExhausted — cap → stalled ───
+describe("CTL-653: maybeEscalateRemediateExhausted", () => {
+  test("verify done + fail + cycle >= cap → writes phase-verify.json status:stalled, returns true", () => {
+    writeSignal("CTL-653", "verify", "done");
+    expect(
+      maybeEscalateRemediateExhausted(orchDir, "CTL-653", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP)
+    ).toBe(true);
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CTL-653", "phase-verify.json"), "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.stalledReason).toBe("remediate-cycle-cap-exhausted");
+  });
+  test("idempotent: file already stalled → returns true, leaves it stalled", () => {
+    const wdir = join(orchDir, "workers", "CTL-653");
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(
+      join(wdir, "phase-verify.json"),
+      JSON.stringify({ ticket: "CTL-653", phase: "verify", status: "stalled" })
+    );
+    expect(
+      maybeEscalateRemediateExhausted(orchDir, "CTL-653", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP)
+    ).toBe(true);
+    expect(JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8")).status).toBe("stalled");
+  });
+  test("cycle < cap → no-op false", () => {
+    expect(maybeEscalateRemediateExhausted(orchDir, "CTL-653", { verify: "done" }, "fail", 0)).toBe(false);
+  });
+  test("verdict pass → no-op false (never stalls a passing verify)", () => {
+    expect(maybeEscalateRemediateExhausted(orchDir, "CTL-653", { verify: "done" }, "pass", 99)).toBe(false);
+  });
+  test("verify not done → no-op false", () => {
+    expect(maybeEscalateRemediateExhausted(orchDir, "CTL-653", { verify: "running" }, "fail", 99)).toBe(false);
   });
 });
 
@@ -1753,5 +1865,112 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     ).not.toThrow();
     // No marker on a thrown apply → retried next tick.
     expect(existsSync(join(orchDir, "workers", "CTL-23", ".terminal-done.applied"))).toBe(false);
+  });
+});
+
+// ─── CTL-653: end-to-end verify⇄remediate cycle through schedulerTick ───
+// Drives the full router → reset → re-verify loop. The dispatch fake plays the
+// worker: it writes each phase's `done` signal, writes verify.json with a
+// verdict that fails for the first `failCycles` verify runs (then passes), and
+// on a remediate dispatch appends a phase.remediate.complete event so
+// countRemediateCycles advances. reclaimDeadWork + writeStatus are stubbed so
+// the test isolates the advancement sweep.
+describe("CTL-653: schedulerTick verify⇄remediate cycle (end-to-end)", () => {
+  const TICKET = "CTL-653";
+  // A no-op Linear writer: every method returns undefined, which labelOnce /
+  // terminalDoneOnce treat as success (so once-markers still get written).
+  const noopWriteStatus = new Proxy({}, { get: () => () => undefined });
+
+  // cyclingDispatch — the worker stand-in. failCycles = how many verify runs
+  // produce a verdict-fail (risk 7) before one passes (risk 1).
+  function cyclingDispatch(failCycles) {
+    const calls = [];
+    let verifyRuns = 0;
+    const fn = ({ orchDir: od, ticket, phase }) => {
+      calls.push(phase);
+      const wdir = join(od, "workers", ticket);
+      mkdirSync(wdir, { recursive: true });
+      if (phase === "verify") {
+        verifyRuns += 1;
+        const risk = verifyRuns <= failCycles ? 7 : 1;
+        writeFileSync(
+          join(wdir, "verify.json"),
+          JSON.stringify({
+            regression_risk: risk,
+            findings: risk >= 5 ? [{ severity: "high", kind: "test", message: "x" }] : [],
+            tests_attempted: 1,
+            gates: {},
+            generatedAt: "2026-05-27T00:00:00Z",
+          })
+        );
+        writeFileSync(join(wdir, "phase-verify.json"), JSON.stringify({ ticket, phase, status: "done" }));
+      } else if (phase === "remediate") {
+        writeFileSync(
+          join(wdir, "phase-remediate.json"),
+          JSON.stringify({ ticket, phase, status: "done" })
+        );
+        // one completed cycle == one phase.remediate.complete.<ticket> event
+        appendToEventLog(
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            attributes: { "event.name": `phase.remediate.complete.${ticket}` },
+          }) + "\n"
+        );
+      } else {
+        writeFileSync(join(wdir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, status: "done" }));
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    fn.calls = calls;
+    return fn;
+  }
+
+  const runTicks = (dispatch, n) => {
+    for (let i = 0; i < n; i += 1) {
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        writeStatus: noopWriteStatus,
+        reclaimDeadWork: () => "noop",
+      });
+    }
+  };
+
+  test("fail once → remediate → re-verify pass → review", () => {
+    writeSignal(TICKET, "implement", "done"); // seed: implement landed
+    const dispatch = cyclingDispatch(1); // verify run #1 fails, #2 passes
+    runTicks(dispatch, 6);
+
+    // The self-heal path leads: verify(fail) → remediate → verify(pass) → review.
+    // (The fake auto-completes review/pr/… too, so assert the leading sequence
+    // and the exact cycle count rather than the full tail.)
+    expect(dispatch.calls.slice(0, 4)).toEqual(["verify", "remediate", "verify", "review"]);
+    expect(dispatch.calls.filter((p) => p === "remediate").length).toBe(1); // exactly one cycle
+    expect(dispatch.calls.filter((p) => p === "verify").length).toBe(2); // initial + one re-verify
+    // Landed on review against a now-passing branch — no human needed, no stall.
+    expect(readPhaseSignals(orchDir, TICKET).review).toBe("done");
+    expect(
+      JSON.parse(readFileSync(join(orchDir, "workers", TICKET, "phase-verify.json"), "utf8")).status
+    ).toBe("done");
+  });
+
+  test("verify never passes → 3 remediations, 3rd re-verified, then stall → needs-human", () => {
+    writeSignal(TICKET, "implement", "done");
+    const dispatch = cyclingDispatch(99); // verify always fails
+    runTicks(dispatch, 12);
+
+    const remediates = dispatch.calls.filter((p) => p === "remediate").length;
+    const verifies = dispatch.calls.filter((p) => p === "verify").length;
+    expect(remediates).toBe(REMEDIATE_CYCLE_CAP); // exactly 3 remediation attempts
+    expect(verifies).toBe(REMEDIATE_CYCLE_CAP + 1); // the 3rd remediation IS re-verified
+    // Never routed to review on a failing verdict.
+    expect(dispatch.calls).not.toContain("review");
+    // Cap exhausted → verify signal stalled → terminal sweep applies needs-human.
+    const verifySig = JSON.parse(
+      readFileSync(join(orchDir, "workers", TICKET, "phase-verify.json"), "utf8")
+    );
+    expect(verifySig.status).toBe("stalled");
+    expect(verifySig.stalledReason).toBe("remediate-cycle-cap-exhausted");
+    expect(existsSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"))).toBe(true);
   });
 });

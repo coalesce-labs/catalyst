@@ -133,6 +133,27 @@ and mirrored in the orchestrate skill's pipeline reference table.
 | 8 | `monitor-merge` | `catalyst-events wait-for` loop → `gh pr merge --squash --delete-branch` | `done` | `phase-monitor-merge.json` | Opus | 50 |
 | 9 | `monitor-deploy` | `/canary` (gstack) | — | `phase-monitor-deploy.json` | Haiku | 30 |
 
+**Ancillary phase — `remediate` (CTL-653).** Not a member of the linear
+sequence: it is a *router-orchestrated conditional detour* the scheduler takes
+when `verify` produces a verdict-fail (`verify.json.regression_risk ≥ 5` OR any
+`severity:"high"` finding). It reads `verify.json.findings[]` as its brief, fixes
+the code, commits, emits `phase.remediate.complete`, and the router cycles back
+to a fresh `verify`. The loop repeats up to **3** times (a counter distinct from
+the revive budget, event-counted via `phase.remediate.complete.<ticket>`); only a
+verdict-fail *after* the budget is spent escalates to `stalled` → `needs-human`.
+
+| Phase | Sub-skill / agent | Linear state | Prior artifact | Default model | Turn cap |
+|---|---|---|---|---|---|
+| `remediate` | (none — fixes findings inline via Edit/Write) | `remediating` (→ Remediate) | `verify.json` | Opus | 40 |
+
+The conditional routing lives entirely in `deriveAdvancement`
+(`execution-core/scheduler.mjs`); the pure FSM (`lib/phase-fsm.mjs`) keeps
+`verify → review` as its single happy-path edge, so `remediate` is added only as
+a *known ancillary phase* (`isKnownPhase`, `ANCILLARY_PHASES`,
+`REMEDIATE_CYCLE_CAP = 3`). Re-entry past the `next.phase in sig` guard is done by
+deleting the verify+remediate cycle signals (`maybeResetForRemediateCycle`); the
+cap escalation stalls the verify signal (`maybeEscalateRemediateExhausted`).
+
 Each phase writes its signal file at
 `~/catalyst/runs/<orchId>/workers/<TICKET>/phase-<name>.json`. Per-phase turn-cap
 defaults live in `plugins/dev/scripts/phase-agent-dispatch` (functions
@@ -150,7 +171,10 @@ stateDiagram-v2
   research --> plan: phase.research.complete
   plan --> implement: phase.plan.complete
   implement --> verify: phase.implement.complete
-  verify --> review: phase.verify.complete
+  verify --> review: verdict-pass (risk<5, no high finding)
+  verify --> remediate: verdict-fail & cycle<3 (CTL-653)
+  remediate --> verify: re-verify (reset signals, cycle++)
+  verify --> stalled: verdict-fail & cycle≥3 → needs-human
   review --> pr: phase.review.complete
   pr --> monitor_merge: phase.pr.complete
   monitor_merge --> monitor_deploy: phase.monitor-merge.complete
@@ -168,6 +192,11 @@ stateDiagram-v2
 
 Revives are once-per-phase; on the second `phase.<name>.failed` for the same phase
 the orchestrator marks the worker `stalled`, posts `attention`, and stops advancing.
+The `verify ⇄ remediate` cycle (CTL-653) is the one exception to the
+"escalate on second failure" rule: a verify *verdict*-fail (a `complete` event
+with a high `regression_risk`, distinct from a verify *crash* `failed` event)
+self-heals through `remediate` up to 3 times before stalling — so a fixable
+verify failure no longer needs a human on the first try.
 
 ## Phase 4 monitor — broker interests + event flow
 

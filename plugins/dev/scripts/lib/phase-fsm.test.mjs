@@ -5,7 +5,12 @@ import { describe, test, expect } from "bun:test";
 
 import {
   PHASES,
+  NEXT_PHASE,
   REVIVE_BUDGET,
+  REMEDIATE_PHASE,
+  REMEDIATE_CYCLE_CAP,
+  ANCILLARY_PHASES,
+  isKnownPhase,
   PhaseFsmError,
   PHASE_LINEAR_KEY,
   TERMINAL_LINEAR_KEY,
@@ -301,5 +306,47 @@ describe("PHASE_LINEAR_KEY — the 9→5 collapse (CTL-558)", () => {
   });
   test("linearKeyForPhase throws PhaseFsmError on an unknown phase", () => {
     expect(() => linearKeyForPhase("bogus")).toThrow(PhaseFsmError);
+  });
+});
+
+// ─── CTL-653: remediate — a router-orchestrated conditional detour, NOT a linear edge ───
+
+describe("CTL-653: remediate ancillary phase", () => {
+  test("REMEDIATE_CYCLE_CAP is 3 and distinct from REVIVE_BUDGET (1)", () => {
+    expect(REMEDIATE_CYCLE_CAP).toBe(3);
+    expect(REMEDIATE_CYCLE_CAP).not.toBe(REVIVE_BUDGET);
+  });
+  test("remediate is NOT a member of the linear PHASES chain", () => {
+    expect(PHASES).not.toContain("remediate"); // happy-path edge loop stays 9 phases
+    expect(NEXT_PHASE).not.toHaveProperty("remediate"); // no linear successor edge
+    expect(NEXT_PHASE.verify).toBe("review"); // happy path unchanged
+  });
+  test("remediate IS a known ancillary phase", () => {
+    expect(REMEDIATE_PHASE).toBe("remediate");
+    expect(ANCILLARY_PHASES).toContain("remediate");
+    expect(isKnownPhase("remediate")).toBe(true);
+    expect(isKnownPhase("bogus")).toBe(false);
+  });
+  test("isKnownPhase accepts every linear phase too", () => {
+    for (const p of PHASES) expect(isKnownPhase(p)).toBe(true);
+  });
+  test("phaseIndex(remediate) returns verify's index (it sits at the verify position)", () => {
+    expect(phaseIndex("remediate")).toBe(phaseIndex("verify"));
+  });
+  test("linearKeyForPhase(remediate) maps to the 'remediating' stateMap key", () => {
+    expect(linearKeyForPhase("remediate")).toBe("remediating");
+    expect(PHASE_LINEAR_KEY.remediate).toBe("remediating");
+  });
+  test("transition() refuses a remediate state — routing is router-owned, not a linear edge", () => {
+    expect(() =>
+      transition({ phase: "remediate", reviveCount: 0, parkedFrom: null }, { type: "complete" })
+    ).toThrow(PhaseFsmError);
+  });
+  test("a needs-input parked FROM remediate is rejected (remediate is not a pipeline park source)", () => {
+    // parkedFrom must be a *pipeline* phase; remediate is ancillary, so resuming
+    // into it would re-enter a non-linear edge — keep the park contract pipeline-only.
+    expect(() =>
+      transition({ phase: "needs-input", reviveCount: 0, parkedFrom: "remediate" }, { type: "resume" })
+    ).toThrow(PhaseFsmError);
   });
 });

@@ -58,6 +58,28 @@ export function countReviveEvents({ ticket, orchId, since, path = getEventLogPat
   return n;
 }
 
+// countRemediateCycles — number of phase.remediate.complete.<ticket> envelopes
+// (CTL-653). The event-counted verify⇄remediate budget, mirroring
+// countReviveEvents but deliberately DISTINCT from it: a crash-revive
+// (phase.implement.revive.<T>) never consumes verdict-cycle budget, and the
+// cycle survives the per-cycle signal reset (signals are deleted each cycle;
+// events are durable). One completed cycle == one remediate-complete event.
+export function countRemediateCycles({ ticket, orchId, since, path = getEventLogPath() } = {}) {
+  if (!ticket) throw new Error("countRemediateCycles: ticket required");
+  const target = `phase.remediate.complete.${ticket}`;
+  let n = 0;
+  for (const line of readLinesSync(path)) {
+    const ev = safeParse(line);
+    if (!ev) continue;
+    const name = ev?.attributes?.["event.name"];
+    if (name !== target) continue;
+    if (orchId && ev?.attributes?.["catalyst.orchestration"] !== orchId) continue;
+    if (since && ev?.ts && ev.ts < since) continue;
+    n++;
+  }
+  return n;
+}
+
 // countDistinctRevivingTickets — unique tickets that have any revive event
 // inside `windowMs` of `now()`. Used by recovery.mjs to suppress revives when
 // the storm-breaker is open (default >3 distinct tickets in the last 10min).

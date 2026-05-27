@@ -106,6 +106,7 @@ linear_key_for_phase() {
     implement)                       echo "inProgress" ;;
     verify)                          echo "verifying" ;;
     review)                          echo "reviewing" ;;
+    remediate)                       echo "remediating" ;;  # CTL-653: ancillary phase, no phase_next edge
     pr|monitor-merge|monitor-deploy) echo "inReview" ;;
     *)                               echo "" ;;  # triage / unknown — no write
   esac

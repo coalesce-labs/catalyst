@@ -113,6 +113,24 @@ function verifyProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile } = 
   );
 }
 
+// CTL-653: readVerifyVerdict — the verdict the advancement router branches on
+// after a verify `done`. Reuses verifyProbe's verify.json read shape. Returns:
+//   "fail" — regression_risk ≥ 5 OR any severity:"high" finding (phase-verify
+//            SKILL.md:196-208 thresholds) → router detours verify → remediate.
+//   "pass" — readable verdict below threshold with no high finding → verify → review.
+//   null   — missing/malformed/non-numeric-risk artifact. Deliberately distinct
+//            from "pass" so the router can apply the conservative non-regressing
+//            default (route to review) rather than stalling on an absent verdict.
+// Pure given the injected readFile seam; never throws (readJson swallows misses).
+export function readVerifyVerdict({ ticket, orchDir } = {}, { readFile = defaultReadFile } = {}) {
+  if (!ticket || !orchDir) return null;
+  const { ok, value } = readJson(workerArtifact(orchDir, ticket, "verify.json"), readFile);
+  if (!ok || !value || typeof value.regression_risk !== "number") return null;
+  const highFinding =
+    Array.isArray(value.findings) && value.findings.some((f) => f?.severity === "high");
+  return value.regression_risk >= 5 || highFinding ? "fail" : "pass";
+}
+
 function reviewProbe({ ticket, orchDir } = {}, { readFile = defaultReadFile } = {}) {
   if (!ticket || !orchDir) return false;
   const { ok, value } = readJson(workerArtifact(orchDir, ticket, "review.json"), readFile);
@@ -281,10 +299,18 @@ const planProbe = artifactProbe("thoughts/shared/plans", {
   allOf: ["## Phase ", "Success Criteria"],
 });
 
+// CTL-653: remediateProbe — remediate is fix-capable (like implement), so its
+// work-done signal is the same: a commit landed on the ticket branch + a clean
+// tree. It reuses implementProbe's commit-state check verbatim. Registering ANY
+// probe is the real point (research §9): without it, a false-dead during
+// remediate hits CTL-587's branch-(A) "no-probe-for-phase" escalation →
+// needs-human, defeating the very autonomy CTL-653 adds.
+const remediateProbe = implementProbe;
+
 // WORK_DONE_PROBES — phase → probe. Adding a probe is the entire opt-in for a
 // phase to participate in the CTL-574 reclaim sweep. All nine pipeline phases
-// now have an entry; only a genuinely-unknown phase falls through to CTL-587's
-// branch-(A) escalation.
+// plus the ancillary remediate phase (CTL-653) have an entry; only a
+// genuinely-unknown phase falls through to CTL-587's branch-(A) escalation.
 export const WORK_DONE_PROBES = {
   implement: implementProbe,
   research: researchProbe,
@@ -295,6 +321,7 @@ export const WORK_DONE_PROBES = {
   pr: prProbe,
   "monitor-merge": monitorMergeProbe,
   "monitor-deploy": monitorDeployProbe,
+  remediate: remediateProbe,
 };
 
 // hasProbe — true when the given phase has a registered probe. Used by the

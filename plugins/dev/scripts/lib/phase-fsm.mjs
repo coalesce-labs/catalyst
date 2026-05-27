@@ -28,6 +28,27 @@ export const EVENT_TYPES = new Set(["complete", "failed", "turn-cap-exhausted", 
 // ─── Revive budget (CTL-531: revive once per phase; 2nd failure escalates) ───
 export const REVIVE_BUDGET = 1;
 
+// ─── CTL-653: remediate — a router-orchestrated conditional detour, NOT a linear edge ───
+// `remediate` is a fix-capable phase the scheduler's router (deriveAdvancement)
+// detours into when `verify` produces a verdict-fail, then cycles back to a
+// fresh `verify`. It is deliberately NOT a member of PHASES / NEXT_PHASE: the
+// pure FSM stays a single-successor table (the happy-path edge loop stays 9
+// phases) and the conditional cycle lives entirely in the router. It IS a
+// *known ancillary phase* so the validation/order/Linear-key helpers accept it
+// (else applyPhaseStatus({phase:"remediate"}) and recovery's supersede guard
+// would throw on an "unknown phase").
+export const REMEDIATE_PHASE = "remediate";
+export const ANCILLARY_PHASES = [REMEDIATE_PHASE];
+// Max remediation attempts before escalating to needs-human. Distinct from
+// REVIVE_BUDGET (crash-revive = 1) so a crash never consumes verdict-cycle budget.
+export const REMEDIATE_CYCLE_CAP = 3;
+
+// isKnownPhase — true for any linear pipeline phase OR a known ancillary phase
+// (remediate). Lets consumers validate a phase name without re-deriving the set.
+export function isKnownPhase(phase) {
+  return PHASES.includes(phase) || ANCILLARY_PHASES.includes(phase);
+}
+
 // ─── Transition table — the happy path (replaces phase_next()) ───
 export const NEXT_PHASE = {
   triage: "research",
@@ -61,6 +82,9 @@ export const PHASE_LINEAR_KEY = {
   pr: "inReview",
   "monitor-merge": "inReview",
   "monitor-deploy": "inReview",
+  // CTL-653: the ancillary remediate phase maps to its own stateMap key
+  // (`remediating` → "Remediate"); it is not part of the 9→5 collapse.
+  [REMEDIATE_PHASE]: "remediating",
 };
 
 // The stateMap key for the terminal success state — written when monitor-deploy completes.
@@ -88,6 +112,13 @@ export function linearKeyForPhase(phase) {
 // an unknown phase so a typo fails loudly rather than silently returning -1
 // (which would misorder before `triage`).
 export function phaseIndex(phase) {
+  // CTL-653: remediate is ancillary (not in PHASES) but the recovery supersede
+  // guard (CTL-606) orders signals by phaseIndex. It cycles with verify, so it
+  // ranks at verify's position — a remediate signal must not be treated as a
+  // dead predecessor of verify.
+  if (phase === REMEDIATE_PHASE) {
+    return PHASES.indexOf("verify");
+  }
   const idx = PHASES.indexOf(phase);
   if (idx === -1) {
     throw new PhaseFsmError(`unknown phase '${phase}'`);
@@ -101,7 +132,10 @@ function assertState(state) {
     throw new PhaseFsmError(`state must be a plain object, got ${describe(state)}`);
   }
   const known =
-    PHASES.includes(state.phase) || state.phase === PARK_STATE || TERMINAL_STATES.has(state.phase);
+    PHASES.includes(state.phase) ||
+    ANCILLARY_PHASES.includes(state.phase) || // CTL-653: remediate is a known state
+    state.phase === PARK_STATE ||
+    TERMINAL_STATES.has(state.phase);
   if (!known) {
     throw new PhaseFsmError(`unknown phase '${state.phase}'`);
   }
@@ -152,6 +186,16 @@ export function transition(state, event) {
       return { phase: state.parkedFrom, reviveCount: state.reviveCount, parkedFrom: null };
     }
     throw new PhaseFsmError(`needs-input only accepts 'resume', got '${event.type}'`);
+  }
+
+  // ─── Ancillary phase: remediate is router-orchestrated, never a linear edge ───
+  // The verify⇄remediate cycle lives in deriveAdvancement (scheduler.mjs), which
+  // keeps transition() a pure single-successor table. Calling transition() with a
+  // remediate state is a programming error — fail loud rather than fabricate an edge.
+  if (state.phase === REMEDIATE_PHASE) {
+    throw new PhaseFsmError(
+      `'remediate' is router-orchestrated (deriveAdvancement) — not a transition() edge`
+    );
   }
 
   // ─── Pipeline phase ───

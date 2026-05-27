@@ -43,6 +43,7 @@ build_execution_core_state_map() {
     inProgress: "Implement",
     verifying: "Validate",
     reviewing: "Validate",
+    remediating: "Remediate",
     inReview: "PR",
     done: "Done",
     canceled: "Canceled"
