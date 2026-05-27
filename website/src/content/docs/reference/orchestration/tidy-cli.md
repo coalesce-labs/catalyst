@@ -90,6 +90,46 @@ Additional guardrails baked into every path:
   performs the actual stop/removal through a single executor seam. (`branches` is the exception — see
   below.)
 
+:::caution[Strict parsing — a typo can't silently disable a guard]
+Argument parsing is strict on every command. An **unknown flag** (`--include-interactiv`) or a
+**non-numeric value** for a numeric flag (`--min-idle-seconds abc`, `--max abc`) is **rejected** with
+`error: <message>` and **exit code 2** — it is no longer silently ignored or coerced. This matters
+most on prune/tidy: a typo'd `--min-idle-seconds abc` used to silently disable the recency guard, and
+a typo'd `--include-interactive` used to silently do nothing. Now both error out instead of quietly
+reverting the flag, so a slip of the keyboard can never weaken a safety guard.
+:::
+
+## Headless / agent use
+
+Every command — not just `list`/`show` — accepts `--json` and emits a **single structured object**
+on stdout (jq-friendly, nothing else interleaved). This makes `catalyst-execution-core` a scriptable,
+headless interface for both humans and agents — the same way `linearis` exposes Linear: run a
+command, parse the JSON, and decide. Because `prune`/`tidy` default to dry-run, an agent can inspect
+a destructive plan as structured data *before* committing to it with `--yes`.
+
+```bash
+# Which sessions would a reap touch? (dry-run, mutates nothing)
+catalyst-execution-core sessions prune --dry-run --json | jq '.planned[].shortId'
+
+# Inspect the full tidy plan step-by-step before acting:
+catalyst-execution-core tidy --dry-run --json | jq '.steps'
+```
+
+The JSON shape is per command:
+
+| Command                  | JSON shape                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------ |
+| `sessions prune --json`  | `{ dryRun, planned: [{shortId, classification, ticket, phase, cwd}], skipped: [{shortId, reason}], emitted }` |
+| `worktrees prune --json` | `{ dryRun, planned: [{path, branch, classification}], skipped: [{path, reason}], emitted }`            |
+| `branches prune --json`  | `{ dryRun, planned: [{name, scope, classification}], skipped: [{name, reason}], deleted }`             |
+| `tidy --json`            | `{ dryRun, steps: [{step, ...result}], aborted, abortedAt }`                                           |
+| `daemon status --json`   | `{ running, pid }`                                                                                     |
+
+`planned` is what a real run would act on (and what a dry-run previews — capped by `--max`); `skipped`
+carries each spared row with its `reason` (e.g. self-session, below the idle threshold, interactive,
+unmerged-without-`--force`); `emitted`/`deleted` is the count actually acted on (`0` under dry-run).
+`list --json` continues to emit its classified inventory as before.
+
 ## Daemon lifecycle
 
 These verbs manage the daemon **process**, distinct from `/catalyst-dev:orchestrate --stop`, which
@@ -114,7 +154,7 @@ for `stop`, `restart`, `probe`, and `status`.
 | `stop`    | Sends `SIGTERM`, waits up to ~3s, then `SIGKILL` if still alive, and removes the PID file.                   |
 | `restart` | `stop` then `start`. Also re-applies OTEL env hygiene by re-warming a fresh daemon.                          |
 | `probe`   | Silent. Exits `0` if the daemon is running, non-zero otherwise — for scripting.                             |
-| `status`  | Prints `running (pid N)` or `stopped`.                                                                       |
+| `status`  | Prints `running (pid N)` or `stopped`. Add `--json` for `{ running, pid }` (scriptable).                                                                       |
 
 **PID and log location.** By default the daemon writes its PID file to
 `~/catalyst/execution-core/daemon.pid` and its log to `~/catalyst/execution-core/daemon.log`.
@@ -141,7 +181,7 @@ single `ps` snapshot for RSS attribution, and an optional Linear-state cache. Pr
 
 | Flag              | Applies to          | Meaning                                                                  |
 | ----------------- | ------------------- | ------------------------------------------------------------------------ |
-| `--json`          | `list`              | Emit the inventory as JSON instead of the table.                         |
+| `--json`          | `list` / `prune`    | Emit a single structured object instead of the table — the inventory for `list`, the `{ dryRun, planned, skipped, emitted }` plan/result for `prune`. |
 | `--ticket <X>`    | `list` / `prune`    | Scope to a single ticket. (`show` takes the ticket as a positional arg.) |
 | `--phase <Y>`     | `list` / `prune`    | Scope to a single phase.                                                 |
 | `--yes`           | `prune`             | Actually emit reap intents. Without it, prune is a dry-run.              |
@@ -211,7 +251,7 @@ itself.
 
 | Flag               | Applies to       | Meaning                                                            |
 | ------------------ | ---------------- | ------------------------------------------------------------------ |
-| `--json`           | `list`           | Emit JSON instead of the table.                                    |
+| `--json`           | `list` / `prune` | Emit a single structured object instead of the table — the inventory for `list`, the `{ dryRun, planned, skipped, emitted }` plan/result for `prune`. |
 | `--stale-days <N>` | `list` / `prune` | Age threshold (days) for the `STALE` class. Default `14`.          |
 | `--yes`            | `prune`          | Actually emit cleanup intents.                                     |
 | `--dry-run`        | `prune`          | Force dry-run. Plan only.                                          |
@@ -274,7 +314,7 @@ executor seam to swap for a ref delete.
 
 | Flag                          | Applies to       | Meaning                                                      |
 | ----------------------------- | ---------------- | ------------------------------------------------------------ |
-| `--json`                      | `list`           | Emit JSON instead of the table.                              |
+| `--json`                      | `list` / `prune` | Emit a single structured object instead of the table — the inventory for `list`, the `{ dryRun, planned, skipped, deleted }` plan/result for `prune`. |
 | `--scope local\|remote\|both` | `list` / `prune` | Which side(s) to consider/act on. Default `both`.            |
 | `--stale-days <N>`            | `list` / `prune` | Age threshold (days) for `STALE_REMOTE`. Default `30`.       |
 | `--yes`                       | `prune`          | Actually delete refs.                                        |
@@ -350,3 +390,13 @@ non-zero.
 `--min-idle-seconds <N>` likewise propagate to the `sessions` step (so a full `tidy` honors the same
 interactive-protection and recency guards as a standalone `sessions prune`). The final
 `git worktree prune` only runs under `--yes` (it is a real mutation, so it is skipped in dry-run).
+
+Add `--json` to get the whole sweep as one object —
+`{ dryRun, steps: [{step, ...result}], aborted, abortedAt }` — where each `steps[]` entry carries the
+per-resource result (the same `planned`/`skipped`/`emitted` shape that noun emits standalone). `aborted`
+plus `abortedAt` capture the abort-on-first-failure outcome, so a headless caller can branch on the
+plan without scraping the summary line:
+
+```bash
+catalyst-execution-core tidy --dry-run --json | jq '.steps'
+```
