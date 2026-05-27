@@ -23,6 +23,25 @@ The skill is dispatched in two modes:
 
 Both modes produce the same `triage.json` shape and emit the same canonical phase event.
 
+## /goal
+
+```
+/goal "I have written ${WORKER_DIR}/triage.json populated with all five fields —
+       classification (feature|bug|docs|refactor|chore), estimated_scope,
+       acronyms_expanded, dependencies, and a non-empty summary — refined with
+       real analysis (not just the deterministic placeholders), AND posted the
+       triaged analysis comment to the Linear ticket, AND printed the triage.json
+       path on stdout. OR I have stopped after 15 turns and recorded a partial
+       triage.json with whatever I could classify."
+```
+
+CTL-656: the `/goal` evaluator keeps the agent working until the triage is
+genuinely complete — every field populated and the Linear comment posted —
+instead of emitting the first-pass deterministic placeholder and exiting. A real
+blocker (unreadable ticket, a Linear 4xx on the comment) surfaces as needs-input
+rather than a silently-thin `triage.json`. (Production/Opus mode only; the CI
+bash body is self-sufficient and does not invoke the evaluator.)
+
 ## Setup prerequisite
 
 The `triaged` workspace label must already exist in Linear. The label is applied by the

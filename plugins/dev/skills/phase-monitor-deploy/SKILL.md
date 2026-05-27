@@ -58,6 +58,27 @@ The file is written by [[phase-monitor-merge]] after `gh pr merge --squash`
 confirms via REST (`gh api repos/<owner>/<repo>/pulls/<num>` returns
 `.merged == true`).
 
+## /goal
+
+```
+/goal "The deploy for the merge SHA actually SUCCEEDED — a terminal
+       deployment_status success event arrived for the SHA AND the /canary check
+       passed — and I have written ${WORKER_DIR}/phase-monitor-deploy.json
+       recording that success. If the deploy FAILED (a deployment_status failure
+       or a failing canary), I have driven at least one remediation attempt
+       rather than passively recording failed/skipped. OR no deployment_status
+       event arrived within PHASE_DEPLOY_TIMEOUT_SEC and I have recorded
+       status:skipped with a reason (the PR is already merged, so a missing
+       deploy event is a skip, not a failure)."
+```
+
+CTL-656: monitor-deploy is **not** a passive watch — its goal is that the deploy
+*actually succeeded*, so the `/goal` evaluator keeps the agent driving toward a
+green canary, including a remediation attempt on a failed deploy, instead of
+emitting `failed`/`skipped` and walking away on the first terminal signal. The
+timeout path is the one legitimate early exit. (Production mode only; the CI
+bash body below remains self-sufficient and deterministic.)
+
 ## Body
 
 ```bash phase-monitor-deploy-body
