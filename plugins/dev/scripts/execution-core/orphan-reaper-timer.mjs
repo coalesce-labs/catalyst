@@ -56,8 +56,11 @@ export function startOrphanReaperTimer({
   const handle = clock.setInterval(async () => {
     try {
       await emit("orphans.reap-requested", {});
-    } catch {
-      /* best-effort; next tick retries */
+    } catch (err) {
+      // CTL-649: a persistently-unwritable event log would make every tick
+      // fail silently, turning the periodic orphan safety-net into a permanent
+      // no-op with zero signal. Surface it; next tick still retries.
+      log.warn({ err }, "orphan-reaper: periodic reap-intent emit failed");
     }
   }, ms);
   // unref so the timer never keeps the process alive on its own

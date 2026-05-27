@@ -231,11 +231,16 @@ export async function runWorktreesPrune({
     //    the reaper's cleanup handler also presweeps, but emitting it explicitly
     //    keeps the "sessions before worktree" ordering observable in the log.
     await emit("worktree.presweep.reap-requested", { worktreePath: row.path });
-    // 2. Remove the worktree and its local branch.
+    // 2. Remove the worktree and its local branch. Force branch-deletion ONLY
+    //    for MERGED rows — a confirmed GitHub merge is squash-safe, where local
+    //    `git branch -d` would falsely refuse. For CLOSED_NO_MERGE / ABANDONED /
+    //    STALE the branch may carry unmerged commits, so we leave force off and
+    //    let the reaper's `-d` refuse rather than silently destroy them.
     await emit("pr.merged.cleanup-requested", {
       ticket: row.ticket,
       worktreePath: row.path,
       branch: row.branch,
+      ...(row.classification === "MERGED" ? { force: true } : {}),
     });
     emitted++;
   }

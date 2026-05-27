@@ -133,12 +133,18 @@ export class Reaper {
     });
   }
 
+  /**
+   * Stop every idle session whose cwd is under the worktree. Returns the count
+   * of sessions that remain live (non-idle, so we declined to stop them, or a
+   * stop that failed) — callers gating worktree removal on "no live session"
+   * use this to avoid a second agents() shell-out.
+   */
   async _handleWorktreePresweep(event) {
-    if (!event.worktree_path) return;
+    if (!event.worktree_path) return 0;
+    const wt = stripTrailingSlash(event.worktree_path);
     const live = await this.agents();
-    const sessions = live.filter(
-      (a) => a.cwd && a.cwd.startsWith(event.worktree_path),
-    );
+    const sessions = live.filter((a) => cwdUnder(a.cwd, wt));
+    let unstoppable = 0;
     for (const s of sessions) {
       let shortId;
       try {
@@ -147,16 +153,36 @@ export class Reaper {
         continue;
       }
       if (isSelfSession(s.sessionId)) continue;
-      // Active sessions stay safe until CTL-619.
-      if (s.status !== "idle") continue;
-      await this.executorReap(shortId);
+      // Active sessions stay safe until CTL-619 — and they count as still-live
+      // so a downstream worktree-remove can refuse rather than yank a live cwd.
+      if (s.status !== "idle") {
+        unstoppable++;
+        continue;
+      }
+      const res = await this.executorReap(shortId);
+      if (!res || !res.ok) unstoppable++;
     }
+    return unstoppable;
   }
 
   async _handlePrMergedCleanup(event) {
     if (!event.worktree_path) return;
     // 1. Presweep first — the worktree-remove step requires no live sessions.
-    await this._handleWorktreePresweep({ worktree_path: event.worktree_path });
+    const stillLive = await this._handleWorktreePresweep({
+      worktree_path: event.worktree_path,
+    });
+    // 1a. Mirror worktree-presweep.sh: never yank a worktree out from under a
+    //     session we could not stop (non-idle/active). Removing it would
+    //     re-introduce the orphan race this protocol exists to close.
+    if (stillLive > 0) {
+      await this.emit("pr.merged.cleanup-failed", {
+        ticket: event.ticket,
+        worktreePath: event.worktree_path,
+        branch: event.branch,
+        reason: "sessions-still-live",
+      });
+      return;
+    }
     // 2. Remove worktree.
     const wt = await this.gitWorktreeRemove(event.worktree_path);
     if (!wt.ok) {
@@ -168,14 +194,28 @@ export class Reaper {
       });
       return;
     }
-    // 3. Delete local branch.
+    // 3. Delete local branch. `force` is set only for a confirmed-MERGED PR
+    //    (squash-merges are invisible to `git branch -d`, so they need `-D`);
+    //    for closed/abandoned/stale the non-force `-d` refuses to drop unmerged
+    //    commits, surfacing the refusal in the echo instead of vanishing them.
+    let branchDeleted = true;
+    let branchDeleteError;
     if (event.branch) {
-      await this.gitBranchDelete(event.branch);
+      const del = await this.gitBranchDelete(event.branch, event.force === true);
+      if (!del.ok) {
+        branchDeleted = false;
+        branchDeleteError = del.error;
+      }
     }
     await this.emit("pr.merged.cleanup-complete", {
       ticket: event.ticket,
       worktreePath: event.worktree_path,
       branch: event.branch,
+      // Truthfully reflect that the branch was NOT deleted — the worktree is
+      // already gone, so we still complete, but consumers must see the refusal.
+      ...(branchDeleted
+        ? {}
+        : { branchDeleted: false, branchDeleteError }),
     });
   }
 
@@ -259,6 +299,24 @@ export class Reaper {
   }
 }
 
+// ─── Pure path helpers ───────────────────────────────────────────────────────
+
+/** Drop a single trailing slash so boundary matching is exact. */
+function stripTrailingSlash(p) {
+  return typeof p === "string" && p.length > 1 && p.endsWith("/")
+    ? p.slice(0, -1)
+    : p;
+}
+
+/**
+ * Boundary-safe "is cwd inside this worktree?" — `/wt/CTL-64` must NOT match a
+ * sibling `/wt/CTL-649`. Either an exact match or a real path-segment boundary.
+ */
+function cwdUnder(cwd, worktree) {
+  if (!cwd || !worktree) return false;
+  return cwd === worktree || cwd.startsWith(worktree + "/");
+}
+
 // ─── Default executors ──────────────────────────────────────────────────────
 // Pure side-effect wrappers — never throw, always return {ok, error?}.
 
@@ -299,8 +357,14 @@ async function defaultEmit(eventType, fields) {
       try {
         mkdirSync(dirname(logPath), { recursive: true });
         appendFileSync(logPath, JSON.stringify(payload) + "\n");
-      } catch {
-        /* best-effort */
+      } catch (appendErr) {
+        // A dropped *.cleanup-complete / *.reap-complete echo makes bootReplay
+        // re-reap on next boot (it keys replay-skip on the echo's presence), so
+        // an unwritable log must be loud, not silently best-effort.
+        log.error(
+          { err: appendErr.message, eventType },
+          "reaper: echo append failed",
+        );
       }
       return;
     }
@@ -339,14 +403,18 @@ async function defaultGitWorktreeRemove(path) {
   }
 }
 
-async function defaultGitBranchDelete(branch) {
+async function defaultGitBranchDelete(branch, force = false) {
   try {
-    const res = spawnSync("git", ["branch", "-D", branch], {
+    // `-D` force-deletes even unmerged branches; reserve it for confirmed
+    // MERGED PRs (squash-merge is invisible to `-d`). Otherwise `-d` refuses
+    // to drop a branch with unmerged commits, surfacing the refusal as {ok:false}.
+    const flag = force ? "-D" : "-d";
+    const res = spawnSync("git", ["branch", flag, branch], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
     if ((res.status ?? 0) === 0) return { ok: true };
-    return { ok: false, error: res.stderr?.trim() || `git branch -D rc=${res.status}` };
+    return { ok: false, error: res.stderr?.trim() || `git branch ${flag} rc=${res.status}` };
   } catch (err) {
     return { ok: false, error: err.message };
   }

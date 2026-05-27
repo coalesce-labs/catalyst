@@ -18,7 +18,10 @@ import {
   existsSync,
   unlinkSync,
   statSync,
-  readFileSync,
+  openSync,
+  fstatSync,
+  readSync,
+  closeSync,
 } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
 import { getExecutionCoreDir, getEventLogPath, log, EVENT_DEBOUNCE_MS } from "./config.mjs";
@@ -47,6 +50,11 @@ let _orphanTimer = null;
 let _eventWatcher = null;
 let _eventDebounceTimer = null;
 let _eventLogCursor = 0;
+// CTL-649: the trailing partial line carried across reads. _eventLogCursor is a
+// BYTE offset; consumeEventTail reads only NEW bytes via a file descriptor and
+// stitches the leftover onto the front so a line split across two writes (or a
+// half-written line at read time) is parsed exactly once, never truncated.
+let _eventLogLeftover = "";
 
 // ensureState — idempotently write a minimal machine-level state.json so the
 // CTL-536 scheduler has a maxParallel to read. Never overwrites an operator's
@@ -173,7 +181,10 @@ function startReaperAndTimer({ orphanReaperConfig, debounceMs }) {
     log.error({ err }, "reaper: bootReplay threw");
   });
   // Initialize the cursor to the current tail so the live-tail loop only
-  // sees lines appended AFTER the replay completed.
+  // sees lines appended AFTER the replay completed. Reset the leftover too, or
+  // a stale partial line from a previous daemon run would be stitched onto the
+  // first live read.
+  _eventLogLeftover = "";
   try {
     if (existsSync(eventLogPath)) _eventLogCursor = statSync(eventLogPath).size;
   } catch {
@@ -189,7 +200,7 @@ function startReaperAndTimer({ orphanReaperConfig, debounceMs }) {
     _eventWatcher = watch(eventsDir, (_evt, filename) => {
       if (filename !== null && filename !== targetName) return;
       clearTimeout(_eventDebounceTimer);
-      _eventDebounceTimer = setTimeout(consumeEventTail, debounceMs);
+      _eventDebounceTimer = setTimeout(() => consumeEventTail(), debounceMs);
     });
   } catch (err) {
     log.error({ err }, "reaper: event-log watch failed — relying on boot replay only");
@@ -202,42 +213,106 @@ function startReaperAndTimer({ orphanReaperConfig, debounceMs }) {
   });
 }
 
-// consumeEventTail — read bytes appended to the event log since the cursor
-// last advanced, parse each line, and dispatch to the reaper.
-function consumeEventTail() {
-  if (!_reaper) return;
-  const path = getEventLogPath();
-  let stats;
+// parseEventTailChunk — pure, deterministic split of a freshly-read byte chunk
+// into complete JSON events plus the trailing partial line. Stitches `leftover`
+// (the partial line carried from the previous read) onto the front of `chunk`
+// so a line split across two reads is reassembled before parsing. Returns the
+// parsed events for the COMPLETE lines and the new leftover (everything after
+// the last "\n"). Malformed complete lines are skipped — they will never be
+// revisited because their bytes are already behind the byte cursor.
+//
+// `chunk` is the utf8-decoded NEW bytes only. Decoding only the new bytes (vs.
+// JS-string-slicing the whole file) is what makes this byte-correct: a
+// multi-byte char upstream of the cursor can no longer shift code-unit indexes.
+export function parseEventTailChunk(chunk, leftover = "") {
+  const text = leftover + chunk;
+  const lines = text.split("\n");
+  // The final element is the trailing partial line (empty if the chunk ended
+  // exactly on a newline) — hold it back until the next read completes it.
+  const newLeftover = lines.pop() ?? "";
+  const events = [];
+  for (const line of lines) {
+    if (!line) continue;
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      continue; // skip a malformed complete line, keep tailing
+    }
+  }
+  return { events, leftover: newLeftover };
+}
+
+// __resetEventTailCursorForTest — reset the module-level byte cursor + leftover
+// so a test can drive consumeEventTail deterministically against a temp file
+// from a known starting offset. Test-only; not used by production code.
+export function __resetEventTailCursorForTest(cursor = 0, leftover = "") {
+  _eventLogCursor = cursor;
+  _eventLogLeftover = leftover;
+}
+
+// __getEventTailLeftoverForTest — inspect the carried partial line. Test-only.
+export function __getEventTailLeftoverForTest() {
+  return _eventLogLeftover;
+}
+
+// consumeEventTail — read the NEW BYTES appended to the event log since the
+// cursor last advanced (via a file descriptor, exactly like monitor.mjs's
+// proven tailer), parse each complete line, and dispatch to the reaper.
+//
+// `path` and `reaper` are injectable for deterministic tests; production passes
+// neither and falls back to the module-level event log + reaper instance.
+export function consumeEventTail({ path = getEventLogPath(), reaper = _reaper } = {}) {
+  if (!reaper) return;
+  let fd;
+  let size;
   try {
-    stats = statSync(path);
+    fd = openSync(path, "r");
+    size = fstatSync(fd).size;
   } catch {
+    // Log file not yet created or a transient stat error — best-effort.
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* fd already gone */
+      }
+    }
     return;
   }
-  if (stats.size < _eventLogCursor) {
-    // File rotated or truncated — restart from 0.
+
+  if (size < _eventLogCursor) {
+    // File rotated or truncated — restart from 0 and drop any partial line
+    // stitched from the now-vanished bytes.
     _eventLogCursor = 0;
+    _eventLogLeftover = "";
   }
-  if (stats.size === _eventLogCursor) return;
-  // Cheap-and-correct: read the whole file then slice from cursor. Event
-  // logs typically stay under a few MB per month; this avoids fd juggling.
-  let content;
+  if (size === _eventLogCursor) {
+    closeSync(fd);
+    return;
+  }
+
+  let chunk;
   try {
-    const full = readFileSync(path, "utf8");
-    content = full.slice(_eventLogCursor);
+    const newByteCount = size - _eventLogCursor;
+    const buf = Buffer.alloc(newByteCount);
+    readSync(fd, buf, 0, newByteCount, _eventLogCursor);
+    closeSync(fd);
+    chunk = buf.toString("utf8");
   } catch (err) {
+    try {
+      closeSync(fd);
+    } catch {
+      /* fd already gone */
+    }
     log.error({ err }, "reaper: event-log read failed");
     return;
   }
-  _eventLogCursor = stats.size;
-  for (const line of content.split("\n")) {
-    if (!line) continue;
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    _reaper.handle(event).catch((err) => {
+  _eventLogCursor = size;
+
+  const { events, leftover } = parseEventTailChunk(chunk, _eventLogLeftover);
+  _eventLogLeftover = leftover;
+  for (const event of events) {
+    reaper.handle(event).catch((err) => {
       log.error({ err, event: event.event }, "reaper: handle threw");
     });
   }
@@ -296,6 +371,7 @@ export function stopDaemon() {
   }
   _reaper = null;
   _eventLogCursor = 0;
+  _eventLogLeftover = "";
   if (_pidFile) {
     try {
       unlinkSync(_pidFile);

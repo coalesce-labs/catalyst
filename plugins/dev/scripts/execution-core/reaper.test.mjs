@@ -150,6 +150,37 @@ describe("Reaper._handleWorktreePresweep", () => {
     await r.handle({ event: "worktree.presweep.reap-requested", worktree_path: "/wt/x" });
     expect(stopped).toEqual([]);
   });
+
+  it("does not stop a sibling whose path only shares a prefix (CTL-64 vs CTL-649)", async () => {
+    const stopped = [];
+    const r = new Reaper({
+      executorReap: (id) => { stopped.push(id); return Promise.resolve({ ok: true }); },
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/CTL-64", status: "idle" },
+        { sessionId: "22222222-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/CTL-649", status: "idle" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.handle({ event: "worktree.presweep.reap-requested", worktree_path: "/wt/CTL-64" });
+    // Only the exact-match worktree is swept; the sibling /wt/CTL-649 is safe.
+    expect(stopped).toEqual(["11111111"]);
+  });
+
+  it("normalizes a trailing slash on the worktree path", async () => {
+    const stopped = [];
+    const r = new Reaper({
+      executorReap: (id) => { stopped.push(id); return Promise.resolve({ ok: true }); },
+      agents: agentsFixture([
+        { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/CTL-1", status: "idle" },
+        { sessionId: "22222222-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/CTL-1/sub", status: "idle" },
+      ]),
+      emit: mock(() => Promise.resolve()),
+      log: silentLog(),
+    });
+    await r.handle({ event: "worktree.presweep.reap-requested", worktree_path: "/wt/CTL-1/" });
+    expect(stopped.sort()).toEqual(["11111111", "22222222"]);
+  });
 });
 
 describe("Reaper._handlePrMergedCleanup", () => {
@@ -159,7 +190,7 @@ describe("Reaper._handlePrMergedCleanup", () => {
       executorReap: (id) => { trace.push(["reap", id]); return Promise.resolve({ ok: true }); },
       agents: agentsFixture([]),
       gitWorktreeRemove: (p) => { trace.push(["wt", p]); return Promise.resolve({ ok: true }); },
-      gitBranchDelete: (b) => { trace.push(["br", b]); return Promise.resolve({ ok: true }); },
+      gitBranchDelete: (b, force) => { trace.push(["br", b, force]); return Promise.resolve({ ok: true }); },
       emit: (evt) => { trace.push(["emit", evt]); return Promise.resolve(); },
       log: silentLog(),
     });
@@ -169,11 +200,56 @@ describe("Reaper._handlePrMergedCleanup", () => {
       worktree_path: "/wt/CTL-1",
       branch: "ryan/ctl-1",
     });
+    // No `force` on the event → non-force branch delete (false).
     expect(trace).toEqual([
       ["wt", "/wt/CTL-1"],
-      ["br", "ryan/ctl-1"],
+      ["br", "ryan/ctl-1", false],
       ["emit", "pr.merged.cleanup-complete"],
     ]);
+  });
+
+  it("forwards force=true to gitBranchDelete only when event.force is set", async () => {
+    const calls = [];
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      gitWorktreeRemove: () => Promise.resolve({ ok: true }),
+      gitBranchDelete: (b, force) => { calls.push({ b, force }); return Promise.resolve({ ok: true }); },
+      emit: () => Promise.resolve(),
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+      force: true,
+    });
+    expect(calls).toEqual([{ b: "ryan/ctl-1", force: true }]);
+  });
+
+  it("reflects branch-delete failure in cleanup-complete (no silent clean complete)", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      gitWorktreeRemove: () => Promise.resolve({ ok: true }),
+      // Non-force `-d` refuses an unmerged branch.
+      gitBranchDelete: () => Promise.resolve({ ok: false, error: "not fully merged" }),
+      emit: (evt, fields) => { emitted.push({ evt, fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+      // closed/abandoned → no force → unmerged commits preserved.
+    });
+    const complete = emitted.find((e) => e.evt === "pr.merged.cleanup-complete");
+    expect(complete).toBeTruthy();
+    expect(complete.fields.branchDeleted).toBe(false);
+    expect(complete.fields.branchDeleteError).toBe("not fully merged");
   });
 
   it("emits cleanup-failed when worktree-remove returns non-ok", async () => {
@@ -193,6 +269,57 @@ describe("Reaper._handlePrMergedCleanup", () => {
       branch: "ryan/ctl-1",
     });
     expect(emitted).toContain("pr.merged.cleanup-failed");
+  });
+
+  it("skips worktree-remove and emits cleanup-failed when a non-idle session remains under the path", async () => {
+    const wtRemove = mock(() => Promise.resolve({ ok: true }));
+    const emitted = [];
+    const r = new Reaper({
+      // An active session can't be stopped (CTL-619 gate) → stays live.
+      executorReap: mock(() => Promise.resolve({ ok: true })),
+      agents: agentsFixture([
+        { sessionId: "abc12345-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/CTL-1", status: "active" },
+      ]),
+      gitWorktreeRemove: wtRemove,
+      gitBranchDelete: mock(() => Promise.resolve({ ok: true })),
+      emit: (evt, fields) => { emitted.push({ evt, fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+    });
+    expect(wtRemove).not.toHaveBeenCalled();
+    const failed = emitted.find((e) => e.evt === "pr.merged.cleanup-failed");
+    expect(failed).toBeTruthy();
+    expect(failed.fields.reason).toBe("sessions-still-live");
+  });
+
+  it("does not sweep a sibling worktree sharing a path prefix (/wt/CTL-64 vs /wt/CTL-649)", async () => {
+    const stopped = [];
+    const wtRemove = mock(() => Promise.resolve({ ok: true }));
+    const r = new Reaper({
+      executorReap: (id) => { stopped.push(id); return Promise.resolve({ ok: true }); },
+      // Idle session lives in the *sibling* /wt/CTL-649, not the target /wt/CTL-64.
+      agents: agentsFixture([
+        { sessionId: "99999999-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/CTL-649", status: "idle" },
+      ]),
+      gitWorktreeRemove: wtRemove,
+      gitBranchDelete: () => Promise.resolve({ ok: true }),
+      emit: () => Promise.resolve(),
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-64",
+      worktree_path: "/wt/CTL-64",
+      branch: "CTL-64",
+    });
+    // Sibling session untouched, and cleanup proceeds for the real target.
+    expect(stopped).toEqual([]);
+    expect(wtRemove).toHaveBeenCalled();
   });
 });
 

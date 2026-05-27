@@ -155,6 +155,30 @@ describe("runWorktreesPrune", () => {
     expect(presweepIdx).toBeGreaterThanOrEqual(0);
     expect(cleanupIdx).toBeGreaterThan(presweepIdx);
     expect(emitted[cleanupIdx].fields.branch).toBe("CTL-1");
+    // MERGED is squash-safe → force the branch delete.
+    expect(emitted[cleanupIdx].fields.force).toBe(true);
+  });
+
+  it("sets force=true only for MERGED rows; omits it for closed/abandoned/stale", async () => {
+    const emitted = [];
+    await runWorktreesPrune({
+      rows: [
+        { path: "/wt/M", branch: "M", ticket: "M", classification: "MERGED" },
+        { path: "/wt/C", branch: "C", ticket: "C", classification: "CLOSED_NO_MERGE" },
+        { path: "/wt/A", branch: "A", ticket: "A", classification: "ABANDONED" },
+        { path: "/wt/S", branch: "S", ticket: "S", classification: "STALE" },
+      ],
+      emit: (event, fields) => emitted.push({ event, fields }),
+      yes: true,
+      includeStale: true,
+    });
+    const cleanupFor = (branch) =>
+      emitted.find((e) => e.event === "pr.merged.cleanup-requested" && e.fields.branch === branch);
+    expect(cleanupFor("M").fields.force).toBe(true);
+    // Unmerged commits must be preserved → no force flag at all.
+    expect(cleanupFor("C").fields.force).toBeUndefined();
+    expect(cleanupFor("A").fields.force).toBeUndefined();
+    expect(cleanupFor("S").fields.force).toBeUndefined();
   });
 
   it("dry-run is the default — nothing emitted without --yes", async () => {

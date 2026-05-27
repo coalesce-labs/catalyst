@@ -66,12 +66,16 @@ else
 fi
 [[ -z $sessions_json || $sessions_json == "null" ]] && exit 0
 
-# Extract sessionIds whose cwd starts with $WORKTREE. We do this in jq
-# unconditionally — even when --cwd worked — so the prefix-match contract is
+# Extract sessionIds whose cwd is $WORKTREE itself or a child of it. We do this
+# in jq unconditionally — even when --cwd worked — so the path-match contract is
 # enforced from one code path.
+#
+# CTL-649: a plain startswith() collides across sibling tickets — startswith(
+# "/wt/CTL-64") wrongly matches "/wt/CTL-649". Match exact-or-child instead:
+# the cwd must equal $wt or begin with "$wt/" (a true path boundary).
 mapfile -t session_ids < <(
 	printf '%s' "$sessions_json" | jq -r --arg wt "$WORKTREE" \
-		'.[]? | select(.cwd != null and (.cwd | startswith($wt))) | .sessionId' 2>/dev/null
+		'.[]? | select(.cwd != null and (.cwd == $wt or (.cwd | startswith($wt + "/")))) | .sessionId' 2>/dev/null
 )
 
 if [[ ${#session_ids[@]} -eq 0 ]]; then

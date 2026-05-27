@@ -99,7 +99,12 @@ export function abortWorker(
     emitReapIntent("phase.abort.reap-requested", {
       ticket,
       bgJobId: id,
-    }).catch(() => {});
+    }).catch((err) =>
+      // CTL-649: this path has NO inline-kill backstop (defaultKillJob is a
+      // no-op by design), so a silently-failed emit is an invisible supervisor
+      // leak. Surface it.
+      log.warn({ err, ticket, bgJobId: id }, "abort-worker: reap-intent emit failed"),
+    );
   }
 
   // Worktree teardown is SKIPPED while a bg job is still live in it: a

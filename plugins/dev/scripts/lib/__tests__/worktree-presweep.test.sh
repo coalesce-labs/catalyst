@@ -136,7 +136,25 @@ reset_event_log
 "$PRESWEEP" /wt/CTL-1/
 grep -q '^11111111$' "$CLAUDE_STOP_LOG" && pass "trailing slash normalized" || fail "trailing slash normalized"
 
-# ── 6. emits worktree.presweep.reap-requested per session ───────────────────
+# ── 6. sibling-prefix boundary: /wt/CTL-64 must NOT match /wt/CTL-649 ────────
+# A plain startswith("/wt/CTL-64") would wrongly reap the sibling CTL-649
+# session. Exact-or-child matching must spare it while still reaping the
+# exact path and a sub-dir under it.
+write_agents_fixture <<'JSON'
+[
+  {"pid":200,"cwd":"/wt/CTL-64","sessionId":"aaaaaaaa-aaaa-bbbb-cccc-dddddddddddd","status":"idle"},
+  {"pid":201,"cwd":"/wt/CTL-64/sub","sessionId":"bbbbbbbb-aaaa-bbbb-cccc-dddddddddddd","status":"active"},
+  {"pid":202,"cwd":"/wt/CTL-649","sessionId":"cccccccc-aaaa-bbbb-cccc-dddddddddddd","status":"idle"}
+]
+JSON
+reset_stop_log
+reset_event_log
+"$PRESWEEP" /wt/CTL-64
+grep -q '^aaaaaaaa$' "$CLAUDE_STOP_LOG" && pass "sibling-prefix: stopped exact /wt/CTL-64" || fail "sibling-prefix: stopped exact /wt/CTL-64"
+grep -q '^bbbbbbbb$' "$CLAUDE_STOP_LOG" && pass "sibling-prefix: stopped /wt/CTL-64/sub child" || fail "sibling-prefix: stopped /wt/CTL-64/sub child"
+grep -q '^cccccccc$' "$CLAUDE_STOP_LOG" && fail "sibling-prefix: did NOT stop /wt/CTL-649 sibling" || pass "sibling-prefix: spared /wt/CTL-649 sibling"
+
+# ── 7. emits worktree.presweep.reap-requested per session ───────────────────
 write_agents_fixture <<'JSON'
 [{"pid":100,"cwd":"/wt/CTL-1","sessionId":"11111111-aaaa-bbbb-cccc-dddddddddddd","status":"idle"}]
 JSON
